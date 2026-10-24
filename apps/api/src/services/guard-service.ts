@@ -100,6 +100,34 @@ export interface GuardRunContext {
    * it). Verdicts record the override's profile id, version and hash.
    */
   profileOverride?: { profileId: string; version?: number };
+  /**
+   * Phase 15.6 — a guard policy simulation: wherever this run would apply
+   * the substitute's profile (a binding, the enforced floor, a guard port
+   * naming it), the substitute is applied instead. Every other profile the
+   * run resolves stays as it is, so the replay shows what changing that one
+   * profile would do. Never set on production traffic.
+   */
+  profileSubstitute?: GuardProfileSubstitute;
+  /**
+   * Phase 15.6 — a guard policy simulation's run: its verdicts go to the
+   * simulation's sink (never to `guard_events`) and `protect` tokens to the
+   * simulation's vault (never to the token vault table).
+   */
+  simulation?: { sink: { record(event: GuardVerdictEvent): void }; vault: TokenVaultStorage };
+}
+
+/**
+ * Phase 15.6 — the profile a simulation swaps in: an unsaved document from
+ * the editor (`inline`, version 0, never stored) or a saved version.
+ */
+export interface GuardProfileSubstitute {
+  profileId: string;
+  /** The saved version; 0 for an unsaved document. */
+  version: number;
+  hash: string;
+  name: string;
+  profile: GuardProfile;
+  inline: boolean;
 }
 
 export class GuardService {
@@ -389,7 +417,11 @@ export class GuardService {
     return { ok: true, profile: { profileId: resolved.profileId, version: resolved.version, hash: resolved.hash } };
   }
 
-  resolveRun(context: { workflowId: string; projectId?: string | null; profileOverride?: GuardRunContext["profileOverride"] }): GuardRunResolution {
+  resolveRun(context: { workflowId: string; projectId?: string | null; profileOverride?: GuardRunContext["profileOverride"]; profileSubstitute?: GuardProfileSubstitute }): GuardRunResolution {
+    if (context.profileSubstitute) {
+      const { profileSubstitute, ...rest } = context;
+      return GuardService.substitute(this.resolveRun(rest), profileSubstitute);
+    }
     if (context.profileOverride) return this.resolveOverride(context.profileOverride, context.projectId ?? "default");
     const projectId = context.projectId ?? "default";
     const project = this.getBinding("project", projectId);
@@ -430,6 +462,44 @@ export class GuardService {
     return { source: "candidate", ...(enforced ? { enforced } : {}), stack, chain };
   }
 
+  /**
+   * Phase 15.6 — a resolution with one profile swapped for a simulation's:
+   * the enforced floor and every stack entry of that profile become the
+   * substitute; the order, the other profiles and the source stay.
+   */
+  static substitute(resolution: GuardRunResolution, substitute: GuardProfileSubstitute): GuardRunResolution {
+    const candidate = GuardService.substituteProfile(substitute);
+    const swap = (entry: ResolvedGuardProfile) => (entry.profileId === substitute.profileId ? candidate : entry);
+    const seen = new Set<string>();
+    const stack = resolution.stack.map(swap).filter((entry) => (seen.has(entry.hash) ? false : (seen.add(entry.hash), true)));
+    const enforced = resolution.enforced ? swap(resolution.enforced) : undefined;
+    const chain = resolution.chain.map((level) =>
+      level.profileId === substitute.profileId && level.version !== undefined ? { ...level, version: substitute.version } : level
+    );
+    return { ...resolution, ...(enforced ? { enforced } : {}), stack, chain };
+  }
+
+  private static substituteProfile(substitute: GuardProfileSubstitute): ResolvedGuardProfile {
+    return { profileId: substitute.profileId, version: substitute.version, hash: substitute.hash, name: substitute.name, profile: substitute.profile };
+  }
+
+  /**
+   * Phase 15.6 — the profile a simulation runs: an unsaved document
+   * (validated like a save, with the profile's id; never stored) or a saved
+   * version. Throws GuardValidationError for an invalid document and
+   * GuardNotFoundError for a missing profile or version.
+   */
+  simulationProfile(profileId: string, source: { document: Record<string, unknown> } | { version: number }): GuardProfileSubstitute {
+    this.requireProfile(profileId);
+    if ("document" in source) {
+      const profile = this.validateDocument(source.document, profileId);
+      return { profileId, version: 0, hash: hashGuardProfile(profile), name: profile.name, profile, inline: true };
+    }
+    const loaded = this.loadProfile(profileId, source.version);
+    if (!loaded) throw new GuardNotFoundError(`Version ${source.version} of guard profile '${profileId}' was not found`);
+    return { profileId, version: loaded.version, hash: loaded.hash, name: loaded.profile.name, profile: loaded.profile, inline: false };
+  }
+
   resolutionView(resolution: GuardRunResolution): GuardResolutionView {
     const ref = (entry: ResolvedGuardProfile): GuardProfileRef => ({ profileId: entry.profileId, version: entry.version, hash: entry.hash, ...(entry.name ? { name: entry.name } : {}) });
     return { source: resolution.source, enforced: resolution.enforced ? ref(resolution.enforced) : null, stack: resolution.stack.map(ref), chain: resolution.chain };
@@ -438,12 +508,18 @@ export class GuardService {
   /** The engine's guard dependencies for one run. */
   runtimeFor(context: GuardRunContext): GuardRuntimeDependencies {
     const override = context.profileOverride;
+    const substitute = context.profileSubstitute;
     return {
       resolveRun: () => this.resolveRun(context),
-      // A guard port naming the candidate's profile gets the candidate's version too.
-      loadProfile: (profileId) => (override && override.profileId === profileId ? this.loadProfile(profileId, override.version) : this.loadProfile(profileId)),
-      vault: this.vault,
-      onVerdict: (event) => this.recordVerdict(event, context)
+      // A guard port naming the candidate's profile gets the candidate's version too (and a simulation's profile its substitute).
+      loadProfile: (profileId) =>
+        substitute && substitute.profileId === profileId
+          ? GuardService.substituteProfile(substitute)
+          : override && override.profileId === profileId
+            ? this.loadProfile(profileId, override.version)
+            : this.loadProfile(profileId),
+      vault: context.simulation?.vault ?? this.vault,
+      onVerdict: (event) => (context.simulation ? context.simulation.sink.record(event) : this.recordVerdict(event, context))
     };
   }
 
@@ -580,6 +656,7 @@ export class GuardService {
       name: record.name,
       ...(record.description ? { description: record.description } : {}),
       builtIn: record.builtIn,
+      ...(this.store.listGuardBindingsForProfile(record.id).some((binding) => binding.scope === "project" && binding.mode === "enforced") ? { enforced: true } : {}),
       latestVersion: record.latestVersion,
       hash: record.latestHash,
       createdAt: record.createdAt,

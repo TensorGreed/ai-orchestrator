@@ -63,7 +63,7 @@ describe("run facts", () => {
       { nodeId: "agent", iteration: 1, providerId: "openai", model: "gpt-4o-mini", inputTokens: 100, outputTokens: 10, costUsd: 0.00011, latencyMs: 400 },
       { nodeId: "agent", iteration: 2, providerId: "openai", model: "gpt-4o-mini", inputTokens: 120, outputTokens: 20, costUsd: 0.00014, latencyMs: 300 }
     ]);
-    expect(facts.guard).toEqual([{ nodeId: "agent", placement: "pre_model", channel: "prompt", detectorId: "pii", effectiveAction: "mask", shadow: false }]);
+    expect(facts.guard).toEqual([{ nodeId: "agent", placement: "pre_model", channel: "prompt", detectorId: "pii", effectiveAction: "mask", shadow: false, dataClass: null, verdict: 0 }]);
     expect(facts.totals).toEqual({ inputTokens: 220, outputTokens: 30, totalTokens: 250, costUsd: 0.00025, durationMs: 950, modelCalls: 2, toolCalls: 2 });
   });
 

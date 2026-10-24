@@ -200,7 +200,9 @@ export class ReplayRecordingService {
           placement: id(original.placement),
           channel: id(original.channel),
           detectorId: optionalId(original.detectorId),
-          effectiveAction: id(original.effectiveAction)
+          effectiveAction: id(original.effectiveAction),
+          ...(original.dataClass !== undefined ? { dataClass: optionalId(original.dataClass) } : {}),
+          ...(original.verdict !== undefined ? { verdict: original.verdict } : {})
         };
       })
     };

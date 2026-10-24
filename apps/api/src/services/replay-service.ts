@@ -39,6 +39,14 @@
  *   - a baseline rerun replays the golden run's own version under the same
  *     settings, and the candidate is compared with that run instead of the
  *     recording.
+ *
+ * Phase 15.6 — a guard policy simulation's execution (`guardSimulation`)
+ * runs either the current profiles (the baseline) or one guard profile
+ * swapped for the simulated one; everything else about the run's guard
+ * resolution stays, and its verdicts and tokens stay in the simulation.
+ * Only for a simulation, a recording that
+ * made no model calls replays on an empty model tape, so any model call is
+ * a strict miss, never live; other jobs still need a tape.
  */
 
 import { randomUUID } from "node:crypto";
@@ -46,6 +54,8 @@ import {
   applyCandidate,
   canonicalJson,
   judgeReplayDiff,
+  MODEL_TAPE_FORMAT,
+  MODEL_TAPE_VERSION,
   liveReadNodeProblems,
   normaliseCandidateOverrides,
   REPLAY_BLOCKED_LOAD_MARKER,
@@ -73,6 +83,7 @@ import { diffRunFacts } from "./run-diff.js";
 import { buildRunFacts, nodeResultRecords, type PriceTurn } from "./run-facts.js";
 import { ReplayRecordingService } from "./replay-recording-service.js";
 import type { SafeUser } from "./auth-service.js";
+import type { GuardSimulationRun } from "./guard-simulation-sink.js";
 
 export class ReplayRunError extends Error {
   constructor(
@@ -98,6 +109,12 @@ export interface ReplayExecutionInput {
   memorySeed?: ModelMemorySeed | null;
   /** Phase 15.3 — the candidate's guard profile. */
   guardProfileOverride?: { profileId: string; version?: number };
+  /**
+   * Phase 15.6 — a guard policy simulation's execution: the profile it swaps
+   * in (none on the baseline side), and the sink and vault its verdicts and
+   * tokens go to instead of the live tables.
+   */
+  guardSimulation?: GuardSimulationRun;
 }
 
 /** A candidate workflow, resolved once. */
@@ -130,6 +147,8 @@ export interface ReplayCaseOptions {
   /** What this execution is in the job: the candidate, or the baseline it is compared with. */
   role?: "candidate" | "baseline";
   repeatIndex?: number;
+  /** Phase 15.6 — a guard policy simulation's execution (see `ReplayExecutionInput.guardSimulation`). */
+  simulation?: GuardSimulationRun;
 }
 
 export interface ReplayExecutionResult {
@@ -374,6 +393,17 @@ export class ReplayService {
         role,
         ...(options.repeatIndex !== undefined ? { repeatIndex: options.repeatIndex } : {}),
         ...(overrides && Object.keys(overrides).length > 0 ? { overrides } : {}),
+        ...(options.simulation
+          ? {
+              simulation: {
+                id: options.simulation.id,
+                side: role === "baseline" ? "current" : "simulated",
+                ...(options.simulation.substitute
+                  ? { profileId: options.simulation.substitute.profileId, version: options.simulation.substitute.version, hash: options.simulation.substitute.hash }
+                  : {})
+              }
+            }
+          : {}),
         startedBy: actor.email
       }
     };
@@ -382,7 +412,14 @@ export class ReplayService {
     let modelPlan: ModelReplayPlan | undefined;
     const preflight: ReplayHealthWarning[] = [];
     if (models === "replay") {
-      if (!recording.modelTape) {
+      // Phase 15.6 — a simulation (always strict) replays a recording that made no model calls on an empty tape,
+      // so any model call is a strict miss. Every other job keeps the rule: no tape, inconclusive.
+      const tape =
+        recording.modelTape ??
+        (options.simulation && mcpMode === "strict" && recording.facts.modelCalls.length === 0
+          ? { format: MODEL_TAPE_FORMAT, version: MODEL_TAPE_VERSION, recordedAt: recording.createdAt, entries: [], truncated: false, bytes: 0 }
+          : null);
+      if (!tape) {
         preflight.push({
           kind: "no_model_tape",
           nodeId: null,
@@ -390,7 +427,7 @@ export class ReplayService {
           blocking: true
         });
       } else if (this.options.providerRegistry) {
-        modelPlan = this.options.cassettes.planModelReplay(recording.modelTape, mcpMode, this.options.providerRegistry);
+        modelPlan = this.options.cassettes.planModelReplay(tape, mcpMode, this.options.providerRegistry);
       } else {
         preflight.push({ kind: "no_model_tape", nodeId: null, message: "Model replay is not available on this server.", blocking: true });
       }
@@ -413,7 +450,8 @@ export class ReplayService {
             customData,
             ...(modelPlan ? { modelPlan } : {}),
             memorySeed: recording.memorySeed,
-            ...(overrides?.guardProfile ? { guardProfileOverride: overrides.guardProfile } : {})
+            ...(overrides?.guardProfile ? { guardProfileOverride: overrides.guardProfile } : {}),
+            ...(options.simulation ? { guardSimulation: options.simulation } : {})
           },
           actor
         );
@@ -453,7 +491,8 @@ export class ReplayService {
         durationMs: durationOf(result),
         nodeResults: result.nodeResults,
         nodes: candidate.workflow.nodes,
-        guardEvents: this.options.store.listGuardEventsForExecution(executionId),
+        // A simulation's verdicts are only in its sink (never written to guard_events).
+        guardEvents: options.simulation ? options.simulation.sink.rows : this.options.store.listGuardEventsForExecution(executionId),
         priceTurn: this.options.priceTurn
       })
     );
@@ -534,6 +573,7 @@ export class ReplayService {
       usage: {
         replayedCalls,
         liveCalls: report.live,
+        matchedCalls: report.matched + report.reused,
         recordedUsage: { inputTokens, outputTokens, costUsd: recordedPriced ? round(recordedUsd) : null }
       }
     };

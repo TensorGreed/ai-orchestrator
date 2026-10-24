@@ -320,7 +320,7 @@ export interface RunFactsInput {
   nodeResults: unknown;
   /** The workflow's nodes, to read node types and configuration. */
   nodes: Array<{ id: string; type: string; config?: unknown }>;
-  guardEvents: Array<{ verdictId: string; nodeId: string | null; placement: string; channel: string; detectorId: string | null; effectiveAction: string; shadow: boolean }>;
+  guardEvents: Array<{ verdictId: string; nodeId: string | null; placement: string; channel: string; detectorId: string | null; effectiveAction: string; shadow: boolean; dataClass?: string | null }>;
   priceTurn: PriceTurn;
 }
 
@@ -368,15 +368,21 @@ export function buildRunFacts(input: RunFactsInput): RunFacts {
     };
   });
 
-  // One entry per verdict and finding, in recorded order.
-  const guard: RunFactGuardVerdict[] = input.guardEvents.map((event) => ({
-    nodeId: event.nodeId,
-    placement: event.placement,
-    channel: event.channel,
-    detectorId: event.detectorId,
-    effectiveAction: event.effectiveAction,
-    shadow: event.shadow
-  }));
+  // One entry per verdict and finding, in recorded order. Phase 15.6: rows keep their data class and which verdict they belong to.
+  const verdictIndex = new Map<string, number>();
+  const guard: RunFactGuardVerdict[] = input.guardEvents.map((event) => {
+    if (!verdictIndex.has(event.verdictId)) verdictIndex.set(event.verdictId, verdictIndex.size);
+    return {
+      nodeId: event.nodeId,
+      placement: event.placement,
+      channel: event.channel,
+      detectorId: event.detectorId,
+      effectiveAction: event.effectiveAction,
+      shadow: event.shadow,
+      dataClass: event.dataClass ?? null,
+      verdict: verdictIndex.get(event.verdictId)!
+    };
+  });
 
   const inputTokens = modelCalls.reduce((sum, call) => sum + (call.inputTokens ?? 0), 0);
   const outputTokens = modelCalls.reduce((sum, call) => sum + (call.outputTokens ?? 0), 0);

@@ -720,3 +720,117 @@
     display: none;
   }
 }
+
+/* ---- Phase 15.6: guard policy simulation ------------------------------ */
+.guard-sim {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+.guard-sim-running {
+  margin: 0;
+  font-size: var(--fs-sm);
+  color: var(--fg-muted);
+}
+.guard-sim-card {
+  display: grid;
+  gap: 8px;
+  padding: 12px 14px;
+  border: 1px solid var(--accent-line);
+  border-radius: var(--r-md);
+  background: var(--bg-elev-2);
+  min-width: 0;
+}
+.guard-sim-empty {
+  border-style: dashed;
+  border-color: var(--line-strong);
+}
+.guard-sim-card .kb-subtle {
+  margin: 0;
+}
+.guard-sim-sentence {
+  margin: 0;
+  font: 600 var(--fs-md) var(--font-display);
+  letter-spacing: var(--ls-display);
+  color: var(--fg);
+}
+.guard-sim-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.guard-sim-details > summary,
+.guard-sim-advanced > summary {
+  cursor: pointer;
+  font-size: var(--fs-sm);
+  color: var(--fg-muted);
+}
+.guard-sim-details > summary:focus-visible,
+.guard-sim-advanced > summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--r-sm);
+}
+.guard-sim-details[open] {
+  display: grid;
+  gap: 10px;
+}
+.guard-sim-tallies {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 24px;
+}
+.guard-sim-tallies h5,
+.guard-sim-runs h5 {
+  margin: 0 0 4px;
+  font-size: var(--fs-xs);
+  color: var(--fg-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.guard-sim-tallies ul,
+.guard-sim-runs ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 4px;
+  font-size: var(--fs-xs);
+}
+.guard-sim-runs li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  align-items: baseline;
+  min-width: 0;
+}
+.guard-sim-run-name {
+  font-weight: 600;
+  color: var(--fg);
+}
+.guard-sim-change code {
+  word-break: break-all;
+}
+.guard-sim-newly_blocked {
+  color: var(--err);
+}
+.guard-sim-no_longer_blocked,
+.guard-sim-diverged {
+  color: var(--warn);
+}
+.guard-sim-action_changed {
+  color: var(--port-guard);
+}
+.guard-sim-version {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: flex-end;
+  margin-top: 8px;
+}
+.guard-sim-version label {
+  display: grid;
+  gap: 4px;
+  font-size: var(--fs-xs);
+  color: var(--fg-muted);
+}

@@ -58,7 +58,8 @@ export default defineConfig({
           { text: "Replay in CI and the release gate", link: "/product/replay-and-release-gate" },
           { text: "Approval gates", link: "/product/approvals" },
           { text: "Guard engine", link: "/product/guard-engine" },
-          { text: "Guard in workflows", link: "/product/guard" }
+          { text: "Guard in workflows", link: "/product/guard" },
+          { text: "Guard policy simulation", link: "/product/guard-simulation" }
         ]
       },
       {

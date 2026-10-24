@@ -1,6 +1,6 @@
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import type { GuardEventView, GuardProfileSummary, GuardProfileVersionView, Project, WorkflowListItem } from "@ai-orchestrator/shared";
+import type { GuardEventView, GuardProfileSummary, GuardSimulationView, GuardProfileVersionView, Project, WorkflowListItem } from "@ai-orchestrator/shared";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import * as api from "../lib/api";
 import { GuardTracePanel } from "./GuardTracePanel";
@@ -22,7 +22,10 @@ vi.mock("../lib/api", async () => {
     fetchGuardProjectBinding: vi.fn(),
     updateGuardProjectBinding: vi.fn(),
     fetchGuardWorkflowBinding: vi.fn(),
-    updateGuardProfile: vi.fn()
+    updateGuardProfile: vi.fn(),
+    simulateGuardProfile: vi.fn(),
+    fetchGuardSimulation: vi.fn(),
+    cancelGuardSimulation: vi.fn()
   };
 });
 
@@ -313,7 +316,175 @@ describe("Profile editor and bindings", () => {
     expect(await screen.findByText("built-in · read-only")).toBeInTheDocument();
     expect(screen.getByLabelText("Name")).toBeDisabled();
     expect(screen.queryByRole("button", { name: /Save/ })).toBeNull();
+    // An admin may still simulate the built-in profile (a saved version, from Advanced).
+    expect(screen.getByRole("button", { name: "Simulate on recent traffic" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "Duplicate" })).toBeInTheDocument();
+  });
+});
+
+describe("Simulate on recent traffic", () => {
+  const counts = { newlyBlocked: 0, noLongerBlocked: 0, actionChanged: 0, nowMasked: 0, unchanged: 0, notReached: 0 };
+  const done: GuardSimulationView = {
+    id: "gsim_1",
+    profileId: "strict",
+    source: { kind: "inline", version: null, hash: "h" },
+    baseVersion: 2,
+    status: "completed",
+    canCancel: false,
+    createdAt: now,
+    createdBy: "builder@example.com",
+    finishedAt: now,
+    jobIds: ["run_1"],
+    summary: {
+      runs: 2, workflows: 1, compared: 1, diverged: 1, notSimulated: 0,
+      runsNewlyBlocked: 1, runsNowMasked: 1, runsNoLongerBlocked: 0, runsChanged: 2, runsUnchanged: 0,
+      checkpoints: { ...counts, newlyBlocked: 1, actionChanged: 1, nowMasked: 1 },
+      byDataClass: { email: { newlyBlocked: 1, noLongerBlocked: 0, actionChanged: 1 } },
+      byDetector: { "guard.dlp": { newlyBlocked: 1, noLongerBlocked: 0, actionChanged: 1 } },
+      sentence: "Across 2 recent runs in 1 workflow: 1 newly blocked, 1 now masked, 0 no longer blocked. 1 run diverged after the guard change."
+    },
+    workflows: [
+      {
+        workflowId: "wf-1", workflowName: "Support agent", projectId: "default", jobId: "run_1",
+        cases: [
+          { recordingId: "r1", recordingName: "Refund question", recordedAt: now, executionId: "e1", outcome: "compared", counts: { ...counts, newlyBlocked: 1 },
+            checkpoints: [{ nodeId: "agent", nodeName: "Support agent", placement: "pre_model", channel: "prompt", occurrence: 1, before: "allow", after: "block", change: "newly_blocked", detectors: [] }] },
+          { recordingId: "r2", recordingName: "Order email", recordedAt: now, executionId: "e2", outcome: "diverged", divergedAt: { step: 1, kind: "model", nodeId: "agent", message: "" },
+            counts: { ...counts, actionChanged: 1, nowMasked: 1 }, checkpoints: [] }
+        ]
+      }
+    ]
+  };
+
+  it("simulates the unsaved document and shows one sentence with the detail behind it", async () => {
+    vi.mocked(api.fetchGuardProfiles).mockResolvedValue({ profiles: [profiles[1]!, profiles[0]!], autoApply: true, builtInId: "default" });
+    vi.mocked(api.simulateGuardProfile).mockResolvedValue({ simulation: { ...done, status: "running", summary: null, workflows: undefined, progress: { done: 0, total: 2 } } });
+    vi.mocked(api.fetchGuardSimulation).mockResolvedValue({ simulation: done });
+    render(<GuardProfilesView projects={projects} workflows={workflows} activeProjectId="default" role="builder" />);
+    await userEvent.click(await screen.findByRole("checkbox", { name: "guard.injection.direct" }));
+    await userEvent.click(screen.getByRole("button", { name: "Simulate on recent traffic" }));
+    expect(api.simulateGuardProfile).toHaveBeenCalledWith("strict", {
+      document: expect.objectContaining({ channels: expect.objectContaining({ prompt: expect.objectContaining({ detectors: [{ id: "guard.dlp", threshold: 0.6 }, { id: "guard.injection.direct", threshold: 0.5 }] }) }) })
+    });
+    expect(api.updateGuardProfile).not.toHaveBeenCalled();
+    expect(await screen.findByText(/0 of 2 runs replayed/)).toBeInTheDocument();
+    expect(await screen.findByTestId("guard-sim-sentence", {}, { timeout: 3000 })).toHaveTextContent("Across 2 recent runs in 1 workflow: 1 newly blocked, 1 now masked, 0 no longer blocked.");
+    expect(screen.getByText(/compared with the current profile \(version 2\)/)).toBeInTheDocument();
+    expect(screen.getByText(/nothing called a model/)).toBeInTheDocument();
+    await userEvent.click(screen.getByText("Details"));
+    expect(screen.getByText("Refund question")).toBeInTheDocument();
+    expect(screen.getByText("Support agent · prompt")).toBeInTheDocument();
+    expect(screen.getByText(/Diverged at step 1/)).toBeInTheDocument();
+    expect(screen.getAllByText("email").length).toBeGreaterThan(0);
+  });
+
+  it("cancels a running simulation from its card, and shows the canceled state", async () => {
+    vi.mocked(api.fetchGuardProfiles).mockResolvedValue({ profiles: [profiles[1]!, profiles[0]!], autoApply: true, builtInId: "default" });
+    const running = { ...done, status: "running" as const, canCancel: true, summary: null, workflows: undefined, progress: { done: 1, total: 4 } };
+    vi.mocked(api.simulateGuardProfile).mockResolvedValue({ simulation: running });
+    vi.mocked(api.fetchGuardSimulation).mockResolvedValue({ simulation: running });
+    vi.mocked(api.cancelGuardSimulation).mockResolvedValue({ simulation: { ...running, status: "canceled", canCancel: false, progress: null } });
+    render(<GuardProfilesView projects={projects} workflows={workflows} activeProjectId="default" role="builder" />);
+    await userEvent.click(await screen.findByRole("button", { name: "Simulate on recent traffic" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Cancel" }));
+    expect(api.cancelGuardSimulation).toHaveBeenCalledWith("gsim_1");
+    expect(await screen.findByText(/The simulation was canceled/)).toBeInTheDocument();
+    expect(screen.getByText(/take priority|go first/)).toBeInTheDocument();
+  });
+
+  it("does not offer Cancel when the viewer may not cancel", async () => {
+    vi.mocked(api.fetchGuardProfiles).mockResolvedValue({ profiles: [profiles[1]!, profiles[0]!], autoApply: true, builtInId: "default" });
+    const running = { ...done, status: "running" as const, canCancel: false, summary: null, workflows: undefined, progress: { done: 1, total: 4 } };
+    vi.mocked(api.simulateGuardProfile).mockResolvedValue({ simulation: running });
+    vi.mocked(api.fetchGuardSimulation).mockResolvedValue({ simulation: running });
+    render(<GuardProfilesView projects={projects} workflows={workflows} activeProjectId="default" role="builder" />);
+    await userEvent.click(await screen.findByRole("button", { name: "Simulate on recent traffic" }));
+    expect(await screen.findByText(/1 of 4 runs replayed/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Cancel" })).toBeNull();
+  });
+
+  it("can simulate a saved version from Advanced, and explains an empty result", async () => {
+    vi.mocked(api.fetchGuardProfiles).mockResolvedValue({ profiles: [profiles[1]!, profiles[0]!], autoApply: true, builtInId: "default" });
+    vi.mocked(api.simulateGuardProfile).mockResolvedValue({
+      simulation: { ...done, source: { kind: "version", version: 1, hash: "c" }, jobIds: [], workflows: [], summary: { ...done.summary!, runs: 0, workflows: 0, sentence: "No recent recorded runs to simulate." }, emptyReason: "No workflow you can read uses this profile." }
+    });
+    render(<GuardProfilesView projects={projects} workflows={workflows} activeProjectId="default" role="builder" />);
+    await userEvent.click(await screen.findByRole("button", { name: "Simulate on recent traffic" }));
+    expect(await screen.findByText("No recent runs to simulate on yet.")).toBeInTheDocument();
+    expect(screen.getByText("No workflow you can read uses this profile.")).toBeInTheDocument();
+    await userEvent.click(screen.getByText("Advanced"));
+    await userEvent.selectOptions(screen.getByLabelText("Version to simulate"), "1");
+    await userEvent.click(screen.getByRole("button", { name: "Simulate version" }));
+    expect(api.simulateGuardProfile).toHaveBeenLastCalledWith("strict", { version: 1 });
+  });
+
+  it("shows field issues for an invalid document", async () => {
+    vi.mocked(api.fetchGuardProfiles).mockResolvedValue({ profiles: [profiles[1]!, profiles[0]!], autoApply: true, builtInId: "default" });
+    vi.mocked(api.simulateGuardProfile).mockRejectedValue(new api.ApiError("Invalid guard profile", 400, { issues: [{ path: "channels.prompt.defaultAction.action", message: "Invalid enum value" }] }));
+    render(<GuardProfilesView projects={projects} workflows={workflows} activeProjectId="default" role="builder" />);
+    await userEvent.click(await screen.findByRole("button", { name: "Simulate on recent traffic" }));
+    expect(await screen.findByText("channels.prompt.defaultAction.action")).toBeInTheDocument();
+  });
+
+  it("is not offered to viewers", async () => {
+    render(<GuardProfilesView projects={projects} workflows={workflows} activeProjectId="default" role="viewer" />);
+    await screen.findByLabelText("Name");
+    expect(screen.queryByRole("button", { name: "Simulate on recent traffic" })).toBeNull();
+  });
+
+  it("is disabled with a plain reason for builders on the built-in profile or a profile a project enforces", async () => {
+    vi.mocked(api.fetchGuardProfile).mockResolvedValue({ profile: profiles[0]!, latest: { ...versions[1]!, profileId: "default", version: 1 }, bindings: [] });
+    const { unmount } = render(<GuardProfilesView projects={projects} workflows={workflows} activeProjectId="default" role="builder" />);
+    const builtIn = await screen.findByRole("button", { name: "Simulate on recent traffic" });
+    expect(builtIn).toBeDisabled();
+    expect(builtIn).toHaveAttribute("title", expect.stringMatching(/only an admin can simulate/));
+    unmount();
+
+    vi.mocked(api.fetchGuardProfiles).mockResolvedValue({ profiles: [profiles[1]!, profiles[0]!], autoApply: true, builtInId: "default" });
+    vi.mocked(api.fetchGuardProfile).mockResolvedValue({ profile: { ...profiles[1]!, enforced: true }, latest: versions[0]!, bindings: [] });
+    render(<GuardProfilesView projects={projects} workflows={workflows} activeProjectId="default" role="builder" />);
+    const enforced = await screen.findByRole("button", { name: "Simulate on recent traffic" });
+    expect(enforced).toBeDisabled();
+    expect(enforced).toHaveAttribute("title", expect.stringMatching(/A project enforces this profile/));
+    expect(screen.getByText(/A project enforces this profile/)).toBeInTheDocument();
+    await userEvent.click(enforced);
+    expect(api.simulateGuardProfile).not.toHaveBeenCalled();
+  });
+
+  it("retries a failed poll with backoff, then offers Retry instead of stopping silently", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      vi.mocked(api.fetchGuardProfiles).mockResolvedValue({ profiles: [profiles[1]!, profiles[0]!], autoApply: true, builtInId: "default" });
+      vi.mocked(api.simulateGuardProfile).mockResolvedValue({ simulation: { ...done, status: "running", summary: null, workflows: undefined, progress: { done: 0, total: 2 } } });
+      vi.mocked(api.fetchGuardSimulation).mockRejectedValue(new Error("Failed to fetch"));
+      render(<GuardProfilesView projects={projects} workflows={workflows} activeProjectId="default" role="builder" />);
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+      await user.click(await screen.findByRole("button", { name: "Simulate on recent traffic" }));
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(api.fetchGuardSimulation).toHaveBeenCalledTimes(1);
+      expect(screen.queryByText(/Lost touch/)).toBeNull();
+      // 2 s, 4 s, 8 s, 16 s, 30 s between retries.
+      await vi.advanceTimersByTimeAsync(2000 + 4000 + 8000 + 16000 + 30000);
+      expect(api.fetchGuardSimulation).toHaveBeenCalledTimes(6);
+      expect(await screen.findByText(/Lost touch with the simulation/)).toBeInTheDocument();
+
+      vi.mocked(api.fetchGuardSimulation).mockResolvedValue({ simulation: done });
+      await user.click(screen.getByRole("button", { name: "Retry" }));
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(await screen.findByTestId("guard-sim-sentence")).toHaveTextContent("Across 2 recent runs in 1 workflow");
+      expect(screen.queryByText(/Lost touch/)).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("shows an interrupted simulation without a result", async () => {
+    vi.mocked(api.fetchGuardProfiles).mockResolvedValue({ profiles: [profiles[1]!, profiles[0]!], autoApply: true, builtInId: "default" });
+    vi.mocked(api.simulateGuardProfile).mockResolvedValue({ simulation: { ...done, status: "interrupted", summary: null, error: "The simulation was interrupted before every run was replayed" } });
+    render(<GuardProfilesView projects={projects} workflows={workflows} activeProjectId="default" role="builder" />);
+    await userEvent.click(await screen.findByRole("button", { name: "Simulate on recent traffic" }));
+    expect(await screen.findByText(/so it has no result. Start it again./)).toBeInTheDocument();
+    expect(screen.queryByTestId("guard-sim-sentence")).toBeNull();
   });
 });
 

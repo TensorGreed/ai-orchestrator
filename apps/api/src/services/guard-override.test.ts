@@ -11,8 +11,9 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { createDefaultGuardProfile } from "@ai-orchestrator/guard-sdk";
 import { SqliteStore } from "../db/database.js";
-import { GuardNotFoundError, GuardService } from "./guard-service.js";
+import { GuardNotFoundError, GuardService, GuardValidationError } from "./guard-service.js";
 import { SecretService } from "./secret-service.js";
+import { GuardSimulationSink, GuardSimulationVault } from "./guard-simulation-sink.js";
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -95,5 +96,52 @@ describe("guard profile override", () => {
     if (!enforced.ok) expect(enforced.problem).toMatch(/project binding \(enforced\)/);
     // An older version of a profile nothing binds is fine.
     expect(guard.resolveProfileOverride({ profileId: "candidate", version: 1 }, { workflowId: "wf", isAdmin: false }).ok).toBe(true);
+  });
+
+  it("Phase 15.6: a simulation swaps one profile wherever the run applies it and keeps the others", async () => {
+    const { guard } = await setup();
+    guard.setBinding("project", "default", { mode: "enforced", profileId: "candidate" }, null);
+    const document = { ...(createDefaultGuardProfile() as unknown as Record<string, unknown>), name: "Draft" };
+    const inline = guard.simulationProfile("candidate", { document });
+    expect(inline).toMatchObject({ profileId: "candidate", version: 0, inline: true, name: "Draft" });
+    // Enforced "candidate" first, then the workflow's own "bound": the enforced one is swapped, "bound" stays.
+    const resolved = guard.resolveRun({ workflowId: "wf", projectId: "default", profileSubstitute: inline });
+    expect(resolved.stack.map((entry) => [entry.profileId, entry.version])).toEqual([["candidate", 0], ["bound", 1]]);
+    expect(resolved.enforced).toMatchObject({ profileId: "candidate", version: 0, hash: inline.hash });
+    expect(resolved.source).toBe("enforced");
+    const runtime = guard.runtimeFor({ workflowId: "wf", projectId: "default", profileSubstitute: inline });
+    expect((await runtime.loadProfile("candidate"))?.hash).toBe(inline.hash);
+    expect((await runtime.loadProfile("bound"))?.version).toBe(1);
+    // A run that never applies the profile is unchanged.
+    guard.setBinding("project", "default", { mode: "inherit" }, null);
+    expect(guard.resolveRun({ workflowId: "wf", projectId: "default", profileSubstitute: inline }).stack.map((entry) => entry.profileId)).toEqual(["bound"]);
+    // A saved version, and the refusals.
+    expect(guard.simulationProfile("candidate", { version: 1 })).toMatchObject({ version: 1, inline: false, name: "Candidate v1" });
+    expect(() => guard.simulationProfile("candidate", { version: 9 })).toThrow(GuardNotFoundError);
+    expect(() => guard.simulationProfile("nope", { version: 1 })).toThrow(GuardNotFoundError);
+    expect(() => guard.simulationProfile("candidate", { document: { name: "" } })).toThrow(GuardValidationError);
+  });
+
+  it("Phase 15.6: a simulated run's verdicts go to its sink and its tokens to its vault, never to the live tables", async () => {
+    const { guard, store } = await setup();
+    const sink = new GuardSimulationSink();
+    const vault = new GuardSimulationVault(guard.vault);
+    const runtime = guard.runtimeFor({ executionId: "exec-sim", workflowId: "wf", projectId: "default", simulation: { sink, vault } });
+    expect(runtime.vault).toBe(vault);
+    await runtime.onVerdict!({
+      executionId: "exec-sim",
+      workflowId: "wf",
+      nodeId: "guard",
+      placement: "node",
+      channel: "prompt",
+      profile: { profileId: "bound", version: 1, hash: "h" },
+      verdict: { action: "allow", actions: [], findings: [], timings: { totalMs: 1 }, budget: { exceeded: false, skippedDetectors: [] } },
+      check: { id: "c1", index: 0, action: "allow" }
+    } as never);
+    expect(sink.checks).toHaveLength(1);
+    expect(store.listGuardEventsForExecution("exec-sim")).toHaveLength(0);
+    await runtime.vault!.put({ token: "tok_1", dataClass: "email", value: "a@b.c", createdAt: new Date().toISOString() });
+    expect(store.getGuardVaultByToken("tok_1")).toBeFalsy();
+    expect(vault.size).toBe(1);
   });
 });

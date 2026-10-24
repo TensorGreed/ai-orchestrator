@@ -134,6 +134,7 @@ const WORKFLOW_LOADS: LoadSite[] = [
   { file: "services/replay-service.ts", match: "const current = this.options.store.getWorkflow(recording.workflowId);", kind: "not_run", why: "a baseline rerun's project, folder and name; the rerun itself is the golden run's saved version (the draft-class candidate load) or its captured workflow, in the replay sandbox" },
   { file: "services/replay-service.ts", match: "this.options.store.getWorkflowVersion(workflowId, request.version)", kind: "draft", why: "a replay candidate: the chosen saved version" },
   { file: "services/replay-recording-service.ts", match: "const current = store.getWorkflow(history.workflowId);", kind: "not_run", why: "recording a golden run" },
+  { file: "services/guard-simulation-service.ts", match: "const workflow = store.getWorkflow(workflowId);", kind: "not_run", why: "a guard simulation's scope: the workflow's project, bindings and guard nodes (its replay jobs load their candidate through the replay service)" },
   { file: "services/workflow-version-service.ts", match: "this.store.getWorkflowVersion(workflowId, version)", kind: "not_run", why: "reading a saved version" },
   { file: "services/audit-bundle-service.ts", match: "this.options.store.getWorkflowVersion(workflow.id, latest)", kind: "not_run", why: "a run manifest's saved version" },
   { file: "services/audit-bundle-service.ts", match: "store.getWorkflow(history.workflowId)", kind: "not_run", why: "a run manifest's workflow", count: 2 },

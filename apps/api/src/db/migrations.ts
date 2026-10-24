@@ -1675,6 +1675,33 @@ export const MIGRATIONS: Migration[] = [
       ALTER TABLE replay_recordings DROP COLUMN IF EXISTS captured_at;
       ALTER TABLE replay_recordings DROP COLUMN IF EXISTS status;
     `
+  },
+  {
+    version: 35,
+    description: "Phase 15.6 — Guard policy simulations (one row grouping a simulation's replay jobs)",
+    up: `
+      CREATE TABLE IF NOT EXISTS guard_simulations (
+        id TEXT PRIMARY KEY,
+        profile_id TEXT NOT NULL,
+        source_kind TEXT NOT NULL,
+        source_version INTEGER,
+        simulated_hash TEXT NOT NULL,
+        base_version INTEGER,
+        job_ids_json TEXT NOT NULL,
+        summary_json TEXT,
+        status TEXT NOT NULL,
+        error TEXT,
+        created_at TIMESTAMPTZ NOT NULL,
+        created_by TEXT,
+        created_by_user_id TEXT,
+        finished_at TIMESTAMPTZ
+      );
+      CREATE INDEX IF NOT EXISTS idx_guard_simulations_profile ON guard_simulations(profile_id, created_at DESC);
+    `,
+    down: `
+      DROP INDEX IF EXISTS idx_guard_simulations_profile;
+      DROP TABLE IF EXISTS guard_simulations;
+    `
   }
 ];
 

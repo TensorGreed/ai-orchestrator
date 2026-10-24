@@ -7,6 +7,8 @@
  * Bindings: the project's binding (an admin can enforce a profile, which
  * builders then cannot change) and a workflow's override, with the profiles
  * that apply to agent traffic in evaluation order.
+ * Phase 15.6: profile editors can simulate the editor's changes (or a saved
+ * version) on recent recorded runs before saving.
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -52,6 +54,8 @@ import {
   type GuardDocument
 } from "../lib/guard-profile-edit";
 import { actionLabel, channelLabel } from "../lib/guard-trace";
+import { GuardSimulationCard, useGuardSimulation } from "./GuardSimulationPanel";
+import { simulateDenial } from "../lib/guard-simulation";
 
 type Role = "admin" | "builder" | "operator" | "viewer";
 
@@ -129,6 +133,7 @@ export function GuardProfilesView({ projects, workflows, activeProjectId, role }
             profileId={selectedId}
             detectors={detectors}
             canEdit={canEdit}
+            role={role}
             takenIds={new Set(profiles.map((profile) => profile.id))}
             onChanged={(id) => void reload(id)}
             onDeleted={() => {
@@ -196,6 +201,7 @@ function GuardProfileEditor({
   profileId,
   detectors,
   canEdit,
+  role,
   takenIds,
   onChanged,
   onDeleted
@@ -203,6 +209,7 @@ function GuardProfileEditor({
   profileId: string;
   detectors: GuardDetectorInfo[];
   canEdit: boolean;
+  role: Role;
   takenIds: Set<string>;
   onChanged: (id: string) => void;
   onDeleted: () => void;
@@ -219,6 +226,7 @@ function GuardProfileEditor({
   const [jsonMode, setJsonMode] = useState(false);
   const [jsonText, setJsonText] = useState("");
   const [busy, setBusy] = useState(false);
+  const simulation = useGuardSimulation(profileId);
 
   const load = useCallback(async () => {
     try {
@@ -243,6 +251,8 @@ function GuardProfileEditor({
   }
 
   const readOnly = !canEdit || summary.builtIn;
+  // Phase 15.6 — who may simulate: the same rule as saving (admins also on the built-in profile, through a saved version).
+  const simulateBlocked = simulateDenial(role, summary);
   const dirty = JSON.stringify(document) !== saved;
   const update = (next: GuardDocument) => {
     setDocument(next);
@@ -283,6 +293,20 @@ function GuardProfileEditor({
     } finally {
       setBusy(false);
     }
+  };
+
+  const simulate = () => {
+    let next = document;
+    if (jsonMode) {
+      try {
+        next = JSON.parse(jsonText) as GuardDocument;
+      } catch {
+        setIssues([{ path: "(json)", message: "Not valid JSON" }]);
+        setError("Invalid guard profile");
+        return;
+      }
+    }
+    void simulation.start({ document: next as Record<string, unknown> });
   };
 
   const duplicate = async () => {
@@ -483,13 +507,42 @@ function GuardProfileEditor({
         {jsonMode && <textarea className="guard-json" aria-label="Profile document" rows={16} value={jsonText} readOnly={readOnly} onChange={(event) => setJsonText(event.target.value)} />}
         <IssueList issues={issues} error={error} />
         {message && <p className="guard-saved" role="status">{message}</p>}
-        {!readOnly && (
+        {canEdit && (!readOnly || summary.builtIn) && (
           <div className="guard-save-row">
-            <input aria-label="Version note" placeholder="Version note (optional)" value={note} onChange={(event) => setNote(event.target.value)} />
-            <button type="button" className="pg-btn primary" disabled={busy || (!dirty && !jsonMode)} onClick={() => void save()}>
-              {dirty || jsonMode ? "Save new version" : "Saved"}
+            {!readOnly && <input aria-label="Version note" placeholder="Version note (optional)" value={note} onChange={(event) => setNote(event.target.value)} />}
+            <button
+              type="button"
+              className="pg-btn"
+              disabled={simulation.busy || simulateBlocked !== null}
+              aria-disabled={simulateBlocked !== null}
+              title={
+                simulateBlocked ??
+                "Replay recent recorded runs of the workflows that use this profile under the current profile and with these settings; nothing is saved and no model is called"
+              }
+              onClick={simulate}
+            >
+              {simulation.busy ? "Simulating…" : "Simulate on recent traffic"}
             </button>
+            {!readOnly && (
+              <button type="button" className="pg-btn primary" disabled={busy || (!dirty && !jsonMode)} onClick={() => void save()}>
+                {dirty || jsonMode ? "Save new version" : "Saved"}
+              </button>
+            )}
           </div>
+        )}
+        {canEdit && simulateBlocked && (!readOnly || summary.builtIn) && <p className="kb-subtle guard-sim-denied">{simulateBlocked}</p>}
+        {canEdit && !simulateBlocked && (
+          <GuardSimulationCard
+            simulation={simulation.simulation}
+            busy={simulation.busy}
+            error={simulation.error}
+            issues={simulation.issues}
+            lost={simulation.lost}
+            versions={versions}
+            onSimulateVersion={(version) => void simulation.start({ version })}
+            onRetry={simulation.retry}
+            onCancel={() => void simulation.cancel()}
+          />
         )}
       </section>
 
