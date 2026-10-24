@@ -88,6 +88,8 @@ A resumed run runs as the person who decided, like any run that person starts: i
 
 On the **Runs** page, a run waiting for approval has **Review approval**, which opens the inbox at that run.
 
+The inbox also holds requests that are not paused runs: [release requests](./release-gate.md#release-requests) to publish a version, and **Gate cases** requests to admit cases to an enforced release gate or remove admitted ones (see [Case admission](./release-gate.md#case-admission-and-required-cases)). A Gate cases card lists the cases and the requester's reason; **Approve** admits or removes them, **Reject** needs a reason.
+
 Only one decision counts. Once a person decides (or the request times out), any other decision for the same request answers `409`. A decision sent for an older request of a run that has since paused again answers `409` too, and so does a decision on a request past its expiry (its timeout outcome applies instead). A run you cannot see answers `404`, whatever state it is in.
 
 A recorded decision is never lost. Claiming the paused run and recording the decision happen in one transaction. If the resume then cannot start (the queue refuses it) or fails, the run waits again and the request is pending again with the same expiry; the decision answers `503` "Could not resume the run; decide again".

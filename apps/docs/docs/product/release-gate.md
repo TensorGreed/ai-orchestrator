@@ -86,11 +86,27 @@ An admin can **enforce** a gate. Then only an admin can:
 - turn it off, lift enforcement or loosen the policy (lower the pass rate, allow more regressions, raise or remove a limit, remove a golden set, accept older golden runs);
 - change the approvers in any way, or self-approval;
 - change the candidate options (scorers, MCP mode, repeats, aggregation, comparison, budget, timeout);
-- remove cases from, or delete, one of its golden sets, add a case that carries its own scorers, or delete a golden run one of its cases uses (adding a plain case is allowed, and makes earlier jobs stale);
+- remove an admitted case from one of its golden sets, delete one of its golden sets, add a case that carries its own scorers, or delete a golden run an admitted case uses (adding a plain case is allowed, makes earlier jobs stale, and the new case waits for admission: see [Case admission](#case-admission-and-required-cases));
+- admit cases, reject waiting ones, and mark cases required or stop requiring them;
 - roll back;
 - delete the workflow.
 
 A builder can still tighten the policy and add golden sets. A refused change answers `403` naming what it changes, and is audited (`release.gate.update_refused`, `release.golden_set_change.refused`, `release.rollback.refused`, `release.workflow_delete.refused`).
+
+### Case admission and required cases
+
+On an enforced gate, a builder could otherwise make a failing version pass by adding easy cases (18 of 20 passing is 90%; add 40 cases that always pass and it is 58 of 60, 96.7%) or by deleting the failing ones. Enforced gates therefore count only **admitted** cases.
+
+- When an admin enforces a gate, every case its golden sets hold is admitted. When an admin adds a golden set to an enforced gate, that set's cases are admitted too.
+- A case added afterwards, by any path (a golden run added in Evaluations or through the API, a hand-written case, a golden-set file import whose set a builder adds to the gate, a promoted capture), is **pending admission**. It runs with every gate job and shows in the results, but it counts toward nothing: not the pass rate, not the minimum number of cases, not regressions, cost, latency or guard blocks. A golden set a builder adds to an enforced gate starts with all its cases pending.
+- An admin admits pending cases, or rejects them (the case leaves its golden set; the golden run is kept), from the gate's **Cases this gate counts** card. A builder clicks **Request admission** instead: the request goes to the gate's approvers in **Approvals** (the gate's admins when it names no approvers), with a reason. Approving admits the cases that are still pending.
+- A builder cannot remove an admitted case, or delete a golden set the gate uses: the API answers `403` with a plain message. A pending case is not counted, so a builder may remove it. To remove an admitted case a builder clicks **Request removal**; approving it removes the case from its set (the golden run is kept). Admins remove cases directly.
+- An admin can mark a golden-run case **required** (which admits it if it was pending). A required case must pass on every publish: if it fails, or errors while errors count as failures, or does not run, the publish is blocked whatever the pass rate, and the reason names the case (`Required case "Refund over limit" failed`). Hand-written cases cannot be required, since replay jobs skip them. Only admins set or clear required, and the golden set page shows a **required** chip on such cases.
+- The gate card shows a plain banner while cases wait, for example "3 new cases waiting for admin admission. They run but don't count yet." The publish dialog lists how many cases are pending and required.
+
+Admission requests follow the release-request rules: approvers must be able to read and publish the workflow (so they are project-scoped), the requester cannot approve their own request unless the gate allows self-approval, and a request expires after the approvers' timeout. A request is refused and canceled as stale when the gate is no longer enforced or none of its cases still fits (already admitted, or no longer there). Each step is audited: `release.gate.cases_admitted`, `release.gate.cases_rejected`, `release.gate.cases_removed`, `release.gate.case_required`, `release.gate.case_request.requested`, `release.gate.case_request.decided`, `release.gate.case_request.canceled` and `release.gate.case_request.timed_out`. Removing an admitted case or clearing required counts as loosening the gate; the audit metadata names it.
+
+Admitting a case changes no golden set, so a replay job that already ran the case is judged again with it counted; adding or removing a case makes earlier jobs stale as before. Lifting enforcement drops the admission state: an unenforced gate counts every case and ignores required marks, exactly as before admission existed. Gates enforced before this release admit every case their sets held when the API first started with migration 36, so their jobs judge as they did.
 
 ### Deleting a workflow
 
@@ -120,6 +136,10 @@ Publishing, rollback and deciding a release request need `workflow:publish` on t
 - `GET /api/workflows/:id/releases` → `{ releases, publishedVersion }`
 - `POST /api/workflows/:id/rollback` (`{ version, reason }`) → `{ release }`
 - `GET /api/workflows/:id/release-state` → `{ state: { draftVersion, publishedVersion, aheadBy, gateEnabled, gateEnforced, productionRefused, canPublish, canEditGate } }`
-- `GET /api/workflows/:id/publish-preview?version=&replayRunId=` → `{ preview }`, the verdict publishing would get now
+- `GET /api/workflows/:id/publish-preview?version=&replayRunId=` → `{ preview }`, the verdict publishing would get now; on an enforced gate `preview.stats.admission` holds `{ admitted, pending, pendingNotPassing, required, requiredFailures: [{ id, name, problem }] }`
+- `GET /api/workflows/:id/release-gate/cases` → `{ cases: { enforced, cases: [{ fixtureId, datasetId, datasetName, name, recordingId, admission: "admitted" | "pending", required, requestId, requestKind }], counts: { admitted, pending, required }, canAdmit, canRequest } }` (an unenforced gate answers `enforced: false` and no cases)
+- `POST /api/workflows/:id/release-gate/cases/admit` and `/reject` (`{ fixtureIds, reason? }`, admins) → `{ cases }`
+- `PUT /api/workflows/:id/release-gate/cases/:fixtureId/required` (`{ required }`, admins) → `{ cases }`
+- `POST /api/workflows/:id/release-gate/cases/requests` (`{ action: "admit" | "remove", fixtureIds, reason }`, `workflow:write`) → `202 { request }`, decided in Approvals
 
-On the Postgres store every release route answers `501`, and every entry point runs the draft.
+On the Postgres store every release route (the admission routes included) answers `501`, and every entry point runs the draft.
