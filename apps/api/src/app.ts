@@ -146,7 +146,9 @@ import { registerGoldenSetFileRoutes } from "./golden-set-file-routes.js";
 import { GOLDEN_SET_FILE_DEFAULT_MAX_BYTES, GUARD_SIMULATION_MAX_CASES_DEFAULT, GUARD_SIMULATION_RETENTION_DAYS } from "@ai-orchestrator/shared";
 import { registerApprovalRoutes } from "./approval-routes.js";
 import { registerReleaseRoutes } from "./release-routes.js";
+import { registerGateAdmissionRoutes } from "./gate-admission-routes.js";
 import { DEACTIVATED_MESSAGE, ReleaseService, withUniqueTriggerPaths } from "./services/release-service.js";
+import { GateAdmissionService } from "./services/gate-admission-service.js";
 import { STUCK_JOB_MARGIN_MS } from "./db/queue-timeouts.js";
 import { ApprovalResumeRunner, ApprovalService, approvalDecisionOf, approvalPersonCheck, type ApprovalResumeJob } from "./services/approval-service.js";
 import { ReplayRecordingService } from "./services/replay-recording-service.js";
@@ -3887,6 +3889,21 @@ export function createApp(
     appPublicUrl: config.APP_PUBLIC_URL,
     logger: { warn: (message, fields) => app.log.warn(fields ?? {}, message) }
   });
+  // Release gate admission: on enforced gates, cases added after enforcement count only once admitted.
+  const gateAdmissionService = new GateAdmissionService({
+    store,
+    available: approvalsSupported,
+    access: (user, workflowId, permission) => runAccess.workflow(user, workflowId, permission),
+    readableWorkflowIds: (user) => runAccess.readableWorkflowIds(user),
+    audit: (event) => {
+      auditService.record(event);
+      logStreamingService.dispatchAudit(event);
+    },
+    notify: (event) => notificationService.notify(event),
+    redact: (value) => String(secretService.redact(value)),
+    appPublicUrl: config.APP_PUBLIC_URL,
+    logger: { warn: (message, fields) => app.log.warn(fields ?? {}, message) }
+  });
   /** The workflow production traffic runs: the published version when there is one, else the draft. */
   const productionWorkflow = (workflowId: string): Workflow | null => releaseService.resolveRunnableWorkflow(workflowId, "production");
   /** Phase 15.4 — what a production entry point answers when it has no workflow to run: why production refuses it (409), or 404. */
@@ -5431,7 +5448,9 @@ export function createApp(
     audit: (request, user, event) => audit(request, user, event),
     sseHeartbeatMs: config.SSE_HEARTBEAT_INTERVAL_MS,
     strictIsolation: config.PROJECT_ISOLATION === "strict",
-    goldenSetChangeDenial: (user, datasetId, change) => releaseService.goldenSetChangeDenial(user, datasetId, change)
+    goldenSetChangeDenial: (user, datasetId, change, target) => releaseService.goldenSetChangeDenial(user, datasetId, change, target),
+    releaseGateAdmission: (run) => releaseService.jobGateAdmission(run),
+    gateCasesRemoval: (user, workflowId, target) => releaseService.gateCasesRemoval(user, workflowId, target)
   });
 
   app.get("/widget.js", async (_request, reply) => {
@@ -7308,6 +7327,8 @@ export function createApp(
     // Phase 15.4 — the gate and release history outlive the workflow; an enforced gate's workflow is the admin's to delete.
     const releaseDenial = releaseService.deleteDenial(user, request.params.id);
     if (releaseDenial) return denyRunAccess(reply, { status: 403, error: releaseDenial });
+    // Deleting the workflow deletes its golden runs: an enforced gate's admitted cases can no longer pass, which is audited.
+    const gateCasesRemoved = releaseService.gateCasesRemoval(user, request.params.id, { via: "workflow" });
 
     try {
       const deleted = store.deleteWorkflow(request.params.id);
@@ -7315,6 +7336,7 @@ export function createApp(
         reply.code(404);
         return { error: "Workflow not found" };
       }
+      gateCasesRemoved?.();
 
       schedulerService?.removeWorkflow(request.params.id);
       triggerService?.removeWorkflow(request.params.id);
@@ -8872,12 +8894,19 @@ export function createApp(
     canSeeProjectAccounts: (user, workflow) => user.role === "admin" || rbacService.can(user, workflow.projectId ?? DEFAULT_PROJECT_ID, "project:invite"),
     requireRole: (request, reply, roles) => requireRole(request, reply, roles),
     dispatch: dispatchApprovalResume,
-    releases: releaseService
+    releases: releaseService,
+    gateCases: gateAdmissionService
   });
 
   registerReleaseRoutes({
     app,
     releases: releaseService,
+    requireRole: (request, reply, roles) => requireRole(request, reply, roles)
+  });
+
+  registerGateAdmissionRoutes({
+    app,
+    admission: gateAdmissionService,
     requireRole: (request, reply, roles) => requireRole(request, reply, roles)
   });
 
@@ -11731,7 +11760,9 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     requireRole: (request, reply, roles) => requireRole(request, reply, roles),
     runAccess,
     audit: (request, user, event) => audit(request, user, event),
-    available: captureAvailable
+    available: captureAvailable,
+    // Release gate admission: an erasure is never refused, but admitted cases it takes are audited and stale jobs marked.
+    subjectRowRemoval: (user, row) => releaseService.dataSubjectRemoval(user, row)
   });
 
   // Phase 15.5 — golden-set files (SQLite only: Postgres answers 501).
@@ -11756,7 +11787,8 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     requireRole: (request, reply, roles) => requireRole(request, reply, roles),
     runAccess,
     audit: (request, user, event) => audit(request, user, event),
-    recordingDeleteDenial: (user, workflowId, recordingId) => releaseService.recordingDeleteDenial(user, workflowId, recordingId)
+    recordingDeleteDenial: (user, workflowId, recordingId) => releaseService.recordingDeleteDenial(user, workflowId, recordingId),
+    gateCasesRemoval: (user, workflowId, target) => releaseService.gateCasesRemoval(user, workflowId, target)
   });
 
   registerGuardRoutes({ app, store, guard: guardService, requireRole: (request, reply, roles) => requireRole(request, reply, roles), runAccess, canAccessWorkflow: (user, workflow, permission) => rbacService.canAccessWorkflow(user, workflow, permission), canInProject: (user, projectId, permission) => rbacService.can(user, projectId, permission), audit: (request, user, event) => audit(request, user, event) });

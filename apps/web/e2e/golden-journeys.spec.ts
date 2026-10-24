@@ -424,5 +424,72 @@ test.describe("golden journeys", () => {
     // Nothing was saved: the editor still offers to save the change.
     await expect(page.getByRole("button", { name: "Save new version" })).toBeEnabled();
   });
-});
 
+  test("an enforced release gate holds a case added later until an admin admits it", async ({ page }) => {
+    await openStudio(page);
+    const stamp = Date.now();
+    const workflowId = `wf-e2e-admission-${stamp}`;
+    const workflow = {
+      id: workflowId,
+      name: `E2E Admission ${stamp}`,
+      schemaVersion: "1.0.0",
+      workflowVersion: 1,
+      nodes: [
+        { id: "hook", type: "webhook_input", name: "Hook", position: { x: 80, y: 180 }, config: { path: `e2e-admission-${stamp}`, method: "POST" } },
+        { id: "out", type: "output", name: "Output", position: { x: 380, y: 180 }, config: { responseTemplate: "ok", outputKey: "result" } }
+      ],
+      edges: [{ id: "edge-1", source: "hook", target: "out" }]
+    };
+    expect((await page.request.post("/api/workflows", { data: workflow })).ok()).toBeTruthy();
+    const goldenRun = async (name: string) => {
+      const run = await page.request.post(`/api/workflows/${workflowId}/execute`, { data: { record: true } });
+      expect(run.ok(), await run.text()).toBeTruthy();
+      const saved = await page.request.post("/api/replay/recordings", { data: { executionId: (await run.json()).executionId, name } });
+      expect(saved.ok(), await saved.text()).toBeTruthy();
+      return (await saved.json()).recording.id as string;
+    };
+    const created = await page.request.post("/api/eval/datasets", { data: { name: `Admission suite ${stamp}`, workflowId } });
+    const setId = (await created.json()).dataset.id as string;
+    expect((await page.request.post(`/api/eval/datasets/${setId}/recordings`, { data: { recordingId: await goldenRun("Counted case") } })).ok()).toBeTruthy();
+    const gate = await page.request.put(`/api/workflows/${workflowId}/release-gate`, { data: { enabled: true, enforced: true, datasetIds: [setId] } });
+    expect(gate.ok(), await gate.text()).toBeTruthy();
+    // Added after the gate was enforced: it waits for admission.
+    expect((await page.request.post(`/api/eval/datasets/${setId}/recordings`, { data: { recordingId: await goldenRun("Late case") } })).ok()).toBeTruthy();
+
+    await page.reload();
+    await sidebarItem(page, "Evaluations").click();
+    await page.getByRole("tab", { name: "Release gates" }).click();
+    await page.getByRole("tabpanel", { name: "Release gates" }).getByLabel("Workflow", { exact: true }).selectOption(workflowId);
+    const cases = page.locator("section.gate-cases-card");
+    await expect(cases.getByRole("status").filter({ hasText: "waiting for admin admission" })).toHaveText(
+      "1 new case waiting for admin admission. It runs but doesn't count yet."
+    );
+    await expect(cases.getByText("waiting for admission", { exact: true })).toBeVisible();
+    await cases.getByRole("button", { name: "Admit Late case" }).click();
+    await expect(cases.getByText('"Late case" now counts.')).toBeVisible();
+    await expect(cases.getByText(/waiting for admin admission/)).toHaveCount(0);
+    await expect(cases.getByText("2 admitted · 0 required")).toBeVisible();
+
+    // The toggle follows the server: it turns on once the gate saved it.
+    await cases.getByLabel("Counted case is required").click();
+    await expect(cases.getByLabel("Counted case is required")).toBeChecked();
+    await expect(cases.getByText("required", { exact: true })).toBeVisible();
+
+    // Adding a golden set to the enforced gate admits nothing unless the admin confirms it.
+    const extra = await page.request.post("/api/eval/datasets", { data: { name: `Extra suite ${stamp}`, workflowId } });
+    const extraId = (await extra.json()).dataset.id as string;
+    expect((await page.request.post(`/api/eval/datasets/${extraId}/recordings`, { data: { recordingId: await goldenRun("Extra case") } })).ok()).toBeTruthy();
+    await page.reload();
+    await sidebarItem(page, "Evaluations").click();
+    await page.getByRole("tab", { name: "Release gates" }).click();
+    await page.getByRole("tabpanel", { name: "Release gates" }).getByLabel("Workflow", { exact: true }).selectOption(workflowId);
+    await page.getByLabel(new RegExp(`Extra suite ${stamp}`)).check();
+    const admitAdded = page.getByLabel("Admit 1 case from the added set?");
+    await expect(admitAdded).not.toBeChecked();
+    await admitAdded.check();
+    await page.getByRole("button", { name: "Save gate" }).click();
+    await expect(page.getByText("Gate saved.")).toBeVisible();
+    await expect(cases.getByText("3 admitted · 1 required")).toBeVisible();
+    await expect(cases.getByText(/waiting for admin admission/)).toHaveCount(0);
+  });
+});

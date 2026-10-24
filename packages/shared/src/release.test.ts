@@ -9,8 +9,12 @@ import {
   releaseScorersMatch,
   releaseGateSettingsSchema,
   releasePublishInputSchema,
+  releaseAdmissionLoosening,
+  releaseGateChecksWorsened,
+  summarizeReleaseGateAdmission,
   type ReleaseGateCase,
-  type ReleaseGateEvidence
+  type ReleaseGateEvidence,
+  type ReleaseGateReasonCheck
 } from "./release";
 
 const HASH = "a".repeat(64);
@@ -257,5 +261,160 @@ describe("publish input", () => {
     expect(releasePublishInputSchema.safeParse({ version: 2, override: { reason: "hotfix" }, requestApproval: { reason: "x" } }).success).toBe(false);
     expect(releasePublishInputSchema.safeParse({ version: 2, override: { reason: " " } }).success).toBe(false);
     expect(releasePublishInputSchema.safeParse({ version: 2, workflowHash: "xyz" }).success).toBe(false);
+  });
+});
+
+describe("gate admission and required cases (enforced gates)", () => {
+  const failing = (id: string): ReleaseGateCase => passing(id, { status: "fail", scorers: [{ type: "status", pass: false }] });
+  /** 18 passing and 2 failing admitted cases: 90%. */
+  const admittedCases = [...Array.from({ length: 18 }, (_, index) => passing(`a${index}`)), failing("a18"), failing("a19")];
+  const gatePolicy = policy({ minPassRate: 0.95, maxRegressions: 10 });
+
+  it("without admission every case counts, exactly as before admission existed", () => {
+    const cases = [...admittedCases, ...Array.from({ length: 40 }, (_, index) => passing(`easy${index}`))];
+    const before = judgeReleaseGate(evidence(cases), gatePolicy, { expected, now: NOW });
+    const withNull = judgeReleaseGate(evidence(cases), gatePolicy, { expected, now: NOW, admission: null });
+    expect(withNull).toEqual(before);
+    // 58 of 60 is 96.7%: the dilution works on a gate without admission.
+    expect(before.verdict).toBe("passed");
+    expect(before.stats.admission).toBeUndefined();
+  });
+
+  it("dilution is blocked: 18/20 stays 18/20 when 40 easy cases wait for admission (58/60 would pass)", () => {
+    const easy = Array.from({ length: 40 }, (_, index) => passing(`easy${index}`));
+    const admission = { admittedIds: admittedCases.map((entry) => entry.id) };
+    const judged = judgeReleaseGate(evidence([...admittedCases, ...easy]), gatePolicy, { expected, now: NOW, admission });
+    expect(judged.verdict).toBe("blocked");
+    expect(judged.stats).toMatchObject({ cases: 20, pass: 18, fail: 2, passRate: 0.9 });
+    expect(judged.stats.admission).toMatchObject({ admitted: 20, pending: 40, pendingNotPassing: 0, required: 0, requiredFailures: [] });
+    expect(judged.reasons.join("\n")).toMatch(/Pass rate 90% is below the required 95%/);
+    // Once admitted they count.
+    const all = { admittedIds: [...admittedCases, ...easy].map((entry) => entry.id) };
+    expect(judgeReleaseGate(evidence([...admittedCases, ...easy]), gatePolicy, { expected, now: NOW, admission: all }).verdict).toBe("passed");
+  });
+
+  it("pending cases count toward no limit: not minCases, regressions, cost or guard blocks", () => {
+    const admission = { admittedIds: ["c1", "c2"] };
+    const cases = [passing("c1"), passing("c2"), failing("p1"), passing("p2", { newGuardBlocks: 3, costUsd: { baseline: 0.01, candidate: 9 } })];
+    const judged = judgeReleaseGate(evidence(cases), policy({ maxCostIncreasePct: 10 }), { expected, now: NOW, admission });
+    expect(judged.stats).toMatchObject({ cases: 2, regressions: 0, newGuardBlocks: 0, costIncreasePct: 0 });
+    expect(judged.stats.admission).toMatchObject({ admitted: 2, pending: 2, pendingNotPassing: 1 });
+    expect(judged.reasons).toEqual(["Only 2 cases judged; the gate needs at least 3."]);
+  });
+
+  it("a failing required case blocks even when every other case passes and the rate is met", () => {
+    const cases = [...Array.from({ length: 19 }, (_, index) => passing(`c${index}`)), failing("must")];
+    const admission = { admittedIds: cases.map((entry) => entry.id), requiredIds: ["must"], caseNames: { must: "Refund over limit" } };
+    const lenient = policy({ minPassRate: 0.9, maxRegressions: 5 });
+    expect(judgeReleaseGate(evidence(cases), lenient, { expected, now: NOW }).verdict).toBe("passed");
+    const judged = judgeReleaseGate(evidence(cases), lenient, { expected, now: NOW, admission });
+    expect(judged.verdict).toBe("blocked");
+    expect(judged.reasons).toEqual(['Required case "Refund over limit" failed: a required case must pass whatever the pass rate.']);
+    expect(judged.stats.admission?.requiredFailures).toEqual([{ id: "must", name: "Refund over limit", problem: "failed" }]);
+  });
+
+  it("a required case that is inconclusive, skipped or missing blocks whatever errorsCountAsFailures says", () => {
+    const cases = [passing("c1"), passing("c2"), passing("c3"), passing("flaky", { status: "error" }), passing("off", { status: "skipped" })];
+    const admission = { admittedIds: ["c1", "c2", "c3", "flaky", "off", "gone"], requiredIds: ["flaky", "off", "gone"], caseNames: { flaky: "Tape miss" } };
+    const strict = judgeReleaseGate(evidence(cases), policy({ minPassRate: 0.5, maxRegressions: 5 }), { expected, now: NOW, admission });
+    expect(strict.stats.admission?.requiredFailures.map((entry) => entry.problem)).toEqual(["was inconclusive", "did not run", "did not run"]);
+    const lax = judgeReleaseGate(evidence(cases), policy({ minPassRate: 0.5, errorsCountAsFailures: false }), { expected, now: NOW, admission });
+    expect(lax.verdict).toBe("blocked");
+    expect(lax.stats.admission?.requiredFailures.map((entry) => entry.id)).toEqual(["flaky", "off", "gone"]);
+    expect(lax.reasons).toContain('Required case "Tape miss" was inconclusive: a required case must pass whatever the pass rate.');
+  });
+
+  it("a required mark on a case that is not admitted has no effect", () => {
+    const cases = [passing("c1"), passing("c2"), passing("c3"), failing("late")];
+    const admission = { admittedIds: ["c1", "c2", "c3"], requiredIds: ["late"] };
+    const judged = judgeReleaseGate(evidence(cases), policy({ minPassRate: 0.5 }), { expected, now: NOW, admission });
+    expect(judged.verdict).toBe("passed");
+    expect(judged.stats.admission).toMatchObject({ required: 0, requiredFailures: [] });
+  });
+
+  it("the shared summary the CLI uses gives the judge's counts", () => {
+    const cases = [passing("c1"), failing("c2"), passing("p1"), failing("p2")];
+    const admission = { admittedIds: ["c1", "c2"], requiredIds: ["c2"] };
+    const judged = judgeReleaseGate(evidence(cases), policy(), { expected, now: NOW, admission });
+    expect(summarizeReleaseGateAdmission(cases, admission)).toEqual(judged.stats.admission);
+  });
+
+  it("removing an admitted case or clearing required loosens the gate; admitting or requiring tightens it", () => {
+    const before = { admittedIds: ["a", "b"], requiredIds: ["a"] };
+    expect(releaseAdmissionLoosening(before, { admittedIds: ["a", "b", "c"], requiredIds: ["a", "b"] })).toEqual([]);
+    expect(releaseAdmissionLoosening(before, { admittedIds: ["a"], requiredIds: ["a"] }, { b: "Big refund" })).toEqual(['removes admitted case "Big refund"']);
+    expect(releaseAdmissionLoosening(before, { admittedIds: ["a", "b"], requiredIds: [] })).toEqual(['stops requiring case "a"']);
+    const gate = releaseGateSettingsSchema.parse({ enabled: true, datasetIds: ["set_a"] });
+    expect(releaseGateLoosening(gate, gate)).toEqual([]);
+    expect(releaseGateLoosening(gate, gate, { before, after: { admittedIds: ["b"], requiredIds: [] } })).toEqual(['removes admitted case "a"', 'stops requiring case "a"']);
+  });
+});
+
+describe("gate reason checks", () => {
+  const failing = (id: string): ReleaseGateCase => passing(id, { status: "fail", scorers: [{ type: "status", pass: false }] });
+
+  it("give every reason a stable code, in the same order, whose wording may change", () => {
+    const cases = [passing("c1"), passing("c2"), failing("c3"), passing("p1")];
+    const gatePolicy = policy({ minCases: 10, minPassRate: 0.9, maxRegressions: 5 });
+    const judged = judgeReleaseGate(evidence(cases, { staleSets: ["set_a"] }), gatePolicy, { expected, now: NOW, admission: { admittedIds: ["c1", "c2", "c3"] } });
+    expect(judged.checks.map((check) => check.code)).toEqual(["stale_sets:set_a", "min_cases", "pass_rate"]);
+    expect(judged.checks).toHaveLength(judged.reasons.length);
+    // A case waiting for admission is not in the wording: it must not change what a request is compared against.
+    const plain = judgeReleaseGate(evidence(cases.slice(0, 3), { staleSets: ["set_a"] }), gatePolicy, { expected, now: NOW, admission: { admittedIds: ["c1", "c2", "c3"] } });
+    expect(plain.reasons).toEqual(judged.reasons);
+    expect(releaseGateChecksWorsened(judged.checks, plain.checks)).toEqual([]);
+    expect(judgeReleaseGate(null, gatePolicy, { expected }).checks).toEqual([{ code: "no_job", measure: null }]);
+    expect(judgeReleaseGate(evidence([passing("c1")]), policy({ minCases: 1 }), { expected, now: NOW, requireApproval: true }).checks).toEqual([
+      { code: "approval_required", measure: null }
+    ]);
+  });
+
+  it("are worse only for a new code or a higher measure; better numbers and vanished reasons are not", () => {
+    const gatePolicy = policy({ minPassRate: 0.9, maxRegressions: 5 });
+    const at = (pass: number, fail: number) =>
+      judgeReleaseGate(evidence([...Array.from({ length: pass }, (_, i) => passing(`p${i}`)), ...Array.from({ length: fail }, (_, i) => failing(`f${i}`))]), gatePolicy, { expected, now: NOW }).checks;
+    const before = at(8, 2);
+    expect(before.map((check) => check.code)).toEqual(["pass_rate"]);
+    expect(releaseGateChecksWorsened(before, at(9, 2))).toEqual([]);
+    expect(releaseGateChecksWorsened(before, at(7, 3)).map((check) => check.code)).toEqual(["pass_rate"]);
+    // A tighter minimum on the same numbers is worse too.
+    const tighter = judgeReleaseGate(evidence([...Array.from({ length: 8 }, (_, i) => passing(`p${i}`)), failing("f0"), failing("f1")]), policy({ minPassRate: 0.95, maxRegressions: 5 }), { expected, now: NOW }).checks;
+    expect(releaseGateChecksWorsened(before, tighter)).toHaveLength(1);
+    expect(releaseGateChecksWorsened(before, [...before, { code: "required_case:f0", measure: null }]).map((check) => check.code)).toEqual(["required_case:f0"]);
+    expect(releaseGateChecksWorsened(before, [])).toEqual([]);
+  });
+
+  it("recording_age has no measure, so the same golden run judged a day later is not worse", () => {
+    const old = (now: string) =>
+      judgeReleaseGate(evidence([passing("c1", { recordingCreatedAt: "2026-07-01T00:00:00.000Z" })]), policy({ maxRecordingAgeDays: 30, minCases: 1 }), { expected, now: new Date(now) });
+    const day1 = old("2026-10-24T12:00:00.000Z");
+    const day2 = old("2026-10-25T12:00:00.000Z");
+    expect(day1.checks).toEqual([{ code: "recording_age", measure: null }]);
+    expect(day2.reasons).not.toEqual(day1.reasons);
+    expect(releaseGateChecksWorsened(day1.checks, day2.checks)).toEqual([]);
+  });
+
+  it("measure a stale or uncovered set by its admitted-case count, so more unrun cases count as worse", () => {
+    const stale = (count: number) =>
+      judgeReleaseGate(evidence([passing("c1")], { datasetIds: [], staleSets: ["s"], staleSetCounts: { s: count } }), policy({ minCases: 1 }), { expected: { ...expected, datasetIds: [] }, now: NOW }).checks;
+    expect(stale(1)).toEqual([{ code: "stale_sets:s", measure: 1 }]);
+    expect(releaseGateChecksWorsened(stale(1), stale(4)).map((check) => check.code)).toEqual(["stale_sets:s"]);
+    expect(releaseGateChecksWorsened(stale(4), stale(4))).toEqual([]);
+    const uncovered = (count: number) =>
+      judgeReleaseGate(evidence([passing("c1")], { datasetIds: [] }), policy({ minCases: 1 }), { expected: { ...expected, datasetIds: ["s"], setCaseCounts: { s: count } }, now: NOW }).checks;
+    expect(releaseGateChecksWorsened(uncovered(2), uncovered(5)).map((check) => check.code)).toEqual(["sets_not_covered:s"]);
+  });
+
+  it("carry one code per uncovered set, stale set, override and ineligible reason, and the gate's scorers", () => {
+    const judge = (job: Partial<ReleaseGateEvidence["job"]>, sets: string[] = ["set_a"], scorersKey?: string) =>
+      judgeReleaseGate(evidence([passing("c1")], { datasetIds: [], ...job }), policy({ minCases: 1 }), { expected: { ...expected, datasetIds: sets, scorersKey }, now: NOW }).checks;
+    const worse = (before: ReleaseGateReasonCheck[], now: ReleaseGateReasonCheck[]) => releaseGateChecksWorsened(before, now).map((check) => check.code);
+    expect(worse(judge({}, ["b"]), judge({}, ["b", "c"]))).toEqual(["sets_not_covered:c"]);
+    expect(worse(judge({ staleSets: ["a"] }, []), judge({ staleSets: ["a", "b"] }, []))).toEqual(["stale_sets:b"]);
+    expect(worse(judge({ overrides: ["repeats"] }, []), judge({ overrides: ["repeats", "model"] }, []))).toEqual(["overrides:model"]);
+    expect(worse(judge({ releaseEligible: false, releaseIneligibleReasons: ["a"] }, []), judge({ releaseEligible: false, releaseIneligibleReasons: ["a", "b"] }, []))).toEqual(["ineligible:b"]);
+    const mismatch = { scorerMismatch: "ran with its own scorers" };
+    expect(worse(judge(mismatch, [], "aaa"), judge(mismatch, [], "bbb"))).toEqual(["scorer_mismatch:bbb"]);
+    expect(worse(judge(mismatch, [], "aaa"), judge(mismatch, [], "aaa"))).toEqual([]);
   });
 });

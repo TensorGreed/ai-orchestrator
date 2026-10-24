@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { defaultReleaseGate } from "@ai-orchestrator/shared";
-import { gateFormFrom, gateLocks, gateSettingsFromForm, gateStatsLines, releasePillLabel, releaseVerdictTone } from "./release";
+import { gateAdmissionBanner, gateFormFrom, gateLocks, gateSettingsFromForm, gateStatsLines, releasePillLabel, releaseVerdictTone } from "./release";
 
 describe("release helpers", () => {
   it("labels the version pill by what production runs", () => {
@@ -66,5 +66,20 @@ describe("release helpers", () => {
     expect(releaseVerdictTone("approved")).toBe("ok");
     expect(releaseVerdictTone("overridden")).toBe("warn");
     expect(releaseVerdictTone("ungated")).toBe("neutral");
+  });
+});
+
+describe("gate admission helpers", () => {
+  it("words the banner for one, many and no waiting cases", () => {
+    expect(gateAdmissionBanner(0)).toBeNull();
+    expect(gateAdmissionBanner(1)).toBe("1 new case waiting for admin admission. It runs but doesn't count yet.");
+    expect(gateAdmissionBanner(3)).toBe("3 new cases waiting for admin admission. They run but don't count yet.");
+  });
+
+  it("lists pending and required cases in the publish dialog's facts", () => {
+    const base = { cases: 20, pass: 18, fail: 2, error: 0, skipped: 0, passRate: 0.9, regressions: 0, costIncreasePct: null, p95LatencyIncreasePct: null, newGuardBlocks: 0, oldestRecordingDays: null };
+    expect(gateStatsLines(base)).toEqual(["18 of 20 cases passed (90%)"]);
+    const lines = gateStatsLines({ ...base, admission: { admitted: 20, pending: 40, pendingNotPassing: 0, required: 2, requiredFailures: [{ id: "a", name: "A", problem: "failed" }] } });
+    expect(lines).toEqual(["18 of 20 cases passed (90%)", "40 cases pending admission (run, not counted)", "2 required cases, 1 not passing"]);
   });
 });

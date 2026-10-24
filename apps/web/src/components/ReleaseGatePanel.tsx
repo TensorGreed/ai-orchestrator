@@ -18,6 +18,7 @@ import {
   type WorkflowReleasesView
 } from "../lib/api";
 import { gateFormFrom, gateLocks, gateSettingsFromForm, releaseVerdictLabel, releaseVerdictTone, type GateForm } from "../lib/release";
+import { GateCasesCard } from "./GateCasesCard";
 
 /** Only roles that can hold workflow:publish can approve a release. */
 const APPROVER_ROLES = RELEASE_APPROVER_ROLE_CHOICES;
@@ -79,6 +80,8 @@ function WorkflowReleaseView({ workflowId, activeProjectId, canEdit, isAdmin }: 
   const [formErrors, setFormErrors] = useState<string[]>([]);
   const [notice, setNotice] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  // Admins adding golden sets to an enforced gate: admit their cases with this save (otherwise they wait for admission).
+  const [admitAddedSetCases, setAdmitAddedSetCases] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -104,6 +107,9 @@ function WorkflowReleaseView({ workflowId, activeProjectId, canEdit, isAdmin }: 
   // On an enforced gate a builder may only tighten it; the server checks it too.
   const locks = gate ? gateLocks(gate, isAdmin) : { adminOnly: !isAdmin, selfApproval: !isAdmin };
   const locked = !canEdit || locks.adminOnly;
+  // Golden sets this save adds to an already enforced gate: their cases wait for admission unless an admin admits them now.
+  const addedSets = gate && form && gate.enforced && form.enforced ? sets.filter((set) => form.datasetIds.includes(set.id) && !gate.datasetIds.includes(set.id)) : [];
+  const addedCaseCount = addedSets.reduce((total, set) => total + set.fixtureCount, 0);
 
   const save = async () => {
     if (!form || !gate) return;
@@ -113,9 +119,11 @@ function WorkflowReleaseView({ workflowId, activeProjectId, canEdit, isAdmin }: 
     if (errors.length > 0) return;
     setSaving(true);
     try {
-      const response = await saveReleaseGate(workflowId, settings as never);
+      const admitting = admitAddedSetCases && addedSets.length > 0 && gate.enforced && form.enforced;
+      const response = await saveReleaseGate(workflowId, (admitting ? { ...settings, admitAddedSetCases: true } : settings) as never);
       setGate(response.gate);
       setForm(gateFormFrom(response.gate));
+      setAdmitAddedSetCases(false);
       setNotice("Gate saved.");
     } catch (err) {
       setFormErrors([errorText(err, "Could not save the gate")]);
@@ -257,8 +265,25 @@ function WorkflowReleaseView({ workflowId, activeProjectId, canEdit, isAdmin }: 
           {isAdmin && (
             <label className="guard-check">
               <input type="checkbox" checked={form.enforced} onChange={(event) => update({ enforced: event.target.checked })} />
-              <span>Enforce: only admins can turn this gate off or loosen it</span>
+              <span>Enforce: only admins can turn this gate off or loosen it, and cases added later count only once admitted</span>
             </label>
+          )}
+          {addedSets.length > 0 && addedCaseCount > 0 && (
+            <div className="gate-admit-added" role="group" aria-label="Cases of the added golden sets">
+              {isAdmin ? (
+                <label className="guard-check">
+                  <input type="checkbox" checked={admitAddedSetCases} onChange={(event) => setAdmitAddedSetCases(event.target.checked)} />
+                  <span>
+                    Admit {addedCaseCount} {addedCaseCount === 1 ? "case" : "cases"} from the added {addedSets.length === 1 ? "set" : "sets"}?
+                  </span>
+                </label>
+              ) : null}
+              <p className="cfg-help">
+                {isAdmin && admitAddedSetCases
+                  ? `Saving admits them: they count toward publishing right away.`
+                  : `Unless admitted, ${addedCaseCount === 1 ? "it waits" : "they wait"} for admission in the gate's Cases card and ${addedCaseCount === 1 ? "does" : "do"} not count yet.`}
+              </p>
+            </div>
           )}
         </fieldset>
         {formErrors.length > 0 && (
@@ -281,6 +306,8 @@ function WorkflowReleaseView({ workflowId, activeProjectId, canEdit, isAdmin }: 
           </div>
         )}
       </section>
+
+      {gate.enforced && <GateCasesCard workflowId={workflowId} gateVersion={gate.updatedAt} />}
 
       <ReleaseHistory workflowId={workflowId} history={history} canRollback={canEdit && !locks.adminOnly} onChanged={() => void load()} />
     </div>

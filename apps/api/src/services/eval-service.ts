@@ -724,7 +724,7 @@ export class EvalService {
     const fixtures: EvalFixtureRecord[] = recordingIds.map((recordingId) => {
       const recording = replay.getRecording(recordingId);
       const at = recording?.createdAt ?? this.now().toISOString();
-      return { id: `rec:${recordingId}`, datasetId: guardSimulationJobDatasetId(request.simulationId), name: recording?.name ?? recordingId, input: null, expected: null, scorers: null, recordingId, createdAt: at, updatedAt: at };
+      return { id: `rec:${recordingId}`, datasetId: guardSimulationJobDatasetId(request.simulationId), name: recording?.name ?? recordingId, input: null, expected: null, scorers: null, required: false, recordingId, createdAt: at, updatedAt: at };
     });
     const { substitute } = request;
     const jobCandidate: ReplayJobCandidate = {

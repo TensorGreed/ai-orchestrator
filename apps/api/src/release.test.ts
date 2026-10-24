@@ -546,10 +546,10 @@ describe("release requests in the approvals inbox", () => {
     expect((await call(context, "POST", `/api/approvals/${id}/approve`, reader.cookie, {})).statusCode).toBe(403);
 
     // The gate changes after the request: approving would publish under settings nobody asked about.
-    await enableGate(context, requester.cookie, "wf-team", { requireApproval: true, approvers: { approverRoles: ["builder"] }, policy: { minCases: 2 } });
+    await enableGate(context, requester.cookie, "wf-team", { requireApproval: true, approvers: { approverRoles: ["builder", "admin"] } });
     const stale = await call(context, "POST", `/api/approvals/${id}/approve`, lead.cookie, {});
     expect(stale.statusCode).toBe(409);
-    expect(stale.json<{ error: string }>().error).toMatch(/stale.*settings changed/);
+    expect(stale.json<{ error: string }>().error).toMatch(/stale.*approve this release.*changed/);
     expect(context.store.getReleaseApprovalRequest(id)!.status).toBe("canceled");
     expect(context.store.getPublishedVersion("wf-team")).toBe(1);
 
@@ -867,15 +867,17 @@ describe("enforced gates: only admins weaken them", () => {
     expect(auditTypes(context)).toEqual(expect.arrayContaining(["release.rollback.refused", "release.rolled_back"]));
   });
 
-  it("removing cases from, deleting, or adding scored cases to an enforced gate's golden set is admin-only; adding a plain case is fine and makes older jobs stale (M4)", async () => {
+  it("removing cases from, deleting, or adding scored cases to an enforced gate's golden set is admin-only; adding a plain case is fine and leaves older jobs standing until it is admitted (M4)", async () => {
     const context = await createTestContext();
     const admin = await login(context, "admin");
     const builder = await login(context, "builder");
     save(context, hookWorkflow("wf-m4", "v1"));
-    await enableGate(context, admin.cookie, "wf-m4", { enforced: true });
+    await enableGate(context, admin.cookie, "wf-m4");
     const v2 = save(context, hookWorkflow("wf-m4", "v2"));
     const hash = await versionHash(context, builder.cookie, "wf-m4", v2);
     const job = seedJob(context, { workflowId: "wf-m4", datasetIds: ["set-wf-m4"], version: v2, hash, statuses: ["pass", "pass", "pass"] });
+    // Enforced once the set holds its cases, so they are admitted (cases added after enforcing wait for admission).
+    await enableGate(context, admin.cookie, "wf-m4", { enforced: true });
     const preview = async () => (await call(context, "GET", `/api/workflows/wf-m4/publish-preview?version=${v2}&replayRunId=${job}`, builder.cookie)).json<{ preview: { verdict: string; reasons: string[] } }>().preview;
     expect((await preview()).verdict).toBe("passed");
     const [first] = context.store.listEvalFixtures("set-wf-m4");
@@ -884,8 +886,13 @@ describe("enforced gates: only admins weaken them", () => {
     expect((await call(context, "POST", "/api/eval/datasets/set-wf-m4/fixtures", builder.cookie, { name: "Always passes", input: {}, scorers: [{ type: "status" }] })).statusCode).toBe(403);
     expect(context.store.listEvalFixtures("set-wf-m4")).toHaveLength(3);
     expect(auditTypes(context)).toContain("release.golden_set_change.refused");
-    // Adding a plain case is allowed, and the job no longer proves anything.
-    expect((await call(context, "POST", "/api/eval/datasets/set-wf-m4/fixtures", builder.cookie, { name: "New case", input: {} })).statusCode).toBe(200);
+    // Adding a plain case is allowed. It waits for admission, so the job still proves what the gate counts.
+    const added = await call(context, "POST", "/api/eval/datasets/set-wf-m4/fixtures", builder.cookie, { name: "New case", input: {} });
+    expect(added.statusCode).toBe(200);
+    expect((await preview()).verdict).toBe("passed");
+    // Once an admin admits it, the job (which never ran it) no longer proves anything.
+    const newCase = context.store.listEvalFixtures("set-wf-m4").find((fixture) => fixture.name === "New case")!;
+    expect((await call(context, "POST", "/api/workflows/wf-m4/release-gate/cases/admit", admin.cookie, { fixtureIds: [newCase.id] })).statusCode).toBe(200);
     const stale = await preview();
     expect(stale.verdict).toBe("blocked");
     expect(stale.reasons.join()).toMatch(/set-wf-m4 changed after replay job/);
@@ -1278,7 +1285,7 @@ describe("release requests: expiry and duplicates (L1, L2)", () => {
     expect(auditTypes(context)).toContain("release.approval.timed_out");
 
     // The gate changes: asking again closes the stale request and makes a new one.
-    await enableGate(context, first.cookie, "wf-req", { approvers: { approverRoles: ["admin"] }, policy: { minCases: 4 } });
+    await enableGate(context, first.cookie, "wf-req", { approvers: { approverRoles: ["admin", "builder"] } });
     const c = await ask(second, "after the change");
     expect(c).not.toBe(b);
     expect(context.store.getReleaseApprovalRequest(b)!.status).toBe("canceled");

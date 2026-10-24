@@ -1,7 +1,7 @@
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { ReleaseApprovalRequestView, ReleaseGateView, ReleasePublishPreview, WorkflowRelease } from "@ai-orchestrator/shared";
+import type { GateCaseRequestView, ReleaseApprovalRequestView, ReleaseGateCasesView, ReleaseGateView, ReleasePublishPreview, WorkflowRelease } from "@ai-orchestrator/shared";
 import { defaultReleaseGate } from "@ai-orchestrator/shared";
 import * as api from "../lib/api";
 import { ApprovalsPage } from "./ApprovalsPage";
@@ -24,7 +24,13 @@ vi.mock("../lib/api", async () => {
     saveReleaseGate: vi.fn(),
     fetchReleases: vi.fn(),
     rollbackWorkflowRelease: vi.fn(),
-    fetchEvalDatasets: vi.fn()
+    fetchEvalDatasets: vi.fn(),
+    fetchReleaseGateCases: vi.fn(),
+    admitGateCases: vi.fn(),
+    rejectGateCases: vi.fn(),
+    setGateCaseRequired: vi.fn(),
+    requestGateCases: vi.fn(),
+    decideGateCaseRequest: vi.fn()
   };
 });
 
@@ -59,8 +65,11 @@ function versions() {
   };
 }
 
+const NOT_ENFORCED: ReleaseGateCasesView = { workflowId: "wf-1", enforced: false, cases: [], counts: { admitted: 0, pending: 0, required: 0 }, canAdmit: false, canRequest: false };
+
 beforeEach(() => {
   vi.resetAllMocks();
+  vi.mocked(api.fetchReleaseGateCases).mockResolvedValue({ cases: NOT_ENFORCED });
   window.history.replaceState(null, "", "/");
 });
 
@@ -289,5 +298,173 @@ describe("release requests in Approvals", () => {
     const card = (await screen.findByRole("heading", { name: "Publish v3 of Refunds" })).closest("article")!;
     expect(within(card).getByRole("button", { name: "Approve and publish v3" })).toBeDisabled();
     expect(within(card).getByText(/approving your own release/)).toBeInTheDocument();
+  });
+});
+
+describe("gate admission on an enforced gate", () => {
+  const caseView = (overrides: Partial<ReleaseGateCasesView["cases"][number]>) => ({
+    fixtureId: "fx_1",
+    datasetId: "set-1",
+    datasetName: "Refund cases",
+    name: "Refund over limit",
+    recordingId: "rec_1",
+    admission: "admitted" as const,
+    required: false,
+    requestId: null,
+    requestKind: null,
+    createdAt: "",
+    ...overrides
+  });
+  const enforcedCases = (overrides: Partial<ReleaseGateCasesView> = {}): ReleaseGateCasesView => ({
+    workflowId: "wf-1",
+    enforced: true,
+    cases: [
+      caseView({}),
+      caseView({ fixtureId: "fx_2", name: "Easy 1", admission: "pending" }),
+      caseView({ fixtureId: "fx_3", name: "Easy 2", admission: "pending" }),
+      caseView({ fixtureId: "fx_4", name: "Easy 3", admission: "pending" })
+    ],
+    counts: { admitted: 1, pending: 3, required: 0 },
+    canAdmit: false,
+    canRequest: true,
+    ...overrides
+  });
+  const mountGate = (enforced: boolean, isAdmin: boolean) => {
+    vi.mocked(api.fetchReleaseGate).mockResolvedValue({ gate: { ...defaultReleaseGate("wf-1"), enabled: true, enforced, datasetIds: ["set-1"] } });
+    vi.mocked(api.fetchEvalDatasets).mockResolvedValue({ datasets: [] });
+    vi.mocked(api.fetchReleases).mockResolvedValue({ releases: [], publishedVersion: null });
+    render(<ReleaseGatePanel workflows={[{ id: "wf-1", name: "Refunds" } as never]} canEdit isAdmin={isAdmin} />);
+  };
+
+  it("shows a plain banner, and a builder requests admission with a reason", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.fetchReleaseGateCases).mockResolvedValue({ cases: enforcedCases() });
+    vi.mocked(api.requestGateCases).mockResolvedValue({ request: { id: "gcr_1" } as GateCaseRequestView });
+    mountGate(true, false);
+    expect(await screen.findByText("3 new cases waiting for admin admission. They run but don't count yet.")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^Admit/ })).toBeNull();
+    expect(screen.queryByLabelText(/is required/)).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Request admission" }));
+    const send = screen.getByRole("button", { name: "Send to approvers" });
+    expect(send).toBeDisabled();
+    await user.type(screen.getByLabelText("Why should these 3 cases count?"), "New refund scenarios");
+    await user.click(send);
+    expect(api.requestGateCases).toHaveBeenCalledWith("wf-1", { action: "admit", fixtureIds: ["fx_2", "fx_3", "fx_4"], reason: "New refund scenarios" });
+    expect(await screen.findByText("Sent to the gate's approvers in the approvals inbox.")).toBeInTheDocument();
+    // An admitted case: the builder asks for its removal.
+    expect(screen.getByRole("button", { name: "Request removal of Refund over limit" })).toBeInTheDocument();
+  });
+
+  it("an admin admits or rejects inline and marks a case required; the chip shows", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.fetchReleaseGateCases).mockResolvedValue({ cases: enforcedCases({ canAdmit: true, canRequest: false }) });
+    vi.mocked(api.admitGateCases).mockResolvedValue({ cases: enforcedCases({ canAdmit: true, canRequest: false, counts: { admitted: 2, pending: 2, required: 0 } }) });
+    vi.mocked(api.setGateCaseRequired).mockResolvedValue({
+      cases: enforcedCases({ canAdmit: true, canRequest: false, cases: [caseView({ required: true })], counts: { admitted: 1, pending: 0, required: 1 } })
+    });
+    mountGate(true, true);
+    await user.click(await screen.findByRole("button", { name: "Admit Easy 1" }));
+    expect(api.admitGateCases).toHaveBeenCalledWith("wf-1", ["fx_2"]);
+    expect(await screen.findByText("2 new cases waiting for admin admission. They run but don't count yet.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Reject Easy 2" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Request admission" })).toBeNull();
+    await user.click(screen.getByLabelText("Refund over limit is required"));
+    expect(api.setGateCaseRequired).toHaveBeenCalledWith("wf-1", "fx_1", true);
+    expect(await screen.findByText("required")).toBeInTheDocument();
+    expect(screen.queryByText(/waiting for admin admission/)).toBeNull();
+  });
+
+  it("an admin adding a golden set to an enforced gate is asked whether to admit its cases; nothing is admitted unless they confirm", async () => {
+    const user = userEvent.setup();
+    const enforcedGate = { ...defaultReleaseGate("wf-1"), enabled: true, enforced: true, datasetIds: ["set-1"] };
+    vi.mocked(api.fetchReleaseGate).mockResolvedValue({ gate: enforcedGate });
+    vi.mocked(api.fetchEvalDatasets).mockResolvedValue({
+      datasets: [
+        { id: "set-1", name: "Refund cases", workflowId: "wf-1", fixtureCount: 4, goldenRunCount: 4 },
+        { id: "set-2", name: "Builder cases", workflowId: "wf-1", fixtureCount: 5, goldenRunCount: 5 }
+      ] as never
+    });
+    vi.mocked(api.fetchReleases).mockResolvedValue({ releases: [], publishedVersion: null });
+    vi.mocked(api.saveReleaseGate).mockImplementation(async (_id, settings) => ({ gate: { ...enforcedGate, ...(settings as Partial<ReleaseGateView>), updatedAt: "now" } }));
+    render(<ReleaseGatePanel workflows={[{ id: "wf-1", name: "Refunds" } as never]} canEdit isAdmin />);
+
+    await user.click(await screen.findByLabelText(/Builder cases/));
+    const admit = screen.getByLabelText("Admit 5 cases from the added set?");
+    expect(admit).not.toBeChecked();
+    expect(screen.getByText(/Unless admitted, they wait for admission/)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Save gate" }));
+    await waitFor(() => expect(api.saveReleaseGate).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(api.saveReleaseGate).mock.calls[0]![1]).not.toHaveProperty("admitAddedSetCases");
+  });
+
+  it("the admin's confirmation is sent with the save", async () => {
+    const user = userEvent.setup();
+    const enforcedGate = { ...defaultReleaseGate("wf-1"), enabled: true, enforced: true, datasetIds: ["set-1"] };
+    vi.mocked(api.fetchReleaseGate).mockResolvedValue({ gate: enforcedGate });
+    vi.mocked(api.fetchEvalDatasets).mockResolvedValue({
+      datasets: [
+        { id: "set-1", name: "Refund cases", workflowId: "wf-1", fixtureCount: 4, goldenRunCount: 4 },
+        { id: "set-2", name: "Builder cases", workflowId: "wf-1", fixtureCount: 1, goldenRunCount: 1 }
+      ] as never
+    });
+    vi.mocked(api.fetchReleases).mockResolvedValue({ releases: [], publishedVersion: null });
+    vi.mocked(api.saveReleaseGate).mockImplementation(async (_id, settings) => ({ gate: { ...enforcedGate, ...(settings as Partial<ReleaseGateView>), updatedAt: "now" } }));
+    render(<ReleaseGatePanel workflows={[{ id: "wf-1", name: "Refunds" } as never]} canEdit isAdmin />);
+
+    await user.click(await screen.findByLabelText(/Builder cases/));
+    await user.click(screen.getByLabelText("Admit 1 case from the added set?"));
+    expect(screen.getByText(/Saving admits them/)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Save gate" }));
+    await waitFor(() => expect(api.saveReleaseGate).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(api.saveReleaseGate).mock.calls[0]![1]).toMatchObject({ datasetIds: ["set-1", "set-2"], admitAddedSetCases: true });
+  });
+
+  it("nothing new appears on an unenforced gate", async () => {
+    mountGate(false, true);
+    expect(await screen.findByText("Release gate")).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText("No version was published yet.")).toBeInTheDocument());
+    expect(api.fetchReleaseGateCases).not.toHaveBeenCalled();
+    expect(screen.queryByText("Cases this gate counts")).toBeNull();
+  });
+
+  it("an admit_cases request in Approvals lists its cases and admits on approval", async () => {
+    const user = userEvent.setup();
+    const view: GateCaseRequestView = {
+      kind: "admit_cases",
+      requestId: "gcr_1",
+      id: "gcr_1",
+      workflowId: "wf-1",
+      workflowName: "Refunds",
+      projectId: "default",
+      status: "pending",
+      message: "Admit 2 cases to the enforced release gate, so they count toward publishing",
+      cases: [
+        { fixtureId: "fx_2", name: "Easy 1", datasetId: "set-1" },
+        { fixtureId: "fx_3", name: "Easy 2", datasetId: "set-1" }
+      ],
+      requestReason: "New refund scenarios",
+      approverRoles: ["admin"],
+      approverUsers: [],
+      allowSelfApproval: false,
+      requestedBy: "builder@example.com",
+      createdAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+      decidedBy: null,
+      decidedAt: null,
+      reason: null,
+      canDecide: true,
+      cannotDecideReason: null
+    };
+    vi.mocked(api.listApprovals).mockResolvedValue({ items: [view] });
+    vi.mocked(api.decideGateCaseRequest).mockResolvedValue({ request: { ...view, status: "approved" } });
+    render(<ApprovalsPage />);
+    const card = (await screen.findByRole("heading", { name: view.message })).closest("article")!;
+    expect(within(card).getByText("Gate cases")).toBeInTheDocument();
+    expect(within(card).getByText("Easy 2")).toBeInTheDocument();
+    await user.click(within(card).getByRole("button", { name: "Reject" }));
+    expect(await within(card).findByText("A reason is required to reject a request")).toBeInTheDocument();
+    await user.click(within(card).getByRole("button", { name: "Approve and admit 2 cases" }));
+    expect(api.decideGateCaseRequest).toHaveBeenCalledWith("gcr_1", "approve", undefined);
+    expect(await screen.findByText("Approved. 2 cases now count toward publishing.")).toBeInTheDocument();
   });
 });

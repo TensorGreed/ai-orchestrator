@@ -114,7 +114,13 @@ export const releaseGateSettingsSchema = z
     /** Every publish waits for an approver, even when the replay job passed. */
     requireApproval: z.boolean().default(false),
     /** Who may approve; also what makes "request approval" possible for a blocked publish. */
-    approvers: releaseApproversSchema.nullable().default(null)
+    approvers: releaseApproversSchema.nullable().default(null),
+    /**
+     * Admins, on an enforced gate: admit the cases of the golden sets this
+     * save adds. Not stored. Without it those cases wait for admission, as
+     * does every case added to a set after the gate was enforced.
+     */
+    admitAddedSetCases: z.boolean().optional()
   })
   .strict()
   .superRefine((value, ctx) => {
@@ -131,7 +137,7 @@ export const releaseGateSettingsSchema = z
 export type ReleaseGateSettingsInput = z.input<typeof releaseGateSettingsSchema>;
 export type ReleaseGateSettings = z.output<typeof releaseGateSettingsSchema>;
 
-export interface ReleaseGateView extends Omit<ReleaseGateSettings, "enforced"> {
+export interface ReleaseGateView extends Omit<ReleaseGateSettings, "enforced" | "admitAddedSetCases"> {
   workflowId: string;
   enforced: boolean;
   updatedAt: string | null;
@@ -259,6 +265,8 @@ export interface ReleaseGateJob {
   scorerMismatch?: string | null;
   /** Gate golden sets whose contents (cases, golden runs, case scorers) changed since the job was queued, or that the job holds no snapshot of. */
   staleSets?: string[];
+  /** Per stale set, how many of its admitted cases are missing from the job or changed (a larger number is worse). */
+  staleSetCounts?: Record<string, number>;
   /** The job holds no snapshot of its sets: it was queued before release gates existed. */
   noSetSnapshot?: boolean;
   /** The job repeated its cases and the replay recorded latency or guard verdicts for only one repeat of some case. */
@@ -277,6 +285,10 @@ export interface ReleaseGateExpectation {
   datasetIds: string[];
   /** The gate's MCP mode (default strict): a strict gate refuses a lenient job. */
   mcpMode?: string;
+  /** A hash of the scorers the gate names, so a gate that changed scorers is a new kind of mismatch. */
+  scorersKey?: string;
+  /** Per set, how many cases the gate counts in it (its admitted cases on an enforced gate): the measure of an uncovered set. */
+  setCaseCounts?: Record<string, number>;
 }
 
 export interface ReleaseGateStats {
@@ -292,14 +304,51 @@ export interface ReleaseGateStats {
   p95LatencyIncreasePct: number | null;
   newGuardBlocks: number;
   oldestRecordingDays: number | null;
+  /**
+   * Gate admission (enforced gates only): which cases counted, which ran
+   * while pending admission, and the required cases. Absent when the gate
+   * judged every case (unenforced gates, and jobs judged without admission).
+   */
+  admission?: ReleaseGateAdmissionStats;
 }
 
 export type ReleaseGateVerdict = "passed" | "blocked" | "needs_approval";
 
+/**
+ * A stable, machine-readable form of a gate reason (see
+ * `ReleaseGateJudgement.checks`). `code` names the kind of reason and stays
+ * the same when its numbers or wording change (per case or scorer it carries
+ * the id: `required_case:<fixtureId>`, `required_scorer:<type>`,
+ * `sets_not_covered:<setId>`, `stale_sets:<setId>`, `overrides:<name>`,
+ * `ineligible:<reason>`, `scorer_mismatch:<gate scorers hash>`), so more of
+ * the same thing is a new code. `measure`, when present, says how bad it is:
+ * higher is worse.
+ */
+export interface ReleaseGateReasonCheck {
+  code: string;
+  measure: number | null;
+}
+
 export interface ReleaseGateJudgement {
   verdict: ReleaseGateVerdict;
   reasons: string[];
+  /** The codes of the reasons, in order: one per reason, and one per set, override or ineligible reason a reason names. */
+  checks: ReleaseGateReasonCheck[];
   stats: ReleaseGateStats;
+}
+
+/**
+ * Whether `now` is a worse verdict than `before`: a reason kind it did not
+ * have, or one of its measures got worse. Better numbers, other wording and
+ * reasons that went away are not worse.
+ */
+export function releaseGateChecksWorsened(before: readonly ReleaseGateReasonCheck[], now: readonly ReleaseGateReasonCheck[]): ReleaseGateReasonCheck[] {
+  const known = new Map(before.map((check) => [check.code, check.measure]));
+  return now.filter((check) => {
+    if (!known.has(check.code)) return true;
+    const previous = known.get(check.code) ?? null;
+    return previous !== null && check.measure !== null && check.measure > previous + 1e-9;
+  });
 }
 
 const DAY_MS = 86_400_000;
@@ -380,7 +429,20 @@ function statsOf(evidence: ReleaseGateEvidence, policy: ReleaseGatePolicy, now: 
 export function judgeReleaseGate(
   evidence: ReleaseGateEvidence | null,
   policy: ReleaseGatePolicy,
-  options: { expected: ReleaseGateExpectation; requireApproval?: boolean; now?: Date }
+  options: {
+    expected: ReleaseGateExpectation;
+    requireApproval?: boolean;
+    now?: Date;
+    /**
+     * Enforced gates: the admitted cases and the required ones. Cases not
+     * admitted run and are reported but count toward nothing; an admitted
+     * required case that does not pass (it failed, was inconclusive, was
+     * skipped or did not run) blocks whatever the pass rate, whether or not
+     * errors count as failures. Without it every case counts, as before
+     * admission existed.
+     */
+    admission?: ReleaseGateAdmission | null;
+  }
 ): ReleaseGateJudgement {
   const now = (options.now ?? new Date()).getTime();
   const empty: ReleaseGateStats = {
@@ -388,39 +450,51 @@ export function judgeReleaseGate(
     costIncreasePct: null, p95LatencyIncreasePct: null, newGuardBlocks: 0, oldestRecordingDays: null
   };
   if (!evidence) {
-    return { verdict: "blocked", reasons: ["No completed replay job for this version's workflow hash. Run the gate first."], stats: empty };
+    return { verdict: "blocked", reasons: ["No completed replay job for this version's workflow hash. Run the gate first."], checks: [{ code: "no_job", measure: null }], stats: empty };
   }
   const reasons: string[] = [];
+  const checks: ReleaseGateReasonCheck[] = [];
+  const add = (code: string | readonly string[], text: string, measure: number | null | ((entity: string, code: string) => number | null) = null) => {
+    reasons.push(text);
+    for (const one of typeof code === "string" ? [code] : code) {
+      const value = typeof measure === "function" ? measure(one.slice(one.indexOf(":") + 1), one) : measure;
+      // JSON has no Infinity: a rise "from zero" is stored as the largest number.
+      checks.push({ code: one, measure: value === null ? null : Number.isFinite(value) ? value : Number.MAX_VALUE });
+    }
+  };
   const { job } = evidence;
-  if (job.status !== "completed") reasons.push(`Replay job ${job.id} is ${job.status}, not completed.`);
+  if (job.status !== "completed") add("job_not_completed", `Replay job ${job.id} is ${job.status}, not completed.`);
   if (job.workflowHash !== options.expected.workflowHash) {
-    reasons.push(`Replay job ${job.id} tested a different workflow hash than this version.`);
+    add("hash_mismatch", `Replay job ${job.id} tested a different workflow hash than this version.`);
   }
   const covered = new Set(job.datasetIds);
   const missing = options.expected.datasetIds.filter((id) => !covered.has(id));
-  if (missing.length > 0) reasons.push(`Replay job ${job.id} did not cover the gate's golden set${missing.length === 1 ? "" : "s"} ${missing.join(", ")}.`);
+  if (missing.length > 0) add(missing.map((id) => `sets_not_covered:${id}`), `Replay job ${job.id} did not cover the gate's golden set${missing.length === 1 ? "" : "s"} ${missing.join(", ")}.`, (id) => options.expected.setCaseCounts?.[id] ?? null);
   if ((options.expected.mcpMode ?? "strict") === "strict" && job.mcpMode && job.mcpMode !== "strict") {
-    reasons.push(`The gate replays MCP calls strictly; job ${job.id} used ${job.mcpMode}.`);
+    add("mcp_mode", `The gate replays MCP calls strictly; job ${job.id} used ${job.mcpMode}.`);
   }
-  if (job.liveWrites) reasons.push(`Replay job ${job.id} allowed live write calls, which a gate run never may.`);
+  if (job.liveWrites) add("live_writes", `Replay job ${job.id} allowed live write calls, which a gate run never may.`);
   if (job.overrides && job.overrides.length > 0) {
-    reasons.push(`Replay job ${job.id} ran with settings the gate does not specify (${job.overrides.join(", ")}), so it does not test the version as it ships.`);
+    add(job.overrides.map((name) => `overrides:${name}`), `Replay job ${job.id} ran with settings the gate does not specify (${job.overrides.join(", ")}), so it does not test the version as it ships.`);
   }
   if (job.releaseEligible !== undefined && job.releaseEligible !== null && job.releaseEligible !== true) {
     const why = job.releaseIneligibleReasons && job.releaseIneligibleReasons.length > 0 ? ` (${job.releaseIneligibleReasons.join("; ")})` : "";
-    reasons.push(`Replay job ${job.id} is not eligible to prove a release${why}.`);
+    add(job.releaseIneligibleReasons && job.releaseIneligibleReasons.length > 0 ? job.releaseIneligibleReasons.map((entry) => `ineligible:${entry}`) : "ineligible", `Replay job ${job.id} is not eligible to prove a release${why}.`);
   }
   if (job.repeatsUnchecked && (policy.maxP95LatencyIncreasePct !== undefined || policy.noNewGuardBlocks)) {
-    reasons.push(
+    add(
+      "repeats_unchecked",
       `This gate checks latency and guard limits per run, but replay job ${job.id} repeated its cases and recorded them for only one repeat: run the gate's suite with repeats 1, or remove those limits.`
     );
   }
-  if (job.scorerMismatch) reasons.push(`Replay job ${job.id} ${job.scorerMismatch}: the gate judges with its own scorers.`);
+  if (job.scorerMismatch) add(options.expected.scorersKey ? `scorer_mismatch:${options.expected.scorersKey}` : "scorer_mismatch", `Replay job ${job.id} ${job.scorerMismatch}: the gate judges with its own scorers.`);
   if (job.noSetSnapshot) {
-    reasons.push(`Replay job ${job.id} was queued before release gates existed, so it holds no record of the golden sets it ran on: run the gate again.`);
+    add("no_set_snapshot", `Replay job ${job.id} was queued before release gates existed, so it holds no record of the golden sets it ran on: run the gate again.`);
   } else if (job.staleSets && job.staleSets.length > 0) {
-    reasons.push(
-      `The golden set${job.staleSets.length === 1 ? "" : "s"} ${job.staleSets.join(", ")} changed after replay job ${job.id} was queued (cases, golden runs or case scorers): run the gate again.`
+    add(
+      job.staleSets.map((id) => `stale_sets:${id}`),
+      `The golden set${job.staleSets.length === 1 ? "" : "s"} ${job.staleSets.join(", ")} changed after replay job ${job.id} was queued (cases, golden runs or case scorers): run the gate again.`,
+      (id) => job.staleSetCounts?.[id] ?? null
     );
   }
 
@@ -430,36 +504,276 @@ export function judgeReleaseGate(
     ? { ...evidence, cases: evidence.cases.map((entry) => (entry.diffMissing && entry.status !== "skipped" ? { ...entry, status: "error" as const } : entry)) }
     : evidence;
 
-  const stats = statsOf(judged, policy, now);
-  if (stats.cases < policy.minCases) reasons.push(`Only ${stats.cases} case${stats.cases === 1 ? "" : "s"} judged; the gate needs at least ${policy.minCases}.`);
+  const admission = options.admission ?? null;
+  const { counted } = splitAdmittedCases(judged.cases, admission);
+  const stats: ReleaseGateStats = statsOf({ ...judged, cases: counted }, policy, now);
+  if (admission) stats.admission = summarizeReleaseGateAdmission(judged.cases, admission);
+  if (stats.cases < policy.minCases) {
+    add("min_cases", `Only ${stats.cases} case${stats.cases === 1 ? "" : "s"} judged; the gate needs at least ${policy.minCases}.`, policy.minCases - stats.cases);
+  }
   if (stats.passRate < policy.minPassRate) {
-    reasons.push(`Pass rate ${Math.round(stats.passRate * 1000) / 10}% is below the required ${Math.round(policy.minPassRate * 1000) / 10}%.`);
+    add("pass_rate", `Pass rate ${Math.round(stats.passRate * 1000) / 10}% is below the required ${Math.round(policy.minPassRate * 1000) / 10}%.`, policy.minPassRate - stats.passRate);
   }
   if (stats.regressions > policy.maxRegressions) {
-    reasons.push(`${stats.regressions} regression${stats.regressions === 1 ? "" : "s"}; the gate allows ${policy.maxRegressions}.`);
+    add("regressions", `${stats.regressions} regression${stats.regressions === 1 ? "" : "s"}; the gate allows ${policy.maxRegressions}.`, stats.regressions - policy.maxRegressions);
+  }
+  for (const failure of stats.admission?.requiredFailures ?? []) {
+    add(`required_case:${failure.id}`, `Required case "${failure.name}" ${failure.problem}: a required case must pass whatever the pass rate.`);
   }
   for (const scorer of policy.requiredScorers) {
-    const failing = judged.cases.filter((entry) => entry.status !== "skipped" && !entry.scorers.some((detail) => detail.type === scorer && detail.pass));
-    if (failing.length > 0) reasons.push(`Required scorer ${scorer} did not pass on ${failing.length} case${failing.length === 1 ? "" : "s"}.`);
+    const failing = counted.filter((entry) => entry.status !== "skipped" && !entry.scorers.some((detail) => detail.type === scorer && detail.pass));
+    if (failing.length > 0) add(`required_scorer:${scorer}`, `Required scorer ${scorer} did not pass on ${failing.length} case${failing.length === 1 ? "" : "s"}.`, failing.length);
   }
   if (policy.maxCostIncreasePct !== undefined && stats.costIncreasePct !== null && stats.costIncreasePct > policy.maxCostIncreasePct) {
-    reasons.push(`Cost rose ${formatPct(stats.costIncreasePct)}; the gate allows ${policy.maxCostIncreasePct}%.`);
+    add("cost", `Cost rose ${formatPct(stats.costIncreasePct)}; the gate allows ${policy.maxCostIncreasePct}%.`, stats.costIncreasePct - policy.maxCostIncreasePct);
   }
   if (policy.maxP95LatencyIncreasePct !== undefined && stats.p95LatencyIncreasePct !== null && stats.p95LatencyIncreasePct > policy.maxP95LatencyIncreasePct) {
-    reasons.push(`p95 latency rose ${formatPct(stats.p95LatencyIncreasePct)}; the gate allows ${policy.maxP95LatencyIncreasePct}%.`);
+    add("latency", `p95 latency rose ${formatPct(stats.p95LatencyIncreasePct)}; the gate allows ${policy.maxP95LatencyIncreasePct}%.`, stats.p95LatencyIncreasePct - policy.maxP95LatencyIncreasePct);
   }
   if (policy.noNewGuardBlocks && stats.newGuardBlocks > 0) {
-    reasons.push(`The candidate added ${stats.newGuardBlocks} guard block${stats.newGuardBlocks === 1 ? "" : "s"} or review${stats.newGuardBlocks === 1 ? "" : "s"}.`);
+    add("guard_blocks", `The candidate added ${stats.newGuardBlocks} guard block${stats.newGuardBlocks === 1 ? "" : "s"} or review${stats.newGuardBlocks === 1 ? "" : "s"}.`, stats.newGuardBlocks);
   }
   const compare = job.compare ?? "recording";
   if (stats.oldestRecordingDays !== null && stats.oldestRecordingDays > policy.maxRecordingAgeDays && compare !== "baseline_rerun") {
-    reasons.push(
+    // No measure: the age only grows with the clock, so time passing is never "worse".
+    add(
+      "recording_age",
       `A golden run is ${stats.oldestRecordingDays} days old (the gate allows ${policy.maxRecordingAgeDays}): run the gate with compare "baseline_rerun" or re-record it.`
     );
   }
-  if (reasons.length > 0) return { verdict: "blocked", reasons, stats };
-  if (options.requireApproval) return { verdict: "needs_approval", reasons: ["This gate sends every publish to its approvers."], stats };
-  return { verdict: "passed", reasons: [], stats };
+  if (reasons.length > 0) return { verdict: "blocked", reasons, checks, stats };
+  if (options.requireApproval) {
+    return { verdict: "needs_approval", reasons: ["This gate sends every publish to its approvers."], checks: [{ code: "approval_required", measure: null }], stats };
+  }
+  return { verdict: "passed", reasons: [], checks: [], stats };
+}
+
+// ---------------------------------------------------------------------------
+// Gate admission and required cases (enforced gates)
+// ---------------------------------------------------------------------------
+
+/**
+ * Which cases an enforced gate counts. When an admin enforces the gate (or
+ * adds golden sets to it) the cases of its sets are admitted; a case added
+ * afterwards, by any path, is pending admission until an admin admits it or
+ * a gate approver approves an `admit_cases` request. A pending case runs and
+ * is reported, but counts toward nothing: not the pass rate, not minCases,
+ * not regressions or any other limit. Required cases (admins only) must pass
+ * whatever the pass rate; only an admitted case can be required.
+ */
+export interface ReleaseGateAdmission {
+  /** Case (fixture) ids the gate counts. */
+  admittedIds: readonly string[];
+  /** Case ids that must pass on every publish (ids that are not admitted are ignored). */
+  requiredIds?: readonly string[];
+  /** Case names, for reasons people read. */
+  caseNames?: Readonly<Record<string, string>>;
+}
+
+export interface ReleaseGateRequiredFailure {
+  id: string;
+  name: string;
+  /** "failed", "was inconclusive" or "did not run". */
+  problem: string;
+}
+
+export interface ReleaseGateAdmissionStats {
+  /** Admitted cases the job ran (skipped ones included). */
+  admitted: number;
+  /** Cases the job ran that are pending admission. */
+  pending: number;
+  /** Pending cases that failed or were inconclusive: reported, not counted. */
+  pendingNotPassing: number;
+  /** Required cases of the gate. */
+  required: number;
+  /** Required cases that block the publish, with why. */
+  requiredFailures: ReleaseGateRequiredFailure[];
+}
+
+/** Splits cases into those the gate counts and those pending admission; without admission every case counts. */
+export function splitAdmittedCases<T extends { id: string }>(cases: readonly T[], admission: ReleaseGateAdmission | null | undefined): { counted: T[]; pending: T[] } {
+  if (!admission) return { counted: [...cases], pending: [] };
+  const admitted = new Set(admission.admittedIds);
+  const counted: T[] = [];
+  const pending: T[] = [];
+  for (const entry of cases) (admitted.has(entry.id) ? counted : pending).push(entry);
+  return { counted, pending };
+}
+
+/**
+ * Admitted, pending and required counts over a job's cases (one entry per
+ * case, repeats already aggregated), and the required cases that block.
+ * Shared by the gate judge and the CLI, so both report the same numbers.
+ * A required case must pass: it blocks when it failed, when it was
+ * inconclusive (whatever `errorsCountAsFailures` says: a candidate can make
+ * a case inconclusive on its own, by a new MCP call or a model-tape miss),
+ * or when the job skipped it or did not run it. Only admitted cases can be
+ * required; a required mark on a pending case has no effect.
+ */
+export function summarizeReleaseGateAdmission(cases: ReadonlyArray<{ id: string; status: ReleaseCaseStatus }>, admission: ReleaseGateAdmission): ReleaseGateAdmissionStats {
+  const { counted, pending } = splitAdmittedCases(cases, admission);
+  const byId = new Map(cases.map((entry) => [entry.id, entry]));
+  const admitted = new Set(admission.admittedIds);
+  const requiredIds = [...new Set(admission.requiredIds ?? [])].filter((id) => admitted.has(id));
+  const requiredFailures: ReleaseGateRequiredFailure[] = [];
+  for (const id of requiredIds) {
+    const entry = byId.get(id);
+    const problem = !entry || entry.status === "skipped" ? "did not run" : entry.status === "fail" ? "failed" : entry.status === "error" ? "was inconclusive" : null;
+    if (problem) requiredFailures.push({ id, name: admission.caseNames?.[id] ?? id, problem });
+  }
+  return {
+    admitted: counted.length,
+    pending: pending.length,
+    pendingNotPassing: pending.filter((entry) => entry.status === "fail" || entry.status === "error").length,
+    required: requiredIds.length,
+    requiredFailures
+  };
+}
+
+/** An enforced gate's admission state: what the loosening check compares. */
+export interface ReleaseGateAdmissionState {
+  admittedIds: readonly string[];
+  requiredIds: readonly string[];
+}
+
+/**
+ * Why going from `before` to `after` loosens an enforced gate's cases:
+ * an admitted case leaves the gate (deleted or no longer admitted), or a
+ * case stops being required. Empty when it does not. Admitting cases and
+ * marking them required only tighten the gate.
+ */
+export function releaseAdmissionLoosening(before: ReleaseGateAdmissionState, after: ReleaseGateAdmissionState, names: Readonly<Record<string, string>> = {}): string[] {
+  const reasons: string[] = [];
+  const label = (ids: string[]) => ids.map((id) => `"${names[id] ?? id}"`).join(", ");
+  const admittedAfter = new Set(after.admittedIds);
+  const removed = before.admittedIds.filter((id) => !admittedAfter.has(id));
+  if (removed.length > 0) reasons.push(`removes admitted case${removed.length === 1 ? "" : "s"} ${label(removed)}`);
+  const requiredAfter = new Set(after.requiredIds);
+  const cleared = before.requiredIds.filter((id) => !requiredAfter.has(id));
+  if (cleared.length > 0) reasons.push(`stops requiring case${cleared.length === 1 ? "" : "s"} ${label(cleared)}`);
+  return reasons;
+}
+
+/**
+ * What a replay job view carries when the workflow's enforced gate uses one
+ * of the job's golden sets (`GET /api/replay/runs/:id`): enough for the CLI
+ * to report admitted, pending and required cases as the gate counts them.
+ */
+export interface ReleaseGateJobAdmission {
+  enforced: true;
+  admittedFixtureIds: string[];
+  /** Cases of the gate's sets waiting for admission: they run but do not count. */
+  pendingFixtureIds: string[];
+  requiredFixtureIds: string[];
+  /** Names of the required cases, so one the job has no result for can still be named. */
+  requiredCaseNames?: Record<string, string>;
+  errorsCountAsFailures: boolean;
+  /**
+   * How the gate judges this job's case results under its current policy and
+   * admission (pass rate, minCases, regressions, required cases, scorers and
+   * limits). Whether the job may prove a release (eligibility, hash, sets) is
+   * reported on its own. The CLI's exit code follows it: 1 when it blocks.
+   */
+  verdict?: ReleaseGateVerdict;
+  reasons?: string[];
+  /**
+   * The gate's golden sets changed in a way the gate counts after the job was
+   * queued (or the job holds no record of them): publishing will refuse the
+   * job however its results look.
+   */
+  setsChanged?: boolean;
+}
+
+/** One case of an enforced gate's golden sets, as the gate's Cases panel shows it. */
+export interface ReleaseGateCaseView {
+  fixtureId: string;
+  datasetId: string;
+  datasetName: string | null;
+  name: string;
+  recordingId: string | null;
+  admission: "admitted" | "pending";
+  required: boolean;
+  /** The pending inbox request about this case, when there is one. */
+  requestId: string | null;
+  requestKind: GateCaseRequestKind | null;
+  createdAt: string;
+}
+
+/** `GET /api/workflows/:id/release-gate/cases`. Unenforced gates answer `enforced: false` and no cases. */
+export interface ReleaseGateCasesView {
+  workflowId: string;
+  enforced: boolean;
+  cases: ReleaseGateCaseView[];
+  counts: { admitted: number; pending: number; required: number };
+  /** Admins admit, reject and mark cases required directly. */
+  canAdmit: boolean;
+  /** Builders (workflow:write) ask the gate's approvers instead. */
+  canRequest: boolean;
+}
+
+const fixtureIdsSchema = z.array(idSchema).min(1, "Name at least one case").max(500);
+
+/** `POST /api/workflows/:id/release-gate/cases/admit` and `/reject` (admins). */
+export const gateCaseDecisionInputSchema = z
+  .object({
+    fixtureIds: fixtureIdsSchema,
+    reason: reasonSchema.optional()
+  })
+  .strict();
+export type GateCaseDecisionInput = z.infer<typeof gateCaseDecisionInputSchema>;
+
+/** `PUT /api/workflows/:id/release-gate/cases/:fixtureId/required` (admins). */
+export const gateCaseRequiredInputSchema = z.object({ required: z.boolean() }).strict();
+
+export const GATE_CASE_REQUEST_ACTIONS = ["admit", "remove"] as const;
+export type GateCaseRequestAction = (typeof GATE_CASE_REQUEST_ACTIONS)[number];
+export const GATE_CASE_REQUEST_KINDS = ["admit_cases", "remove_cases"] as const;
+export type GateCaseRequestKind = (typeof GATE_CASE_REQUEST_KINDS)[number];
+
+/** `POST /api/workflows/:id/release-gate/cases/requests`: a builder asks the gate's approvers. */
+export const gateCaseRequestInputSchema = z
+  .object({
+    action: z.enum(GATE_CASE_REQUEST_ACTIONS),
+    fixtureIds: fixtureIdsSchema,
+    reason: reasonSchema
+  })
+  .strict();
+export type GateCaseRequestInput = z.infer<typeof gateCaseRequestInputSchema>;
+
+export const GATE_CASE_REQUEST_PREFIX = "gcr_";
+
+/** True for an approvals-inbox id that names a gate case request (admit or remove cases). */
+export function isGateCaseRequestId(id: string): boolean {
+  return id.startsWith(GATE_CASE_REQUEST_PREFIX);
+}
+
+/**
+ * A request to admit cases to an enforced gate, or to remove admitted ones,
+ * as the approvals inbox shows it. `id` is what `/api/approvals/:id/approve`
+ * and `/reject` take.
+ */
+export interface GateCaseRequestView {
+  kind: GateCaseRequestKind;
+  requestId: string;
+  id: string;
+  workflowId: string;
+  workflowName: string | null;
+  projectId: string;
+  status: "pending" | "approved" | "rejected" | "timed_out" | "canceled";
+  message: string;
+  cases: Array<{ fixtureId: string; name: string; datasetId: string | null }>;
+  requestReason: string | null;
+  approverRoles: string[];
+  approverUsers: string[];
+  allowSelfApproval: boolean;
+  requestedBy: string | null;
+  createdAt: string;
+  expiresAt: string | null;
+  decidedBy: string | null;
+  decidedAt: string | null;
+  reason: string | null;
+  canDecide: boolean;
+  cannotDecideReason: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -468,10 +782,16 @@ export function judgeReleaseGate(
 
 /**
  * Why `after` is looser than `before`; empty when it is not. On an enforced
- * gate only admins may make such a change.
+ * gate only admins may make such a change. With `admission`, an admitted
+ * case leaving the gate or a case no longer required also loosens it
+ * (`releaseAdmissionLoosening`).
  */
-export function releaseGateLoosening(before: ReleaseGateSettings, after: ReleaseGateSettings): string[] {
-  const reasons: string[] = [];
+export function releaseGateLoosening(
+  before: ReleaseGateSettings,
+  after: ReleaseGateSettings,
+  admission?: { before: ReleaseGateAdmissionState; after: ReleaseGateAdmissionState; names?: Readonly<Record<string, string>> }
+): string[] {
+  const reasons: string[] = admission ? releaseAdmissionLoosening(admission.before, admission.after, admission.names) : [];
   const a = before.policy;
   const b = after.policy;
   if (before.enabled && !after.enabled) reasons.push("disables the gate");
@@ -544,8 +864,8 @@ export function releaseScorersMatch(gateScorers: readonly unknown[] | null | und
 function canonicalApprovers(approvers: ReleaseApprovers | null): string {
   if (!approvers) return "null";
   return releaseCanonicalJson({
-    approverRoles: [...approvers.approverRoles].sort(),
-    approverUsers: approvers.approverUsers.map((entry) => entry.toLowerCase()).sort(),
+    approverRoles: [...new Set(approvers.approverRoles)].sort(),
+    approverUsers: [...new Set(approvers.approverUsers.map((entry) => entry.trim().toLowerCase()))].sort(),
     allowSelfApproval: approvers.allowSelfApproval,
     timeoutMinutes: approvers.timeoutMinutes
   });

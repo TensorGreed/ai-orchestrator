@@ -65,8 +65,10 @@
  * Postgres the routes answer 501 and every channel runs the draft.
  */
 
-import { randomUUID } from "node:crypto";
-import { goldenSetSnapshots } from "./release-snapshot.js";
+import { createHash, randomUUID } from "node:crypto";
+import { goldenSetSnapshots, staleGoldenSetCount, staleGoldenSets, type GoldenSetSnapshot } from "./release-snapshot.js";
+import { gateAuthority } from "./gate-authority.js";
+import { admissionState, gateAdmissionSnapshot, judgeAdmission, nextAdmittedIds } from "./gate-admission-state.js";
 import {
   RELEASE_APPROVAL_REQUEST_PREFIX,
   aggregateReleaseRepeats,
@@ -74,9 +76,12 @@ import {
   defaultReleaseGate,
   judgeReleaseGate,
   releaseApproversSchema,
+  releaseCanonicalJson,
+  releaseGateChecksWorsened,
   releaseGateAdminOnlyChanges,
   releaseScorersMatch,
   releaseCandidateOptionsSchema,
+  releaseAdmissionLoosening,
   releaseGateLoosening,
   releaseGatePolicySchema,
   releaseGateSettingsSchema,
@@ -91,6 +96,7 @@ import {
   type ReleaseChannel,
   type ReleaseGateCase,
   type ReleaseGateEvidence,
+  type ReleaseGateJobAdmission,
   type ReleaseGateJudgement,
   type ReleaseGateSettingsInput,
   type ReleaseGateView,
@@ -102,11 +108,19 @@ import {
   type Workflow,
   type WorkflowRelease
 } from "@ai-orchestrator/shared";
-import type { ReleaseApprovalRequestRecord, ReleaseGateRecord, SqliteStore, WorkflowReleaseRecord } from "../db/database.js";
+import type { EvalFixtureRecord, ReleaseApprovalRequestRecord, ReleaseGateRecord, SqliteStore, WorkflowReleaseRecord } from "../db/database.js";
 import type { AuditEventInput } from "./audit-service.js";
 import type { SafeUser } from "./auth-service.js";
 import type { NotificationEvent } from "./notification-service.js";
 import type { RunAccessResult } from "../run-access.js";
+
+/** The gate's sets as they are now (see `ReleaseService.gateSets`). */
+interface GateSets {
+  fixtureIds: Set<string>;
+  snapshots: Record<string, GoldenSetSnapshot>;
+  /** Enforced gates with stored admission: the admitted cases; null otherwise. */
+  admittedIds: ReadonlySet<string> | null;
+}
 
 export type ReleasePermission = "workflow:read" | "workflow:write" | "workflow:publish";
 
@@ -122,6 +136,9 @@ export class ReleaseError extends Error {
 }
 
 type JobView = EvalRunView & { results: EvalCaseResult[] };
+
+/** Why a job whose case results a data-subject delete removed is no longer release proof. */
+export const DATA_SUBJECT_EVIDENCE_REMOVED = "Stale: a data-subject delete removed some of this job's case results after it ran, so it can no longer prove a release. Run the job again.";
 
 export interface ReleaseServiceOptions {
   store: SqliteStore;
@@ -502,10 +519,13 @@ export class ReleaseService {
     const parsed = releaseGateSettingsSchema.safeParse(input);
     if (!parsed.success) throw new ReleaseError("Invalid gate settings", 400, { issues: parsed.error.issues });
     const next = parsed.data;
-    const current = this.settingsOf(this.store.getReleaseGate(workflowId), workflowId);
+    const previousRecord = this.store.getReleaseGate(workflowId);
+    const current = this.settingsOf(previousRecord, workflowId);
     const isAdmin = user.role === "admin";
     const enforced = next.enforced ?? current.enforced;
     if (enforced !== current.enforced && !isAdmin) throw new ReleaseError("Only admins can enforce a gate or lift enforcement", 403);
+    const admitAddedSetCases = next.admitAddedSetCases === true;
+    if (admitAddedSetCases && !isAdmin) throw new ReleaseError("Only admins can admit cases to an enforced release gate. Ask the gate's approvers from its Cases panel instead.", 403);
     if (!isAdmin && next.approvers?.allowSelfApproval && !current.approvers?.allowSelfApproval) {
       throw new ReleaseError("Only admins can allow self-approval on a release gate", 403);
     }
@@ -545,19 +565,52 @@ export class ReleaseService {
       const version = this.baselineVersion(user, workflowId);
       baseline = { version, workflowHash: this.versionCandidate(workflowId, version).workflowHash };
     }
-    const saved = this.store.upsertReleaseGate({
-      workflowId,
-      enabled: next.enabled,
-      enforced,
-      datasetIds: next.datasetIds,
-      candidateOptions: next.candidateOptions,
-      policy: next.policy,
-      requireApproval: next.requireApproval,
-      approvers: next.approvers,
-      updatedAt: this.now().toISOString(),
-      updatedBy: user.email
+    const admissionBefore = gateAdmissionSnapshot(this.store, previousRecord);
+    // A save that changes nothing leaves the gate (and its `updated_at`) alone, so it makes no open request stale.
+    const settingsKey = (settings: Pick<ReleaseGateRecord, "enabled" | "enforced" | "datasetIds" | "candidateOptions" | "policy" | "requireApproval"> & { approvers?: unknown }) =>
+      releaseCanonicalJson({
+        enabled: settings.enabled,
+        enforced: settings.enforced,
+        datasetIds: settings.datasetIds,
+        candidateOptions: settings.candidateOptions,
+        policy: settings.policy,
+        requireApproval: settings.requireApproval,
+        approvers: settings.approvers ?? null
+      });
+    const unchanged =
+      previousRecord !== null &&
+      settingsKey(previousRecord) ===
+        settingsKey({ enabled: next.enabled, enforced, datasetIds: next.datasetIds, candidateOptions: next.candidateOptions, policy: next.policy, requireApproval: next.requireApproval, approvers: next.approvers });
+    // The settings and the cases the gate counts are saved together, or not at all.
+    const { saved, admitted } = this.store.transaction(() => {
+      const saved = unchanged && previousRecord ? previousRecord : this.store.upsertReleaseGate({
+        workflowId,
+        enabled: next.enabled,
+        enforced,
+        datasetIds: next.datasetIds,
+        candidateOptions: next.candidateOptions,
+        policy: next.policy,
+        requireApproval: next.requireApproval,
+        approvers: next.approvers,
+        updatedAt: this.now().toISOString(),
+        updatedBy: user.email
+      });
+      // Enforcing for the first time admits what the sets hold now; afterwards nothing is admitted without an explicit admin decision.
+      const admitted = nextAdmittedIds(this.store, previousRecord, { enforced, datasetIds: next.datasetIds }, { byAdmin: isAdmin, admitAddedSetCases });
+      const storedBefore = previousRecord?.admittedFixtureIds ?? null;
+      if (JSON.stringify(admitted === null ? null : [...new Set(admitted)].sort()) !== JSON.stringify(storedBefore)) {
+        this.store.setReleaseGateAdmission(workflowId, admitted, this.now().toISOString(), user.email);
+      }
+      return { saved, admitted };
     });
     const view = this.settingsOf(saved, workflowId);
+    const admissionAfter = gateAdmissionSnapshot(this.store, this.store.getReleaseGate(workflowId));
+    const previouslyAdmitted = new Set(admissionBefore ? admissionBefore.admittedIds : []);
+    const newlyAdmitted = admissionAfter ? [...admissionAfter.admittedIds].filter((id) => !previouslyAdmitted.has(id)) : [];
+    const admissionLoosening =
+      admissionBefore && admissionAfter
+        ? { before: admissionState(admissionBefore), after: admissionState(admissionAfter), names: { ...admissionAfter.names, ...admissionBefore.names } }
+        : undefined;
     this.options.audit({
       category: "release",
       eventType: "release.gate.updated",
@@ -575,8 +628,14 @@ export class ReleaseService {
         policy: view.policy,
         requireApproval: view.requireApproval,
         approvers: view.approvers ? { roles: view.approvers.approverRoles, users: view.approvers.approverUsers.length, allowSelfApproval: view.approvers.allowSelfApproval } : null,
-        loosened: releaseGateLoosening(current, next),
+        loosened: releaseGateLoosening(current, next, admissionLoosening),
         enforcedChanged: enforced !== current.enforced,
+        admittedCases: admissionAfter ? admissionAfter.admittedIds.size : null,
+        pendingCases: admissionAfter ? admissionAfter.fixtures.length - admissionAfter.admittedIds.size : null,
+        newlyAdmittedFixtureIds: newlyAdmitted,
+        admitAddedSetCases,
+        storedAdmittedCases: admitted === null ? null : admitted.length,
+        settingsUnchanged: unchanged,
         baselineVersion: baseline?.version ?? null
       }
     });
@@ -760,29 +819,214 @@ export class ReleaseService {
 
   /**
    * Why `user` may not make this change to a golden set (null when they
-   * may): on a set an enforced gate uses, removing cases, deleting the set
-   * and adding a case with its own scorers are admin-only. Audits a refusal.
+   * may), on a set an enforced gate uses: deleting the set and adding a case
+   * with its own scorers are admin-only, and so is removing a case the gate
+   * counts (an admitted case: `releaseAdmissionLoosening`). A builder may
+   * remove a case still pending admission, or ask for removal of an
+   * admitted one in the approvals inbox. Audits a refusal.
    */
-  goldenSetChangeDenial(user: SafeUser, datasetId: string, change: "remove_case" | "delete_set" | "add_case_with_scorers"): string | null {
+  goldenSetChangeDenial(user: SafeUser, datasetId: string, change: "remove_case" | "delete_set" | "add_case_with_scorers", target: { fixtureId?: string } = {}): string | null {
     if (user.role === "admin") return null;
     const dataset = this.store.getEvalDataset(datasetId);
     if (!dataset?.workflowId) return null;
     const gate = this.enforcedGateOf(dataset.workflowId);
     if (!gate || !gate.datasetIds.includes(datasetId)) return null;
+    if (change === "remove_case") {
+      const snapshot = gateAdmissionSnapshot(this.store, gate);
+      if (snapshot && target.fixtureId) {
+        const before = admissionState(snapshot);
+        const after = { admittedIds: before.admittedIds.filter((id) => id !== target.fixtureId), requiredIds: before.requiredIds.filter((id) => id !== target.fixtureId) };
+        const loosening = releaseAdmissionLoosening(before, after, snapshot.names);
+        if (loosening.length === 0) return null;
+        this.refuse(user, dataset.workflowId, "release.golden_set_change.refused", "update", { datasetId, change, fixtureId: target.fixtureId, loosening });
+        return "An enforced release gate counts this case: only an admin can remove it. Ask for its removal from the gate's Cases panel, and an approver decides in the approvals inbox.";
+      }
+    }
     this.refuse(user, dataset.workflowId, "release.golden_set_change.refused", "update", { datasetId, change });
-    const what = change === "delete_set" ? "delete this golden set" : change === "remove_case" ? "remove a case from this golden set" : "add a case with its own scorers to this golden set";
+    if (change === "delete_set") {
+      return "An enforced release gate uses this golden set: only an admin can delete it. Ask for removal of its cases from the gate's Cases panel instead.";
+    }
+    const what = change === "remove_case" ? "remove a case from this golden set" : "add a case with its own scorers to this golden set";
     return `An enforced release gate uses this golden set: only an admin can ${what}.`;
   }
 
-  /** Why `user` may not delete a golden run a case of an enforced gate's golden set uses (admins only); null when they may. Audits a refusal. */
+  /**
+   * Why `user` may not delete a golden run that an admitted case of an
+   * enforced gate's golden set replays (admins only); null when they may.
+   * Audits a refusal.
+   */
   recordingDeleteDenial(user: SafeUser, workflowId: string, recordingId: string): string | null {
     if (user.role === "admin") return null;
     const gate = this.enforcedGateOf(workflowId);
     if (!gate) return null;
-    const datasetId = gate.datasetIds.find((id) => this.store.listEvalFixtures(id).some((fixture) => fixture.recordingId === recordingId));
-    if (!datasetId) return null;
-    this.refuse(user, workflowId, "release.golden_set_change.refused", "delete", { datasetId, change: "delete_recording", recordingId });
-    return "An enforced release gate's golden set uses this golden run: only an admin can delete it.";
+    const snapshot = gateAdmissionSnapshot(this.store, gate);
+    const counted = snapshot?.fixtures.find((fixture) => fixture.recordingId === recordingId && snapshot.admittedIds.has(fixture.id));
+    if (!counted) return null;
+    this.refuse(user, workflowId, "release.golden_set_change.refused", "delete", { datasetId: counted.datasetId, change: "delete_recording", recordingId, fixtureId: counted.id });
+    return "An enforced release gate counts a case that replays this golden run: only an admin can delete it.";
+  }
+
+  /**
+   * Before a delete that can take cases away from the workflow's enforced
+   * gate: a function that audits it (`release.gate.cases_removed`, naming
+   * the admitted and required cases it took and how it loosens the gate)
+   * once the delete is done; null when it takes no admitted case.
+   *   - `fixture` / `golden_set`: the case, or every case of the set, leaves the gate;
+   *   - `golden_run` / `workflow`: the cases replaying the deleted golden run
+   *     (every golden run, for a deleted workflow) stay admitted but can no
+   *     longer pass, so they are inconclusive from then on.
+   */
+  gateCasesRemoval(
+    user: SafeUser,
+    workflowId: string,
+    target:
+      | { via: "fixture"; fixtureId: string }
+      | { via: "golden_set"; datasetId: string }
+      | { via: "golden_run"; recordingId: string }
+      | { via: "workflow" }
+      | { via: "data_subject"; fixtureIds: readonly string[]; kind: string; id: string }
+  ): (() => void) | null {
+    if (!this.options.available) return null;
+    const snapshot = gateAdmissionSnapshot(this.store, this.store.getReleaseGate(workflowId));
+    if (!snapshot) return null;
+    const hit = (fixture: EvalFixtureRecord) => {
+      switch (target.via) {
+        case "fixture":
+          return fixture.id === target.fixtureId;
+        case "golden_set":
+          return fixture.datasetId === target.datasetId;
+        case "golden_run":
+          return fixture.recordingId === target.recordingId;
+        case "data_subject":
+          return target.fixtureIds.includes(fixture.id);
+        default:
+          return Boolean(fixture.recordingId);
+      }
+    };
+    const taken = snapshot.fixtures.filter((fixture) => snapshot.admittedIds.has(fixture.id) && hit(fixture));
+    if (taken.length === 0) return null;
+    const ids = taken.map((fixture) => fixture.id);
+    const required = snapshot.requiredIds.filter((id) => ids.includes(id));
+    const before = admissionState(snapshot);
+    const label = ids.map((id) => `"${snapshot.names[id] ?? id}"`).join(", ");
+    const leaves = target.via === "fixture" || target.via === "golden_set" || target.via === "data_subject";
+    const loosened = leaves
+      ? releaseAdmissionLoosening(before, { admittedIds: before.admittedIds.filter((id) => !ids.includes(id)), requiredIds: before.requiredIds.filter((id) => !ids.includes(id)) }, snapshot.names)
+      : [`deletes the golden run${ids.length === 1 ? "" : "s"} admitted case${ids.length === 1 ? "" : "s"} ${label} replay${ids.length === 1 ? "s" : ""}, so ${ids.length === 1 ? "it is" : "they are"} inconclusive from now on`];
+    return () =>
+      this.options.audit({
+        category: "release",
+        eventType: "release.gate.cases_removed",
+        action: "delete",
+        outcome: "success",
+        actor: { userId: user.id, email: user.email, type: "user" },
+        resourceType: "workflow",
+        resourceId: workflowId,
+        projectId: this.projectOf(workflowId),
+        metadata: {
+          via: target.via,
+          ...(target.via === "fixture" ? { fixtureId: target.fixtureId } : {}),
+          ...(target.via === "golden_set" ? { datasetId: target.datasetId } : {}),
+          ...(target.via === "golden_run" ? { recordingId: target.recordingId } : {}),
+          ...(target.via === "data_subject" ? { target: `${target.kind}:${target.id}` } : {}),
+          fixtureIds: ids,
+          requiredFixtureIds: required,
+          loosened
+        }
+      });
+  }
+
+  /**
+   * Before an admin's data-subject delete removes one row (find-subject):
+   * a function to call once the row is gone, or null when the row touches
+   * no golden-set case and no job's results. Erasure is a legal obligation,
+   * so it is never refused here, even for admitted cases of an enforced
+   * gate; instead
+   *   - the admitted and required cases it takes (a golden run takes every
+   *     case replaying it; a case takes itself) are audited as loosening
+   *     (`release.gate.cases_removed`, via `data_subject`), and
+   *   - every job that held a result of a removed case, or a removed
+   *     result, is stale for good: it is marked release-ineligible, so the
+   *     release gate and pending release approvals stop accepting it
+   *     (`release.jobs.evidence_removed`).
+   */
+  dataSubjectRemoval(user: SafeUser, row: { kind: string; id: string }): (() => void) | null {
+    if (!this.options.available) return null;
+    let workflowId: string | null = null;
+    let fixtureIds: string[] = [];
+    let resultIds: string[] = [];
+    if (row.kind === "recording") {
+      workflowId = this.store.getReplayRecordingSummary(row.id)?.workflowId ?? null;
+      fixtureIds = this.store.evalFixtureIdsForRecording(row.id);
+    } else if (row.kind === "fixture") {
+      const fixture = this.store.getEvalFixture(row.id);
+      if (fixture) {
+        workflowId = this.store.getEvalDataset(fixture.datasetId)?.workflowId ?? null;
+        fixtureIds = [fixture.id];
+      }
+    } else if (row.kind === "eval_result") {
+      resultIds = [row.id];
+    } else {
+      return null;
+    }
+    const runIds = this.store.evalRunIdsForResults({ fixtureIds, resultIds });
+    const casesRemoved = workflowId && fixtureIds.length > 0 ? this.gateCasesRemoval(user, workflowId, { via: "data_subject", fixtureIds, kind: row.kind, id: row.id }) : null;
+    if (!casesRemoved && runIds.length === 0) return null;
+    return () => {
+      casesRemoved?.();
+      const stale = this.store.markEvalRunsReleaseIneligible(runIds, DATA_SUBJECT_EVIDENCE_REMOVED);
+      if (stale.length === 0) return;
+      this.options.audit({
+        category: "release",
+        eventType: "release.jobs.evidence_removed",
+        action: "update",
+        outcome: "success",
+        actor: { userId: user.id, email: user.email, type: "user" },
+        resourceType: workflowId ? "workflow" : "eval_run",
+        resourceId: workflowId ?? stale[0]!,
+        projectId: workflowId ? this.projectOf(workflowId) : null,
+        metadata: { via: "data_subject", target: `${row.kind}:${row.id}`, runIds: stale, fixtureIds, resultIds }
+      });
+    };
+  }
+
+  /**
+   * What a replay job view carries when the workflow's enforced gate uses
+   * one of the job's golden sets: the gate's admitted, pending and required
+   * cases, and how the gate judges the job's case results under its current
+   * policy and admission (the CLI's exit code follows that verdict). Whether
+   * the job may prove a release (its hash, sets, eligibility, scorers) is
+   * left out here: the job view reports it on its own. Null otherwise.
+   */
+  jobGateAdmission(job: JobView): ReleaseGateJobAdmission | null {
+    if (!this.options.available) return null;
+    const record = this.store.getReleaseGate(job.workflowId);
+    const jobSets = job.datasetIds ?? [];
+    if (!record?.enforced || !record.datasetIds.some((datasetId) => jobSets.includes(datasetId))) return null;
+    const snapshot = gateAdmissionSnapshot(this.store, record);
+    if (!snapshot) return null;
+    const gate = this.settingsOf(record, job.workflowId);
+    const evidence = this.evidenceFor(job, gate);
+    const workflowHash = evidence.job.workflowHash ?? "";
+    const judgement = judgeReleaseGate(
+      {
+        job: { id: evidence.job.id, status: evidence.job.status, workflowHash, datasetIds: gate.datasetIds, compare: evidence.job.compare ?? null, liveWrites: false },
+        cases: evidence.cases
+      },
+      gate.policy,
+      { expected: { workflowHash, datasetIds: [] }, requireApproval: gate.requireApproval, now: this.now(), admission: judgeAdmission(snapshot) }
+    );
+    return {
+      enforced: true,
+      admittedFixtureIds: [...snapshot.admittedIds],
+      pendingFixtureIds: snapshot.fixtures.map((fixture) => fixture.id).filter((id) => !snapshot.admittedIds.has(id)),
+      requiredFixtureIds: snapshot.requiredIds,
+      requiredCaseNames: Object.fromEntries(snapshot.requiredIds.map((id) => [id, snapshot.names[id] ?? id])),
+      errorsCountAsFailures: gate.policy.errorsCountAsFailures,
+      verdict: judgement.verdict,
+      reasons: judgement.reasons,
+      setsChanged: Boolean(evidence.job.noSetSnapshot) || (evidence.job.staleSets?.length ?? 0) > 0
+    };
   }
 
   private projectOf(workflowId: string): string | null {
@@ -805,15 +1049,20 @@ export class ReleaseService {
     return { workflow, workflowHash: this.options.hashOf(workflow) };
   }
 
-  /** What the gate's own sets hold now: their case ids and snapshots. */
-  private gateSets(gate: Pick<ReleaseGateView, "datasetIds">): { fixtureIds: Set<string>; snapshots: Record<string, string> } {
+  /**
+   * What the gate's own sets hold now: their case ids and snapshots, and,
+   * for an enforced gate whose admission is stored, the admitted cases
+   * (staleness is then judged over those alone).
+   */
+  private gateSets(gate: Pick<ReleaseGateView, "workflowId" | "datasetIds" | "enforced">): GateSets {
     const fixtureIds = new Set<string>();
     const snapshots = goldenSetSnapshots(gate.datasetIds, (datasetId) => {
       const fixtures = this.store.listEvalFixtures(datasetId);
       for (const fixture of fixtures) fixtureIds.add(fixture.id);
       return fixtures;
     });
-    return { fixtureIds, snapshots };
+    const admission = gate.enforced ? gateAdmissionSnapshot(this.store, this.store.getReleaseGate(gate.workflowId)) : null;
+    return { fixtureIds, snapshots, admittedIds: admission && !admission.admissionMissing ? admission.admittedIds : null };
   }
 
   /**
@@ -821,7 +1070,7 @@ export class ReleaseService {
    * own sets with repeats aggregated, and how the job's scorers, set
    * snapshot and own eligibility compare with the gate.
    */
-  evidenceFor(job: JobView, gate: Pick<ReleaseGateView, "datasetIds" | "candidateOptions">, sets?: { fixtureIds: Set<string>; snapshots: Record<string, string> }): ReleaseGateEvidence {
+  evidenceFor(job: JobView, gate: Pick<ReleaseGateView, "workflowId" | "datasetIds" | "candidateOptions" | "enforced">, sets?: GateSets): ReleaseGateEvidence {
     const current = sets ?? this.gateSets(gate);
     const options = asRecord(job.options);
     const aggregate = (typeof options.aggregate === "string" ? options.aggregate : "all") as ReleaseAggregateMode;
@@ -917,7 +1166,8 @@ export class ReleaseService {
       scorerMismatch = types.length > 0 ? `ran with its own scorers (${types.join(", ")})` : "ran with the default scorers, not the ones the gate names";
     }
     const jobSnapshot = this.store.getEvalRunSetSnapshot(job.id);
-    const staleSets = gate.datasetIds.filter((datasetId) => !jobSnapshot || jobSnapshot[datasetId] !== current.snapshots[datasetId]);
+    const staleSets = jobSnapshot ? staleGoldenSets(gate.datasetIds, jobSnapshot, current.snapshots, current.admittedIds) : [...gate.datasetIds];
+    const staleSetCounts = Object.fromEntries(staleSets.map((id) => [id, jobSnapshot ? staleGoldenSetCount(jobSnapshot[id], current.snapshots[id], current.admittedIds) : 1]));
     return {
       job: {
         id: job.id,
@@ -932,6 +1182,7 @@ export class ReleaseService {
         ...(Array.isArray(ineligible) ? { releaseIneligibleReasons: ineligible.map((entry) => String(entry)) } : {}),
         scorerMismatch,
         staleSets: jobSnapshot ? staleSets : [],
+        ...(jobSnapshot ? { staleSetCounts } : {}),
         ...(jobSnapshot ? {} : { noSetSnapshot: true }),
         ...(repeatsUnchecked ? { repeatsUnchecked: true } : {})
       },
@@ -945,9 +1196,27 @@ export class ReleaseService {
    * Every completed job for the hash is considered.
    */
   judge(gate: ReleaseGateView, workflowId: string, workflowHash: string, replayRunId?: string): { judgement: ReleaseGateJudgement; replayRunId?: string } {
-    const expected = { workflowHash, datasetIds: gate.datasetIds, mcpMode: gate.candidateOptions.mcpMode ?? "strict" };
     const sets = this.gateSets(gate);
-    const judgeJob = (job: JobView) => judgeReleaseGate(this.evidenceFor(job, gate, sets), gate.policy, { expected, requireApproval: gate.requireApproval, now: this.now() });
+    // On an enforced gate a set with no admitted case yet counts for nothing, so a job that did not run it still covers the gate.
+    const datasetIds = sets.admittedIds
+      ? gate.datasetIds.filter((id) => Object.keys(sets.snapshots[id]?.cases ?? {}).some((fixtureId) => sets.admittedIds!.has(fixtureId)))
+      : gate.datasetIds;
+    const expected = {
+      workflowHash,
+      datasetIds,
+      mcpMode: gate.candidateOptions.mcpMode ?? "strict",
+      setCaseCounts: Object.fromEntries(
+        gate.datasetIds.map((id) => {
+          const cases = Object.keys(sets.snapshots[id]?.cases ?? {});
+          return [id, sets.admittedIds ? cases.filter((fixtureId) => sets.admittedIds!.has(fixtureId)).length : cases.length];
+        })
+      ),
+      scorersKey: createHash("sha256").update(releaseCanonicalJson(gate.candidateOptions.scorers ?? null)).digest("hex").slice(0, 16)
+    };
+    // Enforced gates count only admitted cases, and required cases must pass (null: every case counts, as before).
+    const admission = gate.enforced ? judgeAdmission(gateAdmissionSnapshot(this.store, this.store.getReleaseGate(workflowId))) : null;
+    const judgeJob = (job: JobView) =>
+      judgeReleaseGate(this.evidenceFor(job, gate, sets), gate.policy, { expected, requireApproval: gate.requireApproval, now: this.now(), admission });
     if (replayRunId) {
       const job = this.options.loadJob(replayRunId);
       if (!job || job.kind !== "replay" || job.workflowId !== workflowId) throw new ReleaseError("Replay job not found", 404);
@@ -961,7 +1230,7 @@ export class ReleaseService {
       if (judged.judgement.verdict !== "blocked") return judged;
       newest ??= judged;
     }
-    return newest ?? { judgement: judgeReleaseGate(null, gate.policy, { expected, now: this.now() }) };
+    return newest ?? { judgement: judgeReleaseGate(null, gate.policy, { expected, now: this.now(), admission }) };
   }
 
   /** The publish dialog's preview: the verdict publishing would get now. */
@@ -1146,6 +1415,7 @@ export class ReleaseService {
         origin: judgement.verdict === "needs_approval" ? "policy" : "blocked",
         gate,
         reasons: judgement.verdict === "needs_approval" ? [] : judgement.reasons,
+        checks: judgement.verdict === "needs_approval" ? [] : judgement.checks,
         requestReason: input.requestApproval?.reason ?? null,
         publishedVersion: previous
       });
@@ -1212,6 +1482,8 @@ export class ReleaseService {
     origin: "policy" | "blocked";
     gate: ReleaseGateView;
     reasons: string[];
+    /** The reasons as stable codes (`ReleaseGateJudgement.checks`), judged again when the request is decided. */
+    checks: ReleaseGateJudgement["checks"];
     requestReason: string | null;
     publishedVersion: number | null;
   }): ReleaseApprovalRequestRecord {
@@ -1223,7 +1495,14 @@ export class ReleaseService {
         this.closeRequest(existing, "canceled", `Stale: ${stale}`, null);
         continue;
       }
-      if (sameIdentity({ id: existing.requestedByUserId, email: existing.requestedBy }, input.user)) return existing;
+      if (!sameIdentity({ id: existing.requestedByUserId, email: existing.requestedBy }, input.user)) continue;
+      // Asking again after the gate got worse must not hand back a request that approval would cancel.
+      const worse = this.newGateReasons(existing);
+      if (worse) {
+        this.closeRequest(existing, "canceled", `Stale: The release gate now judges version ${existing.version} differently than when the request was made: ${worse.join(" ")}`, null);
+        continue;
+      }
+      return existing;
     }
     const approvers: ReleaseApprovers = input.gate.approvers ?? releaseApproversSchema.parse({});
     const createdAt = this.now();
@@ -1239,6 +1518,8 @@ export class ReleaseService {
       origin: input.origin,
       gateReasons: input.reasons,
       gateUpdatedAt: input.gate.updatedAt,
+      gateChecks: input.checks,
+      gateAuthority: gateAuthority(input.gate),
       publishedVersionAtRequest: input.publishedVersion,
       spec: { approverRoles: approvers.approverRoles, approverUsers: approvers.approverUsers, allowSelfApproval: approvers.allowSelfApproval },
       status: "pending",
@@ -1327,9 +1608,44 @@ export class ReleaseService {
     }
     if (hash !== record.workflowHash) return `Version ${record.version} no longer has the hash that was asked for (the workflow moved project).`;
     const gate = this.store.getReleaseGate(record.workflowId);
-    if ((gate?.updatedAt ?? null) !== record.gateUpdatedAt) return "The release gate's settings changed after the request was made.";
+    // Who decides is what a settings change must not move under a request; a builder's tightening is judged again by the reasons instead.
+    // Requests made before the fingerprint existed keep the timestamp rule.
+    if (record.gateAuthority) {
+      if (!gate || gateAuthority(gate) !== record.gateAuthority) return "Who may approve this release (the gate's approvers, self-approval or enforcement) changed after the request was made.";
+    } else if ((gate?.updatedAt ?? null) !== record.gateUpdatedAt) {
+      return "The release gate's settings changed after the request was made.";
+    }
     if (this.store.getPublishedVersion(record.workflowId) !== record.publishedVersionAtRequest) return "Another version was published after the request was made.";
     return null;
+  }
+
+  /**
+   * The gate's current reasons against the request's version when it now
+   * blocks it worse than when the request was made: a kind of reason it did
+   * not give (an admitted case the job never ran, a new failing required
+   * case) or a worse measure of one it gave (a lower pass rate against the
+   * minimum, more regressions); null when it does not. Reasons are compared
+   * by their stable codes, never their wording, so better numbers or a case
+   * waiting for admission change nothing. The request's own replay job is
+   * judged again, or, when it named none, the jobs for the version's hash.
+   */
+  private newGateReasons(record: ReleaseApprovalRequestRecord): string[] | null {
+    const gate = this.settingsOf(this.store.getReleaseGate(record.workflowId), record.workflowId);
+    if (!gate.enabled) return null;
+    let judgement: ReleaseGateJudgement;
+    try {
+      judgement = this.judge(gate, record.workflowId, record.workflowHash, record.replayRunId ?? undefined).judgement;
+    } catch (error) {
+      if (!(error instanceof ReleaseError) || error.statusCode !== 404) throw error;
+      return [`Replay job ${record.replayRunId} no longer exists.`];
+    }
+    if (judgement.verdict !== "blocked") return null;
+    // Requests made before reason codes existed: their reasons, worded as then, are all there is to compare.
+    if (!record.gateChecks) {
+      const known = new Set(record.gateReasons);
+      return judgement.reasons.some((reason) => !known.has(reason)) ? judgement.reasons : null;
+    }
+    return releaseGateChecksWorsened(record.gateChecks, judgement.checks).length > 0 ? judgement.reasons : null;
   }
 
   private personCheck(record: ReleaseApprovalRequestRecord, user: SafeUser): { allowed: true } | { allowed: false; code: string; message: string } {
@@ -1466,6 +1782,13 @@ export class ReleaseService {
     }
     const conflicts = this.conflictReasons(user, record.workflowId, this.versionCandidate(record.workflowId, record.version).workflow);
     if (conflicts.length > 0) throw new ReleaseError(conflicts.join(" "), 409);
+    // Judged again now: admitted cases, required cases and the policy may have changed since the request was made.
+    const worse = this.newGateReasons(record);
+    if (worse) {
+      const why = `The release gate now judges version ${record.version} differently than when the request was made: ${worse.join(" ")}`;
+      this.closeRequest(record, "canceled", `Stale: ${why}`, user);
+      throw new ReleaseError(`This release request is stale and was canceled. ${why} Ask again.`, 409, { reasons: worse });
+    }
     const decidedAt = this.now().toISOString();
     const release = this.store.transaction(() => {
       const releaseId = `rel_${randomUUID()}`;

@@ -13,7 +13,16 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
-import { goldenSetFileSchema, modelTapeSchema, type EvalRunView, type ReplayJobEstimate, type ReplayRecordingSummary, type Workflow, type WorkflowRelease } from "@ai-orchestrator/shared";
+import {
+  goldenSetFileSchema,
+  modelTapeSchema,
+  type EvalRunView,
+  type ReleasePublishPreview,
+  type ReplayJobEstimate,
+  type ReplayRecordingSummary,
+  type Workflow,
+  type WorkflowRelease
+} from "@ai-orchestrator/shared";
 import { main as cliMain, type CliIo } from "../../../packages/cli/src/main.js";
 import { createApp } from "./app.js";
 import { parseConfig, type AppConfig } from "./config.js";
@@ -366,5 +375,47 @@ describe("golden-set files carry the model tape and the memory seed", () => {
     // Exporting an imported set keeps the tape.
     const again = (await call(context, "GET", `/api/eval/datasets/${body.dataset.id}/export`)).json<typeof file>();
     expect(again.cases[0]!.recording.modelTape!.entries).toHaveLength(1);
+  }, 120_000);
+});
+
+describe("an enforced gate's admission in the CLI", () => {
+  it("reports admitted, pending and required cases exactly as the gate judges them, and marks a failing required case in JUnit", async () => {
+    const context = await createTestContext();
+    saveVersion(context, labelWorkflow("good"));
+    const { setId } = await goldenSet(context, "wf-pub", 3);
+    const gate = await call(context, "PUT", "/api/workflows/wf-pub/release-gate", { enabled: true, enforced: true, datasetIds: [setId] });
+    expect(gate.statusCode, gate.body).toBe(200);
+    // A fourth golden run added after the gate was enforced waits for admission.
+    const run = await call(context, "POST", "/api/workflows/wf-pub/execute", { record: true });
+    const saved = await call(context, "POST", "/api/replay/recordings", { executionId: run.json<{ executionId: string }>().executionId, name: "Late golden" });
+    expect((await call(context, "POST", `/api/eval/datasets/${setId}/recordings`, { recordingId: saved.json<{ recording: { id: string } }>().recording.id })).statusCode).toBe(201);
+    const first = context.store.listEvalFixtures(setId)[0]!;
+    const marked = await context.app.inject({ method: "PUT", url: `/api/workflows/wf-pub/release-gate/cases/${first.id}/required`, headers: { cookie: context.adminCookie }, payload: { required: true } });
+    expect(marked.statusCode, marked.body).toBe(200);
+
+    // A regressing version: every case fails, the required one included.
+    const v2 = saveVersion(context, labelWorkflow("bad"));
+    const junit = path.join(context.tempDir, "gate.xml");
+    const job = await cli(context, ["replay", "run", "--set", setId, "--version", String(v2), "--json", "--junit", junit, "--timeout", "60"]);
+    expect(job.code, job.err + job.out).toBe(1);
+    const view = JSON.parse(job.out) as EvalRunView;
+    expect(view.releaseGate).toMatchObject({ enforced: true, requiredFixtureIds: [first.id] });
+    expect(view.releaseGate!.pendingFixtureIds).toHaveLength(1);
+
+    const preview = (await call(context, "GET", `/api/workflows/wf-pub/publish-preview?version=${v2}&replayRunId=${view.id}`)).json<{ preview: ReleasePublishPreview }>().preview;
+    expect(preview.verdict).toBe("blocked");
+    const admission = preview.stats!.admission!;
+    expect(admission).toMatchObject({ admitted: 3, pending: 1, required: 1 });
+    expect(preview.reasons).toContain(`Required case "${first.name}" failed: a required case must pass whatever the pass rate.`);
+
+    const status = await cli(context, ["replay", "status", view.id]);
+    expect(status.out).toContain(`enforced release gate: ${admission.admitted} admitted, ${admission.pending} pending admission (they run but do not count yet), ${admission.required} required`);
+    expect(status.out).toContain(`required case "${first.name}" failed: it blocks a publish whatever the pass rate`);
+    expect(status.out).toContain("(pending admission, not counted)");
+    const xml = fs.readFileSync(junit, "utf8");
+    expect(xml).toContain('type="required_case"');
+    expect(xml).toContain('<property name="gatePendingCases" value="1"/>');
+    expect(xml).toContain('<property name="gateRequiredFailing" value="1"/>');
+    expect(xml.match(/type="regression"/g)).toHaveLength(3);
   }, 120_000);
 });

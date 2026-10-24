@@ -359,6 +359,32 @@ describe("replay candidates and fair comparison", () => {
     expect(lenientCase.replay!.diff.health.map((warning) => warning.kind)).toContain("model_live");
   }, 60_000);
 
+  it("a required case made inconclusive by a strict tape miss blocks an enforced gate even when errors do not count as failures", async () => {
+    const { context, builder, setId } = await agentSetup(undefined, 2);
+    const admin = await login(context, "admin");
+    const gate = await call(context, "PUT", "/api/workflows/wf-cand/release-gate", admin.cookie, {
+      enabled: true,
+      enforced: true,
+      datasetIds: [setId],
+      policy: { minPassRate: 0, minCases: 1, maxRegressions: 5, errorsCountAsFailures: false }
+    });
+    expect(gate.statusCode, gate.body).toBe(200);
+    const fixtures = (await call(context, "GET", `/api/eval/datasets/${setId}/fixtures`, builder.cookie)).json<{ fixtures: Array<{ id: string; name: string }> }>().fixtures;
+    const required = fixtures[0]!;
+    const marked = await call(context, "PUT", `/api/workflows/wf-cand/release-gate/cases/${required.id}/required`, admin.cookie, { required: true });
+    expect(marked.statusCode, marked.body).toBe(200);
+
+    // The candidate swaps the model, and strict model replay has no tape entry for it: every case is inconclusive.
+    const job = await runJob(context, builder.cookie, { datasetIds: [setId], overrides: { models: [{ nodeId: "agent_1", model: "gpt-5-mini" }] }, models: "replay" });
+    expect(job.summary).toMatchObject({ total: 2, error: 2 });
+    const view = (await call(context, "GET", `/api/replay/runs/${job.id}`, builder.cookie)).json<{
+      run: { releaseGate?: { verdict?: string; reasons?: string[]; requiredFixtureIds: string[] } };
+    }>().run;
+    expect(view.releaseGate?.requiredFixtureIds).toEqual([required.id]);
+    expect(view.releaseGate?.verdict).toBe("blocked");
+    expect(view.releaseGate?.reasons).toContain(`Required case "${required.name}" was inconclusive: a required case must pass whatever the pass rate.`);
+  }, 60_000);
+
   it("makes golden runs without a model tape inconclusive under models replay, running nothing", async () => {
     const { context, builder, model, setId, recordings } = await agentSetup(undefined, 1, {});
     expect(recordings[0]!.capabilities.models).toBe("live");

@@ -1702,6 +1702,61 @@ export const MIGRATIONS: Migration[] = [
       DROP INDEX IF EXISTS idx_guard_simulations_profile;
       DROP TABLE IF EXISTS guard_simulations;
     `
+  },
+  {
+    version: 36,
+    description: "Release gate admission: required cases, the admitted cases of enforced gates, and gate case requests",
+    up: `
+      ALTER TABLE eval_fixtures ADD COLUMN IF NOT EXISTS required INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE release_gates ADD COLUMN IF NOT EXISTS admitted_fixture_ids_json TEXT;
+      ALTER TABLE release_gates ADD COLUMN IF NOT EXISTS admission_updated_at TIMESTAMPTZ;
+      ALTER TABLE release_gates ADD COLUMN IF NOT EXISTS admission_updated_by TEXT;
+      ALTER TABLE release_approval_requests ADD COLUMN IF NOT EXISTS gate_checks_json TEXT;
+      ALTER TABLE release_approval_requests ADD COLUMN IF NOT EXISTS gate_authority TEXT;
+      UPDATE release_gates g
+         SET admitted_fixture_ids_json = (
+           SELECT COALESCE(json_agg(f.id ORDER BY f.id)::text, '[]')
+             FROM eval_fixtures f
+            WHERE f.dataset_id IN (SELECT json_array_elements_text(g.dataset_ids_json::json))
+         ),
+             admission_updated_at = CURRENT_TIMESTAMP,
+             admission_updated_by = 'migration 36'
+       WHERE g.enforced = 1 AND g.admitted_fixture_ids_json IS NULL;
+      CREATE TABLE IF NOT EXISTS gate_case_requests (
+        id TEXT PRIMARY KEY,
+        workflow_id TEXT NOT NULL,
+        workflow_name TEXT,
+        project_id TEXT NOT NULL,
+        action TEXT NOT NULL,
+        fixtures_json TEXT NOT NULL,
+        spec_json TEXT NOT NULL,
+        gate_authority TEXT,
+        status TEXT NOT NULL,
+        request_reason TEXT,
+        requested_by_user_id TEXT,
+        requested_by TEXT,
+        expires_at TIMESTAMPTZ,
+        decided_by_user_id TEXT,
+        decided_by TEXT,
+        decided_at TIMESTAMPTZ,
+        decision_reason TEXT,
+        created_at TIMESTAMPTZ NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_gate_case_requests_workflow ON gate_case_requests(workflow_id, status, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_gate_case_requests_status ON gate_case_requests(status, created_at DESC);
+    `,
+    down: `
+      DROP INDEX IF EXISTS idx_gate_case_requests_status;
+      DROP INDEX IF EXISTS idx_gate_case_requests_workflow;
+      DROP TABLE IF EXISTS gate_case_requests;
+      ALTER TABLE release_approval_requests DROP COLUMN IF EXISTS gate_authority;
+      ALTER TABLE release_approval_requests DROP COLUMN IF EXISTS gate_checks_json;
+      ALTER TABLE release_gates DROP COLUMN IF EXISTS admission_updated_by;
+      ALTER TABLE release_gates DROP COLUMN IF EXISTS admission_updated_at;
+      ALTER TABLE release_gates DROP COLUMN IF EXISTS admitted_fixture_ids_json;
+      ALTER TABLE eval_fixtures DROP COLUMN IF EXISTS required;
+    `
   }
 ];
 

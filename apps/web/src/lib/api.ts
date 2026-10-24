@@ -9,7 +9,10 @@ import type {
   ReplayFindSubjectResult,
   ApprovalRequestView,
   GuardSimulationView,
+  GateCaseRequestView,
   ReleaseApprovalRequestView,
+  ReleaseGateCasesView,
+  ReleaseGateCaseView,
   ReleaseGateSettingsInput,
   ReleaseGateView,
   ReleasePublishPreview,
@@ -2506,6 +2509,8 @@ export interface EvalFixture {
   scorers: EvalScorerSpec[] | null;
   /** Phase 15.2 — the golden run this case replays; null on a hand-written fixture. */
   recordingId: string | null;
+  /** On an enforced release gate this case must pass whatever the pass rate (admins set it). */
+  required?: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -3758,7 +3763,7 @@ export async function rotateAuditSigningKey() {
 export type { ApprovalEditableField, ApprovalRequestView, ApprovalStatus } from "@ai-orchestrator/shared";
 
 /** Phase 15.4 — the inbox holds paused runs and release requests (kind "release"). */
-export type ApprovalInboxItem = ApprovalRequestView | ReleaseApprovalRequestView;
+export type ApprovalInboxItem = ApprovalRequestView | ReleaseApprovalRequestView | GateCaseRequestView;
 
 export type ApprovalListStatus = "pending" | "decided" | "all";
 
@@ -3879,6 +3884,45 @@ export async function publishWorkflowVersion(workflowId: string, payload: Publis
 
 export async function rollbackWorkflowRelease(workflowId: string, payload: { version: number; reason: string }) {
   return apiRequest<{ release: WorkflowRelease }>(releasePath(workflowId, "rollback"), { method: "POST", body: JSON.stringify(payload) });
+}
+
+// Release gate admission — enforced gates count only admitted cases; required cases must pass.
+export type { GateCaseRequestView, ReleaseGateCasesView, ReleaseGateCaseView };
+
+export async function fetchReleaseGateCases(workflowId: string) {
+  return apiRequest<{ cases: ReleaseGateCasesView }>(releasePath(workflowId, "release-gate/cases"));
+}
+
+export async function admitGateCases(workflowId: string, fixtureIds: string[], reason?: string) {
+  return apiRequest<{ cases: ReleaseGateCasesView }>(releasePath(workflowId, "release-gate/cases/admit"), {
+    method: "POST",
+    body: JSON.stringify({ fixtureIds, ...(reason ? { reason } : {}) })
+  });
+}
+
+export async function rejectGateCases(workflowId: string, fixtureIds: string[], reason?: string) {
+  return apiRequest<{ cases: ReleaseGateCasesView }>(releasePath(workflowId, "release-gate/cases/reject"), {
+    method: "POST",
+    body: JSON.stringify({ fixtureIds, ...(reason ? { reason } : {}) })
+  });
+}
+
+export async function setGateCaseRequired(workflowId: string, fixtureId: string, required: boolean) {
+  return apiRequest<{ cases: ReleaseGateCasesView }>(releasePath(workflowId, `release-gate/cases/${encodeURIComponent(fixtureId)}/required`), {
+    method: "PUT",
+    body: JSON.stringify({ required })
+  });
+}
+
+export async function requestGateCases(workflowId: string, payload: { action: "admit" | "remove"; fixtureIds: string[]; reason: string }) {
+  return apiRequest<{ request: GateCaseRequestView }>(releasePath(workflowId, "release-gate/cases/requests"), { method: "POST", body: JSON.stringify(payload) });
+}
+
+export async function decideGateCaseRequest(requestId: string, decision: "approve" | "reject", reason?: string) {
+  return apiRequest<{ request: GateCaseRequestView }>(`/api/approvals/${encodeURIComponent(requestId)}/${decision}`, {
+    method: "POST",
+    body: JSON.stringify(reason ? { reason } : {})
+  });
 }
 
 export async function decideReleaseRequest(requestId: string, decision: "approve" | "reject", reason?: string) {

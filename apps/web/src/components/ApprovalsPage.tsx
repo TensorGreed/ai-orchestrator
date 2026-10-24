@@ -1,6 +1,7 @@
 /**
- * Phase 11.2 — Approvals: runs paused on a person, and (Phase 15.4)
- * requests to publish a workflow version past its release gate.
+ * Phase 11.2 — Approvals: runs paused on a person, (Phase 15.4)
+ * requests to publish a workflow version past its release gate, and
+ * requests to admit cases to (or remove them from) an enforced gate.
  *
  * Pending lists every request the user can see, with what the run asks,
  * who may decide and when it expires; approvers can edit the gate's fields,
@@ -10,8 +11,8 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { ApprovalEditableField, ApprovalRequestView, ReleaseApprovalRequestView } from "@ai-orchestrator/shared";
-import { ApiError, approveApproval, decideReleaseRequest, listApprovals, rejectApproval, type ApprovalInboxItem } from "../lib/api";
+import type { ApprovalEditableField, ApprovalRequestView, GateCaseRequestView, ReleaseApprovalRequestView } from "@ai-orchestrator/shared";
+import { ApiError, approveApproval, decideGateCaseRequest, decideReleaseRequest, listApprovals, rejectApproval, type ApprovalInboxItem } from "../lib/api";
 import {
   approvalKindLabel,
   approvalStatusLabel,
@@ -19,7 +20,9 @@ import {
   buildApprovalEdits,
   decisionError,
   decisionOutcome,
+  gateCaseDecisionOutcome,
   initialFieldDrafts,
+  isGateCaseInboxItem,
   isReleaseInboxItem,
   matchesApprovalFilter,
   matchesFocus,
@@ -192,7 +195,9 @@ export function ApprovalsPage({ focusRequestId, focusExecutionId, onOpenRun, onP
       <ul className="approvals-list" aria-busy={loading}>
         {visible.map((item) => (
           <li key={item.requestId}>
-            {isReleaseInboxItem(item) ? (
+            {isGateCaseInboxItem(item) ? (
+              <GateCaseRequestCard view={item} focused={matchesFocus(item, focusId)} onDecided={handleDecided} />
+            ) : isReleaseInboxItem(item) ? (
               <ReleaseRequestCard view={item} focused={matchesFocus(item, focusId)} onDecided={handleDecided} />
             ) : (
               <ApprovalCard view={item} focused={matchesFocus(item, focusId)} onDecided={handleDecided} {...(onOpenRun ? { onOpenRun } : {})} />
@@ -589,6 +594,161 @@ export function ReleaseRequestCard({ view, focused, onDecided }: ReleaseRequestC
             </button>
             <button type="button" className="pg-btn small primary" disabled={disabled} onClick={() => void decide("approve")}>
               {busy === "approve" ? "Publishing…" : `Approve and publish v${view.version}`}
+            </button>
+          </div>
+        </div>
+      )}
+    </article>
+  );
+}
+
+interface GateCaseRequestCardProps {
+  view: GateCaseRequestView;
+  focused: boolean;
+  onDecided: (message: string) => void;
+}
+
+/** Release gate admission — admit cases to an enforced gate (they count toward publishing), or remove admitted ones. */
+export function GateCaseRequestCard({ view, focused, onDecided }: GateCaseRequestCardProps) {
+  const [reason, setReason] = useState("");
+  const [busy, setBusy] = useState<"approve" | "reject" | null>(null);
+  const [reasonError, setReasonError] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const cardRef = useRef<HTMLElement | null>(null);
+  const pending = view.status === "pending";
+  const idBase = `approval-${view.requestId}`;
+  const removing = view.kind === "remove_cases";
+
+  useEffect(() => {
+    if (focused) cardRef.current?.scrollIntoView?.({ block: "center" });
+  }, [focused]);
+
+  const decide = async (decision: "approve" | "reject") => {
+    setError(null);
+    setReasonError(null);
+    const trimmed = reason.trim();
+    if (decision === "reject" && !trimmed) {
+      setReasonError("A reason is required to reject a request");
+      return;
+    }
+    setBusy(decision);
+    try {
+      await decideGateCaseRequest(view.requestId, decision, trimmed || undefined);
+      onDecided(gateCaseDecisionOutcome(decision, view));
+    } catch (err) {
+      setError(formatError(err));
+      if (err instanceof ApiError && err.status === 409) onDecided(formatError(err));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const disabled = !pending || !view.canDecide || busy !== null;
+
+  return (
+    <article
+      ref={cardRef}
+      className={["approval-card", "is-release", `is-${view.status}`, focused && "is-focused"].filter(Boolean).join(" ")}
+      aria-labelledby={`${idBase}-title`}
+      data-request-id={view.requestId}
+    >
+      <header className="approval-card-head">
+        <div className="approval-card-title">
+          <span className={`approval-status approval-status-${view.status}`}>{approvalStatusLabel(view.status)}</span>
+          <span className="approval-kind">{approvalKindLabel(view.kind)}</span>
+          <h3 id={`${idBase}-title`}>{view.message}</h3>
+        </div>
+        <div className="approval-card-when">
+          <span title={formatWhen(view.createdAt)}>asked {relativeTime(view.createdAt)}</span>
+          {pending && view.expiresAt && (
+            <span title={formatWhen(view.expiresAt)}>
+              {Date.parse(view.expiresAt) > Date.now() ? "expires " : "expired "}
+              {relativeTime(view.expiresAt)}
+            </span>
+          )}
+        </div>
+      </header>
+
+      <dl className="approval-meta">
+        <div>
+          <dt>Workflow</dt>
+          <dd>{view.workflowName ?? view.workflowId}</dd>
+        </div>
+        <div>
+          <dt>What it changes</dt>
+          <dd>
+            {removing
+              ? "These cases leave their golden sets, so the gate stops counting them. Their golden runs are kept."
+              : "These cases already run with every gate job; once admitted they count toward the pass rate and the other limits."}
+          </dd>
+        </div>
+        <div>
+          <dt>Requested by</dt>
+          <dd>
+            {view.requestedBy ?? "unknown"}
+            {view.requestReason ? <span className="approval-reason">“{view.requestReason}”</span> : null}
+          </dd>
+        </div>
+        <div>
+          <dt>Approvers</dt>
+          <dd>{approversSummary(view)}</dd>
+        </div>
+        {!pending && (
+          <div>
+            <dt>Decided</dt>
+            <dd>
+              {view.decidedBy ?? "the timeout"} {view.decidedAt ? <span title={formatWhen(view.decidedAt)}>{relativeTime(view.decidedAt)}</span> : null}
+              {view.reason ? <span className="approval-reason">“{view.reason}”</span> : null}
+            </dd>
+          </div>
+        )}
+      </dl>
+
+      <div className="approval-release-reasons">
+        <div className="approval-tool-head">
+          <span>Cases</span>
+        </div>
+        <ul>
+          {view.cases.map((entry) => (
+            <li key={entry.fixtureId}>
+              {entry.name} <code>{entry.fixtureId}</code>
+            </li>
+          ))}
+        </ul>
+      </div>
+
+      {pending && (
+        <div className="approval-decide">
+          <label className="approval-reason-input" htmlFor={`${idBase}-reason`}>
+            <span>Reason (required to reject)</span>
+            <textarea
+              id={`${idBase}-reason`}
+              rows={2}
+              maxLength={2000}
+              value={reason}
+              disabled={disabled}
+              aria-invalid={reasonError ? true : undefined}
+              aria-describedby={reasonError ? `${idBase}-reason-error` : undefined}
+              onChange={(event) => setReason(event.target.value)}
+            />
+            {reasonError && (
+              <span id={`${idBase}-reason-error`} className="approval-field-error">
+                {reasonError}
+              </span>
+            )}
+          </label>
+          {error && (
+            <div className="approvals-error" role="alert">
+              {error}
+            </div>
+          )}
+          <div className="approval-actions">
+            {!view.canDecide && view.cannotDecideReason && <span className="approval-cannot">{view.cannotDecideReason}</span>}
+            <button type="button" className="pg-btn small danger" disabled={disabled} onClick={() => void decide("reject")}>
+              {busy === "reject" ? "Rejecting…" : "Reject"}
+            </button>
+            <button type="button" className="pg-btn small primary" disabled={disabled} onClick={() => void decide("approve")}>
+              {busy === "approve" ? "Saving…" : removing ? `Approve and remove ${view.cases.length === 1 ? "the case" : `${view.cases.length} cases`}` : `Approve and admit ${view.cases.length === 1 ? "the case" : `${view.cases.length} cases`}`}
             </button>
           </div>
         </div>

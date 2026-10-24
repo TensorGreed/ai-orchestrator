@@ -344,6 +344,31 @@ describe("guard policy simulation", () => {
     expect(publish.json<{ reasons: string[] }>().reasons.join(" ")).toMatch(/guard policy simulation/);
   }, 60_000);
 
+  it("on an enforced gate with admitted cases, a simulation job is never gate evidence: no admission block, refused on publish, never the fallback", async () => {
+    const { context, admin, builder } = await guardedSetup();
+    const recordings = await recordRuns(context, builder.cookie, "wf-guarded", 2, { user_prompt: "Write to someone@example.com please" });
+    context.store.createEvalDataset({ id: "set-enforced", name: "Golden", workflowId: "wf-guarded" });
+    for (const recording of recordings) {
+      expect((await call(context, "POST", "/api/eval/datasets/set-enforced/recordings", builder.cookie, { recordingId: recording.id })).statusCode).toBe(201);
+    }
+    const gate = await call(context, "PUT", "/api/workflows/wf-guarded/release-gate", admin.cookie, { enabled: true, enforced: true, datasetIds: ["set-enforced"], policy: { minCases: 1 } });
+    expect(gate.statusCode, gate.body).toBe(200);
+    const version = new WorkflowVersionService(context.store).snapshot({ workflow: context.store.getWorkflow("wf-guarded")!, changeNote: "test" }).version;
+
+    const simulation = await simulate(context, admin.cookie, "sim-guard", { document: emailProfile("allow") });
+    const jobId = simulation.jobIds[0]!;
+    const job = (await call(context, "GET", `/api/replay/runs/${jobId}`, admin.cookie)).json<{ run: EvalRunView & { releaseGate?: unknown } }>().run;
+    expect(job.releaseGate).toBeUndefined();
+    expect(job.candidate).toMatchObject({ releaseEligible: false });
+    const fallback = (await call(context, "GET", `/api/workflows/wf-guarded/publish-preview?version=${version}`, builder.cookie)).json<{ preview: { replayRunId?: string | null } }>().preview;
+    expect(fallback.replayRunId ?? null).not.toBe(jobId);
+    const named = (await call(context, "GET", `/api/workflows/wf-guarded/publish-preview?version=${version}&replayRunId=${jobId}`, builder.cookie)).json<{ preview: { verdict: string; reasons: string[] } }>().preview;
+    expect(named.verdict).toBe("blocked");
+    expect(named.reasons.join(" ")).toMatch(/guard policy simulation/);
+    const publish = await call(context, "POST", "/api/workflows/wf-guarded/publish", builder.cookie, { version, replayRunId: jobId });
+    expect(publish.statusCode, publish.body).toBe(409);
+  }, 60_000);
+
   it("writes no guard events, stats or token vault rows for simulated replays", async () => {
     const { context, builder } = await guardedSetup();
     await recordRuns(context, builder.cookie, "wf-guarded", 2, { user_prompt: "Write to someone@example.com please" });
