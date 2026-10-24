@@ -3,6 +3,10 @@ import type {
   ReplayCaptureSettingsUpdate,
   ReplayCaptureSettingsView,
   ReplayCaptureView,
+  ReplayFindSubjectDeleteResult,
+  ReplayFindSubjectMatch,
+  ReplayFindSubjectQuery,
+  ReplayFindSubjectResult,
   ApprovalRequestView,
   ReleaseApprovalRequestView,
   ReleaseGateSettingsInput,
@@ -3901,6 +3905,18 @@ export async function promoteReplayCaptures(ids: string[], datasetId?: string) {
     method: "POST",
     body: JSON.stringify({ ids, ...(datasetId ? { datasetId } : {}) })
   });
+}
+
+export type { ReplayFindSubjectDeleteResult, ReplayFindSubjectMatch, ReplayFindSubjectQuery, ReplayFindSubjectResult } from "@ai-orchestrator/shared";
+
+/** Admins: where a value is stored (raw or as its surrogate). Nothing is deleted. */
+export async function findReplaySubject(query: ReplayFindSubjectQuery) {
+  return apiRequest<ReplayFindSubjectResult>("/api/replay/recordings/find-subject", { method: "POST", body: JSON.stringify(query) });
+}
+
+/** Admins: delete rows a search returned; a possible match is deleted only with `confirmPossible`. */
+export async function deleteReplaySubject(query: ReplayFindSubjectQuery, targets: Array<{ kind: ReplayFindSubjectMatch["kind"]; id: string; confirmPossible?: true }>) {
+  return apiRequest<ReplayFindSubjectDeleteResult>("/api/replay/recordings/find-subject/delete", { method: "POST", body: JSON.stringify({ ...query, targets }) });
 }
 
 export async function discardReplayCaptures(ids: string[]) {

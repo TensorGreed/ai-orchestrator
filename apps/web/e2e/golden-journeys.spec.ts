@@ -358,5 +358,19 @@ test.describe("golden journeys", () => {
     await setRow.click();
     const cases = page.getByRole("region", { name: "Cases" });
     await expect(cases.getByText(/Captured webhook/)).toBeVisible();
+
+    // An admin finds the person's masked copy; bare digits offer "Read as" and a country.
+    await sidebarItem(page, "Evaluations").click();
+    const lookup = page.getByRole("region", { name: "Find a person's data" });
+    await lookup.getByLabel("Value").fill("4155550123");
+    await lookup.getByLabel("Read as").selectOption("phone");
+    await expect(lookup.getByLabel("Country")).toHaveValue("");
+    await lookup.getByLabel("Value").fill("jane.doe@example.com");
+    await expect(lookup.getByLabel("Read as")).toHaveCount(0);
+    await lookup.getByRole("button", { name: "Search" }).click();
+    await expect(lookup.getByText(/Searched as email address\. [1-9]\d* certain, 0 possible\./)).toBeVisible();
+    const matches = lookup.getByRole("list", { name: "Matches" });
+    await expect(matches.getByRole("listitem").filter({ hasText: "stored masked" }).first()).toBeVisible();
+    await expect(lookup.getByRole("button", { name: /Delete selected \([1-9]/ })).toBeEnabled();
   });
 });

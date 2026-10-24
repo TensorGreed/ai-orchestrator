@@ -3,7 +3,18 @@
  * inbox's labels. Pure helpers; CaptureInbox renders them.
  */
 
-import { REPLAY_CAPTURE_MAX_PER_DAY_LIMIT, REPLAY_CAPTURE_STATUSES, type ReplayCaptureSettingsUpdate, type ReplayCaptureSettingsView, type ReplayCaptureStatus } from "@ai-orchestrator/shared";
+import {
+  REPLAY_CAPTURE_API_KEY_FILTER,
+  REPLAY_CAPTURE_MAX_PER_DAY_LIMIT,
+  REPLAY_CAPTURE_STATUSES,
+  type ReplayCaptureSettingsUpdate,
+  type ReplayCaptureSettingsView,
+  type ReplayCaptureStatus,
+  type ReplayFindSubjectKind,
+  type ReplayFindSubjectMatch,
+  type ReplayFindSubjectQuery,
+  type ReplayFindSubjectResult
+} from "@ai-orchestrator/shared";
 
 export interface CaptureForm {
   enabled: boolean;
@@ -95,6 +106,7 @@ export function captureStatusLabel(status: ReplayCaptureStatus): string {
 }
 
 const TRIGGER_LABELS: Record<string, string> = {
+  [REPLAY_CAPTURE_API_KEY_FILTER]: "API key",
   webhook: "Webhook",
   webhook_api: "API",
   webhook_api_stream: "API (stream)",
@@ -111,8 +123,24 @@ const TRIGGER_LABELS: Record<string, string> = {
   discord_webhook: "Discord"
 };
 
-/** Production triggers the inbox can filter by, in the order the filter lists them. */
-export const CAPTURE_TRIGGER_FILTERS = ["webhook", "webhook_api", "cron", "chat", "form", "mcp_server", "queue", "slack_webhook", "telegram_webhook", "discord_webhook"] as const;
+/**
+ * Production triggers the inbox can filter by, in the order the filter lists
+ * them. `api_key` filters on the capture source (runs an API key started;
+ * their trigger stays `manual`).
+ */
+export const CAPTURE_TRIGGER_FILTERS = [
+  "webhook",
+  "webhook_api",
+  REPLAY_CAPTURE_API_KEY_FILTER,
+  "cron",
+  "chat",
+  "form",
+  "mcp_server",
+  "queue",
+  "slack_webhook",
+  "telegram_webhook",
+  "discord_webhook"
+] as const;
 
 export type CapturePeriod = "" | "24h" | "7d" | "30d";
 export const CAPTURE_PERIODS: Array<{ value: CapturePeriod; label: string }> = [
@@ -140,4 +168,72 @@ export function captureSummaryLine(view: ReplayCaptureSettingsView): string {
   if (!view.enabled) return "Off. Production runs are not recorded.";
   const masked = view.dlp ? "personal data masked" : "masking off";
   return `Capturing ${ratePercentText(view.effectiveRate)}% of production runs, up to ${view.maxPerDay} a day, ${masked}. ${view.capturedToday} today.`;
+}
+
+// ---------------------------------------------------------------------------
+// Data-subject lookup (admins)
+// ---------------------------------------------------------------------------
+
+/** How the admin asked the lookup to read the value. */
+export type SubjectReadAs = "text" | "phone";
+
+/** "Read as" is offered for 7–15 bare digits: they could be a phone number or plain text (an account number). */
+export function subjectReadAsOffered(value: string): boolean {
+  return /^\d{7,15}$/.test(value.trim());
+}
+
+/** The search body: a phone hint and its country only when the admin chose them for bare digits. */
+export function subjectQuery(value: string, readAs: SubjectReadAs, country: string): ReplayFindSubjectQuery {
+  const query: ReplayFindSubjectQuery = { value: value.trim() };
+  if (subjectReadAsOffered(value) && readAs === "phone") {
+    query.dataClass = "phone";
+    if (country) query.country = country;
+  }
+  return query;
+}
+
+const SUBJECT_CLASS_LABELS: Record<string, string> = {
+  email: "email address",
+  phone: "phone",
+  card_number: "card number",
+  iban: "IBAN",
+  us_ssn: "SSN",
+  national_id: "national ID"
+};
+
+/** The line above the results: "Searched as phone (+1)", "Searched as phone (no country code)", "Searched as text". */
+export function subjectSearchedAs(result: Pick<ReplayFindSubjectResult, "dataClass" | "callingCode">): string {
+  if (!result.dataClass) return "Searched as text";
+  const label = SUBJECT_CLASS_LABELS[result.dataClass] ?? dataClassLabel(result.dataClass);
+  if (result.dataClass !== "phone") return `Searched as ${label}`;
+  return result.callingCode ? `Searched as phone (+${result.callingCode})` : "Searched as phone (no country code)";
+}
+
+const SUBJECT_KIND_LABELS: Record<ReplayFindSubjectKind, string> = {
+  recording: "Golden or captured run",
+  fixture: "Golden-set case",
+  eval_result: "Replay result",
+  execution: "Replay run",
+  cassette: "Replay cassette"
+};
+
+export function subjectKindLabel(kind: ReplayFindSubjectKind): string {
+  return SUBJECT_KIND_LABELS[kind];
+}
+
+export const subjectKey = (match: Pick<ReplayFindSubjectMatch, "kind" | "id">) => `${match.kind}:${match.id}`;
+
+/** Certain matches (ticked by default) and possible matches (no country code in the stored data; never ticked by default). */
+export function splitSubjectMatches(matches: readonly ReplayFindSubjectMatch[]): { exact: ReplayFindSubjectMatch[]; possible: ReplayFindSubjectMatch[] } {
+  return { exact: matches.filter((match) => match.certainty === "exact"), possible: matches.filter((match) => match.certainty !== "exact") };
+}
+
+/** Delete targets for the ticked rows: a possible match is sent with its explicit confirmation. */
+export function subjectDeleteTargets(
+  matches: readonly ReplayFindSubjectMatch[],
+  ticked: ReadonlySet<string>
+): Array<{ kind: ReplayFindSubjectKind; id: string; confirmPossible?: true }> {
+  return matches
+    .filter((match) => ticked.has(subjectKey(match)))
+    .map((match) => (match.certainty === "exact" ? { kind: match.kind, id: match.id } : { kind: match.kind, id: match.id, confirmPossible: true as const }));
 }

@@ -426,6 +426,7 @@ function WorkflowCapture({ workflowId, activeProjectId, canEdit, isAdmin, onOpen
                     {captureStatusLabel((REPLAY_CAPTURE_STATUSES as readonly string[]).includes(item.sourceStatus) ? (item.sourceStatus as ReplayCaptureStatus) : "error")}
                   </span>
                   <span className="capture-chips" aria-label="Data classes">
+                    {item.source === "api_key" && <span className="capture-chip is-source">API key</span>}
                     {!item.masked ? (
                       <span className="capture-chip is-raw">not masked</span>
                     ) : item.dataClasses.length === 0 ? (

@@ -62,6 +62,7 @@ function capture(id: string, overrides: Partial<ReplayCaptureView> = {}): Replay
     capturedAt: "2026-10-24T10:00:00.000Z",
     dataClasses: ["email", "card_number"],
     masked: true,
+    source: null,
     ...overrides
   };
 }
@@ -148,6 +149,17 @@ describe("CaptureInbox", () => {
     );
     const from = vi.mocked(api.fetchReplayCaptures).mock.lastCall![1]!.from!;
     expect(Math.abs(Date.now() - 7 * 86_400_000 - Date.parse(from))).toBeLessThan(60_000);
+  });
+
+  it("marks runs an API key started with a chip and filters them by source", async () => {
+    vi.mocked(api.fetchReplayCaptures).mockResolvedValue({ items: [capture("a", { name: "Captured API-key run", sourceTriggerType: "manual", source: "api_key" }), capture("b")], total: 2 });
+    render(<CaptureInbox workflows={workflows} canEdit isAdmin={false} />);
+    const rows = within(await screen.findByRole("list", { name: "Captured runs" })).getAllByRole("listitem");
+    expect(within(rows[0]!).getByText("API key")).toBeInTheDocument();
+    expect(within(rows[1]!).queryByText("API key")).toBeNull();
+    expect(within(screen.getByLabelText("Filter by trigger")).getByRole("option", { name: "API key" })).toBeInTheDocument();
+    await userEvent.selectOptions(screen.getByLabelText("Filter by trigger"), "api_key");
+    await waitFor(() => expect(api.fetchReplayCaptures).toHaveBeenLastCalledWith("wf-1", { limit: 100, trigger: "api_key" }));
   });
 
   it("is read-only for viewers", async () => {

@@ -1,6 +1,20 @@
 import { describe, expect, it } from "vitest";
-import type { ReplayCaptureSettingsView } from "@ai-orchestrator/shared";
-import { captureFormFrom, capturePeriodFrom, captureSettingsFromForm, captureSummaryLine, captureTriggerLabel, dataClassLabel, ratePercentText } from "./replay-capture";
+import type { ReplayCaptureSettingsView, ReplayFindSubjectMatch } from "@ai-orchestrator/shared";
+import {
+  CAPTURE_TRIGGER_FILTERS,
+  captureFormFrom,
+  capturePeriodFrom,
+  captureSettingsFromForm,
+  captureSummaryLine,
+  captureTriggerLabel,
+  dataClassLabel,
+  ratePercentText,
+  splitSubjectMatches,
+  subjectDeleteTargets,
+  subjectQuery,
+  subjectReadAsOffered,
+  subjectSearchedAs
+} from "./replay-capture";
 
 function view(overrides: Partial<ReplayCaptureSettingsView> = {}): ReplayCaptureSettingsView {
   return {
@@ -72,5 +86,58 @@ describe("capture labels", () => {
     expect(captureSummaryLine(view())).toBe("Off. Production runs are not recorded.");
     expect(captureSummaryLine(view({ enabled: true, effectiveRate: 0.1, capturedToday: 3 }))).toBe("Capturing 10% of production runs, up to 20 a day, personal data masked. 3 today.");
     expect(captureSummaryLine(view({ deployment: { enabled: false, maxRate: 1, retentionDays: 14, maxCandidates: 200 } }))).toContain("REPLAY_CAPTURE_ENABLED");
+  });
+});
+
+describe("API-key captures", () => {
+  it("the trigger filter offers API key, filtering on the source", () => {
+    expect(CAPTURE_TRIGGER_FILTERS).toContain("api_key");
+    expect(captureTriggerLabel("api_key")).toBe("API key");
+  });
+});
+
+describe("data-subject lookup helpers", () => {
+  const match = (id: string, certainty: ReplayFindSubjectMatch["certainty"]): ReplayFindSubjectMatch => ({
+    kind: "recording",
+    id,
+    workflowId: "wf",
+    projectId: null,
+    name: id,
+    status: "golden",
+    matchedAs: ["raw"],
+    fields: ["input"],
+    hits: [],
+    certainty
+  });
+
+  it("offers Read as for 7 to 15 bare digits only, and sends the hint and country only then", () => {
+    expect(subjectReadAsOffered("4155551234")).toBe(true);
+    expect(subjectReadAsOffered(" 1234567 ")).toBe(true);
+    expect(subjectReadAsOffered("123456")).toBe(false);
+    expect(subjectReadAsOffered("1234567890123456")).toBe(false);
+    expect(subjectReadAsOffered("+14155551234")).toBe(false);
+    expect(subjectReadAsOffered("jane@example.com")).toBe(false);
+    expect(subjectQuery("4155551234", "text", "US")).toEqual({ value: "4155551234" });
+    expect(subjectQuery("4155551234", "phone", "")).toEqual({ value: "4155551234", dataClass: "phone" });
+    expect(subjectQuery("4155551234", "phone", "US")).toEqual({ value: "4155551234", dataClass: "phone", country: "US" });
+    expect(subjectQuery(" jane@example.com ", "phone", "US")).toEqual({ value: "jane@example.com" });
+  });
+
+  it("says how the value was searched", () => {
+    expect(subjectSearchedAs({ dataClass: "phone", callingCode: "1" })).toBe("Searched as phone (+1)");
+    expect(subjectSearchedAs({ dataClass: "phone", callingCode: null })).toBe("Searched as phone (no country code)");
+    expect(subjectSearchedAs({ dataClass: "email", callingCode: null })).toBe("Searched as email address");
+    expect(subjectSearchedAs({ dataClass: null, callingCode: null })).toBe("Searched as text");
+  });
+
+  it("splits possible matches out and confirms each one it deletes", () => {
+    const matches = [match("a", "exact"), match("b", "national_only"), match("c", "national_only")];
+    const { exact, possible } = splitSubjectMatches(matches);
+    expect(exact.map((entry) => entry.id)).toEqual(["a"]);
+    expect(possible.map((entry) => entry.id)).toEqual(["b", "c"]);
+    expect(subjectDeleteTargets(matches, new Set(["recording:a", "recording:c"]))).toEqual([
+      { kind: "recording", id: "a" },
+      { kind: "recording", id: "c", confirmPossible: true }
+    ]);
   });
 });

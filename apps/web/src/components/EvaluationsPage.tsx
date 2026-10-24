@@ -55,6 +55,7 @@ import { GoldenStarIcon, ReplayResultView } from "./GoldenRunPanel";
 import { ReplayCandidateFields, ReplayEstimatePanel } from "./ReplayCandidateFields";
 import { ReleaseGatePanel } from "./ReleaseGatePanel";
 import { CaptureInbox } from "./CaptureInbox";
+import { FindSubjectPanel } from "./FindSubjectPanel";
 
 /**
  * Phase 15.2 — the Evaluations page: golden sets (golden runs of one
@@ -364,6 +365,7 @@ function GoldenSetsView({ workflows, workflowNames, activeProjectId, canEdit, is
         {...(currentWorkflowId ? { initialWorkflowId: currentWorkflowId } : {})}
         {...(onOpenRun ? { onOpenRun } : {})}
       />
+      {isAdmin && <FindSubjectPanel />}
     </div>
   );
 }
