@@ -54,6 +54,7 @@ import {
 import { GoldenStarIcon, ReplayResultView } from "./GoldenRunPanel";
 import { ReplayCandidateFields, ReplayEstimatePanel } from "./ReplayCandidateFields";
 import { ReleaseGatePanel } from "./ReleaseGatePanel";
+import { CaptureInbox } from "./CaptureInbox";
 
 /**
  * Phase 15.2 — the Evaluations page: golden sets (golden runs of one
@@ -73,6 +74,8 @@ export interface EvaluationsPageProps {
   /** Phase 15.4 — the tab to open on, and the workflow the Release gates tab starts on. */
   initialTab?: EvaluationsTab;
   currentWorkflowId?: string;
+  /** Phase 15.6 — opens a captured run's source execution on the Runs page. */
+  onOpenRun?: (executionId: string) => void;
 }
 
 export type EvaluationsTab = "sets" | "jobs" | "gates";
@@ -161,7 +164,7 @@ function describeScorer(scorer: EvalScorerSpec): string {
   }
 }
 
-export function EvaluationsPage({ workflows, activeProjectId, role, onOpenSettings, initialTab = "sets", currentWorkflowId }: EvaluationsPageProps) {
+export function EvaluationsPage({ workflows, activeProjectId, role, onOpenSettings, initialTab = "sets", currentWorkflowId, onOpenRun }: EvaluationsPageProps) {
   const canEdit = role === "admin" || role === "builder";
   const [tab, setTab] = useState<Tab>(initialTab);
   const [openJobId, setOpenJobId] = useState<string | null>(null);
@@ -212,7 +215,16 @@ export function EvaluationsPage({ workflows, activeProjectId, role, onOpenSettin
       </header>
       <div role="tabpanel" id={`evals-panel-${tab}`} aria-labelledby={`evals-tab-${tab}`} className="evals-panel">
         {tab === "sets" ? (
-          <GoldenSetsView workflows={workflows} workflowNames={workflowNames} activeProjectId={activeProjectId} canEdit={canEdit} onJobStarted={onJobStarted} />
+          <GoldenSetsView
+            workflows={workflows}
+            workflowNames={workflowNames}
+            activeProjectId={activeProjectId}
+            canEdit={canEdit}
+            isAdmin={role === "admin"}
+            onJobStarted={onJobStarted}
+            {...(currentWorkflowId ? { currentWorkflowId } : {})}
+            {...(onOpenRun ? { onOpenRun } : {})}
+          />
         ) : tab === "gates" ? (
           <ReleaseGatePanel
             workflows={workflows}
@@ -243,10 +255,13 @@ interface GoldenSetsViewProps {
   workflowNames: Map<string, string>;
   activeProjectId?: string;
   canEdit: boolean;
+  isAdmin: boolean;
   onJobStarted: (run: EvalRunView) => void;
+  currentWorkflowId?: string;
+  onOpenRun?: (executionId: string) => void;
 }
 
-function GoldenSetsView({ workflows, workflowNames, activeProjectId, canEdit, onJobStarted }: GoldenSetsViewProps) {
+function GoldenSetsView({ workflows, workflowNames, activeProjectId, canEdit, isAdmin, onJobStarted, currentWorkflowId, onOpenRun }: GoldenSetsViewProps) {
   const [sets, setSets] = useState<EvalDataset[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [openSetId, setOpenSetId] = useState<string | null>(null);
@@ -340,6 +355,15 @@ function GoldenSetsView({ workflows, workflowNames, activeProjectId, canEdit, on
           ))}
         </ul>
       )}
+      <CaptureInbox
+        workflows={workflows}
+        activeProjectId={activeProjectId}
+        canEdit={canEdit}
+        isAdmin={isAdmin}
+        onPromoted={() => void refresh()}
+        {...(currentWorkflowId ? { initialWorkflowId: currentWorkflowId } : {})}
+        {...(onOpenRun ? { onOpenRun } : {})}
+      />
     </div>
   );
 }

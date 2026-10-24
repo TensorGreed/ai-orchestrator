@@ -1,4 +1,8 @@
 import type {
+  ReplayCapturePromoteOutcome,
+  ReplayCaptureSettingsUpdate,
+  ReplayCaptureSettingsView,
+  ReplayCaptureView,
   ApprovalRequestView,
   ReleaseApprovalRequestView,
   ReleaseGateSettingsInput,
@@ -3857,4 +3861,46 @@ export async function decideReleaseRequest(requestId: string, decision: "approve
     `/api/approvals/${encodeURIComponent(requestId)}/${decision}`,
     { method: "POST", body: JSON.stringify(reason ? { reason } : {}) }
   );
+}
+
+// --- Phase 15.6: production capture ---------------------------------------------------
+
+export type { ReplayCapturePromoteOutcome, ReplayCaptureSettingsUpdate, ReplayCaptureSettingsView, ReplayCaptureView };
+export type { ReplayCaptureStatus } from "@ai-orchestrator/shared";
+
+const capturePath = (workflowId: string, leaf: "replay-capture" | "replay-captures") => `/api/workflows/${encodeURIComponent(workflowId)}/${leaf}`;
+
+export async function fetchReplayCaptureSettings(workflowId: string) {
+  return apiRequest<{ settings: ReplayCaptureSettingsView }>(capturePath(workflowId, "replay-capture"));
+}
+
+export async function saveReplayCaptureSettings(workflowId: string, settings: ReplayCaptureSettingsUpdate) {
+  return apiRequest<{ settings: ReplayCaptureSettingsView }>(capturePath(workflowId, "replay-capture"), {
+    method: "PUT",
+    body: JSON.stringify(settings)
+  });
+}
+
+export async function fetchReplayCaptures(workflowId: string, filter: { runStatus?: string; trigger?: string; limit?: number; offset?: number } = {}) {
+  const params = new URLSearchParams();
+  if (filter.runStatus) params.set("runStatus", filter.runStatus);
+  if (filter.trigger) params.set("trigger", filter.trigger);
+  if (filter.limit) params.set("limit", String(filter.limit));
+  if (filter.offset) params.set("offset", String(filter.offset));
+  const q = params.toString() ? `?${params.toString()}` : "";
+  return apiRequest<{ items: ReplayCaptureView[]; total: number }>(`${capturePath(workflowId, "replay-captures")}${q}`);
+}
+
+export async function promoteReplayCaptures(ids: string[], datasetId?: string) {
+  return apiRequest<{ results: ReplayCapturePromoteOutcome[]; promoted: number }>("/api/replay/captures/promote", {
+    method: "POST",
+    body: JSON.stringify({ ids, ...(datasetId ? { datasetId } : {}) })
+  });
+}
+
+export async function discardReplayCaptures(ids: string[]) {
+  return apiRequest<{ results: Array<{ id: string; ok: boolean; error?: string }>; discarded: number }>("/api/replay/captures/discard", {
+    method: "POST",
+    body: JSON.stringify({ ids })
+  });
 }

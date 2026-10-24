@@ -1,0 +1,200 @@
+/* ---------------------------------------------------------------------------
+   capture.css — Phase 15.6: production capture and the "Captured runs" inbox
+   in Evaluations → Golden sets. Tokens only; both themes come from tokens.css.
+   --------------------------------------------------------------------------- */
+
+.capture-panel {
+  display: grid;
+  gap: 12px;
+}
+
+.capture-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.capture-title {
+  margin: 0;
+  font-size: var(--fs-lg);
+  color: var(--fg);
+}
+
+.capture-workflow {
+  display: grid;
+  gap: 4px;
+  min-width: min(100%, 240px);
+}
+
+.capture-grid {
+  display: grid;
+  grid-template-columns: minmax(min(100%, 300px), 1fr) minmax(min(100%, 420px), 2fr);
+  gap: 16px;
+  align-items: start;
+}
+
+@media (max-width: 860px) {
+  .capture-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.capture-toggle {
+  font-size: var(--fs-md);
+  color: var(--fg);
+  font-weight: 600;
+}
+
+.capture-advanced > summary {
+  cursor: pointer;
+  color: var(--fg-muted);
+  font-size: var(--fs-sm);
+  padding: 4px 0;
+}
+
+.capture-advanced[open] > summary {
+  margin-bottom: 8px;
+}
+
+.capture-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 10px;
+}
+
+.capture-inbox .release-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.capture-inbox-title {
+  margin: 0;
+  font-size: var(--fs-md);
+  color: var(--fg);
+}
+
+.capture-inbox .release-card-head .capture-filter {
+  margin-left: auto;
+  width: auto;
+  flex: 0 0 auto;
+  max-width: 50%;
+}
+
+.capture-help {
+  margin: 0;
+  color: var(--fg-muted);
+  font-size: var(--fs-xs);
+  line-height: 1.5;
+}
+
+.capture-row-sub {
+  color: var(--fg-muted);
+  font-size: var(--fs-xs);
+}
+
+.capture-bulk {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.capture-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.capture-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-areas:
+    "check main status"
+    "check chips actions";
+  align-items: center;
+  gap: 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--bg-elev-2);
+  padding: 10px 12px;
+}
+
+.capture-row > input[type="checkbox"] {
+  grid-area: check;
+}
+
+.capture-row-main {
+  grid-area: main;
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.capture-row-title {
+  color: var(--fg);
+  font-size: var(--fs-sm);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.capture-row > .release-tag {
+  grid-area: status;
+  justify-self: end;
+}
+
+.capture-chips {
+  grid-area: chips;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.capture-chip {
+  font-size: var(--fs-xs);
+  color: var(--port-guard);
+  background: var(--port-guard-soft);
+  border-radius: var(--r-pill);
+  padding: 1px 8px;
+}
+
+.capture-chip.is-none {
+  color: var(--fg-muted);
+  background: transparent;
+  border: 1px solid var(--line-strong);
+}
+
+.capture-chip.is-raw {
+  color: var(--warn);
+  background: var(--warn-soft);
+}
+
+.capture-actions {
+  grid-area: actions;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+@media (max-width: 560px) {
+  .capture-row {
+    grid-template-columns: auto minmax(0, 1fr);
+    grid-template-areas:
+      "check main"
+      "check status"
+      "check chips"
+      "check actions";
+  }
+
+  .capture-row > .release-tag,
+  .capture-actions {
+    justify-self: start;
+    justify-content: flex-start;
+  }
+}

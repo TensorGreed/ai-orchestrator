@@ -296,4 +296,67 @@ test.describe("golden journeys", () => {
     const draft = await page.request.post(`${API_URL}/webhook-test/${hookPath}`, { data: {} });
     expect(await draft.json()).toMatchObject({ output: { result: "second" } });
   });
+
+  test("captures a production run, masks it, and promotes it from the inbox into a golden set", async ({ page }) => {
+    await openStudio(page);
+    const stamp = Date.now();
+    const workflowId = `wf-e2e-capture-${stamp}`;
+    const hookPath = `e2e-capture-${stamp}`;
+    const workflow = {
+      id: workflowId,
+      name: `E2E Capture ${stamp}`,
+      schemaVersion: "1.0.0",
+      workflowVersion: 1,
+      nodes: [
+        { id: "hook", type: "webhook_input", name: "Hook", position: { x: 80, y: 180 }, config: { path: hookPath, method: "POST" } },
+        { id: "out", type: "output", name: "Output", position: { x: 380, y: 180 }, config: { responseTemplate: "thanks", outputKey: "result" } }
+      ],
+      edges: [{ id: "edge-1", source: "hook", target: "out" }]
+    };
+    expect((await page.request.post("/api/workflows", { data: workflow })).ok()).toBeTruthy();
+
+    // Evaluations → Golden sets on this workflow: turn capture on with the defaults, then sample every run for the test.
+    await page.reload();
+    await page.getByLabel("Workflow", { exact: true }).selectOption(workflowId);
+    await sidebarItem(page, "Evaluations").click();
+    const capture = page.getByRole("region", { name: "Production capture" });
+    await expect(capture.getByText("Off. Production runs are not recorded.")).toBeVisible();
+    await expect(capture.getByText(/Turn on capture and a sample/)).toBeVisible();
+    await capture.getByRole("checkbox", { name: "Capture production runs" }).check();
+    await expect(capture.getByText(/Capturing 10% of production runs, up to 20 a day, personal data masked/)).toBeVisible();
+    await capture.getByText("Advanced").click();
+    await capture.getByLabel("Sample rate (%)").fill("100");
+    await capture.getByRole("button", { name: "Save" }).click();
+    await expect(capture.getByText(/Capturing 100% of production runs/)).toBeVisible();
+
+    // A production webhook run carrying an email address.
+    const prod = await page.request.post(`${API_URL}/webhook/${hookPath}`, { data: { user_prompt: "Refund for jane.doe@example.com" } });
+    expect(prod.ok()).toBeTruthy();
+
+    // It lands in the inbox, masked, and is promoted in one click.
+    const inbox = capture.getByRole("list", { name: "Captured runs" });
+    await expect
+      .poll(
+        async () => {
+          await capture.getByLabel("Filter by outcome").selectOption("success");
+          await capture.getByLabel("Filter by outcome").selectOption("");
+          return inbox.getByRole("listitem").count().catch(() => 0);
+        },
+        { timeout: 30_000 }
+      )
+      .toBe(1);
+    const row = inbox.getByRole("listitem").first();
+    await expect(row.getByText("email", { exact: true })).toBeVisible();
+    await row.getByRole("button", { name: "Promote" }).click();
+    await expect(capture.getByText("1 promoted to “Captured”.")).toBeVisible();
+    await expect(capture.getByText(/No captured runs yet/)).toBeVisible();
+
+    // The case is in the auto-created "Captured" golden set.
+    const sets = page.getByRole("list", { name: "Golden sets" });
+    const setRow = sets.getByRole("button").filter({ hasText: "Captured" }).filter({ hasText: workflow.name });
+    await expect(setRow).toBeVisible();
+    await setRow.click();
+    const cases = page.getByRole("region", { name: "Cases" });
+    await expect(cases.getByText(/Captured webhook/)).toBeVisible();
+  });
 });
