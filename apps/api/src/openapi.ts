@@ -1816,9 +1816,48 @@ export const openApiSpec = {
     "/api/replay/recordings/find-subject": {
       post: {
         tags: ["Evals"],
-        summary: "Data-subject lookup: find (and optionally delete) every golden or captured run holding a value, raw or as its surrogate (admins; the value is never logged)",
-        requestBody: { required: true, content: { "application/json": { schema: { type: "object", required: ["value"], properties: { value: { type: "string", minLength: 3, maxLength: 1000 }, delete: { type: "boolean" } } } } } },
-        responses: { "200": { description: "{ classesTried, matches, deleted, casesDeleted, searched }" }, "403": { description: "Not an admin" }, "501": { description: "Postgres store" } }
+        summary:
+          "Data-subject lookup, preview: every golden run, captured run, golden-set case, replay result, replay execution and replay cassette holding a value, raw or as its surrogate. Whole-value matching; a value not recognised as a data class needs 6 characters. Deletes nothing (admins; the value is never logged or returned)",
+        requestBody: { required: true, content: { "application/json": { schema: { type: "object", required: ["value"], properties: { value: { type: "string", minLength: 3, maxLength: 1000 } } } } } },
+        responses: {
+          "200": { description: "{ classesTried, matches: [{ kind, id, workflowId, projectId, name, status, matchedAs, fields }], counts, searched, covered, notCovered }" },
+          "400": { description: "Invalid value (too short for a raw search)" },
+          "403": { description: "Not an admin" },
+          "501": { description: "Postgres store" }
+        }
+      }
+    },
+    "/api/replay/recordings/find-subject/delete": {
+      post: {
+        tags: ["Evals"],
+        summary:
+          "Data-subject lookup, delete: removes the rows named in `targets` (from a preview) after checking each still holds the value; a golden run takes its golden-set cases and their results with it. The audit records every deleted id, never the value (admins)",
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["value", "targets"],
+                properties: {
+                  value: { type: "string", minLength: 3, maxLength: 1000 },
+                  targets: {
+                    type: "array",
+                    minItems: 1,
+                    maxItems: 2000,
+                    items: { type: "object", required: ["kind", "id"], properties: { kind: { type: "string", enum: ["recording", "fixture", "eval_result", "execution", "cassette"] }, id: { type: "string" } } }
+                  }
+                }
+              }
+            }
+          }
+        },
+        responses: {
+          "200": { description: "{ deleted (per kind), removed: [{ kind, id }], skipped: [{ kind, id, reason: not_found | no_match }] }" },
+          "400": { description: "Invalid request" },
+          "403": { description: "Not an admin" },
+          "501": { description: "Postgres store" }
+        }
       }
     },
     "/api/replay/recordings/{id}/replay": {
