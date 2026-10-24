@@ -15,6 +15,8 @@ import { REPLAY_FIND_SUBJECT_COUNTRIES, type ReplayFindSubjectMatch, type Replay
 import { ApiError, deleteReplaySubject, findReplaySubject } from "../lib/api";
 import {
   splitSubjectMatches,
+  subjectConfirmText,
+  subjectDeleteNotice,
   subjectDeleteTargets,
   subjectKey,
   subjectKindLabel,
@@ -72,9 +74,7 @@ export function FindSubjectPanel() {
     setError(null);
     try {
       const outcome = await deleteReplaySubject(query, targets);
-      const deleted = outcome.removed.length;
-      const skipped = outcome.skipped.length;
-      setNotice(`Deleted ${deleted} ${deleted === 1 ? "row" : "rows"}${skipped > 0 ? `; ${skipped} skipped (gone, or no longer holding the value)` : ""}.`);
+      setNotice(subjectDeleteNotice(outcome));
       const gone = new Set(outcome.removed.map(subjectKey));
       setResult({ ...result, matches: result.matches.filter((match) => !gone.has(subjectKey(match))) });
       setTicked(new Set());
@@ -87,7 +87,8 @@ export function FindSubjectPanel() {
   };
 
   const groups = result ? splitSubjectMatches(result.matches) : null;
-  const count = result ? subjectDeleteTargets(result.matches, ticked).length : 0;
+  const targets = result ? subjectDeleteTargets(result.matches, ticked) : [];
+  const count = targets.length;
   const toggle = (match: ReplayFindSubjectMatch) =>
     setTicked((current) => {
       const next = new Set(current);
@@ -178,9 +179,9 @@ export function FindSubjectPanel() {
           )}
           {groups.possible.length > 0 && (
             <div className="subject-group">
-              <h5 className="subject-group-title">Possible matches (no country code in the data)</h5>
+              <h5 className="subject-group-title">Possible matches (no country code in the data, or in your search)</h5>
               <p className="capture-help">
-                These hold the same digits without a country code, so they may be another person's number. They are not selected. Select one only after checking it is this
+                These hold the same digits, but a country code is missing on one side, so they may be another person's number. They are not selected. Select one only after checking it is this
                 person's.
               </p>
               <ul className="capture-list" aria-label="Possible matches">
@@ -199,7 +200,7 @@ export function FindSubjectPanel() {
               ) : (
                 <>
                   <span className="capture-help" role="status">
-                    Permanently delete {count} {count === 1 ? "row" : "rows"}? A golden run takes its golden-set cases and results with it.
+                    {subjectConfirmText(targets)}
                   </span>
                   <button type="button" className="pg-btn small danger" disabled={busy} onClick={() => void remove()}>
                     {busy ? "Deleting…" : "Delete"}

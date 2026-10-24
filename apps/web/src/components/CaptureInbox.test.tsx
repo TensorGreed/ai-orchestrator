@@ -37,6 +37,7 @@ function settings(overrides: Partial<ReplayCaptureSettingsView> = {}): ReplayCap
     effectiveRate: 0,
     candidates: 0,
     capturedToday: 0,
+    lastDrop: null,
     ...overrides
   };
 }
@@ -83,6 +84,14 @@ describe("CaptureInbox", () => {
     await userEvent.click(screen.getByRole("checkbox", { name: "Capture production runs" }));
     await waitFor(() => expect(api.saveReplayCaptureSettings).toHaveBeenCalledWith("wf-1", { enabled: true, rate: 0.1, maxPerDay: 20 }));
     expect(await screen.findByText(/Capturing 10% of production runs, up to 20 a day, personal data masked/)).toBeInTheDocument();
+  });
+
+  it("round 4 B2: shows the last dropped run under the settings so a workflow that never captures is visible", async () => {
+    vi.mocked(api.fetchReplayCaptureSettings).mockResolvedValue({
+      settings: settings({ configured: true, enabled: true, effectiveRate: 0.1, lastDrop: { outcome: "dropped_identifier_value", at: "2026-10-24T10:00:00.000Z" } })
+    });
+    render(<CaptureInbox workflows={workflows} canEdit isAdmin={false} />);
+    expect(await screen.findByText(/Last run not captured: .*because a personal value was in an MCP server or tool name/)).toBeInTheDocument();
   });
 
   it("lists captured runs with a badge and data-class chips; promotes, discards and opens runs", async () => {

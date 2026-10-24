@@ -10,6 +10,8 @@ import {
   type ReplayCaptureSettingsUpdate,
   type ReplayCaptureSettingsView,
   type ReplayCaptureStatus,
+  type ReplayCaptureLastDrop,
+  type ReplayFindSubjectDeleteResult,
   type ReplayFindSubjectKind,
   type ReplayFindSubjectMatch,
   type ReplayFindSubjectQuery,
@@ -170,6 +172,21 @@ export function captureSummaryLine(view: ReplayCaptureSettingsView): string {
   return `Capturing ${ratePercentText(view.effectiveRate)}% of production runs, up to ${view.maxPerDay} a day, ${masked}. ${view.capturedToday} today.`;
 }
 
+/** Why capture dropped a sampled run, in plain words. */
+const DROP_REASONS: Record<ReplayCaptureLastDrop["outcome"], string> = {
+  dropped_identifier_value: "a personal value was in an MCP server or tool name, which is kept as written",
+  dropped_unscannable: "the run's content was nested too deeply to check for personal data",
+  dropped_incomplete_mask: "a personal value could not be masked everywhere",
+  skipped_too_large: "the run was larger than the capture size limit",
+  failed: "an error while saving it"
+};
+
+/** The last run capture dropped, with when and why; null when none was. */
+export function captureLastDropLine(lastDrop: ReplayCaptureLastDrop | null | undefined, formatWhen: (iso: string) => string): string | null {
+  if (!lastDrop) return null;
+  return `Last run not captured: ${formatWhen(lastDrop.at)}, because ${DROP_REASONS[lastDrop.outcome] ?? "of an error"}.`;
+}
+
 // ---------------------------------------------------------------------------
 // Data-subject lookup (admins)
 // ---------------------------------------------------------------------------
@@ -223,7 +240,7 @@ export function subjectKindLabel(kind: ReplayFindSubjectKind): string {
 
 export const subjectKey = (match: Pick<ReplayFindSubjectMatch, "kind" | "id">) => `${match.kind}:${match.id}`;
 
-/** Certain matches (ticked by default) and possible matches (no country code in the stored data; never ticked by default). */
+/** Certain matches (ticked by default) and possible matches (a country code missing in the stored data or in the search; never ticked by default). */
 export function splitSubjectMatches(matches: readonly ReplayFindSubjectMatch[]): { exact: ReplayFindSubjectMatch[]; possible: ReplayFindSubjectMatch[] } {
   return { exact: matches.filter((match) => match.certainty === "exact"), possible: matches.filter((match) => match.certainty !== "exact") };
 }
@@ -236,4 +253,25 @@ export function subjectDeleteTargets(
   return matches
     .filter((match) => ticked.has(subjectKey(match)))
     .map((match) => (match.certainty === "exact" ? { kind: match.kind, id: match.id } : { kind: match.kind, id: match.id, confirmPossible: true as const }));
+}
+
+/** The second delete step: how many rows, and how many of them are possible matches the admin selected. */
+export function subjectConfirmText(targets: ReadonlyArray<{ confirmPossible?: true }>): string {
+  const count = targets.length;
+  const possible = targets.filter((target) => target.confirmPossible === true).length;
+  const rows = `${count} ${count === 1 ? "row" : "rows"}`;
+  const ofThem = possible > 0 ? `, ${possible} of them ${possible === 1 ? "a possible match" : "possible matches"}` : "";
+  return `Permanently delete ${rows}${ofThem}? A golden run takes its golden-set cases and results with it.`;
+}
+
+/** The notice after a delete: what was deleted, and why anything was skipped (unconfirmed possible matches named apart). */
+export function subjectDeleteNotice(outcome: Pick<ReplayFindSubjectDeleteResult, "removed" | "skipped">): string {
+  const deleted = outcome.removed.length;
+  const unconfirmed = outcome.skipped.filter((entry) => entry.reason === "possible_match_unconfirmed").length;
+  const other = outcome.skipped.length - unconfirmed;
+  const reasons: string[] = [];
+  if (unconfirmed > 0) reasons.push(`${unconfirmed} ${unconfirmed === 1 ? "possible match" : "possible matches"} not confirmed`);
+  if (other > 0) reasons.push(`${other} gone, or no longer holding the value`);
+  const skipped = outcome.skipped.length;
+  return `Deleted ${deleted} ${deleted === 1 ? "row" : "rows"}${skipped > 0 ? `; ${skipped} skipped (${reasons.join("; ")})` : ""}.`;
 }

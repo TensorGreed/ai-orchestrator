@@ -77,7 +77,7 @@ describe("FindSubjectPanel", () => {
     await userEvent.click(screen.getByRole("button", { name: "Search" }));
     const certain = await screen.findByRole("list", { name: "Matches" });
     expect(within(certain).getByRole("checkbox", { name: "Select Run a" })).toBeChecked();
-    expect(screen.getByText("Possible matches (no country code in the data)")).toBeInTheDocument();
+    expect(screen.getByText("Possible matches (no country code in the data, or in your search)")).toBeInTheDocument();
     const possible = screen.getByRole("list", { name: "Possible matches" });
     expect(within(possible).getByRole("checkbox", { name: "Select Run b" })).not.toBeChecked();
     expect(within(possible).getByRole("checkbox", { name: "Select Run c" })).not.toBeChecked();
@@ -87,7 +87,7 @@ describe("FindSubjectPanel", () => {
     await userEvent.click(within(possible).getByRole("checkbox", { name: "Select Run c" }));
     await userEvent.click(screen.getByRole("button", { name: "Delete selected (2)" }));
     expect(api.deleteReplaySubject).not.toHaveBeenCalled();
-    expect(screen.getByText(/Permanently delete 2 rows\?/)).toBeInTheDocument();
+    expect(screen.getByText(/Permanently delete 2 rows, 1 of them a possible match\?/)).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "Delete" }));
     await waitFor(() =>
       expect(api.deleteReplaySubject).toHaveBeenCalledWith({ value: "+1 415 555 1234" }, [
@@ -98,6 +98,25 @@ describe("FindSubjectPanel", () => {
     expect(await screen.findByText("Deleted 2 rows.")).toBeInTheDocument();
     expect(screen.queryByRole("checkbox", { name: "Select Run a" })).toBeNull();
     expect(screen.getByRole("checkbox", { name: "Select Run b" })).not.toBeChecked();
+  });
+
+  it("round 4 B4: the skipped notice names unconfirmed possible matches apart", async () => {
+    vi.mocked(api.findReplaySubject).mockResolvedValue(result([match("a", "exact"), match("b", "exact")]));
+    vi.mocked(api.deleteReplaySubject).mockResolvedValue({
+      deleted: { recording: 0, fixture: 0, eval_result: 0, execution: 0, cassette: 0 },
+      removed: [],
+      skipped: [
+        { kind: "recording", id: "a", reason: "possible_match_unconfirmed" },
+        { kind: "recording", id: "b", reason: "no_match" }
+      ]
+    });
+    render(<FindSubjectPanel />);
+    await userEvent.type(screen.getByLabelText("Value"), "+1 415 555 1234");
+    await userEvent.click(screen.getByRole("button", { name: "Search" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Delete selected (2)" }));
+    expect(screen.getByText(/Permanently delete 2 rows\? A golden run/)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Delete" }));
+    expect(await screen.findByText("Deleted 0 rows; 2 skipped (1 possible match not confirmed; 1 gone, or no longer holding the value).")).toBeInTheDocument();
   });
 
   it("shows the server's refusal", async () => {

@@ -27,6 +27,7 @@ import {
   captureFormFrom,
   captureSettingsFromForm,
   captureStatusLabel,
+  captureLastDropLine,
   captureSummaryLine,
   captureTriggerLabel,
   CAPTURE_PERIODS,
@@ -256,6 +257,11 @@ function WorkflowCapture({ workflowId, activeProjectId, canEdit, isAdmin, onOpen
         <p className="settings-help" aria-live="polite">
           {captureSummaryLine(view)}
         </p>
+        {view.lastDrop && (
+          <p className="settings-help capture-last-drop" role="status">
+            {captureLastDropLine(view.lastDrop, formatWhen)}
+          </p>
+        )}
         <details className="capture-advanced">
           <summary>Advanced</summary>
           <fieldset className="release-fieldset" disabled={locked}>

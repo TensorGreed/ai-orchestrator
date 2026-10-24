@@ -5,11 +5,14 @@ import {
   captureFormFrom,
   capturePeriodFrom,
   captureSettingsFromForm,
+  captureLastDropLine,
   captureSummaryLine,
   captureTriggerLabel,
   dataClassLabel,
   ratePercentText,
   splitSubjectMatches,
+  subjectConfirmText,
+  subjectDeleteNotice,
   subjectDeleteTargets,
   subjectQuery,
   subjectReadAsOffered,
@@ -33,6 +36,7 @@ function view(overrides: Partial<ReplayCaptureSettingsView> = {}): ReplayCapture
     effectiveRate: 0,
     candidates: 0,
     capturedToday: 0,
+    lastDrop: null,
     ...overrides
   };
 }
@@ -86,6 +90,36 @@ describe("capture labels", () => {
     expect(captureSummaryLine(view())).toBe("Off. Production runs are not recorded.");
     expect(captureSummaryLine(view({ enabled: true, effectiveRate: 0.1, capturedToday: 3 }))).toBe("Capturing 10% of production runs, up to 20 a day, personal data masked. 3 today.");
     expect(captureSummaryLine(view({ deployment: { enabled: false, maxRate: 1, retentionDays: 14, maxCandidates: 200 } }))).toContain("REPLAY_CAPTURE_ENABLED");
+  });
+});
+
+describe("round 4 B2: the last dropped run", () => {
+  it("says when and why in plain words, and nothing when no run was dropped", () => {
+    const when = () => "24 Oct, 10:00";
+    expect(captureLastDropLine(null, when)).toBeNull();
+    expect(captureLastDropLine({ outcome: "dropped_identifier_value", at: "2026-10-24T10:00:00.000Z" }, when)).toBe(
+      "Last run not captured: 24 Oct, 10:00, because a personal value was in an MCP server or tool name, which is kept as written."
+    );
+    expect(captureLastDropLine({ outcome: "skipped_too_large", at: "2026-10-24T10:00:00.000Z" }, when)).toContain("larger than the capture size limit");
+  });
+});
+
+describe("round 4 B4: delete copy", () => {
+  it("the confirm step counts possible matches; the notice names unconfirmed ones", () => {
+    expect(subjectConfirmText([{}, { confirmPossible: true }, { confirmPossible: true }])).toBe(
+      "Permanently delete 3 rows, 2 of them possible matches? A golden run takes its golden-set cases and results with it."
+    );
+    expect(subjectConfirmText([{}])).toBe("Permanently delete 1 row? A golden run takes its golden-set cases and results with it.");
+    expect(subjectDeleteNotice({ removed: [{ kind: "recording", id: "a" }], skipped: [] })).toBe("Deleted 1 row.");
+    expect(
+      subjectDeleteNotice({
+        removed: [],
+        skipped: [
+          { kind: "recording", id: "a", reason: "possible_match_unconfirmed" },
+          { kind: "recording", id: "b", reason: "possible_match_unconfirmed" }
+        ]
+      })
+    ).toBe("Deleted 0 rows; 2 skipped (2 possible matches not confirmed).");
   });
 });
 
