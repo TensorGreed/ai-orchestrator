@@ -867,7 +867,7 @@ describe("enforced gates: only admins weaken them", () => {
     expect(auditTypes(context)).toEqual(expect.arrayContaining(["release.rollback.refused", "release.rolled_back"]));
   });
 
-  it("removing cases from, deleting, or adding scored cases to an enforced gate's golden set is admin-only; adding a plain case is fine and makes older jobs stale (M4)", async () => {
+  it("removing cases from, deleting, or adding scored cases to an enforced gate's golden set is admin-only; adding a plain case is fine and leaves older jobs standing until it is admitted (M4)", async () => {
     const context = await createTestContext();
     const admin = await login(context, "admin");
     const builder = await login(context, "builder");
@@ -886,8 +886,13 @@ describe("enforced gates: only admins weaken them", () => {
     expect((await call(context, "POST", "/api/eval/datasets/set-wf-m4/fixtures", builder.cookie, { name: "Always passes", input: {}, scorers: [{ type: "status" }] })).statusCode).toBe(403);
     expect(context.store.listEvalFixtures("set-wf-m4")).toHaveLength(3);
     expect(auditTypes(context)).toContain("release.golden_set_change.refused");
-    // Adding a plain case is allowed, and the job no longer proves anything.
-    expect((await call(context, "POST", "/api/eval/datasets/set-wf-m4/fixtures", builder.cookie, { name: "New case", input: {} })).statusCode).toBe(200);
+    // Adding a plain case is allowed. It waits for admission, so the job still proves what the gate counts.
+    const added = await call(context, "POST", "/api/eval/datasets/set-wf-m4/fixtures", builder.cookie, { name: "New case", input: {} });
+    expect(added.statusCode).toBe(200);
+    expect((await preview()).verdict).toBe("passed");
+    // Once an admin admits it, the job (which never ran it) no longer proves anything.
+    const newCase = context.store.listEvalFixtures("set-wf-m4").find((fixture) => fixture.name === "New case")!;
+    expect((await call(context, "POST", "/api/workflows/wf-m4/release-gate/cases/admit", admin.cookie, { fixtureIds: [newCase.id] })).statusCode).toBe(200);
     const stale = await preview();
     expect(stale.verdict).toBe("blocked");
     expect(stale.reasons.join()).toMatch(/set-wf-m4 changed after replay job/);

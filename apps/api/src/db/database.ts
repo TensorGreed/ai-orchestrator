@@ -1842,6 +1842,12 @@ export interface ReleaseGateRecord {
   admissionUpdatedBy?: string | null;
 }
 
+/** Phase 15.4 / migration 36 — what a replay job holds of one golden set: the hash over all its cases and each case's fingerprint (null in jobs queued before gate admission). */
+export interface GoldenSetSnapshot {
+  hash: string;
+  cases: Record<string, string> | null;
+}
+
 /** Migration 36 — a request to admit cases to an enforced gate, or to remove admitted ones, decided in the approvals inbox. */
 export interface GateCaseRequestRecord {
   id: string;
@@ -1853,8 +1859,12 @@ export interface GateCaseRequestRecord {
   fixtures: Array<{ fixtureId: string; name: string; datasetId: string | null }>;
   /** The approvers when asked, for display; the decision checks the gate's current approvers. */
   spec: Record<string, unknown>;
-  /** The gate's `updated_at` when asked: any later save of the gate's settings makes the request stale. */
-  gateUpdatedAt: string | null;
+  /**
+   * Who decided the gate when asked: a fingerprint of its approvers,
+   * self-approval and enforcement (admin-only on an enforced gate). Any
+   * change to those makes the request stale; other saves of the gate do not.
+   */
+  gateAuthority: string | null;
   status: string;
   requestReason: string | null;
   requestedByUserId: string | null;
@@ -1899,6 +1909,13 @@ export interface ReleaseApprovalRequestRecord {
   gateReasons: string[];
   /** The gate's `updated_at` when asked: a gate changed since makes the request stale. */
   gateUpdatedAt: string | null;
+  /**
+   * Migration 36 — the gate's reasons as stable codes and measures when
+   * asked (`ReleaseGateJudgement.checks`), so a re-judge at decision time
+   * cancels only for a new kind of reason or a worse measure. Null on
+   * requests made before.
+   */
+  gateChecks?: Array<{ code: string; measure: number | null }> | null;
   publishedVersionAtRequest: number | null;
   spec: Record<string, unknown>;
   status: string;
@@ -1940,6 +1957,15 @@ function mapReleaseGateRow(row: Record<string, unknown>): ReleaseGateRecord {
   };
 }
 
+function parseGateChecks(value: unknown): Array<{ code: string; measure: number | null }> | null {
+  if (value === null || value === undefined) return null;
+  const parsed = parseJsonSafe(value);
+  if (!Array.isArray(parsed)) return null;
+  return parsed
+    .filter((entry): entry is Record<string, unknown> => Boolean(entry) && typeof entry === "object" && typeof (entry as Record<string, unknown>).code === "string")
+    .map((entry) => ({ code: String(entry.code), measure: typeof entry.measure === "number" && Number.isFinite(entry.measure) ? entry.measure : null }));
+}
+
 function mapGateCaseRequestRow(row: Record<string, unknown>): GateCaseRequestRecord {
   const fixtures = parseJsonSafe(row.fixtures_json);
   return {
@@ -1959,7 +1985,7 @@ function mapGateCaseRequestRow(row: Record<string, unknown>): GateCaseRequestRec
           .filter((entry) => entry.fixtureId)
       : [],
     spec: parseJsonObject(row.spec_json),
-    gateUpdatedAt: nullableText(row.gate_updated_at),
+    gateAuthority: nullableText(row.gate_authority),
     status: String(row.status),
     requestReason: nullableText(row.request_reason),
     requestedByUserId: nullableText(row.requested_by_user_id),
@@ -2004,6 +2030,7 @@ function mapReleaseApprovalRequestRow(row: Record<string, unknown>): ReleaseAppr
     origin: row.origin === "policy" ? "policy" : "blocked",
     gateReasons: parseJsonArray(row.gate_reasons_json),
     gateUpdatedAt: nullableText(row.gate_updated_at),
+    gateChecks: parseGateChecks(row.gate_checks_json),
     publishedVersionAtRequest: nullableNumber(row.published_version_at_request),
     spec: parseJsonObject(row.spec_json),
     status: String(row.status),
@@ -3562,7 +3589,7 @@ export class SqliteStore {
         action TEXT NOT NULL,
         fixtures_json TEXT NOT NULL,
         spec_json TEXT NOT NULL,
-        gate_updated_at TEXT,
+        gate_authority TEXT,
         status TEXT NOT NULL,
         request_reason TEXT,
         requested_by_user_id TEXT,
@@ -3578,7 +3605,8 @@ export class SqliteStore {
       CREATE INDEX IF NOT EXISTS idx_gate_case_requests_workflow ON gate_case_requests(workflow_id, status, created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_gate_case_requests_status ON gate_case_requests(status, created_at DESC);
     `);
-    this.ensureColumn("gate_case_requests", "gate_updated_at", "TEXT");
+    this.ensureColumn("gate_case_requests", "gate_authority", "TEXT");
+    this.ensureColumn("release_approval_requests", "gate_checks_json", "TEXT");
     // Gates enforced before admission existed admit every case their sets hold now, so they judge as before. Once only:
     // afterwards an enforced gate without a stored admission fails closed (counts nothing until an admin admits its cases).
     this.transaction(() => {
@@ -7852,18 +7880,34 @@ export class SqliteStore {
   }
 
   /** Phase 15.4 — the per-set snapshot a replay job was queued against (set id -> hash). */
-  setEvalRunSetSnapshot(runId: string, snapshot: Record<string, string>): void {
+  setEvalRunSetSnapshot(runId: string, snapshot: Record<string, GoldenSetSnapshot>): void {
     this.exec(`UPDATE eval_runs SET set_snapshot_json = ? WHERE id = ?`, [JSON.stringify(snapshot), runId]);
     this.persist();
   }
 
-  getEvalRunSetSnapshot(runId: string): Record<string, string> | null {
+  /** Each set's hash and, for jobs queued since gate admission, its cases' fingerprints (older jobs stored the hash alone). */
+  getEvalRunSetSnapshot(runId: string): Record<string, GoldenSetSnapshot> | null {
     const row = this.queryOne<{ set_snapshot_json: string | null }>(`SELECT set_snapshot_json FROM eval_runs WHERE id = ?`, [runId]);
     if (!row?.set_snapshot_json) return null;
     try {
       const parsed = JSON.parse(toString(row.set_snapshot_json)) as unknown;
       if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
-      return Object.fromEntries(Object.entries(parsed as Record<string, unknown>).filter((entry): entry is [string, string] => typeof entry[1] === "string"));
+      const out: Record<string, GoldenSetSnapshot> = {};
+      for (const [datasetId, entry] of Object.entries(parsed as Record<string, unknown>)) {
+        if (typeof entry === "string") {
+          out[datasetId] = { hash: entry, cases: null };
+          continue;
+        }
+        if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+        const { hash, cases } = entry as { hash?: unknown; cases?: unknown };
+        if (typeof hash !== "string") continue;
+        const fingerprints =
+          cases && typeof cases === "object" && !Array.isArray(cases)
+            ? Object.fromEntries(Object.entries(cases as Record<string, unknown>).filter((pair): pair is [string, string] => typeof pair[1] === "string"))
+            : null;
+        out[datasetId] = { hash, cases: fingerprints };
+      }
+      return out;
     } catch {
       return null;
     }
@@ -7923,10 +7967,10 @@ export class SqliteStore {
   insertReleaseApprovalRequest(record: ReleaseApprovalRequestRecord): ReleaseApprovalRequestRecord {
     this.exec(
       `INSERT INTO release_approval_requests (
-         id, workflow_id, workflow_name, project_id, version, workflow_hash, replay_run_id, origin, gate_reasons_json, gate_updated_at,
+         id, workflow_id, workflow_name, project_id, version, workflow_hash, replay_run_id, origin, gate_reasons_json, gate_updated_at, gate_checks_json,
          published_version_at_request, spec_json, status, request_reason, requested_by_user_id, requested_by, expires_at,
          decided_by_user_id, decided_by, decided_at, decision_reason, release_id, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         record.id,
         record.workflowId,
@@ -7938,6 +7982,7 @@ export class SqliteStore {
         record.origin,
         JSON.stringify(record.gateReasons),
         record.gateUpdatedAt,
+        record.gateChecks ? JSON.stringify(record.gateChecks) : null,
         record.publishedVersionAtRequest,
         JSON.stringify(record.spec),
         record.status,
@@ -8027,7 +8072,7 @@ export class SqliteStore {
   insertGateCaseRequest(record: GateCaseRequestRecord): GateCaseRequestRecord {
     this.exec(
       `INSERT INTO gate_case_requests (
-         id, workflow_id, workflow_name, project_id, action, fixtures_json, spec_json, gate_updated_at, status, request_reason, requested_by_user_id,
+         id, workflow_id, workflow_name, project_id, action, fixtures_json, spec_json, gate_authority, status, request_reason, requested_by_user_id,
          requested_by, expires_at, decided_by_user_id, decided_by, decided_at, decision_reason, created_at, updated_at
        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
@@ -8038,7 +8083,7 @@ export class SqliteStore {
         record.action,
         JSON.stringify(record.fixtures),
         JSON.stringify(record.spec),
-        record.gateUpdatedAt,
+        record.gateAuthority,
         record.status,
         record.requestReason,
         record.requestedByUserId,

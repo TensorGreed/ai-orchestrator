@@ -66,7 +66,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { goldenSetSnapshots } from "./release-snapshot.js";
+import { goldenSetSnapshots, staleGoldenSets, type GoldenSetSnapshot } from "./release-snapshot.js";
 import { admissionState, gateAdmissionSnapshot, judgeAdmission, nextAdmittedIds } from "./gate-admission-state.js";
 import {
   RELEASE_APPROVAL_REQUEST_PREFIX,
@@ -75,6 +75,8 @@ import {
   defaultReleaseGate,
   judgeReleaseGate,
   releaseApproversSchema,
+  releaseCanonicalJson,
+  releaseGateChecksWorsened,
   releaseGateAdminOnlyChanges,
   releaseScorersMatch,
   releaseCandidateOptionsSchema,
@@ -110,6 +112,14 @@ import type { AuditEventInput } from "./audit-service.js";
 import type { SafeUser } from "./auth-service.js";
 import type { NotificationEvent } from "./notification-service.js";
 import type { RunAccessResult } from "../run-access.js";
+
+/** The gate's sets as they are now (see `ReleaseService.gateSets`). */
+interface GateSets {
+  fixtureIds: Set<string>;
+  snapshots: Record<string, GoldenSetSnapshot>;
+  /** Enforced gates with stored admission: the admitted cases; null otherwise. */
+  admittedIds: ReadonlySet<string> | null;
+}
 
 export type ReleasePermission = "workflow:read" | "workflow:write" | "workflow:publish";
 
@@ -552,9 +562,24 @@ export class ReleaseService {
       baseline = { version, workflowHash: this.versionCandidate(workflowId, version).workflowHash };
     }
     const admissionBefore = gateAdmissionSnapshot(this.store, previousRecord);
+    // A save that changes nothing leaves the gate (and its `updated_at`) alone, so it makes no open request stale.
+    const settingsKey = (settings: Pick<ReleaseGateRecord, "enabled" | "enforced" | "datasetIds" | "candidateOptions" | "policy" | "requireApproval"> & { approvers?: unknown }) =>
+      releaseCanonicalJson({
+        enabled: settings.enabled,
+        enforced: settings.enforced,
+        datasetIds: settings.datasetIds,
+        candidateOptions: settings.candidateOptions,
+        policy: settings.policy,
+        requireApproval: settings.requireApproval,
+        approvers: settings.approvers ?? null
+      });
+    const unchanged =
+      previousRecord !== null &&
+      settingsKey(previousRecord) ===
+        settingsKey({ enabled: next.enabled, enforced, datasetIds: next.datasetIds, candidateOptions: next.candidateOptions, policy: next.policy, requireApproval: next.requireApproval, approvers: next.approvers });
     // The settings and the cases the gate counts are saved together, or not at all.
     const { saved, admitted } = this.store.transaction(() => {
-      const saved = this.store.upsertReleaseGate({
+      const saved = unchanged && previousRecord ? previousRecord : this.store.upsertReleaseGate({
         workflowId,
         enabled: next.enabled,
         enforced,
@@ -606,6 +631,7 @@ export class ReleaseService {
         newlyAdmittedFixtureIds: newlyAdmitted,
         admitAddedSetCases,
         storedAdmittedCases: admitted === null ? null : admitted.length,
+        settingsUnchanged: unchanged,
         baselineVersion: baseline?.version ?? null
       }
     });
@@ -932,7 +958,8 @@ export class ReleaseService {
       requiredCaseNames: Object.fromEntries(snapshot.requiredIds.map((id) => [id, snapshot.names[id] ?? id])),
       errorsCountAsFailures: gate.policy.errorsCountAsFailures,
       verdict: judgement.verdict,
-      reasons: judgement.reasons
+      reasons: judgement.reasons,
+      setsChanged: Boolean(evidence.job.noSetSnapshot) || (evidence.job.staleSets?.length ?? 0) > 0
     };
   }
 
@@ -956,15 +983,20 @@ export class ReleaseService {
     return { workflow, workflowHash: this.options.hashOf(workflow) };
   }
 
-  /** What the gate's own sets hold now: their case ids and snapshots. */
-  private gateSets(gate: Pick<ReleaseGateView, "datasetIds">): { fixtureIds: Set<string>; snapshots: Record<string, string> } {
+  /**
+   * What the gate's own sets hold now: their case ids and snapshots, and,
+   * for an enforced gate whose admission is stored, the admitted cases
+   * (staleness is then judged over those alone).
+   */
+  private gateSets(gate: Pick<ReleaseGateView, "workflowId" | "datasetIds" | "enforced">): GateSets {
     const fixtureIds = new Set<string>();
     const snapshots = goldenSetSnapshots(gate.datasetIds, (datasetId) => {
       const fixtures = this.store.listEvalFixtures(datasetId);
       for (const fixture of fixtures) fixtureIds.add(fixture.id);
       return fixtures;
     });
-    return { fixtureIds, snapshots };
+    const admission = gate.enforced ? gateAdmissionSnapshot(this.store, this.store.getReleaseGate(gate.workflowId)) : null;
+    return { fixtureIds, snapshots, admittedIds: admission && !admission.admissionMissing ? admission.admittedIds : null };
   }
 
   /**
@@ -972,7 +1004,7 @@ export class ReleaseService {
    * own sets with repeats aggregated, and how the job's scorers, set
    * snapshot and own eligibility compare with the gate.
    */
-  evidenceFor(job: JobView, gate: Pick<ReleaseGateView, "datasetIds" | "candidateOptions">, sets?: { fixtureIds: Set<string>; snapshots: Record<string, string> }): ReleaseGateEvidence {
+  evidenceFor(job: JobView, gate: Pick<ReleaseGateView, "workflowId" | "datasetIds" | "candidateOptions" | "enforced">, sets?: GateSets): ReleaseGateEvidence {
     const current = sets ?? this.gateSets(gate);
     const options = asRecord(job.options);
     const aggregate = (typeof options.aggregate === "string" ? options.aggregate : "all") as ReleaseAggregateMode;
@@ -1068,7 +1100,7 @@ export class ReleaseService {
       scorerMismatch = types.length > 0 ? `ran with its own scorers (${types.join(", ")})` : "ran with the default scorers, not the ones the gate names";
     }
     const jobSnapshot = this.store.getEvalRunSetSnapshot(job.id);
-    const staleSets = gate.datasetIds.filter((datasetId) => !jobSnapshot || jobSnapshot[datasetId] !== current.snapshots[datasetId]);
+    const staleSets = jobSnapshot ? staleGoldenSets(gate.datasetIds, jobSnapshot, current.snapshots, current.admittedIds) : [...gate.datasetIds];
     return {
       job: {
         id: job.id,
@@ -1300,6 +1332,7 @@ export class ReleaseService {
         origin: judgement.verdict === "needs_approval" ? "policy" : "blocked",
         gate,
         reasons: judgement.verdict === "needs_approval" ? [] : judgement.reasons,
+        checks: judgement.verdict === "needs_approval" ? [] : judgement.checks,
         requestReason: input.requestApproval?.reason ?? null,
         publishedVersion: previous
       });
@@ -1366,6 +1399,8 @@ export class ReleaseService {
     origin: "policy" | "blocked";
     gate: ReleaseGateView;
     reasons: string[];
+    /** The reasons as stable codes (`ReleaseGateJudgement.checks`), judged again when the request is decided. */
+    checks: ReleaseGateJudgement["checks"];
     requestReason: string | null;
     publishedVersion: number | null;
   }): ReleaseApprovalRequestRecord {
@@ -1393,6 +1428,7 @@ export class ReleaseService {
       origin: input.origin,
       gateReasons: input.reasons,
       gateUpdatedAt: input.gate.updatedAt,
+      gateChecks: input.checks,
       publishedVersionAtRequest: input.publishedVersion,
       spec: { approverRoles: approvers.approverRoles, approverUsers: approvers.approverUsers, allowSelfApproval: approvers.allowSelfApproval },
       status: "pending",
@@ -1488,10 +1524,13 @@ export class ReleaseService {
 
   /**
    * The gate's current reasons against the request's version when it now
-   * blocks it for a reason it did not give when the request was made (an
-   * admitted failing case, a new required case, a tighter policy); null
-   * when it does not. The request's own replay job is judged again, or, when
-   * it named none, the jobs for the version's hash.
+   * blocks it worse than when the request was made: a kind of reason it did
+   * not give (an admitted case the job never ran, a new failing required
+   * case) or a worse measure of one it gave (a lower pass rate against the
+   * minimum, more regressions); null when it does not. Reasons are compared
+   * by their stable codes, never their wording, so better numbers or a case
+   * waiting for admission change nothing. The request's own replay job is
+   * judged again, or, when it named none, the jobs for the version's hash.
    */
   private newGateReasons(record: ReleaseApprovalRequestRecord): string[] | null {
     const gate = this.settingsOf(this.store.getReleaseGate(record.workflowId), record.workflowId);
@@ -1504,8 +1543,12 @@ export class ReleaseService {
       return [`Replay job ${record.replayRunId} no longer exists.`];
     }
     if (judgement.verdict !== "blocked") return null;
-    const known = new Set(record.gateReasons);
-    return judgement.reasons.some((reason) => !known.has(reason)) ? judgement.reasons : null;
+    // Requests made before reason codes existed: their reasons, worded as then, are all there is to compare.
+    if (!record.gateChecks) {
+      const known = new Set(record.gateReasons);
+      return judgement.reasons.some((reason) => !known.has(reason)) ? judgement.reasons : null;
+    }
+    return releaseGateChecksWorsened(record.gateChecks, judgement.checks).length > 0 ? judgement.reasons : null;
   }
 
   private personCheck(record: ReleaseApprovalRequestRecord, user: SafeUser): { allowed: true } | { allowed: false; code: string; message: string } {

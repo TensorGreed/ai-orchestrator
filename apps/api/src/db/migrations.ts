@@ -1711,6 +1711,7 @@ export const MIGRATIONS: Migration[] = [
       ALTER TABLE release_gates ADD COLUMN IF NOT EXISTS admitted_fixture_ids_json TEXT;
       ALTER TABLE release_gates ADD COLUMN IF NOT EXISTS admission_updated_at TIMESTAMPTZ;
       ALTER TABLE release_gates ADD COLUMN IF NOT EXISTS admission_updated_by TEXT;
+      ALTER TABLE release_approval_requests ADD COLUMN IF NOT EXISTS gate_checks_json TEXT;
       UPDATE release_gates g
          SET admitted_fixture_ids_json = (
            SELECT COALESCE(json_agg(f.id ORDER BY f.id)::text, '[]')
@@ -1728,7 +1729,7 @@ export const MIGRATIONS: Migration[] = [
         action TEXT NOT NULL,
         fixtures_json TEXT NOT NULL,
         spec_json TEXT NOT NULL,
-        gate_updated_at TIMESTAMPTZ,
+        gate_authority TEXT,
         status TEXT NOT NULL,
         request_reason TEXT,
         requested_by_user_id TEXT,
@@ -1748,6 +1749,7 @@ export const MIGRATIONS: Migration[] = [
       DROP INDEX IF EXISTS idx_gate_case_requests_status;
       DROP INDEX IF EXISTS idx_gate_case_requests_workflow;
       DROP TABLE IF EXISTS gate_case_requests;
+      ALTER TABLE release_approval_requests DROP COLUMN IF EXISTS gate_checks_json;
       ALTER TABLE release_gates DROP COLUMN IF EXISTS admission_updated_by;
       ALTER TABLE release_gates DROP COLUMN IF EXISTS admission_updated_at;
       ALTER TABLE release_gates DROP COLUMN IF EXISTS admitted_fixture_ids_json;

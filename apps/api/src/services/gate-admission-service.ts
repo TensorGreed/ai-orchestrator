@@ -19,22 +19,23 @@
  *
  * A request is decided against the gate as it is at decision time: the
  * approver must satisfy the gate's current approvers and self-approval
- * setting (never the ones in force when it was asked). Any later save of the
- * gate's settings (approvers, enforcement, golden sets, policy) makes open
- * requests stale, as does the gate no longer being enforced or none of the
- * request's cases still fitting (pending cases not yet admitted, admitted
+ * setting (never the ones in force when it was asked). A later change to
+ * who decides (the gate's approvers, self-approval or enforcement, all
+ * admin-only on an enforced gate) makes open requests stale, as does the gate
+ * no longer being enforced or none of the request's cases still fitting (pending cases not yet admitted, admitted
  * cases still there): a stale request cannot be approved, says why, and an
  * attempt to approve it cancels it with 409. Every change and request event
  * is audited (category `release`).
  * Gate case requests need the SQLite store; on Postgres the routes answer 501.
  */
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   GATE_CASE_REQUEST_PREFIX,
   RELEASE_APPROVAL_DEFAULT_TIMEOUT_MINUTES,
   checkApprover,
   releaseAdmissionLoosening,
+  releaseCanonicalJson,
   releaseApproversSchema,
   type GateCaseDecisionInput,
   type GateCaseRequestInput,
@@ -278,6 +279,26 @@ export class GateAdmissionService {
     return releaseApproversSchema.parse({ approverRoles: ["admin"], timeoutMinutes: RELEASE_APPROVAL_DEFAULT_TIMEOUT_MINUTES });
   }
 
+  /**
+   * Who decides the gate's cases: its approvers, self-approval and
+   * enforcement, hashed. Only an admin can change any of them on an
+   * enforced gate, so a builder's save never changes it.
+   */
+  private authorityOf(gate: ReleaseGateRecord): string {
+    const approvers = this.approversOf(gate);
+    const sorted = (values: readonly string[]) => [...new Set(values.map((value) => value.trim()))].sort();
+    return createHash("sha256")
+      .update(
+        releaseCanonicalJson({
+          approverRoles: sorted(approvers.approverRoles),
+          approverUsers: sorted(approvers.approverUsers),
+          allowSelfApproval: approvers.allowSelfApproval,
+          enforced: gate.enforced
+        })
+      )
+      .digest("hex");
+  }
+
   /** Builders (`workflow:write`): ask the gate's approvers to admit pending cases or remove admitted ones. */
   request(user: SafeUser, workflowId: string, input: GateCaseRequestInput): GateCaseRequestView {
     this.requireAvailable();
@@ -321,7 +342,7 @@ export class GateAdmissionService {
       action,
       fixtures: cases.map((fixture) => ({ fixtureId: fixture.id, name: fixture.name, datasetId: fixture.datasetId })),
       spec: { approverRoles: approvers.approverRoles, approverUsers: approvers.approverUsers, allowSelfApproval: approvers.allowSelfApproval },
-      gateUpdatedAt: gate.updatedAt,
+      gateAuthority: this.authorityOf(gate),
       status: "pending",
       requestReason: input.reason,
       requestedByUserId: user.id,
@@ -379,7 +400,7 @@ export class GateAdmissionService {
    */
   private staleReason(record: GateCaseRequestRecord, gate: ReleaseGateRecord | null = this.store.getReleaseGate(record.workflowId)): string | null {
     if (!gate?.enforced) return "The release gate is no longer enforced, so every case counts.";
-    if (gate.updatedAt !== record.gateUpdatedAt) return "The release gate's settings (its approvers, enforcement, golden sets or policy) changed after the request was made.";
+    if (record.gateAuthority !== this.authorityOf(gate)) return "Who decides the release gate's cases (its approvers, self-approval or enforcement) changed after the request was made.";
     return null;
   }
 
