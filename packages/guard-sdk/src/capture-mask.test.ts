@@ -8,6 +8,7 @@ import {
   MaskIdentifierError,
   MaskUnscannableError,
   resolveOverlaps,
+  scanForCapture,
   SubjectIndex,
   type MaskPart
 } from "./capture-mask";
@@ -370,6 +371,35 @@ describe("maskRecording", () => {
     ).toThrow(MaskIdentifierError);
   });
 
+  it("round 4 B2: server-made ids and catalog tool names are not scanned on their own; collected values count on token boundaries", () => {
+    const content: MaskPart[] = [{ id: "input", value: { user_prompt: `I am ${EMAIL}, call +1 415 555 1234, card 4111 1111 1111 1111` } }];
+    // Each id holds a digit run the capture scan reads as a Luhn-valid card or a 00cc phone.
+    const registryIds = ["mcp_77585956-5432-4c3f-b145-534cb79b36c8", "mcp_85f23727-9451-4864-97f0-127762bf7512", "mcp_1621faf6-0058-4554-8815-b91576881564"];
+    for (const id of registryIds) {
+      expect(scanForCapture(id).length, id).toBeGreaterThan(0);
+      for (const text of [id, `registry:${id}`]) {
+        expect(() => maskRecording(content, { key, identifiers: [{ id: "cassette server key", text, kind: "generated" }] }), text).not.toThrow();
+      }
+    }
+    expect(() => maskRecording(content, { key, identifiers: [{ id: "adapter", text: "http-mcp", kind: "generated" }] })).not.toThrow();
+
+    const dictionaries = [{ dataClass: "project_codename", terms: ["atlas"], patterns: [], score: 0.9 }];
+    const atlas: MaskPart[] = [{ id: "input", value: { p: "ask atlas about it" } }];
+    for (const kind of ["catalog", "free"] as const) {
+      expect(() => maskRecording(atlas, { key, dictionaries, identifiers: [{ id: "tool name", text: "atlas_search", kind }] }), kind).not.toThrow();
+    }
+
+    // A raw email in a tool name still drops: found on its own (a name the catalog does not list), or collected elsewhere.
+    expect(() => maskRecording([{ id: "input", value: "hello" }], { key, identifiers: [{ id: "tool name", text: `lookup_${EMAIL}` }] })).toThrow(MaskIdentifierError);
+    expect(() => maskRecording(content, { key, identifiers: [{ id: "tool name", text: `lookup_${EMAIL}`, kind: "catalog" }] })).toThrow(MaskIdentifierError);
+    // Collected numbers and words as whole tokens still drop, whatever the kind.
+    expect(() => maskRecording(content, { key, identifiers: [{ id: "tool name", text: "ticket_4155551234", kind: "catalog" }] })).toThrow(MaskIdentifierError);
+    expect(() => maskRecording(content, { key, identifiers: [{ id: "tool name", text: "pay-4111-1111-1111-1111", kind: "generated" }] })).toThrow(MaskIdentifierError);
+    expect(() => maskRecording(atlas, { key, dictionaries, identifiers: [{ id: "server", text: "registry:atlas", kind: "generated" }] })).toThrow(MaskIdentifierError);
+    // Not glued into a longer number.
+    expect(() => maskRecording(content, { key, identifiers: [{ id: "tool name", text: "get_record_94111111111111111", kind: "catalog" }] })).not.toThrow();
+  });
+
   it("property: no collected value survives in any form in any part", () => {
     const random = (() => {
       let state = 42;
@@ -550,6 +580,22 @@ describe("SubjectIndex strict (the data-subject lookup never over-matches)", () 
   it("round 3 A4: Hungarian and Russian national forms are possible matches, not missed", () => {
     expect(certaintyOf("+36 1 234 5678", "phone")("call 06 1 234 5678")).toBe("national_only");
     expect(certaintyOf("+7 495 123 4567", "phone")("call 8 (495) 123-45-67")).toBe("national_only");
+  });
+
+  it("round 4 B1: bare digits searched as text are only a possible match inside another country's number", () => {
+    const text = (stored: string) => {
+      const index = new SubjectIndex({ strict: true });
+      index.addLiteral("4155551234", "raw");
+      const spans = index.find(decodeView(stored).text);
+      if (spans.length === 0) return null;
+      return spans.some((span) => (span.certainty ?? "exact") === "exact") ? "exact" : "national_only";
+    };
+    for (const stored of ["fr +33 4155551234", "fr 0033 4155551234", "fr +33(0)4155551234", "uk +44 (0) 4155551234", "+4155551234"]) expect(text(stored), stored).toBe("national_only");
+    for (const stored of ["ref 4155551234 on file", '{"id":"4155551234"}', "call 4155551234."]) expect(text(stored), stored).toBe("exact");
+    // A text value that is not phone-shaped keeps exact text matching.
+    const word = new SubjectIndex({ strict: true });
+    word.addLiteral("acct-889", "raw");
+    expect(word.find("+33 acct-889")[0]?.certainty).toBeUndefined();
   });
 
   it("round 3 A5: a hit written with an area code in brackets starts at the bracket", () => {

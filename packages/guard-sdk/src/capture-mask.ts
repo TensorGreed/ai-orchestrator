@@ -81,11 +81,25 @@ export interface MaskRecordingOptions {
   maxDepth?: number;
   /**
    * Identifiers kept as written (replay looks them up as they are: MCP server
-   * keys, tool names). They are not masked; when one holds a detected or a
-   * collected value masking throws `MaskIdentifierError` and the caller drops
-   * the capture.
+   * keys, tool names). They are not masked; when one holds a collected value
+   * masking throws `MaskIdentifierError` and the caller drops the capture.
+   * A `free` identifier (the default) is also scanned on its own, so a value
+   * that appears only there drops the capture too. A `generated` one (an id
+   * the server made: a registry server key, an adapter id) and a `catalog`
+   * one (a tool or server name the MCP server's own catalog lists) are not:
+   * their digit runs and words are not personal data, and scanning them
+   * would drop every capture of a workflow for good. Collected values are
+   * looked for in every identifier on token boundaries (emails and secrets
+   * anywhere).
    */
-  identifiers?: ReadonlyArray<{ id: string; text: string }>;
+  identifiers?: ReadonlyArray<MaskIdentifier>;
+}
+
+/** An identifier kept as written; see `MaskRecordingOptions.identifiers`. */
+export interface MaskIdentifier {
+  id: string;
+  text: string;
+  kind?: "free" | "generated" | "catalog";
 }
 
 export interface MaskReport {
@@ -351,6 +365,8 @@ export interface SubjectSpan {
   national?: string;
   /** Lookup: how sure the match is (`comparePhones`); every other class is `exact`. */
   certainty?: PhoneCertainty;
+  /** Lookup: the longer phone number a text hit sits inside (its `+cc` or `00cc` before it), when there is one. */
+  around?: { start: number; end: number };
 }
 
 const EMAIL_TOKEN = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)*\.[A-Za-z]{2,24}\b/g;
@@ -627,6 +643,7 @@ export class SubjectIndex {
     }
 
     if (literal.size > 0) {
+      let intlSpans: Array<{ start: number; end: number }> | undefined;
       const { exact, folded } = this.literals();
       for (const [pattern, fold] of [
         [exact, false],
@@ -637,7 +654,12 @@ export class SubjectIndex {
         for (const match of text.matchAll(pattern)) {
           if (!match[0]) continue;
           const entry = literal.get(fold ? match[0].toLowerCase() : match[0]);
-          if (entry) found.push({ start: match.index ?? 0, end: (match.index ?? 0) + match[0].length, entry });
+          if (!entry) continue;
+          const start = match.index ?? 0;
+          const end = start + match[0].length;
+          // Lookup: bare digits searched as text, found inside a longer phone number (another country's `+cc`), are only a possible match.
+          const around = this.options.strict && PHONE_SHAPED_LITERAL.test(entry.key) ? longerPhoneAround(text, start, end, () => (intlSpans ??= scanInternationalPhones(text))) : null;
+          found.push(around ? { start, end, entry, certainty: "national_only", around } : { start, end, entry });
         }
       }
     }
@@ -656,6 +678,25 @@ export class SubjectIndex {
   matches(text: string): boolean {
     return this.find(decodeView(text).text).length > 0;
   }
+}
+
+/** A literal of 7 to 15 digits, written only with digits and phone separators: it may be part of a longer phone number. */
+const PHONE_SHAPED_LITERAL = /^(?=(?:\D*\d){7,15}\D*$)[\d\s().-]+$/;
+/** What a longer international number puts right before its national digits: `+33 `, `0033 `, `+33(0)`, `+44 (0) `, `(0)`. */
+const PHONE_PREFIX_BEFORE = /(?:(?:\+\s?|(?<!\d)00)\d{1,3}[\s.-]?(?:\(\s?0\s?\)[\s.-]?|\(\s?)?|\(\s?0\s?\)[\s.-]?)$/;
+
+/**
+ * The longer phone number a text hit at `start..end` sits inside: written
+ * right after a `+cc`, `00cc` or `(0)`, or inside a number the international
+ * detector finds that is longer than the hit. Null when there is none.
+ */
+function longerPhoneAround(text: string, start: number, end: number, international: () => ReadonlyArray<{ start: number; end: number }>): { start: number; end: number } | null {
+  const prefix = PHONE_PREFIX_BEFORE.exec(text.slice(Math.max(0, start - 12), start));
+  if (prefix) return { start: start - prefix[0].length, end };
+  for (const span of international()) {
+    if (span.start <= start && span.end >= end && span.end - span.start > end - start) return span;
+  }
+  return null;
 }
 
 /** Longest run of digits read as one phone number (a 15-digit number with an international prefix and a trunk 0). */
@@ -825,26 +866,40 @@ function surrogateEdit(view: string, span: SubjectSpan, key: Uint8Array, tailCla
   return { start: span.start, end: span.end, replacement: surrogate, perChar: surrogate.length === raw.length && (span.entry.family === "digits" || span.entry.family === "alnum") };
 }
 
+/** Separators allowed inside a number written in an identifier (`415-555-1234`, `(415) 555 1234`). */
+const IDENTIFIER_DIGIT_SEPARATORS = "[\\s().-]*";
+
 /**
- * Whether an identifier kept as written holds a detected value, or a
- * collected value anywhere, even glued to other characters
- * (`lookup_jane@example.com`): stricter than
- * the masking finder, because an identifier is never masked. A false alarm
- * only drops the capture.
+ * Whether an identifier kept as written holds a collected value, or (a
+ * `free` identifier) a value its own scan detects. A collected value counts
+ * only as a whole token: a number not glued to other letters or digits (an
+ * optional `+cc` before a phone), a dictionary term or other word not glued
+ * to letters, digits or `_` (`atlas` is not in `atlas_search`). An email or
+ * a secret counts anywhere (`lookup_jane@example.com`). A false alarm only
+ * drops the capture.
  */
-function identifierHolds(index: SubjectIndex, text: string, scanOptions: Parameters<typeof scanDlp>[1]): boolean {
-  const view = decodeView(text).text;
-  // A value found only in an identifier was never collected: the scan of the identifier itself counts too.
-  if (scanForCapture(view, scanOptions).some((match) => view.slice(match.span.start, match.span.end).trim())) return true;
+export function identifierHolds(
+  index: SubjectIndex,
+  identifier: Pick<MaskIdentifier, "text" | "kind">,
+  scanOptions: Parameters<typeof scanDlp>[1] = {}
+): boolean {
+  const view = decodeView(identifier.text).text;
+  // A value found only in an identifier was never collected: a free identifier's own scan counts too.
+  if ((identifier.kind ?? "free") === "free" && scanForCapture(view, scanOptions).some((match) => view.slice(match.span.start, match.span.end).trim())) return true;
   if (index.size === 0) return false;
-  if (index.find(view).length > 0) return true;
   const lower = view.toLowerCase();
-  const digitsOnly = view.replace(/\D/g, "");
-  const alnum = view.replace(/[^A-Za-z0-9]/g, "").toUpperCase();
   return index.entries().some((entry) => {
-    if (entry.family === "digits" || entry.family === "phone") return digitsOnly.includes(entry.key);
-    if (entry.family === "alnum") return alnum.includes(entry.key);
-    return surrogateRedacts(entry.dataClass) ? view.includes(entry.key) : lower.includes(entry.key.toLowerCase());
+    if (entry.family === "email" || surrogateRedacts(entry.dataClass)) return surrogateRedacts(entry.dataClass) ? view.includes(entry.key) : lower.includes(entry.key.toLowerCase());
+    if (entry.family === "digits" || entry.family === "phone") {
+      const body = [...entry.key].join(IDENTIFIER_DIGIT_SEPARATORS);
+      const countryCode = entry.family === "phone" ? `(?:\\+?\\d{1,3}${IDENTIFIER_DIGIT_SEPARATORS})?` : "";
+      return new RegExp(`(?<![\\p{L}\\p{N}])${countryCode}${body}(?![\\p{L}\\p{N}])`, "u").test(view);
+    }
+    if (entry.family === "alnum") {
+      const body = [...entry.key].map(escapeRegExp).join("[\\s-]*");
+      return new RegExp(`(?<![A-Za-z0-9])${body}(?![A-Za-z0-9])`, "i").test(view);
+    }
+    return new RegExp(`(?<![\\p{L}\\p{N}_])${escapeRegExp(entry.key)}(?![\\p{L}\\p{N}_])`, "iu").test(view);
   });
 }
 
@@ -960,7 +1015,7 @@ export function* maskRecordingSteps(parts: readonly MaskPart[], options: MaskRec
   }
   // Identifiers stay as written: none may hold a collected value.
   for (const identifier of options.identifiers ?? []) {
-    if (identifier.text && identifierHolds(index, identifier.text, scanOptions)) {
+    if (identifier.text && identifierHolds(index, identifier, scanOptions)) {
       throw new MaskIdentifierError(`A detected value appears in ${identifier.id}, which is kept as written for replay.`);
     }
   }
