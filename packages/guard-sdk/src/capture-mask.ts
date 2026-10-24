@@ -1,6 +1,6 @@
 import { DEFAULT_NATIONAL_IDS, scanDlp, type DlpMatch, type NationalIdSpec } from "./detectors/dlp";
 import type { GuardDictionary, GuardProfile } from "./profile";
-import { parsePhone, phoneMaskCandidates, phoneMaskKeys, samePhone, type ParsedPhone, type PhoneKeyStrength } from "./phone";
+import { comparePhones, parsePhone, phoneMaskCandidates, phoneMaskKeys, scanInternationalPhones, type ParsedPhone, type PhoneCertainty, type PhoneKeyStrength } from "./phone";
 import {
   phoneSurrogateDigits,
   SURROGATE_VISIBLE_TAIL,
@@ -14,8 +14,9 @@ import {
  * stored: detect, then substitute, globally.
  *
  *   1. Every string in every part (values, object keys and the decimal text
- *      of numbers, at any depth) is scanned with the DLP patterns: the
- *      built-in classes plus the bound guard profile's dictionaries. A
+ *      of numbers, at any depth) is scanned with the DLP patterns (the
+ *      built-in classes plus the bound guard profile's dictionaries) and the
+ *      capture-only international phone detector (`scanForCapture`). A
  *      profile's `disable` list is not applied. The scan reads a decoded view
  *      of each string: URL-encoding (`%40`) and JSON escapes (`@`, `\n`)
  *      are decoded first, so an escaped value is found as well.
@@ -78,6 +79,12 @@ export interface MaskRecordingOptions {
   visibleTailClasses?: readonly string[];
   /** Deepest nesting walked; deeper content throws `MaskUnscannableError`. */
   maxDepth?: number;
+  /**
+   * Identifiers kept as written (replay looks them up as they are: MCP server
+   * keys, tool names). They are not masked; when one holds a collected value
+   * masking throws `MaskIdentifierError` and the caller drops the capture.
+   */
+  identifiers?: ReadonlyArray<{ id: string; text: string }>;
 }
 
 export interface MaskReport {
@@ -116,6 +123,14 @@ export class MaskIncompleteError extends Error {
   }
 }
 
+/** A collected value appears in an identifier the capture keeps as written (an MCP server key, a tool name). The capture must be dropped. */
+export class MaskIdentifierError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "MaskIdentifierError";
+  }
+}
+
 /** When two classes claim one value, the stronger claim wins: secrets first, then the checksum-backed classes. */
 const CLASS_PRIORITY: Record<string, number> = {
   private_key: 0,
@@ -133,6 +148,20 @@ const DEFAULT_MAX_DEPTH = 64;
 /** Strings (or this many characters) processed between two yields of the stepping API. */
 const YIELD_EVERY_STRINGS = 2_000;
 const YIELD_EVERY_CHARS = 256 * 1024;
+
+/**
+ * The scan production capture uses: the DLP patterns (the runtime guard's
+ * scan, unchanged) plus the capture-only international phone detector
+ * (`scanInternationalPhones`), so a number written `+14155551234` or
+ * `+33 1 23 45 67 89` is masked too.
+ */
+export function scanForCapture(text: string, options: Parameters<typeof scanDlp>[1] = {}): DlpMatch[] {
+  const matches = scanDlp(text, options);
+  for (const span of scanInternationalPhones(text)) {
+    matches.push({ dataClass: "phone", span, score: 0.6, message: "International phone number" });
+  }
+  return matches;
+}
 
 function priorityOf(dataClass: string): number {
   return CLASS_PRIORITY[dataClass] ?? 9;
@@ -319,6 +348,8 @@ export interface SubjectSpan {
   entry: SubjectEntry;
   /** Phones: the national number whose digits the span holds (the surrogate replaces exactly these). */
   national?: string;
+  /** Lookup: how sure the match is (`comparePhones`); every other class is `exact`. */
+  certainty?: PhoneCertainty;
 }
 
 const EMAIL_TOKEN = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)*\.[A-Za-z]{2,24}\b/g;
@@ -538,14 +569,23 @@ export class SubjectIndex {
         const segmentFirst = first;
         first = g + 1;
         if ((start > 0 && WORD_CHAR.test(text[start - 1]!)) || (end < text.length && WORD_CHAR.test(text[end]!))) continue;
+        // The excerpt starts at an opening bracket the value is written with: `(207) 946-0958`.
+        const shown = start > 0 && text[start - 1] === "(" && text[groups[segmentFirst]!.start + groups[segmentFirst]!.digits.length] === ")" ? start - 1 : start;
         let value = "";
         for (let k = segmentFirst; k <= g; k += 1) value += groups[k]!.digits;
         const entry = digits.get(value);
-        if (entry) found.push({ start, end, entry });
+        if (entry) found.push({ start: shown, end, entry, certainty: "exact" });
         if (this.strictPhones.length > 0) {
           const phone = parsePhone(text.slice(start, end), start > 0 && text[start - 1] === "+");
-          const hit = phone ? this.strictPhones.find((other) => samePhone(other.phone, phone)) : undefined;
-          if (hit) found.push({ start, end, entry: hit.entry, national: phone!.national });
+          if (phone) {
+            let best: { entry: SubjectEntry; certainty: PhoneCertainty } | null = null;
+            for (const other of this.strictPhones) {
+              const certainty = comparePhones(other.phone, phone);
+              if (certainty && (!best || certainty === "exact")) best = { entry: other.entry, certainty };
+              if (best?.certainty === "exact") break;
+            }
+            if (best) found.push({ start: shown, end, entry: best.entry, national: phone.national, certainty: best.certainty });
+          }
         }
       }
     }
@@ -737,7 +777,7 @@ function workflowLiterals(workflow: unknown, scanOptions: Parameters<typeof scan
   const phoneRuns = new Set<string>();
   const visit = (text: string) => {
     const view = decodeView(text).text;
-    for (const match of resolveOverlaps(scanDlp(view, scanOptions))) {
+    for (const match of resolveOverlaps(scanForCapture(view, scanOptions))) {
       const dataClass = String(match.dataClass);
       if (surrogateRedacts(dataClass)) continue;
       index.add(findingText(view, match), dataClass);
@@ -784,6 +824,25 @@ function surrogateEdit(view: string, span: SubjectSpan, key: Uint8Array, tailCla
   return { start: span.start, end: span.end, replacement: surrogate, perChar: surrogate.length === raw.length && (span.entry.family === "digits" || span.entry.family === "alnum") };
 }
 
+/**
+ * Whether an identifier kept as written holds a collected value anywhere,
+ * even glued to other characters (`lookup_jane@example.com`): stricter than
+ * the masking finder, because an identifier is never masked. A false alarm
+ * only drops the capture.
+ */
+function identifierHolds(index: SubjectIndex, text: string): boolean {
+  const view = decodeView(text).text;
+  if (index.find(view).length > 0) return true;
+  const lower = view.toLowerCase();
+  const digitsOnly = view.replace(/\D/g, "");
+  const alnum = view.replace(/[^A-Za-z0-9]/g, "").toUpperCase();
+  return index.entries().some((entry) => {
+    if (entry.family === "digits" || entry.family === "phone") return digitsOnly.includes(entry.key);
+    if (entry.family === "alnum") return alnum.includes(entry.key);
+    return surrogateRedacts(entry.dataClass) ? view.includes(entry.key) : lower.includes(entry.key.toLowerCase());
+  });
+}
+
 /** Detect, then substitute, across every part, yielding between chunks of work. See the module comment. */
 export function* maskRecordingSteps(parts: readonly MaskPart[], options: MaskRecordingOptions): Generator<void, MaskRecordingResult, void> {
   const maxDepth = options.maxDepth ?? DEFAULT_MAX_DEPTH;
@@ -804,7 +863,7 @@ export function* maskRecordingSteps(parts: readonly MaskPart[], options: MaskRec
         if (text.length === 0 || scanned.has(text)) return;
         scanned.add(text);
         const view = decodeView(text).text;
-        const matches = resolveOverlaps(scanDlp(view, scanOptions)).filter((match) => view.slice(match.span.start, match.span.end).trim());
+        const matches = resolveOverlaps(scanForCapture(view, scanOptions)).filter((match) => view.slice(match.span.start, match.span.end).trim());
         if (matches.length === 0) return;
         withFindings.add(text);
         for (const match of matches) {
@@ -872,7 +931,7 @@ export function* maskRecordingSteps(parts: readonly MaskPart[], options: MaskRec
     const check = (text: string, original: string) => {
       if (text === original && !withFindings.has(original)) return;
       const view = decodeView(text).text;
-      for (const match of scanDlp(view, scanOptions)) {
+      for (const match of scanForCapture(view, scanOptions)) {
         const canonical = canonicalFor(findingText(view, match), String(match.dataClass));
         if (canonical && index.has(canonical)) throw new MaskIncompleteError(`A detected value could not be replaced everywhere in ${part.id}.`);
       }
@@ -893,6 +952,12 @@ export function* maskRecordingSteps(parts: readonly MaskPart[], options: MaskRec
       }
     }
     masked.push({ ...part, value });
+  }
+  // Identifiers stay as written: none may hold a collected value.
+  for (const identifier of options.identifiers ?? []) {
+    if (index.size > 0 && identifier.text && identifierHolds(index, identifier.text)) {
+      throw new MaskIdentifierError(`A detected value appears in ${identifier.id}, which is kept as written for replay.`);
+    }
   }
   return { parts: masked, report };
 }

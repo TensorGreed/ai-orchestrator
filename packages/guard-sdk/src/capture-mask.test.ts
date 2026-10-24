@@ -5,6 +5,7 @@ import {
   maskRecording,
   maskRecordingAsync,
   maskedClassesForNode,
+  MaskIdentifierError,
   MaskUnscannableError,
   resolveOverlaps,
   SubjectIndex,
@@ -312,6 +313,63 @@ describe("maskRecording", () => {
     expect(value.us.startsWith("+1 (")).toBe(true);
   });
 
+  it("round 3 A2: international layouts found only in a tool result are masked, the country code kept", () => {
+    const forms: Array<[string, string]> = [
+      ["+14155551234", "4155551234"],
+      ["+447700900123", "7700900123"],
+      ["+33 1 23 45 67 89", "123456789"],
+      ["+44 (0) 20 7946 0958", "2079460958"],
+      ["+61 2 9876 5432", "298765432"],
+      ["+91 98765 43210", "9876543210"],
+      ["+81 3-1234-5678", "312345678"],
+      ["+353 1 234 5678", "12345678"],
+      ["+36 1 234 5678", "12345678"],
+      ["+7 495 123-45-67", "4951234567"]
+    ];
+    for (const [written, national] of forms) {
+      const cc = written.slice(1).split(/\D/)[0]!.slice(0, written.startsWith("+1") ? 1 : written.startsWith("+7") ? 1 : written.startsWith("+353") ? 3 : 2);
+      const { parts: masked, report } = maskRecording(
+        [
+          { id: "input", value: { q: "look up the customer" } },
+          { id: "cassette:1", value: { result: { content: [{ type: "text", text: JSON.stringify({ phone: written }) }] } } }
+        ],
+        { key }
+      );
+      const text = JSON.stringify(masked[1]!.value);
+      expect(text.replace(/\D/g, ""), written).not.toContain(national);
+      expect(report.values.phone, written).toBe(1);
+      const stored = (JSON.parse((masked[1]!.value as { result: { content: Array<{ text: string }> } }).result.content[0]!.text) as { phone: string }).phone;
+      expect(stored.startsWith(`+${cc}`), `${written} -> ${stored}`).toBe(true);
+      expect(stored.replace(/\d/g, "#"), written).toBe(written.replace(/\d/g, "#"));
+    }
+  });
+
+  it("round 3 A4: Hungarian 06 and Russian 8 national forms get the same surrogate as the international form", () => {
+    for (const [international, national, nationalWritten] of [
+      ["+36 30 123 4567", "301234567", "06 30 123 4567"],
+      ["+7 495 123 4567", "4951234567", "8 (495) 123-45-67"]
+    ] as const) {
+      const { parts: masked } = maskRecording([{ id: "input", value: { a: international, b: nationalWritten } }], { key });
+      const value = masked[0]!.value as { a: string; b: string };
+      expect(JSON.stringify(value).replace(/\D/g, ""), international).not.toContain(national);
+      const trunk = nationalWritten.startsWith("06") ? "06" : "8";
+      expect(value.b.startsWith(trunk), value.b).toBe(true);
+      const cc = international.slice(1).split(" ")[0]!;
+      expect(value.a.replace(/\D/g, "").slice(cc.length), value.a).toBe(value.b.replace(/\D/g, "").slice(trunk.length));
+    }
+  });
+
+  it("round 3 A3: identifiers are never masked; one holding a collected value drops the capture", () => {
+    const parts: MaskPart[] = [{ id: "cassette:1", value: { args: { email: EMAIL } } }];
+    const kept = maskRecording(parts, { key, identifiers: [{ id: "cassette server", text: "registry:crm" }, { id: "tool name", text: "crm_lookup" }] });
+    expect(JSON.stringify(kept.parts)).not.toContain(EMAIL);
+    expect(() => maskRecording(parts, { key, identifiers: [{ id: "tool name", text: `lookup_${EMAIL}` }] })).toThrow(MaskIdentifierError);
+    const dictionaries = [{ dataClass: "project_name", terms: ["atlas"], patterns: [], score: 0.9 }];
+    expect(() =>
+      maskRecording([{ id: "input", value: "ask atlas" }], { key, dictionaries, identifiers: [{ id: "cassette server", text: "registry:atlas" }] })
+    ).toThrow(MaskIdentifierError);
+  });
+
   it("property: no collected value survives in any form in any part", () => {
     const random = (() => {
       let state = 42;
@@ -336,12 +394,34 @@ describe("maskRecording", () => {
       // An 8-digit national number (Norway), written with its country code; its national forms appear elsewhere.
       const norway = `${2 + Math.floor(random() * 7)}${digits(7)}`;
       subjects.push({ dataClass: "phone8", written: `+47 ${norway.slice(0, 4)} ${norway.slice(4)}`, canonical: norway });
+      // Round 3 (A2): international layouts the DLP phone pattern does not read, found only by the capture detector.
+      const nz = (n: number) => `${2 + Math.floor(random() * 7)}${digits(n - 1)}`;
+      const layouts: Array<[string, string]> = [];
+      const us = nz(10);
+      layouts.push([`+1${us}`, us]);
+      const fr = nz(9);
+      layouts.push([`+33 ${fr[0]} ${fr.slice(1, 3)} ${fr.slice(3, 5)} ${fr.slice(5, 7)} ${fr.slice(7)}`, fr]);
+      const uk = nz(10);
+      layouts.push([`+44 (0) ${uk.slice(0, 2)} ${uk.slice(2, 6)} ${uk.slice(6)}`, uk]);
+      const au = nz(9);
+      layouts.push([`+61 ${au[0]} ${au.slice(1, 5)} ${au.slice(5)}`, au]);
+      const india = nz(10);
+      layouts.push([`+91 ${india.slice(0, 5)} ${india.slice(5)}`, india]);
+      const jp = nz(9);
+      layouts.push([`+81 ${jp[0]}-${jp.slice(1, 5)}-${jp.slice(5)}`, jp]);
+      const ie = nz(8);
+      layouts.push([`+353 ${ie[0]} ${ie.slice(1, 4)} ${ie.slice(4)}`, ie]);
+      const ru = nz(10);
+      layouts.push([`+7 ${ru.slice(0, 3)} ${ru.slice(3, 6)}-${ru.slice(6, 8)}-${ru.slice(8)}`, ru]);
+      const [written, canonical] = layouts[i % layouts.length]!;
+      subjects.push({ dataClass: "intl", written, canonical });
     }
     // Each value appears formatted once, then in other forms elsewhere.
     const forms = (subject: (typeof subjects)[number]): unknown[] => {
       const c = subject.canonical;
       if (subject.dataClass === "email") return [c.toUpperCase(), encodeURIComponent(c), c.replace("@", "\\u0040"), JSON.stringify({ to: c })];
       if (subject.dataClass === "phone8") return [c, `0${c}`, `47${c}`, `0047 ${c}`, Number(`47${c}`), `${c.slice(0, 4)} ${c.slice(4)}`, JSON.stringify({ n: c })];
+      if (subject.dataClass === "intl") return [subject.written, subject.written.replace(/[^+\d]/g, ""), JSON.stringify({ phone: subject.written.replace(/[^+\d]/g, "") }), encodeURIComponent(subject.written)];
       return [
         c,
         Number(c),
@@ -352,7 +432,8 @@ describe("maskRecording", () => {
       ];
     };
     const parts: MaskPart[] = [
-      { id: "input", value: subjects.map((subject) => `${subject.written}`).join("; ") },
+      // International numbers never appear in the input: only the capture detector can find them in a tool result.
+      { id: "input", value: subjects.filter((subject) => subject.dataClass !== "intl").map((subject) => `${subject.written}`).join("; ") },
       ...subjects.map((subject, i) => ({ id: `tool:${i}`, nodeId: `n${i % 5}`, value: { args: forms(subject), [`k-${subject.canonical}`]: [forms(subject)] } }))
     ];
     const { parts: masked } = maskRecording(parts, { key });
@@ -363,12 +444,12 @@ describe("maskRecording", () => {
     const flat = decodedAll.replace(/[\s().\-]/g, "");
     for (const subject of subjects) {
       if (subject.dataClass === "email") expect(decodedAll.toLowerCase(), subject.written).not.toContain(subject.canonical);
-      else if (subject.dataClass === "phone" || subject.dataClass === "phone8") expect(flat, subject.written).not.toContain(subject.canonical);
+      else if (subject.dataClass === "phone" || subject.dataClass === "phone8" || subject.dataClass === "intl") expect(flat, subject.written).not.toContain(subject.canonical);
       else expect(flat, subject.written).not.toContain(subject.canonical);
     }
     // And the index finds none of them in what is stored.
     const index = new SubjectIndex();
-    for (const subject of subjects) index.add(subject.written, subject.dataClass === "phone8" ? "phone" : subject.dataClass);
+    for (const subject of subjects) index.add(subject.written, subject.dataClass === "phone8" || subject.dataClass === "intl" ? "phone" : subject.dataClass);
     for (const part of masked) expect(index.matches(JSON.stringify(part.value)), part.id).toBe(false);
   });
 
@@ -432,5 +513,50 @@ describe("SubjectIndex strict (the data-subject lookup never over-matches)", () 
     expect(norway("22123456")).toBe(true);
     expect(norway("+47 22 12 34 56")).toBe(true);
     expect(norway("+45 2212 3456")).toBe(false);
+  });
+
+  const certaintyOf = (value: string, dataClass: string) => {
+    const index = new SubjectIndex({ strict: true });
+    index.add(value, dataClass);
+    return (text: string) => {
+      const spans = index.find(decodeView(text).text);
+      if (spans.length === 0) return null;
+      return spans.some((span) => (span.certainty ?? "exact") === "exact") ? "exact" : "national_only";
+    };
+  };
+
+  it("round 3 A1: every re-review 2 over-match is national_only or no match, never exact", () => {
+    const rows: Array<[string, string, "national_only" | null]> = [
+      ["+44 20 7946 0958", "call (207) 946-0958", "national_only"],
+      ["+1 (207) 946-0958", "ring 020 7946 0958", "national_only"],
+      ["(415) 555-1234", "+33 415 555 1234", "national_only"],
+      ["(415) 555-1234", "+49 415 555 1234", "national_only"],
+      ["(207) 946-0958", "44 207 946 0958", null],
+      ["020 7946 0958", "(207) 946-0958", "national_only"],
+      ["020 7946 0958", "+1 207 946 0958", "national_only"],
+      ["415-555-1234", "ids 7 415 555 1234", null],
+      ["415-555-1234", "ids 86 415 555 1234", null]
+    ];
+    for (const [query, stored, expected] of rows) expect(certaintyOf(query, "phone")(stored), `${query} vs ${stored}`).toBe(expected);
+  });
+
+  it("round 3 A1: the same number with its country code on both sides is exact", () => {
+    const phone = certaintyOf("+1 415-555-1234", "phone");
+    for (const text of ["+14155551234", "tel:+14155551234", "0014155551234", '{"phone":"+1 (415) 555-1234"}']) expect(phone(text), text).toBe("exact");
+    for (const text of ["4155551234", "1-415-555-1234", '"phone":4155551234', "(415) 555-1234"]) expect(phone(text), text).toBe("national_only");
+    expect(certaintyOf("123-45-6788", "us_ssn")("SSN 123 45 6788")).toBe("exact");
+  });
+
+  it("round 3 A4: Hungarian and Russian national forms are possible matches, not missed", () => {
+    expect(certaintyOf("+36 1 234 5678", "phone")("call 06 1 234 5678")).toBe("national_only");
+    expect(certaintyOf("+7 495 123 4567", "phone")("call 8 (495) 123-45-67")).toBe("national_only");
+  });
+
+  it("round 3 A5: a hit written with an area code in brackets starts at the bracket", () => {
+    const index = new SubjectIndex({ strict: true });
+    index.add("+1 (207) 946-0958", "phone");
+    const text = "call (207) 946-0958 now";
+    const [span] = index.find(text);
+    expect(text.slice(span!.start, span!.end)).toBe("(207) 946-0958");
   });
 });

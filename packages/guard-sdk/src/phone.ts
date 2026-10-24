@@ -6,16 +6,21 @@
  * and its national number. ITU calling codes are prefix-free, so a number
  * written with `+` has one country code at most.
  *
- * Two uses, with different rules:
+ * Uses, with different rules:
  *
  *   - Masking (`phoneMaskKeys`) may over-mask: a detected number is replaced
- *     in its international, national and trunk forms, and a number written
- *     without a country code is also tried as if its first one to three
- *     digits were one. The country code digits are never rewritten.
- *   - The data-subject lookup (`samePhone`) must never over-match: two
- *     numbers are the same only when their full numbers are equal, or one is
- *     the other's exact national form (country code and an optional trunk `0`
- *     removed). A shared suffix is never enough.
+ *     in its international, national and trunk forms (the trunk table:
+ *     `0`, Hungary `06`, Russia, Kazakhstan and Belarus `8`, none for Italy),
+ *     and a number written without a country code is also tried as if its
+ *     first one to three digits were one. The country code digits are never
+ *     rewritten.
+ *   - Capture finds international numbers the DLP pattern does not read
+ *     (`scanInternationalPhones`); the runtime guard's scan is unchanged.
+ *   - The data-subject lookup (`comparePhones`) must never over-match: two
+ *     numbers are `exact` only when both carry the same country code and
+ *     national number. When one side has no country code they can only be
+ *     `national_only` (a possible match a delete needs confirmed). A shared
+ *     suffix or a guessed country code never matches.
  */
 
 /** Assigned ITU-T E.164 country calling codes (prefix-free). */
@@ -59,6 +64,27 @@ export function callingCodeOf(digits: string): string | null {
   return null;
 }
 
+/**
+ * Trunk prefixes: what a country's numbers start with when written without
+ * the country code. `0` unless listed. Hungary writes `06`; Russia,
+ * Kazakhstan (both `+7`) and Belarus write `8`. Italy has none: its leading
+ * `0` is part of the number and stays after `+39`.
+ */
+const TRUNK_PREFIXES: Readonly<Record<string, readonly string[]>> = {
+  "36": ["06"],
+  "7": ["8"],
+  "375": ["8"],
+  "39": []
+};
+
+/** The trunk prefixes of a country calling code (`0` unless the table says otherwise). */
+export function trunkPrefixesFor(cc: string): readonly string[] {
+  return TRUNK_PREFIXES[cc] ?? ["0"];
+}
+
+/** How sure a lookup match is: the same full number with its country code on both sides, or only the national digits agree. */
+export type PhoneCertainty = "exact" | "national_only";
+
 export interface ParsedPhone {
   /** Every digit as written, an international `00` prefix removed. */
   digits: string;
@@ -66,8 +92,14 @@ export interface ParsedPhone {
   explicit: boolean;
   /** The country code, when explicit and assigned. */
   cc: string | null;
-  /** The national number: without the country code and without one trunk `0`. */
+  /** The national number: without the country code and without a trunk prefix. */
   national: string;
+}
+
+/** The national number after a country code: a `(0)` trunk written after it is dropped, except where the 0 belongs to the number (Italy). */
+function nationalAfterCode(cc: string, rest: string): string {
+  if (trunkPrefixesFor(cc).length === 0) return rest;
+  return rest.startsWith("0") && rest.length > 1 ? rest.slice(1) : rest;
 }
 
 /**
@@ -85,48 +117,71 @@ export function parsePhone(written: string, explicitHint = false): ParsedPhone |
   }
   if (explicit) {
     const cc = callingCodeOf(digits);
-    if (cc) {
-      const rest = digits.slice(cc.length);
-      const national = rest.startsWith("0") && rest.length > 1 ? rest.slice(1) : rest;
-      return { digits, explicit, cc, national };
-    }
+    if (cc) return { digits, explicit, cc, national: nationalAfterCode(cc, digits.slice(cc.length)) };
     return { digits, explicit, cc: null, national: digits };
   }
   const national = digits.startsWith("0") && digits.length > 1 ? digits.slice(1) : digits;
   return { digits, explicit: false, cc: null, national };
 }
 
-/** Whether `full` is `cc` followed by `national` (optionally with a trunk `0` between). */
-function internationalForm(full: string, cc: string, national: string): boolean {
-  return full === cc + national || full === `${cc}0${national}`;
+/** A number the admin typed without its country code, read as a number of the country `cc` (a country chosen in the lookup). */
+export function phoneInCountry(written: string, cc: string): ParsedPhone | null {
+  const parsed = parsePhone(written);
+  if (!parsed || !CALLING_CODES.has(cc)) return null;
+  if (parsed.explicit) return parsed.cc === cc ? parsed : null;
+  const readings = plainReadings(parsed.digits, cc);
+  // The national number: the trunk prefix removed when it is written.
+  const national = readings.length > 1 ? readings[1]! : readings[0]!;
+  return { digits: cc + national, explicit: true, cc, national };
 }
 
-/** `p` written with a known country code, `q` written without one: is `q` the same number? */
+/** A number written without a country code, read as a number of `cc`: as written, and with the country's trunk prefix removed. */
+function plainReadings(digits: string, cc: string): string[] {
+  const out = [digits];
+  for (const trunk of trunkPrefixesFor(cc)) if (digits.startsWith(trunk) && digits.length > trunk.length) out.push(digits.slice(trunk.length));
+  return out;
+}
+
+/** Whether `full` is `cc` followed by `national` (optionally with a `(0)` trunk between). */
+function internationalForm(full: string, cc: string, national: string): boolean {
+  return full === cc + national || (trunkPrefixesFor(cc).length > 0 && full === `${cc}0${national}`);
+}
+
+/** `p` written with a known country code, `q` written without one: could `q` be the same number? */
 function explicitVersusPlain(p: ParsedPhone, q: ParsedPhone): boolean {
-  // q is p's national form (with or without the trunk 0), or p's full number without the `+`.
-  return q.national === p.national || internationalForm(q.digits, p.cc!, p.national);
+  // q is p's national form (with or without its trunk prefix), or p's full number without the `+`.
+  return plainReadings(q.digits, p.cc!).includes(p.national) || internationalForm(q.digits, p.cc!, p.national);
 }
 
 /**
- * Strict equality for the data-subject lookup: the full numbers are equal,
- * or one is the other's exact national form. Never a shared suffix, never a
- * different country code.
+ * The data-subject lookup's comparison. It must never over-match, because
+ * what it finds can be deleted:
+ *
+ *   - `exact`: both numbers carry the same country code and national number.
+ *   - `national_only`: one side (or both) has no country code, and its
+ *     digits are the other's national form. That cannot prove it is the same
+ *     person (a US `(207) 946-0958` and a UK `020 7946 0958` read alike), so
+ *     the lookup lists it as a possible match and never deletes it without
+ *     an explicit confirmation.
+ *   - null otherwise: never a shared suffix, never another country code, and
+ *     never a guessed country code in front of a number written without one.
  */
-export function samePhone(a: ParsedPhone, b: ParsedPhone): boolean {
+export function comparePhones(a: ParsedPhone, b: ParsedPhone): PhoneCertainty | null {
   const aKnown = a.explicit && a.cc !== null;
   const bKnown = b.explicit && b.cc !== null;
-  if (aKnown && bKnown) return a.cc === b.cc && a.national === b.national;
-  if (aKnown && !b.explicit) return explicitVersusPlain(a, b);
-  if (bKnown && !a.explicit) return explicitVersusPlain(b, a);
+  if (aKnown && bKnown) return a.cc === b.cc && a.national === b.national ? "exact" : null;
+  if (aKnown && !b.explicit) return explicitVersusPlain(a, b) ? "national_only" : null;
+  if (bKnown && !a.explicit) return explicitVersusPlain(b, a) ? "national_only" : null;
   // A `+` with an unassigned code on either side: only the very same digits.
-  if (a.explicit || b.explicit) return a.digits === b.digits;
-  // Neither has a country code: equal, a trunk 0 apart, or one is the other with an assigned code in front.
-  if (a.digits === b.digits || a.national === b.national) return true;
-  const withCode = (long: ParsedPhone, short: ParsedPhone) => {
-    const cc = callingCodeOf(long.digits);
-    return cc !== null && short.national.length >= MIN_NATIONAL_DIGITS && internationalForm(long.digits, cc, short.national);
-  };
-  return withCode(a, b) || withCode(b, a);
+  if (a.explicit && b.explicit) return a.digits === b.digits ? "exact" : null;
+  if (a.explicit || b.explicit) return a.digits === b.digits ? "national_only" : null;
+  // Neither has a country code: the same digits, or a trunk 0 apart.
+  return a.digits === b.digits || a.national === b.national ? "national_only" : null;
+}
+
+/** Whether the lookup counts two numbers as the same at all (`comparePhones` not null). */
+export function samePhone(a: ParsedPhone, b: ParsedPhone): boolean {
+  return comparePhones(a, b) !== null;
 }
 
 /** A run of digits read as a number without a country code, and, when it starts with an assigned calling code, as one with it. */
@@ -163,10 +218,10 @@ export function phoneMaskKeys(phone: ParsedPhone): Array<{ key: string; national
   };
   const add = (national: string, cc: string | null, strength: PhoneKeyStrength) => {
     put(national, national, strength);
-    put(`0${national}`, national, strength);
+    for (const trunk of cc ? trunkPrefixesFor(cc) : ["0"]) put(trunk + national, national, strength);
     if (cc) {
       put(cc + national, national, strength);
-      put(`${cc}0${national}`, national, strength);
+      if (trunkPrefixesFor(cc).length > 0) put(`${cc}0${national}`, national, strength);
     }
   };
   if (phone.cc) {
@@ -178,8 +233,7 @@ export function phoneMaskKeys(phone: ParsedPhone): Array<{ key: string; national
     const body = phone.digits;
     const cc = body.startsWith("0") ? null : callingCodeOf(body);
     if (cc && body.length - cc.length >= MIN_NATIONAL_DIGITS) {
-      const rest = body.slice(cc.length);
-      add(rest.startsWith("0") ? rest.slice(1) : rest, cc, 0);
+      add(nationalAfterCode(cc, body.slice(cc.length)), cc, 0);
     }
   }
   return [...out].map(([key, value]) => ({ key, ...value }));
@@ -188,4 +242,51 @@ export function phoneMaskKeys(phone: ParsedPhone): Array<{ key: string; national
 /** The readings of a run of digits that masking looks up as keys, longest first. */
 export function phoneMaskCandidates(digits: string): string[] {
   return nationalReadings(digits).sort((a, b) => b.length - a.length);
+}
+
+/**
+ * A run that may be an international phone number: `+` or `00`, then digits
+ * with common separators between them (spaces, dots, dashes, brackets, as in
+ * `+1 (415) 555-1234` and `+44 (0) 20 7946 0958`). Never after a letter, a
+ * digit, `_` or another `+`.
+ */
+const INTERNATIONAL_RUN = /(?<![\p{L}\p{N}_+])(?:\+|(?<!\.)00)[ \t.-]?\(?\d(?:[ \t().-]{0,3}\d)*/gu;
+/** Digits after the country code an international phone number has (7–14, one more for a `(0)` trunk). */
+const INTERNATIONAL_REST_MIN = 7;
+const INTERNATIONAL_REST_MAX = 14;
+
+/**
+ * Production capture only (never the runtime guard's DLP scan): international
+ * phone numbers the DLP phone pattern does not read, such as E.164 without
+ * separators (`+14155551234`), French pairs (`+33 1 23 45 67 89`), `(0)`
+ * trunk notation, and the Australian, Indian, Japanese, Irish, Hungarian and
+ * Russian layouts. A run counts when it starts with `+` or `00`, an assigned
+ * calling code follows, then 7 to 14 digits that do not start with 0 (unless
+ * written `(0)`). The longest such run ending on a whole group is taken.
+ * Masking may over-mask, so this errs towards finding a number.
+ */
+export function scanInternationalPhones(text: string): Array<{ start: number; end: number }> {
+  const out: Array<{ start: number; end: number }> = [];
+  for (const run of text.matchAll(INTERNATIONAL_RUN)) {
+    const base = run.index ?? 0;
+    const written = run[0];
+    const prefixLength = written.startsWith("+") ? 1 : 2;
+    const groups = [...written.slice(prefixLength).matchAll(/\d+/g)].map((group) => ({ end: prefixLength + (group.index ?? 0) + group[0].length, digits: group[0] }));
+    const trunkWritten = /\(0\)/.test(written);
+    let digits = "";
+    let best = -1;
+    for (const group of groups) {
+      digits += group.digits;
+      const cc = callingCodeOf(digits);
+      if (!cc) continue;
+      const restWritten = digits.slice(cc.length);
+      const rest = trunkWritten && restWritten.startsWith("0") ? restWritten.slice(1) : restWritten;
+      if (rest.length > INTERNATIONAL_REST_MAX) break;
+      // Only Italy-style numbers keep a leading 0 after the country code.
+      const leadingZeroOk = trunkPrefixesFor(cc).length === 0;
+      if (rest.length >= INTERNATIONAL_REST_MIN && (leadingZeroOk || !rest.startsWith("0"))) best = group.end;
+    }
+    if (best > 0) out.push({ start: base, end: base + best });
+  }
+  return out;
 }
