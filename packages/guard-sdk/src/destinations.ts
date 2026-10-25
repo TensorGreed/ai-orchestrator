@@ -54,10 +54,23 @@ export function profileHasDestinationRules(profile: Pick<GuardProfile, "destinat
   return (profile.destinations?.rules.length ?? 0) > 0;
 }
 
-/** What a label-only finding gets instead of redact, mask or protect: the profile's protection fallback, or block when that would rewrite too. */
+/** Fallbacks that still stop the data: anything else (allow, review, a rewrite) would let it leave. */
+const STOPPING_ACTIONS: ReadonlySet<GuardAction> = new Set<GuardAction>(["block", "require_approval"]);
+
+/**
+ * What a label-only finding gets instead of redact, mask or protect: the
+ * profile's protection fallback when that still stops the data (block or
+ * require approval), otherwise block. A rule written to keep data in must
+ * never degrade into letting it out.
+ */
 function labelOnlyAction(profile: GuardProfile): GuardAction {
   const fallback = profile.protection.fallback;
-  return REWRITING_ACTIONS.has(fallback) || fallback === "transform" ? "block" : fallback;
+  return STOPPING_ACTIONS.has(fallback) ? fallback : "block";
+}
+
+/** Region conditions apply only to vendor and public destinations; local and private are home and always pass. */
+function regionChecked(destination: ResolvedDestination): boolean {
+  return destination.tier === "vendor" || destination.tier === "public";
 }
 
 function describeDestination(destination: ResolvedDestination): string {
@@ -70,11 +83,13 @@ function describeDestination(destination: ResolvedDestination): string {
  * The profile's destination rules that fire for data going to `destination`.
  * A rule fires when the data matches its `when` (any listed class or
  * provenance label; no condition means any data) and the destination is
- * outside its `allow` (a tier further out than `maxTier`, or a region not
- * covered). Classes are the scan's findings plus the labels' classes; a
- * destination approved to hold a class lets that class through. A class
- * only the labels carry cannot be rewritten, so redact, mask and protect
- * become the profile's protection fallback (block by default).
+ * outside its `allow` (a tier further out than `maxTier`, or, for vendor and
+ * public destinations only, a region not covered; local and private
+ * destinations always pass a region check). Classes are the scan's findings
+ * plus the labels' classes; a destination approved to hold a class lets that
+ * class through. A class only the labels carry cannot be rewritten, so
+ * redact, mask and protect become the profile's protection fallback when
+ * that is block or require approval, and block otherwise.
  */
 export function evaluateDestinationRules(profile: GuardProfile, input: DestinationRuleInput): DestinationRuleResult {
   const rules = profile.destinations?.rules ?? [];
@@ -88,7 +103,8 @@ export function evaluateDestinationRules(profile: GuardProfile, input: Destinati
 
   rules.forEach((rule, ruleIndex) => {
     const tierBroken = destinationTierExceeds(input.destination.tier, rule.allow.maxTier);
-    const regionBroken = Boolean(rule.allow.regions?.length) && !regionAllowed(input.destination.region, rule.allow.regions!);
+    const regionBroken =
+      Boolean(rule.allow.regions?.length) && regionChecked(input.destination) && !regionAllowed(input.destination.region, rule.allow.regions!);
     if (!tierBroken && !regionBroken) return;
     const limit = tierBroken
       ? `may go no further than ${DESTINATION_TIER_LABELS[rule.allow.maxTier].toLowerCase()}`

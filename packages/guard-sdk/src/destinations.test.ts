@@ -96,14 +96,23 @@ describe("evaluateDestinationRules", () => {
     expect(LABEL_ONLY_REASON).toBe("matched by where the data came from, not found in the text");
   });
 
-  it("uses the profile's protection fallback for label-only rewrites, never a rewriting fallback", () => {
-    const review = profileWith([{ ...keepInHouse, action: "mask" }], { protection: { fallback: "review" } });
-    expect(evaluateDestinationRules(review, { labels: labels({ dataClasses: ["iban"] }), foundClasses: [], destination: dest() }).fired[0]!.action).toBe("review");
-    const redact = profileWith([{ ...keepInHouse, action: "protect" }], { protection: { fallback: "redact" } });
-    expect(evaluateDestinationRules(redact, { labels: labels({ dataClasses: ["iban"] }), foundClasses: [], destination: dest() }).fired[0]!.action).toBe("block");
+  it("uses the profile's protection fallback for label-only rewrites only when it still stops the data", () => {
+    const run = (fallback: string, action = "mask") =>
+      evaluateDestinationRules(profileWith([{ ...keepInHouse, action }], { protection: { fallback } } as Partial<GuardProfileInput>), {
+        labels: labels({ dataClasses: ["iban"] }),
+        foundClasses: [],
+        destination: dest()
+      }).fired[0]!;
+    // A fallback that stops the data is kept.
+    expect(run("block").action).toBe("block");
+    expect(run("require_approval").action).toBe("require_approval");
+    // Anything that would let the data leave (or rewrite text that is not there) becomes block.
+    for (const fallback of ["allow", "review", "redact", "mask", "transform"]) {
+      expect(run(fallback, "protect")).toMatchObject({ action: "block", requestedAction: "protect", basis: "labels" });
+    }
     // Block, review and approval rules keep their action on labels alone.
-    const approval = profileWith([{ ...keepInHouse, action: "require_approval" }]);
-    expect(evaluateDestinationRules(approval, { labels: labels({ dataClasses: ["iban"] }), foundClasses: [], destination: dest() }).fired[0]).toMatchObject({ action: "require_approval", basis: "labels" });
+    expect(run("allow", "require_approval")).toMatchObject({ action: "require_approval", basis: "labels" });
+    expect(run("allow", "review")).toMatchObject({ action: "review", basis: "labels" });
   });
 
   it("a class found in the content and in the labels counts as content", () => {
@@ -139,6 +148,18 @@ describe("evaluateDestinationRules", () => {
     expect(run("us-east-1")).toHaveLength(1);
     expect(run("unknown")).toHaveLength(1);
     expect(run("us-east-1")[0]!.reason).toContain("may only go to regions eu");
+  });
+
+  it("applies region conditions to vendor and public destinations only; local and private always pass", () => {
+    const profile = profileWith([{ when: { dataClasses: ["email"] }, allow: { maxTier: "public", regions: ["eu"] }, action: "block" }]);
+    const run = (tier: ResolvedDestination["tier"], region: string) =>
+      evaluateDestinationRules(profile, { labels: labels(), foundClasses: ["email"], destination: dest({ tier, region }) }).fired;
+    expect(run("local", "unknown")).toEqual([]);
+    expect(run("private", "unknown")).toEqual([]);
+    expect(run("private", "us-east-1")).toEqual([]);
+    expect(run("vendor", "unknown")).toHaveLength(1);
+    expect(run("public", "us-east-1")).toHaveLength(1);
+    expect(run("public", "eu-central-1")).toEqual([]);
   });
 
   it("takes shadow from the rule, else from the profile's per-action flag", () => {
