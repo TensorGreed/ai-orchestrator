@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { BUILTIN_DESTINATIONS, destinationHostOfUrl, resolveDestination } from "@ai-orchestrator/shared";
-import { PROVIDER_DEFAULT_BASE_URLS, providerDefaultBaseUrl } from "./default-base-urls";
+import { PROVIDER_DEFAULT_BASE_URLS, PROVIDERS_WITH_FIXED_HOST, PROVIDERS_WITHOUT_NETWORK, providerDefaultBaseUrl } from "./default-base-urls";
+import { createDefaultProviderRegistry } from "./index";
 
 describe("provider default base URLs", () => {
   it("are the hosts the built-in vendor destinations list", () => {
@@ -17,5 +18,11 @@ describe("provider default base URLs", () => {
     expect(providerDefaultBaseUrl("ollama", {})).toBe("http://localhost:11434/v1");
     expect(providerDefaultBaseUrl("azure_openai", {})).toBeUndefined();
     expect(providerDefaultBaseUrl("openai_compatible", {})).toBeUndefined();
+  });
+
+  it("names only registered providers as offline or fixed-host, and fixed-host ones have a default", () => {
+    const registry = createDefaultProviderRegistry();
+    for (const id of [...PROVIDERS_WITHOUT_NETWORK, ...PROVIDERS_WITH_FIXED_HOST]) expect(registry.tryGet(id), id).toBeDefined();
+    for (const id of PROVIDERS_WITH_FIXED_HOST) expect(PROVIDER_DEFAULT_BASE_URLS[id], id).toBeDefined();
   });
 });

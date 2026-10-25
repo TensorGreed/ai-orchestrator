@@ -5,7 +5,9 @@
  *
  * The list is derived from configuration only: model providers set on
  * workflow nodes (their base URL, or the adapter's default), MCP servers in
- * the registry and on MCP Tool nodes, HTTP and connector nodes. No traffic
+ * the registry and on MCP Tool nodes, HTTP and connector nodes, in each
+ * workflow's draft and its published version. Disabled nodes and providers
+ * that send nothing over the network are skipped. No traffic
  * is stored. Only hosts are read from URLs; paths, queries and credentials
  * never leave this module.
  *
@@ -27,7 +29,7 @@ import {
   type UnclassifiedDestination,
   type Workflow
 } from "@ai-orchestrator/shared";
-import { providerDefaultBaseUrl } from "@ai-orchestrator/provider-sdk";
+import { PROVIDERS_WITH_FIXED_HOST, PROVIDERS_WITHOUT_NETWORK, providerDefaultBaseUrl } from "@ai-orchestrator/provider-sdk";
 import type { DataDestinationWrite, McpServerRecord, SqliteStore } from "../db/database.js";
 import type { SafeUser } from "./auth-service.js";
 
@@ -77,14 +79,93 @@ function configHost(config: Record<string, unknown>): string | undefined {
   return undefined;
 }
 
+/** A non-empty string setting, trimmed; undefined when the setting is absent or blank. */
+function setting(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+/**
+ * Where a provider node sends its calls: `null` for a provider that sends
+ * nothing over the network, otherwise the host (undefined when the base URL
+ * is set but cannot be read, such as a template: the real host is unknown, so
+ * the default is never assumed).
+ */
+function providerHost(providerId: string, provider: Record<string, unknown>, env: Record<string, string | undefined>): string | undefined | null {
+  if (PROVIDERS_WITHOUT_NETWORK.has(providerId)) return null;
+  if (PROVIDERS_WITH_FIXED_HOST.has(providerId)) return hostFrom(providerDefaultBaseUrl(providerId, env));
+  const configured =
+    setting(provider.baseUrl) ??
+    (providerId === "azure_openai" ? setting(record(provider.extra)?.endpoint) ?? setting(env.AZURE_OPENAI_ENDPOINT) : undefined);
+  if (configured !== undefined) return hostFrom(configured);
+  return hostFrom(providerDefaultBaseUrl(providerId, env));
+}
+
+type CollectWorkflow = Pick<Workflow, "id" | "name" | "nodes"> & {
+  /** The published version's nodes, when one is published. */
+  published?: Pick<Workflow, "nodes"> | null;
+};
+
 export interface CollectInput {
-  workflows: ReadonlyArray<Pick<Workflow, "id" | "name" | "nodes">>;
+  workflows: ReadonlyArray<CollectWorkflow>;
   mcpServers: ReadonlyArray<Pick<McpServerRecord, "id" | "name" | "connection">>;
   env?: Record<string, string | undefined>;
 }
 
-/** Every place the configuration sends data to, with where it was seen. Pure. */
+function refKey(ref: ConfiguredDestination["ref"]): string {
+  return `${ref.kind}\u0000${ref.id ?? ""}\u0000${ref.host ?? ""}`;
+}
+
+function collectNodes(
+  nodes: Workflow["nodes"] | undefined,
+  label: (nodeName: string) => string,
+  registryHosts: ReadonlyMap<string, string | undefined>,
+  env: Record<string, string | undefined>
+): ConfiguredDestination[] {
+  const out: ConfiguredDestination[] = [];
+  for (const node of nodes ?? []) {
+    if (node.disabled) continue;
+    const config = record(node.config) ?? {};
+    const seenIn = label(node.name || node.id);
+    const provider = record(config.provider);
+    if (provider && typeof provider.providerId === "string" && provider.providerId.trim()) {
+      const providerId = provider.providerId.trim();
+      const host = providerHost(providerId, provider, env);
+      if (host === null) continue;
+      out.push({ ref: { kind: "model_provider", id: providerId, ...(host ? { host } : {}) }, seenIn });
+      continue;
+    }
+    if (node.type === "azure_openai_chat_model") {
+      const configured = setting(config.endpoint) ?? setting(env.AZURE_OPENAI_ENDPOINT);
+      const host = configured !== undefined ? hostFrom(configured) : undefined;
+      out.push({ ref: { kind: "model_provider", id: "azure_openai", ...(host ? { host } : {}) }, seenIn });
+      continue;
+    }
+    if (node.type === "mcp_tool") {
+      const registryId = typeof config.registryServerId === "string" && config.registryServerId.trim() ? config.registryServerId.trim() : undefined;
+      const host = (registryId ? registryHosts.get(registryId) : undefined) ?? hostFrom(record(config.connection)?.endpoint);
+      if (registryId || host) out.push({ ref: { kind: "mcp_server", ...(registryId ? { id: registryId } : {}), ...(host ? { host } : {}) }, seenIn });
+      continue;
+    }
+    if (HTTP_NODE_TYPES.has(node.type)) {
+      const host = hostFrom(config.url) ?? hostFrom(config.urlTemplate);
+      if (host) out.push({ ref: { kind: "http", host }, seenIn });
+      continue;
+    }
+    if (getNodeDefinition(node.type)?.category === "Connector") {
+      const host = configHost(config);
+      out.push({ ref: { kind: "connector", id: node.type, ...(host ? { host } : {}) }, seenIn });
+    }
+  }
+  return out;
+}
+
+/**
+ * Every place the configuration sends data to, with where it was seen. Pure.
+ * A workflow's published version adds only what its draft does not already
+ * send to, marked "(published)".
+ */
 export function collectConfiguredDestinations(input: CollectInput): ConfiguredDestination[] {
+  const env = input.env ?? process.env;
   const out: ConfiguredDestination[] = [];
   const registryHosts = new Map<string, string | undefined>();
   for (const server of input.mcpServers) {
@@ -93,37 +174,12 @@ export function collectConfiguredDestinations(input: CollectInput): ConfiguredDe
     out.push({ ref: { kind: "mcp_server", id: server.id, ...(host ? { host } : {}) }, seenIn: `MCP server "${server.name}"` });
   }
   for (const workflow of input.workflows) {
-    for (const node of workflow.nodes ?? []) {
-      const config = record(node.config) ?? {};
-      const seenIn = `Workflow "${workflow.name}" · ${node.name || node.id}`;
-      const provider = record(config.provider);
-      if (provider && typeof provider.providerId === "string" && provider.providerId.trim()) {
-        const providerId = provider.providerId.trim();
-        const host =
-          hostFrom(provider.baseUrl) ?? hostFrom(record(provider.extra)?.endpoint) ?? hostFrom(providerDefaultBaseUrl(providerId, input.env ?? process.env));
-        out.push({ ref: { kind: "model_provider", id: providerId, ...(host ? { host } : {}) }, seenIn });
-        continue;
-      }
-      if (node.type === "azure_openai_chat_model") {
-        const host = hostFrom(config.endpoint);
-        out.push({ ref: { kind: "model_provider", id: "azure_openai", ...(host ? { host } : {}) }, seenIn });
-        continue;
-      }
-      if (node.type === "mcp_tool") {
-        const registryId = typeof config.registryServerId === "string" && config.registryServerId.trim() ? config.registryServerId.trim() : undefined;
-        const host = (registryId ? registryHosts.get(registryId) : undefined) ?? hostFrom(record(config.connection)?.endpoint);
-        if (registryId || host) out.push({ ref: { kind: "mcp_server", ...(registryId ? { id: registryId } : {}), ...(host ? { host } : {}) }, seenIn });
-        continue;
-      }
-      if (HTTP_NODE_TYPES.has(node.type)) {
-        const host = hostFrom(config.url) ?? hostFrom(config.urlTemplate);
-        if (host) out.push({ ref: { kind: "http", host }, seenIn });
-        continue;
-      }
-      if (getNodeDefinition(node.type)?.category === "Connector") {
-        const host = configHost(config);
-        out.push({ ref: { kind: "connector", id: node.type, ...(host ? { host } : {}) }, seenIn });
-      }
+    const draft = collectNodes(workflow.nodes, (node) => `Workflow "${workflow.name}" · ${node}`, registryHosts, env);
+    out.push(...draft);
+    if (!workflow.published) continue;
+    const inDraft = new Set(draft.map((entry) => refKey(entry.ref)));
+    for (const entry of collectNodes(workflow.published.nodes, (node) => `Workflow "${workflow.name}" (published) · ${node}`, registryHosts, env)) {
+      if (!inDraft.has(refKey(entry.ref))) out.push(entry);
     }
   }
   return out;
@@ -223,11 +279,22 @@ export class DataDestinationService {
     const readableProjects = this.deps.readableProjectIds(user);
     const workflowIds = readableWorkflows === null ? null : new Set(readableWorkflows);
     const projectIds = readableProjects === null ? null : new Set(readableProjects);
-    const workflows = store
-      .listWorkflows()
-      .filter((item) => workflowIds === null || workflowIds.has(item.id))
-      .map((item) => store.getWorkflow(item.id))
-      .filter((workflow): workflow is Workflow => workflow !== null);
+    const parse = (json: string | null): Workflow | null => {
+      if (!json) return null;
+      try {
+        return JSON.parse(json) as Workflow;
+      } catch {
+        return null;
+      }
+    };
+    // One query for every workflow's draft and published JSON (no per-workflow loads).
+    const workflows: CollectWorkflow[] = [];
+    for (const item of store.listWorkflowConfigsForDestinations()) {
+      if (workflowIds !== null && !workflowIds.has(item.id)) continue;
+      const draft = parse(item.draftJson);
+      if (!draft) continue;
+      workflows.push({ id: item.id, name: item.name, nodes: draft.nodes ?? [], published: parse(item.publishedJson) });
+    }
     const mcpServers = store.listMcpServers().filter((server) => projectIds === null || server.projectId === null || projectIds.has(server.projectId));
     const configured = collectConfiguredDestinations({ workflows, mcpServers, env: this.deps.env });
     return findUnclassifiedDestinations(configured, store.listDataDestinations());

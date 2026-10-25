@@ -16,3 +16,9 @@ export function providerDefaultBaseUrl(providerId: string, env: Record<string, s
   if (providerId === "ollama" && env.OLLAMA_BASE_URL) return env.OLLAMA_BASE_URL;
   return PROVIDER_DEFAULT_BASE_URLS[providerId];
 }
+
+/** Providers that send nothing over the network (the echo test provider): they are no destination. */
+export const PROVIDERS_WITHOUT_NETWORK: ReadonlySet<string> = new Set(["echo"]);
+
+/** Providers whose adapter always calls its default host and ignores a node's base URL. */
+export const PROVIDERS_WITH_FIXED_HOST: ReadonlySet<string> = new Set(["gemini"]);

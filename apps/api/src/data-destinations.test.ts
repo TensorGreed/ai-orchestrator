@@ -152,6 +152,13 @@ describe("data destination routes", () => {
     expect(body.error).toMatch(/Enter a host name/);
     expect(body.issues[0]!.path).toBe("host");
     expect(((await call(context, "POST", "/api/data-destinations", admin.cookie, { name: "p", kind: "model_provider", tier: "vendor" })).json() as { error: string }).error).toMatch(/Choose the model provider/);
+    // Authority and URL spellings are refused, never stored as a different host.
+    for (const host of ["localhost:80@evil.com", "[::1].evil.com", "localhost:evil", "evil.com/localhost", "local\\host", "localhost?x", "local host"]) {
+      const response = await call(context, "POST", "/api/data-destinations", admin.cookie, { name: "x", kind: "http", host, tier: "local" });
+      expect(response.statusCode, host).toBe(400);
+      expect((response.json() as { error: string }).error, host).toMatch(/Enter a host name/);
+    }
+    expect(((await call(context, "GET", "/api/data-destinations", admin.cookie)).json() as { destinations: unknown[] }).destinations).toEqual([]);
 
     expect((await call(context, "POST", "/api/data-destinations", admin.cookie, corp)).statusCode).toBe(201);
     const duplicate = await call(context, "POST", "/api/data-destinations", admin.cookie, { ...corp, name: "Again", host: "*.CORP.example" });
@@ -248,6 +255,58 @@ describe("collectConfiguredDestinations", () => {
       { kind: "mcp_server", host: "10.0.0.5" },
       { kind: "http", host: "news.example.com" },
       { kind: "connector", id: "google_drive_source" }
+    ]);
+  });
+});
+
+describe("collectConfiguredDestinations edge cases", () => {
+  it("never assumes the default host for a base URL it cannot read, and skips offline providers and disabled nodes", () => {
+    const flow = workflow("w", "default", [
+      { id: "templated", type: "llm_call", config: { provider: { providerId: "openai", model: "m", baseUrl: "https://{{$env.LLM_HOST}}/v1" } } },
+      { id: "echo", type: "llm_call", config: { provider: { providerId: "echo", model: "m" } } },
+      { id: "gemini", type: "llm_call", config: { provider: { providerId: "gemini", model: "m", baseUrl: "https://stray.example.com" } } },
+      { id: "off", type: "http_request", config: { method: "GET", urlTemplate: "https://disabled.example.com/x" } },
+      { id: "plain", type: "llm_call", config: { provider: { providerId: "openai", model: "m" } } }
+    ]);
+    const nodes = flow.nodes.map((node) => (node.id === "off" ? { ...node, disabled: true } : node));
+    const found = collectConfiguredDestinations({ env: {}, mcpServers: [], workflows: [{ ...flow, nodes }] });
+    expect(found.map((entry) => entry.ref)).toEqual([
+      // Templated base URL: the real host is unknown, so no host (not the default api.openai.com).
+      { kind: "model_provider", id: "openai" },
+      // The Gemini adapter always calls its default host.
+      { kind: "model_provider", id: "gemini", host: "generativelanguage.googleapis.com" },
+      { kind: "model_provider", id: "openai", host: "api.openai.com" }
+    ]);
+  });
+
+  it("reads the published version too, adding only what the draft does not send to", () => {
+    const draft = workflow("w", "default", [{ id: "a", type: "http_request", config: { method: "GET", urlTemplate: "https://both.example.com/x" } }]);
+    const published = workflow("w", "default", [
+      { id: "a", type: "http_request", config: { method: "GET", urlTemplate: "https://both.example.com/y" } },
+      { id: "b", type: "http_request", name: "Old hook", config: { method: "GET", urlTemplate: "https://old.example.com/x" } }
+    ]);
+    const found = collectConfiguredDestinations({ env: {}, mcpServers: [], workflows: [{ id: "w", name: "Flow w", nodes: draft.nodes, published }] });
+    expect(found).toEqual([
+      { ref: { kind: "http", host: "both.example.com" }, seenIn: 'Workflow "Flow w" · a' },
+      { ref: { kind: "http", host: "old.example.com" }, seenIn: 'Workflow "Flow w" (published) · Old hook' }
+    ]);
+  });
+
+  it("the not-classified-yet list reads the published version from the store", async () => {
+    const context = await createTestContext();
+    const admin = await login(context, "admin");
+    const published = workflow("wf-pub", "default", [{ id: "hook", type: "http_request", name: "Hook", config: { method: "GET", urlTemplate: "https://published-only.example.com/x" } }]);
+    context.store.upsertWorkflow(published);
+    context.store.writeWorkflowVersion({ id: "wv-1", workflowId: "wf-pub", version: 1, workflowJson: JSON.stringify(published) });
+    context.store.publishWorkflowVersion(
+      { id: "rel-1", workflowId: "wf-pub", version: 1, workflowHash: "h", replayRunId: null, verdict: "ungated", reason: null, gateReasons: [], approval: null, publishedAt: new Date().toISOString(), publishedBy: null, publishedByUserId: null },
+      null
+    );
+    context.store.upsertWorkflow(workflow("wf-pub", "default", [{ id: "hook", type: "http_request", name: "Hook", config: { method: "GET", urlTemplate: "https://draft-only.example.com/x" } }]));
+    const list = (await call(context, "GET", "/api/data-destinations/unclassified", admin.cookie)).json() as { destinations: UnclassifiedDestination[] };
+    expect(list.destinations.map((entry) => [entry.host, entry.seenIn])).toEqual([
+      ["draft-only.example.com", ['Workflow "Flow wf-pub" · Hook']],
+      ["published-only.example.com", ['Workflow "Flow wf-pub" (published) · Hook']]
     ]);
   });
 });

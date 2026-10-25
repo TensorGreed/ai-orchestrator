@@ -12321,6 +12321,24 @@ export class SqliteStore {
   // Migration 38 — data destinations (Phase 16). SQLite only; the routes answer 501 on Postgres.
   // ---------------------------------------------------------------------------
 
+  /**
+   * Every workflow's draft JSON and, when one is published, the published
+   * version's JSON, in one query (the "not classified yet" list reads both).
+   */
+  listWorkflowConfigsForDestinations(): Array<{ id: string; name: string; draftJson: string; publishedJson: string | null }> {
+    return this.queryAll<{ id: string; name: string; workflow_json: string; published_json: string | null }>(
+      `SELECT w.id, w.name, w.workflow_json, v.workflow_json AS published_json
+       FROM workflows w
+       LEFT JOIN workflow_versions v ON v.workflow_id = w.id AND v.version = w.published_version
+       ORDER BY w.updated_at DESC`
+    ).map((row) => ({
+      id: toString(row.id),
+      name: toString(row.name),
+      draftJson: toString(row.workflow_json),
+      publishedJson: row.published_json ? toString(row.published_json) : null
+    }));
+  }
+
   listDataDestinations(): DataDestinationRow[] {
     return this.queryAll<Record<string, unknown>>(`SELECT * FROM data_destinations ORDER BY tier, name, id`).map(mapDataDestinationRow);
   }

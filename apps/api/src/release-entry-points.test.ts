@@ -31,9 +31,9 @@ function sourceFiles(dir = here, prefix = ""): string[] {
 
 /** Calls that load a workflow or one of its saved versions. */
 const LOAD_CALL =
-  /\b(getWorkflow|getWorkflowVersion|productionWorkflow|resolveRunnableWorkflow|loadProductionWorkflow|versionWorkflow|getRunnableWorkflow|deactivatedProductionWorkflow)\s*(\?\.)?\(|\.(getWorkflow|getWorkflowVersion)\b(?!\s*[:(?])|\bworkflowVersionService\.get\s*(\?\.)?\(/;
+  /\b(getWorkflow|getWorkflowVersion|listWorkflowConfigsForDestinations|productionWorkflow|resolveRunnableWorkflow|loadProductionWorkflow|versionWorkflow|getRunnableWorkflow|deactivatedProductionWorkflow)\s*(\?\.)?\(|\.(getWorkflow|getWorkflowVersion)\b(?!\s*[:(?])|\bworkflowVersionService\.get\s*(\?\.)?\(/;
 /** A method or interface declaration of one of those, not a call. */
-const DECLARATION = /^\s*(?:async\s+|private\s+|public\s+)?(?:getWorkflow|getWorkflowVersion|resolveRunnableWorkflow|versionWorkflow)\(\w+:/;
+const DECLARATION = /^\s*(?:async\s+|private\s+|public\s+)?(?:(?:getWorkflow|getWorkflowVersion|resolveRunnableWorkflow|versionWorkflow)\(\w+:|listWorkflowConfigsForDestinations\(\):)/;
 
 type LoadKind = "production" | "draft" | "not_run";
 
@@ -65,7 +65,7 @@ const WORKFLOW_LOADS: LoadSite[] = [
   { file: "db/postgres-store.ts", match: "", kind: "not_run", why: "the Postgres store's own internals (upsert, delete)", count: 2 },
   { file: "services/release-service.ts", match: "", kind: "production", why: "the release resolver, production path claims and its gate, judge and request checks", count: 19 },
   { file: "services/gate-admission-service.ts", match: "", kind: "not_run", why: "gate admission reads only a workflow's name and project (audit, requests, inbox views)", count: 3 },
-  { file: "services/data-destination-service.ts", match: "", kind: "not_run", why: "the not-classified-yet list reads the saved node configs for their hosts; nothing runs" },
+  { file: "services/data-destination-service.ts", match: "", kind: "not_run", why: "the not-classified-yet list reads the draft and published node configs for their hosts in one query; nothing runs" },
 
   // app.ts: production traffic.
   { file: "app.ts", match: "const workflow = productionWorkflow(request.params.workflowId);", kind: "production", why: "Slack, GitHub, Stripe, Telegram, Discord app webhooks and chat", count: 6 },
