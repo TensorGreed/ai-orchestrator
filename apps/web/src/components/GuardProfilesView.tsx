@@ -51,12 +51,12 @@ import {
   setShadowForAction,
   setSpotlighting,
   setTopLevel,
+  destinationRuleLines,
   suggestProfileId,
   type GuardDocument
 } from "../lib/guard-profile-edit";
 import { actionLabel, channelLabel } from "../lib/guard-trace";
 import { GuardSimulationCard, useGuardSimulation } from "./GuardSimulationPanel";
-import { destinationRuleLines } from "../lib/guard-profile-edit";
 import { simulateDenial } from "../lib/guard-simulation";
 
 type Role = "admin" | "builder" | "operator" | "viewer";

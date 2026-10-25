@@ -849,9 +849,15 @@
 .guard-dest-table td {
   vertical-align: middle;
 }
-.guard-dest-builtin tbody tr {
+.guard-dest-builtin tbody tr > td:not(.guard-dest-actions) {
   color: var(--fg-muted);
   opacity: 0.75;
+}
+.guard-field-hint {
+  margin: 0;
+  color: var(--fg-muted);
+  font-size: 12px;
+  line-height: 1.4;
 }
 .guard-dest-actions {
   white-space: nowrap;
@@ -936,4 +942,11 @@
 .guard-dest-rules-block h5 {
   margin: 0;
   font-size: var(--fs-sm);
+}
+.cfg-help.cfg-help-warn {
+  color: var(--fg);
+  padding: 6px 8px;
+  border: 1px solid color-mix(in srgb, var(--warn) 40%, transparent);
+  border-radius: var(--r-sm, 6px);
+  background: var(--warn-soft);
 }

@@ -25,7 +25,11 @@ export interface DestinationForm {
   note: string;
 }
 
-export const EMPTY_DESTINATION_FORM: DestinationForm = { name: "", kind: "http", targetId: "", host: "", tier: "private", region: "", holds: "", note: "" };
+/** A new row starts public, the tier every unclassified destination has: the admin picks a nearer tier on purpose. */
+export const EMPTY_DESTINATION_FORM: DestinationForm = { name: "", kind: "http", targetId: "", host: "", tier: "public", region: "", holds: "", note: "" };
+
+/** Shown on rows matched by id alone: the host a builder sets decides, unless this row is stricter. */
+export const ID_ONLY_ROW_HINT = "Without a web address this row can only make matching calls stricter.";
 
 /** What the target id field is called for each kind (web addresses have none). */
 export const TARGET_ID_LABEL: Record<DestinationKind, string | null> = {
@@ -57,6 +61,11 @@ export function formFromSuggestion(entry: UnclassifiedDestination): DestinationF
     host: entry.suggestion.host ?? "",
     tier: entry.suggestion.tier
   };
+}
+
+/** Add destination pre-filled to override a built-in row for the same host (region under Advanced). */
+export function formFromBuiltIn(row: DataDestinationRow): DestinationForm {
+  return { ...EMPTY_DESTINATION_FORM, name: row.name, kind: "http", host: row.host ?? "", tier: row.tier };
 }
 
 export function inputFromForm(form: DestinationForm): DataDestinationInput {

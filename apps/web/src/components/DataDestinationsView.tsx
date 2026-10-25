@@ -1,17 +1,28 @@
 /**
  * Phase 16 — Security → Data destinations. Admins say how far each place the
  * workflows send data is from home (local, private network, approved
- * vendor, public). Built-in rows are shown greyed and read-only; the "Not
+ * vendor, public). Built-in rows are shown greyed and read-only (admins can
+ * override one with a row for the same host); the "Not
  * classified yet" list comes from configured providers, MCP servers and
  * connectors and offers one-click Classify. Region, approved data classes
  * and a note sit under Advanced. Destinations do nothing until a guard
  * profile has destination rules.
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { DESTINATION_KINDS, DESTINATION_KIND_LABELS, DESTINATION_TIERS, DESTINATION_TIER_LABELS, type DataDestinationRow, type UnclassifiedDestination } from "@ai-orchestrator/shared";
 import { ApiError, createDataDestination, deleteDataDestination, fetchDataDestinations, fetchUnclassifiedDestinations, updateDataDestination } from "../lib/api";
-import { describeMatch, EMPTY_DESTINATION_FORM, formFromRow, formFromSuggestion, inputFromForm, TARGET_ID_LABEL, type DestinationForm } from "../lib/data-destinations";
+import {
+  describeMatch,
+  EMPTY_DESTINATION_FORM,
+  formFromBuiltIn,
+  formFromRow,
+  formFromSuggestion,
+  ID_ONLY_ROW_HINT,
+  inputFromForm,
+  TARGET_ID_LABEL,
+  type DestinationForm
+} from "../lib/data-destinations";
 
 function errorText(err: unknown): string {
   if (err instanceof ApiError) return err.message;
@@ -175,7 +186,7 @@ export function DataDestinationsView() {
       <section className="kb-section" aria-labelledby="dest-builtin">
         <div className="mcp-section-head">
           <h4 id="dest-builtin">Built-in</h4>
-          <span className="kb-subtle">Read-only. Add a destination for the same host to override one.</span>
+          <span className="kb-subtle">Read-only. {canEdit ? "Override one to classify the same host differently." : "An admin can override one with a destination for the same host."}</span>
         </div>
         <div className="mcp-table-scroll">
           <table className="kb-table guard-dest-table guard-dest-builtin" aria-label="Built-in destinations">
@@ -185,11 +196,12 @@ export function DataDestinationsView() {
                 <th>Matches</th>
                 <th>Tier</th>
                 <th>Region</th>
+                {canEdit && <th aria-label="Actions" />}
               </tr>
             </thead>
             <tbody>
               {builtIns.map((row) => (
-                <tr key={row.id} aria-disabled="true">
+                <tr key={row.id} aria-disabled={canEdit ? undefined : "true"}>
                   <td>
                     {row.name} <span className="guard-chip">built-in</span>
                   </td>
@@ -198,6 +210,13 @@ export function DataDestinationsView() {
                     <TierChip tier={row.tier} />
                   </td>
                   <td className="muted-cell">{row.region}</td>
+                  {canEdit && (
+                    <td className="guard-dest-actions">
+                      <button type="button" className="kb-link-btn" aria-label={`Override ${row.name}`} onClick={() => setEditing({ mode: "new", form: formFromBuiltIn(row) })}>
+                        Override
+                      </button>
+                    </td>
+                  )}
                 </tr>
               ))}
             </tbody>
@@ -215,12 +234,19 @@ function TierChip({ tier }: { tier: DataDestinationRow["tier"] }) {
 function DestinationEditor({ title, initial, onSave, onCancel }: { title: string; initial: DestinationForm; onSave: (form: DestinationForm) => Promise<void>; onCancel: () => void }) {
   const [form, setForm] = useState<DestinationForm>(initial);
   const [saving, setSaving] = useState(false);
+  const formRef = useRef<HTMLFormElement>(null);
+  // Opened from a row further down (Classify, Override): bring the form into view.
+  useEffect(() => {
+    formRef.current?.scrollIntoView?.({ block: "nearest" });
+  }, []);
   const [error, setError] = useState<string | null>(null);
   const set = (patch: Partial<DestinationForm>) => setForm((current) => ({ ...current, ...patch }));
   const targetLabel = TARGET_ID_LABEL[form.kind];
+  const idOnly = form.kind !== "http" && !form.host.trim();
 
   return (
     <form
+      ref={formRef}
       className="guard-dest-form"
       aria-label={title}
       onSubmit={async (event) => {
@@ -259,7 +285,12 @@ function DestinationEditor({ title, initial, onSave, onCancel }: { title: string
         )}
         <label>
           <span>{form.kind === "http" ? "Host, wildcard or IP range" : "Host (optional)"}</span>
-          <input value={form.host} onChange={(event) => set({ host: event.target.value })} placeholder={form.kind === "http" ? "*.corp.example or 10.0.0.0/8" : "api.example.com"} />
+          <input
+            value={form.host}
+            onChange={(event) => set({ host: event.target.value })}
+            placeholder={form.kind === "http" ? "*.corp.example or 10.0.0.0/8" : "api.example.com"}
+            aria-describedby={idOnly ? "dest-id-only-hint" : undefined}
+          />
         </label>
         <label>
           <span>Tier</span>
@@ -271,6 +302,11 @@ function DestinationEditor({ title, initial, onSave, onCancel }: { title: string
             ))}
           </select>
         </label>
+        {idOnly && (
+          <p id="dest-id-only-hint" className="guard-field-hint guard-span-2">
+            {ID_ONLY_ROW_HINT}
+          </p>
+        )}
       </div>
       <details className="guard-sim-advanced">
         <summary>Advanced</summary>

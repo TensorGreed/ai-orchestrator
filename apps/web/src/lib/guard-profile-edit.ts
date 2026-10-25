@@ -173,7 +173,8 @@ export function destinationRuleLines(document: Record<string, unknown>): string[
     const what = subjects.length ? subjects.join(", ") : "Any data";
     const tier = tierLabel[String(rule.allow?.maxTier)] ?? String(rule.allow?.maxTier ?? "?");
     const regions = list(rule.allow?.regions);
-    const where = `${tier}${regions.length ? ` in ${regions.join(", ")}` : ""}`;
+    // Regions apply only to vendor and public destinations; this machine and the private network always pass.
+    const where = `${tier}${regions.length ? ` in ${regions.join(", ")} (regions apply to vendors and public destinations only)` : ""}`;
     const action = String(rule.action ?? "block").replace(/_/g, " ");
     const name = typeof rule.name === "string" && rule.name ? `${rule.name}: ` : "";
     return `${name}${what} may only go to ${where}; otherwise ${action}${rule.shadow === true ? " (shadow: observe only)" : ""}.`;
