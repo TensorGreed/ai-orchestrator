@@ -87,6 +87,28 @@ The replay result shows:
 - **Tool calls**: the two runs' tool calls side by side, aligned in order: same, arguments changed, outcome changed, new or missing.
 - **Totals**: token, cost, model call and path changes.
 
+### Guard-masked text
+
+When masking is expected in a comparison, two texts that differ only in what a guard mask hid compare as equal. That is the case when the golden run is a masked [production capture](./production-capture.md), or when the guard masked, redacted or protected content in either run (a shadow-only verdict does not count). In every other comparison, strings are compared as they are, with only whitespace differences ignored.
+
+Only the exact shapes the guard `mask` action writes count as masks, and only as whole words:
+
+| Class | Mask | Compares equal to |
+| --- | --- | --- |
+| Email | `j•••@e••••••.com` | any other masked email, such as `u•••••••••••••@s••••••••.invalid` |
+| Card | `•••• •••• •••• 1111`, `••••••••••••1111` | any other masked card |
+| SSN, NI number | `•••-••-6789`, `•• •• •• 56 C` | any other masked SSN or NI number |
+| Phone | `•• •••-•••-••23` | any other masked phone |
+| IBAN | `GB•• •••• •••• •••• •••4 32` | any other masked IBAN |
+| Fully masked value | `••••••••` (three or more) | any other fully masked value |
+
+Redaction placeholders compare without regard to case (`[REDACTED:Email]` and `[redacted:email]`), but a different class still counts as a change. Anything else still counts:
+
+- a lone `•` or `••`, such as a bullet in a list: `• 3 tablets` and `• 30 tablets` differ
+- mask characters glued to a word: `•OK` and `•FAIL` differ, and so do `ssn:•••1111` and `id:•••1111` (the key before the mask is compared)
+- a number after a single masked group: `•••• 12 items` and `•••• 13 items` differ (a kept tail after a space or dash belongs to the mask only after two or more masked groups, as in a spaced card)
+- masked text against unmasked text: `••••••••••••1111` never equals `4111111111111111`
+
 ## API
 
 - `POST /api/replay/recordings` (builder; `{ executionId, name, notes? }`; `201 { recording }`; 409 while the run is in progress, for a replay, for a run already saved, or over the per-workflow count or byte limit; 413 over the size limit)

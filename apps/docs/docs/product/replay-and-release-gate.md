@@ -130,6 +130,8 @@ l2m release publish "$WORKFLOW_ID" --version 12 --run "$(jq -r .id job.json)"
 
 A job on a workflow file or with overrides, models served from the tape or lenient MCP is never accepted by a release gate; the job's `releaseEligible` says so. The gate also checks the job's comparison settings (ignored paths, scorers, repeats and the rest) against its own candidate options.
 
+Outputs are compared as described in [Reading the result](./golden-runs.md#reading-the-result): whitespace and timing and id fields aside, a changed string is a change. Guard-masked text is compared as a mask only when masking is expected (a masked production capture, or a run whose guard masked, redacted or protected content), and only in the exact shapes the guard writes; see [Guard-masked text](./golden-runs.md#guard-masked-text). A workflow without a guard, replayed against hand-saved golden runs, is compared exactly as before.
+
 | Server answer | Exit code | Output |
 | --- | --- | --- |
 | 200, published | 0 | The version and the gate's verdict |
