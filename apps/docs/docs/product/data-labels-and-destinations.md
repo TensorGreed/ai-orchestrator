@@ -119,3 +119,79 @@ labels** setting on a Guard node always wins.
 
 On Postgres, these labels are stored by the same migration; everything else
 above works the same on both databases.
+
+## Data destinations
+
+A data destination is a place your workflows send data: a model provider, an MCP server, a connector or a plain web address. L2M sorts every destination into one of four tiers, from nearest to furthest:
+
+| Tier | Meaning |
+|---|---|
+| **Local** | This machine (`localhost`, `127.0.0.0/8`, `::1`) |
+| **Private network** | Your own network: `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `fc00::/7`, link-local addresses, and names ending in `.internal` or `.local` |
+| **Approved vendor** | A provider you have a contract with. The default hosts of OpenAI, Anthropic, Google Gemini and Azure OpenAI (`*.openai.azure.com`) are vendors out of the box |
+| **Public** | Everything else, including every destination nobody has classified |
+
+Destinations do nothing on their own. They only matter once a guard profile has **destination rules** ("card numbers, IBANs and national ids may go no further than the private network"). Until then, classifying destinations changes no verdict and no run.
+
+### The Data destinations tab
+
+Open **Security → Data destinations**.
+
+- **Your destinations** lists the rows an admin added: what each one matches, its tier, its region and the data classes it is approved to hold. **Add destination** opens the form.
+- **Not classified yet** lists the providers, MCP servers, web addresses and connectors your workflows and MCP servers are configured to reach that nothing covers, so they count as public. **Classify** opens the form already filled in; pick the tier and save. The list is worked out from configuration only (no traffic is stored), shows hosts only (never paths, queries or credentials), and shows only workflows and MCP servers you can read.
+- **Built-in** shows the read-only rows every deployment has. To change one, add a destination for the same host or range: your row wins.
+
+Everyone signed in can see the tab. Only admins add, change or remove destinations, and every change is written to the audit log (`data_destination.created`, `.updated`, `.deleted`).
+
+### What a destination matches
+
+| Kind | Matches on |
+|---|---|
+| Model provider | The provider id (for example `openai`), optionally only at one host |
+| MCP server | The registry server id, or its host |
+| Connector | The connector type, optionally only at one host |
+| Web address | An exact host (`api.example.com`), a wildcard (`*.corp.example`, which covers subdomains but not `corp.example` itself) or an IP range (`10.20.0.0/16`) |
+
+Host and range rows apply to every kind: an MCP server at `10.1.2.3` is private because of the `10.0.0.0/8` row.
+
+When several rows match, the most specific one wins: an exact id beats an exact host, an exact host beats a wildcard, a longer wildcard beats a shorter one, and a wildcard beats an IP range (the narrowest range wins among ranges). Your row beats an equally specific built-in. If two of your rows are equally specific, the stricter tier wins. A request that was redirected is judged by its strictest hop. A destination nothing matches is public.
+
+### Advanced: region and approved classes
+
+Under **Advanced** in the form:
+
+- **Region**: a tag such as `eu-west-1`. Tags are lower-cased and joined with dashes (`EU West 1` becomes `eu-west-1`). A rule that allows region `eu` covers `eu-west-1` and `eu-central-1`, but not `europe`. A destination with no region is `unknown`, which a region rule never allows unless it lists `unknown`.
+- **Approved data classes**: classes this destination may hold whatever its tier, for example `email` for your CRM vendor. A destination rule never fires for a class the destination is approved to hold.
+
+### Destination rules in a profile
+
+Destination rules live in the profile document under `destinations.rules`. Each rule says which data it covers (`when`: data classes and/or provenance labels; any match counts), where that data may go (`allow`: the furthest tier, and optionally regions) and what happens otherwise (`action`: block, redact, mask, protect, require approval or review; `shadow: true` only records it):
+
+```json
+{
+  "destinations": {
+    "rules": [
+      {
+        "name": "Keep sensitive data in-house",
+        "when": { "dataClasses": ["card_number", "iban", "us_ssn", "national_id", "credential"] },
+        "allow": { "maxTier": "private" },
+        "action": "block",
+        "shadow": true
+      }
+    ]
+  }
+}
+```
+
+A profile without `destinations` keeps its hash and behaves exactly as before. The profile editor shows a profile's destination rules as plain sentences; change them with **Edit as JSON**.
+
+The data classes a rule sees are the ones found in the outgoing content plus the ones the data's labels carry. When a class is carried only by the labels (it came from somewhere sensitive but is not in the text), there is nothing to redact, mask or protect, so those actions fall back to the profile's **No protection provider** setting (block by default), and the verdict says it was "matched by where the data came from, not found in the text".
+
+### Surrogates
+
+The **Surrogate** protection provider swaps sensitive values for realistic stand-ins of the same shape (an email stays an email). Surrogates are one-way: there is no way back to the original, and asking for one is refused with "Surrogates are one-way; use the token vault if you need the original back". A surrogate a run issued is not counted as sensitive data again when that run sends it on, and an email at `@surrogate.invalid` is always recognised as a surrogate.
+
+### Limits
+
+- Destination rows are stored in SQLite. On Postgres the destination routes answer 501 in this release.
+- A surrogate read back from session memory by a later run is no longer known to be one and may be treated as real data; approve the class on that destination if this over-blocks.
