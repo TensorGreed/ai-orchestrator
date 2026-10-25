@@ -193,11 +193,11 @@ The data classes a rule sees are the ones found in the outgoing content plus the
 
 ### The starter rule
 
-Most deployments want one rule for everything. At the top of **Security → Data destinations**, an admin clicks **Add the starter rule**: "Keep sensitive data in-house" keeps card numbers, IBANs, social security and national id numbers, and credentials on this machine or your private network.
+Most deployments want one rule for everything. At the top of **Security → Data destinations**, an admin clicks **Add the starter rule**: "Keep sensitive data in-house" keeps card numbers, IBANs, social security and national id numbers, credentials, private keys and JWTs on this machine or your private network.
 
 It starts by **observing**: every call it would have stopped is recorded (as a shadow verdict) and goes through as before. The card says how many: "Observing: 3 requests would have been blocked this week". When the number looks right, click **Turn on enforcement**; **Back to observing** undoes it.
 
-The deployment's rules live in one stored profile, `destination-rules`, which every run applies after its own profiles (a project's enforced profile, a workflow or project override, or the built-in default). It never replaces any of them. Under **Advanced** the full rule editor lists every rule (name, data classes, provenance, the furthest tier allowed, regions, what happens otherwise and "Observe only"); **Save rules** validates them like a profile and saves a new version. Only admins add, change or turn on these rules, through this card or the profile routes, and every change is audited (`guard.destination_rules.*`). With no rules nothing is applied, as if the profile did not exist.
+The deployment's rules live in one stored profile, `destination-rules`, which every run applies after its own profiles (a project's enforced profile, a workflow or project override, or the built-in default). It never replaces any of them. Replays, release-gate cases and simulations apply its latest version too, whatever profile they test; only an admin can choose it as the profile under test (anyone else gets 403), and no profile can be created or imported under its id (or the preview's). Clean calls write no verdict, so the Security numbers of a workflow without findings stay as they were. The observing count leaves out replays, release-gate cases and eval runs. Under **Advanced** the full rule editor lists every rule (name, data classes, provenance, the furthest tier allowed, regions, what happens otherwise and "Observe only"; **Protect** is not offered there, since these rules have no protection provider of their own); **Save rules** validates them like a profile and saves a new version. Only admins add, change or turn on these rules, through this card or the profile routes, and every change is audited (`guard.destination_rules.*`). With no rules nothing is applied, as if the profile did not exist.
 
 ### Where rules are checked
 
@@ -205,11 +205,17 @@ Rules are checked at call time, just before data leaves, against the destination
 
 | Call | Destination | What is checked |
 |---|---|---|
-| A model call (an LLM node, an agent's first call and every later call that carries new tool results) | The provider and the host it calls (its base URL) | The prompt |
-| An MCP call (an MCP Tool node, an agent's tool call) | The MCP server and its endpoint host | The tool arguments |
-| HTTP Request, Web Browse, and connectors that send (Slack, email, SMS, databases …) | The host the rendered URL or settings name; a connector that always calls one vendor API (Slack, GitHub, Google, Stripe …) uses that API's host | The **egress** channel: the URL path, query values, header values and body, or a connector's rendered settings. Values that come from stored secrets are never part of it |
+| A model call (an LLM node; an agent's first call, with its system prompt, memory and input, and every later call that carries new tool results; an Output Parser or Output Guardrail retry; an MCP server's sampling request) | The provider and the host it calls (its base URL) | The prompt |
+| An MCP call (an MCP Tool node, an agent's tool call, a resource read) | The MCP server and its endpoint host; a server started as a local process (stdio) is local | The tool arguments, or the resource URI |
+| HTTP Request, Web Browse, and connectors that send (Slack, email, SMS, databases …) | The host the rendered URL or settings name; a connector that always calls one vendor API (GitHub, Stripe, Airtable …) uses that API's host, whatever its settings say | The **egress** channel: the URL path (decoded), query values, header values and body (form bodies decoded), or a connector's rendered settings. Stored secret values are never part of it; the names of the settings they fill are |
+| RAG Retrieve, embeddings and rerank | The embedding service, the vector store when it is a network service (upserts carry the documents) and the reranker | The query and the documents |
+| Loads made while rendering: a chart's data URL, a PDF's remote images, styles and scripts, every page a browse visits | The host of each load | The URL |
 
-A host that cannot be read (a templated base URL, or a connector whose host is kept in a secret) is public. A redirect is checked again before it is followed, and the request is judged by its strictest hop.
+What is checked is exactly what is sent: a template is rendered once, checked, and that rendering goes out, so an expression that renders differently each time (a time, a random value) cannot show the check one thing and send another.
+
+A host that cannot be read (a templated base URL, or a connector whose host is kept in a secret) is public. A redirect is checked again before it is followed, and the request is judged by its strictest hop; a redirect hop that would need approval is stopped, not paused, because the first request has already gone out. While rules apply, a load that cannot be checked is stopped with a plain reason: a browser WebSocket, or a page load whose redirects cannot be followed one at a time.
+
+A server started as a local process (stdio MCP) is judged as local: L2M checks what it hands the process, but what that process sends on its own is outside L2M's view.
 
 The classes a rule sees are the ones found in what is sent plus the ones the data's labels carry. **require_approval** pauses the run and puts the call in the approval inbox; once approved the call goes ahead. **redact** and **mask** rewrite what is sent; when a rewrite cannot be applied safely (a redirect, a connector setting that would need rendering again) the call is blocked instead.
 
