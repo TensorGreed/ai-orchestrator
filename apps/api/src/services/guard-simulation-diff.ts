@@ -141,7 +141,8 @@ export function compareGuardChecks(
         before: beforeAction,
         after: afterAction,
         change,
-        detectors: detectorChanges(b, a)
+        detectors: detectorChanges(b, a),
+        ...(place.destination ? { destination: place.destination } : b?.destination ? { destination: b.destination } : {})
       });
     }
   }

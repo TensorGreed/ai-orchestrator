@@ -460,7 +460,7 @@ export class ReplayCaptureService {
    * Queues the capture of a finished run. The work runs after the current
    * request has answered; `idle()` resolves when the queue is empty.
    */
-  finish(ticket: CaptureTicket, input: { executionId: string; workflow: Pick<Workflow, "id" | "name" | "projectId">; plan: McpCassetteRunPlan }): void {
+  finish(ticket: CaptureTicket, input: { executionId: string; workflow: Pick<Workflow, "id" | "name" | "projectId">; plan: McpCassetteRunPlan; issuedSurrogates?: ReadonlySet<string> }): void {
     this.pending += 1;
     this.queue = this.queue
       .then(() => new Promise<void>((resolve) => setImmediate(resolve)))
@@ -476,7 +476,10 @@ export class ReplayCaptureService {
     while (this.pending > 0) await this.queue;
   }
 
-  private async capture(ticket: CaptureTicket, input: { executionId: string; workflow: Pick<Workflow, "id" | "name" | "projectId">; plan: McpCassetteRunPlan }): Promise<void> {
+  private async capture(
+    ticket: CaptureTicket,
+    input: { executionId: string; workflow: Pick<Workflow, "id" | "name" | "projectId">; plan: McpCassetteRunPlan; issuedSurrogates?: ReadonlySet<string> }
+  ): Promise<void> {
     try {
       const store = this.options.store;
       // Settings as they are now: capture turned off (or the kill switch) since the run started drops it.
@@ -507,7 +510,9 @@ export class ReplayCaptureService {
         ? {
             key: this.options.surrogateKey,
             dictionaries: this.options.dictionariesFor(input.workflow),
-            ...(this.options.catalogToolNames ? { catalogToolNames: this.options.catalogToolNames } : {})
+            ...(this.options.catalogToolNames ? { catalogToolNames: this.options.catalogToolNames } : {}),
+            // Phase 16 — surrogates the run issued itself stay as they are (same key, so the original's lookup still finds them).
+            ...(input.issuedSurrogates && input.issuedSurrogates.size > 0 ? { keepValues: [...input.issuedSurrogates] } : {})
           }
         : null;
       const name = `Captured ${ticket.captureSource === "api_key" ? "API-key run" : history.triggerType} ${capturedAt.slice(0, 16).replace("T", " ")}`;

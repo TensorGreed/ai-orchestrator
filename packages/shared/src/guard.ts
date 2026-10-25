@@ -156,8 +156,8 @@ export interface GuardProfileVersionView {
 
 /** One level of the binding chain, as the UI and run traces show it. */
 export interface GuardBindingLevel {
-  /** `candidate` (Phase 15.3): a replay's guard profile override. */
-  level: "project" | "workflow" | "instance" | "port" | "candidate";
+  /** `candidate` (Phase 15.3): a replay's guard profile override. `destinations` (Phase 16): the deployment's destination rules. */
+  level: "project" | "workflow" | "instance" | "port" | "candidate" | "destinations";
   mode: GuardBindingMode | "auto" | "off";
   profileId?: string | null;
   version?: number | null;

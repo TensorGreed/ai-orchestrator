@@ -82,6 +82,7 @@ import {
   type ReplayAttemptStatus,
   type ReplayCandidateOverrides,
   type ReplayCaseAttempt,
+  type DataDestinationRow,
   type ReplayCaseRepeats,
   type ReplayJobEstimate,
   type EvalStoredTruncation,
@@ -257,6 +258,8 @@ export interface SimulationJobRequest {
   profileChanged: boolean;
   /** Why the starter may no longer simulate this profile (their role or the profile changed); null when they still may. Checked on every case. */
   canRun: (actor: SafeUser) => string | null;
+  /** Phase 16 — a destination preview: the stored rows (baseline) and the admin's unsaved rows (candidate). */
+  destinationRows?: { baseline: DataDestinationRow[]; candidate: DataDestinationRow[] };
 }
 
 export interface EvalServiceOptions {
@@ -388,7 +391,15 @@ interface ReplayJobContext {
   /** Phase 15.3 — an inline or overridden candidate: every case re-checks workflow:write. */
   needsWrite: boolean;
   /** Phase 15.6 — a guard policy simulation's job (see `runSimulationCase`). */
-  simulation?: { id: string; substitute: GuardProfileSubstitute; baseSubstitute: GuardProfileSubstitute | null; vault: GuardSimulationRun["vault"]; canRun: SimulationJobRequest["canRun"]; profileChanged: boolean };
+  simulation?: {
+    id: string;
+    substitute: GuardProfileSubstitute;
+    baseSubstitute: GuardProfileSubstitute | null;
+    vault: GuardSimulationRun["vault"];
+    canRun: SimulationJobRequest["canRun"];
+    profileChanged: boolean;
+    destinationRows?: SimulationJobRequest["destinationRows"];
+  };
   candidate: EvalReplayCandidate;
   options: ReplayJobOptions;
   scorers: EvalScorerSpec[] | null;
@@ -762,7 +773,15 @@ export class EvalService {
       needsWrite: false,
       // Recent traffic includes captured runs still in the inbox: server-internal, never from a request body.
       allowCandidates: true,
-      simulation: { id: request.simulationId, substitute, baseSubstitute: request.baseSubstitute, vault: request.vault, canRun: request.canRun, profileChanged: request.profileChanged },
+      simulation: {
+        id: request.simulationId,
+        substitute,
+        baseSubstitute: request.baseSubstitute,
+        vault: request.vault,
+        canRun: request.canRun,
+        profileChanged: request.profileChanged,
+        ...(request.destinationRows ? { destinationRows: request.destinationRows } : {})
+      },
       candidate,
       options,
       scorers: null
@@ -1565,7 +1584,8 @@ export class EvalService {
     const candidate = { workflow: job.candidate.workflow, kind: job.candidate.kind, version: job.candidate.version };
     const request = { mcpMode: "strict" as const };
     const side = async (substitute: GuardProfileSubstitute | null, id: string, role: "baseline" | "candidate") => {
-      const run: GuardSimulationRun = { id: simulation.id, substitute, sink: new GuardSimulationSink(), vault: simulation.vault };
+      const rows = simulation.destinationRows ? (role === "baseline" ? simulation.destinationRows.baseline : simulation.destinationRows.candidate) : undefined;
+      const run: GuardSimulationRun = { id: simulation.id, substitute, sink: new GuardSimulationSink(), vault: simulation.vault, ...(rows ? { destinationRows: rows } : {}) };
       let replayed: SimulatedReplay;
       try {
         const response = await replay.replayCase({ recording, candidate, request, actor, executionId: id, models: "replay", overrides: null, role, simulation: run });

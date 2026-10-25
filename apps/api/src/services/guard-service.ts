@@ -23,6 +23,7 @@ import {
   diffGuardProfiles,
   guardProfileSchema,
   hashGuardProfile,
+  profileHasDestinationRules,
   profileUsesLabels,
   serializeGuardProfile,
   unsafeDictionaryPattern,
@@ -32,7 +33,16 @@ import {
   type TokenVaultStorage
 } from "@ai-orchestrator/guard-sdk";
 import {
+  DESTINATION_RULES_OBSERVING_DAYS,
   GUARD_BUILTIN_PROFILE_ID,
+  GUARD_DESTINATION_RULES_PROFILE_ID,
+  GUARD_DESTINATION_RULES_PROFILE_NAME,
+  STARTER_DESTINATION_RULE,
+  STARTER_DESTINATION_RULE_NAME,
+  destinationRulesMode,
+  type DataDestinationRow,
+  type DestinationRuleView,
+  type DestinationRulesStatus,
   type GuardBindingLevel,
   type GuardBindingMode,
   type GuardEventView,
@@ -87,6 +97,10 @@ export interface GuardServiceOptions {
   /** Apply the built-in default profile when nothing is bound (GUARD_AUTO_APPLY). */
   autoApply: boolean;
   logger?: (message: string, metadata?: Record<string, unknown>) => void;
+  /** Phase 16 — the deployment's data destination rows, read when a run first needs them (once per run). */
+  destinationRows?: () => DataDestinationRow[];
+  /** Phase 16 — the deployment surrogate key (HKDF `l2m/capture-surrogate/v1`), for runtime surrogates. */
+  surrogateKey?: Uint8Array;
 }
 
 export interface GuardRunContext {
@@ -115,6 +129,13 @@ export interface GuardRunContext {
    * simulation's vault (never to the token vault table).
    */
   simulation?: { sink: { record(event: GuardVerdictEvent): void }; vault: TokenVaultStorage };
+  /**
+   * Phase 16 — the run's issued surrogates (in memory, one set per run). The
+   * caller keeps a reference so capture masking can leave them as they are.
+   */
+  issuedSurrogates?: Set<string>;
+  /** Phase 16 — a destination preview's unsaved rows, used in place of the stored rows. Never set on production traffic. */
+  destinationRows?: DataDestinationRow[];
 }
 
 /**
@@ -494,7 +515,26 @@ export class GuardService {
       if (entry && !stack.some((existing) => existing.hash === entry.hash)) stack.push(entry);
     }
     const source: GuardRunResolution["source"] = enforced ? "enforced" : workflowOverride ? "workflow" : projectOverride ? "project" : instance ? "instance" : "none";
-    return { source, ...(enforced ? { enforced } : {}), stack, chain };
+    return GuardService.withDeployment({ source, ...(enforced ? { enforced } : {}), stack, chain }, this.deploymentProfile());
+  }
+
+  /**
+   * Phase 16 — the deployment's destination rules profile, when an admin set
+   * one up and it has rules; undefined otherwise (nothing changes then).
+   */
+  deploymentProfile(): ResolvedGuardProfile | undefined {
+    const store = this.store as Partial<Pick<SqliteStore, "getGuardProfile">>;
+    if (typeof store.getGuardProfile !== "function" || !store.getGuardProfile(GUARD_DESTINATION_RULES_PROFILE_ID)) return undefined;
+    const loaded = this.loadProfile(GUARD_DESTINATION_RULES_PROFILE_ID);
+    return loaded && profileHasDestinationRules(loaded.profile) ? loaded : undefined;
+  }
+
+  /** Appends the deployment's destination rules profile after a resolution's own profiles (never replacing one). */
+  private static withDeployment(resolution: GuardRunResolution, deployment: ResolvedGuardProfile | undefined): GuardRunResolution {
+    if (!deployment) return resolution;
+    const stack = resolution.stack.some((entry) => entry.hash === deployment.hash) ? resolution.stack : [...resolution.stack, deployment];
+    const chain: GuardBindingLevel[] = [...resolution.chain, { level: "destinations", mode: "enforced", profileId: deployment.profileId, version: deployment.version }];
+    return { ...resolution, stack, chain, deployment };
   }
 
   /** The resolution for a candidate profile: the project's enforced floor (unless it is the same profile), then the candidate. */
@@ -509,7 +549,9 @@ export class GuardService {
       { level: "candidate", mode: "override", profileId: candidate.profileId, version: candidate.version }
     ];
     const stack = enforced && enforced.hash !== candidate.hash ? [enforced, candidate] : [candidate];
-    return { source: "candidate", ...(enforced ? { enforced } : {}), stack, chain };
+    // Phase 16 — the deployment's destination rules apply to a candidate's replay too (unless it is the candidate).
+    const deployment = candidate.profileId === GUARD_DESTINATION_RULES_PROFILE_ID ? undefined : this.deploymentProfile();
+    return GuardService.withDeployment({ source: "candidate", ...(enforced ? { enforced } : {}), stack, chain }, deployment);
   }
 
   /**
@@ -523,10 +565,11 @@ export class GuardService {
     const seen = new Set<string>();
     const stack = resolution.stack.map(swap).filter((entry) => (seen.has(entry.hash) ? false : (seen.add(entry.hash), true)));
     const enforced = resolution.enforced ? swap(resolution.enforced) : undefined;
+    const deployment = resolution.deployment ? swap(resolution.deployment) : undefined;
     const chain = resolution.chain.map((level) =>
       level.profileId === substitute.profileId && level.version !== undefined ? { ...level, version: substitute.version } : level
     );
-    return { ...resolution, ...(enforced ? { enforced } : {}), stack, chain };
+    return { ...resolution, ...(enforced ? { enforced } : {}), ...(deployment ? { deployment } : {}), stack, chain };
   }
 
   private static substituteProfile(substitute: GuardProfileSubstitute): ResolvedGuardProfile {
@@ -571,8 +614,71 @@ export class GuardService {
             ? this.loadProfile(profileId, override.version)
             : this.loadProfile(profileId),
       vault: context.simulation?.vault ?? this.vault,
-      onVerdict: (event) => (context.simulation ? context.simulation.sink.record(event) : this.recordVerdict(event, context))
+      onVerdict: (event) => (context.simulation ? context.simulation.sink.record(event) : this.recordVerdict(event, context)),
+      // Phase 16 — read when a check first needs them (the engine keeps them for this run only).
+      destinationRows: () => context.destinationRows ?? this.options.destinationRows?.() ?? [],
+      ...(this.options.surrogateKey ? { surrogateKey: this.options.surrogateKey } : {}),
+      issuedSurrogates: context.issuedSurrogates ?? new Set<string>()
     };
+  }
+
+  // -------------------------------------------------------------------------
+  // Phase 16 — the deployment's destination rules (Security page)
+  // -------------------------------------------------------------------------
+
+  /** The rules, whether they observe or enforce, and the observing count. */
+  destinationRulesStatus(available = true): DestinationRulesStatus {
+    const record = this.store.getGuardProfile(GUARD_DESTINATION_RULES_PROFILE_ID);
+    const loaded = record ? this.loadProfile(GUARD_DESTINATION_RULES_PROFILE_ID) : undefined;
+    const rules = (loaded?.profile.destinations?.rules ?? []) as DestinationRuleView[];
+    const since = new Date(Date.now() - DESTINATION_RULES_OBSERVING_DAYS * 86_400_000).toISOString();
+    const wouldBlock = record && available ? this.store.countObservedDestinationBlocks(GUARD_DESTINATION_RULES_PROFILE_ID, since) : 0;
+    return {
+      available,
+      profileId: GUARD_DESTINATION_RULES_PROFILE_ID,
+      version: loaded?.version ?? null,
+      rules,
+      mode: destinationRulesMode(rules),
+      hasStarter: rules.some((rule) => rule.name === STARTER_DESTINATION_RULE_NAME),
+      observing: { wouldBlock, days: DESTINATION_RULES_OBSERVING_DAYS }
+    };
+  }
+
+  /** Saves the full rule list as a new version of the deployment's rules profile (created on first save). Throws GuardValidationError. */
+  setDestinationRules(rules: Array<Record<string, unknown>>, actorId: string | null, note?: string): DestinationRulesStatus {
+    const document: Record<string, unknown> = {
+      id: GUARD_DESTINATION_RULES_PROFILE_ID,
+      name: GUARD_DESTINATION_RULES_PROFILE_NAME,
+      version: "1",
+      description: "The deployment's destination rules, applied to every run after its own profiles. Managed on the Security page.",
+      destinations: { rules }
+    };
+    if (this.store.getGuardProfile(GUARD_DESTINATION_RULES_PROFILE_ID)) {
+      this.updateProfile(GUARD_DESTINATION_RULES_PROFILE_ID, { document, ...(note ? { note } : {}) }, actorId);
+    } else {
+      this.createProfile({ id: GUARD_DESTINATION_RULES_PROFILE_ID, document, note: note ?? "Created from the Security page" }, actorId);
+    }
+    return this.destinationRulesStatus();
+  }
+
+  /** Adds the starter rule, observing (shadow); unchanged when it is already there. */
+  addStarterDestinationRule(actorId: string | null): { status: DestinationRulesStatus; created: boolean } {
+    const current = this.destinationRulesStatus();
+    if (current.hasStarter) return { status: current, created: false };
+    const starter = { ...STARTER_DESTINATION_RULE, when: { dataClasses: [...STARTER_DESTINATION_RULE.when.dataClasses] }, allow: { ...STARTER_DESTINATION_RULE.allow }, shadow: true };
+    const status = this.setDestinationRules([...(current.rules as unknown as Array<Record<string, unknown>>), starter], actorId, "Added the starter rule (observing)");
+    return { status, created: true };
+  }
+
+  /** Every rule observes (enforce false) or acts (enforce true). */
+  setDestinationRulesEnforcement(enforce: boolean, actorId: string | null): DestinationRulesStatus {
+    const current = this.destinationRulesStatus();
+    if (current.rules.length === 0) throw new GuardNotFoundError("There are no destination rules to turn on yet");
+    const rules = current.rules.map((rule) => {
+      const { shadow: _shadow, ...rest } = rule;
+      return (enforce ? rest : { ...rest, shadow: true }) as unknown as Record<string, unknown>;
+    });
+    return this.setDestinationRules(rules, actorId, enforce ? "Turned on enforcement" : "Back to observing");
   }
 
   // -------------------------------------------------------------------------

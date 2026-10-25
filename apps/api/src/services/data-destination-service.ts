@@ -21,6 +21,7 @@ import {
   chatModelDestinationOf,
   connectorDestinationRef,
   dataDestinationInputSchema,
+  dataDestinationRowSchema,
   destinationHostOfSetting,
   mcpServerDestinationRef,
   findUnclassifiedDestinations,
@@ -232,6 +233,33 @@ export class DataDestinationService {
       throw new DataDestinationError(400, issues[0]?.message ?? "Invalid destination", { issues });
     }
     return normalizeDataDestinationInput(parsed.data);
+  }
+
+  /**
+   * Phase 16 — the rows a destination preview resolves with: the stored rows,
+   * with `rows` added (or replacing the stored row with the same id) and
+   * `removedIds` left out. Every row is validated like a save and never
+   * stored. Returns the stored rows too (the preview's baseline).
+   */
+  previewRows(request: { rows: Array<Record<string, unknown>>; removedIds: string[] }): { baseline: DataDestinationRow[]; candidate: DataDestinationRow[] } {
+    const baseline = this.store.listDataDestinations();
+    const removed = new Set(request.removedIds);
+    for (const id of removed) this.refuseBuiltIn(id);
+    const now = new Date().toISOString();
+    const replaced = new Map<string, DataDestinationRow>();
+    const added: DataDestinationRow[] = [];
+    request.rows.forEach((row, index) => {
+      const { id, ...input } = row as { id?: unknown } & Record<string, unknown>;
+      const write = this.parse(input);
+      const rowId = typeof id === "string" && id.trim() ? id.trim() : `preview_${index + 1}`;
+      if (typeof id === "string" && id.trim()) this.refuseBuiltIn(rowId);
+      const stored = baseline.find((entry) => entry.id === rowId);
+      const value = dataDestinationRowSchema.parse({ ...stored, ...write, id: rowId, builtIn: false, createdAt: stored?.createdAt ?? now, updatedAt: now });
+      if (stored) replaced.set(rowId, value);
+      else added.push(value);
+    });
+    const candidate = [...baseline.filter((entry) => !removed.has(entry.id)).map((entry) => replaced.get(entry.id) ?? entry), ...added];
+    return { baseline, candidate };
   }
 
   private refuseBuiltIn(id: string): void {

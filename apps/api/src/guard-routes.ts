@@ -19,7 +19,10 @@ import { createDefaultGuardRegistry, GUARD_CHANNELS, type GuardChannel } from "@
 import {
   GUARD_ACTION_VALUES,
   GUARD_BUILTIN_PROFILE_ID,
-  GUARD_CHANNEL_VALUES,
+  GUARD_DESTINATION_RULES_PROFILE_ID,
+  GUARD_PROFILE_CHANNEL_VALUES,
+  destinationRulesEnforcementSchema,
+  destinationRulesUpdateSchema,
   guardProfileCreateSchema,
   guardProfileUpdateSchema,
   guardProjectBindingInputSchema,
@@ -43,6 +46,8 @@ export interface GuardRoutesDeps {
   /** Project-level permission (memberships, then the global role); admins always pass. */
   canInProject: (user: SafeUser, projectId: string, permission: "workflow:read" | "workflow:write") => boolean;
   audit: (request: FastifyRequest, user: SafeUser, event: Omit<AuditEventInput, "actor">) => void;
+  /** Phase 16 — false on Postgres: the deployment's destination rules routes answer 501. */
+  destinationRulesAvailable?: boolean;
 }
 
 function str(value: unknown): string | undefined {
@@ -67,7 +72,7 @@ function eventFilters(query: Record<string, unknown>): GuardEventFilters & { lim
     ...(str(query.projectId) ? { projectId: str(query.projectId) } : {}),
     ...(str(query.workflowId) ? { workflowId: str(query.workflowId) } : {}),
     ...(str(query.profileId) ? { profileId: str(query.profileId) } : {}),
-    ...(channel && (GUARD_CHANNEL_VALUES as readonly string[]).includes(channel) ? { channel } : {}),
+    ...(channel && (GUARD_PROFILE_CHANNEL_VALUES as readonly string[]).includes(channel) ? { channel } : {}),
     ...(action && (GUARD_ACTION_VALUES as readonly string[]).includes(action) ? { action } : {}),
     ...(since && !Number.isNaN(Date.parse(since)) ? { since: new Date(since).toISOString() } : {}),
     ...(query.findings === "true" || query.findings === "1" ? { onlyFindings: true } : {}),
@@ -103,6 +108,11 @@ export function registerGuardRoutes(deps: GuardRoutesDeps): void {
    */
   const refuseEnforcedEdit = (user: SafeUser, reply: FastifyReply, profileId: string) => {
     if (user.role === "admin") return null;
+    // Phase 16 — the deployment's destination rules apply to every run: admin-only, like an enforced profile.
+    if (profileId === GUARD_DESTINATION_RULES_PROFILE_ID) {
+      reply.code(403);
+      return { error: "The deployment's destination rules apply to every workflow; only an admin can change them" };
+    }
     const enforcedBy = store.listGuardBindingsForProfile(profileId).filter((binding) => binding.scope === "project" && binding.mode === "enforced");
     if (enforcedBy.length === 0) return null;
     reply.code(403);
@@ -135,6 +145,9 @@ export function registerGuardRoutes(deps: GuardRoutesDeps): void {
       reply.code(400);
       return { error: "Invalid guard profile", issues: zodIssues(parsed.error.issues) };
     }
+    const createId = parsed.data.id ?? (typeof parsed.data.document.id === "string" ? parsed.data.document.id : "");
+    const refusedCreate = createId ? refuseEnforcedEdit(user, reply, createId) : null;
+    if (refusedCreate) return refusedCreate;
     try {
       const profile = guard.createProfile(parsed.data, user.id);
       deps.audit(request, user, { eventType: "guard.profile.created", category: "system", action: "create", resourceType: "guard_profile", resourceId: profile.id, metadata: { version: 1, hash: profile.hash } });
@@ -230,10 +243,110 @@ export function registerGuardRoutes(deps: GuardRoutesDeps): void {
   app.delete<{ Params: { id: string } }>("/api/guard/profiles/:id", async (request, reply) => {
     const user = await requireRole(request, reply, ["builder"]);
     if (!user) return;
+    const refusedDelete = refuseEnforcedEdit(user, reply, request.params.id);
+    if (refusedDelete) return refusedDelete;
     try {
       guard.deleteProfile(request.params.id);
       deps.audit(request, user, { eventType: "guard.profile.deleted", category: "system", action: "delete", resourceType: "guard_profile", resourceId: request.params.id });
       return { ok: true };
+    } catch (error) {
+      return fail(reply, error);
+    }
+  });
+
+  // ---------------------------------------------------------------------------
+  // Phase 16 — the deployment's destination rules (Security page)
+  // ---------------------------------------------------------------------------
+
+  const destinationRulesUnavailable = (reply: FastifyReply) => {
+    if (deps.destinationRulesAvailable !== false) return null;
+    reply.code(501);
+    return { error: "Destination rules need the SQLite store in this release" };
+  };
+  const rulesStatus = (user: SafeUser) => {
+    const status = guard.destinationRulesStatus();
+    return user.role === "admin" ? status : { ...status, observing: null };
+  };
+
+  app.get("/api/guard/destination-rules", async (request, reply) => {
+    const user = await requireRole(request, reply, ["viewer"]);
+    if (!user) return;
+    const unavailable = destinationRulesUnavailable(reply);
+    if (unavailable) return unavailable;
+    return rulesStatus(user);
+  });
+
+  app.post("/api/guard/destination-rules/starter", async (request, reply) => {
+    const user = await requireRole(request, reply, ["admin"]);
+    if (!user) return;
+    const unavailable = destinationRulesUnavailable(reply);
+    if (unavailable) return unavailable;
+    try {
+      const { status, created } = guard.addStarterDestinationRule(user.id);
+      if (created) {
+        deps.audit(request, user, {
+          eventType: "guard.destination_rules.starter_added",
+          category: "system",
+          action: "update",
+          resourceType: "guard_profile",
+          resourceId: GUARD_DESTINATION_RULES_PROFILE_ID,
+          metadata: { version: status.version, mode: status.mode }
+        });
+      }
+      reply.code(created ? 201 : 200);
+      return status;
+    } catch (error) {
+      return fail(reply, error);
+    }
+  });
+
+  app.post<{ Body: unknown }>("/api/guard/destination-rules/enforcement", async (request, reply) => {
+    const user = await requireRole(request, reply, ["admin"]);
+    if (!user) return;
+    const unavailable = destinationRulesUnavailable(reply);
+    if (unavailable) return unavailable;
+    const parsed = destinationRulesEnforcementSchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      reply.code(400);
+      return { error: "Send { enforce: true } or { enforce: false }", issues: zodIssues(parsed.error.issues) };
+    }
+    try {
+      const status = guard.setDestinationRulesEnforcement(parsed.data.enforce, user.id);
+      deps.audit(request, user, {
+        eventType: parsed.data.enforce ? "guard.destination_rules.enforced" : "guard.destination_rules.observing",
+        category: "system",
+        action: "update",
+        resourceType: "guard_profile",
+        resourceId: GUARD_DESTINATION_RULES_PROFILE_ID,
+        metadata: { version: status.version, mode: status.mode }
+      });
+      return status;
+    } catch (error) {
+      return fail(reply, error);
+    }
+  });
+
+  app.put<{ Body: unknown }>("/api/guard/destination-rules", async (request, reply) => {
+    const user = await requireRole(request, reply, ["admin"]);
+    if (!user) return;
+    const unavailable = destinationRulesUnavailable(reply);
+    if (unavailable) return unavailable;
+    const parsed = destinationRulesUpdateSchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      reply.code(400);
+      return { error: "Invalid destination rules", issues: zodIssues(parsed.error.issues) };
+    }
+    try {
+      const status = guard.setDestinationRules(parsed.data.rules, user.id, parsed.data.note);
+      deps.audit(request, user, {
+        eventType: "guard.destination_rules.updated",
+        category: "system",
+        action: "update",
+        resourceType: "guard_profile",
+        resourceId: GUARD_DESTINATION_RULES_PROFILE_ID,
+        metadata: { version: status.version, rules: status.rules.length, mode: status.mode }
+      });
+      return status;
     } catch (error) {
       return fail(reply, error);
     }

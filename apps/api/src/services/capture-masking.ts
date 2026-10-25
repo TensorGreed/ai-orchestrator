@@ -139,6 +139,8 @@ export interface CaptureMaskOptions {
   dictionaries: GuardDictionary[];
   /** The tool names a registry server's current tool snapshot lists (`cassetteIdentifiers`). */
   catalogToolNames?: (registryServerId: string) => readonly string[];
+  /** Phase 16 — surrogates the run issued at runtime: kept as they are (`MaskRecordingOptions.keepValues`). */
+  keepValues?: Iterable<string>;
 }
 
 export interface CapturedRunParts {
@@ -193,6 +195,7 @@ export function* maskCapturedRunSteps(run: CapturedRunParts, options: MaskRunOpt
     key: options.key,
     dictionaries: options.dictionaries,
     keepLiteralsFrom: options.keepLiteralsFrom,
+    ...(options.keepValues ? { keepValues: options.keepValues } : {}),
     identifiers: run.cassette ? cassetteIdentifiers(run.cassette, options.catalogToolNames) : []
   });
   let cursor = 0;
