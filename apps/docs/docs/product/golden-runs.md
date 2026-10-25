@@ -89,7 +89,7 @@ The replay result shows:
 
 ### Guard-masked text
 
-When masking is expected in a comparison, two texts that differ only in what a guard mask hid compare as equal. That is the case when the golden run is a masked [production capture](./production-capture.md), or when the guard masked, redacted or protected content in either run (a shadow-only verdict does not count). In every other comparison, strings are compared as they are, with only whitespace differences ignored.
+When masking is expected in a comparison, two texts that differ only in what a guard mask hid compare as equal. That is the case when the golden run is a masked [production capture](./production-capture.md) made on this server, or when the guard masked, redacted or protected content in either run (a shadow-only verdict does not count). A golden run imported from a file never turns it on: a masked flag or guard verdicts in the file are not this server's word, so its own text is compared exactly (the live run's verdicts still count). In every other comparison, strings are compared as they are, with only whitespace differences ignored.
 
 Only the exact shapes the guard `mask` action writes count as masks, and only as whole words:
 
@@ -107,6 +107,8 @@ Redaction placeholders compare without regard to case (`[REDACTED:Email]` and `[
 - a lone `•` or `••`, such as a bullet in a list: `• 3 tablets` and `• 30 tablets` differ
 - mask characters glued to a word: `•OK` and `•FAIL` differ, and so do `ssn:•••1111` and `id:•••1111` (the key before the mask is compared)
 - a number after a single masked group: `•••• 12 items` and `•••• 13 items` differ (a kept tail after a space or dash belongs to the mask only after two or more masked groups, as in a spaced card)
+- the known cost of that rule: a number right after two or more masked groups is read as part of the mask, so `•••• •••• 12 items` and `•••• •••• 13 items` compare equal. An NI number's suffix letter counts only in upper case (`56 C`)
+- a NUL character already in the text is never read as a mask
 - masked text against unmasked text: `••••••••••••1111` never equals `4111111111111111`
 
 ## API

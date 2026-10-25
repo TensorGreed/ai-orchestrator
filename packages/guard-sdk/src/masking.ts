@@ -81,12 +81,12 @@ const MASKED_IBAN = new RegExp(String.raw`${NOT_BEFORE}[A-Za-z]{2}(•+(?:${SEP}
  * digits (card, SSN), the last two (phone), or an NI number's last digits and
  * suffix letter. The tail may follow a separator (`•••-••-6789`).
  */
-const GROUP_TAIL = String.raw`(?:\d{3}[A-Da-d]|\d{2}${SEP}[A-Da-d]|\d${SEP}\d{2}|\d{2}${SEP}\d|\d{4}|\d{2})`;
+const GROUP_TAIL = String.raw`(?:\d{3}[A-D]|\d{2}${SEP}[A-D]|\d${SEP}\d{2}|\d{2}${SEP}\d|\d{4}|\d{2})`;
 const MASKED_GROUPS = new RegExp(String.raw`${NOT_BEFORE}(•+(?:${SEP}•+)*)(?:(${SEP})?(${GROUP_TAIL}))?${NOT_AFTER}`, "gu");
 const REDACTION_PLACEHOLDER = /\[redacted:([^\]\s]+)\]/gi;
 const SEP_TEST = /[ \-./_]/;
 
-/** What a masked span normalises to. The NUL characters keep it from ever equalling unmasked text. */
+/** What a masked span normalises to. A NUL already in the text is doubled before normalising, so the markers never equal unmasked text. */
 const NORMALISED_MASK = "\u0000mask\u0000";
 const NORMALISED_EMAIL = "\u0000mask:email\u0000";
 const NORMALISED_IBAN = "\u0000mask:iban\u0000";
@@ -115,10 +115,12 @@ const maskCount = (text: string) => text.split(MASK_CHAR).length - 1;
  * masked capture, or a run whose guard masked, redacted or protected).
  */
 export function normaliseMaskedSpans(text: string): string {
-  const hasMask = text.includes(MASK_CHAR);
-  const hasPlaceholder = /\[redacted:/i.test(text);
-  if (!hasMask && !hasPlaceholder) return text;
-  let out = text;
+  // A NUL already in the text is doubled, so it can never read as one of the markers below.
+  const source = text.includes("\u0000") ? text.replaceAll("\u0000", "\u0000\u0000") : text;
+  const hasMask = source.includes(MASK_CHAR);
+  const hasPlaceholder = /\[redacted:/i.test(source);
+  if (!hasMask && !hasPlaceholder) return source;
+  let out = source;
   if (hasPlaceholder) out = out.replace(REDACTION_PLACEHOLDER, (_all, dataClass: string) => `[redacted:${dataClass.toLowerCase()}]`);
   if (!hasMask) return out;
   out = out.replace(MASKED_EMAIL, NORMALISED_EMAIL);

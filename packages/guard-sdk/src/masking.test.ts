@@ -94,6 +94,20 @@ describe("normaliseMaskedSpans", () => {
     expect(n("amount •••-50")).toMatch(/-50$/);
   });
 
+  it("reads an NI suffix letter only in upper case", () => {
+    expect(n("\u2022\u2022 \u2022\u2022 \u2022\u2022 56 C")).toBe(n("\u2022\u2022 \u2022\u2022 \u2022\u2022 12 A"));
+    // A lowercase letter after the number is text, not an NI suffix, so these differ ("a" is not swallowed).
+    expect(n("\u2022\u2022\u2022\u2022 \u2022\u2022\u2022\u2022 12 a")).not.toBe(n("\u2022\u2022\u2022\u2022 \u2022\u2022\u2022\u2022 12 b"));
+  });
+
+  it("never lets a NUL already in the text read as a mask", () => {
+    const mask = "\u2022\u2022\u2022\u2022";
+    expect(n("a\u0000mask\u0000")).not.toBe(n(`a${mask}`));
+    expect(n("\u0000mask\u0000")).not.toBe(n(mask));
+    expect(n("\u0000mask:email\u0000")).not.toBe(n(maskForDataClass("jane@example.com", "email")));
+    expect(n("\u0000mask:iban\u0000")).not.toBe(n(maskForDataClass("GB82 WEST 1234 5698 7654 32", "iban")));
+  });
+
   it("does not equate masked text with unmasked text", () => {
     expect(n(`Card ${MASK_CHAR.repeat(8)}`)).not.toBe(n("Card 41111111"));
     expect(n(`Card ${maskForDataClass("4111 1111 1111 1111", "card_number")}`)).not.toBe(n("Card 4111 1111 1111 1111"));

@@ -127,7 +127,7 @@ describe("surrogateFor", () => {
       expect(surrogate, value).not.toBe(value);
       expect(surrogateFor(value, dataClass, key)).toBe(surrogate);
       expect(classesOf(surrogate), value).toContain(dataClass);
-      // Another value with the same last characters gets a different tail (a random tail repeats about once in 10^tail).
+      // Another value that differs only in its 6th character gets a different tail (a random tail repeats about once in 10^tail).
       const other = value.slice(0, 5) + (value[5] === "9" ? "8" : "9") + value.slice(6);
       expect(surrogateFor(other, dataClass, key), other).not.toBe(surrogate);
     }
