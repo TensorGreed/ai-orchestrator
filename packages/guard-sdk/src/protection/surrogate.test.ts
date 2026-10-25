@@ -116,13 +116,13 @@ describe("surrogateFor", () => {
   });
 
   it("keeps no real character of the value beyond its structure, and stays deterministic", () => {
-    const samples: Array<[string, string, number]> = [
-      ["card_number", "4111 1111 1111 1111", 4],
-      ["card_number", "378282246310005", 4],
-      ["us_ssn", "123-45-6789", 4],
-      ["phone", "+1 (415) 555-0132", 2]
+    const samples: Array<[string, string]> = [
+      ["card_number", "4111 1111 1111 1111"],
+      ["card_number", "378282246310005"],
+      ["us_ssn", "123-45-6789"],
+      ["phone", "+1 (415) 555-0132"]
     ];
-    for (const [dataClass, value, tail] of samples) {
+    for (const [dataClass, value] of samples) {
       const surrogate = surrogateFor(value, dataClass, key);
       expect(surrogate, value).not.toBe(value);
       expect(surrogateFor(value, dataClass, key)).toBe(surrogate);
@@ -130,7 +130,6 @@ describe("surrogateFor", () => {
       // Another value with the same last characters gets a different tail (a random tail repeats about once in 10^tail).
       const other = value.slice(0, 5) + (value[5] === "9" ? "8" : "9") + value.slice(6);
       expect(surrogateFor(other, dataClass, key), other).not.toBe(surrogate);
-      expect(tail).toBeGreaterThan(0);
     }
     // The IBAN keeps its country only.
     const iban = surrogateFor("GB82 WEST 1234 5698 7654 32", "iban", key);

@@ -73,6 +73,8 @@ import {
   CALLING_CODES,
   decodeView,
   findingText,
+  legacyTailedPhoneSurrogateDigits,
+  legacyTailedSurrogate,
   MaskIdentifierError,
   MaskIncompleteError,
   MaskUnscannableError,
@@ -723,9 +725,9 @@ export class ReplayCaptureService {
    * values only; a phone is `exact` only as the same number with its country
    * code on both sides, `national_only` when one side has none). A value of
    * a recognised class matches only stored values of that class: raw, and
-   * as its surrogate. Any
-   * other value is matched as exact text, and as the surrogate of each
-   * dictionary class.
+   * as its surrogate (and as the tailed surrogate captures wrote before
+   * surrogates stopped keeping the mask's visible tail). Any other value is
+   * matched as exact text, and as the surrogate of each dictionary class.
    */
   private needlesFor(query: ReplayFindSubjectQuery): {
     dataClass: string | null;
@@ -751,10 +753,17 @@ export class ReplayCaptureService {
       const surrogate = surrogateFor(text, surrogateClass, key);
       if (surrogate.startsWith("[")) index.addLiteral(surrogate, surrogateClass);
       else index.add(surrogate, surrogateClass);
+      // Captures stored before surrogates stopped keeping the mask's visible tail hold the tailed form, and their raw
+      // value is gone: build it too (lookup only, never for masking), so a lookup never misses data it used to find.
+      const legacy = legacyTailedSurrogate(text, surrogateClass, key);
+      if (legacy !== null && legacy !== surrogate) index.add(legacy, surrogateClass);
       if (surrogateClass === "phone") {
         // A capture keys a copy written without its `+` on that copy's own digits (it cannot know the country code):
         // the full number, and the national number behind a trunk prefix. Those surrogates are written without a country code.
-        for (const plainKey of plainMaskKeys(text)) index.add(phoneSurrogateDigits(plainKey, key), "phone");
+        for (const plainKey of plainMaskKeys(text)) {
+          index.add(phoneSurrogateDigits(plainKey, key), "phone");
+          index.add(legacyTailedPhoneSurrogateDigits(plainKey, key), "phone");
+        }
       }
       needles.push({ label: surrogateClass, index });
     }

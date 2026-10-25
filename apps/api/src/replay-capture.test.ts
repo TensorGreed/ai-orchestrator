@@ -1635,3 +1635,62 @@ describe("re-review round 3: lookup certainty, hints, international phones, kept
     expect(match.hits.some((entry) => entry.certainty === "national_only")).toBe(true);
   }, 60_000);
 });
+
+describe("captures stored before surrogates dropped the visible tail", () => {
+  /** A fixed master key, so the stored forms below are the exact strings ae2f542 wrote for it. */
+  const FIXED_MASTER_KEY = "yMfGxcTDwsHAv769vLu6ubi3trW0s7KxsK+urayrqqk=";
+  /** [value, what a masked capture stored at ae2f542 (tailed surrogate), what a capture stores now]. */
+  const OLD_CAPTURES: Array<[string, string, string]> = [
+    ["4111 1111 1111 1111", "4587 5312 1569 1111", "4587 5312 1562 9558"],
+    ["GB82 WEST 1234 5698 7654 32", "GB89 SEDQ 8755 0331 9354 32", "GB68 SEDQ 8755 0331 9348 40"],
+    ["+1 415-555-0123", "+1 285-239-8523", "+1 285-239-8505"],
+    ["AB 12 34 56 C", "ZY 28 87 56 C", "ZY 28 87 73 A"],
+    ["123-45-6788", "573-71-6788", "573-71-3165"]
+  ];
+
+  it("are still found and deleted by the data-subject lookup (tailed forms, phone plain copies included)", async () => {
+    const context = await createTestContext({ SECRET_MASTER_KEY_BASE64: FIXED_MASTER_KEY });
+    const admin = await login(context, "admin");
+    const builder = await login(context, "builder");
+    save(context, hookWorkflow("wf-old-tail"));
+    const key = deriveCaptureSurrogateKey(Buffer.from(FIXED_MASTER_KEY, "base64"));
+    const store = async (text: string) => {
+      const run = await call(context, "POST", "/api/workflows/wf-old-tail/execute", builder.cookie, { input: { user_prompt: text } });
+      const saved = await call(context, "POST", "/api/replay/recordings", builder.cookie, { executionId: run.json<{ executionId: string }>().executionId, name: text.slice(0, 40) });
+      expect(saved.statusCode, saved.body).toBe(201);
+      return saved.json<{ recording: ReplayRecordingSummary }>().recording.id;
+    };
+    const search = async (value: string) => {
+      const response = await call(context, "POST", "/api/replay/recordings/find-subject", admin.cookie, { value });
+      expect(response.statusCode, response.body).toBe(200);
+      return response.json<ReplayFindSubjectResult>();
+    };
+
+    for (const [value, oldStored, nowStored] of OLD_CAPTURES) {
+      // The fixtures are what they claim: today's surrogate is the untailed form, never the stored one.
+      expect(surrogateFor(value, (await search(value)).dataClass!, key)).toBe(nowStored);
+      const id = await store(`value ${oldStored} end`);
+      const found = await search(value);
+      const match = found.matches.find((entry) => entry.id === id);
+      expect(match, `${value} as ${oldStored}`).toBeDefined();
+      expect(match!.hits[0]!.matchedAs).toBe(found.dataClass);
+      const removed = await call(context, "POST", "/api/replay/recordings/find-subject/delete", admin.cookie, {
+        value,
+        targets: [{ kind: "recording", id, confirmPossible: true }]
+      });
+      expect(removed.statusCode, removed.body).toBe(200);
+      expect(removed.json<ReplayFindSubjectDeleteResult>().removed, value).toEqual([{ kind: "recording", id }]);
+      expect(context.store.getReplayRecordingSummary(id)).toBeNull();
+    }
+
+    // A copy of the phone written without its `+` was keyed on its own digits; main kept its last two as well.
+    const plain = await store("plain 37596597523 end");
+    const found = await search("+1 415-555-0123");
+    expect(found.matches.map((entry) => entry.id)).toContain(plain);
+    const removed = await call(context, "POST", "/api/replay/recordings/find-subject/delete", admin.cookie, {
+      value: "+1 415-555-0123",
+      targets: [{ kind: "recording", id: plain, confirmPossible: true }]
+    });
+    expect(removed.json<ReplayFindSubjectDeleteResult>().removed).toEqual([{ kind: "recording", id: plain }]);
+  }, 60_000);
+});

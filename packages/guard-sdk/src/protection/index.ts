@@ -13,6 +13,7 @@ export * from "./keyed-hash";
 export * from "./aes-gcm";
 export * from "./token-vault";
 export * from "./surrogate";
+export { legacyTailedSurrogate, legacyTailedPhoneSurrogateDigits, LEGACY_TAILED_SURROGATE_CLASSES } from "./legacy-tailed-surrogate";
 
 export interface DefaultProtectionOptions {
   /** Key material for keyed hashing, encryption and deterministic tokens. Without it only `mask` and random tokens work. */
