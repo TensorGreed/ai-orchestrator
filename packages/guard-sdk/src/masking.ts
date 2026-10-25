@@ -65,6 +65,65 @@ export function maskForDataClass(value: string, dataClass?: GuardDataClass): str
   }
 }
 
+const MASK_EDGE_BEFORE = /^[(\[{"'<]+/;
+const MASK_EDGE_AFTER = /[)\]}"'>,.;:!?]+$/;
+const REDACTION_PLACEHOLDER = /\[redacted:([^\]\s]+)\]/gi;
+
+/**
+ * Normalises masked spans so two texts that differ only in what was masked
+ * compare equal: every word holding the mask character (the masked value
+ * together with the characters the mask left visible and the separators it
+ * kept, such as `j•••@e•••.com` or `••••-••••-••••-1111`) becomes a single
+ * mask character, with surrounding punctuation kept, and a redaction
+ * placeholder (`[REDACTED:email]`) is lower-cased. Text without a masked span
+ * is returned unchanged.
+ */
+export function normaliseMaskedSpans(text: string): string {
+  const hasMask = text.includes(MASK_CHAR);
+  const hasPlaceholder = /\[redacted:/i.test(text);
+  if (!hasMask && !hasPlaceholder) return text;
+  let out = text;
+  if (hasPlaceholder) out = out.replace(REDACTION_PLACEHOLDER, (_all, dataClass: string) => `[redacted:${dataClass.toLowerCase()}]`);
+  if (!hasMask) return out;
+  // Words and the whitespace between them. A spaced value masks to several words
+  // (`•••• •••• •••• 1111`): neighbouring words that hold the mask character join the span, and so
+  // does one short digit-only word that closes a run of fully masked words (the visible tail).
+  const parts = out.split(/(\s+)/);
+  const wordCore = (word: string) => {
+    const before = MASK_EDGE_BEFORE.exec(word)?.[0] ?? "";
+    const rest = word.slice(before.length);
+    const after = MASK_EDGE_AFTER.exec(rest)?.[0] ?? "";
+    return { before, core: rest.slice(0, rest.length - after.length), after };
+  };
+  const masked = (word: string) => /^[\d•-]*•[\d•-]*$/.test(wordCore(word).core);
+  const result: string[] = [];
+  for (let i = 0; i < parts.length; i += 2) {
+    const word = parts[i]!;
+    if (!wordCore(word).core.includes(MASK_CHAR)) {
+      result.push(word, parts[i + 1] ?? "");
+      continue;
+    }
+    let before = wordCore(word).before;
+    while (result.length >= 2 && result[result.length - 1] !== "" && masked(result[result.length - 2]!) && wordCore(result[result.length - 2]!).after === "") {
+      before = wordCore(result[result.length - 2]!).before;
+      result.length -= 2;
+    }
+    let end = i;
+    let last = wordCore(word);
+    while (last.after === "" && end + 2 < parts.length && masked(parts[end + 2]!)) {
+      end += 2;
+      last = wordCore(parts[end]!);
+    }
+    if (last.after === "" && /^•+$/.test(last.core) && end + 2 < parts.length && /^\d{1,4}$/.test(wordCore(parts[end + 2]!).core)) {
+      end += 2;
+      last = wordCore(parts[end]!);
+    }
+    result.push(`${before}${MASK_CHAR}${last.after}`, parts[end + 1] ?? "");
+    i = end;
+  }
+  return result.join("");
+}
+
 /** Short, masked excerpt for a finding: the masked value, capped in length. */
 export function maskedEvidence(value: string, dataClass?: GuardDataClass, maxLength = 48): string {
   const masked = maskForDataClass(value, dataClass);

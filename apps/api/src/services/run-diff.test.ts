@@ -53,6 +53,16 @@ describe("value diff", () => {
     expect(diffValues({ text: "Hello   world\n" }, { text: " Hello world" }).changes).toEqual([]);
   });
 
+  it("compares masked spans as equal, and still reports other differences", () => {
+    const left = { answer: "Card ••••••••••••1111 charged, mail j•••@e•••.com", detail: "unchanged" };
+    const right = { answer: "Card ••••••••••••9876 charged, mail ja••••••@x••.com", detail: "unchanged" };
+    expect(diffValues(left, right).changes).toEqual([]);
+    expect(diffValues({ answer: "Card ••••1111 charged" }, { answer: "Card ••••9876 refunded" }).changes).toHaveLength(1);
+    expect(diffValues({ answer: "Card ••••1111" }, { answer: "Card 4111111111111111" }).changes).toHaveLength(1);
+    expect(diffValues({ answer: "Key [REDACTED:credential]" }, { answer: "Key [REDACTED:credential]" }).changes).toEqual([]);
+    expect(diffValues({ answer: "Key [REDACTED:credential]" }, { answer: "Key [REDACTED:email]" }).changes).toHaveLength(1);
+  });
+
   it("scores changed strings by token overlap", () => {
     const [change] = diffValues({ answer: "The invoice for March was sent to the customer" }, { answer: "The March invoice was sent to the customer today" }).changes;
     expect(change!.similarity).toBeGreaterThan(0.6);

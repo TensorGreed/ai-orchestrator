@@ -10,6 +10,7 @@
  * verdict is a separate step (`judgeReplayDiff` in shared).
  */
 
+import { normaliseMaskedSpans } from "@ai-orchestrator/guard-sdk";
 import type {
   ReplayHealthWarning,
   ReplayNumberDelta,
@@ -40,8 +41,9 @@ function isRecord(value: unknown): value is JsonRecord {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
+/** Whitespace and masked spans normalised: two texts that differ only in what the guard masked (or in the whitespace around it) compare equal. */
 function normaliseText(value: string): string {
-  return value.replace(/\s+/g, " ").trim();
+  return normaliseMaskedSpans(value.replace(/\s+/g, " ").trim());
 }
 
 function tokens(text: string): Set<string> {
