@@ -233,7 +233,7 @@ describe("Protection Provider surrogate", () => {
 });
 
 describe("destination rules card (Phase 16)", () => {
-  const STARTER = { name: "Keep sensitive data in-house", when: { dataClasses: ["card_number", "iban", "us_ssn", "national_id", "credential"] }, allow: { maxTier: "private" as const }, action: "block" as const };
+  const STARTER = { name: "Keep sensitive data in-house", when: { dataClasses: ["card_number", "iban", "us_ssn", "national_id", "credential", "private_key", "jwt"] }, allow: { maxTier: "private" as const }, action: "block" as const };
   beforeEach(() => {
     vi.mocked(api.fetchDataDestinations).mockReset().mockResolvedValue({ destinations: [], builtIns: [], canEdit: true });
     vi.mocked(api.fetchUnclassifiedDestinations).mockReset().mockResolvedValue({ destinations: [] });
@@ -273,11 +273,15 @@ describe("destination rules card (Phase 16)", () => {
     const second = within(editor).getByRole("group", { name: "Rule 2" });
     await user.type(within(second).getByLabelText("Data classes"), "email");
     await user.selectOptions(within(second).getByLabelText("Furthest allowed"), "vendor");
+    // The deployment's rules have no protection provider: "Protect" is not offered (it would only block).
+    const actions = [...(within(second).getByLabelText("Otherwise") as HTMLSelectElement).options].map((option) => option.value);
+    expect(actions).not.toContain("protect");
+    expect(actions).toContain("redact");
     await user.selectOptions(within(second).getByLabelText("Otherwise"), "require_approval");
     await user.click(within(second).getByLabelText("Observe only"));
     await user.click(within(editor).getByRole("button", { name: "Save rules" }));
     expect(api.saveDestinationRules).toHaveBeenCalledWith([
-      { name: "Keep sensitive data in-house", when: { dataClasses: ["card_number", "iban", "us_ssn", "national_id", "credential"] }, allow: { maxTier: "private" }, action: "block", shadow: true },
+      { name: "Keep sensitive data in-house", when: { dataClasses: ["card_number", "iban", "us_ssn", "national_id", "credential", "private_key", "jwt"] }, allow: { maxTier: "private" }, action: "block", shadow: true },
       { when: { dataClasses: ["email"] }, allow: { maxTier: "vendor" }, action: "require_approval" }
     ]);
     expect(await screen.findByText("Partly observing")).toBeTruthy();

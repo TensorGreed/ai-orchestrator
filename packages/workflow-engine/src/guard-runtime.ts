@@ -143,6 +143,12 @@ export interface GuardRuntimeDependencies {
    * masking leaves them as they are. One set per run.
    */
   issuedSurrogates?: Set<string>;
+  /**
+   * Phase 16 — record clean outbound verdicts too (simulations: their diff
+   * pairs every checkpoint on both sides). Production traffic leaves it off:
+   * outbound checks record only verdicts with a finding.
+   */
+  recordCleanOutbound?: boolean;
 }
 
 export interface GuardEvalScope {
@@ -372,7 +378,7 @@ export async function runGuardCheck(
     if (!scope.guard.onVerdict || !scope.executionId) continue;
     // Phase 16 — outbound checks record a profile's verdict only when it found something (shadow findings included),
     // so a deployment with destination rules writes no row per clean call and other profiles' numbers stay as they were.
-    if (meta.onlyFindings && !verdictHasFinding(entry.summary)) continue;
+    if (meta.onlyFindings && !scope.guard.recordCleanOutbound && !verdictHasFinding(entry.summary)) continue;
     try {
       await scope.guard.onVerdict({
         executionId: scope.executionId,

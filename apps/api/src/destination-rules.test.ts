@@ -291,6 +291,69 @@ describe("deployment destination rules", () => {
     expect(overwrite.statusCode).toBe(400);
   }, 60_000);
 
+  it("the opt-in check reads profiles as JSON: reformatted or reordered documents are seen, look-alike text is not", async () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-dest-optin-"));
+    const store = await SqliteStore.create(path.join(tempDir, "orchestrator.db"));
+    try {
+      const raw = (store as unknown as { db: { prepare(sql: string): { run(...args: unknown[]): unknown } } }).db;
+      const write = (id: string, json: string) => {
+        raw.prepare(`INSERT INTO guard_profiles (id, name, description, built_in, latest_version, created_at, created_by, updated_at, updated_by) VALUES (?, ?, NULL, 0, 1, '2026-01-01', NULL, '2026-01-01', NULL)`).run(id, id);
+        raw.prepare(`INSERT INTO guard_profile_versions (profile_id, version, hash, document_json, note, created_at, created_by) VALUES (?, 1, ?, ?, NULL, '2026-01-01', NULL)`).run(id, `h-${id}`, json);
+      };
+      // Look-alike text that is not a rule, an empty rule list and an egress action category: no opt-in.
+      write("lookalike", JSON.stringify({ id: "lookalike", description: '"destinations":{"rules":[{', destinations: { rules: [] }, actions: { egress: { action: "block" } } }, null, 2));
+      expect(store.anyGuardProfileUsesLabels()).toBe(false);
+      // Pretty-printed, with a key that sorts before "rules": still seen.
+      write("pretty", JSON.stringify({ id: "pretty", destinations: { aardvark: true, rules: [{ allow: { maxTier: "private" }, action: "block" }] } }, null, 2));
+      expect(store.anyGuardProfileUsesLabels()).toBe(true);
+    } finally {
+      store.close();
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+    const egressTemp = fs.mkdtempSync(path.join(os.tmpdir(), "ao-dest-optin-"));
+    const egressStore = await SqliteStore.create(path.join(egressTemp, "orchestrator.db"));
+    try {
+      const raw = (egressStore as unknown as { db: { prepare(sql: string): { run(...args: unknown[]): unknown } } }).db;
+      raw.prepare(`INSERT INTO guard_profiles (id, name, description, built_in, latest_version, created_at, created_by, updated_at, updated_by) VALUES ('e', 'e', NULL, 0, 1, '2026-01-01', NULL, '2026-01-01', NULL)`).run();
+      raw.prepare(`INSERT INTO guard_profile_versions (profile_id, version, hash, document_json, note, created_at, created_by) VALUES ('e', 1, 'h', ?, NULL, '2026-01-01', NULL)`).run(
+        JSON.stringify({ channels: { egress: { defaultAction: { action: "allow" }, actions: {} } }, id: "e" }, null, 1)
+      );
+      expect(egressStore.anyGuardProfileUsesLabels()).toBe(true);
+    } finally {
+      egressStore.close();
+      fs.rmSync(egressTemp, { recursive: true, force: true });
+    }
+  });
+
+  it("clean outbound calls write no verdict row once rules exist, and replays do not count as observed traffic", async () => {
+    const context = await createTestContext();
+    const admin = await login(context, "admin");
+    const receiver = await startReceiver();
+    context.store.upsertWorkflow(senderWorkflow(receiver.url));
+    expect((await call(context, "POST", "/api/data-destinations", admin.cookie, PUBLIC_LOOPBACK)).statusCode).toBe(201);
+    expect((await call(context, "POST", "/api/guard/destination-rules/starter", admin.cookie)).statusCode).toBe(201);
+    const clean = await call(context, "POST", "/api/workflows/wf-sender/execute", admin.cookie, { user_prompt: "hello" });
+    expect(clean.json<{ status: string }>().status).toBe("success");
+    expect(context.store.listGuardEvents({}).total).toBe(0);
+
+    // A real run with a card: observed once. A replay of it: not traffic, not counted.
+    const run = await call(context, "POST", "/api/workflows/wf-sender/execute", admin.cookie, { record: true, user_prompt: `card ${CARD}` });
+    expect(run.json<{ status: string }>().status).toBe("success");
+    expect((await call(context, "GET", "/api/guard/destination-rules", admin.cookie)).json<DestinationRulesStatus>().observing).toEqual({ wouldBlock: 1, days: 7 });
+    const saved = await call(context, "POST", "/api/replay/recordings", admin.cookie, { executionId: run.json<{ executionId: string }>().executionId, name: "card" });
+    expect(saved.statusCode, saved.body).toBe(201);
+    const set = (await call(context, "POST", "/api/eval/datasets", admin.cookie, { name: "Suite", workflowId: "wf-sender" })).json<{ dataset: { id: string } }>().dataset.id;
+    expect((await call(context, "POST", `/api/eval/datasets/${set}/recordings`, admin.cookie, { recordingId: saved.json<{ recording: { id: string } }>().recording.id })).statusCode).toBe(201);
+    const started = await call(context, "POST", "/api/replay/runs?wait=true", admin.cookie, { datasetIds: [set] });
+    expect([200, 202]).toContain(started.statusCode);
+    const until = Date.now() + 30_000;
+    while (context.store.listGuardEvents({}).events.filter((event) => event.detectorId === "<destinations>").length < 2) {
+      if (Date.now() > until) throw new Error("The replay recorded no verdict");
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    expect((await call(context, "GET", "/api/guard/destination-rules", admin.cookie)).json<DestinationRulesStatus>().observing).toEqual({ wouldBlock: 1, days: 7 });
+  }, 90_000);
+
   it("the rules profile comes after a run's own profiles, a candidate's too, and keeps the instance default", async () => {
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-dest-resolve-"));
     const store = await SqliteStore.create(path.join(tempDir, "orchestrator.db"));

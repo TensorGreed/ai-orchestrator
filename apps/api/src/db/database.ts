@@ -11344,20 +11344,24 @@ export class SqliteStore {
   /**
    * Phase 16 — whether any stored version of any guard profile asks for
    * propagated labels, has destination rules or an egress channel (all of
-   * which make a run track labels). Stored documents have sorted keys, so an
-   * egress channel reads `"egress":{"actions":` (an action keyed by the
-   * egress finding category reads `"egress":{"action":` and does not match). Cached per guard profile revision (read from the
-   * database each call), so a run checks it with one primary-key read and a
-   * profile written by any instance is seen at once. A match on the stored
-   * JSON text (no parse); a false positive only makes runs resolve their
-   * profiles as before.
+   * which make a run track labels), read from the stored JSON with SQLite's
+   * JSON functions (key order and formatting do not matter). Cached per guard
+   * profile revision (read from the database each call), so a run checks it
+   * with one primary-key read and a profile written by any instance is seen
+   * at once.
    */
   anyGuardProfileUsesLabels(): boolean {
     const revision = this.guardProfileRevision();
     if (revision !== undefined && this.guardProfileLabelsCache?.revision === revision) return this.guardProfileLabelsCache.value;
+    // Read as JSON (not as text), so key order and formatting never matter: labels propagated, at least one
+    // destination rule, or an egress channel.
     const row = this.queryOne<{ found: number }>(
       `SELECT 1 AS found FROM guard_profile_versions
-        WHERE document_json LIKE '%"labels":"propagated"%' OR document_json LIKE '%"destinations":{"rules":[{%' OR document_json LIKE '%"egress":{"actions":%'
+        WHERE json_valid(document_json) AND (
+          json_extract(document_json, '$.labels') = 'propagated'
+          OR COALESCE(json_array_length(document_json, '$.destinations.rules'), 0) > 0
+          OR json_type(document_json, '$.channels.egress') = 'object'
+        )
         LIMIT 1`
     );
     const value = Boolean(row);
@@ -11369,14 +11373,16 @@ export class SqliteStore {
    * Phase 16 — observed destination verdicts that would have stopped content:
    * verdicts since `since` with a shadow destination-rule finding of this
    * profile whose action blocks, waits for review or for approval. One per
-   * verdict (a verdict with several such findings counts once).
+   * verdict (a verdict with several such findings counts once). Replays,
+   * release-gate cases and eval runs are not traffic: they are left out.
    */
   countObservedDestinationBlocks(profileId: string, since: string): number {
     const row = this.queryOne<{ total: number }>(
       `SELECT COUNT(DISTINCT verdict_id) AS total FROM guard_events
         WHERE profile_id = ? AND detector_id = '<destinations>' AND shadow = 1
-          AND effective_action IN ('block', 'review', 'require_approval') AND created_at >= ?`,
-      [profileId, since]
+          AND effective_action IN ('block', 'review', 'require_approval') AND created_at >= ?
+          AND execution_id NOT IN (SELECT id FROM execution_history WHERE trigger_type IN (${SUBJECT_EXECUTION_TRIGGERS.map(() => "?").join(", ")}))`,
+      [profileId, since, ...SUBJECT_EXECUTION_TRIGGERS]
     );
     return Number(row?.total ?? 0);
   }

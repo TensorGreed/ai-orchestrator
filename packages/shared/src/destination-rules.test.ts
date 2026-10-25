@@ -10,7 +10,7 @@ import { emptyGuardSimulationCounts, summariseGuardSimulation, type GuardSimulat
 describe("deployment destination rules", () => {
   it("the starter rule keeps cards, IBANs, SSNs, national ids and credentials at most on the private network", () => {
     expect(STARTER_DESTINATION_RULE.allow.maxTier).toBe("private");
-    expect(STARTER_DESTINATION_RULE.when.dataClasses).toEqual(["card_number", "iban", "us_ssn", "national_id", "credential"]);
+    expect(STARTER_DESTINATION_RULE.when.dataClasses).toEqual(["card_number", "iban", "us_ssn", "national_id", "credential", "private_key", "jwt"]);
   });
 
   it("modes and the observing sentence", () => {

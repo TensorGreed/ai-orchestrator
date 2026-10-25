@@ -3,7 +3,7 @@
  * Security → Data destinations.
  *
  * One click adds the starter rule ("Keep sensitive data in-house": card
- * numbers, IBANs, SSNs, national ids and credentials stay on this machine or
+ * numbers, IBANs, SSNs, national ids, credentials, private keys and JWTs stay on this machine or
  * the private network). It starts observing: verdicts are recorded and
  * nothing is stopped, and the banner counts what would have been blocked
  * this week. "Turn on enforcement" makes it act. The full rule editor sits
@@ -30,6 +30,8 @@ const RULE_ACTIONS: Array<{ value: DestinationRuleView["action"]; label: string 
   { value: "mask", label: "Mask" },
   { value: "protect", label: "Protect (profile's provider)" }
 ];
+/** The deployment's rules have no protection provider of their own, so "Protect" is not offered here (it would only block). */
+const EDITABLE_RULE_ACTIONS = RULE_ACTIONS.filter((entry) => entry.value !== "protect");
 
 function errorText(err: unknown): string {
   if (err instanceof ApiError) return err.message;
@@ -149,7 +151,7 @@ export function DestinationRulesCard({ canEdit }: { canEdit: boolean }) {
             <strong>{STARTER_DESTINATION_RULE.name}</strong>
           </p>
           <p className="kb-subtle">
-            Card numbers, IBANs, social security and national id numbers, and credentials stay on this machine or your private network. It starts by observing: nothing is blocked until you turn on enforcement.
+            Card numbers, IBANs, social security and national id numbers, credentials, private keys and tokens stay on this machine or your private network. It starts by observing: nothing is blocked until you turn on enforcement.
           </p>
           {canEdit ? (
             <button type="button" className="pg-btn" disabled={busy} onClick={() => void act(async () => (await addStarterDestinationRule()))}>
@@ -266,7 +268,7 @@ function RuleEditor({ rules, onSave }: { rules: DestinationRuleView[]; onSave: (
             <label>
               <span>Otherwise</span>
               <select aria-label="Otherwise" value={form.action} onChange={(event) => update(index, { action: event.target.value as RuleForm["action"] })}>
-                {RULE_ACTIONS.map((entry) => (
+                {(form.action === "protect" ? RULE_ACTIONS : EDITABLE_RULE_ACTIONS).map((entry) => (
                   <option key={entry.value} value={entry.value}>
                     {entry.label}
                   </option>

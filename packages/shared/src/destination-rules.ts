@@ -26,7 +26,7 @@ export const STARTER_DESTINATION_RULE_NAME = "Keep sensitive data in-house";
 /** The starter rule: payment cards, IBANs, SSNs, national ids and credentials stay on this machine or the private network. */
 export const STARTER_DESTINATION_RULE = Object.freeze({
   name: STARTER_DESTINATION_RULE_NAME,
-  when: { dataClasses: ["card_number", "iban", "us_ssn", "national_id", "credential"] },
+  when: { dataClasses: ["card_number", "iban", "us_ssn", "national_id", "credential", "private_key", "jwt"] },
   allow: { maxTier: "private" as DestinationTier },
   action: "block" as const
 });

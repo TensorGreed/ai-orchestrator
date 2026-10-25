@@ -641,7 +641,9 @@ export class GuardService {
       // Phase 16 — read when a check first needs them (the engine keeps them for this run only).
       destinationRows: () => context.destinationRows ?? this.options.destinationRows?.() ?? [],
       ...(this.options.surrogateKey ? { surrogateKey: this.options.surrogateKey } : {}),
-      issuedSurrogates: context.issuedSurrogates ?? new Set<string>()
+      issuedSurrogates: context.issuedSurrogates ?? new Set<string>(),
+      // A simulation compares every checkpoint on both sides, clean ones included.
+      ...(context.simulation ? { recordCleanOutbound: true } : {})
     };
   }
 

@@ -177,7 +177,7 @@ Destination rules live in the profile document under `destinations.rules`. Each 
     "rules": [
       {
         "name": "Keep sensitive data in-house",
-        "when": { "dataClasses": ["card_number", "iban", "us_ssn", "national_id", "credential"] },
+        "when": { "dataClasses": ["card_number", "iban", "us_ssn", "national_id", "credential", "private_key", "jwt"] },
         "allow": { "maxTier": "private" },
         "action": "block",
         "shadow": true
