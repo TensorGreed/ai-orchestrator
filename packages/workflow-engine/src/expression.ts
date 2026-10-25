@@ -23,6 +23,7 @@ import {
   type SandboxEvaluate,
   type SandboxExpressionPayload
 } from "./expression-sandbox";
+import { recordTemplateRead } from "./data-labels";
 
 export interface ExpressionContext {
   $input?: unknown;
@@ -143,6 +144,7 @@ export function renderExpressionTemplate(template: string, context: ExpressionCo
   if (typeof template !== "string" || !template.includes("{{")) return template;
   return withExpressionEvaluator(context, (evaluate) =>
     template.replace(TEMPLATE_REGEX, (_match, expr: string) => {
+      recordTemplateRead(expr.trim(), false);
       try {
         return stringifyResult(evaluate(expr));
       } catch (error) {

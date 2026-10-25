@@ -1,5 +1,6 @@
 import { withExpressionEvaluator, isComplexExpression, type ExpressionContext } from "./expression";
 import { isExpressionSandboxFailure } from "./expression-sandbox";
+import { recordTemplateRead } from "./data-labels";
 
 function toRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
@@ -35,6 +36,8 @@ export function renderTemplateAdvanced(template: string, values: Record<string, 
       const trimmed = body.trim();
       // Simple a.b.c path — preserve original behavior + unresolved tracking.
       if (SIMPLE_PATH.test(trimmed)) {
+        // Phase 16 — the running node read this path (its labels follow).
+        recordTemplateRead(trimmed, true);
         const value = resolvePath(values, trimmed);
         if (value === undefined || value === null) {
           unresolvedKeys.push(trimmed);
@@ -45,6 +48,7 @@ export function renderTemplateAdvanced(template: string, values: Record<string, 
       }
       // Otherwise — treat as a JS expression in the sandbox.
       if (evaluate && isComplexExpression(trimmed)) {
+        recordTemplateRead(trimmed, false);
         try {
           const result = evaluate(trimmed);
           if (result === undefined || result === null) return "";

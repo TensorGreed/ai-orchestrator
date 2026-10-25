@@ -16,8 +16,9 @@ import {
   withDelegatedUser
 } from "@ai-orchestrator/mcp-sdk";
 import type { ProviderExecutionContext, ProviderRegistry, ResilientFetchRetryInfo } from "@ai-orchestrator/provider-sdk";
-import { NODE_ACTIVITY_LIMIT, NODE_ACTIVITY_PREVIEW_CHARS } from "@ai-orchestrator/shared";
+import { GUARD_EFFECTIVE_PROFILE_REF, NODE_ACTIVITY_LIMIT, NODE_ACTIVITY_PREVIEW_CHARS, inputProvenance } from "@ai-orchestrator/shared";
 import type {
+  DataLabels,
   ApprovalDecisionValue,
   ApprovalHandoffState,
   ChatMessage,
@@ -126,10 +127,21 @@ import {
   createAgentGuardSession,
   GuardBlockedError,
   isGuardBlockedError,
+  resolveGuardRun,
   type AgentGuardSession,
   type GuardEvalScope,
   type GuardRuntimeDependencies
 } from "./guard-runtime";
+import { profileUsesLabels, type GuardDictionary } from "@ai-orchestrator/guard-sdk";
+import {
+  createLabelScanner,
+  currentLabelScope,
+  labelsOf,
+  runInLabelScope,
+  RunLabelState,
+  unionLabels,
+  type NodeLabelScope
+} from "./data-labels";
 
 const MAX_SUB_WORKFLOW_DEPTH = 10;
 
@@ -324,6 +336,12 @@ export interface ExecuteWorkflowRequest {
    */
   toolPolicySubject?: McpToolPolicySubject;
   callStack?: string[];
+  /**
+   * Phase 16 — labels of the run's input: where it came from (the trigger,
+   * the editor, the scheduler) and, for a sub-workflow, the Execute Workflow
+   * node's input labels. Absent: the trigger type decides.
+   */
+  inputLabels?: DataLabels;
   resumeState?: WorkflowExecutionState;
   approvalDecision?: ApprovalDecisionInput;
   executionTimeoutMs?: number;
@@ -383,6 +401,8 @@ interface NodeRuntimeContext {
   writeToolCalls?: WriteToolCallLedger;
   /** Phase 11.2 — the agent execution a worker runs inside, so the worker shares its replay position. */
   writeToolSession?: WriteToolCallSession;
+  /** Phase 16 — this node's data labels while it runs (what it read, what it adds). */
+  labelScope?: NodeLabelScope;
   recordAttachmentUsage?: (usage: {
     attachedNodeId: string;
     usedByNodeId: string;
@@ -1303,6 +1323,7 @@ function applyInputMapping(
     }
 
     let value = remapped[src];
+    currentLabelScope()?.readPath(src);
     if (value === undefined) {
       value = getValueByPath(remapped, src);
     }
@@ -1679,6 +1700,10 @@ function getValueByPath(input: Record<string, unknown>, path: string): unknown {
   const trimmedPath = normalizeLookupPath(path);
   if (!trimmedPath) {
     return undefined;
+  }
+  // Phase 16 — a configured lookup into a node's template data is a read, like a {{ }} path.
+  if (isDerivedResultsSnapshot(input.results)) {
+    currentLabelScope()?.readPath(trimmedPath);
   }
 
   if (trimmedPath in input) {
@@ -2938,7 +2963,16 @@ function resolveReplayStub(stub: ReplayNodeStub, context: NodeRuntimeContext): u
   return stub.output;
 }
 
-async function executeNode(
+/** Runs a node's handler with its label scope current, so its template reads are recorded on it. */
+function executeNode(
+  node: WorkflowNode,
+  context: NodeRuntimeContext,
+  dependencies: WorkflowExecutionDependencies
+): Promise<unknown> {
+  return runInLabelScope(context.labelScope, () => executeNodeHandler(node, context, dependencies));
+}
+
+async function executeNodeHandler(
   node: WorkflowNode,
   context: NodeRuntimeContext,
   dependencies: WorkflowExecutionDependencies
@@ -3448,18 +3482,22 @@ async function executeNode(
         }
 
         let mappedValue = templateData[parentPath];
+        context.labelScope?.readPath(parentPath);
         if (mappedValue === undefined) {
           mappedValue = getValueByPath(templateData, parentPath);
         }
         mappedInput[childKey] = mappedValue;
       }
 
+      // Phase 16 — the child's trigger takes this node's input labels.
+      const childInputLabels = context.labelScope?.inputLabels();
       if (mode === "async") {
         // Fire-and-forget
         executeWorkflow(
           {
             workflow: targetWorkflow,
             input: mappedInput,
+            ...(childInputLabels ? { inputLabels: childInputLabels } : {}),
             triggerType: "sub_workflow",
             triggeredBy: context.workflow.id,
             toolPolicySubject: context.toolPolicySubject,
@@ -3512,6 +3550,7 @@ async function executeNode(
             {
               workflow: targetWorkflow,
               input: mappedInput,
+              ...(childInputLabels ? { inputLabels: childInputLabels } : {}),
               triggerType: "sub_workflow",
               triggeredBy: context.workflow.id,
               toolPolicySubject: context.toolPolicySubject,
@@ -3541,6 +3580,10 @@ async function executeNode(
           details: { subWorkflowId: childPause.workflowId, subWorkflowName: childPause.workflowName, waitingNodeId: childPause.waitingNodeId }
         });
       }
+
+      // Phase 16 — this node's output is the child's output, and takes its labels.
+      const childOutputLabels = runOutputLabels.get(childResult);
+      if (childOutputLabels) context.labelScope?.replace(childOutputLabels);
 
       // Apply outputMapping if configured
       const outputMapping = toRecord(config.outputMapping);
@@ -3577,6 +3620,8 @@ async function executeNode(
 
       const codeSandbox = dependencies.codeSandbox ?? NO_CODE_SANDBOX_PLAN;
       if (codeSandbox.kind === "disabled") throw codeNodesDisabledError(codeSandbox);
+      // Phase 16 — code can read anything it is given: every node in context and the run input.
+      context.labelScope?.readEverything();
 
       if (language === "python") {
         const items = Array.isArray(templateData.items)
@@ -4537,6 +4582,10 @@ async function executeNode(
       }
 
       const messages = await dependencies.memoryStore.loadMessages(namespace, sessionId);
+      // Phase 16 — what earlier runs stored with this memory comes along (older rows have no labels: nothing added).
+      if (context.labelScope && messages.length > 0 && dependencies.memoryStore.loadLabels) {
+        context.labelScope.add(await dependencies.memoryStore.loadLabels(namespace, sessionId));
+      }
       return {
         namespace,
         sessionId,
@@ -5199,6 +5248,9 @@ async function executeNode(
           }
         });
         const agentProviderRetry = providerCallContext(dependencies, node.id).onRetry;
+        // Phase 16 — the labels of each worker's last result, keyed by the tool name the model called.
+        const workerResultLabels = new Map<string, DataLabels>();
+        const labelScope = context.labelScope;
         const modelRunStarted = Date.now();
         const modelRunStartedAt = nowIso();
         let agentState: Awaited<ReturnType<typeof dependencies.agentRuntime.run>>;
@@ -5224,19 +5276,25 @@ async function executeNode(
               ...workerTools.map(wt => ({ name: wt.name, description: wt.description, inputSchema: wt.inputSchema }))
             ],
             describeUnavailableTool: (toolName) => resolvedTools.describeBlocked(toolName),
-            invokeTool: async (toolName, args) => {
+            // Phase 16 — a worker's result carries the worker's labels; any other tool's result is external.
+            resultLabels: (toolName) => workerResultLabels.get(toolName),
+            invokeTool: async (toolName, args, invocation) => {
                const matchingWorker = workerTools.find(wt => wt.name === toolName);
                if (matchingWorker) {
                   const workerId = matchingWorker.serverId.replace("worker-", "");
                   const workerNode = attachedWorkerNodes.find(wn => wn.id === workerId);
                   if (!workerNode) throw new Error(`Worker node ${workerId} not found.`);
                 
+                  const workerGlobals = { ...context.globals, user_prompt: String(args.task_prompt ?? "") };
+                  // Phase 16 — the worker starts with what the supervisor's context holds at the call.
+                  const workerScope = labelScope?.child(workerNode.id, workerNode.type, invocation?.labels ?? labelScope.inputLabels(), workerGlobals);
                   const workerContext: NodeRuntimeContext = {
                      ...context,
                      ...(writeToolSession ? { writeToolSession } : {}),
-                     globals: { ...context.globals, user_prompt: String(args.task_prompt ?? "") },
+                     globals: workerGlobals,
                      parentOutputs: { ...context.parentOutputs },
-                     callStack: [...context.callStack, node.id]
+                     callStack: [...context.callStack, node.id],
+                     labelScope: workerScope
                   };
                 
                   // Phase 12.1 — the worker runs its own guard; a pause there pauses this agent too.
@@ -5245,6 +5303,7 @@ async function executeNode(
                       ...dependencies,
                       activityRecorder: workerActivityRecorder(dependencies.activityRecorder, node.id)
                     });
+                    if (workerScope) workerResultLabels.set(toolName, workerScope.finish(workerResult));
                     return workerResult;
                   } catch (error) {
                     if (isApprovalHandoffSignal(error)) {
@@ -5304,6 +5363,7 @@ async function executeNode(
             callSite: { nodeId: node.id },
             memoryStore: dependencies.memoryStore,
             toolDataStore: dependencies.toolDataStore,
+            ...(labelScope ? { dataLabels: { input: labelScope.inputLabels(), persist: labelScope.run.tracked } } : {}),
             ...(guardSession ? { guard: guardSession.hooks } : {}),
             ...(dependencies.abortSignal ? { signal: dependencies.abortSignal } : {}),
             ...(agentProviderRetry ? { onProviderRetry: agentProviderRetry } : {}),
@@ -5340,6 +5400,8 @@ async function executeNode(
             });
           }
         }
+        // Phase 16 — the answer carries everything its model context held.
+        if (labelScope && agentState.labels) labelScope.replace(agentState.labels);
         const modelRunCompletedAt = nowIso();
         if (attachedModelNode) {
           const lastStep = agentState.steps.at(-1);
@@ -5576,7 +5638,8 @@ async function executeNode(
         parentIds: Object.keys(context.parentOutputs),
         globals: context.globals,
         protectionNodes,
-        connectedHandles
+        connectedHandles,
+        ...(context.labelScope ? { labelScope: context.labelScope } : {})
       });
       for (const protectionNode of protectionNodes) {
         await context.recordAttachmentUsage?.({
@@ -6406,6 +6469,57 @@ function appendCanceledRemainder(nodeOrder: string[], startIndex: number, nodeRe
   }
 }
 
+/** Phase 16 — the labels of each finished run's output, for the Execute Workflow node that ran it (never part of the result). */
+const runOutputLabels = new WeakMap<WorkflowExecutionResult, DataLabels>();
+
+/** The labels of a finished run's output (its output node, else its last node), when the engine computed them. */
+export function outputLabelsOf(result: WorkflowExecutionResult): DataLabels | undefined {
+  return runOutputLabels.get(result);
+}
+
+/**
+ * Phase 16 — whether a run tracks labels: a profile in its resolved guard
+ * stack, or a profile a Guard node names, asks for propagated labels. Such
+ * profiles' dictionaries feed the output scan. Without guard dependencies,
+ * or when nothing opts in, nothing is scanned or stored.
+ */
+async function labelTrackingFor(workflow: Workflow, guard: GuardRuntimeDependencies | undefined): Promise<{ tracked: boolean; dictionaries: GuardDictionary[] }> {
+  if (!guard) return { tracked: false, dictionaries: [] };
+  const profiles: Array<{ labels?: "fixed" | "propagated"; dictionaries: GuardDictionary[] }> = [];
+  try {
+    const resolution = await resolveGuardRun(guard);
+    if (resolution.enforced) profiles.push(resolution.enforced.profile);
+    for (const entry of resolution.stack) profiles.push(entry.profile);
+  } catch {
+    // The run's guard resolution fails where it is used (an agent or a guard node), exactly as before.
+  }
+  for (const node of workflow.nodes) {
+    if (node.type !== "guard" || node.disabled === true) continue;
+    const profileId = typeof toRecord(node.config).profileId === "string" ? String(toRecord(node.config).profileId) : "";
+    if (!profileId || profileId === GUARD_EFFECTIVE_PROFILE_REF) continue;
+    try {
+      const loaded = await guard.loadProfile(profileId);
+      if (loaded) profiles.push(loaded.profile);
+    } catch {
+      // A missing profile fails the guard node when it runs.
+    }
+  }
+  const opted = profiles.filter((profile) => profileUsesLabels(profile));
+  return { tracked: opted.length > 0, dictionaries: opted.flatMap((profile) => profile.dictionaries ?? []) };
+}
+
+async function initRunLabels(request: ExecuteWorkflowRequest, workflow: Workflow, dependencies: WorkflowExecutionDependencies): Promise<RunLabelState> {
+  const tracking = await labelTrackingFor(workflow, dependencies.guard);
+  const scan = createLabelScanner(tracking.dictionaries);
+  const restored = RunLabelState.fromState(request.resumeState?.dataLabels, scan);
+  if (restored) return restored;
+  return new RunLabelState({
+    input: request.inputLabels ?? labelsOf([inputProvenance(request.triggerType, undefined)]),
+    tracked: tracking.tracked,
+    scan
+  });
+}
+
 export async function executeWorkflow(
   request: ExecuteWorkflowRequest,
   dependencies: WorkflowExecutionDependencies
@@ -6414,8 +6528,11 @@ export async function executeWorkflow(
   const owner = (request.resumeState?.workflow ?? request.workflow)?.id;
   const run = async (): Promise<WorkflowExecutionResult> => {
     // A sub-workflow run reuses its parent's dependencies: its nodes report nothing of their own.
+    // Its template reads belong to its own nodes, never to the parent node that started it.
     if (dependencies.activityRecorder) {
-      return executeWorkflowRun(request, { ...dependencies, activityRecorder: NOOP_ACTIVITY_RECORDER, onNodeActivity: undefined });
+      return runInLabelScope(undefined, () =>
+        executeWorkflowRun(request, { ...dependencies, activityRecorder: NOOP_ACTIVITY_RECORDER, onNodeActivity: undefined })
+      );
     }
     const recorder = createNodeActivityRecorder(dependencies.onNodeActivity);
     const result = await executeWorkflowRun(request, { ...dependencies, activityRecorder: recorder });
@@ -6610,6 +6727,11 @@ async function executeWorkflowRun(
     for (const [nodeId, output] of Object.entries(pinnedData)) {
       nodeOutputs.set(nodeId, output);
     }
+  }
+  // Phase 16 — labels beside the outputs. Outputs seeded by the editor and pinned data were given by a user.
+  const labelState = await initRunLabels(request, workflow, dependencies);
+  if (!request.resumeState) {
+    for (const nodeId of nodeOutputs.keys()) labelState.set(nodeId, labelsOf(["user"]));
   }
   const nodeResults: NodeExecutionResult[] = request.resumeState ? [...request.resumeState.nodeResults] : [];
   const attachmentOnlyResultIndexByNodeId = new Map<string, number>();
@@ -6851,6 +6973,8 @@ async function executeWorkflowRun(
     } else if (handoff?.kind === "route") {
       const routed = approved ? handoff.onApprove : handoff.onReject;
       nodeOutputs.set(waitingNode.id, routed);
+      // Phase 16 — the paused node's labels were saved with the run; the routed output is scanned like any output.
+      labelState.set(waitingNode.id, labelState.finalize(labelState.get(waitingNode.id) ?? labelsOf([]), routed));
       nodeResults.push({
         nodeId: waitingNode.id,
         status: "success",
@@ -6858,7 +6982,8 @@ async function executeWorkflowRun(
         completedAt: decidedAt,
         durationMs: 0,
         input: decisionInput,
-        output: routed
+        output: routed,
+        ...labelState.resultField(waitingNode.id)
       });
       applySuccessfulNodeRouting(waitingNode, routed);
       handledByHandoff = true;
@@ -6876,6 +7001,8 @@ async function executeWorkflowRun(
       // Nothing more to record: the routed output or the re-run carries on below.
     } else if (request.approvalDecision.decision === "approve") {
       nodeOutputs.set(waitingNode.id, decisionPayload);
+      // Phase 16 — the decision comes from a person.
+      labelState.set(waitingNode.id, unionLabels([labelState.get(waitingNode.id), labelsOf(["user"])]));
       nodeResults.push({
         nodeId: waitingNode.id,
         status: "success",
@@ -6883,10 +7010,12 @@ async function executeWorkflowRun(
         completedAt: decidedAt,
         durationMs: 0,
         input: decisionInput,
-        output: decisionPayload
+        output: decisionPayload,
+        ...labelState.resultField(waitingNode.id)
       });
     } else {
       const rejectionError = request.approvalDecision.reason?.trim() || (timedOut ? "Human approval timed out" : "Human approval rejected");
+      labelState.set(waitingNode.id, unionLabels([labelState.get(waitingNode.id), labelsOf(["user"])]));
       nodeResults.push({
         nodeId: waitingNode.id,
         status: "error",
@@ -6918,6 +7047,7 @@ async function executeWorkflowRun(
             failedNodeType: waitingNode.type,
             caught: true
           });
+          labelState.set(tryCatchId, unionLabels([labelState.get(tryCatchId), labelState.get(waitingNode.id)]));
           hadContinuedErrors = true;
           caughtByTryCatch = true;
           break;
@@ -7011,7 +7141,10 @@ async function executeWorkflowRun(
     timeoutMinutes: number;
     handoff?: WorkflowExecutionState["approvalHandoff"];
     details?: Record<string, unknown>;
+    labelScope?: NodeLabelScope;
   }): Promise<WorkflowExecutionResult> => {
+    // Phase 16 — the paused node's labels so far travel with the run, for the output it routes or decides on resume.
+    if (pause.labelScope) labelState.set(pause.node.id, pause.labelScope.pendingLabels());
     const waitingOutput = {
       message: pause.approvalMessage,
       timeoutMinutes: pause.timeoutMinutes,
@@ -7057,7 +7190,9 @@ async function executeWorkflowRun(
       ...(toolPolicySubject ? { toolPolicySubject } : {}),
       ...(pause.handoff ? { approvalHandoff: pause.handoff } : {}),
       ...(approvedHandoffKeys.size > 0 ? { approvedHandoffKeys: [...approvedHandoffKeys] } : {}),
-      ...(writeToolCalls.toState() ? { approvedToolResults: writeToolCalls.toState() } : {})
+      ...(writeToolCalls.toState() ? { approvedToolResults: writeToolCalls.toState() } : {}),
+      // Phase 16 — stored only on runs that track labels: otherwise no check reads them, and nothing new is stored.
+      ...(labelState.tracked ? { dataLabels: labelState.toState() } : {})
     };
 
     if (dependencies.persistPausedExecution) {
@@ -7317,6 +7452,14 @@ async function executeWorkflowRun(
       }
     }
     const merged = mergeParentOutputs(parentOutputs);
+    // Phase 16 — the node's labels: its own source and the parents that ran, plus what it reads.
+    const labelScope = labelState.scope({
+      nodeId: node.id,
+      nodeType: node.type,
+      parents: Object.keys(parentOutputs).map((parentId) => labelState.get(parentId)),
+      merged,
+      globals
+    });
     let nodeInput: unknown = captureNodeInputSnapshot(globals, merged, parentOutputs);
     await dependencies.onNodeStart?.({
       nodeId: node.id,
@@ -7329,6 +7472,8 @@ async function executeWorkflowRun(
       if (hasOwnRecordKey(pinnedData, node.id)) {
         const output = pinnedData[node.id];
         nodeOutputs.set(node.id, output);
+        // Phase 16 — pinned data was given by a user.
+        labelState.set(node.id, labelState.finalize(labelsOf(["user"]), output));
         const completedAt = nowIso();
         const durationMs = Date.now() - started;
         nodeResults.push({
@@ -7339,7 +7484,8 @@ async function executeWorkflowRun(
           durationMs,
           input: nodeInput,
           output,
-          warnings: ["Used pinned data; node executor was not called."]
+          warnings: ["Used pinned data; node executor was not called."],
+          ...labelState.resultField(node.id)
         });
         await dependencies.onNodeComplete?.({
           nodeId: node.id,
@@ -7352,6 +7498,7 @@ async function executeWorkflowRun(
         });
         if (node.type === "output") {
           finalOutput = output;
+          labelState.outputNodeId = node.id;
         }
         applySuccessfulNodeRouting(node, output);
         continue;
@@ -7373,6 +7520,7 @@ async function executeWorkflowRun(
           parent_outputs: parentOutputs
         };
         let candidateItems = inputKey ? templateData[inputKey] : undefined;
+        if (inputKey) labelScope.readPath(inputKey);
         if (candidateItems === undefined && inputKey) {
           candidateItems = getValueByPath(templateData, inputKey);
         }
@@ -7396,6 +7544,9 @@ async function executeWorkflowRun(
           item: unknown;
           outputs: Record<string, unknown>;
         }> = [];
+        // Phase 16 — each pass's child labels; the loop's output is their union.
+        const itemLabels = labelScope.inputLabels();
+        const passLabels: DataLabels[] = [];
 
         for (let loopIndex = 0; loopIndex < scopedItems.length; loopIndex += 1) {
           const loopItem = scopedItems[loopIndex];
@@ -7429,6 +7580,13 @@ async function executeWorkflowRun(
             const childMerged = mergeParentOutputs(childParentOutputs);
             childMerged[itemVariable] = loopItem;
             childMerged._loop_index = loopIndex;
+            const childLabelScope = labelState.scope({
+              nodeId: childNode.id,
+              nodeType: childNode.type,
+              parents: Object.keys(childParentOutputs).map((parentId) => (parentId === node.id ? itemLabels : labelState.get(parentId))),
+              merged: childMerged,
+              globals: iterationGlobals
+            });
             const childInput = captureNodeInputSnapshot(iterationGlobals, childMerged, childParentOutputs);
             await dependencies.onNodeStart?.({
               nodeId: childNode.id,
@@ -7452,7 +7610,8 @@ async function executeWorkflowRun(
                   toolPolicySubject,
                   approvedHandoffKeys,
                   writeToolCalls,
-                  recordAttachmentUsage
+                  recordAttachmentUsage,
+                  labelScope: childLabelScope
                 },
                 dependencies
               );
@@ -7461,8 +7620,12 @@ async function executeWorkflowRun(
 
               iterationOutputs[childNode.id] = childOutput;
               nodeOutputs.set(childNode.id, childOutput);
+              const childLabels = childLabelScope.finish(childOutput);
+              labelState.set(childNode.id, childLabels);
+              passLabels.push(childLabels);
               if (childNode.type === "output") {
                 finalOutput = childOutput;
+                labelState.outputNodeId = childNode.id;
               }
               nodeResults.push({
                 nodeId: childNode.id,
@@ -7472,7 +7635,8 @@ async function executeWorkflowRun(
                 durationMs: Date.now() - childStarted,
                 input: childInput,
                 output: childOutput,
-                attempts: childAttempts > 1 ? childAttempts : undefined
+                attempts: childAttempts > 1 ? childAttempts : undefined,
+                ...labelState.resultField(childNode.id)
               });
               await dependencies.onNodeComplete?.({
                 nodeId: childNode.id,
@@ -7528,6 +7692,7 @@ async function executeWorkflowRun(
         };
 
         nodeOutputs.set(node.id, output);
+        labelState.set(node.id, labelState.finalize(unionLabels([itemLabels, ...passLabels]), output));
         nodeResults.push({
           nodeId: node.id,
           status: "success",
@@ -7535,7 +7700,8 @@ async function executeWorkflowRun(
           completedAt: nowIso(),
           durationMs: Date.now() - started,
           input: nodeInput,
-          output
+          output,
+          ...labelState.resultField(node.id)
         });
         await dependencies.onNodeComplete?.({
           nodeId: node.id,
@@ -7565,7 +7731,7 @@ async function executeWorkflowRun(
           parent_outputs: parentOutputs
         });
 
-        return await pauseForApproval({ node, index, nodeInput, startedAtNode, started, approvalMessage, timeoutMinutes });
+        return await pauseForApproval({ node, index, nodeInput, startedAtNode, started, approvalMessage, timeoutMinutes, labelScope });
       }
 
       // Phase 11.2 — the decision belongs to the node the run paused at, once.
@@ -7586,7 +7752,8 @@ async function executeWorkflowRun(
           approvedHandoffKeys,
           writeToolCalls,
           ...(resumeDecision ? { resumeDecision } : {}),
-          recordAttachmentUsage
+          recordAttachmentUsage,
+          labelScope
         },
         dependencies
       );
@@ -7595,6 +7762,7 @@ async function executeWorkflowRun(
       writeToolCalls.clear();
 
       nodeOutputs.set(node.id, output);
+      labelState.set(node.id, labelScope.finish(output));
 
       nodeResults.push({
         nodeId: node.id,
@@ -7604,7 +7772,8 @@ async function executeWorkflowRun(
         durationMs: Date.now() - started,
         input: nodeInput,
         output,
-        attempts: attempts > 1 ? attempts : undefined
+        attempts: attempts > 1 ? attempts : undefined,
+        ...labelState.resultField(node.id)
       });
       await dependencies.onNodeComplete?.({
         nodeId: node.id,
@@ -7618,6 +7787,7 @@ async function executeWorkflowRun(
 
       if (node.type === "output") {
         finalOutput = output;
+        labelState.outputNodeId = node.id;
       }
 
       applySuccessfulNodeRouting(node, output);
@@ -7633,7 +7803,8 @@ async function executeWorkflowRun(
           approvalMessage: error.request.message,
           timeoutMinutes: error.request.timeoutMinutes,
           handoff: error.request.handoff,
-          ...(error.request.details ? { details: error.request.details } : {})
+          ...(error.request.details ? { details: error.request.details } : {}),
+          labelScope
         });
       }
       // The execution timeout fires while a node runs: that node failed, it was not canceled.
@@ -7725,6 +7896,8 @@ async function executeWorkflowRun(
             failedNodeType: node.type,
             caught: true
           });
+          // Phase 16 — an error message can quote what the failed node read.
+          labelState.set(tryCatchId, unionLabels([labelState.get(tryCatchId), labelScope.pendingLabels()]));
 
           caughtByTryCatch = true;
           nodeResults.push({
@@ -7753,6 +7926,7 @@ async function executeWorkflowRun(
       if (!caughtByTryCatch) {
         if (onError === "continue") {
           nodeOutputs.set(node.id, { error: errorMessage });
+          labelState.set(node.id, labelScope.pendingLabels());
           nodeResults.push({
             nodeId: node.id,
             status: "error",
@@ -7800,6 +7974,7 @@ async function executeWorkflowRun(
               }
             }
             nodeOutputs.set(node.id, { error: errorMessage });
+            labelState.set(node.id, labelScope.pendingLabels());
             nodeResults.push({
               nodeId: node.id,
               status: "error",
@@ -7888,6 +8063,7 @@ async function executeWorkflowRun(
 
   if (finalOutput === undefined && nodeOrder.length > 0) {
     finalOutput = nodeOutputs.get(nodeOrder[nodeOrder.length - 1]);
+    labelState.outputNodeId = nodeOrder[nodeOrder.length - 1];
   }
 
   // Phase: agent_clarify — surface the clarification at the top of the
@@ -7897,7 +8073,7 @@ async function executeWorkflowRun(
   // clarification field tells consumers the answer isn't final.
   const clarificationFromAgent = findClarificationInNodeResults(nodeResults);
 
-  return {
+  const completedResult: WorkflowExecutionResult = {
     workflowId: workflow.id,
     status: hadContinuedErrors ? "partial" : "success",
     startedAt,
@@ -7908,6 +8084,9 @@ async function executeWorkflowRun(
     output: finalOutput,
     ...(clarificationFromAgent ? { clarification: clarificationFromAgent } : {})
   };
+  const finalLabels = labelState.outputNodeId ? labelState.get(labelState.outputNodeId) : undefined;
+  if (finalLabels) runOutputLabels.set(completedResult, finalLabels);
+  return completedResult;
 }
 
 /**

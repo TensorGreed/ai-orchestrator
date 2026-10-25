@@ -1,5 +1,6 @@
 import type { GuardOutputHandle, WorkflowNode } from "@ai-orchestrator/shared";
 import { ApprovalHandoffSignal } from "./approval-handoff";
+import type { NodeLabelScope } from "./data-labels";
 import {
   needsApproval,
   parseGuardNodeConfig,
@@ -7,7 +8,9 @@ import {
   resolveGuardNodeProfiles,
   runGuardCheck,
   describeGuardVerdict,
+  declassifiedClasses,
   guardNodeLabels,
+  profilesUsePropagatedLabels,
   type GuardCheckResult,
   type GuardEvalScope,
   type GuardRunResolution
@@ -108,12 +111,17 @@ export async function executeGuardNodeStep(input: {
   protectionNodes: WorkflowNode[];
   /** Output handles of this node that have an edge. */
   connectedHandles: Set<string>;
+  /** Phase 16 — the node's labels: its input's provenance (when a profile asks for it), and the classes it rewrites away. */
+  labelScope?: NodeLabelScope;
 }): Promise<Record<string, unknown>> {
   const config = parseGuardNodeConfig(input.node);
   const { profiles, resolution } = await resolveGuardNodeProfiles(input.scope.guard, config, protectionBindingsFromNodes(input.protectionNodes));
   const fromItem = readPath(input.merged, config.inputField);
   const value = fromItem !== undefined ? fromItem : readPath(input.globals, config.inputField);
-  const result = await runGuardCheck(input.scope, profiles, { content: value ?? "", channel: config.channel, labels: guardNodeLabels(config) });
+  const propagated = input.labelScope && profilesUsePropagatedLabels(profiles) ? input.labelScope.inputLabels().provenance : undefined;
+  const result = await runGuardCheck(input.scope, profiles, { content: value ?? "", channel: config.channel, labels: guardNodeLabels(config, propagated) });
+  // A redacted, masked or protected class is gone from the inspected field (on tracked runs the output scan finds any left elsewhere in the item).
+  input.labelScope?.declassify(declassifiedClasses(result));
 
   const parentIds = new Set(input.parentIds);
   const itemWithoutParentCopies = Object.fromEntries(Object.entries(input.merged).filter(([key]) => !parentIds.has(key)));
