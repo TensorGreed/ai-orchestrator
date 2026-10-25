@@ -3,13 +3,17 @@ import type { ProviderExecutionContext, ProviderRegistry } from "@ai-orchestrato
 
 export interface AgentToolRuntime {
   tools: ToolDefinition[];
-  /** `invocation.labels` (Phase 16): what the agent's model context holds at the call; a delegated worker starts from them. */
-  invokeTool: (toolName: string, args: Record<string, unknown>, invocation?: { labels?: DataLabels }) => Promise<unknown>;
   /**
-   * Phase 16 — the labels of the last result of this tool (a worker's
-   * labels). Undefined: the result came from outside, `untrusted_external`.
+   * `invocation` (Phase 16): `labels` is what the agent's model context holds
+   * at the call (a delegated worker starts from them); `toolCallId` names the
+   * call, so `resultLabels` can tell two calls of one tool apart.
    */
-  resultLabels?: (toolName: string) => DataLabels | undefined;
+  invokeTool: (toolName: string, args: Record<string, unknown>, invocation?: { labels?: DataLabels; toolCallId?: string }) => Promise<unknown>;
+  /**
+   * Phase 16 — the labels of this call's result (a worker's labels).
+   * Undefined: the result came from outside, `untrusted_external`.
+   */
+  resultLabels?: (toolName: string, toolCallId?: string) => DataLabels | undefined;
   /**
    * Phase 10.2 — explains why a requested tool is not in `tools` (for
    * example, an MCP tool policy hid it). The text becomes the tool error the
@@ -33,12 +37,15 @@ export interface AgentRuntimeContext {
   /** Phase 12.1 — guard hooks run inside the loop when the agent is guarded. */
   guard?: AgentGuardHooks;
   /**
-   * Phase 16 — data labels: the agent's input labels; the loop accumulates
-   * what its model context holds (memory, each tool result) and returns it
-   * on the run state. `persist`: write labels with session memory and the
-   * tool cache (the run tracks labels).
+   * Phase 16 — data labels. `input`: everything the agent node read except
+   * its user prompt; `prompt`: what the user prompt read (a guard rewrite of
+   * the prompt declassifies these alone). The loop accumulates what its
+   * model context holds (memory, each tool result) and returns it on the run
+   * state. `persist`: the run tracks labels — memory labels are read, and
+   * labels are written with session memory and the tool cache. `scan`: finds
+   * data classes in tool results (tracked runs only).
    */
-  dataLabels?: { input: DataLabels; persist: boolean };
+  dataLabels?: { input: DataLabels; prompt?: DataLabels; persist: boolean; scan?: (value: unknown) => string[] };
   /**
    * The run's abort signal. It is passed to every model call and ends retry
    * waits early; once it aborts, `run()` throws instead of returning an

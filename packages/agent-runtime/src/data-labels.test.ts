@@ -64,7 +64,7 @@ function run(options: {
   script: Response[];
   context?: Partial<AgentRuntimeContext>;
   decide?: (check: AgentGuardCheck) => AgentGuardDecision;
-  resultLabels?: (name: string) => DataLabels | undefined;
+  resultLabels?: (name: string, callId?: string) => DataLabels | undefined;
   sessionId?: string;
 }) {
   const provider = new ScriptedProvider(options.script);
@@ -128,7 +128,7 @@ describe("agent label accumulation", () => {
       ["final_output", [], L(["user", "untrusted_external"], ["iban"])]
     ]);
     // The tool (a worker) is told what the model context holds at the call.
-    expect(harness.invocations[0]![2]).toEqual({ labels: L(["user"], ["iban"]) });
+    expect(harness.invocations[0]![2]).toEqual({ labels: L(["user"], ["iban"]), toolCallId: "c1" });
   });
 
   it("a tool's own result labels (a worker's) replace the external default", async () => {
@@ -163,8 +163,127 @@ describe("agent label accumulation", () => {
     const cacheGet: Response = { content: "Looking.", toolCalls: [{ id: "c2", name: "session_cache_get", arguments: { record_id: "r1" } }] };
     cache.records[0]!.labels = L(["untrusted_external"], ["card_number"]);
     const second = run({ script: [cacheGet, finalTurn], sessionId: "s", context: { memoryStore: memory, toolDataStore: cache, dataLabels: { input: L(["trusted"]), persist: false } } });
-    expect((await second.state).labels).toEqual(L(["trusted", "user", "untrusted_external"], ["card_number"]));
+    // Not tracking: the memory's labels are not even read (no consumer); the cached record still counts as outside content.
+    expect((await second.state).labels).toEqual(L(["trusted", "untrusted_external"], ["card_number"]));
     // Not persisting: saved without labels (the call has no options argument).
     expect(memory.saveArgs).toEqual([1, 0]);
+  });
+});
+
+/** Finds `email` when the text holds an @ (a stand-in for the run's DLP scanner). */
+const scanEmail = (value: unknown) => (JSON.stringify(value ?? "").includes("@") ? ["email"] : []);
+
+describe("round 1 fixes", () => {
+  it("on tracked runs each tool result is scanned: its classes reach tool_arguments checks, memory and the tool cache", async () => {
+    const memory = new Memory();
+    const cache = new ToolCache();
+    const twoCalls: Response = { content: "Again.", toolCalls: [{ id: "c2", name: "files__read", arguments: { path: "b" } }] };
+    const provider = new ScriptedProvider([toolTurn, twoCalls, finalTurn]);
+    const providerRegistry = new ProviderRegistry();
+    providerRegistry.register(provider);
+    const checks: AgentGuardCheck[] = [];
+    const state = await new DefaultAgentRuntime().run(
+      { provider: { providerId: "scripted", model: "m" }, systemPrompt: "sys", userPrompt: "Go", tools: [{ serverId: "files", ...TOOL }], maxIterations: 4, toolCallingEnabled: true, sessionId: "s" },
+      { tools: [TOOL], invokeTool: async () => ({ text: "Contact ana.lopez@example.org" }) },
+      {
+        providerRegistry,
+        resolveSecret: async () => undefined,
+        memoryStore: memory,
+        toolDataStore: cache,
+        guard: { check: async (check) => (checks.push(check), { outcome: "allow" }) },
+        dataLabels: { input: L(["user"]), persist: true, scan: scanEmail }
+      }
+    );
+    const toolArguments = checks.filter((check) => check.channel === "tool_arguments");
+    // The second call's arguments are checked against a context that holds the first result's email.
+    expect(toolArguments[1]!.dataLabels).toEqual(L(["user", "untrusted_external"], ["email"]));
+    expect(state.labels).toEqual(L(["user", "untrusted_external"], ["email"]));
+    expect(memory.labels).toEqual(L(["user", "untrusted_external"], ["email"]));
+    expect(cache.records[0]!.labels).toEqual(L(["untrusted_external"], ["email"]));
+  });
+
+  it("an external tool's error text is scanned like a result", async () => {
+    const providerRegistry = new ProviderRegistry();
+    providerRegistry.register(new ScriptedProvider([toolTurn, finalTurn]));
+    const state = await new DefaultAgentRuntime().run(
+      { provider: { providerId: "scripted", model: "m" }, systemPrompt: "sys", userPrompt: "Go", tools: [{ serverId: "files", ...TOOL }], maxIterations: 4, toolCallingEnabled: true },
+      {
+        tools: [TOOL],
+        invokeTool: async () => {
+          throw new Error("No access for ana.lopez@example.org");
+        }
+      },
+      { providerRegistry, resolveSecret: async () => undefined, dataLabels: { input: L(["user"]), persist: true, scan: scanEmail } }
+    );
+    expect(state.labels).toEqual(L(["user", "untrusted_external"], ["email"]));
+  });
+
+  it("untracked runs never scan", async () => {
+    let scans = 0;
+    const harness = run({
+      script: [toolTurn, finalTurn],
+      context: { dataLabels: { input: L(["user"]), persist: false, scan: (value) => (scans += 1, scanEmail(value)) } }
+    });
+    await harness.state;
+    expect(scans).toBe(0);
+  });
+
+  it("a prompt rewrite declassifies only what the prompt read; other context still holding the class keeps it", async () => {
+    const redactPrompt = (check: AgentGuardCheck): AgentGuardDecision =>
+      check.channel === "prompt" ? { outcome: "rewrite", content: "Go [email]", declassified: ["email"] } : { outcome: "allow" };
+    // The system prompt also read an email (it is in `input`): the class stays.
+    const shared = run({ script: [finalTurn], context: { dataLabels: { input: L(["trusted"], ["email"]), prompt: L(["user"], ["email"]), persist: false } }, decide: redactPrompt });
+    expect((await shared.state).labels).toEqual(L(["trusted", "user"], ["email"]));
+    // Only the prompt held it: the class goes.
+    const alone = run({ script: [finalTurn], context: { dataLabels: { input: L(["trusted"]), prompt: L(["user"], ["email"]), persist: false } }, decide: redactPrompt });
+    expect((await alone.state).labels).toEqual(L(["trusted", "user"]));
+    // The prompt check itself saw both parts.
+    expect(shared.checks[0]!.dataLabels).toEqual(L(["trusted", "user"], ["email"]));
+  });
+
+  it("a final-answer rewrite does not declassify memory: the stored messages were not rewritten", async () => {
+    const memory = new Memory();
+    const harness = run({
+      script: [finalTurn],
+      sessionId: "s",
+      context: { memoryStore: memory, dataLabels: { input: L(["user"]), prompt: L(["user"], ["email"]), persist: true } },
+      decide: (check) => (check.channel === "final_output" ? { outcome: "rewrite", content: "Done [email]", declassified: ["email"] } : { outcome: "allow" })
+    });
+    const state = await harness.state;
+    expect(state.labels).toEqual(L(["user"]));
+    expect(state.labelsDeclassified).toEqual(["email"]);
+    expect(memory.labels).toEqual(L(["user"], ["email"]));
+  });
+
+  it("a cached result always counts as outside content, even from a row without labels", async () => {
+    const cache = new ToolCache();
+    cache.records.push({ id: "r1", namespace: "n", sessionId: "s", toolName: "files__read", args: {}, output: { text: "x" }, createdAt: "now" });
+    const cacheGet: Response = { content: "Looking.", toolCalls: [{ id: "c2", name: "session_cache_get", arguments: { record_id: "r1" } }] };
+    const harness = run({ script: [cacheGet, finalTurn], sessionId: "s", context: { toolDataStore: cache, dataLabels: { input: L(["trusted"]), persist: false } } });
+    expect((await harness.state).labels).toEqual(L(["trusted", "untrusted_external"]));
+  });
+
+  it("result labels are asked for per call, so two calls of one worker keep their own labels", async () => {
+    const asked: Array<[string, string | undefined]> = [];
+    const twoCalls: Response = {
+      content: "Both.",
+      toolCalls: [
+        { id: "c1", name: "files__read", arguments: { path: "a" } },
+        { id: "c2", name: "files__read", arguments: { path: "b" } }
+      ]
+    };
+    const harness = run({
+      script: [twoCalls, finalTurn],
+      context: { dataLabels: { input: L(["user"]), persist: false } },
+      resultLabels: (name, callId) => {
+        asked.push([name, callId]);
+        return callId === "c1" ? L(["trusted"], ["iban"]) : L(["trusted"], ["email"]);
+      }
+    });
+    expect((await harness.state).labels).toEqual(L(["trusted", "user"], ["email", "iban"]));
+    expect(asked).toEqual([
+      ["files__read", "c1"],
+      ["files__read", "c2"]
+    ]);
   });
 });

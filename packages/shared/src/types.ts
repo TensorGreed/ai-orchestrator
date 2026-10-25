@@ -1104,6 +1104,12 @@ export interface AgentRunState {
    */
   labels?: DataLabels;
   /**
+   * Phase 16 — data classes a `final_output` rewrite removed from the answer
+   * (already left out of `labels`). The caller applies them to any labels it
+   * adds to the answer's afterwards.
+   */
+  labelsDeclassified?: string[];
+  /**
    * Cumulative LLM usage across every model call the agent made (one per
    * iteration plus retries). Aggregated from each `LLMCallResponse.usage`.
    * Unset if the provider didn't report token usage on any iteration.

@@ -1,5 +1,5 @@
 import { getNodeDefinition } from "./definitions";
-import { PROVENANCE_LABELS, type ProvenanceLabel } from "./data-labels";
+import { inputProvenance, PROVENANCE_LABELS, type DataLabels, type ProvenanceLabel } from "./data-labels";
 
 /**
  * Phase 16 — the capture provenance rules (Phase 15.6), shared by production
@@ -42,4 +42,36 @@ export function provenanceFor(nodeType: string, input: ProvenanceLabel): Provena
 export function orderedProvenance(labels: Iterable<ProvenanceLabel>): ProvenanceLabel[] {
   const set = new Set(labels);
   return PROVENANCE_LABELS.filter((label) => set.has(label));
+}
+
+/** Triggers a signed-in user or an API key starts (the editor, retries, replays of such runs, evals). */
+const USER_STARTED_TRIGGERS = new Set(["manual", "manual_stream", "manual_retry", "mcp_replay", "eval"]);
+
+/**
+ * Phase 16 (Q7) — the input labels of a run that replays a recorded one (a
+ * replay, a gate or simulation case, an MCP replay, an eval of a recorded
+ * case): where the recorded run's input came from, never where the replay
+ * was started. The recording's input-node labels win; else the source
+ * trigger decides (runs a user started — the editor, hand-saved golden runs
+ * — are `user`, everything else is judged by the capture rules, which never
+ * give `trusted` without the server's own scheduler). Labels read from an
+ * imported file never carry `trusted`.
+ */
+export function recordedInputLabels(recording: {
+  nodes?: ReadonlyArray<{ nodeType?: string; labels?: DataLabels | null }> | null;
+  sourceTriggerType?: string | null;
+}): DataLabels {
+  const provenance = new Set<ProvenanceLabel>();
+  for (const node of recording.nodes ?? []) {
+    if (!node?.labels || typeof node.nodeType !== "string" || nodeContentSource(node.nodeType) !== "input") continue;
+    for (const label of node.labels.provenance ?? []) {
+      if (label === "trusted" && node.labels.source === "file") continue;
+      provenance.add(label);
+    }
+  }
+  if (provenance.size === 0) {
+    const trigger = recording.sourceTriggerType ?? null;
+    provenance.add(trigger && USER_STARTED_TRIGGERS.has(trigger) ? "user" : inputProvenance(trigger, undefined));
+  }
+  return { provenance: orderedProvenance(provenance), dataClasses: [], source: "propagated" };
 }

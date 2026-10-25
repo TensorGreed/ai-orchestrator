@@ -57,6 +57,12 @@ export function mergeDataLabels(parts: readonly DataLabels[]): DataLabels | null
   };
 }
 
+/** Phase 16 — the union of label sets (missing parts ignored), always source `propagated`; empty labels when there are none. */
+export function unionDataLabels(parts: ReadonlyArray<DataLabels | null | undefined>): DataLabels {
+  const merged = mergeDataLabels(parts.filter((part): part is DataLabels => Boolean(part)));
+  return merged ? { ...merged, source: "propagated" } : { provenance: [], dataClasses: [], source: "propagated" };
+}
+
 /**
  * Phase 16 — labels a run carries per node, in a side map beside the node
  * outputs (never inside an output value). Serialisable, so a paused run's
