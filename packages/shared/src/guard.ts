@@ -200,7 +200,8 @@ export interface GuardEventView {
   nodeId: string;
   /** Agent loop iteration, when the verdict came from an agent's guard port or automatic profile. */
   iteration?: number | null;
-  channel: GuardChannelValue;
+  /** Phase 16: `egress` for the outbound checkpoint (HTTP, connectors, senders). */
+  channel: GuardProfileChannelValue;
   /** Where the guard sat: a DAG guard node, an agent hook, or a delegated worker. */
   placement: "node" | "agent";
   toolName?: string | null;

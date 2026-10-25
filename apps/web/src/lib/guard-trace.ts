@@ -419,3 +419,31 @@ export function dailySeries(daily: Array<{ day: string; action: string; count: n
   }
   return out;
 }
+
+const STOPPING_ACTIONS = new Set(["block", "review", "require_approval"]);
+const STOP_VERB: Record<string, [string, string]> = {
+  block: ["Blocked", "Would have been blocked"],
+  review: ["Held for review", "Would have been held for review"],
+  require_approval: ["Held for approval", "Would have waited for approval"]
+};
+
+/**
+ * Phase 16 — one plain line on why a verdict stopped content (blocked, held
+ * for review or approval; shadow verdicts say "would have"). A destination
+ * rule gives its own reason (it names the rule, the limit and where the data
+ * was going, and says when a class was matched by where the data came from
+ * rather than found in the text); other findings say what was found where.
+ * Null for verdicts that did not stop anything.
+ */
+export function verdictReasonLine(event: Pick<GuardEventView, "effectiveAction" | "shadow" | "detectorId" | "category" | "dataClass" | "channel" | "evidence">): string | null {
+  if (!STOPPING_ACTIONS.has(event.effectiveAction)) return null;
+  const [done, would] = STOP_VERB[event.effectiveAction]!;
+  const verb = event.shadow ? would : done;
+  if (event.detectorId === "<destinations>") {
+    const reason = event.evidence[0]?.message;
+    return reason ? `${verb}: ${reason}.` : `${verb} by a destination rule.`;
+  }
+  if (!event.detectorId) return null;
+  const what = event.dataClass ? event.dataClass.replace(/_/g, " ") : event.category ?? "a finding";
+  return `${verb}: ${what} found in the ${channelLabel(event.channel).toLowerCase()}.`;
+}

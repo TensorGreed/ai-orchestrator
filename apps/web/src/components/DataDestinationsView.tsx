@@ -7,11 +7,18 @@
  * connectors and offers one-click Classify. Region, approved data classes
  * and a note sit under Advanced. Destinations do nothing until a guard
  * profile has destination rules.
+ *
+ * Phase 16 (p3): the deployment's destination rules sit on top (starter rule,
+ * observing banner, enforcement), and the destination form offers "Preview
+ * impact": what the rules in force would do with the unsaved row on recent
+ * recorded traffic (admins only; nothing is saved or sent).
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { DESTINATION_KINDS, DESTINATION_KIND_LABELS, DESTINATION_TIERS, DESTINATION_TIER_LABELS, type DataDestinationRow, type UnclassifiedDestination } from "@ai-orchestrator/shared";
-import { ApiError, createDataDestination, deleteDataDestination, fetchDataDestinations, fetchUnclassifiedDestinations, updateDataDestination } from "../lib/api";
+import { ApiError, createDataDestination, deleteDataDestination, fetchDataDestinations, fetchUnclassifiedDestinations, startDestinationPreview, updateDataDestination } from "../lib/api";
+import { DestinationRulesCard } from "./DestinationRulesCard";
+import { GuardSimulationCard, useSimulationRunner } from "./GuardSimulationPanel";
 import {
   describeMatch,
   EMPTY_DESTINATION_FORM,
@@ -42,6 +49,7 @@ export function DataDestinationsView() {
   const [error, setError] = useState<string | null>(null);
   const [editing, setEditing] = useState<Editing | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const preview = useSimulationRunner(startDestinationPreview);
 
   const reload = useCallback(async () => {
     try {
@@ -78,6 +86,7 @@ export function DataDestinationsView() {
         Say how far each place your workflows send data is from home. A guard profile&apos;s destination rules can then keep sensitive data in-house. Destinations do nothing until a profile has destination rules.
       </p>
       {error && <div className="settings-error">{error}</div>}
+      {loaded && <DestinationRulesCard canEdit={canEdit} />}
       {notice && (
         <p className="kb-subtle" role="status">
           {notice}
@@ -101,6 +110,8 @@ export function DataDestinationsView() {
             title={editing.mode === "edit" ? "Edit destination" : "Add destination"}
             initial={editing.form}
             onCancel={() => setEditing(null)}
+            onPreview={(form) => void preview.start({ rows: [{ ...inputFromForm(form), ...(editing.mode === "edit" ? { id: editing.id } : {}) }] })}
+            previewBusy={preview.busy}
             onSave={async (form) => {
               const input = inputFromForm(form);
               const saved = editing.mode === "edit" ? await updateDataDestination(editing.id, input) : await createDataDestination(input);
@@ -110,6 +121,20 @@ export function DataDestinationsView() {
             }}
           />
         )}
+        <GuardSimulationCard
+          simulation={preview.simulation}
+          busy={preview.busy}
+          error={preview.error}
+          issues={preview.issues}
+          lost={preview.lost}
+          versions={[]}
+          onSimulateVersion={() => undefined}
+          onRetry={preview.retry}
+          onCancel={() => void preview.cancel()}
+          compared="Your unsaved destination compared with the saved destinations, under the destination rules in force."
+          emptyText="No workflow with destination rules has a recorded run yet."
+          label="Preview impact"
+        />
         {loaded && rows.length === 0 ? (
           <div className="page-empty compact guard-dest-empty">
             <p>No destinations classified yet.</p>
@@ -238,7 +263,21 @@ function TierChip({ tier }: { tier: DataDestinationRow["tier"] }) {
   return <span className={`guard-dest-tier guard-dest-tier-${tier}`}>{DESTINATION_TIER_LABELS[tier]}</span>;
 }
 
-function DestinationEditor({ title, initial, onSave, onCancel }: { title: string; initial: DestinationForm; onSave: (form: DestinationForm) => Promise<void>; onCancel: () => void }) {
+function DestinationEditor({
+  title,
+  initial,
+  onSave,
+  onCancel,
+  onPreview,
+  previewBusy
+}: {
+  title: string;
+  initial: DestinationForm;
+  onSave: (form: DestinationForm) => Promise<void>;
+  onCancel: () => void;
+  onPreview?: (form: DestinationForm) => void;
+  previewBusy?: boolean;
+}) {
   const [form, setForm] = useState<DestinationForm>(initial);
   const [saving, setSaving] = useState(false);
   const formRef = useRef<HTMLFormElement>(null);
@@ -341,6 +380,11 @@ function DestinationEditor({ title, initial, onSave, onCancel }: { title: string
         <button type="submit" className="pg-btn" disabled={saving}>
           {saving ? "Saving…" : "Save destination"}
         </button>
+        {onPreview && (
+          <button type="button" className="pg-btn ghost" onClick={() => onPreview(form)} disabled={saving || previewBusy} title="What the destination rules in force would do with this change on recent recorded runs. Nothing is saved or sent.">
+            {previewBusy ? "Previewing…" : "Preview impact"}
+          </button>
+        )}
         <button type="button" className="pg-btn ghost" onClick={onCancel} disabled={saving}>
           Cancel
         </button>

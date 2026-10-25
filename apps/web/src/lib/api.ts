@@ -1,6 +1,7 @@
 import type {
   DataDestinationInput,
   DataDestinationRow,
+  DestinationRulesStatus,
   UnclassifiedDestination,
   ReplayCapturePromoteOutcome,
   ReplayCaptureSettingsUpdate,
@@ -4013,4 +4014,26 @@ export async function updateDataDestination(id: string, payload: DataDestination
 
 export async function deleteDataDestination(id: string) {
   return apiRequest<{ deleted: boolean; id: string }>(`/api/data-destinations/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
+// Phase 16 (p3) — the deployment's destination rules (admins change them) and Preview impact.
+export async function fetchDestinationRules() {
+  return apiRequest<DestinationRulesStatus>("/api/guard/destination-rules");
+}
+
+export async function addStarterDestinationRule() {
+  return apiRequest<DestinationRulesStatus>("/api/guard/destination-rules/starter", { method: "POST" });
+}
+
+export async function setDestinationRulesEnforcement(enforce: boolean) {
+  return apiRequest<DestinationRulesStatus>("/api/guard/destination-rules/enforcement", { method: "POST", body: JSON.stringify({ enforce }) });
+}
+
+export async function saveDestinationRules(rules: Array<Record<string, unknown>>) {
+  return apiRequest<DestinationRulesStatus>("/api/guard/destination-rules", { method: "PUT", body: JSON.stringify({ rules }) });
+}
+
+/** Unsaved rows (an `id` replaces that stored row), validated and never stored. */
+export async function startDestinationPreview(payload: { rows: Array<DataDestinationInput & { id?: string }>; removedIds?: string[] }) {
+  return apiRequest<{ simulation: GuardSimulationView }>("/api/data-destinations/preview", { method: "POST", body: JSON.stringify(payload) });
 }

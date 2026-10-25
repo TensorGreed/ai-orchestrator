@@ -950,3 +950,45 @@
   border-radius: var(--r-sm, 6px);
   background: var(--warn-soft);
 }
+
+/* Phase 16 (p3) — destination rules card, rule editor and verdict reason lines. */
+.guard-dest-rules-card {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+.guard-dest-starter {
+  display: grid;
+  gap: 6px;
+  justify-items: start;
+}
+.guard-dest-starter p {
+  margin: 0;
+}
+.guard-dest-observing {
+  margin: 0;
+}
+.guard-dest-rules-card .guard-dest-rules {
+  margin: 0;
+}
+.guard-dest-rules-card .guard-dest-rules .guard-chip {
+  margin-left: 6px;
+}
+.guard-dest-rule-editor {
+  margin-top: 8px;
+}
+.guard-dest-rule {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  min-width: 0;
+}
+.guard-reason-line {
+  display: block;
+  max-width: 42ch;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
