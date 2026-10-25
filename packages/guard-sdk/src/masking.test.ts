@@ -1,44 +1,115 @@
 import { describe, expect, it } from "vitest";
 import { MASK_CHAR, maskForDataClass, normaliseMaskedSpans } from "./masking";
 
+const n = normaliseMaskedSpans;
+
 describe("normaliseMaskedSpans", () => {
   it("returns text without a masked span unchanged", () => {
-    expect(normaliseMaskedSpans("Plain text, 4111 1111 1111 1111.")).toBe("Plain text, 4111 1111 1111 1111.");
+    expect(n("Plain text, 4111 1111 1111 1111.")).toBe("Plain text, 4111 1111 1111 1111.");
   });
 
-  it("makes masks of different lengths and visible tails of one class equal", () => {
-    const a = `Card ${maskForDataClass("4111 1111 1111 1111", "card_number")} on file.`;
-    const b = `Card ${maskForDataClass("5500-0000-0000-0004", "card_number")} on file.`;
-    expect(a).not.toBe(b);
-    expect(normaliseMaskedSpans(a)).toBe(normaliseMaskedSpans(b));
-    expect(normaliseMaskedSpans(`x ${MASK_CHAR.repeat(3)} y`)).toBe(normaliseMaskedSpans(`x ${MASK_CHAR.repeat(11)} y`));
+  // M1: each class's mask, built with maskForDataClass, for two different values of the class (layouts differ too).
+  const SAME_CLASS: Array<[string, string, string]> = [
+    ["card_number", "4111 1111 1111 1111", "5500 0000 0000 0004"],
+    ["card_number", "4111111111111111", "5500000000000004"],
+    ["card_number", "4111-1111-1111-1111", "5500-0000-0000-0004"],
+    ["card_number", "4111 1111 1111 1111", "5500000000000004"],
+    ["card_number", "3782 822463 10005", "4111 1111 1111 1111"],
+    ["iban", "GB82 WEST 1234 5698 7654 32", "DE89 3704 0044 0532 0130 00"],
+    ["iban", "GB82 WEST 1234 5698 7654 32", "GB29 NWBK 6016 1331 9268 19"],
+    ["iban", "GB82WEST12345698765432", "DE89370400440532013000"],
+    ["iban", "FR76 3000 6000 0112 3456 7890 189", "GB82 WEST 1234 5698 7654 32"],
+    ["phone", "+1 (415) 555-0132", "+44 20 7946 0958"],
+    ["phone", "(415) 555-0132", "(212) 555-0199"],
+    ["phone", "+1 415-555-0123", "415.555.0199"],
+    ["phone", "+14155550123", "+442079460958"],
+    ["national_id", "AB 12 34 56 C", "CD 98 76 54 A"],
+    ["national_id", "AB123456C", "CD987654A"],
+    ["national_id", "AB 123456 C", "CD 987654 A"],
+    ["us_ssn", "123-45-6788", "536-90-4399"],
+    ["us_ssn", "123456788", "536904399"],
+    ["us_ssn", "123 45 6788", "536 90 4399"],
+    ["email", "jane.doe@example.com", "u-2757eb4e85a6@surrogate.invalid"],
+    ["email", "j@x.org", "someone.else@mail.example.co.uk"]
+  ];
+
+  it.each(SAME_CLASS)("%s: masks of %s and %s compare equal", (dataClass, a, b) => {
+    const left = `Value ${maskForDataClass(a, dataClass)} ok, (${maskForDataClass(a, dataClass)}).`;
+    const right = `Value ${maskForDataClass(b, dataClass)} ok, (${maskForDataClass(b, dataClass)}).`;
+    expect(left).not.toBe(right);
+    expect(n(left)).toBe(n(right));
+    // The mask is gone, the words around it stay.
+    expect(n(left)).not.toContain(MASK_CHAR);
+    expect(n(left).startsWith("Value ")).toBe(true);
+    expect(n(left).endsWith(").")).toBe(true);
   });
 
-  it("makes masked emails equal and keeps punctuation around the span", () => {
-    const a = maskForDataClass("john.smith@example.com", "email");
-    const b = maskForDataClass("al@x.org", "email");
-    expect(normaliseMaskedSpans(`Mail (${a}), thanks`)).toBe(normaliseMaskedSpans(`Mail (${b}), thanks`));
-    expect(normaliseMaskedSpans(`Mail (${a}), thanks`)).toBe(`Mail (${MASK_CHAR}), thanks`);
+  it("matches a fully masked value of any length", () => {
+    expect(n(`x ${MASK_CHAR.repeat(3)} y`)).toBe(n(`x ${MASK_CHAR.repeat(11)} y`));
+    expect(n(`key ${maskForDataClass("-----BEGIN PRIVATE KEY-----abc", "private_key")}`)).not.toContain(MASK_CHAR);
   });
 
-  it("keeps real differences in the surrounding text", () => {
-    const m = maskForDataClass("4111111111111111", "card_number");
-    expect(normaliseMaskedSpans(`Charged ${m} today`)).not.toBe(normaliseMaskedSpans(`Refunded ${m} today`));
-    expect(normaliseMaskedSpans(`Charged ${m} today`)).not.toBe(normaliseMaskedSpans(`Charged ${m} 2 days ago`));
+  // H2: the reviewer's examples, none of which may compare equal.
+  const DIFFERENT: Array<[string, string]> = [
+    ["• 3 tablets daily", "• 30 tablets daily"],
+    ["• 2 items left", "• 2000 items left"],
+    ["x\n• 1. Approve\n• 2. Reject", "x\n• 2. Approve\n• 1. Reject"],
+    ["•Paid", "•Refunded"],
+    ["- •Approved", "- •Denied"],
+    ["Status: •OK", "Status: •FAIL"],
+    ["Status: •••OK", "Status: •••FAIL"],
+    ["ssn:•••1111", "id:•••1111"],
+    ["Card:••••1111 charged", "Refund:••••1111 charged"],
+    ["to=j•••@a.com", "cc=j•••@a.com"],
+    ["to=j•••@e••••••.com", "cc=j•••@e••••••.com"],
+    ["amount •••-50", "amount •••+50"],
+    ["amount •••-50", "amount •••-51"],
+    ["•••• 12 items", "•••• 13 items"],
+    ["••••1111 12 items", "••••1111 13 items"],
+    ["•-1", "•-9999"],
+    ["value 4111111111111111", "value ••••••••••••1111"],
+    ["a • b", "a • c"],
+    ["a •• b", "a •• c"],
+    ["Order 12 ••••••••1111", "Order 13 ••••••••1111"],
+    ["Card •••• •••• •••• 1111 charged", "Card •••• •••• •••• 1111 refunded"],
+    ["mail j•••@e••••••.com", "mail j•••@e••••••.com today"],
+    ["x••••1111", "y••••1111"],
+    ["••••1111x", "••••1111y"],
+    ["Card ••••••••", "Card 41111111"]
+  ];
+
+  it.each(DIFFERENT)("keeps %j and %j different", (a, b) => {
+    expect(n(a.replace(/\s+/g, " "))).not.toBe(n(b.replace(/\s+/g, " ")));
   });
 
-  it("treats a spaced masked value and a solid one alike, without swallowing neighbouring numbers", () => {
-    expect(normaliseMaskedSpans("Card •••• •••• •••• 1111 ok")).toBe(normaliseMaskedSpans("Card ••••••••••••9999 ok"));
-    expect(normaliseMaskedSpans("Order 12 ••••1111")).not.toBe(normaliseMaskedSpans("Order 13 ••••1111"));
-    expect(normaliseMaskedSpans("Card ••••1111 12 items")).not.toBe(normaliseMaskedSpans("Card ••••1111 13 items"));
+  it("leaves bullets and glued keys as written", () => {
+    expect(n("• 3 tablets daily")).toBe("• 3 tablets daily");
+    expect(n("x • 1. Approve • 2. Reject")).toBe("x • 1. Approve • 2. Reject");
+    expect(n("•Paid")).toBe("•Paid");
+    expect(n("Status: •••OK")).toBe("Status: •••OK");
+    expect(n("ssn:•••1111").startsWith("ssn:")).toBe(true);
+    expect(n("to=j•••@e••••••.com").startsWith("to=")).toBe(true);
+    // A digit word after a single masked group is not its tail.
+    expect(n("•••• 12 items")).toMatch(/ 12 items$/);
+    expect(n("amount •••-50")).toMatch(/-50$/);
   });
 
   it("does not equate masked text with unmasked text", () => {
-    expect(normaliseMaskedSpans(`Card ${MASK_CHAR.repeat(8)}`)).not.toBe(normaliseMaskedSpans("Card 41111111"));
+    expect(n(`Card ${MASK_CHAR.repeat(8)}`)).not.toBe(n("Card 41111111"));
+    expect(n(`Card ${maskForDataClass("4111 1111 1111 1111", "card_number")}`)).not.toBe(n("Card 4111 1111 1111 1111"));
+  });
+
+  it("keeps masks of different shapes apart", () => {
+    const card = maskForDataClass("4111 1111 1111 1111", "card_number");
+    const email = maskForDataClass("jane@example.com", "email");
+    const iban = maskForDataClass("GB82 WEST 1234 5698 7654 32", "iban");
+    expect(n(`x ${card}`)).not.toBe(n(`x ${email}`));
+    expect(n(`x ${iban}`)).not.toBe(n(`x ${email}`));
+    expect(n(`x ${iban}`)).not.toBe(n(`x ${card}`));
   });
 
   it("lower-cases redaction placeholders and keeps their class", () => {
-    expect(normaliseMaskedSpans("Key [REDACTED:Credential] set")).toBe("Key [redacted:credential] set");
-    expect(normaliseMaskedSpans("Key [REDACTED:credential] set")).not.toBe(normaliseMaskedSpans("Key [REDACTED:email] set"));
+    expect(n("Key [REDACTED:Credential] set")).toBe("Key [redacted:credential] set");
+    expect(n("Key [REDACTED:credential] set")).not.toBe(n("Key [REDACTED:email] set"));
   });
 });

@@ -43,7 +43,7 @@ import {
   type RunFacts
 } from "@ai-orchestrator/shared";
 import { validateJsonSchema } from "@ai-orchestrator/mcp-sdk";
-import { DEFAULT_REPLAY_IGNORE_PATHS, diffValues, tokenSimilarity } from "./run-diff.js";
+import { DEFAULT_REPLAY_IGNORE_PATHS, diffValues, runRewroteContent, tokenSimilarity } from "./run-diff.js";
 
 export type { EvalScoreDetail };
 
@@ -92,6 +92,8 @@ export interface ScorerContext {
   baseline?: RunFacts | null;
   /** This run's facts, when the host built them. */
   candidate?: RunFacts | null;
+  /** The case is a masked production capture: `json_equal` compares guard-masked spans as masks (see `diffValues` `maskedSpans`). */
+  maskedCapture?: boolean;
   llmJudge?: EvalLlmJudge;
   /** 0..1; chooses which pairwise order runs first. Defaults to Math.random. */
   random?: () => number;
@@ -594,7 +596,8 @@ function scoreJsonEqual(spec: Extract<EvalScorerSpec, { type: "json_equal" }>, c
     actual = sortArrays(actual);
   }
   const ignorePaths = [...DEFAULT_REPLAY_IGNORE_PATHS, ...(spec.ignorePaths ?? [])];
-  const diff = diffValues(expected, actual, { ignorePaths, numberTolerance: spec.numberTolerance });
+  const maskedSpans = ctx.maskedCapture === true || runRewroteContent(ctx.baseline) || runRewroteContent(ctx.candidate);
+  const diff = diffValues(expected, actual, { ignorePaths, numberTolerance: spec.numberTolerance, maskedSpans });
   if (diff.changes.length === 0) {
     return { path: spec.path, pass: true, score: 1, reason: `matches ${target.label}${diff.ignored > 0 ? ` (${plural(diff.ignored, "ignored difference")})` : ""}` };
   }

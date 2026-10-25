@@ -65,18 +65,54 @@ export function maskForDataClass(value: string, dataClass?: GuardDataClass): str
   }
 }
 
-const MASK_EDGE_BEFORE = /^[(\[{"'<]+/;
-const MASK_EDGE_AFTER = /[)\]}"'>,.;:!?]+$/;
+// Shapes `maskForDataClass` writes, matched as whole tokens (see `normaliseMaskedSpans`).
+const NOT_BEFORE = String.raw`(?<![\p{L}\p{N}•@_])`;
+const NOT_AFTER = String.raw`(?![\p{L}\p{N}•@])`;
+/** The separators a class mask keeps (`maskValue` `keepSeparators`), except `:`, which reads as a key before a value. */
+const SEP = String.raw`[ \-./_]`;
+/** An email: the first character of the local part and of the domain kept, the top-level domain kept. */
+const MASKED_EMAIL = new RegExp(String.raw`${NOT_BEFORE}[\p{L}\p{N}_+\-]?•+@[\p{L}\p{N}]?•+\.[\p{L}\p{N}\-]+${NOT_AFTER}`, "gu");
+/** An IBAN: the country kept, the last four characters kept (they may hold a separator). */
+const IBAN_TAIL = String.raw`(?:[A-Za-z\d]{4}|[A-Za-z\d]${SEP}[A-Za-z\d]{2}|[A-Za-z\d]{2}${SEP}[A-Za-z\d]|${SEP}[A-Za-z\d]{3})`;
+const MASKED_IBAN = new RegExp(String.raw`${NOT_BEFORE}[A-Za-z]{2}(•+(?:${SEP}•+)*)${IBAN_TAIL}${NOT_AFTER}`, "gu");
+/**
+ * A card, SSN, NI number or phone (or a fully masked value): groups of mask
+ * characters with the separators kept, then the kept tail: the last four
+ * digits (card, SSN), the last two (phone), or an NI number's last digits and
+ * suffix letter. The tail may follow a separator (`•••-••-6789`).
+ */
+const GROUP_TAIL = String.raw`(?:\d{3}[A-Da-d]|\d{2}${SEP}[A-Da-d]|\d${SEP}\d{2}|\d{2}${SEP}\d|\d{4}|\d{2})`;
+const MASKED_GROUPS = new RegExp(String.raw`${NOT_BEFORE}(•+(?:${SEP}•+)*)(?:(${SEP})?(${GROUP_TAIL}))?${NOT_AFTER}`, "gu");
 const REDACTION_PLACEHOLDER = /\[redacted:([^\]\s]+)\]/gi;
+const SEP_TEST = /[ \-./_]/;
+
+/** What a masked span normalises to. The NUL characters keep it from ever equalling unmasked text. */
+const NORMALISED_MASK = "\u0000mask\u0000";
+const NORMALISED_EMAIL = "\u0000mask:email\u0000";
+const NORMALISED_IBAN = "\u0000mask:iban\u0000";
+
+const maskCount = (text: string) => text.split(MASK_CHAR).length - 1;
 
 /**
- * Normalises masked spans so two texts that differ only in what was masked
- * compare equal: every word holding the mask character (the masked value
- * together with the characters the mask left visible and the separators it
- * kept, such as `j•••@e•••.com` or `••••-••••-••••-1111`) becomes a single
- * mask character, with surrounding punctuation kept, and a redaction
- * placeholder (`[REDACTED:email]`) is lower-cased. Text without a masked span
- * is returned unchanged.
+ * Normalises guard-masked spans so two texts that differ only in what the
+ * mask hid compare equal. Only the exact shapes `maskForDataClass` writes are
+ * matched, as whole tokens (never glued to a letter, a digit or another
+ * mask character):
+ *
+ *   - an email: `j•••@e••••••.com`
+ *   - an IBAN: `GB•• •••• •••• •••• •••4 32`, `GB••••••••••••••••5432`
+ *   - a card, SSN, NI number or phone: `•••• •••• •••• 1111`, `••••••••••••1111`,
+ *     `•••-••-6789`, `•• •• •• 56 C`, `•• •••-•••-••23`
+ *   - a run of at least three mask characters (a fully masked value)
+ *
+ * A tail kept after a separator (`•••• •••• •••• 1111`) belongs to the mask
+ * only when at least two masked groups come before it, so `•••• 12 items`
+ * keeps its `12`. A lone `•` or `••` (a bullet) is never a mask, and a key
+ * glued before the mask (`ssn:`, `to=`) stays as written. A redaction
+ * placeholder (`[REDACTED:Email]`) has its class lower-cased.
+ *
+ * Callers apply this only when masking is expected in the comparison (a
+ * masked capture, or a run whose guard masked, redacted or protected).
  */
 export function normaliseMaskedSpans(text: string): string {
   const hasMask = text.includes(MASK_CHAR);
@@ -85,43 +121,18 @@ export function normaliseMaskedSpans(text: string): string {
   let out = text;
   if (hasPlaceholder) out = out.replace(REDACTION_PLACEHOLDER, (_all, dataClass: string) => `[redacted:${dataClass.toLowerCase()}]`);
   if (!hasMask) return out;
-  // Words and the whitespace between them. A spaced value masks to several words
-  // (`•••• •••• •••• 1111`): neighbouring words that hold the mask character join the span, and so
-  // does one short digit-only word that closes a run of fully masked words (the visible tail).
-  const parts = out.split(/(\s+)/);
-  const wordCore = (word: string) => {
-    const before = MASK_EDGE_BEFORE.exec(word)?.[0] ?? "";
-    const rest = word.slice(before.length);
-    const after = MASK_EDGE_AFTER.exec(rest)?.[0] ?? "";
-    return { before, core: rest.slice(0, rest.length - after.length), after };
-  };
-  const masked = (word: string) => /^[\d•-]*•[\d•-]*$/.test(wordCore(word).core);
-  const result: string[] = [];
-  for (let i = 0; i < parts.length; i += 2) {
-    const word = parts[i]!;
-    if (!wordCore(word).core.includes(MASK_CHAR)) {
-      result.push(word, parts[i + 1] ?? "");
-      continue;
-    }
-    let before = wordCore(word).before;
-    while (result.length >= 2 && result[result.length - 1] !== "" && masked(result[result.length - 2]!) && wordCore(result[result.length - 2]!).after === "") {
-      before = wordCore(result[result.length - 2]!).before;
-      result.length -= 2;
-    }
-    let end = i;
-    let last = wordCore(word);
-    while (last.after === "" && end + 2 < parts.length && masked(parts[end + 2]!)) {
-      end += 2;
-      last = wordCore(parts[end]!);
-    }
-    if (last.after === "" && /^•+$/.test(last.core) && end + 2 < parts.length && /^\d{1,4}$/.test(wordCore(parts[end + 2]!).core)) {
-      end += 2;
-      last = wordCore(parts[end]!);
-    }
-    result.push(`${before}${MASK_CHAR}${last.after}`, parts[end + 1] ?? "");
-    i = end;
-  }
-  return result.join("");
+  out = out.replace(MASKED_EMAIL, NORMALISED_EMAIL);
+  // An IBAN is at least 15 characters: at least nine of them masked.
+  out = out.replace(MASKED_IBAN, (all: string, body: string) => (maskCount(body) >= 9 ? NORMALISED_IBAN : all));
+  out = out.replace(MASKED_GROUPS, (all: string, body: string, separator: string | undefined, tail: string | undefined) => {
+    if (maskCount(body) < 3) return all;
+    if (!tail) return NORMALISED_MASK;
+    const groups = body.split(new RegExp(SEP, "u")).length;
+    // A tail after a separator, or one holding a separator, is part of a multi-group layout only.
+    if ((separator || SEP_TEST.test(tail)) && groups < 2) return `${NORMALISED_MASK}${separator ?? ""}${tail}`;
+    return NORMALISED_MASK;
+  });
+  return out;
 }
 
 /** Short, masked excerpt for a finding: the masked value, capped in length. */

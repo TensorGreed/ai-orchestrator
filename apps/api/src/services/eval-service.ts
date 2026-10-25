@@ -1850,6 +1850,7 @@ export class EvalService {
         fixtureInput: recording.input,
         baseline: reference,
         candidate: facts,
+        maskedCapture: recording.capabilities?.capture?.masked === true,
         ...(this.options.random ? { random: this.options.random } : {})
       },
       { runId, workflowId, actorUserId: job.actorUserId, actorEmail: job.actorEmail, executionId: response.executionId }

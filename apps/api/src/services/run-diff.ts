@@ -33,6 +33,21 @@ const MAX_LCS_CELLS = 4_000_000;
 export interface ValueDiffOptions {
   ignorePaths?: string[];
   numberTolerance?: number;
+  /**
+   * Masking is expected in this comparison (a masked capture, or a run whose
+   * guard masked, redacted or protected): texts that differ only in what a
+   * guard mask hid compare equal (`normaliseMaskedSpans`). Off by default:
+   * strings then compare as they are, with whitespace normalised.
+   */
+  maskedSpans?: boolean;
+}
+
+/** Guard actions that rewrite content, so the same answer can read differently from run to run. */
+const CONTENT_REWRITING_ACTIONS = new Set(["mask", "redact", "protect"]);
+
+/** Whether the run's guard rewrote content (a mask, redact or protect verdict that was not shadow-only). */
+export function runRewroteContent(facts: Pick<RunFacts, "guard"> | null | undefined): boolean {
+  return Boolean(facts?.guard?.some((verdict) => !verdict.shadow && CONTENT_REWRITING_ACTIONS.has(verdict.effectiveAction)));
 }
 
 type JsonRecord = Record<string, unknown>;
@@ -41,9 +56,10 @@ function isRecord(value: unknown): value is JsonRecord {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
-/** Whitespace and masked spans normalised: two texts that differ only in what the guard masked (or in the whitespace around it) compare equal. */
-function normaliseText(value: string): string {
-  return normaliseMaskedSpans(value.replace(/\s+/g, " ").trim());
+/** Whitespace normalised; with `maskedSpans`, masked spans too (two texts that differ only in what the guard masked compare equal). */
+function normaliseText(value: string, maskedSpans: boolean): string {
+  const text = value.replace(/\s+/g, " ").trim();
+  return maskedSpans ? normaliseMaskedSpans(text) : text;
 }
 
 function tokens(text: string): Set<string> {
@@ -151,9 +167,9 @@ function displayPath(segments: Array<string | number>): string {
   return out;
 }
 
-function valuesEqual(a: unknown, b: unknown, tolerance: number): boolean {
+function valuesEqual(a: unknown, b: unknown, tolerance: number, maskedSpans: boolean): boolean {
   if (typeof a === "number" && typeof b === "number") return a === b || Math.abs(a - b) <= tolerance;
-  if (typeof a === "string" && typeof b === "string") return a === b || normaliseText(a) === normaliseText(b);
+  if (typeof a === "string" && typeof b === "string") return a === b || normaliseText(a, maskedSpans) === normaliseText(b, maskedSpans);
   return a === b;
 }
 
@@ -163,7 +179,7 @@ function own(record: JsonRecord, key: string): unknown {
 }
 
 /** Deep equality without a depth limit (an explicit stack, so deep values cannot overflow the call stack). */
-function deepEqual(a: unknown, b: unknown, tolerance: number): boolean {
+function deepEqual(a: unknown, b: unknown, tolerance: number, maskedSpans: boolean): boolean {
   const stack: Array<[unknown, unknown]> = [[a, b]];
   while (stack.length > 0) {
     const [left, right] = stack.pop()!;
@@ -176,7 +192,7 @@ function deepEqual(a: unknown, b: unknown, tolerance: number): boolean {
       for (const key of new Set([...Object.keys(left), ...Object.keys(right)])) stack.push([own(left, key), own(right, key)]);
       continue;
     }
-    if (!valuesEqual(left, right, tolerance)) return false;
+    if (!valuesEqual(left, right, tolerance, maskedSpans)) return false;
   }
   return true;
 }
@@ -190,6 +206,7 @@ function deepEqual(a: unknown, b: unknown, tolerance: number): boolean {
 export function diffValues(baseline: unknown, candidate: unknown, options: ValueDiffOptions = {}): { changes: ReplayValueChange[]; ignored: number; truncated: boolean } {
   const ignorePaths = options.ignorePaths ?? [];
   const tolerance = options.numberTolerance ?? 0;
+  const maskedSpans = options.maskedSpans === true;
   const changes: ReplayValueChange[] = [];
   let ignored = 0;
   let truncated = false;
@@ -198,11 +215,11 @@ export function diffValues(baseline: unknown, candidate: unknown, options: Value
 
   const walk = (a: unknown, b: unknown, path: Array<string | number>, depth: number, states: MatchState[]) => {
     if (changes.length >= MAX_VALUE_CHANGES) {
-      if (!truncated && !deepEqual(a, b, tolerance)) truncated = true;
+      if (!truncated && !deepEqual(a, b, tolerance, maskedSpans)) truncated = true;
       return;
     }
     if (path.length > 0 && patterns.some((pattern, index) => stateMatches(pattern, states[index]!))) {
-      if (!deepEqual(a, b, tolerance)) ignored += 1;
+      if (!deepEqual(a, b, tolerance, maskedSpans)) ignored += 1;
       return;
     }
     const child = (segment: string | number) => patterns.map((pattern, index) => advanceState(pattern, states[index]!, String(segment)));
@@ -225,7 +242,7 @@ export function diffValues(baseline: unknown, candidate: unknown, options: Value
       for (const key of keys) walk(own(a, key), own(b, key), [...path, key], depth + 1, child(key));
       return;
     }
-    if (deepEqual(a, b, tolerance)) return;
+    if (deepEqual(a, b, tolerance, maskedSpans)) return;
     const change: ReplayValueChange = { path: displayPath(path), kind: "changed", baseline: a, candidate: b };
     if (depth >= MAX_DEPTH && (Array.isArray(a) || isRecord(a)) && (Array.isArray(b) || isRecord(b))) {
       change.truncated = true;
@@ -362,7 +379,9 @@ export interface RunDiffOptions extends ValueDiffOptions {
 /** The diff of a candidate run against its baseline (see the module comment). */
 export function diffRunFacts(baseline: RunFacts, candidate: RunFacts, options: RunDiffOptions = {}): RunDiff {
   const ignorePaths = [...DEFAULT_REPLAY_IGNORE_PATHS, ...(options.ignorePaths ?? []).filter((path) => !DEFAULT_REPLAY_IGNORE_PATHS.includes(path))];
-  const output = diffValues(baseline.output, candidate.output, { ignorePaths, numberTolerance: options.numberTolerance });
+  // Masked spans are compared as masks only when masking is expected: asked for (a masked capture), or a guard rewrote content in either run.
+  const maskedSpans = options.maskedSpans === true || runRewroteContent(baseline) || runRewroteContent(candidate);
+  const output = diffValues(baseline.output, candidate.output, { ignorePaths, numberTolerance: options.numberTolerance, maskedSpans });
 
   const steps = alignToolCalls(baseline.toolCalls, candidate.toolCalls);
   const counts = new Map<string, { server: string; tool: string; baseline: number; candidate: number }>();

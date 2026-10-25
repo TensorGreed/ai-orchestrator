@@ -502,6 +502,8 @@ export class ReplayService {
     const diff = diffRunFacts(options.baseline?.facts ?? recording.facts, candidateFacts, {
       ignorePaths: request.ignorePaths,
       numberTolerance: request.numberTolerance,
+      // A masked capture holds surrogates, so the guard's masks of them read differently from the live run's.
+      maskedSpans: recording.capabilities?.capture?.masked === true,
       health
     });
     const judged = judgeReplayDiff(diff);
