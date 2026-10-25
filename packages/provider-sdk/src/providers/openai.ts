@@ -1,5 +1,6 @@
 import type { ProviderDefinition } from "@ai-orchestrator/shared";
 import type { LLMProviderAdapter, ProviderCallRequest, ProviderExecutionContext } from "../types";
+import { PROVIDER_DEFAULT_BASE_URLS } from "../default-base-urls";
 import { callOpenAICompatible, callOpenAICompatibleStream } from "./openai-compatible-base";
 
 export class OpenAICloudProviderAdapter implements LLMProviderAdapter {
@@ -23,7 +24,7 @@ export class OpenAICloudProviderAdapter implements LLMProviderAdapter {
       id: this.definition.id,
       label: this.definition.label,
       supportsTools: true,
-      defaultBaseUrl: "https://api.openai.com/v1",
+      defaultBaseUrl: PROVIDER_DEFAULT_BASE_URLS.openai,
       defaultApiKeyEnv: "OPENAI_API_KEY",
       requiresApiKey: true
     });
@@ -34,7 +35,7 @@ export class OpenAICloudProviderAdapter implements LLMProviderAdapter {
       id: this.definition.id,
       label: this.definition.label,
       supportsTools: true,
-      defaultBaseUrl: "https://api.openai.com/v1",
+      defaultBaseUrl: PROVIDER_DEFAULT_BASE_URLS.openai,
       defaultApiKeyEnv: "OPENAI_API_KEY",
       requiresApiKey: true
     });

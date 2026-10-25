@@ -1,5 +1,6 @@
 import type { ProviderDefinition } from "@ai-orchestrator/shared";
 import type { LLMProviderAdapter, ProviderCallRequest, ProviderExecutionContext } from "../types";
+import { providerDefaultBaseUrl } from "../default-base-urls";
 import { callOpenAICompatible, callOpenAICompatibleStream } from "./openai-compatible-base";
 
 export class OllamaProviderAdapter implements LLMProviderAdapter {
@@ -22,7 +23,7 @@ export class OllamaProviderAdapter implements LLMProviderAdapter {
       id: this.definition.id,
       label: this.definition.label,
       supportsTools: true,
-      defaultBaseUrl: process.env.OLLAMA_BASE_URL ?? "http://localhost:11434/v1",
+      defaultBaseUrl: providerDefaultBaseUrl("ollama")!,
       requiresApiKey: false
     });
   }
@@ -32,7 +33,7 @@ export class OllamaProviderAdapter implements LLMProviderAdapter {
       id: this.definition.id,
       label: this.definition.label,
       supportsTools: true,
-      defaultBaseUrl: process.env.OLLAMA_BASE_URL ?? "http://localhost:11434/v1",
+      defaultBaseUrl: providerDefaultBaseUrl("ollama")!,
       requiresApiKey: false
     });
   }

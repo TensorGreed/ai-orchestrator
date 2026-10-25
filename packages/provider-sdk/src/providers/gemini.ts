@@ -1,5 +1,6 @@
 import type { LLMCallResponse, LLMProviderConfig, LLMUsage, ProviderDefinition, ToolCall } from "@ai-orchestrator/shared";
 import type { LLMProviderAdapter, ProviderCallRequest, ProviderExecutionContext, ProviderTestResult } from "../types";
+import { PROVIDER_DEFAULT_BASE_URLS } from "../default-base-urls";
 import { providerHttpError, readResponseJson, readResponseText, resilientFetch } from "../resilient-fetch";
 
 interface GeminiPart {
@@ -89,7 +90,7 @@ export class GeminiProviderAdapter implements LLMProviderAdapter {
 
     const rawModel = request.provider.model || "gemini-2.5-flash";
     const model = rawModel.replace(/^models\//, "");
-    const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+    const endpoint = `${PROVIDER_DEFAULT_BASE_URLS.gemini}/models/${model}:generateContent?key=${apiKey}`;
 
     let systemInstruction: { parts: GeminiPart[] } | undefined;
     const contents: GeminiContent[] = [];
@@ -249,7 +250,7 @@ export class GeminiProviderAdapter implements LLMProviderAdapter {
 
     const rawModel = provider.model || "gemini-2.5-flash";
     const model = rawModel.replace(/^models\//, "");
-    const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${model}?key=${apiKey}`;
+    const endpoint = `${PROVIDER_DEFAULT_BASE_URLS.gemini}/models/${model}?key=${apiKey}`;
     const startedAt = Date.now();
     const response = await resilientFetch(endpoint, {
       method: "GET",
