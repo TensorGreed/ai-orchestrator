@@ -796,6 +796,24 @@ export function chatModelOf(node: Pick<WorkflowNode, "type" | "config">): { prov
   return { providerId, model: text(config.model) || CHAT_MODEL_DEFAULTS[node.type] || "" };
 }
 
+/**
+ * The destination a dedicated chat model node (OpenAI, Anthropic, Ollama,
+ * OpenAI-compatible, AI gateway, Gemini) sends to: its provider id and the
+ * base URL it keeps at the top level of its config (empty when none is set,
+ * so the adapter's default host applies). Null for any other node, and for
+ * `llm_call` and Azure nodes, whose settings sit elsewhere. One mapping for
+ * the "not classified yet" list and, later, for call-time destination refs.
+ */
+export function chatModelDestinationOf(node: Pick<WorkflowNode, "type" | "config">): { providerId: string; baseUrl: string } | null {
+  if (node.type === "llm_call" || node.type === "azure_openai_chat_model" || !isChatModelNode(node)) return null;
+  const config = recordOf(node.config);
+  const api = typeof config.apiProvider === "string" ? config.apiProvider.trim() : "";
+  const providerId =
+    node.type === "ai_gateway_chat_model" ? (api === "openai" || api === "anthropic" ? api : "openai_compatible") : REPLAY_CHAT_MODEL_PROVIDERS[node.type];
+  if (!providerId) return null;
+  return { providerId, baseUrl: typeof config.baseUrl === "string" ? config.baseUrl.trim() : "" };
+}
+
 /** The chat model nodes attached to a node's `chat_model` port. */
 function attachedChatModels(workflow: Pick<Workflow, "nodes" | "edges">, nodeId: string): WorkflowNode[] {
   const byId = new Map(workflow.nodes.map((node) => [node.id, node]));

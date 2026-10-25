@@ -18,6 +18,7 @@
 import { randomUUID } from "node:crypto";
 import {
   BUILTIN_DESTINATIONS,
+  chatModelDestinationOf,
   dataDestinationInputSchema,
   destinationHostOfUrl,
   findUnclassifiedDestinations,
@@ -132,6 +133,13 @@ function collectNodes(
       const host = providerHost(providerId, provider, env);
       if (host === null) continue;
       out.push({ ref: { kind: "model_provider", id: providerId, ...(host ? { host } : {}) }, seenIn });
+      continue;
+    }
+    const chatModel = chatModelDestinationOf(node);
+    if (chatModel) {
+      const host = providerHost(chatModel.providerId, { baseUrl: chatModel.baseUrl }, env);
+      if (host === null) continue;
+      out.push({ ref: { kind: "model_provider", id: chatModel.providerId, ...(host ? { host } : {}) }, seenIn });
       continue;
     }
     if (node.type === "azure_openai_chat_model") {

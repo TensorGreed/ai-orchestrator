@@ -279,6 +279,30 @@ describe("collectConfiguredDestinations edge cases", () => {
     ]);
   });
 
+  it("reads the dedicated chat model nodes' top-level base URL", () => {
+    const flow = workflow("w", "default", [
+      { id: "o", type: "openai_chat_model", config: { baseUrl: "https://proxy.rr1.example/v1", model: "m" } },
+      { id: "o2", type: "openai_chat_model", config: { model: "m" } },
+      { id: "a", type: "anthropic_chat_model", config: { baseUrl: "https://anthropic-proxy.example/v1" } },
+      { id: "l", type: "ollama_chat_model", config: { baseUrl: "http://10.0.0.9:11434" } },
+      { id: "c", type: "openai_compatible_chat_model", config: { baseUrl: "https://llm.company.example/v1", model: "m" } },
+      { id: "g", type: "ai_gateway_chat_model", config: { apiProvider: "anthropic", baseUrl: "https://gw.example/v1", model: "m" } },
+      { id: "m", type: "google_gemini_chat_model", config: { model: "m" } },
+      { id: "t", type: "openai_chat_model", config: { baseUrl: "https://{{$env.HOST}}/v1" } }
+    ]);
+    const found = collectConfiguredDestinations({ env: {}, mcpServers: [], workflows: [flow] });
+    expect(found.map((entry) => entry.ref)).toEqual([
+      { kind: "model_provider", id: "openai", host: "proxy.rr1.example" },
+      { kind: "model_provider", id: "openai", host: "api.openai.com" },
+      { kind: "model_provider", id: "anthropic", host: "anthropic-proxy.example" },
+      { kind: "model_provider", id: "ollama", host: "10.0.0.9" },
+      { kind: "model_provider", id: "openai_compatible", host: "llm.company.example" },
+      { kind: "model_provider", id: "anthropic", host: "gw.example" },
+      { kind: "model_provider", id: "gemini", host: "generativelanguage.googleapis.com" },
+      { kind: "model_provider", id: "openai" }
+    ]);
+  });
+
   it("reads the published version too, adding only what the draft does not send to", () => {
     const draft = workflow("w", "default", [{ id: "a", type: "http_request", config: { method: "GET", urlTemplate: "https://both.example.com/x" } }]);
     const published = workflow("w", "default", [
