@@ -115,7 +115,8 @@ export async function checkOutbound(input: OutboundCheckInput): Promise<Outbound
       ...(input.destinationOnly ? { destinationOnly: true } : {}),
       ...(destination ? { destination, dataLabels: input.dataLabels } : {})
     },
-    input.channel === "egress" || input.channel === "tool_arguments" ? { toolName: input.approvalTag } : {}
+    // Only verdicts with a finding are recorded (shadow findings included): a clean outbound call writes no row.
+    { ...(input.channel === "egress" || input.channel === "tool_arguments" ? { toolName: input.approvalTag } : {}), onlyFindings: true }
   );
   const reason = describeGuardVerdict(result);
   if (result.action === "block") throw new GuardBlockedError(`${input.what} was blocked by the guard: ${reason}`, result.verdicts);
@@ -143,11 +144,20 @@ export async function checkOutbound(input: OutboundCheckInput): Promise<Outbound
 // What an egress node sends
 // ---------------------------------------------------------------------------
 
-/** What the handler sends instead of rendering its settings again, after a rewrite. */
+/**
+ * What the handler sends: exactly what was checked (rendered once, by the
+ * check), after any rewrite. Handlers never render a checked request again.
+ */
 export type EgressOverride =
   | { kind: "http"; url: string; headers: Record<string, string>; body: string }
-  | { kind: "config"; config: Record<string, unknown> }
-  | { kind: "mcp_args"; args: unknown };
+  /** Connector handlers: each template text in the settings and its checked rendering. */
+  | { kind: "renderings"; renderings: ReadonlyMap<string, string> }
+  | { kind: "mcp_args"; args: unknown }
+  | { kind: "browse"; url: string }
+  /** RAG senders: the rendered query (the documents come from upstream data, never rendered). */
+  | { kind: "rag"; query: string }
+  /** Nothing is rendered by the handler: what it sends is its settings as they are. */
+  | { kind: "none" };
 
 export interface EgressRequest {
   refs: DestinationRef[];
@@ -155,51 +165,120 @@ export interface EgressRequest {
   content: Record<string, unknown>;
   what: string;
   approvalTag: string;
-  /** The handler's input after a rewrite; null when this request cannot be rewritten safely (it is blocked instead). */
+  /** What the handler sends when the check changes nothing. */
+  sent: EgressOverride;
+  /** What the handler sends after a rewrite; null when this request cannot be rewritten safely (it is blocked instead). */
   apply(rewritten: unknown): EgressOverride | null;
 }
 
 /** Node types that send requests the egress checkpoint sees, besides category `Connector` senders. */
 const HTTP_EGRESS_TYPES = new Set(["http_request", "web_browse"]);
-/** Settings keys that hold credentials or references to them: never part of the checked content. */
-const SECRET_KEY = /secret|credential|password|passwd|token|api[_-]?key|private[_-]?key/i;
+/** RAG nodes whose embedder, vector store or reranker can be a network service. */
+const RAG_EGRESS_TYPES = new Set(["rag_retrieve", "embeddings_azure_openai", "rerank"]);
+/** Connector nodes that hand their settings to a connector adapter as they are (no rendering). */
+const UNRENDERED_CONNECTOR_TYPES = new Set([
+  "connector_source",
+  "google_drive_source",
+  "azure_storage",
+  "azure_cosmos_db",
+  "azure_monitor_http",
+  "azure_ai_search_vector_store",
+  "qdrant_vector_store"
+]);
+const SECRET_PLACEHOLDER = "[secret]";
 
 function record(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
 }
 
-function renderDeep(value: unknown, data: Record<string, unknown>, depth = 0): unknown {
+/** A secret reference (`{ secretId }`): the id is never content, and the value never enters a check. */
+function isSecretReference(value: unknown): boolean {
+  const entry = record(value);
+  return typeof entry.secretId === "string" && Object.keys(entry).every((key) => key === "secretId" || key === "source" || key === "key");
+}
+
+/** Every secret reference in a node's settings (any depth). */
+export function secretReferencesIn(value: unknown, out: Array<{ secretId: string }> = [], depth = 0): Array<{ secretId: string }> {
+  if (depth > 16 || !value || typeof value !== "object") return out;
+  if (isSecretReference(value)) {
+    out.push({ secretId: (value as { secretId: string }).secretId });
+    return out;
+  }
+  for (const item of Array.isArray(value) ? value : Object.values(value as Record<string, unknown>)) secretReferencesIn(item, out, depth + 1);
+  return out;
+}
+
+/**
+ * Settings as checked content: every string rendered (as the handler renders
+ * it) when `render` is given, secret references left out. Every rendering is
+ * recorded under its template text.
+ */
+function settingsContent(value: unknown, render: ((text: string) => string) | null, renderings: Map<string, string>, depth = 0): unknown {
   if (depth > 16) return undefined;
-  if (typeof value === "string") return value.includes("{{") ? renderTemplate(value, data) : value;
-  if (Array.isArray(value)) return value.map((item) => renderDeep(item, data, depth + 1));
+  if (typeof value === "string") {
+    if (!render || !value.includes("{{")) return value;
+    if (renderings.has(value)) return renderings.get(value);
+    const rendered = render(value);
+    renderings.set(value, rendered);
+    return rendered;
+  }
+  if (Array.isArray(value)) return value.map((item) => settingsContent(item, render, renderings, depth + 1));
   if (value && typeof value === "object") {
     const out: Record<string, unknown> = {};
     for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
-      if (SECRET_KEY.test(key)) continue;
-      out[key] = renderDeep(item, data, depth + 1);
+      if (isSecretReference(item)) continue;
+      out[key] = settingsContent(item, render, renderings, depth + 1);
     }
     return out;
   }
   return value;
 }
 
-function containsTemplate(value: unknown, depth = 0): boolean {
-  if (depth > 16) return true;
-  if (typeof value === "string") return value.includes("{{");
-  if (Array.isArray(value)) return value.some((item) => containsTemplate(item, depth + 1));
-  if (value && typeof value === "object") return Object.values(value as Record<string, unknown>).some((item) => containsTemplate(item, depth + 1));
-  return false;
+/** Replaces the run's secret values in checked content, so they never enter a scan or a verdict. */
+function withoutSecretValues(value: unknown, secrets: readonly string[], depth = 0): { value: unknown; redacted: boolean } {
+  if (secrets.length === 0 || depth > 16) return { value, redacted: false };
+  if (typeof value === "string") {
+    let text = value;
+    for (const secret of secrets) if (text.includes(secret)) text = text.split(secret).join(SECRET_PLACEHOLDER);
+    return { value: text, redacted: text !== value };
+  }
+  let redacted = false;
+  if (Array.isArray(value)) {
+    const items = value.map((item) => {
+      const next = withoutSecretValues(item, secrets, depth + 1);
+      redacted ||= next.redacted;
+      return next.value;
+    });
+    return { value: items, redacted };
+  }
+  if (value && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+      const next = withoutSecretValues(item, secrets, depth + 1);
+      redacted ||= next.redacted;
+      out[key] = next.value;
+    }
+    return { value: out, redacted };
+  }
+  return { value, redacted: false };
 }
 
 /** The URL's parts as checked content: the address without its query, and each query value apart. */
-function urlContent(url: string): { url: string; query: Record<string, string>; host: string | undefined } {
+export function urlContent(url: string): { url: string; query: Record<string, string>; host: string | undefined } {
   try {
     const parsed = new URL(url);
     const query: Record<string, string> = {};
     for (const [key, value] of parsed.searchParams) query[key] = query[key] !== undefined ? `${query[key]} ${value}` : value;
     const bare = new URL(url);
     bare.search = "";
-    return { url: bare.toString(), query, host: parsed.hostname };
+    // Percent-encoded path segments are checked as they read (`4111%201111…` is a card number).
+    let path = bare.toString();
+    try {
+      path = decodeURI(path);
+    } catch {
+      // A malformed escape: checked as written.
+    }
+    return { url: path, query, host: parsed.hostname };
   } catch {
     return { url, query: {}, host: undefined };
   }
@@ -216,20 +295,53 @@ export function httpDestinationRef(url: string): DestinationRef {
   return networkDestinationRef("http", undefined, host);
 }
 
-/** True for node types the egress checkpoint covers (HTTP, Web Browse, connector senders; never triggers). */
+/** True for node types the egress checkpoint covers (HTTP, Web Browse, connector senders, RAG services; never triggers). */
 export function isEgressNodeType(type: string): boolean {
-  if (HTTP_EGRESS_TYPES.has(type)) return true;
+  if (HTTP_EGRESS_TYPES.has(type) || RAG_EGRESS_TYPES.has(type)) return true;
   if (type.endsWith("_trigger")) return false;
   return getNodeDefinition(type)?.category === "Connector";
 }
 
+export interface DescribeEgressOptions {
+  /** Values of the secrets the node's settings reference: replaced in the checked content, never scanned. */
+  secretValues?: readonly string[];
+  /** A connector whose address lives in its secret: the secret's value, read for the host only. */
+  secretAddress?: string;
+  /** RAG nodes: where the embedder, vector store and reranker send (resolved by the engine). */
+  ragRefs?: DestinationRef[];
+}
+
+/** Form bodies decode `+` as a space and percent escapes, so a card split that way is still seen. */
+function readableBody(body: string, headers: Record<string, string>): string {
+  const type = Object.entries(headers).find(([key]) => key.toLowerCase() === "content-type")?.[1] ?? "";
+  if (!/application\/x-www-form-urlencoded/i.test(type) && !/^[\w.%+-]+=[^&]*(&[\w.%+-]+=[^&]*)*$/.test(body.trim())) return body;
+  try {
+    return decodeURIComponent(body.replace(/\+/g, " "));
+  } catch {
+    return body;
+  }
+}
+
 /**
- * What an egress node is about to send, rendered exactly as its handler
- * renders it; null when there is nothing to check (an unrenderable request
- * fails in the handler as before).
+ * What an egress node is about to send, rendered once, exactly as its handler
+ * renders it (the handler then sends this rendering, never a new one); null
+ * when there is nothing to check (an unrenderable request fails in the
+ * handler as before; a connector with no network).
  */
-export function describeEgressRequest(node: Pick<WorkflowNode, "type" | "name" | "id">, config: Record<string, unknown>, templateData: Record<string, unknown>): EgressRequest | null {
+export function describeEgressRequest(
+  node: Pick<WorkflowNode, "type" | "name" | "id">,
+  config: Record<string, unknown>,
+  templateData: Record<string, unknown>,
+  options: DescribeEgressOptions = {}
+): EgressRequest | null {
   const label = node.name || node.type;
+  const secrets = (options.secretValues ?? []).filter((value) => value.length >= 4);
+  const finish = (request: Omit<EgressRequest, "content"> & { content: Record<string, unknown> }): EgressRequest => {
+    const cleaned = withoutSecretValues(request.content, secrets);
+    if (!cleaned.redacted) return request;
+    // A rewrite of content that had a secret value taken out would send the placeholder: blocked instead.
+    return { ...request, content: record(cleaned.value), apply: () => null };
+  };
   if (node.type === "http_request") {
     const method = typeof config.method === "string" ? config.method.trim().toUpperCase() : "GET";
     const safeMethod = ["GET", "POST", "PUT", "PATCH", "DELETE"].includes(method) ? method : "GET";
@@ -244,28 +356,32 @@ export function describeEgressRequest(node: Pick<WorkflowNode, "type" | "name" |
     const body = safeMethod !== "GET" && safeMethod !== "DELETE" ? renderTemplate(typeof config.bodyTemplate === "string" ? config.bodyTemplate : "", templateData) : "";
     const parts = urlContent(renderedUrl);
     const ref = networkDestinationRef("http", undefined, parts.host);
-    return {
+    const readable = readableBody(body, headers);
+    return finish({
       refs: [ref],
       channel: "egress",
-      content: { method: safeMethod, url: parts.url, query: parts.query, headers, body },
+      content: { method: safeMethod, url: parts.url, query: parts.query, headers, body: readable },
       what: `${label} (HTTP request to ${ref.host || "an unknown host"})`,
       approvalTag: ref.host ?? "",
+      sent: { kind: "http", url: renderedUrl, headers, body },
       apply(rewritten) {
         const value = record(rewritten);
         if (typeof value.url !== "string" || typeof value.body !== "string") return null;
+        // A decoded form body cannot be encoded back exactly: a rewrite there is blocked.
+        if (readable !== body && value.body !== readable) return null;
         let url: URL;
         try {
-          url = new URL(value.url);
+          url = new URL(renderedUrl);
         } catch {
           return null;
         }
-        // The address itself must not move: a rewrite only changes values.
-        if (url.hostname !== parts.host) return null;
+        // The address itself must not move: a rewrite only changes values (a rewritten path is refused).
+        if (value.url !== parts.url) return null;
         for (const [key, item] of Object.entries(record(value.query))) url.searchParams.set(key, String(item));
         const nextHeaders = Object.fromEntries(Object.entries(record(value.headers)).map(([key, item]) => [key, String(item)]));
-        return { kind: "http", url: url.toString(), headers: nextHeaders, body: value.body };
+        return { kind: "http", url: url.toString(), headers: nextHeaders, body: readable !== body ? body : value.body };
       }
-    };
+    });
   }
   if (node.type === "web_browse") {
     const url =
@@ -277,31 +393,121 @@ export function describeEgressRequest(node: Pick<WorkflowNode, "type" | "name" |
     if (!url) return null;
     const parts = urlContent(url);
     const ref = networkDestinationRef("http", undefined, parts.host);
-    return {
+    return finish({
       refs: [ref],
       channel: "egress",
       content: { url: parts.url, query: parts.query },
       what: `${label} (browsing ${ref.host || "an unknown host"})`,
       approvalTag: ref.host ?? "",
+      sent: { kind: "browse", url },
       // A browser fetches the page itself: a rewritten address cannot be handed to it safely.
       apply: () => null
-    };
+    });
   }
-  const rendered = record(renderDeep(config, templateData));
-  const ref = connectorDestinationRef(node.type, rendered);
-  return {
+  if (RAG_EGRESS_TYPES.has(node.type)) {
+    const refs = options.ragRefs ?? [];
+    if (refs.length === 0) return null;
+    let query = "";
+    let texts: string[] = [];
+    if (node.type === "embeddings_azure_openai") {
+      const inputKey = typeof config.inputKey === "string" && config.inputKey.trim() ? config.inputKey.trim() : "user_prompt";
+      query = String(readData(templateData, inputKey) ?? readData(templateData, "user_prompt") ?? "");
+    } else {
+      const queryTemplate = typeof config.queryTemplate === "string" ? config.queryTemplate : "{{user_prompt}}";
+      query = renderTemplate(queryTemplate, templateData).trim();
+      const upstream = documentTexts(readData(templateData, "documents"));
+      texts = node.type === "rag_retrieve" ? [...upstream, ...documentTexts(config.documents)] : upstream;
+    }
+    const hosts = [...new Set(refs.map((entry) => entry.host || entry.id || "an unknown host"))].join(", ");
+    return finish({
+      refs,
+      channel: "egress",
+      content: { query, documents: texts },
+      what: `${label} (${node.type.replace(/_/g, " ")} to ${hosts})`,
+      approvalTag: refs.map((entry) => entry.host || entry.id || "").join(">"),
+      sent: { kind: "rag", query },
+      // Embeddings of rewritten text are not the documents' embeddings: a rewrite is blocked.
+      apply: () => null
+    });
+  }
+  const ref = connectorDestinationRef(node.type, config, options.secretAddress);
+  if (!ref) return null;
+  const unrendered = UNRENDERED_CONNECTOR_TYPES.has(node.type);
+  const renderings = new Map<string, string>();
+  const rendered = record(settingsContent(config, unrendered ? null : (text) => renderTemplate(text, templateData), renderings));
+  return finish({
     refs: [ref],
     channel: "egress",
     content: { connector: node.type, settings: rendered },
     what: `${label} (${node.type.replace(/_/g, " ")} to ${ref.host || "an unknown host"})`,
     approvalTag: ref.host || node.type,
+    sent: unrendered ? { kind: "none" } : { kind: "renderings", renderings },
     apply(rewritten) {
+      // The adapter sends its settings as they are: a rewrite cannot reach it.
+      if (unrendered) return null;
       const settings = record(record(rewritten).settings);
-      // The handler renders its settings again: a value that now holds `{{` would be evaluated, so that is refused.
-      if (containsTemplate(settings)) return null;
-      return { kind: "config", config: { ...config, ...settings } };
+      const next = new Map(renderings);
+      if (!mapRewrites(config, rendered, settings, next)) return null;
+      return { kind: "renderings", renderings: next };
     }
-  };
+  });
+}
+
+/**
+ * Maps a rewrite of rendered settings back onto the handler's renderings: a
+ * changed value must come from a template (the handler renders it, so it
+ * sends the rewritten text); a changed literal, a changed shape or one
+ * template text rewritten two ways cannot be applied (false: blocked).
+ */
+function mapRewrites(original: unknown, rendered: unknown, rewritten: unknown, renderings: Map<string, string>, depth = 0): boolean {
+  if (depth > 16) return false;
+  if (typeof original === "string") {
+    if (rewritten === rendered) return true;
+    if (typeof rewritten !== "string" || !original.includes("{{")) return false;
+    const previous = renderings.get(original);
+    if (previous !== undefined && previous !== rendered && previous !== rewritten) return false;
+    renderings.set(original, rewritten);
+    return true;
+  }
+  if (Array.isArray(original)) {
+    if (!Array.isArray(rendered) || !Array.isArray(rewritten) || rewritten.length !== original.length) return false;
+    return original.every((item, index) => mapRewrites(item, rendered[index], rewritten[index], renderings, depth + 1));
+  }
+  if (original && typeof original === "object") {
+    const before = record(rendered);
+    const after = record(rewritten);
+    for (const [key, item] of Object.entries(original as Record<string, unknown>)) {
+      if (isSecretReference(item)) continue;
+      if (!(key in after)) return false;
+      if (!mapRewrites(item, before[key], after[key], renderings, depth + 1)) return false;
+    }
+    return true;
+  }
+  return JSON.stringify(rewritten) === JSON.stringify(rendered);
+}
+
+function readData(data: Record<string, unknown>, key: string): unknown {
+  if (key in data) return data[key];
+  let current: unknown = data;
+  for (const part of key.split(".")) {
+    if (!current || typeof current !== "object") return undefined;
+    current = (current as Record<string, unknown>)[part];
+  }
+  return current;
+}
+
+/** The texts of documents as RAG nodes read them (strings, or objects with `text` / `content`). */
+function documentTexts(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => {
+      if (typeof item === "string") return item;
+      const entry = record(item);
+      if (typeof entry.text === "string") return entry.text;
+      if (typeof entry.content === "string") return entry.content;
+      return JSON.stringify(item);
+    })
+    .filter((text) => text.length > 0);
 }
 
 /** The MCP Tool node's call: its arguments, to its server. */
@@ -319,15 +525,16 @@ export function describeMcpToolRequest(
     content: record(args),
     what: `${node.name || node.type} (MCP tool ${toolName} on ${ref.host || ref.id || "an unknown host"})`,
     approvalTag: toolName,
+    sent: { kind: "mcp_args", args },
     apply: (rewritten) => (rewritten && typeof rewritten === "object" && !Array.isArray(rewritten) ? { kind: "mcp_args", args: rewritten } : null)
   };
 }
 
-/** Runs the egress (or MCP) check for a described request; returns the override for the handler, if the content was rewritten. */
+/** Runs the egress (or MCP) check for a described request; returns what the handler sends (the checked rendering, rewritten when the check rewrote it). */
 export async function checkEgressRequest(
   request: EgressRequest,
   input: Omit<OutboundCheckInput, "channel" | "content" | "refs" | "what" | "approvalTag">
-): Promise<{ override: EgressOverride | null; declassified: string[] }> {
+): Promise<{ override: EgressOverride; declassified: string[] }> {
   const outcome = await checkOutbound({
     ...input,
     channel: request.channel,
@@ -337,7 +544,7 @@ export async function checkEgressRequest(
     approvalTag: request.approvalTag,
     ...(request.channel === "tool_arguments" ? { destinationOnly: true } : {})
   });
-  if (!outcome.transformed) return { override: null, declassified: [] };
+  if (!outcome.transformed) return { override: request.sent, declassified: [] };
   const override = request.apply(outcome.content);
   if (!override) {
     throw new GuardBlockedError(

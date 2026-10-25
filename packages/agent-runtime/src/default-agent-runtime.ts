@@ -1023,12 +1023,20 @@ ${effectiveSystemPrompt}`;
         }
       }
     };
-    // Phase 16 — messages up to here were part of a model call the guard already judged (the prompt check covers the first).
-    let modelCheckedUpTo = messages.length;
+    // Phase 16 — what each model call adds, judged by destination rules before it is sent: on the first call the
+    // whole outgoing prompt (system prompt, memory, any earlier turns) except the user input the prompt check
+    // already judged with its destination; on later calls the tool results since the last call.
+    const promptCheckedIndexes = new Set(pendingPromptChecks);
+    let modelCheckedUpTo = 0;
     const guardModelCall = async (iteration: number) => {
       if (!guard?.checkModelCall) return;
+      const first = modelCheckedUpTo === 0;
       const indexes: number[] = [];
-      for (let index = modelCheckedUpTo; index < messages.length; index += 1) if (messages[index]?.role === "tool") indexes.push(index);
+      for (let index = modelCheckedUpTo; index < messages.length; index += 1) {
+        const message = messages[index];
+        if (!message) continue;
+        if (first ? !promptCheckedIndexes.has(index) && message.content.length > 0 : message.role === "tool") indexes.push(index);
+      }
       modelCheckedUpTo = messages.length;
       if (indexes.length === 0) return;
       const decision = await guard.checkModelCall({

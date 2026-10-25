@@ -19,6 +19,7 @@ import { randomUUID } from "node:crypto";
 import {
   BUILTIN_DESTINATIONS,
   chatModelDestinationOf,
+  connectorAddressInSecret,
   connectorDestinationRef,
   dataDestinationInputSchema,
   dataDestinationRowSchema,
@@ -152,7 +153,8 @@ function collectNodes(
     }
     if (getNodeDefinition(node.type)?.category === "Connector") {
       const ref = connectorDestinationRef(node.type, config);
-      out.push({ ref, seenIn, ...(!ref.host && referencesSecret(config) ? { hostInSecret: true } : {}) });
+      if (!ref) continue;
+      out.push({ ref, seenIn, ...(!ref.host && (connectorAddressInSecret(node.type, config) || referencesSecret(config)) ? { hostInSecret: true } : {}) });
     }
   }
   return out;
@@ -174,7 +176,7 @@ export function collectConfiguredDestinations(input: CollectInput): ConfiguredDe
       out.push({ ref: { kind: "mcp_server", id: server.id }, seenIn });
       continue;
     }
-    const host = hostFrom(record(server.connection)?.endpoint);
+    const host = mcpServerDestinationRef({ adapterId: server.adapterId, registryServerId: server.id, connection: server.connection })?.host || undefined;
     registryHosts.set(server.id, host);
     out.push({ ref: networkDestinationRef("mcp_server", server.id, host), seenIn });
   }

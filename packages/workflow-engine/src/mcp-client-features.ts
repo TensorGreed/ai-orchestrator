@@ -63,7 +63,16 @@ export interface McpSamplingHandlerOptions {
   signal?: AbortSignal;
   /** Phase 15.3 — the node whose MCP call asked for the sample (the model tape's call site). */
   nodeId?: string;
+  /**
+   * Phase 16 — destination rules on the sampling request before it is sent:
+   * returns the messages to send (rewritten or as they were); throwing
+   * refuses the request.
+   */
+  checkModelCall?: McpSamplingCheck;
 }
+
+/** Phase 16 — judges a sampling request's messages against the provider that would answer it. */
+export type McpSamplingCheck = (provider: LLMProviderConfig, messages: ChatMessage[]) => Promise<ChatMessage[]>;
 
 export interface McpSamplingHandler {
   onSampling: NonNullable<MCPExecutionContext["onSampling"]>;
@@ -220,10 +229,18 @@ export function createMcpSamplingHandler(options: McpSamplingHandlerOptions): Mc
       maxTokens: base.maxTokens,
       ...(request.temperature !== undefined ? { temperature: request.temperature } : {})
     };
+    let messages = toChatMessages(request);
+    if (options.checkModelCall) {
+      try {
+        messages = await options.checkModelCall(samplingProvider, messages);
+      } catch (error) {
+        refuse(`The sampling request was not sent: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
     try {
       const adapter = options.providerRegistry.get(samplingProvider.providerId);
       const response = await adapter.generate(
-        { provider: samplingProvider, messages: toChatMessages(request) },
+        { provider: samplingProvider, messages },
         { resolveSecret: options.resolveSecret, ...(options.signal ? { signal: options.signal } : {}), ...(options.nodeId ? { callSite: { nodeId: options.nodeId } } : {}) }
       );
       requests += 1;

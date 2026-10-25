@@ -11,7 +11,7 @@
  */
 import { ErrorCategory, WorkflowError } from "@ai-orchestrator/shared";
 import type { SecretReference } from "@ai-orchestrator/shared";
-import { renderTemplate } from "../template";
+import { renderCheckedTemplate as renderTemplate } from "../template";
 
 export interface Tier1Context {
   templateData: Record<string, unknown>;

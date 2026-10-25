@@ -104,11 +104,12 @@ export interface AgentGuardHooks {
   systemPromptAddition?(): string | undefined;
   check(input: AgentGuardCheck): Promise<AgentGuardDecision>;
   /**
-   * Phase 16 — before each model call after the first: the tool results the
-   * model is about to see, judged by destination rules for the model
-   * provider (the prompt check covers the first call). `content` lists the
-   * new tool messages; a rewrite answers the same number of strings. Absent:
-   * not checked.
+   * Phase 16 — before each model call: what the call adds, judged by
+   * destination rules for the model provider. On the first call that is the
+   * whole outgoing prompt (system prompt, memory, earlier turns) except the
+   * user input the prompt check judges; on later calls the new tool results.
+   * `content` lists those messages; a rewrite answers the same number of
+   * strings. Absent: not checked.
    */
   checkModelCall?(input: { content: string[]; dataLabels?: DataLabels; iteration: number }): Promise<AgentGuardDecision>;
   /** Mark a serialized untrusted tool result before the model sees it. */

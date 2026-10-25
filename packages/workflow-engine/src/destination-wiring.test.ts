@@ -321,16 +321,31 @@ describe("egress checkpoint", () => {
     expect(isEgressNodeType("smtp_send_email")).toBe(true);
     expect(isEgressNodeType("slack_trigger")).toBe(false);
     expect(isEgressNodeType("set_node")).toBe(false);
-    const slack = describeEgressRequest(node("s", "slack_send_message"), { text: "Card {{user_prompt}}", secretRef: { secretId: "slack-hook" }, botToken: "xoxb-1" }, { user_prompt: CARD })!;
+    const slack = describeEgressRequest(
+      node("s", "slack_send_message"),
+      { webhookUrl: "https://hooks.slack.com/services/T/B/x", text: "Card {{user_prompt}} via {{vars.relay}}", secretRef: { secretId: "slack-hook" }, max_tokens: "{{user_prompt}}" },
+      { user_prompt: CARD, vars: { relay: "xoxb-secret-value-1" } },
+      { secretValues: ["xoxb-secret-value-1"] }
+    )!;
     expect(slack.refs[0]).toEqual({ kind: "connector", id: "slack_send_message", host: "hooks.slack.com" });
     expect(JSON.stringify(slack.content)).toContain(CARD);
+    // Secret references and secret values never enter the check; other values are checked whatever their key is called.
     expect(JSON.stringify(slack.content)).not.toContain("slack-hook");
-    expect(JSON.stringify(slack.content)).not.toContain("xoxb");
+    expect(JSON.stringify(slack.content)).not.toContain("xoxb-secret-value-1");
+    expect(JSON.stringify((slack.content as { settings: Record<string, unknown> }).settings.max_tokens)).toContain(CARD);
+    // Content holding a secret value cannot be rewritten (the placeholder would be sent).
+    expect(slack.apply({ connector: "slack_send_message", settings: { text: "x" } })).toBeNull();
     const smtp = describeEgressRequest(node("m", "smtp_send_email"), { host: "smtp.example.com", to: "a@b.c" }, {})!;
     expect(smtp.refs[0]).toEqual({ kind: "connector", id: "smtp_send_email", host: "smtp.example.com" });
-    // A rewrite that would put a template into the settings is refused (the handler renders them again).
-    expect(slack.apply({ connector: "slack_send_message", settings: { text: "{{ results.x }}" } })).toBeNull();
-    expect(slack.apply({ connector: "slack_send_message", settings: { text: "Card [REDACTED:card_number]" } })).toMatchObject({ kind: "config", config: { text: "Card [REDACTED:card_number]", secretRef: { secretId: "slack-hook" } } });
+
+    // The handler gets the checked renderings: a rewrite maps onto the template text it came from.
+    const plain = describeEgressRequest(node("s", "slack_send_message"), { webhookUrl: "https://hooks.slack.com/services/T/B/x", text: "Card {{user_prompt}}", channel: "#ops" }, { user_prompt: CARD })!;
+    expect(plain.sent).toEqual({ kind: "renderings", renderings: new Map([["Card {{user_prompt}}", `Card ${CARD}`]]) });
+    const rewritten = plain.apply({ connector: "slack_send_message", settings: { webhookUrl: "https://hooks.slack.com/services/T/B/x", text: "Card [REDACTED:card_number]", channel: "#ops" } });
+    expect(rewritten).toEqual({ kind: "renderings", renderings: new Map([["Card {{user_prompt}}", "Card [REDACTED:card_number]"]]) });
+    // A changed literal (the handler may send it as it is) or a dropped key cannot be applied: blocked.
+    expect(plain.apply({ connector: "slack_send_message", settings: { webhookUrl: "https://hooks.slack.com/services/T/B/x", text: `Card ${CARD}`, channel: "#[x]" } })).toBeNull();
+    expect(plain.apply({ connector: "slack_send_message", settings: { text: "Card [REDACTED:card_number]" } })).toBeNull();
   });
 });
 

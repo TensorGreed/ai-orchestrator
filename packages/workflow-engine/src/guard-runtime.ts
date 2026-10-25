@@ -346,7 +346,7 @@ export async function runGuardCheck(
   scope: GuardEvalScope,
   profiles: ResolvedGuardProfile[],
   input: GuardInput,
-  meta: { iteration?: number; toolName?: string } = {}
+  meta: { iteration?: number; toolName?: string; onlyFindings?: boolean } = {}
 ): Promise<GuardCheckResult> {
   const registry = scope.guard.registry ?? (defaultRegistry ??= createDefaultGuardRegistry({ resolver: systemDnsResolver }));
   const protection = createDefaultProtectionRegistry({ keys: keyResolverFor(scope), ...(scope.guard.vault ? { vault: scope.guard.vault } : {}) });
@@ -370,6 +370,9 @@ export async function runGuardCheck(
   const checkId = randomUUID();
   for (const [index, entry] of verdicts.entries()) {
     if (!scope.guard.onVerdict || !scope.executionId) continue;
+    // Phase 16 — outbound checks record a profile's verdict only when it found something (shadow findings included),
+    // so a deployment with destination rules writes no row per clean call and other profiles' numbers stay as they were.
+    if (meta.onlyFindings && !verdictHasFinding(entry.summary)) continue;
     try {
       await scope.guard.onVerdict({
         executionId: scope.executionId,
@@ -389,6 +392,11 @@ export async function runGuardCheck(
     }
   }
   return { action: stack.action, content: stack.content, transformed: stack.transformed, verdicts };
+}
+
+/** Phase 16 — a verdict worth a row: a finding, an action (shadow too), a rewrite or a detector skipped for budget. */
+function verdictHasFinding(summary: GuardVerdictSummary): boolean {
+  return summary.findings.length > 0 || summary.actions.length > 0 || summary.transformed || summary.budget.skippedDetectors.length > 0;
 }
 
 /** Short reason for a verdict: categories and detectors, never evidence. */
@@ -531,6 +539,7 @@ export async function createAgentGuardSession(input: {
   const propagatedLabels = profilesUsePropagatedLabels(profiles);
   // Phase 16 — destination rules: model calls judged against the provider, tool calls against their MCP server.
   const destinationRules = profilesHaveDestinationRules(profiles);
+  const destinationProfiles = profiles.filter((entry) => profileHasDestinationRules(entry.profile));
   const destinationOf = async (ref: DestinationRef | null | undefined) => (destinationRules && ref ? resolveDestinationRefs(scope.guard, [ref]) : undefined);
   const fixedLabels = (labels: readonly string[]): DataLabels => ({ provenance: orderedProvenance(labels as ProvenanceLabel[]), dataClasses: [], source: "propagated" });
   /** Turns a check result into the decision the loop acts on (approvals, rewrites). */
@@ -580,7 +589,8 @@ export async function createAgentGuardSession(input: {
             const destination = await destinationOf(input.modelDestination);
             const result = await runGuardCheck(
               scope,
-              profiles,
+              // Only profiles with destination rules judge this call; the others already saw this content.
+              destinationProfiles,
               {
                 content: call.content,
                 channel: "prompt",
@@ -588,7 +598,7 @@ export async function createAgentGuardSession(input: {
                 destinationOnly: true,
                 ...(destination ? { destination, dataLabels: call.dataLabels ?? fixedLabels(["untrusted_external"]) } : {})
               },
-              { iteration: call.iteration }
+              { iteration: call.iteration, onlyFindings: true }
             );
             const entry: AgentGuardTraceEntry = { iteration: call.iteration, channel: "prompt", action: result.action, verdicts: result.verdicts };
             verdictLog.push(entry);

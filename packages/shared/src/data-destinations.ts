@@ -748,20 +748,15 @@ export function findUnclassifiedDestinations(configured: readonly ConfiguredDest
 // and its classification always agree.
 // ---------------------------------------------------------------------------
 
-/** Config keys that may hold the URL or host a connector talks to. */
-export const CONNECTOR_URL_KEYS = ["endpoint", "url", "baseUrl", "apiUrl", "serverUrl", "webhookUrl", "accountUrl", "instanceUrl", "uri", "urlTemplate", "host"] as const;
-
 /**
- * Hosts of connectors that always call one vendor API (whatever their
- * settings), used when the settings name no host of their own.
+ * Connectors that always call one vendor API: the host each one calls,
+ * whatever else its settings hold.
  */
 export const CONNECTOR_FIXED_HOSTS: Readonly<Record<string, string>> = Object.freeze({
-  slack_send_message: "hooks.slack.com",
   github_action: "api.github.com",
   google_sheets_read: "sheets.googleapis.com",
   google_sheets_append: "sheets.googleapis.com",
   google_sheets_update: "sheets.googleapis.com",
-  google_drive_source: "www.googleapis.com",
   google_calendar_create_event: "www.googleapis.com",
   google_calendar_list_events: "www.googleapis.com",
   notion_create_page: "api.notion.com",
@@ -774,7 +769,6 @@ export const CONNECTOR_FIXED_HOSTS: Readonly<Record<string, string>> = Object.fr
   stripe_create_customer: "api.stripe.com",
   stripe_create_charge: "api.stripe.com",
   telegram_send_message: "api.telegram.org",
-  discord_send_message: "discord.com",
   twilio_send_sms: "api.twilio.com"
 });
 
@@ -791,36 +785,127 @@ function plainRecord(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined;
 }
 
-/** The first host found in a connector's config or one level below it (credentials and secret references are skipped). */
-export function connectorConfigHost(config: Record<string, unknown>): string | undefined {
-  for (const key of CONNECTOR_URL_KEYS) {
-    const host = destinationHostOfSetting(config[key]);
-    if (host) return host;
-  }
-  for (const [key, value] of Object.entries(config)) {
-    if (/secret|credential|password|token/i.test(key)) continue;
-    const nested = plainRecord(value);
-    if (!nested) continue;
-    for (const inner of CONNECTOR_URL_KEYS) {
-      const host = destinationHostOfSetting(nested[inner]);
-      if (host) return host;
-    }
-  }
-  return undefined;
+function textSetting(config: Record<string, unknown>, key: string): string {
+  const value = config[key];
+  return typeof value === "string" ? value.trim() : "";
+}
+
+/** The host of a URL built exactly as a handler builds it (so odd values that move the authority are seen as they are). */
+function hostOfBuiltUrl(url: string): string | undefined {
+  if (url.includes("{{")) return undefined;
+  return destinationHostOfUrl(url);
 }
 
 /**
- * Where a connector node sends its requests: its type, and the host its
- * (rendered) settings name, else (no address set) the vendor host it always
- * calls, else an unknown host (public).
+ * What a connector's address comes from: a fixed vendor host, the host its
+ * settings name, nothing at all (a stub with no network), or an unknown host.
+ * `undefined` = an unknown host (public); `null` = sends nothing.
  */
-export function connectorDestinationRef(nodeType: string, config: Record<string, unknown>): DestinationRef {
-  const host = connectorConfigHost(config);
-  if (host) return networkDestinationRef("connector", nodeType, host);
-  // An address that is set but cannot be read (a template) is unknown: the vendor default is never assumed then.
-  const addressSet = CONNECTOR_URL_KEYS.some((key) => typeof config[key] === "string" && String(config[key]).trim() !== "");
-  return networkDestinationRef("connector", nodeType, addressSet ? undefined : CONNECTOR_FIXED_HOSTS[nodeType]);
+type AddressOf = (config: Record<string, unknown>, secretAddress: string | undefined) => string | undefined | null;
+
+const fromKey = (key: string): AddressOf => (config) => destinationHostOfSetting(config[key]);
+
+/** connector-sdk adapters (connector_source and the dedicated nodes), by connector id: their real address keys only. */
+const CONNECTOR_SDK_ADDRESS: Readonly<Record<string, AddressOf>> = {
+  "google-drive": (config) => (textSetting(config, "baseUrl") ? destinationHostOfSetting(config.baseUrl) : "www.googleapis.com"),
+  // Demo stubs: they return sample rows and open no connection.
+  "sql-db": () => null,
+  "nosql-db": () => null,
+  "azure-storage": (config) => {
+    if (textSetting(config, "endpoint")) return destinationHostOfSetting(config.endpoint);
+    const account = textSetting(config, "accountName");
+    // Without an endpoint or an account the address can come from the secret: unknown.
+    return account ? hostOfBuiltUrl(`https://${account}.blob.core.windows.net/`) : undefined;
+  },
+  "azure-cosmos-db": fromKey("endpoint"),
+  "azure-monitor": (config) => {
+    const operation = textSetting(config, "operation") || "query_logs";
+    if (operation === "query_logs") return "api.loganalytics.io";
+    if (operation === "query_metrics") return hostOfBuiltUrl(`https://management.azure.com${textSetting(config, "resourceId")}/x`);
+    const path = textSetting(config, "path");
+    if (/^https?:\/\//i.test(path)) return hostOfBuiltUrl(path);
+    return hostOfBuiltUrl(`https://management.azure.com${path.startsWith("/") ? "" : "/"}${path}`);
+  },
+  "azure-ai-search": fromKey("endpoint"),
+  qdrant: fromKey("endpoint")
+};
+
+/** Dedicated connector nodes that run a connector-sdk adapter on their whole settings. */
+const CONNECTOR_SDK_NODES: Readonly<Record<string, string>> = {
+  google_drive_source: "google-drive",
+  azure_storage: "azure-storage",
+  azure_cosmos_db: "azure-cosmos-db",
+  azure_monitor_http: "azure-monitor",
+  azure_ai_search_vector_store: "azure-ai-search",
+  qdrant_vector_store: "qdrant"
+};
+
+/** Each connector node type: exactly the settings its handler builds its address from. */
+const CONNECTOR_ADDRESS: Readonly<Record<string, AddressOf>> = {
+  // Webhook mode (the default) posts to the webhook URL; bot mode always calls slack.com.
+  slack_send_message: (config) => ((textSetting(config, "authType") || "webhook") === "webhook" ? destinationHostOfSetting(config.webhookUrl) : "slack.com"),
+  discord_send_message: fromKey("webhookUrl"),
+  // The webhook URL, else the whole secret value is the URL.
+  teams_send_message: (config, secretAddress) => (textSetting(config, "webhookUrl") ? destinationHostOfSetting(config.webhookUrl) : destinationHostOfSetting(secretAddress)),
+  smtp_send_email: fromKey("host"),
+  postgres_query: fromKey("host"),
+  mysql_query: fromKey("host"),
+  // The secret's connection URI wins over the settings'.
+  mongo_operation: (config, secretAddress) => {
+    if (plainRecord(config.secretRef)?.secretId) return destinationHostOfSetting(secretAddress);
+    return destinationHostOfSetting(config.uri);
+  },
+  redis_command: (config) => (textSetting(config, "url") ? destinationHostOfSetting(config.url) : "localhost"),
+  jira_create_issue: fromKey("baseUrl"),
+  jira_search_issues: fromKey("baseUrl"),
+  salesforce_create_record: fromKey("instanceUrl"),
+  salesforce_query: fromKey("instanceUrl"),
+  aws_s3_put_object: s3Address,
+  aws_s3_get_object: s3Address,
+  aws_s3_list_objects: s3Address,
+  connector_source: (config) => {
+    const address = CONNECTOR_SDK_ADDRESS[textSetting(config, "connectorId")];
+    if (!address) return undefined;
+    return address(plainRecord(config.connectorConfig) ?? config, undefined);
+  }
+};
+
+function s3Address(config: Record<string, unknown>): string | undefined {
+  const bucket = textSetting(config, "bucket");
+  const region = textSetting(config, "region");
+  if (!bucket || !region) return undefined;
+  return hostOfBuiltUrl(`https://${bucket}.s3.${region}.amazonaws.com/`);
 }
+
+/** Connector node types whose address can come from their secret (the engine passes the secret's value for the host only). */
+export function connectorAddressInSecret(nodeType: string, config: Record<string, unknown>): boolean {
+  if (nodeType === "mongo_operation") return Boolean(plainRecord(config.secretRef)?.secretId);
+  if (nodeType === "teams_send_message") return !textSetting(config, "webhookUrl") && Boolean(plainRecord(config.secretRef)?.secretId);
+  return false;
+}
+
+/**
+ * Where a connector node sends its requests: the host its handler really
+ * calls, read only from the settings that handler uses for its address (a
+ * fixed vendor host for connectors that always call one API). Any other key,
+ * however URL-like, is ignored. An unknown type or an address that cannot be
+ * read (a template, a missing value) is an unknown host: public. Null for a
+ * connector that sends nothing (a demo stub). `secretAddress` is the
+ * secret's value for connectors whose address lives in their secret
+ * (`connectorAddressInSecret`); it is read for the host only.
+ */
+export function connectorDestinationRef(nodeType: string, config: Record<string, unknown>, secretAddress?: string): DestinationRef | null {
+  const fixed = CONNECTOR_FIXED_HOSTS[nodeType];
+  if (fixed) return networkDestinationRef("connector", nodeType, fixed);
+  const sdk = CONNECTOR_SDK_NODES[nodeType];
+  const address = sdk ? CONNECTOR_SDK_ADDRESS[sdk] : CONNECTOR_ADDRESS[nodeType];
+  const host = address ? address(config, secretAddress) : undefined;
+  if (host === null) return null;
+  return networkDestinationRef("connector", nodeType, host);
+}
+
+/** MCP adapters that talk to a local process over stdio (no network endpoint). */
+export const MCP_STDIO_ADAPTERS: ReadonlySet<string> = new Set(["stdio_mcp"]);
 
 /** MCP adapters that send nothing over the network. */
 export const MCP_ADAPTERS_WITHOUT_NETWORK: ReadonlySet<string> = new Set(["mock-mcp"]);
@@ -833,6 +918,9 @@ export const MCP_ADAPTERS_WITHOUT_NETWORK: ReadonlySet<string> = new Set(["mock-
 export function mcpServerDestinationRef(server: { serverId?: string; adapterId?: string; registryServerId?: string; connection?: unknown }): DestinationRef | null {
   const adapter = server.adapterId ?? server.serverId ?? "";
   if (MCP_ADAPTERS_WITHOUT_NETWORK.has(adapter)) return null;
+  // A stdio server is a local process with no network endpoint: what L2M sends it stays on this machine
+  // (the built-in loopback row makes it local). Its own outbound traffic is outside L2M's view.
+  if (MCP_STDIO_ADAPTERS.has(adapter)) return networkDestinationRef("mcp_server", server.registryServerId, "localhost");
   return networkDestinationRef("mcp_server", server.registryServerId, destinationHostOfSetting(plainRecord(server.connection)?.endpoint));
 }
 

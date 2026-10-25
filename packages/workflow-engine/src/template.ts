@@ -106,3 +106,22 @@ export function tryParseJson(value: string): Record<string, unknown> {
     return {};
   }
 }
+
+/**
+ * Phase 16 — the renderings an outbound check already judged, bound to the
+ * template data the handler renders with: the handler sends exactly what was
+ * checked (an expression with `Math.random()` or `new Date()` is never
+ * evaluated a second time) and a value that came from data is never rendered
+ * again. Keys are template texts; values are their checked renderings.
+ */
+const checkedRenderings = new WeakMap<Record<string, unknown>, ReadonlyMap<string, string>>();
+
+export function bindCheckedRenderings(values: Record<string, unknown>, renderings: ReadonlyMap<string, string>): void {
+  checkedRenderings.set(values, renderings);
+}
+
+/** `renderTemplate` for connector handlers: the checked rendering when there is one, else a fresh one. */
+export function renderCheckedTemplate(template: string, values: Record<string, unknown>): string {
+  const checked = checkedRenderings.get(values)?.get(template);
+  return checked !== undefined ? checked : renderTemplate(template, values);
+}
