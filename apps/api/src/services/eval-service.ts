@@ -108,6 +108,7 @@ import type { GuardProfileSubstitute } from "./guard-service.js";
 import { simulateCase, type SimulatedReplay } from "./guard-simulation-diff.js";
 import { GuardSimulationSink, type GuardSimulationRun } from "./guard-simulation-sink.js";
 import { goldenSetSnapshots } from "./release-snapshot.js";
+import { captureExpectsMasking } from "./run-diff.js";
 import { applyScorer, judgeCallsFor, __scorerTest__, type EvalJudgeContext, type EvalLlmJudge } from "./eval-scorers.js";
 
 export type { EvalLlmJudge, EvalJudgeContext, EvalJudgeResponse } from "./eval-scorers.js";
@@ -1850,7 +1851,8 @@ export class EvalService {
         fixtureInput: recording.input,
         baseline: reference,
         candidate: facts,
-        maskedCapture: recording.capabilities?.capture?.masked === true,
+        maskedCapture: captureExpectsMasking(recording.capabilities?.capture),
+        baselineUnverified: !baselineFacts && recording.capabilities?.origin === "imported",
         ...(this.options.random ? { random: this.options.random } : {})
       },
       { runId, workflowId, actorUserId: job.actorUserId, actorEmail: job.actorEmail, executionId: response.executionId }

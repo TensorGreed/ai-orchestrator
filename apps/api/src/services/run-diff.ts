@@ -40,6 +40,17 @@ export interface ValueDiffOptions {
    * strings then compare as they are, with whitespace normalised.
    */
   maskedSpans?: boolean;
+  /**
+   * The baseline's own guard verdicts do not count as a sign that masking is
+   * expected (a golden run imported from a file: this server never saw its
+   * guard work). The candidate side is always trusted.
+   */
+  baselineUnverified?: boolean;
+}
+
+/** Whether a recording's capture vouches for masking: a masked capture made here, not one a file claims. */
+export function captureExpectsMasking(capture: { masked?: boolean; maskingVerified?: boolean } | null | undefined): boolean {
+  return capture?.masked === true && capture.maskingVerified !== false;
 }
 
 /** Guard actions that rewrite content, so the same answer can read differently from run to run. */
@@ -380,7 +391,7 @@ export interface RunDiffOptions extends ValueDiffOptions {
 export function diffRunFacts(baseline: RunFacts, candidate: RunFacts, options: RunDiffOptions = {}): RunDiff {
   const ignorePaths = [...DEFAULT_REPLAY_IGNORE_PATHS, ...(options.ignorePaths ?? []).filter((path) => !DEFAULT_REPLAY_IGNORE_PATHS.includes(path))];
   // Masked spans are compared as masks only when masking is expected: asked for (a masked capture), or a guard rewrote content in either run.
-  const maskedSpans = options.maskedSpans === true || runRewroteContent(baseline) || runRewroteContent(candidate);
+  const maskedSpans = options.maskedSpans === true || (options.baselineUnverified !== true && runRewroteContent(baseline)) || runRewroteContent(candidate);
   const output = diffValues(baseline.output, candidate.output, { ignorePaths, numberTolerance: options.numberTolerance, maskedSpans });
 
   const steps = alignToolCalls(baseline.toolCalls, candidate.toolCalls);

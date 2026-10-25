@@ -79,7 +79,7 @@ import type { ProviderRegistry } from "@ai-orchestrator/provider-sdk";
 import type { ReplayRecordingRecord, SqliteStore } from "../db/database.js";
 import { sha256Hex, workflowForHash } from "./audit-bundle-service.js";
 import type { McpCassetteRunPlan, McpCassetteService, ModelReplayPlan, OfflineReplayOptions } from "./mcp-cassette-service.js";
-import { diffRunFacts } from "./run-diff.js";
+import { captureExpectsMasking, diffRunFacts } from "./run-diff.js";
 import { buildRunFacts, nodeResultRecords, type PriceTurn } from "./run-facts.js";
 import { ReplayRecordingService } from "./replay-recording-service.js";
 import type { SafeUser } from "./auth-service.js";
@@ -503,7 +503,9 @@ export class ReplayService {
       ignorePaths: request.ignorePaths,
       numberTolerance: request.numberTolerance,
       // A masked capture holds surrogates, so the guard's masks of them read differently from the live run's.
-      maskedSpans: recording.capabilities?.capture?.masked === true,
+      maskedSpans: captureExpectsMasking(recording.capabilities?.capture),
+      // An imported golden run's guard verdicts are the file's word, not this server's.
+      baselineUnverified: !options.baseline && recording.capabilities?.origin === "imported",
       health
     });
     const judged = judgeReplayDiff(diff);

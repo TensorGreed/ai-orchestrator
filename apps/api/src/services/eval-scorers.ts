@@ -94,6 +94,8 @@ export interface ScorerContext {
   candidate?: RunFacts | null;
   /** The case is a masked production capture: `json_equal` compares guard-masked spans as masks (see `diffValues` `maskedSpans`). */
   maskedCapture?: boolean;
+  /** The golden run was imported from a file, so its own guard verdicts do not turn masked comparison on. */
+  baselineUnverified?: boolean;
   llmJudge?: EvalLlmJudge;
   /** 0..1; chooses which pairwise order runs first. Defaults to Math.random. */
   random?: () => number;
@@ -596,7 +598,7 @@ function scoreJsonEqual(spec: Extract<EvalScorerSpec, { type: "json_equal" }>, c
     actual = sortArrays(actual);
   }
   const ignorePaths = [...DEFAULT_REPLAY_IGNORE_PATHS, ...(spec.ignorePaths ?? [])];
-  const maskedSpans = ctx.maskedCapture === true || runRewroteContent(ctx.baseline) || runRewroteContent(ctx.candidate);
+  const maskedSpans = ctx.maskedCapture === true || (ctx.baselineUnverified !== true && runRewroteContent(ctx.baseline)) || runRewroteContent(ctx.candidate);
   const diff = diffValues(expected, actual, { ignorePaths, numberTolerance: spec.numberTolerance, maskedSpans });
   if (diff.changes.length === 0) {
     return { path: spec.path, pass: true, score: 1, reason: `matches ${target.label}${diff.ignored > 0 ? ` (${plural(diff.ignored, "ignored difference")})` : ""}` };

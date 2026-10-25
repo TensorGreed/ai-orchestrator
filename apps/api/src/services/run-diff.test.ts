@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { RunFactToolCall, RunFacts } from "@ai-orchestrator/shared";
 import { judgeReplayDiff } from "@ai-orchestrator/shared";
-import { alignToolCalls, DEFAULT_REPLAY_IGNORE_PATHS, diffRunFacts, diffValues, matchesIgnorePath, tokenSimilarity } from "./run-diff.js";
+import { alignToolCalls, DEFAULT_REPLAY_IGNORE_PATHS, captureExpectsMasking, diffRunFacts, diffValues, matchesIgnorePath, tokenSimilarity } from "./run-diff.js";
 
 function tool(tool: string, args: unknown = {}, extra: Partial<RunFactToolCall> = {}): RunFactToolCall {
   return { nodeId: "agent", iteration: 1, server: "mcp_docs", tool, args, argsHash: `${tool}:${JSON.stringify(args)}`, outcome: "ok", durationMs: 10, ...extra };
@@ -283,5 +283,18 @@ describe("masked comparison in a run diff", () => {
     }
     expect(diffRunFacts(unguarded(a), unguarded(b), { maskedSpans: true }).output.equal).toBe(true);
     expect(diffRunFacts(unguarded(a), unguarded("Card •••• •••• •••• 9876 refunded"), { maskedSpans: true }).output.equal).toBe(false);
+  });
+
+  it("does not count an unverified baseline's own guard verdicts, nor an unverified capture flag", () => {
+    const verdict = [{ nodeId: "agent", placement: "post_model", channel: "output", detectorId: "dlp.patterns", effectiveAction: "mask", shadow: false }];
+    const guarded = facts({ output: { answer: a }, guard: verdict });
+    expect(diffRunFacts(guarded, unguarded(b)).output.equal).toBe(true);
+    expect(diffRunFacts(guarded, unguarded(b), { baselineUnverified: true }).output.equal).toBe(false);
+    // The candidate's verdicts are still trusted.
+    expect(diffRunFacts(unguarded(a), facts({ output: { answer: b }, guard: verdict }), { baselineUnverified: true }).output.equal).toBe(true);
+    expect(captureExpectsMasking({ masked: true })).toBe(true);
+    expect(captureExpectsMasking({ masked: true, maskingVerified: false })).toBe(false);
+    expect(captureExpectsMasking({ masked: false })).toBe(false);
+    expect(captureExpectsMasking(undefined)).toBe(false);
   });
 });

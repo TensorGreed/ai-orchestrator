@@ -840,6 +840,51 @@ describe("golden-set files: the importer and exporter do not trust what they car
     expect(again.cases.every((entry) => entry.recording.origin === "imported")).toBe(true);
   });
 
+  it("an imported file never turns on masked comparison: a masked flag or a mask verdict in the file leaves a tampered output different", async () => {
+    const context = await createTestContext();
+    const builder = await login(context, "builder");
+    const counter = await startCounter();
+    context.store.upsertWorkflow(setWorkflow(counter.base));
+    const setId = await suite(context, builder.cookie, "wf-set", 1);
+    const file = await exportFile(context, builder.cookie, setId);
+
+    // The workflow now answers with a mask-shaped value; the file's recorded answer holds another one.
+    const variant = (edit: (recording: GoldenSetFile["cases"][number]["recording"]) => void): GoldenSetFile => {
+      const copy = JSON.parse(JSON.stringify(file)) as GoldenSetFile;
+      const recording = copy.cases[0]!.recording;
+      const label = (recording.workflow as { nodes: Array<{ id: string; config: { assignments?: Array<{ valueTemplate: string }> } }> }).nodes.find((node) => node.id === "label")!;
+      label.config.assignments![0]!.valueTemplate = "\u2022\u2022\u2022\u2022 \u2022\u2022\u2022\u2022 1111";
+      (recording.facts as { output: unknown }).output = "answer \u2022\u2022\u2022\u2022 \u2022\u2022\u2022\u2022 9999";
+      edit(recording);
+      copy.cases[0]!.scorers = [{ type: "json_equal", against: "baseline" }] as never;
+      return rehash(copy);
+    };
+    const replayed = async (candidate: GoldenSetFile) => {
+      const imported = await importFile(context, builder.cookie, candidate);
+      expect(imported.statusCode, imported.body).toBe(201);
+      const started = await call(context, "POST", "/api/replay/runs", builder.cookie, { datasetIds: [imported.json<{ dataset: { id: string } }>().dataset.id] });
+      expect(started.statusCode, started.body).toBe(202);
+      const job = await waitForJob(context, builder.cookie, started.json<{ run: EvalRunView }>().run.id);
+      expect(job.status, job.error ?? "").toBe("completed");
+      return job.summary;
+    };
+
+    // Plain tampered file: exact comparison, the answers differ.
+    expect(await replayed(variant(() => undefined))).toMatchObject({ total: 1, pass: 0, fail: 1 });
+    // The file claims a masked capture: unverified on import, so still exact.
+    expect(await replayed(variant((recording) => { (recording as { capture?: unknown }).capture = { masked: true, dataClasses: ["card_number"] }; }))).toMatchObject({ pass: 0, fail: 1 });
+    // The file carries a mask verdict that was not shadow-only: not this server's word, so still exact.
+    expect(
+      await replayed(
+        variant((recording) => {
+          (recording.facts as { guard: unknown[] }).guard = [
+            { nodeId: "label", placement: "node_output", channel: "output", detectorId: "dlp.patterns", effectiveAction: "mask", shadow: false, dataClass: "card_number" }
+          ];
+        })
+      )
+    ).toMatchObject({ pass: 0, fail: 1 });
+  }, 90_000);
+
   it("ignores secret references in the config comparison only for imported golden runs", async () => {
     const context = await createTestContext();
     const builder = await login(context, "builder");
