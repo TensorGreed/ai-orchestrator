@@ -254,7 +254,8 @@ function containsAny(value: unknown, values: readonly string[], depth = 0): bool
 export function urlContent(url: string): { url: string; query: Record<string, string>; host: string | undefined } {
   try {
     const parsed = new URL(url);
-    const query: Record<string, string> = {};
+    // No prototype: a key named `__proto__` is an ordinary key, checked like any other.
+    const query: Record<string, string> = Object.create(null) as Record<string, string>;
     for (const [key, value] of parsed.searchParams) query[key] = query[key] !== undefined ? `${query[key]} ${value}` : value;
     const bare = new URL(url);
     bare.search = "";
@@ -280,20 +281,28 @@ export function urlContent(url: string): { url: string; query: Record<string, st
  * value of a key given more than once (its values were joined for the check).
  */
 function rebuiltQuery(url: URL, rewritten: Record<string, unknown>): string | null | undefined {
-  const original: Array<[string, string[]]> = [];
+  const original = new Map<string, string[]>();
   for (const [key, value] of url.searchParams) {
-    const entry = original.find(([name]) => name === key);
-    if (entry) entry[1].push(value);
-    else original.push([key, [value]]);
+    const values = original.get(key);
+    if (values) values.push(value);
+    else original.set(key, [value]);
   }
+  // The checked record lists its keys in object order (integer-like keys first), so the original keys are
+  // lined up the same way and each rewritten pair is matched to its original by name, then by position.
+  const record: Record<string, string> = Object.create(null) as Record<string, string>;
+  for (const key of original.keys()) record[key] = "";
+  const order = Object.keys(record);
   const next = Object.entries(rewritten).map(([key, value]) => [key, typeof value === "string" ? value : JSON.stringify(value)] as const);
-  if (next.length !== original.length) return null;
-  const unchanged = next.every(([key, value], index) => key === original[index]![0] && value === original[index]![1].join(" "));
-  if (unchanged) return undefined;
+  if (next.length !== order.length) return null;
+  const sameAsOriginal = (key: string, value: string, index: number) => {
+    const values = original.get(key);
+    return key === order[index] && values !== undefined && value === values.join(" ");
+  };
+  if (next.every(([key, value], index) => sameAsOriginal(key, value, index))) return undefined;
   const params = new URLSearchParams();
   for (const [index, [key, value]] of next.entries()) {
-    const values = original[index]![1];
-    if (value === values.join(" ")) {
+    const values = original.get(order[index]!)!;
+    if (key === order[index] && value === values.join(" ")) {
       for (const item of values) params.append(key, item);
     } else if (values.length === 1) {
       params.append(key, value);

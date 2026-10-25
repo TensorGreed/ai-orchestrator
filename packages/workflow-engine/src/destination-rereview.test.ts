@@ -380,3 +380,51 @@ describe("Azure Storage: an address that comes from the secret", () => {
     expect(harness.events[0]?.verdict.destination).toEqual({ kind: "connector", id: "azure_storage", tier: "public", region: "unknown", matchedBy: "unmatched" });
   });
 });
+
+describe("round 3: query keys are checked and rewritten by name", () => {
+  it("a query key named __proto__ is checked content: HTTP Request blocks a card in it", async () => {
+    const harness = guard(BLOCK);
+    const before = received.length;
+    const result = await executeWorkflow(
+      { workflow: httpFlow({ method: "GET", urlTemplate: `${base}/q?__proto__=4111%201111%201111%201111` }), executionId: "l-e-http", webhookPayload: {} },
+      deps({ guard: harness.guard })
+    );
+    expect(result.status).toBe("error");
+    expect(received.slice(before)).toEqual([]);
+  });
+
+  it("under a redact rule the card in a __proto__ key never reaches the receiver", async () => {
+    const harness = guard(REDACT);
+    const before = received.length;
+    const result = await executeWorkflow(
+      { workflow: httpFlow({ method: "GET", urlTemplate: `${base}/q?__proto__=4111%201111%201111%201111&x=2` }), executionId: "l-e-redact", webhookPayload: {} },
+      deps({ guard: harness.guard })
+    );
+    for (const line of received.slice(before)) expect(line).not.toMatch(CARD_DIGITS);
+    if (result.status === "success") expect(received.slice(before)).toHaveLength(1);
+  });
+
+  it("Web Browse checks the same key (constructor and prototype too)", () => {
+    for (const key of ["__proto__", "constructor", "prototype"]) {
+      const request = describeEgressRequest({ type: "web_browse", name: "b", id: "b" }, { url: `https://api.example.com/q?${key}=${encodeURIComponent(CARD)}` }, {});
+      expect(JSON.stringify(request!.content)).toContain(CARD);
+      expect(Object.entries(request!.content.query as Record<string, string>)).toEqual([[key, CARD]]);
+    }
+  });
+
+  it("an integer-like key next to a repeated key is redacted, not blocked", async () => {
+    const harness = guard(REDACT);
+    const before = received.length;
+    const result = await executeWorkflow(
+      { workflow: httpFlow({ method: "GET", urlTemplate: `${base}/q?x=a&x=b&5=4111%201111%201111%201111` }), executionId: "l-f", webhookPayload: {} },
+      deps({ guard: harness.guard })
+    );
+    expect(result.status).toBe("success");
+    const sent = received.slice(before);
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).not.toMatch(CARD_DIGITS);
+    expect(sent[0]).toContain("5=[REDACTED");
+    expect(sent[0]).toContain("x=a");
+    expect(sent[0]).toContain("x=b");
+  });
+});
