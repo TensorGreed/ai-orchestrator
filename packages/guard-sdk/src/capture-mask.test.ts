@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
   decodeView,
-  maskableDataClasses,
   maskRecording,
   maskRecordingAsync,
   maskedClassesForNode,
@@ -267,16 +266,11 @@ describe("maskRecording", () => {
     expect(() => maskRecording([{ id: "input", value: { plain: "nothing here" } }, { id: "node:x", value: deep }], { key })).toThrow(MaskUnscannableError);
   });
 
-  it("keeps the visible tail only for classes a bound profile can mask", () => {
+  it("gives surrogates no real tail, whatever a bound guard profile masks", () => {
     const value = `card ${CARD} ssn ${SSN}`;
-    const full = maskRecording([{ id: "input", value }], { key }).parts[0]!.value as string;
-    const withTail = maskRecording([{ id: "input", value }], { key, visibleTailClasses: ["card_number"] }).parts[0]!.value as string;
-    const cardOf = (text: string) => text.slice(5, 5 + CARD.length);
-    expect(maskForDataClass(cardOf(withTail), "card_number")).toBe(maskForDataClass(CARD, "card_number"));
-    expect(cardOf(full).slice(-4)).not.toBe("1111");
-    // SSN has no masking profile here: full surrogate either way.
-    expect(withTail.slice(-4)).not.toBe(SSN.slice(-4));
-    expect(maskableDataClasses([createDefaultGuardProfile()])).toEqual(["card_number"]);
+    const masked = maskRecording([{ id: "input", value }], { key }).parts[0]!.value as string;
+    expect(masked.slice(5, 5 + CARD.length).slice(-4)).not.toBe(CARD.slice(-4));
+    expect(masked.slice(-4)).not.toBe(SSN.slice(-4));
   });
 
   // Re-review N3: national forms of an 8-digit national number, detected with its country code.

@@ -135,8 +135,6 @@ export interface CaptureMaskOptions {
   key: Uint8Array;
   /** The bound guard profile's dictionaries. */
   dictionaries: GuardDictionary[];
-  /** Classes a bound guard profile can mask: their surrogates keep what the mask shows. */
-  visibleTailClasses?: readonly string[];
   /** The tool names a registry server's current tool snapshot lists (`cassetteIdentifiers`). */
   catalogToolNames?: (registryServerId: string) => readonly string[];
 }
@@ -193,7 +191,6 @@ export function* maskCapturedRunSteps(run: CapturedRunParts, options: MaskRunOpt
     key: options.key,
     dictionaries: options.dictionaries,
     keepLiteralsFrom: options.keepLiteralsFrom,
-    visibleTailClasses: options.visibleTailClasses,
     identifiers: run.cassette ? cassetteIdentifiers(run.cassette, options.catalogToolNames) : []
   });
   let cursor = 0;
