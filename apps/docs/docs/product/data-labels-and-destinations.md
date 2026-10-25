@@ -110,7 +110,9 @@ labels** setting on a Guard node always wins.
 - **Session memory, the session tool cache and session artifacts** keep
   labels written while a run tracked them, so a later run that reads them
   picks them up. Memory and artifacts written before (or without) tracking
-  have no origin recorded and add nothing. A cached tool result always counts
+  have no origin recorded and add nothing; a save from a run that does not
+  track labels clears the labels stored with the memory or artifact it
+  overwrites. A cached tool result always counts
   as `untrusted_external`, whatever its row holds.
 
 On Postgres, these labels are stored by the same migration; everything else

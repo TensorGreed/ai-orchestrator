@@ -804,7 +804,8 @@ describe("session artifacts (round 1 fixes)", () => {
     readonly rows = new Map<string, { value: unknown; labels: DataLabels | null }>();
     async saveArtifact(input: { namespace: string; sessionId: string; artifactKey: string; value: unknown; labels?: DataLabels }) {
       const key = `${input.namespace}|${input.sessionId}|${input.artifactKey}`;
-      const labels = input.labels ?? this.rows.get(key)?.labels ?? null;
+      // As the stores do: an untracked save (no labels) clears them.
+      const labels = input.labels ?? null;
       this.rows.set(key, { value: input.value, labels });
       return { ...input, labels, createdAt: "now", updatedAt: "now" };
     }
@@ -835,7 +836,7 @@ describe("session artifacts (round 1 fixes)", () => {
     expect(labelsOf(loaded, "load")).toEqual(L(["user", "untrusted_external"], ["email"]));
   });
 
-  it("untracked saves store no labels and keep what was there; rows without labels add nothing", async () => {
+  it("untracked saves store no labels; rows without labels add nothing", async () => {
     const artifacts = new Artifacts();
     await executeWorkflow({ workflow: saveFlow, executionId: "s3", webhookPayload: { user_prompt: "x" } }, { ...deps({ guard: guardDeps(["default"]).guard }), sessionArtifactStore: artifacts });
     expect([...artifacts.rows.values()][0]!.labels).toBeNull();

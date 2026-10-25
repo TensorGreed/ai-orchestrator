@@ -57,11 +57,11 @@ export function createReplaySandbox(seed?: ModelMemorySeed | null): ReplaySandbo
     saveMessages: async (namespace, sessionId, messages, options) => {
       memoryWrites += 1;
       memory.set(sessionKey(namespace, sessionId), structuredClone(messages));
-      // Phase 16 — labels stay inside the sandbox like the messages do, merged with what the memory held (as the store does).
-      if (options?.labels) {
-        const key = sessionKey(namespace, sessionId);
-        memoryLabels.set(key, unionDataLabels([memoryLabels.get(key), options.labels]));
-      }
+      // Phase 16 — labels stay inside the sandbox like the messages do, merged with what the memory held (as the store
+      // does); a save without labels (an untracked run) clears them, as the store does.
+      const key = sessionKey(namespace, sessionId);
+      if (options?.labels) memoryLabels.set(key, unionDataLabels([memoryLabels.get(key), options.labels]));
+      else memoryLabels.delete(key);
     },
     loadLabels: async (namespace, sessionId) => structuredClone(memoryLabels.get(sessionKey(namespace, sessionId)) ?? null)
   };
@@ -88,9 +88,9 @@ export function createReplaySandbox(seed?: ModelMemorySeed | null): ReplaySandbo
       artifactWrites += 1;
       const key = `${sessionKey(input.namespace, input.sessionId)}\u0000${input.artifactKey}`;
       const now = new Date().toISOString();
-      // Phase 16 — like the store: labels given replace the stored ones, a save without them keeps them.
+      // Phase 16 — like the store: labels given replace the stored ones, a save without them clears them.
       const previous = artifacts.get(key);
-      const labels = input.labels ?? previous?.labels ?? null;
+      const labels = input.labels ?? null;
       const record: AgentSessionArtifactRecord = { ...input, labels: labels ? structuredClone(labels) : null, createdAt: previous?.createdAt ?? now, updatedAt: now };
       artifacts.set(key, record);
       return record;

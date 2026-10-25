@@ -4411,9 +4411,10 @@ export class SqliteStore {
   }
 
   /**
-   * Saves a session's memory. `labels` (Phase 16) are written only when
-   * given (the run tracks labels), merged with the labels already stored;
-   * without them the stored labels are left as they are.
+   * Saves a session's memory. `labels` (Phase 16) are given only while the
+   * run tracks labels and are merged with the labels already stored; a save
+   * without them (an untracked run) clears the stored labels, since the
+   * memory it writes has no recorded origin.
    */
   saveSessionMemory(namespace: string, sessionId: string, messages: ChatMessage[], labels?: DataLabels): void {
     const existing = this.queryOne<SessionMemoryRow>(
@@ -4439,10 +4440,11 @@ export class SqliteStore {
       );
     } else {
       this.exec(
-        `INSERT INTO session_memory (namespace, session_id, messages_json, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?)
+        `INSERT INTO session_memory (namespace, session_id, messages_json, labels_json, created_at, updated_at)
+         VALUES (?, ?, ?, NULL, ?, ?)
          ON CONFLICT(namespace, session_id) DO UPDATE SET
            messages_json = excluded.messages_json,
+           labels_json = NULL,
            updated_at = excluded.updated_at`,
         [namespace, sessionId, JSON.stringify(messages), createdAt, now]
       );
@@ -4652,8 +4654,9 @@ export class SqliteStore {
 
   /**
    * Saves a session artifact. `labels` (Phase 16) are given only while the
-   * run tracks labels and replace the stored ones with the value; without
-   * them the stored labels are left as they are (never laundered away).
+   * run tracks labels and replace the stored ones with the value; a save
+   * without them (an untracked run) clears them: the new value has no
+   * recorded origin.
    */
   saveSessionArtifact(input: {
     namespace: string;
@@ -4680,25 +4683,21 @@ export class SqliteStore {
     const createdAt = existing ? toString(existing.created_at) : now;
     const labels = input.labels && !isEmptyDataLabels(input.labels) ? input.labels : undefined;
 
+    // Phase 16 — the value is replaced, so are its labels: an untracked save (no labels) leaves none, its value has
+    // no recorded origin.
     this.exec(
-      labels
-        ? `INSERT INTO session_artifacts (namespace, session_id, artifact_key, value_json, labels_json, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?)
-           ON CONFLICT(namespace, session_id, artifact_key) DO UPDATE SET
-             value_json = excluded.value_json,
-             labels_json = excluded.labels_json,
-             updated_at = excluded.updated_at`
-        : `INSERT INTO session_artifacts (namespace, session_id, artifact_key, value_json, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?)
-           ON CONFLICT(namespace, session_id, artifact_key) DO UPDATE SET
-             value_json = excluded.value_json,
-             updated_at = excluded.updated_at`,
+      `INSERT INTO session_artifacts (namespace, session_id, artifact_key, value_json, labels_json, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(namespace, session_id, artifact_key) DO UPDATE SET
+         value_json = excluded.value_json,
+         labels_json = excluded.labels_json,
+         updated_at = excluded.updated_at`,
       [
         input.namespace,
         input.sessionId,
         input.artifactKey,
         JSON.stringify(input.value ?? null),
-        ...(labels ? [JSON.stringify({ ...labels, source: "propagated" })] : []),
+        labels ? JSON.stringify({ ...labels, source: "propagated" }) : null,
         createdAt,
         now
       ]

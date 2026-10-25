@@ -837,7 +837,7 @@ export class PostgresStore {
     return row ? parseStoredDataLabels(row.labels_json) : null;
   }
 
-  /** Saves a session's memory; `labels` (Phase 16) only while the run tracks labels, merged with the stored ones. */
+  /** Saves a session's memory; `labels` (Phase 16) only while the run tracks labels, merged with the stored ones; none clears them. */
   async saveSessionMemory(namespace: string, sessionId: string, messages: ChatMessage[], labels?: DataLabels): Promise<void> {
     const row = await this.queryOne<{ created_at: string; labels_json: string | null }>(
       `SELECT created_at, labels_json FROM session_memory WHERE namespace = $1 AND session_id = $2`,
@@ -859,11 +859,13 @@ export class PostgresStore {
       );
       return;
     }
+    // An untracked save clears the stored labels: the memory it writes has no recorded origin.
     await this.execute(
-      `INSERT INTO session_memory (namespace, session_id, messages_json, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5)
+      `INSERT INTO session_memory (namespace, session_id, messages_json, labels_json, created_at, updated_at)
+       VALUES ($1, $2, $3, NULL, $4, $5)
        ON CONFLICT (namespace, session_id) DO UPDATE SET
          messages_json = EXCLUDED.messages_json,
+         labels_json = NULL,
          updated_at = EXCLUDED.updated_at`,
       [namespace, sessionId, JSON.stringify(messages), createdAt, now]
     );
@@ -1077,7 +1079,7 @@ export class PostgresStore {
   // Session Artifacts
   // ---------------------------------------------------------------------------
 
-  /** Saves a session artifact; `labels` (Phase 16) only while the run tracks labels, replacing the stored ones. */
+  /** Saves a session artifact; `labels` (Phase 16) only while the run tracks labels, replacing the stored ones (none clears them). */
   async saveSessionArtifact(input: {
     namespace: string;
     sessionId: string;
@@ -1103,26 +1105,16 @@ export class PostgresStore {
     const createdAt = existing ? toStr(existing.created_at) : now;
 
     const labels = input.labels && !isEmptyDataLabels(input.labels) ? input.labels : undefined;
-    if (labels) {
-      await this.execute(
-        `INSERT INTO session_artifacts (namespace, session_id, artifact_key, value_json, labels_json, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)
-         ON CONFLICT (namespace, session_id, artifact_key) DO UPDATE SET
-           value_json = EXCLUDED.value_json,
-           labels_json = EXCLUDED.labels_json,
-           updated_at = EXCLUDED.updated_at`,
-        [input.namespace, input.sessionId, input.artifactKey, JSON.stringify(input.value ?? null), JSON.stringify({ ...labels, source: "propagated" }), createdAt, now]
-      );
-    } else {
-      await this.execute(
-        `INSERT INTO session_artifacts (namespace, session_id, artifact_key, value_json, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6)
-         ON CONFLICT (namespace, session_id, artifact_key) DO UPDATE SET
-           value_json = EXCLUDED.value_json,
-           updated_at = EXCLUDED.updated_at`,
-        [input.namespace, input.sessionId, input.artifactKey, JSON.stringify(input.value ?? null), createdAt, now]
-      );
-    }
+    // The value is replaced, so are its labels: an untracked save (no labels) leaves none.
+    await this.execute(
+      `INSERT INTO session_artifacts (namespace, session_id, artifact_key, value_json, labels_json, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       ON CONFLICT (namespace, session_id, artifact_key) DO UPDATE SET
+         value_json = EXCLUDED.value_json,
+         labels_json = EXCLUDED.labels_json,
+         updated_at = EXCLUDED.updated_at`,
+      [input.namespace, input.sessionId, input.artifactKey, JSON.stringify(input.value ?? null), labels ? JSON.stringify({ ...labels, source: "propagated" }) : null, createdAt, now]
+    );
 
     return {
       namespace: input.namespace,
