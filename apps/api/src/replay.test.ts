@@ -269,7 +269,8 @@ function rawRows(context: TestContext): string {
   }
 }
 
-describe("golden runs with side effects stubbed", () => {
+// ~2 s of fixed waits plus polling per test: CI's 2-core runners need more than vitest's 5 s default.
+describe("golden runs with side effects stubbed", { timeout: 30_000 }, () => {
   it("saves a golden run and replays it without calling Slack, outbound HTTP or a live MCP server", async () => {
     const context = await createTestContext();
     const admin = await login(context, "admin");
