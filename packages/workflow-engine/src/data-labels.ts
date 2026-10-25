@@ -3,7 +3,7 @@ import { scanDlp, type GuardDictionary } from "@ai-orchestrator/guard-sdk";
 import {
   emptyDataLabels,
   isEmptyDataLabels,
-  mergeDataLabels,
+  unionDataLabels,
   nodeContentSource,
   orderedProvenance,
   parseStoredDataLabels,
@@ -43,9 +43,7 @@ export function labelsOf(provenance: Iterable<ProvenanceLabel>, dataClasses: Ite
 
 /** The union of label sets (missing parts ignored); always source `propagated`. */
 export function unionLabels(parts: ReadonlyArray<DataLabels | null | undefined>): DataLabels {
-  const present = parts.filter((part): part is DataLabels => Boolean(part));
-  const merged = mergeDataLabels(present);
-  return merged ? { ...merged, source: "propagated" } : emptyDataLabels();
+  return unionDataLabels(parts);
 }
 
 // ---------------------------------------------------------------------------
@@ -134,9 +132,23 @@ function bracketArgument(source: string, openIndex: number, open: string, close:
  * node in context. Over-reporting is the safe direction: a label is never
  * dropped because an expression was clever.
  */
+/**
+ * Names that reach the whole evaluation scope (or the global object) and so
+ * every value in it: the sandbox evaluates inside `with (__scope)` in a
+ * plain function, where `arguments[0]` and `__scope` are the scope itself.
+ * Seeing one means the expression could read anything.
+ */
+const SCOPE_ESCAPES = /(?<![\w$])(arguments|__scope|this|globalThis|self|global|window|eval|Function|Reflect|Proxy|constructor|__proto__|__l2mRun)(?![\w$])/;
+/** A computed property named like a scope escape (`x["constructor"]`). */
+const ESCAPE_KEY = /\[\s*(["'`])\s*(constructor|__proto__|prototype)\s*\1\s*\]/;
+
 export function referencesInExpression(expression: string): TemplateReferences {
   const out: TemplateReferences = { nodes: [], all: false, heads: [] };
   const source = expression;
+  // A template literal with `${ }` holds code the string blanking below would hide: not understood, so everything.
+  if (/`[^`]*\$\{/.test(source) || ESCAPE_KEY.test(source)) {
+    out.all = true;
+  }
   // String contents blanked out (same length, so indexes match the source): a root inside a string is not a read.
   const blanked = source.replace(STRING_LITERAL, (literal) => literal[0] + " ".repeat(literal.length - 2) + literal[literal.length - 1]);
   // Every occurrence of a data root, outside property access (`a.results` is not the root).
@@ -207,6 +219,7 @@ export function referencesInExpression(expression: string): TemplateReferences {
     // parent_outputs: direct parents count anyway; a literal name is still recorded.
     if (!dynamic && segments[0]) out.nodes.push(segments[0]);
   }
+  if (SCOPE_ESCAPES.test(blanked)) out.all = true;
   // Bare names outside string literals: run inputs such as `user_prompt` (`a.b` property names are skipped).
   const withoutStrings = blanked;
   for (const match of withoutStrings.matchAll(/(?<![\w$.])([A-Za-z_][\w$]*)(?![\w$])/g)) {
@@ -302,9 +315,10 @@ export class RunLabelState {
     this.scan = options.tracked ? options.scan : undefined;
   }
 
-  static fromState(state: WorkflowExecutionState["dataLabels"], scan?: (value: unknown) => string[]): RunLabelState | undefined {
+  /** A paused run's labels; it tracks when it did at the pause or does now (`trackedNow`). */
+  static fromState(state: WorkflowExecutionState["dataLabels"], scan?: (value: unknown) => string[], trackedNow = false): RunLabelState | undefined {
     if (!state) return undefined;
-    const run = new RunLabelState({ input: parseStoredDataLabels(state.input) ?? emptyDataLabels(), tracked: state.tracked === true, scan });
+    const run = new RunLabelState({ input: parseStoredDataLabels(state.input) ?? emptyDataLabels(), tracked: state.tracked === true || trackedNow, scan });
     for (const [nodeId, labels] of Object.entries(state.nodes ?? {})) {
       const parsed = parseStoredDataLabels(labels);
       run.nodes.set(nodeId, parsed ?? emptyDataLabels());
@@ -344,6 +358,11 @@ export class RunLabelState {
     return labels && !isEmptyDataLabels(labels) ? { labels } : {};
   }
 
+  /** The run's data-class scanner, on tracked runs only (others never scan). */
+  get scanner(): ((value: unknown) => string[]) | undefined {
+    return this.scan;
+  }
+
   /** The labels of a finished output: the base, minus declassified classes, plus what a scan finds (tracked runs only). */
   finalize(base: DataLabels, output: unknown, declassified: readonly string[] = []): DataLabels {
     let labels = withoutDataClasses(base, declassified);
@@ -360,9 +379,18 @@ export class RunLabelState {
   }
 }
 
+/** What a node (or one part of it) read: nodes named, everything in context, the run input. */
+class Reads {
+  readonly nodes = new Set<string>();
+  all = false;
+  input = false;
+}
+
 /**
  * One node's labels while it runs: its own source and parents, plus what
  * it reads through templates and what its handler adds or declassifies.
+ * A node with no parent that ran (a root) reads the run input as well:
+ * handlers read the run's globals directly.
  */
 export class NodeLabelScope {
   readonly nodeId: string;
@@ -371,9 +399,10 @@ export class NodeLabelScope {
   private readonly base: DataLabels;
   private readonly merged: Record<string, unknown>;
   private readonly globals: Record<string, unknown>;
-  private readonly readNodes = new Set<string>();
-  private readAll = false;
-  private readInput = false;
+  private readonly reads = new Reads();
+  /** Reads of named parts (an agent's user prompt), kept apart so a rewrite of that part can declassify it alone. */
+  private readonly segments = new Map<string, Reads>();
+  private target: Reads;
   private readonly added: DataLabels[] = [];
   private replaced?: DataLabels;
   private readonly declassified = new Set<string>();
@@ -387,9 +416,10 @@ export class NodeLabelScope {
     this.nodeType = input.nodeType;
     this.merged = input.merged ?? {};
     this.globals = input.globals ?? {};
+    this.target = this.reads;
     const source = nodeContentSource(input.nodeType);
-    const own = source === "input" ? run.input : source === "external" ? labelsOf(["untrusted_external"]) : undefined;
-    this.base = unionLabels([own, ...input.parents]);
+    const own = source === "input" || input.parents.length === 0 ? run.input : undefined;
+    this.base = unionLabels([own, source === "external" ? labelsOf(["untrusted_external"]) : undefined, ...input.parents]);
   }
 
   /** A scope for a node this one runs on its behalf (a supervisor's worker), starting from the given labels. */
@@ -398,14 +428,15 @@ export class NodeLabelScope {
   }
 
   private applyReferences(references: TemplateReferences): void {
-    for (const nodeId of references.nodes) if (this.run.has(nodeId)) this.readNodes.add(nodeId);
-    if (references.all) this.readAll = true;
-    if (this.readInput) return;
+    const reads = this.target;
+    for (const nodeId of references.nodes) if (this.run.has(nodeId)) reads.nodes.add(nodeId);
+    if (references.all) reads.all = true;
+    if (reads.input) return;
     for (const head of references.heads) {
       // A parent's field is the parent's data (already counted); a run global is the run's input.
       if (Object.prototype.hasOwnProperty.call(this.merged, head)) continue;
       if (Object.prototype.hasOwnProperty.call(this.globals, head) && !NON_INPUT_GLOBALS.has(head)) {
-        this.readInput = true;
+        reads.input = true;
         return;
       }
     }
@@ -421,10 +452,76 @@ export class NodeLabelScope {
     this.applyReferences(referencesInExpression(expression));
   }
 
-  /** The node could read anything in context (a code node). */
+  /** The node could read anything in context (a code node, a save of the whole template data). */
   readEverything(): void {
-    this.readAll = true;
-    this.readInput = true;
+    this.target.all = true;
+    this.target.input = true;
+  }
+
+  /** The handler read the run's globals directly (the run input). */
+  readRunInput(): void {
+    this.target.input = true;
+  }
+
+  /**
+   * Runs `body` with its reads recorded under `name` instead of the node's
+   * other reads (they still count in `inputLabels`). Synchronous bodies only:
+   * an await inside would let other reads land in the segment.
+   */
+  segment<T>(name: string, body: () => T): T {
+    const previous = this.target;
+    let reads = this.segments.get(name);
+    if (!reads) {
+      reads = new Reads();
+      this.segments.set(name, reads);
+    }
+    this.target = reads;
+    try {
+      return body();
+    } finally {
+      this.target = previous;
+    }
+  }
+
+  /** Like `segment`, for an asynchronous body: every read until it settles lands in the segment. */
+  async segmentAsync<T>(name: string, body: () => Promise<T>): Promise<T> {
+    const previous = this.target;
+    let reads = this.segments.get(name);
+    if (!reads) {
+      reads = new Reads();
+      this.segments.set(name, reads);
+    }
+    this.target = reads;
+    try {
+      return await body();
+    } finally {
+      this.target = previous;
+    }
+  }
+
+  private labelsOfReads(reads: Reads): Array<DataLabels | undefined> {
+    return [
+      ...[...reads.nodes].map((nodeId) => this.run.get(nodeId)),
+      reads.all ? this.run.everything() : undefined,
+      reads.input ? this.run.input : undefined
+    ];
+  }
+
+  /** The labels of what was read inside one segment (nothing else). */
+  segmentLabels(name: string): DataLabels {
+    const reads = this.segments.get(name);
+    return reads ? unionLabels(this.labelsOfReads(reads)) : emptyDataLabels();
+  }
+
+  /** The node's input labels without the reads of the named segments. */
+  inputLabelsExcept(names: readonly string[]): DataLabels {
+    const skip = new Set(names);
+    return unionLabels([
+      this.base,
+      ...this.labelsOfReads(this.reads),
+      ...[...this.segments].filter(([name]) => !skip.has(name)).flatMap(([, reads]) => this.labelsOfReads(reads)),
+      ...this.added
+    ]);
   }
 
   /** Labels the handler learned at run time (memory it read, a fetched result). */
@@ -444,13 +541,7 @@ export class NodeLabelScope {
 
   /** The labels of what the node has read so far (its input). */
   inputLabels(): DataLabels {
-    return unionLabels([
-      this.base,
-      ...[...this.readNodes].map((nodeId) => this.run.get(nodeId)),
-      this.readAll ? this.run.everything() : undefined,
-      this.readInput ? this.run.input : undefined,
-      ...this.added
-    ]);
+    return this.inputLabelsExcept([]);
   }
 
   /** The labels before the output is scanned: input (or the replacement) minus declassified classes. */

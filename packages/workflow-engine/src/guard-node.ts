@@ -116,6 +116,8 @@ export async function executeGuardNodeStep(input: {
 }): Promise<Record<string, unknown>> {
   const config = parseGuardNodeConfig(input.node);
   const { profiles, resolution } = await resolveGuardNodeProfiles(input.scope.guard, config, protectionBindingsFromNodes(input.protectionNodes));
+  // Phase 16 — the inspected field is a read: from a parent's item, else the run input.
+  input.labelScope?.readPath(config.inputField);
   const fromItem = readPath(input.merged, config.inputField);
   const value = fromItem !== undefined ? fromItem : readPath(input.globals, config.inputField);
   const propagated = input.labelScope && profilesUsePropagatedLabels(profiles) ? input.labelScope.inputLabels().provenance : undefined;

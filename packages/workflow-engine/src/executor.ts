@@ -16,7 +16,7 @@ import {
   withDelegatedUser
 } from "@ai-orchestrator/mcp-sdk";
 import type { ProviderExecutionContext, ProviderRegistry, ResilientFetchRetryInfo } from "@ai-orchestrator/provider-sdk";
-import { GUARD_EFFECTIVE_PROFILE_REF, NODE_ACTIVITY_LIMIT, NODE_ACTIVITY_PREVIEW_CHARS, inputProvenance } from "@ai-orchestrator/shared";
+import { GUARD_EFFECTIVE_PROFILE_REF, NODE_ACTIVITY_LIMIT, NODE_ACTIVITY_PREVIEW_CHARS, inputProvenance, nodeContentSource, withoutDataClasses } from "@ai-orchestrator/shared";
 import type {
   DataLabels,
   ApprovalDecisionValue,
@@ -144,6 +144,9 @@ import {
 } from "./data-labels";
 
 const MAX_SUB_WORKFLOW_DEPTH = 10;
+/** Phase 16 — label segments of an agent node: its user prompt's reads, and reads made while its loop runs. */
+const AGENT_USER_PROMPT_SEGMENT = "user_prompt";
+const AGENT_RUN_SEGMENT = "agent_run";
 
 export interface WorkflowExecutionDependencies {
   providerRegistry: ProviderRegistry;
@@ -295,6 +298,8 @@ export interface AgentSessionArtifactRecord {
   sessionId: string;
   artifactKey: string;
   value: unknown;
+  /** Phase 16 — labels of what the saving run put in the artifact; absent or null when it did not track labels. */
+  labels?: DataLabels | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -305,6 +310,8 @@ export interface AgentSessionArtifactStore {
     sessionId: string;
     artifactKey: string;
     value: unknown;
+    /** Phase 16 — given only while the run tracks labels; replaces the stored labels with the value. */
+    labels?: DataLabels;
   }): Promise<AgentSessionArtifactRecord>;
   loadArtifact(input: {
     namespace: string;
@@ -1254,6 +1261,12 @@ function isErrorLikeOutput(output: unknown): boolean {
  * templateData.result.documents. Returns undefined when any segment is
  * missing rather than throwing — the citation node handles it gracefully.
  */
+/** Phase 16 — a configured path into a node's template data (a chart's data, citations' answer): recorded as a read. */
+function resolveDottedPathRead(templateData: Record<string, unknown>, path: string): unknown {
+  currentLabelScope()?.readPath(path);
+  return resolveDottedPath(templateData, path);
+}
+
 function resolveDottedPath(value: unknown, path: string): unknown {
   if (!path) return value;
   let current: unknown = value;
@@ -1694,6 +1707,18 @@ function normalizeLookupPath(path: string): string {
   }
 
   return trimmed;
+}
+
+/** Phase 16 — a handler's direct read of one top-level template value, recorded like a `{{ key }}` path. */
+function readData(templateData: Record<string, unknown>, key: string): unknown {
+  currentLabelScope()?.readPath(key);
+  return templateData[key];
+}
+
+/** Phase 16 — a handler uses the whole template data: every node in context and the run input. */
+function readWholeData<T extends Record<string, unknown>>(templateData: T): T {
+  currentLabelScope()?.readEverything();
+  return templateData;
 }
 
 function getValueByPath(input: Record<string, unknown>, path: string): unknown {
@@ -3173,10 +3198,12 @@ async function executeNodeHandler(
         ? config.rules.map((entry) => toRecord(entry))
         : [];
       const onFail = config.onFail === "branch" ? "branch" : "error";
+      // Phase 16 — the validator reads the run's globals directly: the run input.
+      context.labelScope?.readRunInput();
       const payloadSources = [
         toRecord(context.globals.webhook),
         toRecord(context.globals),
-        toRecord(templateData.input)
+        toRecord(readData(templateData, "input"))
       ];
       const payload = Object.assign({}, ...payloadSources);
       const errors: Array<{ field: string; check: string; message: string }> = [];
@@ -3340,7 +3367,7 @@ async function executeNodeHandler(
         const expectedRaw =
           typeof cond.value === "string" ? renderTemplate(String(cond.value), templateData) : cond.value;
 
-        let actual: unknown = templateData[field];
+        let actual: unknown = readData(templateData, field);
         if (actual === undefined) actual = getValueByPath(templateData, field);
 
         const actualStr = actual == null ? "" : String(actual);
@@ -3481,7 +3508,7 @@ async function executeNodeHandler(
           continue;
         }
 
-        let mappedValue = templateData[parentPath];
+        let mappedValue = readData(templateData, parentPath);
         context.labelScope?.readPath(parentPath);
         if (mappedValue === undefined) {
           mappedValue = getValueByPath(templateData, parentPath);
@@ -3691,8 +3718,8 @@ async function executeNodeHandler(
         templateData,
         context,
         dependencies,
-        userPrompt: String(templateData[promptKey] ?? templateData.user_prompt ?? ""),
-        systemPrompt: String(templateData[systemPromptKey] ?? "")
+        userPrompt: String(readData(templateData, promptKey) ?? readData(templateData, "user_prompt") ?? ""),
+        systemPrompt: String(readData(templateData, systemPromptKey) ?? "")
       });
       const output = await runLlmNode({
         nodeId: node.id,
@@ -3723,8 +3750,8 @@ async function executeNodeHandler(
         templateData,
         context,
         dependencies,
-        userPrompt: String(templateData[promptKey] ?? templateData.user_prompt ?? ""),
-        systemPrompt: String(templateData[systemPromptKey] ?? "")
+        userPrompt: String(readData(templateData, promptKey) ?? readData(templateData, "user_prompt") ?? ""),
+        systemPrompt: String(readData(templateData, systemPromptKey) ?? "")
       });
       const output = await runLlmNode({
         nodeId: node.id,
@@ -3751,8 +3778,8 @@ async function executeNodeHandler(
         templateData,
         context,
         dependencies,
-        userPrompt: String(templateData[promptKey] ?? templateData.user_prompt ?? ""),
-        systemPrompt: String(templateData[systemPromptKey] ?? "")
+        userPrompt: String(readData(templateData, promptKey) ?? readData(templateData, "user_prompt") ?? ""),
+        systemPrompt: String(readData(templateData, systemPromptKey) ?? "")
       });
       const provider: LLMProviderConfig = {
         providerId: "azure_openai",
@@ -3788,8 +3815,8 @@ async function executeNodeHandler(
 
       const promptKey = typeof config.promptKey === "string" ? config.promptKey : "prompt";
       const systemPromptKey = typeof config.systemPromptKey === "string" ? config.systemPromptKey : "system_prompt";
-      const userPrompt = String(templateData[promptKey] ?? templateData.user_prompt ?? "");
-      const systemPrompt = String(templateData[systemPromptKey] ?? "");
+      const userPrompt = String(readData(templateData, promptKey) ?? readData(templateData, "user_prompt") ?? "");
+      const systemPrompt = String(readData(templateData, systemPromptKey) ?? "");
       const provider: LLMProviderConfig = {
         providerId: "gemini",
         model,
@@ -3939,7 +3966,7 @@ async function executeNodeHandler(
       const separator = typeof config.separator === "string" ? config.separator : "\n\n";
       const strategy = typeof config.strategy === "string" ? config.strategy : "separator";
 
-      const upstreamDocs = normalizeDocuments(templateData.documents);
+      const upstreamDocs = normalizeDocuments(readData(templateData, "documents"));
       const chunkedDocs: ConnectorDocument[] = [];
 
       if (strategy === "separator") {
@@ -4064,7 +4091,7 @@ async function executeNodeHandler(
 
       const inputKey = typeof config.inputKey === "string" && config.inputKey.trim() ? config.inputKey.trim() : "user_prompt";
       const outputKey = typeof config.outputKey === "string" && config.outputKey.trim() ? config.outputKey.trim() : "embedding";
-      const inputText = String(templateData[inputKey] ?? templateData.user_prompt ?? "");
+      const inputText = String(readData(templateData, inputKey) ?? readData(templateData, "user_prompt") ?? "");
       if (!inputText.trim()) {
         throw new Error("Embeddings Azure OpenAI requires non-empty input text.");
       }
@@ -4101,7 +4128,7 @@ async function executeNodeHandler(
       const topK = typeof config.topK === "number" && config.topK > 0 ? Math.floor(config.topK) : 3;
 
       const inlineDocs = normalizeDocuments(config.documents);
-      const upstreamDocs = normalizeDocuments(templateData.documents);
+      const upstreamDocs = normalizeDocuments(readData(templateData, "documents"));
       const allDocs = [...upstreamDocs, ...inlineDocs];
 
       const embedderId = typeof config.embedderId === "string" ? config.embedderId : "token-embedder";
@@ -4327,7 +4354,7 @@ async function executeNodeHandler(
       const topN = typeof config.topN === "number" && config.topN > 0 ? Math.floor(config.topN) : 3;
       const providerId = typeof config.providerId === "string" ? config.providerId : "cohere";
 
-      const upstreamDocs = normalizeDocuments(templateData.documents);
+      const upstreamDocs = normalizeDocuments(readData(templateData, "documents"));
       if (upstreamDocs.length === 0) {
         return { query, documents: [], context: "" };
       }
@@ -4491,7 +4518,7 @@ async function executeNodeHandler(
       const dataPath = typeof config.dataPath === "string" && config.dataPath.trim()
         ? config.dataPath.trim()
         : undefined;
-      const dataValue = dataPath ? resolveDottedPath(templateData, dataPath) : undefined;
+      const dataValue = dataPath ? resolveDottedPathRead(templateData, dataPath) : undefined;
       const data = Array.isArray(dataValue) ? dataValue : undefined;
 
       const width = typeof config.width === "number" && config.width > 0 ? Math.floor(config.width) : undefined;
@@ -4544,13 +4571,13 @@ async function executeNodeHandler(
         ? config.documentsPath.trim()
         : "documents";
 
-      const answerRaw = resolveDottedPath(templateData, answerPath);
+      const answerRaw = resolveDottedPathRead(templateData, answerPath);
       const answer = typeof answerRaw === "string"
         ? answerRaw
         : answerRaw === undefined || answerRaw === null
           ? ""
           : String(answerRaw);
-      const documents = normalizeDocuments(resolveDottedPath(templateData, documentsPath));
+      const documents = normalizeDocuments(resolveDottedPathRead(templateData, documentsPath));
 
       const result = extractCitationsFromText(answer, documents);
       return {
@@ -4583,7 +4610,7 @@ async function executeNodeHandler(
 
       const messages = await dependencies.memoryStore.loadMessages(namespace, sessionId);
       // Phase 16 — what earlier runs stored with this memory comes along (older rows have no labels: nothing added).
-      if (context.labelScope && messages.length > 0 && dependencies.memoryStore.loadLabels) {
+      if (context.labelScope?.run.tracked && messages.length > 0 && dependencies.memoryStore.loadLabels) {
         context.labelScope.add(await dependencies.memoryStore.loadLabels(namespace, sessionId));
       }
       return {
@@ -4617,6 +4644,8 @@ async function executeNodeHandler(
 
       const record = await dependencies.sessionArtifactStore.loadArtifact(scope);
       const artifact = record?.value ?? null;
+      // Phase 16 — what the run that saved it read comes along (rows saved while labels were not tracked add nothing).
+      context.labelScope?.add(record?.labels ?? null);
       return {
         ...context.merged,
         namespace: scope.namespace,
@@ -4646,6 +4675,8 @@ async function executeNodeHandler(
       const scope = resolveSessionArtifactScope(config, templateData, context.workflow, node);
       const outputKey = typeof config.outputKey === "string" && config.outputKey.trim() ? config.outputKey.trim() : "saved_artifact";
       const value = buildSessionArtifactValue(config, templateData);
+      // Phase 16 — without configured fields the whole template data is saved: every completed node and the run input.
+      if (value === templateData) context.labelScope?.readEverything();
       if (!scope.sessionId) {
         return {
           ...context.merged,
@@ -4659,10 +4690,15 @@ async function executeNodeHandler(
         };
       }
 
-      const record = await dependencies.sessionArtifactStore.saveArtifact({
+      // Phase 16 — on a tracked run the artifact keeps the labels of what it saved, for the runs that load it.
+      const artifactLabels = context.labelScope?.run.tracked ? context.labelScope.inputLabels() : undefined;
+      const saved = await dependencies.sessionArtifactStore.saveArtifact({
         ...scope,
-        value
+        value,
+        ...(artifactLabels ? { labels: artifactLabels } : {})
       });
+      // Labels stay beside outputs, never inside them.
+      const { labels: _savedLabels, ...record } = saved;
       return {
         ...context.merged,
         namespace: record.namespace,
@@ -4986,7 +5022,10 @@ async function executeNodeHandler(
       const userTemplate = typeof config.userPromptTemplate === "string" ? config.userPromptTemplate : "{{user_prompt}}";
       const sessionTemplate = typeof config.sessionIdTemplate === "string" ? config.sessionIdTemplate : "{{session_id}}";
       let systemPrompt = renderTemplate(systemTemplate, templateData);
-      let userPrompt = renderTemplate(userTemplate, templateData);
+      // Phase 16 — the user prompt's reads are kept apart: a guard rewrite of the prompt declassifies them alone.
+      let userPrompt = context.labelScope
+        ? context.labelScope.segment(AGENT_USER_PROMPT_SEGMENT, () => renderTemplate(userTemplate, templateData))
+        : renderTemplate(userTemplate, templateData);
       // Phase 10.5 — a registry server prompt can replace the system or user prompt; it is fetched below.
       const serverPromptBinding = readServerPromptBinding(config.serverPrompt);
 
@@ -5109,6 +5148,8 @@ async function executeNodeHandler(
           });
           if (resolvedPrompt.target === "user") userPrompt = resolvedPrompt.text;
           else systemPrompt = resolvedPrompt.text;
+          // Phase 16 — a prompt an MCP server wrote is outside content.
+          context.labelScope?.add(labelsOf(["untrusted_external"]));
           serverPromptUsed = serverPromptTrace(resolvedPrompt);
         }
         if (systemPrompt.trim()) {
@@ -5202,7 +5243,7 @@ async function executeNodeHandler(
           ...workerTools
         ];
 
-        const rawImages = Array.isArray(templateData.images) ? templateData.images as Array<{data: string; mimeType: string}> : [];
+        const rawImages = Array.isArray(readData(templateData, "images")) ? readData(templateData, "images") as Array<{data: string; mimeType: string}> : [];
         const images = rawImages.filter(img => img && typeof img.data === "string" && img.data && typeof img.mimeType === "string" && img.mimeType.startsWith("image/"));
 
 
@@ -5248,14 +5289,15 @@ async function executeNodeHandler(
           }
         });
         const agentProviderRetry = providerCallContext(dependencies, node.id).onRetry;
-        // Phase 16 — the labels of each worker's last result, keyed by the tool name the model called.
+        // Phase 16 — the labels of each worker call's result, keyed by tool name and call id.
         const workerResultLabels = new Map<string, DataLabels>();
+        const workerResultKey = (toolName: string, toolCallId: string | undefined) => `${toolName}\u0000${toolCallId ?? ""}`;
         const labelScope = context.labelScope;
         const modelRunStarted = Date.now();
         const modelRunStartedAt = nowIso();
         let agentState: Awaited<ReturnType<typeof dependencies.agentRuntime.run>>;
         try {
-        agentState = await dependencies.agentRuntime.run(
+        const runAgent = () => dependencies.agentRuntime.run(
           {
             provider,
             systemPrompt,
@@ -5277,7 +5319,7 @@ async function executeNodeHandler(
             ],
             describeUnavailableTool: (toolName) => resolvedTools.describeBlocked(toolName),
             // Phase 16 — a worker's result carries the worker's labels; any other tool's result is external.
-            resultLabels: (toolName) => workerResultLabels.get(toolName),
+            resultLabels: (toolName, toolCallId) => workerResultLabels.get(workerResultKey(toolName, toolCallId)),
             invokeTool: async (toolName, args, invocation) => {
                const matchingWorker = workerTools.find(wt => wt.name === toolName);
                if (matchingWorker) {
@@ -5303,7 +5345,7 @@ async function executeNodeHandler(
                       ...dependencies,
                       activityRecorder: workerActivityRecorder(dependencies.activityRecorder, node.id)
                     });
-                    if (workerScope) workerResultLabels.set(toolName, workerScope.finish(workerResult));
+                    if (workerScope) workerResultLabels.set(workerResultKey(toolName, invocation?.toolCallId), workerScope.finish(workerResult));
                     return workerResult;
                   } catch (error) {
                     if (isApprovalHandoffSignal(error)) {
@@ -5363,13 +5405,24 @@ async function executeNodeHandler(
             callSite: { nodeId: node.id },
             memoryStore: dependencies.memoryStore,
             toolDataStore: dependencies.toolDataStore,
-            ...(labelScope ? { dataLabels: { input: labelScope.inputLabels(), persist: labelScope.run.tracked } } : {}),
+            ...(labelScope
+              ? {
+                  dataLabels: {
+                    input: labelScope.inputLabelsExcept([AGENT_USER_PROMPT_SEGMENT]),
+                    prompt: labelScope.segmentLabels(AGENT_USER_PROMPT_SEGMENT),
+                    persist: labelScope.run.tracked,
+                    ...(labelScope.run.scanner ? { scan: labelScope.run.scanner } : {})
+                  }
+                }
+              : {}),
             ...(guardSession ? { guard: guardSession.hooks } : {}),
             ...(dependencies.abortSignal ? { signal: dependencies.abortSignal } : {}),
             ...(agentProviderRetry ? { onProviderRetry: agentProviderRetry } : {}),
             ...(dependencies.activityRecorder ? { onEvent: (event) => emitNodeActivity(dependencies, node.id, event) } : {})
           }
         );
+        // Phase 16 — reads made while the agent runs (tool configs rendered at call time) join its labels.
+        agentState = labelScope ? await labelScope.segmentAsync(AGENT_RUN_SEGMENT, runAgent) : await runAgent();
         } catch (error) {
           if (isAgentGuardInterrupt(error)) {
             if (error.reason === "approval_required") {
@@ -5400,8 +5453,13 @@ async function executeNodeHandler(
             });
           }
         }
-        // Phase 16 — the answer carries everything its model context held.
-        if (labelScope && agentState.labels) labelScope.replace(agentState.labels);
+        // Phase 16 — the answer carries everything its model context held, and what the agent read while it ran;
+        // classes a final-answer rewrite removed stay out.
+        if (labelScope && agentState.labels) {
+          labelScope.replace(
+            withoutDataClasses(unionLabels([agentState.labels, labelScope.segmentLabels(AGENT_RUN_SEGMENT)]), agentState.labelsDeclassified ?? [])
+          );
+        }
         const modelRunCompletedAt = nowIso();
         if (attachedModelNode) {
           const lastStep = agentState.steps.at(-1);
@@ -5483,9 +5541,9 @@ async function executeNodeHandler(
       const inputKey = typeof config.inputKey === "string" && config.inputKey ? config.inputKey : "answer";
       const resolvedInput =
         getValueByPath(templateData, inputKey) ??
-        templateData[inputKey] ??
-        templateData.text ??
-        templateData.answer;
+        readData(templateData, inputKey) ??
+        readData(templateData, "text") ??
+        readData(templateData, "answer");
       const rawInput =
         typeof resolvedInput === "string"
           ? resolvedInput
@@ -5665,9 +5723,9 @@ async function executeNodeHandler(
       const inputKey = typeof config.inputKey === "string" && config.inputKey ? config.inputKey : "answer";
       const guardrailInput =
         getValueByPath(templateData, inputKey) ??
-        templateData[inputKey] ??
-        templateData.answer ??
-        templateData.text;
+        readData(templateData, inputKey) ??
+        readData(templateData, "answer") ??
+        readData(templateData, "text");
       let candidate =
         typeof guardrailInput === "string"
           ? guardrailInput
@@ -5728,8 +5786,8 @@ async function executeNodeHandler(
       if (!provider) throw new Error("Basic LLM Chain requires a provider. Attach a Chat Model node upstream or configure provider in settings.");
       const promptKey = typeof config.promptKey === "string" ? config.promptKey : "prompt";
       const systemPromptKey = typeof config.systemPromptKey === "string" ? config.systemPromptKey : "system_prompt";
-      const userPrompt = String(templateData[promptKey] ?? templateData.user_prompt ?? "");
-      const systemPrompt = String(templateData[systemPromptKey] ?? "You are a helpful assistant.");
+      const userPrompt = String(readData(templateData, promptKey) ?? readData(templateData, "user_prompt") ?? "");
+      const systemPrompt = String(readData(templateData, systemPromptKey) ?? "You are a helpful assistant.");
       return runLlmNode({ nodeId: node.id, provider, userPrompt, systemPrompt, dependencies });
     }
 
@@ -5738,8 +5796,8 @@ async function executeNodeHandler(
       if (!provider) throw new Error("Q&A Chain requires a provider.");
       const contextKey = typeof config.contextKey === "string" ? config.contextKey : "context";
       const questionKey = typeof config.questionKey === "string" ? config.questionKey : "question";
-      const context = String(templateData[contextKey] ?? "");
-      const question = String(templateData[questionKey] ?? templateData.user_prompt ?? "");
+      const context = String(readData(templateData, contextKey) ?? "");
+      const question = String(readData(templateData, questionKey) ?? readData(templateData, "user_prompt") ?? "");
       const maxLen = typeof config.maxContextLength === "number" ? config.maxContextLength : 4000;
       const truncatedContext = context.slice(0, maxLen);
       const systemPrompt = "You are a question-answering assistant. Answer the question based ONLY on the provided context. If the answer is not found in the context, say so. Cite specific parts of the context that support your answer.";
@@ -5751,7 +5809,7 @@ async function executeNodeHandler(
       const provider = normalizeProvider(config.provider) ?? normalizeProvider(templateData._provider);
       if (!provider) throw new Error("Summarization Chain requires a provider.");
       const textKey = typeof config.textKey === "string" ? config.textKey : "text";
-      const text = String(templateData[textKey] ?? templateData.prompt ?? "");
+      const text = String(readData(templateData, textKey) ?? readData(templateData, "prompt") ?? "");
       const maxLength = typeof config.maxLength === "number" ? config.maxLength : 500;
       const style = typeof config.style === "string" ? config.style : "brief";
       const styleInstructions: Record<string, string> = {
@@ -5769,7 +5827,7 @@ async function executeNodeHandler(
       const provider = normalizeProvider(config.provider) ?? normalizeProvider(templateData._provider);
       if (!provider) throw new Error("Information Extractor requires a provider.");
       const textKey = typeof config.textKey === "string" ? config.textKey : "text";
-      const text = String(templateData[textKey] ?? templateData.prompt ?? "");
+      const text = String(readData(templateData, textKey) ?? readData(templateData, "prompt") ?? "");
       const schema = typeof config.extractionSchema === "string" ? config.extractionSchema : '{ "key": "value" }';
       const systemPrompt = `You are an information extraction assistant. Extract structured data from the provided text according to the given schema. Return ONLY valid JSON matching the schema. If a field cannot be found, use null.`;
       const userPrompt = `Schema to extract:\n${schema}\n\nText:\n${text}`;
@@ -5784,7 +5842,7 @@ async function executeNodeHandler(
       const provider = normalizeProvider(config.provider) ?? normalizeProvider(templateData._provider);
       if (!provider) throw new Error("Text Classifier requires a provider.");
       const textKey = typeof config.textKey === "string" ? config.textKey : "text";
-      const text = String(templateData[textKey] ?? templateData.prompt ?? "");
+      const text = String(readData(templateData, textKey) ?? readData(templateData, "prompt") ?? "");
       const categories = typeof config.categories === "string" ? config.categories : "positive, negative, neutral";
       const multiLabel = config.multiLabel === true;
       const systemPrompt = multiLabel
@@ -5802,7 +5860,7 @@ async function executeNodeHandler(
       const provider = normalizeProvider(config.provider) ?? normalizeProvider(templateData._provider);
       if (!provider) throw new Error("Sentiment Analysis requires a provider.");
       const textKey = typeof config.textKey === "string" ? config.textKey : "text";
-      const text = String(templateData[textKey] ?? templateData.prompt ?? "");
+      const text = String(readData(templateData, textKey) ?? readData(templateData, "prompt") ?? "");
       const systemPrompt = `You are a sentiment analysis assistant. Analyze the sentiment of the provided text. Return a JSON object with: { "sentiment": "positive" | "negative" | "neutral" | "mixed", "score": <number from -1.0 to 1.0>, "confidence": <number from 0.0 to 1.0>, "explanation": "brief explanation of the sentiment" }`;
       const userPrompt = `Analyze the sentiment of this text:\n\n${text}`;
       const result = await runLlmNode({ nodeId: node.id, provider, userPrompt, systemPrompt, dependencies });
@@ -5816,7 +5874,7 @@ async function executeNodeHandler(
       const provider = normalizeProvider(config.provider) ?? normalizeProvider(templateData._provider);
       if (!provider) throw new Error("AI Transform requires a provider.");
       const inputKey = typeof config.inputKey === "string" ? config.inputKey : "text";
-      const input = String(templateData[inputKey] ?? templateData.prompt ?? "");
+      const input = String(readData(templateData, inputKey) ?? readData(templateData, "prompt") ?? "");
       const instruction = typeof config.instruction === "string" ? config.instruction : "Transform the input";
       const outputFormat = typeof config.outputFormat === "string" ? config.outputFormat : "text";
       const formatInstructions: Record<string, string> = {
@@ -5931,11 +5989,11 @@ async function executeNodeHandler(
       const sourceValue = getValueByPath(templateData, inputKey);
       const resolvedSource =
         sourceValue ??
-        templateData[inputKey] ??
-        templateData.result ??
-        templateData.answer ??
-        templateData.text ??
-        templateData.user_prompt ??
+        readData(templateData, inputKey) ??
+        readData(templateData, "result") ??
+        readData(templateData, "answer") ??
+        readData(templateData, "text") ??
+        readData(templateData, "user_prompt") ??
         templateData;
 
       const renderedFilename = renderTemplate(filenameTemplate, templateData);
@@ -5988,12 +6046,12 @@ async function executeNodeHandler(
         value = renderTemplate(responseTemplate, templateData);
       } else {
         value =
-          templateData.answer ??
-          templateData.text ??
-          templateData.prompt ??
-          templateData.user_prompt ??
-          templateData.system_prompt ??
-          templateData;
+          readData(templateData, "answer") ??
+          readData(templateData, "text") ??
+          readData(templateData, "prompt") ??
+          readData(templateData, "user_prompt") ??
+          readData(templateData, "system_prompt") ??
+          readWholeData(templateData);
       }
 
       return {
@@ -6477,14 +6535,32 @@ export function outputLabelsOf(result: WorkflowExecutionResult): DataLabels | un
   return runOutputLabels.get(result);
 }
 
+/** Phase 16 — a Guard node's inline profile override asks for propagated labels. */
+function overrideUsesLabels(node: WorkflowNode): boolean {
+  const override = toRecord(toRecord(node.config).profileOverride);
+  return override.labels === "propagated";
+}
+
+/** Phase 16 — the dictionaries of a Guard node's inline profile override (they feed the scan when it opts in). */
+function overrideDictionaries(node: WorkflowNode): GuardDictionary[] {
+  const dictionaries = toRecord(toRecord(node.config).profileOverride).dictionaries;
+  return Array.isArray(dictionaries) ? (dictionaries as GuardDictionary[]) : [];
+}
+
 /**
  * Phase 16 — whether a run tracks labels: a profile in its resolved guard
- * stack, or a profile a Guard node names, asks for propagated labels. Such
- * profiles' dictionaries feed the output scan. Without guard dependencies,
- * or when nothing opts in, nothing is scanned or stored.
+ * stack, a profile a Guard node names, or a Guard node's inline override
+ * asks for propagated labels. Such profiles' dictionaries feed the output
+ * scan. Without guard dependencies, or when nothing opts in, nothing is
+ * scanned or stored. When the guard dependencies say no profile could opt
+ * in (`mayUseLabels`), nothing is resolved at all: zero-config runs pay one
+ * cheap check.
  */
 async function labelTrackingFor(workflow: Workflow, guard: GuardRuntimeDependencies | undefined): Promise<{ tracked: boolean; dictionaries: GuardDictionary[] }> {
   if (!guard) return { tracked: false, dictionaries: [] };
+  const guardNodes = workflow.nodes.filter((node) => node.type === "guard" && node.disabled !== true);
+  const overriding = guardNodes.filter(overrideUsesLabels);
+  if (overriding.length === 0 && guard.mayUseLabels && !guard.mayUseLabels()) return { tracked: false, dictionaries: [] };
   const profiles: Array<{ labels?: "fixed" | "propagated"; dictionaries: GuardDictionary[] }> = [];
   try {
     const resolution = await resolveGuardRun(guard);
@@ -6493,30 +6569,47 @@ async function labelTrackingFor(workflow: Workflow, guard: GuardRuntimeDependenc
   } catch {
     // The run's guard resolution fails where it is used (an agent or a guard node), exactly as before.
   }
-  for (const node of workflow.nodes) {
-    if (node.type !== "guard" || node.disabled === true) continue;
+  const nodeDictionaries: GuardDictionary[] = [];
+  for (const node of guardNodes) {
     const profileId = typeof toRecord(node.config).profileId === "string" ? String(toRecord(node.config).profileId) : "";
+    const opts = overrideUsesLabels(node);
+    if (opts) nodeDictionaries.push(...overrideDictionaries(node));
     if (!profileId || profileId === GUARD_EFFECTIVE_PROFILE_REF) continue;
     try {
       const loaded = await guard.loadProfile(profileId);
-      if (loaded) profiles.push(loaded.profile);
+      // A node whose override opts in scans with its profile's dictionaries as well.
+      if (loaded) profiles.push(opts ? { ...loaded.profile, labels: "propagated" } : loaded.profile);
     } catch {
       // A missing profile fails the guard node when it runs.
     }
   }
   const opted = profiles.filter((profile) => profileUsesLabels(profile));
-  return { tracked: opted.length > 0, dictionaries: opted.flatMap((profile) => profile.dictionaries ?? []) };
+  const tracked = opted.length > 0 || overriding.length > 0;
+  return {
+    tracked,
+    dictionaries: tracked ? [...opted.flatMap((profile) => profile.dictionaries ?? []), ...nodeDictionaries] : []
+  };
 }
 
 async function initRunLabels(request: ExecuteWorkflowRequest, workflow: Workflow, dependencies: WorkflowExecutionDependencies): Promise<RunLabelState> {
   const tracking = await labelTrackingFor(workflow, dependencies.guard);
-  const scan = createLabelScanner(tracking.dictionaries);
-  const restored = RunLabelState.fromState(request.resumeState?.dataLabels, scan);
-  if (restored) return restored;
+  const scan = tracking.tracked ? createLabelScanner(tracking.dictionaries) : undefined;
+  if (request.resumeState) {
+    // A run that tracked labels when it paused carries on with them (and keeps tracking).
+    const restoredScan = scan ?? (request.resumeState.dataLabels?.tracked ? createLabelScanner([]) : undefined);
+    const restored = RunLabelState.fromState(request.resumeState.dataLabels, restoredScan, tracking.tracked);
+    if (restored) return restored;
+    // Paused without labels (it did not track them then): where its input and finished nodes came from is not known,
+    // so they count as outside content. The resume request's own origin (who answered) is not the run's input.
+    const unknown = labelsOf(["untrusted_external"]);
+    const resumed = new RunLabelState({ input: unknown, tracked: tracking.tracked, ...(scan ? { scan } : {}) });
+    for (const nodeId of Object.keys(request.resumeState.nodeOutputs ?? {})) resumed.set(nodeId, unknown);
+    return resumed;
+  }
   return new RunLabelState({
     input: request.inputLabels ?? labelsOf([inputProvenance(request.triggerType, undefined)]),
     tracked: tracking.tracked,
-    scan
+    ...(scan ? { scan } : {})
   });
 }
 
@@ -6728,10 +6821,16 @@ async function executeWorkflowRun(
       nodeOutputs.set(nodeId, output);
     }
   }
-  // Phase 16 — labels beside the outputs. Outputs seeded by the editor and pinned data were given by a user.
+  // Phase 16 — labels beside the outputs. Outputs seeded by the editor and pinned data were given by a user,
+  // and keep the origin of the node type that usually produces them (a pinned HTTP result was fetched from outside).
   const labelState = await initRunLabels(request, workflow, dependencies);
+  const workflowNodeTypes = new Map(workflow.nodes.map((entry) => [entry.id, entry.type]));
+  const givenLabels = (nodeId: string): DataLabels => {
+    const source = nodeContentSource(workflowNodeTypes.get(nodeId) ?? "");
+    return unionLabels([labelsOf(["user"]), source === "external" ? labelsOf(["untrusted_external"]) : undefined, source === "input" ? labelState.input : undefined]);
+  };
   if (!request.resumeState) {
-    for (const nodeId of nodeOutputs.keys()) labelState.set(nodeId, labelsOf(["user"]));
+    for (const nodeId of nodeOutputs.keys()) labelState.set(nodeId, givenLabels(nodeId));
   }
   const nodeResults: NodeExecutionResult[] = request.resumeState ? [...request.resumeState.nodeResults] : [];
   const attachmentOnlyResultIndexByNodeId = new Map<string, number>();
@@ -6973,8 +7072,9 @@ async function executeWorkflowRun(
     } else if (handoff?.kind === "route") {
       const routed = approved ? handoff.onApprove : handoff.onReject;
       nodeOutputs.set(waitingNode.id, routed);
-      // Phase 16 — the paused node's labels were saved with the run; the routed output is scanned like any output.
-      labelState.set(waitingNode.id, labelState.finalize(labelState.get(waitingNode.id) ?? labelsOf([]), routed));
+      // Phase 16 — the paused node's labels were saved with the run; the decision comes from a person; the routed
+      // output is scanned like any output.
+      labelState.set(waitingNode.id, labelState.finalize(unionLabels([labelState.get(waitingNode.id), labelsOf(["user"])]), routed));
       nodeResults.push({
         nodeId: waitingNode.id,
         status: "success",
@@ -7472,8 +7572,8 @@ async function executeWorkflowRun(
       if (hasOwnRecordKey(pinnedData, node.id)) {
         const output = pinnedData[node.id];
         nodeOutputs.set(node.id, output);
-        // Phase 16 — pinned data was given by a user.
-        labelState.set(node.id, labelState.finalize(labelsOf(["user"]), output));
+        // Phase 16 — pinned data was given by a user (plus the node type's own origin).
+        labelState.set(node.id, labelState.finalize(givenLabels(node.id), output));
         const completedAt = nowIso();
         const durationMs = Date.now() - started;
         nodeResults.push({

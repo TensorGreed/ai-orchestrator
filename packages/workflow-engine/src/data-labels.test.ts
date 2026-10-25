@@ -64,9 +64,16 @@ describe("run label state", () => {
 
   it("input nodes carry the run input, fetching nodes add untrusted_external, others only inherit", () => {
     const run = new RunLabelState({ input: user, tracked: false });
+    const none = labelsOf([]);
     expect(run.scope({ nodeId: "t", nodeType: "webhook_input", parents: [] }).finish({})).toEqual(user);
     expect(run.scope({ nodeId: "h", nodeType: "http_request", parents: [user] }).finish({})).toEqual(labelsOf(["user", "untrusted_external"]));
-    expect(run.scope({ nodeId: "s", nodeType: "set_node", parents: [] }).finish({})).toEqual(labelsOf([]));
+    expect(run.scope({ nodeId: "s", nodeType: "set_node", parents: [none] }).finish({})).toEqual(labelsOf([]));
+    expect(run.scope({ nodeId: "m", nodeType: "mcp_tool", parents: [none] }).finish({})).toEqual(external);
+  });
+
+  it("a root node (no parent ran) reads the run input: handlers read the run's globals directly", () => {
+    const run = new RunLabelState({ input: external, tracked: false });
+    expect(run.scope({ nodeId: "llm", nodeType: "llm_call", parents: [] }).finish({})).toEqual(external);
     expect(run.scope({ nodeId: "m", nodeType: "mcp_tool", parents: [] }).finish({})).toEqual(external);
   });
 
@@ -74,7 +81,7 @@ describe("run label state", () => {
     const run = new RunLabelState({ input: user, tracked: false });
     run.set("fetch", external);
     run.set("other", labelsOf(["sensitive"]));
-    const scope = run.scope({ nodeId: "n", nodeType: "set_node", parents: [], merged: { title: "x" }, globals: { user_prompt: "hi", vars: {} } });
+    const scope = run.scope({ nodeId: "n", nodeType: "set_node", parents: [labelsOf([])], merged: { title: "x" }, globals: { user_prompt: "hi", vars: {} } });
     runInLabelScope(scope, () => {
       renderTemplate("{{results.fetch.body}} {{title}} {{vars.region}}", { results: { fetch: { body: "b" } }, title: "x", vars: {} });
     });
@@ -88,7 +95,7 @@ describe("run label state", () => {
 
   it("a read of a node that has not run adds nothing", () => {
     const run = new RunLabelState({ input: user, tracked: false });
-    const scope = run.scope({ nodeId: "n", nodeType: "set_node", parents: [] });
+    const scope = run.scope({ nodeId: "n", nodeType: "set_node", parents: [labelsOf([])] });
     scope.readPath("results.later.x");
     expect(scope.inputLabels()).toEqual(labelsOf([]));
   });
@@ -143,5 +150,49 @@ describe("run label state", () => {
       labelsOf(["trusted", "user"], ["card_number", "email"])
     );
     expect(unionLabels([])).toEqual(labelsOf([]));
+  });
+});
+
+describe("round 1 fixes: expressions that escape the parser, segments", () => {
+  it("names that reach the whole scope, template strings with ${ } and escape keys read everything", () => {
+    for (const expression of [
+      "arguments[0].results.fetch.body",
+      "__scope.results.fetch",
+      "this.results",
+      "globalThis.x",
+      "(0).constructor.constructor('return 1')()",
+      "x['constructor']",
+      "`${results.fetch.body}`"
+    ]) {
+      expect(referencesInExpression(expression).all, expression).toBe(true);
+    }
+    // Plain template strings and ordinary property names stay precise.
+    expect(referencesInExpression("`hello` + results.fetch.body").all).toBe(false);
+    expect(referencesInExpression("results.fetch.body.length").nodes).toEqual(["fetch"]);
+  });
+
+  it("segments keep a part's reads apart; the node's input still counts them", async () => {
+    const run = new RunLabelState({ input: labelsOf(["user"]), tracked: false });
+    run.set("crm", labelsOf(["trusted"], ["email"]));
+    run.set("page", labelsOf(["untrusted_external"], ["iban"]));
+    const scope = run.scope({ nodeId: "agent", nodeType: "agent_orchestrator", parents: [labelsOf([])] });
+    scope.readPath("results.crm.email");
+    scope.segment("user_prompt", () => scope.readPath("results.page.text"));
+    expect(scope.segmentLabels("user_prompt")).toEqual(labelsOf(["untrusted_external"], ["iban"]));
+    expect(scope.inputLabelsExcept(["user_prompt"])).toEqual(labelsOf(["trusted"], ["email"]));
+    expect(scope.inputLabels()).toEqual(labelsOf(["trusted", "untrusted_external"], ["email", "iban"]));
+    // An async segment collects every read until it settles.
+    await scope.segmentAsync("agent_run", async () => {
+      await Promise.resolve();
+      scope.readEverything();
+    });
+    expect(scope.segmentLabels("agent_run")).toEqual(labelsOf(["trusted", "user", "untrusted_external"], ["email", "iban"]));
+    expect(scope.segmentLabels("missing")).toEqual(labelsOf([]));
+  });
+
+  it("a paused run's labels keep tracking when the resumed run tracks now", () => {
+    const state = new RunLabelState({ input: labelsOf(["user"]), tracked: false }).toState();
+    expect(RunLabelState.fromState(state)!.tracked).toBe(false);
+    expect(RunLabelState.fromState(state, undefined, true)!.tracked).toBe(true);
   });
 });

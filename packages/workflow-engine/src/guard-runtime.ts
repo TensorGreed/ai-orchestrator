@@ -35,6 +35,7 @@ import {
   GUARD_BUILTIN_PROFILE_ID,
   GUARD_EFFECTIVE_PROFILE_REF,
   defaultGuardLabels,
+  orderedProvenance,
   guardNodeConfigSchema,
   guardProtectionNodeConfigSchema,
   type GuardBindingLevel,
@@ -99,6 +100,13 @@ export interface GuardRuntimeDependencies {
   /** Token vault storage; persisted and encrypted by the API. */
   vault?: TokenVaultStorage;
   onVerdict?(event: GuardVerdictEvent): Promise<void> | void;
+  /**
+   * Phase 16 — a cheap check before a run resolves its profiles to learn
+   * whether it tracks labels: false when no profile this run could resolve
+   * asks for propagated labels, so the run skips the resolution. Absent: the
+   * run resolves.
+   */
+  mayUseLabels?(): boolean;
 }
 
 export interface GuardEvalScope {
@@ -444,7 +452,8 @@ export async function createAgentGuardSession(input: {
         {
           content: check.content,
           channel: check.channel,
-          labels: (propagatedLabels && check.dataLabels ? check.dataLabels.provenance : check.labels) as ProvenanceLabel[],
+          // Propagated labels add to the checkpoint's fixed ones: a check never sees weaker labels than with the switch off.
+          labels: (propagatedLabels && check.dataLabels ? orderedProvenance([...check.labels, ...check.dataLabels.provenance]) : check.labels) as ProvenanceLabel[],
           ...(tool ? { tool } : {}),
           ...(withCanary ? { canaries: [canary] } : {})
         },
@@ -507,6 +516,8 @@ export async function createAgentGuardSession(input: {
  */
 export function guardNodeLabels(config: GuardNodeConfig, propagated?: readonly ProvenanceLabel[]): ProvenanceLabel[] {
   if (config.labels) return config.labels as ProvenanceLabel[];
-  if (propagated) return [...propagated];
-  return defaultGuardLabels(config.channel) as ProvenanceLabel[];
+  const defaults = defaultGuardLabels(config.channel) as ProvenanceLabel[];
+  // Never weaker than the channel's default: propagated labels add to it.
+  if (propagated) return orderedProvenance([...defaults, ...propagated]);
+  return defaults;
 }
