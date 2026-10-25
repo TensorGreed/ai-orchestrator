@@ -1,7 +1,7 @@
 import { Pool, type PoolConfig } from "pg";
 import { randomUUID } from "node:crypto";
 import type { ChatMessage, Folder, Project, Workflow, WorkflowListItem } from "@ai-orchestrator/shared";
-import { DEFAULT_PROJECT_ID, isEmptyDataLabels, mergeDataLabels, parseStoredDataLabels, type DataLabels } from "@ai-orchestrator/shared";
+import { DEFAULT_PROJECT_ID, isEmptyDataLabels, labelsForUntrackedSave, mergeDataLabels, parseStoredDataLabels, type DataLabels } from "@ai-orchestrator/shared";
 import { runMigrations } from "./migrations.js";
 import { queuedRunTimeoutMs, STUCK_JOB_MARGIN_MS } from "./queue-timeouts.js";
 import { ProjectNotEmptyError } from "./store-errors.js";
@@ -859,15 +859,16 @@ export class PostgresStore {
       );
       return;
     }
-    // An untracked save clears the stored labels: the memory it writes has no recorded origin.
+    // An untracked save keeps the stored labels and adds `untrusted_external` (the old messages are still in memory).
+    const kept = labelsForUntrackedSave(parseStoredDataLabels(row?.labels_json ?? null));
     await this.execute(
       `INSERT INTO session_memory (namespace, session_id, messages_json, labels_json, created_at, updated_at)
-       VALUES ($1, $2, $3, NULL, $4, $5)
+       VALUES ($1, $2, $3, $4, $5, $6)
        ON CONFLICT (namespace, session_id) DO UPDATE SET
          messages_json = EXCLUDED.messages_json,
-         labels_json = NULL,
+         labels_json = EXCLUDED.labels_json,
          updated_at = EXCLUDED.updated_at`,
-      [namespace, sessionId, JSON.stringify(messages), createdAt, now]
+      [namespace, sessionId, JSON.stringify(messages), kept ? JSON.stringify(kept) : null, createdAt, now]
     );
   }
 
@@ -1095,8 +1096,8 @@ export class PostgresStore {
     createdAt: string;
     updatedAt: string;
   }> {
-    const existing = await this.queryOne<{ created_at: string }>(
-      `SELECT created_at
+    const existing = await this.queryOne<{ created_at: string; labels_json: string | null }>(
+      `SELECT created_at, labels_json
        FROM session_artifacts
        WHERE namespace = $1 AND session_id = $2 AND artifact_key = $3`,
       [input.namespace, input.sessionId, input.artifactKey]
@@ -1104,8 +1105,8 @@ export class PostgresStore {
     const now = new Date().toISOString();
     const createdAt = existing ? toStr(existing.created_at) : now;
 
-    const labels = input.labels && !isEmptyDataLabels(input.labels) ? input.labels : undefined;
-    // The value is replaced, so are its labels: an untracked save (no labels) leaves none.
+    // A tracked save replaces the labels; an untracked one (none given) keeps the stored labels plus `untrusted_external`.
+    const labels = input.labels === undefined ? labelsForUntrackedSave(parseStoredDataLabels(existing?.labels_json ?? null)) ?? undefined : !isEmptyDataLabels(input.labels) ? input.labels : undefined;
     await this.execute(
       `INSERT INTO session_artifacts (namespace, session_id, artifact_key, value_json, labels_json, created_at, updated_at)
        VALUES ($1, $2, $3, $4, $5, $6, $7)

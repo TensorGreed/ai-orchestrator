@@ -14,7 +14,7 @@
 
 import { randomUUID } from "node:crypto";
 import type { AgentSessionMemoryStore, AgentSessionToolDataStore, AgentSessionToolRecord } from "@ai-orchestrator/agent-runtime";
-import { parseStoredDataLabels, unionDataLabels, type DataLabels, type McpElicitationResult, type ModelMemorySeed } from "@ai-orchestrator/shared";
+import { labelsForUntrackedSave, parseStoredDataLabels, unionDataLabels, type DataLabels, type McpElicitationResult, type ModelMemorySeed } from "@ai-orchestrator/shared";
 import type { AgentSessionArtifactRecord, AgentSessionArtifactStore, KnowledgeBaseStore } from "@ai-orchestrator/workflow-engine";
 
 export const REPLAY_KB_WRITE_REFUSED = "Knowledge base writes are not allowed in a replay.";
@@ -58,10 +58,14 @@ export function createReplaySandbox(seed?: ModelMemorySeed | null): ReplaySandbo
       memoryWrites += 1;
       memory.set(sessionKey(namespace, sessionId), structuredClone(messages));
       // Phase 16 — labels stay inside the sandbox like the messages do, merged with what the memory held (as the store
-      // does); a save without labels (an untracked run) clears them, as the store does.
+      // does); a save without labels (an untracked run) keeps them and adds untrusted_external, as the store does.
       const key = sessionKey(namespace, sessionId);
       if (options?.labels) memoryLabels.set(key, unionDataLabels([memoryLabels.get(key), options.labels]));
-      else memoryLabels.delete(key);
+      else {
+        const kept = labelsForUntrackedSave(memoryLabels.get(key));
+        if (kept) memoryLabels.set(key, kept);
+        else memoryLabels.delete(key);
+      }
     },
     loadLabels: async (namespace, sessionId) => structuredClone(memoryLabels.get(sessionKey(namespace, sessionId)) ?? null)
   };
@@ -88,9 +92,9 @@ export function createReplaySandbox(seed?: ModelMemorySeed | null): ReplaySandbo
       artifactWrites += 1;
       const key = `${sessionKey(input.namespace, input.sessionId)}\u0000${input.artifactKey}`;
       const now = new Date().toISOString();
-      // Phase 16 — like the store: labels given replace the stored ones, a save without them clears them.
+      // Phase 16 — like the store: labels given replace the stored ones, a save without them keeps them plus untrusted_external.
       const previous = artifacts.get(key);
-      const labels = input.labels ?? null;
+      const labels = input.labels ?? labelsForUntrackedSave(previous?.labels ?? null);
       const record: AgentSessionArtifactRecord = { ...input, labels: labels ? structuredClone(labels) : null, createdAt: previous?.createdAt ?? now, updatedAt: now };
       artifacts.set(key, record);
       return record;

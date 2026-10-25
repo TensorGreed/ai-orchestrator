@@ -159,7 +159,7 @@ describe("migration 37", () => {
       .queryAll(`SELECT name FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'guard_profile%revision%' ORDER BY name`)
       .map((row) => row.name);
     expect(triggers).toHaveLength(6);
-    const before = context.store.guardProfileRevision();
+    const before = context.store.guardProfileRevision()!;
     context.store.insertGuardProfile({ id: "p", name: "P", document: {}, hash: "h", createdBy: null });
     expect(context.store.guardProfileRevision()).toBeGreaterThan(before);
   });
@@ -213,7 +213,7 @@ describe("labels on runs", () => {
 });
 
 describe("labels on session memory and the tool cache", () => {
-  it("stores labels only when given and merges them; a save without labels (untracked) clears them; older rows read as none", async () => {
+  it("stores labels only when given and merges them; a save without labels (untracked) keeps them and adds untrusted_external; older rows read as none", async () => {
     const context = await createTestContext();
     const store = context.store;
     store.saveSessionMemory("ns", "s1", [{ role: "user", content: "old" }]);
@@ -221,9 +221,26 @@ describe("labels on session memory and the tool cache", () => {
     store.saveSessionMemory("ns", "s1", [{ role: "user", content: "a" }], L(["user"]));
     store.saveSessionMemory("ns", "s1", [{ role: "user", content: "b" }], L(["untrusted_external"], ["email"]));
     expect(store.loadSessionMemoryLabels("ns", "s1")).toEqual(L(["user", "untrusted_external"], ["email"]));
+    // An untracked run saves the messages it loaded plus its turn: the labels stay (plus untrusted_external), never null.
     store.saveSessionMemory("ns", "s1", [{ role: "user", content: "c" }]);
-    expect(store.loadSessionMemoryLabels("ns", "s1")).toBeNull();
+    expect(store.loadSessionMemoryLabels("ns", "s1")).toEqual(L(["user", "untrusted_external"], ["email"]));
     expect(store.loadSessionMemory("ns", "s1")).toEqual([{ role: "user", content: "c" }]);
+    // Over a row with no labels an untracked save writes none.
+    store.saveSessionMemory("ns", "plain", [{ role: "user", content: "x" }]);
+    store.saveSessionMemory("ns", "plain", [{ role: "user", content: "y" }]);
+    expect(store.loadSessionMemoryLabels("ns", "plain")).toBeNull();
+
+    // Artifacts: a tracked save replaces the labels, an untracked one keeps them plus untrusted_external, an empty tracked one stores none.
+    const key = { namespace: "ns", sessionId: "s1", artifactKey: "notes" };
+    store.saveSessionArtifact({ ...key, value: 1, labels: L(["user"], ["email"]) });
+    store.saveSessionArtifact({ ...key, value: 2, labels: L(["user"]) });
+    expect(store.loadSessionArtifact(key)!.labels).toEqual(L(["user"]));
+    store.saveSessionArtifact({ ...key, value: 3 });
+    expect(store.loadSessionArtifact(key)!.labels).toEqual(L(["user", "untrusted_external"]));
+    store.saveSessionArtifact({ ...key, value: 4, labels: L([]) });
+    expect(store.loadSessionArtifact(key)!.labels ?? null).toBeNull();
+    store.saveSessionArtifact({ ...key, value: 5 });
+    expect(store.loadSessionArtifact(key)!.labels ?? null).toBeNull();
 
     const plain = store.saveSessionToolCall({ namespace: "ns", sessionId: "s1", toolName: "t", args: {}, output: 1 });
     const labelled = store.saveSessionToolCall({ namespace: "ns", sessionId: "s1", toolName: "t", args: {}, output: 2, labels: L(["untrusted_external"]) });
@@ -428,11 +445,14 @@ describe("round 1 fixes", () => {
     expect(await sandbox.memoryStore.loadLabels!("n", "s")).toEqual(L(["user", "untrusted_external"], ["email", "iban"]));
     const saved = await sandbox.sessionArtifactStore.saveArtifact({ namespace: "n", sessionId: "s", artifactKey: "k", value: 1, labels: L(["user"]) });
     expect(saved.labels).toEqual(L(["user"]));
-    // A save from an untracked run clears the labels (round 2, as the store does).
+    // A save from an untracked run keeps the labels and adds untrusted_external, as the store does.
     await sandbox.sessionArtifactStore.saveArtifact({ namespace: "n", sessionId: "s", artifactKey: "k", value: 2 });
-    expect((await sandbox.sessionArtifactStore.loadArtifact({ namespace: "n", sessionId: "s", artifactKey: "k" }))?.labels).toBeNull();
+    expect((await sandbox.sessionArtifactStore.loadArtifact({ namespace: "n", sessionId: "s", artifactKey: "k" }))?.labels).toEqual(L(["user", "untrusted_external"]));
     await sandbox.memoryStore.saveMessages("n", "s", []);
-    expect(await sandbox.memoryStore.loadLabels!("n", "s")).toBeNull();
+    expect(await sandbox.memoryStore.loadLabels!("n", "s")).toEqual(L(["user", "untrusted_external"], ["email", "iban"]));
+    // Nothing stored, nothing written.
+    await sandbox.memoryStore.saveMessages("n", "fresh", []);
+    expect(await sandbox.memoryStore.loadLabels!("n", "fresh")).toBeNull();
   });
 });
 

@@ -15,7 +15,7 @@ import {
 } from "@ai-orchestrator/guard-sdk";
 import { createDefaultMCPRegistry, type MCPServerAdapter } from "@ai-orchestrator/mcp-sdk";
 import { ProviderRegistry, type LLMProviderAdapter, type ProviderCallRequest } from "@ai-orchestrator/provider-sdk";
-import type { ChatMessage, DataLabels, Workflow, WorkflowEdge, WorkflowExecutionResult, WorkflowExecutionState, WorkflowNode } from "@ai-orchestrator/shared";
+import { labelsForUntrackedSave, type ChatMessage, type DataLabels, type Workflow, type WorkflowEdge, type WorkflowExecutionResult, type WorkflowExecutionState, type WorkflowNode } from "@ai-orchestrator/shared";
 import { IN_PROCESS_CODE_SANDBOX } from "./code-sandbox";
 import { executeWorkflow, outputLabelsOf, resumeWorkflowExecution, type WorkflowExecutionDependencies } from "./executor";
 import { builtInGuardProfile, type GuardRunResolution, type GuardVerdictEvent, type ResolvedGuardProfile } from "./guard-runtime";
@@ -804,8 +804,8 @@ describe("session artifacts (round 1 fixes)", () => {
     readonly rows = new Map<string, { value: unknown; labels: DataLabels | null }>();
     async saveArtifact(input: { namespace: string; sessionId: string; artifactKey: string; value: unknown; labels?: DataLabels }) {
       const key = `${input.namespace}|${input.sessionId}|${input.artifactKey}`;
-      // As the stores do: an untracked save (no labels) clears them.
-      const labels = input.labels ?? null;
+      // As the stores do: an untracked save (no labels) keeps the stored ones and adds untrusted_external.
+      const labels = input.labels ?? labelsForUntrackedSave(this.rows.get(key)?.labels ?? null);
       this.rows.set(key, { value: input.value, labels });
       return { ...input, labels, createdAt: "now", updatedAt: "now" };
     }
@@ -836,6 +836,13 @@ describe("session artifacts (round 1 fixes)", () => {
     expect(labelsOf(loaded, "load")).toEqual(L(["user", "untrusted_external"], ["email"]));
   });
 
+  it("an untracked save over a labelled artifact keeps the labels and adds untrusted_external; over none it stays none", async () => {
+    const artifacts = new Artifacts();
+    await executeWorkflow({ workflow: saveFlow, executionId: "s5", webhookPayload: { user_prompt: `mail ${EMAIL}` } }, { ...deps({ guard: guardDeps(["tracking"]).guard }), sessionArtifactStore: artifacts });
+    await executeWorkflow({ workflow: saveFlow, executionId: "s6", webhookPayload: { user_prompt: "x" } }, { ...deps({ guard: guardDeps(["default"]).guard }), sessionArtifactStore: artifacts });
+    expect([...artifacts.rows.values()][0]!.labels).toEqual(L(["untrusted_external"], ["email"]));
+  });
+
   it("untracked saves store no labels; rows without labels add nothing", async () => {
     const artifacts = new Artifacts();
     await executeWorkflow({ workflow: saveFlow, executionId: "s3", webhookPayload: { user_prompt: "x" } }, { ...deps({ guard: guardDeps(["default"]).guard }), sessionArtifactStore: artifacts });
@@ -854,7 +861,12 @@ describe("expressions the reference parser cannot read fail closed (round 2)", (
     "a regular expression holding a quote": '{{ /"|n/.test(results.quiet.note) ? results.fetch.body : "x" }}',
     "a regular expression argument holding a quote": "{{ 'a'.replace(/'/g, '') + results.fetch.body + '' }}",
     "a spread of results": "{{ ({ ...results }).fetch.body }}",
-    "a spread of $json": "{{ ({ ...$json }).results.fetch.body }}"
+    "a spread of $json": "{{ ({ ...$json }).results.fetch.body }}",
+    "a regular expression statement after if": "{{ (() => { if (1) /'/.test(''); const v = results.fetch.body; if (1) /'/.test(''); return v })() }}",
+    "a regular expression statement after while": "{{ (() => { let i = 0; while (i++ < 1) /'/.test(''); const v = results.fetch.body; while (i++ < 2) /'/.test(''); return v })() }}",
+    "a regular expression statement after for": "{{ (() => { for (;0;) /'/; const v = results.fetch.body; for (;0;) /'/; return v })() }}",
+    "a hex escape in a bracket key": "{{ results['\\x66etch'].body }}",
+    "a unicode escape in a bracket key": "{{ results['\\u0066etch'].body }}"
   };
   for (const [name, template] of Object.entries(cases)) {
     it(`${name}: the output that holds outside text is labelled from outside`, async () => {

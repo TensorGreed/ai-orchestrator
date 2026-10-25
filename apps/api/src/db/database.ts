@@ -58,7 +58,7 @@ import {
   type McpSandboxSettings,
   type McpSandboxStatus
 } from "@ai-orchestrator/shared";
-import { isEmptyDataLabels, mergeDataLabels, parseStoredDataLabels, type DataLabels } from "@ai-orchestrator/shared";
+import { isEmptyDataLabels, labelsForUntrackedSave, mergeDataLabels, parseStoredDataLabels, type DataLabels } from "@ai-orchestrator/shared";
 import { queuedRunTimeoutMs, STUCK_JOB_MARGIN_MS } from "./queue-timeouts.js";
 import { ProjectNotEmptyError } from "./store-errors.js";
 
@@ -4439,14 +4439,17 @@ export class SqliteStore {
         [namespace, sessionId, JSON.stringify(messages), labelsJson, createdAt, now]
       );
     } else {
+      // An untracked run loads the stored messages and saves them again with its turn: the labels stay, plus
+      // `untrusted_external` for the unknown new turn. Nothing stored means nothing written (zero-config).
+      const kept = labelsForUntrackedSave(parseStoredDataLabels(existing?.labels_json ?? null));
       this.exec(
         `INSERT INTO session_memory (namespace, session_id, messages_json, labels_json, created_at, updated_at)
-         VALUES (?, ?, ?, NULL, ?, ?)
+         VALUES (?, ?, ?, ?, ?, ?)
          ON CONFLICT(namespace, session_id) DO UPDATE SET
            messages_json = excluded.messages_json,
-           labels_json = NULL,
+           labels_json = excluded.labels_json,
            updated_at = excluded.updated_at`,
-        [namespace, sessionId, JSON.stringify(messages), createdAt, now]
+        [namespace, sessionId, JSON.stringify(messages), kept ? JSON.stringify(kept) : null, createdAt, now]
       );
     }
 
@@ -4674,17 +4677,16 @@ export class SqliteStore {
     updatedAt: string;
   } {
     const existing = this.queryOne<SessionArtifactRow>(
-      `SELECT namespace, session_id, artifact_key, value_json, created_at, updated_at
+      `SELECT namespace, session_id, artifact_key, value_json, labels_json, created_at, updated_at
        FROM session_artifacts
        WHERE namespace = ? AND session_id = ? AND artifact_key = ?`,
       [input.namespace, input.sessionId, input.artifactKey]
     );
     const now = new Date().toISOString();
     const createdAt = existing ? toString(existing.created_at) : now;
-    const labels = input.labels && !isEmptyDataLabels(input.labels) ? input.labels : undefined;
-
-    // Phase 16 — the value is replaced, so are its labels: an untracked save (no labels) leaves none, its value has
-    // no recorded origin.
+    // Phase 16 — a tracked save replaces the labels (its load put the old ones into the labels it saves). An untracked
+    // save (no labels given) may carry the old value forward: the stored labels stay, plus `untrusted_external`.
+    const labels = input.labels === undefined ? labelsForUntrackedSave(parseStoredDataLabels(existing?.labels_json ?? null)) ?? undefined : !isEmptyDataLabels(input.labels) ? input.labels : undefined;
     this.exec(
       `INSERT INTO session_artifacts (namespace, session_id, artifact_key, value_json, labels_json, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -11306,11 +11308,15 @@ export class SqliteStore {
    * of profile contents key on it, read once per use (one primary-key read),
    * so a profile saved by another instance is seen by the next run here.
    */
-  guardProfileRevision(): number {
+  guardProfileRevision(): number | undefined {
+    // No revision (the row is missing) or a transaction open on this connection (it may hold uncommitted profile
+    // writes that a rollback would undo): undefined, and callers read the database instead of their caches.
+    if ((this.db as unknown as { inTransaction?: boolean }).inTransaction) return undefined;
     this.guardProfileRevisionStatement ??= this.db.prepare(`SELECT revision FROM guard_profile_revision WHERE id = 1`) as unknown as {
       pluck(): { get(): unknown };
     };
-    return Number(this.guardProfileRevisionStatement.pluck().get() ?? 0);
+    const value = this.guardProfileRevisionStatement.pluck().get();
+    return value === undefined || value === null ? undefined : Number(value);
   }
 
   /**
@@ -11323,12 +11329,12 @@ export class SqliteStore {
    */
   anyGuardProfileUsesLabels(): boolean {
     const revision = this.guardProfileRevision();
-    if (this.guardProfileLabelsCache?.revision === revision) return this.guardProfileLabelsCache.value;
+    if (revision !== undefined && this.guardProfileLabelsCache?.revision === revision) return this.guardProfileLabelsCache.value;
     const row = this.queryOne<{ found: number }>(
       `SELECT 1 AS found FROM guard_profile_versions WHERE document_json LIKE '%"labels":"propagated"%' LIMIT 1`
     );
     const value = Boolean(row);
-    this.guardProfileLabelsCache = { revision, value };
+    if (revision !== undefined) this.guardProfileLabelsCache = { revision, value };
     return value;
   }
 

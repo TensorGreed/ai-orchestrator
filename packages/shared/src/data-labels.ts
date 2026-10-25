@@ -64,6 +64,18 @@ export function unionDataLabels(parts: ReadonlyArray<DataLabels | null | undefin
 }
 
 /**
+ * Phase 16 — the labels to store when a run that does not track labels saves
+ * over a row. It cannot know what it carried forward from the stored value,
+ * so labels are never dropped: none stored stays none (zero-config writes
+ * nothing new), stored labels stay and gain `untrusted_external` (the new
+ * content has an unknown origin).
+ */
+export function labelsForUntrackedSave(stored: DataLabels | null | undefined): DataLabels | null {
+  if (!stored || isEmptyDataLabels(stored)) return null;
+  return unionDataLabels([stored, { provenance: ["untrusted_external"], dataClasses: [], source: "propagated" }]);
+}
+
+/**
  * Phase 16 — labels a run carries per node, in a side map beside the node
  * outputs (never inside an output value). Serialisable, so a paused run's
  * state and a run's history can hold it.
