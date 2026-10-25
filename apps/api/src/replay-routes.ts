@@ -190,7 +190,7 @@ export function registerReplayRoutes(deps: ReplayRoutesDeps): void {
       return result;
     } catch (error) {
       if (error instanceof ReplayRunError) {
-        reply.code(error.code === "not_found" ? 404 : 422);
+        reply.code(error.code === "not_found" ? 404 : error.code === "forbidden" ? 403 : 422);
         return { error: error.message, code: error.code };
       }
       throw error;

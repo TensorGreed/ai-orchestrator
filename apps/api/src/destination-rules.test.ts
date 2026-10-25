@@ -244,6 +244,53 @@ describe("deployment destination rules", () => {
     expect((await call(context, "GET", "/api/data-destinations/previews", builder.cookie)).statusCode).toBe(403);
   }, 120_000);
 
+  it("Preview impact of removing a stored row: removedIds take it out of the candidate side only", async () => {
+    const context = await createTestContext();
+    const admin = await login(context, "admin");
+    const receiver = await startReceiver();
+    context.store.upsertWorkflow(senderWorkflow(receiver.url));
+    expect((await call(context, "POST", "/api/guard/destination-rules/starter", admin.cookie)).statusCode).toBe(201);
+    expect((await call(context, "POST", "/api/guard/destination-rules/enforcement", admin.cookie, { enforce: true })).statusCode).toBe(200);
+    // Recorded while the loopback receiver is local (built-in): the card went out.
+    const run = await call(context, "POST", "/api/workflows/wf-sender/execute", admin.cookie, { record: true, user_prompt: `card ${CARD}` });
+    expect(run.json<{ status: string }>().status).toBe("success");
+    expect((await call(context, "POST", "/api/replay/recordings", admin.cookie, { executionId: run.json<{ executionId: string }>().executionId, name: "card" })).statusCode).toBe(201);
+    // The stored row makes loopback public: the baseline side blocks the card.
+    const stored = await call(context, "POST", "/api/data-destinations", admin.cookie, PUBLIC_LOOPBACK);
+    expect(stored.statusCode, stored.body).toBe(201);
+    const rowId = stored.json<{ destination: { id: string } }>().destination.id;
+
+    const started = await call(context, "POST", "/api/data-destinations/preview?wait=true", admin.cookie, { rows: [], removedIds: [rowId] });
+    expect(started.statusCode, started.body).toBe(200);
+    const preview = started.json<{ simulation: GuardSimulationView }>().simulation;
+    expect(preview.status).toBe("completed");
+    expect(preview.summary).toMatchObject({ runs: 1, runsNewlyBlocked: 0, runsNoLongerBlocked: 1 });
+    // The removal was only previewed.
+    expect(context.store.listDataDestinations().map((row) => row.id)).toEqual([rowId]);
+  }, 120_000);
+
+  it("reserves the rules profile's and the preview's ids: nobody creates or imports them through the profile routes", async () => {
+    const context = await createTestContext();
+    const admin = await login(context, "admin");
+    const builder = await login(context, "builder");
+    for (const id of ["destination-rules", "destinations-preview"]) {
+      const document = { id, name: "Mine", version: "1" };
+      const created = await call(context, "POST", "/api/guard/profiles", admin.cookie, { document });
+      expect(created.statusCode, `${id}: ${created.body}`).toBe(400);
+      expect(created.body).toContain("reserved");
+      expect((await call(context, "POST", "/api/guard/profiles", builder.cookie, { document })).statusCode).not.toBe(201);
+      const imported = await call(context, "POST", "/api/guard/profiles/import", admin.cookie, { document });
+      expect(imported.statusCode, `${id}: ${imported.body}`).toBe(400);
+      expect(context.store.getGuardProfile(id)).toBeNull();
+    }
+    // The Security page still creates the rules profile.
+    expect((await call(context, "POST", "/api/guard/destination-rules/starter", admin.cookie)).statusCode).toBe(201);
+    expect(context.store.getGuardProfile("destination-rules")).not.toBeNull();
+    // And an import cannot overwrite it afterwards.
+    const overwrite = await call(context, "POST", "/api/guard/profiles/import", admin.cookie, { document: { id: "destination-rules", name: "Mine", version: "1" } });
+    expect(overwrite.statusCode).toBe(400);
+  }, 60_000);
+
   it("the rules profile comes after a run's own profiles, a candidate's too, and keeps the instance default", async () => {
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-dest-resolve-"));
     const store = await SqliteStore.create(path.join(tempDir, "orchestrator.db"));

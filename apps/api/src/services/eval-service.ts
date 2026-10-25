@@ -296,7 +296,7 @@ export interface EvalServiceOptions {
 export class EvalRunError extends Error {
   constructor(
     message: string,
-    readonly code: "not_found" | "invalid" | "limit"
+    readonly code: "not_found" | "invalid" | "limit" | "forbidden"
   ) {
     super(message);
     this.name = "EvalRunError";
@@ -971,7 +971,10 @@ export class EvalService {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       const code = (error as { code?: unknown }).code;
-      throw new EvalRunError(message, code === "not_found" || (code === undefined && /not found|no longer exists/i.test(message)) ? "not_found" : "invalid");
+      throw new EvalRunError(
+        message,
+        code === "forbidden" ? "forbidden" : code === "not_found" || (code === undefined && /not found|no longer exists/i.test(message)) ? "not_found" : "invalid"
+      );
     }
     const options: ReplayJobOptions = {
       mcpMode: request.mcpMode ?? "strict",

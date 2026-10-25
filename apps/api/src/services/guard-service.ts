@@ -33,6 +33,7 @@ import {
   type TokenVaultStorage
 } from "@ai-orchestrator/guard-sdk";
 import {
+  DESTINATION_PREVIEW_SIMULATION_PROFILE,
   DESTINATION_RULES_OBSERVING_DAYS,
   GUARD_BUILTIN_PROFILE_ID,
   GUARD_DESTINATION_RULES_PROFILE_ID,
@@ -92,6 +93,9 @@ export class GuardConflictError extends Error {
 const VAULT_PURPOSE = "guard-token-vault";
 /** Option names that would carry key material inline; keys come only through `keyId` (a secret id). */
 const RAW_KEY_OPTION = /^(key|keys|secret|password|value|material|keyMaterial|rawKey)$/i;
+
+/** Phase 16 — profile ids no one creates or imports: the deployment's destination rules and the Preview impact pseudo profile. */
+const RESERVED_GUARD_PROFILE_IDS: ReadonlySet<string> = new Set([GUARD_DESTINATION_RULES_PROFILE_ID, DESTINATION_PREVIEW_SIMULATION_PROFILE]);
 
 export interface GuardServiceOptions {
   /** Apply the built-in default profile when nothing is bound (GUARD_AUTO_APPLY). */
@@ -284,10 +288,16 @@ export class GuardService {
     return record ? this.versionView(record) : null;
   }
 
-  createProfile(input: { id?: string; document: Record<string, unknown>; note?: string }, actorId: string | null): GuardProfileSummary {
+  createProfile(input: { id?: string; document: Record<string, unknown>; note?: string }, actorId: string | null, options: { reserved?: boolean } = {}): GuardProfileSummary {
     const id = input.id ?? (typeof input.document.id === "string" ? input.document.id : undefined);
     if (!id || !/^[a-z0-9][a-z0-9_-]{1,62}$/.test(id)) {
       throw new GuardValidationError("Invalid guard profile", [{ path: "id", message: "Use 2–63 lowercase letters, digits, dashes or underscores" }]);
+    }
+    // Phase 16 — reserved ids: the deployment's destination rules (made on the Security page) and the Preview impact pseudo profile.
+    if (!options.reserved && RESERVED_GUARD_PROFILE_IDS.has(id)) {
+      throw new GuardValidationError("Invalid guard profile", [
+        { path: "id", message: `'${id}' is reserved for the deployment's destination rules; set those up under Security → Data destinations` }
+      ]);
     }
     if (id === GUARD_BUILTIN_PROFILE_ID || this.store.getGuardProfile(id)) {
       throw new GuardConflictError(`A guard profile with id '${id}' already exists`);
@@ -355,6 +365,11 @@ export class GuardService {
   /** Creates the profile, or appends a version when it exists. The document's `id` names the profile. */
   importProfile(input: { document: Record<string, unknown>; note?: string }, actorId: string | null): { profile: GuardProfileSummary; created: boolean; changed: boolean } {
     const id = typeof input.document.id === "string" ? input.document.id : "";
+    if (RESERVED_GUARD_PROFILE_IDS.has(id)) {
+      throw new GuardValidationError("Invalid guard profile", [
+        { path: "id", message: `'${id}' is reserved for the deployment's destination rules; set those up under Security → Data destinations` }
+      ]);
+    }
     const existing = id ? this.store.getGuardProfile(id) : null;
     if (!existing) {
       const profile = this.createProfile({ document: input.document, ...(input.note ? { note: input.note } : {}) }, actorId);
@@ -465,7 +480,15 @@ export class GuardService {
   resolveProfileOverride(
     override: { profileId: string; version?: number },
     context: { workflowId: string; projectId?: string | null; isAdmin: boolean }
-  ): { ok: true; profile: { profileId: string; version: number; hash: string } } | { ok: false; problem: string } {
+  ): { ok: true; profile: { profileId: string; version: number; hash: string } } | { ok: false; problem: string; forbidden?: boolean } {
+    // Phase 16 — the deployment's destination rules are never a builder's candidate: they always run anyway (latest version).
+    if (override.profileId === GUARD_DESTINATION_RULES_PROFILE_ID && !context.isAdmin) {
+      return {
+        ok: false,
+        forbidden: true,
+        problem: "The deployment's destination rules always apply to replays and release-gate cases; only an admin can choose them as the guard profile under test."
+      };
+    }
     const problem = this.profileOverrideProblem(override);
     if (problem) return { ok: false, problem };
     const resolved = this.loadProfile(override.profileId, override.version)!;
@@ -549,9 +572,9 @@ export class GuardService {
       { level: "candidate", mode: "override", profileId: candidate.profileId, version: candidate.version }
     ];
     const stack = enforced && enforced.hash !== candidate.hash ? [enforced, candidate] : [candidate];
-    // Phase 16 — the deployment's destination rules apply to a candidate's replay too (unless it is the candidate).
-    const deployment = candidate.profileId === GUARD_DESTINATION_RULES_PROFILE_ID ? undefined : this.deploymentProfile();
-    return GuardService.withDeployment({ source: "candidate", ...(enforced ? { enforced } : {}), stack, chain }, deployment);
+    // Phase 16 — the deployment's destination rules (latest version) apply to every candidate's replay, even when the
+    // candidate is an older version of them: a candidate can add checks, never remove the deployment's.
+    return GuardService.withDeployment({ source: "candidate", ...(enforced ? { enforced } : {}), stack, chain }, this.deploymentProfile());
   }
 
   /**
@@ -656,7 +679,7 @@ export class GuardService {
     if (this.store.getGuardProfile(GUARD_DESTINATION_RULES_PROFILE_ID)) {
       this.updateProfile(GUARD_DESTINATION_RULES_PROFILE_ID, { document, ...(note ? { note } : {}) }, actorId);
     } else {
-      this.createProfile({ id: GUARD_DESTINATION_RULES_PROFILE_ID, document, note: note ?? "Created from the Security page" }, actorId);
+      this.createProfile({ id: GUARD_DESTINATION_RULES_PROFILE_ID, document, note: note ?? "Created from the Security page" }, actorId, { reserved: true });
     }
     return this.destinationRulesStatus();
   }
