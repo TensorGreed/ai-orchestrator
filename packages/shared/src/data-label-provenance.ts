@@ -55,11 +55,15 @@ const USER_STARTED_TRIGGERS = new Set(["manual", "manual_stream", "manual_retry"
  * trigger decides (runs a user started — the editor, hand-saved golden runs
  * — are `user`, everything else is judged by the capture rules, which never
  * give `trusted` without the server's own scheduler). Labels read from an
- * imported file never carry `trusted`.
+ * imported file never carry `trusted`, and a recording imported from a file
+ * always adds `untrusted_external`: its trigger type and labels are the
+ * file's claim, so it can never make its input count as only a user's.
  */
 export function recordedInputLabels(recording: {
   nodes?: ReadonlyArray<{ nodeType?: string; labels?: DataLabels | null }> | null;
   sourceTriggerType?: string | null;
+  /** The recording came from an imported golden-set file. */
+  imported?: boolean;
 }): DataLabels {
   const provenance = new Set<ProvenanceLabel>();
   for (const node of recording.nodes ?? []) {
@@ -73,5 +77,6 @@ export function recordedInputLabels(recording: {
     const trigger = recording.sourceTriggerType ?? null;
     provenance.add(trigger && USER_STARTED_TRIGGERS.has(trigger) ? "user" : inputProvenance(trigger, undefined));
   }
+  if (recording.imported) provenance.add("untrusted_external");
   return { provenance: orderedProvenance(provenance), dataClasses: [], source: "propagated" };
 }

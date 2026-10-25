@@ -25,6 +25,12 @@ describe("recorded input labels (Phase 16, Q7)", () => {
   it("labels read from a file never carry trusted", () => {
     expect(recordedInputLabels({ nodes: [{ nodeType: "webhook_input", labels: L(["trusted", "user"], [], "file") }], sourceTriggerType: "schedule" })).toEqual(L(["user"]));
     expect(recordedInputLabels({ nodes: [{ nodeType: "schedule_trigger", labels: L(["trusted"], [], "scan") }], sourceTriggerType: "schedule" })).toEqual(L(["trusted"]));
+    // A recording imported from a file: its trigger type and labels are the file's claim, never only a user's.
+    expect(recordedInputLabels({ sourceTriggerType: "manual", imported: true })).toEqual(L(["user", "untrusted_external"]));
+    expect(recordedInputLabels({ nodes: [{ nodeType: "webhook_input", labels: L(["user"], [], "file") }], sourceTriggerType: "manual", imported: true })).toEqual(
+      L(["user", "untrusted_external"])
+    );
+    expect(recordedInputLabels({ sourceTriggerType: "manual", imported: false })).toEqual(L(["user"]));
   });
 });
 

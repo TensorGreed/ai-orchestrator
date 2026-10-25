@@ -435,3 +435,60 @@ describe("round 1 fixes", () => {
     expect(await sandbox.memoryStore.loadLabels!("n", "s")).toBeNull();
   });
 });
+
+describe("round 2: imported golden runs and eval cases", () => {
+  it("a golden run imported from a file always counts its input as outside content on replay, whatever trigger it claims", async () => {
+    const context = await createTestContext();
+    const admin = await login(context, "admin");
+    await trackingProfile(context, admin);
+    context.store.upsertWorkflow(labelledWorkflow("wf-imported", "default"));
+    // Started in the editor: the recording says `manual`, a user's input.
+    const run = (await call(context, "POST", "/api/workflows/wf-imported/execute", admin, { user_prompt: "hello" })).json<RunResult>();
+    expect(run.status).toBe("success");
+    const saved = await call(context, "POST", "/api/replay/recordings", admin, { executionId: run.executionId, name: "Typed in the editor" });
+    expect(saved.statusCode, saved.body).toBe(201);
+    const recordingId = saved.json<{ recording: { id: string } }>().recording.id;
+    expect(context.store.getReplayRecording(recordingId)!.sourceTriggerType).toBe("manual");
+    const set = (await call(context, "POST", "/api/eval/datasets", admin, { name: "Set", workflowId: "wf-imported" })).json<{ dataset: { id: string } }>().dataset.id;
+    expect((await call(context, "POST", `/api/eval/datasets/${set}/recordings`, admin, { recordingId })).statusCode).toBe(201);
+    const file = (await call(context, "GET", `/api/eval/datasets/${set}/export`, admin)).json<{ cases: Array<{ recording: { sourceTriggerType: string } }> }>();
+    expect(file.cases[0]!.recording.sourceTriggerType).toBe("manual");
+    const imported = await call(context, "POST", "/api/eval/datasets/import", admin, { file, workflowId: "wf-imported", name: "From a file" });
+    expect(imported.statusCode, imported.body).toBe(201);
+
+    context.store.upsertWorkflow(labelledWorkflow("wf-imported", "tracking"));
+    const replayed = async (id: string) => {
+      const response = await call(context, "POST", `/api/replay/recordings/${id}/replay`, admin, { draft: true });
+      expect(response.statusCode, response.body).toBe(200);
+      const stored = JSON.parse(storedNodeResults(context, response.json<{ executionId: string }>().executionId)) as Array<{ nodeId: string; labels?: DataLabels }>;
+      return stored.find((entry) => entry.nodeId === "hook")?.labels;
+    };
+    const importedId = context.store
+      .listReplayRecordings({ workflowId: "wf-imported" })
+      .items.map((item) => item.id)
+      .find((id) => context.store.getReplayRecording(id)!.capabilities.origin === "imported")!;
+    expect(importedId).toBeTruthy();
+    // The recorded run replays as a user's input; the same run read back from a file adds outside content.
+    expect(await replayed(recordingId)).toEqual(L(["user"]));
+    expect(await replayed(importedId)).toEqual(L(["user", "untrusted_external"]));
+  }, 30_000);
+
+  it("an eval case a builder typed runs as a user's input", async () => {
+    const context = await createTestContext();
+    const admin = await login(context, "admin");
+    await trackingProfile(context, admin);
+    context.store.upsertWorkflow(labelledWorkflow("wf-eval-labels", "tracking"));
+    const dataset = (await call(context, "POST", "/api/eval/datasets", admin, { name: "Typed cases" })).json<{ dataset: { id: string } }>().dataset;
+    const fixture = await call(context, "POST", `/api/eval/datasets/${dataset.id}/fixtures`, admin, { name: "one", input: { user_prompt: "hello" } });
+    expect(fixture.statusCode, fixture.body).toBe(200);
+    const evaluated = await call(context, "POST", "/api/eval/runs?wait=true", admin, { datasetId: dataset.id, workflowId: "wf-eval-labels" });
+    expect(evaluated.statusCode, evaluated.body).toBe(200);
+    const rows = (context.store as unknown as { queryAll: (sql: string, params: unknown[]) => Array<{ id: string }> }).queryAll(
+      "SELECT id FROM execution_history WHERE workflow_id = ? AND trigger_type = 'eval'",
+      ["wf-eval-labels"]
+    );
+    expect(rows).toHaveLength(1);
+    const stored = JSON.parse(storedNodeResults(context, rows[0]!.id)) as Array<{ nodeId: string; labels?: DataLabels }>;
+    expect(stored.find((entry) => entry.nodeId === "hook")?.labels).toEqual(L(["user"]));
+  }, 30_000);
+});

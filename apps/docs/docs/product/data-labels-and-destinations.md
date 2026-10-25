@@ -50,7 +50,8 @@ On the run view each node shows them in plain words, for example
   replay and an eval of a recorded case take the input origin of the run they
   replay (its input step's labels, else its trigger), never the origin of the
   person who started the replay. Golden runs saved from editor runs count as
-  `user`.
+  `user`. A golden run imported from a file also counts as
+  `untrusted_external`, whatever trigger the file names.
 - **Resumed runs.** A run that paused before it tracked labels does not know
   where its input came from: when it resumes with tracking on, its input and
   every step that already ran count as `untrusted_external`.

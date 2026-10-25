@@ -11696,7 +11696,12 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         channel: "draft",
         ...replayRunInputFor(replay.recording.sourceTriggerType, storedInput),
         // Phase 16 (Q7) — the recording's input origin (replays, gate cases and simulations alike), not the starter's.
-        inputLabels: recordedInputLabels({ nodes: replay.recording.facts?.nodes, sourceTriggerType: replay.recording.sourceTriggerType }),
+        // A golden run imported from a file always counts as outside content as well (its trigger is the file's claim).
+        inputLabels: recordedInputLabels({
+          nodes: replay.recording.facts?.nodes,
+          sourceTriggerType: replay.recording.sourceTriggerType,
+          imported: replay.recording.capabilities.origin === "imported"
+        }),
         // The workflow's pinned outputs are not part of the candidate under test.
         usePinnedData: false,
         mcpPlan: replay.mcpPlan,
