@@ -14,7 +14,7 @@
 
 import { randomUUID } from "node:crypto";
 import type { AgentSessionMemoryStore, AgentSessionToolDataStore, AgentSessionToolRecord } from "@ai-orchestrator/agent-runtime";
-import type { McpElicitationResult, ModelMemorySeed } from "@ai-orchestrator/shared";
+import { labelsForUntrackedSave, parseStoredDataLabels, unionDataLabels, type DataLabels, type McpElicitationResult, type ModelMemorySeed } from "@ai-orchestrator/shared";
 import type { AgentSessionArtifactRecord, AgentSessionArtifactStore, KnowledgeBaseStore } from "@ai-orchestrator/workflow-engine";
 
 export const REPLAY_KB_WRITE_REFUSED = "Knowledge base writes are not allowed in a replay.";
@@ -34,9 +34,16 @@ const sessionKey = (namespace: string, sessionId: string) => `${namespace}\u0000
 
 export function createReplaySandbox(seed?: ModelMemorySeed | null): ReplaySandbox {
   const memory = new Map<string, unknown[]>();
+  // Phase 16 — the labels the recorded run's memory carried come with the seed (a file's labels never say `trusted`).
+  const memoryLabels = new Map<string, DataLabels>();
   for (const session of seed?.sessions ?? []) {
     if (typeof session.namespace === "string" && typeof session.sessionId === "string" && Array.isArray(session.messages)) {
       memory.set(sessionKey(session.namespace, session.sessionId), structuredClone(session.messages));
+      const labels = parseStoredDataLabels(session.labels);
+      if (labels) {
+        const seeded = labels.source === "file" ? { ...labels, provenance: labels.provenance.filter((label) => label !== "trusted") } : labels;
+        memoryLabels.set(sessionKey(session.namespace, session.sessionId), seeded);
+      }
     }
   }
   const toolCalls = new Map<string, AgentSessionToolRecord[]>();
@@ -47,10 +54,20 @@ export function createReplaySandbox(seed?: ModelMemorySeed | null): ReplaySandbo
 
   const memoryStore: AgentSessionMemoryStore = {
     loadMessages: async (namespace, sessionId) => structuredClone((memory.get(sessionKey(namespace, sessionId)) ?? []) as Awaited<ReturnType<AgentSessionMemoryStore["loadMessages"]>>),
-    saveMessages: async (namespace, sessionId, messages) => {
+    saveMessages: async (namespace, sessionId, messages, options) => {
       memoryWrites += 1;
       memory.set(sessionKey(namespace, sessionId), structuredClone(messages));
-    }
+      // Phase 16 — labels stay inside the sandbox like the messages do, merged with what the memory held (as the store
+      // does); a save without labels (an untracked run) keeps them and adds untrusted_external, as the store does.
+      const key = sessionKey(namespace, sessionId);
+      if (options?.labels) memoryLabels.set(key, unionDataLabels([memoryLabels.get(key), options.labels]));
+      else {
+        const kept = labelsForUntrackedSave(memoryLabels.get(key));
+        if (kept) memoryLabels.set(key, kept);
+        else memoryLabels.delete(key);
+      }
+    },
+    loadLabels: async (namespace, sessionId) => structuredClone(memoryLabels.get(sessionKey(namespace, sessionId)) ?? null)
   };
 
   const toolDataStore: AgentSessionToolDataStore = {
@@ -75,7 +92,10 @@ export function createReplaySandbox(seed?: ModelMemorySeed | null): ReplaySandbo
       artifactWrites += 1;
       const key = `${sessionKey(input.namespace, input.sessionId)}\u0000${input.artifactKey}`;
       const now = new Date().toISOString();
-      const record: AgentSessionArtifactRecord = { ...input, createdAt: artifacts.get(key)?.createdAt ?? now, updatedAt: now };
+      // Phase 16 — like the store: labels given replace the stored ones, a save without them keeps them plus untrusted_external.
+      const previous = artifacts.get(key);
+      const labels = input.labels ?? labelsForUntrackedSave(previous?.labels ?? null);
+      const record: AgentSessionArtifactRecord = { ...input, labels: labels ? structuredClone(labels) : null, createdAt: previous?.createdAt ?? now, updatedAt: now };
       artifacts.set(key, record);
       return record;
     },

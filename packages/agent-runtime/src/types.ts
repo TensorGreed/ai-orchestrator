@@ -1,9 +1,19 @@
-import type { AgentRunRequest, AgentRunState, ChatMessage, NodeActivity, ToolCall, ToolDefinition } from "@ai-orchestrator/shared";
+import type { AgentRunRequest, AgentRunState, ChatMessage, DataLabels, NodeActivity, ToolCall, ToolDefinition } from "@ai-orchestrator/shared";
 import type { ProviderExecutionContext, ProviderRegistry } from "@ai-orchestrator/provider-sdk";
 
 export interface AgentToolRuntime {
   tools: ToolDefinition[];
-  invokeTool: (toolName: string, args: Record<string, unknown>) => Promise<unknown>;
+  /**
+   * `invocation` (Phase 16): `labels` is what the agent's model context holds
+   * at the call (a delegated worker starts from them); `toolCallId` names the
+   * call, so `resultLabels` can tell two calls of one tool apart.
+   */
+  invokeTool: (toolName: string, args: Record<string, unknown>, invocation?: { labels?: DataLabels; toolCallId?: string }) => Promise<unknown>;
+  /**
+   * Phase 16 — the labels of this call's result (a worker's labels).
+   * Undefined: the result came from outside, `untrusted_external`.
+   */
+  resultLabels?: (toolName: string, toolCallId?: string) => DataLabels | undefined;
   /**
    * Phase 10.2 — explains why a requested tool is not in `tools` (for
    * example, an MCP tool policy hid it). The text becomes the tool error the
@@ -26,6 +36,16 @@ export interface AgentRuntimeContext {
   toolDataStore?: AgentSessionToolDataStore;
   /** Phase 12.1 — guard hooks run inside the loop when the agent is guarded. */
   guard?: AgentGuardHooks;
+  /**
+   * Phase 16 — data labels. `input`: everything the agent node read except
+   * its user prompt; `prompt`: what the user prompt read (a guard rewrite of
+   * the prompt declassifies these alone). The loop accumulates what its
+   * model context holds (memory, each tool result) and returns it on the run
+   * state. `persist`: the run tracks labels — memory labels are read, and
+   * labels are written with session memory and the tool cache. `scan`: finds
+   * data classes in tool results (tracked runs only).
+   */
+  dataLabels?: { input: DataLabels; prompt?: DataLabels; persist: boolean; scan?: (value: unknown) => string[] };
   /**
    * The run's abort signal. It is passed to every model call and ends retry
    * waits early; once it aborts, `run()` throws instead of returning an
@@ -56,7 +76,10 @@ export type AgentGuardLabel = "trusted" | "user" | "untrusted_external" | "sensi
 export interface AgentGuardCheck {
   channel: AgentGuardChannel;
   content: unknown;
+  /** The checkpoint's fixed labels (a prompt is user input, a tool result is external). */
   labels: AgentGuardLabel[];
+  /** Phase 16 — the propagated labels of this content, when the caller tracks them; profiles that ask for them use these instead. */
+  dataLabels?: DataLabels;
   iteration: number;
   tool?: { name: string; inputSchema?: Record<string, unknown>; toolCallId?: string };
 }
@@ -64,7 +87,7 @@ export interface AgentGuardCheck {
 export type AgentGuardDecision =
   | { outcome: "allow" }
   /** Content was redacted, masked, protected or transformed: continue with this instead. */
-  | { outcome: "rewrite"; content: unknown }
+  | { outcome: "rewrite"; content: unknown; declassified?: string[] }
   /** Tool calls become tool errors, tool results become a notice, prompts and final answers stop the node. */
   | { outcome: "block"; message: string }
   /** A person must decide: the node pauses through the approval hand-off. */
@@ -116,7 +139,10 @@ export interface InternalToolResult {
 
 export interface AgentSessionMemoryStore {
   loadMessages(namespace: string, sessionId: string): Promise<ChatMessage[]>;
-  saveMessages(namespace: string, sessionId: string, messages: ChatMessage[]): Promise<void>;
+  /** `options.labels` (Phase 16): stored with the messages; given only while the run tracks labels. */
+  saveMessages(namespace: string, sessionId: string, messages: ChatMessage[], options?: { labels?: DataLabels }): Promise<void>;
+  /** Phase 16 — the labels stored with this memory; null when none were recorded (older rows). */
+  loadLabels?(namespace: string, sessionId: string): Promise<DataLabels | null>;
 }
 
 export interface AgentSessionToolRecord {
@@ -129,6 +155,8 @@ export interface AgentSessionToolRecord {
   output: unknown;
   error?: string;
   summary?: unknown;
+  /** Phase 16 — labels of the cached result; absent on rows written while labels were not tracked. */
+  labels?: DataLabels | null;
   createdAt: string;
 }
 
@@ -142,6 +170,8 @@ export interface AgentSessionToolDataStore {
     output: unknown;
     error?: string;
     summary?: unknown;
+    /** Phase 16 — given only while the run tracks labels. */
+    labels?: DataLabels;
   }): Promise<AgentSessionToolRecord>;
   listToolCalls(input: {
     namespace: string;

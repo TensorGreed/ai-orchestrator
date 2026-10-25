@@ -6,7 +6,7 @@ import type {
   ChatMessage,
   ToolDefinition
 } from "@ai-orchestrator/shared";
-import { NODE_ACTIVITY_PREVIEW_CHARS } from "@ai-orchestrator/shared";
+import { NODE_ACTIVITY_PREVIEW_CHARS, unionDataLabels, withoutDataClasses, type DataLabels } from "@ai-orchestrator/shared";
 import type { AgentGuardCheck, AgentRuntimeAdapter, AgentRuntimeContext, AgentRuntimeEvent, AgentToolRuntime, InternalToolResult } from "./types";
 import { AgentGuardInterrupt, createToolErrorResult, isAgentGuardInterrupt } from "./types";
 
@@ -225,10 +225,16 @@ function buildToolOutputSummary(args: Record<string, unknown>, output: unknown, 
   };
 }
 
+const unionLabels = unionDataLabels;
+
+const EXTERNAL_RESULT_LABELS: DataLabels = { provenance: ["untrusted_external"], dataClasses: [], source: "propagated" };
+
 function createSessionCacheTools(input: {
   sessionId: string | undefined;
   namespace: string;
   context: AgentRuntimeContext;
+  /** Phase 16 — labels of the cached records the model is shown. */
+  onLabels?: (labels: DataLabels) => void;
 }): RuntimeInternalTool[] {
   if (!input.sessionId || !input.context.toolDataStore) {
     return [];
@@ -267,6 +273,8 @@ function createSessionCacheTools(input: {
         toolName,
         limit
       });
+      // Phase 16 — a cached result is an external tool's output by construction, whatever labels its row has.
+      if (records.length > 0) input.onLabels?.(unionLabels([EXTERNAL_RESULT_LABELS, ...records.map((record) => record.labels)]));
       return {
         session_id: input.sessionId,
         namespace: input.namespace,
@@ -323,6 +331,7 @@ function createSessionCacheTools(input: {
           message: "No cached record found for this session."
         };
       }
+      input.onLabels?.(unionLabels([EXTERNAL_RESULT_LABELS, record.labels]));
 
       const outputPath = toOptionalNonEmptyString(args.output_path);
       const selectedOutput = outputPath ? getValueAtPath(record.output, outputPath) : record.output;
@@ -798,10 +807,36 @@ export class DefaultAgentRuntime implements AgentRuntimeAdapter {
     const memoryMaxMessages = normalizeMaxMessages(request.memory?.maxMessages);
     const persistToolMessages = request.memory?.persistToolMessages === true;
     const toolOutputLimits = normalizeToolOutputLimits(request.toolOutputLimits);
+    // Phase 16 — what the model context holds: the input, memory it read, each result it saw.
+    // `inputLabels` is the rest of what the node read; `promptLabels` what its user prompt read, which a prompt
+    // rewrite declassifies alone (other context may still hold the class).
+    const labelTracking = context.dataLabels;
+    const inputLabels: DataLabels | undefined = labelTracking?.input;
+    let promptLabels: DataLabels | undefined = labelTracking?.prompt;
+    let memoryLabels: DataLabels | undefined;
+    const seenLabels: DataLabels[] = [];
+    let finalDeclassified: string[] = [];
+    const scanLabels = labelTracking?.persist ? labelTracking.scan : undefined;
+    /** Phase 16 — `labels` plus the data classes a scan finds in `content` (tracked runs only). */
+    const withScanned = (labels: DataLabels, content: unknown): DataLabels => {
+      if (!scanLabels || content === null || content === undefined) return labels;
+      const found = scanLabels(content);
+      return found.length > 0 ? unionLabels([labels, { provenance: [], dataClasses: found, source: "propagated" }]) : labels;
+    };
+    const accumulatedLabels = (): DataLabels => unionLabels([inputLabels, promptLabels, memoryLabels, ...seenLabels]);
+    const withLabels = (state: AgentRunState): AgentRunState =>
+      labelTracking
+        ? {
+            ...state,
+            labels: withoutDataClasses(accumulatedLabels(), finalDeclassified),
+            ...(finalDeclassified.length > 0 ? { labelsDeclassified: [...finalDeclassified] } : {})
+          }
+        : state;
     const sessionCacheTools = createSessionCacheTools({
       sessionId: request.sessionId,
       namespace: memoryNamespace,
-      context
+      context,
+      ...(labelTracking ? { onLabels: (labels: DataLabels) => seenLabels.push(labels) } : {})
     });
     const sessionCacheToolNames = new Set(sessionCacheTools.map((tool) => tool.definition.name));
     const sessionCacheHint =
@@ -818,6 +853,10 @@ export class DefaultAgentRuntime implements AgentRuntimeAdapter {
     if (memoryEnabled && request.sessionId) {
       const loaded = await context.memoryStore!.loadMessages(memoryNamespace, request.sessionId);
       memoryMessages = repairToolCallPairs(normalizeStoredMessages(loaded, memoryMaxMessages, toolOutputLimits.messageMaxChars));
+      // Phase 16 — memory written by earlier runs brings its labels (older rows have none); read only on tracked runs.
+      if (labelTracking?.persist && memoryMessages.length > 0 && context.memoryStore!.loadLabels) {
+        memoryLabels = (await context.memoryStore!.loadLabels(memoryNamespace, request.sessionId)) ?? undefined;
+      }
     }
 
     // Phase: agent_clarify resume detection. If the last assistant message
@@ -965,10 +1004,17 @@ ${effectiveSystemPrompt}`;
         const message = messages[index];
         if (!message) continue;
         const text = message.role === "tool" ? request.userPrompt : message.content;
-        const decision = await guard.check({ channel: "prompt", content: text, labels: ["user"], iteration });
+        const decision = await guard.check({
+          channel: "prompt",
+          content: text,
+          labels: ["user"],
+          ...(labelTracking ? { dataLabels: unionLabels([inputLabels, promptLabels]) } : {}),
+          iteration
+        });
         if (decision.outcome === "block") throw new AgentGuardInterrupt("blocked", "prompt", iteration, decision.message);
         if (decision.outcome === "pause") throw new AgentGuardInterrupt("approval_required", "prompt", iteration, decision.message);
         if (decision.outcome === "rewrite") {
+          if (promptLabels && decision.declassified) promptLabels = withoutDataClasses(promptLabels, decision.declassified);
           const rewritten = typeof decision.content === "string" ? decision.content : JSON.stringify(decision.content);
           messages[index] =
             message.role === "tool"
@@ -980,9 +1026,10 @@ ${effectiveSystemPrompt}`;
     /** The final answer after the guard's `final_output` check; a block or pause stops the node. */
     const guardFinalAnswer = async (answer: string, iteration: number): Promise<string> => {
       if (!guard) return answer;
-      const decision = await guard.check({ channel: "final_output", content: answer, labels: [], iteration });
+      const decision = await guard.check({ channel: "final_output", content: answer, labels: [], ...(labelTracking ? { dataLabels: accumulatedLabels() } : {}), iteration });
       if (decision.outcome === "block") throw new AgentGuardInterrupt("blocked", "final_output", iteration, decision.message);
       if (decision.outcome === "pause") throw new AgentGuardInterrupt("approval_required", "final_output", iteration, decision.message);
+      if (decision.outcome === "rewrite" && decision.declassified) finalDeclassified = decision.declassified;
       if (decision.outcome === "rewrite") return typeof decision.content === "string" ? decision.content : JSON.stringify(decision.content);
       return answer;
     };
@@ -1008,7 +1055,15 @@ ${effectiveSystemPrompt}`;
         })
         .slice(-memoryMaxMessages);
 
-      await context.memoryStore.saveMessages(memoryNamespace, request.sessionId, repairToolCallPairs(persistable));
+      if (labelTracking?.persist) {
+        // Phase 16 — the memory keeps what its messages came from, for the runs that read it later. A final-answer
+        // rewrite does not declassify it: the stored prompt, earlier memory and tool messages were not rewritten.
+        await context.memoryStore.saveMessages(memoryNamespace, request.sessionId, repairToolCallPairs(persistable), {
+          labels: accumulatedLabels()
+        });
+      } else {
+        await context.memoryStore.saveMessages(memoryNamespace, request.sessionId, repairToolCallPairs(persistable));
+      }
     };
 
     const LLM_RETRY_MAX = 2;
@@ -1174,7 +1229,7 @@ ${effectiveSystemPrompt}`;
               llmCallCount: llmCallCount || undefined
             };
             await persistConversation();
-            return result;
+            return withLabels(result);
           }
           // No prior success — re-throw
           throw llmError ?? new Error("LLM call failed after retries");
@@ -1244,6 +1299,8 @@ ${effectiveSystemPrompt}`;
             // external tool being called; the failure path below needs both.
             let callArguments = call.arguments;
             let guardedTool: AgentGuardCheck["tool"] | undefined;
+            // Phase 16 — set once an external tool was called: its result or error text carries these labels.
+            let resultLabels: DataLabels | undefined;
             try {
               // --- Check if tool exists before invoking ---
               const toolDefinition = toolDefinitionByName.get(call.name);
@@ -1363,7 +1420,7 @@ ${effectiveSystemPrompt}`;
                   }
                 };
                 await persistConversation();
-                return clarifyResult;
+                return withLabels(clarifyResult);
               }
 
               // Phase 12.1 — guard hook: before each external tool call.
@@ -1372,7 +1429,14 @@ ${effectiveSystemPrompt}`;
               const guardTool = { name: call.name, inputSchema: toolDefinition?.inputSchema, toolCallId: call.id };
               if (guard && !internalTool) {
                 guardedTool = guardTool;
-                const decision = await guard.check({ channel: "tool_arguments", content: callArguments, labels: [], iteration, tool: guardTool });
+                const decision = await guard.check({
+                  channel: "tool_arguments",
+                  content: callArguments,
+                  labels: [],
+                  ...(labelTracking ? { dataLabels: accumulatedLabels() } : {}),
+                  iteration,
+                  tool: guardTool
+                });
                 if (decision.outcome === "pause") throw new AgentGuardInterrupt("approval_required", "tool_arguments", iteration, decision.message);
                 // A rewrite that is no longer an argument object cannot be sent safely: it is refused like a block.
                 const unusableRewrite =
@@ -1399,23 +1463,40 @@ ${effectiveSystemPrompt}`;
                 iteration,
                 argsPreview: previewText(JSON.stringify(callArguments) ?? "", NODE_ACTIVITY_PREVIEW_CHARS)
               });
-              let output = internalTool
-                ? await internalTool.invoke(callArguments)
-                : await tools.invokeTool(call.name, callArguments);
+              let output: unknown;
+              if (internalTool) {
+                output = await internalTool.invoke(callArguments);
+              } else {
+                if (labelTracking) resultLabels = EXTERNAL_RESULT_LABELS;
+                output = labelTracking
+                  ? await tools.invokeTool(call.name, callArguments, { labels: accumulatedLabels(), toolCallId: call.id })
+                  : await tools.invokeTool(call.name, callArguments);
+                if (labelTracking) resultLabels = tools.resultLabels?.(call.name, call.id) ?? EXTERNAL_RESULT_LABELS;
+              }
 
               // Phase 12.1 — guard hook: after each external tool result,
               // before the model sees it. The content is external and untrusted.
               let guardNotice: string | undefined;
               if (guard && !internalTool) {
-                const decision = await guard.check({ channel: "tool_result", content: output, labels: ["untrusted_external"], iteration, tool: guardTool });
+                const decision = await guard.check({
+                  channel: "tool_result",
+                  content: output,
+                  labels: ["untrusted_external"],
+                  ...(resultLabels ? { dataLabels: resultLabels } : {}),
+                  iteration,
+                  tool: guardTool
+                });
                 if (decision.outcome === "pause") throw new AgentGuardInterrupt("approval_required", "tool_result", iteration, decision.message);
                 if (decision.outcome === "block") {
                   guardNotice = `The result of '${call.name}' was withheld by the guard: ${decision.message}. Continue without it.`;
                   output = null;
                 } else if (decision.outcome === "rewrite") {
                   output = decision.content;
+                  if (resultLabels && decision.declassified) resultLabels = withoutDataClasses(resultLabels, decision.declassified);
                 }
               }
+              // Phase 16 — the classes the result holds as the model will see it (after any rewrite), on tracked runs.
+              if (resultLabels && !internalTool) resultLabels = withScanned(resultLabels, output);
 
               if (guardNotice) {
                 reportToolEnd("blocked", guardNotice);
@@ -1430,6 +1511,8 @@ ${effectiveSystemPrompt}`;
                 toolName: call.name,
                 output
               });
+              // The model sees this result from here on.
+              if (resultLabels) seenLabels.push(resultLabels);
 
               reportToolEnd("ok");
               // Reset failure count on success
@@ -1444,7 +1527,8 @@ ${effectiveSystemPrompt}`;
                     toolCallId: call.id,
                     args: callArguments,
                     output,
-                    summary: buildToolOutputSummary(callArguments, output)
+                    summary: buildToolOutputSummary(callArguments, output),
+                    ...(labelTracking?.persist && resultLabels ? { labels: resultLabels } : {})
                   });
                 } catch {
                   // Cache persistence must never break agent execution.
@@ -1477,12 +1561,22 @@ ${effectiveSystemPrompt}`;
               // tool and is as untrusted as a result: guard it before the model sees it.
               let guardedError = normalizedError;
               if (guard && guardedTool) {
-                const decision = await guard.check({ channel: "tool_result", content: normalizedError, labels: ["untrusted_external"], iteration, tool: guardedTool });
+                const decision = await guard.check({
+                  channel: "tool_result",
+                  content: normalizedError,
+                  labels: ["untrusted_external"],
+                  ...(resultLabels ? { dataLabels: resultLabels } : {}),
+                  iteration,
+                  tool: guardedTool
+                });
                 if (decision.outcome === "pause") throw new AgentGuardInterrupt("approval_required", "tool_result", iteration, decision.message);
                 if (decision.outcome === "block") guardedError = `The error from '${call.name}' was withheld by the guard: ${decision.message}.`;
                 else if (decision.outcome === "rewrite") guardedError = typeof decision.content === "string" ? decision.content : JSON.stringify(decision.content);
               }
               const toolError = createToolErrorResult(call, guardedError);
+              // An external tool's error text reaches the model like a result (and is scanned like one).
+              if (resultLabels) resultLabels = withScanned(resultLabels, guardedError);
+              if (resultLabels) seenLabels.push(resultLabels);
               reportToolEnd("error", toolError.error);
               toolResults.push(toolError);
               failedToolCount += 1;
@@ -1504,7 +1598,8 @@ ${effectiveSystemPrompt}`;
                     args: callArguments,
                     output: null,
                     error: toolError.error,
-                    summary: buildToolOutputSummary(callArguments, null, toolError.error)
+                    summary: buildToolOutputSummary(callArguments, null, toolError.error),
+                    ...(labelTracking?.persist && resultLabels ? { labels: resultLabels } : {})
                   });
                 } catch {
                   // Cache persistence must never break agent execution.
@@ -1574,7 +1669,7 @@ ${effectiveSystemPrompt}`;
           llmCallCount: llmCallCount || undefined
         };
         await persistConversation();
-        return result;
+        return withLabels(result);
       }
 
       const result: AgentRunState = {
@@ -1590,7 +1685,7 @@ ${effectiveSystemPrompt}`;
         llmCallCount: llmCallCount || undefined
       };
       await persistConversation();
-      return result;
+      return withLabels(result);
     } catch (error) {
       // Phase 12.1 — a guard block or approval pause is not an agent failure:
       // it leaves the loop as is, without writing the stopped turn to memory.
@@ -1613,7 +1708,7 @@ ${effectiveSystemPrompt}`;
         llmCallCount: llmCallCount || undefined
       };
       await persistConversation();
-      return result;
+      return withLabels(result);
     }
   }
 }

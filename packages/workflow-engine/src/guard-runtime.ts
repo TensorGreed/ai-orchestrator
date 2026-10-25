@@ -15,6 +15,7 @@ import {
   hashGuardProfile,
   mergeGuardProfileOverride,
   PROMPT_HARDENING_TEXT,
+  profileUsesLabels,
   spotlightingSystemPrompt,
   summarizeGuardVerdict,
   wrapWithDelimiters,
@@ -34,6 +35,7 @@ import {
   GUARD_BUILTIN_PROFILE_ID,
   GUARD_EFFECTIVE_PROFILE_REF,
   defaultGuardLabels,
+  orderedProvenance,
   guardNodeConfigSchema,
   guardProtectionNodeConfigSchema,
   type GuardBindingLevel,
@@ -98,6 +100,13 @@ export interface GuardRuntimeDependencies {
   /** Token vault storage; persisted and encrypted by the API. */
   vault?: TokenVaultStorage;
   onVerdict?(event: GuardVerdictEvent): Promise<void> | void;
+  /**
+   * Phase 16 — a cheap check before a run resolves its profiles to learn
+   * whether it tracks labels: false when no profile this run could resolve
+   * asks for propagated labels, so the run skips the resolution. Absent: the
+   * run resolves.
+   */
+  mayUseLabels?(): boolean;
 }
 
 export interface GuardEvalScope {
@@ -324,6 +333,27 @@ export function guardApprovalKey(nodeId: string, channel: GuardChannel, result: 
   return `guard:${nodeId}:${channel}:${toolName ?? ""}:${[...findings].sort().join("|")}:${digest}`;
 }
 
+/**
+ * Phase 16 — the data classes a check rewrote out of the content (redacted,
+ * masked or protected, not in shadow mode): the content's labels drop them.
+ */
+export function declassifiedClasses(result: GuardCheckResult): string[] {
+  if (!result.transformed) return [];
+  const classes = new Set<string>();
+  for (const { summary } of result.verdicts) {
+    for (const action of summary.actions) {
+      if (action.shadow || !action.dataClass) continue;
+      if (action.effective === "redact" || action.effective === "mask" || action.effective === "protect") classes.add(String(action.dataClass));
+    }
+  }
+  return [...classes].sort();
+}
+
+/** Phase 16 — true when a profile among these asks its checks to see propagated labels. */
+export function profilesUsePropagatedLabels(profiles: ReadonlyArray<{ profile: GuardProfile }>): boolean {
+  return profiles.some((entry) => profileUsesLabels(entry.profile));
+}
+
 export function needsApproval(action: GuardAction): boolean {
   return action === "review" || action === "require_approval";
 }
@@ -389,6 +419,8 @@ export async function createAgentGuardSession(input: {
   const spotlighting = spotlightProfile?.profile.spotlighting;
   const harden = profiles.some((entry) => entry.profile.spotlighting?.hardenSystemPrompt === true && entry.profile.spotlighting.mode !== "off");
   const canary = profiles.some((entry) => entry.profile.canaries?.enabled === true) ? generateCanaryToken() : undefined;
+  // Phase 16 — fixed labels per checkpoint unless a profile asks for the propagated ones.
+  const propagatedLabels = profilesUsePropagatedLabels(profiles);
   const boundary = `DATA-${randomBytes(6).toString("hex").toUpperCase()}`;
   const verdictLog: AgentGuardTraceEntry[] = [];
   const approvals: ReadonlySet<string> = input.approvals ?? new Set<string>();
@@ -420,7 +452,8 @@ export async function createAgentGuardSession(input: {
         {
           content: check.content,
           channel: check.channel,
-          labels: check.labels as ProvenanceLabel[],
+          // Propagated labels add to the checkpoint's fixed ones: a check never sees weaker labels than with the switch off.
+          labels: (propagatedLabels && check.dataLabels ? orderedProvenance([...check.labels, ...check.dataLabels.provenance]) : check.labels) as ProvenanceLabel[],
           ...(tool ? { tool } : {}),
           ...(withCanary ? { canaries: [canary] } : {})
         },
@@ -449,7 +482,7 @@ export async function createAgentGuardSession(input: {
         }
         entry.approved = true;
       }
-      return result.transformed ? { outcome: "rewrite", content: result.content } : { outcome: "allow" };
+      return result.transformed ? { outcome: "rewrite", content: result.content, declassified: declassifiedClasses(result) } : { outcome: "allow" };
     }
   };
 
@@ -476,7 +509,15 @@ export async function createAgentGuardSession(input: {
   };
 }
 
-/** Labels a guard node evaluates with when its config names none. */
-export function guardNodeLabels(config: GuardNodeConfig): ProvenanceLabel[] {
-  return (config.labels ?? defaultGuardLabels(config.channel)) as ProvenanceLabel[];
+/**
+ * Labels a guard node evaluates with: its configured labels win; otherwise
+ * the propagated provenance of its input when a profile asks for it
+ * (Phase 16); otherwise the channel's default.
+ */
+export function guardNodeLabels(config: GuardNodeConfig, propagated?: readonly ProvenanceLabel[]): ProvenanceLabel[] {
+  if (config.labels) return config.labels as ProvenanceLabel[];
+  const defaults = defaultGuardLabels(config.channel) as ProvenanceLabel[];
+  // Never weaker than the channel's default: propagated labels add to it.
+  if (propagated) return orderedProvenance([...defaults, ...propagated]);
+  return defaults;
 }

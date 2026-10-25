@@ -6,6 +6,7 @@ import type {
   McpRuntimeRejection,
   McpSandboxSettings
 } from "./mcp-runtime-safety";
+import type { DataLabels, NodeLabelMap } from "./data-labels";
 
 export const WORKFLOW_SCHEMA_VERSION = "1.0.0";
 export const MAX_SUB_WORKFLOW_DEPTH = 10;
@@ -335,6 +336,12 @@ export interface NodeExecutionResult {
   progress?: NodeProgressSnapshot;
   /** What the node did while it ran, oldest first, capped at NODE_ACTIVITY_LIMIT entries. */
   activity?: NodeActivityEvent[];
+  /**
+   * Phase 16 — where the node's output came from and the data classes it
+   * holds (source `propagated`). Only on runs whose guard profiles track
+   * labels, and only when not empty.
+   */
+  labels?: DataLabels;
 }
 
 /** Most activity entries kept per node; older ones are dropped. */
@@ -492,6 +499,12 @@ export interface WorkflowExecutionState {
   releaseChannel?: "production" | "draft";
   /** Phase 15.4 — the published version a production run started on (null: none was published), for its history. */
   releaseVersion?: number | null;
+  /**
+   * Phase 16 — the run's data labels, beside `nodeOutputs`: the input's
+   * labels, every completed node's labels, and whether labels are tracked
+   * (stored and scanned). A resumed run carries on with them.
+   */
+  dataLabels?: { input: DataLabels; nodes: NodeLabelMap; tracked: boolean };
 }
 
 /**
@@ -1084,6 +1097,18 @@ export interface AgentRunState {
     reason?: string;
     toolCallId: string;
   };
+  /**
+   * Phase 16 — what the agent's model context held by the end: its input,
+   * memory it read and every tool result it saw. The answer carries these
+   * labels. Set only when the caller passed input labels.
+   */
+  labels?: DataLabels;
+  /**
+   * Phase 16 — data classes a `final_output` rewrite removed from the answer
+   * (already left out of `labels`). The caller applies them to any labels it
+   * adds to the answer's afterwards.
+   */
+  labelsDeclassified?: string[];
   /**
    * Cumulative LLM usage across every model call the agent made (one per
    * iteration plus retries). Aggregated from each `LLMCallResponse.usage`.

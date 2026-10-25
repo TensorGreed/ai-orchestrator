@@ -15,6 +15,7 @@ import "./styles/guard.css";
 import "./styles/approvals.css";
 import "./styles/release.css";
 import "./styles/capture.css";
+import "./styles/labels.css";
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>

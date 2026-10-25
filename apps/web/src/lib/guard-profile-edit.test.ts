@@ -6,6 +6,7 @@ import {
   setChannelEnabled,
   setDefaultAction,
   setDetector,
+  setLabelTracking,
   setShadowForAction,
   setSpotlighting,
   suggestProfileId
@@ -66,5 +67,13 @@ describe("guard profile edits", () => {
     const copy = duplicateDocument({ ...doc(), version: "7" }, "p-copy", "P (copy)");
     expect(copy).toMatchObject({ id: "p-copy", name: "P (copy)", version: "1" });
     expect(suggestProfileId("Default guard profile (copy)", new Set(["default-guard-profile-copy"]))).toBe("default-guard-profile-copy-2");
+  });
+
+  it("turns label tracking on and removes the field when off", () => {
+    const original = doc();
+    const on = setLabelTracking(original, true);
+    expect(on.labels).toBe("propagated");
+    expect("labels" in original).toBe(false);
+    expect("labels" in setLabelTracking(on, false)).toBe(false);
   });
 });

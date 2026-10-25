@@ -29,13 +29,15 @@
 import {
   DATA_LABEL_SOURCES,
   canonicalJson,
-  getNodeDefinition,
+  inputProvenance,
+  provenanceFor,
   PROVENANCE_LABELS,
   type DataLabels,
   type McpCassette,
   type ModelMemorySeed,
   type ModelTape,
   type ProvenanceLabel,
+  type RunInputOrigin,
   type ReplayRecordedNode,
   type RunFacts
 } from "@ai-orchestrator/shared";
@@ -257,52 +259,43 @@ export function* maskCapturedRunSteps(run: CapturedRunParts, options: MaskRunOpt
  * Who produced a run's input, decided by the server where the run started
  * (never by a caller-supplied trigger name): `scheduler` for the server's own
  * scheduled runs, `user` for runs a signed-in user or an API key started
- * (the queue, the execute API), `external` for everything else.
+ * (the queue, the execute API), `external` for everything else. The rules
+ * live in shared (Phase 16) so capture and label propagation use one copy.
  */
-export type CaptureInputOrigin = "scheduler" | "user" | "external";
-
-/** Production triggers whose input a person typed (chat, forms, app messages) or an authenticated caller sent. */
-const USER_TRIGGERS = new Set(["chat", "form", "webhook_api", "webhook_api_stream", "mcp_server", "slack_webhook", "telegram_webhook", "discord_webhook"]);
-/** Node categories that bring in content from outside the workflow. */
-const EXTERNAL_CATEGORIES = new Set(["Connector", "RAG", "MCP"]);
-const EXTERNAL_TYPES = new Set(["http_request", "web_browse", "mcp_tool"]);
+export type CaptureInputOrigin = RunInputOrigin;
+export { inputProvenance, provenanceFor };
 
 /**
- * The provenance of a run's input. `trusted` only for the server's own
- * scheduler: a trigger name a caller chose (`cron` on the queue route) earns
- * nothing.
+ * Every node of the run facts gets `labels`. With a masking report (a
+ * masked capture), source `scan`: the data classes the masking pass found in
+ * its content and where its content came from (from the trigger and the node
+ * type only, never from the scan). Phase 16 — a node that carries labels the
+ * engine propagated (the run tracked labels) gets source `propagated`: those
+ * labels merged with what the scan found. Without either, the facts are
+ * unchanged.
  */
-export function inputProvenance(triggerType: string | null, origin: CaptureInputOrigin | undefined): ProvenanceLabel {
-  if (origin === "scheduler") return "trusted";
-  if (origin === "user") return "user";
-  if (triggerType && USER_TRIGGERS.has(triggerType)) return "user";
-  return "untrusted_external";
-}
-
-/** Where a node's content came from: input nodes carry the run's input provenance, nodes that fetch from outside are external. */
-export function provenanceFor(nodeType: string, input: ProvenanceLabel): ProvenanceLabel[] {
-  const category = getNodeDefinition(nodeType)?.category;
-  if (category === "Input") return [input];
-  if ((category && EXTERNAL_CATEGORIES.has(category)) || EXTERNAL_TYPES.has(nodeType)) return ["untrusted_external"];
-  return [];
-}
-
-/**
- * Every node of the run facts gets `labels` (source `scan`): the data
- * classes the masking pass found in its content (`dataClasses`), and where
- * its content came from (`provenance`, from the trigger and the node type
- * only, never from the scan). Without a masking report (masking off)
- * nothing was scanned and the facts are unchanged.
- */
-export function withNodeLabels(facts: RunFacts, report: MaskReport | null, input: ProvenanceLabel): RunFacts {
-  if (!report) return facts;
-  const scan: (typeof DATA_LABEL_SOURCES)[number] = "scan";
+export function withNodeLabels(
+  facts: RunFacts,
+  report: MaskReport | null,
+  input: ProvenanceLabel,
+  propagated: ReadonlyMap<string, DataLabels> = new Map()
+): RunFacts {
+  if (!report && propagated.size === 0) return facts;
   return {
     ...facts,
     nodes: facts.nodes.map((node) => {
-      const dataClasses = maskedClassesForNode(report, node.nodeId);
-      const provenance = new Set<ProvenanceLabel>(provenanceFor(node.nodeType, input));
-      const labels: DataLabels = { provenance: PROVENANCE_LABELS.filter((label) => provenance.has(label)), dataClasses, source: scan };
+      const carried = propagated.get(node.nodeId);
+      if (!report && !carried) return node;
+      const provenance = new Set<ProvenanceLabel>(report ? provenanceFor(node.nodeType, input) : []);
+      const dataClasses = new Set<string>(report ? maskedClassesForNode(report, node.nodeId) : []);
+      carried?.provenance.forEach((label) => provenance.add(label));
+      carried?.dataClasses.forEach((name) => dataClasses.add(name));
+      const source: (typeof DATA_LABEL_SOURCES)[number] = carried ? "propagated" : "scan";
+      const labels: DataLabels = {
+        provenance: PROVENANCE_LABELS.filter((label) => provenance.has(label)),
+        dataClasses: report && !carried ? maskedClassesForNode(report, node.nodeId) : [...dataClasses].sort(),
+        source
+      };
       return { ...node, labels };
     })
   };

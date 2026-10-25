@@ -139,9 +139,10 @@ import { registerAuditBundleRoutes } from "./audit-bundle-routes.js";
 import { registerReplayRoutes } from "./replay-routes.js";
 import { registerReplayCaptureRoutes } from "./replay-capture-routes.js";
 import { deriveCaptureSurrogateKey, ReplayCaptureService, type CaptureSource, type CaptureTicket } from "./services/replay-capture-service.js";
-import type { CaptureInputOrigin } from "./services/capture-masking.js";
+import { inputProvenance, type CaptureInputOrigin } from "./services/capture-masking.js";
 import { registerEvalRoutes } from "./eval-routes.js";
 import { registerGoldenSetFileRoutes } from "./golden-set-file-routes.js";
+import { parseStoredDataLabels, recordedInputLabels, type DataLabels } from "@ai-orchestrator/shared";
 import { GOLDEN_SET_FILE_DEFAULT_MAX_BYTES, GUARD_SIMULATION_MAX_CASES_DEFAULT, GUARD_SIMULATION_RETENTION_DAYS } from "@ai-orchestrator/shared";
 import { registerApprovalRoutes } from "./approval-routes.js";
 import { registerReleaseRoutes } from "./release-routes.js";
@@ -1897,6 +1898,13 @@ export function createApp(
      * marker alone makes it eligible for capture.
      */
     captureSource?: CaptureSource;
+    /**
+     * Phase 16 — where the run's input came from, when the server knows better
+     * than the starter: a replay, gate case, simulation, MCP replay or eval of a
+     * recorded case takes the recording's input origin (Q7), not the user who
+     * started it. Absent: decided from the trigger and who started the run.
+     */
+    inputLabels?: DataLabels;
   }) => {
     const channel: ReleaseChannel = input.channel ?? "draft";
     const releaseVersion = channel === "production" ? (input.releaseVersion !== undefined ? input.releaseVersion : releaseService.versionOf(input.workflow)) : null;
@@ -1982,7 +1990,14 @@ export function createApp(
           triggeredBy: input.triggeredBy,
           toolPolicySubject: input.policySubject ?? resolveToolPolicySubject(input.workflow.id, input.policyActor),
           resumeState: input.resumeState,
-          approvalDecision: input.approvalDecision
+          approvalDecision: input.approvalDecision,
+          // Phase 16 — where the run's input came from, as the server knows it (the capture rules, or the recording a
+          // replay replays). A resumed run keeps its own (the engine ignores this on resume).
+          inputLabels: input.inputLabels ?? {
+            provenance: [inputProvenance(input.triggerType, input.captureInputOrigin ?? (input.policyActor ? "user" : undefined))],
+            dataClasses: [],
+            source: "propagated"
+          }
         },
         {
           // Phase 15.3 — a recorded run records its model calls; a model replay answers them from the tape.
@@ -2234,6 +2249,27 @@ export function createApp(
     if (report) next = applyReplayOutcome({ ...next, mcpReplay: report }, report);
     return next;
   };
+
+  /**
+   * Phase 16 (Q7) — the input labels of a run that replays a past execution
+   * (an MCP replay): its input-node labels when it tracked them, else its
+   * trigger decides. Never the replaying user's origin.
+   */
+  const historyInputLabels = (source: { triggerType: string | null; nodeResults: unknown }, workflow: Workflow): DataLabels => {
+    const types = new Map(workflow.nodes.map((node) => [node.id, node.type]));
+    const results = Array.isArray(source.nodeResults) ? (source.nodeResults as Array<Record<string, unknown>>) : [];
+    return recordedInputLabels({
+      nodes: results.map((result) => ({ nodeType: types.get(String(result?.nodeId ?? "")) ?? "", labels: parseStoredDataLabels(result?.labels) })),
+      sourceTriggerType: source.triggerType
+    });
+  };
+
+  /**
+   * Phase 16 — an eval case's input labels. An eval run executes only cases a
+   * builder typed (golden runs are skipped there and replay as replay jobs,
+   * with their recording's origin), so the input is a user's.
+   */
+  const EVAL_CASE_INPUT_LABELS: DataLabels = { provenance: ["user"], dataClasses: [], source: "propagated" };
 
   /** Phase 10.8 — what a replay feeds the workflow, rebuilt from the source run's stored request input. */
   const replayRunInputFor = (
@@ -3049,7 +3085,8 @@ export function createApp(
     knowledgeBaseStoreFor: (projectId) => knowledgeBaseStoreForRun(projectId),
     sessions: {
       loadMemory: (namespace, sessionId) => store.loadSessionMemory(namespace, sessionId),
-      saveMemory: (namespace, sessionId, messages) => store.saveSessionMemory(namespace, sessionId, messages),
+      saveMemory: (namespace, sessionId, messages, labels) => store.saveSessionMemory(namespace, sessionId, messages, labels),
+      loadMemoryLabels: (namespace, sessionId) => store.loadSessionMemoryLabels(namespace, sessionId),
       saveToolCall: (input) => store.saveSessionToolCall(input),
       listToolCalls: (input) => store.listSessionToolCalls(input),
       getToolCall: (input) => store.getSessionToolCall(input),
@@ -3298,6 +3335,8 @@ export function createApp(
         triggeredBy: input.triggeredBy,
         // Eval runs are started by a signed-in builder, looked up again for every case.
         policyActor,
+        // Phase 16 — a case a builder typed is a user's input (whoever starts the eval).
+        inputLabels: EVAL_CASE_INPUT_LABELS,
         mcpPlan
       });
       const result = finishMcpCassettePlan(mcpPlan, executed, {
@@ -8791,6 +8830,8 @@ export function createApp(
       // Phase 15.4: not production traffic, so the draft (or the candidate given) runs.
       channel: "draft",
       ...replayRunInputFor(source.triggerType, storedInput),
+      // Phase 16 — the source run's input origin, not the user replaying it.
+      inputLabels: historyInputLabels(source, workflow),
       mcpPlan,
       policyActor: user,
       workflow,
@@ -11654,6 +11695,13 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         // Phase 15.4: not production traffic, so the draft (or the candidate given) runs.
         channel: "draft",
         ...replayRunInputFor(replay.recording.sourceTriggerType, storedInput),
+        // Phase 16 (Q7) — the recording's input origin (replays, gate cases and simulations alike), not the starter's.
+        // A golden run imported from a file always counts as outside content as well (its trigger is the file's claim).
+        inputLabels: recordedInputLabels({
+          nodes: replay.recording.facts?.nodes,
+          sourceTriggerType: replay.recording.sourceTriggerType,
+          imported: replay.recording.capabilities.origin === "imported"
+        }),
         // The workflow's pinned outputs are not part of the candidate under test.
         usePinnedData: false,
         mcpPlan: replay.mcpPlan,

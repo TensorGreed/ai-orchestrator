@@ -53,7 +53,7 @@ import {
   type ProviderRegistry
 } from "@ai-orchestrator/provider-sdk";
 import type { AgentSessionMemoryStore } from "@ai-orchestrator/agent-runtime";
-import type { ChatMessage, ModelMemorySeed, ModelMemorySeedEntry, ModelTape, ModelTapeMode } from "@ai-orchestrator/shared";
+import type { ChatMessage, DataLabels, ModelMemorySeed, ModelMemorySeedEntry, ModelTape, ModelTapeMode } from "@ai-orchestrator/shared";
 import type { McpServerRecord, McpToolSnapshotRecord, SqliteStore } from "../db/database.js";
 
 /** How far back the accepted-snapshot walk goes before giving up. */
@@ -120,8 +120,24 @@ export class MemorySeedCapture {
         this.capture(namespace, sessionId, messages);
         return messages;
       },
-      saveMessages: (namespace, sessionId, messages) => store.saveMessages(namespace, sessionId, messages)
+      saveMessages: (namespace, sessionId, messages, options) =>
+        options ? store.saveMessages(namespace, sessionId, messages, options) : store.saveMessages(namespace, sessionId, messages),
+      ...(store.loadLabels
+        ? {
+            // Phase 16 — the labels a tracked run read with the memory ride along in the seed, so its replay reads them too.
+            loadLabels: async (namespace: string, sessionId: string) => {
+              const labels = await store.loadLabels!(namespace, sessionId);
+              if (labels) this.captureLabels(namespace, sessionId, labels);
+              return labels;
+            }
+          }
+        : {})
     };
+  }
+
+  private captureLabels(namespace: string, sessionId: string, labels: DataLabels): void {
+    const entry = this.sessions.get(`${namespace}\u0000${sessionId}`);
+    if (entry && !entry.labels) entry.labels = structuredClone(labels);
   }
 
   private capture(namespace: string, sessionId: string, messages: ChatMessage[]): void {

@@ -1,0 +1,38 @@
+/* labels.css — Phase 16: data label chips on run traces ("from outside · contains email"). */
+.data-label-chips {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+}
+
+.data-label-chip {
+  padding: 0 7px;
+  border-radius: var(--r-pill);
+  border: 1px solid var(--line-strong);
+  background: var(--bg-elev-2);
+  color: var(--fg-muted);
+  font: 500 11px/18px var(--font-body);
+  white-space: nowrap;
+}
+
+.data-label-chip.is-external {
+  border-color: var(--warn);
+  color: var(--warn);
+}
+
+.data-label-chip.is-class {
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+  color: var(--fg);
+}
+
+/* The profile editor's "Track where data came from" switch and its explanation. */
+.guard-label-tracking {
+  display: grid;
+  gap: 2px;
+}
+
+.guard-label-tracking .kb-subtle {
+  margin: 0 0 0 22px;
+}

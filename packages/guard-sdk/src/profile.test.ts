@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { hashGuardProfile, parseGuardProfile, parseSerializedGuardProfile, serializeGuardProfile } from "./profile";
+import { hashGuardProfile, parseGuardProfile, parseSerializedGuardProfile, profileUsesLabels, serializeGuardProfile } from "./profile";
 import { GuardProfileError } from "./types";
 
 describe("guard profiles", () => {
@@ -25,5 +25,38 @@ describe("guard profiles", () => {
     expect(parseSerializedGuardProfile(serializeGuardProfile(a))).toEqual(a);
     const c = parseGuardProfile({ ...b, version: "2" });
     expect(hashGuardProfile(c)).not.toBe(hashGuardProfile(a));
+  });
+});
+
+/** The built-in default profile hash on main before Phase 16; adding the optional `labels` field must not change it. */
+const DEFAULT_PROFILE_HASH = "38a972eb9d53a6890647cdc2b7c0f6ce4b9002fd33f497b2b195e3737d2e1aa5";
+
+describe("propagated labels opt-in", () => {
+  it("keeps the built-in default profile and its hash unchanged", async () => {
+    const { createDefaultGuardProfile } = await import("./default-profile");
+    const profile = createDefaultGuardProfile();
+    expect(profile.labels).toBeUndefined();
+    expect(serializeGuardProfile(profile)).not.toContain('"labels"');
+    expect(profileUsesLabels(profile)).toBe(false);
+    // The hash of the built-in default as it was before the labels field existed.
+    expect(hashGuardProfile(profile)).toBe(DEFAULT_PROFILE_HASH);
+  });
+
+  it("is off when absent or fixed, on when propagated", () => {
+    const base = { id: "p", name: "P", version: "1" };
+    expect(profileUsesLabels(parseGuardProfile(base))).toBe(false);
+    expect(profileUsesLabels(parseGuardProfile({ ...base, labels: "fixed" }))).toBe(false);
+    expect(profileUsesLabels(parseGuardProfile({ ...base, labels: "propagated" }))).toBe(true);
+    expect(profileUsesLabels(undefined)).toBe(false);
+    expect(() => parseGuardProfile({ ...base, labels: "always" })).toThrow(GuardProfileError);
+  });
+
+  it("changes the hash only when set", () => {
+    const base = parseGuardProfile({ id: "p", name: "P", version: "1" });
+    const fixed = parseGuardProfile({ id: "p", name: "P", version: "1", labels: "fixed" });
+    const propagated = parseGuardProfile({ id: "p", name: "P", version: "1", labels: "propagated" });
+    expect(hashGuardProfile(propagated)).not.toBe(hashGuardProfile(base));
+    expect(hashGuardProfile(fixed)).not.toBe(hashGuardProfile(propagated));
+    expect(parseSerializedGuardProfile(serializeGuardProfile(propagated)).labels).toBe("propagated");
   });
 });

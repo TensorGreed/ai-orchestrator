@@ -1757,6 +1757,41 @@ export const MIGRATIONS: Migration[] = [
       ALTER TABLE release_gates DROP COLUMN IF EXISTS admitted_fixture_ids_json;
       ALTER TABLE eval_fixtures DROP COLUMN IF EXISTS required;
     `
+  },
+  {
+    version: 37,
+    description: "Phase 16 — data labels on session memory, the session tool cache and session artifacts (null: none recorded); a guard profile revision counter kept by triggers",
+    up: `
+      ALTER TABLE session_memory ADD COLUMN IF NOT EXISTS labels_json TEXT;
+      ALTER TABLE session_tool_cache ADD COLUMN IF NOT EXISTS labels_json TEXT;
+      ALTER TABLE session_artifacts ADD COLUMN IF NOT EXISTS labels_json TEXT;
+      CREATE TABLE IF NOT EXISTS guard_profile_revision (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        revision BIGINT NOT NULL DEFAULT 0
+      );
+      INSERT INTO guard_profile_revision (id, revision) VALUES (1, 0) ON CONFLICT (id) DO NOTHING;
+      CREATE OR REPLACE FUNCTION guard_profile_revision_bump() RETURNS trigger AS $$
+      BEGIN
+        UPDATE guard_profile_revision SET revision = revision + 1 WHERE id = 1;
+        RETURN NULL;
+      END;
+      $$ LANGUAGE plpgsql;
+      DROP TRIGGER IF EXISTS guard_profiles_revision ON guard_profiles;
+      CREATE TRIGGER guard_profiles_revision AFTER INSERT OR UPDATE OR DELETE ON guard_profiles
+        FOR EACH STATEMENT EXECUTE FUNCTION guard_profile_revision_bump();
+      DROP TRIGGER IF EXISTS guard_profile_versions_revision ON guard_profile_versions;
+      CREATE TRIGGER guard_profile_versions_revision AFTER INSERT OR UPDATE OR DELETE ON guard_profile_versions
+        FOR EACH STATEMENT EXECUTE FUNCTION guard_profile_revision_bump();
+    `,
+    down: `
+      DROP TRIGGER IF EXISTS guard_profile_versions_revision ON guard_profile_versions;
+      DROP TRIGGER IF EXISTS guard_profiles_revision ON guard_profiles;
+      DROP FUNCTION IF EXISTS guard_profile_revision_bump();
+      DROP TABLE IF EXISTS guard_profile_revision;
+      ALTER TABLE session_artifacts DROP COLUMN IF EXISTS labels_json;
+      ALTER TABLE session_tool_cache DROP COLUMN IF EXISTS labels_json;
+      ALTER TABLE session_memory DROP COLUMN IF EXISTS labels_json;
+    `
   }
 ];
 

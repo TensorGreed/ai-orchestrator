@@ -58,6 +58,7 @@ import {
   type McpSandboxSettings,
   type McpSandboxStatus
 } from "@ai-orchestrator/shared";
+import { isEmptyDataLabels, labelsForUntrackedSave, mergeDataLabels, parseStoredDataLabels, type DataLabels } from "@ai-orchestrator/shared";
 import { queuedRunTimeoutMs, STUCK_JOB_MARGIN_MS } from "./queue-timeouts.js";
 import { ProjectNotEmptyError } from "./store-errors.js";
 
@@ -199,6 +200,8 @@ interface SessionMemoryRow {
   namespace: string;
   session_id: string;
   messages_json: string;
+  /** Migration 37 — the memory's data labels; null on rows written while labels were not tracked. */
+  labels_json?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -213,6 +216,8 @@ interface SessionToolCacheRow {
   output_json: string;
   error: string | null;
   summary_json: string | null;
+  /** Migration 37 — the cached result's data labels; null when not tracked. */
+  labels_json?: string | null;
   created_at: string;
 }
 
@@ -221,6 +226,8 @@ interface SessionArtifactRow {
   session_id: string;
   artifact_key: string;
   value_json: string;
+  /** Migration 37 — labels of what the saving run put in the artifact; null when it did not track labels. */
+  labels_json?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -2212,6 +2219,12 @@ function toDurationMsForStore(startedAt: string, completedAt: string): number | 
   return Math.max(0, Math.floor(completed - started));
 }
 
+/** Phase 16 — `{ labels }` from a stored labels column, parsed once; nothing when none were recorded. */
+function labelsField(value: string | null | undefined): { labels?: DataLabels } {
+  const labels = parseStoredDataLabels(value ?? null);
+  return labels ? { labels } : {};
+}
+
 function parseJsonSafe(value: unknown): unknown {
   try {
     return JSON.parse(toString(value));
@@ -2273,6 +2286,16 @@ function mapMcpCassetteSummary(row: McpCassetteRow): McpCassetteSummary {
 
 const MCP_CASSETTE_SUMMARY_COLUMNS =
   "id, execution_id, workflow_id, workflow_name, project_id, source, eval_run_id, fixture_id, call_count, server_count, bytes, truncated, created_at, created_by";
+
+/** Migration 37 — the triggers that bump `guard_profile_revision` (name, event, table). */
+export const GUARD_PROFILE_REVISION_TRIGGERS: ReadonlyArray<readonly [string, "INSERT" | "UPDATE" | "DELETE", string]> = [
+  ["guard_profiles_revision_ai", "INSERT", "guard_profiles"],
+  ["guard_profiles_revision_au", "UPDATE", "guard_profiles"],
+  ["guard_profiles_revision_ad", "DELETE", "guard_profiles"],
+  ["guard_profile_versions_revision_ai", "INSERT", "guard_profile_versions"],
+  ["guard_profile_versions_revision_au", "UPDATE", "guard_profile_versions"],
+  ["guard_profile_versions_revision_ad", "DELETE", "guard_profile_versions"]
+];
 
 export class SqliteStore {
   private closed = false;
@@ -3616,6 +3639,24 @@ export class SqliteStore {
     this.ensureColumn("gate_case_requests", "gate_authority", "TEXT");
     this.ensureColumn("release_approval_requests", "gate_checks_json", "TEXT");
     this.ensureColumn("release_approval_requests", "gate_authority", "TEXT");
+
+    // Migration 37 — Phase 16 data labels on session memory, the session tool cache and session artifacts (null: none recorded).
+    this.ensureColumn("session_memory", "labels_json", "TEXT");
+    this.ensureColumn("session_tool_cache", "labels_json", "TEXT");
+    this.ensureColumn("session_artifacts", "labels_json", "TEXT");
+    // Migration 37 — one row counting guard profile writes, bumped by triggers on every insert, update and delete of a
+    // profile or version made by any connection (another instance, a worker, a script): cached profile facts key on it.
+    this.exec(`
+      CREATE TABLE IF NOT EXISTS guard_profile_revision (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        revision INTEGER NOT NULL DEFAULT 0
+      );
+      INSERT OR IGNORE INTO guard_profile_revision (id, revision) VALUES (1, 0);
+      ${GUARD_PROFILE_REVISION_TRIGGERS.map(
+        ([name, event, table]) =>
+          `CREATE TRIGGER IF NOT EXISTS ${name} AFTER ${event} ON ${table} BEGIN UPDATE guard_profile_revision SET revision = revision + 1 WHERE id = 1; END;`
+      ).join("\n      ")}
+    `);
     // Gates enforced before admission existed admit every case their sets hold now, so they judge as before. Once only:
     // afterwards an enforced gate without a stored admission fails closed (counts nothing until an admin admits its cases).
     this.transaction(() => {
@@ -4360,9 +4401,25 @@ export class SqliteStore {
     }
   }
 
-  saveSessionMemory(namespace: string, sessionId: string, messages: ChatMessage[]): void {
+  /** Migration 37 — the labels stored with a session's memory; null when none were recorded. */
+  loadSessionMemoryLabels(namespace: string, sessionId: string): DataLabels | null {
+    const row = this.queryOne<{ labels_json: string | null }>(
+      `SELECT labels_json FROM session_memory WHERE namespace = ? AND session_id = ?`,
+      [namespace, sessionId]
+    );
+    return row ? parseStoredDataLabels(row.labels_json) : null;
+  }
+
+  /**
+   * Saves a session's memory. `labels` (Phase 16) are given only while the
+   * run tracks labels and are merged with the labels already stored; a save
+   * without them (an untracked run) keeps the stored labels and adds
+   * `untrusted_external` (it re-saves the old messages with a turn of unknown
+   * origin); a row with no labels stays without.
+   */
+  saveSessionMemory(namespace: string, sessionId: string, messages: ChatMessage[], labels?: DataLabels): void {
     const existing = this.queryOne<SessionMemoryRow>(
-      `SELECT namespace, session_id, messages_json, created_at, updated_at
+      `SELECT namespace, session_id, messages_json, labels_json, created_at, updated_at
        FROM session_memory
        WHERE namespace = ? AND session_id = ?`,
       [namespace, sessionId]
@@ -4370,14 +4427,32 @@ export class SqliteStore {
     const now = new Date().toISOString();
     const createdAt = existing ? toString(existing.created_at) : now;
 
-    this.exec(
-      `INSERT INTO session_memory (namespace, session_id, messages_json, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?)
-       ON CONFLICT(namespace, session_id) DO UPDATE SET
-         messages_json = excluded.messages_json,
-         updated_at = excluded.updated_at`,
-      [namespace, sessionId, JSON.stringify(messages), createdAt, now]
-    );
+    if (labels) {
+      const merged = mergeDataLabels([parseStoredDataLabels(existing?.labels_json ?? null), labels].filter((entry): entry is DataLabels => Boolean(entry)));
+      const labelsJson = merged && !isEmptyDataLabels(merged) ? JSON.stringify({ ...merged, source: "propagated" }) : existing?.labels_json ?? null;
+      this.exec(
+        `INSERT INTO session_memory (namespace, session_id, messages_json, labels_json, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(namespace, session_id) DO UPDATE SET
+           messages_json = excluded.messages_json,
+           labels_json = excluded.labels_json,
+           updated_at = excluded.updated_at`,
+        [namespace, sessionId, JSON.stringify(messages), labelsJson, createdAt, now]
+      );
+    } else {
+      // An untracked run loads the stored messages and saves them again with its turn: the labels stay, plus
+      // `untrusted_external` for the unknown new turn. Nothing stored means nothing written (zero-config).
+      const kept = labelsForUntrackedSave(parseStoredDataLabels(existing?.labels_json ?? null));
+      this.exec(
+        `INSERT INTO session_memory (namespace, session_id, messages_json, labels_json, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(namespace, session_id) DO UPDATE SET
+           messages_json = excluded.messages_json,
+           labels_json = excluded.labels_json,
+           updated_at = excluded.updated_at`,
+        [namespace, sessionId, JSON.stringify(messages), kept ? JSON.stringify(kept) : null, createdAt, now]
+      );
+    }
 
     this.persist();
   }
@@ -4391,6 +4466,8 @@ export class SqliteStore {
     output: unknown;
     error?: string;
     summary?: unknown;
+    /** Phase 16 — given only while the run tracks labels. */
+    labels?: DataLabels;
   }): {
     id: string;
     namespace: string;
@@ -4401,6 +4478,7 @@ export class SqliteStore {
     output: unknown;
     error?: string;
     summary?: unknown;
+    labels?: DataLabels | null;
     createdAt: string;
   } {
     const now = new Date().toISOString();
@@ -4417,8 +4495,9 @@ export class SqliteStore {
           output_json,
           error,
           summary_json,
+          labels_json,
           created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         id,
         input.namespace,
@@ -4429,6 +4508,7 @@ export class SqliteStore {
         JSON.stringify(input.output ?? null),
         input.error ?? null,
         input.summary === undefined ? null : JSON.stringify(input.summary),
+        input.labels && !isEmptyDataLabels(input.labels) ? JSON.stringify(input.labels) : null,
         now
       ]
     );
@@ -4457,6 +4537,7 @@ export class SqliteStore {
       output: input.output ?? null,
       error: input.error,
       summary: input.summary,
+      ...(input.labels && !isEmptyDataLabels(input.labels) ? { labels: input.labels } : {}),
       createdAt: now
     };
   }
@@ -4475,6 +4556,7 @@ export class SqliteStore {
     args: Record<string, unknown>;
     error?: string;
     summary?: unknown;
+    labels?: DataLabels | null;
     createdAt: string;
   }> {
     const limit =
@@ -4487,7 +4569,7 @@ export class SqliteStore {
     let rows: SessionToolCacheRow[];
     if (toolName) {
       rows = this.queryAll<SessionToolCacheRow>(
-        `SELECT id, namespace, session_id, tool_name, tool_call_id, args_json, output_json, error, summary_json, created_at
+        `SELECT id, namespace, session_id, tool_name, tool_call_id, args_json, output_json, error, summary_json, labels_json, created_at
          FROM session_tool_cache
          WHERE namespace = ? AND session_id = ? AND tool_name = ?
          ORDER BY created_at DESC
@@ -4496,7 +4578,7 @@ export class SqliteStore {
       );
     } else {
       rows = this.queryAll<SessionToolCacheRow>(
-        `SELECT id, namespace, session_id, tool_name, tool_call_id, args_json, output_json, error, summary_json, created_at
+        `SELECT id, namespace, session_id, tool_name, tool_call_id, args_json, output_json, error, summary_json, labels_json, created_at
          FROM session_tool_cache
          WHERE namespace = ? AND session_id = ?
          ORDER BY created_at DESC
@@ -4520,6 +4602,7 @@ export class SqliteStore {
         args,
         error: row.error ? toString(row.error) : undefined,
         summary: row.summary_json ? parseJsonSafe(row.summary_json) : undefined,
+        ...labelsField(row.labels_json),
         createdAt: toString(row.created_at)
       };
     });
@@ -4539,10 +4622,11 @@ export class SqliteStore {
     output: unknown;
     error?: string;
     summary?: unknown;
+    labels?: DataLabels | null;
     createdAt: string;
   } | null {
     const row = this.queryOne<SessionToolCacheRow>(
-      `SELECT id, namespace, session_id, tool_name, tool_call_id, args_json, output_json, error, summary_json, created_at
+      `SELECT id, namespace, session_id, tool_name, tool_call_id, args_json, output_json, error, summary_json, labels_json, created_at
        FROM session_tool_cache
        WHERE namespace = ? AND session_id = ? AND id = ?`,
       [input.namespace, input.sessionId, input.id]
@@ -4567,43 +4651,57 @@ export class SqliteStore {
       output: parseJsonSafe(row.output_json),
       error: row.error ? toString(row.error) : undefined,
       summary: row.summary_json ? parseJsonSafe(row.summary_json) : undefined,
+      ...labelsField(row.labels_json),
       createdAt: toString(row.created_at)
     };
   }
 
+  /**
+   * Saves a session artifact. `labels` (Phase 16) are given only while the
+   * run tracks labels and replace the stored ones with the value; a save
+   * without them (an untracked run) keeps the stored labels and adds
+   * `untrusted_external` (the value may carry the old one forward); a row
+   * with no labels stays without.
+   */
   saveSessionArtifact(input: {
     namespace: string;
     sessionId: string;
     artifactKey: string;
     value: unknown;
+    labels?: DataLabels;
   }): {
     namespace: string;
     sessionId: string;
     artifactKey: string;
     value: unknown;
+    labels?: DataLabels | null;
     createdAt: string;
     updatedAt: string;
   } {
     const existing = this.queryOne<SessionArtifactRow>(
-      `SELECT namespace, session_id, artifact_key, value_json, created_at, updated_at
+      `SELECT namespace, session_id, artifact_key, value_json, labels_json, created_at, updated_at
        FROM session_artifacts
        WHERE namespace = ? AND session_id = ? AND artifact_key = ?`,
       [input.namespace, input.sessionId, input.artifactKey]
     );
     const now = new Date().toISOString();
     const createdAt = existing ? toString(existing.created_at) : now;
-
+    // Phase 16 — a tracked save replaces the labels (its load put the old ones into the labels it saves). An untracked
+    // save (no labels given) may carry the old value forward: the stored labels stay, plus `untrusted_external`.
+    const labels = input.labels === undefined ? labelsForUntrackedSave(parseStoredDataLabels(existing?.labels_json ?? null)) ?? undefined : !isEmptyDataLabels(input.labels) ? input.labels : undefined;
     this.exec(
-      `INSERT INTO session_artifacts (namespace, session_id, artifact_key, value_json, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?)
+      `INSERT INTO session_artifacts (namespace, session_id, artifact_key, value_json, labels_json, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(namespace, session_id, artifact_key) DO UPDATE SET
          value_json = excluded.value_json,
+         labels_json = excluded.labels_json,
          updated_at = excluded.updated_at`,
       [
         input.namespace,
         input.sessionId,
         input.artifactKey,
         JSON.stringify(input.value ?? null),
+        labels ? JSON.stringify({ ...labels, source: "propagated" }) : null,
         createdAt,
         now
       ]
@@ -4616,6 +4714,7 @@ export class SqliteStore {
       sessionId: input.sessionId,
       artifactKey: input.artifactKey,
       value: input.value ?? null,
+      ...(labels ? { labels } : {}),
       createdAt,
       updatedAt: now
     };
@@ -4630,11 +4729,12 @@ export class SqliteStore {
     sessionId: string;
     artifactKey: string;
     value: unknown;
+    labels?: DataLabels | null;
     createdAt: string;
     updatedAt: string;
   } | null {
     const row = this.queryOne<SessionArtifactRow>(
-      `SELECT namespace, session_id, artifact_key, value_json, created_at, updated_at
+      `SELECT namespace, session_id, artifact_key, value_json, labels_json, created_at, updated_at
        FROM session_artifacts
        WHERE namespace = ? AND session_id = ? AND artifact_key = ?`,
       [input.namespace, input.sessionId, input.artifactKey]
@@ -4644,11 +4744,13 @@ export class SqliteStore {
       return null;
     }
 
+    const labels = parseStoredDataLabels(row.labels_json ?? null);
     return {
       namespace: toString(row.namespace),
       sessionId: toString(row.session_id),
       artifactKey: toString(row.artifact_key),
       value: parseJsonSafe(row.value_json),
+      ...(labels ? { labels } : {}),
       createdAt: toString(row.created_at),
       updatedAt: toString(row.updated_at)
     };
@@ -11196,6 +11298,46 @@ export class SqliteStore {
       [id]
     );
     return row ? mapGuardProfileRow(row) : null;
+  }
+
+  private guardProfileRevisionStatement: { pluck(): { get(): unknown } } | null = null;
+  private guardProfileLabelsCache: { revision: number; value: boolean } | null = null;
+
+  /**
+   * Phase 16 — the guard profile revision: a counter in the database that
+   * triggers bump on every write to `guard_profiles` or
+   * `guard_profile_versions`, whichever connection or process made it. Caches
+   * of profile contents key on it, read once per use (one primary-key read),
+   * so a profile saved by another instance is seen by the next run here.
+   */
+  guardProfileRevision(): number | undefined {
+    // No revision (the row is missing) or a transaction open on this connection (it may hold uncommitted profile
+    // writes that a rollback would undo): undefined, and callers read the database instead of their caches.
+    if ((this.db as unknown as { inTransaction?: boolean }).inTransaction) return undefined;
+    this.guardProfileRevisionStatement ??= this.db.prepare(`SELECT revision FROM guard_profile_revision WHERE id = 1`) as unknown as {
+      pluck(): { get(): unknown };
+    };
+    const value = this.guardProfileRevisionStatement.pluck().get();
+    return value === undefined || value === null ? undefined : Number(value);
+  }
+
+  /**
+   * Phase 16 — whether any stored version of any guard profile asks for
+   * propagated labels. Cached per guard profile revision (read from the
+   * database each call), so a run checks it with one primary-key read and a
+   * profile written by any instance is seen at once. A match on the stored
+   * JSON text (no parse); a false positive only makes runs resolve their
+   * profiles as before.
+   */
+  anyGuardProfileUsesLabels(): boolean {
+    const revision = this.guardProfileRevision();
+    if (revision !== undefined && this.guardProfileLabelsCache?.revision === revision) return this.guardProfileLabelsCache.value;
+    const row = this.queryOne<{ found: number }>(
+      `SELECT 1 AS found FROM guard_profile_versions WHERE document_json LIKE '%"labels":"propagated"%' LIMIT 1`
+    );
+    const value = Boolean(row);
+    if (revision !== undefined) this.guardProfileLabelsCache = { revision, value };
+    return value;
   }
 
   /** One version of a profile; the latest when `version` is omitted. */

@@ -47,7 +47,7 @@ import { canonicalJson as cassetteCanonical, hashCassetteArgs, parseCassette, sc
 import type { ReplayRecordingRecord, SqliteStore } from "../db/database.js";
 import { SecretScrubber } from "./audit-scrub.js";
 import { runSteps, runStepsAsync } from "@ai-orchestrator/guard-sdk";
-import type { ProvenanceLabel } from "@ai-orchestrator/shared";
+import { parseStoredDataLabels, type DataLabels, type ProvenanceLabel } from "@ai-orchestrator/shared";
 import { maskCapturedRunSteps, withNodeLabels, type CaptureMaskOptions } from "./capture-masking.js";
 import { sanitizeConfig, sha256Hex, workflowForHash } from "./audit-bundle-service.js";
 import { buildRunFacts, nodeResultRecords, type PriceTurn } from "./run-facts.js";
@@ -322,6 +322,12 @@ export class ReplayRecordingService {
     for (const [nodeId, runs] of finished) {
       if (runs.length > 1) nodes[nodeId]!.runs = runs;
     }
+    // Phase 16 — labels the engine propagated (only runs that tracked them carry any): each node's last labelled result.
+    const propagatedLabels = new Map<string, DataLabels>();
+    for (const result of nodeResultRecords(history.nodeResults)) {
+      const labels = parseStoredDataLabels(result.labels);
+      if (labels && typeof result.nodeId === "string") propagatedLabels.set(result.nodeId, labels);
+    }
 
     const facts: RunFacts = buildRunFacts({
       status: history.status,
@@ -386,7 +392,7 @@ export class ReplayRecordingService {
         modelTape = masked.modelTape;
         memorySeed = masked.memorySeed;
       }
-      scrubbedFacts = withNodeLabels(scrubbedFacts, masked?.report ?? null, capture.inputProvenance);
+      scrubbedFacts = withNodeLabels(scrubbedFacts, masked?.report ?? null, capture.inputProvenance, propagatedLabels);
       captureInfo = {
         rate: capture.rate,
         masked: Boolean(masked),
@@ -397,6 +403,9 @@ export class ReplayRecordingService {
         publishedVersion: capture.publishedVersion,
         ...(capture.source === "api_key" ? { source: "api_key" as const } : {})
       };
+    } else {
+      // A recording that is not a capture keeps the engine's labels as they are (no scan ran).
+      scrubbedFacts = withNodeLabels(scrubbedFacts, null, "untrusted_external", propagatedLabels);
     }
 
     const inputJson = scrubbedInput === null ? null : this.serialise(scrubbedInput, scrubber);
@@ -817,6 +826,15 @@ export class ReplayRecordingService {
       const parsed = modelMemorySeedSchema.safeParse(file.memorySeed);
       if (!parsed.success) throw new ReplayRecordingError(`The memory seed is not valid: ${parsed.error.issues[0]?.message ?? "invalid"} (${parsed.error.issues[0]?.path.join(".") ?? ""}).`, "invalid");
       memorySeed = this.scrubForFile(parsed.data as unknown as ModelMemorySeed, scrubber);
+      // Phase 16 — labels read from a file are never trusted: source `file`, without `trusted`.
+      memorySeed = {
+        ...memorySeed,
+        sessions: memorySeed.sessions.map((session) =>
+          session.labels
+            ? { ...session, labels: { ...session.labels, provenance: session.labels.provenance.filter((label) => label !== "trusted"), source: "file" as const } }
+            : session
+        )
+      };
     }
     const nodes = this.scrubForFile(recordedNodes, scrubber);
     const facts = untrustedFileLabels(this.scrubFacts(stripSecretReferences(file.facts as RunFacts), scrubber));

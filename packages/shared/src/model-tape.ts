@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { ChatMessage } from "./types";
+import { dataLabelsSchema, type DataLabels } from "./data-labels";
 
 /**
  * Phase 15.3 — the model tape: what a run's model calls asked and answered,
@@ -87,6 +88,8 @@ export interface ModelMemorySeedEntry {
   namespace: string;
   sessionId: string;
   messages: ChatMessage[];
+  /** Phase 16 — the labels stored with that memory when the run read it; absent when none were recorded. */
+  labels?: DataLabels;
 }
 
 export interface ModelMemorySeed {
@@ -130,7 +133,9 @@ export const modelMemorySeedSchema = z.object({
       z.object({
         namespace: z.string().max(400),
         sessionId: z.string().max(400),
-        messages: z.array(z.record(z.string(), z.unknown())).max(10_000)
+        messages: z.array(z.record(z.string(), z.unknown())).max(10_000),
+        /** Phase 16 — the labels stored with that memory when the run read it (absent: none recorded). */
+        labels: dataLabelsSchema.optional()
       })
     )
     .max(1_000),
