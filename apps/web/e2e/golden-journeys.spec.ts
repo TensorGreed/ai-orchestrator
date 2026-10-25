@@ -568,12 +568,13 @@ test.describe("golden journeys", () => {
       for (const row of destinations.filter(isOurs)) await page.request.delete(`/api/data-destinations/${encodeURIComponent(row.id)}`);
     };
     await cleanUp();
+    const stamp = Date.now();
+    const workflowId = `wf-e2e-dest-${stamp}`;
     try {
-      const stamp = Date.now();
       const host = `hooks-${stamp}.example.org`;
       const created = await page.request.post("/api/workflows", {
         data: {
-          id: `wf-e2e-dest-${stamp}`,
+          id: workflowId,
           name: `E2E Destinations ${stamp}`,
           schemaVersion: "1.0.0",
           workflowVersion: 1,
@@ -632,6 +633,7 @@ test.describe("golden journeys", () => {
       await expect(page.getByRole("row").filter({ hasText: "Partner hooks" })).toHaveCount(0);
     } finally {
       await cleanUp();
+      await page.request.delete(`/api/workflows/${workflowId}`);
     }
   });
 });

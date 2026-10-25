@@ -197,7 +197,7 @@ describe("Protection Provider surrogate", () => {
   it("a node that already uses it says plainly that it blocks", () => {
     render(<GuardProtectionFields config={{ providerId: "surrogate", dataClasses: ["email"] }} setConfig={() => undefined} secrets={[]} />);
     expect(screen.getByRole("option", { name: "Surrogate (one-way)" })).toBeTruthy();
-    expect(screen.getByRole("status").textContent).toBe("Surrogate needs the deployment key; until it is available this node blocks.");
+    expect(screen.getByRole("status").textContent).toBe("Surrogate needs the deployment key; until it is available this node uses your profile's fallback (block by default).");
     expect(screen.queryByLabelText("Key (from Secrets)")).toBeNull();
   });
 });

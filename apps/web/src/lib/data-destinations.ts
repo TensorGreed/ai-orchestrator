@@ -29,7 +29,7 @@ export interface DestinationForm {
 export const EMPTY_DESTINATION_FORM: DestinationForm = { name: "", kind: "http", targetId: "", host: "", tier: "public", region: "", holds: "", note: "" };
 
 /** Shown on rows matched by id alone: the host a builder sets decides, unless this row is stricter. */
-export const ID_ONLY_ROW_HINT = "Without a web address this row can only make matching calls stricter.";
+export const ID_ONLY_ROW_HINT = "Without a host this row can only make matching calls stricter.";
 
 /** What the target id field is called for each kind (web addresses have none). */
 export const TARGET_ID_LABEL: Record<DestinationKind, string | null> = {
