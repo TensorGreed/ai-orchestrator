@@ -148,6 +148,22 @@ describe("the handler sends the rendering the check judged", () => {
     expect(sent[0]).not.toContain("4111");
   });
 
+  it("Teams: a templated webhook URL with spaces around it posts to the checked rendering, never a second one", async () => {
+    flips.count = 0;
+    const harness = guard();
+    const before = received.length;
+    const wf = workflow(
+      [node("in", "webhook_input"), node("teams", "teams_send_message", { webhookUrl: ` ${base}/teams/{{flip}} `, text: "hello" }), node("out", "output")],
+      [{ source: "in", target: "teams" }, { source: "teams", target: "out" }]
+    );
+    const result = await executeWorkflow({ workflow: wf, executionId: "la-teams", webhookPayload: {} }, deps({ guard: harness.guard }));
+    expect(result.status).toBe("success");
+    const sent = received.slice(before);
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatch(/^\/teams\/nothing /);
+    expect(sent[0]).not.toContain("4111");
+  });
+
   it("an MCP Tool node: the checked arguments are the ones sent", async () => {
     flips.count = 0;
     const harness = guard();

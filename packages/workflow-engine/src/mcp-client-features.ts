@@ -379,6 +379,12 @@ export async function resolveServerPrompt(input: {
   registry: MCPRegistry;
   context: MCPExecutionContext;
   evaluatePolicy?: McpPolicyEvaluator;
+  /**
+   * Phase 16 — the outbound check of the rendered arguments, before
+   * `prompts/get` sends them: returns what to send (the rewritten arguments
+   * after a rewrite) or throws (a block, an approval).
+   */
+  checkArguments?: (args: Record<string, string>) => Promise<Record<string, string>>;
 }): Promise<ResolvedServerPrompt> {
   const { binding, serverConfig } = input;
   if (input.evaluatePolicy) {
@@ -394,8 +400,9 @@ export async function resolveServerPrompt(input: {
   if (!adapter.getPrompt) {
     throw new Error(`MCP adapter '${serverConfig.serverId}' does not support prompts.`);
   }
-  const args: Record<string, string> = {};
+  let args: Record<string, string> = {};
   for (const [key, template] of Object.entries(binding.arguments ?? {})) args[key] = input.renderArgument(template);
+  if (input.checkArguments) args = await input.checkArguments(args);
   const result = await adapter.getPrompt(binding.name, args, serverConfig, input.context);
   const text = promptMessagesToText(result.messages);
   if (!text.trim()) {

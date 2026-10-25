@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { AgentRuntimeAdapter, AgentSessionMemoryStore, AgentSessionToolDataStore } from "@ai-orchestrator/agent-runtime";
-import type { ConnectorRegistry } from "@ai-orchestrator/connector-sdk";
+import { azureStorageEndpointFor, type ConnectorRegistry } from "@ai-orchestrator/connector-sdk";
 import {
   classifyMcpTool,
   evaluateMcpToolAccess,
@@ -21,6 +21,7 @@ import {
   GUARD_EFFECTIVE_PROFILE_REF,
   NODE_ACTIVITY_LIMIT,
   NODE_ACTIVITY_PREVIEW_CHARS,
+  azureStorageSecretAddressConfig,
   connectorAddressInSecret,
   destinationHostOfSetting,
   inputProvenance,
@@ -141,6 +142,7 @@ import {
   checkEgressRequest,
   checkOutbound,
   describeEgressRequest,
+  describeMcpPromptRequest,
   describeMcpToolRequest,
   httpDestinationRef,
   isEgressNodeType,
@@ -2679,10 +2681,10 @@ function validateGuardrailChecks(text: string, checks: string[]): string[] {
  * the fetch is closed before the model is called.
  */
 async function applyServerPromptToLlmNode(input: {
-  nodeId: string;
+  node: WorkflowNode;
   config: Record<string, unknown>;
   templateData: Record<string, unknown>;
-  context: Pick<NodeRuntimeContext, "workflow" | "toolPolicySubject">;
+  context: NodeRuntimeContext;
   dependencies: WorkflowExecutionDependencies;
   systemPrompt: string;
   userPrompt: string;
@@ -2695,11 +2697,13 @@ async function applyServerPromptToLlmNode(input: {
     input.context.toolPolicySubject
   );
   const toolPolicy = await buildRunToolPolicy(input.context, input.dependencies);
-  const scoped = createNodeMcpContext(input.dependencies, input.nodeId, {
+  const scoped = createNodeMcpContext(input.dependencies, input.node.id, {
     serverConfigs: [serverConfig],
-    ...(toolPolicy ? { evaluatePolicy: toolPolicy.evaluate } : {})
+    ...(toolPolicy ? { evaluatePolicy: toolPolicy.evaluate } : {}),
+    // Phase 16 — a sampling request the server makes while the prompt is fetched is a model call.
+    checkSampling: samplingGuardFor(input.node, input.context, input.dependencies)
   });
-  const release = createMcpSessionReleaser(input.dependencies.mcpRegistry, scoped.context, input.nodeId);
+  const release = createMcpSessionReleaser(input.dependencies.mcpRegistry, scoped.context, input.node.id);
   try {
     const resolved = await resolveServerPrompt({
       binding,
@@ -2707,7 +2711,8 @@ async function applyServerPromptToLlmNode(input: {
       serverConfig,
       registry: input.dependencies.mcpRegistry,
       context: scoped.context,
-      ...(toolPolicy ? { evaluatePolicy: toolPolicy.evaluate } : {})
+      ...(toolPolicy ? { evaluatePolicy: toolPolicy.evaluate } : {}),
+      checkArguments: serverPromptArgumentCheck(input.node, input.context, input.dependencies, serverConfig, binding.name)
     });
     return {
       systemPrompt: resolved.target === "system" ? resolved.text : input.systemPrompt,
@@ -2717,6 +2722,36 @@ async function applyServerPromptToLlmNode(input: {
   } finally {
     await release.close();
   }
+}
+
+/**
+ * Phase 16 — the arguments of a server prompt (`prompts/get`) are judged
+ * against the MCP server before they are sent, like an MCP Tool node's
+ * arguments: a block or an approval throws, a rewrite sends the rewritten
+ * arguments. Unchanged when no profile has destination rules.
+ */
+function serverPromptArgumentCheck(
+  node: WorkflowNode,
+  context: NodeRuntimeContext,
+  dependencies: WorkflowExecutionDependencies,
+  serverConfig: MCPServerConfig,
+  promptName: string
+): (args: Record<string, string>) => Promise<Record<string, string>> {
+  return async (args) => {
+    const profiles = await outboundProfilesFor(dependencies.guard, "destinations");
+    if (profiles.length === 0) return args;
+    const request = describeMcpPromptRequest(node, serverConfig, promptName, args);
+    if (!request) return args;
+    const checked = await checkEgressRequest(request, {
+      scope: guardScopeFor(node, context, dependencies, "node"),
+      profiles,
+      dataLabels: context.labelScope?.inputLabels() ?? labelsOf([]),
+      ...(context.approvedHandoffKeys ? { approvals: context.approvedHandoffKeys } : {}),
+      replay: Boolean(dependencies.replayNodeHook)
+    });
+    if (checked.declassified.length > 0) context.labelScope?.declassify(checked.declassified);
+    return checked.override.kind === "mcp_args" ? (checked.override.args as Record<string, string>) : args;
+  };
 }
 
 /**
@@ -3122,9 +3157,13 @@ async function outboundPreCheck(
     }
     let secretAddress: string | undefined;
     if (connectorAddressInSecret(node.type, config)) {
+      // Azure Storage: the endpoint the adapter will call, computed from its settings and the secret (never shown).
+      const azure = azureStorageSecretAddressConfig(node.type, config);
       try {
-        secretAddress = (await dependencies.resolveSecret(normalizeSecretRef(config.secretRef))) ?? undefined;
+        const value = (await dependencies.resolveSecret(normalizeSecretRef((azure ?? config).secretRef))) ?? undefined;
+        secretAddress = azure ? azureStorageEndpointFor(azure, value) || undefined : value;
       } catch {
+        // Unreadable: the address is unknown (public).
         secretAddress = undefined;
       }
     }
@@ -3170,7 +3209,7 @@ async function outboundPreCheck(
           const chain = [...first.refs, httpDestinationRef(url)];
           first.refs.push(chain[chain.length - 1]!);
           // A hop that needs an approval cannot wait: the first request was already sent, so it is stopped instead.
-          const hop = await checkOutbound({ ...common, replay: true, channel: "egress", content: first.content, refs: chain, what: `${first.what}, redirected to ${chain[chain.length - 1]!.host || "an unknown host"}`, approvalTag: chain.map((ref) => ref.host ?? "").join(">") });
+          const hop = await checkOutbound({ ...common, replay: true, channel: "egress", content: first.content, ...(first.ignoredValues ? { ignoredValues: first.ignoredValues } : {}), refs: chain, what: `${first.what}, redirected to ${chain[chain.length - 1]!.host || "an unknown host"}`, approvalTag: chain.map((ref) => ref.host ?? "").join(">") });
           if (hop.transformed) {
             throw new GuardBlockedError(`${first.what} was redirected somewhere the guard would rewrite the request for; it was stopped instead`, hop.result.verdicts);
           }
@@ -4076,7 +4115,7 @@ async function executeNodeHandler(
       const promptKey = typeof config.promptKey === "string" ? config.promptKey : "prompt";
       const systemPromptKey = typeof config.systemPromptKey === "string" ? config.systemPromptKey : "system_prompt";
       const prompts = await applyServerPromptToLlmNode({
-        nodeId: node.id,
+        node,
         config,
         templateData,
         context,
@@ -4109,7 +4148,7 @@ async function executeNodeHandler(
       const promptKey = typeof config.promptKey === "string" ? config.promptKey : "prompt";
       const systemPromptKey = typeof config.systemPromptKey === "string" ? config.systemPromptKey : "system_prompt";
       const prompts = await applyServerPromptToLlmNode({
-        nodeId: node.id,
+        node,
         config,
         templateData,
         context,
@@ -4138,7 +4177,7 @@ async function executeNodeHandler(
       const promptKey = typeof config.promptKey === "string" ? config.promptKey : "prompt";
       const systemPromptKey = typeof config.systemPromptKey === "string" ? config.systemPromptKey : "system_prompt";
       const prompts = await applyServerPromptToLlmNode({
-        nodeId: node.id,
+        node,
         config,
         templateData,
         context,
@@ -5535,7 +5574,8 @@ async function executeNodeHandler(
             serverConfig: serverPromptServerConfig,
             registry: dependencies.mcpRegistry,
             context: mcpExecutionContext,
-            ...(toolPolicy ? { evaluatePolicy: toolPolicy.evaluate } : {})
+            ...(toolPolicy ? { evaluatePolicy: toolPolicy.evaluate } : {}),
+            checkArguments: serverPromptArgumentCheck(node, context, dependencies, serverPromptServerConfig, serverPromptBinding.name)
           });
           if (resolvedPrompt.target === "user") userPrompt = resolvedPrompt.text;
           else systemPrompt = resolvedPrompt.text;

@@ -120,8 +120,19 @@ export function bindCheckedRenderings(values: Record<string, unknown>, rendering
   checkedRenderings.set(values, renderings);
 }
 
-/** `renderTemplate` for connector handlers: the checked rendering when there is one, else a fresh one. */
+/**
+ * `renderTemplate` for connector handlers: the checked rendering when there
+ * is one. After a check, a template it did not render fails closed (it is
+ * never rendered a second time, so nothing unchecked is sent); without a
+ * check, a fresh rendering as before.
+ */
 export function renderCheckedTemplate(template: string, values: Record<string, unknown>): string {
-  const checked = checkedRenderings.get(values)?.get(template);
-  return checked !== undefined ? checked : renderTemplate(template, values);
+  const renderings = checkedRenderings.get(values);
+  if (!renderings) return renderTemplate(template, values);
+  const checked = renderings.get(template);
+  if (checked !== undefined) return checked;
+  if (template.includes("{{")) {
+    throw new Error("A templated setting was not checked by the guard before sending, so the request was not sent.");
+  }
+  return template;
 }

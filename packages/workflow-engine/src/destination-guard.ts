@@ -11,9 +11,10 @@
  * no destination lookup, no scan, no verdict.
  *
  * What is checked is what leaves: the rendered URL (and its query values),
- * header values, the body or the connector's rendered settings. Secret
- * values never enter the content: they are resolved by the handlers, after
- * the check. Destinations are resolved per run from the deployment's rows and
+ * header values, the body or the connector's rendered settings. Secrets
+ * are resolved by the handlers, after the check; a secret value that shows
+ * up in the content anyway is scanned in place (so it cannot split a finding
+ * around it) and a finding entirely inside it is not counted. Destinations are resolved per run from the deployment's rows and
  * the built-ins (`resolveDestinationRefs`); an unknown host is public.
  *
  * In a replay the check runs just before the node's stub: nothing is sent
@@ -76,6 +77,8 @@ export interface OutboundCheckInput {
   dataLabels: DataLabels;
   /** Only destination rules (model and MCP calls: their channel's detectors belong to the agent loop). */
   destinationOnly?: boolean;
+  /** Secret values the call carries: a finding entirely inside one is not counted, and evidence never shows one. */
+  ignoredValues?: readonly string[];
   approvals?: ReadonlySet<string>;
   /** A replay: never pause; an approval fails the node as "would wait for approval". */
   replay: boolean;
@@ -113,6 +116,7 @@ export async function checkOutbound(input: OutboundCheckInput): Promise<Outbound
       channel: input.channel,
       labels: [...input.dataLabels.provenance],
       ...(input.destinationOnly ? { destinationOnly: true } : {}),
+      ...(input.ignoredValues?.length ? { ignoredValues: input.ignoredValues } : {}),
       ...(destination ? { destination, dataLabels: input.dataLabels } : {})
     },
     // Only verdicts with a finding are recorded (shadow findings included): a clean outbound call writes no row.
@@ -169,6 +173,8 @@ export interface EgressRequest {
   sent: EgressOverride;
   /** What the handler sends after a rewrite; null when this request cannot be rewritten safely (it is blocked instead). */
   apply(rewritten: unknown): EgressOverride | null;
+  /** Secret values in the content: scanned in place, a finding entirely inside one is not counted. */
+  ignoredValues?: readonly string[];
 }
 
 /** Node types that send requests the egress checkpoint sees, besides category `Connector` senders. */
@@ -185,13 +191,12 @@ const UNRENDERED_CONNECTOR_TYPES = new Set([
   "azure_ai_search_vector_store",
   "qdrant_vector_store"
 ]);
-const SECRET_PLACEHOLDER = "[secret]";
 
 function record(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
 }
 
-/** A secret reference (`{ secretId }`): the id is never content, and the value never enters a check. */
+/** A secret reference (`{ secretId }`): the id is never content. */
 function isSecretReference(value: unknown): boolean {
   const entry = record(value);
   return typeof entry.secretId === "string" && Object.keys(entry).every((key) => key === "secretId" || key === "source" || key === "key");
@@ -234,33 +239,15 @@ function settingsContent(value: unknown, render: ((text: string) => string) | nu
   return value;
 }
 
-/** Replaces the run's secret values in checked content, so they never enter a scan or a verdict. */
-function withoutSecretValues(value: unknown, secrets: readonly string[], depth = 0): { value: unknown; redacted: boolean } {
-  if (secrets.length === 0 || depth > 16) return { value, redacted: false };
-  if (typeof value === "string") {
-    let text = value;
-    for (const secret of secrets) if (text.includes(secret)) text = text.split(secret).join(SECRET_PLACEHOLDER);
-    return { value: text, redacted: text !== value };
-  }
-  let redacted = false;
-  if (Array.isArray(value)) {
-    const items = value.map((item) => {
-      const next = withoutSecretValues(item, secrets, depth + 1);
-      redacted ||= next.redacted;
-      return next.value;
-    });
-    return { value: items, redacted };
-  }
+/** True when any string in the content contains one of the values. */
+function containsAny(value: unknown, values: readonly string[], depth = 0): boolean {
+  if (values.length === 0 || depth > 16) return false;
+  if (typeof value === "string") return values.some((entry) => value.includes(entry));
+  if (Array.isArray(value)) return value.some((item) => containsAny(item, values, depth + 1));
   if (value && typeof value === "object") {
-    const out: Record<string, unknown> = {};
-    for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
-      const next = withoutSecretValues(item, secrets, depth + 1);
-      redacted ||= next.redacted;
-      out[key] = next.value;
-    }
-    return { value: out, redacted };
+    return Object.entries(value as Record<string, unknown>).some(([key, item]) => containsAny(key, values, depth + 1) || containsAny(item, values, depth + 1));
   }
-  return { value, redacted: false };
+  return false;
 }
 
 /** The URL's parts as checked content: the address without its query, and each query value apart. */
@@ -284,6 +271,39 @@ export function urlContent(url: string): { url: string; query: Record<string, st
   }
 }
 
+/**
+ * The query string after a rewrite of the checked query record (`urlContent`),
+ * rebuilt whole from the rewritten keys and values so no original key or
+ * value is kept: `undefined` when nothing changed (the URL is sent as it
+ * was), null when the rewrite cannot be mapped back (blocked): a key count
+ * that changed (two keys rewritten into one, a key dropped) or a rewritten
+ * value of a key given more than once (its values were joined for the check).
+ */
+function rebuiltQuery(url: URL, rewritten: Record<string, unknown>): string | null | undefined {
+  const original: Array<[string, string[]]> = [];
+  for (const [key, value] of url.searchParams) {
+    const entry = original.find(([name]) => name === key);
+    if (entry) entry[1].push(value);
+    else original.push([key, [value]]);
+  }
+  const next = Object.entries(rewritten).map(([key, value]) => [key, typeof value === "string" ? value : JSON.stringify(value)] as const);
+  if (next.length !== original.length) return null;
+  const unchanged = next.every(([key, value], index) => key === original[index]![0] && value === original[index]![1].join(" "));
+  if (unchanged) return undefined;
+  const params = new URLSearchParams();
+  for (const [index, [key, value]] of next.entries()) {
+    const values = original[index]![1];
+    if (value === values.join(" ")) {
+      for (const item of values) params.append(key, item);
+    } else if (values.length === 1) {
+      params.append(key, value);
+    } else {
+      return null;
+    }
+  }
+  return params.toString();
+}
+
 /** The ref for a web address: its host, or an unknown host (public). */
 export function httpDestinationRef(url: string): DestinationRef {
   let host: string | undefined;
@@ -303,7 +323,7 @@ export function isEgressNodeType(type: string): boolean {
 }
 
 export interface DescribeEgressOptions {
-  /** Values of the secrets the node's settings reference: replaced in the checked content, never scanned. */
+  /** Values of the secrets the node's settings reference: scanned in place; a finding entirely inside one is not counted. */
   secretValues?: readonly string[];
   /** A connector whose address lives in its secret: the secret's value, read for the host only. */
   secretAddress?: string;
@@ -337,10 +357,11 @@ export function describeEgressRequest(
   const label = node.name || node.type;
   const secrets = (options.secretValues ?? []).filter((value) => value.length >= 4);
   const finish = (request: Omit<EgressRequest, "content"> & { content: Record<string, unknown> }): EgressRequest => {
-    const cleaned = withoutSecretValues(request.content, secrets);
-    if (!cleaned.redacted) return request;
-    // A rewrite of content that had a secret value taken out would send the placeholder: blocked instead.
-    return { ...request, content: record(cleaned.value), apply: () => null };
+    // Secret values stay in place for the scan (taking them out could split a finding around them); a finding
+    // entirely inside one is not counted, and evidence never shows one.
+    if (!containsAny(request.content, secrets)) return request;
+    // A rewrite of content that carries a secret value is not sent: blocked instead.
+    return { ...request, ignoredValues: secrets, apply: () => null };
   };
   if (node.type === "http_request") {
     const method = typeof config.method === "string" ? config.method.trim().toUpperCase() : "GET";
@@ -377,7 +398,9 @@ export function describeEgressRequest(
         }
         // The address itself must not move: a rewrite only changes values (a rewritten path is refused).
         if (value.url !== parts.url) return null;
-        for (const [key, item] of Object.entries(record(value.query))) url.searchParams.set(key, String(item));
+        const query = rebuiltQuery(url, record(value.query));
+        if (query === null) return null;
+        if (query !== undefined) url.search = query;
         const nextHeaders = Object.fromEntries(Object.entries(record(value.headers)).map(([key, item]) => [key, String(item)]));
         return { kind: "http", url: url.toString(), headers: nextHeaders, body: readable !== body ? body : value.body };
       }
@@ -408,21 +431,21 @@ export function describeEgressRequest(
     const refs = options.ragRefs ?? [];
     if (refs.length === 0) return null;
     let query = "";
-    let texts: string[] = [];
+    let documents: unknown[] = [];
     if (node.type === "embeddings_azure_openai") {
       const inputKey = typeof config.inputKey === "string" && config.inputKey.trim() ? config.inputKey.trim() : "user_prompt";
       query = String(readData(templateData, inputKey) ?? readData(templateData, "user_prompt") ?? "");
     } else {
       const queryTemplate = typeof config.queryTemplate === "string" ? config.queryTemplate : "{{user_prompt}}";
       query = renderTemplate(queryTemplate, templateData).trim();
-      const upstream = documentTexts(readData(templateData, "documents"));
-      texts = node.type === "rag_retrieve" ? [...upstream, ...documentTexts(config.documents)] : upstream;
+      const upstream = documentsContent(readData(templateData, "documents"));
+      documents = node.type === "rag_retrieve" ? [...upstream, ...documentsContent(config.documents)] : upstream;
     }
     const hosts = [...new Set(refs.map((entry) => entry.host || entry.id || "an unknown host"))].join(", ");
     return finish({
       refs,
       channel: "egress",
-      content: { query, documents: texts },
+      content: { query, documents },
       what: `${label} (${node.type.replace(/_/g, " ")} to ${hosts})`,
       approvalTag: refs.map((entry) => entry.host || entry.id || "").join(">"),
       sent: { kind: "rag", query },
@@ -496,18 +519,13 @@ function readData(data: Record<string, unknown>, key: string): unknown {
   return current;
 }
 
-/** The texts of documents as RAG nodes read them (strings, or objects with `text` / `content`). */
-function documentTexts(value: unknown): string[] {
+/**
+ * Documents as checked content: a string as it is, an object whole (its
+ * text and also its id and metadata, which network stores upsert beside it).
+ */
+function documentsContent(value: unknown): unknown[] {
   if (!Array.isArray(value)) return [];
-  return value
-    .map((item) => {
-      if (typeof item === "string") return item;
-      const entry = record(item);
-      if (typeof entry.text === "string") return entry.text;
-      if (typeof entry.content === "string") return entry.content;
-      return JSON.stringify(item);
-    })
-    .filter((text) => text.length > 0);
+  return value.filter((item) => (typeof item === "string" ? item.length > 0 : item !== null && item !== undefined));
 }
 
 /** The MCP Tool node's call: its arguments, to its server. */
@@ -530,6 +548,35 @@ export function describeMcpToolRequest(
   };
 }
 
+/**
+ * The arguments of an MCP server prompt (`prompts/get`), to its server: a
+ * rewrite is sent when it keeps every argument as text, else blocked.
+ */
+export function describeMcpPromptRequest(
+  node: Pick<WorkflowNode, "name" | "type">,
+  server: { serverId?: string; registryServerId?: string; connection?: unknown },
+  promptName: string,
+  args: Record<string, string>
+): EgressRequest | null {
+  const ref = mcpServerDestinationRef(server);
+  if (!ref) return null;
+  const keys = Object.keys(args);
+  return {
+    refs: [ref],
+    channel: "tool_arguments",
+    content: { ...args },
+    what: `${node.name || node.type} (MCP prompt ${promptName} on ${ref.host || ref.id || "an unknown host"})`,
+    approvalTag: `prompt:${promptName}`,
+    sent: { kind: "mcp_args", args },
+    apply(rewritten) {
+      const value = record(rewritten);
+      const next = Object.keys(value);
+      if (next.length !== keys.length || !keys.every((key) => typeof value[key] === "string")) return null;
+      return { kind: "mcp_args", args: Object.fromEntries(keys.map((key) => [key, value[key] as string])) };
+    }
+  };
+}
+
 /** Runs the egress (or MCP) check for a described request; returns what the handler sends (the checked rendering, rewritten when the check rewrote it). */
 export async function checkEgressRequest(
   request: EgressRequest,
@@ -542,6 +589,7 @@ export async function checkEgressRequest(
     refs: request.refs,
     what: request.what,
     approvalTag: request.approvalTag,
+    ...(request.ignoredValues?.length ? { ignoredValues: request.ignoredValues } : {}),
     ...(request.channel === "tool_arguments" ? { destinationOnly: true } : {})
   });
   if (!outcome.transformed) return { override: request.sent, declassified: [] };

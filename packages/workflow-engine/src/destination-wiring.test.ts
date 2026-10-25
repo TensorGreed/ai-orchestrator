@@ -329,11 +329,13 @@ describe("egress checkpoint", () => {
     )!;
     expect(slack.refs[0]).toEqual({ kind: "connector", id: "slack_send_message", host: "hooks.slack.com" });
     expect(JSON.stringify(slack.content)).toContain(CARD);
-    // Secret references and secret values never enter the check; other values are checked whatever their key is called.
+    // Secret references never enter the check; other values are checked whatever their key is called.
     expect(JSON.stringify(slack.content)).not.toContain("slack-hook");
-    expect(JSON.stringify(slack.content)).not.toContain("xoxb-secret-value-1");
     expect(JSON.stringify((slack.content as { settings: Record<string, unknown> }).settings.max_tokens)).toContain(CARD);
-    // Content holding a secret value cannot be rewritten (the placeholder would be sent).
+    // A secret value stays in place for the scan (so it cannot split a finding) and is named as ignored:
+    // a finding entirely inside it is not counted.
+    expect(slack.ignoredValues).toEqual(["xoxb-secret-value-1"]);
+    // Content holding a secret value cannot be rewritten: blocked instead.
     expect(slack.apply({ connector: "slack_send_message", settings: { text: "x" } })).toBeNull();
     const smtp = describeEgressRequest(node("m", "smtp_send_email"), { host: "smtp.example.com", to: "a@b.c" }, {})!;
     expect(smtp.refs[0]).toEqual({ kind: "connector", id: "smtp_send_email", host: "smtp.example.com" });
