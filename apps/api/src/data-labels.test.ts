@@ -288,7 +288,7 @@ describe("labels on session memory and the tool cache", () => {
 });
 
 describe("round 1 fixes", () => {
-  it("session artifacts keep the labels of a tracked save; a save without labels clears them; older rows have none", async () => {
+  it("session artifacts keep the labels of a tracked save; a save without labels keeps them plus untrusted_external; older rows have none", async () => {
     const context = await createTestContext();
     const store = context.store;
     const key = { namespace: "ns", sessionId: "s1", artifactKey: "latest" };
