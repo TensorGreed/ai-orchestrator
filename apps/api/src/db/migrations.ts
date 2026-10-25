@@ -1760,12 +1760,14 @@ export const MIGRATIONS: Migration[] = [
   },
   {
     version: 37,
-    description: "Phase 16 — data labels on session memory and the session tool cache (null: none recorded)",
+    description: "Phase 16 — data labels on session memory, the session tool cache and session artifacts (null: none recorded)",
     up: `
       ALTER TABLE session_memory ADD COLUMN IF NOT EXISTS labels_json TEXT;
       ALTER TABLE session_tool_cache ADD COLUMN IF NOT EXISTS labels_json TEXT;
+      ALTER TABLE session_artifacts ADD COLUMN IF NOT EXISTS labels_json TEXT;
     `,
     down: `
+      ALTER TABLE session_artifacts DROP COLUMN IF EXISTS labels_json;
       ALTER TABLE session_tool_cache DROP COLUMN IF EXISTS labels_json;
       ALTER TABLE session_memory DROP COLUMN IF EXISTS labels_json;
     `

@@ -23,6 +23,7 @@ import {
   diffGuardProfiles,
   guardProfileSchema,
   hashGuardProfile,
+  profileUsesLabels,
   serializeGuardProfile,
   unsafeDictionaryPattern,
   type GuardProfile,
@@ -130,7 +131,21 @@ export interface GuardProfileSubstitute {
   inline: boolean;
 }
 
+/** Parsed guard profile versions kept per service (a version's document never changes). */
+const PARSED_PROFILE_CACHE_SIZE = 256;
+
+function deepFreeze<T>(value: T): T {
+  if (value && typeof value === "object" && !Object.isFrozen(value)) {
+    Object.freeze(value);
+    for (const item of Object.values(value as Record<string, unknown>)) deepFreeze(item);
+  }
+  return value;
+}
+
 export class GuardService {
+  private readonly parsedProfiles = new Map<string, GuardProfile>();
+  private readonly loadedProfiles = new Map<string, { writes: number; value: ResolvedGuardProfile | undefined }>();
+
   constructor(
     private readonly store: SqliteStore,
     private readonly secrets: SecretService,
@@ -351,15 +366,49 @@ export class GuardService {
   }
 
   loadProfile(profileId: string, version?: number): ResolvedGuardProfile | undefined {
+    // Phase 16 — every run that resolves its guard stack loads the same profiles: the answer is kept until the next
+    // guard profile write (the store counts them; every profile and version write goes through it).
+    const writes = this.store.guardProfileWriteCount?.();
+    const loadKey = `${profileId}\u0000${version ?? "latest"}`;
+    const known = writes === undefined ? undefined : this.loadedProfiles.get(loadKey);
+    if (known && known.writes === writes) return known.value;
+    const value = this.readProfile(profileId, version);
+    if (writes !== undefined) {
+      if (this.loadedProfiles.size >= PARSED_PROFILE_CACHE_SIZE) this.loadedProfiles.delete(this.loadedProfiles.keys().next().value!);
+      this.loadedProfiles.set(loadKey, { writes, value });
+    }
+    return value;
+  }
+
+  private readProfile(profileId: string, version?: number): ResolvedGuardProfile | undefined {
     const record = this.store.getGuardProfileVersion(profileId, version);
     const profileRecord = this.store.getGuardProfile(profileId);
     if (!record || !profileRecord) return undefined;
-    const parsed = guardProfileSchema.safeParse(record.document);
-    if (!parsed.success) {
-      this.options.logger?.("Stored guard profile no longer validates; it is skipped", { profileId, version: record.version });
-      return undefined;
+    // Phase 16 — a stored version never changes: its validated document is parsed once and reused (frozen, so no
+    // caller can change it for the next run). Every run resolves the built-in default; this keeps that cheap.
+    const cacheKey = `${profileId}\u0000${record.version}\u0000${record.hash}`;
+    let profile = this.parsedProfiles.get(cacheKey);
+    if (!profile) {
+      const parsed = guardProfileSchema.safeParse(record.document);
+      if (!parsed.success) {
+        this.options.logger?.("Stored guard profile no longer validates; it is skipped", { profileId, version: record.version });
+        return undefined;
+      }
+      profile = deepFreeze(parsed.data);
+      if (this.parsedProfiles.size >= PARSED_PROFILE_CACHE_SIZE) this.parsedProfiles.delete(this.parsedProfiles.keys().next().value!);
+      this.parsedProfiles.set(cacheKey, profile);
     }
-    return { profileId, version: record.version, hash: record.hash, name: profileRecord.name, profile: parsed.data };
+    return { profileId, version: record.version, hash: record.hash, name: profileRecord.name, profile };
+  }
+
+  /**
+   * Phase 16 — false when no stored profile version asks for propagated
+   * labels: a run then learns it does not track labels without resolving its
+   * profiles (zero-config runs pay this one cached check).
+   */
+  mayUseLabels(): boolean {
+    const store = this.store as Partial<Pick<SqliteStore, "anyGuardProfileUsesLabels">>;
+    return typeof store.anyGuardProfileUsesLabels === "function" ? store.anyGuardProfileUsesLabels() : true;
   }
 
   /**
@@ -511,6 +560,8 @@ export class GuardService {
     const substitute = context.profileSubstitute;
     return {
       resolveRun: () => this.resolveRun(context),
+      // Phase 16 — a simulation's unsaved document may opt in; stored versions are checked in one cached query.
+      mayUseLabels: () => (substitute ? profileUsesLabels(substitute.profile) : false) || this.mayUseLabels(),
       // A guard port naming the candidate's profile gets the candidate's version too (and a simulation's profile its substitute).
       loadProfile: (profileId) =>
         substitute && substitute.profileId === profileId

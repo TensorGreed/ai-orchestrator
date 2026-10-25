@@ -17,6 +17,12 @@ export interface PostgresStoreConfig {
 }
 
 // Helper to safely parse JSON
+/** Phase 16 — `{ labels }` from a stored labels column, parsed once; nothing when none were recorded. */
+function labelsField(value: string | null | undefined): { labels?: DataLabels } {
+  const labels = parseStoredDataLabels(value ?? null);
+  return labels ? { labels } : {};
+}
+
 function parseJsonSafe(value: string | null | undefined): unknown {
   if (!value) return null;
   try {
@@ -1004,7 +1010,7 @@ export class PostgresStore {
         args,
         error: row.error ? toStr(row.error) : undefined,
         summary: row.summary_json ? parseJsonSafe(row.summary_json) : undefined,
-        ...(parseStoredDataLabels(row.labels_json) ? { labels: parseStoredDataLabels(row.labels_json) } : {}),
+        ...labelsField(row.labels_json),
         createdAt: toStr(row.created_at)
       };
     });
@@ -1062,6 +1068,7 @@ export class PostgresStore {
       output: parseJsonSafe(row.output_json),
       error: row.error ? toStr(row.error) : undefined,
       summary: row.summary_json ? parseJsonSafe(row.summary_json) : undefined,
+      ...labelsField(row.labels_json),
       createdAt: toStr(row.created_at)
     };
   }
@@ -1070,16 +1077,19 @@ export class PostgresStore {
   // Session Artifacts
   // ---------------------------------------------------------------------------
 
+  /** Saves a session artifact; `labels` (Phase 16) only while the run tracks labels, replacing the stored ones. */
   async saveSessionArtifact(input: {
     namespace: string;
     sessionId: string;
     artifactKey: string;
     value: unknown;
+    labels?: DataLabels;
   }): Promise<{
     namespace: string;
     sessionId: string;
     artifactKey: string;
     value: unknown;
+    labels?: DataLabels | null;
     createdAt: string;
     updatedAt: string;
   }> {
@@ -1092,27 +1102,34 @@ export class PostgresStore {
     const now = new Date().toISOString();
     const createdAt = existing ? toStr(existing.created_at) : now;
 
-    await this.execute(
-      `INSERT INTO session_artifacts (namespace, session_id, artifact_key, value_json, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6)
-       ON CONFLICT (namespace, session_id, artifact_key) DO UPDATE SET
-         value_json = EXCLUDED.value_json,
-         updated_at = EXCLUDED.updated_at`,
-      [
-        input.namespace,
-        input.sessionId,
-        input.artifactKey,
-        JSON.stringify(input.value ?? null),
-        createdAt,
-        now
-      ]
-    );
+    const labels = input.labels && !isEmptyDataLabels(input.labels) ? input.labels : undefined;
+    if (labels) {
+      await this.execute(
+        `INSERT INTO session_artifacts (namespace, session_id, artifact_key, value_json, labels_json, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
+         ON CONFLICT (namespace, session_id, artifact_key) DO UPDATE SET
+           value_json = EXCLUDED.value_json,
+           labels_json = EXCLUDED.labels_json,
+           updated_at = EXCLUDED.updated_at`,
+        [input.namespace, input.sessionId, input.artifactKey, JSON.stringify(input.value ?? null), JSON.stringify({ ...labels, source: "propagated" }), createdAt, now]
+      );
+    } else {
+      await this.execute(
+        `INSERT INTO session_artifacts (namespace, session_id, artifact_key, value_json, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         ON CONFLICT (namespace, session_id, artifact_key) DO UPDATE SET
+           value_json = EXCLUDED.value_json,
+           updated_at = EXCLUDED.updated_at`,
+        [input.namespace, input.sessionId, input.artifactKey, JSON.stringify(input.value ?? null), createdAt, now]
+      );
+    }
 
     return {
       namespace: input.namespace,
       sessionId: input.sessionId,
       artifactKey: input.artifactKey,
       value: input.value ?? null,
+      ...(labels ? { labels } : {}),
       createdAt,
       updatedAt: now
     };
@@ -1127,6 +1144,7 @@ export class PostgresStore {
     sessionId: string;
     artifactKey: string;
     value: unknown;
+    labels?: DataLabels | null;
     createdAt: string;
     updatedAt: string;
   } | null> {
@@ -1135,10 +1153,11 @@ export class PostgresStore {
       session_id: string;
       artifact_key: string;
       value_json: string;
+      labels_json: string | null;
       created_at: string;
       updated_at: string;
     }>(
-      `SELECT namespace, session_id, artifact_key, value_json, created_at, updated_at
+      `SELECT namespace, session_id, artifact_key, value_json, labels_json, created_at, updated_at
        FROM session_artifacts
        WHERE namespace = $1 AND session_id = $2 AND artifact_key = $3`,
       [input.namespace, input.sessionId, input.artifactKey]
@@ -1153,6 +1172,7 @@ export class PostgresStore {
       sessionId: toStr(row.session_id),
       artifactKey: toStr(row.artifact_key),
       value: parseJsonSafe(row.value_json),
+      ...labelsField(row.labels_json),
       createdAt: toStr(row.created_at),
       updatedAt: toStr(row.updated_at)
     };

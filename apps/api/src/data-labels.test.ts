@@ -21,6 +21,8 @@ import { contiguousMigrationVersions } from "./db/migration-versions.test-helper
 import { AuthService } from "./services/auth-service.js";
 import { SecretService } from "./services/secret-service.js";
 import { createRunScope } from "./run-scope.js";
+import { GuardService } from "./services/guard-service.js";
+import { createReplaySandbox } from "./services/replay-sandbox.js";
 
 interface TestContext {
   app: FastifyInstance;
@@ -131,7 +133,9 @@ describe("migration 37", () => {
     expect(migration.description).toContain("Phase 16");
     expect(migration.up).toContain("ALTER TABLE session_memory ADD COLUMN IF NOT EXISTS labels_json TEXT");
     expect(migration.up).toContain("ALTER TABLE session_tool_cache ADD COLUMN IF NOT EXISTS labels_json TEXT");
+    expect(migration.up).toContain("ALTER TABLE session_artifacts ADD COLUMN IF NOT EXISTS labels_json TEXT");
     expect(migration.down).toContain("ALTER TABLE session_memory DROP COLUMN IF EXISTS labels_json");
+    expect(migration.down).toContain("ALTER TABLE session_artifacts DROP COLUMN IF EXISTS labels_json");
     expect(migration.down).toContain("ALTER TABLE session_tool_cache DROP COLUMN IF EXISTS labels_json");
     expect(migration.up).not.toMatch(/NOT NULL|DEFAULT/);
   });
@@ -142,6 +146,7 @@ describe("migration 37", () => {
       (context.store as unknown as { queryAll: (sql: string) => Array<{ name: string }> }).queryAll(`PRAGMA table_info(${table})`).map((column) => column.name);
     expect(columns("session_memory")).toContain("labels_json");
     expect(columns("session_tool_cache")).toContain("labels_json");
+    expect(columns("session_artifacts")).toContain("labels_json");
   });
 });
 
@@ -247,5 +252,167 @@ describe("labels on session memory and the tool cache", () => {
     expect(await memory.loadLabels!("wf-mem:note", "s")).toEqual(L(["user"], ["iban"]));
     await memory.saveMessages("wf-mem:note", "other", [{ role: "user", content: "hi" }]);
     expect(await memory.loadLabels!("wf-mem:note", "other")).toBeNull();
+  });
+});
+
+describe("round 1 fixes", () => {
+  it("session artifacts keep the labels of a tracked save; a save without labels keeps them; older rows have none", async () => {
+    const context = await createTestContext();
+    const store = context.store;
+    const key = { namespace: "ns", sessionId: "s1", artifactKey: "latest" };
+    store.saveSessionArtifact({ ...key, value: { v: 0 } });
+    expect(store.loadSessionArtifact(key)!.labels).toBeUndefined();
+    const saved = store.saveSessionArtifact({ ...key, value: { v: 1 }, labels: L(["untrusted_external"], ["email"]) });
+    expect(saved.labels).toEqual(L(["untrusted_external"], ["email"]));
+    expect(store.loadSessionArtifact(key)!.labels).toEqual(L(["untrusted_external"], ["email"]));
+    store.saveSessionArtifact({ ...key, value: { v: 2 } });
+    expect(store.loadSessionArtifact(key)).toMatchObject({ value: { v: 2 }, labels: L(["untrusted_external"], ["email"]) });
+    store.saveSessionArtifact({ ...key, value: { v: 3 }, labels: L(["user"]) });
+    expect(store.loadSessionArtifact(key)!.labels).toEqual(L(["user"]));
+  });
+
+  it("the run scope takes the labels' row from the messages read, without reading the messages again", async () => {
+    const context = await createTestContext();
+    const store = context.store;
+    const workflow = { ...labelledWorkflow("wf-legacy", "default"), projectId: "default" };
+    // A legacy (unprefixed) row from before project scoping, with labels.
+    store.saveSessionMemory("wf-legacy:note", "s", [{ role: "user", content: "old" }], L(["untrusted_external"], ["iban"]));
+    let messageReads = 0;
+    const scope = createRunScope({
+      getWorkflow: () => workflow,
+      listWorkflowShares: () => [],
+      getSecretProjectId: () => null,
+      listSecretIdsSharedToProject: () => [],
+      canUseSecretsInProject: () => true,
+      defaultSecretsShared: true,
+      getMcpServerProjectId: () => undefined,
+      resolveRegisteredMcpServer: () => {
+        throw new Error("none");
+      },
+      legacyNamespaceOwnerProjects: () => [],
+      resolveSecret: async () => undefined,
+      knowledgeBaseStoreFor: () => ({}) as never,
+      sessions: {
+        loadMemory: (namespace, sessionId) => {
+          messageReads += 1;
+          return store.loadSessionMemory(namespace, sessionId);
+        },
+        saveMemory: (namespace, sessionId, messages, labels) => store.saveSessionMemory(namespace, sessionId, messages, labels),
+        loadMemoryLabels: (namespace, sessionId) => store.loadSessionMemoryLabels(namespace, sessionId),
+        saveToolCall: (input) => store.saveSessionToolCall(input),
+        listToolCalls: (input) => store.listSessionToolCalls(input),
+        getToolCall: (input) => store.getSessionToolCall(input),
+        saveArtifact: (input) => store.saveSessionArtifact(input),
+        loadArtifact: (input) => store.loadSessionArtifact(input)
+      }
+    });
+    const memory = scope.dependenciesFor(workflow, {}).memoryStore;
+    expect(await memory.loadMessages("wf-legacy:note", "s")).toEqual([{ role: "user", content: "old" }]);
+    const readsAfterMessages = messageReads;
+    expect(await memory.loadLabels!("wf-legacy:note", "s")).toEqual(L(["untrusted_external"], ["iban"]));
+    expect(messageReads).toBe(readsAfterMessages);
+  });
+
+  it("guard profiles: one cached check says whether any profile tracks labels; parsed versions are reused and frozen", async () => {
+    const context = await createTestContext();
+    const admin = await login(context, "admin");
+    // The store answers the cheap check (cached until the next profile write); the built-in default does not opt in.
+    expect(context.store.anyGuardProfileUsesLabels()).toBe(false);
+    await trackingProfile(context, admin);
+    expect(context.store.anyGuardProfileUsesLabels()).toBe(true);
+    const service = new GuardService(context.store, new SecretService(context.store, context.config.SECRET_MASTER_KEY_BASE64), { autoApply: true });
+    const first = service.loadProfile("default")!;
+    const second = service.loadProfile("default")!;
+    expect(second.profile).toBe(first.profile);
+    expect(Object.isFrozen(first.profile)).toBe(true);
+    expect(service.mayUseLabels()).toBe(true);
+    expect(service.runtimeFor({ workflowId: "wf", projectId: "default" }).mayUseLabels!()).toBe(true);
+  });
+
+  it("zero config: runs do not resolve guard profiles to learn they track nothing", async () => {
+    const context = await createTestContext();
+    const builder = await login(context, "builder");
+    context.store.upsertWorkflow({
+      ...labelledWorkflow("wf-bare", "default"),
+      nodes: labelledWorkflow("wf-bare", "default").nodes.filter((node) => node.type !== "guard"),
+      edges: [
+        { id: "e1", source: "hook", target: "note" },
+        { id: "e2", source: "note", target: "pass" }
+      ]
+    } as Workflow);
+    let checks = 0;
+    const original = context.store.anyGuardProfileUsesLabels.bind(context.store);
+    context.store.anyGuardProfileUsesLabels = () => {
+      checks += 1;
+      return original();
+    };
+    const versionReads: string[] = [];
+    const getVersion = context.store.getGuardProfileVersion.bind(context.store);
+    context.store.getGuardProfileVersion = (profileId: string, version?: number) => {
+      versionReads.push(profileId);
+      return getVersion(profileId, version);
+    };
+    const run = (await call(context, "POST", "/api/workflows/wf-bare/execute", builder, { user_prompt: "hello" })).json<RunResult>();
+    expect(run.status).toBe("success");
+    expect(checks).toBe(1);
+    expect(versionReads).toEqual([]);
+  });
+
+  it("replays take the recording's input origin, not the replaying user's (Q7)", async () => {
+    const context = await createTestContext();
+    const admin = await login(context, "admin");
+    await trackingProfile(context, admin);
+    // Recorded while untracked (the default profile): the facts carry no labels, the source trigger was a webhook.
+    context.store.upsertWorkflow(labelledWorkflow("wf-replayed", "default"));
+    const hook = await context.app.inject({ method: "POST", url: "/webhook/hook-wf-replayed", payload: { user_prompt: "hello" } });
+    expect(hook.statusCode, hook.body).toBeLessThan(300);
+    const source = (context.store.listExecutionHistory({ workflowId: "wf-replayed" } as never) as unknown as { items: Array<{ id: string }> }).items[0]!.id;
+    const saved = await call(context, "POST", "/api/replay/recordings", admin, { executionId: source, name: "From a webhook" });
+    expect(saved.statusCode, saved.body).toBe(201);
+    const recordingId = saved.json<{ recording: { id: string } }>().recording.id;
+    expect(context.store.getReplayRecording(recordingId)!.sourceTriggerType).toBe("webhook");
+
+    // The draft now tracks labels; an admin replays it.
+    context.store.upsertWorkflow(labelledWorkflow("wf-replayed", "tracking"));
+    const replayed = await call(context, "POST", `/api/replay/recordings/${recordingId}/replay`, admin, { draft: true });
+    expect(replayed.statusCode, replayed.body).toBe(200);
+    const executionId = replayed.json<{ executionId: string }>().executionId;
+    const stored = JSON.parse(storedNodeResults(context, executionId)) as Array<{ nodeId: string; labels?: DataLabels }>;
+    expect(stored.find((entry) => entry.nodeId === "hook")?.labels).toEqual(L(["untrusted_external"]));
+  });
+
+  it("an MCP replay takes the source run's input origin", async () => {
+    const context = await createTestContext();
+    const admin = await login(context, "admin");
+    await trackingProfile(context, admin);
+    context.store.upsertWorkflow(labelledWorkflow("wf-mcp-replay", "default"));
+    const recorded = (await call(context, "POST", "/api/workflows/wf-mcp-replay/execute", admin, { user_prompt: "hello", record: true })).json<RunResult & { mcpCassette?: { id: string } }>();
+    expect(recorded.status).toBe("success");
+    expect(recorded.mcpCassette?.id).toBeTruthy();
+    // The source run came from outside (a webhook-style trigger): its replay must say so, whoever replays it.
+    (context.store as unknown as { exec: (sql: string, params: unknown[]) => void }).exec("UPDATE execution_history SET trigger_type = ? WHERE id = ?", ["webhook", recorded.executionId]);
+    context.store.upsertWorkflow(labelledWorkflow("wf-mcp-replay", "tracking"));
+    const replay = await call(context, "POST", `/api/executions/${recorded.executionId}/replay`, admin, {});
+    expect(replay.statusCode, replay.body).toBe(200);
+    const replayRun = replay.json<RunResult>();
+    expect(replayRun.nodeResults.find((entry) => entry.nodeId === "hook")?.labels).toEqual(L(["untrusted_external"]));
+  });
+
+  it("a recording's memory seed keeps the memory's labels, and a replay sandbox reads and merges them", async () => {
+    const sandbox = createReplaySandbox({
+      sessions: [
+        { namespace: "n", sessionId: "s", messages: [{ role: "user", content: "hi" }], labels: L(["untrusted_external"], ["iban"]) },
+        { namespace: "n", sessionId: "f", messages: [], labels: { provenance: ["trusted", "user"], dataClasses: [], source: "file" } }
+      ],
+      truncated: false
+    });
+    expect(await sandbox.memoryStore.loadLabels!("n", "s")).toEqual(L(["untrusted_external"], ["iban"]));
+    expect((await sandbox.memoryStore.loadLabels!("n", "f"))?.provenance).toEqual(["user"]);
+    await sandbox.memoryStore.saveMessages("n", "s", [], { labels: L(["user"], ["email"]) });
+    expect(await sandbox.memoryStore.loadLabels!("n", "s")).toEqual(L(["user", "untrusted_external"], ["email", "iban"]));
+    const saved = await sandbox.sessionArtifactStore.saveArtifact({ namespace: "n", sessionId: "s", artifactKey: "k", value: 1, labels: L(["user"]) });
+    expect(saved.labels).toEqual(L(["user"]));
+    await sandbox.sessionArtifactStore.saveArtifact({ namespace: "n", sessionId: "s", artifactKey: "k", value: 2 });
+    expect((await sandbox.sessionArtifactStore.loadArtifact({ namespace: "n", sessionId: "s", artifactKey: "k" }))?.labels).toEqual(L(["user"]));
   });
 });

@@ -93,7 +93,8 @@ export interface RunScopeDeps {
     saveToolCall: (input: ToolCallInput) => ToolCallRecord;
     listToolCalls: (input: { namespace: string; sessionId: string; toolName?: string; limit?: number }) => ToolCallSummary[];
     getToolCall: (input: { namespace: string; sessionId: string; id: string }) => ToolCallRecord | null;
-    saveArtifact: (input: { namespace: string; sessionId: string; artifactKey: string; value: unknown }) => ArtifactRecord;
+    /** `labels` (Phase 16) are passed only while the run tracks data labels. */
+    saveArtifact: (input: { namespace: string; sessionId: string; artifactKey: string; value: unknown; labels?: DataLabels }) => ArtifactRecord;
     loadArtifact: (input: { namespace: string; sessionId: string; artifactKey: string }) => ArtifactRecord | null;
   };
 }
@@ -206,32 +207,44 @@ export function createRunScope(deps: RunScopeDeps) {
       deps.legacyNamespaceOwnerProjects(namespace).every((owner) => owner === projectId);
     const asCaller = <T extends { namespace: string }>(row: T, namespace: string): T => ({ ...row, namespace });
 
+    // Phase 16 — which row each session's messages were read from (scoped or legacy), so its labels come from the same
+    // row without reading the messages again. Every store call is awaited: the Postgres store answers with promises.
+    const memoryRowKey = new Map<string, string>();
+    const sessionKey = (namespace: string, sessionId: string) => `${namespace}\u0000${sessionId}`;
     const memoryStore: ScopedRunDependencies["memoryStore"] = {
       loadMessages: async (namespace, sessionId) => {
-        const messages = deps.sessions.loadMemory(key(namespace), sessionId);
-        if (messages.length > 0 || !legacyReadable(namespace)) return messages;
+        const messages = await deps.sessions.loadMemory(key(namespace), sessionId);
+        if (messages.length > 0 || !legacyReadable(namespace)) {
+          memoryRowKey.set(sessionKey(namespace, sessionId), key(namespace));
+          return messages;
+        }
+        memoryRowKey.set(sessionKey(namespace, sessionId), namespace);
         return deps.sessions.loadMemory(namespace, sessionId);
       },
       saveMessages: async (namespace, sessionId, messages, options) => {
-        if (options?.labels) deps.sessions.saveMemory(key(namespace), sessionId, messages, options.labels);
-        else deps.sessions.saveMemory(key(namespace), sessionId, messages);
+        if (options?.labels) await deps.sessions.saveMemory(key(namespace), sessionId, messages, options.labels);
+        else await deps.sessions.saveMemory(key(namespace), sessionId, messages);
       },
       loadLabels: async (namespace, sessionId) => {
         const loadLabels = deps.sessions.loadMemoryLabels;
         if (!loadLabels) return null;
         // Labels sit on the row the messages were read from: the scoped one, else the legacy one.
-        if (deps.sessions.loadMemory(key(namespace), sessionId).length > 0 || !legacyReadable(namespace)) return loadLabels(key(namespace), sessionId);
-        return loadLabels(namespace, sessionId);
+        let rowKey = memoryRowKey.get(sessionKey(namespace, sessionId));
+        if (rowKey === undefined) {
+          const scoped = await deps.sessions.loadMemory(key(namespace), sessionId);
+          rowKey = scoped.length > 0 || !legacyReadable(namespace) ? key(namespace) : namespace;
+        }
+        return loadLabels(rowKey, sessionId);
       }
     };
 
     const toolDataStore: ScopedRunDependencies["toolDataStore"] = {
-      saveToolCall: async (input) => asCaller(deps.sessions.saveToolCall({ ...input, namespace: key(input.namespace) }), input.namespace),
+      saveToolCall: async (input) => asCaller(await deps.sessions.saveToolCall({ ...input, namespace: key(input.namespace) }), input.namespace),
       listToolCalls: async (input) => {
-        const rows = deps.sessions.listToolCalls({ ...input, namespace: key(input.namespace) });
+        const rows = await deps.sessions.listToolCalls({ ...input, namespace: key(input.namespace) });
         const limit = typeof input.limit === "number" && input.limit > 0 ? input.limit : 20;
         if (rows.length >= limit || !legacyReadable(input.namespace)) return rows.map((row) => asCaller(row, input.namespace));
-        const legacy = deps.sessions.listToolCalls(input);
+        const legacy = await deps.sessions.listToolCalls(input);
         return [...rows, ...legacy]
           .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
           .slice(0, limit)
@@ -239,18 +252,18 @@ export function createRunScope(deps: RunScopeDeps) {
       },
       getToolCall: async (input) => {
         const row =
-          deps.sessions.getToolCall({ ...input, namespace: key(input.namespace) }) ??
-          (legacyReadable(input.namespace) ? deps.sessions.getToolCall(input) : null);
+          (await deps.sessions.getToolCall({ ...input, namespace: key(input.namespace) })) ??
+          (legacyReadable(input.namespace) ? await deps.sessions.getToolCall(input) : null);
         return row ? asCaller(row, input.namespace) : null;
       }
     };
 
     const sessionArtifactStore: ScopedRunDependencies["sessionArtifactStore"] = {
-      saveArtifact: async (input) => asCaller(deps.sessions.saveArtifact({ ...input, namespace: key(input.namespace) }), input.namespace),
+      saveArtifact: async (input) => asCaller(await deps.sessions.saveArtifact({ ...input, namespace: key(input.namespace) }), input.namespace),
       loadArtifact: async (input) => {
         const row =
-          deps.sessions.loadArtifact({ ...input, namespace: key(input.namespace) }) ??
-          (legacyReadable(input.namespace) ? deps.sessions.loadArtifact(input) : null);
+          (await deps.sessions.loadArtifact({ ...input, namespace: key(input.namespace) })) ??
+          (legacyReadable(input.namespace) ? await deps.sessions.loadArtifact(input) : null);
         return row ? asCaller(row, input.namespace) : null;
       }
     };

@@ -226,6 +226,8 @@ interface SessionArtifactRow {
   session_id: string;
   artifact_key: string;
   value_json: string;
+  /** Migration 37 — labels of what the saving run put in the artifact; null when it did not track labels. */
+  labels_json?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -2217,6 +2219,12 @@ function toDurationMsForStore(startedAt: string, completedAt: string): number | 
   return Math.max(0, Math.floor(completed - started));
 }
 
+/** Phase 16 — `{ labels }` from a stored labels column, parsed once; nothing when none were recorded. */
+function labelsField(value: string | null | undefined): { labels?: DataLabels } {
+  const labels = parseStoredDataLabels(value ?? null);
+  return labels ? { labels } : {};
+}
+
 function parseJsonSafe(value: unknown): unknown {
   try {
     return JSON.parse(toString(value));
@@ -3622,9 +3630,10 @@ export class SqliteStore {
     this.ensureColumn("release_approval_requests", "gate_checks_json", "TEXT");
     this.ensureColumn("release_approval_requests", "gate_authority", "TEXT");
 
-    // Migration 37 — Phase 16 data labels on session memory and the session tool cache (null: none recorded).
+    // Migration 37 — Phase 16 data labels on session memory, the session tool cache and session artifacts (null: none recorded).
     this.ensureColumn("session_memory", "labels_json", "TEXT");
     this.ensureColumn("session_tool_cache", "labels_json", "TEXT");
+    this.ensureColumn("session_artifacts", "labels_json", "TEXT");
     // Gates enforced before admission existed admit every case their sets hold now, so they judge as before. Once only:
     // afterwards an enforced gate without a stored admission fails closed (counts nothing until an admin admits its cases).
     this.transaction(() => {
@@ -4564,7 +4573,7 @@ export class SqliteStore {
         args,
         error: row.error ? toString(row.error) : undefined,
         summary: row.summary_json ? parseJsonSafe(row.summary_json) : undefined,
-        ...(parseStoredDataLabels(row.labels_json ?? null) ? { labels: parseStoredDataLabels(row.labels_json ?? null) } : {}),
+        ...labelsField(row.labels_json),
         createdAt: toString(row.created_at)
       };
     });
@@ -4613,21 +4622,28 @@ export class SqliteStore {
       output: parseJsonSafe(row.output_json),
       error: row.error ? toString(row.error) : undefined,
       summary: row.summary_json ? parseJsonSafe(row.summary_json) : undefined,
-      ...(parseStoredDataLabels(row.labels_json ?? null) ? { labels: parseStoredDataLabels(row.labels_json ?? null) } : {}),
+      ...labelsField(row.labels_json),
       createdAt: toString(row.created_at)
     };
   }
 
+  /**
+   * Saves a session artifact. `labels` (Phase 16) are given only while the
+   * run tracks labels and replace the stored ones with the value; without
+   * them the stored labels are left as they are (never laundered away).
+   */
   saveSessionArtifact(input: {
     namespace: string;
     sessionId: string;
     artifactKey: string;
     value: unknown;
+    labels?: DataLabels;
   }): {
     namespace: string;
     sessionId: string;
     artifactKey: string;
     value: unknown;
+    labels?: DataLabels | null;
     createdAt: string;
     updatedAt: string;
   } {
@@ -4639,18 +4655,27 @@ export class SqliteStore {
     );
     const now = new Date().toISOString();
     const createdAt = existing ? toString(existing.created_at) : now;
+    const labels = input.labels && !isEmptyDataLabels(input.labels) ? input.labels : undefined;
 
     this.exec(
-      `INSERT INTO session_artifacts (namespace, session_id, artifact_key, value_json, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?)
-       ON CONFLICT(namespace, session_id, artifact_key) DO UPDATE SET
-         value_json = excluded.value_json,
-         updated_at = excluded.updated_at`,
+      labels
+        ? `INSERT INTO session_artifacts (namespace, session_id, artifact_key, value_json, labels_json, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(namespace, session_id, artifact_key) DO UPDATE SET
+             value_json = excluded.value_json,
+             labels_json = excluded.labels_json,
+             updated_at = excluded.updated_at`
+        : `INSERT INTO session_artifacts (namespace, session_id, artifact_key, value_json, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?)
+           ON CONFLICT(namespace, session_id, artifact_key) DO UPDATE SET
+             value_json = excluded.value_json,
+             updated_at = excluded.updated_at`,
       [
         input.namespace,
         input.sessionId,
         input.artifactKey,
         JSON.stringify(input.value ?? null),
+        ...(labels ? [JSON.stringify({ ...labels, source: "propagated" })] : []),
         createdAt,
         now
       ]
@@ -4663,6 +4688,7 @@ export class SqliteStore {
       sessionId: input.sessionId,
       artifactKey: input.artifactKey,
       value: input.value ?? null,
+      ...(labels ? { labels } : {}),
       createdAt,
       updatedAt: now
     };
@@ -4677,11 +4703,12 @@ export class SqliteStore {
     sessionId: string;
     artifactKey: string;
     value: unknown;
+    labels?: DataLabels | null;
     createdAt: string;
     updatedAt: string;
   } | null {
     const row = this.queryOne<SessionArtifactRow>(
-      `SELECT namespace, session_id, artifact_key, value_json, created_at, updated_at
+      `SELECT namespace, session_id, artifact_key, value_json, labels_json, created_at, updated_at
        FROM session_artifacts
        WHERE namespace = ? AND session_id = ? AND artifact_key = ?`,
       [input.namespace, input.sessionId, input.artifactKey]
@@ -4691,11 +4718,13 @@ export class SqliteStore {
       return null;
     }
 
+    const labels = parseStoredDataLabels(row.labels_json ?? null);
     return {
       namespace: toString(row.namespace),
       sessionId: toString(row.session_id),
       artifactKey: toString(row.artifact_key),
       value: parseJsonSafe(row.value_json),
+      ...(labels ? { labels } : {}),
       createdAt: toString(row.created_at),
       updatedAt: toString(row.updated_at)
     };
@@ -11245,6 +11274,31 @@ export class SqliteStore {
     return row ? mapGuardProfileRow(row) : null;
   }
 
+  /** Phase 16 — bumped on every guard profile version write or delete: caches of profile contents key on it. */
+  private guardProfileWrites = 0;
+  private guardProfileLabelsCache: { writes: number; value: boolean } | null = null;
+
+  /** Guard profile writes so far in this process (a cache key for derived profile facts). */
+  guardProfileWriteCount(): number {
+    return this.guardProfileWrites;
+  }
+
+  /**
+   * Phase 16 — whether any stored version of any guard profile asks for
+   * propagated labels. Cached until the next profile write, so a run checks
+   * it without a query. A match on the stored JSON text (no parse); a false
+   * positive only makes runs resolve their profiles as before.
+   */
+  anyGuardProfileUsesLabels(): boolean {
+    if (this.guardProfileLabelsCache?.writes === this.guardProfileWrites) return this.guardProfileLabelsCache.value;
+    const row = this.queryOne<{ found: number }>(
+      `SELECT 1 AS found FROM guard_profile_versions WHERE document_json LIKE '%"labels":"propagated"%' LIMIT 1`
+    );
+    const value = Boolean(row);
+    this.guardProfileLabelsCache = { writes: this.guardProfileWrites, value };
+    return value;
+  }
+
   /** One version of a profile; the latest when `version` is omitted. */
   getGuardProfileVersion(profileId: string, version?: number): GuardProfileVersionRecord | null {
     const row =
@@ -11280,6 +11334,7 @@ export class SqliteStore {
        VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?)`,
       [input.id, input.name, input.description ?? null, input.builtIn ? 1 : 0, now, input.createdBy, now, input.createdBy]
     );
+    this.guardProfileWrites += 1;
     this.exec(
       `INSERT INTO guard_profile_versions (profile_id, version, hash, document_json, note, created_at, created_by) VALUES (?, 1, ?, ?, ?, ?, ?)`,
       [input.id, input.hash, JSON.stringify(input.document), input.note ?? null, now, input.createdBy]
@@ -11302,6 +11357,7 @@ export class SqliteStore {
     if (!current) throw new Error(`Guard profile '${input.profileId}' not found`);
     const version = current.latestVersion + 1;
     const now = new Date().toISOString();
+    this.guardProfileWrites += 1;
     this.exec(
       `INSERT INTO guard_profile_versions (profile_id, version, hash, document_json, note, created_at, created_by) VALUES (?, ?, ?, ?, ?, ?, ?)`,
       [input.profileId, version, input.hash, JSON.stringify(input.document), input.note ?? null, now, input.createdBy]
@@ -11320,6 +11376,7 @@ export class SqliteStore {
 
   deleteGuardProfile(id: string): boolean {
     if (!this.getGuardProfile(id)) return false;
+    this.guardProfileWrites += 1;
     this.exec(`DELETE FROM guard_profile_versions WHERE profile_id = ?`, [id]);
     this.exec(`DELETE FROM guard_profiles WHERE id = ?`, [id]);
     this.persist();

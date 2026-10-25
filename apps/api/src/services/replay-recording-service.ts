@@ -826,6 +826,15 @@ export class ReplayRecordingService {
       const parsed = modelMemorySeedSchema.safeParse(file.memorySeed);
       if (!parsed.success) throw new ReplayRecordingError(`The memory seed is not valid: ${parsed.error.issues[0]?.message ?? "invalid"} (${parsed.error.issues[0]?.path.join(".") ?? ""}).`, "invalid");
       memorySeed = this.scrubForFile(parsed.data as unknown as ModelMemorySeed, scrubber);
+      // Phase 16 — labels read from a file are never trusted: source `file`, without `trusted`.
+      memorySeed = {
+        ...memorySeed,
+        sessions: memorySeed.sessions.map((session) =>
+          session.labels
+            ? { ...session, labels: { ...session.labels, provenance: session.labels.provenance.filter((label) => label !== "trusted"), source: "file" as const } }
+            : session
+        )
+      };
     }
     const nodes = this.scrubForFile(recordedNodes, scrubber);
     const facts = untrustedFileLabels(this.scrubFacts(stripSecretReferences(file.facts as RunFacts), scrubber));
