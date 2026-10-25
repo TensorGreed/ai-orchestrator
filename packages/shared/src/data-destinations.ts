@@ -335,6 +335,33 @@ function unicodeHostToAscii(value: string | null | undefined): string | null | u
   }
 }
 
+const SCRIPTS = ["Latin", "Cyrillic", "Greek", "Armenian", "Hebrew", "Arabic", "Georgian", "Thai", "Devanagari", "Han", "Hiragana", "Katakana", "Hangul"] as const;
+const SCRIPT_TESTS = SCRIPTS.map((script) => [script, new RegExp(`\\p{Script=${script}}`, "u")] as const);
+const JAPANESE_OR_KOREAN = new Set<string>(["Han", "Hiragana", "Katakana", "Hangul"]);
+
+/**
+ * True when one label of a host name mixes alphabets (Latin with Cyrillic, say),
+ * which is how lookalike names are made. Han with Japanese kana or Hangul is how
+ * those languages are written and is allowed. A letter in a script this list does
+ * not know counts as its own alphabet, so it cannot hide among Latin letters.
+ */
+export function hostMixesAlphabets(host: string): boolean {
+  for (const label of host.split(".")) {
+    const found = new Set<string>();
+    for (const char of label) {
+      if (!/\p{L}/u.test(char)) continue;
+      found.add(SCRIPT_TESTS.find(([, test]) => test.test(char))?.[0] ?? `other:${char}`);
+    }
+    if (found.size < 2) continue;
+    if ([...found].every((script) => JAPANESE_OR_KOREAN.has(script))) continue;
+    return true;
+  }
+  return false;
+}
+
+const MIXED_ALPHABETS_MESSAGE =
+  "This host mixes alphabets, which is how lookalike names are made; enter it in one alphabet or as xn-- punycode";
+
 /** What an admin sends to create or change a destination row. */
 export const dataDestinationInputSchema = z
   .object({
@@ -343,7 +370,13 @@ export const dataDestinationInputSchema = z
     /** Provider id, MCP server registry id, or connector type. Not used for web addresses. */
     targetId: targetIdSchema.nullish(),
     /** Exact host or IP, `*.suffix`, or a CIDR range such as `10.20.0.0/16`. */
-    host: z.string().trim().max(260).nullish().transform(unicodeHostToAscii),
+    host: z
+      .string()
+      .trim()
+      .max(260)
+      .nullish()
+      .refine((value) => !value || !/[^\x00-\x7f]/.test(value) || !hostMixesAlphabets(value), { message: MIXED_ALPHABETS_MESSAGE })
+      .transform(unicodeHostToAscii),
     tier: destinationTierSchema,
     region: z.string().trim().max(64).nullish(),
     holdsDataClasses: z.array(dataClassNameSchema).max(50).default([]),
@@ -577,9 +610,9 @@ function strictestOf(hops: readonly ResolvedDestination[]): { result: ResolvedDe
  * builds the workflow, not by the admin. When the call has a host, the result
  * is the strictest of the id rows and the host's own resolution (built-ins,
  * host rows, else public), with only the classes all of them approve and a
- * region only when the host's own result and every id row agree; on a tie the host's resolution names the
- * result. A host that is given (even empty) but is not a plain host name
- * resolves as public.
+ * region only when the host's own result and every id row
+ * agree; on a tie the host's resolution names the result. A host that is
+ * given (even empty) but is not a plain host name resolves as public.
  */
 export function resolveDestination(ref: DestinationRef, rows: readonly DataDestinationRow[]): ResolvedDestination {
   const hostGiven = ref.host !== undefined && ref.host !== null;
@@ -632,6 +665,8 @@ export interface UnclassifiedDestination {
   host?: string;
   /** Where it was found, for the UI ("Workflow Support bot · node Ask model", "MCP server github"). */
   seenIn: string[];
+  /** Set when the call goes over the network but its host cannot be read from the settings. */
+  hostUnknown?: "unreadable" | "secret";
   /** What it resolves to today (a built-in row or public). */
   current: ResolvedDestination;
   /** A ready-made row for one-click Classify. */
@@ -642,6 +677,19 @@ export interface UnclassifiedDestination {
 export interface ConfiguredDestination {
   ref: DestinationRef;
   seenIn: string;
+  /** The host is kept in a secret (never read here); the call is judged as public until classified. */
+  hostInSecret?: boolean;
+}
+
+/**
+ * The ref for a call that goes over the network. `host` is the host read from
+ * the settings, or undefined when it cannot be read (templated, malformed, in
+ * a secret): the ref then carries an empty host, which resolves as public, so
+ * an id row can never stand in for a host nobody knows. Calls that send nothing
+ * over the network have no ref at all (do not call this for them).
+ */
+export function networkDestinationRef(kind: DestinationKind, id: string | undefined, host: string | undefined): DestinationRef {
+  return { kind, ...(id ? { id } : {}), host: host ?? "" };
 }
 
 const MAX_SEEN_IN = 5;
@@ -659,13 +707,16 @@ export function findUnclassifiedDestinations(configured: readonly ConfiguredDest
     const host = normalizeDestinationHost(entry.ref.host);
     const targetId = entry.ref.kind === "http" ? undefined : entry.ref.id?.trim() || undefined;
     if (!host && !targetId) continue;
-    const key = `${entry.ref.kind}\u0000${targetId ?? ""}\u0000${host ?? ""}`;
+    // A host that was given but cannot be read stays "unknown" (public), never "no host".
+    const hostUnknown: UnclassifiedDestination["hostUnknown"] =
+      !host && entry.ref.host !== undefined && entry.ref.host !== null ? (entry.hostInSecret ? "secret" : "unreadable") : undefined;
+    const key = `${entry.ref.kind}\u0000${targetId ?? ""}\u0000${host ?? ""}\u0000${hostUnknown ?? ""}`;
     const existing = groups.get(key);
     if (existing) {
       if (!existing.seenIn.includes(entry.seenIn) && existing.seenIn.length < MAX_SEEN_IN) existing.seenIn.push(entry.seenIn);
       continue;
     }
-    const ref: DestinationRef = { kind: entry.ref.kind, ...(targetId ? { id: targetId } : {}), ...(host ? { host } : {}) };
+    const ref: DestinationRef = { kind: entry.ref.kind, ...(targetId ? { id: targetId } : {}), ...(host ? { host } : hostUnknown ? { host: "" } : {}) };
     const current = resolveDestination(ref, rows);
     if (current.matchedBy !== "unmatched") continue;
     const suggestedKind: DestinationKind = entry.ref.kind === "connector" && !targetId ? "http" : entry.ref.kind;
@@ -673,6 +724,7 @@ export function findUnclassifiedDestinations(configured: readonly ConfiguredDest
       kind: entry.ref.kind,
       ...(targetId ? { targetId } : {}),
       ...(host ? { host } : {}),
+      ...(hostUnknown ? { hostUnknown } : {}),
       seenIn: [entry.seenIn],
       current,
       suggestion: {

@@ -22,6 +22,7 @@ import {
   dataDestinationInputSchema,
   destinationHostOfUrl,
   findUnclassifiedDestinations,
+  networkDestinationRef,
   getNodeDefinition,
   normalizeDataDestinationInput,
   normalizeDestinationHost,
@@ -80,6 +81,15 @@ function configHost(config: Record<string, unknown>): string | undefined {
   return undefined;
 }
 
+/** True when the config points at a stored credential (a secret reference), at the top level or one level down. */
+function referencesSecret(config: Record<string, unknown>): boolean {
+  const named = (value: Record<string, unknown>) => Object.entries(value).some(([key, item]) => /secret|credential/i.test(key) && Boolean(item));
+  return named(config) || Object.values(config).some((value) => {
+    const nested = record(value);
+    return nested ? named(nested) : false;
+  });
+}
+
 /** A non-empty string setting, trimmed; undefined when the setting is absent or blank. */
 function setting(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
@@ -89,7 +99,8 @@ function setting(value: unknown): string | undefined {
  * Where a provider node sends its calls: `null` for a provider that sends
  * nothing over the network, otherwise the host (undefined when the base URL
  * is set but cannot be read, such as a template: the real host is unknown, so
- * the default is never assumed).
+ * the default is never assumed). Callers turn undefined into an unknown host
+ * with `networkDestinationRef`, never into "no host".
  */
 function providerHost(providerId: string, provider: Record<string, unknown>, env: Record<string, string | undefined>): string | undefined | null {
   if (PROVIDERS_WITHOUT_NETWORK.has(providerId)) return null;
@@ -108,7 +119,7 @@ type CollectWorkflow = Pick<Workflow, "id" | "name" | "nodes"> & {
 
 export interface CollectInput {
   workflows: ReadonlyArray<CollectWorkflow>;
-  mcpServers: ReadonlyArray<Pick<McpServerRecord, "id" | "name" | "connection">>;
+  mcpServers: ReadonlyArray<Pick<McpServerRecord, "id" | "name" | "connection"> & Partial<Pick<McpServerRecord, "adapterId">>>;
   env?: Record<string, string | undefined>;
 }
 
@@ -119,7 +130,7 @@ function refKey(ref: ConfiguredDestination["ref"]): string {
 function collectNodes(
   nodes: Workflow["nodes"] | undefined,
   label: (nodeName: string) => string,
-  registryHosts: ReadonlyMap<string, string | undefined>,
+  registryHosts: ReadonlyMap<string, string | undefined | null>,
   env: Record<string, string | undefined>
 ): ConfiguredDestination[] {
   const out: ConfiguredDestination[] = [];
@@ -132,26 +143,32 @@ function collectNodes(
       const providerId = provider.providerId.trim();
       const host = providerHost(providerId, provider, env);
       if (host === null) continue;
-      out.push({ ref: { kind: "model_provider", id: providerId, ...(host ? { host } : {}) }, seenIn });
+      out.push({ ref: networkDestinationRef("model_provider", providerId, host), seenIn });
       continue;
     }
     const chatModel = chatModelDestinationOf(node);
     if (chatModel) {
       const host = providerHost(chatModel.providerId, { baseUrl: chatModel.baseUrl }, env);
       if (host === null) continue;
-      out.push({ ref: { kind: "model_provider", id: chatModel.providerId, ...(host ? { host } : {}) }, seenIn });
+      out.push({ ref: networkDestinationRef("model_provider", chatModel.providerId, host), seenIn });
       continue;
     }
     if (node.type === "azure_openai_chat_model") {
       const configured = setting(config.endpoint) ?? setting(env.AZURE_OPENAI_ENDPOINT);
       const host = configured !== undefined ? hostFrom(configured) : undefined;
-      out.push({ ref: { kind: "model_provider", id: "azure_openai", ...(host ? { host } : {}) }, seenIn });
+      out.push({ ref: networkDestinationRef("model_provider", "azure_openai", host), seenIn });
       continue;
     }
     if (node.type === "mcp_tool") {
       const registryId = typeof config.registryServerId === "string" && config.registryServerId.trim() ? config.registryServerId.trim() : undefined;
-      const host = (registryId ? registryHosts.get(registryId) : undefined) ?? hostFrom(record(config.connection)?.endpoint);
-      if (registryId || host) out.push({ ref: { kind: "mcp_server", ...(registryId ? { id: registryId } : {}), ...(host ? { host } : {}) }, seenIn });
+      const registered = registryId ? registryHosts.get(registryId) : undefined;
+      const endpoint = setting(record(config.connection)?.endpoint);
+      if (registered === null) {
+        // A registry server that sends nothing over the network.
+        out.push({ ref: { kind: "mcp_server", id: registryId }, seenIn });
+      } else if (registryId || endpoint) {
+        out.push({ ref: networkDestinationRef("mcp_server", registryId, registered ?? (endpoint ? hostFrom(endpoint) : undefined)), seenIn });
+      }
       continue;
     }
     if (HTTP_NODE_TYPES.has(node.type)) {
@@ -161,7 +178,7 @@ function collectNodes(
     }
     if (getNodeDefinition(node.type)?.category === "Connector") {
       const host = configHost(config);
-      out.push({ ref: { kind: "connector", id: node.type, ...(host ? { host } : {}) }, seenIn });
+      out.push({ ref: networkDestinationRef("connector", node.type, host), seenIn, ...(!host && referencesSecret(config) ? { hostInSecret: true } : {}) });
     }
   }
   return out;
@@ -175,11 +192,17 @@ function collectNodes(
 export function collectConfiguredDestinations(input: CollectInput): ConfiguredDestination[] {
   const env = input.env ?? process.env;
   const out: ConfiguredDestination[] = [];
-  const registryHosts = new Map<string, string | undefined>();
+  const registryHosts = new Map<string, string | undefined | null>();
   for (const server of input.mcpServers) {
+    const seenIn = `MCP server "${server.name}"`;
+    if (server.adapterId === "mock-mcp") {
+      registryHosts.set(server.id, null);
+      out.push({ ref: { kind: "mcp_server", id: server.id }, seenIn });
+      continue;
+    }
     const host = hostFrom(record(server.connection)?.endpoint);
     registryHosts.set(server.id, host);
-    out.push({ ref: { kind: "mcp_server", id: server.id, ...(host ? { host } : {}) }, seenIn: `MCP server "${server.name}"` });
+    out.push({ ref: networkDestinationRef("mcp_server", server.id, host), seenIn });
   }
   for (const workflow of input.workflows) {
     const draft = collectNodes(workflow.nodes, (node) => `Workflow "${workflow.name}" · ${node}`, registryHosts, env);

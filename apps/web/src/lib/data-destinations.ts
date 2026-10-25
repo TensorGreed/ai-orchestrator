@@ -86,9 +86,18 @@ export function inputFromForm(form: DestinationForm): DataDestinationInput {
 }
 
 /** "Model provider openai at api.openai.com", "Web address *.corp.example". */
-export function describeMatch(entry: { kind: DestinationKind; targetId?: string | null; host?: string | null }): string {
+export function describeMatch(entry: { kind: DestinationKind; targetId?: string | null; host?: string | null; hostUnknown?: "unreadable" | "secret" }): string {
   const parts = [DESTINATION_KIND_LABELS[entry.kind]];
   if (entry.targetId) parts.push(entry.targetId);
   if (entry.host) parts.push(entry.targetId ? `at ${entry.host}` : entry.host);
+  else if (entry.hostUnknown === "secret") parts.push("(Host is set in a secret)");
+  else if (entry.hostUnknown === "unreadable") parts.push("(host not known yet)");
   return parts.join(" ");
+}
+
+/** After a save: the stored form of a host the admin typed in another alphabet or case, else null. */
+export function storedHostNotice(typed: string, stored: string | null): string | null {
+  const text = typed.trim();
+  if (!stored || !/[^\x00-\x7f]/.test(text) || text.toLowerCase() === stored) return null;
+  return `Saved. ${text} is stored as ${stored}, the spelling web addresses use.`;
 }

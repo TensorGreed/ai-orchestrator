@@ -6,6 +6,7 @@ import {
   destinationHostOfUrl,
   destinationTierExceeds,
   findUnclassifiedDestinations,
+  networkDestinationRef,
   normalizeDataDestinationInput,
   normalizeDestinationHost,
   normalizeRegion,
@@ -474,5 +475,32 @@ describe("round 2: id-only rows only remove permissions", () => {
     const wild = dataDestinationInputSchema.parse({ name: "Shop", kind: "http", host: "*.bücher.example", tier: "private" });
     expect(normalizeDataDestinationInput(wild).host).toBe("*.xn--bcher-kva.example");
     expect(dataDestinationInputSchema.safeParse({ name: "x", kind: "http", host: "bücher.example@evil.com", tier: "private" }).success).toBe(false);
+  });
+
+  it("refuses a host label that mixes alphabets, and allows one alphabet or punycode", () => {
+    const parse = (host: string) => dataDestinationInputSchema.safeParse({ name: "x", kind: "http", host, tier: "private" });
+    const bad = parse("аpi.openai.com"); // Cyrillic a, Latin pi
+    expect(bad.success).toBe(false);
+    expect(bad.success ? "" : bad.error.issues[0]!.message).toContain("mixes alphabets");
+    expect(parse("api.openаi.com").success).toBe(false);
+    expect(parse("*.аpi.example").success).toBe(false);
+    expect(parse("сбербанк.example").success).toBe(true);
+    expect(parse("bücher.example").success).toBe(true);
+    expect(parse("xn--pi-6kc.openai.com").success).toBe(true);
+    expect(parse("日本語ひらがな.example").success).toBe(true);
+  });
+});
+
+describe("unknown hosts in the not-classified list", () => {
+  it("keeps a host that was given but unreadable as unknown, and ignores id-only private rows", () => {
+    const rows = [row({ kind: "model_provider", targetId: "openai_compatible", tier: "private" })];
+    const ref = networkDestinationRef("model_provider", "openai_compatible", undefined);
+    expect(ref).toEqual({ kind: "model_provider", id: "openai_compatible", host: "" });
+    expect(resolveDestination(ref, rows).tier).toBe("public");
+    const listed = findUnclassifiedDestinations([{ ref, seenIn: "a" }, { ref, seenIn: "b", hostInSecret: false }], rows);
+    expect(listed).toHaveLength(1);
+    expect(listed[0]).toMatchObject({ targetId: "openai_compatible", hostUnknown: "unreadable", seenIn: ["a", "b"] });
+    expect(listed[0]!.host).toBeUndefined();
+    expect(listed[0]!.suggestion.host).toBeNull();
   });
 });

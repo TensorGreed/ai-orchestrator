@@ -11,7 +11,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
-import type { DataDestinationRow, UnclassifiedDestination, Workflow } from "@ai-orchestrator/shared";
+import { dataDestinationRowSchema, findUnclassifiedDestinations, resolveDestination, type DataDestinationRow, type UnclassifiedDestination, type Workflow } from "@ai-orchestrator/shared";
 import { createApp } from "./app.js";
 import { parseConfig, type AppConfig } from "./config.js";
 import { SqliteStore } from "./db/database.js";
@@ -254,7 +254,7 @@ describe("collectConfiguredDestinations", () => {
       { kind: "mcp_server", id: "reg", host: "mcp.example.com" },
       { kind: "mcp_server", host: "10.0.0.5" },
       { kind: "http", host: "news.example.com" },
-      { kind: "connector", id: "google_drive_source" }
+      { kind: "connector", id: "google_drive_source", host: "" }
     ]);
   });
 });
@@ -271,8 +271,8 @@ describe("collectConfiguredDestinations edge cases", () => {
     const nodes = flow.nodes.map((node) => (node.id === "off" ? { ...node, disabled: true } : node));
     const found = collectConfiguredDestinations({ env: {}, mcpServers: [], workflows: [{ ...flow, nodes }] });
     expect(found.map((entry) => entry.ref)).toEqual([
-      // Templated base URL: the real host is unknown, so no host (not the default api.openai.com).
-      { kind: "model_provider", id: "openai" },
+      // Templated base URL: the real host is unknown (empty, which resolves public), never the default api.openai.com.
+      { kind: "model_provider", id: "openai", host: "" },
       // The Gemini adapter always calls its default host.
       { kind: "model_provider", id: "gemini", host: "generativelanguage.googleapis.com" },
       { kind: "model_provider", id: "openai", host: "api.openai.com" }
@@ -299,8 +299,50 @@ describe("collectConfiguredDestinations edge cases", () => {
       { kind: "model_provider", id: "openai_compatible", host: "llm.company.example" },
       { kind: "model_provider", id: "anthropic", host: "gw.example" },
       { kind: "model_provider", id: "gemini", host: "generativelanguage.googleapis.com" },
-      { kind: "model_provider", id: "openai" }
+      { kind: "model_provider", id: "openai", host: "" }
     ]);
+  });
+
+  it("a networked call whose host is unknown is public even with an id-only private row, and is listed", () => {
+    const rows = [
+      dataDestinationRowSchema.parse({ id: "a", name: "oc", kind: "model_provider", targetId: "openai_compatible", tier: "private" }),
+      dataDestinationRowSchema.parse({ id: "b", name: "oa", kind: "model_provider", targetId: "openai", tier: "private" }),
+      dataDestinationRowSchema.parse({ id: "c", name: "an", kind: "model_provider", targetId: "anthropic", tier: "private" })
+    ];
+    const flow = workflow("w", "default", [
+      { id: "oc", type: "openai_compatible_chat_model", config: { baseUrl: "{{results.cfg.url}}", model: "m" } },
+      { id: "oa", type: "openai_chat_model", config: { baseUrl: "{{env.X}}/v1" } },
+      { id: "an", type: "anthropic_chat_model", config: { baseUrl: "not a url" } },
+      { id: "llm", type: "llm_call", config: { provider: { providerId: "openai_compatible", model: "m", baseUrl: "{{x}}" } } }
+    ]);
+    const configured = collectConfiguredDestinations({ env: {}, mcpServers: [], workflows: [flow] });
+    for (const entry of configured) {
+      expect(resolveDestination(entry.ref, rows).tier).toBe("public");
+    }
+    const listed = findUnclassifiedDestinations(configured, rows);
+    expect(listed.map((entry) => [entry.targetId, entry.hostUnknown])).toEqual([
+      ["anthropic", "unreadable"],
+      ["openai", "unreadable"],
+      ["openai_compatible", "unreadable"]
+    ]);
+    expect(listed.find((entry) => entry.targetId === "openai_compatible")!.seenIn).toHaveLength(2);
+  });
+
+  it("a connector whose host is only in a secret is public and listed as such, never reading the secret", () => {
+    const rows = [dataDestinationRowSchema.parse({ id: "s", name: "sql", kind: "connector", targetId: "google_drive_source", tier: "private" })];
+    const flow = workflow("w", "default", [
+      { id: "q", type: "google_drive_source", config: { secretRef: { secretId: "sec_1" }, query: "select 1" } },
+      { id: "q2", type: "google_drive_source", config: { endpoint: "{{results.x.url}}", query: "select 1" } }
+    ]);
+    const configured = collectConfiguredDestinations({ env: {}, mcpServers: [], workflows: [flow] });
+    expect(configured.map((entry) => entry.ref)).toEqual([
+      { kind: "connector", id: "google_drive_source", host: "" },
+      { kind: "connector", id: "google_drive_source", host: "" }
+    ]);
+    expect(configured.map((entry) => resolveDestination(entry.ref, rows).tier)).toEqual(["public", "public"]);
+    const listed = findUnclassifiedDestinations(configured, rows);
+    expect(listed.map((entry) => entry.hostUnknown).sort()).toEqual(["secret", "unreadable"]);
+    expect(JSON.stringify(listed)).not.toContain("sec_1");
   });
 
   it("reads the published version too, adding only what the draft does not send to", () => {

@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { BUILTIN_DESTINATIONS, dataDestinationInputSchema, type DataDestinationRow, type UnclassifiedDestination } from "@ai-orchestrator/shared";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import * as api from "../lib/api";
-import { describeMatch, EMPTY_DESTINATION_FORM, formFromBuiltIn, formFromRow, formFromSuggestion, ID_ONLY_ROW_HINT, inputFromForm } from "../lib/data-destinations";
+import { describeMatch, storedHostNotice, EMPTY_DESTINATION_FORM, formFromBuiltIn, formFromRow, formFromSuggestion, ID_ONLY_ROW_HINT, inputFromForm } from "../lib/data-destinations";
 import { destinationRuleLines } from "../lib/guard-profile-edit";
 import { DataDestinationsView } from "./DataDestinationsView";
 import { GuardProtectionFields } from "./GuardNodeConfigFields";
@@ -104,6 +104,26 @@ describe("DataDestinationsView", () => {
     const builtIn = screen.getByRole("table", { name: "Built-in destinations" });
     expect(within(builtIn).getByText("api.openai.com", { exact: false })).toBeTruthy();
     expect(within(builtIn).getAllByText("built-in").length).toBe(BUILTIN_DESTINATIONS.length);
+  });
+
+  it("lists unknown hosts plainly and shows the stored punycode form after saving a Unicode host", async () => {
+    expect(describeMatch({ kind: "connector", targetId: "sql_query", hostUnknown: "secret" })).toBe("Connector sql_query (Host is set in a secret)");
+    expect(storedHostNotice("bücher.example", "xn--bcher-kva.example")).toContain("xn--bcher-kva.example");
+    expect(storedHostNotice("api.example.com", "api.example.com")).toBeNull();
+    vi.mocked(api.fetchDataDestinations).mockResolvedValue({ destinations: [], builtIns: [], canEdit: true });
+    vi.mocked(api.fetchUnclassifiedDestinations).mockResolvedValue({
+      destinations: [{ ...pending, host: undefined, hostUnknown: "secret", targetId: "sql_query", kind: "connector" }]
+    });
+    vi.mocked(api.createDataDestination).mockResolvedValue({ destination: { ...row, host: "xn--bcher-kva.example" } });
+    const user = userEvent.setup();
+    render(<DataDestinationsView />);
+    expect(await screen.findByText("Connector sql_query (Host is set in a secret)")).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Add destination" }));
+    const form = screen.getByRole("form", { name: "Add destination" });
+    await user.type(within(form).getByLabelText("Name"), "Shop");
+    await user.type(within(form).getByLabelText("Host, wildcard or IP range"), "bücher.example");
+    await user.click(within(form).getByRole("button", { name: "Save destination" }));
+    expect(await screen.findByRole("status")).toHaveProperty("textContent", expect.stringContaining("xn--bcher-kva.example"));
   });
 
   it("lets an admin classify a pending destination in one click, with Advanced settings", async () => {

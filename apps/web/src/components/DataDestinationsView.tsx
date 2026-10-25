@@ -21,6 +21,7 @@ import {
   ID_ONLY_ROW_HINT,
   inputFromForm,
   TARGET_ID_LABEL,
+  storedHostNotice,
   type DestinationForm
 } from "../lib/data-destinations";
 
@@ -40,6 +41,7 @@ export function DataDestinationsView() {
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [editing, setEditing] = useState<Editing | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
 
   const reload = useCallback(async () => {
     try {
@@ -76,6 +78,11 @@ export function DataDestinationsView() {
         Say how far each place your workflows send data is from home. A guard profile&apos;s destination rules can then keep sensitive data in-house. Destinations do nothing until a profile has destination rules.
       </p>
       {error && <div className="settings-error">{error}</div>}
+      {notice && (
+        <p className="kb-subtle" role="status">
+          {notice}
+        </p>
+      )}
 
       <section className="kb-section" aria-labelledby="dest-classified">
         <div className="mcp-section-head">
@@ -96,8 +103,8 @@ export function DataDestinationsView() {
             onCancel={() => setEditing(null)}
             onSave={async (form) => {
               const input = inputFromForm(form);
-              if (editing.mode === "edit") await updateDataDestination(editing.id, input);
-              else await createDataDestination(input);
+              const saved = editing.mode === "edit" ? await updateDataDestination(editing.id, input) : await createDataDestination(input);
+              setNotice(storedHostNotice(form.host, saved.destination.host));
               setEditing(null);
               await reload();
             }}
@@ -166,7 +173,7 @@ export function DataDestinationsView() {
             <p className="kb-subtle">Found in your workflows and MCP servers. Nothing covers them, so they count as public.{canEdit ? "" : " Ask an admin to classify them."}</p>
             <ul className="guard-dest-pending" aria-label="Not classified yet">
               {unclassified.map((entry) => (
-                <li key={`${entry.kind}:${entry.targetId ?? ""}:${entry.host ?? ""}`}>
+                <li key={`${entry.kind}:${entry.targetId ?? ""}:${entry.host ?? ""}:${entry.hostUnknown ?? ""}`}>
                   <div>
                     <span className="mono-cell">{describeMatch(entry)}</span>
                     <span className="guard-cell-sub">Seen in {entry.seenIn.join("; ")}</span>
