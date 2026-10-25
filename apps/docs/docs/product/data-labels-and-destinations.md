@@ -131,7 +131,7 @@ A data destination is a place your workflows send data: a model provider, an MCP
 | **Approved vendor** | A provider you have a contract with. The default hosts of OpenAI, Anthropic, Google Gemini and Azure OpenAI (`*.openai.azure.com`) are vendors out of the box |
 | **Public** | Everything else, including every destination nobody has classified |
 
-Destinations do nothing on their own. They only matter once a guard profile has **destination rules** ("card numbers, IBANs and national ids may go no further than the private network"). Until then, classifying destinations changes no verdict and no run.
+Destinations do nothing on their own. They only matter once there are **destination rules** ("card numbers, IBANs and national ids may go no further than the private network"), either the deployment's own (the starter rule below) or in a guard profile. Until then, classifying destinations changes no verdict and no run.
 
 ### The Data destinations tab
 
@@ -187,11 +187,55 @@ Destination rules live in the profile document under `destinations.rules`. Each 
 }
 ```
 
-A profile without `destinations` keeps its hash and behaves exactly as before. The profile editor shows a profile's destination rules as plain sentences; change them with **Edit as JSON**.
+A profile without `destinations` keeps its hash and behaves exactly as before. The profile editor shows a profile's destination rules as plain sentences; change them with **Edit as JSON**. A profile with destination rules (or an `egress` channel) tracks labels on the runs it applies to, so rules also see the classes the data's labels carry.
 
 The data classes a rule sees are the ones found in the outgoing content plus the ones the data's labels carry. When a class is carried only by the labels (it came from somewhere sensitive but is not in the text), there is nothing to redact, mask or protect, so those actions fall back to the profile's **No protection provider** setting when that is block or require approval, and to block otherwise (a rule written to keep data in never lets it out). The verdict says it was "matched by where the data came from, not found in the text".
 
+### The starter rule
+
+Most deployments want one rule for everything. At the top of **Security → Data destinations**, an admin clicks **Add the starter rule**: "Keep sensitive data in-house" keeps card numbers, IBANs, social security and national id numbers, and credentials on this machine or your private network.
+
+It starts by **observing**: every call it would have stopped is recorded (as a shadow verdict) and goes through as before. The card says how many: "Observing: 3 requests would have been blocked this week". When the number looks right, click **Turn on enforcement**; **Back to observing** undoes it.
+
+The deployment's rules live in one stored profile, `destination-rules`, which every run applies after its own profiles (a project's enforced profile, a workflow or project override, or the built-in default). It never replaces any of them. Under **Advanced** the full rule editor lists every rule (name, data classes, provenance, the furthest tier allowed, regions, what happens otherwise and "Observe only"); **Save rules** validates them like a profile and saves a new version. Only admins add, change or turn on these rules, through this card or the profile routes, and every change is audited (`guard.destination_rules.*`). With no rules nothing is applied, as if the profile did not exist.
+
+### Where rules are checked
+
+Rules are checked at call time, just before data leaves, against the destination rows as they are when the run reads them (once per run, never a stale cache):
+
+| Call | Destination | What is checked |
+|---|---|---|
+| A model call (an LLM node, an agent's first call and every later call that carries new tool results) | The provider and the host it calls (its base URL) | The prompt |
+| An MCP call (an MCP Tool node, an agent's tool call) | The MCP server and its endpoint host | The tool arguments |
+| HTTP Request, Web Browse, and connectors that send (Slack, email, SMS, databases …) | The host the rendered URL or settings name; a connector that always calls one vendor API (Slack, GitHub, Google, Stripe …) uses that API's host | The **egress** channel: the URL path, query values, header values and body, or a connector's rendered settings. Values that come from stored secrets are never part of it |
+
+A host that cannot be read (a templated base URL, or a connector whose host is kept in a secret) is public. A redirect is checked again before it is followed, and the request is judged by its strictest hop.
+
+The classes a rule sees are the ones found in what is sent plus the ones the data's labels carry. **require_approval** pauses the run and puts the call in the approval inbox; once approved the call goes ahead. **redact** and **mask** rewrite what is sent; when a rewrite cannot be applied safely (a redirect, a connector setting that would need rendering again) the call is blocked instead.
+
+A profile can also check everything that leaves with its own detectors: give it an `egress` channel (the same shape as the other channels). The engine checks it at the same places; a Guard node never evaluates it.
+
+When a verdict stops something, the Security overview shows one plain line saying why: the rule, the limit, where the data was going and, when the class was only in the labels, "matched by where the data came from, not found in the text". A rule with no data classes or provenance covers any outgoing data and never claims something was found in the text.
+
+### In replays
+
+Replays and release gates never send anything. The check still runs, just before the replay answers the call from its recording: a call a rule blocks fails the replayed step, and one that would need approval fails with "would wait for approval" instead of pausing. Replays use the provenance recorded with the run's input.
+
+### Surrogates at run time
+
+The **Surrogate** protection provider (one-way) can be used at run time, on a Guard node's protection port or as a profile's protection provider for `protect`. It uses the deployment's own key, the same one capture masking uses, so a data-subject lookup finds a value whether it was replaced at run time or in a captured run.
+
+- **One-way.** A surrogate cannot be turned back into the value: asking to reveal one answers 400 "Surrogates are one-way; use the token vault if you need the original back".
+- **Issued surrogates are known for the rest of the run.** Each run keeps the surrogates it issued in memory (never stored). Destination rules and the egress check ignore them, and the class they replaced leaves the data's labels, so a surrogate card number can go where the real one may not. Capture masking leaves them as they are.
+- **Limit: session memory.** The issued set lives for one run. A surrogate that comes back in a later run (from session memory, for example) is not known as one and may be checked like the real value, so it can be stopped more often than needed. Fake emails always end in `@surrogate.invalid` and are recognised in any run.
+
+### Preview impact
+
+Before saving a destination, an admin can see what it would change. In the **Add destination** or **Edit destination** form, **Preview impact** replays the most recent recorded runs of the workflows that have destination rules twice, from their recordings (no model or MCP server is called, nothing is sent): once with the saved destinations and once with the form's unsaved row. It shows one plain sentence first, naming where newly blocked content was going ("Across 12 recent runs in 3 workflows: 3 newly blocked, 0 now masked, 0 no longer blocked. 3 newly blocked going to api.example.com (public)."), with counts per destination under **Details**. The row is validated like a save and never stored.
+
+Profile simulations ("Simulate on recent traffic" in the profile editor) count destination rules too, with the same per-destination counts. Previews are admin-only, run one at a time (they share the simulation slot) and are kept for 30 days.
+
 ### Limits
 
-- Destination rows are stored in SQLite. On Postgres the destination routes answer 501 in this release.
-- In this release destination rules are validated, stored and shown, but not yet applied to model, MCP or outbound calls: writing them changes no run.
+- Destination rows and the deployment's destination rules are stored in SQLite. On Postgres the destination, destination rules and preview routes answer 501 in this release.
+- A redirect chain's approved data classes are the ones every hop is approved for, so a chain can be stopped more often than a single hop would be. It never lets more through.
