@@ -31,6 +31,21 @@ describe("template references", () => {
     expect(literal.all).toBe(false);
   });
 
+  it("an escape in a bracket key string reads everything; a plain key is still read by name", () => {
+    expect(referencesInExpression("results['\\x66etch'].body").all).toBe(true);
+    expect(referencesInExpression("results['\\u0066etch'].body").all).toBe(true);
+    expect(referencesInExpression("$node('\\x66etch').body").all).toBe(true);
+    expect(referencesInExpression("results['fetch'].body")).toMatchObject({ nodes: ["fetch"], all: false });
+  });
+
+  it("a regular expression statement after the header of if, while or for reads everything; a division after other parentheses does not", () => {
+    expect(referencesInExpression("(() => { if (1) /'/.test(''); return results.fetch.body })()").all).toBe(true);
+    expect(referencesInExpression("(() => { while (0) /'/.test(''); return 1 })()").all).toBe(true);
+    expect(referencesInExpression("(() => { for (;0;) /'/; return 1 })()").all).toBe(true);
+    expect(referencesInExpression("(results.quiet.note.length) / 2 + 1")).toMatchObject({ nodes: ["quiet"], all: false });
+    expect(referencesInExpression("Math.max(1, 2) / 2 + results.a.x")).toMatchObject({ nodes: ["a"], all: false });
+  });
+
   it("any dynamic access reads everything in context", () => {
     expect(referencesInExpression("results[key].text").all).toBe(true);
     expect(referencesInExpression("results[`${prefix}a`]").all).toBe(true);

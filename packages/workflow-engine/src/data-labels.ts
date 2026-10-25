@@ -97,6 +97,9 @@ const STRING_LITERAL = /(["'])((?:\\.|(?!\1)[^\\\r\n])*)\1|`((?:\\.|[^\\`])*)`/g
 
 function literalValue(source: string): string | undefined {
   const trimmed = source.trim();
+  // An escape (`\x66`, `\u0066`, `\n`) changes the name the engine looks up: not decoded here, so the key is dynamic
+  // and the access reads every node (fail closed).
+  if (trimmed.includes("\\")) return undefined;
   const quoted = /^(["'])((?:\\.|(?!\1)[^\\])*)\1$/.exec(trimmed);
   if (quoted) return quoted[2]!.replace(/\\(.)/g, "$1");
   const template = /^`((?:\\.|[^\\`$]|\$(?!\{))*)`$/.exec(trimmed);
@@ -145,6 +148,9 @@ const ESCAPE_KEY = /\[\s*(["'`])\s*(constructor|__proto__|prototype)\s*\1\s*\]/;
 /** Words after which a `/` starts a regular expression, not a division. */
 const REGEX_AFTER_WORDS = new Set(["return", "typeof", "instanceof", "in", "of", "new", "delete", "void", "throw", "case", "do", "else", "yield", "await"]);
 
+/** Words whose parenthesised header is followed by a statement, which may be a regular expression. */
+const STATEMENT_HEADER_WORDS = new Set(["if", "while", "for", "with"]);
+
 /**
  * Phase 16 — syntax the string blanking below cannot read safely: comments
  * (`/*`, `//`), anything that could be a regular expression literal (a quote
@@ -157,8 +163,14 @@ function hasOpaqueSyntax(source: string): boolean {
   let previous = "";
   let word = "";
   let gap = false;
+  // One entry per open `(`: whether the word before it was `if`, `while`, `for` or `with`. After such a header's `)` a
+  // `/` starts a regular expression statement, not a division.
+  const parens: boolean[] = [];
+  let closedHeader = false;
   for (let index = 0; index < source.length; index += 1) {
     const char = source[index]!;
+    if (char === "(") parens.push(STATEMENT_HEADER_WORDS.has(word));
+    else if (char === ")") closedHeader = parens.pop() ?? false;
     if (char === '"' || char === "'" || char === "`") {
       for (index += 1; index < source.length && source[index] !== char; index += 1) {
         if (source[index] === "\\") index += 1;
@@ -174,7 +186,7 @@ function hasOpaqueSyntax(source: string): boolean {
     if (char === "/") {
       const next = source[index + 1];
       if (next === "*" || next === "/") return true;
-      const regexContext = previous === "" || /[(,=:[!&|?{};+\-*%<>~^]/.test(previous) || REGEX_AFTER_WORDS.has(word);
+      const regexContext = (previous === ")" && closedHeader) || previous === "" || /[(,=:[!&|?{};+\-*%<>~^]/.test(previous) || REGEX_AFTER_WORDS.has(word);
       if (regexContext) return true;
       previous = char;
       word = "";
