@@ -19,6 +19,7 @@ import path from "node:path";
 import Fastify from "fastify";
 import { afterEach, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
+import { hashGuardProfile, parseGuardProfile } from "@ai-orchestrator/guard-sdk";
 import type { EvalRunView, GuardSimulationView, ReplayRecordingSummary, Workflow } from "@ai-orchestrator/shared";
 import { createApp } from "./app.js";
 import { WorkflowVersionService } from "./services/workflow-version-service.js";
@@ -623,11 +624,23 @@ describe("guard policy simulation", () => {
     const { context, builder } = await guardedSetup();
     // Recorded and simulated against v1 (email: allow); a simulation of the same document changes nothing.
     await recordRuns(context, builder.cookie, "wf-guarded", 3, { user_prompt: "Write to someone@example.com please" });
+    // v2 (blocks email) is saved at a fixed point: after the simulation pinned its baseline to v1 and before any case is enqueued,
+    // so every case replays with v2 as the live version. Racing a PUT against the replay left the order to timing.
+    const original = context.store.getPublishedVersion.bind(context.store);
+    let savedMidStart = 0;
+    context.store.getPublishedVersion = (workflowId: string) => {
+      if (savedMidStart === 0) {
+        const v2 = parseGuardProfile(emailProfile("block"));
+        context.store.addGuardProfileVersion({ profileId: "sim-guard", name: v2.name, document: v2 as unknown as Record<string, unknown>, hash: hashGuardProfile(v2), note: "saved mid-start", createdBy: null });
+        savedMidStart = context.store.getGuardProfile("sim-guard")!.latestVersion;
+      }
+      return original(workflowId);
+    };
     const started = await call(context, "POST", "/api/guard/profiles/sim-guard/simulate", builder.cookie, { document: { ...emailProfile("allow"), name: "Renamed guard" } });
+    context.store.getPublishedVersion = original;
     expect(started.statusCode, started.body).toBe(202);
+    expect(savedMidStart).toBe(2);
     const id = started.json<{ simulation: GuardSimulationView }>().simulation.id;
-    // v2 blocks email, saved while the cases are still being replayed.
-    expect((await call(context, "PUT", "/api/guard/profiles/sim-guard", builder.cookie, { document: emailProfile("block") })).statusCode).toBe(200);
     let finished: GuardSimulationView | null = null;
     for (let attempt = 0; attempt < 600; attempt += 1) {
       finished = (await call(context, "GET", `/api/guard/simulations/${id}`, builder.cookie)).json<{ simulation: GuardSimulationView }>().simulation;
@@ -636,6 +649,8 @@ describe("guard policy simulation", () => {
     }
     expect(finished).toMatchObject({ status: "completed", baseVersion: 1 });
     expect(finished!.summary).toMatchObject({ runs: 3, runsNewlyBlocked: 0, runsNoLongerBlocked: 0, runsUnchanged: 3 });
+    // The live profile really is v2 now: without the pin the same document would have read as loosening v2.
+    expect(context.store.getGuardProfile("sim-guard")!.latestVersion).toBe(2);
   }, 90_000);
 
   it("lists the visible simulations before applying the limit, past the newest hundred", async () => {
