@@ -72,7 +72,7 @@ describe("guard profiles across instances on one database", () => {
 
   it("a write made outside the store (a script, an older build) moves the revision too", async () => {
     const { a, b, ga } = await instances();
-    const before = a.guardProfileRevision();
+    const before = a.guardProfileRevision()!;
     expect(ga.loadProfile("default")?.name).toBeDefined();
     (b as unknown as { db: { exec(sql: string): void } }).db.exec(`UPDATE guard_profiles SET name = 'Renamed elsewhere' WHERE id = 'default'`);
     expect(a.guardProfileRevision()).toBeGreaterThan(before);
@@ -90,5 +90,40 @@ describe("guard profiles across instances on one database", () => {
     };
     expect(stackOf(ga)).toEqual(["default@1"]);
     expect(reads).toEqual([]);
+  });
+
+  it("a profile read inside a transaction that rolls back is never served later (no cache while a transaction is open)", async () => {
+    const { a, b, ga, gb } = await instances();
+    gb.createProfile({ document: strict({ name: "S1" }) }, null);
+    const before = a.guardProfileRevision()!;
+    try {
+      a.transaction(() => {
+        ga.updateProfile("strict", { document: strict({ name: "ROLLED BACK", labels: "propagated" }) }, null);
+        expect(ga.loadProfile("strict")?.name).toBe("ROLLED BACK");
+        expect(ga.mayUseLabels()).toBe(true);
+        expect(a.guardProfileRevision()).toBeUndefined();
+        throw new Error("rollback");
+      });
+    } catch {
+      /* expected */
+    }
+    expect(a.guardProfileRevision()).toBe(before);
+    // Another instance now brings the revision back to the number the rolled-back read was cached under.
+    gb.updateProfile("strict", { document: strict({ name: "S2 committed" }) }, null);
+    expect(b.guardProfileRevision()).toBe(before! + 2);
+    expect(ga.loadProfile("strict")?.name).toBe("S2 committed");
+    expect(ga.mayUseLabels()).toBe(false);
+  });
+
+  it("a missing revision row reads as no revision, so nothing is cached and changes are still seen", async () => {
+    const { a, b, ga, gb } = await instances();
+    (b as unknown as { db: { exec(sql: string): void } }).db.exec(`DELETE FROM guard_profile_revision`);
+    expect(a.guardProfileRevision()).toBeUndefined();
+    gb.createProfile({ document: strict() }, null);
+    gb.setBinding("workflow", "wf", { mode: "override", profileId: "strict" }, null);
+    expect(stackOf(ga)).toEqual(["strict@1"]);
+    gb.updateProfile("strict", { document: strict({ name: "v2", labels: "propagated" }) }, null);
+    expect(stackOf(ga)).toEqual(["strict@2"]);
+    expect(ga.mayUseLabels()).toBe(true);
   });
 });
