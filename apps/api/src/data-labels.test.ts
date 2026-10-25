@@ -299,7 +299,7 @@ describe("round 1 fixes", () => {
     expect(store.loadSessionArtifact(key)!.labels).toEqual(L(["untrusted_external"], ["email"]));
     store.saveSessionArtifact({ ...key, value: { v: 2 } });
     expect(store.loadSessionArtifact(key)).toMatchObject({ value: { v: 2 } });
-    expect(store.loadSessionArtifact(key)!.labels).toBeUndefined();
+    expect(store.loadSessionArtifact(key)!.labels).toEqual(L(["untrusted_external"], ["email"]));
     store.saveSessionArtifact({ ...key, value: { v: 3 }, labels: L(["user"]) });
     expect(store.loadSessionArtifact(key)!.labels).toEqual(L(["user"]));
   });
