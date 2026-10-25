@@ -35,8 +35,7 @@ export const PROTECTION_PROVIDERS: Array<{ value: string; label: string; needsKe
     label: "Surrogate (one-way)",
     needsKey: false,
     oneWay: true,
-    unavailable: "Surrogate needs the deployment key; until it is available this node uses your profile's fallback (block by default).",
-    help: "Swaps each value for a realistic stand-in of the same shape (an email stays an email), keyed by the deployment. One-way: the original can never be revealed; use the token vault if you need it back. Credentials and keys are still fully redacted."
+    help: "Swaps each value for a realistic stand-in of the same shape (an email stays an email), keyed by the deployment. One-way: the original can never be revealed; use the token vault if you need it back. Credentials and keys are still fully redacted. Later checks in the same run recognise the stand-ins, so destination rules do not stop them."
   }
 ];
 

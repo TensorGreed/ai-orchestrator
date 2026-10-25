@@ -1339,9 +1339,14 @@ export function createApp(
   });
   const providerRegistry = createDefaultProviderRegistry();
   // Phase 12.1 — guard profiles, bindings, events and the token vault.
+  // Phase 16 — runtime surrogates use the capture surrogate key (HKDF of the master key), so a data-subject lookup finds both.
+  const runtimeMasterKey = Buffer.from(config.SECRET_MASTER_KEY_BASE64 ?? "", "base64");
   const guardService = new GuardService(store, secretService, {
     autoApply: config.GUARD_AUTO_APPLY,
-    logger: (message, metadata) => app.log.warn(metadata ?? {}, message)
+    logger: (message, metadata) => app.log.warn(metadata ?? {}, message),
+    // Phase 16 — destination rows are read when a run first needs them (SQLite only; none on Postgres).
+    destinationRows: () => ((store as object) instanceof PostgresStore ? [] : store.listDataDestinations()),
+    ...(runtimeMasterKey.length === 32 ? { surrogateKey: deriveCaptureSurrogateKey(runtimeMasterKey) } : {})
   });
   guardService.ensureBuiltIns();
   const connectorRegistry = createDefaultConnectorRegistry();
@@ -1712,7 +1717,7 @@ export function createApp(
    * delays the run's answer.
    */
   let replayCapture: ReplayCaptureService | null = null;
-  const pendingCaptures = new Map<string, { ticket: CaptureTicket; plan: McpCassetteRunPlan; workflow: Workflow; staleAt: number }>();
+  const pendingCaptures = new Map<string, { ticket: CaptureTicket; plan: McpCassetteRunPlan; workflow: Workflow; issuedSurrogates?: ReadonlySet<string>; staleAt: number }>();
   /**
    * A ticket whose run never reached its final history write is given back
    * once the run's own timeout (at most 24 hours) plus a minute has passed
@@ -1733,7 +1738,7 @@ export function createApp(
     if (!pending) return;
     pendingCaptures.delete(executionId);
     if (!replayCapture) return;
-    replayCapture.finish(pending.ticket, { executionId, workflow: pending.workflow, plan: pending.plan });
+    replayCapture.finish(pending.ticket, { executionId, workflow: pending.workflow, plan: pending.plan, issuedSurrogates: pending.issuedSurrogates });
   };
   /** The run's final history was not stored (stopped, or the write failed): nothing is captured. */
   const dropCapture = (executionId: string, outcome: string) => {
@@ -1938,6 +1943,8 @@ export function createApp(
       }
     }
     let captureHandedOff = !captureTicket || runPlan === input.mcpPlan;
+    // Phase 16 — surrogates this run issues (in memory only); capture masking leaves them as they are.
+    const runIssuedSurrogates = new Set<string>();
     const controller = input.executionId
       ? registerActiveExecution({
           executionId: input.executionId,
@@ -2023,12 +2030,14 @@ export function createApp(
           // workflow's project and the shared knowledge bases.
           knowledgeBaseStore: replayKnowledgeBaseStore(input.replay?.sandbox, scoped.knowledgeBaseStore),
           guard: guardService.runtimeFor({
+            issuedSurrogates: runIssuedSurrogates,
             executionId: input.executionId,
             workflowId: mergedWorkflow.id,
             projectId: mergedWorkflow.projectId ?? "default",
             ...(input.guardProfileOverride ? { profileOverride: input.guardProfileOverride } : {}),
             ...(input.guardSimulation?.substitute ? { profileSubstitute: input.guardSimulation.substitute } : {}),
-            ...(input.guardSimulation ? { simulation: { sink: input.guardSimulation.sink, vault: input.guardSimulation.vault } } : {})
+            ...(input.guardSimulation ? { simulation: { sink: input.guardSimulation.sink, vault: input.guardSimulation.vault } } : {}),
+            ...(input.guardSimulation?.destinationRows ? { destinationRows: input.guardSimulation.destinationRows } : {})
           }),
           replayNodeHook: input.replay?.hook,
           loadMcpToolPolicy,
@@ -2182,7 +2191,7 @@ export function createApp(
           pendingCaptures.delete(oldestId);
           replayCapture?.abandon(oldest.ticket, "skipped_backlog");
         }
-        pendingCaptures.set(input.executionId, { ticket: captureTicket, plan: runPlan, workflow: input.workflow, staleAt: Date.now() + executionTimeoutMs + 60_000 });
+        pendingCaptures.set(input.executionId, { ticket: captureTicket, plan: runPlan, workflow: input.workflow, issuedSurrogates: runIssuedSurrogates, staleAt: Date.now() + executionTimeoutMs + 60_000 });
         captureHandedOff = true;
       }
 
@@ -11838,16 +11847,27 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     gateCasesRemoval: (user, workflowId, target) => releaseService.gateCasesRemoval(user, workflowId, target)
   });
 
-  registerGuardRoutes({ app, store, guard: guardService, requireRole: (request, reply, roles) => requireRole(request, reply, roles), runAccess, canAccessWorkflow: (user, workflow, permission) => rbacService.canAccessWorkflow(user, workflow, permission), canInProject: (user, projectId, permission) => rbacService.can(user, projectId, permission), audit: (request, user, event) => audit(request, user, event) });
+  registerGuardRoutes({
+    app,
+    store,
+    guard: guardService,
+    requireRole: (request, reply, roles) => requireRole(request, reply, roles),
+    runAccess,
+    canAccessWorkflow: (user, workflow, permission) => rbacService.canAccessWorkflow(user, workflow, permission),
+    canInProject: (user, projectId, permission) => rbacService.can(user, projectId, permission),
+    audit: (request, user, event) => audit(request, user, event),
+    destinationRulesAvailable: !((store as object) instanceof PostgresStore)
+  });
 
   // Phase 16 — data destinations (SQLite only: Postgres answers 501).
+  const dataDestinationService = new DataDestinationService({
+    store: (store as object) instanceof PostgresStore ? null : store,
+    readableWorkflowIds: (user) => runAccess.readableWorkflowIds(user),
+    readableProjectIds: (user) => runAccess.readableProjectIds(user)
+  });
   registerDataDestinationRoutes({
     app,
-    destinations: new DataDestinationService({
-      store: (store as object) instanceof PostgresStore ? null : store,
-      readableWorkflowIds: (user) => runAccess.readableWorkflowIds(user),
-      readableProjectIds: (user) => runAccess.readableProjectIds(user)
-    }),
+    destinations: dataDestinationService,
     requireRole: (request, reply, roles) => requireRole(request, reply, roles),
     audit: (request, user, event) => audit(request, user, event)
   });
@@ -11869,6 +11889,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     app,
     store,
     simulations: guardSimulationService,
+    destinations: dataDestinationService,
     requireRole: (request, reply, roles) => requireRole(request, reply, roles),
     runAccess,
     audit: (request, user, event) => audit(request, user, event)

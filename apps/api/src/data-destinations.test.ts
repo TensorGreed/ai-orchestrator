@@ -254,7 +254,8 @@ describe("collectConfiguredDestinations", () => {
       { kind: "mcp_server", id: "reg", host: "mcp.example.com" },
       { kind: "mcp_server", host: "10.0.0.5" },
       { kind: "http", host: "news.example.com" },
-      { kind: "connector", id: "google_drive_source", host: "" }
+      // Phase 16 (p3) — a connector that always calls one vendor API is listed with that host.
+      { kind: "connector", id: "google_drive_source", host: "www.googleapis.com" }
     ]);
   });
 });
@@ -329,15 +330,15 @@ describe("collectConfiguredDestinations edge cases", () => {
   });
 
   it("a connector whose host is only in a secret is public and listed as such, never reading the secret", () => {
-    const rows = [dataDestinationRowSchema.parse({ id: "s", name: "sql", kind: "connector", targetId: "google_drive_source", tier: "private" })];
+    const rows = [dataDestinationRowSchema.parse({ id: "s", name: "sql", kind: "connector", targetId: "postgres_query", tier: "private" })];
     const flow = workflow("w", "default", [
-      { id: "q", type: "google_drive_source", config: { secretRef: { secretId: "sec_1" }, query: "select 1" } },
-      { id: "q2", type: "google_drive_source", config: { endpoint: "{{results.x.url}}", query: "select 1" } }
+      { id: "q", type: "postgres_query", config: { secretRef: { secretId: "sec_1" }, query: "select 1" } },
+      { id: "q2", type: "postgres_query", config: { endpoint: "{{results.x.url}}", query: "select 1" } }
     ]);
     const configured = collectConfiguredDestinations({ env: {}, mcpServers: [], workflows: [flow] });
     expect(configured.map((entry) => entry.ref)).toEqual([
-      { kind: "connector", id: "google_drive_source", host: "" },
-      { kind: "connector", id: "google_drive_source", host: "" }
+      { kind: "connector", id: "postgres_query", host: "" },
+      { kind: "connector", id: "postgres_query", host: "" }
     ]);
     expect(configured.map((entry) => resolveDestination(entry.ref, rows).tier)).toEqual(["public", "public"]);
     const listed = findUnclassifiedDestinations(configured, rows);

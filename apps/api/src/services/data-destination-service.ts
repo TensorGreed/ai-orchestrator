@@ -19,19 +19,22 @@ import { randomUUID } from "node:crypto";
 import {
   BUILTIN_DESTINATIONS,
   chatModelDestinationOf,
+  connectorAddressInSecret,
+  connectorDestinationRef,
   dataDestinationInputSchema,
-  destinationHostOfUrl,
+  dataDestinationRowSchema,
+  destinationHostOfSetting,
+  mcpServerDestinationRef,
   findUnclassifiedDestinations,
   networkDestinationRef,
   getNodeDefinition,
   normalizeDataDestinationInput,
-  normalizeDestinationHost,
   type ConfiguredDestination,
   type DataDestinationRow,
   type UnclassifiedDestination,
   type Workflow
 } from "@ai-orchestrator/shared";
-import { PROVIDERS_WITH_FIXED_HOST, PROVIDERS_WITHOUT_NETWORK, providerDefaultBaseUrl } from "@ai-orchestrator/provider-sdk";
+import { providerDestinationHost } from "@ai-orchestrator/provider-sdk";
 import type { DataDestinationWrite, McpServerRecord, SqliteStore } from "../db/database.js";
 import type { SafeUser } from "./auth-service.js";
 
@@ -46,8 +49,6 @@ export class DataDestinationError extends Error {
   }
 }
 
-/** Config keys that may hold the URL or host a connector talks to. */
-const URL_KEYS = ["endpoint", "url", "baseUrl", "apiUrl", "serverUrl", "webhookUrl", "accountUrl", "instanceUrl", "uri", "urlTemplate", "host"];
 /** Node types that make plain web requests: their destination is the host, not a connector type. */
 const HTTP_NODE_TYPES = new Set(["http_request", "web_browse"]);
 
@@ -55,31 +56,7 @@ function record(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined;
 }
 
-/** A host from a URL or bare host value; templated or unreadable values give nothing. */
-function hostFrom(value: unknown): string | undefined {
-  if (typeof value !== "string" || !value.trim()) return undefined;
-  const text = value.trim();
-  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(text)) return destinationHostOfUrl(text);
-  return text.includes("{{") || text.includes("/") ? undefined : normalizeDestinationHost(text);
-}
-
-/** The first host found in a config object or one level below it (credentials and secret references are skipped). */
-function configHost(config: Record<string, unknown>): string | undefined {
-  for (const key of URL_KEYS) {
-    const host = hostFrom(config[key]);
-    if (host) return host;
-  }
-  for (const [key, value] of Object.entries(config)) {
-    if (/secret|credential|password|token/i.test(key)) continue;
-    const nested = record(value);
-    if (!nested) continue;
-    for (const inner of URL_KEYS) {
-      const host = hostFrom(nested[inner]);
-      if (host) return host;
-    }
-  }
-  return undefined;
-}
+const hostFrom = destinationHostOfSetting;
 
 /** True when the config points at a stored credential (a secret reference), at the top level or one level down. */
 function referencesSecret(config: Record<string, unknown>): boolean {
@@ -103,13 +80,8 @@ function setting(value: unknown): string | undefined {
  * with `networkDestinationRef`, never into "no host".
  */
 function providerHost(providerId: string, provider: Record<string, unknown>, env: Record<string, string | undefined>): string | undefined | null {
-  if (PROVIDERS_WITHOUT_NETWORK.has(providerId)) return null;
-  if (PROVIDERS_WITH_FIXED_HOST.has(providerId)) return hostFrom(providerDefaultBaseUrl(providerId, env));
-  const configured =
-    setting(provider.baseUrl) ??
-    (providerId === "azure_openai" ? setting(record(provider.extra)?.endpoint) ?? setting(env.AZURE_OPENAI_ENDPOINT) : undefined);
-  if (configured !== undefined) return hostFrom(configured);
-  return hostFrom(providerDefaultBaseUrl(providerId, env));
+  // One mapping for the list and for call time (provider-sdk), so a call and its classification always agree.
+  return providerDestinationHost(providerId, provider, env);
 }
 
 type CollectWorkflow = Pick<Workflow, "id" | "name" | "nodes"> & {
@@ -166,8 +138,11 @@ function collectNodes(
       if (registered === null) {
         // A registry server that sends nothing over the network.
         out.push({ ref: { kind: "mcp_server", id: registryId }, seenIn });
-      } else if (registryId || endpoint) {
-        out.push({ ref: networkDestinationRef("mcp_server", registryId, registered ?? (endpoint ? hostFrom(endpoint) : undefined)), seenIn });
+      } else if (registryId) {
+        out.push({ ref: networkDestinationRef("mcp_server", registryId, registered), seenIn });
+      } else if (endpoint) {
+        const ref = mcpServerDestinationRef({ serverId: typeof config.serverId === "string" ? config.serverId : undefined, connection: config.connection });
+        if (ref) out.push({ ref, seenIn });
       }
       continue;
     }
@@ -177,8 +152,9 @@ function collectNodes(
       continue;
     }
     if (getNodeDefinition(node.type)?.category === "Connector") {
-      const host = configHost(config);
-      out.push({ ref: networkDestinationRef("connector", node.type, host), seenIn, ...(!host && referencesSecret(config) ? { hostInSecret: true } : {}) });
+      const ref = connectorDestinationRef(node.type, config);
+      if (!ref) continue;
+      out.push({ ref, seenIn, ...(!ref.host && (connectorAddressInSecret(node.type, config) || referencesSecret(config)) ? { hostInSecret: true } : {}) });
     }
   }
   return out;
@@ -200,7 +176,7 @@ export function collectConfiguredDestinations(input: CollectInput): ConfiguredDe
       out.push({ ref: { kind: "mcp_server", id: server.id }, seenIn });
       continue;
     }
-    const host = hostFrom(record(server.connection)?.endpoint);
+    const host = mcpServerDestinationRef({ adapterId: server.adapterId, registryServerId: server.id, connection: server.connection })?.host || undefined;
     registryHosts.set(server.id, host);
     out.push({ ref: networkDestinationRef("mcp_server", server.id, host), seenIn });
   }
@@ -259,6 +235,33 @@ export class DataDestinationService {
       throw new DataDestinationError(400, issues[0]?.message ?? "Invalid destination", { issues });
     }
     return normalizeDataDestinationInput(parsed.data);
+  }
+
+  /**
+   * Phase 16 — the rows a destination preview resolves with: the stored rows,
+   * with `rows` added (or replacing the stored row with the same id) and
+   * `removedIds` left out. Every row is validated like a save and never
+   * stored. Returns the stored rows too (the preview's baseline).
+   */
+  previewRows(request: { rows: Array<Record<string, unknown>>; removedIds: string[] }): { baseline: DataDestinationRow[]; candidate: DataDestinationRow[] } {
+    const baseline = this.store.listDataDestinations();
+    const removed = new Set(request.removedIds);
+    for (const id of removed) this.refuseBuiltIn(id);
+    const now = new Date().toISOString();
+    const replaced = new Map<string, DataDestinationRow>();
+    const added: DataDestinationRow[] = [];
+    request.rows.forEach((row, index) => {
+      const { id, ...input } = row as { id?: unknown } & Record<string, unknown>;
+      const write = this.parse(input);
+      const rowId = typeof id === "string" && id.trim() ? id.trim() : `preview_${index + 1}`;
+      if (typeof id === "string" && id.trim()) this.refuseBuiltIn(rowId);
+      const stored = baseline.find((entry) => entry.id === rowId);
+      const value = dataDestinationRowSchema.parse({ ...stored, ...write, id: rowId, builtIn: false, createdAt: stored?.createdAt ?? now, updatedAt: now });
+      if (stored) replaced.set(rowId, value);
+      else added.push(value);
+    });
+    const candidate = [...baseline.filter((entry) => !removed.has(entry.id)).map((entry) => replaced.get(entry.id) ?? entry), ...added];
+    return { baseline, candidate };
   }
 
   private refuseBuiltIn(id: string): void {

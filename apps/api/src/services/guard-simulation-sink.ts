@@ -18,6 +18,7 @@
 
 import { randomUUID } from "node:crypto";
 import { InMemoryTokenVaultStorage, type TokenVaultRecord, type TokenVaultStorage } from "@ai-orchestrator/guard-sdk";
+import type { DataDestinationRow, GuardDestinationSummary } from "@ai-orchestrator/shared";
 import type { GuardVerdictEvent } from "@ai-orchestrator/workflow-engine";
 import type { GuardProfileSubstitute } from "./guard-service.js";
 
@@ -49,6 +50,8 @@ export interface SimulatedGuardCheck {
   /** The combined action of the whole stack: what the traffic got. */
   action: string;
   verdicts: SimulatedGuardVerdict[];
+  /** Phase 16 — where the content was going, when a profile's destination rules were evaluated. */
+  destination?: GuardDestinationSummary;
 }
 
 /** The event rows `buildRunFacts` reads, so a simulated replay's facts still list its guard verdicts. */
@@ -89,6 +92,7 @@ export class GuardSimulationSink {
       summary.actions.length === 0
         ? [{ detectorId: null, dataClass: null, effectiveAction: summary.action, shadow: false }]
         : summary.actions.map((action) => ({ detectorId: action.detectorId, dataClass: action.dataClass ?? null, effectiveAction: action.effective, shadow: action.shadow }));
+    if (!check.destination && summary.destination) check.destination = summary.destination;
     check.verdicts.push({ profileId: event.profile.profileId, version: event.profile.version, hash: event.profile.hash, action: summary.action, findings });
     const verdictId = randomUUID();
     for (const finding of findings) {
@@ -134,4 +138,6 @@ export interface GuardSimulationRun {
   substitute: GuardProfileSubstitute | null;
   sink: GuardSimulationSink;
   vault: TokenVaultStorage;
+  /** Phase 16 — a destination preview: the rows this side resolves destinations with (unsaved rows on the candidate side). */
+  destinationRows?: DataDestinationRow[];
 }

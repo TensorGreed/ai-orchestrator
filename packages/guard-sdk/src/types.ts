@@ -1,4 +1,4 @@
-import type { McpPolicyRole, McpToolAnnotations, ProvenanceLabel } from "@ai-orchestrator/shared";
+import type { DataLabels, GuardDestinationSummary, McpPolicyRole, McpToolAnnotations, ProvenanceLabel, ResolvedDestination } from "@ai-orchestrator/shared";
 import { PROVENANCE_LABELS as SHARED_PROVENANCE_LABELS } from "@ai-orchestrator/shared";
 
 /**
@@ -118,6 +118,25 @@ export interface GuardInput {
   canaries?: string[];
   /** Redirect chain observed for an outbound request, final destination last. */
   redirectChain?: string[];
+  /**
+   * Phase 16 — where the content is going, resolved against the data
+   * destinations (`summary` names it in verdicts). A profile's destination
+   * rules are evaluated only when this is set.
+   */
+  destination?: { resolved: ResolvedDestination; summary: GuardDestinationSummary };
+  /** Phase 16 — the content's propagated labels (provenance and data classes), for destination rules. */
+  dataLabels?: DataLabels;
+  /** Phase 16 — surrogates the run issued: the destination check and the egress scan do not count them. */
+  issuedSurrogates?: ReadonlySet<string>;
+  /**
+   * Phase 16 — values the scan does not count (the run's secret values): a
+   * finding that lies entirely inside an occurrence of one is dropped, and
+   * they are replaced in findings' evidence and messages. A finding that only
+   * overlaps one (a card number containing a short secret) still counts.
+   */
+  ignoredValues?: readonly string[];
+  /** Phase 16 — evaluate the destination rules only (the channel's detectors already saw this content). */
+  destinationOnly?: boolean;
 }
 
 /** Half-open character range in the inspected text (`contentText`). */
@@ -230,6 +249,8 @@ export interface GuardVerdict {
   trace: GuardTraceEntry[];
   profile: { id: string; version: string; hash: string };
   channel: GuardChannel;
+  /** Phase 16 — where the content was going, when the profile's destination rules were evaluated. */
+  destination?: GuardDestinationSummary;
 }
 
 export class GuardError extends Error {
@@ -270,7 +291,8 @@ export function stableStringify(value: unknown): string {
 function sortKeys(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(sortKeys);
   if (value && typeof value === "object") {
-    const out: Record<string, unknown> = {};
+    // No prototype: a key named `__proto__` stays an ordinary key and is serialised.
+    const out: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
     for (const key of Object.keys(value as Record<string, unknown>).sort()) {
       const inner = (value as Record<string, unknown>)[key];
       if (inner !== undefined) out[key] = sortKeys(inner);

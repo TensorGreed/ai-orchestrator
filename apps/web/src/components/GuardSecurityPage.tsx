@@ -12,7 +12,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { GuardEventView, GuardProfileSummary, Project, WorkflowListItem } from "@ai-orchestrator/shared";
 import { ApiError, fetchGuardEvents, fetchGuardProfiles, fetchGuardStats, type GuardStats } from "../lib/api";
-import { actionLabel, channelLabel, dailySeries } from "../lib/guard-trace";
+import { actionLabel, channelLabel, dailySeries, verdictReasonLine } from "../lib/guard-trace";
 import { DataDestinationsView } from "./DataDestinationsView";
 import { GuardProfilesView } from "./GuardProfilesView";
 
@@ -266,6 +266,7 @@ function GuardOverview({ projects, workflows, onOpenRun }: { projects: Project[]
                     <td>
                       <span className={`guard-action guard-action-${event.effectiveAction}`}>{actionLabel(event.effectiveAction)}</span>
                       {event.shadow && <span className="guard-chip guard-chip-shadow">shadow</span>}
+                      {verdictReasonLine(event) && <span className="guard-cell-sub guard-reason-line">{verdictReasonLine(event)}</span>}
                     </td>
                     <td>{event.evidence[0]?.evidence ? <code className="guard-evidence">{event.evidence[0].evidence}</code> : <span className="kb-subtle">—</span>}</td>
                     <td>

@@ -109,7 +109,7 @@ export interface EvalRoutesDeps {
   gateCasesRemoval?: (user: SafeUser, workflowId: string, target: { via: "fixture"; fixtureId: string } | { via: "golden_set"; datasetId: string }) => (() => void) | null;
 }
 
-const EVAL_RUN_ERROR_STATUS: Record<EvalRunError["code"], number> = { not_found: 404, invalid: 400, limit: 409 };
+const EVAL_RUN_ERROR_STATUS: Record<EvalRunError["code"], number> = { not_found: 404, invalid: 400, limit: 409, forbidden: 403 };
 
 /** Phase 10.8 — eval runs can record their MCP calls, or replay them from cassettes. */
 const evalMcpOptionsSchema = z.object({
@@ -500,7 +500,7 @@ export function registerEvalRoutes(deps: EvalRoutesDeps): void {
         return { ok: true, ...result };
       } catch (error) {
         if (error instanceof EvalRunError) {
-          reply.code(400);
+          reply.code(error.code === "forbidden" ? 403 : 400);
           return { error: error.message, code: error.code };
         }
         throw error;

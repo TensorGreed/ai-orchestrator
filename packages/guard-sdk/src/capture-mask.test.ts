@@ -151,6 +151,22 @@ describe("maskRecording", () => {
     expect(report.keptFromWorkflow).toBe(1);
   });
 
+  it("keeps the surrogates the run issued as they are (Phase 16), still masking the originals to the same surrogate", () => {
+    const issued = surrogateFor(CARD, "card_number", key);
+    const { parts: masked } = maskRecording(
+      [
+        { id: "input", value: `Card ${CARD}` },
+        { id: "tape:1", value: `Model saw ${issued}` }
+      ],
+      { key, keepValues: [issued] }
+    );
+    expect(masked[0]!.value).toBe(`Card ${issued}`);
+    expect(masked[1]!.value).toBe(`Model saw ${issued}`);
+    // Without keepValues the issued surrogate would be masked again.
+    const { parts: again } = maskRecording([{ id: "tape:1", value: `Model saw ${issued}` }], { key });
+    expect(again[0]!.value).not.toBe(`Model saw ${issued}`);
+  });
+
   it("leaves content without findings untouched", () => {
     const value = { a: 1, b: ["plain", true, null], c: { d: "no data here" } };
     const { parts: masked, report } = maskRecording([{ id: "x", value }], { key });

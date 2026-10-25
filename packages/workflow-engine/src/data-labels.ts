@@ -1,5 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import { scanDlp, type GuardDictionary } from "@ai-orchestrator/guard-sdk";
+import { dropIssuedSurrogates, scanDlp, type GuardDictionary } from "@ai-orchestrator/guard-sdk";
 import {
   emptyDataLabels,
   isEmptyDataLabels,
@@ -317,7 +317,7 @@ export const LABEL_SCAN_MAX_CHARS = 256 * 1024;
  * and the profiles' dictionaries (no capture-only detectors). Top-level
  * `_`-prefixed trace fields (telemetry, guard verdicts) are skipped.
  */
-export function createLabelScanner(dictionaries: readonly GuardDictionary[]): (value: unknown) => string[] {
+export function createLabelScanner(dictionaries: readonly GuardDictionary[], issuedSurrogates?: ReadonlySet<string>): (value: unknown) => string[] {
   return (value: unknown) => {
     const parts: string[] = [];
     let size = 0;
@@ -350,7 +350,10 @@ export function createLabelScanner(dictionaries: readonly GuardDictionary[]): (v
     };
     visit(value, 0, true);
     if (parts.length === 0) return [];
-    const matches = scanDlp(parts.join("\n"), { dictionaries: [...dictionaries] });
+    const text = parts.join("\n");
+    const found = scanDlp(text, { dictionaries: [...dictionaries] });
+    // Phase 16 — a surrogate the run issued (or any `@surrogate.invalid` email) stands in for a value that is gone: its class left the labels.
+    const matches = issuedSurrogates ? dropIssuedSurrogates(found, issuedSurrogates, text) : found;
     return [...new Set(matches.map((match) => String(match.dataClass)))].sort();
   };
 }

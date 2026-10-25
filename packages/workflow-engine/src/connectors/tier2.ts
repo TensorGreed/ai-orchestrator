@@ -13,7 +13,7 @@
 import crypto from "node:crypto";
 import { ErrorCategory, WorkflowError } from "@ai-orchestrator/shared";
 import type { SecretReference } from "@ai-orchestrator/shared";
-import { renderTemplate } from "../template";
+import { renderCheckedTemplate as renderTemplate } from "../template";
 
 export interface Tier2Context {
   templateData: Record<string, unknown>;
@@ -145,10 +145,12 @@ export async function executeTeamsSendMessage(
   ctx: Tier2Context
 ): Promise<unknown> {
   const NODE = "teams_send_message";
-  let webhookUrl = getString(config, "webhookUrl").trim();
-  if (!webhookUrl) {
+  // The setting is rendered as written (the text the outbound check rendered), then trimmed.
+  const configured = getString(config, "webhookUrl");
+  let webhookUrl = configured.trim() ? renderTemplate(configured, ctx.templateData).trim() : "";
+  if (!configured.trim()) {
     const fromSecret = await resolveSecretOptional(ctx, config);
-    if (fromSecret) webhookUrl = fromSecret.trim();
+    if (fromSecret?.trim()) webhookUrl = renderTemplate(fromSecret.trim(), ctx.templateData);
   }
   if (!webhookUrl) {
     throw new WorkflowError(
@@ -157,7 +159,6 @@ export async function executeTeamsSendMessage(
       false
     );
   }
-  webhookUrl = renderTemplate(webhookUrl, ctx.templateData);
   const text = renderTemplate(getString(config, "text"), ctx.templateData);
   const title = renderTemplate(getString(config, "title"), ctx.templateData);
   const themeColor = getString(config, "themeColor") || "0078D4";

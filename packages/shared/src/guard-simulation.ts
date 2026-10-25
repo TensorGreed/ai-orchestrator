@@ -26,6 +26,7 @@
  */
 
 import { z } from "zod";
+import { describeDestinationSummary, type GuardDestinationSummary } from "./data-destinations";
 
 /** How many recent recordings a simulation replays when the request names no limit. */
 export const GUARD_SIMULATION_DEFAULT_CASES = 50;
@@ -104,6 +105,8 @@ export interface GuardSimulationCheckpoint {
   change: GuardSimulationChange;
   /** Detectors whose action changed at this checkpoint. */
   detectors: GuardSimulationDetectorChange[];
+  /** Phase 16 — where the checked content was going (model, MCP and egress checks under destination rules). */
+  destination?: GuardDestinationSummary;
 }
 
 export type GuardSimulationCaseOutcome = "compared" | "diverged" | "not_simulated";
@@ -147,6 +150,13 @@ export interface GuardSimulationTally {
   actionChanged: number;
 }
 
+/** Phase 16 — changed checkpoints going to one destination. */
+export interface GuardSimulationDestinationTally extends GuardSimulationTally {
+  /** "api.example.com (public)" */
+  label: string;
+  tier: GuardDestinationSummary["tier"];
+}
+
 export interface GuardSimulationSummary {
   /** Recordings replayed (every case, whatever its outcome). */
   runs: number;
@@ -164,6 +174,8 @@ export interface GuardSimulationSummary {
   /** Changed detector actions per data class (findings without a data class are not listed here). */
   byDataClass: Record<string, GuardSimulationTally>;
   byDetector: Record<string, GuardSimulationTally>;
+  /** Phase 16 — changed checkpoints per destination (keyed by its label); absent when no checkpoint had one. */
+  byDestination?: Record<string, GuardSimulationDestinationTally>;
   /** One plain sentence for the summary card. */
   sentence: string;
 }
@@ -207,6 +219,13 @@ export function guardSimulationSentence(summary: Omit<GuardSimulationSummary, "s
   if (summary.runs === 0) return "No recent recorded runs to simulate.";
   const head = `Across ${plural(summary.runs, "recent run", "recent runs")} in ${plural(summary.workflows, "workflow", "workflows")}: ${summary.runsNewlyBlocked} newly blocked, ${summary.runsNowMasked} now masked, ${summary.runsNoLongerBlocked} no longer blocked.`;
   const extra: string[] = [];
+  // Phase 16 — name where newly blocked content was going (at most three destinations, most first).
+  const going = Object.values(summary.byDestination ?? {})
+    .filter((entry) => entry.newlyBlocked > 0)
+    .sort((a, b) => b.newlyBlocked - a.newlyBlocked || a.label.localeCompare(b.label))
+    .slice(0, 3)
+    .map((entry) => `${entry.newlyBlocked} newly blocked going to ${entry.label}`);
+  if (going.length > 0) extra.push(going.join(", "));
   if (summary.diverged > 0) extra.push(`${plural(summary.diverged, "run", "runs")} diverged after the guard change`);
   if (summary.notSimulated > 0) extra.push(`${plural(summary.notSimulated, "run", "runs")} could not be simulated`);
   return extra.length > 0 ? `${head} ${extra.join("; ")}.` : head;
@@ -217,6 +236,7 @@ export function summariseGuardSimulation(workflows: readonly GuardSimulationWork
   const checkpoints = emptyGuardSimulationCounts();
   const byDataClass: Record<string, GuardSimulationTally> = {};
   const byDetector: Record<string, GuardSimulationTally> = {};
+  const byDestination: Record<string, GuardSimulationDestinationTally> = {};
   const tally = (map: Record<string, GuardSimulationTally>, key: string, change: GuardSimulationDetectorChange["change"]) => {
     const entry = (map[key] ??= { newlyBlocked: 0, noLongerBlocked: 0, actionChanged: 0 });
     if (change === "newly_blocked") entry.newlyBlocked += 1;
@@ -246,6 +266,13 @@ export function summariseGuardSimulation(workflows: readonly GuardSimulationWork
       if (changed) runsChanged += 1;
       else if (entry.outcome === "compared") runsUnchanged += 1;
       for (const checkpoint of entry.checkpoints) {
+        if (checkpoint.destination && checkpoint.change !== "unchanged") {
+          const label = describeDestinationSummary(checkpoint.destination);
+          const tallyEntry = (byDestination[label] ??= { newlyBlocked: 0, noLongerBlocked: 0, actionChanged: 0, label, tier: checkpoint.destination.tier });
+          if (checkpoint.change === "newly_blocked") tallyEntry.newlyBlocked += 1;
+          else if (checkpoint.change === "no_longer_blocked") tallyEntry.noLongerBlocked += 1;
+          else tallyEntry.actionChanged += 1;
+        }
         for (const detector of checkpoint.detectors) {
           tally(byDetector, detector.detectorId, detector.change);
           if (detector.dataClass) tally(byDataClass, detector.dataClass, detector.change);
@@ -266,7 +293,8 @@ export function summariseGuardSimulation(workflows: readonly GuardSimulationWork
     runsUnchanged,
     checkpoints,
     byDataClass,
-    byDetector
+    byDetector,
+    ...(Object.keys(byDestination).length > 0 ? { byDestination } : {})
   };
   return { ...summary, sentence: guardSimulationSentence(summary) };
 }

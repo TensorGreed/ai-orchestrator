@@ -34,12 +34,16 @@
  * pruned after GUARD_SIMULATION_RETENTION_DAYS.
  */
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { parseGuardProfile, profileHasDestinationRules } from "@ai-orchestrator/guard-sdk";
 import {
+  DESTINATION_PREVIEW_SIMULATION_PROFILE,
   GUARD_BUILTIN_PROFILE_ID,
+  GUARD_DESTINATION_RULES_PROFILE_ID,
   GUARD_EFFECTIVE_PROFILE_REF,
   GUARD_SIMULATION_DEFAULT_CASES,
   summariseGuardSimulation,
+  type DataDestinationRow,
   type GuardSimulationCase,
   type GuardSimulationRequest,
   type GuardSimulationView,
@@ -50,7 +54,7 @@ import type { GuardSimulationRecord, SqliteStore } from "../db/database.js";
 import type { RunAccess } from "../run-access.js";
 import type { SafeUser } from "./auth-service.js";
 import type { EvalService } from "./eval-service.js";
-import type { GuardService } from "./guard-service.js";
+import type { GuardProfileSubstitute, GuardService } from "./guard-service.js";
 import { simulateCase } from "./guard-simulation-diff.js";
 import { GuardSimulationVault } from "./guard-simulation-sink.js";
 
@@ -111,6 +115,11 @@ export class GuardSimulationService {
    */
   editorDenial(user: SafeUser, profileId: string): { status: 403 | 404; error: string } | null {
     const { store } = this.options;
+    // Phase 16 — destination previews and the deployment's destination rules are admin-only.
+    if (profileId === DESTINATION_PREVIEW_SIMULATION_PROFILE) return user.role === "admin" ? null : { status: 403, error: "Only admins can preview destination changes" };
+    if (profileId === GUARD_DESTINATION_RULES_PROFILE_ID && user.role !== "admin" && store.getGuardProfile(profileId)) {
+      return { status: 403, error: "The deployment's destination rules apply to every workflow; only an admin can simulate changes to them" };
+    }
     const profile = store.getGuardProfile(profileId);
     if (!profile) return { status: 404, error: "Guard profile not found" };
     if (user.role === "admin") return null;
@@ -199,6 +208,141 @@ export class GuardSimulationService {
     } finally {
       this.starting = false;
     }
+  }
+
+  /**
+   * Phase 16 — "Preview impact" on the Destinations tab: what the
+   * destination rules in force would do with the admin's unsaved destination
+   * rows, on recent recorded traffic of the workflows whose profiles have
+   * destination rules. Both sides run the same profiles; the baseline
+   * resolves destinations with the stored rows (as they were at the start),
+   * the candidate with the unsaved ones (validated, never stored). Admin
+   * only; one simulation at a time (shared with profile simulations).
+   */
+  async startDestinationPreview(rows: { baseline: DataDestinationRow[]; candidate: DataDestinationRow[] }, request: { limit?: number }, actor: SafeUser): Promise<GuardSimulationView> {
+    const { store, guard } = this.options;
+    this.assertIdle();
+    this.starting = true;
+    try {
+      const limit = Math.min(request.limit ?? GUARD_SIMULATION_DEFAULT_CASES, this.options.maxCases);
+      const scope = await this.workflowsWithDestinationRules(actor);
+      const byWorkflow = this.recentRecordings(scope.map((workflow) => workflow.id), limit);
+      this.assertIdle(true);
+      const id = `gsim_${randomUUID()}`;
+      const workflows: StoredDetail["workflows"] = scope
+        .filter((workflow) => byWorkflow.has(workflow.id))
+        .map((workflow) => ({ workflowId: workflow.id, workflowName: workflow.name, projectId: workflow.projectId ?? null, jobId: null, cases: [], recordingIds: byWorkflow.get(workflow.id)! }));
+      const recordings = [...byWorkflow.values()].reduce((sum, ids) => sum + ids.length, 0);
+      const emptyReason =
+        scope.length === 0
+          ? "No workflow has destination rules yet: add the starter rule on the Security page, or add rules to a guard profile."
+          : recordings === 0
+            ? "None of the workflows with destination rules has a recorded run yet. Save runs as golden runs (or capture production runs) to preview on them."
+            : null;
+      // The unsaved rows' fingerprint stands in for a profile hash; the rows themselves are never stored.
+      const hash = createHash("sha256").update(JSON.stringify(rows.candidate.map(({ createdAt: _c, updatedAt: _u, ...row }) => row))).digest("hex");
+      store.insertGuardSimulation({
+        id,
+        profileId: DESTINATION_PREVIEW_SIMULATION_PROFILE,
+        sourceKind: "inline",
+        sourceVersion: null,
+        simulatedHash: hash,
+        baseVersion: null,
+        jobIds: [],
+        detail: { workflows, emptyReason } as unknown as Record<string, unknown>,
+        status: workflows.length === 0 ? "completed" : "running",
+        createdAt: this.now(),
+        createdBy: actor.email,
+        createdByUserId: actor.id,
+        ...(workflows.length === 0 ? { finishedAt: this.now() } : {})
+      });
+      if (workflows.length === 0) return this.view(store.getGuardSimulation(id)!, actor, true);
+
+      const vault = new GuardSimulationVault(guard.vault);
+      // No profile is swapped: the substitute names no profile a run uses.
+      const substitute: GuardProfileSubstitute = {
+        profileId: DESTINATION_PREVIEW_SIMULATION_PROFILE,
+        version: 0,
+        hash,
+        name: "Destination preview",
+        profile: parseGuardProfile({ id: DESTINATION_PREVIEW_SIMULATION_PROFILE, name: "Destination preview", version: "1" }),
+        inline: true
+      };
+      const canRun = (current: SafeUser) => (current.role === "admin" ? null : "Only admins can preview destination changes");
+      const jobIds: string[] = [];
+      for (const workflow of workflows) {
+        try {
+          const published = store.getPublishedVersion(workflow.workflowId);
+          const job = this.options.evals.enqueueSimulationJob(
+            {
+              simulationId: id,
+              workflowId: workflow.workflowId,
+              recordingIds: workflow.recordingIds!,
+              substitute,
+              baseSubstitute: null,
+              vault,
+              canRun,
+              profileChanged: true,
+              destinationRows: rows,
+              ...(published !== null ? { version: published } : {})
+            },
+            actor
+          );
+          workflow.jobId = job.id;
+          jobIds.push(job.id);
+        } catch (error) {
+          workflow.error = this.scrub(`The replay job could not start: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+      const allFailed = jobIds.length === 0;
+      store.updateGuardSimulation({
+        id,
+        jobIds,
+        detail: { workflows, emptyReason } as unknown as Record<string, unknown>,
+        ...(allFailed ? { status: "failed", error: "No replay job could start.", finishedAt: this.now() } : {})
+      });
+      if (!allFailed) this.track(id, jobIds);
+      return this.view(store.getGuardSimulation(id)!, actor, true);
+    } finally {
+      this.starting = false;
+    }
+  }
+
+  /** Workflows `actor` can read whose resolved profiles (or guard nodes' profiles) have destination rules. */
+  async workflowsWithDestinationRules(actor: SafeUser): Promise<Workflow[]> {
+    const { store, guard, runAccess } = this.options;
+    const readable = runAccess.readableWorkflowIds(actor);
+    const ids = readable ?? store.listWorkflows().map((workflow) => workflow.id);
+    const batch = Math.max(1, this.options.scanBatch ?? 25);
+    const named = new Map<string, boolean>();
+    const hasRules = (profileId: string) => {
+      if (!named.has(profileId)) {
+        const loaded = guard.loadProfile(profileId);
+        named.set(profileId, Boolean(loaded && profileHasDestinationRules(loaded.profile)));
+      }
+      return named.get(profileId)!;
+    };
+    const out: Workflow[] = [];
+    for (const [index, workflowId] of ids.entries()) {
+      if (index > 0 && index % batch === 0) await yieldToLoop();
+      const workflow = store.getWorkflow(workflowId);
+      if (!workflow) continue;
+      let uses = false;
+      try {
+        uses = guard.resolveRun({ workflowId: workflow.id, projectId: workflow.projectId ?? null }).stack.some((entry) => profileHasDestinationRules(entry.profile));
+      } catch {
+        uses = false;
+      }
+      if (!uses) {
+        uses = workflow.nodes.some((node) => {
+          if (node.type !== "guard" || node.disabled === true) return false;
+          const profileId = (node.config as { profileId?: unknown } | undefined)?.profileId;
+          return typeof profileId === "string" && profileId !== "" && hasRules(profileId);
+        });
+      }
+      if (uses) out.push(workflow);
+    }
+    return out;
   }
 
   /** Throws GuardSimulationBusyError when a simulation is starting in this process or running anywhere. */

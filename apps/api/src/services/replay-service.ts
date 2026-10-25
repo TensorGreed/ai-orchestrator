@@ -88,7 +88,7 @@ import type { GuardSimulationRun } from "./guard-simulation-sink.js";
 export class ReplayRunError extends Error {
   constructor(
     message: string,
-    readonly code: "not_found" | "invalid"
+    readonly code: "not_found" | "invalid" | "forbidden"
   ) {
     super(message);
     this.name = "ReplayRunError";
@@ -181,7 +181,7 @@ export interface ReplayServiceOptions {
   resolveGuardProfile?: (
     override: { profileId: string; version?: number },
     context: { workflowId: string; projectId: string | null; actor: SafeUser | null }
-  ) => { ok: true; profile: { profileId: string; version: number; hash: string } } | { ok: false; problem: string };
+  ) => { ok: true; profile: { profileId: string; version: number; hash: string } } | { ok: false; problem: string; forbidden?: boolean };
 }
 
 function durationOf(result: ReplayExecutionResult): number | null {
@@ -234,7 +234,7 @@ export class ReplayService {
     if (overrides?.guardProfile) {
       if (!this.options.resolveGuardProfile) throw new ReplayRunError("Guard profile overrides are not available on this server.", "invalid");
       const resolved = this.options.resolveGuardProfile(overrides.guardProfile, { workflowId, projectId: workflow.projectId ?? null, actor: context.actor ?? null });
-      if (!resolved.ok) throw new ReplayRunError(resolved.problem, "invalid");
+      if (!resolved.ok) throw new ReplayRunError(resolved.problem, resolved.forbidden ? "forbidden" : "invalid");
       guardProfile = resolved.profile;
       overrides = { ...overrides, guardProfile: { profileId: resolved.profile.profileId, version: resolved.profile.version } };
     }

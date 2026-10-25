@@ -227,3 +227,20 @@ describe("guard trace", () => {
     expect(series[2]!.blocked).toBe(2);
   });
 });
+
+describe("verdictReasonLine (Phase 16)", () => {
+  const base = { shadow: false, category: "pii", dataClass: "card_number", channel: "egress" as const, evidence: [] };
+  it("a destination rule gives its own reason; shadow says would have", async () => {
+    const { verdictReasonLine } = await import("./guard-trace");
+    const message = 'Rule "Keep sensitive data in-house": Data of class card_number may go no further than private network; this destination is api.example.com (public)';
+    const event = { ...base, effectiveAction: "block" as const, detectorId: "<destinations>", evidence: [{ detectorId: "<destinations>", category: "destination", score: 1, evidence: "", spans: [], message }] };
+    expect(verdictReasonLine(event)).toBe(`Blocked: ${message}.`);
+    expect(verdictReasonLine({ ...event, shadow: true })).toBe(`Would have been blocked: ${message}.`);
+  });
+  it("other findings say what was found where; allowed and rewritten verdicts have none", async () => {
+    const { verdictReasonLine } = await import("./guard-trace");
+    expect(verdictReasonLine({ ...base, effectiveAction: "require_approval", detectorId: "dlp.patterns" })).toBe("Held for approval: card number found in the outbound (egress).");
+    expect(verdictReasonLine({ ...base, effectiveAction: "redact", detectorId: "dlp.patterns" })).toBeNull();
+    expect(verdictReasonLine({ ...base, effectiveAction: "block", detectorId: null })).toBeNull();
+  });
+});

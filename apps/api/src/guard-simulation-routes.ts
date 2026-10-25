@@ -18,22 +18,32 @@
  * with the running simulation's id (without one while another start is
  * still being set up).
  *
+ * Phase 16 — destination previews ("Preview impact" on the Destinations tab):
+ *
+ *   POST /api/data-destinations/preview          start one: { rows, removedIds } (unsaved, never stored); 202
+ *   GET  /api/data-destinations/previews         recent previews (summaries)
+ *
+ * Admin only; read, cancel and the one-at-a-time rule through the routes above.
+ *
  * SQLite only in this release: on Postgres every route answers 501.
  */
 
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
-import { guardSimulationRequestSchema } from "@ai-orchestrator/shared";
+import { DESTINATION_PREVIEW_SIMULATION_PROFILE, destinationPreviewRequestSchema, guardSimulationRequestSchema } from "@ai-orchestrator/shared";
 import type { SqliteStore } from "./db/database.js";
 import type { RunAccess } from "./run-access.js";
 import type { SafeUser, UserRole } from "./services/auth-service.js";
 import type { AuditEventInput } from "./services/audit-service.js";
 import { GuardNotFoundError, GuardValidationError } from "./services/guard-service.js";
+import { DataDestinationError, type DataDestinationService } from "./services/data-destination-service.js";
 import { GuardSimulationBusyError, type GuardSimulationService } from "./services/guard-simulation-service.js";
 
 export interface GuardSimulationRoutesDeps {
   app: FastifyInstance;
   store: SqliteStore;
   simulations: GuardSimulationService | null;
+  /** Phase 16 — builds a destination preview's rows (validated, never stored). */
+  destinations?: DataDestinationService;
   requireRole: (request: FastifyRequest, reply: FastifyReply, roles: UserRole[]) => Promise<SafeUser | null>;
   runAccess: RunAccess;
   audit: (request: FastifyRequest, user: SafeUser, event: Omit<AuditEventInput, "actor">) => void;
@@ -103,6 +113,53 @@ export function registerGuardSimulationRoutes(deps: GuardSimulationRoutesDeps): 
       }
       throw error;
     }
+  });
+
+  app.post<{ Body: unknown; Querystring: { wait?: string } }>("/api/data-destinations/preview", async (request, reply) => {
+    const user = await requireRole(request, reply, ["admin"]);
+    if (!user) return reply;
+    if (!simulations || !deps.destinations?.available) return unavailable(reply);
+    const parsed = destinationPreviewRequestSchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      reply.code(400);
+      return { error: parsed.error.issues[0]?.message ?? "Invalid preview request", issues: parsed.error.issues.map((issue) => ({ path: issue.path.map(String).join(".") || "(root)", message: issue.message })) };
+    }
+    try {
+      const rows = deps.destinations.previewRows({ rows: parsed.data.rows as Array<Record<string, unknown>>, removedIds: parsed.data.removedIds });
+      let simulation = await simulations.startDestinationPreview(rows, { ...(parsed.data.limit !== undefined ? { limit: parsed.data.limit } : {}) }, user);
+      deps.audit(request, user, {
+        eventType: "guard.destination_preview.started",
+        category: "system",
+        action: "execute",
+        resourceType: "data_destination",
+        resourceId: simulation.id,
+        metadata: { simulationId: simulation.id, rows: parsed.data.rows.length, removed: parsed.data.removedIds.length, jobIds: simulation.jobIds, workflows: simulation.workflows?.length ?? 0 }
+      });
+      if (request.query.wait === "true") {
+        await simulations.wait(simulation.id);
+        simulation = simulations.get(simulation.id, user) ?? simulation;
+      }
+      reply.code(simulation.status === "running" ? 202 : 200);
+      return { simulation };
+    } catch (error) {
+      if (error instanceof DataDestinationError) {
+        reply.code(error.statusCode);
+        return { error: error.message, ...(error.details ?? {}) };
+      }
+      if (error instanceof GuardSimulationBusyError) {
+        reply.code(409);
+        return { error: error.message, ...(error.simulationId !== "starting" ? { simulationId: error.simulationId } : {}) };
+      }
+      throw error;
+    }
+  });
+
+  app.get<{ Querystring: { limit?: string } }>("/api/data-destinations/previews", async (request, reply) => {
+    const user = await requireRole(request, reply, ["admin"]);
+    if (!user) return reply;
+    if (!simulations) return unavailable(reply);
+    const limit = Number(request.query.limit);
+    return { simulations: simulations.list(DESTINATION_PREVIEW_SIMULATION_PROFILE, user, Number.isFinite(limit) ? limit : 5) };
   });
 
   app.get<{ Params: { id: string }; Querystring: { limit?: string } }>("/api/guard/profiles/:id/simulations", async (request, reply) => {

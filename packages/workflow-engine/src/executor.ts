@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { AgentRuntimeAdapter, AgentSessionMemoryStore, AgentSessionToolDataStore } from "@ai-orchestrator/agent-runtime";
-import type { ConnectorRegistry } from "@ai-orchestrator/connector-sdk";
+import { azureStorageEndpointFor, type ConnectorRegistry } from "@ai-orchestrator/connector-sdk";
 import {
   classifyMcpTool,
   evaluateMcpToolAccess,
@@ -16,7 +16,21 @@ import {
   withDelegatedUser
 } from "@ai-orchestrator/mcp-sdk";
 import type { ProviderExecutionContext, ProviderRegistry, ResilientFetchRetryInfo } from "@ai-orchestrator/provider-sdk";
-import { GUARD_EFFECTIVE_PROFILE_REF, NODE_ACTIVITY_LIMIT, NODE_ACTIVITY_PREVIEW_CHARS, inputProvenance, nodeContentSource, withoutDataClasses } from "@ai-orchestrator/shared";
+import { providerDestinationRef } from "@ai-orchestrator/provider-sdk";
+import {
+  GUARD_EFFECTIVE_PROFILE_REF,
+  NODE_ACTIVITY_LIMIT,
+  NODE_ACTIVITY_PREVIEW_CHARS,
+  azureStorageSecretAddressConfig,
+  connectorAddressInSecret,
+  destinationHostOfSetting,
+  inputProvenance,
+  mcpServerDestinationRef,
+  networkDestinationRef,
+  nodeContentSource,
+  withoutDataClasses,
+  type DestinationRef
+} from "@ai-orchestrator/shared";
 import type {
   DataLabels,
   ApprovalDecisionValue,
@@ -87,9 +101,10 @@ import {
   playwrightOutboundGuard,
   playwrightWebSocketGuard,
   OutboundUrlBlockedError,
+  type EgressUrlJudge,
   type OutboundGuardConfig
 } from "./outbound-url-guard";
-import { renderTemplate, tryParseJson } from "./template";
+import { bindCheckedRenderings, renderTemplate, tryParseJson } from "./template";
 import {
   createMcpElicitationHandler,
   createMcpSamplingHandler,
@@ -99,6 +114,7 @@ import {
   serverPromptTrace,
   type McpElicitationHandlerOptions,
   type McpPolicyEvaluator,
+  type McpSamplingCheck,
   type McpSamplingHandler,
   type ServerPromptTrace
 } from "./mcp-client-features";
@@ -123,10 +139,26 @@ import {
 } from "./approval-gate-node";
 import type { ReplayNodeHook, ReplayNodeStub } from "./replay-plan";
 import {
+  checkEgressRequest,
+  checkOutbound,
+  describeEgressRequest,
+  describeMcpPromptRequest,
+  describeMcpToolRequest,
+  httpDestinationRef,
+  isEgressNodeType,
+  outboundProfilesFor,
+  secretReferencesIn,
+  urlContent,
+  type EgressOverride,
+  type EgressRequest,
+  type OutboundCheckInput
+} from "./destination-guard";
+import {
   builtInGuardProfile,
   createAgentGuardSession,
   GuardBlockedError,
   isGuardBlockedError,
+  issuedSurrogatesOf,
   resolveGuardRun,
   type AgentGuardSession,
   type GuardEvalScope,
@@ -480,6 +512,8 @@ interface NodeMcpContextOptions {
   /** Servers the node talks to, for their sampling settings. */
   serverConfigs: MCPServerConfig[];
   evaluatePolicy?: McpPolicyEvaluator;
+  /** Phase 16 — destination rules on sampling requests. */
+  checkSampling?: McpSamplingCheck;
 }
 
 interface NodeMcpContext {
@@ -596,6 +630,7 @@ function createNodeMcpContext(
     ...(options.provider ? { provider: options.provider } : {}),
     serverConfigs: options.serverConfigs,
     ...(options.evaluatePolicy ? { evaluatePolicy: options.evaluatePolicy } : {}),
+    ...(options.checkSampling ? { checkModelCall: options.checkSampling } : {}),
     trace: sampling,
     ...(dependencies.abortSignal ? { signal: dependencies.abortSignal } : {}),
     nodeId
@@ -2068,6 +2103,8 @@ async function createHtmlPdfBuffer(input: {
   timeoutMs: number;
   outboundGuard: OutboundGuardConfig;
   resolver?: (hostname: string) => Promise<string[]>;
+  /** Phase 16 — judges each URL the HTML loads against the destination rules. */
+  judge?: EgressUrlJudge;
 }): Promise<Buffer> {
   type PlaywrightModule = typeof import("playwright");
   let playwright: PlaywrightModule;
@@ -2090,9 +2127,9 @@ async function createHtmlPdfBuffer(input: {
     const page = await browser.newPage();
     // Every sub-resource the HTML loads (<img>, <script>, fetch) is checked; a
     // blocked one is aborted, so an injected URL cannot read internal hosts.
-    await page.route("**/*", playwrightOutboundGuard(input.outboundGuard, input.resolver));
+    await page.route("**/*", playwrightOutboundGuard(input.outboundGuard, input.resolver, input.judge));
     // WebSockets bypass page.route; they get the same check.
-    await page.routeWebSocket(/.*/, playwrightWebSocketGuard(input.outboundGuard, input.resolver));
+    await page.routeWebSocket(/.*/, playwrightWebSocketGuard(input.outboundGuard, input.resolver, input.judge));
     await page.setContent(input.html, {
       waitUntil: "networkidle",
       timeout: input.timeoutMs
@@ -2644,10 +2681,10 @@ function validateGuardrailChecks(text: string, checks: string[]): string[] {
  * the fetch is closed before the model is called.
  */
 async function applyServerPromptToLlmNode(input: {
-  nodeId: string;
+  node: WorkflowNode;
   config: Record<string, unknown>;
   templateData: Record<string, unknown>;
-  context: Pick<NodeRuntimeContext, "workflow" | "toolPolicySubject">;
+  context: NodeRuntimeContext;
   dependencies: WorkflowExecutionDependencies;
   systemPrompt: string;
   userPrompt: string;
@@ -2660,11 +2697,13 @@ async function applyServerPromptToLlmNode(input: {
     input.context.toolPolicySubject
   );
   const toolPolicy = await buildRunToolPolicy(input.context, input.dependencies);
-  const scoped = createNodeMcpContext(input.dependencies, input.nodeId, {
+  const scoped = createNodeMcpContext(input.dependencies, input.node.id, {
     serverConfigs: [serverConfig],
-    ...(toolPolicy ? { evaluatePolicy: toolPolicy.evaluate } : {})
+    ...(toolPolicy ? { evaluatePolicy: toolPolicy.evaluate } : {}),
+    // Phase 16 — a sampling request the server makes while the prompt is fetched is a model call.
+    checkSampling: samplingGuardFor(input.node, input.context, input.dependencies)
   });
-  const release = createMcpSessionReleaser(input.dependencies.mcpRegistry, scoped.context, input.nodeId);
+  const release = createMcpSessionReleaser(input.dependencies.mcpRegistry, scoped.context, input.node.id);
   try {
     const resolved = await resolveServerPrompt({
       binding,
@@ -2672,7 +2711,8 @@ async function applyServerPromptToLlmNode(input: {
       serverConfig,
       registry: input.dependencies.mcpRegistry,
       context: scoped.context,
-      ...(toolPolicy ? { evaluatePolicy: toolPolicy.evaluate } : {})
+      ...(toolPolicy ? { evaluatePolicy: toolPolicy.evaluate } : {}),
+      checkArguments: serverPromptArgumentCheck(input.node, input.context, input.dependencies, serverConfig, binding.name)
     });
     return {
       systemPrompt: resolved.target === "system" ? resolved.text : input.systemPrompt,
@@ -2684,18 +2724,131 @@ async function applyServerPromptToLlmNode(input: {
   }
 }
 
+/**
+ * Phase 16 — the arguments of a server prompt (`prompts/get`) are judged
+ * against the MCP server before they are sent, like an MCP Tool node's
+ * arguments: a block or an approval throws, a rewrite sends the rewritten
+ * arguments. Unchanged when no profile has destination rules.
+ */
+function serverPromptArgumentCheck(
+  node: WorkflowNode,
+  context: NodeRuntimeContext,
+  dependencies: WorkflowExecutionDependencies,
+  serverConfig: MCPServerConfig,
+  promptName: string
+): (args: Record<string, string>) => Promise<Record<string, string>> {
+  return async (args) => {
+    const profiles = await outboundProfilesFor(dependencies.guard, "destinations");
+    if (profiles.length === 0) return args;
+    const request = describeMcpPromptRequest(node, serverConfig, promptName, args);
+    if (!request) return args;
+    const checked = await checkEgressRequest(request, {
+      scope: guardScopeFor(node, context, dependencies, "node"),
+      profiles,
+      dataLabels: context.labelScope?.inputLabels() ?? labelsOf([]),
+      ...(context.approvedHandoffKeys ? { approvals: context.approvedHandoffKeys } : {}),
+      replay: Boolean(dependencies.replayNodeHook)
+    });
+    if (checked.declassified.length > 0) context.labelScope?.declassify(checked.declassified);
+    return checked.override.kind === "mcp_args" ? (checked.override.args as Record<string, string>) : args;
+  };
+}
+
+/**
+ * Phase 16 — destination rules on a model call made outside the agent loop
+ * (LLM nodes, the chains, Output Parser and Output Guardrail retries): the
+ * system and user prompt, judged against the provider the call goes to. A
+ * block throws; an approval pauses the run (re-run on approval); a rewrite
+ * returns the rewritten prompts. Unchanged when no profile has rules.
+ */
+async function guardModelPrompt(
+  node: WorkflowNode,
+  context: NodeRuntimeContext,
+  dependencies: WorkflowExecutionDependencies,
+  provider: LLMProviderConfig,
+  prompts: { systemPrompt: string; userPrompt: string },
+  what = "model call"
+): Promise<{ systemPrompt: string; userPrompt: string }> {
+  const profiles = await outboundProfilesFor(dependencies.guard, "destinations");
+  const ref = profiles.length > 0 ? providerDestinationRef(provider) : null;
+  if (!ref) return prompts;
+  const outcome = await checkOutbound({
+    scope: guardScopeFor(node, context, dependencies, "node"),
+    profiles,
+    channel: "prompt",
+    content: { system_prompt: prompts.systemPrompt, user_prompt: prompts.userPrompt },
+    refs: [ref],
+    dataLabels: context.labelScope?.inputLabels() ?? labelsOf([]),
+    destinationOnly: true,
+    ...(context.approvedHandoffKeys ? { approvals: context.approvedHandoffKeys } : {}),
+    replay: Boolean(dependencies.replayNodeHook),
+    what: `${node.name || node.type} (${what} to ${ref.host || ref.id || "an unknown host"})`,
+    approvalTag: ref.host || ref.id || ""
+  });
+  if (!outcome.transformed) return prompts;
+  const rewritten = toRecord(outcome.content);
+  if (typeof rewritten.system_prompt !== "string" || typeof rewritten.user_prompt !== "string") {
+    throw new GuardBlockedError(`${node.name || node.type} was blocked by the guard: the rewritten prompt could not be used`, outcome.result.verdicts);
+  }
+  context.labelScope?.declassify(outcome.declassified);
+  return { systemPrompt: rewritten.system_prompt, userPrompt: rewritten.user_prompt };
+}
+
+/**
+ * Phase 16 — destination rules on an MCP server's sampling request (a model
+ * call the server asks for), judged against the provider that answers it.
+ * A sampling request cannot wait for an approval or carry on after a block:
+ * either refuses the request (the server gets an error, nothing is sent).
+ */
+function samplingGuardFor(
+  node: WorkflowNode,
+  context: NodeRuntimeContext,
+  dependencies: WorkflowExecutionDependencies
+): McpSamplingCheck {
+  return async (provider, messages) => {
+    const profiles = await outboundProfilesFor(dependencies.guard, "destinations");
+    const ref = profiles.length > 0 ? providerDestinationRef(provider) : null;
+    if (!ref) return messages;
+    const outcome = await checkOutbound({
+      scope: guardScopeFor(node, context, dependencies, "node"),
+      profiles,
+      channel: "prompt",
+      content: messages.map((message) => message.content),
+      refs: [ref],
+      dataLabels: context.labelScope?.inputLabels() ?? labelsOf([]),
+      destinationOnly: true,
+      replay: true,
+      what: `${node.name || node.type} (an MCP sampling request to ${ref.host || ref.id || "an unknown host"})`,
+      approvalTag: ref.host || ref.id || ""
+    });
+    if (!outcome.transformed) return messages;
+    const rewritten = Array.isArray(outcome.content) ? outcome.content : null;
+    if (!rewritten || rewritten.length !== messages.length) {
+      throw new GuardBlockedError("The sampling request was blocked by the guard: the rewritten messages could not be used", outcome.result.verdicts);
+    }
+    return messages.map((message, index) => ({ ...message, content: String(rewritten[index] ?? "") }));
+  };
+}
+
 async function runLlmNode(input: {
   nodeId: string;
   provider: LLMProviderConfig;
   userPrompt: string;
   systemPrompt: string;
   dependencies: WorkflowExecutionDependencies;
+  /** Phase 16 — the calling node, for destination rules on the model call. */
+  outbound?: { node: WorkflowNode; context: NodeRuntimeContext };
 }): Promise<Record<string, unknown>> {
-  const messages = [] as Array<{ role: "system" | "user"; content: string }>;
-  if (input.systemPrompt) {
-    messages.push({ role: "system", content: input.systemPrompt });
+  let { systemPrompt, userPrompt } = input;
+  if (input.outbound) {
+    // Phase 16 — destination rules: what this model call sends, judged against the provider it goes to.
+    ({ systemPrompt, userPrompt } = await guardModelPrompt(input.outbound.node, input.outbound.context, input.dependencies, input.provider, { systemPrompt, userPrompt }));
   }
-  messages.push({ role: "user", content: input.userPrompt });
+  const messages = [] as Array<{ role: "system" | "user"; content: string }>;
+  if (systemPrompt) {
+    messages.push({ role: "system", content: systemPrompt });
+  }
+  messages.push({ role: "user", content: userPrompt });
 
   const providerAdapter = input.dependencies.providerRegistry.get(input.provider.providerId);
   const llmIdentity = { providerId: String(input.provider.providerId), model: input.provider.model };
@@ -2703,8 +2856,8 @@ async function runLlmNode(input: {
     kind: "resolved_input",
     fields: {
       ...llmIdentity,
-      systemPrompt: previewForActivity(input.systemPrompt),
-      userPrompt: previewForActivity(input.userPrompt)
+      systemPrompt: previewForActivity(systemPrompt),
+      userPrompt: previewForActivity(userPrompt)
     }
   });
   emitNodeActivity(input.dependencies, input.nodeId, { kind: "llm_call", phase: "start", ...llmIdentity });
@@ -2970,6 +3123,242 @@ function protectionNodesFor(guardNode: WorkflowNode, context: NodeRuntimeContext
   return ids.map((id) => context.nodeById.get(id)).filter((entry): entry is WorkflowNode => Boolean(entry));
 }
 
+/**
+ * Phase 16 — the outbound check of an egress node (HTTP, Web Browse,
+ * connector senders) or an MCP Tool call, before its handler or replay stub.
+ * Null when nothing checks it (the zero-config case pays one cheap check).
+ * Returns what the handler sends instead after a rewrite, and for HTTP
+ * Request the check each redirect hop gets.
+ */
+async function outboundPreCheck(
+  node: WorkflowNode,
+  config: Record<string, unknown>,
+  context: NodeRuntimeContext,
+  dependencies: WorkflowExecutionDependencies
+): Promise<{ override: EgressOverride; onRedirect?: (url: string) => Promise<void>; judgeUrl?: EgressUrlJudge } | null> {
+  const egress = isEgressNodeType(node.type);
+  const mcp = node.type === "mcp_tool";
+  if (!egress && !mcp) return null;
+  const profiles = await outboundProfilesFor(dependencies.guard, egress ? "egress" : "destinations");
+  if (profiles.length === 0) return null;
+  const templateData = buildTemplateData(context, config);
+  let request: EgressRequest | null;
+  if (egress) {
+    // The values of the secrets the node references never enter the check; a connector whose address lives in its
+    // secret is judged by that address (read for the host only).
+    const secretValues: string[] = [];
+    for (const ref of secretReferencesIn(config)) {
+      try {
+        const value = await dependencies.resolveSecret(ref);
+        if (typeof value === "string" && value) secretValues.push(value);
+      } catch {
+        // The handler reports a secret it cannot resolve.
+      }
+    }
+    let secretAddress: string | undefined;
+    if (connectorAddressInSecret(node.type, config)) {
+      // Azure Storage: the endpoint the adapter will call, computed from its settings and the secret (never shown).
+      const azure = azureStorageSecretAddressConfig(node.type, config);
+      try {
+        const value = (await dependencies.resolveSecret(normalizeSecretRef((azure ?? config).secretRef))) ?? undefined;
+        secretAddress = azure ? azureStorageEndpointFor(azure, value) || undefined : value;
+      } catch {
+        // Unreadable: the address is unknown (public).
+        secretAddress = undefined;
+      }
+    }
+    request = describeEgressRequest(node, config, templateData, {
+      secretValues,
+      ...(secretAddress ? { secretAddress } : {}),
+      ...(isRagEgressNode(node.type) ? { ragRefs: ragDestinationRefs(node.type, config, dependencies) } : {})
+    });
+  } else {
+    const operation = config.operation === "read_resource" ? "read_resource" : "call_tool";
+    // A resource read sends its URI (rendered once, here); a tool call its arguments.
+    const uri = operation === "read_resource" ? renderTemplate(typeof config.resourceUri === "string" ? config.resourceUri : "", templateData).trim() : "";
+    const toolName = operation === "read_resource" ? "read_resource" : String(config.toolName ?? "");
+    const argsTemplate = typeof config.argsTemplate === "string" ? config.argsTemplate : "{}";
+    const args = operation === "read_resource" ? { uri } : tryParseJson(renderTemplate(argsTemplate, templateData));
+    let server: MCPServerConfig = { serverId: String(config.serverId ?? ""), registryServerId: readRegistryServerId(config), connection: toRecord(config.connection) };
+    try {
+      server = await applyRegisteredMcpServer(server, dependencies, context.toolPolicySubject);
+    } catch {
+      // The handler reports a server it cannot resolve; until then the host is unknown (public).
+      server = { ...server, connection: {} };
+    }
+    request = describeMcpToolRequest(node, server, toolName, args);
+    // A resource URI cannot be rewritten into another resource: a rewrite is blocked.
+    if (request && operation === "read_resource") request = { ...request, apply: () => null };
+  }
+  if (!request) return null;
+  const scope = guardScopeFor(node, context, dependencies, "node");
+  const dataLabels = context.labelScope?.inputLabels() ?? labelsOf([]);
+  const common = {
+    scope,
+    profiles,
+    dataLabels,
+    ...(context.approvedHandoffKeys ? { approvals: context.approvedHandoffKeys } : {}),
+    replay: Boolean(dependencies.replayNodeHook)
+  };
+  const checked = await checkEgressRequest(request, common);
+  if (checked.declassified.length > 0) context.labelScope?.declassify(checked.declassified);
+  const first = request;
+  const onRedirect =
+    node.type === "http_request"
+      ? async (url: string) => {
+          const chain = [...first.refs, httpDestinationRef(url)];
+          first.refs.push(chain[chain.length - 1]!);
+          // A hop that needs an approval cannot wait: the first request was already sent, so it is stopped instead.
+          const hop = await checkOutbound({ ...common, replay: true, channel: "egress", content: first.content, ...(first.ignoredValues ? { ignoredValues: first.ignoredValues } : {}), refs: chain, what: `${first.what}, redirected to ${chain[chain.length - 1]!.host || "an unknown host"}`, approvalTag: chain.map((ref) => ref.host ?? "").join(">") });
+          if (hop.transformed) {
+            throw new GuardBlockedError(`${first.what} was redirected somewhere the guard would rewrite the request for; it was stopped instead`, hop.result.verdicts);
+          }
+        }
+      : undefined;
+  // Web Browse: every later load (redirects, navigations, sub-resources) is judged as it happens.
+  const judgeUrl = node.type === "web_browse" ? egressUrlJudge(common, first.refs, `${node.name || node.type}`) : undefined;
+  return { override: checked.override, ...(onRedirect ? { onRedirect } : {}), ...(judgeUrl ? { judgeUrl } : {}) };
+}
+
+/**
+ * Phase 16 — judges a URL a browser or a fetcher is about to load (a
+ * redirect, a navigation, an image or data URL) against the destination
+ * rules: its address and query values go to its host, judged with the
+ * chain that led there by the strictest hop. A load cannot wait for an
+ * approval or be rewritten, so either stops it (GuardBlockedError).
+ */
+function egressUrlJudge(
+  common: Omit<OutboundCheckInput, "channel" | "content" | "refs" | "what" | "approvalTag">,
+  startRefs: DestinationRef[],
+  what: string
+): EgressUrlJudge {
+  return async (url, chain = []) => {
+    const parts = urlContent(url);
+    const refs = [...startRefs, ...chain.map((hop) => httpDestinationRef(hop)), httpDestinationRef(url)];
+    const outcome = await checkOutbound({
+      ...common,
+      replay: true,
+      channel: "egress",
+      content: { url: parts.url, query: parts.query },
+      refs,
+      what: `${what} (loading ${parts.host || "an unknown host"})`,
+      approvalTag: refs.map((ref) => ref.host ?? "").join(">")
+    });
+    if (outcome.transformed) {
+      throw new GuardBlockedError(`${what} was stopped from loading ${parts.host || "an unknown host"}: the guard would rewrite that address, which cannot be done for a page load`, outcome.result.verdicts);
+    }
+  };
+}
+
+/**
+ * Phase 16 — a URL judge that remembers why it stopped a load: a browser
+ * only sees an aborted request, so the node fails afterwards with the
+ * guard's plain reason (the first one), whatever the page did next.
+ */
+function recordingJudge(judge: EgressUrlJudge | undefined): { judge?: EgressUrlJudge & { refuse(message: string): void }; run<T>(work: () => Promise<T>): Promise<T> } {
+  if (!judge) return { run: (work) => work() };
+  const stopped: unknown[] = [];
+  const recording = Object.assign(
+    async (url: string, chain: string[]) => {
+      try {
+        await judge(url, chain);
+      } catch (error) {
+        stopped.push(error);
+        throw error;
+      }
+    },
+    { refuse: (message: string) => void stopped.push(new GuardBlockedError(message, [])) }
+  );
+  return {
+    judge: recording,
+    async run(work) {
+      let result: Awaited<ReturnType<typeof work>>;
+      try {
+        result = await work();
+      } catch (error) {
+        if (stopped.length > 0) throw stopped[0];
+        throw error;
+      }
+      if (stopped.length > 0) throw stopped[0];
+      return result;
+    }
+  };
+}
+
+/** Phase 16 — the URL judge for nodes that load URLs while rendering (PDF HTML, charts), or null when nothing checks them. */
+async function renderUrlJudge(
+  node: WorkflowNode,
+  context: NodeRuntimeContext,
+  dependencies: WorkflowExecutionDependencies
+): Promise<EgressUrlJudge | null> {
+  const profiles = await outboundProfilesFor(dependencies.guard, "egress");
+  if (profiles.length === 0) return null;
+  return egressUrlJudge(
+    {
+      scope: guardScopeFor(node, context, dependencies, "node"),
+      profiles,
+      dataLabels: context.labelScope?.inputLabels() ?? labelsOf([]),
+      ...(context.approvedHandoffKeys ? { approvals: context.approvedHandoffKeys } : {}),
+      replay: true
+    },
+    [],
+    node.name || node.type
+  );
+}
+
+/** Phase 16 — RAG nodes whose services are checked as egress. */
+function isRagEgressNode(type: string): boolean {
+  return type === "rag_retrieve" || type === "embeddings_azure_openai" || type === "rerank";
+}
+
+/** Host of a setting, or of an environment fallback the handler would use. */
+function hostOrEnv(value: unknown, envName: string | undefined, fallback?: string): string | undefined {
+  const text = typeof value === "string" && value.trim() ? value.trim() : envName ? process.env[envName]?.trim() || fallback : fallback;
+  return text ? destinationHostOfSetting(text) : undefined;
+}
+
+/**
+ * Phase 16 — where a RAG node's embedder, vector store and reranker send
+ * (the query and the documents): a fixed vendor host, else the configured
+ * endpoint or base URL (or the environment fallback the handler uses). The
+ * token embedder, the in-memory store and the knowledge base stay in the
+ * process (no ref). An unknown service is an unknown host (public).
+ */
+function ragDestinationRefs(type: string, config: Record<string, unknown>, _dependencies: WorkflowExecutionDependencies): DestinationRef[] {
+  const settings = toRecord(config.vectorStoreConfig);
+  const ref = (id: string, host: string | undefined) => networkDestinationRef("connector", id, host);
+  if (type === "embeddings_azure_openai") return [ref("azure-openai-embedder", hostOrEnv(config.endpoint, undefined))];
+  if (type === "rerank") {
+    const providerId = typeof config.providerId === "string" ? config.providerId : "cohere";
+    const host = providerId === "cohere" ? "api.cohere.com" : providerId === "jina" ? "api.jina.ai" : providerId === "voyage" ? "api.voyageai.com" : undefined;
+    return [ref(`${providerId}-reranker`, host)];
+  }
+  const refs: DestinationRef[] = [];
+  const embedderId = typeof config.embedderId === "string" ? config.embedderId : "token-embedder";
+  const embedderHosts: Record<string, () => string | undefined> = {
+    "openai-embedder": () => hostOrEnv(settings.baseUrl, undefined, "https://api.openai.com/v1"),
+    "azure-openai-embedder": () => hostOrEnv(settings.endpoint, "AZURE_OPENAI_ENDPOINT"),
+    "cohere-embedder": () => "api.cohere.ai",
+    "mistral-embedder": () => "api.mistral.ai",
+    "google-vertex-embedder": () => "generativelanguage.googleapis.com",
+    "huggingface-embedder": () => "api-inference.huggingface.co"
+  };
+  if (embedderId !== "token-embedder") refs.push(ref(embedderId, embedderHosts[embedderId]?.()));
+  const storeId = typeof config.vectorStoreId === "string" ? config.vectorStoreId : "in-memory-vector-store";
+  const storeHosts: Record<string, () => string | undefined> = {
+    "pinecone-vector-store": () => "api.pinecone.io",
+    // The connection string lives in a secret or DATABASE_URL: unknown unless it is in the environment.
+    "pgvector-store": () => (typeof config.embeddingSecretRef === "object" && config.embeddingSecretRef ? undefined : hostOrEnv(undefined, "DATABASE_URL")),
+    "azure-ai-search-vector-store": () => hostOrEnv(settings.endpoint, "AZURE_AI_SEARCH_ENDPOINT"),
+    "qdrant-vector-store": () => hostOrEnv(settings.endpoint, "QDRANT_ENDPOINT"),
+    "chroma-vector-store": () => hostOrEnv(settings.endpoint, "CHROMA_ENDPOINT", "http://localhost:8000"),
+    "weaviate-vector-store": () => hostOrEnv(settings.endpoint, "WEAVIATE_ENDPOINT", "http://localhost:8080"),
+    "redis-vector-store": () => hostOrEnv(settings.endpoint, "REDIS_ENDPOINT", "http://localhost:6379")
+  };
+  if (storeId !== "in-memory-vector-store" && storeId !== "knowledge-base") refs.push(ref(storeId, storeHosts[storeId]?.()));
+  return refs;
+}
+
 /** Phase 15.1 — the replay stub for a node, if the run is a replay and the node is stubbed. */
 function replayStubFor(node: WorkflowNode, dependencies: WorkflowExecutionDependencies): ReplayNodeStub | null {
   if (!dependencies.replayNodeHook || node.type === "sticky_note" || node.disabled === true) {
@@ -3015,12 +3404,17 @@ async function executeNodeHandler(
     return mergeParentOutputs(context.parentOutputs);
   }
 
+  // Phase 16 — outbound checks (egress, MCP destination rules) run before the handler, and before a replay's stub.
+  const outbound = await outboundPreCheck(node, config, context, dependencies);
+
   const replayStub = replayStubFor(node, dependencies);
   if (replayStub) {
     return resolveReplayStub(replayStub, context);
   }
 
   const templateData = buildTemplateData(context, config);
+  // Phase 16 — a connector handler sends the renderings the check judged; it never renders them again.
+  if (outbound?.override.kind === "renderings") bindCheckedRenderings(templateData, outbound.override.renderings);
 
   switch (node.type) {
     case "schedule_trigger": {
@@ -3059,8 +3453,10 @@ async function executeNodeHandler(
       const allowedMethods = new Set(["GET", "POST", "PUT", "PATCH", "DELETE"]);
       const safeMethod = allowedMethods.has(method) ? method : "GET";
 
+      // Phase 16 — under outbound checks the handler sends the checked rendering (rewritten when the check rewrote it).
+      const httpOverride = outbound?.override.kind === "http" ? outbound.override : undefined;
       const urlTemplate = typeof config.urlTemplate === "string" ? config.urlTemplate : "";
-      const renderedUrl = renderTemplate(urlTemplate, templateData).trim();
+      const renderedUrl = httpOverride ? httpOverride.url : renderTemplate(urlTemplate, templateData).trim();
       if (!renderedUrl) {
         throw new Error("HTTP Request node requires a non-empty rendered URL.");
       }
@@ -3071,12 +3467,16 @@ async function executeNodeHandler(
       });
 
       const headersTemplate = typeof config.headersTemplate === "string" ? config.headersTemplate : "{}";
-      const renderedHeaders = renderTemplate(headersTemplate, templateData);
       let headersPayload: Record<string, unknown> = {};
-      try {
-        headersPayload = toRecord(JSON.parse(renderedHeaders || "{}"));
-      } catch {
-        throw new Error("HTTP Request node headersTemplate must render valid JSON object.");
+      if (httpOverride) {
+        headersPayload = httpOverride.headers;
+      } else {
+        const renderedHeaders = renderTemplate(headersTemplate, templateData);
+        try {
+          headersPayload = toRecord(JSON.parse(renderedHeaders || "{}"));
+        } catch {
+          throw new Error("HTTP Request node headersTemplate must render valid JSON object.");
+        }
       }
 
       const requestHeaders = new Headers();
@@ -3094,7 +3494,7 @@ async function executeNodeHandler(
       }
 
       const bodyTemplate = typeof config.bodyTemplate === "string" ? config.bodyTemplate : "";
-      const renderedBody = renderTemplate(bodyTemplate, templateData);
+      const renderedBody = httpOverride ? httpOverride.body : renderTemplate(bodyTemplate, templateData);
       const timeoutMs =
         typeof config.timeoutMs === "number" && Number.isFinite(config.timeoutMs) && config.timeoutMs > 0
           ? Math.floor(config.timeoutMs)
@@ -3124,7 +3524,9 @@ async function executeNodeHandler(
 
         const response = await guardedFetch(renderedUrl, requestInit, {
           config: dependencies.outboundGuard ?? DEFAULT_OUTBOUND_GUARD,
-          ...(dependencies.outboundDnsResolver ? { resolver: dependencies.outboundDnsResolver } : {})
+          ...(dependencies.outboundDnsResolver ? { resolver: dependencies.outboundDnsResolver } : {}),
+          // Phase 16 — a redirect is judged again, by the strictest hop of the chain so far.
+          ...(outbound?.onRedirect ? { onRedirect: outbound.onRedirect } : {})
         });
         const responseHeaders: Record<string, string> = {};
         response.headers.forEach((value, key) => {
@@ -3713,7 +4115,7 @@ async function executeNodeHandler(
       const promptKey = typeof config.promptKey === "string" ? config.promptKey : "prompt";
       const systemPromptKey = typeof config.systemPromptKey === "string" ? config.systemPromptKey : "system_prompt";
       const prompts = await applyServerPromptToLlmNode({
-        nodeId: node.id,
+        node,
         config,
         templateData,
         context,
@@ -3722,6 +4124,7 @@ async function executeNodeHandler(
         systemPrompt: String(readData(templateData, systemPromptKey) ?? "")
       });
       const output = await runLlmNode({
+        outbound: { node, context },
         nodeId: node.id,
         provider,
         userPrompt: prompts.userPrompt,
@@ -3745,7 +4148,7 @@ async function executeNodeHandler(
       const promptKey = typeof config.promptKey === "string" ? config.promptKey : "prompt";
       const systemPromptKey = typeof config.systemPromptKey === "string" ? config.systemPromptKey : "system_prompt";
       const prompts = await applyServerPromptToLlmNode({
-        nodeId: node.id,
+        node,
         config,
         templateData,
         context,
@@ -3754,6 +4157,7 @@ async function executeNodeHandler(
         systemPrompt: String(readData(templateData, systemPromptKey) ?? "")
       });
       const output = await runLlmNode({
+        outbound: { node, context },
         nodeId: node.id,
         provider,
         userPrompt: prompts.userPrompt,
@@ -3773,7 +4177,7 @@ async function executeNodeHandler(
       const promptKey = typeof config.promptKey === "string" ? config.promptKey : "prompt";
       const systemPromptKey = typeof config.systemPromptKey === "string" ? config.systemPromptKey : "system_prompt";
       const prompts = await applyServerPromptToLlmNode({
-        nodeId: node.id,
+        node,
         config,
         templateData,
         context,
@@ -3798,6 +4202,7 @@ async function executeNodeHandler(
       };
 
       const output = await runLlmNode({
+        outbound: { node, context },
         nodeId: node.id,
         provider,
         userPrompt: prompts.userPrompt,
@@ -3831,7 +4236,8 @@ async function executeNodeHandler(
         provider,
         userPrompt,
         systemPrompt,
-        dependencies
+        dependencies,
+        outbound: { node, context }
       });
     }
 
@@ -4124,7 +4530,8 @@ async function executeNodeHandler(
 
     case "rag_retrieve": {
       const queryTemplate = typeof config.queryTemplate === "string" ? config.queryTemplate : "{{user_prompt}}";
-      const query = renderTemplate(queryTemplate, templateData).trim();
+      // Phase 16 — the query the outbound check judged, when one did.
+      const query = outbound?.override.kind === "rag" ? outbound.override.query : renderTemplate(queryTemplate, templateData).trim();
       const topK = typeof config.topK === "number" && config.topK > 0 ? Math.floor(config.topK) : 3;
 
       const inlineDocs = normalizeDocuments(config.documents);
@@ -4350,7 +4757,8 @@ async function executeNodeHandler(
       // upstream (typically a rag_retrieve node), scores each (query, doc)
       // pair via a hosted cross-encoder, and returns top-N by relevance.
       const queryTemplate = typeof config.queryTemplate === "string" ? config.queryTemplate : "{{user_prompt}}";
-      const query = renderTemplate(queryTemplate, templateData).trim();
+      // Phase 16 — the query the outbound check judged, when one did.
+      const query = outbound?.override.kind === "rag" ? outbound.override.query : renderTemplate(queryTemplate, templateData).trim();
       const topN = typeof config.topN === "number" && config.topN > 0 ? Math.floor(config.topN) : 3;
       const providerId = typeof config.providerId === "string" ? config.providerId : "cohere";
 
@@ -4403,7 +4811,10 @@ async function executeNodeHandler(
       // (config.urlTemplate); the templated form lets upstream nodes feed
       // dynamic URLs in.
       let url: string | undefined;
-      if (typeof config.url === "string" && config.url.trim()) {
+      if (outbound?.override.kind === "browse") {
+        // Phase 16 — the address the outbound check judged.
+        url = outbound.override.url;
+      } else if (typeof config.url === "string" && config.url.trim()) {
         url = config.url.trim();
       } else if (typeof config.urlTemplate === "string" && config.urlTemplate.trim()) {
         url = renderTemplate(config.urlTemplate, templateData).trim();
@@ -4442,6 +4853,7 @@ async function executeNodeHandler(
           ? "fullPage"
           : true;
 
+      const browseJudge = recordingJudge(outbound?.judgeUrl);
       const browseOptions: WebBrowseOptions = {
         url,
         ...(typeof config.waitUntil === "string"
@@ -4462,15 +4874,16 @@ async function executeNodeHandler(
         ...(typeof config.waitForSelector === "string" && config.waitForSelector.trim()
           ? { waitForSelector: config.waitForSelector.trim() }
           : {}),
-        requestGuard: playwrightOutboundGuard(dependencies.outboundGuard ?? DEFAULT_OUTBOUND_GUARD, dependencies.outboundDnsResolver),
-        webSocketGuard: playwrightWebSocketGuard(dependencies.outboundGuard ?? DEFAULT_OUTBOUND_GUARD, dependencies.outboundDnsResolver)
+        // Phase 16 — under destination rules every later load (redirects, navigations, sub-resources) is judged too.
+        requestGuard: playwrightOutboundGuard(dependencies.outboundGuard ?? DEFAULT_OUTBOUND_GUARD, dependencies.outboundDnsResolver, browseJudge.judge),
+        webSocketGuard: playwrightWebSocketGuard(dependencies.outboundGuard ?? DEFAULT_OUTBOUND_GUARD, dependencies.outboundDnsResolver, browseJudge.judge)
       };
 
       const outputKey = typeof config.outputKey === "string" && config.outputKey.trim()
         ? config.outputKey.trim()
         : "page";
 
-      const result = await browseUrl(browseOptions);
+      const result = await browseJudge.run(() => browseUrl(browseOptions));
       return {
         [outputKey]: result,
         // Mirror the most-used fields at the top level so downstream
@@ -4530,7 +4943,10 @@ async function executeNodeHandler(
 
       const outputKey = typeof config.outputKey === "string" && config.outputKey.trim() ? config.outputKey.trim() : "chart";
 
-      const result = await renderChart({
+      // Vega draws without data whose load failed: the recording judge fails the node with the guard's reason instead.
+      const chartGuard = recordingJudge(dependencies.replayNodeHook ? undefined : (await renderUrlJudge(node, context, dependencies)) ?? undefined);
+      const chartJudge = chartGuard.judge;
+      const result = await chartGuard.run(() => renderChart({
         spec: specObject,
         data,
         width,
@@ -4539,13 +4955,18 @@ async function executeNodeHandler(
         // Phase 15.1 — a replay never lets a chart load data from a URL or file.
         offline: Boolean(dependencies.replayNodeHook),
         // Live charts run every data/image URL through the outbound guard, and fetch over a pinned connection.
-        urlGuard: (url: string) => assertOutboundUrlAllowed(url, dependencies.outboundGuard ?? DEFAULT_OUTBOUND_GUARD, dependencies.outboundDnsResolver),
+        // Phase 16 — under destination rules each URL (and each redirect) is judged as egress before it is loaded.
+        urlGuard: async (url: string) => {
+          await assertOutboundUrlAllowed(url, dependencies.outboundGuard ?? DEFAULT_OUTBOUND_GUARD, dependencies.outboundDnsResolver);
+          if (chartJudge) await chartJudge(url, []);
+        },
         fetcher: (url: string) =>
           guardedFetch(url, {}, {
             config: dependencies.outboundGuard ?? DEFAULT_OUTBOUND_GUARD,
-            ...(dependencies.outboundDnsResolver ? { resolver: dependencies.outboundDnsResolver } : {})
+            ...(dependencies.outboundDnsResolver ? { resolver: dependencies.outboundDnsResolver } : {}),
+            ...(chartJudge ? { onRedirect: (next: string) => chartJudge(next, [url]) } : {})
           })
-      });
+      }));
 
       return {
         [outputKey]: {
@@ -4836,7 +5257,12 @@ async function executeNodeHandler(
         throw new Error("Direct MCP Tool execution requires a specific tool name (single-tool mode).");
       }
       const argsTemplate = typeof config.argsTemplate === "string" ? config.argsTemplate : "{}";
-      const args = operation === "call_tool" ? tryParseJson(renderTemplate(argsTemplate, templateData)) : {};
+      const args =
+        outbound?.override.kind === "mcp_args" && operation === "call_tool"
+          ? outbound.override.args
+          : operation === "call_tool"
+            ? tryParseJson(renderTemplate(argsTemplate, templateData))
+            : {};
       const serverConfig = await applyRegisteredMcpServer(
         {
           serverId,
@@ -4869,7 +5295,8 @@ async function executeNodeHandler(
       // only a server with a default sampling model can use it.
       const directMcp = createNodeMcpContext(dependencies, node.id, {
         serverConfigs: [serverConfig],
-        ...(toolPolicy ? { evaluatePolicy: toolPolicy.evaluate } : {})
+        ...(toolPolicy ? { evaluatePolicy: toolPolicy.evaluate } : {}),
+        checkSampling: samplingGuardFor(node, context, dependencies)
       });
       const directMcpContext = directMcp.context;
       const releaseDirectMcpSessions = createMcpSessionReleaser(dependencies.mcpRegistry, directMcpContext, node.id);
@@ -4878,7 +5305,9 @@ async function executeNodeHandler(
       if (operation === "read_resource") {
         // Phase 10.5 — read one resource into the workflow instead of calling a tool.
         const uriTemplate = typeof config.resourceUri === "string" ? config.resourceUri : "";
-        const uri = renderTemplate(uriTemplate, templateData).trim();
+        // Phase 16 — the URI the outbound check judged, when one did.
+        const checkedUri = outbound?.override.kind === "mcp_args" ? toRecord(outbound.override.args).uri : undefined;
+        const uri = typeof checkedUri === "string" ? checkedUri : renderTemplate(uriTemplate, templateData).trim();
         if (!uri) {
           throw WorkflowError.nodeConfig("MCP Tool node in read-resource mode needs a resource URI.");
         }
@@ -4938,7 +5367,7 @@ async function executeNodeHandler(
           }
         }
         directMcp.samplingHandler.beginCall(toolName);
-        result = await invokeDirectMCPTool(serverConfig, toolName, args, dependencies.mcpRegistry, directMcpContext);
+        result = await invokeDirectMCPTool(serverConfig, toolName, args as Record<string, unknown>, dependencies.mcpRegistry, directMcpContext);
       } finally {
         dependencies.abortSignal?.removeEventListener("abort", releaseDirectMcpSessions.onAbort);
         await releaseDirectMcpSessions.close();
@@ -5124,7 +5553,8 @@ async function executeNodeHandler(
       const agentMcp = createNodeMcpContext(dependencies, node.id, {
         provider,
         serverConfigs: serverPromptServerConfig ? [...serverConfigs, serverPromptServerConfig] : serverConfigs,
-        ...(toolPolicy ? { evaluatePolicy: toolPolicy.evaluate } : {})
+        ...(toolPolicy ? { evaluatePolicy: toolPolicy.evaluate } : {}),
+        checkSampling: samplingGuardFor(node, context, dependencies)
       });
       const mcpExecutionContext = agentMcp.context;
       // Stdio MCP servers spawned for this node live in this context only.
@@ -5144,7 +5574,8 @@ async function executeNodeHandler(
             serverConfig: serverPromptServerConfig,
             registry: dependencies.mcpRegistry,
             context: mcpExecutionContext,
-            ...(toolPolicy ? { evaluatePolicy: toolPolicy.evaluate } : {})
+            ...(toolPolicy ? { evaluatePolicy: toolPolicy.evaluate } : {}),
+            checkArguments: serverPromptArgumentCheck(node, context, dependencies, serverPromptServerConfig, serverPromptBinding.name)
           });
           if (resolvedPrompt.target === "user") userPrompt = resolvedPrompt.text;
           else systemPrompt = resolvedPrompt.text;
@@ -5257,6 +5688,16 @@ async function executeNodeHandler(
                 ...(context.approvedHandoffKeys ? { approvals: context.approvedHandoffKeys } : {}),
                 ...(portGuardNode ? { portGuardNode } : {}),
                 protectionNodes: portGuardNode ? protectionNodesFor(portGuardNode, context) : [],
+                // Phase 16 — where the agent's calls go, for destination rules.
+                modelDestination: providerDestinationRef(provider),
+                toolDestination: (exposedName) => {
+                  const resolved = resolvedTools.resolved.find((entry) => entry.exposedName === exposedName);
+                  if (!resolved) return null;
+                  const server = serverConfigs.find(
+                    (entry) => entry.serverId === resolved.serverId && (entry.registryServerId ?? "") === (resolved.registryServerId ?? "")
+                  );
+                  return mcpServerDestinationRef(server ?? { serverId: resolved.serverId, ...(resolved.registryServerId ? { registryServerId: resolved.registryServerId } : {}) });
+                },
                 describeTool: (exposedName) => {
                   const resolved = resolvedTools.resolved.find((entry) => entry.exposedName === exposedName);
                   if (resolved) {
@@ -5650,14 +6091,23 @@ async function executeNodeHandler(
               ? `Your previous output was invalid. Error: ${result.error}. Required schema: ${JSON.stringify(schemaObj)}. Original output: ${truncatedRawInput}. Please output ONLY valid JSON matching the schema, with no other text.`
               : `Your previous output was not valid JSON. Error: ${result.error}. Original output: ${truncatedRawInput}. Please output ONLY valid JSON with no other text.`;
 
+            // Phase 16 — the retry sends the upstream text to the model: destination rules judge it first (a block stops the node).
+            const retryPrompts = await guardModelPrompt(
+              node,
+              context,
+              dependencies,
+              upstreamProvider,
+              { systemPrompt: "You are a JSON formatting assistant. Output ONLY valid JSON.", userPrompt: correctionPrompt },
+              "parser retry model call"
+            );
             let retryResponse: Awaited<ReturnType<typeof providerAdapter.generate>>;
             try {
               retryResponse = await providerAdapter.generate(
                 {
                   provider: upstreamProvider,
                   messages: [
-                    { role: "system", content: "You are a JSON formatting assistant. Output ONLY valid JSON." },
-                    { role: "user", content: correctionPrompt }
+                    { role: "system", content: retryPrompts.systemPrompt },
+                    { role: "user", content: retryPrompts.userPrompt }
                   ]
                 },
                 providerCallContext(dependencies, node.id)
@@ -5744,19 +6194,24 @@ async function executeNodeHandler(
         const providerAdapter = dependencies.providerRegistry.get(provider.providerId);
         while (attempts < 3 && failures.length > 0) {
           attempts += 1;
+          // Phase 16 — the retry sends the output to the model: destination rules judge it first.
+          const retryPrompts = await guardModelPrompt(
+            node,
+            context,
+            dependencies,
+            provider,
+            {
+              systemPrompt: "You must rewrite the assistant output so it passes all guardrail checks. Return revised content only.",
+              userPrompt: `Failed checks: ${failures.join(", ")}\n\nOriginal output:\n${candidate}`
+            },
+            "guardrail retry model call"
+          );
           const retryResponse = await providerAdapter.generate(
             {
               provider,
               messages: [
-                {
-                  role: "system",
-                  content:
-                    "You must rewrite the assistant output so it passes all guardrail checks. Return revised content only."
-                },
-                {
-                  role: "user",
-                  content: `Failed checks: ${failures.join(", ")}\n\nOriginal output:\n${candidate}`
-                }
+                { role: "system", content: retryPrompts.systemPrompt },
+                { role: "user", content: retryPrompts.userPrompt }
               ]
             },
             providerCallContext(dependencies, node.id)
@@ -5788,7 +6243,7 @@ async function executeNodeHandler(
       const systemPromptKey = typeof config.systemPromptKey === "string" ? config.systemPromptKey : "system_prompt";
       const userPrompt = String(readData(templateData, promptKey) ?? readData(templateData, "user_prompt") ?? "");
       const systemPrompt = String(readData(templateData, systemPromptKey) ?? "You are a helpful assistant.");
-      return runLlmNode({ nodeId: node.id, provider, userPrompt, systemPrompt, dependencies });
+      return runLlmNode({ nodeId: node.id, provider, userPrompt, systemPrompt, dependencies, outbound: { node, context } });
     }
 
     case "qa_chain": {
@@ -5796,13 +6251,13 @@ async function executeNodeHandler(
       if (!provider) throw new Error("Q&A Chain requires a provider.");
       const contextKey = typeof config.contextKey === "string" ? config.contextKey : "context";
       const questionKey = typeof config.questionKey === "string" ? config.questionKey : "question";
-      const context = String(readData(templateData, contextKey) ?? "");
+      const contextText = String(readData(templateData, contextKey) ?? "");
       const question = String(readData(templateData, questionKey) ?? readData(templateData, "user_prompt") ?? "");
       const maxLen = typeof config.maxContextLength === "number" ? config.maxContextLength : 4000;
-      const truncatedContext = context.slice(0, maxLen);
+      const truncatedContext = contextText.slice(0, maxLen);
       const systemPrompt = "You are a question-answering assistant. Answer the question based ONLY on the provided context. If the answer is not found in the context, say so. Cite specific parts of the context that support your answer.";
       const userPrompt = `Context:\n${truncatedContext}\n\nQuestion: ${question}`;
-      return runLlmNode({ nodeId: node.id, provider, userPrompt, systemPrompt, dependencies });
+      return runLlmNode({ nodeId: node.id, provider, userPrompt, systemPrompt, dependencies, outbound: { node, context } });
     }
 
     case "summarization_chain": {
@@ -5820,7 +6275,7 @@ async function executeNodeHandler(
       };
       const systemPrompt = `You are a summarization assistant. ${styleInstructions[style] ?? styleInstructions.brief}`;
       const userPrompt = `Summarize the following text:\n\n${text}`;
-      return runLlmNode({ nodeId: node.id, provider, userPrompt, systemPrompt, dependencies });
+      return runLlmNode({ nodeId: node.id, provider, userPrompt, systemPrompt, dependencies, outbound: { node, context } });
     }
 
     case "information_extractor": {
@@ -5831,7 +6286,7 @@ async function executeNodeHandler(
       const schema = typeof config.extractionSchema === "string" ? config.extractionSchema : '{ "key": "value" }';
       const systemPrompt = `You are an information extraction assistant. Extract structured data from the provided text according to the given schema. Return ONLY valid JSON matching the schema. If a field cannot be found, use null.`;
       const userPrompt = `Schema to extract:\n${schema}\n\nText:\n${text}`;
-      const result = await runLlmNode({ nodeId: node.id, provider, userPrompt, systemPrompt, dependencies });
+      const result = await runLlmNode({ nodeId: node.id, provider, userPrompt, systemPrompt, dependencies, outbound: { node, context } });
       const answer = typeof result.answer === "string" ? result.answer : String(result.text ?? "");
       let extracted: unknown = answer;
       try { extracted = JSON.parse(answer.replace(/^```json?\s*/i, "").replace(/```\s*$/i, "").trim()); } catch { /* keep as string */ }
@@ -5849,7 +6304,7 @@ async function executeNodeHandler(
         ? `You are a text classification assistant. Classify the text into one or more of these categories: ${categories}. Return a JSON object with: { "categories": ["category1", "category2"], "confidence": { "category1": 0.9, "category2": 0.7 }, "reasoning": "brief explanation" }`
         : `You are a text classification assistant. Classify the text into exactly ONE of these categories: ${categories}. Return a JSON object with: { "category": "chosen_category", "confidence": 0.95, "reasoning": "brief explanation" }`;
       const userPrompt = `Classify this text:\n\n${text}`;
-      const result = await runLlmNode({ nodeId: node.id, provider, userPrompt, systemPrompt, dependencies });
+      const result = await runLlmNode({ nodeId: node.id, provider, userPrompt, systemPrompt, dependencies, outbound: { node, context } });
       const answer = typeof result.answer === "string" ? result.answer : String(result.text ?? "");
       let classification: unknown = answer;
       try { classification = JSON.parse(answer.replace(/^```json?\s*/i, "").replace(/```\s*$/i, "").trim()); } catch { /* keep as string */ }
@@ -5863,7 +6318,7 @@ async function executeNodeHandler(
       const text = String(readData(templateData, textKey) ?? readData(templateData, "prompt") ?? "");
       const systemPrompt = `You are a sentiment analysis assistant. Analyze the sentiment of the provided text. Return a JSON object with: { "sentiment": "positive" | "negative" | "neutral" | "mixed", "score": <number from -1.0 to 1.0>, "confidence": <number from 0.0 to 1.0>, "explanation": "brief explanation of the sentiment" }`;
       const userPrompt = `Analyze the sentiment of this text:\n\n${text}`;
-      const result = await runLlmNode({ nodeId: node.id, provider, userPrompt, systemPrompt, dependencies });
+      const result = await runLlmNode({ nodeId: node.id, provider, userPrompt, systemPrompt, dependencies, outbound: { node, context } });
       const answer = typeof result.answer === "string" ? result.answer : String(result.text ?? "");
       let sentiment: unknown = answer;
       try { sentiment = JSON.parse(answer.replace(/^```json?\s*/i, "").replace(/```\s*$/i, "").trim()); } catch { /* keep as string */ }
@@ -5884,7 +6339,7 @@ async function executeNodeHandler(
       };
       const systemPrompt = `You are a data transformation assistant. Apply the user's transformation instruction to the input data. ${formatInstructions[outputFormat] ?? formatInstructions.text}`;
       const userPrompt = `Instruction: ${instruction}\n\nInput:\n${input}`;
-      const result = await runLlmNode({ nodeId: node.id, provider, userPrompt, systemPrompt, dependencies });
+      const result = await runLlmNode({ nodeId: node.id, provider, userPrompt, systemPrompt, dependencies, outbound: { node, context } });
       let transformed: unknown = result.answer ?? result.text;
       if (outputFormat === "json" && typeof transformed === "string") {
         try { transformed = JSON.parse((transformed as string).replace(/^```json?\s*/i, "").replace(/```\s*$/i, "").trim()); } catch { /* keep as string */ }
@@ -6001,14 +6456,17 @@ async function executeNodeHandler(
       let pdfBuffer: Buffer;
       if (renderMode === "html") {
         const html = htmlTemplate.trim() ? renderTemplate(htmlTemplate, templateData) : toPdfHtmlSource(resolvedSource);
-        pdfBuffer = await createHtmlPdfBuffer({
+        // Phase 16 — under destination rules every URL the HTML loads is judged as egress before it goes out.
+        const pdfJudge = recordingJudge((await renderUrlJudge(node, context, dependencies)) ?? undefined);
+        pdfBuffer = await pdfJudge.run(() => createHtmlPdfBuffer({
+          ...(pdfJudge.judge ? { judge: pdfJudge.judge } : {}),
           html,
           format: pageFormat,
           printBackground,
           timeoutMs: htmlRenderTimeoutMs,
           outboundGuard: dependencies.outboundGuard ?? DEFAULT_OUTBOUND_GUARD,
           ...(dependencies.outboundDnsResolver ? { resolver: dependencies.outboundDnsResolver } : {})
-        });
+        }));
       } else {
         let sourceText = textTemplate.trim() ? renderTemplate(textTemplate, templateData) : toPdfSourceText(resolvedSource);
         const maxSourceLength = 50_000;
@@ -6320,6 +6778,8 @@ async function executeNodeWithRetry(
   const replayStub = replayStubFor(node, dependencies);
   if (replayStub) {
     throwIfAborted(dependencies.abortSignal);
+    // Phase 16 — the egress check runs just before the stub: nothing is sent, nothing pauses.
+    await runInLabelScope(context.labelScope, () => outboundPreCheck(node, config, context, dependencies));
     return { output: resolveReplayStub(replayStub, context), attempts: 1 };
   }
   const retry = getRetryConfigForNode(node);
@@ -6593,7 +7053,7 @@ async function labelTrackingFor(workflow: Workflow, guard: GuardRuntimeDependenc
 
 async function initRunLabels(request: ExecuteWorkflowRequest, workflow: Workflow, dependencies: WorkflowExecutionDependencies): Promise<RunLabelState> {
   const tracking = await labelTrackingFor(workflow, dependencies.guard);
-  const scan = tracking.tracked ? createLabelScanner(tracking.dictionaries) : undefined;
+  const scan = tracking.tracked ? createLabelScanner(tracking.dictionaries, dependencies.guard ? issuedSurrogatesOf(dependencies.guard) : undefined) : undefined;
   if (request.resumeState) {
     // A run that tracked labels when it paused carries on with them (and keeps tracking).
     const restoredScan = scan ?? (request.resumeState.dataLabels?.tracked ? createLabelScanner([]) : undefined);

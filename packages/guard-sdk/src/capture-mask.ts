@@ -70,6 +70,14 @@ export interface MaskRecordingOptions {
    * and numbers are not literals. Secrets are never kept.
    */
   keepLiteralsFrom?: unknown;
+  /**
+   * Phase 16 — surrogates the run itself issued (runtime `protect` with the
+   * surrogate provider, same key as capture masking). They are kept as they
+   * are: masking them again would give a surrogate of a surrogate, and a
+   * data-subject lookup of the original still finds them (the original's
+   * surrogate is the issued one).
+   */
+  keepValues?: Iterable<string>;
   /** Deepest nesting walked; deeper content throws `MaskUnscannableError`. */
   maxDepth?: number;
   /**
@@ -953,6 +961,19 @@ export function* maskRecordingSteps(parts: readonly MaskPart[], options: MaskRec
         index.delete(entry);
         keptFromWorkflow += 1;
       }
+    }
+    yield;
+  }
+
+  // Phase 16 — the run's issued surrogates stay as they are.
+  if (options.keepValues && index.size > 0) {
+    for (const value of options.keepValues) {
+      const view = decodeView(value).text;
+      for (const match of scanForCapture(view, scanOptions)) {
+        const canonical = canonicalFor(findingText(view, match), String(match.dataClass));
+        if (canonical && !surrogateRedacts(String(match.dataClass)) && index.has(canonical)) index.delete(canonical);
+      }
+      index.delete({ family: "literal", key: value.toLowerCase() });
     }
     yield;
   }

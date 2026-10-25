@@ -1,6 +1,6 @@
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { BUILTIN_DESTINATIONS, dataDestinationInputSchema, type DataDestinationRow, type UnclassifiedDestination } from "@ai-orchestrator/shared";
+import { BUILTIN_DESTINATIONS, dataDestinationInputSchema, type DataDestinationRow, type DestinationRulesStatus, type GuardSimulationView, type UnclassifiedDestination } from "@ai-orchestrator/shared";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import * as api from "../lib/api";
 import { describeMatch, storedHostNotice, EMPTY_DESTINATION_FORM, formFromBuiltIn, formFromRow, formFromSuggestion, ID_ONLY_ROW_HINT, inputFromForm } from "../lib/data-destinations";
@@ -16,9 +16,17 @@ vi.mock("../lib/api", async () => {
     fetchUnclassifiedDestinations: vi.fn(),
     createDataDestination: vi.fn(),
     updateDataDestination: vi.fn(),
-    deleteDataDestination: vi.fn()
+    deleteDataDestination: vi.fn(),
+    fetchDestinationRules: vi.fn(),
+    addStarterDestinationRule: vi.fn(),
+    setDestinationRulesEnforcement: vi.fn(),
+    saveDestinationRules: vi.fn(),
+    startDestinationPreview: vi.fn(),
+    fetchGuardSimulation: vi.fn()
   };
 });
+
+const OFF: DestinationRulesStatus = { available: true, profileId: "destination-rules", version: null, rules: [], mode: "off", hasStarter: false, observing: { wouldBlock: 0, days: 7 } };
 
 const row: DataDestinationRow = {
   id: "dst_1",
@@ -87,6 +95,7 @@ describe("data destination form helpers", () => {
 
 describe("DataDestinationsView", () => {
   beforeEach(() => {
+    vi.mocked(api.fetchDestinationRules).mockReset().mockResolvedValue(OFF);
     vi.mocked(api.fetchDataDestinations).mockReset();
     vi.mocked(api.fetchUnclassifiedDestinations).mockReset();
     vi.mocked(api.createDataDestination).mockReset();
@@ -208,16 +217,118 @@ describe("DataDestinationsView", () => {
 });
 
 describe("Protection Provider surrogate", () => {
-  it("is not offered until the deployment key is wired", () => {
+  it("is offered, marked one-way, and points to the token vault for a reversible token", () => {
     render(<GuardProtectionFields config={{ providerId: "token_vault", dataClasses: ["email"] }} setConfig={() => undefined} secrets={[]} />);
-    expect(screen.queryByRole("option", { name: "Surrogate (one-way)" })).toBeNull();
+    expect(screen.getByRole("option", { name: "Surrogate (one-way)" })).toBeTruthy();
     expect(screen.getByRole("option", { name: "Token vault" })).toBeTruthy();
   });
 
-  it("a node that already uses it says plainly that it blocks", () => {
+  it("a node that uses it needs no key and says it is one-way", () => {
     render(<GuardProtectionFields config={{ providerId: "surrogate", dataClasses: ["email"] }} setConfig={() => undefined} secrets={[]} />);
-    expect(screen.getByRole("option", { name: "Surrogate (one-way)" })).toBeTruthy();
-    expect(screen.getByRole("status").textContent).toBe("Surrogate needs the deployment key; until it is available this node uses your profile's fallback (block by default).");
+    expect(screen.queryByRole("status")).toBeNull();
+    expect(screen.getByText("One-way")).toBeTruthy();
+    expect(screen.getByText(/use the token vault if you need it back/)).toBeTruthy();
     expect(screen.queryByLabelText("Key (from Secrets)")).toBeNull();
+  });
+});
+
+describe("destination rules card (Phase 16)", () => {
+  const STARTER = { name: "Keep sensitive data in-house", when: { dataClasses: ["card_number", "iban", "us_ssn", "national_id", "credential", "private_key", "jwt"] }, allow: { maxTier: "private" as const }, action: "block" as const };
+  beforeEach(() => {
+    vi.mocked(api.fetchDataDestinations).mockReset().mockResolvedValue({ destinations: [], builtIns: [], canEdit: true });
+    vi.mocked(api.fetchUnclassifiedDestinations).mockReset().mockResolvedValue({ destinations: [] });
+    vi.mocked(api.fetchDestinationRules).mockReset().mockResolvedValue(OFF);
+  });
+
+  it("adds the starter rule observing in one click, shows the observing banner, then turns on enforcement", async () => {
+    const observing: DestinationRulesStatus = { ...OFF, version: 1, rules: [{ ...STARTER, shadow: true }], mode: "observing", hasStarter: true, observing: { wouldBlock: 3, days: 7 } };
+    vi.mocked(api.addStarterDestinationRule).mockResolvedValue(observing);
+    vi.mocked(api.setDestinationRulesEnforcement).mockResolvedValue({ ...observing, version: 2, rules: [STARTER], mode: "enforcing" });
+    const user = userEvent.setup();
+    render(<DataDestinationsView />);
+    await user.click(await screen.findByRole("button", { name: "Add the starter rule" }));
+    expect(api.addStarterDestinationRule).toHaveBeenCalledTimes(1);
+    expect((await screen.findByRole("status")).textContent).toBe("Observing: 3 requests would have been blocked this week");
+    expect(screen.getByRole("list", { name: "Rules in force" }).textContent).toContain("may go no further than private network; otherwise block.");
+    await user.click(screen.getByRole("button", { name: "Turn on enforcement" }));
+    expect(api.setDestinationRulesEnforcement).toHaveBeenCalledWith(true);
+    expect(await screen.findByText("Enforcing")).toBeTruthy();
+    expect(screen.queryByText(/would have been blocked this week/)).toBeNull();
+  });
+
+  it("non-admins see the rules but no buttons; with no rules nothing is offered to them", async () => {
+    vi.mocked(api.fetchDataDestinations).mockResolvedValue({ destinations: [], builtIns: [], canEdit: false });
+    render(<DataDestinationsView />);
+    expect(await screen.findByText("An admin can add it.")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Add the starter rule" })).toBeNull();
+  });
+
+  it("the full rule editor sits under Advanced and saves the rule list", async () => {
+    vi.mocked(api.fetchDestinationRules).mockResolvedValue({ ...OFF, version: 1, rules: [{ ...STARTER, shadow: true }], mode: "observing", hasStarter: true });
+    vi.mocked(api.saveDestinationRules).mockResolvedValue({ ...OFF, version: 2, rules: [{ ...STARTER, shadow: true }, { when: { dataClasses: ["email"] }, allow: { maxTier: "vendor" }, action: "require_approval" }], mode: "mixed", hasStarter: true });
+    const user = userEvent.setup();
+    render(<DataDestinationsView />);
+    const editor = await screen.findByRole("form", { name: "Edit destination rules" });
+    await user.click(within(editor).getByRole("button", { name: "Add rule" }));
+    const second = within(editor).getByRole("group", { name: "Rule 2" });
+    await user.type(within(second).getByLabelText("Data classes"), "email");
+    await user.selectOptions(within(second).getByLabelText("Furthest allowed"), "vendor");
+    // The deployment's rules have no protection provider: "Protect" is not offered (it would only block).
+    const actions = [...(within(second).getByLabelText("Otherwise") as HTMLSelectElement).options].map((option) => option.value);
+    expect(actions).not.toContain("protect");
+    expect(actions).toContain("redact");
+    await user.selectOptions(within(second).getByLabelText("Otherwise"), "require_approval");
+    await user.click(within(second).getByLabelText("Observe only"));
+    await user.click(within(editor).getByRole("button", { name: "Save rules" }));
+    expect(api.saveDestinationRules).toHaveBeenCalledWith([
+      { name: "Keep sensitive data in-house", when: { dataClasses: ["card_number", "iban", "us_ssn", "national_id", "credential", "private_key", "jwt"] }, allow: { maxTier: "private" }, action: "block", shadow: true },
+      { when: { dataClasses: ["email"] }, allow: { maxTier: "vendor" }, action: "require_approval" }
+    ]);
+    expect(await screen.findByText("Partly observing")).toBeTruthy();
+  });
+
+  it("Preview impact sends the unsaved row and shows the plain sentence naming the destination", async () => {
+    const simulation = {
+      id: "gsim_1",
+      profileId: "destinations-preview",
+      source: { kind: "inline", version: null, hash: "h" },
+      baseVersion: null,
+      status: "completed",
+      canCancel: false,
+      createdAt: "",
+      createdBy: null,
+      finishedAt: "",
+      jobIds: [],
+      summary: {
+        runs: 2,
+        workflows: 1,
+        compared: 2,
+        diverged: 0,
+        notSimulated: 0,
+        runsNewlyBlocked: 1,
+        runsNowMasked: 0,
+        runsNoLongerBlocked: 0,
+        runsChanged: 1,
+        runsUnchanged: 1,
+        checkpoints: { newlyBlocked: 1, noLongerBlocked: 0, actionChanged: 0, nowMasked: 0, unchanged: 1, notReached: 0 },
+        byDataClass: {},
+        byDetector: {},
+        byDestination: { "Partner API (public)": { newlyBlocked: 1, noLongerBlocked: 0, actionChanged: 0, label: "Partner API (public)", tier: "public" } },
+        sentence: "Across 2 recent runs in 1 workflow: 1 newly blocked, 0 now masked, 0 no longer blocked. 1 newly blocked going to Partner API (public)."
+      },
+      workflows: []
+    } as unknown as GuardSimulationView;
+    vi.mocked(api.startDestinationPreview).mockResolvedValue({ simulation });
+    const user = userEvent.setup();
+    render(<DataDestinationsView />);
+    await user.click(await screen.findByRole("button", { name: "Add destination" }));
+    const form = screen.getByRole("form", { name: "Add destination" });
+    await user.type(within(form).getByLabelText("Name"), "Partner API");
+    await user.type(within(form).getByLabelText("Host, wildcard or IP range"), "api.partner.example");
+    await user.click(within(form).getByRole("button", { name: "Preview impact" }));
+    expect(api.startDestinationPreview).toHaveBeenCalledWith({ rows: [{ name: "Partner API", kind: "http", host: "api.partner.example", tier: "public", holdsDataClasses: [] }] });
+    expect(api.createDataDestination).not.toHaveBeenCalled();
+    expect((await screen.findByTestId("guard-sim-sentence")).textContent).toContain("1 newly blocked going to Partner API (public)");
+    expect(screen.getByRole("list", { name: "By destination" }).textContent).toContain("Partner API (public) 1 newly blocked");
   });
 });

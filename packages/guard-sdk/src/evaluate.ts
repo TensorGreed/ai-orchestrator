@@ -1,4 +1,6 @@
-import { maskForDataClass } from "./masking";
+import { dropInsideValues, dropIssuedSurrogates, evaluateDestinationRules, profileHasDestinationRules, withoutIgnoredValues } from "./destinations";
+import { scanDlp } from "./detectors/dlp";
+import { maskedEvidence, maskForDataClass } from "./masking";
 import type { ActionRule, GuardProfile } from "./profile";
 import { hashGuardProfile } from "./profile";
 import type { ProtectionRegistry } from "./protection/registry";
@@ -64,6 +66,13 @@ const SEVERITY: Record<GuardAction, number> = {
 };
 
 const ENGINE = "<engine>";
+/** Phase 16 — the pseudo-detector destination rule findings carry. */
+export const DESTINATION_RULES_DETECTOR_ID = "<destinations>";
+/** Phase 16 — the finding category of a destination rule. */
+export const DESTINATION_CATEGORY = "destination";
+/** DLP score a destination scan counts (the built-in profile's DLP threshold). */
+const DESTINATION_SCAN_THRESHOLD = 0.6;
+const NO_SURROGATES: ReadonlySet<string> = new Set();
 
 export function mostSevereAction(actions: readonly GuardAction[]): GuardAction {
   let best: GuardAction = "allow";
@@ -111,13 +120,18 @@ export async function evaluateGuard(profile: GuardProfile, input: GuardInput, op
     tool: input.tool?.toolName
   });
 
-  if (!channel || channel.detectors.length === 0) {
-    log("verdict", "No detectors configured for this channel; allowed");
+  // Phase 16 — destination rules: the scan of the outgoing content (issued surrogates dropped) plus its labels.
+  const destinationEntries = evaluateDestinationStep();
+  const runDetectors = !input.destinationOnly && Boolean(channel && channel.detectors.length > 0);
+
+  if (!runDetectors && destinationEntries.length === 0) {
+    if (input.destination && profileHasDestinationRules(profile)) log("verdict", "No destination rule applies; allowed");
+    else log("verdict", "No detectors configured for this channel; allowed");
     return finish("allow");
   }
 
   const entries = orderByTier(
-    channel.detectors.map((entry) => ({
+    (runDetectors ? channel!.detectors : []).map((entry) => ({
       id: entry.id,
       threshold: entry.threshold,
       options: entry.options,
@@ -128,9 +142,9 @@ export async function evaluateGuard(profile: GuardProfile, input: GuardInput, op
   const shadowFor = (rule: ActionRule, action: GuardAction): boolean => rule.shadow ?? profile.shadow[action] ?? false;
 
   const ruleFor = (finding: GuardFinding): ActionRule => {
-    if (finding.dataClass && channel.actions[finding.dataClass]) return channel.actions[finding.dataClass]!;
-    if (channel.actions[finding.category]) return channel.actions[finding.category]!;
-    return channel.defaultAction;
+    if (finding.dataClass && channel!.actions[finding.dataClass]) return channel!.actions[finding.dataClass]!;
+    if (channel!.actions[finding.category]) return channel!.actions[finding.category]!;
+    return channel!.defaultAction;
   };
 
   let shortCircuited = false;
@@ -190,6 +204,17 @@ export async function evaluateGuard(profile: GuardProfile, input: GuardInput, op
       continue;
     }
     const kept: GuardFinding[] = [];
+    // Phase 16 — the egress scan does not count surrogates the run issued (they stand in for values that never left).
+    if (input.channel === "egress" && input.issuedSurrogates) result = dropIssuedSurrogates(result, input.issuedSurrogates, text);
+    // Phase 16 — a finding that is a secret value the node sends is not data; its evidence never shows one.
+    if (input.ignoredValues?.length) {
+      const ignored = input.ignoredValues;
+      result = dropInsideValues(result, ignored, text).map((finding) => ({
+        ...finding,
+        evidence: withoutIgnoredValues(finding.evidence, ignored),
+        message: withoutIgnoredValues(finding.message, ignored)
+      }));
+    }
     for (const finding of result) {
       if (finding.score >= entry.threshold) kept.push(finding);
       else suppressed.push(finding);
@@ -235,6 +260,14 @@ export async function evaluateGuard(profile: GuardProfile, input: GuardInput, op
         log("short_circuit", `Blocked by ${finding.detectorId}; remaining detectors skipped`);
       }
     }
+  }
+
+  // Phase 16 — destination rule findings join the verdict after the detectors' (a block among them stops the content too).
+  for (const entry of destinationEntries) {
+    findings.push(entry.finding);
+    applied.push(entry.action);
+    log("finding", `${DESTINATION_RULES_DETECTOR_ID}: ${entry.action.reason} → ${entry.action.effective}${entry.action.shadow ? " (shadow)" : ""}`);
+    if (!entry.action.shadow) effectiveActions.push(entry.action.effective);
   }
 
   if (failed) {
@@ -367,8 +400,64 @@ export async function evaluateGuard(profile: GuardProfile, input: GuardInput, op
       budget,
       trace,
       profile: profileRef,
-      channel: input.channel
+      channel: input.channel,
+      ...(input.destination && profileHasDestinationRules(profile) ? { destination: { ...input.destination.summary } } : {})
     };
+  }
+
+  /**
+   * Phase 16 — the profile's destination rules for this content: findings
+   * for the verdict, with the spans of the scan's matches for a class found
+   * in the text (so redact, mask and protect rewrite exactly those) and none
+   * for a class only the labels carry (it cannot be rewritten).
+   */
+  function evaluateDestinationStep(): Array<{ finding: GuardFinding; action: AppliedAction }> {
+    if (!input.destination || !profileHasDestinationRules(profile)) return [];
+    const matches = dropInsideValues(
+      dropIssuedSurrogates(
+        scanDlp(text, { dictionaries }).filter((match) => match.score >= DESTINATION_SCAN_THRESHOLD),
+        input.issuedSurrogates ?? NO_SURROGATES,
+        text
+      ),
+      input.ignoredValues ?? [],
+      text
+    );
+    const labels = input.dataLabels ?? { provenance: input.labels ?? [], dataClasses: [], source: "propagated" as const };
+    const { fired } = evaluateDestinationRules(profile, {
+      labels,
+      foundClasses: [...new Set(matches.map((match) => String(match.dataClass)))],
+      destination: input.destination.resolved
+    });
+    const out: Array<{ finding: GuardFinding; action: AppliedAction }> = [];
+    for (const entry of fired) {
+      const own = entry.basis === "content" && entry.dataClass !== undefined ? matches.filter((match) => match.dataClass === entry.dataClass) : [];
+      const spans = own.map((match) => ({ ...match.span }));
+      const evidence = own.length > 0 ? withoutIgnoredValues(maskedEvidence(text.slice(own[0]!.span.start, own[0]!.span.end), own[0]!.dataClass), input.ignoredValues ?? []) : "";
+      const finding: GuardFinding = {
+        detectorId: DESTINATION_RULES_DETECTOR_ID,
+        category: DESTINATION_CATEGORY,
+        score: 1,
+        spans,
+        evidence,
+        message: entry.reason,
+        ...(entry.dataClass !== undefined ? { dataClass: entry.dataClass } : {}),
+        metadata: { ruleIndex: entry.ruleIndex, basis: entry.basis, ...(entry.provenance ? { provenance: entry.provenance } : {}) }
+      };
+      out.push({
+        finding,
+        action: {
+          detectorId: DESTINATION_RULES_DETECTOR_ID,
+          category: DESTINATION_CATEGORY,
+          ...(entry.dataClass !== undefined ? { dataClass: entry.dataClass } : {}),
+          score: 1,
+          requested: entry.requestedAction,
+          effective: entry.action,
+          shadow: entry.shadow,
+          reason: entry.reason
+        }
+      });
+    }
+    return out;
   }
 }
 

@@ -636,4 +636,128 @@ test.describe("golden journeys", () => {
       await page.request.delete(`/api/workflows/${workflowId}`);
     }
   });
+  test("adds the starter destination rule, watches what it would block, then turns on enforcement", async ({ page }) => {
+    await openStudio(page);
+    const stamp = Date.now();
+    const workflowId = `wf-e2e-rules-${stamp}`;
+    const apiHost = new URL(API_URL).hostname;
+    const rowName = "E2E loopback (public)";
+    const cleanUp = async () => {
+      await page.request.put("/api/guard/destination-rules", { data: { rules: [] } });
+      const listed = await page.request.get("/api/data-destinations");
+      if (!listed.ok()) return;
+      const { destinations } = (await listed.json()) as { destinations: Array<{ id: string; name: string }> };
+      for (const row of destinations.filter((entry) => entry.name === rowName)) await page.request.delete(`/api/data-destinations/${encodeURIComponent(row.id)}`);
+    };
+    await cleanUp();
+    try {
+      // The API's own host counts as public for this journey, so a card sent there is "going too far".
+      expect((await page.request.post("/api/data-destinations", { data: { name: rowName, kind: "http", host: apiHost, tier: "public" } })).ok()).toBeTruthy();
+      const created = await page.request.post("/api/workflows", {
+        data: {
+          id: workflowId,
+          name: `E2E Rules ${stamp}`,
+          schemaVersion: "1.0.0",
+          workflowVersion: 1,
+          nodes: [
+            { id: "hook", type: "webhook_input", name: "Hook", position: { x: 0, y: 0 }, config: { path: `e2e-rules-${stamp}`, method: "POST" } },
+            { id: "send", type: "http_request", name: "Send note", position: { x: 200, y: 0 }, config: { method: "GET", urlTemplate: `${API_URL}/health?note={{user_prompt}}` } },
+            { id: "done", type: "output", name: "Done", position: { x: 400, y: 0 }, config: { responseTemplate: "sent" } }
+          ],
+          edges: [
+            { id: "e1", source: "hook", target: "send" },
+            { id: "e2", source: "send", target: "done" }
+          ]
+        }
+      });
+      expect(created.ok()).toBeTruthy();
+
+      await sidebarItem(page, "Security").click();
+      await page.getByRole("tab", { name: "Data destinations" }).click();
+      await page.getByRole("button", { name: "Add the starter rule" }).click();
+      const banner = page.getByRole("status").filter({ hasText: "would have been blocked this week" });
+      await expect(banner).toHaveText(/^Observing: \d+ requests? would have been blocked this week$/);
+      await expect(page.getByRole("list", { name: "Rules in force" })).toContainText("Keep sensitive data in-house");
+      const before = ((await (await page.request.get("/api/guard/destination-rules")).json()) as { observing: { wouldBlock: number } }).observing.wouldBlock;
+
+      // Observing: the run goes through, and the would-be block is counted.
+      const observed = await page.request.post(`/api/workflows/${workflowId}/execute`, { data: { user_prompt: "card 4111 1111 1111 1111" } });
+      expect(((await observed.json()) as { status: string }).status).toBe("success");
+      await page.getByRole("tab", { name: "Overview" }).click();
+      await page.getByRole("tab", { name: "Data destinations" }).click();
+      const after = before + 1;
+      await expect(page.getByRole("status").filter({ hasText: "would have been blocked this week" })).toHaveText(`Observing: ${after} ${after === 1 ? "request" : "requests"} would have been blocked this week`);
+
+      await page.getByRole("button", { name: "Turn on enforcement" }).click();
+      await expect(page.getByText("Enforcing", { exact: true })).toBeVisible();
+      const blocked = await page.request.post(`/api/workflows/${workflowId}/execute`, { data: { user_prompt: "card 4111 1111 1111 1111" } });
+      expect(((await blocked.json()) as { status: string }).status).toBe("error");
+
+      // The Overview says why, in plain words.
+      await page.getByRole("tab", { name: "Overview" }).click();
+      await expect(page.getByText(/Blocked: Rule "Keep sensitive data in-house": Data of class card_number may go no further than private network/).first()).toBeVisible({ timeout: 30_000 });
+    } finally {
+      await cleanUp();
+      await page.request.delete(`/api/workflows/${workflowId}`);
+    }
+  });
+
+  test("previews what an unsaved destination would change on recent runs before saving it", async ({ page }) => {
+    await openStudio(page);
+    const stamp = Date.now();
+    const workflowId = `wf-e2e-preview-${stamp}`;
+    const apiHost = new URL(API_URL).hostname;
+    const rowName = `E2E preview ${stamp}`;
+    const cleanUp = async () => {
+      await page.request.put("/api/guard/destination-rules", { data: { rules: [] } });
+    };
+    await cleanUp();
+    try {
+      expect((await page.request.post("/api/guard/destination-rules/starter")).ok()).toBeTruthy();
+      expect((await page.request.post("/api/guard/destination-rules/enforcement", { data: { enforce: true } })).ok()).toBeTruthy();
+      const created = await page.request.post("/api/workflows", {
+        data: {
+          id: workflowId,
+          name: `E2E Preview ${stamp}`,
+          schemaVersion: "1.0.0",
+          workflowVersion: 1,
+          nodes: [
+            { id: "hook", type: "webhook_input", name: "Hook", position: { x: 0, y: 0 }, config: { path: `e2e-preview-${stamp}`, method: "POST" } },
+            { id: "send", type: "http_request", name: "Send note", position: { x: 200, y: 0 }, config: { method: "GET", urlTemplate: `${API_URL}/health?note={{user_prompt}}` } },
+            { id: "done", type: "output", name: "Done", position: { x: 400, y: 0 }, config: { responseTemplate: "sent" } }
+          ],
+          edges: [
+            { id: "e1", source: "hook", target: "send" },
+            { id: "e2", source: "send", target: "done" }
+          ]
+        }
+      });
+      expect(created.ok()).toBeTruthy();
+      // The API's host is this machine today, so the card went out and the run was recorded.
+      const run = await page.request.post(`/api/workflows/${workflowId}/execute`, { data: { record: true, user_prompt: "card 4111 1111 1111 1111" } });
+      const body = (await run.json()) as { executionId: string; status: string };
+      expect(body.status).toBe("success");
+      expect((await page.request.post("/api/replay/recordings", { data: { executionId: body.executionId, name: "E2E preview run" } })).ok()).toBeTruthy();
+
+      await sidebarItem(page, "Security").click();
+      await page.getByRole("tab", { name: "Data destinations" }).click();
+      await page.getByRole("button", { name: "Add destination" }).click();
+      const form = page.getByRole("form", { name: "Add destination" });
+      await form.getByLabel("Name", { exact: true }).fill(rowName);
+      await form.getByLabel("Host, wildcard or IP range").fill(apiHost);
+      await form.getByRole("combobox", { name: "Tier", exact: true }).selectOption("public");
+      await form.getByRole("button", { name: "Preview impact" }).click();
+      await expect(page.getByTestId("guard-sim-sentence")).toContainText(`newly blocked going to ${rowName} (public)`, { timeout: 120_000 });
+      await page.getByText("Details", { exact: true }).click();
+      await expect(page.getByRole("list", { name: "By destination" })).toContainText(`${rowName} (public)`);
+
+      // Nothing was saved.
+      await form.getByRole("button", { name: "Cancel" }).click();
+      const listed = (await (await page.request.get("/api/data-destinations")).json()) as { destinations: Array<{ name: string }> };
+      expect(listed.destinations.map((row) => row.name)).not.toContain(rowName);
+    } finally {
+      await cleanUp();
+      await page.request.delete(`/api/workflows/${workflowId}`);
+    }
+  });
 });

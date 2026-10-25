@@ -241,6 +241,11 @@ export interface GuardedFetchOptions {
   maxRedirects?: number;
   /** Replaces the pinned fetch (tests). When set, the connection is not pinned. */
   fetchImpl?: typeof fetch;
+  /**
+   * Phase 16 — called before a redirect is followed, with the next URL;
+   * throwing stops the request there (the destination check of the chain).
+   */
+  onRedirect?: (url: string) => Promise<void>;
 }
 
 /** Credential headers dropped when a redirect leaves the original origin. */
@@ -266,6 +271,7 @@ export async function guardedFetch(url: string, init: RequestInit, options: Guar
     const next = new URL(location, currentUrl).toString();
     // The redirect's own body is never read; release it so this hop's connection (and pinned Agent) can close.
     await response.body?.cancel().catch(() => undefined);
+    if (options.onRedirect) await options.onRedirect(next);
     // A cross-origin redirect drops credentials: Authorization (as fetch does) and the API-key and cookie headers vendors use.
     const nextHeaders = new Headers(currentInit.headers);
     if (new URL(next).origin !== new URL(currentUrl).origin) {
@@ -304,9 +310,31 @@ async function pinnedFetch(url: string, init: RequestInit, options: GuardedFetch
 
 /** Minimal shape of a Playwright `Route`, so this module needs no Playwright types. */
 export interface PlaywrightRouteLike {
-  request(): { url(): string };
+  request(): { url(): string; redirectedFrom?(): { url(): string } | null };
   continue(): Promise<void>;
   abort(errorCode?: string): Promise<void>;
+  /** Present on real routes: the request is made here (redirects not followed), so a redirect can be judged first. */
+  fetch?(options?: { maxRedirects?: number }): Promise<{ status(): number; headers(): Record<string, string> }>;
+  /** Sends back the response `fetch` made (typed loosely: Playwright's own response type stays out of this module). */
+  fulfill?(options: { response: never }): Promise<void>;
+}
+
+/**
+ * Phase 16 — judges a URL a page is about to load against the destination
+ * rules (`chain`: the URLs that redirected to it, first first); throws to
+ * stop the load. The judge records why, for the node to report.
+ */
+export type EgressUrlJudge = (url: string, chain: string[]) => Promise<void>;
+
+/** The URLs that redirected to this request, first first. */
+function redirectChainOf(request: ReturnType<PlaywrightRouteLike["request"]>): string[] {
+  const chain: string[] = [];
+  let previous = request.redirectedFrom?.() ?? null;
+  while (previous && chain.length < 20) {
+    chain.unshift(previous.url());
+    previous = (previous as { redirectedFrom?(): { url(): string } | null }).redirectedFrom?.() ?? null;
+  }
+  return chain;
 }
 
 /**
@@ -314,17 +342,71 @@ export interface PlaywrightRouteLike {
  * no network) and checks every http(s) request against the policy, aborting a
  * blocked one. Register it for all requests (`context.route` with a match-all pattern) so every
  * sub-resource the page loads — not just the top document — is checked.
+ *
+ * Phase 16 — with `judge` (destination rules are active), every load is also
+ * judged before it is sent, and the request is made here without following
+ * redirects, so a redirect's target is judged (with the chain that led to it)
+ * before the browser follows it. A route that cannot be made here is
+ * stopped: a load the rules cannot check never goes out.
  */
-export function playwrightOutboundGuard(config: OutboundGuardConfig, resolver: DnsResolver = nodeDnsResolver): (route: PlaywrightRouteLike) => Promise<void> {
+export function playwrightOutboundGuard(config: OutboundGuardConfig, resolver: DnsResolver = nodeDnsResolver, judge?: EgressUrlJudge): (route: PlaywrightRouteLike) => Promise<void> {
   return async (route) => {
-    const url = route.request().url();
+    const request = route.request();
+    const url = request.url();
     if (url.startsWith("data:") || url.startsWith("blob:") || url.startsWith("about:")) {
       await route.continue();
       return;
     }
     const check = await checkOutboundUrl(url, config, resolver);
-    if (check.ok) await route.continue();
-    else await route.abort("blockedbyclient");
+    if (!check.ok) {
+      await route.abort("blockedbyclient");
+      return;
+    }
+    if (!judge) {
+      await route.continue();
+      return;
+    }
+    const chain = redirectChainOf(request);
+    try {
+      await judge(url, chain);
+    } catch {
+      await route.abort("blockedbyclient");
+      return;
+    }
+    if (!route.fetch || !route.fulfill) {
+      await route.abort("blockedbyclient");
+      return;
+    }
+    let response: Awaited<ReturnType<NonNullable<PlaywrightRouteLike["fetch"]>>>;
+    try {
+      response = await route.fetch({ maxRedirects: 0 });
+    } catch {
+      await route.abort("failed");
+      return;
+    }
+    const status = response.status();
+    const location = status >= 300 && status < 400 ? response.headers()["location"] : undefined;
+    if (location) {
+      let next: string;
+      try {
+        next = new URL(location, url).toString();
+      } catch {
+        await route.abort("blockedbyclient");
+        return;
+      }
+      const nextCheck = await checkOutboundUrl(next, config, resolver);
+      if (!nextCheck.ok) {
+        await route.abort("blockedbyclient");
+        return;
+      }
+      try {
+        await judge(next, [...chain, url]);
+      } catch {
+        await route.abort("blockedbyclient");
+        return;
+      }
+    }
+    await route.fulfill({ response: response as never });
   };
 }
 
@@ -342,9 +424,19 @@ export interface PlaywrightWebSocketRouteLike {
  * socket is closed before any connection is made. `context.route` does not
  * see WebSockets, so the browser-based nodes install both.
  */
-export function playwrightWebSocketGuard(config: OutboundGuardConfig, resolver: DnsResolver = nodeDnsResolver): (ws: PlaywrightWebSocketRouteLike) => Promise<void> {
+export function playwrightWebSocketGuard(
+  config: OutboundGuardConfig,
+  resolver: DnsResolver = nodeDnsResolver,
+  judge?: EgressUrlJudge & { refuse?(message: string): void }
+): (ws: PlaywrightWebSocketRouteLike) => Promise<void> {
   return async (ws) => {
     const url = ws.url();
+    // Phase 16 — what a WebSocket sends after it opens cannot be checked: under destination rules none is opened.
+    if (judge) {
+      judge.refuse?.(`The page tried to open a WebSocket to ${url.replace(/[?#].*$/s, "")}; while destination rules are on, WebSocket traffic cannot be checked, so it was not opened`);
+      await ws.close({ code: 1008, reason: "Blocked: destination rules cannot check WebSocket traffic" });
+      return;
+    }
     const asHttp = url.replace(/^ws(s?):/i, "http$1:");
     const check = /^wss?:/i.test(url) ? await checkOutboundUrl(asHttp, config, resolver) : { ok: false };
     if (check.ok) ws.connectToServer();

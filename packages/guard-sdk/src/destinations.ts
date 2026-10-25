@@ -197,3 +197,47 @@ export function dropIssuedSurrogates<T extends SurrogateCandidate>(matches: read
     return !values.every((value) => isIssued(value, match.dataClass, issued));
   });
 }
+
+// ---------------------------------------------------------------------------
+// Ignored values (secret values)
+// ---------------------------------------------------------------------------
+
+/** Where each value occurs in `text`, as written and as it reads inside a JSON string. */
+function occurrences(text: string, values: readonly string[]): GuardSpan[] {
+  const spans: GuardSpan[] = [];
+  for (const value of values) {
+    if (!value) continue;
+    for (const form of new Set([value, JSON.stringify(value).slice(1, -1)])) {
+      let at = text.indexOf(form);
+      while (at !== -1) {
+        spans.push({ start: at, end: at + form.length });
+        at = text.indexOf(form, at + 1);
+      }
+    }
+  }
+  return spans;
+}
+
+/**
+ * Scan matches without the ones that lie entirely inside an occurrence of an
+ * ignored value (a secret value the node sends): such a match is the secret
+ * itself, not data. A match that only overlaps one, or whose place in the
+ * text is unknown, is kept.
+ */
+export function dropInsideValues<T extends SurrogateCandidate>(matches: readonly T[], values: readonly string[], text: string): T[] {
+  if (values.length === 0) return [...matches];
+  const inside = occurrences(text, values);
+  if (inside.length === 0) return [...matches];
+  return matches.filter((match) => {
+    const spans = match.spans?.length ? match.spans : match.span ? [match.span] : [];
+    if (spans.length === 0) return true;
+    return !spans.every((span) => inside.some((range) => range.start <= span.start && span.end <= range.end));
+  });
+}
+
+/** Text with each ignored value (4 characters or more) replaced, for evidence and messages. */
+export function withoutIgnoredValues(text: string, values: readonly string[]): string {
+  let out = text;
+  for (const value of values) if (value.length >= 4 && out.includes(value)) out = out.split(value).join("[secret]");
+  return out;
+}

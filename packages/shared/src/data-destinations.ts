@@ -741,3 +741,225 @@ export function findUnclassifiedDestinations(configured: readonly ConfiguredDest
     (a, b) => DESTINATION_KINDS.indexOf(a.kind) - DESTINATION_KINDS.indexOf(b.kind) || a.suggestion.name.localeCompare(b.suggestion.name)
   );
 }
+
+// ---------------------------------------------------------------------------
+// Call-time refs (Phase 16, p3): one mapping from settings to a destination,
+// shared by the "not classified yet" list and the engine's checks, so a call
+// and its classification always agree.
+// ---------------------------------------------------------------------------
+
+/**
+ * Connectors that always call one vendor API: the host each one calls,
+ * whatever else its settings hold.
+ */
+export const CONNECTOR_FIXED_HOSTS: Readonly<Record<string, string>> = Object.freeze({
+  github_action: "api.github.com",
+  google_sheets_read: "sheets.googleapis.com",
+  google_sheets_append: "sheets.googleapis.com",
+  google_sheets_update: "sheets.googleapis.com",
+  google_calendar_create_event: "www.googleapis.com",
+  google_calendar_list_events: "www.googleapis.com",
+  notion_create_page: "api.notion.com",
+  notion_query_database: "api.notion.com",
+  airtable_create_record: "api.airtable.com",
+  airtable_list_records: "api.airtable.com",
+  airtable_update_record: "api.airtable.com",
+  hubspot_create_contact: "api.hubapi.com",
+  hubspot_get_contact: "api.hubapi.com",
+  stripe_create_customer: "api.stripe.com",
+  stripe_create_charge: "api.stripe.com",
+  telegram_send_message: "api.telegram.org",
+  twilio_send_sms: "api.twilio.com"
+});
+
+/** A host from a URL or a bare host value; templated or unreadable values give nothing. */
+export function destinationHostOfSetting(value: unknown): string | undefined {
+  if (typeof value !== "string" || !value.trim()) return undefined;
+  const text = value.trim();
+  if (text.includes("{{")) return undefined;
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(text)) return destinationHostOfUrl(text);
+  return text.includes("/") ? undefined : normalizeDestinationHost(text);
+}
+
+function plainRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined;
+}
+
+function textSetting(config: Record<string, unknown>, key: string): string {
+  const value = config[key];
+  return typeof value === "string" ? value.trim() : "";
+}
+
+/** The host of a URL built exactly as a handler builds it (so odd values that move the authority are seen as they are). */
+function hostOfBuiltUrl(url: string): string | undefined {
+  if (url.includes("{{")) return undefined;
+  return destinationHostOfUrl(url);
+}
+
+/**
+ * What a connector's address comes from: a fixed vendor host, the host its
+ * settings name, nothing at all (a stub with no network), or an unknown host.
+ * `undefined` = an unknown host (public); `null` = sends nothing.
+ */
+type AddressOf = (config: Record<string, unknown>, secretAddress: string | undefined) => string | undefined | null;
+
+const fromKey = (key: string): AddressOf => (config) => destinationHostOfSetting(config[key]);
+
+/** connector-sdk adapters (connector_source and the dedicated nodes), by connector id: their real address keys only. */
+const CONNECTOR_SDK_ADDRESS: Readonly<Record<string, AddressOf>> = {
+  "google-drive": (config) => (textSetting(config, "baseUrl") ? destinationHostOfSetting(config.baseUrl) : "www.googleapis.com"),
+  // Demo stubs: they return sample rows and open no connection.
+  "sql-db": () => null,
+  "nosql-db": () => null,
+  "azure-storage": (config, secretAddress) => {
+    if (textSetting(config, "endpoint")) return destinationHostOfSetting(config.endpoint);
+    // With a secret the adapter's endpoint can come from it (a shared-key endpoint or suffix): the engine passes the
+    // endpoint the adapter will call, computed from the secret; without it the host is unknown (public).
+    if (plainRecord(config.secretRef)?.secretId) return destinationHostOfSetting(secretAddress);
+    const account = textSetting(config, "accountName");
+    return account ? hostOfBuiltUrl(`https://${account}.blob.core.windows.net/`) : undefined;
+  },
+  "azure-cosmos-db": fromKey("endpoint"),
+  "azure-monitor": (config) => {
+    const operation = textSetting(config, "operation") || "query_logs";
+    if (operation === "query_logs") return "api.loganalytics.io";
+    if (operation === "query_metrics") return hostOfBuiltUrl(`https://management.azure.com${textSetting(config, "resourceId")}/x`);
+    const path = textSetting(config, "path");
+    if (/^https?:\/\//i.test(path)) return hostOfBuiltUrl(path);
+    return hostOfBuiltUrl(`https://management.azure.com${path.startsWith("/") ? "" : "/"}${path}`);
+  },
+  "azure-ai-search": fromKey("endpoint"),
+  qdrant: fromKey("endpoint")
+};
+
+/** Dedicated connector nodes that run a connector-sdk adapter on their whole settings. */
+const CONNECTOR_SDK_NODES: Readonly<Record<string, string>> = {
+  google_drive_source: "google-drive",
+  azure_storage: "azure-storage",
+  azure_cosmos_db: "azure-cosmos-db",
+  azure_monitor_http: "azure-monitor",
+  azure_ai_search_vector_store: "azure-ai-search",
+  qdrant_vector_store: "qdrant"
+};
+
+/** Each connector node type: exactly the settings its handler builds its address from. */
+const CONNECTOR_ADDRESS: Readonly<Record<string, AddressOf>> = {
+  // Webhook mode (the default) posts to the webhook URL; bot mode always calls slack.com.
+  slack_send_message: (config) => ((textSetting(config, "authType") || "webhook") === "webhook" ? destinationHostOfSetting(config.webhookUrl) : "slack.com"),
+  discord_send_message: fromKey("webhookUrl"),
+  // The webhook URL, else the whole secret value is the URL.
+  teams_send_message: (config, secretAddress) => (textSetting(config, "webhookUrl") ? destinationHostOfSetting(config.webhookUrl) : destinationHostOfSetting(secretAddress)),
+  smtp_send_email: fromKey("host"),
+  postgres_query: fromKey("host"),
+  mysql_query: fromKey("host"),
+  // The secret's connection URI wins over the settings'.
+  mongo_operation: (config, secretAddress) => {
+    if (plainRecord(config.secretRef)?.secretId) return destinationHostOfSetting(secretAddress);
+    return destinationHostOfSetting(config.uri);
+  },
+  redis_command: (config) => (textSetting(config, "url") ? destinationHostOfSetting(config.url) : "localhost"),
+  jira_create_issue: fromKey("baseUrl"),
+  jira_search_issues: fromKey("baseUrl"),
+  salesforce_create_record: fromKey("instanceUrl"),
+  salesforce_query: fromKey("instanceUrl"),
+  aws_s3_put_object: s3Address,
+  aws_s3_get_object: s3Address,
+  aws_s3_list_objects: s3Address,
+  connector_source: (config, secretAddress) => {
+    const address = CONNECTOR_SDK_ADDRESS[textSetting(config, "connectorId")];
+    if (!address) return undefined;
+    return address(connectorSourceAdapterConfig(config), secretAddress);
+  }
+};
+
+function s3Address(config: Record<string, unknown>): string | undefined {
+  const bucket = textSetting(config, "bucket");
+  const region = textSetting(config, "region");
+  if (!bucket || !region) return undefined;
+  return hostOfBuiltUrl(`https://${bucket}.s3.${region}.amazonaws.com/`);
+}
+
+/** The settings a Connector Source node hands its adapter, as the engine builds them (its secret reference included). */
+function connectorSourceAdapterConfig(config: Record<string, unknown>): Record<string, unknown> {
+  const secretRef = config.secretRef ?? config.authSecretRef;
+  return { ...(plainRecord(config.connectorConfig) ?? config), ...(secretRef ? { secretRef } : {}) };
+}
+
+/**
+ * The Azure Storage adapter's settings for a node that runs it (the
+ * dedicated node, or a Connector Source on `azure-storage`) when its
+ * endpoint can come from its secret (a secret and no endpoint setting);
+ * undefined otherwise. The engine computes the endpoint the adapter will
+ * call from these settings and the secret's value.
+ */
+export function azureStorageSecretAddressConfig(nodeType: string, config: Record<string, unknown>): Record<string, unknown> | undefined {
+  const settings =
+    nodeType === "azure_storage" ? config : nodeType === "connector_source" && textSetting(config, "connectorId") === "azure-storage" ? connectorSourceAdapterConfig(config) : undefined;
+  if (!settings || textSetting(settings, "endpoint") || !plainRecord(settings.secretRef)?.secretId) return undefined;
+  return settings;
+}
+
+/** Connector node types whose address can come from their secret (the engine passes the secret's value for the host only). */
+export function connectorAddressInSecret(nodeType: string, config: Record<string, unknown>): boolean {
+  if (nodeType === "mongo_operation") return Boolean(plainRecord(config.secretRef)?.secretId);
+  if (nodeType === "teams_send_message") return !textSetting(config, "webhookUrl") && Boolean(plainRecord(config.secretRef)?.secretId);
+  return azureStorageSecretAddressConfig(nodeType, config) !== undefined;
+}
+
+/**
+ * Where a connector node sends its requests: the host its handler really
+ * calls, read only from the settings that handler uses for its address (a
+ * fixed vendor host for connectors that always call one API). Any other key,
+ * however URL-like, is ignored. An unknown type or an address that cannot be
+ * read (a template, a missing value) is an unknown host: public. Null for a
+ * connector that sends nothing (a demo stub). `secretAddress` is the
+ * secret's value for connectors whose address lives in their secret
+ * (`connectorAddressInSecret`); it is read for the host only.
+ */
+export function connectorDestinationRef(nodeType: string, config: Record<string, unknown>, secretAddress?: string): DestinationRef | null {
+  const fixed = CONNECTOR_FIXED_HOSTS[nodeType];
+  if (fixed) return networkDestinationRef("connector", nodeType, fixed);
+  const sdk = CONNECTOR_SDK_NODES[nodeType];
+  const address = sdk ? CONNECTOR_SDK_ADDRESS[sdk] : CONNECTOR_ADDRESS[nodeType];
+  const host = address ? address(config, secretAddress) : undefined;
+  if (host === null) return null;
+  return networkDestinationRef("connector", nodeType, host);
+}
+
+/** MCP adapters that talk to a local process over stdio (no network endpoint). */
+export const MCP_STDIO_ADAPTERS: ReadonlySet<string> = new Set(["stdio_mcp"]);
+
+/** MCP adapters that send nothing over the network. */
+export const MCP_ADAPTERS_WITHOUT_NETWORK: ReadonlySet<string> = new Set(["mock-mcp"]);
+
+/**
+ * Where an MCP server's calls go: null for an adapter with no network (the
+ * mock server), otherwise the registry id and the host of its endpoint
+ * (unknown when the endpoint is missing or unreadable: public).
+ */
+export function mcpServerDestinationRef(server: { serverId?: string; adapterId?: string; registryServerId?: string; connection?: unknown }): DestinationRef | null {
+  const adapter = server.adapterId ?? server.serverId ?? "";
+  if (MCP_ADAPTERS_WITHOUT_NETWORK.has(adapter)) return null;
+  // A stdio server is a local process with no network endpoint: what L2M sends it stays on this machine
+  // (the built-in loopback row makes it local). Its own outbound traffic is outside L2M's view.
+  if (MCP_STDIO_ADAPTERS.has(adapter)) return networkDestinationRef("mcp_server", server.registryServerId, "localhost");
+  return networkDestinationRef("mcp_server", server.registryServerId, destinationHostOfSetting(plainRecord(server.connection)?.endpoint));
+}
+
+/** A destination as a verdict carries it: never a path, query or credential. */
+export interface GuardDestinationSummary {
+  kind: DestinationKind;
+  id?: string;
+  host?: string;
+  tier: DestinationTier;
+  region: string;
+  /** The classifying row's name, when a row matched. */
+  name?: string;
+  matchedBy: ResolvedDestination["matchedBy"];
+}
+
+/** "api.example.com (public)", "OpenAI (vendor)": how copy names a destination. */
+export function describeDestinationSummary(destination: Pick<GuardDestinationSummary, "name" | "host" | "id" | "tier">): string {
+  const label = destination.name ?? (destination.host || destination.id || "an unknown host");
+  return `${label} (${destination.tier})`;
+}

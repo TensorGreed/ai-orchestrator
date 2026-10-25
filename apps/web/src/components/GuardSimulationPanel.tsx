@@ -43,6 +43,14 @@ function issuesOf(err: unknown): GuardFieldIssue[] {
 
 /** The button that sits next to Save, and the card under the save row. */
 export function useGuardSimulation(profileId: string, options: { pollMs?: number; retryBaseMs?: number } = {}) {
+  return useSimulationRunner<{ document: Record<string, unknown> } | { version: number }>((payload) => simulateGuardProfile(profileId, payload), options);
+}
+
+/**
+ * Starts a simulation with `starter` and polls it to the end (shared by the
+ * profile editor and, Phase 16, Preview impact on the Destinations tab).
+ */
+export function useSimulationRunner<P>(starter: (payload: P) => Promise<{ simulation: GuardSimulationView }>, options: { pollMs?: number; retryBaseMs?: number } = {}) {
   const pollMs = options.pollMs ?? POLL_MS;
   const retryBaseMs = options.retryBaseMs;
   const [simulation, setSimulation] = useState<GuardSimulationView | null>(null);
@@ -92,15 +100,17 @@ export function useGuardSimulation(profileId: string, options: { pollMs?: number
     poll(simulation.id);
   }, [poll, simulation]);
 
+  const starterRef = useRef(starter);
+  starterRef.current = starter;
   const start = useCallback(
-    async (payload: { document: Record<string, unknown> } | { version: number }) => {
+    async (payload: P) => {
       if (timer.current) clearTimeout(timer.current);
       setBusy(true);
       setError(null);
       setLost(null);
       setIssues([]);
       try {
-        const response = await simulateGuardProfile(profileId, payload);
+        const response = await starterRef.current(payload);
         setSimulation(response.simulation);
         if (simulationFinished(response.simulation)) setBusy(false);
         else poll(response.simulation.id);
@@ -110,7 +120,7 @@ export function useGuardSimulation(profileId: string, options: { pollMs?: number
         setBusy(false);
       }
     },
-    [poll, profileId]
+    [poll]
   );
 
   const cancel = useCallback(async () => {
@@ -137,8 +147,14 @@ export function GuardSimulationCard({
   versions,
   onSimulateVersion,
   onRetry,
-  onCancel
+  onCancel,
+  compared,
+  emptyText,
+  label = "Simulation on recent traffic"
 }: {
+  compared?: string;
+  emptyText?: string;
+  label?: string;
   simulation: GuardSimulationView | null;
   busy: boolean;
   error: string | null;
@@ -156,7 +172,7 @@ export function GuardSimulationCard({
 
   if (!simulation && !busy && !error && !lost) return null;
   return (
-    <section className="guard-sim" aria-label="Simulation on recent traffic" aria-busy={busy}>
+    <section className="guard-sim" aria-label={label} aria-busy={busy}>
       {error && (
         <div className="settings-error" role="alert">
           {error}
@@ -195,7 +211,7 @@ export function GuardSimulationCard({
           )}
         </p>
       )}
-      {simulation && simulationFinished(simulation) && <SimulationResult simulation={simulation} />}
+      {simulation && simulationFinished(simulation) && <SimulationResult simulation={simulation} {...(compared ? { compared } : {})} {...(emptyText ? { emptyText } : {})} />}
       {versions.length > 0 && (
         <details className="guard-sim-advanced">
           <summary>Advanced</summary>
@@ -222,7 +238,7 @@ export function GuardSimulationCard({
   );
 }
 
-function SimulationResult({ simulation }: { simulation: GuardSimulationView }) {
+export function SimulationResult({ simulation, compared, emptyText }: { simulation: GuardSimulationView; compared?: string; emptyText?: string }) {
   const summary = simulation.summary;
   if (simulation.status === "failed") {
     return (
@@ -252,7 +268,7 @@ function SimulationResult({ simulation }: { simulation: GuardSimulationView }) {
     return (
       <div className="guard-sim-card guard-sim-empty">
         <p className="guard-sim-sentence">No recent runs to simulate on yet.</p>
-        <p className="kb-subtle">{simulation.emptyReason ?? "None of the workflows that use this profile has a recorded run."}</p>
+        <p className="kb-subtle">{simulation.emptyReason ?? emptyText ?? "None of the workflows that use this profile has a recorded run."}</p>
       </div>
     );
   }
@@ -261,13 +277,14 @@ function SimulationResult({ simulation }: { simulation: GuardSimulationView }) {
   const rows = simulationWorkflowRows(simulation.workflows ?? []);
   const detectors = topTallies(summary.byDetector);
   const dataClasses = topTallies(summary.byDataClass);
+  const destinations = topTallies(summary.byDestination ?? {});
   return (
     <div className="guard-sim-card">
       <p className="guard-sim-sentence" data-testid="guard-sim-sentence">
         {summary.sentence}
       </p>
       <p className="kb-subtle">
-        {label} compared with {current} on these runs. Each run was replayed twice from its recording, so nothing called a model.
+        {compared ?? `${label} compared with ${current} on these runs.`} Each run was replayed twice from its recording, so nothing called a model.
       </p>
       <div className="guard-sim-chips">
         <span className={summary.runsNewlyBlocked > 0 ? "guard-chip guard-chip-lock" : "guard-chip"}>{summary.runsNewlyBlocked} newly blocked</span>
@@ -280,8 +297,20 @@ function SimulationResult({ simulation }: { simulation: GuardSimulationView }) {
       {simulation.error && <p className="kb-subtle">{simulation.error}</p>}
       <details className="guard-sim-details">
         <summary>Details</summary>
-        {(detectors.length > 0 || dataClasses.length > 0) && (
+        {(detectors.length > 0 || dataClasses.length > 0 || destinations.length > 0) && (
           <div className="guard-sim-tallies">
+            {destinations.length > 0 && (
+              <div>
+                <h5>By destination</h5>
+                <ul aria-label="By destination">
+                  {destinations.map((entry) => (
+                    <li key={entry.key}>
+                      {entry.key} {tallyText(entry.tally)}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
             {dataClasses.length > 0 && (
               <div>
                 <h5>By data class</h5>
