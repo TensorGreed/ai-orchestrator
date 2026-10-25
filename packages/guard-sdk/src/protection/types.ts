@@ -1,3 +1,4 @@
+import { SURROGATE_REVEAL_REFUSED_MESSAGE } from "@ai-orchestrator/shared";
 import type { GuardDataClass } from "../types";
 
 /**
@@ -28,6 +29,16 @@ export interface ProtectionProvider {
   dataClasses: readonly GuardDataClass[] | "*";
   protect(value: string, context: ProtectContext): Promise<string>;
   reveal?(token: string, context: ProtectContext): Promise<string>;
+}
+
+/**
+ * Phase 16 — why a provider's tokens cannot be revealed, or undefined when
+ * they can. A route that offers reveal answers 400 with this text.
+ */
+export function revealRefusal(provider: Pick<ProtectionProvider, "id" | "reversible">): string | undefined {
+  if (provider.id === "surrogate") return SURROGATE_REVEAL_REFUSED_MESSAGE;
+  if (!provider.reversible) return `Protection provider '${provider.id}' is one-way; its tokens cannot be turned back into values`;
+  return undefined;
 }
 
 export function providerSupports(provider: ProtectionProvider, dataClass: GuardDataClass): boolean {

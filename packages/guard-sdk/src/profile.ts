@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
+import { DESTINATION_TIERS, PROVENANCE_LABELS, dataClassNameSchema } from "@ai-orchestrator/shared";
 import { GUARD_ACTIONS, GUARD_CHANNELS, GuardProfileError, stableStringify, type GuardAction, type GuardChannel } from "./types";
 
 /**
@@ -69,6 +70,40 @@ export const protectionMappingSchema = z.object({
   options: z.record(z.string(), z.unknown()).default({})
 });
 
+/** Phase 16 — actions a destination rule may take. `allow` and `transform` make no sense there. */
+export const DESTINATION_RULE_ACTIONS = ["block", "redact", "mask", "protect", "require_approval", "review"] as const;
+export type DestinationRuleAction = (typeof DESTINATION_RULE_ACTIONS)[number];
+
+/**
+ * Phase 16 — a destination rule: when outgoing data carries one of these
+ * data classes or provenance labels (any match; no condition means any
+ * data), it may only go to destinations within `allow`; otherwise `action`
+ * applies. A destination approved to hold a class lets that class through.
+ */
+export const destinationRuleSchema = z.object({
+  when: z
+    .object({
+      dataClasses: z.array(dataClassNameSchema).max(100).optional(),
+      provenance: z.array(z.enum(PROVENANCE_LABELS)).max(PROVENANCE_LABELS.length).optional()
+    })
+    .default({}),
+  allow: z.object({
+    maxTier: z.enum(DESTINATION_TIERS),
+    /** Region tags or prefixes (`eu` covers `eu-west-1`). Absent: any region. */
+    regions: z.array(z.string().trim().min(1).max(64)).max(50).optional()
+  }),
+  action: z.enum(DESTINATION_RULE_ACTIONS),
+  /** Observe only: record what would have happened. Overrides the profile-level shadow flag. */
+  shadow: z.boolean().optional(),
+  /** Shown in the editor and in verdict reasons. */
+  name: z.string().trim().min(1).max(120).optional()
+}).superRefine((rule, ctx) => {
+  const conditions = (rule.when.dataClasses?.length ?? 0) + (rule.when.provenance?.length ?? 0);
+  if (conditions === 0 && (rule.action === "redact" || rule.action === "mask" || rule.action === "protect")) {
+    ctx.addIssue({ code: "custom", path: ["action"], message: "Redact, mask and protect need data classes to act on; list them under when, or choose block, review or require_approval" });
+  }
+});
+
 export const guardProfileSchema = z.object({
   id: z.string().min(1),
   name: z.string().min(1),
@@ -113,7 +148,12 @@ export const guardProfileSchema = z.object({
    * (where it really came from), and runs under this profile track labels
    * (stored on node results, data classes scanned). Absent keeps the hash.
    */
-  labels: z.enum(["fixed", "propagated"]).optional()
+  labels: z.enum(["fixed", "propagated"]).optional(),
+  /**
+   * Phase 16 — where data may go. Absent means no destination checks, so
+   * existing profiles keep their hash and behaviour.
+   */
+  destinations: z.object({ rules: z.array(destinationRuleSchema).max(100).default([]) }).optional()
 });
 
 export type GuardProfileInput = z.input<typeof guardProfileSchema>;
@@ -122,6 +162,7 @@ export type ChannelProfile = z.output<typeof channelProfileSchema>;
 export type DetectorEntry = z.output<typeof detectorEntrySchema>;
 export type ActionRule = z.output<typeof actionRuleSchema>;
 export type GuardDictionary = z.output<typeof dictionarySchema>;
+export type DestinationRule = z.output<typeof destinationRuleSchema>;
 
 /**
  * Phase 16 — the opt-in predicate: a profile that asks for propagated

@@ -7,15 +7,20 @@ import { PROVENANCE_LABELS as SHARED_PROVENANCE_LABELS } from "@ai-orchestrator/
  * content from each trust boundary and acts on the verdict.
  */
 
-/** Where in the AI traffic the content sits. */
-export type GuardChannel = "prompt" | "model_output" | "tool_arguments" | "tool_result" | "final_output";
+/**
+ * Where in the AI traffic the content sits. Phase 16: `egress` is outbound
+ * data leaving through HTTP, connectors and senders; only profiles configure
+ * it (the Guard node's channel list in shared stays without it).
+ */
+export type GuardChannel = "prompt" | "model_output" | "tool_arguments" | "tool_result" | "final_output" | "egress";
 
 export const GUARD_CHANNELS: readonly GuardChannel[] = [
   "prompt",
   "model_output",
   "tool_arguments",
   "tool_result",
-  "final_output"
+  "final_output",
+  "egress"
 ];
 
 /** Where the content came from. Policies key on these labels, not only on patterns. The list lives in `@ai-orchestrator/shared` (data-labels.ts). */
