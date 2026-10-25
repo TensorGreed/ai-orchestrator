@@ -2,14 +2,14 @@ import type { DataLabels, ProvenanceLabel } from "@ai-orchestrator/shared";
 
 /**
  * Phase 16 — where a node's data came from and what it contains, in plain
- * words: "from web · contains email". Shown only for runs whose guard
+ * words: "from outside · contains email". Shown only for runs whose guard
  * profile tracks data labels; other runs store none, so nothing renders.
  */
 
 const PROVENANCE_WORDS: Record<ProvenanceLabel, string> = {
   trusted: "from your system",
-  user: "from a person",
-  untrusted_external: "from web",
+  user: "from a user",
+  untrusted_external: "from outside",
   sensitive: "sensitive"
 };
 
@@ -45,7 +45,7 @@ export function DataLabelChips({ labels }: { labels: unknown }) {
   return (
     <span className="data-label-chips" aria-label={`Data labels: ${words.join(" · ")}`} title="Where this node's data came from and what it contains">
       {words.map((word) => (
-        <span key={word} className={word.startsWith("contains") ? "data-label-chip is-class" : word === "from web" ? "data-label-chip is-external" : "data-label-chip"}>
+        <span key={word} className={word.startsWith("contains") ? "data-label-chip is-class" : word === PROVENANCE_WORDS.untrusted_external ? "data-label-chip is-external" : "data-label-chip"}>
           {word}
         </span>
       ))}

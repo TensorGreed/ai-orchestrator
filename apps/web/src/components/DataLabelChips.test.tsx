@@ -5,8 +5,8 @@ import { DataLabelChips, describeDataLabels } from "./DataLabelChips";
 describe("data label chips", () => {
   it("says where the data came from and what it contains, in plain words", () => {
     expect(describeDataLabels({ provenance: ["user", "untrusted_external"], dataClasses: ["email", "card_number"], source: "propagated" })).toEqual([
-      "from web",
-      "from a person",
+      "from outside",
+      "from a user",
       "contains email, card number"
     ]);
     expect(describeDataLabels({ provenance: ["trusted"], dataClasses: [], source: "propagated" })).toEqual(["from your system"]);
@@ -21,8 +21,8 @@ describe("data label chips", () => {
 
   it("renders one chip per word", () => {
     const html = renderToStaticMarkup(<DataLabelChips labels={{ provenance: ["untrusted_external"], dataClasses: ["email"], source: "propagated" }} />);
-    expect(html).toContain("from web");
+    expect(html).toContain("from outside");
     expect(html).toContain("contains email");
-    expect(html).toContain('aria-label="Data labels: from web · contains email"');
+    expect(html).toContain('aria-label="Data labels: from outside · contains email"');
   });
 });

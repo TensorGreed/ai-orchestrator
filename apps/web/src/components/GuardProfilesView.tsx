@@ -422,9 +422,8 @@ function GuardProfileEditor({
               <span>Track where data came from</span>
             </label>
             <p className="kb-subtle">
-              Off by default. When on, runs under this profile note where each step's data came from (a person, your system, the web) and what it contains
-              (emails, card numbers), show it on the run, and checks use that instead of fixed assumptions, so text fetched from the web is checked as
-              outside content even after it is copied into a prompt.
+              Off by default. Notes where each step's data came from and what it contains, shows it on runs, and lets checks treat web, webhook and tool
+              content as outside content even after it is copied into a prompt.
             </p>
           </div>
         </div>

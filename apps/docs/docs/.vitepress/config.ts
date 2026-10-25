@@ -60,7 +60,7 @@ export default defineConfig({
           { text: "Guard engine", link: "/product/guard-engine" },
           { text: "Guard in workflows", link: "/product/guard" },
           { text: "Guard policy simulation", link: "/product/guard-simulation" },
-          { text: "Data labels and destinations", link: "/product/data-labels" }
+          { text: "Data labels and destinations", link: "/product/data-labels-and-destinations" }
         ]
       },
       {

@@ -486,7 +486,7 @@ test.describe("golden journeys", () => {
     await expect(row).toBeVisible({ timeout: 30_000 });
     await row.click();
     const noteChips = page.locator(".execution-trace-node", { hasText: "note" }).locator(".data-label-chips");
-    await expect(noteChips).toHaveAttribute("aria-label", "Data labels: from a person · contains email", { timeout: 30_000 });
+    await expect(noteChips).toHaveAttribute("aria-label", "Data labels: from a user · contains email", { timeout: 30_000 });
   });
 
   test("an enforced release gate holds a case added later until an admin admits it", async ({ page }) => {
