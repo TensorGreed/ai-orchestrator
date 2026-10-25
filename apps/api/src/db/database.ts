@@ -58,6 +58,7 @@ import {
   type McpSandboxSettings,
   type McpSandboxStatus
 } from "@ai-orchestrator/shared";
+import { isEmptyDataLabels, mergeDataLabels, parseStoredDataLabels, type DataLabels } from "@ai-orchestrator/shared";
 import { queuedRunTimeoutMs, STUCK_JOB_MARGIN_MS } from "./queue-timeouts.js";
 import { ProjectNotEmptyError } from "./store-errors.js";
 
@@ -199,6 +200,8 @@ interface SessionMemoryRow {
   namespace: string;
   session_id: string;
   messages_json: string;
+  /** Migration 37 — the memory's data labels; null on rows written while labels were not tracked. */
+  labels_json?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -213,6 +216,8 @@ interface SessionToolCacheRow {
   output_json: string;
   error: string | null;
   summary_json: string | null;
+  /** Migration 37 — the cached result's data labels; null when not tracked. */
+  labels_json?: string | null;
   created_at: string;
 }
 
@@ -3616,6 +3621,10 @@ export class SqliteStore {
     this.ensureColumn("gate_case_requests", "gate_authority", "TEXT");
     this.ensureColumn("release_approval_requests", "gate_checks_json", "TEXT");
     this.ensureColumn("release_approval_requests", "gate_authority", "TEXT");
+
+    // Migration 37 — Phase 16 data labels on session memory and the session tool cache (null: none recorded).
+    this.ensureColumn("session_memory", "labels_json", "TEXT");
+    this.ensureColumn("session_tool_cache", "labels_json", "TEXT");
     // Gates enforced before admission existed admit every case their sets hold now, so they judge as before. Once only:
     // afterwards an enforced gate without a stored admission fails closed (counts nothing until an admin admits its cases).
     this.transaction(() => {
@@ -4360,9 +4369,23 @@ export class SqliteStore {
     }
   }
 
-  saveSessionMemory(namespace: string, sessionId: string, messages: ChatMessage[]): void {
+  /** Migration 37 — the labels stored with a session's memory; null when none were recorded. */
+  loadSessionMemoryLabels(namespace: string, sessionId: string): DataLabels | null {
+    const row = this.queryOne<{ labels_json: string | null }>(
+      `SELECT labels_json FROM session_memory WHERE namespace = ? AND session_id = ?`,
+      [namespace, sessionId]
+    );
+    return row ? parseStoredDataLabels(row.labels_json) : null;
+  }
+
+  /**
+   * Saves a session's memory. `labels` (Phase 16) are written only when
+   * given (the run tracks labels), merged with the labels already stored;
+   * without them the stored labels are left as they are.
+   */
+  saveSessionMemory(namespace: string, sessionId: string, messages: ChatMessage[], labels?: DataLabels): void {
     const existing = this.queryOne<SessionMemoryRow>(
-      `SELECT namespace, session_id, messages_json, created_at, updated_at
+      `SELECT namespace, session_id, messages_json, labels_json, created_at, updated_at
        FROM session_memory
        WHERE namespace = ? AND session_id = ?`,
       [namespace, sessionId]
@@ -4370,14 +4393,28 @@ export class SqliteStore {
     const now = new Date().toISOString();
     const createdAt = existing ? toString(existing.created_at) : now;
 
-    this.exec(
-      `INSERT INTO session_memory (namespace, session_id, messages_json, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?)
-       ON CONFLICT(namespace, session_id) DO UPDATE SET
-         messages_json = excluded.messages_json,
-         updated_at = excluded.updated_at`,
-      [namespace, sessionId, JSON.stringify(messages), createdAt, now]
-    );
+    if (labels) {
+      const merged = mergeDataLabels([parseStoredDataLabels(existing?.labels_json ?? null), labels].filter((entry): entry is DataLabels => Boolean(entry)));
+      const labelsJson = merged && !isEmptyDataLabels(merged) ? JSON.stringify({ ...merged, source: "propagated" }) : existing?.labels_json ?? null;
+      this.exec(
+        `INSERT INTO session_memory (namespace, session_id, messages_json, labels_json, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(namespace, session_id) DO UPDATE SET
+           messages_json = excluded.messages_json,
+           labels_json = excluded.labels_json,
+           updated_at = excluded.updated_at`,
+        [namespace, sessionId, JSON.stringify(messages), labelsJson, createdAt, now]
+      );
+    } else {
+      this.exec(
+        `INSERT INTO session_memory (namespace, session_id, messages_json, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(namespace, session_id) DO UPDATE SET
+           messages_json = excluded.messages_json,
+           updated_at = excluded.updated_at`,
+        [namespace, sessionId, JSON.stringify(messages), createdAt, now]
+      );
+    }
 
     this.persist();
   }
@@ -4391,6 +4428,8 @@ export class SqliteStore {
     output: unknown;
     error?: string;
     summary?: unknown;
+    /** Phase 16 — given only while the run tracks labels. */
+    labels?: DataLabels;
   }): {
     id: string;
     namespace: string;
@@ -4401,6 +4440,7 @@ export class SqliteStore {
     output: unknown;
     error?: string;
     summary?: unknown;
+    labels?: DataLabels | null;
     createdAt: string;
   } {
     const now = new Date().toISOString();
@@ -4417,8 +4457,9 @@ export class SqliteStore {
           output_json,
           error,
           summary_json,
+          labels_json,
           created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         id,
         input.namespace,
@@ -4429,6 +4470,7 @@ export class SqliteStore {
         JSON.stringify(input.output ?? null),
         input.error ?? null,
         input.summary === undefined ? null : JSON.stringify(input.summary),
+        input.labels && !isEmptyDataLabels(input.labels) ? JSON.stringify(input.labels) : null,
         now
       ]
     );
@@ -4457,6 +4499,7 @@ export class SqliteStore {
       output: input.output ?? null,
       error: input.error,
       summary: input.summary,
+      ...(input.labels && !isEmptyDataLabels(input.labels) ? { labels: input.labels } : {}),
       createdAt: now
     };
   }
@@ -4475,6 +4518,7 @@ export class SqliteStore {
     args: Record<string, unknown>;
     error?: string;
     summary?: unknown;
+    labels?: DataLabels | null;
     createdAt: string;
   }> {
     const limit =
@@ -4487,7 +4531,7 @@ export class SqliteStore {
     let rows: SessionToolCacheRow[];
     if (toolName) {
       rows = this.queryAll<SessionToolCacheRow>(
-        `SELECT id, namespace, session_id, tool_name, tool_call_id, args_json, output_json, error, summary_json, created_at
+        `SELECT id, namespace, session_id, tool_name, tool_call_id, args_json, output_json, error, summary_json, labels_json, created_at
          FROM session_tool_cache
          WHERE namespace = ? AND session_id = ? AND tool_name = ?
          ORDER BY created_at DESC
@@ -4496,7 +4540,7 @@ export class SqliteStore {
       );
     } else {
       rows = this.queryAll<SessionToolCacheRow>(
-        `SELECT id, namespace, session_id, tool_name, tool_call_id, args_json, output_json, error, summary_json, created_at
+        `SELECT id, namespace, session_id, tool_name, tool_call_id, args_json, output_json, error, summary_json, labels_json, created_at
          FROM session_tool_cache
          WHERE namespace = ? AND session_id = ?
          ORDER BY created_at DESC
@@ -4520,6 +4564,7 @@ export class SqliteStore {
         args,
         error: row.error ? toString(row.error) : undefined,
         summary: row.summary_json ? parseJsonSafe(row.summary_json) : undefined,
+        ...(parseStoredDataLabels(row.labels_json ?? null) ? { labels: parseStoredDataLabels(row.labels_json ?? null) } : {}),
         createdAt: toString(row.created_at)
       };
     });
@@ -4539,10 +4584,11 @@ export class SqliteStore {
     output: unknown;
     error?: string;
     summary?: unknown;
+    labels?: DataLabels | null;
     createdAt: string;
   } | null {
     const row = this.queryOne<SessionToolCacheRow>(
-      `SELECT id, namespace, session_id, tool_name, tool_call_id, args_json, output_json, error, summary_json, created_at
+      `SELECT id, namespace, session_id, tool_name, tool_call_id, args_json, output_json, error, summary_json, labels_json, created_at
        FROM session_tool_cache
        WHERE namespace = ? AND session_id = ? AND id = ?`,
       [input.namespace, input.sessionId, input.id]
@@ -4567,6 +4613,7 @@ export class SqliteStore {
       output: parseJsonSafe(row.output_json),
       error: row.error ? toString(row.error) : undefined,
       summary: row.summary_json ? parseJsonSafe(row.summary_json) : undefined,
+      ...(parseStoredDataLabels(row.labels_json ?? null) ? { labels: parseStoredDataLabels(row.labels_json ?? null) } : {}),
       createdAt: toString(row.created_at)
     };
   }

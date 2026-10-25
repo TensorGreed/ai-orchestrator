@@ -38,7 +38,7 @@
  * project runs on its owner's execute share, not on the user.
  */
 
-import { DEFAULT_PROJECT_ID, type MCPServerConfig, type ReleaseChannel, type SecretReference, type Workflow } from "@ai-orchestrator/shared";
+import { DEFAULT_PROJECT_ID, type DataLabels, type MCPServerConfig, type ReleaseChannel, type SecretReference, type Workflow } from "@ai-orchestrator/shared";
 import type {
   AgentSessionArtifactStore,
   KnowledgeBaseStore,
@@ -86,7 +86,10 @@ export interface RunScopeDeps {
   knowledgeBaseStoreFor: (projectId: string | null | undefined) => KnowledgeBaseStore;
   sessions: {
     loadMemory: (namespace: string, sessionId: string) => ChatMessages;
-    saveMemory: (namespace: string, sessionId: string, messages: ChatMessages) => void;
+    /** `labels` (Phase 16) are passed only while the run tracks data labels. */
+    saveMemory: (namespace: string, sessionId: string, messages: ChatMessages, labels?: DataLabels) => void;
+    /** Phase 16 — labels stored with a session's memory; null when none were recorded. */
+    loadMemoryLabels?: (namespace: string, sessionId: string) => DataLabels | null;
     saveToolCall: (input: ToolCallInput) => ToolCallRecord;
     listToolCalls: (input: { namespace: string; sessionId: string; toolName?: string; limit?: number }) => ToolCallSummary[];
     getToolCall: (input: { namespace: string; sessionId: string; id: string }) => ToolCallRecord | null;
@@ -209,8 +212,16 @@ export function createRunScope(deps: RunScopeDeps) {
         if (messages.length > 0 || !legacyReadable(namespace)) return messages;
         return deps.sessions.loadMemory(namespace, sessionId);
       },
-      saveMessages: async (namespace, sessionId, messages) => {
-        deps.sessions.saveMemory(key(namespace), sessionId, messages);
+      saveMessages: async (namespace, sessionId, messages, options) => {
+        if (options?.labels) deps.sessions.saveMemory(key(namespace), sessionId, messages, options.labels);
+        else deps.sessions.saveMemory(key(namespace), sessionId, messages);
+      },
+      loadLabels: async (namespace, sessionId) => {
+        const loadLabels = deps.sessions.loadMemoryLabels;
+        if (!loadLabels) return null;
+        // Labels sit on the row the messages were read from: the scoped one, else the legacy one.
+        if (deps.sessions.loadMemory(key(namespace), sessionId).length > 0 || !legacyReadable(namespace)) return loadLabels(key(namespace), sessionId);
+        return loadLabels(namespace, sessionId);
       }
     };
 

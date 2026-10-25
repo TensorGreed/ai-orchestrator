@@ -14,7 +14,7 @@
 
 import { randomUUID } from "node:crypto";
 import type { AgentSessionMemoryStore, AgentSessionToolDataStore, AgentSessionToolRecord } from "@ai-orchestrator/agent-runtime";
-import type { McpElicitationResult, ModelMemorySeed } from "@ai-orchestrator/shared";
+import type { DataLabels, McpElicitationResult, ModelMemorySeed } from "@ai-orchestrator/shared";
 import type { AgentSessionArtifactRecord, AgentSessionArtifactStore, KnowledgeBaseStore } from "@ai-orchestrator/workflow-engine";
 
 export const REPLAY_KB_WRITE_REFUSED = "Knowledge base writes are not allowed in a replay.";
@@ -41,16 +41,20 @@ export function createReplaySandbox(seed?: ModelMemorySeed | null): ReplaySandbo
   }
   const toolCalls = new Map<string, AgentSessionToolRecord[]>();
   const artifacts = new Map<string, AgentSessionArtifactRecord>();
+  const memoryLabels = new Map<string, DataLabels>();
   let memoryWrites = 0;
   let toolCacheWrites = 0;
   let artifactWrites = 0;
 
   const memoryStore: AgentSessionMemoryStore = {
     loadMessages: async (namespace, sessionId) => structuredClone((memory.get(sessionKey(namespace, sessionId)) ?? []) as Awaited<ReturnType<AgentSessionMemoryStore["loadMessages"]>>),
-    saveMessages: async (namespace, sessionId, messages) => {
+    saveMessages: async (namespace, sessionId, messages, options) => {
       memoryWrites += 1;
       memory.set(sessionKey(namespace, sessionId), structuredClone(messages));
-    }
+      // Phase 16 — labels stay inside the sandbox like the messages do.
+      if (options?.labels) memoryLabels.set(sessionKey(namespace, sessionId), structuredClone(options.labels));
+    },
+    loadLabels: async (namespace, sessionId) => structuredClone(memoryLabels.get(sessionKey(namespace, sessionId)) ?? null)
   };
 
   const toolDataStore: AgentSessionToolDataStore = {

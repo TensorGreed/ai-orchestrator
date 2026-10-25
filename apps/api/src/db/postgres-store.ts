@@ -1,7 +1,7 @@
 import { Pool, type PoolConfig } from "pg";
 import { randomUUID } from "node:crypto";
 import type { ChatMessage, Folder, Project, Workflow, WorkflowListItem } from "@ai-orchestrator/shared";
-import { DEFAULT_PROJECT_ID } from "@ai-orchestrator/shared";
+import { DEFAULT_PROJECT_ID, isEmptyDataLabels, mergeDataLabels, parseStoredDataLabels, type DataLabels } from "@ai-orchestrator/shared";
 import { runMigrations } from "./migrations.js";
 import { queuedRunTimeoutMs, STUCK_JOB_MARGIN_MS } from "./queue-timeouts.js";
 import { ProjectNotEmptyError } from "./store-errors.js";
@@ -822,13 +822,37 @@ export class PostgresStore {
     }
   }
 
-  async saveSessionMemory(namespace: string, sessionId: string, messages: ChatMessage[]): Promise<void> {
-    const row = await this.queryOne<{ created_at: string }>(
-      `SELECT created_at FROM session_memory WHERE namespace = $1 AND session_id = $2`,
+  /** Migration 37 — the labels stored with a session's memory; null when none were recorded. */
+  async loadSessionMemoryLabels(namespace: string, sessionId: string): Promise<DataLabels | null> {
+    const row = await this.queryOne<{ labels_json: string | null }>(
+      `SELECT labels_json FROM session_memory WHERE namespace = $1 AND session_id = $2`,
+      [namespace, sessionId]
+    );
+    return row ? parseStoredDataLabels(row.labels_json) : null;
+  }
+
+  /** Saves a session's memory; `labels` (Phase 16) only while the run tracks labels, merged with the stored ones. */
+  async saveSessionMemory(namespace: string, sessionId: string, messages: ChatMessage[], labels?: DataLabels): Promise<void> {
+    const row = await this.queryOne<{ created_at: string; labels_json: string | null }>(
+      `SELECT created_at, labels_json FROM session_memory WHERE namespace = $1 AND session_id = $2`,
       [namespace, sessionId]
     );
     const now = new Date().toISOString();
     const createdAt = row ? toStr(row.created_at) : now;
+    if (labels) {
+      const merged = mergeDataLabels([parseStoredDataLabels(row?.labels_json ?? null), labels].filter((entry): entry is DataLabels => Boolean(entry)));
+      const labelsJson = merged && !isEmptyDataLabels(merged) ? JSON.stringify({ ...merged, source: "propagated" }) : row?.labels_json ?? null;
+      await this.execute(
+        `INSERT INTO session_memory (namespace, session_id, messages_json, labels_json, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         ON CONFLICT (namespace, session_id) DO UPDATE SET
+           messages_json = EXCLUDED.messages_json,
+           labels_json = EXCLUDED.labels_json,
+           updated_at = EXCLUDED.updated_at`,
+        [namespace, sessionId, JSON.stringify(messages), labelsJson, createdAt, now]
+      );
+      return;
+    }
     await this.execute(
       `INSERT INTO session_memory (namespace, session_id, messages_json, created_at, updated_at)
        VALUES ($1, $2, $3, $4, $5)
@@ -852,6 +876,7 @@ export class PostgresStore {
     output: unknown;
     error?: string;
     summary?: unknown;
+    labels?: DataLabels;
   }): Promise<{
     id: string;
     namespace: string;
@@ -867,8 +892,8 @@ export class PostgresStore {
     const now = new Date().toISOString();
     const id = randomUUID();
     await this.execute(
-      `INSERT INTO session_tool_cache (id, namespace, session_id, tool_name, tool_call_id, args_json, output_json, error, summary_json, created_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+      `INSERT INTO session_tool_cache (id, namespace, session_id, tool_name, tool_call_id, args_json, output_json, error, summary_json, labels_json, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
       [
         id,
         input.namespace,
@@ -879,6 +904,7 @@ export class PostgresStore {
         JSON.stringify(input.output ?? null),
         input.error ?? null,
         input.summary === undefined ? null : JSON.stringify(input.summary),
+        input.labels && !isEmptyDataLabels(input.labels) ? JSON.stringify(input.labels) : null,
         now
       ]
     );
@@ -906,6 +932,7 @@ export class PostgresStore {
       output: input.output ?? null,
       error: input.error,
       summary: input.summary,
+      ...(input.labels && !isEmptyDataLabels(input.labels) ? { labels: input.labels } : {}),
       createdAt: now
     };
   }
@@ -940,12 +967,13 @@ export class PostgresStore {
       args_json: string;
       error: string | null;
       summary_json: string | null;
+      labels_json: string | null;
       created_at: string;
     }>;
 
     if (input.toolName) {
       rows = await this.query(
-        `SELECT id, namespace, session_id, tool_name, tool_call_id, args_json, error, summary_json, created_at
+        `SELECT id, namespace, session_id, tool_name, tool_call_id, args_json, error, summary_json, labels_json, created_at
          FROM session_tool_cache
          WHERE namespace = $1 AND session_id = $2 AND tool_name = $3
          ORDER BY created_at DESC LIMIT $4`,
@@ -953,7 +981,7 @@ export class PostgresStore {
       );
     } else {
       rows = await this.query(
-        `SELECT id, namespace, session_id, tool_name, tool_call_id, args_json, error, summary_json, created_at
+        `SELECT id, namespace, session_id, tool_name, tool_call_id, args_json, error, summary_json, labels_json, created_at
          FROM session_tool_cache
          WHERE namespace = $1 AND session_id = $2
          ORDER BY created_at DESC LIMIT $3`,
@@ -976,6 +1004,7 @@ export class PostgresStore {
         args,
         error: row.error ? toStr(row.error) : undefined,
         summary: row.summary_json ? parseJsonSafe(row.summary_json) : undefined,
+        ...(parseStoredDataLabels(row.labels_json) ? { labels: parseStoredDataLabels(row.labels_json) } : {}),
         createdAt: toStr(row.created_at)
       };
     });
@@ -1007,9 +1036,10 @@ export class PostgresStore {
       output_json: string;
       error: string | null;
       summary_json: string | null;
+      labels_json: string | null;
       created_at: string;
     }>(
-      `SELECT id, namespace, session_id, tool_name, tool_call_id, args_json, output_json, error, summary_json, created_at
+      `SELECT id, namespace, session_id, tool_name, tool_call_id, args_json, output_json, error, summary_json, labels_json, created_at
        FROM session_tool_cache
        WHERE namespace = $1 AND session_id = $2 AND id = $3`,
       [input.namespace, input.sessionId, input.id]

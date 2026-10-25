@@ -139,7 +139,7 @@ import { registerAuditBundleRoutes } from "./audit-bundle-routes.js";
 import { registerReplayRoutes } from "./replay-routes.js";
 import { registerReplayCaptureRoutes } from "./replay-capture-routes.js";
 import { deriveCaptureSurrogateKey, ReplayCaptureService, type CaptureSource, type CaptureTicket } from "./services/replay-capture-service.js";
-import type { CaptureInputOrigin } from "./services/capture-masking.js";
+import { inputProvenance, type CaptureInputOrigin } from "./services/capture-masking.js";
 import { registerEvalRoutes } from "./eval-routes.js";
 import { registerGoldenSetFileRoutes } from "./golden-set-file-routes.js";
 import { GOLDEN_SET_FILE_DEFAULT_MAX_BYTES, GUARD_SIMULATION_MAX_CASES_DEFAULT, GUARD_SIMULATION_RETENTION_DAYS } from "@ai-orchestrator/shared";
@@ -1982,7 +1982,13 @@ export function createApp(
           triggeredBy: input.triggeredBy,
           toolPolicySubject: input.policySubject ?? resolveToolPolicySubject(input.workflow.id, input.policyActor),
           resumeState: input.resumeState,
-          approvalDecision: input.approvalDecision
+          approvalDecision: input.approvalDecision,
+          // Phase 16 — where the run's input came from, as the server knows it (the capture rules); used only when a profile tracks labels.
+          inputLabels: {
+            provenance: [inputProvenance(input.triggerType, input.captureInputOrigin ?? (input.policyActor ? "user" : undefined))],
+            dataClasses: [],
+            source: "propagated"
+          }
         },
         {
           // Phase 15.3 — a recorded run records its model calls; a model replay answers them from the tape.
@@ -3049,7 +3055,8 @@ export function createApp(
     knowledgeBaseStoreFor: (projectId) => knowledgeBaseStoreForRun(projectId),
     sessions: {
       loadMemory: (namespace, sessionId) => store.loadSessionMemory(namespace, sessionId),
-      saveMemory: (namespace, sessionId, messages) => store.saveSessionMemory(namespace, sessionId, messages),
+      saveMemory: (namespace, sessionId, messages, labels) => store.saveSessionMemory(namespace, sessionId, messages, labels),
+      loadMemoryLabels: (namespace, sessionId) => store.loadSessionMemoryLabels(namespace, sessionId),
       saveToolCall: (input) => store.saveSessionToolCall(input),
       listToolCalls: (input) => store.listSessionToolCalls(input),
       getToolCall: (input) => store.getSessionToolCall(input),

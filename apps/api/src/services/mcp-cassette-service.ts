@@ -120,7 +120,9 @@ export class MemorySeedCapture {
         this.capture(namespace, sessionId, messages);
         return messages;
       },
-      saveMessages: (namespace, sessionId, messages) => store.saveMessages(namespace, sessionId, messages)
+      saveMessages: (namespace, sessionId, messages, options) =>
+        options ? store.saveMessages(namespace, sessionId, messages, options) : store.saveMessages(namespace, sessionId, messages),
+      ...(store.loadLabels ? { loadLabels: store.loadLabels.bind(store) } : {})
     };
   }
 
