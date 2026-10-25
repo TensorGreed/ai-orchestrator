@@ -104,9 +104,6 @@ Attach **Protection Provider** nodes to a Guard node's **protection** port (0..N
 | `keyed_hash` | no | required |
 | `aes_gcm` | yes | required |
 | `token_vault` | yes | only for deterministic tokens |
-| `surrogate` | no (one-way) | the deployment's surrogate key; none to choose |
-
-A **surrogate** swaps each value for a realistic stand-in of the same shape (an email stays an email, a card number stays Luhn-valid), so downstream steps keep working. It is one-way: asking for the original is refused with "Surrogates are one-way; use the token vault if you need the original back". Credentials, private keys and tokens are still fully redacted. See [Data labels and destinations](./data-labels-and-destinations.md).
 
 Keys are stored secrets chosen by reference (`keySecretRef.secretId`); the workflow never holds a key, and the key is read from `SecretService` only when a value is protected. The token vault keeps values in the `guard_token_vault` table, sealed with AES-256-GCM under the instance master key and bound to its purpose, so tokens still resolve after a restart and a database dump does not reveal them.
 

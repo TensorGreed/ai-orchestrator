@@ -138,8 +138,8 @@ Destinations do nothing on their own. They only matter once a guard profile has 
 Open **Security → Data destinations**.
 
 - **Your destinations** lists the rows an admin added: what each one matches, its tier, its region and the data classes it is approved to hold. **Add destination** opens the form.
-- **Not classified yet** lists the providers, MCP servers, web addresses and connectors your workflows and MCP servers are configured to reach that nothing covers, so they count as public. **Classify** opens the form already filled in; pick the tier and save. The list is worked out from configuration only (no traffic is stored), shows hosts only (never paths, queries or credentials), and shows only workflows and MCP servers you can read.
-- **Built-in** shows the read-only rows every deployment has. To change one, add a destination for the same host or range: your row wins.
+- **Not classified yet** lists the providers, MCP servers, web addresses and connectors your workflows and MCP servers are configured to reach that nothing covers, so they count as public. **Classify** opens the form already filled in, host included, with the tier it has today (public); pick a nearer tier and save. The list is worked out from configuration only (no traffic is stored), shows hosts only (never paths, queries or credentials), and shows only workflows and MCP servers you can read.
+- **Built-in** shows the read-only rows every deployment has. Admins can **Override** one: the form opens with its host and tier filled in, and a region under Advanced. Your row for the same host or range wins.
 
 Everyone signed in can see the tab. Only admins add, change or remove destinations, and every change is written to the audit log (`data_destination.created`, `.updated`, `.deleted`).
 
@@ -147,20 +147,22 @@ Everyone signed in can see the tab. Only admins add, change or remove destinatio
 
 | Kind | Matches on |
 |---|---|
-| Model provider | The provider id (for example `openai`), optionally only at one host |
-| MCP server | The registry server id, or its host |
-| Connector | The connector type, optionally only at one host |
+| Model provider | The provider id (for example `openai`), best together with the host it calls |
+| MCP server | The registry server id, its host, or both |
+| Connector | The connector type, best together with its host |
 | Web address | An exact host (`api.example.com`), a wildcard (`*.corp.example`, which covers subdomains but not `corp.example` itself) or an IP range (`10.20.0.0/16`) |
 
 Host and range rows apply to every kind: an MCP server at `10.1.2.3` is private because of the `10.0.0.0/8` row.
 
-When several rows match, the most specific one wins: an exact id beats an exact host, an exact host beats a wildcard, a longer wildcard beats a shorter one, and a wildcard beats an IP range (the narrowest range wins among ranges). Your row beats an equally specific built-in. If two of your rows are equally specific, the stricter tier wins. A request that was redirected is judged by its strictest hop. A destination nothing matches is public.
+**Without a web address a row can only make matching calls stricter.** Whoever builds a workflow chooses the host a provider, MCP server or connector calls, so a row that names only an id or a connector type never loosens what that host resolves to on its own. For example, a row "provider `openai_compatible` is private" does not make a node pointed at `api.together.xyz` private: the call is judged by the stricter of the row and the host (public here). Add the host to the row (`openai_compatible` at `llm.corp.example`) to classify your in-house server. A row with an id and a host is authoritative for that host.
+
+When several rows match, the most specific one wins: an id with a host beats an exact host, an exact host beats a wildcard, a longer wildcard beats a shorter one, and a wildcard beats an IP range (the narrowest range wins among ranges). Your row beats an equally specific built-in. If two of your rows are equally specific, the stricter tier wins. A request that was redirected is judged by its strictest hop. A destination nothing matches is public, and so is a host that is not a plain host name (anything with `@`, a path or other URL parts).
 
 ### Advanced: region and approved classes
 
 Under **Advanced** in the form:
 
-- **Region**: a tag such as `eu-west-1`. Tags are lower-cased and joined with dashes (`EU West 1` becomes `eu-west-1`). A rule that allows region `eu` covers `eu-west-1` and `eu-central-1`, but not `europe`. A destination with no region is `unknown`, which a region rule never allows unless it lists `unknown`.
+- **Region**: a tag such as `eu-west-1`. Tags are lower-cased and joined with dashes (`EU West 1` becomes `eu-west-1`). A rule that allows region `eu` covers `eu-west-1` and `eu-central-1`, but not `europe`. A destination with no region is `unknown`, which a region rule never allows unless it lists `unknown`. Regions apply only to vendor and public destinations: this machine and your private network always pass a region check.
 - **Approved data classes**: classes this destination may hold whatever its tier, for example `email` for your CRM vendor. A destination rule never fires for a class the destination is approved to hold.
 
 ### Destination rules in a profile
@@ -185,13 +187,9 @@ Destination rules live in the profile document under `destinations.rules`. Each 
 
 A profile without `destinations` keeps its hash and behaves exactly as before. The profile editor shows a profile's destination rules as plain sentences; change them with **Edit as JSON**.
 
-The data classes a rule sees are the ones found in the outgoing content plus the ones the data's labels carry. When a class is carried only by the labels (it came from somewhere sensitive but is not in the text), there is nothing to redact, mask or protect, so those actions fall back to the profile's **No protection provider** setting (block by default), and the verdict says it was "matched by where the data came from, not found in the text".
-
-### Surrogates
-
-The **Surrogate** protection provider swaps sensitive values for realistic stand-ins of the same shape (an email stays an email). Surrogates are one-way: there is no way back to the original, and asking for one is refused with "Surrogates are one-way; use the token vault if you need the original back". A surrogate a run issued is not counted as sensitive data again when that run sends it on, and an email at `@surrogate.invalid` is always recognised as a surrogate.
+The data classes a rule sees are the ones found in the outgoing content plus the ones the data's labels carry. When a class is carried only by the labels (it came from somewhere sensitive but is not in the text), there is nothing to redact, mask or protect, so those actions fall back to the profile's **No protection provider** setting when that is block or require approval, and to block otherwise (a rule written to keep data in never lets it out). The verdict says it was "matched by where the data came from, not found in the text".
 
 ### Limits
 
 - Destination rows are stored in SQLite. On Postgres the destination routes answer 501 in this release.
-- A surrogate read back from session memory by a later run is no longer known to be one and may be treated as real data; approve the class on that destination if this over-blocks.
+- In this release destination rules are validated, stored and shown, but not yet applied to model, MCP or outbound calls: writing them changes no run.
