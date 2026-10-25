@@ -439,7 +439,7 @@ Tokenises, encrypts, hashes or masks sensitive data for a guard. Attach it to a 
 
 | Field | Type | Required | Values |
 |---|---|---|---|
-| `providerId` | `string` | yes | `mask` \| `keyed_hash` \| `aes_gcm` \| `token_vault` |
+| `providerId` | `string` | yes | `mask` \| `keyed_hash` \| `aes_gcm` \| `token_vault` \| `surrogate` |
 | `dataClasses` | `array<string>` | yes | — |
 | `keySecretRef` | `object` | no | — |
 | `deterministic` | `boolean` | no | — |
