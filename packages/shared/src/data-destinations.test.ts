@@ -37,6 +37,35 @@ describe("hosts and patterns", () => {
     expect(normalizeDestinationHost("not a host")).toBeUndefined();
     expect(normalizeDestinationHost("010.0.0.1")).toBeUndefined();
     expect(normalizeDestinationHost("0x7f.1")).toBeUndefined();
+    expect(normalizeDestinationHost("[::1]")).toBe("::1");
+    expect(normalizeDestinationHost("localhost:65535")).toBe("localhost");
+  });
+
+  it("accepts host names only, refusing authority and URL spellings", () => {
+    for (const bad of [
+      "localhost:80@evil.com",
+      "user@localhost",
+      "[::1].evil.com",
+      "[::1]evil",
+      "[::1]:80x",
+      "[::1]:123456",
+      "[localhost]",
+      "localhost:evil",
+      "localhost:",
+      "localhost:123456",
+      "localhost/evil.com",
+      "evil.com/localhost",
+      "localhost\\evil.com",
+      "localhost?x=1",
+      "localhost#frag",
+      "local host",
+      "localhost\tevil",
+      "http://localhost",
+      "fe80::1%eth0"
+    ]) {
+      expect(normalizeDestinationHost(bad), bad).toBeUndefined();
+      expect(resolveDestination({ kind: "http", host: bad }, []).tier, bad).toBe("public");
+    }
     // Built from a URL, odd IP spellings are already canonical.
     expect(destinationHostOfUrl("http://0x7f.1/")).toBe("127.0.0.1");
   });
@@ -138,15 +167,18 @@ describe("built-in destinations", () => {
 });
 
 describe("resolveDestination precedence", () => {
-  it("exact id beats exact host", () => {
-    const rows = [row({ kind: "model_provider", targetId: "corp-llm", tier: "private" }), row({ kind: "http", host: "llm.example.com", tier: "public" })];
+  it("an id row with a host beats an exact host row", () => {
+    const rows = [row({ kind: "model_provider", targetId: "corp-llm", host: "llm.example.com", tier: "private" }), row({ kind: "http", host: "llm.example.com", tier: "public" })];
     expect(resolveDestination({ kind: "model_provider", id: "corp-llm", host: "llm.example.com" }, rows).tier).toBe("private");
   });
 
   it("an id row with a host constraint needs both and beats an id-only row", () => {
     const rows = [row({ kind: "mcp_server", targetId: "gh", tier: "vendor" }), row({ kind: "mcp_server", targetId: "gh", host: "gh.internal.example", tier: "private" })];
     expect(resolveDestination({ kind: "mcp_server", id: "gh", host: "gh.internal.example" }, rows).tier).toBe("private");
-    expect(resolveDestination({ kind: "mcp_server", id: "gh", host: "api.github.com" }, rows).tier).toBe("vendor");
+    // The id-only row cannot loosen what api.github.com resolves to (public).
+    expect(resolveDestination({ kind: "mcp_server", id: "gh", host: "api.github.com" }, rows)).toMatchObject({ tier: "public", matchedBy: "unmatched" });
+    // Without a host, the id-only row applies.
+    expect(resolveDestination({ kind: "mcp_server", id: "gh" }, rows).tier).toBe("vendor");
   });
 
   it("id rows only match their kind", () => {
@@ -207,6 +239,47 @@ describe("resolveDestination precedence", () => {
   });
 });
 
+describe("rows matched by id alone never loosen the host", () => {
+  it("an id-only private row for openai-compatible does not make a public host private", () => {
+    const rows = [row({ kind: "model_provider", targetId: "openai-compatible", tier: "private" })];
+    expect(resolveDestination({ kind: "model_provider", id: "openai-compatible", host: "api.together.xyz" }, rows)).toMatchObject({ tier: "public", matchedBy: "unmatched" });
+    // Pointed at the in-house server on a private address, it stays private.
+    expect(resolveDestination({ kind: "model_provider", id: "openai-compatible", host: "10.1.2.3" }, rows).tier).toBe("private");
+    // A provider with no network host (no host on the call) takes the row.
+    expect(resolveDestination({ kind: "model_provider", id: "openai-compatible" }, rows)).toMatchObject({ tier: "private", matchedBy: "row" });
+  });
+
+  it("openai with a custom base URL resolves by that host, whatever an id-only row says", () => {
+    const rows = [row({ kind: "model_provider", targetId: "openai", tier: "private", region: "eu", holdsDataClasses: ["email"] })];
+    expect(resolveDestination({ kind: "model_provider", id: "openai", host: "proxy.example.net" }, rows).tier).toBe("public");
+    // On the default host the built-in vendor row stands (a tie keeps the host's own resolution, so no region or classes are added).
+    expect(resolveDestination({ kind: "model_provider", id: "openai", host: "api.openai.com" }, rows)).toMatchObject({ tier: "vendor", matchedBy: "builtin", region: "unknown", holdsDataClasses: [] });
+    // At localhost the stricter id row wins.
+    expect(resolveDestination({ kind: "model_provider", id: "openai", host: "localhost" }, rows)).toMatchObject({ tier: "private", matchedBy: "row" });
+  });
+
+  it("an id-only row can make a call stricter", () => {
+    const rows = [row({ kind: "model_provider", targetId: "openai", tier: "public" })];
+    expect(resolveDestination({ kind: "model_provider", id: "openai", host: "api.openai.com" }, rows)).toMatchObject({ tier: "public", matchedBy: "row" });
+  });
+
+  it("connector rows with only a type never loosen the database host", () => {
+    const rows = [row({ kind: "connector", targetId: "sql", tier: "private" })];
+    expect(resolveDestination({ kind: "connector", id: "sql", host: "db.public-cloud.example" }, rows).tier).toBe("public");
+    expect(resolveDestination({ kind: "connector", id: "sql", host: "db.corp.internal" }, rows).tier).toBe("private");
+    // A type + host row is authoritative for that host.
+    const withHost = [...rows, row({ kind: "connector", targetId: "sql", host: "db.public-cloud.example", tier: "vendor" })];
+    expect(resolveDestination({ kind: "connector", id: "sql", host: "db.public-cloud.example" }, withHost).tier).toBe("vendor");
+  });
+
+  it("a host that is given but is not a plain host name resolves as public, even with an id-only row", () => {
+    const rows = [row({ kind: "model_provider", targetId: "corp", tier: "local" })];
+    for (const host of ["localhost:80@evil.com", "[::1].evil.com", "localhost:evil", "localhost/x"]) {
+      expect(resolveDestination({ kind: "model_provider", id: "corp", host }, rows).tier, host).toBe("public");
+    }
+  });
+});
+
 describe("resolveRedirectChain", () => {
   const rows = () => [
     row({ kind: "http", host: "eu.example.com", tier: "vendor", region: "eu-west-1", holdsDataClasses: ["email", "phone"] }),
@@ -254,6 +327,10 @@ describe("row input validation", () => {
     expect(messages({ name: "", kind: "http", host: "x.example", tier: "public" })).toContain("Give the destination a name");
     expect(messages({ name: "x", kind: "http", tier: "public" })).toContain("A web address needs a host, a wildcard or an IP range");
     expect(messages({ name: "x", kind: "http", host: "bad host", tier: "public" })[0]).toMatch(/Enter a host name/);
+    for (const host of ["localhost:80@evil.com", "[::1].evil.com", "localhost:evil", "a.example/path", "a.example\\x", "a.example?x"]) {
+      expect(messages({ name: "x", kind: "http", host, tier: "public" })[0], host).toMatch(/Enter a host name/);
+      expect(messages({ name: "x", kind: "model_provider", targetId: "openai", host, tier: "public" })[0], host).toMatch(/Enter a host name/);
+    }
     expect(messages({ name: "x", kind: "http", host: "a.example", targetId: "x", tier: "public" })).toContain("A web address is matched by its host only");
     expect(messages({ name: "x", kind: "model_provider", tier: "vendor" })[0]).toMatch(/Choose the model provider/);
     expect(messages({ name: "x", kind: "connector", host: "a.example", tier: "vendor" })[0]).toMatch(/connector type/);
@@ -278,11 +355,22 @@ describe("row input validation", () => {
     expect(normalizeDataDestinationInput(dataDestinationInputSchema.parse({ name: "W", kind: "http", host: "*.Corp.Example", tier: "private" })).host).toBe("*.corp.example");
     expect(normalizeDataDestinationInput(dataDestinationInputSchema.parse({ name: "C", kind: "http", host: "10.0.0.0/8", tier: "private" })).region).toBe("unknown");
   });
+
+  it("stores a CIDR range as its network address", () => {
+    const store = (host: string) => normalizeDataDestinationInput(dataDestinationInputSchema.parse({ name: "C", kind: "http", host, tier: "private" })).host;
+    expect(store("10.0.0.1/8")).toBe("10.0.0.0/8");
+    expect(store("10.0.0.0/8")).toBe("10.0.0.0/8");
+    expect(store("192.168.17.200/20")).toBe("192.168.16.0/20");
+    expect(store("172.16.0.1/32")).toBe("172.16.0.1/32");
+    expect(store("FD12:3456::1/16")).toBe("fd12::/16");
+    expect(store("::ffff:10.9.9.9/104")).toBe("10.0.0.0/8");
+    expect(store("0.0.0.0/0")).toBe("0.0.0.0/0");
+  });
 });
 
 describe("findUnclassifiedDestinations", () => {
   it("lists configured destinations nothing covers, grouped, with a suggestion", () => {
-    const covered = row({ kind: "mcp_server", targetId: "github", tier: "vendor" });
+    const covered = row({ kind: "mcp_server", targetId: "github", host: "api.githubcopilot.com", tier: "vendor" });
     const list = findUnclassifiedDestinations(
       [
         { ref: { kind: "model_provider", id: "openai", host: "api.openai.com" }, seenIn: "Workflow A" },
@@ -303,7 +391,8 @@ describe("findUnclassifiedDestinations", () => {
     ]);
     expect(list[0]!.seenIn).toEqual(["Workflow A", "Workflow B"]);
     expect(list[0]!.current.tier).toBe("public");
-    expect(list[0]!.suggestion).toEqual({ name: "llm.example.net", kind: "model_provider", targetId: "openai_compatible", host: "llm.example.net", tier: "vendor" });
+    expect(list[0]!.suggestion).toEqual({ name: "llm.example.net", kind: "model_provider", targetId: "openai_compatible", host: "llm.example.net", tier: "public" });
+    expect(list[1]!.suggestion).toEqual({ name: "db.example.org", kind: "connector", targetId: "postgres", host: "db.example.org", tier: "public" });
     expect(list[2]!.suggestion).toMatchObject({ kind: "http", targetId: null, tier: "public" });
   });
 

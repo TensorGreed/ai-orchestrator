@@ -51,7 +51,11 @@ export interface DestinationRef {
   kind: DestinationKind;
   /** Provider id, MCP server registry id, or connector type. */
   id?: string;
-  /** Host name or IP literal of the effective URL (a port or brackets are tolerated). */
+  /**
+   * Host name or IP literal of the effective URL, taken from `URL.hostname`
+   * (a `:port` or IPv6 brackets are tolerated; anything else that is not a
+   * plain host, such as `user@host`, resolves as public).
+   */
   host?: string;
 }
 
@@ -202,23 +206,34 @@ function validHostname(host: string): boolean {
 
 /**
  * A host in canonical form: lower case, no trailing dot, no brackets or port,
- * IP literals in their canonical spelling. Undefined when it is not a host.
+ * IP literals in their canonical spelling. Undefined when it is not a host
+ * name: anything that looks like more of a URL or authority (`@`, `/`, `\`,
+ * `?`, `#`, whitespace, a port that is not 1–5 digits, text after `]` other
+ * than a port) is refused, so it resolves as public. Callers pass
+ * `URL.hostname`, never `URL.host` or the authority.
  */
 export function normalizeDestinationHost(value: string | null | undefined): string | undefined {
   let host = String(value ?? "")
     .trim()
     .toLowerCase();
   if (!host) return undefined;
+  if (/[@/\\?#\s]/.test(host)) return undefined;
   if (host.startsWith("[")) {
     const close = host.indexOf("]");
     if (close < 0) return undefined;
+    const rest = host.slice(close + 1);
+    if (rest !== "" && !/^:\d{1,5}$/.test(rest)) return undefined;
     host = host.slice(1, close);
+    if (!host.includes(":")) return undefined;
   } else if ((host.match(/:/g) ?? []).length === 1) {
-    host = host.slice(0, host.indexOf(":"));
+    const colon = host.indexOf(":");
+    if (!/^\d{1,5}$/.test(host.slice(colon + 1))) return undefined;
+    host = host.slice(0, colon);
   }
   host = host.replace(/\.$/, "");
   const ip = parseIp(host);
   if (ip) return ipToString(ip);
+  if (host.includes(":")) return undefined;
   return validHostname(host) ? host : undefined;
 }
 
@@ -274,6 +289,17 @@ function cidrContains(pattern: Extract<HostPattern, { type: "cidr" }>, ip: IpByt
     remaining -= take;
   }
   return true;
+}
+
+/** A CIDR range in canonical form: the network address (host bits cleared) and the prefix (`10.0.0.1/8` → `10.0.0.0/8`). */
+function cidrToString(pattern: Extract<HostPattern, { type: "cidr" }>): string {
+  let remaining = pattern.prefix;
+  const bytes = pattern.bytes.map((byte) => {
+    const take = Math.max(0, Math.min(8, remaining));
+    remaining -= 8;
+    return byte & ((0xff << (8 - take)) & 0xff);
+  });
+  return `${ipToString({ family: pattern.family, bytes })}/${pattern.prefix}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -358,7 +384,7 @@ export function normalizeDataDestinationInput(input: z.output<typeof dataDestina
   let host: string | null = null;
   if (pattern?.type === "exact") host = pattern.host;
   else if (pattern?.type === "wildcard") host = `*.${pattern.suffix}`;
-  else if (pattern?.type === "cidr") host = input.host!.trim().toLowerCase();
+  else if (pattern?.type === "cidr") host = cidrToString(pattern);
   return {
     name: input.name.trim(),
     kind: input.kind,
@@ -461,15 +487,22 @@ export const UNMATCHED_DESTINATION: Readonly<ResolvedDestination> = Object.freez
   matchedBy: "unmatched"
 }) as Readonly<ResolvedDestination>;
 
-/**
- * The tier, region and approved data classes of a destination. Admin `rows`
- * are considered with the built-in rows; the most specific match wins
- * (exact id > exact host > longest wildcard suffix > narrowest CIDR), an
- * admin row beats an equally specific built-in, and among equally specific
- * rows the stricter tier wins. A destination nothing matches is public.
- */
-export function resolveDestination(ref: DestinationRef, rows: readonly DataDestinationRow[]): ResolvedDestination {
-  const host = normalizeDestinationHost(ref.host);
+function resolvedFrom(row: DataDestinationRow): ResolvedDestination {
+  return {
+    tier: row.tier,
+    region: normalizeRegion(row.region),
+    holdsDataClasses: [...row.holdsDataClasses],
+    matchedBy: row.builtIn ? "builtin" : "row",
+    rowId: row.id,
+    name: row.name
+  };
+}
+
+function bestMatch(
+  ref: DestinationRef,
+  host: string | undefined,
+  rows: readonly DataDestinationRow[]
+): { strength: MatchStrength; row: DataDestinationRow } | undefined {
   const ip = host ? parseIp(host) : null;
   const seen = new Set<string>();
   const candidates: Array<{ strength: MatchStrength; row: DataDestinationRow }> = [];
@@ -481,17 +514,37 @@ export function resolveDestination(ref: DestinationRef, rows: readonly DataDesti
     const strength = matchRow(row, ref, host, ip);
     if (strength) candidates.push({ strength, row });
   }
-  if (candidates.length === 0) return { ...UNMATCHED_DESTINATION, holdsDataClasses: [] };
   candidates.sort(compareCandidates);
-  const best = candidates[0]!.row;
-  return {
-    tier: best.tier,
-    region: normalizeRegion(best.region),
-    holdsDataClasses: [...best.holdsDataClasses],
-    matchedBy: best.builtIn ? "builtin" : "row",
-    rowId: best.id,
-    name: best.name
-  };
+  return candidates[0];
+}
+
+/**
+ * The tier, region and approved data classes of a destination. Admin `rows`
+ * are considered with the built-in rows; the most specific match wins
+ * (exact id > exact host > longest wildcard suffix > narrowest CIDR), an
+ * admin row beats an equally specific built-in, and among equally specific
+ * rows the stricter tier wins. A destination nothing matches is public.
+ *
+ * A row matched by id alone (a provider id, MCP server id or connector type
+ * with no host) never loosens what the call's host resolves to: the host is
+ * set by whoever builds the workflow, not by the admin. When the call has a
+ * host, the result is the stricter of the id row and the host's own
+ * resolution (built-ins, host rows, else public); on a tie the host's
+ * resolution stands, so the id row cannot add a region or approved classes.
+ * A host that is given but is not a plain host name resolves as public.
+ */
+export function resolveDestination(ref: DestinationRef, rows: readonly DataDestinationRow[]): ResolvedDestination {
+  const hostGiven = String(ref.host ?? "").trim() !== "";
+  const host = normalizeDestinationHost(ref.host);
+  const best = bestMatch(ref, host, rows);
+  const idOnly = best !== undefined && best.strength.rank === 4 && best.strength.detail === 0;
+  if (best && !(idOnly && hostGiven)) return resolvedFrom(best.row);
+  if (!best) return { ...UNMATCHED_DESTINATION, holdsDataClasses: [] };
+  // An id-only row against a call with a host: the stricter of the two.
+  const byId = resolvedFrom(best.row);
+  const hostBest = host ? bestMatch({ kind: ref.kind, host }, host, rows) : undefined;
+  const byHost = hostBest ? resolvedFrom(hostBest.row) : { ...UNMATCHED_DESTINATION, holdsDataClasses: [] };
+  return destinationTierRank(byId.tier) > destinationTierRank(byHost.tier) ? byId : byHost;
 }
 
 export interface ResolvedRedirectChain extends ResolvedDestination {
@@ -549,7 +602,9 @@ const MAX_SEEN_IN = 5;
 /**
  * Configured destinations no row covers: they count as public today. Grouped
  * by kind, id and host, sorted by kind then name, each with a suggested row
- * for one-click Classify (the admin still picks the tier).
+ * for one-click Classify: the host is filled in whenever one is known (a row
+ * without a host can only make calls stricter) and the tier starts at public,
+ * the tier the destination has today; the admin picks a looser one on purpose.
  */
 export function findUnclassifiedDestinations(configured: readonly ConfiguredDestination[], rows: readonly DataDestinationRow[]): UnclassifiedDestination[] {
   const groups = new Map<string, UnclassifiedDestination>();
@@ -578,7 +633,8 @@ export function findUnclassifiedDestinations(configured: readonly ConfiguredDest
         kind: suggestedKind,
         targetId: suggestedKind === "http" ? null : targetId ?? null,
         host: host ?? null,
-        tier: suggestedKind === "http" ? "public" : "vendor"
+        // The tier it has today: the admin picks a looser one on purpose.
+        tier: "public"
       }
     });
   }
