@@ -42,6 +42,7 @@ import {
   duplicateDocument,
   setActionRule,
   setCanaries,
+  setLabelTracking,
   setChannelEnabled,
   setDefaultAction,
   setDetector,
@@ -266,6 +267,7 @@ function GuardProfileEditor({
   const protection = (document.protection ?? {}) as { fallback?: string };
   const spotlighting = (document.spotlighting ?? null) as { mode?: string; hardenSystemPrompt?: boolean } | null;
   const canaries = Boolean((document.canaries as { enabled?: boolean } | undefined)?.enabled);
+  const tracksLabels = document.labels === "propagated";
 
   const save = async () => {
     let next = document;
@@ -414,6 +416,17 @@ function GuardProfileEditor({
             <input type="checkbox" checked={canaries} disabled={readOnly} onChange={(event) => update(setCanaries(document, event.target.checked))} />
             <span>Plant canaries in agent system prompts</span>
           </label>
+          <div className="guard-span-2 guard-label-tracking">
+            <label className="guard-check">
+              <input type="checkbox" role="switch" checked={tracksLabels} disabled={readOnly} onChange={(event) => update(setLabelTracking(document, event.target.checked))} />
+              <span>Track where data came from</span>
+            </label>
+            <p className="kb-subtle">
+              Off by default. When on, runs under this profile note where each step's data came from (a person, your system, the web) and what it contains
+              (emails, card numbers), show it on the run, and checks use that instead of fixed assumptions, so text fetched from the web is checked as
+              outside content even after it is copied into a prompt.
+            </p>
+          </div>
         </div>
 
         <fieldset className="guard-shadow" disabled={readOnly}>

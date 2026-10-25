@@ -120,6 +120,17 @@ export function setCanaries(document: GuardDocument, enabled: boolean): GuardDoc
   return next;
 }
 
+/**
+ * Phase 16 — "Track where data came from": `labels: "propagated"` on, field
+ * removed when off (so a profile that never used it keeps its hash).
+ */
+export function setLabelTracking(document: GuardDocument, enabled: boolean): GuardDocument {
+  const next = cloneDocument(document);
+  if (enabled) next.labels = "propagated";
+  else delete next.labels;
+  return next;
+}
+
 /** A copy of a profile under a new id, for "Duplicate" (the built-in profile cannot be edited in place). */
 export function duplicateDocument(document: GuardDocument, id: string, name: string): GuardDocument {
   const next = cloneDocument(document);

@@ -425,6 +425,70 @@ test.describe("golden journeys", () => {
     await expect(page.getByRole("button", { name: "Save new version" })).toBeEnabled();
   });
 
+  test("turns on tracking where data came from and sees it on the run", async ({ page }) => {
+    await openStudio(page);
+    const stamp = Date.now();
+    const profileId = `e2e-labels-${stamp}`;
+    const workflowId = `wf-e2e-labels-${stamp}`;
+    const profile = {
+      id: profileId,
+      name: `E2E labels ${stamp}`,
+      version: "1",
+      channels: { prompt: { detectors: [{ id: "dlp.patterns", threshold: 0.5 }], actions: { email: { action: "allow" } }, defaultAction: { action: "allow" } } }
+    };
+    expect((await page.request.post("/api/guard/profiles", { data: { document: profile } })).ok()).toBeTruthy();
+    const created = await page.request.post("/api/workflows", {
+      data: {
+        id: workflowId,
+        name: `E2E Labels ${stamp}`,
+        schemaVersion: "1.0.0",
+        workflowVersion: 1,
+        nodes: [
+          { id: "hook", type: "webhook_input", name: "Hook", position: { x: 0, y: 0 }, config: { path: `e2e-labels-${stamp}`, method: "POST" } },
+          { id: "note", type: "set_node", name: "Note", position: { x: 100, y: 0 }, config: { assignments: [{ key: "copy", valueTemplate: "{{user_prompt}}" }] } },
+          { id: "guard", type: "guard", name: "Prompt guard", position: { x: 200, y: 0 }, config: {} },
+          { id: "pass", type: "output", name: "Pass", position: { x: 400, y: 0 }, config: { responseTemplate: "passed" } },
+          { id: "blocked", type: "output", name: "Blocked", position: { x: 400, y: 200 }, config: { responseTemplate: "blocked" } }
+        ],
+        edges: [
+          { id: "e1", source: "hook", target: "note" },
+          { id: "e2", source: "note", target: "guard" },
+          { id: "e3", source: "guard", sourceHandle: "pass", target: "pass" },
+          { id: "e4", source: "guard", sourceHandle: "blocked", target: "blocked" }
+        ]
+      }
+    });
+    expect(created.ok()).toBeTruthy();
+    expect((await page.request.put(`/api/guard/bindings/workflows/${workflowId}`, { data: { mode: "override", profileId } })).ok()).toBeTruthy();
+
+    // Security → Profiles: one switch, off by default.
+    await sidebarItem(page, "Security").click();
+    await page.getByRole("tab", { name: "Profiles & bindings" }).click();
+    await page.getByRole("complementary", { name: "Guard profiles" }).getByRole("button", { name: new RegExp(profile.name) }).click();
+    const tracking = page.getByRole("switch", { name: "Track where data came from" });
+    await expect(tracking).not.toBeChecked();
+    await tracking.check();
+    await page.getByRole("button", { name: "Save new version" }).click();
+    await expect
+      .poll(async () => ((await (await page.request.get(`/api/guard/profiles/${profileId}`)).json()) as { latest?: { document?: { labels?: string } } }).latest?.document?.labels, {
+        timeout: 30_000
+      })
+      .toBe("propagated");
+
+    const run = await page.request.post(`/api/workflows/${workflowId}/execute`, { data: { user_prompt: "Write to someone@example.com please" } });
+    expect(run.ok()).toBeTruthy();
+    const { executionId } = (await run.json()) as { executionId: string };
+
+    // Runs: the run's trace says where each step's data came from and what it holds.
+    await sidebarItem(page, "Runs").click();
+    await expect(page.getByRole("heading", { name: "Runs" })).toBeVisible();
+    const row = page.locator(".executions-table tbody tr.execution-row", { hasText: executionId.slice(0, 8) }).first();
+    await expect(row).toBeVisible({ timeout: 30_000 });
+    await row.click();
+    const noteChips = page.locator(".execution-trace-node", { hasText: "note" }).locator(".data-label-chips");
+    await expect(noteChips).toHaveAttribute("aria-label", "Data labels: from a person · contains email", { timeout: 30_000 });
+  });
+
   test("an enforced release gate holds a case added later until an admin admits it", async ({ page }) => {
     await openStudio(page);
     const stamp = Date.now();

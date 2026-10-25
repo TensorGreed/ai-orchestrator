@@ -2936,6 +2936,9 @@ export function NodeInspector({
           checked={toBooleanValue(config.persistToolMessages, false)}
           onChange={(next) => setConfig((current) => ({ ...current, persistToolMessages: next }))}
         />
+        <div className="cfg-tip" data-testid="memory-origin-note">
+          When a guard profile tracks where data came from, this memory keeps that origin for later runs. Older memory has no origin recorded.
+        </div>
       </>
     );
   };
