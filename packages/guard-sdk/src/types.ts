@@ -128,6 +128,13 @@ export interface GuardInput {
   dataLabels?: DataLabels;
   /** Phase 16 — surrogates the run issued: the destination check and the egress scan do not count them. */
   issuedSurrogates?: ReadonlySet<string>;
+  /**
+   * Phase 16 — values the scan does not count (the run's secret values): a
+   * finding that lies entirely inside an occurrence of one is dropped, and
+   * they are replaced in findings' evidence and messages. A finding that only
+   * overlaps one (a card number containing a short secret) still counts.
+   */
+  ignoredValues?: readonly string[];
   /** Phase 16 — evaluate the destination rules only (the channel's detectors already saw this content). */
   destinationOnly?: boolean;
 }

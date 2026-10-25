@@ -1,4 +1,4 @@
-import { dropIssuedSurrogates, evaluateDestinationRules, profileHasDestinationRules } from "./destinations";
+import { dropInsideValues, dropIssuedSurrogates, evaluateDestinationRules, profileHasDestinationRules, withoutIgnoredValues } from "./destinations";
 import { scanDlp } from "./detectors/dlp";
 import { maskedEvidence, maskForDataClass } from "./masking";
 import type { ActionRule, GuardProfile } from "./profile";
@@ -206,6 +206,15 @@ export async function evaluateGuard(profile: GuardProfile, input: GuardInput, op
     const kept: GuardFinding[] = [];
     // Phase 16 — the egress scan does not count surrogates the run issued (they stand in for values that never left).
     if (input.channel === "egress" && input.issuedSurrogates) result = dropIssuedSurrogates(result, input.issuedSurrogates, text);
+    // Phase 16 — a finding that is a secret value the node sends is not data; its evidence never shows one.
+    if (input.ignoredValues?.length) {
+      const ignored = input.ignoredValues;
+      result = dropInsideValues(result, ignored, text).map((finding) => ({
+        ...finding,
+        evidence: withoutIgnoredValues(finding.evidence, ignored),
+        message: withoutIgnoredValues(finding.message, ignored)
+      }));
+    }
     for (const finding of result) {
       if (finding.score >= entry.threshold) kept.push(finding);
       else suppressed.push(finding);
@@ -404,9 +413,13 @@ export async function evaluateGuard(profile: GuardProfile, input: GuardInput, op
    */
   function evaluateDestinationStep(): Array<{ finding: GuardFinding; action: AppliedAction }> {
     if (!input.destination || !profileHasDestinationRules(profile)) return [];
-    const matches = dropIssuedSurrogates(
-      scanDlp(text, { dictionaries }).filter((match) => match.score >= DESTINATION_SCAN_THRESHOLD),
-      input.issuedSurrogates ?? NO_SURROGATES,
+    const matches = dropInsideValues(
+      dropIssuedSurrogates(
+        scanDlp(text, { dictionaries }).filter((match) => match.score >= DESTINATION_SCAN_THRESHOLD),
+        input.issuedSurrogates ?? NO_SURROGATES,
+        text
+      ),
+      input.ignoredValues ?? [],
       text
     );
     const labels = input.dataLabels ?? { provenance: input.labels ?? [], dataClasses: [], source: "propagated" as const };
@@ -419,7 +432,7 @@ export async function evaluateGuard(profile: GuardProfile, input: GuardInput, op
     for (const entry of fired) {
       const own = entry.basis === "content" && entry.dataClass !== undefined ? matches.filter((match) => match.dataClass === entry.dataClass) : [];
       const spans = own.map((match) => ({ ...match.span }));
-      const evidence = own.length > 0 ? maskedEvidence(text.slice(own[0]!.span.start, own[0]!.span.end), own[0]!.dataClass) : "";
+      const evidence = own.length > 0 ? withoutIgnoredValues(maskedEvidence(text.slice(own[0]!.span.start, own[0]!.span.end), own[0]!.dataClass), input.ignoredValues ?? []) : "";
       const finding: GuardFinding = {
         detectorId: DESTINATION_RULES_DETECTOR_ID,
         category: DESTINATION_CATEGORY,

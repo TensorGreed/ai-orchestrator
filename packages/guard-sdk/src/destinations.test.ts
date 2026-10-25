@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { GUARD_CHANNEL_VALUES, SURROGATE_REVEAL_REFUSED_MESSAGE, type DataLabels, type ResolvedDestination } from "@ai-orchestrator/shared";
 import { createDefaultGuardProfile } from "./default-profile";
-import { dropIssuedSurrogates, evaluateDestinationRules, isSurrogateEmail, LABEL_ONLY_REASON, profileHasDestinationRules } from "./destinations";
+import { dropInsideValues, dropIssuedSurrogates, evaluateDestinationRules, isSurrogateEmail, LABEL_ONLY_REASON, profileHasDestinationRules } from "./destinations";
 import { scanDlp } from "./detectors/dlp";
 import { createDefaultProtectionRegistry, revealRefusal, staticKeyResolver, surrogateFor } from "./protection/index";
 import { guardChannelSchema, hashGuardProfile, parseGuardProfile, type GuardProfileInput } from "./profile";
@@ -217,5 +217,15 @@ describe("surrogate reveal", () => {
     await expect(surrogate.reveal!("x", { dataClass: "email" })).rejects.toThrow(SURROGATE_REVEAL_REFUSED_MESSAGE);
     expect(revealRefusal(registry.get("token_vault")!)).toBeUndefined();
     expect(revealRefusal(registry.get("keyed_hash")!)).toMatch(/one-way/);
+  });
+});
+
+describe("ignored values (the run's secret values)", () => {
+  const CARD = "4111 1111 1111 1111";
+  it("drops a match entirely inside a secret value and keeps one that only overlaps a secret", () => {
+    const inside = `{"token":"${CARD}"}`;
+    expect(dropInsideValues(scanDlp(inside, {}), [CARD], inside)).toEqual([]);
+    const around = `{"c":"${CARD}"}`;
+    expect(dropInsideValues(scanDlp(around, {}), ["1111"], around).map((match) => match.dataClass)).toContain("card_number");
   });
 });

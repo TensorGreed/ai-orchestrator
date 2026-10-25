@@ -155,3 +155,17 @@ describe("destination rules in a verdict", () => {
     expect(verdict.actions[0]!.reason).not.toContain("found in the text");
   });
 });
+
+describe("ignored values (the run's secret values)", () => {
+  it("a short secret inside a card does not hide the card; evidence never shows the secret", async () => {
+    const verdict = await evaluateGuard(inHouse("block"), { channel: "egress", content: { c: CARD }, destination: publicDest(), ignoredValues: ["1111"] }, { registry });
+    expect(verdict.blocked).toBe(true);
+    expect(JSON.stringify(verdict.findings.map((finding) => finding.evidence))).not.toContain("1111");
+  });
+
+  it("a card that is entirely a secret value is not counted", async () => {
+    const verdict = await evaluateGuard(inHouse("block"), { channel: "egress", content: { token: CARD }, destination: publicDest(), ignoredValues: [CARD] }, { registry });
+    expect(verdict.blocked).toBe(false);
+    expect(verdict.findings).toEqual([]);
+  });
+});
