@@ -56,6 +56,7 @@ import {
 } from "../lib/guard-profile-edit";
 import { actionLabel, channelLabel } from "../lib/guard-trace";
 import { GuardSimulationCard, useGuardSimulation } from "./GuardSimulationPanel";
+import { destinationRuleLines } from "../lib/guard-profile-edit";
 import { simulateDenial } from "../lib/guard-simulation";
 
 type Role = "admin" | "builder" | "operator" | "viewer";
@@ -437,6 +438,7 @@ function GuardProfileEditor({
             </label>
           ))}
         </fieldset>
+        <DestinationRulesSummary document={document} />
       </section>
 
       <section className="kb-section">
@@ -954,5 +956,22 @@ function GuardBindingsPanel({
       </div>
       <IssueList issues={issues} error={error} />
     </section>
+  );
+}
+
+/** Phase 16 — the profile's destination rules, read-only (edit them as JSON). Nothing shows when the profile has none. */
+function DestinationRulesSummary({ document }: { document: Record<string, unknown> }) {
+  const rules = destinationRuleLines(document);
+  if (rules.length === 0) return null;
+  return (
+    <div className="guard-dest-rules-block" aria-label="Destination rules">
+      <h5>Destination rules</h5>
+      <ol className="guard-dest-rules">
+        {rules.map((line, index) => (
+          <li key={index}>{line}</li>
+        ))}
+      </ol>
+      <p className="kb-subtle">Where data may go, by the tiers on the Data destinations tab. Change them with Edit as JSON.</p>
+    </div>
   );
 }

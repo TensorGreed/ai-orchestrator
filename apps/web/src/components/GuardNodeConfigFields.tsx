@@ -20,11 +20,18 @@ const bool = (value: unknown, fallback: boolean): boolean => (typeof value === "
 
 const LABELS = ["trusted", "user", "untrusted_external", "sensitive"] as const;
 
-export const PROTECTION_PROVIDERS: Array<{ value: string; label: string; needsKey: boolean; help: string }> = [
+export const PROTECTION_PROVIDERS: Array<{ value: string; label: string; needsKey: boolean; help: string; oneWay?: boolean }> = [
   { value: "mask", label: "Mask", needsKey: false, help: "Replaces all but the last characters. Not reversible." },
   { value: "keyed_hash", label: "Keyed hash (HMAC-SHA256)", needsKey: true, help: "Same input gives the same token, so joins still work. Not reversible." },
   { value: "aes_gcm", label: "Encrypt (AES-256-GCM)", needsKey: true, help: "Reversible with the key; every call gives a new ciphertext." },
-  { value: "token_vault", label: "Token vault", needsKey: false, help: "Swaps the value for a token; the value is kept encrypted in the L2M database. Deterministic tokens need a key." }
+  { value: "token_vault", label: "Token vault", needsKey: false, help: "Swaps the value for a token; the value is kept encrypted in the L2M database. Deterministic tokens need a key." },
+  {
+    value: "surrogate",
+    label: "Surrogate (one-way)",
+    needsKey: false,
+    oneWay: true,
+    help: "Swaps each value for a realistic stand-in of the same shape (an email stays an email), keyed by the deployment. One-way: the original can never be revealed; use the token vault if you need it back. Credentials and keys are still fully redacted."
+  }
 ];
 
 export function GuardNodeFields({ config, setConfig, workflowId, attachedAsPort }: { config: Config; setConfig: SetConfig; workflowId?: string; attachedAsPort: boolean }) {
@@ -194,7 +201,7 @@ export function GuardNodeFields({ config, setConfig, workflowId, attachedAsPort 
 
 export function GuardProtectionFields({ config, setConfig, secrets }: { config: Config; setConfig: SetConfig; secrets: SecretListItem[] }) {
   const providerId = str(config.providerId, "token_vault");
-  const provider = PROTECTION_PROVIDERS.find((entry) => entry.value === providerId) ?? PROTECTION_PROVIDERS[3]!;
+  const provider = PROTECTION_PROVIDERS.find((entry) => entry.value === providerId) ?? PROTECTION_PROVIDERS.find((entry) => entry.value === "token_vault")!;
   const keySecretId = str((config.keySecretRef as { secretId?: unknown } | undefined)?.secretId);
   const dataClasses = config.dataClasses === "*" ? ["*"] : Array.isArray(config.dataClasses) ? config.dataClasses.map(String) : [];
   const [classText, setClassText] = useState(dataClasses.join(", "));
@@ -212,7 +219,9 @@ export function GuardProtectionFields({ config, setConfig, secrets }: { config: 
             </option>
           ))}
         </select>
-        <div className="cfg-help">{provider.help}</div>
+        <div className="cfg-help">
+          {provider.oneWay && <span className="guard-chip guard-chip-warn">One-way</span>} {provider.help}
+        </div>
       </div>
       <div className="cfg-field">
         <label className="cfg-label" htmlFor="guard-protect-classes">

@@ -1,4 +1,7 @@
 import type {
+  DataDestinationInput,
+  DataDestinationRow,
+  UnclassifiedDestination,
   ReplayCapturePromoteOutcome,
   ReplayCaptureSettingsUpdate,
   ReplayCaptureSettingsView,
@@ -3989,4 +3992,25 @@ export async function discardReplayCaptures(ids: string[]) {
     method: "POST",
     body: JSON.stringify({ ids })
   });
+}
+
+// Phase 16 — data destinations (deployment-wide; admins change them).
+export async function fetchDataDestinations() {
+  return apiRequest<{ destinations: DataDestinationRow[]; builtIns: DataDestinationRow[]; canEdit: boolean }>("/api/data-destinations");
+}
+
+export async function fetchUnclassifiedDestinations() {
+  return apiRequest<{ destinations: UnclassifiedDestination[] }>("/api/data-destinations/unclassified");
+}
+
+export async function createDataDestination(payload: DataDestinationInput) {
+  return apiRequest<{ destination: DataDestinationRow }>("/api/data-destinations", { method: "POST", body: JSON.stringify(payload) });
+}
+
+export async function updateDataDestination(id: string, payload: DataDestinationInput) {
+  return apiRequest<{ destination: DataDestinationRow }>(`/api/data-destinations/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify(payload) });
+}
+
+export async function deleteDataDestination(id: string) {
+  return apiRequest<{ deleted: boolean; id: string }>(`/api/data-destinations/${encodeURIComponent(id)}`, { method: "DELETE" });
 }

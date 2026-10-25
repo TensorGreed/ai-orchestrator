@@ -556,4 +556,59 @@ test.describe("golden journeys", () => {
     await expect(cases.getByText("3 admitted · 1 required")).toBeVisible();
     await expect(cases.getByText(/waiting for admin admission/)).toHaveCount(0);
   });
+
+  test("classifies a destination a workflow sends data to, from the not-classified-yet list", async ({ page }) => {
+    await openStudio(page);
+    const stamp = Date.now();
+    const host = `hooks-${stamp}.example.org`;
+    const created = await page.request.post("/api/workflows", {
+      data: {
+        id: `wf-e2e-dest-${stamp}`,
+        name: `E2E Destinations ${stamp}`,
+        schemaVersion: "1.0.0",
+        workflowVersion: 1,
+        nodes: [
+          { id: "hook", type: "webhook_input", name: "Hook", position: { x: 0, y: 0 }, config: { path: `e2e-dest-${stamp}`, method: "POST" } },
+          { id: "send", type: "http_request", name: "Notify partner", position: { x: 200, y: 0 }, config: { method: "POST", urlTemplate: `https://${host}/notify?token=abc` } },
+          { id: "done", type: "output", name: "Done", position: { x: 400, y: 0 }, config: { responseTemplate: "sent" } }
+        ],
+        edges: [
+          { id: "e1", source: "hook", target: "send" },
+          { id: "e2", source: "send", target: "done" }
+        ]
+      }
+    });
+    expect(created.ok()).toBeTruthy();
+
+    await sidebarItem(page, "Security").click();
+    await page.getByRole("tab", { name: "Data destinations" }).click();
+    // Nothing classified yet: destinations change nothing until a profile has destination rules.
+    await expect(page.getByText("No destinations classified yet.")).toBeVisible();
+    await expect(page.getByText(/destinations do nothing until a guard profile has destination rules/)).toBeVisible();
+    await expect(page.getByRole("table", { name: "Built-in destinations" }).getByText("api.openai.com", { exact: false })).toBeVisible();
+
+    const pending = page.getByRole("list", { name: "Not classified yet" });
+    await expect(pending.getByText(`Web address ${host}`)).toBeVisible();
+    await expect(pending.getByText(`Seen in Workflow "E2E Destinations ${stamp}" · Notify partner`)).toBeVisible();
+    await pending.getByRole("button", { name: `Classify Web address ${host}` }).click();
+
+    const form = page.getByRole("form", { name: "Add destination" });
+    await form.getByLabel("Name", { exact: true }).fill("Partner hooks");
+    await form.getByRole("combobox", { name: "Tier", exact: true }).selectOption("vendor");
+    await form.getByText("Advanced", { exact: true }).click();
+    await form.getByLabel("Region", { exact: true }).fill("EU West 1");
+    await form.getByRole("button", { name: "Save destination" }).click();
+
+    const table = page.getByRole("table", { name: "Your destinations" });
+    const saved = table.getByRole("row").filter({ hasText: "Partner hooks" });
+    await expect(saved).toContainText(host);
+    await expect(saved).toContainText("Approved vendor");
+    await expect(saved).toContainText("eu-west-1");
+    await expect(pending.getByText(`Web address ${host}`)).toHaveCount(0);
+
+    // Remove it again so the list starts empty on the next run.
+    page.once("dialog", (dialog) => void dialog.accept());
+    await saved.getByRole("button", { name: "Remove" }).click();
+    await expect(page.getByText("No destinations classified yet.")).toBeVisible();
+  });
 });
