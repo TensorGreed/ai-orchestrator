@@ -811,10 +811,12 @@ const CONNECTOR_SDK_ADDRESS: Readonly<Record<string, AddressOf>> = {
   // Demo stubs: they return sample rows and open no connection.
   "sql-db": () => null,
   "nosql-db": () => null,
-  "azure-storage": (config) => {
+  "azure-storage": (config, secretAddress) => {
     if (textSetting(config, "endpoint")) return destinationHostOfSetting(config.endpoint);
+    // With a secret the adapter's endpoint can come from it (a shared-key endpoint or suffix): the engine passes the
+    // endpoint the adapter will call, computed from the secret; without it the host is unknown (public).
+    if (plainRecord(config.secretRef)?.secretId) return destinationHostOfSetting(secretAddress);
     const account = textSetting(config, "accountName");
-    // Without an endpoint or an account the address can come from the secret: unknown.
     return account ? hostOfBuiltUrl(`https://${account}.blob.core.windows.net/`) : undefined;
   },
   "azure-cosmos-db": fromKey("endpoint"),
@@ -863,10 +865,10 @@ const CONNECTOR_ADDRESS: Readonly<Record<string, AddressOf>> = {
   aws_s3_put_object: s3Address,
   aws_s3_get_object: s3Address,
   aws_s3_list_objects: s3Address,
-  connector_source: (config) => {
+  connector_source: (config, secretAddress) => {
     const address = CONNECTOR_SDK_ADDRESS[textSetting(config, "connectorId")];
     if (!address) return undefined;
-    return address(plainRecord(config.connectorConfig) ?? config, undefined);
+    return address(connectorSourceAdapterConfig(config), secretAddress);
   }
 };
 
@@ -877,11 +879,31 @@ function s3Address(config: Record<string, unknown>): string | undefined {
   return hostOfBuiltUrl(`https://${bucket}.s3.${region}.amazonaws.com/`);
 }
 
+/** The settings a Connector Source node hands its adapter, as the engine builds them (its secret reference included). */
+function connectorSourceAdapterConfig(config: Record<string, unknown>): Record<string, unknown> {
+  const secretRef = config.secretRef ?? config.authSecretRef;
+  return { ...(plainRecord(config.connectorConfig) ?? config), ...(secretRef ? { secretRef } : {}) };
+}
+
+/**
+ * The Azure Storage adapter's settings for a node that runs it (the
+ * dedicated node, or a Connector Source on `azure-storage`) when its
+ * endpoint can come from its secret (a secret and no endpoint setting);
+ * undefined otherwise. The engine computes the endpoint the adapter will
+ * call from these settings and the secret's value.
+ */
+export function azureStorageSecretAddressConfig(nodeType: string, config: Record<string, unknown>): Record<string, unknown> | undefined {
+  const settings =
+    nodeType === "azure_storage" ? config : nodeType === "connector_source" && textSetting(config, "connectorId") === "azure-storage" ? connectorSourceAdapterConfig(config) : undefined;
+  if (!settings || textSetting(settings, "endpoint") || !plainRecord(settings.secretRef)?.secretId) return undefined;
+  return settings;
+}
+
 /** Connector node types whose address can come from their secret (the engine passes the secret's value for the host only). */
 export function connectorAddressInSecret(nodeType: string, config: Record<string, unknown>): boolean {
   if (nodeType === "mongo_operation") return Boolean(plainRecord(config.secretRef)?.secretId);
   if (nodeType === "teams_send_message") return !textSetting(config, "webhookUrl") && Boolean(plainRecord(config.secretRef)?.secretId);
-  return false;
+  return azureStorageSecretAddressConfig(nodeType, config) !== undefined;
 }
 
 /**

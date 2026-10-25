@@ -243,6 +243,34 @@ function buildDemoDocuments(config: Record<string, unknown>) {
   ];
 }
 
+function baseEndpointFor(config: Record<string, unknown>, credential: AzureStorageCredential): string {
+  const explicitEndpoint = toStringValue(config.endpoint);
+  if (explicitEndpoint) {
+    return normalizeUrlWithoutTrailingSlash(explicitEndpoint);
+  }
+
+  if (credential.mode === "shared_key") {
+    return normalizeUrlWithoutTrailingSlash(credential.endpoint ?? toEndpointFromAccount(credential.accountName));
+  }
+
+  const accountName = toStringValue(config.accountName);
+  if (accountName) {
+    return toEndpointFromAccount(accountName);
+  }
+
+  return "";
+}
+
+/**
+ * Phase 16 — the base endpoint this adapter calls for these settings and
+ * this secret value (a shared-key secret can name its own endpoint or
+ * endpoint suffix). For the outbound check's destination only; "" when
+ * there is none.
+ */
+export function azureStorageEndpointFor(config: Record<string, unknown>, secretValue: string | undefined): string {
+  return baseEndpointFor(config, parseStorageCredential(secretValue ?? "", config));
+}
+
 export class AzureStorageConnectorAdapter implements ConnectorAdapter {
   readonly definition = {
     id: "azure-storage",
@@ -282,21 +310,7 @@ export class AzureStorageConnectorAdapter implements ConnectorAdapter {
   }
 
   private buildBaseEndpoint(config: Record<string, unknown>, credential: AzureStorageCredential): string {
-    const explicitEndpoint = toStringValue(config.endpoint);
-    if (explicitEndpoint) {
-      return normalizeUrlWithoutTrailingSlash(explicitEndpoint);
-    }
-
-    if (credential.mode === "shared_key") {
-      return normalizeUrlWithoutTrailingSlash(credential.endpoint ?? toEndpointFromAccount(credential.accountName));
-    }
-
-    const accountName = toStringValue(config.accountName);
-    if (accountName) {
-      return toEndpointFromAccount(accountName);
-    }
-
-    return "";
+    return baseEndpointFor(config, credential);
   }
 
   private async request(input: {

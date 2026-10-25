@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  azureStorageSecretAddressConfig,
   connectorAddressInSecret,
   connectorDestinationRef,
   describeDestinationSummary,
@@ -89,5 +90,29 @@ describe("call-time destination refs", () => {
     expect(describeDestinationSummary({ host: "api.example.com", tier: "public" })).toBe("api.example.com (public)");
     expect(describeDestinationSummary({ id: "scripted", host: "", tier: "public" })).toBe("scripted (public)");
     expect(describeDestinationSummary({ tier: "public" })).toBe("an unknown host (public)");
+  });
+});
+
+describe("Azure Storage: an endpoint that can come from the secret", () => {
+  const secretRef = { secretId: "az" };
+  it("uses the endpoint the engine computed from the secret, else an unknown host", () => {
+    expect(connectorAddressInSecret("azure_storage", { accountName: "acct", secretRef })).toBe(true);
+    expect(connectorDestinationRef("azure_storage", { accountName: "acct", secretRef }, "https://store.example.com")).toEqual({ kind: "connector", id: "azure_storage", host: "store.example.com" });
+    expect(connectorDestinationRef("azure_storage", { accountName: "acct", secretRef }, undefined)).toEqual({ kind: "connector", id: "azure_storage", host: "" });
+  });
+
+  it("an endpoint setting wins; no secret means the account's host", () => {
+    expect(connectorAddressInSecret("azure_storage", { endpoint: "https://e.example.com", secretRef })).toBe(false);
+    expect(connectorDestinationRef("azure_storage", { endpoint: "https://e.example.com", secretRef }, "https://other.example.com")?.host).toBe("e.example.com");
+    expect(connectorAddressInSecret("azure_storage", { accountName: "acct" })).toBe(false);
+    expect(connectorDestinationRef("azure_storage", { accountName: "acct" })?.host).toBe("acct.blob.core.windows.net");
+  });
+
+  it("a Connector Source on azure-storage reads its secret the way the engine hands it to the adapter", () => {
+    const config = { connectorId: "azure-storage", connectorConfig: { accountName: "acct" }, secretRef };
+    expect(azureStorageSecretAddressConfig("connector_source", config)).toEqual({ accountName: "acct", secretRef });
+    expect(connectorDestinationRef("connector_source", config, "https://store.example.com")?.host).toBe("store.example.com");
+    expect(connectorDestinationRef("connector_source", config)?.host).toBe("");
+    expect(azureStorageSecretAddressConfig("connector_source", { connectorId: "qdrant", secretRef })).toBeUndefined();
   });
 });
