@@ -67,7 +67,9 @@ carries the input's labels.
   `results["fetch"]`) are read the same way. Any access the parser
   cannot pin to one node (`results[name]`, `$node(variable)`, the whole
   `$json` or `$input`, `arguments`, `this` or a template string with
-  <span v-pre>`${ }`</span>) counts as reading every node that ran.
+  <span v-pre>`${ }`</span>, a spread such as `...results`) counts as reading
+  every node that ran. So does an expression with a comment or a regular
+  expression in it.
 - Settings that name a field or path (an input key, a chart's data path, a
   Guard node's input field) are reads too.
 - **Code nodes** count as reading everything they could see.

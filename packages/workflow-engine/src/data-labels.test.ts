@@ -153,6 +153,40 @@ describe("run label state", () => {
   });
 });
 
+describe("round 2: comments, regular expressions and spreads fail closed", () => {
+  it("comments, regular expression literals and unicode escapes read everything", () => {
+    for (const expression of [
+      "results.quiet.note /* ' */ + results.fetch.body /* ' */",
+      "/* ' */ results.fetch.body /* ' */",
+      "results.a.x // ' trailing",
+      '/"|n/.test(results.quiet.note) ? results.fetch.body : "x"',
+      "'a'.replace(/'/g, '') + results.fetch.body + ''",
+      "x ? /a/ : results.b.y",
+      "typeof /'/",
+      "\\u0072esults.fetch.body",
+      "'unterminated + results.fetch.body"
+    ]) {
+      expect(referencesInExpression(expression).all, expression).toBe(true);
+    }
+  });
+
+  it("a spread of a data root reads all of it", () => {
+    expect(referencesInExpression("({ ...results }).fetch.body").all).toBe(true);
+    expect(referencesInExpression("({ ...$json }).results.fetch.body").all).toBe(true);
+    expect(referencesInExpression("[...$input]").all).toBe(true);
+    expect(referencesInExpression("[...Object.values(results)]").all).toBe(true);
+    expect(referencesInExpression('({ ...$node("Fetch").output })').nodes).toEqual(["Fetch"]);
+  });
+
+  it("division, strings holding slashes and ordinary property names stay precise", () => {
+    for (const expression of ["results.a.total / 2", "(results.a.x) / results.b.y", "'https://example.com/' + results.a.path", "results.a.x /2"]) {
+      expect(referencesInExpression(expression).all, expression).toBe(false);
+    }
+    expect(referencesInExpression("'https://example.com/' + results.a.path").nodes).toEqual(["a"]);
+    expect(referencesInExpression("item.results.length").all).toBe(false);
+  });
+});
+
 describe("round 1 fixes: expressions that escape the parser, segments", () => {
   it("names that reach the whole scope, template strings with ${ } and escape keys read everything", () => {
     for (const expression of [

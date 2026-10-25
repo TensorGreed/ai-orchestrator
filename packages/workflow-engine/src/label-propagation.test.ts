@@ -844,3 +844,28 @@ describe("session artifacts (round 1 fixes)", () => {
     expect(labelsOf(loaded, "load")).toEqual(L(["user"]));
   });
 });
+
+describe("expressions the reference parser cannot read fail closed (round 2)", () => {
+  // Parent: a pinned node only; `fetch` holds webhook text. Each template reaches `fetch` past the parser.
+  const cases: Record<string, string> = {
+    "a block comment holding a quote": "{{ results.quiet.note /* ' */ + results.fetch.body /* ' */ }}",
+    "block comments around the read": "{{ /* ' */ results.fetch.body /* ' */ }}",
+    "a regular expression holding a quote": '{{ /"|n/.test(results.quiet.note) ? results.fetch.body : "x" }}',
+    "a regular expression argument holding a quote": "{{ 'a'.replace(/'/g, '') + results.fetch.body + '' }}",
+    "a spread of results": "{{ ({ ...results }).fetch.body }}",
+    "a spread of $json": "{{ ({ ...$json }).results.fetch.body }}"
+  };
+  for (const [name, template] of Object.entries(cases)) {
+    it(`${name}: the output that holds outside text is labelled from outside`, async () => {
+      const wf = workflow(
+        [node("in", "webhook_input"), set("fetch", { body: "{{user_prompt}}" }), set("quiet", { note: "static" }), set("via", { copy: template }), node("out", "output")],
+        [{ source: "in", target: "fetch" }, { source: "quiet", target: "via" }, { source: "fetch", target: "out" }, { source: "via", target: "out" }],
+        { pinnedData: { quiet: { note: "pinned" } } }
+      );
+      const { guard } = guardDeps(["tracking"]);
+      const result = await executeWorkflow({ workflow: wf, executionId: `esc-${name}`, webhookPayload: { user_prompt: "hello world" } }, deps({ guard }));
+      expect(JSON.stringify(resultOf(result, "via")?.output)).toContain("hello world");
+      expect(labelsOf(result, "via")?.provenance).toContain("untrusted_external");
+    });
+  }
+});

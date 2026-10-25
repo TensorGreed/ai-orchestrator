@@ -142,15 +142,73 @@ const SCOPE_ESCAPES = /(?<![\w$])(arguments|__scope|this|globalThis|self|global|
 /** A computed property named like a scope escape (`x["constructor"]`). */
 const ESCAPE_KEY = /\[\s*(["'`])\s*(constructor|__proto__|prototype)\s*\1\s*\]/;
 
+/** Words after which a `/` starts a regular expression, not a division. */
+const REGEX_AFTER_WORDS = new Set(["return", "typeof", "instanceof", "in", "of", "new", "delete", "void", "throw", "case", "do", "else", "yield", "await"]);
+
+/**
+ * Phase 16 — syntax the string blanking below cannot read safely: comments
+ * (`/*`, `//`), anything that could be a regular expression literal (a quote
+ * inside one pairs with a later quote and hides real code), unicode escapes,
+ * and template literals holding `${ }`. A left-to-right scan that skips
+ * string contents; seeing any of these means the references are not
+ * understood, so the expression reads everything (fail closed).
+ */
+function hasOpaqueSyntax(source: string): boolean {
+  let previous = "";
+  let word = "";
+  let gap = false;
+  for (let index = 0; index < source.length; index += 1) {
+    const char = source[index]!;
+    if (char === '"' || char === "'" || char === "`") {
+      for (index += 1; index < source.length && source[index] !== char; index += 1) {
+        if (source[index] === "\\") index += 1;
+        else if (char === "`" && source[index] === "$" && source[index + 1] === "{") return true;
+      }
+      if (index >= source.length) return true;
+      previous = char;
+      word = "";
+      gap = false;
+      continue;
+    }
+    if (char === "\\") return true;
+    if (char === "/") {
+      const next = source[index + 1];
+      if (next === "*" || next === "/") return true;
+      const regexContext = previous === "" || /[(,=:[!&|?{};+\-*%<>~^]/.test(previous) || REGEX_AFTER_WORDS.has(word);
+      if (regexContext) return true;
+      previous = char;
+      word = "";
+      gap = false;
+      continue;
+    }
+    if (/\s/.test(char)) {
+      gap = true;
+      continue;
+    }
+    if (/[\w$]/.test(char)) {
+      word = !gap && /[\w$]/.test(previous) ? word + char : char;
+    } else {
+      word = "";
+    }
+    gap = false;
+    previous = char;
+  }
+  return false;
+}
+
 export function referencesInExpression(expression: string): TemplateReferences {
   const out: TemplateReferences = { nodes: [], all: false, heads: [] };
   const source = expression;
-  // A template literal with `${ }` holds code the string blanking below would hide: not understood, so everything.
-  if (/`[^`]*\$\{/.test(source) || ESCAPE_KEY.test(source)) {
+  // Comments, regular expressions, unicode escapes and `${ }` inside template literals hide code from the string
+  // blanking below: not understood, so everything.
+  if (hasOpaqueSyntax(source) || ESCAPE_KEY.test(source)) {
     out.all = true;
   }
   // String contents blanked out (same length, so indexes match the source): a root inside a string is not a read.
-  const blanked = source.replace(STRING_LITERAL, (literal) => literal[0] + " ".repeat(literal.length - 2) + literal[literal.length - 1]);
+  // A spread (`...results`) is blanked too, so the root after it is seen as a root reading the whole value.
+  const blanked = source
+    .replace(STRING_LITERAL, (literal) => literal[0] + " ".repeat(literal.length - 2) + literal[literal.length - 1])
+    .replace(/\.\.\./g, "   ");
   // Every occurrence of a data root, outside property access (`a.results` is not the root).
   const roots = /(?<![\w$.])(\$json|\$input|results|parent_outputs|\$node)(?![\w$])/g;
   for (const match of blanked.matchAll(roots)) {
