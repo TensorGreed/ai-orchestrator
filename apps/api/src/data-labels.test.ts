@@ -137,7 +137,15 @@ describe("migration 37", () => {
     expect(migration.down).toContain("ALTER TABLE session_memory DROP COLUMN IF EXISTS labels_json");
     expect(migration.down).toContain("ALTER TABLE session_artifacts DROP COLUMN IF EXISTS labels_json");
     expect(migration.down).toContain("ALTER TABLE session_tool_cache DROP COLUMN IF EXISTS labels_json");
-    expect(migration.up).not.toMatch(/NOT NULL|DEFAULT/);
+    for (const line of migration.up.split("\n").filter((entry) => entry.includes("labels_json"))) expect(line).not.toMatch(/NOT NULL|DEFAULT/);
+    // The guard profile revision: one row, bumped by triggers on both profile tables; removed on rollback.
+    expect(migration.up).toContain("CREATE TABLE IF NOT EXISTS guard_profile_revision");
+    expect(migration.up).toContain("AFTER INSERT OR UPDATE OR DELETE ON guard_profiles");
+    expect(migration.up).toContain("AFTER INSERT OR UPDATE OR DELETE ON guard_profile_versions");
+    expect(migration.down).toContain("DROP TRIGGER IF EXISTS guard_profiles_revision ON guard_profiles");
+    expect(migration.down).toContain("DROP TRIGGER IF EXISTS guard_profile_versions_revision ON guard_profile_versions");
+    expect(migration.down).toContain("DROP FUNCTION IF EXISTS guard_profile_revision_bump()");
+    expect(migration.down).toContain("DROP TABLE IF EXISTS guard_profile_revision");
   });
 
   it("exists in the SQLite schema", async () => {
@@ -147,6 +155,13 @@ describe("migration 37", () => {
     expect(columns("session_memory")).toContain("labels_json");
     expect(columns("session_tool_cache")).toContain("labels_json");
     expect(columns("session_artifacts")).toContain("labels_json");
+    const triggers = (context.store as unknown as { queryAll: (sql: string) => Array<{ name: string }> })
+      .queryAll(`SELECT name FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'guard_profile%revision%' ORDER BY name`)
+      .map((row) => row.name);
+    expect(triggers).toHaveLength(6);
+    const before = context.store.guardProfileRevision();
+    context.store.insertGuardProfile({ id: "p", name: "P", document: {}, hash: "h", createdBy: null });
+    expect(context.store.guardProfileRevision()).toBeGreaterThan(before);
   });
 });
 

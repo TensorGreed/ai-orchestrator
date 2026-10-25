@@ -144,7 +144,7 @@ function deepFreeze<T>(value: T): T {
 
 export class GuardService {
   private readonly parsedProfiles = new Map<string, GuardProfile>();
-  private readonly loadedProfiles = new Map<string, { writes: number; value: ResolvedGuardProfile | undefined }>();
+  private readonly loadedProfiles = new Map<string, { revision: number; value: ResolvedGuardProfile | undefined }>();
 
   constructor(
     private readonly store: SqliteStore,
@@ -366,16 +366,17 @@ export class GuardService {
   }
 
   loadProfile(profileId: string, version?: number): ResolvedGuardProfile | undefined {
-    // Phase 16 — every run that resolves its guard stack loads the same profiles: the answer is kept until the next
-    // guard profile write (the store counts them; every profile and version write goes through it).
-    const writes = this.store.guardProfileWriteCount?.();
+    // Phase 16 — every run that resolves its guard stack loads the same profiles: the answer is kept per guard profile
+    // revision, a counter in the database bumped by triggers on every profile write from any process. It is read on
+    // every load, so a profile another instance saved is what the next run here resolves (never an in-process count).
+    const revision = this.store.guardProfileRevision?.();
     const loadKey = `${profileId}\u0000${version ?? "latest"}`;
-    const known = writes === undefined ? undefined : this.loadedProfiles.get(loadKey);
-    if (known && known.writes === writes) return known.value;
+    const known = revision === undefined ? undefined : this.loadedProfiles.get(loadKey);
+    if (known && known.revision === revision) return known.value;
     const value = this.readProfile(profileId, version);
-    if (writes !== undefined) {
+    if (revision !== undefined) {
       if (this.loadedProfiles.size >= PARSED_PROFILE_CACHE_SIZE) this.loadedProfiles.delete(this.loadedProfiles.keys().next().value!);
-      this.loadedProfiles.set(loadKey, { writes, value });
+      this.loadedProfiles.set(loadKey, { revision, value });
     }
     return value;
   }

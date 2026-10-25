@@ -2287,6 +2287,16 @@ function mapMcpCassetteSummary(row: McpCassetteRow): McpCassetteSummary {
 const MCP_CASSETTE_SUMMARY_COLUMNS =
   "id, execution_id, workflow_id, workflow_name, project_id, source, eval_run_id, fixture_id, call_count, server_count, bytes, truncated, created_at, created_by";
 
+/** Migration 37 — the triggers that bump `guard_profile_revision` (name, event, table). */
+export const GUARD_PROFILE_REVISION_TRIGGERS: ReadonlyArray<readonly [string, "INSERT" | "UPDATE" | "DELETE", string]> = [
+  ["guard_profiles_revision_ai", "INSERT", "guard_profiles"],
+  ["guard_profiles_revision_au", "UPDATE", "guard_profiles"],
+  ["guard_profiles_revision_ad", "DELETE", "guard_profiles"],
+  ["guard_profile_versions_revision_ai", "INSERT", "guard_profile_versions"],
+  ["guard_profile_versions_revision_au", "UPDATE", "guard_profile_versions"],
+  ["guard_profile_versions_revision_ad", "DELETE", "guard_profile_versions"]
+];
+
 export class SqliteStore {
   private closed = false;
 
@@ -3634,6 +3644,19 @@ export class SqliteStore {
     this.ensureColumn("session_memory", "labels_json", "TEXT");
     this.ensureColumn("session_tool_cache", "labels_json", "TEXT");
     this.ensureColumn("session_artifacts", "labels_json", "TEXT");
+    // Migration 37 — one row counting guard profile writes, bumped by triggers on every insert, update and delete of a
+    // profile or version made by any connection (another instance, a worker, a script): cached profile facts key on it.
+    this.exec(`
+      CREATE TABLE IF NOT EXISTS guard_profile_revision (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        revision INTEGER NOT NULL DEFAULT 0
+      );
+      INSERT OR IGNORE INTO guard_profile_revision (id, revision) VALUES (1, 0);
+      ${GUARD_PROFILE_REVISION_TRIGGERS.map(
+        ([name, event, table]) =>
+          `CREATE TRIGGER IF NOT EXISTS ${name} AFTER ${event} ON ${table} BEGIN UPDATE guard_profile_revision SET revision = revision + 1 WHERE id = 1; END;`
+      ).join("\n      ")}
+    `);
     // Gates enforced before admission existed admit every case their sets hold now, so they judge as before. Once only:
     // afterwards an enforced gate without a stored admission fails closed (counts nothing until an admin admits its cases).
     this.transaction(() => {
@@ -11274,28 +11297,39 @@ export class SqliteStore {
     return row ? mapGuardProfileRow(row) : null;
   }
 
-  /** Phase 16 — bumped on every guard profile version write or delete: caches of profile contents key on it. */
-  private guardProfileWrites = 0;
-  private guardProfileLabelsCache: { writes: number; value: boolean } | null = null;
+  private guardProfileRevisionStatement: { pluck(): { get(): unknown } } | null = null;
+  private guardProfileLabelsCache: { revision: number; value: boolean } | null = null;
 
-  /** Guard profile writes so far in this process (a cache key for derived profile facts). */
-  guardProfileWriteCount(): number {
-    return this.guardProfileWrites;
+  /**
+   * Phase 16 — the guard profile revision: a counter in the database that
+   * triggers bump on every write to `guard_profiles` or
+   * `guard_profile_versions`, whichever connection or process made it. Caches
+   * of profile contents key on it, read once per use (one primary-key read),
+   * so a profile saved by another instance is seen by the next run here.
+   */
+  guardProfileRevision(): number {
+    this.guardProfileRevisionStatement ??= this.db.prepare(`SELECT revision FROM guard_profile_revision WHERE id = 1`) as unknown as {
+      pluck(): { get(): unknown };
+    };
+    return Number(this.guardProfileRevisionStatement.pluck().get() ?? 0);
   }
 
   /**
    * Phase 16 — whether any stored version of any guard profile asks for
-   * propagated labels. Cached until the next profile write, so a run checks
-   * it without a query. A match on the stored JSON text (no parse); a false
-   * positive only makes runs resolve their profiles as before.
+   * propagated labels. Cached per guard profile revision (read from the
+   * database each call), so a run checks it with one primary-key read and a
+   * profile written by any instance is seen at once. A match on the stored
+   * JSON text (no parse); a false positive only makes runs resolve their
+   * profiles as before.
    */
   anyGuardProfileUsesLabels(): boolean {
-    if (this.guardProfileLabelsCache?.writes === this.guardProfileWrites) return this.guardProfileLabelsCache.value;
+    const revision = this.guardProfileRevision();
+    if (this.guardProfileLabelsCache?.revision === revision) return this.guardProfileLabelsCache.value;
     const row = this.queryOne<{ found: number }>(
       `SELECT 1 AS found FROM guard_profile_versions WHERE document_json LIKE '%"labels":"propagated"%' LIMIT 1`
     );
     const value = Boolean(row);
-    this.guardProfileLabelsCache = { writes: this.guardProfileWrites, value };
+    this.guardProfileLabelsCache = { revision, value };
     return value;
   }
 
@@ -11334,7 +11368,6 @@ export class SqliteStore {
        VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?)`,
       [input.id, input.name, input.description ?? null, input.builtIn ? 1 : 0, now, input.createdBy, now, input.createdBy]
     );
-    this.guardProfileWrites += 1;
     this.exec(
       `INSERT INTO guard_profile_versions (profile_id, version, hash, document_json, note, created_at, created_by) VALUES (?, 1, ?, ?, ?, ?, ?)`,
       [input.id, input.hash, JSON.stringify(input.document), input.note ?? null, now, input.createdBy]
@@ -11357,7 +11390,6 @@ export class SqliteStore {
     if (!current) throw new Error(`Guard profile '${input.profileId}' not found`);
     const version = current.latestVersion + 1;
     const now = new Date().toISOString();
-    this.guardProfileWrites += 1;
     this.exec(
       `INSERT INTO guard_profile_versions (profile_id, version, hash, document_json, note, created_at, created_by) VALUES (?, ?, ?, ?, ?, ?, ?)`,
       [input.profileId, version, input.hash, JSON.stringify(input.document), input.note ?? null, now, input.createdBy]
@@ -11376,7 +11408,6 @@ export class SqliteStore {
 
   deleteGuardProfile(id: string): boolean {
     if (!this.getGuardProfile(id)) return false;
-    this.guardProfileWrites += 1;
     this.exec(`DELETE FROM guard_profile_versions WHERE profile_id = ?`, [id]);
     this.exec(`DELETE FROM guard_profiles WHERE id = ?`, [id]);
     this.persist();
