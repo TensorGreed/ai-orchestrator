@@ -837,7 +837,7 @@ export class PostgresStore {
     return row ? parseStoredDataLabels(row.labels_json) : null;
   }
 
-  /** Saves a session's memory; `labels` (Phase 16) only while the run tracks labels, merged with the stored ones; none clears them. */
+  /** Saves a session's memory; `labels` (Phase 16) only while the run tracks labels, merged with the stored ones; none keeps stored labels plus `untrusted_external`. */
   async saveSessionMemory(namespace: string, sessionId: string, messages: ChatMessage[], labels?: DataLabels): Promise<void> {
     const row = await this.queryOne<{ created_at: string; labels_json: string | null }>(
       `SELECT created_at, labels_json FROM session_memory WHERE namespace = $1 AND session_id = $2`,
@@ -1080,7 +1080,7 @@ export class PostgresStore {
   // Session Artifacts
   // ---------------------------------------------------------------------------
 
-  /** Saves a session artifact; `labels` (Phase 16) only while the run tracks labels, replacing the stored ones (none clears them). */
+  /** Saves a session artifact; `labels` (Phase 16) only while the run tracks labels, replacing the stored ones (none keeps stored labels plus `untrusted_external`). */
   async saveSessionArtifact(input: {
     namespace: string;
     sessionId: string;

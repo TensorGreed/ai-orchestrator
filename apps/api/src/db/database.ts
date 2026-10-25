@@ -4413,8 +4413,9 @@ export class SqliteStore {
   /**
    * Saves a session's memory. `labels` (Phase 16) are given only while the
    * run tracks labels and are merged with the labels already stored; a save
-   * without them (an untracked run) clears the stored labels, since the
-   * memory it writes has no recorded origin.
+   * without them (an untracked run) keeps the stored labels and adds
+   * `untrusted_external` (it re-saves the old messages with a turn of unknown
+   * origin); a row with no labels stays without.
    */
   saveSessionMemory(namespace: string, sessionId: string, messages: ChatMessage[], labels?: DataLabels): void {
     const existing = this.queryOne<SessionMemoryRow>(
@@ -4658,8 +4659,9 @@ export class SqliteStore {
   /**
    * Saves a session artifact. `labels` (Phase 16) are given only while the
    * run tracks labels and replace the stored ones with the value; a save
-   * without them (an untracked run) clears them: the new value has no
-   * recorded origin.
+   * without them (an untracked run) keeps the stored labels and adds
+   * `untrusted_external` (the value may carry the old one forward); a row
+   * with no labels stays without.
    */
   saveSessionArtifact(input: {
     namespace: string;
