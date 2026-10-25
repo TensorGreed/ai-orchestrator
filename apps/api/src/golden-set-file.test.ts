@@ -848,13 +848,15 @@ describe("golden-set files: the importer and exporter do not trust what they car
     const setId = await suite(context, builder.cookie, "wf-set", 1);
     const file = await exportFile(context, builder.cookie, setId);
 
-    // The workflow now answers with a mask-shaped value; the file's recorded answer holds another one.
+    // The server's draft now answers with a mask-shaped value; the file's recorded answer (the real run output shape)
+    // holds another one. Under masked comparison the two would be equal, so only exact comparison tells them apart.
+    const draft = setWorkflow(counter.base);
+    (draft.nodes.find((node) => node.id === "label")!.config as { assignments: Array<{ valueTemplate: string }> }).assignments[0]!.valueTemplate = "\u2022\u2022\u2022\u2022 \u2022\u2022\u2022\u2022 1111";
+    context.store.upsertWorkflow(draft);
     const variant = (edit: (recording: GoldenSetFile["cases"][number]["recording"]) => void): GoldenSetFile => {
       const copy = JSON.parse(JSON.stringify(file)) as GoldenSetFile;
       const recording = copy.cases[0]!.recording;
-      const label = (recording.workflow as { nodes: Array<{ id: string; config: { assignments?: Array<{ valueTemplate: string }> } }> }).nodes.find((node) => node.id === "label")!;
-      label.config.assignments![0]!.valueTemplate = "\u2022\u2022\u2022\u2022 \u2022\u2022\u2022\u2022 1111";
-      (recording.facts as { output: unknown }).output = "answer \u2022\u2022\u2022\u2022 \u2022\u2022\u2022\u2022 9999";
+      (recording.facts as { output: unknown }).output = { result: "answer \u2022\u2022\u2022\u2022 \u2022\u2022\u2022\u2022 9999" };
       edit(recording);
       copy.cases[0]!.scorers = [{ type: "json_equal", against: "baseline" }] as never;
       return rehash(copy);
@@ -877,6 +879,18 @@ describe("golden-set files: the importer and exporter do not trust what they car
     expect(
       await replayed(
         variant((recording) => {
+          (recording.facts as { guard: unknown[] }).guard = [
+            { nodeId: "label", placement: "node_output", channel: "output", detectorId: "dlp.patterns", effectiveAction: "mask", shadow: false, dataClass: "card_number" }
+          ];
+        })
+      )
+    ).toMatchObject({ pass: 0, fail: 1 });
+    // The file claims it was recorded here, with a verified mask capture and a mask verdict: imported all the same.
+    expect(
+      await replayed(
+        variant((recording) => {
+          (recording as { origin?: string }).origin = "recorded";
+          (recording as { capture?: unknown }).capture = { masked: true, maskingVerified: true, dataClasses: ["card_number"] };
           (recording.facts as { guard: unknown[] }).guard = [
             { nodeId: "label", placement: "node_output", channel: "output", detectorId: "dlp.patterns", effectiveAction: "mask", shadow: false, dataClass: "card_number" }
           ];
