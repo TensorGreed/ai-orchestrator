@@ -4904,8 +4904,10 @@ async function executeNodeHandler(
 
       const outputKey = typeof config.outputKey === "string" && config.outputKey.trim() ? config.outputKey.trim() : "chart";
 
-      const chartJudge = dependencies.replayNodeHook ? null : await renderUrlJudge(node, context, dependencies);
-      const result = await renderChart({
+      // Vega draws without data whose load failed: the recording judge fails the node with the guard's reason instead.
+      const chartGuard = recordingJudge(dependencies.replayNodeHook ? undefined : (await renderUrlJudge(node, context, dependencies)) ?? undefined);
+      const chartJudge = chartGuard.judge;
+      const result = await chartGuard.run(() => renderChart({
         spec: specObject,
         data,
         width,
@@ -4925,7 +4927,7 @@ async function executeNodeHandler(
             ...(dependencies.outboundDnsResolver ? { resolver: dependencies.outboundDnsResolver } : {}),
             ...(chartJudge ? { onRedirect: (next: string) => chartJudge(next, [url]) } : {})
           })
-      });
+      }));
 
       return {
         [outputKey]: {

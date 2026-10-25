@@ -454,3 +454,214 @@ describe("runtime surrogates", () => {
     expect(model.prompts).toEqual([]);
   });
 });
+
+describe("RAG senders", () => {
+  /** in → rag node → out */
+  const ragWorkflow = (type: string, config: Record<string, unknown>) =>
+    workflow([node("in", "webhook_input"), node("rag", type, config), node("out", "output")], [{ source: "in", target: "rag" }, { source: "rag", target: "out" }]);
+  const documents = [{ id: "d1", text: `Customer card ${CARD}` }, { id: "d2", text: "Opening hours" }];
+
+  it("rag_retrieve: the documents and the query are judged against the embedder before any embedding call", async () => {
+    for (const [embedder, settings] of [
+      ["openai-embedder", { baseUrl: `${base}/v1` }],
+      ["openai-embedder", {}],
+      ["cohere-embedder", {}]
+    ] as const) {
+      const harness = guardDeps(["block"], { rows: PUBLIC_LOCALHOST });
+      const before = received.length;
+      const result = await executeWorkflow(
+        { workflow: ragWorkflow("rag_retrieve", { embedderId: embedder, vectorStoreConfig: settings }), executionId: `rag-${embedder}`, webhookPayload: { user_prompt: "hours?", documents } },
+        deps({ guard: harness.guard })
+      );
+      expect(result.status, embedder).toBe("error");
+      expect(resultOf(result, "rag")?.error, embedder).toContain("was blocked by the guard");
+      expect(received.length).toBe(before);
+      expect(harness.events.find((event) => event.channel === "egress")?.verdict.destination?.kind).toBe("connector");
+    }
+  });
+
+  it("rag_retrieve: a vector store that is a network service is judged too (upserts carry the documents)", async () => {
+    const harness = guardDeps(["block"], { rows: PUBLIC_LOCALHOST });
+    const before = received.length;
+    const result = await executeWorkflow(
+      {
+        workflow: ragWorkflow("rag_retrieve", { embedderId: "token-embedder", vectorStoreId: "qdrant-vector-store", vectorStoreConfig: { endpoint: base, collectionName: "c" } }),
+        executionId: "rag-qdrant",
+        webhookPayload: { user_prompt: "hours?", documents }
+      },
+      deps({ guard: harness.guard })
+    );
+    expect(result.status).toBe("error");
+    expect(received.length).toBe(before);
+    expect(harness.events.find((event) => event.channel === "egress")?.verdict.destination).toMatchObject({ host: "127.0.0.1", tier: "public" });
+  });
+
+  it("rag_retrieve with the in-process embedder and store sends nothing: not checked, runs as before", async () => {
+    const harness = guardDeps(["block"], { rows: PUBLIC_LOCALHOST });
+    const result = await executeWorkflow(
+      { workflow: ragWorkflow("rag_retrieve", {}), executionId: "rag-local", webhookPayload: { user_prompt: "hours?", documents } },
+      deps({ guard: harness.guard })
+    );
+    expect(result.status).toBe("success");
+    expect(harness.events).toEqual([]);
+  });
+
+  it("embeddings and rerank are judged against their service", async () => {
+    const embed = guardDeps(["block"], { rows: PUBLIC_LOCALHOST });
+    const before = received.length;
+    const embedded = await executeWorkflow(
+      { workflow: ragWorkflow("embeddings_azure_openai", { endpoint: base, deployment: "e", secretRef: { secretId: "emb" } }), executionId: "emb", webhookPayload: { user_prompt: `card ${CARD}` } },
+      deps({ guard: embed.guard })
+    );
+    expect(embedded.status).toBe("error");
+    expect(resultOf(embedded, "rag")?.error).toContain("was blocked by the guard");
+    expect(received.length).toBe(before);
+
+    const rerank = guardDeps(["block"]);
+    const reranked = await executeWorkflow(
+      { workflow: ragWorkflow("rerank", { providerId: "cohere" }), executionId: "rerank", webhookPayload: { user_prompt: "hours?", documents } },
+      deps({ guard: rerank.guard })
+    );
+    expect(reranked.status).toBe("error");
+    expect(resultOf(reranked, "rag")?.error).toContain("api.cohere.com");
+  });
+});
+
+describe("what leaves, as it reads", () => {
+  it("a percent-encoded card in the path and a form-encoded card in the body are seen", async () => {
+    const path = guardDeps(["block"], { rows: PUBLIC_LOCALHOST });
+    const before = received.length;
+    const encoded = await executeWorkflow({ workflow: httpWorkflow(`${base}/plain/4111%201111%201111%201111`), executionId: "enc-1", webhookPayload: { user_prompt: "hi" } }, deps({ guard: path.guard }));
+    expect(encoded.status).toBe("error");
+    const form = guardDeps(["block"], { rows: PUBLIC_LOCALHOST });
+    const formWorkflow = workflow(
+      [
+        node("in", "webhook_input"),
+        node("http", "http_request", { method: "POST", urlTemplate: `${base}/plain`, bodyTemplate: "card=4111+1111+1111+1111", headersTemplate: '{"content-type":"application/x-www-form-urlencoded"}' }),
+        node("out", "output")
+      ],
+      [{ source: "in", target: "http" }, { source: "http", target: "out" }]
+    );
+    const posted = await executeWorkflow({ workflow: formWorkflow, executionId: "enc-2", webhookPayload: {} }, deps({ guard: form.guard }));
+    expect(posted.status).toBe("error");
+    expect(received.length).toBe(before);
+  });
+
+  it("a redirect hop that would need an approval is stopped, not paused (the first request already went out)", async () => {
+    const paused: WorkflowExecutionState[] = [];
+    const harness = guardDeps(["approval"], { rows: PUBLIC_SECOND_HOP });
+    const result = await executeWorkflow({ workflow: httpWorkflow(`${base}/redirect`), executionId: "hop-approval", webhookPayload: { user_prompt: `card ${CARD}` } }, deps({ guard: harness.guard, paused }));
+    expect(result.status).toBe("error");
+    expect(paused).toEqual([]);
+    expect(resultOf(result, "http")?.error).toContain("would wait for approval");
+  });
+
+  it("an MCP resource read sends its URI: judged against the server", async () => {
+    const harness = guardDeps(["block"]);
+    const wf = workflow(
+      [node("in", "webhook_input"), node("tool", "mcp_tool", { serverId: "docs-mcp", operation: "read_resource", resourceUri: "docs://cards/{{user_prompt}}" }), node("out", "output")],
+      [{ source: "in", target: "tool" }, { source: "tool", target: "out" }]
+    );
+    const result = await executeWorkflow({ workflow: wf, executionId: "res-1", webhookPayload: { user_prompt: CARD } }, deps({ guard: harness.guard }));
+    expect(result.status).toBe("error");
+    expect(resultOf(result, "tool")?.error).toContain("was blocked by the guard");
+  });
+});
+
+describe("model calls outside LLM nodes and agents", () => {
+  /** A model whose answer carries the card: the retry would send it back out. */
+  class CardAnswer extends RecordingModel {
+    override async generate(request: ProviderCallRequest) {
+      this.prompts.push(request.messages.map((message) => message.content).join("\n"));
+      return { content: `not json, card ${CARD}`, toolCalls: [] };
+    }
+  }
+  // The scripted provider has no known host (public): the clean first call goes out, the retry carries the card.
+
+  it("an Output Parser retry is judged before it sends the upstream text", async () => {
+    const model = new CardAnswer();
+    const harness = guardDeps(["block"]);
+    const wf = workflow(
+      [
+        node("in", "webhook_input"),
+        node("llm", "llm_call", { provider: { providerId: "scripted", model: "m" } }),
+        node("parse", "output_parser", { mode: "auto_fix", maxRetries: 1, inputKey: "answer" }),
+        node("out", "output")
+      ],
+      [{ source: "in", target: "llm" }, { source: "llm", target: "parse" }, { source: "parse", target: "out" }]
+    );
+    const result = await executeWorkflow({ workflow: wf, executionId: "parser", webhookPayload: { user_prompt: "hello" } }, deps({ guard: harness.guard, model }));
+    expect(model.prompts).toHaveLength(1);
+    expect(resultOf(result, "parse")?.error).toContain("parser retry model call");
+  });
+
+  it("an Output Guardrail retry is judged before it sends the output", async () => {
+    const model = new CardAnswer();
+    const harness = guardDeps(["block"]);
+    const wf = workflow(
+      [
+        node("in", "webhook_input"),
+        node("llm", "llm_call", { provider: { providerId: "scripted", model: "m" } }),
+        node("rail", "output_guardrail", { checks: ["must_contain_json"], onFail: "retry" }),
+        node("out", "output")
+      ],
+      [{ source: "in", target: "llm" }, { source: "llm", target: "rail" }, { source: "rail", target: "out" }]
+    );
+    const result = await executeWorkflow({ workflow: wf, executionId: "rail", webhookPayload: { user_prompt: "hello" } }, deps({ guard: harness.guard, model }));
+    expect(model.prompts).toHaveLength(1);
+    expect(resultOf(result, "rail")?.error).toContain("guardrail retry model call");
+  });
+});
+
+describe("outbound verdict rows", () => {
+  it("a clean outbound check writes no row; a finding (shadow included) does", async () => {
+    const clean = guardDeps(["default", "block"], { rows: PUBLIC_LOCALHOST });
+    const ok = await executeWorkflow({ workflow: httpWorkflow(`${base}/plain`), executionId: "rows-1", webhookPayload: { user_prompt: "hello" } }, deps({ guard: clean.guard }));
+    expect(ok.status).toBe("success");
+    expect(clean.events.filter((event) => event.channel === "egress")).toEqual([]);
+
+    const shadow = guardDeps(["default", "shadow"], { rows: PUBLIC_LOCALHOST });
+    await executeWorkflow({ workflow: httpWorkflow(`${base}/plain`), executionId: "rows-2", webhookPayload: { user_prompt: `card ${CARD}` } }, deps({ guard: shadow.guard }));
+    const egress = shadow.events.filter((event) => event.channel === "egress");
+    // Only the rules profile found something: the built-in default writes no row for this call.
+    expect(egress.map((event) => event.profile.profileId)).toEqual(["shadow"]);
+  });
+
+  it("an agent's later model calls record no extra row for the built-in default profile", async () => {
+    const harness = guardDeps(["default", "shadow"]);
+    const model = new RecordingModel("Done.", { name: "docs-mcp__fetch_page", args: { url: "https://example.com" } });
+    const wf = workflow(
+      [
+        node("in", "webhook_input"),
+        node("agent", "agent_orchestrator", { maxIterations: 4, toolCallingEnabled: true, userPromptTemplate: "{{user_prompt}}" }),
+        node("model", "llm_call", { provider: { providerId: "scripted", model: "m" } }),
+        node("tool", "mcp_tool", { serverId: "docs-mcp", toolName: "fetch_page" }),
+        node("out", "output")
+      ],
+      [
+        { source: "in", target: "agent" },
+        { source: "agent", target: "out" },
+        { source: "agent", sourceHandle: "chat_model", target: "model" },
+        { source: "agent", sourceHandle: "tool", target: "tool" }
+      ]
+    );
+    const result = await executeWorkflow({ workflow: wf, executionId: "rows-3", webhookPayload: { user_prompt: "Read the page" } }, deps({ guard: harness.guard, model }));
+    expect(result.status).toBe("success");
+    // The default profile's prompt rows: only the user prompt check (iteration 1), none for later model calls.
+    const defaultPrompt = harness.events.filter((event) => event.profile.profileId === "default" && event.channel === "prompt");
+    expect(defaultPrompt.map((event) => event.iteration)).toEqual([1]);
+  });
+});
+
+describe("loads made while rendering or browsing", () => {
+  it("a chart's data URL is judged as egress before it is fetched", async () => {
+    const harness = guardDeps(["block"], { rows: PUBLIC_LOCALHOST });
+    const before = received.length;
+    const spec = { mark: "bar", data: { url: `${base}/data.json?ssn=${encodeURIComponent(CARD)}` }, encoding: { x: { field: "a", type: "nominal" } } };
+    const wf = workflow([node("in", "webhook_input"), node("chart", "chart", { spec }), node("out", "output")], [{ source: "in", target: "chart" }, { source: "chart", target: "out" }]);
+    const result = await executeWorkflow({ workflow: wf, executionId: "chart-1", webhookPayload: {} }, deps({ guard: harness.guard }));
+    expect(result.status).toBe("error");
+    expect(received.length).toBe(before);
+    expect(harness.events.find((event) => event.channel === "egress")?.verdict.destination).toMatchObject({ host: "127.0.0.1", tier: "public" });
+  });
+});
