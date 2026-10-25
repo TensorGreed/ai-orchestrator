@@ -426,3 +426,53 @@ describe("guard contract additions", () => {
     expect(providerEnum).toEqual([...PROTECTION_PROVIDER_IDS]);
   });
 });
+
+describe("round 2: id-only rows only remove permissions", () => {
+  it("an id-only public row cannot lend its region or approved classes to a stricter-resolving host", () => {
+    const rows = [row({ kind: "model_provider", targetId: "openai", tier: "public", region: "eu-west-1", holdsDataClasses: ["card_number"] })];
+    const resolved = resolveDestination({ kind: "model_provider", id: "openai", host: "generativelanguage.googleapis.com" }, rows);
+    expect(resolved).toMatchObject({ tier: "public", region: "unknown", holdsDataClasses: [] });
+    const local = resolveDestination({ kind: "model_provider", id: "openai", host: "localhost" }, rows);
+    expect(local).toMatchObject({ tier: "public", region: "unknown", holdsDataClasses: [] });
+  });
+
+  it("two id-only rows on one id: the stricter tier wins, classes are intersected and the region needs agreement", () => {
+    const rows = [
+      row({ kind: "model_provider", targetId: "openai", tier: "private", region: "eu-west-1", holdsDataClasses: ["email"] }),
+      row({ kind: "model_provider", targetId: "openai", tier: "public", region: "us-east-1", holdsDataClasses: ["card_number"] })
+    ];
+    expect(resolveDestination({ kind: "model_provider", id: "openai", host: "generativelanguage.googleapis.com" }, rows)).toMatchObject({
+      tier: "public",
+      region: "unknown",
+      holdsDataClasses: []
+    });
+    const same = [
+      row({ kind: "model_provider", targetId: "corp", tier: "public", region: "eu-west-1", holdsDataClasses: ["email", "phone"] }),
+      row({ kind: "model_provider", targetId: "corp", tier: "public", region: "eu-west-1", holdsDataClasses: ["email"] })
+    ];
+    expect(resolveDestination({ kind: "model_provider", id: "corp", host: "10.0.0.1" }, same)).toMatchObject({ tier: "public", holdsDataClasses: [] });
+  });
+
+  it("an empty or blank host on a call that has a host field is public, never decided by an id-only row", () => {
+    const rows = [row({ kind: "model_provider", targetId: "openai-compatible", tier: "local", holdsDataClasses: ["email"] })];
+    for (const host of ["", "   "]) {
+      expect(resolveDestination({ kind: "model_provider", id: "openai-compatible", host }, rows), JSON.stringify(host)).toMatchObject({ tier: "public", holdsDataClasses: [] });
+    }
+    expect(resolveDestination({ kind: "model_provider", id: "openai-compatible" }, rows).tier).toBe("local");
+  });
+
+  it("refuses ports above 65535", () => {
+    expect(normalizeDestinationHost("localhost:99999")).toBeUndefined();
+    expect(normalizeDestinationHost("localhost:65535")).toBe("localhost");
+    expect(normalizeDestinationHost("[::1]:65536")).toBeUndefined();
+    expect(normalizeDestinationHost("[::1]x80")).toBeUndefined();
+  });
+
+  it("stores an international host name in its punycode form", () => {
+    const parsed = dataDestinationInputSchema.parse({ name: "Shop", kind: "http", host: "Bücher.example", tier: "private" });
+    expect(normalizeDataDestinationInput(parsed).host).toBe("xn--bcher-kva.example");
+    const wild = dataDestinationInputSchema.parse({ name: "Shop", kind: "http", host: "*.bücher.example", tier: "private" });
+    expect(normalizeDataDestinationInput(wild).host).toBe("*.xn--bcher-kva.example");
+    expect(dataDestinationInputSchema.safeParse({ name: "x", kind: "http", host: "bücher.example@evil.com", tier: "private" }).success).toBe(false);
+  });
+});

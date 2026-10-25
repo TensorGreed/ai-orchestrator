@@ -204,11 +204,16 @@ function validHostname(host: string): boolean {
   return labels.every((label) => HOST_LABEL.test(label));
 }
 
+/** A port is 1–5 digits and at most 65535 (an empty one is refused). */
+function validPort(text: string): boolean {
+  return /^\d{1,5}$/.test(text) && Number(text) <= 65535;
+}
+
 /**
  * A host in canonical form: lower case, no trailing dot, no brackets or port,
  * IP literals in their canonical spelling. Undefined when it is not a host
  * name: anything that looks like more of a URL or authority (`@`, `/`, `\`,
- * `?`, `#`, whitespace, a port that is not 1–5 digits, text after `]` other
+ * `?`, `#`, whitespace, a port that is not 1–65535, text after `]` other
  * than a port) is refused, so it resolves as public. Callers pass
  * `URL.hostname`, never `URL.host` or the authority.
  */
@@ -222,12 +227,12 @@ export function normalizeDestinationHost(value: string | null | undefined): stri
     const close = host.indexOf("]");
     if (close < 0) return undefined;
     const rest = host.slice(close + 1);
-    if (rest !== "" && !/^:\d{1,5}$/.test(rest)) return undefined;
+    if (rest !== "" && !(rest.startsWith(":") && validPort(rest.slice(1)))) return undefined;
     host = host.slice(1, close);
     if (!host.includes(":")) return undefined;
   } else if ((host.match(/:/g) ?? []).length === 1) {
     const colon = host.indexOf(":");
-    if (!/^\d{1,5}$/.test(host.slice(colon + 1))) return undefined;
+    if (!validPort(host.slice(colon + 1))) return undefined;
     host = host.slice(0, colon);
   }
   host = host.replace(/\.$/, "");
@@ -313,6 +318,23 @@ const targetIdSchema = z
   .max(128)
   .regex(/^[A-Za-z0-9_.:-]+$/, "Use letters, digits, '_', '.', ':' and '-' only");
 
+/**
+ * An international host name typed by an admin (`bücher.example`, `*.bücher.example`)
+ * is stored in its punycode form, the spelling every URL hostname has. Text that
+ * is plain ASCII, or is not a bare host name, is returned unchanged for the
+ * normal validation to judge.
+ */
+function unicodeHostToAscii(value: string | null | undefined): string | null | undefined {
+  if (!value || !/[^\x00-\x7f]/.test(value) || /[@/\\?#\s%:\[\]]/.test(value)) return value;
+  const wildcard = value.startsWith("*.");
+  try {
+    const hostname = new URL(`http://${wildcard ? value.slice(2) : value}`).hostname;
+    return /[^\x00-\x7f]/.test(hostname) ? value : wildcard ? `*.${hostname}` : hostname;
+  } catch {
+    return value;
+  }
+}
+
 /** What an admin sends to create or change a destination row. */
 export const dataDestinationInputSchema = z
   .object({
@@ -321,7 +343,7 @@ export const dataDestinationInputSchema = z
     /** Provider id, MCP server registry id, or connector type. Not used for web addresses. */
     targetId: targetIdSchema.nullish(),
     /** Exact host or IP, `*.suffix`, or a CIDR range such as `10.20.0.0/16`. */
-    host: z.string().trim().max(260).nullish(),
+    host: z.string().trim().max(260).nullish().transform(unicodeHostToAscii),
     tier: destinationTierSchema,
     region: z.string().trim().max(64).nullish(),
     holdsDataClasses: z.array(dataClassNameSchema).max(50).default([]),
@@ -498,11 +520,11 @@ function resolvedFrom(row: DataDestinationRow): ResolvedDestination {
   };
 }
 
-function bestMatch(
+function matchingRows(
   ref: DestinationRef,
   host: string | undefined,
   rows: readonly DataDestinationRow[]
-): { strength: MatchStrength; row: DataDestinationRow } | undefined {
+): Array<{ strength: MatchStrength; row: DataDestinationRow }> {
   const ip = host ? parseIp(host) : null;
   const seen = new Set<string>();
   const candidates: Array<{ strength: MatchStrength; row: DataDestinationRow }> = [];
@@ -515,7 +537,32 @@ function bestMatch(
     if (strength) candidates.push({ strength, row });
   }
   candidates.sort(compareCandidates);
-  return candidates[0];
+  return candidates;
+}
+
+function bestMatch(
+  ref: DestinationRef,
+  host: string | undefined,
+  rows: readonly DataDestinationRow[]
+): { strength: MatchStrength; row: DataDestinationRow } | undefined {
+  return matchingRows(ref, host, rows)[0];
+}
+
+/**
+ * The strictest of several resolutions: its tier, only the data classes every
+ * one of them is approved to hold, and its region only when every resolution
+ * of that tier agrees (else unknown). The first of equally strict ones names it.
+ */
+function strictestOf(hops: readonly ResolvedDestination[]): { result: ResolvedDestination; hopIndex: number } {
+  let hopIndex = 0;
+  hops.forEach((hop, index) => {
+    if (destinationTierRank(hop.tier) > destinationTierRank(hops[hopIndex]!.tier)) hopIndex = index;
+  });
+  const strictest = hops[hopIndex]!;
+  const sameTier = hops.filter((hop) => hop.tier === strictest.tier);
+  const region = sameTier.every((hop) => hop.region === strictest.region) ? strictest.region : UNKNOWN_REGION;
+  const holdsDataClasses = strictest.holdsDataClasses.filter((dataClass) => hops.every((hop) => hop.holdsDataClasses.includes(dataClass)));
+  return { result: { ...strictest, region, holdsDataClasses }, hopIndex };
 }
 
 /**
@@ -526,25 +573,32 @@ function bestMatch(
  * rows the stricter tier wins. A destination nothing matches is public.
  *
  * A row matched by id alone (a provider id, MCP server id or connector type
- * with no host) never loosens what the call's host resolves to: the host is
- * set by whoever builds the workflow, not by the admin. When the call has a
- * host, the result is the stricter of the id row and the host's own
- * resolution (built-ins, host rows, else public); on a tie the host's
- * resolution stands, so the id row cannot add a region or approved classes.
- * A host that is given but is not a plain host name resolves as public.
+ * with no host) can only make a call stricter: the host is set by whoever
+ * builds the workflow, not by the admin. When the call has a host, the result
+ * is the strictest of the id rows and the host's own resolution (built-ins,
+ * host rows, else public), with only the classes all of them approve and a
+ * region only when the host's own result and every id row agree; on a tie the host's resolution names the
+ * result. A host that is given (even empty) but is not a plain host name
+ * resolves as public.
  */
 export function resolveDestination(ref: DestinationRef, rows: readonly DataDestinationRow[]): ResolvedDestination {
-  const hostGiven = String(ref.host ?? "").trim() !== "";
+  const hostGiven = ref.host !== undefined && ref.host !== null;
   const host = normalizeDestinationHost(ref.host);
-  const best = bestMatch(ref, host, rows);
+  const candidates = matchingRows(ref, host, rows);
+  const best = candidates[0];
   const idOnly = best !== undefined && best.strength.rank === 4 && best.strength.detail === 0;
   if (best && !(idOnly && hostGiven)) return resolvedFrom(best.row);
   if (!best) return { ...UNMATCHED_DESTINATION, holdsDataClasses: [] };
-  // An id-only row against a call with a host: the stricter of the two.
-  const byId = resolvedFrom(best.row);
+  // Id-only rows against a call with a host: the strictest of all of them and the host's own result.
+  const idRows = candidates
+    .filter((candidate) => candidate.strength.rank === 4 && candidate.strength.detail === 0)
+    .map((candidate) => resolvedFrom(candidate.row));
   const hostBest = host ? bestMatch({ kind: ref.kind, host }, host, rows) : undefined;
   const byHost = hostBest ? resolvedFrom(hostBest.row) : { ...UNMATCHED_DESTINATION, holdsDataClasses: [] };
-  return destinationTierRank(byId.tier) > destinationTierRank(byHost.tier) ? byId : byHost;
+  const all = [byHost, ...idRows];
+  const { result } = strictestOf(all);
+  // A region tag is the host's to claim: an id row never supplies one.
+  return all.every((hop) => hop.region === result.region) ? result : { ...result, region: UNKNOWN_REGION };
 }
 
 export interface ResolvedRedirectChain extends ResolvedDestination {
@@ -563,15 +617,8 @@ export interface ResolvedRedirectChain extends ResolvedDestination {
 export function resolveRedirectChain(refs: readonly DestinationRef[], rows: readonly DataDestinationRow[]): ResolvedRedirectChain {
   const hops = refs.map((ref) => resolveDestination(ref, rows));
   if (hops.length === 0) return { ...UNMATCHED_DESTINATION, holdsDataClasses: [], hops: [], hopIndex: -1 };
-  let hopIndex = 0;
-  hops.forEach((hop, index) => {
-    if (destinationTierRank(hop.tier) > destinationTierRank(hops[hopIndex]!.tier)) hopIndex = index;
-  });
-  const strictest = hops[hopIndex]!;
-  const sameTier = hops.filter((hop) => hop.tier === strictest.tier);
-  const region = sameTier.every((hop) => hop.region === strictest.region) ? strictest.region : UNKNOWN_REGION;
-  const holdsDataClasses = strictest.holdsDataClasses.filter((dataClass) => hops.every((hop) => hop.holdsDataClasses.includes(dataClass)));
-  return { ...strictest, region, holdsDataClasses, hops, hopIndex };
+  const { result, hopIndex } = strictestOf(hops);
+  return { ...result, hops, hopIndex };
 }
 
 // ---------------------------------------------------------------------------
