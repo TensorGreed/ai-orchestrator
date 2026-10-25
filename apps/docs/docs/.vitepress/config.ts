@@ -59,7 +59,8 @@ export default defineConfig({
           { text: "Approval gates", link: "/product/approvals" },
           { text: "Guard engine", link: "/product/guard-engine" },
           { text: "Guard in workflows", link: "/product/guard" },
-          { text: "Guard policy simulation", link: "/product/guard-simulation" }
+          { text: "Guard policy simulation", link: "/product/guard-simulation" },
+          { text: "Data labels and destinations", link: "/product/data-labels" }
         ]
       },
       {

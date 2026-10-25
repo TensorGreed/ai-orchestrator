@@ -19,7 +19,7 @@ Add **Guard** from the AI section of the node drawer and connect it like any oth
 - **Profile**: a stored profile, or **Effective profile** to use whatever the workflow and project bindings resolve to.
 - **Channel**: `prompt`, `model_output`, `tool_arguments`, `tool_result` or `final_output`. The channel decides which part of the profile applies.
 - **Input field**: the field of the incoming item to check (default `user_prompt`). An empty field checks the whole item.
-- **Trust labels**: provenance labels for the content. When none are set, a `tool_result` check is labelled `untrusted_external` and a `prompt` check `user`.
+- **Trust labels**: provenance labels for the content. When none are set, a `tool_result` check is labelled `untrusted_external` and a `prompt` check `user`. When a profile tracks where data came from, the labels the run propagated are used instead (see [Data labels and destinations](/product/data-labels)); labels set here always win.
 - **Profile override**: optional JSON merged over the chosen profile for this node only.
 
 The node has three outputs:
