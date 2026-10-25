@@ -741,3 +741,115 @@ export function findUnclassifiedDestinations(configured: readonly ConfiguredDest
     (a, b) => DESTINATION_KINDS.indexOf(a.kind) - DESTINATION_KINDS.indexOf(b.kind) || a.suggestion.name.localeCompare(b.suggestion.name)
   );
 }
+
+// ---------------------------------------------------------------------------
+// Call-time refs (Phase 16, p3): one mapping from settings to a destination,
+// shared by the "not classified yet" list and the engine's checks, so a call
+// and its classification always agree.
+// ---------------------------------------------------------------------------
+
+/** Config keys that may hold the URL or host a connector talks to. */
+export const CONNECTOR_URL_KEYS = ["endpoint", "url", "baseUrl", "apiUrl", "serverUrl", "webhookUrl", "accountUrl", "instanceUrl", "uri", "urlTemplate", "host"] as const;
+
+/**
+ * Hosts of connectors that always call one vendor API (whatever their
+ * settings), used when the settings name no host of their own.
+ */
+export const CONNECTOR_FIXED_HOSTS: Readonly<Record<string, string>> = Object.freeze({
+  slack_send_message: "hooks.slack.com",
+  github_action: "api.github.com",
+  google_sheets_read: "sheets.googleapis.com",
+  google_sheets_append: "sheets.googleapis.com",
+  google_sheets_update: "sheets.googleapis.com",
+  google_drive_source: "www.googleapis.com",
+  google_calendar_create_event: "www.googleapis.com",
+  google_calendar_list_events: "www.googleapis.com",
+  notion_create_page: "api.notion.com",
+  notion_query_database: "api.notion.com",
+  airtable_create_record: "api.airtable.com",
+  airtable_list_records: "api.airtable.com",
+  airtable_update_record: "api.airtable.com",
+  hubspot_create_contact: "api.hubapi.com",
+  hubspot_get_contact: "api.hubapi.com",
+  stripe_create_customer: "api.stripe.com",
+  stripe_create_charge: "api.stripe.com",
+  telegram_send_message: "api.telegram.org",
+  discord_send_message: "discord.com",
+  twilio_send_sms: "api.twilio.com"
+});
+
+/** A host from a URL or a bare host value; templated or unreadable values give nothing. */
+export function destinationHostOfSetting(value: unknown): string | undefined {
+  if (typeof value !== "string" || !value.trim()) return undefined;
+  const text = value.trim();
+  if (text.includes("{{")) return undefined;
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(text)) return destinationHostOfUrl(text);
+  return text.includes("/") ? undefined : normalizeDestinationHost(text);
+}
+
+function plainRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined;
+}
+
+/** The first host found in a connector's config or one level below it (credentials and secret references are skipped). */
+export function connectorConfigHost(config: Record<string, unknown>): string | undefined {
+  for (const key of CONNECTOR_URL_KEYS) {
+    const host = destinationHostOfSetting(config[key]);
+    if (host) return host;
+  }
+  for (const [key, value] of Object.entries(config)) {
+    if (/secret|credential|password|token/i.test(key)) continue;
+    const nested = plainRecord(value);
+    if (!nested) continue;
+    for (const inner of CONNECTOR_URL_KEYS) {
+      const host = destinationHostOfSetting(nested[inner]);
+      if (host) return host;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Where a connector node sends its requests: its type, and the host its
+ * (rendered) settings name, else (no address set) the vendor host it always
+ * calls, else an unknown host (public).
+ */
+export function connectorDestinationRef(nodeType: string, config: Record<string, unknown>): DestinationRef {
+  const host = connectorConfigHost(config);
+  if (host) return networkDestinationRef("connector", nodeType, host);
+  // An address that is set but cannot be read (a template) is unknown: the vendor default is never assumed then.
+  const addressSet = CONNECTOR_URL_KEYS.some((key) => typeof config[key] === "string" && String(config[key]).trim() !== "");
+  return networkDestinationRef("connector", nodeType, addressSet ? undefined : CONNECTOR_FIXED_HOSTS[nodeType]);
+}
+
+/** MCP adapters that send nothing over the network. */
+export const MCP_ADAPTERS_WITHOUT_NETWORK: ReadonlySet<string> = new Set(["mock-mcp"]);
+
+/**
+ * Where an MCP server's calls go: null for an adapter with no network (the
+ * mock server), otherwise the registry id and the host of its endpoint
+ * (unknown when the endpoint is missing or unreadable: public).
+ */
+export function mcpServerDestinationRef(server: { serverId?: string; adapterId?: string; registryServerId?: string; connection?: unknown }): DestinationRef | null {
+  const adapter = server.adapterId ?? server.serverId ?? "";
+  if (MCP_ADAPTERS_WITHOUT_NETWORK.has(adapter)) return null;
+  return networkDestinationRef("mcp_server", server.registryServerId, destinationHostOfSetting(plainRecord(server.connection)?.endpoint));
+}
+
+/** A destination as a verdict carries it: never a path, query or credential. */
+export interface GuardDestinationSummary {
+  kind: DestinationKind;
+  id?: string;
+  host?: string;
+  tier: DestinationTier;
+  region: string;
+  /** The classifying row's name, when a row matched. */
+  name?: string;
+  matchedBy: ResolvedDestination["matchedBy"];
+}
+
+/** "api.example.com (public)", "OpenAI (vendor)": how copy names a destination. */
+export function describeDestinationSummary(destination: Pick<GuardDestinationSummary, "name" | "host" | "id" | "tier">): string {
+  const label = destination.name ?? (destination.host || destination.id || "an unknown host");
+  return `${label} (${destination.tier})`;
+}

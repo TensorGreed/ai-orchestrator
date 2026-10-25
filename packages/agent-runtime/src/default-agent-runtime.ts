@@ -1008,7 +1008,7 @@ ${effectiveSystemPrompt}`;
           channel: "prompt",
           content: text,
           labels: ["user"],
-          ...(labelTracking ? { dataLabels: unionLabels([inputLabels, promptLabels]) } : {}),
+          ...(labelTracking ? { dataLabels: unionLabels([inputLabels, promptLabels]), destinationLabels: accumulatedLabels() } : {}),
           iteration
         });
         if (decision.outcome === "block") throw new AgentGuardInterrupt("blocked", "prompt", iteration, decision.message);
@@ -1021,6 +1021,32 @@ ${effectiveSystemPrompt}`;
               ? { ...message, content: serializeToolMessage(true, { user_reply: rewritten }, toolOutputLimits) }
               : { ...message, content: normalizeMessageContent(rewritten, MAX_MESSAGE_CHARS) };
         }
+      }
+    };
+    // Phase 16 — messages up to here were part of a model call the guard already judged (the prompt check covers the first).
+    let modelCheckedUpTo = messages.length;
+    const guardModelCall = async (iteration: number) => {
+      if (!guard?.checkModelCall) return;
+      const indexes: number[] = [];
+      for (let index = modelCheckedUpTo; index < messages.length; index += 1) if (messages[index]?.role === "tool") indexes.push(index);
+      modelCheckedUpTo = messages.length;
+      if (indexes.length === 0) return;
+      const decision = await guard.checkModelCall({
+        content: indexes.map((index) => messages[index]!.content),
+        ...(labelTracking ? { dataLabels: accumulatedLabels() } : {}),
+        iteration
+      });
+      if (decision.outcome === "block") throw new AgentGuardInterrupt("blocked", "prompt", iteration, decision.message);
+      if (decision.outcome === "pause") throw new AgentGuardInterrupt("approval_required", "prompt", iteration, decision.message);
+      if (decision.outcome === "rewrite") {
+        const rewritten = Array.isArray(decision.content) ? decision.content : null;
+        if (!rewritten || rewritten.length !== indexes.length) {
+          throw new AgentGuardInterrupt("blocked", "prompt", iteration, "the rewritten tool results could not be matched to the messages they came from");
+        }
+        indexes.forEach((index, position) => {
+          const value = rewritten[position];
+          messages[index] = { ...messages[index]!, content: typeof value === "string" ? value : JSON.stringify(value) };
+        });
       }
     };
     /** The final answer after the guard's `final_output` check; a block or pause stops the node. */
@@ -1130,6 +1156,8 @@ ${effectiveSystemPrompt}`;
         emit({ kind: "agent_step", phase: "start", iteration, maxIterations: request.maxIterations });
         // Phase 12.1 — guard hook: before each model call.
         await guardPrompts(iteration);
+        // Phase 16 — destination rules on what this model call adds (tool results since the last call).
+        await guardModelCall(iteration);
         // --- LLM call with per-iteration retry ---
         let modelResponse: Awaited<ReturnType<typeof providerAdapter.generate>> | undefined;
         let llmError: Error | undefined;

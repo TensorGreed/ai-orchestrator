@@ -16,7 +16,8 @@ import {
   withDelegatedUser
 } from "@ai-orchestrator/mcp-sdk";
 import type { ProviderExecutionContext, ProviderRegistry, ResilientFetchRetryInfo } from "@ai-orchestrator/provider-sdk";
-import { GUARD_EFFECTIVE_PROFILE_REF, NODE_ACTIVITY_LIMIT, NODE_ACTIVITY_PREVIEW_CHARS, inputProvenance, nodeContentSource, withoutDataClasses } from "@ai-orchestrator/shared";
+import { providerDestinationRef } from "@ai-orchestrator/provider-sdk";
+import { GUARD_EFFECTIVE_PROFILE_REF, NODE_ACTIVITY_LIMIT, NODE_ACTIVITY_PREVIEW_CHARS, inputProvenance, mcpServerDestinationRef, nodeContentSource, withoutDataClasses } from "@ai-orchestrator/shared";
 import type {
   DataLabels,
   ApprovalDecisionValue,
@@ -123,10 +124,22 @@ import {
 } from "./approval-gate-node";
 import type { ReplayNodeHook, ReplayNodeStub } from "./replay-plan";
 import {
+  checkEgressRequest,
+  checkOutbound,
+  describeEgressRequest,
+  describeMcpToolRequest,
+  httpDestinationRef,
+  isEgressNodeType,
+  outboundProfilesFor,
+  type EgressOverride,
+  type EgressRequest
+} from "./destination-guard";
+import {
   builtInGuardProfile,
   createAgentGuardSession,
   GuardBlockedError,
   isGuardBlockedError,
+  issuedSurrogatesOf,
   resolveGuardRun,
   type AgentGuardSession,
   type GuardEvalScope,
@@ -2690,12 +2703,45 @@ async function runLlmNode(input: {
   userPrompt: string;
   systemPrompt: string;
   dependencies: WorkflowExecutionDependencies;
+  /** Phase 16 — the calling node, for destination rules on the model call. */
+  outbound?: { node: WorkflowNode; context: NodeRuntimeContext };
 }): Promise<Record<string, unknown>> {
-  const messages = [] as Array<{ role: "system" | "user"; content: string }>;
-  if (input.systemPrompt) {
-    messages.push({ role: "system", content: input.systemPrompt });
+  let { systemPrompt, userPrompt } = input;
+  if (input.outbound) {
+    // Phase 16 — destination rules: what this model call sends, judged against the provider it goes to.
+    const profiles = await outboundProfilesFor(input.dependencies.guard, "destinations");
+    const ref = profiles.length > 0 ? providerDestinationRef(input.provider) : null;
+    if (ref) {
+      const { node, context } = input.outbound;
+      const outcome = await checkOutbound({
+        scope: guardScopeFor(node, context, input.dependencies, "node"),
+        profiles,
+        channel: "prompt",
+        content: { system_prompt: systemPrompt, user_prompt: userPrompt },
+        refs: [ref],
+        dataLabels: context.labelScope?.inputLabels() ?? labelsOf([]),
+        destinationOnly: true,
+        ...(context.approvedHandoffKeys ? { approvals: context.approvedHandoffKeys } : {}),
+        replay: Boolean(input.dependencies.replayNodeHook),
+        what: `${node.name || node.type} (model call to ${ref.host || ref.id || "an unknown host"})`,
+        approvalTag: ref.host || ref.id || ""
+      });
+      if (outcome.transformed) {
+        const rewritten = toRecord(outcome.content);
+        if (typeof rewritten.system_prompt !== "string" || typeof rewritten.user_prompt !== "string") {
+          throw new GuardBlockedError(`${node.name || node.type} was blocked by the guard: the rewritten prompt could not be used`, outcome.result.verdicts);
+        }
+        systemPrompt = rewritten.system_prompt;
+        userPrompt = rewritten.user_prompt;
+        context.labelScope?.declassify(outcome.declassified);
+      }
+    }
   }
-  messages.push({ role: "user", content: input.userPrompt });
+  const messages = [] as Array<{ role: "system" | "user"; content: string }>;
+  if (systemPrompt) {
+    messages.push({ role: "system", content: systemPrompt });
+  }
+  messages.push({ role: "user", content: userPrompt });
 
   const providerAdapter = input.dependencies.providerRegistry.get(input.provider.providerId);
   const llmIdentity = { providerId: String(input.provider.providerId), model: input.provider.model };
@@ -2703,8 +2749,8 @@ async function runLlmNode(input: {
     kind: "resolved_input",
     fields: {
       ...llmIdentity,
-      systemPrompt: previewForActivity(input.systemPrompt),
-      userPrompt: previewForActivity(input.userPrompt)
+      systemPrompt: previewForActivity(systemPrompt),
+      userPrompt: previewForActivity(userPrompt)
     }
   });
   emitNodeActivity(input.dependencies, input.nodeId, { kind: "llm_call", phase: "start", ...llmIdentity });
@@ -2970,6 +3016,68 @@ function protectionNodesFor(guardNode: WorkflowNode, context: NodeRuntimeContext
   return ids.map((id) => context.nodeById.get(id)).filter((entry): entry is WorkflowNode => Boolean(entry));
 }
 
+/**
+ * Phase 16 — the outbound check of an egress node (HTTP, Web Browse,
+ * connector senders) or an MCP Tool call, before its handler or replay stub.
+ * Null when nothing checks it (the zero-config case pays one cheap check).
+ * Returns what the handler sends instead after a rewrite, and for HTTP
+ * Request the check each redirect hop gets.
+ */
+async function outboundPreCheck(
+  node: WorkflowNode,
+  config: Record<string, unknown>,
+  context: NodeRuntimeContext,
+  dependencies: WorkflowExecutionDependencies
+): Promise<{ override: EgressOverride | null; onRedirect?: (url: string) => Promise<void> } | null> {
+  const egress = isEgressNodeType(node.type);
+  const mcp = node.type === "mcp_tool" && config.operation !== "read_resource";
+  if (!egress && !mcp) return null;
+  const profiles = await outboundProfilesFor(dependencies.guard, egress ? "egress" : "destinations");
+  if (profiles.length === 0) return null;
+  const templateData = buildTemplateData(context, config);
+  let request: EgressRequest | null;
+  if (egress) {
+    request = describeEgressRequest(node, config, templateData);
+  } else {
+    const toolName = String(config.toolName ?? "");
+    const argsTemplate = typeof config.argsTemplate === "string" ? config.argsTemplate : "{}";
+    const args = tryParseJson(renderTemplate(argsTemplate, templateData));
+    let server: MCPServerConfig = { serverId: String(config.serverId ?? ""), registryServerId: readRegistryServerId(config), connection: toRecord(config.connection) };
+    try {
+      server = await applyRegisteredMcpServer(server, dependencies, context.toolPolicySubject);
+    } catch {
+      // The handler reports a server it cannot resolve; until then the host is unknown (public).
+      server = { ...server, connection: {} };
+    }
+    request = describeMcpToolRequest(node, server, toolName, args);
+  }
+  if (!request) return null;
+  const scope = guardScopeFor(node, context, dependencies, "node");
+  const dataLabels = context.labelScope?.inputLabels() ?? labelsOf([]);
+  const common = {
+    scope,
+    profiles,
+    dataLabels,
+    ...(context.approvedHandoffKeys ? { approvals: context.approvedHandoffKeys } : {}),
+    replay: Boolean(dependencies.replayNodeHook)
+  };
+  const checked = await checkEgressRequest(request, common);
+  if (checked.declassified.length > 0) context.labelScope?.declassify(checked.declassified);
+  const first = request;
+  const onRedirect =
+    node.type === "http_request"
+      ? async (url: string) => {
+          const chain = [...first.refs, httpDestinationRef(url)];
+          first.refs.push(chain[chain.length - 1]!);
+          const hop = await checkOutbound({ ...common, channel: "egress", content: first.content, refs: chain, what: `${first.what}, redirected to ${chain[chain.length - 1]!.host || "an unknown host"}`, approvalTag: chain.map((ref) => ref.host ?? "").join(">") });
+          if (hop.transformed) {
+            throw new GuardBlockedError(`${first.what} was redirected somewhere the guard would rewrite the request for; it was stopped instead`, hop.result.verdicts);
+          }
+        }
+      : undefined;
+  return { override: checked.override, ...(onRedirect ? { onRedirect } : {}) };
+}
+
 /** Phase 15.1 — the replay stub for a node, if the run is a replay and the node is stubbed. */
 function replayStubFor(node: WorkflowNode, dependencies: WorkflowExecutionDependencies): ReplayNodeStub | null {
   if (!dependencies.replayNodeHook || node.type === "sticky_note" || node.disabled === true) {
@@ -3003,7 +3111,7 @@ async function executeNodeHandler(
   dependencies: WorkflowExecutionDependencies
 ): Promise<unknown> {
   throwIfAborted(dependencies.abortSignal);
-  const config = toRecord(node.config);
+  let config = toRecord(node.config);
 
   // Visual-only nodes are never executed; downstream receives the merged parent outputs so the DAG stays intact.
   if (node.type === "sticky_note") {
@@ -3014,6 +3122,10 @@ async function executeNodeHandler(
   if (node.disabled === true) {
     return mergeParentOutputs(context.parentOutputs);
   }
+
+  // Phase 16 — outbound checks (egress, MCP destination rules) run before the handler, and before a replay's stub.
+  const outbound = await outboundPreCheck(node, config, context, dependencies);
+  if (outbound?.override?.kind === "config") config = outbound.override.config;
 
   const replayStub = replayStubFor(node, dependencies);
   if (replayStub) {
@@ -3059,8 +3171,9 @@ async function executeNodeHandler(
       const allowedMethods = new Set(["GET", "POST", "PUT", "PATCH", "DELETE"]);
       const safeMethod = allowedMethods.has(method) ? method : "GET";
 
+      const httpOverride = outbound?.override?.kind === "http" ? outbound.override : undefined;
       const urlTemplate = typeof config.urlTemplate === "string" ? config.urlTemplate : "";
-      const renderedUrl = renderTemplate(urlTemplate, templateData).trim();
+      const renderedUrl = httpOverride ? httpOverride.url : renderTemplate(urlTemplate, templateData).trim();
       if (!renderedUrl) {
         throw new Error("HTTP Request node requires a non-empty rendered URL.");
       }
@@ -3071,12 +3184,16 @@ async function executeNodeHandler(
       });
 
       const headersTemplate = typeof config.headersTemplate === "string" ? config.headersTemplate : "{}";
-      const renderedHeaders = renderTemplate(headersTemplate, templateData);
       let headersPayload: Record<string, unknown> = {};
-      try {
-        headersPayload = toRecord(JSON.parse(renderedHeaders || "{}"));
-      } catch {
-        throw new Error("HTTP Request node headersTemplate must render valid JSON object.");
+      if (httpOverride) {
+        headersPayload = httpOverride.headers;
+      } else {
+        const renderedHeaders = renderTemplate(headersTemplate, templateData);
+        try {
+          headersPayload = toRecord(JSON.parse(renderedHeaders || "{}"));
+        } catch {
+          throw new Error("HTTP Request node headersTemplate must render valid JSON object.");
+        }
       }
 
       const requestHeaders = new Headers();
@@ -3094,7 +3211,7 @@ async function executeNodeHandler(
       }
 
       const bodyTemplate = typeof config.bodyTemplate === "string" ? config.bodyTemplate : "";
-      const renderedBody = renderTemplate(bodyTemplate, templateData);
+      const renderedBody = httpOverride ? httpOverride.body : renderTemplate(bodyTemplate, templateData);
       const timeoutMs =
         typeof config.timeoutMs === "number" && Number.isFinite(config.timeoutMs) && config.timeoutMs > 0
           ? Math.floor(config.timeoutMs)
@@ -3124,7 +3241,9 @@ async function executeNodeHandler(
 
         const response = await guardedFetch(renderedUrl, requestInit, {
           config: dependencies.outboundGuard ?? DEFAULT_OUTBOUND_GUARD,
-          ...(dependencies.outboundDnsResolver ? { resolver: dependencies.outboundDnsResolver } : {})
+          ...(dependencies.outboundDnsResolver ? { resolver: dependencies.outboundDnsResolver } : {}),
+          // Phase 16 — a redirect is judged again, by the strictest hop of the chain so far.
+          ...(outbound?.onRedirect ? { onRedirect: outbound.onRedirect } : {})
         });
         const responseHeaders: Record<string, string> = {};
         response.headers.forEach((value, key) => {
@@ -3722,6 +3841,7 @@ async function executeNodeHandler(
         systemPrompt: String(readData(templateData, systemPromptKey) ?? "")
       });
       const output = await runLlmNode({
+        outbound: { node, context },
         nodeId: node.id,
         provider,
         userPrompt: prompts.userPrompt,
@@ -3754,6 +3874,7 @@ async function executeNodeHandler(
         systemPrompt: String(readData(templateData, systemPromptKey) ?? "")
       });
       const output = await runLlmNode({
+        outbound: { node, context },
         nodeId: node.id,
         provider,
         userPrompt: prompts.userPrompt,
@@ -3798,6 +3919,7 @@ async function executeNodeHandler(
       };
 
       const output = await runLlmNode({
+        outbound: { node, context },
         nodeId: node.id,
         provider,
         userPrompt: prompts.userPrompt,
@@ -3831,7 +3953,8 @@ async function executeNodeHandler(
         provider,
         userPrompt,
         systemPrompt,
-        dependencies
+        dependencies,
+        outbound: { node, context }
       });
     }
 
@@ -4836,7 +4959,12 @@ async function executeNodeHandler(
         throw new Error("Direct MCP Tool execution requires a specific tool name (single-tool mode).");
       }
       const argsTemplate = typeof config.argsTemplate === "string" ? config.argsTemplate : "{}";
-      const args = operation === "call_tool" ? tryParseJson(renderTemplate(argsTemplate, templateData)) : {};
+      const args =
+        outbound?.override?.kind === "mcp_args"
+          ? outbound.override.args
+          : operation === "call_tool"
+            ? tryParseJson(renderTemplate(argsTemplate, templateData))
+            : {};
       const serverConfig = await applyRegisteredMcpServer(
         {
           serverId,
@@ -4938,7 +5066,7 @@ async function executeNodeHandler(
           }
         }
         directMcp.samplingHandler.beginCall(toolName);
-        result = await invokeDirectMCPTool(serverConfig, toolName, args, dependencies.mcpRegistry, directMcpContext);
+        result = await invokeDirectMCPTool(serverConfig, toolName, args as Record<string, unknown>, dependencies.mcpRegistry, directMcpContext);
       } finally {
         dependencies.abortSignal?.removeEventListener("abort", releaseDirectMcpSessions.onAbort);
         await releaseDirectMcpSessions.close();
@@ -5257,6 +5385,16 @@ async function executeNodeHandler(
                 ...(context.approvedHandoffKeys ? { approvals: context.approvedHandoffKeys } : {}),
                 ...(portGuardNode ? { portGuardNode } : {}),
                 protectionNodes: portGuardNode ? protectionNodesFor(portGuardNode, context) : [],
+                // Phase 16 — where the agent's calls go, for destination rules.
+                modelDestination: providerDestinationRef(provider),
+                toolDestination: (exposedName) => {
+                  const resolved = resolvedTools.resolved.find((entry) => entry.exposedName === exposedName);
+                  if (!resolved) return null;
+                  const server = serverConfigs.find(
+                    (entry) => entry.serverId === resolved.serverId && (entry.registryServerId ?? "") === (resolved.registryServerId ?? "")
+                  );
+                  return mcpServerDestinationRef(server ?? { serverId: resolved.serverId, ...(resolved.registryServerId ? { registryServerId: resolved.registryServerId } : {}) });
+                },
                 describeTool: (exposedName) => {
                   const resolved = resolvedTools.resolved.find((entry) => entry.exposedName === exposedName);
                   if (resolved) {
@@ -5788,7 +5926,7 @@ async function executeNodeHandler(
       const systemPromptKey = typeof config.systemPromptKey === "string" ? config.systemPromptKey : "system_prompt";
       const userPrompt = String(readData(templateData, promptKey) ?? readData(templateData, "user_prompt") ?? "");
       const systemPrompt = String(readData(templateData, systemPromptKey) ?? "You are a helpful assistant.");
-      return runLlmNode({ nodeId: node.id, provider, userPrompt, systemPrompt, dependencies });
+      return runLlmNode({ nodeId: node.id, provider, userPrompt, systemPrompt, dependencies, outbound: { node, context } });
     }
 
     case "qa_chain": {
@@ -5796,13 +5934,13 @@ async function executeNodeHandler(
       if (!provider) throw new Error("Q&A Chain requires a provider.");
       const contextKey = typeof config.contextKey === "string" ? config.contextKey : "context";
       const questionKey = typeof config.questionKey === "string" ? config.questionKey : "question";
-      const context = String(readData(templateData, contextKey) ?? "");
+      const contextText = String(readData(templateData, contextKey) ?? "");
       const question = String(readData(templateData, questionKey) ?? readData(templateData, "user_prompt") ?? "");
       const maxLen = typeof config.maxContextLength === "number" ? config.maxContextLength : 4000;
-      const truncatedContext = context.slice(0, maxLen);
+      const truncatedContext = contextText.slice(0, maxLen);
       const systemPrompt = "You are a question-answering assistant. Answer the question based ONLY on the provided context. If the answer is not found in the context, say so. Cite specific parts of the context that support your answer.";
       const userPrompt = `Context:\n${truncatedContext}\n\nQuestion: ${question}`;
-      return runLlmNode({ nodeId: node.id, provider, userPrompt, systemPrompt, dependencies });
+      return runLlmNode({ nodeId: node.id, provider, userPrompt, systemPrompt, dependencies, outbound: { node, context } });
     }
 
     case "summarization_chain": {
@@ -5820,7 +5958,7 @@ async function executeNodeHandler(
       };
       const systemPrompt = `You are a summarization assistant. ${styleInstructions[style] ?? styleInstructions.brief}`;
       const userPrompt = `Summarize the following text:\n\n${text}`;
-      return runLlmNode({ nodeId: node.id, provider, userPrompt, systemPrompt, dependencies });
+      return runLlmNode({ nodeId: node.id, provider, userPrompt, systemPrompt, dependencies, outbound: { node, context } });
     }
 
     case "information_extractor": {
@@ -5831,7 +5969,7 @@ async function executeNodeHandler(
       const schema = typeof config.extractionSchema === "string" ? config.extractionSchema : '{ "key": "value" }';
       const systemPrompt = `You are an information extraction assistant. Extract structured data from the provided text according to the given schema. Return ONLY valid JSON matching the schema. If a field cannot be found, use null.`;
       const userPrompt = `Schema to extract:\n${schema}\n\nText:\n${text}`;
-      const result = await runLlmNode({ nodeId: node.id, provider, userPrompt, systemPrompt, dependencies });
+      const result = await runLlmNode({ nodeId: node.id, provider, userPrompt, systemPrompt, dependencies, outbound: { node, context } });
       const answer = typeof result.answer === "string" ? result.answer : String(result.text ?? "");
       let extracted: unknown = answer;
       try { extracted = JSON.parse(answer.replace(/^```json?\s*/i, "").replace(/```\s*$/i, "").trim()); } catch { /* keep as string */ }
@@ -5849,7 +5987,7 @@ async function executeNodeHandler(
         ? `You are a text classification assistant. Classify the text into one or more of these categories: ${categories}. Return a JSON object with: { "categories": ["category1", "category2"], "confidence": { "category1": 0.9, "category2": 0.7 }, "reasoning": "brief explanation" }`
         : `You are a text classification assistant. Classify the text into exactly ONE of these categories: ${categories}. Return a JSON object with: { "category": "chosen_category", "confidence": 0.95, "reasoning": "brief explanation" }`;
       const userPrompt = `Classify this text:\n\n${text}`;
-      const result = await runLlmNode({ nodeId: node.id, provider, userPrompt, systemPrompt, dependencies });
+      const result = await runLlmNode({ nodeId: node.id, provider, userPrompt, systemPrompt, dependencies, outbound: { node, context } });
       const answer = typeof result.answer === "string" ? result.answer : String(result.text ?? "");
       let classification: unknown = answer;
       try { classification = JSON.parse(answer.replace(/^```json?\s*/i, "").replace(/```\s*$/i, "").trim()); } catch { /* keep as string */ }
@@ -5863,7 +6001,7 @@ async function executeNodeHandler(
       const text = String(readData(templateData, textKey) ?? readData(templateData, "prompt") ?? "");
       const systemPrompt = `You are a sentiment analysis assistant. Analyze the sentiment of the provided text. Return a JSON object with: { "sentiment": "positive" | "negative" | "neutral" | "mixed", "score": <number from -1.0 to 1.0>, "confidence": <number from 0.0 to 1.0>, "explanation": "brief explanation of the sentiment" }`;
       const userPrompt = `Analyze the sentiment of this text:\n\n${text}`;
-      const result = await runLlmNode({ nodeId: node.id, provider, userPrompt, systemPrompt, dependencies });
+      const result = await runLlmNode({ nodeId: node.id, provider, userPrompt, systemPrompt, dependencies, outbound: { node, context } });
       const answer = typeof result.answer === "string" ? result.answer : String(result.text ?? "");
       let sentiment: unknown = answer;
       try { sentiment = JSON.parse(answer.replace(/^```json?\s*/i, "").replace(/```\s*$/i, "").trim()); } catch { /* keep as string */ }
@@ -5884,7 +6022,7 @@ async function executeNodeHandler(
       };
       const systemPrompt = `You are a data transformation assistant. Apply the user's transformation instruction to the input data. ${formatInstructions[outputFormat] ?? formatInstructions.text}`;
       const userPrompt = `Instruction: ${instruction}\n\nInput:\n${input}`;
-      const result = await runLlmNode({ nodeId: node.id, provider, userPrompt, systemPrompt, dependencies });
+      const result = await runLlmNode({ nodeId: node.id, provider, userPrompt, systemPrompt, dependencies, outbound: { node, context } });
       let transformed: unknown = result.answer ?? result.text;
       if (outputFormat === "json" && typeof transformed === "string") {
         try { transformed = JSON.parse((transformed as string).replace(/^```json?\s*/i, "").replace(/```\s*$/i, "").trim()); } catch { /* keep as string */ }
@@ -6320,6 +6458,8 @@ async function executeNodeWithRetry(
   const replayStub = replayStubFor(node, dependencies);
   if (replayStub) {
     throwIfAborted(dependencies.abortSignal);
+    // Phase 16 — the egress check runs just before the stub: nothing is sent, nothing pauses.
+    await runInLabelScope(context.labelScope, () => outboundPreCheck(node, config, context, dependencies));
     return { output: resolveReplayStub(replayStub, context), attempts: 1 };
   }
   const retry = getRetryConfigForNode(node);
@@ -6593,7 +6733,7 @@ async function labelTrackingFor(workflow: Workflow, guard: GuardRuntimeDependenc
 
 async function initRunLabels(request: ExecuteWorkflowRequest, workflow: Workflow, dependencies: WorkflowExecutionDependencies): Promise<RunLabelState> {
   const tracking = await labelTrackingFor(workflow, dependencies.guard);
-  const scan = tracking.tracked ? createLabelScanner(tracking.dictionaries) : undefined;
+  const scan = tracking.tracked ? createLabelScanner(tracking.dictionaries, dependencies.guard ? issuedSurrogatesOf(dependencies.guard) : undefined) : undefined;
   if (request.resumeState) {
     // A run that tracked labels when it paused carries on with them (and keeps tracking).
     const restoredScan = scan ?? (request.resumeState.dataLabels?.tracked ? createLabelScanner([]) : undefined);

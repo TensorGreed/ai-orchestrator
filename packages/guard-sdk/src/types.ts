@@ -1,4 +1,4 @@
-import type { McpPolicyRole, McpToolAnnotations, ProvenanceLabel } from "@ai-orchestrator/shared";
+import type { DataLabels, GuardDestinationSummary, McpPolicyRole, McpToolAnnotations, ProvenanceLabel, ResolvedDestination } from "@ai-orchestrator/shared";
 import { PROVENANCE_LABELS as SHARED_PROVENANCE_LABELS } from "@ai-orchestrator/shared";
 
 /**
@@ -118,6 +118,18 @@ export interface GuardInput {
   canaries?: string[];
   /** Redirect chain observed for an outbound request, final destination last. */
   redirectChain?: string[];
+  /**
+   * Phase 16 — where the content is going, resolved against the data
+   * destinations (`summary` names it in verdicts). A profile's destination
+   * rules are evaluated only when this is set.
+   */
+  destination?: { resolved: ResolvedDestination; summary: GuardDestinationSummary };
+  /** Phase 16 — the content's propagated labels (provenance and data classes), for destination rules. */
+  dataLabels?: DataLabels;
+  /** Phase 16 — surrogates the run issued: the destination check and the egress scan do not count them. */
+  issuedSurrogates?: ReadonlySet<string>;
+  /** Phase 16 — evaluate the destination rules only (the channel's detectors already saw this content). */
+  destinationOnly?: boolean;
 }
 
 /** Half-open character range in the inspected text (`contentText`). */
@@ -230,6 +242,8 @@ export interface GuardVerdict {
   trace: GuardTraceEntry[];
   profile: { id: string; version: string; hash: string };
   channel: GuardChannel;
+  /** Phase 16 — where the content was going, when the profile's destination rules were evaluated. */
+  destination?: GuardDestinationSummary;
 }
 
 export class GuardError extends Error {

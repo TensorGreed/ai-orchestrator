@@ -80,6 +80,12 @@ export interface AgentGuardCheck {
   labels: AgentGuardLabel[];
   /** Phase 16 — the propagated labels of this content, when the caller tracks them; profiles that ask for them use these instead. */
   dataLabels?: DataLabels;
+  /**
+   * Phase 16 — for a prompt: the labels of everything the model call sends
+   * (system prompt, memory, earlier tool results, the prompt), which
+   * destination rules judge. Tracked runs only.
+   */
+  destinationLabels?: DataLabels;
   iteration: number;
   tool?: { name: string; inputSchema?: Record<string, unknown>; toolCallId?: string };
 }
@@ -97,6 +103,14 @@ export interface AgentGuardHooks {
   /** Text placed at the start of the system prompt: hardening, spotlighting instructions, a canary line. */
   systemPromptAddition?(): string | undefined;
   check(input: AgentGuardCheck): Promise<AgentGuardDecision>;
+  /**
+   * Phase 16 — before each model call after the first: the tool results the
+   * model is about to see, judged by destination rules for the model
+   * provider (the prompt check covers the first call). `content` lists the
+   * new tool messages; a rewrite answers the same number of strings. Absent:
+   * not checked.
+   */
+  checkModelCall?(input: { content: string[]; dataLabels?: DataLabels; iteration: number }): Promise<AgentGuardDecision>;
   /** Mark a serialized untrusted tool result before the model sees it. */
   spotlight?(text: string, context: { toolName: string; iteration: number }): string;
 }

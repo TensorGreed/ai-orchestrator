@@ -26,3 +26,17 @@ describe("provider default base URLs", () => {
     for (const id of PROVIDERS_WITH_FIXED_HOST) expect(PROVIDER_DEFAULT_BASE_URLS[id], id).toBeDefined();
   });
 });
+
+describe("provider destinations at call time", () => {
+  it("default hosts, a node's base URL, fixed hosts, unknown hosts and offline providers", async () => {
+    const { providerDestinationRef } = await import("./default-base-urls");
+    expect(providerDestinationRef({ providerId: "openai" }, {})).toEqual({ kind: "model_provider", id: "openai", host: "api.openai.com" });
+    expect(providerDestinationRef({ providerId: "openai", baseUrl: "https://llm.corp.internal/v1" }, {})).toEqual({ kind: "model_provider", id: "openai", host: "llm.corp.internal" });
+    expect(providerDestinationRef({ providerId: "gemini", baseUrl: "https://elsewhere.example" }, {})?.host).toBe("generativelanguage.googleapis.com");
+    expect(providerDestinationRef({ providerId: "openai", baseUrl: "{{vars.url}}" }, {})).toEqual({ kind: "model_provider", id: "openai", host: "" });
+    expect(providerDestinationRef({ providerId: "openai_compatible" }, {})).toEqual({ kind: "model_provider", id: "openai_compatible", host: "" });
+    expect(providerDestinationRef({ providerId: "azure_openai", extra: { endpoint: "https://acme.openai.azure.com" } }, {})?.host).toBe("acme.openai.azure.com");
+    expect(providerDestinationRef({ providerId: "ollama" }, { OLLAMA_BASE_URL: "http://gpu.internal:11434" })?.host).toBe("gpu.internal");
+    expect(providerDestinationRef({ providerId: "echo" }, {})).toBeNull();
+  });
+});

@@ -241,6 +241,11 @@ export interface GuardedFetchOptions {
   maxRedirects?: number;
   /** Replaces the pinned fetch (tests). When set, the connection is not pinned. */
   fetchImpl?: typeof fetch;
+  /**
+   * Phase 16 — called before a redirect is followed, with the next URL;
+   * throwing stops the request there (the destination check of the chain).
+   */
+  onRedirect?: (url: string) => Promise<void>;
 }
 
 /** Credential headers dropped when a redirect leaves the original origin. */
@@ -266,6 +271,7 @@ export async function guardedFetch(url: string, init: RequestInit, options: Guar
     const next = new URL(location, currentUrl).toString();
     // The redirect's own body is never read; release it so this hop's connection (and pinned Agent) can close.
     await response.body?.cancel().catch(() => undefined);
+    if (options.onRedirect) await options.onRedirect(next);
     // A cross-origin redirect drops credentials: Authorization (as fetch does) and the API-key and cookie headers vendors use.
     const nextHeaders = new Headers(currentInit.headers);
     if (new URL(next).origin !== new URL(currentUrl).origin) {

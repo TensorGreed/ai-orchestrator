@@ -7,16 +7,20 @@ import {
   createDefaultGuardProfile,
   createDefaultGuardRegistry,
   createDefaultProtectionRegistry,
+  createSurrogateProvider,
   datamark,
   decodeGuardKeyMaterial,
+  DESTINATION_RULES_DETECTOR_ID,
   DEFAULT_DATAMARK,
   evaluateGuardStack,
   generateCanaryToken,
   hashGuardProfile,
   mergeGuardProfileOverride,
   PROMPT_HARDENING_TEXT,
-  profileUsesLabels,
+  profileFeedsPropagatedLabels,
+  profileHasDestinationRules,
   spotlightingSystemPrompt,
+  SURROGATE_PROVIDER_ID,
   summarizeGuardVerdict,
   wrapWithDelimiters,
   type GuardAction,
@@ -41,6 +45,12 @@ import {
   type GuardBindingLevel,
   type GuardNodeConfig,
   type GuardProfileRef,
+  normalizeDestinationHost,
+  resolveRedirectChain,
+  type DataDestinationRow,
+  type DataLabels,
+  type DestinationRef,
+  type GuardDestinationSummary,
   type McpToolPolicySubject,
   type SecretReference,
   type WorkflowNode
@@ -68,6 +78,12 @@ export interface GuardRunResolution {
   /** Evaluated in order for agents without a guard port (enforced first when set). Empty = no automatic guard. */
   stack: ResolvedGuardProfile[];
   chain: GuardBindingLevel[];
+  /**
+   * Phase 16 — the deployment's destination rules profile, when an admin
+   * set one up (also the last entry of `stack`). An agent's guard port adds
+   * it after the port's profiles, so destination rules apply there too.
+   */
+  deployment?: ResolvedGuardProfile;
 }
 
 export interface GuardVerdictEvent {
@@ -107,6 +123,26 @@ export interface GuardRuntimeDependencies {
    * run resolves.
    */
   mayUseLabels?(): boolean;
+  /**
+   * Phase 16 — the deployment's data destination rows (admin
+   * classifications), read once per run when a check needs them. Absent:
+   * only the built-in rows apply.
+   */
+  destinationRows?(): DataDestinationRow[] | Promise<DataDestinationRow[]>;
+  /**
+   * Phase 16 — the deployment surrogate key (HKDF `l2m/capture-surrogate/v1`
+   * of the master key, the same key capture masking uses). The `surrogate`
+   * protection provider uses it whatever key a node names, so a data-subject
+   * lookup finds runtime and capture surrogates alike. Absent: surrogates
+   * fall back to the profile's protection fallback.
+   */
+  surrogateKey?: Uint8Array;
+  /**
+   * Phase 16 — surrogates this run issued (in memory only, never stored).
+   * The destination check and the egress scan ignore them, and capture
+   * masking leaves them as they are. One set per run.
+   */
+  issuedSurrogates?: Set<string>;
 }
 
 export interface GuardEvalScope {
@@ -148,6 +184,52 @@ export const systemDnsResolver = async (hostname: string): Promise<string[]> => 
   return results.map((entry) => entry.address);
 };
 const resolutionCache = new WeakMap<GuardRuntimeDependencies, Promise<GuardRunResolution>>();
+const issuedCache = new WeakMap<GuardRuntimeDependencies, Set<string>>();
+const rowsCache = new WeakMap<GuardRuntimeDependencies, Promise<DataDestinationRow[]>>();
+
+/** Phase 16 — the run's issued surrogates (the dependencies' own set, else one kept per dependencies object). */
+export function issuedSurrogatesOf(guard: GuardRuntimeDependencies): Set<string> {
+  if (guard.issuedSurrogates) return guard.issuedSurrogates;
+  let issued = issuedCache.get(guard);
+  if (!issued) {
+    issued = new Set<string>();
+    issuedCache.set(guard, issued);
+  }
+  return issued;
+}
+
+/**
+ * Phase 16 — where a call goes, resolved against the deployment's rows (and
+ * the built-ins): one ref, or a redirect chain judged by its strictest hop.
+ * The summary names the hop that decided, never a path or query.
+ */
+export async function resolveDestinationRefs(guard: GuardRuntimeDependencies, refs: readonly DestinationRef[]): Promise<NonNullable<GuardInput["destination"]>> {
+  const rows = await destinationRowsOf(guard);
+  const chain = resolveRedirectChain(refs, rows);
+  const { hops: _hops, hopIndex, ...resolved } = chain;
+  const ref = refs[hopIndex] ?? refs[refs.length - 1] ?? { kind: "http" as const, host: "" };
+  const host = normalizeDestinationHost(ref.host);
+  const summary: GuardDestinationSummary = {
+    kind: ref.kind,
+    ...(ref.id ? { id: ref.id } : {}),
+    ...(host ? { host } : {}),
+    tier: resolved.tier,
+    region: resolved.region,
+    ...(resolved.name ? { name: resolved.name } : {}),
+    matchedBy: resolved.matchedBy
+  };
+  return { resolved, summary };
+}
+
+/** Phase 16 — the deployment's destination rows, read once per run (dependencies object), never across runs. */
+export function destinationRowsOf(guard: GuardRuntimeDependencies): Promise<DataDestinationRow[]> {
+  let cached = rowsCache.get(guard);
+  if (!cached) {
+    cached = Promise.resolve(guard.destinationRows ? guard.destinationRows() : []);
+    rowsCache.set(guard, cached);
+  }
+  return cached;
+}
 
 /** The run's resolution, computed once per dependencies object (one per run). */
 export function resolveGuardRun(guard: GuardRuntimeDependencies): Promise<GuardRunResolution> {
@@ -227,7 +309,8 @@ export function parseGuardNodeConfig(node: WorkflowNode): GuardNodeConfig {
 export async function resolveGuardNodeProfiles(
   guard: GuardRuntimeDependencies,
   config: Pick<GuardNodeConfig, "profileId" | "profileOverride">,
-  protection: ProtectionBinding[]
+  protection: ProtectionBinding[],
+  options: { withDeployment?: boolean } = {}
 ): Promise<{ profiles: ResolvedGuardProfile[]; resolution: GuardRunResolution }> {
   const resolution = await resolveGuardRun(guard);
   const enforced = resolution.enforced;
@@ -249,6 +332,8 @@ export async function resolveGuardNodeProfiles(
     return profile === entry.profile ? entry : withProfile(entry, profile);
   });
   const profiles = enforced ? [enforced, ...own] : own;
+  // Phase 16 — an agent's guard port still gets the deployment's destination rules, after its own profiles.
+  if (options.withDeployment && resolution.deployment) profiles.push(resolution.deployment);
   return { profiles: dedupeByHash(profiles), resolution };
 }
 
@@ -265,12 +350,22 @@ export async function runGuardCheck(
 ): Promise<GuardCheckResult> {
   const registry = scope.guard.registry ?? (defaultRegistry ??= createDefaultGuardRegistry({ resolver: systemDnsResolver }));
   const protection = createDefaultProtectionRegistry({ keys: keyResolverFor(scope), ...(scope.guard.vault ? { vault: scope.guard.vault } : {}) });
+  // Phase 16 — runtime surrogates use the deployment key (the capture key), so lookups find them.
+  const surrogateKey = scope.guard.surrogateKey;
+  if (surrogateKey) protection.replace(createSurrogateProvider({ keys: async () => surrogateKey, defaultKeyId: "deployment" }));
+  const issued = issuedSurrogatesOf(scope.guard);
   const subject = scope.subject ? { role: scope.subject.role, ...(scope.subject.userId ? { userId: scope.subject.userId } : {}) } : undefined;
   const stack = await evaluateGuardStack(
     profiles.map((entry) => entry.profile),
-    { ...input, ...(subject && !input.subject ? { subject } : {}) },
+    { ...input, ...(subject && !input.subject ? { subject } : {}), ...(input.issuedSurrogates ? {} : { issuedSurrogates: issued }) },
     { registry, protection }
   );
+  // Phase 16 — remember the surrogates this check issued: later checks and capture masking leave them alone.
+  if (!stack.verdicts.some((verdict) => verdict.blocked)) {
+    for (const verdict of stack.verdicts) {
+      for (const token of verdict.protectedTokens) if (token.providerId === SURROGATE_PROVIDER_ID) issued.add(token.token);
+    }
+  }
   const verdicts = stack.verdicts.map((verdict, index) => ({ profile: guardProfileRef(profiles[index]!), summary: summarizeGuardVerdict(verdict) }));
   const checkId = randomUUID();
   for (const [index, entry] of verdicts.entries()) {
@@ -302,7 +397,11 @@ export function describeGuardVerdict(result: GuardCheckResult): string {
   for (const { summary } of result.verdicts) {
     for (const action of summary.actions) {
       if (action.shadow || action.effective === "allow") continue;
-      reasons.add(action.reason && action.detectorId === "<engine>" ? action.reason : `${action.category}${action.dataClass ? `/${action.dataClass}` : ""} (${action.detectorId})`);
+      reasons.add(
+        action.reason && (action.detectorId === "<engine>" || action.detectorId === DESTINATION_RULES_DETECTOR_ID)
+          ? action.reason
+          : `${action.category}${action.dataClass ? `/${action.dataClass}` : ""} (${action.detectorId})`
+      );
     }
   }
   const list = [...reasons].slice(0, 4).join(", ");
@@ -351,7 +450,12 @@ export function declassifiedClasses(result: GuardCheckResult): string[] {
 
 /** Phase 16 — true when a profile among these asks its checks to see propagated labels. */
 export function profilesUsePropagatedLabels(profiles: ReadonlyArray<{ profile: GuardProfile }>): boolean {
-  return profiles.some((entry) => profileUsesLabels(entry.profile));
+  return profiles.some((entry) => profileFeedsPropagatedLabels(entry.profile));
+}
+
+/** Phase 16 — true when a profile among these has destination rules. */
+export function profilesHaveDestinationRules(profiles: ReadonlyArray<{ profile: GuardProfile }>): boolean {
+  return profiles.some((entry) => profileHasDestinationRules(entry.profile));
 }
 
 export function needsApproval(action: GuardAction): boolean {
@@ -396,6 +500,10 @@ export async function createAgentGuardSession(input: {
   portGuardNode?: WorkflowNode;
   protectionNodes: WorkflowNode[];
   describeTool: (exposedName: string) => GuardToolContext | undefined;
+  /** Phase 16 — where the agent's model calls go (null: no network). */
+  modelDestination?: DestinationRef | null;
+  /** Phase 16 — where a tool call goes (its MCP server), by exposed tool name; null for workers and offline servers. */
+  toolDestination?: (exposedName: string) => DestinationRef | null;
 }): Promise<AgentGuardSession | undefined> {
   const { scope } = input;
   let profiles: ResolvedGuardProfile[];
@@ -406,7 +514,7 @@ export async function createAgentGuardSession(input: {
   if (input.portGuardNode) {
     const config = parseGuardNodeConfig(input.portGuardNode);
     handoffTimeoutMinutes = config.timeoutMinutes;
-    ({ profiles, resolution } = await resolveGuardNodeProfiles(scope.guard, config, protectionBindingsFromNodes(input.protectionNodes)));
+    ({ profiles, resolution } = await resolveGuardNodeProfiles(scope.guard, config, protectionBindingsFromNodes(input.protectionNodes), { withDeployment: true }));
     source = "port";
   } else {
     resolution = await resolveGuardRun(scope.guard);
@@ -421,6 +529,29 @@ export async function createAgentGuardSession(input: {
   const canary = profiles.some((entry) => entry.profile.canaries?.enabled === true) ? generateCanaryToken() : undefined;
   // Phase 16 — fixed labels per checkpoint unless a profile asks for the propagated ones.
   const propagatedLabels = profilesUsePropagatedLabels(profiles);
+  // Phase 16 — destination rules: model calls judged against the provider, tool calls against their MCP server.
+  const destinationRules = profilesHaveDestinationRules(profiles);
+  const destinationOf = async (ref: DestinationRef | null | undefined) => (destinationRules && ref ? resolveDestinationRefs(scope.guard, [ref]) : undefined);
+  const fixedLabels = (labels: readonly string[]): DataLabels => ({ provenance: orderedProvenance(labels as ProvenanceLabel[]), dataClasses: [], source: "propagated" });
+  /** Turns a check result into the decision the loop acts on (approvals, rewrites). */
+  const decide = (channel: GuardChannel, result: GuardCheckResult, entry: AgentGuardTraceEntry, iteration: number, tool?: GuardToolContext): AgentGuardDecision => {
+    if (result.action === "block") return { outcome: "block", message: describeGuardVerdict(result) };
+    if (needsApproval(result.action)) {
+      const key = guardApprovalKey(scope.nodeId, channel, result, tool?.toolName);
+      if (!approvals.has(key)) {
+        const message = `Guard ${result.action === "review" ? "review" : "approval"} needed on ${channel.replace("_", " ")}${tool ? ` (${tool.toolName})` : ""}: ${describeGuardVerdict(result)}`;
+        pendingApproval = {
+          message,
+          timeoutMinutes: handoffTimeoutMinutes,
+          handoff: { kind: "rerun", source: "agent_guard", approvalKey: key },
+          details: { channel, iteration, verdicts: result.verdicts }
+        };
+        return { outcome: "pause", message };
+      }
+      entry.approved = true;
+    }
+    return result.transformed ? { outcome: "rewrite", content: result.content, declassified: declassifiedClasses(result) } : { outcome: "allow" };
+  };
   const boundary = `DATA-${randomBytes(6).toString("hex").toUpperCase()}`;
   const verdictLog: AgentGuardTraceEntry[] = [];
   const approvals: ReadonlySet<string> = input.approvals ?? new Set<string>();
@@ -443,9 +574,37 @@ export async function createAgentGuardSession(input: {
             spotlighting.mode === "datamark" ? datamark(text).content : wrapWithDelimiters(text, { boundary, source: "tool result" }).content
         }
       : {}),
+    ...(destinationRules && input.modelDestination
+      ? {
+          checkModelCall: async (call: { content: string[]; dataLabels?: DataLabels; iteration: number }): Promise<AgentGuardDecision> => {
+            const destination = await destinationOf(input.modelDestination);
+            const result = await runGuardCheck(
+              scope,
+              profiles,
+              {
+                content: call.content,
+                channel: "prompt",
+                labels: ["untrusted_external"],
+                destinationOnly: true,
+                ...(destination ? { destination, dataLabels: call.dataLabels ?? fixedLabels(["untrusted_external"]) } : {})
+              },
+              { iteration: call.iteration }
+            );
+            const entry: AgentGuardTraceEntry = { iteration: call.iteration, channel: "prompt", action: result.action, verdicts: result.verdicts };
+            verdictLog.push(entry);
+            return decide("prompt", result, entry, call.iteration);
+          }
+        }
+      : {}),
     check: async (check: AgentGuardCheck): Promise<AgentGuardDecision> => {
       const tool = check.tool ? input.describeTool(check.tool.name) ?? { toolName: check.tool.name, ...(check.tool.inputSchema ? { inputSchema: check.tool.inputSchema } : {}) } : undefined;
       const withCanary = canary && (check.channel === "tool_arguments" || check.channel === "final_output");
+      const destination =
+        check.channel === "prompt"
+          ? await destinationOf(input.modelDestination)
+          : check.channel === "tool_arguments" && check.tool
+            ? await destinationOf(input.toolDestination?.(check.tool.name))
+            : undefined;
       const result = await runGuardCheck(
         scope,
         profiles,
@@ -455,7 +614,8 @@ export async function createAgentGuardSession(input: {
           // Propagated labels add to the checkpoint's fixed ones: a check never sees weaker labels than with the switch off.
           labels: (propagatedLabels && check.dataLabels ? orderedProvenance([...check.labels, ...check.dataLabels.provenance]) : check.labels) as ProvenanceLabel[],
           ...(tool ? { tool } : {}),
-          ...(withCanary ? { canaries: [canary] } : {})
+          ...(withCanary ? { canaries: [canary] } : {}),
+          ...(destination ? { destination, dataLabels: check.destinationLabels ?? check.dataLabels ?? fixedLabels(check.labels) } : {})
         },
         { iteration: check.iteration, ...(tool ? { toolName: tool.toolName } : {}) }
       );
@@ -467,22 +627,7 @@ export async function createAgentGuardSession(input: {
         verdicts: result.verdicts
       };
       verdictLog.push(entry);
-      if (result.action === "block") return { outcome: "block", message: describeGuardVerdict(result) };
-      if (needsApproval(result.action)) {
-        const key = guardApprovalKey(scope.nodeId, check.channel, result, tool?.toolName);
-        if (!approvals.has(key)) {
-          const message = `Guard ${result.action === "review" ? "review" : "approval"} needed on ${check.channel.replace("_", " ")}${tool ? ` (${tool.toolName})` : ""}: ${describeGuardVerdict(result)}`;
-          pendingApproval = {
-            message,
-            timeoutMinutes: handoffTimeoutMinutes,
-            handoff: { kind: "rerun", source: "agent_guard", approvalKey: key },
-            details: { channel: check.channel, iteration: check.iteration, verdicts: result.verdicts }
-          };
-          return { outcome: "pause", message };
-        }
-        entry.approved = true;
-      }
-      return result.transformed ? { outcome: "rewrite", content: result.content, declassified: declassifiedClasses(result) } : { outcome: "allow" };
+      return decide(check.channel, result, entry, check.iteration, tool);
     }
   };
 

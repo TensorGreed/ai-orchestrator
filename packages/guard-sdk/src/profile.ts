@@ -166,11 +166,30 @@ export type DestinationRule = z.output<typeof destinationRuleSchema>;
 
 /**
  * Phase 16 — the opt-in predicate: a profile that asks for propagated
- * labels. A run tracks labels (scans node outputs for data classes, stores
- * labels) only when a profile in its resolved stack satisfies it.
+ * labels, has destination rules or configures the egress channel. A run
+ * tracks labels (scans node outputs for data classes, stores labels) only
+ * when a profile in its resolved stack satisfies it. The built-in default
+ * profile has none of them.
  */
-export function profileUsesLabels(profile: Pick<GuardProfile, "labels"> | null | undefined): boolean {
+export function profileUsesLabels(profile: Partial<Pick<GuardProfile, "labels" | "destinations" | "channels">> | null | undefined): boolean {
+  if (!profile) return false;
+  return profile.labels === "propagated" || (profile.destinations?.rules.length ?? 0) > 0 || profile.channels?.egress !== undefined;
+}
+
+/**
+ * Phase 16 — whether a profile's existing checks see the propagated
+ * provenance instead of each checkpoint's fixed labels. Only the explicit
+ * switch does this: destination rules read the labels themselves and never
+ * change what the other detectors see.
+ */
+export function profileFeedsPropagatedLabels(profile: Pick<GuardProfile, "labels"> | null | undefined): boolean {
   return profile?.labels === "propagated";
+}
+
+/** Phase 16 — the profile checks outbound requests: it configures the egress channel or has destination rules. */
+export function profileChecksOutbound(profile: Partial<Pick<GuardProfile, "destinations" | "channels">> | null | undefined): boolean {
+  if (!profile) return false;
+  return (profile.destinations?.rules.length ?? 0) > 0 || profile.channels?.egress !== undefined;
 }
 
 /** Validate and fill defaults. Throws `GuardProfileError` with every issue listed. */

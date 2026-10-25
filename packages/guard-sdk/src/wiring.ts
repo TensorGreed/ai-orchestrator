@@ -1,3 +1,4 @@
+import type { GuardDestinationSummary } from "@ai-orchestrator/shared";
 import { evaluateGuard, mostSevereAction, type EvaluateGuardOptions } from "./evaluate";
 import { parseGuardProfile, type GuardProfile } from "./profile";
 import {
@@ -45,6 +46,8 @@ export interface GuardVerdictSummary {
   timings: { totalMs: number; detectors: DetectorTiming[] };
   budget: { limitMs: number; exceeded: boolean; policy: "fail_open" | "fail_closed"; skippedDetectors: string[] };
   profile: { id: string; version: string; hash: string };
+  /** Phase 16 — where the content was going, when the profile's destination rules were evaluated. */
+  destination?: GuardDestinationSummary;
 }
 
 /** A verdict without its content, tokens or decision trace: safe to store and show. */
@@ -72,7 +75,8 @@ export function summarizeGuardVerdict(verdict: GuardVerdict): GuardVerdictSummar
     protectedCount: verdict.protectedTokens.length,
     timings: { totalMs: verdict.timings.totalMs, detectors: verdict.timings.detectors.map((timing) => ({ ...timing })) },
     budget: { ...verdict.budget, skippedDetectors: skipped },
-    profile: { ...verdict.profile }
+    profile: { ...verdict.profile },
+    ...(verdict.destination ? { destination: { ...verdict.destination } } : {})
   };
 }
 
