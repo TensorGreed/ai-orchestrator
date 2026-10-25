@@ -105,7 +105,15 @@ export const guardProfileSchema = z.object({
     })
     .optional(),
   /** Plant a canary token in each agent's system prompt and look for it in tool arguments and the final answer. */
-  canaries: z.object({ enabled: z.boolean().default(true) }).optional()
+  canaries: z.object({ enabled: z.boolean().default(true) }).optional(),
+  /**
+   * Phase 16 — which provenance labels checks see. `fixed` (or absent):
+   * today's labels for each checkpoint (a prompt is user input, a tool result
+   * is external). `propagated`: the labels the run tracked for that content
+   * (where it really came from), and runs under this profile track labels
+   * (stored on node results, data classes scanned). Absent keeps the hash.
+   */
+  labels: z.enum(["fixed", "propagated"]).optional()
 });
 
 export type GuardProfileInput = z.input<typeof guardProfileSchema>;
@@ -114,6 +122,15 @@ export type ChannelProfile = z.output<typeof channelProfileSchema>;
 export type DetectorEntry = z.output<typeof detectorEntrySchema>;
 export type ActionRule = z.output<typeof actionRuleSchema>;
 export type GuardDictionary = z.output<typeof dictionarySchema>;
+
+/**
+ * Phase 16 — the opt-in predicate: a profile that asks for propagated
+ * labels. A run tracks labels (scans node outputs for data classes, stores
+ * labels) only when a profile in its resolved stack satisfies it.
+ */
+export function profileUsesLabels(profile: Pick<GuardProfile, "labels"> | null | undefined): boolean {
+  return profile?.labels === "propagated";
+}
 
 /** Validate and fill defaults. Throws `GuardProfileError` with every issue listed. */
 export function parseGuardProfile(document: unknown): GuardProfile {
