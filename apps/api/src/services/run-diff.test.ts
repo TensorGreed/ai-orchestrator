@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { RunFactToolCall, RunFacts } from "@ai-orchestrator/shared";
 import { judgeReplayDiff } from "@ai-orchestrator/shared";
-import { alignToolCalls, DEFAULT_REPLAY_IGNORE_PATHS, diffRunFacts, diffValues, matchesIgnorePath, tokenSimilarity } from "./run-diff.js";
+import { alignToolCalls, DEFAULT_REPLAY_IGNORE_PATHS, captureExpectsMasking, diffRunFacts, diffValues, matchesIgnorePath, tokenSimilarity } from "./run-diff.js";
 
 function tool(tool: string, args: unknown = {}, extra: Partial<RunFactToolCall> = {}): RunFactToolCall {
   return { nodeId: "agent", iteration: 1, server: "mcp_docs", tool, args, argsHash: `${tool}:${JSON.stringify(args)}`, outcome: "ok", durationMs: 10, ...extra };
@@ -51,6 +51,28 @@ describe("value diff", () => {
     expect(diffValues({ score: 0.81 }, { score: 0.8100004 }, { numberTolerance: 0.001 }).changes).toEqual([]);
     expect(diffValues({ score: 0.81 }, { score: 0.9 }, { numberTolerance: 0.001 }).changes).toHaveLength(1);
     expect(diffValues({ text: "Hello   world\n" }, { text: " Hello world" }).changes).toEqual([]);
+  });
+
+  it("compares masked spans as equal only when masking is expected, and still reports other differences", () => {
+    const left = { answer: "Card •••• •••• •••• 1111 charged, mail j•••@e••••••.com", detail: "unchanged" };
+    const right = { answer: "Card •••• •••• •••• 9876 charged, mail u•••@s••••••••.invalid", detail: "unchanged" };
+    // Off by default: strings compare as they are (whitespace aside), exactly as before masked comparison existed.
+    expect(diffValues(left, right).changes).toHaveLength(1);
+    expect(diffValues(left, right, { maskedSpans: true }).changes).toEqual([]);
+    const masked = { maskedSpans: true };
+    expect(diffValues({ answer: "Card ••••••••••••1111 charged" }, { answer: "Card ••••••••••••9876 refunded" }, masked).changes).toHaveLength(1);
+    expect(diffValues({ answer: "Card ••••••••••••1111" }, { answer: "Card 4111111111111111" }, masked).changes).toHaveLength(1);
+    expect(diffValues({ answer: "Key [REDACTED:credential]" }, { answer: "Key [redacted:credential]" }, masked).changes).toEqual([]);
+    expect(diffValues({ answer: "Key [REDACTED:credential]" }, { answer: "Key [redacted:credential]" }).changes).toHaveLength(1);
+    expect(diffValues({ answer: "Key [REDACTED:credential]" }, { answer: "Key [REDACTED:email]" }, masked).changes).toHaveLength(1);
+  });
+
+  it("never hides a real difference in bullet lists, even when masking is expected", () => {
+    const masked = { maskedSpans: true };
+    expect(diffValues({ answer: "• 3 tablets daily" }, { answer: "• 30 tablets daily" }, masked).changes).toHaveLength(1);
+    expect(diffValues({ answer: "x\n• 1. Approve\n• 2. Reject" }, { answer: "x\n• 2. Approve\n• 1. Reject" }, masked).changes).toHaveLength(1);
+    expect(diffValues({ answer: "Status: •OK" }, { answer: "Status: •FAIL" }, masked).changes).toHaveLength(1);
+    expect(diffValues({ answer: "•••• 12 items" }, { answer: "•••• 13 items" }, masked).changes).toHaveLength(1);
   });
 
   it("scores changed strings by token overlap", () => {
@@ -234,5 +256,45 @@ describe("run diff", () => {
   it("does not call a newly successful run a regression", () => {
     expect(diffRunFacts(facts({ status: "error" }), facts()).status.regression).toBe(false);
     expect(diffRunFacts(facts(), facts({ status: "partial" })).status.regression).toBe(true);
+  });
+});
+
+describe("masked comparison in a run diff", () => {
+  const unguarded = (answer: string) => facts({ output: { answer }, guard: [] });
+  const a = "Card •••• •••• •••• 1111 on file";
+  const b = "Card •••• •••• •••• 9876 on file";
+
+  it("compares exactly as before when nothing was masked", () => {
+    expect(diffRunFacts(unguarded(a), unguarded(b)).output.equal).toBe(false);
+    expect(diffRunFacts(unguarded("• 3 tablets daily"), unguarded("• 30 tablets daily")).output.equal).toBe(false);
+    // A shadow-only mask verdict rewrote nothing.
+    const shadow = [{ nodeId: "agent", placement: "post_model", channel: "output", detectorId: "dlp.patterns", effectiveAction: "mask", shadow: true }];
+    expect(diffRunFacts(facts({ output: { answer: a }, guard: shadow }), facts({ output: { answer: b }, guard: shadow })).output.equal).toBe(false);
+    // Verdicts that do not rewrite content do not turn it on.
+    const blocked = [{ nodeId: "agent", placement: "pre_model", channel: "prompt", detectorId: "pii", effectiveAction: "block", shadow: false }];
+    expect(diffRunFacts(facts({ output: { answer: a }, guard: blocked }), facts({ output: { answer: b }, guard: blocked })).output.equal).toBe(false);
+  });
+
+  it("compares masked spans as masks when either run's guard masked, redacted or protected, or the caller says the recording is a masked capture", () => {
+    for (const action of ["mask", "redact", "protect"]) {
+      const guarded = facts({ output: { answer: b }, guard: [{ nodeId: "agent", placement: "post_model", channel: "output", detectorId: "dlp.patterns", effectiveAction: action, shadow: false }] });
+      expect(diffRunFacts(unguarded(a), guarded).output.equal, action).toBe(true);
+      expect(diffRunFacts(guarded, unguarded(a)).output.equal, action).toBe(true);
+    }
+    expect(diffRunFacts(unguarded(a), unguarded(b), { maskedSpans: true }).output.equal).toBe(true);
+    expect(diffRunFacts(unguarded(a), unguarded("Card •••• •••• •••• 9876 refunded"), { maskedSpans: true }).output.equal).toBe(false);
+  });
+
+  it("does not count an unverified baseline's own guard verdicts, nor an unverified capture flag", () => {
+    const verdict = [{ nodeId: "agent", placement: "post_model", channel: "output", detectorId: "dlp.patterns", effectiveAction: "mask", shadow: false }];
+    const guarded = facts({ output: { answer: a }, guard: verdict });
+    expect(diffRunFacts(guarded, unguarded(b)).output.equal).toBe(true);
+    expect(diffRunFacts(guarded, unguarded(b), { baselineUnverified: true }).output.equal).toBe(false);
+    // The candidate's verdicts are still trusted.
+    expect(diffRunFacts(unguarded(a), facts({ output: { answer: b }, guard: verdict }), { baselineUnverified: true }).output.equal).toBe(true);
+    expect(captureExpectsMasking({ masked: true })).toBe(true);
+    expect(captureExpectsMasking({ masked: true, maskingVerified: false })).toBe(false);
+    expect(captureExpectsMasking({ masked: false })).toBe(false);
+    expect(captureExpectsMasking(undefined)).toBe(false);
   });
 });

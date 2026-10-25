@@ -10,7 +10,6 @@ import {
   SURROGATE_CARD_PREFIX,
   SURROGATE_EMAIL_DOMAIN,
   SURROGATE_PROVIDER_ID,
-  SURROGATE_VISIBLE_TAIL,
   surrogateDetectable,
   surrogateFor
 } from "./surrogate";
@@ -116,34 +115,29 @@ describe("surrogateFor", () => {
     expect(classesOf(surrogate)).toEqual(["national_id"]);
   });
 
-  it("with visibleTail, keeps exactly what the guard mask action shows, so masked output reads the same for the value and its surrogate", () => {
+  it("keeps no real character of the value beyond its structure, and stays deterministic", () => {
     const samples: Array<[string, string]> = [
       ["card_number", "4111 1111 1111 1111"],
-      ["card_number", "5500-0000-0000-0004"],
       ["card_number", "378282246310005"],
-      ["iban", "GB82 WEST 1234 5698 7654 32"],
-      ["iban", "DE89370400440532013000"],
       ["us_ssn", "123-45-6789"],
-      ["phone", "+1 (415) 555-0132"],
-      ["national_id", "AB 12 34 56 C"]
+      ["phone", "+1 (415) 555-0132"]
     ];
     for (const [dataClass, value] of samples) {
-      const surrogate = surrogateFor(value, dataClass, key, { visibleTail: true });
+      const surrogate = surrogateFor(value, dataClass, key);
       expect(surrogate, value).not.toBe(value);
-      expect(maskForDataClass(surrogate, dataClass), value).toBe(maskForDataClass(value, dataClass));
-      expect(surrogate.slice(-SURROGATE_VISIBLE_TAIL[dataClass]!)).toBe(value.slice(-SURROGATE_VISIBLE_TAIL[dataClass]!));
+      expect(surrogateFor(value, dataClass, key)).toBe(surrogate);
       expect(classesOf(surrogate), value).toContain(dataClass);
+      // Another value that differs only in its 6th character gets a different tail (a random tail repeats about once in 10^tail).
+      const other = value.slice(0, 5) + (value[5] === "9" ? "8" : "9") + value.slice(6);
+      expect(surrogateFor(other, dataClass, key), other).not.toBe(surrogate);
     }
-    // Checksums still hold with the kept tail.
-    const tail = { visibleTail: true };
-    expect(luhnValid(surrogateFor("4111 1111 1111 1111", "card_number", key, tail).replace(/\D/g, ""))).toBe(true);
-    expect(ibanValid(surrogateFor("GB82 WEST 1234 5698 7654 32", "iban", key, tail))).toBe(true);
-    expect(usSsnValid(surrogateFor("123-45-6789", "us_ssn", key, tail))).toBe(true);
-    // The rest of a card is not the original's.
-    expect(surrogateFor("4111 1111 1111 1111", "card_number", key, tail).slice(0, 14)).not.toBe("4111 1111 1111");
+    // The IBAN keeps its country only.
+    const iban = surrogateFor("GB82 WEST 1234 5698 7654 32", "iban", key);
+    expect(iban.startsWith("GB")).toBe(true);
+    expect(iban.replace(/\s/g, "").slice(-4)).not.toBe("5432");
   });
 
-  it("without visibleTail (the default), keeps no real tail", () => {
+  it("keeps no real tail across many values", () => {
     let sameTail = 0;
     for (let i = 0; i < 50; i += 1) {
       const card = `4111 1111 1111 ${String(1000 + i * 17).padStart(4, "0")}`;
@@ -161,8 +155,8 @@ describe("surrogateFor", () => {
     const ssns = new Set<string>();
     const cards = new Set<string>();
     for (let i = 0; i < 2000; i += 1) {
-      ssns.add(surrogateFor(`${String(100 + (i % 500)).padStart(3, "0")}-${String(10 + (i % 89)).padStart(2, "0")}-4399`, "us_ssn", key, { visibleTail: true }));
-      cards.add(surrogateFor(`4${String(100_000_000_000 + i * 7919).padStart(11, "0")}1111`, "card_number", key, { visibleTail: true }));
+      ssns.add(surrogateFor(`${String(100 + (i % 500)).padStart(3, "0")}-${String(10 + (i % 89)).padStart(2, "0")}-4399`, "us_ssn", key));
+      cards.add(surrogateFor(`4${String(100_000_000_000 + i * 7919).padStart(11, "0")}1111`, "card_number", key));
     }
     // 2,000 different people sharing a last four: at most a handful collide.
     expect(ssns.size).toBeGreaterThan(1980);

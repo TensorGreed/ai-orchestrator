@@ -140,7 +140,6 @@ import { registerReplayRoutes } from "./replay-routes.js";
 import { registerReplayCaptureRoutes } from "./replay-capture-routes.js";
 import { deriveCaptureSurrogateKey, ReplayCaptureService, type CaptureSource, type CaptureTicket } from "./services/replay-capture-service.js";
 import type { CaptureInputOrigin } from "./services/capture-masking.js";
-import { maskableDataClasses } from "@ai-orchestrator/guard-sdk";
 import { registerEvalRoutes } from "./eval-routes.js";
 import { registerGoldenSetFileRoutes } from "./golden-set-file-routes.js";
 import { GOLDEN_SET_FILE_DEFAULT_MAX_BYTES, GUARD_SIMULATION_MAX_CASES_DEFAULT, GUARD_SIMULATION_RETENTION_DAYS } from "@ai-orchestrator/shared";
@@ -11702,8 +11701,6 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     datasets: evalService,
     surrogateKey: deriveCaptureSurrogateKey(captureMasterKey.length === 32 ? captureMasterKey : crypto.randomBytes(32)),
     dictionariesFor: (workflow) => guardService.resolveRun({ workflowId: workflow.id, projectId: workflow.projectId ?? DEFAULT_PROJECT_ID }).stack.flatMap((entry) => entry.profile.dictionaries ?? []),
-    maskableClassesFor: (workflow) =>
-      maskableDataClasses(guardService.resolveRun({ workflowId: workflow.id, projectId: workflow.projectId ?? DEFAULT_PROJECT_ID }).stack.map((entry) => entry.profile)),
     workflowProject: (workflowId) => store.getWorkflow(workflowId)?.projectId ?? null,
     catalogToolNames: (registryServerId) => {
       const snapshotId = store.getMcpServer(registryServerId)?.currentSnapshotId;

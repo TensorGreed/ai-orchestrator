@@ -1635,3 +1635,107 @@ describe("re-review round 3: lookup certainty, hints, international phones, kept
     expect(match.hits.some((entry) => entry.certainty === "national_only")).toBe(true);
   }, 60_000);
 });
+
+describe("captures stored before surrogates dropped the visible tail", () => {
+  /** A fixed master key, so the stored forms below are the exact strings ae2f542 wrote for it. */
+  const FIXED_MASTER_KEY = "yMfGxcTDwsHAv769vLu6ubi3trW0s7KxsK+urayrqqk=";
+  /** [value, what a masked capture stored at ae2f542 (tailed surrogate), what a capture stores now]. */
+  const OLD_CAPTURES: Array<[string, string, string]> = [
+    ["4111 1111 1111 1111", "4587 5312 1569 1111", "4587 5312 1562 9558"],
+    ["GB82 WEST 1234 5698 7654 32", "GB89 SEDQ 8755 0331 9354 32", "GB68 SEDQ 8755 0331 9348 40"],
+    ["+1 415-555-0123", "+1 285-239-8523", "+1 285-239-8505"],
+    ["AB 12 34 56 C", "ZY 28 87 56 C", "ZY 28 87 73 A"],
+    ["123-45-6788", "573-71-6788", "573-71-3165"]
+  ];
+
+  it("are still found and deleted by the data-subject lookup (tailed forms, phone plain copies included)", async () => {
+    const context = await createTestContext({ SECRET_MASTER_KEY_BASE64: FIXED_MASTER_KEY });
+    const admin = await login(context, "admin");
+    const builder = await login(context, "builder");
+    save(context, hookWorkflow("wf-old-tail"));
+    const key = deriveCaptureSurrogateKey(Buffer.from(FIXED_MASTER_KEY, "base64"));
+    const store = async (text: string) => {
+      const run = await call(context, "POST", "/api/workflows/wf-old-tail/execute", builder.cookie, { input: { user_prompt: text } });
+      const saved = await call(context, "POST", "/api/replay/recordings", builder.cookie, { executionId: run.json<{ executionId: string }>().executionId, name: text.slice(0, 40) });
+      expect(saved.statusCode, saved.body).toBe(201);
+      return saved.json<{ recording: ReplayRecordingSummary }>().recording.id;
+    };
+    const search = async (value: string) => {
+      const response = await call(context, "POST", "/api/replay/recordings/find-subject", admin.cookie, { value });
+      expect(response.statusCode, response.body).toBe(200);
+      return response.json<ReplayFindSubjectResult>();
+    };
+
+    for (const [value, oldStored, nowStored] of OLD_CAPTURES) {
+      // The fixtures are what they claim: today's surrogate is the untailed form, never the stored one.
+      expect(surrogateFor(value, (await search(value)).dataClass!, key)).toBe(nowStored);
+      const id = await store(`value ${oldStored} end`);
+      const found = await search(value);
+      const match = found.matches.find((entry) => entry.id === id);
+      expect(match, `${value} as ${oldStored}`).toBeDefined();
+      expect(match!.hits[0]!.matchedAs).toBe(found.dataClass);
+      const removed = await call(context, "POST", "/api/replay/recordings/find-subject/delete", admin.cookie, {
+        value,
+        targets: [{ kind: "recording", id, confirmPossible: true }]
+      });
+      expect(removed.statusCode, removed.body).toBe(200);
+      expect(removed.json<ReplayFindSubjectDeleteResult>().removed, value).toEqual([{ kind: "recording", id }]);
+      expect(context.store.getReplayRecordingSummary(id)).toBeNull();
+    }
+
+    // A copy of the phone written without its `+` was keyed on its own digits; main kept its last two as well.
+    const plain = await store("plain 37596597523 end");
+    const found = await search("+1 415-555-0123");
+    expect(found.matches.map((entry) => entry.id)).toContain(plain);
+    const removed = await call(context, "POST", "/api/replay/recordings/find-subject/delete", admin.cookie, {
+      value: "+1 415-555-0123",
+      targets: [{ kind: "recording", id: plain, confirmPossible: true }]
+    });
+    expect(removed.json<ReplayFindSubjectDeleteResult>().removed).toEqual([{ kind: "recording", id: plain }]);
+  }, 60_000);
+});
+
+describe("replay comparison of guard-masked spans", () => {
+  it("compares masked spans as masks for a masked capture only; a hand-saved run compares exactly", async () => {
+    const context = await createTestContext();
+    const builder = await login(context, "builder");
+    save(context, hookWorkflow("wf-masked-diff", "Card {{user_prompt}} on file"));
+    const exec = (context.store as unknown as { exec(sql: string, params: unknown[]): void }).exec.bind(context.store);
+    // The golden run's output masked one card; the replay masks another (as a surrogate's mask reads differently).
+    const used = new Set<string>();
+    const record = async (masked: boolean) => {
+      expect((await hook(context, "wf-masked-diff", { user_prompt: "•••• •••• •••• 9876" })).json()).toEqual({ output: { result: "Card •••• •••• •••• 9876 on file" } });
+      const executionId = context.store.listExecutionHistory({ workflowId: "wf-masked-diff", triggerType: "webhook" }).items.find((item) => !used.has(item.id))!.id;
+      used.add(executionId);
+      const saved = await call(context, "POST", "/api/replay/recordings", builder.cookie, { executionId, name: `masked ${masked}` });
+      expect(saved.statusCode, saved.body).toBe(201);
+      const id = saved.json<{ recording: ReplayRecordingSummary }>().recording.id;
+      const recording = context.store.getReplayRecording(id)!;
+      const facts = JSON.stringify(recording.facts).replaceAll("•••• •••• •••• 9876", "•••• •••• •••• 1111");
+      const capabilities = masked
+        ? { ...recording.capabilities, capture: { rate: 1, masked: true, dataClasses: ["card_number"], values: { card_number: 1 }, notDetectableAfterMasking: [], keptFromWorkflow: 0, publishedVersion: 1 } }
+        : recording.capabilities;
+      exec("UPDATE replay_recordings SET facts_json = ?, capabilities_json = ? WHERE id = ?", [facts, JSON.stringify(capabilities), id]);
+      return id;
+    };
+    const replayOf = async (id: string) => {
+      const response = await call(context, "POST", `/api/replay/recordings/${id}/replay`, builder.cookie, {});
+      expect(response.statusCode, response.body).toBe(200);
+      return response.json<{ diff: { output: { equal: boolean } } }>();
+    };
+    const maskedId = await record(true);
+    const handId = await record(false);
+    expect((await replayOf(maskedId)).diff.output.equal).toBe(true);
+    expect((await replayOf(handId)).diff.output.equal).toBe(false);
+    // A replay job scores the same way (its json_equal scorer compares with the golden run).
+    const jobOf = async (recordingId: string) => {
+      const set = (await call(context, "POST", "/api/eval/datasets", builder.cookie, { name: `Set ${recordingId}`, workflowId: "wf-masked-diff" })).json<{ dataset: { id: string } }>().dataset.id;
+      expect((await call(context, "POST", `/api/eval/datasets/${set}/recordings`, builder.cookie, { recordingId })).statusCode).toBe(201);
+      const job = await runJob(context, builder.cookie, { datasetIds: [set] });
+      expect(job.status, job.error ?? "").toBe("completed");
+      return job.results.map((result) => result.status);
+    };
+    expect(await jobOf(maskedId)).toEqual(["pass"]);
+    expect(await jobOf(handId)).toEqual(["fail"]);
+  }, 60_000);
+});

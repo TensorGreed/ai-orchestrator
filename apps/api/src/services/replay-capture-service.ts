@@ -73,6 +73,8 @@ import {
   CALLING_CODES,
   decodeView,
   findingText,
+  legacyTailedPhoneSurrogateDigits,
+  legacyTailedSurrogate,
   MaskIdentifierError,
   MaskIncompleteError,
   MaskUnscannableError,
@@ -196,8 +198,6 @@ export interface ReplayCaptureServiceOptions {
   surrogateKey: Uint8Array;
   /** The dictionaries of the guard profiles bound to the workflow (custom data classes). */
   dictionariesFor: (workflow: { id: string; projectId?: string | null }) => GuardDictionary[];
-  /** Data classes a guard profile bound to the workflow can mask: their surrogates keep what the mask shows. */
-  maskableClassesFor?: (workflow: { id: string; projectId?: string | null }) => string[];
   /** Tool names a registry server's current tool snapshot lists: such a tool name is not scanned on its own (capture-masking `cassetteIdentifiers`). */
   catalogToolNames?: (registryServerId: string) => readonly string[];
   /** The workflow's current project (a promoted run's "Captured" set is made there). */
@@ -507,7 +507,6 @@ export class ReplayCaptureService {
         ? {
             key: this.options.surrogateKey,
             dictionaries: this.options.dictionariesFor(input.workflow),
-            visibleTailClasses: this.options.maskableClassesFor?.(input.workflow) ?? [],
             ...(this.options.catalogToolNames ? { catalogToolNames: this.options.catalogToolNames } : {})
           }
         : null;
@@ -726,10 +725,9 @@ export class ReplayCaptureService {
    * values only; a phone is `exact` only as the same number with its country
    * code on both sides, `national_only` when one side has none). A value of
    * a recognised class matches only stored values of that class: raw, and
-   * as its surrogates (with and without the visible tail, since a capture
-   * keeps the tail only when a guard profile could mask the class). Any
-   * other value is matched as exact text, and as the surrogate of each
-   * dictionary class.
+   * as its surrogate (and as the tailed surrogate captures wrote before
+   * surrogates stopped keeping the mask's visible tail). Any other value is
+   * matched as exact text, and as the surrogate of each dictionary class.
    */
   private needlesFor(query: ReplayFindSubjectQuery): {
     dataClass: string | null;
@@ -752,14 +750,19 @@ export class ReplayCaptureService {
     const key = this.options.surrogateKey;
     for (const surrogateClass of classes) {
       const index = new SubjectIndex({ strict: true });
-      for (const visibleTail of [false, true]) {
-        const surrogate = surrogateFor(text, surrogateClass, key, { visibleTail });
-        if (surrogate.startsWith("[")) index.addLiteral(surrogate, surrogateClass);
-        else index.add(surrogate, surrogateClass);
-        if (surrogateClass === "phone") {
-          // A capture keys a copy written without its `+` on that copy's own digits (it cannot know the country code):
-          // the full number, and the national number behind a trunk prefix. Those surrogates are written without a country code.
-          for (const plainKey of plainMaskKeys(text)) index.add(phoneSurrogateDigits(plainKey, key, visibleTail), "phone");
+      const surrogate = surrogateFor(text, surrogateClass, key);
+      if (surrogate.startsWith("[")) index.addLiteral(surrogate, surrogateClass);
+      else index.add(surrogate, surrogateClass);
+      // Captures stored before surrogates stopped keeping the mask's visible tail hold the tailed form, and their raw
+      // value is gone: build it too (lookup only, never for masking), so a lookup never misses data it used to find.
+      const legacy = legacyTailedSurrogate(text, surrogateClass, key);
+      if (legacy !== null && legacy !== surrogate) index.add(legacy, surrogateClass);
+      if (surrogateClass === "phone") {
+        // A capture keys a copy written without its `+` on that copy's own digits (it cannot know the country code):
+        // the full number, and the national number behind a trunk prefix. Those surrogates are written without a country code.
+        for (const plainKey of plainMaskKeys(text)) {
+          index.add(phoneSurrogateDigits(plainKey, key), "phone");
+          index.add(legacyTailedPhoneSurrogateDigits(plainKey, key), "phone");
         }
       }
       needles.push({ label: surrogateClass, index });

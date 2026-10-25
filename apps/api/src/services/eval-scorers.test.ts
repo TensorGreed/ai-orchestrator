@@ -59,6 +59,18 @@ describe("json_equal", () => {
     expect((await run({ type: "json_equal", path: "id", against: "baseline" }, ctx({ baseline, output, expected: { id: "b2" } }))).pass).toBe(false);
   });
 
+  it("compares guard-masked spans as masks only for a masked capture or a run whose guard rewrote content", async () => {
+    const baseline = facts({ output: { answer: "Card •••• •••• •••• 1111 on file" } });
+    const output = { answer: "Card •••• •••• •••• 9876 on file" };
+    expect((await run({ type: "json_equal" }, ctx({ baseline, output }))).pass).toBe(false);
+    expect((await run({ type: "json_equal" }, ctx({ baseline, output, maskedCapture: true }))).pass).toBe(true);
+    expect((await run({ type: "json_equal" }, ctx({ baseline, output, candidate: facts({ guard: [block("dlp.patterns", "mask")] }) }))).pass).toBe(true);
+    expect((await run({ type: "json_equal" }, ctx({ baseline, output, candidate: facts({ guard: [block("dlp.patterns", "mask", true)] }) }))).pass).toBe(false);
+    // Bullets are never masks.
+    const bullets = facts({ output: { answer: "• 3 tablets daily" } });
+    expect((await run({ type: "json_equal" }, ctx({ baseline: bullets, output: { answer: "• 30 tablets daily" }, maskedCapture: true }))).pass).toBe(false);
+  });
+
   it("fails clearly with nothing to compare with", async () => {
     expect(await run({ type: "json_equal" }, ctx({ baseline: null }))).toMatchObject({ pass: false, score: 0, reason: expect.stringContaining("no `expected`") });
   });

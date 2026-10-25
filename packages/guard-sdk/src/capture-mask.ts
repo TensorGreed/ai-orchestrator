@@ -3,7 +3,6 @@ import type { GuardDictionary, GuardProfile } from "./profile";
 import { comparePhones, parsePhone, phoneMaskCandidates, phoneMaskKeys, scanInternationalPhones, type ParsedPhone, type PhoneCertainty, type PhoneKeyStrength } from "./phone";
 import {
   phoneSurrogateDigits,
-  SURROGATE_VISIBLE_TAIL,
   surrogateDetectable,
   surrogateFor,
   surrogateRedacts
@@ -71,12 +70,6 @@ export interface MaskRecordingOptions {
    * and numbers are not literals. Secrets are never kept.
    */
   keepLiteralsFrom?: unknown;
-  /**
-   * Classes whose surrogates keep the characters the guard `mask` action
-   * shows (`SURROGATE_VISIBLE_TAIL`): the classes a guard profile bound to the
-   * workflow can mask. Every other class gets a full surrogate.
-   */
-  visibleTailClasses?: readonly string[];
   /** Deepest nesting walked; deeper content throws `MaskUnscannableError`. */
   maxDepth?: number;
   /**
@@ -847,13 +840,12 @@ function workflowLiterals(workflow: unknown, scanOptions: Parameters<typeof scan
 }
 
 /** The surrogate text for a span (on the view), and whether it is the same length (written back per character). */
-function surrogateEdit(view: string, span: SubjectSpan, key: Uint8Array, tailClasses: ReadonlySet<string>): ViewEdit {
+function surrogateEdit(view: string, span: SubjectSpan, key: Uint8Array): ViewEdit {
   const raw = view.slice(span.start, span.end);
   const dataClass = span.entry.dataClass;
-  const visibleTail = tailClasses.has(dataClass);
   if (span.entry.family === "phone") {
     // Only the national digits change, in place: the span starts after any country code or trunk 0, and separators stay.
-    const digits = phoneSurrogateDigits(span.national ?? span.entry.key, key, visibleTail);
+    const digits = phoneSurrogateDigits(span.national ?? span.entry.key, key);
     let index = 0;
     let out = "";
     for (const char of raw) {
@@ -862,7 +854,7 @@ function surrogateEdit(view: string, span: SubjectSpan, key: Uint8Array, tailCla
     }
     return { start: span.start, end: span.end, replacement: out, perChar: true };
   }
-  const surrogate = surrogateFor(raw, dataClass, key, { visibleTail });
+  const surrogate = surrogateFor(raw, dataClass, key);
   return { start: span.start, end: span.end, replacement: surrogate, perChar: surrogate.length === raw.length && (span.entry.family === "digits" || span.entry.family === "alnum") };
 }
 
@@ -907,7 +899,6 @@ export function identifierHolds(
 export function* maskRecordingSteps(parts: readonly MaskPart[], options: MaskRecordingOptions): Generator<void, MaskRecordingResult, void> {
   const maxDepth = options.maxDepth ?? DEFAULT_MAX_DEPTH;
   const scanOptions = { dictionaries: options.dictionaries ?? [], nationalIds: options.nationalIds ?? DEFAULT_NATIONAL_IDS };
-  const tailClasses = new Set(options.visibleTailClasses ?? []);
   const budget: WalkBudget = { strings: 0, chars: 0 };
 
   // 1–2. Distinct canonical values and their class.
@@ -984,7 +975,7 @@ export function* maskRecordingSteps(parts: readonly MaskPart[], options: MaskRec
       const view = decodeView(text);
       const spans = index.find(view.text);
       if (spans.length === 0) return text;
-      const out = applyEdits(text, view, spans.map((span) => surrogateEdit(view.text, span, options.key, tailClasses)));
+      const out = applyEdits(text, view, spans.map((span) => surrogateEdit(view.text, span, options.key)));
       for (const span of spans) bump(counts, span.entry.dataClass);
       return out;
     };
@@ -1053,28 +1044,3 @@ export function maskRecordingAsync(parts: readonly MaskPart[], options: MaskReco
 export function maskedClassesForNode(report: MaskReport, nodeId: string): string[] {
   return Object.keys(report.nodes[nodeId] ?? {}).sort();
 }
-
-/**
- * The data classes a guard profile can mask (an action `mask`, or `protect`
- * that falls back to `mask`), on any channel. A rule on the whole
- * `sensitive_data` category, or a default action, covers every class with a
- * visible tail.
- */
-export function maskableDataClasses(profiles: readonly GuardProfile[]): string[] {
-  const out = new Set<string>();
-  const tailClasses = Object.keys(SURROGATE_VISIBLE_TAIL);
-  for (const profile of profiles) {
-    const masks = (action: string | undefined) => action === "mask" || (action === "protect" && profile.protection?.fallback === "mask");
-    for (const channel of Object.values(profile.channels ?? {})) {
-      if (!channel) continue;
-      for (const [name, rule] of Object.entries(channel.actions ?? {})) {
-        if (!masks(rule?.action)) continue;
-        if (name === "sensitive_data") tailClasses.forEach((dataClass) => out.add(dataClass));
-        else out.add(name);
-      }
-      if (masks(channel.defaultAction?.action)) tailClasses.forEach((dataClass) => out.add(dataClass));
-    }
-  }
-  return [...out].sort();
-}
-

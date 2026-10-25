@@ -125,7 +125,7 @@ Every scorer returns pass or fail, a score from 0 to 1 and a reason you can read
 | Scorer | Checks | Options |
 | --- | --- | --- |
 | `status` | The run finished with the expected status | `expect` (default `success`; a replay job's default scorer expects the golden run's status, so a golden run that errored and a candidate that now succeeds fails it, where a single replay would call that an improvement) |
-| `json_equal` | The output (at `path`) equals the expected value or the golden run's output | `against: expected \| baseline`, `ignorePaths` (globs, as for replay), `numberTolerance`, `ignoreArrayOrder`. Timing and id fields are always ignored |
+| `json_equal` | The output (at `path`) equals the expected value or the golden run's output | `against: expected \| baseline`, `ignorePaths` (globs, as for replay), `numberTolerance`, `ignoreArrayOrder`. Timing and id fields are always ignored; guard-masked text compares as for replay ([Guard-masked text](./golden-runs.md#guard-masked-text)) |
 | `json_schema` | The output (at `path`) validates against a JSON Schema | `schema` (at most 64 KB, 32 levels deep). Remote `$ref`s are never fetched and `$id`s are ignored; a schema that does not compile fails the scorer. See [Patterns](#patterns) |
 | `text_similarity` | Word-overlap similarity of the output text to the expected or recorded text | `threshold` (default 0.8), `against`, `path` |
 | `tool_sequence` | The tool calls against the golden run's, or a listed sequence | `mode: exact \| subsequence \| set \| superset_allowed` (default `exact`), `args: exact \| keys \| ignore` (default `ignore`; `set` modes compare tool names only), `expected: [{ tool, server?, args? }]`, `forbiddenTools` |
