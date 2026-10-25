@@ -1792,6 +1792,32 @@ export const MIGRATIONS: Migration[] = [
       ALTER TABLE session_tool_cache DROP COLUMN IF EXISTS labels_json;
       ALTER TABLE session_memory DROP COLUMN IF EXISTS labels_json;
     `
+  },
+  {
+    version: 38,
+    description: "Phase 16 — Data destinations (admin rows classifying where outgoing data goes)",
+    up: `
+      CREATE TABLE IF NOT EXISTS data_destinations (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        target_id TEXT,
+        host TEXT,
+        tier TEXT NOT NULL,
+        region TEXT NOT NULL DEFAULT 'unknown',
+        holds_data_classes_json TEXT NOT NULL DEFAULT '[]',
+        note TEXT,
+        created_at TIMESTAMPTZ NOT NULL,
+        created_by TEXT,
+        updated_at TIMESTAMPTZ NOT NULL,
+        updated_by TEXT
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_data_destinations_match ON data_destinations(kind, COALESCE(target_id, ''), COALESCE(host, ''));
+    `,
+    down: `
+      DROP INDEX IF EXISTS idx_data_destinations_match;
+      DROP TABLE IF EXISTS data_destinations;
+    `
   }
 ];
 

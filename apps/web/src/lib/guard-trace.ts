@@ -28,7 +28,8 @@ export const GUARD_CHANNEL_LABEL: Record<string, string> = {
   model_output: "Model output",
   tool_arguments: "Tool arguments",
   tool_result: "Tool result",
-  final_output: "Final answer"
+  final_output: "Final answer",
+  egress: "Outbound (egress)"
 };
 
 export function actionLabel(action: string): string {

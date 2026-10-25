@@ -147,6 +147,8 @@ import { GOLDEN_SET_FILE_DEFAULT_MAX_BYTES, GUARD_SIMULATION_MAX_CASES_DEFAULT, 
 import { registerApprovalRoutes } from "./approval-routes.js";
 import { registerReleaseRoutes } from "./release-routes.js";
 import { registerGateAdmissionRoutes } from "./gate-admission-routes.js";
+import { registerDataDestinationRoutes } from "./data-destination-routes.js";
+import { DataDestinationService } from "./services/data-destination-service.js";
 import { DEACTIVATED_MESSAGE, ReleaseService, withUniqueTriggerPaths } from "./services/release-service.js";
 import { GateAdmissionService } from "./services/gate-admission-service.js";
 import { STUCK_JOB_MARGIN_MS } from "./db/queue-timeouts.js";
@@ -11837,6 +11839,18 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
   });
 
   registerGuardRoutes({ app, store, guard: guardService, requireRole: (request, reply, roles) => requireRole(request, reply, roles), runAccess, canAccessWorkflow: (user, workflow, permission) => rbacService.canAccessWorkflow(user, workflow, permission), canInProject: (user, projectId, permission) => rbacService.can(user, projectId, permission), audit: (request, user, event) => audit(request, user, event) });
+
+  // Phase 16 — data destinations (SQLite only: Postgres answers 501).
+  registerDataDestinationRoutes({
+    app,
+    destinations: new DataDestinationService({
+      store: (store as object) instanceof PostgresStore ? null : store,
+      readableWorkflowIds: (user) => runAccess.readableWorkflowIds(user),
+      readableProjectIds: (user) => runAccess.readableProjectIds(user)
+    }),
+    requireRole: (request, reply, roles) => requireRole(request, reply, roles),
+    audit: (request, user, event) => audit(request, user, event)
+  });
 
   // Phase 15.6 — guard policy simulation (SQLite only: Postgres answers 501).
   const guardSimulationService = (store as object) instanceof PostgresStore

@@ -5,16 +5,19 @@
  * detectors that fire most, what shadow-mode rules would have blocked, and
  * the latest events (masked evidence only) with links to their runs. Filter
  * by project, workflow and profile. Profiles: the profile editor and the
- * project / workflow bindings with the enforced lock.
+ * project / workflow bindings with the enforced lock. Data destinations
+ * (Phase 16): how far each place data goes is from home.
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { GuardEventView, GuardProfileSummary, Project, WorkflowListItem } from "@ai-orchestrator/shared";
 import { ApiError, fetchGuardEvents, fetchGuardProfiles, fetchGuardStats, type GuardStats } from "../lib/api";
 import { actionLabel, channelLabel, dailySeries } from "../lib/guard-trace";
+import { DataDestinationsView } from "./DataDestinationsView";
 import { GuardProfilesView } from "./GuardProfilesView";
 
-type Tab = "overview" | "profiles";
+type Tab = "overview" | "profiles" | "destinations";
+const TAB_LABEL: Record<Tab, string> = { overview: "Overview", profiles: "Profiles & bindings", destinations: "Data destinations" };
 const DAY_WINDOWS = [7, 14, 30] as const;
 
 function formatError(err: unknown): string {
@@ -46,7 +49,7 @@ export function GuardSecurityPage({ projects, workflows, activeProjectId, role, 
           <p className="page-sub">Guard verdicts on prompts, tool calls, tool results and answers, and the profiles that decide them.</p>
         </div>
         <div className="finops-range guard-tabs" role="tablist" aria-label="Security views">
-          {(["overview", "profiles"] as Tab[]).map((entry) => (
+          {(["overview", "profiles", "destinations"] as Tab[]).map((entry) => (
             <button
               key={entry}
               type="button"
@@ -55,16 +58,14 @@ export function GuardSecurityPage({ projects, workflows, activeProjectId, role, 
               className={tab === entry ? "finops-range-btn active" : "finops-range-btn"}
               onClick={() => setTab(entry)}
             >
-              {entry === "overview" ? "Overview" : "Profiles & bindings"}
+              {TAB_LABEL[entry]}
             </button>
           ))}
         </div>
       </header>
-      {tab === "overview" ? (
-        <GuardOverview projects={projects} workflows={workflows} {...(onOpenRun ? { onOpenRun } : {})} />
-      ) : (
-        <GuardProfilesView projects={projects} workflows={workflows} activeProjectId={activeProjectId ?? "default"} role={role} />
-      )}
+      {tab === "overview" && <GuardOverview projects={projects} workflows={workflows} {...(onOpenRun ? { onOpenRun } : {})} />}
+      {tab === "profiles" && <GuardProfilesView projects={projects} workflows={workflows} activeProjectId={activeProjectId ?? "default"} role={role} />}
+      {tab === "destinations" && <DataDestinationsView />}
     </section>
   );
 }

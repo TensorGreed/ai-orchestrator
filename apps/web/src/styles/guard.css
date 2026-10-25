@@ -834,3 +834,119 @@
   font-size: var(--fs-xs);
   color: var(--fg-muted);
 }
+
+/* Phase 16 — Security → Data destinations */
+.guard-destinations {
+  display: grid;
+  gap: 16px;
+}
+.guard-dest-empty p {
+  margin: 0;
+}
+.guard-dest-empty {
+  gap: 6px;
+}
+.guard-dest-table td {
+  vertical-align: middle;
+}
+.guard-dest-builtin tbody tr > td:not(.guard-dest-actions) {
+  color: var(--fg-muted);
+  opacity: 0.75;
+}
+.guard-field-hint {
+  margin: 0;
+  color: var(--fg-muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+.guard-dest-actions {
+  white-space: nowrap;
+  text-align: right;
+}
+.guard-dest-actions .kb-link-btn + .kb-link-btn {
+  margin-left: 8px;
+}
+.page-pane .kb-link-btn.guard-dest-remove {
+  color: var(--err);
+}
+.guard-dest-tier {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: var(--r-pill);
+  border: 1px solid var(--line-strong);
+  font-size: var(--fs-xs);
+  white-space: nowrap;
+}
+.guard-dest-tier-local,
+.guard-dest-tier-private {
+  color: var(--ok);
+  border-color: var(--ok);
+  background: var(--ok-soft);
+}
+.guard-dest-tier-vendor {
+  color: var(--accent);
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+}
+.guard-dest-tier-public {
+  color: var(--warn);
+  border-color: var(--warn);
+  background: var(--warn-soft);
+}
+.guard-dest-pending {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+.guard-dest-pending li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 10px;
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--r-md);
+  min-width: 0;
+}
+.guard-dest-pending li > div {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.guard-dest-form {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  margin-bottom: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--bg-elev-2);
+}
+.guard-dest-form h5 {
+  margin: 0;
+}
+.guard-dest-rules {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  font-size: var(--fs-sm);
+}
+.guard-dest-rules li + li {
+  margin-top: 4px;
+}
+.guard-dest-rules-block {
+  margin-top: 12px;
+}
+.guard-dest-rules-block h5 {
+  margin: 0;
+  font-size: var(--fs-sm);
+}
+.cfg-help.cfg-help-warn {
+  color: var(--fg);
+  padding: 6px 8px;
+  border: 1px solid color-mix(in srgb, var(--warn) 40%, transparent);
+  border-radius: var(--r-sm, 6px);
+  background: var(--warn-soft);
+}

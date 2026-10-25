@@ -556,4 +556,84 @@ test.describe("golden journeys", () => {
     await expect(cases.getByText("3 admitted · 1 required")).toBeVisible();
     await expect(cases.getByText(/waiting for admin admission/)).toHaveCount(0);
   });
+
+  test("classifies a destination a workflow sends data to, from the not-classified-yet list", async ({ page }) => {
+    await openStudio(page);
+    // Rows this journey creates, left behind by an earlier failed run, are removed first (and again at the end).
+    const isOurs = (row: { name: string; host: string | null }) => row.name === "Partner hooks" || /^hooks-\d+\.example\.org$/.test(row.host ?? "");
+    const cleanUp = async () => {
+      const listed = await page.request.get("/api/data-destinations");
+      if (!listed.ok()) return;
+      const { destinations } = (await listed.json()) as { destinations: Array<{ id: string; name: string; host: string | null }> };
+      for (const row of destinations.filter(isOurs)) await page.request.delete(`/api/data-destinations/${encodeURIComponent(row.id)}`);
+    };
+    await cleanUp();
+    const stamp = Date.now();
+    const workflowId = `wf-e2e-dest-${stamp}`;
+    try {
+      const host = `hooks-${stamp}.example.org`;
+      const created = await page.request.post("/api/workflows", {
+        data: {
+          id: workflowId,
+          name: `E2E Destinations ${stamp}`,
+          schemaVersion: "1.0.0",
+          workflowVersion: 1,
+          nodes: [
+            { id: "hook", type: "webhook_input", name: "Hook", position: { x: 0, y: 0 }, config: { path: `e2e-dest-${stamp}`, method: "POST" } },
+            { id: "send", type: "http_request", name: "Notify partner", position: { x: 200, y: 0 }, config: { method: "POST", urlTemplate: `https://${host}/notify?token=abc` } },
+            { id: "done", type: "output", name: "Done", position: { x: 400, y: 0 }, config: { responseTemplate: "sent" } }
+          ],
+          edges: [
+            { id: "e1", source: "hook", target: "send" },
+            { id: "e2", source: "send", target: "done" }
+          ]
+        }
+      });
+      expect(created.ok()).toBeTruthy();
+
+      await sidebarItem(page, "Security").click();
+      await page.getByRole("tab", { name: "Data destinations" }).click();
+      // Destinations change nothing until a profile has destination rules.
+      await expect(page.getByText(/Destinations do nothing until a profile has destination rules/)).toBeVisible();
+      const builtIns = page.getByRole("table", { name: "Built-in destinations" });
+      await expect(builtIns.getByText("api.openai.com", { exact: false })).toBeVisible();
+
+      // Override opens Add destination pre-filled with the built-in's host and tier.
+      await builtIns.getByRole("button", { name: "Override OpenAI" }).click();
+      const override = page.getByRole("form", { name: "Add destination" });
+      await expect(override.getByLabel("Host, wildcard or IP range")).toHaveValue("api.openai.com");
+      await expect(override.getByRole("combobox", { name: "Tier", exact: true })).toHaveValue("vendor");
+      await override.getByRole("button", { name: "Cancel" }).click();
+      await expect(override).toHaveCount(0);
+
+      const pending = page.getByRole("list", { name: "Not classified yet" });
+      await expect(pending.getByText(`Web address ${host}`)).toBeVisible();
+      await expect(pending.getByText(`Seen in Workflow "E2E Destinations ${stamp}" · Notify partner`)).toBeVisible();
+      await pending.getByRole("button", { name: `Classify Web address ${host}` }).click();
+
+      const form = page.getByRole("form", { name: "Add destination" });
+      await expect(form.getByLabel("Host, wildcard or IP range")).toHaveValue(host);
+      // It starts at the tier it has today; the admin picks a nearer one on purpose.
+      await expect(form.getByRole("combobox", { name: "Tier", exact: true })).toHaveValue("public");
+      await form.getByLabel("Name", { exact: true }).fill("Partner hooks");
+      await form.getByRole("combobox", { name: "Tier", exact: true }).selectOption("vendor");
+      await form.getByText("Advanced", { exact: true }).click();
+      await form.getByLabel("Region", { exact: true }).fill("EU West 1");
+      await form.getByRole("button", { name: "Save destination" }).click();
+
+      const table = page.getByRole("table", { name: "Your destinations" });
+      const saved = table.getByRole("row").filter({ hasText: "Partner hooks" });
+      await expect(saved).toContainText(host);
+      await expect(saved).toContainText("Approved vendor");
+      await expect(saved).toContainText("eu-west-1");
+      await expect(pending.getByText(`Web address ${host}`)).toHaveCount(0);
+
+      page.once("dialog", (dialog) => void dialog.accept());
+      await saved.getByRole("button", { name: "Remove" }).click();
+      await expect(page.getByRole("row").filter({ hasText: "Partner hooks" })).toHaveCount(0);
+    } finally {
+      await cleanUp();
+      await page.request.delete(`/api/workflows/${workflowId}`);
+    }
+  });
 });

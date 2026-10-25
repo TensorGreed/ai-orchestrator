@@ -30,14 +30,28 @@ export const GUARD_BUILTIN_PROFILE_ID = "default";
 export const GUARD_CHANNEL_VALUES = ["prompt", "model_output", "tool_arguments", "tool_result", "final_output"] as const;
 export type GuardChannelValue = (typeof GUARD_CHANNEL_VALUES)[number];
 
+/**
+ * Phase 16 — channels a guard profile may configure: the Guard node's
+ * channels plus `egress` (outbound HTTP, connectors and senders), which the
+ * engine checks itself and a Guard node never evaluates.
+ */
+export const GUARD_PROFILE_CHANNEL_VALUES = [...GUARD_CHANNEL_VALUES, "egress"] as const;
+export type GuardProfileChannelValue = (typeof GUARD_PROFILE_CHANNEL_VALUES)[number];
+
 export const GUARD_ACTION_VALUES = ["allow", "block", "redact", "mask", "protect", "transform", "require_approval", "review"] as const;
 export type GuardActionValue = (typeof GUARD_ACTION_VALUES)[number];
 
 /** Phase 15.6: the list lives in data-labels.ts. */
 export const GUARD_PROVENANCE_VALUES = PROVENANCE_LABELS;
 
-export const PROTECTION_PROVIDER_IDS = ["mask", "keyed_hash", "aes_gcm", "token_vault"] as const;
+export const PROTECTION_PROVIDER_IDS = ["mask", "keyed_hash", "aes_gcm", "token_vault", "surrogate"] as const;
 export type ProtectionProviderIdValue = (typeof PROTECTION_PROVIDER_IDS)[number];
+
+/** Phase 16 — protection providers whose tokens cannot be turned back into the value. */
+export const ONE_WAY_PROTECTION_PROVIDER_IDS: ReadonlySet<ProtectionProviderIdValue> = new Set(["mask", "keyed_hash", "surrogate"]);
+
+/** Phase 16 — what a request to reveal a surrogate answers (400). */
+export const SURROGATE_REVEAL_REFUSED_MESSAGE = "Surrogates are one-way; use the token vault if you need the original back";
 
 /** Provenance a guard node assumes when it is not told: prompt text is user input, tool results are external. */
 export function defaultGuardLabels(channel: GuardChannelValue): Array<(typeof GUARD_PROVENANCE_VALUES)[number]> {

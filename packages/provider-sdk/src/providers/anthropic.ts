@@ -1,5 +1,6 @@
 import type { LLMCallResponse, LLMUsage, ProviderDefinition, ToolCall, ChatMessage } from "@ai-orchestrator/shared";
 import type { LLMProviderAdapter, ProviderCallRequest, ProviderExecutionContext } from "../types";
+import { PROVIDER_DEFAULT_BASE_URLS } from "../default-base-urls";
 import { providerHttpError, readResponseJson, readResponseText, resilientFetch } from "../resilient-fetch";
 
 const ANTHROPIC_TIMEOUT_MS = 60_000;
@@ -92,7 +93,7 @@ export class AnthropicProviderAdapter implements LLMProviderAdapter {
 
     const model = request.provider.model || DEFAULT_ANTHROPIC_MODEL;
     const rejectsSampling = anthropicModelRejectsSampling(model);
-    const rawBaseUrl = request.provider.baseUrl || "https://api.anthropic.com/v1";
+    const rawBaseUrl = request.provider.baseUrl || PROVIDER_DEFAULT_BASE_URLS.anthropic;
     const normalizedBaseUrl = rawBaseUrl.replace(/\/+$/, "");
     const endpoint = normalizedBaseUrl.endsWith("/messages") ? normalizedBaseUrl : `${normalizedBaseUrl}/messages`;
 

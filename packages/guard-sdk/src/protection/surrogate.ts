@@ -2,6 +2,7 @@ import { createHmac } from "node:crypto";
 import { luhnCheckDigit } from "../detectors/dlp";
 import { parsePhone } from "../phone";
 import type { GuardDataClass } from "../types";
+import { SURROGATE_REVEAL_REFUSED_MESSAGE } from "@ai-orchestrator/shared";
 import { GuardProtectionError } from "../types";
 import type { KeyResolver, ProtectionProvider } from "./types";
 
@@ -273,6 +274,10 @@ export function createSurrogateProvider(options: SurrogateProviderOptions): Prot
       const key = await options.keys(keyId);
       if (!key || key.length < 16) throw new GuardProtectionError(SURROGATE_PROVIDER_ID, `Key '${keyId}' is missing or shorter than 16 bytes`);
       return surrogateFor(value, context.dataClass, key);
+    },
+    /** Phase 16 — surrogates are one-way: asking for the original is refused with a pointer to the token vault. */
+    async reveal() {
+      throw new GuardProtectionError(SURROGATE_PROVIDER_ID, SURROGATE_REVEAL_REFUSED_MESSAGE);
     }
   };
 }

@@ -151,3 +151,32 @@ export function suggestProfileId(name: string, taken: Set<string>): string {
   while (taken.has(candidate)) candidate = `${base}-${counter++}`;
   return candidate;
 }
+
+/**
+ * Phase 16 — one plain sentence per destination rule of a profile document,
+ * for the read-only summary in the editor. Empty when there are none.
+ */
+export function destinationRuleLines(document: Record<string, unknown>): string[] {
+  const destinations = document.destinations as { rules?: unknown } | undefined;
+  const rules = Array.isArray(destinations?.rules) ? destinations.rules : [];
+  const tierLabel: Record<string, string> = { local: "this machine", private: "the private network", vendor: "approved vendors", public: "anywhere" };
+  return rules.map((raw) => {
+    const rule = (raw && typeof raw === "object" ? raw : {}) as {
+      name?: unknown;
+      when?: { dataClasses?: unknown; provenance?: unknown };
+      allow?: { maxTier?: unknown; regions?: unknown };
+      action?: unknown;
+      shadow?: unknown;
+    };
+    const list = (value: unknown) => (Array.isArray(value) ? value.map(String).filter(Boolean) : []);
+    const subjects = [...list(rule.when?.dataClasses), ...list(rule.when?.provenance).map((label) => `${label} data`)];
+    const what = subjects.length ? subjects.join(", ") : "Any data";
+    const tier = tierLabel[String(rule.allow?.maxTier)] ?? String(rule.allow?.maxTier ?? "?");
+    const regions = list(rule.allow?.regions);
+    // Regions apply only to vendor and public destinations; this machine and the private network always pass.
+    const where = `${tier}${regions.length ? ` in ${regions.join(", ")} (regions apply to vendors and public destinations only)` : ""}`;
+    const action = String(rule.action ?? "block").replace(/_/g, " ");
+    const name = typeof rule.name === "string" && rule.name ? `${rule.name}: ` : "";
+    return `${name}${what} may only go to ${where}; otherwise ${action}${rule.shadow === true ? " (shadow: observe only)" : ""}.`;
+  });
+}

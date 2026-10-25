@@ -47,7 +47,7 @@ import type {
   ReplayCaptureStatus,
   ReplayGoldenBadge
 } from "@ai-orchestrator/shared";
-import { DEFAULT_MCP_SAMPLING_SETTINGS, DEFAULT_PROJECT_ID, GUARD_SIMULATION_JOB_DATASET_PREFIX, MCP_POLICY_KINDS, MCP_POLICY_ROLES, MCP_TOOL_HINT_CONDITIONS, REPLAY_CAPTURE_API_KEY_FILTER, REPLAY_CAPTURE_STATUSES } from "@ai-orchestrator/shared";
+import { DESTINATION_KINDS, DESTINATION_TIERS, type DataDestinationRow, DEFAULT_MCP_SAMPLING_SETTINGS, DEFAULT_PROJECT_ID, GUARD_SIMULATION_JOB_DATASET_PREFIX, MCP_POLICY_KINDS, MCP_POLICY_ROLES, MCP_TOOL_HINT_CONDITIONS, REPLAY_CAPTURE_API_KEY_FILTER, REPLAY_CAPTURE_STATUSES } from "@ai-orchestrator/shared";
 import {
   normalizeMcpRuntimeLimits,
   normalizeMcpSandboxSettings,
@@ -3677,6 +3677,26 @@ export class SqliteStore {
       }
       this.exec(`INSERT OR IGNORE INTO schema_markers (name, created_at) VALUES ('gate_admission_backfill', ?)`, [new Date().toISOString()]);
     });
+
+    // Migration 38 — data destinations: admin rows classifying where outgoing data goes (Phase 16).
+    this.exec(`
+      CREATE TABLE IF NOT EXISTS data_destinations (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        target_id TEXT,
+        host TEXT,
+        tier TEXT NOT NULL,
+        region TEXT NOT NULL DEFAULT 'unknown',
+        holds_data_classes_json TEXT NOT NULL DEFAULT '[]',
+        note TEXT,
+        created_at TEXT NOT NULL,
+        created_by TEXT,
+        updated_at TEXT NOT NULL,
+        updated_by TEXT
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_data_destinations_match ON data_destinations(kind, COALESCE(target_id, ''), COALESCE(host, ''));
+    `);
 
     this.exec(`CREATE INDEX IF NOT EXISTS idx_workflows_project_id ON workflows(project_id)`);
     this.exec(`CREATE INDEX IF NOT EXISTS idx_workflows_folder_id ON workflows(folder_id)`);
@@ -12296,6 +12316,100 @@ export class SqliteStore {
     this.persist();
     return project;
   }
+
+  // ---------------------------------------------------------------------------
+  // Migration 38 — data destinations (Phase 16). SQLite only; the routes answer 501 on Postgres.
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Every workflow's draft JSON and, when one is published, the published
+   * version's JSON, in one query (the "not classified yet" list reads both).
+   */
+  listWorkflowConfigsForDestinations(): Array<{ id: string; name: string; draftJson: string; publishedJson: string | null }> {
+    return this.queryAll<{ id: string; name: string; workflow_json: string; published_json: string | null }>(
+      `SELECT w.id, w.name, w.workflow_json, v.workflow_json AS published_json
+       FROM workflows w
+       LEFT JOIN workflow_versions v ON v.workflow_id = w.id AND v.version = w.published_version
+       ORDER BY w.updated_at DESC`
+    ).map((row) => ({
+      id: toString(row.id),
+      name: toString(row.name),
+      draftJson: toString(row.workflow_json),
+      publishedJson: row.published_json ? toString(row.published_json) : null
+    }));
+  }
+
+  listDataDestinations(): DataDestinationRow[] {
+    return this.queryAll<Record<string, unknown>>(`SELECT * FROM data_destinations ORDER BY tier, name, id`).map(mapDataDestinationRow);
+  }
+
+  getDataDestination(id: string): DataDestinationRow | null {
+    const row = this.queryOne<Record<string, unknown>>(`SELECT * FROM data_destinations WHERE id = ?`, [id]);
+    return row ? mapDataDestinationRow(row) : null;
+  }
+
+  /** The row with exactly this match (kind, target id, host), if any. */
+  findDataDestinationByMatch(kind: string, targetId: string | null, host: string | null): DataDestinationRow | null {
+    const row = this.queryOne<Record<string, unknown>>(
+      `SELECT * FROM data_destinations WHERE kind = ? AND COALESCE(target_id, '') = ? AND COALESCE(host, '') = ?`,
+      [kind, targetId ?? "", host ?? ""]
+    );
+    return row ? mapDataDestinationRow(row) : null;
+  }
+
+  insertDataDestination(input: DataDestinationWrite & { id: string; actor: string | null; at?: string }): DataDestinationRow {
+    const at = input.at ?? new Date().toISOString();
+    this.exec(
+      `INSERT INTO data_destinations (id, name, kind, target_id, host, tier, region, holds_data_classes_json, note, created_at, created_by, updated_at, updated_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [input.id, input.name, input.kind, input.targetId, input.host, input.tier, input.region, JSON.stringify(input.holdsDataClasses), input.note, at, input.actor, at, input.actor]
+    );
+    return this.getDataDestination(input.id)!;
+  }
+
+  /** Replaces a row's fields; null when it does not exist. */
+  updateDataDestination(id: string, input: DataDestinationWrite & { actor: string | null; at?: string }): DataDestinationRow | null {
+    if (!this.getDataDestination(id)) return null;
+    const at = input.at ?? new Date().toISOString();
+    this.exec(
+      `UPDATE data_destinations SET name = ?, kind = ?, target_id = ?, host = ?, tier = ?, region = ?, holds_data_classes_json = ?, note = ?, updated_at = ?, updated_by = ?
+       WHERE id = ?`,
+      [input.name, input.kind, input.targetId, input.host, input.tier, input.region, JSON.stringify(input.holdsDataClasses), input.note, at, input.actor, id]
+    );
+    return this.getDataDestination(id);
+  }
+
+  deleteDataDestination(id: string): boolean {
+    if (!this.getDataDestination(id)) return false;
+    this.exec(`DELETE FROM data_destinations WHERE id = ?`, [id]);
+    return true;
+  }
+}
+
+/** The fields of a data destination row a write sets (already validated and normalised). */
+export type DataDestinationWrite = Pick<DataDestinationRow, "name" | "kind" | "targetId" | "host" | "tier" | "region" | "holdsDataClasses" | "note">;
+
+function mapDataDestinationRow(row: Record<string, unknown>): DataDestinationRow {
+  const optionalString = (value: unknown) => (value === null || value === undefined ? null : toString(value));
+  const kind = toString(row.kind);
+  const tier = toString(row.tier);
+  return {
+    id: toString(row.id),
+    name: toString(row.name),
+    kind: (DESTINATION_KINDS as readonly string[]).includes(kind) ? (kind as DataDestinationRow["kind"]) : "http",
+    targetId: optionalString(row.target_id),
+    host: optionalString(row.host),
+    // An unreadable tier is treated as public, the strictest.
+    tier: (DESTINATION_TIERS as readonly string[]).includes(tier) ? (tier as DataDestinationRow["tier"]) : "public",
+    region: toString(row.region) || "unknown",
+    holdsDataClasses: parseJsonArray(row.holds_data_classes_json),
+    note: optionalString(row.note),
+    builtIn: false,
+    createdAt: optionalString(row.created_at),
+    updatedAt: optionalString(row.updated_at),
+    createdBy: optionalString(row.created_by),
+    updatedBy: optionalString(row.updated_by)
+  };
 }
 
 function mapGuardSimulationRow(row: Record<string, unknown>): GuardSimulationRecord {
