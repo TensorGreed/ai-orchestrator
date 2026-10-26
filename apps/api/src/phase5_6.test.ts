@@ -202,10 +202,10 @@ async function createTestContext(overrides: Partial<AppConfig> = {}): Promise<Te
 
   const store = await SqliteStore.create(dbPath);
   const config = makeConfig({ GIT_SYNC_WORKDIR: gitWorkdir, ...overrides });
-  store.ensureDefaultProject();
+  await store.ensureDefaultProject();
   const secretService = new SecretService(store, config.SECRET_MASTER_KEY_BASE64);
   const authService = new AuthService(store, config.SESSION_TTL_HOURS);
-  const app = createApp(config, store, secretService, authService);
+  const app = await createApp(config, store, secretService, authService);
   await app.ready();
   const ctx: TestContext = {
     app,
@@ -232,7 +232,7 @@ async function loginUser(
   ctx: TestContext,
   input: { email: string; password: string; role: "admin" | "builder" | "operator" | "viewer" }
 ): Promise<{ cookie: string; userId: string }> {
-  const registered = ctx.authService.register(input);
+  const registered = await ctx.authService.register(input);
   const response = await ctx.app.inject({
     method: "POST",
     url: "/api/auth/login",
@@ -477,7 +477,7 @@ describe("Phase 5.6 — Git push/pull round-trip with credential stubs", () => {
     const cookieA = await loginAdmin(ctxA);
 
     // Create a secret so workflows can reference it through a secretRef.
-    const secret = ctxA.secretService.createSecret({
+    const secret = await ctxA.secretService.createSecret({
       name: "prod-openai",
       provider: "openai",
       value: "sk-prod-test"
@@ -568,7 +568,7 @@ describe("Phase 5.6 — Git push/pull round-trip with credential stubs", () => {
     // pre-existing secret with the same name so the stub should resolve.
     const ctxB = await createTestContext();
     const cookieB = await loginAdmin(ctxB);
-    const secretB = ctxB.secretService.createSecret({
+    const secretB = await ctxB.secretService.createSecret({
       name: "prod-openai",
       provider: "openai",
       value: "sk-local-different"
@@ -597,7 +597,7 @@ describe("Phase 5.6 — Git push/pull round-trip with credential stubs", () => {
     expect(pull.workflowsImported).toBe(1);
     expect(pull.variablesSynced).toBe(1);
 
-    const imported = ctxB.store.getWorkflow("wf-git");
+    const imported = await ctxB.store.getWorkflow("wf-git");
     expect(imported).toBeTruthy();
     // The stub should have been resolved to the local secret id.
     const importedRef = imported!.nodes[0]!.config!.authSecretRef as Record<string, unknown>;

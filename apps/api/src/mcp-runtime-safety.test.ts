@@ -32,7 +32,7 @@ const PINNED = `node:22.11.0-alpine3.20@sha256:${"b".repeat(64)}`;
 async function createTestContext(overrides: Record<string, string> = {}): Promise<TestContext> {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-mcp-safety-"));
   const store = await SqliteStore.create(path.join(tempDir, "orchestrator.db"));
-  store.ensureDefaultProject();
+  await store.ensureDefaultProject();
   const config = parseConfig({
     LOG_LEVEL: "warn",
     SEED_SAMPLE_WORKFLOWS: "false",
@@ -47,7 +47,7 @@ async function createTestContext(overrides: Record<string, string> = {}): Promis
   });
   const secretService = new SecretService(store, config.SECRET_MASTER_KEY_BASE64);
   const authService = new AuthService(store, config.SESSION_TTL_HOURS);
-  const app = createApp(config, store, secretService, authService);
+  const app = await createApp(config, store, secretService, authService);
   await app.ready();
   const context = { app, store, authService, config, tempDir };
   contexts.push(context);
@@ -59,7 +59,7 @@ afterEach(async () => {
     const context = contexts.pop()!;
     await context.app.close();
     try {
-      context.store.close();
+      await context.store.close();
     } catch {
       // Already closed by the app shutdown hooks.
     }
@@ -72,7 +72,7 @@ type Role = "admin" | "builder" | "operator" | "viewer";
 async function login(context: TestContext, role: Role, name: string = role): Promise<{ cookie: string; id: string; email: string }> {
   const email = `${name}@example.com`;
   const password = `${name}-Pass-123!`;
-  const user = context.authService.register({ email, password, role });
+  const user = await context.authService.register({ email, password, role });
   const response = await context.app.inject({ method: "POST", url: "/api/auth/login", payload: { email, password } });
   if (response.statusCode !== 200) throw new Error(`Login failed for ${name}: ${response.body}`);
   const raw = response.headers["set-cookie"];
@@ -140,10 +140,10 @@ describe("migration 27", () => {
     const context = await createTestContext();
     const admin = await login(context, "admin");
     const id = await registerMock(context, admin.cookie);
-    const server = context.store.getMcpServer(id)!;
+    const server = (await context.store.getMcpServer(id))!;
     expect(server).toMatchObject({ sandbox: null, credentialMode: "service", delegatedFallback: "none" });
     expect(server.limits.breaker).toMatchObject({ enabled: true, failureThreshold: 5 });
-    expect(context.store.listMcpUserOAuthConnections()).toEqual([]);
+    expect(await context.store.listMcpUserOAuthConnections()).toEqual([]);
   });
 });
 
@@ -193,7 +193,7 @@ describe("sandbox settings", () => {
       );
       expect(created.statusCode).toBe(201);
       const serverId = created.json<{ server: { id: string } }>().server.id;
-      expect(context.store.getMcpServer(serverId)?.sandbox).toMatchObject({ mode: "container", image: PINNED });
+      expect((await context.store.getMcpServer(serverId))?.sandbox).toMatchObject({ mode: "container", image: PINNED });
 
       // Builders cannot change it; admins can.
       expect((await call(context, "PUT", `/api/mcp/servers/${serverId}`, builder.cookie, { sandbox: null })).statusCode).toBe(403);
@@ -236,7 +236,7 @@ describe("sandbox settings", () => {
     });
     const result = sandboxed.json<{ entries: Array<{ result?: { action: string; serverId?: string } }> }>().entries[0]?.result;
     expect(result?.action).toBe("created");
-    expect(context.store.getMcpServer(result!.serverId!)?.sandbox).toMatchObject({ mode: "container", image: PINNED });
+    expect((await context.store.getMcpServer(result!.serverId!))?.sandbox).toMatchObject({ mode: "container", image: PINNED });
   });
 
   it("takes the sandbox of a matching catalog entry on import", async () => {
@@ -266,7 +266,7 @@ describe("sandbox settings", () => {
       });
       const result = imported.json<{ entries: Array<{ result?: { action: string; serverId?: string } }> }>().entries[0]?.result;
       expect(result?.action).toBe("created");
-      expect(context.store.getMcpServer(result!.serverId!)?.sandbox).toMatchObject({ mode: "container", memoryMb: 256 });
+      expect((await context.store.getMcpServer(result!.serverId!))?.sandbox).toMatchObject({ mode: "container", memoryMb: 256 });
       const presets = await call(context, "GET", "/api/mcp/presets", admin.cookie);
       if (presets.statusCode === 200) {
         expect(JSON.stringify(presets.json())).toContain(PINNED);
@@ -325,7 +325,7 @@ describe("rate limits and the circuit breaker", () => {
     expect(refused.json<{ ok: boolean }>().ok).toBe(false);
     expect(playgroundError(refused)).toMatch(/^Circuit open:/);
 
-    const audit = context.store.listAuditLogs({ resourceType: "mcp_server", pageSize: 200 }).items;
+    const audit = (await context.store.listAuditLogs({ resourceType: "mcp_server", pageSize: 200 })).items;
     expect(audit.map((entry) => entry.eventType)).toContain("mcp_server.breaker_opened");
     const opened = audit.find((entry) => entry.eventType === "mcp_server.breaker_opened")!;
     expect(JSON.stringify(opened.metadata)).not.toContain("unsupported characters");
@@ -357,7 +357,7 @@ describe("rate limits and the circuit breaker", () => {
     const reset = await call(context, "POST", `/api/mcp/servers/${serverId}/breaker/reset`, admin.cookie);
     expect(reset.json<{ runtime: McpRuntimeStateView }>().runtime.breaker.state).toBe("closed");
     expect((await playground(context, builder.cookie, serverId, "3+3")).json<{ ok: boolean }>().ok).toBe(true);
-    const events = context.store.listAuditLogs({ resourceType: "mcp_server", pageSize: 200 }).items.map((entry) => entry.eventType);
+    const events = (await context.store.listAuditLogs({ resourceType: "mcp_server", pageSize: 200 })).items.map((entry) => entry.eventType);
     expect(events).toEqual(expect.arrayContaining(["mcp_server.breaker_closed", "mcp_server.breaker_reset"]));
   });
 
@@ -412,7 +412,7 @@ describe("rate limits and the circuit breaker", () => {
 
     const telemetry = await call(context, "GET", `/api/mcp/servers/${serverId}/telemetry`, admin.cookie);
     expect(telemetry.json<{ totals: Record<string, number> }>().totals).toMatchObject({ calls: 3, errors: 0, rateLimited: 2, errorRate: 0 });
-    const rows = context.store.listMcpToolCalls({ registryServerId: serverId, since: "1970-01-01T00:00:00.000Z" });
+    const rows = await context.store.listMcpToolCalls({ registryServerId: serverId, since: "1970-01-01T00:00:00.000Z" });
     expect(rows.map((row) => row.rejection ?? null)).toEqual([null, "rate_limited", "rate_limited"]);
   });
 });

@@ -40,7 +40,7 @@ const CARD = "4111 1111 1111 1111";
 async function createTestContext(): Promise<TestContext> {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-dest-rules-"));
   const store = await SqliteStore.create(path.join(tempDir, "orchestrator.db"));
-  store.ensureDefaultProject();
+  await store.ensureDefaultProject();
   const config = parseConfig({
     LOG_LEVEL: "warn",
     SEED_SAMPLE_WORKFLOWS: "false",
@@ -52,7 +52,7 @@ async function createTestContext(): Promise<TestContext> {
   });
   const secretService = new SecretService(store, config.SECRET_MASTER_KEY_BASE64);
   const authService = new AuthService(store, config.SESSION_TTL_HOURS);
-  const app = createApp(config, store, secretService, authService);
+  const app = await createApp(config, store, secretService, authService);
   await app.ready();
   const context = { app, store, authService, config, tempDir };
   contexts.push(context);
@@ -65,7 +65,7 @@ afterEach(async () => {
     const context = contexts.pop()!;
     await context.app.close();
     try {
-      context.store.close();
+      await context.store.close();
     } catch {
       // Closed by the app's shutdown hooks.
     }
@@ -76,7 +76,7 @@ afterEach(async () => {
 async function login(context: TestContext, role: "admin" | "builder" | "viewer"): Promise<{ cookie: string }> {
   const email = `${role}@example.com`;
   const password = `${role}-Pass-123!`;
-  context.authService.register({ email, password, role });
+  await context.authService.register({ email, password, role });
   const response = await context.app.inject({ method: "POST", url: "/api/auth/login", payload: { email, password } });
   const raw = response.headers["set-cookie"];
   const values = Array.isArray(raw) ? raw : [raw ?? ""];
@@ -133,15 +133,15 @@ describe("deployment destination rules", () => {
     const context = await createTestContext();
     const admin = await login(context, "admin");
     const receiver = await startReceiver();
-    context.store.upsertWorkflow(senderWorkflow(receiver.url));
+    await context.store.upsertWorkflow(senderWorkflow(receiver.url));
     const status = (await call(context, "GET", "/api/guard/destination-rules", admin.cookie)).json<DestinationRulesStatus>();
     expect(status).toMatchObject({ available: true, version: null, rules: [], mode: "off", hasStarter: false, observing: { wouldBlock: 0, days: 7 } });
-    expect(context.store.getGuardProfile("destination-rules")).toBeNull();
-    expect(context.store.anyGuardProfileUsesLabels()).toBe(false);
+    expect(await context.store.getGuardProfile("destination-rules")).toBeNull();
+    expect(await context.store.anyGuardProfileUsesLabels()).toBe(false);
     const run = await call(context, "POST", "/api/workflows/wf-sender/execute", admin.cookie, { user_prompt: `card ${CARD}` });
     expect(run.json<{ status: string }>().status).toBe("success");
     expect(receiver.bodies.at(-1)).toContain("4111");
-    expect(context.store.listGuardEvents({}).total).toBe(0);
+    expect((await context.store.listGuardEvents({})).total).toBe(0);
   }, 60_000);
 
   it("the starter rule observes first, counts would-be blocks, then enforces with one switch", async () => {
@@ -150,7 +150,7 @@ describe("deployment destination rules", () => {
     const builder = await login(context, "builder");
     const viewer = await login(context, "viewer");
     const receiver = await startReceiver();
-    context.store.upsertWorkflow(senderWorkflow(receiver.url));
+    await context.store.upsertWorkflow(senderWorkflow(receiver.url));
     expect((await call(context, "POST", "/api/data-destinations", admin.cookie, PUBLIC_LOOPBACK)).statusCode).toBe(201);
 
     // Only admins add it; it is created observing.
@@ -162,7 +162,7 @@ describe("deployment destination rules", () => {
     expect(status.rules[0]).toMatchObject({ name: "Keep sensitive data in-house", allow: { maxTier: "private" }, action: "block", shadow: true });
     // A second click changes nothing.
     expect((await call(context, "POST", "/api/guard/destination-rules/starter", admin.cookie)).statusCode).toBe(200);
-    expect(context.store.anyGuardProfileUsesLabels()).toBe(true);
+    expect(await context.store.anyGuardProfileUsesLabels()).toBe(true);
 
     // Observing: the card still goes out, and the would-be block is counted.
     const observed = await call(context, "POST", "/api/workflows/wf-sender/execute", admin.cookie, { user_prompt: `card ${CARD}` });
@@ -174,7 +174,7 @@ describe("deployment destination rules", () => {
     expect(watching.observing).toEqual({ wouldBlock: 1, days: 7 });
     // Non-admins see the rules, not the count.
     expect((await call(context, "GET", "/api/guard/destination-rules", viewer.cookie)).json<DestinationRulesStatus>()).toMatchObject({ mode: "observing", observing: null });
-    const events = context.store.listGuardEvents({ channel: "egress" }).events;
+    const events = (await context.store.listGuardEvents({ channel: "egress" })).events;
     expect(events.find((event) => event.detectorId === "<destinations>")).toMatchObject({ effectiveAction: "block", shadow: true, profileId: "destination-rules", dataClass: "card_number" });
     expect(JSON.stringify(events)).not.toContain("4111 1111 1111 1111");
 
@@ -208,7 +208,7 @@ describe("deployment destination rules", () => {
     const admin = await login(context, "admin");
     const builder = await login(context, "builder");
     const receiver = await startReceiver();
-    context.store.upsertWorkflow(senderWorkflow(receiver.url));
+    await context.store.upsertWorkflow(senderWorkflow(receiver.url));
     expect((await call(context, "POST", "/api/guard/destination-rules/starter", admin.cookie)).statusCode).toBe(201);
     expect((await call(context, "POST", "/api/guard/destination-rules/enforcement", admin.cookie, { enforce: true })).statusCode).toBe(200);
     // Two recorded runs: the loopback receiver is local by default, so both went out.
@@ -234,8 +234,8 @@ describe("deployment destination rules", () => {
     expect(preview.summary!.sentence).toContain("1 newly blocked going to Test receiver (public)");
     // Nothing was sent, and the rows were never stored.
     expect(receiver.bodies.length).toBe(sent);
-    expect(context.store.listDataDestinations()).toEqual([]);
-    expect(JSON.stringify(context.store.getGuardSimulation(preview.id))).not.toContain("Test receiver\",\"kind");
+    expect(await context.store.listDataDestinations()).toEqual([]);
+    expect(JSON.stringify(await context.store.getGuardSimulation(preview.id))).not.toContain("Test receiver\",\"kind");
 
     // Listed for admins; the builder cannot read it.
     const listed = (await call(context, "GET", "/api/data-destinations/previews", admin.cookie)).json<{ simulations: GuardSimulationView[] }>().simulations;
@@ -248,7 +248,7 @@ describe("deployment destination rules", () => {
     const context = await createTestContext();
     const admin = await login(context, "admin");
     const receiver = await startReceiver();
-    context.store.upsertWorkflow(senderWorkflow(receiver.url));
+    await context.store.upsertWorkflow(senderWorkflow(receiver.url));
     expect((await call(context, "POST", "/api/guard/destination-rules/starter", admin.cookie)).statusCode).toBe(201);
     expect((await call(context, "POST", "/api/guard/destination-rules/enforcement", admin.cookie, { enforce: true })).statusCode).toBe(200);
     // Recorded while the loopback receiver is local (built-in): the card went out.
@@ -266,7 +266,7 @@ describe("deployment destination rules", () => {
     expect(preview.status).toBe("completed");
     expect(preview.summary).toMatchObject({ runs: 1, runsNewlyBlocked: 0, runsNoLongerBlocked: 1 });
     // The removal was only previewed.
-    expect(context.store.listDataDestinations().map((row) => row.id)).toEqual([rowId]);
+    expect((await context.store.listDataDestinations()).map((row) => row.id)).toEqual([rowId]);
   }, 120_000);
 
   it("reserves the rules profile's and the preview's ids: nobody creates or imports them through the profile routes", async () => {
@@ -281,11 +281,11 @@ describe("deployment destination rules", () => {
       expect((await call(context, "POST", "/api/guard/profiles", builder.cookie, { document })).statusCode).not.toBe(201);
       const imported = await call(context, "POST", "/api/guard/profiles/import", admin.cookie, { document });
       expect(imported.statusCode, `${id}: ${imported.body}`).toBe(400);
-      expect(context.store.getGuardProfile(id)).toBeNull();
+      expect(await context.store.getGuardProfile(id)).toBeNull();
     }
     // The Security page still creates the rules profile.
     expect((await call(context, "POST", "/api/guard/destination-rules/starter", admin.cookie)).statusCode).toBe(201);
-    expect(context.store.getGuardProfile("destination-rules")).not.toBeNull();
+    expect(await context.store.getGuardProfile("destination-rules")).not.toBeNull();
     // And an import cannot overwrite it afterwards.
     const overwrite = await call(context, "POST", "/api/guard/profiles/import", admin.cookie, { document: { id: "destination-rules", name: "Mine", version: "1" } });
     expect(overwrite.statusCode).toBe(400);
@@ -302,12 +302,12 @@ describe("deployment destination rules", () => {
       };
       // Look-alike text that is not a rule, an empty rule list and an egress action category: no opt-in.
       write("lookalike", JSON.stringify({ id: "lookalike", description: '"destinations":{"rules":[{', destinations: { rules: [] }, actions: { egress: { action: "block" } } }, null, 2));
-      expect(store.anyGuardProfileUsesLabels()).toBe(false);
+      expect(await store.anyGuardProfileUsesLabels()).toBe(false);
       // Pretty-printed, with a key that sorts before "rules": still seen.
       write("pretty", JSON.stringify({ id: "pretty", destinations: { aardvark: true, rules: [{ allow: { maxTier: "private" }, action: "block" }] } }, null, 2));
-      expect(store.anyGuardProfileUsesLabels()).toBe(true);
+      expect(await store.anyGuardProfileUsesLabels()).toBe(true);
     } finally {
-      store.close();
+      await store.close();
       fs.rmSync(tempDir, { recursive: true, force: true });
     }
     const egressTemp = fs.mkdtempSync(path.join(os.tmpdir(), "ao-dest-optin-"));
@@ -318,9 +318,9 @@ describe("deployment destination rules", () => {
       raw.prepare(`INSERT INTO guard_profile_versions (profile_id, version, hash, document_json, note, created_at, created_by) VALUES ('e', 1, 'h', ?, NULL, '2026-01-01', NULL)`).run(
         JSON.stringify({ channels: { egress: { defaultAction: { action: "allow" }, actions: {} } }, id: "e" }, null, 1)
       );
-      expect(egressStore.anyGuardProfileUsesLabels()).toBe(true);
+      expect(await egressStore.anyGuardProfileUsesLabels()).toBe(true);
     } finally {
-      egressStore.close();
+      await egressStore.close();
       fs.rmSync(egressTemp, { recursive: true, force: true });
     }
   });
@@ -329,12 +329,12 @@ describe("deployment destination rules", () => {
     const context = await createTestContext();
     const admin = await login(context, "admin");
     const receiver = await startReceiver();
-    context.store.upsertWorkflow(senderWorkflow(receiver.url));
+    await context.store.upsertWorkflow(senderWorkflow(receiver.url));
     expect((await call(context, "POST", "/api/data-destinations", admin.cookie, PUBLIC_LOOPBACK)).statusCode).toBe(201);
     expect((await call(context, "POST", "/api/guard/destination-rules/starter", admin.cookie)).statusCode).toBe(201);
     const clean = await call(context, "POST", "/api/workflows/wf-sender/execute", admin.cookie, { user_prompt: "hello" });
     expect(clean.json<{ status: string }>().status).toBe("success");
-    expect(context.store.listGuardEvents({}).total).toBe(0);
+    expect((await context.store.listGuardEvents({})).total).toBe(0);
 
     // A real run with a card: observed once. A replay of it: not traffic, not counted.
     const run = await call(context, "POST", "/api/workflows/wf-sender/execute", admin.cookie, { record: true, user_prompt: `card ${CARD}` });
@@ -347,7 +347,7 @@ describe("deployment destination rules", () => {
     const started = await call(context, "POST", "/api/replay/runs?wait=true", admin.cookie, { datasetIds: [set] });
     expect([200, 202]).toContain(started.statusCode);
     const until = Date.now() + 30_000;
-    while (context.store.listGuardEvents({}).events.filter((event) => event.detectorId === "<destinations>").length < 2) {
+    while ((await context.store.listGuardEvents({})).events.filter((event) => event.detectorId === "<destinations>").length < 2) {
       if (Date.now() > until) throw new Error("The replay recorded no verdict");
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
@@ -359,23 +359,23 @@ describe("deployment destination rules", () => {
     const store = await SqliteStore.create(path.join(tempDir, "orchestrator.db"));
     try {
       const guard = new GuardService(store, new SecretService(store, MASTER_KEY), { autoApply: true });
-      guard.ensureBuiltIns();
-      const before = guard.resolveRun({ workflowId: "wf" });
+      await guard.ensureBuiltIns();
+      const before = await guard.resolveRun({ workflowId: "wf" });
       expect(before.stack.map((entry) => entry.profileId)).toEqual(["default"]);
       expect(before.deployment).toBeUndefined();
-      guard.addStarterDestinationRule(null);
-      const after = guard.resolveRun({ workflowId: "wf" });
+      await guard.addStarterDestinationRule(null);
+      const after = await guard.resolveRun({ workflowId: "wf" });
       expect(after.stack.map((entry) => entry.profileId)).toEqual(["default", "destination-rules"]);
       expect(after.source).toBe("instance");
       expect(after.deployment?.profileId).toBe("destination-rules");
       expect(after.chain.at(-1)).toMatchObject({ level: "destinations", mode: "enforced", profileId: "destination-rules", version: 1 });
-      const candidate = guard.resolveRun({ workflowId: "wf", profileOverride: { profileId: "default" } });
+      const candidate = await guard.resolveRun({ workflowId: "wf", profileOverride: { profileId: "default" } });
       expect(candidate.stack.map((entry) => entry.profileId)).toEqual(["default", "destination-rules"]);
       // A rules profile without rules is not applied.
-      guard.setDestinationRules([], null);
-      expect(guard.resolveRun({ workflowId: "wf" }).stack.map((entry) => entry.profileId)).toEqual(["default"]);
+      await guard.setDestinationRules([], null);
+      expect((await guard.resolveRun({ workflowId: "wf" })).stack.map((entry) => entry.profileId)).toEqual(["default"]);
     } finally {
-      store.close();
+      await store.close();
       fs.rmSync(tempDir, { recursive: true, force: true });
     }
   });
@@ -394,8 +394,8 @@ describe("deployment destination rules", () => {
         guard,
         requireRole: async () => admin,
         runAccess: { readableWorkflowIds: () => null } as never,
-        canAccessWorkflow: () => true,
-        canInProject: () => true,
+        canAccessWorkflow: async () => true,
+        canInProject: async () => true,
         audit: () => undefined,
         destinationRulesAvailable: false
       });
@@ -411,7 +411,7 @@ describe("deployment destination rules", () => {
       }
       await app.close();
     } finally {
-      store.close();
+      await store.close();
       fs.rmSync(tempDir, { recursive: true, force: true });
     }
   });

@@ -57,21 +57,21 @@ export function registerReleaseRoutes(deps: ReleaseRoutesDeps): void {
   };
 
   app.get<Params>("/api/workflows/:id/release-gate", (request, reply) =>
-    handle(request, reply, ["viewer"], (user) => ({ gate: releases.gate(user, request.params.id) }))
+    handle(request, reply, ["viewer"], async (user) => ({ gate: await releases.gate(user, request.params.id) }))
   );
 
   app.put<Params & { Body: unknown }>("/api/workflows/:id/release-gate", (request, reply) =>
-    handle(request, reply, ["builder"], (user) => ({ gate: releases.updateGate(user, request.params.id, (request.body ?? {}) as never) }))
+    handle(request, reply, ["builder"], async (user) => ({ gate: await releases.updateGate(user, request.params.id, (request.body ?? {}) as never) }))
   );
 
   app.post<Params & { Body: unknown }>("/api/workflows/:id/publish", (request, reply) =>
-    handle(request, reply, ["viewer"], (user) => {
+    handle(request, reply, ["viewer"], async (user) => {
       const parsed = releasePublishInputSchema.safeParse(request.body ?? {});
       if (!parsed.success) {
         reply.code(400);
         return { error: "Invalid publish request", details: parsed.error.issues };
       }
-      const outcome = releases.publish(user, request.params.id, parsed.data);
+      const outcome = await releases.publish(user, request.params.id, parsed.data);
       reply.code(outcome.status);
       if (outcome.status === 200) return { release: outcome.release };
       if (outcome.status === 202) return { verdict: outcome.verdict, approvalRequestId: outcome.approvalRequestId, reasons: outcome.reasons };
@@ -80,35 +80,35 @@ export function registerReleaseRoutes(deps: ReleaseRoutesDeps): void {
   );
 
   app.get<Params & { Querystring: { limit?: string } }>("/api/workflows/:id/releases", (request, reply) =>
-    handle(request, reply, ["viewer"], (user) => {
+    handle(request, reply, ["viewer"], async (user) => {
       const limit = request.query.limit ? Number.parseInt(request.query.limit, 10) : undefined;
-      return releases.releases(user, request.params.id, limit && Number.isFinite(limit) ? limit : undefined);
+      return await releases.releases(user, request.params.id, limit && Number.isFinite(limit) ? limit : undefined);
     })
   );
 
   app.post<Params & { Body: unknown }>("/api/workflows/:id/rollback", (request, reply) =>
-    handle(request, reply, ["viewer"], (user) => {
+    handle(request, reply, ["viewer"], async (user) => {
       const parsed = releaseRollbackInputSchema.safeParse(request.body ?? {});
       if (!parsed.success) {
         reply.code(400);
         return { error: "Invalid rollback request", details: parsed.error.issues };
       }
-      return { release: releases.rollback(user, request.params.id, parsed.data) };
+      return { release: await releases.rollback(user, request.params.id, parsed.data) };
     })
   );
 
   app.get<Params>("/api/workflows/:id/release-state", (request, reply) =>
-    handle(request, reply, ["viewer"], (user) => ({ state: releases.state(user, request.params.id) }))
+    handle(request, reply, ["viewer"], async (user) => ({ state: await releases.state(user, request.params.id) }))
   );
 
   app.get<Params & { Querystring: { version?: string; replayRunId?: string } }>("/api/workflows/:id/publish-preview", (request, reply) =>
-    handle(request, reply, ["viewer"], (user) => {
+    handle(request, reply, ["viewer"], async (user) => {
       const version = Number.parseInt(request.query.version ?? "", 10);
       if (!Number.isFinite(version) || version <= 0) {
         reply.code(400);
         return { error: "version must be a positive integer" };
       }
-      return { preview: releases.preview(user, request.params.id, version, request.query.replayRunId || undefined) };
+      return { preview: await releases.preview(user, request.params.id, version, request.query.replayRunId || undefined) };
     })
   );
 }

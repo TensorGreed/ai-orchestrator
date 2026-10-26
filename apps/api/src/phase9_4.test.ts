@@ -22,7 +22,7 @@ afterEach(async () => {
   while (ctxs.length > 0) {
     const c = ctxs.pop()!;
     try { await c.app.close(); } catch { /* */ }
-    try { c.store.close(); } catch { /* */ }
+    try { await c.store.close(); } catch { /* */ }
     fs.rmSync(c.tempDir, { recursive: true, force: true });
   }
 });
@@ -31,15 +31,15 @@ async function makeCtx(): Promise<Ctx> {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-phase9-4-"));
   const dbPath = path.join(tempDir, "orchestrator.db");
   const store = await SqliteStore.create(dbPath);
-  store.ensureDefaultProject();
+  await store.ensureDefaultProject();
   const config: AppConfig = makeTestConfig({
     SECRET_MASTER_KEY_BASE64: Buffer.alloc(32, 7).toString("base64")
   });
   const secretService = new SecretService(store, config.SECRET_MASTER_KEY_BASE64);
   const authService = new AuthService(store, config.SESSION_TTL_HOURS);
-  const app = createApp(config, store, secretService, authService);
+  const app = await createApp(config, store, secretService, authService);
   await app.ready();
-  authService.register({ email: "phase94@example.com", password: "pass-9-4-pass", role: "admin" });
+  await authService.register({ email: "phase94@example.com", password: "pass-9-4-pass", role: "admin" });
   const ctx = { app, store, tempDir };
   ctxs.push(ctx);
   return ctx;

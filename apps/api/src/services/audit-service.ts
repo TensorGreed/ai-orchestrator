@@ -1,5 +1,5 @@
 import { nanoid } from "nanoid";
-import { SqliteStore } from "../db/database";
+import type { Store } from "../db/store.js";
 
 export type AuditOutcome = "success" | "failure" | "denied";
 
@@ -75,7 +75,7 @@ export interface AuditLogEntry {
 
 export class AuditService {
   constructor(
-    private readonly store: SqliteStore,
+    private readonly store: Store,
     private readonly options: { enabled: boolean } = { enabled: true }
   ) {}
 
@@ -83,7 +83,7 @@ export class AuditService {
     return this.options.enabled;
   }
 
-  record(event: AuditEventInput): AuditLogEntry | null {
+  async record(event: AuditEventInput): Promise<AuditLogEntry | null> {
     if (!this.options.enabled) return null;
     const id = `aud_${nanoid(16)}`;
     const actor = event.actor ?? {};
@@ -105,7 +105,7 @@ export class AuditService {
       message: event.message ?? null
     };
     try {
-      this.store.writeAuditLog(entry);
+      await this.store.writeAuditLog(entry);
     } catch {
       // Never let audit failures cascade.
       return null;
@@ -117,20 +117,20 @@ export class AuditService {
     };
   }
 
-  list(filter: AuditListFilter = {}): {
+  async list(filter: AuditListFilter = {}): Promise<{
     items: AuditLogEntry[];
     total: number;
     page: number;
     pageSize: number;
-  } {
-    return this.store.listAuditLogs(filter);
+  }> {
+    return await this.store.listAuditLogs(filter);
   }
 
-  purge(options: { before: string }): number {
-    return this.store.pruneAuditLogs(options);
+  async purge(options: { before: string }): Promise<number> {
+    return await this.store.pruneAuditLogs(options);
   }
 
-  exportCsv(filter: AuditListFilter = {}): string {
+  async exportCsv(filter: AuditListFilter = {}): Promise<string> {
     const pageSize = Math.min(500, filter.pageSize ?? 500);
     let page = 1;
     const rows: string[] = [];
@@ -155,7 +155,7 @@ export class AuditService {
       ].join(",")
     );
     while (true) {
-      const result = this.store.listAuditLogs({ ...filter, page, pageSize });
+      const result = await this.store.listAuditLogs({ ...filter, page, pageSize });
       if (!result.items.length) break;
       for (const item of result.items) {
         rows.push(

@@ -33,9 +33,9 @@ import type {
   McpServerProbeRecord,
   McpServerRecord,
   McpServerStatus,
-  McpToolSnapshotRecord,
-  SqliteStore
+  McpToolSnapshotRecord
 } from "../db/database.js";
+import type { Store } from "../db/store.js";
 
 type Logger = {
   info: (msg: string, fields?: Record<string, unknown>) => void;
@@ -137,7 +137,7 @@ export class McpProbeService {
   private readonly reprobeTimers = new Map<string, NodeJS.Timeout>();
 
   constructor(
-    private readonly store: SqliteStore,
+    private readonly store: Store,
     private readonly mcpRegistry: MCPRegistry,
     private readonly deps: {
       resolveSecret: (secretRef?: SecretReference) => Promise<string | undefined>;
@@ -145,7 +145,7 @@ export class McpProbeService {
       /** Phase 10.7 — what the sandbox launcher thinks of a stdio server (no process is started). */
       checkSandbox?: (config: MCPServerConfig) => McpSandboxStatus;
       /** Phase 10.7 — whose own connection probes a delegated server; null when nobody usable. */
-      delegatedProbeUser?: (server: McpServerRecord, requestedBy?: string | null) => string | null;
+      delegatedProbeUser?: (server: McpServerRecord, requestedBy?: string | null) => Promise<string | null>;
     },
     private readonly options: {
       /** Default interval for servers without an override; 0 disables the background loop. */
@@ -168,10 +168,13 @@ export class McpProbeService {
     const serverId = event.registryServerId;
     if (!serverId) return;
     if (this.reprobeTimers.has(serverId)) return;
+    const reprobe = async () => {
+      if (!(await this.store.getMcpServer(serverId))) return;
+      await this.probe(serverId);
+    };
     const timer = setTimeout(() => {
       this.reprobeTimers.delete(serverId);
-      if (!this.store.getMcpServer(serverId)) return;
-      this.probe(serverId).catch((err) => {
+      reprobe().catch((err) => {
         this.logger?.warn("MCP re-probe after list_changed failed", {
           serverId,
           error: err instanceof Error ? err.message : String(err)
@@ -217,9 +220,9 @@ export class McpProbeService {
   /** Probe every enabled server whose interval has elapsed. Leader only. */
   async tick(now = Date.now()): Promise<void> {
     if (!this.deps.isLeader()) return;
-    for (const server of this.store.listMcpServers()) {
+    for (const server of await this.store.listMcpServers()) {
       if (!server.probeEnabled || this.inFlight.has(server.id)) continue;
-      if (server.credentialMode === "delegated" && !this.deps.delegatedProbeUser?.(server)) continue;
+      if (server.credentialMode === "delegated" && !(await this.deps.delegatedProbeUser?.(server))) continue;
       const intervalMs = server.probeIntervalMs ?? this.options.defaultIntervalMs;
       if (intervalMs <= 0) continue;
       const lastMs = server.lastProbeAt ? Date.parse(server.lastProbeAt) : 0;
@@ -249,18 +252,18 @@ export class McpProbeService {
     return pending;
   }
 
-  latency(serverId: string, samples = 100): McpLatencyStats {
-    return latencyStats(this.store.listMcpServerProbes(serverId, samples));
+  async latency(serverId: string, samples = 100): Promise<McpLatencyStats> {
+    return latencyStats(await this.store.listMcpServerProbes(serverId, samples));
   }
 
   private async runProbe(serverId: string, requestedBy: string | null): Promise<McpProbeOutcome> {
-    const server = this.store.getMcpServer(serverId);
+    const server = await this.store.getMcpServer(serverId);
     if (!server) {
       throw new Error(`MCP server not found: ${serverId}`);
     }
     let serverConfig: MCPServerConfig = serverConfigFromRecord(server);
     if (server.credentialMode === "delegated") {
-      const userId = this.deps.delegatedProbeUser?.(server, requestedBy) ?? null;
+      const userId = (await this.deps.delegatedProbeUser?.(server, requestedBy)) ?? null;
       if (!userId) {
         throw new McpProbeSkippedError(
           `MCP server '${server.name}' uses each user's own account. Connect yours under My connections, then probe again.`
@@ -270,7 +273,7 @@ export class McpProbeService {
     }
     if (server.adapterId === "stdio_mcp" && this.deps.checkSandbox) {
       try {
-        this.store.setMcpServerSandboxStatus(server.id, this.deps.checkSandbox(serverConfig));
+        await this.store.setMcpServerSandboxStatus(server.id, this.deps.checkSandbox(serverConfig));
       } catch (err) {
         this.logger?.warn("MCP sandbox check failed", { serverId, error: err instanceof Error ? err.message : String(err) });
       }
@@ -322,7 +325,7 @@ export class McpProbeService {
     if (tools) {
       const entries = normalizeToolSnapshot(tools);
       const hash = hashToolSnapshot(entries);
-      const previous = server.currentSnapshotId ? this.store.getMcpToolSnapshot(server.currentSnapshotId) : null;
+      const previous = server.currentSnapshotId ? await this.store.getMcpToolSnapshot(server.currentSnapshotId) : null;
       if (!previous || previous.hash !== hash) {
         // The first snapshot is the baseline, so it is never breaking.
         const diff = previous ? diffToolSnapshots(previous.tools, entries) : { changes: [], breaking: false };
@@ -353,16 +356,16 @@ export class McpProbeService {
       error,
       snapshotId: tools ? snapshotId : null
     };
-    const status = deriveStatus([probe, ...this.store.listMcpServerProbes(serverId, STATUS_WINDOW - 1)]);
+    const status = deriveStatus([probe, ...await this.store.listMcpServerProbes(serverId, STATUS_WINDOW - 1)]);
 
-    this.store.recordMcpServerProbe({
+    await this.store.recordMcpServerProbe({
       probe,
       status,
       snapshot,
       keepProbes: this.options.keepProbes ?? 500
     });
     if (catalog) {
-      this.store.upsertMcpServerCatalog(serverId, catalog);
+      await this.store.upsertMcpServerCatalog(serverId, catalog);
     }
 
     if (snapshot?.breaking) {
@@ -372,7 +375,7 @@ export class McpProbeService {
       });
     }
 
-    const updated = this.store.getMcpServer(serverId);
+    const updated = await this.store.getMcpServer(serverId);
     if (!updated) {
       throw new Error(`MCP server disappeared during probe: ${serverId}`);
     }

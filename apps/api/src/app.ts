@@ -1,3 +1,4 @@
+import { filterAsync, mapAsync, someAsync } from "./async-array.js";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -90,7 +91,7 @@ import {
   type ReplayNodeHook
 } from "@ai-orchestrator/workflow-engine";
 import { loadDocuments, inferDocumentKind, type DocumentKind } from "./services/document-loader-service";
-import { SqliteStore, type McpServerRecord } from "./db/database";
+import { type McpServerRecord } from "./db/database";
 import { PostgresStore } from "./db/postgres-store.js";
 import { REPLAY_CAPTURE_DEFAULTS, type AppConfig } from "./config";
 import { SecretService } from "./services/secret-service";
@@ -103,6 +104,7 @@ import { EVAL_RUN_STALE_MS, EvalService, REPLAY_JOB_MAX_EXECUTIONS_DEFAULT, type
 import { JUDGE_PROMPT_MAX_CHARS } from "./services/eval-scorers";
 import { AuthService, type SafeUser, type UserRole } from "./services/auth-service";
 import { SchedulerService } from "./services/scheduler-service";
+import { RunWriteChains } from "./services/run-write-chains.js";
 import { NonRetryableQueueError, QueueService } from "./services/queue-service";
 import { TriggerService } from "./services/trigger-service";
 import { ApiKeyService } from "./services/api-key-service";
@@ -164,7 +166,7 @@ import { GuardService } from "./services/guard-service.js";
 import type { GuardSimulationRun } from "./services/guard-simulation-sink.js";
 import { startSseHeartbeat } from "./sse-heartbeat.js";
 import { createRunAccess, type RunAccessDenial } from "./run-access.js";
-import { ProjectNotEmptyError } from "./db/store-errors.js";
+import { ProjectNotEmptyError, rethrowStoreNotImplemented, StoreNotImplementedError } from "./db/store-errors.js";
 import { createRunScope, type SecretScope } from "./run-scope.js";
 import {
   CODE_SANDBOX_INITIALISING,
@@ -211,6 +213,8 @@ import {
   resolveMcpOAuthRedirectUri
 } from "./services/mcp-oauth-service.js";
 import { isInternalSecretProvider } from "./services/secret-service.js";
+import type { Store } from "./db/store.js";
+import { storeImplements } from "./db/store-support.js";
 
 interface Tier1IntegrationSpec {
   id: string;
@@ -617,24 +621,24 @@ function normalizeWorkflowIdCandidate(value: string): string {
  * or release history a deleted workflow left behind (a new, unrelated
  * workflow must not inherit them).
  */
-function workflowIdTaken(store: SqliteStore, id: string): boolean {
-  if (store.getWorkflow(id)) return true;
+async function workflowIdTaken(store: Store, id: string): Promise<boolean> {
+  if (await store.getWorkflow(id)) return true;
   try {
-    return store.getReleaseGate(id) !== null || store.listWorkflowReleases(id, 1).length > 0;
+    return await store.getReleaseGate(id) !== null || (await store.listWorkflowReleases(id, 1)).length > 0;
   } catch {
     return false;
   }
 }
 
-function makeUniqueWorkflowId(store: SqliteStore, preferredId: string): string {
+async function makeUniqueWorkflowId(store: Store, preferredId: string): Promise<string> {
   const base = normalizeWorkflowIdCandidate(preferredId);
-  if (!workflowIdTaken(store, base)) {
+  if (!await workflowIdTaken(store, base)) {
     return base;
   }
 
   for (let index = 2; index <= 10_000; index += 1) {
     const candidate = `${base}-${index}`;
-    if (!workflowIdTaken(store, candidate)) {
+    if (!await workflowIdTaken(store, candidate)) {
       return candidate;
     }
   }
@@ -840,7 +844,7 @@ function isLocalDevOrigin(origin: string): boolean {
 }
 
 /** Phase 15.4 — which version a lookup sees: the draft by default, the published one for production routes. */
-type WorkflowLoader = (id: string) => Workflow | null;
+type WorkflowLoader = (id: string) => Promise<Workflow | null>;
 
 /**
  * Picks the workflow for the signed-in compat webhook routes. `canUse` hides
@@ -848,16 +852,16 @@ type WorkflowLoader = (id: string) => Workflow | null;
  * fallback pick all skip them, so they read as absent.
  */
 async function selectWebhookWorkflow(
-  store: SqliteStore,
+  store: Store,
   workflowId?: string,
   webhookPath?: string,
   webhookMethod = "POST",
-  canUse: (workflow: Workflow) => boolean = () => true,
-  load: WorkflowLoader = (id) => store.getWorkflow(id)
+  canUse: (workflow: Workflow) => boolean | Promise<boolean> = () => true,
+  load: WorkflowLoader = async (id) => await store.getWorkflow(id)
 ): Promise<Workflow | null> {
   if (workflowId) {
-    const workflow = load(workflowId);
-    return workflow && canUse(workflow) ? workflow : null;
+    const workflow = await load(workflowId);
+    return workflow && await canUse(workflow) ? workflow : null;
   }
 
   if (webhookPath) {
@@ -865,11 +869,11 @@ async function selectWebhookWorkflow(
     return match?.workflow ?? null;
   }
 
-  const workflows = store.listWorkflows();
+  const workflows = await store.listWorkflows();
   let firstUsable: Workflow | null = null;
   for (const workflowSummary of workflows) {
-    const workflow = load(workflowSummary.id);
-    if (!workflow || !canUse(workflow)) {
+    const workflow = await load(workflowSummary.id);
+    if (!workflow || !await canUse(workflow)) {
       continue;
     }
     firstUsable ??= workflow;
@@ -992,16 +996,16 @@ function listWebhookEndpoints(workflow: Workflow): WebhookEndpoint[] {
 }
 
 async function listWebhookEndpointMatchesByPath(
-  store: SqliteStore,
+  store: Store,
   path: string,
-  load: WorkflowLoader = (id) => store.getWorkflow(id)
+  load: WorkflowLoader = async (id) => await store.getWorkflow(id)
 ): Promise<Array<{ workflowId: string; workflowName: string; nodeId: string; path: string; method: string }>> {
   const normalizedPath = normalizeWebhookPath(path, "").toLowerCase();
   const matches: Array<{ workflowId: string; workflowName: string; nodeId: string; path: string; method: string }> = [];
 
-  const workflows = store.listWorkflows();
+  const workflows = await store.listWorkflows();
   for (const workflowSummary of workflows) {
-    const workflow = load(workflowSummary.id);
+    const workflow = await load(workflowSummary.id);
     if (!workflow) {
       continue;
     }
@@ -1025,13 +1029,13 @@ async function listWebhookEndpointMatchesByPath(
 }
 
 /** Phase 10.1 — every node that points at a registry server, for the detail page and delete guard. */
-function listMcpServerUsages(
-  store: SqliteStore,
+async function listMcpServerUsages(
+  store: Store,
   registryServerId: string
-): Array<{ workflowId: string; workflowName: string; nodeId: string; nodeName: string; nodeType: string }> {
+): Promise<Array<{ workflowId: string; workflowName: string; nodeId: string; nodeName: string; nodeType: string }>> {
   const usages: Array<{ workflowId: string; workflowName: string; nodeId: string; nodeName: string; nodeType: string }> = [];
-  for (const summary of store.listWorkflows()) {
-    const workflow = store.getWorkflow(summary.id);
+  for (const summary of await store.listWorkflows()) {
+    const workflow = await store.getWorkflow(summary.id);
     if (!workflow) continue;
     for (const node of workflow.nodes) {
       const config = (node.config ?? {}) as Record<string, unknown>;
@@ -1059,14 +1063,14 @@ function listMcpServerUsages(
 }
 
 async function listAllWebhookEndpoints(
-  store: SqliteStore,
-  load: WorkflowLoader = (id) => store.getWorkflow(id)
+  store: Store,
+  load: WorkflowLoader = async (id) => await store.getWorkflow(id)
 ): Promise<Array<{ workflowId: string; workflowName: string; nodeId: string; path: string; method: string }>> {
   const endpoints: Array<{ workflowId: string; workflowName: string; nodeId: string; path: string; method: string }> = [];
-  const workflows = store.listWorkflows();
+  const workflows = await store.listWorkflows();
 
   for (const workflowSummary of workflows) {
-    const workflow = load(workflowSummary.id);
+    const workflow = await load(workflowSummary.id);
     if (!workflow) {
       continue;
     }
@@ -1086,19 +1090,19 @@ async function listAllWebhookEndpoints(
 }
 
 async function selectWebhookByPath(
-  store: SqliteStore,
+  store: Store,
   path: string,
   method: string,
-  canUse: (workflow: Workflow) => boolean = () => true,
-  load: WorkflowLoader = (id) => store.getWorkflow(id)
+  canUse: (workflow: Workflow) => boolean | Promise<boolean> = () => true,
+  load: WorkflowLoader = async (id) => await store.getWorkflow(id)
 ): Promise<{ workflow: Workflow; endpoint: WebhookEndpoint } | null> {
   const normalizedPath = normalizeWebhookPath(path, "").toLowerCase();
   const normalizedMethod = normalizeWebhookMethod(method);
 
-  const workflows = store.listWorkflows();
+  const workflows = await store.listWorkflows();
   for (const workflowSummary of workflows) {
-    const workflow = load(workflowSummary.id);
-    if (!workflow || !canUse(workflow)) {
+    const workflow = await load(workflowSummary.id);
+    if (!workflow || !await canUse(workflow)) {
       continue;
     }
 
@@ -1160,7 +1164,7 @@ async function verifyWebhookRequestAuth(input: {
   headers: Record<string, unknown>;
   rawBody: string;
   endpointKey: string;
-  store: SqliteStore;
+  store: Store;
   secretService: SecretService;
 }): Promise<{ ok: true } | { ok: false; statusCode: 401 | 403; message: string }> {
   const { security } = input;
@@ -1249,22 +1253,22 @@ async function verifyWebhookRequestAuth(input: {
     };
   }
 
-  input.store.clearExpiredWebhookSecurityState(new Date(nowMs).toISOString());
+  await input.store.clearExpiredWebhookSecurityState(new Date(nowMs).toISOString());
   const replayFingerprint = computeSha256Hex(`${input.endpointKey}|${timestampHeaderValue}|${rawSignature}`);
-  if (input.store.hasWebhookReplayKey(replayFingerprint)) {
+  // One insert claims the fingerprint: of two copies of a request arriving together, only the first gets through.
+  const replayExpiry = new Date(nowMs + toleranceMs).toISOString();
+  const claimed = await input.store.saveWebhookReplayKey({
+    replayKey: replayFingerprint,
+    endpointKey: input.endpointKey,
+    expiresAt: replayExpiry
+  });
+  if (!claimed) {
     return {
       ok: false,
       statusCode: 403,
       message: "Webhook replay detected"
     };
   }
-
-  const replayExpiry = new Date(nowMs + toleranceMs).toISOString();
-  input.store.saveWebhookReplayKey({
-    replayKey: replayFingerprint,
-    endpointKey: input.endpointKey,
-    expiresAt: replayExpiry
-  });
 
   return { ok: true };
 }
@@ -1309,9 +1313,9 @@ export interface CreateAppOptions {
   codeSandboxDeps?: Parameters<typeof resolveCodeSandboxPlan>[1];
 }
 
-export function createApp(
+export async function createApp(
   config: AppConfig,
-  store: SqliteStore,
+  store: Store,
   secretService: SecretService,
   authService: AuthService,
   schedulerService?: SchedulerService,
@@ -1345,10 +1349,10 @@ export function createApp(
     autoApply: config.GUARD_AUTO_APPLY,
     logger: (message, metadata) => app.log.warn(metadata ?? {}, message),
     // Phase 16 — destination rows are read when a run first needs them (SQLite only; none on Postgres).
-    destinationRows: () => ((store as object) instanceof PostgresStore ? [] : store.listDataDestinations()),
+    destinationRows: async () => ((store as object) instanceof PostgresStore ? [] : await store.listDataDestinations()),
     ...(runtimeMasterKey.length === 32 ? { surrogateKey: deriveCaptureSurrogateKey(runtimeMasterKey) } : {})
   });
-  guardService.ensureBuiltIns();
+  await guardService.ensureBuiltIns();
   const connectorRegistry = createDefaultConnectorRegistry();
   // Phase 10.7 — stdio sandboxes. The instance label is derived from the
   // database location so the startup sweep only ever sees this deployment's
@@ -1358,7 +1362,7 @@ export function createApp(
     required: config.MCP_SANDBOX_REQUIRED,
     runtime: config.MCP_SANDBOX_RUNTIME,
     allowedMountRoots: config.MCP_SANDBOX_ALLOWED_MOUNT_ROOTS.split(",").map((entry) => entry.trim()).filter(Boolean),
-    instanceLabel: crypto.createHash("sha256").update(`l2m-sandbox:${store.storageLocation()}`).digest("hex").slice(0, 16)
+    instanceLabel: crypto.createHash("sha256").update(`l2m-sandbox:${await store.storageLocation()}`).digest("hex").slice(0, 16)
   };
   const mcpSandboxLauncher = new ContainerSandboxLauncher(mcpSandboxPolicy, {
     onWarning: (message, fields) => app.log.warn(fields ?? {}, message)
@@ -1388,7 +1392,7 @@ export function createApp(
       cpus: config.CODE_SANDBOX_CPUS,
       pidsLimit: config.CODE_SANDBOX_PIDS_LIMIT,
       startupMs: config.CODE_SANDBOX_STARTUP_MS,
-      instanceLabel: crypto.createHash("sha256").update(`l2m-code:${store.storageLocation()}`).digest("hex").slice(0, 16),
+      instanceLabel: crypto.createHash("sha256").update(`l2m-code:${await store.storageLocation()}`).digest("hex").slice(0, 16),
       pythonInProcess: config.CODE_SANDBOX_PYTHON_IN_PROCESS,
       pythonUid: config.CODE_SANDBOX_PYTHON_UID,
       pythonGid: config.CODE_SANDBOX_PYTHON_GID,
@@ -1414,11 +1418,11 @@ export function createApp(
   // Phase 10.7 — rate limits, concurrency caps and circuit breakers. State is
   // in memory, per API instance, keyed by registry server id; it is shared by
   // workflow runs, the gateway and the playground of this process.
-  const recordBreakerTransition = (transition: McpBreakerTransition) => {
-    const server = store.getMcpServer(transition.serverId);
+  const recordBreakerTransition = async (transition: McpBreakerTransition) => {
+    const server = await store.getMcpServer(transition.serverId);
     const eventType =
       transition.to === "open" ? "mcp_server.breaker_opened" : transition.to === "half_open" ? "mcp_server.breaker_half_open" : "mcp_server.breaker_closed";
-    auditService.record({
+    await auditService.record({
       category: "system",
       eventType,
       action: "update",
@@ -1468,10 +1472,10 @@ export function createApp(
     }
     return null;
   };
-  const sandboxInUse = () =>
+  const sandboxInUse = async () =>
     mcpSandboxPolicy.defaultMode === "container" ||
-    store.listMcpServers().some((server) => server.adapterId === "stdio_mcp" && server.sandbox?.mode === "container");
-  if (sandboxInUse()) {
+    (await store.listMcpServers()).some((server) => server.adapterId === "stdio_mcp" && server.sandbox?.mode === "container");
+  if (await sandboxInUse()) {
     void sweepSandboxContainers({ policy: mcpSandboxPolicy })
       .then((swept) => {
         if (swept.removed > 0) app.log.info({ removed: swept.removed, runtime: swept.runtime }, "Removed leftover MCP sandbox containers");
@@ -1491,8 +1495,8 @@ export function createApp(
     redirectUri: resolveMcpOAuthRedirectUri(config),
     stateTtlMs: config.MCP_OAUTH_STATE_TTL_MS,
     refreshSkewMs: config.MCP_OAUTH_REFRESH_SKEW_MS,
-    onAudit: (event) => {
-      auditService.record({
+    onAudit: async (event) => {
+      await auditService.record({
         category: "system",
         eventType: event.eventType,
         action: "update",
@@ -1510,15 +1514,15 @@ export function createApp(
     runtimeGuard: mcpRuntimeGuard,
     // Phase 10.8 — snapshot mock servers read accepted snapshots and cassettes from the store.
     snapshots: {
-      loadSnapshot: (sourceServerId) => {
-        const server = store.getMcpServer(sourceServerId);
-        const file = server ? buildSnapshotFile(store, server) : null;
+      loadSnapshot: async (sourceServerId) => {
+        const server = await store.getMcpServer(sourceServerId);
+        const file = server ? await buildSnapshotFile(store, server) : null;
         if (!file) {
           throw new Error(`MCP server '${sourceServerId}' has no accepted schema snapshot yet. Probe it first.`);
         }
         return file;
       },
-      loadCassette: (cassetteId) => store.getMcpCassette(cassetteId)?.cassette ?? null
+      loadCassette: async (cassetteId) => (await store.getMcpCassette(cassetteId))?.cassette ?? null
     }
   });
   // Phase 10.8 — record and replay of MCP calls.
@@ -1553,8 +1557,8 @@ export function createApp(
     : null;
   // Phase 10.1 — nodes that reference the MCP server registry resolve here at
   // run time, so a registry edit applies to every workflow using the server.
-  const resolveRegisteredMcpServer = (registryServerId: string, actor?: SafeUser | null): MCPServerConfig => {
-    const server = store.getMcpServer(registryServerId);
+  const resolveRegisteredMcpServer = async (registryServerId: string, actor?: SafeUser | null): Promise<MCPServerConfig> => {
+    const server = await store.getMcpServer(registryServerId);
     if (!server) {
       throw new Error(`MCP server '${registryServerId}' is not in the server registry. Pick a registered server on the node.`);
     }
@@ -1569,12 +1573,12 @@ export function createApp(
   };
   // Phase 10.2 — MCP tool policy. Rules and overrides are read when an agent
   // or MCP Tool node starts, so an admin's change applies to the next node.
-  const loadMcpToolPolicy = () => ({
-    rules: store.listMcpToolPolicies(),
-    classifications: store.listMcpToolClassifications()
+  const loadMcpToolPolicy = async () => ({
+    rules: await store.listMcpToolPolicies(),
+    classifications: await store.listMcpToolClassifications()
   });
-  const resolveToolPolicySubject = (workflowId: string, actor?: SafeUser | null): McpToolPolicySubject =>
-    resolveMcpToolPolicySubject(store, workflowId, actor);
+  const resolveToolPolicySubject = async (workflowId: string, actor?: SafeUser | null): Promise<McpToolPolicySubject> =>
+    await resolveMcpToolPolicySubject(store, workflowId, actor);
   const activeExecutions = new Map<
     string,
     {
@@ -1586,14 +1590,14 @@ export function createApp(
     }
   >();
 
-  const pruneExecutionHistory = (reason: "startup" | "interval" | "write") => {
+  const pruneExecutionHistory = async (reason: "startup" | "interval" | "write") => {
     const retentionDays = config.EXECUTION_HISTORY_RETENTION_DAYS;
     if (!Number.isFinite(retentionDays) || retentionDays <= 0) {
       return 0;
     }
     const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000).toISOString();
     try {
-      const deleted = store.pruneExecutionHistory({ before: cutoff });
+      const deleted = await store.pruneExecutionHistory({ before: cutoff });
       if (deleted > 0) {
         app.log.info({ deleted, cutoff, retentionDays, reason }, "Pruned execution history");
       }
@@ -1614,13 +1618,12 @@ export function createApp(
 
   // Phase 15.2 — finished eval runs and replay jobs, on the same timer. The
   // newest run of every set is kept; a store without eval storage skips it.
-  const pruneEvalRuns = (reason: "startup" | "interval") => {
+  const pruneEvalRuns = async (reason: "startup" | "interval") => {
     const retentionDays = config.EVAL_RUN_RETENTION_DAYS;
-    const evalStore = store as unknown as { pruneEvalRuns?: (input: { before: string }) => number };
-    if (retentionDays <= 0 || typeof evalStore.pruneEvalRuns !== "function") return 0;
+    if (retentionDays <= 0 || !storeImplements(store, "pruneEvalRuns")) return 0;
     const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000).toISOString();
     try {
-      const deleted = evalStore.pruneEvalRuns({ before: cutoff });
+      const deleted = await store.pruneEvalRuns({ before: cutoff });
       if (deleted > 0) app.log.info({ deleted, cutoff, retentionDays, reason }, "Pruned eval runs and replay jobs");
       return deleted;
     } catch (error) {
@@ -1632,12 +1635,13 @@ export function createApp(
     }
   };
 
-  pruneExecutionHistory("startup");
-  pruneEvalRuns("startup");
+  await pruneExecutionHistory("startup");
+  await pruneEvalRuns("startup");
   const retentionTimer = config.EXECUTION_HISTORY_RETENTION_DAYS > 0 || config.EVAL_RUN_RETENTION_DAYS > 0
-    ? setInterval(() => {
-        pruneExecutionHistory("interval");
-        pruneEvalRuns("interval");
+    // promise-ok: both prunes catch and log their own errors
+    ? setInterval(async () => {
+        await pruneExecutionHistory("interval");
+        await pruneEvalRuns("interval");
       }, config.EXECUTION_HISTORY_PRUNE_INTERVAL_MS)
     : null;
   if (retentionTimer) {
@@ -1651,9 +1655,7 @@ export function createApp(
   authService.startSessionCleanup();
   app.addHook("onClose", async () => {
     authService.stopSessionCleanup();
-    if (typeof (store as { close?: () => void }).close === "function") {
-      (store as { close: () => void }).close();
-    }
+    await store.close();
   });
 
   type WorkflowExecutionEventHooks = {
@@ -1676,7 +1678,7 @@ export function createApp(
     /** Phase 10.5 — an `elicitation/create` request started waiting for a person, or was settled. */
     onMcpElicitation?: (event: { phase: "created" | "settled"; elicitation: McpElicitationView }) => Promise<void> | void;
   };
-  type ExecutionHistoryRecord = Parameters<SqliteStore["saveExecutionHistory"]>[0];
+  type ExecutionHistoryRecord = Parameters<Store["saveExecutionHistory"]>[0];
 
   const registerActiveExecution = (input: {
     executionId: string;
@@ -1748,7 +1750,12 @@ export function createApp(
     replayCapture?.abandon(pending.ticket, outcome);
   };
 
-  const persistExecutionHistoryRecord = (
+  /** Each run's progress writes, in order; the final write and the end of the run settle them (see RunWriteChains). */
+  const progressWrites = new RunWriteChains((executionId, error) => {
+    app.log.error({ executionId, error: secretService.redact(error instanceof Error ? error.message : String(error)) }, "Progress write failed");
+  });
+
+  const persistExecutionHistoryRecord = async (
     record: ExecutionHistoryRecord,
     meta: {
       phase: "progress" | "final";
@@ -1757,7 +1764,8 @@ export function createApp(
       triggerType?: string;
       status: string;
     }
-  ): boolean => {
+  ): Promise<boolean> => {
+    if (meta.phase === "final") await progressWrites.settle(meta.executionId);
     const active = activeExecutions.get(meta.executionId);
     // A stopped run keeps the canceled record the cancel route wrote. A
     // timed-out run is still saved: it ends as an error with its node results.
@@ -1770,10 +1778,21 @@ export function createApp(
       return false;
     }
     try {
-      store.saveExecutionHistory(record);
+      // A progress write never replaces a finished run's record, and a final write never replaces a cancel that
+      // committed after the abort check above (the store refuses both), whatever order writes commit in.
+      const written = await store.saveExecutionHistory(record, meta.phase === "progress" ? { unlessFinished: true } : { unlessCanceled: true });
+      if (!written) {
+        // Refused: the stored record (a cancel, or a finished run) stays, so this run is not stored. Like the
+        // aborted branch above: no capture, no metrics, and the caller skips the release and run context.
+        if (meta.phase === "final") {
+          dropCapture(meta.executionId, "skipped_not_stored");
+          metricsService.setActiveExecutions(activeExecutions.size);
+        }
+        return false;
+      }
       if (meta.phase === "final") {
         handOffCapture(meta.executionId);
-        pruneExecutionHistory("write");
+        await pruneExecutionHistory("write");
         // Phase 15.1 — replays are experiments, not traffic: they stay out of execution metrics and SLOs.
         if (meta.triggerType !== REPLAY_TRIGGER_TYPE) {
           const status = meta.status === "success" ? "success" : meta.status === "canceled" ? "canceled" : "error";
@@ -1799,9 +1818,9 @@ export function createApp(
     }
   };
 
-  const deleteWorkflowExecutionSafely = (executionId: string, workflowId: string) => {
+  const deleteWorkflowExecutionSafely = async (executionId: string, workflowId: string) => {
     try {
-      store.deleteWorkflowExecution(executionId);
+      await store.deleteWorkflowExecution(executionId);
     } catch (error) {
       app.log.warn(
         {
@@ -1824,7 +1843,7 @@ export function createApp(
   // Bounded: a run whose history is never persisted must not grow it forever.
   const runReleases = new Map<string, { channel: ReleaseChannel; version: number | null }>();
 
-  const runWorkflowExecution = async (input: {
+  const runWorkflowExecutionUnsettled = async (input: {
     workflow: Workflow;
     startNodeId?: string;
     runMode?: "workflow" | "single_node";
@@ -1923,7 +1942,7 @@ export function createApp(
     // Phase 15.6 — sampled for production capture: the run records like a "Record calls" run.
     const captureTicket =
       replayCapture && input.executionId
-        ? replayCapture.decide({
+        ? await replayCapture.decide({
             workflow: input.workflow,
             channel,
             triggerType: input.triggerType,
@@ -1953,7 +1972,7 @@ export function createApp(
           triggeredBy: input.triggeredBy
         })
       : undefined;
-    const projectVars = variablesService.resolveForProject(input.workflow.projectId ?? "default");
+    const projectVars = await variablesService.resolveForProject(input.workflow.projectId ?? "default");
     const mergedWorkflow: Workflow = {
       ...input.workflow,
       variables: { ...projectVars, ...(input.workflow.variables ?? {}) }
@@ -1997,7 +2016,7 @@ export function createApp(
           executionTimeoutMs,
           triggerType: input.triggerType,
           triggeredBy: input.triggeredBy,
-          toolPolicySubject: input.policySubject ?? resolveToolPolicySubject(input.workflow.id, input.policyActor),
+          toolPolicySubject: input.policySubject ?? await resolveToolPolicySubject(input.workflow.id, input.policyActor),
           resumeState: input.resumeState,
           approvalDecision: input.approvalDecision,
           // Phase 16 — where the run's input came from, as the server knows it (the capture rules, or the recording a
@@ -2052,8 +2071,8 @@ export function createApp(
           onMcpElicitation: input.replay
             ? input.replay.sandbox.onMcpElicitation
             : input.executionId
-            ? (elicitation) =>
-                mcpElicitationService.ask({
+            ? async (elicitation) =>
+                await mcpElicitationService.ask({
                   request: { message: elicitation.message, requestedSchema: elicitation.requestedSchema },
                   executionId: input.executionId!,
                   workflowId: mergedWorkflow.id,
@@ -2061,7 +2080,7 @@ export function createApp(
                   nodeId: elicitation.nodeId,
                   serverId: elicitation.serverId,
                   registryServerId: elicitation.registryServerId,
-                  serverName: elicitation.registryServerId ? store.getMcpServer(elicitation.registryServerId)?.name : undefined,
+                  serverName: elicitation.registryServerId ? (await store.getMcpServer(elicitation.registryServerId))?.name : undefined,
                   toolName: elicitation.toolName,
                   triggerType: input.triggerType,
                   createdBy: input.elicitationsForWorkflow ? null : input.policyActor?.id ?? null,
@@ -2070,7 +2089,7 @@ export function createApp(
                 })
             : undefined,
           persistPausedExecution: input.replay ? undefined : async (paused) => {
-            store.saveWorkflowExecutionState({
+            await store.saveWorkflowExecutionState({
               id: paused.executionId,
               workflowId: paused.workflowId,
               workflowName: paused.workflowName,
@@ -2089,7 +2108,7 @@ export function createApp(
             // Phase 11.2 — who may decide, when it expires; audited and notified.
             if (!approvalsSupported) return;
             try {
-              approvalService.recordPause({
+              await approvalService.recordPause({
                 executionId: paused.executionId,
                 workflowId: paused.workflowId,
                 workflowName: paused.workflowName,
@@ -2124,8 +2143,8 @@ export function createApp(
             const failingWorkflow =
               payload.sourceWorkflowId === mergedWorkflow.id
                 ? mergedWorkflow
-                : (channel === "production" ? productionWorkflow(payload.sourceWorkflowId) : store.getWorkflow(payload.sourceWorkflowId)) ?? mergedWorkflow;
-            const errorTarget = runScope.errorWorkflowFor(failingWorkflow, payload.errorWorkflowId, channel);
+                : (channel === "production" ? await productionWorkflow(payload.sourceWorkflowId) : await store.getWorkflow(payload.sourceWorkflowId)) ?? mergedWorkflow;
+            const errorTarget = await runScope.errorWorkflowFor(failingWorkflow, payload.errorWorkflowId, channel);
             if ("error" in errorTarget) {
               app.log.warn({ errorWorkflowId: payload.errorWorkflowId, sourceWorkflowId: payload.sourceWorkflowId, reason: errorTarget.error }, "Error workflow not run");
               return;
@@ -2147,7 +2166,7 @@ export function createApp(
                     timestamp: payload.timestamp
                   },
                   triggerType: "error",
-                  toolPolicySubject: resolveToolPolicySubject(errorWf.id),
+                  toolPolicySubject: await resolveToolPolicySubject(errorWf.id),
                   executionTimeoutMs: config.WORKFLOW_EXECUTION_TIMEOUT_MS
                 },
                 {
@@ -2213,9 +2232,17 @@ export function createApp(
       clearTimeout(executionTimeoutHandle);
       if (captureTicket && !captureHandedOff) replayCapture?.abandon(captureTicket, "failed");
       if (input.executionId) {
-        mcpElicitationService.releaseExecution(input.executionId, "The run ended before the request was answered.");
+        await mcpElicitationService.releaseExecution(input.executionId, "The run ended before the request was answered.");
       }
       releaseActiveExecution(input.executionId, controller);
+    }
+  };
+  /** A run's progress writes are settled when it ends, whatever the outcome (a paused or failed run has no final write). */
+  const runWorkflowExecution = async (input: Parameters<typeof runWorkflowExecutionUnsettled>[0]) => {
+    try {
+      return await runWorkflowExecutionUnsettled(input);
+    } finally {
+      if (input.executionId) await progressWrites.settle(input.executionId);
     }
   };
 
@@ -2223,7 +2250,7 @@ export function createApp(
    * Phase 10.8 — after a recorded run, store its cassette; after a replay,
    * attach the replay report and fail a strict replay that diverged.
    */
-  const finishMcpCassettePlan = <T extends Awaited<ReturnType<typeof runWorkflowExecution>>>(
+  const finishMcpCassettePlan = async <T extends Awaited<ReturnType<typeof runWorkflowExecution>>>(
     plan: McpCassetteRunPlan | undefined,
     result: T,
     meta: {
@@ -2234,12 +2261,12 @@ export function createApp(
       evalRunId?: string | null;
       fixtureId?: string | null;
     }
-  ): T => {
+  ): Promise<T> => {
     if (!plan) return result;
     let next: T = result;
     if (plan.recorder) {
       try {
-        const summary = mcpCassetteService.persist({
+        const summary = await mcpCassetteService.persist({
           plan,
           executionId: meta.executionId,
           workflow: meta.workflow,
@@ -2363,18 +2390,22 @@ export function createApp(
     };
   };
 
-  const recordMcpToolCalls = (executionId: string, workflow: Workflow, nodeResults: unknown) => {
+  const recordMcpToolCalls = async (executionId: string, workflow: Workflow, nodeResults: unknown) => {
     try {
+      // Adapters of the registry entries, read once, for direct MCP Tool nodes that failed before reporting theirs.
+      const adapters = workflow.nodes.some((node) => node.type === "mcp_tool")
+        ? new Map((await store.listMcpServers()).map((server) => [server.id, server.adapterId]))
+        : new Map<string, string>();
       const calls = extractMcpToolCalls({
         executionId,
         workflow,
         nodeResults,
         priceTurn: (providerId, model, inputTokens, outputTokens, cachedInputTokens) =>
           usageService.estimateCostUsd(providerId, model, inputTokens, outputTokens, cachedInputTokens),
-        registryAdapterId: (registryServerId) => store.getMcpServer(registryServerId)?.adapterId,
+        registryAdapterId: (registryServerId) => adapters.get(registryServerId),
         redact: (value) => String(secretService.redact(value))
       });
-      store.replaceMcpToolCallsForExecution(executionId, calls);
+      await store.replaceMcpToolCallsForExecution(executionId, calls);
     } catch (err) {
       app.log.warn(
         { error: secretService.redact(err instanceof Error ? err.message : String(err)), executionId },
@@ -2383,7 +2414,7 @@ export function createApp(
     }
   };
 
-  const persistExecutionHistory = (input: {
+  const persistExecutionHistory = async (input: {
     executionId: string;
     workflow: Workflow;
     result: Awaited<ReturnType<typeof runWorkflowExecution>>;
@@ -2408,7 +2439,7 @@ export function createApp(
       return;
     }
 
-    const persisted = persistExecutionHistoryRecord({
+    const persisted = await persistExecutionHistoryRecord({
       id: input.executionId,
       workflowId: input.workflow.id,
       workflowName: input.workflow.name,
@@ -2435,17 +2466,17 @@ export function createApp(
     runReleases.delete(input.executionId);
     if (persisted && ranOn !== undefined && releaseService.available) {
       try {
-        store.setExecutionRelease(input.executionId, ranOn.channel, ranOn.version);
+        await store.setExecutionRelease(input.executionId, ranOn.channel, ranOn.version);
       } catch (error) {
         app.log.warn({ executionId: input.executionId, error: error instanceof Error ? error.message : String(error) }, "Failed to record the published version a run ran");
       }
     }
 
     if (persisted) {
-      deleteWorkflowExecutionSafely(input.executionId, input.workflow.id);
+      await deleteWorkflowExecutionSafely(input.executionId, input.workflow.id);
       // Phase 11.1 — what the run's signed manifest describes: the workflow as it ran and its MCP servers.
       try {
-        auditBundleService.captureRunContext(input.executionId, input.workflow);
+        await auditBundleService.captureRunContext(input.executionId, input.workflow);
       } catch (error) {
         app.log.warn(
           { executionId: input.executionId, error: secretService.redact(error instanceof Error ? error.message : String(error)) },
@@ -2454,7 +2485,7 @@ export function createApp(
       }
     }
 
-    auditService.record({
+    await auditService.record({
       category: "execution",
       eventType: `execution.${input.result.status}`,
       action: "execute",
@@ -2486,7 +2517,7 @@ export function createApp(
           nodeOutputs[r.nodeId] = r.output;
         }
       }
-      const usageResult = usageService.recordExecution({
+      const usageResult = await usageService.recordExecution({
         executionId: input.executionId,
         workflowId: input.workflow.id,
         workflowName: input.workflow.name,
@@ -2511,7 +2542,7 @@ export function createApp(
       // replay's spend is recorded above, but a replay sends no notifications:
       // the next real run that is over the threshold fires the alert.
       try {
-        if (input.triggerType !== REPLAY_TRIGGER_TYPE) budgetService.recordExecution({
+        if (input.triggerType !== REPLAY_TRIGGER_TYPE) await budgetService.recordExecution({
           executionId: input.executionId,
           workflowId: input.workflow.id,
           projectId: input.workflow.projectId ?? null,
@@ -2542,7 +2573,7 @@ export function createApp(
     // Phase 10.1 — one mcp_tool_calls row per MCP tool call in this run. A
     // replay's calls were answered from a recording, not by the servers.
     if (input.triggerType !== REPLAY_TRIGGER_TYPE) {
-      recordMcpToolCalls(input.executionId, input.workflow, input.result.nodeResults);
+      await recordMcpToolCalls(input.executionId, input.workflow, input.result.nodeResults);
     }
 
     app.log.info(
@@ -2596,9 +2627,24 @@ export function createApp(
         const activity = activityByNodeId.get(entry.nodeId);
         return activity?.length ? { ...entry, activity: [...activity] } : entry;
       });
-    const persistProgress = (completedAt?: string) => {
+    // This run's progress writes go through one chain (see progressWrites); a new hooks object for the same run
+    // (a resume) starts a new chain.
+    const chain = progressWrites.open(input.executionId);
+    const persistProgress = (completedAt?: string): Promise<void> => {
+      const record = progressRecord(completedAt);
+      return chain.enqueue(async () => {
+        await persistExecutionHistoryRecord(record, {
+          phase: "progress",
+          executionId: input.executionId,
+          workflowId: input.workflow.id,
+          triggerType: input.triggerType,
+          status: record.status
+        });
+      });
+    };
+    const progressRecord = (completedAt?: string): ExecutionHistoryRecord => {
       const effectiveStartedAt = startedAt ?? new Date().toISOString();
-      persistExecutionHistoryRecord({
+      return {
         id: input.executionId,
         workflowId: input.workflow.id,
         workflowName: input.workflow.name,
@@ -2614,13 +2660,7 @@ export function createApp(
         inputJson: redactSensitiveInput(input.requestInput),
         customData: input.customData,
         nodeResultsJson: snapshotNodeResults()
-      }, {
-        phase: "progress",
-        executionId: input.executionId,
-        workflowId: input.workflow.id,
-        triggerType: input.triggerType,
-        status: currentStatus
-      });
+      };
     };
 
     return {
@@ -2651,7 +2691,9 @@ export function createApp(
           output: existing?.output,
           error: existing?.error
         });
-        persistProgress();
+        // The progress write starts first and is awaited after the event is passed on, so events reach
+        // the stream in the order the engine emitted them (activity hooks are not awaited by the engine).
+        const persisted = persistProgress();
         try {
           await input.passthroughHooks?.onNodeStart?.(event);
         } catch (error) {
@@ -2666,6 +2708,7 @@ export function createApp(
             "Execution node-start hook failed"
           );
         }
+        await persisted;
       },
       onNodeComplete: async (event) => {
         const existing = nodeResultsById.get(event.nodeId);
@@ -2686,7 +2729,7 @@ export function createApp(
         if (event.status === "waiting_approval") {
           currentStatus = "waiting_approval";
         }
-        persistProgress(event.completedAt);
+        await persistProgress(event.completedAt);
         app.log.debug(
           {
             executionId: input.executionId,
@@ -2715,6 +2758,7 @@ export function createApp(
         }
       },
       onMcpProgress: async (event) => {
+        let persisted: Promise<unknown> | null = null;
         const { nodeId, ...progressEvent } = event;
         const snapshot: NodeProgressSnapshot = {
           ...progressEvent,
@@ -2728,7 +2772,7 @@ export function createApp(
           const nowMs = Date.now();
           if (nowMs - lastProgressPersistMs >= 1000) {
             lastProgressPersistMs = nowMs;
-            persistProgress();
+            persisted = persistProgress();
           }
         }
         try {
@@ -2744,8 +2788,10 @@ export function createApp(
             "Execution MCP-progress hook failed"
           );
         }
+        await persisted;
       },
       onNodeActivity: async (event) => {
+        let persisted: Promise<unknown> | null = null;
         const buffer = activityByNodeId.get(event.nodeId) ?? [];
         buffer.push(event);
         if (buffer.length > NODE_ACTIVITY_LIMIT) buffer.shift();
@@ -2754,7 +2800,7 @@ export function createApp(
           const nowMs = Date.now();
           if (nowMs - lastProgressPersistMs >= 1000) {
             lastProgressPersistMs = nowMs;
-            persistProgress();
+            persisted = persistProgress();
           }
         }
         try {
@@ -2770,6 +2816,7 @@ export function createApp(
             "Execution node-activity hook failed"
           );
         }
+        await persisted;
       },
       onLLMDelta: async (event) => {
         try {
@@ -2791,17 +2838,17 @@ export function createApp(
   };
 
   type ParsedWorkflowExecutePayload = z.infer<typeof workflowExecuteRequestSchema>;
-  const prepareWorkflowExecutionPayload = (
+  const prepareWorkflowExecutionPayload = async (
     payload: ParsedWorkflowExecutePayload,
     reply: FastifyReply,
     user: SafeUser
   ):
-    | {
+    Promise<| {
         payload: ParsedWorkflowExecutePayload;
         nodeOutputs: Record<string, unknown>;
         requestInput: Record<string, unknown>;
       }
-    | null => {
+    | null> => {
     const sourceExecutionId = typeof payload.sourceExecutionId === "string" && payload.sourceExecutionId.trim()
       ? payload.sourceExecutionId.trim()
       : undefined;
@@ -2809,9 +2856,9 @@ export function createApp(
     let replayNodeOutputs: Record<string, unknown> = {};
 
     if (sourceExecutionId) {
-      const sourceExecution = store.getExecutionHistory(sourceExecutionId);
+      const sourceExecution = await store.getExecutionHistory(sourceExecutionId);
       // A run the user cannot read is answered like a missing one.
-      if (!sourceExecution || !runAccess.run(user, sourceExecution, "workflow:read").ok) {
+      if (!sourceExecution || !(await runAccess.run(user, sourceExecution, "workflow:read")).ok) {
         reply.code(404);
         return null;
       }
@@ -2868,13 +2915,13 @@ export function createApp(
     firedAt: string;
   }) => {
     // Schedules are production traffic: the published version when there is one.
-    const workflow = productionWorkflow(input.workflowId);
+    const workflow = await productionWorkflow(input.workflowId);
     if (!workflow) {
       app.log.warn(
         {
           workflowId: input.workflowId,
           scheduleNodeId: input.scheduleNodeId,
-          reason: releaseService.productionRefusal(input.workflowId) ?? "not found"
+          reason: await releaseService.productionRefusal(input.workflowId) ?? "not found"
         },
         "Skipped scheduled execution because production has no workflow to run"
       );
@@ -2906,7 +2953,7 @@ export function createApp(
       captureInputOrigin: "scheduler"
     });
 
-    persistExecutionHistory({
+    await persistExecutionHistory({
       executionId,
       workflow,
       result,
@@ -2929,7 +2976,7 @@ export function createApp(
 
   if (schedulerService) {
     // A scheduler test double that only fires schedules has no loader.
-    schedulerService.setWorkflowLoader?.((workflowId) => productionWorkflow(workflowId));
+    schedulerService.setWorkflowLoader?.(async (workflowId) => await productionWorkflow(workflowId));
     schedulerService.setExecutionHandler((input) => executeScheduledWorkflow(input));
     app.addHook("onClose", async () => {
       schedulerService.stop();
@@ -2964,7 +3011,7 @@ export function createApp(
       // App triggers register from the production version (setWorkflowLoader below).
       channel: "production"
     });
-    persistExecutionHistory({
+    await persistExecutionHistory({
       executionId,
       workflow: input.workflow,
       result,
@@ -2975,7 +3022,7 @@ export function createApp(
   };
 
   if (triggerService) {
-    triggerService.setWorkflowLoader((workflowId) => productionWorkflow(workflowId));
+    triggerService.setWorkflowLoader(async (workflowId) => await productionWorkflow(workflowId));
     triggerService.setExecutionHandler(async (payload) => executeTriggeredWorkflow(payload));
     triggerService.setSecretResolver((ref) => secretService.resolveSecret(ref));
     triggerService.setOutboundGuard(outboundGuard, nodeDnsResolver);
@@ -2998,36 +3045,36 @@ export function createApp(
   const apiKeyService = new ApiKeyService(store, config.API_KEY_DEFAULT_EXPIRY_DAYS);
   const mfaService = new MfaService(store, config.SECRET_MASTER_KEY_BASE64, config.MFA_ISSUER);
   const rbacService = new RbacService(store, config.PROJECT_ISOLATION);
-  const isolationWarning = strictIsolationStartupWarning(config.PROJECT_ISOLATION, store.countProjectMemberships());
+  const isolationWarning = strictIsolationStartupWarning(config.PROJECT_ISOLATION, await store.countProjectMemberships());
   if (isolationWarning) app.log.warn(isolationWarning);
   const runAccess = createRunAccess({
-    getWorkflow: (id) => store.getWorkflow(id),
-    listWorkflows: () => store.listWorkflows(),
-    listProjectIds: () => store.listProjects().map((project) => project.id),
-    canAccessWorkflow: (user, workflow, permission) => rbacService.canAccessWorkflow(user, workflow, permission),
-    canInProject: (user, projectId, permission) => rbacService.can(user, projectId, permission),
-    listWorkflowIdsSharedToProject: (projectId) => store.listWorkflowsSharedToProject(projectId).map((share) => share.workflowId),
-    projectExists: (projectId) => Boolean(store.getProject(projectId))
+    getWorkflow: async (id) => await store.getWorkflow(id),
+    listWorkflows: async () => await store.listWorkflows(),
+    listProjectIds: async () => (await store.listProjects()).map((project) => project.id),
+    canAccessWorkflow: async (user, workflow, permission) => await rbacService.canAccessWorkflow(user, workflow, permission),
+    canInProject: async (user, projectId, permission) => await rbacService.can(user, projectId, permission),
+    listWorkflowIdsSharedToProject: async (projectId) => (await store.listWorkflowsSharedToProject(projectId)).map((share) => share.workflowId),
+    projectExists: async (projectId) => Boolean(await store.getProject(projectId))
   });
   // Phase 9.1 — built-in persistent vector store. A run sees the knowledge
   // bases of its own project and the shared ones without a project; any other
   // id reads as missing, for every method the engine calls.
   const knowledgeBaseStoreForRun = (workflowProjectId: string | null | undefined): KnowledgeBaseStore => {
     const projectId = workflowProjectId ?? DEFAULT_PROJECT_ID;
-    const visible = (id: string) => {
-      const kb = store.getKnowledgeBase(id);
+    const visible = async (id: string) => {
+      const kb = await store.getKnowledgeBase(id);
       return kb && (!kb.projectId || kb.projectId === projectId) ? kb : null;
     };
     const missing = (id: string) => new Error(`Knowledge base not found: ${id}`);
     return {
-      addKnowledgeBaseChunks: (input) => {
-        if (!visible(input.knowledgeBaseId)) throw missing(input.knowledgeBaseId);
-        return store.addKnowledgeBaseChunks({ knowledgeBaseId: input.knowledgeBaseId, chunks: input.chunks });
+      addKnowledgeBaseChunks: async (input) => {
+        if (!await visible(input.knowledgeBaseId)) throw missing(input.knowledgeBaseId);
+        return await store.addKnowledgeBaseChunks({ knowledgeBaseId: input.knowledgeBaseId, chunks: input.chunks });
       },
-      listKnowledgeBaseChunks: (kbId) => (visible(kbId) ? store.listKnowledgeBaseChunks(kbId) : []),
-      bm25SearchKnowledgeBase: (input) => (visible(input.knowledgeBaseId) ? store.bm25SearchKnowledgeBase(input) : []),
-      getKnowledgeBase: (id) => {
-        const kb = visible(id);
+      listKnowledgeBaseChunks: async (kbId) => (await visible(kbId) ? await store.listKnowledgeBaseChunks(kbId) : []),
+      bm25SearchKnowledgeBase: async (input) => (await visible(input.knowledgeBaseId) ? await store.bm25SearchKnowledgeBase(input) : []),
+      getKnowledgeBase: async (id) => {
+        const kb = await visible(id);
         return kb ? { id: kb.id, embedderId: kb.embedderId, dimensions: kb.dimensions } : null;
       }
     };
@@ -3039,11 +3086,11 @@ export function createApp(
   // secret's project or in a project it is shared to.
   const resolveSecretForUser = (user: SafeUser) => async (secretRef?: SecretReference): Promise<string | undefined> => {
     if (!secretRef?.secretId) return undefined;
-    const row = store.getSecret(secretRef.secretId);
+    const row = await store.getSecret(secretRef.secretId);
     if (!row) return undefined;
     const usable =
-      rbacService.can(user, row.projectId ?? DEFAULT_PROJECT_ID, "secret:use") ||
-      rbacService.listSecretShares(row.id).some((share) => rbacService.can(user, share.projectId, "secret:use"));
+      await rbacService.can(user, row.projectId ?? DEFAULT_PROJECT_ID, "secret:use") ||
+      await someAsync(await rbacService.listSecretShares(row.id), (share) => rbacService.can(user, share.projectId, "secret:use"));
     if (!usable) throw new Error(`Secret '${secretRef.secretId}' is not available to you.`);
     return secretService.resolveSecret(secretRef);
   };
@@ -3052,8 +3099,8 @@ export function createApp(
   // read when a run falls back to an unprefixed row; rebuilt when any
   // workflow changes.
   let legacyNamespaceIndex: { fingerprint: string; owners: Map<string, string[]> } | null = null;
-  const legacyNamespaceOwners = (): Map<string, string[]> => {
-    const items = store.listWorkflows();
+  const legacyNamespaceOwners = async (): Promise<Map<string, string[]>> => {
+    const items = await store.listWorkflows();
     const fingerprint = items.map((item) => `${item.id}|${item.updatedAt}|${item.workflowVersion}|${item.projectId ?? DEFAULT_PROJECT_ID}`).join("\n");
     if (legacyNamespaceIndex?.fingerprint === fingerprint) return legacyNamespaceIndex.owners;
     const owners = new Map<string, string[]>();
@@ -3063,7 +3110,7 @@ export function createApp(
       owners.set(namespace, list);
     };
     for (const item of items) {
-      const workflow = store.getWorkflow(item.id);
+      const workflow = await store.getWorkflow(item.id);
       if (!workflow) continue;
       const projectId = workflow.projectId ?? DEFAULT_PROJECT_ID;
       for (const node of workflow.nodes) {
@@ -3078,45 +3125,45 @@ export function createApp(
   // What a run can reach once it is going: sub-workflows, secrets, knowledge
   // bases and session state of its own project (see run-scope.ts).
   const runScope = createRunScope({
-    getWorkflow: (id) => store.getWorkflow(id),
-    getRunnableWorkflow: (id, runChannel) => releaseService.resolveRunnableWorkflow(id, runChannel),
-    productionRefusal: (id) => releaseService.productionRefusal(id),
-    listWorkflowShares: (workflowId) => store.listWorkflowShares(workflowId),
-    getSecretProjectId: (secretId) => store.getSecret(secretId)?.projectId ?? null,
-    listSecretIdsSharedToProject: (projectId) => store.listSecretsSharedToProject(projectId),
-    canUseSecretsInProject: (user, projectId) => rbacService.can(user, projectId, "secret:use"),
+    getWorkflow: async (id) => await store.getWorkflow(id),
+    getRunnableWorkflow: async (id, runChannel) => await releaseService.resolveRunnableWorkflow(id, runChannel),
+    productionRefusal: async (id) => await releaseService.productionRefusal(id),
+    listWorkflowShares: async (workflowId) => await store.listWorkflowShares(workflowId),
+    getSecretProjectId: async (secretId) => (await store.getSecret(secretId))?.projectId ?? null,
+    listSecretIdsSharedToProject: async (projectId) => await store.listSecretsSharedToProject(projectId),
+    canUseSecretsInProject: async (user, projectId) => await rbacService.can(user, projectId, "secret:use"),
     defaultSecretsShared: config.PROJECT_ISOLATION === "role",
-    getMcpServerProjectId: (serverId) => {
-      const server = store.getMcpServer(serverId);
+    getMcpServerProjectId: async (serverId) => {
+      const server = await store.getMcpServer(serverId);
       return server ? server.projectId : undefined;
     },
-    resolveRegisteredMcpServer: (registryServerId) => resolveRegisteredMcpServer(registryServerId),
-    legacyNamespaceOwnerProjects: (namespace) => legacyNamespaceOwners().get(namespace) ?? [],
+    resolveRegisteredMcpServer: async (registryServerId) => await resolveRegisteredMcpServer(registryServerId),
+    legacyNamespaceOwnerProjects: async (namespace) => (await legacyNamespaceOwners()).get(namespace) ?? [],
     resolveSecret: (secretRef) => secretService.resolveSecret(secretRef),
     knowledgeBaseStoreFor: (projectId) => knowledgeBaseStoreForRun(projectId),
     sessions: {
-      loadMemory: (namespace, sessionId) => store.loadSessionMemory(namespace, sessionId),
-      saveMemory: (namespace, sessionId, messages, labels) => store.saveSessionMemory(namespace, sessionId, messages, labels),
-      loadMemoryLabels: (namespace, sessionId) => store.loadSessionMemoryLabels(namespace, sessionId),
-      saveToolCall: (input) => store.saveSessionToolCall(input),
-      listToolCalls: (input) => store.listSessionToolCalls(input),
-      getToolCall: (input) => store.getSessionToolCall(input),
-      saveArtifact: (input) => store.saveSessionArtifact(input),
-      loadArtifact: (input) => store.loadSessionArtifact(input)
+      loadMemory: async (namespace, sessionId) => await store.loadSessionMemory(namespace, sessionId),
+      saveMemory: async (namespace, sessionId, messages, labels) => await store.saveSessionMemory(namespace, sessionId, messages, labels),
+      loadMemoryLabels: async (namespace, sessionId) => await store.loadSessionMemoryLabels(namespace, sessionId),
+      saveToolCall: async (input) => await store.saveSessionToolCall(input),
+      listToolCalls: async (input) => await store.listSessionToolCalls(input),
+      getToolCall: async (input) => await store.getSessionToolCall(input),
+      saveArtifact: async (input) => await store.saveSessionArtifact(input),
+      loadArtifact: async (input) => await store.loadSessionArtifact(input)
     }
   });
   // A changed placement must name a project that exists and, with a folder,
   // a folder of that same project. Unchanged placements are left alone.
-  const workflowPlacementError = (
+  const workflowPlacementError = async (
     workflow: { projectId?: string | null; folderId?: string | null },
     existing?: { projectId?: string | null; folderId?: string | null } | null
-  ): string | null => {
+  ): Promise<string | null> => {
     const projectId = workflow.projectId ?? existing?.projectId ?? DEFAULT_PROJECT_ID;
     const folderId = workflow.folderId ?? null;
     if (existing && projectId === (existing.projectId ?? DEFAULT_PROJECT_ID) && folderId === (existing.folderId ?? null)) return null;
-    if (projectId !== DEFAULT_PROJECT_ID && !store.getProject(projectId)) return "Target project does not exist";
+    if (projectId !== DEFAULT_PROJECT_ID && !await store.getProject(projectId)) return "Target project does not exist";
     if (folderId) {
-      const folder = store.getFolder(folderId);
+      const folder = await store.getFolder(folderId);
       if (!folder) return "Target folder does not exist";
       if (folder.projectId !== projectId) return "Target folder belongs to a different project";
     }
@@ -3125,22 +3172,22 @@ export function createApp(
   // Saving a workflow needs write access to the one it replaces (same id) and
   // to the project it lands in (its own projectId, else the replaced one's),
   // and a placement that exists (400 otherwise).
-  const workflowSaveDenial = (
+  const workflowSaveDenial = async (
     user: SafeUser,
     workflow: { id: string; projectId?: string | null; folderId?: string | null; nodes?: Workflow["nodes"] }
-  ): { ok: false; status: 400 | 403 | 404 | 409; error: string } | null => {
-    const existing = store.getWorkflow(workflow.id);
+  ): Promise<{ ok: false; status: 400 | 403 | 404 | 409; error: string } | null> => {
+    const existing = await store.getWorkflow(workflow.id);
     if (existing) {
-      const access = runAccess.workflow(user, existing.id, "workflow:write");
+      const access = await runAccess.workflow(user, existing.id, "workflow:write");
       if (!access.ok) return access;
     }
-    const target = runAccess.project(user, workflow.projectId ?? existing?.projectId, "workflow:write");
+    const target = await runAccess.project(user, workflow.projectId ?? existing?.projectId, "workflow:write");
     if (!target.ok) return target;
-    const placement = workflowPlacementError(workflow, existing);
+    const placement = await workflowPlacementError(workflow, existing);
     if (placement) return { ok: false, status: 400, error: placement };
     // Phase 15.4 — a production path of a published or gated workflow cannot be taken over by another one.
     if (Array.isArray(workflow.nodes)) {
-      const conflict = releaseService.claimConflict(user, workflow as Workflow);
+      const conflict = await releaseService.claimConflict(user, workflow as Workflow);
       if (conflict) return { ok: false, status: 409, error: conflict };
     }
     return null;
@@ -3171,10 +3218,10 @@ export function createApp(
    * check, never the project one. Checked when a run starts and again for
    * every judge call.
    */
-  const canUseJudgeSecret = (user: SafeUser, secretId: string, scope: SecretScope): boolean => {
-    const row = store.getSecret(secretId);
+  const canUseJudgeSecret = async (user: SafeUser, secretId: string, scope: SecretScope): Promise<boolean> => {
+    const row = await store.getSecret(secretId);
     if (!row || isInternalSecretProvider(row.provider)) return false;
-    return runScope.canUseSecretFor(scope, user, secretId);
+    return await runScope.canUseSecretFor(scope, user, secretId);
   };
 
   // Phase 9.5 / 15.2 — the LLM judge for judge scorers (faithfulness,
@@ -3191,11 +3238,11 @@ export function createApp(
       throw new Error("LLM judges are turned off on this server (EVAL_JUDGE_ENABLED=false)");
     }
     const context = judgeInput.context;
-    const workflow = context ? store.getWorkflow(context.workflowId) : null;
+    const workflow = context ? await store.getWorkflow(context.workflowId) : null;
     const projectId = workflow?.projectId ?? DEFAULT_PROJECT_ID;
-    const actor = context?.actorUserId && context.actorEmail ? evalPolicyActor(context.actorUserId, context.actorEmail) : null;
+    const actor = context?.actorUserId && context.actorEmail ? await evalPolicyActor(context.actorUserId, context.actorEmail) : null;
     if (judgeInput.secretRef) {
-      if (!workflow || !actor || !canUseJudgeSecret(actor, judgeInput.secretRef.secretId, workflow)) {
+      if (!workflow || !actor || !await canUseJudgeSecret(actor, judgeInput.secretRef.secretId, workflow)) {
         throw new Error(`the judge's secret ${judgeInput.secretRef.secretId} cannot be used by the user who started this run in this workflow's project`);
       }
     } else if (!config.EVAL_JUDGE_ALLOW_ENV_CREDENTIALS) {
@@ -3238,7 +3285,7 @@ export function createApp(
       : null;
     if (context) {
       try {
-        usageService.recordExecution({
+        await usageService.recordExecution({
           executionId: context.executionId ?? context.runId,
           workflowId: context.workflowId,
           workflowName: workflow?.name ?? null,
@@ -3268,8 +3315,8 @@ export function createApp(
 
   // The starting user, found by id; a deleted user whose email a new account
   // took over is not the same user.
-  const evalPolicyActor = (userId: string, email: string): SafeUser | null => {
-    const found = store.getUserById(userId);
+  const evalPolicyActor = async (userId: string, email: string): Promise<SafeUser | null> => {
+    const found = await store.getUserById(userId);
     if (!found || found.email.toLowerCase() !== email.toLowerCase() || !MCP_POLICY_ROLES.includes(found.role as McpPolicyRole)) return null;
     return { id: found.id, email: found.email, role: found.role as UserRole };
   };
@@ -3278,19 +3325,19 @@ export function createApp(
    * Phase 10.8 — the MCP plan for one eval fixture: record, replay one
    * cassette, or replay the cassette a past eval run recorded for the same fixture.
    */
-  const planEvalMcp = (input: Parameters<EvalWorkflowExecutor>[0]): McpCassetteRunPlan | undefined => {
+  const planEvalMcp = async (input: Parameters<EvalWorkflowExecutor>[0]): Promise<McpCassetteRunPlan | undefined> => {
     const replay = input.mcp?.replay;
     if (replay) {
       let record: McpCassetteRecord | null = null;
       if (replay.cassetteId) {
-        record = store.getMcpCassette(replay.cassetteId);
+        record = await store.getMcpCassette(replay.cassetteId);
         if (!record) throw new Error(`Cassette not found: ${replay.cassetteId}`);
       } else if (replay.evalRunId) {
-        const match = store
-          .listMcpCassettesForEvalRun(replay.evalRunId)
+        const match = (await store
+          .listMcpCassettesForEvalRun(replay.evalRunId))
           .filter((entry) => entry.fixtureId === input.fixtureId)
           .at(-1);
-        record = match ? store.getMcpCassette(match.id) : null;
+        record = match ? await store.getMcpCassette(match.id) : null;
         if (!record) throw new Error(`Eval run ${replay.evalRunId} recorded no cassette for fixture '${input.fixtureName}'.`);
       }
       if (!record) throw new Error("Replay needs a cassetteId or an evalRunId.");
@@ -3305,20 +3352,20 @@ export function createApp(
    * the workflow (the same rule as queued runs). The run then executes with
    * their policy and project scope (run-scope.ts).
    */
-  const evalRunActor = (userId: string, email: string, workflowId: string, permission: "workflow:read" | "workflow:execute" | "workflow:write" = "workflow:execute"): SafeUser | null => {
-    const actor = evalPolicyActor(userId, email);
+  const evalRunActor = async (userId: string, email: string, workflowId: string, permission: "workflow:read" | "workflow:execute" | "workflow:write" = "workflow:execute"): Promise<SafeUser | null> => {
+    const actor = await evalPolicyActor(userId, email);
     // Phase 15.6 — a guard policy simulation replays in projects its starter can read (models from the tape, no side effects).
-    if (permission === "workflow:read") return actor && runAccess.workflow(actor, workflowId, "workflow:read").ok ? actor : null;
-    if (!actor || !runAccess.workflow(actor, workflowId, "workflow:execute").ok) return null;
-    return permission === "workflow:execute" || runAccess.workflow(actor, workflowId, permission).ok ? actor : null;
+    if (permission === "workflow:read") return actor && (await runAccess.workflow(actor, workflowId, "workflow:read")).ok ? actor : null;
+    if (!actor || !(await runAccess.workflow(actor, workflowId, "workflow:execute")).ok) return null;
+    return permission === "workflow:execute" || (await runAccess.workflow(actor, workflowId, permission)).ok ? actor : null;
   };
 
   const evalService = new EvalService(store, async (input) => {
-    const workflow = store.getWorkflow(input.workflowId);
+    const workflow = await store.getWorkflow(input.workflowId);
     if (!workflow) {
       return { output: null, error: `Workflow not found: ${input.workflowId}` };
     }
-    const policyActor = evalRunActor(input.triggeredByUserId, input.triggeredBy, workflow.id);
+    const policyActor = await evalRunActor(input.triggeredByUserId, input.triggeredBy, workflow.id);
     if (!policyActor) {
       return { output: null, error: `The user who started this run (${input.triggeredBy}) can no longer run this workflow.` };
     }
@@ -3331,7 +3378,7 @@ export function createApp(
     // Phase 10.8 — record this fixture's MCP calls, or answer them from a cassette.
     let mcpPlan: McpCassetteRunPlan | undefined;
     try {
-      mcpPlan = planEvalMcp(input);
+      mcpPlan = await planEvalMcp(input);
     } catch (err) {
       return { output: null, error: err instanceof Error ? err.message : String(err) };
     }
@@ -3350,7 +3397,7 @@ export function createApp(
         inputLabels: EVAL_CASE_INPUT_LABELS,
         mcpPlan
       });
-      const result = finishMcpCassettePlan(mcpPlan, executed, {
+      const result = await finishMcpCassettePlan(mcpPlan, executed, {
         executionId,
         workflow,
         source: "eval",
@@ -3358,7 +3405,7 @@ export function createApp(
         evalRunId: input.runId,
         fixtureId: input.fixtureId
       });
-      persistExecutionHistory({
+      await persistExecutionHistory({
         executionId,
         workflow,
         result,
@@ -3390,7 +3437,7 @@ export function createApp(
         durationMs,
         nodeResults: result.nodeResults,
         nodes: workflow.nodes,
-        guardEvents: store.listGuardEventsForExecution(executionId),
+        guardEvents: await store.listGuardEventsForExecution(executionId),
         priceTurn: (providerId, model, inputTokens, outputTokens, cachedInputTokens) => usageService.estimateCostUsd(providerId, model, inputTokens, outputTokens, cachedInputTokens)
       });
       return {
@@ -3418,16 +3465,16 @@ export function createApp(
     judgeCallCeilingUsd,
     maxResultBytes: config.EVAL_RESULT_MAX_BYTES,
     // Provider error bodies and reasons are stored and shown to viewers: no secret value goes with them.
-    scrub: (text) => String(secretService.redact(replayRecordingService.scrubber().text(text))),
+    scrub: async (text) => String(secretService.redact((await replayRecordingService.scrubber()).text(text))),
     abortExecution: (executionId, reason) => activeExecutions.get(executionId)?.controller.abort(reason),
     // Phase 15.2 — replay jobs use the 15.1 replay machinery, built further down.
     replay: {
       // Phase 15.3 — the draft, a saved version or an inline workflow file, with the overrides applied.
-      resolveCandidate: (workflowId, request, context) => replayService.resolveJobCandidate(workflowId, request, context),
-      getRecording: (id) => store.getReplayRecording(id),
+      resolveCandidate: async (workflowId, request, context) => await replayService.resolveJobCandidate(workflowId, request, context),
+      getRecording: async (id) => await store.getReplayRecording(id),
       // The candidate was resolved when the job started; it runs in the workflow's current project.
-      replayCase: ({ recording, candidate, request, actor, executionId, models, overrides, baseline, role, repeatIndex, simulation }) => {
-        const current = store.getWorkflow(candidate.workflow.id);
+      replayCase: async ({ recording, candidate, request, actor, executionId, models, overrides, baseline, role, repeatIndex, simulation }) => {
+        const current = await store.getWorkflow(candidate.workflow.id);
         if (!current) throw new ReplayRunError("The workflow this golden run belongs to no longer exists.", "not_found");
         const scoped = { ...candidate, workflow: { ...candidate.workflow, projectId: current.projectId, folderId: current.folderId } };
         return replayService.replay(recording, request, actor, {
@@ -3441,15 +3488,15 @@ export function createApp(
           ...(simulation ? { simulation } : {})
         });
       },
-      baselineFor: (recording) => replayService.baselineFor(recording),
+      baselineFor: async (recording) => await replayService.baselineFor(recording),
       priceCall: (providerId, model, inputTokens, outputTokens) => usageService.estimateCostUsd(providerId, model, inputTokens, outputTokens, 0),
       // Phase 15.3 — an inline or overridden candidate keeps needing workflow:write for every case.
-      actorFor: (userId, email, workflowId, permission) => evalRunActor(userId, email, workflowId, permission)
+      actorFor: async (userId, email, workflowId, permission) => await evalRunActor(userId, email, workflowId, permission)
     },
     logger: { warn: (message, fields) => app.log.warn(fields ?? {}, message) }
   });
   app.addHook("onClose", async () => {
-    evalService.shutdown();
+    await evalService.shutdown();
   });
 
   const workerMode = config.WORKER_MODE;
@@ -3462,10 +3509,10 @@ export function createApp(
   // replicas never touch other instances' runs, and on a shared database only
   // runs no live instance has touched lately are interrupted. Eval storage is
   // SQLite-only, so a store without it skips this.
-  const evalStoreReady = typeof (store as unknown as { listEvalRuns?: unknown }).listEvalRuns === "function";
-  const recoverEvalRuns = (reason: "startup" | "interval") => {
+  const evalStoreReady = storeImplements(store, "listEvalRuns");
+  const recoverEvalRuns = async (reason: "startup" | "interval") => {
     try {
-      const interrupted = evalService.recoverInterrupted({ onlyStale: sharedDatabase });
+      const interrupted = await evalService.recoverInterrupted({ onlyStale: sharedDatabase });
       if (interrupted > 0) app.log.warn({ count: interrupted, reason }, "Marked eval runs and replay jobs interrupted by a restart");
     } catch (err) {
       app.log.warn({ err: err instanceof Error ? err.message : String(err), reason }, "Failed to mark interrupted eval runs");
@@ -3474,10 +3521,11 @@ export function createApp(
   if (!evalStoreReady) {
     app.log.info("This database has no eval storage; skipping the interrupted eval run check");
   } else if (workerMode !== "webhook") {
-    recoverEvalRuns("startup");
+    await recoverEvalRuns("startup");
     if (sharedDatabase) {
       // An instance that died is noticed by the others, not only by the next one to boot.
-      const evalRecoveryTimer = setInterval(() => recoverEvalRuns("interval"), EVAL_RUN_STALE_MS);
+      // promise-ok: the task catches and logs its own errors
+      const evalRecoveryTimer = setInterval(async () => await recoverEvalRuns("interval"), EVAL_RUN_STALE_MS);
       (evalRecoveryTimer as { unref?: () => void }).unref?.();
       app.addHook("onClose", async () => {
         clearInterval(evalRecoveryTimer);
@@ -3508,8 +3556,8 @@ export function createApp(
         }
         if (!runsBackgroundWorkers) return;
         try {
-          schedulerService?.initialize();
-          triggerService?.initialize();
+          await schedulerService?.initialize();
+          await triggerService?.initialize();
           app.log.info({ instanceId: leaderElection.getInstanceId() }, "Acquired leader lease — scheduler + trigger services started");
         } catch (err) {
           app.log.warn(
@@ -3625,12 +3673,12 @@ export function createApp(
       isLeader: () => leaderElection.isLeader(),
       checkSandbox: (serverConfig) => mcpSandboxLauncher.check(serverConfig),
       // Phase 10.7 — delegated servers are probed with one user's own connection.
-      delegatedProbeUser: (server, requestedBy) => {
-        const connected = (userId: string | null | undefined) =>
-          userId && store.getMcpUserOAuthConnection(server.id, userId)?.secretId ? userId : null;
-        if (requestedBy) return connected(requestedBy);
-        const creator = server.createdBy ? store.getUserByEmail(server.createdBy) : null;
-        return connected(creator?.id);
+      delegatedProbeUser: async (server, requestedBy) => {
+        const connected = async (userId: string | null | undefined) =>
+          userId && (await store.getMcpUserOAuthConnection(server.id, userId))?.secretId ? userId : null;
+        if (requestedBy) return await connected(requestedBy);
+        const creator = server.createdBy ? await store.getUserByEmail(server.createdBy) : null;
+        return await connected(creator?.id);
       }
     },
     {
@@ -3652,18 +3700,18 @@ export function createApp(
   // Phase 10.5 — questions MCP servers ask the person running a workflow.
   const mcpElicitationService = new McpElicitationService(store, {
     timeoutMs: config.MCP_ELICITATION_TIMEOUT_MS,
-    audit: (event) => {
-      auditService.record(event);
-      logStreamingService.dispatchAudit(event);
+    audit: async (event) => {
+      await auditService.record(event);
+      await logStreamingService.dispatchAudit(event);
     },
     logger: {
       info: (msg, fields) => app.log.info(fields ?? {}, msg),
       warn: (msg, fields) => app.log.warn(fields ?? {}, msg)
     }
   });
-  mcpElicitationService.expireStale();
+  await mcpElicitationService.expireStale();
   app.addHook("onClose", async () => {
-    mcpElicitationService.stop();
+    await mcpElicitationService.stop();
   });
   // Phase 10.6 — deployment-local MCP catalog. Every instance reads and
   // watches the file itself (presets and enforcement are served everywhere).
@@ -3693,8 +3741,8 @@ export function createApp(
     await logStreamingService.stop();
   });
 
-  const notificationService = new NotificationService(config, () =>
-    store.listNotificationConfigs().map(c => ({
+  const notificationService = new NotificationService(config, async () =>
+    (await store.listNotificationConfigs()).map(c => ({
       channel: c.channel,
       enabled: c.enabled,
       config: c.config,
@@ -3710,11 +3758,11 @@ export function createApp(
   }
   const approvalResumes = new ApprovalResumeRunner();
   // A timed-out approval whose run cannot continue: the run ends as an error and its paused state is cleared.
-  const failTimedOutRun = (executionId: string, workflow: Workflow, error: string) => {
-    const existing = store.getExecutionHistory(executionId);
+  const failTimedOutRun = async (executionId: string, workflow: Workflow, error: string) => {
+    const existing = await store.getExecutionHistory(executionId);
     const completedAt = new Date().toISOString();
     const startedAt = existing?.startedAt ?? completedAt;
-    persistExecutionHistoryRecord(
+    await persistExecutionHistoryRecord(
       {
         id: executionId,
         workflowId: workflow.id,
@@ -3731,21 +3779,21 @@ export function createApp(
       },
       { phase: "final", executionId, workflowId: workflow.id, triggerType: existing?.triggerType ?? undefined, status: "error" }
     );
-    deleteWorkflowExecutionSafely(executionId, workflow.id);
+    await deleteWorkflowExecutionSafely(executionId, workflow.id);
   };
   const runApprovalResume = (job: ApprovalResumeJob): Promise<Awaited<ReturnType<typeof runWorkflowExecution>> | null> =>
     approvalResumes.run(job, async () => {
-      const pending = store.getWorkflowExecutionState(job.executionId);
+      const pending = await store.getWorkflowExecutionState(job.executionId);
       if (!pending || pending.status !== "resuming") return null;
       const storedState = pending.state as WorkflowExecutionState | null;
       if (!storedState || typeof storedState !== "object" || !storedState.workflow) {
-        store.releaseWorkflowExecutionClaim(job.executionId);
+        await store.releaseWorkflowExecutionClaim(job.executionId);
         return null;
       }
       const state = openToolResults(secretService, storedState);
       // The decision comes from the request row, never from the job payload: a stale
       // queued job must not apply an earlier decision to a request decided again since.
-      const request = store.getApprovalRequest(job.requestId);
+      const request = await store.getApprovalRequest(job.requestId);
       const decided = request ? approvalDecisionOf(request.status) : null;
       if (!request || !decided || decided !== job.decision) return null;
       try {
@@ -3765,16 +3813,16 @@ export function createApp(
         const actorUserId = timedOut ? request.requestedByUserId : request.decidedByUserId;
         const actorEmail = timedOut ? request.requestedBy : request.decidedBy;
         if (actorUserId) {
-          const actorRecord = store.getUserById(actorUserId);
+          const actorRecord = await store.getUserById(actorUserId);
           actor = actorRecord && actorRecord.email === actorEmail ? { id: actorRecord.id, email: actorRecord.email, role: actorRecord.role as UserRole } : null;
           const check = actor
-            ? approvalPersonCheck(request, actor, (user, workflowId, permission) => runAccess.run(user, { id: workflowId, workflowId }, permission), {
+            ? await approvalPersonCheck(request, actor, async (user, workflowId, permission) => await runAccess.run(user, { id: workflowId, workflowId }, permission), {
                 skipSelfApproval: true,
                 accessOnly: timedOut
               })
             : null;
           if (!actor || !check?.allowed) {
-            auditService.record({
+            await auditService.record({
               category: "approval",
               eventType: "approval.resume_refused",
               action: decided,
@@ -3782,7 +3830,7 @@ export function createApp(
               actor: { userId: actorUserId, ...(actorEmail ? { email: actorEmail } : {}), type: "user" },
               resourceType: "workflow",
               resourceId: pending.workflowId,
-              projectId: store.getWorkflow(pending.workflowId)?.projectId ?? request.projectId,
+              projectId: (await store.getWorkflow(pending.workflowId))?.projectId ?? request.projectId,
               metadata: { executionId: job.executionId, requestId: job.requestId, reason: !actor ? "user_not_found" : check?.allowed === false && check.code !== "project_access" ? "not_an_approver" : "no_execute_permission" },
               message: timedOut
                 ? "Approval timeout refused: the person who started this run may no longer run this workflow."
@@ -3792,12 +3840,12 @@ export function createApp(
               throw new Error("The person who decided this approval can no longer run this workflow; the request is pending again.");
             }
             // Nobody can decide a timed-out request again, so the run ends here instead of waiting forever.
-            failTimedOutRun(job.executionId, state.workflow, "The approval timed out, and the person who started this run can no longer run this workflow, so no branch was run.");
+            await failTimedOutRun(job.executionId, state.workflow, "The approval timed out, and the person who started this run can no longer run this workflow, so no branch was run.");
             return null;
           }
         }
         // Scoped by the workflow's current project (the one access was checked against), not the one stored at the pause.
-        const current = store.getWorkflow(pending.workflowId);
+        const current = await store.getWorkflow(pending.workflowId);
         const resumeWorkflow: Workflow = current ? { ...state.workflow, projectId: current.projectId } : state.workflow;
         const actedBy = request.decidedBy ?? job.actedBy;
         const approvalDecision = {
@@ -3820,7 +3868,7 @@ export function createApp(
           channel: state.releaseChannel === "production" ? "production" : "draft",
           releaseVersion: typeof state.releaseVersion === "number" ? state.releaseVersion : null
         });
-        persistExecutionHistory({
+        await persistExecutionHistory({
           executionId: job.executionId,
           workflow: state.workflow,
           result,
@@ -3837,15 +3885,15 @@ export function createApp(
         return result;
       } catch (error) {
         // The decision is kept for a new try: the run waits again and the request is pending again.
-        approvalService.reopenAfterFailedResume(job);
+        await approvalService.reopenAfterFailedResume(job);
         throw error;
       }
     });
   const dispatchApprovalResume = async (job: ApprovalResumeJob): Promise<{ queued: true } | { queued: false; result: Awaited<ReturnType<typeof runWorkflowExecution>> } | null> => {
     if (queueService) {
-      const pending = store.getWorkflowExecutionState(job.executionId);
+      const pending = await store.getWorkflowExecutionState(job.executionId);
       // One item per decision: a request that is reopened and decided again must not collide with the first.
-      const decidedAt = Date.parse(store.getApprovalRequest(job.requestId)?.decidedAt ?? "") || Date.now();
+      const decidedAt = Date.parse((await store.getApprovalRequest(job.requestId))?.decidedAt ?? "") || Date.now();
       await queueService.enqueue({
         workflowId: pending?.workflowId ?? "",
         executionId: job.executionId,
@@ -3864,22 +3912,22 @@ export function createApp(
     return result ? { queued: false, result } : null;
   };
   const approvalService = new ApprovalService(store, {
-    audit: (event) => {
-      auditService.record(event);
-      logStreamingService.dispatchAudit(event);
+    audit: async (event) => {
+      await auditService.record(event);
+      await logStreamingService.dispatchAudit(event);
     },
     notify: (event) => notificationService.notify(event),
     dispatch: dispatchApprovalResume,
     isLeader: () => leaderElection.isLeader(),
     // Project authorization is the shared run-access check, on the workflow as it is now.
-    access: (user, workflowId, permission) => runAccess.run(user, { id: workflowId, workflowId }, permission),
-    readableWorkflowIds: (user) => runAccess.readableWorkflowIds(user),
-    canExecuteDraft: (user, workflow) =>
-      store.getWorkflow(workflow.id)
-        ? runAccess.workflow(user, workflow.id, "workflow:execute").ok
-        : runAccess.project(user, workflow.projectId, "workflow:execute").ok,
-    listUsers: () =>
-      store.listUsers().map((entry) => ({
+    access: async (user, workflowId, permission) => await runAccess.run(user, { id: workflowId, workflowId }, permission),
+    readableWorkflowIds: async (user) => await runAccess.readableWorkflowIds(user),
+    canExecuteDraft: async (user, workflow) =>
+      await store.getWorkflow(workflow.id)
+        ? (await runAccess.workflow(user, workflow.id, "workflow:execute")).ok
+        : (await runAccess.project(user, workflow.projectId, "workflow:execute")).ok,
+    listUsers: async () =>
+      (await store.listUsers()).map((entry) => ({
         id: entry.id,
         email: entry.email,
         role: entry.role === "admin" || entry.role === "builder" || entry.role === "operator" ? entry.role : "viewer"
@@ -3899,7 +3947,7 @@ export function createApp(
   if (runsBackgroundWorkers && approvalsSupported) {
     // The timer starts on every worker instance; each sweep is leader-only, so a later leader takes over.
     app.addHook("onReady", async () => {
-      approvalService.start();
+      await approvalService.start();
     });
   }
   app.addHook("onClose", async () => {
@@ -3913,27 +3961,27 @@ export function createApp(
   const releaseService = new ReleaseService({
     store,
     available: approvalsSupported,
-    resolveVersion: (workflowId, version) => replayService.resolveWorkflowCandidate(workflowId, { version }).workflow,
+    resolveVersion: async (workflowId, version) => (await replayService.resolveWorkflowCandidate(workflowId, { version })).workflow,
     hashOf: (workflow) => ReplayService.candidateHash(workflow),
-    loadJob: (runId) => evalService.getRun(runId),
-    loadCase: (runId, resultId) => evalService.getCase(runId, resultId),
-    recordingCreatedAt: (recordingId) => store.getReplayRecordingSummary(recordingId)?.createdAt ?? null,
-    access: (user, workflowId, permission) => runAccess.workflow(user, workflowId, permission),
-    readableWorkflowIds: (user) => runAccess.readableWorkflowIds(user),
-    audit: (event) => {
-      auditService.record(event);
-      logStreamingService.dispatchAudit(event);
+    loadJob: async (runId) => await evalService.getRun(runId),
+    loadCase: async (runId, resultId) => await evalService.getCase(runId, resultId),
+    recordingCreatedAt: async (recordingId) => (await store.getReplayRecordingSummary(recordingId))?.createdAt ?? null,
+    access: async (user, workflowId, permission) => await runAccess.workflow(user, workflowId, permission),
+    readableWorkflowIds: async (user) => await runAccess.readableWorkflowIds(user),
+    audit: async (event) => {
+      await auditService.record(event);
+      await logStreamingService.dispatchAudit(event);
     },
     notify: (event) => notificationService.notify(event),
     redact: (value) => String(secretService.redact(value)),
-    onPublished: (workflowId) => {
-      schedulerService?.reloadWorkflow(workflowId);
-      triggerService?.reloadWorkflow(workflowId);
+    onPublished: async (workflowId) => {
+      await schedulerService?.reloadWorkflow(workflowId);
+      await triggerService?.reloadWorkflow(workflowId);
     },
-    snapshotDraft: (workflowId, actor) => {
-      const draft = store.getWorkflow(workflowId);
+    snapshotDraft: async (workflowId, actor) => {
+      const draft = await store.getWorkflow(workflowId);
       if (!draft) throw new Error("Workflow not found");
-      return workflowVersionService.snapshot({ workflow: draft, createdBy: actor.id, changeNote: "baseline for the release gate" }).version;
+      return (await workflowVersionService.snapshot({ workflow: draft, createdBy: actor.id, changeNote: "baseline for the release gate" })).version;
     },
     appPublicUrl: config.APP_PUBLIC_URL,
     logger: { warn: (message, fields) => app.log.warn(fields ?? {}, message) }
@@ -3942,11 +3990,11 @@ export function createApp(
   const gateAdmissionService = new GateAdmissionService({
     store,
     available: approvalsSupported,
-    access: (user, workflowId, permission) => runAccess.workflow(user, workflowId, permission),
-    readableWorkflowIds: (user) => runAccess.readableWorkflowIds(user),
-    audit: (event) => {
-      auditService.record(event);
-      logStreamingService.dispatchAudit(event);
+    access: async (user, workflowId, permission) => await runAccess.workflow(user, workflowId, permission),
+    readableWorkflowIds: async (user) => await runAccess.readableWorkflowIds(user),
+    audit: async (event) => {
+      await auditService.record(event);
+      await logStreamingService.dispatchAudit(event);
     },
     notify: (event) => notificationService.notify(event),
     redact: (value) => String(secretService.redact(value)),
@@ -3954,17 +4002,17 @@ export function createApp(
     logger: { warn: (message, fields) => app.log.warn(fields ?? {}, message) }
   });
   /** The workflow production traffic runs: the published version when there is one, else the draft. */
-  const productionWorkflow = (workflowId: string): Workflow | null => releaseService.resolveRunnableWorkflow(workflowId, "production");
+  const productionWorkflow = async (workflowId: string): Promise<Workflow | null> => await releaseService.resolveRunnableWorkflow(workflowId, "production");
   /** Phase 15.4 — what a production entry point answers when it has no workflow to run: why production refuses it (409), or 404. */
-  const productionMissing = (reply: FastifyReply, workflowId: string): { error: string } => {
-    const refusal = releaseService.productionRefusal(workflowId);
+  const productionMissing = async (reply: FastifyReply, workflowId: string): Promise<{ error: string }> => {
+    const refusal = await releaseService.productionRefusal(workflowId);
     reply.code(refusal ? 409 : 404);
     return { error: refusal ?? "Workflow not found" };
   };
   /** Phase 15.4 — the deactivated gated workflow whose published version has a node matching `matches`, for a "deactivated" answer. */
-  const deactivatedMatch = (matches: (workflow: Workflow) => boolean): Workflow | null => {
-    for (const summary of store.listWorkflows()) {
-      const workflow = releaseService.deactivatedProductionWorkflow(summary.id);
+  const deactivatedMatch = async (matches: (workflow: Workflow) => boolean): Promise<Workflow | null> => {
+    for (const summary of await store.listWorkflows()) {
+      const workflow = await releaseService.deactivatedProductionWorkflow(summary.id);
       if (workflow && matches(workflow)) return workflow;
     }
     return null;
@@ -3975,29 +4023,29 @@ export function createApp(
    * for the draft with `?channel=draft` when it may change the workflow; a
    * person in the editor runs the draft.
    */
-  const executeChannelFor = (
+  const executeChannelFor = async (
     request: FastifyRequest,
     user: SafeUser,
     workflowId: string
-  ): { channel: ReleaseChannel } | { ok: false; status: 400 | 403 | 404; error: string } => {
+  ): Promise<{ channel: ReleaseChannel } | { ok: false; status: 400 | 403 | 404; error: string }> => {
     const asked = asRecord(request.query).channel;
     if (asked !== undefined && asked !== "draft") {
       return { ok: false, status: 400, error: "channel can only be draft" };
     }
-    const viaKey = Boolean(authenticateApiKey(request.headers as Record<string, unknown>));
+    const viaKey = Boolean(await authenticateApiKey(request.headers as Record<string, unknown>));
     if (!viaKey) return { channel: "draft" };
     if (asked === undefined) return { channel: "production" };
-    const write = runAccess.workflow(user, workflowId, "workflow:write");
+    const write = await runAccess.workflow(user, workflowId, "workflow:write");
     if (!write.ok) return { ok: false, status: write.status, error: "Running the draft with an API key (channel=draft) needs workflow:write on the workflow." };
     return { channel: "draft" };
   };
 
-  const pruneAuditLogs = (reason: "startup" | "interval") => {
+  const pruneAuditLogs = async (reason: "startup" | "interval") => {
     const retentionDays = config.AUDIT_LOG_RETENTION_DAYS;
     if (!Number.isFinite(retentionDays) || retentionDays <= 0) return 0;
     const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000).toISOString();
     try {
-      const deleted = auditService.purge({ before: cutoff });
+      const deleted = await auditService.purge({ before: cutoff });
       if (deleted > 0) {
         app.log.info({ deleted, cutoff, retentionDays, reason }, "Pruned audit logs");
       }
@@ -4010,9 +4058,10 @@ export function createApp(
       return 0;
     }
   };
-  pruneAuditLogs("startup");
+  await pruneAuditLogs("startup");
   const auditRetentionTimer = config.AUDIT_LOG_RETENTION_DAYS > 0
-    ? setInterval(() => pruneAuditLogs("interval"), config.AUDIT_LOG_PRUNE_INTERVAL_MS)
+    // promise-ok: the task catches and logs its own errors
+    ? setInterval(async () => await pruneAuditLogs("interval"), config.AUDIT_LOG_PRUNE_INTERVAL_MS)
     : null;
   if (auditRetentionTimer) {
     const t = auditRetentionTimer as { unref?: () => void };
@@ -4055,25 +4104,25 @@ export function createApp(
     };
   };
 
-  const audit = (
+  const audit = async (
     request: { ip?: string; headers: Record<string, unknown> },
     user: SafeUser | null,
     event: Omit<AuditEventInput, "actor"> & { actor?: Partial<AuditActor> }
   ) => {
     const actor = buildActor(request, user, event.actor);
     const full = { ...event, actor };
-    auditService.record(full);
-    logStreamingService.dispatchAudit(full);
+    await auditService.record(full);
+    await logStreamingService.dispatchAudit(full);
   };
   // User-initiated run actions (not webhook/schedule runs). Cancel passes the run's workflow id.
-  const auditRunAction = (
+  const auditRunAction = async (
     request: { ip?: string; headers: Record<string, unknown> },
     user: SafeUser,
     eventType: "execution.started" | "execution.retried" | "execution.replayed" | "execution.cancel_requested",
     run: { executionId: string; workflowId: string; projectId?: string | null },
     metadata: Record<string, unknown> = {}
   ) => {
-    audit(request, user, {
+    await audit(request, user, {
       category: "execution",
       eventType,
       action: eventType === "execution.cancel_requested" ? "cancel" : "execute",
@@ -4136,12 +4185,12 @@ export function createApp(
     return match ? match[1].trim() : null;
   };
 
-  const authenticateApiKey = (headers: Record<string, unknown>): SafeUser | null => {
+  const authenticateApiKey = async (headers: Record<string, unknown>): Promise<SafeUser | null> => {
     const token = extractBearerToken(headers);
     if (!token) return null;
-    const verified = apiKeyService.verify(token);
+    const verified = await apiKeyService.verify(token);
     if (!verified) return null;
-    const user = store.getUserById(verified.userId);
+    const user = await store.getUserById(verified.userId);
     if (!user) return null;
     return {
       id: user.id,
@@ -4182,7 +4231,7 @@ export function createApp(
     allowedRoles: UserRole[]
   ): Promise<SafeUser | null> => {
     // Allow API key authentication (Phase 5.1) as a first-class alternative to session cookies.
-    const apiKeyUser = authenticateApiKey(request.headers as Record<string, unknown>);
+    const apiKeyUser = await authenticateApiKey(request.headers as Record<string, unknown>);
     if (apiKeyUser) {
       if (!hasRequiredRole(apiKeyUser, allowedRoles)) {
         deny(reply, 403, "Insufficient permissions");
@@ -4197,7 +4246,7 @@ export function createApp(
       return null;
     }
 
-    const user = authService.getSessionUser(sessionId);
+    const user = await authService.getSessionUser(sessionId);
     if (!user) {
       clearSessionCookie(reply);
       deny(reply, 401, "Session expired or invalid");
@@ -4220,53 +4269,53 @@ export function createApp(
   ): Promise<SafeUser | null> => {
     const user = await requireRole(request, reply, ["viewer"]);
     if (!user) return null;
-    if (!rbacService.can(user, projectId, permission)) {
+    if (!await rbacService.can(user, projectId, permission)) {
       deny(reply, 403, `Permission '${permission}' required in project '${projectId}'`);
       return null;
     }
     return user;
   };
 
-  const provisionSsoUser = (input: {
+  const provisionSsoUser = async (input: {
     provider: "saml" | "ldap";
     subject: string;
     email: string;
     groups: string[];
-  }): { user: SafeUser; created: boolean } => {
+  }): Promise<{ user: SafeUser; created: boolean }> => {
     const normalizedEmail = input.email.trim().toLowerCase();
-    let storeUser = store.getUserByEmail(normalizedEmail);
+    let storeUser = await store.getUserByEmail(normalizedEmail);
     let created = false;
 
     // Determine global role: group-mapped role > default viewer.
     const mappedGlobalRole =
       input.provider === "saml"
-        ? samlService.resolveGlobalRole(input.groups)
-        : ldapService.resolveGlobalRole(input.groups);
+        ? await samlService.resolveGlobalRole(input.groups)
+        : await ldapService.resolveGlobalRole(input.groups);
     const desiredRole: UserRole = mappedGlobalRole ?? "viewer";
 
     if (!storeUser) {
       const id = `usr_${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`;
       const randomPassword = crypto.randomBytes(24).toString("base64url");
       // Register with the normal register flow so password hashing is consistent.
-      const registered = authService.register({
+      const registered = await authService.register({
         email: normalizedEmail,
         password: randomPassword,
         role: desiredRole
       });
-      storeUser = store.getUserById(registered.id);
+      storeUser = await store.getUserById(registered.id);
       created = true;
     } else if (mappedGlobalRole && storeUser.role !== mappedGlobalRole) {
       // Update role when SSO group mapping indicates a change (do NOT downgrade admins unless explicitly mapped).
       const currentPriority = rolePriority[(storeUser.role as UserRole) ?? "viewer"] ?? 1;
       const targetPriority = rolePriority[mappedGlobalRole];
       if (targetPriority >= currentPriority) {
-        store.saveUser({
+        await store.saveUser({
           id: storeUser.id,
           email: storeUser.email,
           passwordHash: storeUser.passwordHash,
           role: mappedGlobalRole
         });
-        storeUser = store.getUserById(storeUser.id);
+        storeUser = await store.getUserById(storeUser.id);
       }
     }
 
@@ -4277,13 +4326,13 @@ export function createApp(
     // Apply project-level role assignments from group mappings.
     const projectAssignments =
       input.provider === "saml"
-        ? samlService.listProjectRoleAssignments(input.groups)
-        : ldapService.listProjectRoleAssignments(input.groups);
+        ? await samlService.listProjectRoleAssignments(input.groups)
+        : await ldapService.listProjectRoleAssignments(input.groups);
     for (const assignment of projectAssignments) {
-      const project = store.getProject(assignment.projectId);
+      const project = await store.getProject(assignment.projectId);
       if (!project) continue;
       try {
-        rbacService.addMember({
+        await rbacService.addMember({
           userId: storeUser.id,
           projectId: assignment.projectId,
           role: isProjectRole(assignment.role) ? assignment.role : "custom",
@@ -4296,14 +4345,14 @@ export function createApp(
 
     // Persist SSO identity linkage.
     if (input.provider === "saml") {
-      samlService.recordIdentity(storeUser.id, {
+      await samlService.recordIdentity(storeUser.id, {
         nameId: input.subject,
         email: normalizedEmail,
         groups: input.groups,
         attributes: {}
       });
     } else {
-      store.upsertSsoIdentity({
+      await store.upsertSsoIdentity({
         id: `sso_${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`,
         userId: storeUser.id,
         provider: "ldap",
@@ -4326,12 +4375,12 @@ export function createApp(
     return { user, created };
   };
 
-  const issueSessionForUser = (user: SafeUser, reply: FastifyReply): { expiresAt: string } => {
+  const issueSessionForUser = async (user: SafeUser, reply: FastifyReply): Promise<{ expiresAt: string }> => {
     const expiresAtDate = new Date();
     expiresAtDate.setHours(expiresAtDate.getHours() + config.SESSION_TTL_HOURS);
     const expiresAt = expiresAtDate.toISOString();
     const sessionId = `sess_${crypto.randomUUID().replace(/-/g, "")}${crypto.randomBytes(6).toString("hex")}`;
-    store.saveSession({ id: sessionId, userId: user.id, expiresAt });
+    await store.saveSession({ id: sessionId, userId: user.id, expiresAt });
     setSessionCookie(reply, sessionId);
     return { expiresAt };
   };
@@ -4610,7 +4659,7 @@ export function createApp(
     const window = parseUsageWindow(query);
     return {
       window,
-      totals: store.queryUsageTotals({
+      totals: await store.queryUsageTotals({
         ...window,
         workflowId: query?.workflowId,
         userId: query?.userId,
@@ -4637,7 +4686,7 @@ export function createApp(
     return {
       window,
       groupBy,
-      rows: store.queryUsageRollup({
+      rows: await store.queryUsageRollup({
         ...window,
         groupBy,
         workflowId: query?.workflowId,
@@ -4653,7 +4702,7 @@ export function createApp(
     if (!user) return;
     const query = request.query as { limit?: string; workflowId?: string; userId?: string; projectId?: string } | undefined;
     return {
-      events: store.listUsageEvents({
+      events: await store.listUsageEvents({
         limit: query?.limit ? Number(query.limit) : 50,
         workflowId: query?.workflowId,
         userId: query?.userId,
@@ -4674,7 +4723,7 @@ export function createApp(
     if (!user) return;
     const query = request.query as { scopeType?: string; enabledOnly?: string } | undefined;
     return {
-      budgets: store.listBudgets({
+      budgets: await store.listBudgets({
         scopeType: query?.scopeType,
         enabledOnly: query?.enabledOnly === "true"
       })
@@ -4725,7 +4774,7 @@ export function createApp(
       return { error: "scopeId required for non-global budgets" };
     }
     const id = `bgt_${crypto.randomUUID()}`;
-    store.createBudget({
+    await store.createBudget({
       id,
       name: body.name.trim(),
       scopeType: body.scopeType,
@@ -4739,7 +4788,7 @@ export function createApp(
       enabled: body.enabled !== false,
       createdBy: user.email
     });
-    auditService.record({
+    await auditService.record({
       category: "system",
       eventType: "budget.created",
       action: "create",
@@ -4749,13 +4798,13 @@ export function createApp(
       resourceId: id,
       metadata: { scopeType: body.scopeType, limitType: body.limitType, limitValue: body.limitValue, action: body.action }
     });
-    return { budget: store.getBudget(id) };
+    return { budget: await store.getBudget(id) };
   });
 
   app.put<{ Params: { id: string }; Body: unknown }>("/api/budgets/:id", async (request, reply) => {
     const user = await requireRole(request, reply, ["admin"]);
     if (!user) return;
-    const existing = store.getBudget(request.params.id);
+    const existing = await store.getBudget(request.params.id);
     if (!existing) {
       reply.code(404);
       return { error: "Budget not found" };
@@ -4772,8 +4821,8 @@ export function createApp(
       reply.code(400);
       return { error: "Empty update payload" };
     }
-    store.updateBudget(request.params.id, patch);
-    auditService.record({
+    await store.updateBudget(request.params.id, patch);
+    await auditService.record({
       category: "system",
       eventType: "budget.updated",
       action: "update",
@@ -4783,19 +4832,19 @@ export function createApp(
       resourceId: request.params.id,
       metadata: { ...patch }
     });
-    return { budget: store.getBudget(request.params.id) };
+    return { budget: await store.getBudget(request.params.id) };
   });
 
   app.delete<{ Params: { id: string } }>("/api/budgets/:id", async (request, reply) => {
     const user = await requireRole(request, reply, ["admin"]);
     if (!user) return;
-    const existing = store.getBudget(request.params.id);
+    const existing = await store.getBudget(request.params.id);
     if (!existing) {
       reply.code(404);
       return { error: "Budget not found" };
     }
-    store.deleteBudget(request.params.id);
-    auditService.record({
+    await store.deleteBudget(request.params.id);
+    await auditService.record({
       category: "system",
       eventType: "budget.deleted",
       action: "delete",
@@ -4812,7 +4861,7 @@ export function createApp(
     if (!user) return;
     const query = request.query as { budgetId?: string; limit?: string } | undefined;
     return {
-      alerts: store.listBudgetAlerts({
+      alerts: await store.listBudgetAlerts({
         budgetId: query?.budgetId,
         limit: query?.limit ? Number(query.limit) : 100
       })
@@ -4824,13 +4873,13 @@ export function createApp(
   app.get("/api/audit-log/verify-chain", async (request, reply) => {
     const user = await requireRole(request, reply, ["admin"]);
     if (!user) return;
-    return store.verifyAuditChain();
+    return await store.verifyAuditChain();
   });
 
   app.get("/api/audit-export/destinations", async (request, reply) => {
     const user = await requireRole(request, reply, ["admin"]);
     if (!user) return;
-    return { destinations: store.listAuditExportDestinations() };
+    return { destinations: await store.listAuditExportDestinations() };
   });
 
   app.post<{ Body: unknown }>("/api/audit-export/destinations", async (request, reply) => {
@@ -4864,7 +4913,7 @@ export function createApp(
       return { error: "file destination requires config.path" };
     }
     const id = `axdest_${crypto.randomUUID()}`;
-    store.createAuditExportDestination({
+    await store.createAuditExportDestination({
       id,
       name: body.name.trim(),
       kind: body.kind,
@@ -4873,7 +4922,7 @@ export function createApp(
       enabled: body.enabled !== false,
       createdBy: user.email
     });
-    auditService.record({
+    await auditService.record({
       category: "system",
       eventType: "audit_export.destination.created",
       action: "create",
@@ -4883,13 +4932,13 @@ export function createApp(
       resourceId: id,
       metadata: { kind: body.kind, intervalSeconds: body.intervalSeconds ?? 3600 }
     });
-    return { destination: store.getAuditExportDestination(id) };
+    return { destination: await store.getAuditExportDestination(id) };
   });
 
   app.put<{ Params: { id: string }; Body: unknown }>("/api/audit-export/destinations/:id", async (request, reply) => {
     const user = await requireRole(request, reply, ["admin"]);
     if (!user) return;
-    const existing = store.getAuditExportDestination(request.params.id);
+    const existing = await store.getAuditExportDestination(request.params.id);
     if (!existing) {
       reply.code(404);
       return { error: "Destination not found" };
@@ -4904,8 +4953,8 @@ export function createApp(
       reply.code(400);
       return { error: "Empty update payload" };
     }
-    store.updateAuditExportDestination(request.params.id, patch);
-    auditService.record({
+    await store.updateAuditExportDestination(request.params.id, patch);
+    await auditService.record({
       category: "system",
       eventType: "audit_export.destination.updated",
       action: "update",
@@ -4915,19 +4964,19 @@ export function createApp(
       resourceId: request.params.id,
       metadata: { ...patch }
     });
-    return { destination: store.getAuditExportDestination(request.params.id) };
+    return { destination: await store.getAuditExportDestination(request.params.id) };
   });
 
   app.delete<{ Params: { id: string } }>("/api/audit-export/destinations/:id", async (request, reply) => {
     const user = await requireRole(request, reply, ["admin"]);
     if (!user) return;
-    const existing = store.getAuditExportDestination(request.params.id);
+    const existing = await store.getAuditExportDestination(request.params.id);
     if (!existing) {
       reply.code(404);
       return { error: "Destination not found" };
     }
-    store.deleteAuditExportDestination(request.params.id);
-    auditService.record({
+    await store.deleteAuditExportDestination(request.params.id);
+    await auditService.record({
       category: "system",
       eventType: "audit_export.destination.deleted",
       action: "delete",
@@ -4942,7 +4991,7 @@ export function createApp(
   app.post<{ Params: { id: string } }>("/api/audit-export/destinations/:id/run", async (request, reply) => {
     const user = await requireRole(request, reply, ["admin"]);
     if (!user) return;
-    const existing = store.getAuditExportDestination(request.params.id);
+    const existing = await store.getAuditExportDestination(request.params.id);
     if (!existing) {
       reply.code(404);
       return { error: "Destination not found" };
@@ -4951,6 +5000,7 @@ export function createApp(
       const outcome = await auditExportService.runDestination(request.params.id);
       return { outcome };
     } catch (err) {
+      rethrowStoreNotImplemented(err);
       reply.code(500);
       return { error: err instanceof Error ? err.message : String(err) };
     }
@@ -4965,8 +5015,8 @@ export function createApp(
   // One without a project is shared across the deployment (admins create these):
   // everyone can read it, but only an admin may add content, since every
   // project's runs retrieve from it.
-  const knowledgeBaseAccess = (user: SafeUser, id: string, permission: "workflow:read" | "workflow:write") => {
-    const kb = store.getKnowledgeBase(id);
+  const knowledgeBaseAccess = async (user: SafeUser, id: string, permission: "workflow:read" | "workflow:write") => {
+    const kb = await store.getKnowledgeBase(id);
     if (!kb) return { ok: false as const, status: 404 as const, error: "Knowledge base not found" };
     if (!kb.projectId) {
       if (permission === "workflow:write" && user.role !== "admin") {
@@ -4974,7 +5024,7 @@ export function createApp(
       }
       return { ok: true as const, kb };
     }
-    const access = runAccess.project(user, kb.projectId, permission, "Knowledge base");
+    const access = await runAccess.project(user, kb.projectId, permission, "Knowledge base");
     return access.ok ? { ok: true as const, kb } : access;
   };
 
@@ -4982,9 +5032,9 @@ export function createApp(
     const user = await requireRole(request, reply, ["builder"]);
     if (!user) return;
     const query = request.query as { projectId?: string } | undefined;
-    const readable = runAccess.readableProjectIds(user);
-    const knowledgeBases = store
-      .listKnowledgeBases({ projectId: query?.projectId })
+    const readable = await runAccess.readableProjectIds(user);
+    const knowledgeBases = (await store
+      .listKnowledgeBases({ projectId: query?.projectId }))
       .filter((kb) => readable === null || !kb.projectId || readable.includes(kb.projectId));
     return { knowledgeBases };
   });
@@ -4992,10 +5042,10 @@ export function createApp(
   app.get<{ Params: { id: string } }>("/api/knowledge-bases/:id", async (request, reply) => {
     const user = await requireRole(request, reply, ["builder"]);
     if (!user) return;
-    const access = knowledgeBaseAccess(user, request.params.id, "workflow:read");
+    const access = await knowledgeBaseAccess(user, request.params.id, "workflow:read");
     if (!access.ok) return denyRunAccess(reply, access);
     const kb = access.kb;
-    const sources = store.listKnowledgeBaseSources(request.params.id);
+    const sources = await store.listKnowledgeBaseSources(request.params.id);
     return { knowledgeBase: kb, sources };
   });
 
@@ -5018,7 +5068,7 @@ export function createApp(
       return { error: "embedderId is required (e.g. token-embedder, openai-embedder, azure-openai-embedder)" };
     }
     const id = `kb_${crypto.randomUUID()}`;
-    store.createKnowledgeBase({
+    await store.createKnowledgeBase({
       id,
       name: body.name.trim(),
       description: body.description ?? null,
@@ -5027,7 +5077,7 @@ export function createApp(
       embedderConfig: body.embedderConfig ?? {},
       createdBy: user.email
     });
-    auditService.record({
+    await auditService.record({
       category: "system",
       eventType: "knowledge_base.created",
       action: "create",
@@ -5038,13 +5088,13 @@ export function createApp(
       projectId: body.projectId ?? null,
       metadata: { embedderId: body.embedderId }
     });
-    return { knowledgeBase: store.getKnowledgeBase(id) };
+    return { knowledgeBase: await store.getKnowledgeBase(id) };
   });
 
   app.put<{ Params: { id: string }; Body: unknown }>("/api/knowledge-bases/:id", async (request, reply) => {
     const user = await requireRole(request, reply, ["admin"]);
     if (!user) return;
-    const existing = store.getKnowledgeBase(request.params.id);
+    const existing = await store.getKnowledgeBase(request.params.id);
     if (!existing) {
       reply.code(404);
       return { error: "Knowledge base not found" };
@@ -5058,8 +5108,8 @@ export function createApp(
       reply.code(400);
       return { error: "Empty update payload" };
     }
-    store.updateKnowledgeBase(request.params.id, patch);
-    auditService.record({
+    await store.updateKnowledgeBase(request.params.id, patch);
+    await auditService.record({
       category: "system",
       eventType: "knowledge_base.updated",
       action: "update",
@@ -5069,19 +5119,19 @@ export function createApp(
       resourceId: request.params.id,
       metadata: { ...patch }
     });
-    return { knowledgeBase: store.getKnowledgeBase(request.params.id) };
+    return { knowledgeBase: await store.getKnowledgeBase(request.params.id) };
   });
 
   app.delete<{ Params: { id: string } }>("/api/knowledge-bases/:id", async (request, reply) => {
     const user = await requireRole(request, reply, ["admin"]);
     if (!user) return;
-    const existing = store.getKnowledgeBase(request.params.id);
+    const existing = await store.getKnowledgeBase(request.params.id);
     if (!existing) {
       reply.code(404);
       return { error: "Knowledge base not found" };
     }
-    store.deleteKnowledgeBase(request.params.id);
-    auditService.record({
+    await store.deleteKnowledgeBase(request.params.id);
+    await auditService.record({
       category: "system",
       eventType: "knowledge_base.deleted",
       action: "delete",
@@ -5104,7 +5154,7 @@ export function createApp(
   app.post<{ Params: { id: string }; Body: unknown }>("/api/knowledge-bases/:id/ingest", async (request, reply) => {
     const user = await requireRole(request, reply, ["builder"]);
     if (!user) return;
-    const access = knowledgeBaseAccess(user, request.params.id, "workflow:write");
+    const access = await knowledgeBaseAccess(user, request.params.id, "workflow:write");
     if (!access.ok) return denyRunAccess(reply, access);
     const kb = access.kb;
     const body = request.body as Partial<{
@@ -5126,12 +5176,13 @@ export function createApp(
     // Path 1: pre-embedded chunks
     if (Array.isArray(body.chunks) && body.chunks.length > 0) {
       try {
-        const result = store.addKnowledgeBaseChunks({
+        const result = await store.addKnowledgeBaseChunks({
           knowledgeBaseId: request.params.id,
           chunks: body.chunks
         });
         return { inserted: result.inserted, dimensions: result.dimensions };
       } catch (err) {
+        rethrowStoreNotImplemented(err);
         reply.code(400);
         return { error: err instanceof Error ? err.message : String(err) };
       }
@@ -5155,12 +5206,13 @@ export function createApp(
         }))
       );
       try {
-        const result = store.addKnowledgeBaseChunks({
+        const result = await store.addKnowledgeBaseChunks({
           knowledgeBaseId: request.params.id,
           chunks
         });
         return { inserted: result.inserted, dimensions: result.dimensions, sourceId };
       } catch (err) {
+        rethrowStoreNotImplemented(err);
         reply.code(400);
         return { error: err instanceof Error ? err.message : String(err) };
       }
@@ -5189,7 +5241,7 @@ export function createApp(
     async (request, reply) => {
       const user = await requireRole(request, reply, ["builder"]);
       if (!user) return;
-      const access = knowledgeBaseAccess(user, request.params.id, "workflow:write");
+      const access = await knowledgeBaseAccess(user, request.params.id, "workflow:write");
       if (!access.ok) return denyRunAccess(reply, access);
       const kb = access.kb;
       const body = request.body as Partial<{
@@ -5258,11 +5310,11 @@ export function createApp(
 
       // 4. Persist
       try {
-        const result = store.addKnowledgeBaseChunks({
+        const result = await store.addKnowledgeBaseChunks({
           knowledgeBaseId: request.params.id,
           chunks: chunksToInsert
         });
-        auditService.record({
+        await auditService.record({
           category: "system",
           eventType: "knowledge_base.upload",
           action: "ingest",
@@ -5284,6 +5336,7 @@ export function createApp(
           dimensions: result.dimensions
         };
       } catch (err) {
+        rethrowStoreNotImplemented(err);
         reply.code(400);
         return { error: err instanceof Error ? err.message : String(err) };
       }
@@ -5293,12 +5346,12 @@ export function createApp(
   app.get<{ Params: { id: string } }>("/api/knowledge-bases/:id/chunks", async (request, reply) => {
     const user = await requireRole(request, reply, ["builder"]);
     if (!user) return;
-    const access = knowledgeBaseAccess(user, request.params.id, "workflow:read");
+    const access = await knowledgeBaseAccess(user, request.params.id, "workflow:read");
     if (!access.ok) return denyRunAccess(reply, access);
     const kb = access.kb;
     const query = request.query as { limit?: string; sourceId?: string } | undefined;
     return {
-      chunks: store.listKnowledgeBaseChunkPreviews({
+      chunks: await store.listKnowledgeBaseChunkPreviews({
         knowledgeBaseId: request.params.id,
         limit: query?.limit ? Number(query.limit) : 50,
         sourceId: query?.sourceId
@@ -5311,16 +5364,16 @@ export function createApp(
     async (request, reply) => {
       const user = await requireRole(request, reply, ["admin"]);
       if (!user) return;
-      const kb = store.getKnowledgeBase(request.params.id);
+      const kb = await store.getKnowledgeBase(request.params.id);
       if (!kb) {
         reply.code(404);
         return { error: "Knowledge base not found" };
       }
-      const removed = store.deleteKnowledgeBaseChunksBySource({
+      const removed = await store.deleteKnowledgeBaseChunksBySource({
         knowledgeBaseId: request.params.id,
         sourceId: request.params.sourceId
       });
-      auditService.record({
+      await auditService.record({
         category: "system",
         eventType: "knowledge_base.source.deleted",
         action: "delete",
@@ -5343,7 +5396,7 @@ export function createApp(
     async (request, reply) => {
       const user = await requireRole(request, reply, ["builder"]);
       if (!user) return;
-      const access = knowledgeBaseAccess(user, request.params.id, "workflow:read");
+      const access = await knowledgeBaseAccess(user, request.params.id, "workflow:read");
       if (!access.ok) return denyRunAccess(reply, access);
       const kb = access.kb;
       const body = request.body as Partial<{ query: string; topK: number }> | undefined;
@@ -5358,11 +5411,11 @@ export function createApp(
       }
       const adapter = new KnowledgeBaseVectorStoreAdapter(
         {
-          addKnowledgeBaseChunks: (i) => store.addKnowledgeBaseChunks(i),
-          listKnowledgeBaseChunks: (kbId) => store.listKnowledgeBaseChunks(kbId),
-          bm25SearchKnowledgeBase: (i) => store.bm25SearchKnowledgeBase(i),
-          getKnowledgeBase: (kbId) => {
-            const k = store.getKnowledgeBase(kbId);
+          addKnowledgeBaseChunks: async (i) => await store.addKnowledgeBaseChunks(i),
+          listKnowledgeBaseChunks: async (kbId) => await store.listKnowledgeBaseChunks(kbId),
+          bm25SearchKnowledgeBase: async (i) => await store.bm25SearchKnowledgeBase(i),
+          getKnowledgeBase: async (kbId) => {
+            const k = await store.getKnowledgeBase(kbId);
             return k ? { id: k.id, embedderId: k.embedderId, dimensions: k.dimensions } : null;
           }
         },
@@ -5377,14 +5430,14 @@ export function createApp(
   app.get<{ Params: { id: string } }>("/api/audit-export/destinations/:id/runs", async (request, reply) => {
     const user = await requireRole(request, reply, ["admin"]);
     if (!user) return;
-    const existing = store.getAuditExportDestination(request.params.id);
+    const existing = await store.getAuditExportDestination(request.params.id);
     if (!existing) {
       reply.code(404);
       return { error: "Destination not found" };
     }
     const query = request.query as { limit?: string } | undefined;
     return {
-      runs: store.listAuditExportRuns(request.params.id, query?.limit ? Number(query.limit) : 25)
+      runs: await store.listAuditExportRuns(request.params.id, query?.limit ? Number(query.limit) : 25)
     };
   });
 
@@ -5394,8 +5447,8 @@ export function createApp(
     if (!user) return;
     return {
       workerMode,
-      leader: leaderElection.getStatus(),
-      leases: store.listLeases()
+      leader: await leaderElection.getStatus(),
+      leases: await store.listLeases()
     };
   });
 
@@ -5494,12 +5547,12 @@ export function createApp(
     runAccess,
     denyRunAccess,
     canUseSecret: canUseJudgeSecret,
-    audit: (request, user, event) => audit(request, user, event),
+    audit: async (request, user, event) => await audit(request, user, event),
     sseHeartbeatMs: config.SSE_HEARTBEAT_INTERVAL_MS,
     strictIsolation: config.PROJECT_ISOLATION === "strict",
-    goldenSetChangeDenial: (user, datasetId, change, target) => releaseService.goldenSetChangeDenial(user, datasetId, change, target),
-    releaseGateAdmission: (run) => releaseService.jobGateAdmission(run),
-    gateCasesRemoval: (user, workflowId, target) => releaseService.gateCasesRemoval(user, workflowId, target)
+    goldenSetChangeDenial: async (user, datasetId, change, target) => await releaseService.goldenSetChangeDenial(user, datasetId, change, target),
+    releaseGateAdmission: async (run) => await releaseService.jobGateAdmission(run),
+    gateCasesRemoval: async (user, workflowId, target) => await releaseService.gateCasesRemoval(user, workflowId, target)
   });
 
   app.get("/widget.js", async (_request, reply) => {
@@ -5551,12 +5604,12 @@ export function createApp(
 
     // A webhook path is a capability (for unauthenticated webhooks it is the
     // only secret), so only workflows the user can read are listed.
-    const readable = runAccess.readableWorkflowIds(user);
+    const readable = await runAccess.readableWorkflowIds(user);
     const readableIds = readable && new Set(readable);
-    const workflows = store.listWorkflows();
+    const workflows = await store.listWorkflows();
     for (const summary of workflows) {
       if (readableIds && !readableIds.has(summary.id)) continue;
-      const workflow = store.getWorkflow(summary.id);
+      const workflow = await store.getWorkflow(summary.id);
       if (!workflow) continue;
       for (const endpoint of listWebhookEndpoints(workflow)) {
         endpoints.push({
@@ -5584,7 +5637,7 @@ export function createApp(
       };
     }
 
-    const existingUsers = authService.countUsers();
+    const existingUsers = await authService.countUsers();
     let actor: SafeUser | null = null;
 
     if (existingUsers > 0 && !config.AUTH_ALLOW_PUBLIC_REGISTER) {
@@ -5593,7 +5646,7 @@ export function createApp(
         return;
       }
     } else if (existingUsers > 0 && config.AUTH_ALLOW_PUBLIC_REGISTER) {
-      actor = authService.getSessionUser(getSessionIdFromRequest(request));
+      actor = await authService.getSessionUser(getSessionIdFromRequest(request));
     }
 
     const requestedRole: UserRole = parsed.data.role ?? (parsed.data.admin ? "admin" : "viewer");
@@ -5608,12 +5661,12 @@ export function createApp(
     }
 
     try {
-      const user = authService.register({
+      const user = await authService.register({
         email: parsed.data.email,
         password: parsed.data.password,
         role
       });
-      audit(request, actor ?? null, {
+      await audit(request, actor ?? null, {
         category: "auth",
         eventType: "user.register",
         action: "register",
@@ -5623,7 +5676,7 @@ export function createApp(
       });
       return { user };
     } catch (error) {
-      audit(request, actor ?? null, {
+      await audit(request, actor ?? null, {
         category: "auth",
         eventType: "user.register",
         action: "register",
@@ -5648,16 +5701,16 @@ export function createApp(
     }
 
     try {
-      const result = authService.login(parsed.data.email, parsed.data.password);
+      const result = await authService.login(parsed.data.email, parsed.data.password);
       // MFA gate: if the user has MFA enabled (or MFA_ENFORCE is on for admin), require a challenge step.
-      const mfaStatus = mfaService.status(result.user.id);
+      const mfaStatus = await mfaService.status(result.user.id);
       const mustProvideMfa = mfaStatus.enabled || (config.MFA_ENFORCE && result.user.role === "admin");
       if (mustProvideMfa) {
         if (!mfaStatus.enabled) {
           // MFA enforced but not enrolled — still issue the session so user can enrol immediately,
           // but flag it so the UI can redirect to the MFA enrolment flow.
           setSessionCookie(reply, result.sessionId);
-          audit(request, result.user, {
+          await audit(request, result.user, {
             category: "auth",
             eventType: "user.login",
             action: "login",
@@ -5672,9 +5725,9 @@ export function createApp(
           };
         }
         // Revoke the freshly-created session and exchange it for a short-lived MFA challenge token.
-        store.revokeSession(result.sessionId);
+        await store.revokeSession(result.sessionId);
         const challengeId = issueMfaChallenge(result.user.id);
-        audit(request, result.user, {
+        await audit(request, result.user, {
           category: "auth",
           eventType: "user.login.mfa_challenge",
           action: "login",
@@ -5689,7 +5742,7 @@ export function createApp(
         };
       }
       setSessionCookie(reply, result.sessionId);
-      audit(request, result.user, {
+      await audit(request, result.user, {
         category: "auth",
         eventType: "user.login",
         action: "login",
@@ -5701,7 +5754,7 @@ export function createApp(
         expiresAt: result.expiresAt
       };
     } catch (error) {
-      audit(request, null, {
+      await audit(request, null, {
         category: "auth",
         eventType: "user.login",
         action: "login",
@@ -5728,11 +5781,11 @@ export function createApp(
       reply.code(401);
       return { error: "MFA challenge expired or invalid" };
     }
-    if (!mfaService.verify(userId, code)) {
+    if (!await mfaService.verify(userId, code)) {
       reply.code(401);
       return { error: "Invalid MFA code" };
     }
-    const storeUser = store.getUserById(userId);
+    const storeUser = await store.getUserById(userId);
     if (!storeUser) {
       reply.code(401);
       return { error: "User not found" };
@@ -5748,19 +5801,19 @@ export function createApp(
           ? storeUser.role
           : "viewer"
     };
-    const { expiresAt } = issueSessionForUser(safeUser, reply);
+    const { expiresAt } = await issueSessionForUser(safeUser, reply);
     return { user: safeUser, expiresAt };
   });
 
   app.post("/api/auth/logout", async (request, reply) => {
     const sessionId = getSessionIdFromRequest(request);
-    const sessionUser = sessionId ? authService.getSessionUser(sessionId) : null;
+    const sessionUser = sessionId ? await authService.getSessionUser(sessionId) : null;
     if (sessionId) {
-      authService.logout(sessionId);
+      await authService.logout(sessionId);
     }
     clearSessionCookie(reply);
     if (sessionUser) {
-      audit(request, sessionUser, {
+      await audit(request, sessionUser, {
         category: "auth",
         eventType: "user.logout",
         action: "logout",
@@ -5776,8 +5829,8 @@ export function createApp(
     if (!user) {
       return;
     }
-    const mfa = mfaService.status(user.id);
-    const memberships = rbacService.listUserProjects(user.id);
+    const mfa = await mfaService.status(user.id);
+    const memberships = await rbacService.listUserProjects(user.id);
     return { user, mfa, memberships };
   });
 
@@ -5788,19 +5841,19 @@ export function createApp(
   app.get("/api/auth/mfa/status", async (request, reply) => {
     const user = await requireRole(request, reply, ["viewer"]);
     if (!user) return;
-    return mfaService.status(user.id);
+    return await mfaService.status(user.id);
   });
 
   app.post("/api/auth/mfa/enroll", async (request, reply) => {
     const user = await requireRole(request, reply, ["viewer"]);
     if (!user) return;
-    const existing = mfaService.status(user.id);
+    const existing = await mfaService.status(user.id);
     if (existing.enabled) {
       reply.code(409);
       return { error: "MFA is already enabled for this account. Disable it first to re-enrol." };
     }
-    const enrollment = mfaService.enroll(user.id, user.email);
-    audit(request, user, {
+    const enrollment = await mfaService.enroll(user.id, user.email);
+    await audit(request, user, {
       category: "mfa",
       eventType: "mfa.enroll",
       action: "enroll",
@@ -5823,9 +5876,9 @@ export function createApp(
       reply.code(400);
       return { error: "code is required" };
     }
-    const ok = mfaService.activate(user.id, code);
+    const ok = await mfaService.activate(user.id, code);
     if (!ok) {
-      audit(request, user, {
+      await audit(request, user, {
         category: "mfa",
         eventType: "mfa.activate",
         action: "activate",
@@ -5836,7 +5889,7 @@ export function createApp(
       reply.code(401);
       return { error: "Invalid activation code" };
     }
-    audit(request, user, {
+    await audit(request, user, {
       category: "mfa",
       eventType: "mfa.activate",
       action: "activate",
@@ -5851,15 +5904,15 @@ export function createApp(
     if (!user) return;
     const body = asRecord(request.body);
     const code = typeof body.code === "string" ? body.code.trim() : "";
-    const status = mfaService.status(user.id);
+    const status = await mfaService.status(user.id);
     if (status.enabled) {
-      if (!code || !mfaService.verify(user.id, code)) {
+      if (!code || !await mfaService.verify(user.id, code)) {
         reply.code(401);
         return { error: "A valid MFA code is required to disable MFA" };
       }
     }
-    mfaService.disable(user.id);
-    audit(request, user, {
+    await mfaService.disable(user.id);
+    await audit(request, user, {
       category: "mfa",
       eventType: "mfa.disable",
       action: "disable",
@@ -5882,7 +5935,7 @@ export function createApp(
   app.get("/api/auth/api-keys", async (request, reply) => {
     const user = await requireRole(request, reply, ["viewer"]);
     if (!user) return;
-    const keys = user.role === "admin" ? apiKeyService.list() : apiKeyService.list(user.id);
+    const keys = user.role === "admin" ? await apiKeyService.list() : await apiKeyService.list(user.id);
     return { keys };
   });
 
@@ -5894,13 +5947,13 @@ export function createApp(
       reply.code(400);
       return { error: "Invalid API key payload", details: parsed.error.issues };
     }
-    const { plaintext, record } = apiKeyService.create({
+    const { plaintext, record } = await apiKeyService.create({
       userId: user.id,
       name: parsed.data.name,
       scopes: parsed.data.scopes,
       expiresInDays: parsed.data.expiresInDays ?? null
     });
-    audit(request, user, {
+    await audit(request, user, {
       category: "api_key",
       eventType: "api_key.create",
       action: "create",
@@ -5917,12 +5970,12 @@ export function createApp(
   app.delete<{ Params: { id: string } }>("/api/auth/api-keys/:id", async (request, reply) => {
     const user = await requireRole(request, reply, ["viewer"]);
     if (!user) return;
-    const ok = apiKeyService.revoke(request.params.id, user.role === "admin" ? undefined : user.id);
+    const ok = await apiKeyService.revoke(request.params.id, user.role === "admin" ? undefined : user.id);
     if (!ok) {
       reply.code(404);
       return { error: "API key not found" };
     }
-    audit(request, user, {
+    await audit(request, user, {
       category: "api_key",
       eventType: "api_key.revoke",
       action: "revoke",
@@ -5977,13 +6030,13 @@ export function createApp(
         reply.code(400);
         return { error: "SAML assertion did not include an email or nameId" };
       }
-      const { user, created } = provisionSsoUser({
+      const { user, created } = await provisionSsoUser({
         provider: "saml",
         subject: profile.nameId,
         email,
         groups: profile.groups
       });
-      const { expiresAt } = issueSessionForUser(user, reply);
+      const { expiresAt } = await issueSessionForUser(user, reply);
       return { user, expiresAt, provisioned: created };
     } catch (error) {
       reply.code(401);
@@ -6007,13 +6060,13 @@ export function createApp(
     }
     try {
       const profile = await ldapService.authenticate(email, password);
-      const { user, created } = provisionSsoUser({
+      const { user, created } = await provisionSsoUser({
         provider: "ldap",
         subject: profile.dn || profile.email,
         email: profile.email,
         groups: profile.groups
       });
-      const { expiresAt } = issueSessionForUser(user, reply);
+      const { expiresAt } = await issueSessionForUser(user, reply);
       return { user, expiresAt, provisioned: created };
     } catch (error) {
       const err = error as Error & { code?: string };
@@ -6038,7 +6091,7 @@ export function createApp(
     const user = await requireRole(request, reply, ["admin"]);
     if (!user) return;
     const provider = typeof request.query?.provider === "string" ? request.query.provider : undefined;
-    return { mappings: rbacService.listSsoGroupMappings(provider) };
+    return { mappings: await rbacService.listSsoGroupMappings(provider) };
   });
 
   app.post<{ Body: unknown }>("/api/auth/sso/mappings", async (request, reply) => {
@@ -6049,7 +6102,7 @@ export function createApp(
       reply.code(400);
       return { error: "Invalid SSO mapping payload", details: parsed.error.issues };
     }
-    const id = rbacService.upsertSsoGroupMapping({
+    const id = await rbacService.upsertSsoGroupMapping({
       provider: parsed.data.provider,
       groupName: parsed.data.groupName,
       projectId: parsed.data.projectId ?? null,
@@ -6062,7 +6115,7 @@ export function createApp(
   app.delete<{ Params: { id: string } }>("/api/auth/sso/mappings/:id", async (request, reply) => {
     const user = await requireRole(request, reply, ["admin"]);
     if (!user) return;
-    const ok = rbacService.deleteSsoGroupMapping(request.params.id);
+    const ok = await rbacService.deleteSsoGroupMapping(request.params.id);
     if (!ok) {
       reply.code(404);
       return { error: "SSO mapping not found" };
@@ -6097,7 +6150,7 @@ export function createApp(
   app.get("/api/external-providers", async (request, reply) => {
     const user = await requireRole(request, reply, ["builder"]);
     if (!user) return;
-    return { providers: externalSecretsService.listProviders() };
+    return { providers: await externalSecretsService.listProviders() };
   });
 
   app.post<{ Body: unknown }>("/api/external-providers", async (request, reply) => {
@@ -6109,7 +6162,7 @@ export function createApp(
       return { error: "Invalid external provider payload", details: parsed.error.issues };
     }
     if (parsed.data.credentialsSecretId) {
-      const credRow = store.getSecret(parsed.data.credentialsSecretId);
+      const credRow = await store.getSecret(parsed.data.credentialsSecretId);
       if (!credRow) {
         reply.code(400);
         return { error: "credentialsSecretId does not exist" };
@@ -6120,7 +6173,7 @@ export function createApp(
       }
     }
     try {
-      const id = externalSecretsService.createProvider({
+      const id = await externalSecretsService.createProvider({
         name: parsed.data.name,
         type: parsed.data.type,
         config: parsed.data.config ?? {},
@@ -6128,7 +6181,7 @@ export function createApp(
         cacheTtlMs: parsed.data.cacheTtlMs ?? config.EXTERNAL_SECRETS_CACHE_TTL_MS,
         createdBy: user.email
       });
-      audit(request, user, {
+      await audit(request, user, {
         category: "external_secret",
         eventType: "external_provider.create",
         action: "create",
@@ -6136,8 +6189,9 @@ export function createApp(
         resourceId: id,
         metadata: { name: parsed.data.name, type: parsed.data.type }
       });
-      return { id, provider: externalSecretsService.getProvider(id) };
+      return { id, provider: await externalSecretsService.getProvider(id) };
     } catch (err) {
+      rethrowStoreNotImplemented(err);
       reply.code(400);
       return { error: err instanceof Error ? err.message : "Failed to create external provider" };
     }
@@ -6153,7 +6207,7 @@ export function createApp(
         reply.code(400);
         return { error: "Invalid provider payload", details: parsed.error.issues };
       }
-      const ok = externalSecretsService.updateProvider(request.params.id, {
+      const ok = await externalSecretsService.updateProvider(request.params.id, {
         name: parsed.data.name,
         config: parsed.data.config,
         credentialsSecretId: parsed.data.credentialsSecretId ?? null,
@@ -6164,26 +6218,26 @@ export function createApp(
         reply.code(404);
         return { error: "External provider not found" };
       }
-      audit(request, user, {
+      await audit(request, user, {
         category: "external_secret",
         eventType: "external_provider.update",
         action: "update",
         resourceType: "external_provider",
         resourceId: request.params.id
       });
-      return { provider: externalSecretsService.getProvider(request.params.id) };
+      return { provider: await externalSecretsService.getProvider(request.params.id) };
     }
   );
 
   app.delete<{ Params: { id: string } }>("/api/external-providers/:id", async (request, reply) => {
     const user = await requireRole(request, reply, ["admin"]);
     if (!user) return;
-    const result = externalSecretsService.deleteProvider(request.params.id);
+    const result = await externalSecretsService.deleteProvider(request.params.id);
     if (!result.ok) {
       reply.code(result.reason ? 409 : 404);
       return { error: result.reason ?? "External provider not found" };
     }
-    audit(request, user, {
+    await audit(request, user, {
       category: "external_secret",
       eventType: "external_provider.delete",
       action: "delete",
@@ -6198,7 +6252,7 @@ export function createApp(
     async (request, reply) => {
       const user = await requireRole(request, reply, ["admin"]);
       if (!user) return;
-      const provider = externalSecretsService.getProvider(request.params.id);
+      const provider = await externalSecretsService.getProvider(request.params.id);
       if (!provider) {
         reply.code(404);
         return { error: "External provider not found" };
@@ -6219,7 +6273,7 @@ export function createApp(
           credentials: credentialValue,
           key
         });
-        audit(request, user, {
+        await audit(request, user, {
           category: "external_secret",
           eventType: "external_provider.test",
           action: "test",
@@ -6230,7 +6284,7 @@ export function createApp(
         return { ok: true, length: value.length };
       } catch (err) {
         const e = err as Error & { code?: string };
-        audit(request, user, {
+        await audit(request, user, {
           category: "external_secret",
           eventType: "external_provider.test",
           action: "test",
@@ -6271,7 +6325,7 @@ export function createApp(
       reply.code(400);
       return { error: "Invalid audit filter", details: parsed.error.issues };
     }
-    return auditService.list(parsed.data);
+    return await auditService.list(parsed.data);
   });
 
   app.get("/api/audit/export", async (request, reply) => {
@@ -6282,8 +6336,8 @@ export function createApp(
       reply.code(400);
       return { error: "Invalid audit filter", details: parsed.error.issues };
     }
-    const csv = auditService.exportCsv(parsed.data);
-    audit(request, user, {
+    const csv = await auditService.exportCsv(parsed.data);
+    await audit(request, user, {
       category: "system",
       eventType: "audit.export",
       action: "export"
@@ -6321,7 +6375,7 @@ export function createApp(
   app.get("/api/log-streams", async (request, reply) => {
     const user = await requireRole(request, reply, ["admin"]);
     if (!user) return;
-    return { destinations: logStreamingService.listDestinations() };
+    return { destinations: await logStreamingService.listDestinations() };
   });
 
   app.post("/api/log-streams", async (request, reply) => {
@@ -6333,11 +6387,11 @@ export function createApp(
       return { error: "Invalid log stream destination payload", details: parsed.error.issues };
     }
     try {
-      const destination = logStreamingService.createDestination({
+      const destination = await logStreamingService.createDestination({
         ...parsed.data,
         createdBy: user.id
       });
-      audit(request, user, {
+      await audit(request, user, {
         category: "system",
         eventType: "log_stream.destination.create",
         action: "create",
@@ -6347,6 +6401,7 @@ export function createApp(
       });
       return { destination };
     } catch (err) {
+      rethrowStoreNotImplemented(err);
       reply.code(400);
       return { error: err instanceof Error ? err.message : String(err) };
     }
@@ -6361,12 +6416,12 @@ export function createApp(
       return { error: "Invalid log stream destination payload", details: parsed.error.issues };
     }
     try {
-      const destination = logStreamingService.updateDestination(request.params.id, parsed.data);
+      const destination = await logStreamingService.updateDestination(request.params.id, parsed.data);
       if (!destination) {
         reply.code(404);
         return { error: "Log stream destination not found" };
       }
-      audit(request, user, {
+      await audit(request, user, {
         category: "system",
         eventType: "log_stream.destination.update",
         action: "update",
@@ -6376,6 +6431,7 @@ export function createApp(
       });
       return { destination };
     } catch (err) {
+      rethrowStoreNotImplemented(err);
       reply.code(400);
       return { error: err instanceof Error ? err.message : String(err) };
     }
@@ -6384,13 +6440,13 @@ export function createApp(
   app.delete<{ Params: { id: string } }>("/api/log-streams/:id", async (request, reply) => {
     const user = await requireRole(request, reply, ["admin"]);
     if (!user) return;
-    const existing = logStreamingService.getDestination(request.params.id);
+    const existing = await logStreamingService.getDestination(request.params.id);
     if (!existing) {
       reply.code(404);
       return { error: "Log stream destination not found" };
     }
-    logStreamingService.deleteDestination(request.params.id);
-    audit(request, user, {
+    await logStreamingService.deleteDestination(request.params.id);
+    await audit(request, user, {
       category: "system",
       eventType: "log_stream.destination.delete",
       action: "delete",
@@ -6405,7 +6461,7 @@ export function createApp(
     const user = await requireRole(request, reply, ["admin"]);
     if (!user) return;
     const result = await logStreamingService.test(request.params.id);
-    audit(request, user, {
+    await audit(request, user, {
       category: "system",
       eventType: "log_stream.destination.test",
       action: "test",
@@ -6421,12 +6477,12 @@ export function createApp(
   app.get<{ Params: { id: string } }>("/api/log-streams/:id/events", async (request, reply) => {
     const user = await requireRole(request, reply, ["admin"]);
     if (!user) return;
-    const existing = logStreamingService.getDestination(request.params.id);
+    const existing = await logStreamingService.getDestination(request.params.id);
     if (!existing) {
       reply.code(404);
       return { error: "Log stream destination not found" };
     }
-    return { events: logStreamingService.listDeliveryEvents(request.params.id, 100) };
+    return { events: await logStreamingService.listDeliveryEvents(request.params.id, 100) };
   });
 
   // ---------------------------------------------------------------------------
@@ -6449,17 +6505,17 @@ export function createApp(
     const query = request.query as { projectId?: string } | undefined;
     const projectId = query?.projectId;
     if (projectId) {
-      if (user.role !== "admin" && !rbacService.can(user, projectId, "workflow:read")) {
+      if (user.role !== "admin" && !await rbacService.can(user, projectId, "workflow:read")) {
         reply.code(403);
         return { error: "Insufficient permissions for project" };
       }
-      return { variables: variablesService.list(projectId) };
+      return { variables: await variablesService.list(projectId) };
     }
     if (user.role !== "admin") {
       reply.code(403);
       return { error: "projectId query parameter required" };
     }
-    return { variables: variablesService.list() };
+    return { variables: await variablesService.list() };
   });
 
   app.post<{ Body: unknown }>("/api/variables", async (request, reply) => {
@@ -6470,13 +6526,13 @@ export function createApp(
       reply.code(400);
       return { error: "Invalid variable payload", details: parsed.error.issues };
     }
-    if (user.role !== "admin" && !rbacService.can(user, parsed.data.projectId, "workflow:write")) {
+    if (user.role !== "admin" && !await rbacService.can(user, parsed.data.projectId, "workflow:write")) {
       reply.code(403);
       return { error: "Insufficient permissions to manage variables" };
     }
     try {
-      const record = variablesService.create({ ...parsed.data, createdBy: user.id });
-      audit(request, user, {
+      const record = await variablesService.create({ ...parsed.data, createdBy: user.id });
+      await audit(request, user, {
         category: "project",
         eventType: "variable.create",
         action: "create",
@@ -6487,6 +6543,7 @@ export function createApp(
       });
       return { variable: record };
     } catch (err) {
+      rethrowStoreNotImplemented(err);
       reply.code(400);
       return { error: err instanceof Error ? err.message : String(err) };
     }
@@ -6495,12 +6552,12 @@ export function createApp(
   app.put<{ Params: { id: string }; Body: unknown }>("/api/variables/:id", async (request, reply) => {
     const user = await requireRole(request, reply, ["builder"]);
     if (!user) return;
-    const existing = variablesService.get(request.params.id);
+    const existing = await variablesService.get(request.params.id);
     if (!existing) {
       reply.code(404);
       return { error: "Variable not found" };
     }
-    if (user.role !== "admin" && !rbacService.can(user, existing.projectId, "workflow:write")) {
+    if (user.role !== "admin" && !await rbacService.can(user, existing.projectId, "workflow:write")) {
       reply.code(403);
       return { error: "Insufficient permissions to manage variables" };
     }
@@ -6510,12 +6567,12 @@ export function createApp(
       return { error: "Invalid variable payload", details: parsed.error.issues };
     }
     try {
-      const record = variablesService.update(request.params.id, parsed.data);
+      const record = await variablesService.update(request.params.id, parsed.data);
       if (!record) {
         reply.code(404);
         return { error: "Variable not found" };
       }
-      audit(request, user, {
+      await audit(request, user, {
         category: "project",
         eventType: "variable.update",
         action: "update",
@@ -6526,6 +6583,7 @@ export function createApp(
       });
       return { variable: record };
     } catch (err) {
+      rethrowStoreNotImplemented(err);
       reply.code(400);
       return { error: err instanceof Error ? err.message : String(err) };
     }
@@ -6534,17 +6592,17 @@ export function createApp(
   app.delete<{ Params: { id: string } }>("/api/variables/:id", async (request, reply) => {
     const user = await requireRole(request, reply, ["builder"]);
     if (!user) return;
-    const existing = variablesService.get(request.params.id);
+    const existing = await variablesService.get(request.params.id);
     if (!existing) {
       reply.code(404);
       return { error: "Variable not found" };
     }
-    if (user.role !== "admin" && !rbacService.can(user, existing.projectId, "workflow:write")) {
+    if (user.role !== "admin" && !await rbacService.can(user, existing.projectId, "workflow:write")) {
       reply.code(403);
       return { error: "Insufficient permissions to manage variables" };
     }
-    variablesService.delete(request.params.id);
-    audit(request, user, {
+    await variablesService.delete(request.params.id);
+    await audit(request, user, {
       category: "project",
       eventType: "variable.delete",
       action: "delete",
@@ -6563,10 +6621,10 @@ export function createApp(
   app.get<{ Params: { id: string } }>("/api/workflows/:id/versions", async (request, reply) => {
     const user = await requireRole(request, reply, ["viewer"]);
     if (!user) return;
-    const access = runAccess.workflow(user, request.params.id, "workflow:read");
+    const access = await runAccess.workflow(user, request.params.id, "workflow:read");
     if (!access.ok) return denyRunAccess(reply, access);
     const workflow = access.workflow;
-    return { versions: workflowVersionService.list(request.params.id) };
+    return { versions: await workflowVersionService.list(request.params.id) };
   });
 
   app.get<{ Params: { id: string; version: string } }>(
@@ -6574,14 +6632,14 @@ export function createApp(
     async (request, reply) => {
       const user = await requireRole(request, reply, ["viewer"]);
       if (!user) return;
-      const access = runAccess.workflow(user, request.params.id, "workflow:read");
+      const access = await runAccess.workflow(user, request.params.id, "workflow:read");
       if (!access.ok) return denyRunAccess(reply, access);
       const version = Number.parseInt(request.params.version, 10);
       if (!Number.isFinite(version) || version <= 0) {
         reply.code(400);
         return { error: "Invalid version number" };
       }
-      const entry = workflowVersionService.get(request.params.id, version);
+      const entry = await workflowVersionService.get(request.params.id, version);
       if (!entry) {
         reply.code(404);
         return { error: "Version not found" };
@@ -6595,14 +6653,14 @@ export function createApp(
     async (request, reply) => {
       const user = await requireRole(request, reply, ["builder"]);
       if (!user) return;
-      const access = runAccess.workflow(user, request.params.id, "workflow:write");
+      const access = await runAccess.workflow(user, request.params.id, "workflow:write");
       if (!access.ok) return denyRunAccess(reply, access);
       const version = Number.parseInt(request.params.version, 10);
       if (!Number.isFinite(version) || version <= 0) {
         reply.code(400);
         return { error: "Invalid version number" };
       }
-      const entry = workflowVersionService.get(request.params.id, version);
+      const entry = await workflowVersionService.get(request.params.id, version);
       if (!entry) {
         reply.code(404);
         return { error: "Version not found" };
@@ -6611,17 +6669,17 @@ export function createApp(
         ...entry.workflow,
         workflowVersion: (entry.workflow.workflowVersion ?? 1) + 1
       };
-      const saveDenial = workflowSaveDenial(user, restoredWorkflow);
+      const saveDenial = await workflowSaveDenial(user, restoredWorkflow);
       if (saveDenial) return denyRunAccess(reply, saveDenial);
-      const saved = store.upsertWorkflow(restoredWorkflow, { createdBy: user.id });
-      workflowVersionService.snapshot({
+      const saved = await store.upsertWorkflow(restoredWorkflow, { createdBy: user.id });
+      await workflowVersionService.snapshot({
         workflow: saved,
         createdBy: user.id,
         changeNote: `restored from v${version}`
       });
-      schedulerService?.reloadWorkflow(saved.id);
-      triggerService?.reloadWorkflow(saved.id);
-      audit(request, user, {
+      await schedulerService?.reloadWorkflow(saved.id);
+      await triggerService?.reloadWorkflow(saved.id);
+      await audit(request, user, {
         category: "workflow",
         eventType: "workflow.restore",
         action: "restore",
@@ -6656,7 +6714,7 @@ export function createApp(
   app.get("/api/git", async (request, reply) => {
     const user = await requireRole(request, reply, ["admin"]);
     if (!user) return;
-    return { config: gitSyncService.getConfig(), status: gitSyncService.status() };
+    return { config: await gitSyncService.getConfig(), status: await gitSyncService.status() };
   });
 
   app.put<{ Body: unknown }>("/api/git", async (request, reply) => {
@@ -6668,8 +6726,8 @@ export function createApp(
       return { error: "Invalid git config", details: parsed.error.issues };
     }
     try {
-      const config = gitSyncService.configure(parsed.data);
-      audit(request, user, {
+      const config = await gitSyncService.configure(parsed.data);
+      await audit(request, user, {
         category: "system",
         eventType: "git.configure",
         action: "update",
@@ -6677,8 +6735,9 @@ export function createApp(
         resourceId: "default",
         metadata: { repoUrl: parsed.data.repoUrl, defaultBranch: config.defaultBranch }
       });
-      return { config, status: gitSyncService.status() };
+      return { config, status: await gitSyncService.status() };
     } catch (err) {
+      rethrowStoreNotImplemented(err);
       reply.code(400);
       return { error: err instanceof Error ? err.message : String(err) };
     }
@@ -6687,12 +6746,12 @@ export function createApp(
   app.delete("/api/git", async (request, reply) => {
     const user = await requireRole(request, reply, ["admin"]);
     if (!user) return;
-    const existed = gitSyncService.disconnect();
+    const existed = await gitSyncService.disconnect();
     if (!existed) {
       reply.code(404);
       return { error: "Git is not configured" };
     }
-    audit(request, user, {
+    await audit(request, user, {
       category: "system",
       eventType: "git.disconnect",
       action: "delete",
@@ -6705,7 +6764,7 @@ export function createApp(
   app.get("/api/git/status", async (request, reply) => {
     const user = await requireRole(request, reply, ["admin"]);
     if (!user) return;
-    return gitSyncService.status();
+    return await gitSyncService.status();
   });
 
   app.post<{ Body: unknown }>("/api/git/push", async (request, reply) => {
@@ -6718,7 +6777,7 @@ export function createApp(
     }
     try {
       const result = await gitSyncService.push({ ...parsed.data, createdBy: user.id });
-      audit(request, user, {
+      await audit(request, user, {
         category: "system",
         eventType: "git.push",
         action: "push",
@@ -6736,6 +6795,7 @@ export function createApp(
       if (!result.ok) reply.code(400);
       return result;
     } catch (err) {
+      rethrowStoreNotImplemented(err);
       reply.code(400);
       return { ok: false, error: err instanceof Error ? err.message : String(err) };
     }
@@ -6751,8 +6811,8 @@ export function createApp(
     }
     try {
       // Phase 15.4 — a pulled workflow may not take a production path another workflow serves: that one is refused, the rest import.
-      const result = await gitSyncService.pull({ ...parsed.data, createdBy: user.id, canImport: (workflow) => releaseService.claimConflict(user, workflow) });
-      audit(request, user, {
+      const result = await gitSyncService.pull({ ...parsed.data, createdBy: user.id, canImport: async (workflow) => await releaseService.claimConflict(user, workflow) });
+      await audit(request, user, {
         category: "system",
         eventType: "git.pull",
         action: "pull",
@@ -6771,6 +6831,7 @@ export function createApp(
       if (!result.ok) reply.code(400);
       return result;
     } catch (err) {
+      rethrowStoreNotImplemented(err);
       reply.code(400);
       return { ok: false, error: err instanceof Error ? err.message : String(err) };
     }
@@ -6789,27 +6850,27 @@ export function createApp(
   app.get<{ Params: { id: string } }>("/api/projects/:id/members", async (request, reply) => {
     const user = await requireRole(request, reply, ["viewer"]);
     if (!user) return;
-    const project = store.getProject(request.params.id);
+    const project = await store.getProject(request.params.id);
     if (!project) {
       reply.code(404);
       return { error: "Project not found" };
     }
-    if (!rbacService.can(user, project.id, "project:invite") && user.role !== "admin") {
+    if (!await rbacService.can(user, project.id, "project:invite") && user.role !== "admin") {
       reply.code(403);
       return { error: "Insufficient permissions to view project members" };
     }
-    return { members: rbacService.listMembers(project.id) };
+    return { members: await rbacService.listMembers(project.id) };
   });
 
   app.post<{ Params: { id: string }; Body: unknown }>("/api/projects/:id/members", async (request, reply) => {
     const user = await requireRole(request, reply, ["viewer"]);
     if (!user) return;
-    const project = store.getProject(request.params.id);
+    const project = await store.getProject(request.params.id);
     if (!project) {
       reply.code(404);
       return { error: "Project not found" };
     }
-    if (!rbacService.can(user, project.id, "project:invite") && user.role !== "admin") {
+    if (!await rbacService.can(user, project.id, "project:invite") && user.role !== "admin") {
       reply.code(403);
       return { error: "Insufficient permissions to manage members" };
     }
@@ -6818,7 +6879,7 @@ export function createApp(
       reply.code(400);
       return { error: "Invalid member payload", details: parsed.error.issues };
     }
-    const targetUser = store.getUserById(parsed.data.userId);
+    const targetUser = await store.getUserById(parsed.data.userId);
     if (!targetUser) {
       reply.code(400);
       return { error: "Target user does not exist" };
@@ -6829,17 +6890,18 @@ export function createApp(
       return { error: "role must be project_admin, editor, viewer, or custom" };
     }
     try {
-      rbacService.addMember({
+      await rbacService.addMember({
         userId: parsed.data.userId,
         projectId: project.id,
         role: role as ProjectRole | "custom",
         customRoleId: parsed.data.customRoleId ?? null
       });
     } catch (error) {
+      rethrowStoreNotImplemented(error);
       reply.code(400);
       return { error: error instanceof Error ? error.message : "Failed to add member" };
     }
-    audit(request, user, {
+    await audit(request, user, {
       category: "rbac",
       eventType: "project.member.add",
       action: "add_member",
@@ -6848,7 +6910,7 @@ export function createApp(
       projectId: project.id,
       metadata: { userId: parsed.data.userId, role, customRoleId: parsed.data.customRoleId ?? null }
     });
-    return { ok: true, membership: rbacService.getMembership(parsed.data.userId, project.id) };
+    return { ok: true, membership: await rbacService.getMembership(parsed.data.userId, project.id) };
   });
 
   app.delete<{ Params: { id: string; userId: string } }>(
@@ -6856,21 +6918,21 @@ export function createApp(
     async (request, reply) => {
       const user = await requireRole(request, reply, ["viewer"]);
       if (!user) return;
-      const project = store.getProject(request.params.id);
+      const project = await store.getProject(request.params.id);
       if (!project) {
         reply.code(404);
         return { error: "Project not found" };
       }
-      if (!rbacService.can(user, project.id, "project:invite") && user.role !== "admin") {
+      if (!await rbacService.can(user, project.id, "project:invite") && user.role !== "admin") {
         reply.code(403);
         return { error: "Insufficient permissions to remove members" };
       }
-      const ok = rbacService.removeMember(request.params.userId, project.id);
+      const ok = await rbacService.removeMember(request.params.userId, project.id);
       if (!ok) {
         reply.code(404);
         return { error: "Membership not found" };
       }
-      audit(request, user, {
+      await audit(request, user, {
         category: "rbac",
         eventType: "project.member.remove",
         action: "remove_member",
@@ -6901,7 +6963,7 @@ export function createApp(
         ? request.query.projectId
         : undefined;
     return {
-      roles: rbacService.listCustomRoles(projectId),
+      roles: await rbacService.listCustomRoles(projectId),
       availablePermissions: ALL_PERMISSIONS
     };
   });
@@ -6914,14 +6976,14 @@ export function createApp(
       reply.code(400);
       return { error: "Invalid custom role payload", details: parsed.error.issues };
     }
-    const { id } = rbacService.createCustomRole({
+    const { id } = await rbacService.createCustomRole({
       name: parsed.data.name,
       description: parsed.data.description ?? null,
       projectId: parsed.data.projectId ?? null,
       permissions: parsed.data.permissions as Permission[],
       createdBy: user.email
     });
-    audit(request, user, {
+    await audit(request, user, {
       category: "rbac",
       eventType: "custom_role.create",
       action: "create",
@@ -6930,7 +6992,7 @@ export function createApp(
       projectId: parsed.data.projectId ?? null,
       metadata: { name: parsed.data.name, permissions: parsed.data.permissions }
     });
-    return { id, role: rbacService.getCustomRole(id) };
+    return { id, role: await rbacService.getCustomRole(id) };
   });
 
   app.put<{ Params: { id: string }; Body: unknown }>("/api/custom-roles/:id", async (request, reply) => {
@@ -6941,7 +7003,7 @@ export function createApp(
       reply.code(400);
       return { error: "Invalid custom role payload", details: parsed.error.issues };
     }
-    const ok = rbacService.updateCustomRole(request.params.id, {
+    const ok = await rbacService.updateCustomRole(request.params.id, {
       name: parsed.data.name,
       description: parsed.data.description ?? null,
       projectId: parsed.data.projectId === undefined ? undefined : parsed.data.projectId,
@@ -6951,18 +7013,18 @@ export function createApp(
       reply.code(404);
       return { error: "Custom role not found" };
     }
-    return { role: rbacService.getCustomRole(request.params.id) };
+    return { role: await rbacService.getCustomRole(request.params.id) };
   });
 
   app.delete<{ Params: { id: string } }>("/api/custom-roles/:id", async (request, reply) => {
     const user = await requireRole(request, reply, ["admin"]);
     if (!user) return;
-    const ok = rbacService.deleteCustomRole(request.params.id);
+    const ok = await rbacService.deleteCustomRole(request.params.id);
     if (!ok) {
       reply.code(404);
       return { error: "Custom role not found" };
     }
-    audit(request, user, {
+    await audit(request, user, {
       category: "rbac",
       eventType: "custom_role.delete",
       action: "delete",
@@ -6984,20 +7046,20 @@ export function createApp(
   app.get<{ Params: { id: string } }>("/api/workflows/:id/shares", async (request, reply) => {
     const user = await requireRole(request, reply, ["viewer"]);
     if (!user) return;
-    const access = runAccess.workflow(user, request.params.id, "workflow:read");
+    const access = await runAccess.workflow(user, request.params.id, "workflow:read");
     if (!access.ok) return denyRunAccess(reply, access);
-    return { shares: rbacService.listWorkflowShares(access.workflow.id) };
+    return { shares: await rbacService.listWorkflowShares(access.workflow.id) };
   });
 
   app.post<{ Params: { id: string }; Body: unknown }>("/api/workflows/:id/shares", async (request, reply) => {
     const user = await requireRole(request, reply, ["viewer"]);
     if (!user) return;
     // Unreadable reads as missing; sharing needs write on the owning project.
-    const access = runAccess.workflow(user, request.params.id, "workflow:read");
+    const access = await runAccess.workflow(user, request.params.id, "workflow:read");
     if (!access.ok) return denyRunAccess(reply, access);
     const workflow = access.workflow;
     const owningProject = workflow.projectId ?? "default";
-    if (!rbacService.can(user, owningProject, "workflow:write") && user.role !== "admin") {
+    if (!await rbacService.can(user, owningProject, "workflow:write") && user.role !== "admin") {
       reply.code(403);
       return { error: "Only users with workflow:write on the owning project can share the workflow" };
     }
@@ -7006,7 +7068,7 @@ export function createApp(
       reply.code(400);
       return { error: "Invalid share payload", details: parsed.error.issues };
     }
-    if (!store.getProject(parsed.data.projectId)) {
+    if (!await store.getProject(parsed.data.projectId)) {
       reply.code(400);
       return { error: "Target project does not exist" };
     }
@@ -7014,13 +7076,13 @@ export function createApp(
       reply.code(400);
       return { error: "Cannot share a workflow to its owning project" };
     }
-    rbacService.shareWorkflow({
+    await rbacService.shareWorkflow({
       workflowId: workflow.id,
       projectId: parsed.data.projectId,
       accessLevel: parsed.data.accessLevel,
       sharedBy: user.email
     });
-    audit(request, user, {
+    await audit(request, user, {
       category: "sharing",
       eventType: "workflow.share",
       action: "share",
@@ -7037,20 +7099,20 @@ export function createApp(
     async (request, reply) => {
       const user = await requireRole(request, reply, ["viewer"]);
       if (!user) return;
-      const access = runAccess.workflow(user, request.params.id, "workflow:read");
+      const access = await runAccess.workflow(user, request.params.id, "workflow:read");
       if (!access.ok) return denyRunAccess(reply, access);
       const workflow = access.workflow;
       const owningProject = workflow.projectId ?? "default";
-      if (!rbacService.can(user, owningProject, "workflow:write") && user.role !== "admin") {
+      if (!await rbacService.can(user, owningProject, "workflow:write") && user.role !== "admin") {
         reply.code(403);
         return { error: "Insufficient permissions" };
       }
-      const ok = rbacService.unshareWorkflow(workflow.id, request.params.projectId);
+      const ok = await rbacService.unshareWorkflow(workflow.id, request.params.projectId);
       if (!ok) {
         reply.code(404);
         return { error: "Share not found" };
       }
-      audit(request, user, {
+      await audit(request, user, {
         category: "sharing",
         eventType: "workflow.unshare",
         action: "unshare",
@@ -7072,24 +7134,24 @@ export function createApp(
   });
 
   /** Secrets L2M manages for itself answer exactly like a secret that does not exist. */
-  const shareableSecret = (id: string) => {
-    const row = store.getSecret(id);
+  const shareableSecret = async (id: string) => {
+    const row = await store.getSecret(id);
     return row && !isInternalSecretProvider(row.provider) ? row : null;
   };
   // Secrets follow their project. Seeing one needs `secret:read` in its
   // project or in a project it is shared to (else it reads as missing);
   // sharing, unsharing or deleting it needs `secret:write` in its project.
-  const canSeeSecret = (user: SafeUser, secret: { id: string; projectId?: string | null }) =>
-    rbacService.can(user, secret.projectId ?? DEFAULT_PROJECT_ID, "secret:read") ||
-    rbacService.listSecretShares(secret.id).some((share) => rbacService.can(user, share.projectId, "secret:read"));
-  const secretManageDenial = (
+  const canSeeSecret = async (user: SafeUser, secret: { id: string; projectId?: string | null }) =>
+    await rbacService.can(user, secret.projectId ?? DEFAULT_PROJECT_ID, "secret:read") ||
+    await someAsync(await rbacService.listSecretShares(secret.id), (share) => rbacService.can(user, share.projectId, "secret:read"));
+  const secretManageDenial = async (
     user: SafeUser,
     secret: { id: string; projectId?: string | null },
     permission: "secret:read" | "secret:write",
     what = "Secret"
-  ): { status: 403 | 404; error: string } | null => {
-    if (!canSeeSecret(user, secret)) return { status: 404, error: `${what} not found` };
-    if (permission === "secret:write" && !rbacService.can(user, secret.projectId ?? DEFAULT_PROJECT_ID, "secret:write")) {
+  ): Promise<{ status: 403 | 404; error: string } | null> => {
+    if (!await canSeeSecret(user, secret)) return { status: 404, error: `${what} not found` };
+    if (permission === "secret:write" && !await rbacService.can(user, secret.projectId ?? DEFAULT_PROJECT_ID, "secret:write")) {
       return { status: 403, error: "Permission 'secret:write' required in the secret's project" };
     }
     return null;
@@ -7098,36 +7160,36 @@ export function createApp(
   app.get<{ Params: { id: string } }>("/api/secrets/:id/shares", async (request, reply) => {
     const user = await requireRole(request, reply, ["builder"]);
     if (!user) return;
-    const secret = shareableSecret(request.params.id);
+    const secret = await shareableSecret(request.params.id);
     if (!secret) {
       reply.code(404);
       return { error: "Secret not found" };
     }
-    const denial = secretManageDenial(user, secret, "secret:read");
+    const denial = await secretManageDenial(user, secret, "secret:read");
     if (denial) return denyRunAccess(reply, denial);
-    return { shares: rbacService.listSecretShares(request.params.id) };
+    return { shares: await rbacService.listSecretShares(request.params.id) };
   });
 
   app.post<{ Params: { id: string }; Body: unknown }>("/api/secrets/:id/shares", async (request, reply) => {
     const user = await requireRole(request, reply, ["builder"]);
     if (!user) return;
-    const secret = shareableSecret(request.params.id);
+    const secret = await shareableSecret(request.params.id);
     if (!secret) {
       reply.code(404);
       return { error: "Secret not found" };
     }
-    const denial = secretManageDenial(user, secret, "secret:write");
+    const denial = await secretManageDenial(user, secret, "secret:write");
     if (denial) return denyRunAccess(reply, denial);
     const parsed = secretShareSchema.safeParse(request.body);
     if (!parsed.success) {
       reply.code(400);
       return { error: "Invalid share payload", details: parsed.error.issues };
     }
-    if (!store.getProject(parsed.data.projectId)) {
+    if (!await store.getProject(parsed.data.projectId)) {
       reply.code(400);
       return { error: "Target project does not exist" };
     }
-    audit(request, user, {
+    await audit(request, user, {
       category: "sharing",
       eventType: "secret.share",
       action: "share",
@@ -7135,7 +7197,7 @@ export function createApp(
       resourceId: request.params.id,
       metadata: { targetProjectId: parsed.data.projectId }
     });
-    rbacService.shareSecret({
+    await rbacService.shareSecret({
       secretId: request.params.id,
       projectId: parsed.data.projectId,
       sharedBy: user.email
@@ -7148,14 +7210,14 @@ export function createApp(
     async (request, reply) => {
       const user = await requireRole(request, reply, ["builder"]);
       if (!user) return;
-      const secret = shareableSecret(request.params.id);
+      const secret = await shareableSecret(request.params.id);
       if (!secret) {
         reply.code(404);
         return { error: "Share not found" };
       }
-      const denial = secretManageDenial(user, secret, "secret:write", "Share");
+      const denial = await secretManageDenial(user, secret, "secret:write", "Share");
       if (denial) return denyRunAccess(reply, denial);
-      const ok = rbacService.unshareSecret(request.params.id, request.params.projectId);
+      const ok = await rbacService.unshareSecret(request.params.id, request.params.projectId);
       if (!ok) {
         reply.code(404);
         return { error: "Share not found" };
@@ -7200,13 +7262,13 @@ export function createApp(
             ? null
             : query.folderId
           : undefined;
-      const workflows = store.listWorkflows({
+      const workflows = await store.listWorkflows({
         projectId: typeof query.projectId === "string" && query.projectId.trim() ? query.projectId : undefined,
         folderId: folderFilter,
         tag: typeof query.tag === "string" ? query.tag : undefined,
         search: typeof query.search === "string" ? query.search : undefined
       });
-      const readable = runAccess.readableWorkflowIds(user);
+      const readable = await runAccess.readableWorkflowIds(user);
       if (readable === null) return workflows;
       const ids = new Set(readable);
       return workflows.filter((workflow) => ids.has(workflow.id));
@@ -7219,7 +7281,7 @@ export function createApp(
       return;
     }
 
-    const access = runAccess.workflow(user, request.params.id, "workflow:read");
+    const access = await runAccess.workflow(user, request.params.id, "workflow:read");
     if (!access.ok) return denyRunAccess(reply, access);
 
     return access.workflow;
@@ -7231,7 +7293,7 @@ export function createApp(
       return;
     }
 
-    const access = runAccess.workflow(user, request.params.id, "workflow:read");
+    const access = await runAccess.workflow(user, request.params.id, "workflow:read");
     if (!access.ok) return denyRunAccess(reply, access);
     const workflow = access.workflow;
 
@@ -7247,7 +7309,7 @@ export function createApp(
       return;
     }
 
-    const access = runAccess.workflow(user, request.params.id, "workflow:write");
+    const access = await runAccess.workflow(user, request.params.id, "workflow:write");
     if (!access.ok) return denyRunAccess(reply, access);
     const workflow = access.workflow;
 
@@ -7264,9 +7326,9 @@ export function createApp(
       ...workflow,
       variables: parsed.data.variables
     };
-    const saved = store.upsertWorkflow(nextWorkflow);
-    schedulerService?.reloadWorkflow(saved.id);
-    triggerService?.reloadWorkflow(saved.id);
+    const saved = await store.upsertWorkflow(nextWorkflow);
+    await schedulerService?.reloadWorkflow(saved.id);
+    await triggerService?.reloadWorkflow(saved.id);
 
     return {
       workflowId: saved.id,
@@ -7298,14 +7360,14 @@ export function createApp(
       };
     }
 
-    const saveDenial = workflowSaveDenial(user, parsed.data);
+    const saveDenial = await workflowSaveDenial(user, parsed.data);
     if (saveDenial) return denyRunAccess(reply, saveDenial);
 
-    const savedWorkflow = store.upsertWorkflow(parsed.data, { createdBy: user.id });
-    workflowVersionService.snapshot({ workflow: savedWorkflow, createdBy: user.id, changeNote: "created" });
-    schedulerService?.reloadWorkflow(savedWorkflow.id);
-    triggerService?.reloadWorkflow(savedWorkflow.id);
-    audit(request, user, {
+    const savedWorkflow = await store.upsertWorkflow(parsed.data, { createdBy: user.id });
+    await workflowVersionService.snapshot({ workflow: savedWorkflow, createdBy: user.id, changeNote: "created" });
+    await schedulerService?.reloadWorkflow(savedWorkflow.id);
+    await triggerService?.reloadWorkflow(savedWorkflow.id);
+    await audit(request, user, {
       category: "workflow",
       eventType: "workflow.create",
       action: "create",
@@ -7346,14 +7408,14 @@ export function createApp(
       };
     }
 
-    const saveDenial = workflowSaveDenial(user, parsed.data);
+    const saveDenial = await workflowSaveDenial(user, parsed.data);
     if (saveDenial) return denyRunAccess(reply, saveDenial);
 
-    const savedWorkflow = store.upsertWorkflow(parsed.data, { createdBy: user.id });
-    workflowVersionService.snapshot({ workflow: savedWorkflow, createdBy: user.id, changeNote: "updated" });
-    schedulerService?.reloadWorkflow(savedWorkflow.id);
-    triggerService?.reloadWorkflow(savedWorkflow.id);
-    audit(request, user, {
+    const savedWorkflow = await store.upsertWorkflow(parsed.data, { createdBy: user.id });
+    await workflowVersionService.snapshot({ workflow: savedWorkflow, createdBy: user.id, changeNote: "updated" });
+    await schedulerService?.reloadWorkflow(savedWorkflow.id);
+    await triggerService?.reloadWorkflow(savedWorkflow.id);
+    await audit(request, user, {
       category: "workflow",
       eventType: "workflow.update",
       action: "update",
@@ -7371,25 +7433,25 @@ export function createApp(
       return;
     }
 
-    const access = runAccess.workflow(user, request.params.id, "workflow:delete");
+    const access = await runAccess.workflow(user, request.params.id, "workflow:delete");
     if (!access.ok) return denyRunAccess(reply, access);
     // Phase 15.4 — the gate and release history outlive the workflow; an enforced gate's workflow is the admin's to delete.
-    const releaseDenial = releaseService.deleteDenial(user, request.params.id);
+    const releaseDenial = await releaseService.deleteDenial(user, request.params.id);
     if (releaseDenial) return denyRunAccess(reply, { status: 403, error: releaseDenial });
     // Deleting the workflow deletes its golden runs: an enforced gate's admitted cases can no longer pass, which is audited.
-    const gateCasesRemoved = releaseService.gateCasesRemoval(user, request.params.id, { via: "workflow" });
+    const gateCasesRemoved = await releaseService.gateCasesRemoval(user, request.params.id, { via: "workflow" });
 
     try {
-      const deleted = store.deleteWorkflow(request.params.id);
+      const deleted = await store.deleteWorkflow(request.params.id);
       if (!deleted) {
         reply.code(404);
         return { error: "Workflow not found" };
       }
-      gateCasesRemoved?.();
+      await gateCasesRemoved?.();
 
       schedulerService?.removeWorkflow(request.params.id);
-      triggerService?.removeWorkflow(request.params.id);
-      audit(request, user, {
+      await triggerService?.removeWorkflow(request.params.id);
+      await audit(request, user, {
         category: "workflow",
         eventType: "workflow.delete",
         action: "delete",
@@ -7398,6 +7460,7 @@ export function createApp(
       });
       return { ok: true };
     } catch (error) {
+      rethrowStoreNotImplemented(error);
       reply.code(400);
       return {
         error: error instanceof Error ? error.message : "Failed to delete workflow"
@@ -7411,7 +7474,7 @@ export function createApp(
       return;
     }
 
-    const sourceWorkflowAccess = runAccess.workflow(user, request.params.id, "workflow:write");
+    const sourceWorkflowAccess = await runAccess.workflow(user, request.params.id, "workflow:write");
     if (!sourceWorkflowAccess.ok) return denyRunAccess(reply, sourceWorkflowAccess);
     const sourceWorkflow = sourceWorkflowAccess.workflow;
 
@@ -7425,7 +7488,7 @@ export function createApp(
     }
 
     const requestedId = parsed.data.id?.trim();
-    const duplicateId = makeUniqueWorkflowId(store, requestedId || `${sourceWorkflow.id}-copy`);
+    const duplicateId = await makeUniqueWorkflowId(store, requestedId || `${sourceWorkflow.id}-copy`);
     const duplicateName = parsed.data.name.trim();
     const duplicatedWorkflow = JSON.parse(JSON.stringify(sourceWorkflow)) as Workflow;
     delete duplicatedWorkflow.createdAt;
@@ -7434,13 +7497,13 @@ export function createApp(
     duplicatedWorkflow.name = duplicateName;
     duplicatedWorkflow.workflowVersion = 1;
     // Phase 15.4 — a copy never answers on its source's trigger paths: taken ones get a -copy suffix.
-    duplicatedWorkflow.nodes = withUniqueTriggerPaths(duplicatedWorkflow, releaseService.usedRoutingKeys()).nodes;
-    const duplicateDenial = workflowSaveDenial(user, duplicatedWorkflow);
+    duplicatedWorkflow.nodes = withUniqueTriggerPaths(duplicatedWorkflow, await releaseService.usedRoutingKeys()).nodes;
+    const duplicateDenial = await workflowSaveDenial(user, duplicatedWorkflow);
     if (duplicateDenial) return denyRunAccess(reply, duplicateDenial);
 
-    const savedWorkflow = store.upsertWorkflow(duplicatedWorkflow, { createdBy: user.id });
-    schedulerService?.reloadWorkflow(savedWorkflow.id);
-    triggerService?.reloadWorkflow(savedWorkflow.id);
+    const savedWorkflow = await store.upsertWorkflow(duplicatedWorkflow, { createdBy: user.id });
+    await schedulerService?.reloadWorkflow(savedWorkflow.id);
+    await triggerService?.reloadWorkflow(savedWorkflow.id);
     return savedWorkflow;
   });
 
@@ -7449,22 +7512,22 @@ export function createApp(
   app.post<{ Params: { id: string } }>("/api/workflows/:id/activate", async (request, reply) => {
     const user = await requireRole(request, reply, ["builder"]);
     if (!user) return;
-    const access = runAccess.workflow(user, request.params.id, "workflow:write");
+    const access = await runAccess.workflow(user, request.params.id, "workflow:write");
     if (!access.ok) return denyRunAccess(reply, access);
     const workflow = access.workflow;
     const settings = typeof workflow.settings === "object" && workflow.settings ? { ...workflow.settings } : {};
     settings.active = true;
     workflow.settings = settings;
     // Phase 15.4 — an active ungated workflow serves production on its paths: not on one another workflow serves.
-    const claim = releaseService.claimConflict(user, workflow);
+    const claim = await releaseService.claimConflict(user, workflow);
     if (claim) {
       reply.code(409);
       return { error: claim };
     }
-    store.upsertWorkflow(workflow);
-    schedulerService?.reloadWorkflow(workflow.id);
-    triggerService?.reloadWorkflow(workflow.id);
-    audit(request, user, {
+    await store.upsertWorkflow(workflow);
+    await schedulerService?.reloadWorkflow(workflow.id);
+    await triggerService?.reloadWorkflow(workflow.id);
+    await audit(request, user, {
       category: "workflow",
       eventType: "workflow.activate",
       action: "update",
@@ -7477,16 +7540,16 @@ export function createApp(
   app.post<{ Params: { id: string } }>("/api/workflows/:id/deactivate", async (request, reply) => {
     const user = await requireRole(request, reply, ["builder"]);
     if (!user) return;
-    const access = runAccess.workflow(user, request.params.id, "workflow:write");
+    const access = await runAccess.workflow(user, request.params.id, "workflow:write");
     if (!access.ok) return denyRunAccess(reply, access);
     const workflow = access.workflow;
     const settings = typeof workflow.settings === "object" && workflow.settings ? { ...workflow.settings } : {};
     settings.active = false;
     workflow.settings = settings;
-    store.upsertWorkflow(workflow);
+    await store.upsertWorkflow(workflow);
     schedulerService?.removeWorkflow(workflow.id);
-    triggerService?.removeWorkflow(workflow.id);
-    audit(request, user, {
+    await triggerService?.removeWorkflow(workflow.id);
+    await audit(request, user, {
       category: "workflow",
       eventType: "workflow.deactivate",
       action: "update",
@@ -7501,7 +7564,7 @@ export function createApp(
   app.post<{ Params: { id: string }; Body: unknown }>("/api/workflows/:id/transfer", async (request, reply) => {
     const user = await requireRole(request, reply, ["admin"]);
     if (!user) return;
-    const workflow = store.getWorkflow(request.params.id);
+    const workflow = await store.getWorkflow(request.params.id);
     if (!workflow) {
       reply.code(404);
       return { error: "Workflow not found" };
@@ -7512,7 +7575,7 @@ export function createApp(
       reply.code(400);
       return { error: "Invalid payload", details: parsed.error.issues };
     }
-    const targetProject = store.getProject(parsed.data.targetProjectId);
+    const targetProject = await store.getProject(parsed.data.targetProjectId);
     if (!targetProject) {
       reply.code(404);
       return { error: "Target project not found" };
@@ -7520,8 +7583,8 @@ export function createApp(
     const previousProjectId = workflow.projectId;
     workflow.projectId = parsed.data.targetProjectId;
     workflow.folderId = undefined;
-    store.upsertWorkflow(workflow);
-    audit(request, user, {
+    await store.upsertWorkflow(workflow);
+    await audit(request, user, {
       category: "workflow",
       eventType: "workflow.transfer",
       action: "update",
@@ -7558,14 +7621,15 @@ export function createApp(
         };
       }
 
-      const saveDenial = workflowSaveDenial(user, workflow);
+      const saveDenial = await workflowSaveDenial(user, workflow);
       if (saveDenial) return denyRunAccess(reply, saveDenial);
 
-      const savedWorkflow = store.upsertWorkflow(workflow, { createdBy: user.id });
-      schedulerService?.reloadWorkflow(savedWorkflow.id);
-      triggerService?.reloadWorkflow(savedWorkflow.id);
+      const savedWorkflow = await store.upsertWorkflow(workflow, { createdBy: user.id });
+      await schedulerService?.reloadWorkflow(savedWorkflow.id);
+      await triggerService?.reloadWorkflow(savedWorkflow.id);
       return savedWorkflow;
     } catch (error) {
+      rethrowStoreNotImplemented(error);
       reply.code(400);
       return {
         error: error instanceof Error ? error.message : "Failed to import workflow"
@@ -7604,13 +7668,13 @@ export function createApp(
       return { error: "Provide the export as 'source' (JSON object) or 'sourceText' (JSON string)." };
     }
 
-    const folder = parsed.data.folderId ? store.getFolder(parsed.data.folderId) : null;
+    const folder = parsed.data.folderId ? await store.getFolder(parsed.data.folderId) : null;
     if (parsed.data.folderId && !folder) {
       reply.code(400);
       return { error: "Target folder does not exist" };
     }
     const projectId = parsed.data.projectId ?? folder?.projectId ?? "default";
-    if (!store.getProject(projectId)) {
+    if (!await store.getProject(projectId)) {
       reply.code(400);
       return { error: "Target project does not exist" };
     }
@@ -7618,7 +7682,7 @@ export function createApp(
       reply.code(400);
       return { error: `Folder '${folder.id}' belongs to project '${folder.projectId}', not '${projectId}'` };
     }
-    if (!rbacService.can(user, projectId, "workflow:write")) {
+    if (!await rbacService.can(user, projectId, "workflow:write")) {
       deny(reply, 403, `Permission 'workflow:write' required in project '${projectId}'`);
       return;
     }
@@ -7637,7 +7701,7 @@ export function createApp(
     const name = parsed.data.name?.trim();
     const workflow: Workflow = {
       ...conversion.workflow,
-      id: makeUniqueWorkflowId(store, conversion.workflow.id),
+      id: await makeUniqueWorkflowId(store, conversion.workflow.id),
       name: name || conversion.workflow.name,
       projectId,
       folderId: folder?.id
@@ -7654,18 +7718,18 @@ export function createApp(
     }
 
     // Phase 15.4 — the same checks as any other save, the production path claim included.
-    const externalDenial = workflowSaveDenial(user, workflow);
+    const externalDenial = await workflowSaveDenial(user, workflow);
     if (externalDenial) return denyRunAccess(reply, externalDenial);
 
     if (parsed.data.dryRun === true) {
       return { workflow, report: conversion.report, dryRun: true };
     }
 
-    const savedWorkflow = store.upsertWorkflow(workflow, { createdBy: user.id });
-    workflowVersionService.snapshot({ workflow: savedWorkflow, createdBy: user.id, changeNote: "imported from another builder" });
-    schedulerService?.reloadWorkflow(savedWorkflow.id);
-    triggerService?.reloadWorkflow(savedWorkflow.id);
-    audit(request, user, {
+    const savedWorkflow = await store.upsertWorkflow(workflow, { createdBy: user.id });
+    await workflowVersionService.snapshot({ workflow: savedWorkflow, createdBy: user.id, changeNote: "imported from another builder" });
+    await schedulerService?.reloadWorkflow(savedWorkflow.id);
+    await triggerService?.reloadWorkflow(savedWorkflow.id);
+    await audit(request, user, {
       category: "workflow",
       eventType: "workflow.import_external",
       action: "create",
@@ -7689,7 +7753,7 @@ export function createApp(
       return;
     }
 
-    const access = runAccess.workflow(user, request.params.id, "workflow:read");
+    const access = await runAccess.workflow(user, request.params.id, "workflow:read");
     if (!access.ok) return denyRunAccess(reply, access);
     const workflow = access.workflow;
 
@@ -7704,7 +7768,7 @@ export function createApp(
       return;
     }
 
-    const access = runAccess.workflow(user, request.params.id, "workflow:read");
+    const access = await runAccess.workflow(user, request.params.id, "workflow:read");
     if (!access.ok) return denyRunAccess(reply, access);
     const workflow = access.workflow;
 
@@ -7743,21 +7807,21 @@ export function createApp(
   // pass). In role isolation a builder without a membership in the project
   // keeps the management their global role always gave them. Unreadable
   // projects answer 404.
-  const projectManageDenial = (user: SafeUser, projectId: string): RunAccessDenial | null => {
+  const projectManageDenial = async (user: SafeUser, projectId: string): Promise<RunAccessDenial | null> => {
     if (user.role === "admin") return null;
-    const access = runAccess.project(user, projectId, "workflow:read");
+    const access = await runAccess.project(user, projectId, "workflow:read");
     if (!access.ok) return access;
-    if (rbacService.can(user, projectId, "project:manage")) return null;
-    if (config.PROJECT_ISOLATION === "role" && user.role === "builder" && !rbacService.getMembership(user.id, projectId)) return null;
+    if (await rbacService.can(user, projectId, "project:manage")) return null;
+    if (config.PROJECT_ISOLATION === "role" && user.role === "builder" && !await rbacService.getMembership(user.id, projectId)) return null;
     return { ok: false, status: 403, error: "Permission 'project:manage' required in this project" };
   };
 
   app.get("/api/projects", async (request, reply) => {
     const user = await requireRole(request, reply, ["viewer"]);
     if (!user) return;
-    const readable = runAccess.readableProjectIds(user);
+    const readable = await runAccess.readableProjectIds(user);
     const ids = readable && new Set(readable);
-    return { projects: store.listProjects().filter((project) => !ids || ids.has(project.id)) };
+    return { projects: (await store.listProjects()).filter((project) => !ids || ids.has(project.id)) };
   });
 
   app.post<{ Body: unknown }>("/api/projects", async (request, reply) => {
@@ -7770,19 +7834,19 @@ export function createApp(
     }
     const id = parsed.data.id?.trim() || `proj-${crypto.randomUUID()}`;
     // Reusing an existing id is an update of that project.
-    if (store.getProject(id)) {
-      const denial = projectManageDenial(user, id);
+    if (await store.getProject(id)) {
+      const denial = await projectManageDenial(user, id);
       if (denial) return denyRunAccess(reply, denial);
     }
-    const project = store.upsertProject({
+    const project = await store.upsertProject({
       id,
       name: parsed.data.name.trim(),
       description: parsed.data.description?.trim() || undefined,
       createdBy: user.email
     });
     // Under strict isolation only members see a project, so its creator joins it.
-    if (config.PROJECT_ISOLATION === "strict" && user.role !== "admin" && !rbacService.getMembership(user.id, id)) {
-      rbacService.addMember({ userId: user.id, projectId: id, role: "project_admin" });
+    if (config.PROJECT_ISOLATION === "strict" && user.role !== "admin" && !await rbacService.getMembership(user.id, id)) {
+      await rbacService.addMember({ userId: user.id, projectId: id, role: "project_admin" });
     }
     return project;
   });
@@ -7790,19 +7854,19 @@ export function createApp(
   app.put<{ Params: { id: string }; Body: unknown }>("/api/projects/:id", async (request, reply) => {
     const user = await requireRole(request, reply, ["builder"]);
     if (!user) return;
-    const existing = store.getProject(request.params.id);
+    const existing = await store.getProject(request.params.id);
     if (!existing) {
       reply.code(404);
       return { error: "Project not found" };
     }
-    const denial = projectManageDenial(user, existing.id);
+    const denial = await projectManageDenial(user, existing.id);
     if (denial) return denyRunAccess(reply, denial);
     const parsed = projectPayloadSchema.safeParse(request.body);
     if (!parsed.success) {
       reply.code(400);
       return { error: "Invalid project payload", details: parsed.error.issues };
     }
-    const project = store.upsertProject({
+    const project = await store.upsertProject({
       id: existing.id,
       name: parsed.data.name.trim(),
       description: parsed.data.description?.trim() || undefined,
@@ -7814,15 +7878,15 @@ export function createApp(
   app.delete<{ Params: { id: string } }>("/api/projects/:id", async (request, reply) => {
     const user = await requireRole(request, reply, ["builder"]);
     if (!user) return;
-    const denial = projectManageDenial(user, request.params.id);
+    const denial = await projectManageDenial(user, request.params.id);
     if (denial) return denyRunAccess(reply, denial);
     try {
-      const ok = store.deleteProject(request.params.id);
+      const ok = await store.deleteProject(request.params.id);
       if (!ok) {
         reply.code(404);
         return { error: "Project not found" };
       }
-      audit(request, user, {
+      await audit(request, user, {
         category: "project",
         eventType: "project.delete",
         action: "delete",
@@ -7832,6 +7896,7 @@ export function createApp(
       });
       return { ok: true };
     } catch (error) {
+      rethrowStoreNotImplemented(error);
       if (error instanceof ProjectNotEmptyError) {
         reply.code(409);
         return { error: error.message, ...error.counts };
@@ -7848,9 +7913,9 @@ export function createApp(
       typeof request.query?.projectId === "string" && request.query.projectId.trim()
         ? request.query.projectId
         : undefined;
-    const readable = runAccess.readableProjectIds(user);
+    const readable = await runAccess.readableProjectIds(user);
     const ids = readable && new Set(readable);
-    return { folders: store.listFolders(projectId).filter((folder) => !ids || ids.has(folder.projectId)) };
+    return { folders: (await store.listFolders(projectId)).filter((folder) => !ids || ids.has(folder.projectId)) };
   });
 
   app.post<{ Body: unknown }>("/api/folders", async (request, reply) => {
@@ -7861,24 +7926,24 @@ export function createApp(
       reply.code(400);
       return { error: "Invalid folder payload", details: parsed.error.issues };
     }
-    if (!store.getProject(parsed.data.projectId)) {
+    if (!await store.getProject(parsed.data.projectId)) {
       reply.code(400);
       return { error: "Target project does not exist" };
     }
-    const projectAccess = runAccess.project(user, parsed.data.projectId, "workflow:write");
+    const projectAccess = await runAccess.project(user, parsed.data.projectId, "workflow:write");
     if (!projectAccess.ok) return denyRunAccess(reply, projectAccess);
-    const parentFolder = parsed.data.parentId ? store.getFolder(parsed.data.parentId) : null;
+    const parentFolder = parsed.data.parentId ? await store.getFolder(parsed.data.parentId) : null;
     if (parsed.data.parentId && (!parentFolder || parentFolder.projectId !== parsed.data.projectId)) {
       reply.code(400);
       return { error: "Parent folder does not exist in this project" };
     }
     const id = parsed.data.id?.trim() || `fld-${crypto.randomUUID()}`;
-    const replaced = store.getFolder(id);
+    const replaced = await store.getFolder(id);
     if (replaced) {
-      const replacedAccess = runAccess.project(user, replaced.projectId, "workflow:write");
+      const replacedAccess = await runAccess.project(user, replaced.projectId, "workflow:write");
       if (!replacedAccess.ok) return denyRunAccess(reply, replacedAccess);
     }
-    const folder = store.upsertFolder({
+    const folder = await store.upsertFolder({
       id,
       name: parsed.data.name.trim(),
       parentId: parsed.data.parentId,
@@ -7890,25 +7955,25 @@ export function createApp(
   app.put<{ Params: { id: string }; Body: unknown }>("/api/folders/:id", async (request, reply) => {
     const user = await requireRole(request, reply, ["builder"]);
     if (!user) return;
-    const existing = store.getFolder(request.params.id);
+    const existing = await store.getFolder(request.params.id);
     if (!existing) {
       reply.code(404);
       return { error: "Folder not found" };
     }
-    const existingAccess = runAccess.project(user, existing.projectId, "workflow:write", "Folder");
+    const existingAccess = await runAccess.project(user, existing.projectId, "workflow:write", "Folder");
     if (!existingAccess.ok) return denyRunAccess(reply, existingAccess);
     const parsed = folderPayloadSchema.safeParse(request.body);
     if (!parsed.success) {
       reply.code(400);
       return { error: "Invalid folder payload", details: parsed.error.issues };
     }
-    const targetAccess = runAccess.project(user, parsed.data.projectId, "workflow:write");
+    const targetAccess = await runAccess.project(user, parsed.data.projectId, "workflow:write");
     if (!targetAccess.ok) return denyRunAccess(reply, targetAccess);
     if (parsed.data.parentId === existing.id) {
       reply.code(400);
       return { error: "A folder cannot be its own parent" };
     }
-    const folder = store.upsertFolder({
+    const folder = await store.upsertFolder({
       id: existing.id,
       name: parsed.data.name.trim(),
       parentId: parsed.data.parentId,
@@ -7920,12 +7985,12 @@ export function createApp(
   app.delete<{ Params: { id: string } }>("/api/folders/:id", async (request, reply) => {
     const user = await requireRole(request, reply, ["builder"]);
     if (!user) return;
-    const folder = store.getFolder(request.params.id);
+    const folder = await store.getFolder(request.params.id);
     if (folder) {
-      const access = runAccess.project(user, folder.projectId, "workflow:write", "Folder");
+      const access = await runAccess.project(user, folder.projectId, "workflow:write", "Folder");
       if (!access.ok) return denyRunAccess(reply, access);
     }
-    const ok = store.deleteFolder(request.params.id);
+    const ok = await store.deleteFolder(request.params.id);
     if (!ok) {
       reply.code(404);
       return { error: "Folder not found" };
@@ -7939,7 +8004,7 @@ export function createApp(
     async (request, reply) => {
       const user = await requireRole(request, reply, ["builder"]);
       if (!user) return;
-      const access = runAccess.workflow(user, request.params.id, "workflow:write");
+      const access = await runAccess.workflow(user, request.params.id, "workflow:write");
       if (!access.ok) return denyRunAccess(reply, access);
       const workflow = access.workflow;
       const parsed = workflowMoveSchema.safeParse(request.body ?? {});
@@ -7947,14 +8012,14 @@ export function createApp(
         reply.code(400);
         return { error: "Invalid move payload", details: parsed.error.issues };
       }
-      if (parsed.data.projectId && !store.getProject(parsed.data.projectId)) {
+      if (parsed.data.projectId && !await store.getProject(parsed.data.projectId)) {
         reply.code(400);
         return { error: "Target project does not exist" };
       }
       if (
         parsed.data.folderId &&
         parsed.data.folderId !== null &&
-        !store.getFolder(parsed.data.folderId)
+        !await store.getFolder(parsed.data.folderId)
       ) {
         reply.code(400);
         return { error: "Target folder does not exist" };
@@ -7971,11 +8036,11 @@ export function createApp(
             : parsed.data.folderId ?? (projectChanged ? undefined : workflow.folderId),
         tags: parsed.data.tags ?? workflow.tags
       };
-      const moveDenial = workflowSaveDenial(user, nextWorkflow);
+      const moveDenial = await workflowSaveDenial(user, nextWorkflow);
       if (moveDenial) return denyRunAccess(reply, moveDenial);
-      const saved = store.upsertWorkflow(nextWorkflow);
-      schedulerService?.reloadWorkflow(saved.id);
-      triggerService?.reloadWorkflow(saved.id);
+      const saved = await store.upsertWorkflow(nextWorkflow);
+      await schedulerService?.reloadWorkflow(saved.id);
+      await triggerService?.reloadWorkflow(saved.id);
       return saved;
     }
   );
@@ -7983,7 +8048,7 @@ export function createApp(
   app.get<{ Params: { id: string } }>("/api/workflows/:id/pins", async (request, reply) => {
     const user = await requireRole(request, reply, ["viewer"]);
     if (!user) return;
-    const access = runAccess.workflow(user, request.params.id, "workflow:read");
+    const access = await runAccess.workflow(user, request.params.id, "workflow:read");
     if (!access.ok) return denyRunAccess(reply, access);
     const workflow = access.workflow;
     return {
@@ -7997,7 +8062,7 @@ export function createApp(
     async (request, reply) => {
       const user = await requireRole(request, reply, ["builder"]);
       if (!user) return;
-      const access = runAccess.workflow(user, request.params.id, "workflow:write");
+      const access = await runAccess.workflow(user, request.params.id, "workflow:write");
       if (!access.ok) return denyRunAccess(reply, access);
       const workflow = access.workflow;
       const pinNode = workflow.nodes.find((node) => node.id === request.params.nodeId);
@@ -8022,9 +8087,9 @@ export function createApp(
           [request.params.nodeId]: parsed.data.data
         }
       };
-      const saved = store.upsertWorkflow(nextWorkflow);
-      schedulerService?.reloadWorkflow(saved.id);
-      triggerService?.reloadWorkflow(saved.id);
+      const saved = await store.upsertWorkflow(nextWorkflow);
+      await schedulerService?.reloadWorkflow(saved.id);
+      await triggerService?.reloadWorkflow(saved.id);
       return {
         workflowId: saved.id,
         nodeId: request.params.nodeId,
@@ -8039,7 +8104,7 @@ export function createApp(
     async (request, reply) => {
       const user = await requireRole(request, reply, ["builder"]);
       if (!user) return;
-      const access = runAccess.workflow(user, request.params.id, "workflow:write");
+      const access = await runAccess.workflow(user, request.params.id, "workflow:write");
       if (!access.ok) return denyRunAccess(reply, access);
       const workflow = access.workflow;
       const pinnedData = { ...asRecord(workflow.pinnedData) };
@@ -8048,9 +8113,9 @@ export function createApp(
         ...workflow,
         pinnedData: Object.keys(pinnedData).length > 0 ? pinnedData : undefined
       };
-      const saved = store.upsertWorkflow(nextWorkflow);
-      schedulerService?.reloadWorkflow(saved.id);
-      triggerService?.reloadWorkflow(saved.id);
+      const saved = await store.upsertWorkflow(nextWorkflow);
+      await schedulerService?.reloadWorkflow(saved.id);
+      await triggerService?.reloadWorkflow(saved.id);
       return {
         ok: true,
         workflowId: saved.id,
@@ -8066,22 +8131,22 @@ export function createApp(
       return;
     }
 
-    const access = runAccess.workflow(user, request.params.id, "workflow:execute");
+    const access = await runAccess.workflow(user, request.params.id, "workflow:execute");
     if (!access.ok) return denyRunAccess(reply, access);
-    const executeChannel = executeChannelFor(request, user, access.workflow.id);
+    const executeChannel = await executeChannelFor(request, user, access.workflow.id);
     // Phase 15.6 — an API-key run on the production channel may be captured; it stays a `manual` run everywhere else.
     const executeTrigger = "manual";
     const captureSource: CaptureSource | undefined = "channel" in executeChannel && executeChannel.channel === "production" ? "api_key" : undefined;
     if ("error" in executeChannel) return denyRunAccess(reply, executeChannel);
-    const workflow = executeChannel.channel === "production" ? productionWorkflow(access.workflow.id) : access.workflow;
+    const workflow = executeChannel.channel === "production" ? await productionWorkflow(access.workflow.id) : access.workflow;
     if (!workflow) {
       reply.code(409);
-      return { error: releaseService.productionRefusal(access.workflow.id) ?? "Workflow not found" };
+      return { error: await releaseService.productionRefusal(access.workflow.id) ?? "Workflow not found" };
     }
 
     // Phase 8.3 — pre-execution budget check. Block-action budgets reject
     // here (HTTP 402); warn-action budgets only fire post-execution.
-    const budgetCheck = budgetService.checkExecution({
+    const budgetCheck = await budgetService.checkExecution({
       workflowId: workflow.id,
       projectId: workflow.projectId ?? null,
       userEmail: user.email,
@@ -8116,14 +8181,14 @@ export function createApp(
         details: parsed.error.issues
       };
     }
-    const prepared = prepareWorkflowExecutionPayload(parsed.data, reply, user);
+    const prepared = await prepareWorkflowExecutionPayload(parsed.data, reply, user);
     if (!prepared) {
       return { error: "Source execution not found" };
     }
     const executionPayload = prepared.payload;
 
     const executionId = crypto.randomUUID();
-    auditRunAction(request, user, "execution.started", { executionId, workflowId: workflow.id, projectId: workflow.projectId }, { triggerType: executeTrigger });
+    await auditRunAction(request, user, "execution.started", { executionId, workflowId: workflow.id, projectId: workflow.projectId }, { triggerType: executeTrigger });
     const progressHooks = createProgressTrackingHooks({
       executionId,
       workflow,
@@ -8163,9 +8228,9 @@ export function createApp(
       captureSource,
       captureInputOrigin: captureSource ? "user" : undefined
     });
-    const result = finishMcpCassettePlan(mcpPlan, executed, { executionId, workflow, source: "manual", createdBy: user.email });
+    const result = await finishMcpCassettePlan(mcpPlan, executed, { executionId, workflow, source: "manual", createdBy: user.email });
 
-    persistExecutionHistory({
+    await persistExecutionHistory({
       executionId,
       workflow,
       result,
@@ -8188,17 +8253,17 @@ export function createApp(
       return;
     }
 
-    const access = runAccess.workflow(user, request.params.id, "workflow:execute");
+    const access = await runAccess.workflow(user, request.params.id, "workflow:execute");
     if (!access.ok) return denyRunAccess(reply, access);
-    const executeChannel = executeChannelFor(request, user, access.workflow.id);
+    const executeChannel = await executeChannelFor(request, user, access.workflow.id);
     // Phase 15.6 — an API-key run on the production channel may be captured; it stays a `manual_stream` run everywhere else.
     const executeTrigger = "manual_stream";
     const captureSource: CaptureSource | undefined = "channel" in executeChannel && executeChannel.channel === "production" ? "api_key" : undefined;
     if ("error" in executeChannel) return denyRunAccess(reply, executeChannel);
-    const workflow = executeChannel.channel === "production" ? productionWorkflow(access.workflow.id) : access.workflow;
+    const workflow = executeChannel.channel === "production" ? await productionWorkflow(access.workflow.id) : access.workflow;
     if (!workflow) {
       reply.code(409);
-      return { error: releaseService.productionRefusal(access.workflow.id) ?? "Workflow not found" };
+      return { error: await releaseService.productionRefusal(access.workflow.id) ?? "Workflow not found" };
     }
 
     const parsed = workflowExecuteRequestSchema.safeParse(request.body ?? {});
@@ -8209,14 +8274,14 @@ export function createApp(
         details: parsed.error.issues
       };
     }
-    const prepared = prepareWorkflowExecutionPayload(parsed.data, reply, user);
+    const prepared = await prepareWorkflowExecutionPayload(parsed.data, reply, user);
     if (!prepared) {
       return { error: "Source execution not found" };
     }
     const executionPayload = prepared.payload;
 
     const executionId = crypto.randomUUID();
-    auditRunAction(request, user, "execution.started", { executionId, workflowId: workflow.id, projectId: workflow.projectId }, { triggerType: executeTrigger });
+    await auditRunAction(request, user, "execution.started", { executionId, workflowId: workflow.id, projectId: workflow.projectId }, { triggerType: executeTrigger });
     let streamClosed = false;
     request.raw.on("close", () => {
       streamClosed = true;
@@ -8312,9 +8377,9 @@ export function createApp(
         captureSource,
         captureInputOrigin: captureSource ? "user" : undefined
       });
-      const result = finishMcpCassettePlan(mcpPlan, executed, { executionId, workflow, source: "manual", createdBy: user.email });
+      const result = await finishMcpCassettePlan(mcpPlan, executed, { executionId, workflow, source: "manual", createdBy: user.email });
 
-      persistExecutionHistory({
+      await persistExecutionHistory({
         executionId,
         workflow,
         result,
@@ -8648,22 +8713,22 @@ export function createApp(
     const page = Number(query.page);
     const pageSize = Number(query.pageSize);
 
-    const history = store.listExecutionHistory({
+    const history = await store.listExecutionHistory({
       page: Number.isFinite(page) ? page : 1,
       pageSize: Number.isFinite(pageSize) ? pageSize : 20,
       status: typeof query.status === "string" && query.status.trim() ? query.status.trim() : undefined,
       workflowId: typeof query.workflowId === "string" && query.workflowId.trim() ? query.workflowId.trim() : undefined,
       // Only runs of workflows the user can read, filtered before paging so totals match.
-      workflowIds: runAccess.readableWorkflowIds(user) ?? undefined,
+      workflowIds: await runAccess.readableWorkflowIds(user) ?? undefined,
       triggerType:
         typeof query.triggerType === "string" && query.triggerType.trim() ? query.triggerType.trim() : undefined,
       startedFrom: normalizeIsoDateFilter(query.startedFrom),
       startedTo: normalizeIsoDateFilter(query.startedTo)
     });
     // Phase 10.8 — runs recorded with "Record MCP calls" carry a cassette badge.
-    const badges = store.mcpCassetteBadgesForExecutions(history.items.map((item) => item.id));
+    const badges = await store.mcpCassetteBadgesForExecutions(history.items.map((item) => item.id));
     // Phase 15.1 — runs saved as golden runs carry a golden badge.
-    const golden = store.replayGoldenBadgesForExecutions(history.items.map((item) => item.id));
+    const golden = await store.replayGoldenBadgesForExecutions(history.items.map((item) => item.id));
     return {
       ...history,
       items: history.items.map((item) => {
@@ -8680,7 +8745,7 @@ export function createApp(
       return;
     }
 
-    const access = runAccess.run(user, store.getExecutionHistory(request.params.id), "workflow:read");
+    const access = await runAccess.run(user, await store.getExecutionHistory(request.params.id), "workflow:read");
     if (!access.ok) return denyRunAccess(reply, access);
 
     return access.run;
@@ -8692,7 +8757,7 @@ export function createApp(
       return;
     }
 
-    const sourceAccess = runAccess.run(user, store.getExecutionHistory(request.params.id), "workflow:execute");
+    const sourceAccess = await runAccess.run(user, await store.getExecutionHistory(request.params.id), "workflow:execute");
     if (!sourceAccess.ok) return denyRunAccess(reply, sourceAccess);
     const sourceExecution = sourceAccess.run;
 
@@ -8706,14 +8771,14 @@ export function createApp(
     // published), and not at all while a gated workflow is deactivated. An editor run retries the draft.
     // A run whose channel went unrecorded (older history, a record that failed to save, a run that fell out of
     // the in-flight bookkeeping) fails closed: on a gated workflow it retries as production, never the draft.
-    const ranOn = releaseService.available ? store.getExecutionRelease(sourceExecution.id) : null;
+    const ranOn = releaseService.available ? await store.getExecutionRelease(sourceExecution.id) : null;
     const retryChannel: ReleaseChannel = ranOn
       ? ranOn.channel
-      : releaseService.available && store.getReleaseGate(sourceExecution.workflowId)?.enabled
+      : releaseService.available && (await store.getReleaseGate(sourceExecution.workflowId))?.enabled
         ? "production"
         : "draft";
-    const workflow = retryChannel === "production" ? productionWorkflow(sourceExecution.workflowId) : store.getWorkflow(sourceExecution.workflowId);
-    if (!workflow) return productionMissing(reply, sourceExecution.workflowId);
+    const workflow = retryChannel === "production" ? await productionWorkflow(sourceExecution.workflowId) : await store.getWorkflow(sourceExecution.workflowId);
+    if (!workflow) return await productionMissing(reply, sourceExecution.workflowId);
 
     const parsed = workflowExecuteRequestSchema.safeParse(request.body ?? {});
     if (!parsed.success) {
@@ -8724,7 +8789,7 @@ export function createApp(
       };
     }
 
-    const prepared = prepareWorkflowExecutionPayload({
+    const prepared = await prepareWorkflowExecutionPayload({
       ...parsed.data,
       sourceExecutionId: sourceExecution.id,
       usePinnedData: parsed.data.usePinnedData ?? true
@@ -8735,7 +8800,7 @@ export function createApp(
 
     const executionPayload = prepared.payload;
     const executionId = crypto.randomUUID();
-    auditRunAction(request, user, "execution.retried", { executionId, workflowId: workflow.id, projectId: workflow.projectId }, { sourceExecutionId: sourceExecution.id });
+    await auditRunAction(request, user, "execution.retried", { executionId, workflowId: workflow.id, projectId: workflow.projectId }, { sourceExecutionId: sourceExecution.id });
     const progressHooks = createProgressTrackingHooks({
       executionId,
       workflow,
@@ -8772,7 +8837,7 @@ export function createApp(
       hooks: progressHooks
     });
 
-    persistExecutionHistory({
+    await persistExecutionHistory({
       executionId,
       workflow,
       result,
@@ -8805,10 +8870,10 @@ export function createApp(
       reply.code(400);
       return { error: "Invalid replay payload", details: parsed.error.issues };
     }
-    const sourceAccess = runAccess.run(user, store.getExecutionHistory(request.params.id), "workflow:execute");
+    const sourceAccess = await runAccess.run(user, await store.getExecutionHistory(request.params.id), "workflow:execute");
     if (!sourceAccess.ok) return denyRunAccess(reply, sourceAccess);
     const source = sourceAccess.run;
-    const cassette = parsed.data.cassetteId ? store.getMcpCassette(parsed.data.cassetteId) : store.getMcpCassetteForExecution(source.id);
+    const cassette = parsed.data.cassetteId ? await store.getMcpCassette(parsed.data.cassetteId) : await store.getMcpCassetteForExecution(source.id);
     if (!cassette) {
       reply.code(404);
       return { error: "No cassette was recorded for this execution. Run it with Record MCP calls turned on first." };
@@ -8816,14 +8881,14 @@ export function createApp(
     // An unreadable cassette reads as missing; a readable one must belong to
     // this workflow (a cassette with no workflow never does).
     if (parsed.data.cassetteId) {
-      const cassetteAccess = runAccess.run(user, { id: cassette.id, workflowId: cassette.workflowId ?? "" }, "workflow:read", "Cassette");
+      const cassetteAccess = await runAccess.run(user, { id: cassette.id, workflowId: cassette.workflowId ?? "" }, "workflow:read", "Cassette");
       if (!cassetteAccess.ok) return denyRunAccess(reply, cassetteAccess);
     }
     if (cassette.workflowId !== source.workflowId) {
       reply.code(409);
       return { error: "That cassette was recorded for a different workflow." };
     }
-    const workflow = store.getWorkflow(source.workflowId);
+    const workflow = await store.getWorkflow(source.workflowId);
     if (!workflow) {
       reply.code(404);
       return { error: "Workflow not found" };
@@ -8831,7 +8896,7 @@ export function createApp(
     const mode: McpReplayMode = parsed.data.mode ?? "strict";
     const mcpPlan = mcpCassetteService.planReplay(cassette, mode, mcpRegistry, resolveRegisteredMcpServer);
     const executionId = crypto.randomUUID();
-    auditRunAction(request, user, "execution.replayed", { executionId, workflowId: workflow.id, projectId: workflow.projectId }, { sourceExecutionId: source.id, cassetteId: cassette.id, mode });
+    await auditRunAction(request, user, "execution.replayed", { executionId, workflowId: workflow.id, projectId: workflow.projectId }, { sourceExecutionId: source.id, cassetteId: cassette.id, mode });
     const storedInput = asRecord(source.input);
     const customData = {
       ...asRecord(source.customData),
@@ -8859,8 +8924,8 @@ export function createApp(
         customData
       })
     });
-    const result = finishMcpCassettePlan(mcpPlan, executed, { executionId, workflow, source: "replay", createdBy: user.email });
-    persistExecutionHistory({
+    const result = await finishMcpCassettePlan(mcpPlan, executed, { executionId, workflow, source: "replay", createdBy: user.email });
+    await persistExecutionHistory({
       executionId,
       workflow,
       result,
@@ -8878,7 +8943,7 @@ export function createApp(
       return;
     }
 
-    const access = runAccess.run(user, store.getExecutionHistory(request.params.id), "workflow:execute");
+    const access = await runAccess.run(user, await store.getExecutionHistory(request.params.id), "workflow:execute");
     if (!access.ok) return denyRunAccess(reply, access);
     const execution = access.run;
 
@@ -8902,28 +8967,48 @@ export function createApp(
       reply.code(409);
       return { error: "Execution already timed out and is stopping" };
     }
-    active?.controller.abort(reason);
-    if (execution.status === "waiting_approval") {
-      deleteWorkflowExecutionSafely(execution.id, execution.workflowId);
-      if (approvalsSupported) approvalService.cancelForExecution(execution.id, reason, user);
+    const waiting = execution.status === "waiting_approval";
+    // A paused run belongs to whoever moves it first: the cancel takes the pending request (a decision that took it
+    // already wins), then cancels the history and drops the paused state in one write that refuses once a
+    // decision has claimed that state.
+    // A waiting run that is active here is a decided run resuming in this process (a resume writes no progress, so
+    // its history still reads waiting): it is stopped like a running run, whatever the decision was.
+    const resumingHere = waiting && Boolean(active);
+    if (waiting && approvalsSupported && (await approvalService.cancelForExecution(execution.id, reason, user)) === "decided" && !resumingHere) {
+      reply.code(409);
+      return { error: "The approval was already decided, so the run is resuming. It cannot be canceled while it waits any more." };
     }
-
+    // Aborted before the write: the run's own final write is then skipped, so it cannot replace the canceled
+    // record; a run that finished first makes the conditional write refuse (409).
+    active?.controller.abort(reason);
     const completedAt = new Date().toISOString();
-    const canceled = store.cancelExecutionHistory({
+    const { outcome, canceledRequestIds } = await store.cancelExecution({
       id: request.params.id,
+      onlyFrom: resumingHere ? ["waiting_approval", "running", "partial"] : waiting ? ["waiting_approval"] : ["running", "partial"],
       completedAt,
-      error: reason
+      error: reason,
+      deletePausedState: waiting,
+      cancelClaimed: resumingHere
     });
-    if (!canceled) {
+    if (outcome === "missing") {
       reply.code(404);
       return { error: "Execution not found" };
     }
+    if (outcome === "decided") {
+      reply.code(409);
+      return { error: "The approval was already decided, so the run is resuming. It cannot be canceled while it waits any more." };
+    }
+    if (outcome === "not_cancelable") {
+      reply.code(409);
+      return { error: "Only running or waiting executions can be canceled" };
+    }
 
-    auditRunAction(
+    if (approvalsSupported) await approvalService.auditCanceledRequests(canceledRequestIds, user);
+    await auditRunAction(
       request,
       user,
       "execution.cancel_requested",
-      { executionId: execution.id, workflowId: execution.workflowId, projectId: store.getWorkflow(execution.workflowId)?.projectId },
+      { executionId: execution.id, workflowId: execution.workflowId, projectId: (await store.getWorkflow(execution.workflowId))?.projectId },
       { abortedActiveRun: Boolean(active), previousStatus: execution.status }
     );
     return {
@@ -8939,10 +9024,10 @@ export function createApp(
     app,
     approvals: approvalService,
     available: approvalsSupported,
-    loadWorkflow: (id) => store.getWorkflow(id) ?? null,
-    loadRun: (executionId) => store.getExecutionHistory(executionId) ?? store.getWorkflowExecutionState(executionId) ?? null,
+    loadWorkflow: async (id) => await store.getWorkflow(id) ?? null,
+    loadRun: async (executionId) => await store.getExecutionHistory(executionId) ?? await store.getWorkflowExecutionState(executionId) ?? null,
     runAccess,
-    canSeeProjectAccounts: (user, workflow) => user.role === "admin" || rbacService.can(user, workflow.projectId ?? DEFAULT_PROJECT_ID, "project:invite"),
+    canSeeProjectAccounts: async (user, workflow) => user.role === "admin" || await rbacService.can(user, workflow.projectId ?? DEFAULT_PROJECT_ID, "project:invite"),
     requireRole: (request, reply, roles) => requireRole(request, reply, roles),
     dispatch: dispatchApprovalResume,
     releases: releaseService,
@@ -8981,17 +9066,17 @@ export function createApp(
       parsed.data.workflow_id,
       inferAgentWebhookPath(parsed.data),
       "POST",
-      (candidate) => runAccess.workflow(user, candidate.id, "workflow:read").ok,
+      async (candidate) => (await runAccess.workflow(user, candidate.id, "workflow:read")).ok,
       productionWorkflow
     );
     if (!workflow) {
       // Phase 15.4 — a named workflow production refuses (deactivated, or nothing published under its gate): say why, to a reader.
       const named = parsed.data.workflow_id;
-      const refusal = named && runAccess.workflow(user, named, "workflow:read").ok ? releaseService.productionRefusal(named) : null;
+      const refusal = named && (await runAccess.workflow(user, named, "workflow:read")).ok ? await releaseService.productionRefusal(named) : null;
       reply.code(refusal ? 409 : 404);
       return { error: refusal ?? "No workflows available" };
     }
-    const executeAccess = runAccess.workflow(user, workflow.id, "workflow:execute");
+    const executeAccess = await runAccess.workflow(user, workflow.id, "workflow:execute");
     if (!executeAccess.ok) return denyRunAccess(reply, executeAccess);
 
     const executionId = crypto.randomUUID();
@@ -9029,7 +9114,7 @@ export function createApp(
       hooks: progressHooks
     });
 
-    persistExecutionHistory({
+    await persistExecutionHistory({
       executionId,
       workflow,
       result,
@@ -9058,8 +9143,8 @@ export function createApp(
     "/api/webhooks/slack/:workflowId",
     { config: { rawBody: true } },
     async (request, reply) => {
-      const workflow = productionWorkflow(request.params.workflowId);
-      if (!workflow) return productionMissing(reply, request.params.workflowId);
+      const workflow = await productionWorkflow(request.params.workflowId);
+      if (!workflow) return await productionMissing(reply, request.params.workflowId);
       const slackNode = workflow.nodes.find((n) => n.type === "slack_trigger");
       if (!slackNode) {
         reply.code(400);
@@ -9116,7 +9201,7 @@ export function createApp(
         triggeredBy: "slack",
         hooks: progressHooks
       });
-      persistExecutionHistory({
+      await persistExecutionHistory({
         executionId,
         workflow,
         result,
@@ -9136,8 +9221,8 @@ export function createApp(
     "/api/webhooks/github/:workflowId",
     { config: { rawBody: true } },
     async (request, reply) => {
-      const workflow = productionWorkflow(request.params.workflowId);
-      if (!workflow) return productionMissing(reply, request.params.workflowId);
+      const workflow = await productionWorkflow(request.params.workflowId);
+      if (!workflow) return await productionMissing(reply, request.params.workflowId);
       const ghNode = workflow.nodes.find((n) => n.type === "github_webhook_trigger");
       if (!ghNode) {
         reply.code(400);
@@ -9178,7 +9263,7 @@ export function createApp(
         triggeredBy: "github",
         hooks: progressHooks
       });
-      persistExecutionHistory({
+      await persistExecutionHistory({
         executionId,
         workflow,
         result,
@@ -9195,8 +9280,8 @@ export function createApp(
     "/api/webhooks/stripe/:workflowId",
     { config: { rawBody: true } },
     async (request, reply) => {
-      const workflow = productionWorkflow(request.params.workflowId);
-      if (!workflow) return productionMissing(reply, request.params.workflowId);
+      const workflow = await productionWorkflow(request.params.workflowId);
+      if (!workflow) return await productionMissing(reply, request.params.workflowId);
       const stripeNode = workflow.nodes.find((n) => n.type === "stripe_webhook_trigger");
       if (!stripeNode) {
         reply.code(400);
@@ -9252,7 +9337,7 @@ export function createApp(
         triggeredBy: "stripe",
         hooks: progressHooks
       });
-      persistExecutionHistory({
+      await persistExecutionHistory({
         executionId,
         workflow,
         result,
@@ -9269,8 +9354,8 @@ export function createApp(
     "/api/webhooks/telegram/:workflowId",
     { config: { rawBody: true } },
     async (request, reply) => {
-      const workflow = productionWorkflow(request.params.workflowId);
-      if (!workflow) return productionMissing(reply, request.params.workflowId);
+      const workflow = await productionWorkflow(request.params.workflowId);
+      if (!workflow) return await productionMissing(reply, request.params.workflowId);
       const tgNode = workflow.nodes.find((n) => n.type === "telegram_trigger");
       if (!tgNode) {
         reply.code(400);
@@ -9304,7 +9389,7 @@ export function createApp(
         triggeredBy: "telegram",
         hooks: progressHooks
       });
-      persistExecutionHistory({
+      await persistExecutionHistory({
         executionId,
         workflow,
         result,
@@ -9321,8 +9406,8 @@ export function createApp(
     "/api/webhooks/discord/:workflowId",
     { config: { rawBody: true } },
     async (request, reply) => {
-      const workflow = productionWorkflow(request.params.workflowId);
-      if (!workflow) return productionMissing(reply, request.params.workflowId);
+      const workflow = await productionWorkflow(request.params.workflowId);
+      if (!workflow) return await productionMissing(reply, request.params.workflowId);
       const dcNode = workflow.nodes.find((n) => n.type === "discord_trigger");
       if (!dcNode) {
         reply.code(400);
@@ -9385,7 +9470,7 @@ export function createApp(
         triggeredBy: "discord",
         hooks: progressHooks
       });
-      persistExecutionHistory({
+      await persistExecutionHistory({
         executionId,
         workflow,
         result,
@@ -9407,7 +9492,7 @@ export function createApp(
     async (request, reply) => {
       const user = await requireRole(request, reply, ["builder"]);
       if (!user) return;
-      const access = runAccess.workflow(user, request.params.workflowId, "workflow:execute");
+      const access = await runAccess.workflow(user, request.params.workflowId, "workflow:execute");
       if (!access.ok) return denyRunAccess(reply, access);
       const workflow = access.workflow;
       const manualNode = workflow.nodes.find((n) => n.type === "manual_trigger");
@@ -9435,7 +9520,7 @@ export function createApp(
         triggeredBy: user.email,
         hooks: progressHooks
       });
-      persistExecutionHistory({
+      await persistExecutionHistory({
         executionId,
         workflow,
         result,
@@ -9454,9 +9539,9 @@ export function createApp(
       const cfg = asRecord(node.config);
       return typeof cfg.path === "string" && cfg.path.trim() === formPath;
     }) ?? null;
-  const findFormWorkflow = (formPath: string): { workflow: Workflow; node: WorkflowNode } | null => {
-    for (const summary of store.listWorkflows()) {
-      const wf = productionWorkflow(summary.id);
+  const findFormWorkflow = async (formPath: string): Promise<{ workflow: Workflow; node: WorkflowNode } | null> => {
+    for (const summary of await store.listWorkflows()) {
+      const wf = await productionWorkflow(summary.id);
       if (!wf) continue;
       const node = formNodeFor(wf, formPath);
       if (node) return { workflow: wf, node };
@@ -9519,9 +9604,9 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
   app.get<{ Params: { path: string }; Querystring: Record<string, string> }>(
     "/api/forms/:path",
     async (request, reply) => {
-      const found = findFormWorkflow(request.params.path);
+      const found = await findFormWorkflow(request.params.path);
       if (!found) {
-        const deactivated = deactivatedMatch((workflow) => formNodeFor(workflow, request.params.path) !== null);
+        const deactivated = await deactivatedMatch((workflow) => formNodeFor(workflow, request.params.path) !== null);
         reply.code(deactivated ? 409 : 404);
         reply.type("text/html");
         return deactivated ? `<h1>${escapeHtml(DEACTIVATED_MESSAGE)}</h1>` : "<h1>Form not found</h1>";
@@ -9531,7 +9616,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         const user = await requireRole(request, reply, ["viewer"]);
         if (!user) return;
         // Session forms are for people who can see the workflow's project.
-        const access = runAccess.workflow(user, found.workflow.id, "workflow:read", "Form");
+        const access = await runAccess.workflow(user, found.workflow.id, "workflow:read", "Form");
         if (!access.ok) return denyRunAccess(reply, access);
       }
       const successMsg =
@@ -9546,9 +9631,9 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
   app.post<{ Params: { path: string }; Body: unknown }>(
     "/api/forms/:path",
     async (request, reply) => {
-      const found = findFormWorkflow(request.params.path);
+      const found = await findFormWorkflow(request.params.path);
       if (!found) {
-        const deactivated = deactivatedMatch((workflow) => formNodeFor(workflow, request.params.path) !== null);
+        const deactivated = await deactivatedMatch((workflow) => formNodeFor(workflow, request.params.path) !== null);
         reply.code(deactivated ? 409 : 404);
         return { error: deactivated ? DEACTIVATED_MESSAGE : "Form not found" };
       }
@@ -9557,7 +9642,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         const user = await requireRole(request, reply, ["viewer"]);
         if (!user) return;
         // Session forms are for people who can see the workflow's project.
-        const access = runAccess.workflow(user, found.workflow.id, "workflow:read", "Form");
+        const access = await runAccess.workflow(user, found.workflow.id, "workflow:read", "Form");
         if (!access.ok) return denyRunAccess(reply, access);
       }
       const submission = asRecord(request.body);
@@ -9585,7 +9670,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         triggeredBy: "form-submitter",
         hooks: progressHooks
       });
-      persistExecutionHistory({
+      await persistExecutionHistory({
         executionId,
         workflow: found.workflow,
         result,
@@ -9606,8 +9691,8 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
   app.post<{ Params: { workflowId: string }; Body: unknown }>(
     "/api/chat/:workflowId",
     async (request, reply) => {
-      const workflow = productionWorkflow(request.params.workflowId);
-      if (!workflow) return productionMissing(reply, request.params.workflowId);
+      const workflow = await productionWorkflow(request.params.workflowId);
+      if (!workflow) return await productionMissing(reply, request.params.workflowId);
       const chatNode = workflow.nodes.find((n) => n.type === "chat_trigger");
       if (!chatNode) {
         reply.code(400);
@@ -9619,7 +9704,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         const user = await requireRole(request, reply, ["viewer"]);
         if (!user) return;
         // Session chats are for people who can see the workflow's project.
-        const access = runAccess.workflow(user, workflow.id, "workflow:read");
+        const access = await runAccess.workflow(user, workflow.id, "workflow:read");
         if (!access.ok) return denyRunAccess(reply, access);
       } else if (authMode === "bearer") {
         const secretRef = toSecretReference(cfg.secretRef);
@@ -9675,7 +9760,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         triggeredBy: "chat-client",
         hooks: progressHooks
       });
-      persistExecutionHistory({
+      await persistExecutionHistory({
         executionId,
         workflow,
         result,
@@ -9700,9 +9785,9 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       const cfg = asRecord(node.config);
       return typeof cfg.path === "string" && cfg.path.trim() === p;
     }) ?? null;
-  const findMcpServerWorkflow = (p: string): { workflow: Workflow; node: WorkflowNode } | null => {
-    for (const summary of store.listWorkflows()) {
-      const wf = productionWorkflow(summary.id);
+  const findMcpServerWorkflow = async (p: string): Promise<{ workflow: Workflow; node: WorkflowNode } | null> => {
+    for (const summary of await store.listWorkflows()) {
+      const wf = await productionWorkflow(summary.id);
       if (!wf) continue;
       const node = mcpServerNodeFor(wf, p);
       if (node) return { workflow: wf, node };
@@ -9710,15 +9795,15 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     return null;
   };
   /** Phase 15.4 — the answer when no active workflow serves an MCP trigger path: deactivated (409) or not found (404). */
-  const mcpServerMissing = (reply: FastifyReply, p: string): { error: string } => {
-    const deactivated = deactivatedMatch((workflow) => mcpServerNodeFor(workflow, p) !== null);
+  const mcpServerMissing = async (reply: FastifyReply, p: string): Promise<{ error: string }> => {
+    const deactivated = await deactivatedMatch((workflow) => mcpServerNodeFor(workflow, p) !== null);
     reply.code(deactivated ? 409 : 404);
     return { error: deactivated ? DEACTIVATED_MESSAGE : "MCP server not found" };
   };
 
   app.get<{ Params: { path: string } }>("/api/mcp-server/:path/manifest", async (request, reply) => {
-    const found = findMcpServerWorkflow(request.params.path);
-    if (!found) return mcpServerMissing(reply, request.params.path);
+    const found = await findMcpServerWorkflow(request.params.path);
+    if (!found) return await mcpServerMissing(reply, request.params.path);
     const cfg = asRecord(found.node.config);
     return {
       name: cfg.toolName ?? "",
@@ -9730,8 +9815,8 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
   app.post<{ Params: { path: string }; Body: unknown }>(
     "/api/mcp-server/:path/invoke",
     async (request, reply) => {
-      const found = findMcpServerWorkflow(request.params.path);
-      if (!found) return mcpServerMissing(reply, request.params.path);
+      const found = await findMcpServerWorkflow(request.params.path);
+      if (!found) return await mcpServerMissing(reply, request.params.path);
       const cfg = asRecord(found.node.config);
       if (cfg.authMode === "bearer") {
         const secret = await secretService.resolveSecret(toSecretReference(cfg.secretRef));
@@ -9771,7 +9856,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         triggeredBy: "mcp-client",
         hooks: progressHooks
       });
-      persistExecutionHistory({
+      await persistExecutionHistory({
         executionId,
         workflow: found.workflow,
         result,
@@ -9799,17 +9884,17 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     config,
     store,
     loadProductionWorkflow: productionWorkflow,
-    productionRefusal: (id) => releaseService.productionRefusal(id),
+    productionRefusal: async (id) => await releaseService.productionRefusal(id),
     mcpRegistry,
     providerRegistry,
     resolveSecret: (secretRef) => secretService.resolveSecret(secretRef),
     redact: (value) => String(secretService.redact(value)),
     resolveRegisteredMcpServer,
     requireRole: (request, reply, roles) => requireRole(request, reply, roles),
-    auditUser: (request, user, event) => audit(request, user, event),
-    auditRaw: (event) => {
-      auditService.record(event);
-      logStreamingService.dispatchAudit(event);
+    auditUser: async (request, user, event) => await audit(request, user, event),
+    auditRaw: async (event) => {
+      await auditService.record(event);
+      await logStreamingService.dispatchAudit(event);
     },
     runWorkflowTool: async (input) => {
       const triggerType = "mcp_gateway";
@@ -9840,7 +9925,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         policySubject: input.subject,
         hooks
       });
-      persistExecutionHistory({
+      await persistExecutionHistory({
         executionId: input.executionId,
         workflow: input.workflow,
         result,
@@ -9875,17 +9960,17 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       parsed.data.workflow_id,
       inferAgentWebhookPath(parsed.data),
       "POST",
-      (candidate) => runAccess.workflow(user, candidate.id, "workflow:read").ok,
+      async (candidate) => (await runAccess.workflow(user, candidate.id, "workflow:read")).ok,
       productionWorkflow
     );
     if (!workflow) {
       // Phase 15.4 — a named workflow production refuses (deactivated, or nothing published under its gate): say why, to a reader.
       const named = parsed.data.workflow_id;
-      const refusal = named && runAccess.workflow(user, named, "workflow:read").ok ? releaseService.productionRefusal(named) : null;
+      const refusal = named && (await runAccess.workflow(user, named, "workflow:read")).ok ? await releaseService.productionRefusal(named) : null;
       reply.code(refusal ? 409 : 404);
       return { error: refusal ?? "No workflows available" };
     }
-    const executeAccess = runAccess.workflow(user, workflow.id, "workflow:execute");
+    const executeAccess = await runAccess.workflow(user, workflow.id, "workflow:execute");
     if (!executeAccess.ok) return denyRunAccess(reply, executeAccess);
 
     const executionId = crypto.randomUUID();
@@ -9974,7 +10059,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         hooks: progressHooks
       });
 
-      persistExecutionHistory({
+      await persistExecutionHistory({
         executionId,
         workflow,
         result,
@@ -10001,7 +10086,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
   const registerConfiguredWebhookRoute = (routePath: "/webhook/:path" | "/webhook-test/:path") => {
     const isTestRoute = routePath.startsWith("/webhook-test");
     // Phase 15.4 — /webhook/ is production traffic (the published version when there is one); /webhook-test/ runs the draft.
-    const loadForRoute = (id: string) => (isTestRoute ? store.getWorkflow(id) : productionWorkflow(id));
+    const loadForRoute = async (id: string) => (isTestRoute ? await store.getWorkflow(id) : await productionWorkflow(id));
     app.route<{ Params: { path: string }; Body: unknown }>({
       method: ["DELETE", "GET", "OPTIONS", "PATCH", "POST", "PUT"],
       url: routePath,
@@ -10026,7 +10111,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
           // Phase 15.4 — a deactivated gated workflow on this path: say so rather than "not found".
           if (!isTestRoute) {
             const wanted = normalizeWebhookPath(request.params.path, "").toLowerCase();
-            const deactivated = deactivatedMatch((workflow) => listWebhookEndpoints(workflow).some((endpoint) => endpoint.path.toLowerCase() === wanted));
+            const deactivated = await deactivatedMatch((workflow) => listWebhookEndpoints(workflow).some((endpoint) => endpoint.path.toLowerCase() === wanted));
             if (deactivated) {
               reply.code(409);
               return { error: DEACTIVATED_MESSAGE, path: request.params.path };
@@ -10080,7 +10165,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         let idempotencyKey: string | undefined;
         let replayingExistingResult = false;
         if (security.idempotencyEnabled) {
-          store.clearExpiredWebhookSecurityState();
+          await store.clearExpiredWebhookSecurityState();
           idempotencyKey = getHeaderValue(request.headers as Record<string, unknown>, security.idempotencyHeaderName);
           if (!idempotencyKey) {
             reply.code(400);
@@ -10091,7 +10176,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
 
           const now = Date.now();
           const requestHash = computeSha256Hex(rawBody);
-          const existing = store.getWebhookIdempotency({
+          const existing = await store.getWebhookIdempotency({
             endpointKey,
             idempotencyKey
           });
@@ -10169,14 +10254,14 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
 
           const idempotencyExpiry = new Date(now + DEFAULT_IDEMPOTENCY_TTL_SECONDS * 1000).toISOString();
           try {
-            store.saveWebhookIdempotencyPending({
+            await store.saveWebhookIdempotencyPending({
               endpointKey,
               idempotencyKey,
               requestHash,
               expiresAt: idempotencyExpiry
             });
           } catch {
-            const latest = store.getWebhookIdempotency({
+            const latest = await store.getWebhookIdempotency({
               endpointKey,
               idempotencyKey
             });
@@ -10278,7 +10363,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
           channel: isTestRoute ? "draft" : "production"
         });
 
-        persistExecutionHistory({
+        await persistExecutionHistory({
           executionId,
           workflow: match.workflow,
           result,
@@ -10313,7 +10398,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         }
 
         if (security.idempotencyEnabled && idempotencyKey) {
-          store.saveWebhookIdempotencyResult({
+          await store.saveWebhookIdempotencyResult({
             endpointKey,
             idempotencyKey,
             status: result.status,
@@ -10383,8 +10468,8 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     // Editors may create secrets for their project (workflow:write + secret:use);
     // changing, deleting and sharing stay on secret:write.
     const mayCreate =
-      rbacService.can(user, targetProject, "secret:write") ||
-      (rbacService.can(user, targetProject, "workflow:write") && rbacService.can(user, targetProject, "secret:use"));
+      await rbacService.can(user, targetProject, "secret:write") ||
+      (await rbacService.can(user, targetProject, "workflow:write") && await rbacService.can(user, targetProject, "secret:use"));
     if (!mayCreate) {
       reply.code(403);
       return { error: "Permission 'secret:write' required in the target project" };
@@ -10393,12 +10478,12 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     let secretRef;
     let source: "local" | "external" = "local";
     if (parsed.data.externalProviderId && parsed.data.externalKey) {
-      const provider = externalSecretsService.getProvider(parsed.data.externalProviderId);
+      const provider = await externalSecretsService.getProvider(parsed.data.externalProviderId);
       if (!provider) {
         reply.code(400);
         return { error: "Unknown externalProviderId" };
       }
-      secretRef = secretService.createExternalSecret({
+      secretRef = await secretService.createExternalSecret({
         name: parsed.data.name,
         provider: parsed.data.provider,
         externalProviderId: parsed.data.externalProviderId,
@@ -10407,14 +10492,14 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       });
       source = "external";
     } else {
-      secretRef = secretService.createSecret({
+      secretRef = await secretService.createSecret({
         name: parsed.data.name,
         provider: parsed.data.provider,
         value: parsed.data.value as string,
         projectId: parsed.data.projectId
       });
     }
-    audit(request, user, {
+    await audit(request, user, {
       category: "secret",
       eventType: source === "external" ? "secret.create.external" : "secret.create",
       action: "create",
@@ -10450,16 +10535,16 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
   app.delete<{ Params: { id: string } }>("/api/secrets/:id", async (request, reply) => {
     const user = await requireRole(request, reply, ["builder"]);
     if (!user) return;
-    const row = store.getSecret(request.params.id);
+    const row = await store.getSecret(request.params.id);
     if (!row || isInternalSecretProvider(row.provider)) {
       // Phase 10.5 — MCP OAuth secrets are managed from the MCP servers page only.
       reply.code(404);
       return { error: "Secret not found" };
     }
-    const deleteDenial = secretManageDenial(user, row, "secret:write");
+    const deleteDenial = await secretManageDenial(user, row, "secret:write");
     if (deleteDenial) return denyRunAccess(reply, deleteDenial);
-    secretService.deleteSecret(request.params.id);
-    audit(request, user, {
+    await secretService.deleteSecret(request.params.id);
+    await audit(request, user, {
       category: "secret",
       eventType: "secret.delete",
       action: "delete",
@@ -10481,7 +10566,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         ? request.query.projectId
         : undefined;
 
-    return secretService.listSecrets({ projectId }).filter((secret) => canSeeSecret(user, secret));
+    return await filterAsync(await secretService.listSecrets({ projectId }), (secret) => canSeeSecret(user, secret));
   });
 
   // Discover/test requests get their own MCP context, closed when the request
@@ -10538,7 +10623,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         // Phase 10.2 — marked, never hidden, so builders see why an agent will not get a tool.
         policy: { role: user.role, projectId },
         tools: markMcpTools(tools, {
-          rules: store.listMcpToolPolicies(),
+          rules: await store.listMcpToolPolicies(),
           classifications: [],
           role: user.role,
           projectId,
@@ -10546,6 +10631,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         })
       };
     } catch (error) {
+      rethrowStoreNotImplemented(error);
       reply.code(400);
       return {
         error: error instanceof Error ? error.message : "Failed to discover MCP tools"
@@ -10602,9 +10688,9 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
   // Phase 10.1 — MCP server registry. Reads are open to builders (they pick
   // servers on nodes); changing the registry is admin-only because every
   // workflow that references a server follows the change.
-  const mcpServerSummary = (server: McpServerRecord, user?: SafeUser | null) => ({
+  const mcpServerSummary = async (server: McpServerRecord, user?: SafeUser | null) => ({
     ...server,
-    latency: mcpProbeService.latency(server.id),
+    latency: await mcpProbeService.latency(server.id),
     // Phase 10.7 — breaker and limit state on this API instance (the last error only for admins).
     runtime: runtimeStateView(server.id, user)
   });
@@ -10614,7 +10700,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     if (!user) return;
     const query = request.query as { projectId?: string } | undefined;
     return {
-      servers: store.listMcpServers({ projectId: query?.projectId }).map((server) => mcpServerSummary(server, user)),
+      servers: await mapAsync(await store.listMcpServers({ projectId: query?.projectId }), (server) => mcpServerSummary(server, user)),
       adapters: mcpRegistry.listDefinitions().map((definition) => ({ id: definition.id, label: definition.label })),
       defaultProbeIntervalMs: mcpProbeService.defaultIntervalMs,
       sandboxPolicy: sandboxPolicyView()
@@ -10624,30 +10710,30 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
   app.get<{ Params: { id: string } }>("/api/mcp/servers/:id", async (request, reply) => {
     const user = await requireRole(request, reply, ["builder"]);
     if (!user) return;
-    const server = store.getMcpServer(request.params.id);
+    const server = await store.getMcpServer(request.params.id);
     if (!server) {
       reply.code(404);
       return { error: "MCP server not found" };
     }
     return {
-      server: mcpServerSummary(server, user),
+      server: await mcpServerSummary(server, user),
       sandboxPolicy: sandboxPolicyView(),
-      probes: store.listMcpServerProbes(server.id, 50),
+      probes: await store.listMcpServerProbes(server.id, 50),
       // Snapshot list without the tool bodies; fetch one snapshot for those.
-      snapshots: store.listMcpToolSnapshots(server.id, 20).map(({ tools: _tools, ...snapshot }) => snapshot),
-      usages: listMcpServerUsages(store, server.id)
+      snapshots: (await store.listMcpToolSnapshots(server.id, 20)).map(({ tools: _tools, ...snapshot }) => snapshot),
+      usages: await listMcpServerUsages(store, server.id)
     };
   });
 
   app.get<{ Params: { id: string } }>("/api/mcp/servers/:id/tools", async (request, reply) => {
     const user = await requireRole(request, reply, ["builder"]);
     if (!user) return;
-    const server = store.getMcpServer(request.params.id);
+    const server = await store.getMcpServer(request.params.id);
     if (!server) {
       reply.code(404);
       return { error: "MCP server not found" };
     }
-    const snapshot = server.currentSnapshotId ? store.getMcpToolSnapshot(server.currentSnapshotId) : null;
+    const snapshot = server.currentSnapshotId ? await store.getMcpToolSnapshot(server.currentSnapshotId) : null;
     const query = request.query as { projectId?: unknown } | undefined;
     const projectId =
       typeof query?.projectId === "string" && query.projectId.trim() ? query.projectId.trim() : server.projectId ?? "default";
@@ -10658,8 +10744,8 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       // Phase 10.2 — read-only classification and what the caller's role may use in this project.
       policy: { role: user.role, projectId },
       tools: markMcpTools(snapshot?.tools ?? [], {
-        rules: store.listMcpToolPolicies(),
-        classifications: store.listMcpToolClassifications(server.id),
+        rules: await store.listMcpToolPolicies(),
+        classifications: await store.listMcpToolClassifications(server.id),
         role: user.role,
         projectId,
         adapterId: server.adapterId,
@@ -10674,7 +10760,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     async (request, reply) => {
       const user = await requireRole(request, reply, ["builder"]);
       if (!user) return;
-      const snapshot = store.getMcpToolSnapshot(request.params.snapshotId);
+      const snapshot = await store.getMcpToolSnapshot(request.params.snapshotId);
       if (!snapshot || snapshot.serverId !== request.params.id) {
         reply.code(404);
         return { error: "Snapshot not found" };
@@ -10700,12 +10786,12 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     if (!user) return;
     const range = resolveTelemetryWindow(request, reply);
     if (!range) return telemetryWindowError;
-    const server = store.getMcpServer(request.params.id);
+    const server = await store.getMcpServer(request.params.id);
     if (!server) {
       reply.code(404);
       return { error: "MCP server not found" };
     }
-    const rollup = rollupMcpToolCalls(store.listMcpToolCalls({ registryServerId: server.id, since: range.since }));
+    const rollup = rollupMcpToolCalls(await store.listMcpToolCalls({ registryServerId: server.id, since: range.since }));
     return { serverId: server.id, window: range.window, since: range.since, ...rollup };
   });
 
@@ -10714,21 +10800,21 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     if (!user) return;
     const range = resolveTelemetryWindow(request, reply);
     if (!range) return telemetryWindowError;
-    const rollup = rollupMcpToolCalls(store.listMcpToolCalls({ registryServerId: null, since: range.since }), {
+    const rollup = rollupMcpToolCalls(await store.listMcpToolCalls({ registryServerId: null, since: range.since }), {
       byAdapter: true
     });
     return { scope: "inline", window: range.window, since: range.since, ...rollup };
   });
 
-  const validateMcpServerInput = (
+  const validateMcpServerInput = async (
     input: { adapterId?: string; secretRef?: { secretId: string } | null },
     reply: FastifyReply
-  ): { error: string } | null => {
+  ): Promise<{ error: string } | null> => {
     if (input.adapterId !== undefined && !mcpRegistry.tryGet(input.adapterId)) {
       reply.code(400);
       return { error: `Unknown MCP adapter '${input.adapterId}'` };
     }
-    if (input.secretRef && !store.getSecret(input.secretRef.secretId)) {
+    if (input.secretRef && !await store.getSecret(input.secretRef.secretId)) {
       reply.code(400);
       return { error: `Secret '${input.secretRef.secretId}' does not exist` };
     }
@@ -10786,7 +10872,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       reply.code(400);
       return { error: "Invalid MCP server payload", details: parsed.error.issues };
     }
-    const invalid = validateMcpServerInput(parsed.data, reply);
+    const invalid = await validateMcpServerInput(parsed.data, reply);
     if (invalid) return invalid;
     const blocked = enforceMcpCatalog(parsed.data.adapterId, parsed.data.connection, reply);
     if (blocked) return blocked;
@@ -10802,7 +10888,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     if (unsafe) return unsafe;
 
     const id = `mcp_${crypto.randomUUID()}`;
-    store.createMcpServer({
+    await store.createMcpServer({
       id,
       name: parsed.data.name,
       description: parsed.data.description ?? null,
@@ -10821,7 +10907,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       delegatedFallback: parsed.data.delegatedFallback ?? "none",
       createdBy: user.email
     });
-    auditService.record({
+    await auditService.record({
       category: "system",
       eventType: "mcp_server.created",
       action: "create",
@@ -10841,13 +10927,13 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       probeInBackground(id);
     }
     reply.code(201);
-    return { server: mcpServerSummary(store.getMcpServer(id)!, user) };
+    return { server: await mcpServerSummary((await store.getMcpServer(id))!, user) };
   });
 
   app.put<{ Params: { id: string }; Body: unknown }>("/api/mcp/servers/:id", async (request, reply) => {
     const user = await requireRole(request, reply, ["admin"]);
     if (!user) return;
-    const existing = store.getMcpServer(request.params.id);
+    const existing = await store.getMcpServer(request.params.id);
     if (!existing) {
       reply.code(404);
       return { error: "MCP server not found" };
@@ -10857,7 +10943,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       reply.code(400);
       return { error: "Invalid MCP server payload", details: parsed.error.issues };
     }
-    const invalid = validateMcpServerInput(parsed.data, reply);
+    const invalid = await validateMcpServerInput(parsed.data, reply);
     if (invalid) return invalid;
     if (parsed.data.adapterId !== undefined || parsed.data.connection !== undefined) {
       const blocked = enforceMcpCatalog(
@@ -10883,10 +10969,10 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     const { secretRef, sampling, sandbox, ...rest } = parsed.data;
     // Switching how credentials work drops the connections of the other mode.
     if (nextCredentialMode !== existing.credentialMode) {
-      if (nextCredentialMode === "delegated") mcpOAuthService.disconnect(existing.id);
-      else mcpOAuthService.disconnectAllUsers(existing.id);
+      if (nextCredentialMode === "delegated") await mcpOAuthService.disconnect(existing.id);
+      else await mcpOAuthService.disconnectAllUsers(existing.id);
     }
-    store.updateMcpServer(existing.id, {
+    await store.updateMcpServer(existing.id, {
       ...rest,
       ...(sandbox !== undefined ? { sandbox: nextAdapterId === "stdio_mcp" ? sandbox : null } : {}),
       ...(nextAdapterId !== "stdio_mcp" && existing.sandbox ? { sandbox: null } : {}),
@@ -10894,7 +10980,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       // A partial sampling patch keeps what it does not mention.
       ...(sampling !== undefined ? { sampling: sampling ? { ...existing.sampling, ...sampling } : null } : {})
     });
-    auditService.record({
+    await auditService.record({
       category: "system",
       eventType: "mcp_server.updated",
       action: "update",
@@ -10910,10 +10996,10 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       secretRef !== undefined ||
       sandbox !== undefined ||
       parsed.data.credentialMode !== undefined;
-    if (connectionChanged && store.getMcpServer(existing.id)?.probeEnabled) {
+    if (connectionChanged && (await store.getMcpServer(existing.id))?.probeEnabled) {
       probeInBackground(existing.id);
     }
-    return { server: mcpServerSummary(store.getMcpServer(existing.id)!, user) };
+    return { server: await mcpServerSummary((await store.getMcpServer(existing.id))!, user) };
   });
 
   app.delete<{ Params: { id: string }; Querystring: { force?: string } }>(
@@ -10921,12 +11007,12 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     async (request, reply) => {
       const user = await requireRole(request, reply, ["admin"]);
       if (!user) return;
-      const existing = store.getMcpServer(request.params.id);
+      const existing = await store.getMcpServer(request.params.id);
       if (!existing) {
         reply.code(404);
         return { error: "MCP server not found" };
       }
-      const usages = listMcpServerUsages(store, existing.id);
+      const usages = await listMcpServerUsages(store, existing.id);
       if (usages.length > 0 && request.query.force !== "true") {
         reply.code(409);
         return {
@@ -10935,12 +11021,12 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         };
       }
       // Phase 10.5 — the OAuth tokens and client registration go with the server.
-      mcpOAuthService.disconnect(existing.id);
+      await mcpOAuthService.disconnect(existing.id);
       // Phase 10.7 — and every user's own tokens, and its breaker state.
-      mcpOAuthService.disconnectAllUsers(existing.id);
+      await mcpOAuthService.disconnectAllUsers(existing.id);
       mcpRuntimeGuard.forget(existing.id);
-      store.deleteMcpServer(existing.id);
-      auditService.record({
+      await store.deleteMcpServer(existing.id);
+      await auditService.record({
         category: "system",
         eventType: "mcp_server.deleted",
         action: "delete",
@@ -10957,7 +11043,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
   app.post<{ Params: { id: string } }>("/api/mcp/servers/:id/probe", async (request, reply) => {
     const user = await requireRole(request, reply, ["builder"]);
     if (!user) return;
-    if (!store.getMcpServer(request.params.id)) {
+    if (!await store.getMcpServer(request.params.id)) {
       reply.code(404);
       return { error: "MCP server not found" };
     }
@@ -10972,7 +11058,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       throw error;
     }
     return {
-      server: mcpServerSummary(outcome.server, user),
+      server: await mcpServerSummary(outcome.server, user),
       probe: outcome.probe,
       snapshot: outcome.snapshot ? (({ tools: _tools, ...snapshot }) => snapshot)(outcome.snapshot) : null
     };
@@ -10981,17 +11067,17 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
   app.post<{ Params: { id: string } }>("/api/mcp/servers/:id/accept-change", async (request, reply) => {
     const user = await requireRole(request, reply, ["admin"]);
     if (!user) return;
-    const existing = store.getMcpServer(request.params.id);
+    const existing = await store.getMcpServer(request.params.id);
     if (!existing) {
       reply.code(404);
       return { error: "MCP server not found" };
     }
-    const snapshot = store.acknowledgeMcpBreakingChange(existing.id, user.email);
+    const snapshot = await store.acknowledgeMcpBreakingChange(existing.id, user.email);
     if (!snapshot) {
       reply.code(409);
       return { error: "There is no pending breaking change to accept" };
     }
-    auditService.record({
+    await auditService.record({
       category: "system",
       eventType: "mcp_server.breaking_change_accepted",
       action: "update",
@@ -11001,7 +11087,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       resourceId: existing.id,
       metadata: { snapshotId: snapshot.id, breakingChanges: snapshot.changes.filter((change) => change.breaking).length }
     });
-    return { server: mcpServerSummary(store.getMcpServer(existing.id)!, user) };
+    return { server: await mcpServerSummary((await store.getMcpServer(existing.id))!, user) };
   });
 
   // -------------------------------------------------------------------------
@@ -11011,7 +11097,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
   app.get<{ Params: { id: string } }>("/api/mcp/servers/:id/runtime", async (request, reply) => {
     const user = await requireRole(request, reply, ["builder"]);
     if (!user) return;
-    const server = store.getMcpServer(request.params.id);
+    const server = await store.getMcpServer(request.params.id);
     if (!server) {
       reply.code(404);
       return { error: "MCP server not found" };
@@ -11022,13 +11108,13 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
   app.post<{ Params: { id: string } }>("/api/mcp/servers/:id/breaker/reset", async (request, reply) => {
     const user = await requireRole(request, reply, ["admin"]);
     if (!user) return;
-    const server = store.getMcpServer(request.params.id);
+    const server = await store.getMcpServer(request.params.id);
     if (!server) {
       reply.code(404);
       return { error: "MCP server not found" };
     }
     const wasOpen = mcpRuntimeGuard.resetBreaker(server.id, `Reset by ${user.email}.`);
-    audit(request, user, {
+    await audit(request, user, {
       category: "system",
       eventType: "mcp_server.breaker_reset",
       action: "update",
@@ -11048,22 +11134,22 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
   // -------------------------------------------------------------------------
 
   /** A rule's server is a registry entry or, for inline servers, an adapter id. */
-  const validatePolicyScope = (
+  const validatePolicyScope = async (
     input: { projectId?: string | null; serverId?: string | null },
     reply: FastifyReply
-  ): { error: string } | null => {
-    if (input.projectId && !store.getProject(input.projectId)) {
+  ): Promise<{ error: string } | null> => {
+    if (input.projectId && !await store.getProject(input.projectId)) {
       reply.code(400);
       return { error: `Project '${input.projectId}' does not exist` };
     }
-    if (input.serverId && !store.getMcpServer(input.serverId) && !mcpRegistry.tryGet(input.serverId)) {
+    if (input.serverId && !await store.getMcpServer(input.serverId) && !mcpRegistry.tryGet(input.serverId)) {
       reply.code(400);
       return { error: `'${input.serverId}' is neither a registered MCP server nor an MCP adapter id` };
     }
     return null;
   };
 
-  const recordPolicyAudit = (
+  const recordPolicyAudit = async (
     user: SafeUser,
     eventType: string,
     action: "create" | "update" | "delete",
@@ -11071,7 +11157,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     metadata: Record<string, unknown>,
     projectId: string | null = null
   ) => {
-    auditService.record({
+    await auditService.record({
       category: "system",
       eventType,
       action,
@@ -11099,8 +11185,8 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
   // Phase 10.5 — OAuth 2.1 connections for remote MCP servers. Status is
   // readable by builders; connecting, refreshing and disconnecting are
   // admin-only. No route ever returns a token.
-  const findOAuthServer = (serverId: string, reply: FastifyReply) => {
-    const server = store.getMcpServer(serverId);
+  const findOAuthServer = async (serverId: string, reply: FastifyReply) => {
+    const server = await store.getMcpServer(serverId);
     if (!server) {
       reply.code(404);
       return null;
@@ -11111,15 +11197,15 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
   app.get<{ Params: { id: string } }>("/api/mcp/servers/:id/oauth", async (request, reply) => {
     const user = await requireRole(request, reply, ["builder"]);
     if (!user) return;
-    const server = findOAuthServer(request.params.id, reply);
+    const server = await findOAuthServer(request.params.id, reply);
     if (!server) return { error: "MCP server not found" };
-    return { status: mcpOAuthService.status(server.id), usesOAuth: McpOAuthService.usesOAuth(server) };
+    return { status: await mcpOAuthService.status(server.id), usesOAuth: McpOAuthService.usesOAuth(server) };
   });
 
   app.post<{ Params: { id: string }; Body: unknown }>("/api/mcp/servers/:id/oauth/connect", async (request, reply) => {
     const user = await requireRole(request, reply, ["admin"]);
     if (!user) return;
-    const server = findOAuthServer(request.params.id, reply);
+    const server = await findOAuthServer(request.params.id, reply);
     if (!server) return { error: "MCP server not found" };
     const parsed = mcpOAuthConnectSchema.safeParse(request.body ?? {});
     if (!parsed.success) {
@@ -11139,7 +11225,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         userEmail: user.email,
         ...(parsed.data.scope ? { scope: parsed.data.scope } : {})
       });
-      audit(request, user, {
+      await audit(request, user, {
         category: "system",
         eventType: "mcp_server.oauth_connect_started",
         action: "update",
@@ -11152,7 +11238,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       return started;
     } catch (error) {
       const message = error instanceof Error ? error.message : "OAuth connect failed";
-      audit(request, user, {
+      await audit(request, user, {
         category: "system",
         eventType: "mcp_server.oauth_connect_started",
         action: "update",
@@ -11170,7 +11256,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
   app.get<{ Querystring: Record<string, string | undefined> }>("/api/mcp/oauth/callback", async (request, reply) => {
     const query = request.query ?? {};
     const sessionId = getSessionIdFromRequest(request);
-    const sessionUser = sessionId ? authService.getSessionUser(sessionId) : null;
+    const sessionUser = sessionId ? await authService.getSessionUser(sessionId) : null;
     // Phase 10.7 — a user's own connection completes for that user; the shared one only for an admin.
     const outcome = sessionUser
       ? await mcpOAuthService.completeAuthorization({
@@ -11187,7 +11273,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
           error: "Sign in to L2M in this browser, then connect again."
         };
     if (outcome.serverId) {
-      audit(request, sessionUser ?? null, {
+      await audit(request, sessionUser ?? null, {
         category: "system",
         eventType: outcome.userId ? "mcp_server.user_oauth_connected" : "mcp_server.oauth_connected",
         action: "update",
@@ -11216,11 +11302,11 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
   app.post<{ Params: { id: string } }>("/api/mcp/servers/:id/oauth/refresh", async (request, reply) => {
     const user = await requireRole(request, reply, ["admin"]);
     if (!user) return;
-    const server = findOAuthServer(request.params.id, reply);
+    const server = await findOAuthServer(request.params.id, reply);
     if (!server) return { error: "MCP server not found" };
     try {
       const status = await mcpOAuthService.refreshNow(server.id);
-      audit(request, user, {
+      await audit(request, user, {
         category: "system",
         eventType: "mcp_server.oauth_refreshed",
         action: "update",
@@ -11232,18 +11318,19 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       });
       return { status };
     } catch (error) {
+      rethrowStoreNotImplemented(error);
       reply.code(409);
-      return { error: error instanceof Error ? error.message : "Token refresh failed", status: mcpOAuthService.status(server.id) };
+      return { error: error instanceof Error ? error.message : "Token refresh failed", status: await mcpOAuthService.status(server.id) };
     }
   });
 
   app.delete<{ Params: { id: string } }>("/api/mcp/servers/:id/oauth", async (request, reply) => {
     const user = await requireRole(request, reply, ["admin"]);
     if (!user) return;
-    const server = findOAuthServer(request.params.id, reply);
+    const server = await findOAuthServer(request.params.id, reply);
     if (!server) return { error: "MCP server not found" };
-    const status = mcpOAuthService.disconnect(server.id);
-    audit(request, user, {
+    const status = await mcpOAuthService.disconnect(server.id);
+    await audit(request, user, {
       category: "system",
       eventType: "mcp_server.oauth_disconnected",
       action: "update",
@@ -11259,20 +11346,20 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
   // Phase 10.7 — delegated credentials. Every user who can run workflows
   // connects their own account to delegated servers under My connections;
   // admins see who is connected (never a token) and can revoke.
-  const canUseServer = (user: SafeUser, server: McpServerRecord) =>
-    rbacService.can(user, server.projectId ?? DEFAULT_PROJECT_ID, "workflow:execute");
-  const myConnection = (server: McpServerRecord, user: SafeUser): McpMyConnection => {
-    const row = store.getMcpUserOAuthConnection(server.id, user.id);
+  const canUseServer = async (user: SafeUser, server: McpServerRecord) =>
+    await rbacService.can(user, server.projectId ?? DEFAULT_PROJECT_ID, "workflow:execute");
+  const myConnection = async (server: McpServerRecord, user: SafeUser): Promise<McpMyConnection> => {
+    const row = await store.getMcpUserOAuthConnection(server.id, user.id);
     return {
       serverId: server.id,
       serverName: server.name,
       description: server.description,
       delegatedFallback: server.delegatedFallback,
-      connection: row ? mcpOAuthService.userStatus(server, user.id, user.email) : null
+      connection: row ? await mcpOAuthService.userStatus(server, user.id, user.email) : null
     };
   };
-  const findDelegatedServer = (serverId: string, reply: FastifyReply) => {
-    const server = store.getMcpServer(serverId);
+  const findDelegatedServer = async (serverId: string, reply: FastifyReply) => {
+    const server = await store.getMcpServer(serverId);
     if (!server || !McpOAuthService.isDelegated(server)) {
       reply.code(404);
       return null;
@@ -11283,17 +11370,15 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
   app.get("/api/mcp/connections", async (request, reply) => {
     const user = await requireRole(request, reply, ["operator"]);
     if (!user) return;
-    const servers = store
-      .listMcpServers()
-      .filter((server) => McpOAuthService.isDelegated(server) && canUseServer(user, server));
-    return { connections: servers.map((server) => myConnection(server, user)) };
+    const servers = await filterAsync(await store.listMcpServers(), async (server) => McpOAuthService.isDelegated(server) && await canUseServer(user, server));
+    return { connections: await mapAsync(servers, (server) => myConnection(server, user)) };
   });
 
   app.post<{ Params: { serverId: string }; Body: unknown }>("/api/mcp/connections/:serverId/connect", async (request, reply) => {
     const user = await requireRole(request, reply, ["operator"]);
     if (!user) return;
-    const server = findDelegatedServer(request.params.serverId, reply);
-    if (!server || !canUseServer(user, server)) {
+    const server = await findDelegatedServer(request.params.serverId, reply);
+    if (!server || !await canUseServer(user, server)) {
       reply.code(404);
       return { error: "No MCP server with your own account by that id." };
     }
@@ -11315,7 +11400,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         userId: user.id,
         ...(parsed.data.scope ? { scope: parsed.data.scope } : {})
       });
-      audit(request, user, {
+      await audit(request, user, {
         category: "system",
         eventType: "mcp_server.user_oauth_connect_started",
         action: "update",
@@ -11328,7 +11413,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       return started;
     } catch (error) {
       const message = error instanceof Error ? error.message : "OAuth connect failed";
-      audit(request, user, {
+      await audit(request, user, {
         category: "system",
         eventType: "mcp_server.user_oauth_connect_started",
         action: "update",
@@ -11346,14 +11431,14 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
   app.delete<{ Params: { serverId: string } }>("/api/mcp/connections/:serverId", async (request, reply) => {
     const user = await requireRole(request, reply, ["operator"]);
     if (!user) return;
-    const server = store.getMcpServer(request.params.serverId);
+    const server = await store.getMcpServer(request.params.serverId);
     if (!server) {
       reply.code(404);
       return { error: "MCP server not found" };
     }
-    const removed = mcpOAuthService.disconnectUser(server.id, user.id);
+    const removed = await mcpOAuthService.disconnectUser(server.id, user.id);
     if (removed) {
-      audit(request, user, {
+      await audit(request, user, {
         category: "system",
         eventType: "mcp_server.user_oauth_disconnected",
         action: "update",
@@ -11364,37 +11449,38 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         metadata: { name: server.name, userId: user.id }
       });
     }
-    return { connection: myConnection(server, user) };
+    return { connection: await myConnection(server, user) };
   });
 
   app.get<{ Params: { id: string } }>("/api/mcp/servers/:id/connections", async (request, reply) => {
     const user = await requireRole(request, reply, ["admin"]);
     if (!user) return;
-    const server = store.getMcpServer(request.params.id);
+    const server = await store.getMcpServer(request.params.id);
     if (!server) {
       reply.code(404);
       return { error: "MCP server not found" };
     }
-    const connections = store.listMcpUserOAuthConnections({ serverId: server.id }).map((row) => {
-      const owner = store.getUserById(row.userId);
-      return mcpOAuthService.userStatus(server, row.userId, owner?.email ?? null);
-    });
+    const connections = [];
+    for (const row of await store.listMcpUserOAuthConnections({ serverId: server.id })) {
+      const owner = await store.getUserById(row.userId);
+      connections.push(await mcpOAuthService.userStatus(server, row.userId, owner?.email ?? null));
+    }
     return { credentialMode: server.credentialMode, delegatedFallback: server.delegatedFallback, connections };
   });
 
   app.delete<{ Params: { id: string; userId: string } }>("/api/mcp/servers/:id/connections/:userId", async (request, reply) => {
     const user = await requireRole(request, reply, ["admin"]);
     if (!user) return;
-    const server = store.getMcpServer(request.params.id);
+    const server = await store.getMcpServer(request.params.id);
     if (!server) {
       reply.code(404);
       return { error: "MCP server not found" };
     }
-    if (!mcpOAuthService.disconnectUser(server.id, request.params.userId)) {
+    if (!await mcpOAuthService.disconnectUser(server.id, request.params.userId)) {
       reply.code(404);
       return { error: "That user has no connection to this server." };
     }
-    audit(request, user, {
+    await audit(request, user, {
       category: "system",
       eventType: "mcp_server.user_oauth_revoked",
       action: "update",
@@ -11410,7 +11496,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
   app.get("/api/mcp/policies", async (request, reply) => {
     const user = await requireRole(request, reply, ["builder"]);
     if (!user) return;
-    return { rules: store.listMcpToolPolicies(), roles: MCP_POLICY_ROLES };
+    return { rules: await store.listMcpToolPolicies(), roles: MCP_POLICY_ROLES };
   });
 
   app.post<{ Body: unknown }>("/api/mcp/policies", async (request, reply) => {
@@ -11421,9 +11507,9 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       reply.code(400);
       return { error: "Invalid MCP tool policy rule", details: parsed.error.issues };
     }
-    const invalid = validatePolicyScope(parsed.data, reply);
+    const invalid = await validatePolicyScope(parsed.data, reply);
     if (invalid) return invalid;
-    const rule = store.createMcpToolPolicy({
+    const rule = await store.createMcpToolPolicy({
       id: `mtp_${crypto.randomUUID()}`,
       name: parsed.data.name?.trim() || null,
       description: parsed.data.description?.trim() || null,
@@ -11437,7 +11523,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       enabled: parsed.data.enabled !== false,
       createdBy: user.email
     });
-    recordPolicyAudit(user, "mcp_policy.created", "create", rule.id, policyAuditMetadata(rule), rule.projectId);
+    await recordPolicyAudit(user, "mcp_policy.created", "create", rule.id, policyAuditMetadata(rule), rule.projectId);
     reply.code(201);
     return { rule };
   });
@@ -11445,7 +11531,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
   app.put<{ Params: { id: string }; Body: unknown }>("/api/mcp/policies/:id", async (request, reply) => {
     const user = await requireRole(request, reply, ["admin"]);
     if (!user) return;
-    const existing = store.getMcpToolPolicy(request.params.id);
+    const existing = await store.getMcpToolPolicy(request.params.id);
     if (!existing) {
       reply.code(404);
       return { error: "MCP tool policy rule not found" };
@@ -11455,16 +11541,16 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       reply.code(400);
       return { error: "Invalid MCP tool policy rule", details: parsed.error.issues };
     }
-    const invalid = validatePolicyScope(parsed.data, reply);
+    const invalid = await validatePolicyScope(parsed.data, reply);
     if (invalid) return invalid;
     const { name, description, roles, ...rest } = parsed.data;
-    const rule = store.updateMcpToolPolicy(existing.id, {
+    const rule = (await store.updateMcpToolPolicy(existing.id, {
       ...rest,
       ...(name !== undefined ? { name: name?.trim() || null } : {}),
       ...(description !== undefined ? { description: description?.trim() || null } : {}),
       ...(roles !== undefined ? { roles: [...new Set(roles)] } : {})
-    })!;
-    recordPolicyAudit(
+    }))!;
+    await recordPolicyAudit(
       user,
       "mcp_policy.updated",
       "update",
@@ -11478,13 +11564,13 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
   app.delete<{ Params: { id: string } }>("/api/mcp/policies/:id", async (request, reply) => {
     const user = await requireRole(request, reply, ["admin"]);
     if (!user) return;
-    const existing = store.getMcpToolPolicy(request.params.id);
+    const existing = await store.getMcpToolPolicy(request.params.id);
     if (!existing) {
       reply.code(404);
       return { error: "MCP tool policy rule not found" };
     }
-    store.deleteMcpToolPolicy(existing.id);
-    recordPolicyAudit(user, "mcp_policy.deleted", "delete", existing.id, policyAuditMetadata(existing), existing.projectId);
+    await store.deleteMcpToolPolicy(existing.id);
+    await recordPolicyAudit(user, "mcp_policy.deleted", "delete", existing.id, policyAuditMetadata(existing), existing.projectId);
     return { ok: true };
   });
 
@@ -11498,21 +11584,21 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     }
     const { role, serverId, toolName } = parsed.data;
     const projectId = parsed.data.projectId ?? null;
-    const registered = store.getMcpServer(serverId);
+    const registered = await store.getMcpServer(serverId);
     if (!registered && !mcpRegistry.tryGet(serverId)) {
       reply.code(404);
       return { error: `'${serverId}' is neither a registered MCP server nor an MCP adapter id` };
     }
     let annotations: McpToolAnnotations | undefined;
     if (registered?.currentSnapshotId) {
-      annotations = store
-        .getMcpToolSnapshot(registered.currentSnapshotId)
+      annotations = (await store
+        .getMcpToolSnapshot(registered.currentSnapshotId))
         ?.tools.find((tool) => tool.name === toolName)?.annotations;
     }
-    const classifications = registered ? store.listMcpToolClassifications(registered.id) : [];
+    const classifications = registered ? await store.listMcpToolClassifications(registered.id) : [];
     const decision = evaluateToolForContext(
       {
-        rules: store.listMcpToolPolicies(),
+        rules: await store.listMcpToolPolicies(),
         classifications,
         role: role as McpPolicyRole,
         projectId,
@@ -11547,7 +11633,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     async (request, reply) => {
       const user = await requireRole(request, reply, ["admin"]);
       if (!user) return;
-      const server = store.getMcpServer(request.params.id);
+      const server = await store.getMcpServer(request.params.id);
       if (!server) {
         reply.code(404);
         return { error: "MCP server not found" };
@@ -11562,13 +11648,13 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         reply.code(400);
         return { error: "Invalid classification payload", details: parsed.error.issues };
       }
-      const override = store.setMcpToolClassification({
+      const override = await store.setMcpToolClassification({
         registryServerId: server.id,
         toolName,
         readOnly: parsed.data.readOnly,
         setBy: user.email
       });
-      recordPolicyAudit(
+      await recordPolicyAudit(
         user,
         parsed.data.readOnly === null ? "mcp_policy.classification_cleared" : "mcp_policy.classification_set",
         "update",
@@ -11576,11 +11662,11 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         { serverId: server.id, serverName: server.name, toolName, readOnly: parsed.data.readOnly },
         server.projectId
       );
-      const snapshot = server.currentSnapshotId ? store.getMcpToolSnapshot(server.currentSnapshotId) : null;
+      const snapshot = server.currentSnapshotId ? await store.getMcpToolSnapshot(server.currentSnapshotId) : null;
       const annotations = snapshot?.tools.find((tool) => tool.name === toolName)?.annotations;
       const [marked] = markMcpTools([{ name: toolName, ...(annotations ? { annotations } : {}) }], {
         rules: [],
-        classifications: store.listMcpToolClassifications(server.id),
+        classifications: await store.listMcpToolClassifications(server.id),
         role: user.role,
         projectId: server.projectId ?? "default",
         adapterId: server.adapterId,
@@ -11610,17 +11696,17 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     store,
     mcpRegistry,
     catalog: mcpCatalogService,
-    createSecret: (input) => secretService.createSecret(input),
+    createSecret: async (input) => await secretService.createSecret(input),
     resolveSecret: (secretRef) => secretService.resolveSecret(secretRef),
     redact: (value) => String(secretService.redact(value)),
     resolveRegisteredMcpServer,
     withScopedMcpContext,
     requireRole: (request, reply, roles) => requireRole(request, reply, roles),
-    canExecuteInProject: (user, projectId) => rbacService.can(user, projectId, "workflow:execute"),
-    auditUser: (request, user, event) => audit(request, user, event),
+    canExecuteInProject: async (user, projectId) => await rbacService.can(user, projectId, "workflow:execute"),
+    auditUser: async (request, user, event) => await audit(request, user, event),
     probeInBackground,
     sandboxSaveProblem,
-    serverSummary: (server) => mcpServerSummary(server)
+    serverSummary: async (server) => await mcpServerSummary(server)
   });
 
   // Phase 10.5 — resources, prompts and elicitation requests.
@@ -11636,8 +11722,8 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     resolveRegisteredMcpServer,
     withScopedMcpContext,
     requireRole: (request, reply, roles) => requireRole(request, reply, roles),
-    canExecuteInProject: (user, projectId) => rbacService.can(user, projectId, "workflow:execute"),
-    auditUser: (request, user, event) => audit(request, user, event)
+    canExecuteInProject: async (user, projectId) => await rbacService.can(user, projectId, "workflow:execute"),
+    auditUser: async (request, user, event) => await audit(request, user, event)
   });
 
   // Phase 10.3 — read-only routes behind the MCP control plane pages.
@@ -11647,7 +11733,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     store,
     oauth: mcpOAuthService,
     usesOAuth: (server) => McpOAuthService.usesOAuth(server),
-    latency: (serverId) => mcpProbeService.latency(serverId),
+    latency: async (serverId) => await mcpProbeService.latency(serverId),
     runtime: (serverId, user) => runtimeStateView(serverId, user),
     requireRole: (request, reply, roles) => requireRole(request, reply, roles)
   });
@@ -11667,7 +11753,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     environmentSecretValues: () => environmentSecretValues(config as unknown as Record<string, unknown>, process.env),
     logger: { warn: (message, fields) => app.log.warn(fields ?? {}, message) }
   });
-  registerAuditBundleRoutes({ app, store, bundles: auditBundleService, signing: auditSigningService, requireRole: (request, reply, roles) => requireRole(request, reply, roles), runAccess, audit: (request, user, event) => audit(request, user, event) });
+  registerAuditBundleRoutes({ app, store, bundles: auditBundleService, signing: auditSigningService, requireRole: (request, reply, roles) => requireRole(request, reply, roles), runAccess, audit: async (request, user, event) => await audit(request, user, event) });
 
   // Phase 15.1 — golden runs and replay.
   const replayRecordingService = new ReplayRecordingService({
@@ -11693,13 +11779,13 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     providerRegistry,
     liveReads: {
       registry: mcpRegistry,
-      resolve: (registryServerId) => resolveRegisteredMcpServer(registryServerId),
+      resolve: async (registryServerId) => await resolveRegisteredMcpServer(registryServerId),
       // Read-only only when an admin marked the tool read-only in tool policy. A server's own
       // annotations (readOnlyHint) are its claim, not proof: unmarked and unknown tools are writes.
-      isReadOnlyTool: ({ config, toolName }) => manualReadOnlyFor(store.listMcpToolClassifications(), config.registryServerId, toolName) === true
+      isReadOnlyTool: async ({ config, toolName }) => manualReadOnlyFor(await store.listMcpToolClassifications(), config.registryServerId, toolName) === true
     },
-    resolveGuardProfile: (override, context) =>
-      guardService.resolveProfileOverride(override, { workflowId: context.workflowId, projectId: context.projectId, isAdmin: context.actor?.role === "admin" }),
+    resolveGuardProfile: async (override, context) =>
+      await guardService.resolveProfileOverride(override, { workflowId: context.workflowId, projectId: context.projectId, isAdmin: context.actor?.role === "admin" }),
     execute: async (replay, actor) => {
       const storedInput = asRecord(replay.recording.input);
       const executed = await runWorkflowExecution({
@@ -11736,8 +11822,8 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
           customData: replay.customData
         })
       });
-      const result = finishMcpCassettePlan(replay.mcpPlan, executed, { executionId: replay.executionId, workflow: replay.workflow, source: "replay", createdBy: actor.email });
-      persistExecutionHistory({
+      const result = await finishMcpCassettePlan(replay.mcpPlan, executed, { executionId: replay.executionId, workflow: replay.workflow, source: "replay", createdBy: actor.email });
+      await persistExecutionHistory({
         executionId: replay.executionId,
         workflow: replay.workflow,
         result,
@@ -11759,20 +11845,20 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     recordings: replayRecordingService,
     datasets: evalService,
     surrogateKey: deriveCaptureSurrogateKey(captureMasterKey.length === 32 ? captureMasterKey : crypto.randomBytes(32)),
-    dictionariesFor: (workflow) => guardService.resolveRun({ workflowId: workflow.id, projectId: workflow.projectId ?? DEFAULT_PROJECT_ID }).stack.flatMap((entry) => entry.profile.dictionaries ?? []),
-    workflowProject: (workflowId) => store.getWorkflow(workflowId)?.projectId ?? null,
-    catalogToolNames: (registryServerId) => {
-      const snapshotId = store.getMcpServer(registryServerId)?.currentSnapshotId;
-      return snapshotId ? (store.getMcpToolSnapshot(snapshotId)?.tools.map((tool) => tool.name) ?? []) : [];
+    dictionariesFor: async (workflow) => (await guardService.resolveRun({ workflowId: workflow.id, projectId: workflow.projectId ?? DEFAULT_PROJECT_ID })).stack.flatMap((entry) => entry.profile.dictionaries ?? []),
+    workflowProject: async (workflowId) => (await store.getWorkflow(workflowId))?.projectId ?? null,
+    catalogToolNames: async (registryServerId) => {
+      const snapshotId = (await store.getMcpServer(registryServerId))?.currentSnapshotId;
+      return snapshotId ? ((await store.getMcpToolSnapshot(snapshotId))?.tools.map((tool) => tool.name) ?? []) : [];
     },
-    dictionaryClasses: () => {
+    dictionaryClasses: async () => {
       const names = new Set<string>();
-      for (const profile of guardService.listProfiles()) {
-        for (const dictionary of guardService.loadProfile(profile.id)?.profile.dictionaries ?? []) names.add(dictionary.dataClass);
+      for (const profile of await guardService.listProfiles()) {
+        for (const dictionary of (await guardService.loadProfile(profile.id))?.profile.dictionaries ?? []) names.add(dictionary.dataClass);
       }
       return [...names];
     },
-    publishedVersion: (workflowId) => releaseService.publishedVersion(workflowId),
+    publishedVersion: async (workflowId) => await releaseService.publishedVersion(workflowId),
     deployment: {
       enabled: config.REPLAY_CAPTURE_ENABLED ?? REPLAY_CAPTURE_DEFAULTS.enabled,
       maxRate: config.REPLAY_CAPTURE_MAX_RATE ?? REPLAY_CAPTURE_DEFAULTS.maxRate,
@@ -11788,16 +11874,17 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
   if (captureAvailable) {
     replayCapture = captureService;
     // Retention for captured runs nobody promoted, on the execution-history timer's interval.
-    const pruneCaptures = (reason: "startup" | "interval") => {
+    const pruneCaptures = async (reason: "startup" | "interval") => {
       try {
-        const deleted = captureService.pruneExpired();
+        const deleted = await captureService.pruneExpired();
         if (deleted > 0) app.log.info({ deleted, reason, retentionDays: captureService.deployment.retentionDays }, "Pruned captured runs past retention");
       } catch (error) {
         app.log.warn({ reason, error: secretService.redact(error instanceof Error ? error.message : String(error)) }, "Failed to prune captured runs");
       }
     };
-    pruneCaptures("startup");
-    const captureRetentionTimer = setInterval(() => pruneCaptures("interval"), config.EXECUTION_HISTORY_PRUNE_INTERVAL_MS);
+    await pruneCaptures("startup");
+    // promise-ok: the task catches and logs its own errors
+    const captureRetentionTimer = setInterval(async () => await pruneCaptures("interval"), config.EXECUTION_HISTORY_PRUNE_INTERVAL_MS);
     (captureRetentionTimer as { unref?: () => void }).unref?.();
     // Tickets of runs that never wrote their final history are given back on this timer too (the sweep is cheap).
     const captureSweepTimer = setInterval(sweepStaleCaptures, CAPTURE_SWEEP_INTERVAL_MS);
@@ -11815,10 +11902,10 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     captures: captureService,
     requireRole: (request, reply, roles) => requireRole(request, reply, roles),
     runAccess,
-    audit: (request, user, event) => audit(request, user, event),
+    audit: async (request, user, event) => await audit(request, user, event),
     available: captureAvailable,
     // Release gate admission: an erasure is never refused, but admitted cases it takes are audited and stale jobs marked.
-    subjectRowRemoval: (user, row) => releaseService.dataSubjectRemoval(user, row)
+    subjectRowRemoval: async (user, row) => await releaseService.dataSubjectRemoval(user, row)
   });
 
   // Phase 15.5 — golden-set files (SQLite only: Postgres answers 501).
@@ -11829,7 +11916,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     signing: auditSigningService,
     requireRole: (request, reply, roles) => requireRole(request, reply, roles),
     runAccess,
-    audit: (request, user, event) => audit(request, user, event),
+    audit: async (request, user, event) => await audit(request, user, event),
     available: !((store as object) instanceof PostgresStore),
     maxFileBytes: config.GOLDEN_SET_IMPORT_MAX_BYTES ?? GOLDEN_SET_FILE_DEFAULT_MAX_BYTES,
     maxCaseBytes: config.REPLAY_RECORDING_MAX_BYTES,
@@ -11842,9 +11929,9 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     replays: replayService,
     requireRole: (request, reply, roles) => requireRole(request, reply, roles),
     runAccess,
-    audit: (request, user, event) => audit(request, user, event),
-    recordingDeleteDenial: (user, workflowId, recordingId) => releaseService.recordingDeleteDenial(user, workflowId, recordingId),
-    gateCasesRemoval: (user, workflowId, target) => releaseService.gateCasesRemoval(user, workflowId, target)
+    audit: async (request, user, event) => await audit(request, user, event),
+    recordingDeleteDenial: async (user, workflowId, recordingId) => await releaseService.recordingDeleteDenial(user, workflowId, recordingId),
+    gateCasesRemoval: async (user, workflowId, target) => await releaseService.gateCasesRemoval(user, workflowId, target)
   });
 
   registerGuardRoutes({
@@ -11853,23 +11940,23 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     guard: guardService,
     requireRole: (request, reply, roles) => requireRole(request, reply, roles),
     runAccess,
-    canAccessWorkflow: (user, workflow, permission) => rbacService.canAccessWorkflow(user, workflow, permission),
-    canInProject: (user, projectId, permission) => rbacService.can(user, projectId, permission),
-    audit: (request, user, event) => audit(request, user, event),
+    canAccessWorkflow: async (user, workflow, permission) => await rbacService.canAccessWorkflow(user, workflow, permission),
+    canInProject: async (user, projectId, permission) => await rbacService.can(user, projectId, permission),
+    audit: async (request, user, event) => await audit(request, user, event),
     destinationRulesAvailable: !((store as object) instanceof PostgresStore)
   });
 
   // Phase 16 — data destinations (SQLite only: Postgres answers 501).
   const dataDestinationService = new DataDestinationService({
     store: (store as object) instanceof PostgresStore ? null : store,
-    readableWorkflowIds: (user) => runAccess.readableWorkflowIds(user),
-    readableProjectIds: (user) => runAccess.readableProjectIds(user)
+    readableWorkflowIds: async (user) => await runAccess.readableWorkflowIds(user),
+    readableProjectIds: async (user) => await runAccess.readableProjectIds(user)
   });
   registerDataDestinationRoutes({
     app,
     destinations: dataDestinationService,
     requireRole: (request, reply, roles) => requireRole(request, reply, roles),
-    audit: (request, user, event) => audit(request, user, event)
+    audit: async (request, user, event) => await audit(request, user, event)
   });
 
   // Phase 15.6 — guard policy simulation (SQLite only: Postgres answers 501).
@@ -11882,7 +11969,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         runAccess,
         maxCases: config.REPLAY_SIMULATION_MAX_CASES ?? GUARD_SIMULATION_MAX_CASES_DEFAULT,
         maxCasesPerJob: config.REPLAY_JOB_MAX_CASES,
-        scrub: (text) => String(secretService.redact(replayRecordingService.scrubber().text(text))),
+        scrub: async (text) => String(secretService.redact((await replayRecordingService.scrubber()).text(text))),
         logger: { warn: (message, fields) => app.log.warn(fields ?? {}, message) }
       });
   registerGuardSimulationRoutes({
@@ -11892,31 +11979,32 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     destinations: dataDestinationService,
     requireRole: (request, reply, roles) => requireRole(request, reply, roles),
     runAccess,
-    audit: (request, user, event) => audit(request, user, event)
+    audit: async (request, user, event) => await audit(request, user, event)
   });
   if (guardSimulationService) {
     const simulationService = guardSimulationService;
     // Simulations a stopped server left running finish with what their (now interrupted) jobs recorded.
     if (workerMode !== "webhook") {
       try {
-        const recovered = simulationService.recover();
+        const recovered = await simulationService.recover();
         if (recovered > 0) app.log.warn({ count: recovered }, "Finished guard simulations interrupted by a restart");
       } catch (err) {
         app.log.warn({ err: err instanceof Error ? err.message : String(err) }, "Failed to finish interrupted guard simulations");
       }
     }
     // Kept GUARD_SIMULATION_RETENTION_DAYS, pruned on the execution-history timer with their replay jobs.
-    const pruneGuardSimulations = (reason: "startup" | "interval") => {
+    const pruneGuardSimulations = async (reason: "startup" | "interval") => {
       const cutoff = new Date(Date.now() - GUARD_SIMULATION_RETENTION_DAYS * 24 * 60 * 60 * 1000).toISOString();
       try {
-        const deleted = simulationService.prune(cutoff);
+        const deleted = await simulationService.prune(cutoff);
         if (deleted > 0) app.log.info({ deleted, cutoff, reason }, "Pruned guard simulations");
       } catch (err) {
         app.log.warn({ cutoff, reason, err: err instanceof Error ? err.message : String(err) }, "Failed to prune guard simulations");
       }
     };
-    pruneGuardSimulations("startup");
-    const simulationPruneTimer = setInterval(() => pruneGuardSimulations("interval"), config.EXECUTION_HISTORY_PRUNE_INTERVAL_MS);
+    await pruneGuardSimulations("startup");
+    // promise-ok: the task catches and logs its own errors
+    const simulationPruneTimer = setInterval(async () => await pruneGuardSimulations("interval"), config.EXECUTION_HISTORY_PRUNE_INTERVAL_MS);
     (simulationPruneTimer as { unref?: () => void }).unref?.();
     app.addHook("onClose", async () => {
       clearInterval(simulationPruneTimer);
@@ -11931,9 +12019,11 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     resolveSecret: (secretRef) => secretService.resolveSecret(secretRef),
     probeTimeoutMs: config.MCP_PROBE_TIMEOUT_MS,
     loadMcpToolPolicy,
-    resolveToolPolicySubject: (workflowId) => resolveToolPolicySubject(workflowId),
+    resolveToolPolicySubject: async (workflowId) => await resolveToolPolicySubject(workflowId),
     requireRole: (request, reply, roles) => requireRole(request, reply, roles),
-    audit: (event) => auditService.record(event),
+    audit: async (event) => {
+      await auditService.record(event);
+    },
     redact: (value) => {
       const redacted = secretService.redact(value);
       return typeof redacted === "string" ? redacted : value;
@@ -11953,20 +12043,20 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         return;
       }
       // Queued runs (`POST /api/workflows/:id/enqueue`) are production traffic: the version published when the job runs.
-      const workflow = productionWorkflow(payload.workflowId);
+      const workflow = await productionWorkflow(payload.workflowId);
       if (!workflow) {
-        throw new Error(releaseService.productionRefusal(payload.workflowId) ?? `Workflow not found: ${payload.workflowId}`);
+        throw new Error(await releaseService.productionRefusal(payload.workflowId) ?? `Workflow not found: ${payload.workflowId}`);
       }
       // A job a user enqueued runs only if that user may still run the
       // workflow: a revoked membership or a deleted account stops it.
       // Retrying cannot fix that, so the job goes straight to the DLQ.
       let enqueuedBy: SafeUser | null = null;
       if (payload.enqueuedByUserId) {
-        const found = store.getUserById(payload.enqueuedByUserId);
+        const found = await store.getUserById(payload.enqueuedByUserId);
         enqueuedBy = found ? { id: found.id, email: found.email, role: found.role as UserRole } : null;
-        if (!enqueuedBy || !runAccess.workflow(enqueuedBy, workflow.id, "workflow:execute").ok) {
+        if (!enqueuedBy || !(await runAccess.workflow(enqueuedBy, workflow.id, "workflow:execute")).ok) {
           const reason = enqueuedBy ? "no_execute_permission" : "user_not_found";
-          auditService.record({
+          await auditService.record({
             category: "workflow",
             eventType: "queue.job_refused",
             action: "execute",
@@ -12002,7 +12092,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         // A caller may name its queued run anything ("cron" included): it is a user's run, never the scheduler's.
         captureInputOrigin: "user"
       });
-      persistExecutionHistory({
+      await persistExecutionHistory({
         executionId: payload.executionId,
         workflow,
         result,
@@ -12026,7 +12116,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     app.get("/api/queue/depth", async (request, reply) => {
       const user = await requireRole(request, reply, ["operator", "builder", "admin"]);
       if (!user) return;
-      return queueService.getDepth();
+      return await queueService.getDepth();
     });
 
     app.get("/api/queue/dlq", async (request, reply) => {
@@ -12035,7 +12125,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       const limit = typeof (request.query as Record<string, unknown>).limit === "string"
         ? Math.min(200, Math.max(1, Number((request.query as Record<string, unknown>).limit)))
         : 50;
-      return queueService.listDlq(limit, runAccess.readableWorkflowIds(user) ?? undefined);
+      return await queueService.listDlq(limit, await runAccess.readableWorkflowIds(user) ?? undefined);
     });
 
     app.post<{ Params: { id: string }; Body: unknown }>(
@@ -12044,7 +12134,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         const user = await requireRole(request, reply, ["operator", "builder", "admin"]);
         if (!user) return;
 
-        const access = runAccess.workflow(user, request.params.id, "workflow:execute");
+        const access = await runAccess.workflow(user, request.params.id, "workflow:execute");
         if (!access.ok) return denyRunAccess(reply, access);
         const workflow = access.workflow;
 
@@ -12078,9 +12168,9 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
           priority: typeof body.priority === "number" ? body.priority : 0
         });
 
-        auditRunAction(request, user, "execution.started", { executionId, workflowId: workflow.id, projectId: workflow.projectId }, { triggerType: "queue" });
+        await auditRunAction(request, user, "execution.started", { executionId, workflowId: workflow.id, projectId: workflow.projectId }, { triggerType: "queue" });
 
-        const depth = queueService.getDepth();
+        const depth = await queueService.getDepth();
         return { queued: true, executionId, queueDepth: depth };
       }
     );
@@ -12091,7 +12181,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
   app.get("/api/tags", async (request, reply) => {
     const user = await requireRole(request, reply, ["builder", "operator", "viewer"]);
     if (!user) return;
-    const workflows = store.listWorkflows();
+    const workflows = await store.listWorkflows();
     const tagSet = new Set<string>();
     for (const w of workflows) {
       if (Array.isArray(w.tags)) {
@@ -12112,7 +12202,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       reply.code(400);
       return { error: "Invalid tag name", details: parsed.error.issues };
     }
-    audit(request, user, {
+    await audit(request, user, {
       category: "workflow",
       eventType: "tag.create",
       action: "create",
@@ -12126,19 +12216,19 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     const user = await requireRole(request, reply, ["admin"]);
     if (!user) return;
     const tagToRemove = decodeURIComponent(request.params.tag);
-    const workflows = store.listWorkflows();
+    const workflows = await store.listWorkflows();
     let removedCount = 0;
     for (const w of workflows) {
       if (Array.isArray(w.tags) && w.tags.includes(tagToRemove)) {
-        const full = store.getWorkflow(w.id);
+        const full = await store.getWorkflow(w.id);
         if (full) {
           full.tags = (full.tags ?? []).filter((t) => t !== tagToRemove);
-          store.upsertWorkflow(full);
+          await store.upsertWorkflow(full);
           removedCount++;
         }
       }
     }
-    audit(request, user, {
+    await audit(request, user, {
       category: "workflow",
       eventType: "tag.delete",
       action: "delete",
@@ -12154,7 +12244,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
   app.get("/api/users", async (request, reply) => {
     const user = await requireRole(request, reply, ["admin"]);
     if (!user) return;
-    const users = store.listUsers();
+    const users = await store.listUsers();
     return {
       users: users.map((u) => ({
         id: u.id,
@@ -12174,17 +12264,17 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       reply.code(400);
       return { error: "Invalid payload", details: parsed.error.issues };
     }
-    const targetUser = store.getUserById(request.params.id);
+    const targetUser = await store.getUserById(request.params.id);
     if (!targetUser) {
       reply.code(404);
       return { error: "User not found" };
     }
-    const updated = store.updateUserRole(request.params.id, parsed.data.role);
+    const updated = await store.updateUserRole(request.params.id, parsed.data.role);
     if (!updated) {
       reply.code(500);
       return { error: "Failed to update user" };
     }
-    audit(request, user, {
+    await audit(request, user, {
       category: "auth",
       eventType: "user.update.role",
       action: "update",
@@ -12202,19 +12292,19 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       reply.code(400);
       return { error: "Cannot delete your own account" };
     }
-    const targetUser = store.getUserById(request.params.id);
+    const targetUser = await store.getUserById(request.params.id);
     if (!targetUser) {
       reply.code(404);
       return { error: "User not found" };
     }
     // Phase 10.7 — a deleted user's own MCP connections (and their tokens) go with them.
-    mcpOAuthService.disconnectUserEverywhere(request.params.id);
-    const deleted = store.deleteUser(request.params.id);
+    await mcpOAuthService.disconnectUserEverywhere(request.params.id);
+    const deleted = await store.deleteUser(request.params.id);
     if (!deleted) {
       reply.code(500);
       return { error: "Failed to delete user" };
     }
-    audit(request, user, {
+    await audit(request, user, {
       category: "auth",
       eventType: "user.delete",
       action: "delete",
@@ -12234,14 +12324,15 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     const query = request.query as Record<string, string>;
     const category = query.category || undefined;
     const search = query.search || undefined;
-    const templates = store.listTemplates({ category, search });
+    const templates = await store.listTemplates({ category, search });
     // Enrich each template with detected external dependencies (OpenAI key,
     // Pinecone, etc.) so the gallery can show "Requires: …" pills before the
     // user clicks Use Template. listTemplates returns metadata only, so we
     // fetch the full row per template to get the workflowJson. Template count
     // is small (~10s) and this read path is cold, so the extra cost is fine.
-    const enriched = templates.map((tpl) => {
-      const full = store.getTemplate(tpl.id);
+    const enriched = [];
+    for (const tpl of templates) {
+      const full = await store.getTemplate(tpl.id);
       let dependencies: ReturnType<typeof computeTemplateDependencies> = [];
       let thumbnailSvg = "";
       if (full?.workflowJson) {
@@ -12254,8 +12345,8 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         }
       }
       const featured = FEATURED_TEMPLATE_IDS.has(tpl.id);
-      return { ...tpl, dependencies, thumbnailSvg, featured };
-    });
+      enriched.push({ ...tpl, dependencies, thumbnailSvg, featured });
+    }
     // Featured templates float to the top of the gallery; everything else
     // keeps the store's category+name order from listTemplates.
     enriched.sort((a, b) => Number(b.featured) - Number(a.featured));
@@ -12266,7 +12357,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
   app.get<{ Params: { id: string } }>("/api/templates/:id", async (request, reply) => {
     const user = await requireRole(request, reply, ["admin", "builder", "operator", "viewer"]);
     if (!user) return;
-    const template = store.getTemplate(request.params.id);
+    const template = await store.getTemplate(request.params.id);
     if (!template) { reply.code(404); return { error: "Template not found" }; }
     return template;
   });
@@ -12291,7 +12382,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     if (parsed.data.workflowId) {
       // Publishing a template shows the workflow's configuration to every
       // user, so it takes write access to the source, not only read.
-      const access = runAccess.workflow(user, parsed.data.workflowId, "workflow:write");
+      const access = await runAccess.workflow(user, parsed.data.workflowId, "workflow:write");
       if (!access.ok) return denyRunAccess(reply, access);
       wfData = { ...access.workflow };
     } else if (parsed.data.workflowJson) {
@@ -12314,7 +12405,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     delete wfData.pinnedData;
     const workflowJson = JSON.stringify(wfData);
     const id = crypto.randomUUID();
-    store.upsertTemplate({
+    await store.upsertTemplate({
       id,
       name: parsed.data.name,
       description: parsed.data.description,
@@ -12325,7 +12416,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       nodeCount: Array.isArray(wfData.nodes) ? wfData.nodes.length : 0
     });
 
-    audit(request, user, {
+    await audit(request, user, {
       category: "workflow",
       eventType: "template.create",
       action: "create",
@@ -12339,7 +12430,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
   app.post<{ Params: { id: string } }>("/api/templates/:id/use", async (request, reply) => {
     const user = await requireRole(request, reply, ["admin", "builder"]);
     if (!user) return;
-    const template = store.getTemplate(request.params.id);
+    const template = await store.getTemplate(request.params.id);
     if (!template) { reply.code(404); return { error: "Template not found" }; }
 
     const target = z
@@ -12356,12 +12447,12 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     imported.folderId = target.data.folderId;
     delete imported.pinnedData;
     // Phase 15.4 — like a duplicate, a workflow made from a template gets trigger paths nobody uses.
-    imported.nodes = withUniqueTriggerPaths(imported, releaseService.usedRoutingKeys()).nodes;
-    const saveDenial = workflowSaveDenial(user, imported);
+    imported.nodes = withUniqueTriggerPaths(imported, await releaseService.usedRoutingKeys()).nodes;
+    const saveDenial = await workflowSaveDenial(user, imported);
     if (saveDenial) return denyRunAccess(reply, saveDenial);
-    store.upsertWorkflow(imported, { createdBy: user.id });
+    await store.upsertWorkflow(imported, { createdBy: user.id });
 
-    audit(request, user, {
+    await audit(request, user, {
       category: "workflow",
       eventType: "template.use",
       action: "use",
@@ -12376,9 +12467,9 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
   app.delete<{ Params: { id: string } }>("/api/templates/:id", async (request, reply) => {
     const user = await requireRole(request, reply, ["admin"]);
     if (!user) return;
-    const deleted = store.deleteTemplate(request.params.id);
+    const deleted = await store.deleteTemplate(request.params.id);
     if (!deleted) { reply.code(404); return { error: "Template not found" }; }
-    audit(request, user, {
+    await audit(request, user, {
       category: "workflow",
       eventType: "template.delete",
       action: "delete",
@@ -12392,7 +12483,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
   app.get<{ Params: { id: string } }>("/api/workflows/:id/share-link", async (request, reply) => {
     const user = await requireRole(request, reply, ["admin", "builder"]);
     if (!user) return;
-    const access = runAccess.workflow(user, request.params.id, "workflow:read");
+    const access = await runAccess.workflow(user, request.params.id, "workflow:read");
     if (!access.ok) return denyRunAccess(reply, access);
     const exported = exportWorkflowToJson(access.workflow);
     const encoded = Buffer.from(exported).toString("base64url");
@@ -12412,10 +12503,10 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       imported.id = crypto.randomUUID();
       imported.name = `${imported.name} (imported)`;
       // Phase 15.4 — a shared copy gets trigger paths nobody uses, like a duplicate.
-      imported.nodes = withUniqueTriggerPaths(imported, releaseService.usedRoutingKeys()).nodes;
-      const saveDenial = workflowSaveDenial(user, imported);
+      imported.nodes = withUniqueTriggerPaths(imported, await releaseService.usedRoutingKeys()).nodes;
+      const saveDenial = await workflowSaveDenial(user, imported);
       if (saveDenial) return denyRunAccess(reply, saveDenial);
-      store.upsertWorkflow(imported, { createdBy: user.id });
+      await store.upsertWorkflow(imported, { createdBy: user.id });
       return { workflowId: imported.id, name: imported.name };
     } catch {
       reply.code(400);
@@ -12443,7 +12534,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
   app.get("/api/notifications", async (request, reply) => {
     const user = await requireRole(request, reply, ["admin"]);
     if (!user) return;
-    const configs = store.listNotificationConfigs();
+    const configs = await store.listNotificationConfigs();
     return { configs };
   });
 
@@ -12463,9 +12554,9 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       ? body.config as Record<string, unknown>
       : {};
     const events = Array.isArray(body.events) ? body.events.filter((e): e is string => typeof e === "string") : ["execution.failure"];
-    store.upsertNotificationConfig({ id, channel, enabled, config: configObj, events });
-    notificationService.reload();
-    audit(request, user, {
+    await store.upsertNotificationConfig({ id, channel, enabled, config: configObj, events });
+    await notificationService.reload();
+    await audit(request, user, {
       category: "system",
       eventType: "notification.upsert",
       action: "upsert",
@@ -12478,10 +12569,10 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
   app.delete<{ Params: { id: string } }>("/api/notifications/:id", async (request, reply) => {
     const user = await requireRole(request, reply, ["admin"]);
     if (!user) return;
-    const deleted = store.deleteNotificationConfig(request.params.id);
+    const deleted = await store.deleteNotificationConfig(request.params.id);
     if (!deleted) { reply.code(404); return { error: "Notification config not found" }; }
-    notificationService.reload();
-    audit(request, user, {
+    await notificationService.reload();
+    await audit(request, user, {
       category: "system",
       eventType: "notification.delete",
       action: "delete",
@@ -12548,6 +12639,13 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         error: "Request body is too large",
         limitBytes: config.API_BODY_LIMIT_BYTES
       });
+      return;
+    }
+
+    // A store method the Postgres store does not implement yet: the feature is not available here, not broken.
+    if (error instanceof StoreNotImplementedError) {
+      app.log.warn({ method: error.method }, "Store method not implemented on this store");
+      reply.code(501).send({ error: error.message });
       return;
     }
 

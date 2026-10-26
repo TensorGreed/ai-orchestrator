@@ -1,9 +1,8 @@
 import { SqliteStore } from "./database.js";
 import { PostgresStore } from "./postgres-store.js";
+import type { Store } from "./store.js";
 
-export type AnyStore = SqliteStore | PostgresStore;
-
-export async function createStore(config?: { dbFilePath?: string }): Promise<AnyStore> {
+export async function createStore(config?: { dbFilePath?: string }): Promise<Store> {
   const dbType = process.env.DB_TYPE?.toLowerCase();
 
   if (dbType === "postgres" || dbType === "postgresql") {

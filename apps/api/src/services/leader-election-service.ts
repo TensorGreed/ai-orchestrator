@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 import os from "node:os";
-import type { SqliteStore } from "../db/database";
+import type { Store } from "../db/store.js";
 
 export interface LeaderElectionOptions {
   enabled?: boolean;
@@ -49,7 +49,7 @@ export class LeaderElectionService {
   private stopped = false;
 
   constructor(
-    private readonly store: SqliteStore,
+    private readonly store: Store,
     options: LeaderElectionOptions = {},
     leaseName = "primary"
   ) {
@@ -98,7 +98,7 @@ export class LeaderElectionService {
     }
     if (this.enabled && this.holder) {
       try {
-        this.store.releaseLease(this.leaseName, this.instanceId);
+        await this.store.releaseLease(this.leaseName, this.instanceId);
       } catch {
         // ignore
       }
@@ -113,7 +113,7 @@ export class LeaderElectionService {
     }
   }
 
-  getStatus(): LeaderStatus {
+  async getStatus(): Promise<LeaderStatus> {
     if (!this.enabled) {
       return {
         enabled: false,
@@ -126,7 +126,7 @@ export class LeaderElectionService {
         leaseExpiresAt: null
       };
     }
-    const lease = this.store.getLease(this.leaseName);
+    const lease = await this.store.getLease(this.leaseName);
     return {
       enabled: true,
       instanceId: this.instanceId,
@@ -145,7 +145,7 @@ export class LeaderElectionService {
     if (this.stopped) return;
     let acquired = false;
     try {
-      acquired = this.store.tryAcquireLease({
+      acquired = await this.store.tryAcquireLease({
         leaseName: this.leaseName,
         holderId: this.instanceId,
         ttlMs: this.leaseTtlMs

@@ -61,6 +61,15 @@ import {
 import { isEmptyDataLabels, labelsForUntrackedSave, mergeDataLabels, parseStoredDataLabels, type DataLabels } from "@ai-orchestrator/shared";
 import { queuedRunTimeoutMs, STUCK_JOB_MARGIN_MS } from "./queue-timeouts.js";
 import { ProjectNotEmptyError } from "./store-errors.js";
+import type {
+  ApprovalDecisionInput,
+  CancelExecutionResult,
+  ReleaseApprovalDecisionInput,
+  ReleaseGateCasesChange,
+  ReplayRecordingLimits,
+  ReplayRecordingRefusal,
+  Store
+} from "./store.js";
 
 type BindParams = unknown[];
 
@@ -182,7 +191,7 @@ interface FolderRow {
   updated_at: string;
 }
 
-interface SecretRow {
+export interface SecretRow {
   id: string;
   name: string;
   provider: string;
@@ -2210,6 +2219,10 @@ function parseJsonObject(raw: unknown): Record<string, unknown> {
   return {};
 }
 
+/** 1 when a run's history record is finished (a progress write must not replace it), else 0. */
+const FINISHED_HISTORY_SQL = (table: string) =>
+  `(CASE WHEN ${table}.status IN ('success', 'error', 'canceled') OR (${table}.status = 'partial' AND ${table}.completed_at IS NOT NULL AND ${table}.completed_at <> '') THEN 1 ELSE 0 END)`;
+
 function toDurationMsForStore(startedAt: string, completedAt: string): number | null {
   const started = Date.parse(startedAt);
   const completed = Date.parse(completedAt);
@@ -2297,7 +2310,7 @@ export const GUARD_PROFILE_REVISION_TRIGGERS: ReadonlyArray<readonly [string, "I
   ["guard_profile_versions_revision_ad", "DELETE", "guard_profile_versions"]
 ];
 
-export class SqliteStore {
+export class SqliteStore implements Store {
   private closed = false;
 
   private constructor(private readonly db: BetterSqlite3Database) {
@@ -2312,7 +2325,7 @@ export class SqliteStore {
   }
 
   /** Phase 10.7 — where the database lives (a file path, or ":memory:"); names this deployment's sandbox containers. */
-  storageLocation(): string {
+  async storageLocation(): Promise<string> {
     return this.db.name;
   }
 
@@ -3780,7 +3793,7 @@ export class SqliteStore {
     this.db.prepare(sql).run(...params);
   }
 
-  close(): void {
+  async close(): Promise<void> {
     if (this.closed) {
       return;
     }
@@ -3799,12 +3812,12 @@ export class SqliteStore {
     return rows[0] ?? null;
   }
 
-  listWorkflows(options: {
+  async listWorkflows(options: {
     projectId?: string;
     folderId?: string | null;
     tag?: string;
     search?: string;
-  } = {}): WorkflowListItem[] {
+  } = {}): Promise<WorkflowListItem[]> {
     const clauses: string[] = [];
     const params: BindParams = [];
     if (options.projectId) {
@@ -3851,7 +3864,11 @@ export class SqliteStore {
     return mapped;
   }
 
-  getWorkflow(id: string): Workflow | null {
+  async getWorkflow(id: string): Promise<Workflow | null> {
+    return this.getWorkflowSync(id);
+  }
+
+  private getWorkflowSync(id: string): Workflow | null {
     const row = this.queryOne<WorkflowRow>(
       `SELECT id, name, schema_version, workflow_version, workflow_json, created_at, updated_at, tags_json, project_id, folder_id
        FROM workflows
@@ -3878,9 +3895,9 @@ export class SqliteStore {
    * `options.createdBy` (a user id) is stored only when the row is first
    * inserted; later saves never change who created a workflow.
    */
-  upsertWorkflow(workflow: Workflow, options: { createdBy?: string | null } = {}): Workflow {
+  async upsertWorkflow(workflow: Workflow, options: { createdBy?: string | null } = {}): Promise<Workflow> {
     const now = new Date().toISOString();
-    const existing = this.getWorkflow(workflow.id);
+    const existing = this.getWorkflowSync(workflow.id);
     const createdAt = existing?.createdAt ?? now;
     const updatedAt = now;
 
@@ -3925,12 +3942,12 @@ export class SqliteStore {
   }
 
   /** Phase 10.2 — user id of the workflow's creator, or null when unknown. */
-  getWorkflowCreatedBy(id: string): string | null {
+  async getWorkflowCreatedBy(id: string): Promise<string | null> {
     const row = this.queryOne<{ created_by: string | null }>(`SELECT created_by FROM workflows WHERE id = ?`, [id]);
     return row?.created_by ? toString(row.created_by) : null;
   }
 
-  deleteWorkflow(id: string): boolean {
+  async deleteWorkflow(id: string): Promise<boolean> {
     const hasTable = (tableName: string): boolean => {
       const row = this.queryOne<{ count: number }>(
         `SELECT COUNT(*) as count FROM sqlite_master WHERE type = 'table' AND name = ?`,
@@ -3940,7 +3957,7 @@ export class SqliteStore {
     };
 
     // Read before the row goes: its nodes name its legacy session namespaces.
-    const legacyNamespaces = (this.getWorkflow(id)?.nodes ?? []).map((node) => `${id}:${node.id}`);
+    const legacyNamespaces = (this.getWorkflowSync(id)?.nodes ?? []).map((node) => `${id}:${node.id}`);
     const hadForeignKeysEnabled = this.queryOne<{ enabled: number }>("PRAGMA foreign_keys")?.enabled;
     const foreignKeysWereOn = Number(hadForeignKeysEnabled) === 1;
 
@@ -4042,21 +4059,21 @@ export class SqliteStore {
     }
   }
 
-  countWorkflows(): number {
+  async countWorkflows(): Promise<number> {
     const row = this.queryOne<{ count: number }>("SELECT COUNT(*) as count FROM workflows");
     return row ? toNumber(row.count) : 0;
   }
 
-  listSecrets(
+  async listSecrets(
     options: { projectId?: string } = {}
-  ): Array<
+  ): Promise<Array<
     Pick<SecretRow, "id" | "name" | "provider" | "created_at"> & {
       projectId: string;
       source: "local" | "external";
       externalProviderId: string | null;
       externalKey: string | null;
     }
-  > {
+  >> {
     const clauses: string[] = [];
     const params: BindParams = [];
     if (options.projectId) {
@@ -4084,12 +4101,12 @@ export class SqliteStore {
     }));
   }
 
-  getSecret(id: string): (SecretRow & {
+  async getSecret(id: string): Promise<(SecretRow & {
     projectId: string;
     source: "local" | "external";
     externalProviderId: string | null;
     externalKey: string | null;
-  }) | null {
+  }) | null> {
     const row = this.queryOne<SecretRow>(
       `SELECT id, name, provider, iv, auth_tag, ciphertext, created_at, project_id,
               source, external_provider_id, external_key
@@ -4117,7 +4134,7 @@ export class SqliteStore {
     };
   }
 
-  saveSecret(input: {
+  async saveSecret(input: {
     id: string;
     name: string;
     provider: string;
@@ -4128,7 +4145,7 @@ export class SqliteStore {
     source?: "local" | "external";
     externalProviderId?: string | null;
     externalKey?: string | null;
-  }): void {
+  }): Promise<void> {
     this.exec(
       `INSERT INTO secrets (id, name, provider, iv, auth_tag, ciphertext, created_at, project_id,
                             source, external_provider_id, external_key)
@@ -4161,7 +4178,7 @@ export class SqliteStore {
     this.persist();
   }
 
-  deleteSecret(id: string): boolean {
+  async deleteSecret(id: string): Promise<boolean> {
     const existing = this.queryOne<{ id: string }>(`SELECT id FROM secrets WHERE id = ?`, [id]);
     if (!existing) return false;
     this.exec(`DELETE FROM secrets WHERE id = ?`, [id]);
@@ -4171,19 +4188,19 @@ export class SqliteStore {
     return true;
   }
 
-  countUsers(): number {
+  async countUsers(): Promise<number> {
     const row = this.queryOne<{ count: number }>("SELECT COUNT(*) as count FROM users");
     return row ? toNumber(row.count) : 0;
   }
 
-  getUserByEmail(email: string): {
+  async getUserByEmail(email: string): Promise<{
     id: string;
     email: string;
     passwordHash: string;
     role: string;
     createdAt: string;
     updatedAt: string;
-  } | null {
+  } | null> {
     const row = this.queryOne<UserRow>(
       `SELECT id, email, password_hash, role, created_at, updated_at
        FROM users
@@ -4205,7 +4222,18 @@ export class SqliteStore {
     };
   }
 
-  getUserById(id: string): {
+  async getUserById(id: string): Promise<{
+    id: string;
+    email: string;
+    passwordHash: string;
+    role: string;
+    createdAt: string;
+    updatedAt: string;
+  } | null> {
+    return this.getUserByIdSync(id);
+  }
+
+  private getUserByIdSync(id: string): {
     id: string;
     email: string;
     passwordHash: string;
@@ -4234,20 +4262,20 @@ export class SqliteStore {
     };
   }
 
-  saveUser(input: {
+  async saveUser(input: {
     id: string;
     email: string;
     passwordHash: string;
     role: string;
-  }): {
+  }): Promise<{
     id: string;
     email: string;
     role: string;
     createdAt: string;
     updatedAt: string;
-  } {
+  }> {
     const now = new Date().toISOString();
-    const existing = this.getUserById(input.id);
+    const existing = this.getUserByIdSync(input.id);
     const createdAt = existing?.createdAt ?? now;
 
     this.exec(
@@ -4271,13 +4299,13 @@ export class SqliteStore {
     };
   }
 
-  listUsers(): Array<{
+  async listUsers(): Promise<Array<{
     id: string;
     email: string;
     role: string;
     createdAt: string;
     updatedAt: string;
-  }> {
+  }>> {
     const rows = this.queryAll<UserRow>(
       `SELECT id, email, password_hash, role, created_at, updated_at FROM users ORDER BY created_at DESC`
     );
@@ -4290,8 +4318,8 @@ export class SqliteStore {
     }));
   }
 
-  updateUserRole(id: string, role: string): boolean {
-    const existing = this.getUserById(id);
+  async updateUserRole(id: string, role: string): Promise<boolean> {
+    const existing = this.getUserByIdSync(id);
     if (!existing) return false;
     const now = new Date().toISOString();
     this.exec(
@@ -4302,7 +4330,7 @@ export class SqliteStore {
     return true;
   }
 
-  deleteUser(id: string): boolean {
+  async deleteUser(id: string): Promise<boolean> {
     this.exec(`DELETE FROM sessions WHERE user_id = ?`, [id]);
     this.exec(`DELETE FROM users WHERE id = ?`, [id]);
     const changesRow = this.queryOne<{ count: number }>("SELECT changes() as count");
@@ -4311,14 +4339,14 @@ export class SqliteStore {
     return changed;
   }
 
-  getSession(sessionId: string): {
+  async getSession(sessionId: string): Promise<{
     id: string;
     userId: string;
     expiresAt: string;
     createdAt: string;
     lastSeenAt: string;
     revokedAt: string | null;
-  } | null {
+  } | null> {
     const row = this.queryOne<SessionRow>(
       `SELECT id, user_id, expires_at, created_at, last_seen_at, revoked_at
        FROM sessions
@@ -4339,17 +4367,17 @@ export class SqliteStore {
     };
   }
 
-  saveSession(input: {
+  async saveSession(input: {
     id: string;
     userId: string;
     expiresAt: string;
-  }): {
+  }): Promise<{
     id: string;
     userId: string;
     expiresAt: string;
     createdAt: string;
     lastSeenAt: string;
-  } {
+  }> {
     const now = new Date().toISOString();
 
     this.exec(
@@ -4368,7 +4396,7 @@ export class SqliteStore {
     };
   }
 
-  touchSession(sessionId: string): void {
+  async touchSession(sessionId: string): Promise<void> {
     this.exec(
       `UPDATE sessions
        SET last_seen_at = ?
@@ -4378,7 +4406,7 @@ export class SqliteStore {
     this.persist();
   }
 
-  revokeSession(sessionId: string): void {
+  async revokeSession(sessionId: string): Promise<void> {
     this.exec(
       `UPDATE sessions
        SET revoked_at = ?
@@ -4388,7 +4416,7 @@ export class SqliteStore {
     this.persist();
   }
 
-  revokeExpiredSessions(): void {
+  async revokeExpiredSessions(): Promise<void> {
     this.exec(
       `UPDATE sessions
        SET revoked_at = ?
@@ -4398,7 +4426,7 @@ export class SqliteStore {
     this.persist();
   }
 
-  loadSessionMemory(namespace: string, sessionId: string): ChatMessage[] {
+  async loadSessionMemory(namespace: string, sessionId: string): Promise<ChatMessage[]> {
     const row = this.queryOne<SessionMemoryRow>(
       `SELECT namespace, session_id, messages_json, created_at, updated_at
        FROM session_memory
@@ -4422,7 +4450,7 @@ export class SqliteStore {
   }
 
   /** Migration 37 — the labels stored with a session's memory; null when none were recorded. */
-  loadSessionMemoryLabels(namespace: string, sessionId: string): DataLabels | null {
+  async loadSessionMemoryLabels(namespace: string, sessionId: string): Promise<DataLabels | null> {
     const row = this.queryOne<{ labels_json: string | null }>(
       `SELECT labels_json FROM session_memory WHERE namespace = ? AND session_id = ?`,
       [namespace, sessionId]
@@ -4437,7 +4465,7 @@ export class SqliteStore {
    * `untrusted_external` (it re-saves the old messages with a turn of unknown
    * origin); a row with no labels stays without.
    */
-  saveSessionMemory(namespace: string, sessionId: string, messages: ChatMessage[], labels?: DataLabels): void {
+  async saveSessionMemory(namespace: string, sessionId: string, messages: ChatMessage[], labels?: DataLabels): Promise<void> {
     const existing = this.queryOne<SessionMemoryRow>(
       `SELECT namespace, session_id, messages_json, labels_json, created_at, updated_at
        FROM session_memory
@@ -4477,7 +4505,7 @@ export class SqliteStore {
     this.persist();
   }
 
-  saveSessionToolCall(input: {
+  async saveSessionToolCall(input: {
     namespace: string;
     sessionId: string;
     toolName: string;
@@ -4488,7 +4516,7 @@ export class SqliteStore {
     summary?: unknown;
     /** Phase 16 — given only while the run tracks labels. */
     labels?: DataLabels;
-  }): {
+  }): Promise<{
     id: string;
     namespace: string;
     sessionId: string;
@@ -4500,7 +4528,7 @@ export class SqliteStore {
     summary?: unknown;
     labels?: DataLabels | null;
     createdAt: string;
-  } {
+  }> {
     const now = new Date().toISOString();
     const id = randomUUID();
 
@@ -4562,12 +4590,12 @@ export class SqliteStore {
     };
   }
 
-  listSessionToolCalls(input: {
+  async listSessionToolCalls(input: {
     namespace: string;
     sessionId: string;
     toolName?: string;
     limit?: number;
-  }): Array<{
+  }): Promise<Array<{
     id: string;
     namespace: string;
     sessionId: string;
@@ -4578,7 +4606,7 @@ export class SqliteStore {
     summary?: unknown;
     labels?: DataLabels | null;
     createdAt: string;
-  }> {
+  }>> {
     const limit =
       typeof input.limit === "number" && Number.isFinite(input.limit) && input.limit > 0
         ? Math.min(Math.floor(input.limit), 200)
@@ -4628,11 +4656,11 @@ export class SqliteStore {
     });
   }
 
-  getSessionToolCall(input: {
+  async getSessionToolCall(input: {
     namespace: string;
     sessionId: string;
     id: string;
-  }): {
+  }): Promise<{
     id: string;
     namespace: string;
     sessionId: string;
@@ -4644,7 +4672,7 @@ export class SqliteStore {
     summary?: unknown;
     labels?: DataLabels | null;
     createdAt: string;
-  } | null {
+  } | null> {
     const row = this.queryOne<SessionToolCacheRow>(
       `SELECT id, namespace, session_id, tool_name, tool_call_id, args_json, output_json, error, summary_json, labels_json, created_at
        FROM session_tool_cache
@@ -4683,13 +4711,13 @@ export class SqliteStore {
    * `untrusted_external` (the value may carry the old one forward); a row
    * with no labels stays without.
    */
-  saveSessionArtifact(input: {
+  async saveSessionArtifact(input: {
     namespace: string;
     sessionId: string;
     artifactKey: string;
     value: unknown;
     labels?: DataLabels;
-  }): {
+  }): Promise<{
     namespace: string;
     sessionId: string;
     artifactKey: string;
@@ -4697,7 +4725,7 @@ export class SqliteStore {
     labels?: DataLabels | null;
     createdAt: string;
     updatedAt: string;
-  } {
+  }> {
     const existing = this.queryOne<SessionArtifactRow>(
       `SELECT namespace, session_id, artifact_key, value_json, labels_json, created_at, updated_at
        FROM session_artifacts
@@ -4740,11 +4768,11 @@ export class SqliteStore {
     };
   }
 
-  loadSessionArtifact(input: {
+  async loadSessionArtifact(input: {
     namespace: string;
     sessionId: string;
     artifactKey: string;
-  }): {
+  }): Promise<{
     namespace: string;
     sessionId: string;
     artifactKey: string;
@@ -4752,7 +4780,7 @@ export class SqliteStore {
     labels?: DataLabels | null;
     createdAt: string;
     updatedAt: string;
-  } | null {
+  } | null> {
     const row = this.queryOne<SessionArtifactRow>(
       `SELECT namespace, session_id, artifact_key, value_json, labels_json, created_at, updated_at
        FROM session_artifacts
@@ -4776,13 +4804,13 @@ export class SqliteStore {
     };
   }
 
-  clearExpiredWebhookSecurityState(nowIso = new Date().toISOString()): void {
+  async clearExpiredWebhookSecurityState(nowIso = new Date().toISOString()): Promise<void> {
     this.exec(`DELETE FROM webhook_replay_keys WHERE expires_at <= ?`, [nowIso]);
     this.exec(`DELETE FROM webhook_idempotency WHERE expires_at <= ?`, [nowIso]);
     this.persist();
   }
 
-  hasWebhookReplayKey(replayKey: string): boolean {
+  async hasWebhookReplayKey(replayKey: string): Promise<boolean> {
     const row = this.queryOne<WebhookReplayRow>(
       `SELECT replay_key, endpoint_key, created_at, expires_at
        FROM webhook_replay_keys
@@ -4792,17 +4820,19 @@ export class SqliteStore {
     return Boolean(row);
   }
 
-  saveWebhookReplayKey(input: { replayKey: string; endpointKey: string; expiresAt: string }): void {
-    this.exec(
-      `INSERT INTO webhook_replay_keys (replay_key, endpoint_key, created_at, expires_at)
-       VALUES (?, ?, ?, ?)
-       ON CONFLICT(replay_key) DO NOTHING`,
-      [input.replayKey, input.endpointKey, new Date().toISOString(), input.expiresAt]
-    );
+  async saveWebhookReplayKey(input: { replayKey: string; endpointKey: string; expiresAt: string }): Promise<boolean> {
+    const result = this.db
+      .prepare(
+        `INSERT INTO webhook_replay_keys (replay_key, endpoint_key, created_at, expires_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(replay_key) DO NOTHING`
+      )
+      .run(input.replayKey, input.endpointKey, new Date().toISOString(), input.expiresAt);
     this.persist();
+    return result.changes > 0;
   }
 
-  getWebhookIdempotency(input: { endpointKey: string; idempotencyKey: string }): {
+  async getWebhookIdempotency(input: { endpointKey: string; idempotencyKey: string }): Promise<{
     endpointKey: string;
     idempotencyKey: string;
     requestHash: string;
@@ -4811,7 +4841,7 @@ export class SqliteStore {
     createdAt: string;
     updatedAt: string;
     expiresAt: string;
-  } | null {
+  } | null> {
     const row = this.queryOne<WebhookIdempotencyRow>(
       `SELECT endpoint_key, idempotency_key, request_hash, status, result_json, created_at, updated_at, expires_at
        FROM webhook_idempotency
@@ -4844,12 +4874,12 @@ export class SqliteStore {
     };
   }
 
-  saveWebhookIdempotencyPending(input: {
+  async saveWebhookIdempotencyPending(input: {
     endpointKey: string;
     idempotencyKey: string;
     requestHash: string;
     expiresAt: string;
-  }): void {
+  }): Promise<void> {
     const now = new Date().toISOString();
     this.exec(
       `INSERT INTO webhook_idempotency (
@@ -4868,12 +4898,12 @@ export class SqliteStore {
     this.persist();
   }
 
-  saveWebhookIdempotencyResult(input: {
+  async saveWebhookIdempotencyResult(input: {
     endpointKey: string;
     idempotencyKey: string;
     status: "success" | "error" | "partial" | "waiting_approval" | "canceled";
     result: unknown;
-  }): void {
+  }): Promise<void> {
     const now = new Date().toISOString();
     this.exec(
       `UPDATE webhook_idempotency
@@ -4884,7 +4914,7 @@ export class SqliteStore {
     this.persist();
   }
 
-  saveExecutionHistory(input: {
+  async saveExecutionHistory(input: {
     id: string;
     workflowId: string;
     workflowName?: string;
@@ -4899,8 +4929,15 @@ export class SqliteStore {
     nodeResultsJson?: unknown;
     customData?: unknown;
     error?: string;
-  }): void {
-    this.exec(
+  }, options?: { unlessFinished?: boolean; unlessCanceled?: boolean }): Promise<boolean> {
+    const guard = options?.unlessFinished
+      ? `
+        WHERE ${FINISHED_HISTORY_SQL("execution_history")} = 0`
+      : options?.unlessCanceled
+        ? `
+        WHERE execution_history.status <> 'canceled' OR excluded.status = 'canceled'`
+        : "";
+    const result = this.db.prepare(
       `INSERT INTO execution_history (
           id,
           workflow_id,
@@ -4930,8 +4967,8 @@ export class SqliteStore {
           output_json = excluded.output_json,
           node_results_json = excluded.node_results_json,
           custom_data_json = excluded.custom_data_json,
-          error = excluded.error`,
-      [
+          error = excluded.error${guard}`
+    ).run(
         input.id,
         input.workflowId,
         input.workflowName ?? null,
@@ -4946,12 +4983,12 @@ export class SqliteStore {
         input.nodeResultsJson === undefined ? null : JSON.stringify(input.nodeResultsJson),
         input.customData === undefined ? null : JSON.stringify(input.customData),
         input.error ?? null
-      ]
     );
     this.persist();
+    return result.changes > 0;
   }
 
-  listExecutionHistory(input: {
+  async listExecutionHistory(input: {
     page?: number;
     pageSize?: number;
     status?: string;
@@ -4961,7 +4998,7 @@ export class SqliteStore {
     triggerType?: string;
     startedFrom?: string;
     startedTo?: string;
-  }): {
+  }): Promise<{
     total: number;
     page: number;
     pageSize: number;
@@ -4979,7 +5016,7 @@ export class SqliteStore {
       error: string | null;
       createdAt: string;
     }>;
-  } {
+  }> {
     const page = Math.max(1, Math.floor(input.page ?? 1));
     const pageSize = Math.min(100, Math.max(1, Math.floor(input.pageSize ?? 20)));
     const offset = (page - 1) * pageSize;
@@ -5068,7 +5105,27 @@ export class SqliteStore {
     };
   }
 
-  getExecutionHistory(id: string): {
+  async getExecutionHistory(id: string): Promise<{
+    id: string;
+    workflowId: string;
+    workflowName: string | null;
+    status: string;
+    startedAt: string;
+    completedAt: string | null;
+    durationMs: number | null;
+    triggerType: string | null;
+    triggeredBy: string | null;
+    input: unknown;
+    output: unknown;
+    nodeResults: unknown;
+    customData: unknown;
+    error: string | null;
+    createdAt: string;
+  } | null> {
+    return this.getExecutionHistorySync(id);
+  }
+
+  private getExecutionHistorySync(id: string): {
     id: string;
     workflowId: string;
     workflowName: string | null;
@@ -5141,35 +5198,55 @@ export class SqliteStore {
     };
   }
 
-  cancelExecutionHistory(input: {
+  async cancelExecution(input: {
     id: string;
+    onlyFrom: readonly string[];
     completedAt?: string;
     error?: string;
-  }): boolean {
-    const existing = this.getExecutionHistory(input.id);
-    if (!existing) {
-      return false;
-    }
-    const completedAt = input.completedAt ?? new Date().toISOString();
-    this.exec(
-      `UPDATE execution_history
-       SET status = 'canceled',
-           completed_at = ?,
-           duration_ms = ?,
-           error = ?
-       WHERE id = ?`,
-      [
-        completedAt,
-        toDurationMsForStore(existing.startedAt, completedAt),
-        input.error ?? "Execution canceled",
-        input.id
-      ]
-    );
-    this.persist();
-    return true;
+    deletePausedState?: boolean;
+    cancelClaimed?: boolean;
+  }): Promise<CancelExecutionResult> {
+    const result = this.transaction((): CancelExecutionResult => {
+      const refuse = (outcome: CancelExecutionResult["outcome"]): CancelExecutionResult => ({ outcome, canceledRequestIds: [] });
+      const existing = this.getExecutionHistorySync(input.id);
+      if (!existing) return refuse("missing");
+      const open = existing.status !== "partial" || !existing.completedAt;
+      if (!input.onlyFrom.includes(existing.status) || !open) return refuse("not_cancelable");
+      if (input.deletePausedState) {
+        const paused = this.queryOne<{ status: string }>(`SELECT status FROM workflow_executions WHERE id = ?`, [input.id]);
+        if (paused && toString(paused.status) !== "waiting_approval" && !input.cancelClaimed) return refuse("decided");
+        if (paused) this.exec(`DELETE FROM workflow_executions WHERE id = ?`, [input.id]);
+      }
+      const completedAt = input.completedAt ?? new Date().toISOString();
+      const canceledRequestIds: string[] = [];
+      if (input.deletePausedState) {
+        for (const row of this.queryAll<{ id: string }>(
+          `SELECT id FROM approval_requests WHERE execution_id = ? AND status = 'pending' ORDER BY created_at, id`,
+          [input.id]
+        )) {
+          canceledRequestIds.push(toString(row.id));
+        }
+        this.exec(
+          `UPDATE approval_requests SET status = 'canceled', reason = ?, decided_at = ?, updated_at = ? WHERE execution_id = ? AND status = 'pending'`,
+          [input.error ?? "Execution canceled", completedAt, completedAt, input.id]
+        );
+      }
+      this.exec(
+        `UPDATE execution_history
+         SET status = 'canceled',
+             completed_at = ?,
+             duration_ms = ?,
+             error = ?
+         WHERE id = ?`,
+        [completedAt, toDurationMsForStore(existing.startedAt, completedAt), input.error ?? "Execution canceled", input.id]
+      );
+      return { outcome: "canceled", canceledRequestIds };
+    });
+    if (result.outcome === "canceled") this.persist();
+    return result;
   }
 
-  pruneExecutionHistory(input: { before: string }): number {
+  async pruneExecutionHistory(input: { before: string }): Promise<number> {
     const before = this.queryOne<{ count: number }>(
       `SELECT COUNT(*) as count FROM execution_history WHERE started_at < ?`,
       [input.before]
@@ -5190,7 +5267,7 @@ export class SqliteStore {
     return deleted;
   }
 
-  saveWorkflowExecutionState(input: {
+  async saveWorkflowExecutionState(input: {
     id: string;
     workflowId: string;
     workflowName?: string;
@@ -5202,7 +5279,7 @@ export class SqliteStore {
     triggeredBy?: string;
     startedAt: string;
     state: unknown;
-  }): void {
+  }): Promise<void> {
     const now = new Date().toISOString();
     this.exec(
       `INSERT INTO workflow_executions (
@@ -5251,7 +5328,7 @@ export class SqliteStore {
     this.persist();
   }
 
-  getWorkflowExecutionState(id: string): {
+  async getWorkflowExecutionState(id: string): Promise<{
     id: string;
     workflowId: string;
     workflowName: string | null;
@@ -5265,7 +5342,7 @@ export class SqliteStore {
     state: unknown;
     createdAt: string;
     updatedAt: string;
-  } | null {
+  } | null> {
     const row = this.queryOne<WorkflowExecutionRow>(
       `SELECT
          id,
@@ -5315,7 +5392,7 @@ export class SqliteStore {
     };
   }
 
-  listPendingApprovals(): Array<{
+  async listPendingApprovals(): Promise<Array<{
     id: string;
     workflowId: string;
     workflowName: string | null;
@@ -5327,7 +5404,7 @@ export class SqliteStore {
     startedAt: string;
     createdAt: string;
     updatedAt: string;
-  }> {
+  }>> {
     const rows = this.queryAll<WorkflowExecutionRow>(
       `SELECT
          id,
@@ -5364,7 +5441,7 @@ export class SqliteStore {
     }));
   }
 
-  deleteWorkflowExecution(id: string): boolean {
+  async deleteWorkflowExecution(id: string): Promise<boolean> {
     const before = this.queryOne<{ count: number }>("SELECT COUNT(*) as count FROM workflow_executions WHERE id = ?", [id]);
     this.exec("DELETE FROM workflow_executions WHERE id = ?", [id]);
     const after = this.queryOne<{ count: number }>("SELECT COUNT(*) as count FROM workflow_executions WHERE id = ?", [id]);
@@ -5379,7 +5456,11 @@ export class SqliteStore {
    * Phase 11.2 — move a paused run to `resuming` once, so two decisions (two
    * approvers, or an approver and the timeout sweeper) cannot both resume it.
    */
-  claimWorkflowExecutionForResume(id: string): boolean {
+  async claimWorkflowExecutionForResume(id: string): Promise<boolean> {
+    return this.claimWorkflowExecutionForResumeSync(id);
+  }
+
+  private claimWorkflowExecutionForResumeSync(id: string): boolean {
     const result = this.db
       .prepare(`UPDATE workflow_executions SET status = 'resuming', updated_at = ? WHERE id = ? AND status = 'waiting_approval'`)
       .run(new Date().toISOString(), id);
@@ -5388,12 +5469,12 @@ export class SqliteStore {
   }
 
   /** Phase 11.2 — paused runs a decision was taken for but whose resume did not finish (the process stopped). */
-  listResumingWorkflowExecutionIds(): string[] {
+  async listResumingWorkflowExecutionIds(): Promise<string[]> {
     return this.queryAll<{ id: string }>(`SELECT id FROM workflow_executions WHERE status = 'resuming' ORDER BY updated_at ASC`).map((row) => toString(row.id));
   }
 
   /** Phase 11.2 — paused runs in `resuming` whose claim is older than `before`, with the claim time. */
-  listResumingWorkflowExecutions(before?: string): Array<{ id: string; claimedAt: string }> {
+  async listResumingWorkflowExecutions(before?: string): Promise<Array<{ id: string; claimedAt: string }>> {
     const rows = before
       ? this.queryAll<{ id: string; updated_at: string }>(`SELECT id, updated_at FROM workflow_executions WHERE status = 'resuming' AND updated_at < ? ORDER BY updated_at ASC`, [before])
       : this.queryAll<{ id: string; updated_at: string }>(`SELECT id, updated_at FROM workflow_executions WHERE status = 'resuming' ORDER BY updated_at ASC`);
@@ -5401,7 +5482,11 @@ export class SqliteStore {
   }
 
   /** Phase 11.2 — hand a claimed run back to the waiting state (the resume could not start). False when it was not claimed. */
-  releaseWorkflowExecutionClaim(id: string): boolean {
+  async releaseWorkflowExecutionClaim(id: string): Promise<boolean> {
+    return this.releaseWorkflowExecutionClaimSync(id);
+  }
+
+  private releaseWorkflowExecutionClaimSync(id: string): boolean {
     const result = this.db
       .prepare(`UPDATE workflow_executions SET status = 'waiting_approval', updated_at = ? WHERE id = ? AND status = 'resuming'`)
       .run(new Date().toISOString(), id);
@@ -5415,13 +5500,13 @@ export class SqliteStore {
   }
 
   /** Phase 11.2 — when a schema marker was first written (see `schema_markers`). */
-  getSchemaMarker(name: string): string | null {
+  async getSchemaMarker(name: string): Promise<string | null> {
     const row = this.queryOne<{ created_at: string }>(`SELECT created_at FROM schema_markers WHERE name = ?`, [name]);
     return row ? toString(row.created_at) : null;
   }
 
   /** Phase 11.2 — whether a queue item with this id, or one that extends it (`<id>:…`), is still waiting or running. */
-  hasActiveQueueItem(id: string): boolean {
+  async hasActiveQueueItem(id: string): Promise<boolean> {
     const row = this.queryOne<{ id: string }>(
       `SELECT id FROM execution_queue WHERE (id = ? OR id LIKE ? ESCAPE '\\') AND status IN ('pending', 'running') LIMIT 1`,
       [id, `${id.replace(/[\\%_]/g, "\\$&")}:%`]
@@ -5433,7 +5518,7 @@ export class SqliteStore {
   // Phase 11.2 — approval requests
   // -------------------------------------------------------------------------
 
-  insertApprovalRequest(input: ApprovalRequestInsert): ApprovalRequestRecord {
+  async insertApprovalRequest(input: ApprovalRequestInsert): Promise<ApprovalRequestRecord> {
     const now = input.createdAt ?? new Date().toISOString();
     this.exec(
       `INSERT INTO approval_requests (
@@ -5465,16 +5550,20 @@ export class SqliteStore {
       ]
     );
     this.persist();
-    return this.getApprovalRequest(input.id)!;
+    return this.getApprovalRequestSync(input.id)!;
   }
 
-  getApprovalRequest(id: string): ApprovalRequestRecord | null {
+  async getApprovalRequest(id: string): Promise<ApprovalRequestRecord | null> {
+    return this.getApprovalRequestSync(id);
+  }
+
+  private getApprovalRequestSync(id: string): ApprovalRequestRecord | null {
     const row = this.queryOne<ApprovalRequestRow>(`SELECT * FROM approval_requests WHERE id = ?`, [id]);
     return row ? mapApprovalRequestRow(row) : null;
   }
 
   /** The newest pending request of a paused run. */
-  getPendingApprovalRequestForExecution(executionId: string): ApprovalRequestRecord | null {
+  async getPendingApprovalRequestForExecution(executionId: string): Promise<ApprovalRequestRecord | null> {
     const row = this.queryOne<ApprovalRequestRow>(
       `SELECT * FROM approval_requests WHERE execution_id = ? AND status = 'pending' ORDER BY created_at DESC LIMIT 1`,
       [executionId]
@@ -5482,11 +5571,11 @@ export class SqliteStore {
     return row ? mapApprovalRequestRow(row) : null;
   }
 
-  listApprovalRequestsForExecution(executionId: string): ApprovalRequestRecord[] {
+  async listApprovalRequestsForExecution(executionId: string): Promise<ApprovalRequestRecord[]> {
     return this.queryAll<ApprovalRequestRow>(`SELECT * FROM approval_requests WHERE execution_id = ? ORDER BY created_at ASC, id ASC`, [executionId]).map(mapApprovalRequestRow);
   }
 
-  listApprovalRequests(filter: { status: "pending" | "decided" | "all"; workflowId?: string; executionId?: string; limit?: number; scope?: ApprovalReadScope }): ApprovalRequestRecord[] {
+  async listApprovalRequests(filter: { status: "pending" | "decided" | "all"; workflowId?: string; executionId?: string; limit?: number; scope?: ApprovalReadScope }): Promise<ApprovalRequestRecord[]> {
     const clauses: string[] = [];
     const params: BindParams = [];
     // Filtered before the limit, so other projects' requests never crowd out the user's own.
@@ -5519,7 +5608,7 @@ export class SqliteStore {
   }
 
   /** Pending requests past their expiry, oldest first. */
-  listExpiredApprovalRequests(now: string, limit = 100): ApprovalRequestRecord[] {
+  async listExpiredApprovalRequests(now: string, limit = 100): Promise<ApprovalRequestRecord[]> {
     return this.queryAll<ApprovalRequestRow>(
       `SELECT * FROM approval_requests WHERE status = 'pending' AND expires_at IS NOT NULL AND expires_at <= ? ORDER BY expires_at ASC LIMIT ?`,
       [now, Math.max(1, Math.floor(limit))]
@@ -5527,7 +5616,20 @@ export class SqliteStore {
   }
 
   /** Records a decision once: false when the request was no longer pending. */
-  decideApprovalRequest(input: {
+  async decideApprovalRequest(input: {
+    id: string;
+    status: "approved" | "rejected" | "timed_out" | "canceled";
+    decidedByUserId?: string | null;
+    decidedBy?: string | null;
+    reason?: string | null;
+    edits?: Record<string, unknown> | null;
+    editedFields?: string[];
+    decidedAt?: string;
+  }): Promise<boolean> {
+    return this.decideApprovalRequestSync(input);
+  }
+
+  private decideApprovalRequestSync(input: {
     id: string;
     status: "approved" | "rejected" | "timed_out" | "canceled";
     decidedByUserId?: string | null;
@@ -5564,7 +5666,11 @@ export class SqliteStore {
    * run), clearing the decision. Its expiry is unchanged. False when it was
    * not in a decided state.
    */
-  reopenApprovalRequest(id: string): boolean {
+  async reopenApprovalRequest(id: string): Promise<boolean> {
+    return this.reopenApprovalRequestSync(id);
+  }
+
+  private reopenApprovalRequestSync(id: string): boolean {
     const result = this.db
       .prepare(
         `UPDATE approval_requests
@@ -5578,7 +5684,7 @@ export class SqliteStore {
   }
 
   /** Cancels every pending request of a run (the run was canceled or its workflow deleted). */
-  cancelPendingApprovalRequests(filter: { executionId?: string; workflowId?: string }, reason: string): number {
+  async cancelPendingApprovalRequests(filter: { executionId?: string; workflowId?: string }, reason: string): Promise<number> {
     const column = filter.executionId ? "execution_id" : "workflow_id";
     const value = filter.executionId ?? filter.workflowId;
     if (!value) return 0;
@@ -5594,7 +5700,7 @@ export class SqliteStore {
   // Execution Queue methods
   // -------------------------------------------------------------------------
 
-  enqueueExecution(input: {
+  async enqueueExecution(input: {
     id: string;
     workflowId: string;
     workflowName?: string;
@@ -5602,7 +5708,7 @@ export class SqliteStore {
     priority?: number;
     maxAttempts?: number;
     scheduledAt?: string;
-  }): void {
+  }): Promise<void> {
     const now = new Date().toISOString();
     this.exec(
       `INSERT INTO execution_queue (id, workflow_id, workflow_name, payload_json, status, priority, attempts, max_attempts, last_error, scheduled_at, started_at, completed_at, created_at, updated_at)
@@ -5623,7 +5729,7 @@ export class SqliteStore {
     this.persist();
   }
 
-  dequeueNext(limit = 1): Array<{
+  async dequeueNext(limit = 1): Promise<Array<{
     id: string;
     workflowId: string;
     workflowName: string | null;
@@ -5631,7 +5737,7 @@ export class SqliteStore {
     attempts: number;
     maxAttempts: number;
     scheduledAt: string;
-  }> {
+  }>> {
     const now = new Date().toISOString();
     const rows = this.queryAll<ExecutionQueueRow>(
       `SELECT id, workflow_id, workflow_name, payload_json, attempts, max_attempts, scheduled_at
@@ -5677,7 +5783,7 @@ export class SqliteStore {
     });
   }
 
-  markQueueItemRunning(id: string): void {
+  async markQueueItemRunning(id: string): Promise<void> {
     const now = new Date().toISOString();
     this.exec(
       `UPDATE execution_queue SET status = 'running', started_at = ?, updated_at = ? WHERE id = ?`,
@@ -5686,7 +5792,7 @@ export class SqliteStore {
     this.persist();
   }
 
-  markQueueItemCompleted(id: string): void {
+  async markQueueItemCompleted(id: string): Promise<void> {
     const now = new Date().toISOString();
     this.exec(
       `UPDATE execution_queue SET status = 'completed', completed_at = ?, updated_at = ? WHERE id = ?`,
@@ -5696,7 +5802,7 @@ export class SqliteStore {
   }
 
   /** Retries with backoff until max attempts; `retryable: false` moves the job to the DLQ now. */
-  markQueueItemFailed(id: string, error: string, options: { retryable?: boolean } = {}): void {
+  async markQueueItemFailed(id: string, error: string, options: { retryable?: boolean } = {}): Promise<void> {
     const now = new Date().toISOString();
     const row = this.queryOne<ExecutionQueueRow>(
       `SELECT id, workflow_id, workflow_name, payload_json, attempts, max_attempts FROM execution_queue WHERE id = ?`,
@@ -5745,7 +5851,7 @@ export class SqliteStore {
     this.persist();
   }
 
-  requeueStuckItems(stuckAfterMs = 600_000, excludeIds: string[] = [], marginMs = STUCK_JOB_MARGIN_MS): number {
+  async requeueStuckItems(stuckAfterMs = 600_000, excludeIds: string[] = [], marginMs = STUCK_JOB_MARGIN_MS): Promise<number> {
     const nowMs = Date.now();
     const stuckBefore = new Date(nowMs - stuckAfterMs).toISOString();
     const now = new Date(nowMs).toISOString();
@@ -5778,7 +5884,7 @@ export class SqliteStore {
    * Marks runs still recorded as running that no live process owns as errors. Runs the queue still
    * owns (pending/running queue rows) and runs paused for approval are left alone.
    */
-  reconcileOrphanedExecutions(input: { error: string; startedBefore?: string }): Array<{ id: string; workflowId: string }> {
+  async reconcileOrphanedExecutions(input: { error: string; startedBefore?: string }): Promise<Array<{ id: string; workflowId: string }>> {
     const rows = this.queryAll<{ id: unknown; workflow_id: unknown; started_at: unknown }>(
       `SELECT id, workflow_id, started_at FROM execution_history
        WHERE status = 'running'
@@ -5799,7 +5905,7 @@ export class SqliteStore {
     return rows.map((row) => ({ id: toString(row.id), workflowId: toString(row.workflow_id) }));
   }
 
-  getQueueDepth(): { pending: number; running: number; dlq: number } {
+  async getQueueDepth(): Promise<{ pending: number; running: number; dlq: number }> {
     const pendingRow = this.queryOne<{ count: number }>(
       `SELECT COUNT(*) as count FROM execution_queue WHERE status = 'pending'`
     );
@@ -5816,7 +5922,7 @@ export class SqliteStore {
     };
   }
 
-  listDlqItems(limit = 50, workflowIds?: string[]): Array<{
+  async listDlqItems(limit = 50, workflowIds?: string[]): Promise<Array<{
     id: string;
     originalId: string;
     workflowId: string;
@@ -5824,7 +5930,7 @@ export class SqliteStore {
     attempts: number;
     finalError: string;
     failedAt: string;
-  }> {
+  }>> {
     if (workflowIds && workflowIds.length === 0) return [];
     const scope = workflowIds ? `WHERE workflow_id IN (${workflowIds.map(() => "?").join(", ")})` : "";
     const rows = this.queryAll<ExecutionQueueDlqRow>(
@@ -5847,7 +5953,7 @@ export class SqliteStore {
     }));
   }
 
-  getTriggerState(workflowId: string, nodeId: string): Record<string, unknown> | null {
+  async getTriggerState(workflowId: string, nodeId: string): Promise<Record<string, unknown> | null> {
     const row = this.queryOne<{ state_json: string }>(
       `SELECT state_json FROM trigger_state WHERE workflow_id = ? AND node_id = ?`,
       [workflowId, nodeId]
@@ -5860,12 +5966,12 @@ export class SqliteStore {
     }
   }
 
-  saveTriggerState(input: {
+  async saveTriggerState(input: {
     workflowId: string;
     nodeId: string;
     triggerType: string;
     state: Record<string, unknown>;
-  }): void {
+  }): Promise<void> {
     this.exec(
       `INSERT INTO trigger_state (workflow_id, node_id, trigger_type, state_json, updated_at)
        VALUES (?, ?, ?, ?, ?)
@@ -5878,7 +5984,7 @@ export class SqliteStore {
     this.persist();
   }
 
-  deleteTriggerStatesForWorkflow(workflowId: string): void {
+  async deleteTriggerStatesForWorkflow(workflowId: string): Promise<void> {
     this.exec(`DELETE FROM trigger_state WHERE workflow_id = ?`, [workflowId]);
     this.persist();
   }
@@ -5887,7 +5993,7 @@ export class SqliteStore {
   // Phase 4.2 — projects & folders
   // ---------------------------------------------------------------------------
 
-  listProjects(): Project[] {
+  async listProjects(): Promise<Project[]> {
     const rows = this.queryAll<ProjectRow>(
       `SELECT id, name, description, created_by, created_at, updated_at
        FROM projects
@@ -5903,7 +6009,11 @@ export class SqliteStore {
     }));
   }
 
-  getProject(id: string): Project | null {
+  async getProject(id: string): Promise<Project | null> {
+    return this.getProjectSync(id);
+  }
+
+  private getProjectSync(id: string): Project | null {
     const row = this.queryOne<ProjectRow>(
       `SELECT id, name, description, created_by, created_at, updated_at FROM projects WHERE id = ?`,
       [id]
@@ -5919,14 +6029,23 @@ export class SqliteStore {
     };
   }
 
-  upsertProject(input: {
+  async upsertProject(input: {
+    id: string;
+    name: string;
+    description?: string;
+    createdBy?: string;
+  }): Promise<Project> {
+    return this.upsertProjectSync(input);
+  }
+
+  private upsertProjectSync(input: {
     id: string;
     name: string;
     description?: string;
     createdBy?: string;
   }): Project {
     const now = new Date().toISOString();
-    const existing = this.getProject(input.id);
+    const existing = this.getProjectSync(input.id);
     const createdAt = existing?.createdAt ?? now;
     this.exec(
       `INSERT INTO projects (id, name, description, created_by, created_at, updated_at)
@@ -5955,11 +6074,11 @@ export class SqliteStore {
     };
   }
 
-  deleteProject(id: string): boolean {
+  async deleteProject(id: string): Promise<boolean> {
     if (id === DEFAULT_PROJECT_ID) {
       throw new Error("Cannot delete the default project.");
     }
-    const existing = this.getProject(id);
+    const existing = this.getProjectSync(id);
     if (!existing) return false;
     // Never move a project's workflows or secrets into the default project:
     // that would hand them to everyone who can use the default project.
@@ -5985,7 +6104,7 @@ export class SqliteStore {
     return true;
   }
 
-  listFolders(projectId?: string): Folder[] {
+  async listFolders(projectId?: string): Promise<Folder[]> {
     const rows = projectId
       ? this.queryAll<FolderRow>(
           `SELECT id, name, parent_id, project_id, created_at, updated_at FROM folders WHERE project_id = ? ORDER BY name ASC`,
@@ -6004,7 +6123,11 @@ export class SqliteStore {
     }));
   }
 
-  getFolder(id: string): Folder | null {
+  async getFolder(id: string): Promise<Folder | null> {
+    return this.getFolderSync(id);
+  }
+
+  private getFolderSync(id: string): Folder | null {
     const row = this.queryOne<FolderRow>(
       `SELECT id, name, parent_id, project_id, created_at, updated_at FROM folders WHERE id = ?`,
       [id]
@@ -6020,14 +6143,14 @@ export class SqliteStore {
     };
   }
 
-  upsertFolder(input: {
+  async upsertFolder(input: {
     id: string;
     name: string;
     parentId?: string;
     projectId: string;
-  }): Folder {
+  }): Promise<Folder> {
     const now = new Date().toISOString();
-    const existing = this.getFolder(input.id);
+    const existing = this.getFolderSync(input.id);
     const createdAt = existing?.createdAt ?? now;
     this.exec(
       `INSERT INTO folders (id, name, parent_id, project_id, created_at, updated_at)
@@ -6057,8 +6180,8 @@ export class SqliteStore {
     };
   }
 
-  deleteFolder(id: string): boolean {
-    const existing = this.getFolder(id);
+  async deleteFolder(id: string): Promise<boolean> {
+    const existing = this.getFolderSync(id);
     if (!existing) return false;
     // Orphan workflows in this folder (keep them in the project, drop the folder_id).
     this.exec(`UPDATE workflows SET folder_id = NULL WHERE folder_id = ?`, [id]);
@@ -6076,7 +6199,7 @@ export class SqliteStore {
   // Phase 5.1 — API keys
   // ---------------------------------------------------------------------------
 
-  saveApiKey(input: {
+  async saveApiKey(input: {
     id: string;
     userId: string;
     name: string;
@@ -6084,7 +6207,7 @@ export class SqliteStore {
     keyHash: string;
     scopes?: string[];
     expiresAt?: string | null;
-  }): void {
+  }): Promise<void> {
     const now = new Date().toISOString();
     this.exec(
       `INSERT INTO api_keys (id, user_id, name, key_prefix, key_hash, scopes_json, last_used_at, expires_at, revoked_at, created_at)
@@ -6103,7 +6226,7 @@ export class SqliteStore {
     this.persist();
   }
 
-  listApiKeys(userId?: string): Array<{
+  async listApiKeys(userId?: string): Promise<Array<{
     id: string;
     userId: string;
     name: string;
@@ -6113,7 +6236,7 @@ export class SqliteStore {
     expiresAt: string | null;
     revokedAt: string | null;
     createdAt: string;
-  }> {
+  }>> {
     const rows = userId
       ? this.queryAll<{
           id: string;
@@ -6158,7 +6281,7 @@ export class SqliteStore {
     }));
   }
 
-  findApiKeyByPrefix(prefix: string): {
+  async findApiKeyByPrefix(prefix: string): Promise<{
     id: string;
     userId: string;
     name: string;
@@ -6169,7 +6292,7 @@ export class SqliteStore {
     expiresAt: string | null;
     revokedAt: string | null;
     createdAt: string;
-  } | null {
+  } | null> {
     const row = this.queryOne<{
       id: string;
       user_id: string;
@@ -6201,12 +6324,12 @@ export class SqliteStore {
     };
   }
 
-  touchApiKey(id: string): void {
+  async touchApiKey(id: string): Promise<void> {
     this.exec(`UPDATE api_keys SET last_used_at = ? WHERE id = ?`, [new Date().toISOString(), id]);
     this.persist();
   }
 
-  revokeApiKey(id: string, userId?: string): boolean {
+  async revokeApiKey(id: string, userId?: string): Promise<boolean> {
     const existing = userId
       ? this.queryOne<{ id: string }>(`SELECT id FROM api_keys WHERE id = ? AND user_id = ?`, [id, userId])
       : this.queryOne<{ id: string }>(`SELECT id FROM api_keys WHERE id = ?`, [id]);
@@ -6220,7 +6343,21 @@ export class SqliteStore {
   // Phase 5.1 — MFA
   // ---------------------------------------------------------------------------
 
-  getMfaSecret(userId: string): {
+  async getMfaSecret(userId: string): Promise<{
+    userId: string;
+    secretIv: string;
+    secretAuthTag: string;
+    secretCiphertext: string;
+    backupCodes: string[];
+    enabled: boolean;
+    activatedAt: string | null;
+    createdAt: string;
+    updatedAt: string;
+  } | null> {
+    return this.getMfaSecretSync(userId);
+  }
+
+  private getMfaSecretSync(userId: string): {
     userId: string;
     secretIv: string;
     secretAuthTag: string;
@@ -6260,7 +6397,7 @@ export class SqliteStore {
     };
   }
 
-  upsertMfaSecret(input: {
+  async upsertMfaSecret(input: {
     userId: string;
     secretIv: string;
     secretAuthTag: string;
@@ -6268,9 +6405,9 @@ export class SqliteStore {
     backupCodes: string[];
     enabled: boolean;
     activatedAt: string | null;
-  }): void {
+  }): Promise<void> {
     const now = new Date().toISOString();
-    const existing = this.getMfaSecret(input.userId);
+    const existing = this.getMfaSecretSync(input.userId);
     const createdAt = existing?.createdAt ?? now;
     this.exec(
       `INSERT INTO mfa_secrets (user_id, secret_iv, secret_auth_tag, secret_ciphertext, backup_codes_json, enabled, activated_at, created_at, updated_at)
@@ -6298,8 +6435,16 @@ export class SqliteStore {
     this.persist();
   }
 
-  deleteMfaSecret(userId: string): boolean {
-    const existing = this.getMfaSecret(userId);
+  async replaceMfaBackupCodes(input: { userId: string; expected: readonly string[]; next: readonly string[] }): Promise<boolean> {
+    const result = this.db
+      .prepare(`UPDATE mfa_secrets SET backup_codes_json = ?, updated_at = ? WHERE user_id = ? AND backup_codes_json = ?`)
+      .run(JSON.stringify(input.next), new Date().toISOString(), input.userId, JSON.stringify(input.expected));
+    this.persist();
+    return result.changes > 0;
+  }
+
+  async deleteMfaSecret(userId: string): Promise<boolean> {
+    const existing = this.getMfaSecretSync(userId);
     if (!existing) return false;
     this.exec(`DELETE FROM mfa_secrets WHERE user_id = ?`, [userId]);
     this.persist();
@@ -6310,7 +6455,20 @@ export class SqliteStore {
   // Phase 5.1 — SSO identities
   // ---------------------------------------------------------------------------
 
-  findSsoIdentity(provider: string, subject: string): {
+  async findSsoIdentity(provider: string, subject: string): Promise<{
+    id: string;
+    userId: string;
+    provider: string;
+    subject: string;
+    email: string | null;
+    attributes: unknown;
+    createdAt: string;
+    updatedAt: string;
+  } | null> {
+    return this.findSsoIdentitySync(provider, subject);
+  }
+
+  private findSsoIdentitySync(provider: string, subject: string): {
     id: string;
     userId: string;
     provider: string;
@@ -6355,16 +6513,16 @@ export class SqliteStore {
     };
   }
 
-  upsertSsoIdentity(input: {
+  async upsertSsoIdentity(input: {
     id: string;
     userId: string;
     provider: string;
     subject: string;
     email?: string | null;
     attributes?: unknown;
-  }): void {
+  }): Promise<void> {
     const now = new Date().toISOString();
-    const existing = this.findSsoIdentity(input.provider, input.subject);
+    const existing = this.findSsoIdentitySync(input.provider, input.subject);
     const createdAt = existing?.createdAt ?? now;
     this.exec(
       `INSERT INTO sso_identities (id, user_id, provider, subject, email, attributes_json, created_at, updated_at)
@@ -6392,19 +6550,19 @@ export class SqliteStore {
   // Phase 5.2 — Project-level roles
   // ---------------------------------------------------------------------------
 
-  countProjectMemberships(): number {
+  async countProjectMemberships(): Promise<number> {
     const row = this.queryOne<{ count: number }>(`SELECT COUNT(*) as count FROM user_project_roles`);
     return row ? toNumber(row.count) : 0;
   }
 
-  listProjectMembers(projectId: string): Array<{
+  async listProjectMembers(projectId: string): Promise<Array<{
     userId: string;
     projectId: string;
     role: string;
     customRoleId: string | null;
     createdAt: string;
     updatedAt: string;
-  }> {
+  }>> {
     const rows = this.queryAll<{
       user_id: string;
       project_id: string;
@@ -6427,12 +6585,12 @@ export class SqliteStore {
     }));
   }
 
-  listUserProjectRoles(userId: string): Array<{
+  async listUserProjectRoles(userId: string): Promise<Array<{
     userId: string;
     projectId: string;
     role: string;
     customRoleId: string | null;
-  }> {
+  }>> {
     const rows = this.queryAll<{
       user_id: string;
       project_id: string;
@@ -6451,7 +6609,16 @@ export class SqliteStore {
     }));
   }
 
-  getProjectRole(userId: string, projectId: string): {
+  async getProjectRole(userId: string, projectId: string): Promise<{
+    userId: string;
+    projectId: string;
+    role: string;
+    customRoleId: string | null;
+  } | null> {
+    return this.getProjectRoleSync(userId, projectId);
+  }
+
+  private getProjectRoleSync(userId: string, projectId: string): {
     userId: string;
     projectId: string;
     role: string;
@@ -6476,14 +6643,14 @@ export class SqliteStore {
     };
   }
 
-  upsertProjectRole(input: {
+  async upsertProjectRole(input: {
     userId: string;
     projectId: string;
     role: string;
     customRoleId?: string | null;
-  }): void {
+  }): Promise<void> {
     const now = new Date().toISOString();
-    const existing = this.getProjectRole(input.userId, input.projectId);
+    const existing = this.getProjectRoleSync(input.userId, input.projectId);
     if (existing) {
       this.exec(
         `UPDATE user_project_roles SET role = ?, custom_role_id = ?, updated_at = ?
@@ -6500,8 +6667,8 @@ export class SqliteStore {
     this.persist();
   }
 
-  removeProjectRole(userId: string, projectId: string): boolean {
-    const existing = this.getProjectRole(userId, projectId);
+  async removeProjectRole(userId: string, projectId: string): Promise<boolean> {
+    const existing = this.getProjectRoleSync(userId, projectId);
     if (!existing) return false;
     this.exec(`DELETE FROM user_project_roles WHERE user_id = ? AND project_id = ?`, [userId, projectId]);
     this.persist();
@@ -6512,7 +6679,7 @@ export class SqliteStore {
   // Phase 5.2 — Custom roles
   // ---------------------------------------------------------------------------
 
-  listCustomRoles(projectId?: string | null): Array<{
+  async listCustomRoles(projectId?: string | null): Promise<Array<{
     id: string;
     projectId: string | null;
     name: string;
@@ -6521,7 +6688,7 @@ export class SqliteStore {
     createdBy: string | null;
     createdAt: string;
     updatedAt: string;
-  }> {
+  }>> {
     const rows = projectId === undefined
       ? this.queryAll<{
           id: string;
@@ -6576,7 +6743,20 @@ export class SqliteStore {
     }));
   }
 
-  getCustomRole(id: string): {
+  async getCustomRole(id: string): Promise<{
+    id: string;
+    projectId: string | null;
+    name: string;
+    description: string | null;
+    permissions: string[];
+    createdBy: string | null;
+    createdAt: string;
+    updatedAt: string;
+  } | null> {
+    return this.getCustomRoleSync(id);
+  }
+
+  private getCustomRoleSync(id: string): {
     id: string;
     projectId: string | null;
     name: string;
@@ -6613,16 +6793,16 @@ export class SqliteStore {
     };
   }
 
-  upsertCustomRole(input: {
+  async upsertCustomRole(input: {
     id: string;
     projectId?: string | null;
     name: string;
     description?: string | null;
     permissions: string[];
     createdBy?: string | null;
-  }): void {
+  }): Promise<void> {
     const now = new Date().toISOString();
-    const existing = this.getCustomRole(input.id);
+    const existing = this.getCustomRoleSync(input.id);
     const createdAt = existing?.createdAt ?? now;
     this.exec(
       `INSERT INTO custom_roles (id, project_id, name, description, permissions_json, created_by, created_at, updated_at)
@@ -6647,8 +6827,8 @@ export class SqliteStore {
     this.persist();
   }
 
-  deleteCustomRole(id: string): boolean {
-    const existing = this.getCustomRole(id);
+  async deleteCustomRole(id: string): Promise<boolean> {
+    const existing = this.getCustomRoleSync(id);
     if (!existing) return false;
     this.exec(`DELETE FROM custom_roles WHERE id = ?`, [id]);
     this.exec(`UPDATE user_project_roles SET custom_role_id = NULL WHERE custom_role_id = ?`, [id]);
@@ -6660,13 +6840,13 @@ export class SqliteStore {
   // Phase 5.2 — Workflow shares
   // ---------------------------------------------------------------------------
 
-  listWorkflowShares(workflowId: string): Array<{
+  async listWorkflowShares(workflowId: string): Promise<Array<{
     workflowId: string;
     projectId: string;
     accessLevel: string;
     sharedBy: string | null;
     createdAt: string;
-  }> {
+  }>> {
     const rows = this.queryAll<{
       workflow_id: string;
       project_id: string;
@@ -6687,11 +6867,11 @@ export class SqliteStore {
     }));
   }
 
-  listWorkflowsSharedToProject(projectId: string): Array<{
+  async listWorkflowsSharedToProject(projectId: string): Promise<Array<{
     workflowId: string;
     projectId: string;
     accessLevel: string;
-  }> {
+  }>> {
     const rows = this.queryAll<{
       workflow_id: string;
       project_id: string;
@@ -6707,12 +6887,12 @@ export class SqliteStore {
     }));
   }
 
-  upsertWorkflowShare(input: {
+  async upsertWorkflowShare(input: {
     workflowId: string;
     projectId: string;
     accessLevel: "read" | "execute";
     sharedBy?: string | null;
-  }): void {
+  }): Promise<void> {
     this.exec(
       `INSERT INTO workflow_shares (workflow_id, project_id, access_level, shared_by, created_at)
        VALUES (?, ?, ?, ?, ?)
@@ -6723,7 +6903,7 @@ export class SqliteStore {
     this.persist();
   }
 
-  removeWorkflowShare(workflowId: string, projectId: string): boolean {
+  async removeWorkflowShare(workflowId: string, projectId: string): Promise<boolean> {
     const existing = this.queryOne<{ workflow_id: string }>(
       `SELECT workflow_id FROM workflow_shares WHERE workflow_id = ? AND project_id = ?`,
       [workflowId, projectId]
@@ -6738,12 +6918,12 @@ export class SqliteStore {
   // Phase 5.2 — Secret shares
   // ---------------------------------------------------------------------------
 
-  listSecretShares(secretId: string): Array<{
+  async listSecretShares(secretId: string): Promise<Array<{
     secretId: string;
     projectId: string;
     sharedBy: string | null;
     createdAt: string;
-  }> {
+  }>> {
     const rows = this.queryAll<{
       secret_id: string;
       project_id: string;
@@ -6762,7 +6942,7 @@ export class SqliteStore {
     }));
   }
 
-  listSecretsSharedToProject(projectId: string): string[] {
+  async listSecretsSharedToProject(projectId: string): Promise<string[]> {
     const rows = this.queryAll<{ secret_id: string }>(
       `SELECT secret_id FROM secret_shares WHERE project_id = ?`,
       [projectId]
@@ -6770,7 +6950,7 @@ export class SqliteStore {
     return rows.map((row) => toString(row.secret_id));
   }
 
-  upsertSecretShare(input: { secretId: string; projectId: string; sharedBy?: string | null }): void {
+  async upsertSecretShare(input: { secretId: string; projectId: string; sharedBy?: string | null }): Promise<void> {
     this.exec(
       `INSERT INTO secret_shares (secret_id, project_id, shared_by, created_at)
        VALUES (?, ?, ?, ?)
@@ -6780,7 +6960,7 @@ export class SqliteStore {
     this.persist();
   }
 
-  removeSecretShare(secretId: string, projectId: string): boolean {
+  async removeSecretShare(secretId: string, projectId: string): Promise<boolean> {
     const existing = this.queryOne<{ secret_id: string }>(
       `SELECT secret_id FROM secret_shares WHERE secret_id = ? AND project_id = ?`,
       [secretId, projectId]
@@ -6795,7 +6975,7 @@ export class SqliteStore {
   // Phase 5.1 — SSO group-to-role mappings
   // ---------------------------------------------------------------------------
 
-  listSsoGroupMappings(provider?: string): Array<{
+  async listSsoGroupMappings(provider?: string): Promise<Array<{
     id: string;
     provider: string;
     groupName: string;
@@ -6804,7 +6984,7 @@ export class SqliteStore {
     customRoleId: string | null;
     createdAt: string;
     updatedAt: string;
-  }> {
+  }>> {
     const rows = provider
       ? this.queryAll<{
           id: string;
@@ -6845,14 +7025,14 @@ export class SqliteStore {
     }));
   }
 
-  upsertSsoGroupMapping(input: {
+  async upsertSsoGroupMapping(input: {
     id: string;
     provider: string;
     groupName: string;
     projectId?: string | null;
     role: string;
     customRoleId?: string | null;
-  }): void {
+  }): Promise<void> {
     const now = new Date().toISOString();
     const existing = this.queryOne<{ created_at: string }>(
       `SELECT created_at FROM sso_group_mappings WHERE id = ?`,
@@ -6883,7 +7063,7 @@ export class SqliteStore {
     this.persist();
   }
 
-  deleteSsoGroupMapping(id: string): boolean {
+  async deleteSsoGroupMapping(id: string): Promise<boolean> {
     const existing = this.queryOne<{ id: string }>(`SELECT id FROM sso_group_mappings WHERE id = ?`, [id]);
     if (!existing) return false;
     this.exec(`DELETE FROM sso_group_mappings WHERE id = ?`, [id]);
@@ -6895,7 +7075,7 @@ export class SqliteStore {
   // Phase 5.3 — External secret providers + rotation cache
   // ---------------------------------------------------------------------------
 
-  listExternalSecretProviders(): Array<{
+  async listExternalSecretProviders(): Promise<Array<{
     id: string;
     name: string;
     type: string;
@@ -6906,7 +7086,7 @@ export class SqliteStore {
     createdBy: string | null;
     createdAt: string;
     updatedAt: string;
-  }> {
+  }>> {
     const rows = this.queryAll<{
       id: string;
       name: string;
@@ -6936,7 +7116,22 @@ export class SqliteStore {
     }));
   }
 
-  getExternalSecretProvider(id: string): {
+  async getExternalSecretProvider(id: string): Promise<{
+    id: string;
+    name: string;
+    type: string;
+    config: Record<string, unknown>;
+    credentialsSecretId: string | null;
+    cacheTtlMs: number;
+    enabled: boolean;
+    createdBy: string | null;
+    createdAt: string;
+    updatedAt: string;
+  } | null> {
+    return this.getExternalSecretProviderSync(id);
+  }
+
+  private getExternalSecretProviderSync(id: string): {
     id: string;
     name: string;
     type: string;
@@ -6979,7 +7174,7 @@ export class SqliteStore {
     };
   }
 
-  upsertExternalSecretProvider(input: {
+  async upsertExternalSecretProvider(input: {
     id: string;
     name: string;
     type: string;
@@ -6988,9 +7183,9 @@ export class SqliteStore {
     cacheTtlMs?: number;
     enabled?: boolean;
     createdBy?: string | null;
-  }): void {
+  }): Promise<void> {
     const now = new Date().toISOString();
-    const existing = this.getExternalSecretProvider(input.id);
+    const existing = this.getExternalSecretProviderSync(input.id);
     const createdAt = existing?.createdAt ?? now;
     this.exec(
       `INSERT INTO external_secret_providers
@@ -7020,15 +7215,15 @@ export class SqliteStore {
     this.persist();
   }
 
-  deleteExternalSecretProvider(id: string): boolean {
-    const existing = this.getExternalSecretProvider(id);
+  async deleteExternalSecretProvider(id: string): Promise<boolean> {
+    const existing = this.getExternalSecretProviderSync(id);
     if (!existing) return false;
     this.exec(`DELETE FROM external_secret_providers WHERE id = ?`, [id]);
     this.persist();
     return true;
   }
 
-  countSecretsUsingExternalProvider(providerId: string): number {
+  async countSecretsUsingExternalProvider(providerId: string): Promise<number> {
     const row = this.queryOne<{ count: number }>(
       `SELECT COUNT(*) as count FROM secrets WHERE external_provider_id = ?`,
       [providerId]
@@ -7036,14 +7231,14 @@ export class SqliteStore {
     return row ? toNumber(row.count) : 0;
   }
 
-  getExternalSecretCacheEntry(secretId: string): {
+  async getExternalSecretCacheEntry(secretId: string): Promise<{
     secretId: string;
     iv: string;
     authTag: string;
     ciphertext: string;
     fetchedAt: string;
     expiresAt: string;
-  } | null {
+  } | null> {
     const row = this.queryOne<{
       secret_id: string;
       iv: string;
@@ -7067,13 +7262,13 @@ export class SqliteStore {
     };
   }
 
-  upsertExternalSecretCacheEntry(input: {
+  async upsertExternalSecretCacheEntry(input: {
     secretId: string;
     iv: string;
     authTag: string;
     ciphertext: string;
     expiresAt: string;
-  }): void {
+  }): Promise<void> {
     const now = new Date().toISOString();
     this.exec(
       `INSERT INTO external_secret_cache (secret_id, iv, auth_tag, ciphertext, fetched_at, expires_at)
@@ -7089,7 +7284,7 @@ export class SqliteStore {
     this.persist();
   }
 
-  deleteExternalSecretCacheEntry(secretId: string): void {
+  async deleteExternalSecretCacheEntry(secretId: string): Promise<void> {
     this.exec(`DELETE FROM external_secret_cache WHERE secret_id = ?`, [secretId]);
     this.persist();
   }
@@ -7098,7 +7293,7 @@ export class SqliteStore {
   // Phase 5.4 — Audit log
   // ---------------------------------------------------------------------------
 
-  writeAuditLog(entry: {
+  async writeAuditLog(entry: {
     id: string;
     eventType: string;
     category: string;
@@ -7115,7 +7310,7 @@ export class SqliteStore {
     metadata?: unknown;
     message?: string | null;
     createdAt?: string;
-  }): void {
+  }): Promise<void> {
     const createdAt = entry.createdAt ?? new Date().toISOString();
     // Phase 8.4 — hash chain. prev_hash = the last row's entry_hash; for the
     // very first row it's 64 zeros. entry_hash = SHA-256(prev_hash || canonical
@@ -7186,11 +7381,11 @@ export class SqliteStore {
    * Rows persisted before Phase 8.4 (where entry_hash IS NULL) are skipped —
    * we can only attest the chain from the first hash onwards.
    */
-  verifyAuditChain(): {
+  async verifyAuditChain(): Promise<{
     ok: boolean;
     rowsChecked: number;
     firstBrokenAt?: { id: string; createdAt: string; expected: string; stored: string };
-  } {
+  }> {
     const rows = this.queryAll<{
       id: string;
       event_type: string;
@@ -7266,7 +7461,7 @@ export class SqliteStore {
     return { ok: true, rowsChecked: checked };
   }
 
-  listAuditLogs(filter: {
+  async listAuditLogs(filter: {
     category?: string;
     eventType?: string;
     outcome?: string;
@@ -7278,7 +7473,7 @@ export class SqliteStore {
     to?: string;
     page?: number;
     pageSize?: number;
-  } = {}): {
+  } = {}): Promise<{
     items: Array<{
       id: string;
       eventType: string;
@@ -7300,7 +7495,7 @@ export class SqliteStore {
     total: number;
     page: number;
     pageSize: number;
-  } {
+  }> {
     const clauses: string[] = [];
     const params: BindParams = [];
     if (filter.category) {
@@ -7412,9 +7607,9 @@ export class SqliteStore {
     };
   }
 
-  pruneAuditLogs(options: { before: string }): number {
+  async pruneAuditLogs(options: { before: string }): Promise<number> {
     // Phase 11.1 — cached run manifests older than the audit-log retention whose execution history is gone.
-    this.pruneExecutionManifests(options);
+    this.pruneExecutionManifestsSync(options);
     const existing = this.queryOne<{ count: number }>(
       `SELECT COUNT(*) as count FROM audit_logs WHERE created_at < ?`,
       [options.before]
@@ -7430,7 +7625,7 @@ export class SqliteStore {
   // Phase 5.5 — Log streaming destinations + delivery history
   // ---------------------------------------------------------------------------
 
-  listLogStreamDestinations(): LogStreamDestinationRecord[] {
+  async listLogStreamDestinations(): Promise<LogStreamDestinationRecord[]> {
     const rows = this.queryAll<LogStreamDestinationRow>(
       `SELECT id, name, type, enabled, categories_json, min_level, config_iv, config_auth_tag,
               config_ciphertext, last_success_at, last_error_at, last_error, dispatched_count,
@@ -7440,7 +7635,11 @@ export class SqliteStore {
     return rows.map(mapLogStreamDestinationRow);
   }
 
-  getLogStreamDestination(id: string): LogStreamDestinationRecord | null {
+  async getLogStreamDestination(id: string): Promise<LogStreamDestinationRecord | null> {
+    return this.getLogStreamDestinationSync(id);
+  }
+
+  private getLogStreamDestinationSync(id: string): LogStreamDestinationRecord | null {
     const row = this.queryOne<LogStreamDestinationRow>(
       `SELECT id, name, type, enabled, categories_json, min_level, config_iv, config_auth_tag,
               config_ciphertext, last_success_at, last_error_at, last_error, dispatched_count,
@@ -7451,7 +7650,7 @@ export class SqliteStore {
     return row ? mapLogStreamDestinationRow(row) : null;
   }
 
-  upsertLogStreamDestination(input: {
+  async upsertLogStreamDestination(input: {
     id: string;
     name: string;
     type: string;
@@ -7462,9 +7661,9 @@ export class SqliteStore {
     configAuthTag?: string | null;
     configCiphertext?: string | null;
     createdBy?: string | null;
-  }): void {
+  }): Promise<void> {
     const now = new Date().toISOString();
-    const existing = this.getLogStreamDestination(input.id);
+    const existing = this.getLogStreamDestinationSync(input.id);
     const createdAt = existing?.createdAt ?? now;
     this.exec(
       `INSERT INTO log_stream_destinations
@@ -7505,8 +7704,8 @@ export class SqliteStore {
     this.persist();
   }
 
-  deleteLogStreamDestination(id: string): boolean {
-    const existing = this.getLogStreamDestination(id);
+  async deleteLogStreamDestination(id: string): Promise<boolean> {
+    const existing = this.getLogStreamDestinationSync(id);
     if (!existing) return false;
     this.exec(`DELETE FROM log_stream_destinations WHERE id = ?`, [id]);
     this.exec(`DELETE FROM log_stream_events WHERE destination_id = ?`, [id]);
@@ -7514,12 +7713,12 @@ export class SqliteStore {
     return true;
   }
 
-  recordLogStreamDispatch(input: {
+  async recordLogStreamDispatch(input: {
     destinationId: string;
     success: boolean;
     error?: string | null;
     at?: string;
-  }): void {
+  }): Promise<void> {
     const now = input.at ?? new Date().toISOString();
     if (input.success) {
       this.exec(
@@ -7539,7 +7738,7 @@ export class SqliteStore {
     this.persist();
   }
 
-  writeLogStreamEvent(entry: {
+  async writeLogStreamEvent(entry: {
     id: string;
     destinationId: string;
     category: string;
@@ -7550,7 +7749,7 @@ export class SqliteStore {
     error?: string | null;
     payload?: unknown;
     createdAt?: string;
-  }): void {
+  }): Promise<void> {
     const createdAt = entry.createdAt ?? new Date().toISOString();
     this.exec(
       `INSERT INTO log_stream_events
@@ -7572,11 +7771,11 @@ export class SqliteStore {
     this.persist();
   }
 
-  listLogStreamEvents(filter: {
+  async listLogStreamEvents(filter: {
     destinationId?: string;
     status?: string;
     limit?: number;
-  } = {}): Array<{
+  } = {}): Promise<Array<{
     id: string;
     destinationId: string;
     category: string;
@@ -7587,7 +7786,7 @@ export class SqliteStore {
     error: string | null;
     payload: unknown;
     createdAt: string;
-  }> {
+  }>> {
     const clauses: string[] = [];
     const params: BindParams = [];
     if (filter.destinationId) {
@@ -7642,7 +7841,7 @@ export class SqliteStore {
     });
   }
 
-  pruneLogStreamEvents(options: { before: string }): number {
+  async pruneLogStreamEvents(options: { before: string }): Promise<number> {
     const existing = this.queryOne<{ count: number }>(
       `SELECT COUNT(*) as count FROM log_stream_events WHERE created_at < ?`,
       [options.before]
@@ -7658,7 +7857,7 @@ export class SqliteStore {
   // Phase 5.6 — Variables, workflow version history, git config
   // ---------------------------------------------------------------------------
 
-  listVariables(projectId?: string): Array<{
+  async listVariables(projectId?: string): Promise<Array<{
     id: string;
     projectId: string;
     key: string;
@@ -7666,7 +7865,7 @@ export class SqliteStore {
     createdBy: string | null;
     createdAt: string;
     updatedAt: string;
-  }> {
+  }>> {
     const rows = projectId
       ? this.queryAll<{
           id: string;
@@ -7703,7 +7902,19 @@ export class SqliteStore {
     }));
   }
 
-  getVariable(id: string): {
+  async getVariable(id: string): Promise<{
+    id: string;
+    projectId: string;
+    key: string;
+    value: string;
+    createdBy: string | null;
+    createdAt: string;
+    updatedAt: string;
+  } | null> {
+    return this.getVariableSync(id);
+  }
+
+  private getVariableSync(id: string): {
     id: string;
     projectId: string;
     key: string;
@@ -7736,15 +7947,15 @@ export class SqliteStore {
     };
   }
 
-  upsertVariable(input: {
+  async upsertVariable(input: {
     id: string;
     projectId: string;
     key: string;
     value: string;
     createdBy?: string | null;
-  }): void {
+  }): Promise<void> {
     const now = new Date().toISOString();
-    const existing = this.getVariable(input.id);
+    const existing = this.getVariableSync(input.id);
     const createdAt = existing?.createdAt ?? now;
     this.exec(
       `INSERT INTO variables (id, project_id, key, value, created_by, created_at, updated_at)
@@ -7766,15 +7977,15 @@ export class SqliteStore {
     this.persist();
   }
 
-  deleteVariable(id: string): boolean {
-    const existing = this.getVariable(id);
+  async deleteVariable(id: string): Promise<boolean> {
+    const existing = this.getVariableSync(id);
     if (!existing) return false;
     this.exec(`DELETE FROM variables WHERE id = ?`, [id]);
     this.persist();
     return true;
   }
 
-  findVariableByKey(projectId: string, key: string): { id: string; key: string; value: string } | null {
+  async findVariableByKey(projectId: string, key: string): Promise<{ id: string; key: string; value: string } | null> {
     const row = this.queryOne<{ id: string; key: string; value: string }>(
       `SELECT id, key, value FROM variables WHERE project_id = ? AND key = ?`,
       [projectId, key]
@@ -7785,14 +7996,14 @@ export class SqliteStore {
 
   // Workflow version history
 
-  listWorkflowVersions(workflowId: string, limit = 100): Array<{
+  async listWorkflowVersions(workflowId: string, limit = 100): Promise<Array<{
     id: string;
     workflowId: string;
     version: number;
     createdBy: string | null;
     changeNote: string | null;
     createdAt: string;
-  }> {
+  }>> {
     const rows = this.queryAll<{
       id: string;
       workflow_id: string;
@@ -7815,7 +8026,7 @@ export class SqliteStore {
     }));
   }
 
-  getWorkflowVersion(workflowId: string, version: number): {
+  async getWorkflowVersion(workflowId: string, version: number): Promise<{
     id: string;
     workflowId: string;
     version: number;
@@ -7823,7 +8034,7 @@ export class SqliteStore {
     createdBy: string | null;
     changeNote: string | null;
     createdAt: string;
-  } | null {
+  } | null> {
     const row = this.queryOne<{
       id: string;
       workflow_id: string;
@@ -7849,14 +8060,14 @@ export class SqliteStore {
     };
   }
 
-  writeWorkflowVersion(entry: {
+  async writeWorkflowVersion(entry: {
     id: string;
     workflowId: string;
     version: number;
     workflowJson: string;
     createdBy?: string | null;
     changeNote?: string | null;
-  }): void {
+  }): Promise<void> {
     const now = new Date().toISOString();
     this.exec(
       `INSERT INTO workflow_versions (id, workflow_id, version, workflow_json, created_by, change_note, created_at)
@@ -7882,7 +8093,13 @@ export class SqliteStore {
    * Keeps the newest `keep` versions. Phase 15.4: pinned versions (published
    * now or released before) are never pruned and do not count against `keep`.
    */
-  pruneWorkflowVersions(workflowId: string, keep: number): number {
+  async pruneWorkflowVersions(workflowId: string, keep: number): Promise<number> {
+    const pruned = this.pruneWorkflowVersionsSync(workflowId, keep);
+    if (pruned > 0) this.persist();
+    return pruned;
+  }
+
+  private pruneWorkflowVersionsSync(workflowId: string, keep: number): number {
     if (keep <= 0) return 0;
     const toDelete = this.queryAll<{ id: string }>(
       `SELECT id FROM workflow_versions WHERE workflow_id = ? AND pinned = 0 ORDER BY version DESC LIMIT -1 OFFSET ?`,
@@ -7892,11 +8109,37 @@ export class SqliteStore {
     for (const row of toDelete) {
       this.exec(`DELETE FROM workflow_versions WHERE id = ?`, [toString(row.id)]);
     }
-    this.persist();
     return toDelete.length;
   }
 
-  maxWorkflowVersionNumber(workflowId: string): number {
+  async appendWorkflowVersion(input: {
+    id: string;
+    workflowId: string;
+    workflowJson: string;
+    createdBy?: string | null;
+    changeNote?: string | null;
+    retention: number;
+  }): Promise<{ id: string; version: number; createdAt: string }> {
+    const createdAt = new Date().toISOString();
+    const version = this.transaction(() => {
+      const row = this.queryOne<{ max_version: number | null }>(
+        `SELECT MAX(version) as max_version FROM workflow_versions WHERE workflow_id = ?`,
+        [input.workflowId]
+      );
+      const next = (row && row.max_version !== null ? toNumber(row.max_version) : 0) + 1;
+      this.exec(
+        `INSERT INTO workflow_versions (id, workflow_id, version, workflow_json, created_by, change_note, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [input.id, input.workflowId, next, input.workflowJson, input.createdBy ?? null, input.changeNote ?? null, createdAt]
+      );
+      if (input.retention > 0) this.pruneWorkflowVersionsSync(input.workflowId, input.retention);
+      return next;
+    });
+    this.persist();
+    return { id: input.id, version, createdAt };
+  }
+
+  async maxWorkflowVersionNumber(workflowId: string): Promise<number> {
     const row = this.queryOne<{ max_version: number | null }>(
       `SELECT MAX(version) as max_version FROM workflow_versions WHERE workflow_id = ?`,
       [workflowId]
@@ -7907,22 +8150,34 @@ export class SqliteStore {
   // Phase 15.4 — release gate and publish.
 
   /** The version production traffic runs, or null when nothing is published (the draft runs everywhere). */
-  getPublishedVersion(workflowId: string): number | null {
+  async getPublishedVersion(workflowId: string): Promise<number | null> {
+    return this.getPublishedVersionSync(workflowId);
+  }
+
+  private getPublishedVersionSync(workflowId: string): number | null {
     const row = this.queryOne<{ published_version: number | null }>(`SELECT published_version FROM workflows WHERE id = ?`, [workflowId]);
     return row ? nullableNumber(row.published_version) : null;
   }
 
-  isWorkflowVersionPinned(workflowId: string, version: number): boolean {
+  async isWorkflowVersionPinned(workflowId: string, version: number): Promise<boolean> {
     const row = this.queryOne<{ pinned: number }>(`SELECT pinned FROM workflow_versions WHERE workflow_id = ? AND version = ?`, [workflowId, version]);
     return Number(row?.pinned ?? 0) === 1;
   }
 
-  getReleaseGate(workflowId: string): ReleaseGateRecord | null {
+  async getReleaseGate(workflowId: string): Promise<ReleaseGateRecord | null> {
+    return this.getReleaseGateSync(workflowId);
+  }
+
+  private getReleaseGateSync(workflowId: string): ReleaseGateRecord | null {
     const row = this.queryOne<Record<string, unknown>>(`SELECT * FROM release_gates WHERE workflow_id = ?`, [workflowId]);
     return row ? mapReleaseGateRow(row) : null;
   }
 
-  upsertReleaseGate(record: ReleaseGateRecord): ReleaseGateRecord {
+  async upsertReleaseGate(record: ReleaseGateRecord): Promise<ReleaseGateRecord> {
+    return this.upsertReleaseGateSync(record);
+  }
+
+  private upsertReleaseGateSync(record: ReleaseGateRecord): ReleaseGateRecord {
     this.exec(
       `INSERT INTO release_gates (workflow_id, enabled, enforced, dataset_ids_json, candidate_options_json, policy_json, require_approval, approvers_json, updated_at, updated_by)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -7949,10 +8204,10 @@ export class SqliteStore {
         record.updatedBy
       ]
     );
-    return this.getReleaseGate(record.workflowId)!;
+    return this.getReleaseGateSync(record.workflowId)!;
   }
 
-  listWorkflowReleases(workflowId: string, limit = 100): WorkflowReleaseRecord[] {
+  async listWorkflowReleases(workflowId: string, limit = 100): Promise<WorkflowReleaseRecord[]> {
     return this.queryAll<Record<string, unknown>>(
       `SELECT * FROM workflow_releases WHERE workflow_id = ? ORDER BY published_at DESC, id DESC LIMIT ?`,
       [workflowId, Math.max(1, Math.min(500, limit))]
@@ -7960,7 +8215,7 @@ export class SqliteStore {
   }
 
   /** Whether `version` was published before (by any release, a rollback included). */
-  hasReleasedVersion(workflowId: string, version: number): boolean {
+  async hasReleasedVersion(workflowId: string, version: number): Promise<boolean> {
     return Boolean(this.queryOne<{ id: string }>(`SELECT id FROM workflow_releases WHERE workflow_id = ? AND version = ? LIMIT 1`, [workflowId, version]));
   }
 
@@ -7970,9 +8225,13 @@ export class SqliteStore {
    * published version is no longer `expectedPrevious` (another publish got
    * there first) or the version row is gone.
    */
-  publishWorkflowVersion(release: Omit<WorkflowReleaseRecord, "previousVersion">, expectedPrevious: number | null): WorkflowReleaseRecord | null {
+  async publishWorkflowVersion(release: Omit<WorkflowReleaseRecord, "previousVersion">, expectedPrevious: number | null): Promise<WorkflowReleaseRecord | null> {
+    return this.publishWorkflowVersionSync(release, expectedPrevious);
+  }
+
+  private publishWorkflowVersionSync(release: Omit<WorkflowReleaseRecord, "previousVersion">, expectedPrevious: number | null): WorkflowReleaseRecord | null {
     return this.transaction(() => {
-      const current = this.getPublishedVersion(release.workflowId);
+      const current = this.getPublishedVersionSync(release.workflowId);
       if (current !== expectedPrevious) return null;
       const pinned = this.db.prepare(`UPDATE workflow_versions SET pinned = 1 WHERE workflow_id = ? AND version = ?`).run(release.workflowId, release.version);
       if (pinned.changes === 0) return null;
@@ -8002,7 +8261,7 @@ export class SqliteStore {
   }
 
   /** Every completed replay job that tested exactly this workflow hash, newest first. */
-  listReplayRunIdsForHash(workflowId: string, workflowHash: string): string[] {
+  async listReplayRunIdsForHash(workflowId: string, workflowHash: string): Promise<string[]> {
     return this.queryAll<{ id: string }>(
       // Phase 15.6 — a guard policy simulation's jobs are never release proof, so the judge never falls back to one.
       `SELECT id FROM eval_runs WHERE kind = 'replay' AND workflow_id = ? AND workflow_hash = ? AND status = 'completed' AND dataset_id NOT LIKE ? ORDER BY started_at DESC, id DESC`,
@@ -8011,13 +8270,13 @@ export class SqliteStore {
   }
 
   /** Phase 15.4 — the per-set snapshot a replay job was queued against (set id -> hash). */
-  setEvalRunSetSnapshot(runId: string, snapshot: Record<string, GoldenSetSnapshot>): void {
+  async setEvalRunSetSnapshot(runId: string, snapshot: Record<string, GoldenSetSnapshot>): Promise<void> {
     this.exec(`UPDATE eval_runs SET set_snapshot_json = ? WHERE id = ?`, [JSON.stringify(snapshot), runId]);
     this.persist();
   }
 
   /** Each set's hash and, for jobs queued since gate admission, its cases' fingerprints (older jobs stored the hash alone). */
-  getEvalRunSetSnapshot(runId: string): Record<string, GoldenSetSnapshot> | null {
+  async getEvalRunSetSnapshot(runId: string): Promise<Record<string, GoldenSetSnapshot> | null> {
     const row = this.queryOne<{ set_snapshot_json: string | null }>(`SELECT set_snapshot_json FROM eval_runs WHERE id = ?`, [runId]);
     if (!row?.set_snapshot_json) return null;
     try {
@@ -8045,26 +8304,26 @@ export class SqliteStore {
   }
 
   /** Phase 15.4 — the channel and published version a finished run ran on (null version: the draft). */
-  setExecutionRelease(executionId: string, channel: "production" | "draft", version: number | null): void {
+  async setExecutionRelease(executionId: string, channel: "production" | "draft", version: number | null): Promise<void> {
     this.exec(`UPDATE execution_history SET release_channel = ?, release_version = ? WHERE id = ?`, [channel, version, executionId]);
     this.persist();
   }
 
-  getExecutionRelease(executionId: string): { channel: "production" | "draft"; version: number | null } | null {
+  async getExecutionRelease(executionId: string): Promise<{ channel: "production" | "draft"; version: number | null } | null> {
     const row = this.queryOne<{ release_channel: string | null; release_version: number | null }>(`SELECT release_channel, release_version FROM execution_history WHERE id = ?`, [executionId]);
     if (!row || !row.release_channel) return null;
     return { channel: row.release_channel === "production" ? "production" : "draft", version: nullableNumber(row.release_version) };
   }
 
   /** The hashes `version` had when it was released (any release, rollbacks included). */
-  listReleasedVersionHashes(workflowId: string, version: number): string[] {
+  async listReleasedVersionHashes(workflowId: string, version: number): Promise<string[]> {
     return this.queryAll<{ workflow_hash: string }>(`SELECT DISTINCT workflow_hash FROM workflow_releases WHERE workflow_id = ? AND version = ?`, [workflowId, version]).map((row) =>
       toString(row.workflow_hash)
     );
   }
 
   /** The release gates that are switched on. */
-  listEnabledReleaseGateWorkflowIds(): string[] {
+  async listEnabledReleaseGateWorkflowIds(): Promise<string[]> {
     return this.queryAll<{ workflow_id: string }>(`SELECT workflow_id FROM release_gates WHERE enabled = 1`).map((row) => toString(row.workflow_id));
   }
 
@@ -8073,7 +8332,7 @@ export class SqliteStore {
    * pending and decided filters (and their limits) agree with the clock.
    * Returns the requests it closed.
    */
-  timeOutExpiredReleaseApprovalRequests(nowIso: string): ReleaseApprovalRequestRecord[] {
+  async timeOutExpiredReleaseApprovalRequests(nowIso: string): Promise<ReleaseApprovalRequestRecord[]> {
     const expired = this.queryAll<Record<string, unknown>>(
       `SELECT * FROM release_approval_requests WHERE status = 'pending' AND expires_at IS NOT NULL AND expires_at <= ?`,
       [nowIso]
@@ -8088,14 +8347,14 @@ export class SqliteStore {
   }
 
   /** Pending requests for this version and hash, newest first. */
-  listPendingReleaseApprovalRequests(workflowId: string, version: number, workflowHash: string): ReleaseApprovalRequestRecord[] {
+  async listPendingReleaseApprovalRequests(workflowId: string, version: number, workflowHash: string): Promise<ReleaseApprovalRequestRecord[]> {
     return this.queryAll<Record<string, unknown>>(
       `SELECT * FROM release_approval_requests WHERE workflow_id = ? AND version = ? AND workflow_hash = ? AND status = 'pending' ORDER BY created_at DESC`,
       [workflowId, version, workflowHash]
     ).map(mapReleaseApprovalRequestRow);
   }
 
-  insertReleaseApprovalRequest(record: ReleaseApprovalRequestRecord): ReleaseApprovalRequestRecord {
+  async insertReleaseApprovalRequest(record: ReleaseApprovalRequestRecord): Promise<ReleaseApprovalRequestRecord> {
     this.exec(
       `INSERT INTO release_approval_requests (
          id, workflow_id, workflow_name, project_id, version, workflow_hash, replay_run_id, origin, gate_reasons_json, gate_updated_at, gate_checks_json, gate_authority,
@@ -8131,15 +8390,19 @@ export class SqliteStore {
         record.updatedAt
       ]
     );
-    return this.getReleaseApprovalRequest(record.id)!;
+    return this.getReleaseApprovalRequestSync(record.id)!;
   }
 
-  getReleaseApprovalRequest(id: string): ReleaseApprovalRequestRecord | null {
+  async getReleaseApprovalRequest(id: string): Promise<ReleaseApprovalRequestRecord | null> {
+    return this.getReleaseApprovalRequestSync(id);
+  }
+
+  private getReleaseApprovalRequestSync(id: string): ReleaseApprovalRequestRecord | null {
     const row = this.queryOne<Record<string, unknown>>(`SELECT * FROM release_approval_requests WHERE id = ?`, [id]);
     return row ? mapReleaseApprovalRequestRow(row) : null;
   }
 
-  listReleaseApprovalRequests(filter: { status: "pending" | "decided" | "all"; workflowId?: string; limit?: number; scope?: ApprovalReadScope; now?: string }): ReleaseApprovalRequestRecord[] {
+  async listReleaseApprovalRequests(filter: { status: "pending" | "decided" | "all"; workflowId?: string; limit?: number; scope?: ApprovalReadScope; now?: string }): Promise<ReleaseApprovalRequestRecord[]> {
     const clauses: string[] = [];
     const params: unknown[] = [];
     // Expiry applies in SQL too, so an expired request is never pending (and counts against the decided limit, not the pending one).
@@ -8171,7 +8434,18 @@ export class SqliteStore {
   }
 
   /** Records a decision on a pending request; false when it was no longer pending. */
-  decideReleaseApprovalRequest(input: {
+  async decideReleaseApprovalRequest(input: {
+    id: string;
+    status: "approved" | "rejected" | "canceled" | "timed_out";
+    decidedByUserId?: string | null;
+    decidedBy?: string | null;
+    decisionReason?: string | null;
+    releaseId?: string | null;
+  }): Promise<boolean> {
+    return this.decideReleaseApprovalRequestSync(input);
+  }
+
+  private decideReleaseApprovalRequestSync(input: {
     id: string;
     status: "approved" | "rejected" | "canceled" | "timed_out";
     decidedByUserId?: string | null;
@@ -8191,7 +8465,11 @@ export class SqliteStore {
   }
 
   /** Migration 36 — the cases an enforced gate counts (null: not enforced). Leaves the gate's `updated_at` alone. */
-  setReleaseGateAdmission(workflowId: string, admittedFixtureIds: string[] | null, updatedAt: string, updatedBy: string | null): void {
+  async setReleaseGateAdmission(workflowId: string, admittedFixtureIds: string[] | null, updatedAt: string, updatedBy: string | null): Promise<void> {
+    return this.setReleaseGateAdmissionSync(workflowId, admittedFixtureIds, updatedAt, updatedBy);
+  }
+
+  private setReleaseGateAdmissionSync(workflowId: string, admittedFixtureIds: string[] | null, updatedAt: string, updatedBy: string | null): void {
     this.exec(`UPDATE release_gates SET admitted_fixture_ids_json = ?, admission_updated_at = ?, admission_updated_by = ? WHERE workflow_id = ?`, [
       admittedFixtureIds === null ? null : JSON.stringify([...new Set(admittedFixtureIds)].sort()),
       updatedAt,
@@ -8201,7 +8479,7 @@ export class SqliteStore {
     this.persist();
   }
 
-  insertGateCaseRequest(record: GateCaseRequestRecord): GateCaseRequestRecord {
+  async insertGateCaseRequest(record: GateCaseRequestRecord): Promise<GateCaseRequestRecord> {
     this.exec(
       `INSERT INTO gate_case_requests (
          id, workflow_id, workflow_name, project_id, action, fixtures_json, spec_json, gate_authority, status, request_reason, requested_by_user_id,
@@ -8229,22 +8507,26 @@ export class SqliteStore {
         record.updatedAt
       ]
     );
-    return this.getGateCaseRequest(record.id)!;
+    return this.getGateCaseRequestSync(record.id)!;
   }
 
-  getGateCaseRequest(id: string): GateCaseRequestRecord | null {
+  async getGateCaseRequest(id: string): Promise<GateCaseRequestRecord | null> {
+    return this.getGateCaseRequestSync(id);
+  }
+
+  private getGateCaseRequestSync(id: string): GateCaseRequestRecord | null {
     const row = this.queryOne<Record<string, unknown>>(`SELECT * FROM gate_case_requests WHERE id = ?`, [id]);
     return row ? mapGateCaseRequestRow(row) : null;
   }
 
   /** Pending gate case requests of one workflow, newest first. */
-  listPendingGateCaseRequests(workflowId: string): GateCaseRequestRecord[] {
+  async listPendingGateCaseRequests(workflowId: string): Promise<GateCaseRequestRecord[]> {
     return this.queryAll<Record<string, unknown>>(`SELECT * FROM gate_case_requests WHERE workflow_id = ? AND status = 'pending' ORDER BY created_at DESC, id DESC`, [workflowId]).map(
       mapGateCaseRequestRow
     );
   }
 
-  listGateCaseRequests(filter: { status: "pending" | "decided" | "all"; workflowId?: string; limit?: number; scope?: ApprovalReadScope; now?: string }): GateCaseRequestRecord[] {
+  async listGateCaseRequests(filter: { status: "pending" | "decided" | "all"; workflowId?: string; limit?: number; scope?: ApprovalReadScope; now?: string }): Promise<GateCaseRequestRecord[]> {
     const clauses: string[] = [];
     const params: unknown[] = [];
     const now = filter.now ?? new Date().toISOString();
@@ -8275,7 +8557,7 @@ export class SqliteStore {
   }
 
   /** Closes every pending gate case request whose time ran out; returns those it closed. */
-  timeOutExpiredGateCaseRequests(nowIso: string): GateCaseRequestRecord[] {
+  async timeOutExpiredGateCaseRequests(nowIso: string): Promise<GateCaseRequestRecord[]> {
     const expired = this.queryAll<Record<string, unknown>>(
       `SELECT * FROM gate_case_requests WHERE status = 'pending' AND expires_at IS NOT NULL AND expires_at <= ?`,
       [nowIso]
@@ -8290,7 +8572,17 @@ export class SqliteStore {
   }
 
   /** Records a decision on a pending gate case request; false when it was no longer pending. */
-  decideGateCaseRequest(input: {
+  async decideGateCaseRequest(input: {
+    id: string;
+    status: "approved" | "rejected" | "canceled" | "timed_out";
+    decidedByUserId?: string | null;
+    decidedBy?: string | null;
+    decisionReason?: string | null;
+  }): Promise<boolean> {
+    return this.decideGateCaseRequestSync(input);
+  }
+
+  private decideGateCaseRequestSync(input: {
     id: string;
     status: "approved" | "rejected" | "canceled" | "timed_out";
     decidedByUserId?: string | null;
@@ -8311,7 +8603,25 @@ export class SqliteStore {
 
   // Git config (singleton row keyed by literal 'default')
 
-  getGitConfig(): {
+  async getGitConfig(): Promise<{
+    id: string;
+    repoUrl: string;
+    defaultBranch: string;
+    authSecretId: string | null;
+    workflowsDir: string;
+    variablesFile: string;
+    userName: string;
+    userEmail: string;
+    enabled: boolean;
+    lastPushAt: string | null;
+    lastPullAt: string | null;
+    lastError: string | null;
+    updatedAt: string;
+  } | null> {
+    return this.getGitConfigSync();
+  }
+
+  private getGitConfigSync(): {
     id: string;
     repoUrl: string;
     defaultBranch: string;
@@ -8361,7 +8671,7 @@ export class SqliteStore {
     };
   }
 
-  upsertGitConfig(input: {
+  async upsertGitConfig(input: {
     repoUrl: string;
     defaultBranch?: string;
     authSecretId?: string | null;
@@ -8370,7 +8680,7 @@ export class SqliteStore {
     userName?: string;
     userEmail?: string;
     enabled?: boolean;
-  }): void {
+  }): Promise<void> {
     const now = new Date().toISOString();
     this.exec(
       `INSERT INTO git_configs (id, repo_url, default_branch, auth_secret_id, workflows_dir, variables_file,
@@ -8401,15 +8711,15 @@ export class SqliteStore {
     this.persist();
   }
 
-  deleteGitConfig(): boolean {
-    const existing = this.getGitConfig();
+  async deleteGitConfig(): Promise<boolean> {
+    const existing = this.getGitConfigSync();
     if (!existing) return false;
     this.exec(`DELETE FROM git_configs WHERE id = 'default'`);
     this.persist();
     return true;
   }
 
-  recordGitSync(input: { kind: "push" | "pull"; error?: string | null }): void {
+  async recordGitSync(input: { kind: "push" | "pull"; error?: string | null }): Promise<void> {
     const now = new Date().toISOString();
     const column = input.kind === "push" ? "last_push_at" : "last_pull_at";
     this.exec(
@@ -8423,7 +8733,17 @@ export class SqliteStore {
   // Phase 7.1 — Multi-main HA leader leases
   // ---------------------------------------------------------------------------
 
-  getLease(leaseName: string): {
+  async getLease(leaseName: string): Promise<{
+    leaseName: string;
+    holderId: string;
+    expiresAt: string;
+    acquiredAt: string;
+    renewedAt: string;
+  } | null> {
+    return this.getLeaseSync(leaseName);
+  }
+
+  private getLeaseSync(leaseName: string): {
     leaseName: string;
     holderId: string;
     expiresAt: string;
@@ -8455,9 +8775,9 @@ export class SqliteStore {
    * Atomic compare-and-set lease acquisition. Returns true if this holder
    * now owns the lease, false if another non-expired holder owns it.
    */
-  tryAcquireLease(input: { leaseName: string; holderId: string; ttlMs: number }): boolean {
+  async tryAcquireLease(input: { leaseName: string; holderId: string; ttlMs: number }): Promise<boolean> {
     const now = Date.now();
-    const existing = this.getLease(input.leaseName);
+    const existing = this.getLeaseSync(input.leaseName);
     const expiresAt = new Date(now + input.ttlMs).toISOString();
     const nowIso = new Date(now).toISOString();
 
@@ -8495,21 +8815,21 @@ export class SqliteStore {
     return false;
   }
 
-  releaseLease(leaseName: string, holderId: string): boolean {
-    const existing = this.getLease(leaseName);
+  async releaseLease(leaseName: string, holderId: string): Promise<boolean> {
+    const existing = this.getLeaseSync(leaseName);
     if (!existing || existing.holderId !== holderId) return false;
     this.exec(`DELETE FROM leader_leases WHERE lease_name = ?`, [leaseName]);
     this.persist();
     return true;
   }
 
-  listLeases(): Array<{
+  async listLeases(): Promise<Array<{
     leaseName: string;
     holderId: string;
     expiresAt: string;
     acquiredAt: string;
     renewedAt: string;
-  }> {
+  }>> {
     const rows = this.queryAll<{
       lease_name: string;
       holder_id: string;
@@ -8533,11 +8853,11 @@ export class SqliteStore {
   // Workflow Templates (Phase 7.4)
   // ---------------------------------------------------------------------------
 
-  listTemplates(filters?: { category?: string; search?: string }): Array<{
+  async listTemplates(filters?: { category?: string; search?: string }): Promise<Array<{
     id: string; name: string; description: string; category: string;
     tags: string[]; author: string; nodeCount: number;
     createdAt: string; updatedAt: string;
-  }> {
+  }>> {
     const clauses: string[] = [];
     const params: BindParams = [];
     if (filters?.category) {
@@ -8570,11 +8890,11 @@ export class SqliteStore {
     }));
   }
 
-  getTemplate(id: string): {
+  async getTemplate(id: string): Promise<{
     id: string; name: string; description: string; category: string;
     tags: string[]; author: string; workflowJson: string; nodeCount: number;
     createdAt: string; updatedAt: string;
-  } | undefined {
+  } | undefined> {
     const row = this.queryOne<WorkflowTemplateRow>(
       `SELECT id, name, description, category, tags, author, workflow_json, node_count, created_at, updated_at
        FROM workflow_templates WHERE id = ?`,
@@ -8595,10 +8915,10 @@ export class SqliteStore {
     };
   }
 
-  upsertTemplate(input: {
+  async upsertTemplate(input: {
     id: string; name: string; description: string; category: string;
     tags: string[]; author: string; workflowJson: string; nodeCount: number;
-  }): void {
+  }): Promise<void> {
     const now = new Date().toISOString();
     this.exec(
       `INSERT INTO workflow_templates (id, name, description, category, tags, author, workflow_json, node_count, created_at, updated_at)
@@ -8628,7 +8948,7 @@ export class SqliteStore {
     this.persist();
   }
 
-  deleteTemplate(id: string): boolean {
+  async deleteTemplate(id: string): Promise<boolean> {
     this.exec(`DELETE FROM workflow_templates WHERE id = ?`, [id]);
     const changesRow = this.queryOne<{ count: number }>("SELECT changes() as count");
     const changed = (changesRow ? toNumber(changesRow.count) : 0) > 0;
@@ -8636,7 +8956,7 @@ export class SqliteStore {
     return changed;
   }
 
-  countTemplates(): number {
+  async countTemplates(): Promise<number> {
     const row = this.queryOne<{ count: number }>("SELECT COUNT(*) as count FROM workflow_templates");
     return row ? toNumber(row.count) : 0;
   }
@@ -8645,11 +8965,11 @@ export class SqliteStore {
   // Notification Configs (Phase 7.5)
   // ---------------------------------------------------------------------------
 
-  listNotificationConfigs(): Array<{
+  async listNotificationConfigs(): Promise<Array<{
     id: string; channel: string; enabled: boolean;
     config: Record<string, unknown>; events: string[];
     createdAt: string; updatedAt: string;
-  }> {
+  }>> {
     const rows = this.queryAll<{
       id: string; channel: string; enabled: number;
       config_json: string; events: string;
@@ -8666,10 +8986,10 @@ export class SqliteStore {
     }));
   }
 
-  upsertNotificationConfig(input: {
+  async upsertNotificationConfig(input: {
     id: string; channel: string; enabled: boolean;
     config: Record<string, unknown>; events: string[];
-  }): void {
+  }): Promise<void> {
     const now = new Date().toISOString();
     this.exec(
       `INSERT INTO notification_configs (id, channel, enabled, config_json, events, created_at, updated_at)
@@ -8682,7 +9002,7 @@ export class SqliteStore {
     this.persist();
   }
 
-  deleteNotificationConfig(id: string): boolean {
+  async deleteNotificationConfig(id: string): Promise<boolean> {
     this.exec(`DELETE FROM notification_configs WHERE id = ?`, [id]);
     const changesRow = this.queryOne<{ count: number }>("SELECT changes() as count");
     const changed = (changesRow ? toNumber(changesRow.count) : 0) > 0;
@@ -8697,7 +9017,18 @@ export class SqliteStore {
   // the eval-framework docs for the interim story for prod-Postgres users.
   // ---------------------------------------------------------------------------
 
-  createEvalDataset(input: {
+  async createEvalDataset(input: {
+    id: string;
+    name: string;
+    description?: string;
+    projectId?: string;
+    workflowId?: string;
+    createdBy?: string;
+  }): Promise<void> {
+    return this.createEvalDatasetSync(input);
+  }
+
+  private createEvalDatasetSync(input: {
     id: string;
     name: string;
     description?: string;
@@ -8714,7 +9045,11 @@ export class SqliteStore {
     this.persist();
   }
 
-  listEvalDatasets(options: { projectId?: string; workflowId?: string; id?: string } = {}): EvalDatasetRecord[] {
+  async listEvalDatasets(options: { projectId?: string; workflowId?: string; id?: string } = {}): Promise<EvalDatasetRecord[]> {
+    return this.listEvalDatasetsSync(options);
+  }
+
+  private listEvalDatasetsSync(options: { projectId?: string; workflowId?: string; id?: string } = {}): EvalDatasetRecord[] {
     const clauses: string[] = [];
     const params: BindParams = [];
     if (options.projectId) { clauses.push("d.project_id = ?"); params.push(options.projectId); }
@@ -8747,11 +9082,15 @@ export class SqliteStore {
     }));
   }
 
-  getEvalDataset(id: string): EvalDatasetRecord | null {
-    return this.listEvalDatasets({ id })[0] ?? null;
+  async getEvalDataset(id: string): Promise<EvalDatasetRecord | null> {
+    return this.getEvalDatasetSync(id);
   }
 
-  deleteEvalDataset(id: string): boolean {
+  private getEvalDatasetSync(id: string): EvalDatasetRecord | null {
+    return this.listEvalDatasetsSync({ id })[0] ?? null;
+  }
+
+  async deleteEvalDataset(id: string): Promise<boolean> {
     this.exec(`DELETE FROM eval_results WHERE run_id IN (SELECT id FROM eval_runs WHERE dataset_id = ?)`, [id]);
     this.exec(`DELETE FROM eval_runs WHERE dataset_id = ?`, [id]);
     this.exec(`DELETE FROM eval_fixtures WHERE dataset_id = ?`, [id]);
@@ -8762,7 +9101,16 @@ export class SqliteStore {
     return changed;
   }
 
-  createEvalFixture(input: {
+  async createEvalFixture(input: {
+    id: string; datasetId: string; name: string;
+    input: unknown; expected?: unknown;
+    scorers?: Array<Record<string, unknown>>;
+    recordingId?: string;
+  }): Promise<void> {
+    return this.createEvalFixtureSync(input);
+  }
+
+  private createEvalFixtureSync(input: {
     id: string; datasetId: string; name: string;
     input: unknown; expected?: unknown;
     scorers?: Array<Record<string, unknown>>;
@@ -8799,7 +9147,7 @@ export class SqliteStore {
     };
   }
 
-  listEvalFixtures(datasetId: string): EvalFixtureRecord[] {
+  async listEvalFixtures(datasetId: string): Promise<EvalFixtureRecord[]> {
     const rows = this.queryAll<EvalFixtureRow>(
       `SELECT id, dataset_id, name, input_json, expected_json, scorers_json, recording_id, required, created_at, updated_at
        FROM eval_fixtures WHERE dataset_id = ? ORDER BY created_at, rowid`,
@@ -8808,7 +9156,11 @@ export class SqliteStore {
     return rows.map((r) => this.mapEvalFixture(r));
   }
 
-  getEvalFixture(id: string): EvalFixtureRecord | null {
+  async getEvalFixture(id: string): Promise<EvalFixtureRecord | null> {
+    return this.getEvalFixtureSync(id);
+  }
+
+  private getEvalFixtureSync(id: string): EvalFixtureRecord | null {
     const row = this.queryOne<EvalFixtureRow>(
       `SELECT id, dataset_id, name, input_json, expected_json, scorers_json, recording_id, required, created_at, updated_at
        FROM eval_fixtures WHERE id = ?`,
@@ -8818,7 +9170,7 @@ export class SqliteStore {
   }
 
   /** Phase 15.2 — whether a golden set already holds this golden run. */
-  findEvalFixtureByRecording(datasetId: string, recordingId: string): EvalFixtureRecord | null {
+  async findEvalFixtureByRecording(datasetId: string, recordingId: string): Promise<EvalFixtureRecord | null> {
     const row = this.queryOne<EvalFixtureRow>(
       `SELECT id, dataset_id, name, input_json, expected_json, scorers_json, recording_id, required, created_at, updated_at
        FROM eval_fixtures WHERE dataset_id = ? AND recording_id = ? LIMIT 1`,
@@ -8827,12 +9179,16 @@ export class SqliteStore {
     return row ? this.mapEvalFixture(row) : null;
   }
 
-  getEvalFixtureDatasetId(id: string): string | null {
+  async getEvalFixtureDatasetId(id: string): Promise<string | null> {
     const row = this.queryOne<{ dataset_id: string }>(`SELECT dataset_id FROM eval_fixtures WHERE id = ?`, [id]);
     return row ? toString(row.dataset_id) : null;
   }
 
-  deleteEvalFixture(id: string): boolean {
+  async deleteEvalFixture(id: string): Promise<boolean> {
+    return this.deleteEvalFixtureSync(id);
+  }
+
+  private deleteEvalFixtureSync(id: string): boolean {
     this.exec(`DELETE FROM eval_fixtures WHERE id = ?`, [id]);
     const row = this.queryOne<{ count: number }>("SELECT changes() as count");
     const changed = (row ? toNumber(row.count) : 0) > 0;
@@ -8841,13 +9197,17 @@ export class SqliteStore {
   }
 
   /** Migration 36 — marks a case required (or not); false when it does not exist. */
-  setEvalFixtureRequired(id: string, required: boolean): boolean {
+  async setEvalFixtureRequired(id: string, required: boolean): Promise<boolean> {
+    return this.setEvalFixtureRequiredSync(id, required);
+  }
+
+  private setEvalFixtureRequiredSync(id: string, required: boolean): boolean {
     const result = this.db.prepare(`UPDATE eval_fixtures SET required = ?, updated_at = ? WHERE id = ?`).run(required ? 1 : 0, new Date().toISOString(), id);
     if (result.changes > 0) this.persist();
     return result.changes > 0;
   }
 
-  createEvalRun(input: {
+  async createEvalRun(input: {
     id: string; datasetId: string; workflowId: string; workflowName?: string;
     triggeredBy?: string; triggeredByUserId?: string; scorers?: Array<Record<string, unknown>>;
     /** Phase 15.2 */
@@ -8859,7 +9219,7 @@ export class SqliteStore {
     workflowVersion?: number | null;
     options?: Record<string, unknown>;
     progress?: Record<string, unknown>;
-  }): void {
+  }): Promise<void> {
     const now = new Date().toISOString();
     this.exec(
       `INSERT INTO eval_runs (id, dataset_id, workflow_id, workflow_name, status, started_at,
@@ -8888,7 +9248,7 @@ export class SqliteStore {
    * Only a run still queued or running is touched, so a late heartbeat never
    * revives a run another process finished, canceled or interrupted.
    */
-  updateEvalRunProgress(input: { id: string; status?: string; progress: Record<string, unknown> }): void {
+  async updateEvalRunProgress(input: { id: string; status?: string; progress: Record<string, unknown> }): Promise<void> {
     if (input.status) {
       this.exec(`UPDATE eval_runs SET status = ?, progress_json = ? WHERE id = ? AND status IN ('queued', 'running')`, [input.status, JSON.stringify(input.progress), input.id]);
     } else {
@@ -8903,7 +9263,7 @@ export class SqliteStore {
    * or golden set, and its newest finished one, are always kept, so a set
    * never loses its last verdict. Returns how many runs were deleted.
    */
-  pruneEvalRuns(input: { before: string }): number {
+  async pruneEvalRuns(input: { before: string }): Promise<number> {
     const rows = this.queryAll<{ id: string; dataset_id: string; dataset_ids_json: string | null; status: string; started_at: string }>(
       `SELECT id, dataset_id, dataset_ids_json, status, started_at FROM eval_runs ORDER BY started_at DESC, rowid DESC`
     );
@@ -8944,7 +9304,7 @@ export class SqliteStore {
     return doomed.length;
   }
 
-  finalizeEvalRun(input: {
+  async finalizeEvalRun(input: {
     id: string;
     status: "completed" | "errored" | "failed" | "canceled" | "interrupted";
     summary?: Record<string, unknown>;
@@ -8952,7 +9312,7 @@ export class SqliteStore {
     error?: string;
     /** Only finish a run that is still in one of these statuses (a canceled run stays canceled). */
     onlyFrom?: string[];
-  }): boolean {
+  }): Promise<boolean> {
     const now = new Date().toISOString();
     const guard = input.onlyFrom && input.onlyFrom.length > 0 ? ` AND status IN (${input.onlyFrom.map(() => "?").join(", ")})` : "";
     this.exec(
@@ -8973,12 +9333,16 @@ export class SqliteStore {
   }
 
   /** Phase 15.2 — the summary of a run that already finished (a canceled run's last cases). */
-  updateEvalRunSummary(id: string, summary: Record<string, unknown>, progress: Record<string, unknown>): void {
+  async updateEvalRunSummary(id: string, summary: Record<string, unknown>, progress: Record<string, unknown>): Promise<void> {
     this.exec(`UPDATE eval_runs SET summary_json = ?, progress_json = ? WHERE id = ?`, [JSON.stringify(summary), JSON.stringify(progress), id]);
     this.persist();
   }
 
-  listEvalRuns(options: { datasetId?: string; workflowId?: string; workflowIds?: string[]; kind?: "eval" | "replay"; statuses?: string[]; id?: string; limit?: number; offset?: number; excludeSimulations?: boolean } = {}): EvalRunRecord[] {
+  async listEvalRuns(options: { datasetId?: string; workflowId?: string; workflowIds?: string[]; kind?: "eval" | "replay"; statuses?: string[]; id?: string; limit?: number; offset?: number; excludeSimulations?: boolean } = {}): Promise<EvalRunRecord[]> {
+    return this.listEvalRunsSync(options);
+  }
+
+  private listEvalRunsSync(options: { datasetId?: string; workflowId?: string; workflowIds?: string[]; kind?: "eval" | "replay"; statuses?: string[]; id?: string; limit?: number; offset?: number; excludeSimulations?: boolean } = {}): EvalRunRecord[] {
     const clauses: string[] = [];
     const params: BindParams = [];
     if (options.id) { clauses.push("id = ?"); params.push(options.id); }
@@ -9039,11 +9403,11 @@ export class SqliteStore {
     }));
   }
 
-  getEvalRun(id: string): EvalRunRecord | null {
-    return this.listEvalRuns({ id, limit: 1 })[0] ?? null;
+  async getEvalRun(id: string): Promise<EvalRunRecord | null> {
+    return this.listEvalRunsSync({ id, limit: 1 })[0] ?? null;
   }
 
-  recordEvalResult(input: {
+  async recordEvalResult(input: {
     id: string; runId: string; fixtureId: string; fixtureName?: string;
     status: "pass" | "fail" | "error" | "skipped";
     executionId?: string;
@@ -9059,7 +9423,7 @@ export class SqliteStore {
     verdict?: string;
     diff?: unknown;
     costUsd?: number | null;
-  }): void {
+  }): Promise<void> {
     const now = new Date().toISOString();
     this.exec(
       `INSERT INTO eval_results (id, run_id, fixture_id, fixture_name, status, execution_id,
@@ -9109,7 +9473,7 @@ export class SqliteStore {
     };
   }
 
-  listEvalResults(runId: string): EvalResultRecord[] {
+  async listEvalResults(runId: string): Promise<EvalResultRecord[]> {
     const rows = this.queryAll<EvalResultRow>(
       `SELECT id, run_id, fixture_id, fixture_name, status, execution_id,
               score_json, output_json, error, duration_ms, token_input, token_output, token_total,
@@ -9121,7 +9485,7 @@ export class SqliteStore {
   }
 
   /** Phase 15.2 — one case with its run diff. */
-  getEvalResult(runId: string, resultId: string): EvalResultRecord | null {
+  async getEvalResult(runId: string, resultId: string): Promise<EvalResultRecord | null> {
     const row = this.queryOne<EvalResultRow>(
       `SELECT id, run_id, fixture_id, fixture_name, status, execution_id,
               score_json, output_json, error, duration_ms, token_input, token_output, token_total,
@@ -9136,7 +9500,7 @@ export class SqliteStore {
   // Phase 8.2 — usage_events (FinOps cost rollups)
   // ---------------------------------------------------------------------------
 
-  writeUsageEvent(input: {
+  async writeUsageEvent(input: {
     id: string;
     executionId: string;
     workflowId: string;
@@ -9155,7 +9519,7 @@ export class SqliteStore {
     durationMs: number;
     providers: Array<{ providerId: string; model: string; calls: number }>;
     createdAt?: string;
-  }): void {
+  }): Promise<void> {
     this.exec(
       `INSERT INTO usage_events (
          id, execution_id, workflow_id, workflow_name, user_id, user_email,
@@ -9192,7 +9556,7 @@ export class SqliteStore {
    * buckets (`day` / `hour`) and dimensional rollups (`workflow` / `user` /
    * `project` / `provider`). Returns rows with summed tokens + cost.
    */
-  queryUsageRollup(input: {
+  async queryUsageRollup(input: {
     from: string;
     to: string;
     groupBy: "day" | "hour" | "workflow" | "user" | "project" | "provider";
@@ -9200,7 +9564,7 @@ export class SqliteStore {
     userId?: string;
     projectId?: string;
     limit?: number;
-  }): Array<{
+  }): Promise<Array<{
     bucket: string;
     workflowId?: string | null;
     workflowName?: string | null;
@@ -9217,7 +9581,7 @@ export class SqliteStore {
     costUsd: number;
     llmCallCount: number;
     avgDurationMs: number;
-  }> {
+  }>> {
     const filters: string[] = ["created_at >= ?", "created_at < ?"];
     const params: Array<string | number> = [input.from, input.to];
     if (input.workflowId) {
@@ -9436,14 +9800,14 @@ export class SqliteStore {
    * `userKey` matches either `user_id` OR `user_email` so user-scope budgets
    * can be expressed by either identifier (Phase 8.3).
    */
-  queryUsageTotals(input: {
+  async queryUsageTotals(input: {
     from: string;
     to: string;
     workflowId?: string;
     userId?: string;
     userKey?: string;
     projectId?: string;
-  }): {
+  }): Promise<{
     executions: number;
     inputTokens: number;
     outputTokens: number;
@@ -9452,7 +9816,7 @@ export class SqliteStore {
     costUsd: number;
     llmCallCount: number;
     avgDurationMs: number;
-  } {
+  }> {
     const filters: string[] = ["created_at >= ?", "created_at < ?"];
     const params: Array<string | number> = [input.from, input.to];
     if (input.workflowId) { filters.push("workflow_id = ?"); params.push(input.workflowId); }
@@ -9490,7 +9854,7 @@ export class SqliteStore {
    * Recent usage events (with cost), most-recent first. Powers the FinOps
    * "recent runs" panel.
    */
-  listUsageEvents(input: { limit?: number; workflowId?: string; userId?: string; projectId?: string } = {}): Array<{
+  async listUsageEvents(input: { limit?: number; workflowId?: string; userId?: string; projectId?: string } = {}): Promise<Array<{
     id: string; executionId: string; workflowId: string; workflowName: string | null;
     userId: string | null; userEmail: string | null; projectId: string | null;
     triggerType: string | null; status: string;
@@ -9498,7 +9862,7 @@ export class SqliteStore {
     totalTokens: number; costUsd: number; llmCallCount: number; durationMs: number;
     providers: Array<{ providerId: string; model: string; calls: number }>;
     createdAt: string;
-  }> {
+  }>> {
     const filters: string[] = [];
     const params: Array<string | number> = [];
     if (input.workflowId) { filters.push("workflow_id = ?"); params.push(input.workflowId); }
@@ -9545,7 +9909,7 @@ export class SqliteStore {
   // Phase 8.3 — budgets + budget_alerts
   // ---------------------------------------------------------------------------
 
-  createBudget(input: {
+  async createBudget(input: {
     id: string;
     name: string;
     scopeType: "global" | "project" | "workflow" | "user";
@@ -9558,7 +9922,7 @@ export class SqliteStore {
     notifyChannel?: string | null;
     enabled?: boolean;
     createdBy?: string | null;
-  }): void {
+  }): Promise<void> {
     const now = new Date().toISOString();
     this.exec(
       `INSERT INTO budgets (
@@ -9586,14 +9950,14 @@ export class SqliteStore {
     this.persist();
   }
 
-  updateBudget(id: string, patch: {
+  async updateBudget(id: string, patch: {
     name?: string;
     limitValue?: number;
     warnThresholdPct?: number;
     action?: "warn" | "block";
     notifyChannel?: string | null;
     enabled?: boolean;
-  }): boolean {
+  }): Promise<boolean> {
     const fields: string[] = [];
     const params: Array<string | number | null> = [];
     if (patch.name !== undefined) { fields.push("name = ?"); params.push(patch.name); }
@@ -9611,19 +9975,19 @@ export class SqliteStore {
     return true;
   }
 
-  deleteBudget(id: string): boolean {
+  async deleteBudget(id: string): Promise<boolean> {
     this.exec(`DELETE FROM budget_alerts WHERE budget_id = ?`, [id]);
     this.exec(`DELETE FROM budgets WHERE id = ?`, [id]);
     this.persist();
     return true;
   }
 
-  getBudget(id: string): BudgetRecord | null {
+  async getBudget(id: string): Promise<BudgetRecord | null> {
     const row = this.queryOne<BudgetRow>(`SELECT * FROM budgets WHERE id = ?`, [id]);
     return row ? mapBudget(row) : null;
   }
 
-  listBudgets(filter: { enabledOnly?: boolean; scopeType?: string; scopeId?: string } = {}): BudgetRecord[] {
+  async listBudgets(filter: { enabledOnly?: boolean; scopeType?: string; scopeId?: string } = {}): Promise<BudgetRecord[]> {
     const filters: string[] = [];
     const params: Array<string | number> = [];
     if (filter.enabledOnly) { filters.push("enabled = 1"); }
@@ -9644,7 +10008,7 @@ export class SqliteStore {
     return rows.map(mapBudget);
   }
 
-  recordBudgetAlert(input: {
+  async recordBudgetAlert(input: {
     id: string;
     budgetId: string;
     periodStart: string;
@@ -9654,7 +10018,7 @@ export class SqliteStore {
     workflowId?: string | null;
     executionId?: string | null;
     message?: string;
-  }): void {
+  }): Promise<void> {
     this.exec(
       `INSERT INTO budget_alerts (
          id, budget_id, period_start, severity, usage_value, limit_value,
@@ -9681,7 +10045,7 @@ export class SqliteStore {
    * only fire one warn / one block per period+budget combination so users
    * don't get spammed across every execution after a threshold is crossed.
    */
-  getLatestBudgetAlert(budgetId: string, periodStart: string, severity: "warn" | "block"): { id: string; firedAt: string } | null {
+  async getLatestBudgetAlert(budgetId: string, periodStart: string, severity: "warn" | "block"): Promise<{ id: string; firedAt: string } | null> {
     const row = this.queryOne<{ id: string; fired_at: string }>(
       `SELECT id, fired_at FROM budget_alerts
        WHERE budget_id = ? AND period_start = ? AND severity = ?
@@ -9691,12 +10055,12 @@ export class SqliteStore {
     return row ? { id: toString(row.id), firedAt: toString(row.fired_at) } : null;
   }
 
-  listBudgetAlerts(filter: { budgetId?: string; limit?: number } = {}): Array<{
+  async listBudgetAlerts(filter: { budgetId?: string; limit?: number } = {}): Promise<Array<{
     id: string; budgetId: string; periodStart: string;
     severity: string; usageValue: number; limitValue: number;
     workflowId: string | null; executionId: string | null;
     message: string | null; firedAt: string;
-  }> {
+  }>> {
     const filters: string[] = [];
     const params: Array<string | number> = [];
     if (filter.budgetId) { filters.push("budget_id = ?"); params.push(filter.budgetId); }
@@ -9729,7 +10093,7 @@ export class SqliteStore {
   // Phase 8.4 — audit export destinations
   // ---------------------------------------------------------------------------
 
-  createAuditExportDestination(input: {
+  async createAuditExportDestination(input: {
     id: string;
     name: string;
     kind: "http" | "file";
@@ -9737,7 +10101,7 @@ export class SqliteStore {
     intervalSeconds?: number;
     enabled?: boolean;
     createdBy?: string | null;
-  }): void {
+  }): Promise<void> {
     const now = new Date().toISOString();
     this.exec(
       `INSERT INTO audit_export_destinations
@@ -9758,12 +10122,12 @@ export class SqliteStore {
     this.persist();
   }
 
-  updateAuditExportDestination(id: string, patch: {
+  async updateAuditExportDestination(id: string, patch: {
     name?: string;
     config?: Record<string, unknown>;
     intervalSeconds?: number;
     enabled?: boolean;
-  }): boolean {
+  }): Promise<boolean> {
     const fields: string[] = [];
     const params: Array<string | number | null> = [];
     if (patch.name !== undefined) { fields.push("name = ?"); params.push(patch.name); }
@@ -9779,14 +10143,24 @@ export class SqliteStore {
     return true;
   }
 
-  deleteAuditExportDestination(id: string): boolean {
+  async deleteAuditExportDestination(id: string): Promise<boolean> {
     this.exec(`DELETE FROM audit_export_runs WHERE destination_id = ?`, [id]);
     this.exec(`DELETE FROM audit_export_destinations WHERE id = ?`, [id]);
     this.persist();
     return true;
   }
 
-  listAuditExportDestinations(): Array<{
+  async listAuditExportDestinations(): Promise<Array<{
+    id: string; name: string; kind: string; config: Record<string, unknown>;
+    intervalSeconds: number; enabled: boolean;
+    lastExportId: string | null; lastExportAt: string | null;
+    lastStatus: string | null; lastError: string | null;
+    createdBy: string | null; createdAt: string; updatedAt: string;
+  }>> {
+    return this.listAuditExportDestinationsSync();
+  }
+
+  private listAuditExportDestinationsSync(): Array<{
     id: string; name: string; kind: string; config: Record<string, unknown>;
     intervalSeconds: number; enabled: boolean;
     lastExportId: string | null; lastExportAt: string | null;
@@ -9819,8 +10193,8 @@ export class SqliteStore {
     }));
   }
 
-  getAuditExportDestination(id: string) {
-    return this.listAuditExportDestinations().find((d) => d.id === id) ?? null;
+  async getAuditExportDestination(id: string) {
+    return this.listAuditExportDestinationsSync().find((d) => d.id === id) ?? null;
   }
 
   /**
@@ -9829,13 +10203,13 @@ export class SqliteStore {
    * Ordered by (created_at, id) ASC so cursor-based pagination is stable
    * across concurrent inserts.
    */
-  listAuditLogsAfter(input: { afterId: string | null; limit: number }): Array<{
+  async listAuditLogsAfter(input: { afterId: string | null; limit: number }): Promise<Array<{
     id: string; eventType: string; category: string; action: string; outcome: string;
     actorUserId: string | null; actorEmail: string | null; actorType: string;
     resourceType: string | null; resourceId: string | null; projectId: string | null;
     ipAddress: string | null; userAgent: string | null; metadata: unknown;
     message: string | null; createdAt: string; entryHash: string | null;
-  }> {
+  }>> {
     const limit = Math.min(Math.max(input.limit, 1), 5000);
     // SQLite's rowid is the canonical insertion-order key. We CANNOT use the
     // text id for ordering because it's a nanoid (random — not lexicographic
@@ -9888,7 +10262,7 @@ export class SqliteStore {
     }));
   }
 
-  recordAuditExportRun(input: {
+  async recordAuditExportRun(input: {
     id: string;
     destinationId: string;
     startedAt: string;
@@ -9898,7 +10272,7 @@ export class SqliteStore {
     firstId?: string | null;
     lastId?: string | null;
     error?: string | null;
-  }): void {
+  }): Promise<void> {
     this.exec(
       `INSERT INTO audit_export_runs
          (id, destination_id, started_at, completed_at, status, rows_exported, first_id, last_id, error)
@@ -9933,11 +10307,11 @@ export class SqliteStore {
     this.persist();
   }
 
-  listAuditExportRuns(destinationId: string, limit = 25): Array<{
+  async listAuditExportRuns(destinationId: string, limit = 25): Promise<Array<{
     id: string; destinationId: string; startedAt: string; completedAt: string | null;
     status: string; rowsExported: number; firstId: string | null; lastId: string | null;
     error: string | null;
-  }> {
+  }>> {
     const rows = this.queryAll<{
       id: string; destination_id: string; started_at: string; completed_at: string | null;
       status: string; rows_exported: number; first_id: string | null; last_id: string | null;
@@ -9963,7 +10337,7 @@ export class SqliteStore {
   // Phase 9.1 — knowledge_bases (built-in persistent vector store)
   // ---------------------------------------------------------------------------
 
-  createKnowledgeBase(input: {
+  async createKnowledgeBase(input: {
     id: string;
     name: string;
     description?: string | null;
@@ -9972,7 +10346,7 @@ export class SqliteStore {
     embedderConfig?: Record<string, unknown>;
     dimensions?: number;
     createdBy?: string | null;
-  }): void {
+  }): Promise<void> {
     const now = new Date().toISOString();
     this.exec(
       `INSERT INTO knowledge_bases (
@@ -9995,12 +10369,12 @@ export class SqliteStore {
     this.persist();
   }
 
-  updateKnowledgeBase(id: string, patch: {
+  async updateKnowledgeBase(id: string, patch: {
     name?: string;
     description?: string | null;
     embedderConfig?: Record<string, unknown>;
     dimensions?: number;
-  }): boolean {
+  }): Promise<boolean> {
     const fields: string[] = [];
     const params: Array<string | number | null> = [];
     if (patch.name !== undefined) { fields.push("name = ?"); params.push(patch.name); }
@@ -10019,19 +10393,23 @@ export class SqliteStore {
     return true;
   }
 
-  deleteKnowledgeBase(id: string): boolean {
+  async deleteKnowledgeBase(id: string): Promise<boolean> {
     this.exec(`DELETE FROM knowledge_base_chunks WHERE knowledge_base_id = ?`, [id]);
     this.exec(`DELETE FROM knowledge_bases WHERE id = ?`, [id]);
     this.persist();
     return true;
   }
 
-  getKnowledgeBase(id: string): KnowledgeBaseRecord | null {
+  async getKnowledgeBase(id: string): Promise<KnowledgeBaseRecord | null> {
+    return this.getKnowledgeBaseSync(id);
+  }
+
+  private getKnowledgeBaseSync(id: string): KnowledgeBaseRecord | null {
     const row = this.queryOne<KnowledgeBaseRow>(`SELECT * FROM knowledge_bases WHERE id = ?`, [id]);
     return row ? mapKnowledgeBase(row) : null;
   }
 
-  listKnowledgeBases(filter: { projectId?: string } = {}): KnowledgeBaseRecord[] {
+  async listKnowledgeBases(filter: { projectId?: string } = {}): Promise<KnowledgeBaseRecord[]> {
     const filters: string[] = [];
     const params: Array<string | number> = [];
     if (filter.projectId) { filters.push("project_id = ?"); params.push(filter.projectId); }
@@ -10048,7 +10426,7 @@ export class SqliteStore {
    * dimensions is locked on the first insert if it's still 0 — subsequent
    * inserts must match.
    */
-  addKnowledgeBaseChunks(input: {
+  async addKnowledgeBaseChunks(input: {
     knowledgeBaseId: string;
     chunks: Array<{
       id?: string;
@@ -10058,8 +10436,8 @@ export class SqliteStore {
       metadata?: Record<string, unknown> | null;
       vector: number[];
     }>;
-  }): { inserted: number; dimensions: number } {
-    const kb = this.getKnowledgeBase(input.knowledgeBaseId);
+  }): Promise<{ inserted: number; dimensions: number }> {
+    const kb = this.getKnowledgeBaseSync(input.knowledgeBaseId);
     if (!kb) throw new Error(`Knowledge base not found: ${input.knowledgeBaseId}`);
     if (input.chunks.length === 0) return { inserted: 0, dimensions: kb.dimensions };
 
@@ -10110,7 +10488,7 @@ export class SqliteStore {
    * we score in JS — fine up to ~10k chunks per KB. Larger fleets should
    * push to pgvector or sqlite-vec (follow-up).
    */
-  listKnowledgeBaseChunks(knowledgeBaseId: string): KnowledgeBaseChunkRecord[] {
+  async listKnowledgeBaseChunks(knowledgeBaseId: string): Promise<KnowledgeBaseChunkRecord[]> {
     const rows = this.queryAll<KnowledgeBaseChunkRow>(
       `SELECT * FROM knowledge_base_chunks WHERE knowledge_base_id = ? ORDER BY rowid`,
       [knowledgeBaseId]
@@ -10128,18 +10506,18 @@ export class SqliteStore {
    * FTS5 special characters. Words shorter than 2 chars are dropped (FTS5's
    * default tokenizer indexes single characters but they hurt recall).
    */
-  bm25SearchKnowledgeBase(input: {
+  async bm25SearchKnowledgeBase(input: {
     knowledgeBaseId: string;
     query: string;
     topK: number;
-  }): Array<{
+  }): Promise<Array<{
     id: string;
     sourceId: string | null;
     chunkIndex: number;
     content: string;
     metadata: Record<string, unknown> | null;
     score: number;
-  }> {
+  }>> {
     const ftsQuery = buildFts5Query(input.query);
     if (!ftsQuery) return [];
     const limit = Math.min(Math.max(input.topK, 1), 200);
@@ -10196,10 +10574,10 @@ export class SqliteStore {
   }
 
   /** Preview chunks for the UI — content + metadata, no vectors. */
-  listKnowledgeBaseChunkPreviews(input: { knowledgeBaseId: string; limit?: number; sourceId?: string }): Array<{
+  async listKnowledgeBaseChunkPreviews(input: { knowledgeBaseId: string; limit?: number; sourceId?: string }): Promise<Array<{
     id: string; sourceId: string | null; chunkIndex: number; content: string;
     metadata: Record<string, unknown> | null; createdAt: string;
-  }> {
+  }>> {
     const limit = Math.min(input.limit ?? 50, 500);
     const filters = ["knowledge_base_id = ?"];
     const params: Array<string | number> = [input.knowledgeBaseId];
@@ -10224,7 +10602,7 @@ export class SqliteStore {
     }));
   }
 
-  deleteKnowledgeBaseChunksBySource(input: { knowledgeBaseId: string; sourceId: string }): number {
+  async deleteKnowledgeBaseChunksBySource(input: { knowledgeBaseId: string; sourceId: string }): Promise<number> {
     const before = this.queryOne<{ count: number }>(
       `SELECT COUNT(*) as count FROM knowledge_base_chunks WHERE knowledge_base_id = ? AND source_id = ?`,
       [input.knowledgeBaseId, input.sourceId]
@@ -10247,7 +10625,7 @@ export class SqliteStore {
    * Distinct source IDs in a KB with chunk counts. Powers the "Sources"
    * panel in the ingestion UI (Phase 9.2).
    */
-  listKnowledgeBaseSources(knowledgeBaseId: string): Array<{ sourceId: string; chunkCount: number }> {
+  async listKnowledgeBaseSources(knowledgeBaseId: string): Promise<Array<{ sourceId: string; chunkCount: number }>> {
     const rows = this.queryAll<{ source_id: string | null; cnt: number }>(
       `SELECT source_id, COUNT(*) AS cnt FROM knowledge_base_chunks
        WHERE knowledge_base_id = ? AND source_id IS NOT NULL
@@ -10264,7 +10642,7 @@ export class SqliteStore {
   // Phase 10.1 — MCP server registry
   // ---------------------------------------------------------------------------
 
-  createMcpServer(input: {
+  async createMcpServer(input: {
     id: string;
     name: string;
     description?: string | null;
@@ -10283,7 +10661,7 @@ export class SqliteStore {
     credentialMode?: McpCredentialMode;
     delegatedFallback?: McpDelegatedFallback;
     createdBy?: string | null;
-  }): void {
+  }): Promise<void> {
     const now = new Date().toISOString();
     this.exec(
       `INSERT INTO mcp_servers (
@@ -10316,7 +10694,7 @@ export class SqliteStore {
     );
   }
 
-  updateMcpServer(id: string, patch: {
+  async updateMcpServer(id: string, patch: {
     name?: string;
     description?: string | null;
     adapterId?: string;
@@ -10333,7 +10711,7 @@ export class SqliteStore {
     limits?: object | null;
     credentialMode?: McpCredentialMode;
     delegatedFallback?: McpDelegatedFallback;
-  }): boolean {
+  }): Promise<boolean> {
     const fields: string[] = [];
     const params: Array<string | number | null> = [];
     if (patch.sandbox !== undefined) {
@@ -10371,8 +10749,8 @@ export class SqliteStore {
     return true;
   }
 
-  deleteMcpServer(id: string): boolean {
-    const existing = this.getMcpServer(id);
+  async deleteMcpServer(id: string): Promise<boolean> {
+    const existing = this.getMcpServerSync(id);
     if (!existing) return false;
     this.db.transaction(() => {
       this.exec(`DELETE FROM mcp_server_probes WHERE server_id = ?`, [id]);
@@ -10389,17 +10767,21 @@ export class SqliteStore {
   }
 
   /** Phase 10.7 — what the last probe found out about the server's sandbox. */
-  setMcpServerSandboxStatus(id: string, status: McpSandboxStatus | null): void {
+  async setMcpServerSandboxStatus(id: string, status: McpSandboxStatus | null): Promise<void> {
     this.exec(`UPDATE mcp_servers SET sandbox_status_json = ? WHERE id = ?`, [status ? JSON.stringify(status) : null, id]);
   }
 
-  getMcpServer(id: string): McpServerRecord | null {
+  async getMcpServer(id: string): Promise<McpServerRecord | null> {
+    return this.getMcpServerSync(id);
+  }
+
+  private getMcpServerSync(id: string): McpServerRecord | null {
     const row = this.queryOne<McpServerRow>(`SELECT * FROM mcp_servers WHERE id = ?`, [id]);
     return row ? mapMcpServer(row) : null;
   }
 
   /** With a projectId: that project's servers plus deployment-wide ones (no project). */
-  listMcpServers(filter: { projectId?: string } = {}): McpServerRecord[] {
+  async listMcpServers(filter: { projectId?: string } = {}): Promise<McpServerRecord[]> {
     const rows = filter.projectId
       ? this.queryAll<McpServerRow>(
           `SELECT * FROM mcp_servers WHERE project_id = ? OR project_id IS NULL ORDER BY name`,
@@ -10415,12 +10797,12 @@ export class SqliteStore {
    * snapshot also becomes the pending one until someone accepts it.
    * `keepProbes` bounds the history kept per server.
    */
-  recordMcpServerProbe(input: {
+  async recordMcpServerProbe(input: {
     probe: McpServerProbeRecord;
     status: McpServerStatus;
     snapshot?: Omit<McpToolSnapshotRecord, "acknowledgedAt" | "acknowledgedBy">;
     keepProbes: number;
-  }): void {
+  }): Promise<void> {
     const { probe, snapshot } = input;
     this.db.transaction(() => {
       if (snapshot) {
@@ -10492,19 +10874,23 @@ export class SqliteStore {
     })();
   }
 
-  listMcpServerProbes(serverId: string, limit = 100): McpServerProbeRecord[] {
+  async listMcpServerProbes(serverId: string, limit = 100): Promise<McpServerProbeRecord[]> {
     return this.queryAll<McpServerProbeRow>(
       `SELECT * FROM mcp_server_probes WHERE server_id = ? ORDER BY started_at DESC, rowid DESC LIMIT ?`,
       [serverId, limit]
     ).map(mapMcpServerProbe);
   }
 
-  getMcpToolSnapshot(id: string): McpToolSnapshotRecord | null {
+  async getMcpToolSnapshot(id: string): Promise<McpToolSnapshotRecord | null> {
+    return this.getMcpToolSnapshotSync(id);
+  }
+
+  private getMcpToolSnapshotSync(id: string): McpToolSnapshotRecord | null {
     const row = this.queryOne<McpToolSnapshotRow>(`SELECT * FROM mcp_tool_snapshots WHERE id = ?`, [id]);
     return row ? mapMcpToolSnapshot(row) : null;
   }
 
-  listMcpToolSnapshots(serverId: string, limit = 50): McpToolSnapshotRecord[] {
+  async listMcpToolSnapshots(serverId: string, limit = 50): Promise<McpToolSnapshotRecord[]> {
     return this.queryAll<McpToolSnapshotRow>(
       `SELECT * FROM mcp_tool_snapshots WHERE server_id = ? ORDER BY created_at DESC, rowid DESC LIMIT ?`,
       [serverId, limit]
@@ -10512,8 +10898,8 @@ export class SqliteStore {
   }
 
   /** Accept the pending breaking change: unblocks runs until the next breaking diff. */
-  acknowledgeMcpBreakingChange(serverId: string, acknowledgedBy: string): McpToolSnapshotRecord | null {
-    const server = this.getMcpServer(serverId);
+  async acknowledgeMcpBreakingChange(serverId: string, acknowledgedBy: string): Promise<McpToolSnapshotRecord | null> {
+    const server = this.getMcpServerSync(serverId);
     if (!server?.pendingBreakingSnapshotId) return null;
     const snapshotId = server.pendingBreakingSnapshotId;
     const now = new Date().toISOString();
@@ -10527,7 +10913,7 @@ export class SqliteStore {
         [now, serverId]
       );
     })();
-    return this.getMcpToolSnapshot(snapshotId);
+    return this.getMcpToolSnapshotSync(snapshotId);
   }
 
   /**
@@ -10535,7 +10921,7 @@ export class SqliteStore {
    * same execution twice (for example after an approval resume) never
    * double-counts its calls.
    */
-  replaceMcpToolCallsForExecution(executionId: string, calls: McpToolCallWrite[]): void {
+  async replaceMcpToolCallsForExecution(executionId: string, calls: McpToolCallWrite[]): Promise<void> {
     this.db.transaction(() => {
       // The gateway's own row for a workflow tool shares the execution id and is kept.
       this.exec(`DELETE FROM mcp_tool_calls WHERE execution_id = ? AND source = 'workflow'`, [executionId]);
@@ -10546,7 +10932,7 @@ export class SqliteStore {
   }
 
   /** Phase 10.4 — one gateway call, recorded as it finishes. */
-  insertMcpToolCall(call: McpToolCallWrite): void {
+  async insertMcpToolCall(call: McpToolCallWrite): Promise<void> {
     this.insertMcpToolCallRow(call);
   }
 
@@ -10585,7 +10971,7 @@ export class SqliteStore {
   }
 
   /** Phase 10.4 — gateway calls one client made since `since`. */
-  listMcpToolCallsForClient(clientId: string, since: string): McpToolCallRecord[] {
+  async listMcpToolCallsForClient(clientId: string, since: string): Promise<McpToolCallRecord[]> {
     return this.queryAll<McpToolCallRow>(
       `SELECT * FROM mcp_tool_calls WHERE client_id = ? AND started_at >= ? ORDER BY started_at`,
       [clientId, since]
@@ -10593,7 +10979,7 @@ export class SqliteStore {
   }
 
   /** Phase 10.4 — calls, errors and last call per client since `since`. */
-  summarizeMcpClientUsage(since: string): McpClientUsageRow[] {
+  async summarizeMcpClientUsage(since: string): Promise<McpClientUsageRow[]> {
     return this.queryAll<{ client_id: string; calls: number; errors: number; last_called_at: string | null }>(
       `SELECT client_id, COUNT(*) AS calls, SUM(CASE WHEN ok = 1 THEN 0 ELSE 1 END) AS errors,
               MAX(started_at) AS last_called_at
@@ -10613,7 +10999,7 @@ export class SqliteStore {
    * Tool calls started at or after `since`. `registryServerId: null` selects
    * calls to inline-configured servers; a string selects one registry entry.
    */
-  listMcpToolCalls(filter: { registryServerId: string | null; since: string }): McpToolCallRecord[] {
+  async listMcpToolCalls(filter: { registryServerId: string | null; since: string }): Promise<McpToolCallRecord[]> {
     const rows = filter.registryServerId === null
       ? this.queryAll<McpToolCallRow>(
           // Gateway rows without a registry server are workflow tools, not inline servers.
@@ -10633,12 +11019,16 @@ export class SqliteStore {
 
   // Phase 10.5 — OAuth connection status rows (no tokens).
 
-  getMcpOAuthConnection(serverId: string): McpOAuthConnectionRecord | null {
+  async getMcpOAuthConnection(serverId: string): Promise<McpOAuthConnectionRecord | null> {
+    return this.getMcpOAuthConnectionSync(serverId);
+  }
+
+  private getMcpOAuthConnectionSync(serverId: string): McpOAuthConnectionRecord | null {
     const row = this.queryOne<McpOAuthConnectionRow>(`SELECT * FROM mcp_oauth_connections WHERE server_id = ?`, [serverId]);
     return row ? mapMcpOAuthConnection(row) : null;
   }
 
-  upsertMcpOAuthConnection(record: Omit<McpOAuthConnectionRecord, "updatedAt">): McpOAuthConnectionRecord {
+  async upsertMcpOAuthConnection(record: Omit<McpOAuthConnectionRecord, "updatedAt">): Promise<McpOAuthConnectionRecord> {
     const now = new Date().toISOString();
     this.exec(
       `INSERT INTO mcp_oauth_connections (
@@ -10678,12 +11068,16 @@ export class SqliteStore {
         now
       ]
     );
-    return this.getMcpOAuthConnection(record.serverId)!;
+    return this.getMcpOAuthConnectionSync(record.serverId)!;
   }
 
   // Phase 10.7 — per-user OAuth connections to delegated servers (no tokens).
 
-  getMcpUserOAuthConnection(serverId: string, userId: string): McpUserOAuthConnectionRecord | null {
+  async getMcpUserOAuthConnection(serverId: string, userId: string): Promise<McpUserOAuthConnectionRecord | null> {
+    return this.getMcpUserOAuthConnectionSync(serverId, userId);
+  }
+
+  private getMcpUserOAuthConnectionSync(serverId: string, userId: string): McpUserOAuthConnectionRecord | null {
     const row = this.queryOne<McpUserOAuthConnectionRow>(
       `SELECT * FROM mcp_user_oauth_connections WHERE server_id = ? AND user_id = ?`,
       [serverId, userId]
@@ -10691,7 +11085,7 @@ export class SqliteStore {
     return row ? mapMcpUserOAuthConnection(row) : null;
   }
 
-  listMcpUserOAuthConnections(filter: { serverId?: string; userId?: string } = {}): McpUserOAuthConnectionRecord[] {
+  async listMcpUserOAuthConnections(filter: { serverId?: string; userId?: string } = {}): Promise<McpUserOAuthConnectionRecord[]> {
     const clauses: string[] = [];
     const params: string[] = [];
     if (filter.serverId) {
@@ -10709,7 +11103,7 @@ export class SqliteStore {
     ).map(mapMcpUserOAuthConnection);
   }
 
-  upsertMcpUserOAuthConnection(record: Omit<McpUserOAuthConnectionRecord, "updatedAt">): McpUserOAuthConnectionRecord {
+  async upsertMcpUserOAuthConnection(record: Omit<McpUserOAuthConnectionRecord, "updatedAt">): Promise<McpUserOAuthConnectionRecord> {
     const now = new Date().toISOString();
     this.exec(
       `INSERT INTO mcp_user_oauth_connections (
@@ -10748,17 +11142,17 @@ export class SqliteStore {
         now
       ]
     );
-    return this.getMcpUserOAuthConnection(record.serverId, record.userId)!;
+    return this.getMcpUserOAuthConnectionSync(record.serverId, record.userId)!;
   }
 
-  deleteMcpUserOAuthConnection(serverId: string, userId: string): boolean {
-    if (!this.getMcpUserOAuthConnection(serverId, userId)) return false;
+  async deleteMcpUserOAuthConnection(serverId: string, userId: string): Promise<boolean> {
+    if (!this.getMcpUserOAuthConnectionSync(serverId, userId)) return false;
     this.exec(`DELETE FROM mcp_user_oauth_connections WHERE server_id = ? AND user_id = ?`, [serverId, userId]);
     return true;
   }
 
-  deleteMcpOAuthConnection(serverId: string): boolean {
-    if (!this.getMcpOAuthConnection(serverId)) return false;
+  async deleteMcpOAuthConnection(serverId: string): Promise<boolean> {
+    if (!this.getMcpOAuthConnectionSync(serverId)) return false;
     this.exec(`DELETE FROM mcp_oauth_connections WHERE server_id = ?`, [serverId]);
     return true;
   }
@@ -10767,12 +11161,16 @@ export class SqliteStore {
   // Phase 10.5 — server catalogs (resources, templates, prompts) and elicitations
   // ---------------------------------------------------------------------------
 
-  getMcpServerCatalog(serverId: string): McpServerCatalogRecord | null {
+  async getMcpServerCatalog(serverId: string): Promise<McpServerCatalogRecord | null> {
+    return this.getMcpServerCatalogSync(serverId);
+  }
+
+  private getMcpServerCatalogSync(serverId: string): McpServerCatalogRecord | null {
     const row = this.queryOne<McpServerCatalogRow>(`SELECT * FROM mcp_server_catalogs WHERE server_id = ?`, [serverId]);
     return row ? mapMcpServerCatalog(row) : null;
   }
 
-  upsertMcpServerCatalog(serverId: string, catalog: Omit<McpServerCatalog, "updatedAt">): McpServerCatalogRecord {
+  async upsertMcpServerCatalog(serverId: string, catalog: Omit<McpServerCatalog, "updatedAt">): Promise<McpServerCatalogRecord> {
     const now = new Date().toISOString();
     this.exec(
       `INSERT INTO mcp_server_catalogs (server_id, capabilities_json, resources_json, resource_templates_json, prompts_json, updated_at)
@@ -10792,10 +11190,10 @@ export class SqliteStore {
         now
       ]
     );
-    return this.getMcpServerCatalog(serverId)!;
+    return this.getMcpServerCatalogSync(serverId)!;
   }
 
-  createMcpElicitation(input: Omit<McpElicitationRecord, "status" | "createdAt" | "answeredAt" | "answeredBy" | "reason">): McpElicitationRecord {
+  async createMcpElicitation(input: Omit<McpElicitationRecord, "status" | "createdAt" | "answeredAt" | "answeredBy" | "reason">): Promise<McpElicitationRecord> {
     this.exec(
       `INSERT INTO mcp_elicitations (
          id, execution_id, workflow_id, workflow_name, node_id, server_id, registry_server_id, server_name,
@@ -10819,15 +11217,23 @@ export class SqliteStore {
         input.triggerType ?? null
       ]
     );
-    return this.getMcpElicitation(input.id)!;
+    return this.getMcpElicitationSync(input.id)!;
   }
 
-  getMcpElicitation(id: string): McpElicitationRecord | null {
+  async getMcpElicitation(id: string): Promise<McpElicitationRecord | null> {
+    return this.getMcpElicitationSync(id);
+  }
+
+  private getMcpElicitationSync(id: string): McpElicitationRecord | null {
     const row = this.queryOne<McpElicitationRow>(`SELECT * FROM mcp_elicitations WHERE id = ?`, [id]);
     return row ? mapMcpElicitation(row) : null;
   }
 
-  listMcpElicitations(filter: { status?: McpElicitationStatus; executionId?: string; limit?: number } = {}): McpElicitationRecord[] {
+  async listMcpElicitations(filter: { status?: McpElicitationStatus; executionId?: string; limit?: number } = {}): Promise<McpElicitationRecord[]> {
+    return this.listMcpElicitationsSync(filter);
+  }
+
+  private listMcpElicitationsSync(filter: { status?: McpElicitationStatus; executionId?: string; limit?: number } = {}): McpElicitationRecord[] {
     const where: string[] = [];
     const params: Array<string | number> = [];
     if (filter.status) { where.push("status = ?"); params.push(filter.status); }
@@ -10841,11 +11247,15 @@ export class SqliteStore {
   }
 
   /** Settle an elicitation; returns false when it was already settled (first answer wins). */
-  settleMcpElicitation(
+  async settleMcpElicitation(id: string, outcome: { status: Exclude<McpElicitationStatus, "pending">; answeredBy?: string | null; reason?: string | null }): Promise<boolean> {
+    return this.settleMcpElicitationSync(id, outcome);
+  }
+
+  private settleMcpElicitationSync(
     id: string,
     outcome: { status: Exclude<McpElicitationStatus, "pending">; answeredBy?: string | null; reason?: string | null }
   ): boolean {
-    const current = this.getMcpElicitation(id);
+    const current = this.getMcpElicitationSync(id);
     if (!current || current.status !== "pending") return false;
     this.exec(
       `UPDATE mcp_elicitations SET status = ?, answered_at = ?, answered_by = ?, reason = ? WHERE id = ? AND status = 'pending'`,
@@ -10855,34 +11265,38 @@ export class SqliteStore {
   }
 
   /** Mark every pending elicitation of an execution as expired (the run ended or the API restarted). */
-  expireMcpElicitationsForExecution(executionId: string, reason: string): number {
-    const pending = this.listMcpElicitations({ status: "pending", executionId, limit: 500 });
+  async expireMcpElicitationsForExecution(executionId: string, reason: string): Promise<number> {
+    const pending = this.listMcpElicitationsSync({ status: "pending", executionId, limit: 500 });
     for (const entry of pending) {
-      this.settleMcpElicitation(entry.id, { status: "expired", reason });
+      this.settleMcpElicitationSync(entry.id, { status: "expired", reason });
     }
     return pending.length;
   }
 
   /** Pending elicitations whose deadline passed; the elicitation service expires them. */
-  listExpiredMcpElicitations(now: string): McpElicitationRecord[] {
+  async listExpiredMcpElicitations(now: string): Promise<McpElicitationRecord[]> {
     return this.queryAll<McpElicitationRow>(`SELECT * FROM mcp_elicitations WHERE status = 'pending' AND expires_at <= ?`, [now]).map(
       mapMcpElicitation
     );
   }
 
   /** Rules in evaluation order: oldest first. */
-  listMcpToolPolicies(): McpToolPolicyRule[] {
+  async listMcpToolPolicies(): Promise<McpToolPolicyRule[]> {
     return this.queryAll<McpToolPolicyRow>(`SELECT * FROM mcp_tool_policies ORDER BY created_at ASC, rowid ASC`).map(
       mapMcpToolPolicy
     );
   }
 
-  getMcpToolPolicy(id: string): McpToolPolicyRule | null {
+  async getMcpToolPolicy(id: string): Promise<McpToolPolicyRule | null> {
+    return this.getMcpToolPolicySync(id);
+  }
+
+  private getMcpToolPolicySync(id: string): McpToolPolicyRule | null {
     const row = this.queryOne<McpToolPolicyRow>(`SELECT * FROM mcp_tool_policies WHERE id = ?`, [id]);
     return row ? mapMcpToolPolicy(row) : null;
   }
 
-  createMcpToolPolicy(input: Omit<McpToolPolicyRule, "createdAt" | "updatedAt">): McpToolPolicyRule {
+  async createMcpToolPolicy(input: Omit<McpToolPolicyRule, "createdAt" | "updatedAt">): Promise<McpToolPolicyRule> {
     const now = new Date().toISOString();
     this.exec(
       `INSERT INTO mcp_tool_policies (
@@ -10906,15 +11320,15 @@ export class SqliteStore {
         now
       ]
     );
-    return this.getMcpToolPolicy(input.id)!;
+    return this.getMcpToolPolicySync(input.id)!;
   }
 
-  updateMcpToolPolicy(
+  async updateMcpToolPolicy(
     id: string,
     patch: Partial<
       Pick<McpToolPolicyRule, "name" | "description" | "effect" | "projectId" | "roles" | "serverId" | "toolPattern" | "annotationHint" | "kind" | "enabled">
     >
-  ): McpToolPolicyRule | null {
+  ): Promise<McpToolPolicyRule | null> {
     const fields: string[] = [];
     const params: Array<string | number | null> = [];
     if (patch.name !== undefined) { fields.push("name = ?"); params.push(patch.name); }
@@ -10933,17 +11347,17 @@ export class SqliteStore {
       params.push(id);
       this.exec(`UPDATE mcp_tool_policies SET ${fields.join(", ")} WHERE id = ?`, params);
     }
-    return this.getMcpToolPolicy(id);
+    return this.getMcpToolPolicySync(id);
   }
 
-  deleteMcpToolPolicy(id: string): boolean {
-    if (!this.getMcpToolPolicy(id)) return false;
+  async deleteMcpToolPolicy(id: string): Promise<boolean> {
+    if (!this.getMcpToolPolicySync(id)) return false;
     this.exec(`DELETE FROM mcp_tool_policies WHERE id = ?`, [id]);
     return true;
   }
 
   /** Admin read-only overrides; all of them, or one registry server's. */
-  listMcpToolClassifications(registryServerId?: string): McpToolClassificationOverride[] {
+  async listMcpToolClassifications(registryServerId?: string): Promise<McpToolClassificationOverride[]> {
     const rows = registryServerId
       ? this.queryAll<McpToolClassificationRow>(
           `SELECT * FROM mcp_tool_classifications WHERE server_id = ? ORDER BY tool_name`,
@@ -10954,12 +11368,12 @@ export class SqliteStore {
   }
 
   /** `readOnly: null` removes the override, so annotations decide again. */
-  setMcpToolClassification(input: {
+  async setMcpToolClassification(input: {
     registryServerId: string;
     toolName: string;
     readOnly: boolean | null;
     setBy: string | null;
-  }): McpToolClassificationOverride | null {
+  }): Promise<McpToolClassificationOverride | null> {
     if (input.readOnly === null) {
       this.exec(`DELETE FROM mcp_tool_classifications WHERE server_id = ? AND tool_name = ?`, [
         input.registryServerId,
@@ -11018,23 +11432,27 @@ export class SqliteStore {
     });
   }
 
-  listMcpToolsets(): McpToolset[] {
+  async listMcpToolsets(): Promise<McpToolset[]> {
     return this.queryAll<McpToolsetRow>(`SELECT * FROM mcp_toolsets ORDER BY name COLLATE NOCASE, slug`).map((row) =>
       mapMcpToolset(row, this.listMcpToolsetMembers(toString(row.id)))
     );
   }
 
-  getMcpToolset(id: string): McpToolset | null {
+  async getMcpToolset(id: string): Promise<McpToolset | null> {
+    return this.getMcpToolsetSync(id);
+  }
+
+  private getMcpToolsetSync(id: string): McpToolset | null {
     const row = this.queryOne<McpToolsetRow>(`SELECT * FROM mcp_toolsets WHERE id = ?`, [id]);
     return row ? mapMcpToolset(row, this.listMcpToolsetMembers(toString(row.id))) : null;
   }
 
-  getMcpToolsetBySlug(slug: string): McpToolset | null {
+  async getMcpToolsetBySlug(slug: string): Promise<McpToolset | null> {
     const row = this.queryOne<McpToolsetRow>(`SELECT * FROM mcp_toolsets WHERE slug = ?`, [slug]);
     return row ? mapMcpToolset(row, this.listMcpToolsetMembers(toString(row.id))) : null;
   }
 
-  createMcpToolset(input: {
+  async createMcpToolset(input: {
     id: string;
     slug: string;
     name: string;
@@ -11043,7 +11461,7 @@ export class SqliteStore {
     enabled: boolean;
     createdBy: string | null;
     members: McpToolsetMemberSpec[];
-  }): McpToolset {
+  }): Promise<McpToolset> {
     const now = new Date().toISOString();
     this.db.transaction(() => {
       this.exec(
@@ -11053,10 +11471,10 @@ export class SqliteStore {
       );
       this.writeMcpToolsetMembers(input.id, input.members);
     })();
-    return this.getMcpToolset(input.id)!;
+    return this.getMcpToolsetSync(input.id)!;
   }
 
-  updateMcpToolset(
+  async updateMcpToolset(
     id: string,
     patch: {
       slug?: string;
@@ -11066,8 +11484,8 @@ export class SqliteStore {
       enabled?: boolean;
       members?: Array<McpToolsetMemberSpec & { id?: string }>;
     }
-  ): McpToolset | null {
-    if (!this.getMcpToolset(id)) return null;
+  ): Promise<McpToolset | null> {
+    if (!this.getMcpToolsetSync(id)) return null;
     const fields: string[] = [];
     const params: Array<string | number | null> = [];
     if (patch.slug !== undefined) { fields.push("slug = ?"); params.push(patch.slug); }
@@ -11084,16 +11502,16 @@ export class SqliteStore {
         this.writeMcpToolsetMembers(id, patch.members);
       }
     })();
-    return this.getMcpToolset(id);
+    return this.getMcpToolsetSync(id);
   }
 
   /** Deletes the toolset and its members, and drops it from every client's scope. */
-  deleteMcpToolset(id: string): boolean {
-    if (!this.getMcpToolset(id)) return false;
+  async deleteMcpToolset(id: string): Promise<boolean> {
+    if (!this.getMcpToolsetSync(id)) return false;
     this.db.transaction(() => {
       this.exec(`DELETE FROM mcp_toolset_members WHERE toolset_id = ?`, [id]);
       this.exec(`DELETE FROM mcp_toolsets WHERE id = ?`, [id]);
-      for (const client of this.listMcpClients()) {
+      for (const client of this.listMcpClientsSync()) {
         if (!client.toolsetIds.includes(id)) continue;
         this.exec(`UPDATE mcp_clients SET toolset_ids_json = ? WHERE id = ?`, [
           JSON.stringify(client.toolsetIds.filter((entry) => entry !== id)),
@@ -11104,7 +11522,7 @@ export class SqliteStore {
     return true;
   }
 
-  createMcpClient(input: {
+  async createMcpClient(input: {
     id: string;
     name: string;
     tokenPrefix: string;
@@ -11114,7 +11532,7 @@ export class SqliteStore {
     createdBy: string | null;
     createdByEmail: string | null;
     expiresAt: string | null;
-  }): McpClient {
+  }): Promise<McpClient> {
     this.exec(
       `INSERT INTO mcp_clients (
          id, name, token_prefix, token_hash, toolset_ids_json, role, created_by, created_by_email, expires_at, created_at
@@ -11132,11 +11550,15 @@ export class SqliteStore {
         new Date().toISOString()
       ]
     );
-    return this.getMcpClient(input.id)!;
+    return this.getMcpClientSync(input.id)!;
   }
 
   /** Without the token hash. */
-  getMcpClient(id: string): McpClient | null {
+  async getMcpClient(id: string): Promise<McpClient | null> {
+    return this.getMcpClientSync(id);
+  }
+
+  private getMcpClientSync(id: string): McpClient | null {
     const row = this.queryOne<McpClientRow>(`SELECT * FROM mcp_clients WHERE id = ?`, [id]);
     if (!row) return null;
     const { tokenHash: _hash, ...client } = mapMcpClient(row);
@@ -11144,28 +11566,32 @@ export class SqliteStore {
   }
 
   /** With the token hash; for the credential check only. */
-  findMcpClientByTokenPrefix(prefix: string): McpClientSecretRecord | null {
+  async findMcpClientByTokenPrefix(prefix: string): Promise<McpClientSecretRecord | null> {
     const row = this.queryOne<McpClientRow>(`SELECT * FROM mcp_clients WHERE token_prefix = ?`, [prefix]);
     return row ? mapMcpClient(row) : null;
   }
 
-  listMcpClients(): McpClient[] {
+  async listMcpClients(): Promise<McpClient[]> {
+    return this.listMcpClientsSync();
+  }
+
+  private listMcpClientsSync(): McpClient[] {
     return this.queryAll<McpClientRow>(`SELECT * FROM mcp_clients ORDER BY created_at DESC, rowid DESC`).map((row) => {
       const { tokenHash: _hash, ...client } = mapMcpClient(row);
       return client;
     });
   }
 
-  revokeMcpClient(id: string): McpClient | null {
-    const existing = this.getMcpClient(id);
+  async revokeMcpClient(id: string): Promise<McpClient | null> {
+    const existing = this.getMcpClientSync(id);
     if (!existing) return null;
     if (!existing.revokedAt) {
       this.exec(`UPDATE mcp_clients SET revoked_at = ? WHERE id = ?`, [new Date().toISOString(), id]);
     }
-    return this.getMcpClient(id);
+    return this.getMcpClientSync(id);
   }
 
-  touchMcpClient(id: string, at: string): void {
+  async touchMcpClient(id: string, at: string): Promise<void> {
     this.exec(`UPDATE mcp_clients SET last_used_at = ? WHERE id = ?`, [at, id]);
   }
 
@@ -11173,7 +11599,7 @@ export class SqliteStore {
   // Phase 10.8 — MCP cassettes
   // ---------------------------------------------------------------------------
 
-  saveMcpCassette(input: {
+  async saveMcpCassette(input: {
     id: string;
     executionId: string | null;
     workflowId: string | null;
@@ -11184,7 +11610,7 @@ export class SqliteStore {
     fixtureId?: string | null;
     cassette: McpCassette;
     createdBy: string | null;
-  }): McpCassetteSummary {
+  }): Promise<McpCassetteSummary> {
     const createdAt = new Date().toISOString();
     this.exec(
       `INSERT INTO mcp_cassettes (
@@ -11209,41 +11635,49 @@ export class SqliteStore {
         input.createdBy
       ]
     );
-    return this.getMcpCassetteSummary(input.id)!;
+    return this.getMcpCassetteSummarySync(input.id)!;
   }
 
-  getMcpCassetteSummary(id: string): McpCassetteSummary | null {
+  async getMcpCassetteSummary(id: string): Promise<McpCassetteSummary | null> {
+    return this.getMcpCassetteSummarySync(id);
+  }
+
+  private getMcpCassetteSummarySync(id: string): McpCassetteSummary | null {
     const row = this.queryOne<McpCassetteRow>(`SELECT ${MCP_CASSETTE_SUMMARY_COLUMNS} FROM mcp_cassettes WHERE id = ?`, [id]);
     return row ? mapMcpCassetteSummary(row) : null;
   }
 
-  getMcpCassette(id: string): McpCassetteRecord | null {
+  async getMcpCassette(id: string): Promise<McpCassetteRecord | null> {
+    return this.getMcpCassetteSync(id);
+  }
+
+  private getMcpCassetteSync(id: string): McpCassetteRecord | null {
     const row = this.queryOne<McpCassetteRow>(`SELECT * FROM mcp_cassettes WHERE id = ?`, [id]);
     if (!row) return null;
     return { ...mapMcpCassetteSummary(row), cassette: safeJsonParse(toString(row.cassette_json)) as McpCassette };
   }
 
   /** The newest cassette recorded for an execution. */
-  getMcpCassetteForExecution(executionId: string): McpCassetteRecord | null {
+  async getMcpCassetteForExecution(executionId: string): Promise<McpCassetteRecord | null> {
     const row = this.queryOne<{ id: string }>(
       `SELECT id FROM mcp_cassettes WHERE execution_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1`,
       [executionId]
     );
-    return row ? this.getMcpCassette(toString(row.id)) : null;
+    return row ? this.getMcpCassetteSync(toString(row.id)) : null;
   }
 
   /** Cassettes an eval run recorded, keyed by fixture id. */
-  listMcpCassettesForEvalRun(evalRunId: string): McpCassetteSummary[] {
+  async listMcpCassettesForEvalRun(evalRunId: string): Promise<McpCassetteSummary[]> {
     return this.queryAll<McpCassetteRow>(
       `SELECT ${MCP_CASSETTE_SUMMARY_COLUMNS} FROM mcp_cassettes WHERE eval_run_id = ? ORDER BY created_at ASC, rowid ASC`,
       [evalRunId]
     ).map(mapMcpCassetteSummary);
   }
 
-  listMcpCassettes(options: { workflowId?: string; projectId?: string; evalRunId?: string; workflowIds?: string[]; limit?: number; offset?: number } = {}): {
+  async listMcpCassettes(options: { workflowId?: string; projectId?: string; evalRunId?: string; workflowIds?: string[]; limit?: number; offset?: number } = {}): Promise<{
     items: McpCassetteSummary[];
     total: number;
-  } {
+  }> {
     const where: string[] = [];
     const params: Array<string | number> = [];
     // Project scope: only cassettes of these workflows (an empty list matches nothing).
@@ -11275,7 +11709,7 @@ export class SqliteStore {
   }
 
   /** Runs-page badges: the newest cassette per execution id. */
-  mcpCassetteBadgesForExecutions(executionIds: string[]): Map<string, McpCassetteBadge> {
+  async mcpCassetteBadgesForExecutions(executionIds: string[]): Promise<Map<string, McpCassetteBadge>> {
     const out = new Map<string, McpCassetteBadge>();
     const ids = [...new Set(executionIds.filter(Boolean))].slice(0, 500);
     if (ids.length === 0) return out;
@@ -11291,8 +11725,12 @@ export class SqliteStore {
     return out;
   }
 
-  deleteMcpCassette(id: string): boolean {
-    const existing = this.getMcpCassetteSummary(id);
+  async deleteMcpCassette(id: string): Promise<boolean> {
+    return this.deleteMcpCassetteSync(id);
+  }
+
+  private deleteMcpCassetteSync(id: string): boolean {
+    const existing = this.getMcpCassetteSummarySync(id);
     if (!existing) return false;
     this.exec(`DELETE FROM mcp_cassettes WHERE id = ?`, [id]);
     return true;
@@ -11302,7 +11740,7 @@ export class SqliteStore {
   // Phase 12.1 — Guard profiles, bindings, events and the token vault.
   // -------------------------------------------------------------------------
 
-  listGuardProfiles(): GuardProfileRecord[] {
+  async listGuardProfiles(): Promise<GuardProfileRecord[]> {
     return this.queryAll<GuardProfileRow>(
       `SELECT p.*, v.hash AS latest_hash FROM guard_profiles p
          LEFT JOIN guard_profile_versions v ON v.profile_id = p.id AND v.version = p.latest_version
@@ -11310,7 +11748,11 @@ export class SqliteStore {
     ).map(mapGuardProfileRow);
   }
 
-  getGuardProfile(id: string): GuardProfileRecord | null {
+  async getGuardProfile(id: string): Promise<GuardProfileRecord | null> {
+    return this.getGuardProfileSync(id);
+  }
+
+  private getGuardProfileSync(id: string): GuardProfileRecord | null {
     const row = this.queryOne<GuardProfileRow>(
       `SELECT p.*, v.hash AS latest_hash FROM guard_profiles p
          LEFT JOIN guard_profile_versions v ON v.profile_id = p.id AND v.version = p.latest_version
@@ -11330,7 +11772,11 @@ export class SqliteStore {
    * of profile contents key on it, read once per use (one primary-key read),
    * so a profile saved by another instance is seen by the next run here.
    */
-  guardProfileRevision(): number | undefined {
+  async guardProfileRevision(): Promise<number | undefined> {
+    return this.guardProfileRevisionSync();
+  }
+
+  private guardProfileRevisionSync(): number | undefined {
     // No revision (the row is missing) or a transaction open on this connection (it may hold uncommitted profile
     // writes that a rollback would undo): undefined, and callers read the database instead of their caches.
     if ((this.db as unknown as { inTransaction?: boolean }).inTransaction) return undefined;
@@ -11350,8 +11796,8 @@ export class SqliteStore {
    * with one primary-key read and a profile written by any instance is seen
    * at once.
    */
-  anyGuardProfileUsesLabels(): boolean {
-    const revision = this.guardProfileRevision();
+  async anyGuardProfileUsesLabels(): Promise<boolean> {
+    const revision = this.guardProfileRevisionSync();
     if (revision !== undefined && this.guardProfileLabelsCache?.revision === revision) return this.guardProfileLabelsCache.value;
     // Read as JSON (not as text), so key order and formatting never matter: labels propagated, at least one
     // destination rule, or an egress channel.
@@ -11376,7 +11822,7 @@ export class SqliteStore {
    * verdict (a verdict with several such findings counts once). Replays,
    * release-gate cases and eval runs are not traffic: they are left out.
    */
-  countObservedDestinationBlocks(profileId: string, since: string): number {
+  async countObservedDestinationBlocks(profileId: string, since: string): Promise<number> {
     const row = this.queryOne<{ total: number }>(
       `SELECT COUNT(DISTINCT verdict_id) AS total FROM guard_events
         WHERE profile_id = ? AND detector_id = '<destinations>' AND shadow = 1
@@ -11388,7 +11834,11 @@ export class SqliteStore {
   }
 
   /** One version of a profile; the latest when `version` is omitted. */
-  getGuardProfileVersion(profileId: string, version?: number): GuardProfileVersionRecord | null {
+  async getGuardProfileVersion(profileId: string, version?: number): Promise<GuardProfileVersionRecord | null> {
+    return this.getGuardProfileVersionSync(profileId, version);
+  }
+
+  private getGuardProfileVersionSync(profileId: string, version?: number): GuardProfileVersionRecord | null {
     const row =
       version === undefined
         ? this.queryOne<GuardProfileVersionRow>(
@@ -11399,14 +11849,14 @@ export class SqliteStore {
     return row ? mapGuardProfileVersionRow(row) : null;
   }
 
-  listGuardProfileVersions(profileId: string): GuardProfileVersionRecord[] {
+  async listGuardProfileVersions(profileId: string): Promise<GuardProfileVersionRecord[]> {
     return this.queryAll<GuardProfileVersionRow>(`SELECT * FROM guard_profile_versions WHERE profile_id = ? ORDER BY version DESC`, [profileId]).map(
       mapGuardProfileVersionRow
     );
   }
 
   /** Creates a profile with its first version. */
-  insertGuardProfile(input: {
+  async insertGuardProfile(input: {
     id: string;
     name: string;
     description?: string | null;
@@ -11415,7 +11865,7 @@ export class SqliteStore {
     hash: string;
     note?: string | null;
     createdBy: string | null;
-  }): GuardProfileRecord {
+  }): Promise<GuardProfileRecord> {
     const now = new Date().toISOString();
     this.exec(
       `INSERT INTO guard_profiles (id, name, description, built_in, latest_version, created_at, created_by, updated_at, updated_by)
@@ -11427,11 +11877,11 @@ export class SqliteStore {
       [input.id, input.hash, JSON.stringify(input.document), input.note ?? null, now, input.createdBy]
     );
     this.persist();
-    return this.getGuardProfile(input.id)!;
+    return this.getGuardProfileSync(input.id)!;
   }
 
   /** Appends an immutable version and makes it the latest. */
-  addGuardProfileVersion(input: {
+  async addGuardProfileVersion(input: {
     profileId: string;
     name: string;
     description?: string | null;
@@ -11439,8 +11889,8 @@ export class SqliteStore {
     hash: string;
     note?: string | null;
     createdBy: string | null;
-  }): GuardProfileVersionRecord {
-    const current = this.getGuardProfile(input.profileId);
+  }): Promise<GuardProfileVersionRecord> {
+    const current = this.getGuardProfileSync(input.profileId);
     if (!current) throw new Error(`Guard profile '${input.profileId}' not found`);
     const version = current.latestVersion + 1;
     const now = new Date().toISOString();
@@ -11457,27 +11907,31 @@ export class SqliteStore {
       input.profileId
     ]);
     this.persist();
-    return this.getGuardProfileVersion(input.profileId, version)!;
+    return this.getGuardProfileVersionSync(input.profileId, version)!;
   }
 
-  deleteGuardProfile(id: string): boolean {
-    if (!this.getGuardProfile(id)) return false;
+  async deleteGuardProfile(id: string): Promise<boolean> {
+    if (!this.getGuardProfileSync(id)) return false;
     this.exec(`DELETE FROM guard_profile_versions WHERE profile_id = ?`, [id]);
     this.exec(`DELETE FROM guard_profiles WHERE id = ?`, [id]);
     this.persist();
     return true;
   }
 
-  getGuardBinding(scope: GuardBindingScope, scopeId: string): GuardBindingRecord | null {
+  async getGuardBinding(scope: GuardBindingScope, scopeId: string): Promise<GuardBindingRecord | null> {
+    return this.getGuardBindingSync(scope, scopeId);
+  }
+
+  private getGuardBindingSync(scope: GuardBindingScope, scopeId: string): GuardBindingRecord | null {
     const row = this.queryOne<GuardBindingRow>(`SELECT * FROM guard_bindings WHERE scope = ? AND scope_id = ?`, [scope, scopeId]);
     return row ? mapGuardBindingRow(row) : null;
   }
 
-  listGuardBindingsForProfile(profileId: string): GuardBindingRecord[] {
+  async listGuardBindingsForProfile(profileId: string): Promise<GuardBindingRecord[]> {
     return this.queryAll<GuardBindingRow>(`SELECT * FROM guard_bindings WHERE profile_id = ? ORDER BY scope, scope_id`, [profileId]).map(mapGuardBindingRow);
   }
 
-  setGuardBinding(input: { scope: GuardBindingScope; scopeId: string; mode: string; profileId: string | null; updatedBy: string | null }): GuardBindingRecord {
+  async setGuardBinding(input: { scope: GuardBindingScope; scopeId: string; mode: string; profileId: string | null; updatedBy: string | null }): Promise<GuardBindingRecord> {
     const now = new Date().toISOString();
     this.exec(
       `INSERT INTO guard_bindings (scope, scope_id, mode, profile_id, updated_at, updated_by) VALUES (?, ?, ?, ?, ?, ?)
@@ -11485,10 +11939,10 @@ export class SqliteStore {
       [input.scope, input.scopeId, input.mode, input.profileId, now, input.updatedBy]
     );
     this.persist();
-    return this.getGuardBinding(input.scope, input.scopeId)!;
+    return this.getGuardBindingSync(input.scope, input.scopeId)!;
   }
 
-  insertGuardEvents(rows: GuardEventInsert[]): void {
+  async insertGuardEvents(rows: GuardEventInsert[]): Promise<void> {
     for (const row of rows) {
       this.exec(
         `INSERT INTO guard_events (
@@ -11554,7 +12008,7 @@ export class SqliteStore {
     return { where: clauses.length ? `WHERE ${clauses.join(" AND ")}` : "", params };
   }
 
-  listGuardEvents(filters: GuardEventFilters & { limit?: number; offset?: number } = {}): { events: GuardEventRecord[]; total: number } {
+  async listGuardEvents(filters: GuardEventFilters & { limit?: number; offset?: number } = {}): Promise<{ events: GuardEventRecord[]; total: number }> {
     const { where, params } = this.guardEventWhere(filters);
     const limit = Math.min(Math.max(filters.limit ?? 50, 1), 500);
     const offset = Math.max(filters.offset ?? 0, 0);
@@ -11564,12 +12018,12 @@ export class SqliteStore {
   }
 
   /** Events of one execution in the order they were recorded. */
-  listGuardEventsForExecution(executionId: string): GuardEventRecord[] {
+  async listGuardEventsForExecution(executionId: string): Promise<GuardEventRecord[]> {
     return this.queryAll<GuardEventRow>(`SELECT * FROM guard_events WHERE execution_id = ? ORDER BY created_at ASC, id ASC`, [executionId]).map(mapGuardEventRow);
   }
 
   /** Grouped counts for the Security page. */
-  guardEventStats(filters: GuardEventFilters = {}): GuardEventStats {
+  async guardEventStats(filters: GuardEventFilters = {}): Promise<GuardEventStats> {
     const { where, params } = this.guardEventWhere(filters);
     const and = (extra: string) => (where ? `${where} AND ${extra}` : `WHERE ${extra}`);
     const group = (column: string, extraWhere?: string) =>
@@ -11608,16 +12062,16 @@ export class SqliteStore {
     };
   }
 
-  getGuardVaultByToken(token: string): GuardVaultRow | null {
+  async getGuardVaultByToken(token: string): Promise<GuardVaultRow | null> {
     return this.queryOne<GuardVaultRow>(`SELECT * FROM guard_token_vault WHERE token = ?`, [token]);
   }
 
-  getGuardVaultByHash(valueHash: string): GuardVaultRow | null {
+  async getGuardVaultByHash(valueHash: string): Promise<GuardVaultRow | null> {
     return this.queryOne<GuardVaultRow>(`SELECT * FROM guard_token_vault WHERE value_hash = ?`, [valueHash]);
   }
 
   /** Stores a token; a concurrent deterministic insert for the same value keeps the first one. */
-  putGuardVault(input: { token: string; dataClass: string; valueHash: string | null; valueSealed: string; createdAt: string }): void {
+  async putGuardVault(input: { token: string; dataClass: string; valueHash: string | null; valueSealed: string; createdAt: string }): Promise<void> {
     this.exec(`INSERT OR IGNORE INTO guard_token_vault (token, data_class, value_hash, value_sealed, created_at) VALUES (?, ?, ?, ?, ?)`, [
       input.token,
       input.dataClass,
@@ -11653,7 +12107,11 @@ export class SqliteStore {
     };
   }
 
-  getExecutionManifest(executionId: string): ExecutionManifestRecord | null {
+  async getExecutionManifest(executionId: string): Promise<ExecutionManifestRecord | null> {
+    return this.getExecutionManifestSync(executionId);
+  }
+
+  private getExecutionManifestSync(executionId: string): ExecutionManifestRecord | null {
     const row = this.queryOne<Record<string, unknown>>(`SELECT * FROM execution_manifests WHERE execution_id = ?`, [executionId]);
     return row ? this.mapExecutionManifest(row) : null;
   }
@@ -11663,7 +12121,7 @@ export class SqliteStore {
    * finishing the same execution) replaces the context, but never once the
    * manifest has been generated: a manifest is immutable.
    */
-  saveExecutionRunContext(executionId: string, runContext: unknown, createdAt: string): void {
+  async saveExecutionRunContext(executionId: string, runContext: unknown, createdAt: string): Promise<void> {
     this.exec(
       `INSERT INTO execution_manifests (execution_id, run_context_json, created_at) VALUES (?, ?, ?)
        ON CONFLICT(execution_id) DO UPDATE SET run_context_json = excluded.run_context_json, created_at = excluded.created_at
@@ -11676,14 +12134,14 @@ export class SqliteStore {
    * Stores a generated manifest once. Returns the stored record, which is
    * the first one written if two requests raced to generate it.
    */
-  saveExecutionManifest(input: {
+  async saveExecutionManifest(input: {
     executionId: string;
     manifestJson: string;
     manifestDigest: string;
     keyId: string;
     signature: string;
     signedAt: string;
-  }): ExecutionManifestRecord {
+  }): Promise<ExecutionManifestRecord> {
     this.exec(
       `INSERT INTO execution_manifests (execution_id, manifest_json, manifest_digest, key_id, signature, signed_at, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -11696,7 +12154,7 @@ export class SqliteStore {
        WHERE execution_manifests.manifest_json IS NULL`,
       [input.executionId, input.manifestJson, input.manifestDigest, input.keyId, input.signature, input.signedAt, input.signedAt]
     );
-    return this.getExecutionManifest(input.executionId)!;
+    return this.getExecutionManifestSync(input.executionId)!;
   }
 
   // ---------------------------------------------------------------------------
@@ -11704,7 +12162,11 @@ export class SqliteStore {
   // or with their workflow.
   // ---------------------------------------------------------------------------
 
-  saveReplayRecording(input: ReplayRecordingInsert): ReplayRecordingSummary {
+  async saveReplayRecording(input: ReplayRecordingInsert): Promise<ReplayRecordingSummary> {
+    return this.saveReplayRecordingSync(input);
+  }
+
+  private saveReplayRecordingSync(input: ReplayRecordingInsert): ReplayRecordingSummary {
     this.exec(
       `INSERT INTO replay_recordings (
          id, workflow_id, project_id, name, notes, source_execution_id, source_trigger_type, source_status,
@@ -11739,15 +12201,23 @@ export class SqliteStore {
         input.capturedAt ?? null
       ]
     );
-    return this.getReplayRecordingSummary(input.id)!;
+    return this.getReplayRecordingSummarySync(input.id)!;
   }
 
-  getReplayRecordingSummary(id: string): ReplayRecordingSummary | null {
+  async getReplayRecordingSummary(id: string): Promise<ReplayRecordingSummary | null> {
+    return this.getReplayRecordingSummarySync(id);
+  }
+
+  private getReplayRecordingSummarySync(id: string): ReplayRecordingSummary | null {
     const row = this.queryOne<Record<string, unknown>>(`SELECT ${REPLAY_RECORDING_SUMMARY_COLUMNS} FROM replay_recordings WHERE id = ?`, [id]);
     return row ? mapReplayRecordingSummary(row) : null;
   }
 
-  getReplayRecording(id: string): ReplayRecordingRecord | null {
+  async getReplayRecording(id: string): Promise<ReplayRecordingRecord | null> {
+    return this.getReplayRecordingSync(id);
+  }
+
+  private getReplayRecordingSync(id: string): ReplayRecordingRecord | null {
     const row = this.queryOne<Record<string, unknown>>(`SELECT * FROM replay_recordings WHERE id = ?`, [id]);
     if (!row) return null;
     const parse = (value: unknown) => (typeof value === "string" && value ? safeJsonParse(value) : null);
@@ -11763,7 +12233,7 @@ export class SqliteStore {
     };
   }
 
-  listReplayRecordings(options: { workflowId?: string; workflowIds?: string[]; status?: "candidate" | "golden"; limit?: number; offset?: number } = {}): { items: ReplayRecordingSummary[]; total: number } {
+  async listReplayRecordings(options: { workflowId?: string; workflowIds?: string[]; status?: "candidate" | "golden"; limit?: number; offset?: number } = {}): Promise<{ items: ReplayRecordingSummary[]; total: number }> {
     const where: string[] = [];
     const params: Array<string | number> = [];
     if (options.status) {
@@ -11791,19 +12261,31 @@ export class SqliteStore {
   }
 
   /** Bytes one workflow's golden runs use (each row's `bytes`, cassette included). Candidates have their own count cap. */
-  sumReplayRecordingBytesForWorkflow(workflowId: string): number {
+  async sumReplayRecordingBytesForWorkflow(workflowId: string): Promise<number> {
+    return this.sumReplayRecordingBytesForWorkflowSync(workflowId);
+  }
+
+  private sumReplayRecordingBytesForWorkflowSync(workflowId: string): number {
     const row = this.queryOne<{ total: number | null }>(`SELECT COALESCE(SUM(bytes), 0) AS total FROM replay_recordings WHERE workflow_id = ? AND status = 'golden'`, [workflowId]);
     return row ? toNumber(row.total ?? 0) : 0;
   }
 
   /** Bytes every golden run in the deployment uses, cassettes included. */
-  sumReplayRecordingBytes(): number {
+  async sumReplayRecordingBytes(): Promise<number> {
+    return this.sumReplayRecordingBytesSync();
+  }
+
+  private sumReplayRecordingBytesSync(): number {
     const row = this.queryOne<{ total: number | null }>(`SELECT COALESCE(SUM(bytes), 0) AS total FROM replay_recordings WHERE status = 'golden'`, []);
     return row ? toNumber(row.total ?? 0) : 0;
   }
 
   /** The golden run already saved from an execution, if any (captured candidates do not count). */
-  findReplayRecordingIdForExecution(executionId: string, status: "candidate" | "golden" = "golden"): string | null {
+  async findReplayRecordingIdForExecution(executionId: string, status: "candidate" | "golden" = "golden"): Promise<string | null> {
+    return this.findReplayRecordingIdForExecutionSync(executionId, status);
+  }
+
+  private findReplayRecordingIdForExecutionSync(executionId: string, status: "candidate" | "golden" = "golden"): string | null {
     const row = this.queryOne<{ id: string }>(
       `SELECT id FROM replay_recordings WHERE source_execution_id = ? AND status = ? ORDER BY created_at ASC, rowid ASC LIMIT 1`,
       [executionId, status]
@@ -11812,7 +12294,11 @@ export class SqliteStore {
   }
 
   /** Recordings of a workflow with this status (golden by default: the golden cap counts golden runs only). */
-  countReplayRecordingsForWorkflow(workflowId: string, status: "candidate" | "golden" = "golden"): number {
+  async countReplayRecordingsForWorkflow(workflowId: string, status: "candidate" | "golden" = "golden"): Promise<number> {
+    return this.countReplayRecordingsForWorkflowSync(workflowId, status);
+  }
+
+  private countReplayRecordingsForWorkflowSync(workflowId: string, status: "candidate" | "golden" = "golden"): number {
     const row = this.queryOne<{ count: number }>(`SELECT COUNT(*) AS count FROM replay_recordings WHERE workflow_id = ? AND status = ?`, [workflowId, status]);
     return row ? toNumber(row.count) : 0;
   }
@@ -11820,7 +12306,7 @@ export class SqliteStore {
   // Phase 15.6 — production capture ------------------------------------------
 
   /** Captured runs in a workflow's inbox (candidates), newest first. */
-  listReplayCaptures(options: {
+  async listReplayCaptures(options: {
     workflowId: string;
     runStatus?: string;
     trigger?: string;
@@ -11828,7 +12314,7 @@ export class SqliteStore {
     to?: string;
     limit?: number;
     offset?: number;
-  }): { items: ReplayRecordingSummary[]; total: number } {
+  }): Promise<{ items: ReplayRecordingSummary[]; total: number }> {
     const where = ["workflow_id = ?", "status = 'candidate'"];
     const params: Array<string | number> = [options.workflowId];
     if (options.runStatus) {
@@ -11862,13 +12348,13 @@ export class SqliteStore {
   }
 
   /** Runs captured for a workflow since `since` (ISO), promoted or not: the daily limit counts these. */
-  countReplayCapturesSince(workflowId: string, since: string): number {
+  async countReplayCapturesSince(workflowId: string, since: string): Promise<number> {
     const row = this.queryOne<{ count: number }>(`SELECT COUNT(*) AS count FROM replay_recordings WHERE workflow_id = ? AND captured_at >= ?`, [workflowId, since]);
     return row ? toNumber(row.count) : 0;
   }
 
   /** The oldest `count` candidates of a workflow (eviction order). */
-  oldestReplayCaptureIds(workflowId: string, count: number): string[] {
+  async oldestReplayCaptureIds(workflowId: string, count: number): Promise<string[]> {
     if (count <= 0) return [];
     return this.queryAll<{ id: string }>(
       `SELECT id FROM replay_recordings WHERE workflow_id = ? AND status = 'candidate' ORDER BY captured_at ASC, rowid ASC LIMIT ?`,
@@ -11877,7 +12363,7 @@ export class SqliteStore {
   }
 
   /** Deletes candidates captured before `before` (retention). Golden runs are never touched. */
-  pruneReplayCaptures(before: string): number {
+  async pruneReplayCaptures(before: string): Promise<number> {
     const row = this.queryOne<{ count: number }>(`SELECT COUNT(*) AS count FROM replay_recordings WHERE status = 'candidate' AND captured_at < ?`, [before]);
     const count = row ? toNumber(row.count) : 0;
     if (count > 0) this.exec(`DELETE FROM replay_recordings WHERE status = 'candidate' AND captured_at < ?`, [before]);
@@ -11885,12 +12371,15 @@ export class SqliteStore {
   }
 
   /** Promote: the candidate becomes golden with its re-scrubbed content. Returns false when it is no longer a candidate. */
-  promoteReplayCapture(
-    id: string,
-    input: Pick<ReplayRecordingInsert, "name" | "capturedWorkflowJson" | "inputJson" | "nodeOutputsJson" | "factsJson" | "mcpCassetteJson" | "modelTapeJson" | "memorySeedJson" | "bytes" | "workflowHash"> & {
+  async promoteReplayCapture(id: string, input: Pick<ReplayRecordingInsert, "name" | "capturedWorkflowJson" | "inputJson" | "nodeOutputsJson" | "factsJson" | "mcpCassetteJson" | "modelTapeJson" | "memorySeedJson" | "bytes" | "workflowHash"> & {
       createdBy: string | null;
-    }
-  ): boolean {
+    }): Promise<boolean> {
+    return this.promoteReplayCaptureSync(id, input);
+  }
+
+  private promoteReplayCaptureSync(id: string, input: Pick<ReplayRecordingInsert, "name" | "capturedWorkflowJson" | "inputJson" | "nodeOutputsJson" | "factsJson" | "mcpCassetteJson" | "modelTapeJson" | "memorySeedJson" | "bytes" | "workflowHash"> & {
+      createdBy: string | null;
+    }): boolean {
     const before = this.queryOne<{ count: number }>(`SELECT COUNT(*) AS count FROM replay_recordings WHERE id = ? AND status = 'candidate'`, [id]);
     if (!before || toNumber(before.count) === 0) return false;
     this.exec(
@@ -11915,12 +12404,16 @@ export class SqliteStore {
     return true;
   }
 
-  getReplayCaptureSettings(workflowId: string): ReplayCaptureSettingsRecord | null {
+  async getReplayCaptureSettings(workflowId: string): Promise<ReplayCaptureSettingsRecord | null> {
+    return this.getReplayCaptureSettingsSync(workflowId);
+  }
+
+  private getReplayCaptureSettingsSync(workflowId: string): ReplayCaptureSettingsRecord | null {
     const row = this.queryOne<Record<string, unknown>>(`SELECT * FROM replay_capture_settings WHERE workflow_id = ?`, [workflowId]);
     return row ? mapReplayCaptureSettings(row) : null;
   }
 
-  saveReplayCaptureSettings(input: Omit<ReplayCaptureSettingsRecord, "updatedAt"> & { updatedAt?: string }): ReplayCaptureSettingsRecord {
+  async saveReplayCaptureSettings(input: Omit<ReplayCaptureSettingsRecord, "updatedAt"> & { updatedAt?: string }): Promise<ReplayCaptureSettingsRecord> {
     const updatedAt = input.updatedAt ?? new Date().toISOString();
     this.exec(
       `INSERT INTO replay_capture_settings (workflow_id, enabled, rate, max_per_day, only_statuses_json, dlp, dlp_off_reason, target_dataset_id, updated_at, updated_by)
@@ -11942,16 +12435,16 @@ export class SqliteStore {
         input.updatedBy
       ]
     );
-    return this.getReplayCaptureSettings(input.workflowId)!;
+    return this.getReplayCaptureSettingsSync(input.workflowId)!;
   }
 
   /** Notes the last sampled run capture dropped for a workflow (the settings row only; nothing when there is none). */
-  recordReplayCaptureDrop(workflowId: string, outcome: string, at: string): void {
+  async recordReplayCaptureDrop(workflowId: string, outcome: string, at: string): Promise<void> {
     this.exec(`UPDATE replay_capture_settings SET last_drop_outcome = ?, last_drop_at = ? WHERE workflow_id = ?`, [outcome, at, workflowId]);
   }
 
   /** A page of one store's searchable text, in rowid order after `afterRowid`, for the data-subject lookup. */
-  subjectTextPage(kind: SubjectStoreKind, afterRowid: number, limit: number): { rows: SubjectTextRow[]; lastRowid: number | null } {
+  async subjectTextPage(kind: SubjectStoreKind, afterRowid: number, limit: number): Promise<{ rows: SubjectTextRow[]; lastRowid: number | null }> {
     const query = SUBJECT_QUERIES[kind];
     const rows = this.queryAll<Record<string, unknown>>(`${query.select} AND ${query.rowid} > ? ORDER BY ${query.rowid} ASC LIMIT ?`, [
       afterRowid,
@@ -11961,14 +12454,14 @@ export class SqliteStore {
   }
 
   /** One row's searchable text (null when it is gone or not in the searched set). */
-  subjectTextRow(kind: SubjectStoreKind, id: string): SubjectTextRow | null {
+  async subjectTextRow(kind: SubjectStoreKind, id: string): Promise<SubjectTextRow | null> {
     const query = SUBJECT_QUERIES[kind];
     const row = this.queryOne<Record<string, unknown>>(`${query.select} AND ${query.idColumn} = ?`, [id]);
     return row ? mapSubjectTextRow(kind, row) : null;
   }
 
   /** Rows the data-subject lookup searches, per store. */
-  countSubjectRows(kind: SubjectStoreKind): number {
+  async countSubjectRows(kind: SubjectStoreKind): Promise<number> {
     const query = SUBJECT_QUERIES[kind];
     const row = this.queryOne<{ count: number }>(`SELECT COUNT(*) AS count FROM (${query.select})`, []);
     return row ? toNumber(row.count) : 0;
@@ -11978,7 +12471,12 @@ export class SqliteStore {
    * Deletes one row the data-subject lookup found. A golden run takes the
    * golden-set cases made from it, and the results of those cases, with it.
    */
-  deleteSubjectRow(kind: SubjectStoreKind, id: string): { deleted: boolean; cascaded: Array<{ kind: SubjectStoreKind; id: string }> } {
+  async deleteSubjectRow(kind: SubjectStoreKind, id: string): Promise<{ deleted: boolean; cascaded: Array<{ kind: SubjectStoreKind; id: string }> }> {
+    // The row and what it cascades to go together, or not at all.
+    return this.transaction(() => this.deleteSubjectRowSync(kind, id));
+  }
+
+  private deleteSubjectRowSync(kind: SubjectStoreKind, id: string): { deleted: boolean; cascaded: Array<{ kind: SubjectStoreKind; id: string }> } {
     const resultsOf = (fixtureIds: string[]) => {
       if (fixtureIds.length === 0) return [];
       const marks = fixtureIds.map(() => "?").join(", ");
@@ -11992,15 +12490,15 @@ export class SqliteStore {
     };
     switch (kind) {
       case "recording": {
-        if (!this.getReplayRecordingSummary(id)) return { deleted: false, cascaded: [] };
+        if (!this.getReplayRecordingSummarySync(id)) return { deleted: false, cascaded: [] };
         const fixtureIds = this.queryAll<{ id: string }>(`SELECT id FROM eval_fixtures WHERE recording_id = ?`, [id]).map((row) => toString(row.id));
         const cascaded = [...resultsOf(fixtureIds), ...fixtureIds.map((fixtureId) => ({ kind: "fixture" as const, id: fixtureId }))];
-        this.deleteEvalFixturesForRecording(id);
-        return { deleted: this.deleteReplayRecording(id), cascaded };
+        this.deleteEvalFixturesForRecordingSync(id);
+        return { deleted: this.deleteReplayRecordingSync(id), cascaded };
       }
       case "fixture": {
         const cascaded = resultsOf([id]);
-        return { deleted: this.deleteEvalFixture(id), cascaded };
+        return { deleted: this.deleteEvalFixtureSync(id), cascaded };
       }
       case "eval_result": {
         if (!exists("eval_results")) return { deleted: false, cascaded: [] };
@@ -12015,12 +12513,12 @@ export class SqliteStore {
         return { deleted: true, cascaded: [] };
       }
       case "cassette":
-        return { deleted: this.deleteMcpCassette(id), cascaded: [] };
+        return { deleted: this.deleteMcpCassetteSync(id), cascaded: [] };
     }
   }
 
   /** Bytes one workflow's captured candidates use (REPLAY_CAPTURES_MAX_BYTES_PER_WORKFLOW). */
-  sumReplayCaptureBytesForWorkflow(workflowId: string): number {
+  async sumReplayCaptureBytesForWorkflow(workflowId: string): Promise<number> {
     const row = this.queryOne<{ total: number | null }>(`SELECT COALESCE(SUM(bytes), 0) AS total FROM replay_recordings WHERE workflow_id = ? AND status = 'candidate'`, [
       workflowId
     ]);
@@ -12028,7 +12526,7 @@ export class SqliteStore {
   }
 
   /** The oldest candidates of a workflow with their sizes, oldest first (byte-budget eviction). */
-  oldestReplayCaptures(workflowId: string, limit: number): Array<{ id: string; bytes: number }> {
+  async oldestReplayCaptures(workflowId: string, limit: number): Promise<Array<{ id: string; bytes: number }>> {
     return this.queryAll<{ id: string; bytes: number }>(
       `SELECT id, bytes FROM replay_recordings WHERE workflow_id = ? AND status = 'candidate' ORDER BY captured_at ASC, rowid ASC LIMIT ?`,
       [workflowId, Math.max(1, limit)]
@@ -12036,12 +12534,12 @@ export class SqliteStore {
   }
 
   /** Golden-set cases that replay a recording. */
-  evalFixtureIdsForRecording(recordingId: string): string[] {
+  async evalFixtureIdsForRecording(recordingId: string): Promise<string[]> {
     return this.queryAll<{ id: string }>(`SELECT id FROM eval_fixtures WHERE recording_id = ?`, [recordingId]).map((row) => toString(row.id));
   }
 
   /** The runs holding a result of one of these cases, or one of these results. */
-  evalRunIdsForResults(input: { fixtureIds?: readonly string[]; resultIds?: readonly string[] }): string[] {
+  async evalRunIdsForResults(input: { fixtureIds?: readonly string[]; resultIds?: readonly string[] }): Promise<string[]> {
     const out = new Set<string>();
     const collect = (column: "fixture_id" | "id", ids: readonly string[] | undefined) => {
       const unique = [...new Set(ids ?? [])];
@@ -12062,7 +12560,7 @@ export class SqliteStore {
    * proof again. The reason joins the candidate's release-ineligible reasons.
    * Returns the ids changed.
    */
-  markEvalRunsReleaseIneligible(runIds: readonly string[], reason: string): string[] {
+  async markEvalRunsReleaseIneligible(runIds: readonly string[], reason: string): Promise<string[]> {
     const changed: string[] = [];
     for (const runId of new Set(runIds)) {
       const row = this.queryOne<{ candidate_json: string | null }>(`SELECT candidate_json FROM eval_runs WHERE id = ?`, [runId]);
@@ -12084,7 +12582,11 @@ export class SqliteStore {
   }
 
   /** Golden-set cases made from a recording (their input is a copy of the recording's). */
-  deleteEvalFixturesForRecording(recordingId: string): number {
+  async deleteEvalFixturesForRecording(recordingId: string): Promise<number> {
+    return this.deleteEvalFixturesForRecordingSync(recordingId);
+  }
+
+  private deleteEvalFixturesForRecordingSync(recordingId: string): number {
     const row = this.queryOne<{ count: number }>(`SELECT COUNT(*) AS count FROM eval_fixtures WHERE recording_id = ?`, [recordingId]);
     const count = row ? toNumber(row.count) : 0;
     if (count > 0) this.exec(`DELETE FROM eval_fixtures WHERE recording_id = ?`, [recordingId]);
@@ -12092,7 +12594,7 @@ export class SqliteStore {
   }
 
   /** Runs-page badges: how many golden runs were saved from each execution. */
-  replayGoldenBadgesForExecutions(executionIds: string[]): Map<string, ReplayGoldenBadge> {
+  async replayGoldenBadgesForExecutions(executionIds: string[]): Promise<Map<string, ReplayGoldenBadge>> {
     const out = new Map<string, ReplayGoldenBadge>();
     const ids = [...new Set(executionIds.filter(Boolean))].slice(0, 500);
     if (ids.length === 0) return out;
@@ -12109,8 +12611,12 @@ export class SqliteStore {
     return out;
   }
 
-  deleteReplayRecording(id: string): boolean {
-    if (!this.getReplayRecordingSummary(id)) return false;
+  async deleteReplayRecording(id: string): Promise<boolean> {
+    return this.deleteReplayRecordingSync(id);
+  }
+
+  private deleteReplayRecordingSync(id: string): boolean {
+    if (!this.getReplayRecordingSummarySync(id)) return false;
     this.exec(`DELETE FROM replay_recordings WHERE id = ?`, [id]);
     return true;
   }
@@ -12120,7 +12626,7 @@ export class SqliteStore {
   // pruning one deletes its replay jobs and their case results.
   // ---------------------------------------------------------------------------
 
-  insertGuardSimulation(input: Omit<GuardSimulationRecord, "error" | "finishedAt"> & { error?: string | null; finishedAt?: string | null }): GuardSimulationRecord {
+  async insertGuardSimulation(input: Omit<GuardSimulationRecord, "error" | "finishedAt"> & { error?: string | null; finishedAt?: string | null }): Promise<GuardSimulationRecord> {
     this.exec(
       `INSERT INTO guard_simulations (id, profile_id, source_kind, source_version, simulated_hash, base_version, job_ids_json, summary_json, status, error, created_at, created_by, created_by_user_id, finished_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -12142,11 +12648,11 @@ export class SqliteStore {
       ]
     );
     this.persist();
-    return this.getGuardSimulation(input.id)!;
+    return this.getGuardSimulationSync(input.id)!;
   }
 
   /** Updates a simulation; `onlyFrom` limits it to rows still in one of those statuses. Returns whether a row changed. */
-  updateGuardSimulation(input: { id: string; status?: string; jobIds?: string[]; detail?: Record<string, unknown>; error?: string | null; finishedAt?: string | null; onlyFrom?: string[] }): boolean {
+  async updateGuardSimulation(input: { id: string; status?: string; jobIds?: string[]; detail?: Record<string, unknown>; error?: string | null; finishedAt?: string | null; onlyFrom?: string[] }): Promise<boolean> {
     const sets: string[] = [];
     const params: BindParams = [];
     if (input.status !== undefined) { sets.push("status = ?"); params.push(input.status); }
@@ -12162,23 +12668,27 @@ export class SqliteStore {
     return (row ? toNumber(row.count) : 0) > 0;
   }
 
-  getGuardSimulation(id: string): GuardSimulationRecord | null {
+  async getGuardSimulation(id: string): Promise<GuardSimulationRecord | null> {
+    return this.getGuardSimulationSync(id);
+  }
+
+  private getGuardSimulationSync(id: string): GuardSimulationRecord | null {
     const row = this.queryOne<Record<string, unknown>>(`SELECT * FROM guard_simulations WHERE id = ?`, [id]);
     return row ? mapGuardSimulationRow(row) : null;
   }
 
-  listGuardSimulations(options: { profileId: string; limit?: number; offset?: number }): GuardSimulationRecord[] {
+  async listGuardSimulations(options: { profileId: string; limit?: number; offset?: number }): Promise<GuardSimulationRecord[]> {
     const limit = Math.max(1, Math.min(100, Math.floor(options.limit ?? 20)));
     return this.queryAll<Record<string, unknown>>(`SELECT * FROM guard_simulations WHERE profile_id = ? ORDER BY created_at DESC, rowid DESC LIMIT ? OFFSET ?`, [options.profileId, limit, Math.max(0, Math.floor(options.offset ?? 0))]).map(mapGuardSimulationRow);
   }
 
   /** Simulations still running (a stopped server left them so). */
-  listRunningGuardSimulations(): GuardSimulationRecord[] {
+  async listRunningGuardSimulations(): Promise<GuardSimulationRecord[]> {
     return this.queryAll<Record<string, unknown>>(`SELECT * FROM guard_simulations WHERE status = 'running' ORDER BY created_at ASC`).map(mapGuardSimulationRow);
   }
 
   /** Deletes simulations created before `before`, with their replay jobs and case results. Returns how many simulations were deleted. */
-  pruneGuardSimulations(input: { before: string }): number {
+  async pruneGuardSimulations(input: { before: string }): Promise<number> {
     const rows = this.queryAll<{ id: string; job_ids_json: string | null }>(`SELECT id, job_ids_json FROM guard_simulations WHERE created_at < ?`, [input.before]);
     if (rows.length === 0) return 0;
     const jobIds: string[] = [];
@@ -12202,7 +12712,7 @@ export class SqliteStore {
   }
 
   /** MCP tool-call telemetry rows of one execution, oldest first. */
-  listMcpToolCallsForExecution(executionId: string): McpToolCallRecord[] {
+  async listMcpToolCallsForExecution(executionId: string): Promise<McpToolCallRecord[]> {
     return this.queryAll<McpToolCallRow>(`SELECT * FROM mcp_tool_calls WHERE execution_id = ? ORDER BY started_at, id`, [executionId]).map(mapMcpToolCall);
   }
 
@@ -12211,7 +12721,7 @@ export class SqliteStore {
    * is this execution, or whose resource is this execution. No IP address or
    * user agent; the actor's current role comes from the users table.
    */
-  listAuditLogsForExecution(executionId: string): Array<{
+  async listAuditLogsForExecution(executionId: string): Promise<Array<{
     eventType: string;
     action: string;
     outcome: string;
@@ -12221,7 +12731,7 @@ export class SqliteStore {
     actorType: string;
     message: string | null;
     createdAt: string;
-  }> {
+  }>> {
     return this.queryAll<Record<string, unknown>>(
       `SELECT a.event_type, a.action, a.outcome, a.actor_user_id, a.actor_email, a.actor_type, a.message, a.created_at,
               a.resource_type, a.resource_id, a.metadata_json, u.role AS actor_role
@@ -12258,7 +12768,11 @@ export class SqliteStore {
    * history row is gone. While a run's history is kept its manifest is kept,
    * so it is never regenerated with a new signing time, key or workflow.
    */
-  pruneExecutionManifests(options: { before: string }): number {
+  async pruneExecutionManifests(options: { before: string }): Promise<number> {
+    return this.pruneExecutionManifestsSync(options);
+  }
+
+  private pruneExecutionManifestsSync(options: { before: string }): number {
     const where = `created_at < ? AND NOT EXISTS (SELECT 1 FROM execution_history h WHERE h.id = execution_manifests.execution_id)`;
     const row = this.queryOne<{ count: number }>(`SELECT COUNT(*) AS count FROM execution_manifests WHERE ${where}`, [options.before]);
     const count = row ? toNumber(row.count) : 0;
@@ -12282,18 +12796,22 @@ export class SqliteStore {
     };
   }
 
-  listAuditSigningKeys(): AuditSigningKeyRecord[] {
+  async listAuditSigningKeys(): Promise<AuditSigningKeyRecord[]> {
     return this.queryAll<Record<string, unknown>>(`SELECT * FROM audit_signing_keys ORDER BY created_at DESC, key_id ASC`).map((row) =>
       this.mapAuditSigningKey(row)
     );
   }
 
-  getAuditSigningKey(keyId: string): AuditSigningKeyRecord | null {
+  async getAuditSigningKey(keyId: string): Promise<AuditSigningKeyRecord | null> {
     const row = this.queryOne<Record<string, unknown>>(`SELECT * FROM audit_signing_keys WHERE key_id = ?`, [keyId]);
     return row ? this.mapAuditSigningKey(row) : null;
   }
 
-  getActiveAuditSigningKey(): AuditSigningKeyRecord | null {
+  async getActiveAuditSigningKey(): Promise<AuditSigningKeyRecord | null> {
+    return this.getActiveAuditSigningKeySync();
+  }
+
+  private getActiveAuditSigningKeySync(): AuditSigningKeyRecord | null {
     const row = this.queryOne<Record<string, unknown>>(`SELECT * FROM audit_signing_keys WHERE status = 'active'`);
     return row ? this.mapAuditSigningKey(row) : null;
   }
@@ -12303,10 +12821,10 @@ export class SqliteStore {
    * transaction. A key id seen before (an env key put back) is re-activated.
    * Returns false when another writer activated a different key first.
    */
-  activateAuditSigningKey(key: Omit<AuditSigningKeyRecord, "status" | "retiredAt">, expectedActiveKeyId: string | null): boolean {
+  async activateAuditSigningKey(key: Omit<AuditSigningKeyRecord, "status" | "retiredAt">, expectedActiveKeyId: string | null): Promise<boolean> {
     const now = new Date().toISOString();
     return this.db.transaction(() => {
-      const current = this.getActiveAuditSigningKey();
+      const current = this.getActiveAuditSigningKeySync();
       if ((current?.keyId ?? null) !== expectedActiveKeyId) return false;
       if (current && current.keyId !== key.keyId) {
         this.exec(`UPDATE audit_signing_keys SET status = 'retired', retired_at = ?, secret_id = NULL WHERE key_id = ?`, [now, current.keyId]);
@@ -12326,14 +12844,14 @@ export class SqliteStore {
    * Creates the default project if missing, and moves any rows with
    * NULL project_id (shouldn't exist post-migration, but safe) back to default.
    */
-  ensureDefaultProject(): Project {
-    const existing = this.getProject(DEFAULT_PROJECT_ID);
+  async ensureDefaultProject(): Promise<Project> {
+    const existing = this.getProjectSync(DEFAULT_PROJECT_ID);
     if (existing) {
       this.exec(`UPDATE workflows SET project_id = ? WHERE project_id IS NULL`, [DEFAULT_PROJECT_ID]);
       this.exec(`UPDATE secrets SET project_id = ? WHERE project_id IS NULL`, [DEFAULT_PROJECT_ID]);
       return existing;
     }
-    const project = this.upsertProject({
+    const project = this.upsertProjectSync({
       id: DEFAULT_PROJECT_ID,
       name: "Default Project",
       description: "Personal workspace."
@@ -12352,7 +12870,7 @@ export class SqliteStore {
    * Every workflow's draft JSON and, when one is published, the published
    * version's JSON, in one query (the "not classified yet" list reads both).
    */
-  listWorkflowConfigsForDestinations(): Array<{ id: string; name: string; draftJson: string; publishedJson: string | null }> {
+  async listWorkflowConfigsForDestinations(): Promise<Array<{ id: string; name: string; draftJson: string; publishedJson: string | null }>> {
     return this.queryAll<{ id: string; name: string; workflow_json: string; published_json: string | null }>(
       `SELECT w.id, w.name, w.workflow_json, v.workflow_json AS published_json
        FROM workflows w
@@ -12366,17 +12884,21 @@ export class SqliteStore {
     }));
   }
 
-  listDataDestinations(): DataDestinationRow[] {
+  async listDataDestinations(): Promise<DataDestinationRow[]> {
     return this.queryAll<Record<string, unknown>>(`SELECT * FROM data_destinations ORDER BY tier, name, id`).map(mapDataDestinationRow);
   }
 
-  getDataDestination(id: string): DataDestinationRow | null {
+  async getDataDestination(id: string): Promise<DataDestinationRow | null> {
+    return this.getDataDestinationSync(id);
+  }
+
+  private getDataDestinationSync(id: string): DataDestinationRow | null {
     const row = this.queryOne<Record<string, unknown>>(`SELECT * FROM data_destinations WHERE id = ?`, [id]);
     return row ? mapDataDestinationRow(row) : null;
   }
 
   /** The row with exactly this match (kind, target id, host), if any. */
-  findDataDestinationByMatch(kind: string, targetId: string | null, host: string | null): DataDestinationRow | null {
+  async findDataDestinationByMatch(kind: string, targetId: string | null, host: string | null): Promise<DataDestinationRow | null> {
     const row = this.queryOne<Record<string, unknown>>(
       `SELECT * FROM data_destinations WHERE kind = ? AND COALESCE(target_id, '') = ? AND COALESCE(host, '') = ?`,
       [kind, targetId ?? "", host ?? ""]
@@ -12384,32 +12906,240 @@ export class SqliteStore {
     return row ? mapDataDestinationRow(row) : null;
   }
 
-  insertDataDestination(input: DataDestinationWrite & { id: string; actor: string | null; at?: string }): DataDestinationRow {
+  async insertDataDestination(input: DataDestinationWrite & { id: string; actor: string | null; at?: string }): Promise<DataDestinationRow> {
     const at = input.at ?? new Date().toISOString();
     this.exec(
       `INSERT INTO data_destinations (id, name, kind, target_id, host, tier, region, holds_data_classes_json, note, created_at, created_by, updated_at, updated_by)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [input.id, input.name, input.kind, input.targetId, input.host, input.tier, input.region, JSON.stringify(input.holdsDataClasses), input.note, at, input.actor, at, input.actor]
     );
-    return this.getDataDestination(input.id)!;
+    return this.getDataDestinationSync(input.id)!;
   }
 
   /** Replaces a row's fields; null when it does not exist. */
-  updateDataDestination(id: string, input: DataDestinationWrite & { actor: string | null; at?: string }): DataDestinationRow | null {
-    if (!this.getDataDestination(id)) return null;
+  async updateDataDestination(id: string, input: DataDestinationWrite & { actor: string | null; at?: string }): Promise<DataDestinationRow | null> {
+    if (!this.getDataDestinationSync(id)) return null;
     const at = input.at ?? new Date().toISOString();
     this.exec(
       `UPDATE data_destinations SET name = ?, kind = ?, target_id = ?, host = ?, tier = ?, region = ?, holds_data_classes_json = ?, note = ?, updated_at = ?, updated_by = ?
        WHERE id = ?`,
       [input.name, input.kind, input.targetId, input.host, input.tier, input.region, JSON.stringify(input.holdsDataClasses), input.note, at, input.actor, id]
     );
-    return this.getDataDestination(id);
+    return this.getDataDestinationSync(id);
   }
 
-  deleteDataDestination(id: string): boolean {
-    if (!this.getDataDestination(id)) return false;
+  async deleteDataDestination(id: string): Promise<boolean> {
+    if (!this.getDataDestinationSync(id)) return false;
     this.exec(`DELETE FROM data_destinations WHERE id = ?`, [id]);
     return true;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Atomic multi-step operations (Phase 13.1): each is one db.transaction, so
+  // a check and the write it guards cannot interleave with another request.
+  // ---------------------------------------------------------------------------
+
+  async claimExecutionAndDecideApproval(executionId: string, decision: ApprovalDecisionInput): Promise<boolean> {
+    const lost = Symbol("lost");
+    try {
+      return this.transaction(() => {
+        if (!this.claimWorkflowExecutionForResumeSync(executionId)) return false;
+        // Throwing rolls the claim back.
+        if (!this.decideApprovalRequestSync(decision)) throw lost;
+        return true;
+      });
+    } catch (error) {
+      if (error === lost) return false;
+      throw error;
+    }
+  }
+
+  async releaseExecutionClaimAndReopenApproval(executionId: string, requestId: string): Promise<boolean> {
+    return this.transaction(() => {
+      if (!this.releaseWorkflowExecutionClaimSync(executionId)) return false;
+      this.reopenApprovalRequestSync(requestId);
+      return true;
+    });
+  }
+
+  async saveReleaseGate(input: {
+    gate: ReleaseGateRecord | null;
+    admittedFixtureIds?: string[] | null;
+    expected: ReleaseGateRecord | null;
+    updatedAt: string;
+    updatedBy: string | null;
+  }): Promise<ReleaseGateRecord | null> {
+    return this.transaction(() => {
+      const current = this.getReleaseGateSync(input.gate?.workflowId ?? input.expected?.workflowId ?? "");
+      if (JSON.stringify(current) !== JSON.stringify(input.expected)) return null;
+      const saved = input.gate ? this.upsertReleaseGateSync(input.gate) : current;
+      if (!saved) return null;
+      if (input.admittedFixtureIds !== undefined && !sameIdSet(input.admittedFixtureIds, current?.admittedFixtureIds ?? null)) {
+        this.setReleaseGateAdmissionSync(saved.workflowId, input.admittedFixtureIds, input.updatedAt, input.updatedBy);
+      }
+      return saved;
+    });
+  }
+
+  async updateReleaseGateCases(change: ReleaseGateCasesChange): Promise<"ok" | "decided" | "changed"> {
+    const refused = Symbol("refused");
+    let outcome: "decided" | "changed" = "changed";
+    try {
+      return this.transaction(() => {
+        if (change.decideRequest && !this.decideGateCaseRequestSync(change.decideRequest)) {
+          outcome = "decided";
+          throw refused;
+        }
+        if (change.expectedAdmittedFixtureIds !== undefined) {
+          const gate = this.getReleaseGateSync(change.workflowId);
+          if (!gate || !sameIdSet(gate.admittedFixtureIds ?? null, change.expectedAdmittedFixtureIds)) {
+            outcome = "changed";
+            throw refused;
+          }
+        }
+        if (change.admittedFixtureIds !== undefined) {
+          this.setReleaseGateAdmissionSync(change.workflowId, change.admittedFixtureIds, change.updatedAt, change.updatedBy);
+        }
+        for (const fixtureId of change.deleteFixtureIds ?? []) this.deleteEvalFixtureSync(fixtureId);
+        if (change.required) this.setEvalFixtureRequiredSync(change.required.fixtureId, change.required.required);
+        return "ok" as const;
+      });
+    } catch (error) {
+      if (error === refused) return outcome;
+      throw error;
+    }
+  }
+
+  async approveReleaseRequestAndPublish(
+    decision: ReleaseApprovalDecisionInput,
+    release: Omit<WorkflowReleaseRecord, "previousVersion">,
+    expectedPrevious: number | null
+  ): Promise<{ release: WorkflowReleaseRecord } | { refused: "decided" | "conflict" }> {
+    const refused = Symbol("refused");
+    let outcome: "decided" | "conflict" = "conflict";
+    try {
+      return this.transaction(() => {
+        if (!this.decideReleaseApprovalRequestSync(decision)) {
+          outcome = "decided";
+          throw refused;
+        }
+        const committed = this.publishWorkflowVersionSync(release, expectedPrevious);
+        // Throwing rolls the decision back.
+        if (!committed) throw refused;
+        return { release: committed };
+      });
+    } catch (error) {
+      if (error === refused) return { refused: outcome };
+      throw error;
+    }
+  }
+
+  /** The first golden-run limit a save of `bytes` for `workflowId` would break, checked against the store as it is now. */
+  private replayRecordingRefusal(workflowId: string, bytes: number, limits: ReplayRecordingLimits): ReplayRecordingRefusal | null {
+    const count = this.countReplayRecordingsForWorkflowSync(workflowId);
+    if (count >= limits.maxPerWorkflow) return { refused: "count", used: count, bytes };
+    const workflowBytes = this.sumReplayRecordingBytesForWorkflowSync(workflowId);
+    if (workflowBytes + bytes > limits.maxBytesPerWorkflow) return { refused: "workflow_bytes", used: workflowBytes, bytes };
+    const totalBytes = this.sumReplayRecordingBytesSync();
+    if (totalBytes + bytes > limits.maxTotalBytes) return { refused: "total_bytes", used: totalBytes, bytes };
+    return null;
+  }
+
+  async saveReplayRecordingChecked(
+    input: ReplayRecordingInsert,
+    checks: { limits?: ReplayRecordingLimits; uniqueExecution?: boolean }
+  ): Promise<{ saved: ReplayRecordingSummary } | ReplayRecordingRefusal> {
+    return this.transaction((): { saved: ReplayRecordingSummary } | ReplayRecordingRefusal => {
+      if (checks.uniqueExecution && input.sourceExecutionId) {
+        const existingId = this.findReplayRecordingIdForExecutionSync(input.sourceExecutionId, input.status ?? "golden");
+        if (existingId) return { refused: "duplicate", existingId };
+      }
+      if (checks.limits) {
+        const refusal = this.replayRecordingRefusal(input.workflowId, input.bytes, checks.limits);
+        if (refusal) return refusal;
+      }
+      return { saved: this.saveReplayRecordingSync(input) };
+    });
+  }
+
+  async promoteReplayCaptureToGoldenSet(input: {
+    recordingId: string;
+    promotion: Parameters<Store["promoteReplayCapture"]>[1];
+    target: { datasetId: string } | { findOrCreate: Parameters<Store["createEvalDataset"]>[0] & { workflowId: string } };
+    fixture: { id: string; name?: string };
+    limits: ReplayRecordingLimits;
+  }): Promise<{ datasetId: string; fixtureId: string } | { refused: "not_candidate" } | { refused: "set_gone" } | ReplayRecordingRefusal> {
+    type Outcome = { datasetId: string; fixtureId: string } | { refused: "not_candidate" } | { refused: "set_gone" } | ReplayRecordingRefusal;
+    const refused = Symbol("refused");
+    let outcome: Outcome = { refused: "not_candidate" };
+    try {
+      return this.transaction((): Outcome => {
+        const candidate = this.getReplayRecordingSummarySync(input.recordingId);
+        if (!candidate || candidate.status !== "candidate") return { refused: "not_candidate" };
+        const refusal = this.replayRecordingRefusal(candidate.workflowId, input.promotion.bytes, input.limits);
+        if (refusal) return refusal;
+        let datasetId: string;
+        if ("datasetId" in input.target) {
+          if (!this.getEvalDatasetSync(input.target.datasetId)) return { refused: "set_gone" };
+          datasetId = input.target.datasetId;
+        } else {
+          const wanted = input.target.findOrCreate;
+          const existing = this.listEvalDatasetsSync({ workflowId: wanted.workflowId }).find((dataset) => dataset.name === wanted.name);
+          if (existing) {
+            datasetId = existing.id;
+          } else {
+            this.createEvalDatasetSync(wanted);
+            datasetId = wanted.id;
+          }
+        }
+        if (!this.promoteReplayCaptureSync(input.recordingId, input.promotion)) {
+          outcome = { refused: "not_candidate" };
+          throw refused;
+        }
+        const promoted = this.getReplayRecordingSync(input.recordingId)!;
+        this.createEvalFixtureSync({
+          id: input.fixture.id,
+          datasetId,
+          name: input.fixture.name ?? promoted.name,
+          input: promoted.input ?? null,
+          recordingId: promoted.id
+        });
+        return { datasetId, fixtureId: input.fixture.id };
+      });
+    } catch (error) {
+      if (error === refused) return outcome;
+      throw error;
+    }
+  }
+
+  async importGoldenSet(input: {
+    dataset: Parameters<Store["createEvalDataset"]>[0];
+    cases: Array<{ recording: ReplayRecordingInsert; fixture: Omit<Parameters<Store["createEvalFixture"]>[0], "datasetId" | "recordingId"> }>;
+    limits: ReplayRecordingLimits;
+  }): Promise<{ recordingIds: string[] } | ReplayRecordingRefusal> {
+    const refused = Symbol("refused");
+    let outcome: ReplayRecordingRefusal = { refused: "count", used: 0, bytes: 0 };
+    try {
+      return this.transaction(() => {
+        this.createEvalDatasetSync(input.dataset);
+        const recordingIds: string[] = [];
+        for (const entry of input.cases) {
+          const refusal = this.replayRecordingRefusal(entry.recording.workflowId, entry.recording.bytes, input.limits);
+          // Throwing rolls back the set and the cases saved before this one.
+          if (refusal) {
+            outcome = refusal;
+            throw refused;
+          }
+          const summary = this.saveReplayRecordingSync(entry.recording);
+          this.createEvalFixtureSync({ ...entry.fixture, datasetId: input.dataset.id, recordingId: summary.id });
+          recordingIds.push(summary.id);
+        }
+        return { recordingIds };
+      });
+    } catch (error) {
+      if (error === refused) return outcome;
+      throw error;
+    }
   }
 }
 
@@ -12460,4 +13190,12 @@ function mapGuardSimulationRow(row: Record<string, unknown>): GuardSimulationRec
     createdByUserId: optionalString(row.created_by_user_id),
     finishedAt: optionalString(row.finished_at)
   };
+}
+
+/** Whether two stored id lists name the same ids (null: nothing stored). */
+function sameIdSet(a: readonly string[] | null, b: readonly string[] | null): boolean {
+  if (a === null || b === null) return a === b;
+  const left = [...new Set(a)].sort();
+  const right = [...new Set(b)].sort();
+  return left.length === right.length && left.every((id, index) => id === right[index]);
 }

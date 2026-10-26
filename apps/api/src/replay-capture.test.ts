@@ -56,7 +56,7 @@ async function createTestContext(overrides: Record<string, string> = {}, existin
   const tempDir = existing?.tempDir ?? fs.mkdtempSync(path.join(os.tmpdir(), "ao-capture-"));
   const dbPath = existing?.dbPath ?? path.join(tempDir, "orchestrator.db");
   const store = await SqliteStore.create(dbPath);
-  store.ensureDefaultProject();
+  await store.ensureDefaultProject();
   const config = parseConfig({
     LOG_LEVEL: "warn",
     SEED_SAMPLE_WORKFLOWS: "false",
@@ -69,7 +69,7 @@ async function createTestContext(overrides: Record<string, string> = {}, existin
   });
   const secretService = new SecretService(store, config.SECRET_MASTER_KEY_BASE64);
   const authService = new AuthService(store, config.SESSION_TTL_HOURS);
-  const app = createApp(config, store, secretService, authService);
+  const app = await createApp(config, store, secretService, authService);
   await app.ready();
   const context = { app, store, authService, secretService, config, tempDir, dbPath };
   if (!existing) contexts.push(context);
@@ -79,7 +79,7 @@ async function createTestContext(overrides: Record<string, string> = {}, existin
 async function closeContext(context: TestContext): Promise<void> {
   await context.app.close();
   try {
-    context.store.close();
+    await context.store.close();
   } catch {
     // Already closed by the app shutdown hooks.
   }
@@ -99,7 +99,7 @@ type Role = "admin" | "builder" | "operator" | "viewer";
 async function login(context: TestContext, role: Role, name: string = role): Promise<{ cookie: string; id: string }> {
   const email = `${name}@example.com`;
   const password = `${name}-Pass-123!`;
-  const user = context.authService.register({ email, password, role });
+  const user = await context.authService.register({ email, password, role });
   const response = await context.app.inject({ method: "POST", url: "/api/auth/login", payload: { email, password } });
   if (response.statusCode !== 200) throw new Error(`Login failed for ${name}: ${response.body}`);
   const raw = response.headers["set-cookie"];
@@ -177,9 +177,9 @@ function agentWorkflow(baseUrl: string, secretId: string, id = "wf-agent"): Work
   } as Workflow;
 }
 
-function save(context: TestContext, workflow: Workflow): number {
-  const saved = context.store.upsertWorkflow(workflow);
-  return new WorkflowVersionService(context.store).snapshot({ workflow: saved, changeNote: "test" }).version;
+async function save(context: TestContext, workflow: Workflow): Promise<number> {
+  const saved = await context.store.upsertWorkflow(workflow);
+  return (await new WorkflowVersionService(context.store).snapshot({ workflow: saved, changeNote: "test" })).version;
 }
 
 const hook = (context: TestContext, workflowId: string, payload: Record<string, unknown> = {}) =>
@@ -214,8 +214,8 @@ async function settle(): Promise<void> {
   await sleep(150);
 }
 
-function rawRecordingText(context: TestContext, id: string): string {
-  const row = context.store.subjectTextRow("recording", id);
+async function rawRecordingText(context: TestContext, id: string): Promise<string> {
+  const row = await context.store.subjectTextRow("recording", id);
   if (!row) throw new Error(`No recording ${id}`);
   return Object.values(row.texts).filter(Boolean).join("\n");
 }
@@ -257,11 +257,11 @@ describe("zero-config: capture off changes nothing", () => {
   it("never records a workflow that has no capture settings, and reports the defaults", async () => {
     const context = await createTestContext();
     const builder = await login(context, "builder");
-    save(context, hookWorkflow("wf-off"));
+    await save(context, hookWorkflow("wf-off"));
     for (let i = 0; i < 3; i += 1) expect((await hook(context, "wf-off", { user_prompt: `hello ${EMAIL}` })).statusCode).toBe(200);
     await settle();
     expect((await inbox(context, builder.cookie, "wf-off")).total).toBe(0);
-    expect(context.store.listReplayRecordings({}).total).toBe(0);
+    expect((await context.store.listReplayRecordings({})).total).toBe(0);
     const settings = (await call(context, "GET", "/api/workflows/wf-off/replay-capture", builder.cookie)).json<{ settings: ReplayCaptureSettingsView }>().settings;
     expect(settings).toMatchObject({ configured: false, enabled: false, rate: 0.1, maxPerDay: 20, dlp: true, onlyStatuses: ["success", "error", "canceled"], effectiveRate: 0, candidates: 0 });
     expect(settings.deployment).toMatchObject({ enabled: true, maxRate: 1, retentionDays: 14, maxCandidates: 200 });
@@ -270,7 +270,7 @@ describe("zero-config: capture off changes nothing", () => {
   it("the kill switch stops every workflow's capture", async () => {
     const context = await createTestContext({ REPLAY_CAPTURE_ENABLED: "false" });
     const builder = await login(context, "builder");
-    save(context, hookWorkflow("wf-kill"));
+    await save(context, hookWorkflow("wf-kill"));
     const settings = await enableCapture(context, builder.cookie, "wf-kill");
     expect(settings.effectiveRate).toBe(0);
     await hook(context, "wf-kill");
@@ -286,9 +286,9 @@ describe("sampling and limits", () => {
       recordings: {} as never,
       datasets: {} as never,
       surrogateKey: SURROGATE_KEY,
-      dictionariesFor: () => [],
-      dictionaryClasses: () => [],
-      publishedVersion: (workflowId) => context.store.getPublishedVersion(workflowId),
+      dictionariesFor: async () => [],
+      dictionaryClasses: async () => [],
+      publishedVersion: async (workflowId) => await context.store.getPublishedVersion(workflowId),
       deployment: { enabled: true, maxRate, retentionDays: 14, maxPerWorkflow: 200, maxBytesPerWorkflow: 209_715_200 },
       random: seededRandom(seed),
       log: { warn: () => undefined, info: () => undefined }
@@ -297,9 +297,9 @@ describe("sampling and limits", () => {
 
   it("samples at the configured rate with a seeded generator, capped by the deployment ceiling", async () => {
     const context = await createTestContext();
-    save(context, hookWorkflow("wf-rate"));
-    context.store.saveReplayCaptureSettings({ workflowId: "wf-rate", enabled: true, rate: 0.1, maxPerDay: 1_000, onlyStatuses: ["success"], dlp: true, dlpOffReason: null, targetDatasetId: null, updatedBy: null });
-    const draws = (rate: number, maxRate: number, seed: number) => {
+    await save(context, hookWorkflow("wf-rate"));
+    await context.store.saveReplayCaptureSettings({ workflowId: "wf-rate", enabled: true, rate: 0.1, maxPerDay: 1_000, onlyStatuses: ["success"], dlp: true, dlpOffReason: null, targetDatasetId: null, updatedBy: null });
+    const draws = async (rate: number, maxRate: number, seed: number) => {
       const capture = service(context, seed, maxRate);
       const expected = (() => {
         const random = seededRandom(seed);
@@ -309,7 +309,7 @@ describe("sampling and limits", () => {
       })();
       let sampled = 0;
       for (let i = 0; i < 10_000; i += 1) {
-        const ticket = capture.decide({ workflow: { id: "wf-rate" }, channel: "production", triggerType: "webhook", releaseVersion: null, excluded: false });
+        const ticket = await capture.decide({ workflow: { id: "wf-rate" }, channel: "production", triggerType: "webhook", releaseVersion: null, excluded: false });
         if (ticket) {
           sampled += 1;
           capture.abandon(ticket);
@@ -317,24 +317,24 @@ describe("sampling and limits", () => {
       }
       return { sampled, expected };
     };
-    const tenth = draws(0.1, 1, 42);
+    const tenth = await draws(0.1, 1, 42);
     expect(tenth.sampled).toBe(tenth.expected);
     expect(tenth.sampled).toBeGreaterThan(850);
     expect(tenth.sampled).toBeLessThan(1_150);
-    const capped = draws(0.1, 0.02, 7);
+    const capped = await draws(0.1, 0.02, 7);
     expect(capped.sampled).toBe(capped.expected);
     expect(capped.sampled).toBeLessThan(300);
     // Same seed, same decisions.
-    expect(draws(0.1, 1, 42).sampled).toBe(tenth.sampled);
+    expect((await draws(0.1, 1, 42)).sampled).toBe(tenth.sampled);
   });
 
   it("counts runs in flight against the daily limit, and excludes non-production runs", async () => {
     const context = await createTestContext();
-    save(context, hookWorkflow("wf-day"));
-    context.store.saveReplayCaptureSettings({ workflowId: "wf-day", enabled: true, rate: 1, maxPerDay: 3, onlyStatuses: ["success"], dlp: true, dlpOffReason: null, targetDatasetId: null, updatedBy: null });
+    await save(context, hookWorkflow("wf-day"));
+    await context.store.saveReplayCaptureSettings({ workflowId: "wf-day", enabled: true, rate: 1, maxPerDay: 3, onlyStatuses: ["success"], dlp: true, dlpOffReason: null, targetDatasetId: null, updatedBy: null });
     const capture = service(context, 1);
-    const decide = (overrides: Partial<Parameters<ReplayCaptureService["decide"]>[0]> = {}) =>
-      capture.decide({ workflow: { id: "wf-day" }, channel: "production", triggerType: "webhook", releaseVersion: null, excluded: false, ...overrides });
+    const decide = async (overrides: Partial<Parameters<ReplayCaptureService["decide"]>[0]> = {}) =>
+      await capture.decide({ workflow: { id: "wf-day" }, channel: "production", triggerType: "webhook", releaseVersion: null, excluded: false, ...overrides });
     for (const excluded of [
       { channel: "draft" },
       { triggerType: "manual" },
@@ -345,26 +345,26 @@ describe("sampling and limits", () => {
       { triggerType: "eval" },
       { excluded: true }
     ]) {
-      expect(decide(excluded)).toBeNull();
+      expect(await decide(excluded)).toBeNull();
     }
-    const tickets = [decide(), decide(), decide()];
+    const tickets = [await decide(), await decide(), await decide()];
     expect(tickets.every(Boolean)).toBe(true);
-    expect(decide()).toBeNull();
+    expect(await decide()).toBeNull();
     capture.abandon(tickets[0]!);
-    expect(decide()).not.toBeNull();
+    expect(await decide()).not.toBeNull();
   });
 
   it("captures only runs of the published version once there is one", async () => {
     const context = await createTestContext();
     const builder = await login(context, "builder");
-    const v1 = save(context, hookWorkflow("wf-pub", "one"));
-    save(context, hookWorkflow("wf-pub", "two"));
+    const v1 = await save(context, hookWorkflow("wf-pub", "one"));
+    await save(context, hookWorkflow("wf-pub", "two"));
     expect((await call(context, "POST", "/api/workflows/wf-pub/publish", builder.cookie, { version: v1 })).statusCode).toBe(200);
-    context.store.saveReplayCaptureSettings({ workflowId: "wf-pub", enabled: true, rate: 1, maxPerDay: 10, onlyStatuses: ["success"], dlp: true, dlpOffReason: null, targetDatasetId: null, updatedBy: null });
+    await context.store.saveReplayCaptureSettings({ workflowId: "wf-pub", enabled: true, rate: 1, maxPerDay: 10, onlyStatuses: ["success"], dlp: true, dlpOffReason: null, targetDatasetId: null, updatedBy: null });
     const capture = service(context, 3);
-    expect(capture.decide({ workflow: { id: "wf-pub" }, channel: "production", triggerType: "webhook", releaseVersion: 2, excluded: false })).toBeNull();
-    expect(capture.decide({ workflow: { id: "wf-pub" }, channel: "production", triggerType: "webhook", releaseVersion: null, excluded: false })).toBeNull();
-    expect(capture.decide({ workflow: { id: "wf-pub" }, channel: "production", triggerType: "webhook", releaseVersion: v1, excluded: false })).not.toBeNull();
+    expect(await capture.decide({ workflow: { id: "wf-pub" }, channel: "production", triggerType: "webhook", releaseVersion: 2, excluded: false })).toBeNull();
+    expect(await capture.decide({ workflow: { id: "wf-pub" }, channel: "production", triggerType: "webhook", releaseVersion: null, excluded: false })).toBeNull();
+    expect(await capture.decide({ workflow: { id: "wf-pub" }, channel: "production", triggerType: "webhook", releaseVersion: v1, excluded: false })).not.toBeNull();
 
     // Over the API: production runs the published version, and the capture says so.
     expect((await hook(context, "wf-pub")).json<{ output: unknown }>().output).toMatchObject({ result: "one" });
@@ -375,7 +375,7 @@ describe("sampling and limits", () => {
   it("keeps a daily limit per workflow over the API and records why runs were skipped", async () => {
     const context = await createTestContext();
     const builder = await login(context, "builder");
-    save(context, hookWorkflow("wf-limit"));
+    await save(context, hookWorkflow("wf-limit"));
     await enableCapture(context, builder.cookie, "wf-limit", { maxPerDay: 2 });
     for (let i = 0; i < 4; i += 1) expect((await hook(context, "wf-limit")).statusCode).toBe(200);
     await waitForCaptures(context, builder.cookie, "wf-limit", 2);
@@ -393,7 +393,7 @@ describe("sampling and limits", () => {
   it("drops a run whose status is not wanted at completion", async () => {
     const context = await createTestContext();
     const builder = await login(context, "builder");
-    save(context, hookWorkflow("wf-status"));
+    await save(context, hookWorkflow("wf-status"));
     await enableCapture(context, builder.cookie, "wf-status", { onlyStatuses: ["error"] });
     await hook(context, "wf-status");
     await settle();
@@ -407,7 +407,7 @@ describe("sampling and limits", () => {
     const context = await createTestContext();
     const builder = await login(context, "builder");
     // The output echoes the trigger the workflow sees: a template branching on trigger_type == "manual" behaves as before.
-    save(context, hookWorkflow("wf-api", "trigger={{trigger_type}}"));
+    await save(context, hookWorkflow("wf-api", "trigger={{trigger_type}}"));
     await enableCapture(context, builder.cookie, "wf-api", { maxPerDay: 10 });
     const key = (await call(context, "POST", "/api/auth/api-keys", builder.cookie, { name: "CI" })).json<{ key: string }>().key;
     const viaKey = await context.app.inject({ method: "POST", url: "/api/workflows/wf-api/execute", headers: { authorization: `Bearer ${key}` }, payload: { input: { user_prompt: `hi ${EMAIL}` } } });
@@ -427,19 +427,22 @@ describe("sampling and limits", () => {
     // Run history and its filter are unchanged: every run of the execute routes is a manual run, API-key runs included.
     const manual = (await call(context, "GET", "/api/executions?workflowId=wf-api&triggerType=manual&pageSize=50", builder.cookie)).json<{ items: Array<{ id: string }> }>();
     expect(manual.items.length).toBeGreaterThanOrEqual(3);
-    const captured = items.map((item) => context.store.getReplayRecording(item.id)!.sourceExecutionId);
+    const captured: Array<string | null> = [];
+    for (const item of items) captured.push((await context.store.getReplayRecording(item.id))!.sourceExecutionId);
     for (const executionId of captured) {
-      const history = context.store.getExecutionHistory(executionId!)!;
+      const history = (await context.store.getExecutionHistory(executionId!))!;
       expect(["manual", "manual_stream"]).toContain(history.triggerType);
     }
-    expect(manual.items.map((item) => item.id)).toEqual(expect.arrayContaining(captured.filter((id) => context.store.getExecutionHistory(id!)!.triggerType === "manual")));
+    const manualCaptured: Array<string | null> = [];
+    for (const id of captured) if ((await context.store.getExecutionHistory(id!))!.triggerType === "manual") manualCaptured.push(id);
+    expect(manual.items.map((item) => item.id)).toEqual(expect.arrayContaining(manualCaptured));
     expect((await call(context, "GET", "/api/executions?triggerType=api_execute", builder.cookie)).json<{ items: unknown[] }>().items).toEqual([]);
 
     // Ruling (b): the recording says an API key started it; the inbox filters on that, not on the trigger.
     expect(items.every((item) => item.source === "api_key" && item.capabilities.capture?.source === "api_key")).toBe(true);
     expect((await inbox(context, builder.cookie, "wf-api", "?trigger=api_key")).total).toBe(2);
     expect((await inbox(context, builder.cookie, "wf-api", "?trigger=webhook")).total).toBe(0);
-    save(context, hookWorkflow("wf-api-hook"));
+    await save(context, hookWorkflow("wf-api-hook"));
     await enableCapture(context, builder.cookie, "wf-api-hook");
     await hook(context, "wf-api-hook", { user_prompt: "from a webhook" });
     const [webhookCapture] = await waitForCaptures(context, builder.cookie, "wf-api-hook", 1);
@@ -453,8 +456,8 @@ describe("sampling and limits", () => {
     file.cases[0]!.recording.capture = { ...file.cases[0]!.recording.capture, source: "api_key" };
     const imported = await call(context, "POST", "/api/eval/datasets/import", builder.cookie, { file, workflowId: "wf-api", name: "Imported API-key run" });
     expect(imported.statusCode, imported.body).toBe(201);
-    const importedId = context.store.listEvalFixtures(imported.json<{ dataset: { id: string } }>().dataset.id)[0]!.recordingId!;
-    expect(context.store.getReplayRecording(importedId)!.capabilities.capture?.source).toBeUndefined();
+    const importedId = (await context.store.listEvalFixtures(imported.json<{ dataset: { id: string } }>().dataset.id))[0]!.recordingId!;
+    expect((await context.store.getReplayRecording(importedId))!.capabilities.capture?.source).toBeUndefined();
   });
 
   it("a run that pauses for approval keeps nothing and frees its slot; its resume is never captured", async () => {
@@ -477,12 +480,12 @@ describe("sampling and limits", () => {
         { id: "e4", source: "gate", sourceHandle: "timed_out", target: "late" }
       ]
     } as Workflow;
-    save(context, workflow);
+    await save(context, workflow);
     await enableCapture(context, builder.cookie, "wf-gate", { maxPerDay: 1 });
     const paused = await hook(context, "wf-gate", { user_prompt: `pay ${EMAIL}` });
     expect(paused.statusCode, paused.body).toBeLessThan(300);
-    const executionId = context.store.listExecutionHistory({ workflowId: "wf-gate", page: 1, pageSize: 5 }).items[0]!.id;
-    expect(context.store.getExecutionHistory(executionId)?.status).toBe("waiting_approval");
+    const executionId = (await context.store.listExecutionHistory({ workflowId: "wf-gate", page: 1, pageSize: 5 })).items[0]!.id;
+    expect((await context.store.getExecutionHistory(executionId))?.status).toBe("waiting_approval");
     await settle();
     // Nothing kept, and the day's only slot is free again.
     expect((await inbox(context, builder.cookie, "wf-gate")).total).toBe(0);
@@ -492,13 +495,13 @@ describe("sampling and limits", () => {
     const approved = await call(context, "POST", `/api/approvals/${executionId}/approve`, admin.cookie, {});
     expect(approved.statusCode, approved.body).toBe(200);
     const until = Date.now() + 10_000;
-    while (context.store.getExecutionHistory(executionId)?.status !== "success") {
-      if (Date.now() > until) throw new Error(`Resume did not finish: ${context.store.getExecutionHistory(executionId)?.status}`);
+    while ((await context.store.getExecutionHistory(executionId))?.status !== "success") {
+      if (Date.now() > until) throw new Error(`Resume did not finish: ${(await context.store.getExecutionHistory(executionId))?.status}`);
       await sleep(25);
     }
     await settle();
     expect((await inbox(context, builder.cookie, "wf-gate")).total).toBe(0);
-    expect(context.store.listReplayRecordings({}).total).toBe(0);
+    expect((await context.store.listReplayRecordings({})).total).toBe(0);
     // The free slot is real: the next production run is captured.
     await hook(context, "wf-gate", { user_prompt: "again" });
     await settle();
@@ -509,18 +512,18 @@ describe("sampling and limits", () => {
   it("drops a run whose content cannot be scanned completely (fail closed), and deep input never reaches storage raw", async () => {
     const context = await createTestContext();
     const builder = await login(context, "builder");
-    save(context, hookWorkflow("wf-deep"));
+    await save(context, hookWorkflow("wf-deep"));
     // Over the API: content past the history depth limit is already a placeholder before masking, never the raw value.
     await enableCapture(context, builder.cookie, "wf-deep", { maxPerDay: 10 });
     let deep: Record<string, unknown> = { mail: EMAIL };
     for (let i = 0; i < 70; i += 1) deep = { next: deep };
     expect((await hook(context, "wf-deep", deep)).statusCode).toBe(200);
-    for (const item of (await inbox(context, builder.cookie, "wf-deep")).items) expect(rawRecordingText(context, item.id)).not.toContain(EMAIL);
+    for (const item of (await inbox(context, builder.cookie, "wf-deep")).items) expect(await rawRecordingText(context, item.id)).not.toContain(EMAIL);
     await settle();
-    for (const item of (await inbox(context, builder.cookie, "wf-deep")).items) expect(rawRecordingText(context, item.id)).not.toContain(EMAIL);
+    for (const item of (await inbox(context, builder.cookie, "wf-deep")).items) expect(await rawRecordingText(context, item.id)).not.toContain(EMAIL);
 
     // The service: a part masking could not scan completely drops the capture with outcome dropped_unscannable.
-    const executionId = context.store.listExecutionHistory({ workflowId: "wf-deep", page: 1, pageSize: 5 }).items[0]!.id;
+    const executionId = (await context.store.listExecutionHistory({ workflowId: "wf-deep", page: 1, pageSize: 5 })).items[0]!.id;
     const outcomes: string[] = [];
     const capture = new ReplayCaptureService({
       store: context.store,
@@ -531,14 +534,14 @@ describe("sampling and limits", () => {
       } as never,
       datasets: {} as never,
       surrogateKey: SURROGATE_KEY,
-      dictionariesFor: () => [],
-      dictionaryClasses: () => [],
-      publishedVersion: () => null,
+      dictionariesFor: async () => [],
+      dictionaryClasses: async () => [],
+      publishedVersion: async () => null,
       deployment: { enabled: true, maxRate: 1, retentionDays: 14, maxPerWorkflow: 200, maxBytesPerWorkflow: 209_715_200 },
       log: { warn: () => undefined, info: () => undefined },
       metric: (outcome) => outcomes.push(outcome)
     });
-    const ticket = capture.decide({ workflow: { id: "wf-deep" }, channel: "production", triggerType: "webhook", releaseVersion: null, excluded: false })!;
+    const ticket = (await capture.decide({ workflow: { id: "wf-deep" }, channel: "production", triggerType: "webhook", releaseVersion: null, excluded: false }))!;
     capture.finish(ticket, { executionId, workflow: { id: "wf-deep", name: "x", projectId: "default" }, plan: {} as never });
     await capture.idle();
     expect(outcomes).toEqual(["dropped_unscannable"]);
@@ -547,8 +550,8 @@ describe("sampling and limits", () => {
 
   it("reads the settings again when the capture is built: capture turned off mid-run discards it", async () => {
     const context = await createTestContext();
-    save(context, hookWorkflow("wf-mid"));
-    context.store.saveReplayCaptureSettings({ workflowId: "wf-mid", enabled: true, rate: 1, maxPerDay: 10, onlyStatuses: ["success"], dlp: true, dlpOffReason: null, targetDatasetId: null, updatedBy: null });
+    await save(context, hookWorkflow("wf-mid"));
+    await context.store.saveReplayCaptureSettings({ workflowId: "wf-mid", enabled: true, rate: 1, maxPerDay: 10, onlyStatuses: ["success"], dlp: true, dlpOffReason: null, targetDatasetId: null, updatedBy: null });
     const outcomes: string[] = [];
     const created: string[] = [];
     const capture = new ReplayCaptureService({
@@ -556,17 +559,17 @@ describe("sampling and limits", () => {
       recordings: { createCapture: async () => created.push("x") } as never,
       datasets: {} as never,
       surrogateKey: SURROGATE_KEY,
-      dictionariesFor: () => [],
-      dictionaryClasses: () => [],
-      publishedVersion: () => null,
+      dictionariesFor: async () => [],
+      dictionaryClasses: async () => [],
+      publishedVersion: async () => null,
       deployment: { enabled: true, maxRate: 1, retentionDays: 14, maxPerWorkflow: 200, maxBytesPerWorkflow: 209_715_200 },
       log: { warn: () => undefined, info: () => undefined },
       metric: (outcome) => outcomes.push(outcome)
     });
-    const ticket = capture.decide({ workflow: { id: "wf-mid" }, channel: "production", triggerType: "cron", releaseVersion: null, excluded: false })!;
+    const ticket = (await capture.decide({ workflow: { id: "wf-mid" }, channel: "production", triggerType: "cron", releaseVersion: null, excluded: false }))!;
     expect(ticket.inputOrigin).toBe("external");
     expect(capture.inFlightFor("wf-mid")).toBe(1);
-    context.store.saveReplayCaptureSettings({ workflowId: "wf-mid", enabled: false, rate: 1, maxPerDay: 10, onlyStatuses: ["success"], dlp: true, dlpOffReason: null, targetDatasetId: null, updatedBy: null });
+    await context.store.saveReplayCaptureSettings({ workflowId: "wf-mid", enabled: false, rate: 1, maxPerDay: 10, onlyStatuses: ["success"], dlp: true, dlpOffReason: null, targetDatasetId: null, updatedBy: null });
     capture.finish(ticket, { executionId: "exec-none", workflow: { id: "wf-mid", name: "x", projectId: "default" }, plan: {} as never });
     await capture.idle();
     expect(created).toEqual([]);
@@ -580,7 +583,7 @@ describe("sampling and limits", () => {
   it("never captures editor runs, test webhooks or replays", async () => {
     const context = await createTestContext();
     const builder = await login(context, "builder");
-    save(context, hookWorkflow("wf-manual"));
+    await save(context, hookWorkflow("wf-manual"));
     await enableCapture(context, builder.cookie, "wf-manual");
     expect((await call(context, "POST", "/api/workflows/wf-manual/execute", builder.cookie, {})).statusCode).toBe(200);
     expect((await context.app.inject({ method: "POST", url: "/webhook-test/hook-wf-manual", payload: {} })).statusCode).toBe(200);
@@ -597,7 +600,7 @@ describe("sampling and limits", () => {
   it("evicts the oldest candidate at the per-workflow cap; the golden cap counts golden runs only", async () => {
     const context = await createTestContext({ REPLAY_CAPTURES_MAX_PER_WORKFLOW: "2", REPLAY_RECORDINGS_MAX_PER_WORKFLOW: "1" });
     const builder = await login(context, "builder");
-    save(context, hookWorkflow("wf-evict"));
+    await save(context, hookWorkflow("wf-evict"));
     await enableCapture(context, builder.cookie, "wf-evict", { maxPerDay: 10 });
     const ids: string[] = [];
     for (let i = 0; i < 3; i += 1) {
@@ -620,13 +623,13 @@ describe("sampling and limits", () => {
     // A refused promote leaves nothing behind: no empty "Captured" set.
     const sets = (await call(context, "GET", "/api/eval/datasets?workflowId=wf-evict", builder.cookie)).json<{ datasets: Array<{ name: string }> }>().datasets;
     expect(sets.map((set) => set.name)).not.toContain("Captured");
-    expect(context.store.getReplayRecordingSummary(left[0]!)).toMatchObject({ status: "candidate" });
+    expect(await context.store.getReplayRecordingSummary(left[0]!)).toMatchObject({ status: "candidate" });
   });
 
   it("evicts the oldest candidates to stay within REPLAY_CAPTURES_MAX_BYTES_PER_WORKFLOW", async () => {
     const context = await createTestContext({ REPLAY_CAPTURES_MAX_BYTES_PER_WORKFLOW: "1048576" });
     const builder = await login(context, "builder");
-    save(context, hookWorkflow("wf-bytes"));
+    await save(context, hookWorkflow("wf-bytes"));
     await enableCapture(context, builder.cookie, "wf-bytes", { maxPerDay: 10 });
     // Words, not one long token (a long token-like string is scrubbed to a placeholder).
     const note = (letter: string) => `${letter}${letter} `.repeat(60_000);
@@ -637,18 +640,18 @@ describe("sampling and limits", () => {
     await hook(context, "wf-bytes", { note: note("c") });
     await hook(context, "wf-bytes", { note: note("d") });
     const until = Date.now() + 30_000;
-    while (context.store.getReplayRecordingSummary(first!.id) && Date.now() < until) await sleep(50);
+    while (await context.store.getReplayRecordingSummary(first!.id) && Date.now() < until) await sleep(50);
     await settle();
     const left = (await inbox(context, builder.cookie, "wf-bytes")).items;
     expect(left.map((item) => item.id)).not.toContain(first!.id);
     expect(left.length).toBeGreaterThanOrEqual(1);
-    expect(context.store.sumReplayCaptureBytesForWorkflow("wf-bytes")).toBeLessThanOrEqual(1_048_576);
+    expect(await context.store.sumReplayCaptureBytesForWorkflow("wf-bytes")).toBeLessThanOrEqual(1_048_576);
   }, 60_000);
 
   it("refuses a capture whose fixed parts are over REPLAY_RECORDING_MAX_BYTES, and the run is unaffected", async () => {
     const context = await createTestContext({ REPLAY_RECORDING_MAX_BYTES: "16384" });
     const builder = await login(context, "builder");
-    save(context, hookWorkflow("wf-big"));
+    await save(context, hookWorkflow("wf-big"));
     await enableCapture(context, builder.cookie, "wf-big");
     const response = await hook(context, "wf-big", { blob: "x".repeat(80_000) });
     expect(response.statusCode).toBe(200);
@@ -662,7 +665,7 @@ describe("sampling and limits", () => {
   it("deletes candidates past retention at startup and keeps golden runs", async () => {
     const context = await createTestContext();
     const builder = await login(context, "builder");
-    save(context, hookWorkflow("wf-old"));
+    await save(context, hookWorkflow("wf-old"));
     await enableCapture(context, builder.cookie, "wf-old", { maxPerDay: 10 });
     await hook(context, "wf-old");
     await hook(context, "wf-old");
@@ -676,8 +679,8 @@ describe("sampling and limits", () => {
     const reopened = await createTestContext({}, { tempDir: context.tempDir, dbPath: context.dbPath });
     contexts.push(reopened);
     contexts.splice(contexts.indexOf(context), 1);
-    expect(reopened.store.getReplayRecordingSummary(first!.id)).toBeNull();
-    expect(reopened.store.getReplayRecordingSummary(second!.id)).toMatchObject({ status: "golden" });
+    expect(await reopened.store.getReplayRecordingSummary(first!.id)).toBeNull();
+    expect(await reopened.store.getReplayRecordingSummary(second!.id)).toMatchObject({ status: "golden" });
   });
 });
 
@@ -686,8 +689,8 @@ describe("masking and replay", () => {
     const model = await startEchoModel();
     const context = await createTestContext();
     const builder = await login(context, "builder");
-    const secret = context.secretService.createSecret({ name: "Model key", provider: "openai", value: MODEL_KEY });
-    save(context, agentWorkflow(model.baseUrl, secret.secretId));
+    const secret = await context.secretService.createSecret({ name: "Model key", provider: "openai", value: MODEL_KEY });
+    await save(context, agentWorkflow(model.baseUrl, secret.secretId));
     await enableCapture(context, builder.cookie, "wf-agent");
     const prompt = `Customer ${EMAIL} paid with card ${CARD}; escalate to support@acme.test`;
     const response = await hook(context, "wf-agent", { user_prompt: prompt });
@@ -699,7 +702,7 @@ describe("masking and replay", () => {
     expect(captured!.capabilities).toMatchObject({ models: "tape", mcp: "cassette" });
 
     // No raw value anywhere in the stored row; the workflow's own literal stays.
-    const text = rawRecordingText(context, captured!.id);
+    const text = await rawRecordingText(context, captured!.id);
     expect(text).not.toContain(EMAIL);
     expect(text).not.toContain(CARD);
     expect(text).not.toContain("4111111111111111");
@@ -737,7 +740,7 @@ describe("masking and replay", () => {
     expect(exportedCase.facts.nodes.find((entry) => entry.nodeId === "hook")!.labels).toMatchObject({ source: "scan", provenance: ["untrusted_external"] });
     const imported = await call(context, "POST", "/api/eval/datasets/import", builder.cookie, { file, workflowId: "wf-agent", name: "Imported capture" });
     expect(imported.statusCode, imported.body).toBe(201);
-    const importedRecording = context.store.listEvalFixtures(imported.json<{ dataset: { id: string } }>().dataset.id)[0]!.recordingId!;
+    const importedRecording = (await context.store.listEvalFixtures(imported.json<{ dataset: { id: string } }>().dataset.id))[0]!.recordingId!;
     const importedDetail = (await call(context, "GET", `/api/replay/recordings/${importedRecording}`, builder.cookie)).json<{ recording: ReplayRecordingDetail }>().recording;
     expect(importedDetail.capabilities.capture).toMatchObject({ masked: true, dataClasses: expect.arrayContaining(["email", "card_number"]) });
     expect((importedDetail.facts as RunFacts).nodes.find((entry) => entry.nodeId === "hook")!.labels!.dataClasses).toEqual(expect.arrayContaining(["email"]));
@@ -747,7 +750,7 @@ describe("masking and replay", () => {
     const context = await createTestContext();
     const admin = await login(context, "admin");
     const builder = await login(context, "builder");
-    save(context, hookWorkflow("wf-raw"));
+    await save(context, hookWorkflow("wf-raw"));
     await enableCapture(context, builder.cookie, "wf-raw");
     expect((await call(context, "PUT", "/api/workflows/wf-raw/replay-capture", builder.cookie, { dlp: false, reason: "debugging" })).statusCode).toBe(403);
     expect((await call(context, "PUT", "/api/workflows/wf-raw/replay-capture", admin.cookie, { dlp: false })).statusCode).toBe(400);
@@ -757,12 +760,12 @@ describe("masking and replay", () => {
     // Builders do not see the reason.
     const builderView = (await call(context, "GET", "/api/workflows/wf-raw/replay-capture", builder.cookie)).json<{ settings: ReplayCaptureSettingsView }>().settings;
     expect(builderView).toMatchObject({ dlp: false, dlpOffReason: null });
-    const audits = context.store.listAuditLogs({ pageSize: 200 }).items.map((entry) => entry.eventType);
+    const audits = (await context.store.listAuditLogs({ pageSize: 200 })).items.map((entry) => entry.eventType);
     expect(audits).toContain("replay.capture.masking_disabled");
     await hook(context, "wf-raw", { user_prompt: `mail ${EMAIL}` });
     const [captured] = await waitForCaptures(context, builder.cookie, "wf-raw", 1);
     expect(captured).toMatchObject({ masked: false, dataClasses: [] });
-    expect(rawRecordingText(context, captured!.id)).toContain(EMAIL);
+    expect(await rawRecordingText(context, captured!.id)).toContain(EMAIL);
   });
 });
 
@@ -773,7 +776,7 @@ describe("inbox routes and authorization", () => {
     const builder = await login(context, "builder");
     const viewer = await login(context, "viewer");
     const outsider = await login(context, "builder", "outsider");
-    save(context, hookWorkflow("wf-inbox"));
+    await save(context, hookWorkflow("wf-inbox"));
     return { context, admin, builder, viewer, outsider };
   }
 
@@ -792,8 +795,8 @@ describe("inbox routes and authorization", () => {
     expect((await call(context, "POST", "/api/replay/captures/discard", viewer.cookie, { ids: [id] })).statusCode).toBe(403);
 
     // A builder locked out of the workflow's project cannot see it at all.
-    context.store.upsertCustomRole({ id: "none-default", projectId: "default", name: "No access", permissions: [] });
-    context.store.upsertProjectRole({ userId: outsider.id, projectId: "default", role: "custom", customRoleId: "none-default" });
+    await context.store.upsertCustomRole({ id: "none-default", projectId: "default", name: "No access", permissions: [] });
+    await context.store.upsertProjectRole({ userId: outsider.id, projectId: "default", role: "custom", customRoleId: "none-default" });
     {
       expect((await call(context, "GET", "/api/workflows/wf-inbox/replay-capture", outsider.cookie)).statusCode).toBe(404);
       expect((await call(context, "GET", "/api/workflows/wf-inbox/replay-captures", outsider.cookie)).statusCode).toBe(404);
@@ -804,20 +807,20 @@ describe("inbox routes and authorization", () => {
       expect(bulk.results).toEqual([{ id, ok: false, error: "Captured run not found" }]);
     }
     expect((await call(context, "POST", "/api/replay/recordings/find-subject", builder.cookie, { value: EMAIL })).statusCode).toBe(403);
-    expect(context.store.getReplayRecordingSummary(id)).toMatchObject({ status: "candidate" });
+    expect(await context.store.getReplayRecordingSummary(id)).toMatchObject({ status: "candidate" });
   });
 
   it("validates settings: rate ceiling, target set of this workflow", async () => {
     const { context, builder } = await setup();
     const capped = await createTestContext({ REPLAY_CAPTURE_MAX_RATE: "0.2" });
     const cappedBuilder = await login(capped, "builder");
-    save(capped, hookWorkflow("wf-cap"));
+    await save(capped, hookWorkflow("wf-cap"));
     const over = await call(capped, "PUT", "/api/workflows/wf-cap/replay-capture", cappedBuilder.cookie, { enabled: true, rate: 0.5 });
     expect(over.statusCode).toBe(400);
     expect(over.json<{ error: string }>().error).toMatch(/REPLAY_CAPTURE_MAX_RATE/);
     expect((await call(capped, "PUT", "/api/workflows/wf-cap/replay-capture", cappedBuilder.cookie, { enabled: true, rate: 0.2 })).statusCode).toBe(200);
 
-    save(context, hookWorkflow("wf-elsewhere"));
+    await save(context, hookWorkflow("wf-elsewhere"));
     const foreign = await call(context, "POST", "/api/eval/datasets", builder.cookie, { name: "Other set", workflowId: "wf-elsewhere" });
     const foreignId = foreign.json<{ dataset: { id: string } }>().dataset.id;
     expect((await call(context, "PUT", "/api/workflows/wf-inbox/replay-capture", builder.cookie, { targetDatasetId: foreignId })).statusCode).toBe(400);
@@ -849,25 +852,25 @@ describe("inbox routes and authorization", () => {
     const results = bulk.json<{ results: Array<{ id: string; ok: boolean; datasetId?: string }>; promoted: number }>();
     expect(results.promoted).toBe(2);
     expect(results.results.filter((result) => result.ok).every((result) => result.datasetId === target)).toBe(true);
-    expect(context.store.listEvalFixtures(target).map((fixture) => fixture.recordingId).sort()).toEqual([a, b].sort());
-    expect(context.store.getReplayRecordingSummary(a!)).toMatchObject({ status: "golden", createdBy: "builder@example.com" });
-    expect(context.store.getReplayRecordingSummary(a!)!.capturedAt).toBeTruthy();
+    expect((await context.store.listEvalFixtures(target)).map((fixture) => fixture.recordingId).sort()).toEqual([a, b].sort());
+    expect(await context.store.getReplayRecordingSummary(a!)).toMatchObject({ status: "golden", createdBy: "builder@example.com" });
+    expect((await context.store.getReplayRecordingSummary(a!))!.capturedAt).toBeTruthy();
     // Promoting twice is refused: it is no longer in the inbox.
     expect((await call(context, "POST", `/api/replay/captures/${a}/promote`, builder.cookie, {})).statusCode).toBe(404);
 
     expect((await call(context, "DELETE", `/api/replay/captures/${c}`, builder.cookie)).statusCode).toBe(200);
     const discarded = await call(context, "POST", "/api/replay/captures/discard", builder.cookie, { ids: [d, a] });
     expect(discarded.json<{ discarded: number }>().discarded).toBe(1);
-    expect(context.store.getReplayRecordingSummary(c!)).toBeNull();
-    expect(context.store.getReplayRecordingSummary(d!)).toBeNull();
+    expect(await context.store.getReplayRecordingSummary(c!)).toBeNull();
+    expect(await context.store.getReplayRecordingSummary(d!)).toBeNull();
     // A golden run is not discarded by the inbox route.
-    expect(context.store.getReplayRecordingSummary(a!)).toMatchObject({ status: "golden" });
+    expect(await context.store.getReplayRecordingSummary(a!)).toMatchObject({ status: "golden" });
     expect((await inbox(context, builder.cookie, "wf-inbox")).total).toBe(0);
 
     // Export carries promoted runs only.
     const exported = await call(context, "GET", `/api/eval/datasets/${target}/export`, builder.cookie);
     expect(exported.statusCode, exported.body).toBe(200);
-    const audits = context.store.listAuditLogs({ pageSize: 200 }).items.map((entry) => entry.eventType);
+    const audits = (await context.store.listAuditLogs({ pageSize: 200 })).items.map((entry) => entry.eventType);
     expect(audits).toEqual(expect.arrayContaining(["replay.capture.settings_updated", "replay.capture.promoted", "replay.capture.discarded"]));
   });
 });
@@ -877,8 +880,8 @@ describe("data-subject lookup", () => {
     const context = await createTestContext();
     const admin = await login(context, "admin");
     const builder = await login(context, "builder");
-    save(context, hookWorkflow("wf-subject"));
-    save(context, hookWorkflow("wf-bystander"));
+    await save(context, hookWorkflow("wf-subject"));
+    await save(context, hookWorkflow("wf-bystander"));
     await enableCapture(context, builder.cookie, "wf-subject", { maxPerDay: 10 });
     await hook(context, "wf-subject", { user_prompt: `Hi, I am ${EMAIL.toUpperCase()}` });
     await hook(context, "wf-subject", { user_prompt: "nothing personal" });
@@ -906,7 +909,7 @@ describe("data-subject lookup", () => {
     expect(result.covered.length).toBeGreaterThan(0);
     expect(result.notCovered.join(" ")).toMatch(/EXECUTION_HISTORY_RETENTION_DAYS/);
     // Searching deletes nothing.
-    expect(context.store.listReplayRecordings({}).total).toBe(3);
+    expect((await context.store.listReplayRecordings({})).total).toBe(3);
 
     // A target that does not hold the value is skipped, never deleted.
     const other = captures.find((item) => !item.dataClasses.includes("email"))!;
@@ -920,7 +923,7 @@ describe("data-subject lookup", () => {
     expect((await call(context, "POST", "/api/replay/recordings/find-subject", admin.cookie, { value: EMAIL })).json<ReplayFindSubjectResult>().matches).toEqual([]);
     // The other capture is untouched; the audit names every deleted id, never the value.
     expect((await inbox(context, builder.cookie, "wf-subject")).total).toBe(1);
-    const audit = context.store.listAuditLogs({ pageSize: 200 }).items.filter((entry) => entry.eventType.startsWith("replay.find_subject"));
+    const audit = (await context.store.listAuditLogs({ pageSize: 200 })).items.filter((entry) => entry.eventType.startsWith("replay.find_subject"));
     expect(audit.map((entry) => entry.eventType).sort()).toEqual([
       "replay.find_subject.delete_started",
       "replay.find_subject.deleted",
@@ -947,7 +950,7 @@ describe("data-subject lookup: matching and reach", () => {
     const context = await createTestContext();
     const admin = await login(context, "admin");
     const builder = await login(context, "builder");
-    save(context, hookWorkflow("wf-near"));
+    await save(context, hookWorkflow("wf-near"));
     // Hand-saved (unmasked) runs: one holds joann@x.com, one holds the phone with its country code.
     for (const prompt of ["contact joann@x.com", "call +1 415-555-0123 please"]) {
       const run = await call(context, "POST", "/api/workflows/wf-near/execute", builder.cookie, { input: { user_prompt: prompt } });
@@ -972,7 +975,7 @@ describe("data-subject lookup: matching and reach", () => {
     const context = await createTestContext();
     const admin = await login(context, "admin");
     const builder = await login(context, "builder");
-    save(context, hookWorkflow("wf-reach", "{{user_prompt}}"));
+    await save(context, hookWorkflow("wf-reach", "{{user_prompt}}"));
     const run = await call(context, "POST", "/api/workflows/wf-reach/execute", builder.cookie, { input: { user_prompt: `mail ${EMAIL}` }, record: true });
     const saved = await call(context, "POST", "/api/replay/recordings", builder.cookie, { executionId: run.json<{ executionId: string }>().executionId, name: "Hand" });
     const recordingId = saved.json<{ recording: ReplayRecordingSummary }>().recording.id;
@@ -1008,7 +1011,7 @@ describe("re-review round 2: lookup precision, lifecycle, audit and import trust
     const context = await createTestContext();
     const admin = await login(context, "admin");
     const builder = await login(context, "builder");
-    save(context, hookWorkflow("wf-probe"));
+    await save(context, hookWorkflow("wf-probe"));
     // Other people's data (the reviewer's probes).
     const bystanders: string[] = [];
     for (const prompt of ["uk office +44 20 7946 0958", "call +1 912-345-6788", "order 99123456788", "account 777456789012", "invoice no. 2024155551234", "card 4000 0041 5555 1234"]) {
@@ -1052,27 +1055,27 @@ describe("re-review round 2: lookup precision, lifecycle, audit and import trust
     expect(outcome.removed).toEqual([{ kind: "recording", id: own[0] }]);
     expect(outcome.skipped.filter((entry) => entry.reason === "no_match").map((entry) => entry.id).sort()).toEqual([...bystanders].sort());
     expect(outcome.skipped.filter((entry) => entry.reason === "possible_match_unconfirmed").map((entry) => entry.id).sort()).toEqual([own[1], own[2]].sort());
-    for (const id of [...bystanders, own[1]!, own[2]!]) expect(context.store.getReplayRecordingSummary(id)).not.toBeNull();
+    for (const id of [...bystanders, own[1]!, own[2]!]) expect(await context.store.getReplayRecordingSummary(id)).not.toBeNull();
     const confirmed = await call(context, "POST", "/api/replay/recordings/find-subject/delete", admin.cookie, {
       value: "+1 415-555-1234",
       targets: [own[1], own[2]].map((id) => ({ kind: "recording", id, confirmPossible: true }))
     });
     expect(confirmed.json<ReplayFindSubjectDeleteResult>().deleted.recording).toBe(2);
-    for (const id of bystanders) expect(context.store.getReplayRecordingSummary(id)).not.toBeNull();
+    for (const id of bystanders) expect(await context.store.getReplayRecordingSummary(id)).not.toBeNull();
   });
 
   it("N2/N3: masked captures of two people sharing nine digits are found apart, and a capture is found by its national form", async () => {
     const context = await createTestContext();
     const admin = await login(context, "admin");
     const builder = await login(context, "builder");
-    save(context, hookWorkflow("wf-twins"));
+    await save(context, hookWorkflow("wf-twins"));
     await enableCapture(context, builder.cookie, "wf-twins", { maxPerDay: 10 });
     await hook(context, "wf-twins", { user_prompt: "call +1 312 345 6788" });
     await hook(context, "wf-twins", { user_prompt: "call +1 412 345 6788" });
     await hook(context, "wf-twins", { user_prompt: "ring +47 2212 3456", note: "22123456" });
     const items = await waitForCaptures(context, builder.cookie, "wf-twins", 3);
     for (const item of items) {
-      const text = rawRecordingText(context, item.id);
+      const text = await rawRecordingText(context, item.id);
       expect(text).not.toMatch(/345\D?6788/);
       expect(text).not.toContain("22123456");
       expect(text).not.toMatch(/2212 3456/);
@@ -1096,9 +1099,9 @@ describe("re-review round 2: lookup precision, lifecycle, audit and import trust
       recordings: { createCapture: async () => ({ id: "x", bytes: 1 }) } as never,
       datasets: {} as never,
       surrogateKey: SURROGATE_KEY,
-      dictionariesFor: () => [],
-      dictionaryClasses: () => [],
-      publishedVersion: () => null,
+      dictionariesFor: async () => [],
+      dictionaryClasses: async () => [],
+      publishedVersion: async () => null,
       deployment: { enabled: true, maxRate: 1, retentionDays: 14, maxPerWorkflow: 200, maxBytesPerWorkflow: 209_715_200 },
       log: { warn: (data) => warnings.push(data), info: () => undefined },
       metric: (outcome) => outcomes.push(outcome),
@@ -1121,9 +1124,9 @@ describe("re-review round 2: lookup precision, lifecycle, audit and import trust
 
   it("N5: leaked tickets are swept before a run is refused for the daily limit", async () => {
     const context = await createTestContext();
-    save(context, hookWorkflow("wf-leak"));
-    context.store.saveReplayCaptureSettings(settings("wf-leak", 1));
-    const leaked: Array<ReturnType<ReplayCaptureService["decide"]>> = [];
+    await save(context, hookWorkflow("wf-leak"));
+    await context.store.saveReplayCaptureSettings(settings("wf-leak", 1));
+    const leaked: Array<Awaited<ReturnType<ReplayCaptureService["decide"]>>> = [];
     let sweeps = 0;
     const { service, outcomes } = lifecycleService(context, {
       sweepStale: () => {
@@ -1132,49 +1135,49 @@ describe("re-review round 2: lookup precision, lifecycle, audit and import trust
         for (const ticket of leaked.splice(0)) if (ticket) service.abandon(ticket, "skipped_stale");
       }
     });
-    const decide = () => service.decide({ workflow: { id: "wf-leak" }, channel: "production", triggerType: "webhook", releaseVersion: null, excluded: false });
-    leaked.push(decide());
+    const decide = async () => await service.decide({ workflow: { id: "wf-leak" }, channel: "production", triggerType: "webhook", releaseVersion: null, excluded: false });
+    leaked.push(await decide());
     expect(service.inFlightFor("wf-leak")).toBe(1);
     // The day's only slot is held by a leaked ticket: the sweep frees it and this run is sampled.
-    expect(decide()).not.toBeNull();
+    expect(await decide()).not.toBeNull();
     expect(sweeps).toBe(1);
     expect(outcomes).toContain("skipped_stale");
     // Still over the limit after a sweep: refused.
-    expect(decide()).toBeNull();
+    expect(await decide()).toBeNull();
     expect(outcomes).toContain("skipped_daily_limit");
   });
 
   it("N4: a manual run is eligible only with the server's API-key marker", async () => {
     const context = await createTestContext();
-    save(context, hookWorkflow("wf-marker"));
-    context.store.saveReplayCaptureSettings(settings("wf-marker"));
+    await save(context, hookWorkflow("wf-marker"));
+    await context.store.saveReplayCaptureSettings(settings("wf-marker"));
     const { service } = lifecycleService(context);
     const base = { workflow: { id: "wf-marker" }, channel: "production", releaseVersion: null, excluded: false };
-    expect(service.decide({ ...base, triggerType: "manual" })).toBeNull();
-    expect(service.decide({ ...base, triggerType: "manual_retry", captureSource: "api_key" })).toBeNull();
-    expect(service.decide({ ...base, triggerType: "manual", captureSource: "api_key" })).toMatchObject({ triggerType: "manual", captureSource: "api_key" });
+    expect(await service.decide({ ...base, triggerType: "manual" })).toBeNull();
+    expect(await service.decide({ ...base, triggerType: "manual_retry", captureSource: "api_key" })).toBeNull();
+    expect(await service.decide({ ...base, triggerType: "manual", captureSource: "api_key" })).toMatchObject({ triggerType: "manual", captureSource: "api_key" });
   });
 
   it("N6: a capture whose run or workflow was deleted while it was being masked is discarded", async () => {
     const context = await createTestContext();
     const builder = await login(context, "builder");
-    save(context, hookWorkflow("wf-gone"));
+    await save(context, hookWorkflow("wf-gone"));
     expect((await hook(context, "wf-gone", { user_prompt: `hi ${EMAIL}` })).statusCode).toBe(200);
-    const executionId = context.store.listExecutionHistory({ workflowId: "wf-gone", page: 1, pageSize: 5 }).items[0]!.id;
-    context.store.saveReplayCaptureSettings(settings("wf-gone"));
+    const executionId = (await context.store.listExecutionHistory({ workflowId: "wf-gone", page: 1, pageSize: 5 })).items[0]!.id;
+    await context.store.saveReplayCaptureSettings(settings("wf-gone"));
     const saved: string[] = [];
     const { service, outcomes } = lifecycleService(context, {
       recordings: {
-        createCapture: async (_input: unknown, capture: { beforeSave: (bytes: number) => void }) => {
+        createCapture: async (_input: unknown, capture: { beforeSave: (bytes: number) => Promise<void> }) => {
           // Masking yields; meanwhile someone deletes the run (for privacy, say).
           (context.store as unknown as { exec(sql: string, params: unknown[]): void }).exec("DELETE FROM execution_history WHERE id = ?", [executionId]);
-          capture.beforeSave(10);
+          await capture.beforeSave(10);
           saved.push("saved");
           return { id: "x", bytes: 10 };
         }
       } as never
     });
-    const ticket = service.decide({ workflow: { id: "wf-gone" }, channel: "production", triggerType: "webhook", releaseVersion: null, excluded: false })!;
+    const ticket = (await service.decide({ workflow: { id: "wf-gone" }, channel: "production", triggerType: "webhook", releaseVersion: null, excluded: false }))!;
     service.finish(ticket, { executionId, workflow: { id: "wf-gone", name: "x", projectId: "default" }, plan: {} as never });
     await service.idle();
     expect(saved).toEqual([]);
@@ -1185,10 +1188,10 @@ describe("re-review round 2: lookup precision, lifecycle, audit and import trust
 
   it("N9: a capture failure logs the error class and a scrubbed message only", async () => {
     const context = await createTestContext();
-    save(context, hookWorkflow("wf-log"));
+    await save(context, hookWorkflow("wf-log"));
     expect((await hook(context, "wf-log", {})).statusCode).toBe(200);
-    const executionId = context.store.listExecutionHistory({ workflowId: "wf-log", page: 1, pageSize: 5 }).items[0]!.id;
-    context.store.saveReplayCaptureSettings(settings("wf-log"));
+    const executionId = (await context.store.listExecutionHistory({ workflowId: "wf-log", page: 1, pageSize: 5 })).items[0]!.id;
+    await context.store.saveReplayCaptureSettings(settings("wf-log"));
     class ParserBlewUp extends Error {
       constructor(message: string) {
         super(message);
@@ -1203,7 +1206,7 @@ describe("re-review round 2: lookup precision, lifecycle, audit and import trust
       } as never,
       redact: (text) => text.replaceAll(MODEL_KEY, "[REDACTED]")
     });
-    const ticket = service.decide({ workflow: { id: "wf-log" }, channel: "production", triggerType: "webhook", releaseVersion: null, excluded: false })!;
+    const ticket = (await service.decide({ workflow: { id: "wf-log" }, channel: "production", triggerType: "webhook", releaseVersion: null, excluded: false }))!;
     service.finish(ticket, { executionId, workflow: { id: "wf-log", name: "x", projectId: "default" }, plan: {} as never });
     await service.idle();
     expect(outcomes).toEqual(["failed"]);
@@ -1218,7 +1221,7 @@ describe("re-review round 2: lookup precision, lifecycle, audit and import trust
     const context = await createTestContext();
     const admin = await login(context, "admin");
     const builder = await login(context, "builder");
-    save(context, hookWorkflow("wf-crash", "{{user_prompt}}"));
+    await save(context, hookWorkflow("wf-crash", "{{user_prompt}}"));
     const ids = [await handSaved(context, builder.cookie, "wf-crash", `one ${EMAIL}`), await handSaved(context, builder.cookie, "wf-crash", `two ${EMAIL}`)];
     // The server stops in the middle of the delete: the first row goes, the second throws.
     const store = context.store as unknown as { deleteSubjectRow: (kind: string, id: string) => unknown };
@@ -1232,7 +1235,7 @@ describe("re-review round 2: lookup precision, lifecycle, audit and import trust
     const crashed = await call(context, "POST", "/api/replay/recordings/find-subject/delete", admin.cookie, { value: EMAIL, targets: ids.map((id) => ({ kind: "recording", id })) });
     expect(crashed.statusCode).toBe(500);
     store.deleteSubjectRow = original;
-    const audit = context.store.listAuditLogs({ pageSize: 200 }).items.filter((entry) => entry.eventType.startsWith("replay.find_subject.delete"));
+    const audit = (await context.store.listAuditLogs({ pageSize: 200 })).items.filter((entry) => entry.eventType.startsWith("replay.find_subject.delete"));
     expect(audit.map((entry) => entry.eventType)).toEqual(["replay.find_subject.delete_started"]);
     for (const id of ids) expect(JSON.stringify(audit[0])).toContain(`recording:${id}`);
     expect(JSON.stringify(audit)).not.toContain(EMAIL);
@@ -1269,7 +1272,7 @@ describe("re-review round 2: lookup precision, lifecycle, audit and import trust
     });
     expect(removed.statusCode, removed.body).toBe(200);
     expect(sideRows()).toEqual([0, 0, 0]);
-    const trail = context.store.listAuditLogs({ pageSize: 200 }).items.filter((entry) => entry.eventType.startsWith("replay.find_subject.delete"));
+    const trail = (await context.store.listAuditLogs({ pageSize: 200 })).items.filter((entry) => entry.eventType.startsWith("replay.find_subject.delete"));
     expect(trail.filter((entry) => entry.eventType === "replay.find_subject.delete_started")).toHaveLength(2);
     expect(trail.filter((entry) => entry.eventType === "replay.find_subject.deleted")).toHaveLength(1);
   });
@@ -1277,7 +1280,7 @@ describe("re-review round 2: lookup precision, lifecycle, audit and import trust
   it("N8: an imported golden-set file's masked flag and provenance labels are never trusted", async () => {
     const context = await createTestContext();
     const builder = await login(context, "builder");
-    save(context, hookWorkflow("wf-trust"));
+    await save(context, hookWorkflow("wf-trust"));
     await enableCapture(context, builder.cookie, "wf-trust", { maxPerDay: 10 });
     await hook(context, "wf-trust", { user_prompt: `I am ${EMAIL}` });
     const [capture] = await waitForCaptures(context, builder.cookie, "wf-trust", 1);
@@ -1297,7 +1300,7 @@ describe("re-review round 2: lookup precision, lifecycle, audit and import trust
     const listed = (await call(context, "GET", "/api/replay/recordings?workflowId=wf-trust", builder.cookie)).json<{ items: ReplayRecordingSummary[] }>().items;
     const importedRun = listed.find((entry) => entry.capabilities.origin === "imported")!;
     expect(importedRun.capabilities.capture).toMatchObject({ masked: true, maskingVerified: false });
-    const stored = context.store.getReplayRecording(importedRun.id)!;
+    const stored = (await context.store.getReplayRecording(importedRun.id))!;
     for (const entry of stored.facts.nodes) {
       expect(entry.labels?.source).toBe("file");
       expect(entry.labels?.provenance).not.toContain("trusted");
@@ -1331,7 +1334,7 @@ describe("re-review round 3: lookup certainty, hints, international phones, kept
     const context = await createTestContext();
     const admin = await login(context, "admin");
     const builder = await login(context, "builder");
-    save(context, hookWorkflow("wf-a1"));
+    await save(context, hookWorkflow("wf-a1"));
     const rows: Array<[string, string, "national_only" | null]> = [
       ["+44 20 7946 0958", "call (207) 946-0958", "national_only"],
       ["+1 (207) 946-0958", "ring 020 7946 0958", "national_only"],
@@ -1357,14 +1360,14 @@ describe("re-review round 3: lookup certainty, hints, international phones, kept
         const outcome = await erase(context, admin.cookie, { value: query, targets: [{ kind: "recording", id }] });
         expect(outcome.deleted.recording).toBe(0);
         expect(outcome.skipped).toEqual([{ kind: "recording", id, reason: "possible_match_unconfirmed" }]);
-        expect(context.store.getReplayRecordingSummary(id)).not.toBeNull();
+        expect(await context.store.getReplayRecordingSummary(id)).not.toBeNull();
       }
-      context.store.deleteReplayRecording(id);
+      await context.store.deleteReplayRecording(id);
     }
     // The intent audit row counts confirmed possible matches apart.
     const id = await handSaved(context, builder.cookie, "wf-a1", "call (207) 946-0958");
     expect((await erase(context, admin.cookie, { value: "+44 20 7946 0958", targets: [{ kind: "recording", id, confirmPossible: true }] })).deleted.recording).toBe(1);
-    const started = context.store.listAuditLogs({ pageSize: 200 }).items.find((entry) => entry.eventType === "replay.find_subject.delete_started")!;
+    const started = (await context.store.listAuditLogs({ pageSize: 200 })).items.find((entry) => entry.eventType === "replay.find_subject.delete_started")!;
     expect(started.metadata).toMatchObject({ rows: 1, confirmedPossible: 1 });
   }, 60_000);
 
@@ -1372,7 +1375,7 @@ describe("re-review round 3: lookup certainty, hints, international phones, kept
     const context = await createTestContext();
     const admin = await login(context, "admin");
     const builder = await login(context, "builder");
-    save(context, hookWorkflow("wf-hint"));
+    await save(context, hookWorkflow("wf-hint"));
     const intl = await handSaved(context, builder.cookie, "wf-hint", "call +1 415 555 1234");
     const national = await handSaved(context, builder.cookie, "wf-hint", "call (415) 555-1234");
     const other = await handSaved(context, builder.cookie, "wf-hint", "call +33 415 555 1234");
@@ -1415,14 +1418,14 @@ describe("re-review round 3: lookup certainty, hints, international phones, kept
     await refused({ value: "jane.doe@example.com", country: "US" }, /phone numbers only/);
     await refused({ value: "+44 20 7946 0958", country: "US" }, /own country code is not the country chosen/);
     expect((await call(context, "POST", "/api/replay/recordings/find-subject", admin.cookie, { value: "4155551234", country: "United States" })).statusCode).toBe(400);
-    expect(context.store.getReplayRecordingSummary(intl)).not.toBeNull();
+    expect(await context.store.getReplayRecordingSummary(intl)).not.toBeNull();
   }, 60_000);
 
   it("A2: an E.164 or international number the DLP pattern does not read is masked in a capture and found by the lookup", async () => {
     const context = await createTestContext();
     const admin = await login(context, "admin");
     const builder = await login(context, "builder");
-    save(context, hookWorkflow("wf-intl"));
+    await save(context, hookWorkflow("wf-intl"));
     await enableCapture(context, builder.cookie, "wf-intl", { maxPerDay: 20 });
     const numbers: Array<[string, string]> = [
       ["+14155551234", "4155551234"],
@@ -1440,7 +1443,7 @@ describe("re-review round 3: lookup certainty, hints, international phones, kept
     const items = await waitForCaptures(context, builder.cookie, "wf-intl", numbers.length);
     for (const item of items) {
       expect(item.dataClasses).toContain("phone");
-      const stored = rawRecordingText(context, item.id).replace(/\D/g, "");
+      const stored = (await rawRecordingText(context, item.id)).replace(/\D/g, "");
       for (const [, national] of numbers) expect(stored).not.toContain(national);
     }
     for (const [written] of numbers) {
@@ -1464,7 +1467,7 @@ describe("re-review round 3: lookup certainty, hints, international phones, kept
     expect(created.statusCode, created.body).toBe(201);
     const serverId = created.json<{ server: { id: string } }>().server.id;
     expect((await call(context, "POST", `/api/mcp/servers/${serverId}/probe`, admin.cookie)).statusCode).toBe(200);
-    save(context, {
+    await save(context, {
       id: "wf-mcp",
       name: "CRM lookup",
       schemaVersion: "1.0.0",
@@ -1487,9 +1490,9 @@ describe("re-review round 3: lookup certainty, hints, international phones, kept
     expect(response.statusCode, response.body).toBe(200);
     const [captured] = await waitForCaptures(context, builder.cookie, "wf-mcp", 1);
     expect(captured!.capabilities).toMatchObject({ mcp: "cassette" });
-    const text = rawRecordingText(context, captured!.id);
+    const text = await rawRecordingText(context, captured!.id);
     expect(text).not.toContain(EMAIL);
-    const recording = context.store.getReplayRecording(captured!.id)!;
+    const recording = (await context.store.getReplayRecording(captured!.id))!;
     const cassette = recording.mcpCassette!;
     const surrogate = surrogateFor(EMAIL, "email", SURROGATE_KEY);
     // Routing identifiers as written; the resource URI and the arguments masked.
@@ -1511,7 +1514,7 @@ describe("re-review round 3: lookup certainty, hints, international phones, kept
     const context = await createTestContext();
     const admin = await login(context, "admin");
     const builder = await login(context, "builder");
-    save(context, hookWorkflow("wf-b1"));
+    await save(context, hookWorkflow("wf-b1"));
     const french = [
       await handSaved(context, builder.cookie, "wf-b1", "fr +33 4155551234"),
       await handSaved(context, builder.cookie, "wf-b1", "fr 0033 4155551234"),
@@ -1535,8 +1538,8 @@ describe("re-review round 3: lookup certainty, hints, international phones, kept
     const outcome = await erase(context, admin.cookie, { ...query, targets: [...french, plain].map((id) => ({ kind: "recording", id })) });
     expect(outcome.removed).toEqual([{ kind: "recording", id: plain }]);
     expect(outcome.skipped).toEqual(french.map((id) => ({ kind: "recording", id, reason: "possible_match_unconfirmed" })));
-    for (const id of french) expect(context.store.getReplayRecordingSummary(id)).not.toBeNull();
-    expect(context.store.getReplayRecordingSummary(plain)).toBeNull();
+    for (const id of french) expect(await context.store.getReplayRecordingSummary(id)).not.toBeNull();
+    expect(await context.store.getReplayRecordingSummary(plain)).toBeNull();
     // Confirmed row by row, a possible match is deleted.
     const confirmed = await erase(context, admin.cookie, { ...query, targets: [{ kind: "recording", id: french[0]!, confirmPossible: true }] });
     expect(confirmed.removed).toEqual([{ kind: "recording", id: french[0]! }]);
@@ -1546,7 +1549,7 @@ describe("re-review round 3: lookup certainty, hints, international phones, kept
     const context = await createTestContext();
     const admin = await login(context, "admin");
     const builder = await login(context, "builder");
-    save(context, hookWorkflow("wf-b3"));
+    await save(context, hookWorkflow("wf-b3"));
     const id = await handSaved(context, builder.cookie, "wf-b3", "call (207) 946-0958");
     const other = await handSaved(context, builder.cookie, "wf-b3", "uk +44 20 7946 0958");
     const query = { value: "+44 20 7946 0958" };
@@ -1558,10 +1561,10 @@ describe("re-review round 3: lookup certainty, hints, international phones, kept
       expect(response.statusCode, response.body).toBe(400);
       expect(response.json<{ error: string }>().error).toBe("A row is listed twice, once confirmed as a possible match and once not. List each row once.");
       expect(response.body).not.toContain("7946");
-      expect(context.store.getReplayRecordingSummary(id)).not.toBeNull();
-      expect(context.store.getReplayRecordingSummary(other)).not.toBeNull();
+      expect(await context.store.getReplayRecordingSummary(id)).not.toBeNull();
+      expect(await context.store.getReplayRecordingSummary(other)).not.toBeNull();
     }
-    expect(context.store.listAuditLogs({ pageSize: 200 }).items.some((entry) => entry.eventType === "replay.find_subject.delete_started")).toBe(false);
+    expect((await context.store.listAuditLogs({ pageSize: 200 })).items.some((entry) => entry.eventType === "replay.find_subject.delete_started")).toBe(false);
     // The same row twice with the same confirmation is still one target.
     const twice = await erase(context, admin.cookie, { ...query, targets: [{ kind: "recording", id, confirmPossible: true }, { kind: "recording", id, confirmPossible: true }] });
     expect(twice.removed).toEqual([{ kind: "recording", id }]);
@@ -1570,9 +1573,9 @@ describe("re-review round 3: lookup certainty, hints, international phones, kept
   it("round 4 B2: a dropped capture is noted on the workflow's settings, with when and why", async () => {
     const context = await createTestContext();
     const builder = await login(context, "builder");
-    save(context, hookWorkflow("wf-drop"));
+    await save(context, hookWorkflow("wf-drop"));
     expect((await hook(context, "wf-drop", {})).statusCode).toBe(200);
-    const executionId = context.store.listExecutionHistory({ workflowId: "wf-drop", page: 1, pageSize: 5 }).items[0]!.id;
+    const executionId = (await context.store.listExecutionHistory({ workflowId: "wf-drop", page: 1, pageSize: 5 })).items[0]!.id;
     await enableCapture(context, builder.cookie, "wf-drop");
     const before = await call(context, "GET", "/api/workflows/wf-drop/replay-capture", builder.cookie);
     expect(before.json<{ settings: ReplayCaptureSettingsView }>().settings.lastDrop).toBeNull();
@@ -1586,15 +1589,15 @@ describe("re-review round 3: lookup certainty, hints, international phones, kept
       } as never,
       datasets: {} as never,
       surrogateKey: SURROGATE_KEY,
-      dictionariesFor: () => [],
-      dictionaryClasses: () => [],
-      publishedVersion: () => null,
+      dictionariesFor: async () => [],
+      dictionaryClasses: async () => [],
+      publishedVersion: async () => null,
       deployment: { enabled: true, maxRate: 1, retentionDays: 14, maxPerWorkflow: 200, maxBytesPerWorkflow: 209_715_200 },
       log: { warn: () => undefined, info: () => undefined },
       metric: (outcome) => outcomes.push(outcome),
       now: () => new Date("2026-10-24T10:00:00.000Z")
     });
-    const ticket = service.decide({ workflow: { id: "wf-drop" }, channel: "production", triggerType: "webhook", releaseVersion: null, excluded: false })!;
+    const ticket = (await service.decide({ workflow: { id: "wf-drop" }, channel: "production", triggerType: "webhook", releaseVersion: null, excluded: false }))!;
     expect(ticket).toBeTruthy();
     service.finish(ticket, { executionId, workflow: { id: "wf-drop", name: "x", projectId: "default" }, plan: {} as never });
     await service.idle();
@@ -1603,14 +1606,14 @@ describe("re-review round 3: lookup certainty, hints, international phones, kept
     expect(after.json<{ settings: ReplayCaptureSettingsView }>().settings.lastDrop).toEqual({ outcome: "dropped_identifier_value", at: "2026-10-24T10:00:00.000Z" });
     // Saving the settings again keeps the note.
     expect((await call(context, "PUT", "/api/workflows/wf-drop/replay-capture", builder.cookie, { rate: 0.5 })).statusCode).toBe(200);
-    expect(service.view("wf-drop").lastDrop?.outcome).toBe("dropped_identifier_value");
+    expect((await service.view("wf-drop")).lastDrop?.outcome).toBe("dropped_identifier_value");
   }, 60_000);
 
   it("A4 and A5: Hungarian and Russian national forms are possible matches; an excerpt starts at the bracket", async () => {
     const context = await createTestContext();
     const admin = await login(context, "admin");
     const builder = await login(context, "builder");
-    save(context, hookWorkflow("wf-trunk"));
+    await save(context, hookWorkflow("wf-trunk"));
     const hu = await handSaved(context, builder.cookie, "wf-trunk", "call 06 1 234 5678");
     const ru = await handSaved(context, builder.cookie, "wf-trunk", "call 8 (495) 123-45-67");
     const us = await handSaved(context, builder.cookie, "wf-trunk", "call (207) 946-0958");
@@ -1624,11 +1627,11 @@ describe("re-review round 3: lookup certainty, hints, international phones, kept
     expect(hit.excerpt).not.toContain("946");
 
     // Masked captures: the national form written with a two-digit trunk gets the same surrogate, so the lookup finds both copies.
-    save(context, hookWorkflow("wf-trunk-cap"));
+    await save(context, hookWorkflow("wf-trunk-cap"));
     await enableCapture(context, builder.cookie, "wf-trunk-cap");
     await hook(context, "wf-trunk-cap", { user_prompt: "call +36 30 123 4567", note: "or 06 30 123 4567" });
     const [captured] = await waitForCaptures(context, builder.cookie, "wf-trunk-cap", 1);
-    expect(rawRecordingText(context, captured!.id).replace(/\D/g, "")).not.toContain("301234567");
+    expect((await rawRecordingText(context, captured!.id)).replace(/\D/g, "")).not.toContain("301234567");
     const capFound = await find(context, admin.cookie, { value: "+36 30 123 4567" });
     const match = capFound.matches.find((entry) => entry.id === captured!.id)!;
     expect(match.certainty).toBe("exact");
@@ -1652,7 +1655,7 @@ describe("captures stored before surrogates dropped the visible tail", () => {
     const context = await createTestContext({ SECRET_MASTER_KEY_BASE64: FIXED_MASTER_KEY });
     const admin = await login(context, "admin");
     const builder = await login(context, "builder");
-    save(context, hookWorkflow("wf-old-tail"));
+    await save(context, hookWorkflow("wf-old-tail"));
     const key = deriveCaptureSurrogateKey(Buffer.from(FIXED_MASTER_KEY, "base64"));
     const store = async (text: string) => {
       const run = await call(context, "POST", "/api/workflows/wf-old-tail/execute", builder.cookie, { input: { user_prompt: text } });
@@ -1680,7 +1683,7 @@ describe("captures stored before surrogates dropped the visible tail", () => {
       });
       expect(removed.statusCode, removed.body).toBe(200);
       expect(removed.json<ReplayFindSubjectDeleteResult>().removed, value).toEqual([{ kind: "recording", id }]);
-      expect(context.store.getReplayRecordingSummary(id)).toBeNull();
+      expect(await context.store.getReplayRecordingSummary(id)).toBeNull();
     }
 
     // A copy of the phone written without its `+` was keyed on its own digits; main kept its last two as well.
@@ -1699,18 +1702,18 @@ describe("replay comparison of guard-masked spans", () => {
   it("compares masked spans as masks for a masked capture only; a hand-saved run compares exactly", async () => {
     const context = await createTestContext();
     const builder = await login(context, "builder");
-    save(context, hookWorkflow("wf-masked-diff", "Card {{user_prompt}} on file"));
+    await save(context, hookWorkflow("wf-masked-diff", "Card {{user_prompt}} on file"));
     const exec = (context.store as unknown as { exec(sql: string, params: unknown[]): void }).exec.bind(context.store);
     // The golden run's output masked one card; the replay masks another (as a surrogate's mask reads differently).
     const used = new Set<string>();
     const record = async (masked: boolean) => {
       expect((await hook(context, "wf-masked-diff", { user_prompt: "•••• •••• •••• 9876" })).json()).toEqual({ output: { result: "Card •••• •••• •••• 9876 on file" } });
-      const executionId = context.store.listExecutionHistory({ workflowId: "wf-masked-diff", triggerType: "webhook" }).items.find((item) => !used.has(item.id))!.id;
+      const executionId = (await context.store.listExecutionHistory({ workflowId: "wf-masked-diff", triggerType: "webhook" })).items.find((item) => !used.has(item.id))!.id;
       used.add(executionId);
       const saved = await call(context, "POST", "/api/replay/recordings", builder.cookie, { executionId, name: `masked ${masked}` });
       expect(saved.statusCode, saved.body).toBe(201);
       const id = saved.json<{ recording: ReplayRecordingSummary }>().recording.id;
-      const recording = context.store.getReplayRecording(id)!;
+      const recording = (await context.store.getReplayRecording(id))!;
       const facts = JSON.stringify(recording.facts).replaceAll("•••• •••• •••• 9876", "•••• •••• •••• 1111");
       const capabilities = masked
         ? { ...recording.capabilities, capture: { rate: 1, masked: true, dataClasses: ["card_number"], values: { card_number: 1 }, notDetectableAfterMasking: [], keptFromWorkflow: 0, publishedVersion: 1 } }

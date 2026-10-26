@@ -42,8 +42,9 @@ import {
   type OAuthTokenSet
 } from "@ai-orchestrator/mcp-sdk";
 import type { McpOAuthConnectionStatus, McpUserConnectionView } from "@ai-orchestrator/shared";
-import type { McpOAuthConnectionRecord, McpServerRecord, McpUserOAuthConnectionRecord, SqliteStore } from "../db/database.js";
+import type { McpOAuthConnectionRecord, McpServerRecord, McpUserOAuthConnectionRecord } from "../db/database.js";
 import type { SecretService } from "./secret-service.js";
+import type { Store } from "../db/store.js";
 
 export const MCP_OAUTH_CALLBACK_PATH = "/api/mcp/oauth/callback";
 export const MCP_OAUTH_SECRET_PROVIDER = "mcp_oauth";
@@ -114,7 +115,7 @@ export interface McpOAuthServiceOptions {
   refreshSkewMs: number;
   fetchImpl?: FetchLike;
   /** Audit hook for events without a request (background refresh failures). */
-  onAudit?: (event: { eventType: string; serverId: string; outcome: "success" | "failure"; metadata: Record<string, unknown> }) => void;
+  onAudit?: (event: { eventType: string; serverId: string; outcome: "success" | "failure"; metadata: Record<string, unknown> }) => void | Promise<void>;
   /** Phase 10.7 — where a user connects their own account; named in "not connected" errors. */
   connectionsUrl?: string;
 }
@@ -152,7 +153,7 @@ export class McpOAuthService implements McpOAuthTokenProvider {
   private readonly refreshing = new Map<string, Promise<string>>();
 
   constructor(
-    private readonly store: SqliteStore,
+    private readonly store: Store,
     private readonly secretService: SecretService,
     private readonly options: McpOAuthServiceOptions
   ) {}
@@ -176,13 +177,13 @@ export class McpOAuthService implements McpOAuthTokenProvider {
   }
 
   /** Phase 10.7 — one user's connection to a delegated server, as the UI may show it (never a token). */
-  userStatus(server: Pick<McpServerRecord, "id" | "name">, userId: string, userEmail: string | null = null): McpUserConnectionView {
-    const row = this.store.getMcpUserOAuthConnection(server.id, userId);
+  async userStatus(server: Pick<McpServerRecord, "id" | "name">, userId: string, userEmail: string | null = null): Promise<McpUserConnectionView> {
+    const row = await this.store.getMcpUserOAuthConnection(server.id, userId);
     return userConnectionView(server, row, userId, userEmail);
   }
 
-  status(serverId: string): McpOAuthConnectionStatus {
-    const row = this.store.getMcpOAuthConnection(serverId);
+  async status(serverId: string): Promise<McpOAuthConnectionStatus> {
+    const row = await this.store.getMcpOAuthConnection(serverId);
     const base: McpOAuthConnectionStatus = {
       serverId,
       state: "not_connected",
@@ -223,9 +224,9 @@ export class McpOAuthService implements McpOAuthTokenProvider {
     };
   }
 
-  private readSecret(row: Pick<McpOAuthConnectionRecord, "secretId"> | null): StoredOAuthSecret | null {
+  private async readSecret(row: Pick<McpOAuthConnectionRecord, "secretId"> | null): Promise<StoredOAuthSecret | null> {
     if (!row?.secretId) return null;
-    const raw = this.secretService.resolveInternalSecret(row.secretId);
+    const raw = await this.secretService.resolveInternalSecret(row.secretId);
     if (!raw) return null;
     try {
       const parsed = JSON.parse(raw) as StoredOAuthSecret;
@@ -235,17 +236,17 @@ export class McpOAuthService implements McpOAuthTokenProvider {
     }
   }
 
-  private writeSecret(server: McpServerRecord, existingSecretId: string | null, value: StoredOAuthSecret, owner?: { userId: string; email?: string }): string {
+  private async writeSecret(server: McpServerRecord, existingSecretId: string | null, value: StoredOAuthSecret, owner?: { userId: string; email?: string }): Promise<string> {
     const json = JSON.stringify(value);
-    if (existingSecretId && this.secretService.updateInternalSecret(existingSecretId, json)) {
+    if (existingSecretId && await this.secretService.updateInternalSecret(existingSecretId, json)) {
       return existingSecretId;
     }
-    return this.secretService.createSecret({
+    return (await this.secretService.createSecret({
       name: (owner ? `MCP OAuth · ${server.name} · ${owner.email ?? owner.userId}` : `MCP OAuth · ${server.name}`).slice(0, 120),
       provider: owner ? MCP_OAUTH_USER_SECRET_PROVIDER : MCP_OAUTH_SECRET_PROVIDER,
       value: json,
       projectId: server.projectId ?? undefined
-    }).secretId;
+    })).secretId;
   }
 
   private prunePending(now = Date.now()): void {
@@ -328,8 +329,8 @@ export class McpOAuthService implements McpOAuthTokenProvider {
     } else {
       // Reuse an earlier dynamic registration for the same authorization server and redirect URL.
       const previous = input.userId
-        ? this.readSecret(this.store.getMcpUserOAuthConnection(server.id, input.userId))
-        : this.readSecret(this.store.getMcpOAuthConnection(server.id));
+        ? await this.readSecret(await this.store.getMcpUserOAuthConnection(server.id, input.userId))
+        : await this.readSecret(await this.store.getMcpOAuthConnection(server.id));
       if (
         previous?.client.registration === "dynamic" &&
         previous.issuer === metadata.issuer &&
@@ -430,7 +431,7 @@ export class McpOAuthService implements McpOAuthTokenProvider {
         };
       }
     }
-    const server = this.store.getMcpServer(pending.serverId);
+    const server = await this.store.getMcpServer(pending.serverId);
     if (!server) {
       return { serverId: pending.serverId, ok: false, error: "The MCP server no longer exists." };
     }
@@ -438,14 +439,14 @@ export class McpOAuthService implements McpOAuthTokenProvider {
     if (!userId && server.credentialMode === "delegated") {
       return { serverId: server.id, ok: false, error: "The MCP server now uses each user's own account; users connect under My connections." };
     }
-    const recordError = (message: string) => (userId ? this.recordUserError(server.id, userId, message) : this.recordError(server.id, message));
+    const recordError = async (message: string) => (userId ? await this.recordUserError(server.id, userId, message) : await this.recordError(server.id, message));
     const failed = (message: string): OAuthCallbackOutcome => ({ serverId: server.id, ok: false, error: message, ...(userId ? { userId } : {}) });
     if (userId && server.credentialMode !== "delegated") {
       return failed("The MCP server no longer uses each user's own account.");
     }
     if (input.error) {
       const message = `The authorization server refused: ${(input.errorDescription || input.error).slice(0, 300)}`;
-      recordError(message);
+      await recordError(message);
       return failed(message);
     }
     if (!input.code) {
@@ -469,7 +470,7 @@ export class McpOAuthService implements McpOAuthTokenProvider {
       );
     } catch (error) {
       const message = error instanceof McpOAuthError ? error.message : "Token exchange failed.";
-      recordError(message);
+      await recordError(message);
       return failed(message);
     }
 
@@ -487,9 +488,9 @@ export class McpOAuthService implements McpOAuthTokenProvider {
     };
     const now = new Date().toISOString();
     if (userId) {
-      const existingUser = this.store.getMcpUserOAuthConnection(server.id, userId);
-      const userSecretId = this.writeSecret(server, existingUser?.secretId ?? null, secret, { userId, email: pending.userEmail });
-      this.store.upsertMcpUserOAuthConnection({
+      const existingUser = await this.store.getMcpUserOAuthConnection(server.id, userId);
+      const userSecretId = await this.writeSecret(server, existingUser?.secretId ?? null, secret, { userId, email: pending.userEmail });
+      await this.store.upsertMcpUserOAuthConnection({
         serverId: server.id,
         userId,
         secretId: userSecretId,
@@ -507,9 +508,9 @@ export class McpOAuthService implements McpOAuthTokenProvider {
       });
       return { serverId: server.id, ok: true, userId };
     }
-    const existing = this.store.getMcpOAuthConnection(server.id);
-    const secretId = this.writeSecret(server, existing?.secretId ?? null, secret);
-    this.store.upsertMcpOAuthConnection({
+    const existing = await this.store.getMcpOAuthConnection(server.id);
+    const secretId = await this.writeSecret(server, existing?.secretId ?? null, secret);
+    await this.store.upsertMcpOAuthConnection({
       serverId: server.id,
       secretId,
       state: "connected",
@@ -528,9 +529,9 @@ export class McpOAuthService implements McpOAuthTokenProvider {
     return { serverId: server.id, ok: true };
   }
 
-  private recordUserError(serverId: string, userId: string, message: string): void {
-    const row = this.store.getMcpUserOAuthConnection(serverId, userId);
-    this.store.upsertMcpUserOAuthConnection({
+  private async recordUserError(serverId: string, userId: string, message: string): Promise<void> {
+    const row = await this.store.getMcpUserOAuthConnection(serverId, userId);
+    await this.store.upsertMcpUserOAuthConnection({
       serverId,
       userId,
       secretId: row?.secretId ?? null,
@@ -548,9 +549,9 @@ export class McpOAuthService implements McpOAuthTokenProvider {
     });
   }
 
-  private recordError(serverId: string, message: string): void {
-    const row = this.store.getMcpOAuthConnection(serverId);
-    this.store.upsertMcpOAuthConnection({
+  private async recordError(serverId: string, message: string): Promise<void> {
+    const row = await this.store.getMcpOAuthConnection(serverId);
+    await this.store.upsertMcpOAuthConnection({
       serverId,
       secretId: row?.secretId ?? null,
       state: row?.secretId ? "error" : "not_connected",
@@ -575,7 +576,7 @@ export class McpOAuthService implements McpOAuthTokenProvider {
    * not connected, it fails with a message that links to My connections.
    */
   async getAccessToken(registryServerId: string, options?: McpAccessTokenOptions): Promise<string> {
-    const server = this.store.getMcpServer(registryServerId);
+    const server = await this.store.getMcpServer(registryServerId);
     const label = server?.name ?? registryServerId;
     if (server?.credentialMode === "delegated") {
       if (!options?.userId) {
@@ -583,8 +584,8 @@ export class McpOAuthService implements McpOAuthTokenProvider {
       }
       return this.getUserAccessToken(server, options.userId, options.forceRefresh === true);
     }
-    const row = this.store.getMcpOAuthConnection(registryServerId);
-    const secret = this.readSecret(row);
+    const row = await this.store.getMcpOAuthConnection(registryServerId);
+    const secret = await this.readSecret(row);
     if (!row || !secret) {
       throw new Error(
         `MCP server '${label}' uses OAuth but is not connected. An admin can connect it on the MCP servers page.`
@@ -597,7 +598,7 @@ export class McpOAuthService implements McpOAuthTokenProvider {
     }
     if (!secret.refreshToken) {
       if (!due && !options?.forceRefresh) return secret.accessToken;
-      this.markExpired(row, `The access token for '${label}' expired and the server issued no refresh token. Reconnect it.`);
+      await this.markExpired(row, `The access token for '${label}' expired and the server issued no refresh token. Reconnect it.`);
       throw new Error(`MCP server '${label}': the OAuth access token expired and cannot be refreshed. An admin must reconnect it.`);
     }
     const running = this.refreshing.get(registryServerId);
@@ -609,13 +610,13 @@ export class McpOAuthService implements McpOAuthTokenProvider {
     return refresh;
   }
 
-  private markExpired(row: McpOAuthConnectionRecord, message: string): void {
-    this.store.upsertMcpOAuthConnection({ ...row, state: "expired", lastError: message.slice(0, 500) });
+  private async markExpired(row: McpOAuthConnectionRecord, message: string): Promise<void> {
+    await this.store.upsertMcpOAuthConnection({ ...row, state: "expired", lastError: message.slice(0, 500) });
   }
 
   private async refresh(serverId: string, label: string): Promise<string> {
-    const row = this.store.getMcpOAuthConnection(serverId);
-    const secret = this.readSecret(row);
+    const row = await this.store.getMcpOAuthConnection(serverId);
+    const secret = await this.readSecret(row);
     if (!row || !secret?.refreshToken) {
       throw new Error(`MCP server '${label}' is not connected.`);
     }
@@ -634,8 +635,8 @@ export class McpOAuthService implements McpOAuthTokenProvider {
       );
     } catch (error) {
       const message = `Token refresh failed: ${error instanceof Error ? error.message : "unknown error"}`;
-      this.store.upsertMcpOAuthConnection({ ...row, state: "error", lastError: message.slice(0, 500) });
-      this.options.onAudit?.({
+      await this.store.upsertMcpOAuthConnection({ ...row, state: "error", lastError: message.slice(0, 500) });
+      await this.options.onAudit?.({
         eventType: "mcp_server.oauth_refresh_failed",
         serverId,
         outcome: "failure",
@@ -653,9 +654,9 @@ export class McpOAuthService implements McpOAuthTokenProvider {
       ...(tokens.scope ? { scope: tokens.scope } : {})
     };
     if (!tokens.expiresAt) delete next.expiresAt;
-    const server = this.store.getMcpServer(serverId);
-    const secretId = server ? this.writeSecret(server, row.secretId, next) : row.secretId;
-    this.store.upsertMcpOAuthConnection({
+    const server = await this.store.getMcpServer(serverId);
+    const secretId = server ? await this.writeSecret(server, row.secretId, next) : row.secretId;
+    await this.store.upsertMcpOAuthConnection({
       ...row,
       secretId,
       state: "connected",
@@ -670,8 +671,8 @@ export class McpOAuthService implements McpOAuthTokenProvider {
 
   private async getUserAccessToken(server: McpServerRecord, userId: string, forceRefresh: boolean): Promise<string> {
     const label = server.name;
-    const row = this.store.getMcpUserOAuthConnection(server.id, userId);
-    const secret = this.readSecret(row);
+    const row = await this.store.getMcpUserOAuthConnection(server.id, userId);
+    const secret = await this.readSecret(row);
     if (!row || !secret) {
       throw new McpDelegatedCredentialError(
         `MCP server '${label}' uses each user's own account, and the user this run acts for has not connected theirs.${this.connectHint()}`,
@@ -682,7 +683,7 @@ export class McpOAuthService implements McpOAuthTokenProvider {
     const due = expiresAtMs - Date.now() <= this.options.refreshSkewMs;
     if (!forceRefresh && !due) return secret.accessToken;
     if (!secret.refreshToken) {
-      this.store.upsertMcpUserOAuthConnection({
+      await this.store.upsertMcpUserOAuthConnection({
         ...row,
         state: "expired",
         lastError: `The access token for '${label}' expired and the server issued no refresh token. Reconnect it.`
@@ -703,8 +704,8 @@ export class McpOAuthService implements McpOAuthTokenProvider {
   }
 
   private async refreshUser(server: McpServerRecord, userId: string): Promise<string> {
-    const row = this.store.getMcpUserOAuthConnection(server.id, userId);
-    const secret = this.readSecret(row);
+    const row = await this.store.getMcpUserOAuthConnection(server.id, userId);
+    const secret = await this.readSecret(row);
     if (!row || !secret?.refreshToken) {
       throw new McpDelegatedCredentialError(`MCP server '${server.name}': the user's account is not connected.${this.connectHint()}`, this.options.connectionsUrl);
     }
@@ -723,8 +724,8 @@ export class McpOAuthService implements McpOAuthTokenProvider {
       );
     } catch (error) {
       const message = `Token refresh failed: ${error instanceof Error ? error.message : "unknown error"}`;
-      this.store.upsertMcpUserOAuthConnection({ ...row, state: "error", lastError: message.slice(0, 500) });
-      this.options.onAudit?.({
+      await this.store.upsertMcpUserOAuthConnection({ ...row, state: "error", lastError: message.slice(0, 500) });
+      await this.options.onAudit?.({
         eventType: "mcp_server.user_oauth_refresh_failed",
         serverId: server.id,
         outcome: "failure",
@@ -741,8 +742,8 @@ export class McpOAuthService implements McpOAuthTokenProvider {
       ...(tokens.scope ? { scope: tokens.scope } : {})
     };
     if (!tokens.expiresAt) delete next.expiresAt;
-    const secretId = this.writeSecret(server, row.secretId, next, { userId });
-    this.store.upsertMcpUserOAuthConnection({
+    const secretId = await this.writeSecret(server, row.secretId, next, { userId });
+    await this.store.upsertMcpUserOAuthConnection({
       ...row,
       secretId,
       state: "connected",
@@ -756,12 +757,12 @@ export class McpOAuthService implements McpOAuthTokenProvider {
   }
 
   /** Phase 10.7 — forget one user's tokens for a delegated server. Returns false when they had none. */
-  disconnectUser(serverId: string, userId: string): boolean {
-    const row = this.store.getMcpUserOAuthConnection(serverId, userId);
+  async disconnectUser(serverId: string, userId: string): Promise<boolean> {
+    const row = await this.store.getMcpUserOAuthConnection(serverId, userId);
     if (row?.secretId) {
-      this.secretService.deleteSecret(row.secretId);
+      await this.secretService.deleteSecret(row.secretId);
     }
-    const removed = this.store.deleteMcpUserOAuthConnection(serverId, userId);
+    const removed = await this.store.deleteMcpUserOAuthConnection(serverId, userId);
     for (const [state, entry] of this.pending) {
       if (entry.serverId === serverId && entry.userId === userId) this.pending.delete(state);
     }
@@ -769,36 +770,36 @@ export class McpOAuthService implements McpOAuthTokenProvider {
   }
 
   /** Phase 10.7 — forget every user's tokens for a server (it was deleted or left delegated mode). */
-  disconnectAllUsers(serverId: string): number {
-    const rows = this.store.listMcpUserOAuthConnections({ serverId });
-    for (const row of rows) this.disconnectUser(serverId, row.userId);
+  async disconnectAllUsers(serverId: string): Promise<number> {
+    const rows = await this.store.listMcpUserOAuthConnections({ serverId });
+    for (const row of rows) await this.disconnectUser(serverId, row.userId);
     return rows.length;
   }
 
   /** Phase 10.7 — forget a user's tokens for every server (the user was deleted). */
-  disconnectUserEverywhere(userId: string): number {
-    const rows = this.store.listMcpUserOAuthConnections({ userId });
-    for (const row of rows) this.disconnectUser(row.serverId, userId);
+  async disconnectUserEverywhere(userId: string): Promise<number> {
+    const rows = await this.store.listMcpUserOAuthConnections({ userId });
+    for (const row of rows) await this.disconnectUser(row.serverId, userId);
     return rows.length;
   }
 
   /** Manual refresh from the UI. */
   async refreshNow(serverId: string): Promise<McpOAuthConnectionStatus> {
     await this.getAccessToken(serverId, { forceRefresh: true });
-    return this.status(serverId);
+    return await this.status(serverId);
   }
 
   /** Forget the tokens and the client registration. */
-  disconnect(serverId: string): McpOAuthConnectionStatus {
-    const row = this.store.getMcpOAuthConnection(serverId);
+  async disconnect(serverId: string): Promise<McpOAuthConnectionStatus> {
+    const row = await this.store.getMcpOAuthConnection(serverId);
     if (row?.secretId) {
-      this.secretService.deleteSecret(row.secretId);
+      await this.secretService.deleteSecret(row.secretId);
     }
-    this.store.deleteMcpOAuthConnection(serverId);
+    await this.store.deleteMcpOAuthConnection(serverId);
     for (const [state, entry] of this.pending) {
       if (entry.serverId === serverId && !entry.userId) this.pending.delete(state);
     }
-    return this.status(serverId);
+    return await this.status(serverId);
   }
 
   /** Test seam: number of pending authorizations. */

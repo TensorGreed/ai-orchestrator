@@ -37,9 +37,9 @@ describe("replay sandbox", () => {
     } as KnowledgeBaseStore;
     const wrapped = createReplaySandbox().wrapKnowledgeBaseStore(inner);
     expect(() => wrapped.addKnowledgeBaseChunks({} as never)).toThrow(REPLAY_KB_WRITE_REFUSED);
-    expect(wrapped.listKnowledgeBaseChunks("kb1")).toEqual([]);
+    expect(await wrapped.listKnowledgeBaseChunks("kb1")).toEqual([]);
     expect(reads).toEqual(["kb1"]);
-    expect(wrapped.getKnowledgeBase("kb1")).toMatchObject({ id: "kb1" });
+    expect(await wrapped.getKnowledgeBase("kb1")).toMatchObject({ id: "kb1" });
     expect(await createReplaySandbox().onMcpElicitation()).toEqual({ action: "decline" });
   });
 

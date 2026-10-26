@@ -11,3 +11,24 @@ export class ProjectNotEmptyError extends Error {
     this.name = "ProjectNotEmptyError";
   }
 }
+
+/**
+ * A store method this store does not implement yet (the Postgres store, until it reaches parity with SQLite).
+ * The API answers 501, as the routes that check for the SQLite store already do.
+ */
+export class StoreNotImplementedError extends Error {
+  readonly statusCode = 501;
+
+  constructor(readonly method: string) {
+    super(`${method} is not available on this store in this release.`);
+    this.name = "StoreNotImplementedError";
+  }
+}
+
+/**
+ * For a route's own catch that turns any error into a 4xx/5xx: lets StoreNotImplementedError through to the
+ * error handler, so a feature the store cannot serve answers 501 everywhere rather than a misleading 400 or 409.
+ */
+export function rethrowStoreNotImplemented(error: unknown): void {
+  if (error instanceof StoreNotImplementedError) throw error;
+}

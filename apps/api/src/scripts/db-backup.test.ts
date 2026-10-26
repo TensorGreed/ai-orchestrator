@@ -53,7 +53,7 @@ describe("db:export / db:import round trip", () => {
     const sourceStore = await SqliteStore.create(dbPath);
     const secrets = new SecretService(sourceStore, KEY_A);
 
-    sourceStore.upsertWorkflow({
+    await sourceStore.upsertWorkflow({
       id: "wf-1",
       name: "Hello",
       schemaVersion: "1.0.0",
@@ -61,8 +61,8 @@ describe("db:export / db:import round trip", () => {
       nodes: [],
       edges: []
     } as never);
-    const stored = secrets.createSecret({ name: "OPENAI_KEY", provider: "openai", value: "sk-test-12345" });
-    sourceStore.close();
+    const stored = await secrets.createSecret({ name: "OPENAI_KEY", provider: "openai", value: "sk-test-12345" });
+    await sourceStore.close();
 
     // ---- Export ----
     const exporter = await openBackupAdapter();
@@ -100,12 +100,12 @@ describe("db:export / db:import round trip", () => {
 
     const restoredStore = await SqliteStore.create(destPath);
     const restoredSecrets = new SecretService(restoredStore, KEY_A);
-    const list = restoredSecrets.listSecrets();
+    const list = await restoredSecrets.listSecrets();
     expect(list).toHaveLength(1);
     expect(list[0].name).toBe("OPENAI_KEY");
     const revealed = await restoredSecrets.resolveSecret({ secretId: stored.secretId });
     expect(revealed).toBe("sk-test-12345");
-    restoredStore.close();
+    await restoredStore.close();
     try { fs.rmSync(path.dirname(destPath), { recursive: true, force: true }); } catch { /* ignore */ }
   });
 
@@ -113,8 +113,8 @@ describe("db:export / db:import round trip", () => {
     process.env.SECRET_MASTER_KEY_BASE64 = KEY_A;
     const sourceStore = await SqliteStore.create(dbPath);
     const sourceSecrets = new SecretService(sourceStore, KEY_A);
-    const stored = sourceSecrets.createSecret({ name: "STRIPE_KEY", provider: "openai-compatible", value: "sk-live-rotateme" });
-    sourceStore.close();
+    const stored = await sourceSecrets.createSecret({ name: "STRIPE_KEY", provider: "openai-compatible", value: "sk-live-rotateme" });
+    await sourceStore.close();
 
     const exporter = await openBackupAdapter();
     const exportedSecrets = await exporter.selectAll("secrets");
@@ -163,7 +163,7 @@ describe("db:export / db:import round trip", () => {
     const restoredSecrets = new SecretService(restoredStore, KEY_B);
     const revealed = await restoredSecrets.resolveSecret({ secretId: stored.secretId });
     expect(revealed).toBe("sk-live-rotateme");
-    restoredStore.close();
+    await restoredStore.close();
     try { fs.rmSync(path.dirname(destPath), { recursive: true, force: true }); } catch { /* ignore */ }
   });
 });

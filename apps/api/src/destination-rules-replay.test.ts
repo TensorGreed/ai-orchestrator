@@ -40,7 +40,7 @@ const EMAIL = "jane.doe@example.com";
 async function createTestContext(overrides: Record<string, string> = {}): Promise<TestContext> {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-dest-replay-"));
   const store = await SqliteStore.create(path.join(tempDir, "orchestrator.db"));
-  store.ensureDefaultProject();
+  await store.ensureDefaultProject();
   const config = parseConfig({
     LOG_LEVEL: "warn",
     SEED_SAMPLE_WORKFLOWS: "false",
@@ -53,7 +53,7 @@ async function createTestContext(overrides: Record<string, string> = {}): Promis
   });
   const secretService = new SecretService(store, config.SECRET_MASTER_KEY_BASE64);
   const authService = new AuthService(store, config.SESSION_TTL_HOURS);
-  const app = createApp(config, store, secretService, authService);
+  const app = await createApp(config, store, secretService, authService);
   await app.ready();
   const context = { app, store, authService, secretService, config, tempDir };
   contexts.push(context);
@@ -66,7 +66,7 @@ afterEach(async () => {
     const context = contexts.pop()!;
     await context.app.close();
     try {
-      context.store.close();
+      await context.store.close();
     } catch {
       // Closed by the app's shutdown hooks.
     }
@@ -77,7 +77,7 @@ afterEach(async () => {
 async function login(context: TestContext, role: "admin" | "builder"): Promise<{ cookie: string }> {
   const email = `${role}@example.com`;
   const password = `${role}-Pass-123!`;
-  context.authService.register({ email, password, role });
+  await context.authService.register({ email, password, role });
   const response = await context.app.inject({ method: "POST", url: "/api/auth/login", payload: { email, password } });
   const raw = response.headers["set-cookie"];
   const values = Array.isArray(raw) ? raw : [raw ?? ""];
@@ -176,9 +176,9 @@ async function enforcedSetup() {
   const context = await createTestContext({ REPLAY_CONCURRENCY: "1" });
   const admin = await login(context, "admin");
   const builder = await login(context, "builder");
-  const secret = context.secretService.createSecret({ name: "Model key", provider: "openai", value: MODEL_KEY });
-  context.store.upsertWorkflow(cardAgent(model.baseUrl, secret.secretId));
-  context.store.writeWorkflowVersion({ id: "wf-cand-v1", workflowId: "wf-cand", version: 1, workflowJson: JSON.stringify(context.store.getWorkflow("wf-cand")) });
+  const secret = await context.secretService.createSecret({ name: "Model key", provider: "openai", value: MODEL_KEY });
+  await context.store.upsertWorkflow(cardAgent(model.baseUrl, secret.secretId));
+  await context.store.writeWorkflowVersion({ id: "wf-cand-v1", workflowId: "wf-cand", version: 1, workflowJson: JSON.stringify(await context.store.getWorkflow("wf-cand")) });
   // The fake model listens on loopback: classify it public so the starter rule (≤ private) applies to it.
   expect((await call(context, "POST", "/api/data-destinations", admin.cookie, { name: "Test model", kind: "http", host: "127.0.0.1", tier: "public" })).statusCode).toBe(201);
   expect((await call(context, "POST", "/api/guard/destination-rules/starter", admin.cookie)).statusCode).toBe(201);
@@ -236,7 +236,7 @@ describe("runtime surrogates end to end", () => {
     const builder = await login(context, "builder");
     const receiver = await startReceiver();
     const id = "wf-surr";
-    const saved = context.store.upsertWorkflow({
+    const saved = await context.store.upsertWorkflow({
       id,
       name: "Surrogate sender",
       schemaVersion: "1.0.0",
@@ -252,7 +252,7 @@ describe("runtime surrogates end to end", () => {
         { id: "e2", source: "send", target: "out" }
       ]
     } as Workflow);
-    new WorkflowVersionService(context.store).snapshot({ workflow: saved, changeNote: "test" });
+    await new WorkflowVersionService(context.store).snapshot({ workflow: saved, changeNote: "test" });
     expect((await call(context, "POST", "/api/data-destinations", admin.cookie, { name: "Receiver", kind: "http", host: "127.0.0.1", tier: "public" })).statusCode).toBe(201);
     const created = await call(context, "POST", "/api/guard/profiles", admin.cookie, {
       document: {

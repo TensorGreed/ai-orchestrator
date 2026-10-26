@@ -12,11 +12,11 @@ describe("Phase 8.2 — FinOps cost rollup", () => {
   beforeEach(async () => {
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-phase8-2-"));
     store = await SqliteStore.create(path.join(tempDir, "orchestrator.db"));
-    store.ensureDefaultProject();
+    await store.ensureDefaultProject();
   });
 
-  afterEach(() => {
-    store.close();
+  afterEach(async () => {
+    await store.close();
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
 
@@ -81,9 +81,9 @@ describe("Phase 8.2 — FinOps cost rollup", () => {
   });
 
   describe("UsageService.recordExecution", () => {
-    it("sums _telemetry across nodes and writes one usage_events row", () => {
+    it("sums _telemetry across nodes and writes one usage_events row", async () => {
       const u = new UsageService(store);
-      const result = u.recordExecution({
+      const result = await u.recordExecution({
         executionId: "exec_1",
         workflowId: "wf_1",
         workflowName: "Test workflow",
@@ -111,7 +111,7 @@ describe("Phase 8.2 — FinOps cost rollup", () => {
       expect(result.llmCallCount).toBe(3); // 1 (llm1 default) + 2 (llm2 explicit)
       expect(result.costUsd).toBeGreaterThan(0);
 
-      const events = store.listUsageEvents({ workflowId: "wf_1" });
+      const events = await store.listUsageEvents({ workflowId: "wf_1" });
       expect(events).toHaveLength(1);
       const ev = events[0]!;
       expect(ev.executionId).toBe("exec_1");
@@ -122,9 +122,9 @@ describe("Phase 8.2 — FinOps cost rollup", () => {
       expect(ev.providers.find((p) => p.providerId === "anthropic")!.calls).toBe(2);
     });
 
-    it("records a zero-cost row for executions with no LLM calls (still attributes spend correctly)", () => {
+    it("records a zero-cost row for executions with no LLM calls (still attributes spend correctly)", async () => {
       const u = new UsageService(store);
-      const result = u.recordExecution({
+      const result = await u.recordExecution({
         executionId: "exec_2",
         workflowId: "wf_2",
         userEmail: null,
@@ -136,7 +136,7 @@ describe("Phase 8.2 — FinOps cost rollup", () => {
       });
       expect(result.totalTokens).toBe(0);
       expect(result.costUsd).toBe(0);
-      const events = store.listUsageEvents({ workflowId: "wf_2" });
+      const events = await store.listUsageEvents({ workflowId: "wf_2" });
       expect(events).toHaveLength(1);
       expect(events[0]!.totalTokens).toBe(0);
       expect(events[0]!.providers).toHaveLength(0);
@@ -144,8 +144,8 @@ describe("Phase 8.2 — FinOps cost rollup", () => {
   });
 
   describe("query API", () => {
-    function seed(u: UsageService, overrides: Partial<{ workflowId: string; userId: string; tokens: number; createdAtOffset: number }> = {}): void {
-      u.recordExecution({
+    async function seed(u: UsageService, overrides: Partial<{ workflowId: string; userId: string; tokens: number; createdAtOffset: number }> = {}): Promise<void> {
+      await u.recordExecution({
         executionId: `exec_${Math.random()}`,
         workflowId: overrides.workflowId ?? "wf_a",
         workflowName: "A",
@@ -166,26 +166,26 @@ describe("Phase 8.2 — FinOps cost rollup", () => {
       });
     }
 
-    it("totals aggregate over the window", () => {
+    it("totals aggregate over the window", async () => {
       const u = new UsageService(store);
-      seed(u, { workflowId: "wf_a", tokens: 1000 });
-      seed(u, { workflowId: "wf_a", tokens: 2000 });
-      seed(u, { workflowId: "wf_b", tokens: 500 });
+      await seed(u, { workflowId: "wf_a", tokens: 1000 });
+      await seed(u, { workflowId: "wf_a", tokens: 2000 });
+      await seed(u, { workflowId: "wf_b", tokens: 500 });
 
       const window = { from: "1970-01-01T00:00:00Z", to: "9999-12-31T00:00:00Z" };
-      const totals = store.queryUsageTotals(window);
+      const totals = await store.queryUsageTotals(window);
       expect(totals.executions).toBe(3);
       expect(totals.inputTokens).toBe(3500);
       expect(totals.outputTokens).toBe(1500);
       expect(totals.costUsd).toBeGreaterThan(0);
     });
 
-    it("groupBy=workflow ranks by cost desc", () => {
+    it("groupBy=workflow ranks by cost desc", async () => {
       const u = new UsageService(store);
-      seed(u, { workflowId: "wf_cheap", tokens: 100 });
-      seed(u, { workflowId: "wf_expensive", tokens: 100_000 });
+      await seed(u, { workflowId: "wf_cheap", tokens: 100 });
+      await seed(u, { workflowId: "wf_expensive", tokens: 100_000 });
 
-      const rows = store.queryUsageRollup({
+      const rows = await store.queryUsageRollup({
         from: "1970-01-01T00:00:00Z",
         to: "9999-12-31T00:00:00Z",
         groupBy: "workflow"
@@ -194,12 +194,12 @@ describe("Phase 8.2 — FinOps cost rollup", () => {
       expect(rows[1]!.workflowId).toBe("wf_cheap");
     });
 
-    it("groupBy=user splits by user_id", () => {
+    it("groupBy=user splits by user_id", async () => {
       const u = new UsageService(store);
-      seed(u, { userId: "user_alice", tokens: 1000 });
-      seed(u, { userId: "user_bob", tokens: 500 });
+      await seed(u, { userId: "user_alice", tokens: 1000 });
+      await seed(u, { userId: "user_bob", tokens: 500 });
 
-      const rows = store.queryUsageRollup({
+      const rows = await store.queryUsageRollup({
         from: "1970-01-01T00:00:00Z",
         to: "9999-12-31T00:00:00Z",
         groupBy: "user"
@@ -207,10 +207,10 @@ describe("Phase 8.2 — FinOps cost rollup", () => {
       expect(rows.map((r) => r.userId).sort()).toEqual(["user_alice", "user_bob"]);
     });
 
-    it("groupBy=provider unfolds providers_json into per-model rows", () => {
+    it("groupBy=provider unfolds providers_json into per-model rows", async () => {
       const u = new UsageService(store);
       // Mixed-provider execution
-      u.recordExecution({
+      await u.recordExecution({
         executionId: "exec_mix",
         workflowId: "wf_x",
         userId: null,
@@ -224,7 +224,7 @@ describe("Phase 8.2 — FinOps cost rollup", () => {
         }
       });
 
-      const rows = store.queryUsageRollup({
+      const rows = await store.queryUsageRollup({
         from: "1970-01-01T00:00:00Z",
         to: "9999-12-31T00:00:00Z",
         groupBy: "provider"
@@ -234,11 +234,11 @@ describe("Phase 8.2 — FinOps cost rollup", () => {
       expect(providerIds).toEqual(["anthropic", "openai"]);
     });
 
-    it("groupBy=day yields ISO date buckets ordered ascending", () => {
+    it("groupBy=day yields ISO date buckets ordered ascending", async () => {
       const u = new UsageService(store);
-      seed(u, { tokens: 1000 });
-      seed(u, { tokens: 2000 });
-      const rows = store.queryUsageRollup({
+      await seed(u, { tokens: 1000 });
+      await seed(u, { tokens: 2000 });
+      const rows = await store.queryUsageRollup({
         from: "1970-01-01T00:00:00Z",
         to: "9999-12-31T00:00:00Z",
         groupBy: "day"

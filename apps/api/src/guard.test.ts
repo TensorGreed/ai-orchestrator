@@ -41,7 +41,7 @@ async function createTestContext(overrides: Record<string, string> = {}): Promis
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-guard-"));
   const dbPath = path.join(tempDir, "orchestrator.db");
   const store = await SqliteStore.create(dbPath);
-  store.ensureDefaultProject();
+  await store.ensureDefaultProject();
   const config = parseConfig({
     LOG_LEVEL: "info",
     SEED_SAMPLE_WORKFLOWS: "false",
@@ -54,7 +54,7 @@ async function createTestContext(overrides: Record<string, string> = {}): Promis
   });
   const secretService = new SecretService(store, config.SECRET_MASTER_KEY_BASE64);
   const authService = new AuthService(store, config.SESSION_TTL_HOURS);
-  const app = createApp(config, store, secretService, authService);
+  const app = await createApp(config, store, secretService, authService);
   await app.ready();
   const context = { app, store, authService, secretService, config, tempDir, dbPath };
   contexts.push(context);
@@ -67,7 +67,7 @@ afterEach(async () => {
     const context = contexts.pop()!;
     await context.app.close();
     try {
-      context.store.close();
+      await context.store.close();
     } catch {
       // Already closed by the app shutdown hooks.
     }
@@ -80,7 +80,7 @@ type Role = "admin" | "builder" | "operator" | "viewer";
 async function login(context: TestContext, role: Role, name: string = role): Promise<{ cookie: string; id: string }> {
   const email = `${name}@example.com`;
   const password = `${name}-Pass-123!`;
-  const user = context.authService.register({ email, password, role });
+  const user = await context.authService.register({ email, password, role });
   const response = await context.app.inject({ method: "POST", url: "/api/auth/login", payload: { email, password } });
   if (response.statusCode !== 200) throw new Error(`Login failed for ${name}: ${response.body}`);
   const raw = response.headers["set-cookie"];
@@ -180,7 +180,7 @@ describe("migration 28", () => {
     const created = await call(context, "POST", "/api/guard/profiles", admin.cookie, { document: strictProfile("kept") });
     expect(created.statusCode).toBe(201);
     await context.app.close();
-    context.store.close();
+    await context.store.close();
 
     const copy = path.join(context.tempDir, "copy.db");
     fs.copyFileSync(context.dbPath, copy);
@@ -188,8 +188,8 @@ describe("migration 28", () => {
     for (const table of tables) {
       expect((reopened as unknown as { queryAll: (sql: string) => unknown[] }).queryAll(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = '${table}'`)).toHaveLength(1);
     }
-    expect(reopened.getGuardProfile("kept")?.latestVersion).toBe(1);
-    reopened.close();
+    expect((await reopened.getGuardProfile("kept"))?.latestVersion).toBe(1);
+    await reopened.close();
     contexts.pop();
     fs.rmSync(context.tempDir, { recursive: true, force: true });
   });
@@ -244,7 +244,7 @@ describe("guard profiles", () => {
     });
     expect(unknownKey.json<{ issues: Array<{ path: string }> }>().issues[0]!.path).toBe("protection.dataClasses.email.options.keyId");
 
-    const secret = context.secretService.createSecret({ name: "guard key", provider: "custom", value: crypto.randomBytes(32).toString("base64") });
+    const secret = await context.secretService.createSecret({ name: "guard key", provider: "custom", value: crypto.randomBytes(32).toString("base64") });
     const keyed = await call(context, "POST", "/api/guard/profiles", builder.cookie, {
       document: { ...strictProfile("keyed"), protection: { dataClasses: { email: { providerId: "aes_gcm", options: { keyId: secret.secretId } } } } }
     });
@@ -300,7 +300,7 @@ describe("bindings and resolution", () => {
     const builder = await login(context, "builder");
     await call(context, "POST", "/api/guard/profiles", admin.cookie, { document: strictProfile("org-floor", "Org floor") });
     await call(context, "POST", "/api/guard/profiles", builder.cookie, { document: strictProfile("team", "Team") });
-    context.store.upsertWorkflow(guardWorkflow("wf-bind"));
+    await context.store.upsertWorkflow(guardWorkflow("wf-bind"));
 
     expect((await call(context, "PUT", "/api/guard/bindings/projects/default", builder.cookie, { mode: "enforced", profileId: "org-floor" })).statusCode).toBe(403);
     const missing = await call(context, "PUT", "/api/guard/bindings/projects/default", admin.cookie, { mode: "enforced" });
@@ -326,7 +326,7 @@ describe("bindings and resolution", () => {
       ["instance", "auto", "default"]
     ]);
 
-    const audit = context.store.listAuditLogs({ eventType: "guard.binding.updated" } as never) as unknown as { items: unknown[] };
+    const audit = await context.store.listAuditLogs({ eventType: "guard.binding.updated" } as never) as unknown as { items: unknown[] };
     expect(audit.items.length).toBeGreaterThanOrEqual(2);
   });
 });
@@ -351,7 +351,7 @@ describe("guard events and the token vault", () => {
     const context = await createTestContext();
     const builder = await login(context, "builder");
     const admin = await login(context, "admin");
-    context.store.upsertWorkflow(guardWorkflow("wf-events"));
+    await context.store.upsertWorkflow(guardWorkflow("wf-events"));
     const run = (await call(context, "POST", "/api/workflows/wf-events/execute", builder.cookie, { user_prompt: `Use ${SECRET} to reach ${EMAIL}` })).json<RunResult>();
     expect(run.status).toBe("success");
     const guardOutput = run.nodeResults.find((entry) => entry.nodeId === "guard")!.output!;
@@ -369,7 +369,7 @@ describe("guard events and the token vault", () => {
     const listed = await call(context, "GET", "/api/guard/events?workflowId=wf-events", admin.cookie);
     const stats = await call(context, "GET", "/api/guard/stats?workflowId=wf-events", admin.cookie);
     expect(stats.json<{ stats: { verdicts: Array<{ key: string; count: number }> } }>().stats.verdicts).toEqual([{ key: "redact", count: 1 }]);
-    const auditLogs = JSON.stringify(context.store.listAuditLogs({} as never));
+    const auditLogs = JSON.stringify(await context.store.listAuditLogs({} as never));
     const rows = JSON.stringify((context.store as unknown as { queryAll: (sql: string) => unknown[] }).queryAll("SELECT * FROM guard_events"));
     for (const haystack of [JSON.stringify(events), listed.body, stats.body, auditLogs, rows, written.join("")]) {
       expect(haystack).not.toContain(SECRET);
@@ -381,14 +381,14 @@ describe("guard events and the token vault", () => {
   it("persists deterministic vault tokens sealed with the master key, keyed through a secret reference", async () => {
     const context = await createTestContext();
     const builder = await login(context, "builder");
-    const key = context.secretService.createSecret({ name: "vault key", provider: "custom", value: crypto.randomBytes(32).toString("base64") });
+    const key = await context.secretService.createSecret({ name: "vault key", provider: "custom", value: crypto.randomBytes(32).toString("base64") });
     const workflow = guardWorkflow(
       "wf-vault",
       { profileId: "default" },
       [{ id: "vault", type: "guard_protection", name: "Vault", position: { x: 200, y: 200 }, config: { providerId: "token_vault", dataClasses: ["email"], deterministic: true, keySecretRef: { secretId: key.secretId } } }],
       [{ id: "e4", source: "guard", sourceHandle: "protection", target: "vault" }]
     );
-    context.store.upsertWorkflow(workflow);
+    await context.store.upsertWorkflow(workflow);
     const first = (await call(context, "POST", "/api/workflows/wf-vault/execute", builder.cookie, { user_prompt: `Email ${EMAIL}` })).json<RunResult>();
     const token = /tok_email_\S+/.exec(String(first.nodeResults.find((entry) => entry.nodeId === "guard")!.output!.user_prompt))?.[0];
     expect(token).toBeTruthy();
@@ -408,7 +408,7 @@ describe("guard events and the token vault", () => {
     // The protection node carries a secret reference only; raw key material never appears in the stored workflow.
     const keyValue = (await context.secretService.resolveSecret(key))!;
     expect(keyValue.length).toBeGreaterThan(20);
-    expect(JSON.stringify(context.store.getWorkflow("wf-vault"))).not.toContain(keyValue);
+    expect(JSON.stringify(await context.store.getWorkflow("wf-vault"))).not.toContain(keyValue);
   });
 
   it("hands require_approval to the approvals queue and resumes to pass on approve", async () => {
@@ -418,7 +418,7 @@ describe("guard events and the token vault", () => {
     const document = strictProfile("approve-email");
     (document.channels as any).prompt.actions.email = { action: "require_approval" };
     expect((await call(context, "POST", "/api/guard/profiles", builder.cookie, { document })).statusCode).toBe(201);
-    context.store.upsertWorkflow(guardWorkflow("wf-approve", { profileId: "approve-email", approvalMessage: "Check the address" }));
+    await context.store.upsertWorkflow(guardWorkflow("wf-approve", { profileId: "approve-email", approvalMessage: "Check the address" }));
     const run = (await call(context, "POST", "/api/workflows/wf-approve/execute", builder.cookie, { user_prompt: `Write to ${EMAIL}` })).json<RunResult>();
     expect(run.status).toBe("waiting_approval");
     const approvals = (await call(context, "GET", "/api/approvals", operator.cookie)).json<{ items?: Array<{ id: string; approvalMessage?: string }> } | Array<{ id: string; approvalMessage?: string }>>();
@@ -434,21 +434,21 @@ describe("guard events and the token vault", () => {
   it("follows the execution-history retention", async () => {
     const context = await createTestContext();
     const builder = await login(context, "builder");
-    context.store.upsertWorkflow(guardWorkflow("wf-retention"));
+    await context.store.upsertWorkflow(guardWorkflow("wf-retention"));
     await call(context, "POST", "/api/workflows/wf-retention/execute", builder.cookie, { user_prompt: "hello" });
-    const count = () => context.store.listGuardEvents({ workflowId: "wf-retention" }).total;
-    expect(count()).toBe(1);
-    context.store.pruneExecutionHistory({ before: new Date(Date.now() + 60_000).toISOString() });
-    expect(count()).toBe(0);
+    const count = async () => (await context.store.listGuardEvents({ workflowId: "wf-retention" })).total;
+    expect(await count()).toBe(1);
+    await context.store.pruneExecutionHistory({ before: new Date(Date.now() + 60_000).toISOString() });
+    expect(await count()).toBe(0);
   });
 });
 
 describe("guard security review fixes", () => {
   /** A project membership with no permissions: the user cannot read or write it, whatever their global role. */
-  function lockOut(context: TestContext, userId: string, projectId: string) {
-    context.store.upsertProject({ id: projectId, name: projectId });
-    context.store.upsertCustomRole({ id: `none-${projectId}`, projectId, name: "No access", permissions: [] });
-    context.store.upsertProjectRole({ userId, projectId, role: "custom", customRoleId: `none-${projectId}` });
+  async function lockOut(context: TestContext, userId: string, projectId: string) {
+    await context.store.upsertProject({ id: projectId, name: projectId });
+    await context.store.upsertCustomRole({ id: `none-${projectId}`, projectId, name: "No access", permissions: [] });
+    await context.store.upsertProjectRole({ userId, projectId, role: "custom", customRoleId: `none-${projectId}` });
   }
 
   it("refuses a builder's edit or re-import of a profile any project enforces; admins still can", async () => {
@@ -464,7 +464,7 @@ describe("guard security review fixes", () => {
     expect(put.statusCode).toBe(403);
     const imported = await call(context, "POST", "/api/guard/profiles/import", builder.cookie, { document: loosened });
     expect(imported.statusCode).toBe(403);
-    expect(context.store.getGuardProfileVersion("org-floor")!.version).toBe(1);
+    expect((await context.store.getGuardProfileVersion("org-floor"))!.version).toBe(1);
 
     // Profiles nobody enforces stay editable by builders, and admins can still change the enforced one.
     expect((await call(context, "PUT", "/api/guard/profiles/team", builder.cookie, { document: { ...strictProfile("team", "Team"), description: "Edited" } })).statusCode).toBe(200);
@@ -476,11 +476,11 @@ describe("guard security review fixes", () => {
     const admin = await login(context, "admin");
     const builder = await login(context, "builder");
     await call(context, "POST", "/api/guard/profiles", admin.cookie, { document: strictProfile("team", "Team") });
-    lockOut(context, builder.id, "other");
+    await lockOut(context, builder.id, "other");
     expect((await call(context, "PUT", "/api/guard/bindings/projects/other", builder.cookie, { mode: "override", profileId: "team" })).statusCode).toBe(403);
     expect((await call(context, "GET", "/api/guard/bindings/projects/other", builder.cookie)).statusCode).toBe(403);
     expect((await call(context, "GET", "/api/guard/effective?projectId=other", builder.cookie)).statusCode).toBe(403);
-    expect(context.store.getGuardBinding("project", "other")).toBeFalsy();
+    expect(await context.store.getGuardBinding("project", "other")).toBeFalsy();
     // In a project they can write, builders still set overrides.
     expect((await call(context, "PUT", "/api/guard/bindings/projects/default", builder.cookie, { mode: "override", profileId: "team" })).statusCode).toBe(200);
     expect((await call(context, "PUT", "/api/guard/bindings/projects/other", admin.cookie, { mode: "override", profileId: "team" })).statusCode).toBe(200);
@@ -491,10 +491,10 @@ describe("guard security review fixes", () => {
     const admin = await login(context, "admin");
     const builder = await login(context, "builder");
     await call(context, "POST", "/api/guard/profiles", admin.cookie, { document: strictProfile("team", "Team") });
-    lockOut(context, builder.id, "hidden");
-    context.store.upsertWorkflow({ ...guardWorkflow("wf-hidden"), projectId: "hidden" });
-    context.store.upsertWorkflow({ ...guardWorkflow("wf-hidden-bound"), projectId: "hidden" });
-    context.store.upsertWorkflow(guardWorkflow("wf-visible"));
+    await lockOut(context, builder.id, "hidden");
+    await context.store.upsertWorkflow({ ...guardWorkflow("wf-hidden"), projectId: "hidden" });
+    await context.store.upsertWorkflow({ ...guardWorkflow("wf-hidden-bound"), projectId: "hidden" });
+    await context.store.upsertWorkflow(guardWorkflow("wf-visible"));
     await call(context, "PUT", "/api/guard/bindings/workflows/wf-hidden-bound", admin.cookie, { mode: "override", profileId: "team" });
     const hidden = (await call(context, "POST", "/api/workflows/wf-hidden/execute", admin.cookie, { user_prompt: "hello" })).json<RunResult>();
     await call(context, "POST", "/api/workflows/wf-visible/execute", admin.cookie, { user_prompt: "hello" });
@@ -525,8 +525,8 @@ describe("guard security review fixes", () => {
   it("guards the error-handler workflow under its own bindings", async () => {
     const context = await createTestContext();
     const builder = await login(context, "builder");
-    context.store.upsertWorkflow(guardWorkflow("wf-onerror", { inputField: "error" }));
-    context.store.upsertWorkflow({
+    await context.store.upsertWorkflow(guardWorkflow("wf-onerror", { inputField: "error" }));
+    await context.store.upsertWorkflow({
       id: "wf-fails",
       name: "Fails",
       schemaVersion: "1.0.0",

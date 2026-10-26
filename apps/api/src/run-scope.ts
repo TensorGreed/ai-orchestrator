@@ -58,44 +58,44 @@ type ArtifactRecord = NonNullable<Awaited<ReturnType<AgentSessionArtifactStore["
 export type SecretScope = { id?: string; projectId?: string | null };
 
 export interface RunScopeDeps {
-  getWorkflow: (id: string) => Workflow | null | undefined;
+  getWorkflow: (id: string) => Promise<Workflow | null | undefined>;
   /** Phase 15.4 — the version an entry point on `channel` runs; without it every channel loads the draft. */
-  getRunnableWorkflow?: (id: string, channel: ReleaseChannel) => Workflow | null | undefined;
+  getRunnableWorkflow?: (id: string, channel: ReleaseChannel) => Promise<Workflow | null | undefined>;
   /** Phase 15.4 — why production refuses an existing workflow (a deactivated gated one), so a production parent fails with that reason. */
-  productionRefusal?: (id: string) => string | null;
+  productionRefusal?: (id: string) => Promise<string | null>;
   /** Workflow shares as stored: which project gets which access level. */
-  listWorkflowShares: (workflowId: string) => Array<{ projectId: string; accessLevel: string }>;
+  listWorkflowShares: (workflowId: string) => Promise<Array<{ projectId: string; accessLevel: string }>>;
   /** The secret's project (the default project when it has none), or null if it does not exist. */
-  getSecretProjectId: (secretId: string) => string | null;
-  listSecretIdsSharedToProject: (projectId: string) => string[];
-  canUseSecretsInProject: (user: SafeUser, projectId: string) => boolean;
+  getSecretProjectId: (secretId: string) => Promise<string | null>;
+  listSecretIdsSharedToProject: (projectId: string) => Promise<string[]>;
+  canUseSecretsInProject: (user: SafeUser, projectId: string) => Promise<boolean>;
   /**
    * Do default-project secrets and MCP servers count as shared with every
    * project? True in `role` isolation; in `strict` they need an explicit share.
    */
   defaultSecretsShared: boolean;
   /** A registry MCP server's project (null when it has none), or undefined if it does not exist. */
-  getMcpServerProjectId: (serverId: string) => string | null | undefined;
+  getMcpServerProjectId: (serverId: string) => Promise<string | null | undefined>;
   resolveRegisteredMcpServer: McpServerResolver;
   /**
    * Projects of the workflows that claim a pre-scoping session namespace:
    * as their default `<workflowId>:<nodeId>` or as a literal custom namespace.
    */
-  legacyNamespaceOwnerProjects: (namespace: string) => string[];
+  legacyNamespaceOwnerProjects: (namespace: string) => Promise<string[]>;
   resolveSecret: (secretRef?: SecretReference) => Promise<string | undefined>;
   knowledgeBaseStoreFor: (projectId: string | null | undefined) => KnowledgeBaseStore;
   sessions: {
-    loadMemory: (namespace: string, sessionId: string) => ChatMessages;
+    loadMemory: (namespace: string, sessionId: string) => Promise<ChatMessages>;
     /** `labels` (Phase 16) are passed only while the run tracks data labels. */
-    saveMemory: (namespace: string, sessionId: string, messages: ChatMessages, labels?: DataLabels) => void;
+    saveMemory: (namespace: string, sessionId: string, messages: ChatMessages, labels?: DataLabels) => void | Promise<void>;
     /** Phase 16 — labels stored with a session's memory; null when none were recorded. */
-    loadMemoryLabels?: (namespace: string, sessionId: string) => DataLabels | null;
-    saveToolCall: (input: ToolCallInput) => ToolCallRecord;
-    listToolCalls: (input: { namespace: string; sessionId: string; toolName?: string; limit?: number }) => ToolCallSummary[];
-    getToolCall: (input: { namespace: string; sessionId: string; id: string }) => ToolCallRecord | null;
+    loadMemoryLabels?: (namespace: string, sessionId: string) => Promise<DataLabels | null>;
+    saveToolCall: (input: ToolCallInput) => Promise<ToolCallRecord>;
+    listToolCalls: (input: { namespace: string; sessionId: string; toolName?: string; limit?: number }) => Promise<ToolCallSummary[]>;
+    getToolCall: (input: { namespace: string; sessionId: string; id: string }) => Promise<ToolCallRecord | null>;
     /** `labels` (Phase 16) are passed only while the run tracks data labels. */
-    saveArtifact: (input: { namespace: string; sessionId: string; artifactKey: string; value: unknown; labels?: DataLabels }) => ArtifactRecord;
-    loadArtifact: (input: { namespace: string; sessionId: string; artifactKey: string }) => ArtifactRecord | null;
+    saveArtifact: (input: { namespace: string; sessionId: string; artifactKey: string; value: unknown; labels?: DataLabels }) => Promise<ArtifactRecord>;
+    loadArtifact: (input: { namespace: string; sessionId: string; artifactKey: string }) => Promise<ArtifactRecord | null>;
   };
 }
 
@@ -134,17 +134,17 @@ export function createRunScope(deps: RunScopeDeps) {
    * May `caller` load `targetId` as a sub-workflow or error workflow? Only the
    * projects decide, never the run's user. Throws a clear error when not.
    */
-  const loadWorkflowFor = (caller: Workflow, purpose: "Sub-workflow" | "Error workflow", channel: ReleaseChannel = "draft") => (targetId: string): Workflow | undefined => {
-    const target = channel === "production" && deps.getRunnableWorkflow ? deps.getRunnableWorkflow(targetId, "production") : deps.getWorkflow(targetId);
+  const loadWorkflowFor = (caller: Workflow, purpose: "Sub-workflow" | "Error workflow", channel: ReleaseChannel = "draft") => async (targetId: string): Promise<Workflow | undefined> => {
+    const target = channel === "production" && deps.getRunnableWorkflow ? await deps.getRunnableWorkflow(targetId, "production") : await deps.getWorkflow(targetId);
     if (!target) {
-      const refusal = channel === "production" ? deps.productionRefusal?.(targetId) : null;
+      const refusal = channel === "production" ? await deps.productionRefusal?.(targetId) : null;
       if (refusal) throw new Error(`${purpose} '${targetId}': ${refusal}`);
       return undefined;
     }
     if (!target.projectId) return target;
     const callerProject = caller.projectId ?? DEFAULT_PROJECT_ID;
     if (target.projectId === callerProject) return target;
-    if (deps.listWorkflowShares(target.id).some((share) => share.projectId === callerProject && share.accessLevel === "execute")) return target;
+    if ((await deps.listWorkflowShares(target.id)).some((share) => share.projectId === callerProject && share.accessLevel === "execute")) return target;
     throw new Error(
       `${purpose} '${targetId}' is in another project and is not shared to this workflow's project with execute access, so this run cannot call it.`
     );
@@ -155,23 +155,26 @@ export function createRunScope(deps: RunScopeDeps) {
 
   // `secret:use` where the workflow lives, or where it is shared to with
   // execute: an execute share is how another project's users run it.
-  const actorMayUseSecrets = (workflow: SecretScope, actor: SafeUser) =>
-    deps.canUseSecretsInProject(actor, workflow.projectId ?? DEFAULT_PROJECT_ID) ||
-    (workflow.id ? deps.listWorkflowShares(workflow.id) : [])
-      .some((share) => share.accessLevel === "execute" && deps.canUseSecretsInProject(actor, share.projectId));
+  const actorMayUseSecrets = async (workflow: SecretScope, actor: SafeUser): Promise<boolean> => {
+    if (await deps.canUseSecretsInProject(actor, workflow.projectId ?? DEFAULT_PROJECT_ID)) return true;
+    for (const share of workflow.id ? await deps.listWorkflowShares(workflow.id) : []) {
+      if (share.accessLevel === "execute" && await deps.canUseSecretsInProject(actor, share.projectId)) return true;
+    }
+    return false;
+  };
 
   /**
    * Why a run of `workflow` as `actor` may not use this secret, or null when
    * it may (or the secret does not exist, which resolves to nothing).
    */
-  const secretProblem = (workflow: SecretScope, actor: SafeUser | null | undefined, secretId: string): string | null => {
+  const secretProblem = async (workflow: SecretScope, actor: SafeUser | null | undefined, secretId: string): Promise<string | null> => {
     const projectId = workflow.projectId ?? DEFAULT_PROJECT_ID;
-    const secretProject = deps.getSecretProjectId(secretId);
+    const secretProject = await deps.getSecretProjectId(secretId);
     if (secretProject === null) return null;
     const visible =
-      secretProject === projectId || sharedFromDefault(secretProject) || deps.listSecretIdsSharedToProject(projectId).includes(secretId);
+      secretProject === projectId || sharedFromDefault(secretProject) || (await deps.listSecretIdsSharedToProject(projectId)).includes(secretId);
     if (!visible) return `Secret '${secretId}' belongs to another project and is not shared to this workflow's project.`;
-    if (actor && actor.role !== "admin" && !actorMayUseSecrets(workflow, actor)) {
+    if (actor && actor.role !== "admin" && !await actorMayUseSecrets(workflow, actor)) {
       return `Permission 'secret:use' is required in this workflow's project to use secret '${secretId}'.`;
     }
     return null;
@@ -179,14 +182,14 @@ export function createRunScope(deps: RunScopeDeps) {
 
   const resolveSecretFor = (workflow: Workflow, actor: SafeUser | null | undefined) => async (secretRef?: SecretReference) => {
     if (!secretRef?.secretId) return undefined;
-    if (deps.getSecretProjectId(secretRef.secretId) === null) return undefined;
-    const problem = secretProblem(workflow, actor, secretRef.secretId);
+    if ((await deps.getSecretProjectId(secretRef.secretId)) === null) return undefined;
+    const problem = await secretProblem(workflow, actor, secretRef.secretId);
     if (problem) throw new Error(problem);
     return deps.resolveSecret(secretRef);
   };
 
-  const mcpServerResolverFor = (workflow: Workflow, base: McpServerResolver): McpServerResolver => (registryServerId) => {
-    const serverProject = deps.getMcpServerProjectId(registryServerId);
+  const mcpServerResolverFor = (workflow: Workflow, base: McpServerResolver): McpServerResolver => async (registryServerId) => {
+    const serverProject = await deps.getMcpServerProjectId(registryServerId);
     const projectId = workflow.projectId ?? DEFAULT_PROJECT_ID;
     if (serverProject && serverProject !== projectId && !sharedFromDefault(serverProject)) {
       throw new Error(`MCP server '${registryServerId}' belongs to another project, so workflows in this project cannot use it.`);
@@ -202,9 +205,9 @@ export function createRunScope(deps: RunScopeDeps) {
     // project, where every pre-scoping row was written) any namespace that no
     // workflow of another project claims.
     const ownLegacy = (namespace: string) => workflow.nodes.some((node) => namespace === `${workflow.id}:${node.id}`);
-    const legacyReadable = (namespace: string) =>
+    const legacyReadable = async (namespace: string) =>
       (projectId === DEFAULT_PROJECT_ID || ownLegacy(namespace)) &&
-      deps.legacyNamespaceOwnerProjects(namespace).every((owner) => owner === projectId);
+      (await deps.legacyNamespaceOwnerProjects(namespace)).every((owner) => owner === projectId);
     const asCaller = <T extends { namespace: string }>(row: T, namespace: string): T => ({ ...row, namespace });
 
     // Phase 16 — which row each session's messages were read from (scoped or legacy), so its labels come from the same
@@ -214,7 +217,7 @@ export function createRunScope(deps: RunScopeDeps) {
     const memoryStore: ScopedRunDependencies["memoryStore"] = {
       loadMessages: async (namespace, sessionId) => {
         const messages = await deps.sessions.loadMemory(key(namespace), sessionId);
-        if (messages.length > 0 || !legacyReadable(namespace)) {
+        if (messages.length > 0 || !await legacyReadable(namespace)) {
           memoryRowKey.set(sessionKey(namespace, sessionId), key(namespace));
           return messages;
         }
@@ -232,7 +235,7 @@ export function createRunScope(deps: RunScopeDeps) {
         let rowKey = memoryRowKey.get(sessionKey(namespace, sessionId));
         if (rowKey === undefined) {
           const scoped = await deps.sessions.loadMemory(key(namespace), sessionId);
-          rowKey = scoped.length > 0 || !legacyReadable(namespace) ? key(namespace) : namespace;
+          rowKey = scoped.length > 0 || !await legacyReadable(namespace) ? key(namespace) : namespace;
         }
         return loadLabels(rowKey, sessionId);
       }
@@ -243,7 +246,7 @@ export function createRunScope(deps: RunScopeDeps) {
       listToolCalls: async (input) => {
         const rows = await deps.sessions.listToolCalls({ ...input, namespace: key(input.namespace) });
         const limit = typeof input.limit === "number" && input.limit > 0 ? input.limit : 20;
-        if (rows.length >= limit || !legacyReadable(input.namespace)) return rows.map((row) => asCaller(row, input.namespace));
+        if (rows.length >= limit || !await legacyReadable(input.namespace)) return rows.map((row) => asCaller(row, input.namespace));
         const legacy = await deps.sessions.listToolCalls(input);
         return [...rows, ...legacy]
           .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
@@ -253,7 +256,7 @@ export function createRunScope(deps: RunScopeDeps) {
       getToolCall: async (input) => {
         const row =
           (await deps.sessions.getToolCall({ ...input, namespace: key(input.namespace) })) ??
-          (legacyReadable(input.namespace) ? await deps.sessions.getToolCall(input) : null);
+          (await legacyReadable(input.namespace) ? await deps.sessions.getToolCall(input) : null);
         return row ? asCaller(row, input.namespace) : null;
       }
     };
@@ -263,7 +266,7 @@ export function createRunScope(deps: RunScopeDeps) {
       loadArtifact: async (input) => {
         const row =
           (await deps.sessions.loadArtifact({ ...input, namespace: key(input.namespace) })) ??
-          (legacyReadable(input.namespace) ? await deps.sessions.loadArtifact(input) : null);
+          (await legacyReadable(input.namespace) ? await deps.sessions.loadArtifact(input) : null);
         return row ? asCaller(row, input.namespace) : null;
       }
     };
@@ -301,13 +304,13 @@ export function createRunScope(deps: RunScopeDeps) {
      * workflow's project or where it is shared to with execute). False when
      * the secret does not exist.
      */
-    canUseSecretFor(workflow: SecretScope, actor: SafeUser, secretId: string): boolean {
-      return deps.getSecretProjectId(secretId) !== null && secretProblem(workflow, actor, secretId) === null;
+    async canUseSecretFor(workflow: SecretScope, actor: SafeUser, secretId: string): Promise<boolean> {
+      return (await deps.getSecretProjectId(secretId)) !== null && (await secretProblem(workflow, actor, secretId)) === null;
     },
     /** The error workflow `failing` may hand its failure to, or a reason it may not. */
-    errorWorkflowFor(failing: Workflow, errorWorkflowId: string, channel: ReleaseChannel = "draft"): { workflow: Workflow } | { error: string } {
+    async errorWorkflowFor(failing: Workflow, errorWorkflowId: string, channel: ReleaseChannel = "draft"): Promise<{ workflow: Workflow } | { error: string }> {
       try {
-        const workflow = loadWorkflowFor(failing, "Error workflow", channel)(errorWorkflowId);
+        const workflow = await loadWorkflowFor(failing, "Error workflow", channel)(errorWorkflowId);
         return workflow ? { workflow } : { error: `Error workflow '${errorWorkflowId}' was not found.` };
       } catch (error) {
         return { error: error instanceof Error ? error.message : String(error) };

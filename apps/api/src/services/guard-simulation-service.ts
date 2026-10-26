@@ -50,13 +50,15 @@ import {
   type GuardSimulationWorkflow,
   type Workflow
 } from "@ai-orchestrator/shared";
-import type { GuardSimulationRecord, SqliteStore } from "../db/database.js";
+import type { GuardSimulationRecord } from "../db/database.js";
 import type { RunAccess } from "../run-access.js";
 import type { SafeUser } from "./auth-service.js";
 import type { EvalService } from "./eval-service.js";
 import type { GuardProfileSubstitute, GuardService } from "./guard-service.js";
 import { simulateCase } from "./guard-simulation-diff.js";
 import { GuardSimulationVault } from "./guard-simulation-sink.js";
+import type { Store } from "../db/store.js";
+import { mapAsync, someAsync } from "../async-array.js";
 
 /** Another simulation is running (one at a time per deployment). */
 export class GuardSimulationBusyError extends Error {
@@ -71,7 +73,7 @@ export class GuardSimulationBusyError extends Error {
 }
 
 export interface GuardSimulationServiceOptions {
-  store: SqliteStore;
+  store: Store;
   guard: GuardService;
   evals: EvalService;
   runAccess: RunAccess;
@@ -80,7 +82,7 @@ export interface GuardSimulationServiceOptions {
   /** REPLAY_JOB_MAX_CASES: the most cases one workflow's job may have. */
   maxCasesPerJob: number;
   /** Removes secrets from text that is stored and shown (case reasons). */
-  scrub?: (text: string) => string;
+  scrub?: (text: string) => Promise<string>;
   logger?: { warn: (message: string, fields?: Record<string, unknown>) => void };
   now?: () => Date;
   /** Workflows scanned between yields to the event loop. Default 25. */
@@ -113,19 +115,19 @@ export class GuardSimulationService {
    * version: admins, and builders on a profile that is neither built-in nor
    * enforced on a project.
    */
-  editorDenial(user: SafeUser, profileId: string): { status: 403 | 404; error: string } | null {
+  async editorDenial(user: SafeUser, profileId: string): Promise<{ status: 403 | 404; error: string } | null> {
     const { store } = this.options;
     // Phase 16 — destination previews and the deployment's destination rules are admin-only.
     if (profileId === DESTINATION_PREVIEW_SIMULATION_PROFILE) return user.role === "admin" ? null : { status: 403, error: "Only admins can preview destination changes" };
-    if (profileId === GUARD_DESTINATION_RULES_PROFILE_ID && user.role !== "admin" && store.getGuardProfile(profileId)) {
+    if (profileId === GUARD_DESTINATION_RULES_PROFILE_ID && user.role !== "admin" && await store.getGuardProfile(profileId)) {
       return { status: 403, error: "The deployment's destination rules apply to every workflow; only an admin can simulate changes to them" };
     }
-    const profile = store.getGuardProfile(profileId);
+    const profile = await store.getGuardProfile(profileId);
     if (!profile) return { status: 404, error: "Guard profile not found" };
     if (user.role === "admin") return null;
     if (user.role !== "builder") return { status: 403, error: "Only admins and builders can simulate guard profile changes" };
     if (profile.builtIn) return { status: 403, error: "The built-in profile is read-only; only an admin can simulate changes to it. Duplicate it to simulate your own." };
-    const enforced = store.listGuardBindingsForProfile(profileId).some((binding) => binding.scope === "project" && binding.mode === "enforced");
+    const enforced = (await store.listGuardBindingsForProfile(profileId)).some((binding) => binding.scope === "project" && binding.mode === "enforced");
     if (enforced) return { status: 403, error: "This guard profile is enforced on a project; only an admin can change or simulate it" };
     return null;
   }
@@ -137,16 +139,16 @@ export class GuardSimulationService {
    */
   async start(profileId: string, request: GuardSimulationRequest, actor: SafeUser): Promise<GuardSimulationView> {
     const { store, guard } = this.options;
-    const substitute = guard.simulationProfile(profileId, request.document !== undefined ? { document: request.document } : { version: request.version! });
-    this.assertIdle();
-    this.starting = true;
+    this.claimStart();
     try {
-      const baseVersion = store.getGuardProfile(profileId)?.latestVersion ?? null;
+      const substitute = await guard.simulationProfile(profileId, request.document !== undefined ? { document: request.document } : { version: request.version! });
+      await this.assertIdle(true);
+      const baseVersion = (await store.getGuardProfile(profileId))?.latestVersion ?? null;
       const limit = Math.min(request.limit ?? GUARD_SIMULATION_DEFAULT_CASES, this.options.maxCases);
       const scope = await this.workflowsUsing(profileId, actor);
-      const byWorkflow = this.recentRecordings(scope.map((workflow) => workflow.id), limit);
+      const byWorkflow = await this.recentRecordings(scope.map((workflow) => workflow.id), limit);
       // Checked again after the scan: the database is the deployment's one source of truth.
-      this.assertIdle(true);
+      await this.assertIdle(true);
       const id = `gsim_${randomUUID()}`;
       const workflows: StoredDetail["workflows"] = scope
         .filter((workflow) => byWorkflow.has(workflow.id))
@@ -159,7 +161,7 @@ export class GuardSimulationService {
             ? "None of the workflows that use this profile has a recorded run yet. Save runs as golden runs (or capture production runs) to simulate on them."
             : null;
 
-      store.insertGuardSimulation({
+      await store.insertGuardSimulation({
         id,
         profileId,
         sourceKind: substitute.inline ? "inline" : "version",
@@ -174,37 +176,37 @@ export class GuardSimulationService {
         createdByUserId: actor.id,
         ...(workflows.length === 0 ? { finishedAt: this.now() } : {})
       });
-      if (workflows.length === 0) return this.view(store.getGuardSimulation(id)!, actor, true);
+      if (workflows.length === 0) return await this.view((await store.getGuardSimulation(id))!, actor, true);
 
       // One vault for the whole simulation: tokens it creates stay in memory and go away with it.
       const vault = new GuardSimulationVault(guard.vault);
-      const canRun = (current: SafeUser) => this.editorDenial(current, profileId)?.error ?? null;
+      const canRun = async (current: SafeUser) => (await this.editorDenial(current, profileId))?.error ?? null;
       // The current-profile side is pinned to the version the simulation started against, so a save mid-simulation never mixes baselines.
-      const baseSubstitute = baseVersion !== null ? guard.simulationProfile(profileId, { version: baseVersion }) : null;
-      const profileChanged = substitute.hash !== (baseSubstitute ? baseSubstitute.hash : guard.loadProfile(profileId)?.hash);
+      const baseSubstitute = baseVersion !== null ? await guard.simulationProfile(profileId, { version: baseVersion }) : null;
+      const profileChanged = substitute.hash !== (baseSubstitute ? baseSubstitute.hash : (await guard.loadProfile(profileId))?.hash);
       const jobIds: string[] = [];
       for (const workflow of workflows) {
         try {
-          const published = store.getPublishedVersion(workflow.workflowId);
-          const job = this.options.evals.enqueueSimulationJob(
+          const published = await store.getPublishedVersion(workflow.workflowId);
+          const job = await this.options.evals.enqueueSimulationJob(
             { simulationId: id, workflowId: workflow.workflowId, recordingIds: workflow.recordingIds!, substitute, baseSubstitute, vault, canRun, profileChanged, ...(published !== null ? { version: published } : {}) },
             actor
           );
           workflow.jobId = job.id;
           jobIds.push(job.id);
         } catch (error) {
-          workflow.error = this.scrub(`The replay job could not start: ${error instanceof Error ? error.message : String(error)}`);
+          workflow.error = await this.scrub(`The replay job could not start: ${error instanceof Error ? error.message : String(error)}`);
         }
       }
       const allFailed = jobIds.length === 0;
-      store.updateGuardSimulation({
+      await store.updateGuardSimulation({
         id,
         jobIds,
         detail: { workflows, emptyReason } as unknown as Record<string, unknown>,
         ...(allFailed ? { status: "failed", error: "No replay job could start.", finishedAt: this.now() } : {})
       });
       if (!allFailed) this.track(id, jobIds);
-      return this.view(store.getGuardSimulation(id)!, actor, true);
+      return await this.view((await store.getGuardSimulation(id))!, actor, true);
     } finally {
       this.starting = false;
     }
@@ -221,13 +223,13 @@ export class GuardSimulationService {
    */
   async startDestinationPreview(rows: { baseline: DataDestinationRow[]; candidate: DataDestinationRow[] }, request: { limit?: number }, actor: SafeUser): Promise<GuardSimulationView> {
     const { store, guard } = this.options;
-    this.assertIdle();
-    this.starting = true;
+    this.claimStart();
     try {
+      await this.assertIdle(true);
       const limit = Math.min(request.limit ?? GUARD_SIMULATION_DEFAULT_CASES, this.options.maxCases);
       const scope = await this.workflowsWithDestinationRules(actor);
-      const byWorkflow = this.recentRecordings(scope.map((workflow) => workflow.id), limit);
-      this.assertIdle(true);
+      const byWorkflow = await this.recentRecordings(scope.map((workflow) => workflow.id), limit);
+      await this.assertIdle(true);
       const id = `gsim_${randomUUID()}`;
       const workflows: StoredDetail["workflows"] = scope
         .filter((workflow) => byWorkflow.has(workflow.id))
@@ -241,7 +243,7 @@ export class GuardSimulationService {
             : null;
       // The unsaved rows' fingerprint stands in for a profile hash; the rows themselves are never stored.
       const hash = createHash("sha256").update(JSON.stringify(rows.candidate.map(({ createdAt: _c, updatedAt: _u, ...row }) => row))).digest("hex");
-      store.insertGuardSimulation({
+      await store.insertGuardSimulation({
         id,
         profileId: DESTINATION_PREVIEW_SIMULATION_PROFILE,
         sourceKind: "inline",
@@ -256,7 +258,7 @@ export class GuardSimulationService {
         createdByUserId: actor.id,
         ...(workflows.length === 0 ? { finishedAt: this.now() } : {})
       });
-      if (workflows.length === 0) return this.view(store.getGuardSimulation(id)!, actor, true);
+      if (workflows.length === 0) return await this.view((await store.getGuardSimulation(id))!, actor, true);
 
       const vault = new GuardSimulationVault(guard.vault);
       // No profile is swapped: the substitute names no profile a run uses.
@@ -272,8 +274,8 @@ export class GuardSimulationService {
       const jobIds: string[] = [];
       for (const workflow of workflows) {
         try {
-          const published = store.getPublishedVersion(workflow.workflowId);
-          const job = this.options.evals.enqueueSimulationJob(
+          const published = await store.getPublishedVersion(workflow.workflowId);
+          const job = await this.options.evals.enqueueSimulationJob(
             {
               simulationId: id,
               workflowId: workflow.workflowId,
@@ -291,18 +293,18 @@ export class GuardSimulationService {
           workflow.jobId = job.id;
           jobIds.push(job.id);
         } catch (error) {
-          workflow.error = this.scrub(`The replay job could not start: ${error instanceof Error ? error.message : String(error)}`);
+          workflow.error = await this.scrub(`The replay job could not start: ${error instanceof Error ? error.message : String(error)}`);
         }
       }
       const allFailed = jobIds.length === 0;
-      store.updateGuardSimulation({
+      await store.updateGuardSimulation({
         id,
         jobIds,
         detail: { workflows, emptyReason } as unknown as Record<string, unknown>,
         ...(allFailed ? { status: "failed", error: "No replay job could start.", finishedAt: this.now() } : {})
       });
       if (!allFailed) this.track(id, jobIds);
-      return this.view(store.getGuardSimulation(id)!, actor, true);
+      return await this.view((await store.getGuardSimulation(id))!, actor, true);
     } finally {
       this.starting = false;
     }
@@ -311,13 +313,13 @@ export class GuardSimulationService {
   /** Workflows `actor` can read whose resolved profiles (or guard nodes' profiles) have destination rules. */
   async workflowsWithDestinationRules(actor: SafeUser): Promise<Workflow[]> {
     const { store, guard, runAccess } = this.options;
-    const readable = runAccess.readableWorkflowIds(actor);
-    const ids = readable ?? store.listWorkflows().map((workflow) => workflow.id);
+    const readable = await runAccess.readableWorkflowIds(actor);
+    const ids = readable ?? (await store.listWorkflows()).map((workflow) => workflow.id);
     const batch = Math.max(1, this.options.scanBatch ?? 25);
     const named = new Map<string, boolean>();
-    const hasRules = (profileId: string) => {
+    const hasRules = async (profileId: string) => {
       if (!named.has(profileId)) {
-        const loaded = guard.loadProfile(profileId);
+        const loaded = await guard.loadProfile(profileId);
         named.set(profileId, Boolean(loaded && profileHasDestinationRules(loaded.profile)));
       }
       return named.get(profileId)!;
@@ -325,19 +327,19 @@ export class GuardSimulationService {
     const out: Workflow[] = [];
     for (const [index, workflowId] of ids.entries()) {
       if (index > 0 && index % batch === 0) await yieldToLoop();
-      const workflow = store.getWorkflow(workflowId);
+      const workflow = await store.getWorkflow(workflowId);
       if (!workflow) continue;
       let uses = false;
       try {
-        uses = guard.resolveRun({ workflowId: workflow.id, projectId: workflow.projectId ?? null }).stack.some((entry) => profileHasDestinationRules(entry.profile));
+        uses = (await guard.resolveRun({ workflowId: workflow.id, projectId: workflow.projectId ?? null })).stack.some((entry) => profileHasDestinationRules(entry.profile));
       } catch {
         uses = false;
       }
       if (!uses) {
-        uses = workflow.nodes.some((node) => {
+        uses = await someAsync(workflow.nodes, async (node) => {
           if (node.type !== "guard" || node.disabled === true) return false;
           const profileId = (node.config as { profileId?: unknown } | undefined)?.profileId;
-          return typeof profileId === "string" && profileId !== "" && hasRules(profileId);
+          return typeof profileId === "string" && profileId !== "" && await hasRules(profileId);
         });
       }
       if (uses) out.push(workflow);
@@ -345,36 +347,45 @@ export class GuardSimulationService {
     return out;
   }
 
+  /**
+   * Marks this process as starting a simulation, synchronously before the start's first await, so two starts in
+   * one process can never both pass; the start's `finally` clears it.
+   */
+  private claimStart(): void {
+    if (this.starting) throw new GuardSimulationBusyError("starting");
+    this.starting = true;
+  }
+
   /** Throws GuardSimulationBusyError when a simulation is starting in this process or running anywhere. */
-  private assertIdle(ignoreStarting = false): void {
+  private async assertIdle(ignoreStarting = false): Promise<void> {
     // A row whose jobs are gone (no recovery ran) is finished first, so it never blocks every start.
-    for (const record of this.options.store.listRunningGuardSimulations()) {
-      const settled = this.settle(record);
+    for (const record of await this.options.store.listRunningGuardSimulations()) {
+      const settled = await this.settle(record);
       if (settled?.status === "running") throw new GuardSimulationBusyError(settled.id);
     }
     if (this.starting && !ignoreStarting) throw new GuardSimulationBusyError("starting");
   }
 
   /** One simulation as `viewer` sees it, or null when it does not exist. Finishes one whose jobs are done. */
-  get(id: string, viewer: SafeUser, detail = true): GuardSimulationView | null {
-    const record = this.settle(this.options.store.getGuardSimulation(id));
-    return record ? this.view(record, viewer, detail) : null;
+  async get(id: string, viewer: SafeUser, detail = true): Promise<GuardSimulationView | null> {
+    const record = await this.settle(await this.options.store.getGuardSimulation(id));
+    return record ? await this.view(record, viewer, detail) : null;
   }
 
   /**
    * The profile's recent simulations `viewer` may see: their own, and others'
    * that include a workflow they can read (filtered before the limit).
    */
-  list(profileId: string, viewer: SafeUser, limit = 20): GuardSimulationView[] {
+  async list(profileId: string, viewer: SafeUser, limit = 20): Promise<GuardSimulationView[]> {
     const wanted = Math.max(1, Math.min(100, Math.floor(limit)));
-    const readable = this.readable(viewer);
+    const readable = await this.readable(viewer);
     const out: GuardSimulationView[] = [];
     // Visibility is decided before the limit: page through the profile's simulations until `wanted` are visible or they run out.
     for (let offset = 0; out.length < wanted; offset += 100) {
-      const page = this.options.store.listGuardSimulations({ profileId, limit: 100, offset });
+      const page = await this.options.store.listGuardSimulations({ profileId, limit: 100, offset });
       for (const record of page) {
-        if (!this.visibleTo(record, viewer, readable)) continue;
-        out.push(this.view(this.settle(record)!, viewer, false));
+        if (!await this.visibleTo(record, viewer, readable)) continue;
+        out.push(await this.view((await this.settle(record))!, viewer, false));
         if (out.length >= wanted) break;
       }
       if (page.length < 100) break;
@@ -383,7 +394,8 @@ export class GuardSimulationService {
   }
 
   /** Whether `viewer` may see this simulation at all (their own, or one with a workflow they can read). */
-  visibleTo(record: GuardSimulationRecord, viewer: SafeUser, readable = this.readable(viewer)): boolean {
+  async visibleTo(record: GuardSimulationRecord, viewer: SafeUser, given?: Set<string> | null): Promise<boolean> {
+    const readable = given === undefined ? await this.readable(viewer) : given;
     if (readable === null || record.createdByUserId === viewer.id) return true;
     const detail = (record.detail ?? { workflows: [] }) as unknown as StoredDetail;
     return detail.workflows.some((workflow) => readable.has(workflow.workflowId));
@@ -401,15 +413,15 @@ export class GuardSimulationService {
    * over a simulation's cases, so a simulation behind them may wait; canceling
    * frees the deployment for the next one.
    */
-  cancel(id: string, viewer: SafeUser): GuardSimulationView | null {
+  async cancel(id: string, viewer: SafeUser): Promise<GuardSimulationView | null> {
     const { store, evals } = this.options;
-    const record = this.settle(store.getGuardSimulation(id));
+    const record = await this.settle(await store.getGuardSimulation(id));
     if (!record) return null;
     if (record.status === "running") {
-      for (const jobId of record.jobIds) evals.cancel(jobId);
-      store.updateGuardSimulation({ id, status: "canceled", error: null, finishedAt: this.now(), onlyFrom: ["running"] });
+      for (const jobId of record.jobIds) await evals.cancel(jobId);
+      await store.updateGuardSimulation({ id, status: "canceled", error: null, finishedAt: this.now(), onlyFrom: ["running"] });
     }
-    return this.view(store.getGuardSimulation(id)!, viewer, true);
+    return await this.view((await store.getGuardSimulation(id))!, viewer, true);
   }
 
   /** Waits until a simulation this process started has finished (tests, `?wait`). */
@@ -422,86 +434,86 @@ export class GuardSimulationService {
    * anywhere are finished, `interrupted` when a job stopped early. Jobs
    * another instance still runs (a shared database) are left alone.
    */
-  recover(): number {
+  async recover(): Promise<number> {
     let count = 0;
-    for (const record of this.options.store.listRunningGuardSimulations()) {
-      if (this.pending.has(record.id) || this.jobsStillRunning(record)) continue;
-      this.finalize(record.id);
+    for (const record of await this.options.store.listRunningGuardSimulations()) {
+      if (this.pending.has(record.id) || await this.jobsStillRunning(record)) continue;
+      await this.finalize(record.id);
       count += 1;
     }
     return count;
   }
 
-  prune(before: string): number {
-    return this.options.store.pruneGuardSimulations({ before });
+  async prune(before: string): Promise<number> {
+    return await this.options.store.pruneGuardSimulations({ before });
   }
 
   // ---------------------------------------------------------------------------
 
-  private scrub(text: string): string {
+  private async scrub(text: string): Promise<string> {
     try {
-      return this.options.scrub ? this.options.scrub(text) : text;
+      return this.options.scrub ? await this.options.scrub(text) : text;
     } catch {
       return text;
     }
   }
 
-  private readable(viewer: SafeUser): Set<string> | null {
-    const ids = this.options.runAccess.readableWorkflowIds(viewer);
+  private async readable(viewer: SafeUser): Promise<Set<string> | null> {
+    const ids = await this.options.runAccess.readableWorkflowIds(viewer);
     return ids === null ? null : new Set(ids);
   }
 
   private track(id: string, jobIds: string[]): void {
     const done = Promise.all(jobIds.map((jobId) => this.options.evals.wait(jobId)))
-      .then(() => this.finalize(id))
-      .catch((error) => {
+      .then(async () => await this.finalize(id))
+      .catch(async (error) => {
         this.options.logger?.warn("Guard simulation could not finish", { id, error: error instanceof Error ? error.message : String(error) });
-        this.options.store.updateGuardSimulation({ id, status: "failed", error: "The simulation stopped on an internal error.", finishedAt: this.now(), onlyFrom: ["running"] });
+        await this.options.store.updateGuardSimulation({ id, status: "failed", error: "The simulation stopped on an internal error.", finishedAt: this.now(), onlyFrom: ["running"] });
       })
       .finally(() => this.pending.delete(id));
     this.pending.set(id, done);
   }
 
   /** A job of the simulation is still running here, or queued or running in the database (another instance). */
-  private jobsStillRunning(record: GuardSimulationRecord): boolean {
-    return record.jobIds.some((jobId) => {
+  private async jobsStillRunning(record: GuardSimulationRecord): Promise<boolean> {
+    return await someAsync(record.jobIds, async (jobId) => {
       if (this.options.evals.isActive(jobId)) return true;
-      const status = this.options.store.getEvalRun(jobId)?.status;
+      const status = (await this.options.store.getEvalRun(jobId))?.status;
       return status === "queued" || status === "running";
     });
   }
 
   /** A running simulation whose jobs are no longer running anywhere is finished now. */
-  private settle(record: GuardSimulationRecord | null): GuardSimulationRecord | null {
+  private async settle(record: GuardSimulationRecord | null): Promise<GuardSimulationRecord | null> {
     if (!record || record.status !== "running" || this.pending.has(record.id)) return record;
-    if (this.jobsStillRunning(record)) return record;
-    this.finalize(record.id);
-    return this.options.store.getGuardSimulation(record.id);
+    if (await this.jobsStillRunning(record)) return record;
+    await this.finalize(record.id);
+    return await this.options.store.getGuardSimulation(record.id);
   }
 
   /**
    * Stores every case's comparison of a finished simulation. A job that did
    * not complete makes it `interrupted`, with no summary.
    */
-  private finalize(id: string): void {
+  private async finalize(id: string): Promise<void> {
     const { store } = this.options;
-    const record = store.getGuardSimulation(id);
+    const record = await store.getGuardSimulation(id);
     if (!record || record.status !== "running") return;
     const detail = (record.detail ?? { workflows: [] }) as unknown as StoredDetail;
     const interrupted: string[] = [];
-    const workflows: GuardSimulationWorkflow[] = detail.workflows.map((workflow) => {
+    const workflows: GuardSimulationWorkflow[] = await mapAsync(detail.workflows, async (workflow) => {
       const { recordingIds = [], ...rest } = workflow;
       if (!workflow.jobId) return { ...rest, cases: [] };
-      const job = store.getEvalRun(workflow.jobId);
+      const job = await store.getEvalRun(workflow.jobId);
       if (!job || job.status !== "completed") interrupted.push(`${workflow.workflowName}: the replay job ${job ? `ended ${job.status}${job.error ? ` (${job.error})` : ""}` : "was deleted"}`);
-      const results = job ? store.listEvalResults(job.id) : [];
-      const cases: GuardSimulationCase[] = recordingIds.map((recordingId) => {
+      const results = job ? await store.listEvalResults(job.id) : [];
+      const cases: GuardSimulationCase[] = await mapAsync(recordingIds, async (recordingId) => {
         const result = results.find((entry) => entry.recordingId === recordingId) ?? null;
-        const full = result ? store.getEvalResult(result.runId, result.id) : null;
+        const full = result ? await store.getEvalResult(result.runId, result.id) : null;
         const stored = (full?.diff as { simulation?: GuardSimulationCase; truncated?: boolean } | null | undefined) ?? null;
         if (stored?.simulation) return stored.simulation;
-        const recording = store.getReplayRecording(recordingId);
-        return simulateCase({
+        const recording = await store.getReplayRecording(recordingId);
+        return await simulateCase({
           recordingId,
           recording: recording ? { id: recording.id, name: recording.name, createdAt: recording.createdAt } : null,
           baseline: null,
@@ -511,17 +523,17 @@ export class GuardSimulationService {
             : full
               ? (full.error ?? "The replay did not run.")
               : "The replay did not run (the simulation stopped first).",
-          scrub: (text) => this.scrub(text)
+          scrub: async (text) => await this.scrub(text)
         });
       });
       return { ...rest, cases };
     });
     const stopped = interrupted.length > 0;
-    store.updateGuardSimulation({
+    await store.updateGuardSimulation({
       id,
       status: stopped ? "interrupted" : "completed",
       detail: { workflows, emptyReason: detail.emptyReason ?? null } as unknown as Record<string, unknown>,
-      error: stopped ? this.scrub(`The simulation was interrupted before every run was replayed, so it has no result. Start it again. ${interrupted.join("; ")}`) : null,
+      error: stopped ? await this.scrub(`The simulation was interrupted before every run was replayed, so it has no result. Start it again. ${interrupted.join("; ")}`) : null,
       finishedAt: this.now(),
       onlyFrom: ["running"]
     });
@@ -534,19 +546,19 @@ export class GuardSimulationService {
    */
   async workflowsUsing(profileId: string, actor: SafeUser): Promise<Workflow[]> {
     const { store, guard, runAccess } = this.options;
-    const readable = runAccess.readableWorkflowIds(actor);
-    const ids = readable ?? store.listWorkflows().map((workflow) => workflow.id);
+    const readable = await runAccess.readableWorkflowIds(actor);
+    const ids = readable ?? (await store.listWorkflows()).map((workflow) => workflow.id);
     const batch = Math.max(1, this.options.scanBatch ?? 25);
     const builtIn = profileId === GUARD_BUILTIN_PROFILE_ID;
     const out: Workflow[] = [];
     for (const [index, workflowId] of ids.entries()) {
       if (index > 0 && index % batch === 0) await yieldToLoop();
-      const workflow = store.getWorkflow(workflowId);
+      const workflow = await store.getWorkflow(workflowId);
       if (!workflow) continue;
       let uses = false;
       let fallsBackToBuiltIn = false;
       try {
-        const resolution = guard.resolveRun({ workflowId: workflow.id, projectId: workflow.projectId ?? null });
+        const resolution = await guard.resolveRun({ workflowId: workflow.id, projectId: workflow.projectId ?? null });
         uses = resolution.stack.some((entry) => entry.profileId === profileId) || resolution.enforced?.profileId === profileId;
         fallsBackToBuiltIn = resolution.stack.length === 0 && !resolution.enforced;
       } catch {
@@ -571,7 +583,7 @@ export class GuardSimulationService {
    * round-robin across workflows (the workflow with the newest recording
    * first) up to `limit`, at most REPLAY_JOB_MAX_CASES per workflow.
    */
-  private recentRecordings(workflowIds: string[], limit: number): Map<string, string[]> {
+  private async recentRecordings(workflowIds: string[], limit: number): Promise<Map<string, string[]>> {
     const out = new Map<string, string[]>();
     if (workflowIds.length === 0 || limit <= 0) return out;
     const perWorkflow = Math.min(limit, this.options.maxCasesPerJob);
@@ -580,7 +592,7 @@ export class GuardSimulationService {
       const ids: string[] = [];
       let newest = "";
       while (ids.length < perWorkflow) {
-        const page = this.options.store.listReplayRecordings({ workflowId, limit: Math.min(500, perWorkflow - ids.length), offset: ids.length });
+        const page = await this.options.store.listReplayRecordings({ workflowId, limit: Math.min(500, perWorkflow - ids.length), offset: ids.length });
         if (ids.length === 0 && page.items[0]) newest = page.items[0].createdAt;
         ids.push(...page.items.map((item) => item.id));
         if (page.items.length === 0 || ids.length >= page.total) break;
@@ -604,9 +616,9 @@ export class GuardSimulationService {
     return out;
   }
 
-  private view(record: GuardSimulationRecord, viewer: SafeUser, withDetail: boolean): GuardSimulationView {
+  private async view(record: GuardSimulationRecord, viewer: SafeUser, withDetail: boolean): Promise<GuardSimulationView> {
     const detail = (record.detail ?? { workflows: [] }) as unknown as StoredDetail;
-    const readable = this.readable(viewer);
+    const readable = await this.readable(viewer);
     const canRead = (workflowId: string) => readable === null || readable.has(workflowId);
     const visible = detail.workflows.filter((workflow) => canRead(workflow.workflowId));
     const visibleJobs = record.jobIds.filter((jobId) => {
@@ -620,7 +632,7 @@ export class GuardSimulationService {
       let done = 0;
       let total = 0;
       for (const jobId of visibleJobs) {
-        const job = this.options.store.getEvalRun(jobId);
+        const job = await this.options.store.getEvalRun(jobId);
         const jobProgress = job?.progress as { done?: unknown; total?: unknown } | null | undefined;
         done += typeof jobProgress?.done === "number" ? jobProgress.done : 0;
         total += typeof jobProgress?.total === "number" ? jobProgress.total : 0;

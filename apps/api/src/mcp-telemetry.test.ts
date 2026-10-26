@@ -32,7 +32,7 @@ const contexts: TestContext[] = [];
 async function createTestContext(): Promise<TestContext> {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-mcp-telemetry-"));
   const store = await SqliteStore.create(path.join(tempDir, "orchestrator.db"));
-  store.ensureDefaultProject();
+  await store.ensureDefaultProject();
   const config = parseConfig({
     LOG_LEVEL: "warn",
     SEED_SAMPLE_WORKFLOWS: "false",
@@ -44,7 +44,7 @@ async function createTestContext(): Promise<TestContext> {
   });
   const secretService = new SecretService(store, config.SECRET_MASTER_KEY_BASE64);
   const authService = new AuthService(store, config.SESSION_TTL_HOURS);
-  const app = createApp(config, store, secretService, authService);
+  const app = await createApp(config, store, secretService, authService);
   await app.ready();
   const context: TestContext = { app, store, authService, secretService, config, tempDir };
   contexts.push(context);
@@ -57,7 +57,7 @@ afterEach(async () => {
     if (!context) continue;
     await context.app.close();
     try {
-      context.store.close();
+      await context.store.close();
     } catch {
       // The store may already be closed by the app shutdown hooks.
     }
@@ -75,7 +75,7 @@ function extractCookie(setCookieHeader: string | string[] | undefined, cookieNam
 async function login(context: TestContext, role: "admin" | "builder" | "operator" | "viewer"): Promise<string> {
   const email = `${role}@example.com`;
   const password = `${role}-Pass-123!`;
-  context.authService.register({ email, password, role });
+  await context.authService.register({ email, password, role });
   const response = await context.app.inject({ method: "POST", url: "/api/auth/login", payload: { email, password } });
   if (response.statusCode !== 200) throw new Error(`Login failed for ${role}: ${response.body}`);
   return extractCookie(response.headers["set-cookie"], context.config.SESSION_COOKIE_NAME);
@@ -232,7 +232,7 @@ describe("MCP tool telemetry: end to end", () => {
       { content: "Both done.", usage: [60, 6] }
     ]);
     try {
-      context.store.upsertWorkflow(agentWorkflow(server.id, model.baseUrl));
+      await context.store.upsertWorkflow(agentWorkflow(server.id, model.baseUrl));
       const run = await context.app.inject({
         method: "POST",
         url: "/api/workflows/wf-telemetry/execute",
@@ -242,7 +242,7 @@ describe("MCP tool telemetry: end to end", () => {
       expect(run.statusCode).toBe(200);
       const executionId = run.json<{ executionId?: string }>().executionId;
 
-      const registryCalls = context.store.listMcpToolCalls({ registryServerId: server.id, since: ago(HOUR) });
+      const registryCalls = await context.store.listMcpToolCalls({ registryServerId: server.id, since: ago(HOUR) });
       expect(registryCalls).toHaveLength(2);
       expect(registryCalls.map((row) => row.turnInputTokens).sort()).toEqual([50, 51]);
       expect(registryCalls.map((row) => row.turnOutputTokens).sort()).toEqual([10, 11]);
@@ -259,7 +259,7 @@ describe("MCP tool telemetry: end to end", () => {
       expect(storedCost).toBeGreaterThan(0);
       expect(storedCost).toBeCloseTo(expectedCost, 9);
 
-      const inlineCalls = context.store.listMcpToolCalls({ registryServerId: null, since: ago(HOUR) });
+      const inlineCalls = await context.store.listMcpToolCalls({ registryServerId: null, since: ago(HOUR) });
       expect(inlineCalls).toHaveLength(1);
       expect(inlineCalls[0]).toMatchObject({
         nodeId: "direct",
@@ -298,7 +298,7 @@ describe("MCP tool telemetry: end to end", () => {
     const context = await createTestContext();
     const admin = await login(context, "admin");
     const server = await createServer(context, admin);
-    context.store.upsertWorkflow({
+    await context.store.upsertWorkflow({
       id: "wf-broken",
       name: "Broken",
       schemaVersion: "1.0.0",
@@ -321,7 +321,7 @@ describe("MCP tool telemetry: end to end", () => {
     });
     const run = await context.app.inject({ method: "POST", url: "/api/workflows/wf-broken/execute", headers: { cookie: admin }, payload: {} });
     expect(run.statusCode).toBe(400);
-    const rows = context.store.listMcpToolCalls({ registryServerId: server.id, since: ago(HOUR) });
+    const rows = await context.store.listMcpToolCalls({ registryServerId: server.id, since: ago(HOUR) });
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ adapterId: "mock-mcp", toolName: "no_such_tool", ok: false });
     expect(rows[0].error).toBeTruthy();
@@ -471,19 +471,19 @@ describe("MCP tool telemetry: extraction", () => {
 describe("MCP tool telemetry: storage and endpoints", () => {
   it("prunes tool calls with execution history retention and replaces rows per execution", async () => {
     const context = await createTestContext();
-    context.store.replaceMcpToolCallsForExecution("exec_a", [
+    await context.store.replaceMcpToolCallsForExecution("exec_a", [
       call({ executionId: "exec_a", startedAt: ago(40 * 24 * HOUR) }),
       call({ executionId: "exec_a", startedAt: ago(HOUR) })
     ]);
-    context.store.replaceMcpToolCallsForExecution("exec_b", [call({ executionId: "exec_b", startedAt: ago(HOUR) })]);
+    await context.store.replaceMcpToolCallsForExecution("exec_b", [call({ executionId: "exec_b", startedAt: ago(HOUR) })]);
     const since = ago(365 * 24 * HOUR);
-    expect(context.store.listMcpToolCalls({ registryServerId: null, since })).toHaveLength(3);
+    expect(await context.store.listMcpToolCalls({ registryServerId: null, since })).toHaveLength(3);
 
-    context.store.replaceMcpToolCallsForExecution("exec_b", [call({ executionId: "exec_b", startedAt: ago(HOUR) })]);
-    expect(context.store.listMcpToolCalls({ registryServerId: null, since })).toHaveLength(3);
+    await context.store.replaceMcpToolCallsForExecution("exec_b", [call({ executionId: "exec_b", startedAt: ago(HOUR) })]);
+    expect(await context.store.listMcpToolCalls({ registryServerId: null, since })).toHaveLength(3);
 
-    context.store.pruneExecutionHistory({ before: ago(30 * 24 * HOUR) });
-    const left = context.store.listMcpToolCalls({ registryServerId: null, since });
+    await context.store.pruneExecutionHistory({ before: ago(30 * 24 * HOUR) });
+    const left = await context.store.listMcpToolCalls({ registryServerId: null, since });
     expect(left).toHaveLength(2);
     expect(left.every((row) => row.startedAt > ago(31 * 24 * HOUR))).toBe(true);
   });
@@ -494,7 +494,7 @@ describe("MCP tool telemetry: storage and endpoints", () => {
     const server = await createServer(context, admin);
     const other = await createServer(context, admin);
     const durations = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100];
-    context.store.replaceMcpToolCallsForExecution("exec_math", [
+    await context.store.replaceMcpToolCallsForExecution("exec_math", [
       ...durations.map((durationMs, index) =>
         call({
           registryServerId: server.id,

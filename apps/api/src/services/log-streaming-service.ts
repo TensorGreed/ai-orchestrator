@@ -2,8 +2,9 @@ import crypto from "node:crypto";
 import dgram from "node:dgram";
 import net from "node:net";
 import { nanoid } from "nanoid";
-import type { LogStreamDestinationRecord, SqliteStore } from "../db/database";
+import type { LogStreamDestinationRecord } from "../db/database";
 import type { AuditEventInput } from "./audit-service";
+import type { Store } from "../db/store.js";
 
 export type LogStreamDestinationType = "syslog" | "webhook" | "sentry";
 
@@ -131,7 +132,7 @@ export class LogStreamingService {
   private stopped = false;
 
   constructor(
-    private readonly store: SqliteStore,
+    private readonly store: Store,
     rawKey: string | undefined,
     options: LogStreamingOptions = {}
   ) {
@@ -159,10 +160,11 @@ export class LogStreamingService {
     }, this.flushIntervalMs);
     if (typeof this.flushTimer.unref === "function") this.flushTimer.unref();
     if (this.eventRetentionDays > 0) {
-      this.pruneTimer = setInterval(() => {
+      // promise-ok: the prune catches its own errors
+      this.pruneTimer = setInterval(async () => {
         const before = new Date(Date.now() - this.eventRetentionDays * 86400000).toISOString();
         try {
-          this.store.pruneLogStreamEvents({ before });
+          await this.store.pruneLogStreamEvents({ before });
         } catch {
           // ignore
         }
@@ -188,16 +190,16 @@ export class LogStreamingService {
   // Destination CRUD
   // ---------------------------------------------------------------------------
 
-  listDestinations(): LogStreamDestinationPublic[] {
-    return this.store.listLogStreamDestinations().map((record) => this.toPublic(record, true));
+  async listDestinations(): Promise<LogStreamDestinationPublic[]> {
+    return (await this.store.listLogStreamDestinations()).map((record) => this.toPublic(record, true));
   }
 
-  getDestination(id: string): LogStreamDestinationPublic | null {
-    const record = this.store.getLogStreamDestination(id);
+  async getDestination(id: string): Promise<LogStreamDestinationPublic | null> {
+    const record = await this.store.getLogStreamDestination(id);
     return record ? this.toPublic(record, true) : null;
   }
 
-  createDestination(input: {
+  async createDestination(input: {
     name: string;
     type: LogStreamDestinationType | string;
     enabled?: boolean;
@@ -205,12 +207,12 @@ export class LogStreamingService {
     minLevel?: LogLevel;
     config: Record<string, unknown>;
     createdBy?: string | null;
-  }): LogStreamDestinationPublic {
+  }): Promise<LogStreamDestinationPublic> {
     this.validateType(input.type);
     this.validateConfig(input.type, input.config);
     const id = `lsd_${nanoid(12)}`;
     const encrypted = this.encryptConfig(input.config);
-    this.store.upsertLogStreamDestination({
+    await this.store.upsertLogStreamDestination({
       id,
       name: input.name,
       type: input.type,
@@ -222,12 +224,12 @@ export class LogStreamingService {
       configCiphertext: encrypted.ciphertext,
       createdBy: input.createdBy ?? null
     });
-    const created = this.getDestination(id);
+    const created = await this.getDestination(id);
     if (!created) throw new Error("failed to create log stream destination");
     return created;
   }
 
-  updateDestination(
+  async updateDestination(
     id: string,
     patch: {
       name?: string;
@@ -236,8 +238,8 @@ export class LogStreamingService {
       minLevel?: LogLevel;
       config?: Record<string, unknown>;
     }
-  ): LogStreamDestinationPublic | null {
-    const existing = this.store.getLogStreamDestination(id);
+  ): Promise<LogStreamDestinationPublic | null> {
+    const existing = await this.store.getLogStreamDestination(id);
     if (!existing) return null;
     let mergedConfig: Record<string, unknown> | null = null;
     if (patch.config !== undefined) {
@@ -254,7 +256,7 @@ export class LogStreamingService {
       mergedConfig = incoming;
     }
     const encrypted = mergedConfig ? this.encryptConfig(mergedConfig) : null;
-    this.store.upsertLogStreamDestination({
+    await this.store.upsertLogStreamDestination({
       id,
       name: patch.name ?? existing.name,
       type: existing.type,
@@ -266,18 +268,18 @@ export class LogStreamingService {
       configCiphertext: encrypted ? encrypted.ciphertext : existing.configCiphertext,
       createdBy: existing.createdBy
     });
-    return this.getDestination(id);
+    return await this.getDestination(id);
   }
 
-  deleteDestination(id: string): boolean {
-    return this.store.deleteLogStreamDestination(id);
+  async deleteDestination(id: string): Promise<boolean> {
+    return await this.store.deleteLogStreamDestination(id);
   }
 
   // ---------------------------------------------------------------------------
   // Dispatch
   // ---------------------------------------------------------------------------
 
-  dispatchAudit(event: AuditEventInput & { createdAt?: string }): void {
+  async dispatchAudit(event: AuditEventInput & { createdAt?: string }): Promise<void> {
     if (!this.enabled) return;
     const level: LogLevel = event.outcome === "failure" ? "error" : event.outcome === "denied" ? "warn" : "info";
     const logEvent: LogStreamEvent = {
@@ -300,12 +302,12 @@ export class LogStreamingService {
       metadata: event.metadata,
       createdAt: event.createdAt ?? new Date().toISOString()
     };
-    this.dispatch(logEvent);
+    await this.dispatch(logEvent);
   }
 
-  dispatch(event: LogStreamEvent): void {
+  async dispatch(event: LogStreamEvent): Promise<void> {
     if (!this.enabled) return;
-    const destinations = this.store.listLogStreamDestinations();
+    const destinations = await this.store.listLogStreamDestinations();
     for (const dest of destinations) {
       if (!dest.enabled) continue;
       if (!this.matches(dest, event)) continue;
@@ -342,7 +344,7 @@ export class LogStreamingService {
    * unless the dispatch fails (so failures are observable via lastError).
    */
   async test(id: string): Promise<{ ok: true } | { ok: false; error: string }> {
-    const record = this.store.getLogStreamDestination(id);
+    const record = await this.store.getLogStreamDestination(id);
     if (!record) return { ok: false, error: "destination not found" };
     const event: LogStreamEvent = {
       category: "system",
@@ -361,16 +363,16 @@ export class LogStreamingService {
       const adapter = this.adapters.get(record.type);
       if (!adapter) throw new Error(`no adapter for type '${record.type}'`);
       await adapter.send(event, config);
-      this.store.recordLogStreamDispatch({ destinationId: id, success: true });
+      await this.store.recordLogStreamDispatch({ destinationId: id, success: true });
       return { ok: true };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      this.store.recordLogStreamDispatch({ destinationId: id, success: false, error: message });
+      await this.store.recordLogStreamDispatch({ destinationId: id, success: false, error: message });
       return { ok: false, error: message };
     }
   }
 
-  listDeliveryEvents(destinationId: string, limit = 100): Array<{
+  async listDeliveryEvents(destinationId: string, limit = 100): Promise<Array<{
     id: string;
     destinationId: string;
     category: string;
@@ -380,9 +382,9 @@ export class LogStreamingService {
     attempts: number;
     error: string | null;
     createdAt: string;
-  }> {
-    return this.store
-      .listLogStreamEvents({ destinationId, limit })
+  }>> {
+    return (await this.store
+      .listLogStreamEvents({ destinationId, limit }))
       .map(({ payload: _payload, ...rest }) => rest);
   }
 
@@ -420,12 +422,12 @@ export class LogStreamingService {
   }
 
   private async send(entry: QueueEntry): Promise<void> {
-    const record = this.store.getLogStreamDestination(entry.destinationId);
+    const record = await this.store.getLogStreamDestination(entry.destinationId);
     if (!record) return;
     const adapter = this.adapters.get(record.type);
     if (!adapter) {
-      this.writeDelivery(entry, "failed", `no adapter for type '${record.type}'`);
-      this.store.recordLogStreamDispatch({ destinationId: record.id, success: false, error: `no adapter: ${record.type}` });
+      await this.writeDelivery(entry, "failed", `no adapter for type '${record.type}'`);
+      await this.store.recordLogStreamDispatch({ destinationId: record.id, success: false, error: `no adapter: ${record.type}` });
       return;
     }
     let config: Record<string, unknown>;
@@ -433,29 +435,29 @@ export class LogStreamingService {
       config = this.decryptConfig(record);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      this.writeDelivery(entry, "failed", `config decryption failed: ${msg}`);
-      this.store.recordLogStreamDispatch({ destinationId: record.id, success: false, error: msg });
+      await this.writeDelivery(entry, "failed", `config decryption failed: ${msg}`);
+      await this.store.recordLogStreamDispatch({ destinationId: record.id, success: false, error: msg });
       return;
     }
     try {
       entry.attempts += 1;
       await adapter.send(entry.event, config);
-      this.writeDelivery(entry, "sent", null);
-      this.store.recordLogStreamDispatch({ destinationId: record.id, success: true });
+      await this.writeDelivery(entry, "sent", null);
+      await this.store.recordLogStreamDispatch({ destinationId: record.id, success: true });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       if (entry.attempts < this.retryMaxAttempts && !this.stopped) {
         this.queue.push(entry);
       } else {
-        this.writeDelivery(entry, "failed", message);
-        this.store.recordLogStreamDispatch({ destinationId: record.id, success: false, error: message });
+        await this.writeDelivery(entry, "failed", message);
+        await this.store.recordLogStreamDispatch({ destinationId: record.id, success: false, error: message });
       }
     }
   }
 
-  private writeDelivery(entry: QueueEntry, status: "sent" | "failed", error: string | null): void {
+  private async writeDelivery(entry: QueueEntry, status: "sent" | "failed", error: string | null): Promise<void> {
     try {
-      this.store.writeLogStreamEvent({
+      await this.store.writeLogStreamEvent({
         id: `lse_${nanoid(14)}`,
         destinationId: entry.destinationId,
         category: entry.event.category,

@@ -76,7 +76,7 @@ import {
 } from "@ai-orchestrator/shared";
 import { buildReplayPlan, importWorkflowFromJson, validateWorkflowGraph, type ReplayPlan } from "@ai-orchestrator/workflow-engine";
 import type { ProviderRegistry } from "@ai-orchestrator/provider-sdk";
-import type { ReplayRecordingRecord, SqliteStore } from "../db/database.js";
+import type { ReplayRecordingRecord } from "../db/database.js";
 import { sha256Hex, workflowForHash } from "./audit-bundle-service.js";
 import type { McpCassetteRunPlan, McpCassetteService, ModelReplayPlan, OfflineReplayOptions } from "./mcp-cassette-service.js";
 import { captureExpectsMasking, diffRunFacts } from "./run-diff.js";
@@ -84,6 +84,7 @@ import { buildRunFacts, nodeResultRecords, type PriceTurn } from "./run-facts.js
 import { ReplayRecordingService } from "./replay-recording-service.js";
 import type { SafeUser } from "./auth-service.js";
 import type { GuardSimulationRun } from "./guard-simulation-sink.js";
+import type { Store } from "../db/store.js";
 
 export class ReplayRunError extends Error {
   constructor(
@@ -162,7 +163,7 @@ export interface ReplayExecutionResult {
 }
 
 export interface ReplayServiceOptions {
-  store: SqliteStore;
+  store: Store;
   recordings: ReplayRecordingService;
   cassettes: McpCassetteService;
   priceTurn: PriceTurn;
@@ -181,7 +182,7 @@ export interface ReplayServiceOptions {
   resolveGuardProfile?: (
     override: { profileId: string; version?: number },
     context: { workflowId: string; projectId: string | null; actor: SafeUser | null }
-  ) => { ok: true; profile: { profileId: string; version: number; hash: string } } | { ok: false; problem: string; forbidden?: boolean };
+  ) => Promise<{ ok: true; profile: { profileId: string; version: number; hash: string } } | { ok: false; problem: string; forbidden?: boolean }>;
 }
 
 function durationOf(result: ReplayExecutionResult): number | null {
@@ -201,8 +202,8 @@ export class ReplayService {
    * budgets are the ones that apply to the workflow now (a moved workflow
    * never replays under its old project).
    */
-  resolveCandidate(recording: ReplayRecordingRecord, request: ReplayRunRequest): ResolvedCandidate {
-    return this.resolveWorkflowCandidate(recording.workflowId, request);
+  async resolveCandidate(recording: ReplayRecordingRecord, request: ReplayRunRequest): Promise<ResolvedCandidate> {
+    return await this.resolveWorkflowCandidate(recording.workflowId, request);
   }
 
   /**
@@ -214,12 +215,12 @@ export class ReplayService {
    * without a version is pinned to the latest version now, so every case of
    * the job runs the same one.
    */
-  resolveJobCandidate(
+  async resolveJobCandidate(
     workflowId: string,
     request: { version?: number; workflow?: Record<string, unknown>; overrides?: ReplayCandidateOverrides },
     context: { actor?: SafeUser | null } = {}
-  ): ResolvedJobCandidate {
-    const base: ResolvedCandidate = request.workflow ? this.inlineCandidate(workflowId, request.workflow) : this.resolveWorkflowCandidate(workflowId, request);
+  ): Promise<ResolvedJobCandidate> {
+    const base: ResolvedCandidate = request.workflow ? await this.inlineCandidate(workflowId, request.workflow) : await this.resolveWorkflowCandidate(workflowId, request);
     let overrides = normaliseCandidateOverrides(request.overrides) ?? null;
     let workflow: Workflow;
     try {
@@ -233,7 +234,7 @@ export class ReplayService {
     let guardProfile: ResolvedJobCandidate["guardProfile"] = null;
     if (overrides?.guardProfile) {
       if (!this.options.resolveGuardProfile) throw new ReplayRunError("Guard profile overrides are not available on this server.", "invalid");
-      const resolved = this.options.resolveGuardProfile(overrides.guardProfile, { workflowId, projectId: workflow.projectId ?? null, actor: context.actor ?? null });
+      const resolved = await this.options.resolveGuardProfile(overrides.guardProfile, { workflowId, projectId: workflow.projectId ?? null, actor: context.actor ?? null });
       if (!resolved.ok) throw new ReplayRunError(resolved.problem, resolved.forbidden ? "forbidden" : "invalid");
       guardProfile = resolved.profile;
       overrides = { ...overrides, guardProfile: { profileId: resolved.profile.profileId, version: resolved.profile.version } };
@@ -254,8 +255,8 @@ export class ReplayService {
    * validated like an import. It must be this workflow's, and it runs in the
    * workflow's current project and folder. It is never saved.
    */
-  inlineCandidate(workflowId: string, raw: Record<string, unknown>): ResolvedCandidate {
-    const saved = this.options.store.getWorkflow(workflowId);
+  async inlineCandidate(workflowId: string, raw: Record<string, unknown>): Promise<ResolvedCandidate> {
+    const saved = await this.options.store.getWorkflow(workflowId);
     if (!saved) throw new ReplayRunError("The workflow this golden set belongs to no longer exists.", "not_found");
     const size = Buffer.byteLength(JSON.stringify(raw) ?? "", "utf8");
     if (size > REPLAY_INLINE_WORKFLOW_MAX_BYTES) {
@@ -294,12 +295,12 @@ export class ReplayService {
    * saved version it ran, else (no saved version, or pruned since) the
    * workflow captured with it, in the workflow's current project.
    */
-  baselineFor(recording: ReplayRecordingRecord): ResolvedCandidate & { source: "version" | "captured" } {
-    const current = this.options.store.getWorkflow(recording.workflowId);
+  async baselineFor(recording: ReplayRecordingRecord): Promise<ResolvedCandidate & { source: "version" | "captured" }> {
+    const current = await this.options.store.getWorkflow(recording.workflowId);
     if (!current) throw new ReplayRunError("The workflow this golden run belongs to no longer exists.", "not_found");
     if (recording.workflowSavedVersion !== null) {
       try {
-        return { ...this.resolveWorkflowCandidate(recording.workflowId, { version: recording.workflowSavedVersion }), source: "version" };
+        return { ...await this.resolveWorkflowCandidate(recording.workflowId, { version: recording.workflowSavedVersion }), source: "version" };
       } catch (error) {
         if (!(error instanceof ReplayRunError)) throw error;
       }
@@ -324,11 +325,11 @@ export class ReplayService {
   }
 
   /** The candidate for a workflow: the draft, or one of its saved versions (see `resolveCandidate`). */
-  resolveWorkflowCandidate(workflowId: string, request: { version?: number }): { workflow: Workflow; kind: "draft" | "version"; version: number | null } {
-    const current = this.options.store.getWorkflow(workflowId);
+  async resolveWorkflowCandidate(workflowId: string, request: { version?: number }): Promise<{ workflow: Workflow; kind: "draft" | "version"; version: number | null }> {
+    const current = await this.options.store.getWorkflow(workflowId);
     if (!current) throw new ReplayRunError("The workflow this golden run belongs to no longer exists.", "not_found");
     if (request.version === undefined) return { workflow: current, kind: "draft", version: null };
-    const entry = this.options.store.getWorkflowVersion(workflowId, request.version);
+    const entry = await this.options.store.getWorkflowVersion(workflowId, request.version);
     if (!entry) throw new ReplayRunError(`Version ${request.version} of this workflow was not found.`, "not_found");
     let parsed: Workflow;
     try {
@@ -364,13 +365,13 @@ export class ReplayService {
    * the run.
    */
   async replay(recording: ReplayRecordingRecord, request: ReplayRunRequest, actor: SafeUser, options: ReplayCaseOptions = {}): Promise<ReplayRunResponse> {
-    const candidate = options.candidate ?? this.resolveCandidate(recording, request);
+    const candidate = options.candidate ?? await this.resolveCandidate(recording, request);
     const workflowHash = ReplayService.candidateHash(candidate.workflow);
     const mcpMode: ReplayMcpMode = request.mcpMode ?? "strict";
     const models: ReplayModelMode = options.models ?? "live";
     const overrides = options.overrides ?? null;
     const liveReadNodes = overrides?.liveReadNodes ?? [];
-    const scrubber = this.options.recordings.scrubber();
+    const scrubber = await this.options.recordings.scrubber();
     const plan = buildReplayPlan(candidate.workflow, recording.nodes, {
       recordedWorkflow: ReplayRecordingService.capturedWorkflow(recording),
       // An imported golden run carries no secret references, so only for one the candidate's are left out of the comparison too.
@@ -492,9 +493,10 @@ export class ReplayService {
         nodeResults: result.nodeResults,
         nodes: candidate.workflow.nodes,
         // A simulation's verdicts are only in its sink (never written to guard_events).
-        guardEvents: options.simulation ? options.simulation.sink.rows : this.options.store.listGuardEventsForExecution(executionId),
+        guardEvents: options.simulation ? options.simulation.sink.rows : await this.options.store.listGuardEventsForExecution(executionId),
         priceTurn: this.options.priceTurn
-      })
+      }),
+      scrubber
     );
     // Phase 15.3 — tape answers cost nothing; what they cost when recorded is reported apart.
     const tapePriced = modelPlan ? ReplayService.priceTapeReplay(builtFacts, modelPlan.player.report(), this.options.priceTurn) : null;

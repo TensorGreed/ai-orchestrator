@@ -195,10 +195,10 @@ async function createTestContext(overrides: Partial<AppConfig> = {}): Promise<Te
   const dbPath = path.join(tempDir, "orchestrator.db");
   const store = await SqliteStore.create(dbPath);
   const config = makeConfig(overrides);
-  store.ensureDefaultProject();
+  await store.ensureDefaultProject();
   const secretService = new SecretService(store, config.SECRET_MASTER_KEY_BASE64);
   const authService = new AuthService(store, config.SESSION_TTL_HOURS);
-  const app = createApp(config, store, secretService, authService);
+  const app = await createApp(config, store, secretService, authService);
   await app.ready();
   const ctx: TestContext = { app, store, authService, secretService, config, tempDir };
   contexts.push(ctx);
@@ -213,7 +213,7 @@ function extractCookie(header: string | string[] | undefined, name: string): str
 }
 
 async function loginAdmin(ctx: TestContext): Promise<string> {
-  ctx.authService.register({ email: "admin@example.com", password: "admin-password", role: "admin" });
+  await ctx.authService.register({ email: "admin@example.com", password: "admin-password", role: "admin" });
   const response = await ctx.app.inject({
     method: "POST",
     url: "/api/auth/login",
@@ -238,35 +238,35 @@ afterEach(async () => {
 describe("Phase 7.1 — Leader lease primitive (store-level)", () => {
   it("first acquirer wins, second sees it held, and holder can renew", async () => {
     const ctx = await createTestContext();
-    const a = ctx.store.tryAcquireLease({ leaseName: "primary", holderId: "node-a", ttlMs: 60000 });
-    const b = ctx.store.tryAcquireLease({ leaseName: "primary", holderId: "node-b", ttlMs: 60000 });
+    const a = await ctx.store.tryAcquireLease({ leaseName: "primary", holderId: "node-a", ttlMs: 60000 });
+    const b = await ctx.store.tryAcquireLease({ leaseName: "primary", holderId: "node-b", ttlMs: 60000 });
     expect(a).toBe(true);
     expect(b).toBe(false);
 
-    const renewed = ctx.store.tryAcquireLease({ leaseName: "primary", holderId: "node-a", ttlMs: 60000 });
+    const renewed = await ctx.store.tryAcquireLease({ leaseName: "primary", holderId: "node-a", ttlMs: 60000 });
     expect(renewed).toBe(true);
-    const lease = ctx.store.getLease("primary");
+    const lease = await ctx.store.getLease("primary");
     expect(lease?.holderId).toBe("node-a");
   });
 
   it("expired leases can be stolen by any other holder", async () => {
     const ctx = await createTestContext();
     // Acquire with a 1ms TTL so it's immediately expired.
-    ctx.store.tryAcquireLease({ leaseName: "primary", holderId: "dead-node", ttlMs: 1 });
+    await ctx.store.tryAcquireLease({ leaseName: "primary", holderId: "dead-node", ttlMs: 1 });
     await new Promise((resolve) => setTimeout(resolve, 10));
-    const stolen = ctx.store.tryAcquireLease({ leaseName: "primary", holderId: "new-node", ttlMs: 60000 });
+    const stolen = await ctx.store.tryAcquireLease({ leaseName: "primary", holderId: "new-node", ttlMs: 60000 });
     expect(stolen).toBe(true);
-    const lease = ctx.store.getLease("primary");
+    const lease = await ctx.store.getLease("primary");
     expect(lease?.holderId).toBe("new-node");
   });
 
   it("releaseLease only removes the row if the caller matches the holder", async () => {
     const ctx = await createTestContext();
-    ctx.store.tryAcquireLease({ leaseName: "primary", holderId: "node-a", ttlMs: 60000 });
-    expect(ctx.store.releaseLease("primary", "node-b")).toBe(false);
-    expect(ctx.store.getLease("primary")?.holderId).toBe("node-a");
-    expect(ctx.store.releaseLease("primary", "node-a")).toBe(true);
-    expect(ctx.store.getLease("primary")).toBeNull();
+    await ctx.store.tryAcquireLease({ leaseName: "primary", holderId: "node-a", ttlMs: 60000 });
+    expect(await ctx.store.releaseLease("primary", "node-b")).toBe(false);
+    expect((await ctx.store.getLease("primary"))?.holderId).toBe("node-a");
+    expect(await ctx.store.releaseLease("primary", "node-a")).toBe(true);
+    expect(await ctx.store.getLease("primary")).toBeNull();
   });
 });
 
@@ -287,7 +287,7 @@ describe("Phase 7.1 — LeaderElectionService", () => {
     await service.start();
     expect(service.isLeader()).toBe(true);
     expect(becameLeader).toBe(1);
-    const status = service.getStatus();
+    const status = await service.getStatus();
     expect(status.enabled).toBe(false);
     expect(status.isLeader).toBe(true);
     await service.stop();
@@ -434,7 +434,7 @@ describe("Phase 7.1 — /api/ha/status route", () => {
 
   it("denies non-admin callers", async () => {
     const ctx = await createTestContext();
-    ctx.authService.register({ email: "v@example.com", password: "viewer-password", role: "viewer" });
+    await ctx.authService.register({ email: "v@example.com", password: "viewer-password", role: "viewer" });
     const loginResp = await ctx.app.inject({
       method: "POST",
       url: "/api/auth/login",

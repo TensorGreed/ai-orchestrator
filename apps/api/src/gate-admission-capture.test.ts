@@ -35,7 +35,7 @@ const EMAIL = "jane.doe@example.com";
 async function createTestContext(): Promise<TestContext> {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-admission-capture-"));
   const store = await SqliteStore.create(path.join(tempDir, "orchestrator.db"));
-  store.ensureDefaultProject();
+  await store.ensureDefaultProject();
   const config = parseConfig({
     LOG_LEVEL: "warn",
     SEED_SAMPLE_WORKFLOWS: "false",
@@ -47,7 +47,7 @@ async function createTestContext(): Promise<TestContext> {
   });
   const secretService = new SecretService(store, config.SECRET_MASTER_KEY_BASE64);
   const authService = new AuthService(store, config.SESSION_TTL_HOURS);
-  const app = createApp(config, store, secretService, authService);
+  const app = await createApp(config, store, secretService, authService);
   await app.ready();
   const context: TestContext = { app, store, authService, config, tempDir };
   contexts.push(context);
@@ -59,7 +59,7 @@ afterEach(async () => {
     const context = contexts.pop()!;
     await context.app.close();
     try {
-      context.store.close();
+      await context.store.close();
     } catch {
       // Already closed by the app shutdown hooks.
     }
@@ -70,7 +70,7 @@ afterEach(async () => {
 async function login(context: TestContext, role: "admin" | "builder"): Promise<{ cookie: string; email: string }> {
   const email = `${role}@example.com`;
   const password = `${role}-Pass-123!`;
-  if (!context.store.getUserByEmail(email)) context.authService.register({ email, password, role });
+  if (!await context.store.getUserByEmail(email)) await context.authService.register({ email, password, role });
   const response = await context.app.inject({ method: "POST", url: "/api/auth/login", payload: { email, password } });
   if (response.statusCode !== 200) throw new Error(`Login failed for ${role}: ${response.body}`);
   const raw = response.headers["set-cookie"];
@@ -98,9 +98,9 @@ function hookWorkflow(id: string, answer: string): Workflow {
   } as Workflow;
 }
 
-function save(context: TestContext, workflow: Workflow): number {
-  const saved = context.store.upsertWorkflow(workflow);
-  return new WorkflowVersionService(context.store).snapshot({ workflow: saved, changeNote: "test" }).version;
+async function save(context: TestContext, workflow: Workflow): Promise<number> {
+  const saved = await context.store.upsertWorkflow(workflow);
+  return (await new WorkflowVersionService(context.store).snapshot({ workflow: saved, changeNote: "test" })).version;
 }
 
 async function preview(context: TestContext, cookie: string, workflowId: string, version: number, runId: string): Promise<ReleasePublishPreview> {
@@ -116,9 +116,9 @@ async function casesOf(context: TestContext, cookie: string, workflowId: string)
 }
 
 /** A finished replay job over the sets as they are now, every listed case passing. */
-function seedJob(context: TestContext, input: { workflowId: string; datasetId: string; version: number; hash: string; fixtureIds: string[] }): string {
+async function seedJob(context: TestContext, input: { workflowId: string; datasetId: string; version: number; hash: string; fixtureIds: string[] }): Promise<string> {
   const id = `run_${crypto.randomUUID()}`;
-  context.store.createEvalRun({
+  await context.store.createEvalRun({
     id,
     datasetId: input.datasetId,
     workflowId: input.workflowId,
@@ -130,9 +130,9 @@ function seedJob(context: TestContext, input: { workflowId: string; datasetId: s
     workflowVersion: input.version,
     options: { mcpMode: "strict", maxCostUsd: 5 }
   });
-  context.store.setEvalRunSetSnapshot(id, goldenSetSnapshots([input.datasetId], (datasetId) => context.store.listEvalFixtures(datasetId)));
-  input.fixtureIds.forEach((fixtureId, index) => {
-    context.store.recordEvalResult({
+  await context.store.setEvalRunSetSnapshot(id, await goldenSetSnapshots([input.datasetId], async (datasetId) => await context.store.listEvalFixtures(datasetId)));
+  for (const [index, fixtureId] of input.fixtureIds.entries()) {
+    await context.store.recordEvalResult({
       id: `res_${index}_${id}`,
       runId: id,
       fixtureId,
@@ -140,8 +140,8 @@ function seedJob(context: TestContext, input: { workflowId: string; datasetId: s
       score: { pass: true, details: [{ type: "status", pass: true, reason: "pass" }] },
       diff: { verdict: "same", reasons: [], diff: { totals: { costUsd: { baseline: 0.01, candidate: 0.01 }, latencyMs: { baseline: 100, candidate: 100 } }, guard: { added: [], changed: [] } } }
     });
-  });
-  context.store.finalizeEvalRun({ id, status: "completed" });
+  }
+  await context.store.finalizeEvalRun({ id, status: "completed" });
   return id;
 }
 
@@ -166,22 +166,23 @@ async function capturedGateSetup(workflowId: string) {
   const context = await createTestContext();
   const admin = await login(context, "admin");
   const builder = await login(context, "builder");
-  save(context, hookWorkflow(workflowId, "v1"));
+  await save(context, hookWorkflow(workflowId, "v1"));
   const setId = `set-${workflowId}`;
-  context.store.createEvalDataset({ id: setId, name: "Golden", workflowId });
-  const original = ["a", "b"].map((suffix) => {
+  await context.store.createEvalDataset({ id: setId, name: "Golden", workflowId });
+  const original: string[] = [];
+  for (const suffix of ["a", "b"]) {
     const id = `${workflowId}_${suffix}`;
-    context.store.createEvalFixture({ id, datasetId: setId, name: `Case ${suffix}`, input: {}, recordingId: `rec_${id}` });
-    return id;
-  });
+    await context.store.createEvalFixture({ id, datasetId: setId, name: `Case ${suffix}`, input: {}, recordingId: `rec_${id}` });
+    original.push(id);
+  }
   const gate = await call(context, "PUT", `/api/workflows/${workflowId}/release-gate`, admin.cookie, { enabled: true, enforced: true, datasetIds: [setId], policy: { minPassRate: 0.9, minCases: 1 } });
   expect(gate.statusCode, gate.body).toBe(200);
   expect(gate.json<{ gate: ReleaseGateView }>().gate.enforced).toBe(true);
   const capture = await call(context, "PUT", `/api/workflows/${workflowId}/replay-capture`, builder.cookie, { enabled: true, rate: 1 });
   expect(capture.statusCode, capture.body).toBe(200);
-  const version = save(context, hookWorkflow(workflowId, "v2"));
+  const version = await save(context, hookWorkflow(workflowId, "v2"));
   const hash = (await call(context, "GET", `/api/workflows/${workflowId}/publish-preview?version=${version}`, builder.cookie)).json<{ preview: ReleasePublishPreview }>().preview.workflowHash;
-  const job = seedJob(context, { workflowId, datasetId: setId, version, hash, fixtureIds: original });
+  const job = await seedJob(context, { workflowId, datasetId: setId, version, hash, fixtureIds: original });
   const first = await preview(context, builder.cookie, workflowId, version, job);
   expect(first.verdict, first.reasons.join(" | ")).toBe("passed");
   return { context, admin, builder, setId, original, version, hash, job };
@@ -213,8 +214,8 @@ describe("captured runs on an enforced release gate", () => {
     expect(promoted.statusCode, promoted.body).toBe(200);
     const fixtureId = promoted.json<{ result: { fixtureId?: string } }>().result.fixtureId!;
     expect(fixtureId).toBeTruthy();
-    expect(context.store.getEvalFixture(fixtureId)).toMatchObject({ recordingId: capture.id, required: false });
-    expect(context.store.getReplayRecordingSummary(capture.id)).toMatchObject({ status: "golden" });
+    expect(await context.store.getEvalFixture(fixtureId)).toMatchObject({ recordingId: capture.id, required: false });
+    expect(await context.store.getReplayRecordingSummary(capture.id)).toMatchObject({ status: "golden" });
     expect(fixturesOnCandidates(context)).toBe(0);
 
     // Pending on the enforced gate: it does not count, and the earlier job is not stale.
@@ -231,7 +232,7 @@ describe("captured runs on an enforced release gate", () => {
     expect(again.statusCode).toBe(404);
     expect(again.json<{ error: string }>().error).toBe("Captured run not found");
     expect(rawRecording(context, capture.id)).toBe(before);
-    expect(context.store.listEvalFixtures(setId).filter((fixture) => fixture.recordingId === capture.id)).toHaveLength(1);
+    expect((await context.store.listEvalFixtures(setId)).filter((fixture) => fixture.recordingId === capture.id)).toHaveLength(1);
   }, 60_000);
 
   it("an admin's data-subject delete removes an admitted case: audited as loosening, and the jobs that held its results are stale", async () => {
@@ -243,8 +244,8 @@ describe("captured runs on an enforced release gate", () => {
     expect(admitted.statusCode, admitted.body).toBe(200);
     const required = await call(context, "PUT", `/api/workflows/wf-cap-erase/release-gate/cases/${fixtureId}/required`, admin.cookie, { required: true });
     expect(required.statusCode, required.body).toBe(200);
-    const job = seedJob(context, { workflowId: "wf-cap-erase", datasetId: setId, version, hash, fixtureIds: [...original, fixtureId] });
-    const other = seedJob(context, { workflowId: "wf-cap-erase", datasetId: setId, version, hash, fixtureIds: original });
+    const job = await seedJob(context, { workflowId: "wf-cap-erase", datasetId: setId, version, hash, fixtureIds: [...original, fixtureId] });
+    const other = await seedJob(context, { workflowId: "wf-cap-erase", datasetId: setId, version, hash, fixtureIds: original });
     expect((await preview(context, builder.cookie, "wf-cap-erase", version, job)).verdict).toBe("passed");
 
     // Erasure is a legal obligation: the admin's delete is not refused for an admitted case.
@@ -255,10 +256,10 @@ describe("captured runs on an enforced release gate", () => {
     expect(removed.statusCode, removed.body).toBe(200);
     const outcome = removed.json<ReplayFindSubjectDeleteResult>();
     expect(outcome.deleted.recording).toBe(1);
-    expect(context.store.getEvalFixture(fixtureId)).toBeNull();
+    expect(await context.store.getEvalFixture(fixtureId)).toBeNull();
 
     // Audited as loosening the gate, naming the case.
-    const release = context.store.listAuditLogs({ category: "release", pageSize: 500 }).items;
+    const release = (await context.store.listAuditLogs({ category: "release", pageSize: 500 })).items;
     const casesRemoved = release.filter((entry) => entry.eventType === "release.gate.cases_removed").map((entry) => entry.metadata as Record<string, unknown>);
     expect(casesRemoved).toContainEqual(expect.objectContaining({ via: "data_subject", target: `recording:${capture.id}`, fixtureIds: [fixtureId] }));
     const row = casesRemoved.find((entry) => entry.via === "data_subject")!;
@@ -268,11 +269,11 @@ describe("captured runs on an enforced release gate", () => {
     // The job that ran the erased case is stale for good; the one that never ran it is untouched.
     const stale = release.find((entry) => entry.eventType === "release.jobs.evidence_removed");
     expect(stale?.metadata).toMatchObject({ via: "data_subject", runIds: [job] });
-    expect(context.store.getEvalRun(job)!.candidate).toMatchObject({ releaseEligible: false });
+    expect((await context.store.getEvalRun(job))!.candidate).toMatchObject({ releaseEligible: false });
     const judged = await preview(context, builder.cookie, "wf-cap-erase", version, job);
     expect(judged.verdict).toBe("blocked");
     expect(judged.reasons.join(" ")).toMatch(/data-subject delete/);
-    expect(context.store.getEvalRun(other)!.candidate).toMatchObject({ releaseEligible: true });
+    expect((await context.store.getEvalRun(other))!.candidate).toMatchObject({ releaseEligible: true });
     expect((await preview(context, builder.cookie, "wf-cap-erase", version, other)).verdict).toBe("passed");
   }, 60_000);
 });

@@ -809,7 +809,7 @@ export interface KnowledgeBaseStore {
       metadata?: Record<string, unknown> | null;
       vector: number[];
     }>;
-  }): { inserted: number; dimensions: number };
+  }): { inserted: number; dimensions: number } | Promise<{ inserted: number; dimensions: number }>;
 
   /** Read every chunk + vector for a KB; caller scores in JS. */
   listKnowledgeBaseChunks(knowledgeBaseId: string): Array<{
@@ -819,9 +819,16 @@ export interface KnowledgeBaseStore {
     content: string;
     metadata: Record<string, unknown> | null;
     vector: number[];
-  }>;
+  }> | Promise<Array<{
+    id: string;
+    sourceId: string | null;
+    chunkIndex: number;
+    content: string;
+    metadata: Record<string, unknown> | null;
+    vector: number[];
+  }>>;
 
-  getKnowledgeBase(id: string): { id: string; embedderId: string; dimensions: number } | null;
+  getKnowledgeBase(id: string): { id: string; embedderId: string; dimensions: number } | null | Promise<{ id: string; embedderId: string; dimensions: number } | null>;
 
   /**
    * Phase 9.3 — BM25 search over a KB's content. Returns top-K rows with
@@ -841,7 +848,14 @@ export interface KnowledgeBaseStore {
     content: string;
     metadata: Record<string, unknown> | null;
     score: number;
-  }>;
+  }> | Promise<Array<{
+    id: string;
+    sourceId: string | null;
+    chunkIndex: number;
+    content: string;
+    metadata: Record<string, unknown> | null;
+    score: number;
+  }>>;
 }
 
 /**
@@ -898,7 +912,7 @@ export class KnowledgeBaseVectorStoreAdapter implements VectorStoreAdapter {
 
   async upsert(documents: ConnectorDocument[], embedder: EmbeddingAdapter): Promise<void> {
     if (documents.length === 0) return; // append-only; nothing to do
-    const kb = this.store.getKnowledgeBase(this.knowledgeBaseId);
+    const kb = await this.store.getKnowledgeBase(this.knowledgeBaseId);
     if (!kb) throw new Error(`Knowledge base not found: ${this.knowledgeBaseId}`);
 
     const chunks = await Promise.all(
@@ -920,12 +934,12 @@ export class KnowledgeBaseVectorStoreAdapter implements VectorStoreAdapter {
         };
       })
     );
-    this.store.addKnowledgeBaseChunks({ knowledgeBaseId: this.knowledgeBaseId, chunks });
+    await this.store.addKnowledgeBaseChunks({ knowledgeBaseId: this.knowledgeBaseId, chunks });
   }
 
   async similaritySearch(query: string, topK: number, embedder: EmbeddingAdapter): Promise<ConnectorDocument[]> {
     const queryVector = await embedder.embed(query);
-    const chunks = this.store.listKnowledgeBaseChunks(this.knowledgeBaseId);
+    const chunks = await this.store.listKnowledgeBaseChunks(this.knowledgeBaseId);
     if (chunks.length === 0) return [];
     return chunks
       .map((chunk) => ({
@@ -957,7 +971,7 @@ export class KnowledgeBaseVectorStoreAdapter implements VectorStoreAdapter {
    */
   async bm25Search(query: string, topK: number): Promise<ConnectorDocument[]> {
     if (!this.store.bm25SearchKnowledgeBase) return [];
-    const rows = this.store.bm25SearchKnowledgeBase({
+    const rows = await this.store.bm25SearchKnowledgeBase({
       knowledgeBaseId: this.knowledgeBaseId,
       query,
       topK

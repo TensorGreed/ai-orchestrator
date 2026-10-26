@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 import { nanoid } from "nanoid";
-import { SqliteStore } from "../db/database";
+import type { Store } from "../db/store.js";
 
 export type UserRole = "admin" | "builder" | "operator" | "viewer";
 
@@ -46,19 +46,19 @@ export class AuthService {
   private cleanupTimer: NodeJS.Timeout | null = null;
 
   constructor(
-    private readonly store: SqliteStore,
+    private readonly store: Store,
     private readonly sessionTtlHours: number
   ) {}
 
-  countUsers(): number {
-    return this.store.countUsers();
+  async countUsers(): Promise<number> {
+    return await this.store.countUsers();
   }
 
   startSessionCleanup(intervalMs = 5 * 60 * 1000): void {
     if (this.cleanupTimer !== null) return;
-    const tick = () => {
+    const tick = async () => {
       try {
-        const result = this.store.revokeExpiredSessions() as unknown;
+        const result = await this.store.revokeExpiredSessions() as unknown;
         if (result && typeof (result as Promise<unknown>).then === "function") {
           (result as Promise<unknown>).catch(() => undefined);
         }
@@ -66,6 +66,7 @@ export class AuthService {
         // best-effort background cleanup; ignore failures
       }
     };
+    // promise-ok: tick catches its own errors (best-effort cleanup)
     this.cleanupTimer = setInterval(tick, intervalMs);
     if (typeof this.cleanupTimer.unref === "function") {
       this.cleanupTimer.unref();
@@ -87,14 +88,14 @@ export class AuthService {
     };
   }
 
-  register(input: { email: string; password: string; role: UserRole }): SafeUser {
+  async register(input: { email: string; password: string; role: UserRole }): Promise<SafeUser> {
     const email = normalizeEmail(input.email);
-    const existing = this.store.getUserByEmail(email);
+    const existing = await this.store.getUserByEmail(email);
     if (existing) {
       throw new Error("An account with this email already exists");
     }
 
-    const saved = this.store.saveUser({
+    const saved = await this.store.saveUser({
       id: `usr_${nanoid(12)}`,
       email,
       passwordHash: hashPassword(input.password),
@@ -104,20 +105,20 @@ export class AuthService {
     return this.toSafeUser(saved);
   }
 
-  login(emailInput: string, password: string): { user: SafeUser; sessionId: string; expiresAt: string } {
+  async login(emailInput: string, password: string): Promise<{ user: SafeUser; sessionId: string; expiresAt: string }> {
     const email = normalizeEmail(emailInput);
-    const user = this.store.getUserByEmail(email);
+    const user = await this.store.getUserByEmail(email);
     if (!user || !verifyPassword(password, user.passwordHash)) {
       throw new Error("Invalid email or password");
     }
 
-    this.store.revokeExpiredSessions();
+    await this.store.revokeExpiredSessions();
 
     const expiresAtDate = new Date();
     expiresAtDate.setHours(expiresAtDate.getHours() + this.sessionTtlHours);
     const expiresAt = expiresAtDate.toISOString();
 
-    const session = this.store.saveSession({
+    const session = await this.store.saveSession({
       id: `sess_${nanoid(24)}`,
       userId: user.id,
       expiresAt
@@ -130,47 +131,47 @@ export class AuthService {
     };
   }
 
-  getSessionUser(sessionId: string): SafeUser | null {
+  async getSessionUser(sessionId: string): Promise<SafeUser | null> {
     if (!sessionId) {
       return null;
     }
 
-    const session = this.store.getSession(sessionId);
+    const session = await this.store.getSession(sessionId);
     if (!session || session.revokedAt) {
       return null;
     }
 
     if (new Date(session.expiresAt).getTime() <= Date.now()) {
-      this.store.revokeSession(session.id);
+      await this.store.revokeSession(session.id);
       return null;
     }
 
-    const user = this.store.getUserById(session.userId);
+    const user = await this.store.getUserById(session.userId);
     if (!user) {
       return null;
     }
 
-    this.store.touchSession(session.id);
+    await this.store.touchSession(session.id);
     return this.toSafeUser(user);
   }
 
-  logout(sessionId: string): void {
+  async logout(sessionId: string): Promise<void> {
     if (!sessionId) {
       return;
     }
-    this.store.revokeSession(sessionId);
+    await this.store.revokeSession(sessionId);
   }
 
-  bootstrapAdmin(email?: string, password?: string): SafeUser | null {
+  async bootstrapAdmin(email?: string, password?: string): Promise<SafeUser | null> {
     if (!email || !password) {
       return null;
     }
 
-    if (this.store.countUsers() > 0) {
+    if (await this.store.countUsers() > 0) {
       return null;
     }
 
-    return this.register({
+    return await this.register({
       email,
       password,
       role: "admin"

@@ -1,6 +1,6 @@
 import { createRequire } from "node:module";
-import { SqliteStore } from "../db/database";
 import type { UserRole } from "./auth-service";
+import type { Store } from "../db/store.js";
 
 const require = createRequire(import.meta.url);
 
@@ -61,7 +61,7 @@ function normalizeStringArray(raw: unknown): string[] {
 
 export class LdapService {
   constructor(
-    private readonly store: SqliteStore,
+    private readonly store: Store,
     private readonly config: LdapConfig
   ) {}
 
@@ -141,9 +141,9 @@ export class LdapService {
     }
   }
 
-  resolveGlobalRole(groups: string[]): UserRole | null {
+  async resolveGlobalRole(groups: string[]): Promise<UserRole | null> {
     if (!groups || groups.length === 0) return null;
-    const mappings = this.store.listSsoGroupMappings("ldap");
+    const mappings = await this.store.listSsoGroupMappings("ldap");
     for (const group of groups) {
       const match = mappings.find((m) => !m.projectId && m.groupName === group);
       if (match && isUserRole(match.role)) {
@@ -153,9 +153,9 @@ export class LdapService {
     return null;
   }
 
-  listProjectRoleAssignments(groups: string[]): Array<{ projectId: string; role: string; customRoleId: string | null }> {
+  async listProjectRoleAssignments(groups: string[]): Promise<Array<{ projectId: string; role: string; customRoleId: string | null }>> {
     if (!groups || groups.length === 0) return [];
-    const mappings = this.store.listSsoGroupMappings("ldap");
+    const mappings = await this.store.listSsoGroupMappings("ldap");
     const assignments: Array<{ projectId: string; role: string; customRoleId: string | null }> = [];
     for (const group of groups) {
       for (const mapping of mappings) {

@@ -21,17 +21,19 @@ import {
   type McpPolicyRole,
   type McpServerCatalog
 } from "@ai-orchestrator/shared";
-import type { McpServerRecord, SqliteStore } from "./db/database.js";
+import type { McpServerRecord } from "./db/database.js";
 import type { AuditEventInput } from "./services/audit-service.js";
 import type { SafeUser, UserRole } from "./services/auth-service.js";
 import { McpElicitationAnswerError, toElicitationView, type McpElicitationService } from "./services/mcp-elicitation-service.js";
 import type { RunAccess } from "./run-access.js";
 import { captureCatalog } from "./services/mcp-probe-service.js";
 import { evaluateToolForContext } from "./services/mcp-tool-policy.js";
+import type { Store } from "./db/store.js";
+import { filterAsync } from "./async-array.js";
 
 export interface McpClientFeatureDeps {
   app: FastifyInstance;
-  store: SqliteStore;
+  store: Store;
   mcpRegistry: MCPRegistry;
   elicitations: McpElicitationService;
   /** Largest resource the read endpoint returns, in bytes. */
@@ -39,13 +41,13 @@ export interface McpClientFeatureDeps {
   resolveSecret: MCPExecutionContext["resolveSecret"];
   redact: (value: string) => string;
   /** Phase 10.7 — with an actor, a delegated server acts with that user's own account. */
-  resolveRegisteredMcpServer: (registryServerId: string, actor?: SafeUser | null) => MCPServerConfig;
+  resolveRegisteredMcpServer: (registryServerId: string, actor?: SafeUser | null) => Promise<MCPServerConfig>;
   withScopedMcpContext: <T>(run: (context: MCPExecutionContext) => Promise<T>) => Promise<T>;
   requireRole: (request: FastifyRequest, reply: FastifyReply, roles: UserRole[]) => Promise<SafeUser | null>;
-  canExecuteInProject: (user: SafeUser, projectId: string) => boolean;
+  canExecuteInProject: (user: SafeUser, projectId: string) => Promise<boolean>;
   /** Project scope: an elicitation follows the workflow whose run asked it. */
   runAccess: RunAccess;
-  auditUser: (request: FastifyRequest, user: SafeUser, event: Omit<AuditEventInput, "actor">) => void;
+  auditUser: (request: FastifyRequest, user: SafeUser, event: Omit<AuditEventInput, "actor">) => void | Promise<void>;
 }
 
 const MAX_ERROR_CHARS = 2000;
@@ -72,9 +74,9 @@ export function registerMcpClientFeatureRoutes(deps: McpClientFeatureDeps): void
   const { app, store } = deps;
 
   /** Policy context for one user in one project against one registry server. */
-  const policyContext = (server: McpServerRecord, user: SafeUser, projectId: string) => ({
-    rules: store.listMcpToolPolicies(),
-    classifications: store.listMcpToolClassifications(server.id),
+  const policyContext = async (server: McpServerRecord, user: SafeUser, projectId: string) => ({
+    rules: await store.listMcpToolPolicies(),
+    classifications: await store.listMcpToolClassifications(server.id),
     role: user.role as McpPolicyRole,
     projectId,
     adapterId: server.adapterId,
@@ -83,14 +85,14 @@ export function registerMcpClientFeatureRoutes(deps: McpClientFeatureDeps): void
   });
 
   /** Shared preamble of the server-scoped routes: the server, its project and the caller's right to use it. */
-  const loadServerForUser = (
+  const loadServerForUser = async (
     request: FastifyRequest<{ Params: { id: string } }>,
     reply: FastifyReply,
     user: SafeUser,
     requestedProjectId: string | null | undefined,
     needsExecute: boolean
-  ): { server: McpServerRecord; projectId: string } | null => {
-    const server = store.getMcpServer(request.params.id);
+  ): Promise<{ server: McpServerRecord; projectId: string } | null> => {
+    const server = await store.getMcpServer(request.params.id);
     if (!server) {
       reply.code(404);
       reply.send({ error: "MCP server not found" });
@@ -102,12 +104,12 @@ export function registerMcpClientFeatureRoutes(deps: McpClientFeatureDeps): void
       return null;
     }
     const projectId = server.projectId ?? requestedProjectId ?? "default";
-    if (!store.getProject(projectId)) {
+    if (!await store.getProject(projectId)) {
       reply.code(400);
       reply.send({ error: `Project '${projectId}' does not exist` });
       return null;
     }
-    if (needsExecute && !deps.canExecuteInProject(user, projectId)) {
+    if (needsExecute && !await deps.canExecuteInProject(user, projectId)) {
       reply.code(403);
       reply.send({ error: `You do not have permission to use MCP servers in project '${projectId}'.` });
       return null;
@@ -117,15 +119,15 @@ export function registerMcpClientFeatureRoutes(deps: McpClientFeatureDeps): void
 
   const catalogFor = async (server: McpServerRecord, refresh: boolean, user: SafeUser): Promise<McpServerCatalog> => {
     if (refresh) {
-      const serverConfig = deps.resolveRegisteredMcpServer(server.id, user);
+      const serverConfig = await deps.resolveRegisteredMcpServer(server.id, user);
       const adapter = deps.mcpRegistry.get(serverConfig.serverId);
       const live = await deps.withScopedMcpContext((context) => captureCatalog(adapter, serverConfig, context));
-      return store.upsertMcpServerCatalog(server.id, live);
+      return await store.upsertMcpServerCatalog(server.id, live);
     }
-    return store.getMcpServerCatalog(server.id) ?? emptyCatalog();
+    return await store.getMcpServerCatalog(server.id) ?? emptyCatalog();
   };
 
-  const markAccess = <T extends { name?: string }>(
+  const markAccess = async <T extends { name?: string }>(
     entries: readonly T[],
     nameOf: (entry: T) => string,
     server: McpServerRecord,
@@ -133,7 +135,7 @@ export function registerMcpClientFeatureRoutes(deps: McpClientFeatureDeps): void
     projectId: string,
     kind: McpPolicyKind
   ) => {
-    const context = policyContext(server, user, projectId);
+    const context = await policyContext(server, user, projectId);
     return entries.map((entry) => {
       const decision = evaluateToolForContext(context, { name: nameOf(entry) }, kind);
       return {
@@ -166,7 +168,7 @@ export function registerMcpClientFeatureRoutes(deps: McpClientFeatureDeps): void
     const user = await deps.requireRole(request, reply, ["builder"]);
     if (!user) return;
     const query = parseQuery(request);
-    const loaded = loadServerForUser(request, reply, user, query.projectId, false);
+    const loaded = await loadServerForUser(request, reply, user, query.projectId, false);
     if (!loaded) return;
     const { server, projectId } = loaded;
     try {
@@ -176,8 +178,8 @@ export function registerMcpClientFeatureRoutes(deps: McpClientFeatureDeps): void
         capabilities: catalog.capabilities,
         updatedAt: catalog.updatedAt || null,
         policy: { role: user.role, projectId },
-        resources: markAccess(catalog.resources, (entry) => entry.uri, server, user, projectId, "resource"),
-        resourceTemplates: markAccess(catalog.resourceTemplates, (entry) => entry.uriTemplate, server, user, projectId, "resource")
+        resources: await markAccess(catalog.resources, (entry) => entry.uri, server, user, projectId, "resource"),
+        resourceTemplates: await markAccess(catalog.resourceTemplates, (entry) => entry.uriTemplate, server, user, projectId, "resource")
       };
     } catch (error) {
       reply.code(502);
@@ -193,13 +195,13 @@ export function registerMcpClientFeatureRoutes(deps: McpClientFeatureDeps): void
       reply.code(400);
       return { error: "Invalid resource read", details: parsed.error.issues };
     }
-    const loaded = loadServerForUser(request, reply, user, parsed.data.projectId ?? null, true);
+    const loaded = await loadServerForUser(request, reply, user, parsed.data.projectId ?? null, true);
     if (!loaded) return;
     const { server, projectId } = loaded;
     const uri = parsed.data.uri;
-    const decision = evaluateToolForContext(policyContext(server, user, projectId), { name: uri }, "resource");
+    const decision = evaluateToolForContext(await policyContext(server, user, projectId), { name: uri }, "resource");
     if (!decision.allowed) {
-      deps.auditUser(request, user, {
+      await deps.auditUser(request, user, {
         category: "system",
         eventType: "mcp_resource.read_denied",
         action: "read",
@@ -217,7 +219,7 @@ export function registerMcpClientFeatureRoutes(deps: McpClientFeatureDeps): void
     }
     let serverConfig: MCPServerConfig;
     try {
-      serverConfig = deps.resolveRegisteredMcpServer(server.id, user);
+      serverConfig = await deps.resolveRegisteredMcpServer(server.id, user);
     } catch (error) {
       reply.code(409);
       return { error: error instanceof Error ? error.message : String(error) };
@@ -236,7 +238,7 @@ export function registerMcpClientFeatureRoutes(deps: McpClientFeatureDeps): void
         return read;
       });
       const durationMs = Date.now() - started;
-      deps.auditUser(request, user, {
+      await deps.auditUser(request, user, {
         category: "system",
         eventType: "mcp_resource.read",
         action: "read",
@@ -259,7 +261,7 @@ export function registerMcpClientFeatureRoutes(deps: McpClientFeatureDeps): void
         scrubList = secretValuesForScrub(await deps.resolveSecret(serverConfig.secretRef).catch(() => undefined));
       }
       const message = truncate(deps.redact(String(scrubValue(error instanceof Error ? error.message : String(error), scrubList))));
-      deps.auditUser(request, user, {
+      await deps.auditUser(request, user, {
         category: "system",
         eventType: "mcp_resource.read",
         action: "read",
@@ -282,7 +284,7 @@ export function registerMcpClientFeatureRoutes(deps: McpClientFeatureDeps): void
     const user = await deps.requireRole(request, reply, ["builder"]);
     if (!user) return;
     const query = parseQuery(request);
-    const loaded = loadServerForUser(request, reply, user, query.projectId, false);
+    const loaded = await loadServerForUser(request, reply, user, query.projectId, false);
     if (!loaded) return;
     const { server, projectId } = loaded;
     try {
@@ -292,7 +294,7 @@ export function registerMcpClientFeatureRoutes(deps: McpClientFeatureDeps): void
         capabilities: catalog.capabilities,
         updatedAt: catalog.updatedAt || null,
         policy: { role: user.role, projectId },
-        prompts: markAccess(catalog.prompts, (entry) => entry.name, server, user, projectId, "prompt")
+        prompts: await markAccess(catalog.prompts, (entry) => entry.name, server, user, projectId, "prompt")
       };
     } catch (error) {
       reply.code(502);
@@ -308,13 +310,13 @@ export function registerMcpClientFeatureRoutes(deps: McpClientFeatureDeps): void
       reply.code(400);
       return { error: "Invalid prompt request", details: parsed.error.issues };
     }
-    const loaded = loadServerForUser(request, reply, user, parsed.data.projectId ?? null, true);
+    const loaded = await loadServerForUser(request, reply, user, parsed.data.projectId ?? null, true);
     if (!loaded) return;
     const { server, projectId } = loaded;
     const name = parsed.data.name;
-    const decision = evaluateToolForContext(policyContext(server, user, projectId), { name }, "prompt");
+    const decision = evaluateToolForContext(await policyContext(server, user, projectId), { name }, "prompt");
     if (!decision.allowed) {
-      deps.auditUser(request, user, {
+      await deps.auditUser(request, user, {
         category: "system",
         eventType: "mcp_prompt.get_denied",
         action: "read",
@@ -332,7 +334,7 @@ export function registerMcpClientFeatureRoutes(deps: McpClientFeatureDeps): void
     }
     let serverConfig: MCPServerConfig;
     try {
-      serverConfig = deps.resolveRegisteredMcpServer(server.id, user);
+      serverConfig = await deps.resolveRegisteredMcpServer(server.id, user);
     } catch (error) {
       reply.code(409);
       return { error: error instanceof Error ? error.message : String(error) };
@@ -351,7 +353,7 @@ export function registerMcpClientFeatureRoutes(deps: McpClientFeatureDeps): void
         return rendered;
       });
       const durationMs = Date.now() - started;
-      deps.auditUser(request, user, {
+      await deps.auditUser(request, user, {
         category: "system",
         eventType: "mcp_prompt.get",
         action: "read",
@@ -379,9 +381,9 @@ export function registerMcpClientFeatureRoutes(deps: McpClientFeatureDeps): void
 
   // Like approvals: only users who can read the run's workflow see the
   // request; answering it needs `workflow:execute` there.
-  const visibleTo = (user: SafeUser) => (record: { createdBy: string | null; workflowId: string }) =>
+  const visibleTo = (user: SafeUser) => async (record: { createdBy: string | null; workflowId: string }) =>
     (user.role === "admin" || user.role === "operator" || !record.createdBy || record.createdBy === user.id) &&
-    deps.runAccess.workflow(user, record.workflowId, "workflow:read").ok;
+    (await deps.runAccess.workflow(user, record.workflowId, "workflow:read")).ok;
 
   app.get("/api/mcp/elicitations", async (request, reply) => {
     const user = await deps.requireRole(request, reply, ["viewer"]);
@@ -395,18 +397,16 @@ export function registerMcpClientFeatureRoutes(deps: McpClientFeatureDeps): void
           : "pending";
     const executionId = typeof query.executionId === "string" && query.executionId.trim() ? query.executionId.trim() : undefined;
     const limit = Number(query.limit);
-    const items = deps.elicitations
-      .list({ ...(status ? { status } : {}), ...(executionId ? { executionId } : {}), limit: Number.isFinite(limit) ? limit : 100 })
-      .filter(visibleTo(user))
-      .map(toElicitationView);
+    const listed = await deps.elicitations.list({ ...(status ? { status } : {}), ...(executionId ? { executionId } : {}), limit: Number.isFinite(limit) ? limit : 100 });
+    const items = (await filterAsync(listed, visibleTo(user))).map(toElicitationView);
     return { items };
   });
 
   app.get<{ Params: { id: string } }>("/api/mcp/elicitations/:id", async (request, reply) => {
     const user = await deps.requireRole(request, reply, ["viewer"]);
     if (!user) return;
-    const record = deps.elicitations.get(request.params.id);
-    if (!record || !visibleTo(user)(record)) {
+    const record = await deps.elicitations.get(request.params.id);
+    if (!record || !await visibleTo(user)(record)) {
       reply.code(404);
       return { error: "Elicitation request not found" };
     }
@@ -421,18 +421,18 @@ export function registerMcpClientFeatureRoutes(deps: McpClientFeatureDeps): void
       reply.code(400);
       return { error: "Invalid elicitation answer", details: parsed.error.issues };
     }
-    const record = deps.elicitations.get(request.params.id);
-    if (!record || !visibleTo(user)(record)) {
+    const record = await deps.elicitations.get(request.params.id);
+    if (!record || !await visibleTo(user)(record)) {
       reply.code(404);
       return { error: "Elicitation request not found" };
     }
-    const access = deps.runAccess.workflow(user, record.workflowId, "workflow:execute");
+    const access = await deps.runAccess.workflow(user, record.workflowId, "workflow:execute");
     if (!access.ok) {
       reply.code(access.status);
       return { error: access.error };
     }
     try {
-      const settled = deps.elicitations.answer(
+      const settled = await deps.elicitations.answer(
         request.params.id,
         { action: parsed.data.action, ...(parsed.data.content ? { content: parsed.data.content } : {}) },
         { userId: user.id, email: user.email, role: user.role }

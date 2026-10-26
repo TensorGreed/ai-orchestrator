@@ -23,7 +23,7 @@
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import fs from "node:fs/promises";
-import type { SqliteStore } from "../db/database.js";
+import type { Store } from "../db/store.js";
 
 interface AuditExportDestinationConfig {
   /** http kind */
@@ -47,13 +47,13 @@ interface ExportRunOutcome {
 export class AuditExportService {
   private timer: NodeJS.Timeout | null = null;
   private inFlight = new Set<string>();
-  private readonly store: SqliteStore;
+  private readonly store: Store;
   private readonly checkIntervalMs: number;
   private readonly batchSize: number;
   private readonly safeFsRoot: string;
   private logger?: { info: (msg: string, fields?: Record<string, unknown>) => void; warn: (msg: string, fields?: Record<string, unknown>) => void };
 
-  constructor(store: SqliteStore, options: { checkIntervalMs?: number; batchSize?: number; safeFsRoot?: string } = {}) {
+  constructor(store: Store, options: { checkIntervalMs?: number; batchSize?: number; safeFsRoot?: string } = {}) {
     this.store = store;
     this.checkIntervalMs = options.checkIntervalMs ?? 60_000;
     this.batchSize = options.batchSize ?? 500;
@@ -85,7 +85,7 @@ export class AuditExportService {
    * destination are guarded by `inFlight`.
    */
   async tick(): Promise<void> {
-    const dests = this.store.listAuditExportDestinations().filter((d) => d.enabled);
+    const dests = (await this.store.listAuditExportDestinations()).filter((d) => d.enabled);
     const now = Date.now();
     for (const dest of dests) {
       if (this.inFlight.has(dest.id)) continue;
@@ -110,14 +110,14 @@ export class AuditExportService {
    * endpoint can drive a destination on demand.
    */
   async runDestination(id: string): Promise<ExportRunOutcome> {
-    const dest = this.store.getAuditExportDestination(id);
+    const dest = await this.store.getAuditExportDestination(id);
     if (!dest) throw new Error(`Audit export destination not found: ${id}`);
     const runId = `aex_${randomUUID()}`;
     const startedAt = new Date().toISOString();
-    const rows = this.store.listAuditLogsAfter({ afterId: dest.lastExportId, limit: this.batchSize });
+    const rows = await this.store.listAuditLogsAfter({ afterId: dest.lastExportId, limit: this.batchSize });
     if (rows.length === 0) {
       const completedAt = new Date().toISOString();
-      this.store.recordAuditExportRun({
+      await this.store.recordAuditExportRun({
         id: runId,
         destinationId: id,
         startedAt,
@@ -164,7 +164,7 @@ export class AuditExportService {
         rowsConsidered: rows.length
       });
     }
-    this.store.recordAuditExportRun({
+    await this.store.recordAuditExportRun({
       id: runId,
       destinationId: id,
       startedAt,

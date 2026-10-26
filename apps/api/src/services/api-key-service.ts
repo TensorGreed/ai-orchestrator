@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 import { nanoid } from "nanoid";
-import { SqliteStore } from "../db/database";
+import type { Store } from "../db/store.js";
 
 const API_KEY_PREFIX_LENGTH = 10;
 const API_KEY_SECRET_LENGTH = 32;
@@ -31,16 +31,16 @@ export function hashSecret(secret: string): string {
 
 export class ApiKeyService {
   constructor(
-    private readonly store: SqliteStore,
+    private readonly store: Store,
     private readonly defaultExpiryDays: number = 0
   ) {}
 
-  create(input: {
+  async create(input: {
     userId: string;
     name: string;
     scopes?: string[];
     expiresInDays?: number | null;
-  }): { record: ApiKeyRecord; plaintext: string } {
+  }): Promise<{ record: ApiKeyRecord; plaintext: string }> {
     const prefix = `${API_KEY_HUMAN_PREFIX}${nanoid(API_KEY_PREFIX_LENGTH)}`;
     const secret = crypto.randomBytes(API_KEY_SECRET_LENGTH).toString("base64url");
     const plaintext = `${prefix}.${secret}`;
@@ -58,7 +58,7 @@ export class ApiKeyService {
       expiresAt = date.toISOString();
     }
 
-    this.store.saveApiKey({
+    await this.store.saveApiKey({
       id,
       userId: input.userId,
       name: input.name,
@@ -68,7 +68,7 @@ export class ApiKeyService {
       expiresAt
     });
 
-    const saved = this.store.findApiKeyByPrefix(prefix);
+    const saved = await this.store.findApiKeyByPrefix(prefix);
     if (!saved) {
       throw new Error("API key could not be persisted");
     }
@@ -88,8 +88,8 @@ export class ApiKeyService {
     };
   }
 
-  list(userId?: string): ApiKeyRecord[] {
-    return this.store.listApiKeys(userId).map((row) => ({
+  async list(userId?: string): Promise<ApiKeyRecord[]> {
+    return (await this.store.listApiKeys(userId)).map((row) => ({
       id: row.id,
       userId: row.userId,
       name: row.name,
@@ -102,11 +102,11 @@ export class ApiKeyService {
     }));
   }
 
-  revoke(id: string, userId?: string): boolean {
-    return this.store.revokeApiKey(id, userId);
+  async revoke(id: string, userId?: string): Promise<boolean> {
+    return await this.store.revokeApiKey(id, userId);
   }
 
-  verify(rawKey: string): ApiKeyVerification | null {
+  async verify(rawKey: string): Promise<ApiKeyVerification | null> {
     if (!rawKey || typeof rawKey !== "string") return null;
     const trimmed = rawKey.trim();
     const separatorIndex = trimmed.indexOf(".");
@@ -115,7 +115,7 @@ export class ApiKeyService {
     const secret = trimmed.slice(separatorIndex + 1);
     if (!prefix.startsWith(API_KEY_HUMAN_PREFIX) || !secret) return null;
 
-    const record = this.store.findApiKeyByPrefix(prefix);
+    const record = await this.store.findApiKeyByPrefix(prefix);
     if (!record) return null;
     if (record.revokedAt) return null;
     if (record.expiresAt && new Date(record.expiresAt).getTime() <= Date.now()) return null;
@@ -125,7 +125,7 @@ export class ApiKeyService {
     if (expected.length !== candidate.length) return null;
     if (!crypto.timingSafeEqual(expected, candidate)) return null;
 
-    this.store.touchApiKey(record.id);
+    await this.store.touchApiKey(record.id);
     return {
       userId: record.userId,
       keyId: record.id,

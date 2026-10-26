@@ -103,7 +103,7 @@ import {
   type RunFacts,
   type Workflow
 } from "@ai-orchestrator/shared";
-import type { EvalFixtureRecord, EvalResultRecord, EvalRunRecord, ReplayRecordingRecord, SqliteStore } from "../db/database.js";
+import type { EvalFixtureRecord, EvalResultRecord, EvalRunRecord, ReplayRecordingRecord } from "../db/database.js";
 import type { SafeUser } from "./auth-service.js";
 import type { GuardProfileSubstitute } from "./guard-service.js";
 import { simulateCase, type SimulatedReplay } from "./guard-simulation-diff.js";
@@ -111,6 +111,8 @@ import { GuardSimulationSink, type GuardSimulationRun } from "./guard-simulation
 import { goldenSetSnapshots } from "./release-snapshot.js";
 import { captureExpectsMasking } from "./run-diff.js";
 import { applyScorer, judgeCallsFor, __scorerTest__, type EvalJudgeContext, type EvalLlmJudge } from "./eval-scorers.js";
+import type { Store } from "../db/store.js";
+import { mapAsync } from "../async-array.js";
 
 export type { EvalLlmJudge, EvalJudgeContext, EvalJudgeResponse } from "./eval-scorers.js";
 export type { EvalRunSummary, EvalScoreDetail };
@@ -205,8 +207,8 @@ export interface EvalReplayDeps {
     request: { draft?: boolean; version?: number; workflow?: Record<string, unknown>; overrides?: ReplayCandidateOverrides },
     /** Phase 15.3 — who is asking (an admin may pin an older version of a bound guard profile). */
     context?: { actor?: SafeUser | null }
-  ) => EvalReplayCandidate;
-  getRecording: (id: string) => ReplayRecordingRecord | null;
+  ) => Promise<EvalReplayCandidate>;
+  getRecording: (id: string) => Promise<ReplayRecordingRecord | null>;
   /** Replays one golden run against the candidate in the replay sandbox, as `actor`, with this execution id. */
   replayCase: (input: {
     recording: ReplayRecordingRecord;
@@ -229,7 +231,7 @@ export interface EvalReplayDeps {
    * `source: "captured"` means the saved version is gone (or never existed)
    * and only the scrubbed copy captured with the golden run is left.
    */
-  baselineFor?: (recording: ReplayRecordingRecord) => { workflow: Workflow; kind: CandidateKind; version: number | null; source?: "version" | "captured" };
+  baselineFor?: (recording: ReplayRecordingRecord) => Promise<{ workflow: Workflow; kind: CandidateKind; version: number | null; source?: "version" | "captured" }>;
   /** Phase 15.3 — the price of one model call, for the estimate; null when the model has no price. */
   priceCall?: (providerId: string, model: string, inputTokens: number, outputTokens: number) => number | null;
   /**
@@ -238,7 +240,7 @@ export interface EvalReplayDeps {
    * no longer hold `permission` on it (Phase 15.3: an inline or overridden
    * candidate needs `workflow:write` for every case, not only at the start).
    */
-  actorFor: (userId: string, email: string, workflowId: string, permission?: "workflow:read" | "workflow:execute" | "workflow:write") => SafeUser | null;
+  actorFor: (userId: string, email: string, workflowId: string, permission?: "workflow:read" | "workflow:execute" | "workflow:write") => Promise<SafeUser | null>;
 }
 
 /** Phase 15.6 — one workflow's part of a guard policy simulation, as a replay job. */
@@ -257,7 +259,7 @@ export interface SimulationJobRequest {
   /** The simulated profile differs from the profile's latest saved version. */
   profileChanged: boolean;
   /** Why the starter may no longer simulate this profile (their role or the profile changed); null when they still may. Checked on every case. */
-  canRun: (actor: SafeUser) => string | null;
+  canRun: (actor: SafeUser) => string | null | Promise<string | null>;
   /** Phase 16 — a destination preview: the stored rows (baseline) and the admin's unsaved rows (candidate). */
   destinationRows?: { baseline: DataDestinationRow[]; candidate: DataDestinationRow[] };
 }
@@ -282,7 +284,7 @@ export interface EvalServiceOptions {
   /** A stored case output or run diff larger than this (JSON bytes) is replaced by a truncation marker. Default 256 KB. */
   maxResultBytes?: number;
   /** Removes secrets from text that is stored and shown (case errors, score reasons). */
-  scrub?: (text: string) => string;
+  scrub?: (text: string) => Promise<string>;
   replay?: EvalReplayDeps;
   /** Aborts a running execution (cancel). */
   abortExecution?: (executionId: string, reason: string) => void;
@@ -502,10 +504,11 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 export class EvalService {
   private readonly slots: EvalSlots;
   private readonly active = new Map<string, ActiveRun>();
+  private bookkeeping: Promise<void> = Promise.resolve();
   private readonly options: Required<Pick<EvalServiceOptions, "maxCases" | "defaultMaxCostUsd" | "evalRunMaxCostUsd" | "maxResultBytes" | "heartbeatMs">> & EvalServiceOptions;
 
   constructor(
-    private readonly store: SqliteStore,
+    private readonly store: Store,
     private readonly executor: EvalWorkflowExecutor,
     /**
      * Phase 9.5 — optional LLM-judge callback. When omitted, judge-based
@@ -527,36 +530,36 @@ export class EvalService {
   // Datasets and golden sets
   // ---------------------------------------------------------------------------
 
-  createDataset(input: { name: string; description?: string; projectId?: string; workflowId?: string; createdBy?: string }) {
+  async createDataset(input: { name: string; description?: string; projectId?: string; workflowId?: string; createdBy?: string }) {
     const id = `ds_${randomUUID()}`;
-    this.store.createEvalDataset({ id, ...input });
-    return this.store.getEvalDataset(id);
+    await this.store.createEvalDataset({ id, ...input });
+    return await this.store.getEvalDataset(id);
   }
 
-  listDatasets(options: { projectId?: string; workflowId?: string } = {}) {
-    return this.store.listEvalDatasets(options);
+  async listDatasets(options: { projectId?: string; workflowId?: string } = {}) {
+    return await this.store.listEvalDatasets(options);
   }
 
-  getDataset(id: string) {
-    return this.store.getEvalDataset(id);
+  async getDataset(id: string) {
+    return await this.store.getEvalDataset(id);
   }
 
-  deleteDataset(id: string): boolean {
+  async deleteDataset(id: string): Promise<boolean> {
     for (let page = 0; page < 100; page += 1) {
-      const live = this.store.listEvalRuns({ datasetId: id, statuses: ["queued", "running"], limit: 500 });
-      for (const run of live) this.cancel(run.id);
+      const live = await this.store.listEvalRuns({ datasetId: id, statuses: ["queued", "running"], limit: 500 });
+      for (const run of live) await this.cancel(run.id);
       if (live.length < 500) break;
     }
-    return this.store.deleteEvalDataset(id);
+    return await this.store.deleteEvalDataset(id);
   }
 
   // ---------------------------------------------------------------------------
   // Fixtures
   // ---------------------------------------------------------------------------
 
-  addFixture(input: { datasetId: string; name: string; input: unknown; expected?: unknown; scorers?: ScorerSpec[]; recordingId?: string }) {
+  async addFixture(input: { datasetId: string; name: string; input: unknown; expected?: unknown; scorers?: ScorerSpec[]; recordingId?: string }) {
     const id = `fix_${randomUUID()}`;
-    this.store.createEvalFixture({
+    await this.store.createEvalFixture({
       id,
       datasetId: input.datasetId,
       name: input.name,
@@ -565,7 +568,7 @@ export class EvalService {
       scorers: input.scorers as Array<Record<string, unknown>> | undefined,
       ...(input.recordingId ? { recordingId: input.recordingId } : {})
     });
-    return this.store.getEvalFixture(id);
+    return await this.store.getEvalFixture(id);
   }
 
   /**
@@ -573,8 +576,8 @@ export class EvalService {
    * input is the case input, and its recorded output is the expected value
    * (read from the golden run when the case runs, so it is not copied).
    */
-  addGoldenRun(input: { datasetId: string; recording: ReplayRecordingRecord; name?: string; scorers?: ScorerSpec[] }) {
-    return this.addFixture({
+  async addGoldenRun(input: { datasetId: string; recording: ReplayRecordingRecord; name?: string; scorers?: ScorerSpec[] }) {
+    return await this.addFixture({
       datasetId: input.datasetId,
       name: input.name ?? input.recording.name,
       input: input.recording.input ?? null,
@@ -583,16 +586,16 @@ export class EvalService {
     });
   }
 
-  listFixtures(datasetId: string) {
-    return this.store.listEvalFixtures(datasetId);
+  async listFixtures(datasetId: string) {
+    return await this.store.listEvalFixtures(datasetId);
   }
 
-  getFixture(id: string) {
-    return this.store.getEvalFixture(id);
+  async getFixture(id: string) {
+    return await this.store.getEvalFixture(id);
   }
 
-  deleteFixture(id: string): boolean {
-    return this.store.deleteEvalFixture(id);
+  async deleteFixture(id: string): Promise<boolean> {
+    return await this.store.deleteEvalFixture(id);
   }
 
   // ---------------------------------------------------------------------------
@@ -600,19 +603,19 @@ export class EvalService {
   // ---------------------------------------------------------------------------
 
   /** Creates an eval run and queues it; the run executes in the background. */
-  enqueueRun(request: EvalRunRequest): EvalRunView {
-    const dataset = this.store.getEvalDataset(request.datasetId);
+  async enqueueRun(request: EvalRunRequest): Promise<EvalRunView> {
+    const dataset = await this.store.getEvalDataset(request.datasetId);
     if (!dataset) throw new EvalRunError(`Eval dataset not found: ${request.datasetId}`, "not_found");
-    const fixtures = this.store.listEvalFixtures(request.datasetId);
+    const fixtures = await this.store.listEvalFixtures(request.datasetId);
     if (fixtures.length === 0) throw new EvalRunError(`Dataset ${request.datasetId} has no fixtures`, "invalid");
     if (fixtures.length > this.options.maxCases) throw new EvalRunError(`Dataset ${request.datasetId} has ${fixtures.length} fixtures; a run can have at most ${this.options.maxCases} (REPLAY_JOB_MAX_CASES).`, "limit");
     if (dataset.workflowId && dataset.workflowId !== request.workflowId) throw new EvalRunError("This golden set belongs to another workflow.", "invalid");
     if (fixtures.every((fixture) => fixture.recordingId)) throw new EvalRunError("This golden set holds only golden runs: run it as a replay job, which replays them without side effects.", "invalid");
-    const workflow = this.store.getWorkflow(request.workflowId);
+    const workflow = await this.store.getWorkflow(request.workflowId);
 
     const runId = `run_${randomUUID()}`;
     const progress = this.initialProgress(fixtures.length);
-    this.store.createEvalRun({
+    await this.store.createEvalRun({
       id: runId,
       kind: "eval",
       status: "queued",
@@ -625,8 +628,8 @@ export class EvalService {
       progress: progress as unknown as Record<string, unknown>
     });
     const cases = fixtures.map((fixture) => this.caseSpec(fixture, request.scorers));
-    this.launch(runId, cases, (spec, executionId) => this.runEvalCase(request, runId, spec, executionId), { maxCostUsd: this.options.evalRunMaxCostUsd });
-    return this.view(this.store.getEvalRun(runId)!);
+    await this.launch(runId, cases, (spec, executionId) => this.runEvalCase(request, runId, spec, executionId), { maxCostUsd: this.options.evalRunMaxCostUsd });
+    return this.view((await this.store.getEvalRun(runId))!);
   }
 
   /**
@@ -634,9 +637,9 @@ export class EvalService {
    * the run finished (the pre-15.2 behaviour, behind `?wait=true`).
    */
   async startRun(request: EvalRunRequest): Promise<{ runId: string; summary: EvalRunSummary }> {
-    const run = this.enqueueRun(request);
+    const run = await this.enqueueRun(request);
     await this.wait(run.id);
-    const finished = this.store.getEvalRun(run.id);
+    const finished = await this.store.getEvalRun(run.id);
     return { runId: run.id, summary: (finished?.summary as unknown as EvalRunSummary) ?? emptySummary(0) };
   }
 
@@ -644,8 +647,8 @@ export class EvalService {
    * Phase 15.2 — a replay job: every golden run in the sets, replayed against
    * one candidate and scored. The sets must belong to `workflowId`.
    */
-  enqueueReplayJob(request: ReplayJobRequest, context: { workflowId: string; actor: SafeUser }): EvalRunView {
-    const prepared = this.prepareReplayJob(request, context.workflowId, context.actor);
+  async enqueueReplayJob(request: ReplayJobRequest, context: { workflowId: string; actor: SafeUser }): Promise<EvalRunView> {
+    const prepared = await this.prepareReplayJob(request, context.workflowId, context.actor);
     const { candidate, options, fixtures, datasetIds } = prepared;
     const maxExecutions = this.maxExecutions();
     if (prepared.executions > maxExecutions) {
@@ -669,7 +672,7 @@ export class EvalService {
     };
     const runId = `run_${randomUUID()}`;
     const progress = this.initialProgress(fixtures.length);
-    this.store.createEvalRun({
+    await this.store.createEvalRun({
       id: runId,
       kind: "replay",
       status: "queued",
@@ -689,10 +692,10 @@ export class EvalService {
     // Phase 15.4 — what each set holds now (the job's own cases); the release gate accepts the job only while its sets still match.
     // Taken here, after the job row exists, never in the estimate path.
     try {
-      this.store.setEvalRunSetSnapshot(runId, goldenSetSnapshots(datasetIds, (datasetId) => this.store.listEvalFixtures(datasetId)));
+      await this.store.setEvalRunSetSnapshot(runId, await goldenSetSnapshots(datasetIds, async (datasetId) => await this.store.listEvalFixtures(datasetId)));
     } catch (error) {
       // Never leave a job queued that will not launch.
-      this.store.finalizeEvalRun({ id: runId, status: "errored", error: "The golden sets could not be recorded for this job." });
+      await this.store.finalizeEvalRun({ id: runId, status: "errored", error: "The golden sets could not be recorded for this job." });
       throw error;
     }
     const job: ReplayJobContext = {
@@ -704,13 +707,13 @@ export class EvalService {
       scorers: prepared.scorers
     };
     const repeats = options.repeats ?? 1;
-    this.launch(
+    await this.launch(
       runId,
       fixtures.map((fixture) => this.caseSpec(fixture, job.scorers, repeats)),
       (spec, executionId, caseContext) => this.runReplayCase(job, runId, context.workflowId, spec, executionId, caseContext),
       { maxCostUsd: options.maxCostUsd }
     );
-    return this.view(this.store.getEvalRun(runId)!);
+    return this.view((await this.store.getEvalRun(runId))!);
   }
 
   /**
@@ -719,7 +722,7 @@ export class EvalService {
    * request), the published version or the draft, models from the tape,
    * strict MCP and the simulated profile swapped in. Never release proof.
    */
-  enqueueSimulationJob(request: SimulationJobRequest, actor: SafeUser): EvalRunView {
+  async enqueueSimulationJob(request: SimulationJobRequest, actor: SafeUser): Promise<EvalRunView> {
     const replay = this.options.replay;
     if (!replay) throw new EvalRunError("Replay jobs are not available on this server.", "invalid");
     const recordingIds = [...new Set(request.recordingIds)];
@@ -727,14 +730,14 @@ export class EvalService {
     if (recordingIds.length > this.options.maxCases) throw new EvalRunError(`A replay job can have at most ${this.options.maxCases} cases (REPLAY_JOB_MAX_CASES).`, "limit");
     let candidate: EvalReplayCandidate;
     try {
-      candidate = replay.resolveCandidate(request.workflowId, request.version !== undefined ? { version: request.version } : {}, { actor });
+      candidate = await replay.resolveCandidate(request.workflowId, request.version !== undefined ? { version: request.version } : {}, { actor });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       throw new EvalRunError(message, (error as { code?: unknown }).code === "not_found" ? "not_found" : "invalid");
     }
     const options: ReplayJobOptions = { mcpMode: "strict", maxCostUsd: this.options.defaultMaxCostUsd, models: "replay", compare: "recording", repeats: 1, aggregate: "all" };
-    const fixtures: EvalFixtureRecord[] = recordingIds.map((recordingId) => {
-      const recording = replay.getRecording(recordingId);
+    const fixtures: EvalFixtureRecord[] = await mapAsync(recordingIds, async (recordingId) => {
+      const recording = await replay.getRecording(recordingId);
       const at = recording?.createdAt ?? this.now().toISOString();
       return { id: `rec:${recordingId}`, datasetId: guardSimulationJobDatasetId(request.simulationId), name: recording?.name ?? recordingId, input: null, expected: null, scorers: null, required: false, recordingId, createdAt: at, updatedAt: at };
     });
@@ -751,7 +754,7 @@ export class EvalService {
       simulation: { id: request.simulationId, profileId: substitute.profileId, version: substitute.version, hash: substitute.hash, inline: substitute.inline }
     };
     const runId = `run_${randomUUID()}`;
-    this.store.createEvalRun({
+    await this.store.createEvalRun({
       id: runId,
       kind: "replay",
       status: "queued",
@@ -786,14 +789,14 @@ export class EvalService {
       options,
       scorers: null
     };
-    this.launch(
+    await this.launch(
       runId,
       fixtures.map((fixture) => this.caseSpec(fixture, null)),
       (spec, executionId, caseContext) => this.runSimulationCase(job, request.workflowId, spec, executionId, caseContext),
       // Simulations yield: another job's case always starts first, and they never take every slot.
       { maxCostUsd: options.maxCostUsd, priority: "low" }
     );
-    return this.view(this.store.getEvalRun(runId)!);
+    return this.view((await this.store.getEvalRun(runId))!);
   }
 
   /**
@@ -803,9 +806,9 @@ export class EvalService {
    * models, plus the most the judges can cost), with warnings. Validates the
    * request exactly as `enqueueReplayJob` does; nothing is stored or run.
    */
-  estimateReplayJob(request: ReplayJobRequest, context: { workflowId: string; actor?: SafeUser | null } & CandidatePolicy): ReplayJobEstimate {
+  async estimateReplayJob(request: ReplayJobRequest, context: { workflowId: string; actor?: SafeUser | null } & CandidatePolicy): Promise<ReplayJobEstimate> {
     const replay = this.options.replay!;
-    const { candidate, options, fixtures, executions } = this.prepareReplayJob(request, context.workflowId, context.actor ?? null);
+    const { candidate, options, fixtures, executions } = await this.prepareReplayJob(request, context.workflowId, context.actor ?? null);
     const repeats = options.repeats ?? 1;
     const baseline = options.compare === "baseline_rerun";
     const fromTape = options.models === "replay";
@@ -822,7 +825,7 @@ export class EvalService {
     const nowMs = this.now().getTime();
     for (const fixture of fixtures) {
       if (!fixture.recordingId) continue;
-      const recording = replay.getRecording(fixture.recordingId);
+      const recording = await replay.getRecording(fixture.recordingId);
       if (!recording || recording.workflowId !== context.workflowId || candidateRefusal(recording, context)) {
         missing += 1;
         continue;
@@ -837,7 +840,7 @@ export class EvalService {
       changedModelCalls += own.changed;
       if (own.unknown) costUnknown = true;
       if (baseline) {
-        if (this.baselineSourceOf(recording) === "redacted") capturedBaselines += 1;
+        if (await this.baselineSourceOf(recording) === "redacted") capturedBaselines += 1;
         const rerun = this.executionEstimate(recording, null, options);
         modelCalls += repeats * rerun.calls;
         costUsd += repeats * rerun.usd;
@@ -893,9 +896,9 @@ export class EvalService {
   }
 
   /** Phase 15.3 — where a golden run's baseline would come from: its saved version, else the scrubbed captured copy. */
-  private baselineSourceOf(recording: ReplayRecordingRecord): "version" | "captured" | "redacted" | "none" {
+  private async baselineSourceOf(recording: ReplayRecordingRecord): Promise<"version" | "captured" | "redacted" | "none"> {
     try {
-      const found = this.options.replay?.baselineFor?.(recording);
+      const found = await this.options.replay?.baselineFor?.(recording);
       if (found?.source === "captured") return capturedWorkflowIsRedacted(found.workflow) ? "redacted" : "captured";
       return "version";
     } catch {
@@ -945,16 +948,16 @@ export class EvalService {
   }
 
   /** Phase 15.3 — checks a replay job request and resolves its candidate, without storing anything. */
-  private prepareReplayJob(request: ReplayJobRequest, workflowId: string, actor: SafeUser | null = null): PreparedReplayJob {
+  private async prepareReplayJob(request: ReplayJobRequest, workflowId: string, actor: SafeUser | null = null): Promise<PreparedReplayJob> {
     const replay = this.options.replay;
     if (!replay) throw new EvalRunError("Replay jobs are not available on this server.", "invalid");
     const datasetIds = [...new Set(request.datasetIds)];
     const fixtures: EvalFixtureRecord[] = [];
     for (const datasetId of datasetIds) {
-      const dataset = this.store.getEvalDataset(datasetId);
+      const dataset = await this.store.getEvalDataset(datasetId);
       if (!dataset) throw new EvalRunError(`Golden set not found: ${datasetId}`, "not_found");
       if (dataset.workflowId !== workflowId) throw new EvalRunError(`Golden set ${datasetId} does not belong to this workflow.`, "invalid");
-      fixtures.push(...this.store.listEvalFixtures(datasetId));
+      fixtures.push(...await this.store.listEvalFixtures(datasetId));
     }
     if (!fixtures.some((fixture) => fixture.recordingId)) throw new EvalRunError("These golden sets hold no golden runs to replay.", "invalid");
     if (fixtures.length > this.options.maxCases) throw new EvalRunError(`These golden sets hold ${fixtures.length} cases; a replay job can have at most ${this.options.maxCases} (REPLAY_JOB_MAX_CASES).`, "limit");
@@ -962,7 +965,7 @@ export class EvalService {
 
     let candidate: EvalReplayCandidate;
     try {
-      candidate = replay.resolveCandidate(workflowId, {
+      candidate = await replay.resolveCandidate(workflowId, {
         ...(request.draft !== undefined ? { draft: request.draft } : {}),
         ...(request.version !== undefined ? { version: request.version } : {}),
         ...(request.workflow !== undefined ? { workflow: request.workflow } : {}),
@@ -1017,8 +1020,8 @@ export class EvalService {
    * executions are aborted, and the run is `canceled`. Returns the run, or
    * null when it does not exist. A finished run is returned unchanged.
    */
-  cancel(runId: string): EvalRunView | null {
-    const record = this.store.getEvalRun(runId);
+  async cancel(runId: string): Promise<EvalRunView | null> {
+    const record = await this.store.getEvalRun(runId);
     if (!record) return null;
     if (EVAL_RUN_FINISHED_STATUSES.has(record.status)) return this.view(record);
     const active = this.active.get(runId);
@@ -1028,7 +1031,7 @@ export class EvalService {
       this.wake(active);
     }
     const progress = active ? { ...active.progress, updatedAt: this.now().toISOString() } : (record.progress as unknown as EvalRunProgress | null);
-    this.store.finalizeEvalRun({
+    await this.store.finalizeEvalRun({
       id: runId,
       status: "canceled",
       ...(active ? { summary: this.finishSummary(active) as unknown as Record<string, unknown> } : {}),
@@ -1036,7 +1039,7 @@ export class EvalService {
       error: "Canceled",
       onlyFrom: ["queued", "running"]
     });
-    const view = this.view(this.store.getEvalRun(runId)!);
+    const view = this.view((await this.store.getEvalRun(runId))!);
     if (active) this.emit(active, view, false);
     return view;
   }
@@ -1047,14 +1050,14 @@ export class EvalService {
    * `interrupted` (cases that finish afterwards are still recorded if the
    * store is open).
    */
-  shutdown(): void {
+  async shutdown(): Promise<void> {
     for (const active of this.active.values()) {
       if (active.canceled) continue;
       active.canceled = true;
       for (const executionId of active.inFlight) this.options.abortExecution?.(executionId, "The server is stopping.");
       this.wake(active);
-      this.safely(() => {
-        this.store.finalizeEvalRun({
+      this.safely(async () => {
+        await this.store.finalizeEvalRun({
           id: active.runId,
           status: "interrupted",
           summary: this.finishSummary(active) as unknown as Record<string, unknown>,
@@ -1064,6 +1067,7 @@ export class EvalService {
         });
       });
     }
+    await this.flush();
   }
 
   /**
@@ -1073,13 +1077,13 @@ export class EvalService {
    * been written for `EVAL_RUN_STALE_MS`, so runs another live instance is
    * executing are left alone.
    */
-  recoverInterrupted(options: { onlyStale?: boolean } = {}): number {
+  async recoverInterrupted(options: { onlyStale?: boolean } = {}): Promise<number> {
     let count = 0;
     // Runs left alone stay in the list, so the next page starts after them.
     let kept = 0;
     const nowMs = this.now().getTime();
     for (;;) {
-      const page = this.store.listEvalRuns({ statuses: ["queued", "running"], limit: 500, offset: kept });
+      const page = await this.store.listEvalRuns({ statuses: ["queued", "running"], limit: 500, offset: kept });
       for (const run of page) {
         let keep = this.active.has(run.id);
         if (!keep && options.onlyStale) {
@@ -1090,7 +1094,7 @@ export class EvalService {
           kept += 1;
           continue;
         }
-        if (this.store.finalizeEvalRun({ id: run.id, status: "interrupted", error: "The server stopped before this run finished.", onlyFrom: ["queued", "running"] })) count += 1;
+        if (await this.store.finalizeEvalRun({ id: run.id, status: "interrupted", error: "The server stopped before this run finished.", onlyFrom: ["queued", "running"] })) count += 1;
         else kept += 1;
       }
       if (page.length < 500) break;
@@ -1098,24 +1102,24 @@ export class EvalService {
     return count;
   }
 
-  listRuns(options: { datasetId?: string; workflowId?: string; workflowIds?: string[]; kind?: "eval" | "replay"; limit?: number; excludeSimulations?: boolean } = {}): EvalRunView[] {
-    return this.store.listEvalRuns(options).map((run) => this.view(run));
+  async listRuns(options: { datasetId?: string; workflowId?: string; workflowIds?: string[]; kind?: "eval" | "replay"; limit?: number; excludeSimulations?: boolean } = {}): Promise<EvalRunView[]> {
+    return (await this.store.listEvalRuns(options)).map((run) => this.view(run));
   }
 
-  getRun(id: string): (EvalRunView & { results: Array<EvalCaseResult & { output: unknown }> }) | null {
-    const run = this.store.getEvalRun(id);
+  async getRun(id: string): Promise<(EvalRunView & { results: Array<EvalCaseResult & { output: unknown }> }) | null> {
+    const run = await this.store.getEvalRun(id);
     if (!run) return null;
-    const results = this.store.listEvalResults(id).map((result) => ({ ...this.caseView(result), output: result.output }));
+    const results = (await this.store.listEvalResults(id)).map((result) => ({ ...this.caseView(result), output: result.output }));
     return { ...this.view(run), results };
   }
 
-  getRunView(id: string): EvalRunView | null {
-    const run = this.store.getEvalRun(id);
+  async getRunView(id: string): Promise<EvalRunView | null> {
+    const run = await this.store.getEvalRun(id);
     return run ? this.view(run) : null;
   }
 
-  getCase(runId: string, resultId: string): EvalCaseDetail | null {
-    const result = this.store.getEvalResult(runId, resultId);
+  async getCase(runId: string, resultId: string): Promise<EvalCaseDetail | null> {
+    const result = await this.store.getEvalResult(runId, resultId);
     if (!result) return null;
     const diff = (result.diff as ReplayCaseDiff | EvalStoredTruncation | null) ?? null;
     if (isTruncation(diff)) return { ...this.caseView(result), output: result.output, replay: null, replayTruncated: diff };
@@ -1148,12 +1152,12 @@ export class EvalService {
     return { fixture, reserveUsd: roundUsd(reserveUsd * Math.max(1, repeats)), reserveUnknown };
   }
 
-  private launch(runId: string, cases: CaseSpec[], runCase: RunCaseFn, limits: { maxCostUsd?: number; priority?: "low" } = {}): void {
+  private async launch(runId: string, cases: CaseSpec[], runCase: RunCaseFn, limits: { maxCostUsd?: number; priority?: "low" } = {}): Promise<void> {
     let resolveDone!: () => void;
     const done = new Promise<void>((resolve) => {
       resolveDone = resolve;
     });
-    const record = this.store.getEvalRun(runId)!;
+    const record = (await this.store.getEvalRun(runId))!;
     const active: ActiveRun = {
       runId,
       canceled: false,
@@ -1172,8 +1176,8 @@ export class EvalService {
     this.execute(active, cases, runCase, limits)
       .catch((error) => {
         this.options.logger?.warn("Eval run failed", { runId, error: error instanceof Error ? error.message : String(error) });
-        this.safely(() => {
-          this.store.finalizeEvalRun({
+        this.safely(async () => {
+          await this.store.finalizeEvalRun({
             id: runId,
             status: "failed",
             summary: this.finishSummary(active) as unknown as Record<string, unknown>,
@@ -1182,9 +1186,11 @@ export class EvalService {
           });
         });
       })
-      .finally(() => {
+      // promise-ok: finally waits for the returned promise; flush never rejects
+      .finally(async () => {
         this.active.delete(runId);
         this.wake(active);
+        await this.flush();
         active.resolveDone();
       });
   }
@@ -1203,7 +1209,7 @@ export class EvalService {
     const heartbeat = setInterval(() => {
       if (active.canceled) return;
       active.progress = { ...active.progress, updatedAt: this.now().toISOString() };
-      this.safely(() => this.store.updateEvalRunProgress({ id: active.runId, progress: active.progress as unknown as Record<string, unknown> }));
+      this.safely(async () => await this.store.updateEvalRunProgress({ id: active.runId, progress: active.progress as unknown as Record<string, unknown> }));
     }, this.options.heartbeatMs);
     heartbeat.unref?.();
     const running: Array<Promise<void>> = [];
@@ -1247,7 +1253,7 @@ export class EvalService {
         if (!started) {
           started = true;
           active.progress = { ...active.progress, updatedAt: this.now().toISOString() };
-          this.safely(() => this.store.updateEvalRunProgress({ id: active.runId, status: "running", progress: active.progress as unknown as Record<string, unknown> }));
+          this.safely(async () => await this.store.updateEvalRunProgress({ id: active.runId, status: "running", progress: active.progress as unknown as Record<string, unknown> }));
         }
         const executionId = randomUUID();
         active.inFlight.add(executionId);
@@ -1333,10 +1339,10 @@ export class EvalService {
     active.progress = progress;
     if (active.canceled) {
       // The run is already `canceled`; keep its summary current with the cases that finished after the cancel.
-      this.safely(() => this.store.updateEvalRunSummary(active.runId, summary as unknown as Record<string, unknown>, progress as unknown as Record<string, unknown>));
+      this.safely(async () => await this.store.updateEvalRunSummary(active.runId, summary as unknown as Record<string, unknown>, progress as unknown as Record<string, unknown>));
     } else {
-      this.safely(() =>
-        this.store.finalizeEvalRun({
+      this.safely(async () =>
+        await this.store.finalizeEvalRun({
           id: active.runId,
           status: budgetStop ? "failed" : "completed",
           summary: summary as unknown as Record<string, unknown>,
@@ -1346,18 +1352,34 @@ export class EvalService {
         })
       );
     }
-    this.safely(() => {
-      const record = this.store.getEvalRun(active.runId);
+    this.safely(async () => {
+      const record = await this.store.getEvalRun(active.runId);
       if (record) this.emit(active, this.view(record), true);
     });
   }
 
-  private safely(write: () => void): void {
-    try {
-      write();
-    } catch (error) {
+  /**
+   * Queues a bookkeeping write behind the ones before it, so progress,
+   * results and the final status land in the order they were made (a
+   * pooled database could otherwise run them out of order). A failed write
+   * is logged and does not stop the ones after it.
+   */
+  private safely(write: () => unknown): void {
+    this.bookkeeping = this.bookkeeping.then(async () => {
+      await write();
+    }).catch((error: unknown) => {
       this.options.logger?.warn("Eval run bookkeeping failed", { error: error instanceof Error ? error.message : String(error) });
-    }
+    });
+  }
+
+  /** Resolves once every queued bookkeeping write has finished. */
+  async flush(): Promise<void> {
+    let last: Promise<void>;
+    do {
+      last = this.bookkeeping;
+      await last;
+      // promise-ok: identity check: a write queued while waiting replaced the tail
+    } while (last !== this.bookkeeping);
   }
 
   /** A value to store as it is, or a truncation marker when its JSON is over `maxResultBytes`. */
@@ -1371,10 +1393,10 @@ export class EvalService {
     return marker;
   }
 
-  private scrubText(text: string): string {
+  private async scrubText(text: string): Promise<string> {
     if (!this.options.scrub) return text;
     try {
-      return this.options.scrub(text);
+      return await this.options.scrub(text);
     } catch {
       return text;
     }
@@ -1399,20 +1421,20 @@ export class EvalService {
     if (outcome.replayedModelCalls) summary.replayedModelCalls = (summary.replayedModelCalls ?? 0) + outcome.replayedModelCalls;
     if (outcome.recordedCostUsd) summary.recordedCostUsd = roundUsd((summary.recordedCostUsd ?? 0) + outcome.recordedCostUsd);
 
-    const error = outcome.error ? this.scrubText(outcome.error) : undefined;
-    const score = outcome.score
-      ? {
-          pass: outcome.score.pass,
-          details: outcome.score.details.map((detail) => ({ ...detail, reason: this.scrubText(detail.reason) })),
-          ...(outcome.repeats ? { repeats: outcome.repeats } : {})
-        }
-      : outcome.repeats
-        ? { pass: outcome.status === "pass", details: [], repeats: outcome.repeats }
-        : undefined;
-    this.safely(() => {
+    this.safely(async () => {
+      const error = outcome.error ? await this.scrubText(outcome.error) : undefined;
+      const score = outcome.score
+        ? {
+            pass: outcome.score.pass,
+            details: await mapAsync(outcome.score.details, async (detail) => ({ ...detail, reason: await this.scrubText(detail.reason) })),
+            ...(outcome.repeats ? { repeats: outcome.repeats } : {})
+          }
+        : outcome.repeats
+          ? { pass: outcome.status === "pass", details: [], repeats: outcome.repeats }
+          : undefined;
       // The run was deleted with its golden set while this case ran: store nothing.
-      if (!this.store.getEvalRun(active.runId)) return;
-      this.store.recordEvalResult({
+      if (!await this.store.getEvalRun(active.runId)) return;
+      await this.store.recordEvalResult({
         id: `res_${randomUUID()}`,
         runId: active.runId,
         fixtureId: spec.fixture.id,
@@ -1443,10 +1465,10 @@ export class EvalService {
       updatedAt: this.now().toISOString()
     };
     if (!active.canceled) {
-      this.safely(() => this.store.updateEvalRunProgress({ id: active.runId, progress: active.progress as unknown as Record<string, unknown> }));
+      this.safely(async () => await this.store.updateEvalRunProgress({ id: active.runId, progress: active.progress as unknown as Record<string, unknown> }));
     }
-    this.safely(() => {
-      const record = this.store.getEvalRun(active.runId);
+    this.safely(async () => {
+      const record = await this.store.getEvalRun(active.runId);
       if (record) this.emit(active, { ...this.view(record), progress: active.progress }, false);
     });
   }
@@ -1561,9 +1583,9 @@ export class EvalService {
     const simulation = job.simulation!;
     const replay = this.options.replay!;
     const recordingId = spec.fixture.recordingId!;
-    const recording = replay.getRecording(recordingId);
+    const recording = await replay.getRecording(recordingId);
     const meta = recording ? { id: recording.id, name: recording.name, createdAt: recording.createdAt } : null;
-    const finish = (entry: ReturnType<typeof simulateCase>, executions: number): CaseOutcome => ({
+    const finish = (entry: Awaited<ReturnType<typeof simulateCase>>, executions: number): CaseOutcome => ({
       status: entry.outcome === "not_simulated" ? "error" : "pass",
       recordingId,
       ...(entry.executionId ? { executionId: entry.executionId } : {}),
@@ -1573,16 +1595,16 @@ export class EvalService {
       costUsd: 0,
       executions
     });
-    const skip = (reason: string) => finish(simulateCase({ recordingId, recording: meta, baseline: null, candidate: null, skipped: reason, scrub: (text) => this.scrubText(text) }), 0);
-    if (!recording) return skip("The recording was deleted before it could be replayed.");
-    if (recording.workflowId !== workflowId) return skip("The recording belongs to another workflow.");
+    const skip = async (reason: string) => finish(await simulateCase({ recordingId, recording: meta, baseline: null, candidate: null, skipped: reason, scrub: (text) => this.scrubText(text) }), 0);
+    if (!recording) return await skip("The recording was deleted before it could be replayed.");
+    if (recording.workflowId !== workflowId) return await skip("The recording belongs to another workflow.");
     // Phase 15.6 — the same candidate policy as every golden-run path; a simulation job allows captured runs.
     const refusal = candidateRefusal(recording, { allowCandidates: job.allowCandidates });
-    if (refusal) return skip(refusal);
-    const actor = replay.actorFor(job.actorUserId, job.actorEmail, workflowId, "workflow:read");
-    if (!actor) return skip(`The user who started this simulation (${job.actorEmail}) can no longer read this workflow.`);
-    const denied = simulation.canRun(actor);
-    if (denied) return skip(`The user who started this simulation (${job.actorEmail}) may no longer simulate this profile: ${denied}`);
+    if (refusal) return await skip(refusal);
+    const actor = await replay.actorFor(job.actorUserId, job.actorEmail, workflowId, "workflow:read");
+    if (!actor) return await skip(`The user who started this simulation (${job.actorEmail}) can no longer read this workflow.`);
+    const denied = await simulation.canRun(actor);
+    if (denied) return await skip(`The user who started this simulation (${job.actorEmail}) may no longer simulate this profile: ${denied}`);
 
     const candidate = { workflow: job.candidate.workflow, kind: job.candidate.kind, version: job.candidate.version };
     const request = { mcpMode: "strict" as const };
@@ -1602,10 +1624,10 @@ export class EvalService {
     const nodeNames = new Map(job.candidate.workflow.nodes.map((node) => [node.id, node.name] as const));
     const baseline = await side(simulation.baseSubstitute, executionId, "baseline");
     if (context?.canceled()) {
-      return finish(simulateCase({ recordingId, recording: meta, baseline, candidate: null, nodeNames, scrub: (text) => this.scrubText(text) }), 1);
+      return finish(await simulateCase({ recordingId, recording: meta, baseline, candidate: null, nodeNames, scrub: (text) => this.scrubText(text) }), 1);
     }
     const simulated = await side(simulation.substitute, context?.nextExecutionId() ?? randomUUID(), "candidate");
-    return finish(simulateCase({ recordingId, recording: meta, baseline, candidate: simulated, nodeNames, profileChanged: simulation.profileChanged, scrub: (text) => this.scrubText(text) }), 2);
+    return finish(await simulateCase({ recordingId, recording: meta, baseline, candidate: simulated, nodeNames, profileChanged: simulation.profileChanged, scrub: (text) => this.scrubText(text) }), 2);
   }
 
   private async runReplayCase(job: ReplayJobContext, runId: string, workflowId: string, spec: CaseSpec, executionId: string, context?: CaseRunContext): Promise<CaseOutcome> {
@@ -1615,13 +1637,13 @@ export class EvalService {
       return { status: "skipped", error: "A hand-written case; replay jobs replay golden runs only. Run it with an eval run." };
     }
     const recordingId = fixture.recordingId;
-    const recording = replay.getRecording(recordingId);
+    const recording = await replay.getRecording(recordingId);
     if (!recording) return { status: "error", recordingId, error: "The golden run for this case was deleted." };
     if (recording.workflowId !== workflowId) return { status: "error", recordingId, error: "The golden run for this case belongs to another workflow." };
     // Phase 15.6 — a captured run is not a golden run until a builder promotes it.
     const refusal = candidateRefusal(recording, { allowCandidates: job.allowCandidates });
     if (refusal) return { status: "error", recordingId, error: refusal };
-    const actor = replay.actorFor(job.actorUserId, job.actorEmail, workflowId, job.needsWrite ? "workflow:write" : "workflow:execute");
+    const actor = await replay.actorFor(job.actorUserId, job.actorEmail, workflowId, job.needsWrite ? "workflow:write" : "workflow:execute");
     if (!actor) {
       return {
         status: "error",
@@ -1644,7 +1666,7 @@ export class EvalService {
     let baselineCandidate: { workflow: Workflow; kind: CandidateKind; version: number | null } | null = null;
     if (compareBaseline) {
       try {
-        const found = replay.baselineFor!(recording);
+        const found = await replay.baselineFor!(recording);
         if (found.source === "captured" && capturedWorkflowIsRedacted(found.workflow)) {
           return {
             status: "error",

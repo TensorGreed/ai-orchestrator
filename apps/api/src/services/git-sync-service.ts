@@ -2,9 +2,9 @@ import { spawnSync, type SpawnSyncReturns } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import type { GitSyncConfig, GitSyncStatus, Workflow } from "@ai-orchestrator/shared";
-import type { SqliteStore } from "../db/database";
 import type { SecretService } from "./secret-service";
 import type { VariablesService } from "./variables-service";
+import type { Store } from "../db/store.js";
 
 export interface GitSyncServiceOptions {
   workdirRoot: string;
@@ -32,7 +32,7 @@ export interface GitSyncRefusal {
 }
 
 /** Why a pulled workflow may not be saved (for example a production path another workflow serves); null when it may. */
-export type GitSyncImportCheck = (workflow: Workflow) => string | null;
+export type GitSyncImportCheck = (workflow: Workflow) => Promise<string | null>;
 
 export interface ConfigureGitInput {
   repoUrl: string;
@@ -57,7 +57,7 @@ export class GitSyncService {
   private readonly commandTimeoutMs: number;
 
   constructor(
-    private readonly store: SqliteStore,
+    private readonly store: Store,
     private readonly secretService: SecretService,
     private readonly variablesService: VariablesService,
     options: GitSyncServiceOptions
@@ -67,8 +67,8 @@ export class GitSyncService {
     this.commandTimeoutMs = options.commandTimeoutMs ?? 60000;
   }
 
-  getConfig(): GitSyncConfig | null {
-    const row = this.store.getGitConfig();
+  async getConfig(): Promise<GitSyncConfig | null> {
+    const row = await this.store.getGitConfig();
     if (!row) return null;
     return {
       repoUrl: row.repoUrl,
@@ -86,11 +86,11 @@ export class GitSyncService {
     };
   }
 
-  configure(input: ConfigureGitInput): GitSyncConfig {
+  async configure(input: ConfigureGitInput): Promise<GitSyncConfig> {
     if (!input.repoUrl || !input.repoUrl.trim()) {
       throw new Error("repoUrl is required");
     }
-    this.store.upsertGitConfig({
+    await this.store.upsertGitConfig({
       repoUrl: input.repoUrl.trim(),
       defaultBranch: input.defaultBranch,
       authSecretId: input.authSecretId ?? null,
@@ -100,13 +100,13 @@ export class GitSyncService {
       userEmail: input.userEmail,
       enabled: input.enabled
     });
-    const config = this.getConfig();
+    const config = await this.getConfig();
     if (!config) throw new Error("failed to persist git config");
     return config;
   }
 
-  disconnect(): boolean {
-    const existed = this.store.deleteGitConfig();
+  async disconnect(): Promise<boolean> {
+    const existed = await this.store.deleteGitConfig();
     if (existed) {
       const dir = this.workdirPath();
       try {
@@ -118,8 +118,8 @@ export class GitSyncService {
     return existed;
   }
 
-  status(): GitSyncStatus {
-    const config = this.getConfig();
+  async status(): Promise<GitSyncStatus> {
+    const config = await this.getConfig();
     if (!config) {
       return {
         configured: false,
@@ -162,7 +162,7 @@ export class GitSyncService {
   }
 
   async push(options: { branch?: string; message?: string; createdBy?: string }): Promise<GitSyncResult> {
-    const config = this.requireConfig();
+    const config = await this.requireConfig();
     const dir = this.ensureClone(config, options.branch);
     try {
       const branch = options.branch ?? config.defaultBranch;
@@ -170,14 +170,14 @@ export class GitSyncService {
       this.runGit(dir, ["config", "user.name", config.userName]).throwOnFailure();
       this.runGit(dir, ["config", "user.email", config.userEmail]).throwOnFailure();
 
-      const workflowsExported = this.writeWorkflows(dir, config);
-      const variablesSynced = this.writeVariables(dir, config);
+      const workflowsExported = await this.writeWorkflows(dir, config);
+      const variablesSynced = await this.writeVariables(dir, config);
 
       this.runGit(dir, ["add", "-A"]).throwOnFailure();
       const diffRes = this.runGit(dir, ["diff", "--cached", "--name-only"]);
       if (diffRes.status === 0 && diffRes.stdout.trim().length === 0) {
         // Nothing staged — still report success.
-        this.store.recordGitSync({ kind: "push", error: null });
+        await this.store.recordGitSync({ kind: "push", error: null });
         const commitRes = this.runGit(dir, ["rev-parse", "HEAD"]);
         return {
           ok: true,
@@ -192,11 +192,11 @@ export class GitSyncService {
         options.message ??
         `ai-orchestrator sync: ${workflowsExported} workflow(s), ${variablesSynced} variable(s)`;
       this.runGit(dir, ["commit", "-m", message]).throwOnFailure();
-      const pushRes = this.runGit(dir, ["push", this.remoteUrl(config), `HEAD:${branch}`]);
+      const pushRes = this.runGit(dir, ["push", await this.remoteUrl(config), `HEAD:${branch}`]);
       if (pushRes.status !== 0) throw new Error(pushRes.stderr || "git push failed");
 
       const commitRes = this.runGit(dir, ["rev-parse", "HEAD"]);
-      this.store.recordGitSync({ kind: "push", error: null });
+      await this.store.recordGitSync({ kind: "push", error: null });
       return {
         ok: true,
         branch,
@@ -206,25 +206,25 @@ export class GitSyncService {
       };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      this.store.recordGitSync({ kind: "push", error: message });
+      await this.store.recordGitSync({ kind: "push", error: message });
       return { ok: false, error: message };
     }
   }
 
   async pull(options: { branch?: string; createdBy?: string; canImport?: GitSyncImportCheck }): Promise<GitSyncResult> {
-    const config = this.requireConfig();
+    const config = await this.requireConfig();
     const dir = this.ensureClone(config, options.branch);
     try {
       const branch = options.branch ?? config.defaultBranch;
-      this.runGit(dir, ["fetch", this.remoteUrl(config), branch]).throwOnFailure();
+      this.runGit(dir, ["fetch", await this.remoteUrl(config), branch]).throwOnFailure();
       this.runGit(dir, ["checkout", "-B", branch, "FETCH_HEAD"]).throwOnFailure();
 
       const workflowsRefused: GitSyncRefusal[] = [];
-      const workflowsImported = this.readWorkflows(dir, config, options.createdBy ?? null, options.canImport, workflowsRefused);
-      const variablesSynced = this.readVariables(dir, config, options.createdBy ?? null);
+      const workflowsImported = await this.readWorkflows(dir, config, options.createdBy ?? null, options.canImport, workflowsRefused);
+      const variablesSynced = await this.readVariables(dir, config, options.createdBy ?? null);
 
       const commitRes = this.runGit(dir, ["rev-parse", "HEAD"]);
-      this.store.recordGitSync({ kind: "pull", error: null });
+      await this.store.recordGitSync({ kind: "pull", error: null });
       return {
         ok: true,
         branch,
@@ -235,7 +235,7 @@ export class GitSyncService {
       };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      this.store.recordGitSync({ kind: "pull", error: message });
+      await this.store.recordGitSync({ kind: "pull", error: message });
       return { ok: false, error: message };
     }
   }
@@ -248,8 +248,8 @@ export class GitSyncService {
    * Walks a workflow and replaces every `{ secretId: "sec_xxx" }` reference with
    * `{ secretName, secretProvider }`. Used when serialising for git.
    */
-  stubCredentials(workflow: Workflow): Workflow {
-    const secrets = this.secretService.listSecrets({ projectId: workflow.projectId });
+  async stubCredentials(workflow: Workflow): Promise<Workflow> {
+    const secrets = await this.secretService.listSecrets({ projectId: workflow.projectId });
     const byId = new Map(secrets.map((s) => [s.id, { name: s.name, provider: s.provider }]));
     return walkAndReplace(workflow, (node) => {
       if (
@@ -280,8 +280,8 @@ export class GitSyncService {
    * Stubs that can't be resolved are dropped with a console warning (import
    * does not fail — author can fix in the UI).
    */
-  resolveCredentials(workflow: Workflow): Workflow {
-    const secrets = this.secretService.listSecrets({ projectId: workflow.projectId });
+  async resolveCredentials(workflow: Workflow): Promise<Workflow> {
+    const secrets = await this.secretService.listSecrets({ projectId: workflow.projectId });
     const byKey = new Map<string, string>();
     for (const s of secrets) {
       byKey.set(`${s.provider}::${s.name}`, s.id);
@@ -309,16 +309,16 @@ export class GitSyncService {
   // Internals
   // ---------------------------------------------------------------------------
 
-  private requireConfig() {
-    const config = this.getConfig();
+  private async requireConfig() {
+    const config = await this.getConfig();
     if (!config) throw new Error("git is not configured — POST /api/git first");
     if (!config.enabled) throw new Error("git sync is disabled");
     return config;
   }
 
-  private remoteUrl(config: GitSyncConfig): string {
+  private async remoteUrl(config: GitSyncConfig): Promise<string> {
     if (!config.authSecretId) return config.repoUrl;
-    const token = this.tryResolveToken(config.authSecretId);
+    const token = await this.tryResolveToken(config.authSecretId);
     if (!token) return config.repoUrl;
     try {
       const url = new URL(config.repoUrl);
@@ -332,7 +332,7 @@ export class GitSyncService {
     return config.repoUrl;
   }
 
-  private tryResolveToken(secretId: string): string | null {
+  private async tryResolveToken(secretId: string): Promise<string | null> {
     try {
       // Synchronous fallback using store: resolveSecret is async but local
       // secrets can be decrypted inline — we avoid a network round-trip by
@@ -342,7 +342,7 @@ export class GitSyncService {
       // intentionally skip token resolution for external secrets and fall
       // back to the unauthenticated URL — operators can embed the token
       // directly in the repo URL for that case.
-      const secrets = this.secretService.listSecrets();
+      const secrets = await this.secretService.listSecrets();
       const match = secrets.find((s) => s.id === secretId);
       if (!match || match.source !== "local") return null;
       // Use a synchronous bridge via the underlying store layer is not
@@ -368,7 +368,7 @@ export class GitSyncService {
     return dir;
   }
 
-  private writeWorkflows(dir: string, config: GitSyncConfig): number {
+  private async writeWorkflows(dir: string, config: GitSyncConfig): Promise<number> {
     const workflowsDir = path.join(dir, config.workflowsDir);
     fs.mkdirSync(workflowsDir, { recursive: true });
     // Remove stale files — we treat the repo as a mirror of the current set.
@@ -377,12 +377,12 @@ export class GitSyncService {
         fs.rmSync(path.join(workflowsDir, file), { force: true });
       }
     }
-    const summaries = this.store.listWorkflows();
+    const summaries = await this.store.listWorkflows();
     let exported = 0;
     for (const summary of summaries) {
-      const wf = this.store.getWorkflow(summary.id);
+      const wf = await this.store.getWorkflow(summary.id);
       if (!wf) continue;
-      const stubbed = this.stubCredentials(wf);
+      const stubbed = await this.stubCredentials(wf);
       fs.writeFileSync(
         path.join(workflowsDir, `${sanitizeFilename(wf.id)}.json`),
         JSON.stringify(stubbed, null, 2) + "\n",
@@ -393,8 +393,8 @@ export class GitSyncService {
     return exported;
   }
 
-  private writeVariables(dir: string, config: GitSyncConfig): number {
-    const rows = this.variablesService.list();
+  private async writeVariables(dir: string, config: GitSyncConfig): Promise<number> {
+    const rows = await this.variablesService.list();
     const byProject: Record<string, Record<string, string>> = {};
     for (const row of rows) {
       byProject[row.projectId] = byProject[row.projectId] ?? {};
@@ -408,13 +408,13 @@ export class GitSyncService {
     return rows.length;
   }
 
-  private readWorkflows(
+  private async readWorkflows(
     dir: string,
     config: GitSyncConfig,
     createdBy: string | null,
     canImport?: GitSyncImportCheck,
     refused: GitSyncRefusal[] = []
-  ): number {
+  ): Promise<number> {
     const workflowsDir = path.join(dir, config.workflowsDir);
     if (!fs.existsSync(workflowsDir)) return 0;
     const files = fs.readdirSync(workflowsDir).filter((f) => f.endsWith(".json"));
@@ -428,8 +428,8 @@ export class GitSyncService {
         continue;
       }
       if (!parsed || typeof parsed !== "object" || !parsed.id || !Array.isArray(parsed.nodes)) continue;
-      const resolved = this.resolveCredentials(parsed);
-      const reason = canImport?.(resolved) ?? null;
+      const resolved = await this.resolveCredentials(parsed);
+      const reason = (await canImport?.(resolved)) ?? null;
       if (reason) {
         refused.push({ workflowId: resolved.id, file, reason });
         continue;
@@ -437,14 +437,14 @@ export class GitSyncService {
       const now = new Date().toISOString();
       resolved.updatedAt = now;
       if (!resolved.createdAt) resolved.createdAt = now;
-      this.store.upsertWorkflow(resolved);
+      await this.store.upsertWorkflow(resolved);
       imported += 1;
       void createdBy;
     }
     return imported;
   }
 
-  private readVariables(dir: string, config: GitSyncConfig, createdBy: string | null): number {
+  private async readVariables(dir: string, config: GitSyncConfig, createdBy: string | null): Promise<number> {
     const varsPath = path.join(dir, config.variablesFile);
     if (!fs.existsSync(varsPath)) return 0;
     const raw = fs.readFileSync(varsPath, "utf8");
@@ -460,12 +460,12 @@ export class GitSyncService {
       if (!kv || typeof kv !== "object") continue;
       for (const [key, value] of Object.entries(kv)) {
         if (typeof value !== "string") continue;
-        const existing = this.store.findVariableByKey(projectId, key);
+        const existing = await this.store.findVariableByKey(projectId, key);
         if (existing) {
-          this.variablesService.update(existing.id, { value });
+          await this.variablesService.update(existing.id, { value });
         } else {
           try {
-            this.variablesService.create({
+            await this.variablesService.create({
               projectId,
               key,
               value,

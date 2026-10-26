@@ -47,7 +47,7 @@ export class McpSamplingRefusedError extends Error {
   }
 }
 
-export type McpPolicyEvaluator = (subject: McpToolAccessSubjectTool) => { allowed: boolean; message?: string };
+export type McpPolicyEvaluator = (subject: McpToolAccessSubjectTool) => { allowed: boolean; message?: string } | Promise<{ allowed: boolean; message?: string }>;
 
 export interface McpSamplingHandlerOptions {
   providerRegistry: ProviderRegistry;
@@ -213,7 +213,7 @@ export function createMcpSamplingHandler(options: McpSamplingHandlerOptions): Mc
 
     const chosen = chooseSamplingModel(provider!, settings, requested);
     if (options.evaluatePolicy) {
-      const decision = options.evaluatePolicy({
+      const decision = await options.evaluatePolicy({
         adapterId: origin.serverId,
         ...(origin.registryServerId ? { registryServerId: origin.registryServerId } : {}),
         toolName: chosen.model,
@@ -388,7 +388,7 @@ export async function resolveServerPrompt(input: {
 }): Promise<ResolvedServerPrompt> {
   const { binding, serverConfig } = input;
   if (input.evaluatePolicy) {
-    const decision = input.evaluatePolicy({
+    const decision = await input.evaluatePolicy({
       adapterId: serverConfig.serverId,
       registryServerId: binding.registryServerId,
       toolName: binding.name,
@@ -450,7 +450,7 @@ export async function readMcpResource(input: {
 }): Promise<ResourceReadOutput> {
   const { serverConfig } = input;
   if (input.evaluatePolicy) {
-    const decision = input.evaluatePolicy({
+    const decision = await input.evaluatePolicy({
       adapterId: serverConfig.serverId,
       ...(serverConfig.registryServerId ? { registryServerId: serverConfig.registryServerId } : {}),
       toolName: input.uri,

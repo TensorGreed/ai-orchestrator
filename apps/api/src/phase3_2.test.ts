@@ -194,10 +194,10 @@ async function createTestContext(overrides: Partial<AppConfig> = {}): Promise<Te
   const dbPath = path.join(tempDir, "orchestrator.db");
   const store = await SqliteStore.create(dbPath);
   const config = makeConfig(overrides);
-  store.ensureDefaultProject();
+  await store.ensureDefaultProject();
   const secretService = new SecretService(store, config.SECRET_MASTER_KEY_BASE64);
   const authService = new AuthService(store, config.SESSION_TTL_HOURS);
-  const app = createApp(config, store, secretService, authService);
+  const app = await createApp(config, store, secretService, authService);
   await app.ready();
   const ctx: TestContext = { app, store, authService, secretService, config, tempDir };
   contexts.push(ctx);
@@ -212,7 +212,7 @@ function extractCookie(header: string | string[] | undefined, name: string): str
 }
 
 async function loginAdmin(ctx: TestContext): Promise<string> {
-  ctx.authService.register({
+  await ctx.authService.register({
     email: "admin@example.com",
     password: "admin-password",
     role: "admin"
@@ -321,7 +321,7 @@ describe("Phase 3.2 — Stripe webhook signature validation", () => {
     const ctx = await createTestContext();
     const cookie = await loginAdmin(ctx);
     const signingValue = "whsec_test_signing_secret_12345";
-    const secret = ctx.secretService.createSecret({
+    const secret = await ctx.secretService.createSecret({
       name: "stripe-signing",
       provider: "stripe",
       value: signingValue
@@ -410,7 +410,7 @@ describe("Phase 3.2 — Telegram webhook secret-token validation", () => {
   it("accepts matching X-Telegram-Bot-Api-Secret-Token and rejects mismatches", async () => {
     const ctx = await createTestContext();
     const cookie = await loginAdmin(ctx);
-    const tgSecret = ctx.secretService.createSecret({
+    const tgSecret = await ctx.secretService.createSecret({
       name: "tg-secret",
       provider: "telegram",
       value: "shared-secret-token-1234"

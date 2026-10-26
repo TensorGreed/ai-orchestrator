@@ -15,21 +15,21 @@
 
 import { Readable } from "node:stream";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
-import type { SqliteStore } from "./db/database.js";
 import type { SafeUser, UserRole } from "./services/auth-service.js";
 import type { AuditEventInput } from "./services/audit-service.js";
 import { AuditBundleError, type AuditBundleService } from "./services/audit-bundle-service.js";
 import { AuditSigningKeyError, type AuditSigningService } from "./services/audit-signing-service.js";
 import type { RunAccess } from "./run-access.js";
+import type { Store } from "./db/store.js";
 
 export interface AuditBundleRoutesDeps {
   app: FastifyInstance;
-  store: SqliteStore;
+  store: Store;
   bundles: AuditBundleService;
   signing: AuditSigningService;
   requireRole: (request: FastifyRequest, reply: FastifyReply, roles: UserRole[]) => Promise<SafeUser | null>;
   runAccess: RunAccess;
-  audit: (request: FastifyRequest, user: SafeUser, event: Omit<AuditEventInput, "actor">) => void;
+  audit: (request: FastifyRequest, user: SafeUser, event: Omit<AuditEventInput, "actor">) => void | Promise<void>;
 }
 
 const STATUS_BY_CODE: Record<AuditBundleError["code"], number> = {
@@ -58,7 +58,7 @@ export function registerAuditBundleRoutes(deps: AuditBundleRoutesDeps): void {
     const user = await requireRole(request, reply, ["viewer"]);
     if (!user) return null;
     // Readable workflow required (404 otherwise); a deleted workflow's runs are admin-only.
-    const access = deps.runAccess.run(user, store.getExecutionHistory(request.params.id), "workflow:read");
+    const access = await deps.runAccess.run(user, await store.getExecutionHistory(request.params.id), "workflow:read");
     if (!access.ok) {
       reply.code(access.status).send({ error: access.error });
       return null;
@@ -84,7 +84,7 @@ export function registerAuditBundleRoutes(deps: AuditBundleRoutesDeps): void {
       prepared = await bundles.prepareBundle(request.params.id, { includeActorEmails: user.role === "admin" });
     } catch (error) {
       if (error instanceof AuditBundleError && error.code === "too_large") {
-        deps.audit(request, user, {
+        await deps.audit(request, user, {
           eventType: "execution.audit_bundle.export",
           category: "execution",
           action: "export",
@@ -96,7 +96,7 @@ export function registerAuditBundleRoutes(deps: AuditBundleRoutesDeps): void {
       }
       return fail(reply, error);
     }
-    deps.audit(request, user, {
+    await deps.audit(request, user, {
       eventType: "execution.audit_bundle.export",
       category: "execution",
       action: "export",
@@ -120,7 +120,7 @@ export function registerAuditBundleRoutes(deps: AuditBundleRoutesDeps): void {
     const user = await requireRole(request, reply, ["admin"]);
     if (!user) return reply;
     try {
-      return signing.list();
+      return await signing.list();
     } catch (error) {
       return fail(reply, error);
     }
@@ -131,9 +131,9 @@ export function registerAuditBundleRoutes(deps: AuditBundleRoutesDeps): void {
     if (!user) return reply;
     try {
       // Read from the store: rotation must also work when the current key can no longer be decrypted.
-      const previous = store.getActiveAuditSigningKey()?.keyId ?? null;
-      const key = signing.rotate();
-      deps.audit(request, user, {
+      const previous = (await store.getActiveAuditSigningKey())?.keyId ?? null;
+      const key = await signing.rotate();
+      await deps.audit(request, user, {
         eventType: "audit.signing_key.rotated",
         category: "system",
         action: "rotate",
@@ -142,7 +142,7 @@ export function registerAuditBundleRoutes(deps: AuditBundleRoutesDeps): void {
         metadata: { keyId: key.keyId, previousKeyId: previous }
       });
       reply.code(201);
-      return { key, keys: signing.list() };
+      return { key, keys: await signing.list() };
     } catch (error) {
       return fail(reply, error);
     }

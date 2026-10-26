@@ -39,7 +39,7 @@ async function createTestContext(): Promise<TestContext> {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-admission-"));
   const dbPath = path.join(tempDir, "orchestrator.db");
   const store = await SqliteStore.create(dbPath);
-  store.ensureDefaultProject();
+  await store.ensureDefaultProject();
   const config = parseConfig({
     LOG_LEVEL: "warn",
     SEED_SAMPLE_WORKFLOWS: "false",
@@ -51,7 +51,7 @@ async function createTestContext(): Promise<TestContext> {
   });
   const secretService = new SecretService(store, config.SECRET_MASTER_KEY_BASE64);
   const authService = new AuthService(store, config.SESSION_TTL_HOURS);
-  const app = createApp(config, store, secretService, authService);
+  const app = await createApp(config, store, secretService, authService);
   await app.ready();
   const context: TestContext = { app, store, authService, config, tempDir, dbPath };
   contexts.push(context);
@@ -63,7 +63,7 @@ afterEach(async () => {
     const context = contexts.pop()!;
     await context.app.close();
     try {
-      context.store.close();
+      await context.store.close();
     } catch {
       // Already closed by the app shutdown hooks.
     }
@@ -76,8 +76,8 @@ type Role = "admin" | "builder" | "operator" | "viewer";
 async function login(context: TestContext, role: Role, name: string = role): Promise<{ cookie: string; id: string; email: string }> {
   const email = `${name}@example.com`;
   const password = `${name}-Pass-123!`;
-  const existing = context.store.getUserByEmail(email);
-  const id = existing ? existing.id : context.authService.register({ email, password, role }).id;
+  const existing = await context.store.getUserByEmail(email);
+  const id = existing ? existing.id : (await context.authService.register({ email, password, role })).id;
   const response = await context.app.inject({ method: "POST", url: "/api/auth/login", payload: { email, password } });
   if (response.statusCode !== 200) throw new Error(`Login failed for ${name}: ${response.body}`);
   const raw = response.headers["set-cookie"];
@@ -113,17 +113,17 @@ function labelWorkflow(id: string, answer: string): Workflow {
   } as Workflow;
 }
 
-function save(context: TestContext, workflow: Workflow): number {
-  const saved = context.store.upsertWorkflow(workflow);
-  return new WorkflowVersionService(context.store).snapshot({ workflow: saved, changeNote: "test" }).version;
+async function save(context: TestContext, workflow: Workflow): Promise<number> {
+  const saved = await context.store.upsertWorkflow(workflow);
+  return (await new WorkflowVersionService(context.store).snapshot({ workflow: saved, changeNote: "test" })).version;
 }
 
 /** Golden-run cases in a set: each with its own (fake) recording id, so they count as golden-run cases. */
-function addCases(context: TestContext, setId: string, prefix: string, count: number): string[] {
+async function addCases(context: TestContext, setId: string, prefix: string, count: number): Promise<string[]> {
   const ids: string[] = [];
   for (let index = 0; index < count; index += 1) {
     const id = `${prefix}_${index}`;
-    context.store.createEvalFixture({ id, datasetId: setId, name: `${prefix} ${index + 1}`, input: {}, recordingId: `rec_${id}` });
+    await context.store.createEvalFixture({ id, datasetId: setId, name: `${prefix} ${index + 1}`, input: {}, recordingId: `rec_${id}` });
     ids.push(id);
   }
   return ids;
@@ -132,9 +132,9 @@ function addCases(context: TestContext, setId: string, prefix: string, count: nu
 const plainDiff = { verdict: "same", reasons: [], diff: { totals: { costUsd: { baseline: 0.01, candidate: 0.01 }, latencyMs: { baseline: 100, candidate: 100 } }, guard: { added: [], changed: [] } } };
 
 /** A finished replay job over the sets as they are now, with the given status per case. */
-function seedJob(context: TestContext, input: { workflowId: string; datasetIds: string[]; version: number; hash: string; statuses: Record<string, "pass" | "fail" | "error"> }): string {
+async function seedJob(context: TestContext, input: { workflowId: string; datasetIds: string[]; version: number; hash: string; statuses: Record<string, "pass" | "fail" | "error"> }): Promise<string> {
   const id = `run_${crypto.randomUUID()}`;
-  context.store.createEvalRun({
+  await context.store.createEvalRun({
     id,
     datasetId: input.datasetIds[0]!,
     workflowId: input.workflowId,
@@ -146,9 +146,9 @@ function seedJob(context: TestContext, input: { workflowId: string; datasetIds: 
     workflowVersion: input.version,
     options: { mcpMode: "strict", maxCostUsd: 5 }
   });
-  context.store.setEvalRunSetSnapshot(id, goldenSetSnapshots(input.datasetIds, (datasetId) => context.store.listEvalFixtures(datasetId)));
-  Object.entries(input.statuses).forEach(([fixtureId, status], index) => {
-    context.store.recordEvalResult({
+  await context.store.setEvalRunSetSnapshot(id, await goldenSetSnapshots(input.datasetIds, async (datasetId) => await context.store.listEvalFixtures(datasetId)));
+  for (const [index, [fixtureId, status]] of Object.entries(input.statuses).entries()) {
+    await context.store.recordEvalResult({
       id: `res_${index}_${id}`,
       runId: id,
       fixtureId,
@@ -156,8 +156,8 @@ function seedJob(context: TestContext, input: { workflowId: string; datasetIds: 
       score: { pass: status === "pass", details: [{ type: "status", pass: status === "pass", reason: status }] },
       diff: plainDiff
     });
-  });
-  context.store.finalizeEvalRun({ id, status: "completed" });
+  }
+  await context.store.finalizeEvalRun({ id, status: "completed" });
   return id;
 }
 
@@ -181,8 +181,8 @@ async function casesOf(context: TestContext, cookie: string, workflowId: string)
   return response.json<{ cases: ReleaseGateCasesView }>().cases;
 }
 
-const auditLog = (context: TestContext) => context.store.listAuditLogs({ category: "release", pageSize: 500 }).items;
-const auditTypes = (context: TestContext) => auditLog(context).map((entry) => entry.eventType);
+const auditLog = async (context: TestContext) => (await context.store.listAuditLogs({ category: "release", pageSize: 500 })).items;
+const auditTypes = async (context: TestContext) => (await auditLog(context)).map((entry) => entry.eventType);
 
 /**
  * A workflow whose enforced gate admitted 20 golden-run cases (18 pass and 2
@@ -191,12 +191,12 @@ const auditTypes = (context: TestContext) => auditLog(context).map((entry) => en
 async function dilutionSetup(context: TestContext, workflowId: string, enforced: boolean) {
   const admin = await login(context, "admin");
   const builder = await login(context, "builder");
-  save(context, labelWorkflow(workflowId, "v1"));
+  await save(context, labelWorkflow(workflowId, "v1"));
   const setId = `set-${workflowId}`;
-  context.store.createEvalDataset({ id: setId, name: `Golden ${workflowId}`, workflowId });
-  const original = addCases(context, setId, `${workflowId}_orig`, 20);
+  await context.store.createEvalDataset({ id: setId, name: `Golden ${workflowId}`, workflowId });
+  const original = await addCases(context, setId, `${workflowId}_orig`, 20);
   await putGate(context, admin.cookie, workflowId, { datasetIds: [setId], policy: { minPassRate: 0.95, maxRegressions: 5 }, ...(enforced ? { enforced: true } : {}) });
-  const version = save(context, labelWorkflow(workflowId, "v2"));
+  const version = await save(context, labelWorkflow(workflowId, "v2"));
   const hash = (await preview(context, builder.cookie, workflowId, version)).workflowHash;
   const statuses = { ...statusesOf(original.slice(0, 18), "pass"), ...statusesOf(original.slice(18), "fail") };
   return { admin, builder, setId, original, version, hash, statuses };
@@ -206,7 +206,7 @@ describe("dilution on an enforced gate", () => {
   it("adding 40 easy cases does not turn 18/20 (blocked) into 58/60 (passed): they wait for admission, then count once admitted", async () => {
     const context = await createTestContext();
     const { admin, builder, setId, version, hash, statuses } = await dilutionSetup(context, "wf-dilute", true);
-    const before = seedJob(context, { workflowId: "wf-dilute", datasetIds: [setId], version, hash, statuses });
+    const before = await seedJob(context, { workflowId: "wf-dilute", datasetIds: [setId], version, hash, statuses });
     const first = await preview(context, builder.cookie, "wf-dilute", version, before);
     expect(first.verdict).toBe("blocked");
     expect(first.reasons.join()).toMatch(/Pass rate 90% is below the required 95%/);
@@ -216,8 +216,8 @@ describe("dilution on an enforced gate", () => {
       const added = await call(context, "POST", `/api/eval/datasets/${setId}/fixtures`, builder.cookie, { name: `Easy ${index + 1}`, input: {} });
       expect(added.statusCode, added.body).toBe(200);
     }
-    const easy = context.store.listEvalFixtures(setId).filter((fixture) => fixture.name.startsWith("Easy ")).map((fixture) => fixture.id);
-    const diluted = seedJob(context, { workflowId: "wf-dilute", datasetIds: [setId], version, hash, statuses: { ...statuses, ...statusesOf(easy, "pass") } });
+    const easy = (await context.store.listEvalFixtures(setId)).filter((fixture) => fixture.name.startsWith("Easy ")).map((fixture) => fixture.id);
+    const diluted = await seedJob(context, { workflowId: "wf-dilute", datasetIds: [setId], version, hash, statuses: { ...statuses, ...statusesOf(easy, "pass") } });
     const judged = await preview(context, builder.cookie, "wf-dilute", version, diluted);
     expect(judged.verdict).toBe("blocked");
     expect(judged.stats).toMatchObject({ cases: 20, pass: 18, passRate: 0.9 });
@@ -236,16 +236,16 @@ describe("dilution on an enforced gate", () => {
     const after = await preview(context, builder.cookie, "wf-dilute", version, diluted);
     expect(after.verdict).toBe("passed");
     expect(after.stats).toMatchObject({ cases: 60, pass: 58 });
-    expect(auditTypes(context)).toEqual(expect.arrayContaining(["release.gate.cases_admitted", "release.gate.cases_refused"]));
+    expect(await auditTypes(context)).toEqual(expect.arrayContaining(["release.gate.cases_admitted", "release.gate.cases_refused"]));
   });
 
   it("an unenforced gate behaves exactly as before: every case counts and required marks are ignored", async () => {
     const context = await createTestContext();
     const { builder, setId, original, version, hash, statuses } = await dilutionSetup(context, "wf-open", false);
-    const easy = addCases(context, setId, "wf-open_easy", 40);
+    const easy = await addCases(context, setId, "wf-open_easy", 40);
     // A required mark left on a case (from an earlier enforcement) changes nothing on an unenforced gate.
-    context.store.setEvalFixtureRequired(original[19]!, true);
-    const job = seedJob(context, { workflowId: "wf-open", datasetIds: [setId], version, hash, statuses: { ...statuses, ...statusesOf(easy, "pass") } });
+    await context.store.setEvalFixtureRequired(original[19]!, true);
+    const job = await seedJob(context, { workflowId: "wf-open", datasetIds: [setId], version, hash, statuses: { ...statuses, ...statusesOf(easy, "pass") } });
     const judged = await preview(context, builder.cookie, "wf-open", version, job);
     expect(judged.verdict).toBe("passed");
     expect(judged.stats).toMatchObject({ cases: 60, pass: 58 });
@@ -258,7 +258,7 @@ describe("dilution on an enforced gate", () => {
       canAdmit: false,
       canRequest: false
     });
-    expect(context.store.getReleaseGate("wf-open")?.admittedFixtureIds).toBeNull();
+    expect((await context.store.getReleaseGate("wf-open"))?.admittedFixtureIds).toBeNull();
     // Builders remove cases of an unenforced gate's set as before.
     expect((await call(context, "DELETE", `/api/eval/fixtures/${original[0]}`, builder.cookie)).statusCode).toBe(200);
     // Admission routes refuse an unenforced gate.
@@ -277,16 +277,16 @@ describe("removing cases from an enforced gate", () => {
     expect(refused.json<{ error: string }>().error).toBe(
       "An enforced release gate counts this case: only an admin can remove it. Ask for its removal from the gate's Cases panel, and an approver decides in the approvals inbox."
     );
-    expect(context.store.getEvalFixture(failingCase)).not.toBeNull();
+    expect(await context.store.getEvalFixture(failingCase)).not.toBeNull();
     // The whole set follows the same rule.
     const setRefused = await call(context, "DELETE", `/api/eval/datasets/${setId}`, builder.cookie);
     expect(setRefused.statusCode).toBe(403);
     expect(setRefused.json<{ error: string }>().error).toMatch(/only an admin can delete it/);
     // So does a golden run an admitted case replays.
-    expect(auditTypes(context)).toContain("release.golden_set_change.refused");
+    expect(await auditTypes(context)).toContain("release.golden_set_change.refused");
 
     // A pending case is not counted, so removing it loosens nothing.
-    const [pendingCase] = addCases(context, setId, "wf-del_new", 1);
+    const [pendingCase] = await addCases(context, setId, "wf-del_new", 1);
     expect((await call(context, "DELETE", `/api/eval/fixtures/${pendingCase}`, builder.cookie)).statusCode).toBe(200);
 
     expect((await call(context, "DELETE", `/api/eval/fixtures/${failingCase}`, admin.cookie)).statusCode).toBe(200);
@@ -303,16 +303,16 @@ describe("removing cases from an enforced gate", () => {
     expect(request).toMatchObject({ kind: "remove_cases", status: "pending", approverRoles: ["admin"], canDecide: false });
     expect((await casesOf(context, builder.cookie, "wf-rm")).cases.find((entry) => entry.fixtureId === target)).toMatchObject({ requestId: request.id, requestKind: "remove_cases" });
     // A pending case cannot be asked for removal: the builder may delete it directly.
-    const [fresh] = addCases(context, "set-wf-rm", "wf-rm_new", 1);
+    const [fresh] = await addCases(context, "set-wf-rm", "wf-rm_new", 1);
     expect((await call(context, "POST", "/api/workflows/wf-rm/release-gate/cases/requests", builder.cookie, { action: "remove", fixtureIds: [fresh], reason: "x" })).statusCode).toBe(409);
 
     expect((await call(context, "POST", `/api/approvals/${request.id}/reject`, admin.cookie, {})).statusCode).toBe(400);
     const approved = await call(context, "POST", `/api/approvals/${request.id}/approve`, admin.cookie, { reason: "Agreed" });
     expect(approved.statusCode, approved.body).toBe(200);
     expect(approved.json<{ request: GateCaseRequestView }>().request.status).toBe("approved");
-    expect(context.store.getEvalFixture(target)).toBeNull();
+    expect(await context.store.getEvalFixture(target)).toBeNull();
     expect((await casesOf(context, admin.cookie, "wf-rm")).counts).toMatchObject({ admitted: 19 });
-    expect(auditTypes(context)).toEqual(expect.arrayContaining(["release.gate.case_request.requested", "release.gate.case_request.decided", "release.gate.cases_removed"]));
+    expect(await auditTypes(context)).toEqual(expect.arrayContaining(["release.gate.case_request.requested", "release.gate.case_request.decided", "release.gate.cases_removed"]));
   });
 });
 
@@ -321,13 +321,13 @@ describe("required cases", () => {
     const context = await createTestContext();
     const admin = await login(context, "admin");
     const builder = await login(context, "builder");
-    save(context, labelWorkflow("wf-req", "v1"));
-    context.store.createEvalDataset({ id: "set-req", name: "Golden", workflowId: "wf-req" });
-    const ids = addCases(context, "set-req", "req", 20);
+    await save(context, labelWorkflow("wf-req", "v1"));
+    await context.store.createEvalDataset({ id: "set-req", name: "Golden", workflowId: "wf-req" });
+    const ids = await addCases(context, "set-req", "req", 20);
     await putGate(context, admin.cookie, "wf-req", { datasetIds: ["set-req"], enforced: true, policy: { minPassRate: 0.9, maxRegressions: 5 } });
-    const version = save(context, labelWorkflow("wf-req", "v2"));
+    const version = await save(context, labelWorkflow("wf-req", "v2"));
     const hash = (await preview(context, builder.cookie, "wf-req", version)).workflowHash;
-    const job = seedJob(context, { workflowId: "wf-req", datasetIds: ["set-req"], version, hash, statuses: { ...statusesOf(ids.slice(0, 19), "pass"), [ids[19]!]: "fail" } });
+    const job = await seedJob(context, { workflowId: "wf-req", datasetIds: ["set-req"], version, hash, statuses: { ...statusesOf(ids.slice(0, 19), "pass"), [ids[19]!]: "fail" } });
     expect((await preview(context, builder.cookie, "wf-req", version, job)).verdict).toBe("passed");
 
     expect((await call(context, "PUT", `/api/workflows/wf-req/release-gate/cases/${ids[19]}/required`, builder.cookie, { required: true })).statusCode).toBe(403);
@@ -343,7 +343,7 @@ describe("required cases", () => {
     expect((await call(context, "GET", "/api/eval/datasets/set-req/fixtures", builder.cookie)).json<{ fixtures: Array<{ id: string; required: boolean }> }>().fixtures.find((entry) => entry.id === ids[19])?.required).toBe(true);
 
     // An erroring required case blocks too while errors count as failures.
-    const erroring = seedJob(context, { workflowId: "wf-req", datasetIds: ["set-req"], version, hash, statuses: { ...statusesOf(ids.slice(0, 19), "pass"), [ids[19]!]: "error" } });
+    const erroring = await seedJob(context, { workflowId: "wf-req", datasetIds: ["set-req"], version, hash, statuses: { ...statusesOf(ids.slice(0, 19), "pass"), [ids[19]!]: "error" } });
     expect((await preview(context, builder.cookie, "wf-req", version, erroring)).reasons).toEqual(['Required case "req 20" was inconclusive: a required case must pass whatever the pass rate.']);
 
     // Builders cannot clear it, nor delete the required case.
@@ -353,7 +353,7 @@ describe("required cases", () => {
     const cleared = await call(context, "PUT", `/api/workflows/wf-req/release-gate/cases/${ids[19]}/required`, admin.cookie, { required: false });
     expect(cleared.statusCode).toBe(200);
     expect((await preview(context, builder.cookie, "wf-req", version, job)).verdict).toBe("passed");
-    const required = auditLog(context).filter((entry) => entry.eventType === "release.gate.case_required");
+    const required = (await auditLog(context)).filter((entry) => entry.eventType === "release.gate.case_required");
     expect(required.map((entry) => (entry.metadata as Record<string, unknown> | null)?.loosened)).toEqual(expect.arrayContaining([[], ['stops requiring case "req 20"']]));
     // A hand-written case cannot be required: replay jobs skip it.
     const handWritten = await call(context, "POST", "/api/eval/datasets/set-req/fixtures", admin.cookie, { name: "Typed", input: {} });
@@ -364,7 +364,7 @@ describe("required cases", () => {
   it("marking a pending case required admits it", async () => {
     const context = await createTestContext();
     const { admin, setId } = await dilutionSetup(context, "wf-req2", true);
-    const [late] = addCases(context, setId, "late", 1);
+    const [late] = await addCases(context, setId, "late", 1);
     expect((await casesOf(context, admin.cookie, "wf-req2")).counts.pending).toBe(1);
     const marked = await call(context, "PUT", `/api/workflows/wf-req2/release-gate/cases/${late}/required`, admin.cookie, { required: true });
     expect(marked.json<{ cases: ReleaseGateCasesView }>().cases.counts).toEqual({ admitted: 21, pending: 0, required: 1 });
@@ -378,8 +378,8 @@ describe("admission through the approvals inbox", () => {
     // A named builder approver.
     const lead = await login(context, "builder", "lead");
     await putGate(context, admin.cookie, "wf-ask", { datasetIds: [setId], enforced: true, policy: { minPassRate: 0.95, maxRegressions: 5 }, approvers: { approverUsers: [lead.email] } });
-    const easy = addCases(context, setId, "ask_easy", 40);
-    const job = seedJob(context, { workflowId: "wf-ask", datasetIds: [setId], version, hash, statuses: { ...statuses, ...statusesOf(easy, "pass") } });
+    const easy = await addCases(context, setId, "ask_easy", 40);
+    const job = await seedJob(context, { workflowId: "wf-ask", datasetIds: [setId], version, hash, statuses: { ...statuses, ...statusesOf(easy, "pass") } });
     expect((await preview(context, builder.cookie, "wf-ask", version, job)).verdict).toBe("blocked");
 
     const missingReason = await call(context, "POST", "/api/workflows/wf-ask/release-gate/cases/requests", builder.cookie, { action: "admit", fixtureIds: easy });
@@ -411,14 +411,14 @@ describe("admission through the approvals inbox", () => {
   it("a request goes stale when the gate stops being enforced or its cases were admitted meanwhile", async () => {
     const context = await createTestContext();
     const { admin, builder, setId } = await dilutionSetup(context, "wf-stale", true);
-    const late = addCases(context, setId, "stale", 2);
+    const late = await addCases(context, setId, "stale", 2);
     const asked = await call(context, "POST", "/api/workflows/wf-stale/release-gate/cases/requests", builder.cookie, { action: "admit", fixtureIds: late, reason: "please" });
     const id = asked.json<{ request: GateCaseRequestView }>().request.id;
     expect((await call(context, "POST", "/api/workflows/wf-stale/release-gate/cases/admit", admin.cookie, { fixtureIds: late })).statusCode).toBe(200);
     const stale = await call(context, "POST", `/api/approvals/${id}/approve`, admin.cookie, {});
     expect(stale.statusCode).toBe(409);
     expect(stale.json<{ error: string }>().error).toMatch(/stale and was canceled/);
-    expect(context.store.getGateCaseRequest(id)?.status).toBe("canceled");
+    expect((await context.store.getGateCaseRequest(id))?.status).toBe("canceled");
   });
 
   it("is project-scoped: unreadable answers 404, readable without publish 403, on the cases routes and the inbox", async () => {
@@ -427,16 +427,16 @@ describe("admission through the approvals inbox", () => {
     const requester = await login(context, "builder", "requester");
     const outsider = await login(context, "builder", "outsider");
     const reader = await login(context, "builder", "reader");
-    context.store.upsertProject({ id: "p-sec", name: "Secret" });
-    context.store.upsertCustomRole({ id: "none-sec", projectId: "p-sec", name: "None", permissions: [] });
-    context.store.upsertCustomRole({ id: "read-sec", projectId: "p-sec", name: "Read", permissions: ["workflow:read"] });
-    context.store.upsertProjectRole({ userId: outsider.id, projectId: "p-sec", role: "custom", customRoleId: "none-sec" });
-    context.store.upsertProjectRole({ userId: reader.id, projectId: "p-sec", role: "custom", customRoleId: "read-sec" });
-    save(context, { ...labelWorkflow("wf-sec", "v1"), projectId: "p-sec" });
-    context.store.createEvalDataset({ id: "set-sec", name: "Golden", workflowId: "wf-sec" });
-    addCases(context, "set-sec", "sec", 3);
+    await context.store.upsertProject({ id: "p-sec", name: "Secret" });
+    await context.store.upsertCustomRole({ id: "none-sec", projectId: "p-sec", name: "None", permissions: [] });
+    await context.store.upsertCustomRole({ id: "read-sec", projectId: "p-sec", name: "Read", permissions: ["workflow:read"] });
+    await context.store.upsertProjectRole({ userId: outsider.id, projectId: "p-sec", role: "custom", customRoleId: "none-sec" });
+    await context.store.upsertProjectRole({ userId: reader.id, projectId: "p-sec", role: "custom", customRoleId: "read-sec" });
+    await save(context, { ...labelWorkflow("wf-sec", "v1"), projectId: "p-sec" });
+    await context.store.createEvalDataset({ id: "set-sec", name: "Golden", workflowId: "wf-sec" });
+    await addCases(context, "set-sec", "sec", 3);
     await putGate(context, admin.cookie, "wf-sec", { datasetIds: ["set-sec"], enforced: true, approvers: { approverRoles: ["builder"] } });
-    const late = addCases(context, "set-sec", "sec_late", 1);
+    const late = await addCases(context, "set-sec", "sec_late", 1);
     const asked = await call(context, "POST", "/api/workflows/wf-sec/release-gate/cases/requests", requester.cookie, { action: "admit", fixtureIds: late, reason: "r" });
     expect(asked.statusCode, asked.body).toBe(202);
     const id = asked.json<{ request: GateCaseRequestView }>().request.id;
@@ -457,7 +457,7 @@ describe("every add path lands pending", () => {
     const context = await createTestContext();
     const admin = await login(context, "admin");
     const builder = await login(context, "builder");
-    context.store.upsertWorkflow(labelWorkflow("wf-paths", "v1"));
+    await context.store.upsertWorkflow(labelWorkflow("wf-paths", "v1"));
     const recordings: string[] = [];
     for (let index = 0; index < 3; index += 1) {
       const run = await call(context, "POST", "/api/workflows/wf-paths/execute", builder.cookie, {});
@@ -466,7 +466,7 @@ describe("every add path lands pending", () => {
       expect(saved.statusCode, saved.body).toBe(201);
       recordings.push(saved.json<{ recording: { id: string } }>().recording.id);
     }
-    save(context, labelWorkflow("wf-paths", "v1"));
+    await save(context, labelWorkflow("wf-paths", "v1"));
     const created = await call(context, "POST", "/api/eval/datasets", builder.cookie, { name: "Suite", workflowId: "wf-paths" });
     const setId = created.json<{ dataset: { id: string } }>().dataset.id;
     for (const recordingId of recordings.slice(0, 2)) expect((await call(context, "POST", `/api/eval/datasets/${setId}/recordings`, builder.cookie, { recordingId })).statusCode).toBe(201);
@@ -489,7 +489,7 @@ describe("every add path lands pending", () => {
     expect(afterImport.cases.filter((entry) => entry.datasetId === importedId).every((entry) => entry.admission === "pending")).toBe(true);
 
     // The banner text the web shows comes from these counts; the replay job view carries them for the CLI.
-    const job = seedJob(context, { workflowId: "wf-paths", datasetIds: [setId, importedId], version: 1, hash: "a".repeat(64), statuses: {} });
+    const job = await seedJob(context, { workflowId: "wf-paths", datasetIds: [setId, importedId], version: 1, hash: "a".repeat(64), statuses: {} });
     const jobView = (await call(context, "GET", `/api/replay/runs/${job}`, builder.cookie)).json<{ run: { releaseGate?: { admittedFixtureIds: string[]; pendingFixtureIds: string[] } } }>().run;
     expect(jobView.releaseGate?.admittedFixtureIds).toHaveLength(2);
     expect(jobView.releaseGate?.pendingFixtureIds).toHaveLength(5);
@@ -505,12 +505,12 @@ describe("every add path lands pending", () => {
     const thirdId = third.json<{ dataset: { id: string } }>().dataset.id;
     await putGate(context, admin.cookie, "wf-paths", { datasetIds: [setId, importedId, secondId, thirdId], enforced: true, admitAddedSetCases: true });
     expect((await casesOf(context, builder.cookie, "wf-paths")).counts).toEqual({ admitted: 5, pending: 8, required: 0 });
-    const updated = auditLog(context).find((entry) => entry.eventType === "release.gate.updated" && (entry.metadata as Record<string, unknown> | null)?.admitAddedSetCases === true);
+    const updated = (await auditLog(context)).find((entry) => entry.eventType === "release.gate.updated" && (entry.metadata as Record<string, unknown> | null)?.admitAddedSetCases === true);
     expect((updated?.metadata as Record<string, unknown> | undefined)?.newlyAdmittedFixtureIds).toHaveLength(3);
 
     // Lifting enforcement keeps the admission state; enforcing again restores it: nothing that was waiting is admitted.
     await putGate(context, admin.cookie, "wf-paths", { datasetIds: [setId, importedId, secondId, thirdId], enforced: false });
-    expect(context.store.getReleaseGate("wf-paths")?.admittedFixtureIds).toHaveLength(5);
+    expect((await context.store.getReleaseGate("wf-paths"))?.admittedFixtureIds).toHaveLength(5);
     expect((await casesOf(context, builder.cookie, "wf-paths")).enforced).toBe(false);
     await putGate(context, admin.cookie, "wf-paths", { datasetIds: [setId, importedId, secondId, thirdId], enforced: true });
     expect((await casesOf(context, builder.cookie, "wf-paths")).counts).toEqual({ admitted: 5, pending: 8, required: 0 });
@@ -519,7 +519,7 @@ describe("every add path lands pending", () => {
   it("re-enforcing a gate with 20 admitted and 5 pending cases leaves the 5 pending", async () => {
     const context = await createTestContext();
     const { admin, setId } = await dilutionSetup(context, "wf-reenforce", true);
-    addCases(context, setId, "wf-reenforce_late", 5);
+    await addCases(context, setId, "wf-reenforce_late", 5);
     expect((await casesOf(context, admin.cookie, "wf-reenforce")).counts).toEqual({ admitted: 20, pending: 5, required: 0 });
     const settings = { datasetIds: [setId], policy: { minPassRate: 0.95, maxRegressions: 5 } };
     await putGate(context, admin.cookie, "wf-reenforce", { ...settings, enforced: false });
@@ -527,7 +527,7 @@ describe("every add path lands pending", () => {
     expect((await casesOf(context, admin.cookie, "wf-reenforce")).counts).toEqual({ admitted: 20, pending: 5, required: 0 });
     // A case added while the gate was not enforced waits too.
     await putGate(context, admin.cookie, "wf-reenforce", { ...settings, enforced: false });
-    addCases(context, setId, "wf-reenforce_open", 1);
+    await addCases(context, setId, "wf-reenforce_open", 1);
     await putGate(context, admin.cookie, "wf-reenforce", { ...settings, enforced: true });
     expect((await casesOf(context, admin.cookie, "wf-reenforce")).counts).toEqual({ admitted: 20, pending: 6, required: 0 });
   });
@@ -545,16 +545,16 @@ describe("migration 36", () => {
     const context = await createTestContext();
     const admin = await login(context, "admin");
     const builder = await login(context, "builder");
-    expect(context.store.getSchemaMarker("gate_admission_backfill")).not.toBeNull();
-    save(context, labelWorkflow("wf-old", "v1"));
-    context.store.createEvalDataset({ id: "set-old", name: "Golden", workflowId: "wf-old" });
-    const ids = addCases(context, "set-old", "old", 3);
+    expect(await context.store.getSchemaMarker("gate_admission_backfill")).not.toBeNull();
+    await save(context, labelWorkflow("wf-old", "v1"));
+    await context.store.createEvalDataset({ id: "set-old", name: "Golden", workflowId: "wf-old" });
+    const ids = await addCases(context, "set-old", "old", 3);
     await putGate(context, admin.cookie, "wf-old", { datasetIds: ["set-old"], enforced: true });
-    const version = save(context, labelWorkflow("wf-old", "v2"));
+    const version = await save(context, labelWorkflow("wf-old", "v2"));
     const hash = (await preview(context, builder.cookie, "wf-old", version)).workflowHash;
-    const job = seedJob(context, { workflowId: "wf-old", datasetIds: ["set-old"], version, hash, statuses: statusesOf(ids, "pass") });
+    const job = await seedJob(context, { workflowId: "wf-old", datasetIds: ["set-old"], version, hash, statuses: statusesOf(ids, "pass") });
     await context.app.close();
-    context.store.close();
+    await context.store.close();
 
     // As a database from before migration 36 left it: no admission columns, no backfill marker.
     const raw = new Database(context.dbPath);
@@ -565,13 +565,13 @@ describe("migration 36", () => {
     const reopened = await SqliteStore.create(context.dbPath);
     try {
       // Backfilled once: the gate admits every case its sets held, so it judges as before.
-      expect(reopened.getReleaseGate("wf-old")?.admittedFixtureIds).toEqual([...ids].sort());
-      expect(reopened.getReleaseGate("wf-old")?.admissionUpdatedBy).toBe("migration 36");
-      expect(reopened.listEvalFixtures("set-old").every((fixture) => fixture.required === false)).toBe(true);
+      expect((await reopened.getReleaseGate("wf-old"))?.admittedFixtureIds).toEqual([...ids].sort());
+      expect((await reopened.getReleaseGate("wf-old"))?.admissionUpdatedBy).toBe("migration 36");
+      expect((await reopened.listEvalFixtures("set-old")).every((fixture) => fixture.required === false)).toBe(true);
       const columns = (reopened as unknown as { queryAll: (sql: string) => Array<{ name: string }> }).queryAll("PRAGMA table_info(gate_case_requests)").map((row) => row.name);
       expect(columns).toEqual(expect.arrayContaining(["id", "workflow_id", "action", "fixtures_json", "status", "gate_authority"]));
     } finally {
-      reopened.close();
+      await reopened.close();
     }
 
     // Afterwards the backfill never runs again: an enforced gate that lost its admission fails closed.
@@ -581,10 +581,10 @@ describe("migration 36", () => {
     const again = await SqliteStore.create(context.dbPath);
     const secretService = new SecretService(again, context.config.SECRET_MASTER_KEY_BASE64);
     const authService = new AuthService(again, context.config.SESSION_TTL_HOURS);
-    const app = createApp(context.config, again, secretService, authService);
+    const app = await createApp(context.config, again, secretService, authService);
     await app.ready();
     try {
-      expect(again.getReleaseGate("wf-old")?.admittedFixtureIds).toBeNull();
+      expect((await again.getReleaseGate("wf-old"))?.admittedFixtureIds).toBeNull();
       const restarted = { ...context, app, store: again, authService };
       const adminAgain = await login(restarted, "admin");
       const counted = await preview(restarted, adminAgain.cookie, "wf-old", version, job);
@@ -597,7 +597,7 @@ describe("migration 36", () => {
     } finally {
       await app.close();
       try {
-        again.close();
+        await again.close();
       } catch {
         // Closed by the app's shutdown hooks.
       }
@@ -627,13 +627,13 @@ describe("gate case requests are decided against the gate as it is now", () => {
 
     const refused = await call(context, "POST", `/api/approvals/${id}/approve`, lead.cookie, {});
     expect(refused.statusCode).toBe(403);
-    expect(context.store.getEvalFixture(failing)).not.toBeNull();
+    expect(await context.store.getEvalFixture(failing)).not.toBeNull();
     // An admin trying it learns it is stale, in plain words, and it is canceled.
     const stale = await call(context, "POST", `/api/approvals/${id}/approve`, admin.cookie, {});
     expect(stale.statusCode).toBe(409);
     expect(stale.json<{ error: string }>().error).toMatch(/stale and was canceled: Who decides the release gate's cases \(its approvers, self-approval or enforcement\) changed/);
-    expect(context.store.getGateCaseRequest(id)?.status).toBe("canceled");
-    expect(context.store.getEvalFixture(failing)).not.toBeNull();
+    expect((await context.store.getGateCaseRequest(id))?.status).toBe("canceled");
+    expect(await context.store.getEvalFixture(failing)).not.toBeNull();
   });
 
   it("turning self-approval off after a request makes it stale, and the requester cannot approve it", async () => {
@@ -642,7 +642,7 @@ describe("gate case requests are decided against the gate as it is now", () => {
     const lead = await login(context, "builder", "lead");
     const settings = { datasetIds: [setId], enforced: true, policy: { minPassRate: 0.95, maxRegressions: 5 } };
     await putGate(context, admin.cookie, "wf-self", { ...settings, approvers: { approverUsers: [lead.email], allowSelfApproval: true } });
-    const late = addCases(context, setId, "self_late", 1);
+    const late = await addCases(context, setId, "self_late", 1);
     const asked = await call(context, "POST", "/api/workflows/wf-self/release-gate/cases/requests", lead.cookie, { action: "admit", fixtureIds: late, reason: "Mine" });
     const id = asked.json<{ request: GateCaseRequestView }>().request.id;
     expect(asked.json<{ request: GateCaseRequestView }>().request.canDecide).toBe(true);
@@ -656,24 +656,24 @@ describe("gate case requests are decided against the gate as it is now", () => {
     const again = await call(context, "POST", "/api/workflows/wf-self/release-gate/cases/requests", lead.cookie, { action: "admit", fixtureIds: late, reason: "Again" });
     expect(again.statusCode, again.body).toBe(202);
     expect(again.json<{ request: GateCaseRequestView }>().request.id).not.toBe(id);
-    expect(context.store.getGateCaseRequest(id)?.status).toBe("canceled");
+    expect((await context.store.getGateCaseRequest(id))?.status).toBe("canceled");
   });
 
   it("deleting the workflow cancels its pending gate case requests", async () => {
     const context = await createTestContext();
     const { admin, builder, setId } = await dilutionSetup(context, "wf-gone", true);
-    const late = addCases(context, setId, "gone_late", 1);
+    const late = await addCases(context, setId, "gone_late", 1);
     const asked = await call(context, "POST", "/api/workflows/wf-gone/release-gate/cases/requests", builder.cookie, { action: "admit", fixtureIds: late, reason: "r" });
     const id = asked.json<{ request: GateCaseRequestView }>().request.id;
     expect((await call(context, "DELETE", "/api/workflows/wf-gone", admin.cookie)).statusCode).toBe(200);
-    expect(context.store.getGateCaseRequest(id)).toMatchObject({ status: "canceled", decisionReason: "The workflow was deleted" });
+    expect(await context.store.getGateCaseRequest(id)).toMatchObject({ status: "canceled", decisionReason: "The workflow was deleted" });
   });
 });
 
 describe("every admission change is audited", () => {
   /** Oldest first. */
-  const metadataOf = (context: TestContext, eventType: string) =>
-    auditLog(context)
+  const metadataOf = async (context: TestContext, eventType: string) =>
+    (await auditLog(context))
       .filter((entry) => entry.eventType === eventType)
       .map((entry) => (entry.metadata ?? {}) as Record<string, unknown>)
       .reverse();
@@ -681,21 +681,21 @@ describe("every admission change is audited", () => {
   it("admit, reject, required set and cleared, and approval-driven admit and remove each write an audit row", async () => {
     const context = await createTestContext();
     const { admin, builder, setId, original } = await dilutionSetup(context, "wf-audit", true);
-    const late = addCases(context, setId, "audit_late", 3);
+    const late = await addCases(context, setId, "audit_late", 3);
     expect((await call(context, "POST", "/api/workflows/wf-audit/release-gate/cases/admit", admin.cookie, { fixtureIds: [late[0]] })).statusCode).toBe(200);
-    expect(metadataOf(context, "release.gate.cases_admitted")).toContainEqual(expect.objectContaining({ fixtureIds: [late[0]], requestId: null }));
+    expect(await metadataOf(context, "release.gate.cases_admitted")).toContainEqual(expect.objectContaining({ fixtureIds: [late[0]], requestId: null }));
     expect((await call(context, "POST", "/api/workflows/wf-audit/release-gate/cases/reject", admin.cookie, { fixtureIds: [late[1]] })).statusCode).toBe(200);
-    expect(metadataOf(context, "release.gate.cases_rejected")).toContainEqual(expect.objectContaining({ fixtureIds: [late[1]] }));
+    expect(await metadataOf(context, "release.gate.cases_rejected")).toContainEqual(expect.objectContaining({ fixtureIds: [late[1]] }));
     expect((await call(context, "PUT", `/api/workflows/wf-audit/release-gate/cases/${original[0]}/required`, admin.cookie, { required: true })).statusCode).toBe(200);
     expect((await call(context, "PUT", `/api/workflows/wf-audit/release-gate/cases/${original[0]}/required`, admin.cookie, { required: false })).statusCode).toBe(200);
-    expect(metadataOf(context, "release.gate.case_required").map((entry) => entry.required).sort()).toEqual([false, true]);
+    expect((await metadataOf(context, "release.gate.case_required")).map((entry) => entry.required).sort()).toEqual([false, true]);
 
     const admitAsk = await call(context, "POST", "/api/workflows/wf-audit/release-gate/cases/requests", builder.cookie, { action: "admit", fixtureIds: [late[2]], reason: "r" });
     expect((await call(context, "POST", `/api/approvals/${admitAsk.json<{ request: GateCaseRequestView }>().request.id}/approve`, admin.cookie, {})).statusCode).toBe(200);
-    expect(metadataOf(context, "release.gate.cases_admitted")).toContainEqual(expect.objectContaining({ fixtureIds: [late[2]], requestId: expect.stringMatching(/^gcr_/) }));
+    expect(await metadataOf(context, "release.gate.cases_admitted")).toContainEqual(expect.objectContaining({ fixtureIds: [late[2]], requestId: expect.stringMatching(/^gcr_/) }));
     const removeAsk = await call(context, "POST", "/api/workflows/wf-audit/release-gate/cases/requests", builder.cookie, { action: "remove", fixtureIds: [original[1]], reason: "r" });
     expect((await call(context, "POST", `/api/approvals/${removeAsk.json<{ request: GateCaseRequestView }>().request.id}/approve`, admin.cookie, {})).statusCode).toBe(200);
-    expect(metadataOf(context, "release.gate.cases_removed")).toContainEqual(expect.objectContaining({ fixtureIds: [original[1]], requestId: expect.stringMatching(/^gcr_/) }));
+    expect(await metadataOf(context, "release.gate.cases_removed")).toContainEqual(expect.objectContaining({ fixtureIds: [original[1]], requestId: expect.stringMatching(/^gcr_/) }));
   });
 
   it("an admin deleting an admitted or required case, a set, a golden run or the workflow writes release.gate.cases_removed", async () => {
@@ -705,14 +705,14 @@ describe("every admission change is audited", () => {
 
     // The fixture path: a required, admitted case.
     expect((await call(context, "DELETE", `/api/eval/fixtures/${original[0]}`, admin.cookie)).statusCode).toBe(200);
-    const fixtureRow = metadataOf(context, "release.gate.cases_removed").find((entry) => entry.via === "fixture");
+    const fixtureRow = (await metadataOf(context, "release.gate.cases_removed")).find((entry) => entry.via === "fixture");
     expect(fixtureRow).toMatchObject({ via: "fixture", fixtureIds: [original[0]], requiredFixtureIds: [original[0]] });
     expect(fixtureRow?.loosened).toEqual(['removes admitted case "wf-admin-del_orig 1"', 'stops requiring case "wf-admin-del_orig 1"']);
     // A pending case deleted by a builder counts toward nothing: no row.
-    const [pending] = addCases(context, setId, "admin_del_pending", 1);
-    const before = metadataOf(context, "release.gate.cases_removed").length;
+    const [pending] = await addCases(context, setId, "admin_del_pending", 1);
+    const before = (await metadataOf(context, "release.gate.cases_removed")).length;
     expect((await call(context, "DELETE", `/api/eval/fixtures/${pending}`, builder.cookie)).statusCode).toBe(200);
-    expect(metadataOf(context, "release.gate.cases_removed")).toHaveLength(before);
+    expect(await metadataOf(context, "release.gate.cases_removed")).toHaveLength(before);
 
     // The golden-run path: a real golden run replayed by an admitted case.
     const run = await call(context, "POST", "/api/workflows/wf-admin-del/execute", admin.cookie, {});
@@ -722,11 +722,11 @@ describe("every admission change is audited", () => {
     const caseId = added.json<{ fixture: { id: string } }>().fixture.id;
     expect((await call(context, "POST", "/api/workflows/wf-admin-del/release-gate/cases/admit", admin.cookie, { fixtureIds: [caseId] })).statusCode).toBe(200);
     expect((await call(context, "DELETE", `/api/replay/recordings/${recordingId}`, admin.cookie)).statusCode).toBe(200);
-    expect(metadataOf(context, "release.gate.cases_removed")).toContainEqual(expect.objectContaining({ via: "golden_run", recordingId, fixtureIds: [caseId] }));
+    expect(await metadataOf(context, "release.gate.cases_removed")).toContainEqual(expect.objectContaining({ via: "golden_run", recordingId, fixtureIds: [caseId] }));
 
     // The set path names every admitted case it drops.
     expect((await call(context, "DELETE", `/api/eval/datasets/${setId}`, admin.cookie)).statusCode).toBe(200);
-    const setRow = metadataOf(context, "release.gate.cases_removed").find((entry) => entry.via === "golden_set");
+    const setRow = (await metadataOf(context, "release.gate.cases_removed")).find((entry) => entry.via === "golden_set");
     expect(setRow).toMatchObject({ via: "golden_set", datasetId: setId });
     expect(setRow?.fixtureIds).toHaveLength(20);
   });
@@ -734,25 +734,25 @@ describe("every admission change is audited", () => {
   it("deleting the workflow of an enforced gate audits the admitted cases whose golden runs go with it", async () => {
     const context = await createTestContext();
     const admin = await login(context, "admin");
-    save(context, labelWorkflow("wf-wipe", "v1"));
-    context.store.createEvalDataset({ id: "set-wipe", name: "Golden", workflowId: "wf-wipe" });
-    const ids = addCases(context, "set-wipe", "wipe", 2);
+    await save(context, labelWorkflow("wf-wipe", "v1"));
+    await context.store.createEvalDataset({ id: "set-wipe", name: "Golden", workflowId: "wf-wipe" });
+    const ids = await addCases(context, "set-wipe", "wipe", 2);
     await putGate(context, admin.cookie, "wf-wipe", { datasetIds: ["set-wipe"], enforced: true });
     expect((await call(context, "DELETE", "/api/workflows/wf-wipe", admin.cookie)).statusCode).toBe(200);
-    expect(metadataOf(context, "release.gate.cases_removed")).toContainEqual(expect.objectContaining({ via: "workflow", fixtureIds: ids }));
+    expect(await metadataOf(context, "release.gate.cases_removed")).toContainEqual(expect.objectContaining({ via: "workflow", fixtureIds: ids }));
   });
 
   it("removing a set from the gate names the admitted cases it drops", async () => {
     const context = await createTestContext();
     const admin = await login(context, "admin");
-    save(context, labelWorkflow("wf-drop", "v1"));
-    context.store.createEvalDataset({ id: "set-keep", name: "Keep", workflowId: "wf-drop" });
-    context.store.createEvalDataset({ id: "set-drop", name: "Drop", workflowId: "wf-drop" });
-    addCases(context, "set-keep", "keep", 1);
-    addCases(context, "set-drop", "drop", 1);
+    await save(context, labelWorkflow("wf-drop", "v1"));
+    await context.store.createEvalDataset({ id: "set-keep", name: "Keep", workflowId: "wf-drop" });
+    await context.store.createEvalDataset({ id: "set-drop", name: "Drop", workflowId: "wf-drop" });
+    await addCases(context, "set-keep", "keep", 1);
+    await addCases(context, "set-drop", "drop", 1);
     await putGate(context, admin.cookie, "wf-drop", { datasetIds: ["set-keep", "set-drop"], enforced: true });
     await putGate(context, admin.cookie, "wf-drop", { datasetIds: ["set-keep"], enforced: true });
-    const updated = auditLog(context).find((entry) => entry.eventType === "release.gate.updated" && ((entry.metadata as Record<string, unknown>).loosened as string[]).length > 0);
+    const updated = (await auditLog(context)).find((entry) => entry.eventType === "release.gate.updated" && ((entry.metadata as Record<string, unknown>).loosened as string[]).length > 0);
     expect((updated?.metadata as Record<string, unknown>).loosened).toEqual(expect.arrayContaining(['removes admitted case "drop 1"']));
   });
 });
@@ -763,15 +763,15 @@ describe("required cases count only once admitted", () => {
     const { admin, builder, setId, version, hash, statuses, original } = await dilutionSetup(context, "wf-req-pending", true);
     // A required case leaves the gate when its set is dropped, and comes back pending when a builder adds the set again.
     expect((await call(context, "PUT", `/api/workflows/wf-req-pending/release-gate/cases/${original[19]}/required`, admin.cookie, { required: true })).statusCode).toBe(200);
-    context.store.createEvalDataset({ id: "set-other", name: "Other", workflowId: "wf-req-pending" });
-    addCases(context, "set-other", "other", 1);
+    await context.store.createEvalDataset({ id: "set-other", name: "Other", workflowId: "wf-req-pending" });
+    await addCases(context, "set-other", "other", 1);
     const settings = { policy: { minPassRate: 0.5, maxRegressions: 5 } };
     await putGate(context, admin.cookie, "wf-req-pending", { ...settings, datasetIds: ["set-other"], enforced: true, admitAddedSetCases: true });
     await putGate(context, builder.cookie, "wf-req-pending", { ...settings, datasetIds: ["set-other", setId] });
     const view = await casesOf(context, builder.cookie, "wf-req-pending");
     expect(view.counts).toMatchObject({ admitted: 1, pending: 20, required: 0 });
     expect(view.cases.find((entry) => entry.fixtureId === original[19])).toMatchObject({ admission: "pending", required: false });
-    const job = seedJob(context, { workflowId: "wf-req-pending", datasetIds: ["set-other", setId], version, hash, statuses: { ...statuses, other_0: "pass" } });
+    const job = await seedJob(context, { workflowId: "wf-req-pending", datasetIds: ["set-other", setId], version, hash, statuses: { ...statuses, other_0: "pass" } });
     const judged = await preview(context, builder.cookie, "wf-req-pending", version, job);
     expect(judged.reasons.join(" ")).not.toMatch(/Required case/);
     expect((await call(context, "DELETE", `/api/eval/fixtures/${original[19]}`, builder.cookie)).statusCode).toBe(200);
@@ -784,9 +784,9 @@ describe("release requests are judged again when approved", () => {
     const admin = await login(context, "admin");
     const builder = await login(context, "builder");
     const approver = await login(context, "builder", "approver");
-    save(context, labelWorkflow("wf-rejudge", "v1"));
-    context.store.createEvalDataset({ id: "set-rejudge", name: "Golden", workflowId: "wf-rejudge" });
-    const ids = addCases(context, "set-rejudge", "rejudge", 10);
+    await save(context, labelWorkflow("wf-rejudge", "v1"));
+    await context.store.createEvalDataset({ id: "set-rejudge", name: "Golden", workflowId: "wf-rejudge" });
+    const ids = await addCases(context, "set-rejudge", "rejudge", 10);
     await putGate(context, admin.cookie, "wf-rejudge", {
       datasetIds: ["set-rejudge"],
       enforced: true,
@@ -794,9 +794,9 @@ describe("release requests are judged again when approved", () => {
       requireApproval: true,
       approvers: { approverUsers: [approver.email] }
     });
-    const version = save(context, labelWorkflow("wf-rejudge", "v2"));
+    const version = await save(context, labelWorkflow("wf-rejudge", "v2"));
     const hash = (await preview(context, builder.cookie, "wf-rejudge", version)).workflowHash;
-    const job = seedJob(context, { workflowId: "wf-rejudge", datasetIds: ["set-rejudge"], version, hash, statuses: { ...statusesOf(ids.slice(0, 9), "pass"), [ids[9]!]: "fail" } });
+    const job = await seedJob(context, { workflowId: "wf-rejudge", datasetIds: ["set-rejudge"], version, hash, statuses: { ...statusesOf(ids.slice(0, 9), "pass"), [ids[9]!]: "fail" } });
     const published = await call(context, "POST", "/api/workflows/wf-rejudge/publish", builder.cookie, { version, replayRunId: job });
     expect(published.statusCode, published.body).toBe(202);
     const requestId = published.json<{ approvalRequestId: string }>().approvalRequestId;
@@ -809,8 +809,8 @@ describe("release requests are judged again when approved", () => {
     expect(body.error).toMatch(/stale and was canceled\. The release gate now judges version \d+ differently/);
     expect(body.error).toContain('Required case "rejudge 10" failed');
     expect(body.details?.reasons).toEqual(['Required case "rejudge 10" failed: a required case must pass whatever the pass rate.']);
-    expect(context.store.getReleaseApprovalRequest(requestId)?.status).toBe("canceled");
-    expect(context.store.getPublishedVersion("wf-rejudge")).not.toBe(version);
+    expect((await context.store.getReleaseApprovalRequest(requestId))?.status).toBe("canceled");
+    expect(await context.store.getPublishedVersion("wf-rejudge")).not.toBe(version);
   });
 
   it("a request still judged the same is approved and publishes", async () => {
@@ -818,21 +818,21 @@ describe("release requests are judged again when approved", () => {
     const admin = await login(context, "admin");
     const builder = await login(context, "builder");
     const approver = await login(context, "builder", "approver");
-    save(context, labelWorkflow("wf-same", "v1"));
-    context.store.createEvalDataset({ id: "set-same", name: "Golden", workflowId: "wf-same" });
-    const ids = addCases(context, "set-same", "same", 3);
+    await save(context, labelWorkflow("wf-same", "v1"));
+    await context.store.createEvalDataset({ id: "set-same", name: "Golden", workflowId: "wf-same" });
+    const ids = await addCases(context, "set-same", "same", 3);
     await putGate(context, admin.cookie, "wf-same", { datasetIds: ["set-same"], enforced: true, requireApproval: true, approvers: { approverUsers: [approver.email] } });
-    const version = save(context, labelWorkflow("wf-same", "v2"));
+    const version = await save(context, labelWorkflow("wf-same", "v2"));
     const hash = (await preview(context, builder.cookie, "wf-same", version)).workflowHash;
     // A failing case still pending admission counts toward nothing, when filed and when approved.
-    const [late] = addCases(context, "set-same", "same_late", 1);
-    const job = seedJob(context, { workflowId: "wf-same", datasetIds: ["set-same"], version, hash, statuses: { ...statusesOf(ids, "pass"), [late!]: "fail" } });
+    const [late] = await addCases(context, "set-same", "same_late", 1);
+    const job = await seedJob(context, { workflowId: "wf-same", datasetIds: ["set-same"], version, hash, statuses: { ...statusesOf(ids, "pass"), [late!]: "fail" } });
     const published = await call(context, "POST", "/api/workflows/wf-same/publish", builder.cookie, { version, replayRunId: job });
     expect(published.statusCode, published.body).toBe(202);
     const requestId = published.json<{ approvalRequestId: string }>().approvalRequestId;
     const approved = await call(context, "POST", `/api/approvals/${requestId}/approve`, approver.cookie, {});
     expect(approved.statusCode, approved.body).toBe(200);
-    expect(context.store.getPublishedVersion("wf-same")).toBe(version);
+    expect(await context.store.getPublishedVersion("wf-same")).toBe(version);
   });
 });
 
@@ -849,16 +849,16 @@ async function waitingRequestSetup(
   const admin = await login(context, "admin");
   const builder = await login(context, "builder");
   const approver = await login(context, "builder", "approver");
-  save(context, labelWorkflow(workflowId, "v1"));
+  await save(context, labelWorkflow(workflowId, "v1"));
   const setId = `set-${workflowId}`;
-  context.store.createEvalDataset({ id: setId, name: "Golden", workflowId });
-  const ids = addCases(context, setId, `${workflowId}_case`, 10);
+  await context.store.createEvalDataset({ id: setId, name: "Golden", workflowId });
+  const ids = await addCases(context, setId, `${workflowId}_case`, 10);
   const settings = { datasetIds: [setId], enforced: true, policy: input.policy, requireApproval: !input.requestApproval, approvers: { approverUsers: [approver.email] } };
   await putGate(context, admin.cookie, workflowId, settings);
-  const [pending] = addCases(context, setId, `${workflowId}_pending`, 1);
-  const version = save(context, labelWorkflow(workflowId, "v2"));
+  const [pending] = await addCases(context, setId, `${workflowId}_pending`, 1);
+  const version = await save(context, labelWorkflow(workflowId, "v2"));
   const hash = (await preview(context, builder.cookie, workflowId, version)).workflowHash;
-  const job = seedJob(context, { workflowId, datasetIds: [setId], version, hash, statuses: input.statuses(ids, pending!) });
+  const job = await seedJob(context, { workflowId, datasetIds: [setId], version, hash, statuses: input.statuses(ids, pending!) });
   const published = await call(context, "POST", `/api/workflows/${workflowId}/publish`, builder.cookie, {
     version,
     replayRunId: job,
@@ -875,20 +875,20 @@ describe("on an enforced gate only admitted cases can make a job stale", () => {
     const setup = await waitingRequestSetup(context, "wf-pending-churn", { policy: { minPassRate: 0.9 }, statuses: (ids, pending) => ({ ...statusesOf(ids, "pass"), [pending]: "fail" }) });
     const handWritten = await call(context, "POST", `/api/eval/datasets/${setup.setId}/fixtures`, setup.builder.cookie, { name: "Hand-written", input: {} });
     expect(handWritten.statusCode, handWritten.body).toBe(200);
-    addCases(context, setup.setId, "churn_late", 1);
+    await addCases(context, setup.setId, "churn_late", 1);
     expect((await call(context, "DELETE", `/api/eval/fixtures/${setup.pending}`, setup.builder.cookie)).statusCode).toBe(200);
 
     const judged = await preview(context, setup.builder.cookie, "wf-pending-churn", setup.version, setup.job);
     expect(judged.reasons.join(" ")).not.toMatch(/changed after replay job/);
     const approved = await call(context, "POST", `/api/approvals/${setup.requestId}/approve`, setup.approver.cookie, {});
     expect(approved.statusCode, approved.body).toBe(200);
-    expect(context.store.getPublishedVersion("wf-pending-churn")).toBe(setup.version);
+    expect(await context.store.getPublishedVersion("wf-pending-churn")).toBe(setup.version);
   });
 
   it("an admin admitting a case added after the job makes the job stale, and the release request is refused", async () => {
     const context = await createTestContext();
     const setup = await waitingRequestSetup(context, "wf-admit-late", { policy: { minPassRate: 0.9 }, statuses: (ids, pending) => ({ ...statusesOf(ids, "pass"), [pending]: "pass" }) });
-    const [late] = addCases(context, setup.setId, "admit_late", 1);
+    const [late] = await addCases(context, setup.setId, "admit_late", 1);
     // Admitting a case the job did run changes nothing about staleness.
     expect((await call(context, "POST", "/api/workflows/wf-admit-late/release-gate/cases/admit", setup.admin.cookie, { fixtureIds: [setup.pending] })).statusCode).toBe(200);
     expect((await preview(context, setup.builder.cookie, "wf-admit-late", setup.version, setup.job)).reasons.join(" ")).not.toMatch(/changed after replay job/);
@@ -900,15 +900,15 @@ describe("on an enforced gate only admitted cases can make a job stale", () => {
     const approved = await call(context, "POST", `/api/approvals/${setup.requestId}/approve`, setup.approver.cookie, {});
     expect(approved.statusCode).toBe(409);
     expect(approved.json<{ details?: { reasons?: string[] } }>().details?.reasons?.join(" ")).toMatch(/changed after replay job/);
-    expect(context.store.getReleaseApprovalRequest(setup.requestId)?.status).toBe("canceled");
+    expect((await context.store.getReleaseApprovalRequest(setup.requestId))?.status).toBe("canceled");
   });
 
   it("changing the golden run an admitted case replays makes the job stale", async () => {
     const context = await createTestContext();
     const setup = await waitingRequestSetup(context, "wf-rerecord", { policy: { minPassRate: 0.9 }, statuses: (ids) => statusesOf(ids, "pass") });
-    const target = context.store.getEvalFixture(setup.ids[0]!)!;
-    context.store.deleteEvalFixture(target.id);
-    context.store.createEvalFixture({ id: target.id, datasetId: setup.setId, name: target.name, input: {}, recordingId: "rec_rerecorded" });
+    const target = (await context.store.getEvalFixture(setup.ids[0]!))!;
+    await context.store.deleteEvalFixture(target.id);
+    await context.store.createEvalFixture({ id: target.id, datasetId: setup.setId, name: target.name, input: {}, recordingId: "rec_rerecorded" });
     const judged = await preview(context, setup.builder.cookie, "wf-rerecord", setup.version, setup.job);
     expect(judged.verdict).toBe("blocked");
     expect(judged.reasons.join(" ")).toMatch(/changed after replay job/);
@@ -918,13 +918,13 @@ describe("on an enforced gate only admitted cases can make a job stale", () => {
     const context = await createTestContext();
     const admin = await login(context, "admin");
     const builder = await login(context, "builder");
-    save(context, labelWorkflow("wf-loose", "v1"));
-    context.store.createEvalDataset({ id: "set-loose", name: "Golden", workflowId: "wf-loose" });
-    const ids = addCases(context, "set-loose", "loose", 3);
+    await save(context, labelWorkflow("wf-loose", "v1"));
+    await context.store.createEvalDataset({ id: "set-loose", name: "Golden", workflowId: "wf-loose" });
+    const ids = await addCases(context, "set-loose", "loose", 3);
     await putGate(context, admin.cookie, "wf-loose", { datasetIds: ["set-loose"], policy: { minPassRate: 0.5 } });
-    const version = save(context, labelWorkflow("wf-loose", "v2"));
+    const version = await save(context, labelWorkflow("wf-loose", "v2"));
     const hash = (await preview(context, builder.cookie, "wf-loose", version)).workflowHash;
-    const job = seedJob(context, { workflowId: "wf-loose", datasetIds: ["set-loose"], version, hash, statuses: statusesOf(ids, "pass") });
+    const job = await seedJob(context, { workflowId: "wf-loose", datasetIds: ["set-loose"], version, hash, statuses: statusesOf(ids, "pass") });
     expect((await preview(context, builder.cookie, "wf-loose", version, job)).verdict).toBe("passed");
     expect((await call(context, "POST", "/api/eval/datasets/set-loose/fixtures", builder.cookie, { name: "Later", input: {} })).statusCode).toBe(200);
     const judged = await preview(context, builder.cookie, "wf-loose", version, job);
@@ -935,15 +935,15 @@ describe("on an enforced gate only admitted cases can make a job stale", () => {
   it("a job queued before per-case fingerprints keeps the whole-set rule", async () => {
     const context = await createTestContext();
     const setup = await waitingRequestSetup(context, "wf-legacy-snap", { policy: { minPassRate: 0.9 }, statuses: (ids) => statusesOf(ids, "pass") });
-    const current = goldenSetSnapshots([setup.setId], (datasetId) => context.store.listEvalFixtures(datasetId));
+    const current = await goldenSetSnapshots([setup.setId], async (datasetId) => await context.store.listEvalFixtures(datasetId));
     // The 15.4 form: set id -> hash only.
     (context.store as unknown as { exec(sql: string, params: unknown[]): void }).exec(`UPDATE eval_runs SET set_snapshot_json = ? WHERE id = ?`, [
       JSON.stringify({ [setup.setId]: current[setup.setId]!.hash }),
       setup.job
     ]);
-    expect(context.store.getEvalRunSetSnapshot(setup.job)).toEqual({ [setup.setId]: { hash: current[setup.setId]!.hash, cases: null } });
+    expect(await context.store.getEvalRunSetSnapshot(setup.job)).toEqual({ [setup.setId]: { hash: current[setup.setId]!.hash, cases: null } });
     expect((await preview(context, setup.builder.cookie, "wf-legacy-snap", setup.version, setup.job)).reasons.join(" ")).not.toMatch(/changed after replay job/);
-    addCases(context, setup.setId, "legacy_late", 1);
+    await addCases(context, setup.setId, "legacy_late", 1);
     expect((await preview(context, setup.builder.cookie, "wf-legacy-snap", setup.version, setup.job)).reasons.join(" ")).toMatch(/changed after replay job/);
   });
 });
@@ -955,7 +955,7 @@ describe("only admin-only changes make gate case requests stale", () => {
     const lead = await login(context, "builder", "lead");
     const settings = { datasetIds: [setId], enforced: true, policy: { minPassRate: 0.95, maxRegressions: 5 }, approvers: { approverUsers: [lead.email] } };
     const gate = await putGate(context, admin.cookie, "wf-builder-save", settings);
-    const late = addCases(context, setId, "save_late", 2);
+    const late = await addCases(context, setId, "save_late", 2);
     const asked = await call(context, "POST", "/api/workflows/wf-builder-save/release-gate/cases/requests", builder.cookie, { action: "admit", fixtureIds: [late[0]], reason: "Reviewed" });
     expect(asked.statusCode, asked.body).toBe(202);
     const first = asked.json<{ request: GateCaseRequestView }>().request.id;
@@ -965,7 +965,7 @@ describe("only admin-only changes make gate case requests stale", () => {
 
     const unchanged = await putGate(context, builder.cookie, "wf-builder-save", settings);
     expect(unchanged.updatedAt).toBe(gate.updatedAt);
-    expect(auditLog(context).find((entry) => entry.eventType === "release.gate.updated")?.metadata).toMatchObject({ settingsUnchanged: true });
+    expect((await auditLog(context)).find((entry) => entry.eventType === "release.gate.updated")?.metadata).toMatchObject({ settingsUnchanged: true });
     const tightened = await putGate(context, builder.cookie, "wf-builder-save", { ...settings, policy: { minPassRate: 0.97, maxRegressions: 5 } });
     expect(tightened.updatedAt).not.toBe(gate.updatedAt);
 
@@ -973,13 +973,13 @@ describe("only admin-only changes make gate case requests stale", () => {
     expect(inbox).toMatchObject({ canDecide: true });
     const approved = await call(context, "POST", `/api/approvals/${first}/approve`, lead.cookie, {});
     expect(approved.statusCode, approved.body).toBe(200);
-    expect(context.store.getGateCaseRequest(first)?.status).toBe("approved");
+    expect((await context.store.getGateCaseRequest(first))?.status).toBe("approved");
 
     // An admin changing who decides makes the other one stale.
     await putGate(context, admin.cookie, "wf-builder-save", { ...settings, policy: { minPassRate: 0.97, maxRegressions: 5 }, approvers: { approverUsers: [lead.email, admin.email] } });
     const stale = await call(context, "POST", `/api/approvals/${second}/approve`, lead.cookie, {});
     expect(stale.statusCode).toBe(409);
-    expect(context.store.getGateCaseRequest(second)?.status).toBe("canceled");
+    expect((await context.store.getGateCaseRequest(second))?.status).toBe("canceled");
   });
 
   it("a builder's unchanged save leaves a pending release request publishable", async () => {
@@ -1000,13 +1000,13 @@ describe("release requests are re-judged by reason codes, not wording", () => {
       statuses: (ids, pending) => ({ ...statusesOf(ids.slice(0, 8), "pass"), ...statusesOf(ids.slice(8), "fail"), [pending]: "pass" }),
       requestApproval: true
     });
-    const request = context.store.getReleaseApprovalRequest(setup.requestId)!;
+    const request = (await context.store.getReleaseApprovalRequest(setup.requestId))!;
     expect(request.origin).toBe("blocked");
     expect(request.gateChecks?.map((check) => check.code)).toEqual(["min_cases", "pass_rate"]);
     expect(request.gateReasons.join(" ")).not.toMatch(/waiting for admission/);
 
     // A builder adds a case (pending); an admin admits the passing case the job ran: 9 of 11, still blocked, but better.
-    addCases(context, setup.setId, "codes_late", 1);
+    await addCases(context, setup.setId, "codes_late", 1);
     expect((await call(context, "POST", "/api/workflows/wf-codes/release-gate/cases/admit", setup.admin.cookie, { fixtureIds: [setup.pending] })).statusCode).toBe(200);
     const judged = await preview(context, setup.builder.cookie, "wf-codes", setup.version, setup.job);
     expect(judged.verdict).toBe("blocked");
@@ -1038,10 +1038,10 @@ describe("release requests go stale by who decides, and are judged again for the
     const setup = await waitingRequestSetup(context, "wf-tighten-ok", { policy: { minPassRate: 0.5 }, statuses: (ids) => statusesOf(ids, "pass") });
     const tightened = await putGate(context, setup.builder.cookie, "wf-tighten-ok", { ...setup.settings, policy: { minPassRate: 0.9 } });
     expect(tightened.policy.minPassRate).toBe(0.9);
-    expect(context.store.getReleaseApprovalRequest(setup.requestId)?.gateAuthority).toBeTruthy();
+    expect((await context.store.getReleaseApprovalRequest(setup.requestId))?.gateAuthority).toBeTruthy();
     const approved = await approve(context, setup.requestId, setup.approver.cookie);
     expect(approved.statusCode, approved.body).toBe(200);
-    expect(context.store.getPublishedVersion("wf-tighten-ok")).toBe(setup.version);
+    expect(await context.store.getPublishedVersion("wf-tighten-ok")).toBe(setup.version);
   });
 
   it("a builder's tightening that the job fails cancels the request with the reasons", async () => {
@@ -1054,14 +1054,14 @@ describe("release requests go stale by who decides, and are judged again for the
     const refused = await approve(context, setup.requestId, setup.approver.cookie);
     expect(refused.statusCode).toBe(409);
     expect(refused.json<{ details?: { reasons?: string[] } }>().details?.reasons?.join(" ")).toMatch(/Pass rate 80%/);
-    expect(context.store.getReleaseApprovalRequest(setup.requestId)?.status).toBe("canceled");
+    expect((await context.store.getReleaseApprovalRequest(setup.requestId))?.status).toBe("canceled");
   });
 
   it("a builder adding a set of pending cases leaves the request publishable; once an admin admits one of its cases it is refused", async () => {
     const context = await createTestContext();
     const setup = await waitingRequestSetup(context, "wf-add-set", { policy: { minPassRate: 0.9 }, statuses: (ids) => statusesOf(ids, "pass") });
-    context.store.createEvalDataset({ id: "set-added", name: "Added", workflowId: "wf-add-set" });
-    const added = addCases(context, "set-added", "added", 2);
+    await context.store.createEvalDataset({ id: "set-added", name: "Added", workflowId: "wf-add-set" });
+    const added = await addCases(context, "set-added", "added", 2);
     await putGate(context, setup.builder.cookie, "wf-add-set", { ...setup.settings, datasetIds: [setup.setId, "set-added"] });
     const before = await preview(context, setup.builder.cookie, "wf-add-set", setup.version, setup.job);
     expect(before.reasons.join(" ")).not.toMatch(/did not cover|changed after replay job/);
@@ -1072,7 +1072,7 @@ describe("release requests go stale by who decides, and are judged again for the
     expect(after.reasons.join(" ")).toMatch(/did not cover/);
     const refused = await approve(context, setup.requestId, setup.approver.cookie);
     expect(refused.statusCode).toBe(409);
-    expect(context.store.getReleaseApprovalRequest(setup.requestId)?.status).toBe("canceled");
+    expect((await context.store.getReleaseApprovalRequest(setup.requestId))?.status).toBe("canceled");
   });
 
   it("an admin's approver change makes the request stale", async () => {
@@ -1082,7 +1082,7 @@ describe("release requests go stale by who decides, and are judged again for the
     const stale = await approve(context, setup.requestId, setup.approver.cookie);
     expect(stale.statusCode).toBe(409);
     expect(stale.json<{ error: string }>().error).toMatch(/Who may approve this release/);
-    expect(context.store.getReleaseApprovalRequest(setup.requestId)?.status).toBe("canceled");
+    expect((await context.store.getReleaseApprovalRequest(setup.requestId))?.status).toBe("canceled");
   });
 
   it("a request made before the fingerprint existed keeps the timestamp rule", async () => {
@@ -1100,30 +1100,30 @@ describe("release requests go stale by who decides, and are judged again for the
     const admin = await login(context, "admin");
     const builder = await login(context, "builder");
     const approver = await login(context, "builder", "approver");
-    save(context, labelWorkflow("wf-two-sets", "v1"));
-    context.store.createEvalDataset({ id: "set-two-a", name: "A", workflowId: "wf-two-sets" });
-    context.store.createEvalDataset({ id: "set-two-b", name: "B", workflowId: "wf-two-sets" });
-    const a = addCases(context, "set-two-a", "two_a", 3);
-    const b = addCases(context, "set-two-b", "two_b", 3);
+    await save(context, labelWorkflow("wf-two-sets", "v1"));
+    await context.store.createEvalDataset({ id: "set-two-a", name: "A", workflowId: "wf-two-sets" });
+    await context.store.createEvalDataset({ id: "set-two-b", name: "B", workflowId: "wf-two-sets" });
+    const a = await addCases(context, "set-two-a", "two_a", 3);
+    const b = await addCases(context, "set-two-b", "two_b", 3);
     await putGate(context, admin.cookie, "wf-two-sets", { datasetIds: ["set-two-a", "set-two-b"], enforced: true, policy: { minPassRate: 0.5 }, approvers: { approverUsers: [approver.email] } });
-    const version = save(context, labelWorkflow("wf-two-sets", "v2"));
+    const version = await save(context, labelWorkflow("wf-two-sets", "v2"));
     const hash = (await preview(context, builder.cookie, "wf-two-sets", version)).workflowHash;
-    const job = seedJob(context, { workflowId: "wf-two-sets", datasetIds: ["set-two-a", "set-two-b"], version, hash, statuses: statusesOf([...a, ...b], "pass") });
+    const job = await seedJob(context, { workflowId: "wf-two-sets", datasetIds: ["set-two-a", "set-two-b"], version, hash, statuses: statusesOf([...a, ...b], "pass") });
     // Set A's admitted case now replays another golden run: the job is stale for A.
-    const target = context.store.getEvalFixture(a[0]!)!;
-    context.store.deleteEvalFixture(target.id);
-    context.store.createEvalFixture({ id: target.id, datasetId: "set-two-a", name: target.name, input: {}, recordingId: "rec_rerecorded" });
+    const target = (await context.store.getEvalFixture(a[0]!))!;
+    await context.store.deleteEvalFixture(target.id);
+    await context.store.createEvalFixture({ id: target.id, datasetId: "set-two-a", name: target.name, input: {}, recordingId: "rec_rerecorded" });
     const published = await call(context, "POST", "/api/workflows/wf-two-sets/publish", builder.cookie, { version, replayRunId: job, requestApproval: { reason: "Known" } });
     expect(published.statusCode, published.body).toBe(202);
     const requestId = published.json<{ approvalRequestId: string }>().approvalRequestId;
-    expect(context.store.getReleaseApprovalRequest(requestId)?.gateChecks?.map((check) => check.code)).toEqual(["stale_sets:set-two-a"]);
+    expect((await context.store.getReleaseApprovalRequest(requestId))?.gateChecks?.map((check) => check.code)).toEqual(["stale_sets:set-two-a"]);
 
     // An admin admits a case in set B that the job never ran: B is stale as well, a new reason.
-    const [late] = addCases(context, "set-two-b", "two_b_late", 1);
+    const [late] = await addCases(context, "set-two-b", "two_b_late", 1);
     expect((await call(context, "POST", "/api/workflows/wf-two-sets/release-gate/cases/admit", admin.cookie, { fixtureIds: [late] })).statusCode).toBe(200);
     const refused = await approve(context, requestId, approver.cookie);
     expect(refused.statusCode).toBe(409);
-    expect(context.store.getReleaseApprovalRequest(requestId)?.status).toBe("canceled");
+    expect((await context.store.getReleaseApprovalRequest(requestId))?.status).toBe("canceled");
   });
   it("a builder re-casing an approver's email leaves a pending release request approvable", async () => {
     const context = await createTestContext();
@@ -1131,7 +1131,7 @@ describe("release requests go stale by who decides, and are judged again for the
     await putGate(context, setup.builder.cookie, "wf-recase", { ...setup.settings, approvers: { approverUsers: [setup.approver.email.toUpperCase()] } });
     const approved = await approve(context, setup.requestId, setup.approver.cookie);
     expect(approved.statusCode, approved.body).toBe(200);
-    expect(context.store.getPublishedVersion("wf-recase")).toBe(setup.version);
+    expect(await context.store.getPublishedVersion("wf-recase")).toBe(setup.version);
   });
 
   async function staleSetRequest(workflowId: string) {
@@ -1139,43 +1139,43 @@ describe("release requests go stale by who decides, and are judged again for the
     const admin = await login(context, "admin");
     const builder = await login(context, "builder");
     const approver = await login(context, "builder", "approver");
-    save(context, labelWorkflow(workflowId, "v1"));
-    context.store.createEvalDataset({ id: `set-${workflowId}`, name: "S", workflowId });
-    const cases = addCases(context, `set-${workflowId}`, `${workflowId}_c`, 4);
+    await save(context, labelWorkflow(workflowId, "v1"));
+    await context.store.createEvalDataset({ id: `set-${workflowId}`, name: "S", workflowId });
+    const cases = await addCases(context, `set-${workflowId}`, `${workflowId}_c`, 4);
     await putGate(context, admin.cookie, workflowId, { datasetIds: [`set-${workflowId}`], enforced: true, policy: { minPassRate: 0.5 }, approvers: { approverUsers: [approver.email] } });
-    const version = save(context, labelWorkflow(workflowId, "v2"));
+    const version = await save(context, labelWorkflow(workflowId, "v2"));
     const hash = (await preview(context, builder.cookie, workflowId, version)).workflowHash;
-    const job = seedJob(context, { workflowId, datasetIds: [`set-${workflowId}`], version, hash, statuses: statusesOf(cases, "pass") });
+    const job = await seedJob(context, { workflowId, datasetIds: [`set-${workflowId}`], version, hash, statuses: statusesOf(cases, "pass") });
     // One admitted case now replays another golden run: the set is stale, and the request is filed on that.
-    const target = context.store.getEvalFixture(cases[0]!)!;
-    context.store.deleteEvalFixture(target.id);
-    context.store.createEvalFixture({ id: target.id, datasetId: `set-${workflowId}`, name: target.name, input: {}, recordingId: "rec_rerecorded" });
+    const target = (await context.store.getEvalFixture(cases[0]!))!;
+    await context.store.deleteEvalFixture(target.id);
+    await context.store.createEvalFixture({ id: target.id, datasetId: `set-${workflowId}`, name: target.name, input: {}, recordingId: "rec_rerecorded" });
     const ask = () => call(context, "POST", `/api/workflows/${workflowId}/publish`, builder.cookie, { version, replayRunId: job, requestApproval: { reason: "Known" } });
     const published = await ask();
     expect(published.statusCode, published.body).toBe(202);
     const requestId = published.json<{ approvalRequestId: string }>().approvalRequestId;
-    expect(context.store.getReleaseApprovalRequest(requestId)?.gateChecks).toEqual([{ code: `stale_sets:set-${workflowId}`, measure: 1 }]);
+    expect((await context.store.getReleaseApprovalRequest(requestId))?.gateChecks).toEqual([{ code: `stale_sets:set-${workflowId}`, measure: 1 }]);
     return { context, admin, approver, requestId, ask, setId: `set-${workflowId}`, workflowId };
   }
 
   it("admitting never-run cases into a set the request was filed as stale on refuses the approval", async () => {
     const { context, admin, approver, requestId, setId, workflowId } = await staleSetRequest("wf-stale-in-set");
-    const late = addCases(context, setId, "stale_late", 3);
+    const late = await addCases(context, setId, "stale_late", 3);
     expect((await call(context, "POST", `/api/workflows/${workflowId}/release-gate/cases/admit`, admin.cookie, { fixtureIds: late })).statusCode).toBe(200);
     const refused = await call(context, "POST", `/api/approvals/${requestId}/approve`, approver.cookie, {});
     expect(refused.statusCode).toBe(409);
-    expect(context.store.getReleaseApprovalRequest(requestId)?.status).toBe("canceled");
+    expect((await context.store.getReleaseApprovalRequest(requestId))?.status).toBe("canceled");
   });
 
   it("asking again after the gate got worse files a new request instead of returning the old one", async () => {
     const { context, admin, requestId, ask, setId, workflowId } = await staleSetRequest("wf-ask-worse");
-    const late = addCases(context, setId, "worse_late", 3);
+    const late = await addCases(context, setId, "worse_late", 3);
     expect((await call(context, "POST", `/api/workflows/${workflowId}/release-gate/cases/admit`, admin.cookie, { fixtureIds: late })).statusCode).toBe(200);
     const again = await ask();
     expect(again.statusCode, again.body).toBe(202);
     const next = again.json<{ approvalRequestId: string }>().approvalRequestId;
     expect(next).not.toBe(requestId);
-    expect(context.store.getReleaseApprovalRequest(requestId)?.status).toBe("canceled");
-    expect(context.store.getReleaseApprovalRequest(next)?.status).toBe("pending");
+    expect((await context.store.getReleaseApprovalRequest(requestId))?.status).toBe("canceled");
+    expect((await context.store.getReleaseApprovalRequest(next))?.status).toBe("pending");
   });
 });

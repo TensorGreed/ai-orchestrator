@@ -200,7 +200,7 @@ export interface WorkflowExecutionDependencies {
    * Loads an Execute Workflow node's target. Returns undefined for an
    * unknown id; may throw to refuse one the run is not allowed to call.
    */
-  loadWorkflow?: (workflowId: string) => Workflow | undefined;
+  loadWorkflow?: (workflowId: string) => Workflow | undefined | Promise<Workflow | undefined>;
   /**
    * Dependencies scoped to a sub-workflow (its own project's secrets,
    * knowledge bases, session stores, guard and sub-workflow loader). Applied
@@ -3892,7 +3892,7 @@ async function executeNodeHandler(
         );
       }
 
-      const targetWorkflow = dependencies.loadWorkflow(workflowId);
+      const targetWorkflow = await dependencies.loadWorkflow(workflowId);
       if (!targetWorkflow) {
         throw new Error(`Sub-workflow '${workflowId}' was not found.`);
       }
@@ -7020,7 +7020,7 @@ async function labelTrackingFor(workflow: Workflow, guard: GuardRuntimeDependenc
   if (!guard) return { tracked: false, dictionaries: [] };
   const guardNodes = workflow.nodes.filter((node) => node.type === "guard" && node.disabled !== true);
   const overriding = guardNodes.filter(overrideUsesLabels);
-  if (overriding.length === 0 && guard.mayUseLabels && !guard.mayUseLabels()) return { tracked: false, dictionaries: [] };
+  if (overriding.length === 0 && guard.mayUseLabels && !await guard.mayUseLabels()) return { tracked: false, dictionaries: [] };
   const profiles: Array<{ labels?: "fixed" | "propagated"; dictionaries: GuardDictionary[] }> = [];
   try {
     const resolution = await resolveGuardRun(guard);

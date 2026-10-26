@@ -40,7 +40,7 @@ function scopeFixture(overrides: Partial<RunScopeDeps> = {}) {
   const mcpServers: Record<string, string | null> = { "m-pb": "pb", "m-none": null, "m-default": "default" };
   const mcpResolved: string[] = [];
   // Which projects claim a legacy namespace, as app.ts builds it from the stored workflows.
-  const legacyOwners = (namespace: string) => {
+  const legacyOwners = async (namespace: string) => {
     const owners = new Set<string>();
     for (const wf of Object.values(workflows)) {
       for (const node of wf.nodes) {
@@ -56,15 +56,15 @@ function scopeFixture(overrides: Partial<RunScopeDeps> = {}) {
   const artifacts = new Map<string, { namespace: string; sessionId: string; artifactKey: string; value: unknown; createdAt: string; updatedAt: string }>();
   const resolved: string[] = [];
   const deps: RunScopeDeps = {
-    getWorkflow: (id) => workflows[id] ?? null,
-    listWorkflowShares: (id) =>
+    getWorkflow: async (id) => workflows[id] ?? null,
+    listWorkflowShares: async (id) =>
       id === "b-shared" ? [{ projectId: "pa", accessLevel: "execute" }] : id === "b-read-share" ? [{ projectId: "pa", accessLevel: "read" }] : [],
-    getSecretProjectId: (id) => secrets[id] ?? null,
-    listSecretIdsSharedToProject: (projectId) => (projectId === "pa" ? ["s-shared"] : []),
+    getSecretProjectId: async (id) => secrets[id] ?? null,
+    listSecretIdsSharedToProject: async (projectId) => (projectId === "pa" ? ["s-shared"] : []),
     // u-consumer may use secrets only in pa (where b-shared is shared to with execute).
-    canUseSecretsInProject: (actor, projectId) => actor.id !== "u-no-secrets" && (actor.id !== "u-consumer" || projectId === "pa"),
+    canUseSecretsInProject: async (actor, projectId) => actor.id !== "u-no-secrets" && (actor.id !== "u-consumer" || projectId === "pa"),
     defaultSecretsShared: true,
-    getMcpServerProjectId: (id) => (id in mcpServers ? mcpServers[id] : undefined),
+    getMcpServerProjectId: async (id) => (id in mcpServers ? mcpServers[id] : undefined),
     resolveRegisteredMcpServer: (id) => {
       mcpResolved.push(id);
       return { serverId: id, connection: {} } as never;
@@ -78,19 +78,19 @@ function scopeFixture(overrides: Partial<RunScopeDeps> = {}) {
     sessions: {
       loadMemory: (namespace, sessionId) => (memory.get(`${namespace}|${sessionId}`) ?? []) as never,
       saveMemory: (namespace, sessionId, messages) => void memory.set(`${namespace}|${sessionId}`, messages),
-      saveToolCall: (input) => {
+      saveToolCall: async (input) => {
         const row = { ...input, id: `t${toolCalls.length}`, createdAt: new Date(Date.now() + toolCalls.length).toISOString() };
         toolCalls.push(row);
         return row;
       },
-      listToolCalls: (input) => toolCalls.filter((row) => row.namespace === input.namespace && row.sessionId === input.sessionId),
-      getToolCall: (input) => toolCalls.find((row) => row.namespace === input.namespace && row.sessionId === input.sessionId && row.id === input.id) ?? null,
-      saveArtifact: (input) => {
+      listToolCalls: async (input) => toolCalls.filter((row) => row.namespace === input.namespace && row.sessionId === input.sessionId),
+      getToolCall: async (input) => toolCalls.find((row) => row.namespace === input.namespace && row.sessionId === input.sessionId && row.id === input.id) ?? null,
+      saveArtifact: async (input) => {
         const row = { ...input, createdAt: "t", updatedAt: "t" };
         artifacts.set(`${input.namespace}|${input.sessionId}|${input.artifactKey}`, row);
         return row;
       },
-      loadArtifact: (input) => artifacts.get(`${input.namespace}|${input.sessionId}|${input.artifactKey}`) ?? null
+      loadArtifact: async (input) => artifacts.get(`${input.namespace}|${input.sessionId}|${input.artifactKey}`) ?? null
     },
     ...overrides
   };
@@ -98,28 +98,28 @@ function scopeFixture(overrides: Partial<RunScopeDeps> = {}) {
 }
 
 describe("run scope: sub-workflows and error workflows", () => {
-  it("loads same-project, project-less and execute-shared children, and refuses the rest with a clear error", () => {
+  it("loads same-project, project-less and execute-shared children, and refuses the rest with a clear error", async () => {
     const { scope, workflows } = scopeFixture();
     const load = scope.dependenciesFor(workflows["a-1"]!).loadWorkflow;
-    expect(load("a-2")?.id).toBe("a-2");
-    expect(load("legacy")?.id).toBe("legacy");
-    expect(load("b-shared")?.id).toBe("b-shared");
-    expect(load("missing")).toBeUndefined();
-    expect(() => load("b-1")).toThrow(/Sub-workflow 'b-1' is in another project/);
+    expect((await load("a-2"))?.id).toBe("a-2");
+    expect((await load("legacy"))?.id).toBe("legacy");
+    expect((await load("b-shared"))?.id).toBe("b-shared");
+    expect(await load("missing")).toBeUndefined();
+    await expect(load("b-1")).rejects.toThrow(/Sub-workflow 'b-1' is in another project/);
     // A read share is not enough to run it.
-    expect(() => load("b-read-share")).toThrow(/another project/);
+    await expect(load("b-read-share")).rejects.toThrow(/another project/);
   });
 
-  it("the run's user never widens what it can call, not even an admin approving or retrying it", () => {
+  it("the run's user never widens what it can call, not even an admin approving or retrying it", async () => {
     const { scope, workflows } = scopeFixture();
-    expect(() => scope.dependenciesFor(workflows["a-1"]!, { actor: user("admin") }).loadWorkflow("b-1")).toThrow(/Sub-workflow 'b-1' is in another project/);
-    expect(() => scope.dependenciesFor(workflows["a-1"]!, { actor: null }).loadWorkflow("b-1")).toThrow(/another project/);
-    expect(scope.dependenciesFor(workflows["a-1"]!, { actor: user("admin") }).loadWorkflow("b-shared")?.id).toBe("b-shared");
+    await expect(scope.dependenciesFor(workflows["a-1"]!, { actor: user("admin") }).loadWorkflow("b-1")).rejects.toThrow(/Sub-workflow 'b-1' is in another project/);
+    await expect(scope.dependenciesFor(workflows["a-1"]!, { actor: null }).loadWorkflow("b-1")).rejects.toThrow(/another project/);
+    expect((await scope.dependenciesFor(workflows["a-1"]!, { actor: user("admin") }).loadWorkflow("b-shared"))?.id).toBe("b-shared");
   });
 
-  it("a workflow without a project counts as the default project when it calls others", () => {
+  it("a workflow without a project counts as the default project when it calls others", async () => {
     const { scope, workflows } = scopeFixture();
-    expect(() => scope.dependenciesFor(workflows.legacy!).loadWorkflow("a-1")).toThrow(/another project/);
+    await expect(scope.dependenciesFor(workflows.legacy!).loadWorkflow("a-1")).rejects.toThrow(/another project/);
   });
 
   it("a sub-workflow is scoped to its own project", async () => {
@@ -131,16 +131,16 @@ describe("run scope: sub-workflows and error workflows", () => {
     await expect(child.resolveSecret!({ secretId: "s-b" })).resolves.toBe("value-of-s-b");
     expect(resolved).toEqual(["s-b"]);
     // And its own loader: from pb, a1 is in another project.
-    expect(() => child.loadWorkflow!("a-1")).toThrow(/another project/);
-    expect(child.loadWorkflow!("b-1")?.id).toBe("b-1");
+    await expect(child.loadWorkflow!("a-1")).rejects.toThrow(/another project/);
+    expect((await child.loadWorkflow!("b-1"))?.id).toBe("b-1");
   });
 
-  it("error workflows follow the same rule and report why they are not run", () => {
+  it("error workflows follow the same rule and report why they are not run", async () => {
     const { scope, workflows } = scopeFixture();
-    expect(scope.errorWorkflowFor(workflows["a-1"]!, "a-2")).toEqual({ workflow: workflows["a-2"] });
-    expect(scope.errorWorkflowFor(workflows["a-1"]!, "b-1")).toEqual({ error: expect.stringMatching(/Error workflow 'b-1' is in another project/) });
-    expect(scope.errorWorkflowFor(workflows["a-1"]!, "nope")).toEqual({ error: "Error workflow 'nope' was not found." });
-    expect(scope.errorWorkflowFor(workflows["a-1"]!, "b-shared")).toEqual({ workflow: workflows["b-shared"] });
+    expect(await scope.errorWorkflowFor(workflows["a-1"]!, "a-2")).toEqual({ workflow: workflows["a-2"] });
+    expect(await scope.errorWorkflowFor(workflows["a-1"]!, "b-1")).toEqual({ error: expect.stringMatching(/Error workflow 'b-1' is in another project/) });
+    expect(await scope.errorWorkflowFor(workflows["a-1"]!, "nope")).toEqual({ error: "Error workflow 'nope' was not found." });
+    expect(await scope.errorWorkflowFor(workflows["a-1"]!, "b-shared")).toEqual({ workflow: workflows["b-shared"] });
   });
 });
 
@@ -167,7 +167,7 @@ describe("run scope: secrets", () => {
   });
 
   it("strict isolation: a default-project secret needs a share like any other", async () => {
-    const { scope, workflows } = scopeFixture({ defaultSecretsShared: false, listSecretIdsSharedToProject: (projectId) => (projectId === "pb" ? ["s-default"] : []) });
+    const { scope, workflows } = scopeFixture({ defaultSecretsShared: false, listSecretIdsSharedToProject: async (projectId) => (projectId === "pb" ? ["s-default"] : []) });
     await expect(scope.dependenciesFor(workflows["a-1"]!).resolveSecret({ secretId: "s-default" })).rejects.toThrow(/belongs to another project/);
     // The default project's own workflows keep it, and a share opens it to another project.
     await expect(scope.dependenciesFor(workflows.legacy!).resolveSecret({ secretId: "s-default" })).resolves.toBe("value-of-s-default");
@@ -186,18 +186,18 @@ describe("run scope: secrets", () => {
     await expect(scope.dependenciesFor(workflows["b-shared"]!, { actor: user("viewer", "u-no-secrets") }).resolveSecret({ secretId: "s-b" })).rejects.toThrow(/secret:use/);
   });
 
-  it("canUseSecretFor applies the same rules without resolving anything", () => {
+  it("canUseSecretFor applies the same rules without resolving anything", async () => {
     const { scope, workflows, resolved } = scopeFixture();
     const consumer = user("builder", "u-consumer");
-    expect(scope.canUseSecretFor(workflows["b-shared"]!, consumer, "s-b")).toBe(true);
-    expect(scope.canUseSecretFor(workflows["b-1"]!, consumer, "s-b")).toBe(false);
-    expect(scope.canUseSecretFor(workflows["a-1"]!, consumer, "s-b")).toBe(false);
-    expect(scope.canUseSecretFor(workflows["a-1"]!, user("admin", "u-admin"), "s-a")).toBe(true);
-    expect(scope.canUseSecretFor(workflows["a-1"]!, user("builder", "u-no-secrets"), "s-a")).toBe(false);
-    expect(scope.canUseSecretFor(workflows["a-1"]!, consumer, "s-missing")).toBe(false);
+    expect(await scope.canUseSecretFor(workflows["b-shared"]!, consumer, "s-b")).toBe(true);
+    expect(await scope.canUseSecretFor(workflows["b-1"]!, consumer, "s-b")).toBe(false);
+    expect(await scope.canUseSecretFor(workflows["a-1"]!, consumer, "s-b")).toBe(false);
+    expect(await scope.canUseSecretFor(workflows["a-1"]!, user("admin", "u-admin"), "s-a")).toBe(true);
+    expect(await scope.canUseSecretFor(workflows["a-1"]!, user("builder", "u-no-secrets"), "s-a")).toBe(false);
+    expect(await scope.canUseSecretFor(workflows["a-1"]!, consumer, "s-missing")).toBe(false);
     // A project alone (no workflow, so no shares).
-    expect(scope.canUseSecretFor({ projectId: "pa" }, consumer, "s-a")).toBe(true);
-    expect(scope.canUseSecretFor({ projectId: "pb" }, consumer, "s-b")).toBe(false);
+    expect(await scope.canUseSecretFor({ projectId: "pa" }, consumer, "s-a")).toBe(true);
+    expect(await scope.canUseSecretFor({ projectId: "pb" }, consumer, "s-b")).toBe(false);
     expect(resolved).toEqual([]);
   });
 
@@ -215,14 +215,14 @@ describe("run scope: registry MCP servers", () => {
   it("a server with a project is usable only from that project; default-project servers follow the isolation mode", async () => {
     const role = scopeFixture();
     const fromA = role.scope.dependenciesFor(role.workflows["a-1"]!).resolveRegisteredMcpServer;
-    expect(() => fromA("m-pb")).toThrow("MCP server 'm-pb' belongs to another project, so workflows in this project cannot use it.");
+    await expect(fromA("m-pb")).rejects.toThrow("MCP server 'm-pb' belongs to another project, so workflows in this project cannot use it.");
     expect(await fromA("m-none")).toMatchObject({ serverId: "m-none" });
     expect(await fromA("m-default")).toMatchObject({ serverId: "m-default" });
     expect(await role.scope.dependenciesFor(role.workflows["b-1"]!).resolveRegisteredMcpServer("m-pb")).toMatchObject({ serverId: "m-pb" });
     expect(role.mcpResolved).toEqual(["m-none", "m-default", "m-pb"]);
 
     const strict = scopeFixture({ defaultSecretsShared: false });
-    expect(() => strict.scope.dependenciesFor(strict.workflows["a-1"]!).resolveRegisteredMcpServer("m-default")).toThrow(/belongs to another project/);
+    await expect(strict.scope.dependenciesFor(strict.workflows["a-1"]!).resolveRegisteredMcpServer("m-default")).rejects.toThrow(/belongs to another project/);
     expect(await strict.scope.dependenciesFor(strict.workflows.legacy!).resolveRegisteredMcpServer("m-default")).toMatchObject({ serverId: "m-default" });
   });
 
@@ -310,18 +310,18 @@ describe("run scope: session memory, tool cache and artifacts", () => {
     expect(projectSessionNamespace("x", "y:ns")).not.toBe(projectSessionNamespace("x:y", "ns"));
   });
 
-  it("a production run fails on a deactivated gated child and skips such an error workflow, with the reason (Phase 15.4)", () => {
+  it("a production run fails on a deactivated gated child and skips such an error workflow, with the reason (Phase 15.4)", async () => {
     const deactivated = "This workflow is deactivated, so production runs are refused.";
     const { scope, workflows } = scopeFixture({
-      getRunnableWorkflow: (id, channel) => (channel === "production" && id === "a-2" ? null : ({ "a-1": workflow("a-1", "pa"), "a-2": workflow("a-2", "pa") } as Record<string, Workflow>)[id] ?? null),
-      productionRefusal: (id) => (id === "a-2" ? deactivated : null)
+      getRunnableWorkflow: async (id, channel) => (channel === "production" && id === "a-2" ? null : ({ "a-1": workflow("a-1", "pa"), "a-2": workflow("a-2", "pa") } as Record<string, Workflow>)[id] ?? null),
+      productionRefusal: async (id) => (id === "a-2" ? deactivated : null)
     });
     const production = scope.dependenciesFor(workflows["a-1"]!, { channel: "production" });
-    expect(() => production.loadWorkflow!("a-2")).toThrow(/Sub-workflow 'a-2': This workflow is deactivated/);
-    expect(production.loadWorkflow!("missing")).toBeUndefined();
-    expect(scope.errorWorkflowFor(workflows["a-1"]!, "a-2", "production")).toEqual({ error: expect.stringMatching(/Error workflow 'a-2': This workflow is deactivated/) });
+    await expect(production.loadWorkflow!("a-2")).rejects.toThrow(/Sub-workflow 'a-2': This workflow is deactivated/);
+    expect(await production.loadWorkflow!("missing")).toBeUndefined();
+    expect(await scope.errorWorkflowFor(workflows["a-1"]!, "a-2", "production")).toEqual({ error: expect.stringMatching(/Error workflow 'a-2': This workflow is deactivated/) });
     // A draft run (the editor) still calls the child's draft.
-    expect(scope.dependenciesFor(workflows["a-1"]!).loadWorkflow!("a-2")?.id).toBe("a-2");
-    expect(scope.errorWorkflowFor(workflows["a-1"]!, "a-2")).toEqual({ workflow: workflows["a-2"] });
+    expect((await scope.dependenciesFor(workflows["a-1"]!).loadWorkflow!("a-2"))?.id).toBe("a-2");
+    expect(await scope.errorWorkflowFor(workflows["a-1"]!, "a-2")).toEqual({ workflow: workflows["a-2"] });
   });
 });

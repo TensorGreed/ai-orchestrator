@@ -3,7 +3,6 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { getConfig } from "./config";
-import { SqliteStore } from "./db/database";
 import { createStore } from "./db/create-store";
 import { createApp } from "./app";
 import { seedWorkflowsIfEmpty, seedTemplatesIfEmpty } from "./services/seed-service";
@@ -29,23 +28,23 @@ if (fs.existsSync(apiEnvPath)) {
 async function bootstrap() {
   const config = getConfig();
   const dbPath = path.resolve(apiRoot, "data", "orchestrator.db");
-  const store = await createStore({ dbFilePath: dbPath }) as SqliteStore;
+  const store = await createStore({ dbFilePath: dbPath });
   const secretService = new SecretService(store, config.SECRET_MASTER_KEY_BASE64);
   const authService = new AuthService(store, config.SESSION_TTL_HOURS);
 
-  const bootstrapUser = authService.bootstrapAdmin(config.BOOTSTRAP_ADMIN_EMAIL, config.BOOTSTRAP_ADMIN_PASSWORD);
+  const bootstrapUser = await authService.bootstrapAdmin(config.BOOTSTRAP_ADMIN_EMAIL, config.BOOTSTRAP_ADMIN_PASSWORD);
   if (bootstrapUser) {
     // eslint-disable-next-line no-console
     console.log(`Bootstrapped admin user '${bootstrapUser.email}'`);
   }
 
   if (config.SEED_SAMPLE_WORKFLOWS) {
-    seedWorkflowsIfEmpty(store, workspaceRoot);
+    await seedWorkflowsIfEmpty(store, workspaceRoot);
   }
-  seedTemplatesIfEmpty(store, workspaceRoot);
+  await seedTemplatesIfEmpty(store, workspaceRoot);
 
   // Ensure the default project exists and backfill any legacy rows that predate Phase 4.2.
-  store.ensureDefaultProject();
+  await store.ensureDefaultProject();
 
   const runsBackgroundWorkers = config.WORKER_MODE === "all" || config.WORKER_MODE === "worker";
   const schedulerService = runsBackgroundWorkers ? new SchedulerService(store) : undefined;
@@ -57,7 +56,7 @@ async function bootstrap() {
       })
     : undefined;
   const triggerService = runsBackgroundWorkers ? new TriggerService(store) : undefined;
-  const app = createApp(
+  const app = await createApp(
     config,
     store,
     secretService,

@@ -1,7 +1,8 @@
 import cron, { type ScheduledTask } from "node-cron";
 import type { Workflow, WorkflowNode } from "@ai-orchestrator/shared";
 import { isExecutionEdge } from "@ai-orchestrator/workflow-engine";
-import { SqliteStore } from "../db/database";
+import type { Store } from "../db/store.js";
+import { SerialReloads } from "./serial-by-key.js";
 
 export interface SchedulerExecutionInput {
   workflowId: string;
@@ -37,11 +38,13 @@ function isValidTimeZone(value: string): boolean {
 
 export class SchedulerService {
   private readonly jobs = new Map<string, ScheduledTask>();
+  /** Reloads one at a time per workflow; a removal asked for meanwhile wins. */
+  private readonly reloads = new SerialReloads();
   private executeHandler: SchedulerExecutionHandler | null = null;
-  private loadWorkflow: (workflowId: string) => Workflow | null = (workflowId) => this.store.getWorkflow(workflowId);
+  private loadWorkflow: (workflowId: string) => Promise<Workflow | null> = async (workflowId) => await this.store.getWorkflow(workflowId);
 
   constructor(
-    private readonly store: SqliteStore,
+    private readonly store: Store,
     private readonly logger: SchedulerLogger = (level, message, metadata) => {
       const suffix = metadata === undefined ? "" : ` ${JSON.stringify(metadata)}`;
       // eslint-disable-next-line no-console
@@ -57,19 +60,19 @@ export class SchedulerService {
    * Phase 15.4 — which version a schedule registers from: the published one
    * when the workflow has one (production traffic), else the draft.
    */
-  setWorkflowLoader(loader: (workflowId: string) => Workflow | null): void {
+  setWorkflowLoader(loader: (workflowId: string) => Promise<Workflow | null>): void {
     this.loadWorkflow = loader;
   }
 
-  initialize(): void {
-    this.reloadAllSchedules();
+  async initialize(): Promise<void> {
+    await this.reloadAllSchedules();
   }
 
-  reloadAllSchedules(): void {
+  async reloadAllSchedules(): Promise<void> {
     this.clearAllSchedules();
 
-    for (const workflowSummary of this.store.listWorkflows()) {
-      const workflow = this.loadWorkflow(workflowSummary.id);
+    for (const workflowSummary of await this.store.listWorkflows()) {
+      const workflow = await this.loadWorkflow(workflowSummary.id);
       if (!workflow) {
         continue;
       }
@@ -77,16 +80,23 @@ export class SchedulerService {
     }
   }
 
-  reloadWorkflow(workflowId: string): void {
-    this.unregisterWorkflow(workflowId);
-    const workflow = this.loadWorkflow(workflowId);
-    if (!workflow) {
-      return;
-    }
-    this.registerWorkflow(workflow);
+  /**
+   * Reloads of one workflow run one after another, so the last save's schedule is the one registered; a delete
+   * that lands while the workflow is loading wins (it is not registered again).
+   */
+  async reloadWorkflow(workflowId: string): Promise<void> {
+    await this.reloads.reload(workflowId, async (removedSince) => {
+      this.unregisterWorkflow(workflowId);
+      const workflow = await this.loadWorkflow(workflowId);
+      if (!workflow || removedSince()) {
+        return;
+      }
+      this.registerWorkflow(workflow);
+    });
   }
 
   removeWorkflow(workflowId: string): void {
+    this.reloads.removed(workflowId);
     this.unregisterWorkflow(workflowId);
   }
 
@@ -238,8 +248,10 @@ export class SchedulerService {
   }
 
   private stopTask(task: ScheduledTask): void {
+    // promise-ok: node-cron stops the task synchronously; the returned promise only reports that it did
     task.stop();
     const maybeDestroy = task as ScheduledTask & { destroy?: () => void };
+    // promise-ok: as above, for destroy
     maybeDestroy.destroy?.();
   }
 

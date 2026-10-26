@@ -108,11 +108,13 @@ import {
   type Workflow,
   type WorkflowRelease
 } from "@ai-orchestrator/shared";
-import type { EvalFixtureRecord, ReleaseApprovalRequestRecord, ReleaseGateRecord, SqliteStore, WorkflowReleaseRecord } from "../db/database.js";
+import type { EvalFixtureRecord, ReleaseApprovalRequestRecord, ReleaseGateRecord, WorkflowReleaseRecord } from "../db/database.js";
 import type { AuditEventInput } from "./audit-service.js";
 import type { SafeUser } from "./auth-service.js";
 import type { NotificationEvent } from "./notification-service.js";
 import type { RunAccessResult } from "../run-access.js";
+import type { Store } from "../db/store.js";
+import { mapAsync } from "../async-array.js";
 
 /** The gate's sets as they are now (see `ReleaseService.gateSets`). */
 interface GateSets {
@@ -141,7 +143,7 @@ type JobView = EvalRunView & { results: EvalCaseResult[] };
 export const DATA_SUBJECT_EVIDENCE_REMOVED = "Stale: a data-subject delete removed some of this job's case results after it ran, so it can no longer prove a release. Run the job again.";
 
 export interface ReleaseServiceOptions {
-  store: SqliteStore;
+  store: Store;
   /** False on stores without release tables (Postgres in this release): every channel runs the draft. */
   available: boolean;
   /**
@@ -149,22 +151,22 @@ export interface ReleaseServiceOptions {
    * project and folder: the same candidate a replay job builds for it.
    * Throws when the version does not exist.
    */
-  resolveVersion: (workflowId: string, version: number) => Workflow;
+  resolveVersion: (workflowId: string, version: number) => Promise<Workflow>;
   /** The candidate hash replay jobs record (workflowForHash + canonical JSON). */
   hashOf: (workflow: Workflow) => string;
-  loadJob: (runId: string) => JobView | null;
-  loadCase: (runId: string, resultId: string) => EvalCaseDetail | null;
-  recordingCreatedAt: (recordingId: string) => string | null;
+  loadJob: (runId: string) => Promise<JobView | null>;
+  loadCase: (runId: string, resultId: string) => Promise<EvalCaseDetail | null>;
+  recordingCreatedAt: (recordingId: string) => Promise<string | null>;
   /** The shared run-access check (run-access.ts): 404 unreadable, 403 without the permission; admins pass. */
-  access: (user: SafeUser, workflowId: string, permission: ReleasePermission) => RunAccessResult<object>;
-  readableWorkflowIds: (user: SafeUser) => string[] | null;
-  audit: (event: AuditEventInput) => void;
+  access: (user: SafeUser, workflowId: string, permission: ReleasePermission) => Promise<RunAccessResult<object>>;
+  readableWorkflowIds: (user: SafeUser) => Promise<string[] | null>;
+  audit: (event: AuditEventInput) => void | Promise<void>;
   notify: (event: NotificationEvent) => Promise<void>;
   redact: (value: string) => string;
   /** Called after the published version moved: schedules and app triggers re-register from it. */
-  onPublished: (workflowId: string) => void;
+  onPublished: (workflowId: string) => void | Promise<void>;
   /** Saves the draft as a new version (the baseline a gate publishes when it is turned on); returns its number. */
-  snapshotDraft: (workflowId: string, actor: SafeUser) => number;
+  snapshotDraft: (workflowId: string, actor: SafeUser) => Promise<number>;
   appPublicUrl?: string;
   logger?: { warn: (message: string, fields?: Record<string, unknown>) => void };
   now?: () => Date;
@@ -354,7 +356,7 @@ export class ReleaseService {
     return this.options.now?.() ?? new Date();
   }
 
-  private get store(): SqliteStore {
+  private get store(): Store {
     return this.options.store;
   }
 
@@ -362,8 +364,8 @@ export class ReleaseService {
     if (!this.options.available) throw new ReleaseError("Releases need the SQLite store in this release", 501);
   }
 
-  private check(user: SafeUser, workflowId: string, permission: ReleasePermission): void {
-    const result = this.options.access(user, workflowId, permission);
+  private async check(user: SafeUser, workflowId: string, permission: ReleasePermission): Promise<void> {
+    const result = await this.options.access(user, workflowId, permission);
     if (!result.ok) throw new ReleaseError(result.error, result.status);
   }
 
@@ -377,14 +379,14 @@ export class ReleaseService {
    * is gone or unreadable fails closed (null), so production never falls back
    * to an unreviewed draft.
    */
-  resolveRunnableWorkflow(workflowId: string, channel: ReleaseChannel): Workflow | null {
-    const draft = this.store.getWorkflow(workflowId);
+  async resolveRunnableWorkflow(workflowId: string, channel: ReleaseChannel): Promise<Workflow | null> {
+    const draft = await this.store.getWorkflow(workflowId);
     if (!draft || channel === "draft" || !this.options.available) return draft;
-    const gateOn = Boolean(this.store.getReleaseGate(workflowId)?.enabled);
+    const gateOn = Boolean((await this.store.getReleaseGate(workflowId))?.enabled);
     // On a gated workflow deactivating is the kill switch: it stops production whatever version is published.
     // Without a gate, deactivating only unregisters schedules and triggers, as it always did.
     if (gateOn && isWorkflowDeactivated(draft)) return null;
-    const published = this.store.getPublishedVersion(workflowId);
+    const published = await this.store.getPublishedVersion(workflowId);
     if (published === null) {
       // A gate that is on always has a published version, except for a workflow created again under a gated id: fail closed.
       if (gateOn) {
@@ -393,7 +395,7 @@ export class ReleaseService {
       }
       return draft;
     }
-    return this.versionWorkflow(workflowId, published);
+    return await this.versionWorkflow(workflowId, published);
   }
 
   /**
@@ -401,13 +403,13 @@ export class ReleaseService {
    * answered null for it), as every production entry point reports it; null
    * when production runs it, or when the workflow does not exist.
    */
-  productionRefusal(workflowId: string): string | null {
+  async productionRefusal(workflowId: string): Promise<string | null> {
     if (!this.options.available) return null;
-    const draft = this.store.getWorkflow(workflowId);
+    const draft = await this.store.getWorkflow(workflowId);
     if (!draft) return null;
-    const gateOn = Boolean(this.store.getReleaseGate(workflowId)?.enabled);
+    const gateOn = Boolean((await this.store.getReleaseGate(workflowId))?.enabled);
     if (gateOn && isWorkflowDeactivated(draft)) return DEACTIVATED_MESSAGE;
-    return this.resolveRunnableWorkflow(workflowId, "production") === null ? NOTHING_PUBLISHED_MESSAGE : null;
+    return await this.resolveRunnableWorkflow(workflowId, "production") === null ? NOTHING_PUBLISHED_MESSAGE : null;
   }
 
   /**
@@ -415,23 +417,23 @@ export class ReleaseService {
    * would run were it active. Path routing uses it to answer "deactivated"
    * rather than "not found".
    */
-  deactivatedProductionWorkflow(workflowId: string): Workflow | null {
+  async deactivatedProductionWorkflow(workflowId: string): Promise<Workflow | null> {
     if (!this.options.available) return null;
-    const draft = this.store.getWorkflow(workflowId);
-    if (!draft || !isWorkflowDeactivated(draft) || !this.store.getReleaseGate(workflowId)?.enabled) return null;
-    const published = this.store.getPublishedVersion(workflowId);
+    const draft = await this.store.getWorkflow(workflowId);
+    if (!draft || !isWorkflowDeactivated(draft) || !(await this.store.getReleaseGate(workflowId))?.enabled) return null;
+    const published = await this.store.getPublishedVersion(workflowId);
     if (published === null) return null;
     try {
-      return this.options.resolveVersion(workflowId, published);
+      return await this.options.resolveVersion(workflowId, published);
     } catch {
       return null;
     }
   }
 
   /** A saved version as production runs it, remembered as that version for the run's history; null when it cannot load. */
-  versionWorkflow(workflowId: string, version: number): Workflow | null {
+  async versionWorkflow(workflowId: string, version: number): Promise<Workflow | null> {
     try {
-      const workflow = this.options.resolveVersion(workflowId, version);
+      const workflow = await this.options.resolveVersion(workflowId, version);
       this.versions.set(workflow, version);
       return workflow;
     } catch (error) {
@@ -450,15 +452,15 @@ export class ReleaseService {
   }
 
   /** The published version of a workflow, or null (gate off: the draft runs everywhere). */
-  publishedVersion(workflowId: string): number | null {
-    return this.options.available ? this.store.getPublishedVersion(workflowId) : null;
+  async publishedVersion(workflowId: string): Promise<number | null> {
+    return this.options.available ? await this.store.getPublishedVersion(workflowId) : null;
   }
 
-  state(user: SafeUser, workflowId: string): ReleaseStateView {
-    this.check(user, workflowId, "workflow:read");
-    const draftVersion = this.store.maxWorkflowVersionNumber(workflowId) || null;
-    const publishedVersion = this.publishedVersion(workflowId);
-    const gate = this.options.available ? this.store.getReleaseGate(workflowId) : null;
+  async state(user: SafeUser, workflowId: string): Promise<ReleaseStateView> {
+    await this.check(user, workflowId, "workflow:read");
+    const draftVersion = await this.store.maxWorkflowVersionNumber(workflowId) || null;
+    const publishedVersion = await this.publishedVersion(workflowId);
+    const gate = this.options.available ? await this.store.getReleaseGate(workflowId) : null;
     const aheadBy = publishedVersion !== null && draftVersion !== null ? Math.max(0, draftVersion - publishedVersion) : 0;
     return {
       draftVersion,
@@ -466,9 +468,9 @@ export class ReleaseService {
       aheadBy,
       gateEnabled: gate?.enabled ?? false,
       gateEnforced: gate?.enforced ?? false,
-      productionRefused: Boolean(gate?.enabled) && (publishedVersion === null || this.resolveRunnableWorkflow(workflowId, "production") === null),
-      canPublish: this.options.access(user, workflowId, "workflow:publish").ok,
-      canEditGate: this.options.access(user, workflowId, "workflow:write").ok
+      productionRefused: Boolean(gate?.enabled) && (publishedVersion === null || await this.resolveRunnableWorkflow(workflowId, "production") === null),
+      canPublish: (await this.options.access(user, workflowId, "workflow:publish")).ok,
+      canEditGate: (await this.options.access(user, workflowId, "workflow:write")).ok
     };
   }
 
@@ -496,10 +498,10 @@ export class ReleaseService {
     };
   }
 
-  gate(user: SafeUser, workflowId: string): ReleaseGateView {
+  async gate(user: SafeUser, workflowId: string): Promise<ReleaseGateView> {
     this.requireAvailable();
-    this.check(user, workflowId, "workflow:read");
-    return this.settingsOf(this.store.getReleaseGate(workflowId), workflowId);
+    await this.check(user, workflowId, "workflow:read");
+    return this.settingsOf(await this.store.getReleaseGate(workflowId), workflowId);
   }
 
   /**
@@ -513,13 +515,13 @@ export class ReleaseService {
    * publishes the current saved version as the baseline (verdict `ungated`),
    * saving the draft as a version first when it differs from the newest one.
    */
-  updateGate(user: SafeUser, workflowId: string, input: ReleaseGateSettingsInput): ReleaseGateView {
+  async updateGate(user: SafeUser, workflowId: string, input: ReleaseGateSettingsInput): Promise<ReleaseGateView> {
     this.requireAvailable();
-    this.check(user, workflowId, "workflow:write");
+    await this.check(user, workflowId, "workflow:write");
     const parsed = releaseGateSettingsSchema.safeParse(input);
     if (!parsed.success) throw new ReleaseError("Invalid gate settings", 400, { issues: parsed.error.issues });
     const next = parsed.data;
-    const previousRecord = this.store.getReleaseGate(workflowId);
+    const previousRecord = await this.store.getReleaseGate(workflowId);
     const current = this.settingsOf(previousRecord, workflowId);
     const isAdmin = user.role === "admin";
     const enforced = next.enforced ?? current.enforced;
@@ -532,7 +534,7 @@ export class ReleaseService {
     if (current.enforced && !isAdmin) {
       const changes = releaseGateAdminOnlyChanges(current, next);
       if (changes.length > 0) {
-        this.options.audit({
+        await this.options.audit({
           category: "release",
           eventType: "release.gate.update_refused",
           action: "update",
@@ -540,32 +542,32 @@ export class ReleaseService {
           actor: { userId: user.id, email: user.email, type: "user" },
           resourceType: "workflow",
           resourceId: workflowId,
-          projectId: this.projectOf(workflowId),
+          projectId: await this.projectOf(workflowId),
           metadata: { changes }
         });
         throw new ReleaseError(`This gate is enforced: only admins can make this change (it ${changes.join(", ")})`, 403, { loosening: changes });
       }
     }
     for (const datasetId of next.datasetIds) {
-      const dataset = this.store.getEvalDataset(datasetId);
+      const dataset = await this.store.getEvalDataset(datasetId);
       if (!dataset || dataset.workflowId !== workflowId) throw new ReleaseError(`Golden set ${datasetId} is not one of this workflow's golden sets`, 400);
     }
-    const publishedVersion = this.store.getPublishedVersion(workflowId);
+    const publishedVersion = await this.store.getPublishedVersion(workflowId);
     const enabling = next.enabled && !current.enabled;
     if (enabling) {
       // What production will run once the gate is on: the published version, or the saved workflow as the baseline.
-      const production = publishedVersion !== null ? this.versionWorkflow(workflowId, publishedVersion) : this.store.getWorkflow(workflowId);
-      this.assertNoRoutingConflicts(user, workflowId, production, "turn the release gate on");
+      const production = publishedVersion !== null ? await this.versionWorkflow(workflowId, publishedVersion) : await this.store.getWorkflow(workflowId);
+      await this.assertNoRoutingConflicts(user, workflowId, production, "turn the release gate on");
     }
     let baseline: { version: number; workflowHash: string } | null = null;
     if (enabling && publishedVersion === null) {
       // Turning the gate on here publishes a baseline release in this user's name.
-      this.check(user, workflowId, "workflow:publish");
-      if (!this.store.getWorkflow(workflowId)) throw new ReleaseError("Workflow not found", 404);
-      const version = this.baselineVersion(user, workflowId);
-      baseline = { version, workflowHash: this.versionCandidate(workflowId, version).workflowHash };
+      await this.check(user, workflowId, "workflow:publish");
+      if (!await this.store.getWorkflow(workflowId)) throw new ReleaseError("Workflow not found", 404);
+      const version = await this.baselineVersion(user, workflowId);
+      baseline = { version, workflowHash: (await this.versionCandidate(workflowId, version)).workflowHash };
     }
-    const admissionBefore = gateAdmissionSnapshot(this.store, previousRecord);
+    const admissionBefore = await gateAdmissionSnapshot(this.store, previousRecord);
     // A save that changes nothing leaves the gate (and its `updated_at`) alone, so it makes no open request stale.
     const settingsKey = (settings: Pick<ReleaseGateRecord, "enabled" | "enforced" | "datasetIds" | "candidateOptions" | "policy" | "requireApproval"> & { approvers?: unknown }) =>
       releaseCanonicalJson({
@@ -581,37 +583,33 @@ export class ReleaseService {
       previousRecord !== null &&
       settingsKey(previousRecord) ===
         settingsKey({ enabled: next.enabled, enforced, datasetIds: next.datasetIds, candidateOptions: next.candidateOptions, policy: next.policy, requireApproval: next.requireApproval, approvers: next.approvers });
-    // The settings and the cases the gate counts are saved together, or not at all.
-    const { saved, admitted } = this.store.transaction(() => {
-      const saved = unchanged && previousRecord ? previousRecord : this.store.upsertReleaseGate({
-        workflowId,
-        enabled: next.enabled,
-        enforced,
-        datasetIds: next.datasetIds,
-        candidateOptions: next.candidateOptions,
-        policy: next.policy,
-        requireApproval: next.requireApproval,
-        approvers: next.approvers,
-        updatedAt: this.now().toISOString(),
-        updatedBy: user.email
-      });
-      // Enforcing for the first time admits what the sets hold now; afterwards nothing is admitted without an explicit admin decision.
-      const admitted = nextAdmittedIds(this.store, previousRecord, { enforced, datasetIds: next.datasetIds }, { byAdmin: isAdmin, admitAddedSetCases });
-      const storedBefore = previousRecord?.admittedFixtureIds ?? null;
-      if (JSON.stringify(admitted === null ? null : [...new Set(admitted)].sort()) !== JSON.stringify(storedBefore)) {
-        this.store.setReleaseGateAdmission(workflowId, admitted, this.now().toISOString(), user.email);
-      }
-      return { saved, admitted };
-    });
+    // The settings and the cases the gate counts are saved together, or not at all, and only onto the gate as read above.
+    const savedAt = this.now().toISOString();
+    const gateRecord: ReleaseGateRecord | null = unchanged && previousRecord ? null : {
+      workflowId,
+      enabled: next.enabled,
+      enforced,
+      datasetIds: next.datasetIds,
+      candidateOptions: next.candidateOptions,
+      policy: next.policy,
+      requireApproval: next.requireApproval,
+      approvers: next.approvers,
+      updatedAt: savedAt,
+      updatedBy: user.email
+    };
+    // Enforcing for the first time admits what the sets hold now; afterwards nothing is admitted without an explicit admin decision.
+    const admitted = await nextAdmittedIds(this.store, previousRecord, { enforced, datasetIds: next.datasetIds }, { byAdmin: isAdmin, admitAddedSetCases });
+    const saved = await this.store.saveReleaseGate({ gate: gateRecord, admittedFixtureIds: admitted, expected: previousRecord, updatedAt: savedAt, updatedBy: user.email });
+    if (!saved) throw new ReleaseError("The release gate changed while it was being saved. Reload and save again.", 409);
     const view = this.settingsOf(saved, workflowId);
-    const admissionAfter = gateAdmissionSnapshot(this.store, this.store.getReleaseGate(workflowId));
+    const admissionAfter = await gateAdmissionSnapshot(this.store, await this.store.getReleaseGate(workflowId));
     const previouslyAdmitted = new Set(admissionBefore ? admissionBefore.admittedIds : []);
     const newlyAdmitted = admissionAfter ? [...admissionAfter.admittedIds].filter((id) => !previouslyAdmitted.has(id)) : [];
     const admissionLoosening =
       admissionBefore && admissionAfter
         ? { before: admissionState(admissionBefore), after: admissionState(admissionAfter), names: { ...admissionAfter.names, ...admissionBefore.names } }
         : undefined;
-    this.options.audit({
+    await this.options.audit({
       category: "release",
       eventType: "release.gate.updated",
       action: "update",
@@ -619,7 +617,7 @@ export class ReleaseService {
       actor: { userId: user.id, email: user.email, type: "user" },
       resourceType: "workflow",
       resourceId: workflowId,
-      projectId: this.projectOf(workflowId),
+      projectId: await this.projectOf(workflowId),
       metadata: {
         enabled: view.enabled,
         enforced: view.enforced,
@@ -640,7 +638,7 @@ export class ReleaseService {
       }
     });
     if (baseline) {
-      this.commitRelease({
+      await this.commitRelease({
         actor: user,
         workflowId,
         version: baseline.version,
@@ -658,12 +656,12 @@ export class ReleaseService {
   }
 
   /** The saved version that matches the draft production runs now: the newest one, or a fresh snapshot of the draft. */
-  private baselineVersion(user: SafeUser, workflowId: string): number {
-    const draft = this.store.getWorkflow(workflowId)!;
-    const latest = this.store.maxWorkflowVersionNumber(workflowId);
+  private async baselineVersion(user: SafeUser, workflowId: string): Promise<number> {
+    const draft = (await this.store.getWorkflow(workflowId))!;
+    const latest = await this.store.maxWorkflowVersionNumber(workflowId);
     if (latest > 0) {
       try {
-        if (this.options.hashOf(this.options.resolveVersion(workflowId, latest)) === this.options.hashOf(draft)) return latest;
+        if (this.options.hashOf(await this.options.resolveVersion(workflowId, latest)) === this.options.hashOf(draft)) return latest;
       } catch {
         // An unreadable newest version: save the draft as a new one below.
       }
@@ -685,14 +683,14 @@ export class ReleaseService {
    * production. `draft` stands in for the saved workflow (a save being
    * checked).
    */
-  private claimedKeys(workflowId: string, draft?: Workflow | null): ProductionRoutingKey[] {
-    const saved = draft === undefined ? this.store.getWorkflow(workflowId) : draft;
-    const gateOn = Boolean(this.store.getReleaseGate(workflowId)?.enabled);
+  private async claimedKeys(workflowId: string, draft?: Workflow | null): Promise<ProductionRoutingKey[]> {
+    const saved = draft === undefined ? await this.store.getWorkflow(workflowId) : draft;
+    const gateOn = Boolean((await this.store.getReleaseGate(workflowId))?.enabled);
     if (!gateOn && !saved) return [];
-    const published = this.store.getPublishedVersion(workflowId);
+    const published = await this.store.getPublishedVersion(workflowId);
     if (published !== null) {
       try {
-        return productionRoutingKeys(this.options.resolveVersion(workflowId, published));
+        return productionRoutingKeys(await this.options.resolveVersion(workflowId, published));
       } catch {
         // An unreadable published version answers no traffic.
         return [];
@@ -702,11 +700,11 @@ export class ReleaseService {
   }
 
   /** The workflows other than `workflowId` that claim each production path. */
-  private otherClaims(workflowId: string): Map<string, string[]> {
+  private async otherClaims(workflowId: string): Promise<Map<string, string[]>> {
     const claims = new Map<string, string[]>();
-    for (const summary of this.store.listWorkflows()) {
+    for (const summary of await this.store.listWorkflows()) {
       if (summary.id === workflowId) continue;
-      for (const entry of this.claimedKeys(summary.id)) {
+      for (const entry of await this.claimedKeys(summary.id)) {
         const owners = claims.get(entry.key) ?? [];
         if (!owners.includes(summary.id)) owners.push(summary.id);
         claims.set(entry.key, owners);
@@ -716,9 +714,9 @@ export class ReleaseService {
   }
 
   /** The paths in `keys` another workflow claims. */
-  private claimedByOthers(workflowId: string, keys: ProductionRoutingKey[]): RoutingConflict[] {
+  private async claimedByOthers(workflowId: string, keys: ProductionRoutingKey[]): Promise<RoutingConflict[]> {
     if (!this.options.available || keys.length === 0) return [];
-    const claims = this.otherClaims(workflowId);
+    const claims = await this.otherClaims(workflowId);
     const conflicts: RoutingConflict[] = [];
     for (const entry of keys) {
       for (const owner of claims.get(entry.key) ?? []) conflicts.push({ key: entry.key, label: entry.label, workflowId: owner });
@@ -730,15 +728,15 @@ export class ReleaseService {
    * Every trigger path any workflow answers on or may answer on (drafts and
    * published versions alike), so a copy can pick paths nobody uses.
    */
-  usedRoutingKeys(): Set<string> {
+  async usedRoutingKeys(): Promise<Set<string>> {
     const used = new Set<string>();
-    for (const summary of this.store.listWorkflows()) {
-      const draft = this.store.getWorkflow(summary.id);
+    for (const summary of await this.store.listWorkflows()) {
+      const draft = await this.store.getWorkflow(summary.id);
       if (draft) for (const entry of productionRoutingKeys(draft)) used.add(entry.key);
-      const published = this.options.available ? this.store.getPublishedVersion(summary.id) : null;
+      const published = this.options.available ? await this.store.getPublishedVersion(summary.id) : null;
       if (published === null) continue;
       try {
-        for (const entry of productionRoutingKeys(this.options.resolveVersion(summary.id, published))) used.add(entry.key);
+        for (const entry of productionRoutingKeys(await this.options.resolveVersion(summary.id, published))) used.add(entry.key);
       } catch {
         // An unreadable published version answers no traffic.
       }
@@ -747,10 +745,10 @@ export class ReleaseService {
   }
 
   /** How a conflict reads to `user`: another workflow they cannot read stays unnamed. */
-  describeConflicts(user: SafeUser, conflicts: RoutingConflict[]): string[] {
-    return conflicts.map((conflict) => {
-      const readable = this.options.access(user, conflict.workflowId, "workflow:read").ok;
-      const other = readable ? `workflow "${this.store.getWorkflow(conflict.workflowId)?.name ?? conflict.workflowId}" (${conflict.workflowId})` : "another workflow";
+  async describeConflicts(user: SafeUser, conflicts: RoutingConflict[]): Promise<string[]> {
+    return await mapAsync(conflicts, async (conflict) => {
+      const readable = (await this.options.access(user, conflict.workflowId, "workflow:read")).ok;
+      const other = readable ? `workflow "${(await this.store.getWorkflow(conflict.workflowId))?.name ?? conflict.workflowId}" (${conflict.workflowId})` : "another workflow";
       return `${conflict.label} is already used by ${other}.`;
     });
   }
@@ -762,42 +760,42 @@ export class ReleaseService {
    * checked instead), and a path the workflow already claimed before this
    * save never blocks it.
    */
-  claimConflict(user: SafeUser, workflow: Workflow): string | null {
+  async claimConflict(user: SafeUser, workflow: Workflow): Promise<string | null> {
     if (!this.options.available) return null;
-    const before = new Set(this.store.getWorkflow(workflow.id) ? this.claimedKeys(workflow.id).map((entry) => entry.key) : []);
-    const added = this.claimedKeys(workflow.id, workflow).filter((entry) => !before.has(entry.key));
-    const conflicts = this.claimedByOthers(workflow.id, added);
+    const before = new Set(await this.store.getWorkflow(workflow.id) ? (await this.claimedKeys(workflow.id)).map((entry) => entry.key) : []);
+    const added = (await this.claimedKeys(workflow.id, workflow)).filter((entry) => !before.has(entry.key));
+    const conflicts = await this.claimedByOthers(workflow.id, added);
     if (conflicts.length === 0) return null;
-    return `${this.describeConflicts(user, conflicts).join(" ")} Production traffic on that path already goes to another workflow: choose another path.`;
+    return `${(await this.describeConflicts(user, conflicts)).join(" ")} Production traffic on that path already goes to another workflow: choose another path.`;
   }
 
-  private assertNoRoutingConflicts(user: SafeUser, workflowId: string, workflow: Workflow | null, what: string): void {
-    const conflicts = workflow ? this.claimedByOthers(workflowId, productionRoutingKeys(workflow)) : [];
+  private async assertNoRoutingConflicts(user: SafeUser, workflowId: string, workflow: Workflow | null, what: string): Promise<void> {
+    const conflicts = workflow ? await this.claimedByOthers(workflowId, productionRoutingKeys(workflow)) : [];
     if (conflicts.length === 0) return;
-    throw new ReleaseError(`Cannot ${what} while another workflow serves production on one of its paths: ${this.describeConflicts(user, conflicts).join(" ")}`, 409, {
+    throw new ReleaseError(`Cannot ${what} while another workflow serves production on one of its paths: ${(await this.describeConflicts(user, conflicts)).join(" ")}`, 409, {
       conflicts: conflicts.map((conflict) => conflict.key)
     });
   }
 
   /** Why publishing `workflow` (a version) would put it on paths another workflow claims. */
-  private conflictReasons(user: SafeUser, workflowId: string, workflow: Workflow): string[] {
-    const conflicts = this.claimedByOthers(workflowId, productionRoutingKeys(workflow));
+  private async conflictReasons(user: SafeUser, workflowId: string, workflow: Workflow): Promise<string[]> {
+    const conflicts = await this.claimedByOthers(workflowId, productionRoutingKeys(workflow));
     if (conflicts.length === 0) return [];
-    return [...this.describeConflicts(user, conflicts), "Production traffic on that path already goes to another workflow: give this version its own paths before publishing."];
+    return [...(await this.describeConflicts(user, conflicts)), "Production traffic on that path already goes to another workflow: give this version its own paths before publishing."];
   }
 
   // -------------------------------------------------------------------------
   // What only admins may do on an enforced gate
   // -------------------------------------------------------------------------
 
-  private enforcedGateOf(workflowId: string): ReleaseGateRecord | null {
+  private async enforcedGateOf(workflowId: string): Promise<ReleaseGateRecord | null> {
     if (!this.options.available) return null;
-    const gate = this.store.getReleaseGate(workflowId);
+    const gate = await this.store.getReleaseGate(workflowId);
     return gate?.enforced ? gate : null;
   }
 
-  private refuse(user: SafeUser, workflowId: string, eventType: string, action: string, metadata: Record<string, unknown>): void {
-    this.options.audit({
+  private async refuse(user: SafeUser, workflowId: string, eventType: string, action: string, metadata: Record<string, unknown>): Promise<void> {
+    await this.options.audit({
       category: "release",
       eventType,
       action,
@@ -805,15 +803,15 @@ export class ReleaseService {
       actor: { userId: user.id, email: user.email, type: "user" },
       resourceType: "workflow",
       resourceId: workflowId,
-      projectId: this.projectOf(workflowId),
+      projectId: await this.projectOf(workflowId),
       metadata
     });
   }
 
   /** Why `user` may not delete this workflow (an enforced gate: admins only); null when they may. Audits a refusal. */
-  deleteDenial(user: SafeUser, workflowId: string): string | null {
-    if (user.role === "admin" || !this.enforcedGateOf(workflowId)) return null;
-    this.refuse(user, workflowId, "release.workflow_delete.refused", "delete", {});
+  async deleteDenial(user: SafeUser, workflowId: string): Promise<string | null> {
+    if (user.role === "admin" || !await this.enforcedGateOf(workflowId)) return null;
+    await this.refuse(user, workflowId, "release.workflow_delete.refused", "delete", {});
     return "This workflow has an enforced release gate: only an admin can delete it.";
   }
 
@@ -825,24 +823,24 @@ export class ReleaseService {
    * remove a case still pending admission, or ask for removal of an
    * admitted one in the approvals inbox. Audits a refusal.
    */
-  goldenSetChangeDenial(user: SafeUser, datasetId: string, change: "remove_case" | "delete_set" | "add_case_with_scorers", target: { fixtureId?: string } = {}): string | null {
+  async goldenSetChangeDenial(user: SafeUser, datasetId: string, change: "remove_case" | "delete_set" | "add_case_with_scorers", target: { fixtureId?: string } = {}): Promise<string | null> {
     if (user.role === "admin") return null;
-    const dataset = this.store.getEvalDataset(datasetId);
+    const dataset = await this.store.getEvalDataset(datasetId);
     if (!dataset?.workflowId) return null;
-    const gate = this.enforcedGateOf(dataset.workflowId);
+    const gate = await this.enforcedGateOf(dataset.workflowId);
     if (!gate || !gate.datasetIds.includes(datasetId)) return null;
     if (change === "remove_case") {
-      const snapshot = gateAdmissionSnapshot(this.store, gate);
+      const snapshot = await gateAdmissionSnapshot(this.store, gate);
       if (snapshot && target.fixtureId) {
         const before = admissionState(snapshot);
         const after = { admittedIds: before.admittedIds.filter((id) => id !== target.fixtureId), requiredIds: before.requiredIds.filter((id) => id !== target.fixtureId) };
         const loosening = releaseAdmissionLoosening(before, after, snapshot.names);
         if (loosening.length === 0) return null;
-        this.refuse(user, dataset.workflowId, "release.golden_set_change.refused", "update", { datasetId, change, fixtureId: target.fixtureId, loosening });
+        await this.refuse(user, dataset.workflowId, "release.golden_set_change.refused", "update", { datasetId, change, fixtureId: target.fixtureId, loosening });
         return "An enforced release gate counts this case: only an admin can remove it. Ask for its removal from the gate's Cases panel, and an approver decides in the approvals inbox.";
       }
     }
-    this.refuse(user, dataset.workflowId, "release.golden_set_change.refused", "update", { datasetId, change });
+    await this.refuse(user, dataset.workflowId, "release.golden_set_change.refused", "update", { datasetId, change });
     if (change === "delete_set") {
       return "An enforced release gate uses this golden set: only an admin can delete it. Ask for removal of its cases from the gate's Cases panel instead.";
     }
@@ -855,14 +853,14 @@ export class ReleaseService {
    * enforced gate's golden set replays (admins only); null when they may.
    * Audits a refusal.
    */
-  recordingDeleteDenial(user: SafeUser, workflowId: string, recordingId: string): string | null {
+  async recordingDeleteDenial(user: SafeUser, workflowId: string, recordingId: string): Promise<string | null> {
     if (user.role === "admin") return null;
-    const gate = this.enforcedGateOf(workflowId);
+    const gate = await this.enforcedGateOf(workflowId);
     if (!gate) return null;
-    const snapshot = gateAdmissionSnapshot(this.store, gate);
+    const snapshot = await gateAdmissionSnapshot(this.store, gate);
     const counted = snapshot?.fixtures.find((fixture) => fixture.recordingId === recordingId && snapshot.admittedIds.has(fixture.id));
     if (!counted) return null;
-    this.refuse(user, workflowId, "release.golden_set_change.refused", "delete", { datasetId: counted.datasetId, change: "delete_recording", recordingId, fixtureId: counted.id });
+    await this.refuse(user, workflowId, "release.golden_set_change.refused", "delete", { datasetId: counted.datasetId, change: "delete_recording", recordingId, fixtureId: counted.id });
     return "An enforced release gate counts a case that replays this golden run: only an admin can delete it.";
   }
 
@@ -876,7 +874,7 @@ export class ReleaseService {
    *     (every golden run, for a deleted workflow) stay admitted but can no
    *     longer pass, so they are inconclusive from then on.
    */
-  gateCasesRemoval(
+  async gateCasesRemoval(
     user: SafeUser,
     workflowId: string,
     target:
@@ -885,9 +883,9 @@ export class ReleaseService {
       | { via: "golden_run"; recordingId: string }
       | { via: "workflow" }
       | { via: "data_subject"; fixtureIds: readonly string[]; kind: string; id: string }
-  ): (() => void) | null {
+  ): Promise<(() => Promise<void>) | null> {
     if (!this.options.available) return null;
-    const snapshot = gateAdmissionSnapshot(this.store, this.store.getReleaseGate(workflowId));
+    const snapshot = await gateAdmissionSnapshot(this.store, await this.store.getReleaseGate(workflowId));
     if (!snapshot) return null;
     const hit = (fixture: EvalFixtureRecord) => {
       switch (target.via) {
@@ -913,8 +911,8 @@ export class ReleaseService {
     const loosened = leaves
       ? releaseAdmissionLoosening(before, { admittedIds: before.admittedIds.filter((id) => !ids.includes(id)), requiredIds: before.requiredIds.filter((id) => !ids.includes(id)) }, snapshot.names)
       : [`deletes the golden run${ids.length === 1 ? "" : "s"} admitted case${ids.length === 1 ? "" : "s"} ${label} replay${ids.length === 1 ? "s" : ""}, so ${ids.length === 1 ? "it is" : "they are"} inconclusive from now on`];
-    return () =>
-      this.options.audit({
+    return async () => {
+      await this.options.audit({
         category: "release",
         eventType: "release.gate.cases_removed",
         action: "delete",
@@ -922,7 +920,7 @@ export class ReleaseService {
         actor: { userId: user.id, email: user.email, type: "user" },
         resourceType: "workflow",
         resourceId: workflowId,
-        projectId: this.projectOf(workflowId),
+        projectId: await this.projectOf(workflowId),
         metadata: {
           via: target.via,
           ...(target.via === "fixture" ? { fixtureId: target.fixtureId } : {}),
@@ -934,6 +932,7 @@ export class ReleaseService {
           loosened
         }
       });
+    };
   }
 
   /**
@@ -950,18 +949,18 @@ export class ReleaseService {
    *     release gate and pending release approvals stop accepting it
    *     (`release.jobs.evidence_removed`).
    */
-  dataSubjectRemoval(user: SafeUser, row: { kind: string; id: string }): (() => void) | null {
+  async dataSubjectRemoval(user: SafeUser, row: { kind: string; id: string }): Promise<(() => Promise<void>) | null> {
     if (!this.options.available) return null;
     let workflowId: string | null = null;
     let fixtureIds: string[] = [];
     let resultIds: string[] = [];
     if (row.kind === "recording") {
-      workflowId = this.store.getReplayRecordingSummary(row.id)?.workflowId ?? null;
-      fixtureIds = this.store.evalFixtureIdsForRecording(row.id);
+      workflowId = (await this.store.getReplayRecordingSummary(row.id))?.workflowId ?? null;
+      fixtureIds = await this.store.evalFixtureIdsForRecording(row.id);
     } else if (row.kind === "fixture") {
-      const fixture = this.store.getEvalFixture(row.id);
+      const fixture = await this.store.getEvalFixture(row.id);
       if (fixture) {
-        workflowId = this.store.getEvalDataset(fixture.datasetId)?.workflowId ?? null;
+        workflowId = (await this.store.getEvalDataset(fixture.datasetId))?.workflowId ?? null;
         fixtureIds = [fixture.id];
       }
     } else if (row.kind === "eval_result") {
@@ -969,14 +968,14 @@ export class ReleaseService {
     } else {
       return null;
     }
-    const runIds = this.store.evalRunIdsForResults({ fixtureIds, resultIds });
-    const casesRemoved = workflowId && fixtureIds.length > 0 ? this.gateCasesRemoval(user, workflowId, { via: "data_subject", fixtureIds, kind: row.kind, id: row.id }) : null;
+    const runIds = await this.store.evalRunIdsForResults({ fixtureIds, resultIds });
+    const casesRemoved = workflowId && fixtureIds.length > 0 ? await this.gateCasesRemoval(user, workflowId, { via: "data_subject", fixtureIds, kind: row.kind, id: row.id }) : null;
     if (!casesRemoved && runIds.length === 0) return null;
-    return () => {
-      casesRemoved?.();
-      const stale = this.store.markEvalRunsReleaseIneligible(runIds, DATA_SUBJECT_EVIDENCE_REMOVED);
+    return async () => {
+      await casesRemoved?.();
+      const stale = await this.store.markEvalRunsReleaseIneligible(runIds, DATA_SUBJECT_EVIDENCE_REMOVED);
       if (stale.length === 0) return;
-      this.options.audit({
+      await this.options.audit({
         category: "release",
         eventType: "release.jobs.evidence_removed",
         action: "update",
@@ -984,7 +983,7 @@ export class ReleaseService {
         actor: { userId: user.id, email: user.email, type: "user" },
         resourceType: workflowId ? "workflow" : "eval_run",
         resourceId: workflowId ?? stale[0]!,
-        projectId: workflowId ? this.projectOf(workflowId) : null,
+        projectId: workflowId ? await this.projectOf(workflowId) : null,
         metadata: { via: "data_subject", target: `${row.kind}:${row.id}`, runIds: stale, fixtureIds, resultIds }
       });
     };
@@ -998,15 +997,15 @@ export class ReleaseService {
    * the job may prove a release (its hash, sets, eligibility, scorers) is
    * left out here: the job view reports it on its own. Null otherwise.
    */
-  jobGateAdmission(job: JobView): ReleaseGateJobAdmission | null {
+  async jobGateAdmission(job: JobView): Promise<ReleaseGateJobAdmission | null> {
     if (!this.options.available) return null;
-    const record = this.store.getReleaseGate(job.workflowId);
+    const record = await this.store.getReleaseGate(job.workflowId);
     const jobSets = job.datasetIds ?? [];
     if (!record?.enforced || !record.datasetIds.some((datasetId) => jobSets.includes(datasetId))) return null;
-    const snapshot = gateAdmissionSnapshot(this.store, record);
+    const snapshot = await gateAdmissionSnapshot(this.store, record);
     if (!snapshot) return null;
     const gate = this.settingsOf(record, job.workflowId);
-    const evidence = this.evidenceFor(job, gate);
+    const evidence = await this.evidenceFor(job, gate);
     const workflowHash = evidence.job.workflowHash ?? "";
     const judgement = judgeReleaseGate(
       {
@@ -1029,8 +1028,8 @@ export class ReleaseService {
     };
   }
 
-  private projectOf(workflowId: string): string | null {
-    return this.store.getWorkflow(workflowId)?.projectId ?? null;
+  private async projectOf(workflowId: string): Promise<string | null> {
+    return (await this.store.getWorkflow(workflowId))?.projectId ?? null;
   }
 
   // -------------------------------------------------------------------------
@@ -1038,11 +1037,11 @@ export class ReleaseService {
   // -------------------------------------------------------------------------
 
   /** The version as it would run, and its hash; 404 when it does not exist. */
-  versionCandidate(workflowId: string, version: number): { workflow: Workflow; workflowHash: string } {
-    if (!this.store.getWorkflowVersion(workflowId, version)) throw new ReleaseError(`Version ${version} of this workflow was not found`, 404);
+  async versionCandidate(workflowId: string, version: number): Promise<{ workflow: Workflow; workflowHash: string }> {
+    if (!await this.store.getWorkflowVersion(workflowId, version)) throw new ReleaseError(`Version ${version} of this workflow was not found`, 404);
     let workflow: Workflow;
     try {
-      workflow = this.options.resolveVersion(workflowId, version);
+      workflow = await this.options.resolveVersion(workflowId, version);
     } catch (error) {
       throw new ReleaseError(error instanceof Error ? error.message : `Version ${version} could not be read`, 404);
     }
@@ -1054,14 +1053,14 @@ export class ReleaseService {
    * for an enforced gate whose admission is stored, the admitted cases
    * (staleness is then judged over those alone).
    */
-  private gateSets(gate: Pick<ReleaseGateView, "workflowId" | "datasetIds" | "enforced">): GateSets {
+  private async gateSets(gate: Pick<ReleaseGateView, "workflowId" | "datasetIds" | "enforced">): Promise<GateSets> {
     const fixtureIds = new Set<string>();
-    const snapshots = goldenSetSnapshots(gate.datasetIds, (datasetId) => {
-      const fixtures = this.store.listEvalFixtures(datasetId);
+    const snapshots = await goldenSetSnapshots(gate.datasetIds, async (datasetId) => {
+      const fixtures = await this.store.listEvalFixtures(datasetId);
       for (const fixture of fixtures) fixtureIds.add(fixture.id);
       return fixtures;
     });
-    const admission = gate.enforced ? gateAdmissionSnapshot(this.store, this.store.getReleaseGate(gate.workflowId)) : null;
+    const admission = gate.enforced ? await gateAdmissionSnapshot(this.store, await this.store.getReleaseGate(gate.workflowId)) : null;
     return { fixtureIds, snapshots, admittedIds: admission && !admission.admissionMissing ? admission.admittedIds : null };
   }
 
@@ -1070,8 +1069,8 @@ export class ReleaseService {
    * own sets with repeats aggregated, and how the job's scorers, set
    * snapshot and own eligibility compare with the gate.
    */
-  evidenceFor(job: JobView, gate: Pick<ReleaseGateView, "workflowId" | "datasetIds" | "candidateOptions" | "enforced">, sets?: GateSets): ReleaseGateEvidence {
-    const current = sets ?? this.gateSets(gate);
+  async evidenceFor(job: JobView, gate: Pick<ReleaseGateView, "workflowId" | "datasetIds" | "candidateOptions" | "enforced">, sets?: GateSets): Promise<ReleaseGateEvidence> {
+    const current = sets ?? await this.gateSets(gate);
     const options = asRecord(job.options);
     const aggregate = (typeof options.aggregate === "string" ? options.aggregate : "all") as ReleaseAggregateMode;
     const groups = new Map<string, Array<EvalCaseResult & Record<string, unknown>>>();
@@ -1105,7 +1104,7 @@ export class ReleaseService {
       const blocking = (action: unknown) => action === "block" || action === "review";
       for (const result of results) {
         if (caseStatus(result.status) === "skipped") continue;
-        const diff = asRecord(this.options.loadCase(job.id, result.id)?.replay?.diff);
+        const diff = asRecord((await this.options.loadCase(job.id, result.id))?.replay?.diff);
         const totals = asRecord(diff.totals);
         const guard = asRecord(diff.guard);
         if (!diff.totals || !Array.isArray(guard.added) || !Array.isArray(guard.changed)) {
@@ -1151,21 +1150,21 @@ export class ReleaseService {
         costUsd: { baseline: costBaseline, candidate: costCandidate },
         latencyMs: { baseline: latencyBaseline, candidate: latencyCandidate },
         newGuardBlocks,
-        recordingCreatedAt: first.recordingId ? this.options.recordingCreatedAt(first.recordingId) : null,
+        recordingCreatedAt: first.recordingId ? await this.options.recordingCreatedAt(first.recordingId) : null,
         diffMissing
       });
     }
     const candidate = asRecord(job.candidate);
     const eligible = candidate.releaseEligible ?? options.releaseEligible;
     const ineligible = candidate.releaseIneligibleReasons ?? options.releaseIneligibleReasons ?? candidate.ineligibleReasons ?? options.ineligibleReasons;
-    const record = this.store.getEvalRun(job.id);
+    const record = await this.store.getEvalRun(job.id);
     const jobScorers = (record?.scorers ?? null) as unknown[] | null;
     let scorerMismatch: string | null = null;
     if (!releaseScorersMatch(gate.candidateOptions.scorers, jobScorers)) {
       const types = (jobScorers ?? []).map((scorer) => String(asRecord(scorer).type ?? "unknown"));
       scorerMismatch = types.length > 0 ? `ran with its own scorers (${types.join(", ")})` : "ran with the default scorers, not the ones the gate names";
     }
-    const jobSnapshot = this.store.getEvalRunSetSnapshot(job.id);
+    const jobSnapshot = await this.store.getEvalRunSetSnapshot(job.id);
     const staleSets = jobSnapshot ? staleGoldenSets(gate.datasetIds, jobSnapshot, current.snapshots, current.admittedIds) : [...gate.datasetIds];
     const staleSetCounts = Object.fromEntries(staleSets.map((id) => [id, jobSnapshot ? staleGoldenSetCount(jobSnapshot[id], current.snapshots[id], current.admittedIds) : 1]));
     return {
@@ -1195,8 +1194,8 @@ export class ReleaseService {
    * hash that passes, else the newest one) under the gate's current policy.
    * Every completed job for the hash is considered.
    */
-  judge(gate: ReleaseGateView, workflowId: string, workflowHash: string, replayRunId?: string): { judgement: ReleaseGateJudgement; replayRunId?: string } {
-    const sets = this.gateSets(gate);
+  async judge(gate: ReleaseGateView, workflowId: string, workflowHash: string, replayRunId?: string): Promise<{ judgement: ReleaseGateJudgement; replayRunId?: string }> {
+    const sets = await this.gateSets(gate);
     // On an enforced gate a set with no admitted case yet counts for nothing, so a job that did not run it still covers the gate.
     const datasetIds = sets.admittedIds
       ? gate.datasetIds.filter((id) => Object.keys(sets.snapshots[id]?.cases ?? {}).some((fixtureId) => sets.admittedIds!.has(fixtureId)))
@@ -1214,19 +1213,19 @@ export class ReleaseService {
       scorersKey: createHash("sha256").update(releaseCanonicalJson(gate.candidateOptions.scorers ?? null)).digest("hex").slice(0, 16)
     };
     // Enforced gates count only admitted cases, and required cases must pass (null: every case counts, as before).
-    const admission = gate.enforced ? judgeAdmission(gateAdmissionSnapshot(this.store, this.store.getReleaseGate(workflowId))) : null;
-    const judgeJob = (job: JobView) =>
-      judgeReleaseGate(this.evidenceFor(job, gate, sets), gate.policy, { expected, requireApproval: gate.requireApproval, now: this.now(), admission });
+    const admission = gate.enforced ? judgeAdmission(await gateAdmissionSnapshot(this.store, await this.store.getReleaseGate(workflowId))) : null;
+    const judgeJob = async (job: JobView) =>
+      judgeReleaseGate(await this.evidenceFor(job, gate, sets), gate.policy, { expected, requireApproval: gate.requireApproval, now: this.now(), admission });
     if (replayRunId) {
-      const job = this.options.loadJob(replayRunId);
+      const job = await this.options.loadJob(replayRunId);
       if (!job || job.kind !== "replay" || job.workflowId !== workflowId) throw new ReleaseError("Replay job not found", 404);
-      return { judgement: judgeJob(job), replayRunId: job.id };
+      return { judgement: await judgeJob(job), replayRunId: job.id };
     }
     let newest: { judgement: ReleaseGateJudgement; replayRunId: string } | null = null;
-    for (const id of this.store.listReplayRunIdsForHash(workflowId, workflowHash)) {
-      const job = this.options.loadJob(id);
+    for (const id of await this.store.listReplayRunIdsForHash(workflowId, workflowHash)) {
+      const job = await this.options.loadJob(id);
       if (!job || job.status !== "completed") continue;
-      const judged = { judgement: judgeJob(job), replayRunId: job.id };
+      const judged = { judgement: await judgeJob(job), replayRunId: job.id };
       if (judged.judgement.verdict !== "blocked") return judged;
       newest ??= judged;
     }
@@ -1234,13 +1233,13 @@ export class ReleaseService {
   }
 
   /** The publish dialog's preview: the verdict publishing would get now. */
-  preview(user: SafeUser, workflowId: string, version: number, replayRunId?: string): ReleasePublishPreview {
+  async preview(user: SafeUser, workflowId: string, version: number, replayRunId?: string): Promise<ReleasePublishPreview> {
     this.requireAvailable();
-    this.check(user, workflowId, "workflow:read");
-    const gate = this.settingsOf(this.store.getReleaseGate(workflowId), workflowId);
-    const { workflowHash } = this.versionCandidate(workflowId, version);
+    await this.check(user, workflowId, "workflow:read");
+    const gate = this.settingsOf(await this.store.getReleaseGate(workflowId), workflowId);
+    const { workflowHash } = await this.versionCandidate(workflowId, version);
     if (!gate.enabled) return { version, workflowHash, gateEnabled: false, verdict: "passed", reasons: [], replayRunId: null, stats: null, canRequestApproval: false };
-    const { judgement, replayRunId: judgedRun } = this.judge(gate, workflowId, workflowHash, replayRunId);
+    const { judgement, replayRunId: judgedRun } = await this.judge(gate, workflowId, workflowHash, replayRunId);
     return {
       version,
       workflowHash,
@@ -1282,16 +1281,16 @@ export class ReleaseService {
     };
   }
 
-  releases(user: SafeUser, workflowId: string, limit?: number): { releases: WorkflowRelease[]; publishedVersion: number | null } {
+  async releases(user: SafeUser, workflowId: string, limit?: number): Promise<{ releases: WorkflowRelease[]; publishedVersion: number | null }> {
     this.requireAvailable();
-    this.check(user, workflowId, "workflow:read");
+    await this.check(user, workflowId, "workflow:read");
     return {
-      releases: this.store.listWorkflowReleases(workflowId, limit).map((record) => this.toRelease(record)),
-      publishedVersion: this.store.getPublishedVersion(workflowId)
+      releases: (await this.store.listWorkflowReleases(workflowId, limit)).map((record) => this.toRelease(record)),
+      publishedVersion: await this.store.getPublishedVersion(workflowId)
     };
   }
 
-  private commitRelease(input: {
+  private async commitRelease(input: {
     actor: SafeUser;
     workflowId: string;
     version: number;
@@ -1304,8 +1303,8 @@ export class ReleaseService {
     expectedPrevious: number | null;
     /** The baseline a gate publishes when it is turned on. */
     baseline?: boolean;
-  }): WorkflowRelease {
-    const record = this.store.publishWorkflowVersion(
+  }): Promise<WorkflowRelease> {
+    const record = await this.store.publishWorkflowVersion(
       {
         id: `rel_${randomUUID()}`,
         workflowId: input.workflowId,
@@ -1324,7 +1323,7 @@ export class ReleaseService {
     );
     if (!record) throw new ReleaseError("Another release was published at the same time; reload and try again", 409);
     const release = this.toRelease(record);
-    this.options.audit({
+    await this.options.audit({
       category: "release",
       eventType: input.verdict === "rollback" ? "release.rolled_back" : input.verdict === "overridden" ? "release.overridden" : "release.published",
       action: input.verdict === "rollback" ? "rollback" : "publish",
@@ -1332,7 +1331,7 @@ export class ReleaseService {
       actor: { userId: input.actor.id, email: input.actor.email, type: "user" },
       resourceType: "workflow",
       resourceId: input.workflowId,
-      projectId: this.projectOf(input.workflowId),
+      projectId: await this.projectOf(input.workflowId),
       metadata: {
         releaseId: release.id,
         version: release.version,
@@ -1347,19 +1346,19 @@ export class ReleaseService {
       }
     });
     try {
-      this.options.onPublished(input.workflowId);
+      await this.options.onPublished(input.workflowId);
     } catch (error) {
       this.options.logger?.warn("Re-registering triggers after a release failed", { workflowId: input.workflowId, error: error instanceof Error ? error.message : String(error) });
     }
     return release;
   }
 
-  publish(user: SafeUser, workflowId: string, input: ReleasePublishInput): PublishOutcome {
+  async publish(user: SafeUser, workflowId: string, input: ReleasePublishInput): Promise<PublishOutcome> {
     this.requireAvailable();
-    this.check(user, workflowId, "workflow:publish");
-    const { workflowHash } = this.versionCandidate(workflowId, input.version);
-    const gate = this.settingsOf(this.store.getReleaseGate(workflowId), workflowId);
-    const previous = this.store.getPublishedVersion(workflowId);
+    await this.check(user, workflowId, "workflow:publish");
+    const { workflowHash } = await this.versionCandidate(workflowId, input.version);
+    const gate = this.settingsOf(await this.store.getReleaseGate(workflowId), workflowId);
+    const previous = await this.store.getPublishedVersion(workflowId);
     if (input.workflowHash && input.workflowHash !== workflowHash) {
       return {
         status: 409,
@@ -1369,7 +1368,7 @@ export class ReleaseService {
       };
     }
     if (input.override && user.role !== "admin") throw new ReleaseError("Only admins can override the release gate", 403);
-    const conflicts = this.conflictReasons(user, workflowId, this.versionCandidate(workflowId, input.version).workflow);
+    const conflicts = await this.conflictReasons(user, workflowId, (await this.versionCandidate(workflowId, input.version)).workflow);
     if (conflicts.length > 0) {
       // Not even an override: production routing would be ambiguous, whatever the gate says.
       return { status: 409, verdict: "blocked", reasons: conflicts, canRequestApproval: false };
@@ -1377,20 +1376,20 @@ export class ReleaseService {
     if (!gate.enabled) {
       return {
         status: 200,
-        release: this.commitRelease({ actor: user, workflowId, version: input.version, workflowHash, verdict: "ungated", replayRunId: null, reason: null, gateReasons: [], approval: null, expectedPrevious: previous })
+        release: await this.commitRelease({ actor: user, workflowId, version: input.version, workflowHash, verdict: "ungated", replayRunId: null, reason: null, gateReasons: [], approval: null, expectedPrevious: previous })
       };
     }
-    const { judgement, replayRunId } = this.judge(gate, workflowId, workflowHash, input.replayRunId);
+    const { judgement, replayRunId } = await this.judge(gate, workflowId, workflowHash, input.replayRunId);
     if (judgement.verdict === "passed") {
       return {
         status: 200,
-        release: this.commitRelease({ actor: user, workflowId, version: input.version, workflowHash, verdict: "passed", replayRunId: replayRunId ?? null, reason: null, gateReasons: [], approval: null, expectedPrevious: previous })
+        release: await this.commitRelease({ actor: user, workflowId, version: input.version, workflowHash, verdict: "passed", replayRunId: replayRunId ?? null, reason: null, gateReasons: [], approval: null, expectedPrevious: previous })
       };
     }
     if (input.override) {
       return {
         status: 200,
-        release: this.commitRelease({
+        release: await this.commitRelease({
           actor: user,
           workflowId,
           version: input.version,
@@ -1406,7 +1405,7 @@ export class ReleaseService {
     }
     const canRequestApproval = Boolean(gate.approvers);
     if (judgement.verdict === "needs_approval" || (input.requestApproval && canRequestApproval)) {
-      const request = this.requestApproval({
+      const request = await this.requestApproval({
         user,
         workflowId,
         version: input.version,
@@ -1421,7 +1420,7 @@ export class ReleaseService {
       });
       return { status: 202, verdict: "needs_approval", approvalRequestId: request.id, reasons: judgement.reasons };
     }
-    this.options.audit({
+    await this.options.audit({
       category: "release",
       eventType: "release.blocked",
       action: "publish",
@@ -1429,7 +1428,7 @@ export class ReleaseService {
       actor: { userId: user.id, email: user.email, type: "user" },
       resourceType: "workflow",
       resourceId: workflowId,
-      projectId: this.projectOf(workflowId),
+      projectId: await this.projectOf(workflowId),
       metadata: { version: input.version, workflowHash, replayRunId: replayRunId ?? null, reasons: judgement.reasons }
     });
     return {
@@ -1448,32 +1447,32 @@ export class ReleaseService {
    * still have the hash it had when it was released (a workflow moved to
    * another project, or created again under the same id, does not).
    */
-  rollback(user: SafeUser, workflowId: string, input: ReleaseRollbackInput): WorkflowRelease {
+  async rollback(user: SafeUser, workflowId: string, input: ReleaseRollbackInput): Promise<WorkflowRelease> {
     this.requireAvailable();
-    this.check(user, workflowId, "workflow:publish");
-    if (this.enforcedGateOf(workflowId) && user.role !== "admin") {
-      this.refuse(user, workflowId, "release.rollback.refused", "rollback", { version: input.version });
+    await this.check(user, workflowId, "workflow:publish");
+    if (await this.enforcedGateOf(workflowId) && user.role !== "admin") {
+      await this.refuse(user, workflowId, "release.rollback.refused", "rollback", { version: input.version });
       throw new ReleaseError("This workflow's release gate is enforced: only an admin can roll back", 403);
     }
-    const previous = this.store.getPublishedVersion(workflowId);
+    const previous = await this.store.getPublishedVersion(workflowId);
     if (previous === input.version) throw new ReleaseError(`Version ${input.version} is already published`, 409);
-    if (!this.store.hasReleasedVersion(workflowId, input.version)) {
+    if (!await this.store.hasReleasedVersion(workflowId, input.version)) {
       throw new ReleaseError(`Version ${input.version} was never published, so it cannot be rolled back to; publish it instead`, 409);
     }
-    const { workflow, workflowHash } = this.versionCandidate(workflowId, input.version);
-    if (!this.store.listReleasedVersionHashes(workflowId, input.version).includes(workflowHash)) {
+    const { workflow, workflowHash } = await this.versionCandidate(workflowId, input.version);
+    if (!(await this.store.listReleasedVersionHashes(workflowId, input.version)).includes(workflowHash)) {
       throw new ReleaseError(`Version ${input.version} no longer has the hash it was released with (the workflow moved project or was created again), so it cannot be rolled back to; publish it through the gate instead`, 409);
     }
-    const conflicts = this.conflictReasons(user, workflowId, workflow);
+    const conflicts = await this.conflictReasons(user, workflowId, workflow);
     if (conflicts.length > 0) throw new ReleaseError(conflicts.join(" "), 409);
-    return this.commitRelease({ actor: user, workflowId, version: input.version, workflowHash, verdict: "rollback", replayRunId: null, reason: input.reason, gateReasons: [], approval: null, expectedPrevious: previous });
+    return await this.commitRelease({ actor: user, workflowId, version: input.version, workflowHash, verdict: "rollback", replayRunId: null, reason: input.reason, gateReasons: [], approval: null, expectedPrevious: previous });
   }
 
   // -------------------------------------------------------------------------
   // Release requests (the approvals inbox)
   // -------------------------------------------------------------------------
 
-  private requestApproval(input: {
+  private async requestApproval(input: {
     user: SafeUser;
     workflowId: string;
     version: number;
@@ -1486,28 +1485,28 @@ export class ReleaseService {
     checks: ReleaseGateJudgement["checks"];
     requestReason: string | null;
     publishedVersion: number | null;
-  }): ReleaseApprovalRequestRecord {
+  }): Promise<ReleaseApprovalRequestRecord> {
     // Each requester has their own request (their reason, their name on it); stale and expired ones are closed first.
-    this.sweepExpired();
-    for (const existing of this.store.listPendingReleaseApprovalRequests(input.workflowId, input.version, input.workflowHash)) {
-      const stale = this.staleReason(existing);
+    await this.sweepExpired();
+    for (const existing of await this.store.listPendingReleaseApprovalRequests(input.workflowId, input.version, input.workflowHash)) {
+      const stale = await this.staleReason(existing);
       if (stale) {
-        this.closeRequest(existing, "canceled", `Stale: ${stale}`, null);
+        await this.closeRequest(existing, "canceled", `Stale: ${stale}`, null);
         continue;
       }
       if (!sameIdentity({ id: existing.requestedByUserId, email: existing.requestedBy }, input.user)) continue;
       // Asking again after the gate got worse must not hand back a request that approval would cancel.
-      const worse = this.newGateReasons(existing);
+      const worse = await this.newGateReasons(existing);
       if (worse) {
-        this.closeRequest(existing, "canceled", `Stale: The release gate now judges version ${existing.version} differently than when the request was made: ${worse.join(" ")}`, null);
+        await this.closeRequest(existing, "canceled", `Stale: The release gate now judges version ${existing.version} differently than when the request was made: ${worse.join(" ")}`, null);
         continue;
       }
       return existing;
     }
     const approvers: ReleaseApprovers = input.gate.approvers ?? releaseApproversSchema.parse({});
     const createdAt = this.now();
-    const workflow = this.store.getWorkflow(input.workflowId);
-    const record = this.store.insertReleaseApprovalRequest({
+    const workflow = await this.store.getWorkflow(input.workflowId);
+    const record = await this.store.insertReleaseApprovalRequest({
       id: `${RELEASE_APPROVAL_REQUEST_PREFIX}${randomUUID()}`,
       workflowId: input.workflowId,
       workflowName: workflow?.name ?? null,
@@ -1535,7 +1534,7 @@ export class ReleaseService {
       createdAt: createdAt.toISOString(),
       updatedAt: createdAt.toISOString()
     });
-    this.options.audit({
+    await this.options.audit({
       category: "release",
       eventType: "release.approval.requested",
       action: "request",
@@ -1582,9 +1581,9 @@ export class ReleaseService {
   }
 
   /** Closes the release requests whose time ran out (lazily, on list and on request), audited as timed out. */
-  private sweepExpired(): void {
-    for (const record of this.store.timeOutExpiredReleaseApprovalRequests(this.now().toISOString())) {
-      this.options.audit({
+  private async sweepExpired(): Promise<void> {
+    for (const record of await this.store.timeOutExpiredReleaseApprovalRequests(this.now().toISOString())) {
+      await this.options.audit({
         category: "release",
         eventType: "release.approval.timed_out",
         action: "timeout",
@@ -1592,22 +1591,22 @@ export class ReleaseService {
         actor: { type: "system", email: "system" },
         resourceType: "workflow",
         resourceId: record.workflowId,
-        projectId: this.projectOf(record.workflowId),
+        projectId: await this.projectOf(record.workflowId),
         metadata: { requestId: record.id, version: record.version, workflowHash: record.workflowHash }
       });
     }
   }
 
   /** Why approving this request now would publish something other than what was asked; null when it is still valid. */
-  staleReason(record: ReleaseApprovalRequestRecord): string | null {
+  async staleReason(record: ReleaseApprovalRequestRecord): Promise<string | null> {
     let hash: string;
     try {
-      hash = this.versionCandidate(record.workflowId, record.version).workflowHash;
+      hash = (await this.versionCandidate(record.workflowId, record.version)).workflowHash;
     } catch {
       return `Version ${record.version} no longer exists.`;
     }
     if (hash !== record.workflowHash) return `Version ${record.version} no longer has the hash that was asked for (the workflow moved project).`;
-    const gate = this.store.getReleaseGate(record.workflowId);
+    const gate = await this.store.getReleaseGate(record.workflowId);
     // Who decides is what a settings change must not move under a request; a builder's tightening is judged again by the reasons instead.
     // Requests made before the fingerprint existed keep the timestamp rule.
     if (record.gateAuthority) {
@@ -1615,7 +1614,7 @@ export class ReleaseService {
     } else if ((gate?.updatedAt ?? null) !== record.gateUpdatedAt) {
       return "The release gate's settings changed after the request was made.";
     }
-    if (this.store.getPublishedVersion(record.workflowId) !== record.publishedVersionAtRequest) return "Another version was published after the request was made.";
+    if (await this.store.getPublishedVersion(record.workflowId) !== record.publishedVersionAtRequest) return "Another version was published after the request was made.";
     return null;
   }
 
@@ -1629,12 +1628,12 @@ export class ReleaseService {
    * waiting for admission change nothing. The request's own replay job is
    * judged again, or, when it named none, the jobs for the version's hash.
    */
-  private newGateReasons(record: ReleaseApprovalRequestRecord): string[] | null {
-    const gate = this.settingsOf(this.store.getReleaseGate(record.workflowId), record.workflowId);
+  private async newGateReasons(record: ReleaseApprovalRequestRecord): Promise<string[] | null> {
+    const gate = this.settingsOf(await this.store.getReleaseGate(record.workflowId), record.workflowId);
     if (!gate.enabled) return null;
     let judgement: ReleaseGateJudgement;
     try {
-      judgement = this.judge(gate, record.workflowId, record.workflowHash, record.replayRunId ?? undefined).judgement;
+      judgement = (await this.judge(gate, record.workflowId, record.workflowHash, record.replayRunId ?? undefined)).judgement;
     } catch (error) {
       if (!(error instanceof ReleaseError) || error.statusCode !== 404) throw error;
       return [`Replay job ${record.replayRunId} no longer exists.`];
@@ -1648,8 +1647,8 @@ export class ReleaseService {
     return releaseGateChecksWorsened(record.gateChecks, judgement.checks).length > 0 ? judgement.reasons : null;
   }
 
-  private personCheck(record: ReleaseApprovalRequestRecord, user: SafeUser): { allowed: true } | { allowed: false; code: string; message: string } {
-    if (!this.options.access(user, record.workflowId, "workflow:publish").ok) {
+  private async personCheck(record: ReleaseApprovalRequestRecord, user: SafeUser): Promise<{ allowed: true } | { allowed: false; code: string; message: string }> {
+    if (!(await this.options.access(user, record.workflowId, "workflow:publish")).ok) {
       return { allowed: false, code: "project_access", message: "You may not publish this workflow, so you cannot approve its releases." };
     }
     const spec = asRecord(record.spec);
@@ -1664,24 +1663,24 @@ export class ReleaseService {
     );
     if (!check.allowed) return { allowed: false, code: check.code, message: check.code === "self_approval" ? SELF_APPROVAL_MESSAGE : check.message };
     // The person who saved the version is no more independent than the one who asked.
-    const author = this.store.getWorkflowVersion(record.workflowId, record.version)?.createdBy ?? null;
+    const author = (await this.store.getWorkflowVersion(record.workflowId, record.version))?.createdBy ?? null;
     if (author && spec.allowSelfApproval !== true && sameIdentity({ id: author, email: author }, user)) {
       return { allowed: false, code: "self_approval", message: AUTHOR_APPROVAL_MESSAGE };
     }
     return { allowed: true };
   }
 
-  private toView(record: ReleaseApprovalRequestRecord, user: SafeUser): ReleaseApprovalRequestView {
+  private async toView(record: ReleaseApprovalRequestRecord, user: SafeUser): Promise<ReleaseApprovalRequestView> {
     const spec = asRecord(record.spec);
     const status = record.status === "pending" && this.expired(record) ? "timed_out" : record.status;
-    const check = status === "pending" ? this.personCheck(record, user) : { allowed: false as const, message: "Already decided." };
+    const check = status === "pending" ? await this.personCheck(record, user) : { allowed: false as const, message: "Already decided." };
     return {
       kind: "release",
       requestId: record.id,
       id: record.id,
       workflowId: record.workflowId,
       workflowName: record.workflowName,
-      projectId: this.store.getWorkflow(record.workflowId)?.projectId ?? record.projectId,
+      projectId: (await this.store.getWorkflow(record.workflowId))?.projectId ?? record.projectId,
       status: status as ReleaseApprovalRequestView["status"],
       message: record.origin === "policy" ? `Publish version ${record.version}: this gate needs an approver for every release.` : `Publish version ${record.version} although the release gate blocked it.`,
       version: record.version,
@@ -1706,15 +1705,15 @@ export class ReleaseService {
   }
 
   /** Release requests of workflows the user can read, narrowed in SQL before the limit. */
-  listRequests(user: SafeUser, filter: { status: "pending" | "decided" | "all"; workflowId?: string; limit?: number }): ReleaseApprovalRequestView[] {
+  async listRequests(user: SafeUser, filter: { status: "pending" | "decided" | "all"; workflowId?: string; limit?: number }): Promise<ReleaseApprovalRequestView[]> {
     if (!this.options.available) return [];
-    this.sweepExpired();
-    const workflowIds = this.options.readableWorkflowIds(user);
-    const rows = this.store.listReleaseApprovalRequests({ ...filter, now: this.now().toISOString(), scope: workflowIds === null ? { all: true } : { workflowIds } });
+    await this.sweepExpired();
+    const workflowIds = await this.options.readableWorkflowIds(user);
+    const rows = await this.store.listReleaseApprovalRequests({ ...filter, now: this.now().toISOString(), scope: workflowIds === null ? { all: true } : { workflowIds } });
     const views: ReleaseApprovalRequestView[] = [];
     for (const row of rows) {
-      if (!this.options.access(user, row.workflowId, "workflow:read").ok) continue;
-      const view = this.toView(row, user);
+      if (!(await this.options.access(user, row.workflowId, "workflow:read")).ok) continue;
+      const view = await this.toView(row, user);
       // An expired request is decided (timed out) for the inbox's filters.
       if (filter.status === "pending" && view.status !== "pending") continue;
       views.push(view);
@@ -1722,9 +1721,9 @@ export class ReleaseService {
     return views;
   }
 
-  private closeRequest(record: ReleaseApprovalRequestRecord, status: "canceled" | "timed_out", reason: string, actor: SafeUser | null): void {
-    if (!this.store.decideReleaseApprovalRequest({ id: record.id, status, decisionReason: reason, decidedByUserId: actor?.id ?? null, decidedBy: actor?.email ?? "system" })) return;
-    this.options.audit({
+  private async closeRequest(record: ReleaseApprovalRequestRecord, status: "canceled" | "timed_out", reason: string, actor: SafeUser | null): Promise<void> {
+    if (!await this.store.decideReleaseApprovalRequest({ id: record.id, status, decisionReason: reason, decidedByUserId: actor?.id ?? null, decidedBy: actor?.email ?? "system" })) return;
+    await this.options.audit({
       category: "release",
       eventType: status === "timed_out" ? "release.approval.timed_out" : "release.approval.canceled",
       action: status === "timed_out" ? "timeout" : "cancel",
@@ -1732,7 +1731,7 @@ export class ReleaseService {
       actor: actor ? { userId: actor.id, email: actor.email, type: "user" } : { type: "system", email: "system" },
       resourceType: "workflow",
       resourceId: record.workflowId,
-      projectId: this.projectOf(record.workflowId),
+      projectId: await this.projectOf(record.workflowId),
       metadata: { requestId: record.id, version: record.version, workflowHash: record.workflowHash, reason }
     });
   }
@@ -1742,18 +1741,18 @@ export class ReleaseService {
    * version and hash, as the approver; the decision and the release commit
    * together. Throws a `ReleaseError` with the HTTP status when refused.
    */
-  decide(user: SafeUser, requestId: string, decision: "approve" | "reject", reason?: string): { request: ReleaseApprovalRequestView; release: WorkflowRelease | null } {
+  async decide(user: SafeUser, requestId: string, decision: "approve" | "reject", reason?: string): Promise<{ request: ReleaseApprovalRequestView; release: WorkflowRelease | null }> {
     this.requireAvailable();
-    const record = this.store.getReleaseApprovalRequest(requestId);
-    if (!record || !this.options.access(user, record.workflowId, "workflow:read").ok) throw new ReleaseError("Pending approval not found", 404);
+    const record = await this.store.getReleaseApprovalRequest(requestId);
+    if (!record || !(await this.options.access(user, record.workflowId, "workflow:read")).ok) throw new ReleaseError("Pending approval not found", 404);
     if (record.status !== "pending") throw new ReleaseError("This approval was already decided", 409);
     if (this.expired(record)) {
-      this.closeRequest(record, "timed_out", "Nobody decided before the release request expired", null);
+      await this.closeRequest(record, "timed_out", "Nobody decided before the release request expired", null);
       throw new ReleaseError("This release request expired; ask again", 409);
     }
-    const check = this.personCheck(record, user);
+    const check = await this.personCheck(record, user);
     if (!check.allowed) {
-      this.options.audit({
+      await this.options.audit({
         category: "release",
         eventType: "release.approval.decided",
         action: decision,
@@ -1761,7 +1760,7 @@ export class ReleaseService {
         actor: { userId: user.id, email: user.email, type: "user" },
         resourceType: "workflow",
         resourceId: record.workflowId,
-        projectId: this.projectOf(record.workflowId),
+        projectId: await this.projectOf(record.workflowId),
         metadata: { requestId: record.id, version: record.version, refused: check.code }
       });
       throw new ReleaseError(check.message, 403);
@@ -1769,56 +1768,54 @@ export class ReleaseService {
     const trimmed = reason?.trim() || null;
     if (decision === "reject") {
       if (!trimmed) throw new ReleaseError("A reason is required to reject a release request", 400);
-      if (!this.store.decideReleaseApprovalRequest({ id: record.id, status: "rejected", decidedByUserId: user.id, decidedBy: user.email, decisionReason: trimmed })) {
+      if (!await this.store.decideReleaseApprovalRequest({ id: record.id, status: "rejected", decidedByUserId: user.id, decidedBy: user.email, decisionReason: trimmed })) {
         throw new ReleaseError("This approval was already decided", 409);
       }
-      this.auditDecision(record, user, decision, trimmed, null);
-      return { request: this.toView(this.store.getReleaseApprovalRequest(record.id)!, user), release: null };
+      await this.auditDecision(record, user, decision, trimmed, null);
+      return { request: await this.toView((await this.store.getReleaseApprovalRequest(record.id))!, user), release: null };
     }
-    const stale = this.staleReason(record);
+    const stale = await this.staleReason(record);
     if (stale) {
-      this.closeRequest(record, "canceled", `Stale: ${stale}`, user);
+      await this.closeRequest(record, "canceled", `Stale: ${stale}`, user);
       throw new ReleaseError(`This release request is stale and was canceled: ${stale} Ask again.`, 409);
     }
-    const conflicts = this.conflictReasons(user, record.workflowId, this.versionCandidate(record.workflowId, record.version).workflow);
+    const conflicts = await this.conflictReasons(user, record.workflowId, (await this.versionCandidate(record.workflowId, record.version)).workflow);
     if (conflicts.length > 0) throw new ReleaseError(conflicts.join(" "), 409);
     // Judged again now: admitted cases, required cases and the policy may have changed since the request was made.
-    const worse = this.newGateReasons(record);
+    const worse = await this.newGateReasons(record);
     if (worse) {
       const why = `The release gate now judges version ${record.version} differently than when the request was made: ${worse.join(" ")}`;
-      this.closeRequest(record, "canceled", `Stale: ${why}`, user);
+      await this.closeRequest(record, "canceled", `Stale: ${why}`, user);
       throw new ReleaseError(`This release request is stale and was canceled. ${why} Ask again.`, 409, { reasons: worse });
     }
     const decidedAt = this.now().toISOString();
-    const release = this.store.transaction(() => {
-      const releaseId = `rel_${randomUUID()}`;
-      if (!this.store.decideReleaseApprovalRequest({ id: record.id, status: "approved", decidedByUserId: user.id, decidedBy: user.email, decisionReason: trimmed, releaseId })) {
-        throw new ReleaseError("This approval was already decided", 409);
-      }
-      const committed = this.store.publishWorkflowVersion(
-        {
-          id: releaseId,
-          workflowId: record.workflowId,
-          version: record.version,
-          workflowHash: record.workflowHash,
-          replayRunId: record.replayRunId,
-          verdict: "approved",
-          reason: record.requestReason,
-          gateReasons: record.gateReasons,
-          approval: { requestId: record.id, requestedBy: record.requestedBy, decidedBy: user.email, decidedAt, reason: trimmed },
-          publishedAt: decidedAt,
-          publishedBy: user.email,
-          publishedByUserId: user.id
-        },
-        record.publishedVersionAtRequest
-      );
-      // Throwing rolls the decision back.
-      if (!committed) throw new ReleaseError("Another version was published at the same time; ask again", 409);
-      return committed;
-    });
+    const releaseId = `rel_${randomUUID()}`;
+    // The decision and the publish commit together: a lost race leaves the request pending and nothing published.
+    const outcome = await this.store.approveReleaseRequestAndPublish(
+      { id: record.id, status: "approved", decidedByUserId: user.id, decidedBy: user.email, decisionReason: trimmed, releaseId },
+      {
+        id: releaseId,
+        workflowId: record.workflowId,
+        version: record.version,
+        workflowHash: record.workflowHash,
+        replayRunId: record.replayRunId,
+        verdict: "approved",
+        reason: record.requestReason,
+        gateReasons: record.gateReasons,
+        approval: { requestId: record.id, requestedBy: record.requestedBy, decidedBy: user.email, decidedAt, reason: trimmed },
+        publishedAt: decidedAt,
+        publishedBy: user.email,
+        publishedByUserId: user.id
+      },
+      record.publishedVersionAtRequest
+    );
+    if ("refused" in outcome) {
+      throw new ReleaseError(outcome.refused === "decided" ? "This approval was already decided" : "Another version was published at the same time; ask again", 409);
+    }
+    const release = outcome.release;
     const view = this.toRelease(release);
-    this.auditDecision(record, user, decision, trimmed, view.id);
-    this.options.audit({
+    await this.auditDecision(record, user, decision, trimmed, view.id);
+    await this.options.audit({
       category: "release",
       eventType: "release.published",
       action: "publish",
@@ -1826,7 +1823,7 @@ export class ReleaseService {
       actor: { userId: user.id, email: user.email, type: "user" },
       resourceType: "workflow",
       resourceId: record.workflowId,
-      projectId: this.projectOf(record.workflowId),
+      projectId: await this.projectOf(record.workflowId),
       metadata: {
         releaseId: view.id,
         version: view.version,
@@ -1840,15 +1837,15 @@ export class ReleaseService {
       }
     });
     try {
-      this.options.onPublished(record.workflowId);
+      await this.options.onPublished(record.workflowId);
     } catch (error) {
       this.options.logger?.warn("Re-registering triggers after a release failed", { workflowId: record.workflowId, error: error instanceof Error ? error.message : String(error) });
     }
-    return { request: this.toView(this.store.getReleaseApprovalRequest(record.id)!, user), release: view };
+    return { request: await this.toView((await this.store.getReleaseApprovalRequest(record.id))!, user), release: view };
   }
 
-  private auditDecision(record: ReleaseApprovalRequestRecord, user: SafeUser, decision: "approve" | "reject", reason: string | null, releaseId: string | null): void {
-    this.options.audit({
+  private async auditDecision(record: ReleaseApprovalRequestRecord, user: SafeUser, decision: "approve" | "reject", reason: string | null, releaseId: string | null): Promise<void> {
+    await this.options.audit({
       category: "release",
       eventType: "release.approval.decided",
       action: decision,
@@ -1856,7 +1853,7 @@ export class ReleaseService {
       actor: { userId: user.id, email: user.email, type: "user" },
       resourceType: "workflow",
       resourceId: record.workflowId,
-      projectId: this.projectOf(record.workflowId),
+      projectId: await this.projectOf(record.workflowId),
       metadata: { requestId: record.id, version: record.version, workflowHash: record.workflowHash, decision, reason: reason ? this.options.redact(reason) : null, releaseId }
     });
   }

@@ -207,7 +207,7 @@ export const GUARD_SIMULATION_STALE_REASON = "Not simulated: the recording is st
  *     checkpoint changed, the miss is not the guard's: not simulated.
  *   - Otherwise the checkpoints are compared.
  */
-export function simulateCase(input: {
+export async function simulateCase(input: {
   recordingId: string;
   recording: { id: string; name: string; createdAt: string | null } | null;
   baseline: { replay: SimulatedReplay; checks: readonly SimulatedGuardCheck[] } | null;
@@ -216,10 +216,10 @@ export function simulateCase(input: {
   /** The simulated profile differs from the current one (false: the same document, so only chance can tell the replays apart). */
   profileChanged?: boolean;
   /** Text to keep out of stored reasons (secrets). */
-  scrub?: (text: string) => string;
+  scrub?: (text: string) => string | Promise<string>;
   /** Why the case did not run (the starter lost access, the job stopped), when it did not. */
   skipped?: string;
-}): GuardSimulationCase {
+}): Promise<GuardSimulationCase> {
   const scrub = input.scrub ?? ((text: string) => text);
   const base = {
     recordingId: input.recordingId,
@@ -228,24 +228,24 @@ export function simulateCase(input: {
     executionId: input.candidate?.replay.executionId ?? null,
     baselineExecutionId: input.baseline?.replay.executionId ?? null
   };
-  const notSimulated = (reason: string): GuardSimulationCase => ({ ...base, outcome: "not_simulated", reason: scrub(reason), counts: emptyGuardSimulationCounts(), checkpoints: [] });
-  if (!input.recording) return notSimulated("The recording was deleted before it could be replayed.");
-  if (input.skipped) return notSimulated(input.skipped);
-  if (!input.baseline) return notSimulated("The replay did not run (the simulation was stopped first).");
+  const notSimulated = async (reason: string): Promise<GuardSimulationCase> => ({ ...base, outcome: "not_simulated", reason: await scrub(reason), counts: emptyGuardSimulationCounts(), checkpoints: [] });
+  if (!input.recording) return await notSimulated("The recording was deleted before it could be replayed.");
+  if (input.skipped) return await notSimulated(input.skipped);
+  if (!input.baseline) return await notSimulated("The replay did not run (the simulation was stopped first).");
   const stale = blockingProblem(input.baseline.replay);
-  if (stale) return notSimulated(`${GUARD_SIMULATION_STALE_REASON}: ${stale}`);
-  if (!input.candidate) return notSimulated("The replay did not run (the simulation was stopped first).");
+  if (stale) return await notSimulated(`${GUARD_SIMULATION_STALE_REASON}: ${stale}`);
+  if (!input.candidate) return await notSimulated("The replay did not run (the simulation was stopped first).");
 
   const { counts, checkpoints } = compareGuardChecks(input.baseline.checks, input.candidate.checks, input.nodeNames);
   const guardChanged = counts.newlyBlocked + counts.noLongerBlocked + counts.actionChanged > 0;
   const divergedAt = divergenceOf(input.candidate.replay);
   if (divergedAt) {
-    if (guardChanged || input.profileChanged !== false) return { ...base, outcome: "diverged", divergedAt: { ...divergedAt, message: scrub(divergedAt.message) }, counts, checkpoints };
-    return notSimulated(
+    if (guardChanged || input.profileChanged !== false) return { ...base, outcome: "diverged", divergedAt: { ...divergedAt, message: await scrub(divergedAt.message) }, counts, checkpoints };
+    return await notSimulated(
       "Not simulated: the replay needed an answer this recording does not have, but the simulated profile is the current one and no guard checkpoint changed, so the difference is not the guard's."
     );
   }
   const problem = blockingProblem(input.candidate.replay);
-  if (problem) return notSimulated(problem);
+  if (problem) return await notSimulated(problem);
   return { ...base, outcome: "compared", counts, checkpoints };
 }

@@ -54,13 +54,15 @@ import {
   type RunManifestView,
   type Workflow
 } from "@ai-orchestrator/shared";
-import type { ExecutionManifestRecord, McpServerRecord, SqliteStore } from "../db/database.js";
+import type { ExecutionManifestRecord, McpServerRecord } from "../db/database.js";
 import type { AuditSigningService } from "./audit-signing-service.js";
 import { approvalEditsDigest } from "./approval-digest.js";
 import { findCatalogEntryForCommand, packageSpecOf } from "./mcp-catalog.js";
 import { REDACTED, SecretScrubber } from "./audit-scrub.js";
 import { collectRunActivity, priceModelCall } from "./run-facts.js";
 import type { SecretService } from "./secret-service.js";
+import type { Store } from "../db/store.js";
+import { mapAsync } from "../async-array.js";
 
 export { REDACTED };
 
@@ -100,7 +102,7 @@ export class AuditBundleError extends Error {
 }
 
 export interface AuditBundleServiceOptions {
-  store: SqliteStore;
+  store: Store;
   signing: AuditSigningService;
   secrets: SecretService;
   /** USD for one model call; null when the model is not priced. */
@@ -132,7 +134,7 @@ export interface PreparedAuditBundle {
   files: number;
 }
 
-type HistoryRecord = NonNullable<ReturnType<SqliteStore["getExecutionHistory"]>>;
+type HistoryRecord = NonNullable<Awaited<ReturnType<Store["getExecutionHistory"]>>>;
 type JsonRecord = Record<string, unknown>;
 
 // ---------------------------------------------------------------------------
@@ -243,7 +245,7 @@ export class AuditBundleService {
   }
 
   /** MCP server identity as the manifest records it (no secrets, no credentials in URLs). */
-  private serverIdentity(server: McpServerRecord): RunManifestMcpServer {
+  private async serverIdentity(server: McpServerRecord): Promise<RunManifestMcpServer> {
     const connection = asRecord(server.connection) ?? {};
     const adapter = server.adapterId.toLowerCase();
     const command = typeof connection.command === "string" ? connection.command : "";
@@ -263,7 +265,7 @@ export class AuditBundleService {
     } catch {
       catalogEntryId = null;
     }
-    const snapshot = server.currentSnapshotId ? this.options.store.getMcpToolSnapshot(server.currentSnapshotId) : null;
+    const snapshot = server.currentSnapshotId ? await this.options.store.getMcpToolSnapshot(server.currentSnapshotId) : null;
     return {
       registryServerId: server.id,
       name: server.name,
@@ -290,13 +292,13 @@ export class AuditBundleService {
    * the registry MCP servers it references, so a manifest generated later
    * still describes this run even if the workflow or a server changed.
    */
-  captureRunContext(executionId: string, workflow: Workflow): void {
+  async captureRunContext(executionId: string, workflow: Workflow): Promise<void> {
     const hashed = workflowForHash(workflow);
     const workflowHash = sha256Hex(canonicalJson(hashed));
     let savedVersion: number | null = null;
-    const latest = this.options.store.maxWorkflowVersionNumber(workflow.id);
+    const latest = await this.options.store.maxWorkflowVersionNumber(workflow.id);
     if (latest > 0) {
-      const entry = this.options.store.getWorkflowVersion(workflow.id, latest);
+      const entry = await this.options.store.getWorkflowVersion(workflow.id, latest);
       if (entry) {
         try {
           if (sha256Hex(canonicalJson(workflowForHash(JSON.parse(entry.workflowJson) as Workflow))) === workflowHash) savedVersion = latest;
@@ -310,13 +312,13 @@ export class AuditBundleService {
       const id = str(asRecord(node.config)?.registryServerId);
       if (id) serverIds.add(id);
     }
-    const mcpServers = [...serverIds]
-      .sort()
-      .map((id) => this.options.store.getMcpServer(id))
-      .filter((server): server is McpServerRecord => Boolean(server))
-      .map((server) => this.serverIdentity(server));
+    const mcpServers: RunManifestMcpServer[] = [];
+    for (const id of [...serverIds].sort()) {
+      const server = await this.options.store.getMcpServer(id);
+      if (server) mcpServers.push(await this.serverIdentity(server));
+    }
     const context: RunContext = { version: 1, capturedAt: this.now().toISOString(), workflow: hashed, workflowHash, savedVersion, mcpServers };
-    this.options.store.saveExecutionRunContext(executionId, context, context.capturedAt);
+    await this.options.store.saveExecutionRunContext(executionId, context, context.capturedAt);
   }
 
   private readRunContext(record: ExecutionManifestRecord | null): RunContext | null {
@@ -326,8 +328,8 @@ export class AuditBundleService {
   }
 
   /** The finished execution's history, or a typed refusal. */
-  private requireFinished(executionId: string): HistoryRecord {
-    const history = this.options.store.getExecutionHistory(executionId);
+  private async requireFinished(executionId: string): Promise<HistoryRecord> {
+    const history = await this.options.store.getExecutionHistory(executionId);
     if (!history) throw new AuditBundleError("Execution not found", "not_found");
     if (!isFinished(history)) {
       throw new AuditBundleError("The run is still in progress; its manifest is generated once it finishes", "in_progress");
@@ -342,10 +344,10 @@ export class AuditBundleService {
    * values of external secrets, never fetched for this) and the credentials
    * L2M reads from its environment (provider API keys and similar).
    */
-  private scrubber(): SecretScrubber {
+  private async scrubber(): Promise<SecretScrubber> {
     const values: string[] = [];
     try {
-      values.push(...this.options.secrets.valuesForScrubbing());
+      values.push(...await this.options.secrets.valuesForScrubbing());
     } catch {
       // The secret store is unreadable: nothing from it can be scrubbed, or have been used.
     }
@@ -359,8 +361,8 @@ export class AuditBundleService {
 
   /** The cached manifest, generated and signed on first request after the run finished. */
   async getManifest(executionId: string): Promise<RunManifestView> {
-    const history = this.requireFinished(executionId);
-    let record = this.options.store.getExecutionManifest(executionId);
+    const history = await this.requireFinished(executionId);
+    let record = await this.options.store.getExecutionManifest(executionId);
     if (!record?.manifestJson) {
       record = await this.generate(history, record);
     }
@@ -381,11 +383,11 @@ export class AuditBundleService {
 
   private async generate(history: HistoryRecord, existing: ExecutionManifestRecord | null): Promise<ExecutionManifestRecord> {
     const context = this.readRunContext(existing);
-    const manifest = this.buildManifest(history, context);
+    const manifest = await this.buildManifest(history, context);
     // Enum and literal values (statuses, outcomes, roles) and declared keys are
     // kept when they equal a schema constant; every other string is scrubbed,
     // and anything left invalid still fails closed below.
-    const scrubbed = this.scrubber().tree(manifest, { guide: runManifestConstantGuide() });
+    const scrubbed = (await this.scrubber()).tree(manifest, { guide: runManifestConstantGuide() });
     const parsed = runManifestSchema.safeParse(scrubbed);
     if (!parsed.success) {
       this.options.logger?.warn("Generated run manifest failed validation", { executionId: history.id, issues: parsed.error.issues.length });
@@ -394,13 +396,13 @@ export class AuditBundleService {
     const manifestJson = canonicalJson(scrubbed);
     const manifestDigest = sha256Hex(manifestJson);
     const signedAt = manifest.generatedAt;
-    const signature = this.options.signing.sign(
+    const signature = await this.options.signing.sign(
       runManifestAttestationBytes({ executionId: history.id, manifestDigest, keyId: manifest.deployment.keyId, signedAt })
     );
     if (signature.keyId !== manifest.deployment.keyId) {
       throw new AuditBundleError("The signing key changed while the manifest was generated; try again", "invalid");
     }
-    return this.options.store.saveExecutionManifest({
+    return await this.options.store.saveExecutionManifest({
       executionId: history.id,
       manifestJson,
       manifestDigest,
@@ -411,17 +413,17 @@ export class AuditBundleService {
   }
 
   /** Builds the manifest object (not yet scrubbed, validated or signed). */
-  buildManifest(history: HistoryRecord, context: RunContext | null): RunManifest {
+  async buildManifest(history: HistoryRecord, context: RunContext | null): Promise<RunManifest> {
     const store = this.options.store;
     const generatedAt = this.now().toISOString();
-    const keyId = this.options.signing.activeKeyId();
+    const keyId = await this.options.signing.activeKeyId();
 
     let workflowDef: Record<string, unknown> | null = context?.workflow ?? null;
     let workflowSource: RunManifest["workflow"]["source"] = context ? "captured" : "unavailable";
     let workflowHash = context?.workflowHash ?? null;
     let savedVersion = context?.savedVersion ?? null;
     if (!workflowDef) {
-      const current = store.getWorkflow(history.workflowId);
+      const current = await store.getWorkflow(history.workflowId);
       if (current) {
         workflowDef = workflowForHash(current);
         workflowHash = sha256Hex(canonicalJson(workflowDef));
@@ -435,11 +437,11 @@ export class AuditBundleService {
 
     // Servers: captured identities, plus current records for servers seen only in tool calls.
     const servers = new Map<string, RunManifestMcpServer>((context?.mcpServers ?? []).map((server) => [server.registryServerId, server]));
-    const serverFor = (registryServerId: string | null): RunManifestMcpServer | undefined => {
+    const serverFor = async (registryServerId: string | null): Promise<RunManifestMcpServer | undefined> => {
       if (!registryServerId) return undefined;
       if (!servers.has(registryServerId)) {
-        const record = store.getMcpServer(registryServerId);
-        if (record) servers.set(registryServerId, this.serverIdentity(record));
+        const record = await store.getMcpServer(registryServerId);
+        if (record) servers.set(registryServerId, await this.serverIdentity(record));
       }
       return servers.get(registryServerId);
     };
@@ -491,8 +493,8 @@ export class AuditBundleService {
       costUsd: priceModelCall(call, this.options.priceTurn),
       latencyMs: call.latencyMs
     }));
-    const toolCalls: RunManifestToolCall[] = activity.toolCalls.map((call) => {
-      const server = serverFor(call.registryServerId);
+    const toolCalls: RunManifestToolCall[] = await mapAsync(activity.toolCalls, async (call) => {
+      const server = await serverFor(call.registryServerId);
       const adapterId = call.adapterId ?? (call.source === "node" ? (server?.adapterId ?? null) : null);
       return {
         nodeId: call.nodeId,
@@ -512,7 +514,7 @@ export class AuditBundleService {
     });
 
     // Guard verdicts (Phase 12.7): no evidence, no matched content.
-    const guardEvents = store.listGuardEventsForExecution(history.id);
+    const guardEvents = await store.listGuardEventsForExecution(history.id);
     const verdictActions = new Map<string, { action: string; shadow: boolean }>();
     for (const event of guardEvents) if (!verdictActions.has(event.verdictId)) verdictActions.set(event.verdictId, { action: event.verdictAction, shadow: event.shadow });
     const byAction: Record<string, number> = {};
@@ -544,7 +546,7 @@ export class AuditBundleService {
     };
 
     // Approval requests and decisions (Phase 11.2): edited values stay in the node output, only their digest is recorded.
-    const approvalRequests: RunManifestApprovalRequest[] = store.listApprovalRequestsForExecution(history.id).map((request) => ({
+    const approvalRequests: RunManifestApprovalRequest[] = (await store.listApprovalRequestsForExecution(history.id)).map((request) => ({
       requestId: request.id,
       nodeId: request.nodeId,
       kind: request.kind,
@@ -626,14 +628,14 @@ export class AuditBundleService {
    */
   async prepareBundle(executionId: string, options: { includeActorEmails?: boolean } = {}): Promise<PreparedAuditBundle> {
     const view = await this.getManifest(executionId);
-    const history = this.requireFinished(executionId);
-    const record = this.options.store.getExecutionManifest(executionId);
+    const history = await this.requireFinished(executionId);
+    const record = await this.options.store.getExecutionManifest(executionId);
     const context = this.readRunContext(record);
-    const workflow = context?.workflow ?? (() => {
-      const current = this.options.store.getWorkflow(history.workflowId);
+    const workflow = context?.workflow ?? await (async () => {
+      const current = await this.options.store.getWorkflow(history.workflowId);
       return current ? workflowForHash(current) : null;
     })();
-    const scrubber = this.scrubber();
+    const scrubber = await this.scrubber();
     const encoder = new TextEncoder();
     const maxBytes = this.options.maxBundleBytes;
     const files: Array<{ path: string; data: Uint8Array }> = [];
@@ -679,8 +681,8 @@ export class AuditBundleService {
         attempts: result.attempts ?? null,
         errorCategory: result.errorCategory ?? null
       })),
-      mcpToolCalls: this.options.store.listMcpToolCallsForExecution(executionId),
-      guardEvents: this.options.store.listGuardEventsForExecution(executionId)
+      mcpToolCalls: await this.options.store.listMcpToolCallsForExecution(executionId),
+      guardEvents: await this.options.store.listGuardEventsForExecution(executionId)
     });
 
     // Logs: each line is scrubbed as a value before it is serialised, then as text.
@@ -692,7 +694,7 @@ export class AuditBundleService {
       if (typeof result.error === "string") logLine({ source: "node_error", nodeId: result.nodeId, at: result.completedAt ?? result.startedAt ?? null, error: result.error });
       for (const warning of Array.isArray(result.warnings) ? result.warnings : []) logLine({ source: "node_warning", nodeId: result.nodeId, warning });
     }
-    for (const entry of this.options.store.listAuditLogsForExecution(executionId)) {
+    for (const entry of await this.options.store.listAuditLogsForExecution(executionId)) {
       const { actorEmail, ...rest } = entry;
       logLine({ source: "audit_log", ...rest, ...(options.includeActorEmails ? { actorEmail } : {}) });
     }
@@ -778,9 +780,9 @@ export class AuditBundleService {
       index: { executionId, workflowId: history.workflowId, manifestDigest: view.digest, files: index }
     };
     // The signer reports which key signed; the signed bytes name that key and its public key.
-    const { keyId, publicKey } = this.options.signing.activePublicKey();
+    const { keyId, publicKey } = await this.options.signing.activePublicKey();
     const body = { ...unsigned, keyId, publicKey };
-    const signed = this.options.signing.sign(auditBundleSignedBytes(body));
+    const signed = await this.options.signing.sign(auditBundleSignedBytes(body));
     if (signed.keyId !== keyId) throw new AuditBundleError("The signing key changed while the bundle was signed; try again", "invalid");
     const signature: AuditBundleSignature = { ...body, signature: signed.signature };
     const signatureFile = { path: AUDIT_BUNDLE_SIGNATURE_PATH, data: pretty(signature) };

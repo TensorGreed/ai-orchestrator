@@ -1,8 +1,8 @@
 import crypto from "node:crypto";
 import { nanoid } from "nanoid";
 import type { SecretReference } from "@ai-orchestrator/shared";
-import { SqliteStore } from "../db/database";
 import type { ExternalSecretsService } from "./external-secrets-service";
+import type { Store } from "../db/store.js";
 
 interface EncryptedSecret {
   iv: string;
@@ -39,7 +39,7 @@ export class SecretService {
   private readonly key: Buffer;
   private externalSecrets: ExternalSecretsService | null = null;
 
-  constructor(private readonly store: SqliteStore, rawKey?: string) {
+  constructor(private readonly store: Store, rawKey?: string) {
     this.key = parseMasterKey(rawKey);
   }
 
@@ -101,16 +101,16 @@ export class SecretService {
     return Buffer.concat([decipher.update(Buffer.from(ciphertext, "base64")), decipher.final()]).toString("utf8");
   }
 
-  createSecret(input: {
+  async createSecret(input: {
     name: string;
     provider: string;
     value: string;
     projectId?: string;
-  }): SecretReference {
+  }): Promise<SecretReference> {
     const id = `sec_${nanoid(12)}`;
     const encrypted = this.encrypt(input.value);
 
-    this.store.saveSecret({
+    await this.store.saveSecret({
       id,
       name: input.name,
       provider: input.provider,
@@ -127,17 +127,17 @@ export class SecretService {
    * (AWS Secrets Manager, Vault, GCP, Azure). The stored ciphertext is a
    * placeholder; the real value is resolved on demand and cached.
    */
-  createExternalSecret(input: {
+  async createExternalSecret(input: {
     name: string;
     provider: string;
     externalProviderId: string;
     externalKey: string;
     projectId?: string;
-  }): SecretReference {
+  }): Promise<SecretReference> {
     const id = `sec_${nanoid(12)}`;
     // Placeholder ciphertext — never actually returned. Real value is fetched + cached lazily.
     const encrypted = this.encrypt("__external__");
-    this.store.saveSecret({
+    await this.store.saveSecret({
       id,
       name: input.name,
       provider: input.provider,
@@ -150,8 +150,8 @@ export class SecretService {
     return { secretId: id };
   }
 
-  deleteSecret(id: string): boolean {
-    return this.store.deleteSecret(id);
+  async deleteSecret(id: string): Promise<boolean> {
+    return await this.store.deleteSecret(id);
   }
 
   async resolveSecret(secretRef?: SecretReference): Promise<string | undefined> {
@@ -159,7 +159,7 @@ export class SecretService {
       return undefined;
     }
 
-    const row = this.store.getSecret(secretRef.secretId);
+    const row = await this.store.getSecret(secretRef.secretId);
     if (!row) {
       return undefined;
     }
@@ -191,7 +191,7 @@ export class SecretService {
       throw new Error(`External secret '${row.id}' is missing provider or key`);
     }
 
-    const provider = this.externalSecrets.getProvider(row.externalProviderId);
+    const provider = await this.externalSecrets.getProvider(row.externalProviderId);
     if (!provider) {
       throw new Error(`External provider '${row.externalProviderId}' not found`);
     }
@@ -200,7 +200,7 @@ export class SecretService {
     }
 
     // Cache hit within TTL
-    const cached = this.store.getExternalSecretCacheEntry(row.id);
+    const cached = await this.store.getExternalSecretCacheEntry(row.id);
     const now = Date.now();
     if (cached && new Date(cached.expiresAt).getTime() > now) {
       return this.decrypt({
@@ -213,7 +213,7 @@ export class SecretService {
     // Fetch the provider's auth credentials via the local SecretService (recursive but bounded).
     let credentialValue: string | undefined;
     if (provider.credentialsSecretId) {
-      const credRow = this.store.getSecret(provider.credentialsSecretId);
+      const credRow = await this.store.getSecret(provider.credentialsSecretId);
       // Secrets L2M manages for itself (OAuth tokens, the audit signing key) never leave as provider credentials.
       if (credRow && credRow.source !== "external" && !isInternalSecretProvider(credRow.provider)) {
         credentialValue = this.decrypt({
@@ -232,7 +232,7 @@ export class SecretService {
 
     const encrypted = this.encrypt(value);
     const expiresAt = new Date(now + provider.cacheTtlMs).toISOString();
-    this.store.upsertExternalSecretCacheEntry({
+    await this.store.upsertExternalSecretCacheEntry({
       secretId: row.id,
       iv: encrypted.iv,
       authTag: encrypted.authTag,
@@ -243,8 +243,8 @@ export class SecretService {
   }
 
   /** Phase 10.5 — read a secret L2M manages itself (see INTERNAL_SECRET_PROVIDERS). */
-  resolveInternalSecret(secretId: string): string | undefined {
-    const row = this.store.getSecret(secretId);
+  async resolveInternalSecret(secretId: string): Promise<string | undefined> {
+    const row = await this.store.getSecret(secretId);
     if (!row || !isInternalSecretProvider(row.provider) || row.source === "external") {
       return undefined;
     }
@@ -252,12 +252,12 @@ export class SecretService {
   }
 
   /** Phase 10.5 — replace the value of an internal secret in place (token rotation). */
-  updateInternalSecret(secretId: string, value: string): boolean {
-    const row = this.store.getSecret(secretId);
+  async updateInternalSecret(secretId: string, value: string): Promise<boolean> {
+    const row = await this.store.getSecret(secretId);
     if (!row || !isInternalSecretProvider(row.provider)) {
       return false;
     }
-    this.store.saveSecret({
+    await this.store.saveSecret({
       id: row.id,
       name: row.name,
       provider: row.provider,
@@ -278,14 +278,14 @@ export class SecretService {
    * credential-like fields are added too, with and without an auth scheme.
    * Callers hold these in memory only; never log or return them.
    */
-  valuesForScrubbing(): string[] {
+  async valuesForScrubbing(): Promise<string[]> {
     const values = new Set<string>();
-    for (const listed of this.store.listSecrets()) {
-      const row = this.store.getSecret(listed.id);
+    for (const listed of await this.store.listSecrets()) {
+      const row = await this.store.getSecret(listed.id);
       if (!row) continue;
       try {
         if (row.source === "external") {
-          const cached = this.store.getExternalSecretCacheEntry(row.id);
+          const cached = await this.store.getExternalSecretCacheEntry(row.id);
           if (cached) addScrubValue(values, this.decrypt({ iv: cached.iv, authTag: cached.authTag, ciphertext: cached.ciphertext }));
         } else {
           addScrubValue(values, this.decrypt({ iv: row.iv, authTag: row.auth_tag, ciphertext: row.ciphertext }));
@@ -297,12 +297,12 @@ export class SecretService {
     return [...values];
   }
 
-  invalidateExternalCache(secretId: string): void {
-    this.store.deleteExternalSecretCacheEntry(secretId);
+  async invalidateExternalCache(secretId: string): Promise<void> {
+    await this.store.deleteExternalSecretCacheEntry(secretId);
   }
 
-  listSecrets(options: { projectId?: string } = {}) {
-    return this.store.listSecrets({ projectId: options.projectId }).filter((row) => !isInternalSecretProvider(row.provider)).map((row) => ({
+  async listSecrets(options: { projectId?: string } = {}) {
+    return (await this.store.listSecrets({ projectId: options.projectId })).filter((row) => !isInternalSecretProvider(row.provider)).map((row) => ({
       id: row.id,
       name: row.name,
       provider: row.provider,

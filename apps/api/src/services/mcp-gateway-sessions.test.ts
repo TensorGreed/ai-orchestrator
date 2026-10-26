@@ -22,7 +22,9 @@ function makeManager(options: { idleMs?: number; maxSessions?: number } = {}) {
     closeContext: async (context) => {
       closed.push(context);
     },
-    onEnded: (session, reason) => ended.push({ id: session.id, reason }),
+    onEnded: (session, reason) => {
+      ended.push({ id: session.id, reason });
+    },
     now: () => now
   });
   return {
@@ -121,11 +123,11 @@ describe("MCP client policy subject", () => {
     createdAt: ""
   };
 
-  it("caps the client's role at its creator's current role and falls back to viewer without a creator", () => {
+  it("caps the client's role at its creator's current role and falls back to viewer without a creator", async () => {
     expect(capRole("admin", "builder")).toBe("builder");
     expect(capRole("viewer", "admin")).toBe("viewer");
-    const asBuilder = resolveMcpClientSubject({ getUserById: () => ({ id: "usr_1", email: "a@example.com", role: "builder" }) }, client);
-    expect(asBuilder).toMatchObject({ role: "builder", source: "client", clientId: "mcc_1", clientName: "IDE" });
-    expect(resolveMcpClientSubject({ getUserById: () => null }, client).role).toBe("viewer");
+    const asBuilder = resolveMcpClientSubject({ getUserById: async () => ({ id: "usr_1", email: "a@example.com", role: "builder" }) }, client);
+    expect(await asBuilder).toMatchObject({ role: "builder", source: "client", clientId: "mcc_1", clientName: "IDE" });
+    expect((await resolveMcpClientSubject({ getUserById: async () => null }, client)).role).toBe("viewer");
   });
 });

@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { importWorkflowFromJson } from "@ai-orchestrator/workflow-engine";
-import { SqliteStore } from "../db/database";
+import type { Store } from "../db/store.js";
 
 const TEMPLATE_CATEGORY_MAP: Record<string, string> = {
   "basic-flow.json": "Getting Started",
@@ -48,8 +48,8 @@ export const FEATURED_TEMPLATE_IDS = new Set<string>([
   builtInTemplateId("vscode-l2m-coding-agent-flow.json")
 ]);
 
-export function seedWorkflowsIfEmpty(store: SqliteStore, workspaceRoot: string): void {
-  if (store.countWorkflows() > 0) {
+export async function seedWorkflowsIfEmpty(store: Store, workspaceRoot: string): Promise<void> {
+  if (await store.countWorkflows() > 0) {
     return;
   }
 
@@ -63,17 +63,17 @@ export function seedWorkflowsIfEmpty(store: SqliteStore, workspaceRoot: string):
     const fullPath = path.join(sampleDir, fileName);
     const raw = fs.readFileSync(fullPath, "utf8");
     const workflow = importWorkflowFromJson(raw);
-    store.upsertWorkflow(workflow);
+    await store.upsertWorkflow(workflow);
   }
 }
 
-export function seedTemplatesIfEmpty(store: SqliteStore, workspaceRoot: string): void {
+export async function seedTemplatesIfEmpty(store: Store, workspaceRoot: string): Promise<void> {
   const sampleDir = path.resolve(workspaceRoot, "samples", "workflows");
   if (!fs.existsSync(sampleDir)) {
     return;
   }
 
-  const existingTemplatesByName = new Map(store.listTemplates().map((template) => [template.name, template.id]));
+  const existingTemplatesByName = new Map((await store.listTemplates()).map((template) => [template.name, template.id]));
   const files = fs.readdirSync(sampleDir).filter((file) => file.endsWith(".json"));
   for (const fileName of files) {
     const fullPath = path.join(sampleDir, fileName);
@@ -83,7 +83,7 @@ export function seedTemplatesIfEmpty(store: SqliteStore, workspaceRoot: string):
     const description = TEMPLATE_DESCRIPTION_MAP[fileName] ?? "";
     const tags: string[] = [category.toLowerCase().replace(/ & /g, "-").replace(/ /g, "-")];
 
-    store.upsertTemplate({
+    await store.upsertTemplate({
       id: existingTemplatesByName.get(workflow.name) ?? builtInTemplateId(fileName),
       name: workflow.name,
       description,

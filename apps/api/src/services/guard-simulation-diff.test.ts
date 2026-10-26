@@ -208,32 +208,32 @@ describe("divergenceOf and simulateCase", () => {
     expect(divergenceOf(withHealth([{ kind: "mcp_unmatched", nodeId: null, message: "1 MCP call had no recorded answer", blocking: true }], {}, steps))).toMatchObject({ step: 2, kind: "tool", nodeId: "agent" });
   });
 
-  it("calls a tape miss after a guard change 'diverged', an impact rather than an error", () => {
+  it("calls a tape miss after a guard change 'diverged', an impact rather than an error", async () => {
     const entry = simulateCase({ recordingId: "rec_1", recording, baseline: { replay: ok("b"), checks: allow }, candidate: { replay: tapeMiss, checks: masked }, profileChanged: true });
-    expect(entry).toMatchObject({ outcome: "diverged", divergedAt: { step: 3, kind: "model" }, counts: { actionChanged: 1, nowMasked: 1 }, baselineExecutionId: "b" });
+    expect(await entry).toMatchObject({ outcome: "diverged", divergedAt: { step: 3, kind: "model" }, counts: { actionChanged: 1, nowMasked: 1 }, baselineExecutionId: "b" });
   });
 
-  it("blames a miss on the profile when it changed without changing a checkpoint (spotlighting), but not when the profile is the current one", () => {
-    expect(simulateCase({ recordingId: "rec_1", recording, baseline: { replay: ok(), checks: allow }, candidate: { replay: tapeMiss, checks: allow }, profileChanged: true }).outcome).toBe("diverged");
-    const same = simulateCase({ recordingId: "rec_1", recording, baseline: { replay: ok(), checks: allow }, candidate: { replay: tapeMiss, checks: allow }, profileChanged: false });
+  it("blames a miss on the profile when it changed without changing a checkpoint (spotlighting), but not when the profile is the current one", async () => {
+    expect((await simulateCase({ recordingId: "rec_1", recording, baseline: { replay: ok(), checks: allow }, candidate: { replay: tapeMiss, checks: allow }, profileChanged: true })).outcome).toBe("diverged");
+    const same = await simulateCase({ recordingId: "rec_1", recording, baseline: { replay: ok(), checks: allow }, candidate: { replay: tapeMiss, checks: allow }, profileChanged: false });
     expect(same.outcome).toBe("not_simulated");
     expect(same.reason).toMatch(/not the guard's/);
   });
 
-  it("calls a recording the baseline cannot follow stale, never an impact", () => {
-    const entry = simulateCase({ recordingId: "rec_1", recording, baseline: { replay: tapeMiss, checks: allow }, candidate: { replay: ok(), checks: masked }, profileChanged: true });
+  it("calls a recording the baseline cannot follow stale, never an impact", async () => {
+    const entry = await simulateCase({ recordingId: "rec_1", recording, baseline: { replay: tapeMiss, checks: allow }, candidate: { replay: ok(), checks: masked }, profileChanged: true });
     expect(entry.outcome).toBe("not_simulated");
     expect(entry.reason).toMatch(/recording is stale/);
     expect(entry.counts.actionChanged).toBe(0);
   });
 
-  it("reports cases that could not run, and deleted recordings", () => {
+  it("reports cases that could not run, and deleted recordings", async () => {
     const noTape = withHealth([{ kind: "no_model_tape", nodeId: null, message: "This golden run has no model tape", blocking: true }]);
-    expect(simulateCase({ recordingId: "rec_1", recording, baseline: { replay: ok(), checks: [] }, candidate: { replay: noTape, checks: [] } })).toMatchObject({ outcome: "not_simulated", reason: "This golden run has no model tape" });
-    expect(simulateCase({ recordingId: "rec_1", recording, baseline: null, candidate: null, skipped: "lost access" })).toMatchObject({ outcome: "not_simulated", reason: "lost access" });
-    expect(simulateCase({ recordingId: "rec_1", recording: null, baseline: null, candidate: null })).toMatchObject({ outcome: "not_simulated" });
+    expect(await simulateCase({ recordingId: "rec_1", recording, baseline: { replay: ok(), checks: [] }, candidate: { replay: noTape, checks: [] } })).toMatchObject({ outcome: "not_simulated", reason: "This golden run has no model tape" });
+    expect(await simulateCase({ recordingId: "rec_1", recording, baseline: null, candidate: null, skipped: "lost access" })).toMatchObject({ outcome: "not_simulated", reason: "lost access" });
+    expect(await simulateCase({ recordingId: "rec_1", recording: null, baseline: null, candidate: null })).toMatchObject({ outcome: "not_simulated" });
     const threw: SimulatedReplay = { status: "error", error: "boom", executionId: null, response: null };
-    expect(simulateCase({ recordingId: "rec_1", recording, baseline: { replay: ok(), checks: [] }, candidate: { replay: threw, checks: [] } })).toMatchObject({ outcome: "not_simulated", reason: "boom" });
+    expect(await simulateCase({ recordingId: "rec_1", recording, baseline: { replay: ok(), checks: [] }, candidate: { replay: threw, checks: [] } })).toMatchObject({ outcome: "not_simulated", reason: "boom" });
   });
 });
 

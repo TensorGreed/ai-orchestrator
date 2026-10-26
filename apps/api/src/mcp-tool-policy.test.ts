@@ -31,7 +31,7 @@ const tempDirs: string[] = [];
 async function createTestContext(): Promise<TestContext> {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-mcp-policy-"));
   const store = await SqliteStore.create(path.join(tempDir, "orchestrator.db"));
-  store.ensureDefaultProject();
+  await store.ensureDefaultProject();
   const config = parseConfig({
     LOG_LEVEL: "warn",
     SEED_SAMPLE_WORKFLOWS: "false",
@@ -43,7 +43,7 @@ async function createTestContext(): Promise<TestContext> {
   });
   const secretService = new SecretService(store, config.SECRET_MASTER_KEY_BASE64);
   const authService = new AuthService(store, config.SESSION_TTL_HOURS);
-  const app = createApp(config, store, secretService, authService);
+  const app = await createApp(config, store, secretService, authService);
   await app.ready();
   const context: TestContext = { app, store, authService, config, tempDir };
   contexts.push(context);
@@ -56,7 +56,7 @@ afterEach(async () => {
     if (!context) continue;
     await context.app.close();
     try {
-      context.store.close();
+      await context.store.close();
     } catch {
       // Already closed by the app shutdown hooks.
     }
@@ -79,7 +79,7 @@ type Role = "admin" | "builder" | "operator" | "viewer";
 async function login(context: TestContext, role: Role, name: string = role): Promise<{ cookie: string; id: string }> {
   const email = `${name}@example.com`;
   const password = `${name}-Pass-123!`;
-  const user = context.authService.register({ email, password, role });
+  const user = await context.authService.register({ email, password, role });
   const response = await context.app.inject({ method: "POST", url: "/api/auth/login", payload: { email, password } });
   if (response.statusCode !== 200) throw new Error(`Login failed for ${name}: ${response.body}`);
   return { cookie: extractCookie(response.headers["set-cookie"], context.config.SESSION_COOKIE_NAME), id: user.id };
@@ -228,7 +228,7 @@ describe("MCP tool policy routes", () => {
 
     const deleted = await context.app.inject({ method: "DELETE", url: `/api/mcp/policies/${rule.id}`, headers: { cookie: admin.cookie } });
     expect(deleted.statusCode).toBe(200);
-    expect(context.store.getMcpToolPolicy(rule.id)).toBeNull();
+    expect(await context.store.getMcpToolPolicy(rule.id)).toBeNull();
 
     const classified = await context.app.inject({
       method: "PUT",
@@ -245,7 +245,7 @@ describe("MCP tool policy routes", () => {
     });
     expect(cleared.json()).toMatchObject({ override: null, classification: { readOnly: false, source: "unknown" } });
 
-    const events = context.store.listAuditLogs({ resourceType: "mcp_policy" }).items.map((entry) => entry.eventType);
+    const events = (await context.store.listAuditLogs({ resourceType: "mcp_policy" })).items.map((entry) => entry.eventType);
     expect(events).toEqual(
       expect.arrayContaining([
         "mcp_policy.created",
@@ -347,7 +347,7 @@ describe("whose role a run is evaluated with", () => {
     const builder = await login(context, "builder");
     const serverId = await registerMockServer(context, admin.cookie);
     // Owned by the admin, so a builder-only rule can only apply through the triggering user.
-    context.store.upsertWorkflow(calculatorWorkflow("wf-manual", serverId), { createdBy: admin.id });
+    await context.store.upsertWorkflow(calculatorWorkflow("wf-manual", serverId), { createdBy: admin.id });
     await createRule(context, admin.cookie, { name: "Builders: no calculator", effect: "deny", roles: ["builder"], toolPattern: "calculator" });
 
     const run = (cookie: string) =>
@@ -373,7 +373,7 @@ describe("whose role a run is evaluated with", () => {
       payload: calculatorWorkflow("wf-hook", serverId)
     });
     expect(saved.statusCode).toBe(200);
-    expect(context.store.getWorkflowCreatedBy("wf-hook")).toBe(builder.id);
+    expect(await context.store.getWorkflowCreatedBy("wf-hook")).toBe(builder.id);
 
     const hook = () => context.app.inject({ method: "POST", url: "/webhook/calc-wf-hook", payload: {} });
     expect((await hook()).statusCode).toBe(200);
@@ -388,41 +388,41 @@ describe("whose role a run is evaluated with", () => {
     expect((await hook()).statusCode).toBe(200);
 
     // No recorded owner: the run is evaluated as viewer.
-    context.store.upsertWorkflow({ ...calculatorWorkflow("wf-orphan", serverId) });
-    expect(context.store.getWorkflowCreatedBy("wf-orphan")).toBeNull();
+    await context.store.upsertWorkflow({ ...calculatorWorkflow("wf-orphan", serverId) });
+    expect(await context.store.getWorkflowCreatedBy("wf-orphan")).toBeNull();
     const orphan = await context.app.inject({ method: "POST", url: "/webhook/calc-wf-orphan", payload: {} });
     expect(orphan.statusCode).toBe(400);
     expect(orphan.body).toContain("for role viewer");
   });
 
-  it("resolves subjects: user, owner, missing owner, unknown owner", () => {
+  it("resolves subjects: user, owner, missing owner, unknown owner", async () => {
     const users: Record<string, { id: string; email: string; role: string }> = {
       "u-builder": { id: "u-builder", email: "b@example.com", role: "builder" }
     };
     const owners: Record<string, string | null> = { "wf-owned": "u-builder", "wf-gone": "u-deleted", "wf-none": null };
     const store = {
-      getWorkflowCreatedBy: (id: string) => owners[id] ?? null,
-      getUserById: (id: string) => users[id] ?? null
+      getWorkflowCreatedBy: async (id: string) => owners[id] ?? null,
+      getUserById: async (id: string) => users[id] ?? null
     };
 
-    expect(resolveMcpToolPolicySubject(store, "wf-owned", { id: "u-op", email: "op@example.com", role: "operator" })).toEqual({
+    expect(await resolveMcpToolPolicySubject(store, "wf-owned", { id: "u-op", email: "op@example.com", role: "operator" })).toEqual({
       role: "operator",
       source: "user",
       userId: "u-op",
       email: "op@example.com"
     });
-    expect(resolveMcpToolPolicySubject(store, "wf-owned")).toEqual({
+    expect(await resolveMcpToolPolicySubject(store, "wf-owned")).toEqual({
       role: "builder",
       source: "owner",
       userId: "u-builder",
       email: "b@example.com"
     });
-    expect(resolveMcpToolPolicySubject(store, "wf-gone")).toMatchObject({
+    expect(await resolveMcpToolPolicySubject(store, "wf-gone")).toMatchObject({
       role: "viewer",
       source: "fallback",
       fallbackReason: "the workflow owner no longer exists"
     });
-    expect(resolveMcpToolPolicySubject(store, "wf-none")).toMatchObject({
+    expect(await resolveMcpToolPolicySubject(store, "wf-none")).toMatchObject({
       role: "viewer",
       source: "fallback",
       fallbackReason: "the workflow has no recorded owner"
@@ -440,7 +440,7 @@ describe("workflows.created_by", () => {
     const workflow = calculatorWorkflow("wf-owned", serverId);
 
     await context.app.inject({ method: "POST", url: "/api/workflows", headers: { cookie: builder.cookie }, payload: workflow });
-    expect(context.store.getWorkflowCreatedBy("wf-owned")).toBe(builder.id);
+    expect(await context.store.getWorkflowCreatedBy("wf-owned")).toBe(builder.id);
 
     const resaved = await context.app.inject({
       method: "PUT",
@@ -449,8 +449,8 @@ describe("workflows.created_by", () => {
       payload: { ...workflow, name: "Renamed", settings: { noWriteTools: true } }
     });
     expect(resaved.statusCode).toBe(200);
-    expect(context.store.getWorkflowCreatedBy("wf-owned")).toBe(builder.id);
-    expect(context.store.getWorkflow("wf-owned")?.settings).toEqual({ noWriteTools: true });
+    expect(await context.store.getWorkflowCreatedBy("wf-owned")).toBe(builder.id);
+    expect((await context.store.getWorkflow("wf-owned"))?.settings).toEqual({ noWriteTools: true });
 
     const duplicate = await context.app.inject({
       method: "POST",
@@ -458,7 +458,7 @@ describe("workflows.created_by", () => {
       headers: { cookie: other.cookie },
       payload: { name: "Copy" }
     });
-    expect(context.store.getWorkflowCreatedBy(duplicate.json<{ id: string }>().id)).toBe(other.id);
+    expect(await context.store.getWorkflowCreatedBy(duplicate.json<{ id: string }>().id)).toBe(other.id);
 
     const imported = await context.app.inject({
       method: "POST",
@@ -468,7 +468,7 @@ describe("workflows.created_by", () => {
       payload: { workflow: calculatorWorkflow("wf-imported", serverId) }
     });
     expect(imported.statusCode).toBe(200);
-    expect(context.store.getWorkflowCreatedBy("wf-imported")).toBe(other.id);
+    expect(await context.store.getWorkflowCreatedBy("wf-imported")).toBe(other.id);
   });
 
   it("is added to an existing database and backfilled from the earliest version author", async () => {
@@ -476,10 +476,10 @@ describe("workflows.created_by", () => {
     tempDirs.push(tempDir);
     const dbFile = path.join(tempDir, "orchestrator.db");
     const first = await SqliteStore.create(dbFile);
-    first.ensureDefaultProject();
-    first.upsertWorkflow({ id: "wf-a", name: "A", schemaVersion: "1.0.0", workflowVersion: 1, nodes: [], edges: [] });
-    first.upsertWorkflow({ id: "wf-b", name: "B", schemaVersion: "1.0.0", workflowVersion: 1, nodes: [], edges: [] });
-    first.close();
+    await first.ensureDefaultProject();
+    await first.upsertWorkflow({ id: "wf-a", name: "A", schemaVersion: "1.0.0", workflowVersion: 1, nodes: [], edges: [] });
+    await first.upsertWorkflow({ id: "wf-b", name: "B", schemaVersion: "1.0.0", workflowVersion: 1, nodes: [], edges: [] });
+    await first.close();
 
     // Rewind the file to the pre-10.2 schema: no created_by column, no policy tables.
     const raw = new Database(dbFile);
@@ -496,11 +496,11 @@ describe("workflows.created_by", () => {
 
     const upgraded = await SqliteStore.create(dbFile);
     try {
-      expect(upgraded.getWorkflow("wf-a")?.name).toBe("A");
-      expect(upgraded.getWorkflowCreatedBy("wf-a")).toBe("u-first");
-      expect(upgraded.getWorkflowCreatedBy("wf-b")).toBeNull();
-      expect(upgraded.listMcpToolPolicies()).toEqual([]);
-      const rule = upgraded.createMcpToolPolicy({
+      expect((await upgraded.getWorkflow("wf-a"))?.name).toBe("A");
+      expect(await upgraded.getWorkflowCreatedBy("wf-a")).toBe("u-first");
+      expect(await upgraded.getWorkflowCreatedBy("wf-b")).toBeNull();
+      expect(await upgraded.listMcpToolPolicies()).toEqual([]);
+      const rule = await upgraded.createMcpToolPolicy({
         id: "r1",
         name: null,
         description: null,
@@ -511,12 +511,12 @@ describe("workflows.created_by", () => {
         toolPattern: "*",
         enabled: true
       });
-      expect(upgraded.listMcpToolPolicies()).toEqual([rule]);
-      expect(upgraded.setMcpToolClassification({ registryServerId: "mcp_x", toolName: "t", readOnly: true, setBy: null })).toMatchObject({
+      expect(await upgraded.listMcpToolPolicies()).toEqual([rule]);
+      expect(await upgraded.setMcpToolClassification({ registryServerId: "mcp_x", toolName: "t", readOnly: true, setBy: null })).toMatchObject({
         readOnly: true
       });
     } finally {
-      upgraded.close();
+      await upgraded.close();
     }
   });
 });

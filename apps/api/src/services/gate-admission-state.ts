@@ -15,13 +15,16 @@
  */
 
 import type { ReleaseGateAdmission, ReleaseGateAdmissionState } from "@ai-orchestrator/shared";
-import type { EvalFixtureRecord, ReleaseGateRecord, SqliteStore } from "../db/database.js";
+import type { EvalFixtureRecord, ReleaseGateRecord } from "../db/database.js";
+import type { Store } from "../db/store.js";
 
 export interface GateAdmissionSnapshot {
   workflowId: string;
   /** Every case of the gate's golden sets, in set order. */
   fixtures: EvalFixtureRecord[];
   admittedIds: Set<string>;
+  /** The admitted ids as the gate stores them (null: none stored); a change to the cases is checked against this. */
+  storedAdmittedIds: string[] | null;
   /** Required golden-run cases of the gate's sets; only admitted cases can be required. */
   requiredIds: string[];
   names: Record<string, string>;
@@ -34,12 +37,12 @@ export interface GateAdmissionSnapshot {
 }
 
 /** The admission state of an enforced gate; null for a gate that is missing or not enforced. */
-export function gateAdmissionSnapshot(store: Pick<SqliteStore, "listEvalFixtures">, gate: ReleaseGateRecord | null): GateAdmissionSnapshot | null {
+export async function gateAdmissionSnapshot(store: Pick<Store, "listEvalFixtures">, gate: ReleaseGateRecord | null): Promise<GateAdmissionSnapshot | null> {
   if (!gate?.enforced) return null;
   const fixtures: EvalFixtureRecord[] = [];
   const seen = new Set<string>();
   for (const datasetId of gate.datasetIds) {
-    for (const fixture of store.listEvalFixtures(datasetId)) {
+    for (const fixture of await store.listEvalFixtures(datasetId)) {
       if (seen.has(fixture.id)) continue;
       seen.add(fixture.id);
       fixtures.push(fixture);
@@ -55,6 +58,7 @@ export function gateAdmissionSnapshot(store: Pick<SqliteStore, "listEvalFixtures
     workflowId: gate.workflowId,
     fixtures,
     admittedIds,
+    storedAdmittedIds: admissionMissing ? null : [...stored],
     requiredIds: fixtures.filter((fixture) => fixture.required && fixture.recordingId && admittedIds.has(fixture.id)).map((fixture) => fixture.id),
     names,
     admissionMissing
@@ -84,21 +88,25 @@ export function admissionState(snapshot: GateAdmissionSnapshot): ReleaseGateAdmi
  *     the save adds, wait for admission, unless an admin passes
  *     `admitAddedSetCases`: then the cases of the added sets are admitted.
  */
-export function nextAdmittedIds(
-  store: Pick<SqliteStore, "listEvalFixtures">,
+export async function nextAdmittedIds(
+  store: Pick<Store, "listEvalFixtures">,
   before: ReleaseGateRecord | null,
   after: { enforced: boolean; datasetIds: string[] },
   options: { byAdmin: boolean; admitAddedSetCases: boolean }
-): string[] | null {
+): Promise<string[] | null> {
   const stored = before?.admittedFixtureIds ?? null;
   if (!after.enforced) return stored;
-  const idsOf = (datasetIds: readonly string[]) => datasetIds.flatMap((datasetId) => store.listEvalFixtures(datasetId).map((fixture) => fixture.id));
-  const current = new Set(idsOf(after.datasetIds));
+  const idsOf = async (datasetIds: readonly string[]) => {
+    const ids: string[] = [];
+    for (const datasetId of datasetIds) for (const fixture of await store.listEvalFixtures(datasetId)) ids.push(fixture.id);
+    return ids;
+  };
+  const current = new Set(await idsOf(after.datasetIds));
   if (!before?.enforced && stored === null) return [...current];
   const admitted = new Set((stored ?? []).filter((id) => current.has(id)));
   if (options.byAdmin && options.admitAddedSetCases) {
     const added = after.datasetIds.filter((datasetId) => !(before?.datasetIds ?? []).includes(datasetId));
-    for (const id of idsOf(added)) admitted.add(id);
+    for (const id of await idsOf(added)) admitted.add(id);
   }
   return [...admitted];
 }

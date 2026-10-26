@@ -195,10 +195,10 @@ async function createTestContext(overrides: Partial<AppConfig> = {}): Promise<Te
   const dbPath = path.join(tempDir, "orchestrator.db");
   const store = await SqliteStore.create(dbPath);
   const config = makeConfig(overrides);
-  store.ensureDefaultProject();
+  await store.ensureDefaultProject();
   const secretService = new SecretService(store, config.SECRET_MASTER_KEY_BASE64);
   const authService = new AuthService(store, config.SESSION_TTL_HOURS);
-  const app = createApp(config, store, secretService, authService);
+  const app = await createApp(config, store, secretService, authService);
   await app.ready();
   const ctx: TestContext = { app, store, authService, secretService, config, tempDir };
   contexts.push(ctx);
@@ -218,7 +218,7 @@ async function loginUser(
   ctx: TestContext,
   input: { email: string; password: string; role: "admin" | "builder" | "operator" | "viewer" }
 ): Promise<{ cookie: string; userId: string }> {
-  const registered = ctx.authService.register(input);
+  const registered = await ctx.authService.register(input);
   const response = await ctx.app.inject({
     method: "POST",
     url: "/api/auth/login",
@@ -301,7 +301,7 @@ describe("Phase 5.1 — API keys", () => {
     });
     const { ApiKeyService } = await import("./services/api-key-service");
     const apiKeyService = new ApiKeyService(ctx.store, 0);
-    const { plaintext, record } = apiKeyService.create({ userId, name: "tmp" });
+    const { plaintext, record } = await apiKeyService.create({ userId, name: "tmp" });
 
     // Poke the store to set the key as already expired.
     const past = new Date(Date.now() - 60_000).toISOString();
@@ -387,6 +387,15 @@ describe("Phase 5.1 — MFA (TOTP)", () => {
       payload: { challenge: backupChallenge2.mfaChallenge, code: backupCodes[0] }
     });
     expect(reuse.statusCode).toBe(401);
+
+    // Two sign-ins racing with the same unused backup code: only one gets in.
+    const challengeFor = async () =>
+      ((await ctx.app.inject({ method: "POST", url: "/api/auth/login", payload: { email: "mfa@example.com", password: "mfa-password" } })).json() as { mfaChallenge?: string }).mfaChallenge;
+    const [c1, c2] = [await challengeFor(), await challengeFor()];
+    const raced = await Promise.all(
+      [c1, c2].map((challenge) => ctx.app.inject({ method: "POST", url: "/api/auth/login/mfa", payload: { challenge, code: backupCodes[1] } }))
+    );
+    expect(raced.map((response) => response.statusCode).sort()).toEqual([200, 401]);
   });
 });
 
@@ -581,7 +590,7 @@ describe("Phase 5.2 — Workflow and secret sharing", () => {
       .then((r) => r.json())) as { id: string };
 
     // Create a workflow in project A via the store directly.
-    ctx.store.upsertWorkflow({
+    await ctx.store.upsertWorkflow({
       id: "wf-share-1",
       name: "Shared WF",
       schemaVersion: "1.0.0",

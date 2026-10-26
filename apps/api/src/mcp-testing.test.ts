@@ -35,7 +35,7 @@ const contexts: TestContext[] = [];
 async function createTestContext(overrides: Record<string, string> = {}): Promise<TestContext> {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-mcp-testing-"));
   const store = await SqliteStore.create(path.join(tempDir, "orchestrator.db"));
-  store.ensureDefaultProject();
+  await store.ensureDefaultProject();
   const config = parseConfig({
     LOG_LEVEL: "warn",
     SEED_SAMPLE_WORKFLOWS: "false",
@@ -48,7 +48,7 @@ async function createTestContext(overrides: Record<string, string> = {}): Promis
   });
   const secretService = new SecretService(store, config.SECRET_MASTER_KEY_BASE64);
   const authService = new AuthService(store, config.SESSION_TTL_HOURS);
-  const app = createApp(config, store, secretService, authService);
+  const app = await createApp(config, store, secretService, authService);
   await app.ready();
   const context = { app, store, authService, secretService, config, tempDir };
   contexts.push(context);
@@ -60,7 +60,7 @@ afterEach(async () => {
     const context = contexts.pop()!;
     await context.app.close();
     try {
-      context.store.close();
+      await context.store.close();
     } catch {
       // Already closed by the app shutdown hooks.
     }
@@ -73,7 +73,7 @@ type Role = "admin" | "builder" | "operator" | "viewer";
 async function login(context: TestContext, role: Role, name: string = role): Promise<{ cookie: string; id: string; email: string }> {
   const email = `${name}@example.com`;
   const password = `${name}-Pass-123!`;
-  const user = context.authService.register({ email, password, role });
+  const user = await context.authService.register({ email, password, role });
   const response = await context.app.inject({ method: "POST", url: "/api/auth/login", payload: { email, password } });
   if (response.statusCode !== 200) throw new Error(`Login failed for ${name}: ${response.body}`);
   const raw = response.headers["set-cookie"];
@@ -149,10 +149,10 @@ describe("record and replay of a manual run", () => {
     const builder = await login(context, "builder");
     const operator = await login(context, "operator");
     const viewer = await login(context, "viewer");
-    const secret = context.secretService.createSecret({ name: "mock-key", provider: "custom", value: "tok-SUPERSECRET-0042" });
+    const secret = await context.secretService.createSecret({ name: "mock-key", provider: "custom", value: "tok-SUPERSECRET-0042" });
     const serverId = await registerServer(context, admin.cookie, { secretRef: secret });
-    context.store.upsertWorkflow(toolWorkflow("wf-clock", serverId, "get_current_time", '{"tz":"UTC"}'));
-    context.store.upsertWorkflow(toolWorkflow("wf-kb", serverId, "lookup_kb", '{"topic":"tok-SUPERSECRET-0042"}'));
+    await context.store.upsertWorkflow(toolWorkflow("wf-clock", serverId, "get_current_time", '{"tz":"UTC"}'));
+    await context.store.upsertWorkflow(toolWorkflow("wf-kb", serverId, "lookup_kb", '{"topic":"tok-SUPERSECRET-0042"}'));
 
     const recorded = await call(context, "POST", "/api/workflows/wf-clock/execute", builder.cookie, { record: true });
     expect(recorded.statusCode).toBe(200);
@@ -200,12 +200,12 @@ describe("record and replay of a manual run", () => {
     expect(replayRun.status).toBe("success");
     expect(toolOutput(replayRun)).toEqual(toolOutput(recordedRun));
     expect(replayRun.mcpReplay).toMatchObject({ cassetteId, mode: "strict", live: 0, unmatched: [] });
-    const replayed = context.store.getExecutionHistory(replayRun.executionId!);
+    const replayed = await context.store.getExecutionHistory(replayRun.executionId!);
     expect(replayed).toMatchObject({ triggerType: "mcp_replay", status: "success" });
     expect(replayed!.customData).toMatchObject({ mcpReplay: { sourceExecutionId: executionId, cassetteId, mode: "strict" } });
 
     // The workflow changed: strict replay fails clearly, lenient falls through to the live server.
-    context.store.upsertWorkflow(toolWorkflow("wf-clock", serverId, "get_current_time", '{"tz":"Asia/Tokyo"}'));
+    await context.store.upsertWorkflow(toolWorkflow("wf-clock", serverId, "get_current_time", '{"tz":"Asia/Tokyo"}'));
     const strict = await call(context, "POST", `/api/executions/${executionId}/replay`, builder.cookie, { mode: "strict" });
     const strictRun = strict.json<RunResult>();
     expect(strictRun.status).toBe("error");
@@ -250,7 +250,7 @@ describe("record and replay of a manual run", () => {
       { id: "e2", source: "tool", target: "tool2" },
       { id: "e3", source: "tool2", target: "output" }
     ];
-    context.store.upsertWorkflow(workflow);
+    await context.store.upsertWorkflow(workflow);
     const run = (await call(context, "POST", "/api/workflows/wf-big/execute", admin.cookie, { record: true })).json<RunResult>();
     expect(run.status).toBe("success");
     expect(run.mcpCassette).toMatchObject({ truncated: true, callCount: 1 });
@@ -262,7 +262,7 @@ describe("eval runs against cassettes", () => {
     const context = await createTestContext();
     const admin = await login(context, "admin");
     const serverId = await registerServer(context, admin.cookie);
-    context.store.upsertWorkflow(toolWorkflow("wf-eval", serverId, "get_current_time", '{"tz":"UTC"}'));
+    await context.store.upsertWorkflow(toolWorkflow("wf-eval", serverId, "get_current_time", '{"tz":"UTC"}'));
     const dataset = (await call(context, "POST", "/api/eval/datasets", admin.cookie, { name: "Clock" })).json<{ dataset: { id: string } }>().dataset;
     for (const name of ["first", "second"]) {
       const fixture = await call(context, "POST", `/api/eval/datasets/${dataset.id}/fixtures`, admin.cookie, {
@@ -337,10 +337,10 @@ describe("snapshots and snapshot mock servers", () => {
 
     // A registry server generated from the snapshot: same tools, offline answers.
     const mockId = await registerServer(context, admin.cookie, { name: "Mock of Mock", adapterId: "snapshot_mock", connection: { sourceServerId: serverId } });
-    const mock = context.store.getMcpServer(mockId)!;
+    const mock = (await context.store.getMcpServer(mockId))!;
     expect(mock.status).toBe("healthy");
-    expect(acceptedSnapshotFor(context.store, mock)?.hash).toBe(file.snapshot.hash);
-    context.store.upsertWorkflow(toolWorkflow("wf-mock", mockId, "lookup_kb", '{"topic":"mcp"}'));
+    expect((await acceptedSnapshotFor(context.store, mock))?.hash).toBe(file.snapshot.hash);
+    await context.store.upsertWorkflow(toolWorkflow("wf-mock", mockId, "lookup_kb", '{"topic":"mcp"}'));
     const run = (await call(context, "POST", "/api/workflows/wf-mock/execute", builder.cookie, {})).json<RunResult>();
     expect(run.status).toBe("success");
     expect(String(toolOutput(run))).toContain("Mock response from 'lookup_kb'");
@@ -354,7 +354,7 @@ describe("CI check endpoint", () => {
     const builder = await login(context, "builder");
     const viewer = await login(context, "viewer");
     const serverId = await registerServer(context, admin.cookie);
-    context.store.upsertWorkflow(toolWorkflow("wf-uses-calc", serverId, "calculator", '{"expression":"1+1"}', builder.id));
+    await context.store.upsertWorkflow(toolWorkflow("wf-uses-calc", serverId, "calculator", '{"expression":"1+1"}', builder.id));
 
     const key = (await call(context, "POST", "/api/auth/api-keys", builder.cookie, { name: "ci" })).json<{ key: string }>().key;
     const check = (payload: unknown, headers: Record<string, string> = { authorization: `Bearer ${key}` }) =>
@@ -368,7 +368,7 @@ describe("CI check endpoint", () => {
     expect(cleanReport).toMatchObject({ ok: true, failures: [], blockedTools: [] });
     expect(cleanReport.servers[0]).toMatchObject({ serverId, reachable: true, breaking: false });
     expect(cleanReport.servers[0].currentHash).toBe(cleanReport.servers[0].acceptedHash);
-    const probesBefore = context.store.listMcpServerProbes(serverId).length;
+    const probesBefore = (await context.store.listMcpServerProbes(serverId)).length;
 
     // Policy-blocked tool a workflow depends on.
     const rule = await call(context, "POST", "/api/mcp/policies", admin.cookie, { name: "No calculator", effect: "deny", toolPattern: "calculator" });
@@ -382,9 +382,9 @@ describe("CI check endpoint", () => {
     await call(context, "DELETE", `/api/mcp/policies/${rule.json<{ rule: { id: string } }>().rule.id}`, admin.cookie);
 
     // Breaking: the accepted snapshot had a tool the server no longer serves.
-    const current = acceptedSnapshotFor(context.store, context.store.getMcpServer(serverId)!)!;
+    const current = (await acceptedSnapshotFor(context.store, (await context.store.getMcpServer(serverId))!))!;
     const tools = [...current.tools, { name: "retired_tool", description: "", inputSchema: { type: "object" } }];
-    context.store.recordMcpServerProbe({
+    await context.store.recordMcpServerProbe({
       probe: { id: "mcpprobe_fake", serverId, startedAt: new Date().toISOString(), ok: true, latencyMs: 1, toolCount: tools.length, error: null, snapshotId: "mcpsnap_fake" },
       status: "healthy",
       snapshot: {
@@ -421,6 +421,6 @@ describe("CI check endpoint", () => {
     expect((await check({ serverIds: ["mcp_nope"] })).statusCode).toBe(404);
     expect((await check({ toolsetId: "nope" })).statusCode).toBe(404);
     // The check probes without recording anything.
-    expect(context.store.listMcpServerProbes(serverId).length).toBe(probesBefore + 1);
+    expect((await context.store.listMcpServerProbes(serverId)).length).toBe(probesBefore + 1);
   }, 30_000);
 });

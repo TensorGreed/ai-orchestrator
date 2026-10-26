@@ -30,23 +30,23 @@
 
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { DESTINATION_PREVIEW_SIMULATION_PROFILE, destinationPreviewRequestSchema, guardSimulationRequestSchema } from "@ai-orchestrator/shared";
-import type { SqliteStore } from "./db/database.js";
 import type { RunAccess } from "./run-access.js";
 import type { SafeUser, UserRole } from "./services/auth-service.js";
 import type { AuditEventInput } from "./services/audit-service.js";
 import { GuardNotFoundError, GuardValidationError } from "./services/guard-service.js";
 import { DataDestinationError, type DataDestinationService } from "./services/data-destination-service.js";
 import { GuardSimulationBusyError, type GuardSimulationService } from "./services/guard-simulation-service.js";
+import type { Store } from "./db/store.js";
 
 export interface GuardSimulationRoutesDeps {
   app: FastifyInstance;
-  store: SqliteStore;
+  store: Store;
   simulations: GuardSimulationService | null;
   /** Phase 16 — builds a destination preview's rows (validated, never stored). */
   destinations?: DataDestinationService;
   requireRole: (request: FastifyRequest, reply: FastifyReply, roles: UserRole[]) => Promise<SafeUser | null>;
   runAccess: RunAccess;
-  audit: (request: FastifyRequest, user: SafeUser, event: Omit<AuditEventInput, "actor">) => void;
+  audit: (request: FastifyRequest, user: SafeUser, event: Omit<AuditEventInput, "actor">) => void | Promise<void>;
 }
 
 export function registerGuardSimulationRoutes(deps: GuardSimulationRoutesDeps): void {
@@ -58,7 +58,7 @@ export function registerGuardSimulationRoutes(deps: GuardSimulationRoutesDeps): 
   };
 
   /** Why `user` may not simulate this profile (404 when it does not exist); null when they may. */
-  const editorDenial = (user: SafeUser, profileId: string) => simulations!.editorDenial(user, profileId);
+  const editorDenial = async (user: SafeUser, profileId: string) => await simulations!.editorDenial(user, profileId);
 
   const deny = (reply: FastifyReply, denial: { status: number; error: string }) => {
     reply.code(denial.status);
@@ -69,7 +69,7 @@ export function registerGuardSimulationRoutes(deps: GuardSimulationRoutesDeps): 
     const user = await requireRole(request, reply, ["builder"]);
     if (!user) return reply;
     if (!simulations) return unavailable(reply);
-    const denial = editorDenial(user, request.params.id);
+    const denial = await editorDenial(user, request.params.id);
     if (denial) return deny(reply, denial);
     const parsed = guardSimulationRequestSchema.safeParse(request.body ?? {});
     if (!parsed.success) {
@@ -78,7 +78,7 @@ export function registerGuardSimulationRoutes(deps: GuardSimulationRoutesDeps): 
     }
     try {
       let simulation = await simulations.start(request.params.id, parsed.data, user);
-      deps.audit(request, user, {
+      await deps.audit(request, user, {
         eventType: "guard.simulation.started",
         category: "system",
         action: "execute",
@@ -94,7 +94,7 @@ export function registerGuardSimulationRoutes(deps: GuardSimulationRoutesDeps): 
       });
       if (request.query.wait === "true") {
         await simulations.wait(simulation.id);
-        simulation = simulations.get(simulation.id, user) ?? simulation;
+        simulation = await simulations.get(simulation.id, user) ?? simulation;
       }
       reply.code(simulation.status === "running" ? 202 : 200);
       return { simulation };
@@ -125,9 +125,9 @@ export function registerGuardSimulationRoutes(deps: GuardSimulationRoutesDeps): 
       return { error: parsed.error.issues[0]?.message ?? "Invalid preview request", issues: parsed.error.issues.map((issue) => ({ path: issue.path.map(String).join(".") || "(root)", message: issue.message })) };
     }
     try {
-      const rows = deps.destinations.previewRows({ rows: parsed.data.rows as Array<Record<string, unknown>>, removedIds: parsed.data.removedIds });
+      const rows = await deps.destinations.previewRows({ rows: parsed.data.rows as Array<Record<string, unknown>>, removedIds: parsed.data.removedIds });
       let simulation = await simulations.startDestinationPreview(rows, { ...(parsed.data.limit !== undefined ? { limit: parsed.data.limit } : {}) }, user);
-      deps.audit(request, user, {
+      await deps.audit(request, user, {
         eventType: "guard.destination_preview.started",
         category: "system",
         action: "execute",
@@ -137,7 +137,7 @@ export function registerGuardSimulationRoutes(deps: GuardSimulationRoutesDeps): 
       });
       if (request.query.wait === "true") {
         await simulations.wait(simulation.id);
-        simulation = simulations.get(simulation.id, user) ?? simulation;
+        simulation = await simulations.get(simulation.id, user) ?? simulation;
       }
       reply.code(simulation.status === "running" ? 202 : 200);
       return { simulation };
@@ -159,35 +159,35 @@ export function registerGuardSimulationRoutes(deps: GuardSimulationRoutesDeps): 
     if (!user) return reply;
     if (!simulations) return unavailable(reply);
     const limit = Number(request.query.limit);
-    return { simulations: simulations.list(DESTINATION_PREVIEW_SIMULATION_PROFILE, user, Number.isFinite(limit) ? limit : 5) };
+    return { simulations: await simulations.list(DESTINATION_PREVIEW_SIMULATION_PROFILE, user, Number.isFinite(limit) ? limit : 5) };
   });
 
   app.get<{ Params: { id: string }; Querystring: { limit?: string } }>("/api/guard/profiles/:id/simulations", async (request, reply) => {
     const user = await requireRole(request, reply, ["builder"]);
     if (!user) return reply;
     if (!simulations) return unavailable(reply);
-    const denial = editorDenial(user, request.params.id);
+    const denial = await editorDenial(user, request.params.id);
     if (denial) return deny(reply, denial);
     const limit = Number(request.query.limit);
-    return { simulations: simulations.list(request.params.id, user, Number.isFinite(limit) ? limit : 20) };
+    return { simulations: await simulations.list(request.params.id, user, Number.isFinite(limit) ? limit : 20) };
   });
 
   app.get<{ Params: { id: string } }>("/api/guard/simulations/:id", async (request, reply) => {
     const user = await requireRole(request, reply, ["builder"]);
     if (!user) return reply;
     if (!simulations) return unavailable(reply);
-    const record = store.getGuardSimulation(request.params.id);
+    const record = await store.getGuardSimulation(request.params.id);
     if (!record) {
       reply.code(404);
       return { error: "Simulation not found" };
     }
-    const denial = editorDenial(user, record.profileId);
+    const denial = await editorDenial(user, record.profileId);
     if (denial) return deny(reply, denial.status === 404 ? { status: 404, error: "Simulation not found" } : denial);
-    if (!simulations.visibleTo(record, user)) {
+    if (!await simulations.visibleTo(record, user)) {
       reply.code(404);
       return { error: "Simulation not found" };
     }
-    const simulation = simulations.get(record.id, user);
+    const simulation = await simulations.get(record.id, user);
     if (!simulation) {
       reply.code(404);
       return { error: "Simulation not found" };
@@ -199,8 +199,8 @@ export function registerGuardSimulationRoutes(deps: GuardSimulationRoutesDeps): 
     const user = await requireRole(request, reply, ["builder"]);
     if (!user) return reply;
     if (!simulations) return unavailable(reply);
-    const record = store.getGuardSimulation(request.params.id);
-    if (!record || !simulations.visibleTo(record, user)) {
+    const record = await store.getGuardSimulation(request.params.id);
+    if (!record || !await simulations.visibleTo(record, user)) {
       reply.code(404);
       return { error: "Simulation not found" };
     }
@@ -208,12 +208,12 @@ export function registerGuardSimulationRoutes(deps: GuardSimulationRoutesDeps): 
       reply.code(403);
       return { error: "Only an admin or the person who started a simulation can cancel it" };
     }
-    const simulation = simulations.cancel(record.id, user);
+    const simulation = await simulations.cancel(record.id, user);
     if (!simulation) {
       reply.code(404);
       return { error: "Simulation not found" };
     }
-    deps.audit(request, user, {
+    await deps.audit(request, user, {
       eventType: "guard.simulation.canceled",
       category: "system",
       action: "execute",

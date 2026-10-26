@@ -58,12 +58,12 @@ export interface ApprovalRoutesDeps {
   available: boolean;
   requireRole: (request: FastifyRequest, reply: FastifyReply, roles: UserRole[]) => Promise<SafeUser | null>;
   /** The workflow as stored, for the eligibility check; null when it does not exist. */
-  loadWorkflow: (id: string) => { id: string; projectId?: string } | null;
+  loadWorkflow: (id: string) => Promise<{ id: string; projectId?: string } | null>;
   /** A run by execution id (its history, or its paused state), for the `?executionId` filter. */
-  loadRun: (executionId: string) => { id: string; workflowId: string } | null;
+  loadRun: (executionId: string) => Promise<{ id: string; workflowId: string } | null>;
   runAccess: Pick<RunAccess, "workflow" | "run" | "project">;
   /** May list the accounts of the workflow's project (admins, or `project:invite`). */
-  canSeeProjectAccounts: (user: SafeUser, workflow: { id: string; projectId?: string }) => boolean;
+  canSeeProjectAccounts: (user: SafeUser, workflow: { id: string; projectId?: string }) => Promise<boolean>;
   /** Resumes the run: inline (resolves with the run result) or on the queue (resolves with `{ queued: true }`). */
   dispatch: (job: ApprovalResumeJob) => Promise<{ queued: true } | { queued: false; result: { status: string } } | null>;
   /** Phase 15.4 — release requests in the same inbox. */
@@ -100,15 +100,15 @@ export function registerApprovalRoutes(deps: ApprovalRoutesDeps): void {
     const status = query.status && STATUS_FILTERS.has(query.status) ? (query.status as "pending" | "decided" | "all") : "pending";
     const limit = query.limit ? Number(query.limit) : undefined;
     if (query.workflowId) {
-      const access = deps.runAccess.workflow(user, query.workflowId, "workflow:read");
+      const access = await deps.runAccess.workflow(user, query.workflowId, "workflow:read");
       if (!access.ok) return deny(reply, access);
     }
     if (query.executionId) {
-      const access = deps.runAccess.run(user, deps.loadRun(query.executionId), "workflow:read");
+      const access = await deps.runAccess.run(user, await deps.loadRun(query.executionId), "workflow:read");
       if (!access.ok) return deny(reply, access);
     }
     const capped = limit && Number.isFinite(limit) ? Math.max(1, Math.min(500, limit)) : undefined;
-    const runItems: Array<ApprovalRequestView | ReleaseApprovalRequestView | GateCaseRequestView> = approvals.list(user, {
+    const runItems: Array<ApprovalRequestView | ReleaseApprovalRequestView | GateCaseRequestView> = await approvals.list(user, {
       status,
       ...(query.workflowId ? { workflowId: query.workflowId } : {}),
       ...(query.executionId ? { executionId: query.executionId } : {}),
@@ -120,8 +120,8 @@ export function registerApprovalRoutes(deps: ApprovalRoutesDeps): void {
       ...(query.workflowId ? { workflowId: query.workflowId } : {}),
       ...(capped ? { limit: capped } : {})
     };
-    const releaseItems = deps.releases ? deps.releases.listRequests(user, filter) : [];
-    const caseItems = deps.gateCases ? deps.gateCases.listRequests(user, filter) : [];
+    const releaseItems = deps.releases ? await deps.releases.listRequests(user, filter) : [];
+    const caseItems = deps.gateCases ? await deps.gateCases.listRequests(user, filter) : [];
     const items = [...runItems, ...releaseItems, ...caseItems].sort((a, b) => inboxTime(b, status) - inboxTime(a, status)).slice(0, capped ?? 200);
     return { items };
   });
@@ -140,7 +140,7 @@ export function registerApprovalRoutes(deps: ApprovalRoutesDeps): void {
     const special = deps.releases && isReleaseApprovalRequestId(id) ? deps.releases : deps.gateCases && isGateCaseRequestId(id) ? deps.gateCases : null;
     if (special) {
       try {
-        return special.decide(user, id, decision, body.reason);
+        return await special.decide(user, id, decision, body.reason);
       } catch (error) {
         if (error instanceof ReleaseError) {
           reply.code(error.statusCode);
@@ -151,14 +151,14 @@ export function registerApprovalRoutes(deps: ApprovalRoutesDeps): void {
     }
     let job: ApprovalResumeJob;
     try {
-      job = approvals.decide({
+      job = (await approvals.decide({
         executionId: request.params.id,
         user,
         decision,
         ...(body.reason ? { reason: body.reason } : {}),
         ...(body.edits ? { edits: body.edits } : {}),
         ...(body.requestId ? { requestId: body.requestId } : {})
-      }).job;
+      })).job;
     } catch (error) {
       if (error instanceof ApprovalDecisionError) {
         reply.code(error.statusCode);
@@ -170,7 +170,7 @@ export function registerApprovalRoutes(deps: ApprovalRoutesDeps): void {
     try {
       outcome = await deps.dispatch(job);
     } catch (error) {
-      approvals.reopenAfterFailedResume(job);
+      await approvals.reopenAfterFailedResume(job);
       request.log.warn({ executionId: job.executionId, error: error instanceof Error ? error.name : "Error" }, "Resuming an approved run failed");
       reply.code(503);
       return { error: "Could not resume the run; decide again", executionId: job.executionId, requestId: job.requestId };
@@ -198,13 +198,13 @@ export function registerApprovalRoutes(deps: ApprovalRoutesDeps): void {
     }
     // An unsaved workflow is checked against the project it will be saved in.
     // Only an editor configuring the gate needs this answer, so it takes edit rights.
-    const stored = deps.loadWorkflow(parsed.data.workflowId);
+    const stored = await deps.loadWorkflow(parsed.data.workflowId);
     const workflow = stored ?? { id: parsed.data.workflowId, ...(parsed.data.projectId ? { projectId: parsed.data.projectId } : {}) };
     const access = stored
-      ? deps.runAccess.workflow(user, stored.id, "workflow:write")
-      : deps.runAccess.project(user, parsed.data.projectId, "workflow:write", "Workflow");
+      ? await deps.runAccess.workflow(user, stored.id, "workflow:write")
+      : await deps.runAccess.project(user, parsed.data.projectId, "workflow:write", "Workflow");
     if (!access.ok) return deny(reply, access);
-    return approvals.eligibility({ workflow, spec: parsed.data, requester: user, accountBlind: !deps.canSeeProjectAccounts(user, workflow) });
+    return await approvals.eligibility({ workflow, spec: parsed.data, requester: user, accountBlind: !await deps.canSeeProjectAccounts(user, workflow) });
   });
 
   app.post<{ Params: { id: string }; Body: unknown }>("/api/approvals/:id/approve", (request, reply) => decide(request, reply, "approve"));

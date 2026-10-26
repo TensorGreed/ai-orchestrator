@@ -34,7 +34,6 @@ import type { ProviderRegistry } from "@ai-orchestrator/provider-sdk";
 import { createMcpSamplingHandler } from "@ai-orchestrator/workflow-engine";
 import type { z } from "zod";
 import type { AppConfig } from "./config.js";
-import type { SqliteStore } from "./db/database.js";
 import type { AuditEventInput } from "./services/audit-service.js";
 import type { RunAccess } from "./run-access.js";
 import type { SafeUser, UserRole } from "./services/auth-service.js";
@@ -91,6 +90,8 @@ import {
 import { McpClientService, capRole, resolveMcpClientSubject, roleRank } from "./services/mcp-client-service.js";
 import { MCP_TELEMETRY_WINDOWS, parseMcpTelemetryWindow, rollupMcpToolCalls } from "./services/mcp-tool-telemetry.js";
 import { startSseHeartbeat } from "./sse-heartbeat.js";
+import type { Store } from "./db/store.js";
+import { filterAsync, mapAsync } from "./async-array.js";
 
 const SERVER_VERSION = "0.1.0";
 const MAX_ERROR_CHARS = 500;
@@ -106,20 +107,20 @@ export interface GatewayWorkflowRunOutcome {
 export interface McpGatewayDeps {
   app: FastifyInstance;
   config: AppConfig;
-  store: SqliteStore;
+  store: Store;
   mcpRegistry: MCPRegistry;
   /** Phase 10.5 — answers `sampling/createMessage` with a server's default model; absent means sampling is refused. */
   providerRegistry?: ProviderRegistry;
   resolveSecret: MCPExecutionContext["resolveSecret"];
   redact: (value: string) => string;
-  resolveRegisteredMcpServer: (registryServerId: string) => MCPServerConfig;
+  resolveRegisteredMcpServer: (registryServerId: string) => Promise<MCPServerConfig>;
   requireRole: (request: FastifyRequest, reply: FastifyReply, roles: UserRole[]) => Promise<SafeUser | null>;
   /** Project scope: toolset candidates only list workflows the user can read. */
   runAccess: RunAccess;
   /** Audit with the signed-in admin as actor. */
-  auditUser: (request: FastifyRequest, user: SafeUser, event: Omit<AuditEventInput, "actor">) => void;
+  auditUser: (request: FastifyRequest, user: SafeUser, event: Omit<AuditEventInput, "actor">) => void | Promise<void>;
   /** Audit with an MCP client as actor. */
-  auditRaw: (event: AuditEventInput) => void;
+  auditRaw: (event: AuditEventInput) => void | Promise<void>;
   /**
    * Run a workflow tool like the REST invoke route does, with the client's
    * policy subject, record it in execution history and return its outcome.
@@ -141,9 +142,9 @@ export interface McpGatewayDeps {
    * version when there is one (gateway calls are production traffic), else
    * the draft. The admin API (toolset members, candidates) reads drafts.
    */
-  loadProductionWorkflow?: (id: string) => Workflow | null;
+  loadProductionWorkflow?: (id: string) => Promise<Workflow | null>;
   /** Phase 15.4 — why production refuses an existing workflow (a deactivated gated one); the tool call reports it. */
-  productionRefusal?: (id: string) => string | null;
+  productionRefusal?: (id: string) => Promise<string | null>;
 }
 
 interface AuthenticatedClient {
@@ -241,10 +242,10 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
         app.log.warn({ err: deps.redact(error.message) }, "Failed to close MCP sessions of a gateway session");
       }
     },
-    onEnded: (session, reason) => {
-      const client = store.getMcpClient(session.clientId);
-      const toolset = store.getMcpToolset(session.toolsetId);
-      deps.auditRaw({
+    onEnded: async (session, reason) => {
+      const client = await store.getMcpClient(session.clientId);
+      const toolset = await store.getMcpToolset(session.toolsetId);
+      await deps.auditRaw({
         category: "system",
         eventType: "mcp_gateway.session_ended",
         action: "delete",
@@ -276,7 +277,7 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     reply.code(status).header("content-type", "application/json").send(rpcError(null, code, message));
   };
 
-  const authenticate = (request: FastifyRequest, reply: FastifyReply): AuthenticatedClient | null => {
+  const authenticate = async (request: FastifyRequest, reply: FastifyReply): Promise<AuthenticatedClient | null> => {
     const header = headerValue(request, "authorization") ?? "";
     const match = header.match(/^Bearer\s+(.+)$/i);
     const unauthorized = (message: string) => {
@@ -285,7 +286,7 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
       return null;
     };
     if (!match) return unauthorized("A client token is required: send Authorization: Bearer <token>.");
-    const verification = clientService.verify(match[1]!);
+    const verification = await clientService.verify(match[1]!);
     if (!verification.ok) {
       const reason =
         verification.reason === "revoked"
@@ -295,21 +296,21 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
             : "Invalid client token.";
       return unauthorized(reason);
     }
-    return { client: verification.client, subject: resolveMcpClientSubject(store, verification.client) };
+    return { client: verification.client, subject: await resolveMcpClientSubject(store, verification.client) };
   };
 
   /** Origin, credential, toolset and scope checks shared by every method on /mcp/:toolset. */
-  const admit = (
+  const admit = async (
     request: FastifyRequest<{ Params: { toolset: string } }>,
     reply: FastifyReply
-  ): { auth: AuthenticatedClient; toolset: McpToolset } | null => {
+  ): Promise<{ auth: AuthenticatedClient; toolset: McpToolset } | null> => {
     if (!originAllowed(request)) {
       httpError(reply, 403, "Origin not allowed.");
       return null;
     }
-    const auth = authenticate(request, reply);
+    const auth = await authenticate(request, reply);
     if (!auth) return null;
-    const toolset = store.getMcpToolsetBySlug(request.params.toolset);
+    const toolset = await store.getMcpToolsetBySlug(request.params.toolset);
     if (!toolset || !toolset.enabled) {
       httpError(reply, 404, `Toolset '${request.params.toolset}' does not exist or is disabled.`);
       return null;
@@ -321,16 +322,16 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     return { auth, toolset };
   };
 
-  const productionWorkflow = (id: string): Workflow | null => (deps.loadProductionWorkflow ? deps.loadProductionWorkflow(id) : store.getWorkflow(id));
+  const productionWorkflow = async (id: string): Promise<Workflow | null> => (deps.loadProductionWorkflow ? deps.loadProductionWorkflow(id) : await store.getWorkflow(id));
   const catalogStore = {
     getWorkflow: productionWorkflow,
-    listMcpServers: () => store.listMcpServers(),
-    getMcpToolSnapshot: (id: string) => store.getMcpToolSnapshot(id),
-    listMcpToolPolicies: () => store.listMcpToolPolicies(),
-    listMcpToolClassifications: (registryServerId?: string) => store.listMcpToolClassifications(registryServerId)
+    listMcpServers: async () => await store.listMcpServers(),
+    getMcpToolSnapshot: async (id: string) => await store.getMcpToolSnapshot(id),
+    listMcpToolPolicies: async () => await store.listMcpToolPolicies(),
+    listMcpToolClassifications: async (registryServerId?: string) => await store.listMcpToolClassifications(registryServerId)
   };
-  const catalogFor = (toolset: McpToolset, role: McpPolicyRole): GatewayCatalog =>
-    buildGatewayCatalog({ toolset, role, store: catalogStore });
+  const catalogFor = async (toolset: McpToolset, role: McpPolicyRole): Promise<GatewayCatalog> =>
+    await buildGatewayCatalog({ toolset, role, store: catalogStore });
 
   const shouldAuditReadOnly = (session: GatewaySession, toolName: string): boolean => {
     const mode = config.MCP_GATEWAY_AUDIT_READ_ONLY_CALLS;
@@ -341,7 +342,7 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     return true;
   };
 
-  const auditToolCall = (input: {
+  const auditToolCall = async (input: {
     session: GatewaySession;
     auth: AuthenticatedClient;
     toolset: McpToolset;
@@ -354,7 +355,7 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
   }) => {
     // Write tools, workflow tools and failures always; read-only tools per MCP_GATEWAY_AUDIT_READ_ONLY_CALLS.
     if (input.ok && input.readOnly && !shouldAuditReadOnly(input.session, input.toolName)) return;
-    deps.auditRaw({
+    await deps.auditRaw({
       category: "system",
       eventType: "mcp_gateway.tool_called",
       action: "execute",
@@ -399,7 +400,7 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     let samplingUsage: { requests: number; inputTokens: number; outputTokens: number } | null = null;
     try {
       // Phase 10.7 — a delegated server acts with the client's owner's own account.
-      const serverConfig = withDelegatedUser(deps.resolveRegisteredMcpServer(tool.serverId), auth.subject);
+      const serverConfig = withDelegatedUser(await deps.resolveRegisteredMcpServer(tool.serverId), auth.subject);
       const adapter = mcpRegistry.get(serverConfig.serverId);
       const cancelled = new Promise<never>((_resolve, reject) => {
         if (signal.aborted) reject(new Error("Cancelled by the client."));
@@ -414,10 +415,10 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
             providerRegistry: deps.providerRegistry,
             resolveSecret: deps.resolveSecret,
             serverConfigs: [serverConfig],
-            evaluatePolicy: (subject) =>
+            evaluatePolicy: async (subject) =>
               evaluateToolForContext(
                 {
-                  rules: store.listMcpToolPolicies(),
+                  rules: await store.listMcpToolPolicies(),
                   classifications: [],
                   role: auth.subject.role,
                   projectId: toolset.projectId ?? null,
@@ -467,7 +468,7 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     }
     const durationMs = Date.now() - startedAt.getTime();
     try {
-      store.insertMcpToolCall({
+      await store.insertMcpToolCall({
         id: `mtc_${crypto.randomUUID()}`,
         executionId: `mcpgw_${crypto.randomUUID()}`,
         workflowId: "",
@@ -492,7 +493,7 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     } catch (error) {
       app.log.warn({ err: deps.redact(error instanceof Error ? error.message : String(error)) }, "Failed to record MCP gateway telemetry");
     }
-    auditToolCall({
+    await auditToolCall({
       session,
       auth,
       toolset,
@@ -524,10 +525,10 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
   }): Promise<McpCallToolResult> => {
     const { session, auth, toolset, tool, args, executionId } = input;
     const startedAt = new Date();
-    const workflow = productionWorkflow(tool.workflowId);
+    const workflow = await productionWorkflow(tool.workflowId);
     let outcome: GatewayWorkflowRunOutcome;
     if (!workflow) {
-      const refusal = deps.productionRefusal?.(tool.workflowId) ?? null;
+      const refusal = (await deps.productionRefusal?.(tool.workflowId)) ?? null;
       outcome = { status: "error", error: refusal ? `Workflow '${tool.workflowName}': ${refusal}` : `Workflow '${tool.workflowName}' no longer exists.` };
     } else {
       const total = workflow.nodes.length;
@@ -570,7 +571,7 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     const ok = errorText === null;
     const durationMs = Date.now() - startedAt.getTime();
     try {
-      store.insertMcpToolCall({
+      await store.insertMcpToolCall({
         id: `mtc_${crypto.randomUUID()}`,
         executionId,
         workflowId: tool.workflowId,
@@ -591,7 +592,7 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     } catch (error) {
       app.log.warn({ err: deps.redact(error instanceof Error ? error.message : String(error)) }, "Failed to record MCP gateway telemetry");
     }
-    auditToolCall({
+    await auditToolCall({
       session,
       auth,
       toolset,
@@ -625,14 +626,14 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     }
     const args = asRecord(params.arguments);
     const name = params.name;
-    const catalog = catalogFor(toolset, auth.subject.role);
+    const catalog = await catalogFor(toolset, auth.subject.role);
     const tool = catalog.tools.find((entry) => entry.name === name);
     if (!tool) {
       const hidden = catalog.hidden.find((entry) => entry.name === name);
       if (!hidden) {
         return rpcError(request.id, JSON_RPC_ERRORS.invalidParams, `Unknown tool: ${name}`);
       }
-      deps.auditRaw({
+      await deps.auditRaw({
         category: "system",
         eventType: "mcp_gateway.tool_denied",
         action: "execute",
@@ -721,7 +722,7 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
           if (offset === null) {
             return rpcError(request.id, JSON_RPC_ERRORS.invalidParams, "Invalid cursor.");
           }
-          const catalog = catalogFor(toolset, auth.subject.role);
+          const catalog = await catalogFor(toolset, auth.subject.role);
           const page = catalog.tools.slice(offset, offset + TOOLS_PAGE_SIZE);
           const next = offset + TOOLS_PAGE_SIZE < catalog.tools.length ? encodeCursor(offset + TOOLS_PAGE_SIZE) : undefined;
           return rpcResult(request.id, { tools: page.map(toMcpToolDescriptor), ...(next ? { nextCursor: next } : {}) });
@@ -786,7 +787,7 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
       }
       throw error;
     }
-    deps.auditRaw({
+    await deps.auditRaw({
       category: "system",
       eventType: "mcp_gateway.session_started",
       action: "create",
@@ -834,7 +835,7 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     });
 
     scope.post<{ Params: { toolset: string } }>("/mcp/:toolset", async (request, reply) => {
-      const admitted = admit(request, reply);
+      const admitted = await admit(request, reply);
       if (!admitted) return reply;
       const { auth, toolset } = admitted;
       const accept = headerValue(request, "accept");
@@ -986,7 +987,7 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     });
 
     scope.delete<{ Params: { toolset: string } }>("/mcp/:toolset", async (request, reply) => {
-      const admitted = admit(request, reply);
+      const admitted = await admit(request, reply);
       if (!admitted) return reply;
       const sessionHeader = headerValue(request, "mcp-session-id");
       if (!sessionHeader) {
@@ -1010,14 +1011,14 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
 
   const gatewayBaseUrl = config.MCP_GATEWAY_PUBLIC_URL.replace(/\/+$/, "") || null;
 
-  const toolsetView = (toolset: McpToolset) => {
-    const servers = new Map(store.listMcpServers().map((server) => [server.id, server]));
+  const toolsetView = async (toolset: McpToolset) => {
+    const servers = new Map((await store.listMcpServers()).map((server) => [server.id, server]));
     return {
       ...toolset,
       endpointPath: `/mcp/${toolset.slug}`,
-      members: toolset.members.map((member) => {
+      members: await mapAsync(toolset.members, async (member) => {
         if (member.kind === "workflow") {
-          const workflow = store.getWorkflow(member.workflowId);
+          const workflow = await store.getWorkflow(member.workflowId);
           return { ...member, label: workflow?.name ?? member.workflowId, missing: !workflow };
         }
         const server = servers.get(member.serverId);
@@ -1029,12 +1030,12 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
 
   type MemberInput = z.infer<typeof mcpToolsetMemberInputSchema>;
 
-  const validateMembers = (members: MemberInput[], reply: FastifyReply): McpToolsetMemberSpec[] | null => {
+  const validateMembers = async (members: MemberInput[], reply: FastifyReply): Promise<McpToolsetMemberSpec[] | null> => {
     const seen = new Set<string>();
     const result: McpToolsetMemberSpec[] = [];
     for (const member of members) {
       if (member.kind === "workflow") {
-        const workflow = store.getWorkflow(member.workflowId);
+        const workflow = await store.getWorkflow(member.workflowId);
         if (!workflow) {
           reply.code(400).send({ error: `Workflow '${member.workflowId}' does not exist` });
           return null;
@@ -1048,7 +1049,7 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
         seen.add(key);
         result.push({ kind: "workflow", workflowId: member.workflowId });
       } else {
-        if (!store.getMcpServer(member.serverId)) {
+        if (!await store.getMcpServer(member.serverId)) {
           reply.code(400).send({ error: `MCP server '${member.serverId}' is not registered` });
           return null;
         }
@@ -1062,17 +1063,17 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     return result;
   };
 
-  const uniqueSlug = (base: string): string => {
+  const uniqueSlug = async (base: string): Promise<string> => {
     let candidate = base;
     let counter = 2;
-    while (store.getMcpToolsetBySlug(candidate)) {
+    while (await store.getMcpToolsetBySlug(candidate)) {
       candidate = `${base}-${counter}`;
       counter += 1;
     }
     return candidate;
   };
 
-  const auditToolset = (
+  const auditToolset = async (
     request: FastifyRequest,
     user: SafeUser,
     eventType: string,
@@ -1080,7 +1081,7 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     toolset: McpToolset,
     metadata: Record<string, unknown> = {}
   ) => {
-    deps.auditUser(request, user, {
+    await deps.auditUser(request, user, {
       category: "system",
       eventType,
       action,
@@ -1092,8 +1093,8 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     });
   };
 
-  const findToolset = (id: string, reply: FastifyReply): McpToolset | null => {
-    const toolset = store.getMcpToolset(id);
+  const findToolset = async (id: string, reply: FastifyReply): Promise<McpToolset | null> => {
+    const toolset = await store.getMcpToolset(id);
     if (!toolset) {
       reply.code(404).send({ error: "Toolset not found" });
       return null;
@@ -1105,7 +1106,7 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     const user = await deps.requireRole(request, reply, ["builder"]);
     if (!user) return reply;
     return {
-      toolsets: store.listMcpToolsets().map(toolsetView),
+      toolsets: await mapAsync(await store.listMcpToolsets(), toolsetView),
       gatewayBaseUrl,
       protocolVersions: MCP_SUPPORTED_PROTOCOL_VERSIONS
     };
@@ -1116,11 +1117,11 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     const user = await deps.requireRole(request, reply, ["builder"]);
     if (!user) return reply;
     const workflows: Array<{ id: string; name: string; projectId: string | null; tools: string[] }> = [];
-    const readable = deps.runAccess.readableWorkflowIds(user);
+    const readable = await deps.runAccess.readableWorkflowIds(user);
     const readableIds = readable && new Set(readable);
-    for (const summary of store.listWorkflows()) {
+    for (const summary of await store.listWorkflows()) {
       if (readableIds && !readableIds.has(summary.id)) continue;
-      const workflow = store.getWorkflow(summary.id);
+      const workflow = await store.getWorkflow(summary.id);
       if (!workflow) continue;
       const tools = workflow.nodes
         .filter((node) => node.type === "mcp_server_trigger")
@@ -1138,22 +1139,22 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
   app.get<{ Params: { id: string } }>("/api/mcp/toolsets/:id", async (request, reply) => {
     const user = await deps.requireRole(request, reply, ["builder"]);
     if (!user) return reply;
-    const toolset = findToolset(request.params.id, reply);
+    const toolset = await findToolset(request.params.id, reply);
     if (!toolset) return reply;
-    return { toolset: toolsetView(toolset), gatewayBaseUrl };
+    return { toolset: await toolsetView(toolset), gatewayBaseUrl };
   });
 
   app.get<{ Params: { id: string }; Querystring: { role?: string } }>("/api/mcp/toolsets/:id/preview", async (request, reply) => {
     const user = await deps.requireRole(request, reply, ["builder"]);
     if (!user) return reply;
-    const toolset = findToolset(request.params.id, reply);
+    const toolset = await findToolset(request.params.id, reply);
     if (!toolset) return reply;
     const parsedRole = request.query.role === undefined ? { success: true as const, data: user.role } : mcpPolicyRoleSchema.safeParse(request.query.role);
     if (!parsedRole.success) {
       reply.code(400);
       return { error: "role must be one of admin, builder, operator, viewer" };
     }
-    const catalog = catalogFor(toolset, parsedRole.data);
+    const catalog = await catalogFor(toolset, parsedRole.data);
     return {
       toolsetId: toolset.id,
       role: parsedRole.data,
@@ -1172,19 +1173,19 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
       reply.code(400);
       return { error: "Invalid toolset payload", details: parsed.error.issues };
     }
-    if (parsed.data.projectId && !store.getProject(parsed.data.projectId)) {
+    if (parsed.data.projectId && !await store.getProject(parsed.data.projectId)) {
       reply.code(400);
       return { error: `Project '${parsed.data.projectId}' does not exist` };
     }
-    if (parsed.data.slug && store.getMcpToolsetBySlug(parsed.data.slug)) {
+    if (parsed.data.slug && await store.getMcpToolsetBySlug(parsed.data.slug)) {
       reply.code(409);
       return { error: `A toolset with the slug '${parsed.data.slug}' already exists` };
     }
-    const members = validateMembers(parsed.data.members ?? [], reply);
+    const members = await validateMembers(parsed.data.members ?? [], reply);
     if (!members) return reply;
-    const toolset = store.createMcpToolset({
+    const toolset = await store.createMcpToolset({
       id: `mts_${crypto.randomUUID()}`,
-      slug: parsed.data.slug ?? uniqueSlug(slugifyToolsetName(parsed.data.name)),
+      slug: parsed.data.slug ?? await uniqueSlug(slugifyToolsetName(parsed.data.name)),
       name: parsed.data.name,
       description: parsed.data.description ?? null,
       projectId: parsed.data.projectId ?? null,
@@ -1192,90 +1193,90 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
       createdBy: user.email,
       members
     });
-    auditToolset(request, user, "mcp_toolset.created", "create", toolset);
+    await auditToolset(request, user, "mcp_toolset.created", "create", toolset);
     reply.code(201);
-    return { toolset: toolsetView(toolset) };
+    return { toolset: await toolsetView(toolset) };
   });
 
   app.put<{ Params: { id: string } }>("/api/mcp/toolsets/:id", async (request, reply) => {
     const user = await deps.requireRole(request, reply, ["admin"]);
     if (!user) return reply;
-    const existing = findToolset(request.params.id, reply);
+    const existing = await findToolset(request.params.id, reply);
     if (!existing) return reply;
     const parsed = mcpToolsetUpdateSchema.safeParse(request.body);
     if (!parsed.success) {
       reply.code(400);
       return { error: "Invalid toolset payload", details: parsed.error.issues };
     }
-    if (parsed.data.projectId && !store.getProject(parsed.data.projectId)) {
+    if (parsed.data.projectId && !await store.getProject(parsed.data.projectId)) {
       reply.code(400);
       return { error: `Project '${parsed.data.projectId}' does not exist` };
     }
-    if (parsed.data.slug && parsed.data.slug !== existing.slug && store.getMcpToolsetBySlug(parsed.data.slug)) {
+    if (parsed.data.slug && parsed.data.slug !== existing.slug && await store.getMcpToolsetBySlug(parsed.data.slug)) {
       reply.code(409);
       return { error: `A toolset with the slug '${parsed.data.slug}' already exists` };
     }
     let members: McpToolsetMemberSpec[] | undefined;
     if (parsed.data.members !== undefined) {
-      const validated = validateMembers(parsed.data.members, reply);
+      const validated = await validateMembers(parsed.data.members, reply);
       if (!validated) return reply;
       members = validated;
     }
     const { members: _members, ...fields } = parsed.data;
-    const updated = store.updateMcpToolset(existing.id, { ...fields, ...(members ? { members } : {}) })!;
+    const updated = (await store.updateMcpToolset(existing.id, { ...fields, ...(members ? { members } : {}) }))!;
     // A new URL or a disabled toolset ends the sessions bound to the old one.
     if (updated.slug !== existing.slug || !updated.enabled) {
       await sessions.endWhere((session) => session.toolsetId === existing.id, "toolset_removed");
     }
-    auditToolset(request, user, "mcp_toolset.updated", "update", updated, { fields: Object.keys(parsed.data) });
-    return { toolset: toolsetView(updated) };
+    await auditToolset(request, user, "mcp_toolset.updated", "update", updated, { fields: Object.keys(parsed.data) });
+    return { toolset: await toolsetView(updated) };
   });
 
   app.delete<{ Params: { id: string } }>("/api/mcp/toolsets/:id", async (request, reply) => {
     const user = await deps.requireRole(request, reply, ["admin"]);
     if (!user) return reply;
-    const existing = findToolset(request.params.id, reply);
+    const existing = await findToolset(request.params.id, reply);
     if (!existing) return reply;
-    store.deleteMcpToolset(existing.id);
+    await store.deleteMcpToolset(existing.id);
     await sessions.endWhere((session) => session.toolsetId === existing.id, "toolset_removed");
-    auditToolset(request, user, "mcp_toolset.deleted", "delete", existing);
+    await auditToolset(request, user, "mcp_toolset.deleted", "delete", existing);
     return { ok: true };
   });
 
   app.post<{ Params: { id: string } }>("/api/mcp/toolsets/:id/members", async (request, reply) => {
     const user = await deps.requireRole(request, reply, ["admin"]);
     if (!user) return reply;
-    const existing = findToolset(request.params.id, reply);
+    const existing = await findToolset(request.params.id, reply);
     if (!existing) return reply;
     const parsed = mcpToolsetMemberInputSchema.safeParse(request.body);
     if (!parsed.success) {
       reply.code(400);
       return { error: "Invalid toolset member", details: parsed.error.issues };
     }
-    const added = validateMembers([parsed.data], reply);
+    const added = await validateMembers([parsed.data], reply);
     if (!added) return reply;
     const members = [...existing.members, ...added];
-    const updated = store.updateMcpToolset(existing.id, { members })!;
-    auditToolset(request, user, "mcp_toolset.member_added", "update", updated, { member: added[0] ?? null });
+    const updated = (await store.updateMcpToolset(existing.id, { members }))!;
+    await auditToolset(request, user, "mcp_toolset.member_added", "update", updated, { member: added[0] ?? null });
     reply.code(201);
-    return { toolset: toolsetView(updated) };
+    return { toolset: await toolsetView(updated) };
   });
 
   app.delete<{ Params: { id: string; memberId: string } }>("/api/mcp/toolsets/:id/members/:memberId", async (request, reply) => {
     const user = await deps.requireRole(request, reply, ["admin"]);
     if (!user) return reply;
-    const existing = findToolset(request.params.id, reply);
+    const existing = await findToolset(request.params.id, reply);
     if (!existing) return reply;
     const member = existing.members.find((entry) => entry.id === request.params.memberId);
     if (!member) {
       reply.code(404);
       return { error: "Toolset member not found" };
     }
-    const updated = store.updateMcpToolset(existing.id, {
+    const updated = (await store.updateMcpToolset(existing.id, {
       members: existing.members.filter((entry) => entry.id !== member.id)
-    })!;
-    auditToolset(request, user, "mcp_toolset.member_removed", "update", updated, { member });
-    return { toolset: toolsetView(updated) };
+    }))!;
+    await auditToolset(request, user, "mcp_toolset.member_removed", "update", updated, { member });
+    return { toolset: await toolsetView(updated) };
   });
 
   // ---------------------------------------------------------------------------
@@ -1288,10 +1289,10 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     return "active";
   };
 
-  const clientView = (client: McpClient, usage?: { calls: number; errors: number; lastCalledAt: string | null }) => ({
+  const clientView = async (client: McpClient, usage?: { calls: number; errors: number; lastCalledAt: string | null }) => ({
     ...client,
     status: clientStatus(client),
-    effectiveRole: resolveMcpClientSubject(store, client).role,
+    effectiveRole: (await resolveMcpClientSubject(store, client)).role,
     activeSessions: sessions.count((session) => session.clientId === client.id),
     usage: usage ? { calls: usage.calls, errors: usage.errors, lastCalledAt: usage.lastCalledAt } : { calls: 0, errors: 0, lastCalledAt: null }
   });
@@ -1300,10 +1301,10 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     const user = await deps.requireRole(request, reply, ["builder"]);
     if (!user) return reply;
     const since = new Date(Date.now() - MCP_TELEMETRY_WINDOWS["7d"]).toISOString();
-    const usage = new Map(store.summarizeMcpClientUsage(since).map((row) => [row.clientId, row]));
+    const usage = new Map((await store.summarizeMcpClientUsage(since)).map((row) => [row.clientId, row]));
     return {
       usageWindow: "7d",
-      clients: store.listMcpClients().map((client) => clientView(client, usage.get(client.id)))
+      clients: await mapAsync(await store.listMcpClients(), (client) => clientView(client, usage.get(client.id)))
     };
   });
 
@@ -1315,7 +1316,7 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
       reply.code(400);
       return { error: "Invalid client payload", details: parsed.error.issues };
     }
-    const missing = parsed.data.toolsetIds.filter((id) => !store.getMcpToolset(id));
+    const missing = await filterAsync(parsed.data.toolsetIds, async (id) => !(await store.getMcpToolset(id)));
     if (missing.length > 0) {
       reply.code(400);
       return { error: `Unknown toolset(s): ${missing.join(", ")}` };
@@ -1328,7 +1329,7 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
       reply.code(400);
       return { error: "expiresAt must be in the future" };
     }
-    const { client, token } = clientService.create({
+    const { client, token } = await clientService.create({
       name: parsed.data.name,
       toolsetIds: parsed.data.toolsetIds,
       role: capRole(parsed.data.role, user.role),
@@ -1336,7 +1337,7 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
       createdByEmail: user.email,
       expiresAt: parsed.data.expiresAt ? new Date(parsed.data.expiresAt).toISOString() : null
     });
-    deps.auditUser(request, user, {
+    await deps.auditUser(request, user, {
       category: "system",
       eventType: "mcp_client.created",
       action: "create",
@@ -1347,21 +1348,21 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     });
     reply.code(201);
     // The only response that carries the token.
-    return { client: clientView(client), token };
+    return { client: await clientView(client), token };
   });
 
   app.post<{ Params: { id: string } }>("/api/mcp/clients/:id/revoke", async (request, reply) => {
     const user = await deps.requireRole(request, reply, ["admin"]);
     if (!user) return reply;
-    const existing = store.getMcpClient(request.params.id);
+    const existing = await store.getMcpClient(request.params.id);
     if (!existing) {
       reply.code(404);
       return { error: "Client not found" };
     }
-    const revoked = store.revokeMcpClient(existing.id)!;
+    const revoked = (await store.revokeMcpClient(existing.id))!;
     const closed = await sessions.endWhere((session) => session.clientId === existing.id, "revoked");
     if (!existing.revokedAt) {
-      deps.auditUser(request, user, {
+      await deps.auditUser(request, user, {
         category: "system",
         eventType: "mcp_client.revoked",
         action: "update",
@@ -1371,13 +1372,13 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
         metadata: { name: existing.name, tokenPrefix: existing.tokenPrefix, closedSessions: closed }
       });
     }
-    return { client: clientView(revoked) };
+    return { client: await clientView(revoked) };
   });
 
   app.get<{ Params: { id: string } }>("/api/mcp/clients/:id/usage", async (request, reply) => {
     const user = await deps.requireRole(request, reply, ["builder"]);
     if (!user) return reply;
-    const client = store.getMcpClient(request.params.id);
+    const client = await store.getMcpClient(request.params.id);
     if (!client) {
       reply.code(404);
       return { error: "Client not found" };
@@ -1388,7 +1389,7 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
       return { error: `window must be one of ${Object.keys(MCP_TELEMETRY_WINDOWS).join(", ")}` };
     }
     const since = new Date(Date.now() - MCP_TELEMETRY_WINDOWS[window]).toISOString();
-    const rollup = rollupMcpToolCalls(store.listMcpToolCallsForClient(client.id, since));
+    const rollup = rollupMcpToolCalls(await store.listMcpToolCallsForClient(client.id, since));
     return { clientId: client.id, window, since, lastUsedAt: client.lastUsedAt, ...rollup };
   });
 

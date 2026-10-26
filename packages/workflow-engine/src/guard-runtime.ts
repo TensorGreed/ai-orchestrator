@@ -122,7 +122,7 @@ export interface GuardRuntimeDependencies {
    * asks for propagated labels, so the run skips the resolution. Absent: the
    * run resolves.
    */
-  mayUseLabels?(): boolean;
+  mayUseLabels?(): boolean | Promise<boolean>;
   /**
    * Phase 16 — the deployment's data destination rows (admin
    * classifications), read once per run when a check needs them. Absent:

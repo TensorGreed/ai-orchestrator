@@ -9,6 +9,7 @@
     "build": "tsc -p tsconfig.json --noEmit",
     "start": "tsx src/index.ts",
     "test": "vitest run --passWithNoTests",
+    "lint": "node scripts/check-floating-promises.mjs ../../packages/workflow-engine/tsconfig.json",
     "db:rollback": "tsx src/scripts/db-rollback.ts",
     "db:export": "tsx src/scripts/db-export.ts",
     "db:import": "tsx src/scripts/db-import.ts"
@@ -40,6 +41,7 @@
     "@types/better-sqlite3": "^7.6.12",
     "@types/node": "^22.15.3",
     "@types/pg": "^8.11.10",
-    "tsx": "^4.20.5"
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2"
   }
 }

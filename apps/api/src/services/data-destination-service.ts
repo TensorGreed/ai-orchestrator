@@ -35,8 +35,9 @@ import {
   type Workflow
 } from "@ai-orchestrator/shared";
 import { providerDestinationHost } from "@ai-orchestrator/provider-sdk";
-import type { DataDestinationWrite, McpServerRecord, SqliteStore } from "../db/database.js";
+import type { DataDestinationWrite, McpServerRecord } from "../db/database.js";
 import type { SafeUser } from "./auth-service.js";
+import type { Store } from "../db/store.js";
 
 export class DataDestinationError extends Error {
   constructor(
@@ -194,11 +195,11 @@ export function collectConfiguredDestinations(input: CollectInput): ConfiguredDe
 
 export interface DataDestinationServiceDeps {
   /** Null on Postgres: rows are SQLite only in this release. */
-  store: SqliteStore | null;
+  store: Store | null;
   /** Workflow ids the user can read, or null for every workflow (admins). */
-  readableWorkflowIds: (user: SafeUser) => string[] | null;
+  readableWorkflowIds: (user: SafeUser) => Promise<string[] | null>;
   /** Project ids the user can read, or null for every project (admins). */
-  readableProjectIds: (user: SafeUser) => string[] | null;
+  readableProjectIds: (user: SafeUser) => Promise<string[] | null>;
   env?: Record<string, string | undefined>;
 }
 
@@ -214,18 +215,18 @@ export class DataDestinationService {
     return this.deps.store !== null;
   }
 
-  private get store(): SqliteStore {
+  private get store(): Store {
     if (!this.deps.store) throw new DataDestinationError(501, "Data destinations need the SQLite store in this release");
     return this.deps.store;
   }
 
-  list(): DataDestinationListView {
-    return { destinations: this.store.listDataDestinations(), builtIns: [...BUILTIN_DESTINATIONS] };
+  async list(): Promise<DataDestinationListView> {
+    return { destinations: await this.store.listDataDestinations(), builtIns: [...BUILTIN_DESTINATIONS] };
   }
 
   /** Every admin row, for resolving destinations. */
-  rows(): DataDestinationRow[] {
-    return this.deps.store ? this.deps.store.listDataDestinations() : [];
+  async rows(): Promise<DataDestinationRow[]> {
+    return this.deps.store ? await this.deps.store.listDataDestinations() : [];
   }
 
   private parse(body: unknown): DataDestinationWrite {
@@ -243,8 +244,8 @@ export class DataDestinationService {
    * `removedIds` left out. Every row is validated like a save and never
    * stored. Returns the stored rows too (the preview's baseline).
    */
-  previewRows(request: { rows: Array<Record<string, unknown>>; removedIds: string[] }): { baseline: DataDestinationRow[]; candidate: DataDestinationRow[] } {
-    const baseline = this.store.listDataDestinations();
+  async previewRows(request: { rows: Array<Record<string, unknown>>; removedIds: string[] }): Promise<{ baseline: DataDestinationRow[]; candidate: DataDestinationRow[] }> {
+    const baseline = await this.store.listDataDestinations();
     const removed = new Set(request.removedIds);
     for (const id of removed) this.refuseBuiltIn(id);
     const now = new Date().toISOString();
@@ -270,35 +271,35 @@ export class DataDestinationService {
     }
   }
 
-  private refuseDuplicate(write: DataDestinationWrite, exceptId?: string): void {
-    const existing = this.store.findDataDestinationByMatch(write.kind, write.targetId, write.host);
+  private async refuseDuplicate(write: DataDestinationWrite, exceptId?: string): Promise<void> {
+    const existing = await this.store.findDataDestinationByMatch(write.kind, write.targetId, write.host);
     if (existing && existing.id !== exceptId) {
       throw new DataDestinationError(409, `"${existing.name}" already classifies this destination; edit it instead`, { existingId: existing.id });
     }
   }
 
-  create(body: unknown, actor: string | null): DataDestinationRow {
+  async create(body: unknown, actor: string | null): Promise<DataDestinationRow> {
     const write = this.parse(body);
-    this.refuseDuplicate(write);
-    return this.store.insertDataDestination({ ...write, id: `dst_${randomUUID()}`, actor });
+    await this.refuseDuplicate(write);
+    return await this.store.insertDataDestination({ ...write, id: `dst_${randomUUID()}`, actor });
   }
 
   /** Returns the row before and after the change. */
-  update(id: string, body: unknown, actor: string | null): { before: DataDestinationRow; after: DataDestinationRow } {
+  async update(id: string, body: unknown, actor: string | null): Promise<{ before: DataDestinationRow; after: DataDestinationRow }> {
     this.refuseBuiltIn(id);
-    const before = this.store.getDataDestination(id);
+    const before = await this.store.getDataDestination(id);
     if (!before) throw new DataDestinationError(404, "Destination not found");
     const write = this.parse(body);
-    this.refuseDuplicate(write, id);
-    const after = this.store.updateDataDestination(id, { ...write, actor });
+    await this.refuseDuplicate(write, id);
+    const after = await this.store.updateDataDestination(id, { ...write, actor });
     if (!after) throw new DataDestinationError(404, "Destination not found");
     return { before, after };
   }
 
-  remove(id: string): DataDestinationRow {
+  async remove(id: string): Promise<DataDestinationRow> {
     this.refuseBuiltIn(id);
-    const before = this.store.getDataDestination(id);
-    if (!before || !this.store.deleteDataDestination(id)) throw new DataDestinationError(404, "Destination not found");
+    const before = await this.store.getDataDestination(id);
+    if (!before || !await this.store.deleteDataDestination(id)) throw new DataDestinationError(404, "Destination not found");
     return before;
   }
 
@@ -307,10 +308,10 @@ export class DataDestinationService {
    * the user can read: their workflows, and MCP servers that are global or in
    * their projects.
    */
-  unclassified(user: SafeUser): UnclassifiedDestination[] {
+  async unclassified(user: SafeUser): Promise<UnclassifiedDestination[]> {
     const store = this.store;
-    const readableWorkflows = this.deps.readableWorkflowIds(user);
-    const readableProjects = this.deps.readableProjectIds(user);
+    const readableWorkflows = await this.deps.readableWorkflowIds(user);
+    const readableProjects = await this.deps.readableProjectIds(user);
     const workflowIds = readableWorkflows === null ? null : new Set(readableWorkflows);
     const projectIds = readableProjects === null ? null : new Set(readableProjects);
     const parse = (json: string | null): Workflow | null => {
@@ -323,14 +324,14 @@ export class DataDestinationService {
     };
     // One query for every workflow's draft and published JSON (no per-workflow loads).
     const workflows: CollectWorkflow[] = [];
-    for (const item of store.listWorkflowConfigsForDestinations()) {
+    for (const item of await store.listWorkflowConfigsForDestinations()) {
       if (workflowIds !== null && !workflowIds.has(item.id)) continue;
       const draft = parse(item.draftJson);
       if (!draft) continue;
       workflows.push({ id: item.id, name: item.name, nodes: draft.nodes ?? [], published: parse(item.publishedJson) });
     }
-    const mcpServers = store.listMcpServers().filter((server) => projectIds === null || server.projectId === null || projectIds.has(server.projectId));
+    const mcpServers = (await store.listMcpServers()).filter((server) => projectIds === null || server.projectId === null || projectIds.has(server.projectId));
     const configured = collectConfiguredDestinations({ workflows, mcpServers, env: this.deps.env });
-    return findUnclassifiedDestinations(configured, store.listDataDestinations());
+    return findUnclassifiedDestinations(configured, await store.listDataDestinations());
   }
 }

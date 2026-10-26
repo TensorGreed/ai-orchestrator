@@ -64,10 +64,12 @@ import type {
   GuardEventInsert,
   GuardEventRecord,
   GuardProfileRecord,
-  GuardProfileVersionRecord,
-  SqliteStore
+  GuardProfileVersionRecord
 } from "../db/database.js";
 import type { SecretService } from "./secret-service.js";
+import type { Store } from "../db/store.js";
+import { mapAsync } from "../async-array.js";
+import { storeImplements } from "../db/store-support.js";
 
 export interface GuardFieldIssue {
   path: string;
@@ -102,7 +104,7 @@ export interface GuardServiceOptions {
   autoApply: boolean;
   logger?: (message: string, metadata?: Record<string, unknown>) => void;
   /** Phase 16 — the deployment's data destination rows, read when a run first needs them (once per run). */
-  destinationRows?: () => DataDestinationRow[];
+  destinationRows?: () => Promise<DataDestinationRow[]>;
   /** Phase 16 — the deployment surrogate key (HKDF `l2m/capture-surrogate/v1`), for runtime surrogates. */
   surrogateKey?: Uint8Array;
 }
@@ -172,7 +174,7 @@ export class GuardService {
   private readonly loadedProfiles = new Map<string, { revision: number; value: ResolvedGuardProfile | undefined }>();
 
   constructor(
-    private readonly store: SqliteStore,
+    private readonly store: Store,
     private readonly secrets: SecretService,
     private readonly options: GuardServiceOptions
   ) {}
@@ -186,13 +188,13 @@ export class GuardService {
   // -------------------------------------------------------------------------
 
   /** Seeds the built-in default profile; appends a version when the shipped default changed. */
-  ensureBuiltIns(): void {
+  async ensureBuiltIns(): Promise<void> {
     const shipped = createDefaultGuardProfile();
     const document = this.documentOf(shipped);
     const hash = hashGuardProfile(shipped);
-    const existing = this.store.getGuardProfile(GUARD_BUILTIN_PROFILE_ID);
+    const existing = await this.store.getGuardProfile(GUARD_BUILTIN_PROFILE_ID);
     if (!existing) {
-      this.store.insertGuardProfile({
+      await this.store.insertGuardProfile({
         id: GUARD_BUILTIN_PROFILE_ID,
         name: shipped.name,
         description: shipped.description ?? null,
@@ -205,7 +207,7 @@ export class GuardService {
       return;
     }
     if (existing.latestHash !== hash) {
-      this.store.addGuardProfileVersion({
+      await this.store.addGuardProfileVersion({
         profileId: GUARD_BUILTIN_PROFILE_ID,
         name: shipped.name,
         description: shipped.description ?? null,
@@ -218,7 +220,7 @@ export class GuardService {
   }
 
   /** Validates a profile document with the guard-sdk schema; field-level issues on failure. */
-  validateDocument(document: unknown, idOverride?: string): GuardProfile {
+  async validateDocument(document: unknown, idOverride?: string): Promise<GuardProfile> {
     const candidate =
       document && typeof document === "object" && !Array.isArray(document)
         ? { ...(document as Record<string, unknown>), ...(idOverride ? { id: idOverride } : {}) }
@@ -243,7 +245,7 @@ export class GuardService {
           });
         }
         if (option === "keyId") {
-          const secret = typeof value === "string" ? this.store.getSecret(value) : null;
+          const secret = typeof value === "string" ? await this.store.getSecret(value) : null;
           if (!secret) {
             issues.push({ path: `protection.dataClasses.${dataClass}.options.keyId`, message: "keyId must be the id of a stored secret" });
           }
@@ -268,27 +270,27 @@ export class GuardService {
     return result.data;
   }
 
-  listProfiles(): GuardProfileSummary[] {
-    return this.store.listGuardProfiles().map((record) => this.summaryOf(record));
+  async listProfiles(): Promise<GuardProfileSummary[]> {
+    return await mapAsync(await this.store.listGuardProfiles(), (record) => this.summaryOf(record));
   }
 
-  getProfile(id: string): { profile: GuardProfileSummary; latest: GuardProfileVersionView } | null {
-    const record = this.store.getGuardProfile(id);
-    const latest = record ? this.store.getGuardProfileVersion(id) : null;
+  async getProfile(id: string): Promise<{ profile: GuardProfileSummary; latest: GuardProfileVersionView } | null> {
+    const record = await this.store.getGuardProfile(id);
+    const latest = record ? await this.store.getGuardProfileVersion(id) : null;
     if (!record || !latest) return null;
-    return { profile: this.summaryOf(record), latest: this.versionView(latest) };
+    return { profile: await this.summaryOf(record), latest: this.versionView(latest) };
   }
 
-  listVersions(id: string): GuardProfileVersionView[] {
-    return this.store.listGuardProfileVersions(id).map((version) => this.versionView(version));
+  async listVersions(id: string): Promise<GuardProfileVersionView[]> {
+    return (await this.store.listGuardProfileVersions(id)).map((version) => this.versionView(version));
   }
 
-  getVersion(id: string, version: number): GuardProfileVersionView | null {
-    const record = this.store.getGuardProfileVersion(id, version);
+  async getVersion(id: string, version: number): Promise<GuardProfileVersionView | null> {
+    const record = await this.store.getGuardProfileVersion(id, version);
     return record ? this.versionView(record) : null;
   }
 
-  createProfile(input: { id?: string; document: Record<string, unknown>; note?: string }, actorId: string | null, options: { reserved?: boolean } = {}): GuardProfileSummary {
+  async createProfile(input: { id?: string; document: Record<string, unknown>; note?: string }, actorId: string | null, options: { reserved?: boolean } = {}): Promise<GuardProfileSummary> {
     const id = input.id ?? (typeof input.document.id === "string" ? input.document.id : undefined);
     if (!id || !/^[a-z0-9][a-z0-9_-]{1,62}$/.test(id)) {
       throw new GuardValidationError("Invalid guard profile", [{ path: "id", message: "Use 2–63 lowercase letters, digits, dashes or underscores" }]);
@@ -299,11 +301,11 @@ export class GuardService {
         { path: "id", message: `'${id}' is reserved for the deployment's destination rules; set those up under Security → Data destinations` }
       ]);
     }
-    if (id === GUARD_BUILTIN_PROFILE_ID || this.store.getGuardProfile(id)) {
+    if (id === GUARD_BUILTIN_PROFILE_ID || await this.store.getGuardProfile(id)) {
       throw new GuardConflictError(`A guard profile with id '${id}' already exists`);
     }
-    const profile = this.validateDocument(input.document, id);
-    const record = this.store.insertGuardProfile({
+    const profile = await this.validateDocument(input.document, id);
+    const record = await this.store.insertGuardProfile({
       id,
       name: profile.name,
       description: profile.description ?? null,
@@ -312,19 +314,19 @@ export class GuardService {
       note: input.note ?? null,
       createdBy: actorId
     });
-    return this.summaryOf(record);
+    return await this.summaryOf(record);
   }
 
   /** Appends a version. An unchanged document (same hash) returns the latest version without adding one. */
-  updateProfile(id: string, input: { document: Record<string, unknown>; note?: string }, actorId: string | null): { version: GuardProfileVersionView; changed: boolean } {
-    const record = this.requireProfile(id);
+  async updateProfile(id: string, input: { document: Record<string, unknown>; note?: string }, actorId: string | null): Promise<{ version: GuardProfileVersionView; changed: boolean }> {
+    const record = await this.requireProfile(id);
     if (record.builtIn) throw new GuardConflictError("The built-in profile is read-only; duplicate it to change it");
-    const profile = this.validateDocument(input.document, id);
+    const profile = await this.validateDocument(input.document, id);
     const hash = hashGuardProfile(profile);
     if (hash === record.latestHash) {
-      return { version: this.versionView(this.store.getGuardProfileVersion(id)!), changed: false };
+      return { version: this.versionView((await this.store.getGuardProfileVersion(id))!), changed: false };
     }
-    const version = this.store.addGuardProfileVersion({
+    const version = await this.store.addGuardProfileVersion({
       profileId: id,
       name: profile.name,
       description: profile.description ?? null,
@@ -336,80 +338,80 @@ export class GuardService {
     return { version: this.versionView(version), changed: true };
   }
 
-  deleteProfile(id: string): void {
-    const record = this.requireProfile(id);
+  async deleteProfile(id: string): Promise<void> {
+    const record = await this.requireProfile(id);
     if (record.builtIn) throw new GuardConflictError("The built-in profile cannot be deleted");
-    const bindings = this.store.listGuardBindingsForProfile(id).filter((binding) => binding.mode !== "inherit");
+    const bindings = (await this.store.listGuardBindingsForProfile(id)).filter((binding) => binding.mode !== "inherit");
     if (bindings.length > 0) {
       const where = bindings.map((binding) => `${binding.scope} '${binding.scopeId}'`).join(", ");
       throw new GuardConflictError(`The profile is bound to ${where}; change those bindings first`);
     }
-    this.store.deleteGuardProfile(id);
+    await this.store.deleteGuardProfile(id);
   }
 
-  diff(id: string, from: number, to: number): { from: GuardProfileVersionView; to: GuardProfileVersionView; changes: GuardProfileChange[] } | null {
-    const before = this.store.getGuardProfileVersion(id, from);
-    const after = this.store.getGuardProfileVersion(id, to);
+  async diff(id: string, from: number, to: number): Promise<{ from: GuardProfileVersionView; to: GuardProfileVersionView; changes: GuardProfileChange[] } | null> {
+    const before = await this.store.getGuardProfileVersion(id, from);
+    const after = await this.store.getGuardProfileVersion(id, to);
     if (!before || !after) return null;
     return { from: this.versionView(before), to: this.versionView(after), changes: diffGuardProfiles(before.document, after.document) };
   }
 
   /** Stable JSON of one version, for policy-as-code. */
-  exportProfile(id: string, version?: number): { fileName: string; body: string; version: number; hash: string } | null {
-    const record = this.store.getGuardProfileVersion(id, version);
+  async exportProfile(id: string, version?: number): Promise<{ fileName: string; body: string; version: number; hash: string } | null> {
+    const record = await this.store.getGuardProfileVersion(id, version);
     if (!record) return null;
     const profile = guardProfileSchema.parse(record.document);
     return { fileName: `guard-profile-${id}-v${record.version}.json`, body: serializeGuardProfile(profile), version: record.version, hash: record.hash };
   }
 
   /** Creates the profile, or appends a version when it exists. The document's `id` names the profile. */
-  importProfile(input: { document: Record<string, unknown>; note?: string }, actorId: string | null): { profile: GuardProfileSummary; created: boolean; changed: boolean } {
+  async importProfile(input: { document: Record<string, unknown>; note?: string }, actorId: string | null): Promise<{ profile: GuardProfileSummary; created: boolean; changed: boolean }> {
     const id = typeof input.document.id === "string" ? input.document.id : "";
     if (RESERVED_GUARD_PROFILE_IDS.has(id)) {
       throw new GuardValidationError("Invalid guard profile", [
         { path: "id", message: `'${id}' is reserved for the deployment's destination rules; set those up under Security → Data destinations` }
       ]);
     }
-    const existing = id ? this.store.getGuardProfile(id) : null;
+    const existing = id ? await this.store.getGuardProfile(id) : null;
     if (!existing) {
-      const profile = this.createProfile({ document: input.document, ...(input.note ? { note: input.note } : {}) }, actorId);
+      const profile = await this.createProfile({ document: input.document, ...(input.note ? { note: input.note } : {}) }, actorId);
       return { profile, created: true, changed: true };
     }
-    const result = this.updateProfile(id, { document: input.document, note: input.note ?? "Imported" }, actorId);
-    return { profile: this.summaryOf(this.store.getGuardProfile(id)!), created: false, changed: result.changed };
+    const result = await this.updateProfile(id, { document: input.document, note: input.note ?? "Imported" }, actorId);
+    return { profile: await this.summaryOf((await this.store.getGuardProfile(id))!), created: false, changed: result.changed };
   }
 
   // -------------------------------------------------------------------------
   // Bindings and resolution
   // -------------------------------------------------------------------------
 
-  getBinding(scope: "project" | "workflow", scopeId: string): { mode: GuardBindingMode; profileId: string | null; updatedAt: string | null; updatedBy: string | null } {
-    const record = this.store.getGuardBinding(scope, scopeId);
+  async getBinding(scope: "project" | "workflow", scopeId: string): Promise<{ mode: GuardBindingMode; profileId: string | null; updatedAt: string | null; updatedBy: string | null }> {
+    const record = await this.store.getGuardBinding(scope, scopeId);
     return record
       ? { mode: record.mode as GuardBindingMode, profileId: record.profileId, updatedAt: record.updatedAt, updatedBy: record.updatedBy }
       : { mode: "inherit", profileId: null, updatedAt: null, updatedBy: null };
   }
 
-  setBinding(scope: "project" | "workflow", scopeId: string, input: { mode: GuardBindingMode; profileId?: string | null }, actorId: string | null): GuardBindingRecord {
+  async setBinding(scope: "project" | "workflow", scopeId: string, input: { mode: GuardBindingMode; profileId?: string | null }, actorId: string | null): Promise<GuardBindingRecord> {
     if (scope === "workflow" && input.mode === "enforced") {
       throw new GuardValidationError("Invalid binding", [{ path: "mode", message: "Only a project can enforce a profile" }]);
     }
     const profileId = input.mode === "inherit" ? null : input.profileId ?? null;
-    if (profileId && !this.store.getGuardProfile(profileId)) {
+    if (profileId && !await this.store.getGuardProfile(profileId)) {
       throw new GuardValidationError("Invalid binding", [{ path: "profileId", message: `Guard profile '${profileId}' does not exist` }]);
     }
-    return this.store.setGuardBinding({ scope, scopeId, mode: input.mode, profileId, updatedBy: actorId });
+    return await this.store.setGuardBinding({ scope, scopeId, mode: input.mode, profileId, updatedBy: actorId });
   }
 
-  loadProfile(profileId: string, version?: number): ResolvedGuardProfile | undefined {
+  async loadProfile(profileId: string, version?: number): Promise<ResolvedGuardProfile | undefined> {
     // Phase 16 — every run that resolves its guard stack loads the same profiles: the answer is kept per guard profile
     // revision, a counter in the database bumped by triggers on every profile write from any process. It is read on
     // every load, so a profile another instance saved is what the next run here resolves (never an in-process count).
-    const revision = this.store.guardProfileRevision?.();
+    const revision = await this.store.guardProfileRevision?.();
     const loadKey = `${profileId}\u0000${version ?? "latest"}`;
     const known = revision === undefined ? undefined : this.loadedProfiles.get(loadKey);
     if (known && known.revision === revision) return known.value;
-    const value = this.readProfile(profileId, version);
+    const value = await this.readProfile(profileId, version);
     if (revision !== undefined) {
       if (this.loadedProfiles.size >= PARSED_PROFILE_CACHE_SIZE) this.loadedProfiles.delete(this.loadedProfiles.keys().next().value!);
       this.loadedProfiles.set(loadKey, { revision, value });
@@ -417,9 +419,9 @@ export class GuardService {
     return value;
   }
 
-  private readProfile(profileId: string, version?: number): ResolvedGuardProfile | undefined {
-    const record = this.store.getGuardProfileVersion(profileId, version);
-    const profileRecord = this.store.getGuardProfile(profileId);
+  private async readProfile(profileId: string, version?: number): Promise<ResolvedGuardProfile | undefined> {
+    const record = await this.store.getGuardProfileVersion(profileId, version);
+    const profileRecord = await this.store.getGuardProfile(profileId);
     if (!record || !profileRecord) return undefined;
     // Phase 16 — a stored version never changes: its validated document is parsed once and reused (frozen, so no
     // caller can change it for the next run). Every run resolves the built-in default; this keeps that cheap.
@@ -443,9 +445,8 @@ export class GuardService {
    * labels: a run then learns it does not track labels without resolving its
    * profiles (zero-config runs pay this one cached check).
    */
-  mayUseLabels(): boolean {
-    const store = this.store as Partial<Pick<SqliteStore, "anyGuardProfileUsesLabels">>;
-    return typeof store.anyGuardProfileUsesLabels === "function" ? store.anyGuardProfileUsesLabels() : true;
+  async mayUseLabels(): Promise<boolean> {
+    return storeImplements(this.store, "anyGuardProfileUsesLabels") ? await this.store.anyGuardProfileUsesLabels() : true;
   }
 
   /**
@@ -457,10 +458,10 @@ export class GuardService {
    * anything after the enforced profile can only tighten it.
    */
   /** Phase 15.3 — why a guard profile override cannot run, or null when it can. */
-  profileOverrideProblem(override: { profileId: string; version?: number }): string | null {
-    const record = this.store.getGuardProfile(override.profileId);
+  async profileOverrideProblem(override: { profileId: string; version?: number }): Promise<string | null> {
+    const record = await this.store.getGuardProfile(override.profileId);
     if (!record) return `Guard profile ${override.profileId} was not found.`;
-    if (!this.loadProfile(override.profileId, override.version)) {
+    if (!await this.loadProfile(override.profileId, override.version)) {
       return override.version !== undefined
         ? `Version ${override.version} of guard profile ${override.profileId} was not found.`
         : `Guard profile ${override.profileId} has no usable version.`;
@@ -477,10 +478,10 @@ export class GuardService {
    * now (bindings always apply the latest version): a builder cannot replay
    * under a weaker copy of the profile an admin bound.
    */
-  resolveProfileOverride(
+  async resolveProfileOverride(
     override: { profileId: string; version?: number },
     context: { workflowId: string; projectId?: string | null; isAdmin: boolean }
-  ): { ok: true; profile: { profileId: string; version: number; hash: string } } | { ok: false; problem: string; forbidden?: boolean } {
+  ): Promise<{ ok: true; profile: { profileId: string; version: number; hash: string } } | { ok: false; problem: string; forbidden?: boolean }> {
     // Phase 16 — the deployment's destination rules are never a builder's candidate: they always run anyway (latest version).
     if (override.profileId === GUARD_DESTINATION_RULES_PROFILE_ID && !context.isAdmin) {
       return {
@@ -489,17 +490,17 @@ export class GuardService {
         problem: "The deployment's destination rules always apply to replays and release-gate cases; only an admin can choose them as the guard profile under test."
       };
     }
-    const problem = this.profileOverrideProblem(override);
+    const problem = await this.profileOverrideProblem(override);
     if (problem) return { ok: false, problem };
-    const resolved = this.loadProfile(override.profileId, override.version)!;
+    const resolved = (await this.loadProfile(override.profileId, override.version))!;
     if (!context.isAdmin) {
-      const project = this.getBinding("project", context.projectId ?? "default");
-      const workflow = this.getBinding("workflow", context.workflowId);
+      const project = await this.getBinding("project", context.projectId ?? "default");
+      const workflow = await this.getBinding("workflow", context.workflowId);
       const bound = [
         project.mode === "enforced" || project.mode === "override" ? { level: "project", mode: project.mode, profileId: project.profileId } : null,
         workflow.mode === "override" ? { level: "workflow", mode: workflow.mode, profileId: workflow.profileId } : null
       ].filter((entry) => entry && entry.profileId === resolved.profileId);
-      const current = bound.length > 0 ? this.loadProfile(resolved.profileId) : undefined;
+      const current = bound.length > 0 ? await this.loadProfile(resolved.profileId) : undefined;
       if (current && resolved.version < current.version) {
         const where = bound.map((entry) => `the ${entry!.level} binding (${entry!.mode})`).join(" and ");
         return {
@@ -511,26 +512,26 @@ export class GuardService {
     return { ok: true, profile: { profileId: resolved.profileId, version: resolved.version, hash: resolved.hash } };
   }
 
-  resolveRun(context: { workflowId: string; projectId?: string | null; profileOverride?: GuardRunContext["profileOverride"]; profileSubstitute?: GuardProfileSubstitute }): GuardRunResolution {
+  async resolveRun(context: { workflowId: string; projectId?: string | null; profileOverride?: GuardRunContext["profileOverride"]; profileSubstitute?: GuardProfileSubstitute }): Promise<GuardRunResolution> {
     if (context.profileSubstitute) {
       const { profileSubstitute, ...rest } = context;
-      return GuardService.substitute(this.resolveRun(rest), profileSubstitute);
+      return GuardService.substitute(await this.resolveRun(rest), profileSubstitute);
     }
-    if (context.profileOverride) return this.resolveOverride(context.profileOverride, context.projectId ?? "default");
+    if (context.profileOverride) return await this.resolveOverride(context.profileOverride, context.projectId ?? "default");
     const projectId = context.projectId ?? "default";
-    const project = this.getBinding("project", projectId);
-    const workflow = this.getBinding("workflow", context.workflowId);
+    const project = await this.getBinding("project", projectId);
+    const workflow = await this.getBinding("workflow", context.workflowId);
     const chain: GuardBindingLevel[] = [];
     const level = (entry: GuardBindingLevel, resolved?: ResolvedGuardProfile) => chain.push({ ...entry, ...(resolved ? { version: resolved.version } : {}) });
 
-    const enforced = project.mode === "enforced" && project.profileId ? this.loadProfile(project.profileId) : undefined;
-    const projectOverride = project.mode === "override" && project.profileId ? this.loadProfile(project.profileId) : undefined;
-    const workflowOverride = workflow.mode === "override" && workflow.profileId ? this.loadProfile(workflow.profileId) : undefined;
+    const enforced = project.mode === "enforced" && project.profileId ? await this.loadProfile(project.profileId) : undefined;
+    const projectOverride = project.mode === "override" && project.profileId ? await this.loadProfile(project.profileId) : undefined;
+    const workflowOverride = workflow.mode === "override" && workflow.profileId ? await this.loadProfile(workflow.profileId) : undefined;
     level({ level: "project", mode: project.mode, profileId: project.profileId }, enforced ?? projectOverride);
     level({ level: "workflow", mode: workflow.mode, profileId: workflow.profileId }, workflowOverride);
 
     const chosen = workflowOverride ?? projectOverride;
-    const instance = !enforced && !chosen && this.options.autoApply ? this.loadProfile(GUARD_BUILTIN_PROFILE_ID) : undefined;
+    const instance = !enforced && !chosen && this.options.autoApply ? await this.loadProfile(GUARD_BUILTIN_PROFILE_ID) : undefined;
     level({ level: "instance", mode: this.options.autoApply ? "auto" : "off", profileId: this.options.autoApply ? GUARD_BUILTIN_PROFILE_ID : null }, instance);
 
     const stack: ResolvedGuardProfile[] = [];
@@ -538,17 +539,16 @@ export class GuardService {
       if (entry && !stack.some((existing) => existing.hash === entry.hash)) stack.push(entry);
     }
     const source: GuardRunResolution["source"] = enforced ? "enforced" : workflowOverride ? "workflow" : projectOverride ? "project" : instance ? "instance" : "none";
-    return GuardService.withDeployment({ source, ...(enforced ? { enforced } : {}), stack, chain }, this.deploymentProfile());
+    return GuardService.withDeployment({ source, ...(enforced ? { enforced } : {}), stack, chain }, await this.deploymentProfile());
   }
 
   /**
    * Phase 16 — the deployment's destination rules profile, when an admin set
    * one up and it has rules; undefined otherwise (nothing changes then).
    */
-  deploymentProfile(): ResolvedGuardProfile | undefined {
-    const store = this.store as Partial<Pick<SqliteStore, "getGuardProfile">>;
-    if (typeof store.getGuardProfile !== "function" || !store.getGuardProfile(GUARD_DESTINATION_RULES_PROFILE_ID)) return undefined;
-    const loaded = this.loadProfile(GUARD_DESTINATION_RULES_PROFILE_ID);
+  async deploymentProfile(): Promise<ResolvedGuardProfile | undefined> {
+    if (!storeImplements(this.store, "getGuardProfile") || !await this.store.getGuardProfile(GUARD_DESTINATION_RULES_PROFILE_ID)) return undefined;
+    const loaded = await this.loadProfile(GUARD_DESTINATION_RULES_PROFILE_ID);
     return loaded && profileHasDestinationRules(loaded.profile) ? loaded : undefined;
   }
 
@@ -561,11 +561,11 @@ export class GuardService {
   }
 
   /** The resolution for a candidate profile: the project's enforced floor (unless it is the same profile), then the candidate. */
-  private resolveOverride(override: NonNullable<GuardRunContext["profileOverride"]>, projectId: string): GuardRunResolution {
-    const candidate = this.loadProfile(override.profileId, override.version);
-    if (!candidate) throw new GuardNotFoundError(this.profileOverrideProblem(override) ?? `Guard profile '${override.profileId}' not found`);
-    const project = this.getBinding("project", projectId);
-    const enforcedRaw = project.mode === "enforced" && project.profileId ? this.loadProfile(project.profileId) : undefined;
+  private async resolveOverride(override: NonNullable<GuardRunContext["profileOverride"]>, projectId: string): Promise<GuardRunResolution> {
+    const candidate = await this.loadProfile(override.profileId, override.version);
+    if (!candidate) throw new GuardNotFoundError(await this.profileOverrideProblem(override) ?? `Guard profile '${override.profileId}' not found`);
+    const project = await this.getBinding("project", projectId);
+    const enforcedRaw = project.mode === "enforced" && project.profileId ? await this.loadProfile(project.profileId) : undefined;
     const enforced = enforcedRaw && enforcedRaw.profileId !== candidate.profileId ? enforcedRaw : undefined;
     const chain: GuardBindingLevel[] = [
       { level: "project", mode: project.mode, profileId: project.profileId, ...(enforced ? { version: enforced.version } : {}) },
@@ -574,7 +574,7 @@ export class GuardService {
     const stack = enforced && enforced.hash !== candidate.hash ? [enforced, candidate] : [candidate];
     // Phase 16 — the deployment's destination rules (latest version) apply to every candidate's replay, even when the
     // candidate is an older version of them: a candidate can add checks, never remove the deployment's.
-    return GuardService.withDeployment({ source: "candidate", ...(enforced ? { enforced } : {}), stack, chain }, this.deploymentProfile());
+    return GuardService.withDeployment({ source: "candidate", ...(enforced ? { enforced } : {}), stack, chain }, await this.deploymentProfile());
   }
 
   /**
@@ -605,13 +605,13 @@ export class GuardService {
    * version. Throws GuardValidationError for an invalid document and
    * GuardNotFoundError for a missing profile or version.
    */
-  simulationProfile(profileId: string, source: { document: Record<string, unknown> } | { version: number }): GuardProfileSubstitute {
-    this.requireProfile(profileId);
+  async simulationProfile(profileId: string, source: { document: Record<string, unknown> } | { version: number }): Promise<GuardProfileSubstitute> {
+    await this.requireProfile(profileId);
     if ("document" in source) {
-      const profile = this.validateDocument(source.document, profileId);
+      const profile = await this.validateDocument(source.document, profileId);
       return { profileId, version: 0, hash: hashGuardProfile(profile), name: profile.name, profile, inline: true };
     }
-    const loaded = this.loadProfile(profileId, source.version);
+    const loaded = await this.loadProfile(profileId, source.version);
     if (!loaded) throw new GuardNotFoundError(`Version ${source.version} of guard profile '${profileId}' was not found`);
     return { profileId, version: loaded.version, hash: loaded.hash, name: loaded.profile.name, profile: loaded.profile, inline: false };
   }
@@ -626,20 +626,20 @@ export class GuardService {
     const override = context.profileOverride;
     const substitute = context.profileSubstitute;
     return {
-      resolveRun: () => this.resolveRun(context),
+      resolveRun: async () => await this.resolveRun(context),
       // Phase 16 — a simulation's unsaved document may opt in; stored versions are checked in one cached query.
-      mayUseLabels: () => (substitute ? profileUsesLabels(substitute.profile) : false) || this.mayUseLabels(),
+      mayUseLabels: async () => (substitute ? profileUsesLabels(substitute.profile) : false) || await this.mayUseLabels(),
       // A guard port naming the candidate's profile gets the candidate's version too (and a simulation's profile its substitute).
-      loadProfile: (profileId) =>
+      loadProfile: async (profileId) =>
         substitute && substitute.profileId === profileId
           ? GuardService.substituteProfile(substitute)
           : override && override.profileId === profileId
-            ? this.loadProfile(profileId, override.version)
-            : this.loadProfile(profileId),
+            ? await this.loadProfile(profileId, override.version)
+            : await this.loadProfile(profileId),
       vault: context.simulation?.vault ?? this.vault,
-      onVerdict: (event) => (context.simulation ? context.simulation.sink.record(event) : this.recordVerdict(event, context)),
+      onVerdict: async (event) => (context.simulation ? context.simulation.sink.record(event) : await this.recordVerdict(event, context)),
       // Phase 16 — read when a check first needs them (the engine keeps them for this run only).
-      destinationRows: () => context.destinationRows ?? this.options.destinationRows?.() ?? [],
+      destinationRows: async () => context.destinationRows ?? (await this.options.destinationRows?.()) ?? [],
       ...(this.options.surrogateKey ? { surrogateKey: this.options.surrogateKey } : {}),
       issuedSurrogates: context.issuedSurrogates ?? new Set<string>(),
       // A simulation compares every checkpoint on both sides, clean ones included.
@@ -652,12 +652,12 @@ export class GuardService {
   // -------------------------------------------------------------------------
 
   /** The rules, whether they observe or enforce, and the observing count. */
-  destinationRulesStatus(available = true): DestinationRulesStatus {
-    const record = this.store.getGuardProfile(GUARD_DESTINATION_RULES_PROFILE_ID);
-    const loaded = record ? this.loadProfile(GUARD_DESTINATION_RULES_PROFILE_ID) : undefined;
+  async destinationRulesStatus(available = true): Promise<DestinationRulesStatus> {
+    const record = await this.store.getGuardProfile(GUARD_DESTINATION_RULES_PROFILE_ID);
+    const loaded = record ? await this.loadProfile(GUARD_DESTINATION_RULES_PROFILE_ID) : undefined;
     const rules = (loaded?.profile.destinations?.rules ?? []) as DestinationRuleView[];
     const since = new Date(Date.now() - DESTINATION_RULES_OBSERVING_DAYS * 86_400_000).toISOString();
-    const wouldBlock = record && available ? this.store.countObservedDestinationBlocks(GUARD_DESTINATION_RULES_PROFILE_ID, since) : 0;
+    const wouldBlock = record && available ? await this.store.countObservedDestinationBlocks(GUARD_DESTINATION_RULES_PROFILE_ID, since) : 0;
     return {
       available,
       profileId: GUARD_DESTINATION_RULES_PROFILE_ID,
@@ -670,7 +670,7 @@ export class GuardService {
   }
 
   /** Saves the full rule list as a new version of the deployment's rules profile (created on first save). Throws GuardValidationError. */
-  setDestinationRules(rules: Array<Record<string, unknown>>, actorId: string | null, note?: string): DestinationRulesStatus {
+  async setDestinationRules(rules: Array<Record<string, unknown>>, actorId: string | null, note?: string): Promise<DestinationRulesStatus> {
     const document: Record<string, unknown> = {
       id: GUARD_DESTINATION_RULES_PROFILE_ID,
       name: GUARD_DESTINATION_RULES_PROFILE_NAME,
@@ -678,32 +678,32 @@ export class GuardService {
       description: "The deployment's destination rules, applied to every run after its own profiles. Managed on the Security page.",
       destinations: { rules }
     };
-    if (this.store.getGuardProfile(GUARD_DESTINATION_RULES_PROFILE_ID)) {
-      this.updateProfile(GUARD_DESTINATION_RULES_PROFILE_ID, { document, ...(note ? { note } : {}) }, actorId);
+    if (await this.store.getGuardProfile(GUARD_DESTINATION_RULES_PROFILE_ID)) {
+      await this.updateProfile(GUARD_DESTINATION_RULES_PROFILE_ID, { document, ...(note ? { note } : {}) }, actorId);
     } else {
-      this.createProfile({ id: GUARD_DESTINATION_RULES_PROFILE_ID, document, note: note ?? "Created from the Security page" }, actorId, { reserved: true });
+      await this.createProfile({ id: GUARD_DESTINATION_RULES_PROFILE_ID, document, note: note ?? "Created from the Security page" }, actorId, { reserved: true });
     }
-    return this.destinationRulesStatus();
+    return await this.destinationRulesStatus();
   }
 
   /** Adds the starter rule, observing (shadow); unchanged when it is already there. */
-  addStarterDestinationRule(actorId: string | null): { status: DestinationRulesStatus; created: boolean } {
-    const current = this.destinationRulesStatus();
+  async addStarterDestinationRule(actorId: string | null): Promise<{ status: DestinationRulesStatus; created: boolean }> {
+    const current = await this.destinationRulesStatus();
     if (current.hasStarter) return { status: current, created: false };
     const starter = { ...STARTER_DESTINATION_RULE, when: { dataClasses: [...STARTER_DESTINATION_RULE.when.dataClasses] }, allow: { ...STARTER_DESTINATION_RULE.allow }, shadow: true };
-    const status = this.setDestinationRules([...(current.rules as unknown as Array<Record<string, unknown>>), starter], actorId, "Added the starter rule (observing)");
+    const status = await this.setDestinationRules([...(current.rules as unknown as Array<Record<string, unknown>>), starter], actorId, "Added the starter rule (observing)");
     return { status, created: true };
   }
 
   /** Every rule observes (enforce false) or acts (enforce true). */
-  setDestinationRulesEnforcement(enforce: boolean, actorId: string | null): DestinationRulesStatus {
-    const current = this.destinationRulesStatus();
+  async setDestinationRulesEnforcement(enforce: boolean, actorId: string | null): Promise<DestinationRulesStatus> {
+    const current = await this.destinationRulesStatus();
     if (current.rules.length === 0) throw new GuardNotFoundError("There are no destination rules to turn on yet");
     const rules = current.rules.map((rule) => {
       const { shadow: _shadow, ...rest } = rule;
       return (enforce ? rest : { ...rest, shadow: true }) as unknown as Record<string, unknown>;
     });
-    return this.setDestinationRules(rules, actorId, enforce ? "Turned on enforcement" : "Back to observing");
+    return await this.setDestinationRules(rules, actorId, enforce ? "Turned on enforcement" : "Back to observing");
   }
 
   // -------------------------------------------------------------------------
@@ -712,10 +712,10 @@ export class GuardService {
 
   /** Database-backed vault storage; the original value is sealed with the master key. */
   readonly vault: TokenVaultStorage = {
-    getByToken: async (token) => this.openVaultRow(this.store.getGuardVaultByToken(token)),
-    getByValueHash: async (valueHash) => this.openVaultRow(this.store.getGuardVaultByHash(valueHash)),
+    getByToken: async (token) => this.openVaultRow(await this.store.getGuardVaultByToken(token)),
+    getByValueHash: async (valueHash) => this.openVaultRow(await this.store.getGuardVaultByHash(valueHash)),
     put: async (record: TokenVaultRecord) => {
-      this.store.putGuardVault({
+      await this.store.putGuardVault({
         token: record.token,
         dataClass: record.dataClass,
         valueHash: record.valueHash ?? null,
@@ -725,7 +725,7 @@ export class GuardService {
     }
   };
 
-  private openVaultRow(row: ReturnType<SqliteStore["getGuardVaultByToken"]>): TokenVaultRecord | undefined {
+  private openVaultRow(row: Awaited<ReturnType<Store["getGuardVaultByToken"]>>): TokenVaultRecord | undefined {
     if (!row) return undefined;
     try {
       return {
@@ -746,7 +746,7 @@ export class GuardService {
   // -------------------------------------------------------------------------
 
   /** Writes one verdict as event rows. Only the masked summary reaches this method. */
-  recordVerdict(event: GuardVerdictEvent, context: GuardRunContext): void {
+  async recordVerdict(event: GuardVerdictEvent, context: GuardRunContext): Promise<void> {
     const verdictId = randomUUID();
     const createdAt = new Date().toISOString();
     const summary = event.verdict;
@@ -802,29 +802,29 @@ export class GuardService {
             };
           });
     try {
-      this.store.insertGuardEvents(rows);
+      await this.store.insertGuardEvents(rows);
     } catch (error) {
       this.options.logger?.("Guard events could not be written", { error: error instanceof Error ? error.message : String(error) });
     }
   }
 
-  listEvents(filters: GuardEventFilters & { limit?: number; offset?: number }): { events: GuardEventView[]; total: number } {
-    const { events, total } = this.store.listGuardEvents(filters);
+  async listEvents(filters: GuardEventFilters & { limit?: number; offset?: number }): Promise<{ events: GuardEventView[]; total: number }> {
+    const { events, total } = await this.store.listGuardEvents(filters);
     return { events: events.map(toEventView), total };
   }
 
-  eventsForExecution(executionId: string): GuardEventView[] {
-    return this.store.listGuardEventsForExecution(executionId).map(toEventView);
+  async eventsForExecution(executionId: string): Promise<GuardEventView[]> {
+    return (await this.store.listGuardEventsForExecution(executionId)).map(toEventView);
   }
 
-  stats(filters: GuardEventFilters) {
-    return this.store.guardEventStats(filters);
+  async stats(filters: GuardEventFilters) {
+    return await this.store.guardEventStats(filters);
   }
 
   // -------------------------------------------------------------------------
 
-  private requireProfile(id: string): GuardProfileRecord {
-    const record = this.store.getGuardProfile(id);
+  private async requireProfile(id: string): Promise<GuardProfileRecord> {
+    const record = await this.store.getGuardProfile(id);
     if (!record) throw new GuardNotFoundError(`Guard profile '${id}' not found`);
     return record;
   }
@@ -833,13 +833,13 @@ export class GuardService {
     return JSON.parse(serializeGuardProfile(profile)) as Record<string, unknown>;
   }
 
-  private summaryOf(record: GuardProfileRecord): GuardProfileSummary {
+  private async summaryOf(record: GuardProfileRecord): Promise<GuardProfileSummary> {
     return {
       id: record.id,
       name: record.name,
       ...(record.description ? { description: record.description } : {}),
       builtIn: record.builtIn,
-      ...(this.store.listGuardBindingsForProfile(record.id).some((binding) => binding.scope === "project" && binding.mode === "enforced") ? { enforced: true } : {}),
+      ...((await this.store.listGuardBindingsForProfile(record.id)).some((binding) => binding.scope === "project" && binding.mode === "enforced") ? { enforced: true } : {}),
       latestVersion: record.latestVersion,
       hash: record.latestHash,
       createdAt: record.createdAt,

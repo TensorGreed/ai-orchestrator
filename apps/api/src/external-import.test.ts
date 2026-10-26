@@ -35,7 +35,7 @@ function loadFixture(name: string): Record<string, unknown> {
 async function createTestContext(): Promise<TestContext> {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-external-import-"));
   const store = await SqliteStore.create(path.join(tempDir, "orchestrator.db"));
-  store.ensureDefaultProject();
+  await store.ensureDefaultProject();
   const config = parseConfig({
     LOG_LEVEL: "warn",
     SEED_SAMPLE_WORKFLOWS: "false",
@@ -46,7 +46,7 @@ async function createTestContext(): Promise<TestContext> {
   });
   const secretService = new SecretService(store, config.SECRET_MASTER_KEY_BASE64);
   const authService = new AuthService(store, config.SESSION_TTL_HOURS);
-  const app = createApp(config, store, secretService, authService);
+  const app = await createApp(config, store, secretService, authService);
   await app.ready();
   const context: TestContext = { app, store, authService, config, tempDir };
   contexts.push(context);
@@ -59,7 +59,7 @@ afterEach(async () => {
     if (!context) continue;
     await context.app.close();
     try {
-      context.store.close();
+      await context.store.close();
     } catch {
       // The store may already be closed by the app shutdown hooks.
     }
@@ -77,7 +77,7 @@ function extractCookie(setCookieHeader: string | string[] | undefined, cookieNam
 async function login(context: TestContext, role: "admin" | "builder" | "operator" | "viewer"): Promise<string> {
   const email = `${role}@example.com`;
   const password = `${role}-Pass-123!`;
-  context.authService.register({ email, password, role });
+  await context.authService.register({ email, password, role });
   const response = await context.app.inject({ method: "POST", url: "/api/auth/login", payload: { email, password } });
   if (response.statusCode !== 200) throw new Error(`Login failed for ${role}: ${response.body}`);
   return extractCookie(response.headers["set-cookie"], context.config.SESSION_COOKIE_NAME);
@@ -110,8 +110,8 @@ describe("POST /api/workflows/import/external", () => {
     expect(body.report.nodes).toHaveLength(6);
     expect(validateWorkflowGraph(body.workflow).valid).toBe(true);
 
-    expect(context.store.getWorkflow("wf-import-order_approval")).toBeNull();
-    const audit = context.store.listAuditLogs({ eventType: "workflow.import_external" });
+    expect(await context.store.getWorkflow("wf-import-order_approval")).toBeNull();
+    const audit = await context.store.listAuditLogs({ eventType: "workflow.import_external" });
     expect(audit.items).toHaveLength(0);
   });
 
@@ -167,7 +167,7 @@ describe("POST /api/workflows/import/external", () => {
     expect(body.workflow.folderId).toBe("imports");
     expect(body.report.summary.total).toBe(8);
 
-    const stored = context.store.getWorkflow("wf-import-support_agent");
+    const stored = await context.store.getWorkflow("wf-import-support_agent");
     expect(stored).not.toBeNull();
     expect(stored?.projectId).toBe("client-work");
     expect(stored?.folderId).toBe("imports");
@@ -176,7 +176,7 @@ describe("POST /api/workflows/import/external", () => {
     expect(validateWorkflowGraph(stored).valid).toBe(true);
     expect(stored?.edges.filter((edge) => edge.sourceHandle === "tool")).toHaveLength(2);
 
-    const audit = context.store.listAuditLogs({ eventType: "workflow.import_external" });
+    const audit = await context.store.listAuditLogs({ eventType: "workflow.import_external" });
     expect(audit.items).toHaveLength(1);
     expect(audit.items[0]).toMatchObject({ eventType: "workflow.import_external", resourceId: "wf-import-support_agent" });
   });
@@ -194,7 +194,7 @@ describe("POST /api/workflows/import/external", () => {
       });
       expect(response.statusCode).toBe(200);
       expect(response.json<ImportResponse>().workflow.id).toBe(expectedId);
-      expect(context.store.getWorkflow(expectedId)).not.toBeNull();
+      expect(await context.store.getWorkflow(expectedId)).not.toBeNull();
     }
   });
 
@@ -210,7 +210,7 @@ describe("POST /api/workflows/import/external", () => {
     });
 
     expect(response.statusCode).toBe(403);
-    expect(context.store.getWorkflow("wf-import-lead_enrichment_webhook")).toBeNull();
+    expect(await context.store.getWorkflow("wf-import-lead_enrichment_webhook")).toBeNull();
   });
 
   it("requires authentication", async () => {
@@ -276,8 +276,8 @@ describe("POST /api/workflows/import/external", () => {
   it("rejects unknown projects and folders, and folders outside the target project", async () => {
     const context = await createTestContext();
     const cookie = await login(context, "builder");
-    context.store.upsertProject({ id: "other", name: "Other", createdBy: "builder@example.com" });
-    context.store.upsertFolder({ id: "other-folder", name: "Other folder", projectId: "other" });
+    await context.store.upsertProject({ id: "other", name: "Other", createdBy: "builder@example.com" });
+    await context.store.upsertFolder({ id: "other-folder", name: "Other folder", projectId: "other" });
 
     const unknownProject = await context.app.inject({
       method: "POST",
@@ -343,10 +343,10 @@ describe("POST /api/workflows/import/external", () => {
       { secretId: "import-httpbearerauth-orders_mcp_token", credentialType: "httpBearerAuth", credentialName: "Orders MCP token", nodeIds: ["orders_mcp"] }
     ]);
 
-    const stored = context.store.getWorkflow(body.workflow.id);
+    const stored = await context.store.getWorkflow(body.workflow.id);
     expect(JSON.stringify(stored)).not.toContain("must-never-leak");
-    const audit = context.store.listAuditLogs({ eventType: "workflow.import_external" });
+    const audit = await context.store.listAuditLogs({ eventType: "workflow.import_external" });
     expect(JSON.stringify(audit.items)).not.toContain("must-never-leak");
-    expect(context.store.listSecrets()).toHaveLength(0);
+    expect(await context.store.listSecrets()).toHaveLength(0);
   });
 });

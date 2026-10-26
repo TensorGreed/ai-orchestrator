@@ -1,7 +1,8 @@
 import { nanoid } from "nanoid";
 import { DEFAULT_PROJECT_ID } from "@ai-orchestrator/shared";
-import { SqliteStore } from "../db/database";
 import type { SafeUser, UserRole } from "./auth-service";
+import type { Store } from "../db/store.js";
+import { mapAsync } from "../async-array.js";
 
 export type ProjectRole = "project_admin" | "editor" | "viewer";
 
@@ -106,23 +107,23 @@ export type ProjectIsolationMode = "role" | "strict";
 
 export class RbacService {
   constructor(
-    private readonly store: SqliteStore,
+    private readonly store: Store,
     private readonly isolation: ProjectIsolationMode = "role"
   ) {}
 
   // --- Project memberships -------------------------------------------------
 
-  addMember(input: {
+  async addMember(input: {
     userId: string;
     projectId: string;
     role: ProjectRole | "custom";
     customRoleId?: string | null;
-  }): void {
+  }): Promise<void> {
     if (input.role === "custom" && !input.customRoleId) {
       throw new Error("customRoleId is required when role is 'custom'");
     }
     if (input.customRoleId) {
-      const custom = this.store.getCustomRole(input.customRoleId);
+      const custom = await this.store.getCustomRole(input.customRoleId);
       if (!custom) {
         throw new Error("Custom role not found");
       }
@@ -130,7 +131,7 @@ export class RbacService {
         throw new Error("Custom role belongs to a different project");
       }
     }
-    this.store.upsertProjectRole({
+    await this.store.upsertProjectRole({
       userId: input.userId,
       projectId: input.projectId,
       role: input.role,
@@ -138,35 +139,35 @@ export class RbacService {
     });
   }
 
-  removeMember(userId: string, projectId: string): boolean {
-    return this.store.removeProjectRole(userId, projectId);
+  async removeMember(userId: string, projectId: string): Promise<boolean> {
+    return await this.store.removeProjectRole(userId, projectId);
   }
 
-  listMembers(projectId: string): ProjectMembership[] {
-    return this.store.listProjectMembers(projectId).map((row) => this.hydrateMembership(row));
+  async listMembers(projectId: string): Promise<ProjectMembership[]> {
+    return await mapAsync(await this.store.listProjectMembers(projectId), (row) => this.hydrateMembership(row));
   }
 
-  listUserProjects(userId: string): ProjectMembership[] {
-    return this.store.listUserProjectRoles(userId).map((row) => this.hydrateMembership(row));
+  async listUserProjects(userId: string): Promise<ProjectMembership[]> {
+    return await mapAsync(await this.store.listUserProjectRoles(userId), (row) => this.hydrateMembership(row));
   }
 
-  getMembership(userId: string, projectId: string): ProjectMembership | null {
-    const row = this.store.getProjectRole(userId, projectId);
+  async getMembership(userId: string, projectId: string): Promise<ProjectMembership | null> {
+    const row = await this.store.getProjectRole(userId, projectId);
     if (!row) return null;
-    return this.hydrateMembership(row);
+    return await this.hydrateMembership(row);
   }
 
-  private hydrateMembership(row: {
+  private async hydrateMembership(row: {
     userId: string;
     projectId: string;
     role: string;
     customRoleId: string | null;
-  }): ProjectMembership {
+  }): Promise<ProjectMembership> {
     const role: ProjectRole | "custom" = isProjectRole(row.role) ? row.role : "custom";
     let permissions: Permission[] = [];
     if (role === "custom") {
       if (row.customRoleId) {
-        const custom = this.store.getCustomRole(row.customRoleId);
+        const custom = await this.store.getCustomRole(row.customRoleId);
         if (custom) {
           permissions = custom.permissions.filter((p): p is Permission =>
             ALL_PERMISSIONS.includes(p as Permission)
@@ -187,16 +188,16 @@ export class RbacService {
 
   // --- Custom roles --------------------------------------------------------
 
-  createCustomRole(input: {
+  async createCustomRole(input: {
     projectId?: string | null;
     name: string;
     description?: string | null;
     permissions: Permission[];
     createdBy?: string | null;
-  }): { id: string } {
+  }): Promise<{ id: string }> {
     const id = `role_${nanoid(12)}`;
     const sanitized = input.permissions.filter((p) => ALL_PERMISSIONS.includes(p));
-    this.store.upsertCustomRole({
+    await this.store.upsertCustomRole({
       id,
       projectId: input.projectId ?? null,
       name: input.name,
@@ -207,7 +208,7 @@ export class RbacService {
     return { id };
   }
 
-  updateCustomRole(
+  async updateCustomRole(
     id: string,
     input: {
       projectId?: string | null;
@@ -215,11 +216,11 @@ export class RbacService {
       description?: string | null;
       permissions?: Permission[];
     }
-  ): boolean {
-    const existing = this.store.getCustomRole(id);
+  ): Promise<boolean> {
+    const existing = await this.store.getCustomRole(id);
     if (!existing) return false;
     const sanitized = input.permissions?.filter((p) => ALL_PERMISSIONS.includes(p)) ?? existing.permissions;
-    this.store.upsertCustomRole({
+    await this.store.upsertCustomRole({
       id,
       projectId: input.projectId === undefined ? existing.projectId : input.projectId,
       name: input.name ?? existing.name,
@@ -230,16 +231,16 @@ export class RbacService {
     return true;
   }
 
-  deleteCustomRole(id: string): boolean {
-    return this.store.deleteCustomRole(id);
+  async deleteCustomRole(id: string): Promise<boolean> {
+    return await this.store.deleteCustomRole(id);
   }
 
-  listCustomRoles(projectId?: string | null) {
-    return this.store.listCustomRoles(projectId);
+  async listCustomRoles(projectId?: string | null) {
+    return await this.store.listCustomRoles(projectId);
   }
 
-  getCustomRole(id: string) {
-    return this.store.getCustomRole(id);
+  async getCustomRole(id: string) {
+    return await this.store.getCustomRole(id);
   }
 
   // --- Authorization -------------------------------------------------------
@@ -253,39 +254,39 @@ export class RbacService {
    *    permission set (backwards-compatible behaviour for users without per-project roles).
    *  - Otherwise, in `strict` isolation: no permissions.
    */
-  effectivePermissions(user: SafeUser, projectId: string): Permission[] {
+  async effectivePermissions(user: SafeUser, projectId: string): Promise<Permission[]> {
     if (user.role === "admin") return [...ALL_PERMISSIONS];
-    const membership = this.getMembership(user.id, projectId);
+    const membership = await this.getMembership(user.id, projectId);
     if (membership) return membership.permissions;
     if (this.isolation === "strict") return [];
     return [...GLOBAL_ROLE_PERMISSIONS[user.role]];
   }
 
-  can(user: SafeUser, projectId: string, permission: Permission): boolean {
-    return this.effectivePermissions(user, projectId).includes(permission);
+  async can(user: SafeUser, projectId: string, permission: Permission): Promise<boolean> {
+    return (await this.effectivePermissions(user, projectId)).includes(permission);
   }
 
   // --- Workflow sharing ----------------------------------------------------
 
-  shareWorkflow(input: {
+  async shareWorkflow(input: {
     workflowId: string;
     projectId: string;
     accessLevel: "read" | "execute";
     sharedBy?: string | null;
-  }): void {
-    this.store.upsertWorkflowShare(input);
+  }): Promise<void> {
+    await this.store.upsertWorkflowShare(input);
   }
 
-  unshareWorkflow(workflowId: string, projectId: string): boolean {
-    return this.store.removeWorkflowShare(workflowId, projectId);
+  async unshareWorkflow(workflowId: string, projectId: string): Promise<boolean> {
+    return await this.store.removeWorkflowShare(workflowId, projectId);
   }
 
-  listWorkflowShares(workflowId: string) {
-    return this.store.listWorkflowShares(workflowId);
+  async listWorkflowShares(workflowId: string) {
+    return await this.store.listWorkflowShares(workflowId);
   }
 
-  listWorkflowsVisibleToProject(projectId: string): Map<string, "read" | "execute"> {
-    const shares = this.store.listWorkflowsSharedToProject(projectId);
+  async listWorkflowsVisibleToProject(projectId: string): Promise<Map<string, "read" | "execute">> {
+    const shares = await this.store.listWorkflowsSharedToProject(projectId);
     const map = new Map<string, "read" | "execute">();
     for (const share of shares) {
       const level = share.accessLevel === "execute" ? "execute" : "read";
@@ -294,15 +295,15 @@ export class RbacService {
     return map;
   }
 
-  canAccessWorkflow(user: SafeUser, workflow: { id: string; projectId?: string }, permission: Permission): boolean {
+  async canAccessWorkflow(user: SafeUser, workflow: { id: string; projectId?: string }, permission: Permission): Promise<boolean> {
     const owningProject = workflow.projectId ?? DEFAULT_PROJECT_ID;
-    if (this.can(user, owningProject, permission)) return true;
+    if (await this.can(user, owningProject, permission)) return true;
 
     // Check if the workflow is shared to any of the user's projects. Running
     // it through an execute share needs execute in that project, not only read.
-    const shares = this.store.listWorkflowShares(workflow.id);
+    const shares = await this.store.listWorkflowShares(workflow.id);
     for (const share of shares) {
-      if (!this.can(user, share.projectId, permission === "workflow:execute" ? "workflow:execute" : "workflow:read")) continue;
+      if (!await this.can(user, share.projectId, permission === "workflow:execute" ? "workflow:execute" : "workflow:read")) continue;
       if (permission === "workflow:read") return true;
       if (permission === "workflow:execute" && share.accessLevel === "execute") return true;
     }
@@ -311,34 +312,34 @@ export class RbacService {
 
   // --- Secret sharing ------------------------------------------------------
 
-  shareSecret(input: { secretId: string; projectId: string; sharedBy?: string | null }): void {
-    this.store.upsertSecretShare(input);
+  async shareSecret(input: { secretId: string; projectId: string; sharedBy?: string | null }): Promise<void> {
+    await this.store.upsertSecretShare(input);
   }
 
-  unshareSecret(secretId: string, projectId: string): boolean {
-    return this.store.removeSecretShare(secretId, projectId);
+  async unshareSecret(secretId: string, projectId: string): Promise<boolean> {
+    return await this.store.removeSecretShare(secretId, projectId);
   }
 
-  listSecretShares(secretId: string) {
-    return this.store.listSecretShares(secretId);
+  async listSecretShares(secretId: string) {
+    return await this.store.listSecretShares(secretId);
   }
 
-  listSecretsVisibleToProject(projectId: string): Set<string> {
-    return new Set(this.store.listSecretsSharedToProject(projectId));
+  async listSecretsVisibleToProject(projectId: string): Promise<Set<string>> {
+    return new Set(await this.store.listSecretsSharedToProject(projectId));
   }
 
   // --- SSO group-to-role mappings -----------------------------------------
 
-  upsertSsoGroupMapping(input: {
+  async upsertSsoGroupMapping(input: {
     id?: string;
     provider: string;
     groupName: string;
     projectId?: string | null;
     role: string;
     customRoleId?: string | null;
-  }): string {
+  }): Promise<string> {
     const id = input.id ?? `sgm_${nanoid(12)}`;
-    this.store.upsertSsoGroupMapping({
+    await this.store.upsertSsoGroupMapping({
       id,
       provider: input.provider,
       groupName: input.groupName,
@@ -349,11 +350,11 @@ export class RbacService {
     return id;
   }
 
-  listSsoGroupMappings(provider?: string) {
-    return this.store.listSsoGroupMappings(provider);
+  async listSsoGroupMappings(provider?: string) {
+    return await this.store.listSsoGroupMappings(provider);
   }
 
-  deleteSsoGroupMapping(id: string): boolean {
-    return this.store.deleteSsoGroupMapping(id);
+  async deleteSsoGroupMapping(id: string): Promise<boolean> {
+    return await this.store.deleteSsoGroupMapping(id);
   }
 }
