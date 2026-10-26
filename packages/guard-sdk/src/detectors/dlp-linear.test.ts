@@ -15,10 +15,12 @@ import {
   findEmailSpans,
   findJwtSpans,
   findPrivateKeySpans,
+  findSqlStringLiteralSpans,
   findUrlQueryMatches,
   ibanValid,
   luhnValid,
   scanDlp,
+  scrubbedExcerpt,
   scrubEvidenceText,
   type DlpMatch,
   type DlpScanOptions
@@ -175,12 +177,21 @@ function oldReplaceSpans(text: string, spans: readonly GuardSpan[], replacement:
   return out;
 }
 
-function oldScrubEvidenceText(text: string): string {
-  const out = text.replace(OLD_URL_QUERY_OR_FRAGMENT, (_match, base: string) => `${base}?${MASK_CHAR.repeat(3)}`);
+const OLD_SQL_STRING_LITERAL = /'(?:[^'\\]|\\.|'')*'/g;
+
+function oldScrubEvidenceText(text: string, options: { sqlLiterals?: boolean } = {}): string {
+  let out = text.replace(OLD_URL_QUERY_OR_FRAGMENT, (_match, base: string) => `${base}?${MASK_CHAR.repeat(3)}`);
+  if (options.sqlLiterals) out = out.replace(OLD_SQL_STRING_LITERAL, `'${MASK_CHAR.repeat(3)}'`);
   const matches = oldScanDlp(out);
   if (matches.length === 0) return out;
   const byStart = new Map(matches.map((match) => [`${match.span.start}:${match.span.end}`, match.dataClass]));
   return oldReplaceSpans(out, matches.map((match) => match.span), (original, span) => maskForDataClass(original, byStart.get(`${span.start}:${span.end}`)));
+}
+
+function oldScrubbedExcerpt(text: string, span: GuardSpan, maxLength = 80, options: { sqlLiterals?: boolean } = {}): string {
+  const raw = oldScrubEvidenceText(text.slice(span.start, span.end), options).replace(/\s+/g, " ").trim();
+  const chars = Array.from(raw);
+  return chars.length > maxLength ? `${chars.slice(0, maxLength).join("")}…` : raw;
 }
 
 const viaRegex = (re: RegExp, s: string): Array<[number, number]> => [...s.matchAll(re)].map((m) => [m.index ?? 0, (m.index ?? 0) + m[0].length]);
@@ -211,7 +222,10 @@ const PIECES = [
   "-----END EC PRIVATE KEY-----", "\n", "4111 1111 1111 1111", "4111-1111-1111-1111", "4111111111111111", "+44 20 7946 0958", "(415) 555-0123",
   "415.555.0123", "123 456 7890", "536-90-4399", "AB 12 34 56 C", "GB82 WEST 1234 5698 7654 32", "DE89370400440532013000",
   "sk-proj-abcdefghijklmnop1234", "api_key=Zx9#kQ2!vB7mL4pR", "token: \"aB3dE5fG7hJ9kL1m\"", "Bearer abcdefghij0123456789xyz",
-  "ghp_0123456789abcdefghijABCDEFGHIJ0123", "AKIA0123456789ABCDEF", "ſ", "K", "\u00a0", "\u2028", "é", "'", "\"", "`", "<", ">", ")", "]", "="
+  "ghp_0123456789abcdefghijABCDEFGHIJ0123", "AKIA0123456789ABCDEF",
+  // Top-level domains around the 24-letter limit, and dense anchors.
+  "a@b.abcdefghijklmnopqrstuvw", "a@b.abcdefghijklmnopqrstuvwx", "x@y.abcdefghijklmnopqrstuvwxy", ".abcdefghijklmnopqrstuvwxyz",
+  "@@", "a@@b.co", "-@-", "a-@-b.co", "@-@", "://://", "a://://b:cccc@", "http://://u:pass@h", "ſ", "K", "\u00a0", "\u2028", "é", "'", "\"", "`", "<", ">", ")", "]", "="
 ];
 const ALPHABET = "aZ9eyJ_.-+%@:/ \n?#x1'\"`<>)]=(".split("");
 
@@ -430,6 +444,90 @@ describe("linear-time DLP: time budget on 1 MB adversarial input", () => {
         expect(performance.now() - started).toBeLessThan(BUDGET_MS);
         started = performance.now();
         stripHiddenUnicode(text);
+        expect(performance.now() - started).toBeLessThan(BUDGET_MS);
+      }
+    }, 60_000);
+  }
+});
+
+/*
+ * SQL string literals (`scrubEvidenceText(…, { sqlLiterals: true })`, used by
+ * the SQL guard's evidence): the linear scanner against the previous regex.
+ */
+const SQL_UNITS = [
+  "'", "\\", "''", "\\'", "'\\", "\\\\", "'''", "a", "x y", " ", "\n", "\r\n", "\r", "\u2028", "\u2029", "\t", "é", "😀", "\ud800", "\udc00",
+  "SELECT * FROM t WHERE a = ", "'O''Brien'", "'it\\'s'", "jane.doe@example.com", "https://h/p?q='1'#f", "4111 1111 1111 1111", "sk-proj-abcdefghijklmnop1234"
+];
+
+function sqlString(next: (n: number) => number): string {
+  let s = "";
+  const parts = 1 + next(12);
+  for (let i = 0; i < parts; i += 1) {
+    const unit = SQL_UNITS[next(SQL_UNITS.length)]!;
+    s += next(3) === 0 ? unit.repeat(1 + next(60)) : unit;
+  }
+  // Sometimes a backslash or an open quote at the very end.
+  const tail = next(6);
+  return tail === 0 ? `${s}\\` : tail === 1 ? `${s}'` : s;
+}
+
+function sqlCorpus(): string[] {
+  const next = rng(0x5a1);
+  const out = corpus().slice(0, 4000);
+  for (const unit of ["\\'", "'\\", "''", "\\'a", "'\\a", "'''", "\\", "'", "\\\\'", "\\'\n"]) {
+    for (const size of [1, 2, 3, 4, 5, 8, 13, 41, 79, 80, 81, 200]) {
+      const run = unit.repeat(size);
+      out.push(run, `'${run}`, `${run}'`, `'${run}'`, `${run}\\`, `x${run}\\\n'`, `'${"a".repeat(size)}${run}`, `a = '${run}' AND b = '${"é".repeat(size)}'`);
+    }
+  }
+  // Literals that cross the 80-character excerpt cap, with CRLF and Unicode inside.
+  for (const before of [0, 10, 70, 77, 78, 79, 80, 81, 90]) {
+    for (const body of ["abc", "a\r\nb", "😀😀😀", "x\\'y", "O''Brien", "\u2028\u2029", "z".repeat(30)]) {
+      out.push(`${"s".repeat(before)}'${body}' rest`, `${"😀".repeat(before)}'${body}`, `${" ".repeat(before)}'${body}\\`);
+    }
+  }
+  for (let i = 0; i < FUZZ_CASES * 4; i += 1) out.push(sqlString(next));
+  return out;
+}
+
+describe("linear-time SQL string literals: identical results to the previous regex", () => {
+  const cases = sqlCorpus();
+
+  it("finds the same literal spans, and blanks them to the same scrubbed text and excerpt", () => {
+    const next = rng(0x7e57);
+    const differences: string[] = [];
+    for (const s of cases) {
+      if (JSON.stringify(asPairs(findSqlStringLiteralSpans(s))) !== JSON.stringify(viaRegex(OLD_SQL_STRING_LITERAL, s))) differences.push(`spans ${JSON.stringify(s)}`);
+      if (scrubEvidenceText(s, { sqlLiterals: true }) !== oldScrubEvidenceText(s, { sqlLiterals: true })) differences.push(`scrub ${JSON.stringify(s)}`);
+      const start = next(s.length + 1);
+      for (const span of [{ start, end: start + next(s.length - start + 1) }, { start: 0, end: s.length }]) {
+        const max = [80, 10, 1][next(3)]!;
+        if (scrubbedExcerpt(s, span, max, { sqlLiterals: true }) !== oldScrubbedExcerpt(s, span, max, { sqlLiterals: true })) {
+          differences.push(`excerpt ${JSON.stringify([s, span, max])}`);
+        }
+      }
+    }
+    expect(differences.slice(0, 5)).toEqual([]);
+    expect(differences.length).toBe(0);
+    expect(cases.length).toBeGreaterThan(FUZZ_CASES * 4 + 1000);
+  }, FUZZ_TIMEOUT_MS);
+});
+
+describe("linear-time SQL string literals: time budget on 1 MB adversarial input", () => {
+  const MB = 1_000_000;
+  const BUDGET_MS = 2_000;
+  for (const unit of ["\\'", "'\\", "\\'a", "'\\a", "''", "'''\\", "\\\\'", "'a"]) {
+    it(`blanks literals in 1 MB of ${JSON.stringify(unit)} within ${BUDGET_MS} ms`, () => {
+      for (const prefix of ["", "'", "\\"]) {
+        const text = prefix + unit.repeat(Math.ceil(MB / unit.length)).slice(0, MB);
+        let started = performance.now();
+        findSqlStringLiteralSpans(text);
+        expect(performance.now() - started).toBeLessThan(BUDGET_MS);
+        started = performance.now();
+        scrubEvidenceText(text, { sqlLiterals: true });
+        expect(performance.now() - started).toBeLessThan(BUDGET_MS);
+        started = performance.now();
+        scrubbedExcerpt(text, { start: 0, end: text.length }, 80, { sqlLiterals: true });
         expect(performance.now() - started).toBeLessThan(BUDGET_MS);
       }
     }, 60_000);

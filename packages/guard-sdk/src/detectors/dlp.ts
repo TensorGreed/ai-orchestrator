@@ -2,9 +2,9 @@ import { maskedEvidence, maskForDataClass, MASK_CHAR, replaceSpans, shannonEntro
 import type { DetectorContext, GuardDataClass, GuardDetector, GuardFinding, GuardInput, GuardSpan } from "../types";
 import { clampScore } from "../types";
 import { unsafeDictionaryPattern, type GuardDictionary } from "../profile";
-import { digitsAroundAtLeast, findBasicAuthUrlSpans, findEmailSpans, findJwtSpans, findPrivateKeySpans, findUrlQueryMatches } from "./dlp-linear";
+import { digitsAroundAtLeast, findBasicAuthUrlSpans, findEmailSpans, findJwtSpans, findPrivateKeySpans, findSqlStringLiteralSpans, findUrlQueryMatches } from "./dlp-linear";
 
-export { findBasicAuthUrlSpans, findEmailSpans, findJwtSpans, findPrivateKeySpans, findUrlQueryMatches, type UrlQueryMatch } from "./dlp-linear";
+export { findBasicAuthUrlSpans, findEmailSpans, findJwtSpans, findPrivateKeySpans, findSqlStringLiteralSpans, findUrlQueryMatches, type UrlQueryMatch } from "./dlp-linear";
 
 export const DLP_DETECTOR_ID = "dlp.patterns";
 
@@ -343,8 +343,6 @@ function looksLikeJwt(token: string): boolean {
   }
 }
 
-const SQL_STRING_LITERAL = /'(?:[^'\\]|\\.|'')*'/g;
-
 /**
  * Text that pattern detectors (egress, exfiltration, SQL, command, path)
  * keep as evidence or put in a message: URL query and fragment values are
@@ -353,11 +351,26 @@ const SQL_STRING_LITERAL = /'(?:[^'\\]|\\.|'')*'/g;
  */
 export function scrubEvidenceText(text: string, options: { sqlLiterals?: boolean } = {}): string {
   let out = dropUrlQueries(text);
-  if (options.sqlLiterals) out = out.replace(SQL_STRING_LITERAL, `'${MASK_CHAR.repeat(3)}'`);
+  if (options.sqlLiterals) out = blankSqlLiterals(out);
   const matches = scanDlp(out);
   if (matches.length === 0) return out;
   const byStart = new Map(matches.map((match) => [`${match.span.start}:${match.span.end}`, match.dataClass]));
   return replaceSpans(out, matches.map((match) => match.span), (original, span) => maskForDataClass(original, byStart.get(`${span.start}:${span.end}`)));
+}
+
+/** Each SQL string literal becomes `'•••'` (in linear time; the plain regex was quadratic on `\'` runs). */
+function blankSqlLiterals(text: string): string {
+  const literals = findSqlStringLiteralSpans(text);
+  if (literals.length === 0) return text;
+  const blank = `'${MASK_CHAR.repeat(3)}'`;
+  const parts: string[] = [];
+  let cursor = 0;
+  for (const literal of literals) {
+    parts.push(text.slice(cursor, literal.start), blank);
+    cursor = literal.end;
+  }
+  parts.push(text.slice(cursor));
+  return parts.join("");
 }
 
 /** Each URL keeps its scheme, host and path; its query or fragment becomes `?•••`. */

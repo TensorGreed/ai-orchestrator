@@ -247,3 +247,65 @@ export function digitsAroundAtLeast(text: string, start: number, end: number, li
   }
   return false;
 }
+
+const QUOTE = 39;
+const BACKSLASH = 92;
+/** What `.` does not match without the `s` flag. */
+const isLineTerminator = (c: number) => c === 10 || c === 13 || c === 0x2028 || c === 0x2029;
+
+/**
+ * The matches of `/'(?:[^'\\]|\\.|'')*'/g` (a SQL string literal) in one pass.
+ *
+ * The regex is deterministic except at `''`: it first reads the pair as an
+ * escaped quote and goes on, and only if nothing after that can close the
+ * literal does it close at the first quote of the pair. Going on fails only
+ * at a dead end (the end of the text, or `\` before a line terminator or the
+ * end) reached before any lone quote, since any quote it reads either closes
+ * the literal or is another pair. So the body is walked once: a lone quote
+ * closes it; at a dead end it closes at the last pair, or there is no
+ * literal from this quote. With no literal, every quote up to the dead end
+ * was the second character of a `\x` on the same walk, so a literal starting
+ * there would walk the same way to the same dead end: the search resumes at
+ * the dead end, not at the next quote (the regex retries each of them, which
+ * is what made it quadratic on `\'` runs). Each character is read at most
+ * twice (once more after a literal closed at its last pair).
+ */
+export function findSqlStringLiteralSpans(s: string): GuardSpan[] {
+  const out: GuardSpan[] = [];
+  const n = s.length;
+  let from = 0;
+  for (;;) {
+    const start = s.indexOf("'", from);
+    if (start === -1) return out;
+    let p = start + 1;
+    let lastPair = -1;
+    let end = -1;
+    while (p < n) {
+      const c = s.charCodeAt(p);
+      if (c === BACKSLASH) {
+        if (p + 1 < n && !isLineTerminator(s.charCodeAt(p + 1))) {
+          p += 2;
+          continue;
+        }
+        break;
+      }
+      if (c === QUOTE) {
+        if (p + 1 < n && s.charCodeAt(p + 1) === QUOTE) {
+          lastPair = p;
+          p += 2;
+          continue;
+        }
+        end = p + 1;
+        break;
+      }
+      p += 1;
+    }
+    if (end === -1 && lastPair !== -1) end = lastPair + 1;
+    if (end === -1) {
+      from = p;
+      continue;
+    }
+    out.push({ start, end });
+    from = end;
+  }
+}
