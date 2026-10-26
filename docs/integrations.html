@@ -1,153 +1,208 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="description" content="L2M ships with 24+ native integrations across communication, data, productivity, payments, and cloud storage — all first-class nodes in the workflow canvas." />
-    <meta name="theme-color" content="#2563eb" />
-    <meta property="og:title" content="L2M | Integrations" />
-    <meta property="og:description" content="Native Tier 1 and Tier 2 integrations with HMAC- and Ed25519-verified webhook triggers." />
+    <title>L²M integrations: built-in nodes and any MCP server</title>
+    <meta name="description" content="The built-in nodes in L2M: chat models, agents, MCP tools, knowledge bases, app and database nodes, and signed triggers. Anything else, your agents reach through an MCP server." />
+    <link rel="canonical" href="https://lsquarem.com/integrations.html" />
+    <meta name="theme-color" content="#07090f" />
     <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="L2M" />
+    <meta property="og:url" content="https://lsquarem.com/integrations.html" />
+    <meta property="og:title" content="L2M integrations: built-in nodes and any MCP server" />
+    <meta property="og:description" content="Chat models, agents, MCP tools, knowledge bases, app and database nodes, and signed triggers, built into L2M." />
+    <meta property="og:image" content="https://lsquarem.com/assets/social-card.png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content="The L2M studio showing an agent hub with its chat model, memory and two MCP tools, next to the run tape of a finished run." />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="L2M integrations: built-in nodes and any MCP server" />
+    <meta name="twitter:description" content="Chat models, agents, MCP tools, knowledge bases, app and database nodes, and signed triggers, built into L2M." />
+    <meta name="twitter:image" content="https://lsquarem.com/assets/social-card.png" />
     <link rel="icon" type="image/svg+xml" href="./assets/favicon.svg" />
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+    <link rel="preload" href="./assets/fonts/inter-latin-var.woff2" as="font" type="font/woff2" crossorigin />
     <link rel="stylesheet" href="./styles.css" />
-    <title>L²M | Integrations</title>
     <script>
       (function () {
-        var stored = localStorage.getItem("l2m-theme");
-        var prefersDark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
-        var theme = stored || (prefersDark ? "dark" : "light");
-        document.documentElement.setAttribute("data-theme", theme);
+        var root = document.documentElement;
+        var stored = null;
+        try {
+          stored = localStorage.getItem("l2m-theme");
+        } catch (e) {}
+        var prefersLight = window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches;
+        root.setAttribute("data-theme", stored === "light" || stored === "dark" ? stored : prefersLight ? "light" : "dark");
       })();
     </script>
   </head>
   <body>
-    <div class="surface-glow" aria-hidden="true"></div>
+    <a class="skip-link" href="#main">Skip to content</a>
 
     <header class="topbar">
       <div class="container topbar-inner">
-        <a class="brand" href="./index.html" aria-label="L2M home">
-          <img src="./assets/lsquarem-logo.svg" alt="L2M logo" />
-          <div class="brand-text">
-            <strong>L<sup>2</sup>M</strong>
-            <span>MCP-native agent runtime</span>
-          </div>
+        <a class="brand" href="./">
+          <img src="./assets/lsquarem-logo.svg" alt="" width="32" height="32" />
+          <strong>L<sup>2</sup>M</strong>
+          <span class="brand-tag">MCP agents, governed</span>
         </a>
 
-        <nav class="nav" id="siteNav">
-          <a href="./index.html#differentiators">Why L2M</a>
-          <a href="./index.html#quickstart">Quickstart</a>
-          <a href="./index.html#patterns">Patterns</a>
-          <a href="./docs/" class="text-link">Docs</a>
-          <a href="./integrations.html" class="active">Integrations</a>
+        <nav class="nav" id="siteNav" aria-label="Main">
+          <a href="./#studio">Studio</a>
+          <a href="./#control-plane">MCP</a>
+          <a href="./#govern">Govern</a>
+          <a href="./#ship">Ship</a>
+          <a href="./#self-host">Self-host</a>
+          <a href="./docs/">Docs</a>
+          <a href="./integrations.html" aria-current="page">Integrations</a>
+          <a class="nav-github" href="https://github.com/TensorGreed/ai-orchestrator" rel="noopener">GitHub</a>
         </nav>
 
-        <button class="menu-toggle" id="menuToggle" aria-label="Toggle menu" aria-expanded="false">Menu</button>
-
-        <button class="theme-toggle" id="themeToggle" aria-label="Toggle theme">
-          <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" /></svg>
-          <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4" /><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41" /></svg>
-        </button>
-
-        <a class="btn btn-subtle" href="https://github.com/TensorGreed/ai-orchestrator" target="_blank" rel="noreferrer">GitHub</a>
+        <div class="topbar-actions">
+          <a class="btn btn-primary btn-demo" href="./demo/">Live demo</a>
+          <button class="icon-btn theme-toggle" id="themeToggle" type="button" aria-label="Switch between light and dark theme">
+            <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" /></svg>
+            <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4" /><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41" /></svg>
+          </button>
+          <a class="icon-btn topbar-github" href="https://github.com/TensorGreed/ai-orchestrator" rel="noopener" aria-label="L2M on GitHub">
+            <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5a11.5 11.5 0 0 0-3.64 22.41c.58.1.79-.25.79-.56v-2c-3.2.7-3.88-1.37-3.88-1.37-.53-1.33-1.28-1.69-1.28-1.69-1.05-.71.08-.7.08-.7 1.16.08 1.77 1.19 1.77 1.19 1.03 1.77 2.7 1.26 3.36.96.1-.75.4-1.26.73-1.55-2.56-.29-5.25-1.28-5.25-5.68 0-1.26.45-2.28 1.19-3.09-.12-.29-.52-1.46.11-3.05 0 0 .97-.31 3.17 1.18a11 11 0 0 1 5.77 0c2.2-1.49 3.17-1.18 3.17-1.18.63 1.59.23 2.76.11 3.05.74.81 1.19 1.83 1.19 3.09 0 4.41-2.7 5.38-5.26 5.67.41.36.78 1.06.78 2.14v3.17c0 .31.21.67.8.56A11.5 11.5 0 0 0 12 .5z" /></svg>
+          </a>
+          <button class="icon-btn menu-toggle" id="menuToggle" type="button" aria-label="Open menu" aria-expanded="false" aria-controls="siteNav">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16" /></svg>
+          </button>
+        </div>
       </div>
     </header>
 
-    <main>
-      <section class="hero reveal">
+    <main id="main">
+      <section class="hero" aria-labelledby="hero-title">
         <div class="container">
-          <span class="eyebrow">Native integrations</span>
-          <h1 class="integrations-title">24+ connectors, first-class on the canvas.</h1>
-          <p class="integrations-lede">
-            Every integration here is a native node in the L<sup>2</sup>M workflow engine — with secret management, retry semantics, signed webhook triggers where the vendor supports them, and a configuration schema the Studio renders automatically. No third-party glue layer, no sidecar processes.
-          </p>
-          <div class="integrations-stats">
-            <div><strong>24+</strong><span>connectors shipped</span></div>
-            <div><strong>11</strong><span>Tier 1 foundations</span></div>
-            <div><strong>13</strong><span>Tier 2 SaaS</span></div>
-            <div><strong>6</strong><span>signed webhook schemes</span></div>
+          <span class="eyebrow">Integrations</span>
+          <h1 id="hero-title">Built-in nodes, and any MCP server.</h1>
+          <p class="lead">These nodes ship with L2M and are configured in the studio, with credentials kept in the encrypted secret store. For everything else, attach an MCP server to an agent and govern its tools from the MCP control plane.</p>
+          <div class="hero-actions">
+            <a class="btn btn-primary btn-lg" href="./demo/">Try the live demo</a>
+            <a class="btn btn-lg" href="./docs/nodes/reference/">Node reference</a>
           </div>
         </div>
       </section>
 
-      <section id="tier1" class="reveal">
+      <section id="ai" class="reveal" aria-labelledby="ai-title">
         <div class="container">
           <header class="section-header">
-            <span class="eyebrow">Tier 1 · Foundations</span>
-            <h2>Protocols, databases, and the communication backbone.</h2>
-            <p>Primitives every workflow eventually needs — HTTP, SQL, NoSQL, email, Slack, GitHub. Production-hardened with retries, idempotency keys, and HMAC-verified webhook triggers.</p>
+            <span class="eyebrow">Agents and AI</span>
+            <h2 id="ai-title">Models, agents, tools and retrieval.</h2>
+            <p>The pieces an agent is built from. Chat models attach to an agent's model slot; MCP tools, memory and guards attach to its rings.</p>
           </header>
-
-          <div class="integration-grid">
-            <article class="integration-card"><img src="./assets/logos/http.svg" alt="HTTP" loading="lazy" /><div><strong>HTTP Request</strong><div class="integration-meta">http_request · webhook_input</div></div></article>
-            <article class="integration-card"><img src="./assets/logos/slack.svg" alt="Slack" loading="lazy" /><div><strong>Slack</strong><div class="integration-meta">slack_send_message · slack_trigger</div></div></article>
-            <article class="integration-card"><img src="./assets/logos/smtp.svg" alt="SMTP" loading="lazy" /><div><strong>Email (SMTP)</strong><div class="integration-meta">smtp_send_email</div></div></article>
-            <article class="integration-card"><img src="./assets/logos/imap.svg" alt="IMAP" loading="lazy" /><div><strong>Email (IMAP)</strong><div class="integration-meta">imap_email_trigger</div></div></article>
-            <article class="integration-card"><img src="./assets/logos/gmail.svg" alt="Gmail" loading="lazy" /><div><strong>Gmail</strong><div class="integration-meta">smtp_send_email · imap_email_trigger</div></div></article>
-            <article class="integration-card"><img src="./assets/logos/google-sheets.svg" alt="Google Sheets" loading="lazy" /><div><strong>Google Sheets</strong><div class="integration-meta">read · append · update · trigger</div></div></article>
-            <article class="integration-card"><img src="./assets/logos/postgresql.svg" alt="PostgreSQL" loading="lazy" /><div><strong>PostgreSQL</strong><div class="integration-meta">postgres_query · postgres_trigger</div></div></article>
-            <article class="integration-card"><img src="./assets/logos/mysql.svg" alt="MySQL" loading="lazy" /><div><strong>MySQL</strong><div class="integration-meta">mysql_query</div></div></article>
-            <article class="integration-card"><img src="./assets/logos/mongodb.svg" alt="MongoDB" loading="lazy" /><div><strong>MongoDB</strong><div class="integration-meta">mongo_operation</div></div></article>
-            <article class="integration-card"><img src="./assets/logos/redis.svg" alt="Redis" loading="lazy" /><div><strong>Redis</strong><div class="integration-meta">redis_command · redis_trigger</div></div></article>
-            <article class="integration-card"><img src="./assets/logos/github.svg" alt="GitHub" loading="lazy" /><div><strong>GitHub</strong><div class="integration-meta">github_action · github_webhook_trigger</div></div></article>
-          </div>
+          <ul class="integration-grid" role="list">
+            <li class="integration-card"><span class="logo-fallback" aria-hidden="true">LLM</span><div><strong>Chat models</strong><div class="integration-meta">OpenAI · Anthropic · Gemini · Azure OpenAI · Ollama · OpenAI-compatible · AI gateway</div></div></li>
+            <li class="integration-card"><span class="logo-fallback" aria-hidden="true">AG</span><div><strong>Agents</strong><div class="integration-meta">agent_orchestrator · supervisor_node</div></div></li>
+            <li class="integration-card"><span class="logo-fallback" aria-hidden="true">MCP</span><div><strong>MCP Tool</strong><div class="integration-meta">any MCP server, over stdio or Streamable HTTP</div></div></li>
+            <li class="integration-card"><span class="logo-fallback" aria-hidden="true">KB</span><div><strong>Knowledge bases</strong><div class="integration-meta">built-in, with hybrid search and rerank</div></div></li>
+            <li class="integration-card"><span class="logo-fallback" aria-hidden="true">VEC</span><div><strong>Vector stores</strong><div class="integration-meta">Qdrant · Azure AI Search</div></div></li>
+            <li class="integration-card"><span class="logo-fallback" aria-hidden="true">[1]</span><div><strong>Citations</strong><div class="integration-meta">extract_citations</div></div></li>
+            <li class="integration-card"><span class="logo-fallback" aria-hidden="true">GRD</span><div><strong>Guard</strong><div class="integration-meta">guard · guard_protection</div></div></li>
+            <li class="integration-card"><span class="logo-fallback" aria-hidden="true">PDF</span><div><strong>Reports</strong><div class="integration-meta">chart (Vega-Lite) · pdf_output</div></div></li>
+          </ul>
         </div>
       </section>
 
-      <section id="tier2" class="reveal">
+      <section id="apps" class="reveal" aria-labelledby="apps-title">
         <div class="container">
           <header class="section-header">
-            <span class="eyebrow">Tier 2 · SaaS &amp; Cloud</span>
-            <h2>The SaaS landscape your AI workflows actually touch.</h2>
-            <p>CRMs, payment providers, collaboration tools, and cloud storage — each with native authentication, signed webhooks where the vendor supports them, and a Studio config schema rendered inline.</p>
+            <span class="eyebrow">Apps</span>
+            <h2 id="apps-title">Messaging, work tracking, CRM, payments and storage.</h2>
+            <p>App nodes run one operation each, with app triggers where the vendor sends events.</p>
           </header>
-
-          <div class="integration-grid">
-            <article class="integration-card"><img src="./assets/logos/microsoft-teams.svg" alt="Microsoft Teams" loading="lazy" /><div><strong>Microsoft Teams</strong><div class="integration-meta">teams_send_message</div></div></article>
-            <article class="integration-card"><img src="./assets/logos/notion.svg" alt="Notion" loading="lazy" /><div><strong>Notion</strong><div class="integration-meta">create_page · query_database</div></div></article>
-            <article class="integration-card"><img src="./assets/logos/airtable.svg" alt="Airtable" loading="lazy" /><div><strong>Airtable</strong><div class="integration-meta">create · list · update</div></div></article>
-            <article class="integration-card"><img src="./assets/logos/jira.svg" alt="Jira" loading="lazy" /><div><strong>Jira</strong><div class="integration-meta">create_issue · search_issues</div></div></article>
-            <article class="integration-card"><img src="./assets/logos/salesforce.svg" alt="Salesforce" loading="lazy" /><div><strong>Salesforce</strong><div class="integration-meta">create_record · query</div></div></article>
-            <article class="integration-card"><img src="./assets/logos/hubspot.svg" alt="HubSpot" loading="lazy" /><div><strong>HubSpot</strong><div class="integration-meta">create_contact · get_contact</div></div></article>
-            <article class="integration-card"><img src="./assets/logos/stripe.svg" alt="Stripe" loading="lazy" /><div><strong>Stripe</strong><div class="integration-meta">create_charge · webhook_trigger</div></div></article>
-            <article class="integration-card"><img src="./assets/logos/aws-s3.svg" alt="AWS S3" loading="lazy" /><div><strong>AWS S3</strong><div class="integration-meta">put · get · list_objects</div></div></article>
-            <article class="integration-card"><img src="./assets/logos/telegram.svg" alt="Telegram" loading="lazy" /><div><strong>Telegram</strong><div class="integration-meta">send_message · trigger</div></div></article>
-            <article class="integration-card"><img src="./assets/logos/discord.svg" alt="Discord" loading="lazy" /><div><strong>Discord</strong><div class="integration-meta">send_message · trigger (Ed25519)</div></div></article>
-            <article class="integration-card"><img src="./assets/logos/google-drive.svg" alt="Google Drive" loading="lazy" /><div><strong>Google Drive</strong><div class="integration-meta">google_drive_trigger</div></div></article>
-            <article class="integration-card"><img src="./assets/logos/google-calendar.svg" alt="Google Calendar" loading="lazy" /><div><strong>Google Calendar</strong><div class="integration-meta">create_event · list_events</div></div></article>
-            <article class="integration-card"><img src="./assets/logos/twilio.svg" alt="Twilio" loading="lazy" /><div><strong>Twilio</strong><div class="integration-meta">twilio_send_sms</div></div></article>
-          </div>
+          <ul class="integration-grid" role="list">
+            <li class="integration-card"><img src="./assets/logos/slack.svg" alt="" width="30" height="30" loading="lazy" /><div><strong>Slack</strong><div class="integration-meta">slack_send_message · slack_trigger</div></div></li>
+            <li class="integration-card"><img src="./assets/logos/microsoft-teams.svg" alt="" width="30" height="30" loading="lazy" /><div><strong>Microsoft Teams</strong><div class="integration-meta">teams_send_message</div></div></li>
+            <li class="integration-card"><img src="./assets/logos/smtp.svg" alt="" width="30" height="30" loading="lazy" /><div><strong>Email</strong><div class="integration-meta">smtp_send_email · imap_email_trigger</div></div></li>
+            <li class="integration-card"><img src="./assets/logos/telegram.svg" alt="" width="30" height="30" loading="lazy" /><div><strong>Telegram</strong><div class="integration-meta">telegram_send_message · telegram_trigger</div></div></li>
+            <li class="integration-card"><img src="./assets/logos/discord.svg" alt="" width="30" height="30" loading="lazy" /><div><strong>Discord</strong><div class="integration-meta">discord_send_message · discord_trigger</div></div></li>
+            <li class="integration-card"><img src="./assets/logos/twilio.svg" alt="" width="30" height="30" loading="lazy" /><div><strong>Twilio</strong><div class="integration-meta">twilio_send_sms</div></div></li>
+            <li class="integration-card"><img src="./assets/logos/github.svg" alt="" width="30" height="30" loading="lazy" /><div><strong>GitHub</strong><div class="integration-meta">github_action · github_webhook_trigger</div></div></li>
+            <li class="integration-card"><img src="./assets/logos/jira.svg" alt="" width="30" height="30" loading="lazy" /><div><strong>Jira</strong><div class="integration-meta">jira_create_issue · jira_search_issues</div></div></li>
+            <li class="integration-card"><img src="./assets/logos/notion.svg" alt="" width="30" height="30" loading="lazy" /><div><strong>Notion</strong><div class="integration-meta">notion_create_page · notion_query_database</div></div></li>
+            <li class="integration-card"><img src="./assets/logos/airtable.svg" alt="" width="30" height="30" loading="lazy" /><div><strong>Airtable</strong><div class="integration-meta">create · list · update records</div></div></li>
+            <li class="integration-card"><img src="./assets/logos/google-sheets.svg" alt="" width="30" height="30" loading="lazy" /><div><strong>Google Sheets</strong><div class="integration-meta">read · append · update · trigger</div></div></li>
+            <li class="integration-card"><img src="./assets/logos/google-calendar.svg" alt="" width="30" height="30" loading="lazy" /><div><strong>Google Calendar</strong><div class="integration-meta">create_event · list_events</div></div></li>
+            <li class="integration-card"><img src="./assets/logos/google-drive.svg" alt="" width="30" height="30" loading="lazy" /><div><strong>Google Drive</strong><div class="integration-meta">google_drive_source · google_drive_trigger</div></div></li>
+            <li class="integration-card"><img src="./assets/logos/salesforce.svg" alt="" width="30" height="30" loading="lazy" /><div><strong>Salesforce</strong><div class="integration-meta">create_record · SOQL query</div></div></li>
+            <li class="integration-card"><img src="./assets/logos/hubspot.svg" alt="" width="30" height="30" loading="lazy" /><div><strong>HubSpot</strong><div class="integration-meta">create_contact · get_contact</div></div></li>
+            <li class="integration-card"><img src="./assets/logos/stripe.svg" alt="" width="30" height="30" loading="lazy" /><div><strong>Stripe</strong><div class="integration-meta">create_customer · create PaymentIntent · webhook trigger</div></div></li>
+            <li class="integration-card"><img src="./assets/logos/aws-s3.svg" alt="" width="30" height="30" loading="lazy" /><div><strong>AWS S3</strong><div class="integration-meta">put · get · list objects</div></div></li>
+          </ul>
         </div>
       </section>
 
-      <section id="webhook-security" class="reveal">
+      <section id="data" class="reveal" aria-labelledby="data-title">
         <div class="container">
           <header class="section-header">
-            <span class="eyebrow">Security</span>
-            <h2>Every inbound webhook is signature-verified.</h2>
-            <p>Triggers don't just listen on a path — they validate the vendor's signature scheme before the workflow runs, and enforce replay windows where the vendor supports them.</p>
+            <span class="eyebrow">Data and web</span>
+            <h2 id="data-title">Databases, HTTP, Azure services and the web.</h2>
+            <p>Query and write data stores, call any HTTP API, and read rendered web pages.</p>
+          </header>
+          <ul class="integration-grid" role="list">
+            <li class="integration-card"><img src="./assets/logos/http.svg" alt="" width="30" height="30" loading="lazy" /><div><strong>HTTP Request</strong><div class="integration-meta">http_request · webhook_input · webhook_response</div></div></li>
+            <li class="integration-card"><img src="./assets/logos/postgresql.svg" alt="" width="30" height="30" loading="lazy" /><div><strong>PostgreSQL</strong><div class="integration-meta">postgres_query · postgres_trigger</div></div></li>
+            <li class="integration-card"><img src="./assets/logos/mysql.svg" alt="" width="30" height="30" loading="lazy" /><div><strong>MySQL</strong><div class="integration-meta">mysql_query</div></div></li>
+            <li class="integration-card"><img src="./assets/logos/mongodb.svg" alt="" width="30" height="30" loading="lazy" /><div><strong>MongoDB</strong><div class="integration-meta">mongo_operation</div></div></li>
+            <li class="integration-card"><img src="./assets/logos/redis.svg" alt="" width="30" height="30" loading="lazy" /><div><strong>Redis</strong><div class="integration-meta">redis_command · redis_trigger</div></div></li>
+            <li class="integration-card"><span class="logo-fallback" aria-hidden="true">AZ</span><div><strong>Azure Storage</strong><div class="integration-meta">azure_storage</div></div></li>
+            <li class="integration-card"><span class="logo-fallback" aria-hidden="true">AZ</span><div><strong>Azure Cosmos DB</strong><div class="integration-meta">azure_cosmos_db</div></div></li>
+            <li class="integration-card"><span class="logo-fallback" aria-hidden="true">AZ</span><div><strong>Azure Monitor</strong><div class="integration-meta">azure_monitor_http</div></div></li>
+            <li class="integration-card"><span class="logo-fallback" aria-hidden="true">WEB</span><div><strong>Web Browse</strong><div class="integration-meta">web_browse (headless Chromium)</div></div></li>
+          </ul>
+        </div>
+      </section>
+
+      <section id="triggers" class="reveal" aria-labelledby="triggers-title">
+        <div class="container">
+          <header class="section-header">
+            <span class="eyebrow">Triggers</span>
+            <h2 id="triggers-title">Start a workflow from anywhere.</h2>
+            <p>Besides app triggers and webhooks, workflows start on a schedule, from a form or chat, from a stream or queue, or as a tool other MCP clients call.</p>
+          </header>
+          <ul class="integration-grid" role="list">
+            <li class="integration-card"><span class="logo-fallback" aria-hidden="true">CRON</span><div><strong>Schedules</strong><div class="integration-meta">schedule_trigger (cron)</div></div></li>
+            <li class="integration-card"><span class="logo-fallback" aria-hidden="true">UI</span><div><strong>Forms and chat</strong><div class="integration-meta">form_trigger · chat_trigger</div></div></li>
+            <li class="integration-card"><span class="logo-fallback" aria-hidden="true">KF</span><div><strong>Kafka</strong><div class="integration-meta">kafka_trigger</div></div></li>
+            <li class="integration-card"><span class="logo-fallback" aria-hidden="true">RMQ</span><div><strong>RabbitMQ</strong><div class="integration-meta">rabbitmq_trigger</div></div></li>
+            <li class="integration-card"><span class="logo-fallback" aria-hidden="true">MQ</span><div><strong>MQTT</strong><div class="integration-meta">mqtt_trigger</div></div></li>
+            <li class="integration-card"><span class="logo-fallback" aria-hidden="true">RSS</span><div><strong>RSS / Atom</strong><div class="integration-meta">rss_trigger</div></div></li>
+            <li class="integration-card"><span class="logo-fallback" aria-hidden="true">SSE</span><div><strong>Server-sent events</strong><div class="integration-meta">sse_trigger</div></div></li>
+            <li class="integration-card"><span class="logo-fallback" aria-hidden="true">FS</span><div><strong>Files</strong><div class="integration-meta">file_trigger</div></div></li>
+            <li class="integration-card"><span class="logo-fallback" aria-hidden="true">MCP</span><div><strong>Expose as MCP Tool</strong><div class="integration-meta">mcp_server_trigger</div></div></li>
+          </ul>
+        </div>
+      </section>
+
+      <section id="webhook-security" class="reveal" aria-labelledby="webhook-security-title">
+        <div class="container">
+          <header class="section-header">
+            <span class="eyebrow">Signed triggers</span>
+            <h2 id="webhook-security-title">Inbound webhooks are checked before the workflow runs.</h2>
+            <p>App triggers verify the sender's signature scheme; the generic webhook supports bearer tokens and HMAC-SHA256 with a replay window.</p>
           </header>
           <div class="cards">
-            <article><h3>Stripe</h3><p>HMAC-SHA256 over <code>{t}.{body}</code> with a 5-minute replay window.</p></article>
-            <article><h3>GitHub</h3><p>HMAC-SHA256 over the raw body, matched in constant time against <code>X-Hub-Signature-256</code>.</p></article>
-            <article><h3>Slack</h3><p>Signed-secret verification with timestamp skew protection and a granular event filter.</p></article>
-            <article><h3>Discord</h3><p>Ed25519 signature verification using the application public key, with PING/PONG handshake.</p></article>
-            <article><h3>Telegram</h3><p>Constant-time match of <code>X-Telegram-Bot-Api-Secret-Token</code> against the configured secret.</p></article>
-            <article><h3>Generic HMAC</h3><p>Pluggable <code>hmac_sha256</code> mode on any <code>webhook_input</code> node for custom vendors.</p></article>
+            <article class="card"><h3>Stripe</h3><p>Verifies the <code>Stripe-Signature</code> header (HMAC-SHA256 over the timestamp and body) within a replay window.</p></article>
+            <article class="card"><h3>GitHub</h3><p>HMAC-SHA256 over the raw body, checked against <code>X-Hub-Signature-256</code>.</p></article>
+            <article class="card"><h3>Slack</h3><p>Signing-secret verification of <code>X-Slack-Signature</code> with a timestamp check.</p></article>
+            <article class="card"><h3>Discord</h3><p>Ed25519 signature verification with the application's public key.</p></article>
+            <article class="card"><h3>Telegram</h3><p>Matches <code>X-Telegram-Bot-Api-Secret-Token</code> against the configured secret.</p></article>
+            <article class="card"><h3>Generic webhook</h3><p><code>none</code>, <code>bearer_token</code> or <code>hmac_sha256</code> on any <code>webhook_input</code>, with optional idempotency keys.</p></article>
           </div>
         </div>
       </section>
 
-      <section class="reveal">
+      <section class="reveal" aria-labelledby="cta-title">
         <div class="container">
-          <div class="cta-inner">
-            <h2>More integrations land every release.</h2>
-            <p>New connectors — Zendesk, Intercom, Shopify, Asana, Trello, Monday, ClickUp, Box, Dropbox, Azure Blob — are tracked in the public issue tracker. PRs welcome under the <a class="text-link" style="color: #ffffff; text-decoration: underline;" href="https://github.com/TensorGreed/ai-orchestrator/blob/main/CONTRIBUTING.md">contributor guide</a>.</p>
-            <div class="hero-actions" style="justify-content: center;">
-              <a class="btn btn-primary" href="https://github.com/TensorGreed/ai-orchestrator/issues" target="_blank" rel="noreferrer">View Issues</a>
-              <a class="btn btn-subtle" href="./index.html">Back to Home</a>
+          <div class="cta-panel">
+            <h2 id="cta-title">Need something that isn't listed?</h2>
+            <p>Connect its MCP server and register it once: L2M probes it, tracks its tools and applies your policies. Or write a community node package with the node SDK.</p>
+            <div class="hero-actions">
+              <a class="btn btn-primary btn-lg" href="./docs/product/mcp-server-registry">Register an MCP server</a>
+              <a class="btn btn-lg" href="./docs/extensions/community-nodes">Community nodes</a>
             </div>
           </div>
         </div>
@@ -156,17 +211,19 @@
 
     <footer class="footer">
       <div class="container footer-inner">
-        <div><strong>L<sup>2</sup>M</strong> · MCP-native agent runtime · <span id="year"></span></div>
-        <div class="footer-links">
+        <div><strong>L<sup>2</sup>M</strong> · Run and govern MCP agents, self-hosted · <span id="year">2026</span></div>
+        <nav class="footer-links" aria-label="Footer">
+          <a class="btn btn-primary" href="./demo/">Live demo</a>
           <a href="./docs/">Docs</a>
           <a href="./docs/patterns/">Patterns</a>
-          <a href="https://github.com/TensorGreed/ai-orchestrator" target="_blank" rel="noreferrer">GitHub</a>
-          <a href="https://github.com/TensorGreed/l2m-samples" target="_blank" rel="noreferrer">Samples</a>
-          <a href="https://tensorgreed.com" target="_blank" rel="noreferrer">TensorGreed</a>
-        </div>
+          <a href="./integrations.html">Integrations</a>
+          <a href="https://github.com/TensorGreed/ai-orchestrator" rel="noopener">GitHub</a>
+          <a href="https://github.com/TensorGreed/ai-orchestrator/discussions" rel="noopener">Discussions</a>
+          <a href="https://tensorgreed.com" rel="noopener">TensorGreed</a>
+        </nav>
       </div>
     </footer>
 
-    <script src="./main.js"></script>
+    <script src="./main.js" defer></script>
   </body>
 </html>
