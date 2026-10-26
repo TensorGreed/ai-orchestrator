@@ -124,7 +124,7 @@ let tempDir: string;
 async function freshSqliteShape(): Promise<{ shape: SchemaShape; file: string }> {
   const file = path.join(tempDir, `parity-${Math.random().toString(36).slice(2)}.db`);
   const store = await SqliteStore.create(file);
-  store.close();
+  await store.close();
   const db = new Database(file, { readonly: true });
   try {
     return { shape: introspectSqlite(db), file };
@@ -180,7 +180,7 @@ describe("SQLite schema: migration 39 objects", () => {
       expect((store as SqliteStore).upgradeNotes).toEqual([]);
       expect(logged).toEqual([]);
     } finally {
-      store.close();
+      await store.close();
     }
   });
 
@@ -219,11 +219,11 @@ describe("SQLite schema: migration 39 objects", () => {
     const store = await createStore({ env: { DB_SQLITE_PATH: file }, log: { info: (m) => firstLog.push(m), warn: (m) => firstLog.push(m) } });
     expect((store as SqliteStore).upgradeNotes).toEqual(["v39 upgrade: 2 running guard simulations were interrupted (only one can run at a time)."]);
     expect(firstLog).toEqual(["Database: v39 upgrade: 2 running guard simulations were interrupted (only one can run at a time)."]);
-    store.close();
+    await store.close();
     // The note is printed once, at the upgrade; the next start has nothing to say.
     const logged: string[] = [];
     const again = await createStore({ env: { DB_SQLITE_PATH: file }, log: { info: (m) => logged.push(m), warn: (m) => logged.push(m) } });
-    again.close();
+    await again.close();
     expect(logged).toEqual([]);
     const after = new Database(file, { readonly: true });
     try {

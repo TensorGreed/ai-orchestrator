@@ -257,7 +257,7 @@ describe("createStore", () => {
       expect(fs.existsSync(file)).toBe(true);
       expect(logs).toEqual([]);
     } finally {
-      (store as SqliteStore).close();
+      await store.close();
     }
   });
 
@@ -265,9 +265,9 @@ describe("createStore", () => {
     const file = path.join(tempDir, "from-env.db");
     const store = await createStore({ env: { DB_SQLITE_PATH: file } });
     try {
-      expect((store as SqliteStore).storageLocation()).toBe(file);
+      expect(await store.storageLocation()).toBe(file);
     } finally {
-      (store as SqliteStore).close();
+      await store.close();
     }
   });
 

@@ -28,14 +28,13 @@ import { parsePostgresSettings, type PostgresSettings } from "../config.js";
 import { postgresStoreConfig } from "../db/create-store.js";
 import { SqliteStore } from "../db/database.js";
 import { PostgresStore, postgresPoolConfig } from "../db/postgres-store.js";
+import type { Store } from "../db/store.js";
 
 export type TestStoreKind = "sqlite" | "postgres";
 
-/** The store a test receives (both classes until the shared async `Store` interface lands). */
-export type TestStoreInstance = SqliteStore | PostgresStore;
-
-export interface TestStore<S extends TestStoreInstance = TestStoreInstance> {
-  store: S;
+export interface TestStore {
+  /** The store under test, through the shared interface only, so a contract test runs unchanged on both stores. */
+  store: Store;
   kind: TestStoreKind;
   /** The Postgres schema this store lives in (Postgres only). */
   schema?: string;
@@ -121,7 +120,7 @@ export async function createTestStore(options: { kind?: TestStoreKind } = {}): P
       if (done) return;
       done = true;
       try {
-        store.close();
+        await store.close();
       } finally {
         fs.rmSync(dir, { recursive: true, force: true });
       }
@@ -146,7 +145,7 @@ export function noticePostgresSkipped(what: string): void {
 export interface StoreContractContext {
   kind: TestStoreKind;
   /** This test's fresh store (valid inside a test, after beforeEach). */
-  store(): TestStoreInstance;
+  store(): Store;
 }
 
 /**
