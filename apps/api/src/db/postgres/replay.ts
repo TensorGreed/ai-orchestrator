@@ -3,8 +3,8 @@
  * Plain functions over a PgContext; PostgresStore delegates here. Methods that are not implemented yet throw
  * StoreNotImplementedError and are listed in UNIMPLEMENTED_METHODS (remove both together when implementing one).
  *
- * Ordering: SQLite breaks `created_at` ties by rowid (insertion order); Postgres has no rowid, so ties are broken by
- * `id` instead. Timestamps are milliseconds, so a tie needs two rows written in the same millisecond.
+ * Ordering: SQLite breaks `created_at` ties by rowid (insertion order); here `seq`, the identity column v40 adds to
+ * mcp_cassettes and replay_recordings as the stand-in for rowid, does.
  *
  * Golden-run limits (count per workflow, bytes per workflow, bytes in the deployment) are checked and the row written
  * while holding one transaction-scoped advisory lock (REPLAY_GOLDEN_LOCK). READ COMMITTED alone would let two
@@ -159,7 +159,7 @@ export async function getMcpCassette(ctx: PgContext, ...[id]: Parameters<Store["
 
 export async function getMcpCassetteForExecution(ctx: PgContext, ...[executionId]: Parameters<Store["getMcpCassetteForExecution"]>): ReturnType<Store["getMcpCassetteForExecution"]> {
   const row = await ctx.queryOne<{ id: string }>(
-    `SELECT id FROM mcp_cassettes WHERE execution_id = $1 ORDER BY created_at DESC, id DESC LIMIT 1`,
+    `SELECT id FROM mcp_cassettes WHERE execution_id = $1 ORDER BY created_at DESC, seq DESC LIMIT 1`,
     [executionId]
   );
   return row ? cassetteRecord(ctx.pool, toStr(row.id)) : null;
@@ -167,7 +167,7 @@ export async function getMcpCassetteForExecution(ctx: PgContext, ...[executionId
 
 export async function listMcpCassettesForEvalRun(ctx: PgContext, ...[evalRunId]: Parameters<Store["listMcpCassettesForEvalRun"]>): ReturnType<Store["listMcpCassettesForEvalRun"]> {
   const rows = await ctx.query<McpCassetteRow>(
-    `SELECT ${MCP_CASSETTE_SUMMARY_COLUMNS} FROM mcp_cassettes WHERE eval_run_id = $1 ORDER BY created_at ASC, id ASC`,
+    `SELECT ${MCP_CASSETTE_SUMMARY_COLUMNS} FROM mcp_cassettes WHERE eval_run_id = $1 ORDER BY created_at ASC, seq ASC`,
     [evalRunId]
   );
   return rows.map(mapMcpCassetteSummary);
@@ -193,7 +193,7 @@ export async function listMcpCassettes(ctx: PgContext, ...[options = {}]: Parame
   const offset = Math.max(0, Math.floor(options.offset ?? 0));
   const items = (
     await ctx.query<McpCassetteRow>(
-      `SELECT ${MCP_CASSETTE_SUMMARY_COLUMNS} FROM mcp_cassettes ${clause} ORDER BY created_at DESC, id DESC LIMIT ${next(limit)} OFFSET ${next(offset)}`,
+      `SELECT ${MCP_CASSETTE_SUMMARY_COLUMNS} FROM mcp_cassettes ${clause} ORDER BY created_at DESC, seq DESC LIMIT ${next(limit)} OFFSET ${next(offset)}`,
       params
     )
   ).map(mapMcpCassetteSummary);
@@ -207,7 +207,7 @@ export async function mcpCassetteBadgesForExecutions(ctx: PgContext, ...[executi
   const rows = await ctx.query<{ id: string; execution_id: string; call_count: number; truncated: number }>(
     `SELECT id, execution_id, call_count, truncated FROM mcp_cassettes
      WHERE execution_id = ANY($1::text[])
-     ORDER BY created_at ASC, id ASC`,
+     ORDER BY created_at ASC, seq ASC`,
     [ids]
   );
   for (const row of rows) {
@@ -366,7 +366,7 @@ async function goldenBytes(db: Queryable): Promise<number> {
 async function recordingIdForExecution(db: Queryable, executionId: string, status: "candidate" | "golden"): Promise<string | null> {
   const row = await one<{ id: string }>(
     db,
-    `SELECT id FROM replay_recordings WHERE source_execution_id = $1 AND status = $2 ORDER BY created_at ASC, id ASC LIMIT 1`,
+    `SELECT id FROM replay_recordings WHERE source_execution_id = $1 AND status = $2 ORDER BY created_at ASC, seq ASC LIMIT 1`,
     [executionId, status]
   );
   return row ? toStr(row.id) : null;
@@ -408,7 +408,7 @@ export async function listReplayRecordings(ctx: PgContext, ...[options = {}]: Pa
   const offset = Math.max(0, Math.floor(options.offset ?? 0));
   const items = (
     await ctx.query<Record<string, unknown>>(
-      `SELECT ${REPLAY_RECORDING_SUMMARY_COLUMNS} FROM replay_recordings ${clause} ORDER BY created_at DESC, id DESC LIMIT ${next(limit)} OFFSET ${next(offset)}`,
+      `SELECT ${REPLAY_RECORDING_SUMMARY_COLUMNS} FROM replay_recordings ${clause} ORDER BY created_at DESC, seq DESC LIMIT ${next(limit)} OFFSET ${next(offset)}`,
       params
     )
   ).map(mapReplayRecordingSummary);
@@ -438,7 +438,7 @@ export async function replayGoldenBadgesForExecutions(ctx: PgContext, ...[execut
   const rows = await ctx.query<{ id: string; source_execution_id: string }>(
     `SELECT id, source_execution_id FROM replay_recordings
      WHERE status = 'golden' AND source_execution_id = ANY($1::text[])
-     ORDER BY created_at ASC, id ASC`,
+     ORDER BY created_at ASC, seq ASC`,
     [ids]
   );
   for (const row of rows) {

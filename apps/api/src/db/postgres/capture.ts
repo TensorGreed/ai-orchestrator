@@ -5,7 +5,7 @@
  *
  * Each write is one statement (a conditional UPDATE / DELETE whose row count is the answer), so two API processes on
  * one database never promote the same candidate twice or double-count a prune. SQLite orders candidates captured in
- * the same instant by rowid; here `created_at`, then `id`, break that tie.
+ * the same instant by rowid; here `seq` (v40's identity column on replay_recordings, the stand-in for rowid) does.
  */
 import {
   REPLAY_CAPTURE_API_KEY_FILTER,
@@ -142,7 +142,7 @@ export async function listReplayCaptures(ctx: PgContext, ...[options]: Parameter
   const pageParams = [...params, limit, offset];
   const rows = await ctx.query<Record<string, unknown>>(
     `SELECT ${REPLAY_RECORDING_SUMMARY_COLUMNS} FROM replay_recordings ${clause}
-     ORDER BY captured_at DESC, created_at DESC, id DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
+     ORDER BY captured_at DESC, seq DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
     pageParams
   );
   return { items: rows.map(mapReplayRecordingSummary), total: total ? toNum(total.count) : 0 };
@@ -156,7 +156,7 @@ export async function countReplayCapturesSince(ctx: PgContext, ...[workflowId, s
 export async function oldestReplayCaptureIds(ctx: PgContext, ...[workflowId, count]: Parameters<Store["oldestReplayCaptureIds"]>): ReturnType<Store["oldestReplayCaptureIds"]> {
   if (count <= 0) return [];
   const rows = await ctx.query<{ id: string }>(
-    `SELECT id FROM replay_recordings WHERE workflow_id = $1 AND status = 'candidate' ORDER BY captured_at ASC, created_at ASC, id ASC LIMIT $2`,
+    `SELECT id FROM replay_recordings WHERE workflow_id = $1 AND status = 'candidate' ORDER BY captured_at ASC, seq ASC LIMIT $2`,
     [workflowId, count]
   );
   return rows.map((row) => toStr(row.id));
@@ -236,7 +236,7 @@ export async function sumReplayCaptureBytesForWorkflow(ctx: PgContext, ...[workf
 
 export async function oldestReplayCaptures(ctx: PgContext, ...[workflowId, limit]: Parameters<Store["oldestReplayCaptures"]>): ReturnType<Store["oldestReplayCaptures"]> {
   const rows = await ctx.query<{ id: string; bytes: number }>(
-    `SELECT id, bytes FROM replay_recordings WHERE workflow_id = $1 AND status = 'candidate' ORDER BY captured_at ASC, created_at ASC, id ASC LIMIT $2`,
+    `SELECT id, bytes FROM replay_recordings WHERE workflow_id = $1 AND status = 'candidate' ORDER BY captured_at ASC, seq ASC LIMIT $2`,
     [workflowId, Math.max(1, limit)]
   );
   return rows.map((row) => ({ id: toStr(row.id), bytes: toNum(row.bytes) }));

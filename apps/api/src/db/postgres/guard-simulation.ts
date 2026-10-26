@@ -100,12 +100,12 @@ export async function getGuardSimulation(ctx: PgContext, id: string): Promise<Gu
   return row ? mapGuardSimulationRow(row) : null;
 }
 
-/** Newest first; rows created at the same instant come in reverse id order (SQLite: reverse insertion order). */
+/** Newest first; rows created at the same instant come in reverse insertion order (`seq`, v40; SQLite: rowid). */
 export async function listGuardSimulations(ctx: PgContext, options: Parameters<Store["listGuardSimulations"]>[0]): Promise<GuardSimulationRecord[]> {
   const limit = Math.max(1, Math.min(100, Math.floor(options.limit ?? 20)));
   const offset = Math.max(0, Math.floor(options.offset ?? 0));
   const rows = await ctx.query<Row>(
-    `SELECT * FROM guard_simulations WHERE profile_id = $1 ORDER BY created_at DESC, id COLLATE "C" DESC LIMIT $2 OFFSET $3`,
+    `SELECT * FROM guard_simulations WHERE profile_id = $1 ORDER BY created_at DESC, seq DESC LIMIT $2 OFFSET $3`,
     [options.profileId, limit, offset]
   );
   return rows.map(mapGuardSimulationRow);

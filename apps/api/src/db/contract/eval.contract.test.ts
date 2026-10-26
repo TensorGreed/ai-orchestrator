@@ -47,6 +47,18 @@ describeStoreContract("store contract: evals", (ctx) => {
     expect(await store.getEvalDataset("missing")).toBeNull();
   });
 
+  it("cases and results written in the same millisecond keep insert order, not id order (rowid / seq)", async () => {
+    const store = ctx.store();
+    await store.createEvalDataset({ id: "ds", name: "D" });
+    await seedRun(store, "run", "ds");
+    // Ids count down, so any id tie-break would reverse rows that share a timestamp.
+    const ids = Array.from({ length: 20 }, (_, index) => `z${String(19 - index).padStart(2, "0")}`);
+    for (const id of ids) await store.createEvalFixture({ id, datasetId: "ds", name: id, input: null });
+    for (const id of ids) await store.recordEvalResult({ id: `r-${id}`, runId: "run", fixtureId: id, status: "pass" });
+    expect((await store.listEvalFixtures("ds")).map((f) => f.id)).toEqual(ids);
+    expect((await store.listEvalResults("run")).map((r) => r.id)).toEqual(ids.map((id) => `r-${id}`));
+  });
+
   it("stores fixtures with JSON fields, keeps insert order, and finds one by recording", async () => {
     const store = ctx.store();
     await store.createEvalDataset({ id: "ds", name: "D" });

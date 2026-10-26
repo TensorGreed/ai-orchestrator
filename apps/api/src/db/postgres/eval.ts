@@ -3,9 +3,8 @@
  * Plain functions over a PgContext; PostgresStore delegates here. Methods that are not implemented yet throw
  * StoreNotImplementedError and are listed in UNIMPLEMENTED_METHODS (remove both together when implementing one).
  *
- * Ordering: SQLite breaks ties between rows written in the same millisecond by rowid (insert order). Postgres has no
- * rowid, so the timestamps this module writes carry a per-process increasing microsecond part (`orderedNow`); they
- * still read back as millisecond ISO strings, and `id` breaks any remaining tie.
+ * Ordering: where SQLite breaks ties by rowid (insert order), these queries use `seq`, the identity column v40 adds
+ * to eval_fixtures, eval_runs and eval_results as Postgres's stand-in for rowid.
  */
 import { GUARD_SIMULATION_JOB_DATASET_PREFIX } from "@ai-orchestrator/shared";
 import type { EvalDatasetRecord, EvalFixtureRecord, EvalResultRecord, EvalRunRecord } from "../database.js";
@@ -14,20 +13,6 @@ import type { PgContext } from "./context.js";
 import { toNum, toStr } from "./helpers.js";
 
 export const UNIMPLEMENTED_METHODS: readonly (keyof Store)[] = [];
-
-let lastMicros = 0;
-
-/**
- * Now as an ISO timestamp with microseconds, strictly increasing within this process, so rows written in one
- * millisecond keep their insert order in `ORDER BY` (the pool parser reads it back with millisecond precision).
- */
-export function orderedNow(): string {
-  let micros = Date.now() * 1000;
-  if (micros <= lastMicros) micros = lastMicros + 1;
-  lastMicros = micros;
-  const iso = new Date(Math.floor(micros / 1000)).toISOString();
-  return `${iso.slice(0, -1)}${String(micros % 1000).padStart(3, "0")}Z`;
-}
 
 function rowCount(result: { rowCount: number | null }): number {
   return result.rowCount ?? 0;
@@ -42,7 +27,7 @@ function nullableNum(value: unknown): number | null {
 }
 
 export async function createEvalDataset(ctx: PgContext, ...[input]: Parameters<Store["createEvalDataset"]>): ReturnType<Store["createEvalDataset"]> {
-  const now = orderedNow();
+  const now = new Date().toISOString();
   await ctx.execute(
     `INSERT INTO eval_datasets (id, name, description, project_id, workflow_id, created_by, created_at, updated_at)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
@@ -98,7 +83,7 @@ export async function deleteEvalDataset(ctx: PgContext, ...[id]: Parameters<Stor
 }
 
 export async function createEvalFixture(ctx: PgContext, ...[input]: Parameters<Store["createEvalFixture"]>): ReturnType<Store["createEvalFixture"]> {
-  const now = orderedNow();
+  const now = new Date().toISOString();
   await ctx.execute(
     `INSERT INTO eval_fixtures (id, dataset_id, name, input_json, expected_json, scorers_json, recording_id, created_at, updated_at)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
@@ -132,7 +117,7 @@ function mapEvalFixture(r: Record<string, unknown>): EvalFixtureRecord {
 
 export async function listEvalFixtures(ctx: PgContext, ...[datasetId]: Parameters<Store["listEvalFixtures"]>): ReturnType<Store["listEvalFixtures"]> {
   const rows = await ctx.query<Record<string, unknown>>(
-    `SELECT ${FIXTURE_COLUMNS} FROM eval_fixtures WHERE dataset_id = $1 ORDER BY created_at, id`,
+    `SELECT ${FIXTURE_COLUMNS} FROM eval_fixtures WHERE dataset_id = $1 ORDER BY created_at, seq`,
     [datasetId]
   );
   return rows.map(mapEvalFixture);
@@ -145,7 +130,7 @@ export async function getEvalFixture(ctx: PgContext, ...[id]: Parameters<Store["
 
 export async function findEvalFixtureByRecording(ctx: PgContext, ...[datasetId, recordingId]: Parameters<Store["findEvalFixtureByRecording"]>): ReturnType<Store["findEvalFixtureByRecording"]> {
   const row = await ctx.queryOne<Record<string, unknown>>(
-    `SELECT ${FIXTURE_COLUMNS} FROM eval_fixtures WHERE dataset_id = $1 AND recording_id = $2 ORDER BY created_at, id LIMIT 1`,
+    `SELECT ${FIXTURE_COLUMNS} FROM eval_fixtures WHERE dataset_id = $1 AND recording_id = $2 ORDER BY seq LIMIT 1`,
     [datasetId, recordingId]
   );
   return row ? mapEvalFixture(row) : null;
@@ -166,7 +151,7 @@ export async function setEvalFixtureRequired(ctx: PgContext, ...[id, required]: 
 }
 
 export async function createEvalRun(ctx: PgContext, ...[input]: Parameters<Store["createEvalRun"]>): ReturnType<Store["createEvalRun"]> {
-  const now = orderedNow();
+  const now = new Date().toISOString();
   await ctx.execute(
     `INSERT INTO eval_runs (id, dataset_id, workflow_id, workflow_name, status, started_at,
                              triggered_by, triggered_by_user_id, scorers_json, kind, dataset_ids_json, candidate_json,
@@ -203,7 +188,7 @@ export async function updateEvalRunProgress(ctx: PgContext, ...[input]: Paramete
 export async function pruneEvalRuns(ctx: PgContext, ...[input]: Parameters<Store["pruneEvalRuns"]>): ReturnType<Store["pruneEvalRuns"]> {
   return ctx.withTransaction(async (client) => {
     const { rows } = await client.query<{ id: string; dataset_id: string; dataset_ids_json: string | null; status: string; started_at: string }>(
-      `SELECT id, dataset_id, dataset_ids_json, status, started_at FROM eval_runs ORDER BY started_at DESC, id DESC`
+      `SELECT id, dataset_id, dataset_ids_json, status, started_at FROM eval_runs ORDER BY started_at DESC, seq DESC`
     );
     const newest = new Set<string>();
     const newestFinished = new Set<string>();
@@ -297,7 +282,7 @@ export async function listEvalRuns(ctx: PgContext, ...[options = {}]: Parameters
     `SELECT id, dataset_id, workflow_id, workflow_name, status, started_at, completed_at,
             triggered_by, scorers_json, summary_json, error, kind, dataset_ids_json, candidate_json,
             workflow_hash, workflow_version, options_json, progress_json
-     FROM eval_runs ${where} ORDER BY started_at DESC, id DESC LIMIT ${bind(limit)} OFFSET ${bind(offset)}`,
+     FROM eval_runs ${where} ORDER BY started_at DESC, seq DESC LIMIT ${bind(limit)} OFFSET ${bind(offset)}`,
     params
   );
   return rows.map((r): EvalRunRecord => ({
@@ -327,7 +312,7 @@ export async function getEvalRun(ctx: PgContext, ...[id]: Parameters<Store["getE
 }
 
 export async function recordEvalResult(ctx: PgContext, ...[input]: Parameters<Store["recordEvalResult"]>): ReturnType<Store["recordEvalResult"]> {
-  const now = orderedNow();
+  const now = new Date().toISOString();
   await ctx.execute(
     `INSERT INTO eval_results (id, run_id, fixture_id, fixture_name, status, execution_id,
                                 score_json, output_json, error, duration_ms,
@@ -379,7 +364,7 @@ export async function listEvalResults(ctx: PgContext, ...[runId]: Parameters<Sto
     `SELECT id, run_id, fixture_id, fixture_name, status, execution_id,
             score_json, output_json, error, duration_ms, token_input, token_output, token_total,
             recording_id, verdict, NULL AS diff_json, cost_usd
-     FROM eval_results WHERE run_id = $1 ORDER BY created_at, id`,
+     FROM eval_results WHERE run_id = $1 ORDER BY created_at, seq`,
     [runId]
   );
   return rows.map((r) => mapEvalResult(r, false));

@@ -29,6 +29,7 @@ import { postgresStoreConfig } from "../db/create-store.js";
 import { SqliteStore } from "../db/database.js";
 import { PostgresStore, postgresPoolConfig } from "../db/postgres-store.js";
 import type { Store } from "../db/store.js";
+import { applyPendingSeqColumns } from "./pending-seq.js";
 
 export type TestStoreKind = "sqlite" | "postgres";
 
@@ -160,6 +161,7 @@ export function describeStoreContract(name: string, fn: (ctx: StoreContractConte
       let current: TestStore | undefined;
       beforeEach(async () => {
         current = await createTestStore({ kind });
+        await applyPendingSeqColumns(current);
       }, 60_000);
       afterEach(async () => {
         const toClean = current;
