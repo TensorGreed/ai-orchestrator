@@ -1801,8 +1801,29 @@ export const MIGRATIONS: Migration[] = [
     // partial unique index that lets the database (not only the process) refuse a second running simulation. A
     // database that already holds several running rows keeps the newest running; the others become `interrupted`,
     // as a restart would have finished them, so the index can be built. SQLite's embedded migrate() does the same.
+    // The NOT NULL timestamps that SQLite fills with datetime('now') when an insert leaves them out get the same
+    // default here (now()), so such an insert cannot succeed on one store and fail on the other.
     up: `
       CREATE INDEX IF NOT EXISTS idx_sessions_revoked_expires ON sessions(revoked_at, expires_at);
+      ALTER TABLE audit_export_destinations ALTER COLUMN created_at SET DEFAULT now();
+      ALTER TABLE audit_export_destinations ALTER COLUMN updated_at SET DEFAULT now();
+      ALTER TABLE budget_alerts ALTER COLUMN fired_at SET DEFAULT now();
+      ALTER TABLE budgets ALTER COLUMN created_at SET DEFAULT now();
+      ALTER TABLE budgets ALTER COLUMN updated_at SET DEFAULT now();
+      ALTER TABLE eval_datasets ALTER COLUMN created_at SET DEFAULT now();
+      ALTER TABLE eval_datasets ALTER COLUMN updated_at SET DEFAULT now();
+      ALTER TABLE eval_fixtures ALTER COLUMN created_at SET DEFAULT now();
+      ALTER TABLE eval_fixtures ALTER COLUMN updated_at SET DEFAULT now();
+      ALTER TABLE eval_results ALTER COLUMN created_at SET DEFAULT now();
+      ALTER TABLE eval_runs ALTER COLUMN created_at SET DEFAULT now();
+      ALTER TABLE knowledge_base_chunks ALTER COLUMN created_at SET DEFAULT now();
+      ALTER TABLE knowledge_bases ALTER COLUMN created_at SET DEFAULT now();
+      ALTER TABLE knowledge_bases ALTER COLUMN updated_at SET DEFAULT now();
+      ALTER TABLE mcp_servers ALTER COLUMN created_at SET DEFAULT now();
+      ALTER TABLE mcp_servers ALTER COLUMN updated_at SET DEFAULT now();
+      ALTER TABLE mcp_tool_calls ALTER COLUMN created_at SET DEFAULT now();
+      ALTER TABLE mcp_tool_snapshots ALTER COLUMN created_at SET DEFAULT now();
+      ALTER TABLE usage_events ALTER COLUMN created_at SET DEFAULT now();
       UPDATE guard_simulations
          SET status = 'interrupted',
              error = COALESCE(error, 'Stopped by an upgrade: only one simulation can run at a time.'),
@@ -1812,6 +1833,25 @@ export const MIGRATIONS: Migration[] = [
       CREATE UNIQUE INDEX IF NOT EXISTS idx_guard_simulations_one_running ON guard_simulations(status) WHERE status = 'running';
     `,
     down: `
+      ALTER TABLE audit_export_destinations ALTER COLUMN created_at DROP DEFAULT;
+      ALTER TABLE audit_export_destinations ALTER COLUMN updated_at DROP DEFAULT;
+      ALTER TABLE budget_alerts ALTER COLUMN fired_at DROP DEFAULT;
+      ALTER TABLE budgets ALTER COLUMN created_at DROP DEFAULT;
+      ALTER TABLE budgets ALTER COLUMN updated_at DROP DEFAULT;
+      ALTER TABLE eval_datasets ALTER COLUMN created_at DROP DEFAULT;
+      ALTER TABLE eval_datasets ALTER COLUMN updated_at DROP DEFAULT;
+      ALTER TABLE eval_fixtures ALTER COLUMN created_at DROP DEFAULT;
+      ALTER TABLE eval_fixtures ALTER COLUMN updated_at DROP DEFAULT;
+      ALTER TABLE eval_results ALTER COLUMN created_at DROP DEFAULT;
+      ALTER TABLE eval_runs ALTER COLUMN created_at DROP DEFAULT;
+      ALTER TABLE knowledge_base_chunks ALTER COLUMN created_at DROP DEFAULT;
+      ALTER TABLE knowledge_bases ALTER COLUMN created_at DROP DEFAULT;
+      ALTER TABLE knowledge_bases ALTER COLUMN updated_at DROP DEFAULT;
+      ALTER TABLE mcp_servers ALTER COLUMN created_at DROP DEFAULT;
+      ALTER TABLE mcp_servers ALTER COLUMN updated_at DROP DEFAULT;
+      ALTER TABLE mcp_tool_calls ALTER COLUMN created_at DROP DEFAULT;
+      ALTER TABLE mcp_tool_snapshots ALTER COLUMN created_at DROP DEFAULT;
+      ALTER TABLE usage_events ALTER COLUMN created_at DROP DEFAULT;
       DROP INDEX IF EXISTS idx_guard_simulations_one_running;
       DROP INDEX IF EXISTS idx_sessions_revoked_expires;
     `

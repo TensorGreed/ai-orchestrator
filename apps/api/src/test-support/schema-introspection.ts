@@ -4,7 +4,10 @@
  *
  * Normalisation: column types fold into classes (text-like, integer-like, real, other) because the two dialects spell
  * the same stored value differently (TEXT vs TIMESTAMPTZ, INTEGER vs BIGINT); primary-key columns count as NOT NULL
- * on both; index columns are compared as written, lower-cased with whitespace removed.
+ * on both; index columns are compared as written, lower-cased with whitespace removed. Column defaults are compared
+ * by presence only (not the expression: `datetime('now')` and `now()` are the same intent), and only for NOT NULL
+ * columns, where a missing default makes an insert that leaves the column out fail on one store only. Foreign keys
+ * are compared by columns, target table/columns and ON DELETE action.
  */
 import type Database from "better-sqlite3";
 import type { Pool, PoolClient } from "pg";
@@ -14,6 +17,18 @@ export type ColumnClass = "text" | "integer" | "real" | "blob" | "boolean" | "ts
 export interface ColumnShape {
   type: ColumnClass;
   notNull: boolean;
+  /** Whether the column has a DEFAULT (an expression or a sequence); generated columns count as having none. */
+  hasDefault: boolean;
+}
+
+export type ForeignKeyAction = "no action" | "restrict" | "cascade" | "set null" | "set default";
+
+export interface ForeignKeyShape {
+  /** Target table. */
+  references: string;
+  /** Target columns, comma-joined, in key order. */
+  referencedColumns: string;
+  onDelete: ForeignKeyAction;
 }
 
 export interface IndexShape {
@@ -31,6 +46,8 @@ export interface TableShape {
   indexes: Record<string, IndexShape>;
   /** Column lists of UNIQUE table constraints (inline UNIQUE / UNIQUE(a, b)), sorted. */
   uniqueConstraints: string[];
+  /** Foreign keys keyed by their local column list (comma-joined, in key order). */
+  foreignKeys: Record<string, ForeignKeyShape>;
 }
 
 export type SchemaShape = Record<string, TableShape>;
@@ -90,9 +107,14 @@ export function introspectSqlite(db: Database.Database): SchemaShape {
       name: string;
       type: string;
       notnull: number;
+      dflt_value: string | null;
       pk: number;
     }>) {
-      columns[col.name] = { type: classifySqliteType(col.type), notNull: col.notnull === 1 || col.pk > 0 };
+      columns[col.name] = {
+        type: classifySqliteType(col.type),
+        notNull: col.notnull === 1 || col.pk > 0,
+        hasDefault: col.dflt_value !== null
+      };
       if (col.pk > 0) pk.push({ name: col.name, pk: col.pk });
     }
     const indexes: Record<string, IndexShape> = {};
@@ -123,11 +145,29 @@ export function introspectSqlite(db: Database.Database): SchemaShape {
         where: wherePredicateFromSql(sql)
       };
     }
+    const fkRows = db.prepare(`PRAGMA foreign_key_list(${JSON.stringify(name)})`).all() as Array<{
+      id: number;
+      seq: number;
+      table: string;
+      from: string;
+      to: string | null;
+      on_delete: string;
+    }>;
+    const foreignKeys: Record<string, ForeignKeyShape> = {};
+    for (const id of [...new Set(fkRows.map((row) => row.id))]) {
+      const parts = fkRows.filter((row) => row.id === id).sort((a, b) => a.seq - b.seq);
+      foreignKeys[parts.map((row) => row.from).join(",")] = {
+        references: parts[0].table,
+        referencedColumns: parts.map((row) => row.to ?? "").join(","),
+        onDelete: parts[0].on_delete.toLowerCase() as ForeignKeyAction
+      };
+    }
     shape[name] = {
       columns,
       primaryKey: pk.sort((a, b) => a.pk - b.pk).map((c) => c.name),
       indexes,
-      uniqueConstraints: uniqueConstraints.sort()
+      uniqueConstraints: uniqueConstraints.sort(),
+      foreignKeys
     };
   }
   return shape;
@@ -161,16 +201,64 @@ export async function introspectPostgres(db: Queryable, schema: string): Promise
     [schema]
   );
   for (const { table_name } of tables.rows) {
-    shape[table_name] = { columns: {}, primaryKey: [], indexes: {}, uniqueConstraints: [] };
+    shape[table_name] = { columns: {}, primaryKey: [], indexes: {}, uniqueConstraints: [], foreignKeys: {} };
   }
-  const columns = await db.query<{ table_name: string; column_name: string; data_type: string; is_nullable: string }>(
-    `SELECT table_name, column_name, data_type, is_nullable FROM information_schema.columns WHERE table_schema = $1`,
+  const columns = await db.query<{
+    table_name: string;
+    column_name: string;
+    data_type: string;
+    is_nullable: string;
+    column_default: string | null;
+    is_identity: string;
+  }>(
+    `SELECT table_name, column_name, data_type, is_nullable, column_default, is_identity
+       FROM information_schema.columns WHERE table_schema = $1`,
     [schema]
   );
   for (const col of columns.rows) {
     const table = shape[col.table_name];
     if (!table) continue;
-    table.columns[col.column_name] = { type: classifyPostgresType(col.data_type), notNull: col.is_nullable === "NO" };
+    table.columns[col.column_name] = {
+      type: classifyPostgresType(col.data_type),
+      notNull: col.is_nullable === "NO",
+      hasDefault: col.column_default !== null || col.is_identity === "YES"
+    };
+  }
+  const foreignKeys = await db.query<{
+    table_name: string;
+    columns: string[];
+    references: string;
+    referenced_columns: string[];
+    confdeltype: string;
+  }>(
+    `SELECT t.relname AS table_name, rt.relname AS references,
+            ARRAY(SELECT a.attname::text FROM unnest(c.conkey) WITH ORDINALITY AS k(attnum, ord)
+                  JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.attnum ORDER BY k.ord) AS columns,
+            ARRAY(SELECT a.attname::text FROM unnest(c.confkey) WITH ORDINALITY AS k(attnum, ord)
+                  JOIN pg_attribute a ON a.attrelid = c.confrelid AND a.attnum = k.attnum ORDER BY k.ord) AS referenced_columns,
+            c.confdeltype::text AS confdeltype
+       FROM pg_constraint c
+       JOIN pg_class t ON t.oid = c.conrelid
+       JOIN pg_class rt ON rt.oid = c.confrelid
+       JOIN pg_namespace n ON n.oid = t.relnamespace
+      WHERE n.nspname = $1 AND c.contype = 'f'`,
+    [schema]
+  );
+  const deleteActions: Record<string, ForeignKeyAction> = {
+    a: "no action",
+    r: "restrict",
+    c: "cascade",
+    n: "set null",
+    d: "set default"
+  };
+  for (const row of foreignKeys.rows) {
+    const table = shape[row.table_name];
+    if (!table) continue;
+    table.foreignKeys[row.columns.join(",")] = {
+      references: row.references,
+      referencedColumns: row.referenced_columns.join(","),
+      onDelete: deleteActions[row.confdeltype] ?? "no action"
+    };
   }
   const constraints = await db.query<{ table_name: string; contype: string; index_name: string; columns: string[] }>(
     `SELECT t.relname AS table_name, c.contype, i.relname AS index_name,
@@ -227,7 +315,10 @@ export interface SchemaDifference {
     | "primary-key"
     | "unique-constraint"
     | "index-missing"
-    | "index-shape";
+    | "index-shape"
+    | "column-default"
+    | "foreign-key-missing"
+    | "foreign-key-shape";
   table: string;
   /** Column, index or constraint the difference is about; "" for a whole table. */
   object: string;
@@ -256,6 +347,14 @@ export function diffSchemas(sqlite: SchemaShape, postgres: SchemaShape): SchemaD
       if (ca.type !== cb.type) {
         out.push({ kind: "column-type", table, object: column, detail: `sqlite ${ca.type}, postgres ${cb.type}` });
       }
+      if ((ca.notNull || cb.notNull) && ca.hasDefault !== cb.hasDefault) {
+        out.push({
+          kind: "column-default",
+          table,
+          object: column,
+          detail: `NOT NULL; default only in ${ca.hasDefault ? "sqlite" : "postgres"}`
+        });
+      }
       if (ca.notNull !== cb.notNull) {
         out.push({
           kind: "column-nullability",
@@ -275,6 +374,18 @@ export function diffSchemas(sqlite: SchemaShape, postgres: SchemaShape): SchemaD
         object: "",
         detail: `sqlite [${a.uniqueConstraints.join("|")}], postgres [${b.uniqueConstraints.join("|")}]`
       });
+    }
+    for (const key of [...new Set([...Object.keys(a.foreignKeys), ...Object.keys(b.foreignKeys)])].sort()) {
+      const fa = a.foreignKeys[key];
+      const fb = b.foreignKeys[key];
+      const describe = (fk: ForeignKeyShape) => `-> ${fk.references}(${fk.referencedColumns}) on delete ${fk.onDelete}`;
+      if (!fa || !fb) {
+        out.push({ kind: "foreign-key-missing", table, object: key, detail: `${describe((fa ?? fb)!)} only in ${fa ? "sqlite" : "postgres"}` });
+        continue;
+      }
+      if (fa.references !== fb.references || fa.referencedColumns !== fb.referencedColumns || fa.onDelete !== fb.onDelete) {
+        out.push({ kind: "foreign-key-shape", table, object: key, detail: `sqlite ${describe(fa)}, postgres ${describe(fb)}` });
+      }
     }
     for (const index of [...new Set([...Object.keys(a.indexes), ...Object.keys(b.indexes)])].sort()) {
       const ia = a.indexes[index];

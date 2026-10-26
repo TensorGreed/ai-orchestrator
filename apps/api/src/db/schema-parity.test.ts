@@ -33,8 +33,11 @@ const LATEST = Math.max(...MIGRATIONS.map((m) => m.version));
  * Deliberate differences between the two schemas. Everything else must match. Not compared at all: SQLite's FTS5
  * virtual table `knowledge_base_chunks_fts` and its shadow tables (introspection skips them), triggers (the FTS5 sync
  * triggers exist only on SQLite; the guard profile revision triggers exist on both, in each dialect), CHECK
- * constraints and column defaults.
+ * constraints, and default expressions (only whether a NOT NULL column has a default is compared).
  */
+const FOREIGN_KEY_ONLY_IN_POSTGRES =
+  "Postgres keeps this foreign key (NO ACTION); SQLite never declared it. Deleting the parent while a child row exists fails on Postgres (23503) and leaves an orphan on SQLite. Hand-off, q3a: deleteUser / project delete remove child rows (api_keys, mfa_secrets, sso_identities, user_project_roles) explicitly in both stores.";
+
 export const ALLOWED_DIFFERENCES: ReadonlyArray<Omit<SchemaDifference, "detail"> & { reason: string }> = [
   {
     kind: "column-missing",
@@ -53,6 +56,36 @@ export const ALLOWED_DIFFERENCES: ReadonlyArray<Omit<SchemaDifference, "detail">
     table: "schema_migrations",
     object: "",
     reason: "Postgres records applied chain versions; SQLite's embedded migrate() always brings the whole schema."
+  },
+  {
+    kind: "foreign-key-missing",
+    table: "api_keys",
+    object: "user_id",
+    reason: FOREIGN_KEY_ONLY_IN_POSTGRES
+  },
+  {
+    kind: "foreign-key-missing",
+    table: "mfa_secrets",
+    object: "user_id",
+    reason: FOREIGN_KEY_ONLY_IN_POSTGRES
+  },
+  {
+    kind: "foreign-key-missing",
+    table: "sso_identities",
+    object: "user_id",
+    reason: FOREIGN_KEY_ONLY_IN_POSTGRES
+  },
+  {
+    kind: "foreign-key-missing",
+    table: "user_project_roles",
+    object: "project_id",
+    reason: FOREIGN_KEY_ONLY_IN_POSTGRES
+  },
+  {
+    kind: "foreign-key-missing",
+    table: "user_project_roles",
+    object: "user_id",
+    reason: FOREIGN_KEY_ONLY_IN_POSTGRES
   }
 ];
 
@@ -150,6 +183,39 @@ describe("SQLite schema: migration 39 objects", () => {
       expect(index).toBeTruthy();
     } finally {
       after.close();
+    }
+  });
+});
+
+describe("schema introspection: foreign keys and NOT NULL defaults", () => {
+  it("reports a foreign key or a NOT NULL default present on one side only, and a differing ON DELETE action", () => {
+    const db = new Database(":memory:");
+    try {
+      db.exec(`
+        CREATE TABLE parents (id TEXT PRIMARY KEY);
+        CREATE TABLE children (
+          id TEXT PRIMARY KEY,
+          parent_id TEXT NOT NULL REFERENCES parents(id) ON DELETE CASCADE,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          note TEXT DEFAULT 'x'
+        );
+      `);
+      const sqlite = introspectSqlite(db);
+      expect(sqlite.children.foreignKeys).toEqual({ parent_id: { references: "parents", referencedColumns: "id", onDelete: "cascade" } });
+      expect(sqlite.children.columns.created_at).toMatchObject({ notNull: true, hasDefault: true });
+
+      const other: SchemaShape = structuredClone(sqlite);
+      other.children.columns.created_at.hasDefault = false;
+      other.children.columns.note.hasDefault = false; // nullable: a missing default is not reported
+      other.children.foreignKeys.parent_id.onDelete = "no action";
+      other.parents.foreignKeys.id = { references: "children", referencedColumns: "id", onDelete: "no action" };
+      expect(diffSchemas(sqlite, other).map(formatDifference)).toEqual([
+        "column-default children.created_at: NOT NULL; default only in sqlite",
+        "foreign-key-shape children.parent_id: sqlite -> parents(id) on delete cascade, postgres -> parents(id) on delete no action",
+        "foreign-key-missing parents.id: -> children(id) on delete no action only in postgres"
+      ]);
+    } finally {
+      db.close();
     }
   });
 });
@@ -281,6 +347,10 @@ describe.skipIf(!postgresUrl)("Postgres schema parity and migration walk", () =>
       await pool.query(`CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP)`);
       await runMigrations(cb.run, cb.current, cb.setApplied);
       await rollbackMigrations(cb.run, cb.current, cb.setRolledBack, 38);
+      // v39's down drops the timestamp defaults it added; its up puts them back.
+      const hasDefault = async () =>
+        (await introspectPostgres(admin, schema)).budgets.columns.created_at.hasDefault;
+      expect(await hasDefault()).toBe(false);
       const insert = `INSERT INTO guard_simulations (id, profile_id, source_kind, simulated_hash, job_ids_json, status, error, created_at) VALUES ($1, 'p', 'draft', 'h', '[]', $2, $3, $4)`;
       await pool.query(insert, ["old", "running", null, "2026-10-01T00:00:00Z"]);
       await pool.query(insert, ["newest", "running", null, "2026-10-20T00:00:00Z"]);
@@ -288,6 +358,7 @@ describe.skipIf(!postgresUrl)("Postgres schema parity and migration walk", () =>
 
       await runMigrations(cb.run, cb.current, cb.setApplied);
       expect(await chainVersion(pool)).toBe(LATEST);
+      expect(await hasDefault()).toBe(true);
       const rows = await pool.query<{ id: string; status: string; error: string | null; finished_at: string | null }>(
         `SELECT id, status, error, finished_at FROM guard_simulations ORDER BY id`
       );
