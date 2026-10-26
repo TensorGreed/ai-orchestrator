@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { randomUUID, createHash } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import Database, { type Database as BetterSqlite3Database } from "better-sqlite3";
 import type {
   ApprovalRequestKind,
@@ -62,6 +62,7 @@ import { isEmptyDataLabels, labelsForUntrackedSave, mergeDataLabels, parseStored
 import { queuedRunTimeoutMs, STUCK_JOB_MARGIN_MS } from "./queue-timeouts.js";
 import { isForeignKeyViolation, ProjectNotEmptyError, StoreReferenceMissingError } from "./store-errors.js";
 import { clampLimit, LIMIT_MAX } from "./store-limits.js";
+import { auditEntryHash, type AuditChainResult, GENESIS_HASH, verifyAuditRows, wellFormedAuditEntry, wellFormedAuditText } from "./audit-chain.js";
 import type {
   ApprovalDecisionInput,
   CancelExecutionResult,
@@ -2127,52 +2128,6 @@ function toNumber(value: unknown): number {
  */
 function storedAuditText(value: unknown): string | null {
   return value === null || value === undefined ? null : toString(value);
-}
-
-// canonicalAuditPayload: stable, key-ordered JSON serialization. Same input
-// must yield byte-identical output across processes and Node versions.
-function canonicalAuditPayload(input: {
-  id: string;
-  createdAt: string;
-  eventType: string;
-  category: string;
-  action: string;
-  outcome: string;
-  actorUserId: string | null;
-  actorEmail: string | null;
-  actorType: string;
-  resourceType: string | null;
-  resourceId: string | null;
-  projectId: string | null;
-  ipAddress: string | null;
-  userAgent: string | null;
-  metadataJson: string | null;
-  message: string | null;
-}): string {
-  // Explicit field ordering — do NOT sort, so adding fields in future
-  // versions doesn't silently break the chain. New fields go at the end.
-  return JSON.stringify([
-    input.id,
-    input.createdAt,
-    input.eventType,
-    input.category,
-    input.action,
-    input.outcome,
-    input.actorUserId,
-    input.actorEmail,
-    input.actorType,
-    input.resourceType,
-    input.resourceId,
-    input.projectId,
-    input.ipAddress,
-    input.userAgent,
-    input.metadataJson,
-    input.message
-  ]);
-}
-
-function sha256Hex(input: string): string {
-  return createHash("sha256").update(input, "utf8").digest("hex");
 }
 
 function safeJsonParse(raw: string): unknown {
@@ -7343,7 +7298,7 @@ export class SqliteStore implements Store {
   // Phase 5.4 — Audit log
   // ---------------------------------------------------------------------------
 
-  async writeAuditLog(entry: {
+  async writeAuditLog(input: {
     id: string;
     eventType: string;
     category: string;
@@ -7361,13 +7316,16 @@ export class SqliteStore implements Store {
     message?: string | null;
     createdAt?: string;
   }): Promise<void> {
+    // Text as the database stores it (lone surrogates and U+0000 → U+FFFD), so the hash covers exactly what is stored.
+    const entry = wellFormedAuditEntry(input);
     const createdAt = entry.createdAt ?? new Date().toISOString();
+    const metadataJson = wellFormedAuditText(entry.metadata === undefined ? null : JSON.stringify(entry.metadata));
     // Phase 8.4 — hash chain. prev_hash = the last row's entry_hash; for the
     // very first row it's 64 zeros. entry_hash = SHA-256(prev_hash || canonical
     // JSON of this row). Tampering with any historical row breaks every link
     // after it, which `verifyAuditChain()` surfaces.
-    const prevHash = this.getLastAuditEntryHash() ?? "0".repeat(64);
-    const canonical = canonicalAuditPayload({
+    const prevHash = this.getLastAuditEntryHash() ?? GENESIS_HASH;
+    const entryHash = auditEntryHash(prevHash, {
       id: entry.id,
       createdAt,
       eventType: entry.eventType,
@@ -7382,10 +7340,9 @@ export class SqliteStore implements Store {
       projectId: entry.projectId ?? null,
       ipAddress: entry.ipAddress ?? null,
       userAgent: entry.userAgent ?? null,
-      metadataJson: entry.metadata === undefined ? null : JSON.stringify(entry.metadata),
+      metadataJson,
       message: entry.message ?? null
     });
-    const entryHash = sha256Hex(prevHash + canonical);
     this.exec(
       `INSERT INTO audit_logs
          (id, event_type, category, action, outcome, actor_user_id, actor_email, actor_type,
@@ -7406,7 +7363,7 @@ export class SqliteStore implements Store {
         entry.projectId ?? null,
         entry.ipAddress ?? null,
         entry.userAgent ?? null,
-        entry.metadata === undefined ? null : JSON.stringify(entry.metadata),
+        metadataJson,
         entry.message ?? null,
         createdAt,
         prevHash,
@@ -7431,11 +7388,7 @@ export class SqliteStore implements Store {
    * Rows persisted before Phase 8.4 (where entry_hash IS NULL) are skipped —
    * we can only attest the chain from the first hash onwards.
    */
-  async verifyAuditChain(): Promise<{
-    ok: boolean;
-    rowsChecked: number;
-    firstBrokenAt?: { id: string; createdAt: string; expected: string; stored: string };
-  }> {
+  async verifyAuditChain(): Promise<AuditChainResult> {
     const rows = this.queryAll<{
       id: string;
       event_type: string;
@@ -7462,53 +7415,30 @@ export class SqliteStore implements Store {
        FROM audit_logs WHERE entry_hash IS NOT NULL
        ORDER BY rowid ASC`
     );
-    let prev = "0".repeat(64);
-    let checked = 0;
-    for (const row of rows) {
-      const stored = toString(row.entry_hash ?? "");
-      const storedPrev = toString(row.prev_hash ?? "");
-      if (storedPrev !== prev) {
-        return {
-          ok: false,
-          rowsChecked: checked,
-          firstBrokenAt: {
-            id: toString(row.id),
-            createdAt: toString(row.created_at),
-            expected: prev,
-            stored: storedPrev
-          }
-        };
-      }
-      const canonical = canonicalAuditPayload({
-        id: toString(row.id),
-        createdAt: toString(row.created_at),
-        eventType: toString(row.event_type),
-        category: toString(row.category),
-        action: toString(row.action),
-        outcome: toString(row.outcome),
-        actorUserId: storedAuditText(row.actor_user_id),
-        actorEmail: storedAuditText(row.actor_email),
-        actorType: toString(row.actor_type),
-        resourceType: storedAuditText(row.resource_type),
-        resourceId: storedAuditText(row.resource_id),
-        projectId: storedAuditText(row.project_id),
-        ipAddress: storedAuditText(row.ip_address),
-        userAgent: storedAuditText(row.user_agent),
-        metadataJson: storedAuditText(row.metadata_json),
-        message: storedAuditText(row.message)
-      });
-      const expected = sha256Hex(prev + canonical);
-      if (expected !== stored) {
-        return {
-          ok: false,
-          rowsChecked: checked,
-          firstBrokenAt: { id: toString(row.id), createdAt: toString(row.created_at), expected, stored }
-        };
-      }
-      prev = expected;
-      checked += 1;
-    }
-    return { ok: true, rowsChecked: checked };
+    return verifyAuditRows(
+      rows.map((row) => ({
+        fields: {
+          id: toString(row.id),
+          createdAt: toString(row.created_at),
+          eventType: toString(row.event_type),
+          category: toString(row.category),
+          action: toString(row.action),
+          outcome: toString(row.outcome),
+          actorUserId: storedAuditText(row.actor_user_id),
+          actorEmail: storedAuditText(row.actor_email),
+          actorType: toString(row.actor_type),
+          resourceType: storedAuditText(row.resource_type),
+          resourceId: storedAuditText(row.resource_id),
+          projectId: storedAuditText(row.project_id),
+          ipAddress: storedAuditText(row.ip_address),
+          userAgent: storedAuditText(row.user_agent),
+          metadataJson: storedAuditText(row.metadata_json),
+          message: storedAuditText(row.message)
+        },
+        prevHash: toString(row.prev_hash ?? ""),
+        entryHash: toString(row.entry_hash ?? "")
+      }))
+    );
   }
 
   async listAuditLogs(filter: {

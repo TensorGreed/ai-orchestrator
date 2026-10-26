@@ -6,26 +6,25 @@
  * Insertion order. SQLite orders the audit chain and the export cursor by rowid; Postgres orders them by `seq`, the
  * identity column v40 adds. Every append runs under one advisory transaction lock, and `seq` is drawn inside it, so
  * `seq` order is also commit order: a cursor reading `seq > last` cannot skip a row that commits later. `created_at`
- * is the write's wall-clock time (or the caller's value), and the hash covers it as the read path returns it (the
- * millisecond ISO string parseTimestamptz gives, the string the SQLite store returns).
+ * is the write's wall-clock time (or the caller's value), truncated to the millisecond, and the hash covers it as the
+ * read path returns it (the millisecond ISO string parseTimestamptz gives, the string the SQLite store returns).
  *
  * Advisory lock keys, beside ADVISORY_LOCK_CLASS_MIGRATIONS (0x4c324d) and ADVISORY_LOCK_CLASS_LEADER (0x4c324e) in
  * postgres-store.ts:
  *   0x4c324f ("L2O")  audit writes — key 1: the audit-log chain append; key 2: signing-key activation.
  */
-import { createHash } from "node:crypto";
 import type { PoolClient } from "pg";
 import type { AuditSigningKeyRecord, ExecutionManifestRecord, LogStreamDestinationRecord } from "../database.js";
 import { type Store } from "../store.js";
 import { parseJsonSafe, toNum, toStr } from "./helpers.js";
 import type { PgContext } from "./context.js";
+import { auditEntryHash, GENESIS_HASH, verifyAuditRows, wellFormedAuditEntry, wellFormedAuditText } from "../audit-chain.js";
 
 export const UNIMPLEMENTED_METHODS: readonly (keyof Store)[] = [];
 
 export const ADVISORY_LOCK_CLASS_AUDIT = 0x4c324f;
 const AUDIT_LOCK_CHAIN = 1;
 const AUDIT_LOCK_SIGNING_KEYS = 2;
-const GENESIS_HASH = "0".repeat(64);
 
 type Row = Record<string, unknown>;
 
@@ -41,49 +40,6 @@ function storedAuditText(value: unknown): string | null {
   return value === null || value === undefined ? null : toStr(value);
 }
 
-/** Same as the SQLite store's canonicalAuditPayload: explicit field order, never sorted. */
-function canonicalAuditPayload(input: {
-  id: string;
-  createdAt: string;
-  eventType: string;
-  category: string;
-  action: string;
-  outcome: string;
-  actorUserId: string | null;
-  actorEmail: string | null;
-  actorType: string;
-  resourceType: string | null;
-  resourceId: string | null;
-  projectId: string | null;
-  ipAddress: string | null;
-  userAgent: string | null;
-  metadataJson: string | null;
-  message: string | null;
-}): string {
-  return JSON.stringify([
-    input.id,
-    input.createdAt,
-    input.eventType,
-    input.category,
-    input.action,
-    input.outcome,
-    input.actorUserId,
-    input.actorEmail,
-    input.actorType,
-    input.resourceType,
-    input.resourceId,
-    input.projectId,
-    input.ipAddress,
-    input.userAgent,
-    input.metadataJson,
-    input.message
-  ]);
-}
-
-function sha256Hex(input: string): string {
-  return createHash("sha256").update(input, "utf8").digest("hex");
-}
-
 async function advisoryXactLock(client: PoolClient, key: number): Promise<void> {
   await client.query(`SELECT pg_advisory_xact_lock($1, $2)`, [ADVISORY_LOCK_CLASS_AUDIT, key]);
 }
@@ -92,19 +48,24 @@ async function advisoryXactLock(client: PoolClient, key: number): Promise<void> 
 // Audit log
 // ---------------------------------------------------------------------------
 
-export async function writeAuditLog(ctx: PgContext, entry: Parameters<Store["writeAuditLog"]>[0]): Promise<void> {
-  const metadataJson = entry.metadata === undefined ? null : JSON.stringify(entry.metadata);
+export async function writeAuditLog(ctx: PgContext, input: Parameters<Store["writeAuditLog"]>[0]): Promise<void> {
+  // Text as the database stores it (lone surrogates and U+0000 → U+FFFD), so the hash covers exactly what is stored.
+  const entry = wellFormedAuditEntry(input);
+  const metadataJson = wellFormedAuditText(entry.metadata === undefined ? null : JSON.stringify(entry.metadata));
   await ctx.withTransaction(async (client) => {
     await advisoryXactLock(client, AUDIT_LOCK_CHAIN);
-    const createdAtInput = entry.createdAt ?? new Date().toISOString();
-    // `iso` comes back through parseTimestamptz: the string every read returns, which the hash covers.
-    const stamp = await client.query<{ iso: string }>(`SELECT $1::timestamptz AS iso`, [createdAtInput]);
+    // Stored to the millisecond, so the hash (over the millisecond ISO string every read returns) covers created_at
+    // exactly, and verify can treat any sub-millisecond part as an edit.
+    const stamp = await client.query<{ iso: string }>(
+      `SELECT date_trunc('milliseconds', $1::timestamptz) AS iso`,
+      [entry.createdAt ?? new Date().toISOString()]
+    );
     const createdAt = toStr(stamp.rows[0]?.iso);
     const last = await client.query<{ entry_hash: string | null }>(
       `SELECT entry_hash FROM audit_logs WHERE entry_hash IS NOT NULL ORDER BY seq DESC LIMIT 1`
     );
     const prevHash = last.rows[0]?.entry_hash ? toStr(last.rows[0].entry_hash) : GENESIS_HASH;
-    const canonical = canonicalAuditPayload({
+    const entryHash = auditEntryHash(prevHash, {
       id: entry.id,
       createdAt,
       eventType: entry.eventType,
@@ -122,7 +83,6 @@ export async function writeAuditLog(ctx: PgContext, entry: Parameters<Store["wri
       metadataJson,
       message: entry.message ?? null
     });
-    const entryHash = sha256Hex(prevHash + canonical);
     await client.query(
       `INSERT INTO audit_logs
          (id, event_type, category, action, outcome, actor_user_id, actor_email, actor_type,
@@ -145,7 +105,7 @@ export async function writeAuditLog(ctx: PgContext, entry: Parameters<Store["wri
         entry.userAgent ?? null,
         metadataJson,
         entry.message ?? null,
-        createdAtInput,
+        createdAt,
         prevHash,
         entryHash
       ]
@@ -153,56 +113,41 @@ export async function writeAuditLog(ctx: PgContext, entry: Parameters<Store["wri
   });
 }
 
+/** The chain rule (lone-surrogate rows, unverifiable rows) is in ../audit-chain.ts, shared with SQLite. */
 export async function verifyAuditChain(ctx: PgContext): ReturnType<Store["verifyAuditChain"]> {
   const rows = await ctx.query<Row>(
     `SELECT id, event_type, category, action, outcome, actor_user_id, actor_email, actor_type,
             resource_type, resource_id, project_id, ip_address, user_agent, metadata_json, message,
-            created_at, prev_hash, entry_hash
+            created_at, prev_hash, entry_hash,
+            date_trunc('milliseconds', created_at) <> created_at AS created_at_sub_ms
      FROM audit_logs WHERE entry_hash IS NOT NULL
      ORDER BY seq ASC`
   );
-  let prev = GENESIS_HASH;
-  let checked = 0;
-  for (const row of rows) {
-    const stored = toStr(row.entry_hash ?? "");
-    const storedPrev = toStr(row.prev_hash ?? "");
-    if (storedPrev !== prev) {
-      return {
-        ok: false,
-        rowsChecked: checked,
-        firstBrokenAt: { id: toStr(row.id), createdAt: toStr(row.created_at), expected: prev, stored: storedPrev }
-      };
-    }
-    const canonical = canonicalAuditPayload({
-      id: toStr(row.id),
-      createdAt: toStr(row.created_at),
-      eventType: toStr(row.event_type),
-      category: toStr(row.category),
-      action: toStr(row.action),
-      outcome: toStr(row.outcome),
-      actorUserId: storedAuditText(row.actor_user_id),
-      actorEmail: storedAuditText(row.actor_email),
-      actorType: toStr(row.actor_type),
-      resourceType: storedAuditText(row.resource_type),
-      resourceId: storedAuditText(row.resource_id),
-      projectId: storedAuditText(row.project_id),
-      ipAddress: storedAuditText(row.ip_address),
-      userAgent: storedAuditText(row.user_agent),
-      metadataJson: storedAuditText(row.metadata_json),
-      message: storedAuditText(row.message)
-    });
-    const expected = sha256Hex(prev + canonical);
-    if (expected !== stored) {
-      return {
-        ok: false,
-        rowsChecked: checked,
-        firstBrokenAt: { id: toStr(row.id), createdAt: toStr(row.created_at), expected, stored }
-      };
-    }
-    prev = expected;
-    checked += 1;
-  }
-  return { ok: true, rowsChecked: checked };
+  return verifyAuditRows(
+    rows.map((row) => ({
+      fields: {
+        id: toStr(row.id),
+        createdAt: toStr(row.created_at),
+        eventType: toStr(row.event_type),
+        category: toStr(row.category),
+        action: toStr(row.action),
+        outcome: toStr(row.outcome),
+        actorUserId: storedAuditText(row.actor_user_id),
+        actorEmail: storedAuditText(row.actor_email),
+        actorType: toStr(row.actor_type),
+        resourceType: storedAuditText(row.resource_type),
+        resourceId: storedAuditText(row.resource_id),
+        projectId: storedAuditText(row.project_id),
+        ipAddress: storedAuditText(row.ip_address),
+        userAgent: storedAuditText(row.user_agent),
+        metadataJson: storedAuditText(row.metadata_json),
+        message: storedAuditText(row.message)
+      },
+      prevHash: toStr(row.prev_hash ?? ""),
+      entryHash: toStr(row.entry_hash ?? ""),
+      createdAtHasSubMillisecond: row.created_at_sub_ms === true
+    }))
+  );
 }
 
 function mapAuditLogRow(row: Row) {

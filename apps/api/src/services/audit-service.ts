@@ -1,5 +1,6 @@
 import { nanoid } from "nanoid";
 import type { Store } from "../db/store.js";
+import { wellFormedAuditText } from "../db/audit-chain.js";
 
 export type AuditOutcome = "success" | "failure" | "denied";
 
@@ -73,9 +74,13 @@ export interface AuditLogEntry {
   createdAt: string;
 }
 
-/** An optional audit field: an empty string (e.g. an empty User-Agent header) is stored as none. */
+/**
+ * An optional audit field: an empty string (e.g. an empty User-Agent header) is stored as none, and text is made
+ * well-formed (lone surrogates and U+0000 → U+FFFD) as the store hashes and stores it, so the entry returned here is
+ * the one stored.
+ */
 function textOrNull(value: string | null | undefined): string | null {
-  return value ? value : null;
+  return value ? wellFormedAuditText(value) : null;
 }
 
 export class AuditService {
@@ -94,9 +99,9 @@ export class AuditService {
     const actor = event.actor ?? {};
     const entry = {
       id,
-      eventType: event.eventType,
-      category: event.category,
-      action: event.action,
+      eventType: wellFormedAuditText(event.eventType),
+      category: wellFormedAuditText(event.category),
+      action: wellFormedAuditText(event.action),
       outcome: event.outcome ?? "success",
       actorUserId: textOrNull(actor.userId),
       actorEmail: textOrNull(actor.email),
