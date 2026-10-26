@@ -53,7 +53,8 @@ describe("store lifecycle", () => {
 
   it("the deployment's destination rules profile is off on a store without guard profiles, not an error", async () => {
     let asked = 0;
-    // A Postgres store that has not reached parity: getGuardProfile is one of its stubs.
+    // A Postgres store that has not reached parity. The Postgres store implements getGuardProfile now, so the test
+    // lists it as a stub for its own duration.
     const store = Object.create(PostgresStore.prototype) as Store;
     Object.defineProperty(store, "getGuardProfile", {
       value: async () => {
@@ -61,10 +62,16 @@ describe("store lifecycle", () => {
         throw new Error("getGuardProfile is not available on this store in this release.");
       }
     });
-    expect(PostgresStore.unimplemented.has("getGuardProfile")).toBe(true);
-    const guard = new GuardService(store, {} as SecretService, { autoApply: false });
-    await expect(guard.deploymentProfile()).resolves.toBeUndefined();
-    expect(asked).toBe(0);
+    const unimplemented = PostgresStore.unimplemented as Set<keyof Store>;
+    const wasListed = unimplemented.has("getGuardProfile");
+    unimplemented.add("getGuardProfile");
+    try {
+      const guard = new GuardService(store, {} as SecretService, { autoApply: false });
+      await expect(guard.deploymentProfile()).resolves.toBeUndefined();
+      expect(asked).toBe(0);
+    } finally {
+      if (!wasListed) unimplemented.delete("getGuardProfile");
+    }
   });
 
   it("a route whose own catch maps errors to 400 still answers 501 for a store method the store does not implement", async () => {

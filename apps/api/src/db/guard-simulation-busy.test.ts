@@ -56,7 +56,7 @@ if (!testPostgresUrl()) noticePostgresSkipped("one running guard simulation");
 
 postgres("one running guard simulation [postgres]", () => {
   it("a second running row is that violation; a duplicate id and a second finished row are not", async () => {
-    // insertGuardSimulation is not on the Postgres store yet, so the rows go in with SQL on the migrated schema.
+    // The rows go in with plain SQL on the migrated schema, so the index itself (not the store method) is tested.
     current = await createTestStore({ kind: "postgres" });
     const pool = testPostgresPool(current.schema);
     try {
