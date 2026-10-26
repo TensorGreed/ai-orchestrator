@@ -100,6 +100,8 @@ jobs:
           src/db/schema-parity.test.ts
           src/db/contract
           src/config-postgres.test.ts
+          src/db/execution-cancel-store.test.ts
+          src/db/guard-simulation-busy.test.ts
 
   e2e:
     name: Web E2E
