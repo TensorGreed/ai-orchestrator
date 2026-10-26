@@ -237,6 +237,20 @@ export function destinationRowsOf(guard: GuardRuntimeDependencies): Promise<Data
   return cached;
 }
 
+/**
+ * Phase 16 — the dependencies' `mayUseLabels` shortcut, failing open: absent, or failing (a store error), the answer
+ * is true, so the run takes the full resolution path (which handles its own failures where they are used) instead of
+ * failing at start. Only a clean false skips the resolution.
+ */
+export async function guardMayUseLabels(guard: GuardRuntimeDependencies): Promise<boolean> {
+  if (!guard.mayUseLabels) return true;
+  try {
+    return await guard.mayUseLabels();
+  } catch {
+    return true;
+  }
+}
+
 /** The run's resolution, computed once per dependencies object (one per run). */
 export function resolveGuardRun(guard: GuardRuntimeDependencies): Promise<GuardRunResolution> {
   let cached = resolutionCache.get(guard);

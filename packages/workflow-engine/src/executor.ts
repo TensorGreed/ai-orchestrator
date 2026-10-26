@@ -157,6 +157,7 @@ import {
   builtInGuardProfile,
   createAgentGuardSession,
   GuardBlockedError,
+  guardMayUseLabels,
   isGuardBlockedError,
   issuedSurrogatesOf,
   resolveGuardRun,
@@ -7025,7 +7026,7 @@ async function labelTrackingFor(workflow: Workflow, guard: GuardRuntimeDependenc
   if (!guard) return { tracked: false, dictionaries: [] };
   const guardNodes = workflow.nodes.filter((node) => node.type === "guard" && node.disabled !== true);
   const overriding = guardNodes.filter(overrideUsesLabels);
-  if (overriding.length === 0 && guard.mayUseLabels && !await guard.mayUseLabels()) return { tracked: false, dictionaries: [] };
+  if (overriding.length === 0 && !await guardMayUseLabels(guard)) return { tracked: false, dictionaries: [] };
   const profiles: Array<{ labels?: "fixed" | "propagated"; dictionaries: GuardDictionary[] }> = [];
   try {
     const resolution = await resolveGuardRun(guard);
