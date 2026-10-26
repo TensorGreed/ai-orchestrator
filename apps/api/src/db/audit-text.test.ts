@@ -1,10 +1,12 @@
 /**
  * Phase 13.1 — audit text the database cannot store as given, on both stores (Postgres when TEST_POSTGRES_URL is set).
  *
- * A lone UTF-16 surrogate is hashed by JSON.stringify as the escape `\ud800` but stored by both drivers as U+FFFD, so
- * before the fix one such row stopped verifyAuditChain for good. Writes now store and hash the well-formed text. Rows
- * written the old way are checked by the rule in audit-chain.ts: one U+FFFD is searched exhaustively (verified or
- * broken), two or more make the row `unverifiable` (ok: false, the chain continues past it). The tamper cases below
+ * A lone UTF-16 surrogate is hashed by JSON.stringify as the escape `\ud800` but stored by pg (and by better-sqlite3 on
+ * Node 24) as U+FFFD, so before the fix one such row stopped verifyAuditChain for good. better-sqlite3 on Node 20 stores
+ * it as generalized UTF-8 bytes instead, which SqliteStore reads back exactly. Writes now store and hash the
+ * well-formed text. Rows written the old way are checked by the rule in audit-chain.ts: text kept exactly is verified
+ * exactly; otherwise one U+FFFD is searched exhaustively (verified or broken), two or more make the row `unverifiable`
+ * (ok: false, the chain continues past it). The tamper cases below
  * pin that the rule never turns an edited row into a passing one.
  */
 import crypto from "node:crypto";
@@ -28,6 +30,19 @@ type Entry = Parameters<Store["writeAuditLog"]>[0];
 
 function entry(id: string, overrides: Partial<Entry> = {}): Entry {
   return { id, eventType: "tag.create", category: "workflow", action: "create", outcome: "success", ...overrides };
+}
+
+/** `value` in generalized UTF-8 (WTF-8): a lone surrogate as its own 3-byte sequence, as better-sqlite3 on Node 20 stores it. */
+function wtf8(value: string): Buffer {
+  const bytes: number[] = [];
+  for (const char of value) {
+    const code = char.codePointAt(0)!;
+    if (code < 0x80) bytes.push(code);
+    else if (code < 0x800) bytes.push(0xc0 | (code >> 6), 0x80 | (code & 0x3f));
+    else if (code < 0x10000) bytes.push(0xe0 | (code >> 12), 0x80 | ((code >> 6) & 0x3f), 0x80 | (code & 0x3f));
+    else bytes.push(0xf0 | (code >> 18), 0x80 | ((code >> 12) & 0x3f), 0x80 | ((code >> 6) & 0x3f), 0x80 | (code & 0x3f));
+  }
+  return Buffer.from(bytes);
 }
 
 describe("wellFormedAuditText", () => {
@@ -98,8 +113,20 @@ for (const kind of kinds) {
 
     const tamper = (sql: string, params: unknown[] = []) => raw(async (exec) => { await exec(sql, params); });
 
-    /** Appends a row the way the build before the fix did: hash over the raw text, the driver stores U+FFFD. */
-    function writeOldFormat(id: string, text: { message?: string; resourceId?: string }, createdAt: string): Promise<Store> {
+    /**
+     * Appends a row the way a build before the fix did: the hash over the raw text, the text stored as the driver of
+     * that build stored it. Which one depends on the Node version it ran on, so the test picks it instead of the Node
+     * running the test:
+     *  - "replacement": each lone surrogate stored as U+FFFD (pg on any Node; better-sqlite3 on Node 24).
+     *  - "wtf8": each lone surrogate stored as its 3-byte generalized UTF-8 form, ED A0 80 for U+D800 (better-sqlite3 on
+     *    Node 20, the runtime image). SQLite only: Postgres refuses those bytes.
+     */
+    function writeOldFormat(
+      id: string,
+      text: { message?: string; resourceId?: string },
+      createdAt: string,
+      storedAs: "replacement" | "wtf8" = "replacement"
+    ): Promise<Store> {
       return raw(async (exec) => {
         const order = kind === "postgres" ? "seq" : "rowid";
         const last = await exec(`SELECT entry_hash FROM audit_logs WHERE entry_hash IS NOT NULL ORDER BY ${order} DESC LIMIT 1`);
@@ -109,11 +136,14 @@ for (const kind of kinds) {
           actorUserId: null, actorEmail: null, actorType: "user", resourceType: "tag", resourceId: text.resourceId ?? null,
           projectId: null, ipAddress: null, userAgent: null, metadataJson: null, message: text.message ?? null
         };
+        const stored = (value: string | null): unknown =>
+          value === null ? null : storedAs === "wtf8" ? wtf8(value) : (value as unknown as { toWellFormed(): string }).toWellFormed();
+        const textParam = storedAs === "wtf8" ? "CAST(? AS TEXT)" : "?";
         await exec(
           `INSERT INTO audit_logs (id, event_type, category, action, outcome, actor_type, resource_type, resource_id, message,
-             created_at, prev_hash, entry_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             created_at, prev_hash, entry_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ${textParam}, ${textParam}, ?, ?, ?)`,
           [id, fields.eventType, fields.category, fields.action, fields.outcome, fields.actorType, fields.resourceType,
-            fields.resourceId, fields.message, createdAt, prev, auditEntryHash(prev, fields)]
+            stored(fields.resourceId), stored(fields.message), createdAt, prev, auditEntryHash(prev, fields)]
         );
       });
     }
@@ -214,6 +244,41 @@ for (const kind of kinds) {
       expect(result.firstBrokenAt).toBeUndefined();
       expect(result.unverifiable?.[0]?.reason).toMatch(/2 U\+FFFD/);
     }, 60_000);
+
+    if (kind === "sqlite") {
+      it("an old row whose lone surrogates were stored as generalized UTF-8 (Node 20) is verified exactly, however many it holds", async () => {
+        await (await fresh()).writeAuditLog(entry("before"));
+        let store = await writeOldFormat("old3", { resourceId: "\ud800", message: "a \udc00 b \udbff" }, "2026-01-01T00:00:00.000Z", "wtf8");
+        await store.writeAuditLog(entry("after1"));
+        await store.writeAuditLog(entry("after2"));
+        expect(await store.verifyAuditChain()).toEqual({ ok: true, rowsChecked: 4 });
+        // The store kept this row's text exactly, so any edit is broken: no U+FFFD search, no "unverifiable".
+        store = await tamper(`UPDATE audit_logs SET action = 'delete' WHERE id = 'old3'`);
+        const result = await store.verifyAuditChain();
+        expect(result).toMatchObject({ ok: false, rowsChecked: 1, firstBrokenAt: { id: "old3" } });
+        expect(result.unverifiable).toBeUndefined();
+      }, 60_000);
+
+      it("a generalized-UTF-8 row given another lone surrogate is broken, and bytes no writer stored never verify", async () => {
+        await (await fresh()).writeAuditLog(entry("before"));
+        let store = await writeOldFormat("old1", { message: "x \udfff y" }, "2026-01-01T00:00:00.000Z", "wtf8");
+        await store.writeAuditLog(entry("after1"));
+        expect(await store.verifyAuditChain()).toEqual({ ok: true, rowsChecked: 3 });
+        // Seen as U+FFFD, \udffe and \udfff look the same; the stored bytes do not, and the hash covers \udfff.
+        store = await tamper(`UPDATE audit_logs SET message = CAST(? AS TEXT) WHERE id = 'old1'`, [wtf8("x \udffe y")]);
+        expect(await store.verifyAuditChain()).toMatchObject({ ok: false, rowsChecked: 1, firstBrokenAt: { id: "old1" } });
+        // A truncated sequence, and U+DFFF after a high surrogate written as two 3-byte halves (CESU-8, not generalized UTF-8).
+        for (const hex of ["7820edbf2079", "7820eda080edbfbf2079"]) {
+          store = await tamper(`UPDATE audit_logs SET message = CAST(? AS TEXT) WHERE id = 'old1'`, [Buffer.from(hex, "hex")]);
+          const result = await store.verifyAuditChain();
+          // Read with U+FFFD for each invalid sequence, as the driver reads them: broken or unverifiable, never verified.
+          expect(result.ok).toBe(false);
+          expect(result.firstBrokenAt?.id ?? result.unverifiable?.[0]?.id).toBe("old1");
+        }
+        store = await tamper(`UPDATE audit_logs SET message = CAST(? AS TEXT) WHERE id = 'old1'`, [wtf8("x \udfff y")]);
+        expect(await store.verifyAuditChain()).toEqual({ ok: true, rowsChecked: 3 });
+      }, 60_000);
+    }
 
     it("a row after an unverifiable row is still checked: editing it breaks the chain there", async () => {
       await (await fresh()).writeAuditLog(entry("before"));

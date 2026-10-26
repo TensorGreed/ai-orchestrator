@@ -7,10 +7,13 @@
  *
  * ## Text the database cannot store as given (lone surrogates, U+0000)
  *
- * A JS string can hold a lone UTF-16 surrogate. JSON.stringify escapes it as the ASCII text `\ud800`, but both drivers
- * store text as UTF-8, which turns it into U+FFFD. Before this fix the writer hashed the escaped surrogate and stored
- * U+FFFD, so verification could never match that row again and stopped there, leaving every later row unchecked. One
- * builder request (`POST /api/tags {"name":"\ud800"}`) was enough. Postgres also refuses U+0000 in text.
+ * A JS string can hold a lone UTF-16 surrogate. JSON.stringify escapes it as the ASCII text `\ud800`, but the drivers
+ * store text as UTF-8, which has no form for it. pg turns it into U+FFFD on every Node version; better-sqlite3 does so
+ * on Node 24, while on Node 20 (the runtime image, and CI) it writes the surrogate's 3-byte generalized UTF-8 form
+ * (WTF-8: ED A0 80 for U+D800), which reads back through the driver as three U+FFFD. Before this fix the writer hashed
+ * the escaped surrogate and stored one of those, so verification could never match that row again and stopped there,
+ * leaving every later row unchecked. One builder request (`POST /api/tags {"name":"\ud800"}`) was enough. Postgres
+ * also refuses U+0000 in text.
  *
  * Writes now pass every text field through `wellFormedAuditText` (lone surrogate → U+FFFD, as
  * String.prototype.toWellFormed does; U+0000 → U+FFFD, as the Postgres parameter mapping does) **before** hashing and
@@ -18,10 +21,17 @@
  *
  * ## Verifying rows written before the fix (the rule)
  *
+ * The stored values are the stored bytes decoded exactly: SqliteStore reads text columns as bytes and decodes them with
+ * `storedSqliteAuditText`, so a lone surrogate kept as generalized UTF-8 comes back as that surrogate, whichever Node
+ * version wrote the row or verifies it. (The driver's own reading would give three U+FFFD for it.) Postgres text is
+ * always valid UTF-8, so its driver's reading is exact.
+ *
  * For each row, in insertion order:
  *  1. Its stored prev_hash must equal the previous row's stored entry_hash (64 zeros for the first). Otherwise the
  *     chain is broken at this row.
  *  2. Its hash recomputed over the stored values must equal its stored entry_hash. If so, the row is verified.
+ *     Otherwise, if any stored value holds a lone surrogate, the store kept the row's text exactly (no writer stores
+ *     one surrogate exactly and replaces another), so nothing was lost that could explain the mismatch. Broken.
  *  3. Otherwise count the U+FFFD characters `k` in the row's free-text fields (LEGACY_TEXT_FIELDS: everything except
  *     id, created_at, outcome, actor_type and metadata_json; metadata was always JSON.stringify'd before storing, so a
  *     lone surrogate there was stored as ASCII `\ud800` and any U+FFFD in it is a real one). Each U+FFFD is either a
@@ -53,10 +63,75 @@ import { createHash } from "node:crypto";
 
 export const GENESIS_HASH = "0".repeat(64);
 
+const strictUtf8 = new TextDecoder("utf-8", { fatal: true });
+const lenientUtf8 = new TextDecoder("utf-8");
+
+/**
+ * A SQLite text value from its stored bytes (read with `CAST(column AS BLOB)`), decoded the same on every Node version.
+ * Valid UTF-8 decodes as such. Generalized UTF-8 (WTF-8), where a lone surrogate is its own 3-byte sequence, as
+ * better-sqlite3 on Node 20 stores it, decodes to that surrogate, so the text is exactly what the writer hashed. Any
+ * other bytes decode with U+FFFD for each invalid sequence (TextDecoder's WHATWG rule, as the drivers read them).
+ */
+export function storedSqliteAuditText(bytes: Uint8Array | null): string | null {
+  if (bytes === null) return null;
+  try {
+    return strictUtf8.decode(bytes);
+  } catch {
+    return decodeGeneralizedUtf8(bytes) ?? lenientUtf8.decode(bytes);
+  }
+}
+
+/** WTF-8: UTF-8 that also encodes lone surrogates (ED A0–BF 80–BF). Undefined for anything else, a CESU-8 pair included. */
+function decodeGeneralizedUtf8(bytes: Uint8Array): string | undefined {
+  const units: number[] = [];
+  const continuation = (at: number) => at < bytes.length && (bytes[at]! & 0xc0) === 0x80;
+  let i = 0;
+  while (i < bytes.length) {
+    const b0 = bytes[i]!;
+    let code: number;
+    if (b0 < 0x80) {
+      code = b0;
+      i += 1;
+    } else if (b0 >= 0xc2 && b0 <= 0xdf && continuation(i + 1)) {
+      code = ((b0 & 0x1f) << 6) | (bytes[i + 1]! & 0x3f);
+      i += 2;
+    } else if (b0 >= 0xe0 && b0 <= 0xef && continuation(i + 1) && continuation(i + 2) && (b0 !== 0xe0 || bytes[i + 1]! >= 0xa0)) {
+      code = ((b0 & 0x0f) << 12) | ((bytes[i + 1]! & 0x3f) << 6) | (bytes[i + 2]! & 0x3f);
+      i += 3;
+    } else if (
+      b0 >= 0xf0 && b0 <= 0xf4 && continuation(i + 1) && continuation(i + 2) && continuation(i + 3) &&
+      (b0 !== 0xf0 || bytes[i + 1]! >= 0x90) && (b0 !== 0xf4 || bytes[i + 1]! <= 0x8f)
+    ) {
+      code = ((b0 & 0x07) << 18) | ((bytes[i + 1]! & 0x3f) << 12) | ((bytes[i + 2]! & 0x3f) << 6) | (bytes[i + 3]! & 0x3f);
+      i += 4;
+    } else {
+      return undefined;
+    }
+    if (code >= 0x10000) {
+      units.push(0xd800 + ((code - 0x10000) >> 10), 0xdc00 + ((code - 0x10000) & 0x3ff));
+      continue;
+    }
+    // A high then a low surrogate, each in 3 bytes, is CESU-8: a writer encodes that pair in 4 bytes. (A last unit that
+    // is a high surrogate came from 3 bytes: a 4-byte sequence ends in a low one.)
+    const previous = units[units.length - 1];
+    if (code >= 0xdc00 && code <= 0xdfff && previous !== undefined && previous >= 0xd800 && previous <= 0xdbff) {
+      return undefined;
+    }
+    units.push(code);
+  }
+  let out = "";
+  for (let at = 0; at < units.length; at += 0x2000) out += String.fromCharCode(...units.slice(at, at + 0x2000));
+  return out;
+}
+
 const REPLACEMENT = "�";
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
 const LONE_SURROGATE_OR_NUL = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]|\u0000/g;
 
-/** `value` as both drivers store it: lone surrogates and U+0000 become U+FFFD (String.prototype.toWellFormed + NUL). */
+/**
+ * `value` as every store keeps it on every Node version: lone surrogates and U+0000 become U+FFFD
+ * (String.prototype.toWellFormed + NUL), as pg stores them.
+ */
 export function wellFormedAuditText(value: string): string;
 export function wellFormedAuditText(value: string | null): string | null;
 export function wellFormedAuditText(value: string | null | undefined): string | null | undefined;
@@ -152,7 +227,10 @@ const LEGACY_TEXT_FIELDS = [
 ] as const satisfies ReadonlyArray<keyof AuditCanonicalInput>;
 
 export interface AuditChainRow {
-  /** The hashed fields as stored (optional text: NULL → null, "" stays ""). */
+  /**
+   * The hashed fields as stored, decoded exactly (optional text: NULL → null, "" stays ""). On SQLite they may hold a
+   * lone surrogate (see storedSqliteAuditText).
+   */
   fields: AuditCanonicalInput;
   prevHash: string;
   entryHash: string;
@@ -183,6 +261,11 @@ export interface AuditChainResult {
   firstBrokenAt?: { id: string; createdAt: string; expected: string; stored: string };
   /** Rows whose content could not be checked (see the rule above). Present only when not empty. */
   unverifiable?: AuditUnverifiableRow[];
+}
+
+/** Step 2 of the rule: whether the store kept this row's text exactly (a lone surrogate in any stored value). */
+function holdsLoneSurrogate(fields: AuditCanonicalInput): boolean {
+  return Object.values(fields).some((value) => typeof value === "string" && LONE_SURROGATE.test(value));
 }
 
 type LegacyOutcome = "verified" | "broken" | "unverifiable";
@@ -262,6 +345,9 @@ export function verifyAuditRows(rows: Iterable<AuditChainRow>): AuditChainResult
       return finish({ ok: false, rowsChecked: checked, firstBrokenAt: { id, createdAt, expected, stored: row.entryHash } });
     }
     if (expected !== row.entryHash) {
+      if (holdsLoneSurrogate(row.fields)) {
+        return finish({ ok: false, rowsChecked: checked, firstBrokenAt: { id, createdAt, expected, stored: row.entryHash } });
+      }
       const legacy = legacyReplacementCheck(prev, row);
       if (legacy.outcome === "broken") {
         return finish({ ok: false, rowsChecked: checked, firstBrokenAt: { id, createdAt, expected, stored: row.entryHash } });

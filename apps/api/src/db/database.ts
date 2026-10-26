@@ -62,7 +62,15 @@ import { isEmptyDataLabels, labelsForUntrackedSave, mergeDataLabels, parseStored
 import { queuedRunTimeoutMs, STUCK_JOB_MARGIN_MS } from "./queue-timeouts.js";
 import { isForeignKeyViolation, ProjectNotEmptyError, StoreReferenceMissingError } from "./store-errors.js";
 import { clampLimit, LIMIT_MAX } from "./store-limits.js";
-import { auditEntryHash, type AuditChainResult, GENESIS_HASH, verifyAuditRows, wellFormedAuditEntry, wellFormedAuditText } from "./audit-chain.js";
+import {
+  auditEntryHash,
+  type AuditChainResult,
+  GENESIS_HASH,
+  storedSqliteAuditText,
+  verifyAuditRows,
+  wellFormedAuditEntry,
+  wellFormedAuditText
+} from "./audit-chain.js";
 import type {
   ApprovalDecisionInput,
   CancelExecutionResult,
@@ -2119,15 +2127,6 @@ function toString(value: unknown): string {
 
 function toNumber(value: unknown): number {
   return typeof value === "number" ? value : Number(value ?? 0);
-}
-
-// Phase 8.4 — audit-log hash chain helpers.
-/**
- * A stored optional audit field as the write path hashed it: NULL stays null and "" stays "" (the writer hashes
- * `value ?? null`). Reading by truthiness would turn "" into null and break the chain at that row.
- */
-function storedAuditText(value: unknown): string | null {
-  return value === null || value === undefined ? null : toString(value);
 }
 
 function safeJsonParse(raw: string): unknown {
@@ -7389,51 +7388,40 @@ export class SqliteStore implements Store {
    * we can only attest the chain from the first hash onwards.
    */
   async verifyAuditChain(): Promise<AuditChainResult> {
-    const rows = this.queryAll<{
-      id: string;
-      event_type: string;
-      category: string;
-      action: string;
-      outcome: string;
-      actor_user_id: string | null;
-      actor_email: string | null;
-      actor_type: string;
-      resource_type: string | null;
-      resource_id: string | null;
-      project_id: string | null;
-      ip_address: string | null;
-      user_agent: string | null;
-      metadata_json: string | null;
-      message: string | null;
-      created_at: string;
-      prev_hash: string | null;
-      entry_hash: string | null;
-    }>(
-      `SELECT id, event_type, category, action, outcome, actor_user_id, actor_email, actor_type,
-              resource_type, resource_id, project_id, ip_address, user_agent, metadata_json, message,
-              created_at, prev_hash, entry_hash
+    // Text columns are read as their stored bytes and decoded by storedSqliteAuditText, the same on every Node version:
+    // better-sqlite3 on Node 20 stored a lone surrogate as generalized UTF-8, which the driver reads as three U+FFFD.
+    // An optional field keeps NULL as null and "" as "" (the writer hashes `value ?? null`; reading by truthiness would
+    // turn "" into null and break the chain at that row).
+    const text = [
+      "id", "event_type", "category", "action", "outcome", "actor_user_id", "actor_email", "actor_type", "resource_type",
+      "resource_id", "project_id", "ip_address", "user_agent", "metadata_json", "message", "created_at"
+    ] as const;
+    type Bytes = Uint8Array | null;
+    const rows = this.queryAll<Record<(typeof text)[number], Bytes> & { prev_hash: string | null; entry_hash: string | null }>(
+      `SELECT ${text.map((column) => `CAST(${column} AS BLOB) AS ${column}`).join(", ")}, prev_hash, entry_hash
        FROM audit_logs WHERE entry_hash IS NOT NULL
        ORDER BY rowid ASC`
     );
+    const required = (value: Bytes) => storedSqliteAuditText(value) ?? "";
     return verifyAuditRows(
       rows.map((row) => ({
         fields: {
-          id: toString(row.id),
-          createdAt: toString(row.created_at),
-          eventType: toString(row.event_type),
-          category: toString(row.category),
-          action: toString(row.action),
-          outcome: toString(row.outcome),
-          actorUserId: storedAuditText(row.actor_user_id),
-          actorEmail: storedAuditText(row.actor_email),
-          actorType: toString(row.actor_type),
-          resourceType: storedAuditText(row.resource_type),
-          resourceId: storedAuditText(row.resource_id),
-          projectId: storedAuditText(row.project_id),
-          ipAddress: storedAuditText(row.ip_address),
-          userAgent: storedAuditText(row.user_agent),
-          metadataJson: storedAuditText(row.metadata_json),
-          message: storedAuditText(row.message)
+          id: required(row.id),
+          createdAt: required(row.created_at),
+          eventType: required(row.event_type),
+          category: required(row.category),
+          action: required(row.action),
+          outcome: required(row.outcome),
+          actorUserId: storedSqliteAuditText(row.actor_user_id),
+          actorEmail: storedSqliteAuditText(row.actor_email),
+          actorType: required(row.actor_type),
+          resourceType: storedSqliteAuditText(row.resource_type),
+          resourceId: storedSqliteAuditText(row.resource_id),
+          projectId: storedSqliteAuditText(row.project_id),
+          ipAddress: storedSqliteAuditText(row.ip_address),
+          userAgent: storedSqliteAuditText(row.user_agent),
+          metadataJson: storedSqliteAuditText(row.metadata_json),
+          message: storedSqliteAuditText(row.message)
         },
         prevHash: toString(row.prev_hash ?? ""),
         entryHash: toString(row.entry_hash ?? "")
