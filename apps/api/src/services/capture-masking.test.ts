@@ -76,15 +76,16 @@ describe("maskCapturedRun", () => {
     expect(masked.report.keptFromWorkflow).toBe(1);
   });
 
-  it("keeps tool names as written in the tape, so a dictionary term inside one does not change a request hash the replay recomputes", () => {
+  it("keeps a configured tool's name as written in the tape, so a dictionary term inside one does not change a request hash the replay recomputes", () => {
     const base = run();
-    const tools = [{ name: "atlas-search", description: "Search the atlas catalog", inputSchema: { type: "object", properties: { q: { type: "string" } } } }];
-    const call = { id: "c1", name: "atlas-search", arguments: { q: "x" } };
+    // A worker delegate tool: replay rebuilds it from the workflow, so it is held back as written.
+    const tools = [{ name: "delegate_to_atlas-search", description: "Delegate task to atlas-search. Hint: be brief", inputSchema: { type: "object", properties: { task_prompt: { type: "string" } } } }];
+    const call = { id: "c1", name: "delegate_to_atlas-search", arguments: { task_prompt: "x" } };
     const request = {
       messages: [
-        { role: "user", content: `Who is ${EMAIL}? Ask atlas.` },
+        { role: "user", content: `Who is ${EMAIL}?` },
         { role: "assistant", content: "", toolCalls: [call] },
-        { role: "tool", content: "found", name: "atlas-search", toolCallId: "c1" }
+        { role: "tool", content: "found", name: "delegate_to_atlas-search", toolCallId: "c1" }
       ],
       tools,
       params: { model: "m" }
@@ -93,11 +94,87 @@ describe("maskCapturedRun", () => {
     const masked = maskCapturedRun(base, { key, dictionaries: [{ dataClass: "project", terms: ["atlas"], patterns: [], score: 0.9 }] });
     const surrogate = surrogateFor(EMAIL, "email", key);
     const entry = masked.modelTape!.entries[0]!;
-    // What the replay recomputes: the live request has the real tool definitions and tool names, with the content masked.
-    const live = canonicalTapeJson({ ...request, messages: [{ ...request.messages[0]!, content: `Who is ${surrogate}? Ask ${surrogateFor("atlas", "project", key)}.` }, request.messages[1]!, request.messages[2]!] }) as ModelTape["entries"][number]["request"];
+    // What the replay recomputes: the live request has the configured tool definitions and tool names, with the content masked.
+    const live = canonicalTapeJson({ ...request, messages: [{ ...request.messages[0]!, content: `Who is ${surrogate}?` }, request.messages[1]!, request.messages[2]!] }) as ModelTape["entries"][number]["request"];
     expect(entry.request).toEqual(live);
     expect(entry.requestHash).toBe(hashModelRequest(live));
-    expect((entry.response as { toolCalls: Array<{ name: string }> }).toolCalls[0]!.name).toBe("atlas-search");
+    expect((entry.response as { toolCalls: Array<{ name: string }> }).toolCalls[0]!.name).toBe("delegate_to_atlas-search");
+    expect(JSON.stringify(masked)).not.toContain(EMAIL);
+  });
+
+  // Re-review H1: a held-back definition is never stored with a collected value in it.
+  it("drops the capture when a configured tool's name, description or schema holds a collected value", () => {
+    const dictionaries = [{ dataClass: "project", terms: ["atlas"], patterns: [], score: 0.9 }];
+    const withTool = (tool: Record<string, unknown>, content = `Who is ${EMAIL}?`) => {
+      const base = run();
+      const request = { messages: [{ role: "user", content }], tools: [tool], params: { model: "m" } };
+      base.modelTape = { ...base.modelTape, entries: [{ ...base.modelTape.entries[0]!, request }] } as unknown as ModelTape;
+      return base;
+    };
+    const schema = { type: "object", properties: { q: { type: "string" } } };
+    expect(() => maskCapturedRun(withTool({ name: "delegate_to_Helper", description: `Delegate task to Helper. Hint: mail ${EMAIL}`, inputSchema: schema }), { key, dictionaries })).toThrow(MaskIdentifierError);
+    expect(() => maskCapturedRun(withTool({ name: "delegate_to_Helper", description: "Delegate", inputSchema: { type: "object", properties: { q: { type: "string", default: EMAIL } } } }), { key, dictionaries })).toThrow(MaskIdentifierError);
+    expect(() => maskCapturedRun(withTool({ name: "delegate_to_Helper", description: "Delegate", inputSchema: { type: "object", properties: { [EMAIL]: { type: "string" } } } }), { key, dictionaries })).toThrow(MaskIdentifierError);
+    // A dictionary term the content holds (so it was collected) as a word in a held-back name or description.
+    expect(() => maskCapturedRun(withTool({ name: "delegate_to_ask-atlas", description: "Delegate", inputSchema: schema }, "Ask atlas."), { key, dictionaries })).toThrow(MaskIdentifierError);
+    expect(() => maskCapturedRun(withTool({ name: "delegate_to_Helper", description: "Delegate to the atlas team", inputSchema: schema }, "Ask atlas."), { key, dictionaries })).toThrow(MaskIdentifierError);
+    // The error never repeats the value.
+    let message = "";
+    try {
+      maskCapturedRun(withTool({ name: "delegate_to_Helper", description: `owner ${EMAIL}`, inputSchema: schema }), { key, dictionaries });
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message).toContain("model tape entry 1 tool 1");
+    expect(message).not.toContain(EMAIL);
+    expect(message).not.toContain("Helper");
+  });
+
+  // Re-review H1/M1: an MCP tool's definition in the tape is masked exactly as the cassette's tools/list copy.
+  it("masks an MCP-listed tool in the tape with the same surrogates as the cassette, so replay's live request hashes alike", () => {
+    const dictionaries = [{ dataClass: "project", terms: ["atlas"], patterns: [], score: 0.9 }];
+    const listed = [
+      { name: "lookup", description: `Look up contacts; owner ${EMAIL}`, inputSchema: { type: "object", properties: { q: { type: "string", default: EMAIL } } } },
+      { name: "atlas-search", description: "Search the atlas catalog", inputSchema: { type: "object", properties: { q: { type: "string" } } } }
+    ];
+    // How the agent exposes them: `<adapterId>__<name>`, `[<adapterId>] <description>`.
+    const expose = (tool: (typeof listed)[number]) => ({ name: `http_mcp__${tool.name}`, description: `[http_mcp] ${tool.description}`, inputSchema: tool.inputSchema });
+    const base = run();
+    base.cassette = {
+      ...base.cassette!,
+      servers: [{ key: "registry:crm", registryServerId: "crm", adapterId: "http_mcp", label: "CRM" }],
+      entries: [{ seq: 1, server: "registry:crm", method: "tools/list", result: listed, at: 0, durationMs: 1 }]
+    } as McpCassette;
+    const request = { messages: [{ role: "user", content: `Who is ${EMAIL}?` }], tools: listed.map(expose), params: { model: "m" } };
+    base.modelTape = { ...base.modelTape, entries: [{ ...base.modelTape.entries[0]!, request }] } as unknown as ModelTape;
+    const masked = maskCapturedRun(base, { key, dictionaries });
+    expect(JSON.stringify(masked)).not.toContain(EMAIL);
+    const cassetteTools = masked.cassette!.entries[0]!.result as typeof listed;
+    const tapeTools = (masked.modelTape!.entries[0]!.request as { tools: ReturnType<typeof expose>[] }).tools;
+    const surrogate = surrogateFor(EMAIL, "email", key);
+    expect(cassetteTools[0]!.description).toBe(`Look up contacts; owner ${surrogate}`);
+    expect(cassetteTools[1]!.name).not.toBe("atlas-search");
+    // Identical to what the agent builds from the masked cassette at replay.
+    expect(tapeTools).toEqual(cassetteTools.map(expose));
+    const live = canonicalTapeJson({ ...request, messages: [{ role: "user", content: `Who is ${surrogate}?` }], tools: cassetteTools.map(expose) }) as ModelTape["entries"][number]["request"];
+    expect(masked.modelTape!.entries[0]!.requestHash).toBe(hashModelRequest(live));
+  });
+
+  it("restores held-back tool-call names by position, never by a name the model made up", () => {
+    const base = run();
+    const tools = [{ name: "session_cache_list", description: "List cached tool outputs", inputSchema: { type: "object" } }];
+    const request = {
+      messages: [
+        { role: "user", content: "hi" },
+        { role: "assistant", content: "", toolCalls: [{ id: "c1", name: "l2m_held_tool_0", arguments: {} }, { id: "c2", name: "session_cache_list", arguments: {} }] }
+      ],
+      tools,
+      params: { model: "m" }
+    };
+    base.modelTape = { ...base.modelTape, entries: [{ ...base.modelTape.entries[0]!, request }] } as unknown as ModelTape;
+    const masked = maskCapturedRun(base, { key, dictionaries: [] });
+    const calls = (masked.modelTape!.entries[0]!.request as unknown as { messages: Array<{ toolCalls: Array<{ name: string }> }> }).messages[1]!.toolCalls;
+    expect(calls.map((entry) => entry.name)).toEqual(["l2m_held_tool_0", "session_cache_list"]);
   });
 
   it("labels each node with the classes found in it and where its content came from", () => {
