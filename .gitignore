@@ -16,3 +16,6 @@ apps/web/dist-demo
 apps/web/test-results-demo
 apps/web/playwright-report-demo
 apps/web/demo-screenshots
+
+# Assembled Pages site (scripts/assemble-pages-site.mjs)
+_site/

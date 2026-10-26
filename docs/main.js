@@ -1,4 +1,4 @@
-// Mobile menu, theme toggle, year stamp, and scroll-reveal.
+// Mobile menu, theme toggle, year stamp and scroll-reveal.
 
 const menuToggle = document.getElementById("menuToggle");
 const siteNav = document.getElementById("siteNav");
@@ -10,44 +10,63 @@ if (yearTarget) {
 }
 
 if (menuToggle && siteNav) {
+  const setOpen = (open) => {
+    siteNav.classList.toggle("open", open);
+    menuToggle.setAttribute("aria-expanded", String(open));
+    menuToggle.setAttribute("aria-label", open ? "Close menu" : "Open menu");
+  };
+
   menuToggle.addEventListener("click", () => {
-    const next = !siteNav.classList.contains("open");
-    siteNav.classList.toggle("open", next);
-    menuToggle.setAttribute("aria-expanded", String(next));
+    const open = !siteNav.classList.contains("open");
+    setOpen(open);
+    if (open) siteNav.querySelector("a")?.focus();
   });
 
   siteNav.querySelectorAll("a").forEach((link) => {
-    link.addEventListener("click", () => {
-      siteNav.classList.remove("open");
-      menuToggle.setAttribute("aria-expanded", "false");
-    });
+    link.addEventListener("click", () => setOpen(false));
+  });
+
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && siteNav.classList.contains("open")) {
+      setOpen(false);
+      menuToggle.focus();
+    }
   });
 }
 
-// Theme toggle persists to localStorage. The initial theme is set by an
-// inline script in <head> to avoid a flash-of-wrong-theme on page load.
+// The initial theme is set by an inline script in <head> to avoid a flash of
+// the wrong theme; the toggle persists the choice when storage is available.
 if (themeToggle) {
   themeToggle.addEventListener("click", () => {
-    const current = document.documentElement.getAttribute("data-theme") || "light";
+    const current = document.documentElement.getAttribute("data-theme") === "light" ? "light" : "dark";
     const next = current === "dark" ? "light" : "dark";
     document.documentElement.setAttribute("data-theme", next);
     try {
       localStorage.setItem("l2m-theme", next);
     } catch (e) {
-      // Storage unavailable (private browsing, etc.) — toggle still works for the session.
+      // Storage unavailable (private browsing, blocked site data): the toggle still works for this page.
     }
   });
 }
 
+// Sections fade in as they scroll into view. Without IntersectionObserver, or
+// with reduced motion requested, they are shown at once.
+document.documentElement.classList.add("js");
 const revealTargets = document.querySelectorAll(".reveal");
-const observer = new IntersectionObserver(
-  (entries) => {
-    entries.forEach((entry) => {
-      if (entry.isIntersecting) {
-        entry.target.classList.add("is-visible");
-      }
-    });
-  },
-  { threshold: 0.12, rootMargin: "0px 0px -40px 0px" }
-);
-revealTargets.forEach((item) => observer.observe(item));
+const reduceMotion = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+if (!("IntersectionObserver" in window) || reduceMotion) {
+  revealTargets.forEach((item) => item.classList.add("is-visible"));
+} else {
+  const observer = new IntersectionObserver(
+    (entries) => {
+      entries.forEach((entry) => {
+        if (entry.isIntersecting) {
+          entry.target.classList.add("is-visible");
+          observer.unobserve(entry.target);
+        }
+      });
+    },
+    { threshold: 0.08, rootMargin: "0px 0px -40px 0px" }
+  );
+  revealTargets.forEach((item) => observer.observe(item));
+}

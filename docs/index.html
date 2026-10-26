@@ -1,343 +1,361 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="description" content="L2M is the MCP-native agent runtime: a visual workflow builder, multi-agent Swarm, and a first-party VS Code surface for building AI agents that do real work via the Model Context Protocol." />
-    <meta name="theme-color" content="#2563eb" />
-    <meta property="og:title" content="L2M | The MCP-native agent runtime" />
-    <meta property="og:description" content="Visual workflow builder, multi-agent Swarm, and a VS Code surface for AI agents that do real work via MCP." />
+    <title>L²M: run and govern MCP agents, self-hosted</title>
+    <meta name="description" content="L2M is an open-source, self-hosted studio and runtime for MCP agents: build them visually, run them with tool calling, and govern them with an MCP control plane, Guard, approvals, signed audit bundles and release gates. Try the live demo in your browser." />
+    <link rel="canonical" href="https://lsquarem.com/" />
+    <meta name="theme-color" content="#07090f" />
     <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="L2M" />
     <meta property="og:url" content="https://lsquarem.com/" />
+    <meta property="og:title" content="L2M: run and govern MCP agents, self-hosted" />
+    <meta property="og:description" content="Build MCP agents visually, run them, and govern every tool call: control plane, Guard, approvals, signed audit bundles and release gates. Open source, self-hosted. Live demo in your browser." />
+    <meta property="og:image" content="https://lsquarem.com/assets/social-card.png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content="The L2M studio showing an agent hub with its chat model, memory and two MCP tools, next to the run tape of a finished run." />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="L2M: run and govern MCP agents, self-hosted" />
+    <meta name="twitter:description" content="Build MCP agents visually, run them, and govern every tool call. Open source, self-hosted. Live demo in your browser." />
+    <meta name="twitter:image" content="https://lsquarem.com/assets/social-card.png" />
+    <meta name="twitter:image:alt" content="The L2M studio showing an agent hub with its chat model, memory and two MCP tools, next to the run tape of a finished run." />
     <link rel="icon" type="image/svg+xml" href="./assets/favicon.svg" />
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+    <link rel="preload" href="./assets/fonts/inter-latin-var.woff2" as="font" type="font/woff2" crossorigin />
     <link rel="stylesheet" href="./styles.css" />
-    <title>L²M — The MCP-native agent runtime</title>
     <script>
       (function () {
-        var stored = localStorage.getItem("l2m-theme");
-        var prefersDark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
-        var theme = stored || (prefersDark ? "dark" : "light");
-        document.documentElement.setAttribute("data-theme", theme);
+        var root = document.documentElement;
+        var stored = null;
+        try {
+          stored = localStorage.getItem("l2m-theme");
+        } catch (e) {}
+        var prefersLight = window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches;
+        root.setAttribute("data-theme", stored === "light" || stored === "dark" ? stored : prefersLight ? "light" : "dark");
       })();
     </script>
   </head>
   <body>
-    <div class="surface-glow" aria-hidden="true"></div>
+    <a class="skip-link" href="#main">Skip to content</a>
 
     <header class="topbar">
       <div class="container topbar-inner">
-        <a class="brand" href="#home" aria-label="L2M home">
-          <img src="./assets/lsquarem-logo.svg" alt="L2M logo" />
-          <div class="brand-text">
-            <strong>L<sup>2</sup>M</strong>
-            <span>MCP-native agent runtime</span>
-          </div>
+        <a class="brand" href="./">
+          <img src="./assets/lsquarem-logo.svg" alt="" width="32" height="32" />
+          <strong>L<sup>2</sup>M</strong>
+          <span class="brand-tag">MCP agents, governed</span>
         </a>
 
-        <nav class="nav" id="siteNav">
-          <a href="#differentiators">Why L2M</a>
-          <a href="#quickstart">Quickstart</a>
-          <a href="#patterns">Patterns</a>
-          <a href="./docs/" class="text-link">Docs</a>
-          <a href="./demo/">Live demo</a>
-          <a href="https://github.com/TensorGreed/l2m-samples" target="_blank" rel="noreferrer">Samples</a>
+        <nav class="nav" id="siteNav" aria-label="Main">
+          <a href="#studio">Studio</a>
+          <a href="#control-plane">MCP</a>
+          <a href="#govern">Govern</a>
+          <a href="#ship">Ship</a>
+          <a href="#self-host">Self-host</a>
+          <a href="./docs/">Docs</a>
+          <a href="./integrations.html">Integrations</a>
+          <a class="nav-github" href="https://github.com/TensorGreed/ai-orchestrator" rel="noopener">GitHub</a>
         </nav>
 
-        <button class="menu-toggle" id="menuToggle" aria-label="Toggle menu" aria-expanded="false">Menu</button>
-
-        <button class="theme-toggle" id="themeToggle" aria-label="Toggle theme">
-          <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" /></svg>
-          <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4" /><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41" /></svg>
-        </button>
-
-        <a class="btn btn-subtle" href="https://github.com/TensorGreed/ai-orchestrator" target="_blank" rel="noreferrer">GitHub</a>
+        <div class="topbar-actions">
+          <a class="btn btn-primary btn-demo" href="./demo/">Live demo</a>
+          <button class="icon-btn theme-toggle" id="themeToggle" type="button" aria-label="Switch between light and dark theme">
+            <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" /></svg>
+            <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4" /><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41" /></svg>
+          </button>
+          <a class="icon-btn topbar-github" href="https://github.com/TensorGreed/ai-orchestrator" rel="noopener" aria-label="L2M on GitHub">
+            <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5a11.5 11.5 0 0 0-3.64 22.41c.58.1.79-.25.79-.56v-2c-3.2.7-3.88-1.37-3.88-1.37-.53-1.33-1.28-1.69-1.28-1.69-1.05-.71.08-.7.08-.7 1.16.08 1.77 1.19 1.77 1.19 1.03 1.77 2.7 1.26 3.36.96.1-.75.4-1.26.73-1.55-2.56-.29-5.25-1.28-5.25-5.68 0-1.26.45-2.28 1.19-3.09-.12-.29-.52-1.46.11-3.05 0 0 .97-.31 3.17 1.18a11 11 0 0 1 5.77 0c2.2-1.49 3.17-1.18 3.17-1.18.63 1.59.23 2.76.11 3.05.74.81 1.19 1.83 1.19 3.09 0 4.41-2.7 5.38-5.26 5.67.41.36.78 1.06.78 2.14v3.17c0 .31.21.67.8.56A11.5 11.5 0 0 0 12 .5z" /></svg>
+          </a>
+          <button class="icon-btn menu-toggle" id="menuToggle" type="button" aria-label="Open menu" aria-expanded="false" aria-controls="siteNav">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16" /></svg>
+          </button>
+        </div>
       </div>
     </header>
 
-    <main id="home">
-      <!-- ============================================================
-           Hero
-           ============================================================ -->
-      <section class="hero reveal">
-        <div class="container hero-grid">
-          <div class="hero-copy">
-            <span class="eyebrow">Open source · MIT</span>
-            <h1>The <span class="accent">MCP-native</span> agent runtime.</h1>
-            <p class="lead">
-              Visual workflow builder, multi-agent Swarm, and a first-party VS Code surface — for developers composing AI agents that do real work in real systems via the <a class="text-link" href="https://modelcontextprotocol.io" target="_blank" rel="noreferrer">Model Context Protocol</a>.
-            </p>
-            <div class="hero-actions">
-              <a class="btn btn-primary" href="./docs/getting-started/build-your-first-mcp-agent">
-                Build your first agent in 5 min
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 5l7 7-7 7" /></svg>
-              </a>
-              <a class="btn btn-subtle" href="./demo/">Try the live demo</a>
-              <a class="btn btn-subtle" href="./docs/">Read the docs</a>
-            </div>
+    <main id="main">
+      <!-- Hero: the live demo is the primary call to action. -->
+      <section class="hero" aria-labelledby="hero-title">
+        <div class="container">
+          <ul class="pill-row" aria-label="At a glance">
+            <li>Open source · MIT</li>
+            <li>Self-hosted only</li>
+            <li>No call-home</li>
+          </ul>
+          <h1 id="hero-title">The place your <span class="accent">MCP agents</span> run and are governed.</h1>
+          <p class="lead">
+            Build tool-calling agents in a visual studio, run them against your MCP servers, and decide what every tool call may do: policies, Guard, approvals, signed audit bundles and a release gate. It all runs on your own infrastructure.
+          </p>
+          <div class="hero-actions">
+            <a class="btn btn-primary btn-lg" href="./demo/">
+              Try the live demo
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14M13 5l7 7-7 7" /></svg>
+            </a>
+            <a class="btn btn-lg" href="./docs/">Read the docs</a>
           </div>
-
-          <aside class="hero-canvas" aria-label="Studio canvas preview">
-            <div class="canvas-header">
-              <span class="dot"></span><span class="dot"></span><span class="dot"></span>
-              <code>studio / mcp-agent</code>
-            </div>
-            <div class="canvas-body">
-              <div class="flow-row">
-                <span class="flow-pill">webhook_input</span>
-                <span class="flow-arrow">→</span>
-                <span class="flow-pill accent">agent_orchestrator</span>
-                <span class="flow-arrow">→</span>
-                <span class="flow-pill">output</span>
-              </div>
-              <div class="flow-attach">
-                <div class="flow-attach-row"><span class="flow-attach-label">chat_model</span><span class="flow-pill">openai gpt-4o-mini</span></div>
-                <div class="flow-attach-row"><span class="flow-attach-label">memory</span><span class="flow-pill">session_memory</span></div>
-                <div class="flow-attach-row"><span class="flow-attach-label">tool</span><span class="flow-pill accent">mcp filesystem</span></div>
-                <div class="flow-attach-row"><span class="flow-attach-label">tool</span><span class="flow-pill accent">mcp git</span></div>
-                <div class="flow-attach-row"><span class="flow-attach-label">tool</span><span class="flow-pill accent">mcp postgres</span></div>
-              </div>
-              <div class="flow-row" style="margin-top: 28px;">
-                <span class="flow-pill success">execution success · 3 tool calls</span>
-              </div>
-            </div>
-            <div class="canvas-footer">
-              <div><span class="status ok"></span>execution_history persisted</div>
-              <div><span class="status wait"></span>x-request-id propagated</div>
-            </div>
-          </aside>
+          <p class="hero-note">Runs in your browser, no sign-up. Recorded runs; nothing leaves your browser.</p>
         </div>
       </section>
 
-      <!-- ============================================================
-           Differentiators (3-up)
-           ============================================================ -->
-      <section id="differentiators" class="reveal">
+      <!-- See it running -->
+      <section class="demo-section" id="see-it-running" aria-labelledby="demo-title">
         <div class="container">
           <header class="section-header">
-            <span class="eyebrow">Why L2M</span>
-            <h2>Three things other workflow tools don't do.</h2>
-            <p>n8n has a basic MCP client node. Langflow and Flowise have none. Most "agent platforms" treat tool calls as glorified HTTP. L2M treats MCP, multi-agent topology, and IDE composition as first-class primitives.</p>
+            <span class="eyebrow">See it running</span>
+            <h2 id="demo-title">The real studio, with recorded runs.</h2>
+            <p>The demo is the L2M studio itself, built against recorded runs. Open it and click around: nothing is faked by hand, and no model, server or tracker is called.</p>
           </header>
+          <a class="demo-frame" href="./demo/?mode=editor&amp;workflowId=wf-demo-support-agent" aria-label="Open the live demo: the support agent workflow in the studio">
+            <img src="./assets/screens/studio-run.webp" width="1440" height="900" fetchpriority="high" alt="The L2M studio editor in dark theme. A round Support agent hub sits between an Ask a question trigger and an Answer output; its chat model and session memory sit on the inner ring and two MCP tools, Knowledge base and Calculator, on the outer ring. Below, the stage strip and the run tape show a finished run with per-node timing bars." />
+            <span class="btn btn-primary demo-frame-cta" aria-hidden="true">Open the live demo →</span>
+          </a>
+          <ul class="try-grid" aria-label="Things to try in the demo">
+            <li>
+              <a href="./demo/?mode=editor&amp;workflowId=wf-demo-support-agent">
+                <strong>Build an agent</strong>
+                <span>The agent is a hub. Attach a model, memory and MCP tools on its rings.</span>
+              </a>
+            </li>
+            <li>
+              <a href="./demo/?mode=editor&amp;workflowId=wf-demo-research-swarm&amp;demoRun=recorded">
+                <strong>Watch a recorded run</strong>
+                <span>A Supervisor delegates to two workers. Follow it on the run tape.</span>
+              </a>
+            </li>
+            <li>
+              <a href="./demo/?mode=editor&amp;workflowId=wf-demo-guarded-intake&amp;demoRun=recorded">
+                <strong>See Guard block a call</strong>
+                <span>Personal data in a request is caught before it reaches the agent.</span>
+              </a>
+            </li>
+            <li>
+              <a href="./demo/?mode=editor&amp;workflowId=wf-demo-faq-release">
+                <strong>See a release gate stop a bad change</strong>
+                <span>Open the gated FAQ workflow and click its release pill (&ldquo;v2 live &middot; draft +2&rdquo;) to publish: the draft fails its golden runs, so the gate blocks it.</span>
+              </a>
+            </li>
+          </ul>
+        </div>
+      </section>
 
-          <div class="differentiators">
-            <article class="diff-card">
-              <span class="diff-icon" aria-hidden="true">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5z" /><path d="M2 17l10 5 10-5" /><path d="M2 12l10 5 10-5" /></svg>
-              </span>
-              <h3>MCP-native, end to end</h3>
-              <p>stdio, http_streamable, and mock transports ship in-box. The MCP Tool node probes any server, lists its tools, and dry-runs them inline. Expose your own workflows back out as MCP tools that <em>other</em> agents — IDE, CLI, anything MCP-compatible — call by URL.</p>
-              <a class="text-link" href="./docs/extensions/mcp">MCP integration docs →</a>
+      <!-- Studio + agents -->
+      <section id="studio" class="reveal" aria-labelledby="studio-title">
+        <div class="container">
+          <header class="section-header">
+            <span class="eyebrow">Build and run</span>
+            <h2 id="studio-title">A studio built around the agent.</h2>
+            <p>Agents are the centre of the canvas, not a node among many. Everything you build is versioned workflow JSON you can diff, review and import.</p>
+          </header>
+          <div class="cards two">
+            <article class="card">
+              <span class="card-icon tone-agent" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3" /><circle cx="12" cy="12" r="8" stroke-dasharray="3 3" /><circle cx="12" cy="4" r="1.6" /><circle cx="19" cy="15" r="1.6" /></svg></span>
+              <h3>The Orbit studio</h3>
+              <ul>
+                <li>Agents are round hubs; model, memory, tools and workers sit on rings as slots.</li>
+                <li>Flows lay out into stages, with a stage strip and one-click Tidy.</li>
+                <li>A run tape shows per-node timing, with LLM time marked.</li>
+                <li>A docked inspector for parameters, input, output and trace.</li>
+                <li>A command palette on <kbd>⌘K</kbd> / <kbd>Ctrl K</kbd>. Light and dark themes.</li>
+                <li>Import workflow JSON from other builders: preview the conversion first, then fix what's left from a checklist.</li>
+              </ul>
+              <a class="text-link card-link" href="./docs/product/workflow-editor">Workflow editor →</a>
             </article>
-
-            <article class="diff-card">
-              <span class="diff-icon" aria-hidden="true">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="5" r="3" /><circle cx="6" cy="19" r="3" /><circle cx="18" cy="19" r="3" /><path d="M12 8v6M9 17l3-3 3 3" /></svg>
-              </span>
-              <h3>Multi-agent Swarm</h3>
-              <p>Compose Supervisor → Worker hierarchies via dedicated attachment ports — not chained prompts. Workers become synthetic tools to the parent, recursively. Each worker gets its own model, its own tool set, its own memory.</p>
-              <a class="text-link" href="./docs/runtime/agent-loop">Agent loop docs →</a>
-            </article>
-
-            <article class="diff-card">
-              <span class="diff-icon" aria-hidden="true">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 18l6-6-6-6M8 6l-6 6 6 6" /></svg>
-              </span>
-              <h3>VS Code surface</h3>
-              <p>First-party extension turns any L2M workflow into a coding agent inside the editor — streaming responses, patch previews with workspace-path safety, and command approval. Bring your own backend agent topology.</p>
-              <a class="text-link" href="./docs/getting-started/vscode-extension">VS Code extension →</a>
+            <article class="card">
+              <span class="card-icon tone-tool" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18l3 3 6.3-6.3a4 4 0 0 0 5.4-5.4l-2.5 2.5-2.4-.6-.6-2.4z" /></svg></span>
+              <h3>Run MCP agents</h3>
+              <ul>
+                <li>A tool-calling loop: zero, one or many tool calls per step, until the answer or the iteration limit.</li>
+                <li>Supervisor and workers: workers become tools of their Supervisor, each with its own model, tools and memory.</li>
+                <li>Memory per session, and a session tool cache so later turns can reuse full tool output.</li>
+                <li>MCP-native tools over stdio and Streamable HTTP, shortlisted by relevance to the prompt.</li>
+                <li>Agents can stop and ask the user a question mid-run.</li>
+                <li>OpenAI, Anthropic, Gemini, Azure OpenAI, Ollama and OpenAI-compatible models, plus a built-in echo model that needs no key.</li>
+              </ul>
+              <a class="text-link card-link" href="./docs/runtime/agent-loop">The agent loop →</a>
             </article>
           </div>
         </div>
       </section>
 
-      <!-- ============================================================
-           Code preview — the workflow JSON contract
-           ============================================================ -->
-      <section class="reveal">
+      <!-- MCP control plane -->
+      <section id="control-plane" class="reveal" aria-labelledby="cp-title">
         <div class="container split">
           <div>
-            <span class="eyebrow">Workflow JSON</span>
-            <h2>A stable, importable contract.</h2>
-            <p class="lead">Every workflow you build in Studio serializes to a versioned JSON document. Check it into git. Diff it. Code-review it. Import it anywhere. The agent runtime, MCP attachments, branching, retries, memory — all of it round-trips through this format.</p>
-            <ul class="clean-list">
-              <li><code>schemaVersion: "1.0.0"</code> — breaking-change boundary, never silently shifts.</li>
-              <li>Attachment ports (chat_model, memory, tool, worker) live alongside DAG edges.</li>
-              <li>Every adapter (LLM, MCP, connector) registers through a single SDK seam.</li>
+            <span class="eyebrow">MCP control plane</span>
+            <h2 id="cp-title">Every MCP server your agents call, in one place.</h2>
+            <p class="lead">Register a server once. L2M probes it, tracks its tools and what they cost, and enforces who may call what, for agents and outside clients alike.</p>
+            <ul class="feature-list">
+              <li><strong>Registry and onboarding.</strong> Health probes, tool schema snapshots with breaking-change diffs, a playground, and import from MCP client config files.</li>
+              <li><strong>Telemetry and policy.</strong> Calls, p95 latency, errors, tokens and cost per tool. Allow and deny rules by project, role, server and tool, plus a "no write tools" switch.</li>
+              <li><strong>Gateway.</strong> Serve workflows and registered tools to other MCP clients, with per-client tokens and the same policies.</li>
+              <li><strong>Credentials.</strong> OAuth 2.1 for remote servers, or each user's own delegated account.</li>
+              <li><strong>Testing.</strong> Record MCP calls into cassettes and replay them; <code>l2m mcp check</code> fails CI on breaking changes or blocked tools.</li>
+              <li><strong>Runtime safety.</strong> Stdio servers in sandboxed containers, rate limits, concurrency caps and a circuit breaker.</li>
             </ul>
+            <a class="text-link" href="./docs/product/mcp-control-plane">MCP control plane docs →</a>
           </div>
-
-          <div class="code-preview">
-            <div class="code-preview-header">samples/mcp-agent.json</div>
-            <pre><code><span class="tok-key">"nodes"</span>: [
-  {
-    <span class="tok-key">"id"</span>: <span class="tok-str">"trigger"</span>,
-    <span class="tok-key">"type"</span>: <span class="tok-str">"webhook_input"</span>,
-    <span class="tok-key">"config"</span>: { <span class="tok-key">"path"</span>: <span class="tok-str">"agent"</span>, <span class="tok-key">"authMode"</span>: <span class="tok-str">"hmac_sha256"</span> }
-  },
-  {
-    <span class="tok-key">"id"</span>: <span class="tok-str">"agent"</span>,
-    <span class="tok-key">"type"</span>: <span class="tok-str">"agent_orchestrator"</span>,
-    <span class="tok-key">"config"</span>: {
-      <span class="tok-key">"systemPromptTemplate"</span>: <span class="tok-str">"{{system_prompt}}"</span>,
-      <span class="tok-key">"toolCallingEnabled"</span>: <span class="tok-num">true</span>,
-      <span class="tok-key">"maxIterations"</span>: <span class="tok-num">6</span>
-    }
-  },
-  <span class="tok-comment">// + chat_model, memory, mcp_tool nodes...</span>
-],
-<span class="tok-key">"edges"</span>: [
-  { <span class="tok-key">"source"</span>: <span class="tok-str">"agent"</span>, <span class="tok-key">"sourceHandle"</span>: <span class="tok-str">"chat_model"</span>, <span class="tok-key">"target"</span>: <span class="tok-str">"llm"</span> },
-  { <span class="tok-key">"source"</span>: <span class="tok-str">"agent"</span>, <span class="tok-key">"sourceHandle"</span>: <span class="tok-str">"tool"</span>, <span class="tok-key">"target"</span>: <span class="tok-str">"mcp_fs"</span> }
-]</code></pre>
-          </div>
-        </div>
-      </section>
-
-      <!-- ============================================================
-           Studio screenshot
-           ============================================================ -->
-      <section class="reveal">
-        <div class="container">
-          <header class="section-header">
-            <span class="eyebrow">Studio</span>
-            <h2>The actual editor, not a marketing render.</h2>
-          </header>
-          <figure class="studio-shot">
-            <img src="./assets/l2M_editor.PNG" alt="L2M Studio editor showing a multi-node SDLC workflow with DeveloperAgent, QAAgent, and Output nodes on canvas." loading="lazy" />
+          <figure class="shot">
+            <img src="./assets/screens/mcp-tools.webp" width="1440" height="900" loading="lazy" decoding="async" alt="The MCP tools page in the L2M studio: a catalogue of five tools from a registered demo server, with filters for destructive, open-world and blocked tools, and columns for calls, errors, p95 latency, cost and policy (read-only or write). The demo has no calls recorded against this server, so the telemetry columns show dashes." />
+            <figcaption>MCP → Tools: one catalogue across every registered server, with each tool&rsquo;s policy. Telemetry fills in as agents call the tools.</figcaption>
           </figure>
         </div>
       </section>
 
-      <!-- ============================================================
-           Quickstart strip
-           ============================================================ -->
-      <section id="quickstart" class="reveal">
-        <div class="container">
-          <div class="quickstart">
-            <div>
-              <span class="eyebrow">Get running</span>
-              <h2>Five minutes from clone to a working MCP agent.</h2>
-              <p>No API keys, no Ollama, no setup beyond a 32-byte master key. The bundled echo provider and in-process mock-mcp adapter let you verify the agent runtime end-to-end before swapping in real models and real MCP servers.</p>
-              <a class="btn btn-primary" href="./docs/getting-started/build-your-first-mcp-agent">Read the 5-minute tutorial →</a>
-            </div>
-            <ol class="quickstart-steps">
-              <li><span class="step-num">1</span><div><code>git clone</code> · <code>pnpm install</code></div></li>
-              <li><span class="step-num">2</span><div>Generate a master key, set <code>SECRET_MASTER_KEY_BASE64</code></div></li>
-              <li><span class="step-num">3</span><div><code>pnpm dev</code> · open <code>localhost:5173</code></div></li>
-              <li><span class="step-num">4</span><div>Templates → <strong>MCP Agent Quickstart</strong> → Run</div></li>
-              <li><span class="step-num">5</span><div>See the agent call MCP tools in execution history</div></li>
-            </ol>
-          </div>
-        </div>
-      </section>
-
-      <!-- ============================================================
-           Capabilities — refreshed cards
-           ============================================================ -->
-      <section class="reveal">
+      <!-- Govern -->
+      <section id="govern" class="reveal" aria-labelledby="govern-title">
         <div class="container">
           <header class="section-header">
-            <span class="eyebrow">Capabilities</span>
-            <h2>Production-ready foundations.</h2>
-            <p>The boring stuff that decides whether you can actually ship.</p>
+            <span class="eyebrow">Govern</span>
+            <h2 id="govern-title">Decide what agents may do, and prove what they did.</h2>
           </header>
-
-          <div class="cards">
-            <article>
-              <h3>Branching DAG executor</h3>
-              <p>Topological execution with <code>if</code>, <code>switch</code>, <code>try/catch</code>. Template interpolation across nodes via <code>{{key}}</code> from the merged scope.</p>
+          <div class="cards two">
+            <article class="card">
+              <span class="card-icon tone-guard" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" /></svg></span>
+              <h3>L2M Guard</h3>
+              <p>Checks prompts, tool arguments, tool results and answers: prompt-injection rules, SQL, shell, path and egress checks on tool arguments, and DLP for personal data and credentials. Versioned guard profiles, protection providers to mask, hash, encrypt or tokenise, and a Security page with every verdict.</p>
+              <a class="text-link card-link" href="./docs/product/guard">Guard →</a>
             </article>
-            <article>
-              <h3>Auth, RBAC, MFA, SSO</h3>
-              <p>Session cookies, API keys, TOTP, SAML, LDAP. Project-scoped roles plus custom roles with fine-grained permissions.</p>
+            <article class="card">
+              <span class="card-icon tone-tool" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3 8-8" /><path d="M20 12v7a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h9" /></svg></span>
+              <h3>Approval gates</h3>
+              <p>Pause a run on a person. Approval gates, human approvals, guard reviews, write tools an agent wants to call and versions waiting to be published all land in one Approvals inbox.</p>
+              <a class="text-link card-link" href="./docs/product/approvals">Approvals →</a>
             </article>
-            <article>
-              <h3>Encrypted secrets at rest</h3>
-              <p>AES-256-GCM with master-key rotation via <code>db:export</code> / <code>db:import</code>. External providers: Vault, AWS, GCP, Azure.</p>
+            <article class="card">
+              <span class="card-icon tone-accent" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><path d="M14 2v6h6M9 15l2 2 4-4" /></svg></span>
+              <h3>Signed audit bundles</h3>
+              <p>Every finished run gets a manifest of models, tool calls, prompts and approvals. Export it as an Ed25519-signed bundle with secrets scrubbed, and check it offline with <code>l2m audit verify</code>.</p>
+              <a class="text-link card-link" href="./docs/security/audit-bundles">Audit bundles →</a>
             </article>
-            <article>
-              <h3>Webhooks, signed and idempotent</h3>
-              <p>HMAC-SHA256, bearer, Stripe, Discord Ed25519, Telegram. Replay window + idempotency keyed on any header.</p>
+            <article class="card">
+              <span class="card-icon tone-memory" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.6 13.4l-7.2 7.2a2 2 0 0 1-2.8 0L2 12V2h10l8.6 8.6a2 2 0 0 1 0 2.8z" /><circle cx="7" cy="7" r="1.5" /></svg></span>
+              <h3>Data labels and destinations</h3>
+              <p>Label where each step's data came from and what it contains. Sort every model, server and URL into local, private, approved-vendor or public, and block, redact or ask for approval when sensitive data would go too far.</p>
+              <a class="text-link card-link" href="./docs/product/data-labels-and-destinations">Data destinations →</a>
             </article>
-            <article>
-              <h3>Observability</h3>
-              <p>Prometheus metrics, OTEL tracing, request-ID propagation through logs, dedicated webhook replicas.</p>
-            </article>
-            <article>
-              <h3>Multi-main HA</h3>
-              <p>Postgres-backed leader election: scheduler + triggers run on the leader, replicas autoscale webhook ingestion, lease handoff tested.</p>
-            </article>
+          </div>
+          <div class="cards two shot-row">
+            <figure class="shot">
+              <img src="./assets/screens/guard-security.webp" width="1440" height="900" loading="lazy" decoding="async" alt="The Security page in the L2M studio: guard verdict totals for the last 14 days, a verdicts-per-day chart, and breakdowns by action, category, channel and top detector." />
+              <figcaption>Security: every guard verdict, by action, channel and detector.</figcaption>
+            </figure>
+            <figure class="shot">
+              <img src="./assets/screens/approvals-inbox.webp" width="1440" height="900" loading="lazy" decoding="async" alt="The Approvals inbox in the L2M studio: two pending approval-gate requests from a refund workflow, each with an editable reply, the requester, the allowed approver roles, and Reject and Approve buttons." />
+              <figcaption>Approvals: decide paused runs, and edit fields before approving.</figcaption>
+            </figure>
           </div>
         </div>
       </section>
 
-      <!-- ============================================================
-           Patterns / samples callout
-           ============================================================ -->
-      <section id="patterns" class="reveal">
+      <!-- Ship safely -->
+      <section id="ship" class="reveal" aria-labelledby="ship-title">
+        <div class="container split reverse">
+          <div>
+            <span class="eyebrow">Ship safely</span>
+            <h2 id="ship-title">CI for agents.</h2>
+            <p class="lead">Treat a prompt or tool change like a code change: replay it against known-good runs before it reaches production.</p>
+            <ul class="feature-list">
+              <li><strong>Golden runs and sets.</strong> Save good runs, group them, and replay a draft or a saved version against them.</li>
+              <li><strong>Scorers.</strong> JSON equality and schema, text similarity, tool sequence, status, budget, no new guard blocks, and an LLM judge.</li>
+              <li><strong>Release gate on publish.</strong> A version reaches production only after its replay job passes the gate's policy; an override needs a written reason and is audited.</li>
+              <li><strong>Production capture.</strong> Sample real runs with personal data masked, and promote the useful ones into a golden set.</li>
+              <li><strong>A CLI for your pipeline.</strong> Run replays, write JUnit results and publish from CI.</li>
+            </ul>
+            <div class="code-panel">
+              <div class="code-panel-header">ci.sh</div>
+              <pre><code><span class="tok-c"># replay the draft against a golden set; non-zero exit when it fails</span>
+<span class="tok-k">l2m</span> replay run --set faq-golden --draft --junit replay.xml
+<span class="tok-c"># publish a version through the release gate</span>
+<span class="tok-k">l2m</span> release publish wf-faq --version 4</code></pre>
+            </div>
+            <p style="margin-top: 16px;"><a class="text-link" href="./docs/product/replay-and-release-gate">Replay and the release gate →</a></p>
+          </div>
+          <figure class="shot">
+            <img src="./assets/screens/release-gate-blocked.webp" width="680" height="500" loading="lazy" decoding="async" alt="The Publish to production dialog in the L2M studio: version 4 is blocked by the release gate because 0 of 3 golden cases passed and there are 3 regressions; an admin override needs a written reason." />
+            <figcaption>A release gate blocking v4: 0 of 3 golden cases passed.</figcaption>
+          </figure>
+        </div>
+      </section>
+
+      <!-- Self-hosted foundations -->
+      <section id="self-host" class="reveal" aria-labelledby="sh-title">
+        <div class="container">
+          <header class="section-header">
+            <span class="eyebrow">Self-hosted foundations</span>
+            <h2 id="sh-title">Yours to run. Nothing hosted by us.</h2>
+            <p>L2M runs only on your infrastructure. There is no hosted edition and no call-home: the product sends no analytics anywhere.</p>
+          </header>
+          <div class="cards">
+            <article class="card">
+              <h3>Auth and access</h3>
+              <p>Session sign-in, API keys, TOTP MFA, and SSO through SAML or LDAP (optional packages). Admin, builder, operator and viewer roles, projects and custom roles.</p>
+              <a class="text-link card-link" href="./docs/security/auth-rbac">Auth and RBAC →</a>
+            </article>
+            <article class="card">
+              <h3>Encrypted secrets</h3>
+              <p>AES-256-GCM at rest, master-key rotation through export and import, and external managers: HashiCorp Vault built in; AWS, Google Cloud and Azure with their SDK installed. Configs carry secret references, never values.</p>
+              <a class="text-link card-link" href="./docs/security/secrets">Secrets →</a>
+            </article>
+            <article class="card">
+              <h3>Signed webhooks</h3>
+              <p>Bearer or HMAC-SHA256 with a replay window and optional idempotency keys, plus signature checks for Stripe, GitHub, Slack, Telegram and Discord triggers.</p>
+              <a class="text-link card-link" href="./docs/security/secure-webhooks">Secure webhooks →</a>
+            </article>
+            <article class="card">
+              <h3>Schedules and queue</h3>
+              <p>Cron schedules and a database-backed run queue, rate limiting and security headers, and cost tracking with budget caps.</p>
+            </article>
+            <article class="card">
+              <h3>Observability</h3>
+              <p>Prometheus metrics, OpenTelemetry traces over OTLP, request IDs through the logs, and a tamper-evident audit log.</p>
+              <a class="text-link card-link" href="./docs/operations/observability">Observability →</a>
+            </article>
+            <article class="card">
+              <h3>Storage and deploy</h3>
+              <p>SQLite by default; Postgres support in progress. Docker images for amd64 and arm64, Docker Compose and a Helm chart.</p>
+            </article>
+          </div>
+
+          <div class="callout">
+            <span class="card-icon tone-accent" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v18M3 12h18" /></svg></span>
+            <p><strong>Everything is optional.</strong> A simple workflow runs with no extra configuration. Approvals, release gates, data labels and destinations, production capture and sandboxing stay off until you turn them on. A built-in guard profile checks agents by default; set <code>GUARD_AUTO_APPLY=false</code> to apply only the profiles you bind.</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- Get running -->
+      <section id="get-running" class="reveal" aria-labelledby="gr-title">
         <div class="container split">
           <div>
-            <span class="eyebrow">Patterns + Samples</span>
-            <h2>Battle-tested topologies, runnable on day one.</h2>
-            <p class="lead">Ten documented topologies — zero-key MCP agent, supervisor swarm, workflow-as-MCP-tool, RAG with citation, structured-output triage, multi-turn artifacts — each with a runnable sample workflow.</p>
-            <ul class="clean-list">
-              <li>Pattern library lives in the docs site.</li>
-              <li>Three full reference projects in <a class="text-link" href="https://github.com/TensorGreed/l2m-samples" target="_blank" rel="noreferrer">l2m-samples</a>: helpdesk agent, support triage, VS Code repo reviewer.</li>
-              <li>Every sample runs zero-key first; the swap-to-real-models path is documented.</li>
-            </ul>
-            <div class="hero-actions" style="margin-top: 24px;">
-              <a class="btn btn-primary" href="./docs/patterns/">Open the pattern library</a>
-              <a class="btn btn-subtle" href="https://github.com/TensorGreed/l2m-samples" target="_blank" rel="noreferrer">l2m-samples →</a>
+            <span class="eyebrow">Get running</span>
+            <h2 id="gr-title">From clone to a working MCP agent.</h2>
+            <p class="lead">No model key is needed to start: the MCP Agent Quickstart template uses the built-in echo model and an in-process mock MCP server. Swap in real models and servers when you're ready.</p>
+            <div class="hero-actions" style="justify-content: flex-start;">
+              <a class="btn btn-primary" href="./docs/getting-started/build-your-first-mcp-agent">Follow the tutorial</a>
+              <a class="btn" href="./demo/">Try the live demo first</a>
             </div>
           </div>
-
-          <div class="schedule-panel">
-            <h3>Pattern at a glance</h3>
-            <div class="schedule-row"><code>helpdesk-agent</code><span>Slack/Teams + MCP KB + memory</span></div>
-            <div class="schedule-row"><code>support-triage</code><span>Agent → JSON → switch routing</span></div>
-            <div class="schedule-row"><code>swarm</code><span>Supervisor + multiple workers</span></div>
-            <div class="schedule-row"><code>workflow-as-mcp</code><span>Expose flow as MCP tool</span></div>
-            <div class="schedule-row"><code>vscode-reviewer</code><span>Diff + filesystem MCP</span></div>
-            <div class="schedule-row"><code>rag-with-citation</code><span>Retriever + cited answer</span></div>
-          </div>
+          <ol class="steps">
+            <li><div><code>git clone</code> the repository, then <code>pnpm install</code> (Node 20+, pnpm 10+).</div></li>
+            <li><div>Copy <code>.env.example</code> to <code>.env</code>, set <code>SECRET_MASTER_KEY_BASE64</code> and the bootstrap admin's email and password.</div></li>
+            <li><div><code>pnpm dev</code>, then sign in at <code>localhost:5173</code>.</div></li>
+            <li><div>Templates → <strong>MCP Agent Quickstart</strong> → Use template → Run.</div></li>
+          </ol>
         </div>
       </section>
 
-      <!-- ============================================================
-           Architecture stack
-           ============================================================ -->
-      <section class="reveal">
+      <!-- Final CTA -->
+      <section class="reveal" aria-labelledby="cta-title">
         <div class="container">
-          <header class="section-header">
-            <span class="eyebrow">Stack</span>
-            <h2>Practical architecture for fast iteration.</h2>
-          </header>
-          <div class="stack">
-            <div><strong>Frontend</strong><span>Vite + React 19 + React Flow</span></div>
-            <div><strong>API</strong><span>Fastify v5 + zod-validated config</span></div>
-            <div><strong>Runtime</strong><span>Pure-TS DAG executor + agent loop</span></div>
-            <div><strong>Storage</strong><span>SQLite (better-sqlite3) or Postgres</span></div>
-            <div><strong>SDKs</strong><span>provider · mcp · connector · agent</span></div>
-            <div><strong>Deploy</strong><span>Docker · Helm · GHCR multi-arch</span></div>
-          </div>
-        </div>
-      </section>
-
-      <!-- ============================================================
-           CTA
-           ============================================================ -->
-      <section class="reveal">
-        <div class="container">
-          <div class="cta-inner">
-            <span class="eyebrow" style="background: rgba(255,255,255,0.16); color: #ffffff; border-color: rgba(255,255,255,0.3);">Open source · MIT</span>
-            <h2>From local prototype to production agents.</h2>
-            <p>L2M is a pure OSS project — no closed-source enterprise SKU, no SaaS lock-in. Self-host it, fork it, build community nodes, run it as the MCP-native runtime your stack actually needs.</p>
-            <div class="hero-actions" style="justify-content: center;">
-              <a class="btn btn-primary" href="https://github.com/TensorGreed/ai-orchestrator" target="_blank" rel="noreferrer">View on GitHub</a>
-              <a class="btn btn-subtle" href="./docs/">Read the docs</a>
+          <div class="cta-panel">
+            <span class="eyebrow">Open source · MIT</span>
+            <h2 id="cta-title">See it before you install it.</h2>
+            <p>The live demo is the real studio with recorded runs: build an agent, run it, and watch Guard and the release gate at work. When you're ready, self-host it.</p>
+            <div class="hero-actions">
+              <a class="btn btn-primary btn-lg" href="./demo/">Try the live demo</a>
+              <a class="btn btn-lg" href="https://github.com/TensorGreed/ai-orchestrator" rel="noopener">View on GitHub</a>
+              <a class="btn btn-lg" href="./docs/">Read the docs</a>
             </div>
           </div>
         </div>
@@ -346,20 +364,18 @@
 
     <footer class="footer">
       <div class="container footer-inner">
-        <div>
-          <strong>L<sup>2</sup>M</strong> · MCP-native agent runtime · <span id="year"></span>
-        </div>
-        <div class="footer-links">
+        <div><strong>L<sup>2</sup>M</strong> · Run and govern MCP agents, self-hosted · <span id="year">2026</span></div>
+        <nav class="footer-links" aria-label="Footer">
+          <a class="btn btn-primary" href="./demo/">Live demo</a>
           <a href="./docs/">Docs</a>
           <a href="./docs/patterns/">Patterns</a>
-          <a href="https://github.com/TensorGreed/ai-orchestrator" target="_blank" rel="noreferrer">GitHub</a>
-          <a href="https://github.com/TensorGreed/l2m-samples" target="_blank" rel="noreferrer">Samples</a>
-          <a href="https://github.com/TensorGreed/ai-orchestrator/discussions" target="_blank" rel="noreferrer">Discussions</a>
-          <a href="https://tensorgreed.com" target="_blank" rel="noreferrer">TensorGreed</a>
-        </div>
+          <a href="./integrations.html">Integrations</a>
+          <a href="https://github.com/TensorGreed/ai-orchestrator" rel="noopener">GitHub</a>
+          <a href="https://tensorgreed.com" rel="noopener">TensorGreed</a>
+        </nav>
       </div>
     </footer>
 
-    <script src="./main.js"></script>
+    <script src="./main.js" defer></script>
   </body>
 </html>

@@ -1,0 +1,59 @@
+name: Pages site check
+
+# Builds the lsquarem.com site the way the Pages workflow does (landing from
+# `docs/`, the VitePress docs at /docs/, the live demo at /demo/), assembles
+# _site/ and checks it in a browser with scripts/check-pages-site.mjs: the hero
+# reaches a loading demo, the nav demo button shows at 360 and 1440 px, every
+# internal link answers 200, nothing is requested off the site's origin, and
+# no console errors. It publishes nothing; deploys stay in pages.yml.
+
+on:
+  pull_request:
+    paths:
+      - "docs/**"
+      - "apps/docs/**"
+      - "scripts/assemble-pages-site.mjs"
+      - "scripts/check-pages-site.mjs"
+      - ".github/workflows/pages.yml"
+      - ".github/workflows/pages-check.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Landing, docs and demo
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Corepack must run before setup-node: `cache: "pnpm"` calls pnpm.
+      - name: Enable Corepack
+        run: corepack enable
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "pnpm"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build docs (base /docs/)
+        run: pnpm docs:build
+
+      # Unlike the deploy, the check needs the demo: a failed demo build fails here.
+      - name: Build the live demo (base /demo/)
+        run: pnpm --filter @ai-orchestrator/web build:demo
+
+      - name: Assemble _site
+        run: node scripts/assemble-pages-site.mjs
+
+      - name: Install Playwright Chromium
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: Check the assembled site
+        run: node scripts/check-pages-site.mjs
