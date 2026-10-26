@@ -273,8 +273,12 @@ export async function deleteProject(ctx: PgContext, id: string): Promise<boolean
   if (id === DEFAULT_PROJECT_ID) {
     throw new Error("Cannot delete the default project.");
   }
-  // One transaction: the emptiness check and the deletes see the same rows. user_project_roles has a foreign key to
-  // projects on Postgres, so its rows go before the project row.
+  // One transaction, so the project's own rows (folders, variables, memberships, shares) go together with it, and the
+  // project row is locked against a concurrent delete or rename. The emptiness check is not atomic with writes into
+  // the project: workflows, secrets and the other counted tables have no foreign key to projects, so a workflow saved
+  // into this project between the count and the commit is left under a deleted project id. Accepted (as on SQLite
+  // since the store went async); the route checks first and such a save is a race with an admin's delete.
+  // user_project_roles has a foreign key to projects on Postgres, so its rows go before the project row.
   return ctx.withTransaction(async (client) => {
     const existing = await client.query(`SELECT id FROM projects WHERE id = $1 FOR UPDATE`, [id]);
     if (existing.rows.length === 0) return false;
