@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { approvalGateConfigSchema, dataDestinationRowSchema, guardNodeConfigSchema, nodeDefinitions, workflowSchema } from "@ai-orchestrator/shared";
 import { demoFixtures } from "./fixtures";
+import { findLeaks } from "./leak-patterns";
 import meta from "./fixtures/meta.json?raw";
 import workflows from "./fixtures/workflows.json?raw";
 import runs from "./fixtures/runs.json?raw";
@@ -60,15 +61,19 @@ describe("demo fixtures", () => {
     const guardEvents = get("GET /api/guard/events?workflowId=wf-demo-guarded-intake").events as Array<{ effectiveAction: string }>;
     expect(guardEvents.some((event) => event.effectiveAction === "block")).toBe(true);
     expect(demoFixtures.responses.post["POST /api/workflows/wf-demo-faq-release/publish"]).toMatchObject({ status: 409, body: { verdict: "blocked" } });
-    const replay = Object.entries(demoFixtures.responses.post).find(([key]) => key.endsWith("/replay"))![1].body as { diff?: unknown };
-    expect(replay.diff).toBeTruthy();
+    const replay = Object.entries(demoFixtures.responses.post).find(([key]) => key.endsWith("/replay"))![1];
+    expect((replay.body as { diff?: unknown }).diff).toBeTruthy();
+    // Recorded writes say what they were made against, so the demo can tell when they no longer apply.
+    for (const [key, write] of Object.entries(demoFixtures.responses.post)) {
+      const workflow = demoFixtures.workflows.workflows.find((entry) => entry.id === write.match.workflowId);
+      expect(workflow, key).toBeTruthy();
+      expect(write.match.graph.nodes.length, key).toBeGreaterThan(0);
+    }
   });
 
   it("hold no credentials, private hosts or real addresses", () => {
-    expect(raw).not.toMatch(/\b(?:sk|pk|rk)-[A-Za-z0-9_-]{16,}/);
-    expect(raw).not.toMatch(/Bearer\s+[A-Za-z0-9._~+/=-]{12,}/);
-    expect(raw).not.toMatch(/-----BEGIN [A-Z ]*PRIVATE KEY-----/);
-    expect(raw).not.toMatch(/Demo-Only-Pass/);
+    // The same patterns the recorder refuses; it also checks this machine's paths, names and keys.
+    expect(findLeaks(raw)).toEqual([]);
     expect(raw).not.toMatch(/127\.0\.0\.1:(?!7001\b)\d{2,5}/);
     for (const email of raw.match(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g) ?? []) {
       expect(email, email).toMatch(/@example\.(com|org)$/);

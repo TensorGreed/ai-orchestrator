@@ -22,6 +22,11 @@ export interface RecordedResponse {
   body: unknown;
 }
 
+/** A recorded answer to a write, with the request and the workflow graph it was made against. */
+export interface RecordedWrite extends RecordedResponse {
+  match: { workflowId: string; graph: Pick<Workflow, "nodes" | "edges">; request: Record<string, unknown> };
+}
+
 /** What `demo/record-fixtures.mts` writes: real API answers and run streams from a recording session. */
 export interface DemoFixtures {
   meta: {
@@ -33,7 +38,7 @@ export interface DemoFixtures {
   };
   workflows: { workflows: Workflow[]; workflowList: WorkflowListItem[] };
   runs: Record<string, RecordedRun>;
-  responses: { get: Record<string, RecordedResponse>; post: Record<string, RecordedResponse> };
+  responses: { get: Record<string, RecordedResponse>; post: Record<string, RecordedWrite> };
 }
 
 export const demoFixtures = { meta, workflows, runs, responses } as unknown as DemoFixtures;

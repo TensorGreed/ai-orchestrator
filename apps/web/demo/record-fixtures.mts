@@ -25,6 +25,7 @@ import { AuthService } from "../../api/src/services/auth-service.js";
 import { SecretService } from "../../api/src/services/secret-service.js";
 import { seedTemplatesIfEmpty } from "../../api/src/services/seed-service.js";
 import { WorkflowVersionService } from "../../api/src/services/workflow-version-service.js";
+import { findLeaks, literalPattern } from "../src/demo/leak-patterns.ts";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, "..", "..", "..");
@@ -349,7 +350,7 @@ function scrub<T>(value: T, baseUrls: string[]): T {
   for (const url of baseUrls) text = text.split(url).join(MODEL_HOST_PLACEHOLDER);
   text = text
     .replace(new RegExp(os.tmpdir().replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "[^\"\\\\]*", "g"), "/data")
-    .replace(/\b(sk|pk|rk|ghp|gho|xox[abp])[-_][A-Za-z0-9_-]{12,}/g, "[redacted]")
+    .replace(/\b(?:sk|pk|rk)-[A-Za-z0-9_-]{12,}|\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{12,}|\bgithub_pat_[A-Za-z0-9_]{12,}|\bxox[abposr]-[A-Za-z0-9-]{10,}|\bAKIA[0-9A-Z]{16}\b|\beyJ[\w-]+\.[\w-]+\.[\w-]+/g, "[redacted]")
     .replace(/Bearer\s+[A-Za-z0-9._~+/=-]{12,}/g, "Bearer [redacted]")
     .replace(/-----BEGIN [A-Z ]+-----[^"]*-----END [A-Z ]+-----/g, "[redacted]");
   return JSON.parse(text) as T;
@@ -451,15 +452,8 @@ async function main() {
   await runStream("wf-demo-refund-approval", "order 1044, $64.20", requesterCookie);
   await must("POST", `/api/approvals/${firstApproval}/approve`, { reason: "Within the refund policy." });
 
-  // A golden run of the support agent, then a draft that changes its prompt, replayed against it.
-  console.log("Recording the replay diff");
+  // A golden run of the support agent, listed on its golden-run panel.
   const golden = (await must("POST", "/api/replay/recordings", { executionId: supportRun, name: "Team plan pricing question" })) as { recording: { id: string } };
-  const support = (await must("GET", "/api/workflows/wf-demo-support-agent")) as Json;
-  const editedSupport = structuredClone(support) as { nodes: Array<{ id: string; config: Json }> };
-  editedSupport.nodes.find((entry) => entry.id === "output")!.config.responseTemplate = "Answer: {{answer}}";
-  await must("PUT", "/api/workflows/wf-demo-support-agent", editedSupport);
-  const replayDiff = await must("POST", `/api/replay/recordings/${golden.recording.id}/replay`, { draft: true });
-  await must("PUT", "/api/workflows/wf-demo-support-agent", support);
 
   // The release gate: v1 published, a golden set of three runs, a regressing v2 blocked by its replay job.
   console.log("Recording the release gate");
@@ -485,8 +479,14 @@ async function main() {
     if (!["queued", "running"].includes(current.run.status)) break;
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
-  const blockedPublish = await call("POST", "/api/workflows/wf-demo-faq-release/publish", { version: faqV2 });
+  const publishRequest = { version: faqV2 };
+  const blockedPublish = await call("POST", "/api/workflows/wf-demo-faq-release/publish", publishRequest);
   console.log(`  publish v${faqV2}: ${blockedPublish.status}`);
+  // The regressing draft replayed against a golden run of v1: a real diff, on the graph the demo stores.
+  console.log("Recording the replay diff");
+  const replayRequest = { draft: true, mcpMode: "strict" };
+  const replayDiff = await must("POST", `/api/replay/recordings/${faqRecordings[0]}/replay`, replayRequest);
+  const faqStored = (await must("GET", "/api/workflows/wf-demo-faq-release")) as { nodes: unknown[]; edges: unknown[] };
   await runStream("wf-demo-faq-release", "How do I reset my password?");
 
   // Everything the UI reads, as the API answers it.
@@ -573,10 +573,21 @@ async function main() {
     await record(`/api/mcp/servers/${server.id}/telemetry?window=24h`);
   }
 
-  // Recorded answers to a few writes the demo replays as they were.
-  const posts: Record<string, { status: number; body: unknown }> = {
-    [`POST /api/replay/recordings/${golden.recording.id}/replay`]: { status: 200, body: replayDiff },
-    [`POST /api/workflows/wf-demo-faq-release/publish`]: { status: blockedPublish.status, body: blockedPublish.json() }
+  // Recorded answers to a few writes, with what they were made against: the demo replays one only
+  // when the request and the workflow's graph are the same again.
+  const faqGraph = { nodes: faqStored.nodes, edges: faqStored.edges };
+  const posts: Record<string, { status: number; body: unknown; match: { workflowId: string; graph: unknown; request: Json } }> = {
+    [`POST /api/replay/recordings/${faqRecordings[0]}/replay`]: {
+      status: 200,
+      body: replayDiff,
+      match: { workflowId: "wf-demo-faq-release", graph: faqGraph, request: replayRequest }
+    },
+    [`POST /api/workflows/wf-demo-faq-release/publish`]: {
+      status: blockedPublish.status,
+      body: blockedPublish.json(),
+      // An override or an approval request gets another answer than the recorded one.
+      match: { workflowId: "wf-demo-faq-release", graph: faqGraph, request: { ...publishRequest, override: null, requestApproval: null } }
+    }
   };
 
   const workflows: Json[] = [];
@@ -601,9 +612,27 @@ async function main() {
     baseUrls
   );
 
-  const modelPort = new URL(model.baseUrl).port;
-  const leaks = JSON.stringify(fixture).match(new RegExp(`:${modelPort}\\b|sk-[A-Za-z0-9]{12,}|session=|Demo-Only-Pass|${os.tmpdir().replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`, "gi"));
-  if (leaks) throw new Error(`Scrub missed: ${[...new Set(leaks)].join(", ")}`);
+  // Refuse to write anything credential-shaped or anything that identifies this machine or this recording.
+  const sessionToken = cookie.slice(cookie.indexOf("=") + 1);
+  const machine: Array<{ name: string; value: string }> = [
+    { name: "scripted model address", value: new URL(model.baseUrl).host },
+    { name: "temp directory", value: os.tmpdir() },
+    { name: "home directory", value: os.homedir() },
+    { name: "repository path", value: repoRoot },
+    { name: "user name", value: os.userInfo().username },
+    { name: "host name", value: os.hostname() },
+    { name: "master key", value: config.SECRET_MASTER_KEY_BASE64 },
+    { name: "session cookie", value: sessionToken }
+  ];
+  // Names a machine shares with countless others (root, runner, localhost, ...) identify nothing and would match ordinary words.
+  const generic = new Set(["root", "user", "runner", "node", "admin", "ubuntu", "localhost", "/", "/tmp", "/root", "/home"]);
+  const checked = machine.filter((entry) => entry.value.length >= 4 && !generic.has(entry.value));
+  for (const entry of machine) if (!checked.includes(entry)) console.log(`  not checking the ${entry.name} "${entry.value}": too generic to identify anything`);
+  const leaks = findLeaks(
+    JSON.stringify(fixture),
+    checked.map((entry) => ({ name: entry.name, pattern: literalPattern(entry.value) }))
+  );
+  if (leaks.length) throw new Error(`Refusing to write fixtures; found ${leaks.map((leak) => `${leak.name} (${leak.match})`).join(", ")}`);
 
   fs.mkdirSync(outDir, { recursive: true });
   const { workflows: wf, workflowList: list, runs: recordedRuns, responses: recorded, posts: recordedPosts, meta } = fixture;
