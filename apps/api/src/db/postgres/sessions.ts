@@ -167,9 +167,16 @@ export async function saveSessionToolCall(ctx: PgContext, input: {
 }> {
   const now = new Date().toISOString();
   const id = randomUUID();
-  await ctx.execute(
+  // Calls saved within one millisecond keep their order: created_at is at least 1 microsecond after the session's
+  // newest entry (reads return milliseconds, so createdAt reads as the save time), which the cap and the newest-first
+  // lists below rely on.
+  const inserted = await ctx.query<{ created_at: string }>(
     `INSERT INTO session_tool_cache (id, namespace, session_id, tool_name, tool_call_id, args_json, output_json, error, summary_json, labels_json, created_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+       SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+              GREATEST($11::timestamptz, COALESCE(
+                (SELECT MAX(created_at) FROM session_tool_cache WHERE namespace = $2 AND session_id = $3) + interval '1 microsecond',
+                $11::timestamptz))
+       RETURNING created_at`,
     [
       id,
       input.namespace,
@@ -184,6 +191,7 @@ export async function saveSessionToolCall(ctx: PgContext, input: {
       now
     ]
   );
+  const createdAt = inserted[0] ? toStr(inserted[0].created_at) : now;
 
   // Prune old records
   await ctx.execute(
@@ -209,7 +217,7 @@ export async function saveSessionToolCall(ctx: PgContext, input: {
     error: input.error,
     summary: input.summary,
     ...(input.labels && !isEmptyDataLabels(input.labels) ? { labels: input.labels } : {}),
-    createdAt: now
+    createdAt
   };
 }
 
