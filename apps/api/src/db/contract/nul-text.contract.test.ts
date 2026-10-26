@@ -1,8 +1,8 @@
 /**
  * Phase 13.1 — store contract: a NUL character (U+0000) in free text. Postgres TEXT cannot hold it (22021), so the
  * Postgres store writes every string parameter with U+0000 replaced by U+FFFD (postgres/context.ts); SQLite keeps the
- * NUL. Either way the write succeeds, reads back, and the audit chain still verifies, because the Postgres hash
- * covers the value as stored.
+ * NUL. Either way the write succeeds and reads back. Audit text is the exception: both stores store it with U+0000 and
+ * lone surrogates as U+FFFD and hash that (db/audit-chain.ts), so the chain verifies on both.
  */
 import { expect, it } from "vitest";
 import { describeStoreContract } from "../../test-support/test-store.js";
@@ -86,14 +86,18 @@ describeStoreContract("store contract: NUL characters in free text", (ctx) => {
     expect(await store.getReplayRecording(`rec${NUL}`)).toBeNull();
   });
 
-  it("an audit message and actor with a NUL are stored, and the chain still verifies", async () => {
+  it("an audit message and actor with a NUL or a lone surrogate are stored as U+FFFD on both stores, and the chain still verifies", async () => {
+    // Audit text is normalised before hashing on both stores (db/audit-chain.ts): the hash covers the stored value, and
+    // the Postgres parameter mapping (U+0000 → U+FFFD) agrees with it, so it is a no-op here.
     const store = ctx.store();
     await store.writeAuditLog({ id: "a1", eventType: "auth.login", category: "auth", action: "login", outcome: "failure", message: `bad ${NUL} input`, userAgent: `ua${NUL}`, metadata: { raw: NUL } });
     await store.writeAuditLog({ id: "a2", eventType: "auth.login", category: "auth", action: "login", outcome: "success", actorEmail: `x${NUL}@example.com` });
+    await store.writeAuditLog({ id: "a3", eventType: "tag.create", category: "workflow", action: "create", outcome: "success", resourceId: "\ud800", message: `lone \udc00 and ${NUL}`, metadata: { raw: "\udbff" } });
     const page = await store.listAuditLogs();
     const first = page.items.find((item) => item.id === "a1");
-    expect(first).toMatchObject({ message: stored(`bad ${NUL} input`), userAgent: stored(`ua${NUL}`), metadata: { raw: NUL } });
-    expect(page.items.find((item) => item.id === "a2")?.actorEmail).toBe(stored(`x${NUL}@example.com`));
-    expect(await store.verifyAuditChain()).toMatchObject({ ok: true, rowsChecked: 2 });
+    expect(first).toMatchObject({ message: "bad � input", userAgent: "ua�", metadata: { raw: NUL } });
+    expect(page.items.find((item) => item.id === "a2")?.actorEmail).toBe("x�@example.com");
+    expect(page.items.find((item) => item.id === "a3")).toMatchObject({ resourceId: "�", message: "lone � and �", metadata: { raw: "\udbff" } });
+    expect(await store.verifyAuditChain()).toEqual({ ok: true, rowsChecked: 3 });
   });
 });

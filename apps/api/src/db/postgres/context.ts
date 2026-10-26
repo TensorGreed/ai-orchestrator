@@ -9,7 +9,9 @@ import type { Store } from "../store.js";
  * context (`query`, `queryOne`, `execute`, `pool.query`, and the clients `withClient` / `withTransaction` /
  * `pool.connect` hand out) writes each string parameter with U+0000 replaced by U+FFFD (pgText), so a NUL from tool
  * output or a user's text is stored instead of failing the write, and a lookup by a NUL-bearing key finds nothing
- * instead of failing. A module that hashes a stored value (the audit chain) hashes it through pgText too.
+ * instead of failing. The audit chain normalises its text itself before hashing (audit-chain.ts wellFormedAuditText:
+ * U+0000 and lone surrogates → U+FFFD, the same U+0000 rule as pgText), so the mapping is a no-op for audit_logs and
+ * the hash covers the stored value.
  */
 export interface PgContext {
   pool: Pool;

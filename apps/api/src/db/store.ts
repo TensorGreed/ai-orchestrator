@@ -12,7 +12,8 @@
  * NUL characters in text: SQLite stores U+0000 in a string field as given. Postgres TEXT cannot hold it, so the
  * Postgres store writes (and looks up) every string with U+0000 replaced by U+FFFD (postgres/context.ts), and reads
  * it back that way. JSON fields are unaffected on both (JSON.stringify writes the escape `\u0000`). The audit chain
- * on Postgres hashes the stored value, so it verifies either way.
+ * is the exception: both stores write audit text with U+0000 (and lone surrogates) as U+FFFD and hash that stored
+ * value (db/audit-chain.ts).
  */
 import type {
   ChatMessage,
