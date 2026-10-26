@@ -137,7 +137,20 @@ jobs:
       # The static demo (lsquarem.com/demo/): built with --mode demo and served
       # by vite preview on its own port; no API or database involved.
       - name: Run static demo E2E
-        run: pnpm --filter @ai-orchestrator/web e2e:demo
+        env:
+          DEMO_SCREENSHOT_DIR: ${{ github.workspace }}/apps/web/demo-screenshots
+        run: |
+          mkdir -p "$DEMO_SCREENSHOT_DIR"
+          pnpm --filter @ai-orchestrator/web e2e:demo
+
+      # One screenshot per step of the demo journey, for reviewers.
+      - name: Upload demo screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: demo-screenshots
+          path: apps/web/demo-screenshots
+          if-no-files-found: ignore
 
       - name: Upload Playwright report
         if: always()
