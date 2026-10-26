@@ -54,6 +54,9 @@ export interface PostgresStoreConfig {
  *                     activation. Keys 3 and 4 (MCP policies / clients before v40) are retired; do not reuse them.
  *   0x4c3257 ("L2W")  workflow version numbers (postgres/workflows.ts) — key: hashtext(workflow id). Held by
  *                     appendWorkflowVersion from reading MAX(version) to commit.
+ *   0x4c3252 ("L2R")  golden-run saves, capture promotions and golden-set imports — one key for the deployment,
+ *                     held for the transaction (pg_advisory_xact_lock); see ADVISORY_LOCK_CLASS_REPLAY_GOLDEN in
+ *                     postgres/replay.ts.
  * Add a new class here rather than reusing one.
  */
 export const ADVISORY_LOCK_CLASS_MIGRATIONS = 0x4c324d;
