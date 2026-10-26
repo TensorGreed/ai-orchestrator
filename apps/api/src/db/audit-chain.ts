@@ -25,10 +25,15 @@
  *  3. Otherwise count the U+FFFD characters `k` in the row's free-text fields (LEGACY_TEXT_FIELDS: everything except
  *     id, created_at, outcome, actor_type and metadata_json; metadata was always JSON.stringify'd before storing, so a
  *     lone surrogate there was stored as ASCII `\ud800` and any U+FFFD in it is a real one). Each U+FFFD is either a
- *     real U+FFFD or one of the 2048 lone surrogates U+D800–U+DFFF that the driver replaced.
+ *     real U+FFFD or one of the 2049 characters a store replaced: the 2048 lone surrogates U+D800–U+DFFF (both drivers)
+ *     or U+0000 (SQLite stored and hashed it as is; the Postgres parameter mapping stores it as U+FFFD, so a SQLite row
+ *     copied to Postgres holds U+FFFD where its hash saw U+0000).
  *     - k = 0: nothing can explain the mismatch. Broken.
- *     - k = 1: every explanation is tried (the 2048 surrogates at that position, about 10 ms). A match proves the row
- *       is exactly what was written: it is verified, like any other row. No match: broken.
+ *     - k = 1: every explanation is tried (the 2049 candidates at that position). The canonical text before the
+ *       U+FFFD is hashed once and copied per candidate, so the cost is 2049 hashes of the text after it: a few ms
+ *       for an ordinary row or a 100 KB row whose U+FFFD is near its end, about 100 ms when a 100 KB text follows it.
+ *       Only rows written before the fix (or edited) reach this step. A match proves the row is exactly what was written: it is
+ *       verified, like any other row. No match: broken.
  *     - k ≥ 2: the 2049^k explanations cannot all be tried, so tampering cannot be ruled out, and neither can an
  *       honest old row. The row goes into `unverifiable` with the reason; the chain continues from its stored
  *       entry_hash (pinned by the next row's prev_hash), so every later row is still verified. `ok` is false while
@@ -116,6 +121,16 @@ export function auditEntryHash(prevHash: string, input: AuditCanonicalInput): st
   return sha256Hex(prevHash + canonicalAuditPayload(input));
 }
 
+/**
+ * What a single U+FFFD in a legacy row may stand for: the 2048 lone surrogates U+D800–U+DFFF, which both drivers store
+ * as U+FFFD, and U+0000, which SQLite stored and hashed as is and the Postgres parameter mapping stores as U+FFFD (a
+ * SQLite row copied to Postgres).
+ */
+const SINGLE_CANDIDATES: readonly number[] = [
+  ...Array.from({ length: 0xdfff - 0xd800 + 1 }, (_, i) => 0xd800 + i),
+  0x0000
+];
+
 /** Free-text fields a lone surrogate could have reached before the fix (see the rule above). */
 const LEGACY_TEXT_FIELDS = [
   "eventType",
@@ -176,11 +191,43 @@ function legacyReplacementCheck(prev: string, row: AuditChainRow): { outcome: Le
   const text = row.fields[only.field] as string;
   const before = text.slice(0, only.index);
   const after = text.slice(only.index + 1);
-  for (let code = 0xd800; code <= 0xdfff; code += 1) {
-    const candidate = { ...row.fields, [only.field]: before + String.fromCharCode(code) + after };
-    if (auditEntryHash(prev, candidate) === row.entryHash) return { outcome: "verified", replacements };
+  const withCandidate = (code: number) => ({ ...row.fields, [only.field]: before + String.fromCharCode(code) + after });
+  // A neighbour that could pair with a candidate (never in well-formed stored text) would change its escape: then
+  // every candidate is built in full.
+  const mayPair = /[\uD800-\uDBFF]$/.test(before) || /^[\uDC00-\uDFFF]/.test(after);
+  const split = mayPair
+    ? undefined
+    : splitAtCandidate(canonicalAuditPayload(withCandidate(SINGLE_CANDIDATES[0]!)), canonicalAuditPayload(withCandidate(SINGLE_CANDIDATES[1]!)));
+  if (split) {
+    // The canonical text is prefix + `\uXXXX` + suffix for every candidate: hash the prefix once, copy it per candidate.
+    const head = createHash("sha256").update(prev + split.prefix, "utf8");
+    for (const code of SINGLE_CANDIDATES) {
+      const digest = head.copy().update(`\\u${code.toString(16).padStart(4, "0")}${split.suffix}`, "utf8").digest("hex");
+      if (digest === row.entryHash) return { outcome: "verified", replacements };
+    }
+    return { outcome: "broken", replacements };
+  }
+  for (const code of SINGLE_CANDIDATES) {
+    if (auditEntryHash(prev, withCandidate(code)) === row.entryHash) return { outcome: "verified", replacements };
   }
   return { outcome: "broken", replacements };
+}
+
+/**
+ * The canonical texts for the first two candidates split as prefix + 6-character escape + suffix. JSON.stringify writes
+ * every lone surrogate and U+0000 as a lowercase `\uXXXX` escape, so the split holds for every candidate; when the two
+ * texts do not have that shape, the caller falls back to building each candidate.
+ */
+function splitAtCandidate(first: string, second: string): { prefix: string; suffix: string } | undefined {
+  if (first.length !== second.length) return undefined;
+  let start = 0;
+  while (start < first.length && first[start] === second[start]) start += 1;
+  const at = first.lastIndexOf("\\u", start);
+  if (at === -1 || at + 6 > first.length) return undefined;
+  if (first.slice(at + 6) !== second.slice(at + 6) || first.slice(0, at) !== second.slice(0, at)) return undefined;
+  const escape = (code: number) => `\\u${code.toString(16).padStart(4, "0")}`;
+  if (first.slice(at, at + 6) !== escape(SINGLE_CANDIDATES[0]!) || second.slice(at, at + 6) !== escape(SINGLE_CANDIDATES[1]!)) return undefined;
+  return { prefix: first.slice(0, at), suffix: first.slice(at + 6) };
 }
 
 /** Walks `rows` (insertion order, entry_hash IS NOT NULL) by the rule above. */
