@@ -3,6 +3,8 @@
 //   - the nav's "Live demo" button is visible at 360 px and 1440 px;
 //   - every internal link and asset on the landing pages answers 200, and every #fragment exists;
 //   - no request leaves the site's origin (fonts are self-hosted, no trackers);
+//   - the links into the demo open the workflow they name, `demoRun=recorded` starts its recorded
+//     run, and the Guard link shows GUARD BLOCKED on the run tape;
 //   - no console errors on the landing pages or the demo.
 //
 //   pnpm docs:build && pnpm --filter @ai-orchestrator/web build:demo
@@ -208,14 +210,77 @@ for (const pathname of landingPages) {
   }
 }
 
-// The demo itself stays on its origin and logs no errors.
-console.log("Demo");
+// The landing's links into the demo open what they promise: the studio shows the linked
+// workflow, `demoRun=recorded` starts its recorded run, and the Guard link shows the block.
+// The demo stays on its origin and logs no errors while doing it.
+console.log("Demo links");
 {
-  const { context, page } = await openPage({ width: 1440, height: 900 }, "/demo/");
-  await page.goto(`${origin}/demo/?mode=editor&workflowId=wf-demo-support-agent`, { waitUntil: "networkidle" });
-  await page.waitForTimeout(500);
-  pass("deep link into the demo editor loaded");
+  const { context, page } = await openPage({ width: 1440, height: 900 }, "/");
+  await page.goto(`${origin}/`, { waitUntil: "load" });
+  const demoLinks = await page.evaluate(() =>
+    [...document.querySelectorAll(".demo-frame, .try-grid a")].map((anchor) => ({
+      href: anchor.href,
+      label: (anchor.querySelector("strong")?.textContent ?? anchor.getAttribute("aria-label") ?? "").trim()
+    }))
+  );
   await context.close();
+  if (demoLinks.length < 5) fail(`expected the screenshot link and four "what to try" links, found ${demoLinks.length}`);
+
+  const noRunYet = "No run yet. Run the workflow to see per-node timing";
+  for (const { href, label } of demoLinks) {
+    const url = new URL(href);
+    const workflowId = url.searchParams.get("workflowId");
+    const recorded = url.searchParams.get("demoRun") === "recorded";
+    const name = `"${label}"`;
+    const { context: demo, page: tab } = await openPage({ width: 1440, height: 900 }, `demo ${name}`);
+    await tab.goto(href, { waitUntil: "networkidle" });
+    if (!workflowId) {
+      fail(`${name}: ${url.pathname}${url.search} names no workflowId`);
+    } else {
+      try {
+        await tab.waitForFunction(
+          (id) => document.querySelector('select[aria-label="Workflow"]')?.value === id,
+          workflowId,
+          { timeout: 10_000 }
+        );
+        pass(`${name}: the studio shows ${workflowId}`);
+      } catch {
+        const shown = await tab.evaluate(() => document.querySelector('select[aria-label="Workflow"]')?.value ?? "no workflow select");
+        fail(`${name}: expected ${workflowId} in the studio, found ${shown || "an unsaved workflow"}`);
+      }
+    }
+    if (recorded) {
+      try {
+        // The run tape leaves its placeholder and the top bar's run status is neither idle nor an error.
+        await tab.waitForFunction(
+          (text) => {
+            const status = document.querySelector(".hud-run-status");
+            return (
+              status !== null &&
+              !status.classList.contains("is-idle") &&
+              !status.classList.contains("is-error") &&
+              !document.body.innerText.includes(text)
+            );
+          },
+          noRunYet,
+          { timeout: 10_000 }
+        );
+        pass(`${name}: the recorded run started (the run tape left "No run yet")`);
+      } catch {
+        const status = await tab.evaluate(() => document.querySelector(".hud-run-status")?.textContent?.trim() ?? "no run status");
+        fail(`${name}: no recorded run within 10 s (run status: ${status})`);
+      }
+    }
+    if (workflowId === "wf-demo-guarded-intake") {
+      try {
+        await tab.waitForFunction(() => /guard blocked/i.test(document.body.innerText), undefined, { timeout: 20_000 });
+        pass(`${name}: the run tape shows GUARD BLOCKED`);
+      } catch {
+        fail(`${name}: no "GUARD BLOCKED" on the run tape after 20 s`);
+      }
+    }
+    await demo.close();
+  }
 }
 
 await browser.close();
