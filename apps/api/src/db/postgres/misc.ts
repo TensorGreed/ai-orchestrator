@@ -1,7 +1,7 @@
 /**
  * Phase 13.1 — PostgresStore: Store lifecycle, git sync, leases, variables, usage and budgets, notification configs.
- * Plain functions over a PgContext; PostgresStore delegates here. Methods that are not implemented yet throw
- * StoreNotImplementedError and are listed in UNIMPLEMENTED_METHODS (remove both together when implementing one).
+ * Plain functions over a PgContext; PostgresStore delegates here. Every method is implemented;
+ * UNIMPLEMENTED_METHODS is empty.
  */
 import { type Store } from "../store.js";
 import type { BudgetRecord } from "../database.js";

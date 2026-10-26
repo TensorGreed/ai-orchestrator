@@ -1,7 +1,7 @@
 /**
  * Phase 13.1 — PostgresStore: Eval datasets, fixtures, runs and results.
- * Plain functions over a PgContext; PostgresStore delegates here. Methods that are not implemented yet throw
- * StoreNotImplementedError and are listed in UNIMPLEMENTED_METHODS (remove both together when implementing one).
+ * Plain functions over a PgContext; PostgresStore delegates here. Every method is implemented;
+ * UNIMPLEMENTED_METHODS is empty.
  *
  * Ordering: where SQLite breaks ties by rowid (insert order), these queries use `seq`, the identity column v40 adds
  * to eval_fixtures, eval_runs and eval_results as Postgres's stand-in for rowid.

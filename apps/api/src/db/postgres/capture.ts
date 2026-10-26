@@ -1,7 +1,7 @@
 /**
  * Phase 13.1 — PostgresStore: Replay capture settings, captured runs and retention.
- * Plain functions over a PgContext; PostgresStore delegates here. Methods that are not implemented yet throw
- * StoreNotImplementedError and are listed in UNIMPLEMENTED_METHODS (remove both together when implementing one).
+ * Plain functions over a PgContext; PostgresStore delegates here. Every method is implemented;
+ * UNIMPLEMENTED_METHODS is empty.
  *
  * Each write is one statement (a conditional UPDATE / DELETE whose row count is the answer), so two API processes on
  * one database never promote the same candidate twice or double-count a prune. SQLite orders candidates captured in

@@ -1,7 +1,7 @@
 /**
  * Phase 13.1 — PostgresStore: Replay recordings, golden runs and sets, replay candidates and MCP cassettes (tapes).
- * Plain functions over a PgContext; PostgresStore delegates here. Methods that are not implemented yet throw
- * StoreNotImplementedError and are listed in UNIMPLEMENTED_METHODS (remove both together when implementing one).
+ * Plain functions over a PgContext; PostgresStore delegates here. Every method is implemented;
+ * UNIMPLEMENTED_METHODS is empty.
  *
  * Ordering: SQLite breaks `created_at` ties by rowid (insertion order); here `seq`, the identity column v40 adds to
  * mcp_cassettes and replay_recordings as the stand-in for rowid, does.

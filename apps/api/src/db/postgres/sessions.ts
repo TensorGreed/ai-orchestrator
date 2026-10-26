@@ -1,7 +1,7 @@
 /**
  * Phase 13.1 — PostgresStore: Login sessions, session memory, the session tool cache and session artifacts.
- * Plain functions over a PgContext; PostgresStore delegates here. Methods that are not implemented yet throw
- * StoreNotImplementedError and are listed in UNIMPLEMENTED_METHODS (remove both together when implementing one).
+ * Plain functions over a PgContext; PostgresStore delegates here. Every method is implemented;
+ * UNIMPLEMENTED_METHODS is empty.
  */
 import { randomUUID } from "node:crypto";
 import { type ChatMessage, type DataLabels, isEmptyDataLabels, labelsForUntrackedSave, mergeDataLabels, parseStoredDataLabels } from "@ai-orchestrator/shared";
