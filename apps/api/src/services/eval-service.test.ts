@@ -64,9 +64,12 @@ describe("eval runs in the background", () => {
   it("caps cases running at once across runs and reports progress after each case", async () => {
     let running = 0;
     let peak = 0;
+    // Cases start only once the test has subscribed, so no case can finish before the listener is there.
+    const open = deferred();
     const executor: EvalWorkflowExecutor = async (input) => {
       running += 1;
       peak = Math.max(peak, running);
+      await open.promise;
       await sleep(15);
       running -= 1;
       return { executionId: input.executionId, output: input.fixtureInput };
@@ -75,21 +78,52 @@ describe("eval runs in the background", () => {
     const a = await datasetWith(svc, 4);
     const b = await datasetWith(svc, 3);
     const first = await svc.enqueueRun({ datasetId: a.id, workflowId: "wf", triggeredBy: "b@example.com", triggeredByUserId: "u1" });
+    const seen: number[] = [];
+    svc.subscribe(first.id, (run) => seen.push(run.progress?.done ?? -1));
     const second = await svc.enqueueRun({ datasetId: b.id, workflowId: "wf", triggeredBy: "b@example.com", triggeredByUserId: "u1" });
+    open.resolve();
     expect(first.status).toBe("queued");
     expect(first.kind).toBe("eval");
     expect(first.progress).toMatchObject({ total: 4, done: 0 });
-    const seen: number[] = [];
-    svc.subscribe(first.id, (run) => seen.push(run.progress?.done ?? -1));
     await Promise.all([svc.wait(first.id), svc.wait(second.id)]);
     expect(peak).toBe(2);
-    expect(seen).toEqual([1, 2, 3, 4, 4]);
+    // One event per case and one when the run finishes. Each reports the progress stored by then; on a pooled store two
+    // cases that finish together can both report the later count, so the exact sequence is [1, 2, 3, 4, 4] on SQLite only.
+    expect(seen).toHaveLength(5);
+    expect(seen).toEqual([...seen].sort((x, y) => x - y));
+    expect(seen.slice(-2)).toEqual([4, 4]);
+    expect(seen[0]).toBeGreaterThanOrEqual(1);
     const done = (await svc.getRun(first.id))!;
     expect(done.status).toBe("completed");
     expect(done.summary).toMatchObject({ total: 4, pass: 4, fail: 0, error: 0, passRate: 1 });
     expect(done.progress).toMatchObject({ total: 4, done: 4, running: 0, pass: 4 });
     expect(done.results).toHaveLength(4);
     expect((await svc.getRun(second.id))!.summary).toMatchObject({ total: 3, pass: 3 });
+  });
+
+  it("wait and startRun return the finished run even when its last writes land after it left the active set", async () => {
+    // A store whose final write is slow, as a pooled database can be: the run leaves `active` before it commits.
+    const slow = new Proxy(store, {
+      get(target, prop, receiver) {
+        const value = Reflect.get(target, prop, receiver);
+        if (prop === "finalizeEvalRun" && typeof value === "function") {
+          return async (...args: unknown[]) => {
+            await sleep(40);
+            return (value as (...a: unknown[]) => unknown).apply(target, args);
+          };
+        }
+        return typeof value === "function" ? (value as (...a: unknown[]) => unknown).bind(target) : value;
+      }
+    });
+    const svc = new EvalService(slow, async (input) => ({ executionId: input.executionId, output: input.fixtureInput }));
+    const dataset = await datasetWith(svc, 2);
+    const result = await svc.startRun({ datasetId: dataset.id, workflowId: "wf", triggeredBy: "b@example.com", triggeredByUserId: "u1" });
+    expect(result.summary).toMatchObject({ total: 2, pass: 2 });
+    expect((await store.getEvalRun(result.runId))!.status).toBe("completed");
+    const queued = await svc.enqueueRun({ datasetId: dataset.id, workflowId: "wf", triggeredBy: "b@example.com", triggeredByUserId: "u1" });
+    await sleep(20);
+    await svc.wait(queued.id);
+    expect((await store.getEvalRun(queued.id))!.status).toBe("completed");
   });
 
   it("rejects a dataset over the case limit", async () => {
@@ -111,6 +145,8 @@ describe("eval runs in the background", () => {
     const dataset = await datasetWith(svc, 3);
     const run = await svc.enqueueRun({ datasetId: dataset.id, workflowId: "wf", triggeredBy: "b@example.com", triggeredByUserId: "u1" });
     await sleep(5);
+    // The `running` status is a queued bookkeeping write; on a pooled store it may not have landed after 5 ms.
+    await svc.flush();
     expect((await svc.getRunView(run.id))!.status).toBe("running");
     const canceled = (await svc.cancel(run.id))!;
     expect(canceled.status).toBe("canceled");

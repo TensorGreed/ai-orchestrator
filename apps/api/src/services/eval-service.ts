@@ -997,6 +997,9 @@ export class EvalService {
   /** Resolves when the run has finished (immediately for a run this process is not running). */
   async wait(runId: string): Promise<void> {
     await this.active.get(runId)?.done;
+    // A run that just finished leaves `active` before its last writes land (see launch); wait for those too, so the
+    // stored run is final whether or not this call found it active.
+    await this.flush();
   }
 
   isActive(runId: string): boolean {
