@@ -4,8 +4,10 @@
  *
  * SQLite pages in rowid order. Postgres has no stable row number (ctid moves on every UPDATE), so the cursor here is
  * `seq`, the identity column v40 adds to replay_recordings, eval_fixtures, eval_results, execution_history and
- * mcp_cassettes as the stand-in for rowid: assigned once on insert, never reused, so a row is never skipped or read
- * twice while the lookup pages, even when rows are updated in between.
+ * mcp_cassettes as the stand-in for rowid (each with a unique index): assigned once on insert, never reused and never
+ * changed by an UPDATE, so a row that existed when the lookup started is read exactly once. Identity values are
+ * drawn at insert, not at commit, so a row inserted while the lookup runs can be missed: its transaction may commit
+ * after the cursor has passed a later seq. Rows written during a lookup are not part of its answer.
  */
 import type { PoolClient } from "pg";
 import { SUBJECT_CASSETTE_SOURCES, SUBJECT_EXECUTION_TRIGGERS, type SubjectStoreKind, type SubjectTextRow } from "../database.js";

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -198,6 +198,49 @@ describe("Phase 8.3 — budget caps + alerts", () => {
       const alerts = await store.listBudgetAlerts({ budgetId: "bgt_d" });
       // Only one warn alert per period — debounced
       expect(alerts.filter((a) => a.severity === "warn")).toHaveLength(1);
+    });
+
+    it("an alert the store refuses (recorded === false) logs nothing and posts no webhook", async () => {
+      await store.createBudget({
+        id: "bgt_r",
+        name: "refused",
+        scopeType: "workflow",
+        scopeId: "wf_r",
+        period: "month",
+        limitType: "tokens",
+        limitValue: 100,
+        warnThresholdPct: 0.5,
+        action: "warn",
+        notifyChannel: "https://hooks.example/budget"
+      });
+      const refusing = new Proxy(store, {
+        get(target, prop, receiver) {
+          if (prop === "recordBudgetAlert") return async () => false;
+          const value = Reflect.get(target, prop, receiver);
+          return typeof value === "function" ? (value as (...a: unknown[]) => unknown).bind(target) : value;
+        }
+      });
+      const service = new BudgetService(refusing);
+      const warn = vi.fn();
+      service.setLogger({ info: vi.fn(), warn });
+      const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("ok"));
+      try {
+        await seedExecution("wf_r", 80);
+        await service.recordExecution({ executionId: "e-r", workflowId: "wf_r", projectId: "proj_default", userEmail: null, userId: "user_alice", spentUsd: 0, spentTokens: 80 });
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        expect(warn).not.toHaveBeenCalled();
+        expect(fetchSpy).not.toHaveBeenCalled();
+        // The same crossing on the real store records, warns and posts: the stub is what kept it quiet.
+        const real = new BudgetService(store);
+        const realWarn = vi.fn();
+        real.setLogger({ info: vi.fn(), warn: realWarn });
+        await real.recordExecution({ executionId: "e-r2", workflowId: "wf_r", projectId: "proj_default", userEmail: null, userId: "user_alice", spentUsd: 0, spentTokens: 80 });
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        expect(realWarn).toHaveBeenCalledWith("Budget threshold crossed", expect.objectContaining({ budgetId: "bgt_r", severity: "warn" }));
+        expect(fetchSpy).toHaveBeenCalledTimes(1);
+      } finally {
+        fetchSpy.mockRestore();
+      }
     });
 
     it("escalates from warn to block as usage crosses the cap", async () => {
