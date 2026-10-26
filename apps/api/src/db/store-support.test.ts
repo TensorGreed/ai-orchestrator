@@ -1,19 +1,16 @@
 import { describe, expect, it } from "vitest";
 import { PostgresStore } from "./postgres-store.js";
-import { StoreNotImplementedError } from "./store-errors.js";
 import { storeImplements } from "./store-support.js";
 import type { Store } from "./store.js";
 
 describe("storeImplements", () => {
-  it("lists exactly the Postgres methods that throw StoreNotImplementedError", async () => {
+  it("lists exactly the Postgres methods that throw StoreNotImplementedError: none, now that every domain is ported", () => {
     const pg = Object.create(PostgresStore.prototype) as Store;
-    expect(PostgresStore.unimplemented.size).toBeGreaterThan(0);
-    for (const method of PostgresStore.unimplemented) {
-      expect(storeImplements(pg, method)).toBe(false);
-      const fn = (pg as unknown as Record<string, (...args: unknown[]) => Promise<unknown>>)[method]!;
-      await expect(fn.call(pg)).rejects.toBeInstanceOf(StoreNotImplementedError);
+    expect([...PostgresStore.unimplemented]).toEqual([]);
+    for (const method of ["getWorkflow", "appendWorkflowVersion", "listMcpServers", "anyGuardProfileUsesLabels", "listEvalRuns", "recordBudgetAlert"] as const) {
+      expect(storeImplements(pg, method)).toBe(true);
+      expect(typeof (PostgresStore.prototype as unknown as Record<string, unknown>)[method]).toBe("function");
     }
-    expect(storeImplements(pg, "getWorkflow")).toBe(true);
   });
 
   it("treats any other store as implementing everything", () => {
