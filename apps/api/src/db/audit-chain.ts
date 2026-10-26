@@ -27,7 +27,7 @@
  *     lone surrogate there was stored as ASCII `\ud800` and any U+FFFD in it is a real one). Each U+FFFD is either a
  *     real U+FFFD or one of the 2048 lone surrogates U+D800–U+DFFF that the driver replaced.
  *     - k = 0: nothing can explain the mismatch. Broken.
- *     - k = 1: every explanation is tried (the 2048 surrogates at that position, about 2 ms). A match proves the row
+ *     - k = 1: every explanation is tried (the 2048 surrogates at that position, about 10 ms). A match proves the row
  *       is exactly what was written: it is verified, like any other row. No match: broken.
  *     - k ≥ 2: the 2049^k explanations cannot all be tried, so tampering cannot be ruled out, and neither can an
  *       honest old row. The row goes into `unverifiable` with the reason; the chain continues from its stored
