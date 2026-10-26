@@ -70,11 +70,16 @@ let server: http.Server;
 let baseUrl: string;
 let upgradeAttempts = 0;
 
-/** Opens a WebSocket to this server and marks the page done a little later (a routed close does not always reach the page). */
+/**
+ * Opens a WebSocket to this server and marks the page done when the socket settles (closed or errored), or after a long
+ * fallback (a routed close does not always reach the page). A short fixed timer raced the guard's async check on loaded machines.
+ */
 const wsPage = (port: number) => `<!doctype html><html><head><title>ws</title></head><body><script>
   const ws = new WebSocket('ws://127.0.0.1:${port}/socket');
   const done = () => { if (!document.getElementById('done')) document.body.insertAdjacentHTML('beforeend', '<div id="done">done</div>'); };
-  setTimeout(done, 700);
+  ws.onclose = done;
+  ws.onerror = done;
+  setTimeout(done, 6000);
 </script></body></html>`;
 
 beforeAll(async () => {
@@ -219,6 +224,23 @@ describe("web_browse", () => {
         waitForSelector: "#done",
         timeoutMs: 8000,
         webSocketGuard: playwrightWebSocketGuard({ denyPrivate: false, allowlist: [] })
+      });
+      expect(upgradeAttempts).toBe(1);
+    }, 30000);
+
+    it("an allowed WebSocket still reaches the server when the guard is slow (loaded machine)", async () => {
+      // A loaded CI core can take over a second to resolve the guard check and connect; the page must wait for the socket's outcome, not a fixed timer.
+      upgradeAttempts = 0;
+      const guard = playwrightWebSocketGuard({ denyPrivate: false, allowlist: [] });
+      await browseUrl({
+        url: `${baseUrl}/ws-page`,
+        screenshot: false,
+        waitForSelector: "#done",
+        timeoutMs: 15000,
+        webSocketGuard: async (ws) => {
+          await new Promise((resolve) => setTimeout(resolve, 1500));
+          await guard(ws);
+        }
       });
       expect(upgradeAttempts).toBe(1);
     }, 30000);
