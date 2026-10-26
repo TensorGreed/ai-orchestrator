@@ -17,9 +17,14 @@ on:
     paths:
       - "docs/**"
       - "apps/docs/**"
+      # The demo at /demo/ is the studio itself (apps/web) built against recorded
+      # fixtures, and it bundles the shared schemas and node definitions
+      # (packages/shared/src). Sample workflows are what its templates and
+      # fixtures are made from. A change to any of these changes the demo.
       - "packages/shared/src/**"
       - "apps/web/**"
       - "samples/workflows/**"
+      - "scripts/assemble-pages-site.mjs"
       - ".github/workflows/pages.yml"
   workflow_dispatch:
 
@@ -56,35 +61,25 @@ jobs:
       - name: Build VitePress (with base=/docs/)
         run: pnpm --filter @ai-orchestrator/docs build
 
+      # A broken demo must not take the landing page and the docs down with it:
+      # the site deploys without /demo/ and the run shows a warning.
       - name: Build the live demo (with base=/demo/)
+        id: demo
+        continue-on-error: true
         run: pnpm --filter @ai-orchestrator/web build:demo
 
+      # Landing at /, docs at /docs/, and the demo at /demo/ when it built.
+      # The landing, the docs and the CNAME check stay required.
       - name: Assemble unified site
+        env:
+          DEMO_OUTCOME: ${{ steps.demo.outcome }}
         run: |
           set -euo pipefail
-          mkdir -p _site
-          # 1. Marketing landing: copy the static `docs/` folder to root
-          cp -r docs/. _site/
-          # 2. Product docs: VitePress build mounted at /docs/
-          mkdir -p _site/docs
-          cp -r apps/docs/docs/.vitepress/dist/. _site/docs/
-          # 3. Live demo: the static studio build mounted at /demo/
-          mkdir -p _site/demo
-          cp -r apps/web/dist-demo/. _site/demo/
-          # 4. Sanity: the marketing CNAME from `docs/` is preserved at the
-          #    root of the artifact (Pages requires CNAME at site root).
-          test -f _site/CNAME && grep -q "lsquarem.com" _site/CNAME
-          # 5. Sanity: the demo entry exists and loads its assets from /demo/.
-          test -f _site/demo/index.html
-          grep -q 'src="/demo/assets/' _site/demo/index.html
-          ls _site/demo/assets/*.js > /dev/null
+          node scripts/assemble-pages-site.mjs
           echo "Built _site:"
           ls -la _site
           echo "Built _site/docs:"
           ls -la _site/docs | head -10
-          echo "Built _site/demo:"
-          du -sh _site/demo
-          ls -la _site/demo/assets
 
       - name: Configure Pages
         uses: actions/configure-pages@v5
