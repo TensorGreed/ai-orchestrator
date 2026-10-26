@@ -34,16 +34,21 @@ does not block the site: it deploys without `/demo/` and the run shows a warning
 - **Runs** replay the recorded event stream (node activity, run tape, tool calls, tokens, cost,
   guard verdicts) at a readable pace, but only for the recorded run's own input and graph:
   - the run input (the `user_prompt` of an editor, chat or webhook run) must equal the recorded one
-    after trimming and collapsing whitespace;
+    after trimming and collapsing whitespace, and so must the `system_prompt` (the studio's default
+    one, which the recorder sends as the studio does);
   - the workflow's graph (node types, configs and edges; not layout or names) must be the one that
-    was recorded. A copy with the same graph replays too.
+    was recorded. A copy with the same graph replays too;
+  - partial and debug runs (`startNodeId`, `runMode: "single_node"`, `sourceExecutionId`) are never
+    replayed.
 
-  Another input gets "Runs need a real deployment" with **Try the recorded question**: in Chat it
-  puts the recorded question in the message box for the visitor to send; in the editor, which has
-  no prompt field, it runs the recorded question once (it shows as the trigger's input). Another
-  graph gets the same answer with a link that opens and runs the most similar recorded workflow,
-  or a button to restore the recorded version. The demo never answers a question it has no
-  recording for.
+  Another input gets "Runs need a real deployment" with **Try the recorded question**: in Chat on
+  that workflow it puts the recorded question in the message box for the visitor to send; in the
+  editor on that workflow, which has no prompt field, it runs the recorded question once (it shows
+  as the trigger's input). With another workflow open it opens that workflow and runs it there.
+  The request is for the very next run only: any run clears it, and it holds only for the same
+  workflow on the same graph within two seconds. Another graph gets the same answer with a link that
+  opens and runs the most similar recorded workflow, or a button to restore the recorded version.
+  The demo never answers a question it has no recording for.
 - **Recorded writes** (the replay diff of the gated workflow's draft against a golden run, the
   blocked publish of its v4) are kept with the request and the graph they were made against, and
   answer only that request on that graph; anything else gets the typed refusal.
@@ -85,9 +90,11 @@ no model is called, no MCP server is reached, no code runs.
 Before writing, it replaces the scripted model's address with `models.example.com`, removes temp
 paths and anything shaped like a credential, and refuses to write if anything is still found: the
 patterns in `src/demo/leak-patterns.ts` (API keys, GitHub, Slack and AWS keys, JWTs, PEM blocks,
-bearer tokens) and this machine's values (home directory, repository path, user and host names,
-the recording's master key and session cookie; generic ones such as `root` are skipped, and the
-recorder says so). `src/demo/fixtures.test.ts` checks the committed fixtures against the same
+bearer tokens, `/home/<name>/`, `/Users/<name>/` and `C:\Users\` paths) and this machine's values:
+home directory, repository path, the recording's master key and session cookie, and the user and
+host names at any length as whole JSON-string tokens (`"vm"`, `/vm/`). Host and user names are
+first replaced by `demo-host` / `demo-user` everywhere except the node definitions, which are
+compiled from source (their placeholders, such as a database user `root`, are product defaults). `src/demo/fixtures.test.ts` checks the committed fixtures against the same
 patterns, validates them against the `@ai-orchestrator/shared` schemas, and checks the size budget
 and that only `example.com` / `example.org` addresses appear.
 

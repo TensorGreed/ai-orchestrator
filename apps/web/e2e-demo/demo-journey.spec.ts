@@ -97,6 +97,11 @@ test("the demo journey: banner, template, edit, save, persist, recorded run, sec
   await expect(page).not.toHaveURL(/demoRun=/);
   await expect(page.getByText(/status\s+success/)).toBeVisible({ timeout: 30_000 });
 
+  // Asked to run the recorded question of a workflow whose graph has no recording, the demo says so at once.
+  await page.goto(`/demo/?workflowId=${workflowId}&mode=editor&demoRun=recorded`);
+  await expect(notice).toContainText("Here is a recorded run of a similar workflow", { timeout: 5_000 });
+  await notice.getByRole("button", { name: "Close" }).click();
+
   // A recorded workflow answers its recorded question only. The editor has no prompt field, so Run
   // first offers the recorded question; choosing it replays the recording, with that question as the trigger's input.
   await page.goto("/demo/?workflowId=wf-demo-support-agent&mode=editor");
@@ -126,6 +131,28 @@ test("the demo journey: banner, template, edit, save, persist, recorded run, sec
   await expect(page.getByText(/\$7,056/).first()).toBeVisible({ timeout: 60_000 });
   await shot(page, "08-chat-recorded-question");
 
+  // The recorded question asked for with another workflow open opens and runs the right workflow,
+  // and is spent: a later message to the support agent gets no recorded answer.
+  const workflowSwitch = page.getByRole("banner").getByRole("combobox", { name: "Workflow", exact: true });
+  await message.fill("Tell me a joke about penguins");
+  await page.getByRole("button", { name: "Send", exact: true }).click();
+  await expect(notice).toContainText("answers one question");
+  await workflowSwitch.selectOption("wf-demo-guarded-intake");
+  await expect(workflowSwitch).toHaveValue("wf-demo-guarded-intake");
+  await notice.getByRole("button", { name: "Try the recorded question" }).click();
+  await page.waitForURL(/workflowId=wf-demo-support-agent/);
+  await expect(page.getByText(/status\s+success/)).toBeVisible({ timeout: 60_000 });
+  await page.goto("/demo/?workflowId=wf-demo-support-agent&mode=chat");
+  await expect(message).toBeVisible();
+  const answersBefore = await page.getByText(/\$7,056/).count();
+  await message.fill("What is the capital of France?");
+  await page.getByRole("button", { name: "Send", exact: true }).click();
+  await expect(notice).toContainText("Runs need a real deployment");
+  // Finished: the button reads "Send" again, not "Streaming…".
+  await expect(page.getByRole("button", { name: "Send", exact: true })).toBeVisible();
+  expect(await page.getByText(/\$7,056/).count()).toBe(answersBefore);
+  await notice.getByRole("button", { name: "Close" }).click();
+
   // Security: the recorded guard block.
   await sidebarItem(page, "Security").click();
   await expect(page.getByRole("heading", { name: "Security", exact: true })).toBeVisible();
@@ -149,6 +176,12 @@ test("the demo journey: banner, template, edit, save, persist, recorded run, sec
   const pagesBefore = page.context().pages().length;
   await page.getByRole("link", { name: "Export CSV" }).click();
   await expect(notice).toContainText("Not available in the demo");
+  expect(page.context().pages().length).toBe(pagesBefore);
+  await notice.getByRole("button", { name: "Close" }).click();
+  // A middle click, which opens links without a "click" event, too.
+  await page.getByRole("link", { name: "Export CSV" }).click({ button: "middle" });
+  await expect(notice).toContainText("Not available in the demo");
+  await page.waitForTimeout(500);
   expect(page.context().pages().length).toBe(pagesBefore);
   await notice.getByRole("button", { name: "Close" }).click();
 

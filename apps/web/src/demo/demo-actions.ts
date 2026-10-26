@@ -33,13 +33,35 @@ function runButton(doc: Document): HTMLButtonElement | null {
   return doc.querySelector<HTMLButtonElement>('button[aria-label="Run workflow"]');
 }
 
+/** The workflow the studio has open, from its HUD switcher. */
+function openWorkflowId(doc: Document): string | null {
+  return doc.querySelector<HTMLSelectElement>('select[aria-label="Workflow"]')?.value || null;
+}
+
+/** A studio URL in the editor for this workflow that runs its recorded question once it is open. */
+export function recordedRunUrl(workflowId: string, base: string = import.meta.env.BASE_URL): string {
+  return `${base}?${new URLSearchParams({ workflowId, mode: "editor", [RUN_RECORDED_PARAM]: "recorded" }).toString()}`;
+}
+
 /**
- * "Try the recorded question". In Chat it goes into the message box for the
- * visitor to send, so what they see asked is what gets answered. In the
- * editor, which has no prompt field, the next run is the recorded question
- * (it shows as the trigger's input on the canvas) and Run is pressed.
+ * "Try the recorded question". In Chat on that workflow it goes into the
+ * message box for the visitor to send, so what they see asked is what gets
+ * answered. In the editor on that workflow, which has no prompt field, the
+ * next run is the recorded question (it shows as the trigger's input on the
+ * canvas) and Run is pressed. With another workflow open it opens this one
+ * and runs it there, rather than arming a run the open workflow would take.
  */
-export function tryRecordedQuestion(backend: RecordedInputRunner, workflowId: string, recordedInput: string, doc: Document = document): "filled" | "ran" | "unavailable" {
+export function tryRecordedQuestion(
+  backend: RecordedInputRunner,
+  workflowId: string,
+  recordedInput: string,
+  doc: Document = document,
+  navigate: (url: string) => void = (url) => window.location.assign(url)
+): "filled" | "ran" | "opened" | "unavailable" {
+  if (openWorkflowId(doc) !== workflowId) {
+    navigate(recordedRunUrl(workflowId));
+    return "opened";
+  }
   const chatInput = doc.querySelector<HTMLInputElement>("input.chat-message-input");
   if (chatInput) {
     fillInput(chatInput, recordedInput);
@@ -53,8 +75,10 @@ export function tryRecordedQuestion(backend: RecordedInputRunner, workflowId: st
 
 /**
  * Runs the recorded question of the workflow in the URL when it carries
- * `?demoRun=recorded`, as soon as the editor's Run button is there. The
- * parameter is removed first, so a reload does not run it again.
+ * `?demoRun=recorded`, as soon as the editor has that workflow open. The
+ * parameter is removed first, so a reload does not run it again. When the
+ * workflow no longer has a recorded graph, Run is still pressed: the demo then
+ * says so and offers to restore the recorded version.
  */
 export function runRecordedFromUrl(backend: RecordedInputRunner, win: Window = window, timeoutMs = 15_000): () => void {
   const url = new URL(win.location.href);
@@ -67,8 +91,8 @@ export function runRecordedFromUrl(backend: RecordedInputRunner, win: Window = w
   const attempt = () => {
     const run = runButton(win.document);
     // Wait until the editor has opened this workflow, not just drawn its Run button.
-    const active = win.document.querySelector<HTMLSelectElement>('select[aria-label="Workflow"]')?.value;
-    if (run && !run.disabled && active === workflowId && backend.armRecordedInput(workflowId) !== null) {
+    if (run && !run.disabled && openWorkflowId(win.document) === workflowId) {
+      backend.armRecordedInput(workflowId);
       run.click();
       return;
     }

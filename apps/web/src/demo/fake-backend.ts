@@ -154,6 +154,12 @@ export function graphDigest(workflow: Pick<Workflow, "nodes" | "edges">): string
   return stable({ nodes, edges });
 }
 
+/** How long "Try the recorded question" waits for the run it was pressed for. */
+export const ARMED_RUN_TTL_MS = 2_000;
+
+/** Request fields of partial and debug runs, whose results no recording holds. */
+const PARTIAL_RUN_FIELDS = ["startNodeId", "runMode", "sourceExecutionId"] as const;
+
 /** Inputs compare after trimming and collapsing whitespace. */
 export function normalizeRunInput(value: string): string {
   return value.trim().replace(/\s+/g, " ");
@@ -201,9 +207,10 @@ export interface FakeBackend {
   /** Puts one workflow back to its recorded version. */
   restoreRecorded(workflowId: string): boolean;
   /**
-   * The visitor chose "Try the recorded question": the next run of this
-   * workflow runs the recorded input, whatever the studio sends. Returns that
-   * input, or null when the workflow has no recording.
+   * The visitor chose "Try the recorded question": the next run, if it is
+   * this workflow on its current graph within ARMED_RUN_TTL_MS, runs the
+   * recorded input whatever the studio sends. Any run clears it. Returns that
+   * input, or null (and arms nothing) when the workflow has no recording.
    */
   armRecordedInput(workflowId: string): string | null;
   workflows(): Workflow[];
@@ -279,8 +286,11 @@ export function createFakeBackend(options: FakeBackendOptions): FakeBackend {
 
   let state = load();
   const missed: string[] = [];
-  /** A workflow whose next run is the recorded question, at the visitor's request. */
-  let armedInput: string | null = null;
+  /**
+   * "Try the recorded question": the next run of this workflow, on this graph,
+   * within a moment, is the recorded question. Any run clears it.
+   */
+  let armed: { workflowId: string; graphDigest: string; expiresAt: number } | null = null;
 
   const persist = () => {
     try {
@@ -395,6 +405,12 @@ export function createFakeBackend(options: FakeBackendOptions): FakeBackend {
     return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
   };
 
+  const partialRun = (workflow: Workflow, field: string): Response => {
+    const message = `${RUN_NEEDS_DEPLOYMENT_MESSAGE} Running part of a workflow or debugging from a node (${field}) only works against a real deployment.`;
+    options.notify?.({ kind: "not_in_demo", message });
+    return notInDemo(message, 409, { workflowId: workflow.id, field });
+  };
+
   const inputNotRecorded = (workflow: Workflow, recordedInput: string): Response => {
     const message = `${RUN_NEEDS_DEPLOYMENT_MESSAGE} The recorded run of this workflow answers one question: “${recordedInput}”. Anything else needs a real model.`;
     options.notify?.({ kind: "input_not_recorded", message, workflowId: workflow.id, recordedInput });
@@ -402,16 +418,24 @@ export function createFakeBackend(options: FakeBackendOptions): FakeBackend {
   };
 
   const execute = (workflowId: string, stream: boolean, body: Json): Response => {
+    // Read and clear the visitor's request first: it is for this one run, whatever happens to it.
+    const arm = armed;
+    armed = null;
     const workflow = findWorkflow(workflowId);
     if (!workflow) return json(404, { error: "Workflow not found" });
+    const partial = PARTIAL_RUN_FIELDS.find((field) => body[field] !== undefined && body[field] !== null && body[field] !== "" && !(field === "runMode" && body[field] === "workflow"));
+    if (partial) return partialRun(workflow, partial);
     const recording = recordingFor(workflow);
     if (!recording) return notRecorded(workflow);
-    // A recording answers its own input only: the visitor asked for it explicitly, or sent the same input.
-    const armed = armedInput === workflowId;
-    armedInput = null;
-    const input = runInputOf(body);
-    if (!armed && (input === null || normalizeRunInput(input) !== normalizeRunInput(recording.run.prompt))) {
-      return inputNotRecorded(workflow, recording.run.prompt);
+    const armedForThis = Boolean(arm && arm.workflowId === workflowId && arm.graphDigest === graphDigest(workflow) && now().getTime() <= arm.expiresAt);
+    if (!armedForThis) {
+      // A recording answers its own input only, sent with the system prompt it was recorded with.
+      const input = runInputOf(body);
+      const systemPrompt = typeof body.system_prompt === "string" ? normalizeRunInput(body.system_prompt) : null;
+      const recordedSystemPrompt = recording.run.systemPrompt ? normalizeRunInput(recording.run.systemPrompt) : null;
+      if (input === null || normalizeRunInput(input) !== normalizeRunInput(recording.run.prompt) || systemPrompt !== recordedSystemPrompt) {
+        return inputNotRecorded(workflow, recording.run.prompt);
+      }
     }
     if (stream) return replayStream(recording.run);
     const result = [...recording.run.frames].reverse().find((frame) => frame.event === "result");
@@ -654,8 +678,9 @@ export function createFakeBackend(options: FakeBackendOptions): FakeBackend {
     armRecordedInput(workflowId) {
       const workflow = findWorkflow(workflowId);
       const recording = workflow ? recordingFor(workflow) : null;
-      if (!recording) return null;
-      armedInput = workflowId;
+      armed = null;
+      if (!workflow || !recording) return null;
+      armed = { workflowId, graphDigest: graphDigest(workflow), expiresAt: now().getTime() + ARMED_RUN_TTL_MS };
       return recording.run.prompt;
     },
     workflows: () => clone(state.workflows),

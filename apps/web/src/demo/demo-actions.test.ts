@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { RUN_RECORDED_PARAM, isApiLink, runRecordedFromUrl, tryRecordedQuestion } from "./demo-actions";
+import { RUN_RECORDED_PARAM, isApiLink, recordedRunUrl, runRecordedFromUrl, tryRecordedQuestion } from "./demo-actions";
 
 const ORIGIN = "https://lsquarem.com";
+/** The studio's HUD switcher with this workflow open. */
+const open = (workflowId: string) => `<select aria-label="Workflow"><option value="other">Other</option><option value="${workflowId}" selected>This</option></select>`;
 
 afterEach(() => {
   document.body.innerHTML = "";
@@ -22,7 +24,7 @@ describe("API links", () => {
 
 describe("Try the recorded question", () => {
   it("puts the question in the chat box for the visitor to send", () => {
-    document.body.innerHTML = '<input class="chat-message-input" aria-label="Message" value="Tell me a joke" /><button aria-label="Run workflow"></button>';
+    document.body.innerHTML = `${open("wf-1")}<input class="chat-message-input" aria-label="Message" value="Tell me a joke" /><button aria-label="Run workflow"></button>`;
     const input = document.querySelector<HTMLInputElement>("input")!;
     const typed = vi.fn();
     input.addEventListener("input", typed);
@@ -34,7 +36,7 @@ describe("Try the recorded question", () => {
   });
 
   it("in the editor, runs the recorded question once through the Run button", () => {
-    document.body.innerHTML = '<button aria-label="Run workflow"></button>';
+    document.body.innerHTML = `${open("wf-1")}<button aria-label="Run workflow"></button>`;
     const clicked = vi.fn();
     document.querySelector("button")!.addEventListener("click", clicked);
     const backend = { armRecordedInput: vi.fn(() => "What is MCP?") };
@@ -45,9 +47,26 @@ describe("Try the recorded question", () => {
 
   it("does nothing without a Run button or a recording", () => {
     const backend = { armRecordedInput: vi.fn(() => null) };
+    document.body.innerHTML = open("wf-1");
     expect(tryRecordedQuestion(backend, "wf-1", "x")).toBe("unavailable");
-    document.body.innerHTML = '<button aria-label="Run workflow"></button>';
+    document.body.innerHTML = `${open("wf-1")}<button aria-label="Run workflow"></button>`;
     expect(tryRecordedQuestion(backend, "wf-1", "x")).toBe("unavailable");
+  });
+
+  it("with another workflow open, opens this one to run there instead of arming a run the open one would take", () => {
+    for (const markup of [`${open("wf-other")}<button aria-label="Run workflow"></button>`, `${open("wf-other")}<input class="chat-message-input" aria-label="Message" />`, ""]) {
+      document.body.innerHTML = markup;
+      const clicked = vi.fn();
+      document.querySelector("button")?.addEventListener("click", clicked);
+      const backend = { armRecordedInput: vi.fn(() => "What is MCP?") };
+      const navigate = vi.fn();
+      expect(tryRecordedQuestion(backend, "wf-1", "What is MCP?", document, navigate)).toBe("opened");
+      expect(navigate).toHaveBeenCalledWith(recordedRunUrl("wf-1"));
+      expect(backend.armRecordedInput).not.toHaveBeenCalled();
+      expect(clicked).not.toHaveBeenCalled();
+      expect(document.querySelector<HTMLInputElement>("input")?.value ?? "").toBe("");
+    }
+    expect(recordedRunUrl("wf-1", "/demo/")).toBe(`/demo/?workflowId=wf-1&mode=editor&${RUN_RECORDED_PARAM}=recorded`);
   });
 
   it("runs from a ?demoRun=recorded link once the editor has opened that workflow, and drops the parameter", () => {
@@ -66,6 +85,21 @@ describe("Try the recorded question", () => {
     expect(clicked).toHaveBeenCalledTimes(1);
     expect(backend.armRecordedInput).toHaveBeenCalledWith("wf-1");
     vi.advanceTimersByTime(2000);
+    expect(clicked).toHaveBeenCalledTimes(1);
+    stop();
+    window.history.replaceState(null, "", "/");
+  });
+
+  it("presses Run even when the workflow's graph is no longer the recorded one, so the demo can say so and offer to restore it", () => {
+    vi.useFakeTimers();
+    window.history.replaceState(null, "", `/demo/?workflowId=wf-1&${RUN_RECORDED_PARAM}=recorded`);
+    const backend = { armRecordedInput: vi.fn(() => null) };
+    const clicked = vi.fn();
+    document.body.innerHTML = `${open("wf-1")}<button aria-label="Run workflow"></button>`;
+    document.querySelector("button")!.addEventListener("click", clicked);
+    const stop = runRecordedFromUrl(backend, window);
+    vi.advanceTimersByTime(250);
+    expect(backend.armRecordedInput).toHaveBeenCalledWith("wf-1");
     expect(clicked).toHaveBeenCalledTimes(1);
     stop();
     window.history.replaceState(null, "", "/");

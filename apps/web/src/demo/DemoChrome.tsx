@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { NOT_IN_DEMO_MESSAGE, type DemoNotice } from "./fake-backend";
 import { DEMO_NOTICE_EVENT, demoBackend } from "./demo-transport";
-import { RUN_RECORDED_PARAM, isApiLink, runRecordedFromUrl, tryRecordedQuestion } from "./demo-actions";
+import { RUN_RECORDED_PARAM, isApiLink, recordedRunUrl, runRecordedFromUrl, tryRecordedQuestion } from "./demo-actions";
 
 export const DEMO_BANNER_DISMISSED_KEY = "l2m-demo:banner-dismissed";
 export const DEMO_TOUR_KEY = "l2m-demo:tour";
@@ -119,8 +119,13 @@ export function DemoChrome() {
       event.stopPropagation();
       setNotice({ kind: "not_in_demo", message: NOT_IN_DEMO_MESSAGE });
     };
+    // A middle click opens a link without a "click" event.
     document.addEventListener("click", onClick, true);
-    return () => document.removeEventListener("click", onClick, true);
+    document.addEventListener("auxclick", onClick, true);
+    return () => {
+      document.removeEventListener("click", onClick, true);
+      document.removeEventListener("auxclick", onClick, true);
+    };
   }, []);
 
   const saveTour = useCallback((next: TourState) => {
@@ -195,7 +200,7 @@ export function DemoChrome() {
               <button
                 type="button"
                 className="demo-button demo-button-primary"
-                onClick={() => window.location.assign(appUrl({ workflowId: notice.similar!.workflowId, mode: "editor", [RUN_RECORDED_PARAM]: "recorded" }))}
+                onClick={() => window.location.assign(recordedRunUrl(notice.similar!.workflowId))}
               >
                 Run “{notice.similar.name}”
               </button>

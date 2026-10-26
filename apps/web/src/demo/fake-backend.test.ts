@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Workflow } from "@ai-orchestrator/shared";
-import { APPROVAL_RESUME_MESSAGE, CREDENTIALS_MESSAGE, DEMO_STATE_STORAGE_KEY, NOT_IN_DEMO, createFakeBackend, graphDigest, shiftFixtures, type DemoNotice, type DemoStorage } from "./fake-backend";
+import { APPROVAL_RESUME_MESSAGE, ARMED_RUN_TTL_MS, CREDENTIALS_MESSAGE, DEMO_STATE_STORAGE_KEY, NOT_IN_DEMO, createFakeBackend, graphDigest, shiftFixtures, type DemoNotice, type DemoStorage } from "./fake-backend";
 import { demoFixtures } from "./fixtures";
 
 const transport = vi.hoisted(() => ({ backend: null as null | { fetch: (input: string, init?: RequestInit) => Promise<Response>; openEventSource: (url: string) => EventSource } }));
@@ -45,7 +45,12 @@ function parseSse(text: string): Array<{ event: string; data: any }> {
 
 /** The run input a workflow's recording answers. */
 const recordedPrompt = (workflowId: string) => demoFixtures.runs[workflowId]!.prompt;
-const asked = (workflowId: string) => JSON.stringify({ user_prompt: recordedPrompt(workflowId) });
+/** A run request as the studio sends it for the recorded question: the prompt and the recorded system prompt. */
+const askedBody = (workflowId: string, userPrompt: unknown = recordedPrompt(workflowId)) => {
+  const systemPrompt = demoFixtures.runs[workflowId]!.systemPrompt;
+  return { user_prompt: userPrompt, ...(systemPrompt ? { system_prompt: systemPrompt } : {}) };
+};
+const asked = (workflowId: string) => JSON.stringify(askedBody(workflowId));
 
 afterEach(() => {
   transport.backend = null;
@@ -205,7 +210,7 @@ describe("runs", () => {
   it("drives the client's stream handlers to completion", async () => {
     backend();
     const seen: string[] = [];
-    const result = await api.executeWorkflowStream("wf-demo-research-swarm", { user_prompt: recordedPrompt("wf-demo-research-swarm") } as never, {
+    const result = await api.executeWorkflowStream("wf-demo-research-swarm", askedBody("wf-demo-research-swarm") as never, {
       onExecutionStarted: () => seen.push("started"),
       onNodeStart: (event) => seen.push(`start:${event.nodeId}`),
       onNodeComplete: (event) => seen.push(`complete:${event.nodeId}`),
@@ -233,7 +238,7 @@ describe("runs", () => {
     edited.nodes.find((node) => node.id === "output")!.config = { responseTemplate: "Changed: {{answer}}" };
     await api.updateWorkflow(edited);
 
-    const refused = await call(demo, "POST", "/api/workflows/wf-demo-support-agent/execute/stream", { user_prompt: recordedPrompt("wf-demo-support-agent") });
+    const refused = await call(demo, "POST", "/api/workflows/wf-demo-support-agent/execute/stream", askedBody("wf-demo-support-agent"));
     expect(refused.status).toBe(409);
     expect(refused.body).toMatchObject({ code: NOT_IN_DEMO, restorable: true });
     expect(refused.body.error).toContain("Runs need a real deployment");
@@ -271,7 +276,7 @@ describe("runs", () => {
   it("replays a copy with the same graph, such as a duplicate", async () => {
     backend();
     const copy = await api.duplicateWorkflow("wf-demo-guarded-intake", { name: "Guarded intake copy" });
-    const result = await api.executeWorkflowStream(copy.id, { user_prompt: recordedPrompt("wf-demo-guarded-intake") } as never);
+    const result = await api.executeWorkflowStream(copy.id, askedBody("wf-demo-guarded-intake") as never);
     expect(result.output).toEqual({ result: "Blocked by the prompt guard." });
   });
 
@@ -290,11 +295,11 @@ describe("runs answer only the recorded input", () => {
     const demo = backend();
     const prompt = recordedPrompt("wf-demo-support-agent");
     const spaced = `  ${prompt.replace(/ /g, "  \n ")}  `;
-    const response = await call(demo, "POST", "/api/workflows/wf-demo-support-agent/execute", { user_prompt: spaced });
+    const response = await call(demo, "POST", "/api/workflows/wf-demo-support-agent/execute", askedBody("wf-demo-support-agent", spaced));
     expect(response.status).toBe(200);
     expect(response.body.output.result).toContain("$7,056");
     // Chat sends the same input under `user_prompt`; a webhook body may nest it.
-    expect((await call(demo, "POST", "/api/workflows/wf-demo-support-agent/execute", { input: { user_prompt: prompt } })).status).toBe(200);
+    expect((await call(demo, "POST", "/api/workflows/wf-demo-support-agent/execute", { input: { user_prompt: prompt }, system_prompt: demoFixtures.runs["wf-demo-support-agent"]!.systemPrompt })).status).toBe(200);
   });
 
   it("refuses any other input with a typed answer that offers the recorded question", async () => {
@@ -328,6 +333,77 @@ describe("runs answer only the recorded input", () => {
     const workflow = { ...structuredClone(demoFixtures.workflows.workflows[0]!), id: "wf-new", name: "New", nodes: [], edges: [] } as Workflow;
     await call(demo, "POST", "/api/workflows", workflow);
     expect(demo.armRecordedInput("wf-new")).toBeNull();
+  });
+});
+
+describe("the recorded question, asked for once", () => {
+  const penguin = (workflowId = "wf-demo-support-agent") => askedBody(workflowId, "What is the capital of France?");
+
+  it("is spent by the next run of any workflow, so a later message is refused", async () => {
+    const demo = backend();
+    expect(demo.armRecordedInput("wf-demo-support-agent")).not.toBeNull();
+    // The click ran another workflow: the request for the support agent is gone with it.
+    expect((await call(demo, "POST", "/api/workflows/wf-demo-guarded-intake/execute", penguin("wf-demo-guarded-intake"))).status).toBe(409);
+    const later = await call(demo, "POST", "/api/workflows/wf-demo-support-agent/execute/stream", penguin());
+    expect(later.status).toBe(409);
+    expect(later.body.error).not.toContain("$7,056");
+  });
+
+  it("is spent by a run the demo refuses for its graph, and restoring the graph does not bring it back", async () => {
+    const demo = backend();
+    const workflow = await api.fetchWorkflow("wf-demo-support-agent");
+    expect(demo.armRecordedInput("wf-demo-support-agent")).not.toBeNull();
+    const edited = structuredClone(workflow);
+    edited.nodes.find((node) => node.id === "output")!.config = { responseTemplate: "Edited: {{answer}}" };
+    await api.updateWorkflow(edited);
+    expect((await call(demo, "POST", "/api/workflows/wf-demo-support-agent/execute", penguin())).body).toMatchObject({ restorable: true });
+    demo.restoreRecorded("wf-demo-support-agent");
+    expect((await call(demo, "POST", "/api/workflows/wf-demo-support-agent/execute", penguin())).status).toBe(409);
+  });
+
+  it("holds only for the graph it was asked on", async () => {
+    const demo = backend();
+    expect(demo.armRecordedInput("wf-demo-support-agent")).not.toBeNull();
+    const workflow = await api.fetchWorkflow("wf-demo-support-agent");
+    const moved = { ...workflow, nodes: workflow.nodes.map((node) => (node.id === "output" ? { ...node, config: { responseTemplate: "Moved: {{answer}}" } } : node)) };
+    await api.updateWorkflow(moved);
+    expect((await call(demo, "POST", "/api/workflows/wf-demo-support-agent/execute", penguin())).status).toBe(409);
+  });
+
+  it("expires after a moment", async () => {
+    let clock = Date.parse(demoFixtures.meta.recordedAt) + 60_000;
+    const demo = createFakeBackend({ fixtures: demoFixtures, storage: null, pace: 0, now: () => new Date(clock) });
+    expect(demo.armRecordedInput("wf-demo-support-agent")).not.toBeNull();
+    clock += ARMED_RUN_TTL_MS + 1;
+    expect((await demo.fetch("/api/workflows/wf-demo-support-agent/execute", { method: "POST", body: JSON.stringify(penguin()) })).status).toBe(409);
+    expect(demo.armRecordedInput("wf-demo-support-agent")).not.toBeNull();
+    clock += ARMED_RUN_TTL_MS - 100;
+    expect((await demo.fetch("/api/workflows/wf-demo-support-agent/execute", { method: "POST", body: JSON.stringify(penguin()) })).status).toBe(200);
+  });
+});
+
+describe("what a run request must match besides its input", () => {
+  it("refuses partial and debug runs with the typed answer", async () => {
+    const demo = backend();
+    for (const extra of [{ startNodeId: "agent" }, { runMode: "single_node" }, { sourceExecutionId: demoFixtures.runs["wf-demo-support-agent"]!.executionId }]) {
+      const refused = await call(demo, "POST", "/api/workflows/wf-demo-support-agent/execute/stream", { ...askedBody("wf-demo-support-agent"), ...extra });
+      expect(refused.status, JSON.stringify(extra)).toBe(409);
+      expect(refused.body).toMatchObject({ code: NOT_IN_DEMO, field: Object.keys(extra)[0] });
+      expect(refused.body.error).toContain("Runs need a real deployment");
+    }
+    // An explicit whole-workflow run is a normal run.
+    expect((await call(demo, "POST", "/api/workflows/wf-demo-support-agent/execute", { ...askedBody("wf-demo-support-agent"), runMode: "workflow" })).status).toBe(200);
+  });
+
+  it("requires the system prompt the run was recorded with", async () => {
+    const demo = backend();
+    const recorded = demoFixtures.runs["wf-demo-support-agent"]!;
+    expect(recorded.systemPrompt).toBeTruthy();
+    for (const systemPrompt of [undefined, "You are a pirate."]) {
+      const body = { user_prompt: recorded.prompt, ...(systemPrompt ? { system_prompt: systemPrompt } : {}) };
+      expect((await call(demo, "POST", "/api/workflows/wf-demo-support-agent/execute", body)).status, String(systemPrompt)).toBe(409);
+    }
+    expect((await call(demo, "POST", "/api/workflows/wf-demo-support-agent/execute", { user_prompt: recorded.prompt, system_prompt: `  ${recorded.systemPrompt}\n` })).status).toBe(200);
   });
 });
 
