@@ -170,17 +170,33 @@ export function mergeSpans(spans: readonly GuardSpan[]): GuardSpan[] {
   return out;
 }
 
-/** Replace each span in `text` with `replacement(originalSlice, span)`, right to left so offsets stay valid. */
+/**
+ * Replace each span in `text` with `replacement(originalSlice, span)`.
+ * Overlapping spans are merged first; `replacement` is called right to left.
+ * The result is joined once, so many spans stay linear in the text length.
+ */
 export function replaceSpans(
   text: string,
   spans: readonly GuardSpan[],
   replacement: (original: string, span: GuardSpan) => string
 ): string {
-  let out = text;
-  for (const span of mergeSpans(spans).reverse()) {
-    out = out.slice(0, span.start) + replacement(text.slice(span.start, span.end), span) + out.slice(span.end);
+  const merged = mergeSpans(spans);
+  if (merged.some((span) => span.start < 0 || span.end > text.length)) {
+    // Out-of-range spans keep the right-to-left splice semantics exactly.
+    let out = text;
+    for (const span of merged.reverse()) out = out.slice(0, span.start) + replacement(text.slice(span.start, span.end), span) + out.slice(span.end);
+    return out;
   }
-  return out;
+  const replaced: string[] = new Array<string>(merged.length);
+  for (let i = merged.length - 1; i >= 0; i -= 1) replaced[i] = replacement(text.slice(merged[i]!.start, merged[i]!.end), merged[i]!);
+  const parts: string[] = [];
+  let cursor = 0;
+  for (let i = 0; i < merged.length; i += 1) {
+    parts.push(text.slice(cursor, merged[i]!.start), replaced[i]!);
+    cursor = merged[i]!.end;
+  }
+  parts.push(text.slice(cursor));
+  return parts.join("");
 }
 
 /** Shannon entropy in bits per character. */
