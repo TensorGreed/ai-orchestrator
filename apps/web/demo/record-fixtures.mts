@@ -46,6 +46,8 @@ const SAMPLE_FILES = [
 
 export const DEMO_USER = { email: "demo@example.com", password: "Demo-Only-Pass-123!", role: "admin" as const };
 const REQUESTER = { email: "alex.requester@example.com", password: "Demo-Only-Pass-456!" };
+/** What the studio's editor and chat send as `system_prompt` when no System Prompt node sets one (apps/web/src/App.tsx). */
+const STUDIO_DEFAULT_SYSTEM_PROMPT = "You are a precise tool-using AI assistant.";
 const MODEL_HOST_PLACEHOLDER = "https://models.example.com/v1";
 
 type Json = Record<string, unknown>;
@@ -423,15 +425,24 @@ async function main() {
   }
 
   // Runs, recorded as event streams. One recording per workflow; the last one wins.
-  const runs: Record<string, { prompt: string; executionId: string; frames: ReturnType<typeof parseSse> }> = {};
+  const runs: Record<string, { prompt: string; systemPrompt: string | null; executionId: string; frames: ReturnType<typeof parseSse> }> = {};
   const runStream = async (workflowId: string, prompt: string, as = cookie) => {
-    const response = await app.inject({ method: "POST", url: `/api/workflows/${workflowId}/execute/stream`, headers: { cookie: as }, payload: { user_prompt: prompt } });
+    // The studio sends its default system prompt unless the workflow has a System Prompt node with text.
+    const stored = (await must("GET", `/api/workflows/${workflowId}`)) as { nodes: Array<{ type: string; config?: { text?: unknown } }> };
+    const fromNodes = stored.nodes.some((entry) => entry.type === "system_prompt" && typeof entry.config?.text === "string" && entry.config.text.trim() !== "");
+    const systemPrompt = fromNodes ? null : STUDIO_DEFAULT_SYSTEM_PROMPT;
+    const response = await app.inject({
+      method: "POST",
+      url: `/api/workflows/${workflowId}/execute/stream`,
+      headers: { cookie: as },
+      payload: { user_prompt: prompt, ...(systemPrompt ? { system_prompt: systemPrompt } : {}) }
+    });
     if (response.statusCode !== 200) throw new Error(`stream ${workflowId} answered ${response.statusCode}: ${response.body.slice(0, 300)}`);
     const frames = parseSse(response.body);
     const started = frames.find((frame) => frame.event === "execution_started")?.data as { executionId?: string } | undefined;
     const result = frames.find((frame) => frame.event === "result")?.data as { status?: string } | undefined;
     if (!started?.executionId || !result) throw new Error(`stream ${workflowId} had no start or result frame`);
-    runs[workflowId] = { prompt, executionId: started.executionId, frames };
+    runs[workflowId] = { prompt, systemPrompt, executionId: started.executionId, frames };
     console.log(`  run ${workflowId}: ${result.status} (${frames.length} frames)`);
     return started.executionId;
   };
@@ -613,26 +624,45 @@ async function main() {
   );
 
   // Refuse to write anything credential-shaped or anything that identifies this machine or this recording.
+  // The node definitions are compiled from source (their placeholders, such as a database user "root",
+  // are product defaults), so machine names are scrubbed from and checked in everything else.
+  const definitionsKey = "GET /api/definitions";
+  const definitions = fixture.responses[definitionsKey];
+  delete fixture.responses[definitionsKey];
+  const hostName = os.hostname();
+  const userName = os.userInfo().username;
+  const scrubbedRest = JSON.parse(
+    JSON.stringify(fixture)
+      .split(JSON.stringify(hostName)).join(JSON.stringify("demo-host"))
+      .split(JSON.stringify(userName)).join(JSON.stringify("demo-user"))
+  ) as typeof fixture;
+  Object.assign(fixture, scrubbedRest);
   const sessionToken = cookie.slice(cookie.indexOf("=") + 1);
-  const machine: Array<{ name: string; value: string }> = [
-    { name: "scripted model address", value: new URL(model.baseUrl).host },
-    { name: "temp directory", value: os.tmpdir() },
-    { name: "home directory", value: os.homedir() },
-    { name: "repository path", value: repoRoot },
-    { name: "user name", value: os.userInfo().username },
-    { name: "host name", value: os.hostname() },
-    { name: "master key", value: config.SECRET_MASTER_KEY_BASE64 },
-    { name: "session cookie", value: sessionToken }
+  // Whole JSON-string tokens: "bob", /bob/, \bob\ (any length; ordinary words inside text do not count).
+  const token = (value: string) => new RegExp(`["/\\\\]${value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}["/\\\\]`);
+  // A path counts when it is followed by a separator or the end of a string, so "</root>" is not "/root".
+  const pathPattern = (value: string) => new RegExp(`${value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?=[/"\\\\])`);
+  const machine: Array<{ name: string; pattern: RegExp | null; value: string }> = [
+    { name: "scripted model address", value: new URL(model.baseUrl).host, pattern: literalPattern(new URL(model.baseUrl).host) },
+    // "/" and "/tmp" are on every machine and in ordinary paths; temp paths are scrubbed above.
+    { name: "temp directory", value: os.tmpdir(), pattern: ["/", "/tmp"].includes(os.tmpdir()) ? null : pathPattern(os.tmpdir()) },
+    { name: "home directory", value: os.homedir(), pattern: os.homedir() === "/" ? null : pathPattern(os.homedir()) },
+    { name: "repository path", value: repoRoot, pattern: pathPattern(repoRoot) },
+    { name: "user name", value: userName, pattern: token(userName) },
+    { name: "host name", value: hostName, pattern: token(hostName) },
+    { name: "master key", value: config.SECRET_MASTER_KEY_BASE64, pattern: literalPattern(config.SECRET_MASTER_KEY_BASE64) },
+    { name: "session cookie", value: sessionToken, pattern: literalPattern(sessionToken) }
   ];
-  // Names a machine shares with countless others (root, runner, localhost, ...) identify nothing and would match ordinary words.
-  const generic = new Set(["root", "user", "runner", "node", "admin", "ubuntu", "localhost", "/", "/tmp", "/root", "/home"]);
-  const checked = machine.filter((entry) => entry.value.length >= 4 && !generic.has(entry.value));
-  for (const entry of machine) if (!checked.includes(entry)) console.log(`  not checking the ${entry.name} "${entry.value}": too generic to identify anything`);
-  const leaks = findLeaks(
-    JSON.stringify(fixture),
-    checked.map((entry) => ({ name: entry.name, pattern: literalPattern(entry.value) }))
-  );
+  for (const entry of machine) if (!entry.pattern) console.log(`  not checking the ${entry.name} "${entry.value}": on every machine`);
+  const leaks = [
+    ...findLeaks(
+      JSON.stringify(fixture),
+      machine.filter((entry) => entry.pattern).map((entry) => ({ name: entry.name, pattern: entry.pattern! }))
+    ),
+    ...findLeaks(JSON.stringify(definitions ?? {}))
+  ];
   if (leaks.length) throw new Error(`Refusing to write fixtures; found ${leaks.map((leak) => `${leak.name} (${leak.match})`).join(", ")}`);
+  if (definitions) fixture.responses[definitionsKey] = definitions;
 
   fs.mkdirSync(outDir, { recursive: true });
   const { workflows: wf, workflowList: list, runs: recordedRuns, responses: recorded, posts: recordedPosts, meta } = fixture;

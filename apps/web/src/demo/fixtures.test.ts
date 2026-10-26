@@ -6,6 +6,7 @@ import meta from "./fixtures/meta.json?raw";
 import workflows from "./fixtures/workflows.json?raw";
 import runs from "./fixtures/runs.json?raw";
 import responses from "./fixtures/responses.json?raw";
+import studioSource from "../App.tsx?raw";
 
 const raw = [meta, workflows, runs, responses].join("\n");
 const get = (key: string) => demoFixtures.responses.get[key]?.body as any;
@@ -69,6 +70,17 @@ describe("demo fixtures", () => {
       expect(workflow, key).toBeTruthy();
       expect(write.match.graph.nodes.length, key).toBeGreaterThan(0);
     }
+  });
+
+  it("record each run with the system prompt the studio sends for it", () => {
+    // The editor and chat defaults in App.tsx; a run must match the one it was recorded with.
+    const defaults = [...studioSource.matchAll(/const \[(?:systemPrompt|chatSystemPrompt), set\w+\] = useState\("([^"]*)"\)/g)].map((match) => match[1]);
+    expect(defaults).toHaveLength(2);
+    expect(new Set(defaults).size).toBe(1);
+    for (const [workflowId, run] of Object.entries(demoFixtures.runs)) {
+      expect(run.systemPrompt === null || run.systemPrompt === defaults[0], workflowId).toBe(true);
+    }
+    expect(demoFixtures.runs["wf-demo-support-agent"]!.systemPrompt).toBe(defaults[0]);
   });
 
   it("hold no credentials, private hosts or real addresses", () => {

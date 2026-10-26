@@ -14,7 +14,10 @@ export const LEAK_PATTERNS: ReadonlyArray<{ name: string; pattern: RegExp }> = [
   { name: "JSON Web Token", pattern: /\beyJ[\w-]+\.[\w-]+\.[\w-]+/ },
   { name: "PEM block", pattern: /-----BEGIN [A-Z ]*-----/ },
   { name: "Bearer token", pattern: /Bearer\s+[A-Za-z0-9._~+/=-]{12,}/ },
-  { name: "recording password", pattern: /Demo-Only-Pass/ }
+  { name: "recording password", pattern: /Demo-Only-Pass/ },
+  { name: "home directory path", pattern: /(?:\/home|\/Users)\/[^/"]+\// },
+  // In JSON text a Windows path's backslashes are escaped.
+  { name: "Windows user path", pattern: /C:\\{1,2}Users\\{1,2}/i }
 ];
 
 /** Every pattern the text matches, with what matched. */

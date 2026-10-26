@@ -13,6 +13,8 @@ export interface RecordedFrame {
 
 export interface RecordedRun {
   prompt: string;
+  /** The `system_prompt` the run was sent with, as the studio sends it; null when it sent none. */
+  systemPrompt: string | null;
   executionId: string;
   frames: RecordedFrame[];
 }
