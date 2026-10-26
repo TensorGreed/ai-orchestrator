@@ -51,6 +51,56 @@ jobs:
       - name: Build docs
         run: pnpm docs:build
 
+  api-postgres:
+    name: API on Postgres
+    runs-on: ubuntu-latest
+    needs: quality
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: l2m
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      TEST_POSTGRES_URL: postgres://postgres:l2m@127.0.0.1:5432/postgres
+      REQUIRE_TEST_POSTGRES: "true"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Corepack must run BEFORE setup-node — `cache: "pnpm"` on setup-node
+      # invokes `pnpm` to compute the cache key, so pnpm has to already be
+      # on PATH at that point. The previous order failed with "Unable to
+      # locate executable file: pnpm".
+      - name: Enable Corepack
+        run: corepack enable
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "pnpm"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # Phase 13.1: the schema parity / migration walk tests, the database settings tests and the store contract
+      # suite, each against a fresh schema in the service database. The full API suite on Postgres follows once every
+      # store method has a Postgres implementation.
+      - name: Postgres schema and store contract tests
+        run: >-
+          pnpm --filter @ai-orchestrator/api exec vitest run
+          src/db/schema-parity.test.ts
+          src/db/contract
+          src/config-postgres.test.ts
+
   e2e:
     name: Web E2E
     runs-on: ubuntu-latest
