@@ -76,6 +76,30 @@ describe("maskCapturedRun", () => {
     expect(masked.report.keptFromWorkflow).toBe(1);
   });
 
+  it("keeps tool names as written in the tape, so a dictionary term inside one does not change a request hash the replay recomputes", () => {
+    const base = run();
+    const tools = [{ name: "atlas-search", description: "Search the atlas catalog", inputSchema: { type: "object", properties: { q: { type: "string" } } } }];
+    const call = { id: "c1", name: "atlas-search", arguments: { q: "x" } };
+    const request = {
+      messages: [
+        { role: "user", content: `Who is ${EMAIL}? Ask atlas.` },
+        { role: "assistant", content: "", toolCalls: [call] },
+        { role: "tool", content: "found", name: "atlas-search", toolCallId: "c1" }
+      ],
+      tools,
+      params: { model: "m" }
+    };
+    base.modelTape = { ...base.modelTape, entries: [{ ...base.modelTape.entries[0]!, request, response: { content: "", toolCalls: [call] } }] } as unknown as ModelTape;
+    const masked = maskCapturedRun(base, { key, dictionaries: [{ dataClass: "project", terms: ["atlas"], patterns: [], score: 0.9 }] });
+    const surrogate = surrogateFor(EMAIL, "email", key);
+    const entry = masked.modelTape!.entries[0]!;
+    // What the replay recomputes: the live request has the real tool definitions and tool names, with the content masked.
+    const live = canonicalTapeJson({ ...request, messages: [{ ...request.messages[0]!, content: `Who is ${surrogate}? Ask ${surrogateFor("atlas", "project", key)}.` }, request.messages[1]!, request.messages[2]!] }) as ModelTape["entries"][number]["request"];
+    expect(entry.request).toEqual(live);
+    expect(entry.requestHash).toBe(hashModelRequest(live));
+    expect((entry.response as { toolCalls: Array<{ name: string }> }).toolCalls[0]!.name).toBe("atlas-search");
+  });
+
   it("labels each node with the classes found in it and where its content came from", () => {
     const masked = maskCapturedRun(run(), { key, dictionaries: [] });
     const facts = withNodeLabels(masked.facts, masked.report, "untrusted_external");

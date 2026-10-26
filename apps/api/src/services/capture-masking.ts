@@ -62,6 +62,68 @@ const CASSETTE_SERVER_MASKED = ["label"] as const;
 /** Cassette server fields replay rebuilds from the live configuration: kept as written, and checked for collected values. */
 const CASSETTE_SERVER_IDENTIFIERS = ["key", "registryServerId", "adapterId"] as const;
 
+const isRecord = (value: unknown): value is Record<string, unknown> => Boolean(value) && typeof value === "object" && !Array.isArray(value);
+
+/**
+ * The tool names an entry's request defines. Its `tools` are the agent's tool definitions, operator configuration
+ * from the workflow or the MCP catalog, and replay rebuilds them as configured; a tool call names one of them.
+ */
+function definedToolNames(request: ModelTape["entries"][number]["request"]): Set<string> {
+  const names = new Set<string>();
+  if (Array.isArray(request.tools)) for (const tool of request.tools) if (isRecord(tool) && typeof tool.name === "string") names.add(tool.name);
+  return names;
+}
+
+const TAPE_TOOL_NAME_PLACEHOLDER = /^l2m_held_tool_(\d+)$/;
+
+/**
+ * A tape entry's content for masking: the tool definitions are left out (kept as written), and the names of
+ * those tools in tool calls and tool messages are held back and put back afterwards. The agent asks the MCP
+ * server for a tool by the name it was configured with, and the replay hashes its request with the real
+ * definitions, so a dictionary term inside a tool name must not be masked there.
+ */
+function tapeEntryContent(entry: ModelTape["entries"][number]): { content: Record<string, unknown>; restore: (masked: { request: ModelTape["entries"][number]["request"]; response?: unknown; error?: string }) => { request: ModelTape["entries"][number]["request"]; response?: unknown; error?: string } } {
+  const defined = definedToolNames(entry.request);
+  const calls = (value: unknown): Array<Record<string, unknown>> => (Array.isArray(value) ? value.filter(isRecord) : []);
+  /** Visits each message's tool-call names and a tool message's name (those that name a defined tool), in order. */
+  const nameSlots = (messages: unknown, response: unknown, held = false): Array<{ holder: Record<string, unknown>; name: string }> => {
+    const slots: Array<{ holder: Record<string, unknown>; name: string }> = [];
+    const add = (holder: Record<string, unknown>) => {
+      if (typeof holder.name !== "string") return;
+      if (held ? TAPE_TOOL_NAME_PLACEHOLDER.test(holder.name) : defined.has(holder.name)) slots.push({ holder, name: holder.name });
+    };
+    for (const message of calls(messages)) {
+      for (const call of calls(message.toolCalls)) add(call);
+      if (message.role === "tool") add(message);
+    }
+    if (isRecord(response)) for (const call of calls(response.toolCalls)) add(call);
+    return slots;
+  };
+  if (defined.size === 0) {
+    return { content: { request: entry.request, response: entry.response, error: entry.error }, restore: (masked) => masked };
+  }
+  const request = structuredClone(entry.request) as ModelTape["entries"][number]["request"];
+  const response = structuredClone(entry.response);
+  const tools = request.tools;
+  const slots = nameSlots(request.messages, response);
+  slots.forEach((slot, index) => {
+    slot.holder.name = `l2m_held_tool_${index}`;
+  });
+  const { tools: _tools, ...requestContent } = request;
+  return {
+    content: { request: requestContent, response, error: entry.error },
+    restore: (masked) => {
+      const maskedRequest = { ...(masked.request as Record<string, unknown>), tools } as ModelTape["entries"][number]["request"];
+      // Each held-back name goes back where its placeholder is.
+      for (const slot of nameSlots(maskedRequest.messages, masked.response, true)) {
+        const index = Number(TAPE_TOOL_NAME_PLACEHOLDER.exec(slot.name)![1]);
+        slot.holder.name = slots[index]?.name ?? slot.holder.name;
+      }
+      return { ...masked, request: maskedRequest };
+    }
+  };
+}
+
 /** A `tools/call` entry's `name` is the tool name from the workflow (replay asks for it as configured); a resource URI or prompt name is content. */
 function nameIsIdentifier(entry: McpCassette["entries"][number]): boolean {
   return entry.method === "tools/call";
@@ -188,7 +250,8 @@ export function* maskCapturedRunSteps(run: CapturedRunParts, options: MaskRunOpt
       run.cassette.servers.map((server) => Object.fromEntries(CASSETTE_SERVER_MASKED.filter((field) => typeof server[field] === "string").map((field) => [field, server[field]])))
     );
   }
-  run.modelTape?.entries.forEach((entry, index) => add(`tape:${index}`, { request: entry.request, response: entry.response, error: entry.error }, entry.nodeId));
+  const tapeContents = run.modelTape?.entries.map((entry) => tapeEntryContent(entry)) ?? [];
+  run.modelTape?.entries.forEach((entry, index) => add(`tape:${index}`, tapeContents[index]!.content, entry.nodeId));
   run.memorySeed?.sessions.forEach((session, index) => add(`memory:${index}`, session));
 
   const { parts: masked, report } = yield* maskRecordingSteps(parts, {
@@ -240,8 +303,8 @@ export function* maskCapturedRunSteps(run: CapturedRunParts, options: MaskRunOpt
   const modelTape: ModelTape | null = run.modelTape
     ? {
         ...run.modelTape,
-        entries: run.modelTape.entries.map((entry) => {
-          const content = next<{ request: ModelTape["entries"][number]["request"]; response?: unknown; error?: string }>();
+        entries: run.modelTape.entries.map((entry, index) => {
+          const content = tapeContents[index]!.restore(next<{ request: ModelTape["entries"][number]["request"]; response?: unknown; error?: string }>());
           const request = canonicalTapeJson(content.request) as ModelTape["entries"][number]["request"];
           const out = { ...entry, request, requestHash: hashModelRequest(request) };
           if (entry.response !== undefined) out.response = content.response;
