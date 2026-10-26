@@ -126,6 +126,45 @@ describe("eval runs in the background", () => {
     expect((await store.getEvalRun(queued.id))!.status).toBe("completed");
   });
 
+  it("wait returns once the writes queued before it have landed, not when another run's later writes do", async () => {
+    let otherRun = "";
+    let gated = false;
+    const gate = deferred();
+    const slow = new Proxy(store, {
+      get(target, prop, receiver) {
+        const value = Reflect.get(target, prop, receiver);
+        if (prop === "updateEvalRunProgress" && typeof value === "function") {
+          return async (...args: unknown[]) => {
+            if ((args[0] as { id?: string }).id === otherRun) await (gated ? gate.promise : sleep(30));
+            return (value as (...a: unknown[]) => unknown).apply(target, args);
+          };
+        }
+        return typeof value === "function" ? (value as (...a: unknown[]) => unknown).bind(target) : value;
+      }
+    });
+    const second = deferred();
+    const svc = new EvalService(slow, async (input) => {
+      if ((input.fixtureInput as { b?: number }).b === 1) await second.promise;
+      return { executionId: input.executionId, output: input.fixtureInput };
+    });
+    const first = await svc.startRun({ datasetId: (await datasetWith(svc, 1)).id, workflowId: "wf", triggeredBy: "b@example.com", triggeredByUserId: "u1" });
+    const other = (await svc.createDataset({ name: "other" }))!;
+    for (const b of [0, 1]) await svc.addFixture({ datasetId: other.id, name: `b-${b}`, input: { b }, expected: { b } });
+    const run = await svc.enqueueRun({ datasetId: other.id, workflowId: "wf", triggeredBy: "b@example.com", triggeredByUserId: "u1" });
+    otherRun = run.id;
+    await sleep(5);
+    // The other run has slow writes queued; from now on its writes hang until the gate opens.
+    const waiting = svc.wait(first.runId).then(() => "returned");
+    gated = true;
+    second.resolve();
+    expect(await Promise.race([waiting, sleep(1500).then(() => "still waiting")])).toBe("returned");
+    // The other run's writes are still held at the gate: its stored status is not final yet.
+    expect((await store.getEvalRun(run.id))!.status).not.toBe("completed");
+    gate.resolve();
+    await svc.wait(run.id);
+    expect((await store.getEvalRun(run.id))!.status).toBe("completed");
+  });
+
   it("rejects a dataset over the case limit", async () => {
     const svc = new EvalService(store, async () => ({ output: null }), undefined, { maxCases: 2 });
     const dataset = await datasetWith(svc, 3);

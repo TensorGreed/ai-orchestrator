@@ -998,8 +998,9 @@ export class EvalService {
   async wait(runId: string): Promise<void> {
     await this.active.get(runId)?.done;
     // A run that just finished leaves `active` before its last writes land (see launch); wait for those too, so the
-    // stored run is final whether or not this call found it active.
-    await this.flush();
+    // stored run is final whether or not this call found it active. The chain is serial and the run queued its last
+    // writes before it left `active`, so its current tail covers them; writes other runs queue later are not waited on.
+    await this.settled();
   }
 
   isActive(runId: string): boolean {
@@ -1193,7 +1194,7 @@ export class EvalService {
       .finally(async () => {
         this.active.delete(runId);
         this.wake(active);
-        await this.flush();
+        await this.settled();
         active.resolveDone();
       });
   }
@@ -1375,7 +1376,15 @@ export class EvalService {
     });
   }
 
-  /** Resolves once every queued bookkeeping write has finished. */
+  /**
+   * Resolves once every bookkeeping write queued so far has finished (the chain is serial, so its current tail covers
+   * them all); writes queued afterwards are not waited on. Never rejects (safely catches each write).
+   */
+  private async settled(): Promise<void> {
+    await this.bookkeeping;
+  }
+
+  /** Resolves once every queued bookkeeping write has finished, including writes queued while it waits. */
   async flush(): Promise<void> {
     let last: Promise<void>;
     do {
