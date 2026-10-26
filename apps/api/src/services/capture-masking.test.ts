@@ -9,6 +9,14 @@ import { cassetteIdentifiers, inputProvenance, maskCapturedRun, maskCapturedRunA
 const key = Buffer.from("0123456789abcdef0123456789abcdef");
 const EMAIL = "jane.doe@example.com";
 
+/** A captured workflow whose supervisor has these workers attached: the runtime names their delegate tools `delegate_to_<name>`. */
+function withWorkers(...names: string[]) {
+  return {
+    nodes: [{ id: "sup", type: "supervisor_node", name: "Sup", config: {} }, ...names.map((name, index) => ({ id: `w${index}`, type: "agent_orchestrator", name, config: {} }))],
+    edges: names.map((_, index) => ({ id: `e${index}`, source: "sup", target: `w${index}`, sourceHandle: "worker" }))
+  };
+}
+
 function run() {
   const facts: RunFacts = {
     status: "success",
@@ -91,7 +99,7 @@ describe("maskCapturedRun", () => {
       params: { model: "m" }
     };
     base.modelTape = { ...base.modelTape, entries: [{ ...base.modelTape.entries[0]!, request, response: { content: "", toolCalls: [call] } }] } as unknown as ModelTape;
-    const masked = maskCapturedRun(base, { key, dictionaries: [{ dataClass: "project", terms: ["atlas"], patterns: [], score: 0.9 }] });
+    const masked = maskCapturedRun(base, { key, dictionaries: [{ dataClass: "project", terms: ["atlas"], patterns: [], score: 0.9 }], keepLiteralsFrom: withWorkers("atlas-search") });
     const surrogate = surrogateFor(EMAIL, "email", key);
     const entry = masked.modelTape!.entries[0]!;
     // What the replay recomputes: the live request has the configured tool definitions and tool names, with the content masked.
@@ -112,16 +120,16 @@ describe("maskCapturedRun", () => {
       return base;
     };
     const schema = { type: "object", properties: { q: { type: "string" } } };
-    expect(() => maskCapturedRun(withTool({ name: "delegate_to_Helper", description: `Delegate task to Helper. Hint: mail ${EMAIL}`, inputSchema: schema }), { key, dictionaries })).toThrow(MaskIdentifierError);
-    expect(() => maskCapturedRun(withTool({ name: "delegate_to_Helper", description: "Delegate", inputSchema: { type: "object", properties: { q: { type: "string", default: EMAIL } } } }), { key, dictionaries })).toThrow(MaskIdentifierError);
-    expect(() => maskCapturedRun(withTool({ name: "delegate_to_Helper", description: "Delegate", inputSchema: { type: "object", properties: { [EMAIL]: { type: "string" } } } }), { key, dictionaries })).toThrow(MaskIdentifierError);
-    // A dictionary term the content holds (so it was collected) as a word in a held-back name or description.
-    expect(() => maskCapturedRun(withTool({ name: "delegate_to_ask-atlas", description: "Delegate", inputSchema: schema }, "Ask atlas."), { key, dictionaries })).toThrow(MaskIdentifierError);
-    expect(() => maskCapturedRun(withTool({ name: "delegate_to_Helper", description: "Delegate to the atlas team", inputSchema: schema }, "Ask atlas."), { key, dictionaries })).toThrow(MaskIdentifierError);
+    expect(() => maskCapturedRun(withTool({ name: "delegate_to_Helper", description: `Delegate task to Helper. Hint: mail ${EMAIL}`, inputSchema: schema }), { key, dictionaries, keepLiteralsFrom: withWorkers("Helper") })).toThrow(MaskIdentifierError);
+    expect(() => maskCapturedRun(withTool({ name: "delegate_to_Helper", description: "Delegate", inputSchema: { type: "object", properties: { q: { type: "string", default: EMAIL } } } }), { key, dictionaries, keepLiteralsFrom: withWorkers("Helper") })).toThrow(MaskIdentifierError);
+    expect(() => maskCapturedRun(withTool({ name: "delegate_to_Helper", description: "Delegate", inputSchema: { type: "object", properties: { [EMAIL]: { type: "string" } } } }), { key, dictionaries, keepLiteralsFrom: withWorkers("Helper") })).toThrow(MaskIdentifierError);
+    // A dictionary term the content holds (so it was collected) as a word in a held-back definition.
+    expect(() => maskCapturedRun(withTool({ name: "agent_clarify", description: "Ask the atlas user", inputSchema: schema }, "Ask atlas."), { key, dictionaries, keepLiteralsFrom: withWorkers("Helper") })).toThrow(MaskIdentifierError);
+    expect(() => maskCapturedRun(withTool({ name: "delegate_to_Helper", description: "Delegate to the atlas team", inputSchema: schema }, "Ask atlas."), { key, dictionaries, keepLiteralsFrom: withWorkers("Helper") })).toThrow(MaskIdentifierError);
     // The error never repeats the value.
     let message = "";
     try {
-      maskCapturedRun(withTool({ name: "delegate_to_Helper", description: `owner ${EMAIL}`, inputSchema: schema }), { key, dictionaries });
+      maskCapturedRun(withTool({ name: "delegate_to_Helper", description: `owner ${EMAIL}`, inputSchema: schema }), { key, dictionaries, keepLiteralsFrom: withWorkers("Helper") });
     } catch (error) {
       message = (error as Error).message;
     }
@@ -158,6 +166,63 @@ describe("maskCapturedRun", () => {
     expect(tapeTools).toEqual(cassetteTools.map(expose));
     const live = canonicalTapeJson({ ...request, messages: [{ role: "user", content: `Who is ${surrogate}?` }], tools: cassetteTools.map(expose) }) as ModelTape["entries"][number]["request"];
     expect(masked.modelTape!.entries[0]!.requestHash).toBe(hashModelRequest(live));
+  });
+
+  // Re-review round 2 N1: only names the runtime itself builds are held back; any other tool is content.
+  it("masks an MCP tool whose tools/list answer is missing from a truncated cassette, and a tool with no runtime-built name", () => {
+    const OTHER = "bob.smith@corp-example.com";
+    const tools = [
+      { name: "http_mcp__lookup", description: `[http_mcp] Look up contacts; owner ${OTHER}`, inputSchema: { type: "object" } },
+      { name: "manual_lookup", description: "Find a contact", inputSchema: { type: "object", properties: { q: { type: "string", default: OTHER } } } },
+      // Named like a delegate tool, but no attached worker has that name: content too.
+      { name: "delegate_to_Ghost", description: `Delegate task to Ghost. Hint: ${OTHER}`, inputSchema: { type: "object" } }
+    ];
+    const base = run();
+    base.cassette = { ...base.cassette!, truncated: true, servers: [{ key: "registry:crm", registryServerId: "crm", adapterId: "http_mcp" }], entries: [] } as unknown as McpCassette;
+    const request = { messages: [{ role: "user", content: "Who owns the contacts?" }], tools, params: { model: "m" } };
+    base.modelTape = { ...base.modelTape, entries: [{ ...base.modelTape.entries[0]!, request }] } as unknown as ModelTape;
+    const masked = maskCapturedRun(base, { key, dictionaries: [], keepLiteralsFrom: withWorkers("Helper") });
+    expect(JSON.stringify(masked)).not.toContain(OTHER);
+    const surrogate = surrogateFor(OTHER, "email", key);
+    const taped = (masked.modelTape!.entries[0]!.request as unknown as { tools: typeof tools }).tools;
+    expect(taped[0]!.description).toBe(`[http_mcp] Look up contacts; owner ${surrogate}`);
+    expect(JSON.stringify(taped[1])).toContain(surrogate);
+    expect(taped[2]!.description).toContain(surrogate);
+  });
+
+  it("holds back only the runtime's own tool names: agent_clarify, session_cache_*, and delegate tools of attached workers", () => {
+    const dictionaries = [{ dataClass: "project", terms: ["atlas"], patterns: [], score: 0.9 }];
+    const tools = [
+      { name: "agent_clarify", description: "Ask the atlas user", inputSchema: { type: "object" } },
+      { name: "session_cache_get", description: "Get an atlas record", inputSchema: { type: "object" } },
+      { name: "delegate_to_atlas_Helper", description: "Delegate task to atlas-Helper.", inputSchema: { type: "object" } }
+    ];
+    const base = run();
+    const request = { messages: [{ role: "user", content: `Who is ${EMAIL}?` }], tools, params: { model: "m" } };
+    base.modelTape = { ...base.modelTape, entries: [{ ...base.modelTape.entries[0]!, request }] } as unknown as ModelTape;
+    // The worker's name is sanitised the way the engine builds the delegate tool name.
+    const masked = maskCapturedRun(base, { key, dictionaries, keepLiteralsFrom: withWorkers("atlas Helper") });
+    expect((masked.modelTape!.entries[0]!.request as unknown as { tools: typeof tools }).tools).toEqual(tools);
+  });
+
+  // Re-review round 2 N2: every scalar in a held-back definition is checked, numbers as their decimal text.
+  it("drops the capture when a held-back schema holds a collected value as a number (default, enum, examples, const at any depth)", () => {
+    const CARD = "4111111111111111";
+    const withSchema = (inputSchema: Record<string, unknown>) => {
+      const base = run();
+      base.input = { user_prompt: `card ${CARD}`, from: "x" };
+      const request = { messages: [{ role: "user", content: `Pay with ${CARD}` }], tools: [{ name: "delegate_to_Helper", description: "Delegate", inputSchema }], params: { model: "m" } };
+      base.modelTape = { ...base.modelTape, entries: [{ ...base.modelTape.entries[0]!, request }] } as unknown as ModelTape;
+      return base;
+    };
+    const options = { key, dictionaries: [], keepLiteralsFrom: withWorkers("Helper") };
+    const card = Number(CARD);
+    for (const field of [{ default: card }, { enum: [card] }, { examples: [card] }, { const: card }]) {
+      expect(() => maskCapturedRun(withSchema({ type: "object", properties: { n: { type: "number", ...field } } }), options)).toThrow(MaskIdentifierError);
+      expect(() => maskCapturedRun(withSchema({ type: "object", properties: { a: { type: "object", properties: { b: { type: "array", items: { type: "number", ...field } } } } } }), options)).toThrow(MaskIdentifierError);
+    }
+    // A number nobody collected stays as written.
+    expect(() => maskCapturedRun(withSchema({ type: "object", properties: { n: { type: "number", default: 3 } } }), options)).not.toThrow();
   });
 
   it("restores held-back tool-call names by position, never by a name the model made up", () => {

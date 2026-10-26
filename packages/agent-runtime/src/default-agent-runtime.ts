@@ -77,6 +77,9 @@ const CLARIFY_TOOL_NAME = "agent_clarify";
 
 const SESSION_CACHE_LIST_TOOL_NAME = "session_cache_list";
 const SESSION_CACHE_GET_TOOL_NAME = "session_cache_get";
+
+/** The names of the tools the agent runtime adds by itself (never from an MCP server or the workflow). */
+export const RUNTIME_INTERNAL_TOOL_NAMES: readonly string[] = Object.freeze([CLARIFY_TOOL_NAME, SESSION_CACHE_LIST_TOOL_NAME, SESSION_CACHE_GET_TOOL_NAME]);
 const SESSION_CACHE_DEFAULT_LIST_LIMIT = 10;
 const SESSION_CACHE_MAX_LIST_LIMIT = 50;
 const SESSION_CACHE_SUMMARY_LIMITS: NormalizedToolOutputLimits = {

@@ -734,7 +734,8 @@ function spend(budget: WalkBudget, text: string): boolean {
   return false;
 }
 
-function numberText(value: number): string | null {
+/** The text a number is scanned and masked as (its decimal form); null for NaN and infinities. */
+export function numberText(value: number): string | null {
   return Number.isFinite(value) ? String(value) : null;
 }
 
