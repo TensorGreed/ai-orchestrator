@@ -115,3 +115,19 @@ describe("dlp: custom pattern safety", () => {
     expect(Date.now() - started).toBeLessThan(1000);
   });
 });
+
+describe("card numbers next to hyphens", () => {
+  it("finds a card glued to a word by a hyphen", () => {
+    for (const text of ["cust-4111111111111111", "4111111111111111-cust", "id=cust-4111111111111111-x", "ref_cust-4111 1111 1111 1111"]) {
+      expect(classes(text), text).toContain("card_number");
+    }
+  });
+  it("leaves order ids, phones, dates, UUIDs, SKUs and versions alone", () => {
+    const benign = [
+      "order 20240115-0001234567", "ORD-2024-0115-123456789", "call 555-123-4567", "+1-800-555-0199",
+      "2024-01-15", "2024-01-15T10:20:30Z", "550e8400-e29b-41d4-a716-446655440000", "SKU-1234-5678-9012",
+      "SKU-123456789012", "v1.2.3-4567", "1.22.333-4444444444", "ticket 12-4111111111111111"
+    ];
+    for (const text of benign) expect(classes(text), text).not.toContain("card_number");
+  });
+});

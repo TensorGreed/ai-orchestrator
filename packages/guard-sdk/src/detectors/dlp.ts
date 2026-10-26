@@ -119,7 +119,8 @@ export const DEFAULT_NATIONAL_IDS: NationalIdSpec[] = [
 
 const EMAIL = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)*\.[A-Za-z]{2,24}\b/g;
 const PHONE = /(?<![\w.-])(?:\+?\d{1,3}[\s.-]?)?(?:\(\d{2,4}\)[\s.-]?|\d{2,4}[\s.-])\d{3,4}[\s.-]?\d{3,4}(?![\w-])/g;
-const CARD = /(?<![\d-])(?:\d[ -]?){12,18}\d(?![\d-])/g;
+// A hyphen next to a letter (`cust-4111…`) is a separator; a hyphen next to another digit is part of a longer number.
+const CARD = /(?<!\d)(?<!\d-)(?:\d[ -]?){12,18}\d(?!\d)(?!-\d)/g;
 const IBAN = /\b[A-Z]{2}\d{2}(?:[ -]?[A-Z0-9]{4}){2,7}(?:[ -]?[A-Z0-9]{1,4})?\b/g;
 const JWT = /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g;
 const PRIVATE_KEY = /-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----[\s\S]*?-----END (?:[A-Z ]+ )?PRIVATE KEY-----|-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----[^\n]*/g;
