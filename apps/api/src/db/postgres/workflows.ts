@@ -4,24 +4,13 @@
  * StoreNotImplementedError and are listed in UNIMPLEMENTED_METHODS (remove both together when implementing one).
  */
 import { DEFAULT_PROJECT_ID, type Folder, type Project, type Workflow, type WorkflowListItem } from "@ai-orchestrator/shared";
-import { ProjectNotEmptyError, StoreNotImplementedError } from "../store-errors.js";
+import type { PoolClient } from "pg";
+import { ProjectNotEmptyError } from "../store-errors.js";
 import { type Store } from "../store.js";
 import { parseTagsJson, toNum, toStr } from "./helpers.js";
 import type { PgContext } from "./context.js";
 
-export const UNIMPLEMENTED_METHODS: readonly (keyof Store)[] = [
-  "listWorkflowVersions",
-  "getWorkflowVersion",
-  "writeWorkflowVersion",
-  "pruneWorkflowVersions",
-  "maxWorkflowVersionNumber",
-  "appendWorkflowVersion",
-  "listWorkflowShares",
-  "listWorkflowsSharedToProject",
-  "upsertWorkflowShare",
-  "removeWorkflowShare",
-  "getWorkflowCreatedBy"
-];
+export const UNIMPLEMENTED_METHODS: readonly (keyof Store)[] = [];
 
 // Workflow methods
 export async function listWorkflows(ctx: PgContext, options: {
@@ -157,20 +146,52 @@ export async function upsertWorkflow(ctx: PgContext, workflow: Workflow, options
 export async function deleteWorkflow(ctx: PgContext, id: string): Promise<boolean> {
   // Read before the row goes: its nodes name its legacy session namespaces.
   const legacyNamespaces = ((await ctx.store.getWorkflow(id))?.nodes ?? []).map((node) => `${id}:${node.id}`);
-  await ctx.execute(`DELETE FROM execution_history WHERE workflow_id = $1`, [id]);
-  await ctx.execute(`DELETE FROM workflow_executions WHERE workflow_id = $1`, [id]);
-  // A re-created workflow with the same id must not inherit the old one's
-  // queue rows or its legacy default-namespace session state (exactly
-  // `<workflowId>:<nodeId>` for its nodes).
-  await ctx.execute(`DELETE FROM execution_queue WHERE workflow_id = $1`, [id]);
-  await ctx.execute(`DELETE FROM execution_queue_dlq WHERE workflow_id = $1`, [id]);
-  if (legacyNamespaces.length > 0) {
-    for (const table of ["session_memory", "session_tool_cache", "session_artifacts"]) {
-      await ctx.execute(`DELETE FROM ${table} WHERE namespace = ANY($1::text[])`, [legacyNamespaces]);
+  return ctx.withTransaction(async (client) => {
+    const run = (sql: string, params: unknown[]) => client.query(sql, params);
+    await run(`DELETE FROM execution_history WHERE workflow_id = $1`, [id]);
+    await run(`DELETE FROM workflow_executions WHERE workflow_id = $1`, [id]);
+    // Phase 11.2 — decided requests stay as the audit trail; pending ones end with their paused run.
+    const now = new Date().toISOString();
+    await run(
+      `UPDATE approval_requests SET status = 'canceled', reason = 'The workflow was deleted', decided_at = $1, updated_at = $1
+         WHERE workflow_id = $2 AND status = 'pending'`,
+      [now, id]
+    );
+    await run(`UPDATE approval_requests SET workflow_deleted_at = $1 WHERE workflow_id = $2 AND workflow_deleted_at IS NULL`, [now, id]);
+    await run(`DELETE FROM mcp_cassettes WHERE workflow_id = $1`, [id]);
+    await run(`DELETE FROM replay_recordings WHERE workflow_id = $1`, [id]);
+    await run(`DELETE FROM replay_capture_settings WHERE workflow_id = $1`, [id]);
+    await run(`DELETE FROM guard_events WHERE workflow_id = $1`, [id]);
+    await run(`DELETE FROM guard_bindings WHERE scope = 'workflow' AND scope_id = $1`, [id]);
+    // Workflow ids are chosen by the client, so a new workflow can reuse a deleted one's id: nothing keyed by the
+    // old id may carry over (versions, shares, queue and dead-letter rows, eval runs, elicitations, and session state
+    // under the old workflow's legacy default namespaces, exactly `<workflowId>:<nodeId>` for its nodes).
+    await run(`DELETE FROM workflow_versions WHERE workflow_id = $1`, [id]);
+    await run(`DELETE FROM workflow_shares WHERE workflow_id = $1`, [id]);
+    await run(`DELETE FROM execution_queue WHERE workflow_id = $1`, [id]);
+    await run(`DELETE FROM execution_queue_dlq WHERE workflow_id = $1`, [id]);
+    await run(`DELETE FROM eval_results WHERE run_id IN (SELECT id FROM eval_runs WHERE workflow_id = $1)`, [id]);
+    await run(`DELETE FROM eval_runs WHERE workflow_id = $1`, [id]);
+    await run(`DELETE FROM mcp_elicitations WHERE workflow_id = $1`, [id]);
+    // Phase 15.4 — the release gate and history outlive the workflow; pending release and gate case requests end.
+    await run(
+      `UPDATE release_approval_requests SET status = 'canceled', decided_by = 'system', decided_at = $1, decision_reason = 'The workflow was deleted', updated_at = $1
+         WHERE workflow_id = $2 AND status = 'pending'`,
+      [now, id]
+    );
+    await run(
+      `UPDATE gate_case_requests SET status = 'canceled', decided_by = 'system', decided_at = $1, decision_reason = 'The workflow was deleted', updated_at = $1
+         WHERE workflow_id = $2 AND status = 'pending'`,
+      [now, id]
+    );
+    if (legacyNamespaces.length > 0) {
+      for (const table of ["session_memory", "session_tool_cache", "session_artifacts"]) {
+        await run(`DELETE FROM ${table} WHERE namespace = ANY($1::text[])`, [legacyNamespaces]);
+      }
     }
-  }
-  const result = await ctx.pool.query(`DELETE FROM workflows WHERE id = $1`, [id]);
-  return (result.rowCount ?? 0) > 0;
+    const result = await run(`DELETE FROM workflows WHERE id = $1`, [id]);
+    return (result.rowCount ?? 0) > 0;
+  });
 }
 
 export async function countWorkflows(ctx: PgContext): Promise<number> {
@@ -186,7 +207,7 @@ export async function listProjects(ctx: PgContext): Promise<Project[]> {
     created_by: string | null;
     created_at: string;
     updated_at: string;
-  }>(`SELECT id, name, description, created_by, created_at, updated_at FROM projects ORDER BY name ASC`);
+  }>(`SELECT id, name, description, created_by, created_at, updated_at FROM projects ORDER BY name COLLATE "C" ASC`);
   return rows.map((row) => ({
     id: toStr(row.id),
     name: toStr(row.name),
@@ -252,26 +273,32 @@ export async function deleteProject(ctx: PgContext, id: string): Promise<boolean
   if (id === DEFAULT_PROJECT_ID) {
     throw new Error("Cannot delete the default project.");
   }
-  const existing = await ctx.store.getProject(id);
-  if (!existing) return false;
-  // Never move a project's workflows or secrets into the default project.
-  const count = async (table: string) =>
-    toNum((await ctx.queryOne<{ count: string }>(`SELECT COUNT(*) as count FROM ${table} WHERE project_id = $1`, [id]))?.count ?? 0);
-  const counts = { workflows: await count("workflows"), secrets: await count("secrets"),
-    knowledgeBases: await count("knowledge_bases"),
-    mcpServers: await count("mcp_servers"),
-    evalDatasets: await count("eval_datasets")
-  };
-  if (Object.values(counts).some((value) => value > 0)) throw new ProjectNotEmptyError(counts);
-  await ctx.execute(`DELETE FROM folders WHERE project_id = $1`, [id]);
-  await ctx.execute(`DELETE FROM variables WHERE project_id = $1`, [id]);
-  await ctx.execute(`DELETE FROM guard_bindings WHERE scope = 'project' AND scope_id = $1`, [id]);
-  // Memberships, roles and shares must not revive with a re-created id.
-  for (const table of ["user_project_roles", "custom_roles", "workflow_shares", "secret_shares"]) {
-    await ctx.execute(`DELETE FROM ${table} WHERE project_id = $1`, [id]);
-  }
-  await ctx.execute(`DELETE FROM projects WHERE id = $1`, [id]);
-  return true;
+  // One transaction: the emptiness check and the deletes see the same rows. user_project_roles has a foreign key to
+  // projects on Postgres, so its rows go before the project row.
+  return ctx.withTransaction(async (client) => {
+    const existing = await client.query(`SELECT id FROM projects WHERE id = $1 FOR UPDATE`, [id]);
+    if (existing.rows.length === 0) return false;
+    // Never move a project's workflows or secrets into the default project.
+    const count = async (table: string) =>
+      toNum((await client.query<{ count: string }>(`SELECT COUNT(*) AS count FROM ${table} WHERE project_id = $1`, [id])).rows[0]?.count ?? 0);
+    const counts = {
+      workflows: await count("workflows"),
+      secrets: await count("secrets"),
+      knowledgeBases: await count("knowledge_bases"),
+      mcpServers: await count("mcp_servers"),
+      evalDatasets: await count("eval_datasets")
+    };
+    if (Object.values(counts).some((value) => value > 0)) throw new ProjectNotEmptyError(counts);
+    await client.query(`DELETE FROM folders WHERE project_id = $1`, [id]);
+    await client.query(`DELETE FROM variables WHERE project_id = $1`, [id]);
+    await client.query(`DELETE FROM guard_bindings WHERE scope = 'project' AND scope_id = $1`, [id]);
+    // Memberships, roles and shares must not revive with a re-created id.
+    for (const table of ["user_project_roles", "custom_roles", "workflow_shares", "secret_shares"]) {
+      await client.query(`DELETE FROM ${table} WHERE project_id = $1`, [id]);
+    }
+    await client.query(`DELETE FROM projects WHERE id = $1`, [id]);
+    return true;
+  });
 }
 
 export async function listFolders(ctx: PgContext, projectId?: string): Promise<Folder[]> {
@@ -284,7 +311,7 @@ export async function listFolders(ctx: PgContext, projectId?: string): Promise<F
         created_at: string;
         updated_at: string;
       }>(
-        `SELECT id, name, parent_id, project_id, created_at, updated_at FROM folders WHERE project_id = $1 ORDER BY name ASC`,
+        `SELECT id, name, parent_id, project_id, created_at, updated_at FROM folders WHERE project_id = $1 ORDER BY name COLLATE "C" ASC`,
         [projectId]
       )
     : await ctx.query<{
@@ -294,7 +321,7 @@ export async function listFolders(ctx: PgContext, projectId?: string): Promise<F
         project_id: string;
         created_at: string;
         updated_at: string;
-      }>(`SELECT id, name, parent_id, project_id, created_at, updated_at FROM folders ORDER BY project_id, name`);
+      }>(`SELECT id, name, parent_id, project_id, created_at, updated_at FROM folders ORDER BY project_id COLLATE "C", name COLLATE "C"`);
   return rows.map((row) => ({
     id: toStr(row.id),
     name: toStr(row.name),
@@ -411,7 +438,7 @@ export async function listTemplates(ctx: PgContext, filters?: { category?: strin
     created_at: string; updated_at: string;
   }>(
     `SELECT id, name, description, category, tags, author, node_count, created_at, updated_at
-       FROM workflow_templates ${where} ORDER BY category, name`,
+       FROM workflow_templates ${where} ORDER BY category COLLATE "C", name COLLATE "C"`,
     params
   );
   return rows.map((row) => {
@@ -504,46 +531,167 @@ export async function countTemplates(ctx: PgContext): Promise<number> {
   return row ? toNum(row.count) : 0;
 }
 
-export async function listWorkflowVersions(_ctx: PgContext, ..._args: Parameters<Store["listWorkflowVersions"]>): ReturnType<Store["listWorkflowVersions"]> {
-  throw new StoreNotImplementedError("listWorkflowVersions");
+type WorkflowVersionRow = {
+  id: string;
+  workflow_id: string;
+  version: number;
+  workflow_json: string;
+  created_by: string | null;
+  change_note: string | null;
+  created_at: string;
+};
+
+export async function listWorkflowVersions(ctx: PgContext, workflowId: string, limit = 100): ReturnType<Store["listWorkflowVersions"]> {
+  const rows = await ctx.query<Omit<WorkflowVersionRow, "workflow_json">>(
+    `SELECT id, workflow_id, version, created_by, change_note, created_at
+       FROM workflow_versions WHERE workflow_id = $1 ORDER BY version DESC LIMIT $2`,
+    [workflowId, Math.max(1, Math.min(500, limit))]
+  );
+  return rows.map((row) => ({
+    id: toStr(row.id),
+    workflowId: toStr(row.workflow_id),
+    version: toNum(row.version),
+    createdBy: row.created_by ? toStr(row.created_by) : null,
+    changeNote: row.change_note ? toStr(row.change_note) : null,
+    createdAt: toStr(row.created_at)
+  }));
 }
 
-export async function getWorkflowVersion(_ctx: PgContext, ..._args: Parameters<Store["getWorkflowVersion"]>): ReturnType<Store["getWorkflowVersion"]> {
-  throw new StoreNotImplementedError("getWorkflowVersion");
+export async function getWorkflowVersion(ctx: PgContext, workflowId: string, version: number): ReturnType<Store["getWorkflowVersion"]> {
+  const row = await ctx.queryOne<WorkflowVersionRow>(
+    `SELECT id, workflow_id, version, workflow_json, created_by, change_note, created_at
+       FROM workflow_versions WHERE workflow_id = $1 AND version = $2`,
+    [workflowId, version]
+  );
+  if (!row) return null;
+  return {
+    id: toStr(row.id),
+    workflowId: toStr(row.workflow_id),
+    version: toNum(row.version),
+    workflowJson: toStr(row.workflow_json),
+    createdBy: row.created_by ? toStr(row.created_by) : null,
+    changeNote: row.change_note ? toStr(row.change_note) : null,
+    createdAt: toStr(row.created_at)
+  };
 }
 
-export async function writeWorkflowVersion(_ctx: PgContext, ..._args: Parameters<Store["writeWorkflowVersion"]>): ReturnType<Store["writeWorkflowVersion"]> {
-  throw new StoreNotImplementedError("writeWorkflowVersion");
+export async function writeWorkflowVersion(ctx: PgContext, entry: Parameters<Store["writeWorkflowVersion"]>[0]): Promise<void> {
+  await ctx.execute(
+    `INSERT INTO workflow_versions (id, workflow_id, version, workflow_json, created_by, change_note, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       ON CONFLICT (workflow_id, version) DO UPDATE SET
+         workflow_json = EXCLUDED.workflow_json,
+         change_note = EXCLUDED.change_note,
+         created_by = EXCLUDED.created_by`,
+    [entry.id, entry.workflowId, entry.version, entry.workflowJson, entry.createdBy ?? null, entry.changeNote ?? null, new Date().toISOString()]
+  );
 }
 
-export async function pruneWorkflowVersions(_ctx: PgContext, ..._args: Parameters<Store["pruneWorkflowVersions"]>): ReturnType<Store["pruneWorkflowVersions"]> {
-  throw new StoreNotImplementedError("pruneWorkflowVersions");
+type Queryable = Pick<PoolClient, "query">;
+
+/** Keeps the newest `keep` unpinned versions; pinned ones never count and are never pruned (as SQLite). */
+async function pruneVersions(db: Queryable, workflowId: string, keep: number): Promise<number> {
+  if (keep <= 0) return 0;
+  const result = await db.query(
+    `DELETE FROM workflow_versions WHERE id IN (
+       SELECT id FROM workflow_versions WHERE workflow_id = $1 AND pinned = 0 ORDER BY version DESC OFFSET $2
+     )`,
+    [workflowId, keep]
+  );
+  return result.rowCount ?? 0;
 }
 
-export async function maxWorkflowVersionNumber(_ctx: PgContext, ..._args: Parameters<Store["maxWorkflowVersionNumber"]>): ReturnType<Store["maxWorkflowVersionNumber"]> {
-  throw new StoreNotImplementedError("maxWorkflowVersionNumber");
+export async function pruneWorkflowVersions(ctx: PgContext, workflowId: string, keep: number): Promise<number> {
+  return pruneVersions(ctx.pool, workflowId, keep);
 }
 
-export async function appendWorkflowVersion(_ctx: PgContext, ..._args: Parameters<Store["appendWorkflowVersion"]>): ReturnType<Store["appendWorkflowVersion"]> {
-  throw new StoreNotImplementedError("appendWorkflowVersion");
+export async function maxWorkflowVersionNumber(ctx: PgContext, workflowId: string): Promise<number> {
+  const row = await ctx.queryOne<{ max_version: number | null }>(
+    `SELECT MAX(version) AS max_version FROM workflow_versions WHERE workflow_id = $1`,
+    [workflowId]
+  );
+  return row && row.max_version !== null ? toNum(row.max_version) : 0;
 }
 
-export async function listWorkflowShares(_ctx: PgContext, ..._args: Parameters<Store["listWorkflowShares"]>): ReturnType<Store["listWorkflowShares"]> {
-  throw new StoreNotImplementedError("listWorkflowShares");
+const VERSION_NUMBER_CONSTRAINT = "workflow_versions_workflow_id_version_key";
+const APPEND_ATTEMPTS = 20;
+
+/**
+ * Takes the next version number, inserts it and prunes, in one transaction. Two appends that read the same MAX both
+ * try to insert N; UNIQUE (workflow_id, version) refuses the second, which aborts its transaction, so the whole
+ * transaction is retried and takes N+1. A duplicate `id` (the primary key) is the caller's error and is rethrown.
+ */
+export async function appendWorkflowVersion(ctx: PgContext, input: Parameters<Store["appendWorkflowVersion"]>[0]): ReturnType<Store["appendWorkflowVersion"]> {
+  const createdAt = new Date().toISOString();
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      const version = await ctx.withTransaction(async (client) => {
+        const row = (await client.query<{ max_version: number | null }>(
+          `SELECT MAX(version) AS max_version FROM workflow_versions WHERE workflow_id = $1`,
+          [input.workflowId]
+        )).rows[0];
+        const next = (row && row.max_version !== null ? toNum(row.max_version) : 0) + 1;
+        await client.query(
+          `INSERT INTO workflow_versions (id, workflow_id, version, workflow_json, created_by, change_note, created_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+          [input.id, input.workflowId, next, input.workflowJson, input.createdBy ?? null, input.changeNote ?? null, createdAt]
+        );
+        if (input.retention > 0) await pruneVersions(client, input.workflowId, input.retention);
+        return next;
+      });
+      return { id: input.id, version, createdAt };
+    } catch (error) {
+      const pgError = error as { code?: string; constraint?: string };
+      if (pgError.code === "23505" && pgError.constraint === VERSION_NUMBER_CONSTRAINT && attempt < APPEND_ATTEMPTS) continue;
+      throw error;
+    }
+  }
 }
 
-export async function listWorkflowsSharedToProject(_ctx: PgContext, ..._args: Parameters<Store["listWorkflowsSharedToProject"]>): ReturnType<Store["listWorkflowsSharedToProject"]> {
-  throw new StoreNotImplementedError("listWorkflowsSharedToProject");
+export async function listWorkflowShares(ctx: PgContext, workflowId: string): ReturnType<Store["listWorkflowShares"]> {
+  // SQLite reads these through the (workflow_id, project_id) primary key, so in project id order.
+  const rows = await ctx.query<{ workflow_id: string; project_id: string; access_level: string; shared_by: string | null; created_at: string }>(
+    `SELECT workflow_id, project_id, access_level, shared_by, created_at
+       FROM workflow_shares WHERE workflow_id = $1 ORDER BY project_id COLLATE "C"`,
+    [workflowId]
+  );
+  return rows.map((row) => ({
+    workflowId: toStr(row.workflow_id),
+    projectId: toStr(row.project_id),
+    accessLevel: toStr(row.access_level),
+    sharedBy: row.shared_by ? toStr(row.shared_by) : null,
+    createdAt: toStr(row.created_at)
+  }));
 }
 
-export async function upsertWorkflowShare(_ctx: PgContext, ..._args: Parameters<Store["upsertWorkflowShare"]>): ReturnType<Store["upsertWorkflowShare"]> {
-  throw new StoreNotImplementedError("upsertWorkflowShare");
+export async function listWorkflowsSharedToProject(ctx: PgContext, projectId: string): ReturnType<Store["listWorkflowsSharedToProject"]> {
+  // SQLite reads these through idx_workflow_shares_project_id: ties in project id fall back to rowid (insertion) order.
+  const rows = await ctx.query<{ workflow_id: string; project_id: string; access_level: string }>(
+    `SELECT workflow_id, project_id, access_level FROM workflow_shares WHERE project_id = $1 ORDER BY created_at, workflow_id COLLATE "C"`,
+    [projectId]
+  );
+  return rows.map((row) => ({
+    workflowId: toStr(row.workflow_id),
+    projectId: toStr(row.project_id),
+    accessLevel: toStr(row.access_level)
+  }));
 }
 
-export async function removeWorkflowShare(_ctx: PgContext, ..._args: Parameters<Store["removeWorkflowShare"]>): ReturnType<Store["removeWorkflowShare"]> {
-  throw new StoreNotImplementedError("removeWorkflowShare");
+export async function upsertWorkflowShare(ctx: PgContext, input: Parameters<Store["upsertWorkflowShare"]>[0]): Promise<void> {
+  await ctx.execute(
+    `INSERT INTO workflow_shares (workflow_id, project_id, access_level, shared_by, created_at)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (workflow_id, project_id) DO UPDATE SET access_level = EXCLUDED.access_level`,
+    [input.workflowId, input.projectId, input.accessLevel, input.sharedBy ?? null, new Date().toISOString()]
+  );
 }
 
-export async function getWorkflowCreatedBy(_ctx: PgContext, ..._args: Parameters<Store["getWorkflowCreatedBy"]>): ReturnType<Store["getWorkflowCreatedBy"]> {
-  throw new StoreNotImplementedError("getWorkflowCreatedBy");
+export async function removeWorkflowShare(ctx: PgContext, workflowId: string, projectId: string): Promise<boolean> {
+  const result = await ctx.pool.query(`DELETE FROM workflow_shares WHERE workflow_id = $1 AND project_id = $2`, [workflowId, projectId]);
+  return (result.rowCount ?? 0) > 0;
+}
+
+export async function getWorkflowCreatedBy(ctx: PgContext, id: string): Promise<string | null> {
+  const row = await ctx.queryOne<{ created_by: string | null }>(`SELECT created_by FROM workflows WHERE id = $1`, [id]);
+  return row?.created_by ? toStr(row.created_by) : null;
 }

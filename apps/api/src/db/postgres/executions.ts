@@ -3,17 +3,12 @@
  * Plain functions over a PgContext; PostgresStore delegates here. Methods that are not implemented yet throw
  * StoreNotImplementedError and are listed in UNIMPLEMENTED_METHODS (remove both together when implementing one).
  */
-import { StoreNotImplementedError } from "../store-errors.js";
+import type { PoolClient } from "pg";
 import { type CancelExecutionResult, type Store } from "../store.js";
 import { parseJsonSafe, toNum, toStr } from "./helpers.js";
 import type { PgContext } from "./context.js";
 
-export const UNIMPLEMENTED_METHODS: readonly (keyof Store)[] = [
-  "claimWorkflowExecutionForResume",
-  "listResumingWorkflowExecutionIds",
-  "listResumingWorkflowExecutions",
-  "releaseWorkflowExecutionClaim"
-];
+export const UNIMPLEMENTED_METHODS: readonly (keyof Store)[] = [];
 
 export async function saveExecutionHistory(ctx: PgContext, input: {
   id: string;
@@ -462,18 +457,47 @@ export async function deleteWorkflowExecution(ctx: PgContext, id: string): Promi
   return (result.rowCount ?? 0) > 0;
 }
 
-export async function claimWorkflowExecutionForResume(_ctx: PgContext, ..._args: Parameters<Store["claimWorkflowExecutionForResume"]>): ReturnType<Store["claimWorkflowExecutionForResume"]> {
-  throw new StoreNotImplementedError("claimWorkflowExecutionForResume");
+type Queryable = Pick<PoolClient, "query">;
+
+/** Moves a paused run from `waiting_approval` to `resuming`; false when it was not waiting (someone else claimed it). */
+export async function claimExecutionForResumeOn(db: Queryable, id: string): Promise<boolean> {
+  const result = await db.query(
+    `UPDATE workflow_executions SET status = 'resuming', updated_at = $1 WHERE id = $2 AND status = 'waiting_approval'`,
+    [new Date().toISOString(), id]
+  );
+  return (result.rowCount ?? 0) > 0;
 }
 
-export async function listResumingWorkflowExecutionIds(_ctx: PgContext, ..._args: Parameters<Store["listResumingWorkflowExecutionIds"]>): ReturnType<Store["listResumingWorkflowExecutionIds"]> {
-  throw new StoreNotImplementedError("listResumingWorkflowExecutionIds");
+/** Hands a claimed run back to `waiting_approval`; false when it was not claimed. */
+export async function releaseExecutionClaimOn(db: Queryable, id: string): Promise<boolean> {
+  const result = await db.query(
+    `UPDATE workflow_executions SET status = 'waiting_approval', updated_at = $1 WHERE id = $2 AND status = 'resuming'`,
+    [new Date().toISOString(), id]
+  );
+  return (result.rowCount ?? 0) > 0;
 }
 
-export async function listResumingWorkflowExecutions(_ctx: PgContext, ..._args: Parameters<Store["listResumingWorkflowExecutions"]>): ReturnType<Store["listResumingWorkflowExecutions"]> {
-  throw new StoreNotImplementedError("listResumingWorkflowExecutions");
+export async function claimWorkflowExecutionForResume(ctx: PgContext, id: string): Promise<boolean> {
+  return claimExecutionForResumeOn(ctx.pool, id);
 }
 
-export async function releaseWorkflowExecutionClaim(_ctx: PgContext, ..._args: Parameters<Store["releaseWorkflowExecutionClaim"]>): ReturnType<Store["releaseWorkflowExecutionClaim"]> {
-  throw new StoreNotImplementedError("releaseWorkflowExecutionClaim");
+export async function listResumingWorkflowExecutionIds(ctx: PgContext): Promise<string[]> {
+  const rows = await ctx.query<{ id: string }>(`SELECT id FROM workflow_executions WHERE status = 'resuming' ORDER BY updated_at ASC, id COLLATE "C"`);
+  return rows.map((row) => toStr(row.id));
+}
+
+export async function listResumingWorkflowExecutions(ctx: PgContext, before?: string): Promise<Array<{ id: string; claimedAt: string }>> {
+  const rows = before
+    ? await ctx.query<{ id: string; updated_at: string }>(
+        `SELECT id, updated_at FROM workflow_executions WHERE status = 'resuming' AND updated_at < $1 ORDER BY updated_at ASC, id COLLATE "C"`,
+        [before]
+      )
+    : await ctx.query<{ id: string; updated_at: string }>(
+        `SELECT id, updated_at FROM workflow_executions WHERE status = 'resuming' ORDER BY updated_at ASC, id COLLATE "C"`
+      );
+  return rows.map((row) => ({ id: toStr(row.id), claimedAt: toStr(row.updated_at) }));
+}
+
+export async function releaseWorkflowExecutionClaim(ctx: PgContext, id: string): Promise<boolean> {
+  return releaseExecutionClaimOn(ctx.pool, id);
 }
