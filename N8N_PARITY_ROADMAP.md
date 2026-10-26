@@ -694,6 +694,39 @@ providers and secrets.
 - Live write calls are never allowed in gate runs
 - Only admins can override a failed gate, with a reason, until approval gates (11.2) land
 
+## Phase 16: DLP labels and data destinations
+
+**Why:** a guard check that only reads the text in front of it can't tell where data came from or where it is going.
+Labels that follow data through a run, and an admin list of where outgoing data lands, let a deployment say
+"card numbers and credentials stay in-house" and have every model call, MCP call and outbound request held to it.
+Everything is optional: with no guard profile, or the built-in default profile, a workflow runs exactly as before,
+with the same verdicts, profile hashes and latency.
+
+### 16.1 Data labels
+- [x] Provenance and data-class labels propagate node to node beside outputs (direct parents, `{{ }}` reads, code
+  nodes, branches, loops, sub-workflows, agents and supervisor-to-worker calls); only guard redact, mask or protect
+  removes a data class, and provenance is never removed
+- [x] Labels kept across approval pause and resume, in execution history and recordings, and on session memory, the
+  tool cache and session artifacts (migration v37); run-view label chips per node
+- [x] Opt-in per profile (`labels: "propagated"`, "Track where data came from"); a DB revision counter keeps cached
+  profiles fresh across instances
+
+### 16.2 Data destinations and destination rules
+- [x] `data_destinations` (migration v38): model providers, MCP servers, connectors and HTTP hosts classed local,
+  private, vendor or public, with region and approved data classes; built-in rows for loopback, private ranges and
+  the default vendor endpoints; anything unmatched counts as public
+- [x] Optional profile destination rules (block, redact, mask, protect, require approval, review, shadow) checked
+  at model prompts, MCP tool arguments and a new `egress` checkpoint for HTTP, connectors and senders, including
+  replays before their write stubs
+- [x] Runtime surrogates as a one-way protection provider; a one-click "Keep sensitive data in-house" starter rule
+  that starts in shadow mode; per-destination counts in policy simulation and "Preview impact" for unsaved rows
+- [x] Security page Destinations tab with a "Not classified yet" list; docs page "Data labels and destinations"
+
+### Later
+- [ ] DLP depth: exact-data match, file and OCR content, a local NER model through the classifier interface, an
+  encoded-exfiltration decoder, false-positive review and audit reports
+- [ ] Postgres for labels, destinations and destination rules (13.1)
+
 ## Implementation Priority Matrix
 
 | Priority | Phase | Estimated Effort | Business Impact |
