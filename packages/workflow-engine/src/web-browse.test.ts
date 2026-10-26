@@ -214,7 +214,7 @@ describe("web_browse", () => {
         url: `${baseUrl}/ws-page`,
         screenshot: false,
         waitForSelector: "#done",
-        timeoutMs: 8000,
+        timeoutMs: 15000,
         webSocketGuard: playwrightWebSocketGuard({ denyPrivate: true, allowlist: [] })
       });
       expect(upgradeAttempts).toBe(0);
@@ -222,11 +222,11 @@ describe("web_browse", () => {
         url: `${baseUrl}/ws-page`,
         screenshot: false,
         waitForSelector: "#done",
-        timeoutMs: 8000,
+        timeoutMs: 15000,
         webSocketGuard: playwrightWebSocketGuard({ denyPrivate: false, allowlist: [] })
       });
       expect(upgradeAttempts).toBe(1);
-    }, 30000);
+    }, 45000);
 
     it("an allowed WebSocket still reaches the server when the guard is slow (loaded machine)", async () => {
       // A loaded CI core can take over a second to resolve the guard check and connect; the page must wait for the socket's outcome, not a fixed timer.
