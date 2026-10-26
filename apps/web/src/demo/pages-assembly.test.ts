@@ -28,8 +28,8 @@ function repo(options: { demo?: "built" | "broken" | "missing"; cname?: boolean 
   return root;
 }
 
-function assemble(root: string, env: Record<string, string> = {}) {
-  const result = spawnSync(process.execPath, [script, "--root", root], { encoding: "utf8", env: { ...process.env, ...env } });
+function assemble(root: string, env: Record<string, string> = {}, extraArgs: string[] = [], cwd?: string) {
+  const result = spawnSync(process.execPath, [script, "--root", root, ...extraArgs], { encoding: "utf8", env: { ...process.env, ...env }, ...(cwd ? { cwd } : {}) });
   return { status: result.status, output: `${result.stdout}${result.stderr}`, site: path.join(root, "_site") };
 }
 
@@ -55,6 +55,24 @@ describe("the Pages site", () => {
       expect(run.output).toContain("::warning title=Live demo not deployed::");
       expect(run.output).toContain("demo build: failure");
     }
+  });
+
+  it("refuses an output folder it would delete wrongly: empty, missing, the root, or one holding the repository or the current directory", () => {
+    const root = repo({ demo: "built" });
+    const nested = path.join(root, "work");
+    fs.mkdirSync(nested);
+    write(nested, "keep.txt", "keep");
+    for (const extra of [["--out", ""], ["--out", "  "], ["--out"], ["--out", "--root"], ["--out", "/"], ["--out", root], ["--out", path.dirname(root)], ["--out", "."], ["--out", ".."]]) {
+      const run = assemble(root, {}, extra, nested);
+      expect(run.status, JSON.stringify(extra)).toBe(1);
+      expect(run.output).toContain("::error");
+    }
+    // Everything is still there.
+    expect(fs.readFileSync(path.join(nested, "keep.txt"), "utf8")).toBe("keep");
+    expect(fs.existsSync(path.join(root, "docs/index.html"))).toBe(true);
+    // A folder of its own works, inside the repository or not.
+    expect(assemble(root, {}, ["--out", path.join(root, "out-site")]).status).toBe(0);
+    expect(fs.existsSync(path.join(root, "out-site/demo/index.html"))).toBe(true);
   });
 
   it("fails without the CNAME, demo or not", () => {

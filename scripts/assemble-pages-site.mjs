@@ -13,18 +13,32 @@ import { existsSync, promises as fs } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+function fail(message) {
+  console.error(`::error title=Pages site not assembled::${message}`);
+  process.exit(1);
+}
+
 const args = process.argv.slice(2);
+/** An option's value; given without one (or as ""), it is an error rather than a default. */
 const option = (name) => {
   const index = args.indexOf(name);
-  return index >= 0 ? args[index + 1] : undefined;
+  if (index < 0) return undefined;
+  const value = args[index + 1];
+  if (value === undefined || value.trim() === "" || value.startsWith("--")) fail(`${name} needs a directory.`);
+  return value;
 };
 
 const repoRoot = path.resolve(option("--root") ?? path.join(path.dirname(fileURLToPath(import.meta.url)), ".."));
 const out = path.resolve(option("--out") ?? path.join(repoRoot, "_site"));
 
-function fail(message) {
-  console.error(`::error title=Pages site not assembled::${message}`);
-  process.exit(1);
+// The output folder is deleted first: never the filesystem root, nor the repository, the current
+// directory or a folder holding either.
+const holds = (parent, child) => {
+  const relative = path.relative(parent, child);
+  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+};
+if (out === path.parse(out).root || holds(out, repoRoot) || holds(out, process.cwd())) {
+  fail(`Refusing to use ${out} as the output folder: it is the filesystem root, or holds the repository or the current directory.`);
 }
 
 async function demoBuildIsUsable(dir) {
