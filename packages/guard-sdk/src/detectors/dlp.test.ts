@@ -130,4 +130,10 @@ describe("card numbers next to hyphens", () => {
     ];
     for (const text of benign) expect(classes(text), text).not.toContain("card_number");
   });
+  // A recorded choice: a letter-prefixed id whose 13–19 digits pass Luhn is flagged, the same as `ORD 4111…` and
+  // `ref_4111…` already were; one that fails Luhn, or is all one digit, is not.
+  it("flags a letter-prefixed id whose digits pass Luhn, and only then", () => {
+    for (const text of ["ORD-4111111111111111", "1Z-4111111111111111", "a-4111111111111111-b"]) expect(classes(text), text).toContain("card_number");
+    for (const text of ["ORD-4111111111111112", "1Z-4111111111111113", "ORD-0000000000000000"]) expect(classes(text), text).not.toContain("card_number");
+  });
 });
