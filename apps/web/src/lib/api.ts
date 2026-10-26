@@ -2098,6 +2098,8 @@ export interface AuditChainStatus {
   ok: boolean;
   rowsChecked: number;
   firstBrokenAt?: { id: string; createdAt: string; expected: string; stored: string };
+  /** Rows written before audit text was normalised whose content cannot be checked; `ok` is false while present. */
+  unverifiable?: Array<{ id: string; createdAt: string; reason: string }>;
 }
 
 export interface AuditExportDestination {

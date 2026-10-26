@@ -1753,16 +1753,35 @@ function AuditChainPanel() {
         </button>
       </div>
       {error && <div className="settings-error">{error}</div>}
-      {status && (
-        <div className="settings-help" style={{ marginTop: "0.5rem" }}>
-          {status.ok ? (
-            <span style={{ color: "#16a34a" }}>✓ Chain intact — verified {status.rowsChecked} rows.</span>
-          ) : (
-            <span style={{ color: "#dc2626" }}>
-              ✗ Chain broken at row {status.firstBrokenAt?.id} ({status.firstBrokenAt?.createdAt}). Rows verified before break: {status.rowsChecked}.
-            </span>
-          )}
-        </div>
+      {status && <AuditChainStatusLine status={status} />}
+    </div>
+  );
+}
+
+/** The verify-chain verdict: intact, broken at a row, or verified except rows whose content cannot be checked. */
+export function AuditChainStatusLine({ status }: { status: AuditChainStatus }) {
+  const unverifiable = status.unverifiable ?? [];
+  return (
+    <div className="settings-help" style={{ marginTop: "0.5rem" }}>
+      {status.ok ? (
+        <span style={{ color: "#16a34a" }}>✓ Chain intact — verified {status.rowsChecked} rows.</span>
+      ) : status.firstBrokenAt ? (
+        <span style={{ color: "#dc2626" }}>
+          ✗ Chain broken at row {status.firstBrokenAt.id} ({status.firstBrokenAt.createdAt}). Rows verified before break: {status.rowsChecked}.
+        </span>
+      ) : (
+        <span style={{ color: "#b45309" }}>
+          ⚠ Not verified: {unverifiable.length} {unverifiable.length === 1 ? "row" : "rows"} cannot be checked. Verified {status.rowsChecked} other rows.
+        </span>
+      )}
+      {unverifiable.length > 0 && (
+        <ul style={{ margin: "0.25rem 0 0", paddingLeft: "1.25rem" }}>
+          {unverifiable.map((row) => (
+            <li key={row.id} title={row.reason}>
+              <code>{row.id}</code> ({row.createdAt}): written with text the database replaced (U+FFFD); its content cannot be verified.
+            </li>
+          ))}
+        </ul>
       )}
     </div>
   );
