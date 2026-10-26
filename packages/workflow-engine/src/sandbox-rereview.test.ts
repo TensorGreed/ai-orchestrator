@@ -24,7 +24,9 @@ import {
   QUICKJS_STACK_BYTES,
   SANDBOX_BREAKER_MESSAGE,
   quickJsActiveHeapBytes,
+  quickJsInexactLimitSessions,
   recycleQuickJsInstanceForTesting,
+  withoutQuickJsSparesForTesting,
   quickJsRecycledInstances,
   quickJsRetiredInstances,
   quickJsSandboxReady,
@@ -114,6 +116,49 @@ describe("N1: memory is bounded for many small allocations, results are capped, 
     // A recycle is not a crash: it never counts towards the failure counter or a circuit breaker.
     expect(quickJsRetiredInstances()).toBe(retired);
     expect(quickJsActiveHeapBytes()).toBeLessThan(64 * MB);
+  }, 60_000);
+
+  it("a session with a small limit does not run on an instance whose grown heap would let it exceed that limit", async () => {
+    await recycleQuickJsInstanceForTesting();
+    const grow = (limitBytes: number, blocks: number) =>
+      withQuickJs({ memoryBytes: limitBytes, stackBytes: QUICKJS_STACK_BYTES, timeoutMs: 20_000 }, (session) => {
+        session.evaluateTrusted(`globalThis.f = () => { const a = []; for (let i = 0; i < ${blocks}; i += 1) a.push('x'.repeat(1000) + i); return String(a.length); }`, "t.js");
+        return session.callGlobal("f", []);
+      });
+    expect(grow(128 * MB, 60_000)).toBe("60000");
+    const grown = quickJsActiveHeapBytes();
+    expect(grown).toBeGreaterThan(48 * MB);
+    const recycled = quickJsRecycledInstances();
+    // A limit the grown heap still fits in keeps the instance.
+    expect(grow(128 * MB, 10)).toBe("10");
+    expect(quickJsRecycledInstances()).toBe(recycled);
+    // An 8 MB limit on that instance could be exceeded by tens of MB of free heap before growth trips: it gets a fresh one.
+    expect(grow(8 * MB, 10)).toBe("10");
+    expect(quickJsRecycledInstances()).toBe(recycled + 1);
+    expect(quickJsActiveHeapBytes()).toBeLessThan(grown / 2);
+    await quickJsSandboxReady();
+  }, 60_000);
+
+  it("counts a small-limit session that ran on a grown instance because no spare was ready (diagnostics only)", async () => {
+    await recycleQuickJsInstanceForTesting();
+    const grow = (limitBytes: number, blocks: number) =>
+      withQuickJs({ memoryBytes: limitBytes, stackBytes: QUICKJS_STACK_BYTES, timeoutMs: 20_000 }, (session) => {
+        session.evaluateTrusted(`globalThis.f = () => { const a = []; for (let i = 0; i < ${blocks}; i += 1) a.push('x'.repeat(1000) + i); return String(a.length); }`, "t.js");
+        return session.callGlobal("f", []);
+      });
+    expect(grow(128 * MB, 60_000)).toBe("60000");
+    const grown = quickJsActiveHeapBytes();
+    const inexact = quickJsInexactLimitSessions();
+    const recycled = quickJsRecycledInstances();
+    // A limit the grown heap fits in is exact: not counted.
+    expect(grow(128 * MB, 10)).toBe("10");
+    expect(quickJsInexactLimitSessions()).toBe(inexact);
+    // No spare ready: the session still runs on the grown instance (unchanged behaviour), and is counted.
+    expect(withoutQuickJsSparesForTesting(() => grow(8 * MB, 10))).toBe("10");
+    expect(quickJsInexactLimitSessions()).toBe(inexact + 1);
+    expect(quickJsRecycledInstances()).toBe(recycled);
+    expect(quickJsActiveHeapBytes()).toBeGreaterThanOrEqual(grown);
+    await recycleQuickJsInstanceForTesting();
   }, 60_000);
 
   it("a large code-node result no longer retires the instance (QuickJS leaked objects when it was serialized inside a promise job)", async () => {

@@ -834,6 +834,11 @@ function resolveWebhookPrompt(globals: Record<string, unknown>): string | undefi
   return undefined;
 }
 
+/** The name of the synthetic tool a Supervisor gets for an attached worker node. */
+export function workerDelegateToolName(workerName: string): string {
+  return `delegate_to_${workerName.replace(/[^a-zA-Z0-9_-]/g, "_")}`;
+}
+
 function getAttachmentHandle(sourceHandle: string | undefined): AgentAttachmentHandle | undefined {
   if (!sourceHandle || !AGENT_ATTACHMENT_HANDLES.has(sourceHandle as AgentAttachmentHandle)) {
     return undefined;
@@ -5652,7 +5657,7 @@ async function executeNodeHandler(
           const descriptionHint = typeof workerConfig.systemPromptTemplate === "string" ? workerConfig.systemPromptTemplate.slice(0, 100) : worker.name;
           return {
             serverId: `worker-${worker.id}`,
-            name: `delegate_to_${worker.name.replace(/[^a-zA-Z0-9_-]/g, "_")}`,
+            name: workerDelegateToolName(worker.name),
             description: `Delegate task to ${worker.name}. Hint: ${descriptionHint}`,
             inputSchema: {
               type: "object",

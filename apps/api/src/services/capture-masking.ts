@@ -19,6 +19,17 @@
  * as written, because replay looks them up as configured; if one holds a
  * collected value the capture is dropped (`dropped_identifier_value`).
  *
+ * In a model-tape request, only a tool whose name the runtime builds itself
+ * is held back as written: `agent_clarify`, `session_cache_*`
+ * (`RUNTIME_INTERNAL_TOOL_NAMES`) and the delegate tool of a worker attached
+ * in the captured workflow. Replay rebuilds those the same way, so their
+ * definition and the names of calls to them stay as written; every string
+ * and number in such a definition is checked like an identifier, and one
+ * holding a collected value drops the capture. Every other tool (one the
+ * agent built from an MCP server's `tools/list` answer, recorded or not, a
+ * manual tool) is content, masked with the same surrogates as the
+ * cassette's copy, so replay's request, built from that copy, hashes alike.
+ *
  * Values the workflow definition itself holds as whole literals are kept
  * (see `MaskRecordingOptions.keepLiteralsFrom`).
  *
@@ -41,9 +52,13 @@ import {
   type ReplayRecordedNode,
   type RunFacts
 } from "@ai-orchestrator/shared";
+import { randomBytes } from "node:crypto";
 import {
+  MaskIncompleteError,
+  MaskUnscannableError,
   maskRecordingSteps,
   maskedClassesForNode,
+  numberText,
   runSteps,
   runStepsAsync,
   type GuardDictionary,
@@ -52,6 +67,8 @@ import {
   type MaskReport
 } from "@ai-orchestrator/guard-sdk";
 import { canonicalJson as cassetteCanonical, hashCassetteArgs } from "@ai-orchestrator/mcp-sdk";
+import { RUNTIME_INTERNAL_TOOL_NAMES } from "@ai-orchestrator/agent-runtime";
+import { workerDelegateToolName } from "@ai-orchestrator/workflow-engine";
 import { canonicalTapeJson, hashModelRequest } from "@ai-orchestrator/provider-sdk";
 import { sha256Hex } from "./audit-bundle-service.js";
 
@@ -61,6 +78,211 @@ const CASSETTE_ENTRY_KEPT = new Set(["seq", "method", "argsHash", "at", "duratio
 const CASSETTE_SERVER_MASKED = ["label"] as const;
 /** Cassette server fields replay rebuilds from the live configuration: kept as written, and checked for collected values. */
 const CASSETTE_SERVER_IDENTIFIERS = ["key", "registryServerId", "adapterId"] as const;
+
+const isRecord = (value: unknown): value is Record<string, unknown> => Boolean(value) && typeof value === "object" && !Array.isArray(value);
+
+type TapeEntry = ModelTape["entries"][number];
+type TapeContent = { request: TapeEntry["request"]; response?: unknown; error?: string };
+
+/**
+ * The names the agent gives the tools an MCP server listed in this run's
+ * cassette (a recorded `tools/list` answer): `<adapterId>__<tool>`. At replay
+ * the agent builds these definitions from the cassette's masked copy, so the
+ * tape's copy is masked as content with the same surrogates. A server whose
+ * adapter is not recorded matches any `<adapter>__<tool>`.
+ */
+function mcpListedToolNames(cassette: McpCassette | null): { has: (name: string) => boolean } {
+  const exact = new Set<string>();
+  const anyAdapter = new Set<string>();
+  for (const entry of cassette?.entries ?? []) {
+    if (entry.method !== "tools/list" || !Array.isArray(entry.result)) continue;
+    const adapterId = cassette!.servers.find((server) => server.key === entry.server)?.adapterId;
+    for (const tool of entry.result as unknown[]) {
+      const name = isRecord(tool) ? tool.name : undefined;
+      if (typeof name !== "string" || !name) continue;
+      if (adapterId) exact.add(`${adapterId}__${name}`);
+      else anyAdapter.add(name);
+    }
+  }
+  return {
+    has: (name) => {
+      if (exact.has(name)) return true;
+      const split = name.indexOf("__");
+      return split > 0 && anyAdapter.has(name.slice(split + 2));
+    }
+  };
+}
+
+/**
+ * The tool names the runtime builds itself, and so rebuilds the same way at
+ * replay: its internal tools and the delegate tool of every worker attached
+ * (`worker` port) in the captured workflow. An allow-list: any other name is
+ * content, so a tool that reached the agent some other way (an MCP server
+ * whose `tools/list` answer the cassette did not keep, a manual tool) is
+ * masked, never stored as written.
+ */
+export function runtimeToolNames(workflow: unknown): Set<string> {
+  const names = new Set<string>(RUNTIME_INTERNAL_TOOL_NAMES);
+  if (!isRecord(workflow) || !Array.isArray(workflow.nodes) || !Array.isArray(workflow.edges)) return names;
+  const nameById = new Map<string, string>();
+  for (const node of workflow.nodes as unknown[]) {
+    if (isRecord(node) && typeof node.id === "string" && typeof node.name === "string") nameById.set(node.id, node.name);
+  }
+  for (const edge of workflow.edges as unknown[]) {
+    if (!isRecord(edge) || edge.sourceHandle !== "worker" || typeof edge.target !== "string") continue;
+    const name = nameById.get(edge.target);
+    if (name !== undefined) names.add(workerDelegateToolName(name));
+  }
+  return names;
+}
+
+/**
+ * The adapter ids of the MCP servers this run could reach: every `serverId`
+ * the captured workflow sets (an MCP Tool node, an agent's inline servers)
+ * and every adapter the cassette recorded (registry servers included). The
+ * agent names their tools `<serverId>__<tool>`, so such a name is an MCP
+ * tool even when it equals a worker's delegate tool name (worker `a..b` and
+ * server `delegate_to_a` both give `delegate_to_a__b`).
+ */
+export function configuredMcpServerIds(workflow: unknown, cassette: McpCassette | null): Set<string> {
+  const ids = new Set<string>();
+  for (const server of cassette?.servers ?? []) {
+    if (typeof server.adapterId === "string" && server.adapterId) ids.add(server.adapterId);
+  }
+  const walk = (value: unknown, depth: number) => {
+    if (depth > MAX_HELD_TOOL_DEPTH) return;
+    if (Array.isArray(value)) for (const item of value) walk(item, depth + 1);
+    else if (isRecord(value)) {
+      for (const [field, item] of Object.entries(value)) {
+        if (field === "serverId" && typeof item === "string" && item) ids.add(item);
+        else walk(item, depth + 1);
+      }
+    }
+  };
+  if (isRecord(workflow)) walk(workflow.nodes, 0);
+  return ids;
+}
+
+/** True when the name is how the agent exposes a tool of one of these servers. */
+function isMcpExposedName(name: string, serverIds: ReadonlySet<string>): boolean {
+  for (const id of serverIds) if (name.startsWith(`${id}__`)) return true;
+  return false;
+}
+
+/** Deepest nesting walked in a held-back tool definition; deeper fails closed. */
+const MAX_HELD_TOOL_DEPTH = 64;
+
+/** Every scalar text a held-back tool definition holds: strings, object keys and numbers (as content masking reads them), at any depth. */
+function definitionStrings(value: unknown, out: string[], depth = 0): string[] {
+  if (depth > MAX_HELD_TOOL_DEPTH) throw new MaskUnscannableError("A tool definition kept as written is nested too deeply to check.");
+  if (typeof value === "string") out.push(value);
+  else if (typeof value === "number") {
+    const text = numberText(value);
+    if (text) out.push(text);
+  } else if (Array.isArray(value)) for (const item of value) definitionStrings(item, out, depth + 1);
+  else if (isRecord(value)) {
+    for (const [field, item] of Object.entries(value)) {
+      out.push(field);
+      definitionStrings(item, out, depth + 1);
+    }
+  }
+  return out;
+}
+
+/** A per-capture placeholder prefix: lowercase letters only, so no detector reads it as a number. */
+function heldNamePrefix(): string {
+  const letters = Array.from(randomBytes(12), (byte) => String.fromCharCode(97 + (byte % 26))).join("");
+  return `l2m_held_${letters}_`;
+}
+
+type NameSlot = { holder: Record<string, unknown>; name: string; path: readonly [where: "request" | "response", message: number, call: number] };
+
+/**
+ * A tape entry's content for masking, and how to put held-back parts back.
+ *
+ * A tool whose name the runtime builds itself (`runtimeNames`) and no MCP
+ * server listed or could expose (`<serverId>__…`) is held back as written: its definition is left out of the
+ * content and the names of calls to it are swapped for placeholders, then
+ * put back by position. Every string and number a held-back definition holds
+ * is returned as a `catalog` identifier, so a collected value in one drops
+ * the capture instead of being stored. Every other tool is content: its
+ * definition and the names of calls to it are masked like the cassette's
+ * copy.
+ */
+function tapeEntryContent(
+  entry: TapeEntry,
+  index: number,
+  listed: { has: (name: string) => boolean },
+  runtimeNames: ReadonlySet<string>,
+  serverIds: ReadonlySet<string>,
+  prefix: string
+): { content: TapeContent; identifiers: MaskIdentifier[]; restore: (masked: TapeContent) => TapeContent } {
+  const tools = Array.isArray(entry.request.tools) ? entry.request.tools : [];
+  // Held back only when the runtime builds the name, no MCP server listed it and no configured server could expose it (such a name is content either way).
+  const heldAt = tools.map(
+    (tool) => isRecord(tool) && typeof tool.name === "string" && runtimeNames.has(tool.name) && !listed.has(tool.name) && !isMcpExposedName(tool.name, serverIds)
+  );
+  const held = new Set<string>();
+  tools.forEach((tool, position) => {
+    if (heldAt[position] && isRecord(tool) && typeof tool.name === "string") held.add(tool.name);
+  });
+  if (!heldAt.some(Boolean)) {
+    return { content: { request: entry.request, response: entry.response, error: entry.error }, identifiers: [], restore: (masked) => masked };
+  }
+  const identifiers: MaskIdentifier[] = [];
+  tools.forEach((tool, position) => {
+    if (!heldAt[position]) return;
+    // The id names the place only: the error message must never repeat the value.
+    definitionStrings(tool, []).forEach((text) => identifiers.push({ id: `model tape entry ${index + 1} tool ${position + 1}`, text, kind: "catalog" }));
+  });
+  const list = (value: unknown): unknown[] => (Array.isArray(value) ? value : []);
+  /** Each held tool's name in a tool call or a tool message, by position. */
+  const slotsOf = (request: Record<string, unknown>, response: unknown): NameSlot[] => {
+    const slots: NameSlot[] = [];
+    const add = (holder: unknown, path: NameSlot["path"]) => {
+      if (isRecord(holder) && typeof holder.name === "string" && held.has(holder.name)) slots.push({ holder, name: holder.name, path });
+    };
+    list(request.messages).forEach((message, m) => {
+      if (!isRecord(message)) return;
+      list(message.toolCalls).forEach((call, c) => add(call, ["request", m, c]));
+      if (message.role === "tool") add(message, ["request", m, -1]);
+    });
+    if (isRecord(response)) list(response.toolCalls).forEach((call, c) => add(call, ["response", -1, c]));
+    return slots;
+  };
+  const holderAt = (request: Record<string, unknown>, response: unknown, [where, m, c]: NameSlot["path"]): Record<string, unknown> | undefined => {
+    const message = where === "response" ? response : list(request.messages)[m];
+    if (!isRecord(message)) return undefined;
+    const holder = c < 0 ? message : list(message.toolCalls)[c];
+    return isRecord(holder) ? holder : undefined;
+  };
+
+  const request = structuredClone(entry.request) as TapeEntry["request"] & Record<string, unknown>;
+  const response = structuredClone(entry.response);
+  const slots = slotsOf(request, response);
+  slots.forEach((slot, n) => {
+    slot.holder.name = `${prefix}${n}`;
+  });
+  // Held-back definitions leave the content; MCP-listed ones stay in place and are masked.
+  request.tools = tools.map((tool, position) => (heldAt[position] ? null : tool)) as TapeEntry["request"]["tools"];
+  return {
+    content: { request, response, error: entry.error },
+    identifiers,
+    restore: (masked) => {
+      const maskedRequest = structuredClone(masked.request) as TapeEntry["request"] & Record<string, unknown>;
+      const maskedResponse = structuredClone(masked.response);
+      const maskedTools = Array.isArray(maskedRequest.tools) ? maskedRequest.tools : [];
+      maskedRequest.tools = tools.map((tool, position) => (heldAt[position] ? tool : maskedTools[position])) as TapeEntry["request"]["tools"];
+      // Each held-back name goes back to the position it was taken from; nothing else is renamed.
+      for (const slot of slots) {
+        const holder = holderAt(maskedRequest, maskedResponse, slot.path);
+        if (!holder) throw new MaskIncompleteError("A held-back tool name could not be put back in the model tape.");
+        holder.name = slot.name;
+      }
+      return { ...masked, request: maskedRequest, response: maskedResponse };
+    }
+  };
+}
 
 /** A `tools/call` entry's `name` is the tool name from the workflow (replay asks for it as configured); a resource URI or prompt name is content. */
 function nameIsIdentifier(entry: McpCassette["entries"][number]): boolean {
@@ -188,7 +410,12 @@ export function* maskCapturedRunSteps(run: CapturedRunParts, options: MaskRunOpt
       run.cassette.servers.map((server) => Object.fromEntries(CASSETTE_SERVER_MASKED.filter((field) => typeof server[field] === "string").map((field) => [field, server[field]])))
     );
   }
-  run.modelTape?.entries.forEach((entry, index) => add(`tape:${index}`, { request: entry.request, response: entry.response, error: entry.error }, entry.nodeId));
+  const listed = mcpListedToolNames(run.cassette);
+  const runtimeNames = runtimeToolNames(options.keepLiteralsFrom);
+  const serverIds = configuredMcpServerIds(options.keepLiteralsFrom, run.cassette);
+  const prefix = heldNamePrefix();
+  const tapeContents = run.modelTape?.entries.map((entry, index) => tapeEntryContent(entry, index, listed, runtimeNames, serverIds, prefix)) ?? [];
+  run.modelTape?.entries.forEach((entry, index) => add(`tape:${index}`, tapeContents[index]!.content, entry.nodeId));
   run.memorySeed?.sessions.forEach((session, index) => add(`memory:${index}`, session));
 
   const { parts: masked, report } = yield* maskRecordingSteps(parts, {
@@ -196,7 +423,7 @@ export function* maskCapturedRunSteps(run: CapturedRunParts, options: MaskRunOpt
     dictionaries: options.dictionaries,
     keepLiteralsFrom: options.keepLiteralsFrom,
     ...(options.keepValues ? { keepValues: options.keepValues } : {}),
-    identifiers: run.cassette ? cassetteIdentifiers(run.cassette, options.catalogToolNames) : []
+    identifiers: [...(run.cassette ? cassetteIdentifiers(run.cassette, options.catalogToolNames) : []), ...tapeContents.flatMap((content) => content.identifiers)]
   });
   let cursor = 0;
   const next = <T>() => masked[cursor++]!.value as T;
@@ -240,8 +467,8 @@ export function* maskCapturedRunSteps(run: CapturedRunParts, options: MaskRunOpt
   const modelTape: ModelTape | null = run.modelTape
     ? {
         ...run.modelTape,
-        entries: run.modelTape.entries.map((entry) => {
-          const content = next<{ request: ModelTape["entries"][number]["request"]; response?: unknown; error?: string }>();
+        entries: run.modelTape.entries.map((entry, index) => {
+          const content = tapeContents[index]!.restore(next<TapeContent>());
           const request = canonicalTapeJson(content.request) as ModelTape["entries"][number]["request"];
           const out = { ...entry, request, requestHash: hashModelRequest(request) };
           if (entry.response !== undefined) out.response = content.response;

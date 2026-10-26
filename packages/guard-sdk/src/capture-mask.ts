@@ -1,4 +1,4 @@
-import { DEFAULT_NATIONAL_IDS, scanDlp, type DlpMatch, type NationalIdSpec } from "./detectors/dlp";
+import { DEFAULT_NATIONAL_IDS, findEmailSpans, scanDlp, type DlpMatch, type NationalIdSpec } from "./detectors/dlp";
 import type { GuardDictionary, GuardProfile } from "./profile";
 import { comparePhones, parsePhone, phoneMaskCandidates, phoneMaskKeys, scanInternationalPhones, type ParsedPhone, type PhoneCertainty, type PhoneKeyStrength } from "./phone";
 import {
@@ -370,7 +370,6 @@ export interface SubjectSpan {
   around?: { start: number; end: number };
 }
 
-const EMAIL_TOKEN = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)*\.[A-Za-z]{2,24}\b/g;
 const DIGIT_RUN = /\d+(?:[\s().\/-]{1,3}\d+)*/g;
 const DIGIT_GROUP = /\d+/g;
 const ALNUM_RUN = /[A-Za-z0-9]+(?:[\s-][A-Za-z0-9]+)*/g;
@@ -621,9 +620,10 @@ export class SubjectIndex {
     }
 
     if (email.size > 0) {
-      for (const match of text.matchAll(EMAIL_TOKEN)) {
-        const entry = email.get(match[0].toLowerCase());
-        if (entry) found.push({ start: match.index ?? 0, end: (match.index ?? 0) + match[0].length, entry });
+      // The DLP email pattern, found in linear time.
+      for (const span of findEmailSpans(text)) {
+        const entry = email.get(text.slice(span.start, span.end).toLowerCase());
+        if (entry) found.push({ start: span.start, end: span.end, entry });
       }
     }
 
@@ -734,7 +734,8 @@ function spend(budget: WalkBudget, text: string): boolean {
   return false;
 }
 
-function numberText(value: number): string | null {
+/** The text a number is scanned and masked as (its decimal form); null for NaN and infinities. */
+export function numberText(value: number): string | null {
   return Number.isFinite(value) ? String(value) : null;
 }
 

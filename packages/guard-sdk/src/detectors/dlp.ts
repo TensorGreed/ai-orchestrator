@@ -2,6 +2,9 @@ import { maskedEvidence, maskForDataClass, MASK_CHAR, replaceSpans, shannonEntro
 import type { DetectorContext, GuardDataClass, GuardDetector, GuardFinding, GuardInput, GuardSpan } from "../types";
 import { clampScore } from "../types";
 import { unsafeDictionaryPattern, type GuardDictionary } from "../profile";
+import { digitsAroundAtLeast, findBasicAuthUrlSpans, findEmailSpans, findJwtSpans, findPrivateKeySpans, findSqlStringLiteralSpans, findUrlQueryMatches } from "./dlp-linear";
+
+export { findBasicAuthUrlSpans, findEmailSpans, findJwtSpans, findPrivateKeySpans, findSqlStringLiteralSpans, findUrlQueryMatches, type UrlQueryMatch } from "./dlp-linear";
 
 export const DLP_DETECTOR_ID = "dlp.patterns";
 
@@ -115,14 +118,14 @@ export const DEFAULT_NATIONAL_IDS: NationalIdSpec[] = [
   }
 ];
 
-// Patterns
+// Patterns. Email, JWT, private keys and `scheme://user:password@` are found by
+// the linear-time finders in `dlp-linear.ts`; written as plain regexes they
+// backtrack quadratically on long runs without their anchor character.
 
-const EMAIL = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)*\.[A-Za-z]{2,24}\b/g;
 const PHONE = /(?<![\w.-])(?:\+?\d{1,3}[\s.-]?)?(?:\(\d{2,4}\)[\s.-]?|\d{2,4}[\s.-])\d{3,4}[\s.-]?\d{3,4}(?![\w-])/g;
-const CARD = /(?<![\d-])(?:\d[ -]?){12,18}\d(?![\d-])/g;
+// A hyphen next to a letter (`cust-4111…`) is a separator; a hyphen next to another digit is part of a longer number.
+const CARD = /(?<!\d)(?<!\d-)(?:\d[ -]?){12,18}\d(?!\d)(?!-\d)/g;
 const IBAN = /\b[A-Z]{2}\d{2}(?:[ -]?[A-Z0-9]{4}){2,7}(?:[ -]?[A-Z0-9]{1,4})?\b/g;
-const JWT = /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g;
-const PRIVATE_KEY = /-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----[\s\S]*?-----END (?:[A-Z ]+ )?PRIVATE KEY-----|-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----[^\n]*/g;
 
 /** Well-known credential prefixes. The list is kept short and specific so ordinary words never match. */
 const KEY_PREFIXES: Array<{ id: string; pattern: RegExp; score: number }> = [
@@ -138,18 +141,79 @@ const KEY_PREFIXES: Array<{ id: string; pattern: RegExp; score: number }> = [
   { id: "hf", pattern: /\bhf_[A-Za-z0-9]{30,}\b/g, score: 0.85 },
   { id: "sendgrid", pattern: /\bSG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}\b/g, score: 0.9 },
   { id: "l2m-mcp", pattern: /\bl2m_mcp_[A-Za-z0-9_-]{16,}\b/g, score: 0.95 },
-  { id: "bearer", pattern: /\b[Bb]earer\s+[A-Za-z0-9._~+/-]{20,}=*/g, score: 0.8 },
-  { id: "basic-auth-url", pattern: /\b[a-z][a-z0-9+.-]*:\/\/[^\s/:@]+:[^\s@/]{4,}@/g, score: 0.85 }
+  { id: "bearer", pattern: /\b[Bb]earer\s+[A-Za-z0-9._~+/-]{20,}=*/g, score: 0.8 }
 ];
+/** `scheme://user:password@`, found by `findBasicAuthUrlSpans` (it follows the key prefixes above). */
+const BASIC_AUTH_URL = { id: "basic-auth-url", score: 0.85 };
 
 /** Same heuristic as the MCP config import's credential-name rule (mcp-sdk `CREDENTIAL_NAME_PATTERN`), kept local so this package depends only on shared. */
 export const CREDENTIAL_NAME_PATTERN = /(token|key|secret|passw|pwd|auth|credential|cookie|(^|[-_])pat($|[-_]))/i;
 
 const CREDENTIAL_ASSIGNMENT = /([A-Za-z_][A-Za-z0-9_.-]{1,40})\s*(?:[:=]|=>|:=)\s*["'`]?([A-Za-z0-9+/=_\-.~]{12,})["'`]?/g;
 
-function pushUnlessCovered(matches: DlpMatch[], candidate: DlpMatch): void {
-  const covered = matches.some((m) => m.span.start <= candidate.span.start && m.span.end >= candidate.span.end && m.score >= candidate.score);
-  if (!covered) matches.push(candidate);
+function covers(m: DlpMatch, candidate: DlpMatch): boolean {
+  return m.span.start <= candidate.span.start && m.span.end >= candidate.span.end && m.score >= candidate.score;
+}
+
+/**
+ * Append each of `pending` (the findings of one detector pass) that no match
+ * already in `matches` covers: same span or wider, and the same score or
+ * higher. This equals checking each candidate in turn against everything
+ * added before it, because the non-empty findings of one pass never overlap
+ * (a pass with an empty span is checked that way, one by one). Small inputs
+ * compare pairwise; large ones sweep by score with a prefix-max tree over
+ * starts, so thousands of findings cost O(n log n) instead of O(n²).
+ */
+export function appendUncoveredMatches(matches: DlpMatch[], pending: readonly DlpMatch[], naiveLimit = 1024): void {
+  if (pending.length === 0) return;
+  if (pending.some((m) => m.span.start >= m.span.end)) {
+    for (const candidate of pending) if (!matches.some((m) => covers(m, candidate))) matches.push(candidate);
+    return;
+  }
+  const frozen = matches.length;
+  if (frozen * pending.length <= naiveLimit || [...matches, ...pending].some((m) => Number.isNaN(m.score))) {
+    // Only the earlier passes can cover a candidate, so the comparison stops at `frozen`.
+    for (const candidate of pending) {
+      let covered = false;
+      for (let i = 0; i < frozen && !covered; i += 1) covered = covers(matches[i]!, candidate);
+      if (!covered) matches.push(candidate);
+    }
+    return;
+  }
+  const starts = [...new Set(matches.map((m) => m.span.start))].sort((a, b) => a - b);
+  const tree = new Float64Array(starts.length + 1).fill(-Infinity);
+  const countAtMost = (value: number) => {
+    let lo = 0;
+    let hi = starts.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >>> 1;
+      if (starts[mid]! <= value) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo;
+  };
+  const insert = (start: number, end: number) => {
+    for (let i = countAtMost(start); i <= starts.length; i += i & -i) if (tree[i]! < end) tree[i] = end;
+  };
+  const widestEndFrom = (start: number) => {
+    let best = -Infinity;
+    for (let i = countAtMost(start); i > 0; i -= i & -i) if (tree[i]! > best) best = tree[i]!;
+    return best;
+  };
+  const byScore = Array.from({ length: frozen }, (_, i) => i).sort((a, b) => matches[b]!.score - matches[a]!.score);
+  const order = Array.from({ length: pending.length }, (_, i) => i).sort((a, b) => pending[b]!.score - pending[a]!.score);
+  const covered = new Uint8Array(pending.length);
+  let inserted = 0;
+  for (const index of order) {
+    const candidate = pending[index]!;
+    while (inserted < frozen && matches[byScore[inserted]!]!.score >= candidate.score) {
+      const m = matches[byScore[inserted]!]!;
+      insert(m.span.start, m.span.end);
+      inserted += 1;
+    }
+    if (widestEndFrom(candidate.span.start) >= candidate.span.end) covered[index] = 1;
+  }
+  for (let i = 0; i < pending.length; i += 1) if (!covered[i]) matches.push(pending[i]!);
 }
 
 export interface DlpScanOptions {
@@ -164,22 +228,36 @@ export interface DlpScanOptions {
 export function scanDlp(text: string, options: DlpScanOptions = {}): DlpMatch[] {
   const matches: DlpMatch[] = [];
   const disabled = new Set(options.disable ?? []);
+  // Findings of one pass are checked against earlier passes when the pass ends (see `appendUncoveredMatches`).
+  const pending: DlpMatch[] = [];
   const add = (m: DlpMatch) => {
-    if (!disabled.has(m.dataClass)) pushUnlessCovered(matches, m);
+    if (!disabled.has(m.dataClass)) pending.push(m);
+  };
+  const flush = () => {
+    appendUncoveredMatches(matches, pending);
+    pending.length = 0;
   };
   const run = (regex: RegExp, handler: (match: RegExpMatchArray) => void) => {
     regex.lastIndex = 0;
     for (const match of text.matchAll(regex)) handler(match);
+    flush();
+  };
+  const runSpans = (spans: GuardSpan[], handler: (value: string, span: GuardSpan) => void) => {
+    for (const span of spans) handler(text.slice(span.start, span.end), span);
+    flush();
   };
 
-  run(PRIVATE_KEY, (m) => add({ dataClass: "private_key", span: spanOf(m), score: 1, message: "Private key block" }));
-  run(JWT, (m) => {
-    if (!looksLikeJwt(m[0])) return;
-    add({ dataClass: "jwt", span: spanOf(m), score: 0.95, message: "JSON Web Token" });
+  runSpans(findPrivateKeySpans(text), (_value, span) => add({ dataClass: "private_key", span, score: 1, message: "Private key block" }));
+  runSpans(findJwtSpans(text), (value, span) => {
+    if (!looksLikeJwt(value)) return;
+    add({ dataClass: "jwt", span, score: 0.95, message: "JSON Web Token" });
   });
   for (const prefix of KEY_PREFIXES) {
     run(prefix.pattern, (m) => add({ dataClass: "credential", span: spanOf(m), score: prefix.score, message: `Credential with a known key prefix (${prefix.id})` }));
   }
+  runSpans(findBasicAuthUrlSpans(text), (_value, span) =>
+    add({ dataClass: "credential", span, score: BASIC_AUTH_URL.score, message: `Credential with a known key prefix (${BASIC_AUTH_URL.id})` })
+  );
   run(CREDENTIAL_ASSIGNMENT, (m) => {
     const name = m[1]!;
     const value = m[2]!;
@@ -214,7 +292,7 @@ export function scanDlp(text: string, options: DlpScanOptions = {}): DlpMatch[] 
       add({ dataClass: spec.dataClass ?? "national_id", span: spanOf(m), score: spec.score ?? 0.85, message: `${spec.label} (${spec.country})` });
     });
   }
-  run(EMAIL, (m) => add({ dataClass: "email", span: spanOf(m), score: 0.95, message: "Email address" }));
+  runSpans(findEmailSpans(text), (_value, span) => add({ dataClass: "email", span, score: 0.95, message: "Email address" }));
   run(PHONE, (m) => {
     const digits = m[0].replace(/\D/g, "");
     if (digits.length < 9 || digits.length > 15) return;
@@ -222,7 +300,7 @@ export function scanDlp(text: string, options: DlpScanOptions = {}): DlpMatch[] 
     if (/^\d{4}[-.]\d{2}[-.]\d{2}$/.test(m[0].trim()) || /^\d{1,2}[-.]\d{1,2}[-.]\d{4}$/.test(m[0].trim())) return;
     if (/^(\d)\1+$/.test(digits)) return;
     // Part of a longer digit run (a card or account number) is not a phone number.
-    if (digitsAround(text, m.index ?? 0, (m.index ?? 0) + m[0].length) >= 13) return;
+    if (digitsAroundAtLeast(text, m.index ?? 0, (m.index ?? 0) + m[0].length, 13)) return;
     add({ dataClass: "phone", span: spanOf(m), score: 0.6, message: "Phone number" });
   });
 
@@ -250,14 +328,6 @@ export function scanDlp(text: string, options: DlpScanOptions = {}): DlpMatch[] 
   return matches.sort((a, b) => a.span.start - b.span.start || b.score - a.score);
 }
 
-function digitsAround(text: string, start: number, end: number): number {
-  let from = start;
-  let to = end;
-  while (from > 0 && /[\d\s.()-]/.test(text[from - 1]!)) from -= 1;
-  while (to < text.length && /[\d\s.()-]/.test(text[to]!)) to += 1;
-  return text.slice(from, to).replace(/\D/g, "").length;
-}
-
 function spanOf(m: RegExpMatchArray): GuardSpan {
   const start = m.index ?? 0;
   return { start, end: start + m[0].length };
@@ -273,9 +343,6 @@ function looksLikeJwt(token: string): boolean {
   }
 }
 
-const URL_QUERY_OR_FRAGMENT = /(\b[a-z][a-z0-9+.-]*:\/\/[^\s?#"'`<>]*)[?#][^\s"'`<>)\]]*/gi;
-const SQL_STRING_LITERAL = /'(?:[^'\\]|\\.|'')*'/g;
-
 /**
  * Text that pattern detectors (egress, exfiltration, SQL, command, path)
  * keep as evidence or put in a message: URL query and fragment values are
@@ -283,12 +350,41 @@ const SQL_STRING_LITERAL = /'(?:[^'\\]|\\.|'')*'/g;
  * request, and whatever the DLP scan finds is masked by its data class.
  */
 export function scrubEvidenceText(text: string, options: { sqlLiterals?: boolean } = {}): string {
-  let out = text.replace(URL_QUERY_OR_FRAGMENT, (_match, base: string) => `${base}?${MASK_CHAR.repeat(3)}`);
-  if (options.sqlLiterals) out = out.replace(SQL_STRING_LITERAL, `'${MASK_CHAR.repeat(3)}'`);
+  let out = dropUrlQueries(text);
+  if (options.sqlLiterals) out = blankSqlLiterals(out);
   const matches = scanDlp(out);
   if (matches.length === 0) return out;
   const byStart = new Map(matches.map((match) => [`${match.span.start}:${match.span.end}`, match.dataClass]));
   return replaceSpans(out, matches.map((match) => match.span), (original, span) => maskForDataClass(original, byStart.get(`${span.start}:${span.end}`)));
+}
+
+/** Each SQL string literal becomes `'•••'` (in linear time; the plain regex was quadratic on `\'` runs). */
+function blankSqlLiterals(text: string): string {
+  const literals = findSqlStringLiteralSpans(text);
+  if (literals.length === 0) return text;
+  const blank = `'${MASK_CHAR.repeat(3)}'`;
+  const parts: string[] = [];
+  let cursor = 0;
+  for (const literal of literals) {
+    parts.push(text.slice(cursor, literal.start), blank);
+    cursor = literal.end;
+  }
+  parts.push(text.slice(cursor));
+  return parts.join("");
+}
+
+/** Each URL keeps its scheme, host and path; its query or fragment becomes `?•••`. */
+function dropUrlQueries(text: string): string {
+  const urls = findUrlQueryMatches(text);
+  if (urls.length === 0) return text;
+  const parts: string[] = [];
+  let cursor = 0;
+  for (const url of urls) {
+    parts.push(text.slice(cursor, url.baseEnd), `?${MASK_CHAR.repeat(3)}`);
+    cursor = url.end;
+  }
+  parts.push(text.slice(cursor));
+  return parts.join("");
 }
 
 /** `excerptEvidence` for pattern detectors: the excerpt is scrubbed before it is flattened and capped. */

@@ -17,7 +17,10 @@
  * the instance's linear memory and stops the session once it has grown by
  * more than the limit. WebAssembly memory never shrinks, so an instance whose
  * heap has grown past a threshold is recycled after the session: a fresh one
- * takes over and the old one is garbage-collected.
+ * takes over and the old one is garbage-collected. Free heap an earlier session
+ * grew is reusable without further growth, so a session whose memory limit is
+ * smaller than that free space starts on a fresh instance too (when a spare is
+ * ready), which keeps the limit exact.
  *
  * The WebAssembly module is compiled once; instances of it are reused. Some
  * deep recursions inside the engine's C code (the parser, for one) exhaust the
@@ -133,11 +136,14 @@ const SPARE_INSTANCES = 4;
 const MIN_RECYCLE_HEAP_BYTES = 256 * 1024 * 1024;
 
 let active: QuickJSWASMModule | null = await loadModule();
+/** Linear memory a fresh instance holds; heap beyond this is space an earlier session grew and a new one can reuse without growing the heap. */
+const FRESH_HEAP_BYTES = quickJsHeapBytes(active);
 const spares: QuickJSWASMModule[] = [];
 for (let i = 0; i < SPARE_INSTANCES; i += 1) spares.push(await loadModule());
 let loading = 0;
 let retiredCount = 0;
 let recycledCount = 0;
+let inexactLimitCount = 0;
 let largestLimitBytes = 0;
 
 function refill(): void {
@@ -194,6 +200,25 @@ export function quickJsRetiredInstances(): number {
 /** How many instances were recycled because their heap had grown too large (tests, diagnostics). */
 export function quickJsRecycledInstances(): number {
   return recycledCount;
+}
+
+/**
+ * How many sessions ran on an instance whose free heap exceeded their memory
+ * limit because no spare was ready to take over (their limit was inexact;
+ * tests, diagnostics).
+ */
+export function quickJsInexactLimitSessions(): number {
+  return inexactLimitCount;
+}
+
+/** Runs `body` with the spares set aside, as if none were ready, then puts them back. For tests. */
+export function withoutQuickJsSparesForTesting<T>(body: () => T): T {
+  const held = spares.splice(0);
+  try {
+    return body();
+  } finally {
+    spares.unshift(...held);
+  }
 }
 
 /** Heap bytes of the instance the next session will use (tests, diagnostics). */
@@ -305,6 +330,13 @@ export function withQuickJs<T>(limits: QuickJsLimits, body: (session: QuickJsSes
   const owner = ownerStorage.getStore();
   const startedAt = Date.now();
   if (breakerOpen(owner, startedAt)) throw new SandboxFailureError(SANDBOX_BREAKER_MESSAGE);
+  // The memory check measures heap growth, so free space an earlier session grew is usable without tripping it. When that
+  // space alone exceeds this session's limit, start on a fresh instance (only while a spare is ready: never run the pool dry).
+  if (active && quickJsHeapBytes(active) - FRESH_HEAP_BYTES > limits.memoryBytes) {
+    if (spares.length > 0) retire(active, false);
+    // No spare ready: the session runs on the grown instance (its limit is inexact); counted for diagnostics only.
+    else inexactLimitCount += 1;
+  }
   const module = active;
   if (!module) {
     refill();

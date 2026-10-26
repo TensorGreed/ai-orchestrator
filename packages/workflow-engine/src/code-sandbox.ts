@@ -576,7 +576,10 @@ export function hostWarning(reason: string, python: "allow" | "deny", pythonUid?
     python === "deny"
       ? "Python code nodes are disabled (CODE_SANDBOX_PYTHON_IN_PROCESS=deny)."
       : `Python code nodes run as host subprocesses${pythonUid !== undefined ? ` as uid ${pythonUid}` : " as the API user"} and are NOT sandboxed: they can run any OS command, open network connections that bypass the outbound URL guard, and read any file that user can read (the SQLite database, .env)${pythonUid !== undefined ? "" : ", including the API's own environment through /proc/<pid>/environ, which holds SECRET_MASTER_KEY_BASE64"}. Anyone who can author a workflow can do this.`;
-  return `Code nodes run on the API host, not in a container: ${reason} ${js} ${py} Install docker or podman with the code images (CODE_SANDBOX_MODE=container), set CODE_SANDBOX_PYTHON_IN_PROCESS=deny, or CODE_NODES_ENABLED=false.`;
+  const advice = python === "deny"
+    ? "Install docker or podman with the code images (CODE_SANDBOX_MODE=container), or set CODE_NODES_ENABLED=false."
+    : "Install docker or podman with the code images (CODE_SANDBOX_MODE=container), set CODE_SANDBOX_PYTHON_IN_PROCESS=deny, or CODE_NODES_ENABLED=false.";
+  return `Code nodes run on the API host, not in a container: ${reason} ${js} ${py} ${advice}`;
 }
 
 /**
