@@ -197,10 +197,10 @@ async function createTestContext(overrides: Partial<AppConfig> = {}): Promise<Te
   const dbPath = path.join(tempDir, "orchestrator.db");
   const store = await SqliteStore.create(dbPath);
   const config = makeConfig(overrides);
-  store.ensureDefaultProject();
+  await store.ensureDefaultProject();
   const secretService = new SecretService(store, config.SECRET_MASTER_KEY_BASE64);
   const authService = new AuthService(store, config.SESSION_TTL_HOURS);
-  const app = createApp(config, store, secretService, authService);
+  const app = await createApp(config, store, secretService, authService);
   await app.ready();
   const ctx: TestContext = { app, store, authService, secretService, config, tempDir };
   contexts.push(ctx);
@@ -215,7 +215,7 @@ function extractCookie(header: string | string[] | undefined, name: string): str
 }
 
 async function loginAdmin(ctx: TestContext): Promise<string> {
-  ctx.authService.register({
+  await ctx.authService.register({
     email: "admin@example.com",
     password: "admin-password",
     role: "admin"
@@ -229,7 +229,7 @@ async function loginAdmin(ctx: TestContext): Promise<string> {
 }
 
 async function loginOperator(ctx: TestContext): Promise<string> {
-  ctx.authService.register({
+  await ctx.authService.register({
     email: "operator@example.com",
     password: "operator-password",
     role: "operator"
@@ -605,33 +605,33 @@ describe("Phase 5.5 — LogStreamingService unit behavior", () => {
       enabled: true,
       flushIntervalMs: 500
     });
-    expect(() =>
+    await expect(
       service.createDestination({
         name: "bad",
         type: "unknown" as unknown as "webhook",
         config: {}
       })
-    ).toThrow(/unsupported/);
-    expect(() =>
+    ).rejects.toThrow(/unsupported/);
+    await expect(
       service.createDestination({ name: "bad", type: "webhook", config: { url: "ftp://x" } })
-    ).toThrow(/url/);
+    ).rejects.toThrow(/url/);
   });
 
   it("keeps secrets encrypted at rest on the SqliteStore row", async () => {
     const ctx = await createTestContext();
     const service = new LogStreamingService(ctx.store, ctx.config.SECRET_MASTER_KEY_BASE64);
-    const created = service.createDestination({
+    const created = await service.createDestination({
       name: "sentry",
       type: "sentry",
       config: { dsn: "https://abc123@sentry.example.com/42" }
     });
-    const row = ctx.store.getLogStreamDestination(created.id);
+    const row = await ctx.store.getLogStreamDestination(created.id);
     expect(row).toBeTruthy();
     // The ciphertext column must not contain the raw DSN.
     expect(row!.configCiphertext).not.toContain("sentry.example.com");
     expect(row!.configCiphertext).not.toContain("abc123");
     // Public view masks the dsn field.
-    const pub = service.getDestination(created.id);
+    const pub = await service.getDestination(created.id);
     expect(pub!.config.dsn).toBe("__secret__");
   });
 
@@ -649,13 +649,13 @@ describe("Phase 5.5 — LogStreamingService unit behavior", () => {
           })
       });
     });
-    const created = service.createDestination({
+    const created = await service.createDestination({
       name: "slow",
       type: "webhook",
       config: { url: "http://127.0.0.1:9/ingest" },
       categories: ["secret"]
     });
-    service.dispatch({ category: "secret", eventType: "secret.created", level: "info", createdAt: new Date().toISOString() });
+    await service.dispatch({ category: "secret", eventType: "secret.created", level: "info", createdAt: new Date().toISOString() });
 
     void service.flush();
     await sendStarted;
@@ -668,6 +668,6 @@ describe("Phase 5.5 — LogStreamingService unit behavior", () => {
 
     releaseSend();
     await stopping;
-    expect(ctx.store.listLogStreamEvents({ destinationId: created.id, limit: 10 })).toHaveLength(1);
+    expect(await ctx.store.listLogStreamEvents({ destinationId: created.id, limit: 10 })).toHaveLength(1);
   });
 });

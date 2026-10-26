@@ -60,7 +60,7 @@ export type OutboundNeed = "destinations" | "egress";
  */
 export async function outboundProfilesFor(guard: GuardRuntimeDependencies | undefined, need: OutboundNeed): Promise<ResolvedGuardProfile[]> {
   if (!guard) return [];
-  if (guard.mayUseLabels && !guard.mayUseLabels()) return [];
+  if (guard.mayUseLabels && !await guard.mayUseLabels()) return [];
   const resolution = await resolveGuardRun(guard);
   const wanted = need === "egress" ? profileChecksOutbound : profileHasDestinationRules;
   return resolution.stack.filter((entry) => wanted(entry.profile));

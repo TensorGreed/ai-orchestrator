@@ -57,21 +57,21 @@ import {
   type GoldenSetFileCase
 } from "@ai-orchestrator/shared";
 import { z } from "zod";
-import type { SqliteStore } from "./db/database.js";
 import type { RunAccess } from "./run-access.js";
 import type { SafeUser, UserRole } from "./services/auth-service.js";
 import type { AuditEventInput } from "./services/audit-service.js";
 import type { AuditSigningService } from "./services/audit-signing-service.js";
 import { MIN_RECORDED_AT_MS, ReplayRecordingError, type PreparedImport, type ReplayRecordingService } from "./services/replay-recording-service.js";
+import type { Store } from "./db/store.js";
 
 export interface GoldenSetFileRoutesDeps {
   app: FastifyInstance;
-  store: SqliteStore;
+  store: Store;
   recordings: ReplayRecordingService;
   signing: AuditSigningService;
   requireRole: (request: FastifyRequest, reply: FastifyReply, roles: UserRole[]) => Promise<SafeUser | null>;
   runAccess: RunAccess;
-  audit: (request: FastifyRequest, user: SafeUser, event: Omit<AuditEventInput, "actor">) => void;
+  audit: (request: FastifyRequest, user: SafeUser, event: Omit<AuditEventInput, "actor">) => void | Promise<void>;
   /** False on Postgres: both routes answer 501. */
   available: boolean;
   /** `GOLDEN_SET_IMPORT_MAX_BYTES`: the largest file accepted, and the basis of the import route's request body limit. */
@@ -136,12 +136,12 @@ export function registerGoldenSetFileRoutes(deps: GoldenSetFileRoutesDeps): void
     const user = await requireRole(request, reply, ["viewer"]);
     if (!user) return reply;
     if (!deps.available) return unavailable(reply);
-    const dataset = store.getEvalDataset(request.params.id);
+    const dataset = await store.getEvalDataset(request.params.id);
     if (!dataset) return deny(reply, { status: 404, error: "Golden set not found" });
     // A dataset without a workflow follows its project; either way an unreadable one answers 404 before anything else is said.
     const access = dataset.workflowId
-      ? runAccess.workflow(user, dataset.workflowId, "workflow:read", "Golden set")
-      : runAccess.project(user, dataset.projectId ?? DEFAULT_PROJECT_ID, "workflow:read", "Golden set");
+      ? await runAccess.workflow(user, dataset.workflowId, "workflow:read", "Golden set")
+      : await runAccess.project(user, dataset.projectId ?? DEFAULT_PROJECT_ID, "workflow:read", "Golden set");
     if (!access.ok) return deny(reply, access);
     if (!dataset.workflowId) {
       reply.code(400);
@@ -152,8 +152,8 @@ export function registerGoldenSetFileRoutes(deps: GoldenSetFileRoutesDeps): void
     if (signed && user.role !== "admin") {
       return deny(reply, { status: 403, error: "Only admins can sign a golden-set file with the deployment's audit key; export it unsigned." });
     }
-    const workflow = store.getWorkflow(dataset.workflowId);
-    const scrubber = recordings.scrubber();
+    const workflow = await store.getWorkflow(dataset.workflowId);
+    const scrubber = await recordings.scrubber();
     // One numbering of redacted object keys across the whole file.
     const redactedKeys = new Map<string, string>();
     const cases: GoldenSetFile["cases"] = [];
@@ -164,8 +164,8 @@ export function registerGoldenSetFileRoutes(deps: GoldenSetFileRoutesDeps): void
     );
     let total = jsonBytes(header);
     let skipped = 0;
-    for (const fixture of store.listEvalFixtures(dataset.id)) {
-      const recording = fixture.recordingId ? store.getReplayRecording(fixture.recordingId) : null;
+    for (const fixture of await store.listEvalFixtures(dataset.id)) {
+      const recording = fixture.recordingId ? await store.getReplayRecording(fixture.recordingId) : null;
       // A hand-written case, or one whose golden run was deleted, has no recording to carry; a captured candidate is not a golden run yet.
       if (!recording || candidateRefusal(recording)) {
         skipped += 1;
@@ -207,11 +207,11 @@ export function registerGoldenSetFileRoutes(deps: GoldenSetFileRoutesDeps): void
       cases
     };
     if (signed) {
-      const keyId = deps.signing.activeKeyId();
-      const signature = deps.signing.sign(goldenSetSignedBytes(file, keyId, exportedAt));
+      const keyId = await deps.signing.activeKeyId();
+      const signature = await deps.signing.sign(goldenSetSignedBytes(file, keyId, exportedAt));
       file.signature = { algorithm: "Ed25519", keyId: signature.keyId, publicKey: signature.publicKey, signedAt: exportedAt, signature: signature.signature };
     }
-    deps.audit(request, user, {
+    await deps.audit(request, user, {
       eventType: "replay.golden_set.exported",
       category: "workflow",
       action: "read",
@@ -262,7 +262,7 @@ export function registerGoldenSetFileRoutes(deps: GoldenSetFileRoutesDeps): void
         return { error: firstIssue(body.error), details: body.error.issues };
       }
       // The target comes first: someone who cannot write it learns nothing about the file.
-      const access = runAccess.workflow(user, body.data.workflowId, "workflow:write", "Workflow");
+      const access = await runAccess.workflow(user, body.data.workflowId, "workflow:write", "Workflow");
       if (!access.ok) return deny(reply, access);
       const target = access.workflow;
       const projectId = target.projectId ?? DEFAULT_PROJECT_ID;
@@ -282,7 +282,7 @@ export function registerGoldenSetFileRoutes(deps: GoldenSetFileRoutesDeps): void
       }
       // The generic deep scrub of everything outside the cases (each case follows below, one at a time):
       // from here on only scrubbed values are used, stored or echoed. The signature is verified over the original bytes.
-      const scrubber = recordings.scrubber();
+      const scrubber = await recordings.scrubber();
       const redactedKeys = new Map<string, string>();
       const { cases: rawCases, signature: rawSignature, ...headerFields } = header.data;
       const fileHeader = {
@@ -303,7 +303,7 @@ export function registerGoldenSetFileRoutes(deps: GoldenSetFileRoutesDeps): void
       let signature: "verified" | "unverified" | "absent" = "absent";
       if (fileHeader.signature) {
         const bytes = goldenSetSignedBytes(body.data.file as Record<string, unknown>, fileHeader.signature.keyId, fileHeader.signature.signedAt);
-        signature = deps.signing.verify(fileHeader.signature.keyId, bytes, fileHeader.signature.signature) ? "verified" : "unverified";
+        signature = await deps.signing.verify(fileHeader.signature.keyId, bytes, fileHeader.signature.signature) ? "verified" : "unverified";
         if (signature === "unverified") {
           warnings.push(
             `The file is signed with key ${fileHeader.signature.keyId.slice(0, 16)}, which this deployment cannot verify. Everything in it was scrubbed and checked on import as for any file; verify the signature with 'l2m golden verify' and the exporting deployment's public key.`
@@ -374,28 +374,28 @@ export function registerGoldenSetFileRoutes(deps: GoldenSetFileRoutesDeps): void
       const name = body.data.name === undefined ? fileHeader.name : recordings.scrubFileValue(body.data.name, scrubber, redactedKeys);
       const datasetId = `ds_${randomUUID()}`;
       try {
-        // Inserts only: everything expensive happened above.
-        store.transaction(() => {
-          store.createEvalDataset({
+        // Inserts only, in one transaction: everything expensive happened above. A refused case leaves nothing behind.
+        const outcome = await store.importGoldenSet({
+          dataset: {
             id: datasetId,
             name,
             ...(fileHeader.description ? { description: fileHeader.description } : {}),
             projectId,
             workflowId: target.id,
             createdBy: user.email
-          });
-          for (const { entry, recording, scorers } of prepared) {
-            const summary = recordings.saveImport(recording, user.email);
-            store.createEvalFixture({
+          },
+          cases: prepared.map(({ entry, recording, scorers }) => ({
+            recording: { ...recording.row, createdBy: user.email },
+            fixture: {
               id: `fix_${randomUUID()}`,
-              datasetId,
               name: entry.name,
               input: recording.input ?? null,
-              ...(scorers && scorers.length > 0 ? { scorers: scorers as unknown as Array<Record<string, unknown>> } : {}),
-              recordingId: summary.id
-            });
-          }
+              ...(scorers && scorers.length > 0 ? { scorers: scorers as unknown as Array<Record<string, unknown>> } : {})
+            }
+          })),
+          limits: recordings.limits
         });
+        if ("refused" in outcome) throw recordings.refusalError(outcome, "importing");
       } catch (error) {
         if (error instanceof ReplayRecordingError) {
           reply.code(RECORDING_ERROR_STATUS[error.code]);
@@ -418,8 +418,8 @@ export function registerGoldenSetFileRoutes(deps: GoldenSetFileRoutesDeps): void
       if (droppedTapeEntries > 0) {
         warnings.push(`${droppedTapeEntries} recorded model call${droppedTapeEntries === 1 ? "" : "s"} were dropped because ${target.id} has no node with the same id and type; those tapes are marked truncated.`);
       }
-      const dataset = store.getEvalDataset(datasetId);
-      deps.audit(request, user, {
+      const dataset = await store.getEvalDataset(datasetId);
+      await deps.audit(request, user, {
         eventType: "replay.golden_set.imported",
         category: "workflow",
         action: "create",

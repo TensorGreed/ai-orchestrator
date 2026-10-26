@@ -1,6 +1,6 @@
 import { nanoid } from "nanoid";
 import type { Workflow } from "@ai-orchestrator/shared";
-import type { SqliteStore } from "../db/database";
+import type { Store } from "../db/store.js";
 
 export interface WorkflowVersionSummary {
   id: string;
@@ -21,44 +21,39 @@ export interface WorkflowVersionFull extends WorkflowVersionSummary {
  */
 export class WorkflowVersionService {
   constructor(
-    private readonly store: SqliteStore,
+    private readonly store: Store,
     private readonly retention: number = 100
   ) {}
 
-  snapshot(input: {
+  async snapshot(input: {
     workflow: Workflow;
     createdBy?: string | null;
     changeNote?: string | null;
-  }): WorkflowVersionSummary {
-    const nextVersion = this.store.maxWorkflowVersionNumber(input.workflow.id) + 1;
-    const id = `wfv_${nanoid(14)}`;
-    this.store.writeWorkflowVersion({
-      id,
+  }): Promise<WorkflowVersionSummary> {
+    const appended = await this.store.appendWorkflowVersion({
+      id: `wfv_${nanoid(14)}`,
       workflowId: input.workflow.id,
-      version: nextVersion,
       workflowJson: JSON.stringify(input.workflow),
       createdBy: input.createdBy ?? null,
-      changeNote: input.changeNote ?? null
+      changeNote: input.changeNote ?? null,
+      retention: this.retention
     });
-    if (this.retention > 0) {
-      this.store.pruneWorkflowVersions(input.workflow.id, this.retention);
-    }
     return {
-      id,
+      id: appended.id,
       workflowId: input.workflow.id,
-      version: nextVersion,
+      version: appended.version,
       createdBy: input.createdBy ?? null,
       changeNote: input.changeNote ?? null,
-      createdAt: new Date().toISOString()
+      createdAt: appended.createdAt
     };
   }
 
-  list(workflowId: string, limit = 100): WorkflowVersionSummary[] {
-    return this.store.listWorkflowVersions(workflowId, limit);
+  async list(workflowId: string, limit = 100): Promise<WorkflowVersionSummary[]> {
+    return await this.store.listWorkflowVersions(workflowId, limit);
   }
 
-  get(workflowId: string, version: number): WorkflowVersionFull | null {
-    const row = this.store.getWorkflowVersion(workflowId, version);
+  async get(workflowId: string, version: number): Promise<WorkflowVersionFull | null> {
+    const row = await this.store.getWorkflowVersion(workflowId, version);
     if (!row) return null;
     let parsed: Workflow;
     try {

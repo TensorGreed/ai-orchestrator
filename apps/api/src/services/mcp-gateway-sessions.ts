@@ -47,7 +47,7 @@ export interface GatewaySessionManagerOptions {
   createContext: () => MCPExecutionContext;
   /** Release adapter sessions (stdio children) held by a session's context. */
   closeContext: (context: MCPExecutionContext) => Promise<void>;
-  onEnded?: (session: GatewaySession, reason: GatewaySessionEndReason) => void;
+  onEnded?: (session: GatewaySession, reason: GatewaySessionEndReason) => void | Promise<void>;
   now?: () => number;
 }
 
@@ -138,7 +138,7 @@ export class GatewaySessionManager {
     }
     session.inFlight.clear();
     await this.options.closeContext(session.mcpContext);
-    this.options.onEnded?.(session, reason);
+    await this.options.onEnded?.(session, reason);
     return true;
   }
 

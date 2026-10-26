@@ -36,7 +36,7 @@ const contexts: TestContext[] = [];
 async function createTestContext(overrides: Record<string, string> = {}): Promise<TestContext> {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-mcp-onboarding-"));
   const store = await SqliteStore.create(path.join(tempDir, "orchestrator.db"));
-  store.ensureDefaultProject();
+  await store.ensureDefaultProject();
   const config = parseConfig({
     LOG_LEVEL: "warn",
     SEED_SAMPLE_WORKFLOWS: "false",
@@ -49,7 +49,7 @@ async function createTestContext(overrides: Record<string, string> = {}): Promis
   });
   const secretService = new SecretService(store, config.SECRET_MASTER_KEY_BASE64);
   const authService = new AuthService(store, config.SESSION_TTL_HOURS);
-  const app = createApp(config, store, secretService, authService);
+  const app = await createApp(config, store, secretService, authService);
   await app.ready();
   const context = { app, store, authService, secretService, config, tempDir };
   contexts.push(context);
@@ -61,7 +61,7 @@ afterEach(async () => {
     const context = contexts.pop()!;
     await context.app.close();
     try {
-      context.store.close();
+      await context.store.close();
     } catch {
       // Already closed by the app shutdown hooks.
     }
@@ -74,7 +74,7 @@ type Role = "admin" | "builder" | "operator" | "viewer";
 async function login(context: TestContext, role: Role, name: string = role): Promise<string> {
   const email = `${name}@example.com`;
   const password = `${name}-Pass-123!`;
-  context.authService.register({ email, password, role });
+  await context.authService.register({ email, password, role });
   const response = await context.app.inject({ method: "POST", url: "/api/auth/login", payload: { email, password } });
   if (response.statusCode !== 200) throw new Error(`Login failed for ${name}: ${response.body}`);
   const raw = response.headers["set-cookie"];
@@ -129,14 +129,14 @@ describe("POST /api/mcp/servers/import", () => {
       ["remote", "http_mcp", "single", "create"]
     ]);
     for (const secret of [STDIO_KEY, STDIO_SECRET, BEARER]) expect(preview.raw).not.toContain(secret);
-    expect(context.store.listMcpServers()).toHaveLength(0);
+    expect(await context.store.listMcpServers()).toHaveLength(0);
 
     const result = await importConfig(context, admin, { content: sampleConfig(), fileName: "mcp.json", probe: false });
     expect(result.status).toBe(200);
     for (const secret of [STDIO_KEY, STDIO_SECRET, BEARER]) expect(result.raw).not.toContain(secret);
     expect(result.body.entries.map((entry) => entry.result?.action)).toEqual(["created", "created"]);
 
-    const servers = context.store.listMcpServers();
+    const servers = await context.store.listMcpServers();
     expect(servers.map((server) => server.name).sort()).toEqual(["echo", "remote"]);
     const echo = servers.find((server) => server.name === "echo")!;
     expect(echo.connection).toEqual({
@@ -156,7 +156,7 @@ describe("POST /api/mcp/servers/import", () => {
       expect(JSON.stringify(servers)).not.toContain(secret);
     }
 
-    const audits = context.store.listAuditLogs({ pageSize: 200 }).items;
+    const audits = (await context.store.listAuditLogs({ pageSize: 200 })).items;
     const imported = audits.find((entry) => entry.eventType === "mcp_server.imported");
     expect(imported).toBeTruthy();
     expect(audits.filter((entry) => entry.eventType === "secret.create")).toHaveLength(2);
@@ -175,7 +175,7 @@ describe("POST /api/mcp/servers/import", () => {
     const denied = await importConfig(context, builder, { content: sampleConfig() });
     expect(denied.status).toBe(403);
     expect((await importConfig(context, viewer, { content: sampleConfig(), dryRun: true })).status).toBe(403);
-    expect(context.store.listMcpServers()).toHaveLength(0);
+    expect(await context.store.listMcpServers()).toHaveLength(0);
   });
 
   it("rejects unreadable files with a clear message", async () => {
@@ -193,7 +193,7 @@ describe("POST /api/mcp/servers/import", () => {
     const context = await createTestContext();
     const admin = await login(context, "admin");
     await importConfig(context, admin, { content: sampleConfig(), probe: false });
-    const [before] = context.store.listMcpServers().filter((server) => server.name === "echo");
+    const [before] = (await context.store.listMcpServers()).filter((server) => server.name === "echo");
 
     const again = await importConfig(context, admin, { content: sampleConfig(), dryRun: true });
     expect(again.body.entries.map((entry) => [entry.decision, entry.duplicate?.serverId])).toEqual([
@@ -207,9 +207,9 @@ describe("POST /api/mcp/servers/import", () => {
       entries: { echo: { decision: "update" }, remote: { decision: "copy" } }
     });
     expect(chosen.body.entries.map((entry) => entry.result?.action)).toEqual(["updated", "created"]);
-    const servers = context.store.listMcpServers();
+    const servers = await context.store.listMcpServers();
     expect(servers.map((server) => server.name).sort()).toEqual(["echo", "remote", "remote (imported)"]);
-    const after = context.store.getMcpServer(before!.id)!;
+    const after = (await context.store.getMcpServer(before!.id))!;
     expect(after.secretId).not.toBe(before!.secretId);
   });
 
@@ -223,7 +223,7 @@ describe("POST /api/mcp/servers/import", () => {
     const missing = await importConfig(context, admin, { content, probe: false });
     expect(missing.body.entries[0]!.result).toMatchObject({ action: "skipped" });
     expect(missing.body.entries[0]!.result?.reason).toMatch(/TRACKER_TOKEN/);
-    expect(context.store.listMcpServers()).toHaveLength(0);
+    expect(await context.store.listMcpServers()).toHaveLength(0);
 
     const supplied = await importConfig(context, admin, {
       content,
@@ -232,7 +232,7 @@ describe("POST /api/mcp/servers/import", () => {
     });
     expect(supplied.body.entries[0]!.result?.action).toBe("created");
     expect(supplied.raw).not.toContain("typed-token-value-1");
-    const [server] = context.store.listMcpServers();
+    const [server] = await context.store.listMcpServers();
     expect(server!.connection).toMatchObject({ secretEnvVar: "TRACKER_TOKEN" });
     expect(await context.secretService.resolveSecret({ secretId: server!.secretId! })).toBe("typed-token-value-1");
   });
@@ -241,7 +241,7 @@ describe("POST /api/mcp/servers/import", () => {
     const context = await createTestContext();
     const admin = await login(context, "admin");
     await importConfig(context, admin, { content: sampleConfig(), probe: false, entries: { remote: { decision: "skip" } } });
-    const [echo] = context.store.listMcpServers();
+    const [echo] = await context.store.listMcpServers();
     const probe = await context.app.inject({ method: "POST", url: `/api/mcp/servers/${echo!.id}/probe`, headers: { cookie: admin } });
     expect(probe.json().probe.ok).toBe(true);
     const call = await context.app.inject({
@@ -307,7 +307,7 @@ describe("MCP catalog", () => {
     fs.writeFileSync(file, fs.readFileSync(exampleCatalog, "utf8"));
     const fixed = await context.app.inject({ method: "POST", url: "/api/mcp/catalog/reload", headers: { cookie: admin } });
     expect(fixed.json().status).toMatchObject({ state: "ok", entryCount: 6 });
-    expect(context.store.listAuditLogs({ pageSize: 50 }).items.some((entry) => entry.eventType === "mcp_catalog.reloaded")).toBe(true);
+    expect((await context.store.listAuditLogs({ pageSize: 50 })).items.some((entry) => entry.eventType === "mcp_catalog.reloaded")).toBe(true);
   });
 
   it("starts with a broken catalog file without crashing", async () => {
@@ -391,18 +391,18 @@ describe("MCP playground", () => {
     expect(body.exchange.request).toMatchObject({ jsonrpc: "2.0", method: "tools/call", params: { name: "lookup_kb", arguments: { topic: "mcp" } } });
     expect(body.exchange.response).toMatchObject({ jsonrpc: "2.0", id: body.exchange.request.id });
     expect(body.policy).toEqual({ role: "builder", projectId: "default" });
-    const rows = context.store.listMcpToolCalls({ registryServerId: id, since: "2020-01-01T00:00:00.000Z" });
+    const rows = await context.store.listMcpToolCalls({ registryServerId: id, since: "2020-01-01T00:00:00.000Z" });
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ source: "playground", toolName: "lookup_kb", ok: true, clientId: null });
-    expect(context.store.listAuditLogs({ pageSize: 50 }).items.some((entry) => entry.eventType === "mcp_tool.playground_call")).toBe(true);
+    expect((await context.store.listAuditLogs({ pageSize: 50 })).items.some((entry) => entry.eventType === "mcp_tool.playground_call")).toBe(true);
   });
 
   it("evaluates a project-scoped server only in its own project", async () => {
     const context = await createTestContext();
     const admin = await login(context, "admin");
     const builder = await login(context, "builder");
-    context.store.upsertProject({ id: "team-a", name: "Team A" });
-    context.store.upsertProject({ id: "team-b", name: "Team B" });
+    await context.store.upsertProject({ id: "team-a", name: "Team A" });
+    await context.store.upsertProject({ id: "team-b", name: "Team B" });
     const created = await context.app.inject({
       method: "POST",
       url: "/api/mcp/servers",
@@ -435,9 +435,9 @@ describe("MCP playground", () => {
     const admin = await login(context, "admin");
     const builder = await login(context, "builder");
     const id = await mockServer(context, admin);
-    const builderUser = context.store.getUserByEmail("builder@example.com");
+    const builderUser = await context.store.getUserByEmail("builder@example.com");
     if (!builderUser) throw new Error("builder missing");
-    context.store.upsertProjectRole({ userId: builderUser.id, projectId: "default", role: "viewer" });
+    await context.store.upsertProjectRole({ userId: builderUser.id, projectId: "default", role: "viewer" });
 
     const response = await context.app.inject({
       method: "POST",
@@ -446,7 +446,7 @@ describe("MCP playground", () => {
       payload: { toolName: "lookup_kb", args: { topic: "mcp" } }
     });
     expect(response.statusCode).toBe(403);
-    expect(context.store.listMcpToolCalls({ registryServerId: id, since: "2020-01-01T00:00:00.000Z" })).toHaveLength(0);
+    expect(await context.store.listMcpToolCalls({ registryServerId: id, since: "2020-01-01T00:00:00.000Z" })).toHaveLength(0);
   });
 
   it("asks before calling a write tool", async () => {
@@ -498,11 +498,11 @@ describe("MCP playground", () => {
       payload: { toolName: "lookup_kb", args: { topic: "mcp" } }
     });
     expect(allowedForAdmin.statusCode).toBe(200);
-    const rows = context.store.listMcpToolCalls({ registryServerId: id, since: "2020-01-01T00:00:00.000Z" });
+    const rows = await context.store.listMcpToolCalls({ registryServerId: id, since: "2020-01-01T00:00:00.000Z" });
     expect(rows).toHaveLength(1);
 
     // A project-scoped deny applies only when that project is active.
-    context.store.upsertProject({ id: "proj_ops", name: "Ops" });
+    await context.store.upsertProject({ id: "proj_ops", name: "Ops" });
     await context.app.inject({
       method: "POST",
       url: "/api/mcp/policies",
@@ -542,7 +542,7 @@ describe("MCP playground", () => {
     const context = await createTestContext();
     const admin = await login(context, "admin");
     await importConfig(context, admin, { content: sampleConfig(), probe: false, entries: { remote: { decision: "skip" } } });
-    const [echo] = context.store.listMcpServers();
+    const [echo] = await context.store.listMcpServers();
     await context.app.inject({ method: "POST", url: `/api/mcp/servers/${echo!.id}/probe`, headers: { cookie: admin } });
     const response = await context.app.inject({
       method: "POST",

@@ -185,7 +185,7 @@ export interface McpCassetteRecorderOptions {
   /** Extra string redaction (the API passes its secret redactor). */
   redact?: (value: string) => string;
   /** Accepted snapshot hash of a registry server, recorded with its identity. */
-  snapshotHashFor?: (registryServerId: string) => string | null | undefined;
+  snapshotHashFor?: (registryServerId: string) => string | null | undefined | Promise<string | null | undefined>;
   now?: () => number;
 }
 
@@ -211,18 +211,22 @@ export class McpCassetteRecorder {
     return Math.max(0, Math.round(this.now() - this.startedAt));
   }
 
-  /** Registers the server on first sight and returns its key. */
-  serverFor(config: MCPServerConfig): string {
+  /**
+   * Registers the server on first sight and returns its key. Servers keep
+   * the order they were first seen in, even while a snapshot hash is looked up.
+   */
+  async serverFor(config: MCPServerConfig): Promise<string> {
     const key = cassetteServerKey(config);
     if (!this.servers.has(key)) {
-      const snapshotHash = config.registryServerId ? this.options.snapshotHashFor?.(config.registryServerId) : undefined;
-      this.servers.set(key, {
+      const server: McpCassetteServer = {
         key,
         adapterId: config.serverId,
         ...(config.registryServerId ? { registryServerId: config.registryServerId } : {}),
-        ...(config.label ? { label: config.label } : {}),
-        ...(snapshotHash !== undefined ? { snapshotHash } : {})
-      });
+        ...(config.label ? { label: config.label } : {})
+      };
+      this.servers.set(key, server);
+      const snapshotHash = config.registryServerId ? await this.options.snapshotHashFor?.(config.registryServerId) : undefined;
+      if (snapshotHash !== undefined) this.servers.set(key, { ...server, snapshotHash });
     }
     return key;
   }
@@ -321,7 +325,7 @@ export function recordingAdapter(adapter: MCPServerAdapter, recorder: McpCassett
     args: unknown,
     run: (context: MCPExecutionContext) => Promise<T>
   ): Promise<T> => {
-    const server = recorder.serverFor(config);
+    const server = await recorder.serverFor(config);
     const secrets = await cassetteSecretsFor(config, context);
     const scrubOptions = recorder.scrubOptions(secrets);
     const scrub = (value: unknown) => scrubForCassette(value, scrubOptions);
@@ -441,7 +445,7 @@ export interface McpCassettePlayerOptions {
   /** Registry for `live_read_only` servers' live calls. */
   liveReads?: MCPRegistry;
   /** Is this tool read-only? Unknown tools are writes. Without it no tool call goes live. */
-  isReadOnlyTool?: (input: { config: MCPServerConfig; toolName: string; annotations?: Record<string, unknown> }) => boolean;
+  isReadOnlyTool?: (input: { config: MCPServerConfig; toolName: string; annotations?: Record<string, unknown> }) => boolean | Promise<boolean>;
 }
 
 function matchKey(server: string, method: McpCassetteMethod, name: string | undefined, argsHash: string): string {
@@ -500,11 +504,11 @@ export class McpCassettePlayer {
   }
 
   /** A `live_read_only` server's call that goes to the live server: a read-only tool call or a read. */
-  private goesLive(method: McpCassetteMethod, server: string, config: MCPServerConfig, name: string | undefined): boolean {
+  private async goesLive(method: McpCassetteMethod, server: string, config: MCPServerConfig, name: string | undefined): Promise<boolean> {
     if (method === "resources/read" || method === "prompts/get") return true;
     if (method !== "tools/call" || name === undefined || !this.options.isReadOnlyTool) return false;
     try {
-      return this.options.isReadOnlyTool({ config, toolName: name, annotations: this.recordedAnnotations(server, name) }) === true;
+      return (await this.options.isReadOnlyTool({ config, toolName: name, annotations: this.recordedAnnotations(server, name) })) === true;
     } catch {
       return false;
     }
@@ -525,17 +529,19 @@ export class McpCassettePlayer {
     const scrubbedArgs = input.args === undefined ? undefined : canonicalJson(scrubForCassette(input.args, scrubOptions));
     const name = input.name === undefined ? undefined : String(scrubForCassette(input.name, scrubOptions));
     const key = matchKey(server, input.method, name, hashCassetteArgs(scrubbedArgs));
-    const candidates = this.byKey.get(key) ?? [];
-    const position = this.cursor.get(key) ?? 0;
     const mode = this.modeFor(input.config);
 
-    if (mode === "live_read_only" && input.live && this.goesLive(input.method, server, input.config, name)) {
+    if (mode === "live_read_only" && input.live && (await this.goesLive(input.method, server, input.config, name))) {
       const readAdapter = this.options.liveReads?.tryGet(input.config.serverId);
       if (readAdapter) {
         this.liveRead += 1;
         return input.live(readAdapter);
       }
     }
+
+    // Read the cursor only after the last await, so concurrent calls never take the same entry.
+    const candidates = this.byKey.get(key) ?? [];
+    const position = this.cursor.get(key) ?? 0;
 
     let entry: McpCassetteEntry | undefined;
     if (position < candidates.length) {

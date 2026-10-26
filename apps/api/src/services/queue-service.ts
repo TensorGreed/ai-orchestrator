@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
-import type { SqliteStore } from "../db/database.js";
 import { STUCK_JOB_MARGIN_MS, queuedRunTimeoutMs } from "../db/queue-timeouts.js";
 import type { ApprovalResumeJob } from "./approval-service.js";
+import type { Store } from "../db/store.js";
 
 export interface QueuedExecutionPayload {
   workflowId: string;
@@ -51,7 +51,7 @@ export class NonRetryableQueueError extends Error {
 }
 
 export class QueueService {
-  private readonly store: SqliteStore;
+  private readonly store: Store;
   private readonly config: Required<QueueServiceConfig>;
   private running = 0;
   private readonly inFlight = new Map<string, { startedAtMs: number; stuckAfterMs: number }>();
@@ -60,8 +60,9 @@ export class QueueService {
   private pollTimer: NodeJS.Timeout | null = null;
   private stuckTimer: NodeJS.Timeout | null = null;
   private started = false;
+  private polling = false;
 
-  constructor(store: SqliteStore, config: QueueServiceConfig = {}) {
+  constructor(store: Store, config: QueueServiceConfig = {}) {
     this.store = store;
     this.config = {
       concurrency: config.concurrency ?? 5,
@@ -80,17 +81,19 @@ export class QueueService {
       return;
     }
     this.started = true;
-    this.pollTimer = setInterval(() => {
-      this.poll();
+    // promise-ok: poll catches and logs its own dequeue errors
+    this.pollTimer = setInterval(async () => {
+      await this.poll();
     }, this.config.pollIntervalMs);
 
     // Check for stuck items every 60 seconds
-    this.stuckTimer = setInterval(() => {
-      this.sweepStuck();
+    // promise-ok: sweepStuck catches and logs its own errors
+    this.stuckTimer = setInterval(async () => {
+      await this.sweepStuck();
     }, 60_000);
   }
 
-  private sweepStuck(): void {
+  private async sweepStuck(): Promise<void> {
     const nowMs = Date.now();
     for (const [id, { startedAtMs, stuckAfterMs }] of this.inFlight) {
       if (nowMs - startedAtMs > stuckAfterMs && !this.warnedStuck.has(id)) {
@@ -100,15 +103,10 @@ export class QueueService {
     }
     try {
       // A shared database can hold running jobs of other instances; the store applies each job's own run time limit.
-      Promise.resolve(this.store.requeueStuckItems(this.config.stuckJobTimeoutMs, [...this.inFlight.keys()], STUCK_JOB_MARGIN_MS))
-        .then((requeued) => {
-          if (requeued > 0) {
-            console.info(`[queue] Re-queued ${requeued} stuck job(s)`);
-          }
-        })
-        .catch((error: unknown) => {
-          console.error("[queue] Failed to requeue stuck items", error);
-        });
+      const requeued = await this.store.requeueStuckItems(this.config.stuckJobTimeoutMs, [...this.inFlight.keys()], STUCK_JOB_MARGIN_MS);
+      if (requeued > 0) {
+        console.info(`[queue] Re-queued ${requeued} stuck job(s)`);
+      }
     } catch (error) {
       console.error("[queue] Failed to requeue stuck items", error);
     }
@@ -132,7 +130,7 @@ export class QueueService {
     const executionId = payload.executionId ?? randomUUID();
     const { priority, executionId: _id, queueItemId, maxAttempts, ...rest } = payload;
 
-    this.store.enqueueExecution({
+    await this.store.enqueueExecution({
       // A resume reuses its run's execution id, so its queue item needs its own id.
       id: queueItemId ?? executionId,
       workflowId: rest.workflowId,
@@ -145,11 +143,11 @@ export class QueueService {
     return executionId;
   }
 
-  getDepth(): { pending: number; running: number; dlq: number } {
-    return this.store.getQueueDepth();
+  async getDepth(): Promise<{ pending: number; running: number; dlq: number }> {
+    return await this.store.getQueueDepth();
   }
 
-  listDlq(limit?: number, workflowIds?: string[]): Array<{
+  async listDlq(limit?: number, workflowIds?: string[]): Promise<Array<{
     id: string;
     originalId: string;
     workflowId: string;
@@ -157,11 +155,22 @@ export class QueueService {
     attempts: number;
     finalError: string;
     failedAt: string;
-  }> {
-    return this.store.listDlqItems(limit, workflowIds);
+  }>> {
+    return await this.store.listDlqItems(limit, workflowIds);
   }
 
-  private poll(): void {
+  private async poll(): Promise<void> {
+    // One poll at a time: a dequeue still waiting on the database must not let the next tick take more jobs.
+    if (this.polling) return;
+    this.polling = true;
+    try {
+      await this.pollOnce();
+    } finally {
+      this.polling = false;
+    }
+  }
+
+  private async pollOnce(): Promise<void> {
     if (!this.handler) {
       return;
     }
@@ -171,9 +180,9 @@ export class QueueService {
       return;
     }
 
-    let items: ReturnType<SqliteStore["dequeueNext"]>;
+    let items: Awaited<ReturnType<Store["dequeueNext"]>>;
     try {
-      items = this.store.dequeueNext(available);
+      items = await this.store.dequeueNext(available);
     } catch (error) {
       console.error("[queue] Failed to dequeue items", error);
       return;
@@ -195,7 +204,7 @@ export class QueueService {
   }
 
   private async executeItem(
-    item: ReturnType<SqliteStore["dequeueNext"]>[number]
+    item: Awaited<ReturnType<Store["dequeueNext"]>>[number]
   ): Promise<void> {
     const handler = this.handler;
     if (!handler) {
@@ -203,7 +212,7 @@ export class QueueService {
       this.inFlight.delete(item.id);
       this.warnedStuck.delete(item.id);
       try {
-        this.store.markQueueItemFailed(item.id, "No handler registered");
+        await this.store.markQueueItemFailed(item.id, "No handler registered");
       } catch {
         // ignore
       }
@@ -213,12 +222,12 @@ export class QueueService {
     try {
       const payload = item.payload as unknown as QueuedExecutionPayload;
       await handler(payload);
-      this.store.markQueueItemCompleted(item.id);
+      await this.store.markQueueItemCompleted(item.id);
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
       console.error(`[queue] Job ${item.id} failed: ${errorMessage}`);
       try {
-        this.store.markQueueItemFailed(item.id, errorMessage, { retryable: !(error instanceof NonRetryableQueueError) });
+        await this.store.markQueueItemFailed(item.id, errorMessage, { retryable: !(error instanceof NonRetryableQueueError) });
       } catch (persistError) {
         console.error("[queue] Failed to mark item as failed", persistError);
       }

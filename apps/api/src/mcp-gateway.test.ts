@@ -82,7 +82,7 @@ const INJECTED_SECRET = "echo-secret-value-9f3k2";
 async function createTestContext(overrides: Record<string, string> = {}): Promise<TestContext> {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-mcp-gateway-"));
   const store = await SqliteStore.create(path.join(tempDir, "orchestrator.db"));
-  store.ensureDefaultProject();
+  await store.ensureDefaultProject();
   const config = parseConfig({
     LOG_LEVEL: "warn",
     SEED_SAMPLE_WORKFLOWS: "false",
@@ -97,7 +97,7 @@ async function createTestContext(overrides: Record<string, string> = {}): Promis
   });
   const secretService = new SecretService(store, config.SECRET_MASTER_KEY_BASE64);
   const authService = new AuthService(store, config.SESSION_TTL_HOURS);
-  const app = createApp(config, store, secretService, authService);
+  const app = await createApp(config, store, secretService, authService);
   await app.listen({ port: 0, host: "127.0.0.1" });
   const port = (app.server.address() as AddressInfo).port;
   const context: TestContext = { app, store, authService, secretService, config, tempDir, baseUrl: `http://127.0.0.1:${port}` };
@@ -114,7 +114,7 @@ afterEach(async () => {
     if (!context) continue;
     await context.app.close();
     try {
-      context.store.close();
+      await context.store.close();
     } catch {
       // Already closed by the app shutdown hooks.
     }
@@ -134,7 +134,7 @@ type Role = "admin" | "builder" | "operator" | "viewer";
 async function login(context: TestContext, role: Role, name: string = role): Promise<{ cookie: string; id: string; email: string }> {
   const email = `${name}@example.com`;
   const password = `${name}-Pass-123!`;
-  const user = context.authService.register({ email, password, role });
+  const user = await context.authService.register({ email, password, role });
   const response = await context.app.inject({ method: "POST", url: "/api/auth/login", payload: { email, password } });
   if (response.statusCode !== 200) throw new Error(`Login failed for ${name}: ${response.body}`);
   return { cookie: extractCookie(response.headers["set-cookie"], context.config.SESSION_COOKIE_NAME), id: user.id, email };
@@ -280,8 +280,8 @@ async function setupFixture(overrides: Record<string, string> = {}): Promise<Fix
     connection: { command: process.execPath, args: ["-e", ECHO_SERVER_SCRIPT], timeoutMs: 20000, secretEnvVar: "ECHO_TOKEN" },
     secretRef: { secretId: secret.body.id }
   });
-  context.store.upsertWorkflow(triggerWorkflow("wf-echo", "echo_workflow"), { createdBy: admin.id });
-  context.store.upsertWorkflow(slowWorkflow("wf-slow"), { createdBy: admin.id });
+  await context.store.upsertWorkflow(triggerWorkflow("wf-echo", "echo_workflow"), { createdBy: admin.id });
+  await context.store.upsertWorkflow(slowWorkflow("wf-slow"), { createdBy: admin.id });
   const toolsetResponse = await api<{ toolset: McpToolset }>(context, admin.cookie, "POST", "/api/mcp/toolsets", {
     name: "Main tools",
     description: "Everything the tests need",
@@ -323,10 +323,10 @@ function processAlive(pid: number): boolean {
   }
 }
 
-async function waitFor(check: () => boolean, timeoutMs = 8000): Promise<void> {
+async function waitFor(check: () => Promise<boolean>, timeoutMs = 8000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    if (check()) return;
+    if (await check()) return;
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
   throw new Error("Condition not met in time");
@@ -399,7 +399,7 @@ describe("MCP gateway conformance (official SDK client)", () => {
     expect(progress[0]!.progress).toBe(0);
     const executionId = (workflowResult._meta as { executionId?: string } | undefined)?.executionId;
     expect(executionId).toBeTruthy();
-    const execution = context.store.getExecutionHistory(executionId!);
+    const execution = await context.store.getExecutionHistory(executionId!);
     expect(execution?.status).toBe("success");
     expect(execution?.triggerType).toBe("mcp_gateway");
 
@@ -416,7 +416,7 @@ describe("MCP gateway conformance (official SDK client)", () => {
     expect(JSON.stringify(envcheck)).not.toContain(INJECTED_SECRET);
 
     // Cancel a long workflow run: the run ends canceled.
-    const before = new Set(context.store.listExecutionHistory({ triggerType: "mcp_gateway", pageSize: 100 }).items.map((item) => item.id));
+    const before = new Set((await context.store.listExecutionHistory({ triggerType: "mcp_gateway", pageSize: 100 })).items.map((item) => item.id));
     const workflowAbort = new AbortController();
     const slowCall = client.callTool({ name: "slow_workflow", arguments: { text: "x" } }, undefined, {
       signal: workflowAbort.signal,
@@ -424,14 +424,14 @@ describe("MCP gateway conformance (official SDK client)", () => {
     });
     await expect(slowCall).rejects.toThrow();
     let canceledId = "";
-    await waitFor(() => {
-      const item = context.store
-        .listExecutionHistory({ triggerType: "mcp_gateway", pageSize: 100 })
+    await waitFor(async () => {
+      const item = (await context.store
+        .listExecutionHistory({ triggerType: "mcp_gateway", pageSize: 100 }))
         .items.find((entry) => !before.has(entry.id) && entry.status === "canceled");
       canceledId = item?.id ?? "";
       return Boolean(item);
     });
-    expect(context.store.getExecutionHistory(canceledId)?.workflowId).toBe("wf-slow");
+    expect((await context.store.getExecutionHistory(canceledId))?.workflowId).toBe("wf-slow");
 
     // Cancel a hanging stdio call: the child process is stopped.
     const pid = Number(textOf(await client.callTool({ name: "echo_server__pid", arguments: {} })));
@@ -442,7 +442,7 @@ describe("MCP gateway conformance (official SDK client)", () => {
       onprogress: () => hangAbort.abort("test cancel")
     });
     await expect(hangCall).rejects.toThrow();
-    await waitFor(() => !processAlive(pid));
+    await waitFor(async () => !processAlive(pid));
 
     // The next call starts the server again; ending the session stops it.
     const pid2 = Number(textOf(await client.callTool({ name: "echo_server__pid", arguments: {} })));
@@ -450,7 +450,7 @@ describe("MCP gateway conformance (official SDK client)", () => {
     expect(processAlive(pid2)).toBe(true);
     const sessionId = transport.sessionId!;
     await transport.terminateSession();
-    await waitFor(() => !processAlive(pid2));
+    await waitFor(async () => !processAlive(pid2));
     const afterEnd = await rpc(context, toolset.slug, { jsonrpc: "2.0", id: 9, method: "ping" }, {
       authorization: `Bearer ${token}`,
       "mcp-session-id": sessionId
@@ -526,7 +526,7 @@ describe("MCP gateway auth and security", () => {
     expect((await rpc(context, toolset.slug, init, { authorization: `Bearer ${token}x` })).statusCode).toBe(401);
     expect((await rpc(context, toolset.slug, init, { authorization: "Basic abc" })).statusCode).toBe(401);
 
-    context.store.createMcpClient({
+    await context.store.createMcpClient({
       id: "mcc_expired",
       name: "Expired",
       tokenPrefix: "l2m_mcp_expiredtest1",
@@ -644,7 +644,7 @@ describe("MCP gateway auth and security", () => {
       toolPattern: "calculator"
     });
     expect(rule.status).toBe(201);
-    context.store.upsertWorkflow(calculatorWorkflow("wf-calc", mockServerId), { createdBy: admin.id });
+    await context.store.upsertWorkflow(calculatorWorkflow("wf-calc", mockServerId), { createdBy: admin.id });
     await api(context, admin.cookie, "POST", `/api/mcp/toolsets/${toolset.id}/members`, { kind: "workflow", workflowId: "wf-calc" });
 
     const listNames = async () => {
@@ -660,8 +660,8 @@ describe("MCP gateway auth and security", () => {
     expect((await listNames()).names).toContain("mock_tools__calculator");
 
     // Demote the creator: the client is capped at builder.
-    const stored = context.store.getUserById(creator.id)!;
-    context.store.saveUser({ id: stored.id, email: stored.email, passwordHash: stored.passwordHash, role: "builder" });
+    const stored = (await context.store.getUserById(creator.id))!;
+    await context.store.saveUser({ id: stored.id, email: stored.email, passwordHash: stored.passwordHash, role: "builder" });
     const { sessionId, names } = await listNames();
     expect(names).not.toContain("mock_tools__calculator");
     expect(names).toContain("mock_tools__lookup_kb");
@@ -687,17 +687,17 @@ describe("MCP gateway auth and security", () => {
     expect(viaWorkflow.json().result.isError).toBe(true);
     expect(viaWorkflow.json().result.content[0].text).toMatch(/blocked by policy/);
 
-    const deniedAudit = context.store.listAuditLogs({ eventType: "mcp_gateway.tool_denied" }).items;
+    const deniedAudit = (await context.store.listAuditLogs({ eventType: "mcp_gateway.tool_denied" })).items;
     expect(deniedAudit.length).toBeGreaterThanOrEqual(1);
     expect(deniedAudit[0]!.outcome).toBe("denied");
   });
 
   it("fails calls to a server that is blocked on a breaking change", async () => {
     const { context, toolset, token, mockServerId } = await setupFixture();
-    const server = context.store.getMcpServer(mockServerId)!;
-    const current = context.store.getMcpToolSnapshot(server.currentSnapshotId!)!;
-    context.store.updateMcpServer(mockServerId, { blockOnBreakingChange: true });
-    context.store.recordMcpServerProbe({
+    const server = (await context.store.getMcpServer(mockServerId))!;
+    const current = (await context.store.getMcpToolSnapshot(server.currentSnapshotId!))!;
+    await context.store.updateMcpServer(mockServerId, { blockOnBreakingChange: true });
+    await context.store.recordMcpServerProbe({
       probe: { id: "probe_break", serverId: mockServerId, startedAt: new Date().toISOString(), ok: true, latencyMs: 1, toolCount: current.toolCount, error: null, snapshotId: "snap_break" },
       status: "healthy",
       snapshot: { ...current, id: "snap_break", previousSnapshotId: current.id, breaking: true, changes: [{ tool: "calculator", kind: "removed", breaking: true, detail: "test" }], createdAt: new Date().toISOString() },
@@ -721,7 +721,7 @@ describe("MCP gateway auth and security", () => {
     expect(list.body).not.toContain(token.split(".")[1]!);
     expect(list.body).not.toContain("tokenHash");
     expect(list.json().clients[0].tokenPrefix).toBe(client.tokenPrefix);
-    const audits = JSON.stringify(context.store.listAuditLogs({ pageSize: 500 }).items);
+    const audits = JSON.stringify((await context.store.listAuditLogs({ pageSize: 500 })).items);
     expect(audits).not.toContain(token.split(".")[1]!);
     expect(audits).not.toContain(INJECTED_SECRET);
   });
@@ -741,13 +741,13 @@ describe("MCP gateway telemetry and audit", () => {
     await call(4, "mock_tools__lookup_kb", { topic: "rag" });
     await call(5, "echo_workflow", { text: "t" });
 
-    const rows = context.store.listMcpToolCallsForClient(client.id, new Date(Date.now() - 60_000).toISOString());
+    const rows = await context.store.listMcpToolCallsForClient(client.id, new Date(Date.now() - 60_000).toISOString());
     expect(rows).toHaveLength(5);
     expect(rows.every((row) => row.source === "gateway" && row.clientId === client.id)).toBe(true);
     const workflowRow = rows.find((row) => row.toolName === "echo_workflow")!;
     expect(workflowRow.adapterId).toBe("workflow");
     expect(workflowRow.workflowId).toBe("wf-echo");
-    expect(context.store.getExecutionHistory(workflowRow.executionId)?.status).toBe("success");
+    expect((await context.store.getExecutionHistory(workflowRow.executionId))?.status).toBe("success");
 
     // Registry rows count toward the server's telemetry; gateway workflow rows stay out of the inline rollup.
     const serverTelemetry = await api<{ totals: { calls: number } }>(context, admin.cookie, "GET", `/api/mcp/servers/${mockServerId}/telemetry`);
@@ -766,14 +766,14 @@ describe("MCP gateway telemetry and audit", () => {
     const listed = await api<{ clients: Array<{ id: string; usage: { calls: number; errors: number } }> }>(context, admin.cookie, "GET", "/api/mcp/clients");
     expect(listed.body.clients.find((entry) => entry.id === client.id)?.usage).toMatchObject({ calls: 5, errors: 1 });
 
-    const called = context.store.listAuditLogs({ eventType: "mcp_gateway.tool_called", pageSize: 100 }).items;
+    const called = (await context.store.listAuditLogs({ eventType: "mcp_gateway.tool_called", pageSize: 100 })).items;
     const byTool = (tool: string) => called.filter((entry) => (entry.metadata as { tool?: string }).tool === tool);
     // calculator has no read-only hint (a write tool): every call. lookup_kb is read-only: first call only.
     expect(byTool("mock_tools__calculator")).toHaveLength(2);
     expect(byTool("mock_tools__lookup_kb")).toHaveLength(1);
     expect(byTool("echo_workflow")).toHaveLength(1);
     expect(called.find((entry) => entry.outcome === "failure")).toBeTruthy();
-    expect(context.store.listAuditLogs({ eventType: "mcp_gateway.session_started" }).items.length).toBeGreaterThanOrEqual(1);
+    expect((await context.store.listAuditLogs({ eventType: "mcp_gateway.session_started" })).items.length).toBeGreaterThanOrEqual(1);
   });
 });
 
@@ -784,8 +784,8 @@ describe("MCP toolset and client admin API", () => {
     const builder = await login(context, "builder");
     const viewer = await login(context, "viewer");
     const mockServerId = await registerServer(context, admin.cookie, { name: "Mock tools", adapterId: "mock-mcp" });
-    context.store.upsertWorkflow(triggerWorkflow("wf-echo", "echo_workflow"), { createdBy: admin.id });
-    context.store.upsertWorkflow({ id: "wf-plain", name: "Plain", schemaVersion: "1.0.0", workflowVersion: 1, nodes: [], edges: [] });
+    await context.store.upsertWorkflow(triggerWorkflow("wf-echo", "echo_workflow"), { createdBy: admin.id });
+    await context.store.upsertWorkflow({ id: "wf-plain", name: "Plain", schemaVersion: "1.0.0", workflowVersion: 1, nodes: [], edges: [] });
 
     expect((await api(context, builder.cookie, "POST", "/api/mcp/toolsets", { name: "X" })).status).toBe(403);
     expect((await api(context, viewer.cookie, "GET", "/api/mcp/toolsets")).status).toBe(403);
@@ -852,9 +852,9 @@ describe("MCP toolset and client admin API", () => {
     expect(revoked.body.client.status).toBe("revoked");
 
     expect((await api(context, admin.cookie, "DELETE", `/api/mcp/toolsets/${created.body.toolset.id}`)).status).toBe(200);
-    expect(context.store.getMcpClient(minted.client.id)?.toolsetIds).toEqual([]);
+    expect((await context.store.getMcpClient(minted.client.id))?.toolsetIds).toEqual([]);
 
-    const events = context.store.listAuditLogs({ pageSize: 200 }).items.map((entry) => entry.eventType);
+    const events = (await context.store.listAuditLogs({ pageSize: 200 })).items.map((entry) => entry.eventType);
     expect(events).toEqual(
       expect.arrayContaining([
         "mcp_toolset.created",
@@ -904,11 +904,11 @@ describe("MCP gateway schema", () => {
       legacy.close();
 
       const store = await SqliteStore.create(file);
-      const rows = store.listMcpToolCalls({ registryServerId: null, since: "2026-01-01T00:00:00.000Z" });
+      const rows = await store.listMcpToolCalls({ registryServerId: null, since: "2026-01-01T00:00:00.000Z" });
       expect(rows).toEqual([expect.objectContaining({ id: "old", source: "workflow", clientId: null })]);
-      expect(store.listMcpToolsets()).toEqual([]);
-      expect(store.listMcpClients()).toEqual([]);
-      store.close();
+      expect(await store.listMcpToolsets()).toEqual([]);
+      expect(await store.listMcpClients()).toEqual([]);
+      await store.close();
 
       const check = new Database(file);
       const tables = check.prepare(`SELECT name FROM sqlite_master WHERE type = 'table'`).all() as Array<{ name: string }>;

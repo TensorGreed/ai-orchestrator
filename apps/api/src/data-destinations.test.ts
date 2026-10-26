@@ -35,7 +35,7 @@ const MASTER_KEY = crypto.randomBytes(32).toString("base64");
 async function createTestContext(overrides: Record<string, string> = {}): Promise<TestContext> {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-destinations-"));
   const store = await SqliteStore.create(path.join(tempDir, "orchestrator.db"));
-  store.ensureDefaultProject();
+  await store.ensureDefaultProject();
   const config = parseConfig({
     LOG_LEVEL: "warn",
     SEED_SAMPLE_WORKFLOWS: "false",
@@ -48,7 +48,7 @@ async function createTestContext(overrides: Record<string, string> = {}): Promis
   });
   const secretService = new SecretService(store, config.SECRET_MASTER_KEY_BASE64);
   const authService = new AuthService(store, config.SESSION_TTL_HOURS);
-  const app = createApp(config, store, secretService, authService);
+  const app = await createApp(config, store, secretService, authService);
   await app.ready();
   const context = { app, store, authService, config, tempDir };
   contexts.push(context);
@@ -60,7 +60,7 @@ afterEach(async () => {
     const context = contexts.pop()!;
     await context.app.close();
     try {
-      context.store.close();
+      await context.store.close();
     } catch {
       // already closed
     }
@@ -73,7 +73,7 @@ type Role = "admin" | "builder" | "operator" | "viewer";
 async function login(context: TestContext, role: Role, name: string = role): Promise<{ cookie: string; id: string }> {
   const email = `${name}@example.com`;
   const password = `${name}-Pass-123!`;
-  const user = context.authService.register({ email, password, role });
+  const user = await context.authService.register({ email, password, role });
   const response = await context.app.inject({ method: "POST", url: "/api/auth/login", payload: { email, password } });
   if (response.statusCode !== 200) throw new Error(`Login failed for ${name}: ${response.body}`);
   const raw = response.headers["set-cookie"];
@@ -136,7 +136,7 @@ describe("data destination routes", () => {
     expect((await call(context, "DELETE", `/api/data-destinations/${row.id}`, admin.cookie)).statusCode).toBe(404);
     expect((await call(context, "PUT", `/api/data-destinations/${row.id}`, admin.cookie, corp)).statusCode).toBe(404);
 
-    const audit = context.store.listAuditLogs({ resourceType: "data_destination", pageSize: 50 }).items;
+    const audit = (await context.store.listAuditLogs({ resourceType: "data_destination", pageSize: 50 })).items;
     expect(audit.map((entry) => entry.eventType).sort()).toEqual(["data_destination.created", "data_destination.deleted", "data_destination.updated"]);
     const update = audit.find((entry) => entry.eventType === "data_destination.updated")!;
     expect(JSON.stringify(update)).toContain('"tier":"private"');
@@ -179,10 +179,10 @@ describe("data destination routes", () => {
     const context = await createTestContext({ PROJECT_ISOLATION: "strict" });
     const admin = await login(context, "admin");
     const builder = await login(context, "builder");
-    context.store.upsertProject({ id: "team", name: "Team" });
-    context.store.upsertProject({ id: "other", name: "Other" });
-    context.store.upsertProjectRole({ userId: builder.id, projectId: "team", role: "editor" });
-    context.store.upsertWorkflow(
+    await context.store.upsertProject({ id: "team", name: "Team" });
+    await context.store.upsertProject({ id: "other", name: "Other" });
+    await context.store.upsertProjectRole({ userId: builder.id, projectId: "team", role: "editor" });
+    await context.store.upsertWorkflow(
       workflow("wf-team", "team", [
         { id: "model", type: "llm_call", name: "Ask model", config: { provider: { providerId: "openai_compatible", model: "m", baseUrl: "https://llm.example.net/v1" } } },
         { id: "default-model", type: "llm_call", config: { provider: { providerId: "openai", model: "gpt" } } },
@@ -191,9 +191,9 @@ describe("data destination routes", () => {
         { id: "slack", type: "slack_send_message", config: { webhookUrl: "https://hooks.slack.com/services/T000/B000/XXXSECRET" } }
       ])
     );
-    context.store.upsertWorkflow(workflow("wf-other", "other", [{ id: "crm", type: "http_request", config: { method: "GET", urlTemplate: "https://crm.other.example/api" } }]));
-    context.store.createMcpServer({ id: "gh", name: "GitHub", adapterId: "http-mcp", connection: { endpoint: "https://mcp.github.example/mcp", transport: "http_streamable" }, projectId: "other" });
-    context.store.createMcpServer({ id: "files", name: "Files", adapterId: "http-mcp", connection: { endpoint: "http://localhost:7001/mcp" } });
+    await context.store.upsertWorkflow(workflow("wf-other", "other", [{ id: "crm", type: "http_request", config: { method: "GET", urlTemplate: "https://crm.other.example/api" } }]));
+    await context.store.createMcpServer({ id: "gh", name: "GitHub", adapterId: "http-mcp", connection: { endpoint: "https://mcp.github.example/mcp", transport: "http_streamable" }, projectId: "other" });
+    await context.store.createMcpServer({ id: "files", name: "Files", adapterId: "http-mcp", connection: { endpoint: "http://localhost:7001/mcp" } });
 
     const adminList = (await call(context, "GET", "/api/data-destinations/unclassified", admin.cookie)).json() as { destinations: UnclassifiedDestination[] };
     expect(adminList.destinations.map((entry) => [entry.kind, entry.targetId ?? null, entry.host ?? null])).toEqual([
@@ -219,10 +219,10 @@ describe("data destination routes", () => {
   });
 
   it("answers 501 when the store is not SQLite", async () => {
-    const service = new DataDestinationService({ store: null, readableWorkflowIds: () => null, readableProjectIds: () => null });
+    const service = new DataDestinationService({ store: null, readableWorkflowIds: async () => null, readableProjectIds: async () => null });
     expect(service.available).toBe(false);
-    expect(service.rows()).toEqual([]);
-    expect(() => service.list()).toThrow(/SQLite/);
+    expect(await service.rows()).toEqual([]);
+    await expect(service.list()).rejects.toThrow(/SQLite/);
   });
 });
 
@@ -363,13 +363,13 @@ describe("collectConfiguredDestinations edge cases", () => {
     const context = await createTestContext();
     const admin = await login(context, "admin");
     const published = workflow("wf-pub", "default", [{ id: "hook", type: "http_request", name: "Hook", config: { method: "GET", urlTemplate: "https://published-only.example.com/x" } }]);
-    context.store.upsertWorkflow(published);
-    context.store.writeWorkflowVersion({ id: "wv-1", workflowId: "wf-pub", version: 1, workflowJson: JSON.stringify(published) });
-    context.store.publishWorkflowVersion(
+    await context.store.upsertWorkflow(published);
+    await context.store.writeWorkflowVersion({ id: "wv-1", workflowId: "wf-pub", version: 1, workflowJson: JSON.stringify(published) });
+    await context.store.publishWorkflowVersion(
       { id: "rel-1", workflowId: "wf-pub", version: 1, workflowHash: "h", replayRunId: null, verdict: "ungated", reason: null, gateReasons: [], approval: null, publishedAt: new Date().toISOString(), publishedBy: null, publishedByUserId: null },
       null
     );
-    context.store.upsertWorkflow(workflow("wf-pub", "default", [{ id: "hook", type: "http_request", name: "Hook", config: { method: "GET", urlTemplate: "https://draft-only.example.com/x" } }]));
+    await context.store.upsertWorkflow(workflow("wf-pub", "default", [{ id: "hook", type: "http_request", name: "Hook", config: { method: "GET", urlTemplate: "https://draft-only.example.com/x" } }]));
     const list = (await call(context, "GET", "/api/data-destinations/unclassified", admin.cookie)).json() as { destinations: UnclassifiedDestination[] };
     expect(list.destinations.map((entry) => [entry.host, entry.seenIn])).toEqual([
       ["draft-only.example.com", ['Workflow "Flow wf-pub" · Hook']],
@@ -395,12 +395,12 @@ describe("migration 38", () => {
     try {
       const file = path.join(tempDir, "orchestrator.db");
       const store = await SqliteStore.create(file);
-      store.insertDataDestination({ id: "dst_1", name: "Lab", kind: "http", targetId: null, host: "10.0.0.0/8", tier: "local", region: "unknown", holdsDataClasses: [], note: null, actor: "a" });
-      expect(() => store.insertDataDestination({ id: "dst_2", name: "Lab again", kind: "http", targetId: null, host: "10.0.0.0/8", tier: "private", region: "unknown", holdsDataClasses: [], note: null, actor: "a" })).toThrow();
-      store.close();
+      await store.insertDataDestination({ id: "dst_1", name: "Lab", kind: "http", targetId: null, host: "10.0.0.0/8", tier: "local", region: "unknown", holdsDataClasses: [], note: null, actor: "a" });
+      await expect(store.insertDataDestination({ id: "dst_2", name: "Lab again", kind: "http", targetId: null, host: "10.0.0.0/8", tier: "private", region: "unknown", holdsDataClasses: [], note: null, actor: "a" })).rejects.toThrow();
+      await store.close();
       const reopened = await SqliteStore.create(file);
-      expect(reopened.listDataDestinations().map((row) => [row.id, row.tier])).toEqual([["dst_1", "local"]]);
-      reopened.close();
+      expect((await reopened.listDataDestinations()).map((row) => [row.id, row.tier])).toEqual([["dst_1", "local"]]);
+      await reopened.close();
     } finally {
       fs.rmSync(tempDir, { recursive: true, force: true });
     }

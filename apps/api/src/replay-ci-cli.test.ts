@@ -51,7 +51,7 @@ const MASTER_KEY = crypto.randomBytes(32).toString("base64");
 async function createTestContext(): Promise<TestContext> {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-ci-cli-"));
   const store = await SqliteStore.create(path.join(tempDir, "orchestrator.db"));
-  store.ensureDefaultProject();
+  await store.ensureDefaultProject();
   const config = parseConfig({
     LOG_LEVEL: "warn",
     SEED_SAMPLE_WORKFLOWS: "false",
@@ -64,9 +64,9 @@ async function createTestContext(): Promise<TestContext> {
   });
   const secretService = new SecretService(store, config.SECRET_MASTER_KEY_BASE64);
   const authService = new AuthService(store, config.SESSION_TTL_HOURS);
-  const app = createApp(config, store, secretService, authService);
+  const app = await createApp(config, store, secretService, authService);
   await app.ready();
-  authService.register({ email: "admin@example.com", password: "admin-Pass-123!", role: "admin" });
+  await authService.register({ email: "admin@example.com", password: "admin-Pass-123!", role: "admin" });
   const login = await app.inject({ method: "POST", url: "/api/auth/login", payload: { email: "admin@example.com", password: "admin-Pass-123!" } });
   const raw = login.headers["set-cookie"];
   const adminCookie = (Array.isArray(raw) ? raw : [raw ?? ""]).find((value) => value.startsWith(`${config.SESSION_COOKIE_NAME}=`))!.split(";")[0]!;
@@ -95,7 +95,7 @@ afterEach(async () => {
     const context = contexts.pop()!;
     await context.app.close();
     try {
-      context.store.close();
+      await context.store.close();
     } catch {
       // Already closed by the app shutdown hooks.
     }
@@ -196,18 +196,18 @@ async function goldenSet(context: TestContext, workflowId: string, count: number
   return { setId, recordings };
 }
 
-function saveVersion(context: TestContext, workflow: Workflow): number {
-  const saved = context.store.upsertWorkflow(workflow);
-  return new WorkflowVersionService(context.store).snapshot({ workflow: saved, changeNote: "test" }).version;
+async function saveVersion(context: TestContext, workflow: Workflow): Promise<number> {
+  const saved = await context.store.upsertWorkflow(workflow);
+  return (await new WorkflowVersionService(context.store).snapshot({ workflow: saved, changeNote: "test" })).version;
 }
 
 describe("the CI CLI against the real replay routes", () => {
   it("estimates, then runs a job with a model override and a baseline rerun: the job is not release proof and the CLI says so", async () => {
     const model = await startModel();
     const context = await createTestContext();
-    const secret = context.secretService.createSecret({ name: "Model key", provider: "openai", value: MODEL_KEY });
-    context.store.upsertWorkflow(agentWorkflow(model.baseUrl, secret.secretId));
-    context.store.writeWorkflowVersion({ id: "wf-cli-v1", workflowId: "wf-cli", version: 1, workflowJson: JSON.stringify(context.store.getWorkflow("wf-cli")) });
+    const secret = await context.secretService.createSecret({ name: "Model key", provider: "openai", value: MODEL_KEY });
+    await context.store.upsertWorkflow(agentWorkflow(model.baseUrl, secret.secretId));
+    await context.store.writeWorkflowVersion({ id: "wf-cli-v1", workflowId: "wf-cli", version: 1, workflowJson: JSON.stringify(await context.store.getWorkflow("wf-cli")) });
     const { setId } = await goldenSet(context, "wf-cli", 2);
     const callsAfterGolden = model.calls.length;
 
@@ -240,7 +240,7 @@ describe("the CI CLI against the real replay routes", () => {
 
     // An inline candidate (a workflow file) is not release proof either; an export file holding the workflow works too.
     const file = path.join(context.tempDir, "candidate.json");
-    fs.writeFileSync(file, JSON.stringify({ format: "l2m.workflow", workflow: context.store.getWorkflow("wf-cli") }));
+    fs.writeFileSync(file, JSON.stringify({ format: "l2m.workflow", workflow: await context.store.getWorkflow("wf-cli") }));
     const inline = await cli(context, ["replay", "run", "--set", setId, "--file", file, "--json", "--timeout", "60"]);
     expect(inline.code, inline.err + inline.out).toBe(0);
     expect(JSON.parse(inline.out).candidate).toMatchObject({ kind: "inline", releaseEligible: false });
@@ -269,7 +269,7 @@ describe("the CI CLI against the real replay routes", () => {
 
   it("publish through a release gate: blocked is exit 1 and names the job, a passing job publishes with exit 0", async () => {
     const context = await createTestContext();
-    const v1 = saveVersion(context, labelWorkflow("good"));
+    const v1 = await saveVersion(context, labelWorkflow("good"));
     const { setId } = await goldenSet(context, "wf-pub", 3);
     // Ungated: publishing needs no job.
     const first = await cli(context, ["release", "publish", "wf-pub", "--version", String(v1), "--json"]);
@@ -280,7 +280,7 @@ describe("the CI CLI against the real replay routes", () => {
     expect(gate.statusCode, gate.body).toBe(200);
 
     // A regressing version with no job: blocked, nothing published.
-    const v2 = saveVersion(context, labelWorkflow("bad"));
+    const v2 = await saveVersion(context, labelWorkflow("bad"));
     const noJob = await cli(context, ["release", "publish", "wf-pub", "--version", String(v2)]);
     expect(noJob.code).toBe(1);
     expect(noJob.out).toContain("blocked by the release gate");
@@ -296,7 +296,7 @@ describe("the CI CLI against the real replay routes", () => {
     expect((await cli(context, ["release", "publish", "wf-pub", "--version", String(v2)])).out).toContain(`replay job ${failedRun.id}`);
 
     // A fixed version with a passing job publishes: exit 0, verdict passed.
-    const v3 = saveVersion(context, labelWorkflow("good"));
+    const v3 = await saveVersion(context, labelWorkflow("good"));
     const passing = await cli(context, ["replay", "run", "--set", setId, "--version", String(v3), "--json", "--timeout", "60"]);
     expect(passing.code, passing.err + passing.out).toBe(0);
     const passedRun = JSON.parse(passing.out) as EvalRunView;
@@ -322,9 +322,9 @@ describe("golden-set files carry the model tape and the memory seed", () => {
   it("round-trips a model tape through export and import, scrubs planted secrets in it and replays the imported set from it", async () => {
     const model = await startModel();
     const context = await createTestContext();
-    const secret = context.secretService.createSecret({ name: "Model key", provider: "openai", value: MODEL_KEY });
-    context.store.upsertWorkflow(agentWorkflow(model.baseUrl, secret.secretId));
-    context.store.writeWorkflowVersion({ id: "wf-cli-v1", workflowId: "wf-cli", version: 1, workflowJson: JSON.stringify(context.store.getWorkflow("wf-cli")) });
+    const secret = await context.secretService.createSecret({ name: "Model key", provider: "openai", value: MODEL_KEY });
+    await context.store.upsertWorkflow(agentWorkflow(model.baseUrl, secret.secretId));
+    await context.store.writeWorkflowVersion({ id: "wf-cli-v1", workflowId: "wf-cli", version: 1, workflowJson: JSON.stringify(await context.store.getWorkflow("wf-cli")) });
     const { setId, recordings } = await goldenSet(context, "wf-cli", 1);
     expect(recordings[0]!.capabilities).toMatchObject({ models: "tape" });
 
@@ -344,7 +344,7 @@ describe("golden-set files carry the model tape and the memory seed", () => {
     const body = JSON.parse(imported.out) as { dataset: { id: string }; imported: number; warnings: string[] };
     expect(body.imported).toBe(1);
     expect(body.warnings.join(" ")).not.toMatch(/tape/);
-    const stored = context.store.getReplayRecording(context.store.listEvalFixtures(body.dataset.id)[0]!.recordingId!)!;
+    const stored = (await context.store.getReplayRecording((await context.store.listEvalFixtures(body.dataset.id))[0]!.recordingId!))!;
     expect(stored.capabilities).toMatchObject({ models: "tape", origin: "imported" });
     expect(stored.modelTape!.entries.map((entry) => entry.requestHash)).toEqual(tape.entries.map((entry) => entry.requestHash));
     expect(stored.modelTape!.entries[0]!.response).toEqual(tape.entries[0]!.response);
@@ -362,7 +362,7 @@ describe("golden-set files carry the model tape and the memory seed", () => {
     const scrubbedImport = await call(context, "POST", "/api/eval/datasets/import", { file: planted, workflowId: "wf-cli" });
     expect(scrubbedImport.statusCode, scrubbedImport.body).toBe(201);
     const scrubbedSet = scrubbedImport.json<{ dataset: { id: string } }>().dataset.id;
-    const scrubbedRow = context.store.getReplayRecording(context.store.listEvalFixtures(scrubbedSet)[0]!.recordingId!)!;
+    const scrubbedRow = (await context.store.getReplayRecording((await context.store.listEvalFixtures(scrubbedSet))[0]!.recordingId!))!;
     expect(JSON.stringify(scrubbedRow.modelTape)).not.toContain(secretValue);
     expect(scrubbedRow.modelTape!.entries[0]!.requestHash).toBe(tape.entries[0]!.requestHash);
 
@@ -381,7 +381,7 @@ describe("golden-set files carry the model tape and the memory seed", () => {
 describe("an enforced gate's admission in the CLI", () => {
   it("reports admitted, pending and required cases exactly as the gate judges them, and marks a failing required case in JUnit", async () => {
     const context = await createTestContext();
-    saveVersion(context, labelWorkflow("good"));
+    await saveVersion(context, labelWorkflow("good"));
     const { setId } = await goldenSet(context, "wf-pub", 3);
     const gate = await call(context, "PUT", "/api/workflows/wf-pub/release-gate", { enabled: true, enforced: true, datasetIds: [setId] });
     expect(gate.statusCode, gate.body).toBe(200);
@@ -389,12 +389,12 @@ describe("an enforced gate's admission in the CLI", () => {
     const run = await call(context, "POST", "/api/workflows/wf-pub/execute", { record: true });
     const saved = await call(context, "POST", "/api/replay/recordings", { executionId: run.json<{ executionId: string }>().executionId, name: "Late golden" });
     expect((await call(context, "POST", `/api/eval/datasets/${setId}/recordings`, { recordingId: saved.json<{ recording: { id: string } }>().recording.id })).statusCode).toBe(201);
-    const first = context.store.listEvalFixtures(setId)[0]!;
+    const first = (await context.store.listEvalFixtures(setId))[0]!;
     const marked = await context.app.inject({ method: "PUT", url: `/api/workflows/wf-pub/release-gate/cases/${first.id}/required`, headers: { cookie: context.adminCookie }, payload: { required: true } });
     expect(marked.statusCode, marked.body).toBe(200);
 
     // A regressing version: every case fails, the required one included.
-    const v2 = saveVersion(context, labelWorkflow("bad"));
+    const v2 = await saveVersion(context, labelWorkflow("bad"));
     const junit = path.join(context.tempDir, "gate.xml");
     const job = await cli(context, ["replay", "run", "--set", setId, "--version", String(v2), "--json", "--junit", junit, "--timeout", "60"]);
     expect(job.code, job.err + job.out).toBe(1);

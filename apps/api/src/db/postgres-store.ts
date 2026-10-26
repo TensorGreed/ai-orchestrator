@@ -4,7 +4,8 @@ import type { ChatMessage, Folder, Project, Workflow, WorkflowListItem } from "@
 import { DEFAULT_PROJECT_ID, isEmptyDataLabels, labelsForUntrackedSave, mergeDataLabels, parseStoredDataLabels, type DataLabels } from "@ai-orchestrator/shared";
 import { runMigrations } from "./migrations.js";
 import { queuedRunTimeoutMs, STUCK_JOB_MARGIN_MS } from "./queue-timeouts.js";
-import { ProjectNotEmptyError } from "./store-errors.js";
+import { ProjectNotEmptyError, StoreNotImplementedError } from "./store-errors.js";
+import type { CancelExecutionResult, Store } from "./store.js";
 
 export interface PostgresStoreConfig {
   host: string;
@@ -49,7 +50,320 @@ function toStr(value: unknown): string {
 
 const MAX_SESSION_TOOL_CACHE_RECORDS = 400;
 
-export class PostgresStore {
+export class PostgresStore implements Store {
+  /**
+   * Store methods this store does not implement yet: each throws
+   * StoreNotImplementedError (501). Feature checks read this through
+   * `storeImplements` instead of probing for the method.
+   */
+  static readonly unimplemented: ReadonlySet<keyof Store> = new Set<keyof Store>([
+    "acknowledgeMcpBreakingChange",
+    "activateAuditSigningKey",
+    "addGuardProfileVersion",
+    "addKnowledgeBaseChunks",
+    "anyGuardProfileUsesLabels",
+    "appendWorkflowVersion",
+    "approveReleaseRequestAndPublish",
+    "bm25SearchKnowledgeBase",
+    "cancelPendingApprovalRequests",
+    "claimExecutionAndDecideApproval",
+    "claimWorkflowExecutionForResume",
+    "countObservedDestinationBlocks",
+    "countProjectMemberships",
+    "countReplayCapturesSince",
+    "countReplayRecordingsForWorkflow",
+    "countSecretsUsingExternalProvider",
+    "countSubjectRows",
+    "createAuditExportDestination",
+    "createBudget",
+    "createEvalDataset",
+    "createEvalFixture",
+    "createEvalRun",
+    "createKnowledgeBase",
+    "createMcpClient",
+    "createMcpElicitation",
+    "createMcpServer",
+    "createMcpToolPolicy",
+    "createMcpToolset",
+    "decideApprovalRequest",
+    "decideGateCaseRequest",
+    "decideReleaseApprovalRequest",
+    "deleteAuditExportDestination",
+    "deleteBudget",
+    "deleteCustomRole",
+    "deleteDataDestination",
+    "deleteEvalDataset",
+    "deleteEvalFixture",
+    "deleteEvalFixturesForRecording",
+    "deleteExternalSecretCacheEntry",
+    "deleteExternalSecretProvider",
+    "deleteGitConfig",
+    "deleteGuardProfile",
+    "deleteKnowledgeBase",
+    "deleteKnowledgeBaseChunksBySource",
+    "deleteLogStreamDestination",
+    "deleteMcpCassette",
+    "deleteMcpOAuthConnection",
+    "deleteMcpServer",
+    "deleteMcpToolPolicy",
+    "deleteMcpToolset",
+    "deleteMcpUserOAuthConnection",
+    "deleteMfaSecret",
+    "replaceMfaBackupCodes",
+    "deleteReplayRecording",
+    "deleteSecret",
+    "deleteSsoGroupMapping",
+    "deleteSubjectRow",
+    "deleteVariable",
+    "evalFixtureIdsForRecording",
+    "evalRunIdsForResults",
+    "expireMcpElicitationsForExecution",
+    "finalizeEvalRun",
+    "findApiKeyByPrefix",
+    "findDataDestinationByMatch",
+    "findEvalFixtureByRecording",
+    "findMcpClientByTokenPrefix",
+    "findReplayRecordingIdForExecution",
+    "findSsoIdentity",
+    "findVariableByKey",
+    "getActiveAuditSigningKey",
+    "getApprovalRequest",
+    "getAuditExportDestination",
+    "getAuditSigningKey",
+    "getBudget",
+    "getCustomRole",
+    "getDataDestination",
+    "getEvalDataset",
+    "getEvalFixture",
+    "getEvalFixtureDatasetId",
+    "getEvalResult",
+    "getEvalRun",
+    "getEvalRunSetSnapshot",
+    "getExecutionManifest",
+    "getExecutionRelease",
+    "getExternalSecretCacheEntry",
+    "getExternalSecretProvider",
+    "getGateCaseRequest",
+    "getGitConfig",
+    "getGuardBinding",
+    "getGuardProfile",
+    "getGuardProfileVersion",
+    "getGuardSimulation",
+    "getGuardVaultByHash",
+    "getGuardVaultByToken",
+    "getKnowledgeBase",
+    "getLatestBudgetAlert",
+    "getLease",
+    "getLogStreamDestination",
+    "getMcpCassette",
+    "getMcpCassetteForExecution",
+    "getMcpCassetteSummary",
+    "getMcpClient",
+    "getMcpElicitation",
+    "getMcpOAuthConnection",
+    "getMcpServer",
+    "getMcpServerCatalog",
+    "getMcpToolPolicy",
+    "getMcpToolSnapshot",
+    "getMcpToolset",
+    "getMcpToolsetBySlug",
+    "getMcpUserOAuthConnection",
+    "getMfaSecret",
+    "getPendingApprovalRequestForExecution",
+    "getProjectRole",
+    "getPublishedVersion",
+    "getReleaseApprovalRequest",
+    "getReleaseGate",
+    "getReplayCaptureSettings",
+    "getReplayRecording",
+    "getReplayRecordingSummary",
+    "getSchemaMarker",
+    "getVariable",
+    "getWorkflowCreatedBy",
+    "getWorkflowVersion",
+    "guardEventStats",
+    "guardProfileRevision",
+    "hasActiveQueueItem",
+    "hasReleasedVersion",
+    "importGoldenSet",
+    "insertApprovalRequest",
+    "insertDataDestination",
+    "insertGateCaseRequest",
+    "insertGuardEvents",
+    "insertGuardProfile",
+    "insertGuardSimulation",
+    "insertMcpToolCall",
+    "insertReleaseApprovalRequest",
+    "isWorkflowVersionPinned",
+    "listApiKeys",
+    "listApprovalRequests",
+    "listApprovalRequestsForExecution",
+    "listAuditExportDestinations",
+    "listAuditExportRuns",
+    "listAuditLogs",
+    "listAuditLogsAfter",
+    "listAuditLogsForExecution",
+    "listAuditSigningKeys",
+    "listBudgetAlerts",
+    "listBudgets",
+    "listCustomRoles",
+    "listDataDestinations",
+    "listEnabledReleaseGateWorkflowIds",
+    "listEvalDatasets",
+    "listEvalFixtures",
+    "listEvalResults",
+    "listEvalRuns",
+    "listExpiredApprovalRequests",
+    "listExpiredMcpElicitations",
+    "listExternalSecretProviders",
+    "listGateCaseRequests",
+    "listGuardBindingsForProfile",
+    "listGuardEvents",
+    "listGuardEventsForExecution",
+    "listGuardProfileVersions",
+    "listGuardProfiles",
+    "listGuardSimulations",
+    "listKnowledgeBaseChunkPreviews",
+    "listKnowledgeBaseChunks",
+    "listKnowledgeBaseSources",
+    "listKnowledgeBases",
+    "listLeases",
+    "listLogStreamDestinations",
+    "listLogStreamEvents",
+    "listMcpCassettes",
+    "listMcpCassettesForEvalRun",
+    "listMcpClients",
+    "listMcpElicitations",
+    "listMcpServerProbes",
+    "listMcpServers",
+    "listMcpToolCalls",
+    "listMcpToolCallsForClient",
+    "listMcpToolCallsForExecution",
+    "listMcpToolClassifications",
+    "listMcpToolPolicies",
+    "listMcpToolSnapshots",
+    "listMcpToolsets",
+    "listMcpUserOAuthConnections",
+    "listPendingGateCaseRequests",
+    "listPendingReleaseApprovalRequests",
+    "listProjectMembers",
+    "listReleaseApprovalRequests",
+    "listReleasedVersionHashes",
+    "listReplayCaptures",
+    "listReplayRecordings",
+    "listReplayRunIdsForHash",
+    "listResumingWorkflowExecutionIds",
+    "listResumingWorkflowExecutions",
+    "listRunningGuardSimulations",
+    "listSecretShares",
+    "listSecretsSharedToProject",
+    "listSsoGroupMappings",
+    "listUsageEvents",
+    "listUserProjectRoles",
+    "listVariables",
+    "listWorkflowConfigsForDestinations",
+    "listWorkflowReleases",
+    "listWorkflowShares",
+    "listWorkflowVersions",
+    "listWorkflowsSharedToProject",
+    "markEvalRunsReleaseIneligible",
+    "maxWorkflowVersionNumber",
+    "mcpCassetteBadgesForExecutions",
+    "oldestReplayCaptureIds",
+    "oldestReplayCaptures",
+    "promoteReplayCapture",
+    "promoteReplayCaptureToGoldenSet",
+    "pruneAuditLogs",
+    "pruneEvalRuns",
+    "pruneExecutionManifests",
+    "pruneGuardSimulations",
+    "pruneLogStreamEvents",
+    "pruneReplayCaptures",
+    "pruneWorkflowVersions",
+    "publishWorkflowVersion",
+    "putGuardVault",
+    "queryUsageRollup",
+    "queryUsageTotals",
+    "recordAuditExportRun",
+    "recordBudgetAlert",
+    "recordEvalResult",
+    "recordGitSync",
+    "recordLogStreamDispatch",
+    "recordMcpServerProbe",
+    "recordReplayCaptureDrop",
+    "releaseExecutionClaimAndReopenApproval",
+    "releaseLease",
+    "releaseWorkflowExecutionClaim",
+    "removeProjectRole",
+    "removeSecretShare",
+    "removeWorkflowShare",
+    "reopenApprovalRequest",
+    "replaceMcpToolCallsForExecution",
+    "replayGoldenBadgesForExecutions",
+    "revokeApiKey",
+    "revokeMcpClient",
+    "saveApiKey",
+    "saveExecutionManifest",
+    "saveExecutionRunContext",
+    "saveMcpCassette",
+    "saveReleaseGate",
+    "saveReplayCaptureSettings",
+    "saveReplayRecording",
+    "saveReplayRecordingChecked",
+    "setEvalFixtureRequired",
+    "setEvalRunSetSnapshot",
+    "setExecutionRelease",
+    "setGuardBinding",
+    "setMcpServerSandboxStatus",
+    "setMcpToolClassification",
+    "setReleaseGateAdmission",
+    "settleMcpElicitation",
+    "storageLocation",
+    "subjectTextPage",
+    "subjectTextRow",
+    "sumReplayCaptureBytesForWorkflow",
+    "sumReplayRecordingBytes",
+    "sumReplayRecordingBytesForWorkflow",
+    "summarizeMcpClientUsage",
+    "timeOutExpiredGateCaseRequests",
+    "timeOutExpiredReleaseApprovalRequests",
+    "touchApiKey",
+    "touchMcpClient",
+    "tryAcquireLease",
+    "updateAuditExportDestination",
+    "updateBudget",
+    "updateDataDestination",
+    "updateEvalRunProgress",
+    "updateEvalRunSummary",
+    "updateGuardSimulation",
+    "updateKnowledgeBase",
+    "updateMcpServer",
+    "updateMcpToolPolicy",
+    "updateMcpToolset",
+    "updateReleaseGateCases",
+    "upsertCustomRole",
+    "upsertExternalSecretCacheEntry",
+    "upsertExternalSecretProvider",
+    "upsertGitConfig",
+    "upsertLogStreamDestination",
+    "upsertMcpOAuthConnection",
+    "upsertMcpServerCatalog",
+    "upsertMcpUserOAuthConnection",
+    "upsertMfaSecret",
+    "upsertProjectRole",
+    "upsertReleaseGate",
+    "upsertSecretShare",
+    "upsertSsoGroupMapping",
+    "upsertSsoIdentity",
+    "upsertVariable",
+    "upsertWorkflowShare",
+    "verifyAuditChain",
+    "writeAuditLog",
+    "writeLogStreamEvent",
+    "writeUsageEvent",
+    "writeWorkflowVersion"
+  ]);
+
   private readonly pool: Pool;
 
   private constructor(pool: Pool) {
@@ -288,7 +602,7 @@ export class PostgresStore {
 
   async listSecrets(
     options: { projectId?: string } = {}
-  ): Promise<Array<{ id: string; name: string; provider: string; created_at: string; projectId: string }>> {
+  ): ReturnType<Store["listSecrets"]> {
     const clauses: string[] = [];
     const params: unknown[] = [];
     if (options.projectId) {
@@ -311,20 +625,15 @@ export class PostgresStore {
       name: toStr(row.name),
       provider: toStr(row.provider),
       created_at: toStr(row.created_at),
-      projectId: row.project_id ? toStr(row.project_id) : DEFAULT_PROJECT_ID
+      projectId: row.project_id ? toStr(row.project_id) : DEFAULT_PROJECT_ID,
+      // External secret providers are SQLite only in this release: every Postgres secret is a local one.
+      source: "local" as const,
+      externalProviderId: null,
+      externalKey: null
     }));
   }
 
-  async getSecret(id: string): Promise<{
-    id: string;
-    name: string;
-    provider: string;
-    iv: string;
-    auth_tag: string;
-    ciphertext: string;
-    created_at: string;
-    projectId: string;
-  } | null> {
+  async getSecret(id: string): ReturnType<Store["getSecret"]> {
     const row = await this.queryOne<{
       id: string;
       name: string;
@@ -347,7 +656,10 @@ export class PostgresStore {
       auth_tag: toStr(row.auth_tag),
       ciphertext: toStr(row.ciphertext),
       created_at: toStr(row.created_at),
-      projectId: row.project_id ? toStr(row.project_id) : DEFAULT_PROJECT_ID
+      projectId: row.project_id ? toStr(row.project_id) : DEFAULT_PROJECT_ID,
+      source: "local",
+      externalProviderId: null,
+      externalKey: null
     };
   }
 
@@ -1188,13 +1500,14 @@ export class PostgresStore {
     return Boolean(row);
   }
 
-  async saveWebhookReplayKey(input: { replayKey: string; endpointKey: string; expiresAt: string }): Promise<void> {
-    await this.execute(
+  async saveWebhookReplayKey(input: { replayKey: string; endpointKey: string; expiresAt: string }): Promise<boolean> {
+    const result = await this.pool.query(
       `INSERT INTO webhook_replay_keys (replay_key, endpoint_key, created_at, expires_at)
        VALUES ($1, $2, $3, $4)
        ON CONFLICT (replay_key) DO NOTHING`,
       [input.replayKey, input.endpointKey, new Date().toISOString(), input.expiresAt]
     );
+    return (result.rowCount ?? 0) > 0;
   }
 
   async getWebhookIdempotency(input: { endpointKey: string; idempotencyKey: string }): Promise<{
@@ -1282,8 +1595,15 @@ export class PostgresStore {
     nodeResultsJson?: unknown;
     customData?: unknown;
     error?: string;
-  }): Promise<void> {
-    await this.execute(
+  }, options?: { unlessFinished?: boolean; unlessCanceled?: boolean }): Promise<boolean> {
+    const guard = options?.unlessFinished
+      ? `
+       WHERE NOT (execution_history.status IN ('success', 'error', 'canceled') OR (execution_history.status = 'partial' AND execution_history.completed_at IS NOT NULL))`
+      : options?.unlessCanceled
+        ? `
+       WHERE execution_history.status <> 'canceled' OR EXCLUDED.status = 'canceled'`
+        : "";
+    const result = await this.pool.query(
       `INSERT INTO execution_history (id, workflow_id, workflow_name, status, started_at, completed_at, duration_ms, trigger_type, triggered_by, input_json, output_json, node_results_json, custom_data_json, error)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
        ON CONFLICT (id) DO UPDATE SET
@@ -1299,7 +1619,7 @@ export class PostgresStore {
          output_json = EXCLUDED.output_json,
          node_results_json = EXCLUDED.node_results_json,
          custom_data_json = EXCLUDED.custom_data_json,
-         error = EXCLUDED.error`,
+         error = EXCLUDED.error${guard}`,
       [
         input.id,
         input.workflowId,
@@ -1317,6 +1637,7 @@ export class PostgresStore {
         input.error ?? null
       ]
     );
+    return (result.rowCount ?? 0) > 0;
   }
 
   async listExecutionHistory(input: {
@@ -1492,31 +1813,56 @@ export class PostgresStore {
     };
   }
 
-  async cancelExecutionHistory(input: {
+  async cancelExecution(input: {
     id: string;
+    onlyFrom: readonly string[];
     completedAt?: string;
     error?: string;
-  }): Promise<boolean> {
-    const existing = await this.getExecutionHistory(input.id);
-    if (!existing) {
-      return false;
+    deletePausedState?: boolean;
+    cancelClaimed?: boolean;
+  }): Promise<CancelExecutionResult> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const found = await client.query(`SELECT status, started_at, completed_at FROM execution_history WHERE id = $1 FOR UPDATE`, [input.id]);
+      const existing = found.rows[0] as { status: string; started_at: unknown; completed_at: unknown } | undefined;
+      const refuse = (outcome: CancelExecutionResult["outcome"]): CancelExecutionResult => ({ outcome, canceledRequestIds: [] });
+      const result = await (async (): Promise<CancelExecutionResult> => {
+        if (!existing) return refuse("missing");
+        const open = existing.status !== "partial" || !existing.completed_at;
+        if (!input.onlyFrom.includes(existing.status) || !open) return refuse("not_cancelable");
+        if (input.deletePausedState) {
+          const paused = await client.query(`SELECT status FROM workflow_executions WHERE id = $1 FOR UPDATE`, [input.id]);
+          const pausedStatus = (paused.rows[0] as { status: string } | undefined)?.status;
+          if (pausedStatus !== undefined && pausedStatus !== "waiting_approval" && !input.cancelClaimed) return refuse("decided");
+          if (pausedStatus !== undefined) await client.query(`DELETE FROM workflow_executions WHERE id = $1`, [input.id]);
+        }
+        const completedAt = input.completedAt ?? new Date().toISOString();
+        const canceledRequestIds: string[] = [];
+        if (input.deletePausedState) {
+          const canceled = await client.query(
+            `UPDATE approval_requests SET status = 'canceled', reason = $1, decided_at = $2, updated_at = $2 WHERE execution_id = $3 AND status = 'pending' RETURNING id`,
+            [input.error ?? "Execution canceled", completedAt, input.id]
+          );
+          for (const row of canceled.rows as Array<{ id: unknown }>) canceledRequestIds.push(toStr(row.id));
+        }
+        const started = Date.parse(toStr(existing.started_at));
+        const completed = Date.parse(completedAt);
+        const durationMs = Number.isFinite(started) && Number.isFinite(completed) ? Math.max(0, Math.floor(completed - started)) : null;
+        await client.query(
+          `UPDATE execution_history SET status = 'canceled', completed_at = $1, duration_ms = $2, error = $3 WHERE id = $4`,
+          [completedAt, durationMs, input.error ?? "Execution canceled", input.id]
+        );
+        return { outcome: "canceled", canceledRequestIds };
+      })();
+      await client.query(result.outcome === "canceled" ? "COMMIT" : "ROLLBACK");
+      return result;
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
     }
-    const completedAt = input.completedAt ?? new Date().toISOString();
-    const started = Date.parse(existing.startedAt);
-    const completed = Date.parse(completedAt);
-    const durationMs = Number.isFinite(started) && Number.isFinite(completed)
-      ? Math.max(0, Math.floor(completed - started))
-      : null;
-    const result = await this.pool.query(
-      `UPDATE execution_history
-       SET status = 'canceled',
-           completed_at = $1,
-           duration_ms = $2,
-           error = $3
-       WHERE id = $4`,
-      [completedAt, durationMs, input.error ?? "Execution canceled", input.id]
-    );
-    return (result.rowCount ?? 0) > 0;
   }
 
   async pruneExecutionHistory(input: { before: string }): Promise<number> {
@@ -2136,5 +2482,970 @@ export class PostgresStore {
   async deleteNotificationConfig(id: string): Promise<boolean> {
     const result = await this.pool.query(`DELETE FROM notification_configs WHERE id = $1`, [id]);
     return (result.rowCount ?? 0) > 0;
+  }
+
+  // ---- Not yet implemented on Postgres: each throws StoreNotImplementedError, which the API answers with 501.
+
+  // Store lifecycle
+  async storageLocation(..._args: Parameters<Store["storageLocation"]>): ReturnType<Store["storageLocation"]> {
+    throw new StoreNotImplementedError("storageLocation");
+  }
+  async getSchemaMarker(..._args: Parameters<Store["getSchemaMarker"]>): ReturnType<Store["getSchemaMarker"]> {
+    throw new StoreNotImplementedError("getSchemaMarker");
+  }
+
+  // Releases, publishing and gate admission
+  async getPublishedVersion(..._args: Parameters<Store["getPublishedVersion"]>): ReturnType<Store["getPublishedVersion"]> {
+    throw new StoreNotImplementedError("getPublishedVersion");
+  }
+  async isWorkflowVersionPinned(..._args: Parameters<Store["isWorkflowVersionPinned"]>): ReturnType<Store["isWorkflowVersionPinned"]> {
+    throw new StoreNotImplementedError("isWorkflowVersionPinned");
+  }
+  async getReleaseGate(..._args: Parameters<Store["getReleaseGate"]>): ReturnType<Store["getReleaseGate"]> {
+    throw new StoreNotImplementedError("getReleaseGate");
+  }
+  async upsertReleaseGate(..._args: Parameters<Store["upsertReleaseGate"]>): ReturnType<Store["upsertReleaseGate"]> {
+    throw new StoreNotImplementedError("upsertReleaseGate");
+  }
+  async listWorkflowReleases(..._args: Parameters<Store["listWorkflowReleases"]>): ReturnType<Store["listWorkflowReleases"]> {
+    throw new StoreNotImplementedError("listWorkflowReleases");
+  }
+  async hasReleasedVersion(..._args: Parameters<Store["hasReleasedVersion"]>): ReturnType<Store["hasReleasedVersion"]> {
+    throw new StoreNotImplementedError("hasReleasedVersion");
+  }
+  async listReplayRunIdsForHash(..._args: Parameters<Store["listReplayRunIdsForHash"]>): ReturnType<Store["listReplayRunIdsForHash"]> {
+    throw new StoreNotImplementedError("listReplayRunIdsForHash");
+  }
+  async setEvalRunSetSnapshot(..._args: Parameters<Store["setEvalRunSetSnapshot"]>): ReturnType<Store["setEvalRunSetSnapshot"]> {
+    throw new StoreNotImplementedError("setEvalRunSetSnapshot");
+  }
+  async getEvalRunSetSnapshot(..._args: Parameters<Store["getEvalRunSetSnapshot"]>): ReturnType<Store["getEvalRunSetSnapshot"]> {
+    throw new StoreNotImplementedError("getEvalRunSetSnapshot");
+  }
+  async setExecutionRelease(..._args: Parameters<Store["setExecutionRelease"]>): ReturnType<Store["setExecutionRelease"]> {
+    throw new StoreNotImplementedError("setExecutionRelease");
+  }
+  async getExecutionRelease(..._args: Parameters<Store["getExecutionRelease"]>): ReturnType<Store["getExecutionRelease"]> {
+    throw new StoreNotImplementedError("getExecutionRelease");
+  }
+  async listReleasedVersionHashes(..._args: Parameters<Store["listReleasedVersionHashes"]>): ReturnType<Store["listReleasedVersionHashes"]> {
+    throw new StoreNotImplementedError("listReleasedVersionHashes");
+  }
+  async listEnabledReleaseGateWorkflowIds(..._args: Parameters<Store["listEnabledReleaseGateWorkflowIds"]>): ReturnType<Store["listEnabledReleaseGateWorkflowIds"]> {
+    throw new StoreNotImplementedError("listEnabledReleaseGateWorkflowIds");
+  }
+  async timeOutExpiredReleaseApprovalRequests(..._args: Parameters<Store["timeOutExpiredReleaseApprovalRequests"]>): ReturnType<Store["timeOutExpiredReleaseApprovalRequests"]> {
+    throw new StoreNotImplementedError("timeOutExpiredReleaseApprovalRequests");
+  }
+  async listPendingReleaseApprovalRequests(..._args: Parameters<Store["listPendingReleaseApprovalRequests"]>): ReturnType<Store["listPendingReleaseApprovalRequests"]> {
+    throw new StoreNotImplementedError("listPendingReleaseApprovalRequests");
+  }
+  async insertReleaseApprovalRequest(..._args: Parameters<Store["insertReleaseApprovalRequest"]>): ReturnType<Store["insertReleaseApprovalRequest"]> {
+    throw new StoreNotImplementedError("insertReleaseApprovalRequest");
+  }
+  async getReleaseApprovalRequest(..._args: Parameters<Store["getReleaseApprovalRequest"]>): ReturnType<Store["getReleaseApprovalRequest"]> {
+    throw new StoreNotImplementedError("getReleaseApprovalRequest");
+  }
+  async listReleaseApprovalRequests(..._args: Parameters<Store["listReleaseApprovalRequests"]>): ReturnType<Store["listReleaseApprovalRequests"]> {
+    throw new StoreNotImplementedError("listReleaseApprovalRequests");
+  }
+  async decideReleaseApprovalRequest(..._args: Parameters<Store["decideReleaseApprovalRequest"]>): ReturnType<Store["decideReleaseApprovalRequest"]> {
+    throw new StoreNotImplementedError("decideReleaseApprovalRequest");
+  }
+  async setReleaseGateAdmission(..._args: Parameters<Store["setReleaseGateAdmission"]>): ReturnType<Store["setReleaseGateAdmission"]> {
+    throw new StoreNotImplementedError("setReleaseGateAdmission");
+  }
+  async insertGateCaseRequest(..._args: Parameters<Store["insertGateCaseRequest"]>): ReturnType<Store["insertGateCaseRequest"]> {
+    throw new StoreNotImplementedError("insertGateCaseRequest");
+  }
+  async getGateCaseRequest(..._args: Parameters<Store["getGateCaseRequest"]>): ReturnType<Store["getGateCaseRequest"]> {
+    throw new StoreNotImplementedError("getGateCaseRequest");
+  }
+  async listPendingGateCaseRequests(..._args: Parameters<Store["listPendingGateCaseRequests"]>): ReturnType<Store["listPendingGateCaseRequests"]> {
+    throw new StoreNotImplementedError("listPendingGateCaseRequests");
+  }
+  async listGateCaseRequests(..._args: Parameters<Store["listGateCaseRequests"]>): ReturnType<Store["listGateCaseRequests"]> {
+    throw new StoreNotImplementedError("listGateCaseRequests");
+  }
+  async timeOutExpiredGateCaseRequests(..._args: Parameters<Store["timeOutExpiredGateCaseRequests"]>): ReturnType<Store["timeOutExpiredGateCaseRequests"]> {
+    throw new StoreNotImplementedError("timeOutExpiredGateCaseRequests");
+  }
+  async decideGateCaseRequest(..._args: Parameters<Store["decideGateCaseRequest"]>): ReturnType<Store["decideGateCaseRequest"]> {
+    throw new StoreNotImplementedError("decideGateCaseRequest");
+  }
+  async markEvalRunsReleaseIneligible(..._args: Parameters<Store["markEvalRunsReleaseIneligible"]>): ReturnType<Store["markEvalRunsReleaseIneligible"]> {
+    throw new StoreNotImplementedError("markEvalRunsReleaseIneligible");
+  }
+
+  // Guard simulations
+  async insertGuardSimulation(..._args: Parameters<Store["insertGuardSimulation"]>): ReturnType<Store["insertGuardSimulation"]> {
+    throw new StoreNotImplementedError("insertGuardSimulation");
+  }
+  async updateGuardSimulation(..._args: Parameters<Store["updateGuardSimulation"]>): ReturnType<Store["updateGuardSimulation"]> {
+    throw new StoreNotImplementedError("updateGuardSimulation");
+  }
+  async getGuardSimulation(..._args: Parameters<Store["getGuardSimulation"]>): ReturnType<Store["getGuardSimulation"]> {
+    throw new StoreNotImplementedError("getGuardSimulation");
+  }
+  async listGuardSimulations(..._args: Parameters<Store["listGuardSimulations"]>): ReturnType<Store["listGuardSimulations"]> {
+    throw new StoreNotImplementedError("listGuardSimulations");
+  }
+  async listRunningGuardSimulations(..._args: Parameters<Store["listRunningGuardSimulations"]>): ReturnType<Store["listRunningGuardSimulations"]> {
+    throw new StoreNotImplementedError("listRunningGuardSimulations");
+  }
+  async pruneGuardSimulations(..._args: Parameters<Store["pruneGuardSimulations"]>): ReturnType<Store["pruneGuardSimulations"]> {
+    throw new StoreNotImplementedError("pruneGuardSimulations");
+  }
+
+  // MCP cassettes
+  async saveMcpCassette(..._args: Parameters<Store["saveMcpCassette"]>): ReturnType<Store["saveMcpCassette"]> {
+    throw new StoreNotImplementedError("saveMcpCassette");
+  }
+  async getMcpCassetteSummary(..._args: Parameters<Store["getMcpCassetteSummary"]>): ReturnType<Store["getMcpCassetteSummary"]> {
+    throw new StoreNotImplementedError("getMcpCassetteSummary");
+  }
+  async getMcpCassette(..._args: Parameters<Store["getMcpCassette"]>): ReturnType<Store["getMcpCassette"]> {
+    throw new StoreNotImplementedError("getMcpCassette");
+  }
+  async getMcpCassetteForExecution(..._args: Parameters<Store["getMcpCassetteForExecution"]>): ReturnType<Store["getMcpCassetteForExecution"]> {
+    throw new StoreNotImplementedError("getMcpCassetteForExecution");
+  }
+  async listMcpCassettesForEvalRun(..._args: Parameters<Store["listMcpCassettesForEvalRun"]>): ReturnType<Store["listMcpCassettesForEvalRun"]> {
+    throw new StoreNotImplementedError("listMcpCassettesForEvalRun");
+  }
+  async listMcpCassettes(..._args: Parameters<Store["listMcpCassettes"]>): ReturnType<Store["listMcpCassettes"]> {
+    throw new StoreNotImplementedError("listMcpCassettes");
+  }
+  async mcpCassetteBadgesForExecutions(..._args: Parameters<Store["mcpCassetteBadgesForExecutions"]>): ReturnType<Store["mcpCassetteBadgesForExecutions"]> {
+    throw new StoreNotImplementedError("mcpCassetteBadgesForExecutions");
+  }
+  async deleteMcpCassette(..._args: Parameters<Store["deleteMcpCassette"]>): ReturnType<Store["deleteMcpCassette"]> {
+    throw new StoreNotImplementedError("deleteMcpCassette");
+  }
+
+  // MCP registry, probes, telemetry, OAuth, elicitations, policies, toolsets and clients
+  async createMcpServer(..._args: Parameters<Store["createMcpServer"]>): ReturnType<Store["createMcpServer"]> {
+    throw new StoreNotImplementedError("createMcpServer");
+  }
+  async updateMcpServer(..._args: Parameters<Store["updateMcpServer"]>): ReturnType<Store["updateMcpServer"]> {
+    throw new StoreNotImplementedError("updateMcpServer");
+  }
+  async deleteMcpServer(..._args: Parameters<Store["deleteMcpServer"]>): ReturnType<Store["deleteMcpServer"]> {
+    throw new StoreNotImplementedError("deleteMcpServer");
+  }
+  async setMcpServerSandboxStatus(..._args: Parameters<Store["setMcpServerSandboxStatus"]>): ReturnType<Store["setMcpServerSandboxStatus"]> {
+    throw new StoreNotImplementedError("setMcpServerSandboxStatus");
+  }
+  async getMcpServer(..._args: Parameters<Store["getMcpServer"]>): ReturnType<Store["getMcpServer"]> {
+    throw new StoreNotImplementedError("getMcpServer");
+  }
+  async listMcpServers(..._args: Parameters<Store["listMcpServers"]>): ReturnType<Store["listMcpServers"]> {
+    throw new StoreNotImplementedError("listMcpServers");
+  }
+  async recordMcpServerProbe(..._args: Parameters<Store["recordMcpServerProbe"]>): ReturnType<Store["recordMcpServerProbe"]> {
+    throw new StoreNotImplementedError("recordMcpServerProbe");
+  }
+  async listMcpServerProbes(..._args: Parameters<Store["listMcpServerProbes"]>): ReturnType<Store["listMcpServerProbes"]> {
+    throw new StoreNotImplementedError("listMcpServerProbes");
+  }
+  async getMcpToolSnapshot(..._args: Parameters<Store["getMcpToolSnapshot"]>): ReturnType<Store["getMcpToolSnapshot"]> {
+    throw new StoreNotImplementedError("getMcpToolSnapshot");
+  }
+  async listMcpToolSnapshots(..._args: Parameters<Store["listMcpToolSnapshots"]>): ReturnType<Store["listMcpToolSnapshots"]> {
+    throw new StoreNotImplementedError("listMcpToolSnapshots");
+  }
+  async acknowledgeMcpBreakingChange(..._args: Parameters<Store["acknowledgeMcpBreakingChange"]>): ReturnType<Store["acknowledgeMcpBreakingChange"]> {
+    throw new StoreNotImplementedError("acknowledgeMcpBreakingChange");
+  }
+  async replaceMcpToolCallsForExecution(..._args: Parameters<Store["replaceMcpToolCallsForExecution"]>): ReturnType<Store["replaceMcpToolCallsForExecution"]> {
+    throw new StoreNotImplementedError("replaceMcpToolCallsForExecution");
+  }
+  async insertMcpToolCall(..._args: Parameters<Store["insertMcpToolCall"]>): ReturnType<Store["insertMcpToolCall"]> {
+    throw new StoreNotImplementedError("insertMcpToolCall");
+  }
+  async listMcpToolCallsForClient(..._args: Parameters<Store["listMcpToolCallsForClient"]>): ReturnType<Store["listMcpToolCallsForClient"]> {
+    throw new StoreNotImplementedError("listMcpToolCallsForClient");
+  }
+  async summarizeMcpClientUsage(..._args: Parameters<Store["summarizeMcpClientUsage"]>): ReturnType<Store["summarizeMcpClientUsage"]> {
+    throw new StoreNotImplementedError("summarizeMcpClientUsage");
+  }
+  async listMcpToolCalls(..._args: Parameters<Store["listMcpToolCalls"]>): ReturnType<Store["listMcpToolCalls"]> {
+    throw new StoreNotImplementedError("listMcpToolCalls");
+  }
+  async getMcpOAuthConnection(..._args: Parameters<Store["getMcpOAuthConnection"]>): ReturnType<Store["getMcpOAuthConnection"]> {
+    throw new StoreNotImplementedError("getMcpOAuthConnection");
+  }
+  async upsertMcpOAuthConnection(..._args: Parameters<Store["upsertMcpOAuthConnection"]>): ReturnType<Store["upsertMcpOAuthConnection"]> {
+    throw new StoreNotImplementedError("upsertMcpOAuthConnection");
+  }
+  async getMcpUserOAuthConnection(..._args: Parameters<Store["getMcpUserOAuthConnection"]>): ReturnType<Store["getMcpUserOAuthConnection"]> {
+    throw new StoreNotImplementedError("getMcpUserOAuthConnection");
+  }
+  async listMcpUserOAuthConnections(..._args: Parameters<Store["listMcpUserOAuthConnections"]>): ReturnType<Store["listMcpUserOAuthConnections"]> {
+    throw new StoreNotImplementedError("listMcpUserOAuthConnections");
+  }
+  async upsertMcpUserOAuthConnection(..._args: Parameters<Store["upsertMcpUserOAuthConnection"]>): ReturnType<Store["upsertMcpUserOAuthConnection"]> {
+    throw new StoreNotImplementedError("upsertMcpUserOAuthConnection");
+  }
+  async deleteMcpUserOAuthConnection(..._args: Parameters<Store["deleteMcpUserOAuthConnection"]>): ReturnType<Store["deleteMcpUserOAuthConnection"]> {
+    throw new StoreNotImplementedError("deleteMcpUserOAuthConnection");
+  }
+  async deleteMcpOAuthConnection(..._args: Parameters<Store["deleteMcpOAuthConnection"]>): ReturnType<Store["deleteMcpOAuthConnection"]> {
+    throw new StoreNotImplementedError("deleteMcpOAuthConnection");
+  }
+  async getMcpServerCatalog(..._args: Parameters<Store["getMcpServerCatalog"]>): ReturnType<Store["getMcpServerCatalog"]> {
+    throw new StoreNotImplementedError("getMcpServerCatalog");
+  }
+  async upsertMcpServerCatalog(..._args: Parameters<Store["upsertMcpServerCatalog"]>): ReturnType<Store["upsertMcpServerCatalog"]> {
+    throw new StoreNotImplementedError("upsertMcpServerCatalog");
+  }
+  async createMcpElicitation(..._args: Parameters<Store["createMcpElicitation"]>): ReturnType<Store["createMcpElicitation"]> {
+    throw new StoreNotImplementedError("createMcpElicitation");
+  }
+  async getMcpElicitation(..._args: Parameters<Store["getMcpElicitation"]>): ReturnType<Store["getMcpElicitation"]> {
+    throw new StoreNotImplementedError("getMcpElicitation");
+  }
+  async listMcpElicitations(..._args: Parameters<Store["listMcpElicitations"]>): ReturnType<Store["listMcpElicitations"]> {
+    throw new StoreNotImplementedError("listMcpElicitations");
+  }
+  async settleMcpElicitation(..._args: Parameters<Store["settleMcpElicitation"]>): ReturnType<Store["settleMcpElicitation"]> {
+    throw new StoreNotImplementedError("settleMcpElicitation");
+  }
+  async expireMcpElicitationsForExecution(..._args: Parameters<Store["expireMcpElicitationsForExecution"]>): ReturnType<Store["expireMcpElicitationsForExecution"]> {
+    throw new StoreNotImplementedError("expireMcpElicitationsForExecution");
+  }
+  async listExpiredMcpElicitations(..._args: Parameters<Store["listExpiredMcpElicitations"]>): ReturnType<Store["listExpiredMcpElicitations"]> {
+    throw new StoreNotImplementedError("listExpiredMcpElicitations");
+  }
+  async listMcpToolPolicies(..._args: Parameters<Store["listMcpToolPolicies"]>): ReturnType<Store["listMcpToolPolicies"]> {
+    throw new StoreNotImplementedError("listMcpToolPolicies");
+  }
+  async getMcpToolPolicy(..._args: Parameters<Store["getMcpToolPolicy"]>): ReturnType<Store["getMcpToolPolicy"]> {
+    throw new StoreNotImplementedError("getMcpToolPolicy");
+  }
+  async createMcpToolPolicy(..._args: Parameters<Store["createMcpToolPolicy"]>): ReturnType<Store["createMcpToolPolicy"]> {
+    throw new StoreNotImplementedError("createMcpToolPolicy");
+  }
+  async updateMcpToolPolicy(..._args: Parameters<Store["updateMcpToolPolicy"]>): ReturnType<Store["updateMcpToolPolicy"]> {
+    throw new StoreNotImplementedError("updateMcpToolPolicy");
+  }
+  async deleteMcpToolPolicy(..._args: Parameters<Store["deleteMcpToolPolicy"]>): ReturnType<Store["deleteMcpToolPolicy"]> {
+    throw new StoreNotImplementedError("deleteMcpToolPolicy");
+  }
+  async listMcpToolClassifications(..._args: Parameters<Store["listMcpToolClassifications"]>): ReturnType<Store["listMcpToolClassifications"]> {
+    throw new StoreNotImplementedError("listMcpToolClassifications");
+  }
+  async setMcpToolClassification(..._args: Parameters<Store["setMcpToolClassification"]>): ReturnType<Store["setMcpToolClassification"]> {
+    throw new StoreNotImplementedError("setMcpToolClassification");
+  }
+  async listMcpToolsets(..._args: Parameters<Store["listMcpToolsets"]>): ReturnType<Store["listMcpToolsets"]> {
+    throw new StoreNotImplementedError("listMcpToolsets");
+  }
+  async getMcpToolset(..._args: Parameters<Store["getMcpToolset"]>): ReturnType<Store["getMcpToolset"]> {
+    throw new StoreNotImplementedError("getMcpToolset");
+  }
+  async getMcpToolsetBySlug(..._args: Parameters<Store["getMcpToolsetBySlug"]>): ReturnType<Store["getMcpToolsetBySlug"]> {
+    throw new StoreNotImplementedError("getMcpToolsetBySlug");
+  }
+  async createMcpToolset(..._args: Parameters<Store["createMcpToolset"]>): ReturnType<Store["createMcpToolset"]> {
+    throw new StoreNotImplementedError("createMcpToolset");
+  }
+  async updateMcpToolset(..._args: Parameters<Store["updateMcpToolset"]>): ReturnType<Store["updateMcpToolset"]> {
+    throw new StoreNotImplementedError("updateMcpToolset");
+  }
+  async deleteMcpToolset(..._args: Parameters<Store["deleteMcpToolset"]>): ReturnType<Store["deleteMcpToolset"]> {
+    throw new StoreNotImplementedError("deleteMcpToolset");
+  }
+  async createMcpClient(..._args: Parameters<Store["createMcpClient"]>): ReturnType<Store["createMcpClient"]> {
+    throw new StoreNotImplementedError("createMcpClient");
+  }
+  async getMcpClient(..._args: Parameters<Store["getMcpClient"]>): ReturnType<Store["getMcpClient"]> {
+    throw new StoreNotImplementedError("getMcpClient");
+  }
+  async findMcpClientByTokenPrefix(..._args: Parameters<Store["findMcpClientByTokenPrefix"]>): ReturnType<Store["findMcpClientByTokenPrefix"]> {
+    throw new StoreNotImplementedError("findMcpClientByTokenPrefix");
+  }
+  async listMcpClients(..._args: Parameters<Store["listMcpClients"]>): ReturnType<Store["listMcpClients"]> {
+    throw new StoreNotImplementedError("listMcpClients");
+  }
+  async revokeMcpClient(..._args: Parameters<Store["revokeMcpClient"]>): ReturnType<Store["revokeMcpClient"]> {
+    throw new StoreNotImplementedError("revokeMcpClient");
+  }
+  async touchMcpClient(..._args: Parameters<Store["touchMcpClient"]>): ReturnType<Store["touchMcpClient"]> {
+    throw new StoreNotImplementedError("touchMcpClient");
+  }
+  async listMcpToolCallsForExecution(..._args: Parameters<Store["listMcpToolCallsForExecution"]>): ReturnType<Store["listMcpToolCallsForExecution"]> {
+    throw new StoreNotImplementedError("listMcpToolCallsForExecution");
+  }
+
+  // Guard profiles, bindings, events and vault
+  async listGuardProfiles(..._args: Parameters<Store["listGuardProfiles"]>): ReturnType<Store["listGuardProfiles"]> {
+    throw new StoreNotImplementedError("listGuardProfiles");
+  }
+  async getGuardProfile(..._args: Parameters<Store["getGuardProfile"]>): ReturnType<Store["getGuardProfile"]> {
+    throw new StoreNotImplementedError("getGuardProfile");
+  }
+  async guardProfileRevision(..._args: Parameters<Store["guardProfileRevision"]>): ReturnType<Store["guardProfileRevision"]> {
+    throw new StoreNotImplementedError("guardProfileRevision");
+  }
+  async anyGuardProfileUsesLabels(..._args: Parameters<Store["anyGuardProfileUsesLabels"]>): ReturnType<Store["anyGuardProfileUsesLabels"]> {
+    throw new StoreNotImplementedError("anyGuardProfileUsesLabels");
+  }
+  async countObservedDestinationBlocks(..._args: Parameters<Store["countObservedDestinationBlocks"]>): ReturnType<Store["countObservedDestinationBlocks"]> {
+    throw new StoreNotImplementedError("countObservedDestinationBlocks");
+  }
+  async getGuardProfileVersion(..._args: Parameters<Store["getGuardProfileVersion"]>): ReturnType<Store["getGuardProfileVersion"]> {
+    throw new StoreNotImplementedError("getGuardProfileVersion");
+  }
+  async listGuardProfileVersions(..._args: Parameters<Store["listGuardProfileVersions"]>): ReturnType<Store["listGuardProfileVersions"]> {
+    throw new StoreNotImplementedError("listGuardProfileVersions");
+  }
+  async insertGuardProfile(..._args: Parameters<Store["insertGuardProfile"]>): ReturnType<Store["insertGuardProfile"]> {
+    throw new StoreNotImplementedError("insertGuardProfile");
+  }
+  async addGuardProfileVersion(..._args: Parameters<Store["addGuardProfileVersion"]>): ReturnType<Store["addGuardProfileVersion"]> {
+    throw new StoreNotImplementedError("addGuardProfileVersion");
+  }
+  async deleteGuardProfile(..._args: Parameters<Store["deleteGuardProfile"]>): ReturnType<Store["deleteGuardProfile"]> {
+    throw new StoreNotImplementedError("deleteGuardProfile");
+  }
+  async getGuardBinding(..._args: Parameters<Store["getGuardBinding"]>): ReturnType<Store["getGuardBinding"]> {
+    throw new StoreNotImplementedError("getGuardBinding");
+  }
+  async listGuardBindingsForProfile(..._args: Parameters<Store["listGuardBindingsForProfile"]>): ReturnType<Store["listGuardBindingsForProfile"]> {
+    throw new StoreNotImplementedError("listGuardBindingsForProfile");
+  }
+  async setGuardBinding(..._args: Parameters<Store["setGuardBinding"]>): ReturnType<Store["setGuardBinding"]> {
+    throw new StoreNotImplementedError("setGuardBinding");
+  }
+  async insertGuardEvents(..._args: Parameters<Store["insertGuardEvents"]>): ReturnType<Store["insertGuardEvents"]> {
+    throw new StoreNotImplementedError("insertGuardEvents");
+  }
+  async listGuardEvents(..._args: Parameters<Store["listGuardEvents"]>): ReturnType<Store["listGuardEvents"]> {
+    throw new StoreNotImplementedError("listGuardEvents");
+  }
+  async listGuardEventsForExecution(..._args: Parameters<Store["listGuardEventsForExecution"]>): ReturnType<Store["listGuardEventsForExecution"]> {
+    throw new StoreNotImplementedError("listGuardEventsForExecution");
+  }
+  async guardEventStats(..._args: Parameters<Store["guardEventStats"]>): ReturnType<Store["guardEventStats"]> {
+    throw new StoreNotImplementedError("guardEventStats");
+  }
+  async getGuardVaultByToken(..._args: Parameters<Store["getGuardVaultByToken"]>): ReturnType<Store["getGuardVaultByToken"]> {
+    throw new StoreNotImplementedError("getGuardVaultByToken");
+  }
+  async getGuardVaultByHash(..._args: Parameters<Store["getGuardVaultByHash"]>): ReturnType<Store["getGuardVaultByHash"]> {
+    throw new StoreNotImplementedError("getGuardVaultByHash");
+  }
+  async putGuardVault(..._args: Parameters<Store["putGuardVault"]>): ReturnType<Store["putGuardVault"]> {
+    throw new StoreNotImplementedError("putGuardVault");
+  }
+
+  // Data destinations
+  async listWorkflowConfigsForDestinations(..._args: Parameters<Store["listWorkflowConfigsForDestinations"]>): ReturnType<Store["listWorkflowConfigsForDestinations"]> {
+    throw new StoreNotImplementedError("listWorkflowConfigsForDestinations");
+  }
+  async listDataDestinations(..._args: Parameters<Store["listDataDestinations"]>): ReturnType<Store["listDataDestinations"]> {
+    throw new StoreNotImplementedError("listDataDestinations");
+  }
+  async getDataDestination(..._args: Parameters<Store["getDataDestination"]>): ReturnType<Store["getDataDestination"]> {
+    throw new StoreNotImplementedError("getDataDestination");
+  }
+  async findDataDestinationByMatch(..._args: Parameters<Store["findDataDestinationByMatch"]>): ReturnType<Store["findDataDestinationByMatch"]> {
+    throw new StoreNotImplementedError("findDataDestinationByMatch");
+  }
+  async insertDataDestination(..._args: Parameters<Store["insertDataDestination"]>): ReturnType<Store["insertDataDestination"]> {
+    throw new StoreNotImplementedError("insertDataDestination");
+  }
+  async updateDataDestination(..._args: Parameters<Store["updateDataDestination"]>): ReturnType<Store["updateDataDestination"]> {
+    throw new StoreNotImplementedError("updateDataDestination");
+  }
+  async deleteDataDestination(..._args: Parameters<Store["deleteDataDestination"]>): ReturnType<Store["deleteDataDestination"]> {
+    throw new StoreNotImplementedError("deleteDataDestination");
+  }
+
+  // Knowledge bases
+  async createKnowledgeBase(..._args: Parameters<Store["createKnowledgeBase"]>): ReturnType<Store["createKnowledgeBase"]> {
+    throw new StoreNotImplementedError("createKnowledgeBase");
+  }
+  async updateKnowledgeBase(..._args: Parameters<Store["updateKnowledgeBase"]>): ReturnType<Store["updateKnowledgeBase"]> {
+    throw new StoreNotImplementedError("updateKnowledgeBase");
+  }
+  async deleteKnowledgeBase(..._args: Parameters<Store["deleteKnowledgeBase"]>): ReturnType<Store["deleteKnowledgeBase"]> {
+    throw new StoreNotImplementedError("deleteKnowledgeBase");
+  }
+  async getKnowledgeBase(..._args: Parameters<Store["getKnowledgeBase"]>): ReturnType<Store["getKnowledgeBase"]> {
+    throw new StoreNotImplementedError("getKnowledgeBase");
+  }
+  async listKnowledgeBases(..._args: Parameters<Store["listKnowledgeBases"]>): ReturnType<Store["listKnowledgeBases"]> {
+    throw new StoreNotImplementedError("listKnowledgeBases");
+  }
+  async addKnowledgeBaseChunks(..._args: Parameters<Store["addKnowledgeBaseChunks"]>): ReturnType<Store["addKnowledgeBaseChunks"]> {
+    throw new StoreNotImplementedError("addKnowledgeBaseChunks");
+  }
+  async listKnowledgeBaseChunks(..._args: Parameters<Store["listKnowledgeBaseChunks"]>): ReturnType<Store["listKnowledgeBaseChunks"]> {
+    throw new StoreNotImplementedError("listKnowledgeBaseChunks");
+  }
+  async bm25SearchKnowledgeBase(..._args: Parameters<Store["bm25SearchKnowledgeBase"]>): ReturnType<Store["bm25SearchKnowledgeBase"]> {
+    throw new StoreNotImplementedError("bm25SearchKnowledgeBase");
+  }
+  async listKnowledgeBaseChunkPreviews(..._args: Parameters<Store["listKnowledgeBaseChunkPreviews"]>): ReturnType<Store["listKnowledgeBaseChunkPreviews"]> {
+    throw new StoreNotImplementedError("listKnowledgeBaseChunkPreviews");
+  }
+  async deleteKnowledgeBaseChunksBySource(..._args: Parameters<Store["deleteKnowledgeBaseChunksBySource"]>): ReturnType<Store["deleteKnowledgeBaseChunksBySource"]> {
+    throw new StoreNotImplementedError("deleteKnowledgeBaseChunksBySource");
+  }
+  async listKnowledgeBaseSources(..._args: Parameters<Store["listKnowledgeBaseSources"]>): ReturnType<Store["listKnowledgeBaseSources"]> {
+    throw new StoreNotImplementedError("listKnowledgeBaseSources");
+  }
+
+  // Evals (datasets, fixtures, runs, results)
+  async createEvalDataset(..._args: Parameters<Store["createEvalDataset"]>): ReturnType<Store["createEvalDataset"]> {
+    throw new StoreNotImplementedError("createEvalDataset");
+  }
+  async listEvalDatasets(..._args: Parameters<Store["listEvalDatasets"]>): ReturnType<Store["listEvalDatasets"]> {
+    throw new StoreNotImplementedError("listEvalDatasets");
+  }
+  async getEvalDataset(..._args: Parameters<Store["getEvalDataset"]>): ReturnType<Store["getEvalDataset"]> {
+    throw new StoreNotImplementedError("getEvalDataset");
+  }
+  async deleteEvalDataset(..._args: Parameters<Store["deleteEvalDataset"]>): ReturnType<Store["deleteEvalDataset"]> {
+    throw new StoreNotImplementedError("deleteEvalDataset");
+  }
+  async createEvalFixture(..._args: Parameters<Store["createEvalFixture"]>): ReturnType<Store["createEvalFixture"]> {
+    throw new StoreNotImplementedError("createEvalFixture");
+  }
+  async listEvalFixtures(..._args: Parameters<Store["listEvalFixtures"]>): ReturnType<Store["listEvalFixtures"]> {
+    throw new StoreNotImplementedError("listEvalFixtures");
+  }
+  async getEvalFixture(..._args: Parameters<Store["getEvalFixture"]>): ReturnType<Store["getEvalFixture"]> {
+    throw new StoreNotImplementedError("getEvalFixture");
+  }
+  async findEvalFixtureByRecording(..._args: Parameters<Store["findEvalFixtureByRecording"]>): ReturnType<Store["findEvalFixtureByRecording"]> {
+    throw new StoreNotImplementedError("findEvalFixtureByRecording");
+  }
+  async getEvalFixtureDatasetId(..._args: Parameters<Store["getEvalFixtureDatasetId"]>): ReturnType<Store["getEvalFixtureDatasetId"]> {
+    throw new StoreNotImplementedError("getEvalFixtureDatasetId");
+  }
+  async deleteEvalFixture(..._args: Parameters<Store["deleteEvalFixture"]>): ReturnType<Store["deleteEvalFixture"]> {
+    throw new StoreNotImplementedError("deleteEvalFixture");
+  }
+  async setEvalFixtureRequired(..._args: Parameters<Store["setEvalFixtureRequired"]>): ReturnType<Store["setEvalFixtureRequired"]> {
+    throw new StoreNotImplementedError("setEvalFixtureRequired");
+  }
+  async createEvalRun(..._args: Parameters<Store["createEvalRun"]>): ReturnType<Store["createEvalRun"]> {
+    throw new StoreNotImplementedError("createEvalRun");
+  }
+  async updateEvalRunProgress(..._args: Parameters<Store["updateEvalRunProgress"]>): ReturnType<Store["updateEvalRunProgress"]> {
+    throw new StoreNotImplementedError("updateEvalRunProgress");
+  }
+  async pruneEvalRuns(..._args: Parameters<Store["pruneEvalRuns"]>): ReturnType<Store["pruneEvalRuns"]> {
+    throw new StoreNotImplementedError("pruneEvalRuns");
+  }
+  async finalizeEvalRun(..._args: Parameters<Store["finalizeEvalRun"]>): ReturnType<Store["finalizeEvalRun"]> {
+    throw new StoreNotImplementedError("finalizeEvalRun");
+  }
+  async updateEvalRunSummary(..._args: Parameters<Store["updateEvalRunSummary"]>): ReturnType<Store["updateEvalRunSummary"]> {
+    throw new StoreNotImplementedError("updateEvalRunSummary");
+  }
+  async listEvalRuns(..._args: Parameters<Store["listEvalRuns"]>): ReturnType<Store["listEvalRuns"]> {
+    throw new StoreNotImplementedError("listEvalRuns");
+  }
+  async getEvalRun(..._args: Parameters<Store["getEvalRun"]>): ReturnType<Store["getEvalRun"]> {
+    throw new StoreNotImplementedError("getEvalRun");
+  }
+  async recordEvalResult(..._args: Parameters<Store["recordEvalResult"]>): ReturnType<Store["recordEvalResult"]> {
+    throw new StoreNotImplementedError("recordEvalResult");
+  }
+  async listEvalResults(..._args: Parameters<Store["listEvalResults"]>): ReturnType<Store["listEvalResults"]> {
+    throw new StoreNotImplementedError("listEvalResults");
+  }
+  async getEvalResult(..._args: Parameters<Store["getEvalResult"]>): ReturnType<Store["getEvalResult"]> {
+    throw new StoreNotImplementedError("getEvalResult");
+  }
+  async evalFixtureIdsForRecording(..._args: Parameters<Store["evalFixtureIdsForRecording"]>): ReturnType<Store["evalFixtureIdsForRecording"]> {
+    throw new StoreNotImplementedError("evalFixtureIdsForRecording");
+  }
+  async evalRunIdsForResults(..._args: Parameters<Store["evalRunIdsForResults"]>): ReturnType<Store["evalRunIdsForResults"]> {
+    throw new StoreNotImplementedError("evalRunIdsForResults");
+  }
+  async deleteEvalFixturesForRecording(..._args: Parameters<Store["deleteEvalFixturesForRecording"]>): ReturnType<Store["deleteEvalFixturesForRecording"]> {
+    throw new StoreNotImplementedError("deleteEvalFixturesForRecording");
+  }
+
+  // Replay recordings, capture and subject rows
+  async saveReplayRecording(..._args: Parameters<Store["saveReplayRecording"]>): ReturnType<Store["saveReplayRecording"]> {
+    throw new StoreNotImplementedError("saveReplayRecording");
+  }
+  async getReplayRecordingSummary(..._args: Parameters<Store["getReplayRecordingSummary"]>): ReturnType<Store["getReplayRecordingSummary"]> {
+    throw new StoreNotImplementedError("getReplayRecordingSummary");
+  }
+  async getReplayRecording(..._args: Parameters<Store["getReplayRecording"]>): ReturnType<Store["getReplayRecording"]> {
+    throw new StoreNotImplementedError("getReplayRecording");
+  }
+  async listReplayRecordings(..._args: Parameters<Store["listReplayRecordings"]>): ReturnType<Store["listReplayRecordings"]> {
+    throw new StoreNotImplementedError("listReplayRecordings");
+  }
+  async sumReplayRecordingBytesForWorkflow(..._args: Parameters<Store["sumReplayRecordingBytesForWorkflow"]>): ReturnType<Store["sumReplayRecordingBytesForWorkflow"]> {
+    throw new StoreNotImplementedError("sumReplayRecordingBytesForWorkflow");
+  }
+  async sumReplayRecordingBytes(..._args: Parameters<Store["sumReplayRecordingBytes"]>): ReturnType<Store["sumReplayRecordingBytes"]> {
+    throw new StoreNotImplementedError("sumReplayRecordingBytes");
+  }
+  async findReplayRecordingIdForExecution(..._args: Parameters<Store["findReplayRecordingIdForExecution"]>): ReturnType<Store["findReplayRecordingIdForExecution"]> {
+    throw new StoreNotImplementedError("findReplayRecordingIdForExecution");
+  }
+  async countReplayRecordingsForWorkflow(..._args: Parameters<Store["countReplayRecordingsForWorkflow"]>): ReturnType<Store["countReplayRecordingsForWorkflow"]> {
+    throw new StoreNotImplementedError("countReplayRecordingsForWorkflow");
+  }
+  async listReplayCaptures(..._args: Parameters<Store["listReplayCaptures"]>): ReturnType<Store["listReplayCaptures"]> {
+    throw new StoreNotImplementedError("listReplayCaptures");
+  }
+  async countReplayCapturesSince(..._args: Parameters<Store["countReplayCapturesSince"]>): ReturnType<Store["countReplayCapturesSince"]> {
+    throw new StoreNotImplementedError("countReplayCapturesSince");
+  }
+  async oldestReplayCaptureIds(..._args: Parameters<Store["oldestReplayCaptureIds"]>): ReturnType<Store["oldestReplayCaptureIds"]> {
+    throw new StoreNotImplementedError("oldestReplayCaptureIds");
+  }
+  async pruneReplayCaptures(..._args: Parameters<Store["pruneReplayCaptures"]>): ReturnType<Store["pruneReplayCaptures"]> {
+    throw new StoreNotImplementedError("pruneReplayCaptures");
+  }
+  async promoteReplayCapture(..._args: Parameters<Store["promoteReplayCapture"]>): ReturnType<Store["promoteReplayCapture"]> {
+    throw new StoreNotImplementedError("promoteReplayCapture");
+  }
+  async getReplayCaptureSettings(..._args: Parameters<Store["getReplayCaptureSettings"]>): ReturnType<Store["getReplayCaptureSettings"]> {
+    throw new StoreNotImplementedError("getReplayCaptureSettings");
+  }
+  async saveReplayCaptureSettings(..._args: Parameters<Store["saveReplayCaptureSettings"]>): ReturnType<Store["saveReplayCaptureSettings"]> {
+    throw new StoreNotImplementedError("saveReplayCaptureSettings");
+  }
+  async recordReplayCaptureDrop(..._args: Parameters<Store["recordReplayCaptureDrop"]>): ReturnType<Store["recordReplayCaptureDrop"]> {
+    throw new StoreNotImplementedError("recordReplayCaptureDrop");
+  }
+  async subjectTextPage(..._args: Parameters<Store["subjectTextPage"]>): ReturnType<Store["subjectTextPage"]> {
+    throw new StoreNotImplementedError("subjectTextPage");
+  }
+  async subjectTextRow(..._args: Parameters<Store["subjectTextRow"]>): ReturnType<Store["subjectTextRow"]> {
+    throw new StoreNotImplementedError("subjectTextRow");
+  }
+  async countSubjectRows(..._args: Parameters<Store["countSubjectRows"]>): ReturnType<Store["countSubjectRows"]> {
+    throw new StoreNotImplementedError("countSubjectRows");
+  }
+  async deleteSubjectRow(..._args: Parameters<Store["deleteSubjectRow"]>): ReturnType<Store["deleteSubjectRow"]> {
+    throw new StoreNotImplementedError("deleteSubjectRow");
+  }
+  async sumReplayCaptureBytesForWorkflow(..._args: Parameters<Store["sumReplayCaptureBytesForWorkflow"]>): ReturnType<Store["sumReplayCaptureBytesForWorkflow"]> {
+    throw new StoreNotImplementedError("sumReplayCaptureBytesForWorkflow");
+  }
+  async oldestReplayCaptures(..._args: Parameters<Store["oldestReplayCaptures"]>): ReturnType<Store["oldestReplayCaptures"]> {
+    throw new StoreNotImplementedError("oldestReplayCaptures");
+  }
+  async replayGoldenBadgesForExecutions(..._args: Parameters<Store["replayGoldenBadgesForExecutions"]>): ReturnType<Store["replayGoldenBadgesForExecutions"]> {
+    throw new StoreNotImplementedError("replayGoldenBadgesForExecutions");
+  }
+  async deleteReplayRecording(..._args: Parameters<Store["deleteReplayRecording"]>): ReturnType<Store["deleteReplayRecording"]> {
+    throw new StoreNotImplementedError("deleteReplayRecording");
+  }
+
+  // Workflow versions
+  async listWorkflowVersions(..._args: Parameters<Store["listWorkflowVersions"]>): ReturnType<Store["listWorkflowVersions"]> {
+    throw new StoreNotImplementedError("listWorkflowVersions");
+  }
+  async getWorkflowVersion(..._args: Parameters<Store["getWorkflowVersion"]>): ReturnType<Store["getWorkflowVersion"]> {
+    throw new StoreNotImplementedError("getWorkflowVersion");
+  }
+  async writeWorkflowVersion(..._args: Parameters<Store["writeWorkflowVersion"]>): ReturnType<Store["writeWorkflowVersion"]> {
+    throw new StoreNotImplementedError("writeWorkflowVersion");
+  }
+  async pruneWorkflowVersions(..._args: Parameters<Store["pruneWorkflowVersions"]>): ReturnType<Store["pruneWorkflowVersions"]> {
+    throw new StoreNotImplementedError("pruneWorkflowVersions");
+  }
+  async maxWorkflowVersionNumber(..._args: Parameters<Store["maxWorkflowVersionNumber"]>): ReturnType<Store["maxWorkflowVersionNumber"]> {
+    throw new StoreNotImplementedError("maxWorkflowVersionNumber");
+  }
+  async appendWorkflowVersion(..._args: Parameters<Store["appendWorkflowVersion"]>): ReturnType<Store["appendWorkflowVersion"]> {
+    throw new StoreNotImplementedError("appendWorkflowVersion");
+  }
+  async publishWorkflowVersion(..._args: Parameters<Store["publishWorkflowVersion"]>): ReturnType<Store["publishWorkflowVersion"]> {
+    throw new StoreNotImplementedError("publishWorkflowVersion");
+  }
+
+  // RBAC: project roles, custom roles, SSO group mappings
+  async countProjectMemberships(..._args: Parameters<Store["countProjectMemberships"]>): ReturnType<Store["countProjectMemberships"]> {
+    throw new StoreNotImplementedError("countProjectMemberships");
+  }
+  async listProjectMembers(..._args: Parameters<Store["listProjectMembers"]>): ReturnType<Store["listProjectMembers"]> {
+    throw new StoreNotImplementedError("listProjectMembers");
+  }
+  async listUserProjectRoles(..._args: Parameters<Store["listUserProjectRoles"]>): ReturnType<Store["listUserProjectRoles"]> {
+    throw new StoreNotImplementedError("listUserProjectRoles");
+  }
+  async getProjectRole(..._args: Parameters<Store["getProjectRole"]>): ReturnType<Store["getProjectRole"]> {
+    throw new StoreNotImplementedError("getProjectRole");
+  }
+  async upsertProjectRole(..._args: Parameters<Store["upsertProjectRole"]>): ReturnType<Store["upsertProjectRole"]> {
+    throw new StoreNotImplementedError("upsertProjectRole");
+  }
+  async removeProjectRole(..._args: Parameters<Store["removeProjectRole"]>): ReturnType<Store["removeProjectRole"]> {
+    throw new StoreNotImplementedError("removeProjectRole");
+  }
+  async listCustomRoles(..._args: Parameters<Store["listCustomRoles"]>): ReturnType<Store["listCustomRoles"]> {
+    throw new StoreNotImplementedError("listCustomRoles");
+  }
+  async getCustomRole(..._args: Parameters<Store["getCustomRole"]>): ReturnType<Store["getCustomRole"]> {
+    throw new StoreNotImplementedError("getCustomRole");
+  }
+  async upsertCustomRole(..._args: Parameters<Store["upsertCustomRole"]>): ReturnType<Store["upsertCustomRole"]> {
+    throw new StoreNotImplementedError("upsertCustomRole");
+  }
+  async deleteCustomRole(..._args: Parameters<Store["deleteCustomRole"]>): ReturnType<Store["deleteCustomRole"]> {
+    throw new StoreNotImplementedError("deleteCustomRole");
+  }
+  async listSsoGroupMappings(..._args: Parameters<Store["listSsoGroupMappings"]>): ReturnType<Store["listSsoGroupMappings"]> {
+    throw new StoreNotImplementedError("listSsoGroupMappings");
+  }
+  async upsertSsoGroupMapping(..._args: Parameters<Store["upsertSsoGroupMapping"]>): ReturnType<Store["upsertSsoGroupMapping"]> {
+    throw new StoreNotImplementedError("upsertSsoGroupMapping");
+  }
+  async deleteSsoGroupMapping(..._args: Parameters<Store["deleteSsoGroupMapping"]>): ReturnType<Store["deleteSsoGroupMapping"]> {
+    throw new StoreNotImplementedError("deleteSsoGroupMapping");
+  }
+
+  // Workflow and secret shares
+  async listWorkflowShares(..._args: Parameters<Store["listWorkflowShares"]>): ReturnType<Store["listWorkflowShares"]> {
+    throw new StoreNotImplementedError("listWorkflowShares");
+  }
+  async listWorkflowsSharedToProject(..._args: Parameters<Store["listWorkflowsSharedToProject"]>): ReturnType<Store["listWorkflowsSharedToProject"]> {
+    throw new StoreNotImplementedError("listWorkflowsSharedToProject");
+  }
+  async upsertWorkflowShare(..._args: Parameters<Store["upsertWorkflowShare"]>): ReturnType<Store["upsertWorkflowShare"]> {
+    throw new StoreNotImplementedError("upsertWorkflowShare");
+  }
+  async removeWorkflowShare(..._args: Parameters<Store["removeWorkflowShare"]>): ReturnType<Store["removeWorkflowShare"]> {
+    throw new StoreNotImplementedError("removeWorkflowShare");
+  }
+  async listSecretShares(..._args: Parameters<Store["listSecretShares"]>): ReturnType<Store["listSecretShares"]> {
+    throw new StoreNotImplementedError("listSecretShares");
+  }
+  async listSecretsSharedToProject(..._args: Parameters<Store["listSecretsSharedToProject"]>): ReturnType<Store["listSecretsSharedToProject"]> {
+    throw new StoreNotImplementedError("listSecretsSharedToProject");
+  }
+  async upsertSecretShare(..._args: Parameters<Store["upsertSecretShare"]>): ReturnType<Store["upsertSecretShare"]> {
+    throw new StoreNotImplementedError("upsertSecretShare");
+  }
+  async removeSecretShare(..._args: Parameters<Store["removeSecretShare"]>): ReturnType<Store["removeSecretShare"]> {
+    throw new StoreNotImplementedError("removeSecretShare");
+  }
+
+  // Workflows and templates
+  async getWorkflowCreatedBy(..._args: Parameters<Store["getWorkflowCreatedBy"]>): ReturnType<Store["getWorkflowCreatedBy"]> {
+    throw new StoreNotImplementedError("getWorkflowCreatedBy");
+  }
+
+  // Users, sessions, API keys, MFA and SSO identities
+  async saveApiKey(..._args: Parameters<Store["saveApiKey"]>): ReturnType<Store["saveApiKey"]> {
+    throw new StoreNotImplementedError("saveApiKey");
+  }
+  async listApiKeys(..._args: Parameters<Store["listApiKeys"]>): ReturnType<Store["listApiKeys"]> {
+    throw new StoreNotImplementedError("listApiKeys");
+  }
+  async findApiKeyByPrefix(..._args: Parameters<Store["findApiKeyByPrefix"]>): ReturnType<Store["findApiKeyByPrefix"]> {
+    throw new StoreNotImplementedError("findApiKeyByPrefix");
+  }
+  async touchApiKey(..._args: Parameters<Store["touchApiKey"]>): ReturnType<Store["touchApiKey"]> {
+    throw new StoreNotImplementedError("touchApiKey");
+  }
+  async revokeApiKey(..._args: Parameters<Store["revokeApiKey"]>): ReturnType<Store["revokeApiKey"]> {
+    throw new StoreNotImplementedError("revokeApiKey");
+  }
+  async getMfaSecret(..._args: Parameters<Store["getMfaSecret"]>): ReturnType<Store["getMfaSecret"]> {
+    throw new StoreNotImplementedError("getMfaSecret");
+  }
+  async upsertMfaSecret(..._args: Parameters<Store["upsertMfaSecret"]>): ReturnType<Store["upsertMfaSecret"]> {
+    throw new StoreNotImplementedError("upsertMfaSecret");
+  }
+  async replaceMfaBackupCodes(..._args: Parameters<Store["replaceMfaBackupCodes"]>): ReturnType<Store["replaceMfaBackupCodes"]> {
+    throw new StoreNotImplementedError("replaceMfaBackupCodes");
+  }
+  async deleteMfaSecret(..._args: Parameters<Store["deleteMfaSecret"]>): ReturnType<Store["deleteMfaSecret"]> {
+    throw new StoreNotImplementedError("deleteMfaSecret");
+  }
+  async findSsoIdentity(..._args: Parameters<Store["findSsoIdentity"]>): ReturnType<Store["findSsoIdentity"]> {
+    throw new StoreNotImplementedError("findSsoIdentity");
+  }
+  async upsertSsoIdentity(..._args: Parameters<Store["upsertSsoIdentity"]>): ReturnType<Store["upsertSsoIdentity"]> {
+    throw new StoreNotImplementedError("upsertSsoIdentity");
+  }
+
+  // Secrets and external secret providers
+  async deleteSecret(..._args: Parameters<Store["deleteSecret"]>): ReturnType<Store["deleteSecret"]> {
+    throw new StoreNotImplementedError("deleteSecret");
+  }
+  async listExternalSecretProviders(..._args: Parameters<Store["listExternalSecretProviders"]>): ReturnType<Store["listExternalSecretProviders"]> {
+    throw new StoreNotImplementedError("listExternalSecretProviders");
+  }
+  async getExternalSecretProvider(..._args: Parameters<Store["getExternalSecretProvider"]>): ReturnType<Store["getExternalSecretProvider"]> {
+    throw new StoreNotImplementedError("getExternalSecretProvider");
+  }
+  async upsertExternalSecretProvider(..._args: Parameters<Store["upsertExternalSecretProvider"]>): ReturnType<Store["upsertExternalSecretProvider"]> {
+    throw new StoreNotImplementedError("upsertExternalSecretProvider");
+  }
+  async deleteExternalSecretProvider(..._args: Parameters<Store["deleteExternalSecretProvider"]>): ReturnType<Store["deleteExternalSecretProvider"]> {
+    throw new StoreNotImplementedError("deleteExternalSecretProvider");
+  }
+  async countSecretsUsingExternalProvider(..._args: Parameters<Store["countSecretsUsingExternalProvider"]>): ReturnType<Store["countSecretsUsingExternalProvider"]> {
+    throw new StoreNotImplementedError("countSecretsUsingExternalProvider");
+  }
+  async getExternalSecretCacheEntry(..._args: Parameters<Store["getExternalSecretCacheEntry"]>): ReturnType<Store["getExternalSecretCacheEntry"]> {
+    throw new StoreNotImplementedError("getExternalSecretCacheEntry");
+  }
+  async upsertExternalSecretCacheEntry(..._args: Parameters<Store["upsertExternalSecretCacheEntry"]>): ReturnType<Store["upsertExternalSecretCacheEntry"]> {
+    throw new StoreNotImplementedError("upsertExternalSecretCacheEntry");
+  }
+  async deleteExternalSecretCacheEntry(..._args: Parameters<Store["deleteExternalSecretCacheEntry"]>): ReturnType<Store["deleteExternalSecretCacheEntry"]> {
+    throw new StoreNotImplementedError("deleteExternalSecretCacheEntry");
+  }
+
+  // Execution history and paused executions
+  async claimWorkflowExecutionForResume(..._args: Parameters<Store["claimWorkflowExecutionForResume"]>): ReturnType<Store["claimWorkflowExecutionForResume"]> {
+    throw new StoreNotImplementedError("claimWorkflowExecutionForResume");
+  }
+  async listResumingWorkflowExecutionIds(..._args: Parameters<Store["listResumingWorkflowExecutionIds"]>): ReturnType<Store["listResumingWorkflowExecutionIds"]> {
+    throw new StoreNotImplementedError("listResumingWorkflowExecutionIds");
+  }
+  async listResumingWorkflowExecutions(..._args: Parameters<Store["listResumingWorkflowExecutions"]>): ReturnType<Store["listResumingWorkflowExecutions"]> {
+    throw new StoreNotImplementedError("listResumingWorkflowExecutions");
+  }
+  async releaseWorkflowExecutionClaim(..._args: Parameters<Store["releaseWorkflowExecutionClaim"]>): ReturnType<Store["releaseWorkflowExecutionClaim"]> {
+    throw new StoreNotImplementedError("releaseWorkflowExecutionClaim");
+  }
+
+  // Approval requests
+  async insertApprovalRequest(..._args: Parameters<Store["insertApprovalRequest"]>): ReturnType<Store["insertApprovalRequest"]> {
+    throw new StoreNotImplementedError("insertApprovalRequest");
+  }
+  async getApprovalRequest(..._args: Parameters<Store["getApprovalRequest"]>): ReturnType<Store["getApprovalRequest"]> {
+    throw new StoreNotImplementedError("getApprovalRequest");
+  }
+  async getPendingApprovalRequestForExecution(..._args: Parameters<Store["getPendingApprovalRequestForExecution"]>): ReturnType<Store["getPendingApprovalRequestForExecution"]> {
+    throw new StoreNotImplementedError("getPendingApprovalRequestForExecution");
+  }
+  async listApprovalRequestsForExecution(..._args: Parameters<Store["listApprovalRequestsForExecution"]>): ReturnType<Store["listApprovalRequestsForExecution"]> {
+    throw new StoreNotImplementedError("listApprovalRequestsForExecution");
+  }
+  async listApprovalRequests(..._args: Parameters<Store["listApprovalRequests"]>): ReturnType<Store["listApprovalRequests"]> {
+    throw new StoreNotImplementedError("listApprovalRequests");
+  }
+  async listExpiredApprovalRequests(..._args: Parameters<Store["listExpiredApprovalRequests"]>): ReturnType<Store["listExpiredApprovalRequests"]> {
+    throw new StoreNotImplementedError("listExpiredApprovalRequests");
+  }
+  async decideApprovalRequest(..._args: Parameters<Store["decideApprovalRequest"]>): ReturnType<Store["decideApprovalRequest"]> {
+    throw new StoreNotImplementedError("decideApprovalRequest");
+  }
+  async reopenApprovalRequest(..._args: Parameters<Store["reopenApprovalRequest"]>): ReturnType<Store["reopenApprovalRequest"]> {
+    throw new StoreNotImplementedError("reopenApprovalRequest");
+  }
+  async cancelPendingApprovalRequests(..._args: Parameters<Store["cancelPendingApprovalRequests"]>): ReturnType<Store["cancelPendingApprovalRequests"]> {
+    throw new StoreNotImplementedError("cancelPendingApprovalRequests");
+  }
+
+  // Execution queue
+  async hasActiveQueueItem(..._args: Parameters<Store["hasActiveQueueItem"]>): ReturnType<Store["hasActiveQueueItem"]> {
+    throw new StoreNotImplementedError("hasActiveQueueItem");
+  }
+
+  // Triggers, git sync and leases
+  async getGitConfig(..._args: Parameters<Store["getGitConfig"]>): ReturnType<Store["getGitConfig"]> {
+    throw new StoreNotImplementedError("getGitConfig");
+  }
+  async upsertGitConfig(..._args: Parameters<Store["upsertGitConfig"]>): ReturnType<Store["upsertGitConfig"]> {
+    throw new StoreNotImplementedError("upsertGitConfig");
+  }
+  async deleteGitConfig(..._args: Parameters<Store["deleteGitConfig"]>): ReturnType<Store["deleteGitConfig"]> {
+    throw new StoreNotImplementedError("deleteGitConfig");
+  }
+  async recordGitSync(..._args: Parameters<Store["recordGitSync"]>): ReturnType<Store["recordGitSync"]> {
+    throw new StoreNotImplementedError("recordGitSync");
+  }
+  async getLease(..._args: Parameters<Store["getLease"]>): ReturnType<Store["getLease"]> {
+    throw new StoreNotImplementedError("getLease");
+  }
+  async tryAcquireLease(..._args: Parameters<Store["tryAcquireLease"]>): ReturnType<Store["tryAcquireLease"]> {
+    throw new StoreNotImplementedError("tryAcquireLease");
+  }
+  async releaseLease(..._args: Parameters<Store["releaseLease"]>): ReturnType<Store["releaseLease"]> {
+    throw new StoreNotImplementedError("releaseLease");
+  }
+  async listLeases(..._args: Parameters<Store["listLeases"]>): ReturnType<Store["listLeases"]> {
+    throw new StoreNotImplementedError("listLeases");
+  }
+
+  // Audit log, log streaming, audit export, signing keys and execution manifests
+  async writeAuditLog(..._args: Parameters<Store["writeAuditLog"]>): ReturnType<Store["writeAuditLog"]> {
+    throw new StoreNotImplementedError("writeAuditLog");
+  }
+  async verifyAuditChain(..._args: Parameters<Store["verifyAuditChain"]>): ReturnType<Store["verifyAuditChain"]> {
+    throw new StoreNotImplementedError("verifyAuditChain");
+  }
+  async listAuditLogs(..._args: Parameters<Store["listAuditLogs"]>): ReturnType<Store["listAuditLogs"]> {
+    throw new StoreNotImplementedError("listAuditLogs");
+  }
+  async pruneAuditLogs(..._args: Parameters<Store["pruneAuditLogs"]>): ReturnType<Store["pruneAuditLogs"]> {
+    throw new StoreNotImplementedError("pruneAuditLogs");
+  }
+  async listLogStreamDestinations(..._args: Parameters<Store["listLogStreamDestinations"]>): ReturnType<Store["listLogStreamDestinations"]> {
+    throw new StoreNotImplementedError("listLogStreamDestinations");
+  }
+  async getLogStreamDestination(..._args: Parameters<Store["getLogStreamDestination"]>): ReturnType<Store["getLogStreamDestination"]> {
+    throw new StoreNotImplementedError("getLogStreamDestination");
+  }
+  async upsertLogStreamDestination(..._args: Parameters<Store["upsertLogStreamDestination"]>): ReturnType<Store["upsertLogStreamDestination"]> {
+    throw new StoreNotImplementedError("upsertLogStreamDestination");
+  }
+  async deleteLogStreamDestination(..._args: Parameters<Store["deleteLogStreamDestination"]>): ReturnType<Store["deleteLogStreamDestination"]> {
+    throw new StoreNotImplementedError("deleteLogStreamDestination");
+  }
+  async recordLogStreamDispatch(..._args: Parameters<Store["recordLogStreamDispatch"]>): ReturnType<Store["recordLogStreamDispatch"]> {
+    throw new StoreNotImplementedError("recordLogStreamDispatch");
+  }
+  async writeLogStreamEvent(..._args: Parameters<Store["writeLogStreamEvent"]>): ReturnType<Store["writeLogStreamEvent"]> {
+    throw new StoreNotImplementedError("writeLogStreamEvent");
+  }
+  async listLogStreamEvents(..._args: Parameters<Store["listLogStreamEvents"]>): ReturnType<Store["listLogStreamEvents"]> {
+    throw new StoreNotImplementedError("listLogStreamEvents");
+  }
+  async pruneLogStreamEvents(..._args: Parameters<Store["pruneLogStreamEvents"]>): ReturnType<Store["pruneLogStreamEvents"]> {
+    throw new StoreNotImplementedError("pruneLogStreamEvents");
+  }
+  async createAuditExportDestination(..._args: Parameters<Store["createAuditExportDestination"]>): ReturnType<Store["createAuditExportDestination"]> {
+    throw new StoreNotImplementedError("createAuditExportDestination");
+  }
+  async updateAuditExportDestination(..._args: Parameters<Store["updateAuditExportDestination"]>): ReturnType<Store["updateAuditExportDestination"]> {
+    throw new StoreNotImplementedError("updateAuditExportDestination");
+  }
+  async deleteAuditExportDestination(..._args: Parameters<Store["deleteAuditExportDestination"]>): ReturnType<Store["deleteAuditExportDestination"]> {
+    throw new StoreNotImplementedError("deleteAuditExportDestination");
+  }
+  async listAuditExportDestinations(..._args: Parameters<Store["listAuditExportDestinations"]>): ReturnType<Store["listAuditExportDestinations"]> {
+    throw new StoreNotImplementedError("listAuditExportDestinations");
+  }
+  async getAuditExportDestination(..._args: Parameters<Store["getAuditExportDestination"]>): ReturnType<Store["getAuditExportDestination"]> {
+    throw new StoreNotImplementedError("getAuditExportDestination");
+  }
+  async listAuditLogsAfter(..._args: Parameters<Store["listAuditLogsAfter"]>): ReturnType<Store["listAuditLogsAfter"]> {
+    throw new StoreNotImplementedError("listAuditLogsAfter");
+  }
+  async recordAuditExportRun(..._args: Parameters<Store["recordAuditExportRun"]>): ReturnType<Store["recordAuditExportRun"]> {
+    throw new StoreNotImplementedError("recordAuditExportRun");
+  }
+  async listAuditExportRuns(..._args: Parameters<Store["listAuditExportRuns"]>): ReturnType<Store["listAuditExportRuns"]> {
+    throw new StoreNotImplementedError("listAuditExportRuns");
+  }
+  async getExecutionManifest(..._args: Parameters<Store["getExecutionManifest"]>): ReturnType<Store["getExecutionManifest"]> {
+    throw new StoreNotImplementedError("getExecutionManifest");
+  }
+  async saveExecutionRunContext(..._args: Parameters<Store["saveExecutionRunContext"]>): ReturnType<Store["saveExecutionRunContext"]> {
+    throw new StoreNotImplementedError("saveExecutionRunContext");
+  }
+  async saveExecutionManifest(..._args: Parameters<Store["saveExecutionManifest"]>): ReturnType<Store["saveExecutionManifest"]> {
+    throw new StoreNotImplementedError("saveExecutionManifest");
+  }
+  async listAuditLogsForExecution(..._args: Parameters<Store["listAuditLogsForExecution"]>): ReturnType<Store["listAuditLogsForExecution"]> {
+    throw new StoreNotImplementedError("listAuditLogsForExecution");
+  }
+  async pruneExecutionManifests(..._args: Parameters<Store["pruneExecutionManifests"]>): ReturnType<Store["pruneExecutionManifests"]> {
+    throw new StoreNotImplementedError("pruneExecutionManifests");
+  }
+  async listAuditSigningKeys(..._args: Parameters<Store["listAuditSigningKeys"]>): ReturnType<Store["listAuditSigningKeys"]> {
+    throw new StoreNotImplementedError("listAuditSigningKeys");
+  }
+  async getAuditSigningKey(..._args: Parameters<Store["getAuditSigningKey"]>): ReturnType<Store["getAuditSigningKey"]> {
+    throw new StoreNotImplementedError("getAuditSigningKey");
+  }
+  async getActiveAuditSigningKey(..._args: Parameters<Store["getActiveAuditSigningKey"]>): ReturnType<Store["getActiveAuditSigningKey"]> {
+    throw new StoreNotImplementedError("getActiveAuditSigningKey");
+  }
+  async activateAuditSigningKey(..._args: Parameters<Store["activateAuditSigningKey"]>): ReturnType<Store["activateAuditSigningKey"]> {
+    throw new StoreNotImplementedError("activateAuditSigningKey");
+  }
+
+  // Variables
+  async listVariables(..._args: Parameters<Store["listVariables"]>): ReturnType<Store["listVariables"]> {
+    throw new StoreNotImplementedError("listVariables");
+  }
+  async getVariable(..._args: Parameters<Store["getVariable"]>): ReturnType<Store["getVariable"]> {
+    throw new StoreNotImplementedError("getVariable");
+  }
+  async upsertVariable(..._args: Parameters<Store["upsertVariable"]>): ReturnType<Store["upsertVariable"]> {
+    throw new StoreNotImplementedError("upsertVariable");
+  }
+  async deleteVariable(..._args: Parameters<Store["deleteVariable"]>): ReturnType<Store["deleteVariable"]> {
+    throw new StoreNotImplementedError("deleteVariable");
+  }
+  async findVariableByKey(..._args: Parameters<Store["findVariableByKey"]>): ReturnType<Store["findVariableByKey"]> {
+    throw new StoreNotImplementedError("findVariableByKey");
+  }
+
+  // Usage and budgets
+  async writeUsageEvent(..._args: Parameters<Store["writeUsageEvent"]>): ReturnType<Store["writeUsageEvent"]> {
+    throw new StoreNotImplementedError("writeUsageEvent");
+  }
+  async queryUsageRollup(..._args: Parameters<Store["queryUsageRollup"]>): ReturnType<Store["queryUsageRollup"]> {
+    throw new StoreNotImplementedError("queryUsageRollup");
+  }
+  async queryUsageTotals(..._args: Parameters<Store["queryUsageTotals"]>): ReturnType<Store["queryUsageTotals"]> {
+    throw new StoreNotImplementedError("queryUsageTotals");
+  }
+  async listUsageEvents(..._args: Parameters<Store["listUsageEvents"]>): ReturnType<Store["listUsageEvents"]> {
+    throw new StoreNotImplementedError("listUsageEvents");
+  }
+  async createBudget(..._args: Parameters<Store["createBudget"]>): ReturnType<Store["createBudget"]> {
+    throw new StoreNotImplementedError("createBudget");
+  }
+  async updateBudget(..._args: Parameters<Store["updateBudget"]>): ReturnType<Store["updateBudget"]> {
+    throw new StoreNotImplementedError("updateBudget");
+  }
+  async deleteBudget(..._args: Parameters<Store["deleteBudget"]>): ReturnType<Store["deleteBudget"]> {
+    throw new StoreNotImplementedError("deleteBudget");
+  }
+  async getBudget(..._args: Parameters<Store["getBudget"]>): ReturnType<Store["getBudget"]> {
+    throw new StoreNotImplementedError("getBudget");
+  }
+  async listBudgets(..._args: Parameters<Store["listBudgets"]>): ReturnType<Store["listBudgets"]> {
+    throw new StoreNotImplementedError("listBudgets");
+  }
+  async recordBudgetAlert(..._args: Parameters<Store["recordBudgetAlert"]>): ReturnType<Store["recordBudgetAlert"]> {
+    throw new StoreNotImplementedError("recordBudgetAlert");
+  }
+  async getLatestBudgetAlert(..._args: Parameters<Store["getLatestBudgetAlert"]>): ReturnType<Store["getLatestBudgetAlert"]> {
+    throw new StoreNotImplementedError("getLatestBudgetAlert");
+  }
+  async listBudgetAlerts(..._args: Parameters<Store["listBudgetAlerts"]>): ReturnType<Store["listBudgetAlerts"]> {
+    throw new StoreNotImplementedError("listBudgetAlerts");
+  }
+
+  // Atomic multi-step operations (each runs in one transaction)
+  async claimExecutionAndDecideApproval(..._args: Parameters<Store["claimExecutionAndDecideApproval"]>): ReturnType<Store["claimExecutionAndDecideApproval"]> {
+    throw new StoreNotImplementedError("claimExecutionAndDecideApproval");
+  }
+  async releaseExecutionClaimAndReopenApproval(..._args: Parameters<Store["releaseExecutionClaimAndReopenApproval"]>): ReturnType<Store["releaseExecutionClaimAndReopenApproval"]> {
+    throw new StoreNotImplementedError("releaseExecutionClaimAndReopenApproval");
+  }
+  async saveReleaseGate(..._args: Parameters<Store["saveReleaseGate"]>): ReturnType<Store["saveReleaseGate"]> {
+    throw new StoreNotImplementedError("saveReleaseGate");
+  }
+  async updateReleaseGateCases(..._args: Parameters<Store["updateReleaseGateCases"]>): ReturnType<Store["updateReleaseGateCases"]> {
+    throw new StoreNotImplementedError("updateReleaseGateCases");
+  }
+  async approveReleaseRequestAndPublish(..._args: Parameters<Store["approveReleaseRequestAndPublish"]>): ReturnType<Store["approveReleaseRequestAndPublish"]> {
+    throw new StoreNotImplementedError("approveReleaseRequestAndPublish");
+  }
+  async saveReplayRecordingChecked(..._args: Parameters<Store["saveReplayRecordingChecked"]>): ReturnType<Store["saveReplayRecordingChecked"]> {
+    throw new StoreNotImplementedError("saveReplayRecordingChecked");
+  }
+  async promoteReplayCaptureToGoldenSet(..._args: Parameters<Store["promoteReplayCaptureToGoldenSet"]>): ReturnType<Store["promoteReplayCaptureToGoldenSet"]> {
+    throw new StoreNotImplementedError("promoteReplayCaptureToGoldenSet");
+  }
+  async importGoldenSet(..._args: Parameters<Store["importGoldenSet"]>): ReturnType<Store["importGoldenSet"]> {
+    throw new StoreNotImplementedError("importGoldenSet");
   }
 }

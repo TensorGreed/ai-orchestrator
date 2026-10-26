@@ -33,7 +33,7 @@ const servers: http.Server[] = [];
 async function createTestContext(overrides: Record<string, string> = {}): Promise<TestContext> {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-run-timeout-"));
   const store = await SqliteStore.create(path.join(tempDir, "orchestrator.db"));
-  store.ensureDefaultProject();
+  await store.ensureDefaultProject();
   const config = parseConfig({
     LOG_LEVEL: "warn",
     SEED_SAMPLE_WORKFLOWS: "false",
@@ -46,7 +46,7 @@ async function createTestContext(overrides: Record<string, string> = {}): Promis
   });
   const secretService = new SecretService(store, config.SECRET_MASTER_KEY_BASE64);
   const authService = new AuthService(store, config.SESSION_TTL_HOURS);
-  const app = createApp(config, store, secretService, authService);
+  const app = await createApp(config, store, secretService, authService);
   await app.ready();
   const context = { app, store, authService, config, tempDir };
   contexts.push(context);
@@ -75,7 +75,7 @@ afterEach(async () => {
     const context = contexts.pop()!;
     await context.app.close();
     try {
-      context.store.close();
+      await context.store.close();
     } catch {
       // Already closed by the app shutdown hooks.
     }
@@ -86,7 +86,7 @@ afterEach(async () => {
 async function login(context: TestContext): Promise<string> {
   const email = "builder@example.com";
   const password = "builder-Pass-123!";
-  context.authService.register({ email, password, role: "builder" });
+  await context.authService.register({ email, password, role: "builder" });
   const response = await context.app.inject({ method: "POST", url: "/api/auth/login", payload: { email, password } });
   const raw = response.headers["set-cookie"];
   const values = Array.isArray(raw) ? raw : [raw ?? ""];
@@ -184,7 +184,7 @@ describe("run-level execution timeout", () => {
     });
 
     // The run is saved as an error, not rewritten as canceled.
-    const history = context.store.getExecutionHistory(result.executionId);
+    const history = await context.store.getExecutionHistory(result.executionId);
     expect(history?.status).toBe("error");
 
     // Heartbeats were sent while the model call was pending.

@@ -18,96 +18,96 @@ describe("Phase 8.4 — audit hash chain + export", () => {
     audit = new AuditService(store, { enabled: true });
   });
 
-  afterEach(() => {
-    try { store.close(); } catch { /* may already be closed by tampering test */ }
+  afterEach(async () => {
+    try { await store.close(); } catch { /* may already be closed by tampering test */ }
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
 
   describe("hash chain", () => {
-    it("first row links from the genesis hash (64 zeros)", () => {
-      audit.record({ category: "auth", eventType: "login", action: "auth", outcome: "success" });
-      const result = store.verifyAuditChain();
+    it("first row links from the genesis hash (64 zeros)", async () => {
+      await audit.record({ category: "auth", eventType: "login", action: "auth", outcome: "success" });
+      const result = await store.verifyAuditChain();
       expect(result.ok).toBe(true);
       expect(result.rowsChecked).toBe(1);
     });
 
-    it("each row's prev_hash equals the previous row's entry_hash", () => {
-      audit.record({ category: "auth", eventType: "login", action: "auth", outcome: "success" });
-      audit.record({ category: "auth", eventType: "logout", action: "auth", outcome: "success" });
-      audit.record({ category: "workflow", eventType: "create", action: "create", outcome: "success" });
-      const result = store.verifyAuditChain();
+    it("each row's prev_hash equals the previous row's entry_hash", async () => {
+      await audit.record({ category: "auth", eventType: "login", action: "auth", outcome: "success" });
+      await audit.record({ category: "auth", eventType: "logout", action: "auth", outcome: "success" });
+      await audit.record({ category: "workflow", eventType: "create", action: "create", outcome: "success" });
+      const result = await store.verifyAuditChain();
       expect(result.ok).toBe(true);
       expect(result.rowsChecked).toBe(3);
     });
 
     it("verifyAuditChain detects tampering with metadata", async () => {
-      audit.record({ category: "auth", eventType: "login", action: "auth", outcome: "success", actor: { email: "alice@example.com" } });
-      audit.record({ category: "auth", eventType: "login", action: "auth", outcome: "success", actor: { email: "bob@example.com" } });
+      await audit.record({ category: "auth", eventType: "login", action: "auth", outcome: "success", actor: { email: "alice@example.com" } });
+      await audit.record({ category: "auth", eventType: "login", action: "auth", outcome: "success", actor: { email: "bob@example.com" } });
 
       // Tamper directly through a parallel better-sqlite3 connection so we
       // mimic an attacker with DB write access — exactly the threat model
       // the chain is meant to defend against.
       const dbPath = path.join(tempDir, "orchestrator.db");
-      store.close();
+      await store.close();
       const tamper = new Database(dbPath);
       tamper.exec(`UPDATE audit_logs SET actor_email = 'eve@evil.example.com' WHERE actor_email = 'bob@example.com'`);
       tamper.close();
 
       const reopened = await SqliteStore.create(dbPath);
-      const result = reopened.verifyAuditChain();
+      const result = await reopened.verifyAuditChain();
       expect(result.ok).toBe(false);
       expect(result.firstBrokenAt).toBeDefined();
-      reopened.close();
+      await reopened.close();
     });
   });
 
   describe("listAuditLogsAfter cursor", () => {
-    it("returns rows after the given id, in chronological order", () => {
-      audit.record({ category: "auth", eventType: "a", action: "auth", outcome: "success" });
-      const second = audit.record({ category: "auth", eventType: "b", action: "auth", outcome: "success" })!;
-      audit.record({ category: "auth", eventType: "c", action: "auth", outcome: "success" });
-      audit.record({ category: "auth", eventType: "d", action: "auth", outcome: "success" });
+    it("returns rows after the given id, in chronological order", async () => {
+      await audit.record({ category: "auth", eventType: "a", action: "auth", outcome: "success" });
+      const second = (await audit.record({ category: "auth", eventType: "b", action: "auth", outcome: "success" }))!;
+      await audit.record({ category: "auth", eventType: "c", action: "auth", outcome: "success" });
+      await audit.record({ category: "auth", eventType: "d", action: "auth", outcome: "success" });
 
-      const after = store.listAuditLogsAfter({ afterId: second.id, limit: 10 });
+      const after = await store.listAuditLogsAfter({ afterId: second.id, limit: 10 });
       expect(after.map((r) => r.eventType)).toEqual(["c", "d"]);
     });
 
-    it("returns the full list when afterId is null", () => {
-      audit.record({ category: "auth", eventType: "x", action: "auth", outcome: "success" });
-      audit.record({ category: "auth", eventType: "y", action: "auth", outcome: "success" });
-      const all = store.listAuditLogsAfter({ afterId: null, limit: 10 });
+    it("returns the full list when afterId is null", async () => {
+      await audit.record({ category: "auth", eventType: "x", action: "auth", outcome: "success" });
+      await audit.record({ category: "auth", eventType: "y", action: "auth", outcome: "success" });
+      const all = await store.listAuditLogsAfter({ afterId: null, limit: 10 });
       expect(all).toHaveLength(2);
     });
 
-    it("respects the limit", () => {
+    it("respects the limit", async () => {
       for (let i = 0; i < 10; i++) {
-        audit.record({ category: "auth", eventType: `e${i}`, action: "auth", outcome: "success" });
+        await audit.record({ category: "auth", eventType: `e${i}`, action: "auth", outcome: "success" });
       }
-      const first3 = store.listAuditLogsAfter({ afterId: null, limit: 3 });
+      const first3 = await store.listAuditLogsAfter({ afterId: null, limit: 3 });
       expect(first3).toHaveLength(3);
     });
   });
 
   describe("export destinations CRUD", () => {
-    it("create + list + update + delete round-trip", () => {
-      store.createAuditExportDestination({
+    it("create + list + update + delete round-trip", async () => {
+      await store.createAuditExportDestination({
         id: "axd_1",
         name: "Datadog",
         kind: "http",
         config: { url: "https://http-intake.logs.datadoghq.com", headers: { "DD-API-KEY": "abc" } }
       });
-      let list = store.listAuditExportDestinations();
+      let list = await store.listAuditExportDestinations();
       expect(list).toHaveLength(1);
       expect(list[0]!.kind).toBe("http");
       expect((list[0]!.config as { url: string }).url).toBe("https://http-intake.logs.datadoghq.com");
 
-      store.updateAuditExportDestination("axd_1", { intervalSeconds: 600, enabled: false });
-      const after = store.getAuditExportDestination("axd_1")!;
+      await store.updateAuditExportDestination("axd_1", { intervalSeconds: 600, enabled: false });
+      const after = (await store.getAuditExportDestination("axd_1"))!;
       expect(after.intervalSeconds).toBe(600);
       expect(after.enabled).toBe(false);
 
-      store.deleteAuditExportDestination("axd_1");
-      list = store.listAuditExportDestinations();
+      await store.deleteAuditExportDestination("axd_1");
+      list = await store.listAuditExportDestinations();
       expect(list).toHaveLength(0);
     });
   });
@@ -115,14 +115,14 @@ describe("Phase 8.4 — audit hash chain + export", () => {
   describe("AuditExportService.runDestination", () => {
     it("delivers NDJSON to a file destination and advances the cursor", async () => {
       const filePath = path.join(tempDir, "audit.ndjson");
-      store.createAuditExportDestination({
+      await store.createAuditExportDestination({
         id: "axd_file",
         name: "local file",
         kind: "file",
         config: { path: filePath }
       });
-      audit.record({ category: "auth", eventType: "login", action: "auth", outcome: "success" });
-      audit.record({ category: "auth", eventType: "logout", action: "auth", outcome: "success" });
+      await audit.record({ category: "auth", eventType: "login", action: "auth", outcome: "success" });
+      await audit.record({ category: "auth", eventType: "logout", action: "auth", outcome: "success" });
 
       const exporter = new AuditExportService(store, { batchSize: 100, safeFsRoot: tempDir });
       const outcome = await exporter.runDestination("axd_file");
@@ -144,13 +144,13 @@ describe("Phase 8.4 — audit hash chain + export", () => {
       const safeRoot = path.join(tempDir, "safe");
       fs.mkdirSync(safeRoot, { recursive: true });
       // Try to write to /tmp directly (outside safe root)
-      store.createAuditExportDestination({
+      await store.createAuditExportDestination({
         id: "axd_bad",
         name: "escape",
         kind: "file",
         config: { path: path.join(tempDir, "outside.ndjson") } // outside safeRoot
       });
-      audit.record({ category: "auth", eventType: "login", action: "auth", outcome: "success" });
+      await audit.record({ category: "auth", eventType: "login", action: "auth", outcome: "success" });
 
       const exporter = new AuditExportService(store, { batchSize: 100, safeFsRoot: safeRoot });
       const outcome = await exporter.runDestination("axd_bad");
@@ -159,7 +159,7 @@ describe("Phase 8.4 — audit hash chain + export", () => {
     });
 
     it("records a run row even when the destination is empty", async () => {
-      store.createAuditExportDestination({
+      await store.createAuditExportDestination({
         id: "axd_empty",
         name: "no rows",
         kind: "file",
@@ -169,27 +169,27 @@ describe("Phase 8.4 — audit hash chain + export", () => {
       const outcome = await exporter.runDestination("axd_empty");
       expect(outcome.status).toBe("success");
       expect(outcome.rowsExported).toBe(0);
-      const runs = store.listAuditExportRuns("axd_empty");
+      const runs = await store.listAuditExportRuns("axd_empty");
       expect(runs).toHaveLength(1);
       expect(runs[0]!.status).toBe("success");
     });
 
     it("records a failure run when delivery throws", async () => {
-      store.createAuditExportDestination({
+      await store.createAuditExportDestination({
         id: "axd_bad_url",
         name: "bad url",
         kind: "http",
         config: { url: "http://localhost:1/this-port-is-closed" }
       });
-      audit.record({ category: "auth", eventType: "login", action: "auth", outcome: "success" });
+      await audit.record({ category: "auth", eventType: "login", action: "auth", outcome: "success" });
       const exporter = new AuditExportService(store, { batchSize: 100, safeFsRoot: tempDir });
       const outcome = await exporter.runDestination("axd_bad_url");
       expect(outcome.status).toBe("failure");
-      const runs = store.listAuditExportRuns("axd_bad_url");
+      const runs = await store.listAuditExportRuns("axd_bad_url");
       expect(runs[0]!.status).toBe("failure");
       expect(runs[0]!.error).toBeTruthy();
       // Cursor should NOT advance on failure
-      const dest = store.getAuditExportDestination("axd_bad_url")!;
+      const dest = (await store.getAuditExportDestination("axd_bad_url"))!;
       expect(dest.lastExportId).toBeNull();
     });
   });

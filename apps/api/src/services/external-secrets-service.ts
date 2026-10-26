@@ -1,6 +1,6 @@
 import { createRequire } from "node:module";
 import { nanoid } from "nanoid";
-import { SqliteStore } from "../db/database";
+import type { Store } from "../db/store.js";
 
 const require = createRequire(import.meta.url);
 
@@ -289,7 +289,7 @@ export class ExternalSecretsService {
   private readonly adapters: Map<string, ProviderAdapter> = new Map();
 
   constructor(
-    private readonly store: SqliteStore,
+    private readonly store: Store,
     adapters: ProviderAdapter[] = DEFAULT_EXTERNAL_ADAPTERS
   ) {
     for (const adapter of adapters) {
@@ -301,33 +301,33 @@ export class ExternalSecretsService {
     this.adapters.set(adapter.type, adapter);
   }
 
-  listProviders(): ExternalSecretProviderRecord[] {
-    return this.store.listExternalSecretProviders();
+  async listProviders(): Promise<ExternalSecretProviderRecord[]> {
+    return await this.store.listExternalSecretProviders();
   }
 
-  getProvider(id: string): ExternalSecretProviderRecord | null {
-    return this.store.getExternalSecretProvider(id);
+  async getProvider(id: string): Promise<ExternalSecretProviderRecord | null> {
+    return await this.store.getExternalSecretProvider(id);
   }
 
   supportsType(type: string): boolean {
     return this.adapters.has(type);
   }
 
-  createProvider(input: {
+  async createProvider(input: {
     name: string;
     type: string;
     config?: Record<string, unknown>;
     credentialsSecretId?: string | null;
     cacheTtlMs?: number;
     createdBy?: string | null;
-  }): string {
+  }): Promise<string> {
     if (!this.adapters.has(input.type)) {
       throw new Error(
         `Unknown external secret provider type '${input.type}'. Supported: ${Array.from(this.adapters.keys()).join(", ")}`
       );
     }
     const id = `esp_${nanoid(12)}`;
-    this.store.upsertExternalSecretProvider({
+    await this.store.upsertExternalSecretProvider({
       id,
       name: input.name,
       type: input.type,
@@ -340,7 +340,7 @@ export class ExternalSecretsService {
     return id;
   }
 
-  updateProvider(
+  async updateProvider(
     id: string,
     input: {
       name?: string;
@@ -349,10 +349,10 @@ export class ExternalSecretsService {
       cacheTtlMs?: number;
       enabled?: boolean;
     }
-  ): boolean {
-    const existing = this.store.getExternalSecretProvider(id);
+  ): Promise<boolean> {
+    const existing = await this.store.getExternalSecretProvider(id);
     if (!existing) return false;
-    this.store.upsertExternalSecretProvider({
+    await this.store.upsertExternalSecretProvider({
       id,
       name: input.name ?? existing.name,
       type: existing.type,
@@ -366,12 +366,12 @@ export class ExternalSecretsService {
     return true;
   }
 
-  deleteProvider(id: string): { ok: boolean; reason?: string } {
-    const using = this.store.countSecretsUsingExternalProvider(id);
+  async deleteProvider(id: string): Promise<{ ok: boolean; reason?: string }> {
+    const using = await this.store.countSecretsUsingExternalProvider(id);
     if (using > 0) {
       return { ok: false, reason: `${using} secret(s) still reference this provider` };
     }
-    const deleted = this.store.deleteExternalSecretProvider(id);
+    const deleted = await this.store.deleteExternalSecretProvider(id);
     return { ok: deleted };
   }
 

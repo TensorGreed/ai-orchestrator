@@ -196,10 +196,10 @@ async function createTestContext(overrides: Partial<AppConfig> = {}): Promise<Te
   const dbPath = path.join(tempDir, "orchestrator.db");
   const store = await SqliteStore.create(dbPath);
   const config = makeConfig(overrides);
-  store.ensureDefaultProject();
+  await store.ensureDefaultProject();
   const secretService = new SecretService(store, config.SECRET_MASTER_KEY_BASE64);
   const authService = new AuthService(store, config.SESSION_TTL_HOURS);
-  const app = createApp(config, store, secretService, authService);
+  const app = await createApp(config, store, secretService, authService);
   await app.ready();
   const ctx: TestContext = { app, store, authService, secretService, config, tempDir };
   contexts.push(ctx);
@@ -214,7 +214,7 @@ function extractCookie(header: string | string[] | undefined, name: string): str
 }
 
 async function loginAdmin(ctx: TestContext): Promise<string> {
-  ctx.authService.register({
+  await ctx.authService.register({
     email: "admin@example.com",
     password: "admin-password",
     role: "admin"
@@ -228,7 +228,7 @@ async function loginAdmin(ctx: TestContext): Promise<string> {
 }
 
 async function loginViewer(ctx: TestContext): Promise<string> {
-  ctx.authService.register({
+  await ctx.authService.register({
     email: "viewer@example.com",
     password: "viewer-password",
     role: "viewer"

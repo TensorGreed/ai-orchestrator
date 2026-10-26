@@ -25,14 +25,14 @@ async function makeStore(): Promise<{ store: SqliteStore; dir: string }> {
   dirs.push(dir);
   const store = await SqliteStore.create(path.join(dir, "orchestrator.db"));
   stores.push(store);
-  store.ensureDefaultProject();
+  await store.ensureDefaultProject();
   return { store, dir };
 }
 
-afterEach(() => {
+afterEach(async () => {
   for (const store of stores.splice(0)) {
     try {
-      store.close();
+      await store.close();
     } catch {
       // Already closed.
     }
@@ -40,8 +40,8 @@ afterEach(() => {
   for (const dir of dirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
 });
 
-function saveRun(store: SqliteStore, id: string, status: string, startedAt: string): void {
-  store.saveExecutionHistory({ id, workflowId: "wf", status, startedAt });
+async function saveRun(store: SqliteStore, id: string, status: string, startedAt: string): Promise<void> {
+  await store.saveExecutionHistory({ id, workflowId: "wf", status, startedAt });
 }
 
 function baseEnv(dir: string): Record<string, string> {
@@ -60,50 +60,50 @@ describe("reconcileInterruptedRuns", () => {
   it("marks running runs as errors and leaves approvals, finished runs and queue-owned runs alone", async () => {
     const { store } = await makeStore();
     const old = new Date(Date.now() - 3_600_000).toISOString();
-    saveRun(store, "orphan", "running", old);
-    saveRun(store, "paused", "waiting_approval", old);
-    saveRun(store, "done", "success", old);
-    saveRun(store, "queued", "running", old);
-    store.enqueueExecution({ id: "queued", workflowId: "wf", payload: {}, priority: 0, maxAttempts: 3 });
+    await saveRun(store, "orphan", "running", old);
+    await saveRun(store, "paused", "waiting_approval", old);
+    await saveRun(store, "done", "success", old);
+    await saveRun(store, "queued", "running", old);
+    await store.enqueueExecution({ id: "queued", workflowId: "wf", payload: {}, priority: 0, maxAttempts: 3 });
 
     const reconciled = await reconcileInterruptedRuns(store, { sharedDatabase: false });
 
     expect(reconciled).toEqual([{ id: "orphan", workflowId: "wf" }]);
-    const orphan = store.getExecutionHistory("orphan")!;
+    const orphan = (await store.getExecutionHistory("orphan"))!;
     expect(orphan.status).toBe("error");
     expect(orphan.error).toBe(INTERRUPTED_RUN_ERROR);
     expect(orphan.completedAt).toBeTruthy();
     expect(orphan.durationMs).toBeGreaterThan(0);
-    expect(store.getExecutionHistory("paused")!.status).toBe("waiting_approval");
-    expect(store.getExecutionHistory("done")!.status).toBe("success");
-    expect(store.getExecutionHistory("queued")!.status).toBe("running");
+    expect((await store.getExecutionHistory("paused"))!.status).toBe("waiting_approval");
+    expect((await store.getExecutionHistory("done"))!.status).toBe("success");
+    expect((await store.getExecutionHistory("queued"))!.status).toBe("running");
     expect(await reconcileInterruptedRuns(store, { sharedDatabase: false })).toEqual([]);
   });
 
   it("on a shared database only touches runs older than the longest a run may last plus the margin", async () => {
     const { store } = await makeStore();
     const now = Date.now();
-    saveRun(store, "fresh", "running", new Date(now - 60_000).toISOString());
-    saveRun(store, "long", "running", new Date(now - 300_000 - STUCK_JOB_MARGIN_MS - 1_000).toISOString());
-    saveRun(store, "stale", "running", new Date(now - MAX_RUN_TIMEOUT_MS - STUCK_JOB_MARGIN_MS - 1_000).toISOString());
+    await saveRun(store, "fresh", "running", new Date(now - 60_000).toISOString());
+    await saveRun(store, "long", "running", new Date(now - 300_000 - STUCK_JOB_MARGIN_MS - 1_000).toISOString());
+    await saveRun(store, "stale", "running", new Date(now - MAX_RUN_TIMEOUT_MS - STUCK_JOB_MARGIN_MS - 1_000).toISOString());
 
     const reconciled = await reconcileInterruptedRuns(store, { sharedDatabase: true, now });
 
     expect(reconciled.map((run) => run.id)).toEqual(["stale"]);
-    expect(store.getExecutionHistory("fresh")!.status).toBe("running");
-    expect(store.getExecutionHistory("long")!.status).toBe("running");
+    expect((await store.getExecutionHistory("fresh"))!.status).toBe("running");
+    expect((await store.getExecutionHistory("long"))!.status).toBe("running");
   });
 });
 
 describe("reconcile at boot", () => {
   async function bootWith(extra: Record<string, string>): Promise<string> {
     const { store, dir } = await makeStore();
-    saveRun(store, "old-run", "running", new Date(Date.now() - 3_600_000).toISOString());
+    await saveRun(store, "old-run", "running", new Date(Date.now() - 3_600_000).toISOString());
     const config = parseConfig({ ...baseEnv(dir), ...extra });
-    const app = createApp(config, store, new SecretService(store, config.SECRET_MASTER_KEY_BASE64), new AuthService(store, config.SESSION_TTL_HOURS));
+    const app = await createApp(config, store, new SecretService(store, config.SECRET_MASTER_KEY_BASE64), new AuthService(store, config.SESSION_TTL_HOURS));
     try {
       await app.ready();
-      return store.getExecutionHistory("old-run")!.status;
+      return (await store.getExecutionHistory("old-run"))!.status;
     } finally {
       await app.close();
     }
@@ -137,24 +137,24 @@ describe("queue stuck-job sweeper", () => {
 
   it("does not requeue a job this process is still executing", async () => {
     const { store } = await makeStore();
-    store.enqueueExecution({ id: "job-1", workflowId: "wf", payload: {}, priority: 0, maxAttempts: 3 });
-    store.enqueueExecution({ id: "job-2", workflowId: "wf", payload: {}, priority: 0, maxAttempts: 3 });
-    store.dequeueNext(2);
+    await store.enqueueExecution({ id: "job-1", workflowId: "wf", payload: {}, priority: 0, maxAttempts: 3 });
+    await store.enqueueExecution({ id: "job-2", workflowId: "wf", payload: {}, priority: 0, maxAttempts: 3 });
+    await store.dequeueNext(2);
     await new Promise((resolve) => setTimeout(resolve, 5));
 
-    expect(store.requeueStuckItems(0, ["job-1"])).toBe(1);
-    expect(store.getQueueDepth()).toMatchObject({ pending: 1, running: 1 });
+    expect(await store.requeueStuckItems(0, ["job-1"])).toBe(1);
+    expect(await store.getQueueDepth()).toMatchObject({ pending: 1, running: 1 });
   });
 
   it("holds back a job whose own run time limit has not passed yet", async () => {
     const { store } = await makeStore();
-    store.enqueueExecution({ id: "job-long", workflowId: "wf", payload: { executionTimeoutMs: 3_600_000 }, priority: 0, maxAttempts: 3 });
-    store.enqueueExecution({ id: "job-plain", workflowId: "wf", payload: {}, priority: 0, maxAttempts: 3 });
-    store.dequeueNext(2);
+    await store.enqueueExecution({ id: "job-long", workflowId: "wf", payload: { executionTimeoutMs: 3_600_000 }, priority: 0, maxAttempts: 3 });
+    await store.enqueueExecution({ id: "job-plain", workflowId: "wf", payload: {}, priority: 0, maxAttempts: 3 });
+    await store.dequeueNext(2);
     await new Promise((resolve) => setTimeout(resolve, 5));
 
-    expect(store.requeueStuckItems(0, [], 60_000)).toBe(1);
-    expect(store.getQueueDepth()).toMatchObject({ pending: 1, running: 1 });
+    expect(await store.requeueStuckItems(0, [], 60_000)).toBe(1);
+    expect(await store.getQueueDepth()).toMatchObject({ pending: 1, running: 1 });
   });
 
   it("applies the clamp in the service and skips jobs it still holds when sweeping", async () => {
@@ -174,12 +174,12 @@ describe("queue stuck-job sweeper", () => {
     try {
       await service.enqueue({ workflowId: "wf", executionId: "held" });
       const deadline = Date.now() + 2_000;
-      while (service.getDepth().running < 1 && Date.now() < deadline) {
+      while ((await service.getDepth()).running < 1 && Date.now() < deadline) {
         await new Promise((resolve) => setTimeout(resolve, 10));
       }
-      expect(service.getDepth().running).toBe(1);
+      expect((await service.getDepth()).running).toBe(1);
       (service as unknown as { sweepStuck(): void }).sweepStuck();
-      expect(service.getDepth()).toMatchObject({ running: 1, pending: 0 });
+      expect(await service.getDepth()).toMatchObject({ running: 1, pending: 0 });
     } finally {
       release();
       service.stop();
@@ -203,10 +203,10 @@ describe("run audit events", () => {
     const authService = new AuthService(store, config.SESSION_TTL_HOURS);
     // Not started, so no sweeper or poller runs; the enqueue route only needs the service to exist.
     const queueService = new QueueService(store, {});
-    const app = createApp(config, store, new SecretService(store, config.SECRET_MASTER_KEY_BASE64), authService, undefined, queueService);
+    const app = await createApp(config, store, new SecretService(store, config.SECRET_MASTER_KEY_BASE64), authService, undefined, queueService);
     await app.ready();
     try {
-      authService.register({ email: "builder@example.com", password: "builder-Pass-123!", role: "builder" });
+      await authService.register({ email: "builder@example.com", password: "builder-Pass-123!", role: "builder" });
       const login = await app.inject({
         method: "POST",
         url: "/api/auth/login",
@@ -232,7 +232,7 @@ describe("run audit events", () => {
       const runId = (run.json() as { executionId: string }).executionId;
 
       const failed = crypto.randomUUID();
-      store.saveExecutionHistory({ id: failed, workflowId: workflow.id, status: "error", startedAt: new Date().toISOString() });
+      await store.saveExecutionHistory({ id: failed, workflowId: workflow.id, status: "error", startedAt: new Date().toISOString() });
       const retry = await app.inject({ method: "POST", url: `/api/executions/${failed}/retry`, headers: { cookie }, payload: {} });
       expect(retry.statusCode).toBeLessThan(500);
 
@@ -240,8 +240,8 @@ describe("run audit events", () => {
       expect(queued.statusCode).toBe(200);
 
       const recorded = crypto.randomUUID();
-      store.saveExecutionHistory({ id: recorded, workflowId: workflow.id, status: "success", startedAt: new Date().toISOString() });
-      store.saveMcpCassette({
+      await store.saveExecutionHistory({ id: recorded, workflowId: workflow.id, status: "success", startedAt: new Date().toISOString() });
+      await store.saveMcpCassette({
         id: "cassette-1",
         executionId: recorded,
         workflowId: workflow.id,
@@ -255,11 +255,11 @@ describe("run audit events", () => {
       expect(replay.statusCode).toBeLessThan(500);
 
       const running = crypto.randomUUID();
-      store.saveExecutionHistory({ id: running, workflowId: workflow.id, status: "running", startedAt: new Date().toISOString() });
+      await store.saveExecutionHistory({ id: running, workflowId: workflow.id, status: "running", startedAt: new Date().toISOString() });
       const cancel = await app.inject({ method: "POST", url: `/api/executions/${running}/cancel`, headers: { cookie }, payload: {} });
       expect(cancel.statusCode).toBe(200);
 
-      const events = store.listAuditLogs({ pageSize: 100 }) as { items: Array<{ eventType: string; metadata: Record<string, unknown> }> };
+      const events = await store.listAuditLogs({ pageSize: 100 }) as { items: Array<{ eventType: string; metadata: Record<string, unknown> }> };
       const types = events.items.map((item) => item.eventType);
       expect(types).toContain("execution.started");
       expect(types).toContain("execution.retried");

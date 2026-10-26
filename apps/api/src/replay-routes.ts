@@ -16,25 +16,25 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { candidateRefusal } from "./services/candidate-policy.js";
 import { replayRecordingCreateSchema, replayRunRequestSchema } from "@ai-orchestrator/shared";
-import type { SqliteStore } from "./db/database.js";
 import type { SafeUser, UserRole } from "./services/auth-service.js";
 import type { AuditEventInput } from "./services/audit-service.js";
 import { ReplayRecordingError, ReplayRecordingService } from "./services/replay-recording-service.js";
 import { ReplayRunError, type ReplayService } from "./services/replay-service.js";
 import type { RunAccess, RunAccessDenial } from "./run-access.js";
+import type { Store } from "./db/store.js";
 
 export interface ReplayRoutesDeps {
   app: FastifyInstance;
-  store: SqliteStore;
+  store: Store;
   recordings: ReplayRecordingService;
   replays: ReplayService;
   requireRole: (request: FastifyRequest, reply: FastifyReply, roles: UserRole[]) => Promise<SafeUser | null>;
   runAccess: RunAccess;
-  audit: (request: FastifyRequest, user: SafeUser, event: Omit<AuditEventInput, "actor">) => void;
+  audit: (request: FastifyRequest, user: SafeUser, event: Omit<AuditEventInput, "actor">) => void | Promise<void>;
   /** Phase 15.4 — why `user` may not delete a golden run (an enforced release gate's case uses it); null when they may. */
-  recordingDeleteDenial?: (user: SafeUser, workflowId: string, recordingId: string) => string | null;
+  recordingDeleteDenial?: (user: SafeUser, workflowId: string, recordingId: string) => Promise<string | null>;
   /** Release gate admission — before deleting a golden run that admitted cases of an enforced gate replay: a function that audits it once done. */
-  gateCasesRemoval?: (user: SafeUser, workflowId: string, target: { via: "golden_run"; recordingId: string }) => (() => void) | null;
+  gateCasesRemoval?: (user: SafeUser, workflowId: string, target: { via: "golden_run"; recordingId: string }) => Promise<(() => Promise<void>) | null>;
 }
 
 const RECORDING_STATUS: Record<ReplayRecordingError["code"], number> = {
@@ -63,12 +63,12 @@ export function registerReplayRoutes(deps: ReplayRoutesDeps): void {
       reply.code(400);
       return { error: "Invalid golden run", details: parsed.error.issues };
     }
-    const access = runAccess.run(user, store.getExecutionHistory(parsed.data.executionId), "workflow:write");
+    const access = await runAccess.run(user, await store.getExecutionHistory(parsed.data.executionId), "workflow:write");
     if (!access.ok) return deny(reply, access);
     const history = access.run;
     try {
-      const recording = recordings.create(parsed.data, user.email);
-      deps.audit(request, user, {
+      const recording = await recordings.create(parsed.data, user.email);
+      await deps.audit(request, user, {
         eventType: "replay.recording.created",
         category: "workflow",
         action: "create",
@@ -96,24 +96,24 @@ export function registerReplayRoutes(deps: ReplayRoutesDeps): void {
     const offset = Number(request.query.offset);
     const paging = { limit: Number.isFinite(limit) ? limit : 50, offset: Number.isFinite(offset) ? offset : 0 };
     // Admins also see golden runs of a workflow id that is gone; everyone else only readable workflows.
-    const readable = runAccess.readableWorkflowIds(user);
+    const readable = await runAccess.readableWorkflowIds(user);
     // Phase 15.6 — golden runs only; captured candidates are listed by the inbox.
     if (workflowId) {
       if (readable !== null && !readable.includes(workflowId)) return { items: [], total: 0 };
-      return store.listReplayRecordings({ workflowId, status: "golden", ...paging });
+      return await store.listReplayRecordings({ workflowId, status: "golden", ...paging });
     }
-    return store.listReplayRecordings(readable === null ? { status: "golden", ...paging } : { workflowIds: readable, status: "golden", ...paging });
+    return await store.listReplayRecordings(readable === null ? { status: "golden", ...paging } : { workflowIds: readable, status: "golden", ...paging });
   });
 
   app.get<{ Params: { id: string } }>("/api/replay/recordings/:id", async (request, reply) => {
     const user = await requireRole(request, reply, ["viewer"]);
     if (!user) return reply;
-    const record = recordings.get(request.params.id);
+    const record = await recordings.get(request.params.id);
     if (!record) {
       reply.code(404);
       return { error: "Golden run not found" };
     }
-    const access = runAccess.run(user, record, "workflow:read", "Golden run");
+    const access = await runAccess.run(user, record, "workflow:read", "Golden run");
     if (!access.ok) return deny(reply, access);
     return { recording: ReplayRecordingService.detail(record) };
   });
@@ -121,22 +121,22 @@ export function registerReplayRoutes(deps: ReplayRoutesDeps): void {
   app.delete<{ Params: { id: string } }>("/api/replay/recordings/:id", async (request, reply) => {
     const user = await requireRole(request, reply, ["builder"]);
     if (!user) return reply;
-    const summary = store.getReplayRecordingSummary(request.params.id);
+    const summary = await store.getReplayRecordingSummary(request.params.id);
     if (!summary) {
       reply.code(404);
       return { error: "Golden run not found" };
     }
-    const access = runAccess.run(user, summary, "workflow:write", "Golden run");
+    const access = await runAccess.run(user, summary, "workflow:write", "Golden run");
     if (!access.ok) return deny(reply, access);
-    const gateDenial = deps.recordingDeleteDenial?.(user, summary.workflowId, summary.id) ?? null;
+    const gateDenial = (await deps.recordingDeleteDenial?.(user, summary.workflowId, summary.id)) ?? null;
     if (gateDenial) {
       reply.code(403);
       return { error: gateDenial };
     }
-    const gateCasesRemoved = deps.gateCasesRemoval?.(user, summary.workflowId, { via: "golden_run", recordingId: summary.id }) ?? null;
-    store.deleteReplayRecording(summary.id);
-    gateCasesRemoved?.();
-    deps.audit(request, user, {
+    const gateCasesRemoved = (await deps.gateCasesRemoval?.(user, summary.workflowId, { via: "golden_run", recordingId: summary.id })) ?? null;
+    await store.deleteReplayRecording(summary.id);
+    await gateCasesRemoved?.();
+    await deps.audit(request, user, {
       eventType: "replay.recording.deleted",
       category: "workflow",
       action: "delete",
@@ -156,12 +156,12 @@ export function registerReplayRoutes(deps: ReplayRoutesDeps): void {
       reply.code(400);
       return { error: "Invalid replay request", details: parsed.error.issues };
     }
-    const record = recordings.get(request.params.id);
+    const record = await recordings.get(request.params.id);
     if (!record) {
       reply.code(404);
       return { error: "Golden run not found" };
     }
-    const access = runAccess.run(user, record, "workflow:execute", "Golden run");
+    const access = await runAccess.run(user, record, "workflow:execute", "Golden run");
     if (!access.ok) return deny(reply, access);
     const refusal = candidateRefusal(record);
     if (refusal) {
@@ -170,7 +170,7 @@ export function registerReplayRoutes(deps: ReplayRoutesDeps): void {
     }
     try {
       const result = await replays.replay(record, parsed.data, user);
-      deps.audit(request, user, {
+      await deps.audit(request, user, {
         eventType: "replay.run",
         category: "execution",
         action: "execute",

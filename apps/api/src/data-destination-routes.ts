@@ -25,7 +25,7 @@ export interface DataDestinationRoutesDeps {
   app: FastifyInstance;
   destinations: DataDestinationService;
   requireRole: (request: FastifyRequest, reply: FastifyReply, roles: UserRole[]) => Promise<SafeUser | null>;
-  audit: (request: FastifyRequest, user: SafeUser, event: Omit<AuditEventInput, "actor">) => void;
+  audit: (request: FastifyRequest, user: SafeUser, event: Omit<AuditEventInput, "actor">) => void | Promise<void>;
 }
 
 type Params = { Params: { id: string } };
@@ -57,17 +57,17 @@ export function registerDataDestinationRoutes(deps: DataDestinationRoutesDeps): 
   };
 
   app.get("/api/data-destinations", (request, reply) =>
-    handle(request, reply, ["viewer"], (user) => ({ ...destinations.list(), canEdit: user.role === "admin" }))
+    handle(request, reply, ["viewer"], async (user) => ({ ...await destinations.list(), canEdit: user.role === "admin" }))
   );
 
   app.get("/api/data-destinations/unclassified", (request, reply) =>
-    handle(request, reply, ["viewer"], (user) => ({ destinations: destinations.unclassified(user) }))
+    handle(request, reply, ["viewer"], async (user) => ({ destinations: await destinations.unclassified(user) }))
   );
 
   app.post<{ Body: unknown }>("/api/data-destinations", (request, reply) =>
-    handle(request, reply, ["admin"], (user) => {
-      const destination = destinations.create(request.body, user.email);
-      deps.audit(request, user, {
+    handle(request, reply, ["admin"], async (user) => {
+      const destination = await destinations.create(request.body, user.email);
+      await deps.audit(request, user, {
         eventType: "data_destination.created",
         category: "system",
         action: "create",
@@ -81,9 +81,9 @@ export function registerDataDestinationRoutes(deps: DataDestinationRoutesDeps): 
   );
 
   app.put<Params & { Body: unknown }>("/api/data-destinations/:id", (request, reply) =>
-    handle(request, reply, ["admin"], (user) => {
-      const { before, after } = destinations.update(request.params.id, request.body, user.email);
-      deps.audit(request, user, {
+    handle(request, reply, ["admin"], async (user) => {
+      const { before, after } = await destinations.update(request.params.id, request.body, user.email);
+      await deps.audit(request, user, {
         eventType: "data_destination.updated",
         category: "system",
         action: "update",
@@ -96,9 +96,9 @@ export function registerDataDestinationRoutes(deps: DataDestinationRoutesDeps): 
   );
 
   app.delete<Params>("/api/data-destinations/:id", (request, reply) =>
-    handle(request, reply, ["admin"], (user) => {
-      const removed = destinations.remove(request.params.id);
-      deps.audit(request, user, {
+    handle(request, reply, ["admin"], async (user) => {
+      const removed = await destinations.remove(request.params.id);
+      await deps.audit(request, user, {
         eventType: "data_destination.deleted",
         category: "system",
         action: "delete",

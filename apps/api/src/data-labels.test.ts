@@ -38,7 +38,7 @@ const EMAIL = "maria.gonzalez@example.org";
 async function createTestContext(): Promise<TestContext> {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-labels-"));
   const store = await SqliteStore.create(path.join(tempDir, "orchestrator.db"));
-  store.ensureDefaultProject();
+  await store.ensureDefaultProject();
   const config = parseConfig({
     LOG_LEVEL: "info",
     SEED_SAMPLE_WORKFLOWS: "false",
@@ -50,7 +50,7 @@ async function createTestContext(): Promise<TestContext> {
   });
   const secretService = new SecretService(store, config.SECRET_MASTER_KEY_BASE64);
   const authService = new AuthService(store, config.SESSION_TTL_HOURS);
-  const app = createApp(config, store, secretService, authService);
+  const app = await createApp(config, store, secretService, authService);
   await app.ready();
   const context = { app, store, authService, config, tempDir };
   contexts.push(context);
@@ -62,7 +62,7 @@ afterEach(async () => {
     const context = contexts.pop()!;
     await context.app.close();
     try {
-      context.store.close();
+      await context.store.close();
     } catch {
       // Already closed by the app shutdown hooks.
     }
@@ -73,7 +73,7 @@ afterEach(async () => {
 async function login(context: TestContext, role: "admin" | "builder"): Promise<string> {
   const email = `${role}@example.com`;
   const password = `${role}-Pass-123!`;
-  context.authService.register({ email, password, role });
+  await context.authService.register({ email, password, role });
   const response = await context.app.inject({ method: "POST", url: "/api/auth/login", payload: { email, password } });
   const raw = response.headers["set-cookie"];
   const cookie = (Array.isArray(raw) ? raw : [raw ?? ""]).find((value) => value.startsWith(`${context.config.SESSION_COOKIE_NAME}=`))!;
@@ -159,9 +159,9 @@ describe("migration 37", () => {
       .queryAll(`SELECT name FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'guard_profile%revision%' ORDER BY name`)
       .map((row) => row.name);
     expect(triggers).toHaveLength(6);
-    const before = context.store.guardProfileRevision()!;
-    context.store.insertGuardProfile({ id: "p", name: "P", document: {}, hash: "h", createdBy: null });
-    expect(context.store.guardProfileRevision()).toBeGreaterThan(before);
+    const before = (await context.store.guardProfileRevision())!;
+    await context.store.insertGuardProfile({ id: "p", name: "P", document: {}, hash: "h", createdBy: null });
+    expect(await context.store.guardProfileRevision()).toBeGreaterThan(before);
   });
 });
 
@@ -169,7 +169,7 @@ describe("labels on runs", () => {
   it("zero config: a run under the default profile stores no labels anywhere", async () => {
     const context = await createTestContext();
     const cookie = await login(context, "builder");
-    context.store.upsertWorkflow(labelledWorkflow("wf-plain", "default"));
+    await context.store.upsertWorkflow(labelledWorkflow("wf-plain", "default"));
     const run = (await call(context, "POST", "/api/workflows/wf-plain/execute", cookie, { user_prompt: `Write to ${EMAIL}` })).json<RunResult>();
     expect(run.status).toBe("success");
     expect(run.nodeResults.every((entry) => entry.labels === undefined)).toBe(true);
@@ -180,7 +180,7 @@ describe("labels on runs", () => {
     const context = await createTestContext();
     const admin = await login(context, "admin");
     await trackingProfile(context, admin);
-    context.store.upsertWorkflow(labelledWorkflow("wf-tracked", "tracking"));
+    await context.store.upsertWorkflow(labelledWorkflow("wf-tracked", "tracking"));
     const run = (await call(context, "POST", "/api/workflows/wf-tracked/execute", admin, { user_prompt: `Write to ${EMAIL}` })).json<RunResult>();
     expect(run.status).toBe("success");
     const labels = (nodeId: string) => run.nodeResults.find((entry) => entry.nodeId === nodeId)?.labels;
@@ -195,7 +195,7 @@ describe("labels on runs", () => {
     // A recording keeps the propagated labels on its facts.
     const recording = await call(context, "POST", "/api/replay/recordings", admin, { executionId: run.executionId, name: "Labelled" });
     expect(recording.statusCode, recording.body).toBe(201);
-    const facts = context.store.getReplayRecording(recording.json<{ recording: { id: string } }>().recording.id)!.facts as RunFacts;
+    const facts = (await context.store.getReplayRecording(recording.json<{ recording: { id: string } }>().recording.id))!.facts as RunFacts;
     expect(facts.nodes.find((entry) => entry.nodeId === "note")?.labels).toEqual(L(["user"], ["email"]));
   });
 
@@ -203,10 +203,10 @@ describe("labels on runs", () => {
     const context = await createTestContext();
     const admin = await login(context, "admin");
     await trackingProfile(context, admin);
-    context.store.upsertWorkflow(labelledWorkflow("wf-hook", "tracking"));
+    await context.store.upsertWorkflow(labelledWorkflow("wf-hook", "tracking"));
     const response = await context.app.inject({ method: "POST", url: "/webhook/hook-wf-hook", payload: { user_prompt: "hello" } });
     expect(response.statusCode, response.body).toBeLessThan(300);
-    const latest = context.store.listExecutionHistory({ workflowId: "wf-hook" } as never) as unknown as { items: Array<{ id: string }> };
+    const latest = await context.store.listExecutionHistory({ workflowId: "wf-hook" } as never) as unknown as { items: Array<{ id: string }> };
     const stored = JSON.parse(storedNodeResults(context, latest.items[0]!.id)) as Array<{ nodeId: string; labels?: DataLabels }>;
     expect(stored.find((entry) => entry.nodeId === "hook")?.labels).toEqual(L(["untrusted_external"]));
   });
@@ -216,38 +216,38 @@ describe("labels on session memory and the tool cache", () => {
   it("stores labels only when given and merges them; a save without labels (untracked) keeps them and adds untrusted_external; older rows read as none", async () => {
     const context = await createTestContext();
     const store = context.store;
-    store.saveSessionMemory("ns", "s1", [{ role: "user", content: "old" }]);
-    expect(store.loadSessionMemoryLabels("ns", "s1")).toBeNull();
-    store.saveSessionMemory("ns", "s1", [{ role: "user", content: "a" }], L(["user"]));
-    store.saveSessionMemory("ns", "s1", [{ role: "user", content: "b" }], L(["untrusted_external"], ["email"]));
-    expect(store.loadSessionMemoryLabels("ns", "s1")).toEqual(L(["user", "untrusted_external"], ["email"]));
+    await store.saveSessionMemory("ns", "s1", [{ role: "user", content: "old" }]);
+    expect(await store.loadSessionMemoryLabels("ns", "s1")).toBeNull();
+    await store.saveSessionMemory("ns", "s1", [{ role: "user", content: "a" }], L(["user"]));
+    await store.saveSessionMemory("ns", "s1", [{ role: "user", content: "b" }], L(["untrusted_external"], ["email"]));
+    expect(await store.loadSessionMemoryLabels("ns", "s1")).toEqual(L(["user", "untrusted_external"], ["email"]));
     // An untracked run saves the messages it loaded plus its turn: the labels stay (plus untrusted_external), never null.
-    store.saveSessionMemory("ns", "s1", [{ role: "user", content: "c" }]);
-    expect(store.loadSessionMemoryLabels("ns", "s1")).toEqual(L(["user", "untrusted_external"], ["email"]));
-    expect(store.loadSessionMemory("ns", "s1")).toEqual([{ role: "user", content: "c" }]);
+    await store.saveSessionMemory("ns", "s1", [{ role: "user", content: "c" }]);
+    expect(await store.loadSessionMemoryLabels("ns", "s1")).toEqual(L(["user", "untrusted_external"], ["email"]));
+    expect(await store.loadSessionMemory("ns", "s1")).toEqual([{ role: "user", content: "c" }]);
     // Over a row with no labels an untracked save writes none.
-    store.saveSessionMemory("ns", "plain", [{ role: "user", content: "x" }]);
-    store.saveSessionMemory("ns", "plain", [{ role: "user", content: "y" }]);
-    expect(store.loadSessionMemoryLabels("ns", "plain")).toBeNull();
+    await store.saveSessionMemory("ns", "plain", [{ role: "user", content: "x" }]);
+    await store.saveSessionMemory("ns", "plain", [{ role: "user", content: "y" }]);
+    expect(await store.loadSessionMemoryLabels("ns", "plain")).toBeNull();
 
     // Artifacts: a tracked save replaces the labels, an untracked one keeps them plus untrusted_external, an empty tracked one stores none.
     const key = { namespace: "ns", sessionId: "s1", artifactKey: "notes" };
-    store.saveSessionArtifact({ ...key, value: 1, labels: L(["user"], ["email"]) });
-    store.saveSessionArtifact({ ...key, value: 2, labels: L(["user"]) });
-    expect(store.loadSessionArtifact(key)!.labels).toEqual(L(["user"]));
-    store.saveSessionArtifact({ ...key, value: 3 });
-    expect(store.loadSessionArtifact(key)!.labels).toEqual(L(["user", "untrusted_external"]));
-    store.saveSessionArtifact({ ...key, value: 4, labels: L([]) });
-    expect(store.loadSessionArtifact(key)!.labels ?? null).toBeNull();
-    store.saveSessionArtifact({ ...key, value: 5 });
-    expect(store.loadSessionArtifact(key)!.labels ?? null).toBeNull();
+    await store.saveSessionArtifact({ ...key, value: 1, labels: L(["user"], ["email"]) });
+    await store.saveSessionArtifact({ ...key, value: 2, labels: L(["user"]) });
+    expect((await store.loadSessionArtifact(key))!.labels).toEqual(L(["user"]));
+    await store.saveSessionArtifact({ ...key, value: 3 });
+    expect((await store.loadSessionArtifact(key))!.labels).toEqual(L(["user", "untrusted_external"]));
+    await store.saveSessionArtifact({ ...key, value: 4, labels: L([]) });
+    expect((await store.loadSessionArtifact(key))!.labels ?? null).toBeNull();
+    await store.saveSessionArtifact({ ...key, value: 5 });
+    expect((await store.loadSessionArtifact(key))!.labels ?? null).toBeNull();
 
-    const plain = store.saveSessionToolCall({ namespace: "ns", sessionId: "s1", toolName: "t", args: {}, output: 1 });
-    const labelled = store.saveSessionToolCall({ namespace: "ns", sessionId: "s1", toolName: "t", args: {}, output: 2, labels: L(["untrusted_external"]) });
+    const plain = await store.saveSessionToolCall({ namespace: "ns", sessionId: "s1", toolName: "t", args: {}, output: 1 });
+    const labelled = await store.saveSessionToolCall({ namespace: "ns", sessionId: "s1", toolName: "t", args: {}, output: 2, labels: L(["untrusted_external"]) });
     expect(plain.labels).toBeUndefined();
-    expect(store.getSessionToolCall({ namespace: "ns", sessionId: "s1", id: plain.id })!.labels).toBeUndefined();
-    expect(store.getSessionToolCall({ namespace: "ns", sessionId: "s1", id: labelled.id })!.labels).toEqual(L(["untrusted_external"]));
-    expect(store.listSessionToolCalls({ namespace: "ns", sessionId: "s1" }).find((row) => row.id === labelled.id)!.labels).toEqual(L(["untrusted_external"]));
+    expect((await store.getSessionToolCall({ namespace: "ns", sessionId: "s1", id: plain.id }))!.labels).toBeUndefined();
+    expect((await store.getSessionToolCall({ namespace: "ns", sessionId: "s1", id: labelled.id }))!.labels).toEqual(L(["untrusted_external"]));
+    expect((await store.listSessionToolCalls({ namespace: "ns", sessionId: "s1" })).find((row) => row.id === labelled.id)!.labels).toEqual(L(["untrusted_external"]));
   });
 
   it("the run scope reads labels from the row it read the messages from", async () => {
@@ -255,28 +255,28 @@ describe("labels on session memory and the tool cache", () => {
     const store = context.store;
     const workflow = { ...labelledWorkflow("wf-mem", "default"), projectId: "default" };
     const scope = createRunScope({
-      getWorkflow: () => workflow,
-      listWorkflowShares: () => [],
-      getSecretProjectId: () => null,
-      listSecretIdsSharedToProject: () => [],
-      canUseSecretsInProject: () => true,
+      getWorkflow: async () => workflow,
+      listWorkflowShares: async () => [],
+      getSecretProjectId: async () => null,
+      listSecretIdsSharedToProject: async () => [],
+      canUseSecretsInProject: async () => true,
       defaultSecretsShared: true,
-      getMcpServerProjectId: () => undefined,
+      getMcpServerProjectId: async () => undefined,
       resolveRegisteredMcpServer: () => {
         throw new Error("none");
       },
-      legacyNamespaceOwnerProjects: () => [],
+      legacyNamespaceOwnerProjects: async () => [],
       resolveSecret: async () => undefined,
       knowledgeBaseStoreFor: () => ({}) as never,
       sessions: {
-        loadMemory: (namespace, sessionId) => store.loadSessionMemory(namespace, sessionId),
-        saveMemory: (namespace, sessionId, messages, labels) => store.saveSessionMemory(namespace, sessionId, messages, labels),
-        loadMemoryLabels: (namespace, sessionId) => store.loadSessionMemoryLabels(namespace, sessionId),
-        saveToolCall: (input) => store.saveSessionToolCall(input),
-        listToolCalls: (input) => store.listSessionToolCalls(input),
-        getToolCall: (input) => store.getSessionToolCall(input),
-        saveArtifact: (input) => store.saveSessionArtifact(input),
-        loadArtifact: (input) => store.loadSessionArtifact(input)
+        loadMemory: async (namespace, sessionId) => await store.loadSessionMemory(namespace, sessionId),
+        saveMemory: async (namespace, sessionId, messages, labels) => await store.saveSessionMemory(namespace, sessionId, messages, labels),
+        loadMemoryLabels: async (namespace, sessionId) => await store.loadSessionMemoryLabels(namespace, sessionId),
+        saveToolCall: async (input) => await store.saveSessionToolCall(input),
+        listToolCalls: async (input) => await store.listSessionToolCalls(input),
+        getToolCall: async (input) => await store.getSessionToolCall(input),
+        saveArtifact: async (input) => await store.saveSessionArtifact(input),
+        loadArtifact: async (input) => await store.loadSessionArtifact(input)
       }
     });
     const memory = scope.dependenciesFor(workflow, {}).memoryStore;
@@ -292,16 +292,16 @@ describe("round 1 fixes", () => {
     const context = await createTestContext();
     const store = context.store;
     const key = { namespace: "ns", sessionId: "s1", artifactKey: "latest" };
-    store.saveSessionArtifact({ ...key, value: { v: 0 } });
-    expect(store.loadSessionArtifact(key)!.labels).toBeUndefined();
-    const saved = store.saveSessionArtifact({ ...key, value: { v: 1 }, labels: L(["untrusted_external"], ["email"]) });
+    await store.saveSessionArtifact({ ...key, value: { v: 0 } });
+    expect((await store.loadSessionArtifact(key))!.labels).toBeUndefined();
+    const saved = await store.saveSessionArtifact({ ...key, value: { v: 1 }, labels: L(["untrusted_external"], ["email"]) });
     expect(saved.labels).toEqual(L(["untrusted_external"], ["email"]));
-    expect(store.loadSessionArtifact(key)!.labels).toEqual(L(["untrusted_external"], ["email"]));
-    store.saveSessionArtifact({ ...key, value: { v: 2 } });
-    expect(store.loadSessionArtifact(key)).toMatchObject({ value: { v: 2 } });
-    expect(store.loadSessionArtifact(key)!.labels).toEqual(L(["untrusted_external"], ["email"]));
-    store.saveSessionArtifact({ ...key, value: { v: 3 }, labels: L(["user"]) });
-    expect(store.loadSessionArtifact(key)!.labels).toEqual(L(["user"]));
+    expect((await store.loadSessionArtifact(key))!.labels).toEqual(L(["untrusted_external"], ["email"]));
+    await store.saveSessionArtifact({ ...key, value: { v: 2 } });
+    expect(await store.loadSessionArtifact(key)).toMatchObject({ value: { v: 2 } });
+    expect((await store.loadSessionArtifact(key))!.labels).toEqual(L(["untrusted_external"], ["email"]));
+    await store.saveSessionArtifact({ ...key, value: { v: 3 }, labels: L(["user"]) });
+    expect((await store.loadSessionArtifact(key))!.labels).toEqual(L(["user"]));
   });
 
   it("the run scope takes the labels' row from the messages read, without reading the messages again", async () => {
@@ -309,34 +309,34 @@ describe("round 1 fixes", () => {
     const store = context.store;
     const workflow = { ...labelledWorkflow("wf-legacy", "default"), projectId: "default" };
     // A legacy (unprefixed) row from before project scoping, with labels.
-    store.saveSessionMemory("wf-legacy:note", "s", [{ role: "user", content: "old" }], L(["untrusted_external"], ["iban"]));
+    await store.saveSessionMemory("wf-legacy:note", "s", [{ role: "user", content: "old" }], L(["untrusted_external"], ["iban"]));
     let messageReads = 0;
     const scope = createRunScope({
-      getWorkflow: () => workflow,
-      listWorkflowShares: () => [],
-      getSecretProjectId: () => null,
-      listSecretIdsSharedToProject: () => [],
-      canUseSecretsInProject: () => true,
+      getWorkflow: async () => workflow,
+      listWorkflowShares: async () => [],
+      getSecretProjectId: async () => null,
+      listSecretIdsSharedToProject: async () => [],
+      canUseSecretsInProject: async () => true,
       defaultSecretsShared: true,
-      getMcpServerProjectId: () => undefined,
+      getMcpServerProjectId: async () => undefined,
       resolveRegisteredMcpServer: () => {
         throw new Error("none");
       },
-      legacyNamespaceOwnerProjects: () => [],
+      legacyNamespaceOwnerProjects: async () => [],
       resolveSecret: async () => undefined,
       knowledgeBaseStoreFor: () => ({}) as never,
       sessions: {
-        loadMemory: (namespace, sessionId) => {
+        loadMemory: async (namespace, sessionId) => {
           messageReads += 1;
-          return store.loadSessionMemory(namespace, sessionId);
+          return await store.loadSessionMemory(namespace, sessionId);
         },
-        saveMemory: (namespace, sessionId, messages, labels) => store.saveSessionMemory(namespace, sessionId, messages, labels),
-        loadMemoryLabels: (namespace, sessionId) => store.loadSessionMemoryLabels(namespace, sessionId),
-        saveToolCall: (input) => store.saveSessionToolCall(input),
-        listToolCalls: (input) => store.listSessionToolCalls(input),
-        getToolCall: (input) => store.getSessionToolCall(input),
-        saveArtifact: (input) => store.saveSessionArtifact(input),
-        loadArtifact: (input) => store.loadSessionArtifact(input)
+        saveMemory: async (namespace, sessionId, messages, labels) => await store.saveSessionMemory(namespace, sessionId, messages, labels),
+        loadMemoryLabels: async (namespace, sessionId) => await store.loadSessionMemoryLabels(namespace, sessionId),
+        saveToolCall: async (input) => await store.saveSessionToolCall(input),
+        listToolCalls: async (input) => await store.listSessionToolCalls(input),
+        getToolCall: async (input) => await store.getSessionToolCall(input),
+        saveArtifact: async (input) => await store.saveSessionArtifact(input),
+        loadArtifact: async (input) => await store.loadSessionArtifact(input)
       }
     });
     const memory = scope.dependenciesFor(workflow, {}).memoryStore;
@@ -350,22 +350,22 @@ describe("round 1 fixes", () => {
     const context = await createTestContext();
     const admin = await login(context, "admin");
     // The store answers the cheap check (cached until the next profile write); the built-in default does not opt in.
-    expect(context.store.anyGuardProfileUsesLabels()).toBe(false);
+    expect(await context.store.anyGuardProfileUsesLabels()).toBe(false);
     await trackingProfile(context, admin);
-    expect(context.store.anyGuardProfileUsesLabels()).toBe(true);
+    expect(await context.store.anyGuardProfileUsesLabels()).toBe(true);
     const service = new GuardService(context.store, new SecretService(context.store, context.config.SECRET_MASTER_KEY_BASE64), { autoApply: true });
-    const first = service.loadProfile("default")!;
-    const second = service.loadProfile("default")!;
+    const first = (await service.loadProfile("default"))!;
+    const second = (await service.loadProfile("default"))!;
     expect(second.profile).toBe(first.profile);
     expect(Object.isFrozen(first.profile)).toBe(true);
-    expect(service.mayUseLabels()).toBe(true);
-    expect(service.runtimeFor({ workflowId: "wf", projectId: "default" }).mayUseLabels!()).toBe(true);
+    expect(await service.mayUseLabels()).toBe(true);
+    expect(await service.runtimeFor({ workflowId: "wf", projectId: "default" }).mayUseLabels!()).toBe(true);
   });
 
   it("zero config: runs do not resolve guard profiles to learn they track nothing", async () => {
     const context = await createTestContext();
     const builder = await login(context, "builder");
-    context.store.upsertWorkflow({
+    await context.store.upsertWorkflow({
       ...labelledWorkflow("wf-bare", "default"),
       nodes: labelledWorkflow("wf-bare", "default").nodes.filter((node) => node.type !== "guard"),
       edges: [
@@ -375,15 +375,15 @@ describe("round 1 fixes", () => {
     } as Workflow);
     let checks = 0;
     const original = context.store.anyGuardProfileUsesLabels.bind(context.store);
-    context.store.anyGuardProfileUsesLabels = () => {
+    context.store.anyGuardProfileUsesLabels = async () => {
       checks += 1;
-      return original();
+      return await original();
     };
     const versionReads: string[] = [];
     const getVersion = context.store.getGuardProfileVersion.bind(context.store);
-    context.store.getGuardProfileVersion = (profileId: string, version?: number) => {
+    context.store.getGuardProfileVersion = async (profileId: string, version?: number) => {
       versionReads.push(profileId);
-      return getVersion(profileId, version);
+      return await getVersion(profileId, version);
     };
     const run = (await call(context, "POST", "/api/workflows/wf-bare/execute", builder, { user_prompt: "hello" })).json<RunResult>();
     expect(run.status).toBe("success");
@@ -396,17 +396,17 @@ describe("round 1 fixes", () => {
     const admin = await login(context, "admin");
     await trackingProfile(context, admin);
     // Recorded while untracked (the default profile): the facts carry no labels, the source trigger was a webhook.
-    context.store.upsertWorkflow(labelledWorkflow("wf-replayed", "default"));
+    await context.store.upsertWorkflow(labelledWorkflow("wf-replayed", "default"));
     const hook = await context.app.inject({ method: "POST", url: "/webhook/hook-wf-replayed", payload: { user_prompt: "hello" } });
     expect(hook.statusCode, hook.body).toBeLessThan(300);
-    const source = (context.store.listExecutionHistory({ workflowId: "wf-replayed" } as never) as unknown as { items: Array<{ id: string }> }).items[0]!.id;
+    const source = (await context.store.listExecutionHistory({ workflowId: "wf-replayed" } as never) as unknown as { items: Array<{ id: string }> }).items[0]!.id;
     const saved = await call(context, "POST", "/api/replay/recordings", admin, { executionId: source, name: "From a webhook" });
     expect(saved.statusCode, saved.body).toBe(201);
     const recordingId = saved.json<{ recording: { id: string } }>().recording.id;
-    expect(context.store.getReplayRecording(recordingId)!.sourceTriggerType).toBe("webhook");
+    expect((await context.store.getReplayRecording(recordingId))!.sourceTriggerType).toBe("webhook");
 
     // The draft now tracks labels; an admin replays it.
-    context.store.upsertWorkflow(labelledWorkflow("wf-replayed", "tracking"));
+    await context.store.upsertWorkflow(labelledWorkflow("wf-replayed", "tracking"));
     const replayed = await call(context, "POST", `/api/replay/recordings/${recordingId}/replay`, admin, { draft: true });
     expect(replayed.statusCode, replayed.body).toBe(200);
     const executionId = replayed.json<{ executionId: string }>().executionId;
@@ -418,13 +418,13 @@ describe("round 1 fixes", () => {
     const context = await createTestContext();
     const admin = await login(context, "admin");
     await trackingProfile(context, admin);
-    context.store.upsertWorkflow(labelledWorkflow("wf-mcp-replay", "default"));
+    await context.store.upsertWorkflow(labelledWorkflow("wf-mcp-replay", "default"));
     const recorded = (await call(context, "POST", "/api/workflows/wf-mcp-replay/execute", admin, { user_prompt: "hello", record: true })).json<RunResult & { mcpCassette?: { id: string } }>();
     expect(recorded.status).toBe("success");
     expect(recorded.mcpCassette?.id).toBeTruthy();
     // The source run came from outside (a webhook-style trigger): its replay must say so, whoever replays it.
     (context.store as unknown as { exec: (sql: string, params: unknown[]) => void }).exec("UPDATE execution_history SET trigger_type = ? WHERE id = ?", ["webhook", recorded.executionId]);
-    context.store.upsertWorkflow(labelledWorkflow("wf-mcp-replay", "tracking"));
+    await context.store.upsertWorkflow(labelledWorkflow("wf-mcp-replay", "tracking"));
     const replay = await call(context, "POST", `/api/executions/${recorded.executionId}/replay`, admin, {});
     expect(replay.statusCode, replay.body).toBe(200);
     const replayRun = replay.json<RunResult>();
@@ -461,14 +461,14 @@ describe("round 2: imported golden runs and eval cases", () => {
     const context = await createTestContext();
     const admin = await login(context, "admin");
     await trackingProfile(context, admin);
-    context.store.upsertWorkflow(labelledWorkflow("wf-imported", "default"));
+    await context.store.upsertWorkflow(labelledWorkflow("wf-imported", "default"));
     // Started in the editor: the recording says `manual`, a user's input.
     const run = (await call(context, "POST", "/api/workflows/wf-imported/execute", admin, { user_prompt: "hello" })).json<RunResult>();
     expect(run.status).toBe("success");
     const saved = await call(context, "POST", "/api/replay/recordings", admin, { executionId: run.executionId, name: "Typed in the editor" });
     expect(saved.statusCode, saved.body).toBe(201);
     const recordingId = saved.json<{ recording: { id: string } }>().recording.id;
-    expect(context.store.getReplayRecording(recordingId)!.sourceTriggerType).toBe("manual");
+    expect((await context.store.getReplayRecording(recordingId))!.sourceTriggerType).toBe("manual");
     const set = (await call(context, "POST", "/api/eval/datasets", admin, { name: "Set", workflowId: "wf-imported" })).json<{ dataset: { id: string } }>().dataset.id;
     expect((await call(context, "POST", `/api/eval/datasets/${set}/recordings`, admin, { recordingId })).statusCode).toBe(201);
     const file = (await call(context, "GET", `/api/eval/datasets/${set}/export`, admin)).json<{ cases: Array<{ recording: { sourceTriggerType: string } }> }>();
@@ -476,28 +476,29 @@ describe("round 2: imported golden runs and eval cases", () => {
     const imported = await call(context, "POST", "/api/eval/datasets/import", admin, { file, workflowId: "wf-imported", name: "From a file" });
     expect(imported.statusCode, imported.body).toBe(201);
 
-    context.store.upsertWorkflow(labelledWorkflow("wf-imported", "tracking"));
+    await context.store.upsertWorkflow(labelledWorkflow("wf-imported", "tracking"));
     const replayed = async (id: string) => {
       const response = await call(context, "POST", `/api/replay/recordings/${id}/replay`, admin, { draft: true });
       expect(response.statusCode, response.body).toBe(200);
       const stored = JSON.parse(storedNodeResults(context, response.json<{ executionId: string }>().executionId)) as Array<{ nodeId: string; labels?: DataLabels }>;
       return stored.find((entry) => entry.nodeId === "hook")?.labels;
     };
-    const importedId = context.store
-      .listReplayRecordings({ workflowId: "wf-imported" })
-      .items.map((item) => item.id)
-      .find((id) => context.store.getReplayRecording(id)!.capabilities.origin === "imported")!;
+    let importedId: string | undefined;
+    for (const item of (await context.store.listReplayRecordings({ workflowId: "wf-imported" })).items) {
+      if ((await context.store.getReplayRecording(item.id))!.capabilities.origin === "imported") importedId = item.id;
+      if (importedId) break;
+    }
     expect(importedId).toBeTruthy();
     // The recorded run replays as a user's input; the same run read back from a file adds outside content.
     expect(await replayed(recordingId)).toEqual(L(["user"]));
-    expect(await replayed(importedId)).toEqual(L(["user", "untrusted_external"]));
+    expect(await replayed(importedId!)).toEqual(L(["user", "untrusted_external"]));
   }, 30_000);
 
   it("an eval case a builder typed runs as a user's input", async () => {
     const context = await createTestContext();
     const admin = await login(context, "admin");
     await trackingProfile(context, admin);
-    context.store.upsertWorkflow(labelledWorkflow("wf-eval-labels", "tracking"));
+    await context.store.upsertWorkflow(labelledWorkflow("wf-eval-labels", "tracking"));
     const dataset = (await call(context, "POST", "/api/eval/datasets", admin, { name: "Typed cases" })).json<{ dataset: { id: string } }>().dataset;
     const fixture = await call(context, "POST", `/api/eval/datasets/${dataset.id}/fixtures`, admin, { name: "one", input: { user_prompt: "hello" } });
     expect(fixture.statusCode, fixture.body).toBe(200);

@@ -12,8 +12,8 @@
 import crypto from "node:crypto";
 import { nanoid } from "nanoid";
 import { MCP_POLICY_ROLES, type McpClient, type McpPolicyRole, type McpToolPolicySubject } from "@ai-orchestrator/shared";
-import type { SqliteStore } from "../db/database.js";
 import { hashSecret } from "./api-key-service.js";
+import type { Store } from "../db/store.js";
 
 export const MCP_CLIENT_TOKEN_PREFIX = "l2m_mcp_";
 const PREFIX_ID_LENGTH = 12;
@@ -41,15 +41,15 @@ export type McpClientVerification =
   | { ok: false; reason: "malformed" | "unknown" | "revoked" | "expired" };
 
 export interface McpClientSubjectStore {
-  getUserById(id: string): { id: string; email: string; role: string } | null;
+  getUserById(id: string): Promise<{ id: string; email: string; role: string } | null>;
 }
 
 /**
  * Policy subject for a gateway call: the client's role capped at its
  * creator's current role; viewer when the creator no longer exists.
  */
-export function resolveMcpClientSubject(store: McpClientSubjectStore, client: McpClient): McpToolPolicySubject {
-  const creator = client.createdBy ? store.getUserById(client.createdBy) : null;
+export async function resolveMcpClientSubject(store: McpClientSubjectStore, client: McpClient): Promise<McpToolPolicySubject> {
+  const creator = client.createdBy ? await store.getUserById(client.createdBy) : null;
   const creatorRole = asPolicyRole(creator?.role) ?? "viewer";
   return {
     role: capRole(client.role, creatorRole),
@@ -63,19 +63,19 @@ export function resolveMcpClientSubject(store: McpClientSubjectStore, client: Mc
 export class McpClientService {
   private readonly lastTouched = new Map<string, number>();
 
-  constructor(private readonly store: SqliteStore) {}
+  constructor(private readonly store: Store) {}
 
-  create(input: {
+  async create(input: {
     name: string;
     toolsetIds: string[];
     role: McpPolicyRole;
     createdBy: string;
     createdByEmail: string;
     expiresAt: string | null;
-  }): { client: McpClient; token: string } {
+  }): Promise<{ client: McpClient; token: string }> {
     const tokenPrefix = `${MCP_CLIENT_TOKEN_PREFIX}${nanoid(PREFIX_ID_LENGTH)}`;
     const secret = crypto.randomBytes(SECRET_BYTES).toString("base64url");
-    const client = this.store.createMcpClient({
+    const client = await this.store.createMcpClient({
       id: `mcc_${crypto.randomUUID()}`,
       name: input.name,
       tokenPrefix,
@@ -89,7 +89,7 @@ export class McpClientService {
     return { client, token: `${tokenPrefix}.${secret}` };
   }
 
-  verify(rawToken: string, now: Date = new Date()): McpClientVerification {
+  async verify(rawToken: string, now: Date = new Date()): Promise<McpClientVerification> {
     const token = rawToken.trim();
     const separator = token.indexOf(".");
     if (!token.startsWith(MCP_CLIENT_TOKEN_PREFIX) || separator <= MCP_CLIENT_TOKEN_PREFIX.length) {
@@ -99,7 +99,7 @@ export class McpClientService {
     const secret = token.slice(separator + 1);
     if (!secret) return { ok: false, reason: "malformed" };
 
-    const record = this.store.findMcpClientByTokenPrefix(prefix);
+    const record = await this.store.findMcpClientByTokenPrefix(prefix);
     if (!record) return { ok: false, reason: "unknown" };
     const expected = Buffer.from(record.tokenHash, "hex");
     const candidate = Buffer.from(hashSecret(secret), "hex");
@@ -116,7 +116,7 @@ export class McpClientService {
     if (now.getTime() - last >= TOUCH_INTERVAL_MS) {
       this.lastTouched.set(client.id, now.getTime());
       const at = now.toISOString();
-      this.store.touchMcpClient(client.id, at);
+      await this.store.touchMcpClient(client.id, at);
       client.lastUsedAt = at;
     }
     return { ok: true, client };

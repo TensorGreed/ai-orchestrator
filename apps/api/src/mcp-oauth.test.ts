@@ -267,7 +267,7 @@ const REDIRECT_BASE = "https://l2m.example.test";
 async function createTestContext(overrides: Record<string, string> = {}): Promise<TestContext> {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-mcp-oauth-"));
   const store = await SqliteStore.create(path.join(tempDir, "orchestrator.db"));
-  store.ensureDefaultProject();
+  await store.ensureDefaultProject();
   const config = parseConfig({
     LOG_LEVEL: "info",
     SEED_SAMPLE_WORKFLOWS: "false",
@@ -282,7 +282,7 @@ async function createTestContext(overrides: Record<string, string> = {}): Promis
   });
   const secretService = new SecretService(store, config.SECRET_MASTER_KEY_BASE64);
   const authService = new AuthService(store, config.SESSION_TTL_HOURS);
-  const app = createApp(config, store, secretService, authService);
+  const app = await createApp(config, store, secretService, authService);
   await app.ready();
   const context = { app, store, authService, config, tempDir };
   contexts.push(context);
@@ -296,7 +296,7 @@ afterEach(async () => {
     const context = contexts.pop()!;
     await context.app.close();
     try {
-      context.store.close();
+      await context.store.close();
     } catch {
       // Already closed by the app shutdown hooks.
     }
@@ -314,7 +314,7 @@ function extractCookie(setCookieHeader: string | string[] | undefined, cookieNam
 async function login(context: TestContext, role: "admin" | "builder" | "operator", name: string = role): Promise<string> {
   const email = `${name}@example.com`;
   const password = `${name}-Pass-123!`;
-  context.authService.register({ email, password, role });
+  await context.authService.register({ email, password, role });
   const response = await context.app.inject({ method: "POST", url: "/api/auth/login", payload: { email, password } });
   if (response.statusCode !== 200) throw new Error(`Login failed for ${name}: ${response.body}`);
   return extractCookie(response.headers["set-cookie"], context.config.SESSION_COOKIE_NAME);
@@ -489,7 +489,7 @@ describe("MCP OAuth connect flow", () => {
     // No token or refresh token in any response, audit row, secret listing or log line.
     const secretsList = await call(context, "GET", "/api/secrets", admin);
     expect(secretsList.json<Array<{ provider: string }>>().some((secret) => secret.provider === "mcp_oauth")).toBe(false);
-    const audit = context.store.listAuditLogs({ resourceType: "mcp_server", pageSize: 200 });
+    const audit = await context.store.listAuditLogs({ resourceType: "mcp_server", pageSize: 200 });
     expect(audit.items.map((item) => item.eventType)).toEqual(
       expect.arrayContaining(["mcp_server.oauth_connect_started", "mcp_server.oauth_connected"])
     );
@@ -597,14 +597,14 @@ describe("MCP OAuth connect flow", () => {
     expect(manual.statusCode).toBe(200);
     expect(manual.json<{ status: McpOAuthConnectionStatus }>().status.lastRefreshAt).not.toBeNull();
 
-    const secretId = context.store.getMcpOAuthConnection(serverId)?.secretId;
+    const secretId = (await context.store.getMcpOAuthConnection(serverId))?.secretId;
     expect(secretId).toBeTruthy();
     // The OAuth secret cannot be deleted or resolved through the generic secret routes.
     expect((await call(context, "DELETE", `/api/secrets/${secretId}`, admin)).statusCode).toBe(404);
 
     const disconnected = await call(context, "DELETE", `/api/mcp/servers/${serverId}/oauth`, admin);
     expect(disconnected.json<{ status: McpOAuthConnectionStatus }>().status.state).toBe("not_connected");
-    expect(context.store.getSecret(secretId!)).toBeNull();
+    expect(await context.store.getSecret(secretId!)).toBeNull();
     const probe = await call(context, "POST", `/api/mcp/servers/${serverId}/probe`, admin);
     expect(probe.json<{ probe: { ok: boolean; error: string } }>().probe.error).toMatch(/not connected/);
   });
@@ -685,8 +685,8 @@ describe("delegated MCP credentials", () => {
     const bob = await login(context, "builder", "bob");
     const carol = await login(context, "operator", "carol");
     expect((await call(context, "GET", "/api/mcp/connections", carol)).statusCode).toBe(200);
-    const aliceId = context.store.getUserByEmail("alice@example.com")!.id;
-    const bobId = context.store.getUserByEmail("bob@example.com")!.id;
+    const aliceId = (await context.store.getUserByEmail("alice@example.com"))!.id;
+    const bobId = (await context.store.getUserByEmail("bob@example.com"))!.id;
 
     // Delegated credentials need an OAuth http server.
     const bearer = await call(context, "POST", "/api/mcp/servers", admin, {
@@ -753,20 +753,20 @@ describe("delegated MCP credentials", () => {
     expect(secretsList.json<Array<{ provider: string }>>().some((secret) => secret.provider.startsWith("mcp_oauth"))).toBe(false);
 
     // Admin revokes Bob: his token is gone and his runs fail again.
-    const bobSecret = context.store.getMcpUserOAuthConnection(serverId, bobId)?.secretId;
+    const bobSecret = (await context.store.getMcpUserOAuthConnection(serverId, bobId))?.secretId;
     expect(bobSecret).toBeTruthy();
     expect((await call(context, "DELETE", `/api/mcp/servers/${serverId}/connections/${bobId}`, alice)).statusCode).toBe(403);
     expect((await call(context, "DELETE", `/api/mcp/servers/${serverId}/connections/${bobId}`, admin)).statusCode).toBe(200);
-    expect(context.store.getMcpUserOAuthConnection(serverId, bobId)).toBeNull();
-    expect(context.store.getSecret(bobSecret!)).toBeNull();
+    expect(await context.store.getMcpUserOAuthConnection(serverId, bobId)).toBeNull();
+    expect(await context.store.getSecret(bobSecret!)).toBeNull();
     expect((await runAs(context, bob, "wf-oauth-weather")).status).toBe("error");
 
     // Alice disconnects herself.
     const disconnected = await call(context, "DELETE", `/api/mcp/connections/${serverId}`, alice);
     expect(disconnected.json<{ connection: { connection: unknown } }>().connection.connection).toBeNull();
-    expect(context.store.getMcpUserOAuthConnection(serverId, aliceId)).toBeNull();
+    expect(await context.store.getMcpUserOAuthConnection(serverId, aliceId)).toBeNull();
 
-    const events = context.store.listAuditLogs({ resourceType: "mcp_server", pageSize: 200 }).items.map((item) => item.eventType);
+    const events = (await context.store.listAuditLogs({ resourceType: "mcp_server", pageSize: 200 })).items.map((item) => item.eventType);
     expect(events).toEqual(
       expect.arrayContaining([
         "mcp_server.user_oauth_connect_started",
@@ -781,7 +781,7 @@ describe("delegated MCP credentials", () => {
     );
 
     // No token in any response, audit row or log line.
-    const audit = context.store.listAuditLogs({ pageSize: 500 });
+    const audit = await context.store.listAuditLogs({ pageSize: 500 });
     const haystacks = [...seenBodies, JSON.stringify(audit.items), ...logs];
     for (const secret of issuedSecrets) {
       for (const haystack of haystacks) {
@@ -801,7 +801,7 @@ describe("delegated MCP credentials", () => {
     const hijack = await call(context, "GET", `${location.pathname}${location.search}`, admin);
     expect(hijack.statusCode).toBe(400);
     expect(fake.tokenRequests).toHaveLength(0);
-    expect(context.store.listMcpUserOAuthConnections({ serverId })).toEqual([]);
+    expect(await context.store.listMcpUserOAuthConnections({ serverId })).toEqual([]);
   });
 
   it("probes with the requesting user's connection and calls through the gateway as the client's owner", async () => {
@@ -923,7 +923,7 @@ describe("Phase 10.5 schema", () => {
     try {
       const file = path.join(tempDir, "orchestrator.db");
       const first = await SqliteStore.create(file);
-      first.createMcpToolPolicy({
+      await first.createMcpToolPolicy({
         id: "legacy",
         name: null,
         description: null,
@@ -934,11 +934,11 @@ describe("Phase 10.5 schema", () => {
         toolPattern: "*",
         enabled: true
       });
-      first.close();
+      await first.close();
       const reopened = await SqliteStore.create(file);
-      expect(reopened.getMcpToolPolicy("legacy")?.annotationHint).toBeNull();
-      expect(reopened.getMcpOAuthConnection("nope")).toBeNull();
-      reopened.close();
+      expect((await reopened.getMcpToolPolicy("legacy"))?.annotationHint).toBeNull();
+      expect(await reopened.getMcpOAuthConnection("nope")).toBeNull();
+      await reopened.close();
     } finally {
       fs.rmSync(tempDir, { recursive: true, force: true });
     }

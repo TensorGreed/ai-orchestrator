@@ -22,7 +22,8 @@ import {
   nodeDnsResolver,
   type OutboundGuardConfig
 } from "@ai-orchestrator/workflow-engine";
-import { SqliteStore } from "../db/database";
+import type { Store } from "../db/store.js";
+import { SerialReloads } from "./serial-by-key.js";
 
 export interface TriggerExecutionInput {
   workflow: Workflow;
@@ -159,12 +160,14 @@ function parseFeed(xml: string): RssItem[] {
 
 export class TriggerService {
   private readonly active = new Map<string, ActiveTrigger>();
+  /** Reloads one at a time per workflow; a removal asked for meanwhile wins. */
+  private readonly reloads = new SerialReloads();
   private executeHandler: TriggerExecutionHandler | null = null;
-  private loadWorkflow: (workflowId: string) => Workflow | null = (workflowId) => this.store.getWorkflow(workflowId);
+  private loadWorkflow: (workflowId: string) => Promise<Workflow | null> = async (workflowId) => await this.store.getWorkflow(workflowId);
   private resolveSecret: SecretResolver = async () => undefined;
 
   constructor(
-    private readonly store: SqliteStore,
+    private readonly store: Store,
     private readonly logger: Logger = (level, message, metadata) => {
       const suffix = metadata === undefined ? "" : ` ${JSON.stringify(metadata)}`;
       // eslint-disable-next-line no-console
@@ -200,7 +203,7 @@ export class TriggerService {
    * Phase 15.4 — which version a trigger registers from: the published one
    * when the workflow has one (production traffic), else the draft.
    */
-  setWorkflowLoader(loader: (workflowId: string) => Workflow | null): void {
+  setWorkflowLoader(loader: (workflowId: string) => Promise<Workflow | null>): void {
     this.loadWorkflow = loader;
   }
 
@@ -208,27 +211,34 @@ export class TriggerService {
     this.resolveSecret = resolver;
   }
 
-  initialize(): void {
-    this.reloadAllWorkflows();
+  async initialize(): Promise<void> {
+    await this.reloadAllWorkflows();
   }
 
-  reloadAllWorkflows(): void {
+  async reloadAllWorkflows(): Promise<void> {
     this.stopAll();
-    for (const summary of this.store.listWorkflows()) {
-      const workflow = this.loadWorkflow(summary.id);
+    for (const summary of await this.store.listWorkflows()) {
+      const workflow = await this.loadWorkflow(summary.id);
       if (workflow) this.registerWorkflow(workflow);
     }
   }
 
-  reloadWorkflow(workflowId: string): void {
-    this.unregisterWorkflow(workflowId);
-    const workflow = this.loadWorkflow(workflowId);
-    if (workflow) this.registerWorkflow(workflow);
+  /**
+   * Reloads of one workflow run one after another, so the last save's triggers are the ones registered; a delete
+   * that lands while the workflow is loading wins (it is not registered again).
+   */
+  async reloadWorkflow(workflowId: string): Promise<void> {
+    await this.reloads.reload(workflowId, async (removedSince) => {
+      this.unregisterWorkflow(workflowId);
+      const workflow = await this.loadWorkflow(workflowId);
+      if (workflow && !removedSince()) this.registerWorkflow(workflow);
+    });
   }
 
-  removeWorkflow(workflowId: string): void {
+  async removeWorkflow(workflowId: string): Promise<void> {
+    this.reloads.removed(workflowId);
     this.unregisterWorkflow(workflowId);
-    this.store.deleteTriggerStatesForWorkflow(workflowId);
+    await this.store.deleteTriggerStatesForWorkflow(workflowId);
   }
 
   async stop(): Promise<void> {
@@ -345,7 +355,7 @@ export class TriggerService {
       try {
         const current = await listFilesRecursive(watchPath, recursive);
         const currentMap = new Map(current.map((f) => [f.path, f.mtimeMs]));
-        const prev = (this.store.getTriggerState(workflow.id, node.id) ?? {}) as Record<string, number>;
+        const prev = (await this.store.getTriggerState(workflow.id, node.id) ?? {}) as Record<string, number>;
         const prevMap = new Map<string, number>(
           Object.entries(prev).filter(([, v]) => typeof v === "number") as Array<[string, number]>
         );
@@ -372,7 +382,7 @@ export class TriggerService {
         // Save latest snapshot
         const newState: Record<string, number> = {};
         for (const [p, m] of currentMap) newState[p] = m;
-        this.store.saveTriggerState({
+        await this.store.saveTriggerState({
           workflowId: workflow.id,
           nodeId: node.id,
           triggerType: "file_trigger",
@@ -429,13 +439,13 @@ export class TriggerService {
         }
         const xml = await res.text();
         const items = parseFeed(xml).slice(0, maxItems * 10);
-        const prevState = (this.store.getTriggerState(workflow.id, node.id) ?? {}) as { seen?: string[] };
+        const prevState = (await this.store.getTriggerState(workflow.id, node.id) ?? {}) as { seen?: string[] };
         const seen = new Set<string>(Array.isArray(prevState.seen) ? prevState.seen : []);
         const fresh = items.filter((it) => !seen.has(it.id)).slice(0, maxItems);
 
         // Update state with current feed window (trimmed)
         const mergedSeen = Array.from(new Set([...seen, ...items.map((it) => it.id)])).slice(-500);
-        this.store.saveTriggerState({
+        await this.store.saveTriggerState({
           workflowId: workflow.id,
           nodeId: node.id,
           triggerType: "rss_trigger",

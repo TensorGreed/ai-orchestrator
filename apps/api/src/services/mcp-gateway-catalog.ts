@@ -61,11 +61,11 @@ export interface GatewayCatalog {
 }
 
 export interface GatewayCatalogStore {
-  getWorkflow(id: string): Workflow | null;
-  listMcpServers(): McpServerRecord[];
-  getMcpToolSnapshot(id: string): McpToolSnapshotRecord | null;
-  listMcpToolPolicies(): McpToolPolicyRule[];
-  listMcpToolClassifications(registryServerId?: string): McpToolClassificationOverride[];
+  getWorkflow(id: string): Promise<Workflow | null>;
+  listMcpServers(): Promise<McpServerRecord[]>;
+  getMcpToolSnapshot(id: string): Promise<McpToolSnapshotRecord | null>;
+  listMcpToolPolicies(): Promise<McpToolPolicyRule[]>;
+  listMcpToolClassifications(registryServerId?: string): Promise<McpToolClassificationOverride[]>;
 }
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -89,22 +89,22 @@ type Candidate =
   | (Omit<GatewayServerTool, "name"> & { rawName: string })
   | { kind: "hidden"; rawName: string; hidden: Omit<GatewayHiddenTool, "name"> };
 
-export function buildGatewayCatalog(input: {
+export async function buildGatewayCatalog(input: {
   toolset: McpToolset;
   role: McpPolicyRole;
   store: GatewayCatalogStore;
-}): GatewayCatalog {
+}): Promise<GatewayCatalog> {
   const { toolset, role, store } = input;
-  const servers = store.listMcpServers();
+  const servers = await store.listMcpServers();
   const serverById = new Map(servers.map((server) => [server.id, server]));
   const slugs = registryServerSlugs(servers);
-  const rules = store.listMcpToolPolicies();
+  const rules = await store.listMcpToolPolicies();
   const warnings: string[] = [];
   const candidates: Candidate[] = [];
 
   for (const member of toolset.members) {
     if (member.kind === "workflow") {
-      const workflow = store.getWorkflow(member.workflowId);
+      const workflow = await store.getWorkflow(member.workflowId);
       if (!workflow) {
         warnings.push(`Workflow '${member.workflowId}' no longer exists.`);
         continue;
@@ -139,7 +139,7 @@ export function buildGatewayCatalog(input: {
       warnings.push(`MCP server '${member.serverId}' is no longer registered.`);
       continue;
     }
-    const snapshot = server.currentSnapshotId ? store.getMcpToolSnapshot(server.currentSnapshotId) : null;
+    const snapshot = server.currentSnapshotId ? await store.getMcpToolSnapshot(server.currentSnapshotId) : null;
     if (!snapshot) {
       warnings.push(`MCP server '${server.name}' has no tool snapshot yet; probe it to publish its tools.`);
       continue;
@@ -147,7 +147,7 @@ export function buildGatewayCatalog(input: {
     if (server.blockOnBreakingChange && server.pendingBreakingSnapshotId) {
       warnings.push(`MCP server '${server.name}' has an unaccepted breaking change; calls to its tools fail until it is accepted.`);
     }
-    const classifications = store.listMcpToolClassifications(server.id);
+    const classifications = await store.listMcpToolClassifications(server.id);
     const slug = slugs.get(server.id) ?? "server";
     const tools = snapshot.tools.filter((tool) => matchesToolPattern(member.toolGlob ?? "*", tool.name));
     if (tools.length === 0) {

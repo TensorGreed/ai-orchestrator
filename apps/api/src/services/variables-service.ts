@@ -1,73 +1,73 @@
 import { nanoid } from "nanoid";
 import type { VariableRecord } from "@ai-orchestrator/shared";
-import type { SqliteStore } from "../db/database";
+import type { Store } from "../db/store.js";
 
 const VALID_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const MAX_VALUE_LENGTH = 65536;
 
 export class VariablesService {
-  constructor(private readonly store: SqliteStore) {}
+  constructor(private readonly store: Store) {}
 
-  list(projectId?: string): VariableRecord[] {
-    return this.store.listVariables(projectId);
+  async list(projectId?: string): Promise<VariableRecord[]> {
+    return await this.store.listVariables(projectId);
   }
 
-  get(id: string): VariableRecord | null {
-    return this.store.getVariable(id);
+  async get(id: string): Promise<VariableRecord | null> {
+    return await this.store.getVariable(id);
   }
 
-  create(input: { projectId: string; key: string; value: string; createdBy?: string | null }): VariableRecord {
+  async create(input: { projectId: string; key: string; value: string; createdBy?: string | null }): Promise<VariableRecord> {
     this.validateKey(input.key);
     this.validateValue(input.value);
-    const existing = this.store.findVariableByKey(input.projectId, input.key);
+    const existing = await this.store.findVariableByKey(input.projectId, input.key);
     if (existing) {
       throw new Error(`Variable '${input.key}' already exists in this project`);
     }
     const id = `var_${nanoid(14)}`;
-    this.store.upsertVariable({
+    await this.store.upsertVariable({
       id,
       projectId: input.projectId,
       key: input.key,
       value: input.value,
       createdBy: input.createdBy ?? null
     });
-    const record = this.store.getVariable(id);
+    const record = await this.store.getVariable(id);
     if (!record) throw new Error("failed to create variable");
     return record;
   }
 
-  update(id: string, patch: { key?: string; value?: string }): VariableRecord | null {
-    const existing = this.store.getVariable(id);
+  async update(id: string, patch: { key?: string; value?: string }): Promise<VariableRecord | null> {
+    const existing = await this.store.getVariable(id);
     if (!existing) return null;
     const nextKey = patch.key ?? existing.key;
     if (patch.key !== undefined) this.validateKey(nextKey);
     if (patch.value !== undefined) this.validateValue(patch.value);
     if (patch.key !== undefined && patch.key !== existing.key) {
-      const collision = this.store.findVariableByKey(existing.projectId, patch.key);
+      const collision = await this.store.findVariableByKey(existing.projectId, patch.key);
       if (collision && collision.id !== id) {
         throw new Error(`Variable '${patch.key}' already exists in this project`);
       }
     }
-    this.store.upsertVariable({
+    await this.store.upsertVariable({
       id,
       projectId: existing.projectId,
       key: nextKey,
       value: patch.value ?? existing.value,
       createdBy: existing.createdBy
     });
-    return this.store.getVariable(id);
+    return await this.store.getVariable(id);
   }
 
-  delete(id: string): boolean {
-    return this.store.deleteVariable(id);
+  async delete(id: string): Promise<boolean> {
+    return await this.store.deleteVariable(id);
   }
 
   /**
    * Returns a plain `{ KEY: value }` map for use as workflow-time variables.
    * Project-level variables are the baseline; workflow.variables override.
    */
-  resolveForProject(projectId: string): Record<string, string> {
-    const rows = this.store.listVariables(projectId);
+  async resolveForProject(projectId: string): Promise<Record<string, string>> {
+    const rows = await this.store.listVariables(projectId);
     const map: Record<string, string> = {};
     for (const row of rows) map[row.key] = row.value;
     return map;

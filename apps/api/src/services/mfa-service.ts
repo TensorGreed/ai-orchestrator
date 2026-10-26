@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import { SqliteStore } from "../db/database";
+import type { Store } from "../db/store.js";
 
 const BASE32_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
 const TOTP_STEP_SECONDS = 30;
@@ -118,7 +118,7 @@ export class MfaService {
   private readonly key: Buffer;
 
   constructor(
-    private readonly store: SqliteStore,
+    private readonly store: Store,
     rawMasterKey: string | undefined,
     private readonly issuer: string = "ai-orchestrator"
   ) {
@@ -146,13 +146,13 @@ export class MfaService {
     return decrypted.toString("utf8");
   }
 
-  enroll(userId: string, userEmail: string): MfaEnrollment {
+  async enroll(userId: string, userEmail: string): Promise<MfaEnrollment> {
     const rawSecret = crypto.randomBytes(20);
     const secret = base32Encode(rawSecret);
     const backupCodes = Array.from({ length: BACKUP_CODE_COUNT }, () => generateBackupCode());
 
     const encrypted = this.encrypt(secret);
-    this.store.upsertMfaSecret({
+    await this.store.upsertMfaSecret({
       userId,
       secretIv: encrypted.iv,
       secretAuthTag: encrypted.authTag,
@@ -173,12 +173,12 @@ export class MfaService {
     };
   }
 
-  activate(userId: string, code: string): boolean {
-    const record = this.store.getMfaSecret(userId);
+  async activate(userId: string, code: string): Promise<boolean> {
+    const record = await this.store.getMfaSecret(userId);
     if (!record) return false;
     const secret = this.decrypt(record.secretIv, record.secretAuthTag, record.secretCiphertext);
     if (!verifyTotpCode(secret, code)) return false;
-    this.store.upsertMfaSecret({
+    await this.store.upsertMfaSecret({
       userId,
       secretIv: record.secretIv,
       secretAuthTag: record.secretAuthTag,
@@ -190,8 +190,8 @@ export class MfaService {
     return true;
   }
 
-  verify(userId: string, code: string): boolean {
-    const record = this.store.getMfaSecret(userId);
+  async verify(userId: string, code: string): Promise<boolean> {
+    const record = await this.store.getMfaSecret(userId);
     if (!record || !record.enabled) return false;
     const secret = this.decrypt(record.secretIv, record.secretAuthTag, record.secretCiphertext);
     if (verifyTotpCode(secret, code)) return true;
@@ -208,24 +208,16 @@ export class MfaService {
 
     const remainingBackup = [...record.backupCodes];
     remainingBackup.splice(matchIndex, 1);
-    this.store.upsertMfaSecret({
-      userId,
-      secretIv: record.secretIv,
-      secretAuthTag: record.secretAuthTag,
-      secretCiphertext: record.secretCiphertext,
-      backupCodes: remainingBackup,
-      enabled: record.enabled,
-      activatedAt: record.activatedAt
-    });
-    return true;
+    // Only one sign-in spends a backup code: a concurrent one that already used it makes this swap fail.
+    return await this.store.replaceMfaBackupCodes({ userId, expected: record.backupCodes, next: remainingBackup });
   }
 
-  disable(userId: string): boolean {
-    return this.store.deleteMfaSecret(userId);
+  async disable(userId: string): Promise<boolean> {
+    return await this.store.deleteMfaSecret(userId);
   }
 
-  status(userId: string): MfaStatus {
-    const record = this.store.getMfaSecret(userId);
+  async status(userId: string): Promise<MfaStatus> {
+    const record = await this.store.getMfaSecret(userId);
     if (!record) {
       return { enabled: false, pending: false, activatedAt: null, remainingBackupCodes: 0 };
     }
@@ -237,7 +229,7 @@ export class MfaService {
     };
   }
 
-  isEnabled(userId: string): boolean {
-    return this.status(userId).enabled;
+  async isEnabled(userId: string): Promise<boolean> {
+    return (await this.status(userId)).enabled;
   }
 }

@@ -44,7 +44,8 @@ import {
   type Workflow
 } from "@ai-orchestrator/shared";
 import { canonicalJson as cassetteCanonical, hashCassetteArgs, parseCassette, scrubForCassette } from "@ai-orchestrator/mcp-sdk";
-import type { ReplayRecordingRecord, SqliteStore } from "../db/database.js";
+import type { ReplayRecordingRecord } from "../db/database.js";
+import type { ReplayRecordingLimits, ReplayRecordingRefusal, Store } from "../db/store.js";
 import { SecretScrubber } from "./audit-scrub.js";
 import { runSteps, runStepsAsync } from "@ai-orchestrator/guard-sdk";
 import { parseStoredDataLabels, type DataLabels, type ProvenanceLabel } from "@ai-orchestrator/shared";
@@ -66,7 +67,7 @@ export class ReplayRecordingError extends Error {
 }
 
 export interface ReplayRecordingServiceOptions {
-  store: SqliteStore;
+  store: Store;
   secrets: Pick<SecretService, "valuesForScrubbing">;
   /** Credentials L2M reads from its environment (provider API keys and similar). */
   environmentSecretValues?: () => string[];
@@ -115,12 +116,12 @@ export interface CaptureOptions {
   /** Where the run's input came from (labels); decided by the server where the run started. */
   inputProvenance: ProvenanceLabel;
   /** Called once the candidate is built and checked, right before it is saved (eviction makes room here). Throw to drop it. */
-  beforeSave?: (bytes: number) => void;
+  beforeSave?: (bytes: number) => void | Promise<void>;
 }
 
 /** A golden run from a file, checked and scrubbed, ready to be saved (`ReplayRecordingService.saveImport`). */
 export interface PreparedImport {
-  row: Omit<Parameters<SqliteStore["saveReplayRecording"]>[0], "createdBy">;
+  row: Omit<Parameters<Store["saveReplayRecording"]>[0], "createdBy">;
   /** The scrubbed trigger input, for the golden set's fixture. */
   input: unknown;
   /** Recorded nodes left out because the target has no node with the same id and type. */
@@ -140,6 +141,18 @@ const SCRUB_SHRINK_ALLOWANCE = 2;
 /** The earliest `recordedAt` an imported golden run may claim. */
 export const MIN_RECORDED_AT_MS = Date.UTC(2000, 0, 1);
 
+/** The store reads one golden-run save needs (see `ReplayRecordingService.load`). */
+interface LoadedRun {
+  history: NonNullable<Awaited<ReturnType<Store["getExecutionHistory"]>>>;
+  current: Workflow | null;
+  context: CapturedRunContext | null;
+  guardEvents: Awaited<ReturnType<Store["listGuardEventsForExecution"]>>;
+  cassetteRecord: { cassette: McpCassette } | null;
+  /** Null for a capture (golden-run budgets do not apply to candidates). */
+  budgetUsage: { workflow: number; total: number } | null;
+  scrubber: SecretScrubber;
+}
+
 export class ReplayRecordingService {
   constructor(private readonly options: ReplayRecordingServiceOptions) {}
 
@@ -148,10 +161,10 @@ export class ReplayRecordingService {
   }
 
   /** A scrubber over every secret value the deployment holds (in memory only). */
-  scrubber(): SecretScrubber {
+  async scrubber(): Promise<SecretScrubber> {
     const values: string[] = [];
     try {
-      values.push(...this.options.secrets.valuesForScrubbing());
+      values.push(...(await this.options.secrets.valuesForScrubbing()));
     } catch {
       // The secret store is unreadable: nothing from it can have reached a run.
     }
@@ -164,7 +177,7 @@ export class ReplayRecordingService {
   }
 
   /** A value with credential keys, token shapes and every secret value removed. */
-  scrubValue<T>(value: T, scrubber: SecretScrubber = this.scrubber()): T {
+  scrubValue<T>(value: T, scrubber: SecretScrubber): T {
     if (value === undefined) return value;
     const shaped = scrubForCassette(value, this.options.redact ? { redact: this.options.redact } : {});
     const tree = scrubber.tree(shaped);
@@ -177,7 +190,7 @@ export class ReplayRecordingService {
    * provider and model names, guard placements) only lose secret values:
    * the token-shape redactor would otherwise blank long registry ids.
    */
-  scrubFacts(facts: RunFacts, scrubber: SecretScrubber = this.scrubber()): RunFacts {
+  scrubFacts(facts: RunFacts, scrubber: SecretScrubber): RunFacts {
     const scrubbed = this.scrubValue(facts, scrubber);
     const id = (value: string) => scrubber.text(value);
     const optionalId = (value: string | null) => (value === null ? null : id(value));
@@ -220,7 +233,7 @@ export class ReplayRecordingService {
    * no secret references, so the candidate's are left out too. For a run
    * recorded here a changed credential reference still counts as a change.
    */
-  storedConfig(config: unknown, scrubber: SecretScrubber = this.scrubber(), options: { imported?: boolean } = {}): unknown {
+  storedConfig(config: unknown, scrubber: SecretScrubber, options: { imported?: boolean } = {}): unknown {
     if (options.imported) {
       return this.scrubValue(JSON.parse(canonicalJson(stripSecretReferences(sanitizeConfig(config ?? {}, 3)))) as unknown, scrubber);
     }
@@ -242,8 +255,9 @@ export class ReplayRecordingService {
    * secret scrub; tape and cassette match keys are then taken again over the
    * masked content, so a `models: "replay"` replay still finds its answers.
    */
-  create(input: { executionId: string; name: string; notes?: string | null }, createdBy: string | null): ReplayRecordingSummary {
-    return runSteps(this.build(input, createdBy));
+  async create(input: { executionId: string; name: string; notes?: string | null }, createdBy: string | null): Promise<ReplayRecordingSummary> {
+    const loaded = await this.load(input);
+    return await this.save(runSteps(this.build(loaded, input, createdBy)));
   }
 
   /**
@@ -251,13 +265,15 @@ export class ReplayRecordingService {
    * `create`). Masking runs in chunks, giving the event loop a turn between
    * them, so a large capture never stalls production requests.
    */
-  createCapture(input: { executionId: string; name: string }, capture: CaptureOptions): Promise<ReplayRecordingSummary> {
-    return runStepsAsync(this.build(input, null, capture));
+  async createCapture(input: { executionId: string; name: string }, capture: CaptureOptions): Promise<ReplayRecordingSummary> {
+    const loaded = await this.load(input, capture);
+    return await this.save(await runStepsAsync(this.build(loaded, input, null, capture)), capture);
   }
 
-  private *build(input: { executionId: string; name: string; notes?: string | null }, createdBy: string | null, capture?: CaptureOptions): Generator<void, ReplayRecordingSummary, void> {
+  /** What `build` needs from the store, read (and the save checked) before the synchronous build runs. */
+  private async load(input: { executionId: string }, capture?: CaptureOptions): Promise<LoadedRun> {
     const store = this.options.store;
-    const history = store.getExecutionHistory(input.executionId);
+    const history = await store.getExecutionHistory(input.executionId);
     if (!history) throw new ReplayRecordingError("Execution not found", "not_found");
     if (!history.completedAt || IN_PROGRESS_STATUSES.has(history.status)) {
       throw new ReplayRecordingError("The run has not finished; save it as a golden run once it has.", "in_progress");
@@ -267,22 +283,77 @@ export class ReplayRecordingService {
     }
     if (!capture) {
       // One golden run per execution: a second copy of the same run adds storage and nothing to compare.
-      const existing = store.findReplayRecordingIdForExecution(history.id);
+      const existing = await store.findReplayRecordingIdForExecution(history.id);
       if (existing) {
         throw new ReplayRecordingError(`This run is already saved as golden run ${existing}. Open that one, or delete it before saving the run again.`, "duplicate");
       }
-      if (store.countReplayRecordingsForWorkflow(history.workflowId) >= this.options.maxPerWorkflow) {
+      if (await store.countReplayRecordingsForWorkflow(history.workflowId) >= this.options.maxPerWorkflow) {
         throw new ReplayRecordingError(
           `This workflow already has ${this.options.maxPerWorkflow} golden runs (REPLAY_RECORDINGS_MAX_PER_WORKFLOW). Delete some before saving more.`,
           "limit"
         );
       }
-    } else if (store.findReplayRecordingIdForExecution(history.id, "candidate")) {
+    } else if (await store.findReplayRecordingIdForExecution(history.id, "candidate")) {
       throw new ReplayRecordingError("This run was already captured.", "duplicate");
     }
+    return {
+      history,
+      current: await store.getWorkflow(history.workflowId),
+      context: asRecord((await store.getExecutionManifest(history.id))?.runContext) as CapturedRunContext | null,
+      guardEvents: await store.listGuardEventsForExecution(history.id),
+      // A capture brings the run's own recording; a golden run saved by hand takes the run's cassette.
+      cassetteRecord: capture ? (capture.cassette ? { cassette: capture.cassette } : null) : await store.getMcpCassetteForExecution(history.id),
+      budgetUsage: capture ? null : await this.budgetUsage(history.workflowId),
+      scrubber: await this.scrubber()
+    };
+  }
 
-    const current = store.getWorkflow(history.workflowId);
-    const context = asRecord(store.getExecutionManifest(history.id)?.runContext) as CapturedRunContext | null;
+  /**
+   * Saves what `build` made. The checks `load` made (one golden run per execution, the golden-run count) and
+   * the storage budgets, with the bytes the run came to, are made again in the save's own transaction.
+   */
+  private async save(built: { row: Parameters<Store["saveReplayRecording"]>[0]; bytes: number }, capture?: CaptureOptions): Promise<ReplayRecordingSummary> {
+    await capture?.beforeSave?.(built.bytes);
+    const outcome = await this.options.store.saveReplayRecordingChecked(built.row, capture ? { uniqueExecution: true } : { uniqueExecution: true, limits: this.limits });
+    if ("refused" in outcome) throw this.refusalError(outcome, capture ? "capturing" : "saving", built.bytes);
+    return outcome.saved;
+  }
+
+  /** The golden-run limits a save is checked against (REPLAY_RECORDINGS_*). */
+  get limits(): ReplayRecordingLimits {
+    return { maxPerWorkflow: this.options.maxPerWorkflow, maxBytesPerWorkflow: this.options.maxBytesPerWorkflow, maxTotalBytes: this.options.maxTotalBytes };
+  }
+
+  /** The error a refused golden-run save answers with; the same messages as the checks made before the save. */
+  refusalError(refusal: ReplayRecordingRefusal, action: "saving" | "capturing" | "promoting" | "importing", bytes?: number): ReplayRecordingError {
+    if (refusal.refused === "duplicate") {
+      return action === "capturing"
+        ? new ReplayRecordingError("This run was already captured.", "duplicate")
+        : new ReplayRecordingError(`This run is already saved as golden run ${refusal.existingId}. Open that one, or delete it before saving the run again.`, "duplicate");
+    }
+    if (refusal.refused === "count") {
+      return new ReplayRecordingError(
+        `This workflow already has ${this.options.maxPerWorkflow} golden runs (REPLAY_RECORDINGS_MAX_PER_WORKFLOW). Delete some before ${action === "capturing" ? "saving" : action} more.`,
+        "limit"
+      );
+    }
+    const usage = refusal.refused === "workflow_bytes" ? { workflow: refusal.used, total: 0 } : { workflow: 0, total: refusal.used };
+    try {
+      this.checkBudgetUsage(usage, bytes ?? refusal.bytes);
+    } catch (error) {
+      if (error instanceof ReplayRecordingError) return error;
+      throw error;
+    }
+    return new ReplayRecordingError("Saving this run would take the golden runs over their storage budget. Delete some before saving more.", "limit");
+  }
+
+  private *build(
+    loaded: LoadedRun,
+    input: { executionId: string; name: string; notes?: string | null },
+    createdBy: string | null,
+    capture?: CaptureOptions
+  ): Generator<void, { row: Parameters<Store["saveReplayRecording"]>[0]; bytes: number }, void> {
+    const { history, current, context } = loaded;
     let captured: Record<string, unknown>;
     let workflowHash: string;
     let savedVersion: number | null;
@@ -336,12 +407,12 @@ export class ReplayRecordingService {
       durationMs: history.durationMs,
       nodeResults: history.nodeResults,
       nodes: capturedNodes,
-      guardEvents: store.listGuardEventsForExecution(history.id),
+      guardEvents: loaded.guardEvents,
       priceTurn: this.options.priceTurn
     });
 
     // Cheap size checks on the raw copy first: the clone, scrub and serialise passes below cost time on the event loop.
-    const cassetteRecord = capture ? (capture.cassette ? { cassette: capture.cassette } : null) : store.getMcpCassetteForExecution(history.id);
+    const cassetteRecord = loaded.cassetteRecord;
     const rawFixed = jsonBytes(facts) + (history.input === undefined || history.input === null ? 0 : jsonBytes(history.input)) + jsonBytes(captured);
     const rawNodes = jsonBytes(nodes);
     const rawCassette = cassetteRecord ? jsonBytes(cassetteRecord.cassette) : 0;
@@ -350,9 +421,9 @@ export class ReplayRecordingService {
     }
     // Node outputs that do not fit are cut, so only an untruncated run counts them in its estimate.
     const estimate = (rawFixed + (rawFixed + rawNodes <= this.options.maxBytes ? rawNodes : 0) + rawCassette) / SCRUB_SHRINK_ALLOWANCE;
-    if (!capture) this.checkBudgets(history.workflowId, Math.ceil(estimate), true);
+    if (loaded.budgetUsage) this.checkBudgetUsage(loaded.budgetUsage, Math.ceil(estimate), true);
 
-    const scrubber = this.scrubber();
+    const scrubber = loaded.scrubber;
     let scrubbedNodes = this.scrubValue(nodes, scrubber);
     let scrubbedFacts = this.scrubFacts(facts, scrubber);
     let scrubbedInput = history.input === undefined || history.input === null ? null : this.scrubValue(history.input, scrubber);
@@ -460,41 +531,41 @@ export class ReplayRecordingService {
       byteLength(nodesJson) +
       (modelTapeJson ? byteLength(modelTapeJson) : 0) +
       (memorySeedJson ? byteLength(memorySeedJson) : 0);
-    if (!capture) this.checkBudgets(history.workflowId, bytes);
-    capture?.beforeSave?.(bytes);
-
-    return store.saveReplayRecording({
-      id: `rec_${randomUUID()}`,
-      workflowId: history.workflowId,
-      projectId: current?.projectId ?? (typeof captured.projectId === "string" ? captured.projectId : null),
-      name: input.name,
-      notes: input.notes?.trim() ? input.notes.trim() : null,
-      sourceExecutionId: history.id,
-      sourceTriggerType: history.triggerType,
-      sourceStatus: history.status,
-      workflowHash,
-      workflowSavedVersion: savedVersion,
-      capturedWorkflowJson: workflowJson,
-      inputJson,
-      nodeOutputsJson: nodesJson,
-      factsJson,
-      mcpCassetteJson: cassetteJson,
-      modelTapeJson,
-      memorySeedJson,
-      capabilities: {
-        mcp: cassette ? "cassette" : "none",
-        models: modelTape ? "tape" : "live",
-        memory: memorySeed ? "seeded" : "empty",
-        workflowSource,
-        scrubbed,
-        ...(captureInfo ? { capture: captureInfo } : {})
-      },
+    return {
       bytes,
-      truncated,
-      createdAt: this.now().toISOString(),
-      createdBy: capture ? null : createdBy,
-      ...(capture ? { status: "candidate" as const, capturedAt: capture.capturedAt } : {})
-    });
+      row: {
+        id: `rec_${randomUUID()}`,
+        workflowId: history.workflowId,
+        projectId: current?.projectId ?? (typeof captured.projectId === "string" ? captured.projectId : null),
+        name: input.name,
+        notes: input.notes?.trim() ? input.notes.trim() : null,
+        sourceExecutionId: history.id,
+        sourceTriggerType: history.triggerType,
+        sourceStatus: history.status,
+        workflowHash,
+        workflowSavedVersion: savedVersion,
+        capturedWorkflowJson: workflowJson,
+        inputJson,
+        nodeOutputsJson: nodesJson,
+        factsJson,
+        mcpCassetteJson: cassetteJson,
+        modelTapeJson,
+        memorySeedJson,
+        capabilities: {
+          mcp: cassette ? "cassette" : "none",
+          models: modelTape ? "tape" : "live",
+          memory: memorySeed ? "seeded" : "empty",
+          workflowSource,
+          scrubbed,
+          ...(captureInfo ? { capture: captureInfo } : {})
+        },
+        bytes,
+        truncated,
+        createdAt: this.now().toISOString(),
+        createdBy: capture ? null : createdBy,
+        ...(capture ? { status: "candidate" as const, capturedAt: capture.capturedAt } : {})
+      }
+    };
   }
 
   /**
@@ -503,7 +574,7 @@ export class ReplayRecordingService {
    * since the capture), then the per-recording size limit, the golden-run
    * count and the storage budgets apply, as for a run saved by hand.
    */
-  preparePromotion(record: ReplayRecordingRecord): {
+  async preparePromotion(record: ReplayRecordingRecord): Promise<{
     name: string;
     capturedWorkflowJson: string;
     inputJson: string | null;
@@ -514,8 +585,8 @@ export class ReplayRecordingService {
     memorySeedJson: string | null;
     bytes: number;
     workflowHash: string;
-  } {
-    const scrubber = this.scrubber();
+  }> {
+    const scrubber = await this.scrubber();
     const workflowJson = this.serialise(scrubber.tree(record.capturedWorkflow), scrubber);
     const inputJson = record.input === null || record.input === undefined ? null : this.serialise(this.scrubValue(record.input, scrubber), scrubber);
     const nodesJson = this.serialise(this.scrubValue(record.nodes, scrubber), scrubber);
@@ -534,13 +605,13 @@ export class ReplayRecordingService {
       (modelTapeJson ? byteLength(modelTapeJson) : 0) +
       (memorySeedJson ? byteLength(memorySeedJson) : 0);
     if (bytes > this.options.maxBytes) throw new ReplayRecordingError(`${this.tooLargeMessage()} The captured run is ${bytes} bytes.`, "too_large");
-    if (this.options.store.countReplayRecordingsForWorkflow(record.workflowId) >= this.options.maxPerWorkflow) {
+    if (await this.options.store.countReplayRecordingsForWorkflow(record.workflowId) >= this.options.maxPerWorkflow) {
       throw new ReplayRecordingError(
         `This workflow already has ${this.options.maxPerWorkflow} golden runs (REPLAY_RECORDINGS_MAX_PER_WORKFLOW). Delete some before promoting more.`,
         "limit"
       );
     }
-    this.checkBudgets(record.workflowId, bytes);
+    await this.checkBudgets(record.workflowId, bytes);
     // The hash binds to the workflow as it ran (the run context's hash), as for a run saved by hand.
     const workflowHash = record.workflowHash;
     return {
@@ -672,7 +743,7 @@ export class ReplayRecordingService {
    * only lose secret values: the token-shape redactor would otherwise blank
    * a long id and break the replay plan.
    */
-  scrubWorkflow(workflow: Record<string, unknown>, scrubber: SecretScrubber = this.scrubber()): Record<string, unknown> {
+  scrubWorkflow(workflow: Record<string, unknown>, scrubber: SecretScrubber): Record<string, unknown> {
     const scrubbed = this.scrubForFile(sanitizeConfig(workflow) as Record<string, unknown>, scrubber);
     const id = (value: unknown) => (typeof value === "string" ? scrubber.text(value) : value);
     if (typeof workflow.id === "string") scrubbed.id = id(workflow.id);
@@ -700,7 +771,7 @@ export class ReplayRecordingService {
    * and ids, methods, snapshot hashes) only lose secret values, so a replay
    * still finds its entries.
    */
-  scrubCassette(cassette: McpCassette, scrubber: SecretScrubber = this.scrubber()): McpCassette {
+  scrubCassette(cassette: McpCassette, scrubber: SecretScrubber): McpCassette {
     const scrubbed = this.scrubForFile(cassette, scrubber) as McpCassette;
     const text = (value: unknown) => (typeof value === "string" ? scrubber.text(value) : value);
     const servers = cassette.servers.map((server, index) => {
@@ -734,7 +805,7 @@ export class ReplayRecordingService {
    * since), and secret references are removed. `workflowHash` is the hash of
    * the workflow exactly as the file carries it, so an importer can check it.
    */
-  toFileRecording(record: ReplayRecordingRecord, scrubber: SecretScrubber = this.scrubber()): GoldenSetFileRecording {
+  toFileRecording(record: ReplayRecordingRecord, scrubber: SecretScrubber): GoldenSetFileRecording {
     const nodes = this.scrubForFile(record.nodes, scrubber);
     const input = record.input === undefined || record.input === null ? null : this.scrubForFile(record.input, scrubber);
     const workflow = this.scrubWorkflow(record.capturedWorkflow, scrubber);
@@ -780,7 +851,7 @@ export class ReplayRecordingService {
    */
   prepareImport(
     input: { workflowId: string; projectId: string | null; recording: GoldenSetFileRecording; name: string; sourceWorkflowId: string; keepNodes?: Map<string, string> },
-    scrubber: SecretScrubber = this.scrubber()
+    scrubber: SecretScrubber
   ): PreparedImport {
     const file = input.recording;
     const claimedHash = sha256Hex(canonicalJson(file.workflow));
@@ -935,14 +1006,17 @@ export class ReplayRecordingService {
   }
 
   /** Saves a golden run `prepareImport` checked, after the per-workflow count and the storage budgets. */
-  saveImport(prepared: PreparedImport, createdBy: string | null): ReplayRecordingSummary {
+  async saveImport(prepared: PreparedImport, createdBy: string | null): Promise<ReplayRecordingSummary> {
     const store = this.options.store;
     const { row } = prepared;
-    if (store.countReplayRecordingsForWorkflow(row.workflowId) >= this.options.maxPerWorkflow) {
+    if (await store.countReplayRecordingsForWorkflow(row.workflowId) >= this.options.maxPerWorkflow) {
       throw new ReplayRecordingError(`This workflow already has ${this.options.maxPerWorkflow} golden runs (REPLAY_RECORDINGS_MAX_PER_WORKFLOW). Delete some before importing more.`, "limit");
     }
-    this.checkBudgets(row.workflowId, row.bytes);
-    return store.saveReplayRecording({ ...row, createdBy });
+    await this.checkBudgets(row.workflowId, row.bytes);
+    // Checked again in the save's transaction: another save may have used the room meanwhile.
+    const outcome = await store.saveReplayRecordingChecked({ ...row, createdBy }, { limits: this.limits });
+    if ("refused" in outcome) throw this.refusalError(outcome, "importing", row.bytes);
+    return outcome.saved;
   }
 
   private tooLargeMessage(): string {
@@ -950,17 +1024,26 @@ export class ReplayRecordingService {
   }
 
   /** Refuses a save of `bytes` that would take the workflow's or the deployment's golden runs over their budget. */
-  private checkBudgets(workflowId: string, bytes: number, estimated = false): void {
+  private async checkBudgets(workflowId: string, bytes: number): Promise<void> {
+    this.checkBudgetUsage(await this.budgetUsage(workflowId), bytes);
+  }
+
+  /** The bytes the workflow's golden runs and the deployment's golden runs take now. */
+  private async budgetUsage(workflowId: string): Promise<{ workflow: number; total: number }> {
     const store = this.options.store;
+    return { workflow: await store.sumReplayRecordingBytesForWorkflow(workflowId), total: await store.sumReplayRecordingBytes() };
+  }
+
+  private checkBudgetUsage(usage: { workflow: number; total: number }, bytes: number, estimated = false): void {
     const size = estimated ? `at least about ${bytes} bytes once scrubbed` : `${bytes} bytes`;
-    const used = store.sumReplayRecordingBytesForWorkflow(workflowId);
+    const used = usage.workflow;
     if (used + bytes > this.options.maxBytesPerWorkflow) {
       throw new ReplayRecordingError(
         `Saving this run (${size}) would take this workflow's golden runs over REPLAY_RECORDINGS_MAX_BYTES_PER_WORKFLOW (${used} of ${this.options.maxBytesPerWorkflow} bytes used). Delete some before saving more.`,
         "limit"
       );
     }
-    const total = store.sumReplayRecordingBytes();
+    const total = usage.total;
     if (total + bytes > this.options.maxTotalBytes) {
       throw new ReplayRecordingError(
         `Saving this run (${size}) would take the golden runs in this deployment over REPLAY_RECORDINGS_MAX_TOTAL_BYTES (${total} of ${this.options.maxTotalBytes} bytes used). Delete some before saving more.`,
@@ -969,8 +1052,8 @@ export class ReplayRecordingService {
     }
   }
 
-  get(id: string): ReplayRecordingRecord | null {
-    return this.options.store.getReplayRecording(id);
+  async get(id: string): Promise<ReplayRecordingRecord | null> {
+    return await this.options.store.getReplayRecording(id);
   }
 
   /** What the API returns for one golden run: no captured workflow or raw cassette. */

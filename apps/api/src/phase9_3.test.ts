@@ -16,22 +16,22 @@ describe("Phase 9.3 — hybrid search + rerank", () => {
   beforeEach(async () => {
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-phase9-3-"));
     store = await SqliteStore.create(path.join(tempDir, "orchestrator.db"));
-    store.ensureDefaultProject();
+    await store.ensureDefaultProject();
   });
 
-  afterEach(() => {
-    try { store.close(); } catch { /* may already be closed */ }
+  afterEach(async () => {
+    try { await store.close(); } catch { /* may already be closed */ }
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
 
   function adapter(kbId: string): KnowledgeBaseVectorStoreAdapter {
     return new KnowledgeBaseVectorStoreAdapter(
       {
-        addKnowledgeBaseChunks: (i) => store.addKnowledgeBaseChunks(i),
-        listKnowledgeBaseChunks: (id) => store.listKnowledgeBaseChunks(id),
-        bm25SearchKnowledgeBase: (i) => store.bm25SearchKnowledgeBase(i),
-        getKnowledgeBase: (id) => {
-          const kb = store.getKnowledgeBase(id);
+        addKnowledgeBaseChunks: async (i) => await store.addKnowledgeBaseChunks(i),
+        listKnowledgeBaseChunks: async (id) => await store.listKnowledgeBaseChunks(id),
+        bm25SearchKnowledgeBase: async (i) => await store.bm25SearchKnowledgeBase(i),
+        getKnowledgeBase: async (id) => {
+          const kb = await store.getKnowledgeBase(id);
           return kb ? { id: kb.id, embedderId: kb.embedderId, dimensions: kb.dimensions } : null;
         }
       },
@@ -82,10 +82,10 @@ describe("Phase 9.3 — hybrid search + rerank", () => {
   // -------------------------------------------------------------------------
 
   describe("BM25 search via FTS5", () => {
-    function setupKb(): string {
-      store.createKnowledgeBase({ id: "kb_bm25", name: "bm25", embedderId: "token-embedder" });
+    async function setupKb(): Promise<string> {
+      await store.createKnowledgeBase({ id: "kb_bm25", name: "bm25", embedderId: "token-embedder" });
       const v = (n: number) => new Array(64).fill(n);
-      store.addKnowledgeBaseChunks({
+      await store.addKnowledgeBaseChunks({
         knowledgeBaseId: "kb_bm25",
         chunks: [
           { chunkIndex: 0, content: "Reset your password using the recovery email link", vector: v(1), sourceId: "doc-auth" },
@@ -97,9 +97,9 @@ describe("Phase 9.3 — hybrid search + rerank", () => {
       return "kb_bm25";
     }
 
-    it("returns BM25-ranked chunks for an exact-keyword query", () => {
-      const kbId = setupKb();
-      const results = store.bm25SearchKnowledgeBase({
+    it("returns BM25-ranked chunks for an exact-keyword query", async () => {
+      const kbId = await setupKb();
+      const results = await store.bm25SearchKnowledgeBase({
         knowledgeBaseId: kbId,
         query: "password",
         topK: 5
@@ -110,10 +110,10 @@ describe("Phase 9.3 — hybrid search + rerank", () => {
       expect(results.some((r) => r.sourceId === "doc-billing")).toBe(false);
     });
 
-    it("escapes FTS5 special characters in user queries", () => {
-      const kbId = setupKb();
+    it("escapes FTS5 special characters in user queries", async () => {
+      const kbId = await setupKb();
       // Query contains FTS5-meaningful chars (parens, colon, NOT)
-      const results = store.bm25SearchKnowledgeBase({
+      const results = await store.bm25SearchKnowledgeBase({
         knowledgeBaseId: kbId,
         query: "what (does NOT) :reset password? mean!",
         topK: 5
@@ -122,9 +122,9 @@ describe("Phase 9.3 — hybrid search + rerank", () => {
       expect(results.length).toBeGreaterThan(0);
     });
 
-    it("returns empty for queries with no indexable tokens", () => {
-      const kbId = setupKb();
-      const results = store.bm25SearchKnowledgeBase({
+    it("returns empty for queries with no indexable tokens", async () => {
+      const kbId = await setupKb();
+      const results = await store.bm25SearchKnowledgeBase({
         knowledgeBaseId: kbId,
         query: "?? ! - +",
         topK: 5
@@ -132,9 +132,9 @@ describe("Phase 9.3 — hybrid search + rerank", () => {
       expect(results).toEqual([]);
     });
 
-    it("normalizes scores to [0, 1] with the best result at 1", () => {
-      const kbId = setupKb();
-      const results = store.bm25SearchKnowledgeBase({
+    it("normalizes scores to [0, 1] with the best result at 1", async () => {
+      const kbId = await setupKb();
+      const results = await store.bm25SearchKnowledgeBase({
         knowledgeBaseId: kbId,
         query: "password recovery",
         topK: 5
@@ -148,17 +148,17 @@ describe("Phase 9.3 — hybrid search + rerank", () => {
       expect(top).toBeCloseTo(1, 6);
     });
 
-    it("scopes to a single KB (FTS rows from another KB don't leak)", () => {
-      store.createKnowledgeBase({ id: "kb_other", name: "other", embedderId: "token-embedder" });
-      store.addKnowledgeBaseChunks({
+    it("scopes to a single KB (FTS rows from another KB don't leak)", async () => {
+      await store.createKnowledgeBase({ id: "kb_other", name: "other", embedderId: "token-embedder" });
+      await store.addKnowledgeBaseChunks({
         knowledgeBaseId: "kb_other",
         chunks: [
           { chunkIndex: 0, content: "different KB password content", vector: new Array(64).fill(1), sourceId: "x" }
         ]
       });
-      const kbId = setupKb();
+      const kbId = await setupKb();
 
-      const results = store.bm25SearchKnowledgeBase({
+      const results = await store.bm25SearchKnowledgeBase({
         knowledgeBaseId: kbId,
         query: "password",
         topK: 10
@@ -166,12 +166,12 @@ describe("Phase 9.3 — hybrid search + rerank", () => {
       expect(results.every((r) => !r.content.includes("different KB"))).toBe(true);
     });
 
-    it("FTS index stays in sync after deletes", () => {
-      const kbId = setupKb();
+    it("FTS index stays in sync after deletes", async () => {
+      const kbId = await setupKb();
       // Drop one source — FTS triggers should remove the rows
-      store.deleteKnowledgeBaseChunksBySource({ knowledgeBaseId: kbId, sourceId: "doc-auth" });
+      await store.deleteKnowledgeBaseChunksBySource({ knowledgeBaseId: kbId, sourceId: "doc-auth" });
 
-      const results = store.bm25SearchKnowledgeBase({
+      const results = await store.bm25SearchKnowledgeBase({
         knowledgeBaseId: kbId,
         query: "password",
         topK: 5
@@ -189,7 +189,7 @@ describe("Phase 9.3 — hybrid search + rerank", () => {
     it("hybrid returns results when BM25 finds matches the dense path misses", async () => {
       // The token embedder is bag-of-tokens hashed into 64 buckets — easy
       // to defeat with an out-of-vocabulary keyword. BM25 picks it up.
-      store.createKnowledgeBase({ id: "kb_hybrid", name: "hybrid", embedderId: "token-embedder" });
+      await store.createKnowledgeBase({ id: "kb_hybrid", name: "hybrid", embedderId: "token-embedder" });
       const a = adapter("kb_hybrid");
       const embedder = new TokenEmbeddingAdapter();
       await a.upsert(
@@ -209,7 +209,7 @@ describe("Phase 9.3 — hybrid search + rerank", () => {
     });
 
     it("falls back to vector-only when BM25 returns nothing", async () => {
-      store.createKnowledgeBase({ id: "kb_fb", name: "fb", embedderId: "token-embedder" });
+      await store.createKnowledgeBase({ id: "kb_fb", name: "fb", embedderId: "token-embedder" });
       const a = adapter("kb_fb");
       const embedder = new TokenEmbeddingAdapter();
       await a.upsert(
@@ -226,7 +226,7 @@ describe("Phase 9.3 — hybrid search + rerank", () => {
     });
 
     it("hybrid result count is bounded by topK", async () => {
-      store.createKnowledgeBase({ id: "kb_topk", name: "topk", embedderId: "token-embedder" });
+      await store.createKnowledgeBase({ id: "kb_topk", name: "topk", embedderId: "token-embedder" });
       const a = adapter("kb_topk");
       const embedder = new TokenEmbeddingAdapter();
       const docs = Array.from({ length: 20 }, (_, i) => ({

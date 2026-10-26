@@ -56,38 +56,38 @@ export function registerGateAdmissionRoutes(deps: GateAdmissionRoutesDeps): void
   };
 
   app.get<Params>("/api/workflows/:id/release-gate/cases", (request, reply) =>
-    handle(request, reply, ["viewer"], (user) => ({ cases: admission.casesView(user, request.params.id) }))
+    handle(request, reply, ["viewer"], async (user) => ({ cases: await admission.casesView(user, request.params.id) }))
   );
 
   app.post<Params & { Body: unknown }>("/api/workflows/:id/release-gate/cases/admit", (request, reply) =>
-    handle(request, reply, ["builder"], (user) => {
+    handle(request, reply, ["builder"], async (user) => {
       const parsed = gateCaseDecisionInputSchema.safeParse(request.body ?? {});
       if (!parsed.success) return invalid(reply, "admission", parsed.error.issues);
-      return { cases: admission.admit(user, request.params.id, parsed.data) };
+      return { cases: await admission.admit(user, request.params.id, parsed.data) };
     })
   );
 
   app.post<Params & { Body: unknown }>("/api/workflows/:id/release-gate/cases/reject", (request, reply) =>
-    handle(request, reply, ["builder"], (user) => {
+    handle(request, reply, ["builder"], async (user) => {
       const parsed = gateCaseDecisionInputSchema.safeParse(request.body ?? {});
       if (!parsed.success) return invalid(reply, "rejection", parsed.error.issues);
-      return { cases: admission.reject(user, request.params.id, parsed.data) };
+      return { cases: await admission.reject(user, request.params.id, parsed.data) };
     })
   );
 
   app.put<{ Params: { id: string; fixtureId: string }; Body: unknown }>("/api/workflows/:id/release-gate/cases/:fixtureId/required", (request, reply) =>
-    handle(request, reply, ["builder"], (user) => {
+    handle(request, reply, ["builder"], async (user) => {
       const parsed = gateCaseRequiredInputSchema.safeParse(request.body ?? {});
       if (!parsed.success) return invalid(reply, "required setting", parsed.error.issues);
-      return { cases: admission.setRequired(user, request.params.id, request.params.fixtureId, parsed.data.required) };
+      return { cases: await admission.setRequired(user, request.params.id, request.params.fixtureId, parsed.data.required) };
     })
   );
 
   app.post<Params & { Body: unknown }>("/api/workflows/:id/release-gate/cases/requests", (request, reply) =>
-    handle(request, reply, ["builder"], (user) => {
+    handle(request, reply, ["builder"], async (user) => {
       const parsed = gateCaseRequestInputSchema.safeParse(request.body ?? {});
       if (!parsed.success) return invalid(reply, "request", parsed.error.issues);
-      const view = admission.request(user, request.params.id, parsed.data);
+      const view = await admission.request(user, request.params.id, parsed.data);
       reply.code(202);
       return { request: view };
     })

@@ -18,8 +18,8 @@ import {
 
 /** The store reads the subject resolution needs. */
 export interface McpToolPolicySubjectStore {
-  getWorkflowCreatedBy(workflowId: string): string | null;
-  getUserById(id: string): { id: string; email: string; role: string } | null;
+  getWorkflowCreatedBy(workflowId: string): Promise<string | null>;
+  getUserById(id: string): Promise<{ id: string; email: string; role: string } | null>;
 }
 
 /**
@@ -27,19 +27,19 @@ export interface McpToolPolicySubjectStore {
  * it; otherwise (webhooks, schedules, queue, public chat and forms) the
  * workflow's creator; otherwise the lowest role, viewer, with the reason.
  */
-export function resolveMcpToolPolicySubject(
+export async function resolveMcpToolPolicySubject(
   store: McpToolPolicySubjectStore,
   workflowId: string,
   actor?: { id: string; email: string; role: McpPolicyRole } | null
-): McpToolPolicySubject {
+): Promise<McpToolPolicySubject> {
   if (actor) {
     return { role: actor.role, source: "user", userId: actor.id, email: actor.email };
   }
-  const ownerId = store.getWorkflowCreatedBy(workflowId);
+  const ownerId = await store.getWorkflowCreatedBy(workflowId);
   if (!ownerId) {
     return { role: "viewer", source: "fallback", fallbackReason: "the workflow has no recorded owner" };
   }
-  const owner = store.getUserById(ownerId);
+  const owner = await store.getUserById(ownerId);
   if (!owner || !MCP_POLICY_ROLES.includes(owner.role as McpPolicyRole)) {
     return { role: "viewer", source: "fallback", userId: ownerId, fallbackReason: "the workflow owner no longer exists" };
   }

@@ -28,7 +28,7 @@ const contexts: TestContext[] = [];
 async function createTestContext(): Promise<TestContext> {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-mcp-registry-"));
   const store = await SqliteStore.create(path.join(tempDir, "orchestrator.db"));
-  store.ensureDefaultProject();
+  await store.ensureDefaultProject();
   const config = parseConfig({
     LOG_LEVEL: "warn",
     SEED_SAMPLE_WORKFLOWS: "false",
@@ -40,7 +40,7 @@ async function createTestContext(): Promise<TestContext> {
   });
   const secretService = new SecretService(store, config.SECRET_MASTER_KEY_BASE64);
   const authService = new AuthService(store, config.SESSION_TTL_HOURS);
-  const app = createApp(config, store, secretService, authService);
+  const app = await createApp(config, store, secretService, authService);
   await app.ready();
   const context: TestContext = { app, store, authService, secretService, config, tempDir };
   contexts.push(context);
@@ -53,7 +53,7 @@ afterEach(async () => {
     if (!context) continue;
     await context.app.close();
     try {
-      context.store.close();
+      await context.store.close();
     } catch {
       // The store may already be closed by the app shutdown hooks.
     }
@@ -71,7 +71,7 @@ function extractCookie(setCookieHeader: string | string[] | undefined, cookieNam
 async function login(context: TestContext, role: "admin" | "builder" | "operator" | "viewer"): Promise<string> {
   const email = `${role}@example.com`;
   const password = `${role}-Pass-123!`;
-  context.authService.register({ email, password, role });
+  await context.authService.register({ email, password, role });
   const response = await context.app.inject({ method: "POST", url: "/api/auth/login", payload: { email, password } });
   if (response.statusCode !== 200) throw new Error(`Login failed for ${role}: ${response.body}`);
   return extractCookie(response.headers["set-cookie"], context.config.SESSION_COOKIE_NAME);
@@ -170,7 +170,7 @@ describe("MCP server registry API", () => {
     expect(detailBody.snapshots[0]).not.toHaveProperty("tools");
     expect(detailBody.usages).toEqual([]);
 
-    const audit = context.store.listAuditLogs({ resourceType: "mcp_server" });
+    const audit = await context.store.listAuditLogs({ resourceType: "mcp_server" });
     expect(audit.items.map((entry) => entry.eventType)).toContain("mcp_server.created");
   });
 
@@ -183,7 +183,7 @@ describe("MCP server registry API", () => {
     expect((await createServer(context, admin, { probeIntervalMs: 500 })).statusCode).toBe(400);
     expect((await createServer(context, admin, { name: " " })).statusCode).toBe(400);
 
-    const secret = context.secretService.createSecret({ name: "Token", provider: "mcp", value: "t0ken" });
+    const secret = await context.secretService.createSecret({ name: "Token", provider: "mcp", value: "t0ken" });
     const created = await createServer(context, admin, { secretRef: { secretId: secret.secretId } });
     expect(created.statusCode).toBe(201);
     const server = created.json<{ server: ServerBody }>().server;
@@ -212,7 +212,7 @@ describe("MCP server registry API", () => {
     const context = await createTestContext();
     const admin = await login(context, "admin");
     const server = (await createServer(context, admin, { blockOnBreakingChange: true })).json<{ server: ServerBody }>().server;
-    context.store.upsertWorkflow(calculatorWorkflow(server.id));
+    await context.store.upsertWorkflow(calculatorWorkflow(server.id));
 
     const run = () =>
       context.app.inject({ method: "POST", url: "/api/workflows/wf-registry-calc/execute", headers: { cookie: admin }, payload: {} });
@@ -225,7 +225,7 @@ describe("MCP server registry API", () => {
 
     // Simulate a probe that saw a breaking schema change.
     const now = new Date().toISOString();
-    context.store.recordMcpServerProbe({
+    await context.store.recordMcpServerProbe({
       probe: { id: "probe_x", serverId: server.id, startedAt: now, ok: true, latencyMs: 5, toolCount: 0, error: null, snapshotId: "snap_x" },
       status: "healthy",
       snapshot: {
@@ -261,7 +261,7 @@ describe("MCP server registry API", () => {
     });
     expect(accepted.statusCode).toBe(200);
     expect(accepted.json<{ server: ServerBody }>().server.pendingBreakingSnapshotId).toBeNull();
-    expect(context.store.getMcpToolSnapshot("snap_x")?.acknowledgedBy).toBe("admin@example.com");
+    expect((await context.store.getMcpToolSnapshot("snap_x"))?.acknowledgedBy).toBe("admin@example.com");
 
     const again = await context.app.inject({
       method: "POST",
@@ -276,7 +276,7 @@ describe("MCP server registry API", () => {
     const context = await createTestContext();
     const admin = await login(context, "admin");
     const server = (await createServer(context, admin)).json<{ server: ServerBody }>().server;
-    context.store.upsertWorkflow(calculatorWorkflow(server.id));
+    await context.store.upsertWorkflow(calculatorWorkflow(server.id));
 
     const refused = await context.app.inject({ method: "DELETE", url: `/api/mcp/servers/${server.id}`, headers: { cookie: admin } });
     expect(refused.statusCode).toBe(409);

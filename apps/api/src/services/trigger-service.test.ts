@@ -22,8 +22,8 @@ function service(fetchImpl: typeof fetch, resolved: string[] = ["93.184.216.34"]
   return { triggers: triggers as unknown as Record<string, (wf: Workflow, n: WorkflowNode) => () => void>, logs };
 }
 
-const waitFor = async (check: () => boolean) => {
-  for (let i = 0; i < 100 && !check(); i += 1) await new Promise((resolve) => setTimeout(resolve, 10));
+const waitFor = async (check: () => boolean | Promise<boolean>) => {
+  for (let i = 0; i < 100 && !(await check()); i += 1) await new Promise((resolve) => setTimeout(resolve, 10));
 };
 
 const stops: Array<() => void> = [];

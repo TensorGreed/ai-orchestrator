@@ -100,7 +100,7 @@ class SqliteAdapter implements BackupAdapter {
     // and all ensureColumn() shims have run before we touch the file.
     const { SqliteStore } = await import("../db/database.js");
     const store = await SqliteStore.create(absolutePath);
-    store.close();
+    await store.close();
 
     const db = new Database(absolutePath);
     db.pragma("journal_mode = WAL");

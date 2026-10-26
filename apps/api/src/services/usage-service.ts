@@ -21,7 +21,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import type { SqliteStore } from "../db/database.js";
+import type { Store } from "../db/store.js";
 
 export interface ModelPricing {
   /** Dollars per 1 million input tokens. */
@@ -121,12 +121,12 @@ export interface RecordExecutionInput {
 }
 
 export class UsageService {
-  private readonly store: SqliteStore;
+  private readonly store: Store;
   private pricing: PricingTable;
   private logger?: { info: (msg: string, fields?: Record<string, unknown>) => void; warn: (msg: string, fields?: Record<string, unknown>) => void };
   private readonly seenUnpricedModels = new Set<string>();
 
-  constructor(store: SqliteStore, options: { pricingOverridesJson?: string } = {}) {
+  constructor(store: Store, options: { pricingOverridesJson?: string } = {}) {
     this.store = store;
     this.pricing = mergePricing(DEFAULT_PRICING, options.pricingOverridesJson);
   }
@@ -154,14 +154,14 @@ export class UsageService {
    * unconditionally — emits a no-op row when no LLM calls happened (still
    * useful as a spend-attribution artifact for the workflow execution).
    */
-  recordExecution(input: RecordExecutionInput): {
+  async recordExecution(input: RecordExecutionInput): Promise<{
     inputTokens: number;
     outputTokens: number;
     cachedInputTokens: number;
     totalTokens: number;
     costUsd: number;
     llmCallCount: number;
-  } {
+  }> {
     const telemetries: NodeTelemetry[] = input.liveModelCalls
       ? input.liveModelCalls.map((call) => ({
           providerId: call.providerId,
@@ -200,7 +200,7 @@ export class UsageService {
       else providerCounts.set(key, { providerId: t.providerId, model: t.model, calls });
     }
 
-    this.store.writeUsageEvent({
+    await this.store.writeUsageEvent({
       id: `usage_${randomUUID()}`,
       executionId: input.executionId,
       workflowId: input.workflowId,

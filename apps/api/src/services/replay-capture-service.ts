@@ -45,7 +45,7 @@
  * its slot again.
  */
 
-import { hkdfSync } from "node:crypto";
+import { hkdfSync, randomUUID } from "node:crypto";
 import {
   DEFAULT_REPLAY_CAPTURE_SETTINGS,
   REPLAY_CAPTURE_DEFAULT_SET_NAME,
@@ -92,10 +92,11 @@ import {
   type GuardDictionary,
   type SubjectSpan
 } from "@ai-orchestrator/guard-sdk";
-import { SUBJECT_CASSETTE_SOURCES, SUBJECT_EXECUTION_TRIGGERS, type ReplayCaptureSettingsRecord, type SqliteStore, type SubjectTextRow } from "../db/database.js";
+import { SUBJECT_CASSETTE_SOURCES, SUBJECT_EXECUTION_TRIGGERS, type ReplayCaptureSettingsRecord, type SubjectTextRow } from "../db/database.js";
 import { inputProvenance, type CaptureInputOrigin } from "./capture-masking.js";
 import type { McpCassetteRunPlan } from "./mcp-cassette-service.js";
 import { ReplayRecordingError, type ReplayRecordingService } from "./replay-recording-service.js";
+import type { Store } from "../db/store.js";
 
 /** HKDF info for the surrogate key: one deployment-stable key derived from the master key. */
 export const CAPTURE_SURROGATE_HKDF_INFO = "l2m/capture-surrogate/v1";
@@ -185,27 +186,24 @@ export interface CaptureDeployment {
 }
 
 export interface ReplayCaptureServiceOptions {
-  store: SqliteStore;
+  store: Store;
   recordings: ReplayRecordingService;
   /** Golden sets: the promote target. */
   datasets: {
-    getDataset(id: string): { id: string; workflowId?: string | null } | null | undefined;
-    listDatasets(options: { workflowId?: string }): Array<{ id: string; name: string; workflowId?: string | null }>;
-    createDataset(input: { name: string; description?: string; projectId?: string; workflowId?: string; createdBy?: string }): { id: string } | null | undefined;
-    addGoldenRun(input: { datasetId: string; recording: NonNullable<ReturnType<SqliteStore["getReplayRecording"]>>; name?: string }): { id: string } | null | undefined;
+    getDataset(id: string): Promise<{ id: string; workflowId?: string | null } | null | undefined>;
   };
   /** Surrogate key (HKDF of the master key). */
   surrogateKey: Uint8Array;
   /** The dictionaries of the guard profiles bound to the workflow (custom data classes). */
-  dictionariesFor: (workflow: { id: string; projectId?: string | null }) => GuardDictionary[];
+  dictionariesFor: (workflow: { id: string; projectId?: string | null }) => Promise<GuardDictionary[]>;
   /** Tool names a registry server's current tool snapshot lists: such a tool name is not scanned on its own (capture-masking `cassetteIdentifiers`). */
-  catalogToolNames?: (registryServerId: string) => readonly string[];
+  catalogToolNames?: (registryServerId: string) => Promise<readonly string[]>;
   /** The workflow's current project (a promoted run's "Captured" set is made there). */
-  workflowProject?: (workflowId: string) => string | null;
+  workflowProject?: (workflowId: string) => Promise<string | null>;
   /** Every dictionary data class the deployment's guard profiles define (the data-subject lookup tries them all). */
-  dictionaryClasses: () => string[];
+  dictionaryClasses: () => Promise<string[]>;
   /** The workflow's published version, or null when it has none. */
-  publishedVersion: (workflowId: string) => number | null;
+  publishedVersion: (workflowId: string) => Promise<number | null>;
   deployment: CaptureDeployment;
   /** Uniform draw in [0, 1); tests pass a seeded generator. */
   random?: () => number;
@@ -281,12 +279,12 @@ export class ReplayCaptureService {
   // Settings
   // ---------------------------------------------------------------------------
 
-  settings(workflowId: string): ReplayCaptureSettingsRecord | null {
-    return this.options.store.getReplayCaptureSettings(workflowId);
+  async settings(workflowId: string): Promise<ReplayCaptureSettingsRecord | null> {
+    return await this.options.store.getReplayCaptureSettings(workflowId);
   }
 
-  view(workflowId: string): ReplayCaptureSettingsView {
-    const stored = this.settings(workflowId);
+  async view(workflowId: string): Promise<ReplayCaptureSettingsView> {
+    const stored = await this.settings(workflowId);
     const base = stored ?? { ...DEFAULT_REPLAY_CAPTURE_SETTINGS, workflowId, dlpOffReason: null, updatedAt: null, updatedBy: null };
     const deployment = this.options.deployment;
     const active = deployment.enabled && base.enabled;
@@ -304,8 +302,8 @@ export class ReplayCaptureService {
       dlpOffReason: base.dlpOffReason,
       deployment: { enabled: deployment.enabled, maxRate: deployment.maxRate, retentionDays: deployment.retentionDays, maxCandidates: deployment.maxPerWorkflow },
       effectiveRate: active ? Math.min(base.rate, deployment.maxRate) : 0,
-      candidates: this.options.store.countReplayRecordingsForWorkflow(workflowId, "candidate"),
-      capturedToday: this.options.store.countReplayCapturesSince(workflowId, startOfUtcDay(this.now())) + (this.inFlight.get(workflowId) ?? 0),
+      candidates: await this.options.store.countReplayRecordingsForWorkflow(workflowId, "candidate"),
+      capturedToday: await this.options.store.countReplayCapturesSince(workflowId, startOfUtcDay(this.now())) + (this.inFlight.get(workflowId) ?? 0),
       lastDrop:
         stored?.lastDropOutcome && stored.lastDropAt && (REPLAY_CAPTURE_DROP_OUTCOMES as readonly string[]).includes(stored.lastDropOutcome)
           ? { outcome: stored.lastDropOutcome as ReplayCaptureDropOutcome, at: stored.lastDropAt }
@@ -318,8 +316,8 @@ export class ReplayCaptureService {
    * a reason (the caller audits it); a rate above the deployment's ceiling
    * and a target that is not one of the workflow's golden sets are refused.
    */
-  update(workflow: Pick<Workflow, "id">, patch: ReplayCaptureSettingsUpdate, actor: { email: string; role: string }): ReplayCaptureSettingsView {
-    const current = this.settings(workflow.id);
+  async update(workflow: Pick<Workflow, "id">, patch: ReplayCaptureSettingsUpdate, actor: { email: string; role: string }): Promise<ReplayCaptureSettingsView> {
+    const current = await this.settings(workflow.id);
     const next = {
       enabled: patch.enabled ?? current?.enabled ?? DEFAULT_REPLAY_CAPTURE_SETTINGS.enabled,
       rate: patch.rate ?? current?.rate ?? DEFAULT_REPLAY_CAPTURE_SETTINGS.rate,
@@ -341,19 +339,19 @@ export class ReplayCaptureService {
     }
     if (next.dlp) dlpOffReason = null;
     if (next.targetDatasetId) {
-      const dataset = this.options.datasets.getDataset(next.targetDatasetId);
+      const dataset = await this.options.datasets.getDataset(next.targetDatasetId);
       if (!dataset || dataset.workflowId !== workflow.id) {
         throw new ReplayCaptureError("The target must be a golden set of this workflow.", "invalid");
       }
     }
-    this.options.store.saveReplayCaptureSettings({
+    await this.options.store.saveReplayCaptureSettings({
       workflowId: workflow.id,
       ...next,
       dlpOffReason,
       updatedAt: this.now().toISOString(),
       updatedBy: actor.email
     });
-    return this.view(workflow.id);
+    return await this.view(workflow.id);
   }
 
   // ---------------------------------------------------------------------------
@@ -364,7 +362,7 @@ export class ReplayCaptureService {
    * Whether this run is captured. Called when the run starts, before its
    * registries are built; never throws (a failure means "not captured").
    */
-  decide(input: {
+  async decide(input: {
     workflow: Pick<Workflow, "id">;
     channel: string;
     triggerType: string | undefined;
@@ -375,14 +373,14 @@ export class ReplayCaptureService {
     inputOrigin?: CaptureInputOrigin;
     /** Server-side: an API key started the run (never from a request body). */
     captureSource?: CaptureSource;
-  }): CaptureTicket | null {
+  }): Promise<CaptureTicket | null> {
     try {
       const deployment = this.options.deployment;
       if (!deployment.enabled || input.excluded || input.channel !== "production") return null;
       if (!input.triggerType || !eligibleTrigger(input.triggerType, input.captureSource)) return null;
-      const settings = this.settings(input.workflow.id);
+      const settings = await this.settings(input.workflow.id);
       if (!settings?.enabled) return null;
-      const published = this.options.publishedVersion(input.workflow.id);
+      const published = await this.options.publishedVersion(input.workflow.id);
       if (published !== null && input.releaseVersion !== published) {
         this.metric("skipped_not_published_version");
         return null;
@@ -394,11 +392,11 @@ export class ReplayCaptureService {
         return null;
       }
       const since = startOfUtcDay(this.now());
-      let used = this.options.store.countReplayCapturesSince(input.workflow.id, since) + (this.inFlight.get(input.workflow.id) ?? 0);
+      let used = await this.options.store.countReplayCapturesSince(input.workflow.id, since) + (this.inFlight.get(input.workflow.id) ?? 0);
       if (used >= settings.maxPerDay && this.options.sweepStale) {
         // Tickets of runs that never finished may hold the day's slots: give them back first.
         this.options.sweepStale();
-        used = this.options.store.countReplayCapturesSince(input.workflow.id, since) + (this.inFlight.get(input.workflow.id) ?? 0);
+        used = await this.options.store.countReplayCapturesSince(input.workflow.id, since) + (this.inFlight.get(input.workflow.id) ?? 0);
       }
       if (used >= settings.maxPerDay) {
         this.metric("skipped_daily_limit");
@@ -443,6 +441,27 @@ export class ReplayCaptureService {
     return this.inFlight.get(workflowId) ?? 0;
   }
 
+  /**
+   * Registry catalog tool names of every registry server the cassette
+   * called, read before masking (which is synchronous). A server whose
+   * catalog cannot be read is left out, so its names are scanned on their own.
+   */
+  private async catalogToolNamesOf(
+    cassette: McpCassette | null,
+    lookup: (registryServerId: string) => Promise<readonly string[]>
+  ): Promise<Map<string, readonly string[]>> {
+    const names = new Map<string, readonly string[]>();
+    for (const server of cassette?.servers ?? []) {
+      if (!server.registryServerId || names.has(server.registryServerId)) continue;
+      try {
+        names.set(server.registryServerId, await lookup(server.registryServerId));
+      } catch {
+        // No registry catalog: masking scans the server's names on their own (fails closed).
+      }
+    }
+    return names;
+  }
+
   /** The recording the run's recorder holds: MCP cassette with model tape and memory seed. */
   static cassetteOf(plan: McpCassetteRunPlan): McpCassette | null {
     if (!plan.recorder) return null;
@@ -483,12 +502,12 @@ export class ReplayCaptureService {
     try {
       const store = this.options.store;
       // Settings as they are now: capture turned off (or the kill switch) since the run started drops it.
-      const current = this.settings(ticket.workflowId);
+      const current = await this.settings(ticket.workflowId);
       if (!this.options.deployment.enabled || !current?.enabled) {
         this.metric("discarded_disabled");
         return;
       }
-      const history = store.getExecutionHistory(input.executionId);
+      const history = await store.getExecutionHistory(input.executionId);
       if (!history || !history.completedAt || ["running", "pending", "queued", "waiting_approval"].includes(history.status)) {
         this.metric("skipped_unfinished");
         return;
@@ -506,11 +525,21 @@ export class ReplayCaptureService {
       const capturedAt = this.now().toISOString();
       // Masking applies when either the settings the run started with or the current ones ask for it.
       const masked = ticket.settings.dlp || current.dlp;
+      const cassette = ReplayCaptureService.cassetteOf(input.plan);
+      const catalogNames = masked && this.options.catalogToolNames ? await this.catalogToolNamesOf(cassette, this.options.catalogToolNames) : null;
       const mask = masked
         ? {
             key: this.options.surrogateKey,
-            dictionaries: this.options.dictionariesFor(input.workflow),
-            ...(this.options.catalogToolNames ? { catalogToolNames: this.options.catalogToolNames } : {}),
+            dictionaries: await this.options.dictionariesFor(input.workflow),
+            ...(catalogNames
+              ? {
+                  catalogToolNames: (registryServerId: string) => {
+                    const names = catalogNames.get(registryServerId);
+                    if (!names) throw new Error(`No registry catalog for ${registryServerId}`);
+                    return names;
+                  }
+                }
+              : {}),
             // Phase 16 — surrogates the run issued itself stay as they are (same key, so the original's lookup still finds them).
             ...(input.issuedSurrogates && input.issuedSurrogates.size > 0 ? { keepValues: [...input.issuedSurrogates] } : {})
           }
@@ -519,23 +548,23 @@ export class ReplayCaptureService {
       const summary = await this.options.recordings.createCapture(
         { executionId: input.executionId, name },
         {
-          cassette: ReplayCaptureService.cassetteOf(input.plan),
+          cassette,
           mask,
           rate: ticket.rate,
           publishedVersion: ticket.publishedVersion,
           capturedAt,
           ...(ticket.captureSource ? { source: ticket.captureSource } : {}),
           inputProvenance: inputProvenance(history.triggerType, ticket.inputOrigin),
-          beforeSave: (bytes) => {
+          beforeSave: async (bytes) => {
             // Read once more right before saving: masking ran in chunks, and capture may have been turned off meanwhile.
-            const latest = this.settings(ticket.workflowId);
+            const latest = await this.settings(ticket.workflowId);
             if (!this.options.deployment.enabled || !latest?.enabled) throw new ReplayCaptureError("Capture was turned off while the run was being masked.", "conflict");
             // The run or its workflow deleted meanwhile (perhaps for privacy): nothing of it is kept.
-            if (!store.getExecutionHistory(input.executionId) || !store.getWorkflow(ticket.workflowId)) {
+            if (!await store.getExecutionHistory(input.executionId) || !await store.getWorkflow(ticket.workflowId)) {
               throw new ReplayCaptureError("The run or its workflow was deleted while it was being captured.", "not_found");
             }
             if (!masked && latest.dlp) throw new ReplayCaptureError("Masking was turned on while the run was being captured.", "conflict");
-            this.evictFor(ticket.workflowId, bytes);
+            await this.evictFor(ticket.workflowId, bytes);
           }
         }
       );
@@ -546,7 +575,7 @@ export class ReplayCaptureService {
       this.metric(outcome);
       if ((REPLAY_CAPTURE_DROP_OUTCOMES as readonly string[]).includes(outcome)) {
         try {
-          this.options.store.recordReplayCaptureDrop(ticket.workflowId, outcome, this.now().toISOString());
+          await this.options.store.recordReplayCaptureDrop(ticket.workflowId, outcome, this.now().toISOString());
         } catch {
           // The note is for the settings panel; the metric and the log line above still carry the drop.
         }
@@ -565,20 +594,20 @@ export class ReplayCaptureService {
    * the workflow is at its candidate count or over its byte budget. A
    * candidate larger than the whole budget is refused.
    */
-  private evictFor(workflowId: string, bytes: number): void {
+  private async evictFor(workflowId: string, bytes: number): Promise<void> {
     const store = this.options.store;
     const { maxPerWorkflow, maxBytesPerWorkflow } = this.options.deployment;
     if (bytes > maxBytesPerWorkflow) {
       throw new ReplayRecordingError(`The captured run is ${bytes} bytes, more than REPLAY_CAPTURES_MAX_BYTES_PER_WORKFLOW (${maxBytesPerWorkflow}).`, "too_large");
     }
-    let count = store.countReplayRecordingsForWorkflow(workflowId, "candidate");
-    let used = store.sumReplayCaptureBytesForWorkflow(workflowId);
+    let count = await store.countReplayRecordingsForWorkflow(workflowId, "candidate");
+    let used = await store.sumReplayCaptureBytesForWorkflow(workflowId);
     while (count > 0 && (count + 1 > maxPerWorkflow || used + bytes > maxBytesPerWorkflow)) {
-      const oldest = store.oldestReplayCaptures(workflowId, 20);
+      const oldest = await store.oldestReplayCaptures(workflowId, 20);
       if (oldest.length === 0) break;
       for (const candidate of oldest) {
         if (!(count + 1 > maxPerWorkflow || used + bytes > maxBytesPerWorkflow)) break;
-        if (store.deleteReplayRecording(candidate.id)) this.metric("evicted");
+        if (await store.deleteReplayRecording(candidate.id)) this.metric("evicted");
         count -= 1;
         used -= candidate.bytes;
       }
@@ -586,9 +615,9 @@ export class ReplayCaptureService {
   }
 
   /** Retention: candidates older than REPLAY_CAPTURE_RETENTION_DAYS. */
-  pruneExpired(): number {
+  async pruneExpired(): Promise<number> {
     const cutoff = new Date(this.now().getTime() - this.options.deployment.retentionDays * 24 * 60 * 60 * 1000).toISOString();
-    return this.options.store.pruneReplayCaptures(cutoff);
+    return await this.options.store.pruneReplayCaptures(cutoff);
   }
 
   // ---------------------------------------------------------------------------
@@ -610,55 +639,63 @@ export class ReplayCaptureService {
    * becomes golden, and joins the golden set (`datasetId`, else the
    * settings' target, else a set named "Captured" made on first use).
    */
-  promote(id: string, input: { datasetId?: string; name?: string }, actor: { email: string }): ReplayCapturePromoteOutcome & { workflowId?: string } {
+  async promote(id: string, input: { datasetId?: string; name?: string }, actor: { email: string }): Promise<ReplayCapturePromoteOutcome & { workflowId?: string }> {
     const store = this.options.store;
-    const record = store.getReplayRecording(id);
+    const record = await store.getReplayRecording(id);
     if (!record || record.status !== "candidate") return { id, ok: false, error: "Captured run not found" };
     try {
       // Checks first; the "Captured" set is made inside the transaction, so a refused promote leaves nothing behind.
-      const prepared = this.options.recordings.preparePromotion(record);
-      const projectId = this.options.workflowProject?.(record.workflowId) ?? record.projectId;
-      let fixtureId: string | undefined;
-      let datasetId = "";
-      store.transaction(() => {
-        datasetId = this.targetSet(record.workflowId, projectId, input.datasetId, actor.email);
-        if (!store.promoteReplayCapture(id, { ...prepared, name: input.name ?? prepared.name, createdBy: actor.email })) {
-          throw new ReplayCaptureError("The run is no longer waiting in the inbox.", "conflict");
-        }
-        const promoted = store.getReplayRecording(id)!;
-        fixtureId = this.options.datasets.addGoldenRun({ datasetId, recording: promoted })?.id;
-        if (!fixtureId) throw new ReplayCaptureError("The run could not be added to the golden set.", "conflict");
+      const prepared = await this.options.recordings.preparePromotion(record);
+      const projectId = (await this.options.workflowProject?.(record.workflowId)) ?? record.projectId;
+      const target = await this.targetSet(record.workflowId, projectId, input.datasetId, actor.email);
+      // The candidate becomes golden, the "Captured" set is made when missing and the case is added in one
+      // transaction, so a refused promote leaves nothing behind.
+      const outcome = await store.promoteReplayCaptureToGoldenSet({
+        recordingId: id,
+        promotion: { ...prepared, name: input.name ?? prepared.name, createdBy: actor.email },
+        target,
+        fixture: { id: `fix_${randomUUID()}` },
+        limits: this.options.recordings.limits
       });
-      return { id, ok: true, datasetId, workflowId: record.workflowId, ...(fixtureId ? { fixtureId } : {}) };
+      if ("refused" in outcome) {
+        if (outcome.refused === "not_candidate") throw new ReplayCaptureError("The run is no longer waiting in the inbox.", "conflict");
+        if (outcome.refused === "set_gone") throw new ReplayCaptureError("The run could not be added to the golden set.", "conflict");
+        throw this.options.recordings.refusalError(outcome, "promoting");
+      }
+      return { id, ok: true, datasetId: outcome.datasetId, workflowId: record.workflowId, fixtureId: outcome.fixtureId };
     } catch (error) {
       if (error instanceof ReplayCaptureError || error instanceof ReplayRecordingError) return { id, ok: false, error: error.message, workflowId: record.workflowId };
       throw error;
     }
   }
 
-  private targetSet(workflowId: string, projectId: string | null, requested: string | undefined, actorEmail: string): string {
-    const datasets = this.options.datasets;
-    const wanted = requested ?? this.settings(workflowId)?.targetDatasetId ?? null;
+  /** The golden set a promote joins: the requested or configured one, else the workflow's "Captured" set (made on first use). */
+  private async targetSet(
+    workflowId: string,
+    projectId: string | null,
+    requested: string | undefined,
+    actorEmail: string
+  ): Promise<{ datasetId: string } | { findOrCreate: { id: string; name: string; description: string; workflowId: string; projectId?: string; createdBy: string } }> {
+    const wanted = requested ?? (await this.settings(workflowId))?.targetDatasetId ?? null;
     if (wanted) {
-      const dataset = datasets.getDataset(wanted);
+      const dataset = await this.options.datasets.getDataset(wanted);
       if (!dataset || dataset.workflowId !== workflowId) {
         // A target that was deleted since falls back to the default set; an explicit one that is wrong is an error.
         if (requested) throw new ReplayCaptureError("The golden set must belong to this workflow.", "invalid");
       } else {
-        return dataset.id;
+        return { datasetId: dataset.id };
       }
     }
-    const existing = datasets.listDatasets({ workflowId }).find((dataset) => dataset.name === REPLAY_CAPTURE_DEFAULT_SET_NAME);
-    if (existing) return existing.id;
-    const created = datasets.createDataset({
-      name: REPLAY_CAPTURE_DEFAULT_SET_NAME,
-      description: "Runs captured from production and promoted from the Captured runs inbox.",
-      workflowId,
-      ...(projectId ? { projectId } : {}),
-      createdBy: actorEmail
-    });
-    if (!created) throw new ReplayCaptureError("The Captured golden set could not be created.", "conflict");
-    return created.id;
+    return {
+      findOrCreate: {
+        id: `ds_${randomUUID()}`,
+        name: REPLAY_CAPTURE_DEFAULT_SET_NAME,
+        description: "Runs captured from production and promoted from the Captured runs inbox.",
+        workflowId,
+        ...(projectId ? { projectId } : {}),
+        createdBy: actorEmail
+      }
+    };
   }
 
   // ---------------------------------------------------------------------------
@@ -734,12 +771,12 @@ export class ReplayCaptureService {
    * surrogates stopped keeping the mask's visible tail). Any other value is
    * matched as exact text, and as the surrogate of each dictionary class.
    */
-  private needlesFor(query: ReplayFindSubjectQuery): {
+  private async needlesFor(query: ReplayFindSubjectQuery): Promise<{
     dataClass: string | null;
     callingCode: string | null;
     classesTried: string[];
     needles: Array<{ label: string; index: SubjectIndex }>;
-  } {
+  }> {
     const { text, dataClass, callingCode } = this.readQuery(query);
     if (!dataClass && text.length < REPLAY_FIND_SUBJECT_MIN_RAW_LENGTH) {
       throw new ReplayCaptureError(
@@ -751,7 +788,7 @@ export class ReplayCaptureService {
     if (dataClass) raw.add(text, dataClass);
     else raw.addLiteral(text, "raw");
     const needles: Array<{ label: string; index: SubjectIndex }> = [{ label: "raw", index: raw }];
-    const classes = dataClass ? [dataClass] : [...new Set(this.options.dictionaryClasses())].sort();
+    const classes = dataClass ? [dataClass] : [...new Set(await this.options.dictionaryClasses())].sort();
     const key = this.options.surrogateKey;
     for (const surrogateClass of classes) {
       const index = new SubjectIndex({ strict: true });
@@ -820,7 +857,7 @@ export class ReplayCaptureService {
    * the event loop gets a turn between them. Nothing is deleted here.
    */
   async findSubject(query: ReplayFindSubjectQuery): Promise<ReplayFindSubjectResult> {
-    const { dataClass, callingCode, classesTried, needles } = this.needlesFor(query);
+    const { dataClass, callingCode, classesTried, needles } = await this.needlesFor(query);
     const store = this.options.store;
     const matches: ReplayFindSubjectMatch[] = [];
     const counts = Object.fromEntries(REPLAY_FIND_SUBJECT_KINDS.map((kind) => [kind, 0])) as Record<ReplayFindSubjectKind, number>;
@@ -828,7 +865,7 @@ export class ReplayCaptureService {
     for (const kind of REPLAY_FIND_SUBJECT_KINDS) {
       let after = 0;
       for (;;) {
-        const page = store.subjectTextPage(kind, after, FIND_SUBJECT_PAGE);
+        const page = await store.subjectTextPage(kind, after, FIND_SUBJECT_PAGE);
         for (const row of page.rows) {
           searched[kind] += 1;
           const match = this.matchRow(row, needles);
@@ -864,9 +901,9 @@ export class ReplayCaptureService {
     query: ReplayFindSubjectQuery,
     targets: Array<{ kind: ReplayFindSubjectKind; id: string; confirmPossible?: true }>,
     hooks: {
-      beforeDelete?: (rows: Array<{ kind: ReplayFindSubjectKind; id: string; certainty: ReplayFindSubjectCertainty }>) => void;
+      beforeDelete?: (rows: Array<{ kind: ReplayFindSubjectKind; id: string; certainty: ReplayFindSubjectCertainty }>) => void | Promise<void>;
       /** Just before one row is deleted: a function called once it is gone (the release gate's audit and stale jobs), or null. */
-      beforeRowDelete?: (row: { kind: ReplayFindSubjectKind; id: string }) => (() => void) | null;
+      beforeRowDelete?: (row: { kind: ReplayFindSubjectKind; id: string }) => Promise<(() => Promise<void>) | null>;
     } = {}
   ): Promise<ReplayFindSubjectDeleteResult> {
     // A row named both with and without a confirmation is a mistake in the request, whichever comes first: refused, nothing deleted.
@@ -879,7 +916,7 @@ export class ReplayCaptureService {
       }
       confirmations.set(key, confirmedHere);
     }
-    const { needles } = this.needlesFor(query);
+    const { needles } = await this.needlesFor(query);
     const store = this.options.store;
     const deleted = Object.fromEntries(REPLAY_FIND_SUBJECT_KINDS.map((kind) => [kind, 0])) as Record<ReplayFindSubjectKind, number>;
     const skipped: ReplayFindSubjectDeleteResult["skipped"] = [];
@@ -891,7 +928,7 @@ export class ReplayCaptureService {
       const key = `${target.kind}:${target.id}`;
       if (seen.has(key)) continue;
       seen.add(key);
-      const row = store.subjectTextRow(target.kind, target.id);
+      const row = await store.subjectTextRow(target.kind, target.id);
       const match = row ? this.matchRow(row, needles) : null;
       if (!row) skipped.push({ kind: target.kind, id: target.id, reason: "not_found" });
       else if (!match) skipped.push({ kind: target.kind, id: target.id, reason: "no_match" });
@@ -902,15 +939,15 @@ export class ReplayCaptureService {
       if (checked % FIND_SUBJECT_PAGE === 0) await new Promise<void>((resolve) => setImmediate(resolve));
     }
     if (confirmed.length === 0) return { deleted, removed, skipped };
-    hooks.beforeDelete?.(confirmed);
+    await hooks.beforeDelete?.(confirmed);
     const gone = new Set<string>();
     let done = 0;
     for (const target of confirmed) {
       // Already removed with a golden run deleted before it (a case or a result named as a target too).
       if (gone.has(`${target.kind}:${target.id}`)) continue;
-      const afterDelete = hooks.beforeRowDelete?.({ kind: target.kind, id: target.id }) ?? null;
-      const outcome = store.transaction(() => store.deleteSubjectRow(target.kind, target.id));
-      if (outcome.deleted) afterDelete?.();
+      const afterDelete = (await hooks.beforeRowDelete?.({ kind: target.kind, id: target.id })) ?? null;
+      const outcome = await store.deleteSubjectRow(target.kind, target.id);
+      if (outcome.deleted) await afterDelete?.();
       if (outcome.deleted) {
         gone.add(`${target.kind}:${target.id}`);
         deleted[target.kind] += 1;

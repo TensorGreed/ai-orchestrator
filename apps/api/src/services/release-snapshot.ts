@@ -44,10 +44,10 @@ export function goldenSetSnapshot(fixtures: readonly SnapshotFixture[]): string 
 }
 
 /** Snapshots of several sets, keyed by set id: each set's hash and its cases' fingerprints. */
-export function goldenSetSnapshots(datasetIds: readonly string[], listFixtures: (datasetId: string) => readonly SnapshotFixture[]): Record<string, GoldenSetSnapshot> {
+export async function goldenSetSnapshots(datasetIds: readonly string[], listFixtures: (datasetId: string) => Promise<readonly SnapshotFixture[]>): Promise<Record<string, GoldenSetSnapshot>> {
   const out: Record<string, GoldenSetSnapshot> = {};
   for (const datasetId of datasetIds) {
-    const fixtures = listFixtures(datasetId);
+    const fixtures = await listFixtures(datasetId);
     out[datasetId] = { hash: goldenSetSnapshot(fixtures), cases: Object.fromEntries(fixtures.map((fixture) => [fixture.id, goldenCaseFingerprint(fixture)])) };
   }
   return out;

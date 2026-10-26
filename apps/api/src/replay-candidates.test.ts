@@ -41,7 +41,7 @@ async function createTestContext(overrides: Record<string, string> = {}, existin
   const tempDir = existing?.tempDir ?? fs.mkdtempSync(path.join(os.tmpdir(), "ao-replay-cand-"));
   const dbPath = existing?.dbPath ?? path.join(tempDir, "orchestrator.db");
   const store = await SqliteStore.create(dbPath);
-  store.ensureDefaultProject();
+  await store.ensureDefaultProject();
   const config = parseConfig({
     LOG_LEVEL: "warn",
     SEED_SAMPLE_WORKFLOWS: "false",
@@ -54,7 +54,7 @@ async function createTestContext(overrides: Record<string, string> = {}, existin
   });
   const secretService = new SecretService(store, config.SECRET_MASTER_KEY_BASE64);
   const authService = new AuthService(store, config.SESSION_TTL_HOURS);
-  const app = createApp(config, store, secretService, authService);
+  const app = await createApp(config, store, secretService, authService);
   await app.ready();
   const context = { app, store, authService, secretService, config, tempDir, dbPath };
   if (!existing) contexts.push(context);
@@ -64,7 +64,7 @@ async function createTestContext(overrides: Record<string, string> = {}, existin
 async function closeContext(context: TestContext): Promise<void> {
   await context.app.close();
   try {
-    context.store.close();
+    await context.store.close();
   } catch {
     // Already closed by the app shutdown hooks.
   }
@@ -84,7 +84,7 @@ type Role = "admin" | "builder" | "operator" | "viewer";
 async function login(context: TestContext, role: Role, name: string = role): Promise<{ cookie: string; id: string }> {
   const email = `${name}@example.com`;
   const password = `${name}-Pass-123!`;
-  const user = context.authService.register({ email, password, role });
+  const user = await context.authService.register({ email, password, role });
   const response = await context.app.inject({ method: "POST", url: "/api/auth/login", payload: { email, password } });
   if (response.statusCode !== 200) throw new Error(`Login failed for ${name}: ${response.body}`);
   const raw = response.headers["set-cookie"];
@@ -270,11 +270,11 @@ async function agentSetup(answer?: (model: string) => string, golden = 2, body?:
   const model = await startModel(answer);
   const context = await createTestContext({ REPLAY_CONCURRENCY: "2", ...options.config });
   const builder = await login(context, "builder");
-  const secret = context.secretService.createSecret({ name: "Model key", provider: "openai", value: MODEL_KEY });
-  context.store.upsertWorkflow(agentWorkflow(model.baseUrl, secret.secretId));
+  const secret = await context.secretService.createSecret({ name: "Model key", provider: "openai", value: MODEL_KEY });
+  await context.store.upsertWorkflow(agentWorkflow(model.baseUrl, secret.secretId));
   // Saved as version 1, so a baseline rerun replays that version (not the scrubbed captured copy).
   if (options.saveVersion !== false) {
-    context.store.writeWorkflowVersion({ id: "wf-cand-v1", workflowId: "wf-cand", version: 1, workflowJson: JSON.stringify(context.store.getWorkflow("wf-cand")) });
+    await context.store.writeWorkflowVersion({ id: "wf-cand-v1", workflowId: "wf-cand", version: 1, workflowJson: JSON.stringify(await context.store.getWorkflow("wf-cand")) });
   }
   const recordings = await goldenRuns(context, builder.cookie, "wf-cand", golden, body);
   const setId = await goldenSet(context, builder.cookie, "wf-cand", recordings);
@@ -413,7 +413,7 @@ describe("replay candidates and fair comparison", () => {
     const builder = await login(context, "builder");
     expect((await call(context, "POST", "/api/guard/profiles", admin.cookie, { document: emailProfile("allow") })).statusCode).toBe(201);
     expect((await call(context, "PUT", "/api/guard/profiles/cand-guard", admin.cookie, { document: emailProfile("block") })).statusCode).toBe(200);
-    context.store.upsertWorkflow(guardWorkflow());
+    await context.store.upsertWorkflow(guardWorkflow());
     const recordings = await goldenRuns(context, builder.cookie, "wf-guarded", 1, { record: true, user_prompt: "Write to someone@example.com please" });
     const setId = await goldenSet(context, builder.cookie, "wf-guarded", recordings);
 
@@ -442,11 +442,11 @@ describe("replay candidates and fair comparison", () => {
     const builder = await login(context, "builder");
     const viewer = await login(context, "viewer");
     const counter = await startCounter();
-    context.store.upsertWorkflow(writeWorkflow(counter.base));
+    await context.store.upsertWorkflow(writeWorkflow(counter.base));
     const recordings = await goldenRuns(context, builder.cookie, "wf-write", 2);
     const setId = await goldenSet(context, builder.cookie, "wf-write", recordings);
     expect(counter.count("/slack")).toBe(2);
-    const before = context.store.getWorkflow("wf-write");
+    const before = await context.store.getWorkflow("wf-write");
 
     // Validation: another workflow's file, an invalid file, both a version and a file, overrides that match nothing, a write node run live.
     const other = { ...writeWorkflow(counter.base, "v2"), id: "wf-other" };
@@ -473,18 +473,18 @@ describe("replay candidates and fair comparison", () => {
     expect(inline.status, inline.error ?? "").toBe("completed");
     expect(inline.candidate).toMatchObject({ kind: "inline", version: null, name: "Writes" });
     expect(inline.summary).toMatchObject({ total: 2, fail: 2 });
-    expect(context.store.getWorkflow("wf-write")).toEqual(before);
+    expect(await context.store.getWorkflow("wf-write")).toEqual(before);
     expect(counter.count("/slack")).toBe(2);
 
     // A user who may run the workflow but not edit it: plain jobs only.
-    context.store.upsertProject({ id: "team", name: "Team" });
+    await context.store.upsertProject({ id: "team", name: "Team" });
     const shared = { ...writeWorkflow(counter.base), id: "wf-team", projectId: "team" };
-    context.store.upsertWorkflow(shared);
+    await context.store.upsertWorkflow(shared);
     const teamGolden = await goldenRuns(context, admin.cookie, "wf-team", 1);
     const teamSet = await goldenSet(context, admin.cookie, "wf-team", teamGolden);
     // In the team project the builder may read and run workflows, not edit them.
-    context.store.upsertCustomRole({ id: "run-only", projectId: "team", name: "Run only", permissions: ["workflow:read", "workflow:execute"] });
-    context.store.upsertProjectRole({ userId: builder.id, projectId: "team", role: "custom", customRoleId: "run-only" });
+    await context.store.upsertCustomRole({ id: "run-only", projectId: "team", name: "Run only", permissions: ["workflow:read", "workflow:execute"] });
+    await context.store.upsertProjectRole({ userId: builder.id, projectId: "team", role: "custom", customRoleId: "run-only" });
     for (const body of [{ datasetIds: [teamSet], workflow: { ...shared, name: "Changed" } }, { datasetIds: [teamSet], overrides: { guardProfile: { profileId: "default" } } }]) {
       for (const url of ["/api/replay/runs", "/api/replay/estimate"]) {
         const response = await call(context, "POST", url, builder.cookie, body);
@@ -567,7 +567,7 @@ describe("replay candidates: review fixes", () => {
     const context = await createTestContext();
     const builder = await login(context, "builder");
     const counter = await startCounter();
-    context.store.upsertWorkflow(writeWorkflow(counter.base));
+    await context.store.upsertWorkflow(writeWorkflow(counter.base));
     const setId = await goldenSet(context, builder.cookie, "wf-write", await goldenRuns(context, builder.cookie, "wf-write", 1));
     // The draft gains nodes after the golden run; naming them as live reads is refused before anything runs.
     const draft = writeWorkflow(counter.base);
@@ -579,7 +579,7 @@ describe("replay candidates: review fixes", () => {
       { id: "fetch", type: "http_request", config: { method: "GET", urlTemplate: `${counter.base}/get` } }
     ];
     draft.nodes.push(...(extra.map((node) => ({ ...node, name: node.id, position: { x: 0, y: 300 } })) as Workflow["nodes"]));
-    context.store.upsertWorkflow(draft);
+    await context.store.upsertWorkflow(draft);
     for (const nodeId of ["redis_in", "pg_in", "browse", "pdf"]) {
       for (const url of ["/api/replay/runs", "/api/replay/estimate"]) {
         const response = await call(context, "POST", url, builder.cookie, { datasetIds: [setId], overrides: { liveReadNodes: [nodeId] } });
@@ -635,13 +635,13 @@ describe("replay candidates: review fixes", () => {
 
     // "latest" is resolved once, when the job is created, and stored with its hash.
     const guarded = await runJob(context, builder.cookie, { datasetIds: [setId], overrides: { guardProfile: { profileId: "default" } } });
-    const latest = context.store.getGuardProfileVersion("default");
+    const latest = await context.store.getGuardProfileVersion("default");
     expect(guarded.candidate!.overrides!.guardProfile).toEqual({ profileId: "default", version: latest!.version });
     expect(guarded.candidate!.guardProfile).toEqual({ profileId: "default", version: latest!.version, hash: latest!.hash });
     expect(guarded.candidate!.releaseEligible).toBe(false);
     expect(guarded.candidate!.releaseIneligibleReasons!.join(" ")).toMatch(/guard profile/);
     // Stored on the job, not only in the response.
-    const stored = context.store.getEvalRun(guarded.id)!.candidate as { releaseEligible?: boolean; guardProfile?: { version: number } };
+    const stored = (await context.store.getEvalRun(guarded.id))!.candidate as { releaseEligible?: boolean; guardProfile?: { version: number } };
     expect(stored).toMatchObject({ releaseEligible: false, guardProfile: { version: latest!.version } });
 
     const taped = await runJob(context, builder.cookie, { datasetIds: [setId], models: "replay" });
@@ -657,7 +657,7 @@ describe("replay candidates: review fixes", () => {
     const builder = await login(context, "builder");
     expect((await call(context, "POST", "/api/guard/profiles", admin.cookie, { document: emailProfile("allow") })).statusCode).toBe(201);
     expect((await call(context, "PUT", "/api/guard/profiles/cand-guard", admin.cookie, { document: emailProfile("block") })).statusCode).toBe(200);
-    context.store.upsertWorkflow(guardWorkflow());
+    await context.store.upsertWorkflow(guardWorkflow());
     const setId = await goldenSet(context, builder.cookie, "wf-guarded", await goldenRuns(context, builder.cookie, "wf-guarded", 1, { record: true, user_prompt: "Write to someone@example.com please" }));
     // The project enforces cand-guard (latest: version 2).
     expect((await call(context, "PUT", "/api/guard/bindings/projects/default", admin.cookie, { mode: "enforced", profileId: "cand-guard" })).statusCode).toBe(200);
@@ -714,10 +714,10 @@ describe("replay candidates: review fixes", () => {
     const model = await startModel();
     const context = await createTestContext({ REPLAY_CONCURRENCY: "2" });
     const builder = await login(context, "builder");
-    const secret = context.secretService.createSecret({ name: "Model key", provider: "openai", value: MODEL_KEY });
+    const secret = await context.secretService.createSecret({ name: "Model key", provider: "openai", value: MODEL_KEY });
     const workflow = agentWorkflow(model.baseUrl, secret.secretId);
     workflow.nodes = workflow.nodes.map((node) => (node.id === "output" ? { ...node, config: { apiKey: "inline-credential-1234567890" } } : node));
-    context.store.upsertWorkflow(workflow);
+    await context.store.upsertWorkflow(workflow);
     const setId = await goldenSet(context, builder.cookie, "wf-cand", await goldenRuns(context, builder.cookie, "wf-cand", 1));
     const body = { datasetIds: [setId], compare: "baseline_rerun" };
     const estimate = (await call(context, "POST", "/api/replay/estimate", builder.cookie, body)).json<ReplayJobEstimate>();
@@ -738,12 +738,12 @@ describe("replay candidates: review fixes", () => {
     workflow.nodes = workflow.nodes.map((node) =>
       node.id === "tool" ? { ...node, config: { ...node.config, toolName: "calculator", argsTemplate: JSON.stringify({ expression: `1${" ".repeat(2500)}+1` }) } } : node
     );
-    context.store.upsertWorkflow(workflow);
+    await context.store.upsertWorkflow(workflow);
     const run = await call(context, "POST", "/api/workflows/wf-clock/execute", admin.cookie, { record: true });
     expect(run.statusCode, run.body).toBe(200);
     const saved = await call(context, "POST", "/api/replay/recordings", admin.cookie, { executionId: run.json<{ executionId: string }>().executionId, name: "Calculator" });
     expect(saved.statusCode, saved.body).toBe(201);
-    const stored = context.store.getReplayRecording(saved.json<{ recording: { id: string } }>().recording.id)!;
+    const stored = (await context.store.getReplayRecording(saved.json<{ recording: { id: string } }>().recording.id))!;
     expect(stored.mcpCassette).toBeTruthy();
     expect(JSON.stringify(stored.mcpCassette).length).toBeGreaterThan(2000);
     // Workflow + cassette + node outputs would be over the limit: the node output gave way, the total fits.
@@ -756,15 +756,15 @@ describe("replay candidates: review fixes", () => {
     const context = await createTestContext({ REPLAY_CONCURRENCY: "1" });
     const admin = await login(context, "admin");
     const builder = await login(context, "builder");
-    context.store.upsertProject({ id: "team", name: "Team" });
-    const secret = context.secretService.createSecret({ name: "Model key", provider: "openai", value: MODEL_KEY });
-    context.store.upsertWorkflow(agentWorkflow(model.baseUrl, secret.secretId, "team", "wf-team-agent"));
+    await context.store.upsertProject({ id: "team", name: "Team" });
+    const secret = await context.secretService.createSecret({ name: "Model key", provider: "openai", value: MODEL_KEY });
+    await context.store.upsertWorkflow(agentWorkflow(model.baseUrl, secret.secretId, "team", "wf-team-agent"));
     const setId = await goldenSet(context, admin.cookie, "wf-team-agent", await goldenRuns(context, admin.cookie, "wf-team-agent", 3));
     const started = await call(context, "POST", "/api/replay/runs", builder.cookie, { datasetIds: [setId], overrides: { models: [{ nodeId: "agent_1", model: "gpt-5-mini" }] } });
     expect(started.statusCode, started.body).toBe(202);
     // Write access goes; run access stays.
-    context.store.upsertCustomRole({ id: "run-only", projectId: "team", name: "Run only", permissions: ["workflow:read", "workflow:execute"] });
-    context.store.upsertProjectRole({ userId: builder.id, projectId: "team", role: "custom", customRoleId: "run-only" });
+    await context.store.upsertCustomRole({ id: "run-only", projectId: "team", name: "Run only", permissions: ["workflow:read", "workflow:execute"] });
+    await context.store.upsertProjectRole({ userId: builder.id, projectId: "team", role: "custom", customRoleId: "run-only" });
     const runId = started.json<{ run: EvalRunView }>().run.id;
     await call(context, "GET", `/api/replay/runs/${runId}?wait=true`, admin.cookie);
     let run: JobView | null = null;
@@ -786,7 +786,7 @@ describe("replay candidates: review fixes", () => {
     const unknown = await call(context, "POST", "/api/replay/estimate", builder.cookie, { datasetIds: [setId], overrides: { models: [{ ...switched, secretRef: { secretId: "sec_missing" } }] } });
     expect(unknown.statusCode).toBe(400);
     expect(unknown.json<{ error: string }>().error).toContain("sec_missing");
-    const other = context.secretService.createSecret({ name: "Anthropic key", provider: "anthropic", value: "sk-ant-other-0123456789abcdef" });
+    const other = await context.secretService.createSecret({ name: "Anthropic key", provider: "anthropic", value: "sk-ant-other-0123456789abcdef" });
     expect((await call(context, "POST", "/api/replay/estimate", builder.cookie, { datasetIds: [setId], overrides: { models: [{ ...switched, secretRef: { secretId: other.secretId } }] } })).statusCode).toBe(200);
     // A model change on the same provider keeps the node's secret, with no secretRef needed.
     expect((await call(context, "POST", "/api/replay/estimate", builder.cookie, { datasetIds: [setId], overrides: { models: [{ nodeId: "model", model: "gpt-5-mini" }] } })).statusCode).toBe(200);
@@ -798,17 +798,17 @@ describe("replay candidates: review fixes", () => {
     const context = await createTestContext();
     const admin = await login(context, "admin");
     const builder = await login(context, "builder");
-    context.store.upsertProject({ id: "team", name: "Team" });
-    const secret = context.secretService.createSecret({ name: "Model key", provider: "openai", value: MODEL_KEY });
-    context.store.upsertWorkflow(agentWorkflow(model.baseUrl, secret.secretId, "team", "wf-team-agent"));
+    await context.store.upsertProject({ id: "team", name: "Team" });
+    const secret = await context.secretService.createSecret({ name: "Model key", provider: "openai", value: MODEL_KEY });
+    await context.store.upsertWorkflow(agentWorkflow(model.baseUrl, secret.secretId, "team", "wf-team-agent"));
     const run = await call(context, "POST", "/api/workflows/wf-team-agent/execute", admin.cookie, { record: true });
     const cassetteId = run.json<{ mcpCassette?: { id: string } }>().mcpCassette!.id;
     const full = (await call(context, "GET", `/api/mcp/cassettes/${cassetteId}`, builder.cookie)).json<{ cassette: { cassette: { models: { entries: Array<Record<string, unknown>> }; omitted?: unknown } } }>().cassette.cassette;
     expect(full.models.entries[0]!.request).toBeTruthy();
     expect(full.omitted).toBeUndefined();
 
-    context.store.upsertCustomRole({ id: "run-only", projectId: "team", name: "Run only", permissions: ["workflow:read", "workflow:execute"] });
-    context.store.upsertProjectRole({ userId: builder.id, projectId: "team", role: "custom", customRoleId: "run-only" });
+    await context.store.upsertCustomRole({ id: "run-only", projectId: "team", name: "Run only", permissions: ["workflow:read", "workflow:execute"] });
+    await context.store.upsertProjectRole({ userId: builder.id, projectId: "team", role: "custom", customRoleId: "run-only" });
     const limited = await call(context, "GET", `/api/mcp/cassettes/${cassetteId}`, builder.cookie);
     expect(limited.statusCode).toBe(200);
     const view = limited.json<{ cassette: { cassette: { models: { entries: Array<Record<string, unknown>> }; memorySeed?: unknown; omitted?: { modelTapeBodies: boolean } } } }>().cassette.cassette;
@@ -827,11 +827,11 @@ describe("replay candidates: review fixes", () => {
     const model = await startRecordingModel({ contentBytes: 12_000 });
     const context = await createTestContext({ REPLAY_RECORDING_MAX_BYTES: "16384" });
     const builder = await login(context, "builder");
-    const secret = context.secretService.createSecret({ name: "Model key", provider: "openai", value: MODEL_KEY });
-    context.store.upsertWorkflow(agentWorkflow(model.baseUrl, secret.secretId));
+    const secret = await context.secretService.createSecret({ name: "Model key", provider: "openai", value: MODEL_KEY });
+    await context.store.upsertWorkflow(agentWorkflow(model.baseUrl, secret.secretId));
     const recordings = await goldenRuns(context, builder.cookie, "wf-cand", 1);
     expect(recordings[0]!.truncated).toBe(true);
-    const stored = context.store.getReplayRecording(recordings[0]!.id)!;
+    const stored = (await context.store.getReplayRecording(recordings[0]!.id))!;
     expect(stored.modelTape).toMatchObject({ truncated: true, entries: [] });
     expect(stored.bytes).toBeLessThanOrEqual(16384);
     const setId = await goldenSet(context, builder.cookie, "wf-cand", recordings);
@@ -852,7 +852,7 @@ describe("replay candidates: review fixes", () => {
     const admin = await login(context, "admin");
     const builder = await login(context, "builder");
     const serverId = await registerMockServer(context, admin.cookie);
-    context.store.upsertWorkflow(clockWorkflow(serverId));
+    await context.store.upsertWorkflow(clockWorkflow(serverId));
     const setId = await goldenSet(context, builder.cookie, "wf-clock", await goldenRuns(context, builder.cookie, "wf-clock", 1));
     const body = { datasetIds: [setId], overrides: { mcpServers: { [serverId]: "live_read_only" } } };
     // The mock server annotates get_current_time readOnlyHint: true. That claim alone keeps it on the cassette.
@@ -861,7 +861,7 @@ describe("replay candidates: review fixes", () => {
     const first = await caseDetail(context, builder.cookie, annotatedOnly.id, annotatedOnly.results[0]!.id);
     expect(first.replay!.diff.health.map((warning) => warning.kind)).not.toContain("mcp_live_read");
 
-    context.store.setMcpToolClassification({ registryServerId: serverId, toolName: "get_current_time", readOnly: true, setBy: admin.id });
+    await context.store.setMcpToolClassification({ registryServerId: serverId, toolName: "get_current_time", readOnly: true, setBy: admin.id });
     const marked = await runJob(context, builder.cookie, body);
     const second = await caseDetail(context, builder.cookie, marked.id, marked.results[0]!.id);
     expect(second.replay!.diff.health.map((warning) => warning.kind)).toContain("mcp_live_read");
@@ -872,18 +872,18 @@ describe("replay candidates: review fixes", () => {
     const model = await startRecordingModel();
     const context = await createTestContext();
     const builder = await login(context, "builder");
-    const secret = context.secretService.createSecret({ name: "Model key", provider: "openai", value: MODEL_KEY });
+    const secret = await context.secretService.createSecret({ name: "Model key", provider: "openai", value: MODEL_KEY });
     const workflow = agentWorkflow(model.baseUrl, secret.secretId);
     workflow.nodes.push({ id: "memory", type: "local_memory", name: "Memory", position: { x: 300, y: 160 }, config: { namespace: "seed-mem", sessionIdTemplate: "{{session_id}}" } } as Workflow["nodes"][number]);
     workflow.edges.push({ id: "e4", source: "agent_1", sourceHandle: "memory", target: "memory" });
-    context.store.upsertWorkflow(workflow);
+    await context.store.upsertWorkflow(workflow);
     // A first run fills the session; the recorded second run starts from it.
     expect((await call(context, "POST", "/api/workflows/wf-cand/execute", builder.cookie, { session_id: "s-1" })).statusCode).toBe(200);
     const recordings = await goldenRuns(context, builder.cookie, "wf-cand", 1, { record: true, session_id: "s-1" });
     expect(recordings[0]!.capabilities.memory).toBe("seeded");
     const recordedMessages = model.bodies[1]!.messages.length;
     expect(recordedMessages).toBeGreaterThan(model.bodies[0]!.messages.length);
-    const memoryBefore = context.store.loadSessionMemory(projectSessionNamespace("default", "seed-mem"), "s-1");
+    const memoryBefore = await context.store.loadSessionMemory(projectSessionNamespace("default", "seed-mem"), "s-1");
     expect(memoryBefore.length).toBeGreaterThan(0);
 
     const setId = await goldenSet(context, builder.cookie, "wf-cand", recordings);
@@ -892,19 +892,19 @@ describe("replay candidates: review fixes", () => {
     // The replay's model call carried the seeded history, as the recorded run's did.
     expect(model.bodies.at(-1)!.messages.length).toBe(recordedMessages);
     // Nothing the replay did reached the real session.
-    expect(context.store.loadSessionMemory(projectSessionNamespace("default", "seed-mem"), "s-1")).toEqual(memoryBefore);
+    expect(await context.store.loadSessionMemory(projectSessionNamespace("default", "seed-mem"), "s-1")).toEqual(memoryBefore);
   }, 60_000);
 
   it("leaves a live run's answer and retries unchanged when its model calls are recorded (L9)", async () => {
     const model = await startRecordingModel({ failFirst: 1, answer: "steady" });
     const context = await createTestContext();
     const builder = await login(context, "builder");
-    const secret = context.secretService.createSecret({ name: "Model key", provider: "openai", value: MODEL_KEY });
+    const secret = await context.secretService.createSecret({ name: "Model key", provider: "openai", value: MODEL_KEY });
     const workflow = agentWorkflow(model.baseUrl, secret.secretId);
     workflow.nodes = workflow.nodes.map((node) =>
       node.id === "model" ? ({ ...node, config: { provider: { providerId: "openai", model: "gpt-4o-mini", baseUrl: model.baseUrl, secretRef: { secretId: secret.secretId }, extra: { maxRetries: 1 } } } } as typeof node) : node
     );
-    context.store.upsertWorkflow(workflow);
+    await context.store.upsertWorkflow(workflow);
     const recorded = await call(context, "POST", "/api/workflows/wf-cand/execute", builder.cookie, { record: true });
     expect(recorded.json<{ status: string }>().status).toBe("success");
     // The failed first call was retried, as in an unrecorded run.

@@ -39,7 +39,7 @@ const contexts: TestContext[] = [];
 async function createTestContext(overrides: Record<string, string> = {}, options: { queuePollMs?: number } = {}): Promise<TestContext> {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-mcp-features-"));
   const store = await SqliteStore.create(path.join(tempDir, "orchestrator.db"));
-  store.ensureDefaultProject();
+  await store.ensureDefaultProject();
   const config = parseConfig({
     LOG_LEVEL: "warn",
     SEED_SAMPLE_WORKFLOWS: "false",
@@ -53,7 +53,7 @@ async function createTestContext(overrides: Record<string, string> = {}, options
   const secretService = new SecretService(store, config.SECRET_MASTER_KEY_BASE64);
   const authService = new AuthService(store, config.SESSION_TTL_HOURS);
   const queueService = options.queuePollMs ? new QueueService(store, { pollIntervalMs: options.queuePollMs }) : undefined;
-  const app = createApp(config, store, secretService, authService, undefined, queueService);
+  const app = await createApp(config, store, secretService, authService, undefined, queueService);
   await app.ready();
   const context = { app, store, authService, secretService, config, tempDir };
   contexts.push(context);
@@ -65,7 +65,7 @@ afterEach(async () => {
     const context = contexts.pop()!;
     await context.app.close();
     try {
-      context.store.close();
+      await context.store.close();
     } catch {
       // Already closed by the app shutdown hooks.
     }
@@ -78,7 +78,7 @@ type Role = "admin" | "builder" | "operator" | "viewer";
 async function login(context: TestContext, role: Role, name: string = role): Promise<{ cookie: string; id: string; email: string }> {
   const email = `${name}@example.com`;
   const password = `${name}-Pass-123!`;
-  const user = context.authService.register({ email, password, role });
+  const user = await context.authService.register({ email, password, role });
   const response = await context.app.inject({ method: "POST", url: "/api/auth/login", payload: { email, password } });
   if (response.statusCode !== 200) throw new Error(`Login failed for ${name}: ${response.body}`);
   const raw = response.headers["set-cookie"];
@@ -133,10 +133,10 @@ function sseFrames(body: string, event: string): Array<Record<string, unknown>> 
     .map((frame) => JSON.parse(frame.split("\n").find((line) => line.startsWith("data:"))!.slice(5)) as Record<string, unknown>);
 }
 
-async function waitFor<T>(probe: () => T | undefined, timeoutMs = 5000): Promise<T> {
+async function waitFor<T>(probe: () => T | undefined | Promise<T | undefined>, timeoutMs = 5000): Promise<T> {
   const started = Date.now();
   for (;;) {
-    const value = probe();
+    const value = await probe();
     if (value !== undefined) return value;
     if (Date.now() - started > timeoutMs) throw new Error("Timed out waiting");
     await new Promise((resolve) => setTimeout(resolve, 10));
@@ -168,44 +168,44 @@ describe("migration 25", () => {
   it("round-trips catalogs, elicitations, sampling settings and policy kinds through the SQLite store", async () => {
     const context = await createTestContext();
     const { store } = context;
-    store.createMcpServer({ id: "mcp_a", name: "A", adapterId: "mock-mcp", sampling: { allow: true, maxTokens: 50, allowedModels: ["x"], maxRequestsPerCall: 2, defaultModel: { providerId: "openai", model: "gpt-4o-mini" } } });
-    expect(store.getMcpServer("mcp_a")!.sampling).toEqual({ allow: true, maxTokens: 50, allowedModels: ["x"], maxRequestsPerCall: 2, defaultModel: { providerId: "openai", model: "gpt-4o-mini" } });
-    store.updateMcpServer("mcp_a", { sampling: null });
-    expect(store.getMcpServer("mcp_a")!.sampling).toMatchObject({ allow: false, allowedModels: [], defaultModel: null });
+    await store.createMcpServer({ id: "mcp_a", name: "A", adapterId: "mock-mcp", sampling: { allow: true, maxTokens: 50, allowedModels: ["x"], maxRequestsPerCall: 2, defaultModel: { providerId: "openai", model: "gpt-4o-mini" } } });
+    expect((await store.getMcpServer("mcp_a"))!.sampling).toEqual({ allow: true, maxTokens: 50, allowedModels: ["x"], maxRequestsPerCall: 2, defaultModel: { providerId: "openai", model: "gpt-4o-mini" } });
+    await store.updateMcpServer("mcp_a", { sampling: null });
+    expect((await store.getMcpServer("mcp_a"))!.sampling).toMatchObject({ allow: false, allowedModels: [], defaultModel: null });
 
-    expect(store.getMcpServerCatalog("mcp_a")).toBeNull();
-    const catalog = store.upsertMcpServerCatalog("mcp_a", {
+    expect(await store.getMcpServerCatalog("mcp_a")).toBeNull();
+    const catalog = await store.upsertMcpServerCatalog("mcp_a", {
       capabilities: { resources: { listChanged: true }, prompts: {} },
       resources: [{ uri: "a://1", name: "one" }],
       resourceTemplates: [{ uriTemplate: "a://{id}", name: "by id" }],
       prompts: [{ name: "p", arguments: [{ name: "x", required: true }] }]
     });
     expect(catalog).toMatchObject({ serverId: "mcp_a", resources: [{ uri: "a://1" }], prompts: [{ name: "p" }] });
-    store.upsertMcpServerCatalog("mcp_a", { capabilities: {}, resources: [], resourceTemplates: [], prompts: [] });
-    expect(store.getMcpServerCatalog("mcp_a")!.resources).toEqual([]);
+    await store.upsertMcpServerCatalog("mcp_a", { capabilities: {}, resources: [], resourceTemplates: [], prompts: [] });
+    expect((await store.getMcpServerCatalog("mcp_a"))!.resources).toEqual([]);
 
-    const rule = store.createMcpToolPolicy({ id: "r1", name: "r", description: null, effect: "deny", projectId: null, roles: [], serverId: null, toolPattern: "mock://*", kind: "resource", enabled: true, createdBy: null });
+    const rule = await store.createMcpToolPolicy({ id: "r1", name: "r", description: null, effect: "deny", projectId: null, roles: [], serverId: null, toolPattern: "mock://*", kind: "resource", enabled: true, createdBy: null });
     expect(rule.kind).toBe("resource");
-    expect(store.updateMcpToolPolicy("r1", { kind: "prompt" })!.kind).toBe("prompt");
-    expect(store.createMcpToolPolicy({ id: "r2", name: null, description: null, effect: "deny", projectId: null, roles: [], serverId: null, toolPattern: "*", enabled: true, createdBy: null }).kind).toBe("tool");
+    expect((await store.updateMcpToolPolicy("r1", { kind: "prompt" }))!.kind).toBe("prompt");
+    expect((await store.createMcpToolPolicy({ id: "r2", name: null, description: null, effect: "deny", projectId: null, roles: [], serverId: null, toolPattern: "*", enabled: true, createdBy: null })).kind).toBe("tool");
 
-    const record = store.createMcpElicitation({
+    const record = await store.createMcpElicitation({
       id: "elc_1", executionId: "exec_1", workflowId: "wf", workflowName: "WF", nodeId: "agent", serverId: "mock-mcp", registryServerId: "mcp_a", serverName: "A",
       toolName: "ask_user", message: "Which?", requestedSchema: { type: "object", properties: { answer: { type: "string" } }, required: ["answer"] },
       expiresAt: new Date(Date.now() + 60_000).toISOString(), createdBy: "u1", triggerType: "manual_stream"
     });
     expect(record).toMatchObject({ status: "pending", createdBy: "u1", serverName: "A", requestedSchema: { required: ["answer"] } });
-    expect(store.listMcpElicitations({ status: "pending" })).toHaveLength(1);
-    expect(store.settleMcpElicitation("elc_1", { status: "accepted", answeredBy: "u1@example.com" })).toBe(true);
-    expect(store.settleMcpElicitation("elc_1", { status: "declined" })).toBe(false);
-    expect(store.getMcpElicitation("elc_1")).toMatchObject({ status: "accepted", answeredBy: "u1@example.com" });
-    expect(store.listMcpElicitations({ status: "pending" })).toHaveLength(0);
-    expect(store.listMcpElicitations({ executionId: "exec_1" })).toHaveLength(1);
+    expect(await store.listMcpElicitations({ status: "pending" })).toHaveLength(1);
+    expect(await store.settleMcpElicitation("elc_1", { status: "accepted", answeredBy: "u1@example.com" })).toBe(true);
+    expect(await store.settleMcpElicitation("elc_1", { status: "declined" })).toBe(false);
+    expect(await store.getMcpElicitation("elc_1")).toMatchObject({ status: "accepted", answeredBy: "u1@example.com" });
+    expect(await store.listMcpElicitations({ status: "pending" })).toHaveLength(0);
+    expect(await store.listMcpElicitations({ executionId: "exec_1" })).toHaveLength(1);
 
-    store.insertMcpToolCall({ id: "mtc_1", executionId: "x", workflowId: "wf", nodeId: "n", registryServerId: "mcp_a", adapterId: "mock-mcp", toolName: "t", startedAt: new Date().toISOString(), durationMs: 1, ok: true, error: null, turnInputTokens: null, turnOutputTokens: null, estimatedCostUsd: null, samplingRequests: 2, samplingInputTokens: 30, samplingOutputTokens: 7 });
-    expect(store.listMcpToolCalls({ registryServerId: "mcp_a", since: "1970-01-01T00:00:00.000Z" })).toContainEqual(expect.objectContaining({ samplingRequests: 2, samplingInputTokens: 30, samplingOutputTokens: 7 }));
-    store.deleteMcpServer("mcp_a");
-    expect(store.getMcpServerCatalog("mcp_a")).toBeNull();
+    await store.insertMcpToolCall({ id: "mtc_1", executionId: "x", workflowId: "wf", nodeId: "n", registryServerId: "mcp_a", adapterId: "mock-mcp", toolName: "t", startedAt: new Date().toISOString(), durationMs: 1, ok: true, error: null, turnInputTokens: null, turnOutputTokens: null, estimatedCostUsd: null, samplingRequests: 2, samplingInputTokens: 30, samplingOutputTokens: 7 });
+    expect(await store.listMcpToolCalls({ registryServerId: "mcp_a", since: "1970-01-01T00:00:00.000Z" })).toContainEqual(expect.objectContaining({ samplingRequests: 2, samplingInputTokens: 30, samplingOutputTokens: 7 }));
+    await store.deleteMcpServer("mcp_a");
+    expect(await store.getMcpServerCatalog("mcp_a")).toBeNull();
   });
 });
 
@@ -216,13 +216,13 @@ describe("probe catalog capture and list_changed", () => {
     const builder = await login(context, "builder");
     const viewer = await login(context, "viewer");
     const serverId = await registerMockServer(context, admin.cookie);
-    const stored = context.store.getMcpServerCatalog(serverId);
+    const stored = await context.store.getMcpServerCatalog(serverId);
     expect(stored).toMatchObject({ capabilities: { resources: { listChanged: false }, prompts: { listChanged: false }, tools: { listChanged: false } } });
     expect(stored!.resources.map((entry) => entry.uri)).toEqual(["mock://docs/readme", "mock://kb/index.json", "mock://images/dot.png"]);
     expect(stored!.resourceTemplates.map((entry) => entry.uriTemplate)).toEqual(["mock://kb/{topic}"]);
     expect(stored!.prompts.map((entry) => entry.name)).toEqual(["explain_topic"]);
     // The tool snapshot is unchanged by the catalog.
-    expect(context.store.getMcpToolSnapshot(context.store.getMcpServer(serverId)!.currentSnapshotId!)!.tools.map((tool) => tool.name)).not.toContain("readme");
+    expect((await context.store.getMcpToolSnapshot((await context.store.getMcpServer(serverId))!.currentSnapshotId!))!.tools.map((tool) => tool.name)).not.toContain("readme");
 
     await createRule(context, admin.cookie, { name: "No KB for builders", effect: "deny", roles: ["builder"], kind: "resource", toolPattern: "mock://kb/*" });
     await createRule(context, admin.cookie, { name: "No explain", effect: "deny", roles: ["builder"], kind: "prompt", toolPattern: "explain_*" });
@@ -240,9 +240,9 @@ describe("probe catalog capture and list_changed", () => {
     expect((await call(context, "GET", `/api/mcp/servers/${serverId}/prompts`, admin.cookie)).json<{ prompts: Array<{ access: { allowed: boolean } }> }>().prompts[0].access.allowed).toBe(true);
 
     // Live refresh re-lists and rewrites the catalog.
-    context.store.upsertMcpServerCatalog(serverId, { capabilities: {}, resources: [], resourceTemplates: [], prompts: [] });
+    await context.store.upsertMcpServerCatalog(serverId, { capabilities: {}, resources: [], resourceTemplates: [], prompts: [] });
     expect((await call(context, "GET", `/api/mcp/servers/${serverId}/resources?refresh=true`, admin.cookie)).json<{ resources: unknown[] }>().resources).toHaveLength(3);
-    expect(context.store.getMcpServerCatalog(serverId)!.prompts).toHaveLength(1);
+    expect((await context.store.getMcpServerCatalog(serverId))!.prompts).toHaveLength(1);
 
     // RBAC: builders and above read catalogs.
     for (const url of [`/api/mcp/servers/${serverId}/resources`, `/api/mcp/servers/${serverId}/prompts`]) {
@@ -255,7 +255,7 @@ describe("probe catalog capture and list_changed", () => {
     const context = await createTestContext();
     const admin = await login(context, "admin");
     const serverId = await registerMockServer(context, admin.cookie);
-    const before = context.store.listMcpServerProbes(serverId, 10).length;
+    const before = (await context.store.listMcpServerProbes(serverId, 10)).length;
     const service = new McpProbeService(
       context.store,
       createDefaultMCPRegistry(),
@@ -269,9 +269,9 @@ describe("probe catalog capture and list_changed", () => {
     // Unknown servers and events without a registry id are ignored.
     service.onListChanged({ kind: "tools", serverId: "mock-mcp", at: new Date().toISOString() });
     service.onListChanged({ kind: "tools", serverId: "mock-mcp", registryServerId: "mcp_missing", at: new Date().toISOString() });
-    await waitFor(() => (context.store.listMcpServerProbes(serverId, 10).length === before + 1 ? true : undefined));
+    await waitFor(async () => ((await context.store.listMcpServerProbes(serverId, 10)).length === before + 1 ? true : undefined));
     await new Promise((resolve) => setTimeout(resolve, 80));
-    expect(context.store.listMcpServerProbes(serverId, 10)).toHaveLength(before + 1);
+    expect(await context.store.listMcpServerProbes(serverId, 10)).toHaveLength(before + 1);
     expect(service.pendingReprobes()).toEqual([]);
     service.stop();
   });
@@ -312,7 +312,7 @@ describe("resource read and prompt get endpoints", () => {
     expect((await call(context, "POST", `/api/mcp/servers/${serverId}/prompts/get`, builder.cookie, { name: "explain_topic", arguments: { topic: "rag" } })).statusCode).toBe(403);
     expect((await call(context, "POST", `/api/mcp/servers/${serverId}/prompts/get`, viewer.cookie, { name: "explain_topic", arguments: { topic: "rag" } })).statusCode).toBe(403);
 
-    const events = context.store.listAuditLogs({ pageSize: 200 }).items.map((entry) => entry.eventType);
+    const events = (await context.store.listAuditLogs({ pageSize: 200 })).items.map((entry) => entry.eventType);
     expect(events).toEqual(expect.arrayContaining(["mcp_resource.read", "mcp_resource.read_denied", "mcp_prompt.get", "mcp_prompt.get_denied"]));
 
     // Policy evaluate dry runs take a kind too.
@@ -324,7 +324,7 @@ describe("resource read and prompt get endpoints", () => {
   it("a registry server with a project is usable only from that project's workflows", async () => {
     const context = await createTestContext();
     const admin = await login(context, "admin");
-    context.store.upsertProject({ id: "pb", name: "pb" });
+    await context.store.upsertProject({ id: "pb", name: "pb" });
     const serverId = await registerMockServer(context, admin.cookie, { projectId: "pb" });
     const elsewhere = directWorkflow("wf-elsewhere", serverId, { toolName: "get_current_time" });
     expect((await call(context, "POST", "/api/workflows", admin.cookie, elsewhere)).statusCode).toBe(200);
@@ -335,7 +335,7 @@ describe("resource read and prompt get endpoints", () => {
     expect((await call(context, "POST", "/api/workflows", admin.cookie, inProject)).statusCode).toBe(200);
     const allowed = await context.app.inject({ method: "POST", url: "/webhook/hook-wf-in-pb", payload: {} });
     expect(allowed.statusCode).toBe(200);
-    const run = context.store.listExecutionHistory({ workflowId: "wf-in-pb", pageSize: 5 }).items[0];
+    const run = (await context.store.listExecutionHistory({ workflowId: "wf-in-pb", pageSize: 5 })).items[0];
     expect(run?.status).toBe("success");
   });
 
@@ -385,8 +385,8 @@ describe("elicitation", () => {
     await call(context, "POST", "/api/workflows", builder.cookie, askWorkflow("wf-ask", serverId));
 
     const stream = call(context, "POST", "/api/workflows/wf-ask/execute/stream", builder.cookie, { input: {} });
-    const pending = await waitFor(() => {
-      const items = context.store.listMcpElicitations({ status: "pending" });
+    const pending = await waitFor(async () => {
+      const items = await context.store.listMcpElicitations({ status: "pending" });
       return items.length > 0 ? items[0] : undefined;
     });
     expect(pending).toMatchObject({ workflowId: "wf-ask", nodeId: "tool", toolName: "ask_user", message: "Which region?", serverName: "Mock", registryServerId: serverId, createdBy: builder.id, triggerType: "manual_stream" });
@@ -421,7 +421,7 @@ describe("elicitation", () => {
     expect(toolOutput.tool_output).toEqual({ question: "Which region?", action: "accept", answer: "eu" });
     expect((toolOutput._mcpElicitations as Array<Record<string, unknown>>)[0]).toMatchObject({ id: pending.id, action: "accept", source: "user" });
 
-    const audits = context.store.listAuditLogs({ resourceType: "mcp_elicitation", pageSize: 50 }).items;
+    const audits = (await context.store.listAuditLogs({ resourceType: "mcp_elicitation", pageSize: 50 })).items;
     expect(audits.map((entry) => entry.eventType).sort()).toEqual(["mcp_elicitation.accepted", "mcp_elicitation.requested"]);
     const accepted = audits.find((entry) => entry.eventType === "mcp_elicitation.accepted")!;
     expect(JSON.stringify(accepted.metadata)).not.toContain("\"eu\"");
@@ -439,7 +439,7 @@ describe("elicitation", () => {
     // An attended trigger type, so the request waits for a person instead of being declined.
     const queued = await call(context, "POST", "/api/workflows/wf-queued-ask/enqueue", builder.cookie, { triggerType: "manual" });
     expect(queued.statusCode).toBeLessThan(300);
-    const pending = await waitFor(() => context.store.listMcpElicitations({ status: "pending" })[0]);
+    const pending = await waitFor(async () => (await context.store.listMcpElicitations({ status: "pending" }))[0]);
     expect(pending).toMatchObject({ workflowId: "wf-queued-ask", createdBy: null });
     // Another builder who may run the workflow sees it and answers it; a viewer sees it but cannot answer.
     expect((await call(context, "GET", "/api/mcp/elicitations", other.cookie)).json<{ items: McpElicitationView[] }>().items.map((item) => item.id)).toEqual([pending.id]);
@@ -456,17 +456,17 @@ describe("elicitation", () => {
     await call(context, "POST", "/api/workflows", admin.cookie, askWorkflow("wf-auto", serverId));
     const run = await context.app.inject({ method: "POST", url: "/webhook/hook-wf-auto", payload: {} });
     expect(run.statusCode).toBe(200);
-    const history = await waitFor(() => {
-      const item = context.store.listExecutionHistory({ workflowId: "wf-auto", pageSize: 5 }).items.find((entry) => entry.status === "success");
-      return item ? context.store.getExecutionHistory(item.id) ?? undefined : undefined;
+    const history = await waitFor(async () => {
+      const item = (await context.store.listExecutionHistory({ workflowId: "wf-auto", pageSize: 5 })).items.find((entry) => entry.status === "success");
+      return item ? await context.store.getExecutionHistory(item.id) ?? undefined : undefined;
     });
     const toolResult = (history.nodeResults as Array<{ nodeId: string; output: Record<string, unknown> }>).find((entry) => entry.nodeId === "tool")!;
     expect(toolResult.output.tool_output).toEqual({ question: "Which region?", action: "decline" });
     expect((toolResult.output._mcpElicitations as Array<Record<string, unknown>>)[0]).toMatchObject({ action: "decline", source: "unattended", note: expect.stringContaining("Unattended run (webhook)") });
-    const stored = context.store.listMcpElicitations({ status: "auto_declined" });
+    const stored = await context.store.listMcpElicitations({ status: "auto_declined" });
     expect(stored).toHaveLength(1);
     expect(stored[0].reason).toContain("Unattended run (webhook)");
-    expect(context.store.listAuditLogs({ resourceType: "mcp_elicitation", pageSize: 10 }).items.map((entry) => entry.eventType)).toEqual(["mcp_elicitation.auto_declined"]);
+    expect((await context.store.listAuditLogs({ resourceType: "mcp_elicitation", pageSize: 10 })).items.map((entry) => entry.eventType)).toEqual(["mcp_elicitation.auto_declined"]);
 
     const service = new McpElicitationService(context.store, { timeoutMs: 60_000, audit: () => undefined });
     const refused = await service.ask({
@@ -474,13 +474,15 @@ describe("elicitation", () => {
       executionId: "exec_r", workflowId: "wf", nodeId: "n", serverId: "mock-mcp", toolName: "login", triggerType: "manual"
     });
     expect(refused).toMatchObject({ action: "decline", source: "refused", note: expect.stringContaining("look like credentials (api_token)") });
-    expect(context.store.listMcpElicitations({ executionId: "exec_r" })[0]).toMatchObject({ status: "auto_declined", reason: expect.stringContaining("credentials") });
+    expect((await context.store.listMcpElicitations({ executionId: "exec_r" }))[0]).toMatchObject({ status: "auto_declined", reason: expect.stringContaining("credentials") });
   });
 
   it("times out, follows run cancellation, and expires stale rows on restart", async () => {
     const context = await createTestContext();
     const audits: string[] = [];
-    const service = new McpElicitationService(context.store, { timeoutMs: 60_000, audit: (event) => audits.push(event.eventType) });
+    const service = new McpElicitationService(context.store, { timeoutMs: 60_000, audit: (event) => {
+      audits.push(event.eventType);
+    } });
     const base = { request: { message: "Q?", requestedSchema: { type: "object" as const, properties: { a: { type: "string" as const } } } }, workflowId: "wf", nodeId: "n", serverId: "mock-mcp", toolName: "ask", triggerType: "manual" };
 
     const events: string[] = [];
@@ -492,20 +494,20 @@ describe("elicitation", () => {
 
     const controller = new AbortController();
     const waiting = service.ask({ ...base, executionId: "exec_c", signal: controller.signal });
-    await waitFor(() => (service.listPending({ executionId: "exec_c" }).length === 1 ? true : undefined));
+    await waitFor(async () => ((await service.listPending({ executionId: "exec_c" })).length === 1 ? true : undefined));
     controller.abort();
     expect(await waiting).toMatchObject({ action: "cancel", source: "timeout" });
-    expect(context.store.listMcpElicitations({ executionId: "exec_c" })[0].status).toBe("expired");
+    expect((await context.store.listMcpElicitations({ executionId: "exec_c" }))[0].status).toBe("expired");
 
     const released = service.ask({ ...base, executionId: "exec_e" });
-    await waitFor(() => (service.listPending({ executionId: "exec_e" }).length === 1 ? true : undefined));
-    expect(service.releaseExecution("exec_e", "The run ended.")).toBe(1);
+    await waitFor(async () => ((await service.listPending({ executionId: "exec_e" })).length === 1 ? true : undefined));
+    expect(await service.releaseExecution("exec_e", "The run ended.")).toBe(1);
     expect(await released).toMatchObject({ action: "cancel" });
 
     // A row left pending by a previous process is expired by the next start.
-    context.store.createMcpElicitation({ id: "elc_old", executionId: "exec_old", workflowId: "wf", nodeId: "n", serverId: "s", toolName: "t", message: "m", requestedSchema: { type: "object", properties: {} }, expiresAt: new Date().toISOString(), createdBy: null, triggerType: null });
-    expect(service.expireStale()).toBe(1);
-    expect(context.store.getMcpElicitation("elc_old")!.status).toBe("expired");
+    await context.store.createMcpElicitation({ id: "elc_old", executionId: "exec_old", workflowId: "wf", nodeId: "n", serverId: "s", toolName: "t", message: "m", requestedSchema: { type: "object", properties: {} }, expiresAt: new Date().toISOString(), createdBy: null, triggerType: null });
+    expect(await service.expireStale()).toBe(1);
+    expect((await context.store.getMcpElicitation("elc_old"))!.status).toBe("expired");
     expect(audits).toEqual(expect.arrayContaining(["mcp_elicitation.requested", "mcp_elicitation.expired"]));
   });
 });

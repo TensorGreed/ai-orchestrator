@@ -29,23 +29,25 @@ import {
   guardWorkflowBindingInputSchema,
   type Workflow
 } from "@ai-orchestrator/shared";
-import type { GuardEventFilters, SqliteStore } from "./db/database.js";
+import type { GuardEventFilters } from "./db/database.js";
 import type { SafeUser, UserRole } from "./services/auth-service.js";
 import type { AuditEventInput } from "./services/audit-service.js";
 import { GuardConflictError, GuardNotFoundError, GuardValidationError, type GuardFieldIssue, type GuardService } from "./services/guard-service.js";
 import type { RunAccess } from "./run-access.js";
+import type { Store } from "./db/store.js";
+import { filterAsync } from "./async-array.js";
 
 export interface GuardRoutesDeps {
   app: FastifyInstance;
-  store: SqliteStore;
+  store: Store;
   guard: GuardService;
   requireRole: (request: FastifyRequest, reply: FastifyReply, roles: UserRole[]) => Promise<SafeUser | null>;
   /** Run-level access: a run of a workflow the user cannot read answers 404. */
   runAccess: RunAccess;
-  canAccessWorkflow: (user: SafeUser, workflow: { id: string; projectId?: string }, permission: "workflow:read" | "workflow:write") => boolean;
+  canAccessWorkflow: (user: SafeUser, workflow: { id: string; projectId?: string }, permission: "workflow:read" | "workflow:write") => Promise<boolean>;
   /** Project-level permission (memberships, then the global role); admins always pass. */
-  canInProject: (user: SafeUser, projectId: string, permission: "workflow:read" | "workflow:write") => boolean;
-  audit: (request: FastifyRequest, user: SafeUser, event: Omit<AuditEventInput, "actor">) => void;
+  canInProject: (user: SafeUser, projectId: string, permission: "workflow:read" | "workflow:write") => Promise<boolean>;
+  audit: (request: FastifyRequest, user: SafeUser, event: Omit<AuditEventInput, "actor">) => void | Promise<void>;
   /** Phase 16 — false on Postgres: the deployment's destination rules routes answer 501. */
   destinationRulesAvailable?: boolean;
 }
@@ -106,14 +108,14 @@ export function registerGuardRoutes(deps: GuardRoutesDeps): void {
    * could append a version to it would loosen every run it covers. Edits and
    * re-imports of a profile any project enforces are admin-only.
    */
-  const refuseEnforcedEdit = (user: SafeUser, reply: FastifyReply, profileId: string) => {
+  const refuseEnforcedEdit = async (user: SafeUser, reply: FastifyReply, profileId: string) => {
     if (user.role === "admin") return null;
     // Phase 16 — the deployment's destination rules apply to every run: admin-only, like an enforced profile.
     if (profileId === GUARD_DESTINATION_RULES_PROFILE_ID) {
       reply.code(403);
       return { error: "The deployment's destination rules apply to every workflow; only an admin can change them" };
     }
-    const enforcedBy = store.listGuardBindingsForProfile(profileId).filter((binding) => binding.scope === "project" && binding.mode === "enforced");
+    const enforcedBy = (await store.listGuardBindingsForProfile(profileId)).filter((binding) => binding.scope === "project" && binding.mode === "enforced");
     if (enforcedBy.length === 0) return null;
     reply.code(403);
     return { error: "This guard profile is enforced on a project; only an admin can change it" };
@@ -125,7 +127,7 @@ export function registerGuardRoutes(deps: GuardRoutesDeps): void {
   };
 
   /** Workflows a non-admin may read, for scoping guard events; undefined for admins (no filter). */
-  const readableWorkflowIds = (user: SafeUser): string[] | undefined => deps.runAccess.readableWorkflowIds(user) ?? undefined;
+  const readableWorkflowIds = async (user: SafeUser): Promise<string[] | undefined> => await deps.runAccess.readableWorkflowIds(user) ?? undefined;
 
   // ---------------------------------------------------------------------------
   // Profiles
@@ -134,7 +136,7 @@ export function registerGuardRoutes(deps: GuardRoutesDeps): void {
   app.get("/api/guard/profiles", async (request, reply) => {
     const user = await requireRole(request, reply, ["viewer"]);
     if (!user) return;
-    return { profiles: guard.listProfiles(), autoApply: guard.autoApply, builtInId: GUARD_BUILTIN_PROFILE_ID };
+    return { profiles: await guard.listProfiles(), autoApply: guard.autoApply, builtInId: GUARD_BUILTIN_PROFILE_ID };
   });
 
   app.post<{ Body: unknown }>("/api/guard/profiles", async (request, reply) => {
@@ -146,11 +148,11 @@ export function registerGuardRoutes(deps: GuardRoutesDeps): void {
       return { error: "Invalid guard profile", issues: zodIssues(parsed.error.issues) };
     }
     const createId = parsed.data.id ?? (typeof parsed.data.document.id === "string" ? parsed.data.document.id : "");
-    const refusedCreate = createId ? refuseEnforcedEdit(user, reply, createId) : null;
+    const refusedCreate = createId ? await refuseEnforcedEdit(user, reply, createId) : null;
     if (refusedCreate) return refusedCreate;
     try {
-      const profile = guard.createProfile(parsed.data, user.id);
-      deps.audit(request, user, { eventType: "guard.profile.created", category: "system", action: "create", resourceType: "guard_profile", resourceId: profile.id, metadata: { version: 1, hash: profile.hash } });
+      const profile = await guard.createProfile(parsed.data, user.id);
+      await deps.audit(request, user, { eventType: "guard.profile.created", category: "system", action: "create", resourceType: "guard_profile", resourceId: profile.id, metadata: { version: 1, hash: profile.hash } });
       reply.code(201);
       return { profile };
     } catch (error) {
@@ -176,11 +178,11 @@ export function registerGuardRoutes(deps: GuardRoutesDeps): void {
       return { error: "Invalid guard profile", issues: [{ path: "document", message: "Expected a profile document object" }] };
     }
     const importId = typeof (document as Record<string, unknown>).id === "string" ? ((document as Record<string, unknown>).id as string) : "";
-    const refused = importId ? refuseEnforcedEdit(user, reply, importId) : null;
+    const refused = importId ? await refuseEnforcedEdit(user, reply, importId) : null;
     if (refused) return refused;
     try {
-      const result = guard.importProfile({ document: document as Record<string, unknown>, ...(str(body.note) ? { note: str(body.note) } : {}) }, user.id);
-      deps.audit(request, user, {
+      const result = await guard.importProfile({ document: document as Record<string, unknown>, ...(str(body.note) ? { note: str(body.note) } : {}) }, user.id);
+      await deps.audit(request, user, {
         eventType: "guard.profile.imported",
         category: "system",
         action: result.created ? "create" : "update",
@@ -198,15 +200,15 @@ export function registerGuardRoutes(deps: GuardRoutesDeps): void {
   app.get<{ Params: { id: string } }>("/api/guard/profiles/:id", async (request, reply) => {
     const user = await requireRole(request, reply, ["viewer"]);
     if (!user) return;
-    const found = guard.getProfile(request.params.id);
+    const found = await guard.getProfile(request.params.id);
     if (!found) {
       reply.code(404);
       return { error: "Guard profile not found" };
     }
-    const bindings = store.listGuardBindingsForProfile(request.params.id).filter((binding) => {
+    const bindings = await filterAsync(await store.listGuardBindingsForProfile(request.params.id), async (binding) => {
       if (binding.mode === "inherit") return false;
-      if (binding.scope === "project") return deps.canInProject(user, binding.scopeId, "workflow:read");
-      const workflow = store.getWorkflow(binding.scopeId);
+      if (binding.scope === "project") return await deps.canInProject(user, binding.scopeId, "workflow:read");
+      const workflow = await store.getWorkflow(binding.scopeId);
       return workflow ? deps.canAccessWorkflow(user, workflow, "workflow:read") : user.role === "admin";
     });
     return { ...found, bindings };
@@ -220,12 +222,12 @@ export function registerGuardRoutes(deps: GuardRoutesDeps): void {
       reply.code(400);
       return { error: "Invalid guard profile", issues: zodIssues(parsed.error.issues) };
     }
-    const refused = refuseEnforcedEdit(user, reply, request.params.id);
+    const refused = await refuseEnforcedEdit(user, reply, request.params.id);
     if (refused) return refused;
     try {
-      const result = guard.updateProfile(request.params.id, parsed.data, user.id);
+      const result = await guard.updateProfile(request.params.id, parsed.data, user.id);
       if (result.changed) {
-        deps.audit(request, user, {
+        await deps.audit(request, user, {
           eventType: "guard.profile.updated",
           category: "system",
           action: "update",
@@ -243,11 +245,11 @@ export function registerGuardRoutes(deps: GuardRoutesDeps): void {
   app.delete<{ Params: { id: string } }>("/api/guard/profiles/:id", async (request, reply) => {
     const user = await requireRole(request, reply, ["builder"]);
     if (!user) return;
-    const refusedDelete = refuseEnforcedEdit(user, reply, request.params.id);
+    const refusedDelete = await refuseEnforcedEdit(user, reply, request.params.id);
     if (refusedDelete) return refusedDelete;
     try {
-      guard.deleteProfile(request.params.id);
-      deps.audit(request, user, { eventType: "guard.profile.deleted", category: "system", action: "delete", resourceType: "guard_profile", resourceId: request.params.id });
+      await guard.deleteProfile(request.params.id);
+      await deps.audit(request, user, { eventType: "guard.profile.deleted", category: "system", action: "delete", resourceType: "guard_profile", resourceId: request.params.id });
       return { ok: true };
     } catch (error) {
       return fail(reply, error);
@@ -263,8 +265,8 @@ export function registerGuardRoutes(deps: GuardRoutesDeps): void {
     reply.code(501);
     return { error: "Destination rules need the SQLite store in this release" };
   };
-  const rulesStatus = (user: SafeUser) => {
-    const status = guard.destinationRulesStatus();
+  const rulesStatus = async (user: SafeUser) => {
+    const status = await guard.destinationRulesStatus();
     return user.role === "admin" ? status : { ...status, observing: null };
   };
 
@@ -273,7 +275,7 @@ export function registerGuardRoutes(deps: GuardRoutesDeps): void {
     if (!user) return;
     const unavailable = destinationRulesUnavailable(reply);
     if (unavailable) return unavailable;
-    return rulesStatus(user);
+    return await rulesStatus(user);
   });
 
   app.post("/api/guard/destination-rules/starter", async (request, reply) => {
@@ -282,9 +284,9 @@ export function registerGuardRoutes(deps: GuardRoutesDeps): void {
     const unavailable = destinationRulesUnavailable(reply);
     if (unavailable) return unavailable;
     try {
-      const { status, created } = guard.addStarterDestinationRule(user.id);
+      const { status, created } = await guard.addStarterDestinationRule(user.id);
       if (created) {
-        deps.audit(request, user, {
+        await deps.audit(request, user, {
           eventType: "guard.destination_rules.starter_added",
           category: "system",
           action: "update",
@@ -311,8 +313,8 @@ export function registerGuardRoutes(deps: GuardRoutesDeps): void {
       return { error: "Send { enforce: true } or { enforce: false }", issues: zodIssues(parsed.error.issues) };
     }
     try {
-      const status = guard.setDestinationRulesEnforcement(parsed.data.enforce, user.id);
-      deps.audit(request, user, {
+      const status = await guard.setDestinationRulesEnforcement(parsed.data.enforce, user.id);
+      await deps.audit(request, user, {
         eventType: parsed.data.enforce ? "guard.destination_rules.enforced" : "guard.destination_rules.observing",
         category: "system",
         action: "update",
@@ -337,8 +339,8 @@ export function registerGuardRoutes(deps: GuardRoutesDeps): void {
       return { error: "Invalid destination rules", issues: zodIssues(parsed.error.issues) };
     }
     try {
-      const status = guard.setDestinationRules(parsed.data.rules, user.id, parsed.data.note);
-      deps.audit(request, user, {
+      const status = await guard.setDestinationRules(parsed.data.rules, user.id, parsed.data.note);
+      await deps.audit(request, user, {
         eventType: "guard.destination_rules.updated",
         category: "system",
         action: "update",
@@ -355,17 +357,17 @@ export function registerGuardRoutes(deps: GuardRoutesDeps): void {
   app.get<{ Params: { id: string } }>("/api/guard/profiles/:id/versions", async (request, reply) => {
     const user = await requireRole(request, reply, ["viewer"]);
     if (!user) return;
-    if (!store.getGuardProfile(request.params.id)) {
+    if (!await store.getGuardProfile(request.params.id)) {
       reply.code(404);
       return { error: "Guard profile not found" };
     }
-    return { versions: guard.listVersions(request.params.id) };
+    return { versions: await guard.listVersions(request.params.id) };
   });
 
   app.get<{ Params: { id: string; version: string } }>("/api/guard/profiles/:id/versions/:version", async (request, reply) => {
     const user = await requireRole(request, reply, ["viewer"]);
     if (!user) return;
-    const version = guard.getVersion(request.params.id, Number(request.params.version));
+    const version = await guard.getVersion(request.params.id, Number(request.params.version));
     if (!version) {
       reply.code(404);
       return { error: "Guard profile version not found" };
@@ -382,7 +384,7 @@ export function registerGuardRoutes(deps: GuardRoutesDeps): void {
       reply.code(400);
       return { error: "Invalid diff request", issues: [{ path: Number.isInteger(from) ? "to" : "from", message: "Expected a version number" }] };
     }
-    const diff = guard.diff(request.params.id, from, to);
+    const diff = await guard.diff(request.params.id, from, to);
     if (!diff) {
       reply.code(404);
       return { error: "Guard profile version not found" };
@@ -394,7 +396,7 @@ export function registerGuardRoutes(deps: GuardRoutesDeps): void {
     const user = await requireRole(request, reply, ["viewer"]);
     if (!user) return;
     const version = request.query.version !== undefined ? Number(request.query.version) : undefined;
-    const exported = guard.exportProfile(request.params.id, Number.isInteger(version) ? version : undefined);
+    const exported = await guard.exportProfile(request.params.id, Number.isInteger(version) ? version : undefined);
     if (!exported) {
       reply.code(404);
       return { error: "Guard profile not found" };
@@ -426,22 +428,22 @@ export function registerGuardRoutes(deps: GuardRoutesDeps): void {
   // Bindings and effective profile
   // ---------------------------------------------------------------------------
 
-  const projectBindingView = (projectId: string) => {
-    const binding = guard.getBinding("project", projectId);
+  const projectBindingView = async (projectId: string) => {
+    const binding = await guard.getBinding("project", projectId);
     return { projectId, ...binding, locked: binding.mode === "enforced" };
   };
 
   app.get<{ Params: { projectId: string } }>("/api/guard/bindings/projects/:projectId", async (request, reply) => {
     const user = await requireRole(request, reply, ["viewer"]);
     if (!user) return;
-    if (!store.getProject(request.params.projectId)) {
+    if (!await store.getProject(request.params.projectId)) {
       reply.code(404);
       return { error: "Project not found" };
     }
-    if (!deps.canInProject(user, request.params.projectId, "workflow:read")) return forbidden(reply);
+    if (!await deps.canInProject(user, request.params.projectId, "workflow:read")) return forbidden(reply);
     return {
-      binding: projectBindingView(request.params.projectId),
-      effective: guard.resolutionView(guard.resolveRun({ workflowId: "", projectId: request.params.projectId }))
+      binding: await projectBindingView(request.params.projectId),
+      effective: guard.resolutionView(await guard.resolveRun({ workflowId: "", projectId: request.params.projectId }))
     };
   });
 
@@ -449,17 +451,17 @@ export function registerGuardRoutes(deps: GuardRoutesDeps): void {
     const user = await requireRole(request, reply, ["builder"]);
     if (!user) return;
     const projectId = request.params.projectId;
-    if (!store.getProject(projectId)) {
+    if (!await store.getProject(projectId)) {
       reply.code(404);
       return { error: "Project not found" };
     }
-    if (!deps.canInProject(user, projectId, "workflow:write")) return forbidden(reply);
+    if (!await deps.canInProject(user, projectId, "workflow:write")) return forbidden(reply);
     const parsed = guardProjectBindingInputSchema.safeParse(request.body);
     if (!parsed.success) {
       reply.code(400);
       return { error: "Invalid binding", issues: zodIssues(parsed.error.issues) };
     }
-    const current = guard.getBinding("project", projectId);
+    const current = await guard.getBinding("project", projectId);
     if (user.role !== "admin" && (parsed.data.mode === "enforced" || current.mode === "enforced")) {
       reply.code(403);
       return {
@@ -470,8 +472,8 @@ export function registerGuardRoutes(deps: GuardRoutesDeps): void {
       };
     }
     try {
-      guard.setBinding("project", projectId, parsed.data, user.id);
-      deps.audit(request, user, {
+      await guard.setBinding("project", projectId, parsed.data, user.id);
+      await deps.audit(request, user, {
         eventType: "guard.binding.updated",
         category: "project",
         action: "update",
@@ -481,8 +483,8 @@ export function registerGuardRoutes(deps: GuardRoutesDeps): void {
         metadata: { scope: "project", from: { mode: current.mode, profileId: current.profileId }, to: { mode: parsed.data.mode, profileId: parsed.data.profileId ?? null } }
       });
       return {
-        binding: projectBindingView(projectId),
-        effective: guard.resolutionView(guard.resolveRun({ workflowId: "", projectId }))
+        binding: await projectBindingView(projectId),
+        effective: guard.resolutionView(await guard.resolveRun({ workflowId: "", projectId }))
       };
     } catch (error) {
       return fail(reply, error);
@@ -493,7 +495,7 @@ export function registerGuardRoutes(deps: GuardRoutesDeps): void {
     const user = await requireRole(request, reply, roles);
     if (!user) return null;
     // An unreadable workflow reads as missing; a readable one without the permission is 403.
-    const access = deps.runAccess.workflow(user, workflowId, permission);
+    const access = await deps.runAccess.workflow(user, workflowId, permission);
     if (!access.ok) {
       reply.code(access.status);
       reply.send({ error: access.status === 404 ? "Workflow not found" : "Insufficient permissions" });
@@ -502,19 +504,19 @@ export function registerGuardRoutes(deps: GuardRoutesDeps): void {
     return { user, workflow: access.workflow };
   };
 
-  const workflowBindingResponse = (workflow: Workflow) => {
+  const workflowBindingResponse = async (workflow: Workflow) => {
     const projectId = workflow.projectId ?? "default";
     return {
-      binding: { workflowId: workflow.id, ...guard.getBinding("workflow", workflow.id) },
-      project: projectBindingView(projectId),
-      effective: guard.resolutionView(guard.resolveRun({ workflowId: workflow.id, projectId }))
+      binding: { workflowId: workflow.id, ...await guard.getBinding("workflow", workflow.id) },
+      project: await projectBindingView(projectId),
+      effective: guard.resolutionView(await guard.resolveRun({ workflowId: workflow.id, projectId }))
     };
   };
 
   app.get<{ Params: { workflowId: string } }>("/api/guard/bindings/workflows/:workflowId", async (request, reply) => {
     const found = await workflowFor(request, reply, request.params.workflowId, "workflow:read", ["viewer"]);
     if (!found) return;
-    return workflowBindingResponse(found.workflow);
+    return await workflowBindingResponse(found.workflow);
   });
 
   app.put<{ Params: { workflowId: string }; Body: unknown }>("/api/guard/bindings/workflows/:workflowId", async (request, reply) => {
@@ -531,9 +533,9 @@ export function registerGuardRoutes(deps: GuardRoutesDeps): void {
       return { error: "Invalid binding", issues: zodIssues(parsed.error.issues) };
     }
     try {
-      const current = guard.getBinding("workflow", found.workflow.id);
-      guard.setBinding("workflow", found.workflow.id, parsed.data, found.user.id);
-      deps.audit(request, found.user, {
+      const current = await guard.getBinding("workflow", found.workflow.id);
+      await guard.setBinding("workflow", found.workflow.id, parsed.data, found.user.id);
+      await deps.audit(request, found.user, {
         eventType: "guard.binding.updated",
         category: "workflow",
         action: "update",
@@ -542,7 +544,7 @@ export function registerGuardRoutes(deps: GuardRoutesDeps): void {
         projectId: found.workflow.projectId ?? "default",
         metadata: { scope: "workflow", from: { mode: current.mode, profileId: current.profileId }, to: { mode: parsed.data.mode, profileId: parsed.data.profileId ?? null } }
       });
-      return workflowBindingResponse(found.workflow);
+      return await workflowBindingResponse(found.workflow);
     } catch (error) {
       return fail(reply, error);
     }
@@ -553,13 +555,13 @@ export function registerGuardRoutes(deps: GuardRoutesDeps): void {
     if (workflowId) {
       const found = await workflowFor(request, reply, workflowId, "workflow:read", ["viewer"]);
       if (!found) return;
-      return workflowBindingResponse(found.workflow);
+      return await workflowBindingResponse(found.workflow);
     }
     const user = await requireRole(request, reply, ["viewer"]);
     if (!user) return;
     const projectId = str(request.query.projectId) ?? "default";
-    if (!deps.canInProject(user, projectId, "workflow:read")) return forbidden(reply);
-    return { project: projectBindingView(projectId), effective: guard.resolutionView(guard.resolveRun({ workflowId: "", projectId })) };
+    if (!await deps.canInProject(user, projectId, "workflow:read")) return forbidden(reply);
+    return { project: await projectBindingView(projectId), effective: guard.resolutionView(await guard.resolveRun({ workflowId: "", projectId })) };
   });
 
   // ---------------------------------------------------------------------------
@@ -569,23 +571,23 @@ export function registerGuardRoutes(deps: GuardRoutesDeps): void {
   app.get<{ Params: { id: string } }>("/api/executions/:id/guard-events", async (request, reply) => {
     const user = await requireRole(request, reply, ["viewer"]);
     if (!user) return;
-    const access = deps.runAccess.run(user, store.getExecutionHistory(request.params.id), "workflow:read");
+    const access = await deps.runAccess.run(user, await store.getExecutionHistory(request.params.id), "workflow:read");
     if (!access.ok) {
       reply.code(access.status);
       return { error: access.error };
     }
-    return { events: guard.eventsForExecution(request.params.id) };
+    return { events: await guard.eventsForExecution(request.params.id) };
   });
 
   app.get<{ Querystring: Record<string, unknown> }>("/api/guard/events", async (request, reply) => {
     const user = await requireRole(request, reply, ["viewer"]);
     if (!user) return;
-    const workflowIds = readableWorkflowIds(user);
+    const workflowIds = await readableWorkflowIds(user);
     const filters = { ...eventFilters(request.query), ...(workflowIds ? { workflowIds } : {}) };
-    const { events, total } = guard.listEvents(filters);
+    const { events, total } = await guard.listEvents(filters);
     const names = new Map<string, string>();
     for (const event of events) {
-      if (event.workflowId && !names.has(event.workflowId)) names.set(event.workflowId, store.getWorkflow(event.workflowId)?.name ?? event.workflowId);
+      if (event.workflowId && !names.has(event.workflowId)) names.set(event.workflowId, (await store.getWorkflow(event.workflowId))?.name ?? event.workflowId);
     }
     return { events: events.map((event) => ({ ...event, workflowName: event.workflowId ? names.get(event.workflowId) : undefined })), total };
   });
@@ -594,8 +596,8 @@ export function registerGuardRoutes(deps: GuardRoutesDeps): void {
     const user = await requireRole(request, reply, ["viewer"]);
     if (!user) return;
     const query = { days: 14, ...request.query };
-    const workflowIds = readableWorkflowIds(user);
+    const workflowIds = await readableWorkflowIds(user);
     const filters = { ...eventFilters(query), ...(workflowIds ? { workflowIds } : {}) };
-    return { since: filters.since ?? null, stats: guard.stats(filters) };
+    return { since: filters.since ?? null, stats: await guard.stats(filters) };
   });
 }

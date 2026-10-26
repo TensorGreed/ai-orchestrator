@@ -33,7 +33,7 @@ const servers: http.Server[] = [];
 async function createTestContext(): Promise<TestContext> {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-tool-results-"));
   const store = await SqliteStore.create(path.join(tempDir, "orchestrator.db"));
-  store.ensureDefaultProject();
+  await store.ensureDefaultProject();
   const config = parseConfig({
     LOG_LEVEL: "warn",
     SEED_SAMPLE_WORKFLOWS: "false",
@@ -45,7 +45,7 @@ async function createTestContext(): Promise<TestContext> {
   });
   const secretService = new SecretService(store, config.SECRET_MASTER_KEY_BASE64);
   const authService = new AuthService(store, config.SESSION_TTL_HOURS);
-  const app = createApp(config, store, secretService, authService);
+  const app = await createApp(config, store, secretService, authService);
   await app.ready();
   const context = { app, store, authService, config, tempDir };
   contexts.push(context);
@@ -62,7 +62,7 @@ afterEach(async () => {
     const context = contexts.pop()!;
     await context.app.close();
     try {
-      context.store.close();
+      await context.store.close();
     } catch {
       // Already closed by the app shutdown hooks.
     }
@@ -73,7 +73,7 @@ afterEach(async () => {
 async function login(context: TestContext, role: "admin" | "builder", name: string): Promise<string> {
   const email = `${name}@example.com`;
   const password = `${name}-Pass-123!`;
-  context.authService.register({ email, password, role });
+  await context.authService.register({ email, password, role });
   const response = await context.app.inject({ method: "POST", url: "/api/auth/login", payload: { email, password } });
   const raw = response.headers["set-cookie"];
   const values = Array.isArray(raw) ? raw : [raw ?? ""];
@@ -209,8 +209,8 @@ describe("approved write-tool results are stored encrypted", () => {
     return { context, admin, builder, mcp, model, serverId };
   }
 
-  function expectSealed(context: TestContext, executionId: string, sha: string) {
-    const stored = context.store.getWorkflowExecutionState(executionId)!;
+  async function expectSealed(context: TestContext, executionId: string, sha: string) {
+    const stored = (await context.store.getWorkflowExecutionState(executionId))!;
     const text = JSON.stringify(stored.state);
     expect(text).not.toContain(sha);
     expect(text).not.toContain("total_tokens");
@@ -228,7 +228,7 @@ describe("approved write-tool results are stored encrypted", () => {
 
   it("gives the agent the exact result back after the next approval", async () => {
     const { context, admin, builder, mcp, model, serverId } = await setup();
-    context.store.upsertWorkflow(agentWorkflow("wf-agent", serverId, model.baseUrl));
+    await context.store.upsertWorkflow(agentWorkflow("wf-agent", serverId, model.baseUrl));
     const run = (await context.app.inject({ method: "POST", url: "/api/workflows/wf-agent/execute", headers: { cookie: builder }, payload: {} })).json<RunResult>();
     expect(run.status).toBe("waiting_approval");
 
@@ -237,7 +237,7 @@ describe("approved write-tool results are stored encrypted", () => {
     expect(second.status).toBe("waiting_approval");
     expect(mcp.calls).toEqual(["a@example.org"]);
     const shaA = sha1("a@example.org");
-    expectSealed(context, run.executionId!, shaA);
+    await expectSealed(context, run.executionId!, shaA);
 
     // Approve write B: A is answered from the stored result, B runs once.
     const done = await approve(context, admin, run.executionId!);
@@ -248,7 +248,7 @@ describe("approved write-tool results are stored encrypted", () => {
 
   it("does the same for a write inside a sub-workflow", async () => {
     const { context, admin, builder, mcp, model, serverId } = await setup();
-    context.store.upsertWorkflow(agentWorkflow("wf-child-agent", serverId, model.baseUrl));
+    await context.store.upsertWorkflow(agentWorkflow("wf-child-agent", serverId, model.baseUrl));
     const parent = {
       id: "wf-parent-agent",
       name: "Parent",
@@ -261,7 +261,7 @@ describe("approved write-tool results are stored encrypted", () => {
         { id: "p2", source: "call", target: "out" }
       ]
     } as Workflow;
-    context.store.upsertWorkflow(parent);
+    await context.store.upsertWorkflow(parent);
     const run = (await context.app.inject({ method: "POST", url: "/api/workflows/wf-parent-agent/execute", headers: { cookie: builder }, payload: {} })).json<RunResult>();
     expect(run.status).toBe("waiting_approval");
 
@@ -269,9 +269,9 @@ describe("approved write-tool results are stored encrypted", () => {
     expect(second.status).toBe("waiting_approval");
     expect(mcp.calls).toEqual(["a@example.org"]);
     const shaA = sha1("a@example.org");
-    const stored = JSON.stringify(context.store.getWorkflowExecutionState(run.executionId!)!.state);
+    const stored = JSON.stringify((await context.store.getWorkflowExecutionState(run.executionId!))!.state);
     expect(stored).toContain("childState");
-    expectSealed(context, run.executionId!, shaA);
+    await expectSealed(context, run.executionId!, shaA);
 
     const done = await approve(context, admin, run.executionId!);
     expect(done.status).toBe("success");
@@ -281,13 +281,13 @@ describe("approved write-tool results are stored encrypted", () => {
 
   it("asks again, without failing, when the sealed results cannot be opened", async () => {
     const { context, admin, builder, mcp, model, serverId } = await setup();
-    context.store.upsertWorkflow(agentWorkflow("wf-agent-bad", serverId, model.baseUrl));
+    await context.store.upsertWorkflow(agentWorkflow("wf-agent-bad", serverId, model.baseUrl));
     const run = (await context.app.inject({ method: "POST", url: "/api/workflows/wf-agent-bad/execute", headers: { cookie: builder }, payload: {} })).json<RunResult>();
     const second = await approve(context, admin, run.executionId!);
     expect(second.status).toBe("waiting_approval");
-    const pending = context.store.getWorkflowExecutionState(run.executionId!)!;
+    const pending = (await context.store.getWorkflowExecutionState(run.executionId!))!;
     const state = pending.state as Record<string, unknown>;
-    context.store.saveWorkflowExecutionState({ ...pending, state: { ...state, approvedToolResultsSealed: "v1.AAAA.AAAA.AAAA" } } as never);
+    await context.store.saveWorkflowExecutionState({ ...pending, state: { ...state, approvedToolResultsSealed: "v1.AAAA.AAAA.AAAA" } } as never);
 
     // Write A's stored result is gone, so the re-run asks for A again instead of failing.
     const third = await approve(context, admin, run.executionId!);

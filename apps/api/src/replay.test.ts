@@ -42,7 +42,7 @@ async function createTestContext(overrides: Record<string, string> = {}): Promis
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-replay-"));
   const dbPath = path.join(tempDir, "orchestrator.db");
   const store = await SqliteStore.create(dbPath);
-  store.ensureDefaultProject();
+  await store.ensureDefaultProject();
   const config = parseConfig({
     LOG_LEVEL: "warn",
     SEED_SAMPLE_WORKFLOWS: "false",
@@ -55,7 +55,7 @@ async function createTestContext(overrides: Record<string, string> = {}): Promis
   });
   const secretService = new SecretService(store, config.SECRET_MASTER_KEY_BASE64);
   const authService = new AuthService(store, config.SESSION_TTL_HOURS);
-  const app = createApp(config, store, secretService, authService);
+  const app = await createApp(config, store, secretService, authService);
   await app.ready();
   const context = { app, store, authService, secretService, config, tempDir, dbPath };
   contexts.push(context);
@@ -69,7 +69,7 @@ afterEach(async () => {
     const context = contexts.pop()!;
     await context.app.close();
     try {
-      context.store.close();
+      await context.store.close();
     } catch {
       // Already closed by the app shutdown hooks.
     }
@@ -82,7 +82,7 @@ type Role = "admin" | "builder" | "operator" | "viewer";
 async function login(context: TestContext, role: Role, name: string = role): Promise<{ cookie: string; id: string }> {
   const email = `${name}@example.com`;
   const password = `${name}-Pass-123!`;
-  const user = context.authService.register({ email, password, role });
+  const user = await context.authService.register({ email, password, role });
   const response = await context.app.inject({ method: "POST", url: "/api/auth/login", payload: { email, password } });
   if (response.statusCode !== 200) throw new Error(`Login failed for ${name}: ${response.body}`);
   const raw = response.headers["set-cookie"];
@@ -279,8 +279,8 @@ describe("golden runs with side effects stubbed", { timeout: 30_000 }, () => {
     const viewer = await login(context, "viewer");
     const counter = await startCounter();
     const serverId = await registerServer(context, admin.cookie);
-    context.store.upsertWorkflow(errorWorkflow(counter.base));
-    context.store.upsertWorkflow(sideEffectWorkflow({ serverId, base: counter.base }));
+    await context.store.upsertWorkflow(errorWorkflow(counter.base));
+    await context.store.upsertWorkflow(sideEffectWorkflow({ serverId, base: counter.base }));
 
     const recorded = await call(context, "POST", "/api/workflows/wf-golden/execute", builder.cookie, { record: true });
     expect(recorded.statusCode).toBe(200);
@@ -336,14 +336,14 @@ describe("golden runs with side effects stubbed", { timeout: 30_000 }, () => {
     expect(same.diff.health.filter((entry) => entry.blocking)).toEqual([]);
     expect(counter.count("/slack")).toBe(1);
     expect(counter.count("/http")).toBe(1);
-    const replayed = context.store.getExecutionHistory(same.executionId);
+    const replayed = await context.store.getExecutionHistory(same.executionId);
     expect(replayed).toMatchObject({ triggerType: "replay", workflowId: "wf-golden" });
     expect(replayed!.customData).toMatchObject({ replay: { recordingId: golden.id, sourceExecutionId: recordedRun.executionId } });
     // A replay is not a golden run source.
     expect((await call(context, "POST", "/api/replay/recordings", builder.cookie, { executionId: same.executionId, name: "x" })).statusCode).toBe(409);
     // Replays stay out of MCP tool-call telemetry.
-    expect(context.store.listMcpToolCallsForExecution(same.executionId)).toEqual([]);
-    expect(context.store.listMcpToolCallsForExecution(recordedRun.executionId).length).toBeGreaterThan(0);
+    expect(await context.store.listMcpToolCallsForExecution(same.executionId)).toEqual([]);
+    expect((await context.store.listMcpToolCallsForExecution(recordedRun.executionId)).length).toBeGreaterThan(0);
 
     // Determinism: replaying again gives the same verdict and facts.
     const again = await replay(context, builder.cookie, golden.id);
@@ -351,7 +351,7 @@ describe("golden runs with side effects stubbed", { timeout: 30_000 }, () => {
     expect(again.facts.output).toEqual(same.facts.output);
 
     // A changed answer fails with an output diff, still with no side effects.
-    context.store.upsertWorkflow(sideEffectWorkflow({ serverId, base: counter.base, answer: "v2" }));
+    await context.store.upsertWorkflow(sideEffectWorkflow({ serverId, base: counter.base, answer: "v2" }));
     const changed = await replay(context, builder.cookie, golden.id, { draft: true });
     expect(changed.verdict).toBe("fail");
     expect(changed.diff.output.equal).toBe(false);
@@ -360,7 +360,7 @@ describe("golden runs with side effects stubbed", { timeout: 30_000 }, () => {
     expect(counter.count("/http")).toBe(1);
 
     // Changed tool arguments have no recorded answer in either mode (lenient only reuses answers for repeated calls). Never live.
-    context.store.upsertWorkflow(sideEffectWorkflow({ serverId, base: counter.base, tz: "Asia/Tokyo" }));
+    await context.store.upsertWorkflow(sideEffectWorkflow({ serverId, base: counter.base, tz: "Asia/Tokyo" }));
     const strict = await replay(context, builder.cookie, golden.id, { mcpMode: "strict" });
     expect(strict.verdict).toBe("error");
     expect(strict.diff.health).toEqual(expect.arrayContaining([expect.objectContaining({ kind: "mcp_unmatched", blocking: true })]));
@@ -371,7 +371,7 @@ describe("golden runs with side effects stubbed", { timeout: 30_000 }, () => {
 
     // A code node is answered from the recording: a candidate script that escapes the JavaScript sandbox never runs,
     // and since its code changed, the replay says it could not judge it instead of passing on the old output.
-    context.store.upsertWorkflow(sideEffectWorkflow({ serverId, base: counter.base, escape: true }));
+    await context.store.upsertWorkflow(sideEffectWorkflow({ serverId, base: counter.base, escape: true }));
     const escaped = await replay(context, builder.cookie, golden.id);
     expect(escaped.verdict, JSON.stringify(escaped.reasons)).toBe("error");
     expect(escaped.diff.health).toEqual(expect.arrayContaining([expect.objectContaining({ kind: "config_changed", nodeId: "shape", blocking: true })]));
@@ -380,13 +380,13 @@ describe("golden runs with side effects stubbed", { timeout: 30_000 }, () => {
     expect(counter.count("/code")).toBe(0);
 
     // A broken candidate: the run fails, the error workflow and its notifications are not fired.
-    context.store.upsertWorkflow(sideEffectWorkflow({ serverId, base: counter.base, broken: true }));
+    await context.store.upsertWorkflow(sideEffectWorkflow({ serverId, base: counter.base, broken: true }));
     const broken = await replay(context, builder.cookie, golden.id);
     expect(broken.status).toBe("error");
     expect(broken.verdict).toBe("fail");
     await sleep(300);
     expect(counter.count("/error")).toBe(0);
-    expect(context.store.listExecutionHistory({ workflowId: "wf-error", page: 1, pageSize: 10 }).total).toBe(0);
+    expect((await context.store.listExecutionHistory({ workflowId: "wf-error", page: 1, pageSize: 10 })).total).toBe(0);
     // The same candidate run for real does fire it, so the check above is meaningful.
     await call(context, "POST", "/api/workflows/wf-golden/execute", builder.cookie, {});
     for (let attempt = 0; attempt < 40 && counter.count("/error") === 0; attempt += 1) await sleep(50);
@@ -398,7 +398,7 @@ describe("golden runs with side effects stubbed", { timeout: 30_000 }, () => {
     expect((await call(context, "POST", `/api/replay/recordings/nope/replay`, builder.cookie, {})).statusCode).toBe(404);
 
     // The escaping script cannot reach the network even in a real run: the JavaScript sandbox blocks the escape.
-    context.store.upsertWorkflow(sideEffectWorkflow({ serverId, base: counter.base, escape: true }));
+    await context.store.upsertWorkflow(sideEffectWorkflow({ serverId, base: counter.base, escape: true }));
     const real = await call(context, "POST", "/api/workflows/wf-golden/execute", builder.cookie, {});
     expect(real.statusCode).toBe(200);
     await sleep(200);
@@ -411,14 +411,14 @@ describe("golden runs with side effects stubbed", { timeout: 30_000 }, () => {
     const builder = await login(context, "builder");
     const counter = await startCounter();
     const serverId = await registerServer(context, admin.cookie);
-    context.store.upsertWorkflow(errorWorkflow(counter.base));
-    context.store.upsertWorkflow(sideEffectWorkflow({ serverId, base: counter.base }));
+    await context.store.upsertWorkflow(errorWorkflow(counter.base));
+    await context.store.upsertWorkflow(sideEffectWorkflow({ serverId, base: counter.base }));
     const run = (await call(context, "POST", "/api/workflows/wf-golden/execute", builder.cookie, { record: true })).json<{ executionId: string }>();
     const golden = await saveGolden(context, builder.cookie, run.executionId);
 
-    context.store.pruneExecutionHistory({ before: new Date(Date.now() + 86_400_000).toISOString() });
-    expect(context.store.getExecutionHistory(run.executionId)).toBeNull();
-    expect(context.store.getMcpCassetteForExecution(run.executionId)).toBeNull();
+    await context.store.pruneExecutionHistory({ before: new Date(Date.now() + 86_400_000).toISOString() });
+    expect(await context.store.getExecutionHistory(run.executionId)).toBeNull();
+    expect(await context.store.getMcpCassetteForExecution(run.executionId)).toBeNull();
 
     const kept = await call(context, "GET", `/api/replay/recordings/${golden.id}`, builder.cookie);
     expect(kept.statusCode).toBe(200);
@@ -427,8 +427,8 @@ describe("golden runs with side effects stubbed", { timeout: 30_000 }, () => {
     expect(counter.count("/slack")).toBe(1);
 
     // A saved version as the candidate: the draft moves on, version 7 still matches the golden run.
-    context.store.writeWorkflowVersion({ id: "ver-7", workflowId: "wf-golden", version: 7, workflowJson: JSON.stringify(sideEffectWorkflow({ serverId, base: counter.base })) });
-    context.store.upsertWorkflow(sideEffectWorkflow({ serverId, base: counter.base, answer: "draft" }));
+    await context.store.writeWorkflowVersion({ id: "ver-7", workflowId: "wf-golden", version: 7, workflowJson: JSON.stringify(sideEffectWorkflow({ serverId, base: counter.base })) });
+    await context.store.upsertWorkflow(sideEffectWorkflow({ serverId, base: counter.base, answer: "draft" }));
     const versioned = await replay(context, builder.cookie, golden.id, { version: 7 });
     expect(versioned.candidate).toMatchObject({ kind: "version", version: 7 });
     expect(versioned.verdict, JSON.stringify(versioned.reasons)).toBe("pass");
@@ -440,16 +440,16 @@ describe("golden runs with side effects stubbed", { timeout: 30_000 }, () => {
     const second = (await call(context, "POST", "/api/workflows/wf-golden/execute", builder.cookie, { record: true })).json<{ executionId: string }>();
     const another = await saveGolden(context, builder.cookie, second.executionId);
     expect((await call(context, "DELETE", "/api/workflows/wf-golden", admin.cookie)).statusCode).toBeLessThan(300);
-    expect(context.store.getReplayRecording(another.id)).toBeNull();
+    expect(await context.store.getReplayRecording(another.id)).toBeNull();
   });
 
   it("replays a saved version under the workflow's current project, not the project it was saved in", async () => {
     const context = await createTestContext();
     const builder = await login(context, "builder");
-    context.store.upsertProject({ id: "proj-a", name: "Project A" });
-    context.store.upsertProject({ id: "proj-b", name: "Project B" });
-    context.store.upsertVariable({ id: "var-a", projectId: "proj-a", key: "GREETING", value: "from A" });
-    context.store.upsertVariable({ id: "var-b", projectId: "proj-b", key: "GREETING", value: "from B" });
+    await context.store.upsertProject({ id: "proj-a", name: "Project A" });
+    await context.store.upsertProject({ id: "proj-b", name: "Project B" });
+    await context.store.upsertVariable({ id: "var-a", projectId: "proj-a", key: "GREETING", value: "from A" });
+    await context.store.upsertVariable({ id: "var-b", projectId: "proj-b", key: "GREETING", value: "from B" });
     const moved = (projectId: string): Workflow =>
       ({
         id: "wf-moved",
@@ -464,8 +464,8 @@ describe("golden runs with side effects stubbed", { timeout: 30_000 }, () => {
         edges: [{ id: "e1", source: "start", target: "output" }]
       }) as Workflow;
     // Version 3 was saved while the workflow lived in project A; it has since moved to project B.
-    context.store.writeWorkflowVersion({ id: "ver-3", workflowId: "wf-moved", version: 3, workflowJson: JSON.stringify(moved("proj-a")) });
-    context.store.upsertWorkflow(moved("proj-b"));
+    await context.store.writeWorkflowVersion({ id: "ver-3", workflowId: "wf-moved", version: 3, workflowJson: JSON.stringify(moved("proj-a")) });
+    await context.store.upsertWorkflow(moved("proj-b"));
     const run = (await call(context, "POST", "/api/workflows/wf-moved/execute", builder.cookie, {})).json<{ executionId: string; output: unknown }>();
     expect(JSON.stringify(run.output)).toContain("from B");
     const golden = await saveGolden(context, builder.cookie, run.executionId);
@@ -474,7 +474,7 @@ describe("golden runs with side effects stubbed", { timeout: 30_000 }, () => {
     expect(versioned.candidate).toMatchObject({ kind: "version", version: 3 });
     expect(JSON.stringify(versioned.facts.output)).not.toContain("from A");
     expect(versioned.verdict, JSON.stringify(versioned.reasons)).toBe("pass");
-    expect(context.store.getExecutionHistory(versioned.executionId)).toMatchObject({ workflowId: "wf-moved" });
+    expect(await context.store.getExecutionHistory(versioned.executionId)).toMatchObject({ workflowId: "wf-moved" });
   });
 
   it("scrubs secrets from the stored golden run and keeps session memory untouched in a replay", async () => {
@@ -482,14 +482,14 @@ describe("golden runs with side effects stubbed", { timeout: 30_000 }, () => {
     const builder = await login(context, "builder");
     const counter = await startCounter();
     const model = await startEchoModel("Hello");
-    const secret = context.secretService.createSecret({ name: "Model key", provider: "openai", value: PLANTED });
-    context.store.upsertWorkflow(errorWorkflow(counter.base));
-    context.store.upsertWorkflow(agentWorkflow(model.baseUrl, secret.secretId));
+    const secret = await context.secretService.createSecret({ name: "Model key", provider: "openai", value: PLANTED });
+    await context.store.upsertWorkflow(errorWorkflow(counter.base));
+    await context.store.upsertWorkflow(agentWorkflow(model.baseUrl, secret.secretId));
 
     const run = await call(context, "POST", "/api/workflows/wf-agent/execute", builder.cookie, { session_id: "sess-1" });
     expect(run.json<{ status: string }>().status).toBe("success");
     // The model leaked the key into its answer; the stored execution is what golden runs copy from.
-    const memoryBefore = context.store.loadSessionMemory(projectSessionNamespace("default", "golden-mem"), "sess-1");
+    const memoryBefore = await context.store.loadSessionMemory(projectSessionNamespace("default", "golden-mem"), "sess-1");
     expect(memoryBefore.length).toBeGreaterThan(0);
 
     const golden = await saveGolden(context, builder.cookie, run.json<{ executionId: string }>().executionId);
@@ -507,15 +507,15 @@ describe("golden runs with side effects stubbed", { timeout: 30_000 }, () => {
     expect(model.calls()).toBeGreaterThan(callsBefore);
     expect(result.verdict, JSON.stringify(result.reasons)).toBe("pass");
     expect(JSON.stringify(result)).not.toContain(PLANTED);
-    expect(context.store.loadSessionMemory(projectSessionNamespace("default", "golden-mem"), "sess-1")).toEqual(memoryBefore);
+    expect(await context.store.loadSessionMemory(projectSessionNamespace("default", "golden-mem"), "sess-1")).toEqual(memoryBefore);
 
     // Failing candidate: no error workflow.
-    context.store.upsertWorkflow(agentWorkflow(model.baseUrl, secret.secretId, { codeThrows: true }));
+    await context.store.upsertWorkflow(agentWorkflow(model.baseUrl, secret.secretId, { codeThrows: true }));
     const broken = await replay(context, builder.cookie, golden.id);
     expect(broken.status).toBe("error");
     await sleep(300);
     expect(counter.count("/error")).toBe(0);
-    expect(context.store.loadSessionMemory(projectSessionNamespace("default", "golden-mem"), "sess-1")).toEqual(memoryBefore);
+    expect(await context.store.loadSessionMemory(projectSessionNamespace("default", "golden-mem"), "sess-1")).toEqual(memoryBefore);
   });
 
   it("records a replay's model spend but never sends a budget alert from it", async () => {
@@ -523,15 +523,15 @@ describe("golden runs with side effects stubbed", { timeout: 30_000 }, () => {
     const builder = await login(context, "builder");
     const counter = await startCounter();
     const model = await startEchoModel("Hello");
-    const secret = context.secretService.createSecret({ name: "Model key", provider: "openai", value: PLANTED });
-    context.store.upsertWorkflow(errorWorkflow(counter.base));
-    context.store.upsertWorkflow(agentWorkflow(model.baseUrl, secret.secretId));
+    const secret = await context.secretService.createSecret({ name: "Model key", provider: "openai", value: PLANTED });
+    await context.store.upsertWorkflow(errorWorkflow(counter.base));
+    await context.store.upsertWorkflow(agentWorkflow(model.baseUrl, secret.secretId));
     const run = (await call(context, "POST", "/api/workflows/wf-agent/execute", builder.cookie, {})).json<{ executionId: string; status: string }>();
     expect(run.status).toBe("success");
     const golden = await saveGolden(context, builder.cookie, run.executionId);
 
     // A one-token budget: any spend crosses it and would post to the budget's channel.
-    context.store.createBudget({ id: "bud-1", name: "Tiny", scopeType: "workflow", scopeId: "wf-agent", period: "day", limitType: "tokens", limitValue: 1, action: "warn", notifyChannel: `${counter.base}/budget` });
+    await context.store.createBudget({ id: "bud-1", name: "Tiny", scopeType: "workflow", scopeId: "wf-agent", period: "day", limitType: "tokens", limitValue: 1, action: "warn", notifyChannel: `${counter.base}/budget` });
     const result = await replay(context, builder.cookie, golden.id);
     expect(result.verdict, JSON.stringify(result.reasons)).toBe("pass");
     await sleep(300);
@@ -570,13 +570,13 @@ describe("golden runs with side effects stubbed", { timeout: 30_000 }, () => {
           { id: "e2", source: "chart", target: "output" }
         ]
       }) as Workflow;
-    context.store.upsertWorkflow(chartWorkflow(null));
+    await context.store.upsertWorkflow(chartWorkflow(null));
     const run = (await call(context, "POST", "/api/workflows/wf-chart/execute", builder.cookie, {})).json<{ executionId: string; status: string }>();
     expect(run.status).toBe("success");
     const golden = await saveGolden(context, builder.cookie, run.executionId);
     expect((await replay(context, builder.cookie, golden.id)).verdict).toBe("pass");
 
-    context.store.upsertWorkflow(chartWorkflow(`${counter.base}/chart-data?secret=abc`));
+    await context.store.upsertWorkflow(chartWorkflow(`${counter.base}/chart-data?secret=abc`));
     const result = await replay(context, builder.cookie, golden.id);
     expect(counter.count("/chart-data")).toBe(0);
     expect(result.verdict).toBe("error");
@@ -586,7 +586,7 @@ describe("golden runs with side effects stubbed", { timeout: 30_000 }, () => {
   it("refuses to save the same run twice and caps the bytes one workflow's golden runs may use", async () => {
     const context = await createTestContext({ REPLAY_RECORDINGS_MAX_BYTES_PER_WORKFLOW: "65536" });
     const builder = await login(context, "builder");
-    context.store.upsertWorkflow({
+    await context.store.upsertWorkflow({
       id: "wf-sized",
       name: "Sized",
       schemaVersion: "1.0.0",
@@ -619,7 +619,7 @@ describe("golden runs with side effects stubbed", { timeout: 30_000 }, () => {
     }
     expect(refused?.statusCode).toBe(409);
     expect(refused?.body).toContain("REPLAY_RECORDINGS_MAX_BYTES_PER_WORKFLOW");
-    const saved = context.store.listReplayRecordings({ workflowId: "wf-sized" }).items;
+    const saved = (await context.store.listReplayRecordings({ workflowId: "wf-sized" })).items;
     expect(saved.reduce((sum, entry) => sum + entry.bytes, 0)).toBeLessThanOrEqual(65536);
   });
 
@@ -646,14 +646,14 @@ describe("golden runs with side effects stubbed", { timeout: 30_000 }, () => {
     let refused: { statusCode: number; body: string } | null = null;
     // A new workflow each time: only the deployment-wide cap can stop this.
     for (let attempt = 0; attempt < 6 && !refused; attempt += 1) {
-      context.store.upsertWorkflow(sized(`wf-total-${attempt}`));
+      await context.store.upsertWorkflow(sized(`wf-total-${attempt}`));
       const executionId = (await call(context, "POST", `/api/workflows/wf-total-${attempt}/execute`, builder.cookie, {})).json<{ executionId: string }>().executionId;
       const response = await call(context, "POST", "/api/replay/recordings", builder.cookie, { executionId, name: `Run ${attempt}` });
       if (response.statusCode !== 201) refused = response;
     }
     expect(refused?.statusCode).toBe(409);
     expect(refused?.body).toContain("REPLAY_RECORDINGS_MAX_TOTAL_BYTES");
-    expect(context.store.sumReplayRecordingBytes()).toBeLessThanOrEqual(65536);
+    expect(await context.store.sumReplayRecordingBytes()).toBeLessThanOrEqual(65536);
   });
 
   it("refuses an oversized run or a spent budget before scrubbing it", async () => {
@@ -675,7 +675,7 @@ describe("golden runs with side effects stubbed", { timeout: 30_000 }, () => {
     const scrub = vi.spyOn(ReplayRecordingService.prototype, "scrubValue");
 
     // The run's own output cannot be cut, and it is far over the per-run limit.
-    context.store.upsertWorkflow(workflow("wf-huge", "word ".repeat(20_000)));
+    await context.store.upsertWorkflow(workflow("wf-huge", "word ".repeat(20_000)));
     const huge = (await call(context, "POST", "/api/workflows/wf-huge/execute", builder.cookie, {})).json<{ executionId: string }>().executionId;
     scrub.mockClear();
     const tooLarge = await call(context, "POST", "/api/replay/recordings", builder.cookie, { executionId: huge, name: "Huge" });
@@ -683,9 +683,9 @@ describe("golden runs with side effects stubbed", { timeout: 30_000 }, () => {
     expect(scrub).not.toHaveBeenCalled();
 
     // A deployment whose golden runs nearly fill the budget refuses the next save without scrubbing anything.
-    context.store.upsertWorkflow(workflow("wf-small", "word ".repeat(600)));
+    await context.store.upsertWorkflow(workflow("wf-small", "word ".repeat(600)));
     const small = (await call(context, "POST", "/api/workflows/wf-small/execute", builder.cookie, {})).json<{ executionId: string }>().executionId;
-    vi.spyOn(context.store, "sumReplayRecordingBytes").mockReturnValue(16384 - 500);
+    vi.spyOn(context.store, "sumReplayRecordingBytes").mockResolvedValue(16384 - 500);
     scrub.mockClear();
     const spent = await call(context, "POST", "/api/replay/recordings", builder.cookie, { executionId: small, name: "Small" });
     expect(spent.statusCode).toBe(409);
@@ -716,7 +716,7 @@ describe("golden runs with side effects stubbed", { timeout: 30_000 }, () => {
           { id: "e3", source: "plain", target: "output" }
         ]
       }) as Workflow;
-    context.store.upsertWorkflow(scrubbedWorkflow("{{results.page.count}} items"));
+    await context.store.upsertWorkflow(scrubbedWorkflow("{{results.page.count}} items"));
     const run = (await call(context, "POST", "/api/workflows/wf-scrub/execute", builder.cookie, {})).json<{ executionId: string; status: string }>();
     expect(run.status).toBe("success");
     const golden = await saveGolden(context, builder.cookie, run.executionId);
@@ -754,14 +754,14 @@ describe("golden runs with side effects stubbed", { timeout: 30_000 }, () => {
       }
       return { id: "wf-branch", name: "Branch", schemaVersion: "1.0.0", workflowVersion: 1, projectId: "default", nodes, edges } as Workflow;
     };
-    context.store.upsertWorkflow(branchWorkflow("none"));
+    await context.store.upsertWorkflow(branchWorkflow("none"));
     const run = (await call(context, "POST", "/api/workflows/wf-branch/execute", builder.cookie, {})).json<{ executionId: string; status: string }>();
     expect(run.status).toBe("success");
     const golden = await saveGolden(context, builder.cookie, run.executionId);
     expect((await replay(context, builder.cookie, golden.id)).verdict).toBe("pass");
 
     for (const extra of ["write", "code"] as const) {
-      context.store.upsertWorkflow(branchWorkflow(extra));
+      await context.store.upsertWorkflow(branchWorkflow(extra));
       const result = await replay(context, builder.cookie, golden.id);
       // The output is unchanged, so this used to pass while the new node went untested.
       expect(result.diff.output.equal).toBe(true);
@@ -795,7 +795,7 @@ describe("golden runs with side effects stubbed", { timeout: 30_000 }, () => {
           { id: "e4", source: "shout", target: "output" }
         ]
       }) as Workflow;
-    context.store.upsertWorkflow(loopWorkflow("return { up: String(input.item).toUpperCase() };"));
+    await context.store.upsertWorkflow(loopWorkflow("return { up: String(input.item).toUpperCase() };"));
     const run = (await call(context, "POST", "/api/workflows/wf-loop/execute", builder.cookie, {})).json<{ executionId: string; status: string }>();
     expect(run.status, JSON.stringify(run)).toBe("success");
     const golden = await saveGolden(context, builder.cookie, run.executionId);
@@ -804,11 +804,11 @@ describe("golden runs with side effects stubbed", { timeout: 30_000 }, () => {
 
     const same = await replay(context, builder.cookie, golden.id);
     expect(same.verdict, JSON.stringify(same.reasons)).toBe("pass");
-    const replayed = context.store.getExecutionHistory(same.executionId)!;
+    const replayed = (await context.store.getExecutionHistory(same.executionId))!;
     const shoutOutputs = (replayed.nodeResults as Array<{ nodeId: string; output?: unknown }>).filter((entry) => entry.nodeId === "shout").map((entry) => (entry.output as { up?: string }).up);
     expect(shoutOutputs).toEqual(["A", "B", "C"]);
 
-    context.store.upsertWorkflow(loopWorkflow("return { up: String(input.item).toLowerCase() };"));
+    await context.store.upsertWorkflow(loopWorkflow("return { up: String(input.item).toLowerCase() };"));
     const changed = await replay(context, builder.cookie, golden.id);
     expect(changed.verdict).toBe("error");
     expect(changed.diff.health).toEqual(expect.arrayContaining([expect.objectContaining({ kind: "config_changed", nodeId: "shout", blocking: true })]));
@@ -839,7 +839,7 @@ describe("golden runs with side effects stubbed", { timeout: 30_000 }, () => {
           { id: "e4", source: "post", target: "output" }
         ]
       }) as Workflow;
-    context.store.upsertWorkflow(loopWorkflow(["a", "b"]));
+    await context.store.upsertWorkflow(loopWorkflow(["a", "b"]));
     const run = (await call(context, "POST", "/api/workflows/wf-loop-write/execute", builder.cookie, {})).json<{ executionId: string; status: string }>();
     expect(run.status, JSON.stringify(run)).toBe("success");
     expect(counter.count("/post")).toBe(2);
@@ -847,10 +847,10 @@ describe("golden runs with side effects stubbed", { timeout: 30_000 }, () => {
 
     const same = await replay(context, builder.cookie, golden.id);
     expect(same.verdict, JSON.stringify(same.reasons)).toBe("pass");
-    context.store.upsertWorkflow(loopWorkflow(["a"]));
+    await context.store.upsertWorkflow(loopWorkflow(["a"]));
     expect((await replay(context, builder.cookie, golden.id)).diff.health.some((warning) => warning.kind === "recording_overrun")).toBe(false);
 
-    context.store.upsertWorkflow(loopWorkflow(["a", "b", "c"]));
+    await context.store.upsertWorkflow(loopWorkflow(["a", "b", "c"]));
     const over = await replay(context, builder.cookie, golden.id);
     expect(over.verdict).toBe("error");
     expect(over.diff.health).toEqual(expect.arrayContaining([expect.objectContaining({ kind: "recording_overrun", nodeId: "post", blocking: true })]));
@@ -861,7 +861,7 @@ describe("golden runs with side effects stubbed", { timeout: 30_000 }, () => {
   it("truncates the largest node outputs to fit REPLAY_RECORDING_MAX_BYTES", async () => {
     const context = await createTestContext({ REPLAY_RECORDING_MAX_BYTES: "16384" });
     const builder = await login(context, "builder");
-    context.store.upsertWorkflow({
+    await context.store.upsertWorkflow({
       id: "wf-big",
       name: "Big",
       schemaVersion: "1.0.0",

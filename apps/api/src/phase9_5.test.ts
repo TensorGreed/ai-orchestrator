@@ -141,11 +141,11 @@ describe("Phase 9.5 — RAG-specific eval scorers", () => {
   beforeEach(async () => {
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-phase9-5-"));
     store = await SqliteStore.create(path.join(tempDir, "orchestrator.db"));
-    store.ensureDefaultProject();
+    await store.ensureDefaultProject();
   });
 
-  afterEach(() => {
-    try { store.close(); } catch { /* may already be closed */ }
+  afterEach(async () => {
+    try { await store.close(); } catch { /* may already be closed */ }
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
 
@@ -164,7 +164,7 @@ describe("Phase 9.5 — RAG-specific eval scorers", () => {
     const svc = new EvalService(store, fakeExecutor);
 
     // Workflow + dataset + fixture wiring
-    store.upsertWorkflow({
+    await store.upsertWorkflow({
       id: "wf",
       name: "wf",
       schemaVersion: "1.0.0",
@@ -172,8 +172,8 @@ describe("Phase 9.5 — RAG-specific eval scorers", () => {
       nodes: [],
       edges: []
     });
-    const dataset = svc.createDataset({ name: "ds" })!;
-    svc.addFixture({
+    const dataset = (await svc.createDataset({ name: "ds" }))!;
+    await svc.addFixture({
       datasetId: dataset.id,
       name: "fix1",
       input: { user_prompt: "how do I reset my password" },
@@ -192,7 +192,7 @@ describe("Phase 9.5 — RAG-specific eval scorers", () => {
     });
 
     expect(result.summary.total).toBe(1);
-    const run = svc.getRun(result.runId)!;
+    const run = (await svc.getRun(result.runId))!;
     const fixtureResult = run.results[0]!;
     const score = fixtureResult.score as { details: Array<{ type: string; pass: boolean; score: number }> };
     expect(score.details).toHaveLength(2);
@@ -211,9 +211,9 @@ describe("Phase 9.5 — RAG-specific eval scorers", () => {
     });
     const svc = new EvalService(store, fakeExecutor); // no judge passed
 
-    store.upsertWorkflow({ id: "wf", name: "wf", schemaVersion: "1.0.0", workflowVersion: 1, nodes: [], edges: [] });
-    const dataset = svc.createDataset({ name: "ds2" })!;
-    svc.addFixture({ datasetId: dataset.id, name: "f", input: "q", expected: "a" });
+    await store.upsertWorkflow({ id: "wf", name: "wf", schemaVersion: "1.0.0", workflowVersion: 1, nodes: [], edges: [] });
+    const dataset = (await svc.createDataset({ name: "ds2" }))!;
+    await svc.addFixture({ datasetId: dataset.id, name: "f", input: "q", expected: "a" });
 
     const result = await svc.startRun({
       datasetId: dataset.id,
@@ -226,7 +226,7 @@ describe("Phase 9.5 — RAG-specific eval scorers", () => {
       ]
     });
 
-    const run = svc.getRun(result.runId)!;
+    const run = (await svc.getRun(result.runId))!;
     const fixtureResult = run.results[0]!;
     const score = fixtureResult.score as { details: Array<{ type: string; pass: boolean; reason: string }> };
     for (const d of score.details) {
@@ -250,9 +250,9 @@ describe("Phase 9.5 — RAG-specific eval scorers", () => {
     });
     const svc = new EvalService(store, fakeExecutor, judge);
 
-    store.upsertWorkflow({ id: "wf3", name: "w", schemaVersion: "1.0.0", workflowVersion: 1, nodes: [], edges: [] });
-    const dataset = svc.createDataset({ name: "ds3" })!;
-    svc.addFixture({ datasetId: dataset.id, name: "f", input: "how to reset", expected: "click email link" });
+    await store.upsertWorkflow({ id: "wf3", name: "w", schemaVersion: "1.0.0", workflowVersion: 1, nodes: [], edges: [] });
+    const dataset = (await svc.createDataset({ name: "ds3" }))!;
+    await svc.addFixture({ datasetId: dataset.id, name: "f", input: "how to reset", expected: "click email link" });
 
     const result = await svc.startRun({
       datasetId: dataset.id,
@@ -262,7 +262,7 @@ describe("Phase 9.5 — RAG-specific eval scorers", () => {
       scorers: [{ type: "faithfulness", threshold: 0.6 } as ScorerSpec]
     });
 
-    const run = svc.getRun(result.runId)!;
+    const run = (await svc.getRun(result.runId))!;
     const fixtureResult = run.results[0]!;
     const score = fixtureResult.score as { details: Array<{ type: string; pass: boolean; score: number }> };
     expect(score.details[0]!.pass).toBe(true);
@@ -284,9 +284,9 @@ describe("Phase 9.5 — RAG-specific eval scorers", () => {
     });
     const svc = new EvalService(store, fakeExecutor, judge);
 
-    store.upsertWorkflow({ id: "wf4", name: "w", schemaVersion: "1.0.0", workflowVersion: 1, nodes: [], edges: [] });
-    const dataset = svc.createDataset({ name: "ds4" })!;
-    svc.addFixture({
+    await store.upsertWorkflow({ id: "wf4", name: "w", schemaVersion: "1.0.0", workflowVersion: 1, nodes: [], edges: [] });
+    const dataset = (await svc.createDataset({ name: "ds4" }))!;
+    await svc.addFixture({
       datasetId: dataset.id,
       name: "f",
       input: "What are your office hours?",
@@ -300,7 +300,7 @@ describe("Phase 9.5 — RAG-specific eval scorers", () => {
       triggeredByUserId: "u1",
       scorers: [{ type: "answer_relevance", threshold: 0.6 } as ScorerSpec]
     });
-    const run = svc.getRun(result.runId)!;
+    const run = (await svc.getRun(result.runId))!;
     const score = run.results[0]!.score as { details: Array<{ pass: boolean; score: number; reason: string }> };
     expect(score.details[0]!.pass).toBe(true);
     expect(score.details[0]!.score).toBeCloseTo(0.92, 6);
@@ -312,9 +312,9 @@ describe("Phase 9.5 — RAG-specific eval scorers", () => {
     const judge: EvalLlmJudge = async () => '{"score": 1.7, "reasoning": "off-spec"}';
     const fakeExecutor = async () => ({ output: { answer: "z" }, durationMs: 1 });
     const svc = new EvalService(store, fakeExecutor, judge);
-    store.upsertWorkflow({ id: "wf5", name: "w", schemaVersion: "1.0.0", workflowVersion: 1, nodes: [], edges: [] });
-    const dataset = svc.createDataset({ name: "ds5" })!;
-    svc.addFixture({ datasetId: dataset.id, name: "f", input: "q", expected: "" });
+    await store.upsertWorkflow({ id: "wf5", name: "w", schemaVersion: "1.0.0", workflowVersion: 1, nodes: [], edges: [] });
+    const dataset = (await svc.createDataset({ name: "ds5" }))!;
+    await svc.addFixture({ datasetId: dataset.id, name: "f", input: "q", expected: "" });
     const result = await svc.startRun({
       datasetId: dataset.id,
       workflowId: "wf5",
@@ -322,7 +322,7 @@ describe("Phase 9.5 — RAG-specific eval scorers", () => {
       triggeredByUserId: "u1",
       scorers: [{ type: "answer_relevance" } as ScorerSpec]
     });
-    const run = svc.getRun(result.runId)!;
+    const run = (await svc.getRun(result.runId))!;
     const score = run.results[0]!.score as { details: Array<{ score: number }> };
     expect(score.details[0]!.score).toBeLessThanOrEqual(1);
     expect(score.details[0]!.score).toBeGreaterThanOrEqual(0);

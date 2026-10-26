@@ -50,7 +50,7 @@ async function createTestContext(overrides: Record<string, string> = {}): Promis
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-golden-file-"));
   const dbPath = path.join(tempDir, "orchestrator.db");
   const store = await SqliteStore.create(dbPath);
-  store.ensureDefaultProject();
+  await store.ensureDefaultProject();
   const config = parseConfig({
     LOG_LEVEL: "warn",
     SEED_SAMPLE_WORKFLOWS: "false",
@@ -63,7 +63,7 @@ async function createTestContext(overrides: Record<string, string> = {}): Promis
   });
   const secretService = new SecretService(store, config.SECRET_MASTER_KEY_BASE64);
   const authService = new AuthService(store, config.SESSION_TTL_HOURS);
-  const app = createApp(config, store, secretService, authService);
+  const app = await createApp(config, store, secretService, authService);
   await app.ready();
   const context = { app, store, authService, secretService, config, tempDir, dbPath };
   contexts.push(context);
@@ -76,7 +76,7 @@ afterEach(async () => {
     const context = contexts.pop()!;
     await context.app.close();
     try {
-      context.store.close();
+      await context.store.close();
     } catch {
       // Already closed by the app shutdown hooks.
     }
@@ -89,7 +89,7 @@ type Role = "admin" | "builder" | "operator" | "viewer";
 async function login(context: TestContext, role: Role, name: string = role): Promise<{ cookie: string; id: string }> {
   const email = `${name}@example.com`;
   const password = `${name}-Pass-123!`;
-  const user = context.authService.register({ email, password, role });
+  const user = await context.authService.register({ email, password, role });
   const response = await context.app.inject({ method: "POST", url: "/api/auth/login", payload: { email, password } });
   if (response.statusCode !== 200) throw new Error(`Login failed for ${name}: ${response.body}`);
   const raw = response.headers["set-cookie"];
@@ -207,7 +207,7 @@ describe("golden-set files", () => {
     const context = await createTestContext();
     const builder = await login(context, "builder");
     const counter = await startCounter();
-    context.store.upsertWorkflow(setWorkflow(counter.base));
+    await context.store.upsertWorkflow(setWorkflow(counter.base));
     const setId = await suite(context, builder.cookie, "wf-set", 2);
 
     const file = await exportFile(context, builder.cookie, setId);
@@ -243,8 +243,8 @@ describe("golden-set files", () => {
     const context = await createTestContext();
     const builder = await login(context, "builder");
     const counter = await startCounter();
-    const secret = context.secretService.createSecret({ name: "Slack", provider: "slack", value: PLANTED_SECRET, projectId: "default" });
-    context.store.upsertWorkflow(setWorkflow(counter.base, "wf-set", "default", secret.secretId));
+    const secret = await context.secretService.createSecret({ name: "Slack", provider: "slack", value: PLANTED_SECRET, projectId: "default" });
+    await context.store.upsertWorkflow(setWorkflow(counter.base, "wf-set", "default", secret.secretId));
     const setId = await suite(context, builder.cookie, "wf-set", 1);
 
     const file = await exportFile(context, builder.cookie, setId);
@@ -288,7 +288,7 @@ describe("golden-set files", () => {
     const context = await createTestContext({ REPLAY_RECORDING_MAX_BYTES: "16384", REPLAY_JOB_MAX_CASES: "3" });
     const builder = await login(context, "builder");
     const counter = await startCounter();
-    context.store.upsertWorkflow(setWorkflow(counter.base));
+    await context.store.upsertWorkflow(setWorkflow(counter.base));
     const setId = await suite(context, builder.cookie, "wf-set", 2);
     const file = await exportFile(context, builder.cookie, setId);
     const datasetsBefore = countRows(context, "eval_datasets");
@@ -323,7 +323,7 @@ describe("golden-set files", () => {
     const context = await createTestContext();
     const builder = await login(context, "builder");
     const counter = await startCounter();
-    context.store.upsertWorkflow(setWorkflow(counter.base));
+    await context.store.upsertWorkflow(setWorkflow(counter.base));
     const setId = await suite(context, builder.cookie, "wf-set", 1);
     const file = await exportFile(context, builder.cookie, setId);
 
@@ -353,7 +353,7 @@ describe("golden-set files", () => {
     const admin = await login(context, "admin");
     const builder = await login(context, "builder");
     const counter = await startCounter();
-    context.store.upsertWorkflow(setWorkflow(counter.base));
+    await context.store.upsertWorkflow(setWorkflow(counter.base));
     const setId = await suite(context, builder.cookie, "wf-set", 1);
 
     // Signing is for admins, who manage the signing keys; a builder exports unsigned only.
@@ -398,11 +398,11 @@ describe("golden-set files", () => {
     const context = await createTestContext();
     const builder = await login(context, "builder");
     const counter = await startCounter();
-    context.store.upsertWorkflow(setWorkflow(counter.base));
+    await context.store.upsertWorkflow(setWorkflow(counter.base));
     // A fork: the same ids, but `notify` is now an HTTP call instead of a Slack message.
     const fork = setWorkflow(counter.base, "wf-other");
     fork.nodes = fork.nodes.map((node) => (node.id === "notify" ? { ...node, type: "http_request", config: { method: "POST", url: `${counter.base}/elsewhere` } } : node)) as Workflow["nodes"];
-    context.store.upsertWorkflow(fork);
+    await context.store.upsertWorkflow(fork);
     const setId = await suite(context, builder.cookie, "wf-set", 1);
     const file = await exportFile(context, builder.cookie, setId);
     const datasetsBefore = countRows(context, "eval_datasets");
@@ -419,8 +419,8 @@ describe("golden-set files", () => {
     expect(body.dataset.workflowId).toBe("wf-other");
     expect(body.warnings.join(" ")).toContain("exported from workflow wf-set");
     expect(body.warnings.join(" ")).toMatch(/Recorded outputs of 1 node were dropped .*notify/);
-    const recordingId = context.store.listEvalFixtures(body.dataset.id)[0]!.recordingId!;
-    const stored = context.store.getReplayRecording(recordingId)!;
+    const recordingId = (await context.store.listEvalFixtures(body.dataset.id))[0]!.recordingId!;
+    const stored = (await context.store.getReplayRecording(recordingId))!;
     expect(Object.keys(stored.nodes).sort()).toEqual(["label", "output", "start"]);
     expect(stored.capabilities).toMatchObject({ origin: "imported", sourceWorkflowId: "wf-set" });
   });
@@ -433,7 +433,7 @@ describe("golden-set files", () => {
     const outsider = await login(context, "builder", "outsider");
     const executor = await login(context, "builder", "executor");
     const counter = await startCounter();
-    context.store.upsertWorkflow(setWorkflow(counter.base));
+    await context.store.upsertWorkflow(setWorkflow(counter.base));
     const setId = await suite(context, builder.cookie, "wf-set", 1);
     const file = await exportFile(context, builder.cookie, setId);
 
@@ -442,14 +442,14 @@ describe("golden-set files", () => {
     expect((await importFile(context, viewer.cookie, file)).statusCode).toBe(403);
 
     // A builder with execute but not write on the project.
-    context.store.upsertCustomRole({ id: "exec-only", projectId: "default", name: "Runner", permissions: ["workflow:read", "workflow:execute"] });
-    context.store.upsertProjectRole({ userId: executor.id, projectId: "default", role: "custom", customRoleId: "exec-only" });
+    await context.store.upsertCustomRole({ id: "exec-only", projectId: "default", name: "Runner", permissions: ["workflow:read", "workflow:execute"] });
+    await context.store.upsertProjectRole({ userId: executor.id, projectId: "default", role: "custom", customRoleId: "exec-only" });
     expect((await call(context, "GET", `/api/eval/datasets/${setId}/export`, executor.cookie)).statusCode).toBe(200);
     expect((await importFile(context, executor.cookie, file)).statusCode).toBe(403);
 
     // A builder locked out of the project sees neither the set nor the workflow.
-    context.store.upsertCustomRole({ id: "none-default", projectId: "default", name: "No access", permissions: [] });
-    context.store.upsertProjectRole({ userId: outsider.id, projectId: "default", role: "custom", customRoleId: "none-default" });
+    await context.store.upsertCustomRole({ id: "none-default", projectId: "default", name: "No access", permissions: [] });
+    await context.store.upsertProjectRole({ userId: outsider.id, projectId: "default", role: "custom", customRoleId: "none-default" });
     const hidden = await call(context, "GET", `/api/eval/datasets/${setId}/export`, outsider.cookie);
     expect(hidden.statusCode).toBe(404);
     expect(hidden.body).toBe((await call(context, "GET", "/api/eval/datasets/ds_missing/export", outsider.cookie)).body);
@@ -470,7 +470,7 @@ describe("golden-set files", () => {
     const admin = await login(context, "admin");
     const builder = await login(context, "builder");
     const counter = await startCounter();
-    context.store.upsertWorkflow(setWorkflow(counter.base));
+    await context.store.upsertWorkflow(setWorkflow(counter.base));
     const setId = await suite(context, builder.cookie, "wf-set", 1);
     const file = await exportFile(context, admin.cookie, setId, true);
     expect((await importFile(context, builder.cookie, file)).statusCode).toBe(201);
@@ -577,8 +577,8 @@ describe("golden-set files: the importer and exporter do not trust what they car
     const context = await createTestContext();
     const builder = await login(context, "builder");
     const counter = await startCounter();
-    context.secretService.createSecret({ name: "Known", provider: "slack", value: PLANTED_SECRET, projectId: "default" });
-    context.store.upsertWorkflow(setWorkflow(counter.base));
+    await context.secretService.createSecret({ name: "Known", provider: "slack", value: PLANTED_SECRET, projectId: "default" });
+    await context.store.upsertWorkflow(setWorkflow(counter.base));
     const setId = await suite(context, builder.cookie, "wf-set", 1);
     const raw = JSON.parse(JSON.stringify(await exportFile(context, builder.cookie, setId))) as GoldenSetFile;
     const recording = raw.cases[0]!.recording as GoldenSetFile["cases"][number]["recording"] & Record<string, unknown>;
@@ -623,7 +623,7 @@ describe("golden-set files: the importer and exporter do not trust what they car
     expectNoNeedles(imported.body, "the import response");
     expectNoNeedles(storedRows(context, body.dataset.id), "the stored rows");
     // Structure survives the scrub: node ids and types, the cassette's match fields.
-    const stored = context.store.getReplayRecording(context.store.listEvalFixtures(body.dataset.id)[0]!.recordingId!)!;
+    const stored = (await context.store.getReplayRecording((await context.store.listEvalFixtures(body.dataset.id))[0]!.recordingId!))!;
     expect((stored.capturedWorkflow.nodes as Array<{ id: string; type: string }>).map((node) => `${node.id}:${node.type}`)).toEqual(["start:manual_trigger", "label:set_node", "notify:slack_send_message", "output:output"]);
     expect(stored.mcpCassette!.entries[0]).toMatchObject({ server: "registry:srv", method: "tools/call", name: "lookup" });
     expect(stored.mcpCassette!.entries[0]!.argsHash).toMatch(/^[0-9a-f]{64}$/);
@@ -643,8 +643,8 @@ describe("golden-set files: the importer and exporter do not trust what they car
     const context = await createTestContext();
     const builder = await login(context, "builder");
     const counter = await startCounter();
-    context.secretService.createSecret({ name: "Known", provider: "slack", value: PLANTED_SECRET, projectId: "default" });
-    context.store.upsertWorkflow(setWorkflow(counter.base));
+    await context.secretService.createSecret({ name: "Known", provider: "slack", value: PLANTED_SECRET, projectId: "default" });
+    await context.store.upsertWorkflow(setWorkflow(counter.base));
     const setId = await suite(context, builder.cookie, "wf-set", 1);
     const raw = JSON.parse(JSON.stringify(await exportFile(context, builder.cookie, setId))) as GoldenSetFile;
     const both = `tok ${GH_TOKEN} and ${PLANTED_SECRET}`;
@@ -666,7 +666,7 @@ describe("golden-set files: the importer and exporter do not trust what they car
     const body = imported.json<{ dataset: { id: string } }>();
     expectNoNeedles(imported.body, "the import response");
     expectNoNeedles(storedRows(context, body.dataset.id), "the stored rows");
-    const stored = context.store.getReplayRecording(context.store.listEvalFixtures(body.dataset.id)[0]!.recordingId!)!;
+    const stored = (await context.store.getReplayRecording((await context.store.listEvalFixtures(body.dataset.id))[0]!.recordingId!))!;
     const output = stored.nodes.label!.output as Record<string, unknown>;
     expect(Object.keys(output)).toEqual(expect.arrayContaining(["keep"]));
     expect(Object.keys(output).filter((key) => key.startsWith("[REDACTED_KEY_"))).toHaveLength(2);
@@ -682,7 +682,7 @@ describe("golden-set files: the importer and exporter do not trust what they car
     const context = await createTestContext({ GOLDEN_SET_IMPORT_MAX_BYTES: "65536" });
     const builder = await login(context, "builder");
     const counter = await startCounter();
-    context.store.upsertWorkflow(setWorkflow(counter.base));
+    await context.store.upsertWorkflow(setWorkflow(counter.base));
     const setId = await suite(context, builder.cookie, "wf-set", 30);
     const response = await call(context, "GET", `/api/eval/datasets/${setId}/export`, builder.cookie);
     expect(response.statusCode, response.body.slice(0, 200)).toBe(413);
@@ -693,7 +693,7 @@ describe("golden-set files: the importer and exporter do not trust what they car
     const context = await createTestContext();
     const builder = await login(context, "builder");
     const counter = await startCounter();
-    context.store.upsertWorkflow(setWorkflow(counter.base));
+    await context.store.upsertWorkflow(setWorkflow(counter.base));
     const setId = await suite(context, builder.cookie, "wf-set", 2);
     const file = await exportFile(context, builder.cookie, setId);
     for (const recordedAt of ["0001-01-01T00:00:00.000Z", "1999-12-31T23:59:59.000Z"]) {
@@ -715,12 +715,12 @@ describe("golden-set files: the importer and exporter do not trust what they car
     const context = await createTestContext();
     const builder = await login(context, "builder");
     const counter = await startCounter();
-    context.store.upsertWorkflow(setWorkflow(counter.base));
+    await context.store.upsertWorkflow(setWorkflow(counter.base));
     const setId = await suite(context, builder.cookie, "wf-set", 1);
     // A row as an older version or a bug could have left it: nothing in it was scrubbed.
     const workflow = setWorkflow(counter.base) as unknown as Record<string, unknown>;
     (workflow.nodes as Array<{ id: string; config: Record<string, unknown> }>)[2]!.config = { ...planted(), text: "done" };
-    const row = context.store.saveReplayRecording({
+    const row = await context.store.saveReplayRecording({
       id: "rec_planted",
       workflowId: "wf-set",
       projectId: "default",
@@ -744,7 +744,7 @@ describe("golden-set files: the importer and exporter do not trust what they car
     });
     expect((await call(context, "POST", `/api/eval/datasets/${setId}/recordings`, builder.cookie, { recordingId: row.id })).statusCode).toBe(201);
     // The known value only becomes a secret now, after the row was stored.
-    context.secretService.createSecret({ name: "Late", provider: "slack", value: PLANTED_SECRET, projectId: "default" });
+    await context.secretService.createSecret({ name: "Late", provider: "slack", value: PLANTED_SECRET, projectId: "default" });
     const exported = await call(context, "GET", `/api/eval/datasets/${setId}/export`, builder.cookie);
     expect(exported.statusCode, exported.body).toBe(200);
     expectNoNeedles(exported.body, "the export");
@@ -775,7 +775,7 @@ describe("golden-set files: the importer and exporter do not trust what they car
     const context = await createTestContext();
     const builder = await login(context, "builder");
     const counter = await startCounter();
-    context.store.upsertWorkflow(setWorkflow(counter.base));
+    await context.store.upsertWorkflow(setWorkflow(counter.base));
     const setId = await suite(context, builder.cookie, "wf-set", 1);
     const file = await exportFile(context, builder.cookie, setId);
     const deep = JSON.parse(JSON.stringify(file)) as GoldenSetFile;
@@ -796,7 +796,7 @@ describe("golden-set files: the importer and exporter do not trust what they car
     const admin = await login(context, "admin");
     const builder = await login(context, "builder");
     const counter = await startCounter();
-    context.store.upsertWorkflow(setWorkflow(counter.base));
+    await context.store.upsertWorkflow(setWorkflow(counter.base));
     const setId = await suite(context, builder.cookie, "wf-set", 2);
     const file = await exportFile(context, builder.cookie, setId);
     expect(file.cases[0]!.recording).toMatchObject({ origin: "recorded" });
@@ -829,7 +829,7 @@ describe("golden-set files: the importer and exporter do not trust what they car
     expect(Date.parse(future.createdAt)).toBeLessThanOrEqual(Date.now());
     expect(Date.parse(future.createdAt)).toBeGreaterThanOrEqual(before);
     // The stored hash is the hash of the workflow as stored here.
-    const stored = context.store.getReplayRecording(old.id)!;
+    const stored = (await context.store.getReplayRecording(old.id))!;
     expect(stored.workflowHash).toBe(crypto.createHash("sha256").update(canonicalJson(stored.capturedWorkflow)).digest("hex"));
     expect(listed.filter((entry) => entry.capabilities.origin !== "imported").every((entry) => entry.capabilities.origin === undefined)).toBe(true);
 
@@ -844,7 +844,7 @@ describe("golden-set files: the importer and exporter do not trust what they car
     const context = await createTestContext();
     const builder = await login(context, "builder");
     const counter = await startCounter();
-    context.store.upsertWorkflow(setWorkflow(counter.base));
+    await context.store.upsertWorkflow(setWorkflow(counter.base));
     const setId = await suite(context, builder.cookie, "wf-set", 1);
     const file = await exportFile(context, builder.cookie, setId);
 
@@ -852,7 +852,7 @@ describe("golden-set files: the importer and exporter do not trust what they car
     // holds another one. Under masked comparison the two would be equal, so only exact comparison tells them apart.
     const draft = setWorkflow(counter.base);
     (draft.nodes.find((node) => node.id === "label")!.config as { assignments: Array<{ valueTemplate: string }> }).assignments[0]!.valueTemplate = "\u2022\u2022\u2022\u2022 \u2022\u2022\u2022\u2022 1111";
-    context.store.upsertWorkflow(draft);
+    await context.store.upsertWorkflow(draft);
     const variant = (edit: (recording: GoldenSetFile["cases"][number]["recording"]) => void): GoldenSetFile => {
       const copy = JSON.parse(JSON.stringify(file)) as GoldenSetFile;
       const recording = copy.cases[0]!.recording;
@@ -903,14 +903,14 @@ describe("golden-set files: the importer and exporter do not trust what they car
     const context = await createTestContext();
     const builder = await login(context, "builder");
     const counter = await startCounter();
-    const staging = context.secretService.createSecret({ name: "Staging", provider: "slack", value: "staging-value-000000", projectId: "default" });
-    const production = context.secretService.createSecret({ name: "Production", provider: "slack", value: "production-value-111111", projectId: "default" });
-    context.store.upsertWorkflow(setWorkflow(counter.base, "wf-set", "default", staging.secretId));
+    const staging = await context.secretService.createSecret({ name: "Staging", provider: "slack", value: "staging-value-000000", projectId: "default" });
+    const production = await context.secretService.createSecret({ name: "Production", provider: "slack", value: "production-value-111111", projectId: "default" });
+    await context.store.upsertWorkflow(setWorkflow(counter.base, "wf-set", "default", staging.secretId));
     const setId = await suite(context, builder.cookie, "wf-set", 1);
-    const nativeId = context.store.listEvalFixtures(setId)[0]!.recordingId!;
+    const nativeId = (await context.store.listEvalFixtures(setId))[0]!.recordingId!;
     const imported = await importFile(context, builder.cookie, await exportFile(context, builder.cookie, setId));
     expect(imported.statusCode, imported.body).toBe(201);
-    const importedId = context.store.listEvalFixtures(imported.json<{ dataset: { id: string } }>().dataset.id)[0]!.recordingId!;
+    const importedId = (await context.store.listEvalFixtures(imported.json<{ dataset: { id: string } }>().dataset.id))[0]!.recordingId!;
 
     const replayDraft = async (recordingId: string) => {
       const response = await call(context, "POST", `/api/replay/recordings/${recordingId}/replay`, builder.cookie, { draft: true });
@@ -924,7 +924,7 @@ describe("golden-set files: the importer and exporter do not trust what they car
     expect(notifyChanged(await replayDraft(importedId))).toBe(false);
 
     // The candidate moves the stubbed write node to the production credential.
-    context.store.upsertWorkflow(setWorkflow(counter.base, "wf-set", "default", production.secretId));
+    await context.store.upsertWorkflow(setWorkflow(counter.base, "wf-set", "default", production.secretId));
     expect(notifyChanged(await replayDraft(nativeId))).toBe(true);
     // An imported run carries no reference to compare, so it cannot tell.
     expect(notifyChanged(await replayDraft(importedId))).toBe(false);
@@ -934,7 +934,7 @@ describe("golden-set files: the importer and exporter do not trust what they car
     const context = await createTestContext();
     const builder = await login(context, "builder");
     const counter = await startCounter();
-    context.store.upsertWorkflow(setWorkflow(counter.base));
+    await context.store.upsertWorkflow(setWorkflow(counter.base));
     const setId = await suite(context, builder.cookie, "wf-set", 3);
     const file = await exportFile(context, builder.cookie, setId);
 
@@ -967,12 +967,12 @@ describe("golden-set files: the importer and exporter do not trust what they car
     const context = await createTestContext();
     const builder = await login(context, "builder");
     const counter = await startCounter();
-    context.store.upsertWorkflow(setWorkflow(counter.base));
-    context.store.upsertWorkflow(setWorkflow(counter.base, "wf-b"));
+    await context.store.upsertWorkflow(setWorkflow(counter.base));
+    await context.store.upsertWorkflow(setWorkflow(counter.base, "wf-b"));
     const setId = await suite(context, builder.cookie, "wf-set", 1);
     const otherSet = await suite(context, builder.cookie, "wf-b", 1);
-    const foreign = context.store.listEvalFixtures(otherSet)[0]!.recordingId!;
-    context.store.createEvalFixture({ id: "fix_foreign", datasetId: setId, name: "Foreign", input: null, recordingId: foreign });
+    const foreign = (await context.store.listEvalFixtures(otherSet))[0]!.recordingId!;
+    await context.store.createEvalFixture({ id: "fix_foreign", datasetId: setId, name: "Foreign", input: null, recordingId: foreign });
     const refused = await call(context, "GET", `/api/eval/datasets/${setId}/export`, builder.cookie);
     expect(refused.statusCode, refused.body).toBe(409);
     expect(refused.json<{ error: string }>().error).toContain("another workflow");
@@ -983,11 +983,11 @@ describe("golden-set files: the importer and exporter do not trust what they car
     const admin = await login(context, "admin");
     const builder = await login(context, "builder");
     const counter = await startCounter();
-    context.store.upsertProject({ id: "team", name: "Team" });
-    context.store.upsertProject({ id: "other", name: "Other" });
-    context.store.upsertProjectRole({ userId: builder.id, projectId: "team", role: "editor" });
-    context.store.upsertWorkflow(setWorkflow(counter.base, "wf-team", "team"));
-    context.store.upsertWorkflow(setWorkflow(counter.base, "wf-other", "other"));
+    await context.store.upsertProject({ id: "team", name: "Team" });
+    await context.store.upsertProject({ id: "other", name: "Other" });
+    await context.store.upsertProjectRole({ userId: builder.id, projectId: "team", role: "editor" });
+    await context.store.upsertWorkflow(setWorkflow(counter.base, "wf-team", "team"));
+    await context.store.upsertWorkflow(setWorkflow(counter.base, "wf-other", "other"));
     const teamSet = await suite(context, builder.cookie, "wf-team", 1);
     const otherSet = await suite(context, admin.cookie, "wf-other", 1);
 
@@ -1008,17 +1008,17 @@ describe("golden-set files: the importer and exporter do not trust what they car
     expect(imported.statusCode, imported.body).toBe(201);
     const dataset = imported.json<{ dataset: { id: string; projectId: string; workflowId: string } }>().dataset;
     expect(dataset).toMatchObject({ projectId: "team", workflowId: "wf-team" });
-    const recording = context.store.getReplayRecording(context.store.listEvalFixtures(dataset.id)[0]!.recordingId!)!;
+    const recording = (await context.store.getReplayRecording((await context.store.listEvalFixtures(dataset.id))[0]!.recordingId!))!;
     expect(recording).toMatchObject({ projectId: "team", workflowId: "wf-team" });
     // And the other project gains nothing.
-    expect(context.store.listEvalDatasets({ projectId: "other" }).map((entry) => entry.id)).toEqual([otherSet]);
+    expect((await context.store.listEvalDatasets({ projectId: "other" })).map((entry) => entry.id)).toEqual([otherSet]);
   }, 60_000);
 
   it("the CLI exports a signed file from a running server and 'golden verify' checks it with the deployment's public key", async () => {
     const context = await createTestContext();
     const admin = await login(context, "admin");
     const counter = await startCounter();
-    context.store.upsertWorkflow(setWorkflow(counter.base));
+    await context.store.upsertWorkflow(setWorkflow(counter.base));
     const setId = await suite(context, admin.cookie, "wf-set", 1);
     const created = await call(context, "POST", "/api/auth/api-keys", admin.cookie, { name: "ci" });
     expect(created.statusCode, created.body).toBe(200);

@@ -64,7 +64,7 @@ describe("McpProbeService", () => {
       { resolveSecret: async () => undefined, isLeader: () => leader },
       { defaultIntervalMs: 60_000, probeTimeoutMs: 200, keepProbes: 3 }
     );
-    store.createMcpServer({
+    await store.createMcpServer({
       id: "mcp_1",
       name: "Issues",
       adapterId: "scripted",
@@ -74,9 +74,9 @@ describe("McpProbeService", () => {
     });
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     service.stop();
-    try { store.close(); } catch { /* may already be closed */ }
+    try { await store.close(); } catch { /* may already be closed */ }
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
 
@@ -109,7 +109,7 @@ describe("McpProbeService", () => {
 
     expect(second.snapshot).toBeUndefined();
     expect(second.probe.snapshotId).toBe(first.snapshot!.id);
-    expect(store.listMcpToolSnapshots("mcp_1")).toHaveLength(1);
+    expect(await store.listMcpToolSnapshots("mcp_1")).toHaveLength(1);
   });
 
   it("records a non-breaking change without blocking", async () => {
@@ -131,10 +131,10 @@ describe("McpProbeService", () => {
     expect(outcome.snapshot?.breaking).toBe(true);
     expect(outcome.server.pendingBreakingSnapshotId).toBe(outcome.snapshot!.id);
 
-    const acknowledged = store.acknowledgeMcpBreakingChange("mcp_1", "admin@example.com");
+    const acknowledged = await store.acknowledgeMcpBreakingChange("mcp_1", "admin@example.com");
     expect(acknowledged).toMatchObject({ id: outcome.snapshot!.id, acknowledgedBy: "admin@example.com" });
-    expect(store.getMcpServer("mcp_1")?.pendingBreakingSnapshotId).toBeNull();
-    expect(store.acknowledgeMcpBreakingChange("mcp_1", "admin@example.com")).toBeNull();
+    expect((await store.getMcpServer("mcp_1"))?.pendingBreakingSnapshotId).toBeNull();
+    expect(await store.acknowledgeMcpBreakingChange("mcp_1", "admin@example.com")).toBeNull();
   });
 
   it("marks the server down on failure and degraded after recovering", async () => {
@@ -158,7 +158,7 @@ describe("McpProbeService", () => {
   });
 
   it("fails cleanly when the adapter is not registered", async () => {
-    store.updateMcpServer("mcp_1", { adapterId: "gone" });
+    await store.updateMcpServer("mcp_1", { adapterId: "gone" });
     const outcome = await service.probe("mcp_1");
     expect(outcome.probe).toMatchObject({ ok: false, error: "Unknown MCP adapter: gone" });
   });
@@ -168,12 +168,12 @@ describe("McpProbeService", () => {
     for (let i = 0; i < 5; i += 1) {
       await service.probe("mcp_1");
     }
-    expect(store.listMcpServerProbes("mcp_1")).toHaveLength(3);
+    expect(await store.listMcpServerProbes("mcp_1")).toHaveLength(3);
   });
 
   it("only probes due servers, and only on the leader", async () => {
     adapter.tools = [tool("search")];
-    store.createMcpServer({ id: "mcp_off", name: "Off", adapterId: "scripted", probeEnabled: false });
+    await store.createMcpServer({ id: "mcp_off", name: "Off", adapterId: "scripted", probeEnabled: false });
 
     leader = false;
     await service.tick();
@@ -189,7 +189,7 @@ describe("McpProbeService", () => {
     await service.tick(Date.now() + 61_000);
     expect(adapter.seenConfigs).toHaveLength(2);
 
-    store.updateMcpServer("mcp_1", { probeIntervalMs: 600_000 });
+    await store.updateMcpServer("mcp_1", { probeIntervalMs: 600_000 });
     await service.tick(Date.now() + 120_000);
     expect(adapter.seenConfigs).toHaveLength(2);
   });
@@ -201,20 +201,20 @@ describe("McpProbeService", () => {
     expect(adapter.seenConfigs).toHaveLength(1);
   });
 
-  it("lists deployment-wide servers in every project", () => {
-    store.createMcpServer({ id: "mcp_a", name: "A only", adapterId: "scripted", projectId: "proj_a" });
-    store.createMcpServer({ id: "mcp_b", name: "B only", adapterId: "scripted", projectId: "proj_b" });
-    expect(store.listMcpServers({ projectId: "proj_a" }).map((server) => server.id)).toEqual(["mcp_a", "mcp_1"]);
-    expect(store.listMcpServers().map((server) => server.id)).toEqual(["mcp_a", "mcp_b", "mcp_1"]);
+  it("lists deployment-wide servers in every project", async () => {
+    await store.createMcpServer({ id: "mcp_a", name: "A only", adapterId: "scripted", projectId: "proj_a" });
+    await store.createMcpServer({ id: "mcp_b", name: "B only", adapterId: "scripted", projectId: "proj_b" });
+    expect((await store.listMcpServers({ projectId: "proj_a" })).map((server) => server.id)).toEqual(["mcp_a", "mcp_1"]);
+    expect((await store.listMcpServers()).map((server) => server.id)).toEqual(["mcp_a", "mcp_b", "mcp_1"]);
   });
 
   it("deletes probes and snapshots with the server", async () => {
     adapter.tools = [tool("search")];
     await service.probe("mcp_1");
-    expect(store.deleteMcpServer("mcp_1")).toBe(true);
-    expect(store.listMcpServerProbes("mcp_1")).toEqual([]);
-    expect(store.listMcpToolSnapshots("mcp_1")).toEqual([]);
-    expect(store.deleteMcpServer("mcp_1")).toBe(false);
+    expect(await store.deleteMcpServer("mcp_1")).toBe(true);
+    expect(await store.listMcpServerProbes("mcp_1")).toEqual([]);
+    expect(await store.listMcpToolSnapshots("mcp_1")).toEqual([]);
+    expect(await store.deleteMcpServer("mcp_1")).toBe(false);
   });
 });
 

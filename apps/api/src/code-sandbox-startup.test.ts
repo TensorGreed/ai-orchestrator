@@ -37,18 +37,18 @@ function baseEnv(overrides: Record<string, string> = {}): Record<string, string>
 async function createCtx(env: Record<string, string>, options: CreateAppOptions): Promise<Ctx> {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-code-startup-"));
   const store = await SqliteStore.create(path.join(tempDir, "orchestrator.db"));
-  store.ensureDefaultProject();
+  await store.ensureDefaultProject();
   const config = parseConfig(baseEnv(env));
   const secretService = new SecretService(store, config.SECRET_MASTER_KEY_BASE64);
   const authService = new AuthService(store, config.SESSION_TTL_HOURS);
-  const app = createApp(config, store, secretService, authService, undefined, undefined, undefined, options);
+  const app = await createApp(config, store, secretService, authService, undefined, undefined, undefined, options);
   const ctx = { app, store, authService, config, tempDir };
   contexts.push(ctx);
   return ctx;
 }
 
 async function builderCookie(ctx: Ctx): Promise<string> {
-  ctx.authService.register({ email: "builder@example.com", password: "builder-password", role: "builder" });
+  await ctx.authService.register({ email: "builder@example.com", password: "builder-password", role: "builder" });
   const response = await ctx.app.inject({ method: "POST", url: "/api/auth/login", payload: { email: "builder@example.com", password: "builder-password" } });
   const header = response.headers["set-cookie"];
   const raw = (Array.isArray(header) ? header : [header ?? ""]).find((entry) => entry.startsWith(`${ctx.config.SESSION_COOKIE_NAME}=`)) ?? "";
@@ -61,7 +61,7 @@ afterEach(async () => {
   while (contexts.length > 0) {
     const ctx = contexts.pop()!;
     await ctx.app.close();
-    ctx.store.close?.();
+    await ctx.store.close?.();
     fs.rmSync(ctx.tempDir, { recursive: true, force: true });
   }
 });

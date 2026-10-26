@@ -108,12 +108,14 @@ function escapeSlack(value: string): string {
 
 export class NotificationService {
   private channels: NotificationChannel[] = [];
+  /** The latest channel load; `notify` waits for it so a send never uses channels from before a change. */
+  private loaded: Promise<void>;
 
   constructor(
     private config: AppConfig,
-    private listConfigs: () => NotificationChannel[]
+    private listConfigs: () => NotificationChannel[] | Promise<NotificationChannel[]>
   ) {
-    this.reload();
+    this.loaded = this.load().catch(() => undefined);
   }
 
   /** Events the env-configured channels receive; Phase 11.2 adds approval events unless turned off. */
@@ -121,8 +123,17 @@ export class NotificationService {
     return this.config.NOTIFICATIONS_APPROVAL_EVENTS ? ["execution.failure", ...APPROVAL_NOTIFICATION_EVENTS] : ["execution.failure"];
   }
 
-  reload(): void {
-    this.channels = this.listConfigs();
+  /** Reloads the channels from the stored configs (plus the env-configured defaults). */
+  reload(): Promise<void> {
+    const loading = this.load();
+    // A failed load keeps the previous channels; the next reload tries again.
+    this.loaded = loading.catch(() => undefined);
+    return loading;
+  }
+
+  private async load(): Promise<void> {
+    const channels = [...(await this.listConfigs())];
+    this.channels = channels;
 
     // Also add env-var-based defaults if no DB configs exist
     if (this.config.NOTIFICATIONS_ENABLED) {
@@ -162,6 +173,7 @@ export class NotificationService {
   }
 
   async notify(event: NotificationEvent): Promise<void> {
+    await this.loaded;
     const matching = this.channels.filter(c => c.enabled && c.events.includes(event.type));
     const results = await Promise.allSettled(
       matching.map(c => this.sendToChannel(c, event))

@@ -30,8 +30,9 @@ import type {
   McpElicitationStatus,
   McpElicitationView
 } from "@ai-orchestrator/shared";
-import type { McpElicitationRecord, SqliteStore } from "../db/database.js";
+import type { McpElicitationRecord } from "../db/database.js";
 import type { AuditEventInput } from "./audit-service.js";
+import type { Store } from "../db/store.js";
 
 /** Trigger types where a person is in front of the run and can answer. */
 export const ATTENDED_TRIGGER_TYPES = new Set(["manual", "manual_stream", "manual_retry", "approval_resume"]);
@@ -74,7 +75,7 @@ export interface McpElicitationEvent {
 export interface McpElicitationServiceOptions {
   /** Longest a request waits for a person (ms). */
   timeoutMs: number;
-  audit: (event: AuditEventInput) => void;
+  audit: (event: AuditEventInput) => void | Promise<void>;
   logger?: { info: (msg: string, fields?: Record<string, unknown>) => void; warn: (msg: string, fields?: Record<string, unknown>) => void };
   now?: () => number;
 }
@@ -115,15 +116,15 @@ export class McpElicitationService {
   private readonly executionListeners = new Map<string, Set<(event: McpElicitationEvent) => void>>();
 
   constructor(
-    private readonly store: SqliteStore,
+    private readonly store: Store,
     private readonly options: McpElicitationServiceOptions
   ) {}
 
   /** Requests still marked pending from before a restart cannot be answered any more. */
-  expireStale(reason = "The API restarted while the request was waiting."): number {
-    const stale = this.store.listMcpElicitations({ status: "pending", limit: 500 }).filter((entry) => !this.pending.has(entry.id));
+  async expireStale(reason = "The API restarted while the request was waiting."): Promise<number> {
+    const stale = (await this.store.listMcpElicitations({ status: "pending", limit: 500 })).filter((entry) => !this.pending.has(entry.id));
     for (const entry of stale) {
-      this.store.settleMcpElicitation(entry.id, { status: "expired", reason });
+      await this.store.settleMcpElicitation(entry.id, { status: "expired", reason });
     }
     return stale.length;
   }
@@ -139,16 +140,16 @@ export class McpElicitationService {
     };
   }
 
-  get(id: string): McpElicitationRecord | null {
-    return this.store.getMcpElicitation(id);
+  async get(id: string): Promise<McpElicitationRecord | null> {
+    return await this.store.getMcpElicitation(id);
   }
 
-  listPending(filter: { executionId?: string } = {}): McpElicitationRecord[] {
-    return this.store.listMcpElicitations({ status: "pending", ...filter, limit: 200 });
+  async listPending(filter: { executionId?: string } = {}): Promise<McpElicitationRecord[]> {
+    return await this.store.listMcpElicitations({ status: "pending", ...filter, limit: 200 });
   }
 
-  list(filter: { status?: McpElicitationStatus; executionId?: string; limit?: number } = {}): McpElicitationRecord[] {
-    return this.store.listMcpElicitations(filter);
+  async list(filter: { status?: McpElicitationStatus; executionId?: string; limit?: number } = {}): Promise<McpElicitationRecord[]> {
+    return await this.store.listMcpElicitations(filter);
   }
 
   /** Whether this instance holds the pending tool call for the request (answers must land here). */
@@ -161,7 +162,7 @@ export class McpElicitationService {
    * deadline passes, the run is canceled, or straight away for unattended
    * runs and refused schemas.
    */
-  ask(input: McpElicitationAsk): Promise<McpElicitationAnswer> {
+  async ask(input: McpElicitationAsk): Promise<McpElicitationAnswer> {
     const now = this.options.now ?? Date.now;
     const id = `elc_${randomUUID()}`;
     const base = {
@@ -206,36 +207,42 @@ export class McpElicitationService {
     }
     if (refusal) {
       const expiresAt = new Date(now()).toISOString();
-      const record = this.store.createMcpElicitation({ ...base, expiresAt });
-      this.store.settleMcpElicitation(record.id, { status: "auto_declined", reason: refusal });
-      this.options.audit({ ...auditBase, eventType: "mcp_elicitation.refused", outcome: "denied", metadata: { ...metadata, reason: refusal } });
+      const record = await this.store.createMcpElicitation({ ...base, expiresAt });
+      await this.store.settleMcpElicitation(record.id, { status: "auto_declined", reason: refusal });
+      await this.options.audit({ ...auditBase, eventType: "mcp_elicitation.refused", outcome: "denied", metadata: { ...metadata, reason: refusal } });
       this.options.logger?.warn("MCP elicitation refused", { id, reason: refusal });
-      this.emit(input.executionId, { phase: "settled", elicitation: toElicitationView(this.store.getMcpElicitation(record.id)!) });
+      this.emit(input.executionId, { phase: "settled", elicitation: toElicitationView((await this.store.getMcpElicitation(record.id))!) });
       return Promise.resolve({ id, action: "decline", source: "refused", note: refusal });
     }
 
     if (!isAttendedTrigger(input.triggerType)) {
       const note = `Unattended run (${input.triggerType ?? "unknown trigger"}): nobody can answer, declined automatically.`;
       const expiresAt = new Date(now()).toISOString();
-      const record = this.store.createMcpElicitation({ ...base, expiresAt });
-      this.store.settleMcpElicitation(record.id, { status: "auto_declined", reason: note });
-      this.options.audit({ ...auditBase, eventType: "mcp_elicitation.auto_declined", outcome: "success", metadata });
-      this.emit(input.executionId, { phase: "settled", elicitation: toElicitationView(this.store.getMcpElicitation(record.id)!) });
+      const record = await this.store.createMcpElicitation({ ...base, expiresAt });
+      await this.store.settleMcpElicitation(record.id, { status: "auto_declined", reason: note });
+      await this.options.audit({ ...auditBase, eventType: "mcp_elicitation.auto_declined", outcome: "success", metadata });
+      this.emit(input.executionId, { phase: "settled", elicitation: toElicitationView((await this.store.getMcpElicitation(record.id))!) });
       return Promise.resolve({ id, action: "decline", source: "unattended", note });
     }
 
     const timeoutMs = Math.max(1_000, Math.min(this.options.timeoutMs, input.timeoutMs ?? this.options.timeoutMs));
     const expiresAt = new Date(now() + timeoutMs).toISOString();
-    const record = this.store.createMcpElicitation({ ...base, expiresAt });
-    this.options.audit({ ...auditBase, eventType: "mcp_elicitation.requested", outcome: "success", metadata: { ...metadata, expiresAt } });
+    const record = await this.store.createMcpElicitation({ ...base, expiresAt });
+    await this.options.audit({ ...auditBase, eventType: "mcp_elicitation.requested", outcome: "success", metadata: { ...metadata, expiresAt } });
 
+    // A timeout or an abort settles the request in the background; a failed write is logged.
+    const settleLater = (outcome: Parameters<McpElicitationService["finish"]>[1], answer: McpElicitationAnswer) => {
+      this.finish(id, outcome, answer).catch((error: unknown) => {
+        this.options.logger?.warn("MCP elicitation could not be settled", { id, error: error instanceof Error ? error.message : String(error) });
+      });
+    };
     return new Promise<McpElicitationAnswer>((resolve) => {
       const entry: PendingEntry = {
         record,
         resolve,
         listeners: [],
         timer: setTimeout(() => {
-          this.finish(id, { status: "expired", reason: `No answer within ${Math.round(timeoutMs / 1000)} s.` }, {
+          settleLater({ status: "expired", reason: `No answer within ${Math.round(timeoutMs / 1000)} s.` }, {
             id,
             action: "decline",
             source: "timeout",
@@ -247,7 +254,7 @@ export class McpElicitationService {
       entry.timer.unref?.();
       if (input.signal) {
         const onAbort = () => {
-          this.finish(id, { status: "expired", reason: "The run was canceled while waiting." }, {
+          settleLater({ status: "expired", reason: "The run was canceled while waiting." }, {
             id,
             action: "cancel",
             source: "timeout",
@@ -272,12 +279,12 @@ export class McpElicitationService {
    * schema; the first answer wins. Only the person whose run it is, or an
    * operator or admin, may answer.
    */
-  answer(
+  async answer(
     id: string,
     answer: { action: McpElicitationAction; content?: Record<string, unknown> },
     actor: { userId: string; email: string; role: string }
-  ): McpElicitationRecord {
-    const record = this.store.getMcpElicitation(id);
+  ): Promise<McpElicitationRecord> {
+    const record = await this.store.getMcpElicitation(id);
     if (!record) {
       throw new McpElicitationAnswerError("Elicitation request not found.", 404);
     }
@@ -301,12 +308,12 @@ export class McpElicitationService {
       }
       content = checked.content;
     }
-    const settled = this.finish(
+    const settled = await this.finish(
       id,
       { status: SETTLED_STATUS[answer.action], answeredBy: actor.email },
       { id, action: answer.action, ...(content ? { content } : {}), source: "user" }
     );
-    this.options.audit({
+    await this.options.audit({
       category: "system",
       eventType: `mcp_elicitation.${SETTLED_STATUS[answer.action]}`,
       action: answer.action,
@@ -324,39 +331,39 @@ export class McpElicitationService {
         fields: content ? Object.keys(content) : []
       }
     });
-    return settled ?? this.store.getMcpElicitation(id)!;
+    return settled ?? (await this.store.getMcpElicitation(id))!;
   }
 
   /** Expire every request an execution still has waiting (the run ended without answering them). */
-  releaseExecution(executionId: string, reason: string): number {
+  async releaseExecution(executionId: string, reason: string): Promise<number> {
     let count = 0;
     for (const [id, entry] of this.pending) {
       if (entry.record.executionId !== executionId) continue;
-      this.finish(id, { status: "expired", reason }, { id, action: "cancel", source: "timeout", note: reason });
+      await this.finish(id, { status: "expired", reason }, { id, action: "cancel", source: "timeout", note: reason });
       count += 1;
     }
     return count;
   }
 
-  stop(): void {
+  async stop(): Promise<void> {
     for (const [id] of this.pending) {
-      this.finish(id, { status: "expired", reason: "The API is shutting down." }, { id, action: "cancel", source: "timeout", note: "The API is shutting down." });
+      await this.finish(id, { status: "expired", reason: "The API is shutting down." }, { id, action: "cancel", source: "timeout", note: "The API is shutting down." });
     }
   }
 
-  private finish(
+  private async finish(
     id: string,
     outcome: { status: Exclude<McpElicitationStatus, "pending">; answeredBy?: string | null; reason?: string | null },
     answer: McpElicitationAnswer
-  ): McpElicitationRecord | null {
+  ): Promise<McpElicitationRecord | null> {
     const entry = this.pending.get(id);
     if (!entry) return null;
     this.pending.delete(id);
     clearTimeout(entry.timer);
     if (entry.signal && entry.onAbort) entry.signal.removeEventListener("abort", entry.onAbort);
-    this.store.settleMcpElicitation(id, outcome);
+    await this.store.settleMcpElicitation(id, outcome);
     if (outcome.status === "expired") {
-      this.options.audit({
+      await this.options.audit({
         category: "system",
         eventType: "mcp_elicitation.expired",
         action: "expire",
@@ -367,7 +374,7 @@ export class McpElicitationService {
         metadata: { executionId: entry.record.executionId, reason: outcome.reason ?? null }
       });
     }
-    const settled = this.store.getMcpElicitation(id);
+    const settled = await this.store.getMcpElicitation(id);
     if (settled) this.emit(entry.record.executionId, { phase: "settled", elicitation: toElicitationView(settled) });
     entry.resolve(answer);
     return settled;

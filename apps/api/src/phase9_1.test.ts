@@ -15,17 +15,17 @@ describe("Phase 9.1 — built-in persistent vector store", () => {
   beforeEach(async () => {
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-phase9-1-"));
     store = await SqliteStore.create(path.join(tempDir, "orchestrator.db"));
-    store.ensureDefaultProject();
+    await store.ensureDefaultProject();
   });
 
-  afterEach(() => {
-    try { store.close(); } catch { /* may already be closed */ }
+  afterEach(async () => {
+    try { await store.close(); } catch { /* may already be closed */ }
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
 
   describe("CRUD", () => {
-    it("creates, reads, updates, and deletes a KB", () => {
-      store.createKnowledgeBase({
+    it("creates, reads, updates, and deletes a KB", async () => {
+      await store.createKnowledgeBase({
         id: "kb_1",
         name: "Helpdesk corpus",
         description: "Q1 support transcripts",
@@ -34,71 +34,71 @@ describe("Phase 9.1 — built-in persistent vector store", () => {
         embedderConfig: {},
         createdBy: "alice@example.com"
       });
-      const fetched = store.getKnowledgeBase("kb_1")!;
+      const fetched = (await store.getKnowledgeBase("kb_1"))!;
       expect(fetched.name).toBe("Helpdesk corpus");
       expect(fetched.embedderId).toBe("token-embedder");
       expect(fetched.chunkCount).toBe(0);
       expect(fetched.dimensions).toBe(0);
 
-      store.updateKnowledgeBase("kb_1", { name: "Renamed", description: null });
-      const after = store.getKnowledgeBase("kb_1")!;
+      await store.updateKnowledgeBase("kb_1", { name: "Renamed", description: null });
+      const after = (await store.getKnowledgeBase("kb_1"))!;
       expect(after.name).toBe("Renamed");
       expect(after.description).toBeNull();
 
-      store.deleteKnowledgeBase("kb_1");
-      expect(store.getKnowledgeBase("kb_1")).toBeNull();
+      await store.deleteKnowledgeBase("kb_1");
+      expect(await store.getKnowledgeBase("kb_1")).toBeNull();
     });
 
-    it("lists KBs scoped to a project", () => {
-      store.createKnowledgeBase({ id: "kb_a", name: "A", projectId: "p1", embedderId: "token-embedder" });
-      store.createKnowledgeBase({ id: "kb_b", name: "B", projectId: "p2", embedderId: "token-embedder" });
-      const p1 = store.listKnowledgeBases({ projectId: "p1" });
+    it("lists KBs scoped to a project", async () => {
+      await store.createKnowledgeBase({ id: "kb_a", name: "A", projectId: "p1", embedderId: "token-embedder" });
+      await store.createKnowledgeBase({ id: "kb_b", name: "B", projectId: "p2", embedderId: "token-embedder" });
+      const p1 = await store.listKnowledgeBases({ projectId: "p1" });
       expect(p1.map((k) => k.id)).toEqual(["kb_a"]);
     });
   });
 
   describe("addKnowledgeBaseChunks", () => {
-    it("locks dimensions on first insert and rejects mismatches afterwards", () => {
-      store.createKnowledgeBase({ id: "kb_dim", name: "dims", embedderId: "token-embedder" });
-      store.addKnowledgeBaseChunks({
+    it("locks dimensions on first insert and rejects mismatches afterwards", async () => {
+      await store.createKnowledgeBase({ id: "kb_dim", name: "dims", embedderId: "token-embedder" });
+      await store.addKnowledgeBaseChunks({
         knowledgeBaseId: "kb_dim",
         chunks: [{ chunkIndex: 0, content: "hello", vector: new Array(64).fill(0).map((_, i) => i) }]
       });
-      const kb = store.getKnowledgeBase("kb_dim")!;
+      const kb = (await store.getKnowledgeBase("kb_dim"))!;
       expect(kb.dimensions).toBe(64);
       expect(kb.chunkCount).toBe(1);
 
-      expect(() => store.addKnowledgeBaseChunks({
+      await expect(store.addKnowledgeBaseChunks({
         knowledgeBaseId: "kb_dim",
         chunks: [{ chunkIndex: 1, content: "wrong", vector: [1, 2, 3] }]
-      })).toThrow(/dimension mismatch/i);
+      })).rejects.toThrow(/dimension mismatch/i);
     });
 
-    it("appends chunks and updates chunk_count", () => {
-      store.createKnowledgeBase({ id: "kb_app", name: "append", embedderId: "token-embedder" });
+    it("appends chunks and updates chunk_count", async () => {
+      await store.createKnowledgeBase({ id: "kb_app", name: "append", embedderId: "token-embedder" });
       const v = new Array(64).fill(1);
-      store.addKnowledgeBaseChunks({
+      await store.addKnowledgeBaseChunks({
         knowledgeBaseId: "kb_app",
         chunks: [
           { chunkIndex: 0, content: "first", vector: v, sourceId: "doc1" },
           { chunkIndex: 1, content: "second", vector: v, sourceId: "doc1" }
         ]
       });
-      store.addKnowledgeBaseChunks({
+      await store.addKnowledgeBaseChunks({
         knowledgeBaseId: "kb_app",
         chunks: [{ chunkIndex: 2, content: "third", vector: v, sourceId: "doc2" }]
       });
-      const kb = store.getKnowledgeBase("kb_app")!;
+      const kb = (await store.getKnowledgeBase("kb_app"))!;
       expect(kb.chunkCount).toBe(3);
-      const sources = store.listKnowledgeBaseSources("kb_app");
+      const sources = await store.listKnowledgeBaseSources("kb_app");
       expect(sources.map((s) => s.sourceId).sort()).toEqual(["doc1", "doc2"]);
       expect(sources.find((s) => s.sourceId === "doc1")!.chunkCount).toBe(2);
     });
 
-    it("deleteKnowledgeBaseChunksBySource removes only that source", () => {
-      store.createKnowledgeBase({ id: "kb_src", name: "by-source", embedderId: "token-embedder" });
+    it("deleteKnowledgeBaseChunksBySource removes only that source", async () => {
+      await store.createKnowledgeBase({ id: "kb_src", name: "by-source", embedderId: "token-embedder" });
       const v = new Array(64).fill(1);
-      store.addKnowledgeBaseChunks({
+      await store.addKnowledgeBaseChunks({
         knowledgeBaseId: "kb_src",
         chunks: [
           { chunkIndex: 0, content: "a1", vector: v, sourceId: "alpha" },
@@ -106,28 +106,28 @@ describe("Phase 9.1 — built-in persistent vector store", () => {
           { chunkIndex: 2, content: "b1", vector: v, sourceId: "beta" }
         ]
       });
-      const removed = store.deleteKnowledgeBaseChunksBySource({
+      const removed = await store.deleteKnowledgeBaseChunksBySource({
         knowledgeBaseId: "kb_src",
         sourceId: "alpha"
       });
       expect(removed).toBe(2);
-      const kb = store.getKnowledgeBase("kb_src")!;
+      const kb = (await store.getKnowledgeBase("kb_src"))!;
       expect(kb.chunkCount).toBe(1);
-      const remaining = store.listKnowledgeBaseChunkPreviews({ knowledgeBaseId: "kb_src" });
+      const remaining = await store.listKnowledgeBaseChunkPreviews({ knowledgeBaseId: "kb_src" });
       expect(remaining[0]!.sourceId).toBe("beta");
     });
 
-    it("cascade-deletes chunks when the KB itself is deleted", () => {
-      store.createKnowledgeBase({ id: "kb_del", name: "cascade", embedderId: "token-embedder" });
+    it("cascade-deletes chunks when the KB itself is deleted", async () => {
+      await store.createKnowledgeBase({ id: "kb_del", name: "cascade", embedderId: "token-embedder" });
       const v = new Array(64).fill(1);
-      store.addKnowledgeBaseChunks({
+      await store.addKnowledgeBaseChunks({
         knowledgeBaseId: "kb_del",
         chunks: [{ chunkIndex: 0, content: "x", vector: v }]
       });
-      store.deleteKnowledgeBase("kb_del");
+      await store.deleteKnowledgeBase("kb_del");
       // Re-create with the same id; chunk_count should be 0, no orphans
-      store.createKnowledgeBase({ id: "kb_del", name: "fresh", embedderId: "token-embedder" });
-      expect(store.getKnowledgeBase("kb_del")!.chunkCount).toBe(0);
+      await store.createKnowledgeBase({ id: "kb_del", name: "fresh", embedderId: "token-embedder" });
+      expect((await store.getKnowledgeBase("kb_del"))!.chunkCount).toBe(0);
     });
   });
 
@@ -135,10 +135,10 @@ describe("Phase 9.1 — built-in persistent vector store", () => {
     function adapter(kbId: string): KnowledgeBaseVectorStoreAdapter {
       return new KnowledgeBaseVectorStoreAdapter(
         {
-          addKnowledgeBaseChunks: (i) => store.addKnowledgeBaseChunks(i),
-          listKnowledgeBaseChunks: (id) => store.listKnowledgeBaseChunks(id),
-          getKnowledgeBase: (id) => {
-            const kb = store.getKnowledgeBase(id);
+          addKnowledgeBaseChunks: async (i) => await store.addKnowledgeBaseChunks(i),
+          listKnowledgeBaseChunks: async (id) => await store.listKnowledgeBaseChunks(id),
+          getKnowledgeBase: async (id) => {
+            const kb = await store.getKnowledgeBase(id);
             return kb ? { id: kb.id, embedderId: kb.embedderId, dimensions: kb.dimensions } : null;
           }
         },
@@ -147,7 +147,7 @@ describe("Phase 9.1 — built-in persistent vector store", () => {
     }
 
     it("upsert + similaritySearch returns top-K by cosine similarity", async () => {
-      store.createKnowledgeBase({ id: "kb_sim", name: "sim", embedderId: "token-embedder" });
+      await store.createKnowledgeBase({ id: "kb_sim", name: "sim", embedderId: "token-embedder" });
       const a = adapter("kb_sim");
       const embedder = new TokenEmbeddingAdapter();
       await a.upsert(
@@ -171,23 +171,23 @@ describe("Phase 9.1 — built-in persistent vector store", () => {
     });
 
     it("upsert([]) is a no-op (lets callers query without re-ingesting)", async () => {
-      store.createKnowledgeBase({ id: "kb_noop", name: "noop", embedderId: "token-embedder" });
+      await store.createKnowledgeBase({ id: "kb_noop", name: "noop", embedderId: "token-embedder" });
       const a = adapter("kb_noop");
       await a.upsert([], new TokenEmbeddingAdapter());
-      expect(store.getKnowledgeBase("kb_noop")!.chunkCount).toBe(0);
+      expect((await store.getKnowledgeBase("kb_noop"))!.chunkCount).toBe(0);
     });
 
     it("upsert is APPEND, not replace (in contrast to in-memory store)", async () => {
-      store.createKnowledgeBase({ id: "kb_app2", name: "app2", embedderId: "token-embedder" });
+      await store.createKnowledgeBase({ id: "kb_app2", name: "app2", embedderId: "token-embedder" });
       const a = adapter("kb_app2");
       const embedder = new TokenEmbeddingAdapter();
       await a.upsert([{ id: "x", text: "first batch", metadata: {} }], embedder);
       await a.upsert([{ id: "y", text: "second batch", metadata: {} }], embedder);
-      expect(store.getKnowledgeBase("kb_app2")!.chunkCount).toBe(2);
+      expect((await store.getKnowledgeBase("kb_app2"))!.chunkCount).toBe(2);
     });
 
     it("similaritySearch on an empty KB returns []", async () => {
-      store.createKnowledgeBase({ id: "kb_empty", name: "empty", embedderId: "token-embedder" });
+      await store.createKnowledgeBase({ id: "kb_empty", name: "empty", embedderId: "token-embedder" });
       const a = adapter("kb_empty");
       const r = await a.similaritySearch("anything", 5, new TokenEmbeddingAdapter());
       expect(r).toEqual([]);

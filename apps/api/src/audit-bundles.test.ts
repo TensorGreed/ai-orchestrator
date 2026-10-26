@@ -55,7 +55,7 @@ async function createTestContext(overrides: Record<string, string> = {}): Promis
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-audit-bundles-"));
   const dbPath = path.join(tempDir, "orchestrator.db");
   const store = await SqliteStore.create(dbPath);
-  store.ensureDefaultProject();
+  await store.ensureDefaultProject();
   const config = parseConfig({
     LOG_LEVEL: "warn",
     SEED_SAMPLE_WORKFLOWS: "false",
@@ -68,7 +68,7 @@ async function createTestContext(overrides: Record<string, string> = {}): Promis
   });
   const secretService = new SecretService(store, config.SECRET_MASTER_KEY_BASE64);
   const authService = new AuthService(store, config.SESSION_TTL_HOURS);
-  const app = createApp(config, store, secretService, authService);
+  const app = await createApp(config, store, secretService, authService);
   await app.ready();
   const context = { app, store, authService, secretService, config, tempDir, dbPath };
   contexts.push(context);
@@ -82,7 +82,7 @@ afterEach(async () => {
     const context = contexts.pop()!;
     await context.app.close();
     try {
-      context.store.close();
+      await context.store.close();
     } catch {
       // Already closed by the app shutdown hooks.
     }
@@ -95,7 +95,7 @@ type Role = "admin" | "builder" | "operator" | "viewer";
 async function login(context: TestContext, role: Role, name: string = role): Promise<{ cookie: string; id: string }> {
   const email = `${name}@example.com`;
   const password = `${name}-Pass-123!`;
-  const user = context.authService.register({ email, password, role });
+  const user = await context.authService.register({ email, password, role });
   const response = await context.app.inject({ method: "POST", url: "/api/auth/login", payload: { email, password } });
   if (response.statusCode !== 200) throw new Error(`Login failed for ${name}: ${response.body}`);
   const raw = response.headers["set-cookie"];
@@ -338,7 +338,7 @@ describe("run manifests", () => {
     const second = (await call(context, "GET", `/api/executions/${executionId}/manifest`, admin.cookie)).json<RunManifestView>();
     expect(second.digest).toBe(first.digest);
     expect(second.signedAt).toBe(first.signedAt);
-    const record = context.store.getExecutionManifest(executionId)!;
+    const record = (await context.store.getExecutionManifest(executionId))!;
 
     // A second generator over the same records, at the same moment, writes the same bytes.
     const signing = new AuditSigningService(context.store, context.secretService);
@@ -352,9 +352,9 @@ describe("run manifests", () => {
       maxBundleBytes: 10_000_000,
       now: () => new Date(first.signedAt)
     });
-    const history = context.store.getExecutionHistory(executionId)!;
-    const rebuilt = generator.buildManifest(history, record.runContext as Parameters<AuditBundleService["buildManifest"]>[1]);
-    const rebuiltAgain = generator.buildManifest(history, record.runContext as Parameters<AuditBundleService["buildManifest"]>[1]);
+    const history = (await context.store.getExecutionHistory(executionId))!;
+    const rebuilt = await generator.buildManifest(history, record.runContext as Parameters<AuditBundleService["buildManifest"]>[1]);
+    const rebuiltAgain = await generator.buildManifest(history, record.runContext as Parameters<AuditBundleService["buildManifest"]>[1]);
     expect(canonicalJson(rebuilt)).toBe(canonicalJson(rebuiltAgain));
     expect(canonicalJson(rebuilt)).toBe(record.manifestJson);
 
@@ -365,10 +365,10 @@ describe("run manifests", () => {
     expect(bundleA.get("manifest.json")!.toString("utf8")).toBe(record.manifestJson);
 
     // Saving again never overwrites a stored manifest.
-    context.store.saveExecutionManifest({ executionId, manifestJson: "{}", manifestDigest: "0".repeat(64), keyId: "x", signature: "y", signedAt: new Date().toISOString() });
-    expect(context.store.getExecutionManifest(executionId)!.manifestJson).toBe(record.manifestJson);
-    context.store.saveExecutionRunContext(executionId, { version: 1, replaced: true }, new Date().toISOString());
-    expect((context.store.getExecutionManifest(executionId)!.runContext as Record<string, unknown>).replaced).toBeUndefined();
+    await context.store.saveExecutionManifest({ executionId, manifestJson: "{}", manifestDigest: "0".repeat(64), keyId: "x", signature: "y", signedAt: new Date().toISOString() });
+    expect((await context.store.getExecutionManifest(executionId))!.manifestJson).toBe(record.manifestJson);
+    await context.store.saveExecutionRunContext(executionId, { version: 1, replaced: true }, new Date().toISOString());
+    expect(((await context.store.getExecutionManifest(executionId))!.runContext as Record<string, unknown>).replaced).toBeUndefined();
   });
 
   it("records every tool-call outcome, including refused calls, and approval decisions", async () => {
@@ -419,7 +419,7 @@ describe("run manifests", () => {
         { nodeId: "gate", status: "success", startedAt: now, input: { decision: "reject", actedBy: "lee@example.com", reason: "Not during the freeze" }, output: { rejected: true } }
       ]
     };
-    const manifest = service.buildManifest(history, null);
+    const manifest = await service.buildManifest(history, null);
     expect(manifest.toolCalls.map((entry) => entry.outcome)).toEqual(outcomes.map(([, outcome]) => outcome));
     expect(manifest.toolCalls[1]).toMatchObject({ toolName: "write_file", adapterId: "http-mcp", serverIdentity: "adapter:http-mcp", argsDigest: sha256(canonicalJson({ path: "/tmp/1" })), resultDigest: null });
     expect(manifest.approvals).toEqual([{ nodeId: "gate", decision: "reject", actedBy: "lee@example.com", reason: "Not during the freeze", decidedAt: now }]);
@@ -430,15 +430,15 @@ describe("run manifests", () => {
   it("refuses runs that are still in progress", async () => {
     const context = await createTestContext();
     const admin = await login(context, "admin");
-    context.store.upsertWorkflow({ id: "wf-live", name: "Live", schemaVersion: "1.0.0", workflowVersion: 1, nodes: [], edges: [] });
+    await context.store.upsertWorkflow({ id: "wf-live", name: "Live", schemaVersion: "1.0.0", workflowVersion: 1, nodes: [], edges: [] });
     for (const status of ["running", "waiting_approval"]) {
       const id = `exec-${status}`;
-      context.store.saveExecutionHistory({ id, workflowId: "wf-live", status, startedAt: new Date().toISOString() });
+      await context.store.saveExecutionHistory({ id, workflowId: "wf-live", status, startedAt: new Date().toISOString() });
       const manifest = await call(context, "GET", `/api/executions/${id}/manifest`, admin.cookie);
       expect(manifest.statusCode).toBe(409);
       expect(manifest.json<{ code: string }>().code).toBe("in_progress");
       expect((await call(context, "GET", `/api/executions/${id}/bundle`, admin.cookie)).statusCode).toBe(409);
-      expect(context.store.getExecutionManifest(id)).toBeNull();
+      expect(await context.store.getExecutionManifest(id)).toBeNull();
     }
     expect((await call(context, "GET", "/api/executions/nope/manifest", admin.cookie)).statusCode).toBe(404);
   });
@@ -469,12 +469,12 @@ describe("secrets stay out", () => {
     const admin = await login(context, "admin");
     // The fake model echoes the bearer token into its answer, so the run's own output carries the secret.
     const { executionId } = await runAuditedWorkflow(context, admin.cookie, { echoAuth: true });
-    expect(JSON.stringify(context.store.getExecutionHistory(executionId))).toContain(PLANTED);
+    expect(JSON.stringify(await context.store.getExecutionHistory(executionId))).toContain(PLANTED);
 
     const manifest = await call(context, "GET", `/api/executions/${executionId}/manifest`, admin.cookie);
     expect(manifest.statusCode).toBe(200);
     expect(manifest.body).not.toContain(PLANTED);
-    expect(context.store.getExecutionManifest(executionId)!.manifestJson).not.toContain(PLANTED);
+    expect((await context.store.getExecutionManifest(executionId))!.manifestJson).not.toContain(PLANTED);
 
     const bundle = await call(context, "GET", `/api/executions/${executionId}/bundle`, admin.cookie);
     expect(bundle.statusCode).toBe(200);
@@ -487,7 +487,7 @@ describe("secrets stay out", () => {
     const keys = await call(context, "GET", "/api/audit/signing-keys", admin.cookie);
     expect(keys.body).not.toContain(PLANTED);
 
-    const auditRows = context.store.listAuditLogs({ pageSize: 200 });
+    const auditRows = await context.store.listAuditLogs({ pageSize: 200 });
     expect(JSON.stringify(auditRows)).not.toContain(PLANTED);
 
     stdout.mockRestore();
@@ -495,8 +495,8 @@ describe("secrets stay out", () => {
     expect(logged.length).toBeGreaterThan(0);
     expect(logged).not.toContain(PLANTED);
     // The generated signing key's seed is never written anywhere either.
-    const keyRow = context.store.listAuditSigningKeys()[0]!;
-    const seed = context.secretService.resolveInternalSecret(keyRow.secretId!)!;
+    const keyRow = (await context.store.listAuditSigningKeys())[0]!;
+    const seed = (await context.secretService.resolveInternalSecret(keyRow.secretId!))!;
     expect(seed).toMatch(/^[A-Za-z0-9+/]{43}=$/);
     expect(logged).not.toContain(seed);
     expect(bundle.rawPayload.includes(Buffer.from(seed))).toBe(false);
@@ -511,7 +511,7 @@ describe("secrets equal to words the manifest schema fixes", () => {
     const context = await createTestContext();
     const admin = await login(context, "admin");
     const { executionId } = await runAuditedWorkflow(context, admin.cookie, { finalContent: "success" });
-    const history = JSON.stringify(context.store.getExecutionHistory(executionId));
+    const history = JSON.stringify(await context.store.getExecutionHistory(executionId));
     expect(history).toContain('"answer":"success"');
     const secret = await call(context, "POST", "/api/secrets", admin.cookie, { name: "Status word", provider: "custom", value: "success", projectId: "default" });
     expect(secret.statusCode).toBe(200);
@@ -530,7 +530,7 @@ describe("secrets equal to words the manifest schema fixes", () => {
     expect(agentFile).toContain('"answer": "[REDACTED]"');
     expect(agentFile).not.toContain("success");
     expect(files.get("execution/run.json")!.toString("utf8")).not.toContain("success");
-    expect(files.get("manifest.json")!.toString("utf8")).toBe(context.store.getExecutionManifest(executionId)!.manifestJson);
+    expect(files.get("manifest.json")!.toString("utf8")).toBe((await context.store.getExecutionManifest(executionId))!.manifestJson);
   });
 
   it("generates the manifest when secrets equal enum values, literals or field names it requires", async () => {
@@ -554,7 +554,7 @@ describe("secrets equal to words the manifest schema fixes", () => {
     const context = await createTestContext();
     const admin = await login(context, "admin");
     const { executionId } = await runAuditedWorkflow(context, admin.cookie);
-    const workflowHash = (context.store.getExecutionManifest(executionId)!.runContext as { workflowHash: string }).workflowHash;
+    const workflowHash = ((await context.store.getExecutionManifest(executionId))!.runContext as { workflowHash: string }).workflowHash;
     expect(workflowHash).toMatch(/^[a-f0-9]{64}$/);
     const secret = await call(context, "POST", "/api/secrets", admin.cookie, { name: "Digest fragment", provider: "custom", value: workflowHash.slice(8, 24), projectId: "default" });
     expect(secret.statusCode).toBe(200);
@@ -563,7 +563,7 @@ describe("secrets equal to words the manifest schema fixes", () => {
     const response = await call(context, "GET", `/api/executions/${executionId}/manifest`, admin.cookie);
     expect(response.statusCode).toBe(500);
     expect(response.body).not.toContain(workflowHash.slice(8, 24));
-    expect(context.store.getExecutionManifest(executionId)!.manifestJson).toBeFalsy();
+    expect((await context.store.getExecutionManifest(executionId))!.manifestJson).toBeFalsy();
   });
 });
 
@@ -608,15 +608,15 @@ describe("secret scrubbing in bundles", () => {
     }
     // Not referenced by any workflow: a secret of another project and an MCP OAuth token set.
     const OTHER_PROJECT = "other-project-secret-value-77";
-    context.secretService.createSecret({ name: "elsewhere", provider: "generic", value: OTHER_PROJECT, projectId: "elsewhere" });
+    await context.secretService.createSecret({ name: "elsewhere", provider: "generic", value: OTHER_PROJECT, projectId: "elsewhere" });
     const OAUTH_TOKEN = "oauth-access-TOKEN-1234567890";
-    context.secretService.createSecret({ name: "oauth", provider: "mcp_oauth", value: JSON.stringify({ access_token: OAUTH_TOKEN, token_type: "Bearer" }) });
+    await context.secretService.createSecret({ name: "oauth", provider: "mcp_oauth", value: JSON.stringify({ access_token: OAUTH_TOKEN, token_type: "Bearer" }) });
     // Too short to scrub without mangling unrelated text.
-    context.secretService.createSecret({ name: "short", provider: "generic", value: "ab12z" });
+    await context.secretService.createSecret({ name: "short", provider: "generic", value: "ab12z" });
 
     const secrets = [...Object.values(tricky), OTHER_PROJECT, OAUTH_TOKEN, ENV_KEY];
     const now = new Date().toISOString();
-    context.store.saveExecutionHistory({
+    await context.store.saveExecutionHistory({
       id: "exec-scrub",
       workflowId: "wf-scrub-gone",
       status: "success",
@@ -707,16 +707,16 @@ describe("SecretService.valuesForScrubbing", () => {
   it("covers local, internal and cached external secrets, and credential fields of JSON values, without fetching anything", async () => {
     const context = await createTestContext();
     const service = context.secretService;
-    service.createSecret({ name: "local", provider: "generic", value: "local-value-123456", projectId: "any-project" });
-    service.createSecret({
+    await service.createSecret({ name: "local", provider: "generic", value: "local-value-123456", projectId: "any-project" });
+    await service.createSecret({
       name: "bundle",
       provider: "mcp_oauth",
       value: JSON.stringify({ headers: { Authorization: "Bearer bundle-bearer-token-42" }, token_type: "Bearer", scope: "read" })
     });
-    const external = service.createExternalSecret({ name: "vault", provider: "generic", externalProviderId: "missing-provider", externalKey: "path/to/key" });
+    const external = await service.createExternalSecret({ name: "vault", provider: "generic", externalProviderId: "missing-provider", externalKey: "path/to/key" });
     const encrypt = (service as unknown as { encrypt: (value: string) => { iv: string; authTag: string; ciphertext: string } }).encrypt.bind(service);
-    context.store.upsertExternalSecretCacheEntry({ secretId: external.secretId, ...encrypt("external-cached-value-99"), expiresAt: new Date(Date.now() - 1000).toISOString() });
-    const values = service.valuesForScrubbing();
+    await context.store.upsertExternalSecretCacheEntry({ secretId: external.secretId, ...encrypt("external-cached-value-99"), expiresAt: new Date(Date.now() - 1000).toISOString() });
+    const values = await service.valuesForScrubbing();
     expect(values).toEqual(expect.arrayContaining(["local-value-123456", "Bearer bundle-bearer-token-42", "bundle-bearer-token-42", "external-cached-value-99"]));
     expect(values).not.toContain("__external__");
     expect(values).not.toContain("read");
@@ -751,7 +751,7 @@ describe("audit bundle export", () => {
     const keys = (await call(context, "GET", "/api/audit/signing-keys", admin.cookie)).json<AuditSigningKeysResponse>();
     expect(verifyBundle(response.rawPayload, keys.keys[0]!.publicKey)).toBe(true);
 
-    const audit = context.store.listAuditLogs({ eventType: "execution.audit_bundle.export" });
+    const audit = await context.store.listAuditLogs({ eventType: "execution.audit_bundle.export" });
     expect(audit.items).toHaveLength(1);
     expect(audit.items[0]).toMatchObject({ outcome: "success", actorEmail: "admin@example.com", resourceType: "execution", resourceId: executionId });
     expect(audit.items[0]!.metadata).toMatchObject({ manifestDigest: response.headers["x-l2m-manifest-digest"], keyId: keys.activeKeyId });
@@ -770,18 +770,18 @@ describe("audit bundle export", () => {
     expect((await call(context, "GET", `/api/executions/${executionId}/bundle`, viewer.cookie)).statusCode).toBe(200);
 
     // A builder locked out of the workflow's project is told the run does not exist.
-    context.store.upsertProject({ id: "hidden", name: "Hidden" });
-    context.store.upsertCustomRole({ id: "none-hidden", projectId: "hidden", name: "No access", permissions: [] });
-    context.store.upsertProjectRole({ userId: builder.id, projectId: "hidden", role: "custom", customRoleId: "none-hidden" });
-    const workflow = context.store.getWorkflow("wf-audit")!;
-    context.store.upsertWorkflow({ ...workflow, projectId: "hidden" });
+    await context.store.upsertProject({ id: "hidden", name: "Hidden" });
+    await context.store.upsertCustomRole({ id: "none-hidden", projectId: "hidden", name: "No access", permissions: [] });
+    await context.store.upsertProjectRole({ userId: builder.id, projectId: "hidden", role: "custom", customRoleId: "none-hidden" });
+    const workflow = (await context.store.getWorkflow("wf-audit"))!;
+    await context.store.upsertWorkflow({ ...workflow, projectId: "hidden" });
     expect((await call(context, "GET", `/api/executions/${executionId}/manifest`, builder.cookie)).statusCode).toBe(404);
     expect((await call(context, "GET", `/api/executions/${executionId}/bundle`, builder.cookie)).statusCode).toBe(404);
     expect((await call(context, "GET", `/api/executions/${executionId}/bundle`, admin.cookie)).statusCode).toBe(200);
 
     // Runs of a deleted workflow are admin-only.
-    context.store.upsertWorkflow({ ...workflow, projectId: "default" });
-    context.store.saveExecutionHistory({ id: "exec-orphan", workflowId: "wf-gone", status: "success", startedAt: new Date().toISOString(), completedAt: new Date().toISOString() });
+    await context.store.upsertWorkflow({ ...workflow, projectId: "default" });
+    await context.store.saveExecutionHistory({ id: "exec-orphan", workflowId: "wf-gone", status: "success", startedAt: new Date().toISOString(), completedAt: new Date().toISOString() });
     expect((await call(context, "GET", "/api/executions/exec-orphan/manifest", viewer.cookie)).statusCode).toBe(404);
     const orphan = await call(context, "GET", "/api/executions/exec-orphan/manifest", admin.cookie);
     expect(orphan.statusCode).toBe(200);
@@ -802,7 +802,7 @@ describe("audit bundle export", () => {
     const body = response.json<{ error: string; code: string }>();
     expect(body.code).toBe("too_large");
     expect(body.error).toMatch(/over the 1024-byte limit \(AUDIT_BUNDLE_MAX_BYTES\)/);
-    const audit = context.store.listAuditLogs({ eventType: "execution.audit_bundle.export" });
+    const audit = await context.store.listAuditLogs({ eventType: "execution.audit_bundle.export" });
     expect(audit.items[0]).toMatchObject({ outcome: "failure" });
     // The manifest alone is still available.
     expect((await call(context, "GET", `/api/executions/${executionId}/manifest`, admin.cookie)).statusCode).toBe(200);
@@ -813,25 +813,25 @@ describe("audit bundle export", () => {
     const admin = await login(context, "admin");
     const { executionId } = await runAuditedWorkflow(context, admin.cookie);
     const first = (await call(context, "GET", `/api/executions/${executionId}/manifest`, admin.cookie)).json<RunManifestView>();
-    expect(context.store.getExecutionManifest(executionId)?.manifestJson).toBeTruthy();
+    expect((await context.store.getExecutionManifest(executionId))?.manifestJson).toBeTruthy();
     const future = new Date(Date.now() + 60_000).toISOString();
     const past = new Date(Date.now() - 86_400_000).toISOString();
 
     // Past the retention, but the history is kept: the manifest stays and is served unchanged, never regenerated.
-    context.store.pruneAuditLogs({ before: future });
-    expect(context.store.getExecutionManifest(executionId)?.manifestJson).toBeTruthy();
+    await context.store.pruneAuditLogs({ before: future });
+    expect((await context.store.getExecutionManifest(executionId))?.manifestJson).toBeTruthy();
     const again = (await call(context, "GET", `/api/executions/${executionId}/manifest`, admin.cookie)).json<RunManifestView>();
     expect(again).toEqual(first);
 
     // History gone, manifest still inside the retention: kept.
-    context.store.pruneExecutionHistory({ before: future });
-    expect(context.store.getExecutionHistory(executionId)).toBeNull();
-    context.store.pruneAuditLogs({ before: past });
-    expect(context.store.getExecutionManifest(executionId)?.manifestJson).toBeTruthy();
+    await context.store.pruneExecutionHistory({ before: future });
+    expect(await context.store.getExecutionHistory(executionId)).toBeNull();
+    await context.store.pruneAuditLogs({ before: past });
+    expect((await context.store.getExecutionManifest(executionId))?.manifestJson).toBeTruthy();
 
     // Both: pruned.
-    context.store.pruneAuditLogs({ before: future });
-    expect(context.store.getExecutionManifest(executionId)).toBeNull();
+    await context.store.pruneAuditLogs({ before: future });
+    expect(await context.store.getExecutionManifest(executionId)).toBeNull();
     expect((await call(context, "GET", `/api/executions/${executionId}/manifest`, admin.cookie)).statusCode).toBe(404);
   });
 
@@ -841,7 +841,7 @@ describe("audit bundle export", () => {
     const viewer = await login(context, "viewer");
     const { executionId } = await runAuditedWorkflow(context, admin.cookie);
     // A row that merely mentions the id deeper in its metadata is not about this execution.
-    context.store.writeAuditLog({
+    await context.store.writeAuditLog({
       id: "unrelated-row",
       eventType: "other.event",
       category: "system",
@@ -882,7 +882,7 @@ describe("internal secret providers", () => {
     expect((await call(context, "POST", "/api/secrets", admin.cookie, { name: "oauth", provider: "mcp_oauth", value: "token-value" })).statusCode).toBe(400);
 
     await call(context, "GET", "/api/audit/signing-keys", admin.cookie);
-    const internalId = context.store.listAuditSigningKeys()[0]!.secretId!;
+    const internalId = (await context.store.listAuditSigningKeys())[0]!.secretId!;
     for (const id of [internalId, "sec_does_not_exist"]) {
       const list = await call(context, "GET", `/api/secrets/${id}/shares`, admin.cookie);
       const share = await call(context, "POST", `/api/secrets/${id}/shares`, admin.cookie, { projectId: "default" });
@@ -901,7 +901,7 @@ describe("signing keys", () => {
   it("generates a key on first use, stores it through SecretService and keeps it out of the secrets API", async () => {
     const context = await createTestContext();
     const admin = await login(context, "admin");
-    expect(context.store.listAuditSigningKeys()).toEqual([]);
+    expect(await context.store.listAuditSigningKeys()).toEqual([]);
     const response = await call(context, "GET", "/api/audit/signing-keys", admin.cookie);
     expect(response.statusCode).toBe(200);
     const body = response.json<AuditSigningKeysResponse>();
@@ -913,19 +913,19 @@ describe("signing keys", () => {
     expect(key.publicKeyPem).toContain("BEGIN PUBLIC KEY");
     expect(key.keyId).toBe(auditKeyIdFor(Buffer.from(key.publicKey, "base64")));
 
-    const record = context.store.listAuditSigningKeys()[0]!;
+    const record = (await context.store.listAuditSigningKeys())[0]!;
     expect(record.secretId).toMatch(/^sec_/);
-    const row = context.store.getSecret(record.secretId!)!;
+    const row = (await context.store.getSecret(record.secretId!))!;
     expect(row.provider).toBe("audit_signing");
     // Stored encrypted: the ciphertext is not the seed.
-    const seed = context.secretService.resolveInternalSecret(record.secretId!)!;
+    const seed = (await context.secretService.resolveInternalSecret(record.secretId!))!;
     expect(row.ciphertext).not.toContain(seed);
     // Hidden from the secrets list, refused to node configs, not deletable through the generic route.
     const secrets = await call(context, "GET", "/api/secrets", admin.cookie);
     expect(secrets.json<Array<{ id: string }>>().map((entry) => entry.id)).not.toContain(record.secretId);
     expect(await context.secretService.resolveSecret({ secretId: record.secretId! })).toBeUndefined();
     expect((await call(context, "DELETE", `/api/secrets/${record.secretId}`, admin.cookie)).statusCode).toBe(404);
-    expect(context.store.getSecret(record.secretId!)).toBeTruthy();
+    expect(await context.store.getSecret(record.secretId!)).toBeTruthy();
   });
 
   it("rotates: new exports use the new key, old bundles still verify with the retired public key", async () => {
@@ -934,7 +934,7 @@ describe("signing keys", () => {
     const { executionId } = await runAuditedWorkflow(context, admin.cookie);
     const before = (await call(context, "GET", "/api/audit/signing-keys", admin.cookie)).json<AuditSigningKeysResponse>();
     const oldKey = before.keys[0]!;
-    const oldSecretId = context.store.listAuditSigningKeys()[0]!.secretId!;
+    const oldSecretId = (await context.store.listAuditSigningKeys())[0]!.secretId!;
     const oldBundle = (await call(context, "GET", `/api/executions/${executionId}/bundle`, admin.cookie)).rawPayload;
 
     const rotated = await call(context, "POST", "/api/audit/signing-keys/rotate", admin.cookie);
@@ -945,7 +945,7 @@ describe("signing keys", () => {
     expect(after.keys.keys.find((key) => key.keyId === oldKey.keyId)).toMatchObject({ status: "retired", publicKey: oldKey.publicKey });
     expect(after.keys.keys.find((key) => key.keyId === oldKey.keyId)!.retiredAt).toBeTruthy();
     // The retired key's private half is gone.
-    expect(context.store.getSecret(oldSecretId)).toBeNull();
+    expect(await context.store.getSecret(oldSecretId)).toBeNull();
 
     const newBundle = (await call(context, "GET", `/api/executions/${executionId}/bundle`, admin.cookie)).rawPayload;
     expect(verifyBundle(oldBundle, oldKey.publicKey)).toBe(true);
@@ -955,7 +955,7 @@ describe("signing keys", () => {
     // The manifest itself is unchanged and still names the key that was active when it was generated.
     expect(unzip(oldBundle).get("manifest.json")!.equals(unzip(newBundle).get("manifest.json")!)).toBe(true);
 
-    const audit = context.store.listAuditLogs({ eventType: "audit.signing_key.rotated" });
+    const audit = await context.store.listAuditLogs({ eventType: "audit.signing_key.rotated" });
     expect(audit.items[0]!.metadata).toMatchObject({ keyId: after.key.keyId, previousKeyId: oldKey.keyId });
   });
 
@@ -969,7 +969,7 @@ describe("signing keys", () => {
     expect(body.activeKeyId).toBe(auditKeyIdFor(raw));
     expect(body.canRotate).toBe(false);
     expect(body.keys[0]).toMatchObject({ source: "env", publicKey: Buffer.from(raw).toString("base64") });
-    expect(context.store.listAuditSigningKeys()[0]!.secretId).toBeNull();
+    expect((await context.store.listAuditSigningKeys())[0]!.secretId).toBeNull();
     const rotate = await call(context, "POST", "/api/audit/signing-keys/rotate", admin.cookie);
     expect(rotate.statusCode).toBe(409);
     expect(rotate.json<{ error: string }>().error).toContain("AUDIT_SIGNING_KEY_BASE64");
@@ -1020,9 +1020,9 @@ describe("migration 29", () => {
       db.close();
     }
     const now = new Date().toISOString();
-    expect(context.store.activateAuditSigningKey({ keyId: "a".repeat(16), algorithm: "Ed25519", publicKey: "x", source: "generated", secretId: null, createdAt: now }, null)).toBe(true);
+    expect(await context.store.activateAuditSigningKey({ keyId: "a".repeat(16), algorithm: "Ed25519", publicKey: "x", source: "generated", secretId: null, createdAt: now }, null)).toBe(true);
     // A writer that expected no active key loses the race instead of creating a second active key.
-    expect(context.store.activateAuditSigningKey({ keyId: "b".repeat(16), algorithm: "Ed25519", publicKey: "y", source: "generated", secretId: null, createdAt: now }, null)).toBe(false);
-    expect(context.store.listAuditSigningKeys().filter((key) => key.status === "active")).toHaveLength(1);
+    expect(await context.store.activateAuditSigningKey({ keyId: "b".repeat(16), algorithm: "Ed25519", publicKey: "y", source: "generated", secretId: null, createdAt: now }, null)).toBe(false);
+    expect((await context.store.listAuditSigningKeys()).filter((key) => key.status === "active")).toHaveLength(1);
   });
 });

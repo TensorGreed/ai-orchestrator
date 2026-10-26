@@ -17,7 +17,7 @@
 
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { McpPolicyRole, McpRuntimeStateView, McpToolAnnotations } from "@ai-orchestrator/shared";
-import type { McpServerProbeRecord, McpServerRecord, McpServerStatus, SqliteStore } from "./db/database.js";
+import type { McpServerProbeRecord, McpServerRecord, McpServerStatus } from "./db/database.js";
 import type { RunAccess } from "./run-access.js";
 import type { SafeUser, UserRole } from "./services/auth-service.js";
 import type { McpOAuthService } from "./services/mcp-oauth-service.js";
@@ -29,13 +29,15 @@ import {
   rollupMcpToolCalls,
   type McpTelemetryWindow
 } from "./services/mcp-tool-telemetry.js";
+import type { Store } from "./db/store.js";
+import { mapAsync } from "./async-array.js";
 
 export interface McpControlPlaneDeps {
   app: FastifyInstance;
-  store: SqliteStore;
+  store: Store;
   oauth: Pick<McpOAuthService, "status">;
   usesOAuth: (server: McpServerRecord) => boolean;
-  latency: (serverId: string) => { samples: number; p50Ms: number | null; p95Ms: number | null; errorRate: number | null };
+  latency: (serverId: string) => Promise<{ samples: number; p50Ms: number | null; p95Ms: number | null; errorRate: number | null }>;
   /** Phase 10.7 — breaker and limit state on this API instance (the last error only for admins). */
   runtime: (serverId: string, user: SafeUser) => McpRuntimeStateView;
   requireRole: (request: FastifyRequest, reply: FastifyReply, roles: UserRole[]) => Promise<SafeUser | null>;
@@ -137,15 +139,15 @@ function str(value: unknown): string | null {
 }
 
 /** Every workflow node that references a registry server, keyed by server id. */
-export function collectRegistryUsages(store: SqliteStore): Map<string, Array<McpToolUsage & { toolNames: string[] | null }>> {
+export async function collectRegistryUsages(store: Store): Promise<Map<string, Array<McpToolUsage & { toolNames: string[] | null }>>> {
   const byServer = new Map<string, Array<McpToolUsage & { toolNames: string[] | null }>>();
   const push = (serverId: string, entry: McpToolUsage & { toolNames: string[] | null }) => {
     const list = byServer.get(serverId) ?? [];
     list.push(entry);
     byServer.set(serverId, list);
   };
-  for (const summary of store.listWorkflows()) {
-    const workflow = store.getWorkflow(summary.id);
+  for (const summary of await store.listWorkflows()) {
+    const workflow = await store.getWorkflow(summary.id);
     if (!workflow) continue;
     for (const node of workflow.nodes) {
       const config = asRecord(node.config);
@@ -284,9 +286,9 @@ export function registerMcpControlPlaneRoutes(deps: McpControlPlaneDeps): void {
     return raw === undefined ? "7d" : parseMcpTelemetryWindow(raw);
   };
 
-  const buildChanges = (user: SafeUser, filter: { serverId?: string | null; kinds?: Set<McpChangeKind> | null; limit: number }) => {
+  const buildChanges = async (user: SafeUser, filter: { serverId?: string | null; kinds?: Set<McpChangeKind> | null; limit: number }) => {
     const isAdmin = user.role === "admin";
-    const servers = store.listMcpServers();
+    const servers = await store.listMcpServers();
     const serverNames = new Map(servers.map((server) => [server.id, server.name]));
     const items: McpChangeItem[] = [];
     const wants = (kind: McpChangeKind) => !filter.kinds || filter.kinds.has(kind);
@@ -294,7 +296,7 @@ export function registerMcpControlPlaneRoutes(deps: McpControlPlaneDeps): void {
     for (const server of servers) {
       if (filter.serverId && server.id !== filter.serverId) continue;
       if (wants("schema")) {
-        for (const snapshot of store.listMcpToolSnapshots(server.id, SNAPSHOTS_PER_SERVER)) {
+        for (const snapshot of await store.listMcpToolSnapshots(server.id, SNAPSHOTS_PER_SERVER)) {
           const breakingCount = snapshot.changes.filter((change) => change.breaking).length;
           const baseline = !snapshot.previousSnapshotId;
           items.push({
@@ -325,7 +327,7 @@ export function registerMcpControlPlaneRoutes(deps: McpControlPlaneDeps): void {
         }
       }
       if (wants("status")) {
-        for (const transition of statusTransitions(store.listMcpServerProbes(server.id, PROBES_PER_SERVER))) {
+        for (const transition of statusTransitions(await store.listMcpServerProbes(server.id, PROBES_PER_SERVER))) {
           items.push({
             id: `status:${transition.probeId}`,
             at: transition.at,
@@ -341,7 +343,7 @@ export function registerMcpControlPlaneRoutes(deps: McpControlPlaneDeps): void {
         }
       }
       if (wants("catalog")) {
-        const catalog = store.getMcpServerCatalog(server.id);
+        const catalog = await store.getMcpServerCatalog(server.id);
         const listed = catalog ? catalog.resources.length + catalog.resourceTemplates.length + catalog.prompts.length : 0;
         if (catalog && catalog.updatedAt && listed > 0) {
           items.push({
@@ -360,7 +362,7 @@ export function registerMcpControlPlaneRoutes(deps: McpControlPlaneDeps): void {
     }
 
     for (const resourceType of AUDIT_RESOURCE_TYPES) {
-      const audit = store.listAuditLogs({ resourceType, pageSize: AUDIT_PAGE_SIZE });
+      const audit = await store.listAuditLogs({ resourceType, pageSize: AUDIT_PAGE_SIZE });
       for (const entry of audit.items) {
         const metadata = asRecord(entry.metadata);
         const serverId =
@@ -417,30 +419,30 @@ export function registerMcpControlPlaneRoutes(deps: McpControlPlaneDeps): void {
         ? new Set(query.serverIds.split(",").map((id) => id.trim()).filter(Boolean))
         : null;
     const since = new Date(Date.now() - MCP_TELEMETRY_WINDOWS[window]).toISOString();
-    const rules = store.listMcpToolPolicies();
-    const usages = detail ? collectRegistryUsages(store) : new Map<string, Array<McpToolUsage & { toolNames: string[] | null }>>();
-    const servers = store
-      .listMcpServers(requestedProject ? { projectId: requestedProject } : {})
+    const rules = await store.listMcpToolPolicies();
+    const usages = detail ? await collectRegistryUsages(store) : new Map<string, Array<McpToolUsage & { toolNames: string[] | null }>>();
+    const servers = (await store
+      .listMcpServers(requestedProject ? { projectId: requestedProject } : {}))
       .filter((server) => !onlyIds || onlyIds.has(server.id));
 
     const tools: unknown[] = [];
     const serverViews: unknown[] = [];
     for (const server of servers) {
       const projectId = server.projectId ?? requestedProject ?? "default";
-      const snapshot = server.currentSnapshotId ? store.getMcpToolSnapshot(server.currentSnapshotId) : null;
+      const snapshot = server.currentSnapshotId ? await store.getMcpToolSnapshot(server.currentSnapshotId) : null;
       const marked = markMcpTools(snapshot?.tools ?? [], {
         rules,
-        classifications: store.listMcpToolClassifications(server.id),
+        classifications: await store.listMcpToolClassifications(server.id),
         role: user.role as McpPolicyRole,
         projectId,
         adapterId: server.adapterId,
         registryServerId: server.id,
         serverLabel: server.name
       });
-      const calls = detail ? store.listMcpToolCalls({ registryServerId: server.id, since }) : [];
+      const calls = detail ? await store.listMcpToolCalls({ registryServerId: server.id, since }) : [];
       const telemetry = detail ? new Map(rollupMcpToolCalls(calls).tools.map((entry) => [entry.toolName, entry])) : null;
       const recentByTool = new Map<string, unknown[]>();
-      const readable = detail ? deps.runAccess.readableWorkflowIds(user) : null;
+      const readable = detail ? await deps.runAccess.readableWorkflowIds(user) : null;
       const readableIds = readable && new Set(readable);
       for (const call of [...calls].sort((a, b) => (a.startedAt < b.startedAt ? 1 : -1))) {
         const list = recentByTool.get(call.toolName) ?? [];
@@ -524,7 +526,7 @@ export function registerMcpControlPlaneRoutes(deps: McpControlPlaneDeps): void {
     const limitRaw = Number(query.limit);
     const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(MAX_CHANGES, Math.floor(limitRaw)) : DEFAULT_CHANGES;
     const serverId = str(query.serverId);
-    return { kinds: MCP_CHANGE_KINDS, ...buildChanges(user, { serverId, kinds, limit }) };
+    return { kinds: MCP_CHANGE_KINDS, ...await buildChanges(user, { serverId, kinds, limit }) };
   });
 
   app.get("/api/mcp/overview", async (request, reply) => {
@@ -538,7 +540,7 @@ export function registerMcpControlPlaneRoutes(deps: McpControlPlaneDeps): void {
     const isAdmin = user.role === "admin";
     const now = Date.now();
     const since = new Date(now - MCP_TELEMETRY_WINDOWS[window]).toISOString();
-    const servers = store.listMcpServers();
+    const servers = await store.listMcpServers();
     const byStatus: Record<McpServerStatus, number> = { healthy: 0, degraded: 0, down: 0, unknown: 0 };
     const tools: Array<{ serverId: string; serverName: string; toolName: string; calls: number; errors: number; errorRate: number; p95Ms: number | null; costUsd: number | null }> = [];
     const pendingBreaking: unknown[] = [];
@@ -552,7 +554,7 @@ export function registerMcpControlPlaneRoutes(deps: McpControlPlaneDeps): void {
     for (const server of servers) {
       byStatus[server.status] += 1;
       if (server.pendingBreakingSnapshotId) {
-        const snapshot = store.getMcpToolSnapshot(server.pendingBreakingSnapshotId);
+        const snapshot = await store.getMcpToolSnapshot(server.pendingBreakingSnapshotId);
         pendingBreaking.push({
           serverId: server.id,
           serverName: server.name,
@@ -586,7 +588,7 @@ export function registerMcpControlPlaneRoutes(deps: McpControlPlaneDeps): void {
       }
       // A delegated server has no shared connection to watch; each user connects their own.
       if (deps.usesOAuth(server) && server.credentialMode !== "delegated") {
-        const status = deps.oauth.status(server.id);
+        const status = await deps.oauth.status(server.id);
         if (status.state !== "connected") {
           oauthAttention.push({
             serverId: server.id,
@@ -606,7 +608,7 @@ export function registerMcpControlPlaneRoutes(deps: McpControlPlaneDeps): void {
           allowedModels: server.sampling.allowedModels.length
         });
       }
-      const rollup = rollupMcpToolCalls(store.listMcpToolCalls({ registryServerId: server.id, since }));
+      const rollup = rollupMcpToolCalls(await store.listMcpToolCalls({ registryServerId: server.id, since }));
       totalCalls += rollup.totals.calls;
       totalErrors += rollup.totals.errors;
       for (const tool of rollup.tools) {
@@ -631,10 +633,10 @@ export function registerMcpControlPlaneRoutes(deps: McpControlPlaneDeps): void {
 
     const visibleElicitation = (record: { createdBy: string | null }) =>
       user.role === "admin" || user.role === "operator" || !record.createdBy || record.createdBy === user.id;
-    const openQuestions = store.listMcpElicitations({ status: "pending", limit: 500 }).filter(visibleElicitation);
+    const openQuestions = (await store.listMcpElicitations({ status: "pending", limit: 500 })).filter(visibleElicitation);
 
-    const clientUsage = new Map(store.summarizeMcpClientUsage(since).map((row) => [row.clientId, row]));
-    const clients = store.listMcpClients();
+    const clientUsage = new Map((await store.summarizeMcpClientUsage(since)).map((row) => [row.clientId, row]));
+    const clients = await store.listMcpClients();
     const activeClients = clients
       .filter((client) => clientIsActive(client, now))
       .map((client) => ({
@@ -652,12 +654,12 @@ export function registerMcpControlPlaneRoutes(deps: McpControlPlaneDeps): void {
       servers: {
         total: servers.length,
         byStatus,
-        list: servers.map((server) => ({
+        list: await mapAsync(servers, async (server) => ({
           id: server.id,
           name: server.name,
           status: server.status,
           lastProbeAt: server.lastProbeAt,
-          latency: deps.latency(server.id)
+          latency: await deps.latency(server.id)
         }))
       },
       pendingBreaking,
@@ -671,7 +673,7 @@ export function registerMcpControlPlaneRoutes(deps: McpControlPlaneDeps): void {
       sampling,
       tools: { calls: totalCalls, errors: totalErrors, busiest, errorProne },
       clients: { total: clients.length, active: activeClients.length, top: activeClients.slice(0, 5) },
-      changes: buildChanges(user, { kinds: null, limit: 8 }).items
+      changes: (await buildChanges(user, { kinds: null, limit: 8 })).items
     };
   });
 }

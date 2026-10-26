@@ -19,7 +19,7 @@ import {
   type McpSandboxSettings,
   type SecretReference
 } from "@ai-orchestrator/shared";
-import type { McpServerRecord, SqliteStore } from "./db/database.js";
+import type { McpServerRecord } from "./db/database.js";
 import type { AuditEventInput } from "./services/audit-service.js";
 import type { SafeUser, UserRole } from "./services/auth-service.js";
 import type { McpCatalogService } from "./services/mcp-catalog.js";
@@ -34,27 +34,29 @@ import {
 } from "./services/mcp-config-import.js";
 import { toolError, toolSuccess } from "./services/mcp-gateway-protocol.js";
 import { evaluateToolForContext } from "./services/mcp-tool-policy.js";
+import type { Store } from "./db/store.js";
+import { mapAsync } from "./async-array.js";
 
 const MASK = "••••••";
 const MAX_ERROR_CHARS = 2000;
 
 export interface McpOnboardingDeps {
   app: FastifyInstance;
-  store: SqliteStore;
+  store: Store;
   mcpRegistry: MCPRegistry;
   catalog: McpCatalogService;
-  createSecret: (input: { name: string; provider: string; value: string; projectId?: string }) => SecretReference;
+  createSecret: (input: { name: string; provider: string; value: string; projectId?: string }) => Promise<SecretReference>;
   resolveSecret: MCPExecutionContext["resolveSecret"];
   redact: (value: string) => string;
   /** Phase 10.7 — with an actor, a delegated server acts with that user's own account. */
-  resolveRegisteredMcpServer: (registryServerId: string, actor?: SafeUser | null) => MCPServerConfig;
+  resolveRegisteredMcpServer: (registryServerId: string, actor?: SafeUser | null) => Promise<MCPServerConfig>;
   /** Phase 10.7 — why a server with this sandbox may not be saved (MCP_SANDBOX_REQUIRED, mounts), or null. */
   sandboxSaveProblem: (adapterId: string, sandbox: McpSandboxSettings | null | undefined) => string | null;
   withScopedMcpContext: <T>(run: (context: MCPExecutionContext) => Promise<T>) => Promise<T>;
   requireRole: (request: FastifyRequest, reply: FastifyReply, roles: UserRole[]) => Promise<SafeUser | null>;
   /** Whether the user may run workflows in the project; the playground runs tools under the same permission. */
-  canExecuteInProject: (user: SafeUser, projectId: string) => boolean;
-  auditUser: (request: FastifyRequest, user: SafeUser, event: Omit<AuditEventInput, "actor">) => void;
+  canExecuteInProject: (user: SafeUser, projectId: string) => Promise<boolean>;
+  auditUser: (request: FastifyRequest, user: SafeUser, event: Omit<AuditEventInput, "actor">) => void | Promise<void>;
   /** Probe a server in the background, like a normal registration. */
   probeInBackground: (serverId: string) => void;
   serverSummary: (server: McpServerRecord) => unknown;
@@ -134,7 +136,7 @@ export function registerMcpOnboardingRoutes(deps: McpOnboardingDeps): void {
       return { error: "Only admins can import MCP servers; builders may preview with dryRun." };
     }
     const projectId = parsed.data.projectId ?? null;
-    if (projectId && !store.getProject(projectId)) {
+    if (projectId && !await store.getProject(projectId)) {
       reply.code(400);
       return { error: `Project '${projectId}' does not exist` };
     }
@@ -147,7 +149,7 @@ export function registerMcpOnboardingRoutes(deps: McpOnboardingDeps): void {
       return { error: error instanceof McpConfigImportError ? error.message : "The file could not be read as an MCP client config." };
     }
 
-    const existing = store.listMcpServers();
+    const existing = await store.listMcpServers();
     const plan = planMcpConfigImport(config, {
       existing,
       entries: parsed.data.entries,
@@ -203,14 +205,14 @@ export function registerMcpOnboardingRoutes(deps: McpOnboardingDeps): void {
       }
       let secretId: string | null = null;
       if (materialized.secret) {
-        const ref = deps.createSecret({
+        const ref = await deps.createSecret({
           name: `MCP ${view.name}: ${materialized.secret.names.join(", ")}`.slice(0, 200),
           provider: "mcp",
           value: materialized.secret.value,
           ...(projectId ? { projectId } : {})
         });
         secretId = ref.secretId;
-        deps.auditUser(request, user, {
+        await deps.auditUser(request, user, {
           category: "secret",
           eventType: "secret.create",
           action: "create",
@@ -228,19 +230,19 @@ export function registerMcpOnboardingRoutes(deps: McpOnboardingDeps): void {
       }
       const probeEnabled = !view.disabledInSource;
       if (view.decision === "update" && view.duplicate) {
-        store.updateMcpServer(view.duplicate.serverId, {
+        await store.updateMcpServer(view.duplicate.serverId, {
           adapterId: view.adapterId,
           connection: materialized.connection,
           secretId,
           ...(sandbox ? { sandbox } : {})
         });
         updated.push(view.duplicate.serverId);
-        if (probe && store.getMcpServer(view.duplicate.serverId)?.probeEnabled) deps.probeInBackground(view.duplicate.serverId);
+        if (probe && (await store.getMcpServer(view.duplicate.serverId))?.probeEnabled) deps.probeInBackground(view.duplicate.serverId);
         results.push({ ...view, result: { action: "updated", serverId: view.duplicate.serverId, ...(secretId ? { secretId } : {}) } });
         continue;
       }
       const id = `mcp_${crypto.randomUUID()}`;
-      store.createMcpServer({
+      await store.createMcpServer({
         id,
         name: view.name,
         description: `Imported from ${parsed.data.fileName ?? "a client config"} (${view.key})`.slice(0, 2000),
@@ -258,7 +260,7 @@ export function registerMcpOnboardingRoutes(deps: McpOnboardingDeps): void {
       results.push({ ...view, result: { action: "created", serverId: id, ...(secretId ? { secretId } : {}) } });
     }
 
-    deps.auditUser(request, user, {
+    await deps.auditUser(request, user, {
       category: "system",
       eventType: "mcp_server.imported",
       action: "create",
@@ -286,10 +288,10 @@ export function registerMcpOnboardingRoutes(deps: McpOnboardingDeps): void {
 
     return {
       ...respond(results),
-      servers: [...created, ...updated]
-        .map((serverId) => store.getMcpServer(serverId))
-        .filter((server): server is McpServerRecord => Boolean(server))
-        .map(deps.serverSummary)
+      servers: await mapAsync(
+        (await mapAsync([...created, ...updated], async (serverId) => await store.getMcpServer(serverId))).filter((server): server is McpServerRecord => Boolean(server)),
+        (server) => deps.serverSummary(server)
+      )
     };
   });
 
@@ -311,7 +313,7 @@ export function registerMcpOnboardingRoutes(deps: McpOnboardingDeps): void {
       return { error: "No catalog file is configured (MCP_CATALOG_FILE).", status: catalog.status() };
     }
     const status = catalog.reload();
-    deps.auditUser(request, user, {
+    await deps.auditUser(request, user, {
       category: "system",
       eventType: "mcp_catalog.reloaded",
       action: "update",
@@ -337,7 +339,7 @@ export function registerMcpOnboardingRoutes(deps: McpOnboardingDeps): void {
       reply.code(400);
       return { error: "Invalid playground call", details: parsed.error.issues };
     }
-    const server = store.getMcpServer(request.params.id);
+    const server = await store.getMcpServer(request.params.id);
     if (!server) {
       reply.code(404);
       return { error: "MCP server not found" };
@@ -349,15 +351,15 @@ export function registerMcpOnboardingRoutes(deps: McpOnboardingDeps): void {
       return { error: `MCP server '${server.name}' belongs to another project.` };
     }
     const projectId = server.projectId ?? parsed.data.projectId ?? "default";
-    if (!store.getProject(projectId)) {
+    if (!await store.getProject(projectId)) {
       reply.code(400);
       return { error: `Project '${projectId}' does not exist` };
     }
-    if (!deps.canExecuteInProject(user, projectId)) {
+    if (!await deps.canExecuteInProject(user, projectId)) {
       reply.code(403);
       return { error: `You do not have permission to run tools in project '${projectId}'.` };
     }
-    const snapshot = server.currentSnapshotId ? store.getMcpToolSnapshot(server.currentSnapshotId) : null;
+    const snapshot = server.currentSnapshotId ? await store.getMcpToolSnapshot(server.currentSnapshotId) : null;
     if (!snapshot) {
       reply.code(409);
       return { error: `MCP server '${server.name}' has no tool snapshot yet. Probe it first.` };
@@ -371,8 +373,8 @@ export function registerMcpOnboardingRoutes(deps: McpOnboardingDeps): void {
 
     const decision = evaluateToolForContext(
       {
-        rules: store.listMcpToolPolicies(),
-        classifications: store.listMcpToolClassifications(server.id),
+        rules: await store.listMcpToolPolicies(),
+        classifications: await store.listMcpToolClassifications(server.id),
         role: user.role as McpPolicyRole,
         projectId,
         adapterId: server.adapterId,
@@ -382,7 +384,7 @@ export function registerMcpOnboardingRoutes(deps: McpOnboardingDeps): void {
       { name: tool.name, ...(tool.annotations ? { annotations: tool.annotations } : {}) }
     );
     if (!decision.allowed) {
-      deps.auditUser(request, user, {
+      await deps.auditUser(request, user, {
         category: "system",
         eventType: "mcp_tool.playground_denied",
         action: "execute",
@@ -409,7 +411,7 @@ export function registerMcpOnboardingRoutes(deps: McpOnboardingDeps): void {
 
     let serverConfig: MCPServerConfig;
     try {
-      serverConfig = deps.resolveRegisteredMcpServer(server.id, user);
+      serverConfig = await deps.resolveRegisteredMcpServer(server.id, user);
     } catch (error) {
       reply.code(409);
       return { error: error instanceof Error ? error.message : String(error) };
@@ -444,7 +446,7 @@ export function registerMcpOnboardingRoutes(deps: McpOnboardingDeps): void {
     const durationMs = Date.now() - startedAt.getTime();
     const telemetryId = `mtc_${crypto.randomUUID()}`;
     try {
-      store.insertMcpToolCall({
+      await store.insertMcpToolCall({
         id: telemetryId,
         executionId: `mcppg_${crypto.randomUUID()}`,
         workflowId: "",
@@ -466,7 +468,7 @@ export function registerMcpOnboardingRoutes(deps: McpOnboardingDeps): void {
     } catch (error) {
       app.log.warn({ err: deps.redact(error instanceof Error ? error.message : String(error)) }, "Failed to record MCP playground telemetry");
     }
-    deps.auditUser(request, user, {
+    await deps.auditUser(request, user, {
       category: "system",
       eventType: "mcp_tool.playground_call",
       action: "execute",

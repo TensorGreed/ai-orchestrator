@@ -142,7 +142,7 @@ async function createRoleSession(
   context: TestContext,
   input: { email: string; password: string; role: "admin" | "builder" | "operator" | "viewer" }
 ): Promise<string> {
-  context.authService.register(input);
+  await context.authService.register(input);
   const login = await context.app.inject({
     method: "POST",
     url: "/api/auth/login",
@@ -337,10 +337,10 @@ async function createTestContext(overrides: Partial<AppConfig> = {}): Promise<Te
     ...overrides
   };
 
-  store.ensureDefaultProject();
+  await store.ensureDefaultProject();
   const secretService = new SecretService(store, config.SECRET_MASTER_KEY_BASE64);
   const authService = new AuthService(store, config.SESSION_TTL_HOURS);
-  const app = createApp(config, store, secretService, authService);
+  const app = await createApp(config, store, secretService, authService);
   await app.ready();
 
   const context: TestContext = {
@@ -467,7 +467,7 @@ describe("auth + rbac API", () => {
     expect(noSession.statusCode).toBe(401);
     expect(noSession.json<{ error: string }>().error).toBe("Authentication required");
 
-    context.authService.register({
+    await context.authService.register({
       email: "viewer@example.com",
       password: "ViewerPass123!",
       role: "viewer"
@@ -505,7 +505,7 @@ describe("auth + rbac API", () => {
     ];
 
     for (const user of users) {
-      context.authService.register(user);
+      await context.authService.register(user);
     }
 
     const sessionCookies: Record<string, string> = {};
@@ -912,7 +912,7 @@ describe("auth + rbac API", () => {
       password: "BuilderPass123!",
       role: "builder"
     });
-    const secretRef = context.secretService.createSecret({
+    const secretRef = await context.secretService.createSecret({
       name: "gateway-model-list-key",
       provider: "anthropic",
       value: "gateway-secret"
@@ -975,7 +975,7 @@ describe("auth + rbac API", () => {
       password: "BuilderPass123!",
       role: "builder"
     });
-    const secretRef = context.secretService.createSecret({
+    const secretRef = await context.secretService.createSecret({
       name: "anthropic-test-key",
       provider: "anthropic",
       value: "anthropic-secret"
@@ -1056,7 +1056,7 @@ describe("secured webhook execution", () => {
     });
 
     const token = "bearer-secret-token";
-    const secretRef = context.secretService.createSecret({
+    const secretRef = await context.secretService.createSecret({
       name: "webhook-bearer-token",
       provider: "webhook",
       value: token
@@ -1113,7 +1113,7 @@ describe("secured webhook execution", () => {
     });
 
     const hmacSecret = "hmac-shared-key";
-    const secretRef = context.secretService.createSecret({
+    const secretRef = await context.secretService.createSecret({
       name: "webhook-hmac-key",
       provider: "webhook",
       value: hmacSecret
@@ -1192,6 +1192,19 @@ describe("secured webhook execution", () => {
       payload: rawBody
     });
     expect(replay.statusCode).toBe(403);
+
+    // Two copies of a fresh signed request arriving together: exactly one gets through.
+    const raceTimestamp = `${Math.floor(Date.now() / 1000) + 1}`;
+    const raceSignature = crypto.createHmac("sha256", hmacSecret).update(`${raceTimestamp}.${rawBody}`).digest("hex");
+    const send = () =>
+      context.app.inject({
+        method: "POST",
+        url: "/webhook/secure-wf-webhook-hmac",
+        headers: { "content-type": "application/json", "x-webhook-timestamp": raceTimestamp, "x-webhook-signature": raceSignature },
+        payload: rawBody
+      });
+    const raced = await Promise.all([send(), send()]);
+    expect(raced.map((response) => response.statusCode).sort()).toEqual([200, 403]);
   });
 
   it("returns cached result for duplicate idempotency key and 409 for conflicts", async () => {
@@ -1894,7 +1907,7 @@ describe("execution resilience and lifecycle", () => {
     const oldStartedAt = new Date(Date.now() - 10 * 24 * 60 * 60 * 1000).toISOString();
     const recentStartedAt = new Date().toISOString();
 
-    context.store.saveExecutionHistory({
+    await context.store.saveExecutionHistory({
       id: "exec-old",
       workflowId: "wf-old",
       workflowName: "Old Workflow",
@@ -1902,7 +1915,7 @@ describe("execution resilience and lifecycle", () => {
       startedAt: oldStartedAt,
       completedAt: oldStartedAt
     });
-    context.store.saveExecutionHistory({
+    await context.store.saveExecutionHistory({
       id: "exec-recent",
       workflowId: "wf-recent",
       workflowName: "Recent Workflow",
@@ -1911,19 +1924,19 @@ describe("execution resilience and lifecycle", () => {
       completedAt: recentStartedAt
     });
 
-    const deleted = context.store.pruneExecutionHistory({
+    const deleted = await context.store.pruneExecutionHistory({
       before: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
     });
     expect(deleted).toBe(1);
-    expect(context.store.getExecutionHistory("exec-old")).toBeNull();
-    expect(context.store.getExecutionHistory("exec-recent")).not.toBeNull();
+    expect(await context.store.getExecutionHistory("exec-old")).toBeNull();
+    expect(await context.store.getExecutionHistory("exec-recent")).not.toBeNull();
   });
 });
 
 describe("node definitions surface (Phase 1 + 2)", () => {
   it("exposes all 23 new Phase 1 + Phase 2 node types via /api/definitions", async () => {
     const context = await createTestContext();
-    context.authService.register({
+    await context.authService.register({
       email: "viewer@example.com",
       password: "ViewerPass123!",
       role: "viewer"
@@ -1978,7 +1991,7 @@ describe("node definitions surface (Phase 1 + 2)", () => {
 describe("Phase 3.1 Tier 1 integrations surface", () => {
   it("exposes all Tier 1 node types in /api/definitions and /api/integrations", async () => {
     const context = await createTestContext();
-    context.authService.register({
+    await context.authService.register({
       email: "viewer-tier1@example.com",
       password: "ViewerPass123!",
       role: "viewer"
@@ -2067,7 +2080,7 @@ describe("Phase 3.5 trigger system expansion", () => {
     if (login.statusCode === 200) {
       return extractCookie(login.headers["set-cookie"], context.config.SESSION_COOKIE_NAME);
     }
-    context.authService.register({ email, password: "TestPass123!", role });
+    await context.authService.register({ email, password: "TestPass123!", role });
     const retry = await context.app.inject({
       method: "POST",
       url: "/api/auth/login",
@@ -2130,7 +2143,7 @@ describe("Phase 3.5 trigger system expansion", () => {
       ],
       edges: [{ id: "e1", source: "trigger", target: "out" }]
     };
-    context.store.upsertWorkflow(workflow);
+    await context.store.upsertWorkflow(workflow);
 
     const res = await context.app.inject({
       method: "POST",
@@ -2178,7 +2191,7 @@ describe("Phase 3.5 trigger system expansion", () => {
       ],
       edges: [{ id: "e1", source: "form", target: "out" }]
     };
-    context.store.upsertWorkflow(workflow);
+    await context.store.upsertWorkflow(workflow);
 
     const htmlRes = await context.app.inject({
       method: "GET",
@@ -2235,7 +2248,7 @@ describe("Phase 3.5 trigger system expansion", () => {
       ],
       edges: [{ id: "e1", source: "chat", target: "out" }]
     };
-    context.store.upsertWorkflow(workflow);
+    await context.store.upsertWorkflow(workflow);
 
     const res = await context.app.inject({
       method: "POST",
@@ -2282,7 +2295,7 @@ describe("Phase 3.5 trigger system expansion", () => {
       ],
       edges: [{ id: "e1", source: "mcp", target: "out" }]
     };
-    context.store.upsertWorkflow(workflow);
+    await context.store.upsertWorkflow(workflow);
 
     const manifest = await context.app.inject({
       method: "GET",
@@ -2309,7 +2322,7 @@ describe("Phase 4.2 workflow organization", () => {
     role: "admin" | "builder" | "viewer"
   ): Promise<string> {
     const email = `${role}-42-${Date.now()}-${Math.random().toString(36).slice(2, 6)}@example.com`;
-    context.authService.register({ email, password: "TestPass123!", role });
+    await context.authService.register({ email, password: "TestPass123!", role });
     const login = await context.app.inject({
       method: "POST",
       url: "/api/auth/login",
@@ -2375,7 +2388,7 @@ describe("Phase 4.2 workflow organization", () => {
     expect(folderRes.statusCode).toBe(200);
     const folder = folderRes.json<{ id: string }>();
 
-    context.store.upsertWorkflow(makeWorkflow("wf-move-1", { name: "To move" }));
+    await context.store.upsertWorkflow(makeWorkflow("wf-move-1", { name: "To move" }));
 
     const moveRes = await context.app.inject({
       method: "POST",
@@ -2421,8 +2434,8 @@ describe("Phase 4.2 workflow organization", () => {
   it("search filters by name (case-insensitive substring)", async () => {
     const context = await createTestContext();
     const cookie = await registerAndLogin(context, "builder");
-    context.store.upsertWorkflow(makeWorkflow("wf-s-1", { name: "Customer Onboarding Agent" }));
-    context.store.upsertWorkflow(makeWorkflow("wf-s-2", { name: "Invoice Processor" }));
+    await context.store.upsertWorkflow(makeWorkflow("wf-s-1", { name: "Customer Onboarding Agent" }));
+    await context.store.upsertWorkflow(makeWorkflow("wf-s-2", { name: "Invoice Processor" }));
 
     const res = await context.app.inject({
       method: "GET",
@@ -2453,7 +2466,7 @@ describe("Phase 4.2 workflow organization", () => {
     });
     const folder = folderRes.json<{ id: string }>();
 
-    context.store.upsertWorkflow(
+    await context.store.upsertWorkflow(
       makeWorkflow("wf-src", {
         name: "Src",
         tags: ["production"],
@@ -2546,7 +2559,7 @@ describe("Phase 4.2 workflow organization", () => {
       payload: { name: "Tmp", projectId: "default" }
     });
     const folder = folderRes.json<{ id: string }>();
-    context.store.upsertWorkflow(
+    await context.store.upsertWorkflow(
       makeWorkflow("wf-fld", { folderId: folder.id })
     );
 
@@ -2557,7 +2570,7 @@ describe("Phase 4.2 workflow organization", () => {
     });
     expect(del.statusCode).toBe(200);
 
-    const wf = context.store.getWorkflow("wf-fld");
+    const wf = await context.store.getWorkflow("wf-fld");
     expect(wf).not.toBeNull();
     expect(wf?.folderId).toBeUndefined();
   });
@@ -2569,7 +2582,7 @@ describe("Phase 1 MCP probe & inspector", () => {
     role: "admin" | "builder" | "viewer"
   ): Promise<string> {
     const email = `${role}-mcp-probe-${Date.now()}-${Math.random().toString(36).slice(2, 6)}@example.com`;
-    context.authService.register({ email, password: "TestPass123!", role });
+    await context.authService.register({ email, password: "TestPass123!", role });
     const login = await context.app.inject({
       method: "POST",
       url: "/api/auth/login",
@@ -2982,7 +2995,7 @@ describe("Phase 4.9 — multi-node DAG executor through the public API", () => {
         { id: "e3", source: "set_b", target: "out" }
       ]
     };
-    context.store.upsertWorkflow(workflow);
+    await context.store.upsertWorkflow(workflow);
 
     const run = await context.app.inject({
       method: "POST",
@@ -3027,13 +3040,13 @@ describe("Phase 4.9 — SECRET_MASTER_KEY_BASE64 rotation end-to-end", () => {
   it("a fresh server booted under a new master key can resolve secrets re-encrypted offline", async () => {
     const oldContext = await createTestContext();
     const oldKeyB64 = oldContext.config.SECRET_MASTER_KEY_BASE64;
-    const stored = oldContext.secretService.createSecret({
+    const stored = await oldContext.secretService.createSecret({
       name: "STRIPE_KEY",
       provider: "openai-compatible",
       value: "sk-rotate-me-please"
     });
 
-    const row = oldContext.store.getSecret(stored.secretId);
+    const row = await oldContext.store.getSecret(stored.secretId);
     expect(row).not.toBeNull();
     expect(row!.iv).toBeTruthy();
     expect(row!.auth_tag).toBeTruthy();
@@ -3057,7 +3070,7 @@ describe("Phase 4.9 — SECRET_MASTER_KEY_BASE64 rotation end-to-end", () => {
     const newCiphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
     const newAuthTag = cipher.getAuthTag();
 
-    oldContext.store.saveSecret({
+    await oldContext.store.saveSecret({
       id: stored.secretId,
       name: row!.name,
       provider: row!.provider,

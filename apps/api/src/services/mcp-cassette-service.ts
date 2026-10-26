@@ -54,7 +54,8 @@ import {
 } from "@ai-orchestrator/provider-sdk";
 import type { AgentSessionMemoryStore } from "@ai-orchestrator/agent-runtime";
 import type { ChatMessage, DataLabels, ModelMemorySeed, ModelMemorySeedEntry, ModelTape, ModelTapeMode } from "@ai-orchestrator/shared";
-import type { McpServerRecord, McpToolSnapshotRecord, SqliteStore } from "../db/database.js";
+import type { McpServerRecord, McpToolSnapshotRecord } from "../db/database.js";
+import type { Store } from "../db/store.js";
 
 /** How far back the accepted-snapshot walk goes before giving up. */
 const MAX_SNAPSHOT_WALK = 100;
@@ -64,23 +65,23 @@ const MAX_SNAPSHOT_WALK = 100;
  * change is waiting to be accepted, in which case the newest snapshot before
  * it that is not itself an unaccepted breaking change.
  */
-export function acceptedSnapshotFor(store: SqliteStore, server: McpServerRecord): McpToolSnapshotRecord | null {
+export async function acceptedSnapshotFor(store: Store, server: McpServerRecord): Promise<McpToolSnapshotRecord | null> {
   let snapshotId = server.currentSnapshotId;
   if (server.pendingBreakingSnapshotId) {
-    snapshotId = store.getMcpToolSnapshot(server.pendingBreakingSnapshotId)?.previousSnapshotId ?? null;
+    snapshotId = (await store.getMcpToolSnapshot(server.pendingBreakingSnapshotId))?.previousSnapshotId ?? null;
   }
-  let snapshot = snapshotId ? store.getMcpToolSnapshot(snapshotId) : null;
+  let snapshot = snapshotId ? await store.getMcpToolSnapshot(snapshotId) : null;
   for (let steps = 0; snapshot && snapshot.breaking && !snapshot.acknowledgedAt && steps < MAX_SNAPSHOT_WALK; steps += 1) {
-    snapshot = snapshot.previousSnapshotId ? store.getMcpToolSnapshot(snapshot.previousSnapshotId) : null;
+    snapshot = snapshot.previousSnapshotId ? await store.getMcpToolSnapshot(snapshot.previousSnapshotId) : null;
   }
   return snapshot;
 }
 
 /** The export file for a server's accepted snapshot, with its resource and prompt catalog. Null before the first probe. */
-export function buildSnapshotFile(store: SqliteStore, server: McpServerRecord): McpSnapshotFile | null {
-  const snapshot = acceptedSnapshotFor(store, server);
+export async function buildSnapshotFile(store: Store, server: McpServerRecord): Promise<McpSnapshotFile | null> {
+  const snapshot = await acceptedSnapshotFor(store, server);
   if (!snapshot) return null;
-  const catalog = store.getMcpServerCatalog(server.id);
+  const catalog = await store.getMcpServerCatalog(server.id);
   return {
     format: MCP_SNAPSHOT_FILE_FORMAT,
     version: MCP_SNAPSHOT_FILE_VERSION,
@@ -209,7 +210,7 @@ export interface OfflineReplayOptions {
   liveReads?: {
     registry: MCPRegistry;
     resolve: (registryServerId: string) => MCPServerConfig | Promise<MCPServerConfig>;
-    isReadOnlyTool: (input: { config: MCPServerConfig; toolName: string; annotations?: Record<string, unknown> }) => boolean;
+    isReadOnlyTool: (input: { config: MCPServerConfig; toolName: string; annotations?: Record<string, unknown> }) => Promise<boolean>;
   };
 }
 
@@ -228,7 +229,7 @@ export interface McpCassetteServiceOptions {
 
 export class McpCassetteService {
   constructor(
-    private readonly store: SqliteStore,
+    private readonly store: Store,
     private readonly options: McpCassetteServiceOptions
   ) {}
 
@@ -246,9 +247,9 @@ export class McpCassetteService {
       maxBytes: this.options.maxBytes,
       maxEntries: this.options.maxCalls,
       redact: this.options.redact,
-      snapshotHashFor: (registryServerId) => {
-        const server = this.store.getMcpServer(registryServerId);
-        return server ? (acceptedSnapshotFor(this.store, server)?.hash ?? null) : null;
+      snapshotHashFor: async (registryServerId) => {
+        const server = await this.store.getMcpServer(registryServerId);
+        return server ? ((await acceptedSnapshotFor(this.store, server))?.hash ?? null) : null;
       }
     });
     const plan: McpCassetteRunPlan = { registry: createRecordingRegistry(base, recorder), recorder };
@@ -351,7 +352,7 @@ export class McpCassetteService {
   }
 
   /** Store what a recorded run captured. Returns null when there was nothing to record into. */
-  persist(input: {
+  async persist(input: {
     plan: McpCassetteRunPlan;
     executionId: string | null;
     workflow: Pick<Workflow, "id" | "name" | "projectId">;
@@ -359,7 +360,7 @@ export class McpCassetteService {
     evalRunId?: string | null;
     fixtureId?: string | null;
     createdBy: string | null;
-  }): McpCassetteSummary | null {
+  }): Promise<McpCassetteSummary | null> {
     if (!input.plan.recorder) return null;
     const cassette: McpCassette = input.plan.recorder.toCassette();
     if (input.plan.modelRecorder) {
@@ -368,7 +369,7 @@ export class McpCassetteService {
       const seed = input.plan.memoryCapture?.toSeed();
       if (seed) cassette.memorySeed = seed;
     }
-    return this.store.saveMcpCassette({
+    return await this.store.saveMcpCassette({
       id: `mcpcas_${randomUUID()}`,
       executionId: input.executionId,
       workflowId: input.workflow.id,

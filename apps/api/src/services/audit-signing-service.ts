@@ -23,8 +23,9 @@ import {
   type AuditSigningKeysResponse,
   type AuditSigningKeyView
 } from "@ai-orchestrator/shared";
-import type { AuditSigningKeyRecord, SqliteStore } from "../db/database.js";
+import type { AuditSigningKeyRecord } from "../db/database.js";
 import type { SecretService } from "./secret-service.js";
+import type { Store } from "../db/store.js";
 
 /** SecretService provider of the generated signing key (an internal secret). */
 export const AUDIT_SIGNING_SECRET_PROVIDER = "audit_signing";
@@ -87,7 +88,7 @@ export class AuditSigningService {
   private readonly envKey: LoadedKey | null;
 
   constructor(
-    private readonly store: SqliteStore,
+    private readonly store: Store,
     private readonly secrets: SecretService,
     private readonly options: AuditSigningServiceOptions = {}
   ) {
@@ -100,18 +101,18 @@ export class AuditSigningService {
   }
 
   /** The key that signs now, created or switched to on first use. */
-  activeKeyId(): string {
-    return this.ensureActive().keyId;
+  async activeKeyId(): Promise<string> {
+    return (await this.ensureActive()).keyId;
   }
 
   /** Key id and base64 raw public key of the key that signs now. */
-  activePublicKey(): { keyId: string; publicKey: string } {
-    const key = this.ensureActive();
+  async activePublicKey(): Promise<{ keyId: string; publicKey: string }> {
+    const key = await this.ensureActive();
     return { keyId: key.keyId, publicKey: key.publicKeyRaw.toString("base64") };
   }
 
-  sign(bytes: Uint8Array): AuditSignature {
-    const key = this.ensureActive();
+  async sign(bytes: Uint8Array): Promise<AuditSignature> {
+    const key = await this.ensureActive();
     return {
       keyId: key.keyId,
       publicKey: key.publicKeyRaw.toString("base64"),
@@ -120,8 +121,8 @@ export class AuditSigningService {
   }
 
   /** Verifies against any key this deployment has used (active or retired). */
-  verify(keyId: string, bytes: Uint8Array, signatureBase64: string): boolean {
-    const record = this.store.getAuditSigningKey(keyId);
+  async verify(keyId: string, bytes: Uint8Array, signatureBase64: string): Promise<boolean> {
+    const record = await this.store.getAuditSigningKey(keyId);
     if (!record) return false;
     try {
       return crypto.verify(null, Buffer.from(bytes), ed25519PublicKeyFromRaw(Buffer.from(record.publicKey, "base64")), Buffer.from(signatureBase64, "base64"));
@@ -130,23 +131,23 @@ export class AuditSigningService {
     }
   }
 
-  list(): AuditSigningKeysResponse {
-    const activeKeyId = this.activeKeyId();
+  async list(): Promise<AuditSigningKeysResponse> {
+    const activeKeyId = await this.activeKeyId();
     return {
       activeKeyId,
       canRotate: !this.envManaged,
-      keys: this.store.listAuditSigningKeys().map((record) => this.view(record))
+      keys: (await this.store.listAuditSigningKeys()).map((record) => this.view(record))
     };
   }
 
   /** Generates a new key and retires the current one. Refused when the key comes from the environment. */
-  rotate(): AuditSigningKeyView {
+  async rotate(): Promise<AuditSigningKeyView> {
     if (this.envManaged) {
       throw new AuditSigningKeyError("The signing key comes from AUDIT_SIGNING_KEY_BASE64; rotate it by setting a new value and restarting", "env_managed");
     }
     // No ensureActive(): a key that can no longer be decrypted must still be replaceable.
-    const key = this.generate();
-    const record = this.store.getAuditSigningKey(key.keyId);
+    const key = await this.generate();
+    const record = await this.store.getAuditSigningKey(key.keyId);
     return this.view(record!);
   }
 
@@ -164,12 +165,12 @@ export class AuditSigningService {
     };
   }
 
-  private ensureActive(): LoadedKey {
-    const active = this.store.getActiveAuditSigningKey();
+  private async ensureActive(): Promise<LoadedKey> {
+    const active = await this.store.getActiveAuditSigningKey();
     if (this.loaded && active?.keyId === this.loaded.keyId) return this.loaded;
 
     if (this.envKey) {
-      if (active?.keyId !== this.envKey.keyId) this.activate(this.envKey, "env", null, active);
+      if (active?.keyId !== this.envKey.keyId) await this.activate(this.envKey, "env", null, active);
       this.loaded = this.envKey;
       return this.envKey;
     }
@@ -177,7 +178,7 @@ export class AuditSigningService {
     if (active && active.source === "generated" && active.secretId) {
       let seed: string | undefined;
       try {
-        seed = this.secrets.resolveInternalSecret(active.secretId);
+        seed = await this.secrets.resolveInternalSecret(active.secretId);
       } catch {
         seed = undefined;
       }
@@ -196,22 +197,22 @@ export class AuditSigningService {
     }
 
     // No key yet, or the active key came from an environment variable that is no longer set.
-    return this.generate();
+    return await this.generate();
   }
 
-  private generate(): LoadedKey {
-    const current = this.store.getActiveAuditSigningKey();
+  private async generate(): Promise<LoadedKey> {
+    const current = await this.store.getActiveAuditSigningKey();
     const key = keyFromSeed(crypto.randomBytes(32));
-    const secretRef = this.secrets.createSecret({
+    const secretRef = await this.secrets.createSecret({
       name: `Audit signing key ${key.keyId}`,
       provider: AUDIT_SIGNING_SECRET_PROVIDER,
       value: key.privateKey.export({ format: "der", type: "pkcs8" }).subarray(PKCS8_ED25519_PREFIX.length).toString("base64")
     });
-    if (!this.activate(key, "generated", secretRef.secretId, current)) {
+    if (!await this.activate(key, "generated", secretRef.secretId, current)) {
       // Another instance activated a key first; use that one.
-      this.secrets.deleteSecret(secretRef.secretId);
+      await this.secrets.deleteSecret(secretRef.secretId);
       this.loaded = null;
-      return this.ensureActive();
+      return await this.ensureActive();
     }
     this.options.logger?.info("Generated a new audit signing key", { keyId: key.keyId });
     this.loaded = key;
@@ -219,8 +220,8 @@ export class AuditSigningService {
   }
 
   /** Activates `key`, retiring `current`; deletes the retired key's private half. */
-  private activate(key: LoadedKey, source: "env" | "generated", secretId: string | null, current: AuditSigningKeyRecord | null): boolean {
-    const ok = this.store.activateAuditSigningKey(
+  private async activate(key: LoadedKey, source: "env" | "generated", secretId: string | null, current: AuditSigningKeyRecord | null): Promise<boolean> {
+    const ok = await this.store.activateAuditSigningKey(
       {
         keyId: key.keyId,
         algorithm: AUDIT_SIGNING_ALGORITHM,
@@ -233,7 +234,7 @@ export class AuditSigningService {
     );
     if (!ok) return false;
     if (current && current.keyId !== key.keyId) {
-      if (current.secretId) this.secrets.deleteSecret(current.secretId);
+      if (current.secretId) await this.secrets.deleteSecret(current.secretId);
       this.options.logger?.info("Retired audit signing key", { keyId: current.keyId, activeKeyId: key.keyId });
     }
     if (source === "env") this.options.logger?.info("Using the audit signing key from AUDIT_SIGNING_KEY_BASE64", { keyId: key.keyId });

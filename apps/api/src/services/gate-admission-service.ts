@@ -41,7 +41,7 @@ import {
   type ReleaseGateCaseView,
   type ReleaseGateCasesView
 } from "@ai-orchestrator/shared";
-import type { GateCaseRequestRecord, ReleaseGateRecord, SqliteStore } from "../db/database.js";
+import type { GateCaseRequestRecord, ReleaseGateRecord } from "../db/database.js";
 import type { RunAccessResult } from "../run-access.js";
 import type { AuditEventInput } from "./audit-service.js";
 import type { SafeUser } from "./auth-service.js";
@@ -49,15 +49,17 @@ import { admissionState, gateAdmissionSnapshot, type GateAdmissionSnapshot } fro
 import { gateApprovers, gateAuthority } from "./gate-authority.js";
 import type { NotificationEvent } from "./notification-service.js";
 import { ReleaseError, type ReleasePermission } from "./release-service.js";
+import type { ReleaseGateCasesChange, Store } from "../db/store.js";
+import { mapAsync } from "../async-array.js";
 
 export interface GateAdmissionServiceOptions {
-  store: SqliteStore;
+  store: Store;
   /** False on stores without release tables (Postgres in this release): every route answers 501. */
   available: boolean;
   /** The shared run-access check (run-access.ts): 404 unreadable, 403 without the permission; admins pass. */
-  access: (user: SafeUser, workflowId: string, permission: ReleasePermission) => RunAccessResult<object>;
-  readableWorkflowIds: (user: SafeUser) => string[] | null;
-  audit: (event: AuditEventInput) => void;
+  access: (user: SafeUser, workflowId: string, permission: ReleasePermission) => Promise<RunAccessResult<object>>;
+  readableWorkflowIds: (user: SafeUser) => Promise<string[] | null>;
+  audit: (event: AuditEventInput) => void | Promise<void>;
   notify: (event: NotificationEvent) => Promise<void>;
   redact: (value: string) => string;
   appPublicUrl?: string;
@@ -66,6 +68,7 @@ export interface GateAdmissionServiceOptions {
 }
 
 const SELF_APPROVAL_MESSAGE = "You asked for this, and this gate does not allow approving your own request.";
+const CASES_CHANGED_MESSAGE = "The release gate's cases changed while this was being decided. Reload and try again.";
 const NOT_ENFORCED_MESSAGE = "This release gate is not enforced, so every case already counts: admission applies to enforced gates only.";
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -86,7 +89,7 @@ export class GateAdmissionService {
     return this.options.available;
   }
 
-  private get store(): SqliteStore {
+  private get store(): Store {
     return this.options.store;
   }
 
@@ -98,17 +101,17 @@ export class GateAdmissionService {
     if (!this.options.available) throw new ReleaseError("Release gates need the SQLite store in this release", 501);
   }
 
-  private check(user: SafeUser, workflowId: string, permission: ReleasePermission): void {
-    const result = this.options.access(user, workflowId, permission);
+  private async check(user: SafeUser, workflowId: string, permission: ReleasePermission): Promise<void> {
+    const result = await this.options.access(user, workflowId, permission);
     if (!result.ok) throw new ReleaseError(result.error, result.status);
   }
 
-  private projectOf(workflowId: string): string | null {
-    return this.store.getWorkflow(workflowId)?.projectId ?? null;
+  private async projectOf(workflowId: string): Promise<string | null> {
+    return (await this.store.getWorkflow(workflowId))?.projectId ?? null;
   }
 
-  private auditEvent(user: SafeUser | null, workflowId: string, eventType: string, action: string, metadata: Record<string, unknown>, outcome: "success" | "denied" = "success"): void {
-    this.options.audit({
+  private async auditEvent(user: SafeUser | null, workflowId: string, eventType: string, action: string, metadata: Record<string, unknown>, outcome: "success" | "denied" = "success"): Promise<void> {
+    await this.options.audit({
       category: "release",
       eventType,
       action,
@@ -116,15 +119,15 @@ export class GateAdmissionService {
       actor: user ? { userId: user.id, email: user.email, type: "user" } : { type: "system", email: "system" },
       resourceType: "workflow",
       resourceId: workflowId,
-      projectId: this.projectOf(workflowId),
+      projectId: await this.projectOf(workflowId),
       metadata
     });
   }
 
   /** The enforced gate and its admission state; 409 when the gate is not enforced. */
-  private enforced(workflowId: string): { gate: ReleaseGateRecord; snapshot: GateAdmissionSnapshot } {
-    const gate = this.store.getReleaseGate(workflowId);
-    const snapshot = gateAdmissionSnapshot(this.store, gate);
+  private async enforced(workflowId: string): Promise<{ gate: ReleaseGateRecord; snapshot: GateAdmissionSnapshot }> {
+    const gate = await this.store.getReleaseGate(workflowId);
+    const snapshot = await gateAdmissionSnapshot(this.store, gate);
     if (!gate || !snapshot) throw new ReleaseError(NOT_ENFORCED_MESSAGE, 409);
     return { gate, snapshot };
   }
@@ -142,33 +145,33 @@ export class GateAdmissionService {
   // The gate's cases
   // -------------------------------------------------------------------------
 
-  casesView(user: SafeUser, workflowId: string): ReleaseGateCasesView {
+  async casesView(user: SafeUser, workflowId: string): Promise<ReleaseGateCasesView> {
     this.requireAvailable();
-    this.check(user, workflowId, "workflow:read");
-    const gate = this.store.getReleaseGate(workflowId);
-    const snapshot = gateAdmissionSnapshot(this.store, gate);
-    const canWrite = this.options.access(user, workflowId, "workflow:write").ok;
+    await this.check(user, workflowId, "workflow:read");
+    const gate = await this.store.getReleaseGate(workflowId);
+    const snapshot = await gateAdmissionSnapshot(this.store, gate);
+    const canWrite = (await this.options.access(user, workflowId, "workflow:write")).ok;
     if (!snapshot) {
       return { workflowId, enforced: false, cases: [], counts: { admitted: 0, pending: 0, required: 0 }, canAdmit: false, canRequest: false };
     }
-    this.sweepExpired();
+    await this.sweepExpired();
     const asked = new Map<string, { id: string; kind: GateCaseRequestKind }>();
-    for (const request of this.store.listPendingGateCaseRequests(workflowId)) {
-      if (this.expired(request) || this.staleReason(request, gate)) continue;
+    for (const request of await this.store.listPendingGateCaseRequests(workflowId)) {
+      if (this.expired(request) || await this.staleReason(request, gate)) continue;
       for (const entry of request.fixtures) {
         if (!asked.has(entry.fixtureId)) asked.set(entry.fixtureId, { id: request.id, kind: request.action === "remove" ? "remove_cases" : "admit_cases" });
       }
     }
     const setNames = new Map<string, string | null>();
-    const setName = (datasetId: string) => {
-      if (!setNames.has(datasetId)) setNames.set(datasetId, this.store.getEvalDataset(datasetId)?.name ?? null);
+    const setName = async (datasetId: string) => {
+      if (!setNames.has(datasetId)) setNames.set(datasetId, (await this.store.getEvalDataset(datasetId))?.name ?? null);
       return setNames.get(datasetId) ?? null;
     };
     const required = new Set(snapshot.requiredIds);
-    const cases: ReleaseGateCaseView[] = snapshot.fixtures.map((fixture) => ({
+    const cases: ReleaseGateCaseView[] = await mapAsync(snapshot.fixtures, async (fixture) => ({
       fixtureId: fixture.id,
       datasetId: fixture.datasetId,
-      datasetName: setName(fixture.datasetId),
+      datasetName: await setName(fixture.datasetId),
       name: fixture.name,
       recordingId: fixture.recordingId,
       admission: snapshot.admittedIds.has(fixture.id) ? "admitted" : "pending",
@@ -191,78 +194,107 @@ export class GateAdmissionService {
     };
   }
 
-  private requireAdmin(user: SafeUser, workflowId: string, what: string): void {
-    this.check(user, workflowId, "workflow:write");
+  private async requireAdmin(user: SafeUser, workflowId: string, what: string): Promise<void> {
+    await this.check(user, workflowId, "workflow:write");
     if (user.role !== "admin") {
-      this.auditEvent(user, workflowId, "release.gate.cases_refused", "update", { what }, "denied");
+      await this.auditEvent(user, workflowId, "release.gate.cases_refused", "update", { what }, "denied");
       throw new ReleaseError(`Only admins can ${what} on an enforced release gate. Ask the gate's approvers instead.`, 403);
     }
   }
 
   /** Admins: the pending cases count from now on. */
-  admit(user: SafeUser, workflowId: string, input: GateCaseDecisionInput): ReleaseGateCasesView {
+  async admit(user: SafeUser, workflowId: string, input: GateCaseDecisionInput): Promise<ReleaseGateCasesView> {
     this.requireAvailable();
-    this.requireAdmin(user, workflowId, "admit cases");
-    const { snapshot } = this.enforced(workflowId);
+    await this.requireAdmin(user, workflowId, "admit cases");
+    const { snapshot } = await this.enforced(workflowId);
     const cases = this.casesOf(snapshot, input.fixtureIds);
-    const admitted = this.applyAdmit(user, workflowId, snapshot, cases.map((fixture) => fixture.id), { reason: input.reason ?? null, requestId: null });
+    const admitted = await this.applyAdmit(user, workflowId, snapshot, cases.map((fixture) => fixture.id), { reason: input.reason ?? null, requestId: null });
     if (admitted.length === 0) throw new ReleaseError("Those cases are already admitted.", 409);
-    return this.casesView(user, workflowId);
+    return await this.casesView(user, workflowId);
   }
 
   /** Admins: pending cases leave their golden sets (the golden runs are kept). Admitted cases are removed with the case's own delete. */
-  reject(user: SafeUser, workflowId: string, input: GateCaseDecisionInput): ReleaseGateCasesView {
+  async reject(user: SafeUser, workflowId: string, input: GateCaseDecisionInput): Promise<ReleaseGateCasesView> {
     this.requireAvailable();
-    this.requireAdmin(user, workflowId, "reject cases");
-    const { snapshot } = this.enforced(workflowId);
+    await this.requireAdmin(user, workflowId, "reject cases");
+    const { snapshot } = await this.enforced(workflowId);
     const cases = this.casesOf(snapshot, input.fixtureIds);
     const admitted = cases.filter((fixture) => snapshot.admittedIds.has(fixture.id));
     if (admitted.length > 0) {
       throw new ReleaseError(`Only pending cases can be rejected; ${admitted.map((fixture) => `"${fixture.name}"`).join(", ")} ${admitted.length === 1 ? "is" : "are"} admitted. Remove an admitted case from its golden set instead.`, 409);
     }
-    this.store.transaction(() => {
-      for (const fixture of cases) this.store.deleteEvalFixture(fixture.id);
+    await this.applyChange({
+      workflowId,
+      expectedAdmittedFixtureIds: snapshot.storedAdmittedIds,
+      deleteFixtureIds: cases.map((fixture) => fixture.id),
+      updatedAt: this.now().toISOString(),
+      updatedBy: user.email
     });
-    this.auditEvent(user, workflowId, "release.gate.cases_rejected", "update", {
+    await this.auditEvent(user, workflowId, "release.gate.cases_rejected", "update", {
       fixtureIds: cases.map((fixture) => fixture.id),
       reason: input.reason ? this.options.redact(input.reason) : null
     });
-    return this.casesView(user, workflowId);
+    return await this.casesView(user, workflowId);
   }
 
   /** Admins: a golden-run case must pass on every publish (marking it also admits it), or no longer must. */
-  setRequired(user: SafeUser, workflowId: string, fixtureId: string, required: boolean): ReleaseGateCasesView {
+  async setRequired(user: SafeUser, workflowId: string, fixtureId: string, required: boolean): Promise<ReleaseGateCasesView> {
     this.requireAvailable();
-    this.requireAdmin(user, workflowId, required ? "mark a case required" : "stop requiring a case");
-    const { snapshot } = this.enforced(workflowId);
+    await this.requireAdmin(user, workflowId, required ? "mark a case required" : "stop requiring a case");
+    const { snapshot } = await this.enforced(workflowId);
     const [fixture] = this.casesOf(snapshot, [fixtureId]);
     if (!fixture!.recordingId) throw new ReleaseError("Only a golden-run case can be required: replay jobs skip hand-written fixtures.", 400);
     const before = admissionState(snapshot);
-    this.store.transaction(() => {
-      if (required && !snapshot.admittedIds.has(fixtureId)) {
-        this.applyAdmit(user, workflowId, snapshot, [fixtureId], { reason: "Marked required", requestId: null });
-      }
-      if (fixture!.required !== required) this.store.setEvalFixtureRequired(fixtureId, required);
+    const admitting = required && !snapshot.admittedIds.has(fixtureId);
+    // Admitting the case and marking it required commit together.
+    await this.applyChange({
+      workflowId,
+      expectedAdmittedFixtureIds: snapshot.storedAdmittedIds,
+      ...(admitting ? { admittedFixtureIds: [...snapshot.admittedIds, fixtureId] } : {}),
+      ...(fixture!.required !== required ? { required: { fixtureId, required } } : {}),
+      updatedAt: this.now().toISOString(),
+      updatedBy: user.email
     });
+    if (admitting) await this.auditAdmitted(user, workflowId, [fixtureId], { reason: "Marked required", requestId: null });
     const after = { admittedIds: [...new Set([...before.admittedIds, ...(required ? [fixtureId] : [])])], requiredIds: required ? [...new Set([...before.requiredIds, fixtureId])] : before.requiredIds.filter((id) => id !== fixtureId) };
-    this.auditEvent(user, workflowId, "release.gate.case_required", "update", {
+    await this.auditEvent(user, workflowId, "release.gate.case_required", "update", {
       fixtureId,
       required,
       loosened: releaseAdmissionLoosening(before, after, snapshot.names)
     });
-    return this.casesView(user, workflowId);
+    return await this.casesView(user, workflowId);
   }
 
-  private applyAdmit(user: SafeUser, workflowId: string, snapshot: GateAdmissionSnapshot, fixtureIds: string[], context: { reason: string | null; requestId: string | null }): string[] {
+  private async applyAdmit(user: SafeUser, workflowId: string, snapshot: GateAdmissionSnapshot, fixtureIds: string[], context: { reason: string | null; requestId: string | null }): Promise<string[]> {
     const fresh = fixtureIds.filter((id) => !snapshot.admittedIds.has(id));
     if (fresh.length === 0) return [];
-    this.store.setReleaseGateAdmission(workflowId, [...snapshot.admittedIds, ...fresh], this.now().toISOString(), user.email);
-    this.auditEvent(user, workflowId, "release.gate.cases_admitted", "update", {
-      fixtureIds: fresh,
+    await this.applyChange({
+      workflowId,
+      expectedAdmittedFixtureIds: snapshot.storedAdmittedIds,
+      admittedFixtureIds: [...snapshot.admittedIds, ...fresh],
+      updatedAt: this.now().toISOString(),
+      updatedBy: user.email
+    });
+    await this.auditAdmitted(user, workflowId, fresh, context);
+    return fresh;
+  }
+
+  private async auditAdmitted(user: SafeUser, workflowId: string, fixtureIds: string[], context: { reason: string | null; requestId: string | null }): Promise<void> {
+    await this.auditEvent(user, workflowId, "release.gate.cases_admitted", "update", {
+      fixtureIds,
       reason: context.reason ? this.options.redact(context.reason) : null,
       requestId: context.requestId
     });
-    return fresh;
+  }
+
+  /**
+   * Applies a change to the gate's cases in one store transaction, refused when the admitted cases are no longer
+   * the ones this decision was made on (another admin or approver changed them meanwhile).
+   */
+  private async applyChange(change: ReleaseGateCasesChange): Promise<void> {
+    const outcome = await this.store.updateReleaseGateCases(change);
+    if (outcome === "decided") throw new ReleaseError("This approval was already decided", 409);
+    if (outcome === "changed") throw new ReleaseError(CASES_CHANGED_MESSAGE, 409);
   }
 
   // -------------------------------------------------------------------------
@@ -270,10 +302,10 @@ export class GateAdmissionService {
   // -------------------------------------------------------------------------
 
   /** Builders (`workflow:write`): ask the gate's approvers to admit pending cases or remove admitted ones. */
-  request(user: SafeUser, workflowId: string, input: GateCaseRequestInput): GateCaseRequestView {
+  async request(user: SafeUser, workflowId: string, input: GateCaseRequestInput): Promise<GateCaseRequestView> {
     this.requireAvailable();
-    this.check(user, workflowId, "workflow:write");
-    const { gate, snapshot } = this.enforced(workflowId);
+    await this.check(user, workflowId, "workflow:write");
+    const { gate, snapshot } = await this.enforced(workflowId);
     const cases = this.casesOf(snapshot, input.fixtureIds);
     if (input.action === "admit") {
       const already = cases.filter((fixture) => snapshot.admittedIds.has(fixture.id));
@@ -284,27 +316,27 @@ export class GateAdmissionService {
         throw new ReleaseError(`${pending.map((fixture) => `"${fixture.name}"`).join(", ")} ${pending.length === 1 ? "is" : "are"} still pending admission: remove ${pending.length === 1 ? "it" : "them"} from the golden set directly.`, 409);
       }
     }
-    this.sweepExpired();
+    await this.sweepExpired();
     const action = input.action;
     const ids = new Set(cases.map((fixture) => fixture.id));
-    for (const existing of this.store.listPendingGateCaseRequests(workflowId)) {
-      const stale = this.staleReason(existing, gate);
+    for (const existing of await this.store.listPendingGateCaseRequests(workflowId)) {
+      const stale = await this.staleReason(existing, gate);
       if (stale) {
-        this.close(existing, "canceled", `Stale: ${stale}`, null);
+        await this.close(existing, "canceled", `Stale: ${stale}`, null);
         continue;
       }
       if (existing.action !== action) continue;
       const overlap = existing.fixtures.filter((entry) => ids.has(entry.fixtureId));
       if (overlap.length === 0) continue;
       if (sameIdentity({ id: existing.requestedByUserId, email: existing.requestedBy }, user) && overlap.length === ids.size && existing.fixtures.length === ids.size) {
-        return this.toView(existing, user);
+        return await this.toView(existing, user);
       }
       throw new ReleaseError(`A request about ${overlap.map((entry) => `"${entry.name}"`).join(", ")} is already waiting in the approvals inbox.`, 409);
     }
     const approvers = gateApprovers(gate);
     const createdAt = this.now();
-    const workflow = this.store.getWorkflow(workflowId);
-    const record = this.store.insertGateCaseRequest({
+    const workflow = await this.store.getWorkflow(workflowId);
+    const record = await this.store.insertGateCaseRequest({
       id: `${GATE_CASE_REQUEST_PREFIX}${randomUUID()}`,
       workflowId,
       workflowName: workflow?.name ?? null,
@@ -325,7 +357,7 @@ export class GateAdmissionService {
       createdAt: createdAt.toISOString(),
       updatedAt: createdAt.toISOString()
     });
-    this.auditEvent(user, workflowId, "release.gate.case_request.requested", "request", {
+    await this.auditEvent(user, workflowId, "release.gate.case_request.requested", "request", {
       requestId: record.id,
       action,
       fixtureIds: [...ids],
@@ -350,16 +382,16 @@ export class GateAdmissionService {
         }
       })
       .catch((error) => this.options.logger?.warn("Gate case request notification failed", { error: error instanceof Error ? error.message : String(error) }));
-    return this.toView(record, user);
+    return await this.toView(record, user);
   }
 
   private expired(record: GateCaseRequestRecord): boolean {
     return Boolean(record.expiresAt && Date.parse(record.expiresAt) <= this.now().getTime());
   }
 
-  private sweepExpired(): void {
-    for (const record of this.store.timeOutExpiredGateCaseRequests(this.now().toISOString())) {
-      this.auditEvent(null, record.workflowId, "release.gate.case_request.timed_out", "timeout", { requestId: record.id, action: record.action });
+  private async sweepExpired(): Promise<void> {
+    for (const record of await this.store.timeOutExpiredGateCaseRequests(this.now().toISOString())) {
+      await this.auditEvent(null, record.workflowId, "release.gate.case_request.timed_out", "timeout", { requestId: record.id, action: record.action });
     }
   }
 
@@ -368,15 +400,16 @@ export class GateAdmissionService {
    * it was asked of; null when it still holds. `gate` is the current gate
    * (read when not given).
    */
-  private staleReason(record: GateCaseRequestRecord, gate: ReleaseGateRecord | null = this.store.getReleaseGate(record.workflowId)): string | null {
+  private async staleReason(record: GateCaseRequestRecord, given?: ReleaseGateRecord | null): Promise<string | null> {
+    const gate = given === undefined ? await this.store.getReleaseGate(record.workflowId) : given;
     if (!gate?.enforced) return "The release gate is no longer enforced, so every case counts.";
     if (record.gateAuthority !== gateAuthority(gate)) return "Who decides the release gate's cases (its approvers, self-approval or enforcement) changed after the request was made.";
     return null;
   }
 
   /** Checks the person against the gate's approvers and self-approval setting as they are now. */
-  private personCheck(record: GateCaseRequestRecord, user: SafeUser, gate: ReleaseGateRecord | null): { allowed: true } | { allowed: false; code: string; message: string } {
-    if (!this.options.access(user, record.workflowId, "workflow:publish").ok) {
+  private async personCheck(record: GateCaseRequestRecord, user: SafeUser, gate: ReleaseGateRecord | null): Promise<{ allowed: true } | { allowed: false; code: string; message: string }> {
+    if (!(await this.options.access(user, record.workflowId, "workflow:publish")).ok) {
       return { allowed: false, code: "project_access", message: "You may not publish this workflow, so you cannot decide its gate's cases." };
     }
     if (!gate) return { allowed: false, code: "stale", message: "This workflow no longer has a release gate." };
@@ -397,11 +430,11 @@ export class GateAdmissionService {
       : `Admit ${count} to the enforced release gate, so ${record.fixtures.length === 1 ? "it counts" : "they count"} toward publishing`;
   }
 
-  private toView(record: GateCaseRequestRecord, user: SafeUser): GateCaseRequestView {
+  private async toView(record: GateCaseRequestRecord, user: SafeUser): Promise<GateCaseRequestView> {
     const status = record.status === "pending" && this.expired(record) ? "timed_out" : record.status;
-    const gate = this.store.getReleaseGate(record.workflowId);
-    const stale = status === "pending" ? this.staleReason(record, gate) : null;
-    const check = status !== "pending" ? { allowed: false as const, message: "Already decided." } : stale ? { allowed: false as const, message: `This request is stale: ${stale} Ask again.` } : this.personCheck(record, user, gate);
+    const gate = await this.store.getReleaseGate(record.workflowId);
+    const stale = status === "pending" ? await this.staleReason(record, gate) : null;
+    const check = status !== "pending" ? { allowed: false as const, message: "Already decided." } : stale ? { allowed: false as const, message: `This request is stale: ${stale} Ask again.` } : await this.personCheck(record, user, gate);
     // The approvers who decide now: the gate's current ones (the ones asked when the gate is gone).
     const spec = asRecord(record.spec);
     const current = gate ? gateApprovers(gate) : null;
@@ -411,7 +444,7 @@ export class GateAdmissionService {
       id: record.id,
       workflowId: record.workflowId,
       workflowName: record.workflowName,
-      projectId: this.store.getWorkflow(record.workflowId)?.projectId ?? record.projectId,
+      projectId: (await this.store.getWorkflow(record.workflowId))?.projectId ?? record.projectId,
       status: status as GateCaseRequestView["status"],
       message: this.message(record),
       cases: record.fixtures,
@@ -431,24 +464,24 @@ export class GateAdmissionService {
   }
 
   /** Gate case requests of workflows the user can read, narrowed in SQL before the limit. */
-  listRequests(user: SafeUser, filter: { status: "pending" | "decided" | "all"; workflowId?: string; limit?: number }): GateCaseRequestView[] {
+  async listRequests(user: SafeUser, filter: { status: "pending" | "decided" | "all"; workflowId?: string; limit?: number }): Promise<GateCaseRequestView[]> {
     if (!this.options.available) return [];
-    this.sweepExpired();
-    const workflowIds = this.options.readableWorkflowIds(user);
-    const rows = this.store.listGateCaseRequests({ ...filter, now: this.now().toISOString(), scope: workflowIds === null ? { all: true } : { workflowIds } });
+    await this.sweepExpired();
+    const workflowIds = await this.options.readableWorkflowIds(user);
+    const rows = await this.store.listGateCaseRequests({ ...filter, now: this.now().toISOString(), scope: workflowIds === null ? { all: true } : { workflowIds } });
     const views: GateCaseRequestView[] = [];
     for (const row of rows) {
-      if (!this.options.access(user, row.workflowId, "workflow:read").ok) continue;
-      const view = this.toView(row, user);
+      if (!(await this.options.access(user, row.workflowId, "workflow:read")).ok) continue;
+      const view = await this.toView(row, user);
       if (filter.status === "pending" && view.status !== "pending") continue;
       views.push(view);
     }
     return views;
   }
 
-  private close(record: GateCaseRequestRecord, status: "canceled" | "timed_out", reason: string, actor: SafeUser | null): void {
-    if (!this.store.decideGateCaseRequest({ id: record.id, status, decisionReason: reason, decidedByUserId: actor?.id ?? null, decidedBy: actor?.email ?? "system" })) return;
-    this.auditEvent(actor, record.workflowId, status === "timed_out" ? "release.gate.case_request.timed_out" : "release.gate.case_request.canceled", status === "timed_out" ? "timeout" : "cancel", {
+  private async close(record: GateCaseRequestRecord, status: "canceled" | "timed_out", reason: string, actor: SafeUser | null): Promise<void> {
+    if (!await this.store.decideGateCaseRequest({ id: record.id, status, decisionReason: reason, decidedByUserId: actor?.id ?? null, decidedBy: actor?.email ?? "system" })) return;
+    await this.auditEvent(actor, record.workflowId, status === "timed_out" ? "release.gate.case_request.timed_out" : "release.gate.case_request.canceled", status === "timed_out" ? "timeout" : "cancel", {
       requestId: record.id,
       action: record.action,
       reason
@@ -461,60 +494,59 @@ export class GateAdmissionService {
    * (`remove_cases`: the cases leave their golden sets, the golden runs are
    * kept), as the approver.
    */
-  decide(user: SafeUser, requestId: string, decision: "approve" | "reject", reason?: string): { request: GateCaseRequestView } {
+  async decide(user: SafeUser, requestId: string, decision: "approve" | "reject", reason?: string): Promise<{ request: GateCaseRequestView }> {
     this.requireAvailable();
-    const record = this.store.getGateCaseRequest(requestId);
-    if (!record || !this.options.access(user, record.workflowId, "workflow:read").ok) throw new ReleaseError("Pending approval not found", 404);
+    const record = await this.store.getGateCaseRequest(requestId);
+    if (!record || !(await this.options.access(user, record.workflowId, "workflow:read")).ok) throw new ReleaseError("Pending approval not found", 404);
     if (record.status !== "pending") throw new ReleaseError("This approval was already decided", 409);
     if (this.expired(record)) {
-      this.close(record, "timed_out", "Nobody decided before the request expired", null);
+      await this.close(record, "timed_out", "Nobody decided before the request expired", null);
       throw new ReleaseError("This request expired; ask again", 409);
     }
-    const check = this.personCheck(record, user, this.store.getReleaseGate(record.workflowId));
+    const check = await this.personCheck(record, user, await this.store.getReleaseGate(record.workflowId));
     if (!check.allowed) {
-      this.auditEvent(user, record.workflowId, "release.gate.case_request.decided", decision, { requestId: record.id, action: record.action, refused: check.code }, "denied");
+      await this.auditEvent(user, record.workflowId, "release.gate.case_request.decided", decision, { requestId: record.id, action: record.action, refused: check.code }, "denied");
       throw new ReleaseError(check.message, 403);
     }
     const trimmed = reason?.trim() || null;
     if (decision === "reject") {
       if (!trimmed) throw new ReleaseError("A reason is required to reject a request", 400);
-      if (!this.store.decideGateCaseRequest({ id: record.id, status: "rejected", decidedByUserId: user.id, decidedBy: user.email, decisionReason: trimmed })) {
+      if (!await this.store.decideGateCaseRequest({ id: record.id, status: "rejected", decidedByUserId: user.id, decidedBy: user.email, decisionReason: trimmed })) {
         throw new ReleaseError("This approval was already decided", 409);
       }
-      this.auditEvent(user, record.workflowId, "release.gate.case_request.decided", decision, { requestId: record.id, action: record.action, decision, reason: this.options.redact(trimmed) });
-      return { request: this.toView(this.store.getGateCaseRequest(record.id)!, user) };
+      await this.auditEvent(user, record.workflowId, "release.gate.case_request.decided", decision, { requestId: record.id, action: record.action, decision, reason: this.options.redact(trimmed) });
+      return { request: await this.toView((await this.store.getGateCaseRequest(record.id))!, user) };
     }
-    const gate = this.store.getReleaseGate(record.workflowId);
-    const snapshot = gateAdmissionSnapshot(this.store, gate);
-    const stale = (why: string): never => {
-      this.close(record, "canceled", `Stale: ${why}`, user);
+    const gate = await this.store.getReleaseGate(record.workflowId);
+    const snapshot = await gateAdmissionSnapshot(this.store, gate);
+    const stale = async (why: string): Promise<never> => {
+      await this.close(record, "canceled", `Stale: ${why}`, user);
       throw new ReleaseError(`This request is stale and was canceled: ${why} Ask again.`, 409);
     };
-    const why = this.staleReason(record, gate);
-    if (why || !snapshot) return stale(why ?? "The release gate is no longer enforced, so every case counts.");
+    const why = await this.staleReason(record, gate);
+    if (why || !snapshot) return await stale(why ?? "The release gate is no longer enforced, so every case counts.");
     const inGate = new Set(snapshot.fixtures.map((fixture) => fixture.id));
     const asked = record.fixtures.map((entry) => entry.fixtureId);
     const fits = record.action === "admit" ? asked.filter((id) => inGate.has(id) && !snapshot.admittedIds.has(id)) : asked.filter((id) => snapshot.admittedIds.has(id));
     if (fits.length === 0) {
-      return stale(record.action === "admit" ? "None of its cases is still pending admission." : "None of its cases is still admitted to the gate.");
+      return await stale(record.action === "admit" ? "None of its cases is still pending admission." : "None of its cases is still admitted to the gate.");
     }
     const before = admissionState(snapshot);
-    this.store.transaction(() => {
-      if (!this.store.decideGateCaseRequest({ id: record.id, status: "approved", decidedByUserId: user.id, decidedBy: user.email, decisionReason: trimmed })) {
-        throw new ReleaseError("This approval was already decided", 409);
-      }
-      if (record.action === "admit") {
-        this.store.setReleaseGateAdmission(record.workflowId, [...snapshot.admittedIds, ...fits], this.now().toISOString(), user.email);
-      } else {
-        for (const id of fits) this.store.deleteEvalFixture(id);
-        this.store.setReleaseGateAdmission(record.workflowId, [...snapshot.admittedIds].filter((id) => !fits.includes(id)), this.now().toISOString(), user.email);
-      }
+    // The decision and the change it approves commit together.
+    await this.applyChange({
+      workflowId: record.workflowId,
+      decideRequest: { id: record.id, status: "approved", decidedByUserId: user.id, decidedBy: user.email, decisionReason: trimmed },
+      expectedAdmittedFixtureIds: snapshot.storedAdmittedIds,
+      admittedFixtureIds: record.action === "admit" ? [...snapshot.admittedIds, ...fits] : [...snapshot.admittedIds].filter((id) => !fits.includes(id)),
+      ...(record.action === "admit" ? {} : { deleteFixtureIds: fits }),
+      updatedAt: this.now().toISOString(),
+      updatedBy: user.email
     });
     const after =
       record.action === "admit"
         ? { admittedIds: [...before.admittedIds, ...fits], requiredIds: before.requiredIds }
         : { admittedIds: before.admittedIds.filter((id) => !fits.includes(id)), requiredIds: before.requiredIds.filter((id) => !fits.includes(id)) };
-    this.auditEvent(user, record.workflowId, "release.gate.case_request.decided", decision, {
+    await this.auditEvent(user, record.workflowId, "release.gate.case_request.decided", decision, {
       requestId: record.id,
       action: record.action,
       decision,
@@ -523,10 +555,10 @@ export class GateAdmissionService {
       reason: trimmed ? this.options.redact(trimmed) : null,
       loosened: releaseAdmissionLoosening(before, after, snapshot.names)
     });
-    this.auditEvent(user, record.workflowId, record.action === "admit" ? "release.gate.cases_admitted" : "release.gate.cases_removed", "update", {
+    await this.auditEvent(user, record.workflowId, record.action === "admit" ? "release.gate.cases_admitted" : "release.gate.cases_removed", "update", {
       fixtureIds: fits,
       requestId: record.id
     });
-    return { request: this.toView(this.store.getGateCaseRequest(record.id)!, user) };
+    return { request: await this.toView((await this.store.getGateCaseRequest(record.id))!, user) };
   }
 }

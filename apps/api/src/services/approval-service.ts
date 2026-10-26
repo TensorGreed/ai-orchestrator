@@ -47,12 +47,14 @@ import {
   type ApprovalRequestView,
   type WorkflowExecutionState
 } from "@ai-orchestrator/shared";
-import type { ApprovalReadScope, ApprovalRequestRecord, SqliteStore } from "../db/database.js";
+import type { ApprovalReadScope, ApprovalRequestRecord } from "../db/database.js";
 import { approvalEditsDigest, newApprovalEditsSalt } from "./approval-digest.js";
 import type { AuditEventInput } from "./audit-service.js";
 import type { SafeUser } from "./auth-service.js";
 import type { RunAccessResult, RunPermission } from "../run-access.js";
 import type { NotificationEvent } from "./notification-service.js";
+import type { Store } from "../db/store.js";
+import { someAsync } from "../async-array.js";
 
 export interface ApprovalResumeJob {
   executionId: string;
@@ -82,7 +84,7 @@ export class ApprovalDecisionError extends Error {
 type WorkflowRef = { id: string; projectId?: string };
 
 export interface ApprovalServiceOptions {
-  audit: (event: AuditEventInput) => void;
+  audit: (event: AuditEventInput) => void | Promise<void>;
   notify: (event: NotificationEvent) => Promise<void>;
   /** Runs the resume inline or enqueues it; resolves with the run result when inline. */
   dispatch: (job: ApprovalResumeJob) => Promise<unknown>;
@@ -92,16 +94,16 @@ export interface ApprovalServiceOptions {
    * cannot read it, 403 without `permission`; admins pass, also for a deleted
    * workflow's runs (which are admin-only).
    */
-  access: (user: SafeUser, workflowId: string, permission: RunPermission) => RunAccessResult<object>;
+  access: (user: SafeUser, workflowId: string, permission: RunPermission) => Promise<RunAccessResult<object>>;
   /** Workflow ids the user can read, or null for everything (admins); applied in SQL before the list limit. */
-  readableWorkflowIds: (user: SafeUser) => string[] | null;
+  readableWorkflowIds: (user: SafeUser) => Promise<string[] | null>;
   /**
    * Execute access for the editor's "who could approve" check, where the
    * workflow may not be saved yet (then its project decides).
    */
-  canExecuteDraft: (user: SafeUser, workflow: WorkflowRef) => boolean;
+  canExecuteDraft: (user: SafeUser, workflow: WorkflowRef) => Promise<boolean>;
   /** Every user, for the editor's "who could approve" check. */
-  listUsers: () => SafeUser[];
+  listUsers: () => Promise<SafeUser[]>;
   /** Masks secret values in text shown to approvers. */
   redact: (value: unknown) => unknown;
   sweepIntervalMs: number;
@@ -146,6 +148,7 @@ export class ApprovalResumeRunner {
     try {
       return await done;
     } finally {
+      // promise-ok: identity check on the same promise object
       if (this.inFlight.get(job.executionId)?.done === done) this.inFlight.delete(job.executionId);
     }
   }
@@ -182,19 +185,19 @@ export type ApprovalCheck = { allowed: true } | { allowed: false; message: strin
  * the person who already decided with this same check. `accessOnly` stops
  * after the access checks (the requester of a timed-out run is no approver).
  */
-export function approvalPersonCheck(
+export async function approvalPersonCheck(
   record: ApprovalRequestRecord,
   user: SafeUser,
   access: ApprovalServiceOptions["access"],
   options: { skipSelfApproval?: boolean; accessOnly?: boolean } = {}
-): ApprovalCheck {
-  if (!access(user, record.workflowId, "workflow:execute").ok) {
+): Promise<ApprovalCheck> {
+  if (!(await access(user, record.workflowId, "workflow:execute")).ok) {
     return { allowed: false, code: "project_access", message: "You do not have execute access to this workflow's project." };
   }
   // A gate inside a sub-workflow: execute access on every workflow down to the one that asked.
   const along = new Set([...record.path.map((step) => step.workflowId), record.askingWorkflowId ?? ""].filter((id) => id && id !== record.workflowId));
   for (const workflowId of along) {
-    if (!access(user, workflowId, "workflow:execute").ok) {
+    if (!(await access(user, workflowId, "workflow:execute")).ok) {
       return { allowed: false, code: "project_access", message: "You do not have execute access to the project of a sub-workflow this request comes from." };
     }
   }
@@ -209,7 +212,7 @@ export class ApprovalService {
   private sweeping = false;
 
   constructor(
-    private readonly store: SqliteStore,
+    private readonly store: Store,
     private readonly options: ApprovalServiceOptions
   ) {}
 
@@ -248,10 +251,10 @@ export class ApprovalService {
   }
 
   /** The workflow's project now (it may have moved since the pause), else the one stored with the request. */
-  private currentProjectId(record: Pick<ApprovalRequestRecord, "workflowId" | "projectId">, memo?: Map<string, string>): string {
+  private async currentProjectId(record: Pick<ApprovalRequestRecord, "workflowId" | "projectId">, memo?: Map<string, string>): Promise<string> {
     const known = memo?.get(record.workflowId);
     if (known !== undefined) return known;
-    const projectId = this.store.getWorkflow(record.workflowId)?.projectId ?? record.projectId;
+    const projectId = (await this.store.getWorkflow(record.workflowId))?.projectId ?? record.projectId;
     memo?.set(record.workflowId, projectId);
     return projectId;
   }
@@ -273,15 +276,15 @@ export class ApprovalService {
    * person who started the run (kept from the run's first request, since a
    * resumed run is triggered by its approver).
    */
-  recordPause(input: { executionId: string; workflowId: string; workflowName?: string; projectId: string; state: WorkflowExecutionState; message: string; timeoutMinutes: number }): ApprovalRequestRecord {
+  async recordPause(input: { executionId: string; workflowId: string; workflowName?: string; projectId: string; state: WorkflowExecutionState; message: string; timeoutMinutes: number }): Promise<ApprovalRequestRecord> {
     const info = resolvePendingApproval(input.state);
-    const earlier = this.store.listApprovalRequestsForExecution(input.executionId);
-    this.store.cancelPendingApprovalRequests({ executionId: input.executionId }, "Superseded by a newer request of the same run");
+    const earlier = await this.store.listApprovalRequestsForExecution(input.executionId);
+    await this.store.cancelPendingApprovalRequests({ executionId: input.executionId }, "Superseded by a newer request of the same run");
     const first = earlier[0];
     const requester = first ? { userId: first.requestedByUserId, email: first.requestedBy } : requesterFromState(input.state);
     const createdAt = this.now();
     const timeoutMinutes = input.timeoutMinutes > 0 ? Math.floor(input.timeoutMinutes) : null;
-    const record = this.store.insertApprovalRequest({
+    const record = await this.store.insertApprovalRequest({
       id: `apr_${randomUUID()}`,
       executionId: input.executionId,
       workflowId: input.workflowId,
@@ -302,7 +305,7 @@ export class ApprovalService {
       editsSalt: newApprovalEditsSalt(),
       createdAt: createdAt.toISOString()
     });
-    this.options.audit({
+    await this.options.audit({
       category: "approval",
       eventType: "approval.requested",
       action: "request",
@@ -310,7 +313,7 @@ export class ApprovalService {
       actor: { type: "system", email: requester.email, userId: requester.userId },
       resourceType: "workflow",
       resourceId: record.workflowId,
-      projectId: this.currentProjectId(record),
+      projectId: await this.currentProjectId(record),
       metadata: this.auditMetadata(record, { expiresAt: record.expiresAt, approverRoles: record.spec.approverRoles, approverUsers: record.spec.approverUsers.length })
     });
     this.notify(record, "approval.requested");
@@ -325,18 +328,18 @@ export class ApprovalService {
    * boot with migration 32) gets one full timeout counted from then, never
    * an immediate rejection.
    */
-  private backfill(pending: NonNullable<ReturnType<SqliteStore["getWorkflowExecutionState"]>>, grace?: string[]): ApprovalRequestRecord | null {
+  private async backfill(pending: NonNullable<Awaited<ReturnType<Store["getWorkflowExecutionState"]>>>, grace?: string[]): Promise<ApprovalRequestRecord | null> {
     const state = pending.state as WorkflowExecutionState | null;
     if (!state || typeof state !== "object" || !state.workflow) return null;
     const info = resolvePendingApproval(state);
     const pausedAt = Date.parse(pending.updatedAt || pending.createdAt);
-    const upgradedAt = Date.parse(this.store.getSchemaMarker("approval_requests") ?? "");
+    const upgradedAt = Date.parse(await this.store.getSchemaMarker("approval_requests") ?? "");
     const fromUpgrade = Number.isFinite(upgradedAt) && (!Number.isFinite(pausedAt) || pausedAt < upgradedAt);
     const countFrom = fromUpgrade ? upgradedAt : pausedAt;
     if (fromUpgrade) grace?.push(pending.id);
     const timeoutMinutes = pending.timeoutMinutes && pending.timeoutMinutes > 0 ? pending.timeoutMinutes : null;
     const requester = requesterFromState(state);
-    return this.store.insertApprovalRequest({
+    return await this.store.insertApprovalRequest({
       id: `apr_${randomUUID()}`,
       executionId: pending.id,
       workflowId: pending.workflowId,
@@ -360,13 +363,13 @@ export class ApprovalService {
   }
 
   /** Requests for paused runs that have none yet. */
-  backfillMissing(): number {
+  async backfillMissing(): Promise<number> {
     let created = 0;
     const grace: string[] = [];
-    for (const pending of this.store.listPendingApprovals()) {
-      if (this.store.getPendingApprovalRequestForExecution(pending.id)) continue;
-      const full = this.store.getWorkflowExecutionState(pending.id);
-      if (full && this.backfill(full, grace)) created += 1;
+    for (const pending of await this.store.listPendingApprovals()) {
+      if (await this.store.getPendingApprovalRequestForExecution(pending.id)) continue;
+      const full = await this.store.getWorkflowExecutionState(pending.id);
+      if (full && await this.backfill(full, grace)) created += 1;
     }
     if (grace.length > 0) {
       this.log("warn", "Approval timeouts are now enforced: runs paused before this upgrade get one full timeout from the upgrade", { executionIds: grace });
@@ -374,15 +377,15 @@ export class ApprovalService {
     return created;
   }
 
-  private requestFor(executionId: string): ApprovalRequestRecord | null {
-    const existing = this.store.getPendingApprovalRequestForExecution(executionId);
+  private async requestFor(executionId: string): Promise<ApprovalRequestRecord | null> {
+    const existing = await this.store.getPendingApprovalRequestForExecution(executionId);
     if (existing) return existing;
-    const pending = this.store.getWorkflowExecutionState(executionId);
-    return pending && pending.status === "waiting_approval" ? this.backfill(pending) : null;
+    const pending = await this.store.getWorkflowExecutionState(executionId);
+    return pending && pending.status === "waiting_approval" ? await this.backfill(pending) : null;
   }
 
-  private decisionCheck(record: ApprovalRequestRecord, user: SafeUser): ApprovalCheck {
-    return approvalPersonCheck(record, user, this.options.access);
+  private async decisionCheck(record: ApprovalRequestRecord, user: SafeUser): Promise<ApprovalCheck> {
+    return await approvalPersonCheck(record, user, this.options.access);
   }
 
   /**
@@ -395,29 +398,29 @@ export class ApprovalService {
    * does not depend on which accounts exist: any approver user other than themselves
    * counts as "someone else could approve", and admins do not count through roles.
    */
-  eligibility(input: {
+  async eligibility(input: {
     workflow: WorkflowRef;
     spec: Pick<ApprovalRequestSpec, "approverRoles" | "approverUsers" | "allowSelfApproval">;
     requester: SafeUser;
     accountBlind?: boolean;
-  }): ApprovalEligibilityView {
+  }): Promise<ApprovalEligibilityView> {
     const requester = { userId: input.requester.id, email: input.requester.email };
     const blind = input.accountBlind === true;
     const isRequester = (entry: string) => entry === requester.userId || entry.toLowerCase() === requester.email.toLowerCase();
     const named = blind ? input.spec.approverUsers.filter(isRequester) : input.spec.approverUsers;
     const spec = { ...input.spec, approverUsers: named };
-    const can = (user: SafeUser) => this.options.canExecuteDraft(user, input.workflow) && checkApprover(spec, user, requester).allowed;
+    const can = async (user: SafeUser) => await this.options.canExecuteDraft(user, input.workflow) && checkApprover(spec, user, requester).allowed;
     const someoneElseNamed = blind && input.spec.approverUsers.some((entry) => !isRequester(entry));
-    const others = this.options.listUsers().filter((user) => user.id !== input.requester.id && (!blind || user.role !== "admin"));
+    const others = (await this.options.listUsers()).filter((user) => user.id !== input.requester.id && (!blind || user.role !== "admin"));
     return {
-      othersCanApprove: someoneElseNamed || others.some(can),
-      requesterCanApprove: can(input.requester)
+      othersCanApprove: someoneElseNamed || (await someAsync(others, can)),
+      requesterCanApprove: await can(input.requester)
     };
   }
 
-  toView(record: ApprovalRequestRecord, user: SafeUser, projects?: Map<string, string>): ApprovalRequestView {
+  async toView(record: ApprovalRequestRecord, user: SafeUser, projects?: Map<string, string>): Promise<ApprovalRequestView> {
     const spec = { ...defaultApprovalRequest(record.kind), ...record.spec };
-    const check = record.status === "pending" ? this.decisionCheck(record, user) : { allowed: false as const, message: "Already decided.", code: "decided" };
+    const check = record.status === "pending" ? await this.decisionCheck(record, user) : { allowed: false as const, message: "Already decided.", code: "decided" };
     const redact = <T>(value: T): T => this.options.redact(value) as T;
     return {
       requestId: record.id,
@@ -425,7 +428,7 @@ export class ApprovalService {
       executionId: record.executionId,
       workflowId: record.workflowId,
       workflowName: record.workflowName,
-      projectId: this.currentProjectId(record, projects),
+      projectId: await this.currentProjectId(record, projects),
       nodeId: record.nodeId,
       nodeType: record.nodeType,
       kind: record.kind,
@@ -457,12 +460,12 @@ export class ApprovalService {
   }
 
   /** Requests the user can see: workflows of projects they can read. */
-  list(user: SafeUser, filter: { status: "pending" | "decided" | "all"; workflowId?: string; executionId?: string; limit?: number }): ApprovalRequestView[] {
-    if (filter.status !== "decided") this.backfillMissing();
+  async list(user: SafeUser, filter: { status: "pending" | "decided" | "all"; workflowId?: string; executionId?: string; limit?: number }): Promise<ApprovalRequestView[]> {
+    if (filter.status !== "decided") await this.backfillMissing();
     const limit = Math.max(1, Math.min(500, filter.limit ?? 200));
-    const workflowIds = this.options.readableWorkflowIds(user);
+    const workflowIds = await this.options.readableWorkflowIds(user);
     const scope: ApprovalReadScope = workflowIds === null ? { all: true } : { workflowIds };
-    const rows = this.store.listApprovalRequests({ ...filter, limit, scope });
+    const rows = await this.store.listApprovalRequests({ ...filter, limit, scope });
     // The SQL scope already holds only readable workflows; this re-check is per workflow, not per row.
     const readable = new Map<string, boolean>();
     const visible: ApprovalRequestView[] = [];
@@ -470,9 +473,9 @@ export class ApprovalService {
     for (const row of rows) {
       // A deleted workflow's requests stay admin-only, even if a new workflow reuses the id.
       if (row.workflowDeletedAt && user.role !== "admin") continue;
-      if (!readable.has(row.workflowId)) readable.set(row.workflowId, this.options.access(user, row.workflowId, "workflow:read").ok);
+      if (!readable.has(row.workflowId)) readable.set(row.workflowId, (await this.options.access(user, row.workflowId, "workflow:read")).ok);
       if (!readable.get(row.workflowId)) continue;
-      visible.push(this.toView(row, user, projects));
+      visible.push(await this.toView(row, user, projects));
       if (visible.length >= limit) break;
     }
     return visible;
@@ -482,30 +485,30 @@ export class ApprovalService {
    * Records a person's decision and claims the paused run. Throws an
    * `ApprovalDecisionError` with the HTTP status when it may not be taken.
    */
-  decide(input: {
+  async decide(input: {
     executionId: string;
     user: SafeUser;
     decision: "approve" | "reject";
     reason?: string;
     edits?: Record<string, unknown>;
     requestId?: string;
-  }): { job: ApprovalResumeJob; record: ApprovalRequestRecord } {
-    const pending = this.store.getWorkflowExecutionState(input.executionId);
+  }): Promise<{ job: ApprovalResumeJob; record: ApprovalRequestRecord }> {
+    const pending = await this.store.getWorkflowExecutionState(input.executionId);
     if (!pending) throw new ApprovalDecisionError("Pending approval not found", 404);
     const state = pending.state as WorkflowExecutionState | null;
     const validState = Boolean(state && typeof state === "object" && state.workflow);
     // Visibility first, by the workflow's current project: another project's run
     // (or a deleted workflow's, for non-admins) answers as if it did not exist,
     // and nothing is written for it.
-    if (!this.options.access(input.user, pending.workflowId, "workflow:read").ok) {
+    if (!(await this.options.access(input.user, pending.workflowId, "workflow:read")).ok) {
       throw new ApprovalDecisionError("Pending approval not found", 404);
     }
     if (pending.status === "resuming") throw new ApprovalDecisionError("This approval was already decided", 409);
     if (pending.status !== "waiting_approval") throw new ApprovalDecisionError("Pending approval not found", 404);
     if (!validState) throw new ApprovalDecisionError("Stored execution state is invalid and cannot be resumed", 400);
-    const record = this.requestFor(input.executionId);
+    const record = await this.requestFor(input.executionId);
     if (!record) throw new ApprovalDecisionError("Pending approval not found", 404);
-    if (record.workflowId !== pending.workflowId || !this.options.access(input.user, record.workflowId, "workflow:read").ok) {
+    if (record.workflowId !== pending.workflowId || !(await this.options.access(input.user, record.workflowId, "workflow:read")).ok) {
       throw new ApprovalDecisionError("Pending approval not found", 404);
     }
     if (input.requestId && input.requestId !== record.id) {
@@ -516,9 +519,9 @@ export class ApprovalService {
       void this.sweep().catch((error) => this.log("warn", "Approval sweep failed", { error: error instanceof Error ? error.message : String(error) }));
       throw new ApprovalDecisionError("This approval expired; its timeout outcome applies", 409);
     }
-    const check = this.decisionCheck(record, input.user);
+    const check = await this.decisionCheck(record, input.user);
     if (!check.allowed) {
-      this.options.audit({
+      await this.options.audit({
         category: "approval",
         eventType: "approval.decided",
         action: input.decision,
@@ -526,7 +529,7 @@ export class ApprovalService {
         actor: { userId: input.user.id, email: input.user.email, type: "user" },
         resourceType: "workflow",
         resourceId: record.workflowId,
-        projectId: this.currentProjectId(record),
+        projectId: await this.currentProjectId(record),
         metadata: this.auditMetadata(record, { refused: check.code })
       });
       throw new ApprovalDecisionError(check.message, 403);
@@ -545,7 +548,7 @@ export class ApprovalService {
       editedFields = checked.changed;
     }
     const decidedAt = this.now().toISOString();
-    const claimed = this.claimAndDecide(input.executionId, {
+    const claimed = await this.claimAndDecide(input.executionId, {
       id: record.id,
       status: input.decision === "approve" ? "approved" : "rejected",
       decidedByUserId: input.user.id,
@@ -556,8 +559,8 @@ export class ApprovalService {
       decidedAt
     });
     if (!claimed) throw new ApprovalDecisionError("This approval was already decided", 409);
-    const decided = this.store.getApprovalRequest(record.id)!;
-    this.options.audit({
+    const decided = (await this.store.getApprovalRequest(record.id))!;
+    await this.options.audit({
       category: "approval",
       eventType: "approval.decided",
       action: input.decision,
@@ -565,7 +568,7 @@ export class ApprovalService {
       actor: { userId: input.user.id, email: input.user.email, type: "user" },
       resourceType: "workflow",
       resourceId: record.workflowId,
-      projectId: this.currentProjectId(record),
+      projectId: await this.currentProjectId(record),
       metadata: this.auditMetadata(decided, {
         decision: input.decision,
         reason: reason ? String(this.options.redact(reason)) : null,
@@ -592,19 +595,8 @@ export class ApprovalService {
    * Claims the paused run and records the decision in one transaction: both
    * commit, or neither does. False when another decision got there first.
    */
-  private claimAndDecide(executionId: string, decision: Parameters<SqliteStore["decideApprovalRequest"]>[0]): boolean {
-    const lost = Symbol("lost");
-    try {
-      return this.store.transaction(() => {
-        if (!this.store.claimWorkflowExecutionForResume(executionId)) return false;
-        // Throwing rolls the claim back.
-        if (!this.store.decideApprovalRequest(decision)) throw lost;
-        return true;
-      });
-    } catch (error) {
-      if (error === lost) return false;
-      throw error;
-    }
+  private async claimAndDecide(executionId: string, decision: Parameters<Store["decideApprovalRequest"]>[0]): Promise<boolean> {
+    return await this.store.claimExecutionAndDecideApproval(executionId, decision);
   }
 
   /**
@@ -614,12 +606,8 @@ export class ApprovalService {
    * Nothing changes when the run is no longer claimed (it paused again, or
    * finished). Returns whether it was handed back.
    */
-  reopenAfterFailedResume(job: Pick<ApprovalResumeJob, "executionId" | "requestId">): boolean {
-    return this.store.transaction(() => {
-      if (!this.store.releaseWorkflowExecutionClaim(job.executionId)) return false;
-      this.store.reopenApprovalRequest(job.requestId);
-      return true;
-    });
+  async reopenAfterFailedResume(job: Pick<ApprovalResumeJob, "executionId" | "requestId">): Promise<boolean> {
+    return await this.store.releaseExecutionClaimAndReopenApproval(job.executionId, job.requestId);
   }
 
   /**
@@ -632,18 +620,18 @@ export class ApprovalService {
     this.sweeping = true;
     let expired = 0;
     try {
-      this.backfillMissing();
-      for (const record of this.store.listExpiredApprovalRequests(this.now().toISOString())) {
-        const pending = this.store.getWorkflowExecutionState(record.executionId);
+      await this.backfillMissing();
+      for (const record of await this.store.listExpiredApprovalRequests(this.now().toISOString())) {
+        const pending = await this.store.getWorkflowExecutionState(record.executionId);
         if (!pending) {
-          this.store.cancelPendingApprovalRequests({ executionId: record.executionId }, "The paused run no longer exists");
+          await this.store.cancelPendingApprovalRequests({ executionId: record.executionId }, "The paused run no longer exists");
           continue;
         }
-        if (!this.claimAndDecide(record.executionId, { id: record.id, status: "timed_out", decidedBy: SYSTEM_ACTOR, reason: "Nobody decided before the approval expired" })) continue;
+        if (!await this.claimAndDecide(record.executionId, { id: record.id, status: "timed_out", decidedBy: SYSTEM_ACTOR, reason: "Nobody decided before the approval expired" })) continue;
         expired += 1;
         const spec = { ...defaultApprovalRequest(record.kind), ...record.spec };
         const outcome = spec.timeoutOutcome === "fallback" && record.kind === "approval_gate" ? "fallback branch" : "rejected";
-        this.options.audit({
+        await this.options.audit({
           category: "approval",
           eventType: "approval.timed_out",
           action: "timeout",
@@ -651,18 +639,18 @@ export class ApprovalService {
           actor: { type: "system", email: SYSTEM_ACTOR },
           resourceType: "workflow",
           resourceId: record.workflowId,
-          projectId: this.currentProjectId(record),
+          projectId: await this.currentProjectId(record),
           metadata: this.auditMetadata(record, { expiresAt: record.expiresAt, outcome })
         });
         this.notify(record, "approval.timed_out", outcome);
         const job: ApprovalResumeJob = { executionId: record.executionId, requestId: record.id, decision: "timeout", actedBy: SYSTEM_ACTOR, actorUserId: null, reason: "Approval timed out" };
-        this.options.dispatch(job).catch((error) => {
+        this.options.dispatch(job).catch(async (error) => {
           // Still expired: the next sweep expires it again.
-          this.reopenAfterFailedResume(job);
+          await this.reopenAfterFailedResume(job);
           this.log("warn", "Resuming a timed-out approval failed", { executionId: record.executionId, error: error instanceof Error ? error.message : String(error) });
         });
       }
-      this.recoverInterrupted("periodic");
+      await this.recoverInterrupted("periodic");
     } finally {
       this.sweeping = false;
     }
@@ -675,24 +663,24 @@ export class ApprovalService {
    * recorded decision for the pause they are in. A run in `resuming` with no
    * decision for its current pause is handed back to waiting. Leader only.
    */
-  recoverInterrupted(mode: "startup" | "periodic" = "periodic"): number {
+  async recoverInterrupted(mode: "startup" | "periodic" = "periodic"): Promise<number> {
     if (!this.options.isLeader()) return 0;
     const immediate = mode === "startup" && this.options.recoverAtStartupImmediately;
     const graceMs = this.options.queueMode ? QUEUE_RECOVERY_GRACE_MS : this.options.resumeStaleAfterMs;
     const before = immediate ? undefined : new Date(this.now().getTime() - graceMs).toISOString();
     let recovered = 0;
-    for (const { id: executionId } of this.store.listResumingWorkflowExecutions(before)) {
+    for (const { id: executionId } of await this.store.listResumingWorkflowExecutions(before)) {
       if (this.options.isResumeActive(executionId)) continue;
-      const pending = this.store.getWorkflowExecutionState(executionId);
+      const pending = await this.store.getWorkflowExecutionState(executionId);
       const state = pending?.state as WorkflowExecutionState | null | undefined;
       const waitingNodeId = state && typeof state === "object" && state.workflow ? resolvePendingApproval(state).nodeId : null;
       // The decision must belong to the pause the run is in now, never to an earlier one.
-      const latest = this.store.listApprovalRequestsForExecution(executionId).at(-1);
+      const latest = (await this.store.listApprovalRequestsForExecution(executionId)).at(-1);
       if (!latest || !DECIDED_STATUSES.has(latest.status) || !waitingNodeId || latest.nodeId !== waitingNodeId) {
-        this.store.releaseWorkflowExecutionClaim(executionId);
+        await this.store.releaseWorkflowExecutionClaim(executionId);
         continue;
       }
-      if (this.options.queueMode && this.store.hasActiveQueueItem(`${executionId}:${latest.id}`)) continue;
+      if (this.options.queueMode && await this.store.hasActiveQueueItem(`${executionId}:${latest.id}`)) continue;
       recovered += 1;
       const decision: ApprovalDecisionValue = approvalDecisionOf(latest.status) ?? "timeout";
       const job: ApprovalResumeJob = {
@@ -706,8 +694,8 @@ export class ApprovalService {
         ...(this.options.queueMode ? { retryTag: this.now().getTime().toString(36) } : {})
       };
       this.log("info", "Re-driving an interrupted approval resume", { executionId, requestId: latest.id });
-      this.options.dispatch(job).catch((error) => {
-        this.reopenAfterFailedResume(job);
+      this.options.dispatch(job).catch(async (error) => {
+        await this.reopenAfterFailedResume(job);
         this.log("warn", "Recovering an interrupted approval resume failed", { executionId, error: error instanceof Error ? error.message : String(error) });
       });
     }
@@ -715,29 +703,46 @@ export class ApprovalService {
   }
 
   /** Marks the run's pending request canceled (the run was canceled). */
-  cancelForExecution(executionId: string, reason: string, user?: SafeUser | null): void {
-    const pending = this.store.getPendingApprovalRequestForExecution(executionId);
-    if (this.store.cancelPendingApprovalRequests({ executionId }, reason) > 0 && pending) {
-      this.options.audit({
-        category: "approval",
-        eventType: "approval.canceled",
-        action: "cancel",
-        outcome: "success",
-        actor: user ? { userId: user.id, email: user.email, type: "user" } : { type: "system", email: SYSTEM_ACTOR },
-        resourceType: "workflow",
-        resourceId: pending.workflowId,
-        projectId: this.currentProjectId(pending),
-        metadata: this.auditMetadata(pending)
-      });
+  /**
+   * Cancels the run's pending request. "decided": a request was pending when read but a decision took it before
+   * the cancel did, so the run belongs to that decision. "none": the run had no pending request.
+   */
+  async cancelForExecution(executionId: string, reason: string, user?: SafeUser | null): Promise<"canceled" | "decided" | "none"> {
+    const pending = await this.store.getPendingApprovalRequestForExecution(executionId);
+    const canceled = await this.store.cancelPendingApprovalRequests({ executionId }, reason);
+    if (canceled === 0) return pending ? "decided" : "none";
+    if (pending) await this.auditCanceled(pending, user);
+    return "canceled";
+  }
+
+  /** Audits requests another write already canceled (the run cancel's own transaction cancels any still pending). */
+  async auditCanceledRequests(requestIds: readonly string[], user?: SafeUser | null): Promise<void> {
+    for (const id of requestIds) {
+      const record = await this.store.getApprovalRequest(id);
+      if (record) await this.auditCanceled(record, user);
     }
   }
 
+  private async auditCanceled(record: ApprovalRequestRecord, user?: SafeUser | null): Promise<void> {
+    await this.options.audit({
+      category: "approval",
+      eventType: "approval.canceled",
+      action: "cancel",
+      outcome: "success",
+      actor: user ? { userId: user.id, email: user.email, type: "user" } : { type: "system", email: SYSTEM_ACTOR },
+      resourceType: "workflow",
+      resourceId: record.workflowId,
+      projectId: await this.currentProjectId(record),
+      metadata: this.auditMetadata(record)
+    });
+  }
+
   /** Startup: backfill, recover interrupted resumes and expire what is overdue; then sweep on a timer. */
-  start(): void {
+  async start(): Promise<void> {
     if (this.timer) return;
     try {
-      this.backfillMissing();
-      this.recoverInterrupted("startup");
+      await this.backfillMissing();
+      await this.recoverInterrupted("startup");
     } catch (error) {
       this.log("warn", "Approval startup reconciliation failed", { error: error instanceof Error ? error.message : String(error) });
     }

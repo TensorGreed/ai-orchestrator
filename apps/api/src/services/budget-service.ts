@@ -29,7 +29,8 @@
  */
 
 import { randomUUID } from "node:crypto";
-import type { BudgetRecord, SqliteStore } from "../db/database.js";
+import type { BudgetRecord } from "../db/database.js";
+import type { Store } from "../db/store.js";
 
 export interface BudgetCheckContext {
   workflowId: string;
@@ -51,10 +52,10 @@ export interface BudgetRecordContext extends BudgetCheckContext {
 }
 
 export class BudgetService {
-  private readonly store: SqliteStore;
+  private readonly store: Store;
   private logger?: { info: (msg: string, fields?: Record<string, unknown>) => void; warn: (msg: string, fields?: Record<string, unknown>) => void };
 
-  constructor(store: SqliteStore) {
+  constructor(store: Store) {
     this.store = store;
   }
 
@@ -72,12 +73,12 @@ export class BudgetService {
    * Also surface budgets that are within `warnThresholdPct` so the caller
    * can attach a "warning" header to the response.
    */
-  checkExecution(ctx: BudgetCheckContext): BudgetCheckResult {
-    const matching = this.matchingBudgets(ctx);
+  async checkExecution(ctx: BudgetCheckContext): Promise<BudgetCheckResult> {
+    const matching = await this.matchingBudgets(ctx);
     const approaching: BudgetCheckResult["approachingLimit"] = [];
     for (const budget of matching) {
       const periodStart = currentPeriodStart(budget.period);
-      const current = this.currentUsage(budget, ctx, periodStart);
+      const current = await this.currentUsage(budget, ctx, periodStart);
       const pct = budget.limitValue > 0 ? current / budget.limitValue : 0;
       if (budget.action === "block" && current >= budget.limitValue) {
         return {
@@ -102,15 +103,15 @@ export class BudgetService {
    * and fires an alert if a threshold was newly crossed. Debounced via
    * getLatestBudgetAlert so we only fire once per (budget, period, severity).
    */
-  recordExecution(ctx: BudgetRecordContext): void {
-    const matching = this.matchingBudgets(ctx);
+  async recordExecution(ctx: BudgetRecordContext): Promise<void> {
+    const matching = await this.matchingBudgets(ctx);
     for (const budget of matching) {
       const periodStart = currentPeriodStart(budget.period);
-      const current = this.currentUsage(budget, ctx, periodStart);
+      const current = await this.currentUsage(budget, ctx, periodStart);
       if (current >= budget.limitValue) {
-        this.maybeFireAlert(budget, periodStart, "block", current, ctx);
+        await this.maybeFireAlert(budget, periodStart, "block", current, ctx);
       } else if (current >= budget.limitValue * budget.warnThresholdPct) {
-        this.maybeFireAlert(budget, periodStart, "warn", current, ctx);
+        await this.maybeFireAlert(budget, periodStart, "warn", current, ctx);
       }
     }
   }
@@ -119,8 +120,8 @@ export class BudgetService {
   // Internals
   // ---------------------------------------------------------------------------
 
-  private matchingBudgets(ctx: BudgetCheckContext): BudgetRecord[] {
-    const all = this.store.listBudgets({ enabledOnly: true });
+  private async matchingBudgets(ctx: BudgetCheckContext): Promise<BudgetRecord[]> {
+    const all = await this.store.listBudgets({ enabledOnly: true });
     return all.filter((b) => {
       if (b.scopeType === "global") return true;
       if (b.scopeType === "project") return ctx.projectId !== null && b.scopeId === ctx.projectId;
@@ -133,7 +134,7 @@ export class BudgetService {
     });
   }
 
-  private currentUsage(budget: BudgetRecord, ctx: BudgetCheckContext, periodStart: string): number {
+  private async currentUsage(budget: BudgetRecord, ctx: BudgetCheckContext, periodStart: string): Promise<number> {
     const periodEnd = currentPeriodEnd(budget.period);
     const filter: { from: string; to: string; workflowId?: string; userId?: string; userKey?: string; projectId?: string } = {
       from: periodStart,
@@ -146,23 +147,23 @@ export class BudgetService {
       // — both identify "the user" depending on how the execution was triggered.
       filter.userKey = budget.scopeId ?? ctx.userId ?? ctx.userEmail ?? undefined;
     }
-    const totals = this.store.queryUsageTotals(filter);
+    const totals = await this.store.queryUsageTotals(filter);
     return budget.limitType === "usd" ? totals.costUsd : totals.totalTokens;
   }
 
-  private maybeFireAlert(
+  private async maybeFireAlert(
     budget: BudgetRecord,
     periodStart: string,
     severity: "warn" | "block",
     usageValue: number,
     ctx: BudgetRecordContext
-  ): void {
-    const existing = this.store.getLatestBudgetAlert(budget.id, periodStart, severity);
+  ): Promise<void> {
+    const existing = await this.store.getLatestBudgetAlert(budget.id, periodStart, severity);
     if (existing) return; // already fired this period
     const message = severity === "block"
       ? `Budget "${budget.name}" exceeded: ${formatUsage(usageValue, budget.limitType)} of ${formatUsage(budget.limitValue, budget.limitType)}`
       : `Budget "${budget.name}" at ${Math.round((usageValue / budget.limitValue) * 100)}%: ${formatUsage(usageValue, budget.limitType)} of ${formatUsage(budget.limitValue, budget.limitType)}`;
-    this.store.recordBudgetAlert({
+    await this.store.recordBudgetAlert({
       id: `bal_${randomUUID()}`,
       budgetId: budget.id,
       periodStart,

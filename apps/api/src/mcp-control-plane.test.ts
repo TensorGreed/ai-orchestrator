@@ -29,7 +29,7 @@ const contexts: TestContext[] = [];
 async function createTestContext(): Promise<TestContext> {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-mcp-control-plane-"));
   const store = await SqliteStore.create(path.join(tempDir, "orchestrator.db"));
-  store.ensureDefaultProject();
+  await store.ensureDefaultProject();
   const config = parseConfig({
     LOG_LEVEL: "warn",
     SEED_SAMPLE_WORKFLOWS: "false",
@@ -41,7 +41,7 @@ async function createTestContext(): Promise<TestContext> {
   });
   const secretService = new SecretService(store, config.SECRET_MASTER_KEY_BASE64);
   const authService = new AuthService(store, config.SESSION_TTL_HOURS);
-  const app = createApp(config, store, secretService, authService);
+  const app = await createApp(config, store, secretService, authService);
   await app.ready();
   const context: TestContext = { app, store, authService, config, tempDir };
   contexts.push(context);
@@ -54,7 +54,7 @@ afterEach(async () => {
     if (!context) continue;
     await context.app.close();
     try {
-      context.store.close();
+      await context.store.close();
     } catch {
       // The store may already be closed by the app shutdown hooks.
     }
@@ -72,7 +72,7 @@ function extractCookie(setCookieHeader: string | string[] | undefined, cookieNam
 async function login(context: TestContext, role: "admin" | "builder" | "operator" | "viewer"): Promise<string> {
   const email = `${role}@example.com`;
   const password = `${role}-Pass-123!`;
-  context.authService.register({ email, password, role });
+  await context.authService.register({ email, password, role });
   const response = await context.app.inject({ method: "POST", url: "/api/auth/login", payload: { email, password } });
   if (response.statusCode !== 200) throw new Error(`Login failed for ${role}: ${response.body}`);
   return extractCookie(response.headers["set-cookie"], context.config.SESSION_COOKIE_NAME);
@@ -144,7 +144,7 @@ async function seed(context: TestContext, admin: string) {
 
   const now = Date.now();
   for (let index = 0; index < 4; index += 1) {
-    context.store.insertMcpToolCall({
+    await context.store.insertMcpToolCall({
       id: `mtc_${index}`,
       executionId: `exec_${index}`,
       workflowId: "wf-control-plane",
@@ -171,7 +171,7 @@ async function seed(context: TestContext, admin: string) {
   });
   expect(policy.status).toBe(201);
 
-  context.store.createMcpClient({
+  await context.store.createMcpClient({
     id: "mcl_1",
     name: "IDE",
     tokenPrefix: "l2m_abc",
@@ -182,7 +182,7 @@ async function seed(context: TestContext, admin: string) {
     createdByEmail: null,
     expiresAt: null
   });
-  context.store.createMcpClient({
+  await context.store.createMcpClient({
     id: "mcl_2",
     name: "Old laptop",
     tokenPrefix: "l2m_def",
@@ -194,7 +194,7 @@ async function seed(context: TestContext, admin: string) {
     expiresAt: new Date(now - 60_000).toISOString()
   });
 
-  context.store.createMcpElicitation({
+  await context.store.createMcpElicitation({
     id: "elc_1",
     executionId: "exec_1",
     workflowId: "wf-control-plane",
@@ -233,7 +233,7 @@ describe("MCP control plane routes", () => {
     const admin = await login(context, "admin");
     const builder = await login(context, "builder");
     const { mockId } = await seed(context, admin);
-    context.store.upsertWorkflow(workflowUsing(mockId));
+    await context.store.upsertWorkflow(workflowUsing(mockId));
 
     type ToolsBody = {
       policy: { role: string };

@@ -198,10 +198,10 @@ async function createTestContext(overrides: Partial<AppConfig> = {}): Promise<Te
   const dbPath = path.join(tempDir, "orchestrator.db");
   const store = await SqliteStore.create(dbPath);
   const config = makeConfig(overrides);
-  store.ensureDefaultProject();
+  await store.ensureDefaultProject();
   const secretService = new SecretService(store, config.SECRET_MASTER_KEY_BASE64);
   const authService = new AuthService(store, config.SESSION_TTL_HOURS);
-  const app = createApp(config, store, secretService, authService);
+  const app = await createApp(config, store, secretService, authService);
   await app.ready();
   const ctx: TestContext = { app, store, authService, secretService, config, tempDir };
   contexts.push(ctx);
@@ -221,7 +221,7 @@ async function loginUser(
   ctx: TestContext,
   input: { email: string; password: string; role: "admin" | "builder" | "operator" | "viewer" }
 ): Promise<{ cookie: string; userId: string }> {
-  const registered = ctx.authService.register(input);
+  const registered = await ctx.authService.register(input);
   const response = await ctx.app.inject({
     method: "POST",
     url: "/api/auth/login",
@@ -419,7 +419,7 @@ describe("Phase 5.3 — External secret providers CRUD + resolve + rotation", ()
     expect(cached).toBe("initial-value");
 
     // Invalidate the cache and the next resolve sees the rotated value.
-    ctx.secretService.invalidateExternalCache(secretId);
+    await ctx.secretService.invalidateExternalCache(secretId);
     const refreshed = await ctx.secretService.resolveSecret({ secretId });
     expect(refreshed).toBe("rotated-value");
 
@@ -707,7 +707,7 @@ describe("Phase 5.4 — Audit logging", () => {
       role: "admin"
     });
     // Directly insert an ancient entry via the store.
-    ctx.store.writeAuditLog({
+    await ctx.store.writeAuditLog({
       id: "aud_ancient",
       eventType: "system.test",
       category: "system",
@@ -716,7 +716,7 @@ describe("Phase 5.4 — Audit logging", () => {
       createdAt: "2001-01-01T00:00:00.000Z"
     });
     const cutoff = new Date("2010-01-01T00:00:00.000Z").toISOString();
-    const pruned = ctx.store.pruneAuditLogs({ before: cutoff });
+    const pruned = await ctx.store.pruneAuditLogs({ before: cutoff });
     expect(pruned).toBeGreaterThanOrEqual(1);
 
     const list = await ctx.app.inject({
@@ -759,7 +759,7 @@ describe("Phase 5.4 — Audit logging", () => {
     });
     // Generate enough events to need pagination.
     for (let i = 0; i < 6; i += 1) {
-      ctx.store.writeAuditLog({
+      await ctx.store.writeAuditLog({
         id: `aud_p${i}`,
         eventType: "system.test",
         category: "system",
