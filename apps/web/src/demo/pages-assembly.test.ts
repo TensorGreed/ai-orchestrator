@@ -70,9 +70,29 @@ describe("the Pages site", () => {
     // Everything is still there.
     expect(fs.readFileSync(path.join(nested, "keep.txt"), "utf8")).toBe("keep");
     expect(fs.existsSync(path.join(root, "docs/index.html"))).toBe(true);
-    // A folder of its own works, inside the repository or not.
-    expect(assemble(root, {}, ["--out", path.join(root, "out-site")]).status).toBe(0);
-    expect(fs.existsSync(path.join(root, "out-site/demo/index.html"))).toBe(true);
+    // The default _site/ in the repository and a folder outside it work.
+    expect(assemble(root, {}, ["--out", path.join(root, "_site")]).status).toBe(0);
+    expect(fs.existsSync(path.join(root, "_site/demo/index.html"))).toBe(true);
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), "l2m-pages-out-"));
+    roots.push(outside);
+    expect(assemble(root, {}, ["--out", path.join(outside, "site")]).status).toBe(0);
+    expect(fs.existsSync(path.join(outside, "site/docs/index.html"))).toBe(true);
+  });
+
+  it("refuses any other folder in the repository, such as apps/, and deletes nothing", () => {
+    const root = repo({ demo: "built" });
+    write(root, "apps/keep.txt", "keep");
+    const before = fs.readdirSync(path.join(root, "apps")).sort();
+    for (const out of [path.join(root, "apps"), path.join(root, "apps", "web"), path.join(root, "docs"), path.join(root, "new-site"), path.join(root, "_site", "nested")]) {
+      const run = assemble(root, {}, ["--out", out]);
+      expect(run.status, out).toBe(1);
+      expect(run.output, out).toContain("::error");
+    }
+    expect(fs.readFileSync(path.join(root, "apps/keep.txt"), "utf8")).toBe("keep");
+    expect(fs.readdirSync(path.join(root, "apps")).sort()).toEqual(before);
+    expect(fs.existsSync(path.join(root, "apps/web/dist-demo/index.html"))).toBe(true);
+    expect(fs.existsSync(path.join(root, "docs/CNAME"))).toBe(true);
+    expect(fs.existsSync(path.join(root, "new-site"))).toBe(false);
   });
 
   it("fails without the CNAME, demo or not", () => {

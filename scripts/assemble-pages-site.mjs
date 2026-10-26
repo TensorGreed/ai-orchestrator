@@ -7,7 +7,7 @@
 // without a usable demo build the site is assembled without /demo/ and a
 // GitHub Actions warning says so.
 //
-//   node scripts/assemble-pages-site.mjs [--root <repo>] [--out <dir>]
+//   node scripts/assemble-pages-site.mjs [--root <repo>] [--out <dir outside the repo>]
 //   DEMO_OUTCOME=<outcome of the demo build step> names it in the warning.
 import { existsSync, promises as fs } from "node:fs";
 import path from "node:path";
@@ -31,14 +31,17 @@ const option = (name) => {
 const repoRoot = path.resolve(option("--root") ?? path.join(path.dirname(fileURLToPath(import.meta.url)), ".."));
 const out = path.resolve(option("--out") ?? path.join(repoRoot, "_site"));
 
-// The output folder is deleted first: never the filesystem root, nor the repository, the current
-// directory or a folder holding either.
+// The output folder is deleted first. It is either the default `_site/` in the repository or a
+// folder outside it; never another folder in the repository, the filesystem root, or a folder
+// holding the repository or the current directory.
 const holds = (parent, child) => {
   const relative = path.relative(parent, child);
   return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 };
-if (out === path.parse(out).root || holds(out, repoRoot) || holds(out, process.cwd())) {
-  fail(`Refusing to use ${out} as the output folder: it is the filesystem root, or holds the repository or the current directory.`);
+const defaultOut = path.join(repoRoot, "_site");
+const allowed = out === defaultOut || !holds(repoRoot, out);
+if (!allowed || out === path.parse(out).root || holds(out, repoRoot) || holds(out, process.cwd())) {
+  fail(`Refusing to use ${out} as the output folder: use the default ${defaultOut} or a folder outside the repository that holds neither it nor the current directory.`);
 }
 
 async function demoBuildIsUsable(dir) {
