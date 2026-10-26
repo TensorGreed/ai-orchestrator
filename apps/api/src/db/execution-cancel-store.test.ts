@@ -86,7 +86,7 @@ describe.each(kinds)("run-ending writes (%s)", (_kind, open) => {
   }, 60_000);
   afterAll(async () => {
     await harness?.close();
-  });
+  }, 60_000);
 
   const startedAt = new Date(Date.now() - 1_000).toISOString();
   let seq = 0;
