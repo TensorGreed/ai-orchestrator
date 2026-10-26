@@ -61,6 +61,27 @@ run("two instances on one Postgres schema", () => {
     }
   }, 60_000);
 
+  it("80 concurrent appends to one workflow from two instances (10 connections each): no errors, versions 1..80", async () => {
+    primary = await createTestStore({ kind: "postgres" });
+    const wide = await PostgresStore.create(postgresStoreConfig(testPostgresSettings(), { schema: primary.schema!, maxConnections: 10 }));
+    second = await PostgresStore.create(postgresStoreConfig(testPostgresSettings(), { schema: primary.schema!, maxConnections: 10 }));
+    try {
+      const stores = [wide, second];
+      const results = await Promise.allSettled(
+        Array.from({ length: 80 }, (_, i) => stores[i % 2]!.appendWorkflowVersion({ id: `w-${i}`, workflowId: "wf", workflowJson: JSON.stringify({ i }), retention: 5 }))
+      );
+      const failed = results.filter((r) => r.status === "rejected").map((r) => String((r as PromiseRejectedResult).reason));
+      expect(failed).toEqual([]);
+      const versions = results.map((r) => (r as PromiseFulfilledResult<{ version: number }>).value.version).sort((a, b) => a - b);
+      expect(versions).toEqual(Array.from({ length: 80 }, (_, i) => i + 1));
+      expect((await wide.listWorkflowVersions("wf", 100)).map((v) => v.version)).toEqual([80, 79, 78, 77, 76]);
+      // A different workflow is not held up by this one's lock (a per-workflow key).
+      expect((await second.appendWorkflowVersion({ id: "other-1", workflowId: "wf-other", workflowJson: "{}", retention: 0 })).version).toBe(1);
+    } finally {
+      await wide.close();
+    }
+  }, 120_000);
+
   it("an approval is decided once when two instances decide it at the same moment", async () => {
     const [a, b] = await open();
     for (let round = 0; round < 6; round += 1) {

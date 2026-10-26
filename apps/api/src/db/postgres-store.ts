@@ -50,6 +50,10 @@ export interface PostgresStoreConfig {
  *   0x4c324d ("L2M")  migrations — key: hashtext(schema). Held while the chain runs or is reversed (boot, db:rollback,
  *                     db:restore); see withMigrationLock.
  *   0x4c324e ("L2N")  leader election (reserved for the scheduler/queue leader lock).
+ *   0x4c324f ("L2O")  audit writes (postgres/audit.ts) — key 1: the audit-log chain append; key 2: signing-key
+ *                     activation. Keys 3 and 4 (MCP policies / clients before v40) are retired; do not reuse them.
+ *   0x4c3257 ("L2W")  workflow version numbers (postgres/workflows.ts) — key: hashtext(workflow id). Held by
+ *                     appendWorkflowVersion from reading MAX(version) to commit.
  * Add a new class here rather than reusing one.
  */
 export const ADVISORY_LOCK_CLASS_MIGRATIONS = 0x4c324d;

@@ -613,39 +613,34 @@ export async function maxWorkflowVersionNumber(ctx: PgContext, workflowId: strin
   return row && row.max_version !== null ? toNum(row.max_version) : 0;
 }
 
-const VERSION_NUMBER_CONSTRAINT = "workflow_versions_workflow_id_version_key";
-const APPEND_ATTEMPTS = 20;
+/** Advisory-lock class for version numbers; the key space is documented in postgres-store.ts. */
+export const ADVISORY_LOCK_CLASS_WORKFLOW_VERSIONS = 0x4c3257;
 
 /**
- * Takes the next version number, inserts it and prunes, in one transaction. Two appends that read the same MAX both
- * try to insert N; UNIQUE (workflow_id, version) refuses the second, which aborts its transaction, so the whole
- * transaction is retried and takes N+1. A duplicate `id` (the primary key) is the caller's error and is rethrown.
+ * Takes the next version number, inserts it and prunes, in one transaction. Appends to one workflow are serialised
+ * by `pg_advisory_xact_lock(0x4c3257, hashtext(workflow id))`, taken before MAX(version) and held to commit, so each
+ * append reads the previous one's committed number (READ COMMITTED: every statement sees what committed before it).
+ * Appends to different workflows only share a lock on a hash collision, which costs a wait, never a wrong number.
+ * A duplicate `id` (the primary key) is the caller's error and is thrown as is.
  */
 export async function appendWorkflowVersion(ctx: PgContext, input: Parameters<Store["appendWorkflowVersion"]>[0]): ReturnType<Store["appendWorkflowVersion"]> {
   const createdAt = new Date().toISOString();
-  for (let attempt = 1; ; attempt += 1) {
-    try {
-      const version = await ctx.withTransaction(async (client) => {
-        const row = (await client.query<{ max_version: number | null }>(
-          `SELECT MAX(version) AS max_version FROM workflow_versions WHERE workflow_id = $1`,
-          [input.workflowId]
-        )).rows[0];
-        const next = (row && row.max_version !== null ? toNum(row.max_version) : 0) + 1;
-        await client.query(
-          `INSERT INTO workflow_versions (id, workflow_id, version, workflow_json, created_by, change_note, created_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-          [input.id, input.workflowId, next, input.workflowJson, input.createdBy ?? null, input.changeNote ?? null, createdAt]
-        );
-        if (input.retention > 0) await pruneVersions(client, input.workflowId, input.retention);
-        return next;
-      });
-      return { id: input.id, version, createdAt };
-    } catch (error) {
-      const pgError = error as { code?: string; constraint?: string };
-      if (pgError.code === "23505" && pgError.constraint === VERSION_NUMBER_CONSTRAINT && attempt < APPEND_ATTEMPTS) continue;
-      throw error;
-    }
-  }
+  const version = await ctx.withTransaction(async (client) => {
+    await client.query(`SELECT pg_advisory_xact_lock($1, hashtext($2))`, [ADVISORY_LOCK_CLASS_WORKFLOW_VERSIONS, input.workflowId]);
+    const row = (await client.query<{ max_version: number | null }>(
+      `SELECT MAX(version) AS max_version FROM workflow_versions WHERE workflow_id = $1`,
+      [input.workflowId]
+    )).rows[0];
+    const next = (row && row.max_version !== null ? toNum(row.max_version) : 0) + 1;
+    await client.query(
+      `INSERT INTO workflow_versions (id, workflow_id, version, workflow_json, created_by, change_note, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [input.id, input.workflowId, next, input.workflowJson, input.createdBy ?? null, input.changeNote ?? null, createdAt]
+    );
+    if (input.retention > 0) await pruneVersions(client, input.workflowId, input.retention);
+    return next;
+  });
+  return { id: input.id, version, createdAt };
 }
 
 export async function listWorkflowShares(ctx: PgContext, workflowId: string): ReturnType<Store["listWorkflowShares"]> {
