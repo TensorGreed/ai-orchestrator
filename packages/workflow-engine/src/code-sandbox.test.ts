@@ -418,3 +418,16 @@ function fakeContainer(file: string, args: string[], _options: unknown, calls: A
   };
   return child;
 }
+
+describe("host warning advice", () => {
+  it("suggests denying in-process Python only when it is allowed", async () => {
+    const { hostWarning } = await import("./code-sandbox.js");
+    const allowed = hostWarning("no runtime.", "allow");
+    expect(allowed).toContain("set CODE_SANDBOX_PYTHON_IN_PROCESS=deny");
+    const denied = hostWarning("no runtime.", "deny");
+    expect(denied).not.toContain("set CODE_SANDBOX_PYTHON_IN_PROCESS=deny");
+    expect(denied).toContain("Python code nodes are disabled (CODE_SANDBOX_PYTHON_IN_PROCESS=deny)");
+    expect(denied).toContain("CODE_SANDBOX_MODE=container");
+    expect(denied).toContain("CODE_NODES_ENABLED=false");
+  });
+});
