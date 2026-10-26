@@ -66,6 +66,10 @@ export default defineConfig(({ mode }) => {
     return {
       base: "/demo/",
       plugins: [demoMode(), react()],
+      // The studio's Docs button: the docs sit next to the demo on the same site.
+      define: {
+        "import.meta.env.VITE_DOCS_URL": JSON.stringify("/docs/")
+      },
       resolve: {
         extensions: [".tsx", ".ts", ".jsx", ".js", ".mjs", ".json"]
       },

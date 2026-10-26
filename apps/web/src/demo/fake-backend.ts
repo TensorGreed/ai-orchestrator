@@ -6,7 +6,7 @@
  * one that was recorded; nothing is computed or sent anywhere.
  */
 import { workflowSchema, type Workflow, type WorkflowListItem } from "@ai-orchestrator/shared";
-import type { DemoFixtures, RecordedFrame, RecordedRun } from "./fixtures";
+import type { DemoFixtures, RecordedFrame, RecordedRun, RecordedWrite } from "./fixtures";
 
 export const NOT_IN_DEMO = "not_in_demo";
 export const DEMO_STATE_STORAGE_KEY = "l2m-demo:state:v1";
@@ -14,16 +14,34 @@ export const DEMO_STATE_STORAGE_KEY = "l2m-demo:state:v1";
 export const NOT_IN_DEMO_MESSAGE = "Not available in the demo. This needs a real L2M deployment.";
 export const CREDENTIALS_MESSAGE = "Not available in the demo. Sign-in, credentials, API keys and user admin need a real L2M deployment.";
 export const RUN_NEEDS_DEPLOYMENT_MESSAGE = "Runs need a real deployment.";
+export const APPROVAL_RESUME_MESSAGE = "On a real deployment the paused run would now resume.";
 
 /** Something the demo banner should tell the visitor, with an optional way out. */
-export interface DemoNotice {
-  kind: "run_not_recorded";
-  message: string;
-  workflowId: string;
-  /** Restore this workflow to the recorded version so its recorded run replays. */
-  restorable: boolean;
-  similar?: { workflowId: string; name: string; executionId: string };
-}
+export type DemoNotice =
+  | {
+      kind: "run_not_recorded";
+      message: string;
+      workflowId: string;
+      /** Restore this workflow to the recorded version so its recorded run replays. */
+      restorable: boolean;
+      similar?: { workflowId: string; name: string; executionId: string };
+    }
+  | {
+      /** The graph was recorded, but with another input: only the recorded question has an answer. */
+      kind: "input_not_recorded";
+      message: string;
+      workflowId: string;
+      recordedInput: string;
+    }
+  | {
+      kind: "approval_decided";
+      message: string;
+      executionId: string;
+    }
+  | {
+      kind: "not_in_demo";
+      message: string;
+    };
 
 export interface DemoStorage {
   getItem(key: string): string | null;
@@ -136,6 +154,20 @@ export function graphDigest(workflow: Pick<Workflow, "nodes" | "edges">): string
   return stable({ nodes, edges });
 }
 
+/** Inputs compare after trimming and collapsing whitespace. */
+export function normalizeRunInput(value: string): string {
+  return value.trim().replace(/\s+/g, " ");
+}
+
+/** The input a run request carries: the prompt of a manual or chat run, or the body of a webhook run. */
+export function runInputOf(body: Record<string, unknown>): string | null {
+  const nested = body.input && typeof body.input === "object" ? (body.input as Record<string, unknown>) : {};
+  for (const candidate of [body.user_prompt, body.message, nested.user_prompt, nested.message]) {
+    if (typeof candidate === "string") return candidate;
+  }
+  return null;
+}
+
 function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
@@ -168,6 +200,12 @@ export interface FakeBackend {
   reset(): void;
   /** Puts one workflow back to its recorded version. */
   restoreRecorded(workflowId: string): boolean;
+  /**
+   * The visitor chose "Try the recorded question": the next run of this
+   * workflow runs the recorded input, whatever the studio sends. Returns that
+   * input, or null when the workflow has no recording.
+   */
+  armRecordedInput(workflowId: string): string | null;
   workflows(): Workflow[];
   /** Requests the demo had no answer for, as "METHOD /path", oldest first. */
   misses(): string[];
@@ -241,6 +279,8 @@ export function createFakeBackend(options: FakeBackendOptions): FakeBackend {
 
   let state = load();
   const missed: string[] = [];
+  /** A workflow whose next run is the recorded question, at the visitor's request. */
+  let armedInput: string | null = null;
 
   const persist = () => {
     try {
@@ -355,11 +395,24 @@ export function createFakeBackend(options: FakeBackendOptions): FakeBackend {
     return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
   };
 
-  const execute = (workflowId: string, stream: boolean): Response => {
+  const inputNotRecorded = (workflow: Workflow, recordedInput: string): Response => {
+    const message = `${RUN_NEEDS_DEPLOYMENT_MESSAGE} The recorded run of this workflow answers one question: “${recordedInput}”. Anything else needs a real model.`;
+    options.notify?.({ kind: "input_not_recorded", message, workflowId: workflow.id, recordedInput });
+    return notInDemo(message, 409, { workflowId: workflow.id, recordedInput });
+  };
+
+  const execute = (workflowId: string, stream: boolean, body: Json): Response => {
     const workflow = findWorkflow(workflowId);
     if (!workflow) return json(404, { error: "Workflow not found" });
     const recording = recordingFor(workflow);
     if (!recording) return notRecorded(workflow);
+    // A recording answers its own input only: the visitor asked for it explicitly, or sent the same input.
+    const armed = armedInput === workflowId;
+    armedInput = null;
+    const input = runInputOf(body);
+    if (!armed && (input === null || normalizeRunInput(input) !== normalizeRunInput(recording.run.prompt))) {
+      return inputNotRecorded(workflow, recording.run.prompt);
+    }
     if (stream) return replayStream(recording.run);
     const result = [...recording.run.frames].reverse().find((frame) => frame.event === "result");
     return result ? json(200, result.data) : notRecorded(workflow);
@@ -391,6 +444,11 @@ export function createFakeBackend(options: FakeBackendOptions): FakeBackend {
     if (decision === "reject" && item.requireRejectReason && !reason) return json(400, { error: "A reason is required to reject this request." });
     state.decisions[String(item.executionId)] = { status: decision === "approve" ? "approved" : "rejected", reason, decidedAt: now().toISOString() };
     persist();
+    options.notify?.({
+      kind: "approval_decided",
+      message: `${decision === "approve" ? "Approved" : "Rejected"} on demo data. ${APPROVAL_RESUME_MESSAGE}`,
+      executionId: String(item.executionId)
+    });
     return json(202, { queued: true, executionId: item.executionId, requestId: item.requestId, decision });
   };
 
@@ -447,6 +505,29 @@ export function createFakeBackend(options: FakeBackendOptions): FakeBackend {
     const recorded = recordedBody(aliasPath, query ? `?${query}` : "");
     if (!recorded) return null;
     return json(200, JSON.parse(JSON.stringify(recorded.body).split(JSON.stringify(blank)).join(JSON.stringify(visitorId))));
+  };
+
+  /** Values a request leaves out take the API's defaults, or null. */
+  const requestValue = (body: Json, key: string): unknown => {
+    if (body[key] !== undefined) return body[key];
+    if (key === "mcpMode") return "strict";
+    if (key === "draft") return body.version === undefined;
+    return null;
+  };
+
+  /**
+   * A recorded answer to a write (a replay diff, a publish verdict) stands
+   * only for the same request on the same graph; anything else would be an
+   * answer the API never gave.
+   */
+  const recordedWrite = (recorded: RecordedWrite, body: Json): Response => {
+    const workflow = findWorkflow(recorded.match.workflowId);
+    const sameGraph = Boolean(workflow) && graphDigest(workflow!) === graphDigest(recorded.match.graph);
+    const sameRequest = Object.entries(recorded.match.request).every(([key, value]) => stable(requestValue(body, key)) === stable(value));
+    if (sameGraph && sameRequest) return json(recorded.status, clone(recorded.body));
+    const message = `${RUN_NEEDS_DEPLOYMENT_MESSAGE} This answer was recorded for another version of “${workflow?.name ?? recorded.match.workflowId}” or another request.`;
+    options.notify?.({ kind: "not_in_demo", message });
+    return notInDemo(message, 409, { workflowId: recorded.match.workflowId });
   };
 
   const readBody = async (init?: RequestInit): Promise<Json> => {
@@ -522,8 +603,8 @@ export function createFakeBackend(options: FakeBackendOptions): FakeBackend {
         const newId = typeof body.id === "string" && body.id && !findWorkflow(body.id) ? body.id : nextId(name);
         return saveFromBody({ ...clone(workflow), id: newId, name });
       }
-      if (action === "execute/stream" && method === "POST") return execute(id, true);
-      if (action === "execute" && method === "POST") return execute(id, false);
+      if (action === "execute/stream" && method === "POST") return execute(id, true, await readBody(init));
+      if (action === "execute" && method === "POST") return execute(id, false, await readBody(init));
       if (action === "variables" && method === "GET" && workflow && !recordedWorkflows.has(id)) return json(200, { workflowId: id, variables: {} });
     }
 
@@ -548,7 +629,7 @@ export function createFakeBackend(options: FakeBackendOptions): FakeBackend {
     const recorded = method === "GET" ? visitorWorkflowGet(pathname, searchParams) ?? recordedGet(pathname, url.search) : null;
     if (recorded) return recorded;
     const recordedPost = fixtures.responses.post[`${method} ${pathname}`];
-    if (recordedPost) return json(recordedPost.status, clone(recordedPost.body));
+    if (recordedPost) return recordedWrite(recordedPost, await readBody(init));
     missed.push(`${method} ${pathname}${url.search}`);
     return notInDemo();
   };
@@ -569,6 +650,13 @@ export function createFakeBackend(options: FakeBackendOptions): FakeBackend {
       if (!recorded) return false;
       putWorkflow(clone(recorded));
       return true;
+    },
+    armRecordedInput(workflowId) {
+      const workflow = findWorkflow(workflowId);
+      const recording = workflow ? recordingFor(workflow) : null;
+      if (!recording) return null;
+      armedInput = workflowId;
+      return recording.run.prompt;
     },
     workflows: () => clone(state.workflows),
     misses: () => [...missed]

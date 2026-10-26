@@ -91,37 +91,71 @@ test("the demo journey: banner, template, edit, save, persist, recorded run, sec
   await expect(notice).toContainText("Runs need a real deployment");
   await expect(notice).toContainText("Here is a recorded run of a similar workflow");
   await shot(page, "04-not-recorded-notice");
-  await notice.getByRole("button", { name: "Close" }).click();
+  // Its button opens the recorded workflow and runs its recorded question.
+  await notice.getByRole("button", { name: "Run “Basic LLM Flow”" }).click();
+  await page.waitForURL(/workflowId=wf-basic-llm(&|$)/);
+  await expect(page).not.toHaveURL(/demoRun=/);
+  await expect(page.getByText(/status\s+success/)).toBeVisible({ timeout: 30_000 });
 
-  // A recorded workflow replays its run to the end.
+  // A recorded workflow answers its recorded question only. The editor has no prompt field, so Run
+  // first offers the recorded question; choosing it replays the recording, with that question as the trigger's input.
   await page.goto("/demo/?workflowId=wf-demo-support-agent&mode=editor");
   await expect(page.locator(".react-flow__node").first()).toBeVisible();
+  await expect(page.getByRole("banner").getByRole("link", { name: "Documentation" })).toHaveAttribute("href", "/docs/");
   await page.getByRole("banner").getByRole("button", { name: "Run workflow" }).click();
+  await expect(notice).toContainText("answers one question");
+  await notice.getByRole("button", { name: "Try the recorded question" }).click();
   await expect(page.getByText(/status\s+running/)).toBeVisible();
   await shot(page, "05-recorded-run-replaying");
   await expect(page.getByText(/status\s+success/)).toBeVisible({ timeout: 60_000 });
   await expect(page.getByText(/last run \d+\s*ms/).first()).toBeVisible();
+  await expect(page.locator(".react-flow__node").filter({ hasText: "Ask a question" })).toContainText("A customer on the Team plan");
   await shot(page, "06-recorded-run-finished");
+
+  // Chat: another question gets no answer, the recorded one gets the recorded answer.
+  await page.goto("/demo/?workflowId=wf-demo-support-agent&mode=chat");
+  const message = page.getByRole("textbox", { name: "Message" });
+  await message.fill("Tell me a joke about penguins");
+  await page.getByRole("button", { name: "Send", exact: true }).click();
+  await expect(notice).toContainText("Runs need a real deployment");
+  await expect(page.getByText("$7,056")).toHaveCount(0);
+  await shot(page, "07-chat-other-question");
+  await notice.getByRole("button", { name: "Try the recorded question" }).click();
+  await expect(message).toHaveValue(/^A customer on the Team plan has 49 seats/);
+  await page.getByRole("button", { name: "Send", exact: true }).click();
+  await expect(page.getByText(/\$7,056/).first()).toBeVisible({ timeout: 60_000 });
+  await shot(page, "08-chat-recorded-question");
 
   // Security: the recorded guard block.
   await sidebarItem(page, "Security").click();
   await expect(page.getByRole("heading", { name: "Security", exact: true })).toBeVisible();
   await expect(page.getByText("Blocked", { exact: true }).first()).toBeVisible();
-  await shot(page, "07-security");
+  await shot(page, "09-security");
 
   // Approvals: decide one on demo data.
   await sidebarItem(page, "Approvals").click();
   await expect(page.getByRole("heading", { name: "Approvals" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Approve" })).toHaveCount(2);
-  await shot(page, "08-approvals");
+  await shot(page, "10-approvals");
   await page.getByRole("button", { name: "Approve" }).first().click();
   await expect(page.getByText(/Approved\./).first()).toBeVisible();
+  await expect(notice).toContainText("On a real deployment the paused run would now resume.");
   await expect(page.getByRole("button", { name: "Approve" })).toHaveCount(1);
+  await notice.getByRole("button", { name: "Close" }).click();
+
+  // Links straight to the API (exports) get the demo's answer instead of the host's 404.
+  await sidebarItem(page, "Settings").click();
+  await page.getByRole("tab", { name: "Audit Log", exact: true }).click();
+  const pagesBefore = page.context().pages().length;
+  await page.getByRole("link", { name: "Export CSV" }).click();
+  await expect(notice).toContainText("Not available in the demo");
+  expect(page.context().pages().length).toBe(pagesBefore);
+  await notice.getByRole("button", { name: "Close" }).click();
 
   // Release gate on the gated workflow.
   await page.goto("/demo/?workflowId=wf-demo-faq-release&mode=editor");
   await expect(page.locator(".react-flow__node").first()).toBeVisible();
-  await shot(page, "09-release-gated-workflow");
+  await shot(page, "11-release-gated-workflow");
 
   // Reset: the visitor's workflow and decisions are gone.
   await page.getByRole("region", { name: "Live demo" }).getByRole("button", { name: "Reset demo" }).click();

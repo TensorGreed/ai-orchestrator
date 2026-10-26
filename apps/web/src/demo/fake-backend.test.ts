@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Workflow } from "@ai-orchestrator/shared";
-import { CREDENTIALS_MESSAGE, DEMO_STATE_STORAGE_KEY, NOT_IN_DEMO, createFakeBackend, graphDigest, shiftFixtures, type DemoNotice, type DemoStorage } from "./fake-backend";
+import { APPROVAL_RESUME_MESSAGE, CREDENTIALS_MESSAGE, DEMO_STATE_STORAGE_KEY, NOT_IN_DEMO, createFakeBackend, graphDigest, shiftFixtures, type DemoNotice, type DemoStorage } from "./fake-backend";
 import { demoFixtures } from "./fixtures";
 
 const transport = vi.hoisted(() => ({ backend: null as null | { fetch: (input: string, init?: RequestInit) => Promise<Response>; openEventSource: (url: string) => EventSource } }));
@@ -42,6 +42,10 @@ function parseSse(text: string): Array<{ event: string; data: any }> {
       return { event: lines[0]!.slice("event: ".length), data: JSON.parse(lines[1]!.slice("data: ".length)) };
     });
 }
+
+/** The run input a workflow's recording answers. */
+const recordedPrompt = (workflowId: string) => demoFixtures.runs[workflowId]!.prompt;
+const asked = (workflowId: string) => JSON.stringify({ user_prompt: recordedPrompt(workflowId) });
 
 afterEach(() => {
   transport.backend = null;
@@ -183,7 +187,7 @@ describe("runs", () => {
   it("replays the recorded stream in order and finishes with the recorded result", async () => {
     const demo = backend();
     const recorded = demoFixtures.runs["wf-demo-support-agent"]!;
-    const response = await demo.fetch("/api/workflows/wf-demo-support-agent/execute/stream", { method: "POST", body: "{}" });
+    const response = await demo.fetch("/api/workflows/wf-demo-support-agent/execute/stream", { method: "POST", body: asked("wf-demo-support-agent") });
     expect(response.headers.get("content-type")).toBe("text/event-stream");
     const frames = parseSse(await response.text());
     expect(frames.map((frame) => frame.event)).toEqual(recorded.frames.map((frame) => frame.event));
@@ -201,7 +205,7 @@ describe("runs", () => {
   it("drives the client's stream handlers to completion", async () => {
     backend();
     const seen: string[] = [];
-    const result = await api.executeWorkflowStream("wf-demo-research-swarm", { input: {} } as never, {
+    const result = await api.executeWorkflowStream("wf-demo-research-swarm", { user_prompt: recordedPrompt("wf-demo-research-swarm") } as never, {
       onExecutionStarted: () => seen.push("started"),
       onNodeStart: (event) => seen.push(`start:${event.nodeId}`),
       onNodeComplete: (event) => seen.push(`complete:${event.nodeId}`),
@@ -216,7 +220,7 @@ describe("runs", () => {
   it("paces the replay through the delay it is given", async () => {
     const delays: number[] = [];
     const demo = createFakeBackend({ fixtures: demoFixtures, storage: null, delay: async (ms) => void delays.push(ms) });
-    await (await demo.fetch("/api/workflows/wf-demo-guarded-intake/execute/stream", { method: "POST" })).text();
+    await (await demo.fetch("/api/workflows/wf-demo-guarded-intake/execute/stream", { method: "POST", body: asked("wf-demo-guarded-intake") })).text();
     expect(delays).toHaveLength(demoFixtures.runs["wf-demo-guarded-intake"]!.frames.length);
     expect(delays.every((ms) => ms > 0)).toBe(true);
   });
@@ -229,7 +233,7 @@ describe("runs", () => {
     edited.nodes.find((node) => node.id === "output")!.config = { responseTemplate: "Changed: {{answer}}" };
     await api.updateWorkflow(edited);
 
-    const refused = await call(demo, "POST", "/api/workflows/wf-demo-support-agent/execute/stream", {});
+    const refused = await call(demo, "POST", "/api/workflows/wf-demo-support-agent/execute/stream", { user_prompt: recordedPrompt("wf-demo-support-agent") });
     expect(refused.status).toBe(409);
     expect(refused.body).toMatchObject({ code: NOT_IN_DEMO, restorable: true });
     expect(refused.body.error).toContain("Runs need a real deployment");
@@ -244,7 +248,7 @@ describe("runs", () => {
     expect(graphDigest(moved)).toBe(graphDigest(workflow));
 
     expect(demo.restoreRecorded("wf-demo-support-agent")).toBe(true);
-    const replay = await demo.fetch("/api/workflows/wf-demo-support-agent/execute/stream", { method: "POST" });
+    const replay = await demo.fetch("/api/workflows/wf-demo-support-agent/execute/stream", { method: "POST", body: asked("wf-demo-support-agent") });
     expect(replay.status).toBe(200);
   });
 
@@ -261,13 +265,13 @@ describe("runs", () => {
     expect(refused.body.restorable).toBe(false);
     expect(refused.body.similar).toMatchObject({ workflowId: "wf-demo-support-agent" });
     expect(refused.body.error).toContain("Here is a recorded run of a similar workflow");
-    expect(notices[0]!.similar?.executionId).toBe(demoFixtures.runs["wf-demo-support-agent"]!.executionId);
+    expect(notices[0]).toMatchObject({ kind: "run_not_recorded", similar: { executionId: demoFixtures.runs["wf-demo-support-agent"]!.executionId } });
   });
 
   it("replays a copy with the same graph, such as a duplicate", async () => {
     backend();
     const copy = await api.duplicateWorkflow("wf-demo-guarded-intake", { name: "Guarded intake copy" });
-    const result = await api.executeWorkflowStream(copy.id, {} as never);
+    const result = await api.executeWorkflowStream(copy.id, { user_prompt: recordedPrompt("wf-demo-guarded-intake") } as never);
     expect(result.output).toEqual({ result: "Blocked by the prompt guard." });
   });
 
@@ -280,10 +284,100 @@ describe("runs", () => {
   });
 });
 
+
+describe("runs answer only the recorded input", () => {
+  it("replays when the input is the recorded one, after trimming and whitespace normalisation", async () => {
+    const demo = backend();
+    const prompt = recordedPrompt("wf-demo-support-agent");
+    const spaced = `  ${prompt.replace(/ /g, "  \n ")}  `;
+    const response = await call(demo, "POST", "/api/workflows/wf-demo-support-agent/execute", { user_prompt: spaced });
+    expect(response.status).toBe(200);
+    expect(response.body.output.result).toContain("$7,056");
+    // Chat sends the same input under `user_prompt`; a webhook body may nest it.
+    expect((await call(demo, "POST", "/api/workflows/wf-demo-support-agent/execute", { input: { user_prompt: prompt } })).status).toBe(200);
+  });
+
+  it("refuses any other input with a typed answer that offers the recorded question", async () => {
+    const notices: DemoNotice[] = [];
+    const demo = backend({ notify: (notice) => notices.push(notice) });
+    for (const body of [{ user_prompt: "Tell me a joke about penguins" }, { message: "Tell me a joke about penguins" }, {}, { user_prompt: "What time is it in America/Toronto? Use tools when needed." }]) {
+      const refused = await call(demo, "POST", "/api/workflows/wf-demo-support-agent/execute/stream", body);
+      expect(refused.status, JSON.stringify(body)).toBe(409);
+      expect(refused.body).toMatchObject({ code: NOT_IN_DEMO, recordedInput: recordedPrompt("wf-demo-support-agent") });
+      expect(refused.body.error).toContain("Runs need a real deployment");
+      expect(refused.body.error).not.toContain("$7,056");
+    }
+    expect(notices.every((notice) => notice.kind === "input_not_recorded" && notice.recordedInput === recordedPrompt("wf-demo-support-agent"))).toBe(true);
+    // Through the client, the chat's stream surfaces the refusal instead of an answer.
+    await expect(api.executeWorkflowStream("wf-demo-support-agent", { user_prompt: "Tell me a joke about penguins" } as never)).rejects.toMatchObject({ status: 409 });
+  });
+
+  it("runs the recorded question once when the visitor asks for it, and only for that workflow", async () => {
+    const demo = backend();
+    expect(demo.armRecordedInput("wf-demo-support-agent")).toBe(recordedPrompt("wf-demo-support-agent"));
+    // The editor sends its built-in prompt; the armed run is the recorded question instead.
+    const editorRun = { user_prompt: "What time is it in America/Toronto? Use tools when needed." };
+    const first = await demo.fetch("/api/workflows/wf-demo-support-agent/execute/stream", { method: "POST", body: JSON.stringify(editorRun) });
+    expect(first.status).toBe(200);
+    const frames = parseSse(await first.text());
+    expect(frames.find((frame) => frame.event === "node_start")!.data.input.user_prompt).toBe(recordedPrompt("wf-demo-support-agent"));
+    expect((await call(demo, "POST", "/api/workflows/wf-demo-support-agent/execute", editorRun)).status).toBe(409);
+
+    expect(demo.armRecordedInput("wf-demo-guarded-intake")).not.toBeNull();
+    expect((await call(demo, "POST", "/api/workflows/wf-demo-support-agent/execute", editorRun)).status).toBe(409);
+    const workflow = { ...structuredClone(demoFixtures.workflows.workflows[0]!), id: "wf-new", name: "New", nodes: [], edges: [] } as Workflow;
+    await call(demo, "POST", "/api/workflows", workflow);
+    expect(demo.armRecordedInput("wf-new")).toBeNull();
+  });
+});
+
+describe("recorded writes", () => {
+  const replayKey = Object.keys(demoFixtures.responses.post).find((key) => key.endsWith("/replay"))!;
+  const replayUrl = replayKey.replace(/^POST /, "");
+
+  it("returns the recorded replay diff for the recorded request on the recorded draft", async () => {
+    const demo = backend();
+    for (const body of [{ draft: true, mcpMode: "strict" }, { draft: true }, {}]) {
+      const response = await call(demo, "POST", replayUrl, body);
+      expect(response.status, JSON.stringify(body)).toBe(200);
+      expect(response.body.diff).toBeTruthy();
+    }
+    expect((await api.runReplay(replayUrl.split("/")[4]!, { draft: true, mcpMode: "strict" })).diff).toBeTruthy();
+  });
+
+  it("refuses the replay diff for another candidate, another MCP mode or a changed draft", async () => {
+    const notices: DemoNotice[] = [];
+    const demo = backend({ notify: (notice) => notices.push(notice) });
+    expect((await call(demo, "POST", replayUrl, { version: 1, mcpMode: "strict" })).status).toBe(409);
+    expect((await call(demo, "POST", replayUrl, { draft: true, mcpMode: "lenient" })).status).toBe(409);
+    const workflow = await api.fetchWorkflow("wf-demo-faq-release");
+    const edited = structuredClone(workflow);
+    edited.nodes.find((node) => node.id === "output")!.config = { responseTemplate: "Changed: {{answer}}", outputKey: "result" };
+    await api.updateWorkflow(edited);
+    const refused = await call(demo, "POST", replayUrl, { draft: true, mcpMode: "strict" });
+    expect(refused).toMatchObject({ status: 409, body: { code: NOT_IN_DEMO } });
+    expect(refused.body.error).toContain("Runs need a real deployment");
+    expect(notices.at(-1)).toMatchObject({ kind: "not_in_demo" });
+  });
+
+  it("returns the recorded publish verdict only for the recorded version of the recorded graph", async () => {
+    const demo = backend();
+    const recorded = demoFixtures.responses.post["POST /api/workflows/wf-demo-faq-release/publish"]!;
+    const version = recorded.match.request.version as number;
+    expect(await api.publishWorkflowVersion("wf-demo-faq-release", { version })).toMatchObject({ outcome: "blocked", reasons: expect.arrayContaining([expect.stringMatching(/regression/)]) });
+    await expect(api.publishWorkflowVersion("wf-demo-faq-release", { version: version - 1 })).rejects.toMatchObject({ status: 409 });
+    await expect(api.publishWorkflowVersion("wf-demo-faq-release", { version, override: { reason: "Ship it" } })).rejects.toMatchObject({ status: 409 });
+    const workflow = await api.fetchWorkflow("wf-demo-faq-release");
+    await api.updateWorkflow({ ...workflow, nodes: workflow.nodes.map((node) => (node.id === "output" ? { ...node, config: { responseTemplate: "{{answer}}" } } : node)) });
+    expect((await call(demo, "POST", "/api/workflows/wf-demo-faq-release/publish", { version })).status).toBe(409);
+  });
+});
+
 describe("approvals", () => {
   it("decides on demo data: approve, reject with a reason, one decision per request", async () => {
     const storage = memoryStorage();
-    backend({ storage });
+    const notices: DemoNotice[] = [];
+    backend({ storage, notify: (notice) => notices.push(notice) });
     const pending = (await api.listApprovals({ status: "pending" })).items;
     expect(pending).toHaveLength(2);
     expect(pending.every((item) => item.canDecide)).toBe(true);
@@ -291,6 +385,7 @@ describe("approvals", () => {
 
     const [first, second] = pending as Array<{ executionId: string; requestId: string }>;
     const approved = await api.approveApproval(first!.executionId, { requestId: first!.requestId, reason: "Looks right." });
+    expect(notices.at(-1)).toEqual({ kind: "approval_decided", executionId: first!.executionId, message: `Approved on demo data. ${APPROVAL_RESUME_MESSAGE}` });
     expect(approved).toEqual({ queued: true, executionId: first!.executionId, requestId: first!.requestId, decision: "approve" });
     await expect(api.approveApproval(first!.executionId, {})).rejects.toMatchObject({ status: 409 });
 

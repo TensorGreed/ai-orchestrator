@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
-import type { DemoNotice } from "./fake-backend";
+import { NOT_IN_DEMO_MESSAGE, type DemoNotice } from "./fake-backend";
 import { DEMO_NOTICE_EVENT, demoBackend } from "./demo-transport";
+import { RUN_RECORDED_PARAM, isApiLink, runRecordedFromUrl, tryRecordedQuestion } from "./demo-actions";
 
 export const DEMO_BANNER_DISMISSED_KEY = "l2m-demo:banner-dismissed";
 export const DEMO_TOUR_KEY = "l2m-demo:tour";
@@ -10,7 +11,7 @@ const SELF_HOST_URL = "/docs/getting-started/quickstart";
 interface TourStep {
   title: string;
   body: string;
-  action?: { label: string; workflowId?: string; mode: string };
+  action?: { label: string; workflowId?: string; mode: string; runRecorded?: boolean };
 }
 
 export const TOUR_STEPS: TourStep[] = [
@@ -21,8 +22,8 @@ export const TOUR_STEPS: TourStep[] = [
   },
   {
     title: "Run it",
-    body: "Press Run. The recorded run replays as it happened: node activity, each tool call, tokens and cost on the run tape.",
-    action: { label: "Open the support agent", workflowId: "wf-demo-support-agent", mode: "editor" }
+    body: "Run the recorded question. Its run replays as it happened: node activity, each tool call, tokens and cost on the run tape. Other questions need a real deployment.",
+    action: { label: "Run the recorded question", workflowId: "wf-demo-support-agent", mode: "editor", runRecorded: true }
   },
   {
     title: "See the guard",
@@ -107,6 +108,21 @@ export function DemoChrome() {
     return () => window.removeEventListener(DEMO_NOTICE_EVENT, onNotice);
   }, []);
 
+  useEffect(() => runRecordedFromUrl(demoBackend), []);
+
+  // Exports and downloads link straight to the API, which a static host cannot serve.
+  useEffect(() => {
+    const onClick = (event: MouseEvent) => {
+      const link = event.target instanceof Element ? event.target.closest<HTMLAnchorElement>("a[href]") : null;
+      if (!link || !isApiLink(link.href, window.location.origin)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      setNotice({ kind: "not_in_demo", message: NOT_IN_DEMO_MESSAGE });
+    };
+    document.addEventListener("click", onClick, true);
+    return () => document.removeEventListener("click", onClick, true);
+  }, []);
+
   const saveTour = useCallback((next: TourState) => {
     setTour(next);
     writeStorage(DEMO_TOUR_KEY, next.status === "done" ? "done" : String(next.step));
@@ -119,7 +135,9 @@ export function DemoChrome() {
 
   const step = tour.status === "open" ? TOUR_STEPS[tour.step] : undefined;
   const goTo = (action: NonNullable<TourStep["action"]>) => {
-    window.location.assign(appUrl({ ...(action.workflowId ? { workflowId: action.workflowId } : {}), mode: action.mode }));
+    window.location.assign(
+      appUrl({ ...(action.workflowId ? { workflowId: action.workflowId } : {}), mode: action.mode, ...(action.runRecorded ? { [RUN_RECORDED_PARAM]: "recorded" } : {}) })
+    );
   };
 
   return (
@@ -160,7 +178,7 @@ export function DemoChrome() {
         <div className="demo-notice" role="status">
           <p>{notice.message}</p>
           <div className="demo-notice-actions">
-            {notice.restorable && (
+            {notice.kind === "run_not_recorded" && notice.restorable && (
               <button
                 type="button"
                 className="demo-button demo-button-primary"
@@ -173,9 +191,25 @@ export function DemoChrome() {
                 Restore the recorded version
               </button>
             )}
-            {notice.similar && (
-              <button type="button" className="demo-button demo-button-primary" onClick={() => window.location.assign(appUrl({ workflowId: notice.similar!.workflowId, mode: "editor" }))}>
-                Open “{notice.similar.name}”
+            {notice.kind === "run_not_recorded" && notice.similar && (
+              <button
+                type="button"
+                className="demo-button demo-button-primary"
+                onClick={() => window.location.assign(appUrl({ workflowId: notice.similar!.workflowId, mode: "editor", [RUN_RECORDED_PARAM]: "recorded" }))}
+              >
+                Run “{notice.similar.name}”
+              </button>
+            )}
+            {notice.kind === "input_not_recorded" && (
+              <button
+                type="button"
+                className="demo-button demo-button-primary"
+                onClick={() => {
+                  const outcome = tryRecordedQuestion(demoBackend, notice.workflowId, notice.recordedInput);
+                  if (outcome !== "unavailable") setNotice(null);
+                }}
+              >
+                Try the recorded question
               </button>
             )}
             <button type="button" className="demo-button" onClick={() => setNotice(null)}>

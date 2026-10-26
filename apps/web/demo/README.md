@@ -19,7 +19,9 @@ Normal builds never reference `src/demo/`: the swap is done by the `demoMode` pl
 | Re-record the fixtures | `pnpm --filter @ai-orchestrator/web demo:record` |
 
 GitHub Pages publishes it from `.github/workflows/pages.yml` next to the marketing landing (`/`) and
-the docs (`/docs/`). Pages must use **GitHub Actions** as its source.
+the docs (`/docs/`); `scripts/assemble-pages-site.mjs` puts the three together. A failed demo build
+does not block the site: it deploys without `/demo/` and the run shows a warning. Pages must use
+**GitHub Actions** as its source.
 
 ## What the demo does
 
@@ -30,14 +32,28 @@ the docs (`/docs/`). Pages must use **GitHub Actions** as its source.
   storage blocked the demo still works for the page's lifetime. **Reset demo** in the banner restores
   the fixtures.
 - **Runs** replay the recorded event stream (node activity, run tape, tool calls, tokens, cost,
-  guard verdicts) at a readable pace, but only when the workflow's graph (node types, configs and
-  edges; not layout or names) is the one that was recorded. A copy with the same graph replays too.
-  Anything else gets "Runs need a real deployment", with a link to the recorded run of the most
-  similar workflow, or a button to restore the recorded version. The demo never makes up a result.
+  guard verdicts) at a readable pace, but only for the recorded run's own input and graph:
+  - the run input (the `user_prompt` of an editor, chat or webhook run) must equal the recorded one
+    after trimming and collapsing whitespace;
+  - the workflow's graph (node types, configs and edges; not layout or names) must be the one that
+    was recorded. A copy with the same graph replays too.
+
+  Another input gets "Runs need a real deployment" with **Try the recorded question**: in Chat it
+  puts the recorded question in the message box for the visitor to send; in the editor, which has
+  no prompt field, it runs the recorded question once (it shows as the trigger's input). Another
+  graph gets the same answer with a link that opens and runs the most similar recorded workflow,
+  or a button to restore the recorded version. The demo never answers a question it has no
+  recording for.
+- **Recorded writes** (the replay diff of the gated workflow's draft against a golden run, the
+  blocked publish of its v4) are kept with the request and the graph they were made against, and
+  answer only that request on that graph; anything else gets the typed refusal.
 - **Governance pages** show recorded data: Runs, Security (guard verdicts, data destinations),
-  Approvals (approve and reject work on demo data and persist), Evaluations (golden sets, replay
-  jobs, release gates), the release gate on "FAQ answerer (release gated)", the replay diff of the
-  support agent's golden run, and the MCP pages.
+  Approvals (approve and reject work on demo data and persist; the demo says that on a real
+  deployment the paused run would now resume), Evaluations (golden sets, replay jobs, release
+  gates), the release gate and golden-run replay diff on "FAQ answerer (release gated)", and the
+  MCP pages.
+- Links that point straight at the API (audit, cassette and guard-profile exports) show "Not
+  available in the demo" instead of the static host's 404.
 - Recorded timestamps are moved forward to the visit, so approvals are not expired and the
   last-14-days views have data.
 
@@ -60,15 +76,20 @@ no model is called, no MCP server is reached, no code runs.
    provider), an MCP agent with tools and memory, a supervisor with two workers, a guard block and
    three approval pauses (started by a second user so the demo user may decide them), with a scripted
    OpenAI-style model on 127.0.0.1 and the mock MCP adapter, so no key is needed;
-3. saves a golden run, edits the workflow and records the replay diff;
+3. saves a golden run of the support agent;
 4. publishes v1 of a gated workflow, builds a golden set of three runs, saves a regressing draft,
-   runs a real replay job against it and records the blocked publish;
+   runs a real replay job against it, records the blocked publish and the draft's replay diff
+   against a golden run, each with the request and graph it answered;
 5. reads back every API answer the studio needs and writes them with the run streams.
 
 Before writing, it replaces the scripted model's address with `models.example.com`, removes temp
-paths and anything shaped like a credential, and refuses to write if a check still finds one.
-`src/demo/fixtures.test.ts` validates the fixtures against the `@ai-orchestrator/shared` schemas
-and checks the size budget and that only `example.com` / `example.org` addresses appear.
+paths and anything shaped like a credential, and refuses to write if anything is still found: the
+patterns in `src/demo/leak-patterns.ts` (API keys, GitHub, Slack and AWS keys, JWTs, PEM blocks,
+bearer tokens) and this machine's values (home directory, repository path, user and host names,
+the recording's master key and session cookie; generic ones such as `root` are skipped, and the
+recorder says so). `src/demo/fixtures.test.ts` checks the committed fixtures against the same
+patterns, validates them against the `@ai-orchestrator/shared` schemas, and checks the size budget
+and that only `example.com` / `example.org` addresses appear.
 
 Re-record after API or UI changes that alter what the studio reads, then run
 `pnpm --filter @ai-orchestrator/web test` and the demo journey. A new recording resets visitors'
