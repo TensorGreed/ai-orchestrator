@@ -318,6 +318,48 @@ describe("the CI CLI against the real replay routes", () => {
   }, 120_000);
 });
 
+describe("a publish that needs approval, through the real routes", () => {
+  it("a 202 needs_approval reply exits 4 with the request id and publishes nothing", async () => {
+    const context = await createTestContext();
+    const created = await call(context, "POST", "/api/workflows", labelWorkflow("good"));
+    expect(created.statusCode, created.body).toBeLessThan(300);
+    const { setId } = await goldenSet(context, "wf-pub", 3);
+    const gate = await call(context, "PUT", "/api/workflows/wf-pub/release-gate", {
+      enabled: true,
+      datasetIds: [setId],
+      requireApproval: true,
+      approvers: { approverRoles: ["admin"], allowSelfApproval: true }
+    });
+    expect(gate.statusCode, gate.body).toBe(200);
+
+    // Turning the gate on baselines version 1; a second version (same answers, a renamed node) is the one to publish.
+    const v2 = await call(context, "PUT", "/api/workflows/wf-pub", { ...labelWorkflow("good"), nodes: labelWorkflow("good").nodes.map((node) => (node.id === "label" ? { ...node, name: "Label renamed" } : node)) });
+    expect(v2.statusCode, v2.body).toBe(200);
+    const versions = (await call(context, "GET", "/api/workflows/wf-pub/versions")).json<{ versions: Array<{ version: number }> }>().versions;
+    const version = Math.max(...versions.map((entry) => entry.version));
+    expect(version).toBeGreaterThan(1);
+    // The gate still wants a passing job; approval is the second step.
+    const job = await cli(context, ["replay", "run", "--set", setId, "--version", String(version), "--json", "--timeout", "60"]);
+    expect(job.code, job.err + job.out).toBe(0);
+    const run = JSON.parse(job.out) as EvalRunView;
+    const proof = ["--hash", run.candidate!.workflowHash, "--run", run.id];
+    const asked = await cli(context, ["release", "publish", "wf-pub", "--version", String(version), ...proof, "--json"]);
+    expect(asked.code, asked.err + asked.out).toBe(4);
+    const body = JSON.parse(asked.out) as { verdict: string; approvalRequestId: string; exitCode?: number };
+    expect(body.verdict).toBe("needs_approval");
+    expect(body.approvalRequestId).toMatch(/\S/);
+
+    const text = await cli(context, ["release", "publish", "wf-pub", "--version", String(version), ...proof]);
+    expect(text.code).toBe(4);
+    expect(text.out).toContain(`request ${body.approvalRequestId}`);
+
+    // Still only the baseline release: nothing is published while the request waits.
+    const history = (await call(context, "GET", "/api/workflows/wf-pub/releases")).json<{ releases: WorkflowRelease[]; publishedVersion: number | null }>();
+    expect(history.publishedVersion).toBe(1);
+    expect(history.releases).toHaveLength(1);
+  }, 120_000);
+});
+
 describe("golden-set files carry the model tape and the memory seed", () => {
   it("round-trips a model tape through export and import, scrubs planted secrets in it and replays the imported set from it", async () => {
     const model = await startModel();
