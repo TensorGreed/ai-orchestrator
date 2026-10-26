@@ -60,7 +60,7 @@ import {
 } from "@ai-orchestrator/shared";
 import { isEmptyDataLabels, labelsForUntrackedSave, mergeDataLabels, parseStoredDataLabels, type DataLabels } from "@ai-orchestrator/shared";
 import { queuedRunTimeoutMs, STUCK_JOB_MARGIN_MS } from "./queue-timeouts.js";
-import { ProjectNotEmptyError } from "./store-errors.js";
+import { isForeignKeyViolation, ProjectNotEmptyError, StoreReferenceMissingError } from "./store-errors.js";
 import { clampLimit, LIMIT_MAX } from "./store-limits.js";
 import type {
   ApprovalDecisionInput,
@@ -4424,11 +4424,17 @@ export class SqliteStore implements Store {
   }> {
     const now = new Date().toISOString();
 
-    this.exec(
-      `INSERT INTO sessions (id, user_id, expires_at, created_at, last_seen_at, revoked_at)
-       VALUES (?, ?, ?, ?, ?, NULL)`,
-      [input.id, input.userId, input.expiresAt, now, now]
-    );
+    try {
+      this.exec(
+        `INSERT INTO sessions (id, user_id, expires_at, created_at, last_seen_at, revoked_at)
+         VALUES (?, ?, ?, ?, ?, NULL)`,
+        [input.id, input.userId, input.expiresAt, now, now]
+      );
+    } catch (error) {
+      // The sessions table declares its user key, so SQLite refuses a session for a user deleted meanwhile.
+      if (isForeignKeyViolation(error)) throw new StoreReferenceMissingError();
+      throw error;
+    }
 
     this.persist();
     return {

@@ -8,6 +8,7 @@ import { type ChatMessage, type DataLabels, isEmptyDataLabels, labelsForUntracke
 import { type Store } from "../store.js";
 import { parseJsonSafe, toStr, labelsField } from "./helpers.js";
 import type { PgContext } from "./context.js";
+import { withReferenceCheck } from "../store-errors.js";
 
 const MAX_SESSION_TOOL_CACHE_RECORDS = 400;
 
@@ -55,11 +56,11 @@ export async function saveSession(ctx: PgContext, input: {
   lastSeenAt: string;
 }> {
   const now = new Date().toISOString();
-  await ctx.execute(
+  await withReferenceCheck(() => ctx.execute(
     `INSERT INTO sessions (id, user_id, expires_at, created_at, last_seen_at, revoked_at)
        VALUES ($1, $2, $3, $4, $5, NULL)`,
     [input.id, input.userId, input.expiresAt, now, now]
-  );
+  ));
   return { id: input.id, userId: input.userId, expiresAt: input.expiresAt, createdAt: now, lastSeenAt: now };
 }
 

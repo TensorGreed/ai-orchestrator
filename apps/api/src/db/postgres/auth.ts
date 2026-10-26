@@ -2,10 +2,15 @@
  * Phase 13.1 — PostgresStore: Users, RBAC, API keys, MFA and SSO identities.
  * Plain functions over a PgContext; PostgresStore delegates here. Every method is implemented, so
  * UNIMPLEMENTED_METHODS is empty.
+ *
+ * Postgres keeps foreign keys from sessions, api_keys, mfa_secrets, sso_identities and user_project_roles to users
+ * (and projects). A write whose user or project was deleted meanwhile throws StoreReferenceMissingError (409), not the
+ * raw 23503.
  */
 import { type Store } from "../store.js";
 import { toNum, toStr } from "./helpers.js";
 import type { PgContext } from "./context.js";
+import { withReferenceCheck } from "../store-errors.js";
 
 export const UNIMPLEMENTED_METHODS: readonly (keyof Store)[] = [];
 
@@ -142,6 +147,10 @@ export async function updateUserRole(ctx: PgContext, id: string, role: string): 
  */
 export async function deleteUser(ctx: PgContext, id: string): Promise<boolean> {
   return ctx.withTransaction(async (client) => {
+    // Lock the user first. A concurrent child insert (a login, a new key) checks its key with a share lock on this
+    // row: one already in flight commits before this lock is granted, so the deletes below see and remove it; one that
+    // starts later waits and then fails with StoreReferenceMissingError. Either way the user delete cannot hit 23503.
+    await client.query(`SELECT id FROM users WHERE id = $1 FOR UPDATE`, [id]);
     await client.query(`DELETE FROM sessions WHERE user_id = $1`, [id]);
     await client.query(`DELETE FROM api_keys WHERE user_id = $1`, [id]);
     await client.query(`DELETE FROM mfa_secrets WHERE user_id = $1`, [id]);
@@ -222,7 +231,7 @@ export async function getProjectRole(ctx: PgContext, userId: string, projectId: 
 
 export async function upsertProjectRole(ctx: PgContext, input: Parameters<Store["upsertProjectRole"]>[0]): ReturnType<Store["upsertProjectRole"]> {
   const now = new Date().toISOString();
-  await ctx.execute(
+  await withReferenceCheck(() => ctx.execute(
     `INSERT INTO user_project_roles (user_id, project_id, role, custom_role_id, created_at, updated_at)
        VALUES ($1, $2, $3, $4, $5, $5)
        ON CONFLICT (user_id, project_id) DO UPDATE SET
@@ -230,7 +239,8 @@ export async function upsertProjectRole(ctx: PgContext, input: Parameters<Store[
          custom_role_id = EXCLUDED.custom_role_id,
          updated_at = EXCLUDED.updated_at`,
     [input.userId, input.projectId, input.role, input.customRoleId ?? null, now]
-  );
+  ));
+
 }
 
 export async function removeProjectRole(ctx: PgContext, userId: string, projectId: string): ReturnType<Store["removeProjectRole"]> {
@@ -403,11 +413,12 @@ function mapApiKey(row: ApiKeyRow) {
 }
 
 export async function saveApiKey(ctx: PgContext, input: Parameters<Store["saveApiKey"]>[0]): ReturnType<Store["saveApiKey"]> {
-  await ctx.execute(
+  await withReferenceCheck(() => ctx.execute(
     `INSERT INTO api_keys (id, user_id, name, key_prefix, key_hash, scopes_json, last_used_at, expires_at, revoked_at, created_at)
        VALUES ($1, $2, $3, $4, $5, $6, NULL, $7, NULL, $8)`,
     [input.id, input.userId, input.name, input.keyPrefix, input.keyHash, JSON.stringify(input.scopes ?? []), input.expiresAt ?? null, new Date().toISOString()]
-  );
+  ));
+
 }
 
 export async function listApiKeys(ctx: PgContext, userId?: string): ReturnType<Store["listApiKeys"]> {
@@ -488,7 +499,7 @@ export async function getMfaSecret(ctx: PgContext, userId: string): ReturnType<S
 
 export async function upsertMfaSecret(ctx: PgContext, input: Parameters<Store["upsertMfaSecret"]>[0]): ReturnType<Store["upsertMfaSecret"]> {
   const now = new Date().toISOString();
-  await ctx.execute(
+  await withReferenceCheck(() => ctx.execute(
     `INSERT INTO mfa_secrets (user_id, secret_iv, secret_auth_tag, secret_ciphertext, backup_codes_json, enabled, activated_at, created_at, updated_at)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8)
        ON CONFLICT (user_id) DO UPDATE SET
@@ -509,7 +520,8 @@ export async function upsertMfaSecret(ctx: PgContext, input: Parameters<Store["u
       input.activatedAt,
       now
     ]
-  );
+  ));
+
 }
 
 /** Compare-and-set on the stored backup codes: true only for the one writer whose `expected` was still stored. */
@@ -569,7 +581,7 @@ export async function findSsoIdentity(ctx: PgContext, provider: string, subject:
 export async function upsertSsoIdentity(ctx: PgContext, input: Parameters<Store["upsertSsoIdentity"]>[0]): ReturnType<Store["upsertSsoIdentity"]> {
   const now = new Date().toISOString();
   // An existing (provider, subject) keeps its id and created_at, as in SQLite.
-  await ctx.execute(
+  await withReferenceCheck(() => ctx.execute(
     `INSERT INTO sso_identities (id, user_id, provider, subject, email, attributes_json, created_at, updated_at)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $7)
        ON CONFLICT (provider, subject) DO UPDATE SET
@@ -586,5 +598,6 @@ export async function upsertSsoIdentity(ctx: PgContext, input: Parameters<Store[
       input.attributes === undefined ? null : JSON.stringify(input.attributes),
       now
     ]
-  );
+  ));
+
 }

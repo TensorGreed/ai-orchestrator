@@ -7,6 +7,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import { postgresStoreConfig } from "./create-store.js";
 import { PostgresStore } from "./postgres-store.js";
 import type { Store } from "./store.js";
+import { StoreReferenceMissingError } from "./store-errors.js";
+import { testPostgresPool } from "../test-support/test-store.js";
 import { createTestStore, noticePostgresSkipped, testPostgresSettings, testPostgresUrl, type TestStore } from "../test-support/test-store.js";
 
 const run = testPostgresUrl() ? describe : describe.skip;
@@ -80,6 +82,38 @@ run("two instances on one Postgres schema", () => {
     } finally {
       await wide.close();
     }
+  }, 120_000);
+
+  it("deleting a user while another instance logs them in: the delete never fails, no session is left behind", async () => {
+    const [a, b] = await open();
+    const outcomes = { saved: 0, refused: 0 };
+    for (let round = 0; round < 15; round += 1) {
+      const userId = `u-${round}`;
+      await a.saveUser({ id: userId, email: `${userId}@example.com`, passwordHash: "x", role: "viewer" });
+      const expiresAt = new Date(Date.now() + 60_000).toISOString();
+      const [deleted, ...writes] = await Promise.allSettled([
+        a.deleteUser(userId),
+        b.saveSession({ id: `s-${round}-1`, userId, expiresAt }),
+        b.saveApiKey({ id: `k-${round}`, userId, name: "k", keyPrefix: `p${round}`, keyHash: "h" }),
+        b.saveSession({ id: `s-${round}-2`, userId, expiresAt })
+      ]);
+      expect(deleted).toEqual({ status: "fulfilled", value: true });
+      for (const write of writes) {
+        if (write.status === "fulfilled") outcomes.saved += 1;
+        else {
+          expect(write.reason).toBeInstanceOf(StoreReferenceMissingError);
+          outcomes.refused += 1;
+        }
+      }
+    }
+    const pool = testPostgresPool(primary!.schema);
+    try {
+      const left = await pool.query(`SELECT (SELECT COUNT(*) FROM sessions)::int + (SELECT COUNT(*) FROM api_keys)::int AS n`);
+      expect(left.rows[0].n).toBe(0);
+    } finally {
+      await pool.end();
+    }
+    expect(outcomes.saved + outcomes.refused).toBe(45);
   }, 120_000);
 
   it("an approval is decided once when two instances decide it at the same moment", async () => {
