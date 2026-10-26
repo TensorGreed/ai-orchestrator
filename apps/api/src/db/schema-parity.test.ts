@@ -48,65 +48,73 @@ const LATEST = Math.max(...MIGRATIONS.map((m) => m.version));
 const FOREIGN_KEY_ONLY_IN_POSTGRES =
   "Postgres keeps this foreign key (NO ACTION); SQLite never declared it. Deleting the parent while a child row exists fails on Postgres (23503) and leaves an orphan on SQLite. Hand-off, q3a: deleteUser / project delete remove child rows (api_keys, mfa_secrets, sso_identities, user_project_roles) explicitly in both stores.";
 
-export const ALLOWED_DIFFERENCES: ReadonlyArray<Omit<SchemaDifference, "detail"> & { reason: string }> = [
+export const ALLOWED_DIFFERENCES: ReadonlyArray<SchemaDifference & { reason: string }> = [
   {
     kind: "column-missing",
     table: "knowledge_base_chunks",
     object: "content_tsv",
+    detail: "only in postgres",
     reason: "Postgres full-text search: a generated tsvector column (v19). SQLite uses the FTS5 virtual table."
   },
   {
     kind: "index-missing",
     table: "knowledge_base_chunks",
     object: "idx_kb_chunks_content_tsv",
+    detail: "only in postgres",
     reason: "Postgres full-text search: the GIN index over content_tsv (v19)."
   },
   {
     kind: "table-missing",
     table: "schema_migrations",
     object: "",
+    detail: "only in postgres",
     reason: "Postgres records applied chain versions; SQLite's embedded migrate() always brings the whole schema."
   },
   {
     kind: "foreign-key-missing",
     table: "api_keys",
     object: "user_id",
+    detail: "-> users(id) on delete no action only in postgres",
     reason: FOREIGN_KEY_ONLY_IN_POSTGRES
   },
   {
     kind: "foreign-key-missing",
     table: "mfa_secrets",
     object: "user_id",
+    detail: "-> users(id) on delete no action only in postgres",
     reason: FOREIGN_KEY_ONLY_IN_POSTGRES
   },
   {
     kind: "foreign-key-missing",
     table: "sso_identities",
     object: "user_id",
+    detail: "-> users(id) on delete no action only in postgres",
     reason: FOREIGN_KEY_ONLY_IN_POSTGRES
   },
   {
     kind: "foreign-key-missing",
     table: "user_project_roles",
     object: "project_id",
+    detail: "-> projects(id) on delete no action only in postgres",
     reason: FOREIGN_KEY_ONLY_IN_POSTGRES
   },
   {
     kind: "foreign-key-missing",
     table: "user_project_roles",
     object: "user_id",
+    detail: "-> users(id) on delete no action only in postgres",
     reason: FOREIGN_KEY_ONLY_IN_POSTGRES
   }
 ];
 
 function unexpected(differences: SchemaDifference[]): string[] {
   return differences
-    .filter((d) => !ALLOWED_DIFFERENCES.some((a) => a.kind === d.kind && a.table === d.table && a.object === d.object))
+    .filter((d) => !ALLOWED_DIFFERENCES.some((a) => a.kind === d.kind && a.table === d.table && a.object === d.object && a.detail === d.detail))
     .map(formatDifference);
 }
 
 function staleAllowances(differences: SchemaDifference[]): string[] {
-  return ALLOWED_DIFFERENCES.filter((a) => !differences.some((d) => a.kind === d.kind && a.table === d.table && a.object === d.object)).map(
+  return ALLOWED_DIFFERENCES.filter((a) => !differences.some((d) => a.kind === d.kind && a.table === d.table && a.object === d.object && a.detail === d.detail)).map(
     (a) => `${a.kind} ${a.table}${a.object ? `.${a.object}` : ""}`
   );
 }
@@ -131,6 +139,29 @@ beforeAll(() => {
 
 afterAll(() => {
   fs.rmSync(tempDir, { recursive: true, force: true });
+});
+
+describe("the allow-list pins the shape of each allowed difference", () => {
+  const fk = (table: string, object: string, detail: string): SchemaDifference => ({ kind: "foreign-key-missing", table, object, detail });
+
+  it("accepts the documented shapes", () => {
+    const documented = ALLOWED_DIFFERENCES.map(({ kind, table, object, detail }) => ({ kind, table, object, detail }));
+    expect(unexpected(documented)).toEqual([]);
+    expect(staleAllowances(documented)).toEqual([]);
+  });
+
+  it("reports an allowed foreign key whose ON DELETE action, target table or target columns changed", () => {
+    expect(unexpected([fk("api_keys", "user_id", "-> users(id) on delete no action only in postgres")])).toEqual([]);
+    expect(unexpected([fk("api_keys", "user_id", "-> users(id) on delete cascade only in postgres")])).toHaveLength(1);
+    expect(unexpected([fk("api_keys", "user_id", "-> projects(id) on delete no action only in postgres")])).toHaveLength(1);
+    expect(unexpected([fk("api_keys", "user_id", "-> users(email) on delete no action only in postgres")])).toHaveLength(1);
+    expect(unexpected([fk("api_keys", "user_id", "-> users(id) on delete no action only in sqlite")])).toHaveLength(1);
+  });
+
+  it("reports a changed content_tsv column or index as unexpected", () => {
+    expect(unexpected([{ kind: "column-missing", table: "knowledge_base_chunks", object: "content_tsv", detail: "only in postgres" }])).toEqual([]);
+    expect(unexpected([{ kind: "column-missing", table: "knowledge_base_chunks", object: "content_tsv", detail: "only in sqlite" }])).toHaveLength(1);
+  });
 });
 
 describe("SQLite schema: migration 39 objects", () => {
@@ -287,6 +318,9 @@ describe.skipIf(!postgresUrl)("Postgres schema parity and migration walk", () =>
     try {
       const pgShape = await introspectPostgres(pool, test.schema!);
       expect(Object.keys(pgShape).length).toBeGreaterThan(70);
+      // The whole table is allowed to be missing from SQLite, so pin its shape here.
+      expect(Object.keys(pgShape.schema_migrations.columns).sort()).toEqual(["applied_at", "version"]);
+      expect(pgShape.schema_migrations.primaryKey).toEqual(["version"]);
       const differences = diffSchemas(sqliteShape, pgShape);
       expect(unexpected(differences)).toEqual([]);
       expect(staleAllowances(differences)).toEqual([]);

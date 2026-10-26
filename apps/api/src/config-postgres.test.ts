@@ -162,6 +162,23 @@ describe("parsePostgresSettings", () => {
     }
   });
 
+  it("a URL with more than one sslmode is refused (libpq would use the last, a first-wins read would differ)", () => {
+    const error = errorOf(() => parsePostgresSettings({ DB_POSTGRESDB_URL: `postgres://u:${encodeURIComponent(SECRET)}@h/db?sslmode=disable&sslmode=require` }));
+    expect(error.message).toMatch(/^Invalid database configuration: /);
+    expect(error.message).toMatch(/more than one sslmode/);
+    expect(error.message).not.toContain(SECRET);
+    expect(error.message).not.toContain("postgres://");
+  });
+
+  it("with an sslmode in the URL, the CA and REJECT_UNAUTHORIZED hints point at the sslmode, not at DB_POSTGRESDB_SSL=true", () => {
+    const ca = errorOf(() => parsePostgresSettings({ DB_POSTGRESDB_URL: "postgres://u:p@h/db?sslmode=disable", DB_POSTGRESDB_SSL_CA: PEM }));
+    expect(ca.message).toMatch(/sslmode in DB_POSTGRESDB_URL/);
+    expect(ca.message).not.toMatch(/DB_POSTGRESDB_SSL=true/);
+    const reject = errorOf(() => parsePostgresSettings({ DB_POSTGRESDB_URL: "postgres://u:p@h/db?sslmode=disable", DB_POSTGRESDB_SSL_REJECT_UNAUTHORIZED: "false" }));
+    expect(reject.message).toMatch(/sslmode in DB_POSTGRESDB_URL/);
+    expect(reject.message).not.toMatch(/DB_POSTGRESDB_SSL=true/);
+  });
+
   it("a malformed percent escape in the URL is a database configuration error, not a bare URIError", () => {
     for (const url of [`postgres://u:p%ZZ${SECRET}@h/db`, `postgres://u%E0%A4%A@h/db`, `postgres://u@h/d%ZZb`]) {
       const error = errorOf(() => parsePostgresSettings({ DB_POSTGRESDB_URL: url }));

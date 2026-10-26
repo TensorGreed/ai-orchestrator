@@ -593,6 +593,10 @@ function parsePostgresUrl(raw: string): { host: string; port?: number; database?
       throw invalidDbSetting(`${DB_ENV.url} has the unsupported parameter '${key}'; only sslmode is read (use the DB_POSTGRESDB_SSL* settings for TLS).`);
     }
   }
+  if (url.searchParams.getAll("sslmode").length > 1) {
+    // libpq applies the last one; reading the first would connect differently from psql on the same URL.
+    throw invalidDbSetting(`${DB_ENV.url} has more than one sslmode; keep exactly one.`);
+  }
   const sslMode = url.searchParams.get("sslmode") ?? undefined;
   if (sslMode !== undefined && !URL_SSL_MODES.has(sslMode)) {
     throw invalidDbSetting(`${DB_ENV.url} has an unknown sslmode; use disable, require, verify-ca or verify-full.`);
@@ -665,10 +669,16 @@ export function parsePostgresSettings(env: Record<string, string | undefined>): 
   const rejectUnauthorized = values[DB_ENV.rejectUnauthorized];
   const caValue = values[DB_ENV.sslCa];
   if (!sslOn && caValue) {
-    throw invalidDbSetting(`${DB_ENV.sslCa} is set but TLS is off; set ${DB_ENV.ssl}=true (or sslmode=verify-full in ${DB_ENV.url}).`);
+    throw invalidDbSetting(
+      `${DB_ENV.sslCa} is set but TLS is off; ` +
+        (fromUrl?.sslMode !== undefined ? `change the sslmode in ${DB_ENV.url} to require, verify-ca or verify-full.` : `set ${DB_ENV.ssl}=true (or sslmode=verify-full in ${DB_ENV.url}).`)
+    );
   }
   if (!sslOn && rejectUnauthorized === false) {
-    throw invalidDbSetting(`${DB_ENV.rejectUnauthorized}=false is set but TLS is off; set ${DB_ENV.ssl}=true or remove it.`);
+    throw invalidDbSetting(
+      `${DB_ENV.rejectUnauthorized}=false is set but TLS is off; ` +
+        (fromUrl?.sslMode !== undefined ? `change the sslmode in ${DB_ENV.url} to require, or remove it.` : `set ${DB_ENV.ssl}=true or remove it.`)
+    );
   }
   let ssl: PostgresSslSettings | false = false;
   if (sslOn) {
