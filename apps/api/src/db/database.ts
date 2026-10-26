@@ -3711,6 +3711,24 @@ export class SqliteStore implements Store {
       CREATE UNIQUE INDEX IF NOT EXISTS idx_data_destinations_match ON data_destinations(kind, COALESCE(target_id, ''), COALESCE(host, ''));
     `);
 
+    // Migration 39 — schema parity with the Postgres chain, and at most one running guard simulation per deployment
+    // (a partial unique index). Several running rows left by an older build: the newest keeps running, the others are
+    // `interrupted` (as a restart would finish them), so the index can be built.
+    this.exec(`CREATE INDEX IF NOT EXISTS idx_secrets_external_provider_id ON secrets(external_provider_id)`);
+    this.transaction(() => {
+      if (this.queryOne<{ name: string }>(`SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_guard_simulations_one_running'`)) return;
+      this.exec(
+        `UPDATE guard_simulations
+            SET status = 'interrupted',
+                error = COALESCE(error, 'Stopped by an upgrade: only one simulation can run at a time.'),
+                finished_at = COALESCE(finished_at, ?)
+          WHERE status = 'running'
+            AND id <> (SELECT id FROM guard_simulations WHERE status = 'running' ORDER BY created_at DESC, id DESC LIMIT 1)`,
+        [new Date().toISOString()]
+      );
+      this.exec(`CREATE UNIQUE INDEX idx_guard_simulations_one_running ON guard_simulations(status) WHERE status = 'running'`);
+    });
+
     this.exec(`CREATE INDEX IF NOT EXISTS idx_workflows_project_id ON workflows(project_id)`);
     this.exec(`CREATE INDEX IF NOT EXISTS idx_workflows_folder_id ON workflows(folder_id)`);
     this.exec(`CREATE INDEX IF NOT EXISTS idx_secrets_project_id ON secrets(project_id)`);

@@ -626,8 +626,8 @@ export const MIGRATIONS: Migration[] = [
         author TEXT NOT NULL DEFAULT 'ai-orchestrator',
         workflow_json TEXT NOT NULL,
         node_count INTEGER NOT NULL DEFAULT 0,
-        created_at TEXT NOT NULL DEFAULT (datetime('now')),
-        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
       );
 
       CREATE INDEX IF NOT EXISTS idx_workflow_templates_category ON workflow_templates(category);
@@ -646,8 +646,8 @@ export const MIGRATIONS: Migration[] = [
         enabled INTEGER NOT NULL DEFAULT 1,
         config_json TEXT NOT NULL DEFAULT '{}',
         events TEXT NOT NULL DEFAULT '["execution.failure"]',
-        created_at TEXT NOT NULL DEFAULT (datetime('now')),
-        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
       );
     `,
     down: `
@@ -833,8 +833,9 @@ export const MIGRATIONS: Migration[] = [
     version: 17,
     description: "Phase 8.4 — audit log hash chain (tamper-evidence) + export destinations",
     up: `
-      ALTER TABLE audit_logs ADD COLUMN prev_hash TEXT;
-      ALTER TABLE audit_logs ADD COLUMN entry_hash TEXT;
+      -- IF NOT EXISTS: the down keeps these columns (tamper evidence), so a rollback past v17 and a re-apply must not fail.
+      ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS prev_hash TEXT;
+      ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS entry_hash TEXT;
 
       CREATE TABLE IF NOT EXISTS audit_export_destinations (
         id TEXT PRIMARY KEY,
@@ -917,41 +918,15 @@ export const MIGRATIONS: Migration[] = [
   },
   {
     version: 19,
-    description: "Phase 9.3 — FTS5 BM25 index over knowledge_base_chunks for hybrid search",
+    description: "Phase 9.3 — full-text index over knowledge_base_chunks for hybrid search (a generated tsvector + GIN; SQLite uses FTS5 BM25)",
     up: `
-      CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_base_chunks_fts USING fts5(
-        content,
-        kb_id UNINDEXED,
-        content='knowledge_base_chunks',
-        content_rowid='rowid',
-        tokenize='porter unicode61'
-      );
-
-      INSERT INTO knowledge_base_chunks_fts(rowid, content, kb_id)
-        SELECT rowid, content, knowledge_base_id FROM knowledge_base_chunks;
-
-      CREATE TRIGGER IF NOT EXISTS kb_chunks_fts_ai AFTER INSERT ON knowledge_base_chunks BEGIN
-        INSERT INTO knowledge_base_chunks_fts(rowid, content, kb_id)
-        VALUES (new.rowid, new.content, new.knowledge_base_id);
-      END;
-
-      CREATE TRIGGER IF NOT EXISTS kb_chunks_fts_ad AFTER DELETE ON knowledge_base_chunks BEGIN
-        INSERT INTO knowledge_base_chunks_fts(knowledge_base_chunks_fts, rowid, content, kb_id)
-        VALUES('delete', old.rowid, old.content, old.knowledge_base_id);
-      END;
-
-      CREATE TRIGGER IF NOT EXISTS kb_chunks_fts_au AFTER UPDATE ON knowledge_base_chunks BEGIN
-        INSERT INTO knowledge_base_chunks_fts(knowledge_base_chunks_fts, rowid, content, kb_id)
-        VALUES('delete', old.rowid, old.content, old.knowledge_base_id);
-        INSERT INTO knowledge_base_chunks_fts(rowid, content, kb_id)
-        VALUES (new.rowid, new.content, new.knowledge_base_id);
-      END;
+      ALTER TABLE knowledge_base_chunks
+        ADD COLUMN IF NOT EXISTS content_tsv tsvector GENERATED ALWAYS AS (to_tsvector('english', content)) STORED;
+      CREATE INDEX IF NOT EXISTS idx_kb_chunks_content_tsv ON knowledge_base_chunks USING GIN (content_tsv);
     `,
     down: `
-      DROP TRIGGER IF EXISTS kb_chunks_fts_au;
-      DROP TRIGGER IF EXISTS kb_chunks_fts_ad;
-      DROP TRIGGER IF EXISTS kb_chunks_fts_ai;
-      DROP TABLE IF EXISTS knowledge_base_chunks_fts;
+      DROP INDEX IF EXISTS idx_kb_chunks_content_tsv;
+      ALTER TABLE knowledge_base_chunks DROP COLUMN IF EXISTS content_tsv;
     `
   },
   {
@@ -1817,6 +1792,28 @@ export const MIGRATIONS: Migration[] = [
     down: `
       DROP INDEX IF EXISTS idx_data_destinations_match;
       DROP TABLE IF EXISTS data_destinations;
+    `
+  },
+  {
+    version: 39,
+    description: "Phase 13.1 — Postgres schema parity with SQLite; at most one running guard simulation per deployment",
+    // Brings a Postgres database to the schema the SQLite store creates: the one index the chain lacked, and the
+    // partial unique index that lets the database (not only the process) refuse a second running simulation. A
+    // database that already holds several running rows keeps the newest running; the others become `interrupted`,
+    // as a restart would have finished them, so the index can be built. SQLite's embedded migrate() does the same.
+    up: `
+      CREATE INDEX IF NOT EXISTS idx_sessions_revoked_expires ON sessions(revoked_at, expires_at);
+      UPDATE guard_simulations
+         SET status = 'interrupted',
+             error = COALESCE(error, 'Stopped by an upgrade: only one simulation can run at a time.'),
+             finished_at = COALESCE(finished_at, now())
+       WHERE status = 'running'
+         AND id <> (SELECT id FROM guard_simulations WHERE status = 'running' ORDER BY created_at DESC, id DESC LIMIT 1);
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_guard_simulations_one_running ON guard_simulations(status) WHERE status = 'running';
+    `,
+    down: `
+      DROP INDEX IF EXISTS idx_guard_simulations_one_running;
+      DROP INDEX IF EXISTS idx_sessions_revoked_expires;
     `
   }
 ];
