@@ -295,14 +295,20 @@ export async function cancelExecution(ctx: PgContext, input: {
   }
 }
 
+/** The same deletes as SqliteStore.pruneExecutionHistory, in one transaction; returns the history rows removed. */
 export async function pruneExecutionHistory(ctx: PgContext, input: { before: string }): Promise<number> {
-  const result = await ctx.pool.query(
-    `DELETE FROM execution_history WHERE started_at < $1`,
-    [input.before]
-  );
-  // Phase 10.1 — tool-call telemetry follows the execution-history retention.
-  await ctx.pool.query(`DELETE FROM mcp_tool_calls WHERE started_at < $1`, [input.before]);
-  return result.rowCount ?? 0;
+  return ctx.withTransaction(async (client) => {
+    const result = await client.query(`DELETE FROM execution_history WHERE started_at < $1`, [input.before]);
+    // Phase 10.1 — tool-call telemetry follows the execution-history retention.
+    await client.query(`DELETE FROM mcp_tool_calls WHERE started_at < $1`, [input.before]);
+    // Phase 10.8 — so do cassettes recorded from those runs.
+    await client.query(`DELETE FROM mcp_cassettes WHERE created_at < $1`, [input.before]);
+    // Phase 12.1 — and so do guard events.
+    await client.query(`DELETE FROM guard_events WHERE created_at < $1`, [input.before]);
+    // Phase 11.2 — and decided approval requests; pending ones stay with their paused run.
+    await client.query(`DELETE FROM approval_requests WHERE status <> 'pending' AND created_at < $1`, [input.before]);
+    return result.rowCount ?? 0;
+  });
 }
 
 export async function saveWorkflowExecutionState(ctx: PgContext, input: {
