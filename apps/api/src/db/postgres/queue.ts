@@ -8,6 +8,7 @@ import { queuedRunTimeoutMs, STUCK_JOB_MARGIN_MS } from "../queue-timeouts.js";
 import { type Store } from "../store.js";
 import { toNum, toStr } from "./helpers.js";
 import type { PgContext } from "./context.js";
+import { clampLimit, LIMIT_MAX } from "../store-limits.js";
 
 export const UNIMPLEMENTED_METHODS: readonly (keyof Store)[] = [];
 
@@ -75,7 +76,7 @@ export async function dequeueNext(ctx: PgContext, limit = 1): Promise<Array<{
      UPDATE execution_queue AS q SET status = 'running', started_at = $1, updated_at = $1
        FROM picked WHERE q.id = picked.id
      RETURNING q.id, q.workflow_id, q.workflow_name, q.payload_json, q.priority, q.attempts, q.max_attempts, q.scheduled_at, q.created_at`,
-    [now, limit]
+    [now, clampLimit(limit, { fallback: 1, max: LIMIT_MAX.dequeueNext })]
   );
   // RETURNING has no order; give the claim order back.
   rows.sort((a, b) =>

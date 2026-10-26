@@ -15,6 +15,7 @@ import type { KnowledgeBaseChunkRecord, KnowledgeBaseRecord } from "../database.
 import { type Store } from "../store.js";
 import { parseJsonSafe, toNum, toStr } from "./helpers.js";
 import type { PgContext } from "./context.js";
+import { clampLimit, LIMIT_MAX } from "../store-limits.js";
 
 export const UNIMPLEMENTED_METHODS: readonly (keyof Store)[] = [];
 
@@ -256,7 +257,7 @@ export async function listKnowledgeBaseChunkPreviews(ctx: PgContext, input: { kn
   id: string; sourceId: string | null; chunkIndex: number; content: string;
   metadata: Record<string, unknown> | null; createdAt: string;
 }>> {
-  const limit = Math.min(input.limit ?? 50, 500);
+  const limit = clampLimit(input.limit, { fallback: 50, max: LIMIT_MAX.knowledgeBaseChunkPreviews });
   const params: unknown[] = [input.knowledgeBaseId];
   let where = `knowledge_base_id = $1`;
   if (input.sourceId) {

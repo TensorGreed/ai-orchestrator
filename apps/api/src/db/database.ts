@@ -61,6 +61,7 @@ import {
 import { isEmptyDataLabels, labelsForUntrackedSave, mergeDataLabels, parseStoredDataLabels, type DataLabels } from "@ai-orchestrator/shared";
 import { queuedRunTimeoutMs, STUCK_JOB_MARGIN_MS } from "./queue-timeouts.js";
 import { ProjectNotEmptyError } from "./store-errors.js";
+import { clampLimit, LIMIT_MAX } from "./store-limits.js";
 import type {
   ApprovalDecisionInput,
   CancelExecutionResult,
@@ -5788,7 +5789,7 @@ export class SqliteStore implements Store {
        WHERE status = 'pending' AND scheduled_at <= ?
        ORDER BY priority DESC, scheduled_at ASC
        LIMIT ?`,
-      [now, limit]
+      [now, clampLimit(limit, { fallback: 1, max: LIMIT_MAX.dequeueNext })]
     );
 
     if (rows.length === 0) {
@@ -10621,7 +10622,7 @@ export class SqliteStore implements Store {
     id: string; sourceId: string | null; chunkIndex: number; content: string;
     metadata: Record<string, unknown> | null; createdAt: string;
   }>> {
-    const limit = Math.min(input.limit ?? 50, 500);
+    const limit = clampLimit(input.limit, { fallback: 50, max: LIMIT_MAX.knowledgeBaseChunkPreviews });
     const filters = ["knowledge_base_id = ?"];
     const params: Array<string | number> = [input.knowledgeBaseId];
     if (input.sourceId) { filters.push("source_id = ?"); params.push(input.sourceId); }
@@ -10920,7 +10921,7 @@ export class SqliteStore implements Store {
   async listMcpServerProbes(serverId: string, limit = 100): Promise<McpServerProbeRecord[]> {
     return this.queryAll<McpServerProbeRow>(
       `SELECT * FROM mcp_server_probes WHERE server_id = ? ORDER BY started_at DESC, rowid DESC LIMIT ?`,
-      [serverId, limit]
+      [serverId, clampLimit(limit, { fallback: 100, max: LIMIT_MAX.mcpServerProbes })]
     ).map(mapMcpServerProbe);
   }
 
@@ -10936,7 +10937,7 @@ export class SqliteStore implements Store {
   async listMcpToolSnapshots(serverId: string, limit = 50): Promise<McpToolSnapshotRecord[]> {
     return this.queryAll<McpToolSnapshotRow>(
       `SELECT * FROM mcp_tool_snapshots WHERE server_id = ? ORDER BY created_at DESC, rowid DESC LIMIT ?`,
-      [serverId, limit]
+      [serverId, clampLimit(limit, { fallback: 50, max: LIMIT_MAX.mcpToolSnapshots })]
     ).map(mapMcpToolSnapshot);
   }
 

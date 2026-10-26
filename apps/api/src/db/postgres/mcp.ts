@@ -55,6 +55,7 @@ import {
 import { type Store } from "../store.js";
 import { parseJsonSafe, toNum, toStr } from "./helpers.js";
 import type { PgContext } from "./context.js";
+import { clampLimit, LIMIT_MAX } from "../store-limits.js";
 
 export const UNIMPLEMENTED_METHODS: readonly (keyof Store)[] = [];
 
@@ -543,7 +544,7 @@ export async function recordMcpServerProbe(ctx: PgContext, ...[input]: Parameter
 export async function listMcpServerProbes(ctx: PgContext, ...[serverId, limit = 100]: Parameters<Store["listMcpServerProbes"]>): ReturnType<Store["listMcpServerProbes"]> {
   const result = await ctx.query<Row>(
     `SELECT * FROM mcp_server_probes WHERE server_id = $1 ORDER BY started_at DESC, ${INSERTION_DESC} LIMIT $2`,
-    [serverId, limit]
+    [serverId, clampLimit(limit, { fallback: 100, max: LIMIT_MAX.mcpServerProbes })]
   );
   return result.map(mapMcpServerProbe);
 }
@@ -560,7 +561,7 @@ export async function getMcpToolSnapshot(ctx: PgContext, ...[id]: Parameters<Sto
 export async function listMcpToolSnapshots(ctx: PgContext, ...[serverId, limit = 50]: Parameters<Store["listMcpToolSnapshots"]>): ReturnType<Store["listMcpToolSnapshots"]> {
   const result = await ctx.query<Row>(
     `SELECT * FROM mcp_tool_snapshots WHERE server_id = $1 ORDER BY created_at DESC, ${INSERTION_DESC} LIMIT $2`,
-    [serverId, limit]
+    [serverId, clampLimit(limit, { fallback: 50, max: LIMIT_MAX.mcpToolSnapshots })]
   );
   return result.map(mapMcpToolSnapshot);
 }
