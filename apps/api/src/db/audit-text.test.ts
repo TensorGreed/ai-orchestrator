@@ -183,7 +183,8 @@ for (const kind of kinds) {
         const body = verify.json() as { ok: boolean; rowsChecked: number; unverifiable?: unknown };
         expect(body.ok).toBe(true);
         expect(body.unverifiable).toBeUndefined();
-        const audited = (await store.listAuditLogs({ eventType: "tag.create" })).items.map((item) => item.resourceId);
+        // Sorted: the two rows can share a millisecond, and SQLite's order within one is not insertion order.
+        const audited = (await store.listAuditLogs({ eventType: "tag.create" })).items.map((item) => item.resourceId).sort();
         expect(audited).toEqual(["plain", "�"]);
         expect(body.rowsChecked).toBe((await store.listAuditLogs({ pageSize: 500 })).total);
       } finally {
