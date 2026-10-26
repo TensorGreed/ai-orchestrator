@@ -8,6 +8,11 @@
  *
  * Methods are grouped by domain. Records and filters are the types the SQLite store defines (`./database.js`) or
  * the shared workflow contract (`@ai-orchestrator/shared`).
+ *
+ * NUL characters in text: SQLite stores U+0000 in a string field as given. Postgres TEXT cannot hold it, so the
+ * Postgres store writes (and looks up) every string with U+0000 replaced by U+FFFD (postgres/context.ts), and reads
+ * it back that way. JSON fields are unaffected on both (JSON.stringify writes the escape `\u0000`). The audit chain
+ * on Postgres hashes the stored value, so it verifies either way.
  */
 import type {
   ChatMessage,
