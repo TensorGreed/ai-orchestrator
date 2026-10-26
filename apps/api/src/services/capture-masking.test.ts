@@ -205,6 +205,38 @@ describe("maskCapturedRun", () => {
     expect((masked.modelTape!.entries[0]!.request as unknown as { tools: typeof tools }).tools).toEqual(tools);
   });
 
+  // Re-review 2 L1: worker `a..b` is delegated as `delegate_to_a__b`, which is also how a server `delegate_to_a` exposes its tool `b`.
+  it("never holds back a tool named `<configured MCP serverId>__…`, even when a worker's delegate tool has the same name", () => {
+    const OTHER = "bob.smith@corp-example.com";
+    const tool = { name: "delegate_to_a__b", description: `[delegate_to_a] owner ${OTHER}`, inputSchema: { type: "object" } };
+    const workflow = withWorkers("a..b");
+    const capture = (servers: unknown[], keepLiteralsFrom: unknown) => {
+      const base = run();
+      base.cassette = { ...base.cassette!, truncated: true, servers, entries: [] } as unknown as McpCassette;
+      const request = { messages: [{ role: "user", content: "Who owns it?" }], tools: [tool], params: { model: "m" } };
+      base.modelTape = { ...base.modelTape, entries: [{ ...base.modelTape.entries[0]!, request }] } as unknown as ModelTape;
+      return maskCapturedRun(base, { key, dictionaries: [], keepLiteralsFrom });
+    };
+    const surrogate = surrogateFor(OTHER, "email", key);
+    const mcpNode = { id: "m", type: "mcp_tool", name: "Lookup", config: { serverId: "delegate_to_a" } };
+    const inline = { id: "sup", type: "supervisor_node", name: "Sup", config: { mcpServers: [{ serverId: "delegate_to_a", connection: {} }] } };
+    const cases = [
+      // The server is named by the cassette (a registry server's adapter), by an MCP Tool node, or inline on an agent node.
+      capture([{ key: "registry:crm", registryServerId: "crm", adapterId: "delegate_to_a" }], workflow),
+      capture([], { ...workflow, nodes: [...workflow.nodes, mcpNode] }),
+      capture([], { ...workflow, nodes: [inline, ...workflow.nodes.slice(1)] })
+    ];
+    for (const masked of cases) {
+      expect(JSON.stringify(masked)).not.toContain(OTHER);
+      expect((masked.modelTape!.entries[0]!.request as unknown as { tools: Array<typeof tool> }).tools[0]!.description).toBe(`[delegate_to_a] owner ${surrogate}`);
+    }
+    // With no such server, the worker's delegate tool stays as written.
+    const kept = { ...tool, description: "Delegate task to a..b." };
+    const plain = run();
+    plain.modelTape = { ...plain.modelTape, entries: [{ ...plain.modelTape.entries[0]!, request: { messages: [], tools: [kept], params: { model: "m" } } }] } as unknown as ModelTape;
+    expect((maskCapturedRun(plain, { key, dictionaries: [], keepLiteralsFrom: workflow }).modelTape!.entries[0]!.request as unknown as { tools: unknown[] }).tools).toEqual([kept]);
+  });
+
   // Re-review round 2 N2: every scalar in a held-back definition is checked, numbers as their decimal text.
   it("drops the capture when a held-back schema holds a collected value as a number (default, enum, examples, const at any depth)", () => {
     const CARD = "4111111111111111";

@@ -136,6 +136,39 @@ export function runtimeToolNames(workflow: unknown): Set<string> {
   return names;
 }
 
+/**
+ * The adapter ids of the MCP servers this run could reach: every `serverId`
+ * the captured workflow sets (an MCP Tool node, an agent's inline servers)
+ * and every adapter the cassette recorded (registry servers included). The
+ * agent names their tools `<serverId>__<tool>`, so such a name is an MCP
+ * tool even when it equals a worker's delegate tool name (worker `a..b` and
+ * server `delegate_to_a` both give `delegate_to_a__b`).
+ */
+export function configuredMcpServerIds(workflow: unknown, cassette: McpCassette | null): Set<string> {
+  const ids = new Set<string>();
+  for (const server of cassette?.servers ?? []) {
+    if (typeof server.adapterId === "string" && server.adapterId) ids.add(server.adapterId);
+  }
+  const walk = (value: unknown, depth: number) => {
+    if (depth > MAX_HELD_TOOL_DEPTH) return;
+    if (Array.isArray(value)) for (const item of value) walk(item, depth + 1);
+    else if (isRecord(value)) {
+      for (const [field, item] of Object.entries(value)) {
+        if (field === "serverId" && typeof item === "string" && item) ids.add(item);
+        else walk(item, depth + 1);
+      }
+    }
+  };
+  if (isRecord(workflow)) walk(workflow.nodes, 0);
+  return ids;
+}
+
+/** True when the name is how the agent exposes a tool of one of these servers. */
+function isMcpExposedName(name: string, serverIds: ReadonlySet<string>): boolean {
+  for (const id of serverIds) if (name.startsWith(`${id}__`)) return true;
+  return false;
+}
+
 /** Deepest nesting walked in a held-back tool definition; deeper fails closed. */
 const MAX_HELD_TOOL_DEPTH = 64;
 
@@ -168,7 +201,7 @@ type NameSlot = { holder: Record<string, unknown>; name: string; path: readonly 
  * A tape entry's content for masking, and how to put held-back parts back.
  *
  * A tool whose name the runtime builds itself (`runtimeNames`) and no MCP
- * server listed is held back as written: its definition is left out of the
+ * server listed or could expose (`<serverId>__…`) is held back as written: its definition is left out of the
  * content and the names of calls to it are swapped for placeholders, then
  * put back by position. Every string and number a held-back definition holds
  * is returned as a `catalog` identifier, so a collected value in one drops
@@ -181,11 +214,14 @@ function tapeEntryContent(
   index: number,
   listed: { has: (name: string) => boolean },
   runtimeNames: ReadonlySet<string>,
+  serverIds: ReadonlySet<string>,
   prefix: string
 ): { content: TapeContent; identifiers: MaskIdentifier[]; restore: (masked: TapeContent) => TapeContent } {
   const tools = Array.isArray(entry.request.tools) ? entry.request.tools : [];
-  // Held back only when the runtime builds the name and no MCP server listed it (a listed name is content either way).
-  const heldAt = tools.map((tool) => isRecord(tool) && typeof tool.name === "string" && runtimeNames.has(tool.name) && !listed.has(tool.name));
+  // Held back only when the runtime builds the name, no MCP server listed it and no configured server could expose it (such a name is content either way).
+  const heldAt = tools.map(
+    (tool) => isRecord(tool) && typeof tool.name === "string" && runtimeNames.has(tool.name) && !listed.has(tool.name) && !isMcpExposedName(tool.name, serverIds)
+  );
   const held = new Set<string>();
   tools.forEach((tool, position) => {
     if (heldAt[position] && isRecord(tool) && typeof tool.name === "string") held.add(tool.name);
@@ -376,8 +412,9 @@ export function* maskCapturedRunSteps(run: CapturedRunParts, options: MaskRunOpt
   }
   const listed = mcpListedToolNames(run.cassette);
   const runtimeNames = runtimeToolNames(options.keepLiteralsFrom);
+  const serverIds = configuredMcpServerIds(options.keepLiteralsFrom, run.cassette);
   const prefix = heldNamePrefix();
-  const tapeContents = run.modelTape?.entries.map((entry, index) => tapeEntryContent(entry, index, listed, runtimeNames, prefix)) ?? [];
+  const tapeContents = run.modelTape?.entries.map((entry, index) => tapeEntryContent(entry, index, listed, runtimeNames, serverIds, prefix)) ?? [];
   run.modelTape?.entries.forEach((entry, index) => add(`tape:${index}`, tapeContents[index]!.content, entry.nodeId));
   run.memorySeed?.sessions.forEach((session, index) => add(`memory:${index}`, session));
 
