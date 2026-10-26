@@ -9,6 +9,7 @@ import type { Store } from "../store.js";
 import {
   createTestStore,
   noticePostgresSkipped,
+  testPostgresPool,
   testPostgresSettings,
   testPostgresUrl,
   type TestStore
@@ -97,4 +98,54 @@ describe.skipIf(!enabled)("Postgres concurrency: leases and budget alerts (two s
     expect(recorded.filter(Boolean)).toHaveLength(0);
     expect(await a.listBudgetAlerts({ budgetId: "b-del", limit: 500 })).toEqual([]);
   });
+
+  async function orphanAlerts(): Promise<number> {
+    const pool = testPostgresPool(first!.schema!);
+    try {
+      const r = await pool.query<{ n: string }>(
+        `SELECT count(*) AS n FROM budget_alerts al WHERE NOT EXISTS (SELECT 1 FROM budgets b WHERE b.id = al.budget_id)`
+      );
+      return Number(r.rows[0]?.n ?? 0);
+    } finally {
+      await pool.end();
+    }
+  }
+
+  it("an alert that commits while deleteBudget waits is deleted with the budget (no orphan)", async () => {
+    await a.createBudget({ id: "det", name: "Det", scopeType: "global", period: "month", limitType: "usd", limitValue: 1, action: "warn" });
+    const pool = testPostgresPool(first!.schema!);
+    const client = await pool.connect();
+    try {
+      // recordBudgetAlert's own steps on a raw connection: lock the budget, then insert the alert.
+      await client.query("BEGIN");
+      await client.query(`SELECT id FROM budgets WHERE id = $1 FOR UPDATE`, ["det"]);
+      const deleting = b.deleteBudget("det");
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      await client.query(
+        `INSERT INTO budget_alerts (id, budget_id, period_start, severity, usage_value, limit_value, fired_at)
+         VALUES ('x', 'det', '2026-10-01T00:00:00.000Z', 'warn', 2, 1, now())`
+      );
+      await client.query("COMMIT");
+      expect(await deleting).toBe(true);
+    } finally {
+      client.release();
+      await pool.end();
+    }
+    expect(await a.getBudget("det")).toBeNull();
+    expect(await orphanAlerts()).toBe(0);
+  });
+
+  it("alerts raced against deleteBudget on two stores never leave an orphan alert", async () => {
+    for (let i = 0; i < 60; i += 1) {
+      const id = `race-${i}`;
+      await a.createBudget({ id, name: id, scopeType: "global", period: "month", limitType: "usd", limitValue: 1, action: "warn" });
+      const [recorder, deleter] = i % 2 === 0 ? [a, b] : [b, a];
+      await Promise.all([
+        recorder.recordBudgetAlert({ id: `al-${i}`, budgetId: id, periodStart: "2026-10-01T00:00:00.000Z", severity: "warn", usageValue: 2, limitValue: 1 }),
+        deleter.deleteBudget(id)
+      ]);
+      expect(await a.getBudget(id)).toBeNull();
+    }
+    expect(await orphanAlerts()).toBe(0);
+  }, 60_000);
 });

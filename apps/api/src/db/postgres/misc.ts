@@ -599,9 +599,15 @@ export async function updateBudget(ctx: PgContext, id: string, patch: Parameters
   return true;
 }
 
-/** Removes the budget and its alerts together; true, as on SQLite, whether or not it existed. */
+/**
+ * Removes the budget and its alerts together; true, as on SQLite, whether or not it existed. The budget row is locked
+ * first, the lock recordBudgetAlert takes: a racing alert either commits before the lock is granted (and the alert
+ * DELETE below, a new statement, sees and removes it) or waits and then finds no budget and records nothing. Deleting
+ * the alerts first left an orphan when an alert committed between the two statements.
+ */
 export async function deleteBudget(ctx: PgContext, id: string): Promise<boolean> {
   await ctx.withTransaction(async (client) => {
+    await client.query(`SELECT id FROM budgets WHERE id = $1 FOR UPDATE`, [id]);
     await client.query(`DELETE FROM budget_alerts WHERE budget_id = $1`, [id]);
     await client.query(`DELETE FROM budgets WHERE id = $1`, [id]);
   });
