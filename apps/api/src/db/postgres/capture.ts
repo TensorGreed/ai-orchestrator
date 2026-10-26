@@ -18,7 +18,7 @@ import {
 import type { ReplayCaptureSettingsRecord } from "../database.js";
 import { type Store } from "../store.js";
 import type { PgContext } from "./context.js";
-import { toNum, toStr } from "./helpers.js";
+import { nulSafeJsonb, toNum, toStr } from "./helpers.js";
 
 export const UNIMPLEMENTED_METHODS: readonly (keyof Store)[] = [];
 
@@ -129,7 +129,7 @@ export async function listReplayCaptures(ctx: PgContext, ...[options]: Parameter
   if (options.runStatus) where.push(`source_status = ${bind(options.runStatus)}`);
   if (options.trigger === REPLAY_CAPTURE_API_KEY_FILTER) {
     // Runs an API key started keep the trigger `manual`; the capture info records the source.
-    where.push(`(capabilities_json::jsonb #>> '{capture,source}') = 'api_key'`);
+    where.push(`(${nulSafeJsonb("capabilities_json")} #>> '{capture,source}') = 'api_key'`);
   } else if (options.trigger) {
     where.push(`source_trigger_type = ${bind(options.trigger)}`);
   }

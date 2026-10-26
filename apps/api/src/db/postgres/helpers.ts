@@ -7,6 +7,16 @@ export function labelsField(value: string | null | undefined): { labels?: DataLa
   return labels ? { labels } : {};
 }
 
+/**
+ * SQL that reads a stored JSON text column as jsonb, NUL-proof. jsonb (and json's operators) refuse the escape
+ * `\u0000` with 22P05 anywhere in the document, so one NUL in a user's string would fail every query that reads the
+ * column. The escape is swapped for `\ufffd` (the same width, still valid JSON) before the cast, so the other fields
+ * read as SQLite's JSON functions read them. `column` is a fixed column name, never input.
+ */
+export function nulSafeJsonb(column: string): string {
+  return `replace(${column}, '\\u0000', '\\ufffd')::jsonb`;
+}
+
 // Helper to safely parse JSON
 export function parseJsonSafe(value: string | null | undefined): unknown {
   if (!value) return null;

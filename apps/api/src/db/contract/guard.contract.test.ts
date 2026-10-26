@@ -122,6 +122,20 @@ describeStoreContract("store contract: guard", (ctx) => {
     expect(await store.anyGuardProfileUsesLabels()).toBe(true);
   });
 
+  it("anyGuardProfileUsesLabels never throws on a NUL character in a stored document, and still reads its fields", async () => {
+    const store = ctx.store();
+    await store.insertGuardProfile(profileInput("nul", { name: "a\u0000b", document: { name: "a\u0000b", labels: "off\u0000", tags: ["\u0000"] } }));
+    expect(await store.anyGuardProfileUsesLabels()).toBe(false);
+    // Later clean versions are still read: the NUL document stays in the table.
+    await store.addGuardProfileVersion({ profileId: "nul", name: "clean", document: { name: "clean" }, hash: "h2", createdBy: null });
+    expect(await store.anyGuardProfileUsesLabels()).toBe(false);
+    await store.addGuardProfileVersion({ profileId: "nul", name: "x\u0000", document: { name: "x\u0000", labels: "propagated" }, hash: "h3", createdBy: null });
+    expect(await store.anyGuardProfileUsesLabels()).toBe(true);
+    await store.deleteGuardProfile("nul");
+    await store.insertGuardProfile(profileInput("nul-rules", { document: { note: "\u0000", destinations: { rules: [{ id: "\u0000" }] } } }));
+    expect(await store.anyGuardProfileUsesLabels()).toBe(true);
+  });
+
   it("bindings upsert by scope and id, and list by profile in scope then id order", async () => {
     const store = ctx.store();
     expect(await store.getGuardBinding("project", "default")).toBeNull();
