@@ -5,14 +5,11 @@
  */
 import { randomUUID } from "node:crypto";
 import { queuedRunTimeoutMs, STUCK_JOB_MARGIN_MS } from "../queue-timeouts.js";
-import { StoreNotImplementedError } from "../store-errors.js";
 import { type Store } from "../store.js";
 import { toNum, toStr } from "./helpers.js";
 import type { PgContext } from "./context.js";
 
-export const UNIMPLEMENTED_METHODS: readonly (keyof Store)[] = [
-  "hasActiveQueueItem"
-];
+export const UNIMPLEMENTED_METHODS: readonly (keyof Store)[] = [];
 
 export async function enqueueExecution(ctx: PgContext, input: {
   id: string;
@@ -42,6 +39,11 @@ export async function enqueueExecution(ctx: PgContext, input: {
   );
 }
 
+/**
+ * Claims up to `limit` due jobs, highest priority first, then oldest schedule. One statement: the rows are picked with
+ * `FOR UPDATE SKIP LOCKED` and moved to `running` together, so two pollers (or two API instances) never claim the same
+ * job; a poller skips rows another one is claiming instead of waiting for them.
+ */
 export async function dequeueNext(ctx: PgContext, limit = 1): Promise<Array<{
   id: string;
   workflowId: string;
@@ -57,27 +59,31 @@ export async function dequeueNext(ctx: PgContext, limit = 1): Promise<Array<{
     workflow_id: string;
     workflow_name: string | null;
     payload_json: string;
+    priority: number;
     attempts: number;
     max_attempts: number;
     scheduled_at: string;
+    created_at: string;
   }>(
-    `SELECT id, workflow_id, workflow_name, payload_json, attempts, max_attempts, scheduled_at
-       FROM execution_queue
-       WHERE status = 'pending' AND scheduled_at <= $1
-       ORDER BY priority DESC, scheduled_at ASC
-       LIMIT $2`,
+    `WITH picked AS (
+       SELECT id FROM execution_queue
+        WHERE status = 'pending' AND scheduled_at <= $1
+        ORDER BY priority DESC, scheduled_at ASC, created_at ASC, id COLLATE "C"
+        LIMIT $2
+        FOR UPDATE SKIP LOCKED
+     )
+     UPDATE execution_queue AS q SET status = 'running', started_at = $1, updated_at = $1
+       FROM picked WHERE q.id = picked.id
+     RETURNING q.id, q.workflow_id, q.workflow_name, q.payload_json, q.priority, q.attempts, q.max_attempts, q.scheduled_at, q.created_at`,
     [now, limit]
   );
-
-  if (rows.length === 0) return [];
-
-  for (const row of rows) {
-    await ctx.execute(
-      `UPDATE execution_queue SET status = 'running', started_at = $1, updated_at = $2 WHERE id = $3`,
-      [now, now, row.id]
-    );
-  }
-
+  // RETURNING has no order; give the claim order back.
+  rows.sort((a, b) =>
+    toNum(b.priority) - toNum(a.priority) ||
+    Date.parse(toStr(a.scheduled_at)) - Date.parse(toStr(b.scheduled_at)) ||
+    Date.parse(toStr(a.created_at)) - Date.parse(toStr(b.created_at)) ||
+    (toStr(a.id) < toStr(b.id) ? -1 : toStr(a.id) > toStr(b.id) ? 1 : 0)
+  );
   return rows.map((row) => {
     let payload: Record<string, unknown> = {};
     try {
@@ -85,7 +91,7 @@ export async function dequeueNext(ctx: PgContext, limit = 1): Promise<Array<{
       if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
         payload = parsed as Record<string, unknown>;
       }
-    } catch { /* ignore */ }
+    } catch { /* a malformed payload runs with none, as on SQLite */ }
     return {
       id: toStr(row.id),
       workflowId: toStr(row.workflow_id),
@@ -115,53 +121,55 @@ export async function markQueueItemCompleted(ctx: PgContext, id: string): Promis
 }
 
 /** Retries with backoff until max attempts; `retryable: false` moves the job to the DLQ now. */
+/** Retries with backoff until max attempts; `retryable: false` moves the job to the DLQ now. One transaction. */
 export async function markQueueItemFailed(ctx: PgContext, id: string, error: string, options: { retryable?: boolean } = {}): Promise<void> {
   const now = new Date().toISOString();
-  const row = await ctx.queryOne<{
-    id: string;
-    workflow_id: string;
-    workflow_name: string | null;
-    payload_json: string;
-    attempts: number;
-    max_attempts: number;
-  }>(
-    `SELECT id, workflow_id, workflow_name, payload_json, attempts, max_attempts FROM execution_queue WHERE id = $1`,
-    [id]
-  );
-  if (!row) return;
+  await ctx.withTransaction(async (client) => {
+    const row = (await client.query<{
+      id: string;
+      workflow_id: string;
+      workflow_name: string | null;
+      payload_json: string;
+      attempts: number;
+      max_attempts: number;
+    }>(
+      `SELECT id, workflow_id, workflow_name, payload_json, attempts, max_attempts FROM execution_queue WHERE id = $1 FOR UPDATE`,
+      [id]
+    )).rows[0];
+    if (!row) return;
 
-  const attempts = toNum(row.attempts) + 1;
-  const maxAttempts = toNum(row.max_attempts);
+    const attempts = toNum(row.attempts) + 1;
+    const maxAttempts = toNum(row.max_attempts);
 
-  if (attempts >= maxAttempts || options.retryable === false) {
-    const dlqId = randomUUID();
-    await ctx.execute(
-      `INSERT INTO execution_queue_dlq (id, original_id, workflow_id, workflow_name, payload_json, attempts, final_error, failed_at, created_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-      [
-        dlqId,
-        toStr(row.id),
-        toStr(row.workflow_id),
-        row.workflow_name ? toStr(row.workflow_name) : null,
-        toStr(row.payload_json),
-        attempts,
-        error,
-        now,
-        now
-      ]
-    );
-    await ctx.execute(
-      `UPDATE execution_queue SET status = 'dead', attempts = $1, last_error = $2, updated_at = $3 WHERE id = $4`,
-      [attempts, error, now, id]
-    );
-  } else {
-    const backoffMs = 1000 * Math.pow(2, attempts - 1);
-    const retryAt = new Date(Date.now() + backoffMs).toISOString();
-    await ctx.execute(
-      `UPDATE execution_queue SET status = 'pending', attempts = $1, last_error = $2, scheduled_at = $3, updated_at = $4 WHERE id = $5`,
-      [attempts, error, retryAt, now, id]
-    );
-  }
+    if (attempts >= maxAttempts || options.retryable === false) {
+      await client.query(
+        `INSERT INTO execution_queue_dlq (id, original_id, workflow_id, workflow_name, payload_json, attempts, final_error, failed_at, created_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+        [
+          randomUUID(),
+          toStr(row.id),
+          toStr(row.workflow_id),
+          row.workflow_name ? toStr(row.workflow_name) : null,
+          toStr(row.payload_json),
+          attempts,
+          error,
+          now,
+          now
+        ]
+      );
+      await client.query(
+        `UPDATE execution_queue SET status = 'dead', attempts = $1, last_error = $2, updated_at = $3 WHERE id = $4`,
+        [attempts, error, now, id]
+      );
+    } else {
+      const backoffMs = 1000 * Math.pow(2, attempts - 1);
+      const retryAt = new Date(Date.now() + backoffMs).toISOString();
+      await client.query(
+        `UPDATE execution_queue SET status = 'pending', attempts = $1, last_error = $2, scheduled_at = $3, updated_at = $4 WHERE id = $5`,
+        [attempts, error, retryAt, now, id]
+      );
+    }
+  });
 }
 
 export async function requeueStuckItems(ctx: PgContext, stuckAfterMs = 600_000, excludeIds: string[] = [], marginMs = STUCK_JOB_MARGIN_MS): Promise<number> {
@@ -261,6 +269,11 @@ export async function listDlqItems(ctx: PgContext, limit = 50, workflowIds?: str
   }));
 }
 
-export async function hasActiveQueueItem(_ctx: PgContext, ..._args: Parameters<Store["hasActiveQueueItem"]>): ReturnType<Store["hasActiveQueueItem"]> {
-  throw new StoreNotImplementedError("hasActiveQueueItem");
+/** Whether `id`, or a job keyed `<id>:…`, is pending or running. LIKE is case-insensitive on SQLite, so ILIKE here. */
+export async function hasActiveQueueItem(ctx: PgContext, id: string): Promise<boolean> {
+  const row = await ctx.queryOne<{ id: string }>(
+    `SELECT id FROM execution_queue WHERE (id = $1 OR id ILIKE $2 ESCAPE '\\') AND status IN ('pending', 'running') LIMIT 1`,
+    [id, `${id.replace(/[\\%_]/g, "\\$&")}:%`]
+  );
+  return Boolean(row);
 }
