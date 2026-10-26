@@ -18,7 +18,7 @@ import type {
 } from "../database.js";
 import { SUBJECT_EXECUTION_TRIGGERS } from "../database.js";
 import { type Store } from "../store.js";
-import { nulSafeJsonb, toNum, toStr } from "./helpers.js";
+import { storedJsonb, toNum, toStr } from "./helpers.js";
 import type { PgContext } from "./context.js";
 
 export const UNIMPLEMENTED_METHODS: readonly (keyof Store)[] = [];
@@ -145,16 +145,21 @@ export async function anyGuardProfileUsesLabels(ctx: PgContext): Promise<boolean
   if (revision !== undefined && cached?.revision === revision) return cached.value;
   // Read as JSON (not as text), so key order and formatting never matter. A document that is not a JSON object
   // cannot match (SQLite's json_valid + json_extract read it as no match too); CASE keeps the cast behind the check.
-  // A NUL character in any string of any version must not fail this check (every run calls it): nulSafeJsonb.
-  const doc = nulSafeJsonb("document_json");
+  // A NUL or a lone surrogate in any string of any version must not fail this check (every run calls it): storedJsonb.
+  // The document is cast once per version, in the subquery (OFFSET 0 keeps the planner from copying the cast into
+  // each condition).
   const row = await ctx.queryOne<{ found: number }>(
-    `SELECT 1 AS found FROM guard_profile_versions
-      WHERE CASE WHEN document_json IS JSON OBJECT THEN (
-        (${doc} ->> 'labels') IS NOT DISTINCT FROM 'propagated'
-        OR (jsonb_typeof(${doc} -> 'destinations' -> 'rules') = 'array'
-            AND jsonb_array_length(${doc} -> 'destinations' -> 'rules') > 0)
-        OR jsonb_typeof(${doc} -> 'channels' -> 'egress') = 'object'
-      ) ELSE false END
+    `SELECT 1 AS found FROM (
+        SELECT CASE WHEN document_json IS JSON OBJECT THEN ${storedJsonb("document_json")} END AS doc
+          FROM guard_profile_versions
+         OFFSET 0
+      ) v
+      WHERE v.doc IS NOT NULL AND (
+        (v.doc ->> 'labels') IS NOT DISTINCT FROM 'propagated'
+        OR (jsonb_typeof(v.doc -> 'destinations' -> 'rules') = 'array'
+            AND jsonb_array_length(v.doc -> 'destinations' -> 'rules') > 0)
+        OR jsonb_typeof(v.doc -> 'channels' -> 'egress') = 'object'
+      )
       LIMIT 1`
   );
   const value = Boolean(row);

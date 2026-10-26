@@ -81,6 +81,15 @@ describeStoreContract("store contract: replay capture", (ctx) => {
     );
     expect((await store.listReplayCaptures({ workflowId: "wf-1", trigger: REPLAY_CAPTURE_API_KEY_FILTER })).items.map((i) => i.id)).toEqual(["c3", "c4"]);
     await store.deleteReplayRecording("c4");
+    // Nor does a lone surrogate (stored as the escape `\ud800`, which jsonb refuses).
+    await store.saveReplayRecording(
+      recording("c5", {
+        capturedAt: "2026-09-01T10:00:00.000Z",
+        capabilities: { mcp: "none", models: "live", memory: "empty", workflowSource: "captured", note: "a\uD800b\uDC00", capture: { source: "api_key" } } as never
+      })
+    );
+    expect((await store.listReplayCaptures({ workflowId: "wf-1", trigger: REPLAY_CAPTURE_API_KEY_FILTER })).items.map((i) => i.id)).toEqual(["c3", "c5"]);
+    await store.deleteReplayRecording("c5");
     expect(
       (await store.listReplayCaptures({ workflowId: "wf-1", from: "2026-10-02T10:00:00.000Z", to: "2026-10-03T10:00:00.000Z" })).items.map((i) => i.id)
     ).toEqual(["c3", "c2"]);

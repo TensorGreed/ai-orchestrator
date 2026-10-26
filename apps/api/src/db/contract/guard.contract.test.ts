@@ -136,6 +136,22 @@ describeStoreContract("store contract: guard", (ctx) => {
     expect(await store.anyGuardProfileUsesLabels()).toBe(true);
   });
 
+  it("anyGuardProfileUsesLabels never throws on a lone surrogate in a stored document, and answers as SQLite does", async () => {
+    const store = ctx.store();
+    // JSON.stringify writes a lone surrogate as the escape `\ud800`, which jsonb refuses (22P02).
+    await store.insertGuardProfile(profileInput("hi", { name: "cut \uD800", document: { name: "cut \uD800", labels: "off" } }));
+    expect(await store.anyGuardProfileUsesLabels()).toBe(false);
+    await store.insertGuardProfile(profileInput("lo", { document: { name: "x\uDC00", labels: "propagated" } }));
+    expect(await store.anyGuardProfileUsesLabels()).toBe(true);
+    await store.deleteGuardProfile("lo");
+    expect(await store.anyGuardProfileUsesLabels()).toBe(false);
+    // A valid pair, a literal backslash before "ud800" and a lone surrogate inside a rule all still read.
+    await store.insertGuardProfile(
+      profileInput("mixed", { document: { a: "😀", b: "\\ud800", c: "\uDBFF\uDBFF\uDC00", destinations: { rules: [{ id: "\uDFFF" }] } } })
+    );
+    expect(await store.anyGuardProfileUsesLabels()).toBe(true);
+  });
+
   it("bindings upsert by scope and id, and list by profile in scope then id order", async () => {
     const store = ctx.store();
     expect(await store.getGuardBinding("project", "default")).toBeNull();
