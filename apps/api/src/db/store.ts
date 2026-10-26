@@ -1628,14 +1628,15 @@ export interface Store {
    * Rows persisted before Phase 8.4 (where entry_hash IS NULL) are skipped —
    * we can only attest the chain from the first hash onwards.
    *
-   * `unverifiable` (present only when not empty) lists rows written before audit text was normalised whose content
-   * cannot be checked; `ok` is false while it is not empty. The rule is in db/audit-chain.ts.
+   * `unverifiable` (present only when not empty) lists rows whose content cannot be checked: either a row written
+   * before audit text was normalised, or an edit. Each is named by its chain position and hashes; its id and createdAt
+   * are as stored (unverified). `ok` is false while it is not empty. The rule is in db/audit-chain.ts.
    */
   verifyAuditChain(): Promise<{
     ok: boolean;
     rowsChecked: number;
     firstBrokenAt?: { id: string; createdAt: string; expected: string; stored: string };
-    unverifiable?: Array<{ id: string; createdAt: string; reason: string }>;
+    unverifiable?: Array<{ id: string; createdAt: string; position: number; prevHash: string; entryHash: string; reason: string }>;
   }>;
   listAuditLogs(filter?: {
     category?: string;

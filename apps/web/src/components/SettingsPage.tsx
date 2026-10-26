@@ -1758,6 +1758,10 @@ function AuditChainPanel() {
   );
 }
 
+function shortHash(hash: string): string {
+  return hash.length > 12 ? `${hash.slice(0, 12)}…` : hash;
+}
+
 /** The verify-chain verdict: intact, broken at a row, or verified except rows whose content cannot be checked. */
 export function AuditChainStatusLine({ status }: { status: AuditChainStatus }) {
   const unverifiable = status.unverifiable ?? [];
@@ -1777,8 +1781,11 @@ export function AuditChainStatusLine({ status }: { status: AuditChainStatus }) {
       {unverifiable.length > 0 && (
         <ul style={{ margin: "0.25rem 0 0", paddingLeft: "1.25rem" }}>
           {unverifiable.map((row) => (
-            <li key={row.id} title={row.reason}>
-              <code>{row.id}</code> ({row.createdAt}): written with text the database replaced (U+FFFD); its content cannot be verified.
+            <li key={`${row.position}:${row.entryHash}`} title={row.reason}>
+              Row {row.position} in the chain (entry hash <code>{shortHash(row.entryHash)}</code>, follows prev hash{" "}
+              <code>{shortHash(row.prevHash)}</code>): Content cannot be verified: either a row written before audit text was
+              normalised, or an edit. Compare it with a backup or export. Its id and time as stored (unverified):{" "}
+              <code>{row.id}</code>, {row.createdAt}.
             </li>
           ))}
         </ul>

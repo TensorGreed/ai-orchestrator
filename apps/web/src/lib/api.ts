@@ -2098,8 +2098,12 @@ export interface AuditChainStatus {
   ok: boolean;
   rowsChecked: number;
   firstBrokenAt?: { id: string; createdAt: string; expected: string; stored: string };
-  /** Rows written before audit text was normalised whose content cannot be checked; `ok` is false while present. */
-  unverifiable?: Array<{ id: string; createdAt: string; reason: string }>;
+  /**
+   * Rows whose content cannot be checked (a row written before audit text was normalised, or an edit); `ok` is false
+   * while present. `position` (1-based walk index), `prevHash` and `entryHash` place the row in the chain; `id` and
+   * `createdAt` are as stored, unverified.
+   */
+  unverifiable?: Array<{ id: string; createdAt: string; position: number; prevHash: string; entryHash: string; reason: string }>;
 }
 
 export interface AuditExportDestination {

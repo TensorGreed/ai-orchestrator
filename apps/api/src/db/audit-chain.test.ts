@@ -1,6 +1,6 @@
 /**
- * Phase 13.1 — verifyAuditRows on its own (no store): the single-U+FFFD search's candidates (the 2048 lone surrogates
- * and U+0000) and its cost on a large legacy row.
+ * Phase 13.1 — verifyAuditRows on its own (no store): what an unverifiable row reports, the single-U+FFFD search's
+ * candidates (the 2048 lone surrogates and U+0000) and its cost on a large legacy row.
  */
 import { describe, expect, it } from "vitest";
 import { auditEntryHash, GENESIS_HASH, verifyAuditRows, wellFormedAuditText, type AuditCanonicalInput, type AuditChainRow } from "./audit-chain.js";
@@ -33,6 +33,33 @@ function chain(written: AuditCanonicalInput[]): AuditChainRow[] {
 }
 
 describe("verifyAuditRows", () => {
+  it("an unverifiable row is reported by its chain position and hashes, with a reason that does not assume it is legacy", () => {
+    const rows = chain([fields("a", "first"), fields("b", "second"), fields("old", "\ud800 and \udc00"), fields("c", "after")]);
+    const result = verifyAuditRows(rows);
+    expect(result).toMatchObject({ ok: false, rowsChecked: 3 });
+    expect(result.firstBrokenAt).toBeUndefined();
+    expect(result.unverifiable).toEqual([
+      {
+        id: "old",
+        createdAt: "2026-01-01T00:00:00.000Z",
+        position: 3,
+        prevHash: rows[1]!.entryHash,
+        entryHash: rows[2]!.entryHash,
+        reason: expect.stringContaining(
+          "Content cannot be verified: either a row written before audit text was normalised, or an edit. Compare it with a backup or export."
+        )
+      }
+    ]);
+    // The next row's prev_hash pins the reported entry hash.
+    expect(rows[3]!.prevHash).toBe(result.unverifiable![0]!.entryHash);
+    expect(result.unverifiable![0]!.reason).toMatch(/2 U\+FFFD/);
+  });
+
+  it("the position counts every row walked, unverifiable ones included", () => {
+    const rows = chain([fields("u1", "\ud800\ud800"), fields("v", "ok"), fields("u2", "\udfff x \udbff")]);
+    expect(verifyAuditRows(rows).unverifiable?.map((row) => [row.id, row.position])).toEqual([["u1", 1], ["u2", 3]]);
+  });
+
   it("a row hashed with U+0000 and stored as U+FFFD (a SQLite → Postgres copy) is verified by the single-U+FFFD search", () => {
     const rows = chain([fields("a", "before"), fields("nul", "x\u0000y"), fields("b", "after")]);
     expect(rows[1]!.fields.message).toBe("x�y");

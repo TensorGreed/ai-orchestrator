@@ -43,6 +43,11 @@
  * or not) fails, because the full search finds no match. A row given two or more U+FFFD is named in `unverifiable`
  * and the result is `ok: false`, so it is visible, never hidden. Deleting, inserting or reordering rows breaks the
  * prev_hash link at step 1 exactly as before, for unverifiable rows too.
+ *
+ * What it cannot tell. An unverifiable row is either an honest old row or an edit; nothing stored can say which (a
+ * marker on the row would be as unauthenticated as the row). So the report never assumes the benign cause: it names
+ * the row by its chain position (walk index, its prev_hash, which the previous row pins, and its entry_hash, which
+ * the next row pins) and shows id and created_at as stored, unverified. Compare the row with a backup or an export.
  */
 import { createHash } from "node:crypto";
 
@@ -159,8 +164,16 @@ export interface AuditChainRow {
 }
 
 export interface AuditUnverifiableRow {
+  /** As stored, and not checked: the row's content (id and createdAt included) is exactly what could not be verified. */
   id: string;
+  /** As stored (unverified), like `id`. */
   createdAt: string;
+  /** 1-based position of the row in the walk (insertion order, hashed rows only). */
+  position: number;
+  /** The row's stored prev_hash, which equals the previous row's entry_hash (checked). */
+  prevHash: string;
+  /** The row's stored entry_hash; the next row's prev_hash must equal it, or the chain is broken there. */
+  entryHash: string;
   reason: string;
 }
 
@@ -234,11 +247,13 @@ function splitAtCandidate(first: string, second: string): { prefix: string; suff
 export function verifyAuditRows(rows: Iterable<AuditChainRow>): AuditChainResult {
   let prev = GENESIS_HASH;
   let checked = 0;
+  let position = 0;
   const unverifiable: AuditUnverifiableRow[] = [];
   const finish = (result: AuditChainResult): AuditChainResult =>
     unverifiable.length > 0 ? { ...result, ok: false, unverifiable } : result;
   for (const row of rows) {
     const { id, createdAt } = row.fields;
+    position += 1;
     if (row.prevHash !== prev) {
       return finish({ ok: false, rowsChecked: checked, firstBrokenAt: { id, createdAt, expected: prev, stored: row.prevHash } });
     }
@@ -255,10 +270,14 @@ export function verifyAuditRows(rows: Iterable<AuditChainRow>): AuditChainResult
         unverifiable.push({
           id,
           createdAt,
+          position,
+          prevHash: row.prevHash,
+          entryHash: row.entryHash,
           reason:
-            `The hash does not match the stored text, which holds ${legacy.replacements} U+FFFD characters. A row ` +
-            `written before audit text was normalised could have had lone surrogates there, and there are too many ` +
-            `combinations to check, so this row's content cannot be verified. The chain continues from its stored hash.`
+            `Content cannot be verified: either a row written before audit text was normalised, or an edit. Compare it ` +
+            `with a backup or export. Its hash does not match the stored text, which holds ${legacy.replacements} U+FFFD ` +
+            `characters, too many combinations to check. Its id and created_at are as stored (unverified); the row is ` +
+            `pinned by its chain position. The chain continues from its stored hash.`
         });
         prev = row.entryHash;
         continue;
