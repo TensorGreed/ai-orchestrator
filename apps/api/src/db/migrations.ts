@@ -44,6 +44,18 @@ export const INSERTION_SEQ_TABLES: ReadonlyArray<{ table: string; backfillOrder:
   { table: "execution_history", backfillOrder: `started_at, id COLLATE "C"` }
 ];
 
+/**
+ * v40: the Postgres columns created as REAL (float4, about 7 significant digits) where SQLite's REAL is an 8-byte
+ * double. Up widens them through text, so a stored 0.1 stays 0.1; down narrows them back.
+ */
+export const WIDENED_REAL_COLUMNS: ReadonlyArray<{ table: string; column: string }> = [
+  { table: "usage_events", column: "cost_usd" },
+  { table: "budgets", column: "limit_value" },
+  { table: "budgets", column: "warn_threshold_pct" },
+  { table: "budget_alerts", column: "usage_value" },
+  { table: "budget_alerts", column: "limit_value" }
+];
+
 /** v40: the tables the data-subject lookup pages by `seq` (postgres/data-labels.ts); each gets a unique seq index. */
 export const SUBJECT_SEQ_TABLES: ReadonlyArray<string> = [
   "replay_recordings",
@@ -1915,7 +1927,8 @@ export const MIGRATIONS: Migration[] = [
   },
   {
     version: 40,
-    description: "Phase 13.1 — Postgres insertion order: an identity `seq` column on the tables SQLite orders by rowid",
+    description:
+      "Phase 13.1 — Postgres insertion order: an identity `seq` column on the tables SQLite orders by rowid; REAL budget and usage columns widened to double precision",
     // Postgres only (SQLite's rowid already plays this role; its embedded migrate() is unchanged). Existing rows are
     // numbered in the order the store read them before this column existed, then new rows take the identity's next
     // value, so insertion order no longer depends on created_at, transaction ids or row positions.
@@ -1923,9 +1936,13 @@ export const MIGRATIONS: Migration[] = [
       ...INSERTION_SEQ_TABLES.map(({ table, backfillOrder }) => insertionSeqUp(table, backfillOrder)),
       `CREATE UNIQUE INDEX IF NOT EXISTS idx_audit_logs_seq ON audit_logs(seq);`,
       `CREATE INDEX IF NOT EXISTS idx_kb_chunks_kb_seq ON knowledge_base_chunks(knowledge_base_id, seq);`,
-      ...SUBJECT_SEQ_TABLES.map((table) => `CREATE UNIQUE INDEX IF NOT EXISTS idx_${table}_seq ON ${table}(seq);`)
+      ...SUBJECT_SEQ_TABLES.map((table) => `CREATE UNIQUE INDEX IF NOT EXISTS idx_${table}_seq ON ${table}(seq);`),
+      ...WIDENED_REAL_COLUMNS.map(
+        ({ table, column }) => `ALTER TABLE ${table} ALTER COLUMN ${column} TYPE DOUBLE PRECISION USING ${column}::text::double precision;`
+      )
     ].join("\n"),
     down: [
+      ...WIDENED_REAL_COLUMNS.map(({ table, column }) => `ALTER TABLE ${table} ALTER COLUMN ${column} TYPE REAL;`),
       ...SUBJECT_SEQ_TABLES.map((table) => `DROP INDEX IF EXISTS idx_${table}_seq;`),
       `DROP INDEX IF EXISTS idx_kb_chunks_kb_seq;`,
       `DROP INDEX IF EXISTS idx_audit_logs_seq;`,
