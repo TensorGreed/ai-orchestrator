@@ -85,4 +85,16 @@ describe.skipIf(!enabled)("Postgres concurrency: leases and budget alerts (two s
     expect((await a.getLatestBudgetAlert("b1", periodStart, "warn"))?.id).toBe("warn-1");
     expect((await b.getLatestBudgetAlert("b1", "2026-11-01T00:00:00.000Z", "block"))?.id).toBe("next-window");
   });
+
+  it("alerts raced for a deleted budget record nothing (no orphans, no duplicates)", async () => {
+    await a.createBudget({ id: "b-del", name: "Gone", scopeType: "global", period: "month", limitType: "usd", limitValue: 10, action: "warn" });
+    await a.deleteBudget("b-del");
+    const recorded = await Promise.all(
+      Array.from({ length: 20 }, (_, i) =>
+        (i % 2 === 0 ? a : b).recordBudgetAlert({ id: `orphan-${i}`, budgetId: "b-del", periodStart: "p", severity: "warn", usageValue: 11, limitValue: 10 })
+      )
+    );
+    expect(recorded.filter(Boolean)).toHaveLength(0);
+    expect(await a.listBudgetAlerts({ budgetId: "b-del", limit: 500 })).toEqual([]);
+  });
 });

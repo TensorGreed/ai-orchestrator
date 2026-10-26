@@ -7,6 +7,7 @@ import { type Store } from "../store.js";
 import type { BudgetRecord } from "../database.js";
 import { toNum, toStr } from "./helpers.js";
 import type { PgContext } from "./context.js";
+import { clampLimit, LIMIT_MAX } from "../store-limits.js";
 
 export const UNIMPLEMENTED_METHODS: readonly (keyof Store)[] = [];
 
@@ -180,23 +181,24 @@ export async function getLease(ctx: PgContext, leaseName: string): ReturnType<St
 /**
  * One conditional upsert, so two instances racing for a lease can never both win: a missing lease is inserted, the
  * holder renews its own (keeping `acquired_at`), and an expired one is taken over; a live lease held by someone else
- * leaves the row untouched and returns no row. Expiry is judged on this process's clock, as the SQLite store does.
+ * leaves the row untouched and returns no row. Leases are the cross-instance mechanism, so "now" and the expiry come
+ * from the database clock (clock_timestamp(), to the millisecond), never from an instance's own clock: an instance
+ * running ahead cannot take a live lease and one running behind cannot keep an expired one. (SQLite runs in one
+ * process, so its clock is the process's.)
  */
 export async function tryAcquireLease(ctx: PgContext, input: { leaseName: string; holderId: string; ttlMs: number }): Promise<boolean> {
-  const now = Date.now();
-  const nowIso = new Date(now).toISOString();
-  const expiresAt = new Date(now + input.ttlMs).toISOString();
   const result = await ctx.pool.query(
     `INSERT INTO leader_leases (lease_name, holder_id, expires_at, acquired_at, renewed_at)
-     VALUES ($1, $2, $3, $4, $4)
+     SELECT $1, $2, t.now + $3 * interval '1 millisecond', t.now, t.now
+       FROM (SELECT date_trunc('milliseconds', clock_timestamp()) AS now) AS t
      ON CONFLICT (lease_name) DO UPDATE SET
        holder_id = EXCLUDED.holder_id,
        expires_at = EXCLUDED.expires_at,
        acquired_at = CASE WHEN leader_leases.holder_id = EXCLUDED.holder_id THEN leader_leases.acquired_at ELSE EXCLUDED.acquired_at END,
        renewed_at = EXCLUDED.renewed_at
-     WHERE leader_leases.holder_id = EXCLUDED.holder_id OR leader_leases.expires_at <= $4::timestamptz
+     WHERE leader_leases.holder_id = EXCLUDED.holder_id OR leader_leases.expires_at <= EXCLUDED.renewed_at
      RETURNING lease_name`,
-    [input.leaseName, input.holderId, expiresAt, nowIso]
+    [input.leaseName, input.holderId, Math.max(0, Math.floor(input.ttlMs))]
   );
   return (result.rowCount ?? 0) > 0;
 }
@@ -310,17 +312,11 @@ export async function writeUsageEvent(ctx: PgContext, input: Parameters<Store["w
   );
 }
 
-/**
- * `cost_usd` is a REAL (4-byte float) column on Postgres. Each stored value reads back as its shortest decimal text
- * (0.1 stays 0.1); summing that text as double precision keeps totals as close to SQLite's (8-byte REAL) as the column
- * allows, where a plain SUM would add in single precision.
- */
-const COST = `cost_usd::text::double precision`;
-
+/** `cost_usd` is double precision (v40), the same 8-byte float as SQLite's REAL, so sums match SQLite's. */
 const AGGREGATES = `COUNT(*) AS execs,
   SUM(input_tokens) AS ti, SUM(output_tokens) AS "to",
   SUM(cached_input_tokens) AS ci, SUM(total_tokens) AS tt,
-  SUM(${COST}) AS cost, SUM(llm_call_count) AS calls,
+  SUM(cost_usd) AS cost, SUM(llm_call_count) AS calls,
   AVG(duration_ms) AS avgd`;
 
 type AggregateRow = {
@@ -348,7 +344,7 @@ export async function queryUsageRollup(ctx: PgContext, input: Parameters<Store["
   if (input.userId) { params.push(input.userId); filters.push(`user_id = $${params.length}`); }
   if (input.projectId) { params.push(input.projectId); filters.push(`project_id = $${params.length}`); }
   const where = `WHERE ${filters.join(" AND ")}`;
-  const limit = Math.min(input.limit ?? 100, 500);
+  const limit = clampLimit(input.limit, { fallback: 100, max: LIMIT_MAX.usageRollup });
 
   if (input.groupBy === "day" || input.groupBy === "hour") {
     // The same bucket strings SQLite's strftime gives, in UTC.
@@ -421,7 +417,7 @@ export async function queryUsageRollup(ctx: PgContext, input: Parameters<Store["
   }>(
     `SELECT providers_json, input_tokens AS ti, output_tokens AS "to",
             cached_input_tokens AS ci, total_tokens AS tt,
-            ${COST} AS cost, llm_call_count AS calls, duration_ms AS duration
+            cost_usd AS cost, llm_call_count AS calls, duration_ms AS duration
      FROM usage_events ${where}
      ORDER BY created_at ASC, id COLLATE "C" ASC`,
     params
@@ -494,7 +490,7 @@ export async function listUsageEvents(ctx: PgContext, input: Parameters<Store["l
   if (input.userId) { params.push(input.userId); filters.push(`user_id = $${params.length}`); }
   if (input.projectId) { params.push(input.projectId); filters.push(`project_id = $${params.length}`); }
   const where = filters.length > 0 ? `WHERE ${filters.join(" AND ")}` : "";
-  const limit = Math.min(input.limit ?? 50, 500);
+  const limit = clampLimit(input.limit, { fallback: 50, max: LIMIT_MAX.usageEvents });
   const rows = await ctx.query<{
     id: string; execution_id: string; workflow_id: string; workflow_name: string | null;
     user_id: string | null; user_email: string | null; project_id: string | null;
@@ -502,7 +498,7 @@ export async function listUsageEvents(ctx: PgContext, input: Parameters<Store["l
     input_tokens: number; output_tokens: number; cached_input_tokens: number;
     total_tokens: number; cost_usd: number; llm_call_count: number; duration_ms: number;
     providers_json: string | null; created_at: string;
-  }>(`SELECT * FROM usage_events ${where} ORDER BY created_at DESC LIMIT ${limit}`, params);
+  }>(`SELECT * FROM usage_events ${where} ORDER BY created_at DESC, id COLLATE "C" DESC LIMIT ${limit}`, params);
   return rows.map((r) => ({
     id: toStr(r.id),
     executionId: toStr(r.execution_id),
@@ -639,11 +635,15 @@ export async function listBudgets(ctx: PgContext, filter: Parameters<Store["list
  * Records a budget alert at most once per (budget, period, severity). BudgetService checks getLatestBudgetAlert and
  * then calls this, and two API instances (or two runs in one) can both pass that check; here the budget's row is
  * locked for the transaction and the insert happens only when no alert for the window exists yet, so the second
- * caller records nothing and gets false, so BudgetService sends no second notification. (The SQLite store inserts unconditionally; it runs in one process.)
+ * caller records nothing and gets false, so BudgetService sends no second notification. A budget deleted meanwhile
+ * has no row to lock, so nothing would serialise the inserts: that alert is not recorded either (false), which leaves
+ * no orphan alert and sends no notification for a deleted budget. (The SQLite store inserts unconditionally; it runs
+ * in one process.)
  */
 export async function recordBudgetAlert(ctx: PgContext, input: Parameters<Store["recordBudgetAlert"]>[0]): Promise<boolean> {
   return ctx.withTransaction(async (client) => {
-    await client.query(`SELECT id FROM budgets WHERE id = $1 FOR UPDATE`, [input.budgetId]);
+    const locked = await client.query(`SELECT id FROM budgets WHERE id = $1 FOR UPDATE`, [input.budgetId]);
+    if ((locked.rowCount ?? 0) === 0) return false;
     const result = await client.query(
       `INSERT INTO budget_alerts (
          id, budget_id, period_start, severity, usage_value, limit_value,
@@ -674,7 +674,7 @@ export async function getLatestBudgetAlert(ctx: PgContext, budgetId: string, per
   const row = await ctx.queryOne<{ id: string; fired_at: string }>(
     `SELECT id, fired_at FROM budget_alerts
      WHERE budget_id = $1 AND period_start = $2 AND severity = $3
-     ORDER BY fired_at DESC LIMIT 1`,
+     ORDER BY fired_at DESC, id COLLATE "C" DESC LIMIT 1`,
     [budgetId, periodStart, severity]
   );
   return row ? { id: toStr(row.id), firedAt: toStr(row.fired_at) } : null;
@@ -685,11 +685,11 @@ export async function listBudgetAlerts(ctx: PgContext, filter: Parameters<Store[
   const filters: string[] = [];
   if (filter.budgetId) { params.push(filter.budgetId); filters.push(`budget_id = $${params.length}`); }
   const where = filters.length > 0 ? `WHERE ${filters.join(" AND ")}` : "";
-  const limit = Math.min(filter.limit ?? 100, 500);
+  const limit = clampLimit(filter.limit, { fallback: 100, max: LIMIT_MAX.budgetAlerts });
   const rows = await ctx.query<{
     id: string; budget_id: string; period_start: string; severity: string; usage_value: number; limit_value: number;
     workflow_id: string | null; execution_id: string | null; message: string | null; fired_at: string;
-  }>(`SELECT * FROM budget_alerts ${where} ORDER BY fired_at DESC LIMIT ${limit}`, params);
+  }>(`SELECT * FROM budget_alerts ${where} ORDER BY fired_at DESC, id COLLATE "C" DESC LIMIT ${limit}`, params);
   return rows.map((r) => ({
     id: toStr(r.id),
     budgetId: toStr(r.budget_id),

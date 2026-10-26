@@ -3,7 +3,7 @@
  * budgets and budget alerts, notification configs. The same assertions on SQLite and, with TEST_POSTGRES_URL, on
  * Postgres.
  */
-import { expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import { describeStoreContract } from "../../test-support/test-store.js";
 import type { Store } from "../store.js";
 
@@ -145,6 +145,26 @@ describeStoreContract("store contract: leader leases", (ctx) => {
     expect(Date.parse(after!.acquiredAt)).toBeGreaterThan(Date.parse(before!.acquiredAt));
   });
 
+  it("Postgres judges expiry on the database clock, so an instance whose clock runs ahead cannot take a live lease", async () => {
+    const store = ctx.store();
+    expect(await store.tryAcquireLease({ leaseName: "primary", holderId: "a", ttlMs: 60_000 })).toBe(true);
+    const held = await store.getLease("primary");
+    vi.useFakeTimers({ toFake: ["Date"], now: Date.now() + 10 * 60_000 });
+    try {
+      const taken = await store.tryAcquireLease({ leaseName: "primary", holderId: "ahead", ttlMs: 60_000 });
+      // SQLite runs in one process, so its clock is the only one: expiry follows it, as on main.
+      expect(taken).toBe(ctx.kind === "sqlite");
+    } finally {
+      vi.useRealTimers();
+    }
+    if (ctx.kind === "postgres") {
+      const after = await store.getLease("primary");
+      expect(after).toEqual(held);
+      expect(Math.abs(Date.parse(held!.acquiredAt) - Date.now())).toBeLessThan(60_000);
+      expect(Date.parse(held!.expiresAt) - Date.parse(held!.acquiredAt)).toBe(60_000);
+    }
+  });
+
   it("release needs the holder; list is ordered by name", async () => {
     const store = ctx.store();
     await store.tryAcquireLease({ leaseName: "scheduler", holderId: "a", ttlMs: 60_000 });
@@ -226,6 +246,37 @@ describeStoreContract("store contract: usage events and rollups", (ctx) => {
     expect((await store.listUsageEvents({ workflowId: "wf-b" })).map((e) => e.id)).toEqual(["e3"]);
     expect((await store.listUsageEvents({ projectId: "p1", limit: 2 })).map((e) => e.id)).toEqual(["out", "e4"]);
     expect((await store.listUsageEvents({ userId: "u1", limit: 10_000 })).length).toBe(4);
+  });
+
+  it("a negative or fractional limit is clamped (1..500), a zero one takes the default", async () => {
+    const store = ctx.store();
+    await seed(store);
+    expect((await store.listUsageEvents({ limit: -1 })).map((e) => e.id)).toEqual(["out"]);
+    expect((await store.listUsageEvents({ limit: 2.9 })).map((e) => e.id)).toEqual(["out", "e4"]);
+    expect(await store.listUsageEvents({ limit: 0 })).toHaveLength(5);
+    expect(await store.queryUsageRollup({ ...window, groupBy: "day", limit: -1 })).toHaveLength(1);
+    expect(await store.queryUsageRollup({ ...window, groupBy: "workflow", limit: -5 })).toHaveLength(1);
+    expect(await store.queryUsageRollup({ ...window, groupBy: "provider", limit: 1.5 })).toHaveLength(1);
+    expect(await store.queryUsageRollup({ ...window, groupBy: "day", limit: 0 })).toHaveLength(2);
+  });
+
+  it("events created in the same millisecond list by id, newest id first", async () => {
+    const store = ctx.store();
+    for (const id of ["x2", "x3", "x1"]) await store.writeUsageEvent(usage(id, { createdAt: "2026-10-01T10:00:00.000Z" }));
+    expect((await store.listUsageEvents()).map((e) => e.id)).toEqual(["x3", "x2", "x1"]);
+  });
+
+  it("costs keep double precision: a 12-significant-digit cost reads back and sums exactly", async () => {
+    const store = ctx.store();
+    await store.writeUsageEvent(usage("big", { costUsd: 1234.56789012, totalTokens: 100_000_001 }));
+    const [event] = await store.listUsageEvents();
+    expect(event.costUsd).toBe(1234.56789012);
+    expect(event.totalTokens).toBe(100_000_001);
+    const totals = await store.queryUsageTotals(window);
+    expect(totals.costUsd).toBe(1234.56789012);
+    expect(totals.totalTokens).toBe(100_000_001);
+    const [day] = await store.queryUsageRollup({ ...window, groupBy: "day" });
+    expect(day.costUsd).toBe(1234.56789012);
   });
 
   it("an event without createdAt gets the current time", async () => {
@@ -362,6 +413,48 @@ describeStoreContract("store contract: budgets and alerts", (ctx) => {
     expect(await store.getBudget("b1")).toBeNull();
     expect((await store.listBudgetAlerts()).map((a) => a.id)).toEqual(["a3"]);
     expect(await store.deleteBudget("b1")).toBe(true);
+  });
+});
+
+describeStoreContract("store contract: budget precision, alert limits, ties and missing budgets", (ctx) => {
+  const budget = (id: string, overrides: Partial<Parameters<Store["createBudget"]>[0]> = {}): Parameters<Store["createBudget"]>[0] => ({
+    id, name: `Budget ${id}`, scopeType: "global", period: "month", limitType: "tokens", limitValue: 100_000_001, action: "warn", ...overrides
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("a token budget above 2^24 and 12-significant-digit values round-trip exactly", async () => {
+    const store = ctx.store();
+    await store.createBudget(budget("b1", { warnThresholdPct: 0.123456789012 }));
+    expect(await store.getBudget("b1")).toMatchObject({ limitValue: 100_000_001, warnThresholdPct: 0.123456789012 });
+    await store.updateBudget("b1", { limitValue: 123_456_789 });
+    expect((await store.getBudget("b1"))?.limitValue).toBe(123_456_789);
+    expect((await store.listBudgets()).map((b) => b.limitValue)).toEqual([123_456_789]);
+    await store.recordBudgetAlert({ id: "a1", budgetId: "b1", periodStart: "2026-10-01T00:00:00.000Z", severity: "warn", usageValue: 1234.56789012, limitValue: 100_000_001 });
+    expect(await store.listBudgetAlerts()).toEqual([expect.objectContaining({ usageValue: 1234.56789012, limitValue: 100_000_001 })]);
+  });
+
+  it("alert lists clamp negative and fractional limits, and same-millisecond alerts list by id, newest id first", async () => {
+    const store = ctx.store();
+    await store.createBudget(budget("b1"));
+    vi.useFakeTimers({ toFake: ["Date"], now: Date.parse("2026-10-26T08:00:00.000Z") });
+    for (const [id, severity, periodStart] of [["a2", "warn", "p1"], ["a3", "warn", "p2"], ["a1", "block", "p1"]] as const) {
+      await store.recordBudgetAlert({ id, budgetId: "b1", periodStart, severity, usageValue: 1, limitValue: 2 });
+    }
+    vi.useRealTimers();
+    expect((await store.listBudgetAlerts()).map((a) => a.id)).toEqual(["a3", "a2", "a1"]);
+    expect((await store.listBudgetAlerts({ limit: -1 })).map((a) => a.id)).toEqual(["a3"]);
+    expect((await store.listBudgetAlerts({ limit: 2.5 })).map((a) => a.id)).toEqual(["a3", "a2"]);
+    expect(await store.listBudgetAlerts({ limit: 0 })).toHaveLength(3);
+  });
+
+  it("an alert for a budget that no longer exists is not recorded on Postgres", async () => {
+    const store = ctx.store();
+    const recorded = await store.recordBudgetAlert({ id: "a1", budgetId: "gone", periodStart: "p", severity: "warn", usageValue: 1, limitValue: 2 });
+    // SQLite runs in one process and records unconditionally, as on main; Postgres locks the budget row and finds none.
+    expect(recorded).toBe(ctx.kind === "sqlite");
+    expect(await store.listBudgetAlerts()).toHaveLength(ctx.kind === "sqlite" ? 1 : 0);
   });
 });
 
