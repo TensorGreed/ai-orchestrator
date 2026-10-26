@@ -15,6 +15,9 @@
  */
 
 import { Pool } from "pg";
+import { parsePostgresSettings } from "../config.js";
+import { postgresStoreConfig } from "../db/create-store.js";
+import { postgresPoolConfig } from "../db/postgres-store.js";
 import { MIGRATIONS, rollbackMigrations } from "../db/migrations.js";
 
 interface Args {
@@ -62,8 +65,9 @@ function printUsageAndExit(code: number): never {
       "",
       "Required env (Postgres only):",
       "  DB_TYPE=postgres",
-      "  DB_POSTGRESDB_HOST, DB_POSTGRESDB_PORT, DB_POSTGRESDB_DATABASE,",
-      "  DB_POSTGRESDB_USER, DB_POSTGRESDB_PASSWORD, DB_POSTGRESDB_SSL"
+      "  DB_POSTGRESDB_URL, or DB_POSTGRESDB_HOST, DB_POSTGRESDB_PORT, DB_POSTGRESDB_DATABASE,",
+      "  DB_POSTGRESDB_USER, DB_POSTGRESDB_PASSWORD",
+      "  TLS: DB_POSTGRESDB_SSL, DB_POSTGRESDB_SSL_CA, DB_POSTGRESDB_SSL_REJECT_UNAUTHORIZED"
     ].join("\n")
   );
   process.exit(code);
@@ -87,15 +91,7 @@ async function main() {
     process.exit(2);
   }
 
-  const pool = new Pool({
-    host: process.env.DB_POSTGRESDB_HOST ?? "localhost",
-    port: Number(process.env.DB_POSTGRESDB_PORT) || 5432,
-    database: process.env.DB_POSTGRESDB_DATABASE ?? "ai_orchestrator",
-    user: process.env.DB_POSTGRESDB_USER ?? "postgres",
-    password: process.env.DB_POSTGRESDB_PASSWORD ?? "",
-    ssl: process.env.DB_POSTGRESDB_SSL === "true" ? { rejectUnauthorized: false } : false,
-    max: 2
-  });
+  const pool = new Pool(postgresPoolConfig(postgresStoreConfig(parsePostgresSettings(process.env)), { max: 2 }));
 
   try {
     await pool.query(`

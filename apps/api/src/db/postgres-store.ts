@@ -1,4 +1,4 @@
-import { Pool, type PoolConfig } from "pg";
+import pg, { Pool, type PoolConfig } from "pg";
 import { randomUUID } from "node:crypto";
 import type { ChatMessage, Folder, Project, Workflow, WorkflowListItem } from "@ai-orchestrator/shared";
 import { DEFAULT_PROJECT_ID, isEmptyDataLabels, labelsForUntrackedSave, mergeDataLabels, parseStoredDataLabels, type DataLabels } from "@ai-orchestrator/shared";
@@ -6,6 +6,7 @@ import { runMigrations } from "./migrations.js";
 import { queuedRunTimeoutMs, STUCK_JOB_MARGIN_MS } from "./queue-timeouts.js";
 import { ProjectNotEmptyError, StoreNotImplementedError } from "./store-errors.js";
 import type { CancelExecutionResult, Store } from "./store.js";
+import type { PostgresSslSettings } from "../config.js";
 
 export interface PostgresStoreConfig {
   host: string;
@@ -13,8 +14,14 @@ export interface PostgresStoreConfig {
   database: string;
   user: string;
   password: string;
-  ssl?: boolean;
+  /** TLS: `false` (or absent) for none; otherwise certificates are verified unless `rejectUnauthorized` is false. */
+  ssl?: PostgresSslSettings | false;
   maxConnections?: number;
+  /**
+   * Phase 13.1 — the schema every connection uses (`search_path`), created when missing. Tests give each file its own;
+   * deployments leave it unset (the role's default, normally `public`).
+   */
+  schema?: string;
 }
 
 // Helper to safely parse JSON
@@ -49,6 +56,52 @@ function toStr(value: unknown): string {
 }
 
 const MAX_SESSION_TOOL_CACHE_RECORDS = 400;
+
+/** Phase 13.1 — first key of the advisory lock taken while migrating (second key: the schema). "L2M" in ASCII. */
+const MIGRATION_LOCK_CLASS = 0x4c324d;
+
+const PG_TIMESTAMPTZ_OID = 1184;
+
+/**
+ * Phase 13.1 — TIMESTAMPTZ values come back as ISO-8601 strings (`2026-10-26T07:00:00.000Z`), the shape the SQLite
+ * store returns, instead of Date objects; every other type keeps pg's default parser.
+ */
+const POSTGRES_TYPES = {
+  getTypeParser: ((oid: number, format?: "text" | "binary") => {
+    if (oid === PG_TIMESTAMPTZ_OID && format !== "binary") {
+      return (value: string) => {
+        const date = new Date(value);
+        return Number.isNaN(date.getTime()) ? value : date.toISOString();
+      };
+    }
+    return format === undefined ? pg.types.getTypeParser(oid) : pg.types.getTypeParser(oid, format);
+  }) as typeof pg.types.getTypeParser
+};
+
+const PG_IDENTIFIER = /^[a-z_][a-z0-9_]{0,62}$/;
+
+function quotePgIdentifier(name: string): string {
+  if (!PG_IDENTIFIER.test(name)) throw new Error(`Invalid Postgres schema name '${name}' (lower-case letters, digits and _ only).`);
+  return `"${name}"`;
+}
+
+/** Phase 13.1 — the pg Pool settings for a store config (also used by the db:* scripts so TLS is handled once). */
+export function postgresPoolConfig(config: PostgresStoreConfig, overrides: Partial<PoolConfig> = {}): PoolConfig {
+  return {
+    host: config.host,
+    port: config.port,
+    database: config.database,
+    user: config.user,
+    password: config.password,
+    ssl: config.ssl ? { rejectUnauthorized: config.ssl.rejectUnauthorized, ...(config.ssl.ca ? { ca: config.ssl.ca } : {}) } : false,
+    max: config.maxConnections ?? 10,
+    idleTimeoutMillis: 30000,
+    connectionTimeoutMillis: 5000,
+    types: POSTGRES_TYPES,
+    ...(config.schema ? { options: `-c search_path=${quotePgIdentifier(config.schema)}` } : {}),
+    ...overrides
+  };
+}
 
 export class PostgresStore implements Store {
   /**
@@ -371,21 +424,15 @@ export class PostgresStore implements Store {
   }
 
   static async create(config: PostgresStoreConfig): Promise<PostgresStore> {
-    const poolConfig: PoolConfig = {
-      host: config.host,
-      port: config.port,
-      database: config.database,
-      user: config.user,
-      password: config.password,
-      ssl: config.ssl ? { rejectUnauthorized: false } : false,
-      max: config.maxConnections ?? 10,
-      idleTimeoutMillis: 30000,
-      connectionTimeoutMillis: 5000
-    };
-    const pool = new Pool(poolConfig);
-    const store = new PostgresStore(pool);
-    await store.migrate();
-    return store;
+    const pool = new Pool(postgresPoolConfig(config));
+    try {
+      const store = new PostgresStore(pool);
+      await store.migrate(config.schema);
+      return store;
+    } catch (error) {
+      await pool.end().catch(() => undefined);
+      throw error;
+    }
   }
 
   async close(): Promise<void> {
@@ -412,30 +459,44 @@ export class PostgresStore implements Store {
     await this.pool.query(sql, params);
   }
 
-  private async migrate(): Promise<void> {
-    // Ensure schema_migrations table exists
-    await this.execute(`
-      CREATE TABLE IF NOT EXISTS schema_migrations (
-        version INTEGER PRIMARY KEY,
-        applied_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
-      )
-    `);
-
-    await runMigrations(
-      async (sql) => { await this.execute(sql); },
-      async () => {
-        const row = await this.queryOne<{ version: number }>(
-          `SELECT COALESCE(MAX(version), 0) as version FROM schema_migrations`
+  /**
+   * Runs the MIGRATIONS chain on one connection holding a session advisory lock (keyed by the schema), so two
+   * instances starting together never run the same migration twice; the second waits, then finds nothing to do.
+   * `schema` (tests) is created, under the lock, when missing.
+   */
+  private async migrate(schema?: string): Promise<void> {
+    const client = await this.pool.connect();
+    let discard = false;
+    try {
+      const lockArgs = [MIGRATION_LOCK_CLASS, schema ?? null];
+      await client.query(`SELECT pg_advisory_lock($1, hashtext(COALESCE($2::text, current_schema(), '')))`, lockArgs);
+      try {
+        if (schema) await client.query(`CREATE SCHEMA IF NOT EXISTS ${quotePgIdentifier(schema)}`);
+        await client.query(`
+          CREATE TABLE IF NOT EXISTS schema_migrations (
+            version INTEGER PRIMARY KEY,
+            applied_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+          )
+        `);
+        await runMigrations(
+          async (sql) => { await client.query(sql); },
+          async () => {
+            const result = await client.query<{ version: number }>(`SELECT COALESCE(MAX(version), 0) as version FROM schema_migrations`);
+            return toNum(result.rows[0]?.version);
+          },
+          async (version) => {
+            await client.query(`INSERT INTO schema_migrations (version) VALUES ($1) ON CONFLICT (version) DO NOTHING`, [version]);
+          }
         );
-        return row ? toNum(row.version) : 0;
-      },
-      async (version) => {
-        await this.execute(
-          `INSERT INTO schema_migrations (version) VALUES ($1) ON CONFLICT (version) DO NOTHING`,
-          [version]
-        );
+      } finally {
+        // If unlocking fails the connection is discarded below, which releases a session lock too.
+        await client.query(`SELECT pg_advisory_unlock($1, hashtext(COALESCE($2::text, current_schema(), '')))`, lockArgs).catch(() => {
+          discard = true;
+        });
       }
-    );
+    } finally {
+      client.release(discard);
+    }
   }
 
   // ---------------------------------------------------------------------------

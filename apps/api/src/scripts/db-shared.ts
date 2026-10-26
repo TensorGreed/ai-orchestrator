@@ -11,6 +11,9 @@ import path from "node:path";
 import fs from "node:fs";
 import Database, { type Database as BetterSqlite3Database } from "better-sqlite3";
 import { Pool } from "pg";
+import { parsePostgresSettings } from "../config.js";
+import { postgresStoreConfig } from "../db/create-store.js";
+import { postgresPoolConfig } from "../db/postgres-store.js";
 import { MIGRATIONS, runMigrations } from "../db/migrations.js";
 
 export interface BackupAdapter {
@@ -152,15 +155,7 @@ class PostgresAdapter implements BackupAdapter {
   private constructor(private readonly pool: Pool) {}
 
   static async create(): Promise<PostgresAdapter> {
-    const pool = new Pool({
-      host: process.env.DB_POSTGRESDB_HOST ?? "localhost",
-      port: Number(process.env.DB_POSTGRESDB_PORT) || 5432,
-      database: process.env.DB_POSTGRESDB_DATABASE ?? "ai_orchestrator",
-      user: process.env.DB_POSTGRESDB_USER ?? "postgres",
-      password: process.env.DB_POSTGRESDB_PASSWORD ?? "",
-      ssl: process.env.DB_POSTGRESDB_SSL === "true" ? { rejectUnauthorized: false } : false,
-      max: 4
-    });
+    const pool = new Pool(postgresPoolConfig(postgresStoreConfig(parsePostgresSettings(process.env)), { max: 4 }));
     await pool.query(`
       CREATE TABLE IF NOT EXISTS schema_migrations (
         version INTEGER PRIMARY KEY,

@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import { z } from "zod";
 
 /** Phase 15.6 — production capture defaults (see the REPLAY_CAPTURE_* settings). */
@@ -489,15 +490,191 @@ export function parseConfig(env: Record<string, string | undefined>): AppConfig 
   if (!parsed.success) {
     throw new Error(`Invalid environment configuration: ${parsed.error.message}`);
   }
+  // Phase 13.1 — the Postgres settings are checked only when DB_TYPE=postgres (fail fast, before the store opens).
+  if (isPostgresDbType(env.DB_TYPE)) parsePostgresSettings(env);
 
   return parsed.data;
 }
 
 export function getConfig(): AppConfig {
-  const parsed = envSchema.safeParse(process.env);
+  return parseConfig(process.env);
+}
+
+// ---------------------------------------------------------------------------
+// Phase 13.1 — database settings. SQLite (the default) needs none of these; DB_TYPE=postgres reads the DB_POSTGRESDB_*
+// block below. Values are never echoed in errors or logs (the password, and the URL that may hold it, least of all).
+// ---------------------------------------------------------------------------
+
+/** DB_TYPE values that select the Postgres store (anything else, or nothing, is SQLite as before). */
+export function isPostgresDbType(value: string | undefined): boolean {
+  const normalized = value?.trim().toLowerCase();
+  return normalized === "postgres" || normalized === "postgresql";
+}
+
+export interface PostgresSslSettings {
+  /** Verify the server certificate (and host name) against the system CAs or `ca`. Off only by explicit opt-out. */
+  rejectUnauthorized: boolean;
+  /** PEM of a private CA (from DB_POSTGRESDB_SSL_CA, a path or the PEM itself). */
+  ca?: string;
+}
+
+export interface PostgresSettings {
+  host: string;
+  port: number;
+  database: string;
+  user: string;
+  password: string;
+  ssl: PostgresSslSettings | false;
+  poolSize: number;
+  /** Where the settings came from (`url` when DB_POSTGRESDB_URL was set; it wins over the separate variables). */
+  source: "url" | "variables";
+  /** Startup warnings to print once (never containing secrets). */
+  warnings: string[];
+}
+
+const DB_ENV = {
+  url: "DB_POSTGRESDB_URL",
+  host: "DB_POSTGRESDB_HOST",
+  port: "DB_POSTGRESDB_PORT",
+  database: "DB_POSTGRESDB_DATABASE",
+  user: "DB_POSTGRESDB_USER",
+  password: "DB_POSTGRESDB_PASSWORD",
+  ssl: "DB_POSTGRESDB_SSL",
+  sslCa: "DB_POSTGRESDB_SSL_CA",
+  rejectUnauthorized: "DB_POSTGRESDB_SSL_REJECT_UNAUTHORIZED",
+  poolSize: "DB_POSTGRESDB_POOL_SIZE"
+} as const;
+
+const optionalTrimmed = z.preprocess(
+  (value) => (typeof value === "string" && value.trim() === "" ? undefined : typeof value === "string" ? value.trim() : value),
+  z.string().optional()
+);
+
+const postgresEnvSchema = z.object({
+  [DB_ENV.url]: optionalTrimmed,
+  [DB_ENV.host]: optionalTrimmed,
+  [DB_ENV.port]: z.preprocess(
+    (value) => (typeof value === "string" && value.trim() === "" ? undefined : value),
+    z.coerce.number().int().min(1).max(65535).optional()
+  ),
+  [DB_ENV.database]: optionalTrimmed,
+  [DB_ENV.user]: optionalTrimmed,
+  // Not trimmed: a password may legitimately start or end with spaces.
+  [DB_ENV.password]: z.string().optional(),
+  [DB_ENV.ssl]: z.preprocess((value) => (typeof value === "string" && value.trim() === "" ? undefined : value), booleanFromEnv.optional()),
+  [DB_ENV.sslCa]: optionalTrimmed,
+  [DB_ENV.rejectUnauthorized]: z.preprocess((value) => (typeof value === "string" && value.trim() === "" ? undefined : value), booleanFromEnv.optional()),
+  [DB_ENV.poolSize]: z.preprocess(
+    (value) => (typeof value === "string" && value.trim() === "" ? undefined : value),
+    z.coerce.number().int().min(1).max(1000).optional()
+  )
+});
+
+const URL_SSL_MODES = new Set(["disable", "allow", "prefer", "require", "verify-ca", "verify-full"]);
+
+function invalidDbSetting(message: string): Error {
+  return new Error(`Invalid database configuration: ${message}`);
+}
+
+function parsePostgresUrl(raw: string): { host: string; port?: number; database?: string; user?: string; password?: string; sslMode?: string } {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    // The URL may hold the password: say what is wrong, never what it was.
+    throw invalidDbSetting(`${DB_ENV.url} is not a valid URL (expected postgres://user:password@host:port/database).`);
+  }
+  if (url.protocol !== "postgres:" && url.protocol !== "postgresql:") {
+    throw invalidDbSetting(`${DB_ENV.url} must start with postgres:// or postgresql://.`);
+  }
+  if (!url.hostname) throw invalidDbSetting(`${DB_ENV.url} has no host.`);
+  for (const key of url.searchParams.keys()) {
+    if (key !== "sslmode") {
+      throw invalidDbSetting(`${DB_ENV.url} has the unsupported parameter '${key}'; only sslmode is read (use the DB_POSTGRESDB_SSL* settings for TLS).`);
+    }
+  }
+  const sslMode = url.searchParams.get("sslmode") ?? undefined;
+  if (sslMode !== undefined && !URL_SSL_MODES.has(sslMode)) {
+    throw invalidDbSetting(`${DB_ENV.url} has an unknown sslmode; use disable, require, verify-ca or verify-full.`);
+  }
+  const port = url.port ? Number(url.port) : undefined;
+  const database = decodeURIComponent(url.pathname.replace(/^\//, ""));
+  return {
+    host: url.hostname.replace(/^\[(.*)\]$/, "$1"),
+    port,
+    database: database || undefined,
+    user: url.username ? decodeURIComponent(url.username) : undefined,
+    password: url.password ? decodeURIComponent(url.password) : undefined,
+    sslMode
+  };
+}
+
+function readCa(value: string): string {
+  if (value.includes("-----BEGIN")) return value.replace(/\\n/g, "\n");
+  try {
+    const pem = fs.readFileSync(value, "utf8");
+    if (!pem.includes("-----BEGIN")) throw new Error("not PEM");
+    return pem;
+  } catch {
+    throw invalidDbSetting(`${DB_ENV.sslCa} must be a PEM certificate or the path of a readable PEM file.`);
+  }
+}
+
+/**
+ * The Postgres connection settings from an environment record, validated. Throws a clear error naming the variable
+ * (never its value) when one is invalid. DB_POSTGRESDB_URL wins over the separate variables when set; its `sslmode`
+ * turns TLS on (require / verify-ca / verify-full) or off (disable). With TLS on, certificates are verified unless
+ * DB_POSTGRESDB_SSL_REJECT_UNAUTHORIZED=false (a warning says so).
+ */
+export function parsePostgresSettings(env: Record<string, string | undefined>): PostgresSettings {
+  const parsed = postgresEnvSchema.safeParse(env);
   if (!parsed.success) {
-    throw new Error(`Invalid environment configuration: ${parsed.error.message}`);
+    const names = [...new Set(parsed.error.issues.map((issue) => String(issue.path[0] ?? "")))].filter(Boolean);
+    throw invalidDbSetting(
+      names.map((name) => `${name} is invalid${name === DB_ENV.port ? " (1-65535)" : name === DB_ENV.poolSize ? " (1-1000)" : name === DB_ENV.ssl || name === DB_ENV.rejectUnauthorized ? " (true or false)" : ""}`).join("; ") + "."
+    );
+  }
+  const values = parsed.data;
+  const warnings: string[] = [];
+  const fromUrl = values[DB_ENV.url] ? parsePostgresUrl(values[DB_ENV.url] as string) : undefined;
+
+  let sslOn = values[DB_ENV.ssl] ?? false;
+  if (fromUrl?.sslMode && values[DB_ENV.ssl] === undefined) {
+    sslOn = fromUrl.sslMode === "require" || fromUrl.sslMode === "verify-ca" || fromUrl.sslMode === "verify-full";
+  }
+  const rejectUnauthorized = values[DB_ENV.rejectUnauthorized];
+  const caValue = values[DB_ENV.sslCa];
+  if (!sslOn && caValue) {
+    throw invalidDbSetting(`${DB_ENV.sslCa} is set but TLS is off; set ${DB_ENV.ssl}=true (or sslmode=verify-full in ${DB_ENV.url}).`);
+  }
+  if (!sslOn && rejectUnauthorized === false) {
+    throw invalidDbSetting(`${DB_ENV.rejectUnauthorized}=false is set but TLS is off; set ${DB_ENV.ssl}=true or remove it.`);
+  }
+  let ssl: PostgresSslSettings | false = false;
+  if (sslOn) {
+    ssl = { rejectUnauthorized: rejectUnauthorized !== false, ...(caValue ? { ca: readCa(caValue) } : {}) };
+    if (!ssl.rejectUnauthorized) {
+      warnings.push(
+        `${DB_ENV.rejectUnauthorized}=false: the Postgres server certificate is NOT verified, so the connection can be intercepted. Set ${DB_ENV.sslCa} to your CA instead.`
+      );
+    }
   }
 
-  return parsed.data;
+  return {
+    host: fromUrl?.host ?? values[DB_ENV.host] ?? "localhost",
+    port: fromUrl ? fromUrl.port ?? 5432 : values[DB_ENV.port] ?? 5432,
+    database: fromUrl ? fromUrl.database ?? "ai_orchestrator" : values[DB_ENV.database] ?? "ai_orchestrator",
+    user: fromUrl ? fromUrl.user ?? "postgres" : values[DB_ENV.user] ?? "postgres",
+    password: fromUrl ? fromUrl.password ?? "" : values[DB_ENV.password] ?? "",
+    ssl,
+    poolSize: values[DB_ENV.poolSize] ?? 10,
+    source: fromUrl ? "url" : "variables",
+    warnings
+  };
+}
+
+/** A log-safe one-line description of the Postgres target (no password). */
+export function describePostgresSettings(settings: Pick<PostgresSettings, "host" | "port" | "database" | "user" | "ssl">): string {
+  const tls = settings.ssl === false ? "no TLS" : settings.ssl.rejectUnauthorized ? "TLS, certificate verified" : "TLS, certificate NOT verified";
+  return `postgres ${settings.user}@${settings.host}:${settings.port}/${settings.database} (${tls})`;
 }
