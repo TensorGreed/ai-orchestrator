@@ -12,3 +12,7 @@ apps/web/test-results
 apps/web/playwright-report
 N8N_PARITY_ROADMAP.md
 *.vsix
+apps/web/dist-demo
+apps/web/test-results-demo
+apps/web/playwright-report-demo
+apps/web/demo-screenshots

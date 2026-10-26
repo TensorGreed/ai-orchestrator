@@ -4518,7 +4518,7 @@ function StudioApp() {
         <div className="auth-shell">
           <form className="auth-card" onSubmit={handleCompleteMfa}>
             <div className="auth-brand">
-              <img src="/lsquarem-logo.svg" alt="L2M logo" className="auth-brand-logo" />
+              <img src={`${import.meta.env.BASE_URL}lsquarem-logo.svg`} alt="L2M logo" className="auth-brand-logo" />
               <h1>
                 L<sup>2</sup>M
               </h1>
@@ -4558,7 +4558,7 @@ function StudioApp() {
       <div className="auth-shell">
         <form className="auth-card" onSubmit={handleLogin}>
           <div className="auth-brand">
-            <img src="/lsquarem-logo.svg" alt="L2M logo" className="auth-brand-logo" />
+            <img src={`${import.meta.env.BASE_URL}lsquarem-logo.svg`} alt="L2M logo" className="auth-brand-logo" />
             <h1>
               L<sup>2</sup>M
             </h1>

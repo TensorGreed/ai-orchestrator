@@ -1,0 +1,240 @@
+/* Static demo chrome: banner, notice and tour. Loaded only by the demo entry; tokens only. */
+
+:root {
+  --demo-bar-h: 36px;
+}
+
+/* With the banner shown, the app shell gives up the banner's height. */
+:root[data-demo-bar="on"] #root,
+:root[data-demo-bar="on"] .studio-shell,
+:root[data-demo-bar="on"] .app-sidebar,
+:root[data-demo-bar="on"] .loading-screen {
+  height: calc(100dvh - var(--demo-bar-h));
+  min-height: calc(100dvh - var(--demo-bar-h));
+}
+
+:root[data-demo-bar="on"] #root {
+  margin-top: var(--demo-bar-h);
+}
+
+.demo-bar {
+  position: fixed;
+  inset: 0 0 auto 0;
+  z-index: 1000;
+  height: var(--demo-bar-h);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 8px 0 14px;
+  background: var(--bg-elev);
+  border-bottom: 1px solid var(--accent-line);
+  color: var(--fg);
+  font-family: var(--font-body);
+  font-size: var(--fs-sm);
+}
+
+.demo-bar-text {
+  margin: 0;
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--fg-muted);
+}
+
+.demo-bar-text strong {
+  color: var(--fg);
+  font-weight: 600;
+}
+
+.demo-dot {
+  width: 8px;
+  height: 8px;
+  flex: none;
+  border-radius: var(--r-pill);
+  background: var(--accent);
+  box-shadow: 0 0 0 4px var(--accent-soft);
+}
+
+.demo-bar-links {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+}
+
+.demo-link {
+  display: inline-flex;
+  align-items: center;
+  height: 26px;
+  padding: 0 10px;
+  border: 1px solid transparent;
+  border-radius: var(--r-pill);
+  background: none;
+  color: var(--fg-muted);
+  font: inherit;
+  text-decoration: none;
+  cursor: pointer;
+  transition: color var(--dur) var(--ease), background var(--dur) var(--ease);
+}
+
+.demo-link:hover,
+.demo-link:focus-visible {
+  color: var(--fg);
+  background: var(--bg-elev-2);
+}
+
+.demo-link-primary {
+  color: var(--accent);
+  border-color: var(--accent-line);
+}
+
+.demo-close {
+  width: 26px;
+  height: 26px;
+  flex: none;
+  border: none;
+  border-radius: var(--r-pill);
+  background: none;
+  color: var(--fg-muted);
+  font-size: var(--fs-lg);
+  line-height: 1;
+  cursor: pointer;
+}
+
+.demo-close:hover,
+.demo-close:focus-visible {
+  color: var(--fg);
+  background: var(--bg-elev-2);
+}
+
+.demo-link:focus-visible,
+.demo-close:focus-visible,
+.demo-pill:focus-visible,
+.demo-button:focus-visible {
+  outline: none;
+  box-shadow: var(--glow-accent);
+}
+
+.demo-pill {
+  position: fixed;
+  left: 12px;
+  bottom: 12px;
+  z-index: 1000;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 28px;
+  padding: 0 12px;
+  border: 1px solid var(--accent-line);
+  border-radius: var(--r-pill);
+  background: var(--bg-elev);
+  color: var(--fg);
+  font: 500 var(--fs-xs) var(--font-body);
+  box-shadow: var(--shadow-md);
+  cursor: pointer;
+}
+
+.demo-notice,
+.demo-tour {
+  position: fixed;
+  right: 16px;
+  z-index: 1001;
+  width: min(380px, calc(100vw - 32px));
+  padding: 14px 16px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-lg);
+  background: var(--bg-elev);
+  color: var(--fg);
+  font-family: var(--font-body);
+  font-size: var(--fs-sm);
+  box-shadow: var(--shadow-lg);
+}
+
+.demo-notice {
+  top: calc(var(--demo-bar-h) + var(--hud-h) + 12px);
+  border-color: var(--warn);
+}
+
+.demo-notice p {
+  margin: 0 0 10px;
+  line-height: 1.45;
+}
+
+.demo-notice-actions,
+.demo-tour-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.demo-tour {
+  bottom: 16px;
+}
+
+.demo-tour-count {
+  margin: 0 0 4px;
+  color: var(--fg-faint);
+  font: 500 var(--fs-xs) var(--font-mono);
+}
+
+.demo-tour-title {
+  margin: 0 0 6px;
+  font: 600 var(--fs-lg) var(--font-display);
+  letter-spacing: var(--ls-display);
+}
+
+.demo-tour-body {
+  margin: 0 0 12px;
+  color: var(--fg-muted);
+  line-height: 1.5;
+}
+
+.demo-tour-spacer {
+  flex: 1;
+}
+
+.demo-button {
+  height: 30px;
+  padding: 0 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-pill);
+  background: var(--bg-elev-2);
+  color: var(--fg);
+  font: 500 var(--fs-sm) var(--font-body);
+  cursor: pointer;
+  transition: border-color var(--dur) var(--ease), background var(--dur) var(--ease);
+}
+
+.demo-button:hover {
+  border-color: var(--accent-line);
+}
+
+.demo-button-primary {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--fg-on-accent);
+}
+
+.demo-button-ghost {
+  border-color: transparent;
+  background: none;
+  color: var(--fg-muted);
+}
+
+@media (max-width: 880px) {
+  :root {
+    --demo-bar-h: 40px;
+  }
+
+  .demo-bar-text {
+    display: none;
+  }
+
+  .demo-bar-links {
+    flex: 1;
+    overflow-x: auto;
+  }
+}

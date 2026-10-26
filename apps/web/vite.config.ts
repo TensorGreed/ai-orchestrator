@@ -1,6 +1,34 @@
-import { defineConfig, loadEnv } from "vite";
+import { defineConfig, loadEnv, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
 import path from "node:path";
+
+/**
+ * The static demo (`--mode demo`): the API client's transport resolves to the
+ * in-browser fake backend and the page boots through the demo entry, which adds
+ * the demo banner. Only this mode references `src/demo/`.
+ */
+function demoMode(): Plugin {
+  const transport = path.resolve(__dirname, "src/lib/transport.ts");
+  const demoTransport = path.resolve(__dirname, "src/demo/demo-transport.ts");
+  return {
+    name: "l2m-demo-mode",
+    enforce: "pre",
+    async resolveId(source, importer, options) {
+      if (!importer || !source.includes("transport")) return null;
+      const resolved = await this.resolve(source, importer, { ...options, skipSelf: true });
+      return resolved?.id === transport ? demoTransport : null;
+    },
+    // The demo makes no request off its own origin: fonts fall back to the system stack.
+    transform(code, id) {
+      if (!id.endsWith("/src/styles/tokens.css")) return null;
+      return code.replace(/@import url\("https:\/\/fonts\.googleapis\.com[^"]*"\);\n?/g, "");
+    },
+    transformIndexHtml: {
+      order: "pre",
+      handler: (html) => html.replace("/src/main.tsx", "/src/demo/demo-main.tsx")
+    }
+  };
+}
 
 export default defineConfig(({ mode }) => {
   const isWidgetBuild = mode === "widget";
@@ -30,6 +58,28 @@ export default defineConfig(({ mode }) => {
             inlineDynamicImports: true
           }
         }
+      }
+    };
+  }
+
+  if (mode === "demo") {
+    return {
+      base: "/demo/",
+      plugins: [demoMode(), react()],
+      // The studio's Docs button: the docs sit next to the demo on the same site.
+      define: {
+        "import.meta.env.VITE_DOCS_URL": JSON.stringify("/docs/")
+      },
+      resolve: {
+        extensions: [".tsx", ".ts", ".jsx", ".js", ".mjs", ".json"]
+      },
+      build: {
+        outDir: "dist-demo",
+        emptyOutDir: true
+      },
+      preview: {
+        port: 4319,
+        strictPort: true
       }
     };
   }

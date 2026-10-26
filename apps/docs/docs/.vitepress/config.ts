@@ -14,6 +14,7 @@ export default defineConfig({
     nav: [
       { text: "← lsquarem.com", link: "https://lsquarem.com/" },
       { text: "Why", link: "/why" },
+      { text: "Live demo", link: "https://lsquarem.com/demo/", target: "_self" },
       { text: "Quickstart", link: "/getting-started/build-your-first-mcp-agent" },
       { text: "Patterns", link: "/patterns/" },
       { text: "Architecture", link: "/architecture/overview" },

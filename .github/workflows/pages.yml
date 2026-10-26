@@ -3,8 +3,11 @@ name: Deploy lsquarem.com (Pages)
 # Builds the unified site that lives at lsquarem.com:
 #   - /        marketing landing — the static HTML/CSS/JS in `docs/`
 #   - /docs/   product documentation — the VitePress build under `apps/docs/`
+#   - /demo/   the static live demo — `apps/web` built with `--mode demo`: the
+#              real studio against an in-browser fake API serving recorded
+#              fixtures (apps/web/src/demo/), no server and no network
 #
-# The two halves are merged into a single artifact and deployed via
+# The three parts are merged into a single artifact and deployed via
 # actions/deploy-pages. To enable, in GitHub Settings → Pages flip the
 # source from "Deploy from a branch" to "GitHub Actions".
 
@@ -14,7 +17,14 @@ on:
     paths:
       - "docs/**"
       - "apps/docs/**"
-      - "packages/shared/src/definitions.ts"
+      # The demo at /demo/ is the studio itself (apps/web) built against recorded
+      # fixtures, and it bundles the shared schemas and node definitions
+      # (packages/shared/src). Sample workflows are what its templates and
+      # fixtures are made from. A change to any of these changes the demo.
+      - "packages/shared/src/**"
+      - "apps/web/**"
+      - "samples/workflows/**"
+      - "scripts/assemble-pages-site.mjs"
       - ".github/workflows/pages.yml"
   workflow_dispatch:
 
@@ -51,18 +61,21 @@ jobs:
       - name: Build VitePress (with base=/docs/)
         run: pnpm --filter @ai-orchestrator/docs build
 
+      # A broken demo must not take the landing page and the docs down with it:
+      # the site deploys without /demo/ and the run shows a warning.
+      - name: Build the live demo (with base=/demo/)
+        id: demo
+        continue-on-error: true
+        run: pnpm --filter @ai-orchestrator/web build:demo
+
+      # Landing at /, docs at /docs/, and the demo at /demo/ when it built.
+      # The landing, the docs and the CNAME check stay required.
       - name: Assemble unified site
+        env:
+          DEMO_OUTCOME: ${{ steps.demo.outcome }}
         run: |
           set -euo pipefail
-          mkdir -p _site
-          # 1. Marketing landing: copy the static `docs/` folder to root
-          cp -r docs/. _site/
-          # 2. Product docs: VitePress build mounted at /docs/
-          mkdir -p _site/docs
-          cp -r apps/docs/docs/.vitepress/dist/. _site/docs/
-          # 3. Sanity: the marketing CNAME from `docs/` is preserved at the
-          #    root of the artifact (Pages requires CNAME at site root).
-          test -f _site/CNAME && grep -q "lsquarem.com" _site/CNAME
+          node scripts/assemble-pages-site.mjs
           echo "Built _site:"
           ls -la _site
           echo "Built _site/docs:"

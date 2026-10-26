@@ -1117,7 +1117,9 @@ export const NODE_LOGO_MAP: Record<string, string> = {
 };
 
 export function resolveNodeLogo(nodeType: string): string | undefined {
-  return NODE_LOGO_MAP[nodeType];
+  const logo = NODE_LOGO_MAP[nodeType];
+  // Served from the app's base path ("/" normally, "/demo/" in the static demo).
+  return logo ? `${import.meta.env.BASE_URL}${logo.slice(1)}` : undefined;
 }
 
 export function NodeLogoImage({
