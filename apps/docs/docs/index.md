@@ -18,11 +18,11 @@ features:
   - title: MCP-first
     details: Wire any Model Context Protocol server in as an agent tool. Schemas are compacted, tools are shortlisted by prompt relevance, and full outputs are cached across multi-turn sessions. Expose your own workflows back out as MCP tools that other agents invoke.
   - title: Multi-agent Swarm
-    details: Compose Supervisor → Worker hierarchies via dedicated attachment ports. Workers become synthetic tools to the parent, recursively. Other visual workflow tools either lack MCP integration entirely or treat agent delegation as chained prompts rather than first-class topology.
+    details: Compose Supervisor → Worker hierarchies via dedicated attachment ports. Workers become synthetic tools to the parent, recursively. Each worker brings its own model, tools and memory.
   - title: VS Code agent surface
     details: First-party extension turns any workflow into a coding agent inside the editor — streaming responses, patch previews with workspace-path safety, and command approval. Bring your own backend agent topology.
   - title: Production-ready foundations
-    details: SAML/LDAP SSO, MFA, encrypted secrets with rotation, external secret managers (Vault/AWS/GCP/Azure), RBAC + projects + custom roles, audit logs, Prometheus, OTEL tracing, and multi-main HA via leader election.
+    details: TOTP MFA and SSO through SAML or LDAP (optional packages). AES-256-GCM secrets with master-key rotation through db:export / db:import, and external secret managers (HashiCorp Vault built in; AWS, Google Cloud and Azure once their SDK is installed). RBAC with projects and custom roles, a tamper-evident audit log, Prometheus metrics and OpenTelemetry traces over OTLP.
 ---
 
 ## Documentation map

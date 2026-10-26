@@ -12,6 +12,7 @@
 //
 // The site is served by a small static server that resolves paths the way GitHub Pages does
 // (`/docs/foo` serves `foo.html`, `/demo` redirects to `/demo/`). Exit 1 on any failure.
+// CI runs it from .github/workflows/pages-check.yml on pull requests that touch the site.
 import { createServer } from "node:http";
 import { existsSync, promises as fs, statSync } from "node:fs";
 import path from "node:path";
