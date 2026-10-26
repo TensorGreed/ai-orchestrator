@@ -5,6 +5,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { describePostgresSettings, isPostgresDbType, parseConfig, parsePostgresSettings } from "./config.js";
 import { createStore, postgresStoreConfig } from "./db/create-store.js";
@@ -121,13 +122,51 @@ describe("parsePostgresSettings", () => {
     expect(postgresPoolConfig(postgresStoreConfig(settings)).ssl).toEqual({ rejectUnauthorized: true });
   });
 
-  it("sslmode in the URL turns TLS on or off; DB_POSTGRESDB_SSL, when set, wins", () => {
+  it("sslmode in the URL turns TLS on or off; DB_POSTGRESDB_SSL alone decides when the URL has no sslmode", () => {
     expect(parsePostgresSettings({ DB_POSTGRESDB_URL: "postgres://u@h/db?sslmode=require" }).ssl).toEqual({ rejectUnauthorized: true });
+    expect(parsePostgresSettings({ DB_POSTGRESDB_URL: "postgres://u@h/db?sslmode=verify-ca" }).ssl).toEqual({ rejectUnauthorized: true });
     expect(parsePostgresSettings({ DB_POSTGRESDB_URL: "postgres://u@h/db?sslmode=verify-full" }).ssl).toEqual({ rejectUnauthorized: true });
     expect(parsePostgresSettings({ DB_POSTGRESDB_URL: "postgres://u@h/db?sslmode=disable" }).ssl).toBe(false);
-    expect(parsePostgresSettings({ DB_POSTGRESDB_URL: "postgres://u@h/db?sslmode=disable", DB_POSTGRESDB_SSL: "true" }).ssl).toEqual({
+    expect(parsePostgresSettings({ DB_POSTGRESDB_URL: "postgres://u@h/db", DB_POSTGRESDB_SSL: "true" }).ssl).toEqual({ rejectUnauthorized: true });
+    expect(parsePostgresSettings({ DB_POSTGRESDB_URL: "postgres://u@h/db", DB_POSTGRESDB_SSL: "false" }).ssl).toBe(false);
+    // Both set and agreeing is fine.
+    expect(parsePostgresSettings({ DB_POSTGRESDB_URL: "postgres://u@h/db?sslmode=verify-full", DB_POSTGRESDB_SSL: "true" }).ssl).toEqual({
       rejectUnauthorized: true
     });
+    expect(parsePostgresSettings({ DB_POSTGRESDB_URL: "postgres://u@h/db?sslmode=disable", DB_POSTGRESDB_SSL: "false" }).ssl).toBe(false);
+  });
+
+  it("sslmode in the URL and DB_POSTGRESDB_SSL that disagree fail fast, naming both and never echoing the URL", () => {
+    for (const [mode, ssl] of [
+      ["verify-full", "false"],
+      ["require", "false"],
+      ["disable", "true"]
+    ]) {
+      const error = errorOf(() =>
+        parsePostgresSettings({ DB_POSTGRESDB_URL: `postgres://u:${encodeURIComponent(SECRET)}@h/db?sslmode=${mode}`, DB_POSTGRESDB_SSL: ssl })
+      );
+      expect(error.message).toMatch(/DB_POSTGRESDB_URL/);
+      expect(error.message).toMatch(/DB_POSTGRESDB_SSL\b/);
+      expect(error.message).not.toContain(SECRET);
+      expect(error.message).not.toContain(encodeURIComponent(SECRET));
+    }
+  });
+
+  it("a copied .env.example with the suggested URL uncommented keeps TLS on (no shipped default turns it off)", () => {
+    const example = fs.readFileSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../.env.example"), "utf8");
+    const env: Record<string, string> = {};
+    for (const rawLine of example.split(/\r?\n/)) {
+      // Uncomment the suggested URL line, as the template invites; leave every other comment alone.
+      const line = /^#\s*DB_POSTGRESDB_URL=/.test(rawLine) ? rawLine.replace(/^#\s*/, "") : rawLine;
+      const match = /^([A-Z0-9_]+)=(.*)$/.exec(line.trim());
+      if (match) env[match[1]] = match[2];
+    }
+    expect(env.DB_POSTGRESDB_URL).toMatch(/sslmode=verify-full/);
+    // The shipped template sets no DB_POSTGRESDB_* value besides the uncommented URL: the defaults come from code.
+    expect(Object.keys(env).filter((key) => key.startsWith("DB_POSTGRESDB_"))).toEqual(["DB_POSTGRESDB_URL"]);
+    const settings = parsePostgresSettings(env);
+    expect(settings.ssl).toEqual({ rejectUnauthorized: true });
+    expect(describePostgresSettings(settings)).toContain("TLS, certificate verified");
   });
 
   it("DB_POSTGRESDB_SSL_CA takes a PEM (escaped newlines too) or a file path", () => {

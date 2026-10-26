@@ -124,13 +124,21 @@ Optional PostgreSQL storage:
 
 ```bash
 DB_TYPE=postgres
-DB_POSTGRESDB_HOST=localhost
-DB_POSTGRESDB_PORT=5432
-DB_POSTGRESDB_DATABASE=ai_orchestrator
-DB_POSTGRESDB_USER=postgres
-DB_POSTGRESDB_PASSWORD=
-DB_POSTGRESDB_SSL=false
-DB_POSTGRESDB_POOL_SIZE=10
+# Defaults shown; uncomment only what you change.
+# DB_POSTGRESDB_HOST=localhost
+# DB_POSTGRESDB_PORT=5432
+# DB_POSTGRESDB_DATABASE=ai_orchestrator
+# DB_POSTGRESDB_USER=postgres
+# DB_POSTGRESDB_PASSWORD=
+# DB_POSTGRESDB_SSL=false
+# DB_POSTGRESDB_POOL_SIZE=10
+# Or one URL (wins over the settings above). sslmode require / verify-ca / verify-full turn TLS on and verify the
+# certificate and host name; disable turns it off; allow / prefer are refused. DB_POSTGRESDB_SSL, if set, must agree.
+# DB_POSTGRESDB_URL=postgres://user:password@host:5432/ai_orchestrator?sslmode=verify-full
+# Private CA (PEM or path of a PEM file):
+# DB_POSTGRESDB_SSL_CA=/etc/ssl/certs/my-db-ca.pem
+# Not recommended: skip certificate verification (a startup warning says so).
+# DB_POSTGRESDB_SSL_REJECT_UNAUTHORIZED=false
 ```
 
 Optional execution queue concurrency:

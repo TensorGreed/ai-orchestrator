@@ -623,7 +623,8 @@ function readCa(value: string): string {
 /**
  * The Postgres connection settings from an environment record, validated. Throws a clear error naming the variable
  * (never its value) when one is invalid. DB_POSTGRESDB_URL wins over the separate variables when set; its `sslmode`
- * turns TLS on (require / verify-ca / verify-full) or off (disable). With TLS on, certificates are verified unless
+ * turns TLS on (require / verify-ca / verify-full) or off (disable), and must agree with DB_POSTGRESDB_SSL when both
+ * are set. With TLS on, certificates are verified unless
  * DB_POSTGRESDB_SSL_REJECT_UNAUTHORIZED=false (a warning says so).
  */
 export function parsePostgresSettings(env: Record<string, string | undefined>): PostgresSettings {
@@ -638,10 +639,16 @@ export function parsePostgresSettings(env: Record<string, string | undefined>): 
   const warnings: string[] = [];
   const fromUrl = values[DB_ENV.url] ? parsePostgresUrl(values[DB_ENV.url] as string) : undefined;
 
-  let sslOn = values[DB_ENV.ssl] ?? false;
-  if (fromUrl?.sslMode && values[DB_ENV.ssl] === undefined) {
-    sslOn = fromUrl.sslMode === "require" || fromUrl.sslMode === "verify-ca" || fromUrl.sslMode === "verify-full";
+  // TLS: the URL's sslmode and DB_POSTGRESDB_SSL each decide alone; when both are set they must agree, so a leftover
+  // DB_POSTGRESDB_SSL=false can never quietly turn off the TLS a URL asks for (or the reverse).
+  const sslFromVariable = values[DB_ENV.ssl];
+  const sslFromUrl = fromUrl?.sslMode === undefined ? undefined : fromUrl.sslMode !== "disable";
+  if (sslFromUrl !== undefined && sslFromVariable !== undefined && sslFromUrl !== sslFromVariable) {
+    throw invalidDbSetting(
+      `the sslmode in ${DB_ENV.url} turns TLS ${sslFromUrl ? "on" : "off"} but ${DB_ENV.ssl}=${sslFromVariable} turns it ${sslFromVariable ? "on" : "off"}; remove ${DB_ENV.ssl} or make the two agree.`
+    );
   }
+  const sslOn = sslFromUrl ?? sslFromVariable ?? false;
   const rejectUnauthorized = values[DB_ENV.rejectUnauthorized];
   const caValue = values[DB_ENV.sslCa];
   if (!sslOn && caValue) {
