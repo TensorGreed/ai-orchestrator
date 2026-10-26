@@ -5,7 +5,6 @@
 import { expect, it } from "vitest";
 import type { Workflow } from "@ai-orchestrator/shared";
 import { describeStoreContract } from "../../test-support/test-store.js";
-import { storeImplements } from "../store-support.js";
 import type { DataDestinationWrite } from "../database.js";
 
 const ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
@@ -63,10 +62,8 @@ describeStoreContract("store contract: data destinations", (ctx) => {
     expect(JSON.parse(configs[0]!.draftJson)).toMatchObject({ id: "wf-b" });
   });
 
-  it("a published workflow also gives its published version's JSON", async (test) => {
+  it("a published workflow also gives its published version's JSON", async () => {
     const store = ctx.store();
-    // needs q3a: appendWorkflowVersion is a q3a stub on Postgres until q3a lands.
-    if (!storeImplements(store, "appendWorkflowVersion") || !storeImplements(store, "publishWorkflowVersion")) test.skip();
     await store.upsertWorkflow(workflow("wf-a", "Draft name"));
     const saved = await store.appendWorkflowVersion({ id: "ver-1", workflowId: "wf-a", workflowJson: JSON.stringify({ id: "wf-a", published: true }), retention: 10 });
     const release = await store.publishWorkflowVersion(

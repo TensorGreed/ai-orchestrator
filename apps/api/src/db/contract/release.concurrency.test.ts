@@ -19,7 +19,6 @@ import { postgresStoreConfig } from "../create-store.js";
 import { PostgresStore } from "../postgres-store.js";
 import type { Store } from "../store.js";
 import type { ReleaseApprovalRequestRecord, ReleaseGateRecord } from "../database.js";
-import { applyPendingSeqColumns } from "../../test-support/pending-seq.js";
 
 const ROUNDS = 8;
 const now = () => new Date().toISOString();
@@ -103,7 +102,6 @@ if (!testPostgresUrl()) {
 
     beforeEach(async () => {
       first = await createTestStore({ kind: "postgres" });
-      await applyPendingSeqColumns(first);
       second = await PostgresStore.create(postgresStoreConfig(testPostgresSettings(), { schema: first.schema!, maxConnections: 4 }));
       sql = testPostgresPool(first.schema!);
       a = first.store;

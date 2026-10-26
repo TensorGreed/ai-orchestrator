@@ -33,7 +33,24 @@ export const INSERTION_SEQ_TABLES: ReadonlyArray<{ table: string; backfillOrder:
   { table: "mcp_elicitations", backfillOrder: `created_at, id COLLATE "C"` },
   { table: "mcp_tool_policies", backfillOrder: `created_at, id COLLATE "C"` },
   { table: "mcp_toolset_members", backfillOrder: `toolset_id COLLATE "C", position, id COLLATE "C"` },
-  { table: "mcp_clients", backfillOrder: `created_at, id COLLATE "C"` }
+  { table: "mcp_clients", backfillOrder: `created_at, id COLLATE "C"` },
+  // Governance tables (q3b): eval, replay, capture, guard simulations and the data-subject lookup.
+  { table: "eval_fixtures", backfillOrder: `created_at, id COLLATE "C"` },
+  { table: "eval_runs", backfillOrder: `started_at, id COLLATE "C"` },
+  { table: "eval_results", backfillOrder: `created_at, id COLLATE "C"` },
+  { table: "mcp_cassettes", backfillOrder: `created_at, id COLLATE "C"` },
+  { table: "replay_recordings", backfillOrder: `created_at, id COLLATE "C"` },
+  { table: "guard_simulations", backfillOrder: `created_at, id COLLATE "C"` },
+  { table: "execution_history", backfillOrder: `started_at, id COLLATE "C"` }
+];
+
+/** v40: the tables the data-subject lookup pages by `seq` (postgres/data-labels.ts); each gets a unique seq index. */
+export const SUBJECT_SEQ_TABLES: ReadonlyArray<string> = [
+  "replay_recordings",
+  "eval_fixtures",
+  "eval_results",
+  "execution_history",
+  "mcp_cassettes"
 ];
 
 /** Adds `seq BIGINT NOT NULL GENERATED ALWAYS AS IDENTITY` to `table`, numbering existing rows by `backfillOrder`. */
@@ -1905,9 +1922,11 @@ export const MIGRATIONS: Migration[] = [
     up: [
       ...INSERTION_SEQ_TABLES.map(({ table, backfillOrder }) => insertionSeqUp(table, backfillOrder)),
       `CREATE UNIQUE INDEX IF NOT EXISTS idx_audit_logs_seq ON audit_logs(seq);`,
-      `CREATE INDEX IF NOT EXISTS idx_kb_chunks_kb_seq ON knowledge_base_chunks(knowledge_base_id, seq);`
+      `CREATE INDEX IF NOT EXISTS idx_kb_chunks_kb_seq ON knowledge_base_chunks(knowledge_base_id, seq);`,
+      ...SUBJECT_SEQ_TABLES.map((table) => `CREATE UNIQUE INDEX IF NOT EXISTS idx_${table}_seq ON ${table}(seq);`)
     ].join("\n"),
     down: [
+      ...SUBJECT_SEQ_TABLES.map((table) => `DROP INDEX IF EXISTS idx_${table}_seq;`),
       `DROP INDEX IF EXISTS idx_kb_chunks_kb_seq;`,
       `DROP INDEX IF EXISTS idx_audit_logs_seq;`,
       ...INSERTION_SEQ_TABLES.map(({ table }) => `ALTER TABLE ${table} DROP COLUMN IF EXISTS seq;`)

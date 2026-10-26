@@ -13,7 +13,6 @@ import {
   testPostgresUrl,
   type TestStore
 } from "../../test-support/test-store.js";
-import { applyPendingSeqColumns } from "../../test-support/pending-seq.js";
 
 const enabled = Boolean(testPostgresUrl());
 if (!enabled) noticePostgresSkipped("misc concurrency (leases, budget alerts)");
@@ -26,7 +25,6 @@ describe.skipIf(!enabled)("Postgres concurrency: leases and budget alerts (two s
 
   beforeEach(async () => {
     first = await createTestStore({ kind: "postgres" });
-    await applyPendingSeqColumns(first);
     second = await PostgresStore.create(postgresStoreConfig(testPostgresSettings(), { schema: first.schema!, maxConnections: 8 }));
     a = first.store;
     b = second;

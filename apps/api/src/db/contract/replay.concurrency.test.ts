@@ -9,7 +9,6 @@ import type { ReplayRecordingInsert } from "../database.js";
 import { PostgresStore } from "../postgres-store.js";
 import type { ReplayRecordingLimits, Store } from "../store.js";
 import { createTestStore, noticePostgresSkipped, testPostgresSettings, testPostgresUrl, type TestStore } from "../../test-support/test-store.js";
-import { applyPendingSeqColumns } from "../../test-support/pending-seq.js";
 
 const ROUNDS = 8;
 
@@ -62,7 +61,6 @@ postgres("checked golden-run writes from two stores on one Postgres database", (
 
   beforeEach(async () => {
     first = await createTestStore({ kind: "postgres" });
-    await applyPendingSeqColumns(first);
     second = await PostgresStore.create(postgresStoreConfig(testPostgresSettings(), { schema: first.schema!, maxConnections: 4 }));
     a = first.store;
     b = second;

@@ -5,42 +5,22 @@
  */
 import { expect, it } from "vitest";
 import { describeStoreContract } from "../../test-support/test-store.js";
-import { StoreNotImplementedError } from "../store-errors.js";
 import type { Store } from "../store.js";
 import type { GateCaseRequestRecord, ReleaseApprovalRequestRecord, ReleaseGateRecord } from "../database.js";
 
 const ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const at = (offsetMs: number) => new Date(Date.UTC(2026, 9, 26, 8, 0, 0) + offsetMs).toISOString();
 
-type Skip = (note?: string) => void;
-
-/**
- * Runs a setup step that needs a method of another lane. While that method is still a stub on this store the test
- * is skipped with `note` instead of failing.
- */
-async function orSkip<T>(skip: Skip, note: string, fn: () => Promise<T>): Promise<T> {
-  try {
-    return await fn();
-  } catch (error) {
-    if (error instanceof StoreNotImplementedError) {
-      skip(`${note} (${error.method})`);
-    }
-    throw error;
-  }
-}
-
 async function workflow(store: Store, id: string): Promise<void> {
   await store.upsertWorkflow({ id, name: `Workflow ${id}`, schemaVersion: "1.0.0", workflowVersion: 1, nodes: [], edges: [] } as never);
 }
 
 /** A workflow with `count` saved versions (1..count). */
-async function workflowWithVersions(store: Store, skip: Skip, id: string, count: number): Promise<void> {
+async function workflowWithVersions(store: Store, id: string, count: number): Promise<void> {
   await workflow(store, id);
-  await orSkip(skip, "needs q3a", async () => {
-    for (let index = 0; index < count; index += 1) {
-      await store.appendWorkflowVersion({ id: `${id}-v${index + 1}`, workflowId: id, workflowJson: JSON.stringify({ id, n: index }), retention: 0 });
-    }
-  });
+  for (let index = 0; index < count; index += 1) {
+    await store.appendWorkflowVersion({ id: `${id}-v${index + 1}`, workflowId: id, workflowJson: JSON.stringify({ id, n: index }), retention: 0 });
+  }
 }
 
 function gate(workflowId: string, overrides: Partial<ReleaseGateRecord> = {}): ReleaseGateRecord {
@@ -189,9 +169,9 @@ describeStoreContract("store contract: release gates and publishing", (ctx) => {
     expect(await store.saveReleaseGate({ gate: null, expected: null, updatedAt: at(0), updatedBy: null })).toBeNull();
   });
 
-  it("publishes a version once from the expected previous one, pins it and records the release", async ({ skip }) => {
+  it("publishes a version once from the expected previous one, pins it and records the release", async () => {
     const store = ctx.store();
-    await workflowWithVersions(store, skip, "wf-1", 3);
+    await workflowWithVersions(store, "wf-1", 3);
     expect(await store.getPublishedVersion("wf-1")).toBeNull();
     expect(await store.getPublishedVersion("missing")).toBeNull();
     expect(await store.isWorkflowVersionPinned("wf-1", 1)).toBe(false);
@@ -237,11 +217,9 @@ describeStoreContract("store contract: release gates and publishing", (ctx) => {
     expect(await store.getExecutionRelease("ex-2")).toEqual({ channel: "draft", version: null });
   });
 
-  it("a replay job's set snapshot round-trips (old hash-only entries read as cases: null); release proof skips simulation jobs", async ({ skip }) => {
+  it("a replay job's set snapshot round-trips (old hash-only entries read as cases: null); release proof skips simulation jobs", async () => {
     const store = ctx.store();
-    await orSkip(skip, "needs the eval store", async () => {
-      await store.createEvalRun({ id: "run-old", datasetId: "set-a", workflowId: "wf-1", kind: "replay", status: "completed", workflowHash: "h1" });
-    });
+    await store.createEvalRun({ id: "run-old", datasetId: "set-a", workflowId: "wf-1", kind: "replay", status: "completed", workflowHash: "h1" });
     expect(await store.getEvalRunSetSnapshot("run-old")).toBeNull();
     await store.setEvalRunSetSnapshot("run-old", { "set-a": { hash: "sa", cases: { "fx-1": "f1" } }, "set-b": { hash: "sb", cases: null } });
     expect(await store.getEvalRunSetSnapshot("run-old")).toEqual({ "set-a": { hash: "sa", cases: { "fx-1": "f1" } }, "set-b": { hash: "sb", cases: null } });
@@ -258,11 +236,9 @@ describeStoreContract("store contract: release gates and publishing", (ctx) => {
     expect(await store.listReplayRunIdsForHash("wf-1", "h1")).toEqual(["run-new", "run-old"]);
   });
 
-  it("marks runs release-ineligible once per reason and keeps earlier reasons", async ({ skip }) => {
+  it("marks runs release-ineligible once per reason and keeps earlier reasons", async () => {
     const store = ctx.store();
-    await orSkip(skip, "needs the eval store", async () => {
-      await store.createEvalRun({ id: "run-1", datasetId: "set-a", workflowId: "wf-1", kind: "replay", status: "completed", candidate: { releaseEligible: true, note: "x" } });
-    });
+    await store.createEvalRun({ id: "run-1", datasetId: "set-a", workflowId: "wf-1", kind: "replay", status: "completed", candidate: { releaseEligible: true, note: "x" } });
     await store.createEvalRun({ id: "run-2", datasetId: "set-a", workflowId: "wf-1", kind: "replay", status: "completed" });
     expect((await store.markEvalRunsReleaseIneligible(["run-1", "run-1", "run-2", "missing"], "evidence removed")).sort()).toEqual(["run-1", "run-2"]);
     expect(await store.markEvalRunsReleaseIneligible(["run-1"], "evidence removed")).toEqual([]);
@@ -335,9 +311,9 @@ describeStoreContract("store contract: release approval requests", (ctx) => {
     expect((await store.getReleaseApprovalRequest("later"))?.status).toBe("pending");
   });
 
-  it("approve-and-publish decides and publishes together; a lost publish rolls the decision back", async ({ skip }) => {
+  it("approve-and-publish decides and publishes together; a lost publish rolls the decision back", async () => {
     const store = ctx.store();
-    await workflowWithVersions(store, skip, "wf-1", 2);
+    await workflowWithVersions(store, "wf-1", 2);
     await store.insertReleaseApprovalRequest(releaseRequest("rr-1"));
     await store.insertReleaseApprovalRequest(releaseRequest("rr-2", { version: 2, workflowHash: "hash-2" }));
     const decision = (id: string) => ({ id, status: "approved" as const, decidedByUserId: "u-bo", decidedBy: "bo", decisionReason: null, releaseId: `rel-${id}` });
@@ -389,13 +365,11 @@ describeStoreContract("store contract: gate case requests and gate case changes"
     expect(await store.timeOutExpiredGateCaseRequests(now)).toEqual([]);
   });
 
-  it("updateReleaseGateCases refuses a decided request or changed admission and otherwise applies everything", async ({ skip }) => {
+  it("updateReleaseGateCases refuses a decided request or changed admission and otherwise applies everything", async () => {
     const store = ctx.store();
     await store.upsertReleaseGate(gate("wf-1", { enforced: true }));
     await store.setReleaseGateAdmission("wf-1", ["fx-1"], at(0), "ana");
-    await orSkip(skip, "needs the eval store", async () => {
-      await store.createEvalDataset({ id: "set-a", name: "Set A", workflowId: "wf-1" });
-    });
+    await store.createEvalDataset({ id: "set-a", name: "Set A", workflowId: "wf-1" });
     await store.createEvalFixture({ id: "fx-1", datasetId: "set-a", name: "One", input: { q: 1 } });
     await store.createEvalFixture({ id: "fx-2", datasetId: "set-a", name: "Two", input: { q: 2 } });
     await store.createEvalFixture({ id: "fx-3", datasetId: "set-a", name: "Three", input: { q: 3 } });

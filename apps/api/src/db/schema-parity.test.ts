@@ -58,8 +58,17 @@ const SEQ_INDEXES: ReadonlyArray<{ table: string; index: string; definition: str
     table: "knowledge_base_chunks",
     index: "idx_kb_chunks_kb_seq",
     definition: "CREATE INDEX idx_kb_chunks_kb_seq ON knowledge_base_chunks USING btree (knowledge_base_id, seq)"
-  }
+  },
+  // The data-subject lookup pages these five tables by `seq` (postgres/data-labels.ts).
+  ...["replay_recordings", "eval_fixtures", "eval_results", "execution_history", "mcp_cassettes"].map((table) => ({
+    table,
+    index: `idx_${table}_seq`,
+    definition: `CREATE UNIQUE INDEX idx_${table}_seq ON ${table} USING btree (seq)`
+  }))
 ];
+
+/** The tables q3b's Postgres modules order by `seq` (where SQLite uses rowid); all must be in v40. */
+const Q3B_SEQ_TABLES = ["eval_fixtures", "eval_runs", "eval_results", "mcp_cassettes", "replay_recordings", "guard_simulations", "execution_history"];
 
 export const ALLOWED_DIFFERENCES: ReadonlyArray<SchemaDifference & { reason: string }> = [
   ...INSERTION_SEQ_TABLES.map(({ table }) => ({
@@ -362,6 +371,11 @@ describe.skipIf(!postgresUrl)("Postgres schema parity and migration walk", () =>
       await test.cleanup();
     }
   }, 120_000);
+
+  it("v40 covers every table the governance modules order by seq", () => {
+    const tables = INSERTION_SEQ_TABLES.map(({ table }) => table);
+    expect(Q3B_SEQ_TABLES.filter((table) => !tables.includes(table))).toEqual([]);
+  });
 
   it("v40: every insertion-ordered table has seq BIGINT NOT NULL GENERATED ALWAYS AS IDENTITY, and the seq indexes are exactly as documented", async () => {
     const test = await createTestStore({ kind: "postgres" });

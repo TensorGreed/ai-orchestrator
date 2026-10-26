@@ -13,7 +13,6 @@ import { PostgresStore } from "../postgres-store.js";
 import { isOneRunningSimulationViolation } from "../store-errors.js";
 import { GuardService } from "../../services/guard-service.js";
 import { SecretService } from "../../services/secret-service.js";
-import { applyPendingSeqColumns } from "../../test-support/pending-seq.js";
 
 const postgres = testPostgresUrl() ? describe : describe.skip;
 if (!testPostgresUrl()) noticePostgresSkipped("guard concurrency on Postgres");
@@ -24,7 +23,6 @@ let second: PostgresStore | undefined;
 
 async function twoStores() {
   primary = await createTestStore({ kind: "postgres" });
-  await applyPendingSeqColumns(primary);
   second = await PostgresStore.create(postgresStoreConfig(testPostgresSettings(), { schema: primary.schema!, maxConnections: 4 }));
   return { a: primary.store, b: second, schema: primary.schema! };
 }
