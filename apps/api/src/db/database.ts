@@ -9998,7 +9998,7 @@ export class SqliteStore implements Store {
     workflowId?: string | null;
     executionId?: string | null;
     message?: string;
-  }): Promise<void> {
+  }): Promise<boolean> {
     this.exec(
       `INSERT INTO budget_alerts (
          id, budget_id, period_start, severity, usage_value, limit_value,
@@ -10018,6 +10018,7 @@ export class SqliteStore implements Store {
       ]
     );
     this.persist();
+    return true;
   }
 
   /**

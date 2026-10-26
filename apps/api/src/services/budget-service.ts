@@ -163,7 +163,7 @@ export class BudgetService {
     const message = severity === "block"
       ? `Budget "${budget.name}" exceeded: ${formatUsage(usageValue, budget.limitType)} of ${formatUsage(budget.limitValue, budget.limitType)}`
       : `Budget "${budget.name}" at ${Math.round((usageValue / budget.limitValue) * 100)}%: ${formatUsage(usageValue, budget.limitType)} of ${formatUsage(budget.limitValue, budget.limitType)}`;
-    await this.store.recordBudgetAlert({
+    const recorded = await this.store.recordBudgetAlert({
       id: `bal_${randomUUID()}`,
       budgetId: budget.id,
       periodStart,
@@ -174,6 +174,8 @@ export class BudgetService {
       executionId: ctx.executionId,
       message
     });
+    // Another instance (or a concurrent run) recorded this window's alert between the check and the write.
+    if (!recorded) return;
     this.logger?.warn("Budget threshold crossed", {
       budgetId: budget.id,
       severity,

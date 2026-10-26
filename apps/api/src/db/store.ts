@@ -1985,6 +1985,8 @@ export interface Store {
   deleteBudget(id: string): Promise<boolean>;
   getBudget(id: string): Promise<BudgetRecord | null>;
   listBudgets(filter?: { enabledOnly?: boolean; scopeType?: string; scopeId?: string }): Promise<BudgetRecord[]>;
+  /** Records a fired budget alert; false when the store refused it as a duplicate for the same budget, window and
+   * severity (Postgres, where two instances can pass the debounce check together). SQLite always records it. */
   recordBudgetAlert(input: {
     id: string;
     budgetId: string;
@@ -1995,7 +1997,7 @@ export interface Store {
     workflowId?: string | null;
     executionId?: string | null;
     message?: string;
-  }): Promise<void>;
+  }): Promise<boolean>;
   /**
    * Most recent alert for a (budget, period) pair. Used to debounce — we
    * only fire one warn / one block per period+budget combination so users
