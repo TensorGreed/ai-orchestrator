@@ -4357,11 +4357,19 @@ export class SqliteStore implements Store {
     return true;
   }
 
+  /**
+   * Phase 13.1 — removes the user with its sessions, API keys, MFA secret, SSO identities and project roles in one
+   * transaction (Postgres keeps foreign keys on those rows, so both stores remove them explicitly).
+   */
   async deleteUser(id: string): Promise<boolean> {
-    this.exec(`DELETE FROM sessions WHERE user_id = ?`, [id]);
-    this.exec(`DELETE FROM users WHERE id = ?`, [id]);
-    const changesRow = this.queryOne<{ count: number }>("SELECT changes() as count");
-    const changed = (changesRow ? toNumber(changesRow.count) : 0) > 0;
+    const changed = this.db.transaction(() => {
+      this.exec(`DELETE FROM sessions WHERE user_id = ?`, [id]);
+      this.exec(`DELETE FROM api_keys WHERE user_id = ?`, [id]);
+      this.exec(`DELETE FROM mfa_secrets WHERE user_id = ?`, [id]);
+      this.exec(`DELETE FROM sso_identities WHERE user_id = ?`, [id]);
+      this.exec(`DELETE FROM user_project_roles WHERE user_id = ?`, [id]);
+      return this.db.prepare(`DELETE FROM users WHERE id = ?`).run(id).changes > 0;
+    })();
     this.persist();
     return changed;
   }
