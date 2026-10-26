@@ -50,7 +50,7 @@ async function createTestContext(): Promise<TestContext> {
   });
   const secretService = new SecretService(store, config.SECRET_MASTER_KEY_BASE64);
   const authService = new AuthService(store, config.SESSION_TTL_HOURS);
-  const app = createApp(config, store, secretService, authService);
+  const app = await createApp(config, store, secretService, authService);
   await app.ready();
   const context = { app, store, authService, config, tempDir };
   contexts.push(context);
