@@ -1,7 +1,8 @@
 /**
  * Phase 13.1 — store contract: audit log (hash chain, filters, export cursor), log streaming, audit export
  * destinations and runs, execution manifests and audit signing keys. Same assertions on SQLite and, with
- * TEST_POSTGRES_URL, on Postgres; the concurrency cases at the end run on Postgres only.
+ * TEST_POSTGRES_URL, on Postgres. The concurrency cases at the end race on Postgres (a pool of 4); SQLite runs them
+ * one after another.
  */
 import { expect, it } from "vitest";
 import type { Store } from "../store.js";
@@ -97,6 +98,35 @@ describeStoreContract("store contract: audit", (ctx) => {
     await store.saveExecutionRunContext("exec-gone-2", {}, "2001-01-01T00:00:00.000Z");
     expect(await store.pruneExecutionManifests({ before: "2000-01-01T00:00:00.000Z" })).toBe(0);
     expect(await store.pruneExecutionManifests({ before: "2020-01-01T00:00:00.000Z" })).toBe(1);
+  });
+
+  it("a far-future row does not move later rows' times: prune and from/to still place them by their own time", async () => {
+    const store = ctx.store();
+    await store.writeAuditLog(entry("future", { createdAt: "2099-01-01T00:00:00.000Z" }));
+    const before = Date.now();
+    for (const id of ["n1", "n2", "n3"]) {
+      await store.writeAuditLog(entry(id));
+      await pause();
+    }
+    const after = Date.now();
+    const items = (await store.listAuditLogs()).items;
+    expect(items.map((item) => item.id)).toEqual(["future", "n3", "n2", "n1"]);
+    for (const item of items.slice(1)) {
+      expect(Date.parse(item.createdAt)).toBeGreaterThanOrEqual(before);
+      expect(Date.parse(item.createdAt)).toBeLessThanOrEqual(after);
+    }
+    // The chain is in insertion order, so the future-dated first row is not reported.
+    expect(await store.verifyAuditChain()).toEqual({ ok: true, rowsChecked: 4 });
+    expect((await store.listAuditLogsAfter({ afterId: "future", limit: 10 })).map((row) => row.id)).toEqual(["n1", "n2", "n3"]);
+    const nextYear = new Date(after + 365 * 24 * 3600 * 1000).toISOString();
+    expect((await store.listAuditLogs({ from: nextYear })).items.map((item) => item.id)).toEqual(["future"]);
+    expect((await store.listAuditLogs({ to: nextYear })).items.map((item) => item.id)).toEqual(["n3", "n2", "n1"]);
+    expect(await store.pruneAuditLogs({ before: nextYear })).toBe(3);
+    expect((await store.listAuditLogs()).items.map((item) => item.id)).toEqual(["future"]);
+    // The next write links to the newest remaining row, the future one, and gets its own time.
+    await store.writeAuditLog(entry("n4"));
+    expect(await store.verifyAuditChain()).toEqual({ ok: true, rowsChecked: 2 });
+    expect(Date.parse((await store.listAuditLogs()).items[1]!.createdAt)).toBeLessThan(Date.parse("2099-01-01T00:00:00.000Z") - 1000);
   });
 
   it("log stream destinations: upsert keeps history and creator, dispatches count, delete removes events once", async () => {
@@ -303,8 +333,7 @@ describeStoreContract("store contract: audit", (ctx) => {
     expect((await store.listAuditSigningKeys()).map((k) => k.keyId)).toEqual(["B", "a", "b"]);
   });
 
-  if (ctx.kind === "postgres") {
-    it("50 concurrent audit writes keep one chain: distinct times, a valid chain, a cursor walk that sees each row once", async () => {
+  it("50 concurrent audit writes keep one chain: a valid chain, a cursor walk that sees each row once", async () => {
       const store = ctx.store();
       const ids = Array.from({ length: 50 }, (_, i) => `race-${String(i).padStart(2, "0")}`);
       await Promise.all(ids.map((id) => store.writeAuditLog(entry(id, { metadata: { id } }))));
@@ -319,12 +348,11 @@ describeStoreContract("store contract: audit", (ctx) => {
       }
       expect(seen.length).toBe(50);
       expect(new Set(seen)).toEqual(new Set(ids));
-      // The read path shows millisecond ISO strings; the stored values are distinct (microsecond steps), so the
-      // walk above, which compares stored values, saw every row exactly once.
       const listed = await store.listAuditLogs({ pageSize: 500 });
       expect(listed.total).toBe(50);
       expect(listed.items.every((item) => ISO.test(item.createdAt))).toBe(true);
-      expect(listed.items.map((item) => item.id).reverse()).toEqual(seen);
+      // Postgres breaks same-millisecond ties by insertion order (seq); SQLite's tie order there is its index's.
+      if (ctx.kind === "postgres") expect(listed.items.map((item) => item.id).reverse()).toEqual(seen);
       // Writes after the race extend the same chain.
       await store.writeAuditLog(entry("after"));
       expect(await store.verifyAuditChain()).toEqual({ ok: true, rowsChecked: 51 });
@@ -343,5 +371,4 @@ describeStoreContract("store contract: audit", (ctx) => {
         expect((await store.listAuditSigningKeys()).filter((k) => k.status === "active").length).toBe(1);
       }
     }, 60_000);
-  }
 });

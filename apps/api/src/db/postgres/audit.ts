@@ -3,13 +3,11 @@
  * Plain functions over a PgContext; PostgresStore delegates here. Same observable behaviour as the SqliteStore
  * methods of the same names.
  *
- * Insertion order. SQLite orders the audit chain and the export cursor by rowid. Postgres has no rowid, so the chain
- * order is `created_at` (then id): every append runs under one advisory transaction lock and, when the caller gives
- * no `createdAt`, stores GREATEST(now, latest created_at + 1 µs). TIMESTAMPTZ keeps the microseconds, so rows written
- * in one millisecond still sort in insertion order, while the read path (parseTimestamptz) returns the millisecond ISO
- * string the SQLite store returns. The hash covers exactly that returned string, so verifyAuditChain recomputes it.
- * A caller-given `createdAt` (tests only; AuditService never passes one) is stored as given, so a backdated entry
- * sorts where its time puts it.
+ * Insertion order. SQLite orders the audit chain and the export cursor by rowid; Postgres orders them by `seq`, the
+ * identity column v40 adds. Every append runs under one advisory transaction lock, and `seq` is drawn inside it, so
+ * `seq` order is also commit order: a cursor reading `seq > last` cannot skip a row that commits later. `created_at`
+ * is the write's wall-clock time (or the caller's value), and the hash covers it as the read path returns it (the
+ * millisecond ISO string parseTimestamptz gives, the string the SQLite store returns).
  *
  * Advisory lock keys, beside ADVISORY_LOCK_CLASS_MIGRATIONS (0x4c324d) and ADVISORY_LOCK_CLASS_LEADER (0x4c324e) in
  * postgres-store.ts:
@@ -98,19 +96,12 @@ export async function writeAuditLog(ctx: PgContext, entry: Parameters<Store["wri
   const metadataJson = entry.metadata === undefined ? null : JSON.stringify(entry.metadata);
   await ctx.withTransaction(async (client) => {
     await advisoryXactLock(client, AUDIT_LOCK_CHAIN);
-    // `iso` comes back through parseTimestamptz (the string every read returns); `exact` keeps the microseconds.
-    const stamp = entry.createdAt === undefined
-      ? await client.query<{ iso: string; exact: string }>(
-          `SELECT ts AS iso, ts::text AS exact FROM (
-             SELECT GREATEST($1::timestamptz, (SELECT MAX(created_at) FROM audit_logs) + interval '1 microsecond') AS ts
-           ) s`,
-          [new Date().toISOString()]
-        )
-      : await client.query<{ iso: string; exact: string }>(`SELECT $1::timestamptz AS iso, $1::timestamptz::text AS exact`, [entry.createdAt]);
+    const createdAtInput = entry.createdAt ?? new Date().toISOString();
+    // `iso` comes back through parseTimestamptz: the string every read returns, which the hash covers.
+    const stamp = await client.query<{ iso: string }>(`SELECT $1::timestamptz AS iso`, [createdAtInput]);
     const createdAt = toStr(stamp.rows[0]?.iso);
-    const createdAtExact = toStr(stamp.rows[0]?.exact);
     const last = await client.query<{ entry_hash: string | null }>(
-      `SELECT entry_hash FROM audit_logs WHERE entry_hash IS NOT NULL ORDER BY created_at DESC, id COLLATE "C" DESC LIMIT 1`
+      `SELECT entry_hash FROM audit_logs WHERE entry_hash IS NOT NULL ORDER BY seq DESC LIMIT 1`
     );
     const prevHash = last.rows[0]?.entry_hash ? toStr(last.rows[0].entry_hash) : GENESIS_HASH;
     const canonical = canonicalAuditPayload({
@@ -154,7 +145,7 @@ export async function writeAuditLog(ctx: PgContext, entry: Parameters<Store["wri
         entry.userAgent ?? null,
         metadataJson,
         entry.message ?? null,
-        createdAtExact,
+        createdAtInput,
         prevHash,
         entryHash
       ]
@@ -168,7 +159,7 @@ export async function verifyAuditChain(ctx: PgContext): ReturnType<Store["verify
             resource_type, resource_id, project_id, ip_address, user_agent, metadata_json, message,
             created_at, prev_hash, entry_hash
      FROM audit_logs WHERE entry_hash IS NOT NULL
-     ORDER BY created_at ASC, id COLLATE "C" ASC`
+     ORDER BY seq ASC`
   );
   let prev = GENESIS_HASH;
   let checked = 0;
@@ -265,7 +256,7 @@ export async function listAuditLogs(ctx: PgContext, filter: Parameters<Store["li
   const rows = await ctx.query<Row>(
     `SELECT ${AUDIT_LOG_COLUMNS}
      FROM audit_logs ${where}
-     ORDER BY created_at DESC
+     ORDER BY created_at DESC, seq DESC
      LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
     [...params, pageSize, offset]
   );
@@ -532,25 +523,22 @@ export async function getAuditExportDestination(ctx: PgContext, id: string): Pro
   return row ? mapAuditExportDestination(row) : null;
 }
 
-/** Rows after the cursor row in insertion order (created_at, see the header), or from the start when it is gone. */
+/** Rows after the cursor row in insertion order (`seq`, see the header), or from the start when it is gone. */
 export async function listAuditLogsAfter(ctx: PgContext, input: { afterId: string | null; limit: number }): ReturnType<Store["listAuditLogsAfter"]> {
   const limit = Math.min(Math.max(input.limit, 1), 5000);
   let where = "";
   const params: unknown[] = [];
   if (input.afterId) {
-    const cursor = await ctx.queryOne<{ created_at: string; exact: string; id: string }>(
-      `SELECT created_at, created_at::text AS exact, id FROM audit_logs WHERE id = $1`,
-      [input.afterId]
-    );
+    const cursor = await ctx.queryOne<{ seq: string }>(`SELECT seq FROM audit_logs WHERE id = $1`, [input.afterId]);
     if (cursor) {
-      params.push(cursor.exact, cursor.id);
-      where = `WHERE (created_at > $1::timestamptz OR (created_at = $1::timestamptz AND id COLLATE "C" > $2 COLLATE "C"))`;
+      params.push(cursor.seq);
+      where = `WHERE seq > $1::bigint`;
     }
   }
   const rows = await ctx.query<Row>(
     `SELECT ${AUDIT_LOG_COLUMNS}, entry_hash
      FROM audit_logs ${where}
-     ORDER BY created_at ASC, id COLLATE "C" ASC LIMIT $${params.length + 1}`,
+     ORDER BY seq ASC LIMIT $${params.length + 1}`,
     [...params, limit]
   );
   return rows.map((r) => ({ ...mapAuditLogRow(r), entryHash: nullableStr(r.entry_hash) }));

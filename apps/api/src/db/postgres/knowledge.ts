@@ -2,10 +2,9 @@
  * Phase 13.1 — PostgresStore: Knowledge bases and their chunks/search.
  * Plain functions over a PgContext; PostgresStore delegates here.
  *
- * Chunk order: SQLite lists chunks in rowid (insertion) order. Postgres has no rowid, so each chunk of a batch is
- * stored `i` microseconds after the batch time and chunks are listed by created_at. TIMESTAMPTZ keeps the
- * microseconds while reads return milliseconds, so createdAt reads as the batch time (the first 1000 chunks of a
- * batch; a larger batch advances by one millisecond per 1000 chunks).
+ * Chunk order: SQLite lists chunks in rowid (insertion) order; Postgres lists them by `seq`, the identity column v40
+ * adds (a batch is inserted in its given order, so `seq` follows it). Every chunk of a batch has the batch's time as
+ * created_at, as on SQLite.
  *
  * Keyword search: SQLite ranks with FTS5 bm25(); Postgres matches the v19 `content_tsv` column (to_tsvector
  * 'english') with websearch_to_tsquery and ranks with ts_rank_cd. Both min-max normalise to 0..1, best first. The
@@ -160,10 +159,10 @@ export async function addKnowledgeBaseChunks(ctx: PgContext, input: Parameters<S
     const now = new Date().toISOString();
     await client.query(
       `INSERT INTO knowledge_base_chunks (id, knowledge_base_id, source_id, chunk_index, content, metadata_json, vector_json, created_at)
-       SELECT c.id, $1, c.source_id, c.chunk_index, c.content, c.metadata_json, c.vector_json,
-              $2::timestamptz + make_interval(secs => (c.ord - 1) / 1000000.0)
+       SELECT c.id, $1, c.source_id, c.chunk_index, c.content, c.metadata_json, c.vector_json, $2::timestamptz
          FROM unnest($3::text[], $4::text[], $5::int[], $6::text[], $7::text[], $8::text[])
-              WITH ORDINALITY AS c(id, source_id, chunk_index, content, metadata_json, vector_json, ord)`,
+              WITH ORDINALITY AS c(id, source_id, chunk_index, content, metadata_json, vector_json, ord)
+        ORDER BY c.ord`,
       [
         input.knowledgeBaseId,
         now,
@@ -191,7 +190,7 @@ export async function addKnowledgeBaseChunks(ctx: PgContext, input: Parameters<S
 export async function listKnowledgeBaseChunks(ctx: PgContext, knowledgeBaseId: string): Promise<KnowledgeBaseChunkRecord[]> {
   const rows = await ctx.query<KnowledgeBaseChunkRow>(
     `SELECT id, knowledge_base_id, source_id, chunk_index, content, metadata_json, vector_json, created_at
-       FROM knowledge_base_chunks WHERE knowledge_base_id = $1 ORDER BY created_at, id COLLATE "C"`,
+       FROM knowledge_base_chunks WHERE knowledge_base_id = $1 ORDER BY seq`,
     [knowledgeBaseId]
   );
   return rows.map(mapKnowledgeBaseChunk);
@@ -232,7 +231,7 @@ export async function bm25SearchKnowledgeBase(ctx: PgContext, input: { knowledge
     `SELECT c.id, c.source_id, c.chunk_index, c.content, c.metadata_json, ts_rank_cd(c.content_tsv, q.query) AS raw_score
        FROM knowledge_base_chunks c, websearch_to_tsquery('english', $1) AS q(query)
       WHERE c.knowledge_base_id = $2 AND c.content_tsv @@ q.query
-      ORDER BY raw_score DESC, c.created_at, c.id COLLATE "C"
+      ORDER BY raw_score DESC, c.seq
       LIMIT $3`,
     [websearch, input.knowledgeBaseId, limit]
   );
@@ -270,7 +269,7 @@ export async function listKnowledgeBaseChunkPreviews(ctx: PgContext, input: { kn
     metadata_json: string | null; created_at: string;
   }>(
     `SELECT id, source_id, chunk_index, content, metadata_json, created_at
-       FROM knowledge_base_chunks WHERE ${where} ORDER BY chunk_index, created_at, id COLLATE "C" LIMIT $${params.length}`,
+       FROM knowledge_base_chunks WHERE ${where} ORDER BY chunk_index, seq LIMIT $${params.length}`,
     params
   );
   return rows.map((row) => ({

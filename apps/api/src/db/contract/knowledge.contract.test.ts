@@ -66,6 +66,56 @@ describeStoreContract("store contract: knowledge bases", (ctx) => {
     expect(await store.listKnowledgeBaseChunks("kb")).toEqual([]);
   });
 
+  it("keeps insertion order across many back-to-back batches, also when ids sort the other way (no ties by id)", async () => {
+    const store = ctx.store();
+    await store.createKnowledgeBase({ id: "kb", name: "KB", embedderId: "hash" });
+    // 60 one-chunk batches in a row land several per millisecond; ids sort opposite to insertion.
+    const ids = Array.from({ length: 60 }, (_, i) => `c-${String(999 - i).padStart(3, "0")}`);
+    for (const id of ids) {
+      await store.addKnowledgeBaseChunks({ knowledgeBaseId: "kb", chunks: [{ id, chunkIndex: 0, content: id, vector: [1, 0] }] });
+    }
+    expect((await store.listKnowledgeBaseChunks("kb")).map((c) => c.id)).toEqual(ids);
+  }, 60_000);
+
+  it("concurrent batches stay whole and in their own order", async () => {
+    const store = ctx.store();
+    await store.createKnowledgeBase({ id: "kb", name: "KB", embedderId: "hash" });
+    for (let round = 0; round < 10; round += 1) {
+      await Promise.all(["x", "y", "z"].map((batch) =>
+        store.addKnowledgeBaseChunks({
+          knowledgeBaseId: "kb",
+          chunks: [
+            { id: `${round}-${batch}-2`, chunkIndex: 0, content: "second id, first chunk", vector: [1, 0] },
+            { id: `${round}-${batch}-1`, chunkIndex: 1, content: "first id, second chunk", vector: [0, 1] }
+          ]
+        })
+      ));
+    }
+    const listed = (await store.listKnowledgeBaseChunks("kb")).map((c) => c.id);
+    expect(listed).toHaveLength(60);
+    for (let i = 0; i < listed.length; i += 2) {
+      const [first, second] = [listed[i]!, listed[i + 1]!];
+      expect(first.endsWith("-2")).toBe(true);
+      expect(second).toBe(first.replace(/-2$/, "-1"));
+    }
+  }, 60_000);
+
+  it("a batch of 5000 chunks reads back with one creation time, not in the future", async () => {
+    const store = ctx.store();
+    await store.createKnowledgeBase({ id: "kb", name: "KB", embedderId: "hash" });
+    const before = Date.now();
+    const chunks = Array.from({ length: 5000 }, (_, i) => ({ id: `big-${String(i).padStart(4, "0")}`, chunkIndex: i, content: "c", vector: [1] }));
+    await store.addKnowledgeBaseChunks({ knowledgeBaseId: "kb", chunks });
+    const after = Date.now();
+    const listed = await store.listKnowledgeBaseChunks("kb");
+    expect(listed.map((c) => c.id)).toEqual(chunks.map((c) => c.id));
+    const times = new Set(listed.map((c) => c.createdAt));
+    expect(times.size).toBe(1);
+    const at = Date.parse([...times][0]!);
+    expect(at).toBeGreaterThanOrEqual(before);
+    expect(at).toBeLessThanOrEqual(after);
+  }, 60_000);
+
   it("keyword search: matching chunks only, best first, scores normalised to 0..1, scoped to the knowledge base", async () => {
     const store = ctx.store();
     await store.createKnowledgeBase({ id: "kb", name: "KB", embedderId: "hash" });

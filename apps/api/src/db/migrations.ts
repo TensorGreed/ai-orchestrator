@@ -19,6 +19,35 @@ export interface Migration {
   down: string;
 }
 
+/**
+ * v40: the Postgres tables whose SQLite queries order by rowid (insertion order). `backfillOrder` numbers the rows
+ * that exist when v40 runs, in the order the store listed them before (created_at / started_at, then id).
+ */
+export const INSERTION_SEQ_TABLES: ReadonlyArray<{ table: string; backfillOrder: string }> = [
+  { table: "audit_logs", backfillOrder: `created_at, id COLLATE "C"` },
+  { table: "knowledge_base_chunks", backfillOrder: `created_at, id COLLATE "C"` },
+  { table: "session_tool_cache", backfillOrder: `created_at, id COLLATE "C"` },
+  { table: "mcp_server_probes", backfillOrder: `started_at, id COLLATE "C"` },
+  { table: "mcp_tool_snapshots", backfillOrder: `created_at, id COLLATE "C"` },
+  { table: "mcp_tool_calls", backfillOrder: `started_at, created_at, id COLLATE "C"` },
+  { table: "mcp_elicitations", backfillOrder: `created_at, id COLLATE "C"` },
+  { table: "mcp_tool_policies", backfillOrder: `created_at, id COLLATE "C"` },
+  { table: "mcp_toolset_members", backfillOrder: `toolset_id COLLATE "C", position, id COLLATE "C"` },
+  { table: "mcp_clients", backfillOrder: `created_at, id COLLATE "C"` }
+];
+
+/** Adds `seq BIGINT NOT NULL GENERATED ALWAYS AS IDENTITY` to `table`, numbering existing rows by `backfillOrder`. */
+function insertionSeqUp(table: string, backfillOrder: string): string {
+  return `
+      ALTER TABLE ${table} ADD COLUMN seq BIGINT;
+      UPDATE ${table} AS t SET seq = o.n
+        FROM (SELECT id, row_number() OVER (ORDER BY ${backfillOrder}) AS n FROM ${table}) AS o
+       WHERE t.id = o.id;
+      ALTER TABLE ${table} ALTER COLUMN seq SET NOT NULL;
+      ALTER TABLE ${table} ALTER COLUMN seq ADD GENERATED ALWAYS AS IDENTITY;
+      SELECT setval(pg_get_serial_sequence('${table}', 'seq'), COALESCE((SELECT MAX(seq) FROM ${table}), 0) + 1, false);`;
+}
+
 export const MIGRATIONS: Migration[] = [
   {
     version: 1,
@@ -1866,6 +1895,23 @@ export const MIGRATIONS: Migration[] = [
       DROP INDEX IF EXISTS idx_guard_simulations_one_running;
       DROP INDEX IF EXISTS idx_sessions_revoked_expires;
     `
+  },
+  {
+    version: 40,
+    description: "Phase 13.1 — Postgres insertion order: an identity `seq` column on the tables SQLite orders by rowid",
+    // Postgres only (SQLite's rowid already plays this role; its embedded migrate() is unchanged). Existing rows are
+    // numbered in the order the store read them before this column existed, then new rows take the identity's next
+    // value, so insertion order no longer depends on created_at, transaction ids or row positions.
+    up: [
+      ...INSERTION_SEQ_TABLES.map(({ table, backfillOrder }) => insertionSeqUp(table, backfillOrder)),
+      `CREATE UNIQUE INDEX IF NOT EXISTS idx_audit_logs_seq ON audit_logs(seq);`,
+      `CREATE INDEX IF NOT EXISTS idx_kb_chunks_kb_seq ON knowledge_base_chunks(knowledge_base_id, seq);`
+    ].join("\n"),
+    down: [
+      `DROP INDEX IF EXISTS idx_kb_chunks_kb_seq;`,
+      `DROP INDEX IF EXISTS idx_audit_logs_seq;`,
+      ...INSERTION_SEQ_TABLES.map(({ table }) => `ALTER TABLE ${table} DROP COLUMN IF EXISTS seq;`)
+    ].join("\n")
   }
 ];
 

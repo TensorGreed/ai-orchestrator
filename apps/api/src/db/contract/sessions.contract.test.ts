@@ -2,10 +2,14 @@
  * Phase 13.1 — store contract: login sessions, session memory, the session tool cache and artifacts, webhook security
  * state and trigger state, on both stores.
  */
-import { expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import { describeStoreContract } from "../../test-support/test-store.js";
 
 const ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 describeStoreContract("store contract: sessions, webhooks and triggers", (ctx) => {
   it("login sessions: save, touch, revoke, expire", async () => {
@@ -64,6 +68,34 @@ describeStoreContract("store contract: sessions, webhooks and triggers", (ctx) =
     expect(oldestKept).toHaveLength(1);
     expect(await store.listSessionToolCalls({ namespace: "ns", sessionId: "cap", toolName: "t4" })).toEqual([]);
     expect(await store.listSessionToolCalls({ namespace: "ns", sessionId: "s", limit: 0 })).toHaveLength(2);
+  });
+
+  // Postgres only: SQLite has no tie-breaker after created_at here, so its order within one millisecond is the
+  // index's (oldest first); recorded as a later SQLite change (q3a STATUS, "For later").
+  it.runIf(ctx.kind === "postgres")("tool-cache calls saved within one millisecond are listed newest first and the cap keeps the newest", async () => {
+    const store = ctx.store();
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-10-26T12:00:00.000Z"));
+    for (let i = 0; i < 405; i += 1) {
+      await store.saveSessionToolCall({ namespace: "ns", sessionId: "tie", toolName: `t${i}`, args: {}, output: i });
+    }
+    const kept = await store.listSessionToolCalls({ namespace: "ns", sessionId: "tie", limit: 200 });
+    expect(kept.slice(0, 3).map((c) => c.toolName)).toEqual(["t404", "t403", "t402"]);
+    expect(new Set(kept.map((c) => c.createdAt))).toEqual(new Set(["2026-10-26T12:00:00.000Z"]));
+    expect(await store.listSessionToolCalls({ namespace: "ns", sessionId: "tie", toolName: "t5" })).toHaveLength(1);
+    expect(await store.listSessionToolCalls({ namespace: "ns", sessionId: "tie", toolName: "t4" })).toEqual([]);
+  }, 60_000);
+
+  it("concurrent tool-cache saves in one session: all kept, one stable newest-first order", async () => {
+    const store = ctx.store();
+    const saved = await Promise.all(
+      Array.from({ length: 8 }, (_, i) => store.saveSessionToolCall({ namespace: "ns", sessionId: "race", toolName: `r${i}`, args: {}, output: i }))
+    );
+    const listed = await store.listSessionToolCalls({ namespace: "ns", sessionId: "race" });
+    expect(new Set(listed.map((c) => c.id))).toEqual(new Set(saved.map((c) => c.id)));
+    const times = listed.map((c) => Date.parse(c.createdAt));
+    expect(times).toEqual([...times].sort((a, b) => b - a));
+    expect(await store.listSessionToolCalls({ namespace: "ns", sessionId: "race" })).toEqual(listed);
   });
 
   it("session artifacts upsert and keep their creation time", async () => {

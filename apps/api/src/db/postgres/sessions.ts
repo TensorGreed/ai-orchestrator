@@ -167,15 +167,11 @@ export async function saveSessionToolCall(ctx: PgContext, input: {
 }> {
   const now = new Date().toISOString();
   const id = randomUUID();
-  // Calls saved within one millisecond keep their order: created_at is at least 1 microsecond after the session's
-  // newest entry (reads return milliseconds, so createdAt reads as the save time), which the cap and the newest-first
-  // lists below rely on.
+  // Calls saved within one millisecond keep their order: the cap and the newest-first lists below break created_at
+  // ties by `seq` (v40's identity column, SQLite's rowid).
   const inserted = await ctx.query<{ created_at: string }>(
     `INSERT INTO session_tool_cache (id, namespace, session_id, tool_name, tool_call_id, args_json, output_json, error, summary_json, labels_json, created_at)
-       SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-              GREATEST($11::timestamptz, COALESCE(
-                (SELECT MAX(created_at) FROM session_tool_cache WHERE namespace = $2 AND session_id = $3) + interval '1 microsecond',
-                $11::timestamptz))
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
        RETURNING created_at`,
     [
       id,
@@ -200,7 +196,7 @@ export async function saveSessionToolCall(ctx: PgContext, input: {
          AND id NOT IN (
            SELECT id FROM session_tool_cache
            WHERE namespace = $1 AND session_id = $2
-           ORDER BY created_at DESC
+           ORDER BY created_at DESC, seq DESC
            LIMIT $3
          )`,
     [input.namespace, input.sessionId, MAX_SESSION_TOOL_CACHE_RECORDS]
@@ -260,7 +256,7 @@ export async function listSessionToolCalls(ctx: PgContext, input: {
       `SELECT id, namespace, session_id, tool_name, tool_call_id, args_json, error, summary_json, labels_json, created_at
          FROM session_tool_cache
          WHERE namespace = $1 AND session_id = $2 AND tool_name = $3
-         ORDER BY created_at DESC LIMIT $4`,
+         ORDER BY created_at DESC, seq DESC LIMIT $4`,
       [input.namespace, input.sessionId, input.toolName, limit]
     );
   } else {
@@ -268,7 +264,7 @@ export async function listSessionToolCalls(ctx: PgContext, input: {
       `SELECT id, namespace, session_id, tool_name, tool_call_id, args_json, error, summary_json, labels_json, created_at
          FROM session_tool_cache
          WHERE namespace = $1 AND session_id = $2
-         ORDER BY created_at DESC LIMIT $3`,
+         ORDER BY created_at DESC, seq DESC LIMIT $3`,
       [input.namespace, input.sessionId, limit]
     );
   }

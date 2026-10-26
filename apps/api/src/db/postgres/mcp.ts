@@ -6,13 +6,9 @@
  * Ordering notes (SQLite parity):
  * - Text sorts use `COLLATE "C"` (SQLite compares TEXT by code point); SQLite's `COLLATE NOCASE` folds ASCII A–Z only,
  *   which `asciiLower` below reproduces.
- * - SQLite breaks timestamp ties by `rowid` (insertion order). Postgres has no rowid: insert-only tables break ties by
- *   the inserting transaction (`xmin`) and then the row's position (`ctid`); tool policies and gateway clients, whose
- *   creation time the store sets itself, get a creation time at least 1 µs after the newest existing one (TIMESTAMPTZ
- *   keeps microseconds; reads return millisecond ISO strings), so ordering by the full `created_at` is exactly the
- *   insertion order (policy evaluation order depends on it) and no visible creation time is in the future.
- * - Those two creates serialise the read-max-then-insert with `pg_advisory_xact_lock(0x4c324f, key)`, the class audit.ts
- *   owns: key 3 for tool policies, key 4 for gateway clients.
+ * - SQLite breaks timestamp ties by `rowid` (insertion order); Postgres breaks them by `seq`, the identity column v40
+ *   adds to probes, snapshots, tool calls, elicitations, tool policies (evaluation order depends on it), toolset
+ *   members and gateway clients. `seq` never changes on UPDATE or VACUUM, unlike `xmin` / `ctid`.
  */
 import { randomUUID } from "node:crypto";
 import {
@@ -65,9 +61,9 @@ export const UNIMPLEMENTED_METHODS: readonly (keyof Store)[] = [];
 type Row = Record<string, unknown>;
 type Queryable = Pick<PoolClient, "query">;
 
-/** SQLite `rowid ASC` / `rowid DESC` for insert-only rows. */
-const INSERTION_ASC = `xmin::text::bigint ASC, ctid ASC`;
-const INSERTION_DESC = `xmin::text::bigint DESC, ctid DESC`;
+/** SQLite `rowid ASC` / `rowid DESC`: v40's identity column. */
+const INSERTION_ASC = `seq ASC`;
+const INSERTION_DESC = `seq DESC`;
 
 /** SQLite `COLLATE NOCASE`: ASCII letters folded, everything else compared by code point. */
 function asciiLower(column: string): string {
@@ -937,9 +933,9 @@ export async function listExpiredMcpElicitations(ctx: PgContext, ...[now]: Param
 // Phase 10.2 — MCP tool policy and read-only classifications
 // ---------------------------------------------------------------------------
 
-/** Rules in evaluation order: oldest first (creation times are strictly increasing, see the header). */
+/** Rules in evaluation order: oldest first, ties in insertion order (see the header). */
 export async function listMcpToolPolicies(ctx: PgContext, ..._args: Parameters<Store["listMcpToolPolicies"]>): ReturnType<Store["listMcpToolPolicies"]> {
-  const result = await ctx.query<Row>(`SELECT * FROM mcp_tool_policies ORDER BY created_at ASC`);
+  const result = await ctx.query<Row>(`SELECT * FROM mcp_tool_policies ORDER BY created_at ASC, ${INSERTION_ASC}`);
   return result.map(mapMcpToolPolicy);
 }
 
@@ -952,33 +948,13 @@ export async function getMcpToolPolicy(ctx: PgContext, ...[id]: Parameters<Store
   return getMcpToolPolicyOn(ctx.pool, id);
 }
 
-/** Advisory-lock class shared with audit.ts (0x4c324f); keys 3 and 4 are this module's. */
-const ADVISORY_LOCK_CLASS_MONOTONIC = 0x4c324f;
-const MONOTONIC_LOCK_KEY = { mcp_tool_policies: 3, mcp_clients: 4 } as const;
-
-/** `now`, or 1 µs after the newest row's `created_at` when that is not earlier (keeps insertion order). */
-function monotonicCreatedAt(table: keyof typeof MONOTONIC_LOCK_KEY, param: string): string {
-  return `GREATEST(${param}::timestamptz, COALESCE((SELECT MAX(created_at) FROM ${table}) + interval '1 microsecond', ${param}::timestamptz))`;
-}
-
-/** Runs one insert that reads MAX(created_at), holding the table's advisory lock until commit. */
-async function insertMonotonic(ctx: PgContext, table: keyof typeof MONOTONIC_LOCK_KEY, sql: string, params: unknown[]): Promise<Row> {
-  return ctx.withTransaction(async (client) => {
-    await client.query(`SELECT pg_advisory_xact_lock($1, $2)`, [ADVISORY_LOCK_CLASS_MONOTONIC, MONOTONIC_LOCK_KEY[table]]);
-    return (await one(client, sql, params))!;
-  });
-}
-
 export async function createMcpToolPolicy(ctx: PgContext, ...[input]: Parameters<Store["createMcpToolPolicy"]>): ReturnType<Store["createMcpToolPolicy"]> {
   const now = new Date().toISOString();
-  const row = await insertMonotonic(
-    ctx,
-    "mcp_tool_policies",
+  const row = await ctx.queryOne<Row>(
     `INSERT INTO mcp_tool_policies (
        id, name, description, effect, project_id, roles_json, server_id, tool_pattern, annotation_hint, kind, enabled,
        created_by, created_at, updated_at
-     ) SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, t.at, t.at
-         FROM (SELECT ${monotonicCreatedAt("mcp_tool_policies", "$13")} AS at) t
+     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $13)
      RETURNING *`,
     [
       input.id,
@@ -996,7 +972,7 @@ export async function createMcpToolPolicy(ctx: PgContext, ...[input]: Parameters
       now
     ]
   );
-  return mapMcpToolPolicy(row);
+  return mapMcpToolPolicy(row!);
 }
 
 export async function updateMcpToolPolicy(ctx: PgContext, ...[id, patch]: Parameters<Store["updateMcpToolPolicy"]>): ReturnType<Store["updateMcpToolPolicy"]> {
@@ -1178,12 +1154,10 @@ async function getMcpClientOn(db: Queryable, id: string): Promise<McpClient | nu
 }
 
 export async function createMcpClient(ctx: PgContext, ...[input]: Parameters<Store["createMcpClient"]>): ReturnType<Store["createMcpClient"]> {
-  const row = await insertMonotonic(
-    ctx,
-    "mcp_clients",
+  const row = await ctx.queryOne<Row>(
     `INSERT INTO mcp_clients (
        id, name, token_prefix, token_hash, toolset_ids_json, role, created_by, created_by_email, expires_at, created_at
-     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, ${monotonicCreatedAt("mcp_clients", "$10")})
+     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
      RETURNING *`,
     [
       input.id,
@@ -1198,7 +1172,7 @@ export async function createMcpClient(ctx: PgContext, ...[input]: Parameters<Sto
       new Date().toISOString()
     ]
   );
-  return withoutHash(mapMcpClient(row));
+  return withoutHash(mapMcpClient(row!));
 }
 
 /** Without the token hash. */
@@ -1213,7 +1187,7 @@ export async function findMcpClientByTokenPrefix(ctx: PgContext, ...[prefix]: Pa
 }
 
 export async function listMcpClients(ctx: PgContext, ..._args: Parameters<Store["listMcpClients"]>): ReturnType<Store["listMcpClients"]> {
-  const result = await ctx.query<Row>(`SELECT * FROM mcp_clients ORDER BY created_at DESC`);
+  const result = await ctx.query<Row>(`SELECT * FROM mcp_clients ORDER BY created_at DESC, ${INSERTION_DESC}`);
   return result.map((row) => withoutHash(mapMcpClient(row)));
 }
 

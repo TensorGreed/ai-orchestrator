@@ -196,6 +196,33 @@ describeStoreContract("store contract: MCP", (ctx) => {
     expect((await store.listMcpServerProbes("srv-1")).map((p) => p.id)).toEqual(["pc", "pb"]);
   });
 
+  it("snapshots of one creation time keep insertion order after one of them is updated (acknowledged)", async () => {
+    const store = ctx.store();
+    await addServer(store, "srv-1");
+    const base = { serverId: "srv-1", tools: [], toolCount: 0, previousSnapshotId: null, changes: [], createdAt: iso(0) };
+    const ids = ["snap-c", "snap-a", "snap-b"];
+    for (const [i, id] of ids.entries()) {
+      await store.recordMcpServerProbe({
+        probe: { id: `p-${id}`, serverId: "srv-1", startedAt: iso(0), ok: true, latencyMs: 1, toolCount: 0, error: null, snapshotId: id },
+        status: "healthy",
+        snapshot: { ...base, id, hash: id, breaking: i === 0 },
+        keepProbes: 10
+      });
+    }
+    const newestFirst = [...ids].reverse();
+    expect((await store.listMcpToolSnapshots("srv-1")).map((s) => s.id)).toEqual(newestFirst);
+    expect((await store.acknowledgeMcpBreakingChange("srv-1", "admin"))?.id).toBe("snap-c");
+    expect((await store.listMcpToolSnapshots("srv-1")).map((s) => s.id)).toEqual(newestFirst);
+    expect((await store.listMcpServerProbes("srv-1")).map((p) => p.id)).toEqual(newestFirst.map((id) => `p-${id}`));
+  });
+
+  it("tool calls of one start time written in one transaction are listed in insertion order", async () => {
+    const store = ctx.store();
+    const ids = ["k3", "k1", "k5", "k2", "k4"];
+    await store.replaceMcpToolCallsForExecution("exec-1", ids.map((id) => call(id)));
+    expect((await store.listMcpToolCalls({ registryServerId: "srv-1", since: iso(0) })).map((r) => r.id)).toEqual(ids);
+  });
+
   it("deletes a server with its dependent rows", async () => {
     const store = ctx.store();
     await addServer(store, "srv-1");

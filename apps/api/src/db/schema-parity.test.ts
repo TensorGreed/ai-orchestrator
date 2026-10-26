@@ -4,7 +4,7 @@
  * Postgres (TEST_POSTGRES_URL set; skipped otherwise): a fresh schema migrated through the MIGRATIONS chain must have
  * the same tables, columns (type class, nullability), primary keys, unique constraints and named indexes as a fresh
  * SQLite created by the store's embedded migrate(), except for the deliberate differences in ALLOWED_DIFFERENCES.
- * The rollback walk v39 -> v10 -> v39 (and -> v0 -> v39) must succeed and land on the same schema again.
+ * The rollback walk v40 -> v10 -> v40 (and -> v0 -> v40) must succeed and land on the same schema again.
  *
  * SQLite (always): the v39 objects exist, the partial unique index refuses a second running guard simulation, and an
  * older database holding several running simulations upgrades cleanly.
@@ -15,7 +15,7 @@ import os from "node:os";
 import path from "node:path";
 import { Pool as PgPool, type Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { MIGRATIONS, rollbackMigrations, runMigrations } from "./migrations.js";
+import { INSERTION_SEQ_TABLES, MIGRATIONS, rollbackMigrations, runMigrations } from "./migrations.js";
 import { SqliteStore } from "./database.js";
 import { createStore, postgresStoreConfig } from "./create-store.js";
 import { PostgresStore, postgresPoolConfig, withMigrationLock } from "./postgres-store.js";
@@ -48,7 +48,34 @@ const LATEST = Math.max(...MIGRATIONS.map((m) => m.version));
 const FOREIGN_KEY_ONLY_IN_POSTGRES =
   "Postgres keeps this foreign key (NO ACTION); SQLite never declared it. Deleting the parent while a child row exists fails on Postgres (23503) and leaves an orphan on SQLite. Hand-off, q3a: deleteUser / project delete remove child rows (api_keys, mfa_secrets, sso_identities, user_project_roles) explicitly in both stores.";
 
+const ROWID_STAND_IN =
+  "Postgres stand-in for SQLite rowid (v40): BIGINT NOT NULL GENERATED ALWAYS AS IDENTITY, the insertion order the Postgres queries use where SQLite orders by rowid. Its shape is pinned by the v40 test below.";
+
+/** The v40 indexes over `seq`, exactly as Postgres reports them (pinned by the v40 test). */
+const SEQ_INDEXES: ReadonlyArray<{ table: string; index: string; definition: string }> = [
+  { table: "audit_logs", index: "idx_audit_logs_seq", definition: "CREATE UNIQUE INDEX idx_audit_logs_seq ON audit_logs USING btree (seq)" },
+  {
+    table: "knowledge_base_chunks",
+    index: "idx_kb_chunks_kb_seq",
+    definition: "CREATE INDEX idx_kb_chunks_kb_seq ON knowledge_base_chunks USING btree (knowledge_base_id, seq)"
+  }
+];
+
 export const ALLOWED_DIFFERENCES: ReadonlyArray<SchemaDifference & { reason: string }> = [
+  ...INSERTION_SEQ_TABLES.map(({ table }) => ({
+    kind: "column-missing" as const,
+    table,
+    object: "seq",
+    detail: "only in postgres",
+    reason: ROWID_STAND_IN
+  })),
+  ...SEQ_INDEXES.map(({ table, index }) => ({
+    kind: "index-missing" as const,
+    table,
+    object: index,
+    detail: "only in postgres",
+    reason: ROWID_STAND_IN
+  })),
   {
     kind: "column-missing",
     table: "knowledge_base_chunks",
@@ -333,6 +360,79 @@ describe.skipIf(!postgresUrl)("Postgres schema parity and migration walk", () =>
     } finally {
       await pool.end();
       await test.cleanup();
+    }
+  }, 120_000);
+
+  it("v40: every insertion-ordered table has seq BIGINT NOT NULL GENERATED ALWAYS AS IDENTITY, and the seq indexes are exactly as documented", async () => {
+    const test = await createTestStore({ kind: "postgres" });
+    const pool = testPostgresPool();
+    try {
+      const columns = await pool.query<{ table_name: string; data_type: string; is_nullable: string; is_identity: string; identity_generation: string | null }>(
+        `SELECT table_name, data_type, is_nullable, is_identity, identity_generation
+           FROM information_schema.columns WHERE table_schema = $1 AND column_name = 'seq' ORDER BY table_name`,
+        [test.schema]
+      );
+      expect(columns.rows).toEqual(
+        INSERTION_SEQ_TABLES.map(({ table }) => ({ table_name: table, data_type: "bigint", is_nullable: "NO", is_identity: "YES", identity_generation: "ALWAYS" })).sort((a, b) =>
+          a.table_name < b.table_name ? -1 : 1
+        )
+      );
+      const indexes = await pool.query<{ tablename: string; indexname: string; indexdef: string }>(
+        // Only this schema's indexes over a `seq` column (the fence keeps pg_get_indexdef off other tests' schemas).
+        `SELECT tablename, indexname, replace(pg_get_indexdef(indexrelid), $1 || '.', '') AS indexdef FROM (
+           SELECT DISTINCT t.relname AS tablename, c.relname AS indexname, i.indexrelid
+             FROM pg_index i
+             JOIN pg_class c ON c.oid = i.indexrelid
+             JOIN pg_class t ON t.oid = i.indrelid
+             JOIN pg_namespace n ON n.oid = t.relnamespace
+             JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ANY(i.indkey)
+            WHERE n.nspname = $1 AND a.attname = 'seq'
+           OFFSET 0
+         ) s ORDER BY indexname`,
+        [test.schema]
+      );
+      expect(indexes.rows.map((row) => ({ table: row.tablename, index: row.indexname, definition: row.indexdef }))).toEqual(
+        [...SEQ_INDEXES].sort((a, b) => (a.index < b.index ? -1 : 1))
+      );
+    } finally {
+      await pool.end();
+      await test.cleanup();
+    }
+  }, 120_000);
+
+  it("v40 on a populated v39 database numbers existing rows in the old read order; new rows follow; down removes seq", async () => {
+    const schema = randomTestSchema();
+    const admin = testPostgresPool();
+    await admin.query(`CREATE SCHEMA "${schema}"`);
+    const pool = testPostgresPool(schema);
+    const cb = chainCallbacks(pool);
+    try {
+      await pool.query(`CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP)`);
+      await runMigrations(cb.run, cb.current, cb.setApplied);
+      await rollbackMigrations(cb.run, cb.current, cb.setRolledBack, 39);
+      expect(await chainVersion(pool)).toBe(39);
+      // Inserted out of time order; ties on created_at are numbered by id.
+      const insert = `INSERT INTO audit_logs (id, event_type, category, action, outcome, created_at) VALUES ($1, 'e', 'auth', 'a', 'success', $2)`;
+      await pool.query(insert, ["b", "2026-01-02T00:00:00.000Z"]);
+      await pool.query(insert, ["a", "2026-01-03T00:00:00.000Z"]);
+      await pool.query(insert, ["d", "2026-01-01T00:00:00.000Z"]);
+      await pool.query(insert, ["c", "2026-01-01T00:00:00.000Z"]);
+      await runMigrations(cb.run, cb.current, cb.setApplied);
+      expect(await chainVersion(pool)).toBe(LATEST);
+      await pool.query(insert, ["z", "2020-01-01T00:00:00.000Z"]);
+      const rows = await pool.query<{ id: string; seq: string }>(`SELECT id, seq FROM audit_logs ORDER BY seq`);
+      expect(rows.rows.map((row) => [row.id, Number(row.seq)])).toEqual([["c", 1], ["d", 2], ["b", 3], ["a", 4], ["z", 5]]);
+      // GENERATED ALWAYS: a caller cannot pick seq.
+      await expect(pool.query(`INSERT INTO audit_logs (id, event_type, category, action, outcome, created_at, seq) VALUES ('x', 'e', 'auth', 'a', 'success', now(), 1)`)).rejects.toMatchObject({ code: "428C9" });
+
+      await rollbackMigrations(cb.run, cb.current, cb.setRolledBack, 39);
+      const left = await pool.query(`SELECT table_name FROM information_schema.columns WHERE table_schema = $1 AND column_name = 'seq'`, [schema]);
+      expect(left.rows).toEqual([]);
+      expect((await pool.query(`SELECT COUNT(*)::int AS n FROM audit_logs`)).rows[0].n).toBe(5);
+    } finally {
+      await pool.end();
+      await admin.end();
+      await dropTestSchema(schema);
     }
   }, 120_000);
 
