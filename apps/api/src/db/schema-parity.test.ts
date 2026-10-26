@@ -473,7 +473,13 @@ describe.skipIf(!postgresUrl)("Postgres schema parity and migration walk", () =>
 
       await expect(withMigrationLock(pool, "t_lock_a", async () => Promise.reject(new Error("boom")))).rejects.toThrow("boom");
       await withMigrationLock(pool, "t_lock_a", async () => undefined);
-      const held = await pool.query<{ n: number }>(`SELECT COUNT(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND classid = $1`, [0x4c324d]);
+      // Only this test's keys: other test files boot stores (and take migration locks) on the same server meanwhile.
+      const held = await pool.query<{ n: number }>(
+        `SELECT COUNT(*)::int AS n FROM pg_locks
+          WHERE locktype = 'advisory' AND classid = $1 AND objsubid = 2
+            AND objid::bigint IN ((hashtext('t_lock_a')::bigint + 4294967296) % 4294967296, (hashtext('t_lock_b')::bigint + 4294967296) % 4294967296)`,
+        [0x4c324d]
+      );
       expect(held.rows[0].n).toBe(0);
     } finally {
       await pool.end();
