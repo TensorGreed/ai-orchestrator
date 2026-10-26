@@ -2120,6 +2120,14 @@ function toNumber(value: unknown): number {
 }
 
 // Phase 8.4 — audit-log hash chain helpers.
+/**
+ * A stored optional audit field as the write path hashed it: NULL stays null and "" stays "" (the writer hashes
+ * `value ?? null`). Reading by truthiness would turn "" into null and break the chain at that row.
+ */
+function storedAuditText(value: unknown): string | null {
+  return value === null || value === undefined ? null : toString(value);
+}
+
 // canonicalAuditPayload: stable, key-ordered JSON serialization. Same input
 // must yield byte-identical output across processes and Node versions.
 function canonicalAuditPayload(input: {
@@ -7471,16 +7479,16 @@ export class SqliteStore implements Store {
         category: toString(row.category),
         action: toString(row.action),
         outcome: toString(row.outcome),
-        actorUserId: row.actor_user_id ? toString(row.actor_user_id) : null,
-        actorEmail: row.actor_email ? toString(row.actor_email) : null,
+        actorUserId: storedAuditText(row.actor_user_id),
+        actorEmail: storedAuditText(row.actor_email),
         actorType: toString(row.actor_type),
-        resourceType: row.resource_type ? toString(row.resource_type) : null,
-        resourceId: row.resource_id ? toString(row.resource_id) : null,
-        projectId: row.project_id ? toString(row.project_id) : null,
-        ipAddress: row.ip_address ? toString(row.ip_address) : null,
-        userAgent: row.user_agent ? toString(row.user_agent) : null,
-        metadataJson: row.metadata_json ? toString(row.metadata_json) : null,
-        message: row.message ? toString(row.message) : null
+        resourceType: storedAuditText(row.resource_type),
+        resourceId: storedAuditText(row.resource_id),
+        projectId: storedAuditText(row.project_id),
+        ipAddress: storedAuditText(row.ip_address),
+        userAgent: storedAuditText(row.user_agent),
+        metadataJson: storedAuditText(row.metadata_json),
+        message: storedAuditText(row.message)
       });
       const expected = sha256Hex(prev + canonical);
       if (expected !== stored) {

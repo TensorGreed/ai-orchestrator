@@ -35,6 +35,14 @@ function nullableStr(value: unknown): string | null {
   return value ? toStr(value) : null;
 }
 
+/**
+ * A stored optional audit field as the write path hashed it: NULL stays null and "" stays "" (the writer hashes
+ * `value ?? null`). Reading by truthiness would turn "" into null and break the chain at that row.
+ */
+function storedAuditText(value: unknown): string | null {
+  return value === null || value === undefined ? null : toStr(value);
+}
+
 /** Same as the SQLite store's canonicalAuditPayload: explicit field order, never sorted. */
 function canonicalAuditPayload(input: {
   id: string;
@@ -181,16 +189,16 @@ export async function verifyAuditChain(ctx: PgContext): ReturnType<Store["verify
       category: toStr(row.category),
       action: toStr(row.action),
       outcome: toStr(row.outcome),
-      actorUserId: nullableStr(row.actor_user_id),
-      actorEmail: nullableStr(row.actor_email),
+      actorUserId: storedAuditText(row.actor_user_id),
+      actorEmail: storedAuditText(row.actor_email),
       actorType: toStr(row.actor_type),
-      resourceType: nullableStr(row.resource_type),
-      resourceId: nullableStr(row.resource_id),
-      projectId: nullableStr(row.project_id),
-      ipAddress: nullableStr(row.ip_address),
-      userAgent: nullableStr(row.user_agent),
-      metadataJson: nullableStr(row.metadata_json),
-      message: nullableStr(row.message)
+      resourceType: storedAuditText(row.resource_type),
+      resourceId: storedAuditText(row.resource_id),
+      projectId: storedAuditText(row.project_id),
+      ipAddress: storedAuditText(row.ip_address),
+      userAgent: storedAuditText(row.user_agent),
+      metadataJson: storedAuditText(row.metadata_json),
+      message: storedAuditText(row.message)
     });
     const expected = sha256Hex(prev + canonical);
     if (expected !== stored) {

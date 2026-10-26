@@ -73,6 +73,11 @@ export interface AuditLogEntry {
   createdAt: string;
 }
 
+/** An optional audit field: an empty string (e.g. an empty User-Agent header) is stored as none. */
+function textOrNull(value: string | null | undefined): string | null {
+  return value ? value : null;
+}
+
 export class AuditService {
   constructor(
     private readonly store: Store,
@@ -93,16 +98,16 @@ export class AuditService {
       category: event.category,
       action: event.action,
       outcome: event.outcome ?? "success",
-      actorUserId: actor.userId ?? null,
-      actorEmail: actor.email ?? null,
+      actorUserId: textOrNull(actor.userId),
+      actorEmail: textOrNull(actor.email),
       actorType: actor.type ?? "user",
-      resourceType: event.resourceType ?? null,
-      resourceId: event.resourceId ?? null,
-      projectId: event.projectId ?? null,
-      ipAddress: actor.ipAddress ?? null,
-      userAgent: actor.userAgent ?? null,
+      resourceType: textOrNull(event.resourceType),
+      resourceId: textOrNull(event.resourceId),
+      projectId: textOrNull(event.projectId),
+      ipAddress: textOrNull(actor.ipAddress),
+      userAgent: textOrNull(actor.userAgent),
       metadata: event.metadata,
-      message: event.message ?? null
+      message: textOrNull(event.message)
     };
     try {
       await this.store.writeAuditLog(entry);
