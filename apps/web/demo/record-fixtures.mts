@@ -362,7 +362,7 @@ async function main() {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "l2m-demo-record-"));
   const model = await startScriptedModel(SCRIPTS);
   const store = await SqliteStore.create(path.join(tempDir, "orchestrator.db"));
-  store.ensureDefaultProject();
+  await store.ensureDefaultProject();
   const config = parseConfig({
     LOG_LEVEL: "error",
     SEED_SAMPLE_WORKFLOWS: "false",
@@ -376,10 +376,10 @@ async function main() {
   });
   const secretService = new SecretService(store, config.SECRET_MASTER_KEY_BASE64);
   const authService = new AuthService(store, config.SESSION_TTL_HOURS);
-  const app = createApp(config, store, secretService, authService);
+  const app = await createApp(config, store, secretService, authService);
   await app.ready();
 
-  const user = authService.register({ email: DEMO_USER.email, password: DEMO_USER.password, role: DEMO_USER.role });
+  const user = await authService.register({ email: DEMO_USER.email, password: DEMO_USER.password, role: DEMO_USER.role });
   const login = await app.inject({ method: "POST", url: "/api/auth/login", payload: { email: DEMO_USER.email, password: DEMO_USER.password } });
   const cookie = [login.headers["set-cookie"]].flat().map(String).find((value) => value.startsWith(`${config.SESSION_COOKIE_NAME}=`))?.split(";")[0];
   if (!cookie) throw new Error(`Login failed: ${login.body}`);
@@ -399,16 +399,16 @@ async function main() {
   for (const file of SAMPLE_FILES) {
     const parsed = JSON.parse(fs.readFileSync(path.join(sampleDir, file), "utf8")) as { schemaVersion: string; workflowVersion: number; workflow: Json };
     // The same path the API's own seed takes: samples are stored as written.
-    store.upsertWorkflow({ ...parsed.workflow, schemaVersion: parsed.schemaVersion, workflowVersion: parsed.workflowVersion, projectId: "default" } as never);
+    await store.upsertWorkflow({ ...parsed.workflow, schemaVersion: parsed.schemaVersion, workflowVersion: parsed.workflowVersion, projectId: "default" } as never);
     const check = await call("POST", `/api/workflows/${String(parsed.workflow.id)}/validate`);
     if (check.status !== 200 || (check.json() as { valid?: boolean }).valid === false) console.warn(`  sample ${file} does not validate: ${check.body.slice(0, 200)}`);
   }
-  seedTemplatesIfEmpty(store, repoRoot);
+  await seedTemplatesIfEmpty(store, repoRoot);
   const sampleNames = new Set(
     SAMPLE_FILES.map((file) => String((JSON.parse(fs.readFileSync(path.join(sampleDir, file), "utf8")) as { workflow: Json }).workflow.name))
   );
-  for (const template of store.listTemplates()) {
-    if (!sampleNames.has(template.name)) store.deleteTemplate(template.id);
+  for (const template of await store.listTemplates()) {
+    if (!sampleNames.has(template.name)) await store.deleteTemplate(template.id);
   }
   for (const workflow of [supportAgentWorkflow(model.baseUrl), swarmWorkflow(model.baseUrl), guardedWorkflow(), approvalWorkflow()]) {
     await must("POST", "/api/workflows", workflow);
@@ -454,7 +454,7 @@ async function main() {
   await runStream("wf-demo-research-swarm", "Brief the team: what is RAG, and how many uncached retrievals a day at 1,250 queries and an 18% miss rate?");
   await runStream("wf-demo-guarded-intake", "Please update the billing contact to jordan.lee@example.org and confirm.");
   // A teammate starts the refund runs, so the demo user is an eligible approver (nobody approves their own run).
-  authService.register({ email: REQUESTER.email, password: REQUESTER.password, role: "builder" });
+  await authService.register({ email: REQUESTER.email, password: REQUESTER.password, role: "builder" });
   const requesterLogin = await app.inject({ method: "POST", url: "/api/auth/login", payload: { email: REQUESTER.email, password: REQUESTER.password } });
   const requesterCookie = [requesterLogin.headers["set-cookie"]].flat().map(String).find((value) => value.startsWith(`${config.SESSION_COOKIE_NAME}=`))?.split(";")[0];
   if (!requesterCookie) throw new Error(`Requester login failed: ${requesterLogin.body}`);
@@ -470,7 +470,7 @@ async function main() {
   console.log("Recording the release gate");
   await must("POST", "/api/workflows", faqWorkflow(model.baseUrl, "{{answer}}"));
   const versions = new WorkflowVersionService(store);
-  const faqV1 = versions.snapshot({ workflow: store.getWorkflow("wf-demo-faq-release")!, changeNote: "First version" }).version;
+  const faqV1 = (await versions.snapshot({ workflow: (await store.getWorkflow("wf-demo-faq-release"))!, changeNote: "First version" })).version;
   await must("POST", "/api/workflows/wf-demo-faq-release/publish", { version: faqV1 });
   const faqRecordings: string[] = [];
   for (const [index, question] of ["How do I reset my password?", "Where do I change my password?", "My reset link expired, what now?"].entries()) {
@@ -483,7 +483,7 @@ async function main() {
   await must("PUT", "/api/workflows/wf-demo-faq-release/release-gate", { enabled: true, datasetIds: [set.dataset.id] });
   const faqDraft = faqWorkflow(model.baseUrl, "FAQ: {{answer}}");
   await must("PUT", "/api/workflows/wf-demo-faq-release", faqDraft);
-  const faqV2 = versions.snapshot({ workflow: store.getWorkflow("wf-demo-faq-release")!, changeNote: "Prefix answers" }).version;
+  const faqV2 = (await versions.snapshot({ workflow: (await store.getWorkflow("wf-demo-faq-release"))!, changeNote: "Prefix answers" })).version;
   const job = (await must("POST", "/api/replay/runs", { datasetIds: [set.dataset.id] })) as { run: { id: string } };
   for (let attempt = 0; attempt < 400; attempt += 1) {
     const current = (await must("GET", `/api/replay/runs/${job.run.id}`)) as { run: { status: string } };
@@ -556,7 +556,7 @@ async function main() {
   ]) {
     await record(url);
   }
-  for (const template of store.listTemplates()) await record(`/api/templates/${template.id}`);
+  for (const template of await store.listTemplates()) await record(`/api/templates/${template.id}`);
   for (const execution of executions?.items ?? []) {
     await record(`/api/executions/${execution.id}`);
     await record(`/api/executions/${execution.id}/guard-events`);
@@ -684,7 +684,7 @@ async function main() {
   await app.close();
   await model.close();
   try {
-    store.close();
+    await store.close();
   } catch {
     // Already closed by the app shutdown hooks.
   }
