@@ -14,7 +14,14 @@ import { Pool } from "pg";
 import { parsePostgresSettings } from "../config.js";
 import { postgresStoreConfig } from "../db/create-store.js";
 import { applyMigrationChain, postgresPoolConfig, withMigrationLock } from "../db/postgres-store.js";
-import { MIGRATIONS } from "../db/migrations.js";
+import { INSERTION_SEQ_TABLES, MIGRATIONS } from "../db/migrations.js";
+
+/**
+ * Tables that carry v40's `seq` identity on Postgres (insertion order). A Postgres backup keeps `seq`: export reads
+ * them in `seq` order, import writes `seq` back (OVERRIDING SYSTEM VALUE, since the identity is GENERATED ALWAYS) and
+ * then moves the identity past the restored max, so the chain and cursors walk the restored rows in the same order.
+ */
+const SEQ_TABLES: ReadonlySet<string> = new Set(INSERTION_SEQ_TABLES.map(({ table }) => table));
 
 export interface BackupAdapter {
   readonly kind: "sqlite" | "postgres";
@@ -175,7 +182,8 @@ class PostgresAdapter implements BackupAdapter {
   }
 
   async selectAll(table: string): Promise<Record<string, unknown>[]> {
-    const r = await this.pool.query(`SELECT * FROM ${quoteIdent(table)}`);
+    const order = SEQ_TABLES.has(table) ? " ORDER BY seq" : "";
+    const r = await this.pool.query(`SELECT * FROM ${quoteIdent(table)}${order}`);
     return r.rows as Record<string, unknown>[];
   }
 
@@ -183,6 +191,8 @@ class PostgresAdapter implements BackupAdapter {
     if (rows.length === 0) return;
     const cols = Object.keys(rows[0]);
     const colSql = cols.map(quoteIdent).join(", ");
+    const keepsSeq = SEQ_TABLES.has(table) && cols.includes("seq");
+    const overriding = keepsSeq ? " OVERRIDING SYSTEM VALUE" : "";
     const BATCH_SIZE = 500;
     for (let i = 0; i < rows.length; i += BATCH_SIZE) {
       const batch = rows.slice(i, i + BATCH_SIZE);
@@ -193,7 +203,15 @@ class PostgresAdapter implements BackupAdapter {
         })
         .join(", ");
       const params = batch.flatMap((row) => cols.map((c) => row[c] ?? null));
-      await this.pool.query(`INSERT INTO ${quoteIdent(table)} (${colSql}) VALUES ${valuesSql}`, params);
+      await this.pool.query(`INSERT INTO ${quoteIdent(table)} (${colSql})${overriding} VALUES ${valuesSql}`, params);
+    }
+    if (keepsSeq) {
+      // The restored rows carry their own seq; the next insert must get max + 1, not a value the identity already
+      // handed out before the import (or one a restored row now holds).
+      await this.pool.query(
+        `SELECT setval(pg_get_serial_sequence($1, 'seq'), COALESCE((SELECT MAX(seq) FROM ${quoteIdent(table)}), 0) + 1, false)`,
+        [table]
+      );
     }
   }
 
