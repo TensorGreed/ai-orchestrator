@@ -159,7 +159,28 @@ class SqliteAdapter implements BackupAdapter {
 class PostgresAdapter implements BackupAdapter {
   readonly kind = "postgres" as const;
 
+  private readonly generatedColumns = new Map<string, ReadonlySet<string>>();
+
   private constructor(private readonly pool: Pool) {}
+
+  /**
+   * Generated columns of `table` (`GENERATED ALWAYS AS (...) STORED`, e.g. knowledge_base_chunks.content_tsv), read
+   * from the catalog. Postgres refuses a value for them, and recomputes them from the row, so a backup leaves them out
+   * and an import drops them from a backup that carries them. Identity columns (`seq`) are not generated columns here
+   * (is_generated = 'NEVER'); they are restored as above.
+   */
+  private async generatedColumnsOf(table: string): Promise<ReadonlySet<string>> {
+    const cached = this.generatedColumns.get(table);
+    if (cached) return cached;
+    const r = await this.pool.query<{ column_name: string }>(
+      `SELECT column_name FROM information_schema.columns
+        WHERE table_schema = current_schema() AND table_name = $1 AND is_generated = 'ALWAYS'`,
+      [table]
+    );
+    const columns = new Set(r.rows.map((row) => row.column_name));
+    this.generatedColumns.set(table, columns);
+    return columns;
+  }
 
   static async create(): Promise<PostgresAdapter> {
     const pool = new Pool(postgresPoolConfig(postgresStoreConfig(parsePostgresSettings(process.env)), { max: 4 }));
@@ -183,13 +204,17 @@ class PostgresAdapter implements BackupAdapter {
 
   async selectAll(table: string): Promise<Record<string, unknown>[]> {
     const order = SEQ_TABLES.has(table) ? " ORDER BY seq" : "";
+    const generated = await this.generatedColumnsOf(table);
     const r = await this.pool.query(`SELECT * FROM ${quoteIdent(table)}${order}`);
-    return r.rows as Record<string, unknown>[];
+    const rows = r.rows as Record<string, unknown>[];
+    if (generated.size === 0) return rows;
+    return rows.map((row) => Object.fromEntries(Object.entries(row).filter(([column]) => !generated.has(column))));
   }
 
   async insertRows(table: string, rows: Record<string, unknown>[]): Promise<void> {
     if (rows.length === 0) return;
-    const cols = Object.keys(rows[0]);
+    const generated = await this.generatedColumnsOf(table);
+    const cols = Object.keys(rows[0]).filter((column) => !generated.has(column));
     const colSql = cols.map(quoteIdent).join(", ");
     const keepsSeq = SEQ_TABLES.has(table) && cols.includes("seq");
     const overriding = keepsSeq ? " OVERRIDING SYSTEM VALUE" : "";

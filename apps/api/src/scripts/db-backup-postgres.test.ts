@@ -4,7 +4,8 @@
  * v40 gives the insertion-order tables (INSERTION_SEQ_TABLES) a `seq GENERATED ALWAYS AS IDENTITY` column. A backup
  * keeps `seq`: the export reads those tables in `seq` order, the import writes `seq` back with OVERRIDING SYSTEM VALUE
  * and then moves each identity past the restored max, so the restored chain and cursor walk the same order and the
- * next insert gets max + 1.
+ * next insert gets max + 1. Generated columns (knowledge_base_chunks.content_tsv) are left out of the export and dropped
+ * on import, so Postgres recomputes them.
  */
 import { randomBytes } from "node:crypto";
 import { Pool } from "pg";
@@ -120,6 +121,48 @@ describe.skipIf(!url)("db:export / db:import round trip [postgres]", () => {
     const after = await auditOrder(dstUrl);
     const maxBefore = Math.max(...before.map((r) => Number(r.seq)));
     expect(after.at(-1)).toEqual({ id: "a-next", seq: String(maxBefore + 1) });
+  }, 120_000);
+
+  it("skips generated columns (the knowledge-base tsvector) on export, and on import of a backup that carries them", async () => {
+    const srcUrl = await freshDatabase("src");
+    const source = await openStore(srcUrl);
+    await source.createKnowledgeBase({ id: "kb1", name: "KB", embedderId: "mock" });
+    await source.addKnowledgeBaseChunks({
+      knowledgeBaseId: "kb1",
+      chunks: [
+        { id: "c1", chunkIndex: 0, content: "refund policy for orders", vector: [1, 0] },
+        { id: "c2", chunkIndex: 1, content: "shipping times", vector: [0, 1] }
+      ]
+    });
+    await source.close();
+
+    process.env.DB_TYPE = "postgres";
+    process.env.DB_POSTGRESDB_URL = srcUrl;
+    const exporter = await openBackupAdapter();
+    const kbs = await exporter.selectAll("knowledge_bases");
+    const chunks = await exporter.selectAll("knowledge_base_chunks");
+    await exporter.close();
+    expect(chunks.map((r) => r.id)).toEqual(["c1", "c2"]);
+    expect(chunks[0]).not.toHaveProperty("content_tsv");
+    expect(chunks[0]).toHaveProperty("seq");
+
+    const dstUrl = await freshDatabase("dst");
+    process.env.DB_POSTGRESDB_URL = dstUrl;
+    const importer = await openBackupAdapter();
+    await importer.insertRows("knowledge_bases", JSON.parse(JSON.stringify(kbs)) as Record<string, unknown>[]);
+    // A backup taken before this fix carries the generated column: the import drops it and Postgres recomputes it.
+    const carried = (JSON.parse(JSON.stringify(chunks)) as Record<string, unknown>[]).map((r) => ({ ...r, content_tsv: "'stale':1" }));
+    await importer.insertRows("knowledge_base_chunks", carried);
+    await importer.close();
+
+    const restored = await openStore(dstUrl);
+    try {
+      const hits = await restored.bm25SearchKnowledgeBase({ knowledgeBaseId: "kb1", query: "refunds", topK: 5 });
+      expect(hits.map((h) => h.id)).toEqual(["c1"]);
+      expect((await restored.listKnowledgeBaseChunks("kb1")).map((c) => c.id)).toEqual(["c1", "c2"]);
+    } finally {
+      await restored.close();
+    }
   }, 120_000);
 
   it("imports into a database that already used its identity (truncate, then restore lower seq values)", async () => {
