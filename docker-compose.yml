@@ -23,3 +23,66 @@ services:
       - api
     ports:
       - "5173:80"
+
+  # Optional: the same stack on Postgres, beside the default one.
+  #   docker compose --profile postgres up --build
+  # API on http://localhost:4001, web on http://localhost:5174, Postgres data in the l2m-postgres volume.
+  # Without --profile postgres none of the services below start.
+  # Works once Phase 13.1 is complete (this profile ships stacked under the async store and the Postgres store work);
+  # until then the API migrates the database and then stops at startup.
+  postgres:
+    profiles: ["postgres"]
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ai_orchestrator
+      POSTGRES_USER: l2m
+      POSTGRES_PASSWORD: l2m-local-only
+    volumes:
+      - l2m-postgres:/var/lib/postgresql/data
+    networks: [postgres-stack]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U l2m -d ai_orchestrator"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  api-postgres:
+    profiles: ["postgres"]
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    environment:
+      API_HOST: 0.0.0.0
+      API_PORT: 4000
+      WEB_ORIGIN: http://localhost:5174
+      SECRET_MASTER_KEY_BASE64: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
+      OLLAMA_BASE_URL: http://host.docker.internal:11434/v1
+      DB_TYPE: postgres
+      # Inside the compose network only, without TLS; use DB_POSTGRESDB_SSL=true (verified) for a remote server.
+      DB_POSTGRESDB_URL: postgres://l2m:l2m-local-only@postgres:5432/ai_orchestrator
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "4001:4000"
+    networks:
+      postgres-stack:
+        # The web image proxies to http://api:4000.
+        aliases: [api]
+
+  web-postgres:
+    profiles: ["postgres"]
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    depends_on:
+      - api-postgres
+    ports:
+      - "5174:80"
+    networks: [postgres-stack]
+
+networks:
+  postgres-stack: {}
+
+volumes:
+  l2m-postgres: {}

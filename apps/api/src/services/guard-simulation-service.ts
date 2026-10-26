@@ -58,6 +58,7 @@ import type { GuardProfileSubstitute, GuardService } from "./guard-service.js";
 import { simulateCase } from "./guard-simulation-diff.js";
 import { GuardSimulationVault } from "./guard-simulation-sink.js";
 import type { Store } from "../db/store.js";
+import { isOneRunningSimulationViolation } from "../db/store-errors.js";
 import { mapAsync, someAsync } from "../async-array.js";
 
 /** Another simulation is running (one at a time per deployment). */
@@ -161,7 +162,7 @@ export class GuardSimulationService {
             ? "None of the workflows that use this profile has a recorded run yet. Save runs as golden runs (or capture production runs) to simulate on them."
             : null;
 
-      await store.insertGuardSimulation({
+      await this.insertSimulation({
         id,
         profileId,
         sourceKind: substitute.inline ? "inline" : "version",
@@ -243,7 +244,7 @@ export class GuardSimulationService {
             : null;
       // The unsaved rows' fingerprint stands in for a profile hash; the rows themselves are never stored.
       const hash = createHash("sha256").update(JSON.stringify(rows.candidate.map(({ createdAt: _c, updatedAt: _u, ...row }) => row))).digest("hex");
-      await store.insertGuardSimulation({
+      await this.insertSimulation({
         id,
         profileId: DESTINATION_PREVIEW_SIMULATION_PROFILE,
         sourceKind: "inline",
@@ -354,6 +355,20 @@ export class GuardSimulationService {
   private claimStart(): void {
     if (this.starting) throw new GuardSimulationBusyError("starting");
     this.starting = true;
+  }
+
+  /**
+   * Inserts a new simulation row. Another instance can start one between this start's last `assertIdle` and the
+   * insert; the database's one-running index then refuses the row, which is the same answer as a busy check (409).
+   */
+  private async insertSimulation(input: Parameters<Store["insertGuardSimulation"]>[0]): Promise<void> {
+    try {
+      await this.options.store.insertGuardSimulation(input);
+    } catch (error) {
+      if (!isOneRunningSimulationViolation(error)) throw error;
+      const running = (await this.options.store.listRunningGuardSimulations().catch(() => []))[0];
+      throw new GuardSimulationBusyError(running?.id ?? "starting");
+    }
   }
 
   /** Throws GuardSimulationBusyError when a simulation is starting in this process or running anywhere. */

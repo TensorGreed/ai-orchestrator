@@ -2313,6 +2313,9 @@ export const GUARD_PROFILE_REVISION_TRIGGERS: ReadonlyArray<readonly [string, "I
 export class SqliteStore implements Store {
   private closed = false;
 
+  /** Phase 13.1 — one-line notes from this open's migrations (e.g. simulations an upgrade interrupted), for the log. */
+  readonly upgradeNotes: string[] = [];
+
   private constructor(private readonly db: BetterSqlite3Database) {
     // Pragmas tuned for typical web-app workloads: WAL gives concurrent reads
     // during writes, NORMAL synchronous is durable across app crashes (only
@@ -3710,6 +3713,30 @@ export class SqliteStore implements Store {
       );
       CREATE UNIQUE INDEX IF NOT EXISTS idx_data_destinations_match ON data_destinations(kind, COALESCE(target_id, ''), COALESCE(host, ''));
     `);
+
+    // Migration 39 — schema parity with the Postgres chain, and at most one running guard simulation per deployment
+    // (a partial unique index). Several running rows left by an older build: the newest keeps running, the others are
+    // `interrupted` (as a restart would finish them), so the index can be built.
+    this.exec(`CREATE INDEX IF NOT EXISTS idx_secrets_external_provider_id ON secrets(external_provider_id)`);
+    this.transaction(() => {
+      if (this.queryOne<{ name: string }>(`SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_guard_simulations_one_running'`)) return;
+      const { changes } = this.db
+        .prepare(
+          `UPDATE guard_simulations
+              SET status = 'interrupted',
+                  error = COALESCE(error, 'Stopped by an upgrade: only one simulation can run at a time.'),
+                  finished_at = COALESCE(finished_at, ?)
+            WHERE status = 'running'
+              AND id <> (SELECT id FROM guard_simulations WHERE status = 'running' ORDER BY created_at DESC, id DESC LIMIT 1)`
+        )
+        .run(new Date().toISOString());
+      this.exec(`CREATE UNIQUE INDEX idx_guard_simulations_one_running ON guard_simulations(status) WHERE status = 'running'`);
+      if (changes > 0) {
+        this.upgradeNotes.push(
+          `v39 upgrade: ${changes} running guard simulation${changes === 1 ? " was" : "s were"} interrupted (only one can run at a time).`
+        );
+      }
+    });
 
     this.exec(`CREATE INDEX IF NOT EXISTS idx_workflows_project_id ON workflows(project_id)`);
     this.exec(`CREATE INDEX IF NOT EXISTS idx_workflows_folder_id ON workflows(folder_id)`);

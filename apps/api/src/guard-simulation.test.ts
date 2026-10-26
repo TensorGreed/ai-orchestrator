@@ -644,6 +644,30 @@ describe("guard policy simulation", () => {
     expect(await context.store.listGuardSimulations({ profileId: "sim-guard" })).toHaveLength(1);
   }, 60_000);
 
+  it("a simulation another instance starts between this start's last check and its insert answers 409, not 500", async () => {
+    const { context, builder } = await guardedSetup();
+    await recordRuns(context, builder.cookie, "wf-guarded", 1, { user_prompt: "Write to someone@example.com please" });
+    // The other instance's row commits after this start's last assertIdle; the one-running index refuses this insert.
+    const original = context.store.insertGuardSimulation.bind(context.store);
+    let other: string | undefined;
+    context.store.insertGuardSimulation = async (input) => {
+      if (!other && input.status === "running") {
+        other = `gsim_other_${crypto.randomUUID()}`;
+        await original({ ...input, id: other });
+      }
+      return await original(input);
+    };
+    let response;
+    try {
+      response = await call(context, "POST", "/api/guard/profiles/sim-guard/simulate", builder.cookie, { document: emailProfile("block") });
+    } finally {
+      context.store.insertGuardSimulation = original;
+    }
+    expect(response.statusCode, response.body).toBe(409);
+    expect(response.json<{ simulationId?: string }>().simulationId).toBe(other);
+    expect((await context.store.listRunningGuardSimulations()).map((record) => record.id)).toEqual([other]);
+  }, 60_000);
+
   it("pins the current-profile side to the version the simulation started against, so a save mid-simulation never mixes baselines", async () => {
     const { context, builder } = await guardedSetup();
     // Recorded and simulated against v1 (email: allow); a simulation of the same document changes nothing.

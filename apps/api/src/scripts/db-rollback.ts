@@ -15,6 +15,9 @@
  */
 
 import { Pool } from "pg";
+import { parsePostgresSettings } from "../config.js";
+import { postgresStoreConfig } from "../db/create-store.js";
+import { currentChainVersion, ensureMigrationsTable, postgresPoolConfig, withMigrationLock } from "../db/postgres-store.js";
 import { MIGRATIONS, rollbackMigrations } from "../db/migrations.js";
 
 interface Args {
@@ -62,8 +65,9 @@ function printUsageAndExit(code: number): never {
       "",
       "Required env (Postgres only):",
       "  DB_TYPE=postgres",
-      "  DB_POSTGRESDB_HOST, DB_POSTGRESDB_PORT, DB_POSTGRESDB_DATABASE,",
-      "  DB_POSTGRESDB_USER, DB_POSTGRESDB_PASSWORD, DB_POSTGRESDB_SSL"
+      "  DB_POSTGRESDB_URL, or DB_POSTGRESDB_HOST, DB_POSTGRESDB_PORT, DB_POSTGRESDB_DATABASE,",
+      "  DB_POSTGRESDB_USER, DB_POSTGRESDB_PASSWORD",
+      "  TLS: DB_POSTGRESDB_SSL, DB_POSTGRESDB_SSL_CA, DB_POSTGRESDB_SSL_REJECT_UNAUTHORIZED"
     ].join("\n")
   );
   process.exit(code);
@@ -87,38 +91,21 @@ async function main() {
     process.exit(2);
   }
 
-  const pool = new Pool({
-    host: process.env.DB_POSTGRESDB_HOST ?? "localhost",
-    port: Number(process.env.DB_POSTGRESDB_PORT) || 5432,
-    database: process.env.DB_POSTGRESDB_DATABASE ?? "ai_orchestrator",
-    user: process.env.DB_POSTGRESDB_USER ?? "postgres",
-    password: process.env.DB_POSTGRESDB_PASSWORD ?? "",
-    ssl: process.env.DB_POSTGRESDB_SSL === "true" ? { rejectUnauthorized: false } : false,
-    max: 2
-  });
+  const pool = new Pool(postgresPoolConfig(postgresStoreConfig(parsePostgresSettings(process.env)), { max: 2 }));
 
   try {
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS schema_migrations (
-        version INTEGER PRIMARY KEY,
-        applied_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
-      )
-    `);
-
-    const result = await rollbackMigrations(
-      async (sql) => { await pool.query(sql); },
-      async () => {
-        const r = await pool.query<{ version: string | number | null }>(
-          `SELECT COALESCE(MAX(version), 0) AS version FROM schema_migrations`
-        );
-        const v = r.rows[0]?.version;
-        return typeof v === "number" ? v : Number(v ?? 0);
-      },
-      async (newVersion) => {
-        await pool.query(`DELETE FROM schema_migrations WHERE version > $1`, [newVersion]);
-      },
-      args.to
-    );
+    // Under the migrations lock, so a rollback never interleaves with an instance migrating at boot.
+    const result = await withMigrationLock(pool, undefined, async (client) => {
+      await ensureMigrationsTable(client);
+      return rollbackMigrations(
+        async (sql) => { await client.query(sql); },
+        () => currentChainVersion(client),
+        async (newVersion) => {
+          await client.query(`DELETE FROM schema_migrations WHERE version > $1`, [newVersion]);
+        },
+        args.to
+      );
+    });
 
     if (result.rolledBack.length === 0) {
       console.log(`No-op: schema already at v${result.from} (target v${args.to}).`);

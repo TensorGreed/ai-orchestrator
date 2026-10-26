@@ -27,7 +27,8 @@ if (fs.existsSync(apiEnvPath)) {
 
 async function bootstrap() {
   const config = getConfig();
-  const dbPath = path.resolve(apiRoot, "data", "orchestrator.db");
+  // DB_SQLITE_PATH (relative to the working directory) picks another SQLite file; unset, the default is as before.
+  const dbPath = process.env.DB_SQLITE_PATH?.trim() ? path.resolve(process.env.DB_SQLITE_PATH.trim()) : path.resolve(apiRoot, "data", "orchestrator.db");
   const store = await createStore({ dbFilePath: dbPath });
   const secretService = new SecretService(store, config.SECRET_MASTER_KEY_BASE64);
   const authService = new AuthService(store, config.SESSION_TTL_HOURS);

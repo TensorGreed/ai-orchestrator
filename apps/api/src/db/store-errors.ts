@@ -32,3 +32,19 @@ export class StoreNotImplementedError extends Error {
 export function rethrowStoreNotImplemented(error: unknown): void {
   if (error instanceof StoreNotImplementedError) throw error;
 }
+
+/** Phase 13.1 — the v39 partial unique index that allows one running guard simulation per deployment. */
+export const ONE_RUNNING_SIMULATION_INDEX = "idx_guard_simulations_one_running";
+
+/**
+ * Whether `error` is the one-running-simulation index refusing an insert, on either store, and only that index:
+ * SQLite reports SQLITE_CONSTRAINT_UNIQUE on `guard_simulations.status` (the only unique index on that column),
+ * Postgres 23505 naming the index as its constraint. A duplicate id or any other violation is not it.
+ */
+export function isOneRunningSimulationViolation(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const { code, constraint, message } = error as { code?: unknown; constraint?: unknown; message?: unknown };
+  if (code === "SQLITE_CONSTRAINT_UNIQUE") return typeof message === "string" && /\bguard_simulations\.status\b/.test(message);
+  if (code === "23505") return constraint === ONE_RUNNING_SIMULATION_INDEX;
+  return false;
+}
