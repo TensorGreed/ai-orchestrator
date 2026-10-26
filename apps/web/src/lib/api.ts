@@ -122,6 +122,7 @@ import type {
   WorkflowListItem,
   WorkflowValidationResult
 } from "@ai-orchestrator/shared";
+import { apiFetch, openEventSource } from "./transport";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "";
 
@@ -142,7 +143,7 @@ async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
     headers.set("content-type", "application/json");
   }
 
-  const response = await fetch(`${API_BASE}${path}`, {
+  const response = await apiFetch(`${API_BASE}${path}`, {
     ...init,
     credentials: "include",
     headers
@@ -479,7 +480,7 @@ async function streamWorkflowExecutionRequest(
   payload: Record<string, unknown>,
   handlers: WorkflowExecuteStreamHandlers = {}
 ): Promise<WorkflowExecutionResult> {
-  const response = await fetch(`${API_BASE}${path}`, {
+  const response = await apiFetch(`${API_BASE}${path}`, {
     method: "POST",
     credentials: "include",
     headers: {
@@ -914,7 +915,7 @@ export async function testProvider(payload: {
   latencyMs?: number;
   preview?: string;
 }> {
-  const response = await fetch(`${API_BASE}/api/providers/test`, {
+  const response = await apiFetch(`${API_BASE}/api/providers/test`, {
     method: "POST",
     credentials: "include",
     headers: { "content-type": "application/json" },
@@ -2704,7 +2705,7 @@ export function subscribeEvalRun(runId: string, onEvent: (event: EvalRunEvent) =
   }
 
   try {
-    source = new EventSource(`${API_BASE}/api/eval/runs/${encodeURIComponent(runId)}/events`, { withCredentials: true });
+    source = openEventSource(`${API_BASE}/api/eval/runs/${encodeURIComponent(runId)}/events`, { withCredentials: true });
   } catch {
     startPolling();
     return stop;
@@ -3734,7 +3735,7 @@ export interface AuditBundleDownload {
 
 /** Fetches the bundle as a blob so a refusal (in progress, too large, no access) can be shown inline. */
 export async function downloadAuditBundle(executionId: string): Promise<AuditBundleDownload> {
-  const response = await fetch(`${API_BASE}/api/executions/${encodeURIComponent(executionId)}/bundle`, { credentials: "include" });
+  const response = await apiFetch(`${API_BASE}/api/executions/${encodeURIComponent(executionId)}/bundle`, { credentials: "include" });
   if (!response.ok) {
     let payload: Record<string, unknown> = {};
     try {
@@ -3859,7 +3860,7 @@ export type PublishResult =
   | { outcome: "blocked"; reasons: string[]; replayRunId?: string; canRequestApproval: boolean };
 
 export async function publishWorkflowVersion(workflowId: string, payload: PublishRequest): Promise<PublishResult> {
-  const response = await fetch(`${API_BASE}${releasePath(workflowId, "publish")}`, {
+  const response = await apiFetch(`${API_BASE}${releasePath(workflowId, "publish")}`, {
     method: "POST",
     credentials: "include",
     headers: { "content-type": "application/json" },
