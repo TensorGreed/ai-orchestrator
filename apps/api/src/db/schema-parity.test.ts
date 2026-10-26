@@ -13,10 +13,12 @@ import Database from "better-sqlite3";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import type { Pool } from "pg";
+import { Pool as PgPool, type Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { MIGRATIONS, rollbackMigrations, runMigrations } from "./migrations.js";
 import { SqliteStore } from "./database.js";
+import { createStore, postgresStoreConfig } from "./create-store.js";
+import { PostgresStore, postgresPoolConfig, withMigrationLock } from "./postgres-store.js";
 import {
   diffSchemas,
   formatDifference,
@@ -25,7 +27,15 @@ import {
   type SchemaDifference,
   type SchemaShape
 } from "../test-support/schema-introspection.js";
-import { createTestStore, dropTestSchema, noticePostgresSkipped, randomTestSchema, testPostgresPool, testPostgresUrl } from "../test-support/test-store.js";
+import {
+  createTestStore,
+  dropTestSchema,
+  noticePostgresSkipped,
+  randomTestSchema,
+  testPostgresPool,
+  testPostgresSettings,
+  testPostgresUrl
+} from "../test-support/test-store.js";
 
 const LATEST = Math.max(...MIGRATIONS.map((m) => m.version));
 
@@ -131,6 +141,18 @@ describe("SQLite schema: migration 39 objects", () => {
     expect(shape.sessions.indexes.idx_sessions_revoked_expires).toBeDefined();
   });
 
+  it("a fresh database has no upgrade notes", async () => {
+    const file = path.join(tempDir, `fresh-${Math.random().toString(36).slice(2)}.db`);
+    const logged: string[] = [];
+    const store = await createStore({ env: { DB_SQLITE_PATH: file }, log: { info: (m) => logged.push(m), warn: (m) => logged.push(m) } });
+    try {
+      expect((store as SqliteStore).upgradeNotes).toEqual([]);
+      expect(logged).toEqual([]);
+    } finally {
+      store.close();
+    }
+  });
+
   it("refuses a second running simulation and allows any number of finished ones", async () => {
     const { file } = await freshSqliteShape();
     const db = new Database(file);
@@ -162,8 +184,16 @@ describe("SQLite schema: migration 39 objects", () => {
     insert.run("done", "completed", null, "2026-10-21T00:00:00.000Z");
     db.close();
 
-    const store = await SqliteStore.create(file);
+    const firstLog: string[] = [];
+    const store = await createStore({ env: { DB_SQLITE_PATH: file }, log: { info: (m) => firstLog.push(m), warn: (m) => firstLog.push(m) } });
+    expect((store as SqliteStore).upgradeNotes).toEqual(["v39 upgrade: 2 running guard simulations were interrupted (only one can run at a time)."]);
+    expect(firstLog).toEqual(["Database: v39 upgrade: 2 running guard simulations were interrupted (only one can run at a time)."]);
     store.close();
+    // The note is printed once, at the upgrade; the next start has nothing to say.
+    const logged: string[] = [];
+    const again = await createStore({ env: { DB_SQLITE_PATH: file }, log: { info: (m) => logged.push(m), warn: (m) => logged.push(m) } });
+    again.close();
+    expect(logged).toEqual([]);
     const after = new Database(file, { readonly: true });
     try {
       const rows = after.prepare(`SELECT id, status, error, finished_at FROM guard_simulations ORDER BY id`).all() as Array<{
@@ -353,10 +383,14 @@ describe.skipIf(!postgresUrl)("Postgres schema parity and migration walk", () =>
       expect(await hasDefault()).toBe(false);
       const insert = `INSERT INTO guard_simulations (id, profile_id, source_kind, simulated_hash, job_ids_json, status, error, created_at) VALUES ($1, 'p', 'draft', 'h', '[]', $2, $3, $4)`;
       await pool.query(insert, ["old", "running", null, "2026-10-01T00:00:00Z"]);
+      await pool.query(insert, ["older", "running", null, "2026-09-01T00:00:00Z"]);
       await pool.query(insert, ["newest", "running", null, "2026-10-20T00:00:00Z"]);
       await pool.query(insert, ["done", "completed", null, "2026-10-21T00:00:00Z"]);
 
-      await runMigrations(cb.run, cb.current, cb.setApplied);
+      // The store's own boot applies v39 and reports what it interrupted (a NOTICE raised by the migration).
+      const store = await PostgresStore.create(postgresStoreConfig(testPostgresSettings(), { schema, maxConnections: 2 }));
+      expect(store.upgradeNotes).toEqual(["v39 upgrade: 2 running guard simulations were interrupted (only one can run at a time)."]);
+      await store.close();
       expect(await chainVersion(pool)).toBe(LATEST);
       expect(await hasDefault()).toBe(true);
       const rows = await pool.query<{ id: string; status: string; error: string | null; finished_at: string | null }>(
@@ -375,10 +409,44 @@ describe.skipIf(!postgresUrl)("Postgres schema parity and migration walk", () =>
     }
   }, 180_000);
 
+  it("withMigrationLock serialises holders of the same schema, not of different schemas, and releases on a throw", async () => {
+    // One connection per holder (three at once).
+    const pool = new PgPool(postgresPoolConfig(postgresStoreConfig(testPostgresSettings()), { max: 4 }));
+    try {
+      let releaseFirst!: () => void;
+      const firstHeld = new Promise<void>((resolve) => {
+        releaseFirst = resolve;
+      });
+      const order: string[] = [];
+      const first = withMigrationLock(pool, "t_lock_a", async () => {
+        order.push("first:start");
+        await firstHeld;
+        order.push("first:end");
+      });
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      const second = withMigrationLock(pool, "t_lock_a", async () => {
+        order.push("second");
+      });
+      const other = withMigrationLock(pool, "t_lock_b", async () => {
+        order.push("other-schema");
+      });
+      await other;
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      expect(order).toEqual(["first:start", "other-schema"]);
+      releaseFirst();
+      await Promise.all([first, second]);
+      expect(order).toEqual(["first:start", "other-schema", "first:end", "second"]);
+
+      await expect(withMigrationLock(pool, "t_lock_a", async () => Promise.reject(new Error("boom")))).rejects.toThrow("boom");
+      await withMigrationLock(pool, "t_lock_a", async () => undefined);
+      const held = await pool.query<{ n: number }>(`SELECT COUNT(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND classid = $1`, [0x4c324d]);
+      expect(held.rows[0].n).toBe(0);
+    } finally {
+      await pool.end();
+    }
+  }, 60_000);
+
   it("two stores migrating the same schema at once both succeed (the migration lock serialises them)", async () => {
-    const { PostgresStore } = await import("./postgres-store.js");
-    const { postgresStoreConfig } = await import("./create-store.js");
-    const { testPostgresSettings } = await import("../test-support/test-store.js");
     const schema = randomTestSchema();
     const config = postgresStoreConfig(testPostgresSettings(), { schema, maxConnections: 2 });
     try {

@@ -11,6 +11,12 @@
  * Contract files (`apps/api/src/db/contract/<domain>.contract.test.ts`) call `describeStoreContract(name, fn)`: `fn`
  * runs once against SQLite, always, and once against Postgres when TEST_POSTGRES_URL is set (skipped otherwise, with
  * a one-line notice). Each test gets its own fresh store.
+ *
+ * A run that is killed before cleanup leaves its `t_*` schemas behind (harmless; CI throws the server away). To clear
+ * them on a local server, with no test run in progress:
+ *
+ *   psql "$TEST_POSTGRES_URL" -Atc "SELECT format('DROP SCHEMA %I CASCADE;', nspname) FROM pg_namespace
+ *     WHERE nspname ~ '^t_[0-9a-f]+$'" | psql "$TEST_POSTGRES_URL"
  */
 import { randomBytes } from "node:crypto";
 import fs from "node:fs";

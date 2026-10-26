@@ -1,4 +1,4 @@
-import pg, { Pool, type PoolConfig } from "pg";
+import pg, { Pool, type PoolClient, type PoolConfig } from "pg";
 import { randomUUID } from "node:crypto";
 import type { ChatMessage, Folder, Project, Workflow, WorkflowListItem } from "@ai-orchestrator/shared";
 import { DEFAULT_PROJECT_ID, isEmptyDataLabels, labelsForUntrackedSave, mergeDataLabels, parseStoredDataLabels, type DataLabels } from "@ai-orchestrator/shared";
@@ -57,22 +57,35 @@ function toStr(value: unknown): string {
 
 const MAX_SESSION_TOOL_CACHE_RECORDS = 400;
 
-/** Phase 13.1 — first key of the advisory lock taken while migrating (second key: the schema). "L2M" in ASCII. */
-const MIGRATION_LOCK_CLASS = 0x4c324d;
+/**
+ * Phase 13.1 — L2M's advisory-lock key space. Two-key locks `(class, key)`; each class is one purpose, so locks taken
+ * for different purposes never collide:
+ *   0x4c324d ("L2M")  migrations — key: hashtext(schema). Held while the chain runs or is reversed (boot, db:rollback,
+ *                     db:restore); see withMigrationLock.
+ *   0x4c324e ("L2N")  leader election (reserved for the scheduler/queue leader lock).
+ * Add a new class here rather than reusing one.
+ */
+export const ADVISORY_LOCK_CLASS_MIGRATIONS = 0x4c324d;
+export const ADVISORY_LOCK_CLASS_LEADER = 0x4c324e;
 
 const PG_TIMESTAMPTZ_OID = 1184;
+const pgTimestamptzParser = pg.types.getTypeParser(PG_TIMESTAMPTZ_OID) as (value: string) => unknown;
 
 /**
- * Phase 13.1 — TIMESTAMPTZ values come back as ISO-8601 strings (`2026-10-26T07:00:00.000Z`), the shape the SQLite
- * store returns, instead of Date objects; every other type keeps pg's default parser.
+ * Phase 13.1 — a TIMESTAMPTZ value as an ISO-8601 string (`2026-10-26T07:00:00.000Z`), the shape the SQLite store
+ * returns. pg's own parser reads the text (offsets with seconds, BC dates); a value with no ISO form (`infinity`)
+ * comes back as Postgres wrote it.
  */
+export function parseTimestamptz(value: string): string {
+  const parsed = pgTimestamptzParser(value);
+  return parsed instanceof Date && !Number.isNaN(parsed.getTime()) ? parsed.toISOString() : value;
+}
+
+/** TIMESTAMPTZ through parseTimestamptz; every other type keeps pg's default parser. */
 const POSTGRES_TYPES = {
   getTypeParser: ((oid: number, format?: "text" | "binary") => {
     if (oid === PG_TIMESTAMPTZ_OID && format !== "binary") {
-      return (value: string) => {
-        const date = new Date(value);
-        return Number.isNaN(date.getTime()) ? value : date.toISOString();
-      };
+      return parseTimestamptz;
     }
     return format === undefined ? pg.types.getTypeParser(oid) : pg.types.getTypeParser(oid, format);
   }) as typeof pg.types.getTypeParser
@@ -101,6 +114,71 @@ export function postgresPoolConfig(config: PostgresStoreConfig, overrides: Parti
     ...(config.schema ? { options: `-c search_path=${quotePgIdentifier(config.schema)}` } : {}),
     ...overrides
   };
+}
+
+/**
+ * Phase 13.1 — runs `fn` on one connection holding the migrations advisory lock for `schema` (the connection's
+ * current schema when unset), so booting instances, db:rollback and db:restore never run or reverse the chain at the
+ * same time. The lock is released afterwards, also when `fn` throws; a connection whose unlock fails is discarded,
+ * which releases a session lock too.
+ */
+export async function withMigrationLock<T>(pool: Pool, schema: string | undefined, fn: (client: PoolClient) => Promise<T>): Promise<T> {
+  const client = await pool.connect();
+  let discard = false;
+  try {
+    const lockArgs = [ADVISORY_LOCK_CLASS_MIGRATIONS, schema ?? null];
+    await client.query(`SELECT pg_advisory_lock($1, hashtext(COALESCE($2::text, current_schema(), '')))`, lockArgs);
+    try {
+      return await fn(client);
+    } finally {
+      await client.query(`SELECT pg_advisory_unlock($1, hashtext(COALESCE($2::text, current_schema(), '')))`, lockArgs).catch(() => {
+        discard = true;
+      });
+    }
+  } finally {
+    client.release(discard);
+  }
+}
+
+/** The applied chain version on this connection (0 for none). */
+export async function currentChainVersion(client: Pool | PoolClient): Promise<number> {
+  const result = await client.query<{ version: string | number | null }>(`SELECT COALESCE(MAX(version), 0) AS version FROM schema_migrations`);
+  return toNum(result.rows[0]?.version);
+}
+
+/** Creates `schema_migrations` when missing. */
+export async function ensureMigrationsTable(client: Pool | PoolClient): Promise<void> {
+  await client.query(`
+    CREATE TABLE IF NOT EXISTS schema_migrations (
+      version INTEGER PRIMARY KEY,
+      applied_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+}
+
+/**
+ * Applies every pending chain migration on `client` (call it inside withMigrationLock). Returns the NOTICE messages
+ * the migrations raised (for example how many running guard simulations v39 interrupted), for one startup line each.
+ */
+export async function applyMigrationChain(client: PoolClient): Promise<string[]> {
+  const notices: string[] = [];
+  const onNotice = (notice: { message?: string }) => {
+    if (notice.message?.startsWith("L2M ")) notices.push(notice.message.slice(4));
+  };
+  client.on("notice", onNotice);
+  try {
+    await ensureMigrationsTable(client);
+    await runMigrations(
+      async (sql) => { await client.query(sql); },
+      () => currentChainVersion(client),
+      async (version) => {
+        await client.query(`INSERT INTO schema_migrations (version) VALUES ($1) ON CONFLICT (version) DO NOTHING`, [version]);
+      }
+    );
+  } finally {
+    client.off("notice", onNotice);
+  }
+  return notices;
 }
 
 export class PostgresStore implements Store {
@@ -419,6 +497,9 @@ export class PostgresStore implements Store {
 
   private readonly pool: Pool;
 
+  /** Phase 13.1 — one-line notes from this start's migrations (e.g. simulations an upgrade interrupted), for the log. */
+  readonly upgradeNotes: string[] = [];
+
   private constructor(pool: Pool) {
     this.pool = pool;
   }
@@ -460,43 +541,16 @@ export class PostgresStore implements Store {
   }
 
   /**
-   * Runs the MIGRATIONS chain on one connection holding a session advisory lock (keyed by the schema), so two
-   * instances starting together never run the same migration twice; the second waits, then finds nothing to do.
-   * `schema` (tests) is created, under the lock, when missing.
+   * Runs the MIGRATIONS chain under the migrations advisory lock (keyed by the schema), so two instances starting
+   * together never run the same migration twice; the second waits, then finds nothing to do. `schema` (tests) is
+   * created, under the lock, when missing.
    */
   private async migrate(schema?: string): Promise<void> {
-    const client = await this.pool.connect();
-    let discard = false;
-    try {
-      const lockArgs = [MIGRATION_LOCK_CLASS, schema ?? null];
-      await client.query(`SELECT pg_advisory_lock($1, hashtext(COALESCE($2::text, current_schema(), '')))`, lockArgs);
-      try {
-        if (schema) await client.query(`CREATE SCHEMA IF NOT EXISTS ${quotePgIdentifier(schema)}`);
-        await client.query(`
-          CREATE TABLE IF NOT EXISTS schema_migrations (
-            version INTEGER PRIMARY KEY,
-            applied_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
-          )
-        `);
-        await runMigrations(
-          async (sql) => { await client.query(sql); },
-          async () => {
-            const result = await client.query<{ version: number }>(`SELECT COALESCE(MAX(version), 0) as version FROM schema_migrations`);
-            return toNum(result.rows[0]?.version);
-          },
-          async (version) => {
-            await client.query(`INSERT INTO schema_migrations (version) VALUES ($1) ON CONFLICT (version) DO NOTHING`, [version]);
-          }
-        );
-      } finally {
-        // If unlocking fails the connection is discarded below, which releases a session lock too.
-        await client.query(`SELECT pg_advisory_unlock($1, hashtext(COALESCE($2::text, current_schema(), '')))`, lockArgs).catch(() => {
-          discard = true;
-        });
-      }
-    } finally {
-      client.release(discard);
-    }
+    const notes = await withMigrationLock(this.pool, schema, async (client) => {
+      if (schema) await client.query(`CREATE SCHEMA IF NOT EXISTS ${quotePgIdentifier(schema)}`);
+      return applyMigrationChain(client);
+    });
+    this.upgradeNotes.push(...notes);
   }
 
   // ---------------------------------------------------------------------------

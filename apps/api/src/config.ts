@@ -597,14 +597,27 @@ function parsePostgresUrl(raw: string): { host: string; port?: number; database?
   if (sslMode !== undefined && !URL_SSL_MODES.has(sslMode)) {
     throw invalidDbSetting(`${DB_ENV.url} has an unknown sslmode; use disable, require, verify-ca or verify-full.`);
   }
+  if (sslMode === "allow" || sslMode === "prefer") {
+    // libpq would fall back to plain text with these; here TLS is either required (and verified) or off.
+    throw invalidDbSetting(
+      `${DB_ENV.url} has sslmode=${sslMode}, which would allow a connection without TLS; use require or disable. require, verify-ca and verify-full all verify the server certificate and host name here; for a private CA set ${DB_ENV.sslCa}.`
+    );
+  }
   const port = url.port ? Number(url.port) : undefined;
-  const database = decodeURIComponent(url.pathname.replace(/^\//, ""));
+  const decode = (part: string, what: string): string => {
+    try {
+      return decodeURIComponent(part);
+    } catch {
+      throw invalidDbSetting(`${DB_ENV.url} has a malformed percent escape in the ${what}; encode special characters as %XX.`);
+    }
+  };
+  const database = decode(url.pathname.replace(/^\//, ""), "database name");
   return {
     host: url.hostname.replace(/^\[(.*)\]$/, "$1"),
     port,
     database: database || undefined,
-    user: url.username ? decodeURIComponent(url.username) : undefined,
-    password: url.password ? decodeURIComponent(url.password) : undefined,
+    user: url.username ? decode(url.username, "user name") : undefined,
+    password: url.password ? decode(url.password, "password") : undefined,
     sslMode
   };
 }

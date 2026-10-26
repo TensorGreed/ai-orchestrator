@@ -152,6 +152,25 @@ describe("parsePostgresSettings", () => {
     }
   });
 
+  it("sslmode=allow / prefer are refused (TLS would be optional); the hint says require verifies certificates here", () => {
+    for (const mode of ["allow", "prefer"]) {
+      const error = errorOf(() => parsePostgresSettings({ DB_POSTGRESDB_URL: `postgres://u:${encodeURIComponent(SECRET)}@h/db?sslmode=${mode}` }));
+      expect(error.message).toMatch(/DB_POSTGRESDB_URL/);
+      expect(error.message).toMatch(/use require or disable/);
+      expect(error.message).toMatch(/DB_POSTGRESDB_SSL_CA/);
+      expect(error.message).not.toContain(SECRET);
+    }
+  });
+
+  it("a malformed percent escape in the URL is a database configuration error, not a bare URIError", () => {
+    for (const url of [`postgres://u:p%ZZ${SECRET}@h/db`, `postgres://u%E0%A4%A@h/db`, `postgres://u@h/d%ZZb`]) {
+      const error = errorOf(() => parsePostgresSettings({ DB_POSTGRESDB_URL: url }));
+      expect(error).not.toBeInstanceOf(URIError);
+      expect(error.message).toMatch(/^Invalid database configuration: DB_POSTGRESDB_URL/);
+      expect(error.message).not.toContain(SECRET);
+    }
+  });
+
   it("a copied .env.example with the suggested URL uncommented keeps TLS on (no shipped default turns it off)", () => {
     const example = fs.readFileSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../.env.example"), "utf8");
     const env: Record<string, string> = {};

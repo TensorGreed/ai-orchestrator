@@ -35,10 +35,14 @@ export async function createStore(config?: {
     const settings = parsePostgresSettings(env);
     for (const warning of settings.warnings) log.warn(`Warning: ${warning}`);
     log.info(`Database: ${describePostgresSettings(settings)}`);
-    return PostgresStore.create(postgresStoreConfig(settings));
+    const store = await PostgresStore.create(postgresStoreConfig(settings));
+    for (const note of store.upgradeNotes) log.info(`Database: ${note}`);
+    return store;
   }
 
   // Default: SQLite
   const dbFilePath = config?.dbFilePath ?? env.DB_SQLITE_PATH ?? "./data/orchestrator.db";
-  return SqliteStore.create(dbFilePath);
+  const store = await SqliteStore.create(dbFilePath);
+  for (const note of store.upgradeNotes) log.info(`Database: ${note}`);
+  return store;
 }

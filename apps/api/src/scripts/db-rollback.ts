@@ -17,7 +17,7 @@
 import { Pool } from "pg";
 import { parsePostgresSettings } from "../config.js";
 import { postgresStoreConfig } from "../db/create-store.js";
-import { postgresPoolConfig } from "../db/postgres-store.js";
+import { currentChainVersion, ensureMigrationsTable, postgresPoolConfig, withMigrationLock } from "../db/postgres-store.js";
 import { MIGRATIONS, rollbackMigrations } from "../db/migrations.js";
 
 interface Args {
@@ -94,27 +94,18 @@ async function main() {
   const pool = new Pool(postgresPoolConfig(postgresStoreConfig(parsePostgresSettings(process.env)), { max: 2 }));
 
   try {
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS schema_migrations (
-        version INTEGER PRIMARY KEY,
-        applied_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
-      )
-    `);
-
-    const result = await rollbackMigrations(
-      async (sql) => { await pool.query(sql); },
-      async () => {
-        const r = await pool.query<{ version: string | number | null }>(
-          `SELECT COALESCE(MAX(version), 0) AS version FROM schema_migrations`
-        );
-        const v = r.rows[0]?.version;
-        return typeof v === "number" ? v : Number(v ?? 0);
-      },
-      async (newVersion) => {
-        await pool.query(`DELETE FROM schema_migrations WHERE version > $1`, [newVersion]);
-      },
-      args.to
-    );
+    // Under the migrations lock, so a rollback never interleaves with an instance migrating at boot.
+    const result = await withMigrationLock(pool, undefined, async (client) => {
+      await ensureMigrationsTable(client);
+      return rollbackMigrations(
+        async (sql) => { await client.query(sql); },
+        () => currentChainVersion(client),
+        async (newVersion) => {
+          await client.query(`DELETE FROM schema_migrations WHERE version > $1`, [newVersion]);
+        },
+        args.to
+      );
+    });
 
     if (result.rolledBack.length === 0) {
       console.log(`No-op: schema already at v${result.from} (target v${args.to}).`);

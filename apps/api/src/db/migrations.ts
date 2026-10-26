@@ -1824,12 +1824,23 @@ export const MIGRATIONS: Migration[] = [
       ALTER TABLE mcp_tool_calls ALTER COLUMN created_at SET DEFAULT now();
       ALTER TABLE mcp_tool_snapshots ALTER COLUMN created_at SET DEFAULT now();
       ALTER TABLE usage_events ALTER COLUMN created_at SET DEFAULT now();
-      UPDATE guard_simulations
-         SET status = 'interrupted',
-             error = COALESCE(error, 'Stopped by an upgrade: only one simulation can run at a time.'),
-             finished_at = COALESCE(finished_at, now())
-       WHERE status = 'running'
-         AND id <> (SELECT id FROM guard_simulations WHERE status = 'running' ORDER BY created_at DESC, id DESC LIMIT 1);
+      DO $$
+      DECLARE interrupted integer;
+      BEGIN
+        UPDATE guard_simulations
+           SET status = 'interrupted',
+               error = COALESCE(error, 'Stopped by an upgrade: only one simulation can run at a time.'),
+               finished_at = COALESCE(finished_at, now())
+         WHERE status = 'running'
+           AND id <> (SELECT id FROM guard_simulations WHERE status = 'running' ORDER BY created_at DESC, id DESC LIMIT 1);
+        GET DIAGNOSTICS interrupted = ROW_COUNT;
+        -- PostgresStore turns NOTICEs starting with "L2M " into one startup log line each.
+        IF interrupted > 0 THEN
+          RAISE NOTICE 'L2M v39 upgrade: % running guard simulation% interrupted (only one can run at a time).',
+            interrupted, CASE WHEN interrupted = 1 THEN ' was' ELSE 's were' END;
+        END IF;
+      END
+      $$;
       CREATE UNIQUE INDEX IF NOT EXISTS idx_guard_simulations_one_running ON guard_simulations(status) WHERE status = 'running';
     `,
     down: `
