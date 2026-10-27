@@ -8,6 +8,8 @@ import net from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
 import { postgresPoolConfig } from "../postgres-store.js";
 import { createTestStore, noticePostgresSkipped, testPostgresUrl, testStorePool, type TestStore } from "../../test-support/test-store.js";
+import type { Store } from "../store.js";
+import { LeaderElectionService } from "../../services/leader-election-service.js";
 import { leaderSessionSettings, PgLeaderLock } from "./leader-lock.js";
 
 describe("leaderSessionSettings", () => {
@@ -115,7 +117,9 @@ run("Postgres leader lock liveness", () => {
     // eslint-disable-next-line no-console
     console.info(`[leader-lock liveness] standby took the lock ${takeoverMs} ms after the partition`);
     expect(zombie.rows).toEqual([]);
-    expect(lost).toBe(0); // stepped down by its own failed check, not by an 'end' event it never got
+    // Stepped down by its own failed check or liveness query (at most one loss reported), not by an 'end' event it
+    // never got.
+    expect(lost).toBeLessThanOrEqual(1);
   }, 40_000);
 
   it("a setting the server refuses is warned about once; the lock still works, also on a new connection", async () => {
@@ -144,3 +148,141 @@ run("Postgres leader lock liveness", () => {
   }, 30_000);
 });
 
+
+/**
+ * Phase 13.1 (review round 2, M-1) — the election around the real lock when the leader's start-up (reconcile, then a
+ * full schedule load) takes longer than idle_session_timeout. A model of app.ts's callbacks: onBecomeLeader waits
+ * `slowMs`, then starts "the scheduler"; onResignLeader stops it. Renew 1 s, so idle_session_timeout is its 5 s floor.
+ */
+run("Postgres leader election with a slow start-up", () => {
+  let test: TestStore | undefined;
+  const cleanups: Array<() => Promise<void>> = [];
+
+  afterEach(async () => {
+    while (cleanups.length > 0) await cleanups.pop()!().catch(() => undefined);
+    await test?.cleanup();
+    test = undefined;
+  }, 30_000);
+
+  async function instances() {
+    test = await createTestStore({ kind: "postgres" });
+    const config = test.postgres!.config;
+    const pool = testStorePool(test, { max: 2 });
+    cleanups.push(async () => await pool.end());
+    const make = (id: string, slowMs: number, onBecome?: () => void) => {
+      const lock = new PgLeaderLock({
+        clientConfig: postgresPoolConfig(config, { max: 1, application_name: `slow-${id}` }),
+        pool,
+        leaseName: "primary",
+        holderId: id,
+        ttlMs: 30_000,
+        renewIntervalMs: 1_000,
+        checkTimeoutMs: 1_000
+      });
+      const state = { running: false, become: 0, resign: 0 };
+      const election = new LeaderElectionService({ getLease: async () => null } as unknown as Store, {
+        instanceId: id,
+        lock,
+        renewIntervalMs: 1_000,
+        onBecomeLeader: async () => {
+          state.become += 1;
+          onBecome?.();
+          await new Promise((resolve) => setTimeout(resolve, slowMs));
+          state.running = true;
+        },
+        onResignLeader: () => {
+          state.resign += 1;
+          state.running = false;
+        },
+        leaderWorkRunning: () => state.running
+      });
+      cleanups.push(async () => await election.stop());
+      return { election, state };
+    };
+    return { pool, make };
+  }
+
+  /** Samples every 100 ms for `ms`: how often both ran, and how often one ran while it was not the leader. */
+  async function sample(ms: number, all: Array<{ election: LeaderElectionService; state: { running: boolean } }>) {
+    let both = 0;
+    let zombie = 0;
+    let none = 0;
+    const end = Date.now() + ms;
+    while (Date.now() < end) {
+      const running = all.filter((one) => one.state.running);
+      if (running.length > 1) both += 1;
+      if (running.length === 0) none += 1;
+      if (all.some((one) => one.state.running && !one.election.isLeader())) zombie += 1;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    return { both, zombie, none };
+  }
+
+  it("a lone leader whose start-up outlasts idle_session_timeout keeps the lock: one become, no resign", async () => {
+    const { make } = await instances();
+    const a = make("A", 7_000);
+    await a.election.start();
+    expect(a.state).toMatchObject({ running: true, become: 1, resign: 0 });
+    const seen = await sample(4_000, [a]);
+    expect(seen).toEqual({ both: 0, zombie: 0, none: 0 });
+    expect(a.state).toMatchObject({ running: true, become: 1, resign: 0 });
+    expect(a.election.isLeader()).toBe(true);
+  }, 30_000);
+
+  it("a slow leader beside a standby: never both running, the leader keeps the lock", async () => {
+    const { make } = await instances();
+    const a = make("A", 7_000);
+    const b = make("B", 0);
+    const started = a.election.start();
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    await b.election.start();
+    await started;
+    const seen = await sample(4_000, [a, b]);
+    expect(seen).toEqual({ both: 0, zombie: 0, none: 0 });
+    expect(a.election.isLeader()).toBe(true);
+    expect(b.election.isLeader()).toBe(false);
+    expect(a.state).toMatchObject({ become: 1, resign: 0 });
+  }, 30_000);
+
+  it("the lock's session killed during start-up beside a standby: once settled, exactly one runs, and it holds the lock", async () => {
+    const { pool, make } = await instances();
+    const kill = () =>
+      void setTimeout(() => {
+        void pool.query(`SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE application_name = 'slow-A'`).catch(() => undefined);
+      }, 1_500);
+    const a = make("A", 4_000, kill);
+    const b = make("B", 0);
+    const started = a.election.start();
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    await b.election.start();
+    await started;
+    // A's start-up finished after its lock was gone and B took it: A stops at once.
+    await new Promise((resolve) => setTimeout(resolve, 1_500));
+    const seen = await sample(4_000, [a, b]);
+    expect(seen).toEqual({ both: 0, zombie: 0, none: 0 });
+    expect([a, b].filter((one) => one.state.running).map((one) => one.election.isLeader())).toEqual([true]);
+  }, 30_000);
+
+  it("a lone leader whose session is killed during start-up settles as leader with the lock", async () => {
+    const { pool, make } = await instances();
+    let killed = false;
+    const a = make("A", 4_000, () => {
+      if (killed) return;
+      killed = true;
+      setTimeout(() => {
+        void pool.query(`SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE application_name = 'slow-A'`).catch(() => undefined);
+      }, 1_500);
+    });
+    await a.election.start();
+    // The first start-up ended without the lock: it resigned and started again on a new connection.
+    const deadline = Date.now() + 15_000;
+    while (!(a.state.running && a.election.isLeader())) {
+      if (Date.now() > deadline) throw new Error(`never settled: ${JSON.stringify(a.state)}`);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    const seen = await sample(3_000, [a]);
+    expect(seen).toEqual({ both: 0, zombie: 0, none: 0 });
+    const held = await pool.query(`SELECT count(*)::int AS n FROM pg_locks l JOIN pg_stat_activity s ON s.pid = l.pid WHERE l.locktype = 'advisory' AND s.application_name = 'slow-A'`);
+    expect(held.rows[0].n).toBe(1);
+  }, 30_000);
+});

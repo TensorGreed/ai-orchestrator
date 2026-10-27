@@ -13,6 +13,11 @@
  * pooler that refuses one of these settings is warned about once and the lock still works; it then frees a lost
  * leader's lock only when it notices the dead link itself.
  *
+ * While the lock is held the connection also runs a liveness query (`SELECT 1`) every renew interval on its own timer,
+ * independent of the election's checks, so a leader whose start-up (or any other work between checks) runs longer than
+ * `idle_session_timeout` is never ended by the server for being idle. A liveness query that fails or gets no answer
+ * counts as losing the lock (the listeners are told).
+ *
  * A stepping-down instance stops its leader work within one check; a standby takes the lock at its next check after
  * the server ends the old session. The connection must reach Postgres directly or through a session-mode pooler:
  * with transaction pooling (e.g. PgBouncer `pool_mode=transaction`) a session lock lands on a server connection that
@@ -82,6 +87,8 @@ export class PgLeaderLock implements LeaderLock {
   /** The check in flight: checks never overlap, so there is never a second connection asking for the lock. */
   private checking: Promise<boolean> | null = null;
   private warnedSettings = false;
+  /** The liveness timer of the current connection; its query uses the check slot, so it never overlaps itself or a check. */
+  private heartbeat: NodeJS.Timeout | null = null;
 
   constructor(private readonly options: PgLeaderLockOptions) {}
 
@@ -130,6 +137,7 @@ export class PgLeaderLock implements LeaderLock {
     const wasHeld = this.held;
     this.client = null;
     this.held = false;
+    this.stopHeartbeat();
     if (!client) return;
     if (wasHeld) {
       await this.options.pool
@@ -171,7 +179,39 @@ export class PgLeaderLock implements LeaderLock {
       throw new Error("released");
     }
     this.client = client;
+    this.startHeartbeat(client, renewIntervalMs);
     return client;
+  }
+
+  /** Every renew interval, while the lock is held and no check is in flight: one `SELECT 1` on the lock's connection. */
+  private startHeartbeat(client: pg.Client, intervalMs: number): void {
+    this.stopHeartbeat();
+    const timer = setInterval(() => this.ping(client), intervalMs);
+    timer.unref?.();
+    this.heartbeat = timer;
+  }
+
+  private stopHeartbeat(): void {
+    if (this.heartbeat) clearInterval(this.heartbeat);
+    this.heartbeat = null;
+  }
+
+  /** Takes the check slot, so a check that starts meanwhile waits for this query instead of racing it. */
+  private ping(client: pg.Client): void {
+    if (this.checking !== null || client !== this.client || !this.held || this.released) return;
+    // promise-ok: kept in the check slot so a concurrent check() joins it; cleared when it settles
+    this.checking = (async () => {
+      try {
+        await withTimeout(client.query(`SELECT 1`), this.options.checkTimeoutMs ?? 5_000);
+        return this.held && client === this.client;
+      } catch {
+        // No election check is running to notice it: the lock is lost now, so the election steps down at once.
+        this.drop(true, client);
+        return false;
+      }
+    })().finally(() => {
+      this.checking = null;
+    });
   }
 
   /** Sets each liveness setting on its own, so one the server or a pooler refuses leaves the others in place. */
@@ -203,6 +243,7 @@ export class PgLeaderLock implements LeaderLock {
     const wasHeld = this.held;
     this.client = null;
     this.held = false;
+    this.stopHeartbeat();
     client.removeAllListeners("end");
     client.removeAllListeners("error");
     // Keep a late error from becoming an unhandled 'error' event.

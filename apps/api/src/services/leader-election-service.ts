@@ -18,6 +18,14 @@ export interface LeaderElectionOptions {
    * this instance down at once, not at the next renewal.
    */
   lock?: LeaderLock;
+  /**
+   * Phase 13.1 — whether this instance's leader work (schedules, triggers, the schedule sync) is running now. Checked
+   * on every election tick and after every start-up: running while this instance is not the leader stops it at once
+   * (onResignLeader). Without it the service tracks its own become/resign calls.
+   */
+  leaderWorkRunning?: () => boolean;
+  /** Told when leader work had to be stopped because the lock was lost while it started, or found running without it. */
+  logger?: { warn: (message: string, fields?: Record<string, unknown>) => void };
 }
 
 /** A lock that is never granted: the instance follows (Postgres instances without background workers, with HA on). */
@@ -73,6 +81,10 @@ export class LeaderElectionService {
   private ticking = false;
   /** Run one more tick as soon as the current one ends (the lock was just lost). */
   private retryRequested = false;
+  /** onBecomeLeader was called and no onResignLeader since (this instance's own view of its leader work). */
+  private leading = false;
+  private readonly leaderWorkRunning: (() => boolean) | undefined;
+  private readonly logger: LeaderElectionOptions["logger"];
 
   constructor(
     private readonly store: Store,
@@ -90,6 +102,8 @@ export class LeaderElectionService {
     this.leaseName = leaseName;
     this.onBecomeLeader = options.onBecomeLeader;
     this.onResignLeader = options.onResignLeader;
+    this.leaderWorkRunning = options.leaderWorkRunning;
+    this.logger = options.logger;
   }
 
   getInstanceId(): string {
@@ -143,15 +157,9 @@ export class LeaderElectionService {
     }
     // Stop this instance's leader work first, then give up the lock or lease: freed first, a standby could start its
     // schedules while this instance's are still registered.
-    if (this.enabled && this.holder) {
+    if (this.enabled && (this.holder || this.leading || this.workRunning())) {
       this.holder = false;
-      if (this.onResignLeader) {
-        try {
-          await this.onResignLeader();
-        } catch {
-          // ignore
-        }
-      }
+      await this.resign();
       try {
         if (!this.lock) await this.store.releaseLease(this.leaseName, this.instanceId);
       } catch {
@@ -228,22 +236,50 @@ export class LeaderElectionService {
     this.holder = acquired;
     this.lastRenewAt = new Date().toISOString();
     if (!wasLeader && acquired && this.onBecomeLeader) {
+      this.leading = true;
       try {
         await this.onBecomeLeader();
       } catch {
         // ignore — next tick will try again
       }
+      // The lock can be lost (or the service stopped) while the start-up runs; the step-down then ran before the
+      // start-up finished starting things. Stop them now, so nothing runs without the lock.
+      if (!this.holder || this.stopped) {
+        this.logger?.warn("Leader lock lost while this instance was starting its leader work; stopped it again", {
+          instanceId: this.instanceId
+        });
+        await this.resign();
+        return;
+      }
     }
     if (wasLeader && !acquired) {
-      if (this.onResignLeader) {
-        try {
-          await this.onResignLeader();
-        } catch {
-          // ignore
-        }
-      }
+      await this.resign();
       // The check found the lock's connection gone: try for the lock again at once on a new one.
       if (this.lock) this.retryRequested = true;
+      return;
+    }
+    // Invariant: no leader work runs while this instance is not the leader, whatever path started it.
+    if (!this.holder && (this.leading || this.workRunning())) {
+      this.logger?.warn("Leader work was running on an instance that is not the leader; stopped it", { instanceId: this.instanceId });
+      await this.resign();
+    }
+  }
+
+  private workRunning(): boolean {
+    try {
+      return this.leaderWorkRunning?.() === true;
+    } catch {
+      return false;
+    }
+  }
+
+  private async resign(): Promise<void> {
+    this.leading = false;
+    if (!this.onResignLeader) return;
+    try {
+      await this.onResignLeader();
+    } catch {
+      // ignore
     }
   }
 
@@ -253,12 +289,6 @@ export class LeaderElectionService {
     this.holder = false;
     const announced = !this.unannounced;
     this.unannounced = false;
-    if (announced && this.onResignLeader) {
-      try {
-        await this.onResignLeader();
-      } catch {
-        // ignore
-      }
-    }
+    if (announced) await this.resign();
   }
 }

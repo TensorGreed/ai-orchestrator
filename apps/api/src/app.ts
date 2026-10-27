@@ -3630,7 +3630,12 @@ export async function createApp(
         } catch {
           // ignore
         }
-      }
+      },
+      // Checked on every election tick: schedules, triggers or the sync running on a non-leader are stopped at once.
+      leaderWorkRunning: () =>
+        runsBackgroundWorkers &&
+        (scheduleSyncTimer !== null || schedulerService?.isRunning?.() === true || triggerService?.isRunning?.() === true),
+      logger: { warn: (message, fields) => app.log.warn(fields ?? {}, message) }
     },
     "primary"
   );

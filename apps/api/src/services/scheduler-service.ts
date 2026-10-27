@@ -137,6 +137,11 @@ export class SchedulerService {
     this.unregisterWorkflow(workflowId);
   }
 
+  /** Phase 13.1 — started (initialize() since the last stop()) or still holding a registered job. */
+  isRunning(): boolean {
+    return !this.standby || this.jobs.size > 0;
+  }
+
   /** Unregisters everything; saves register nothing until the next initialize() (a standby instance). */
   stop(): void {
     this.standby = true;

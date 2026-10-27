@@ -281,6 +281,11 @@ export class TriggerService {
     await this.store.deleteTriggerStatesForWorkflow(workflowId);
   }
 
+  /** Phase 13.1 — started (initialize() since the last stop()) or still holding a running trigger. */
+  isRunning(): boolean {
+    return !this.standby || this.active.size > 0;
+  }
+
   /** Stops every trigger; saves start nothing until the next initialize() (a standby instance). */
   async stop(): Promise<void> {
     this.standby = true;
