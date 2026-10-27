@@ -15,6 +15,10 @@ import { parsePostgresSettings } from "../config.js";
 import { postgresStoreConfig } from "../db/create-store.js";
 import { applyMigrationChain, postgresPoolConfig, withMigrationLock } from "../db/postgres-store.js";
 import { INSERTION_SEQ_TABLES, MIGRATIONS } from "../db/migrations.js";
+import { exactSqliteTextRows, SQLITE_AUDIT_TEXT_COLUMNS } from "../db/audit-chain.js";
+
+/** The rowid alias SqliteAdapter.selectAll reads beside `*` (no table has a column of that name). */
+const ROWID_KEY = "__backup_rowid";
 
 /**
  * Tables that carry v40's `seq` identity on Postgres (insertion order). A Postgres backup keeps `seq`: export reads
@@ -129,8 +133,16 @@ class SqliteAdapter implements BackupAdapter {
   }
 
   async selectAll(table: string): Promise<Record<string, unknown>[]> {
-    const stmt = this.db.prepare(`SELECT * FROM ${quoteIdent(table)}`);
-    return stmt.all() as Record<string, unknown>[];
+    // rowid order, so an import (which inserts in file order) keeps insertion order: the audit chain walks rowid.
+    const rows = this.db.prepare(`SELECT rowid AS ${ROWID_KEY}, * FROM ${quoteIdent(table)} ORDER BY rowid`).all() as Record<string, unknown>[];
+    if (table === "audit_logs") {
+      // Audit text exactly as stored, as verify reads it: a lone surrogate that better-sqlite3 on Node 20 kept as
+      // generalized UTF-8 reads through the driver as three U+FFFD, which would make the restored row unverifiable.
+      // Read exactly, it is the surrogate, which the JSON backup keeps as its `\ud800` escape.
+      exactSqliteTextRows(this.db, table, rows, SQLITE_AUDIT_TEXT_COLUMNS, ROWID_KEY);
+    }
+    for (const row of rows) delete row[ROWID_KEY];
+    return rows;
   }
 
   async insertRows(table: string, rows: Record<string, unknown>[]): Promise<void> {

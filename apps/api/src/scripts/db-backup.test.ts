@@ -12,7 +12,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
+import Database from "better-sqlite3";
 import { SqliteStore } from "../db/database.js";
+import { appendLegacySqliteAuditRow } from "./legacy-audit.test-helper.js";
 import { SecretService } from "../services/secret-service.js";
 import {
   EXPORTED_TABLES,
@@ -165,5 +167,44 @@ describe("db:export / db:import round trip", () => {
     expect(revealed).toBe("sk-live-rotateme");
     await restoredStore.close();
     try { fs.rmSync(path.dirname(destPath), { recursive: true, force: true }); } catch { /* ignore */ }
+  });
+
+  it("a Node-20 lone-surrogate audit row (stored as generalized UTF-8) survives export -> JSON -> import and still verifies", async () => {
+    const sourceStore = await SqliteStore.create(dbPath);
+    await sourceStore.writeAuditLog({ id: "a1", eventType: "auth.login", category: "auth", action: "login", outcome: "success" });
+    await sourceStore.close();
+    const raw = new Database(dbPath);
+    appendLegacySqliteAuditRow(raw, "legacy-surrogate", { message: "tag \ud800 here" });
+    appendLegacySqliteAuditRow(raw, "legacy-nul", { userAgent: "agent\u0000x" });
+    const stored = raw.prepare(`SELECT hex(message) AS h FROM audit_logs WHERE id = 'legacy-surrogate'`).get() as { h: string };
+    expect(stored.h).toContain("EDA080");
+    raw.close();
+    const reopened = await SqliteStore.create(dbPath);
+    await reopened.writeAuditLog({ id: "a2", eventType: "auth.logout", category: "auth", action: "logout", outcome: "success" });
+    expect(await reopened.verifyAuditChain()).toEqual({ ok: true, rowsChecked: 4 });
+    await reopened.close();
+
+    const exporter = await openBackupAdapter();
+    const audit = await exporter.selectAll("audit_logs");
+    await exporter.close();
+    expect(audit.map((row) => row.id)).toEqual(["a1", "legacy-surrogate", "legacy-nul", "a2"]);
+    // Read exactly: the surrogate itself (three U+FFFD through the driver), which JSON keeps as its escape.
+    expect(audit[1]!.message).toBe("tag \ud800 here");
+    const file = JSON.stringify({ audit });
+    expect(file).toContain("tag \\ud800 here");
+
+    const destPath = tempPath("dest-legacy");
+    process.env.DB_SQLITE_PATH = destPath;
+    const dest = await openBackupAdapter();
+    await dest.insertRows("audit_logs", (JSON.parse(file) as { audit: Record<string, unknown>[] }).audit);
+    await dest.close();
+    const restored = await SqliteStore.create(destPath);
+    try {
+      // Node 20 stores the surrogate exactly again; Node 24 stores U+FFFD, which the single-U+FFFD search explains.
+      expect(await restored.verifyAuditChain()).toEqual({ ok: true, rowsChecked: 4 });
+    } finally {
+      await restored.close();
+      fs.rmSync(path.dirname(destPath), { recursive: true, force: true });
+    }
   });
 });
