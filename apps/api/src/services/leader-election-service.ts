@@ -68,6 +68,8 @@ export class LeaderElectionService {
   private unannounced = false;
   /** A tick in flight: a slow check or leader callback never overlaps the next interval's tick. */
   private ticking = false;
+  /** Run one more tick as soon as the current one ends (the lock was just lost). */
+  private retryRequested = false;
 
   constructor(
     private readonly store: Store,
@@ -76,7 +78,9 @@ export class LeaderElectionService {
   ) {
     this.lock = options.lock;
     this.enabled = options.enabled === true || this.lock !== undefined;
-    this.lock?.onLost(() => void this.stepDown());
+    // A dropped lock connection: step down now, then try to take the lock again at once (a lone instance whose
+    // connection blipped leads again within moments instead of a renew interval later).
+    this.lock?.onLost(() => void this.stepDown().then(() => this.retryNow()));
     this.leaseTtlMs = options.leaseTtlMs ?? 30000;
     this.renewIntervalMs = options.renewIntervalMs ?? 10000;
     this.instanceId = options.instanceId ?? `${os.hostname()}-${crypto.randomBytes(4).toString("hex")}`;
@@ -184,10 +188,20 @@ export class LeaderElectionService {
     if (this.stopped || this.ticking) return;
     this.ticking = true;
     try {
-      await this.tickOnce();
+      do {
+        this.retryRequested = false;
+        await this.tickOnce();
+      } while (this.retryRequested && !this.stopped);
     } finally {
       this.ticking = false;
     }
+  }
+
+  /** Re-tries the lock at once instead of at the next interval; only once the election loop runs. */
+  private retryNow(): void {
+    if (this.stopped || !this.timer || !this.lock) return;
+    this.retryRequested = true;
+    void this.tick();
   }
 
   private async tickOnce(): Promise<void> {
@@ -215,12 +229,16 @@ export class LeaderElectionService {
         // ignore — next tick will try again
       }
     }
-    if (wasLeader && !acquired && this.onResignLeader) {
-      try {
-        await this.onResignLeader();
-      } catch {
-        // ignore
+    if (wasLeader && !acquired) {
+      if (this.onResignLeader) {
+        try {
+          await this.onResignLeader();
+        } catch {
+          // ignore
+        }
       }
+      // The check found the lock's connection gone: try for the lock again at once on a new one.
+      if (this.lock) this.retryRequested = true;
     }
   }
 

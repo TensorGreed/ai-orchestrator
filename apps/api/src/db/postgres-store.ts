@@ -25,7 +25,7 @@ import * as secrets from "./postgres/secrets.js";
 import * as sessions from "./postgres/sessions.js";
 import * as webhooks from "./postgres/webhooks.js";
 import * as workflows from "./postgres/workflows.js";
-import { ADVISORY_LOCK_CLASS_LEADER, PgLeaderLock, type LeaderLock } from "./postgres/leader-lock.js";
+import { ADVISORY_LOCK_CLASS_LEADER, PgLeaderLock, type LeaderLock, type PgLeaderLockOptions } from "./postgres/leader-lock.js";
 
 export { parseTimestamptz };
 
@@ -209,7 +209,14 @@ export class PostgresStore implements Store {
    * Phase 13.1 — the leader lock for `leaseName`: a session advisory lock on a dedicated connection (not one of the
    * pool's), released when the lock is released, the store closes, or the connection ends.
    */
-  leaderLock(input: { leaseName: string; holderId: string; ttlMs: number }): LeaderLock {
+  leaderLock(input: {
+    leaseName: string;
+    holderId: string;
+    ttlMs: number;
+    /** HA_RENEW_INTERVAL_MS: how often the lock is checked; sizes the session's liveness settings. */
+    renewIntervalMs?: number;
+    logger?: PgLeaderLockOptions["logger"];
+  }): LeaderLock {
     const lock = new PgLeaderLock({
       // Named, so an operator can find the leader's session (pg_stat_activity.application_name).
       clientConfig: postgresPoolConfig(this.config, { max: 1, application_name: LEADER_APPLICATION_NAME }),

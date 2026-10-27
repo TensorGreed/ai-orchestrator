@@ -3537,7 +3537,13 @@ export async function createApp(
   const leaderLock =
     store instanceof PostgresStore
       ? runsBackgroundWorkers
-        ? store.leaderLock({ leaseName: "primary", holderId: leaderInstanceId, ttlMs: config.HA_LEASE_TTL_MS })
+        ? store.leaderLock({
+            leaseName: "primary",
+            holderId: leaderInstanceId,
+            ttlMs: config.HA_LEASE_TTL_MS,
+            renewIntervalMs: config.HA_RENEW_INTERVAL_MS,
+            logger: { warn: (message, fields) => app.log.warn(fields ?? {}, message) }
+          })
         : config.HA_ENABLED
           ? NEVER_LEAD
           : undefined
