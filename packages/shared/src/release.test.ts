@@ -431,3 +431,111 @@ describe("gate reason checks", () => {
     expect(worse(judge(mismatch, [], "aaa"), judge(mismatch, [], "aaa"))).toEqual([]);
   });
 });
+
+describe("repeats: cost and p95 latency at the worst selection of the repeats", () => {
+  const pair = (baseline: number, candidate: number) => ({ baseline, candidate });
+  const flat = (id: string) => passing(id, { latencyMs: pair(1000, 1000), repeats: { latencyMs: [pair(1000, 1000), pair(1000, 1000)] } });
+
+  it("is never more lenient than the deciding repeats when a larger repeat rose less (p95)", () => {
+    // rec_a: the deciding repeat 1000 → 1500 (+50%); repeat 2 adds more time (3000 → 3600) but only +20%.
+    const caseA = passing("a", { latencyMs: pair(1000, 1500), repeats: { latencyMs: [pair(1000, 1500), pair(3000, 3600)] } });
+    const judgement = judgeReleaseGate(evidence([caseA, flat("b"), flat("c")]), policy({ maxP95LatencyIncreasePct: 30 }), { expected, now: NOW });
+    expect(judgement.stats.p95LatencyIncreasePct).toBeCloseTo(50, 6);
+    expect(judgement.stats.repeatSelection?.latency).toEqual({ by: "deciding" });
+    expect(judgement.reasons).toEqual(["p95 latency rose 50%; the gate allows 30%."]);
+  });
+
+  it("finds a repeat the deciding repeats hide, and names it", () => {
+    const caseA = passing("a", { latencyMs: pair(3000, 3600), repeats: { latencyMs: [pair(3000, 3600), pair(1000, 1500)] } });
+    const judgement = judgeReleaseGate(evidence([caseA, flat("b"), flat("c")]), policy({ maxP95LatencyIncreasePct: 30 }), { expected, now: NOW });
+    expect(judgement.stats.p95LatencyIncreasePct).toBeCloseTo(50, 6);
+    expect(judgement.reasons).toEqual(["p95 latency rose 50% at repeat 2; the gate allows 30%."]);
+  });
+
+  it("names each case's largest absolute or relative increase when no single repeat index shows it", () => {
+    // Case a is worst at repeat 1, case b at repeat 2: only a per-case pick puts both in one set.
+    const cost = (deciding: [number, number], repeats: Array<[number, number]>) => ({ costUsd: pair(...deciding), repeats: { costUsd: repeats.map(([b, c]) => pair(b, c)) } });
+    const absolute = judgeReleaseGate(
+      evidence([passing("a", cost([0.01, 0.01], [[0.01, 0.02], [0.01, 0.01]])), passing("b", cost([0.01, 0.01], [[0.01, 0.01], [0.01, 0.02]]))]),
+      policy({ minCases: 1, maxCostIncreasePct: 60 }),
+      { expected, now: NOW }
+    );
+    expect(absolute.stats.costIncreasePct).toBeCloseTo(100, 6);
+    expect(absolute.reasons).toEqual(["Cost rose 100% at each case's repeat that added the most cost; the gate allows 60%."]);
+    // Each case has a short repeat at +50% and a long one that adds more time at +5%: every repeat index and the
+    // largest increase keep a long repeat at the top of p95 (+5%); only the relative pick shows the +50%.
+    const relative = judgeReleaseGate(
+      evidence([
+        passing("a", { latencyMs: pair(2000, 2100), repeats: { latencyMs: [pair(100, 150), pair(2000, 2100)] } }),
+        passing("b", { latencyMs: pair(2000, 2100), repeats: { latencyMs: [pair(2000, 2100), pair(100, 150)] } })
+      ]),
+      policy({ minCases: 1, maxP95LatencyIncreasePct: 30 }),
+      { expected, now: NOW }
+    );
+    expect(relative.stats.p95LatencyIncreasePct).toBeCloseTo(50, 6);
+    expect(relative.stats.repeatSelection?.latency).toEqual({ by: "largest_relative_increase" });
+    expect(relative.reasons).toEqual(["p95 latency rose 50% at each case's repeat that rose the most over its own baseline; the gate allows 30%."]);
+  });
+
+  it("falls back to the largest increase for a case whose baselines are all zero", () => {
+    const caseA = passing("a", { costUsd: pair(0.01, 0.01), repeats: { costUsd: [pair(0, 0.001), pair(0, 0.02)] } });
+    const caseB = passing("b", { costUsd: pair(0.01, 0.01), repeats: { costUsd: [pair(0.01, 0.01), pair(0.01, 0.01)] } });
+    const judgement = judgeReleaseGate(evidence([caseA, caseB]), policy({ minCases: 1, maxCostIncreasePct: 10 }), { expected, now: NOW });
+    // Repeat 2, the largest increase and the relative pick (which falls back to it) all give $0.01 → $0.03; repeat 2 comes first.
+    expect(judgement.stats.costIncreasePct).toBeCloseTo(200, 6);
+    expect(judgement.stats.repeatSelection?.cost).toEqual({ by: "repeat", repeat: 2 });
+  });
+
+  it("uses a case's deciding pair where a repeat has no pair, and judges cases without repeats as before", () => {
+    const caseA = passing("a", { latencyMs: pair(1000, 1100), repeats: { latencyMs: [null, pair(1000, 1050)] } });
+    const judgement = judgeReleaseGate(evidence([caseA, passing("b")]), policy({ minCases: 1, maxP95LatencyIncreasePct: 5 }), { expected, now: NOW });
+    expect(judgement.stats.p95LatencyIncreasePct).toBeCloseTo(10, 6);
+    expect(judgement.stats.repeatSelection?.latency).toEqual({ by: "deciding" });
+    const plain = judgeReleaseGate(evidence([passing("a"), passing("b")]), policy({ minCases: 1, maxP95LatencyIncreasePct: 5 }), { expected, now: NOW });
+    expect(plain.stats.repeatSelection).toBeUndefined();
+    expect(plain.verdict).toBe("passed");
+  });
+
+  it("never passes where the deciding repeats alone block (seeded random repeat sets)", () => {
+    // A small deterministic generator (mulberry32), so a failure reproduces from its seed.
+    const random = (seed: number) => () => {
+      seed = (seed + 0x6d2b79f5) | 0;
+      let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+    let stricter = 0;
+    for (let seed = 1; seed <= 2000; seed += 1) {
+      const next = random(seed);
+      const repeats = 2 + Math.floor(next() * 3);
+      const recording = next() < 0.3;
+      const value = (scale: number) => Math.round(scale * (0.1 + next() * 3) * 1000) / 1000;
+      const metric = (scale: number, shared: number | null) => {
+        const pairs = Array.from({ length: repeats }, () => {
+          if (next() < 0.1) return null;
+          const baseline = shared ?? (next() < 0.05 ? 0 : value(scale));
+          return pair(baseline, Math.max(0, Math.round((baseline || scale / 10) * (0.7 + next() * 1.1) * 1000) / 1000));
+        });
+        const decidingIndex = Math.floor(next() * repeats);
+        const deciding = pairs[decidingIndex] ?? pair(shared ?? value(scale), value(scale));
+        pairs[decidingIndex] = deciding;
+        return { deciding, pairs };
+      };
+      const cases = Array.from({ length: 1 + Math.floor(next() * 6) }, (_unused, index) => {
+        const cost = metric(0.01, recording ? value(0.01) : null);
+        const latency = metric(1000, recording ? value(1000) : null);
+        return passing(`c${index}`, { costUsd: cost.deciding, latencyMs: latency.deciding, repeats: { costUsd: cost.pairs, latencyMs: latency.pairs } });
+      });
+      const limits = policy({ minCases: 1, maxCostIncreasePct: Math.floor(next() * 60), maxP95LatencyIncreasePct: Math.floor(next() * 60) });
+      const full = judgeReleaseGate(evidence(cases), limits, { expected, now: NOW });
+      const decidingOnly = judgeReleaseGate(evidence(cases.map(({ repeats: _repeats, ...rest }) => rest)), limits, { expected, now: NOW });
+      const rank = (value: number | null) => value ?? Number.NEGATIVE_INFINITY;
+      expect(rank(full.stats.costIncreasePct), `seed ${seed} cost`).toBeGreaterThanOrEqual(rank(decidingOnly.stats.costIncreasePct));
+      expect(rank(full.stats.p95LatencyIncreasePct), `seed ${seed} latency`).toBeGreaterThanOrEqual(rank(decidingOnly.stats.p95LatencyIncreasePct));
+      if (decidingOnly.verdict === "blocked") expect(full.verdict, `seed ${seed}`).toBe("blocked");
+      if (full.verdict === "blocked" && decidingOnly.verdict === "passed") stricter += 1;
+    }
+    // The repeats are not ignored: some sets block only at a repeat the deciding ones hide.
+    expect(stricter).toBeGreaterThan(0);
+  });
+});

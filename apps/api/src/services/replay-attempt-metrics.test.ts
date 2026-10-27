@@ -243,7 +243,11 @@ describe("replay repeats record latency and guard blocks per attempt", () => {
     const job = await runJob((recordingId, repeatIndex) => ({ latencyMs: recordingId === "rec_b" && repeatIndex === 2 ? 400 : 100 }));
     const { evidence, judgement, codes } = await judge(job, { maxP95LatencyIncreasePct: 50, noNewGuardBlocks: false });
     expect(evidence.job.repeatsUnchecked).toBeUndefined();
-    expect(evidence.cases.map((entry) => entry.latencyMs.candidate).sort((a, b) => a! - b!)).toEqual([100, 100, 400]);
+    // Each case carries its deciding repeat's pair and every repeat's own pair.
+    expect(evidence.cases.map((entry) => entry.repeats?.latencyMs?.map((pair) => pair?.candidate)).sort()).toEqual([[100, 100, 100], [100, 100, 100], [100, 100, 400]]);
+    expect(judgement.stats.p95LatencyIncreasePct).toBeCloseTo(300, 6);
+    expect(judgement.stats.repeatSelection?.latency).toEqual({ by: "repeat", repeat: 3 });
+    expect(judgement.reasons).toEqual(["p95 latency rose 300% at repeat 3; the gate allows 50%."]);
     expect(judgement.verdict).toBe("blocked");
     expect(codes).toContain("latency");
     expect(codes).not.toContain("repeats_unchecked");
@@ -281,8 +285,15 @@ describe("replay repeats record latency and guard blocks per attempt", () => {
       expect(evidence.job.repeatsUncheckedLimits).toEqual(["guard", "latency"]);
       expect(judgement.verdict).toBe("blocked");
       expect(codes).toEqual(["repeats_unchecked"]);
-      expect(judgement.reasons.join()).toMatch(/recorded them for only one repeat \(it ran before replays recorded every repeat\): run the gate again, or remove those limits/);
+      // The refusal names only the limit the policy has.
+      expect(judgement.reasons.join()).toMatch(
+        policy.maxP95LatencyIncreasePct !== undefined
+          ? /checks latency limits per run, .* recorded latency for only one repeat \(it ran before replays recorded every repeat\): run the gate again, or remove that limit/
+          : /checks guard limits per run, .* recorded guard verdicts for only one repeat \(it ran before replays recorded every repeat\): run the gate again, or remove that limit/
+      );
     }
+    const both = await judge(job, { maxP95LatencyIncreasePct: 50, noNewGuardBlocks: true }, legacy);
+    expect(both.judgement.reasons.join()).toMatch(/checks latency and guard limits per run, .* recorded them for only one repeat .*: run the gate again, or remove those limits/);
     // A cost-only gate never needed them.
     expect((await judge(job, { maxCostIncreasePct: 10, noNewGuardBlocks: false }, legacy)).judgement.verdict).toBe("passed");
   });
@@ -330,8 +341,8 @@ describe("baseline reruns with repeats: each repeat is judged against its own ba
     );
     const { evidence, judgement, codes } = await judge(job, { maxP95LatencyIncreasePct: 10, noNewGuardBlocks: false });
     expect(evidence.job.repeatsUnchecked).toBeUndefined();
-    const slow = evidence.cases.find((entry) => entry.latencyMs.candidate === 1500)!;
-    expect(slow.latencyMs).toEqual({ baseline: 1000, candidate: 1500 });
+    const slow = evidence.cases.find((entry) => entry.repeats?.latencyMs?.some((pair) => pair?.candidate === 1500))!;
+    expect(slow.repeats?.latencyMs?.[2]).toEqual({ baseline: 1000, candidate: 1500 });
     expect(judgement.stats.p95LatencyIncreasePct).toBeCloseTo(50, 6);
     expect(judgement.verdict).toBe("blocked");
     expect(codes).toEqual(["latency"]);
@@ -372,7 +383,7 @@ describe("baseline reruns with repeats: each repeat is judged against its own ba
     const guardOnly = await judge(job, { noNewGuardBlocks: true }, legacy);
     expect(guardOnly.codes).toEqual([]);
     expect(guardOnly.judgement.verdict).toBe("passed");
-    expect(latency.judgement.reasons.join()).toMatch(/run the gate again, or remove those limits/);
+    expect(latency.judgement.reasons.join()).toMatch(/checks latency limits per run, .*: run the gate again, or remove that limit\./);
     // Cost: the deciding repeat's own pair (+5%), never a repeat's candidate against another repeat's baseline (+200%).
     const cost = await judge(job, { maxCostIncreasePct: 10, noNewGuardBlocks: false }, legacy);
     expect(cost.judgement.stats.costIncreasePct).toBeCloseTo(5, 6);
@@ -422,9 +433,9 @@ describe("repeats: cost is compared like with like, and the worst repeat adds th
       const flat = { baselineLatencyMs: 1000, latencyMs: 1000, baselineCostUsd: 0.01, costUsd: 0.01 };
       const job = await runJob((recordingId, repeatIndex) => (recordingId !== "rec_a" ? flat : (repeatIndex === 0) === slowFirst ? big : small), { repeats: 2, compare: "baseline_rerun" });
       const { evidence, judgement, codes } = await judge(job, { maxCostIncreasePct: 5, maxP95LatencyIncreasePct: 50, noNewGuardBlocks: false });
-      const caseA = evidence.cases.find((entry) => entry.latencyMs.baseline === 3000)!;
-      expect(caseA.latencyMs).toEqual({ baseline: 3000, candidate: 5700 });
-      expect(caseA.costUsd).toEqual({ baseline: 0.01, candidate: 0.019 });
+      const caseA = evidence.cases.find((entry) => entry.repeats?.latencyMs?.some((pair) => pair?.baseline === 3000))!;
+      expect(caseA.repeats?.latencyMs?.[slowFirst ? 0 : 1]).toEqual({ baseline: 3000, candidate: 5700 });
+      expect(caseA.repeats?.costUsd?.[slowFirst ? 0 : 1]).toEqual({ baseline: 0.01, candidate: 0.019 });
       expect(judgement.stats.costIncreasePct).toBeCloseTo(30, 6);
       expect(judgement.stats.p95LatencyIncreasePct).toBeCloseTo(90, 6);
       expect(judgement.verdict).toBe("blocked");
@@ -472,4 +483,81 @@ describe("repeats: cost is compared like with like, and the worst repeat adds th
     expect(latency.codes).toEqual(["repeats_unchecked"]);
     expect((await judge(job, { noNewGuardBlocks: true }, torn)).judgement.verdict).toBe("passed");
   });
+});
+
+describe("repeats: the gate is never more lenient than the deciding repeats", () => {
+  const rerun = { repeats: 2, compare: "baseline_rerun" } as const;
+  const flat = { baselineLatencyMs: 1000, latencyMs: 1000, baselineCostUsd: 0.01, costUsd: 0.01 };
+
+  it("blocks a 30% p95 limit at the deciding repeat's +50% when a larger repeat of the same case rose 20%", async () => {
+    // rec_a: the deciding repeat 1000 → 1500 ms (+50%), the other 3000 → 3600 ms (adds more time, but +20%).
+    const job = await runJob((recordingId, repeatIndex) => (recordingId !== "rec_a" ? flat : repeatIndex === 0 ? { ...flat, latencyMs: 1500 } : { ...flat, baselineLatencyMs: 3000, latencyMs: 3600 }), rerun);
+    const { judgement, codes } = await judge(job, { maxP95LatencyIncreasePct: 30, noNewGuardBlocks: false });
+    expect(judgement.stats.p95LatencyIncreasePct).toBeCloseTo(50, 6);
+    expect(judgement.stats.repeatSelection?.latency).toEqual({ by: "deciding" });
+    expect(judgement.reasons).toEqual(["p95 latency rose 50%; the gate allows 30%."]);
+    expect(codes).toEqual(["latency"]);
+  });
+
+  it("blocks the same shape when the +50% repeat is not the deciding one, and names it", async () => {
+    const job = await runJob((recordingId, repeatIndex) => (recordingId !== "rec_a" ? flat : repeatIndex === 1 ? { ...flat, latencyMs: 1500 } : { ...flat, baselineLatencyMs: 3000, latencyMs: 3600 }), rerun);
+    const { judgement } = await judge(job, { maxP95LatencyIncreasePct: 30, noNewGuardBlocks: false });
+    expect(judgement.stats.p95LatencyIncreasePct).toBeCloseTo(50, 6);
+    expect(judgement.reasons).toEqual(["p95 latency rose 50% at repeat 2; the gate allows 30%."]);
+  });
+
+  it("blocks a 10% cost limit at the deciding repeat's figure when a far larger repeat rose 1%", async () => {
+    // rec_a: the deciding repeat $0.001 → $0.01, the other $1.00 → $1.01.
+    const job = await runJob((recordingId, repeatIndex) => (recordingId !== "rec_a" ? flat : repeatIndex === 0 ? { ...flat, baselineCostUsd: 0.001, costUsd: 0.01 } : { ...flat, baselineCostUsd: 1, costUsd: 1.01 }), rerun);
+    const { judgement, codes } = await judge(job, { maxCostIncreasePct: 10, noNewGuardBlocks: false });
+    // ($0.03 − $0.021) / $0.021, as a single repeat judges it.
+    expect(judgement.stats.costIncreasePct).toBeCloseTo((0.009 / 0.021) * 100, 6);
+    expect(judgement.stats.repeatSelection?.cost).toEqual({ by: "deciding" });
+    expect(codes).toEqual(["cost"]);
+  });
+
+  it("never passes where judging the deciding repeats alone blocks (seeded random repeat sets)", async () => {
+    // A small deterministic generator (mulberry32): a failure reproduces from its seed.
+    const random = (seed: number) => () => {
+      seed = (seed + 0x6d2b79f5) | 0;
+      let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+    const rank = (value: number | null) => value ?? Number.NEGATIVE_INFINITY;
+    let stricter = 0;
+    for (let seed = 1; seed <= 12; seed += 1) {
+      const next = random(seed);
+      const compare = seed % 3 === 0 ? ("recording" as const) : ("baseline_rerun" as const);
+      const repeats = 2 + (seed % 2);
+      const plans = new Map<string, AttemptPlan>();
+      for (const recordingId of ["rec_a", "rec_b", "rec_c"]) {
+        for (let repeatIndex = 0; repeatIndex < repeats; repeatIndex += 1) {
+          const baselineLatencyMs = Math.round(100 + next() * 4900);
+          const baselineCostUsd = Math.round((0.001 + next() * 0.05) * 1e6) / 1e6;
+          plans.set(`${recordingId}:${repeatIndex}`, {
+            baselineLatencyMs,
+            baselineCostUsd,
+            // Against the recording (100 ms, $0.01) or this repeat's own baseline.
+            latencyMs: Math.round((compare === "recording" ? RECORDED_LATENCY_MS : baselineLatencyMs) * (0.7 + next() * 1.2)),
+            costUsd: Math.round((compare === "recording" ? 0.01 : baselineCostUsd) * (0.7 + next() * 1.2) * 1e6) / 1e6
+          });
+        }
+      }
+      const job = await runJob((recordingId, repeatIndex) => plans.get(`${recordingId}:${repeatIndex}`)!, { repeats, compare });
+      const policyInput = { maxCostIncreasePct: Math.floor(next() * 60), maxP95LatencyIncreasePct: Math.floor(next() * 60), noNewGuardBlocks: false };
+      const { evidence, judgement } = await judge(job, policyInput);
+      expect(evidence.cases.every((entry) => entry.repeats?.costUsd?.length === repeats && entry.repeats?.latencyMs?.length === repeats), `seed ${seed}`).toBe(true);
+      const decidingOnly = judgeReleaseGate(
+        { ...evidence, cases: evidence.cases.map(({ repeats: _repeats, ...rest }) => rest) },
+        releaseGatePolicySchema.parse({ minCases: 1, ...policyInput }),
+        { expected: { workflowHash: "cand-hash", datasetIds: [job.setId] } }
+      );
+      expect(rank(judgement.stats.costIncreasePct), `seed ${seed} cost`).toBeGreaterThanOrEqual(rank(decidingOnly.stats.costIncreasePct));
+      expect(rank(judgement.stats.p95LatencyIncreasePct), `seed ${seed} latency`).toBeGreaterThanOrEqual(rank(decidingOnly.stats.p95LatencyIncreasePct));
+      if (decidingOnly.verdict === "blocked") expect(judgement.verdict, `seed ${seed}`).toBe("blocked");
+      if (judgement.verdict === "blocked" && decidingOnly.verdict === "passed") stricter += 1;
+    }
+    expect(stricter).toBeGreaterThan(0);
+  }, 60_000);
 });
