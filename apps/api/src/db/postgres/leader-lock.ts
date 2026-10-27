@@ -159,6 +159,8 @@ export class PgLeaderLock implements LeaderLock {
       await client.connect();
     } catch (error) {
       client.removeAllListeners();
+      // Keep a late error from becoming an unhandled 'error' event.
+      client.on("error", () => undefined);
       await client.end().catch(() => undefined);
       throw error;
     }

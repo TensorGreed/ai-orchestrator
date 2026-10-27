@@ -1,8 +1,9 @@
-import pg, { Pool, type PoolClient, type PoolConfig } from "pg";
+import pg, { type Pool, type PoolClient, type PoolConfig } from "pg";
 import { runMigrations } from "./migrations.js";
 import type { Store } from "./store.js";
 import type { PostgresSslSettings } from "../config.js";
 import { createPgContext, type PgContext } from "./postgres/context.js";
+import { createPostgresPool, type PoolErrorLogger } from "./postgres/pool.js";
 import { PG_TIMESTAMPTZ_OID, parseTimestamptz, toNum } from "./postgres/helpers.js";
 import * as approvals from "./postgres/approvals.js";
 import * as audit from "./postgres/audit.js";
@@ -181,8 +182,9 @@ export class PostgresStore implements Store {
     this.ctx = createPgContext(pool, this);
   }
 
-  static async create(config: PostgresStoreConfig): Promise<PostgresStore> {
-    const pool = new Pool(postgresPoolConfig(config));
+  static async create(config: PostgresStoreConfig, options: { logger?: PoolErrorLogger } = {}): Promise<PostgresStore> {
+    // An idle connection the server ends is logged, not an unhandled 'error' event that ends the process.
+    const pool = createPostgresPool(postgresPoolConfig(config), { label: "store", ...(options.logger ? { logger: options.logger } : {}) });
     try {
       const store = new PostgresStore(pool, config);
       await store.migrate(config.schema);

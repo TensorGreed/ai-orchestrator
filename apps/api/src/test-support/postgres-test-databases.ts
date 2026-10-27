@@ -3,10 +3,11 @@
  * the TEST_POSTGRES_URL settings, the run's migrated template database and dropping test databases. No vitest
  * imports here, so the global setup can load it.
  */
-import { Pool } from "pg";
+import type { Pool } from "pg";
 import { parsePostgresSettings, type PostgresSettings } from "../config.js";
 import { postgresStoreConfig } from "../db/create-store.js";
 import { PostgresStore, postgresPoolConfig } from "../db/postgres-store.js";
+import { createPostgresPool } from "../db/postgres/pool.js";
 
 export const TEST_DATABASE = /^t_[0-9a-f]+_[0-9a-f]+$/;
 export const TEMPLATE_DATABASE = /^l2m_tpl_[0-9a-f]+$/;
@@ -26,7 +27,7 @@ export function testPostgresSettings(): PostgresSettings {
 
 /** An admin pool on the TEST_POSTGRES_URL database (no search_path), for CREATE / DROP DATABASE. */
 export function adminPool(): Pool {
-  return new Pool(postgresPoolConfig(postgresStoreConfig(testPostgresSettings()), { max: 2 }));
+  return createPostgresPool(postgresPoolConfig(postgresStoreConfig(testPostgresSettings()), { max: 2 }), { label: "test-admin" });
 }
 
 export function quoteDatabase(name: string): string {

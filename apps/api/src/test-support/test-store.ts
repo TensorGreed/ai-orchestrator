@@ -33,11 +33,12 @@ import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { Pool } from "pg";
+import type { Pool } from "pg";
 import { afterEach, beforeEach, describe, inject, it } from "vitest";
 import { postgresStoreConfig } from "../db/create-store.js";
 import { SqliteStore } from "../db/database.js";
 import { PostgresStore, postgresPoolConfig, type PostgresStoreConfig } from "../db/postgres-store.js";
+import { createPostgresPool } from "../db/postgres/pool.js";
 import {
   adminPool,
   createMigratedTemplate,
@@ -84,7 +85,7 @@ export function randomTestSchema(): string {
 
 /** A small pool on TEST_POSTGRES_URL, optionally with `search_path` set to `schema` (the caller ends it). */
 export function testPostgresPool(schema?: string): Pool {
-  return new Pool(postgresPoolConfig(postgresStoreConfig(testPostgresSettings(), schema ? { schema } : {}), { max: 2 }));
+  return createPostgresPool(postgresPoolConfig(postgresStoreConfig(testPostgresSettings(), schema ? { schema } : {}), { max: 2 }), { label: "test" });
 }
 
 export async function dropTestSchema(schema: string): Promise<void> {
@@ -177,7 +178,7 @@ export async function openTestStoreTwin(test: TestStore, options: { maxConnectio
 /** A small pg pool on the same database as `test`, for SQL a test runs beside the store (the caller ends it). */
 export function testStorePool(test: TestStore, options: { max?: number } = {}): Pool {
   if (!test.postgres) throw new Error("testStorePool needs a Postgres test store.");
-  return new Pool(postgresPoolConfig(test.postgres.config, { max: options.max ?? 2 }));
+  return createPostgresPool(postgresPoolConfig(test.postgres.config, { max: options.max ?? 2 }), { label: "test" });
 }
 
 export async function createTestStore(options: { kind?: TestStoreKind; maxConnections?: number } = {}): Promise<TestStore> {
