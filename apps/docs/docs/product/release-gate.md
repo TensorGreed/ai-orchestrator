@@ -144,6 +144,7 @@ A published or released version is pinned: version retention never prunes it. Th
 
 - It needs `workflow:publish`, the same permission as publishing: admins and builders (and project roles that grant it). Operators and viewers cannot unpublish.
 - The release gate never blocks it, enforced or not, and no approval is needed: it is the way out of a bad release. With a gate on, the confirmation and the API answer say plainly that the gate does not check the draft: production runs the ungated draft, and every save goes live, until a version is published again. Deactivating a gated workflow still stops production.
+- The dialog sends the version it named (`expectedVersion`): if someone published or rolled back meanwhile, it answers `409` ("v5 is live now, not v4") and changes nothing, so you never take down a version you did not see. API calls without `expectedVersion` take down whatever is live.
 - When nothing is published (a second unpublish included) it answers `409` and records nothing. Two unpublishes at the same time, on one API instance or two, record one entry.
 - It is refused with `409` when the draft's webhook, form or MCP trigger paths are served by another workflow, as a publish would be. While unpublished, the draft serves those paths and claims them, gated or not.
 - Runs already in progress finish on the version they started with, a paused run included.
@@ -163,7 +164,7 @@ Publishing, rollback, unpublish and deciding a release request need `workflow:pu
 - `POST /api/workflows/:id/publish` (`{ version, workflowHash?, replayRunId?, override?: { reason }, requestApproval?: { reason } }`) answers `200 { release }`, `202 { verdict: "needs_approval", approvalRequestId }` or `409 { verdict: "blocked", reasons, replayRunId?, canRequestApproval }`
 - `GET /api/workflows/:id/releases` → `{ releases, publishedVersion }`
 - `POST /api/workflows/:id/rollback` (`{ version, reason }`) → `{ release }`
-- `POST /api/workflows/:id/unpublish` (`{ reason? }`) → `{ release, productionRuns: "draft", gateEnabled, gateEnforced, notice }`; `409` when nothing is published
+- `POST /api/workflows/:id/unpublish` (`{ reason?, expectedVersion? }`) → `{ release, productionRuns: "draft", gateEnabled, gateEnforced, notice }`; `409` when nothing is published or `expectedVersion` is not the live version
 - `GET /api/workflows/:id/release-state` → `{ state: { draftVersion, publishedVersion, aheadBy, gateEnabled, gateEnforced, productionRefused, unpublishedAt, canPublish, canEditGate } }`
 - `GET /api/workflows/:id/publish-preview?version=&replayRunId=` → `{ preview }`, the verdict publishing would get now; on an enforced gate `preview.stats.admission` holds `{ admitted, pending, pendingNotPassing, required, requiredFailures: [{ id, name, problem }] }`
 - `GET /api/workflows/:id/release-gate/cases` → `{ cases: { enforced, cases: [{ fixtureId, datasetId, datasetName, name, recordingId, admission: "admitted" | "pending", required, requestId, requestKind }], counts: { admitted, pending, required }, canAdmit, canRequest } }` (an unenforced gate answers `enforced: false` and no cases)
