@@ -79,6 +79,7 @@ import {
   guardSimulationJobDatasetId,
   REPLAY_STALE_RECORDING_DAYS,
   replayJobReleaseIneligibleReasons,
+  replayNewGuardBlocks,
   type ReplayAttemptStatus,
   type ReplayCandidateOverrides,
   type ReplayCaseAttempt,
@@ -491,6 +492,22 @@ function roundUsd(value: number): number {
 /** A model call of the run had no price, so its cost is not in `totals.costUsd`. */
 function modelCostIsUnknown(facts: RunFacts | undefined | null): boolean {
   return Boolean(facts?.modelCalls.some((call) => call.costUsd === null));
+}
+
+/**
+ * What one repeat of a replay case measured, by the definitions the case
+ * diff uses: the candidate's latency (`totals.latencyMs.candidate`) and its
+ * new guard blocks against the reference run (`replayNewGuardBlocks`). Null
+ * when the diff does not carry the figure.
+ */
+function replayAttemptMetrics(response: ReplayRunResponse): { latencyMs: number | null; newGuardBlocks: number | null } {
+  const diff = response.diff as Partial<ReplayRunResponse["diff"]> | undefined;
+  const latency = diff?.totals?.latencyMs?.candidate;
+  const guard = diff?.guard;
+  return {
+    latencyMs: typeof latency === "number" && Number.isFinite(latency) ? latency : null,
+    newGuardBlocks: guard && Array.isArray(guard.added) && Array.isArray(guard.changed) ? replayNewGuardBlocks(guard) : null
+  };
 }
 
 function isTruncation(value: unknown): value is EvalStoredTruncation {
@@ -1767,7 +1784,18 @@ export class EvalService {
         if (baselineResponse.verdict === "error") {
           const reason = `The baseline rerun was inconclusive: ${baselineResponse.reasons.join(" ") || "it could not be judged."}`;
           attempts.push({
-            record: { repeatIndex, status: "error", executionId: null, baselineExecutionId: baselineResponse.executionId, verdict: "error", reasons: [reason], costUsd: baselineResponse.facts.totals.costUsd },
+            record: {
+              repeatIndex,
+              status: "error",
+              executionId: null,
+              baselineExecutionId: baselineResponse.executionId,
+              verdict: "error",
+              reasons: [reason],
+              costUsd: baselineResponse.facts.totals.costUsd,
+              // The candidate never ran in this repeat.
+              latencyMs: null,
+              newGuardBlocks: null
+            },
             outcome: { status: "error", recordingId, error: reason, executionId: baselineResponse.executionId }
           });
           continue;
@@ -1816,7 +1844,8 @@ export class EvalService {
           baselineExecutionId: baseline?.executionId ?? null,
           verdict: response.verdict,
           reasons: response.reasons,
-          costUsd: outcome.costUsd ?? null
+          costUsd: outcome.costUsd ?? null,
+          ...replayAttemptMetrics(response)
         },
         outcome
       });

@@ -357,6 +357,20 @@ export interface ReplayCaseAttempt {
   verdict: ReplayRunResponse["verdict"] | null;
   reasons: string[];
   costUsd: number | null;
+  /**
+   * The candidate's latency in this repeat, as the case diff's
+   * `totals.latencyMs.candidate`; null when the candidate did not run or has
+   * no duration. Absent on results stored before repeats recorded it (the
+   * release gate then treats latency and guard limits as unchecked).
+   */
+  latencyMs?: number | null;
+  /**
+   * Guard verdicts this repeat added that block or hold for review, plus
+   * those it escalated to one, against its reference run
+   * (`replayNewGuardBlocks`); null when the candidate did not run. Absent on
+   * older results, like `latencyMs`.
+   */
+  newGuardBlocks?: number | null;
 }
 
 export interface EvalRunView {
