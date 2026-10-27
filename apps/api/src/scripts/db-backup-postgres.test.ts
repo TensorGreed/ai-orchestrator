@@ -7,13 +7,12 @@
  * next insert gets max + 1. Generated columns (knowledge_base_chunks.content_tsv) are left out of the export and dropped
  * on import, so Postgres recomputes them.
  */
-import { randomBytes } from "node:crypto";
 import { Pool } from "pg";
 import { afterEach, describe, expect, it } from "vitest";
 import { parsePostgresSettings } from "../config.js";
 import { postgresStoreConfig } from "../db/create-store.js";
 import { PostgresStore, postgresPoolConfig } from "../db/postgres-store.js";
-import { noticePostgresSkipped, testPostgresUrl } from "../test-support/test-store.js";
+import { createEmptyTestDatabase, noticePostgresSkipped, testPostgresUrl } from "../test-support/test-store.js";
 import { AuditVerdictMismatch, EXPORTED_TABLES, exportDump, importDump, openBackupAdapter, type BackupDump } from "./db-shared.js";
 
 const url = testPostgresUrl();
@@ -23,10 +22,6 @@ function databaseUrl(name: string): string {
   const u = new URL(url as string);
   u.pathname = `/${name}`;
   return u.toString();
-}
-
-function adminPool(): Pool {
-  return new Pool({ connectionString: url, max: 1 });
 }
 
 async function openStore(dbUrl: string): Promise<PostgresStore> {
@@ -44,36 +39,22 @@ async function auditOrder(dbUrl: string): Promise<Array<{ id: string; seq: strin
 }
 
 describe.skipIf(!url)("db:export / db:import round trip [postgres]", () => {
-  const created: string[] = [];
   const savedEnv = { DB_TYPE: process.env.DB_TYPE, DB_POSTGRESDB_URL: process.env.DB_POSTGRESDB_URL };
 
-  afterEach(async () => {
+  afterEach(() => {
     process.env.DB_TYPE = savedEnv.DB_TYPE;
     process.env.DB_POSTGRESDB_URL = savedEnv.DB_POSTGRESDB_URL;
     if (savedEnv.DB_TYPE === undefined) delete process.env.DB_TYPE;
     if (savedEnv.DB_POSTGRESDB_URL === undefined) delete process.env.DB_POSTGRESDB_URL;
-    const pool = adminPool();
-    try {
-      for (const name of created.splice(0)) await pool.query(`DROP DATABASE IF EXISTS "${name}" WITH (FORCE)`);
-    } finally {
-      await pool.end();
-    }
-  }, 60_000);
+  });
 
-  async function freshDatabase(label: string): Promise<string> {
-    const name = `q3a_backup_${label}_${randomBytes(4).toString("hex")}`;
-    const pool = adminPool();
-    try {
-      await pool.query(`CREATE DATABASE "${name}"`);
-    } finally {
-      await pool.end();
-    }
-    created.push(name);
-    return databaseUrl(name);
+  /** An empty database the test migrates or restores into; dropped with the file's other test databases. */
+  async function freshDatabase(): Promise<string> {
+    return databaseUrl(await createEmptyTestDatabase());
   }
 
   it("keeps seq through export and import: same rows, same order, the chain verifies, the next insert is max + 1", async () => {
-    const srcUrl = await freshDatabase("src");
+    const srcUrl = await freshDatabase();
     const source = await openStore(srcUrl);
     // Ids sort opposite to insertion and every row has the same created_at, so only seq gives the order.
     for (let i = 0; i < 6; i += 1) {
@@ -99,7 +80,7 @@ describe.skipIf(!url)("db:export / db:import round trip [postgres]", () => {
     expect(tables.audit_logs.map((r) => r.id)).toEqual(["z9", "z8", "z7", "z6", "z5", "z4"]);
     const dump = JSON.parse(JSON.stringify({ tables })) as { tables: Record<string, Record<string, unknown>[]> };
 
-    const dstUrl = await freshDatabase("dst");
+    const dstUrl = await freshDatabase();
     process.env.DB_POSTGRESDB_URL = dstUrl;
     const importer = await openBackupAdapter();
     for (const table of [...EXPORTED_TABLES].reverse()) await importer.truncate(table);
@@ -124,7 +105,7 @@ describe.skipIf(!url)("db:export / db:import round trip [postgres]", () => {
   }, 120_000);
 
   it("skips generated columns (the knowledge-base tsvector) on export, and on import of a backup that carries them", async () => {
-    const srcUrl = await freshDatabase("src");
+    const srcUrl = await freshDatabase();
     const source = await openStore(srcUrl);
     await source.createKnowledgeBase({ id: "kb1", name: "KB", embedderId: "mock" });
     await source.addKnowledgeBaseChunks({
@@ -146,7 +127,7 @@ describe.skipIf(!url)("db:export / db:import round trip [postgres]", () => {
     expect(chunks[0]).not.toHaveProperty("content_tsv");
     expect(chunks[0]).toHaveProperty("seq");
 
-    const dstUrl = await freshDatabase("dst");
+    const dstUrl = await freshDatabase();
     process.env.DB_POSTGRESDB_URL = dstUrl;
     const importer = await openBackupAdapter();
     await importer.insertRows("knowledge_bases", JSON.parse(JSON.stringify(kbs)) as Record<string, unknown>[]);
@@ -166,7 +147,7 @@ describe.skipIf(!url)("db:export / db:import round trip [postgres]", () => {
   }, 120_000);
 
   it("imports into a database that already used its identity (truncate, then restore lower seq values)", async () => {
-    const srcUrl = await freshDatabase("src");
+    const srcUrl = await freshDatabase();
     const source = await openStore(srcUrl);
     for (let i = 0; i < 3; i += 1) {
       await source.writeAuditLog({ id: `s${i}`, eventType: "e", category: "c", action: "a", outcome: "success" });
@@ -178,7 +159,7 @@ describe.skipIf(!url)("db:export / db:import round trip [postgres]", () => {
     const rows = await exporter.selectAll("audit_logs");
     await exporter.close();
 
-    const dstUrl = await freshDatabase("dst");
+    const dstUrl = await freshDatabase();
     const dest = await openStore(dstUrl);
     for (let i = 0; i < 10; i += 1) {
       await dest.writeAuditLog({ id: `old${i}`, eventType: "e", category: "c", action: "a", outcome: "success" });
@@ -201,7 +182,7 @@ describe.skipIf(!url)("db:export / db:import round trip [postgres]", () => {
   }, 120_000);
 
   it("records the audit verdict in one snapshot, and a restore that changes it rolls back on Postgres too", async () => {
-    const srcUrl = await freshDatabase("src");
+    const srcUrl = await freshDatabase();
     const source = await openStore(srcUrl);
     await source.writeAuditLog({ id: "p1", eventType: "e", category: "c", action: "a", outcome: "success", message: "approved by alice" });
     await source.writeAuditLog({ id: "p2", eventType: "e", category: "c", action: "a", outcome: "success" });
@@ -213,7 +194,7 @@ describe.skipIf(!url)("db:export / db:import round trip [postgres]", () => {
     await exporter.close();
     expect(dump.auditVerdict).toEqual({ ok: true, rowsChecked: 2, unverifiable: [] });
 
-    const dstUrl = await freshDatabase("dst");
+    const dstUrl = await freshDatabase();
     const dest = await openStore(dstUrl);
     await dest.writeAuditLog({ id: "kept", eventType: "e", category: "c", action: "a", outcome: "success" });
     await dest.close();
@@ -235,7 +216,7 @@ describe.skipIf(!url)("db:export / db:import round trip [postgres]", () => {
   }, 120_000);
 
   it("--merge into an empty audit log refuses a changed verdict; --allow-audit-change restores it with a warning", async () => {
-    const srcUrl = await freshDatabase("msrc");
+    const srcUrl = await freshDatabase();
     const source = await openStore(srcUrl);
     await source.writeAuditLog({ id: "m1", eventType: "e", category: "c", action: "a", outcome: "success" });
     await source.writeAuditLog({ id: "m2", eventType: "e", category: "c", action: "a", outcome: "success" });
@@ -247,7 +228,7 @@ describe.skipIf(!url)("db:export / db:import round trip [postgres]", () => {
     await exporter.close();
     dump.tables.audit_logs![0]!.message = "approved by mallory";
 
-    const dstUrl = await freshDatabase("mdst");
+    const dstUrl = await freshDatabase();
     await (await openStore(dstUrl)).close();
     process.env.DB_POSTGRESDB_URL = dstUrl;
     let importer = await openBackupAdapter();
@@ -264,7 +245,7 @@ describe.skipIf(!url)("db:export / db:import round trip [postgres]", () => {
   }, 120_000);
 
   it("a failing later table in --merge rolls back the earlier tables too", async () => {
-    const srcUrl = await freshDatabase("rsrc");
+    const srcUrl = await freshDatabase();
     const source = await openStore(srcUrl);
     await source.upsertWorkflow({ id: "wf-new", name: "New", schemaVersion: "1.0.0", workflowVersion: 1, nodes: [], edges: [] } as never);
     await source.writeAuditLog({ id: "r1", eventType: "e", category: "c", action: "a", outcome: "success" });
@@ -275,7 +256,7 @@ describe.skipIf(!url)("db:export / db:import round trip [postgres]", () => {
     const dump = JSON.parse(JSON.stringify(await exportDump(exporter))) as BackupDump;
     await exporter.close();
 
-    const dstUrl = await freshDatabase("rdst");
+    const dstUrl = await freshDatabase();
     const dest = await openStore(dstUrl);
     await dest.writeAuditLog({ id: "before", eventType: "e", category: "c", action: "a", outcome: "success" });
     await dest.close();

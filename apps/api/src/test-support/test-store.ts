@@ -169,6 +169,24 @@ async function cloneTestDatabase(): Promise<string> {
   return name;
 }
 
+/**
+ * An empty database of this run (created from the server's default template, so nothing migrated), for a test that
+ * migrates or restores into it itself; its name. Dropped with the file's other test databases after its last test, or
+ * by the run's teardown if the file is killed. Not dropped per test: every DROP DATABASE waits for a server-wide
+ * checkpoint, which takes tens of seconds while the rest of the suite writes to a server that syncs to disk.
+ */
+export async function createEmptyTestDatabase(): Promise<string> {
+  const name = `t_${testPostgresRun()}_${randomBytes(6).toString("hex")}`;
+  const admin = adminPool();
+  try {
+    await admin.query(`CREATE DATABASE ${quoteDatabase(name)}`);
+  } finally {
+    await admin.end();
+  }
+  pendingDrops.add(name);
+  return name;
+}
+
 /** Another PostgresStore on the same database as `test` (a second API instance in a two-instance test). */
 export async function openTestStoreTwin(test: TestStore, options: { maxConnections?: number } = {}): Promise<PostgresStore> {
   if (!test.postgres) throw new Error("openTestStoreTwin needs a Postgres test store.");
