@@ -2991,16 +2991,32 @@ export async function createApp(
     triggerType: string;
     input: Record<string, unknown>;
   }) => {
+    // Phase 13.1 — the workflow as it is now, not the one the trigger was registered from: a save or publish through
+    // another instance reaches the leader's triggers only at its next sync, and only a changed trigger node is
+    // re-registered. Like a schedule, the published version when there is one.
+    const workflow = await productionWorkflow(input.workflow.id);
+    const triggerNode = workflow?.nodes.find((candidate) => candidate.id === input.node.id && candidate.type === input.node.type);
+    if (!workflow || !triggerNode || asRecord(triggerNode.config).active === false) {
+      app.log.warn(
+        {
+          workflowId: input.workflow.id,
+          nodeId: input.node.id,
+          reason: workflow ? "the trigger is no longer in the workflow, or is off" : await releaseService.productionRefusal(input.workflow.id) ?? "not found"
+        },
+        "Skipped triggered execution because production has no workflow with this trigger to run"
+      );
+      return;
+    }
     const executionId = crypto.randomUUID();
     const progressHooks = createProgressTrackingHooks({
       executionId,
-      workflow: input.workflow,
+      workflow,
       triggerType: input.triggerType,
       triggeredBy: "trigger-service",
       requestInput: input.input
     });
     const result = await runWorkflowExecution({
-      workflow: input.workflow,
+      workflow,
       directInput: {
         trigger_type: input.triggerType,
         trigger_node_id: input.node.id,
@@ -3015,7 +3031,7 @@ export async function createApp(
     });
     await persistExecutionHistory({
       executionId,
-      workflow: input.workflow,
+      workflow,
       result,
       triggerType: input.triggerType,
       triggeredBy: "trigger-service",

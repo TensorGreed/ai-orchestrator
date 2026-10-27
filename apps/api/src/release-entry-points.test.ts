@@ -72,6 +72,7 @@ const WORKFLOW_LOADS: LoadSite[] = [
   // app.ts: production traffic.
   { file: "app.ts", match: "const workflow = productionWorkflow(request.params.workflowId);", kind: "production", why: "Slack, GitHub, Stripe, Telegram, Discord app webhooks and chat", count: 6 },
   { file: "app.ts", match: "const workflow = productionWorkflow(input.workflowId);", kind: "production", why: "a schedule firing" },
+  { file: "app.ts", match: "const workflow = productionWorkflow(input.workflow.id);", kind: "production", why: "an app or polling trigger firing: the version current now, not the one it registered from" },
   { file: "app.ts", match: "schedulerService.setWorkflowLoader?.((workflowId) => productionWorkflow(workflowId));", kind: "production", why: "schedules register from the published version" },
   { file: "app.ts", match: "triggerService.setWorkflowLoader((workflowId) => productionWorkflow(workflowId));", kind: "production", why: "app and polling triggers register from the published version" },
   { file: "app.ts", match: "getRunnableWorkflow: (id, runChannel) => releaseService.resolveRunnableWorkflow(id, runChannel),", kind: "production", why: "sub-workflows called from a production run" },

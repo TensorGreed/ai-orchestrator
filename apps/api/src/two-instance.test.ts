@@ -304,6 +304,49 @@ run("two API instances on one Postgres database", () => {
     expect((await a.store.getExecutionHistory(run.executionId))?.status).not.toBe("success");
   }, 60_000);
 
+  it("a trigger on the leader runs the workflow as saved through the other instance, not the one it registered", async () => {
+    const [a, b] = await start(2);
+    const watchDir = fs.mkdtempSync(path.join(os.tmpdir(), "l2m-two-instance-watch-"));
+    tempDirs.push(watchDir);
+    // An empty folder is no baseline (the trigger fires only once it has seen a file).
+    fs.writeFileSync(path.join(watchDir, "existing.txt"), "before");
+    const fileWorkflow = (answer: string): Workflow => ({
+      ...workflow("wf-file", node("watch", "file_trigger", { watchPath: watchDir, pollIntervalSeconds: 1, events: ["created"], active: true })),
+      nodes: [
+        node("watch", "file_trigger", { watchPath: watchDir, pollIntervalSeconds: 1, events: ["created"], active: true }),
+        node("out", "output", { responseTemplate: answer })
+      ]
+    });
+    await a!.store.upsertWorkflow(fileWorkflow("answer from v1"));
+    await a!.triggers.syncAllWorkflows();
+    await b!.triggers.syncAllWorkflows();
+    const activeTriggers = (instance: Instance) => (instance.triggers as unknown as { active: Map<string, unknown> }).active.size;
+    const leader = await until(() => [a!, b!].find((instance) => activeTriggers(instance) > 0), "a leader with the trigger");
+    const other = leader === a ? b! : a!;
+    expect(activeTriggers(other)).toBe(0);
+    // The trigger's first poll records the folder's baseline; files after it fire.
+    await until(async () => await leader.store.getTriggerState("wf-file", "watch"), "the trigger's baseline");
+
+    // Saved through the instance that is not the leader: the trigger node is unchanged, so the leader keeps its trigger.
+    const cookie = await loginAs(other, "admin", "admin");
+    const saved = await other.app.inject({ method: "PUT", url: "/api/workflows/wf-file", headers: { cookie }, payload: fileWorkflow("answer from v2") });
+    expect(saved.statusCode).toBe(200);
+    fs.writeFileSync(path.join(watchDir, "new.txt"), "hello");
+
+    const pool = testStorePool(primary!);
+    try {
+      const row = await until(async () => {
+        const rows = await pool.query<{ output_json: string | null; status: string; error: string | null }>(`SELECT output_json, status, error FROM execution_history WHERE workflow_id = 'wf-file'`);
+        // The progress hooks write the row as the run starts; wait for its end.
+        return rows.rows.find((entry) => entry.status !== "running");
+      }, "the triggered run");
+      expect(row.output_json, JSON.stringify(row)).toContain("answer from v2");
+      expect(row.output_json).not.toContain("answer from v1");
+    } finally {
+      await pool.end();
+    }
+  }, 60_000);
+
   it("leader election alone: one holder at a time; stopping the holder hands the lock over", async () => {
     primary = await createTestStore({ kind: "postgres" });
     const twins = [await openTestStoreTwin(primary), await openTestStoreTwin(primary)];
