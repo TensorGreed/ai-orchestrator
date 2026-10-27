@@ -2,7 +2,7 @@
  * Scheduler and trigger reloads of one workflow run one after another, and a delete that lands while a reload is
  * loading the workflow wins: a networked store answers loads out of order.
  */
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Workflow, WorkflowNode } from "@ai-orchestrator/shared";
 import type { Store } from "../db/store.js";
 import { SchedulerService } from "./scheduler-service.js";
@@ -245,37 +245,77 @@ describe("a standby instance and the leader's sync (Phase 13.1)", () => {
 });
 
 describe("a tick node-cron runs twice (an early timer)", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  type Task = { runner: { onMatch: (date: Date, execution: unknown) => Promise<unknown> } };
+  const currentTask = (scheduler: SchedulerService) =>
+    (scheduler as unknown as { jobs: Map<string, unknown> }).jobs.get("wf-reload::tick") as Task | undefined;
+  /** A task's own callback, as node-cron calls it on each match with the matched second (milliseconds cut). */
+  const matchOn = async (task: Task, second: number, id: string) => await task.runner.onMatch(new Date(second * 1000), { id });
+
   async function everySecond() {
     const scheduler = new SchedulerService({} as Store, quiet);
     services.push(scheduler);
     const fired: string[] = [];
-    scheduler.setExecutionHandler(async (input) => void fired.push(input.firedAt));
+    scheduler.setExecutionHandler(async (input) => void fired.push(input.scheduledFor));
     scheduler.setWorkflowLoader(async () => scheduleWorkflow("tick"));
     await scheduler.reloadWorkflow("wf-reload");
-    const task = (scheduler as unknown as { jobs: Map<string, { options?: unknown }> }).jobs.get("wf-reload::tick") as unknown as {
-      runner: { onMatch: (date: Date, execution: unknown) => Promise<unknown> };
-    };
-    // The task's own callback, as node-cron calls it on each match with the matched second (milliseconds cut).
-    const match = async (second: number, id: string) => await task.runner.onMatch(new Date(second * 1000), { id });
-    return { fired, match };
+    const task = currentTask(scheduler)!;
+    const match = async (second: number, id: string) => await matchOn(task, second, id);
+    return { scheduler, fired, match };
   }
+
+  const settle = async () => await new Promise((resolve) => setTimeout(resolve, 10));
 
   it("is fired once: a second run of the same matched second is skipped", async () => {
     const { fired, match } = await everySecond();
-    const second = Math.floor(Date.now() / 1000);
+    // node-cron's first match is the second after the one the task was registered in.
+    const second = Math.floor(Date.now() / 1000) + 1;
     await match(second, "a");
     await match(second, "b");
-    await new Promise((resolve) => setTimeout(resolve, 10));
-    expect(fired).toHaveLength(1);
+    await settle();
+    expect(fired).toEqual([new Date(second * 1000).toISOString()]);
   });
 
   it("a lagging event loop runs two seconds' ticks moments apart: both fire", async () => {
     const { fired, match } = await everySecond();
-    const second = Math.floor(Date.now() / 1000);
+    const second = Math.floor(Date.now() / 1000) + 1;
     // Tick N ran late (the loop was blocked past the boundary) and tick N + 1 on time: well under a second apart.
     await match(second, "late");
     await match(second + 1, "on-time");
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    await settle();
     expect(fired).toHaveLength(2);
+  });
+
+  it("a schedule registered again in the second its tick fired does not fire that second again", async () => {
+    // A re-registration (a new leader, the old one re-elected, a save) builds a new task; its first timer can wake a
+    // moment early, still inside the second it was registered in, and node-cron then matches that second, which the
+    // task it replaced (or another instance's) already fired.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-10-27T12:00:00.400Z"));
+    const { scheduler, fired, match } = await everySecond();
+    const second = Date.parse("2026-10-27T12:00:01.000Z") / 1000;
+    vi.setSystemTime(new Date("2026-10-27T12:00:01.004Z"));
+    await match(second, "old task");
+    vi.setSystemTime(new Date("2026-10-27T12:00:01.090Z"));
+    await scheduler.reloadWorkflow("wf-reload");
+    const replacement = currentTask(scheduler)!;
+    vi.setSystemTime(new Date("2026-10-27T12:00:01.998Z"));
+    await matchOn(replacement, second, "early wake");
+    vi.setSystemTime(new Date("2026-10-27T12:00:02.001Z"));
+    await matchOn(replacement, second + 1, "next");
+    await settle();
+    expect(fired).toEqual(["2026-10-27T12:00:01.000Z", "2026-10-27T12:00:02.000Z"]);
+  });
+
+  it("a tick node-cron had already dispatched when its task was stopped does not fire", async () => {
+    // node-cron runs the callback a timer turn after the match, so a stop (the leader stepping down) can land between.
+    const { scheduler, fired, match } = await everySecond();
+    scheduler.stop();
+    await match(Math.floor(Date.now() / 1000) + 1, "after stop");
+    await settle();
+    expect(fired).toEqual([]);
   });
 });

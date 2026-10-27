@@ -88,8 +88,11 @@ run("two API instances on one Postgres database", () => {
   let primary: TestStore | undefined;
   const instances: Instance[] = [];
   const tempDirs: string[] = [];
-  /** Every tick fired (no `event`), and, for a failure message, when each scheduler registered and stopped. */
-  let fires: Array<{ instance: number; at: number; event?: string }> = [];
+  /**
+   * Every tick fired (no `event`: the second the cron matched, and when the run started), and, for a failure message,
+   * when each scheduler registered and stopped.
+   */
+  let fires: Array<{ instance: number; at: number; second?: string; event?: string }> = [];
 
   afterEach(async () => {
     for (const instance of instances.splice(0)) {
@@ -134,11 +137,11 @@ run("two API instances on one Postgres database", () => {
       fires.push({ instance: i, at: Date.now(), event: "stopped" });
       stopScheduler();
     };
-    // Record each tick as it fires (the cron's own time), before the app's handler runs it.
+    // Record each tick as it fires (the matched second), before the app's handler runs it.
     const setHandler = scheduler.setExecutionHandler.bind(scheduler);
     scheduler.setExecutionHandler = (handler) =>
       setHandler(async (input) => {
-        fires.push({ instance: i, at: Date.now() });
+        fires.push({ instance: i, at: Date.now(), second: input.scheduledFor });
         await handler(input);
       });
     const triggers = new TriggerService(store, quiet);
@@ -167,13 +170,18 @@ run("two API instances on one Postgres database", () => {
   const ticks = () => fires.filter((fire) => !fire.event);
   const cronSeconds = async (): Promise<number[]> => ticks().map((fire) => fire.at);
   /**
-   * The shortest gap between two fires, by any instance. The cron ticks every second; a tick fired twice (two
-   * leaders, or two jobs for one schedule) shows a gap near zero. Timer jitter and a busy event loop move a fire by tens of milliseconds, not
-   * a second.
+   * The seconds that fired more than once, by any instance. The cron matches every second; a tick run twice (two
+   * leaders, or two jobs for one schedule) repeats its second. Not the time between fires: a busy event loop can run
+   * one second's tick late and the next on time, moments apart, and both are due.
    */
-  const shortestGap = (): number => {
-    const times = ticks().map((fire) => fire.at).sort((x, y) => x - y);
-    return Math.min(...times.slice(1).map((time, index) => time - times[index]!));
+  const repeatedSeconds = (): string[] => {
+    const seen = new Set<string>();
+    const repeated = new Set<string>();
+    for (const fire of ticks()) {
+      if (seen.has(fire.second!)) repeated.add(fire.second!);
+      seen.add(fire.second!);
+    }
+    return [...repeated];
   };
 
   async function lockHolderPid(): Promise<number | null> {
@@ -214,7 +222,7 @@ run("two API instances on one Postgres database", () => {
     expect(jobCount(standby.scheduler)).toBe(0);
 
     await until(async () => (await cronSeconds()).length >= 3, "three scheduled runs");
-    expect(shortestGap(), JSON.stringify(fires)).toBeGreaterThan(150);
+    expect(repeatedSeconds(), JSON.stringify(fires)).toEqual([]);
 
     // Kill the leader's lock session: it steps down at once (its schedules stop), and whichever instance takes the
     // free lock first leads from then on, on a new session.
@@ -230,7 +238,7 @@ run("two API instances on one Postgres database", () => {
     expect(standby).toBeDefined();
     const taken = (await cronSeconds()).length;
     await until(async () => (await cronSeconds()).length >= taken + 3, "three runs after the failover");
-    expect(shortestGap(), JSON.stringify(fires)).toBeGreaterThan(150);
+    expect(repeatedSeconds(), JSON.stringify(fires)).toEqual([]);
   }, 90_000);
 
   it("the health output keeps its shape: enabled, one leader, the holder named by both", async () => {

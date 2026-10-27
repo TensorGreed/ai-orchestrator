@@ -1132,7 +1132,7 @@ describe("project authorization: shares, imports, restores and other callers", (
   it("a scheduled run of a workflow in a locked-out project still runs (no user, by design)", async () => {
     const { context, admin } = await seed({ scheduler: true });
     const before = (await call(context, "GET", "/api/executions?workflowId=wf-hidden", admin.cookie)).json<{ total: number }>().total;
-    await context.fireSchedule!({ workflowId: "wf-hidden", workflowName: "hidden", scheduleNodeId: "start", cronExpression: "* * * * *", timezone: "UTC", firedAt: new Date().toISOString() });
+    await context.fireSchedule!({ workflowId: "wf-hidden", workflowName: "hidden", scheduleNodeId: "start", cronExpression: "* * * * *", timezone: "UTC", firedAt: new Date().toISOString(), scheduledFor: new Date(Math.floor(Date.now() / 1000) * 1000).toISOString() });
     expect((await call(context, "GET", "/api/executions?workflowId=wf-hidden", admin.cookie)).json<{ total: number }>().total).toBe(before + 1);
   });
 });

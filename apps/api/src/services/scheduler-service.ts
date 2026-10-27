@@ -11,6 +11,8 @@ export interface SchedulerExecutionInput {
   cronExpression: string;
   timezone: string;
   firedAt: string;
+  /** The second the cron matched (ISO, milliseconds zero): the tick this run is for. */
+  scheduledFor: string;
 }
 
 type SchedulerExecutionHandler = (input: SchedulerExecutionInput) => Promise<void>;
@@ -163,14 +165,22 @@ export class SchedulerService {
     // already fired) again, then the one starting, a few milliseconds apart (seen with crons that match every second).
     // A repeat of the matched second that last fired is skipped. Keyed on the matched second, not on the time between fires: a blocked
     // event loop can run two different seconds' ticks moments apart, and both must fire.
-    let lastFiredSecond: number | null = null;
+    //
+    // A new task's first timer can wake early the same way, still inside the second it was registered in, and node-cron
+    // then runs that second, whose tick the task it replaced (a re-registration on a save or a sync, this instance
+    // re-elected) or the previous leader already ran. node-cron's first match is always after the second the task was
+    // registered in, so a match at or before it is that early wake and is skipped.
+    let lastFiredSecond = Math.floor(Date.now() / 1000);
     const task = cron.schedule(
       schedule.cronExpression,
       (context) => {
         const second = Math.floor(context.date.getTime() / 1000);
-        if (second === lastFiredSecond) return;
+        if (second <= lastFiredSecond) return;
+        // node-cron runs the callback a timer turn after the match: the task may have been stopped (this instance
+        // stepped down) or replaced since, and a job no longer registered must not run.
+        if (this.jobs.get(key) !== task) return;
         lastFiredSecond = second;
-        void this.handleScheduledTick(workflow, schedule);
+        void this.handleScheduledTick(workflow, schedule, second);
       },
       {
         timezone: schedule.timezone
@@ -261,7 +271,7 @@ export class SchedulerService {
     return matches;
   }
 
-  private async handleScheduledTick(workflow: Workflow, schedule: ScheduleRegistration): Promise<void> {
+  private async handleScheduledTick(workflow: Workflow, schedule: ScheduleRegistration, second: number): Promise<void> {
     if (!this.executeHandler) {
       this.logger("warn", "Schedule fired before execution handler was configured", {
         workflowId: workflow.id,
@@ -277,7 +287,8 @@ export class SchedulerService {
         scheduleNodeId: schedule.node.id,
         cronExpression: schedule.cronExpression,
         timezone: schedule.timezone,
-        firedAt: new Date().toISOString()
+        firedAt: new Date().toISOString(),
+        scheduledFor: new Date(second * 1000).toISOString()
       });
     } catch (error) {
       this.logger("error", "Scheduled execution failed", {
