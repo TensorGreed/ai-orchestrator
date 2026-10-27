@@ -260,7 +260,7 @@ describe("source refusals (before any connection)", () => {
     appendLegacySqliteAuditRow(raw, "unexplained", { message: "\ufffd and \ufffd", metadataJson: "{\"a\":\"x\u0000\"}" });
     raw.close();
     const message = await refusal();
-    expect(message).toMatch(/row unexplained \(position 2\), verified on SQLite, would not be verifiable on Postgres, and its SQLite text does not explain it/);
+    expect(message).toMatch(/row unexplained \(position 2\), verified on SQLite, would not be verifiable on Postgres, and its text on SQLite does not explain it/);
   });
 
   it("opens the source read-only: its bytes are unchanged, also after a refusal", async () => {

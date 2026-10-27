@@ -14,12 +14,16 @@ import path from "node:path";
 import crypto from "node:crypto";
 import Database from "better-sqlite3";
 import { SqliteStore } from "../db/database.js";
-import { appendLegacySqliteAuditRow, bomAuditEntry, sqliteAuditBytes } from "./legacy-audit.test-helper.js";
+import { appendLegacySqliteAuditRow, bomAuditEntry, sqliteAuditBytes, wtf8 } from "./legacy-audit.test-helper.js";
 import { SecretService } from "../services/secret-service.js";
 import {
+  AuditVerdictMismatch,
   EXPORTED_TABLES,
   ENCRYPTED_COLUMNS,
-  openBackupAdapter
+  exportDump,
+  importDump,
+  openBackupAdapter,
+  type BackupDump
 } from "./db-shared.js";
 
 const KEY_A = crypto.randomBytes(32).toString("base64");
@@ -246,5 +250,171 @@ describe("db:export / db:import round trip", () => {
       restoredRaw.close();
       fs.rmSync(path.dirname(destPath), { recursive: true, force: true });
     }
+  });
+});
+
+/** Whether this Node's better-sqlite3 stores a lone surrogate exactly (Node 20: generalized UTF-8) or as U+FFFD (24). */
+function sqliteKeepsLoneSurrogates(): boolean {
+  const db = new Database(":memory:");
+  try {
+    return (db.prepare(`SELECT hex(?) AS h`).get("\ud800") as { h: string }).h === "EDA080";
+  } finally {
+    db.close();
+  }
+}
+
+describe("db:export records the audit verdict; db:import refuses a restore that changes it", () => {
+  let dir: string;
+  let sourcePath: string;
+  let destPath: string;
+  const lines: string[] = [];
+  const log = (line: string) => lines.push(line);
+
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), "aio-backup-verdict-"));
+    sourcePath = path.join(dir, "source.db");
+    destPath = path.join(dir, "dest.db");
+    lines.length = 0;
+    process.env.DB_TYPE = "sqlite";
+  });
+
+  afterEach(() => {
+    delete process.env.DB_TYPE;
+    delete process.env.DB_SQLITE_PATH;
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  async function exportFrom(file: string, options: { excludeHistory?: boolean } = {}): Promise<BackupDump> {
+    process.env.DB_SQLITE_PATH = file;
+    const adapter = await openBackupAdapter();
+    try {
+      // Through JSON, as the file on disk.
+      return JSON.parse(JSON.stringify(await exportDump(adapter, { ...options, log }))) as BackupDump;
+    } finally {
+      await adapter.close();
+    }
+  }
+
+  async function importInto(file: string, dump: BackupDump) {
+    process.env.DB_SQLITE_PATH = file;
+    const adapter = await openBackupAdapter();
+    try {
+      return await importDump(adapter, dump, { log });
+    } finally {
+      await adapter.close();
+    }
+  }
+
+  /** The destination holds one workflow and one audit row before the restore, to see a rollback leave them. */
+  async function destinationWithData(): Promise<void> {
+    const store = await SqliteStore.create(destPath);
+    await store.upsertWorkflow({ id: "wf-before", name: "Before", schemaVersion: "1.0.0", workflowVersion: 1, nodes: [], edges: [] } as never);
+    await store.writeAuditLog({ id: "before", eventType: "e", category: "c", action: "a", outcome: "success" });
+    await store.close();
+  }
+
+  async function destinationState(): Promise<{ workflows: string[]; audit: string[] }> {
+    const raw = new Database(destPath, { readonly: true });
+    try {
+      return {
+        workflows: (raw.prepare(`SELECT id FROM workflows ORDER BY id`).all() as Array<{ id: string }>).map((row) => row.id),
+        audit: (raw.prepare(`SELECT id FROM audit_logs ORDER BY rowid`).all() as Array<{ id: string }>).map((row) => row.id)
+      };
+    } finally {
+      raw.close();
+    }
+  }
+
+  it("records the verdict (ok / broken at a row / unverifiable rows) and restores a clean backup with the same verdict", async () => {
+    const store = await SqliteStore.create(sourcePath);
+    await store.writeAuditLog({ id: "a1", eventType: "e", category: "c", action: "a", outcome: "success" });
+    await store.writeAuditLog({ id: "a2", eventType: "e", category: "c", action: "a", outcome: "success" });
+    await store.close();
+    const dump = await exportFrom(sourcePath);
+    expect(dump.auditVerdict).toEqual({ ok: true, rowsChecked: 2, unverifiable: [] });
+    expect(lines).toContain("  audit chain: intact (2 rows verified) (recorded in the backup)");
+    const report = await importInto(destPath, dump);
+    expect(report.audit?.restored).toEqual({ ok: true, rowsChecked: 2 });
+    expect(lines).toContain("Audit chain: intact (2 rows verified), as the backup recorded (intact (2 rows verified)).");
+
+    const withoutHistory = await exportFrom(sourcePath, { excludeHistory: true });
+    expect(withoutHistory.auditVerdict).toBeUndefined();
+  });
+
+  it("refuses and rolls back a restore whose chain breaks where the backup recorded it intact (an edited backup file)", async () => {
+    const store = await SqliteStore.create(sourcePath);
+    await store.writeAuditLog({ id: "a1", eventType: "e", category: "c", action: "a", outcome: "success", message: "approved by alice" });
+    await store.writeAuditLog({ id: "a2", eventType: "e", category: "c", action: "a", outcome: "success" });
+    await store.close();
+    const dump = await exportFrom(sourcePath);
+    dump.tables.audit_logs![0]!.message = "approved by mallory";
+    await destinationWithData();
+    const before = await destinationState();
+    const error = await importInto(destPath, dump).then(() => undefined, (e: unknown) => e as Error);
+    expect(error).toBeInstanceOf(AuditVerdictMismatch);
+    expect(error!.message).toMatch(/does not match the backup's recorded verdict \(intact \(2 rows verified\)\): row a1 \(position 1\) would be broken on the restored database/);
+    expect(error!.message).toContain("Nothing was restored (rolled back).");
+    expect(await destinationState()).toEqual(before);
+  });
+
+  it("a backup of a broken chain must restore broken at the same row (review probe p9: a swapped Node-20 surrogate)", async () => {
+    const store = await SqliteStore.create(sourcePath);
+    await store.writeAuditLog({ id: "a1", eventType: "e", category: "c", action: "a", outcome: "success" });
+    await store.close();
+    const raw = new Database(sourcePath);
+    appendLegacySqliteAuditRow(raw, "legacy", { message: "tag \ud800 here" });
+    raw.prepare(`UPDATE audit_logs SET message = CAST(? AS TEXT) WHERE id = 'legacy'`).run(wtf8("tag \udfff here"));
+    raw.close();
+    const dump = await exportFrom(sourcePath);
+    expect(dump.auditVerdict).toEqual({ ok: false, rowsChecked: 1, firstBrokenAt: { id: "legacy", position: 2 }, unverifiable: [] });
+    await destinationWithData();
+    const before = await destinationState();
+    const result = await importInto(destPath, dump).then((report) => report, (e: unknown) => e as Error);
+    if (sqliteKeepsLoneSurrogates()) {
+      // Node 20 stores the swapped surrogate exactly again: still broken at the same row.
+      expect(result).not.toBeInstanceOf(Error);
+      expect((result as Awaited<ReturnType<typeof importDump>>).audit?.restored.firstBrokenAt?.id).toBe("legacy");
+    } else {
+      // Node 24 stores U+FFFD, which the one-U+FFFD search then "explains": the restore would call the chain intact.
+      expect(result).toBeInstanceOf(AuditVerdictMismatch);
+      expect((result as Error).message).toContain("the backup's chain was broken at row legacy, the restored one is intact (2 rows verified)");
+      expect(await destinationState()).toEqual(before);
+    }
+  });
+
+  it("allows only the documented change: a row with two lone surrogates may become unverifiable where they become U+FFFD", async () => {
+    const store = await SqliteStore.create(sourcePath);
+    await store.writeAuditLog({ id: "a1", eventType: "e", category: "c", action: "a", outcome: "success" });
+    await store.close();
+    const raw = new Database(sourcePath);
+    appendLegacySqliteAuditRow(raw, "two-surrogates", { message: "\udbff and \udc00" });
+    raw.close();
+    const dump = await exportFrom(sourcePath);
+    expect(dump.auditVerdict).toEqual({ ok: true, rowsChecked: 2, unverifiable: [] });
+    const report = await importInto(destPath, dump);
+    if (sqliteKeepsLoneSurrogates()) {
+      expect(report.audit?.restored).toEqual({ ok: true, rowsChecked: 2 });
+      expect(report.audit?.becameUnverifiable).toEqual([]);
+    } else {
+      expect(report.audit?.restored).toMatchObject({ ok: false, rowsChecked: 1, unverifiable: [{ id: "two-surrogates" }] });
+      expect(report.audit?.becameUnverifiable).toEqual(["two-surrogates"]);
+      expect(lines.join("\n")).toContain("1 audit row(s) verified in the backup cannot be verified after the restore (two-surrogates)");
+    }
+  });
+
+  it("an older backup without a recorded verdict restores as before, with a note", async () => {
+    const store = await SqliteStore.create(sourcePath);
+    await store.writeAuditLog({ id: "a1", eventType: "e", category: "c", action: "a", outcome: "success" });
+    await store.close();
+    const dump = await exportFrom(sourcePath);
+    delete dump.auditVerdict;
+    dump.tables.audit_logs![0]!.message = "edited";
+    const report = await importInto(destPath, dump);
+    expect(report.totalInserted).toBeGreaterThan(0);
+    expect(report.audit?.restored.firstBrokenAt?.id).toBe("a1");
+    expect(lines.join("\n")).toContain(
+      "Note: this backup does not record its audit-chain verdict (written by an older db:export), so the restored chain is not compared with it. " +
+        "Restored audit chain: broken at row a1"
+    );
   });
 });

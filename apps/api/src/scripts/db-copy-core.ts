@@ -69,6 +69,7 @@ import { pgParams } from "../db/postgres/context.js";
 import { describePostgresSettings, parsePostgresSettings } from "../config.js";
 import { postgresStoreConfig } from "../db/create-store.js";
 import { loadApiEnvFiles } from "./api-env.js";
+import { auditCarryOver, brokenPosition, unverifiableOnPostgresBySource, verdictText, verifyPostgresAuditChainByCursor } from "./audit-carry-over.js";
 import { applyMigrationChain, currentChainVersion, postgresPoolConfig, withMigrationLock, type PostgresStoreConfig } from "../db/postgres-store.js";
 
 /** The chain version this build migrates to (whatever MIGRATIONS' highest is; never a fixed number). */
@@ -481,71 +482,8 @@ function asPostgresStores(row: AuditChainRow): AuditChainRow {
   return { ...row, fields: fields as unknown as AuditCanonicalInput };
 }
 
-function optionalText(value: unknown): string | null {
-  return value === null || value === undefined ? null : String(value);
-}
-
-/**
- * The copied chain's verdict, read through a cursor in the copy transaction (seq order) and walked row by row, so the
- * chain is never held in memory. Reads and maps the rows exactly as postgres/audit.ts verifyAuditChain does (same
- * query, required fields as text, optional ones NULL → null, the sub-millisecond flag); the db:copy tests compare the
- * two verdicts.
- */
-async function verifyTargetAuditChain(client: PoolClient): Promise<AuditChainResult> {
-  const walker = new AuditChainWalker();
-  await client.query(
-    `DECLARE db_copy_audit NO SCROLL CURSOR FOR
-       SELECT id, event_type, category, action, outcome, actor_user_id, actor_email, actor_type,
-              resource_type, resource_id, project_id, ip_address, user_agent, metadata_json, message,
-              created_at, prev_hash, entry_hash,
-              date_trunc('milliseconds', created_at) <> created_at AS created_at_sub_ms
-         FROM audit_logs WHERE entry_hash IS NOT NULL
-        ORDER BY seq ASC`
-  );
-  try {
-    const text = (value: unknown) => (typeof value === "string" ? value : String(value ?? ""));
-    for (;;) {
-      const batch = await client.query<Record<string, unknown>>(`FETCH 2000 FROM db_copy_audit`);
-      for (const row of batch.rows) {
-        const more = walker.push({
-          fields: {
-            id: text(row.id),
-            createdAt: text(row.created_at),
-            eventType: text(row.event_type),
-            category: text(row.category),
-            action: text(row.action),
-            outcome: text(row.outcome),
-            actorUserId: optionalText(row.actor_user_id),
-            actorEmail: optionalText(row.actor_email),
-            actorType: text(row.actor_type),
-            resourceType: optionalText(row.resource_type),
-            resourceId: optionalText(row.resource_id),
-            projectId: optionalText(row.project_id),
-            ipAddress: optionalText(row.ip_address),
-            userAgent: optionalText(row.user_agent),
-            metadataJson: optionalText(row.metadata_json),
-            message: optionalText(row.message)
-          },
-          prevHash: text(row.prev_hash ?? ""),
-          entryHash: text(row.entry_hash ?? ""),
-          createdAtHasSubMillisecond: row.created_at_sub_ms === true
-        });
-        if (!more) return walker.result();
-      }
-      if (batch.rows.length < 2000) return walker.result();
-    }
-  } finally {
-    await client.query(`CLOSE db_copy_audit`);
-  }
-}
-
-function verdictLine(result: AuditChainResult): string {
-  if (result.firstBrokenAt) return `broken at row ${result.firstBrokenAt.id} (${result.rowsChecked} rows verified before it)`;
-  const unverifiable = result.unverifiable?.length ?? 0;
-  return unverifiable > 0
-    ? `${result.rowsChecked} rows verified, ${unverifiable} cannot be verified (${preview(result.unverifiable!.map((row) => row.id))})`
-    : `intact (${result.rowsChecked} rows verified)`;
-}
+const verdictLine = verdictText;
+const SQLITE_TO_POSTGRES = { source: "SQLite", target: "Postgres" };
 
 function sameVerdict(a: AuditChainResult, b: AuditChainResult): boolean {
   return (
@@ -554,66 +492,6 @@ function sameVerdict(a: AuditChainResult, b: AuditChainResult): boolean {
     (a.firstBrokenAt?.id ?? null) === (b.firstBrokenAt?.id ?? null) &&
     JSON.stringify((a.unverifiable ?? []).map((row) => row.id)) === JSON.stringify((b.unverifiable ?? []).map((row) => row.id))
   );
-}
-
-/** 1-based walk position of the row where `result` found the chain broken. */
-function brokenPosition(result: AuditChainResult): number | undefined {
-  return result.firstBrokenAt ? result.rowsChecked + (result.unverifiable?.length ?? 0) + 1 : undefined;
-}
-
-const UNSTORABLE_ON_POSTGRES = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]|\u0000/g;
-
-/**
- * Whether a source row's own text explains it being unverifiable on Postgres: its free-text fields hold at least one
- * character Postgres cannot store (U+0000, a lone surrogate), and two or more U+FFFD once those become U+FFFD (the
- * verifier tries one U+FFFD's candidates, not two). Computed from the source row, never from the target.
- */
-function unverifiableOnPostgresBySource(fields: AuditCanonicalInput): boolean {
-  let unstorable = 0;
-  let replacements = 0;
-  for (const field of LEGACY_TEXT_FIELDS) {
-    const value = fields[field];
-    if (typeof value !== "string") continue;
-    unstorable += value.match(UNSTORABLE_ON_POSTGRES)?.length ?? 0;
-    replacements += wellFormedAuditText(value).split("\ufffd").length - 1;
-  }
-  return unstorable > 0 && replacements >= 2;
-}
-
-/**
- * The audit rule for a copy (see the header, step 5): `target` (predicted or actual) against `source`, row by row up to
- * the source's break (all rows when the source is not broken). Returns what breaks the rule, and the rows that became
- * unverifiable as the rule allows.
- */
-function auditCarryOver(
-  source: AuditChainResult,
-  target: AuditChainResult,
-  explainedBySource: ReadonlySet<string>
-): { problems: string[]; becameUnverifiable: string[] } {
-  const limit = brokenPosition(source) ?? Number.POSITIVE_INFINITY;
-  const problems: string[] = [];
-  const targetBreak = brokenPosition(target);
-  if (target.firstBrokenAt && targetBreak! < limit) {
-    problems.push(`row ${target.firstBrokenAt.id} (position ${targetBreak}) would be broken on Postgres, where SQLite verified the chain up to it`);
-  }
-  const before = (row: { position: number }) => row.position < limit && (targetBreak === undefined || row.position < targetBreak);
-  const sourceUnverifiable = new Set((source.unverifiable ?? []).filter(before).map((row) => row.id));
-  const targetUnverifiable = new Set((target.unverifiable ?? []).filter(before).map((row) => row.id));
-  for (const id of sourceUnverifiable) {
-    if (!targetUnverifiable.has(id)) problems.push(`row ${id} cannot be verified on SQLite but would count as verified on Postgres`);
-  }
-  const becameUnverifiable: string[] = [];
-  for (const row of (target.unverifiable ?? []).filter(before)) {
-    if (sourceUnverifiable.has(row.id)) continue;
-    if (explainedBySource.has(row.id)) becameUnverifiable.push(row.id);
-    else {
-      problems.push(
-        `row ${row.id} (position ${row.position}), verified on SQLite, would not be verifiable on Postgres, and its SQLite text does not ` +
-          `explain it (it needs a character Postgres cannot store and two or more U+FFFD once those become U+FFFD)`
-      );
-    }
-  }
-  return { problems, becameUnverifiable };
 }
 
 async function countRows(client: PoolClient, table: string): Promise<number> {
@@ -762,7 +640,7 @@ export async function runDbCopy(options: DbCopyOptions): Promise<DbCopyReport> {
         }
       })()
     );
-    const predicted = auditCarryOver(sourceAudit, expectedTarget, explainedBySource);
+    const predicted = auditCarryOver(sourceAudit, expectedTarget, explainedBySource, SQLITE_TO_POSTGRES);
     if (predicted.problems.length > 0) {
       throw new DbCopyRefusal(
         `The audit chain would not carry over to Postgres: ${predicted.problems.join("; ")}. SQLite says the chain is ` +
@@ -956,11 +834,11 @@ async function copyInto(client: PoolClient, ctx: CopyContext): Promise<DbCopyRep
       if (sourceDigest.set !== targetDigest.set) mismatches.push(`${plan.table}: primary-key checksum differs`);
       if (sourceDigest.order !== targetDigest.order) mismatches.push(`${plan.table}: seq order differs from SQLite rowid order`);
     }
-    const targetAudit = await verifyTargetAuditChain(client);
+    const targetAudit = await verifyPostgresAuditChainByCursor(client);
     if (!sameVerdict(targetAudit, ctx.expectedTarget)) {
       mismatches.push(`audit chain on Postgres is ${verdictLine(targetAudit)}, expected ${verdictLine(ctx.expectedTarget)}`);
     }
-    const carried = auditCarryOver(ctx.sourceAudit, targetAudit, ctx.explainedBySource);
+    const carried = auditCarryOver(ctx.sourceAudit, targetAudit, ctx.explainedBySource, SQLITE_TO_POSTGRES);
     mismatches.push(...carried.problems.map((problem) => `audit chain: ${problem}`));
     if (mismatches.length > 0) {
       throw new Error(`Verification failed, nothing was committed: ${mismatches.join("; ")}.`);

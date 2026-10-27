@@ -12,15 +12,24 @@
  * --source-master-key. The importer will decrypt every encrypted blob with
  * the source key and re-encrypt with the current SECRET_MASTER_KEY_BASE64
  * before insert.
+ *
+ * The whole restore is one transaction. When the backup records its audit
+ * chain's verdict (db:export writes it), the restored chain is verified
+ * before committing and must give the same verdict, except rows that become
+ * unverifiable because this store cannot keep a character they hold (two or
+ * more U+FFFD once U+0000 and lone surrogates become U+FFFD); otherwise the
+ * restore rolls back. An older backup without the verdict restores as
+ * before, with a printed note.
  */
 
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import {
-  EXPORTED_TABLES,
   ENCRYPTED_COLUMNS,
-  openBackupAdapter
+  importDump,
+  openBackupAdapter,
+  type BackupDump
 } from "./db-shared.js";
 
 interface Args {
@@ -30,14 +39,7 @@ interface Args {
   merge: boolean;
 }
 
-interface DumpFile {
-  format: string;
-  formatVersion: number;
-  schemaVersion: number;
-  exportedAt: string;
-  dbType: "sqlite" | "postgres";
-  tables: Record<string, Record<string, unknown>[]>;
-}
+type DumpFile = Omit<BackupDump, "format" | "formatVersion"> & { format: string; formatVersion: number };
 
 function parseArgs(argv: string[]): Args {
   let inPath: string | null = null;
@@ -82,7 +84,9 @@ function printUsageAndExit(code: number): never {
       "  --merge                    Insert without truncating (default: truncate first).",
       "  --help, -h                 Show this message.",
       "",
-      "Default mode TRUNCATES every restored table before insert. The destination",
+      "Default mode TRUNCATES every restored table before insert. The restore is one",
+      "transaction: it rolls back if any table fails, or if the restored audit chain",
+      "does not give the verdict the backup recorded. The destination",
       "DB must be the same kind (sqlite or postgres) as the source — cross-store",
       "restore is not supported because column types differ."
     ].join("\n")
@@ -211,43 +215,12 @@ async function main() {
       console.log("--source-master-key matches current SECRET_MASTER_KEY_BASE64; skipping re-encryption.");
     }
 
-    if (!args.merge) {
-      console.log("Truncating destination tables...");
-      // Truncate in reverse so a later non-cascading SQLite delete doesn't
-      // hit a parent before its children. CASCADE on Postgres makes this
-      // moot, but the symmetry keeps both paths predictable.
-      for (const table of [...EXPORTED_TABLES].reverse()) {
-        try {
-          await adapter.truncate(table);
-        } catch (err) {
-          console.warn(`  ${table}: truncate skipped (${err instanceof Error ? err.message : String(err)})`);
-        }
-      }
-    }
-
-    let totalInserted = 0;
-    let totalReencrypted = 0;
-    for (const table of EXPORTED_TABLES) {
-      const rows = dump.tables[table];
-      if (!rows || rows.length === 0) {
-        console.log(`  ${table}: 0 rows`);
-        continue;
-      }
-      const sourceForRe = sourceKey ?? destKey;
-      const { rows: prepared, touched } = willReencrypt
-        ? reencryptRows(table, rows, sourceForRe, destKey)
-        : { rows, touched: 0 };
-      try {
-        await adapter.insertRows(table, prepared);
-        totalInserted += prepared.length;
-        totalReencrypted += touched;
-        console.log(`  ${table}: ${prepared.length} rows${touched > 0 ? ` (${touched} re-encrypted)` : ""}`);
-      } catch (err) {
-        throw new Error(
-          `Failed to insert into ${table}: ${err instanceof Error ? err.message : String(err)}`
-        );
-      }
-    }
+    const { totalInserted, totalTouched: totalReencrypted } = await importDump(adapter, dump as BackupDump, {
+      merge: args.merge,
+      prepare: (table, rows) => (willReencrypt ? reencryptRows(table, rows, sourceKey ?? destKey, destKey) : { rows, touched: 0 }),
+      log: (line) => console.log(line),
+      warn: (line) => console.warn(line)
+    });
 
     console.log(
       `\nRestored ${totalInserted} rows from ${inPath} ` +

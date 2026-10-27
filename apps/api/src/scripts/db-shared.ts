@@ -10,12 +10,28 @@
 import path from "node:path";
 import fs from "node:fs";
 import Database, { type Database as BetterSqlite3Database } from "better-sqlite3";
-import { Pool } from "pg";
+import { Pool, type PoolClient } from "pg";
 import { parsePostgresSettings } from "../config.js";
 import { postgresStoreConfig } from "../db/create-store.js";
 import { applyMigrationChain, postgresPoolConfig, withMigrationLock } from "../db/postgres-store.js";
 import { INSERTION_SEQ_TABLES, MIGRATIONS } from "../db/migrations.js";
-import { exactSqliteTextRows, SQLITE_AUDIT_TEXT_COLUMNS } from "../db/audit-chain.js";
+import {
+  exactSqliteTextRows,
+  iterateSqliteAuditChainRows,
+  SQLITE_AUDIT_TEXT_COLUMNS,
+  verifyAuditRows,
+  type AuditCanonicalInput,
+  type AuditChainResult
+} from "../db/audit-chain.js";
+import {
+  auditVerdictFromRecord,
+  auditVerdictRecord,
+  restoredAuditProblems,
+  unverifiableOnPostgresBySource,
+  verdictText,
+  verifyPostgresAuditChainByCursor,
+  type AuditVerdictRecord
+} from "./audit-carry-over.js";
 
 /** The rowid alias SqliteAdapter.selectAll reads beside `*` (no table has a column of that name). */
 const ROWID_KEY = "__backup_rowid";
@@ -33,6 +49,13 @@ export interface BackupAdapter {
   selectAll(table: string): Promise<Record<string, unknown>[]>;
   insertRows(table: string, rows: Record<string, unknown>[]): Promise<void>;
   truncate(table: string): Promise<void>;
+  /**
+   * Runs `fn` in one transaction: every read sees one snapshot (`readOnly`, for db:export), or every write commits
+   * together and a throw rolls all of them back (db:import).
+   */
+  transaction<T>(fn: () => Promise<T>, options?: { readOnly?: boolean }): Promise<T>;
+  /** The audit chain's verdict as this store's verifyAuditChain gives it (inside the transaction, when one is open). */
+  verifyAuditChain(): Promise<AuditChainResult>;
   close(): Promise<void>;
 }
 
@@ -163,6 +186,24 @@ class SqliteAdapter implements BackupAdapter {
     this.db.prepare(`DELETE FROM ${quoteIdent(table)}`).run();
   }
 
+  async transaction<T>(fn: () => Promise<T>): Promise<T> {
+    // One connection, so the writes inside (insertRows' own transactions become savepoints) commit or roll back together.
+    this.db.exec("BEGIN");
+    try {
+      const result = await fn();
+      this.db.exec("COMMIT");
+      return result;
+    } catch (error) {
+      if (this.db.inTransaction) this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  async verifyAuditChain(): Promise<AuditChainResult> {
+    // As SqliteStore.verifyAuditChain reads it (text exact), in rowid batches.
+    return verifyAuditRows(iterateSqliteAuditChainRows(this.db));
+  }
+
   async close(): Promise<void> {
     this.db.close();
   }
@@ -172,8 +213,31 @@ class PostgresAdapter implements BackupAdapter {
   readonly kind = "postgres" as const;
 
   private readonly generatedColumns = new Map<string, ReadonlySet<string>>();
+  /** The transaction's connection while transaction() runs; every query goes through it then. */
+  private client: PoolClient | undefined;
 
   private constructor(private readonly pool: Pool) {}
+
+  private q<R extends Record<string, unknown> = Record<string, unknown>>(sql: string, params?: unknown[]) {
+    return (this.client ?? this.pool).query<R>(sql, params);
+  }
+
+  /**
+   * `fn` under a savepoint while a transaction is open: the callers skip a table that is missing on an old schema,
+   * and on Postgres a failed statement would otherwise abort the whole transaction.
+   */
+  private async guarded<T>(fn: () => Promise<T>): Promise<T> {
+    if (!this.client) return fn();
+    await this.client.query("SAVEPOINT backup_table");
+    try {
+      const result = await fn();
+      await this.client.query("RELEASE SAVEPOINT backup_table");
+      return result;
+    } catch (error) {
+      await this.client.query("ROLLBACK TO SAVEPOINT backup_table");
+      throw error;
+    }
+  }
 
   /**
    * Generated columns of `table` (`GENERATED ALWAYS AS (...) STORED`, e.g. knowledge_base_chunks.content_tsv), read
@@ -184,7 +248,7 @@ class PostgresAdapter implements BackupAdapter {
   private async generatedColumnsOf(table: string): Promise<ReadonlySet<string>> {
     const cached = this.generatedColumns.get(table);
     if (cached) return cached;
-    const r = await this.pool.query<{ column_name: string }>(
+    const r = await this.q<{ column_name: string }>(
       `SELECT column_name FROM information_schema.columns
         WHERE table_schema = current_schema() AND table_name = $1 AND is_generated = 'ALWAYS'`,
       [table]
@@ -207,7 +271,7 @@ class PostgresAdapter implements BackupAdapter {
   }
 
   async schemaVersion(): Promise<number> {
-    const r = await this.pool.query<{ version: string | number | null }>(
+    const r = await this.q<{ version: string | number | null }>(
       `SELECT COALESCE(MAX(version), 0) AS version FROM schema_migrations`
     );
     const v = r.rows[0]?.version;
@@ -217,7 +281,7 @@ class PostgresAdapter implements BackupAdapter {
   async selectAll(table: string): Promise<Record<string, unknown>[]> {
     const order = SEQ_TABLES.has(table) ? " ORDER BY seq" : "";
     const generated = await this.generatedColumnsOf(table);
-    const r = await this.pool.query(`SELECT * FROM ${quoteIdent(table)}${order}`);
+    const r = await this.guarded(() => this.q(`SELECT * FROM ${quoteIdent(table)}${order}`));
     const rows = r.rows as Record<string, unknown>[];
     if (generated.size === 0) return rows;
     return rows.map((row) => Object.fromEntries(Object.entries(row).filter(([column]) => !generated.has(column))));
@@ -240,12 +304,12 @@ class PostgresAdapter implements BackupAdapter {
         })
         .join(", ");
       const params = batch.flatMap((row) => cols.map((c) => row[c] ?? null));
-      await this.pool.query(`INSERT INTO ${quoteIdent(table)} (${colSql})${overriding} VALUES ${valuesSql}`, params);
+      await this.q(`INSERT INTO ${quoteIdent(table)} (${colSql})${overriding} VALUES ${valuesSql}`, params);
     }
     if (keepsSeq) {
       // The restored rows carry their own seq; the next insert must get max + 1, not a value the identity already
       // handed out before the import (or one a restored row now holds).
-      await this.pool.query(
+      await this.q(
         `SELECT setval(pg_get_serial_sequence($1, 'seq'), COALESCE((SELECT MAX(seq) FROM ${quoteIdent(table)}), 0) + 1, false)`,
         [table]
       );
@@ -255,12 +319,224 @@ class PostgresAdapter implements BackupAdapter {
   async truncate(table: string): Promise<void> {
     // CASCADE because the importer truncates every table; FK chains would
     // otherwise force a topological order we don't want to maintain.
-    await this.pool.query(`TRUNCATE TABLE ${quoteIdent(table)} CASCADE`);
+    await this.guarded(() => this.q(`TRUNCATE TABLE ${quoteIdent(table)} CASCADE`));
+  }
+
+  async transaction<T>(fn: () => Promise<T>, options: { readOnly?: boolean } = {}): Promise<T> {
+    if (this.client) throw new Error("db backup: transactions do not nest.");
+    const client = await this.pool.connect();
+    try {
+      await client.query(options.readOnly ? "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY" : "BEGIN");
+      this.client = client;
+      const result = await fn();
+      await client.query("COMMIT");
+      return result;
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      this.client = undefined;
+      client.release();
+    }
+  }
+
+  async verifyAuditChain(): Promise<AuditChainResult> {
+    // A cursor needs a transaction: inside the caller's when one is open, else a read-only one of its own.
+    if (this.client) return verifyPostgresAuditChainByCursor(this.client);
+    return this.transaction(() => verifyPostgresAuditChainByCursor(this.client!), { readOnly: true });
   }
 
   async close(): Promise<void> {
     await this.pool.end();
   }
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// The backup file, and the audit verdict it records
+
+export interface BackupDump {
+  format: "ai-orchestrator-backup";
+  formatVersion: 1;
+  schemaVersion: number;
+  exportedAt: string;
+  dbType: "sqlite" | "postgres";
+  /**
+   * The source's audit-chain verdict when audit_logs was exported (absent in backups written before it was recorded,
+   * and with --exclude-history). db:import compares the restored chain with it.
+   */
+  auditVerdict?: AuditVerdictRecord;
+  tables: Record<string, Record<string, unknown>[]>;
+}
+
+/**
+ * Reads a backup from `adapter` in one read transaction (one snapshot: the recorded verdict is the verdict of the rows
+ * exported). Tables missing on an old schema are recorded empty, with a warning.
+ */
+export async function exportDump(
+  adapter: BackupAdapter,
+  options: { excludeHistory?: boolean; log?: (line: string) => void; warn?: (line: string) => void } = {}
+): Promise<BackupDump> {
+  const log = options.log ?? (() => undefined);
+  const warn = options.warn ?? log;
+  const targetTables = options.excludeHistory
+    ? EXPORTED_TABLES.filter((t) => !(HISTORY_TABLES as readonly string[]).includes(t))
+    : (EXPORTED_TABLES as readonly string[]);
+  return adapter.transaction(
+    async () => {
+      const schemaVersion = await adapter.schemaVersion();
+      const tables: Record<string, Record<string, unknown>[]> = {};
+      for (const table of targetTables) {
+        try {
+          const rows = await adapter.selectAll(table);
+          tables[table] = rows;
+          log(`  ${table}: ${rows.length} rows`);
+        } catch (err) {
+          // A table may be missing on an old schema where this build never wrote it. Don't fail the whole export:
+          // record an empty list and warn so the operator can investigate if it matters.
+          warn(`  ${table}: skipped (${err instanceof Error ? err.message : String(err)})`);
+          tables[table] = [];
+        }
+      }
+      let auditVerdict: AuditVerdictRecord | undefined;
+      if (targetTables.includes("audit_logs")) {
+        const verdict = await adapter.verifyAuditChain();
+        auditVerdict = auditVerdictRecord(verdict);
+        log(`  audit chain: ${verdictText(verdict)} (recorded in the backup)`);
+      }
+      return {
+        format: "ai-orchestrator-backup" as const,
+        formatVersion: 1 as const,
+        schemaVersion,
+        exportedAt: new Date().toISOString(),
+        dbType: adapter.kind,
+        ...(auditVerdict ? { auditVerdict } : {}),
+        tables
+      };
+    },
+    { readOnly: true }
+  );
+}
+
+/** audit_logs columns → the canonical fields the rule reads (free text only matters). */
+const AUDIT_FIELD_COLUMNS: Record<keyof AuditCanonicalInput, string> = {
+  id: "id", createdAt: "created_at", eventType: "event_type", category: "category", action: "action", outcome: "outcome",
+  actorUserId: "actor_user_id", actorEmail: "actor_email", actorType: "actor_type", resourceType: "resource_type",
+  resourceId: "resource_id", projectId: "project_id", ipAddress: "ip_address", userAgent: "user_agent",
+  metadataJson: "metadata_json", message: "message"
+};
+
+/** Ids of backup audit rows whose own text explains becoming unverifiable when restored (see audit-carry-over.ts). */
+function explainedAuditRows(rows: Record<string, unknown>[]): Set<string> {
+  const explained = new Set<string>();
+  for (const row of rows) {
+    const fields = Object.fromEntries(
+      Object.entries(AUDIT_FIELD_COLUMNS).map(([field, column]) => [field, typeof row[column] === "string" ? row[column] : row[column] == null ? null : String(row[column])])
+    ) as unknown as AuditCanonicalInput;
+    if (unverifiableOnPostgresBySource(fields)) explained.add(String(row.id));
+  }
+  return explained;
+}
+
+/** A restore the backup's recorded audit verdict refuses (rolled back). */
+export class AuditVerdictMismatch extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "AuditVerdictMismatch";
+  }
+}
+
+export interface ImportOptions {
+  merge?: boolean;
+  /** Rows of a table as they go in (db:import re-encrypts secrets here); returns the rows and how many were changed. */
+  prepare?: (table: string, rows: Record<string, unknown>[]) => { rows: Record<string, unknown>[]; touched: number };
+  log?: (line: string) => void;
+  warn?: (line: string) => void;
+}
+
+export interface ImportReport {
+  totalInserted: number;
+  totalTouched: number;
+  /** The restored chain's verdict (when audit_logs was restored), and the rows that became unverifiable as allowed. */
+  audit?: { restored: AuditChainResult; recorded?: AuditVerdictRecord; becameUnverifiable: string[] };
+}
+
+/**
+ * Restores `dump` into `adapter` in one transaction. When the backup recorded its audit verdict, the restored chain is
+ * verified before committing and must give the same verdict, except rows the rule allows to become unverifiable
+ * (two or more U+FFFD once characters this store cannot keep become U+FFFD); otherwise everything rolls back.
+ * A backup without a recorded verdict (older db:export) restores as before, with a note.
+ */
+export async function importDump(adapter: BackupAdapter, dump: BackupDump, options: ImportOptions = {}): Promise<ImportReport> {
+  const log = options.log ?? (() => undefined);
+  const warn = options.warn ?? log;
+  const restoresAudit = (dump.tables.audit_logs?.length ?? 0) > 0 || dump.auditVerdict !== undefined;
+  return adapter.transaction(async () => {
+    if (!options.merge) {
+      log("Truncating destination tables...");
+      // Reverse order, so a later non-cascading SQLite delete doesn't hit a parent before its children (CASCADE on
+      // Postgres makes this moot; the symmetry keeps both paths predictable).
+      for (const table of [...EXPORTED_TABLES].reverse()) {
+        try {
+          await adapter.truncate(table);
+        } catch (err) {
+          warn(`  ${table}: truncate skipped (${err instanceof Error ? err.message : String(err)})`);
+        }
+      }
+    }
+    let totalInserted = 0;
+    let totalTouched = 0;
+    for (const table of EXPORTED_TABLES) {
+      const rows = dump.tables[table];
+      if (!rows || rows.length === 0) {
+        log(`  ${table}: 0 rows`);
+        continue;
+      }
+      const { rows: prepared, touched } = options.prepare ? options.prepare(table, rows) : { rows, touched: 0 };
+      try {
+        await adapter.insertRows(table, prepared);
+      } catch (err) {
+        throw new Error(`Failed to insert into ${table}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      totalInserted += prepared.length;
+      totalTouched += touched;
+      log(`  ${table}: ${prepared.length} rows${touched > 0 ? ` (${touched} re-encrypted)` : ""}`);
+    }
+    if (!restoresAudit) return { totalInserted, totalTouched };
+
+    const restored = await adapter.verifyAuditChain();
+    if (!dump.auditVerdict) {
+      log(
+        `Note: this backup does not record its audit-chain verdict (written by an older db:export), so the restored chain ` +
+          `is not compared with it. Restored audit chain: ${verdictText(restored)}.`
+      );
+      return { totalInserted, totalTouched, audit: { restored, becameUnverifiable: [] } };
+    }
+    if (options.merge) {
+      log(
+        `Note: --merge keeps rows already in the database, so the restored audit chain is not compared with the backup's ` +
+          `verdict. Restored audit chain: ${verdictText(restored)}.`
+      );
+      return { totalInserted, totalTouched, audit: { restored, recorded: dump.auditVerdict, becameUnverifiable: [] } };
+    }
+    const recorded = auditVerdictFromRecord(dump.auditVerdict);
+    const { problems, becameUnverifiable } = restoredAuditProblems(recorded, restored, explainedAuditRows(dump.tables.audit_logs ?? []));
+    if (problems.length > 0) {
+      throw new AuditVerdictMismatch(
+        `The restored audit chain does not match the backup's recorded verdict (${verdictText(recorded)}): ${problems.join("; ")}. ` +
+          `Nothing was restored (rolled back). Restore on the same kind of store and Node version that wrote the backup, ` +
+          `or investigate the backup file.`
+      );
+    }
+    log(`Audit chain: ${verdictText(restored)}, as the backup recorded (${verdictText(recorded)}).`);
+    if (becameUnverifiable.length > 0) {
+      log(
+        `Note: ${becameUnverifiable.length} audit row(s) verified in the backup cannot be verified after the restore ` +
+          `(${becameUnverifiable.slice(0, 8).join(", ")}${becameUnverifiable.length > 8 ? ", …" : ""}): each holds two or more U+FFFD once ` +
+          `U+0000 and lone surrogates (which this store cannot keep) become U+FFFD. Keep the backup file as the record for them.`
+      );
+    }
+    return { totalInserted, totalTouched, audit: { restored, recorded: dump.auditVerdict, becameUnverifiable } };
+  });
 }
 
 export async function openBackupAdapter(): Promise<BackupAdapter> {
