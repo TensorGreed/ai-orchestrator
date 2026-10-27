@@ -3,9 +3,10 @@
  *
  * What it does, in order:
  *  1. Source: opens the SQLite file read-only, inside one read transaction (a consistent snapshot), and compares its
- *     tables and columns with the schema this build's SqliteStore creates. Older (a table or column missing): refused,
- *     start this build once against the file to upgrade it. Newer (a table or column this build does not know):
- *     refused, run db:copy from the build that wrote it.
+ *     schema with the one this build's SqliteStore creates: tables and columns, indexes (name, unique, key columns,
+ *     partial), triggers (names) and the schema_markers rows the store writes. Older (something missing): refused,
+ *     start this build once against the file to upgrade it. Newer (something this build does not know): refused, run
+ *     db:copy from the build that wrote it. A same-named index defined differently is refused with both hints.
  *  2. Target: everything runs on one connection holding the migrations advisory lock (withMigrationLock), so an API
  *     instance starting against the target waits until the copy has committed or rolled back. An empty database with
  *     no applied migrations is migrated first through the normal chain (applyMigrationChain, as PostgresStore does at
@@ -142,22 +143,50 @@ interface SqliteTable {
   columns: string[];
 }
 
-/** User tables of a SQLite database (FTS5 virtual tables, their shadow tables and sqlite_* excluded). */
-function sqliteTables(db: BetterSqlite3Database): Map<string, SqliteTable> {
-  const master = db.prepare(`SELECT name, sql FROM sqlite_master WHERE type = 'table'`).all() as Array<{ name: string; sql: string | null }>;
-  const virtual = master.filter((row) => /^CREATE VIRTUAL TABLE/i.test(row.sql ?? "")).map((row) => row.name);
+interface SqliteSchema {
+  /** User tables (FTS5 virtual tables, their shadow tables and sqlite_* excluded). */
+  tables: Map<string, SqliteTable>;
+  /** Named indexes on user tables (sqlite_autoindex_* excluded): a definition string to compare. */
+  indexes: Map<string, string>;
+  /** Trigger names. */
+  triggers: Set<string>;
+  /** schema_markers names (rows the store's migrate() writes; a data-only migration records itself there). */
+  markers: Set<string>;
+}
+
+/** The parts of a SQLite schema db:copy compares with this build's. */
+function sqliteSchema(db: BetterSqlite3Database): SqliteSchema {
+  const master = db.prepare(`SELECT type, name, tbl_name, sql FROM sqlite_master`).all() as Array<{ type: string; name: string; tbl_name: string; sql: string | null }>;
+  const virtual = master.filter((row) => row.type === "table" && /^CREATE VIRTUAL TABLE/i.test(row.sql ?? "")).map((row) => row.name);
   const internal = (name: string) => name.startsWith("sqlite_") || virtual.some((v) => name === v || name.startsWith(`${v}_`));
   const tables = new Map<string, SqliteTable>();
-  for (const { name } of master) {
-    if (internal(name)) continue;
-    const columns = (db.prepare(`PRAGMA table_info(${sqliteIdent(name)})`).all() as Array<{ name: string }>).map((c) => c.name);
-    tables.set(name, { columns });
+  const indexes = new Map<string, string>();
+  const triggers = new Set<string>();
+  for (const row of master) {
+    if (row.type === "table" && !internal(row.name)) {
+      const columns = (db.prepare(`PRAGMA table_info(${sqliteIdent(row.name)})`).all() as Array<{ name: string }>).map((c) => c.name);
+      tables.set(row.name, { columns });
+    }
   }
-  return tables;
+  for (const row of master) {
+    if (row.type === "trigger") triggers.add(row.name);
+    if (row.type !== "index" || row.name.startsWith("sqlite_autoindex_") || internal(row.tbl_name)) continue;
+    const list = db.prepare(`PRAGMA index_list(${sqliteIdent(row.tbl_name)})`).all() as Array<{ name: string; unique: number; partial: number }>;
+    const entry = list.find((item) => item.name === row.name);
+    const keys = (db.prepare(`PRAGMA index_xinfo(${sqliteIdent(row.name)})`).all() as Array<{ name: string | null; key: number; desc: number }>)
+      .filter((column) => column.key === 1)
+      .map((column) => `${column.name ?? "<expression>"}${column.desc ? " DESC" : ""}`);
+    indexes.set(row.name, `${entry?.unique ? "UNIQUE " : ""}ON ${row.tbl_name} (${keys.join(", ")})${entry?.partial ? " WHERE …" : ""}`);
+  }
+  const markers = new Set<string>();
+  if (tables.has("schema_markers")) {
+    for (const { name } of db.prepare(`SELECT name FROM schema_markers`).all() as Array<{ name: string }>) markers.add(name);
+  }
+  return { tables, indexes, triggers, markers };
 }
 
 /** The schema this build's SqliteStore creates (a fresh file in a temp directory, removed afterwards). */
-async function codeSqliteTables(): Promise<Map<string, SqliteTable>> {
+async function codeSqliteSchema(): Promise<SqliteSchema> {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "l2m-db-copy-schema-"));
   try {
     const file = path.join(dir, "schema.db");
@@ -165,7 +194,7 @@ async function codeSqliteTables(): Promise<Map<string, SqliteTable>> {
     await store.close();
     const db = new Database(file, { readonly: true });
     try {
-      return sqliteTables(db);
+      return sqliteSchema(db);
     } finally {
       db.close();
     }
@@ -174,30 +203,51 @@ async function codeSqliteTables(): Promise<Map<string, SqliteTable>> {
   }
 }
 
-/** Refuses a source whose schema is not this build's: older (boot once to upgrade) or newer (copy from that build). */
-function checkSourceSchema(source: Map<string, SqliteTable>, code: Map<string, SqliteTable>, sqlitePath: string): void {
+/**
+ * Refuses a source whose schema is not this build's: older (boot once to upgrade) or newer (copy from that build).
+ * Tables, columns, indexes, triggers and schema markers all count: a migration that only adds a unique index (and
+ * dedupes the rows it would refuse) or only transforms data (recording a marker) leaves tables and columns as they were.
+ */
+function checkSourceSchema(source: SqliteSchema, code: SqliteSchema, sqlitePath: string): void {
   const missing: string[] = [];
   const unknown: string[] = [];
-  for (const [table, { columns }] of code) {
-    const have = source.get(table);
+  const differing: string[] = [];
+  for (const [table, { columns }] of code.tables) {
+    const have = source.tables.get(table);
     if (!have) missing.push(table);
     else for (const column of columns) if (!have.columns.includes(column)) missing.push(`${table}.${column}`);
   }
-  for (const [table, { columns }] of source) {
-    const known = code.get(table);
+  for (const [table, { columns }] of source.tables) {
+    const known = code.tables.get(table);
     if (!known) unknown.push(table);
     else for (const column of columns) if (!known.columns.includes(column)) unknown.push(`${table}.${column}`);
   }
+  for (const [name, definition] of code.indexes) {
+    const have = source.indexes.get(name);
+    if (have === undefined) missing.push(`index ${name}`);
+    else if (have !== definition) differing.push(`index ${name} is ${have} in the file, ${definition} in this build`);
+  }
+  for (const name of source.indexes.keys()) if (!code.indexes.has(name)) unknown.push(`index ${name}`);
+  for (const name of code.triggers) if (!source.triggers.has(name)) missing.push(`trigger ${name}`);
+  for (const name of source.triggers) if (!code.triggers.has(name)) unknown.push(`trigger ${name}`);
+  for (const name of code.markers) if (!source.markers.has(name)) missing.push(`schema marker ${name}`);
+  for (const name of source.markers) if (!code.markers.has(name)) unknown.push(`schema marker ${name}`);
+  const upgrade =
+    `start this build once against it (DB_SQLITE_PATH=${sqlitePath} pnpm --filter @ai-orchestrator/api start, wait for "listening", ` +
+    `stop it), then run db:copy again`;
   if (unknown.length > 0) {
     throw new DbCopyRefusal(
-      `The SQLite database has ${unknown.length} table(s)/column(s) this build does not know (${preview(unknown)}): it was written by a newer ` +
+      `The SQLite database has ${unknown.length} schema object(s) this build does not know (${preview(unknown)}): it was written by a newer ` +
         `build. Run db:copy from that build (or a newer one), so nothing is dropped.`
     );
   }
   if (missing.length > 0) {
+    throw new DbCopyRefusal(`The SQLite database is older than this build (missing ${preview(missing)}). Upgrade it first: ${upgrade}.`);
+  }
+  if (differing.length > 0) {
     throw new DbCopyRefusal(
-      `The SQLite database is older than this build (missing ${preview(missing)}). Upgrade it first: start this build once ` +
-        `against it (DB_SQLITE_PATH=${sqlitePath} pnpm --filter @ai-orchestrator/api start, wait for "listening", stop it), then run db:copy again.`
+      `The SQLite database's schema differs from this build's (${preview(differing, 4)}). If the file is older, upgrade it first: ${upgrade}. ` +
+        `If a newer build wrote it, run db:copy from that build.`
     );
   }
 }
@@ -647,9 +697,10 @@ export async function runDbCopy(options: DbCopyOptions): Promise<DbCopyReport> {
   try {
     // One read transaction: every read below sees the same snapshot, even if something writes the file meanwhile.
     db.exec("BEGIN");
-    const source = sqliteTables(db);
+    const sourceSchema = sqliteSchema(db);
+    const source = sourceSchema.tables;
     if (source.size === 0) throw new DbCopyRefusal(`--from: ${sqlitePath} holds no tables; it is not an L2M database.`);
-    checkSourceSchema(source, await codeSqliteTables(), options.sqlitePath);
+    checkSourceSchema(sourceSchema, await codeSqliteSchema(), options.sqlitePath);
     log(`Source: SQLite ${sqlitePath} (read-only), schema matches this build.`);
 
     const sourceAuditRows = readSqliteAuditChainRows(db);
@@ -816,9 +867,17 @@ async function copyInto(client: PoolClient, ctx: CopyContext): Promise<DbCopyRep
         try {
           await client.query(insertHead + tuples.join(", "), pgParams(params));
         } catch (error) {
-          throw new Error(
-            `Copying ${plan.table} failed in the batch from SQLite rowid ${String(rows[0]!.__rowid)} to ${String(rows[rows.length - 1]!.__rowid)}: ${describeError(error)}`
-          );
+          const range = `the batch from SQLite rowid ${String(rows[0]!.__rowid)} to ${String(rows[rows.length - 1]!.__rowid)}`;
+          const pgError = error as { code?: string; constraint?: string; detail?: string };
+          if (pgError.code === "23505") {
+            throw new Error(
+              `Copying ${plan.table} failed in ${range}: the rows break the unique constraint "${pgError.constraint ?? "?"}" of ${plan.table} on ` +
+                `Postgres${pgError.detail ? ` (${pgError.detail})` : ""}. Nothing was committed (the copy rolled back). If the SQLite file ` +
+                `predates that constraint, start this build once against it so its migration applies, then run db:copy again. Otherwise ` +
+                `two SQLite values become the same on Postgres (U+0000 and lone surrogates are stored as U+FFFD): fix one of the rows.`
+            );
+          }
+          throw new Error(`Copying ${plan.table} failed in ${range}: ${describeError(error)}`);
         }
         copied += rows.length;
       }

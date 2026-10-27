@@ -92,6 +92,18 @@ const BROKEN_SOURCES: Record<string, { brokenAt: string; seed: (file: string) =>
   }
 };
 
+/** guard_token_vault rows with the given value_hash values (raw SQL, so a unique index can be missing or bypassed). */
+function insertVaultRows(raw: Database.Database, valueHashes: string[]): void {
+  const cols = raw.prepare(`PRAGMA table_info(guard_token_vault)`).all() as Array<{ name: string; type: string }>;
+  valueHashes.forEach((hash, i) => {
+    const id = `v${i + 1}`;
+    const values = cols.map((c) =>
+      c.name === "id" || c.name === "token" ? id : c.name === "value_hash" ? hash : /_at$/.test(c.name) ? new Date().toISOString() : /INT|REAL/i.test(c.type) ? 0 : "x"
+    );
+    raw.prepare(`INSERT INTO guard_token_vault (${cols.map((c) => c.name).join(", ")}) VALUES (${cols.map(() => "?").join(", ")})`).run(...values);
+  });
+}
+
 describe("parseDbCopyArgs", () => {
   it("reads sqlite:<path>, --to postgres and one of --yes / --dry-run", () => {
     expect(parseDbCopyArgs(["--from", "sqlite:/tmp/a.db", "--to", "postgres", "--yes"])).toEqual({ from: "/tmp/a.db", yes: true, dryRun: false, allowBrokenAudit: false, help: false });
@@ -159,6 +171,48 @@ describe("source refusals (before any connection)", () => {
     expect(message).toContain("budget_alerts");
     expect(message).toContain("audit_logs.entry_hash");
     expect(message).toContain(`DB_SQLITE_PATH=${sourcePath} pnpm --filter @ai-orchestrator/api start`);
+  });
+
+  it("a source missing a unique index this build creates (the duplicates it would refuse included): older, start this build once", async () => {
+    await sqliteSource();
+    const raw = new Database(sourcePath);
+    raw.exec(`DROP INDEX idx_guard_token_vault_hash`);
+    insertVaultRows(raw, ["same", "same"]);
+    raw.close();
+    const message = await refusal();
+    expect(message).toMatch(/older than this build \(missing index idx_guard_token_vault_hash\)/);
+    expect(message).toContain(`DB_SQLITE_PATH=${sourcePath} pnpm --filter @ai-orchestrator/api start`);
+  });
+
+  it("a missing trigger or schema marker (a data-only migration) is older too; an index this build does not know is newer", async () => {
+    await sqliteSource();
+    let raw = new Database(sourcePath);
+    raw.exec(`DROP TRIGGER kb_chunks_fts_ai; DELETE FROM schema_markers WHERE name = 'gate_admission_backfill'`);
+    raw.close();
+    const older = await refusal();
+    expect(older).toMatch(/older than this build/);
+    expect(older).toContain("trigger kb_chunks_fts_ai");
+    expect(older).toContain("schema marker gate_admission_backfill");
+
+    fs.rmSync(sourcePath);
+    await sqliteSource();
+    raw = new Database(sourcePath);
+    raw.exec(`CREATE INDEX idx_from_the_future ON workflows (name)`);
+    raw.close();
+    expect(await refusal()).toMatch(/1 schema object\(s\) this build does not know \(index idx_from_the_future\): it was written by a newer build/);
+  });
+
+  it("an index this build creates as UNIQUE but the file holds as plain is refused with both hints", async () => {
+    await sqliteSource();
+    const raw = new Database(sourcePath);
+    const { sql } = raw.prepare(`SELECT sql FROM sqlite_master WHERE name = 'idx_guard_token_vault_hash'`).get() as { sql: string };
+    raw.exec(`DROP INDEX idx_guard_token_vault_hash`);
+    raw.exec(sql.replace(/CREATE UNIQUE INDEX/i, "CREATE INDEX"));
+    raw.close();
+    const message = await refusal();
+    expect(message).toMatch(/schema differs from this build's \(index idx_guard_token_vault_hash is ON guard_token_vault \(value_hash\) in the file, UNIQUE ON guard_token_vault \(value_hash\) in this build\)/);
+    expect(message).toContain("start this build once");
+    expect(message).toContain("run db:copy from that build");
   });
 
   it("a source newer than this build (a table or column this build does not know): copy from that build", async () => {
@@ -590,6 +644,20 @@ describe.skipIf(!postgresUrl)("db:copy into Postgres", () => {
     const { report } = await copy();
     expect(report.migratedTarget).toBe(false);
     expect((await targetCounts()).users).toBe(1);
+  }, 120_000);
+
+  it("a unique violation on Postgres names the table and constraint and rolls back (two SQLite values equal once stored)", async () => {
+    await sqliteSource();
+    const raw = new Database(sourcePath);
+    // Distinct on SQLite; both "same\ufffd" on Postgres (U+0000 is stored as U+FFFD).
+    insertVaultRows(raw, ["same\u0000", "same\ufffd"]);
+    raw.close();
+    const error = await copy().then(() => undefined, (e: unknown) => e as Error);
+    expect(error).toBeInstanceOf(Error);
+    expect(error!.message).toMatch(/^Copying guard_token_vault failed in the batch from SQLite rowid 1 to 2: the rows break the unique constraint "idx_guard_token_vault_hash" of guard_token_vault on Postgres/);
+    expect(error!.message).toContain("Nothing was committed (the copy rolled back).");
+    expect(error!.message).toContain("start this build once against it");
+    expect((await targetCounts()).guard_token_vault).toBe(0);
   }, 120_000);
 
   it("converts values as the Postgres store writes them: '' timestamps to NULL, fractional integers rounded (reported), NUL in text to U+FFFD", async () => {
