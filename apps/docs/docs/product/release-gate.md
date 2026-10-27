@@ -30,7 +30,7 @@ What **deactivate** (`POST /api/workflows/:id/deactivate`) does depends on the g
 - **Without a release gate** it works as it always did: it unregisters the workflow's schedules and app or polling triggers. Production webhooks, chat, forms, the MCP Server Trigger, the MCP gateway, API-key `/execute`, queued jobs and sub-workflow calls keep running, whether or not a version is published.
 - **With a release gate on** it is the kill switch: every production entry point refuses the workflow, whatever version is published. Webhooks, forms, the MCP Server Trigger, chat, app webhooks and API-key `/execute` answer `409` with "This workflow is deactivated, so production runs are refused." Queued jobs fail with that message, a production run that calls it as a sub-workflow fails with it, a production failure that names it as the error workflow skips it (the log says why), and the MCP gateway stops listing its tool. The editor and `/webhook-test/` keep running the draft. **Activate** brings the published version back.
 
-The SQLite and Postgres code paths behave the same for workflows without a gate; gates exist only on SQLite in this release. To change what production does instead, publish (or roll back to) another version. Turning a trigger off in the draft does not touch production until you publish it.
+To change what production does instead, publish (or roll back to) another version. Turning a trigger off in the draft does not touch production until you publish it.
 
 ### Production paths belong to what serves production
 
@@ -155,5 +155,3 @@ Publishing, rollback and deciding a release request need `workflow:publish` on t
 - `POST /api/workflows/:id/release-gate/cases/admit` and `/reject` (`{ fixtureIds, reason? }`, admins) → `{ cases }`
 - `PUT /api/workflows/:id/release-gate/cases/:fixtureId/required` (`{ required }`, admins) → `{ cases }`
 - `POST /api/workflows/:id/release-gate/cases/requests` (`{ action: "admit" | "remove", fixtureIds, reason }`, `workflow:write`) → `202 { request }`, decided in Approvals
-
-On the Postgres store every release route (the admission routes included) answers `501`, and every entry point runs the draft.

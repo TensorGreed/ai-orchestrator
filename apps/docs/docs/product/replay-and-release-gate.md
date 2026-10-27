@@ -5,7 +5,7 @@ This page shows how a pipeline tests a workflow file from git against the golden
 Everything runs against your own deployment's API. Nothing here calls an outside service.
 
 ::: info What the server must have
-`replay run --set` with overrides, `--file`, `--models`, `--compare`, `--repeats`, `--aggregate` and `--estimate` needs a server with replay candidates, and `l2m release publish` needs a server with release gates. A server without them answers 400 for a request field it does not know (the CLI exits 2 and names the field) or has no publish route (exit 1). Release gates and golden-set import and export need the SQLite store; on Postgres those routes answer 501.
+`replay run --set` with overrides, `--file`, `--models`, `--compare`, `--repeats`, `--aggregate` and `--estimate` needs a server with replay candidates, and `l2m release publish` needs a server with release gates. A server without them answers 400 for a request field it does not know (the CLI exits 2 and names the field) or has no publish route (exit 1).
 :::
 
 ## Set up the CLI
@@ -164,7 +164,7 @@ l2m golden verify golden/support-bot.json --public-key deployment-public-key.pem
 The API routes behind the commands:
 
 - `GET /api/eval/datasets/:id/export[?sign=true]` (viewer with read access to the set's workflow; 404 when the set is not readable, 400 for a dataset that is not a golden set, 409 when the set holds a golden run of another workflow). `?sign=true` needs an admin: the signing key is the deployment's audit key, which only admins manage; anyone else gets 403 and can export unsigned. Cases without a golden run (hand-written cases, or a deleted golden run) are left out and counted in the `x-l2m-skipped-cases` header. The file is written by `l2m golden export -o` with mode 0600, never through a symbolic link.
-- `POST /api/eval/datasets/import` (builder with edit access to the target workflow; body `{ file, workflowId, projectId?, name?, allowWorkflowMismatch? }`; `201 { dataset, imported, skipped, warnings }`). The caller is authenticated before the body is read, so an anonymous upload is refused (401) without being parsed. 400 for a file that does not match the format, is nested deeper than 64 levels, carries a workflow hash that does not match its workflow, or has a broken MCP cassette; 413 for a file or case over the size limits; 403 when you can read the workflow but not edit it; 404 when you cannot read it; 409 for a file exported from another workflow without `allowWorkflowMismatch`, and when the workflow's golden-run limits would be exceeded. Both routes answer 501 on the Postgres store.
+- `POST /api/eval/datasets/import` (builder with edit access to the target workflow; body `{ file, workflowId, projectId?, name?, allowWorkflowMismatch? }`; `201 { dataset, imported, skipped, warnings }`). The caller is authenticated before the body is read, so an anonymous upload is refused (401) without being parsed. 400 for a file that does not match the format, is nested deeper than 64 levels, carries a workflow hash that does not match its workflow, or has a broken MCP cassette; 413 for a file or case over the size limits; 403 when you can read the workflow but not edit it; 404 when you cannot read it; 409 for a file exported from another workflow without `allowWorkflowMismatch`, and when the workflow's golden-run limits would be exceeded.
 
 `GOLDEN_SET_IMPORT_MAX_BYTES` (default 33554432, 32 MiB) sets the largest file the import accepts and the import route's request body limit.
 

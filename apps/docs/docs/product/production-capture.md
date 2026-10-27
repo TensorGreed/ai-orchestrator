@@ -161,8 +161,6 @@ Every route checks access to the workflow, the same way as golden runs: a user w
 - `POST /api/replay/recordings/find-subject` (admin; `{ value, dataClass?, country? }`; `{ dataClass, callingCode, classesTried, matches (each with certainty and hits), counts, searched, covered, notCovered }`; searches only)
 - `POST /api/replay/recordings/find-subject/delete` (admin; `{ value, dataClass?, country?, targets: [{ kind, id, confirmPossible? }] }` from a search, up to 2000; `{ deleted, removed, skipped }`; a possible match needs `confirmPossible: true`)
 
-These routes need the SQLite store. On Postgres they answer 501, and capture does not run.
-
 ## Configuration
 
 | Variable | Default | |

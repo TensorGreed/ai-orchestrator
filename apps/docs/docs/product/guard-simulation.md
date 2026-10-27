@@ -110,5 +110,4 @@ A simulation's `status` is `running`, `completed`, `failed` (nothing could start
 
 ## Limits
 
-- **SQLite only.** On Postgres the simulation routes answer 501.
 - Simulation uses recorded runs only; it cannot say what the profile would do to traffic that was never recorded.

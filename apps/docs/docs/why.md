@@ -71,7 +71,7 @@ The features that closed-source agent platforms put behind enterprise SKUs are o
 - **RBAC** — global roles (admin/builder/operator/viewer) plus per-project roles (project_admin/editor/viewer) plus custom roles with a granular permission vocabulary.
 - **Audit log** — auth, MFA, SSO, API keys, secrets, workflow CRUD, execution outcomes, sharing changes, and more — with category/event-type/outcome filters and CSV export.
 - **Observability** — Prometheus `/metrics` endpoint with histograms, OTEL-compatible spans (in-memory or OTLP/HTTP export), SLO tracking with budgets surfaced as gauges.
-- **HA** — Leader election (only the leader runs the scheduler and triggers) and a separate webhook process (`WORKER_MODE=webhook`); running several replicas needs Postgres, which is in progress.
+- **HA** — Leader election (only the leader runs the scheduler and triggers) and a separate webhook process (`WORKER_MODE=webhook`); several replicas share one Postgres database, and one of them, elected with a Postgres advisory lock, runs the schedules and triggers.
 - **Source control** — Git push/pull workflows with credential stubbing, plus per-workflow versioning with restore.
 
 ## 6. Honest about what's still rough
