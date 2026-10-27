@@ -297,6 +297,59 @@ test.describe("golden journeys", () => {
     expect(await draft.json()).toMatchObject({ output: { result: "second" } });
   });
 
+  test("unpublishes: production runs v1, then the draft once v1 is taken down", async ({ page }) => {
+    await openStudio(page);
+    const stamp = Date.now();
+    const workflowId = `wf-e2e-unpublish-${stamp}`;
+    const hookPath = `e2e-unpublish-${stamp}`;
+    const workflow = (answer: string) => ({
+      id: workflowId,
+      name: `E2E Unpublish ${stamp}`,
+      schemaVersion: "1.0.0",
+      workflowVersion: 1,
+      nodes: [
+        { id: "hook", type: "webhook_input", name: "Hook", position: { x: 80, y: 180 }, config: { path: hookPath, method: "POST" } },
+        { id: "out", type: "output", name: "Output", position: { x: 380, y: 180 }, config: { responseTemplate: answer, outputKey: "result" } }
+      ],
+      edges: [{ id: "edge-1", source: "hook", target: "out" }]
+    });
+    expect((await page.request.post("/api/workflows", { data: workflow("published") })).ok()).toBeTruthy();
+    expect((await page.request.put(`/api/workflows/${workflowId}`, { data: workflow("draft") })).ok()).toBeTruthy();
+    const production = async () => (await (await page.request.post(`${API_URL}/webhook/${hookPath}`, { data: {} })).json()) as { output?: { result?: string } };
+
+    // Publish v1 from the version pill: production runs it while the draft moves on.
+    await page.reload();
+    await page.getByLabel("Workflow", { exact: true }).selectOption(workflowId);
+    await sidebarItem(page, "Editor").click();
+    const pill = page.getByRole("button", { name: /^Release:/ });
+    await expect(pill).toHaveText(/v2 · not published/);
+    await pill.click();
+    const dialog = page.getByRole("dialog", { name: "Publish to production" });
+    await dialog.getByLabel("Version").selectOption("1");
+    await dialog.getByRole("button", { name: "Publish v1" }).click();
+    await expect(dialog.getByText(/Published v1/)).toBeVisible();
+    await dialog.getByRole("button", { name: "Close" }).click();
+    await expect(pill).toHaveText(/v1 live · draft \+1/);
+    expect(await production()).toMatchObject({ output: { result: "published" } });
+
+    // Unpublish v1: the confirmation names it and says production runs the draft.
+    await pill.click();
+    await dialog.getByRole("button", { name: "Unpublish v1" }).click();
+    const confirm = page.getByRole("alertdialog", { name: "Unpublish v1?" });
+    await expect(confirm.getByText(/Production stops running v1 and runs the draft/)).toBeVisible();
+    await confirm.getByLabel("Reason (optional)").fill("E2E incident");
+    await confirm.getByRole("button", { name: "Unpublish v1" }).click();
+    await expect(confirm).toBeHidden();
+    await expect(dialog.getByRole("status")).toContainText("Unpublished.");
+    await dialog.getByRole("button", { name: "Close" }).click();
+    await expect(pill).toHaveText(/v2 · unpublished/);
+    expect(await production()).toMatchObject({ output: { result: "draft" } });
+
+    const history = (await (await page.request.get(`/api/workflows/${workflowId}/releases`)).json()) as { releases: Array<{ verdict: string; version: number; reason: string | null }>; publishedVersion: number | null };
+    expect(history.publishedVersion).toBeNull();
+    expect(history.releases[0]).toMatchObject({ verdict: "unpublished", version: 1, reason: "E2E incident" });
+  });
+
   test("captures a production run, masks it, and promotes it from the inbox into a golden set", async ({ page }) => {
     await openStudio(page);
     const stamp = Date.now();

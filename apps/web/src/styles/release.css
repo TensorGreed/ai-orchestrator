@@ -338,3 +338,26 @@
     display: none;
   }
 }
+
+/* Unpublish: the row in the Publish dialog and the confirm dialog on top of it. */
+.release-unpublish-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--line-strong);
+}
+
+.release-unpublish-row .settings-help {
+  margin: 0;
+}
+
+.release-unpublish-backdrop {
+  z-index: 70;
+}
+
+.release-unpublish-notice {
+  margin: 0 0 8px;
+}
