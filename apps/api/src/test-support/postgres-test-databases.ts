@@ -79,3 +79,26 @@ export async function listRunDatabases(run: string): Promise<string[]> {
     await admin.end();
   }
 }
+
+/**
+ * Drops the test and template databases a killed run left on the TEST_POSTGRES_URL server (a normal run drops its
+ * own). Every `t_*` / `l2m_tpl_*` database except `exceptRun`'s, so run it with no other test run in progress against
+ * that server. Returns the names dropped. From the command line: drop-leftover-test-databases.ts.
+ */
+export async function dropLeftoverTestDatabases(options: { exceptRun?: string } = {}): Promise<string[]> {
+  const admin = adminPool();
+  let names: string[];
+  try {
+    const result = await admin.query<{ datname: string }>(`SELECT datname FROM pg_database WHERE datname LIKE 't\\_%' OR datname LIKE 'l2m\\_tpl\\_%'`);
+    names = result.rows
+      .map((row) => row.datname)
+      .filter((name) => TEST_DATABASE.test(name) || TEMPLATE_DATABASE.test(name))
+      .filter((name) => !options.exceptRun || (name !== `l2m_tpl_${options.exceptRun}` && !name.startsWith(`t_${options.exceptRun}_`)))
+      // Clones before templates: a template cannot be dropped while a clone is being made from it.
+      .sort((a, b) => Number(TEMPLATE_DATABASE.test(a)) - Number(TEMPLATE_DATABASE.test(b)) || a.localeCompare(b));
+  } finally {
+    await admin.end();
+  }
+  await dropTestDatabases(names);
+  return names;
+}

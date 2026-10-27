@@ -15,6 +15,10 @@
  * there, the template included. A killed run can leave `t_*` / `l2m_tpl_*` databases behind (harmless; CI throws the
  * server away). To clear them on a local server, with no test run in progress:
  *
+ *   TEST_POSTGRES_URL=… pnpm --filter @ai-orchestrator/api exec tsx src/test-support/drop-leftover-test-databases.ts
+ *
+ * or with psql only:
+ *
  *   psql "$TEST_POSTGRES_URL" -Atc "SELECT format('DROP DATABASE %I WITH (FORCE);', datname) FROM pg_database
  *     WHERE datname ~ '^(t_[0-9a-f]+_[0-9a-f]+|l2m_tpl_[0-9a-f]+)$'" | psql "$TEST_POSTGRES_URL"
  *
@@ -37,6 +41,7 @@ import { PostgresStore, postgresPoolConfig, type PostgresStoreConfig } from "../
 import {
   adminPool,
   createMigratedTemplate,
+  dropLeftoverTestDatabases,
   dropTestDatabases,
   quoteDatabase,
   TEMPLATE_DATABASE,
@@ -46,7 +51,7 @@ import {
 
 import type { Store } from "../db/store.js";
 
-export { createMigratedTemplate, dropTestDatabases, testPostgresSettings, testPostgresUrl };
+export { createMigratedTemplate, dropLeftoverTestDatabases, dropTestDatabases, testPostgresSettings, testPostgresUrl };
 
 export type TestStoreKind = "sqlite" | "postgres";
 
