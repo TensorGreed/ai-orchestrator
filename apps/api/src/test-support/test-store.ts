@@ -127,6 +127,7 @@ let localTemplate: Promise<string> | undefined;
 function templateDatabase(): Promise<string> {
   const fromSetup = provided("l2mPostgresTemplate");
   if (fromSetup) return Promise.resolve(fromSetup);
+  // promise-ok: kept so every caller in this process waits for the same template; returned below
   localTemplate ??= (async () => {
     const name = `l2m_tpl_${testPostgresRun()}`;
     await createMigratedTemplate(name);

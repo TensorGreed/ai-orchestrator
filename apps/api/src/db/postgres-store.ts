@@ -195,6 +195,7 @@ export class PostgresStore implements Store {
 
   async close(): Promise<void> {
     // Idempotent like SqliteStore.close: the app's onClose and a caller may both close it; both wait for the end.
+    // promise-ok: kept and awaited below (and by every later close)
     this.closing ??= (async () => {
       await Promise.all([...this.leaderLocks].map((lock) => lock.release()));
       await this.pool.end();
