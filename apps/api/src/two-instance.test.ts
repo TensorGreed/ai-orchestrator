@@ -12,7 +12,7 @@ import type { FastifyInstance } from "fastify";
 import type { Workflow, WorkflowNode } from "@ai-orchestrator/shared";
 import { createApp } from "./app.js";
 import { parseConfig } from "./config.js";
-import type { PostgresStore } from "./db/postgres-store.js";
+import { LEADER_APPLICATION_NAME, type PostgresStore } from "./db/postgres-store.js";
 import { ADVISORY_LOCK_CLASS_LEADER } from "./db/postgres/leader-lock.js";
 import { AuthService } from "./services/auth-service.js";
 import { LeaderElectionService } from "./services/leader-election-service.js";
@@ -64,7 +64,8 @@ run("two API instances on one Postgres database", () => {
   let primary: TestStore | undefined;
   const instances: Instance[] = [];
   const tempDirs: string[] = [];
-  let fires: Array<{ instance: number; at: number }> = [];
+  /** Every tick fired (no `event`), and, for a failure message, when each scheduler registered and stopped. */
+  let fires: Array<{ instance: number; at: number; event?: string }> = [];
 
   afterEach(async () => {
     for (const instance of instances.splice(0)) {
@@ -95,7 +96,14 @@ run("two API instances on one Postgres database", () => {
         HA_RENEW_INTERVAL_MS: "100",
         ...overrides
       });
-      const scheduler = new SchedulerService(store, quiet);
+      const scheduler = new SchedulerService(store, (_level, message) => {
+        if (message === "Registered schedule") fires.push({ instance: i, at: Date.now(), event: "registered" });
+      });
+      const stopScheduler = scheduler.stop.bind(scheduler);
+      scheduler.stop = () => {
+        fires.push({ instance: i, at: Date.now(), event: "stopped" });
+        stopScheduler();
+      };
       // Record each tick as it fires (the cron's own time), before the app's handler runs it.
       const setHandler = scheduler.setExecutionHandler.bind(scheduler);
       scheduler.setExecutionHandler = (handler) =>
@@ -111,14 +119,15 @@ run("two API instances on one Postgres database", () => {
     return instances;
   }
 
-  const cronSeconds = async (): Promise<number[]> => fires.map((fire) => fire.at);
+  const ticks = () => fires.filter((fire) => !fire.event);
+  const cronSeconds = async (): Promise<number[]> => ticks().map((fire) => fire.at);
   /**
    * The shortest gap between two fires, by any instance. The cron ticks every second; a tick fired twice (two
    * leaders, or two jobs for one schedule) shows a gap near zero. Timer jitter and a busy event loop move a fire by tens of milliseconds, not
    * a second.
    */
   const shortestGap = (): number => {
-    const times = fires.map((fire) => fire.at).sort((x, y) => x - y);
+    const times = ticks().map((fire) => fire.at).sort((x, y) => x - y);
     return Math.min(...times.slice(1).map((time, index) => time - times[index]!));
   };
 
@@ -246,6 +255,22 @@ run("two API instances on one Postgres database", () => {
       await services[first]!.stop();
       await until(() => services[other]!.isLeader(), "the other instance to lead");
       expect(events).toEqual([`lead-${first}`, `resign-${first}`, `lead-${other}`]);
+
+      // Checks asked for at once share one check: one dedicated connection, never a second one asking for the lock.
+      const extra = twins[first]!.leaderLock({ leaseName: "other-lease", holderId: "extra", ttlMs: 1_000 });
+      expect(await Promise.all(Array.from({ length: 5 }, () => extra.check()))).toEqual([true, true, true, true, true]);
+      const pool = testStorePool(primary!);
+      try {
+        const sessions = await pool.query<{ n: string }>(
+          `SELECT COUNT(*) AS n FROM pg_stat_activity WHERE datname = current_database() AND application_name = $1`,
+          [LEADER_APPLICATION_NAME]
+        );
+        // The other instance's lock and this one.
+        expect(Number(sessions.rows[0]!.n)).toBe(2);
+      } finally {
+        await pool.end();
+      }
+      await extra.release();
     } finally {
       for (const service of services) await service.stop();
       for (const store of twins) await store.close();

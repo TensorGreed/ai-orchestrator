@@ -62,6 +62,8 @@ export interface PostgresStoreConfig {
  */
 export const ADVISORY_LOCK_CLASS_MIGRATIONS = 0x4c324d;
 export { ADVISORY_LOCK_CLASS_LEADER };
+/** Phase 13.1 — application_name of the dedicated leader-lock connection. */
+export const LEADER_APPLICATION_NAME = "l2m-leader";
 
 /** TIMESTAMPTZ through parseTimestamptz; every other type keeps pg's default parser. */
 const POSTGRES_TYPES = {
@@ -209,7 +211,8 @@ export class PostgresStore implements Store {
    */
   leaderLock(input: { leaseName: string; holderId: string; ttlMs: number }): LeaderLock {
     const lock = new PgLeaderLock({
-      clientConfig: postgresPoolConfig(this.config, { max: 1 }),
+      // Named, so an operator can find the leader's session (pg_stat_activity.application_name).
+      clientConfig: postgresPoolConfig(this.config, { max: 1, application_name: LEADER_APPLICATION_NAME }),
       pool: this.pool,
       ...input
     });

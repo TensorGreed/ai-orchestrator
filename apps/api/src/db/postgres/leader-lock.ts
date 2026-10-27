@@ -44,6 +44,8 @@ export class PgLeaderLock implements LeaderLock {
   private held = false;
   private released = false;
   private readonly listeners: Array<() => void> = [];
+  /** The check in flight: checks never overlap, so there is never a second connection asking for the lock. */
+  private checking: Promise<boolean> | null = null;
 
   constructor(private readonly options: PgLeaderLockOptions) {}
 
@@ -52,6 +54,14 @@ export class PgLeaderLock implements LeaderLock {
   }
 
   async check(): Promise<boolean> {
+    // promise-ok: kept so a concurrent caller waits for the same check; cleared when it settles
+    this.checking ??= this.checkOnce().finally(() => {
+      this.checking = null;
+    });
+    return await this.checking;
+  }
+
+  private async checkOnce(): Promise<boolean> {
     if (this.released) return false;
     try {
       const client = await this.connection();

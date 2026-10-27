@@ -66,6 +66,8 @@ export class LeaderElectionService {
   private readonly lock: LeaderLock | undefined;
   /** Leading since acquireEarly(), with onBecomeLeader not yet run (start() runs it). */
   private unannounced = false;
+  /** A tick in flight: a slow check or leader callback never overlaps the next interval's tick. */
+  private ticking = false;
 
   constructor(
     private readonly store: Store,
@@ -179,7 +181,16 @@ export class LeaderElectionService {
   }
 
   private async tick(): Promise<void> {
-    if (this.stopped) return;
+    if (this.stopped || this.ticking) return;
+    this.ticking = true;
+    try {
+      await this.tickOnce();
+    } finally {
+      this.ticking = false;
+    }
+  }
+
+  private async tickOnce(): Promise<void> {
     let acquired = false;
     try {
       acquired = this.lock
