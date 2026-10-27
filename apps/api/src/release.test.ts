@@ -335,7 +335,7 @@ describe("the release gate", () => {
     expect(history.releases.map((release) => release.verdict)).toEqual(["passed", "rollback", "overridden", "ungated"]);
     expect(await auditTypes(context)).toEqual(expect.arrayContaining(["release.gate.updated", "release.blocked", "release.overridden", "release.rolled_back", "release.published"]));
     const state = (await call(context, "GET", "/api/workflows/wf-gate/release-state", builder.cookie)).json<{ state: Record<string, unknown> }>().state;
-    expect(state).toEqual({ draftVersion: v3, publishedVersion: v3, aheadBy: 0, gateEnabled: true, gateEnforced: false, productionRefused: false, canPublish: true, canEditGate: true });
+    expect(state).toEqual({ draftVersion: v3, publishedVersion: v3, aheadBy: 0, gateEnabled: true, gateEnforced: false, productionRefused: false, unpublishedAt: null, canPublish: true, canEditGate: true });
   });
 
   it("re-judges a job under the policy in force at publish time", async () => {

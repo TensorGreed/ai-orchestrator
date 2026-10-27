@@ -9,11 +9,26 @@
  *    someone decides which version it should see.
  * 2. Every `runWorkflowExecution` call, in any file, names its channel.
  * 3. The production routes and loaders are wired to the production loader.
+ * 4. After an unpublish, the production entry points run the draft again, as
+ *    a never-published workflow does (over the API, on the test store).
  */
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
+import type { Workflow } from "@ai-orchestrator/shared";
+import {
+  callAs,
+  closeReleaseTestContext,
+  createReleaseTestContext,
+  enableReleaseGate,
+  hookWorkflow,
+  loginAs,
+  productionHook,
+  saveVersion,
+  testNode,
+  type ReleaseTestContext
+} from "./test-support/release.test-helper.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const read = (file: string) => fs.readFileSync(path.join(here, file), "utf8");
@@ -65,7 +80,7 @@ const WORKFLOW_LOADS: LoadSite[] = [
   { file: "db/postgres-store.ts", match: "", kind: "not_run", why: "the Postgres store's own internals (the delegations to db/postgres/*)", count: 3 },
   { file: "db/postgres/workflows.ts", match: "", kind: "not_run", why: "the Postgres store's workflow internals (getWorkflow, upsert, delete, getWorkflowVersion)", count: 4 },
   { file: "db/postgres/data-destinations.ts", match: "", kind: "not_run", why: "the Postgres store's destination-scan stub, not a workflow run", count: 1 },
-  { file: "services/release-service.ts", match: "", kind: "production", why: "the release resolver, production path claims and its gate, judge and request checks", count: 19 },
+  { file: "services/release-service.ts", match: "", kind: "production", why: "the release resolver, production path claims and its gate, judge, request and unpublish checks", count: 20 },
   { file: "services/gate-admission-service.ts", match: "", kind: "not_run", why: "gate admission reads only a workflow's name and project (audit, requests, inbox views)", count: 3 },
   { file: "services/data-destination-service.ts", match: "", kind: "not_run", why: "the not-classified-yet list reads the draft and published node configs for their hosts in one query; nothing runs" },
 
@@ -340,5 +355,182 @@ describe("production entry points load the published version", () => {
     expect(appSource).toContain('channel: state.releaseChannel === "production" ? "production" : "draft"');
     expect(appSource).toContain('releaseVersion: typeof state.releaseVersion === "number" ? state.releaseVersion : null');
     expect(read("run-scope.ts")).toMatch(/getRunnableWorkflow/);
+  });
+});
+
+describe("after an unpublish every production entry point runs the draft", () => {
+  // Every production loader above goes through productionWorkflow / resolveRunnableWorkflow (parts 1-3), so the
+  // resolver's answer after an unpublish is what each of them runs; these runs check it end to end per entry point.
+  const contexts: ReleaseTestContext[] = [];
+  const open = async (options: { scheduler?: boolean } = {}) => {
+    const created = await createReleaseTestContext(options);
+    contexts.push(created);
+    return created;
+  };
+  afterEach(async () => {
+    while (contexts.length > 0) await closeReleaseTestContext(contexts.pop()!);
+  });
+
+  /** Publishes the first saved version, saves `draft` as the next one, then unpublishes it. */
+  async function publishThenUnpublish(ctx: ReleaseTestContext, cookie: string, published: Workflow, draft: Workflow, check?: () => Promise<void>): Promise<void> {
+    const v1 = await saveVersion(ctx, published);
+    expect((await callAs(ctx, "POST", `/api/workflows/${published.id}/publish`, cookie, { version: v1 })).statusCode).toBe(200);
+    await saveVersion(ctx, draft);
+    if (check) await check();
+    const response = await callAs(ctx, "POST", `/api/workflows/${published.id}/unpublish`, cookie, {});
+    expect(response.statusCode, response.body).toBe(200);
+  }
+
+  it("production webhooks, API-key /execute and /execute/stream, chat and forms", async () => {
+    const ctx = await open();
+    const builder = await loginAs(ctx, "builder");
+    await publishThenUnpublish(ctx, builder.cookie, hookWorkflow("wf-hook", "published", "default", "old-path"), hookWorkflow("wf-hook", "draft", "default", "new-path"), async () => {
+      expect(await productionHook(ctx, "old-path")).toMatchObject({ output: { result: "published" } });
+      expect((await productionHook(ctx, "new-path")).status).toBe(404);
+    });
+    expect(await productionHook(ctx, "new-path")).toMatchObject({ status: 200, output: { result: "draft" } });
+    expect((await productionHook(ctx, "old-path")).status).toBe(404);
+
+    const key = (await callAs(ctx, "POST", "/api/auth/api-keys", builder.cookie, { name: "CI" })).json<{ key: string }>().key;
+    const viaKey = await ctx.app.inject({ method: "POST", url: "/api/workflows/wf-hook/execute", headers: { authorization: `Bearer ${key}` }, payload: {} });
+    expect(viaKey.statusCode, viaKey.body).toBe(200);
+    expect(viaKey.json<{ output: unknown }>().output).toMatchObject({ result: "draft" });
+    const streamed = await ctx.app.inject({ method: "POST", url: "/api/workflows/wf-hook/execute/stream", headers: { authorization: `Bearer ${key}` }, payload: {} });
+    expect(streamed.body).toContain('"result":"draft"');
+
+    const chat = (answer: string): Workflow => ({
+      id: "wf-chat",
+      name: "Chat",
+      schemaVersion: "1.0.0",
+      workflowVersion: 1,
+      projectId: "default",
+      nodes: [testNode("chat", "chat_trigger", {}), testNode("out", "output", { responseTemplate: answer })],
+      edges: [{ id: "e1", source: "chat", target: "out" }]
+    }) as Workflow;
+    await publishThenUnpublish(ctx, builder.cookie, chat("chat-published"), chat("chat-draft"));
+    const chatted = await ctx.app.inject({ method: "POST", url: "/api/chat/wf-chat", payload: { message: "hi" } });
+    expect(chatted.statusCode, chatted.body).toBe(200);
+    expect(JSON.stringify(chatted.json().output)).toContain("chat-draft");
+
+    const form = (formPath: string): Workflow => ({
+      id: "wf-form",
+      name: "Form",
+      schemaVersion: "1.0.0",
+      workflowVersion: 1,
+      projectId: "default",
+      nodes: [testNode("form", "form_trigger", { path: formPath, title: "Feedback" }), testNode("out", "output", { responseTemplate: "thanks" })],
+      edges: [{ id: "e1", source: "form", target: "out" }]
+    }) as Workflow;
+    await publishThenUnpublish(ctx, builder.cookie, form("form-published"), form("form-draft"), async () => {
+      expect((await ctx.app.inject({ method: "GET", url: "/api/forms/form-published" })).statusCode).toBe(200);
+      expect((await ctx.app.inject({ method: "GET", url: "/api/forms/form-draft" })).statusCode).toBe(404);
+    });
+    expect((await ctx.app.inject({ method: "GET", url: "/api/forms/form-draft" })).statusCode).toBe(200);
+    expect((await ctx.app.inject({ method: "GET", url: "/api/forms/form-published" })).statusCode).toBe(404);
+  });
+
+  it("a gated workflow too: its draft serves the production webhook once unpublished", async () => {
+    const ctx = await open();
+    const admin = await loginAs(ctx, "admin");
+    await saveVersion(ctx, hookWorkflow("wf-gated", "reviewed"));
+    expect((await enableReleaseGate(ctx, admin.cookie, "wf-gated", { enforced: true })).statusCode).toBe(200);
+    await saveVersion(ctx, hookWorkflow("wf-gated", "draft"));
+    expect(await productionHook(ctx, "hook-wf-gated")).toMatchObject({ output: { result: "reviewed" } });
+    expect((await callAs(ctx, "POST", "/api/workflows/wf-gated/unpublish", admin.cookie, {})).statusCode).toBe(200);
+    expect(await productionHook(ctx, "hook-wf-gated")).toMatchObject({ status: 200, output: { result: "draft" } });
+  });
+
+  it("schedules re-register from the draft and run it", async () => {
+    const ctx = await open({ scheduler: true });
+    const builder = await loginAs(ctx, "builder");
+    const scheduled = (answer: string, cron: string): Workflow => ({
+      id: "wf-cron",
+      name: "Cron",
+      schemaVersion: "1.0.0",
+      workflowVersion: 1,
+      projectId: "default",
+      nodes: [testNode("tick", "schedule_trigger", { cronExpression: cron, timezone: "UTC", active: true }), testNode("out", "output", { responseTemplate: answer })],
+      edges: [{ id: "e1", source: "tick", target: "out" }]
+    }) as Workflow;
+    // What each registered job was built from: "cron|timezone".
+    const jobs = () => [...(ctx.scheduler as unknown as { signatures: Map<string, string> }).signatures.values()];
+    await publishThenUnpublish(ctx, builder.cookie, scheduled("published", "0 3 * * *"), scheduled("draft", "0 4 * * *"), async () => {
+      await ctx.scheduler!.reloadWorkflow("wf-cron");
+      expect(JSON.stringify(jobs())).toContain("0 3 * * *");
+    });
+    expect(JSON.stringify(jobs())).toContain("0 4 * * *");
+    expect(JSON.stringify(jobs())).not.toContain("0 3 * * *");
+    const handler = (ctx.scheduler as unknown as { executeHandler: (input: Record<string, string>) => Promise<void> }).executeHandler;
+    await handler({ workflowId: "wf-cron", workflowName: "Cron", scheduleNodeId: "tick", cronExpression: "0 4 * * *", timezone: "UTC", firedAt: new Date().toISOString() });
+    const run = (await ctx.store.listExecutionHistory({ workflowId: "wf-cron", page: 1, pageSize: 5 })).items[0]!;
+    expect(JSON.stringify((await ctx.store.getExecutionHistory(run.id))!.output)).toContain("draft");
+  });
+
+  it("a sub-workflow called from production runs the child's draft once the child is unpublished", async () => {
+    const ctx = await open();
+    const builder = await loginAs(ctx, "builder");
+    const child = (answer: string): Workflow => ({
+      id: "wf-child",
+      name: "Child",
+      schemaVersion: "1.0.0",
+      workflowVersion: 1,
+      projectId: "default",
+      nodes: [testNode("start", "manual_trigger"), testNode("out", "output", { responseTemplate: answer })],
+      edges: [{ id: "c1", source: "start", target: "out" }]
+    }) as Workflow;
+    await saveVersion(ctx, {
+      id: "wf-parent",
+      name: "Parent",
+      schemaVersion: "1.0.0",
+      workflowVersion: 1,
+      projectId: "default",
+      nodes: [testNode("hook", "webhook_input", { path: "hook-parent", method: "POST" }), testNode("call", "execute_workflow", { workflowId: "wf-child" }), testNode("out", "output", { responseTemplate: "parent got {{result}}" })],
+      edges: [{ id: "p1", source: "hook", target: "call" }, { id: "p2", source: "call", target: "out" }]
+    } as Workflow);
+    await publishThenUnpublish(ctx, builder.cookie, child("child-published"), child("child-draft"), async () => {
+      expect(JSON.stringify((await productionHook(ctx, "hook-parent")).output)).toContain("child-published");
+    });
+    expect(JSON.stringify((await productionHook(ctx, "hook-parent")).output)).toContain("child-draft");
+  });
+
+  it("the MCP gateway lists and runs the draft's tool", async () => {
+    const ctx = await open();
+    const admin = await loginAs(ctx, "admin");
+    const tool = (answer: string, description: string): Workflow => ({
+      id: "wf-tool",
+      name: "Tool",
+      schemaVersion: "1.0.0",
+      workflowVersion: 1,
+      projectId: "default",
+      nodes: [
+        testNode("trigger", "mcp_server_trigger", { path: "wf-tool-path", toolName: "release_tool", toolDescription: description, inputSchema: { type: "object", properties: {} }, authMode: "public" }),
+        testNode("out", "output", { outputKey: "result", responseTemplate: answer })
+      ],
+      edges: [{ id: "e1", source: "trigger", target: "out" }]
+    }) as Workflow;
+    await publishThenUnpublish(ctx, admin.cookie, tool("tool-published", "Published description"), tool("tool-draft", "Draft description"));
+    const toolset = await callAs(ctx, "POST", "/api/mcp/toolsets", admin.cookie, { name: "Release tools", projectId: "default", members: [{ kind: "workflow", workflowId: "wf-tool" }] });
+    expect(toolset.statusCode, toolset.body).toBe(201);
+    const slug = toolset.json<{ toolset: { id: string; slug: string } }>().toolset;
+    const client = await callAs(ctx, "POST", "/api/mcp/clients", admin.cookie, { name: "IDE", toolsetIds: [slug.id], role: "builder" });
+    expect(client.statusCode, client.body).toBe(201);
+    const token = client.json<{ token: string }>().token;
+    const rpc = (body: unknown, headers: Record<string, string> = {}) =>
+      ctx.app.inject({
+        method: "POST",
+        url: `/mcp/${slug.slug}`,
+        headers: { "content-type": "application/json", accept: "application/json, text/event-stream", authorization: `Bearer ${token}`, ...headers },
+        payload: JSON.stringify(body)
+      });
+    const init = await rpc({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "raw", version: "1" } } });
+    expect(init.statusCode, init.body).toBe(200);
+    const session = { "mcp-session-id": init.headers["mcp-session-id"] as string };
+    const listed = await rpc({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} }, session);
+    const tools = listed.json<{ result: { tools: Array<{ name: string; description: string }> } }>().result.tools;
+    expect(tools.find((entry) => entry.name === "release_tool")?.description).toContain("Draft description");
+    const called = await rpc({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "release_tool", arguments: {} } }, session);
+    const text = JSON.stringify(called.json());
+    expect(text).toContain("tool-draft");
+    expect(text).not.toContain("tool-published");
   });
 });

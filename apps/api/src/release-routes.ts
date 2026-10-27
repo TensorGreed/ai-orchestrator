@@ -9,6 +9,8 @@
  *        409 { verdict: "blocked", reasons, replayRunId?, canRequestApproval }
  *   GET  /api/workflows/:id/releases         release history and the published version (viewer)
  *   POST /api/workflows/:id/rollback         back to a version published before (workflow:publish)
+ *   POST /api/workflows/:id/unpublish        take the published version down; production runs the draft (workflow:publish)
+ *        200 { release, productionRuns: "draft", gateEnabled, gateEnforced, notice }   409 nothing is published
  *   GET  /api/workflows/:id/release-state    the editor's version pill: draft, published, ahead by (viewer)
  *   GET  /api/workflows/:id/publish-preview  ?version=N[&replayRunId=]: the verdict publishing would get now (viewer)
  *
@@ -18,7 +20,7 @@
  */
 
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
-import { releasePublishInputSchema, releaseRollbackInputSchema } from "@ai-orchestrator/shared";
+import { releasePublishInputSchema, releaseRollbackInputSchema, releaseUnpublishInputSchema } from "@ai-orchestrator/shared";
 import type { SafeUser, UserRole } from "./services/auth-service.js";
 import { ReleaseError, type ReleaseService } from "./services/release-service.js";
 
@@ -89,6 +91,17 @@ export function registerReleaseRoutes(deps: ReleaseRoutesDeps): void {
         return { error: "Invalid rollback request", details: parsed.error.issues };
       }
       return { release: await releases.rollback(user, request.params.id, parsed.data) };
+    })
+  );
+
+  app.post<Params & { Body: unknown }>("/api/workflows/:id/unpublish", (request, reply) =>
+    handle(request, reply, ["viewer"], async (user) => {
+      const parsed = releaseUnpublishInputSchema.safeParse(request.body ?? {});
+      if (!parsed.success) {
+        reply.code(400);
+        return { error: "Invalid unpublish request", details: parsed.error.issues };
+      }
+      return await releases.unpublish(user, request.params.id, parsed.data);
     })
   );
 
