@@ -1,14 +1,11 @@
 /**
  * Phase 13.1 — PostgresStore: Secrets, external secret providers and secret shares.
- * Plain functions over a PgContext; PostgresStore delegates here. Every method is implemented, so
- * UNIMPLEMENTED_METHODS is empty.
+ * Plain functions over a PgContext; PostgresStore delegates here. Every method is implemented.
  */
 import { DEFAULT_PROJECT_ID } from "@ai-orchestrator/shared";
 import { type Store } from "../store.js";
 import { toNum, toStr } from "./helpers.js";
 import type { PgContext } from "./context.js";
-
-export const UNIMPLEMENTED_METHODS: readonly (keyof Store)[] = [];
 
 interface SecretDbRow {
   id: string;

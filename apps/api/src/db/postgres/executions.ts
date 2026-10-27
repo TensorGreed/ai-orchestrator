@@ -1,14 +1,11 @@
 /**
  * Phase 13.1 — PostgresStore: Execution history, workflow execution state, runs, cancellation and paused-run claims.
- * Plain functions over a PgContext; PostgresStore delegates here. Every method is implemented;
- * UNIMPLEMENTED_METHODS is empty.
+ * Plain functions over a PgContext; PostgresStore delegates here. Every method is implemented.
  */
 import type { PoolClient } from "pg";
 import { type CancelExecutionResult, type Store } from "../store.js";
 import { parseJsonSafe, toNum, toStr } from "./helpers.js";
 import type { PgContext } from "./context.js";
-
-export const UNIMPLEMENTED_METHODS: readonly (keyof Store)[] = [];
 
 export async function saveExecutionHistory(ctx: PgContext, input: {
   id: string;

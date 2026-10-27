@@ -30,8 +30,7 @@
  *
  * A decision is never lost: when its resume cannot be started the request
  * goes back to pending and the route answers 503, so it can be decided
- * again. Approvals need the SQLite store in this release; on Postgres every
- * route answers 501.
+ * again.
  */
 
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
@@ -54,8 +53,6 @@ import { ReleaseError, type ReleaseService } from "./services/release-service.js
 export interface ApprovalRoutesDeps {
   app: FastifyInstance;
   approvals: ApprovalService;
-  /** False on stores without approval requests (Postgres in this release). */
-  available: boolean;
   requireRole: (request: FastifyRequest, reply: FastifyReply, roles: UserRole[]) => Promise<SafeUser | null>;
   /** The workflow as stored, for the eligibility check; null when it does not exist. */
   loadWorkflow: (id: string) => Promise<{ id: string; projectId?: string } | null>;
@@ -83,10 +80,6 @@ const STATUS_FILTERS = new Set(["pending", "decided", "all"]);
 
 export function registerApprovalRoutes(deps: ApprovalRoutesDeps): void {
   const { app, approvals, requireRole } = deps;
-  const unavailable = (reply: FastifyReply) => {
-    reply.code(501);
-    return { error: "Approvals need the SQLite store in this release" };
-  };
   const deny = (reply: FastifyReply, denial: RunAccessDenial) => {
     reply.code(denial.status);
     return { error: denial.error };
@@ -95,7 +88,6 @@ export function registerApprovalRoutes(deps: ApprovalRoutesDeps): void {
   app.get<{ Querystring: Record<string, string | undefined> }>("/api/approvals", async (request, reply) => {
     const user = await requireRole(request, reply, ["viewer"]);
     if (!user) return;
-    if (!deps.available) return unavailable(reply);
     const query = request.query ?? {};
     const status = query.status && STATUS_FILTERS.has(query.status) ? (query.status as "pending" | "decided" | "all") : "pending";
     const limit = query.limit ? Number(query.limit) : undefined;
@@ -129,7 +121,6 @@ export function registerApprovalRoutes(deps: ApprovalRoutesDeps): void {
   const decide = async (request: FastifyRequest<{ Params: { id: string }; Body: unknown }>, reply: FastifyReply, decision: "approve" | "reject") => {
     const user = await requireRole(request, reply, ["viewer"]);
     if (!user) return;
-    if (!deps.available) return unavailable(reply);
     const parsed = (decision === "approve" ? approvalApproveInputSchema : approvalRejectInputSchema).safeParse(request.body ?? {});
     if (!parsed.success) {
       reply.code(400);
@@ -190,7 +181,6 @@ export function registerApprovalRoutes(deps: ApprovalRoutesDeps): void {
   app.post<{ Body: unknown }>("/api/approvals/eligibility", async (request, reply) => {
     const user = await requireRole(request, reply, ["builder"]);
     if (!user) return;
-    if (!deps.available) return unavailable(reply);
     const parsed = approvalEligibilityInputSchema.safeParse(request.body ?? {});
     if (!parsed.success) {
       reply.code(400);

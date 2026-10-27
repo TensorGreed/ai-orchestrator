@@ -166,7 +166,7 @@ import { GuardService } from "./services/guard-service.js";
 import type { GuardSimulationRun } from "./services/guard-simulation-sink.js";
 import { startSseHeartbeat } from "./sse-heartbeat.js";
 import { createRunAccess, type RunAccessDenial } from "./run-access.js";
-import { ProjectNotEmptyError, rethrowStoreNotImplemented, StoreNotImplementedError, StoreReferenceMissingError } from "./db/store-errors.js";
+import { ProjectNotEmptyError, StoreReferenceMissingError } from "./db/store-errors.js";
 import { createRunScope, type SecretScope } from "./run-scope.js";
 import {
   CODE_SANDBOX_INITIALISING,
@@ -214,7 +214,6 @@ import {
 } from "./services/mcp-oauth-service.js";
 import { isInternalSecretProvider } from "./services/secret-service.js";
 import type { Store } from "./db/store.js";
-import { storeImplements } from "./db/store-support.js";
 
 interface Tier1IntegrationSpec {
   id: string;
@@ -1348,8 +1347,8 @@ export async function createApp(
   const guardService = new GuardService(store, secretService, {
     autoApply: config.GUARD_AUTO_APPLY,
     logger: (message, metadata) => app.log.warn(metadata ?? {}, message),
-    // Phase 16 — destination rows are read when a run first needs them (SQLite only; none on Postgres).
-    destinationRows: async () => ((store as object) instanceof PostgresStore ? [] : await store.listDataDestinations()),
+    // Phase 16 — destination rows are read when a run first needs them.
+    destinationRows: async () => await store.listDataDestinations(),
     ...(runtimeMasterKey.length === 32 ? { surrogateKey: deriveCaptureSurrogateKey(runtimeMasterKey) } : {})
   });
   await guardService.ensureBuiltIns();
@@ -1617,10 +1616,10 @@ export async function createApp(
   };
 
   // Phase 15.2 — finished eval runs and replay jobs, on the same timer. The
-  // newest run of every set is kept; a store without eval storage skips it.
+  // newest run of every set is kept.
   const pruneEvalRuns = async (reason: "startup" | "interval") => {
     const retentionDays = config.EVAL_RUN_RETENTION_DAYS;
-    if (retentionDays <= 0 || !storeImplements(store, "pruneEvalRuns")) return 0;
+    if (retentionDays <= 0) return 0;
     const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000).toISOString();
     try {
       const deleted = await store.pruneEvalRuns({ before: cutoff });
@@ -2106,7 +2105,6 @@ export async function createApp(
             // The paused state carries the version now; the resume records it again.
             runReleases.delete(paused.executionId);
             // Phase 11.2 — who may decide, when it expires; audited and notified.
-            if (!approvalsSupported) return;
             try {
               await approvalService.recordPause({
                 executionId: paused.executionId,
@@ -2464,7 +2462,7 @@ export async function createApp(
 
     const ranOn = runReleases.get(input.executionId);
     runReleases.delete(input.executionId);
-    if (persisted && ranOn !== undefined && releaseService.available) {
+    if (persisted && ranOn !== undefined) {
       try {
         await store.setExecutionRelease(input.executionId, ranOn.channel, ranOn.version);
       } catch (error) {
@@ -3208,8 +3206,7 @@ export async function createApp(
 
   // Phase 7.3 — Eval framework. Wires the existing runWorkflowExecution path
   // as the per-fixture executor so eval runs share routing, telemetry, and
-  // history with regular runs. SQLite-only — see /docs/extensions/eval-framework
-  // for the Postgres-parity follow-up note.
+  // history with regular runs.
   /**
    * Phase 15.2 — whether `user` may hand this secret to a judge running for a
    * workflow (or, without one, in a project): a non-internal secret the run
@@ -3507,9 +3504,7 @@ export async function createApp(
   // Phase 15.2 — eval runs and replay jobs a stopped server left queued or
   // running. The same rules as the execution reconcile below: webhook
   // replicas never touch other instances' runs, and on a shared database only
-  // runs no live instance has touched lately are interrupted. Eval storage is
-  // SQLite-only, so a store without it skips this.
-  const evalStoreReady = storeImplements(store, "listEvalRuns");
+  // runs no live instance has touched lately are interrupted.
   const recoverEvalRuns = async (reason: "startup" | "interval") => {
     try {
       const interrupted = await evalService.recoverInterrupted({ onlyStale: sharedDatabase });
@@ -3518,9 +3513,7 @@ export async function createApp(
       app.log.warn({ err: err instanceof Error ? err.message : String(err), reason }, "Failed to mark interrupted eval runs");
     }
   };
-  if (!evalStoreReady) {
-    app.log.info("This database has no eval storage; skipping the interrupted eval run check");
-  } else if (workerMode !== "webhook") {
+  if (workerMode !== "webhook") {
     await recoverEvalRuns("startup");
     if (sharedDatabase) {
       // An instance that died is noticed by the others, not only by the next one to boot.
@@ -3751,11 +3744,6 @@ export async function createApp(
   );
 
   // Phase 11.2 — resuming a decided approval: inline, or on the execution queue when it is in use.
-  // Approvals need the SQLite store in this release; on Postgres they answer 501 and nothing is recorded.
-  const approvalsSupported = !((store as object) instanceof PostgresStore);
-  if (!approvalsSupported) {
-    app.log.warn("Approval requests need the SQLite store in this release: on Postgres the approvals inbox, decisions and approval timeouts answer 501");
-  }
   const approvalResumes = new ApprovalResumeRunner();
   // A timed-out approval whose run cannot continue: the run ends as an error and its paused state is cleared.
   const failTimedOutRun = async (executionId: string, workflow: Workflow, error: string) => {
@@ -3944,7 +3932,7 @@ export async function createApp(
       warn: (msg, fields) => app.log.warn(fields ?? {}, msg)
     }
   });
-  if (runsBackgroundWorkers && approvalsSupported) {
+  if (runsBackgroundWorkers) {
     // The timer starts on every worker instance; each sweep is leader-only, so a later leader takes over.
     app.addHook("onReady", async () => {
       await approvalService.start();
@@ -3956,11 +3944,9 @@ export async function createApp(
 
   // Phase 15.4 — release gate and publish. Production entry points run the
   // published version through `productionWorkflow`; the editor, manual runs
-  // and /webhook-test/ run the draft. Postgres: releases answer 501 and every
-  // entry point runs the draft (approvalsSupported is the same store check).
+  // and /webhook-test/ run the draft.
   const releaseService = new ReleaseService({
     store,
-    available: approvalsSupported,
     resolveVersion: async (workflowId, version) => (await replayService.resolveWorkflowCandidate(workflowId, { version })).workflow,
     hashOf: (workflow) => ReplayService.candidateHash(workflow),
     loadJob: async (runId) => await evalService.getRun(runId),
@@ -3989,7 +3975,6 @@ export async function createApp(
   // Release gate admission: on enforced gates, cases added after enforcement count only once admitted.
   const gateAdmissionService = new GateAdmissionService({
     store,
-    available: approvalsSupported,
     access: async (user, workflowId, permission) => await runAccess.workflow(user, workflowId, permission),
     readableWorkflowIds: async (user) => await runAccess.readableWorkflowIds(user),
     audit: async (event) => {
@@ -5000,7 +4985,6 @@ export async function createApp(
       const outcome = await auditExportService.runDestination(request.params.id);
       return { outcome };
     } catch (err) {
-      rethrowStoreNotImplemented(err);
       reply.code(500);
       return { error: err instanceof Error ? err.message : String(err) };
     }
@@ -5182,7 +5166,6 @@ export async function createApp(
         });
         return { inserted: result.inserted, dimensions: result.dimensions };
       } catch (err) {
-        rethrowStoreNotImplemented(err);
         reply.code(400);
         return { error: err instanceof Error ? err.message : String(err) };
       }
@@ -5212,7 +5195,6 @@ export async function createApp(
         });
         return { inserted: result.inserted, dimensions: result.dimensions, sourceId };
       } catch (err) {
-        rethrowStoreNotImplemented(err);
         reply.code(400);
         return { error: err instanceof Error ? err.message : String(err) };
       }
@@ -5336,7 +5318,6 @@ export async function createApp(
           dimensions: result.dimensions
         };
       } catch (err) {
-        rethrowStoreNotImplemented(err);
         reply.code(400);
         return { error: err instanceof Error ? err.message : String(err) };
       }
@@ -6191,7 +6172,6 @@ export async function createApp(
       });
       return { id, provider: await externalSecretsService.getProvider(id) };
     } catch (err) {
-      rethrowStoreNotImplemented(err);
       reply.code(400);
       return { error: err instanceof Error ? err.message : "Failed to create external provider" };
     }
@@ -6401,7 +6381,6 @@ export async function createApp(
       });
       return { destination };
     } catch (err) {
-      rethrowStoreNotImplemented(err);
       reply.code(400);
       return { error: err instanceof Error ? err.message : String(err) };
     }
@@ -6431,7 +6410,6 @@ export async function createApp(
       });
       return { destination };
     } catch (err) {
-      rethrowStoreNotImplemented(err);
       reply.code(400);
       return { error: err instanceof Error ? err.message : String(err) };
     }
@@ -6543,7 +6521,6 @@ export async function createApp(
       });
       return { variable: record };
     } catch (err) {
-      rethrowStoreNotImplemented(err);
       reply.code(400);
       return { error: err instanceof Error ? err.message : String(err) };
     }
@@ -6583,7 +6560,6 @@ export async function createApp(
       });
       return { variable: record };
     } catch (err) {
-      rethrowStoreNotImplemented(err);
       reply.code(400);
       return { error: err instanceof Error ? err.message : String(err) };
     }
@@ -6737,7 +6713,6 @@ export async function createApp(
       });
       return { config, status: await gitSyncService.status() };
     } catch (err) {
-      rethrowStoreNotImplemented(err);
       reply.code(400);
       return { error: err instanceof Error ? err.message : String(err) };
     }
@@ -6795,7 +6770,6 @@ export async function createApp(
       if (!result.ok) reply.code(400);
       return result;
     } catch (err) {
-      rethrowStoreNotImplemented(err);
       reply.code(400);
       return { ok: false, error: err instanceof Error ? err.message : String(err) };
     }
@@ -6831,7 +6805,6 @@ export async function createApp(
       if (!result.ok) reply.code(400);
       return result;
     } catch (err) {
-      rethrowStoreNotImplemented(err);
       reply.code(400);
       return { ok: false, error: err instanceof Error ? err.message : String(err) };
     }
@@ -6897,7 +6870,6 @@ export async function createApp(
         customRoleId: parsed.data.customRoleId ?? null
       });
     } catch (error) {
-      rethrowStoreNotImplemented(error);
       // The user or project was deleted after the checks above (Postgres foreign key): 409 with a plain message.
       if (error instanceof StoreReferenceMissingError) {
         reply.code(409);
@@ -7467,7 +7439,6 @@ export async function createApp(
       });
       return { ok: true };
     } catch (error) {
-      rethrowStoreNotImplemented(error);
       reply.code(400);
       return {
         error: error instanceof Error ? error.message : "Failed to delete workflow"
@@ -7636,7 +7607,6 @@ export async function createApp(
       await triggerService?.reloadWorkflow(savedWorkflow.id);
       return savedWorkflow;
     } catch (error) {
-      rethrowStoreNotImplemented(error);
       reply.code(400);
       return {
         error: error instanceof Error ? error.message : "Failed to import workflow"
@@ -7903,7 +7873,6 @@ export async function createApp(
       });
       return { ok: true };
     } catch (error) {
-      rethrowStoreNotImplemented(error);
       if (error instanceof ProjectNotEmptyError) {
         reply.code(409);
         return { error: error.message, ...error.counts };
@@ -8778,10 +8747,10 @@ export async function createApp(
     // published), and not at all while a gated workflow is deactivated. An editor run retries the draft.
     // A run whose channel went unrecorded (older history, a record that failed to save, a run that fell out of
     // the in-flight bookkeeping) fails closed: on a gated workflow it retries as production, never the draft.
-    const ranOn = releaseService.available ? await store.getExecutionRelease(sourceExecution.id) : null;
+    const ranOn = await store.getExecutionRelease(sourceExecution.id);
     const retryChannel: ReleaseChannel = ranOn
       ? ranOn.channel
-      : releaseService.available && (await store.getReleaseGate(sourceExecution.workflowId))?.enabled
+      : (await store.getReleaseGate(sourceExecution.workflowId))?.enabled
         ? "production"
         : "draft";
     const workflow = retryChannel === "production" ? await productionWorkflow(sourceExecution.workflowId) : await store.getWorkflow(sourceExecution.workflowId);
@@ -8981,7 +8950,7 @@ export async function createApp(
     // A waiting run that is active here is a decided run resuming in this process (a resume writes no progress, so
     // its history still reads waiting): it is stopped like a running run, whatever the decision was.
     const resumingHere = waiting && Boolean(active);
-    if (waiting && approvalsSupported && (await approvalService.cancelForExecution(execution.id, reason, user)) === "decided" && !resumingHere) {
+    if (waiting && (await approvalService.cancelForExecution(execution.id, reason, user)) === "decided" && !resumingHere) {
       reply.code(409);
       return { error: "The approval was already decided, so the run is resuming. It cannot be canceled while it waits any more." };
     }
@@ -9010,7 +8979,7 @@ export async function createApp(
       return { error: "Only running or waiting executions can be canceled" };
     }
 
-    if (approvalsSupported) await approvalService.auditCanceledRequests(canceledRequestIds, user);
+    await approvalService.auditCanceledRequests(canceledRequestIds, user);
     await auditRunAction(
       request,
       user,
@@ -9030,7 +8999,6 @@ export async function createApp(
   registerApprovalRoutes({
     app,
     approvals: approvalService,
-    available: approvalsSupported,
     loadWorkflow: async (id) => await store.getWorkflow(id) ?? null,
     loadRun: async (executionId) => await store.getExecutionHistory(executionId) ?? await store.getWorkflowExecutionState(executionId) ?? null,
     runAccess,
@@ -10638,7 +10606,6 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         })
       };
     } catch (error) {
-      rethrowStoreNotImplemented(error);
       reply.code(400);
       return {
         error: error instanceof Error ? error.message : "Failed to discover MCP tools"
@@ -11325,7 +11292,6 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       });
       return { status };
     } catch (error) {
-      rethrowStoreNotImplemented(error);
       reply.code(409);
       return { error: error instanceof Error ? error.message : "Token refresh failed", status: await mcpOAuthService.status(server.id) };
     }
@@ -11843,10 +11809,10 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       return result;
     }
   });
-  // Phase 15.6 — production capture (SQLite only: Postgres answers 501, and nothing is captured there).
+  // Phase 15.6 — production capture.
   // The surrogate key is derived from the 32-byte master key; without it capture stays off (index.ts refuses to start without it).
   const captureMasterKey = Buffer.from(config.SECRET_MASTER_KEY_BASE64 ?? "", "base64");
-  const captureAvailable = !((store as object) instanceof PostgresStore) && captureMasterKey.length === 32;
+  const captureAvailable = captureMasterKey.length === 32;
   const captureService = new ReplayCaptureService({
     store,
     recordings: replayRecordingService,
@@ -11915,7 +11881,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     subjectRowRemoval: async (user, row) => await releaseService.dataSubjectRemoval(user, row)
   });
 
-  // Phase 15.5 — golden-set files (SQLite only: Postgres answers 501).
+  // Phase 15.5 — golden-set files.
   registerGoldenSetFileRoutes({
     app,
     store,
@@ -11924,7 +11890,6 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     requireRole: (request, reply, roles) => requireRole(request, reply, roles),
     runAccess,
     audit: async (request, user, event) => await audit(request, user, event),
-    available: !((store as object) instanceof PostgresStore),
     maxFileBytes: config.GOLDEN_SET_IMPORT_MAX_BYTES ?? GOLDEN_SET_FILE_DEFAULT_MAX_BYTES,
     maxCaseBytes: config.REPLAY_RECORDING_MAX_BYTES,
     maxCases: config.REPLAY_JOB_MAX_CASES
@@ -11949,13 +11914,12 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     runAccess,
     canAccessWorkflow: async (user, workflow, permission) => await rbacService.canAccessWorkflow(user, workflow, permission),
     canInProject: async (user, projectId, permission) => await rbacService.can(user, projectId, permission),
-    audit: async (request, user, event) => await audit(request, user, event),
-    destinationRulesAvailable: !((store as object) instanceof PostgresStore)
+    audit: async (request, user, event) => await audit(request, user, event)
   });
 
-  // Phase 16 — data destinations (SQLite only: Postgres answers 501).
+  // Phase 16 — data destinations.
   const dataDestinationService = new DataDestinationService({
-    store: (store as object) instanceof PostgresStore ? null : store,
+    store,
     readableWorkflowIds: async (user) => await runAccess.readableWorkflowIds(user),
     readableProjectIds: async (user) => await runAccess.readableProjectIds(user)
   });
@@ -11966,19 +11930,17 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     audit: async (request, user, event) => await audit(request, user, event)
   });
 
-  // Phase 15.6 — guard policy simulation (SQLite only: Postgres answers 501).
-  const guardSimulationService = (store as object) instanceof PostgresStore
-    ? null
-    : new GuardSimulationService({
-        store,
-        guard: guardService,
-        evals: evalService,
-        runAccess,
-        maxCases: config.REPLAY_SIMULATION_MAX_CASES ?? GUARD_SIMULATION_MAX_CASES_DEFAULT,
-        maxCasesPerJob: config.REPLAY_JOB_MAX_CASES,
-        scrub: async (text) => String(secretService.redact((await replayRecordingService.scrubber()).text(text))),
-        logger: { warn: (message, fields) => app.log.warn(fields ?? {}, message) }
-      });
+  // Phase 15.6 — guard policy simulation.
+  const guardSimulationService = new GuardSimulationService({
+    store,
+    guard: guardService,
+    evals: evalService,
+    runAccess,
+    maxCases: config.REPLAY_SIMULATION_MAX_CASES ?? GUARD_SIMULATION_MAX_CASES_DEFAULT,
+    maxCasesPerJob: config.REPLAY_JOB_MAX_CASES,
+    scrub: async (text) => String(secretService.redact((await replayRecordingService.scrubber()).text(text))),
+    logger: { warn: (message, fields) => app.log.warn(fields ?? {}, message) }
+  });
   registerGuardSimulationRoutes({
     app,
     store,
@@ -11988,35 +11950,32 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     runAccess,
     audit: async (request, user, event) => await audit(request, user, event)
   });
-  if (guardSimulationService) {
-    const simulationService = guardSimulationService;
-    // Simulations a stopped server left running finish with what their (now interrupted) jobs recorded.
-    if (workerMode !== "webhook") {
-      try {
-        const recovered = await simulationService.recover();
-        if (recovered > 0) app.log.warn({ count: recovered }, "Finished guard simulations interrupted by a restart");
-      } catch (err) {
-        app.log.warn({ err: err instanceof Error ? err.message : String(err) }, "Failed to finish interrupted guard simulations");
-      }
+  // Simulations a stopped server left running finish with what their (now interrupted) jobs recorded.
+  if (workerMode !== "webhook") {
+    try {
+      const recovered = await guardSimulationService.recover();
+      if (recovered > 0) app.log.warn({ count: recovered }, "Finished guard simulations interrupted by a restart");
+    } catch (err) {
+      app.log.warn({ err: err instanceof Error ? err.message : String(err) }, "Failed to finish interrupted guard simulations");
     }
-    // Kept GUARD_SIMULATION_RETENTION_DAYS, pruned on the execution-history timer with their replay jobs.
-    const pruneGuardSimulations = async (reason: "startup" | "interval") => {
-      const cutoff = new Date(Date.now() - GUARD_SIMULATION_RETENTION_DAYS * 24 * 60 * 60 * 1000).toISOString();
-      try {
-        const deleted = await simulationService.prune(cutoff);
-        if (deleted > 0) app.log.info({ deleted, cutoff, reason }, "Pruned guard simulations");
-      } catch (err) {
-        app.log.warn({ cutoff, reason, err: err instanceof Error ? err.message : String(err) }, "Failed to prune guard simulations");
-      }
-    };
-    await pruneGuardSimulations("startup");
-    // promise-ok: the task catches and logs its own errors
-    const simulationPruneTimer = setInterval(async () => await pruneGuardSimulations("interval"), config.EXECUTION_HISTORY_PRUNE_INTERVAL_MS);
-    (simulationPruneTimer as { unref?: () => void }).unref?.();
-    app.addHook("onClose", async () => {
-      clearInterval(simulationPruneTimer);
-    });
   }
+  // Kept GUARD_SIMULATION_RETENTION_DAYS, pruned on the execution-history timer with their replay jobs.
+  const pruneGuardSimulations = async (reason: "startup" | "interval") => {
+    const cutoff = new Date(Date.now() - GUARD_SIMULATION_RETENTION_DAYS * 24 * 60 * 60 * 1000).toISOString();
+    try {
+      const deleted = await guardSimulationService.prune(cutoff);
+      if (deleted > 0) app.log.info({ deleted, cutoff, reason }, "Pruned guard simulations");
+    } catch (err) {
+      app.log.warn({ cutoff, reason, err: err instanceof Error ? err.message : String(err) }, "Failed to prune guard simulations");
+    }
+  };
+  await pruneGuardSimulations("startup");
+  // promise-ok: the task catches and logs its own errors
+  const simulationPruneTimer = setInterval(async () => await pruneGuardSimulations("interval"), config.EXECUTION_HISTORY_PRUNE_INTERVAL_MS);
+  (simulationPruneTimer as { unref?: () => void }).unref?.();
+  app.addHook("onClose", async () => {
+    clearInterval(simulationPruneTimer);
+  });
 
   registerMcpTestingRoutes({
     app,
@@ -12646,13 +12605,6 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         error: "Request body is too large",
         limitBytes: config.API_BODY_LIMIT_BYTES
       });
-      return;
-    }
-
-    // A store method the Postgres store does not implement yet: the feature is not available here, not broken.
-    if (error instanceof StoreNotImplementedError) {
-      app.log.warn({ method: error.method }, "Store method not implemented on this store");
-      reply.code(501).send({ error: error.message });
       return;
     }
 

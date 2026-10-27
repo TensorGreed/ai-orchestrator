@@ -26,7 +26,6 @@
  * cases still there): a stale request cannot be approved, says why, and an
  * attempt to approve it cancels it with 409. Every change and request event
  * is audited (category `release`).
- * Gate case requests need the SQLite store; on Postgres the routes answer 501.
  */
 
 import { randomUUID } from "node:crypto";
@@ -54,8 +53,6 @@ import { mapAsync } from "../async-array.js";
 
 export interface GateAdmissionServiceOptions {
   store: Store;
-  /** False on stores without release tables (Postgres in this release): every route answers 501. */
-  available: boolean;
   /** The shared run-access check (run-access.ts): 404 unreadable, 403 without the permission; admins pass. */
   access: (user: SafeUser, workflowId: string, permission: ReleasePermission) => Promise<RunAccessResult<object>>;
   readableWorkflowIds: (user: SafeUser) => Promise<string[] | null>;
@@ -85,20 +82,12 @@ const plural = (count: number, word: string) => `${count} ${word}${count === 1 ?
 export class GateAdmissionService {
   constructor(private readonly options: GateAdmissionServiceOptions) {}
 
-  get available(): boolean {
-    return this.options.available;
-  }
-
   private get store(): Store {
     return this.options.store;
   }
 
   private now(): Date {
     return this.options.now?.() ?? new Date();
-  }
-
-  private requireAvailable(): void {
-    if (!this.options.available) throw new ReleaseError("Release gates need the SQLite store in this release", 501);
   }
 
   private async check(user: SafeUser, workflowId: string, permission: ReleasePermission): Promise<void> {
@@ -146,7 +135,6 @@ export class GateAdmissionService {
   // -------------------------------------------------------------------------
 
   async casesView(user: SafeUser, workflowId: string): Promise<ReleaseGateCasesView> {
-    this.requireAvailable();
     await this.check(user, workflowId, "workflow:read");
     const gate = await this.store.getReleaseGate(workflowId);
     const snapshot = await gateAdmissionSnapshot(this.store, gate);
@@ -204,7 +192,6 @@ export class GateAdmissionService {
 
   /** Admins: the pending cases count from now on. */
   async admit(user: SafeUser, workflowId: string, input: GateCaseDecisionInput): Promise<ReleaseGateCasesView> {
-    this.requireAvailable();
     await this.requireAdmin(user, workflowId, "admit cases");
     const { snapshot } = await this.enforced(workflowId);
     const cases = this.casesOf(snapshot, input.fixtureIds);
@@ -215,7 +202,6 @@ export class GateAdmissionService {
 
   /** Admins: pending cases leave their golden sets (the golden runs are kept). Admitted cases are removed with the case's own delete. */
   async reject(user: SafeUser, workflowId: string, input: GateCaseDecisionInput): Promise<ReleaseGateCasesView> {
-    this.requireAvailable();
     await this.requireAdmin(user, workflowId, "reject cases");
     const { snapshot } = await this.enforced(workflowId);
     const cases = this.casesOf(snapshot, input.fixtureIds);
@@ -239,7 +225,6 @@ export class GateAdmissionService {
 
   /** Admins: a golden-run case must pass on every publish (marking it also admits it), or no longer must. */
   async setRequired(user: SafeUser, workflowId: string, fixtureId: string, required: boolean): Promise<ReleaseGateCasesView> {
-    this.requireAvailable();
     await this.requireAdmin(user, workflowId, required ? "mark a case required" : "stop requiring a case");
     const { snapshot } = await this.enforced(workflowId);
     const [fixture] = this.casesOf(snapshot, [fixtureId]);
@@ -303,7 +288,6 @@ export class GateAdmissionService {
 
   /** Builders (`workflow:write`): ask the gate's approvers to admit pending cases or remove admitted ones. */
   async request(user: SafeUser, workflowId: string, input: GateCaseRequestInput): Promise<GateCaseRequestView> {
-    this.requireAvailable();
     await this.check(user, workflowId, "workflow:write");
     const { gate, snapshot } = await this.enforced(workflowId);
     const cases = this.casesOf(snapshot, input.fixtureIds);
@@ -465,7 +449,6 @@ export class GateAdmissionService {
 
   /** Gate case requests of workflows the user can read, narrowed in SQL before the limit. */
   async listRequests(user: SafeUser, filter: { status: "pending" | "decided" | "all"; workflowId?: string; limit?: number }): Promise<GateCaseRequestView[]> {
-    if (!this.options.available) return [];
     await this.sweepExpired();
     const workflowIds = await this.options.readableWorkflowIds(user);
     const rows = await this.store.listGateCaseRequests({ ...filter, now: this.now().toISOString(), scope: workflowIds === null ? { all: true } : { workflowIds } });
@@ -495,7 +478,6 @@ export class GateAdmissionService {
    * kept), as the approver.
    */
   async decide(user: SafeUser, requestId: string, decision: "approve" | "reject", reason?: string): Promise<{ request: GateCaseRequestView }> {
-    this.requireAvailable();
     const record = await this.store.getGateCaseRequest(requestId);
     if (!record || !(await this.options.access(user, record.workflowId, "workflow:read")).ok) throw new ReleaseError("Pending approval not found", 404);
     if (record.status !== "pending") throw new ReleaseError("This approval was already decided", 409);

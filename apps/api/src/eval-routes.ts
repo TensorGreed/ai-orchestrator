@@ -71,7 +71,6 @@ import type { AuditEventInput } from "./services/audit-service.js";
 import { EvalRunError, type EvalService } from "./services/eval-service.js";
 import { startSseHeartbeat } from "./sse-heartbeat.js";
 import type { Store } from "./db/store.js";
-import { storeImplements } from "./db/store-support.js";
 
 type DatasetPermission = "workflow:read" | "workflow:write";
 
@@ -688,17 +687,9 @@ export function registerEvalRoutes(deps: EvalRoutesDeps): void {
     return { ok: true, request: parsed.data, workflowId };
   };
 
-  // Golden runs, golden sets and replay jobs are SQLite-only in this release.
-  const replayStoreReady = storeImplements(store, "getReplayRecording");
-  const replayUnavailable = (reply: FastifyReply) => {
-    reply.code(501);
-    return { error: "Replay jobs need the SQLite store in this release." };
-  };
-
   app.post<{ Body: unknown }>("/api/replay/runs", async (request, reply) => {
     const user = await requireRole(request, reply, ["builder"]);
     if (!user) return reply;
-    if (!replayStoreReady) return replayUnavailable(reply);
     const checked = await checkReplayJobRequest(user, request.body, reply);
     if (!checked.ok) return checked.response;
     const { workflowId } = checked;
@@ -725,7 +716,6 @@ export function registerEvalRoutes(deps: EvalRoutesDeps): void {
   app.post<{ Body: unknown }>("/api/replay/estimate", async (request, reply) => {
     const user = await requireRole(request, reply, ["builder"]);
     if (!user) return reply;
-    if (!replayStoreReady) return replayUnavailable(reply);
     const checked = await checkReplayJobRequest(user, request.body, reply);
     if (!checked.ok) return checked.response;
     try {

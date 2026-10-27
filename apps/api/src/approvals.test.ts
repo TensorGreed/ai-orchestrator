@@ -23,9 +23,7 @@ import { QueueService } from "./services/queue-service.js";
 import { ApprovalResumeRunner } from "./services/approval-service.js";
 import { approvalEditsDigest } from "./services/approval-digest.js";
 import { escapeTeams } from "./services/notification-service.js";
-import { registerApprovalRoutes } from "./approval-routes.js";
 import { contiguousMigrationVersions } from "./db/migration-versions.test-helper.js";
-import Fastify from "fastify";
 import { SecretService } from "./services/secret-service.js";
 
 interface TestContext {
@@ -1397,16 +1395,5 @@ describe("what approvals record and send", () => {
     expect(parseConfig({ ...base, APP_PUBLIC_URL: "https://l2m.example.test" }).APP_PUBLIC_URL).toBe("https://l2m.example.test");
     expect(() => parseConfig({ ...base, APP_PUBLIC_URL: "javascript:alert(1)" })).toThrow();
     expect(() => parseConfig({ ...base, APP_PUBLIC_URL: "l2m.example.test" })).toThrow();
-  });
-
-  it("answers 501 when the store has no approval requests", async () => {
-    const app = Fastify();
-    const user = { id: "u1", email: "u@example.com", role: "admin" as const };
-    registerApprovalRoutes({ app, approvals: {} as never, available: false, loadWorkflow: async () => null, loadRun: async () => null, runAccess: {} as never, canSeeProjectAccounts: async () => true, requireRole: async () => user, dispatch: async () => null });
-    await app.ready();
-    const listed = await app.inject({ method: "GET", url: "/api/approvals" });
-    expect(listed.statusCode).toBe(501);
-    expect((await app.inject({ method: "POST", url: "/api/approvals/x/approve", payload: {} })).statusCode).toBe(501);
-    await app.close();
   });
 });

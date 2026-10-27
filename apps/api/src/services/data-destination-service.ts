@@ -11,8 +11,7 @@
  * is stored. Only hosts are read from URLs; paths, queries and credentials
  * never leave this module.
  *
- * Rows live in SQLite (migration 38). On Postgres the service is unavailable
- * and the routes answer 501.
+ * Rows live in the `data_destinations` table (migration 38).
  */
 
 import { randomUUID } from "node:crypto";
@@ -194,8 +193,7 @@ export function collectConfiguredDestinations(input: CollectInput): ConfiguredDe
 }
 
 export interface DataDestinationServiceDeps {
-  /** Null on Postgres: rows are SQLite only in this release. */
-  store: Store | null;
+  store: Store;
   /** Workflow ids the user can read, or null for every workflow (admins). */
   readableWorkflowIds: (user: SafeUser) => Promise<string[] | null>;
   /** Project ids the user can read, or null for every project (admins). */
@@ -211,12 +209,7 @@ export interface DataDestinationListView {
 export class DataDestinationService {
   constructor(private readonly deps: DataDestinationServiceDeps) {}
 
-  get available(): boolean {
-    return this.deps.store !== null;
-  }
-
   private get store(): Store {
-    if (!this.deps.store) throw new DataDestinationError(501, "Data destinations need the SQLite store in this release");
     return this.deps.store;
   }
 
@@ -226,7 +219,7 @@ export class DataDestinationService {
 
   /** Every admin row, for resolving destinations. */
   async rows(): Promise<DataDestinationRow[]> {
-    return this.deps.store ? await this.deps.store.listDataDestinations() : [];
+    return await this.store.listDataDestinations();
   }
 
   private parse(body: unknown): DataDestinationWrite {

@@ -14,8 +14,7 @@
  *
  * Access goes through the shared run-access helper (run-access.ts): a
  * workflow the user cannot read answers 404, one they can read but may not
- * act on 403; admins always pass. Releases need the SQLite store in this
- * release; on Postgres every route answers 501.
+ * act on 403; admins always pass.
  */
 
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
@@ -45,10 +44,6 @@ export function registerReleaseRoutes(deps: ReleaseRoutesDeps): void {
   const handle = async <T>(request: FastifyRequest, reply: FastifyReply, roles: UserRole[], work: (user: SafeUser) => T | Promise<T>) => {
     const user = await requireRole(request, reply, roles);
     if (!user) return reply;
-    if (!releases.available) {
-      reply.code(501);
-      return { error: "Releases need the SQLite store in this release" };
-    }
     try {
       return await work(user);
     } catch (error) {

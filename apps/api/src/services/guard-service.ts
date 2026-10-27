@@ -69,7 +69,6 @@ import type {
 import type { SecretService } from "./secret-service.js";
 import type { Store } from "../db/store.js";
 import { mapAsync } from "../async-array.js";
-import { storeImplements } from "../db/store-support.js";
 
 export interface GuardFieldIssue {
   path: string;
@@ -449,7 +448,6 @@ export class GuardService {
    * run failing at start.
    */
   async mayUseLabels(): Promise<boolean> {
-    if (!storeImplements(this.store, "anyGuardProfileUsesLabels")) return true;
     try {
       return await this.store.anyGuardProfileUsesLabels();
     } catch (error) {
@@ -558,7 +556,7 @@ export class GuardService {
    * one up and it has rules; undefined otherwise (nothing changes then).
    */
   async deploymentProfile(): Promise<ResolvedGuardProfile | undefined> {
-    if (!storeImplements(this.store, "getGuardProfile") || !await this.store.getGuardProfile(GUARD_DESTINATION_RULES_PROFILE_ID)) return undefined;
+    if (!await this.store.getGuardProfile(GUARD_DESTINATION_RULES_PROFILE_ID)) return undefined;
     const loaded = await this.loadProfile(GUARD_DESTINATION_RULES_PROFILE_ID);
     return loaded && profileHasDestinationRules(loaded.profile) ? loaded : undefined;
   }
@@ -663,14 +661,14 @@ export class GuardService {
   // -------------------------------------------------------------------------
 
   /** The rules, whether they observe or enforce, and the observing count. */
-  async destinationRulesStatus(available = true): Promise<DestinationRulesStatus> {
+  async destinationRulesStatus(): Promise<DestinationRulesStatus> {
     const record = await this.store.getGuardProfile(GUARD_DESTINATION_RULES_PROFILE_ID);
     const loaded = record ? await this.loadProfile(GUARD_DESTINATION_RULES_PROFILE_ID) : undefined;
     const rules = (loaded?.profile.destinations?.rules ?? []) as DestinationRuleView[];
     const since = new Date(Date.now() - DESTINATION_RULES_OBSERVING_DAYS * 86_400_000).toISOString();
-    const wouldBlock = record && available ? await this.store.countObservedDestinationBlocks(GUARD_DESTINATION_RULES_PROFILE_ID, since) : 0;
+    const wouldBlock = record ? await this.store.countObservedDestinationBlocks(GUARD_DESTINATION_RULES_PROFILE_ID, since) : 0;
     return {
-      available,
+      available: true,
       profileId: GUARD_DESTINATION_RULES_PROFILE_ID,
       version: loaded?.version ?? null,
       rules,

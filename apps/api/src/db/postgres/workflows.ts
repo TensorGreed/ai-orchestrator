@@ -1,7 +1,6 @@
 /**
  * Phase 13.1 — PostgresStore: Workflows, folders, projects, templates, workflow versions and workflow shares.
- * Plain functions over a PgContext; PostgresStore delegates here. Every method is implemented;
- * UNIMPLEMENTED_METHODS is empty.
+ * Plain functions over a PgContext; PostgresStore delegates here. Every method is implemented.
  */
 import { DEFAULT_PROJECT_ID, type Folder, type Project, type Workflow, type WorkflowListItem } from "@ai-orchestrator/shared";
 import type { PoolClient } from "pg";
@@ -9,8 +8,6 @@ import { ProjectNotEmptyError } from "../store-errors.js";
 import { type Store } from "../store.js";
 import { parseTagsJson, toNum, toStr } from "./helpers.js";
 import type { PgContext } from "./context.js";
-
-export const UNIMPLEMENTED_METHODS: readonly (keyof Store)[] = [];
 
 // Workflow methods
 export async function listWorkflows(ctx: PgContext, options: {

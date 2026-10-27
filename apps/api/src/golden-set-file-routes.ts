@@ -33,8 +33,7 @@
  * event loop between cases, before the transaction; the transaction then
  * only inserts the set and every golden run: any failure leaves nothing
  * behind. Imported golden runs are marked `origin: "imported"` with the
- * claimed recording time and the source workflow id. Both routes answer 501
- * on Postgres.
+ * claimed recording time and the source workflow id.
  */
 
 import { randomUUID } from "node:crypto";
@@ -72,8 +71,6 @@ export interface GoldenSetFileRoutesDeps {
   requireRole: (request: FastifyRequest, reply: FastifyReply, roles: UserRole[]) => Promise<SafeUser | null>;
   runAccess: RunAccess;
   audit: (request: FastifyRequest, user: SafeUser, event: Omit<AuditEventInput, "actor">) => void | Promise<void>;
-  /** False on Postgres: both routes answer 501. */
-  available: boolean;
   /** `GOLDEN_SET_IMPORT_MAX_BYTES`: the largest file accepted, and the basis of the import route's request body limit. */
   maxFileBytes: number;
   /** `REPLAY_RECORDING_MAX_BYTES`: the largest single case. */
@@ -127,15 +124,10 @@ export function registerGoldenSetFileRoutes(deps: GoldenSetFileRoutesDeps): void
     reply.code(denial.status);
     return { error: denial.error };
   };
-  const unavailable = (reply: FastifyReply) => {
-    reply.code(501);
-    return { error: "Golden-set files need the SQLite store in this release" };
-  };
 
   app.get<{ Params: { id: string }; Querystring: { sign?: string } }>("/api/eval/datasets/:id/export", async (request, reply) => {
     const user = await requireRole(request, reply, ["viewer"]);
     if (!user) return reply;
-    if (!deps.available) return unavailable(reply);
     const dataset = await store.getEvalDataset(request.params.id);
     if (!dataset) return deny(reply, { status: 404, error: "Golden set not found" });
     // A dataset without a workflow follows its project; either way an unreadable one answers 404 before anything else is said.
@@ -241,7 +233,6 @@ export function registerGoldenSetFileRoutes(deps: GoldenSetFileRoutesDeps): void
       onRequest: async (request, reply) => {
         const user = await requireRole(request, reply, ["builder"]);
         if (!user) return reply;
-        if (!deps.available) return reply.code(501).send({ error: "Golden-set files need the SQLite store in this release" });
         importUsers.set(request, user);
       }
     },

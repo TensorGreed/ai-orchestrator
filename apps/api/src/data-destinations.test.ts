@@ -18,7 +18,7 @@ import { SqliteStore } from "./db/database.js";
 import { MIGRATIONS } from "./db/migrations.js";
 import { contiguousMigrationVersions } from "./db/migration-versions.test-helper.js";
 import { AuthService } from "./services/auth-service.js";
-import { collectConfiguredDestinations, DataDestinationService } from "./services/data-destination-service.js";
+import { collectConfiguredDestinations } from "./services/data-destination-service.js";
 import { SecretService } from "./services/secret-service.js";
 
 interface TestContext {
@@ -216,13 +216,6 @@ describe("data destination routes", () => {
     expect((await call(context, "POST", "/api/data-destinations", admin.cookie, suggestion)).statusCode).toBe(201);
     const after = (await call(context, "GET", "/api/data-destinations/unclassified", admin.cookie)).json() as { destinations: UnclassifiedDestination[] };
     expect(after.destinations.map((entry) => entry.host)).not.toContain("llm.example.net");
-  });
-
-  it("answers 501 when the store is not SQLite", async () => {
-    const service = new DataDestinationService({ store: null, readableWorkflowIds: async () => null, readableProjectIds: async () => null });
-    expect(service.available).toBe(false);
-    expect(await service.rows()).toEqual([]);
-    await expect(service.list()).rejects.toThrow(/SQLite/);
   });
 });
 

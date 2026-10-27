@@ -48,8 +48,6 @@ export interface GuardRoutesDeps {
   /** Project-level permission (memberships, then the global role); admins always pass. */
   canInProject: (user: SafeUser, projectId: string, permission: "workflow:read" | "workflow:write") => Promise<boolean>;
   audit: (request: FastifyRequest, user: SafeUser, event: Omit<AuditEventInput, "actor">) => void | Promise<void>;
-  /** Phase 16 — false on Postgres: the deployment's destination rules routes answer 501. */
-  destinationRulesAvailable?: boolean;
 }
 
 function str(value: unknown): string | undefined {
@@ -260,11 +258,6 @@ export function registerGuardRoutes(deps: GuardRoutesDeps): void {
   // Phase 16 — the deployment's destination rules (Security page)
   // ---------------------------------------------------------------------------
 
-  const destinationRulesUnavailable = (reply: FastifyReply) => {
-    if (deps.destinationRulesAvailable !== false) return null;
-    reply.code(501);
-    return { error: "Destination rules need the SQLite store in this release" };
-  };
   const rulesStatus = async (user: SafeUser) => {
     const status = await guard.destinationRulesStatus();
     return user.role === "admin" ? status : { ...status, observing: null };
@@ -273,16 +266,12 @@ export function registerGuardRoutes(deps: GuardRoutesDeps): void {
   app.get("/api/guard/destination-rules", async (request, reply) => {
     const user = await requireRole(request, reply, ["viewer"]);
     if (!user) return;
-    const unavailable = destinationRulesUnavailable(reply);
-    if (unavailable) return unavailable;
     return await rulesStatus(user);
   });
 
   app.post("/api/guard/destination-rules/starter", async (request, reply) => {
     const user = await requireRole(request, reply, ["admin"]);
     if (!user) return;
-    const unavailable = destinationRulesUnavailable(reply);
-    if (unavailable) return unavailable;
     try {
       const { status, created } = await guard.addStarterDestinationRule(user.id);
       if (created) {
@@ -305,8 +294,6 @@ export function registerGuardRoutes(deps: GuardRoutesDeps): void {
   app.post<{ Body: unknown }>("/api/guard/destination-rules/enforcement", async (request, reply) => {
     const user = await requireRole(request, reply, ["admin"]);
     if (!user) return;
-    const unavailable = destinationRulesUnavailable(reply);
-    if (unavailable) return unavailable;
     const parsed = destinationRulesEnforcementSchema.safeParse(request.body ?? {});
     if (!parsed.success) {
       reply.code(400);
@@ -331,8 +318,6 @@ export function registerGuardRoutes(deps: GuardRoutesDeps): void {
   app.put<{ Body: unknown }>("/api/guard/destination-rules", async (request, reply) => {
     const user = await requireRole(request, reply, ["admin"]);
     if (!user) return;
-    const unavailable = destinationRulesUnavailable(reply);
-    if (unavailable) return unavailable;
     const parsed = destinationRulesUpdateSchema.safeParse(request.body ?? {});
     if (!parsed.success) {
       reply.code(400);

@@ -24,8 +24,6 @@
  *   GET  /api/data-destinations/previews         recent previews (summaries)
  *
  * Admin only; read, cancel and the one-at-a-time rule through the routes above.
- *
- * SQLite only in this release: on Postgres every route answers 501.
  */
 
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
@@ -41,9 +39,9 @@ import type { Store } from "./db/store.js";
 export interface GuardSimulationRoutesDeps {
   app: FastifyInstance;
   store: Store;
-  simulations: GuardSimulationService | null;
+  simulations: GuardSimulationService;
   /** Phase 16 — builds a destination preview's rows (validated, never stored). */
-  destinations?: DataDestinationService;
+  destinations: DataDestinationService;
   requireRole: (request: FastifyRequest, reply: FastifyReply, roles: UserRole[]) => Promise<SafeUser | null>;
   runAccess: RunAccess;
   audit: (request: FastifyRequest, user: SafeUser, event: Omit<AuditEventInput, "actor">) => void | Promise<void>;
@@ -52,13 +50,8 @@ export interface GuardSimulationRoutesDeps {
 export function registerGuardSimulationRoutes(deps: GuardSimulationRoutesDeps): void {
   const { app, store, simulations, requireRole } = deps;
 
-  const unavailable = (reply: FastifyReply) => {
-    reply.code(501);
-    return { error: "Guard policy simulation needs the SQLite store in this release." };
-  };
-
   /** Why `user` may not simulate this profile (404 when it does not exist); null when they may. */
-  const editorDenial = async (user: SafeUser, profileId: string) => await simulations!.editorDenial(user, profileId);
+  const editorDenial = async (user: SafeUser, profileId: string) => await simulations.editorDenial(user, profileId);
 
   const deny = (reply: FastifyReply, denial: { status: number; error: string }) => {
     reply.code(denial.status);
@@ -68,7 +61,6 @@ export function registerGuardSimulationRoutes(deps: GuardSimulationRoutesDeps): 
   app.post<{ Params: { id: string }; Body: unknown; Querystring: { wait?: string } }>("/api/guard/profiles/:id/simulate", async (request, reply) => {
     const user = await requireRole(request, reply, ["builder"]);
     if (!user) return reply;
-    if (!simulations) return unavailable(reply);
     const denial = await editorDenial(user, request.params.id);
     if (denial) return deny(reply, denial);
     const parsed = guardSimulationRequestSchema.safeParse(request.body ?? {});
@@ -118,7 +110,6 @@ export function registerGuardSimulationRoutes(deps: GuardSimulationRoutesDeps): 
   app.post<{ Body: unknown; Querystring: { wait?: string } }>("/api/data-destinations/preview", async (request, reply) => {
     const user = await requireRole(request, reply, ["admin"]);
     if (!user) return reply;
-    if (!simulations || !deps.destinations?.available) return unavailable(reply);
     const parsed = destinationPreviewRequestSchema.safeParse(request.body ?? {});
     if (!parsed.success) {
       reply.code(400);
@@ -157,7 +148,6 @@ export function registerGuardSimulationRoutes(deps: GuardSimulationRoutesDeps): 
   app.get<{ Querystring: { limit?: string } }>("/api/data-destinations/previews", async (request, reply) => {
     const user = await requireRole(request, reply, ["admin"]);
     if (!user) return reply;
-    if (!simulations) return unavailable(reply);
     const limit = Number(request.query.limit);
     return { simulations: await simulations.list(DESTINATION_PREVIEW_SIMULATION_PROFILE, user, Number.isFinite(limit) ? limit : 5) };
   });
@@ -165,7 +155,6 @@ export function registerGuardSimulationRoutes(deps: GuardSimulationRoutesDeps): 
   app.get<{ Params: { id: string }; Querystring: { limit?: string } }>("/api/guard/profiles/:id/simulations", async (request, reply) => {
     const user = await requireRole(request, reply, ["builder"]);
     if (!user) return reply;
-    if (!simulations) return unavailable(reply);
     const denial = await editorDenial(user, request.params.id);
     if (denial) return deny(reply, denial);
     const limit = Number(request.query.limit);
@@ -175,7 +164,6 @@ export function registerGuardSimulationRoutes(deps: GuardSimulationRoutesDeps): 
   app.get<{ Params: { id: string } }>("/api/guard/simulations/:id", async (request, reply) => {
     const user = await requireRole(request, reply, ["builder"]);
     if (!user) return reply;
-    if (!simulations) return unavailable(reply);
     const record = await store.getGuardSimulation(request.params.id);
     if (!record) {
       reply.code(404);
@@ -198,7 +186,6 @@ export function registerGuardSimulationRoutes(deps: GuardSimulationRoutesDeps): 
   app.post<{ Params: { id: string } }>("/api/guard/simulations/:id/cancel", async (request, reply) => {
     const user = await requireRole(request, reply, ["builder"]);
     if (!user) return reply;
-    if (!simulations) return unavailable(reply);
     const record = await store.getGuardSimulation(request.params.id);
     if (!record || !await simulations.visibleTo(record, user)) {
       reply.code(404);

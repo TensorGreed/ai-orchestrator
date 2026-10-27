@@ -1727,9 +1727,9 @@ export const openApiSpec = {
     "/api/workflows/{id}/replay-capture": {
       get: {
         tags: ["Evals"],
-        summary: "Production capture settings of a workflow, the deployment's limits, candidates waiting, today's count and the last run capture dropped (`lastDrop`: outcome and time) (viewers; SQLite only)",
+        summary: "Production capture settings of a workflow, the deployment's limits, candidates waiting, today's count and the last run capture dropped (`lastDrop`: outcome and time) (viewers)",
         parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
-        responses: { "200": { description: "{ settings }" }, "404": { description: "Not found or not readable" }, "501": { description: "Postgres store" } }
+        responses: { "200": { description: "{ settings }" }, "404": { description: "Not found or not readable" } }
       },
       put: {
         tags: ["Evals"],
@@ -1759,8 +1759,7 @@ export const openApiSpec = {
           "200": { description: "{ settings }" },
           "400": { description: "Invalid settings, a rate over REPLAY_CAPTURE_MAX_RATE, a target set of another workflow, or masking off without a reason" },
           "403": { description: "Readable but not editable, or masking off by a non-admin" },
-          "404": { description: "Not found or not readable" },
-          "501": { description: "Postgres store" }
+          "404": { description: "Not found or not readable" }
         }
       }
     },
@@ -1785,8 +1784,7 @@ export const openApiSpec = {
         ],
         responses: {
           "200": { description: "{ items: [summary + { dataClasses, masked, source: api_key | null }], total }" },
-          "404": { description: "Not found or not readable" },
-          "501": { description: "Postgres store" }
+          "404": { description: "Not found or not readable" }
         }
       }
     },
@@ -1796,7 +1794,7 @@ export const openApiSpec = {
         summary: "Promote a captured run into a golden set: re-scrubbed, size and count limits checked (builders)",
         parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
         requestBody: { required: false, content: { "application/json": { schema: { type: "object", additionalProperties: false, properties: { datasetId: { type: "string" }, name: { type: "string", maxLength: 120 } } } } } },
-        responses: { "200": { description: "{ result, recording }" }, "403": { description: "Readable but not editable" }, "404": { description: "Not found, not readable or no longer in the inbox" }, "409": { description: "Over a golden-run limit" }, "501": { description: "Postgres store" } }
+        responses: { "200": { description: "{ result, recording }" }, "403": { description: "Readable but not editable" }, "404": { description: "Not found, not readable or no longer in the inbox" }, "409": { description: "Over a golden-run limit" } }
       }
     },
     "/api/replay/captures/promote": {
@@ -1804,7 +1802,7 @@ export const openApiSpec = {
         tags: ["Evals"],
         summary: "Promote up to 100 captured runs; one result per id (builders)",
         requestBody: { required: true, content: { "application/json": { schema: { type: "object", required: ["ids"], properties: { ids: { type: "array", minItems: 1, maxItems: 100, items: { type: "string" } }, datasetId: { type: "string" } } } } } },
-        responses: { "200": { description: "{ results, promoted }" }, "501": { description: "Postgres store" } }
+        responses: { "200": { description: "{ results, promoted }" } }
       }
     },
     "/api/replay/captures/{id}": {
@@ -1812,7 +1810,7 @@ export const openApiSpec = {
         tags: ["Evals"],
         summary: "Discard a captured run (builders)",
         parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
-        responses: { "200": { description: "{ deleted: true }" }, "403": { description: "Readable but not editable" }, "404": { description: "Not found or not readable" }, "501": { description: "Postgres store" } }
+        responses: { "200": { description: "{ deleted: true }" }, "403": { description: "Readable but not editable" }, "404": { description: "Not found or not readable" } }
       }
     },
     "/api/replay/captures/discard": {
@@ -1820,7 +1818,7 @@ export const openApiSpec = {
         tags: ["Evals"],
         summary: "Discard up to 100 captured runs; one result per id (builders)",
         requestBody: { required: true, content: { "application/json": { schema: { type: "object", required: ["ids"], properties: { ids: { type: "array", minItems: 1, maxItems: 100, items: { type: "string" } } } } } } },
-        responses: { "200": { description: "{ results, discarded }" }, "501": { description: "Postgres store" } }
+        responses: { "200": { description: "{ results, discarded }" } }
       }
     },
     "/api/replay/recordings/find-subject": {
@@ -1850,8 +1848,7 @@ export const openApiSpec = {
               "{ dataClass, callingCode, classesTried, matches: [{ kind, id, workflowId, projectId, name, status, matchedAs, fields, certainty, hits: [{ field, matchedAs, dataClass, excerpt, certainty, storedCallingCode? }] }], counts, searched, covered, notCovered }; exact matches first"
           },
           "400": { description: "Invalid value (too short for a raw search), a value that does not parse as the requested class, or an unknown country" },
-          "403": { description: "Not an admin" },
-          "501": { description: "Postgres store" }
+          "403": { description: "Not an admin" }
         }
       }
     },
@@ -1893,8 +1890,7 @@ export const openApiSpec = {
         responses: {
           "200": { description: "{ deleted (per kind), removed: [{ kind, id }], skipped: [{ kind, id, reason: not_found | no_match | possible_match_unconfirmed }] }" },
           "400": { description: "Invalid request, or a row listed both with and without confirmPossible (nothing is deleted)" },
-          "403": { description: "Not an admin" },
-          "501": { description: "Postgres store" }
+          "403": { description: "Not an admin" }
         }
       }
     },

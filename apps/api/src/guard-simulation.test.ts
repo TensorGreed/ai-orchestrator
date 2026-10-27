@@ -16,7 +16,6 @@ import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
-import Fastify from "fastify";
 import { afterEach, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
 import { hashGuardProfile, parseGuardProfile } from "@ai-orchestrator/guard-sdk";
@@ -26,7 +25,6 @@ import { WorkflowVersionService } from "./services/workflow-version-service.js";
 import { parseConfig, type AppConfig } from "./config.js";
 import { SqliteStore } from "./db/database.js";
 import { MIGRATIONS } from "./db/migrations.js";
-import { registerGuardSimulationRoutes } from "./guard-simulation-routes.js";
 import { AuthService } from "./services/auth-service.js";
 import { GuardService } from "./services/guard-service.js";
 import { GuardSimulationBusyError, GuardSimulationService } from "./services/guard-simulation-service.js";
@@ -829,23 +827,5 @@ describe("migration 35", () => {
     expect(columns).toEqual(
       expect.arrayContaining(["id", "profile_id", "source_kind", "source_version", "simulated_hash", "base_version", "job_ids_json", "summary_json", "status", "created_at", "created_by", "finished_at"])
     );
-  });
-
-  it("answers 501 when the store has no simulation storage (Postgres)", async () => {
-    const app = Fastify();
-    const user = { id: "u", email: "u@example.com", role: "admin" as const };
-    registerGuardSimulationRoutes({
-      app,
-      store: {} as unknown as SqliteStore,
-      simulations: null,
-      requireRole: async () => user,
-      runAccess: {} as never,
-      audit: () => undefined
-    });
-    await app.ready();
-    for (const [method, url] of [["POST", "/api/guard/profiles/p/simulate"], ["GET", "/api/guard/profiles/p/simulations"], ["GET", "/api/guard/simulations/s"]] as const) {
-      expect((await app.inject({ method, url, payload: method === "POST" ? { version: 1 } : undefined })).statusCode).toBe(501);
-    }
-    await app.close();
   });
 });

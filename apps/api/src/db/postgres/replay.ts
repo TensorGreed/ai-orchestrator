@@ -1,7 +1,6 @@
 /**
  * Phase 13.1 — PostgresStore: Replay recordings, golden runs and sets, replay candidates and MCP cassettes (tapes).
- * Plain functions over a PgContext; PostgresStore delegates here. Every method is implemented;
- * UNIMPLEMENTED_METHODS is empty.
+ * Plain functions over a PgContext; PostgresStore delegates here. Every method is implemented.
  *
  * Ordering: SQLite breaks `created_at` ties by rowid (insertion order); here `seq`, the identity column v40 adds to
  * mcp_cassettes and replay_recordings as the stand-in for rowid, does.
@@ -40,8 +39,6 @@ import { toNum, toStr } from "./helpers.js";
  */
 export const ADVISORY_LOCK_CLASS_REPLAY_GOLDEN = 0x4c3252;
 const REPLAY_GOLDEN_LOCK_KEY = 0;
-
-export const UNIMPLEMENTED_METHODS: readonly (keyof Store)[] = [];
 
 type Queryable = Pick<PoolClient, "query">;
 

@@ -8,8 +8,6 @@ import { type Store } from "../store.js";
 import { toStr } from "./helpers.js";
 import type { PgContext } from "./context.js";
 
-export const UNIMPLEMENTED_METHODS: readonly (keyof Store)[] = [];
-
 type Row = Record<string, unknown>;
 
 function parseJsonArray(raw: unknown): string[] {

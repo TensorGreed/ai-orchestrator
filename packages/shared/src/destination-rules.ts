@@ -50,7 +50,7 @@ export interface DestinationRuleView {
 export type DestinationRulesMode = "off" | "observing" | "enforcing" | "mixed";
 
 export interface DestinationRulesStatus {
-  /** False on Postgres (this release keeps destinations in SQLite only). */
+  /** Always true; kept so older clients that check it keep working. */
   available: boolean;
   profileId: string;
   /** The profile's latest version; null when it does not exist yet. */

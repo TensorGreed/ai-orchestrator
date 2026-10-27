@@ -23,7 +23,6 @@ import { SecretService } from "../services/secret-service.js";
 import { createTestStore, noticePostgresSkipped, testPostgresPool, testPostgresUrl, type TestStore, type TestStoreKind } from "../test-support/test-store.js";
 import { auditEntryHash, GENESIS_HASH, wellFormedAuditText, type AuditCanonicalInput } from "./audit-chain.js";
 import { SqliteStore } from "./database.js";
-import { StoreNotImplementedError } from "./store-errors.js";
 import type { Store } from "./store.js";
 
 type Entry = Parameters<Store["writeAuditLog"]>[0];
@@ -167,30 +166,8 @@ for (const kind of kinds) {
       expect(await store.verifyAuditChain()).toEqual({ ok: true, rowsChecked: 1 });
     }, 60_000);
 
-    /**
-     * The store the app boots on. On Postgres, methods another lane still has to implement (guard profiles, read at
-     * boot) answer null here instead of throwing; the tags route and the audit chain use only the real store.
-     */
-    function bootable(store: Store): Store {
-      return new Proxy(store, {
-        get(target, property, receiver) {
-          const value = Reflect.get(target, property, receiver);
-          if (typeof value !== "function") return value;
-          return (...args: unknown[]) => {
-            const result = (value as (...a: unknown[]) => unknown).apply(target, args);
-            return result instanceof Promise
-              ? result.catch((error: unknown) => {
-                  if (error instanceof StoreNotImplementedError) return null;
-                  throw error;
-                })
-              : result;
-          };
-        }
-      });
-    }
-
     it("POST /api/tags with a lone-surrogate name no longer breaks the chain", async () => {
-      const store = bootable(await fresh());
+      const store = await fresh();
       const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-audit-text-"));
       const config = parseConfig({
         LOG_LEVEL: "warn", SEED_SAMPLE_WORKFLOWS: "false", SECRET_MASTER_KEY_BASE64: crypto.randomBytes(32).toString("base64"),

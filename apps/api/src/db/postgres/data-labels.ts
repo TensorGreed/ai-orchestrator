@@ -10,12 +10,11 @@
  * after the cursor has passed a later seq. Rows written during a lookup are not part of its answer.
  */
 import type { PoolClient } from "pg";
-import { SUBJECT_CASSETTE_SOURCES, SUBJECT_EXECUTION_TRIGGERS, type SubjectStoreKind, type SubjectTextRow } from "../database.js";
+import type { SubjectStoreKind, SubjectTextRow } from "../database.js";
+import { SUBJECT_CASSETTE_SOURCES, SUBJECT_EXECUTION_TRIGGERS } from "../store-shared.js";
 import { type Store } from "../store.js";
 import { toNum, toStr } from "./helpers.js";
 import type { PgContext } from "./context.js";
-
-export const UNIMPLEMENTED_METHODS: readonly (keyof Store)[] = [];
 
 type Row = Record<string, unknown>;
 

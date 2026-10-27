@@ -17,8 +17,6 @@ import { parseJsonSafe, toNum, toStr } from "./helpers.js";
 import type { PgContext } from "./context.js";
 import { clampLimit, LIMIT_MAX } from "../store-limits.js";
 
-export const UNIMPLEMENTED_METHODS: readonly (keyof Store)[] = [];
-
 interface KnowledgeBaseRow {
   id: string;
   name: string;

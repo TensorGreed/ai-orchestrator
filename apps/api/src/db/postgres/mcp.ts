@@ -37,27 +37,25 @@ import {
   type McpToolsetMemberSpec
 } from "@ai-orchestrator/shared";
 import type { PoolClient } from "pg";
-import {
-  normalizeMcpSamplingSettings,
-  type McpClientSecretRecord,
-  type McpClientUsageRow,
-  type McpElicitationRecord,
-  type McpOAuthConnectionRecord,
-  type McpServerCatalogRecord,
-  type McpServerProbeRecord,
-  type McpServerRecord,
-  type McpServerStatus,
-  type McpToolCallRecord,
-  type McpToolCallWrite,
-  type McpToolSnapshotRecord,
-  type McpUserOAuthConnectionRecord
+import { normalizeMcpSamplingSettings } from "../store-shared.js";
+import type {
+  McpClientSecretRecord,
+  McpClientUsageRow,
+  McpElicitationRecord,
+  McpOAuthConnectionRecord,
+  McpServerCatalogRecord,
+  McpServerProbeRecord,
+  McpServerRecord,
+  McpServerStatus,
+  McpToolCallRecord,
+  McpToolCallWrite,
+  McpToolSnapshotRecord,
+  McpUserOAuthConnectionRecord
 } from "../database.js";
 import { type Store } from "../store.js";
 import { parseJsonSafe, toNum, toStr } from "./helpers.js";
 import type { PgContext } from "./context.js";
 import { clampLimit, LIMIT_MAX } from "../store-limits.js";
-
-export const UNIMPLEMENTED_METHODS: readonly (keyof Store)[] = [];
 
 type Row = Record<string, unknown>;
 type Queryable = Pick<PoolClient, "query">;

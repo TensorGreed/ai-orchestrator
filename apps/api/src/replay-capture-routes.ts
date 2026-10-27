@@ -14,8 +14,9 @@
  * Access follows the workflow (run-access.ts): reading needs `workflow:read`
  * (404 otherwise), changing needs `workflow:write` (403 when readable but not
  * writable). In bulk requests every id is checked on its own; one the user
- * cannot read reports "not found" like a missing one. SQLite only: on
- * Postgres every route answers 501.
+ * cannot read reports "not found" like a missing one. Without a 32-byte
+ * SECRET_MASTER_KEY_BASE64 (which index.ts already refuses to start without)
+ * capture is off and every route answers 503.
  */
 
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
@@ -44,7 +45,7 @@ export interface ReplayCaptureRoutesDeps {
   requireRole: (request: FastifyRequest, reply: FastifyReply, roles: UserRole[]) => Promise<SafeUser | null>;
   runAccess: RunAccess;
   audit: (request: FastifyRequest, user: SafeUser, event: Omit<AuditEventInput, "actor">) => void | Promise<void>;
-  /** False on Postgres: every route answers 501. */
+  /** False without a 32-byte master key (no surrogate key): every route answers 503. */
   available: boolean;
   /**
    * Release gate admission — before a data-subject delete removes one row: a
@@ -76,8 +77,8 @@ export function registerReplayCaptureRoutes(deps: ReplayCaptureRoutesDeps): void
     return { error: denial.error };
   };
   const unavailable = (reply: FastifyReply) => {
-    reply.code(501);
-    return { error: "Production capture needs the SQLite store; it is not available on Postgres yet." };
+    reply.code(503);
+    return { error: "Production capture needs a 32-byte SECRET_MASTER_KEY_BASE64." };
   };
 
   /** A candidate the user may act on, or the denial (404 for missing, golden or unreadable; 403 for read-only). */

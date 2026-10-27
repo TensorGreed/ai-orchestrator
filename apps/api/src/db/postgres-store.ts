@@ -163,31 +163,6 @@ export async function applyMigrationChain(client: PoolClient): Promise<string[]>
 }
 
 export class PostgresStore implements Store {
-  /**
-   * Store methods this store does not implement yet: each throws
-   * StoreNotImplementedError (501). Feature checks read this through
-   * `storeImplements` instead of probing for the method.
-   */
-  static readonly unimplemented: ReadonlySet<keyof Store> = new Set<keyof Store>([
-    ...approvals.UNIMPLEMENTED_METHODS,
-    ...audit.UNIMPLEMENTED_METHODS,
-    ...auth.UNIMPLEMENTED_METHODS,
-    ...capture.UNIMPLEMENTED_METHODS,
-    ...data_destinations.UNIMPLEMENTED_METHODS,
-    ...data_labels.UNIMPLEMENTED_METHODS,
-    ...evals.UNIMPLEMENTED_METHODS,
-    ...executions.UNIMPLEMENTED_METHODS,
-    ...guard.UNIMPLEMENTED_METHODS,
-    ...guard_simulation.UNIMPLEMENTED_METHODS,
-    ...knowledge.UNIMPLEMENTED_METHODS,
-    ...mcp.UNIMPLEMENTED_METHODS,
-    ...misc.UNIMPLEMENTED_METHODS,
-    ...queue.UNIMPLEMENTED_METHODS,
-    ...release.UNIMPLEMENTED_METHODS,
-    ...replay.UNIMPLEMENTED_METHODS,
-    ...secrets.UNIMPLEMENTED_METHODS,
-    ...workflows.UNIMPLEMENTED_METHODS
-  ]);
   private readonly pool: Pool;
   private readonly ctx: PgContext;
 

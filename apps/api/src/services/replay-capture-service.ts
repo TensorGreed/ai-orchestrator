@@ -92,7 +92,8 @@ import {
   type GuardDictionary,
   type SubjectSpan
 } from "@ai-orchestrator/guard-sdk";
-import { SUBJECT_CASSETTE_SOURCES, SUBJECT_EXECUTION_TRIGGERS, type ReplayCaptureSettingsRecord, type SubjectTextRow } from "../db/database.js";
+import type { ReplayCaptureSettingsRecord, SubjectTextRow } from "../db/database.js";
+import { SUBJECT_CASSETTE_SOURCES, SUBJECT_EXECUTION_TRIGGERS } from "../db/store-shared.js";
 import { inputProvenance, type CaptureInputOrigin } from "./capture-masking.js";
 import type { McpCassetteRunPlan } from "./mcp-cassette-service.js";
 import { ReplayRecordingError, type ReplayRecordingService } from "./replay-recording-service.js";

@@ -4,23 +4,20 @@
  * counted by the observing banner and enforced with one switch; only admins
  * change it; HTTP Request egress is checked at call time against the stored
  * destination rows; "Preview impact" replays recent runs with unsaved rows
- * (never stored) and names where newly blocked content was going; and on
- * Postgres the routes answer 501.
+ * (never stored) and names where newly blocked content was going.
  */
 import crypto from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
-import Fastify from "fastify";
 import { afterEach, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
 import type { DestinationRulesStatus, GuardSimulationView, Workflow } from "@ai-orchestrator/shared";
 import { createApp } from "./app.js";
 import { parseConfig, type AppConfig } from "./config.js";
 import { SqliteStore } from "./db/database.js";
-import { registerGuardRoutes } from "./guard-routes.js";
-import { AuthService, type SafeUser } from "./services/auth-service.js";
+import { AuthService } from "./services/auth-service.js";
 import { GuardService } from "./services/guard-service.js";
 import { SecretService } from "./services/secret-service.js";
 
@@ -374,42 +371,6 @@ describe("deployment destination rules", () => {
       // A rules profile without rules is not applied.
       await guard.setDestinationRules([], null);
       expect((await guard.resolveRun({ workflowId: "wf" })).stack.map((entry) => entry.profileId)).toEqual(["default"]);
-    } finally {
-      await store.close();
-      fs.rmSync(tempDir, { recursive: true, force: true });
-    }
-  });
-
-  it("on Postgres the destination rules routes answer 501", async () => {
-    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-dest-pg-"));
-    const store = await SqliteStore.create(path.join(tempDir, "orchestrator.db"));
-    try {
-      const secrets = new SecretService(store, MASTER_KEY);
-      const guard = new GuardService(store, secrets, { autoApply: false });
-      const app = Fastify();
-      const admin = { id: "u1", email: "admin@example.com", role: "admin" } as SafeUser;
-      registerGuardRoutes({
-        app,
-        store,
-        guard,
-        requireRole: async () => admin,
-        runAccess: { readableWorkflowIds: () => null } as never,
-        canAccessWorkflow: async () => true,
-        canInProject: async () => true,
-        audit: () => undefined,
-        destinationRulesAvailable: false
-      });
-      await app.ready();
-      for (const [method, url, payload] of [
-        ["GET", "/api/guard/destination-rules", undefined],
-        ["POST", "/api/guard/destination-rules/starter", undefined],
-        ["POST", "/api/guard/destination-rules/enforcement", { enforce: true }],
-        ["PUT", "/api/guard/destination-rules", { rules: [] }]
-      ] as const) {
-        const response = await app.inject({ method, url, ...(payload ? { payload } : {}) });
-        expect(response.statusCode, url).toBe(501);
-      }
-      await app.close();
     } finally {
       await store.close();
       fs.rmSync(tempDir, { recursive: true, force: true });
