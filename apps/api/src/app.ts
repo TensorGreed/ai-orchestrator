@@ -1,5 +1,6 @@
 import { filterAsync, mapAsync, someAsync } from "./async-array.js";
 import crypto from "node:crypto";
+import os from "node:os";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -1311,6 +1312,9 @@ export interface CreateAppOptions {
   /** Runtime/image detection seams for the code sandbox plan (tests). */
   codeSandboxDeps?: Parameters<typeof resolveCodeSandboxPlan>[1];
 }
+
+/** Phase 13.1 — how often the leader re-reads schedules and triggers when several instances share the database. */
+export const SCHEDULE_SYNC_INTERVAL_MS = 15_000;
 
 export async function createApp(
   config: AppConfig,
@@ -3525,11 +3529,40 @@ export async function createApp(
       });
     }
   }
+  // Postgres: instances that run the scheduler and triggers elect one leader with an advisory lock on a dedicated
+  // connection, with or without HA_ENABLED, so a cron fires once however many instances share the database. SQLite
+  // (one process) keeps the lease row, used only when HA_ENABLED is set.
+  const leaderInstanceId = config.HA_INSTANCE_ID ?? `${os.hostname()}-${crypto.randomBytes(4).toString("hex")}`;
+  const leaderLock =
+    store instanceof PostgresStore && (config.HA_ENABLED || runsBackgroundWorkers)
+      ? store.leaderLock({ leaseName: "primary", holderId: leaderInstanceId, ttlMs: config.HA_LEASE_TTL_MS })
+      : undefined;
+  // On a shared database, schedules and triggers saved through another instance reach the leader's at the next sync.
+  let scheduleSyncTimer: NodeJS.Timeout | null = null;
+  const startScheduleSync = () => {
+    if (scheduleSyncTimer) return;
+    // promise-ok: each sync catches and logs its own errors
+    scheduleSyncTimer = setInterval(async () => {
+      try {
+        await schedulerService?.syncAllSchedules();
+        await triggerService?.syncAllWorkflows();
+      } catch (err) {
+        app.log.warn({ err: err instanceof Error ? err.message : String(err) }, "Failed to sync schedules and triggers");
+      }
+    }, SCHEDULE_SYNC_INTERVAL_MS);
+    scheduleSyncTimer.unref?.();
+  };
+  const stopScheduleSync = () => {
+    if (scheduleSyncTimer) clearInterval(scheduleSyncTimer);
+    scheduleSyncTimer = null;
+  };
+  app.addHook("onClose", async () => stopScheduleSync());
   const leaderElection = new LeaderElectionService(
     store,
     {
       enabled: config.HA_ENABLED,
-      instanceId: config.HA_INSTANCE_ID,
+      instanceId: leaderInstanceId,
+      ...(leaderLock ? { lock: leaderLock } : {}),
       leaseTtlMs: config.HA_LEASE_TTL_MS,
       renewIntervalMs: config.HA_RENEW_INTERVAL_MS,
       onBecomeLeader: async () => {
@@ -3551,6 +3584,7 @@ export async function createApp(
         try {
           await schedulerService?.initialize();
           await triggerService?.initialize();
+          if (sharedDatabase) startScheduleSync();
           app.log.info({ instanceId: leaderElection.getInstanceId() }, "Acquired leader lease — scheduler + trigger services started");
         } catch (err) {
           app.log.warn(
@@ -3561,6 +3595,7 @@ export async function createApp(
       },
       onResignLeader: () => {
         if (!runsBackgroundWorkers) return;
+        stopScheduleSync();
         try {
           schedulerService?.stop();
           void triggerService?.stop();
@@ -3572,6 +3607,15 @@ export async function createApp(
     },
     "primary"
   );
+  if (leaderLock || config.HA_ENABLED) {
+    // Standby until elected: a save on a standby instance registers no schedule or trigger of its own.
+    schedulerService?.stop();
+    void triggerService?.stop();
+  }
+  // Before the other startup hooks (the approval sweep at boot asks isLeader()); the election loop starts later.
+  app.addHook("onReady", async () => {
+    await leaderElection.acquireEarly();
+  });
   const metricsService = new MetricsService({
     enabled: config.METRICS_ENABLED,
     prefix: config.METRICS_PREFIX,

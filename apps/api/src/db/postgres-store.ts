@@ -25,6 +25,7 @@ import * as secrets from "./postgres/secrets.js";
 import * as sessions from "./postgres/sessions.js";
 import * as webhooks from "./postgres/webhooks.js";
 import * as workflows from "./postgres/workflows.js";
+import { ADVISORY_LOCK_CLASS_LEADER, PgLeaderLock, type LeaderLock } from "./postgres/leader-lock.js";
 
 export { parseTimestamptz };
 
@@ -60,7 +61,7 @@ export interface PostgresStoreConfig {
  * Add a new class here rather than reusing one.
  */
 export const ADVISORY_LOCK_CLASS_MIGRATIONS = 0x4c324d;
-export const ADVISORY_LOCK_CLASS_LEADER = 0x4c324e;
+export { ADVISORY_LOCK_CLASS_LEADER };
 
 /** TIMESTAMPTZ through parseTimestamptz; every other type keeps pg's default parser. */
 const POSTGRES_TYPES = {
@@ -169,15 +170,19 @@ export class PostgresStore implements Store {
   /** Phase 13.1 — one-line notes from this start's migrations (e.g. simulations an upgrade interrupted), for the log. */
   readonly upgradeNotes: string[] = [];
 
-  private constructor(pool: Pool) {
+  private readonly config: PostgresStoreConfig;
+  private readonly leaderLocks = new Set<PgLeaderLock>();
+
+  private constructor(pool: Pool, config: PostgresStoreConfig) {
     this.pool = pool;
+    this.config = config;
     this.ctx = createPgContext(pool, this);
   }
 
   static async create(config: PostgresStoreConfig): Promise<PostgresStore> {
     const pool = new Pool(postgresPoolConfig(config));
     try {
-      const store = new PostgresStore(pool);
+      const store = new PostgresStore(pool, config);
       await store.migrate(config.schema);
       return store;
     } catch (error) {
@@ -190,8 +195,25 @@ export class PostgresStore implements Store {
 
   async close(): Promise<void> {
     // Idempotent like SqliteStore.close: the app's onClose and a caller may both close it; both wait for the end.
-    this.closing ??= this.pool.end();
+    this.closing ??= (async () => {
+      await Promise.all([...this.leaderLocks].map((lock) => lock.release()));
+      await this.pool.end();
+    })();
     await this.closing;
+  }
+
+  /**
+   * Phase 13.1 — the leader lock for `leaseName`: a session advisory lock on a dedicated connection (not one of the
+   * pool's), released when the lock is released, the store closes, or the connection ends.
+   */
+  leaderLock(input: { leaseName: string; holderId: string; ttlMs: number }): LeaderLock {
+    const lock = new PgLeaderLock({
+      clientConfig: postgresPoolConfig(this.config, { max: 1 }),
+      pool: this.pool,
+      ...input
+    });
+    this.leaderLocks.add(lock);
+    return lock;
   }
 
   /**

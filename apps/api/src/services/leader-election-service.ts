@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import os from "node:os";
 import type { Store } from "../db/store.js";
+import type { LeaderLock } from "../db/postgres/leader-lock.js";
 
 export interface LeaderElectionOptions {
   enabled?: boolean;
@@ -11,6 +12,12 @@ export interface LeaderElectionOptions {
   onBecomeLeader?: () => void | Promise<void>;
   /** Called when this instance loses the lease (e.g. DB error, remote steal). */
   onResignLeader?: () => void | Promise<void>;
+  /**
+   * Phase 13.1 — decide leadership with this lock instead of the `leader_leases` row (Postgres: an advisory lock on
+   * a dedicated connection). Election is then on whatever `enabled` says, and losing the lock's connection steps
+   * this instance down at once, not at the next renewal.
+   */
+  lock?: LeaderLock;
 }
 
 export interface LeaderStatus {
@@ -33,6 +40,8 @@ export interface LeaderStatus {
  *
  * When `HA_ENABLED=false` this service always reports itself as the leader
  * — single-instance deployments get the same API without HA overhead.
+ *
+ * With a `lock` (Postgres) the lock decides instead of the row: one holder at a time, freed when its session ends.
  */
 export class LeaderElectionService {
   private readonly enabled: boolean;
@@ -47,13 +56,18 @@ export class LeaderElectionService {
   private timer: NodeJS.Timeout | null = null;
   private lastRenewAt: string | null = null;
   private stopped = false;
+  private readonly lock: LeaderLock | undefined;
+  /** Leading since acquireEarly(), with onBecomeLeader not yet run (start() runs it). */
+  private unannounced = false;
 
   constructor(
     private readonly store: Store,
     options: LeaderElectionOptions = {},
     leaseName = "primary"
   ) {
-    this.enabled = options.enabled === true;
+    this.lock = options.lock;
+    this.enabled = options.enabled === true || this.lock !== undefined;
+    this.lock?.onLost(() => void this.stepDown());
     this.leaseTtlMs = options.leaseTtlMs ?? 30000;
     this.renewIntervalMs = options.renewIntervalMs ?? 10000;
     this.instanceId = options.instanceId ?? `${os.hostname()}-${crypto.randomBytes(4).toString("hex")}`;
@@ -68,6 +82,21 @@ export class LeaderElectionService {
 
   isLeader(): boolean {
     return this.enabled ? this.holder : true;
+  }
+
+  /**
+   * Phase 13.1 — with a lock: takes it now, if it is free, so isLeader() answers for this instance while the rest of
+   * startup runs (an approval sweep at boot asks before the election loop starts). onBecomeLeader still runs from
+   * start(). Without a lock this does nothing.
+   */
+  async acquireEarly(): Promise<void> {
+    if (!this.lock || this.stopped || this.timer || this.holder) return;
+    try {
+      this.holder = await this.lock.check();
+    } catch {
+      this.holder = false;
+    }
+    this.unannounced = this.holder;
   }
 
   /**
@@ -96,9 +125,10 @@ export class LeaderElectionService {
       clearInterval(this.timer);
       this.timer = null;
     }
+    if (this.lock) await this.lock.release();
     if (this.enabled && this.holder) {
       try {
-        await this.store.releaseLease(this.leaseName, this.instanceId);
+        if (!this.lock) await this.store.releaseLease(this.leaseName, this.instanceId);
       } catch {
         // ignore
       }
@@ -145,15 +175,19 @@ export class LeaderElectionService {
     if (this.stopped) return;
     let acquired = false;
     try {
-      acquired = await this.store.tryAcquireLease({
-        leaseName: this.leaseName,
-        holderId: this.instanceId,
-        ttlMs: this.leaseTtlMs
-      });
+      acquired = this.lock
+        ? await this.lock.check()
+        : await this.store.tryAcquireLease({
+            leaseName: this.leaseName,
+            holderId: this.instanceId,
+            ttlMs: this.leaseTtlMs
+          });
     } catch {
       acquired = false;
     }
-    const wasLeader = this.holder;
+    if (this.stopped) return;
+    const wasLeader = this.holder && !this.unannounced;
+    this.unannounced = false;
     this.holder = acquired;
     this.lastRenewAt = new Date().toISOString();
     if (!wasLeader && acquired && this.onBecomeLeader) {
@@ -164,6 +198,21 @@ export class LeaderElectionService {
       }
     }
     if (wasLeader && !acquired && this.onResignLeader) {
+      try {
+        await this.onResignLeader();
+      } catch {
+        // ignore
+      }
+    }
+  }
+
+  /** The lock's connection ended or failed while this instance led: stop leading now. */
+  private async stepDown(): Promise<void> {
+    if (!this.holder || this.stopped) return;
+    this.holder = false;
+    const announced = !this.unannounced;
+    this.unannounced = false;
+    if (announced && this.onResignLeader) {
       try {
         await this.onResignLeader();
       } catch {

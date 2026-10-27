@@ -168,3 +168,78 @@ describe("what reloads keep in memory", () => {
     expect(tracked(scheduler)).toBe(0);
   });
 });
+
+describe("a standby instance and the leader's sync (Phase 13.1)", () => {
+  const withCron = (workflow: Workflow, cronExpression: string): Workflow => ({
+    ...workflow,
+    nodes: workflow.nodes.map((n) => (n.type === "schedule_trigger" ? { ...n, config: { ...n.config, cronExpression } } : n))
+  });
+  const storeOf = (workflows: () => Workflow[]) =>
+    ({
+      listWorkflows: async () => workflows().map((w) => ({ id: w.id })),
+      getTriggerState: async () => null,
+      saveTriggerState: async () => undefined,
+      deleteTriggerStatesForWorkflow: async () => 0
+    }) as unknown as Store;
+
+  it("after stop() a save registers nothing until initialize(); initialize registers what the database holds", async () => {
+    let current = [scheduleWorkflow("tick")];
+    const scheduler = new SchedulerService(storeOf(() => current), quiet);
+    services.push(scheduler);
+    scheduler.setWorkflowLoader(async (id) => current.find((w) => w.id === id) ?? null);
+    scheduler.stop();
+    await scheduler.reloadWorkflow("wf-reload");
+    await scheduler.syncAllSchedules();
+    expect(jobKeys(scheduler)).toEqual([]);
+    await scheduler.initialize();
+    expect(jobKeys(scheduler)).toEqual(["wf-reload::tick"]);
+    current = [];
+    scheduler.stop();
+    expect(jobKeys(scheduler)).toEqual([]);
+  });
+
+  it("sync keeps an unchanged schedule's job, replaces a changed one and drops a removed one", async () => {
+    let current = [scheduleWorkflow("tick")];
+    const scheduler = new SchedulerService(storeOf(() => current), quiet);
+    services.push(scheduler);
+    scheduler.setWorkflowLoader(async (id) => current.find((w) => w.id === id) ?? null);
+    await scheduler.initialize();
+    const jobs = (scheduler as unknown as { jobs: Map<string, unknown> }).jobs;
+    const before = jobs.get("wf-reload::tick");
+    await scheduler.syncAllSchedules();
+    expect(jobs.get("wf-reload::tick")).toBe(before);
+    current = [withCron(scheduleWorkflow("tick"), "0 0 2 1 *")];
+    await scheduler.syncAllSchedules();
+    expect(jobKeys(scheduler)).toEqual(["wf-reload::tick"]);
+    expect(jobs.get("wf-reload::tick")).not.toBe(before);
+    current = [{ ...scheduleWorkflow("other"), id: "wf-2" }];
+    await scheduler.syncAllSchedules();
+    expect(jobKeys(scheduler)).toEqual(["wf-2::other"]);
+  });
+
+  it("triggers: a standby registers nothing; sync keeps an unchanged trigger and restarts a changed one", async () => {
+    let current = [rssWorkflow("feed")];
+    const fetchStub = (async () => new Response("<rss><channel></channel></rss>", { status: 200 })) as unknown as typeof fetch;
+    const triggers = new TriggerService(storeOf(() => current), quiet, fetchStub);
+    triggers.setOutboundGuard(DEFAULT_OUTBOUND_GUARD, async () => ["93.184.216.34"]);
+    services.push(triggers);
+    triggers.setWorkflowLoader(async (id) => current.find((w) => w.id === id) ?? null);
+    await triggers.stop();
+    await triggers.reloadWorkflow("wf-reload");
+    await triggers.syncAllWorkflows();
+    expect(triggerKeys(triggers)).toEqual([]);
+    await triggers.initialize();
+    const active = (triggers as unknown as { active: Map<string, unknown> }).active;
+    const before = active.get("wf-reload::feed");
+    expect(before).toBeDefined();
+    await triggers.syncAllWorkflows();
+    expect(active.get("wf-reload::feed")).toBe(before);
+    current = [{ ...rssWorkflow("feed"), nodes: rssWorkflow("feed").nodes.map((n) => (n.type === "rss_trigger" ? { ...n, config: { ...n.config, pollIntervalSeconds: 7200 } } : n)) }];
+    await triggers.syncAllWorkflows();
+    expect(active.get("wf-reload::feed")).toBeDefined();
+    expect(active.get("wf-reload::feed")).not.toBe(before);
+    current = [];
+    await triggers.syncAllWorkflows();
+    expect(triggerKeys(triggers)).toEqual([]);
+  });
+});
