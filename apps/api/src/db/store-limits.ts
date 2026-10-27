@@ -12,5 +12,8 @@ export const LIMIT_MAX = {
   knowledgeBaseChunkPreviews: 500,
   dequeueNext: 1000,
   mcpServerProbes: 1000,
-  mcpToolSnapshots: 1000
+  mcpToolSnapshots: 1000,
+  usageRollup: 500,
+  usageEvents: 500,
+  budgetAlerts: 500
 } as const;

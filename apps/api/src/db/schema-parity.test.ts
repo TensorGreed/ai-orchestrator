@@ -58,8 +58,17 @@ const SEQ_INDEXES: ReadonlyArray<{ table: string; index: string; definition: str
     table: "knowledge_base_chunks",
     index: "idx_kb_chunks_kb_seq",
     definition: "CREATE INDEX idx_kb_chunks_kb_seq ON knowledge_base_chunks USING btree (knowledge_base_id, seq)"
-  }
+  },
+  // The data-subject lookup pages these five tables by `seq` (postgres/data-labels.ts).
+  ...["replay_recordings", "eval_fixtures", "eval_results", "execution_history", "mcp_cassettes"].map((table) => ({
+    table,
+    index: `idx_${table}_seq`,
+    definition: `CREATE UNIQUE INDEX idx_${table}_seq ON ${table} USING btree (seq)`
+  }))
 ];
+
+/** The tables q3b's Postgres modules order by `seq` (where SQLite uses rowid); all must be in v40. */
+const Q3B_SEQ_TABLES = ["eval_fixtures", "eval_runs", "eval_results", "mcp_cassettes", "replay_recordings", "guard_simulations", "execution_history"];
 
 export const ALLOWED_DIFFERENCES: ReadonlyArray<SchemaDifference & { reason: string }> = [
   ...INSERTION_SEQ_TABLES.map(({ table }) => ({
@@ -362,6 +371,67 @@ describe.skipIf(!postgresUrl)("Postgres schema parity and migration walk", () =>
       await test.cleanup();
     }
   }, 120_000);
+
+  it("v40: no float4 (real) column remains; SQLite REAL is an 8-byte double, so Postgres uses double precision", async () => {
+    const test = await createTestStore({ kind: "postgres" });
+    const pool = testPostgresPool();
+    try {
+      const real = await pool.query<{ column: string }>(
+        `SELECT table_name || '.' || column_name AS column FROM information_schema.columns
+          WHERE table_schema = $1 AND data_type = 'real' ORDER BY 1`,
+        [test.schema]
+      );
+      expect(real.rows).toEqual([]);
+      const widened = await pool.query<{ column: string; data_type: string }>(
+        `SELECT table_name || '.' || column_name AS column, data_type FROM information_schema.columns
+          WHERE table_schema = $1 AND (table_name, column_name) IN (('usage_events', 'cost_usd'), ('budgets', 'limit_value'),
+            ('budgets', 'warn_threshold_pct'), ('budget_alerts', 'usage_value'), ('budget_alerts', 'limit_value')) ORDER BY 1`,
+        [test.schema]
+      );
+      expect(widened.rows).toEqual(
+        ["budget_alerts.limit_value", "budget_alerts.usage_value", "budgets.limit_value", "budgets.warn_threshold_pct", "usage_events.cost_usd"].map((column) => ({
+          column,
+          data_type: "double precision"
+        }))
+      );
+    } finally {
+      await pool.end();
+      await test.cleanup();
+    }
+  }, 120_000);
+
+  it("v40 down narrows the widened columns back to real, keeping the shortest decimal on the way up again", async () => {
+    const schema = randomTestSchema();
+    const admin = testPostgresPool();
+    await admin.query(`CREATE SCHEMA "${schema}"`);
+    const pool = testPostgresPool(schema);
+    const cb = chainCallbacks(pool);
+    try {
+      await pool.query(`CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP)`);
+      await runMigrations(cb.run, cb.current, cb.setApplied);
+      await rollbackMigrations(cb.run, cb.current, cb.setRolledBack, 39);
+      const type = await pool.query<{ data_type: string }>(
+        `SELECT data_type FROM information_schema.columns WHERE table_schema = $1 AND table_name = 'usage_events' AND column_name = 'cost_usd'`,
+        [schema]
+      );
+      expect(type.rows[0]?.data_type).toBe("real");
+      await pool.query(
+        `INSERT INTO usage_events (id, execution_id, workflow_id, status, cost_usd, created_at) VALUES ('u1', 'e1', 'w1', 'success', 0.1, now())`
+      );
+      await runMigrations(cb.run, cb.current, cb.setApplied);
+      const cost = await pool.query<{ cost: number }>(`SELECT cost_usd AS cost FROM usage_events WHERE id = 'u1'`);
+      expect(cost.rows[0]?.cost).toBe(0.1);
+    } finally {
+      await pool.end();
+      await admin.end();
+      await dropTestSchema(schema);
+    }
+  }, 120_000);
+
+  it("v40 covers every table the governance modules order by seq", () => {
+    const tables = INSERTION_SEQ_TABLES.map(({ table }) => table);
+    expect(Q3B_SEQ_TABLES.filter((table) => !tables.includes(table))).toEqual([]);
+  });
 
   it("v40: every insertion-ordered table has seq BIGINT NOT NULL GENERATED ALWAYS AS IDENTITY, and the seq indexes are exactly as documented", async () => {
     const test = await createTestStore({ kind: "postgres" });

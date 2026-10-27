@@ -8,6 +8,12 @@
  *
  * Methods are grouped by domain. Records and filters are the types the SQLite store defines (`./database.js`) or
  * the shared workflow contract (`@ai-orchestrator/shared`).
+ *
+ * NUL characters in text: SQLite stores U+0000 in a string field as given. Postgres TEXT cannot hold it, so the
+ * Postgres store writes (and looks up) every string with U+0000 replaced by U+FFFD (postgres/context.ts), and reads
+ * it back that way. JSON fields are unaffected on both (JSON.stringify writes the escape `\u0000`). The audit chain
+ * is the exception: both stores write audit text with U+0000 (and lone surrogates) as U+FFFD and hash that stored
+ * value (db/audit-chain.ts).
  */
 import type {
   ChatMessage,
@@ -1589,6 +1595,8 @@ export interface Store {
   /**
    * Atomic compare-and-set lease acquisition. Returns true if this holder
    * now owns the lease, false if another non-expired holder owns it.
+   * Expiry is judged on the database clock on Postgres (shared by every
+   * instance) and on the process clock on SQLite.
    */
   tryAcquireLease(input: { leaseName: string; holderId: string; ttlMs: number }): Promise<boolean>;
   releaseLease(leaseName: string, holderId: string): Promise<boolean>;
@@ -1985,6 +1993,9 @@ export interface Store {
   deleteBudget(id: string): Promise<boolean>;
   getBudget(id: string): Promise<BudgetRecord | null>;
   listBudgets(filter?: { enabledOnly?: boolean; scopeType?: string; scopeId?: string }): Promise<BudgetRecord[]>;
+  /** Records a fired budget alert; false when the store refused it as a duplicate for the same budget, window and
+   * severity, or because the budget no longer exists (Postgres, where two instances can pass the debounce check
+   * together). SQLite always records it. */
   recordBudgetAlert(input: {
     id: string;
     budgetId: string;
@@ -1995,7 +2006,7 @@ export interface Store {
     workflowId?: string | null;
     executionId?: string | null;
     message?: string;
-  }): Promise<void>;
+  }): Promise<boolean>;
   /**
    * Most recent alert for a (budget, period) pair. Used to debounce — we
    * only fire one warn / one block per period+budget combination so users

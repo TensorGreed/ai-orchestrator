@@ -443,10 +443,21 @@ export class GuardService {
   /**
    * Phase 16 — false when no stored profile version asks for propagated
    * labels: a run then learns it does not track labels without resolving its
-   * profiles (zero-config runs pay this one cached check).
+   * profiles (zero-config runs pay this one cached check). Fails open: a
+   * store error answers true, so the run takes the full resolution path
+   * (which reports its own failures where they are used) instead of every
+   * run failing at start.
    */
   async mayUseLabels(): Promise<boolean> {
-    return storeImplements(this.store, "anyGuardProfileUsesLabels") ? await this.store.anyGuardProfileUsesLabels() : true;
+    if (!storeImplements(this.store, "anyGuardProfileUsesLabels")) return true;
+    try {
+      return await this.store.anyGuardProfileUsesLabels();
+    } catch (error) {
+      this.options.logger?.("Guard profile labels check failed; resolving the run's profiles instead", {
+        error: error instanceof Error ? error.message : String(error)
+      });
+      return true;
+    }
   }
 
   /**

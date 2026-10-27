@@ -9565,7 +9565,7 @@ export class SqliteStore implements Store {
       params.push(input.projectId);
     }
     const where = `WHERE ${filters.join(" AND ")}`;
-    const limit = Math.min(input.limit ?? 100, 500);
+    const limit = clampLimit(input.limit, { fallback: 100, max: LIMIT_MAX.usageRollup });
 
     if (input.groupBy === "day" || input.groupBy === "hour") {
       const fmt = input.groupBy === "day" ? "%Y-%m-%d" : "%Y-%m-%dT%H:00:00";
@@ -9837,7 +9837,7 @@ export class SqliteStore implements Store {
     if (input.userId) { filters.push("user_id = ?"); params.push(input.userId); }
     if (input.projectId) { filters.push("project_id = ?"); params.push(input.projectId); }
     const where = filters.length > 0 ? `WHERE ${filters.join(" AND ")}` : "";
-    const limit = Math.min(input.limit ?? 50, 500);
+    const limit = clampLimit(input.limit, { fallback: 50, max: LIMIT_MAX.usageEvents });
     const rows = this.queryAll<{
       id: string; execution_id: string; workflow_id: string; workflow_name: string | null;
       user_id: string | null; user_email: string | null; project_id: string | null;
@@ -9846,7 +9846,7 @@ export class SqliteStore implements Store {
       total_tokens: number; cost_usd: number; llm_call_count: number; duration_ms: number;
       providers_json: string | null; created_at: string;
     }>(
-      `SELECT * FROM usage_events ${where} ORDER BY created_at DESC LIMIT ${limit}`,
+      `SELECT * FROM usage_events ${where} ORDER BY created_at DESC, id DESC LIMIT ${limit}`,
       params
     );
     return rows.map((r) => ({
@@ -9986,7 +9986,7 @@ export class SqliteStore implements Store {
     workflowId?: string | null;
     executionId?: string | null;
     message?: string;
-  }): Promise<void> {
+  }): Promise<boolean> {
     this.exec(
       `INSERT INTO budget_alerts (
          id, budget_id, period_start, severity, usage_value, limit_value,
@@ -10006,6 +10006,7 @@ export class SqliteStore implements Store {
       ]
     );
     this.persist();
+    return true;
   }
 
   /**
@@ -10017,7 +10018,7 @@ export class SqliteStore implements Store {
     const row = this.queryOne<{ id: string; fired_at: string }>(
       `SELECT id, fired_at FROM budget_alerts
        WHERE budget_id = ? AND period_start = ? AND severity = ?
-       ORDER BY fired_at DESC LIMIT 1`,
+       ORDER BY fired_at DESC, id DESC LIMIT 1`,
       [budgetId, periodStart, severity]
     );
     return row ? { id: toString(row.id), firedAt: toString(row.fired_at) } : null;
@@ -10033,14 +10034,14 @@ export class SqliteStore implements Store {
     const params: Array<string | number> = [];
     if (filter.budgetId) { filters.push("budget_id = ?"); params.push(filter.budgetId); }
     const where = filters.length > 0 ? `WHERE ${filters.join(" AND ")}` : "";
-    const limit = Math.min(filter.limit ?? 100, 500);
+    const limit = clampLimit(filter.limit, { fallback: 100, max: LIMIT_MAX.budgetAlerts });
     const rows = this.queryAll<{
       id: string; budget_id: string; period_start: string;
       severity: string; usage_value: number; limit_value: number;
       workflow_id: string | null; execution_id: string | null;
       message: string | null; fired_at: string;
     }>(
-      `SELECT * FROM budget_alerts ${where} ORDER BY fired_at DESC LIMIT ${limit}`,
+      `SELECT * FROM budget_alerts ${where} ORDER BY fired_at DESC, id DESC LIMIT ${limit}`,
       params
     );
     return rows.map((r) => ({

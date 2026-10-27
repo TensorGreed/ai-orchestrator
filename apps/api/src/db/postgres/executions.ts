@@ -1,7 +1,7 @@
 /**
  * Phase 13.1 — PostgresStore: Execution history, workflow execution state, runs, cancellation and paused-run claims.
- * Plain functions over a PgContext; PostgresStore delegates here. Methods that are not implemented yet throw
- * StoreNotImplementedError and are listed in UNIMPLEMENTED_METHODS (remove both together when implementing one).
+ * Plain functions over a PgContext; PostgresStore delegates here. Every method is implemented;
+ * UNIMPLEMENTED_METHODS is empty.
  */
 import type { PoolClient } from "pg";
 import { type CancelExecutionResult, type Store } from "../store.js";

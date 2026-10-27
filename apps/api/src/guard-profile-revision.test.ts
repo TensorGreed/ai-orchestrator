@@ -62,6 +62,25 @@ describe("guard profiles across instances on one database", () => {
     expect(await ga.mayUseLabels()).toBe(true);
   });
 
+  it("mayUseLabels fails open: a store error answers true (resolve fully) and is logged, never thrown", async () => {
+    const { a } = await instances();
+    const logged: Array<{ message: string; metadata?: Record<string, unknown> }> = [];
+    const failing = new Proxy(a, {
+      get(target, property, receiver) {
+        if (property === "anyGuardProfileUsesLabels") {
+          return async () => {
+            throw new Error("unsupported Unicode escape sequence");
+          };
+        }
+        const value = Reflect.get(target, property, receiver);
+        return typeof value === "function" ? value.bind(target) : value;
+      }
+    });
+    const service = new GuardService(failing, new SecretService(a, key), { autoApply: true, logger: (message, metadata) => logged.push({ message, metadata }) });
+    expect(await service.mayUseLabels()).toBe(true);
+    expect(logged).toEqual([{ message: expect.stringContaining("labels check failed"), metadata: { error: "unsupported Unicode escape sequence" } }]);
+  });
+
   it("a profile deleted by another instance is no longer resolved here", async () => {
     const { ga, gb } = await instances();
     await gb.createProfile({ document: strict() }, null);

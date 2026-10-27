@@ -760,6 +760,24 @@ describe("opt-in and zero-config cost (round 1 fixes)", () => {
     expect(resolutions).toBe(1);
   });
 
+  it("a mayUseLabels check that throws fails open: the run starts and resolves its guard stack instead", async () => {
+    let resolutions = 0;
+    const { guard } = guardDeps(["default"]);
+    const failing = {
+      ...guard,
+      resolveRun: () => {
+        resolutions += 1;
+        return guard.resolveRun();
+      },
+      mayUseLabels: async () => {
+        throw new Error("store unavailable");
+      }
+    };
+    const result = await executeWorkflow({ workflow: simpleWorkflow(), executionId: "c-fail", webhookPayload: { user_prompt: "x" } }, deps({ guard: failing }));
+    expect(result.status).toBe("success");
+    expect(resolutions).toBe(1);
+  });
+
   it("a Guard node whose profile override asks for propagated labels makes the run track them", async () => {
     const wf = workflow(
       [node("in", "webhook_input"), node("g", "guard", { profileId: "spy", inputField: "user_prompt", channel: "prompt", profileOverride: { labels: "propagated" } }), node("out", "output")],

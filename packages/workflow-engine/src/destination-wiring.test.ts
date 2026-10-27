@@ -198,6 +198,21 @@ describe("zero config", () => {
     expect(harness.calls.resolveRun).toBe(0);
     expect(harness.calls.rows).toBe(0);
   });
+
+  it("a failing mayUseLabels check fails open to the full path: the run starts and the outbound check still blocks", async () => {
+    const harness = guardDeps(["block"], {
+      mayUseLabels: () => {
+        throw new Error("unsupported Unicode escape sequence");
+      },
+      rows: PUBLIC_LOCALHOST
+    });
+    const before = received.length;
+    const result = await executeWorkflow({ workflow: httpWorkflow(`${base}/plain`), executionId: "z3", webhookPayload: { user_prompt: `card ${CARD}` } }, deps({ guard: harness.guard }));
+    expect(result.status).toBe("error");
+    expect(received.length).toBe(before);
+    expect(resultOf(result, "http")?.error ?? "").toContain("was blocked by the guard");
+    expect(harness.calls.resolveRun).toBeGreaterThan(0);
+  });
 });
 
 describe("egress checkpoint", () => {

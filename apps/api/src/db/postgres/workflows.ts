@@ -1,7 +1,7 @@
 /**
  * Phase 13.1 — PostgresStore: Workflows, folders, projects, templates, workflow versions and workflow shares.
- * Plain functions over a PgContext; PostgresStore delegates here. Methods that are not implemented yet throw
- * StoreNotImplementedError and are listed in UNIMPLEMENTED_METHODS (remove both together when implementing one).
+ * Plain functions over a PgContext; PostgresStore delegates here. Every method is implemented;
+ * UNIMPLEMENTED_METHODS is empty.
  */
 import { DEFAULT_PROJECT_ID, type Folder, type Project, type Workflow, type WorkflowListItem } from "@ai-orchestrator/shared";
 import type { PoolClient } from "pg";
