@@ -3899,7 +3899,7 @@ export async function rollbackWorkflowRelease(workflowId: string, payload: { ver
 }
 
 /** Takes the published version down: production runs the draft until a version is published again. */
-export async function unpublishWorkflowRelease(workflowId: string, payload: { reason?: string } = {}) {
+export async function unpublishWorkflowRelease(workflowId: string, payload: { reason?: string; expectedVersion?: number } = {}) {
   return apiRequest<ReleaseUnpublishResult>(releasePath(workflowId, "unpublish"), { method: "POST", body: JSON.stringify(payload) });
 }
 

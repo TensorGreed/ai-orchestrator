@@ -187,7 +187,11 @@ export function PublishDialog({ workflowId, state, canPublish, isAdmin, onClose,
         ...extra
       });
       setResult(outcome);
-      if (outcome.outcome === "published") onPublished();
+      if (outcome.outcome === "published") {
+        // A version is live again: the unpublish notice no longer describes production.
+        setUnpublishedNotice(null);
+        onPublished();
+      }
     } catch (err) {
       setError(errorText(err, "Publish failed"));
     } finally {

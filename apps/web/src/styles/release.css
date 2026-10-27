@@ -361,3 +361,13 @@
 .release-unpublish-notice {
   margin: 0 0 8px;
 }
+
+/* The gate sentence of the confirm dialog: a warning (production runs an ungated draft), not a failure. */
+.release-unpublish-warning {
+  border: 1px solid var(--warn);
+  border-radius: var(--r-md);
+  background: var(--warn-soft);
+  color: var(--fg);
+  padding: 10px 12px;
+  font-size: var(--fs-sm);
+}

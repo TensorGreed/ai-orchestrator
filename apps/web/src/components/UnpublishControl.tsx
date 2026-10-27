@@ -6,7 +6,7 @@
  * the Releases card of the Gates tab.
  */
 
-import { useEffect, useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { releaseUnpublishNotice } from "@ai-orchestrator/shared";
 import { ApiError, unpublishWorkflowRelease, type ReleaseUnpublishResult } from "../lib/api";
 
@@ -65,6 +65,16 @@ export function UnpublishConfirmDialog({ workflowId, liveVersion, gateEnabled, g
   const [reason, setReason] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const cancelRef = useRef<HTMLButtonElement | null>(null);
+
+  useEffect(() => {
+    // Focus moves into the dialog (on Cancel, the safe choice) and goes back to what had it when the dialog closes.
+    const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    cancelRef.current?.focus();
+    return () => {
+      if (previous && previous.isConnected) previous.focus();
+    };
+  }, []);
 
   useEffect(() => {
     // Escape closes this dialog only, not a dialog it was opened from.
@@ -81,7 +91,7 @@ export function UnpublishConfirmDialog({ workflowId, liveVersion, gateEnabled, g
     setBusy(true);
     setError(null);
     try {
-      const result = await unpublishWorkflowRelease(workflowId, reason.trim() ? { reason: reason.trim() } : {});
+      const result = await unpublishWorkflowRelease(workflowId, { expectedVersion: liveVersion, ...(reason.trim() ? { reason: reason.trim() } : {}) });
       onUnpublished(result);
     } catch (err) {
       setError(errorText(err, "Unpublish failed"));
@@ -105,7 +115,7 @@ export function UnpublishConfirmDialog({ workflowId, liveVersion, gateEnabled, g
           </h3>
         </header>
         <div className="pg-modal-body">
-          <p className={gateEnabled ? "approvals-error release-unpublish-notice" : "settings-help release-unpublish-notice"}>
+          <p className={gateEnabled ? "release-unpublish-warning release-unpublish-notice" : "settings-help release-unpublish-notice"}>
             {releaseUnpublishNotice({ version: liveVersion, gateEnabled, gateEnforced })}
           </p>
           <p className="settings-help">Runs already in progress finish on v{liveVersion}. Publishing or rolling back puts a version live again.</p>
@@ -129,7 +139,7 @@ export function UnpublishConfirmDialog({ workflowId, liveVersion, gateEnabled, g
             </div>
           )}
           <div className="release-actions">
-            <button type="button" className="pg-btn small ghost" disabled={busy} onClick={onCancel}>
+            <button ref={cancelRef} type="button" className="pg-btn small ghost" disabled={busy} onClick={onCancel}>
               Cancel
             </button>
             <button type="button" className="pg-btn small danger" disabled={busy} onClick={() => void confirm()}>

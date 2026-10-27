@@ -6,7 +6,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { RELEASE_APPROVER_ROLE_CHOICES, type WorkflowListItem } from "@ai-orchestrator/shared";
+import { RELEASE_APPROVER_ROLE_CHOICES, type WorkflowListItem, type WorkflowRelease } from "@ai-orchestrator/shared";
 import {
   ApiError,
   fetchEvalDatasets,
@@ -355,6 +355,10 @@ function ReleaseHistory({
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const unpublished = history.publishedVersion === null && history.releases[0]?.verdict === "unpublished";
+  // The "Unpublished" notice describes the moment after the unpublish: a later publish or rollback ends it.
+  useEffect(() => {
+    if (history.publishedVersion !== null) setNotice(null);
+  }, [history.publishedVersion]);
   // Rollback is offered once per version, on its newest release (an unpublish entry is not a release of it).
   const newestOfVersion = useMemo(() => {
     const seen = new Set<number>();
@@ -416,14 +420,16 @@ function ReleaseHistory({
         <div className="evals-empty">No version was published yet.</div>
       ) : (
         <ol className="release-history">
-          {history.releases.map((release) => (
+          {history.releases.map((release, index) => (
             <li key={release.id} className={release.verdict !== "unpublished" && release.version === history.publishedVersion ? "is-live" : undefined}>
               <div className="release-history-head">
                 <strong>{release.verdict === "unpublished" ? `v${release.version} taken down` : `v${release.version}`}</strong>
                 <span className={`release-tag is-${releaseVerdictTone(release.verdict)}`}>{releaseVerdictLabel(release.verdict)}</span>
                 <span className="cfg-help">
                   {release.publishedBy ?? "unknown"} · {formatWhen(release.publishedAt)}
-                  {release.verdict === "unpublished" ? " · production runs the draft" : release.previousVersion !== null ? ` · from v${release.previousVersion}` : ""}
+                  {release.verdict === "unpublished"
+                    ? unpublishedSuffix(index === 0 && unpublished, history.releases[index - 1])
+                    : release.previousVersion !== null ? ` · from v${release.previousVersion}` : ""}
                 </span>
               </div>
               {release.reason && <div className="release-history-reason">“{release.reason}”</div>}
@@ -472,4 +478,13 @@ function ReleaseHistory({
       )}
     </section>
   );
+}
+
+/**
+ * What an `unpublished` history entry says about production: it runs the draft only while this is the newest entry
+ * and nothing was published since; an older one says how long it ran the draft.
+ */
+function unpublishedSuffix(current: boolean, next: WorkflowRelease | undefined): string {
+  if (current) return " · production runs the draft";
+  return next && next.verdict !== "unpublished" ? ` · production ran the draft until v${next.version}` : " · production ran the draft";
 }
