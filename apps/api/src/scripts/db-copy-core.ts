@@ -65,6 +65,9 @@ import { SqliteStore } from "../db/database.js";
 import { INSERTION_SEQ_TABLES, MIGRATIONS } from "../db/migrations.js";
 import { verifyAuditChain as verifyPostgresAuditChain } from "../db/postgres/audit.js";
 import { pgParams, type PgContext } from "../db/postgres/context.js";
+import { describePostgresSettings, parsePostgresSettings } from "../config.js";
+import { postgresStoreConfig } from "../db/create-store.js";
+import { loadApiEnvFiles } from "./api-env.js";
 import { applyMigrationChain, currentChainVersion, postgresPoolConfig, withMigrationLock, type PostgresStoreConfig } from "../db/postgres-store.js";
 
 /** The chain version this build migrates to (whatever MIGRATIONS' highest is; never a fixed number). */
@@ -943,10 +946,12 @@ export const USAGE = [
   "insertion order, the audit chain) before committing. One transaction: a failed copy writes nothing.",
   "",
   "Options:",
-  "  --from sqlite:<path>  The SQLite file (read-only). `--from sqlite` alone uses DB_SQLITE_PATH, else",
-  "                        apps/api/data/orchestrator.db. A relative path is relative to the current directory",
+  "  --from sqlite:<path>  The SQLite file (read-only). `--from sqlite` alone uses the API's file: DB_SQLITE_PATH,",
+  "                        else apps/api/data/orchestrator.db. A relative path is relative to the current directory",
   "                        (apps/api when run through pnpm --filter).",
   "  --to postgres         The target: DB_POSTGRESDB_URL or DB_POSTGRESDB_HOST/PORT/DATABASE/USER/PASSWORD/SSL*.",
+  "                        Settings are read as the API reads them: the environment, the repo's .env (which does not",
+  "                        override it), then apps/api/.env (which does).",
   "  --dry-run             Check everything and report row counts; write nothing.",
   "  --yes, -y             Copy (required unless --dry-run).",
   "  --allow-broken-audit  Copy even though the SQLite audit chain is broken (refused by default). The summary then",
@@ -958,7 +963,10 @@ export const USAGE = [
   "SECRET_MASTER_KEY_BASE64."
 ].join("\n");
 
-/** Parses the CLI arguments; throws DbCopyRefusal with a usage hint on anything wrong. */
+/**
+ * Parses the CLI arguments; throws DbCopyRefusal with a usage hint on anything wrong. A run with neither --yes nor
+ * --dry-run parses (so the CLI can print what it resolved first) and is refused by requireConfirmation.
+ */
 export function parseDbCopyArgs(argv: string[], env: Record<string, string | undefined> = process.env): DbCopyArgs {
   let from: string | undefined;
   let to: string | undefined;
@@ -996,6 +1004,64 @@ export function parseDbCopyArgs(argv: string[], env: Record<string, string | und
   if (to === undefined) throw new DbCopyRefusal(`--to postgres is required.\n\n${USAGE}`);
   if (to !== "postgres" && to !== "postgresql") throw new DbCopyRefusal(`--to must be postgres, got '${to}'.\n\n${USAGE}`);
   if (yes && dryRun) throw new DbCopyRefusal(`--dry-run and --yes together: choose one.\n\n${USAGE}`);
-  if (!yes && !dryRun) throw new DbCopyRefusal(`Refusing to copy without --yes (or check first with --dry-run).\n\n${USAGE}`);
   return { from: file, yes, dryRun, allowBrokenAudit, help };
+}
+
+/** Refuses a run with neither --yes nor --dry-run (after the CLI printed the source and target it resolved). */
+export function requireConfirmation(args: DbCopyArgs): void {
+  if (!args.yes && !args.dryRun) throw new DbCopyRefusal(`Refusing to copy without --yes (or check first with --dry-run).\n\n${USAGE}`);
+}
+
+export interface DbCopyCliOptions {
+  /** apps/api: where the .env files are found (the repo root's is two levels up), as index.ts finds them. */
+  apiRoot: string;
+  /** The environment to resolve settings from; the .env files are loaded into it (process.env by default). */
+  env?: Record<string, string | undefined>;
+  out?: (line: string) => void;
+  err?: (line: string) => void;
+}
+
+/**
+ * The CLI: loads settings exactly as the API does (loadApiEnvFiles) **before** resolving `--from sqlite` and the
+ * Postgres target, prints both (never the password), then requires --yes or --dry-run. Returns the exit code.
+ */
+export async function runDbCopyCli(argv: string[], options: DbCopyCliOptions): Promise<number> {
+  const env = options.env ?? process.env;
+  const out = options.out ?? ((line: string) => console.log(line));
+  const err = options.err ?? ((line: string) => console.error(line));
+  loadApiEnvFiles(options.apiRoot, env);
+  let args: DbCopyArgs;
+  try {
+    args = parseDbCopyArgs(argv, env);
+  } catch (error) {
+    err(error instanceof Error ? error.message : String(error));
+    return 2;
+  }
+  if (args.help) {
+    out(USAGE);
+    return 0;
+  }
+  try {
+    out(`Source: SQLite ${args.from}`);
+    const settings = parsePostgresSettings(env);
+    for (const warning of settings.warnings) err(`Warning: ${warning}`);
+    out(`Target: ${describePostgresSettings(settings)}`);
+    requireConfirmation(args);
+    await runDbCopy({
+      sqlitePath: args.from,
+      postgres: postgresStoreConfig(settings, { maxConnections: 1 }),
+      dryRun: args.dryRun,
+      allowBrokenAudit: args.allowBrokenAudit,
+      log: out
+    });
+    return 0;
+  } catch (error) {
+    if (error instanceof DbCopyRefusal) {
+      err(`Refused: ${error.message}`);
+      return 2;
+    }
+    // Config errors name the variable, never its value; pg errors never carry the password.
+    err(`db:copy failed: ${error instanceof Error ? error.message : String(error)}`);
+    return 1;
+  }
 }

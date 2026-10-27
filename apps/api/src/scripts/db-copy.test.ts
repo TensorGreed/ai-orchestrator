@@ -19,7 +19,8 @@ import { SqliteStore } from "../db/database.js";
 import { MIGRATIONS } from "../db/migrations.js";
 import { PostgresStore, postgresPoolConfig, type PostgresStoreConfig } from "../db/postgres-store.js";
 import { noticePostgresSkipped, testPostgresUrl } from "../test-support/test-store.js";
-import { API_ROOT, CODE_SCHEMA_VERSION, DbCopyRefusal, parseDbCopyArgs, runDbCopy } from "./db-copy-core.js";
+import { API_ROOT, CODE_SCHEMA_VERSION, DbCopyRefusal, parseDbCopyArgs, requireConfirmation, runDbCopy, runDbCopyCli } from "./db-copy-core.js";
+import { loadApiEnvFiles } from "./api-env.js";
 import { appendLegacySqliteAuditRow, bomAuditEntry, sqliteAuditBytes, wtf8 } from "./legacy-audit.test-helper.js";
 
 const run = promisify(execFile);
@@ -120,7 +121,9 @@ describe("parseDbCopyArgs", () => {
     expect(refused(["--from", "sqlite:", "--to", "postgres", "--yes"])).toMatch(/--from must be sqlite:<path>/);
     expect(refused(["--from", "sqlite:/a.db", "--yes"])).toMatch(/--to postgres is required/);
     expect(refused(["--from", "sqlite:/a.db", "--to", "sqlite", "--yes"])).toMatch(/--to must be postgres/);
-    expect(refused(["--from", "sqlite:/a.db", "--to", "postgres"])).toMatch(/without --yes/);
+    // Neither --yes nor --dry-run parses (the CLI prints what it resolved first) and is refused by requireConfirmation.
+    const unconfirmed = parseDbCopyArgs(["--from", "sqlite:/a.db", "--to", "postgres"], {});
+    expect(() => requireConfirmation(unconfirmed)).toThrow(/without --yes/);
     expect(refused(["--from", "sqlite:/a.db", "--to", "postgres", "--yes", "--dry-run"])).toMatch(/choose one/);
     expect(refused(["--from", "sqlite:/a.db", "--to", "postgres", "--yes", "--force"])).toMatch(/Unknown argument: --force/);
     expect(refused(["--from"])).toMatch(/--from needs a value/);
@@ -243,12 +246,67 @@ describe("the CLI process", () => {
     const missing = await cliRun(["--from", "sqlite:./missing.db", "--to", "postgres", "--yes"], env);
     expect(missing.code).toBe(2);
     expect(missing.out).toContain(`Refused: --from: no SQLite file at ${path.join(fs.realpathSync(dir), "missing.db")}`);
-    expect(missing.out).toContain("Postgres: postgres copier@127.0.0.1:1/none (no TLS)");
+    expect(missing.out).toContain("Target: postgres copier@127.0.0.1:1/none (no TLS)");
+    const unconfirmed = await cliRun(["--from", "sqlite:./missing.db", "--to", "postgres"], env);
+    expect(unconfirmed.code).toBe(2);
+    expect(unconfirmed.out).toContain(`Source: SQLite ${path.join(fs.realpathSync(dir), "missing.db")}`);
+    expect(unconfirmed.out).toContain("Target: postgres copier@127.0.0.1:1/none (no TLS)");
+    expect(unconfirmed.out).toContain("Refused: Refusing to copy without --yes");
     const invalid = await cliRun(["--from", "sqlite:./missing.db", "--to", "postgres", "--yes"], { DB_POSTGRESDB_URL: "mysql://copier:s3cret-pass-word@h/db" });
     expect(invalid.code).toBe(1);
     expect(invalid.out).toContain("DB_POSTGRESDB_URL must start with postgres://");
-    for (const result of [badArgs, missing, invalid]) expect(result.out).not.toContain("s3cret-pass-word");
+    for (const result of [badArgs, missing, unconfirmed, invalid]) expect(result.out).not.toContain("s3cret-pass-word");
   }, 120_000);
+});
+
+describe("settings are loaded as the API loads them, before anything is resolved", () => {
+  /** A repo layout in the temp dir: <dir>/.env (root) and <dir>/apps/api/.env. */
+  function layout(rootEnv: string | undefined, apiEnv: string | undefined): string {
+    const apiRoot = path.join(dir, "apps", "api");
+    fs.mkdirSync(apiRoot, { recursive: true });
+    if (rootEnv !== undefined) fs.writeFileSync(path.join(dir, ".env"), rootEnv);
+    if (apiEnv !== undefined) fs.writeFileSync(path.join(apiRoot, ".env"), apiEnv);
+    return apiRoot;
+  }
+
+  it("loadApiEnvFiles: the root .env does not override the environment, apps/api/.env overrides both (index.ts's rule)", () => {
+    const apiRoot = layout("A=root\nB=root\nC=root\n", "B=api\nC=api\n");
+    const env: Record<string, string | undefined> = { A: "env", C: "env" };
+    loadApiEnvFiles(apiRoot, env);
+    expect(env).toEqual({ A: "env", B: "api", C: "api" });
+    const onlyRoot = layout(undefined, undefined);
+    fs.rmSync(path.join(onlyRoot, ".env"));
+    const env2: Record<string, string | undefined> = { A: "env" };
+    loadApiEnvFiles(onlyRoot, env2);
+    expect(env2).toEqual({ A: "env", B: "root", C: "root" });
+  });
+
+  it("`--from sqlite` and the Postgres target come from apps/api/.env when it disagrees with the environment, and are printed first", async () => {
+    const apiFile = path.join(dir, "from-api-env.db");
+    const apiRoot = layout(
+      "DB_POSTGRESDB_HOST=root-host.invalid\n",
+      `DB_SQLITE_PATH=${apiFile}\nDB_POSTGRESDB_HOST=api-host.invalid\nDB_POSTGRESDB_PORT=1\nDB_POSTGRESDB_DATABASE=apidb\n` +
+        `DB_POSTGRESDB_USER=apiuser\nDB_POSTGRESDB_PASSWORD=api-secret-pw\n`
+    );
+    const env: Record<string, string | undefined> = {
+      DB_SQLITE_PATH: path.join(dir, "from-shell.db"),
+      DB_POSTGRESDB_HOST: "shell-host.invalid",
+      DB_POSTGRESDB_DATABASE: "shelldb"
+    };
+    const out: string[] = [];
+    const err: string[] = [];
+    const run = (argv: string[]) => runDbCopyCli(argv, { apiRoot, env, out: (line) => out.push(line), err: (line) => err.push(line) });
+    // No --yes: what it resolved is printed, then it is refused.
+    expect(await run(["--from", "sqlite", "--to", "postgres"])).toBe(2);
+    expect(out.slice(0, 2)).toEqual([`Source: SQLite ${apiFile}`, "Target: postgres apiuser@api-host.invalid:1/apidb (no TLS)"]);
+    expect(err.join("\n")).toContain("Refusing to copy without --yes");
+    // With --yes: the file the API would open is the one db:copy looks for (it does not exist here: refused).
+    out.length = 0;
+    err.length = 0;
+    expect(await run(["--from", "sqlite", "--to", "postgres", "--yes"])).toBe(2);
+    expect(err.join("\n")).toContain(`Refused: --from: no SQLite file at ${apiFile}.`);
+    expect([...out, ...err].join("\n")).not.toContain("api-secret-pw");
+  });
 });
 
 // ---------------------------------------------------------------------------------------------------------------
