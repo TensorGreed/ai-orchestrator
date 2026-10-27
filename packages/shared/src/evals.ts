@@ -356,7 +356,16 @@ export interface ReplayCaseAttempt {
   baselineExecutionId: string | null;
   verdict: ReplayRunResponse["verdict"] | null;
   reasons: string[];
+  /** What the repeat spent, judge calls included (for display and the job's totals; the release gate uses `candidateCostUsd`). */
   costUsd: number | null;
+  /**
+   * The candidate's model cost in this repeat, as the case diff's
+   * `totals.costUsd.candidate` (judge calls excluded, like `baselineCostUsd`,
+   * so the two compare like with like); null when the candidate did not run
+   * or its cost is unknown. Absent on older results: the release gate then
+   * judges cost on the deciding repeat's own pair from the case diff.
+   */
+  candidateCostUsd?: number | null;
   /**
    * The candidate's latency in this repeat, as the case diff's
    * `totals.latencyMs.candidate`; null when the candidate did not run or has
@@ -369,14 +378,14 @@ export interface ReplayCaseAttempt {
    * `totals.latencyMs.baseline`: the recording, or (with `compare:
    * "baseline_rerun"`) this repeat's own baseline rerun. Null when the
    * candidate did not run. Absent on older results; a `baseline_rerun` gate
-   * then treats latency and guard limits as unchecked for repeats above 1.
+   * then treats a latency limit as unchecked for repeats above 1.
    */
   baselineLatencyMs?: number | null;
   /**
    * The model cost of the run this repeat was compared with, as the case
-   * diff's `totals.costUsd.baseline`; null like `baselineLatencyMs`. Absent
-   * on older results (a `baseline_rerun` gate then judges cost on the
-   * deciding repeat's own pair).
+   * diff's `totals.costUsd.baseline` (model cost only); null like
+   * `baselineLatencyMs`. Absent on older results (the gate then judges cost
+   * on the deciding repeat's own pair).
    */
   baselineCostUsd?: number | null;
   /**

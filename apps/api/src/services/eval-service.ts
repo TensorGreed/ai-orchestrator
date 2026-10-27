@@ -496,18 +496,20 @@ function modelCostIsUnknown(facts: RunFacts | undefined | null): boolean {
 
 /**
  * What one repeat of a replay case measured, by the definitions the case
- * diff uses: the candidate's latency (`totals.latencyMs.candidate`), the
+ * diff uses: the candidate's latency and model cost (`totals.latencyMs` and
+ * `totals.costUsd`, candidate side: judge calls are not model cost), the
  * reference run's latency and cost it was compared with (the recording, or
  * this repeat's own baseline rerun), and its new guard blocks against that
  * reference run (`replayNewGuardBlocks`). Null when the diff does not carry
  * the figure.
  */
-function replayAttemptMetrics(response: ReplayRunResponse): Pick<ReplayCaseAttempt, "latencyMs" | "baselineLatencyMs" | "baselineCostUsd" | "newGuardBlocks"> {
+function replayAttemptMetrics(response: ReplayRunResponse): Pick<ReplayCaseAttempt, "latencyMs" | "candidateCostUsd" | "baselineLatencyMs" | "baselineCostUsd" | "newGuardBlocks"> {
   const diff = response.diff as Partial<ReplayRunResponse["diff"]> | undefined;
   const finite = (value: unknown) => (typeof value === "number" && Number.isFinite(value) ? value : null);
   const guard = diff?.guard;
   return {
     latencyMs: finite(diff?.totals?.latencyMs?.candidate),
+    candidateCostUsd: finite(diff?.totals?.costUsd?.candidate),
     baselineLatencyMs: finite(diff?.totals?.latencyMs?.baseline),
     baselineCostUsd: finite(diff?.totals?.costUsd?.baseline),
     newGuardBlocks: guard && Array.isArray(guard.added) && Array.isArray(guard.changed) ? replayNewGuardBlocks(guard) : null
@@ -1798,6 +1800,7 @@ export class EvalService {
               costUsd: baselineResponse.facts.totals.costUsd,
               // The candidate never ran in this repeat: there is nothing to compare.
               latencyMs: null,
+              candidateCostUsd: null,
               baselineLatencyMs: null,
               baselineCostUsd: null,
               newGuardBlocks: null

@@ -1619,7 +1619,7 @@ describe("repeats and old jobs (M1, L2, L3)", () => {
   // The replay runner lists the attempts beside the case's run diff, not inside it.
   const withAttempts = (costs: number[], extra: Record<string, unknown> = {}) => ({
     ...plainDiff,
-    attempts: costs.map((costUsd, repeatIndex) => ({ repeatIndex, status: "pass", executionId: `exec-${repeatIndex}`, baselineExecutionId: null, verdict: "pass", reasons: [], costUsd, ...extra }))
+    attempts: costs.map((costUsd, repeatIndex) => ({ repeatIndex, status: "pass", executionId: `exec-${repeatIndex}`, baselineExecutionId: null, verdict: "pass", reasons: [], costUsd, candidateCostUsd: costUsd, ...extra }))
   });
   const publish = async (context: TestContext, cookie: string, id: string, version: number) => call(context, "POST", `/api/workflows/${id}/publish`, cookie, { version });
 

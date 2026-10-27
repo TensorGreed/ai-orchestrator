@@ -14,6 +14,7 @@ import {
   releaseCandidateOptionsSchema,
   releaseGatePolicySchema,
   type EvalCaseDetail,
+  type EvalScorerSpec,
   type ReleaseGatePolicyInput,
   type ReplayRunResponse,
   type RunDiff,
@@ -24,6 +25,7 @@ import {
 import type { ReplayRecordingRecord } from "../db/database.js";
 import type { Store } from "../db/store.js";
 import { openTestStore } from "../test-support/test-store.js";
+import type { EvalLlmJudge } from "./eval-scorers.js";
 import { EvalService, type EvalReplayDeps } from "./eval-service.js";
 import { ReleaseService } from "./release-service.js";
 
@@ -161,8 +163,14 @@ function replayDeps(recordings: Map<string, ReplayRecordingRecord>, plan: (recor
   };
 }
 
+/** An LLM judge that always passes and costs $0.005 a call (only `llm_judge` scorers call it). */
+const JUDGE_COST_USD = 0.005;
+const judgeCall: EvalLlmJudge = async () => ({ content: "{\"score\": 1}", costUsd: JUDGE_COST_USD });
+const judgeScorers: EvalScorerSpec[] = [{ type: "status", expect: "success" }, { type: "llm_judge", rubric: "Is it right?", providerId: "openai", model: "gpt-4o-mini" }];
+
 /** The job's comparison settings, which the gate's candidate options name too. */
 interface JobSettings {
+  scorers?: EvalScorerSpec[];
   repeats?: number;
   aggregate?: "all" | "majority" | "any";
   compare?: "recording" | "baseline_rerun";
@@ -171,7 +179,7 @@ interface JobSettings {
 async function runJob(plan: (recordingId: string, repeatIndex: number) => AttemptPlan, settings: JobSettings = {}) {
   const jobSettings = { repeats: 3, aggregate: "all" as const, ...settings };
   const recordings = new Map(["rec_a", "rec_b", "rec_c"].map((id) => [id, recordingFor(id)]));
-  const svc = new EvalService(store, async () => ({ output: null }), undefined, { replay: replayDeps(recordings, plan) });
+  const svc = new EvalService(store, async () => ({ output: null }), judgeCall, { replay: replayDeps(recordings, plan) });
   const set = (await svc.createDataset({ name: "golden", workflowId: "wf" }))!;
   for (const recording of recordings.values()) await svc.addGoldenRun({ datasetId: set.id, recording });
   const job = await svc.enqueueReplayJob({ datasetIds: [set.id], ...jobSettings }, { workflowId: "wf", actor });
@@ -270,6 +278,7 @@ describe("replay repeats record latency and guard blocks per attempt", () => {
     for (const policy of [{ maxP95LatencyIncreasePct: 50, noNewGuardBlocks: false }, { noNewGuardBlocks: true }]) {
       const { evidence, judgement, codes } = await judge(job, policy, legacy);
       expect(evidence.job.repeatsUnchecked).toBe(true);
+      expect(evidence.job.repeatsUncheckedLimits).toEqual(["guard", "latency"]);
       expect(judgement.verdict).toBe("blocked");
       expect(codes).toEqual(["repeats_unchecked"]);
       expect(judgement.reasons.join()).toMatch(/recorded them for only one repeat \(it ran before replays recorded every repeat\): run the gate again, or remove those limits/);
@@ -286,10 +295,10 @@ describe("baseline reruns with repeats: each repeat is judged against its own ba
     const job = await runJob((_recordingId, repeatIndex) => ({ latencyMs: 1050 + repeatIndex, baselineLatencyMs: 1000 + repeatIndex, costUsd: 0.02, baselineCostUsd: 0.01 + repeatIndex / 1000 }), rerun);
     const result = job.run.results.find((entry) => entry.fixtureName === "rec_a")!;
     const detail = (await job.svc.getCase(job.run.id, result.id))!;
-    expect(detail.replay?.attempts?.map((attempt) => [attempt.latencyMs, attempt.baselineLatencyMs, attempt.baselineCostUsd])).toEqual([
-      [1050, 1000, 0.01],
-      [1051, 1001, 0.011],
-      [1052, 1002, 0.012]
+    expect(detail.replay?.attempts?.map((attempt) => [attempt.latencyMs, attempt.baselineLatencyMs, attempt.candidateCostUsd, attempt.baselineCostUsd])).toEqual([
+      [1050, 1000, 0.02, 0.01],
+      [1051, 1001, 0.02, 0.011],
+      [1052, 1002, 0.02, 0.012]
     ]);
   });
 
@@ -357,11 +366,110 @@ describe("baseline reruns with repeats: each repeat is judged against its own ba
     };
     const latency = await judge(job, { maxP95LatencyIncreasePct: 10, noNewGuardBlocks: false }, legacy);
     expect(latency.evidence.job.repeatsUnchecked).toBe(true);
+    expect(latency.evidence.job.repeatsUncheckedLimits).toEqual(["latency"]);
     expect(latency.codes).toEqual(["repeats_unchecked"]);
+    // Every repeat's guard verdicts were recorded, so a guard-only gate (the default) checks them.
+    const guardOnly = await judge(job, { noNewGuardBlocks: true }, legacy);
+    expect(guardOnly.codes).toEqual([]);
+    expect(guardOnly.judgement.verdict).toBe("passed");
     expect(latency.judgement.reasons.join()).toMatch(/run the gate again, or remove those limits/);
     // Cost: the deciding repeat's own pair (+5%), never a repeat's candidate against another repeat's baseline (+200%).
     const cost = await judge(job, { maxCostIncreasePct: 10, noNewGuardBlocks: false }, legacy);
     expect(cost.judgement.stats.costIncreasePct).toBeCloseTo(5, 6);
     expect(cost.judgement.verdict).toBe("passed");
+  });
+});
+
+describe("repeats: cost is compared like with like, and the worst repeat adds the most", () => {
+  for (const compare of ["recording", "baseline_rerun"] as const) {
+    it(`gives an LLM-judged job the same cost verdict with repeats 1, 2 and 3 (compare: ${compare})`, async () => {
+      for (const repeats of [1, 2, 3]) {
+        // The candidate's model cost equals its baseline's; only the judge calls cost extra.
+        const job = await runJob(() => ({ latencyMs: 100, baselineLatencyMs: 100, costUsd: 0.01, baselineCostUsd: 0.01 }), { repeats, compare, scorers: judgeScorers });
+        const { evidence, judgement } = await judge(job, { maxCostIncreasePct: 10, noNewGuardBlocks: false });
+        expect(evidence.cases.map((entry) => entry.costUsd)).toEqual([0.01, 0.01, 0.01].map((usd) => ({ baseline: usd, candidate: usd })));
+        expect(judgement.stats.costIncreasePct).toBe(0);
+        expect(judgement.verdict).toBe("passed");
+        if (repeats > 1) {
+          const result = job.run.results.find((entry) => entry.fixtureName === "rec_a")!;
+          const attempt = (await job.svc.getCase(job.run.id, result.id))!.replay!.attempts![0]!;
+          // The repeat's spend includes its judge call; the gate compares its model cost.
+          expect(attempt.costUsd).toBeCloseTo(0.01 + JUDGE_COST_USD, 9);
+          expect(attempt.candidateCostUsd).toBe(0.01);
+        }
+      }
+    });
+  }
+
+  it("judges attempts stored before they carried their model cost on the deciding repeat's own pair", async () => {
+    const job = await runJob((_recordingId, repeatIndex) => ({ latencyMs: 100, costUsd: repeatIndex === 1 ? 0.012 : 0.01 }), { repeats: 2, scorers: judgeScorers });
+    const legacy = async (runId: string, resultId: string): Promise<EvalCaseDetail | null> => {
+      const detail = await job.svc.getCase(runId, resultId);
+      if (!detail?.replay?.attempts) return detail;
+      return { ...detail, replay: { ...detail.replay, attempts: detail.replay.attempts.map(({ candidateCostUsd: _cost, ...rest }) => rest) } };
+    };
+    const { evidence, judgement } = await judge(job, { maxCostIncreasePct: 10, noNewGuardBlocks: false }, legacy);
+    // Never the judge-inclusive spend (0.015, 0.017) against the model-only baseline.
+    expect(evidence.cases.map((entry) => entry.costUsd)).toEqual([0.01, 0.01, 0.01].map((usd) => ({ baseline: usd, candidate: usd })));
+    expect(judgement.verdict).toBe("passed");
+  });
+
+  for (const slowFirst of [true, false]) {
+    it(`blocks on a slow, expensive repeat that a small high-ratio repeat would hide (slow repeat ${slowFirst ? "deciding" : "second"})`, async () => {
+      // rec_a: one repeat adds 2700 ms and $0.009 over its own baseline (+90%), the other 100 ms and $0.001 (+100%).
+      const big = { baselineLatencyMs: 3000, latencyMs: 5700, baselineCostUsd: 0.01, costUsd: 0.019 };
+      const small = { baselineLatencyMs: 100, latencyMs: 200, baselineCostUsd: 0.001, costUsd: 0.002 };
+      const flat = { baselineLatencyMs: 1000, latencyMs: 1000, baselineCostUsd: 0.01, costUsd: 0.01 };
+      const job = await runJob((recordingId, repeatIndex) => (recordingId !== "rec_a" ? flat : (repeatIndex === 0) === slowFirst ? big : small), { repeats: 2, compare: "baseline_rerun" });
+      const { evidence, judgement, codes } = await judge(job, { maxCostIncreasePct: 5, maxP95LatencyIncreasePct: 50, noNewGuardBlocks: false });
+      const caseA = evidence.cases.find((entry) => entry.latencyMs.baseline === 3000)!;
+      expect(caseA.latencyMs).toEqual({ baseline: 3000, candidate: 5700 });
+      expect(caseA.costUsd).toEqual({ baseline: 0.01, candidate: 0.019 });
+      expect(judgement.stats.costIncreasePct).toBeCloseTo(30, 6);
+      expect(judgement.stats.p95LatencyIncreasePct).toBeCloseTo(90, 6);
+      expect(judgement.verdict).toBe("blocked");
+      expect(codes.sort()).toEqual(["cost", "latency"]);
+    });
+  }
+
+  it("still passes when every repeat is 5% above its own baseline, whatever their sizes", async () => {
+    const job = await runJob(
+      (_recordingId, repeatIndex) => [
+        { baselineLatencyMs: 100, latencyMs: 105, baselineCostUsd: 0.001, costUsd: 0.00105 },
+        { baselineLatencyMs: 3000, latencyMs: 3150, baselineCostUsd: 0.03, costUsd: 0.0315 },
+        { baselineLatencyMs: 1000, latencyMs: 1050, baselineCostUsd: 0.01, costUsd: 0.0105 }
+      ][repeatIndex]!,
+      { repeats: 3, compare: "baseline_rerun" }
+    );
+    const { judgement } = await judge(job, { maxCostIncreasePct: 10, maxP95LatencyIncreasePct: 10, noNewGuardBlocks: true });
+    expect(judgement.stats.costIncreasePct).toBeCloseTo(5, 6);
+    expect(judgement.stats.p95LatencyIncreasePct).toBeCloseTo(5, 6);
+    expect(judgement.verdict).toBe("passed");
+  });
+
+  it("never pairs one repeat's candidate with another repeat's baseline when no repeat has both", async () => {
+    const job = await runJob(
+      (_recordingId, repeatIndex) =>
+        repeatIndex === 0 ? { baselineLatencyMs: 1000, latencyMs: 1050, baselineCostUsd: 0.01, costUsd: 0.0105 } : { baselineLatencyMs: 3000, latencyMs: 3150, baselineCostUsd: 0.03, costUsd: 0.0315 },
+      { repeats: 2, compare: "baseline_rerun" }
+    );
+    // Repeat 1 lost its baseline figures, repeat 2 its candidate figures.
+    const torn = async (runId: string, resultId: string): Promise<EvalCaseDetail | null> => {
+      const detail = await job.svc.getCase(runId, resultId);
+      if (!detail?.replay?.attempts) return detail;
+      const attempts = detail.replay.attempts.map((attempt) =>
+        attempt.repeatIndex === 0 ? { ...attempt, baselineCostUsd: null, baselineLatencyMs: null } : { ...attempt, candidateCostUsd: null, latencyMs: null }
+      );
+      return { ...detail, replay: { ...detail.replay, attempts } };
+    };
+    const cost = await judge(job, { maxCostIncreasePct: 10, noNewGuardBlocks: false }, torn);
+    // Cost: the deciding repeat's own pair from the case diff (+5%), not 0.0105 against 0.03.
+    expect(cost.evidence.cases.map((entry) => entry.costUsd)).toEqual([0, 1, 2].map(() => ({ baseline: 0.01, candidate: 0.0105 })));
+    expect(cost.judgement.verdict).toBe("passed");
+    // Latency: unchecked, with the same refusal; guard verdicts were recorded and stay checked.
+    const latency = await judge(job, { maxP95LatencyIncreasePct: 10, noNewGuardBlocks: true }, torn);
+    expect(latency.evidence.job.repeatsUncheckedLimits).toEqual(["latency"]);
+    expect(latency.codes).toEqual(["repeats_unchecked"]);
+    expect((await judge(job, { noNewGuardBlocks: true }, torn)).judgement.verdict).toBe("passed");
   });
 });

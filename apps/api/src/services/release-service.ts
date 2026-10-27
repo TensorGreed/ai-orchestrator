@@ -205,28 +205,24 @@ interface MetricPair {
   candidate: number | null;
 }
 
-/** How far a pair's candidate rose over its own baseline, for ranking pairs (from a zero baseline any rise ranks first). */
-function pairIncrease(pair: { baseline: number; candidate: number }): number {
-  if (pair.baseline > 0) return (pair.candidate - pair.baseline) / pair.baseline;
-  return pair.candidate > pair.baseline ? Number.POSITIVE_INFINITY : 0;
-}
-
 /**
- * The worst of several baseline/candidate pairs: the complete pair whose
- * candidate rose most over its own baseline. Without a complete pair, the
- * known baseline and the largest known candidate (which the gate leaves out).
+ * The worst of several baseline/candidate pairs, each a repeat's candidate
+ * with the run it was compared with: the complete pair that adds the most
+ * over its own baseline (ties go to the larger candidate). That is the pair
+ * the gate's job statistics (summed cost, p95 latency) feel most, so a small
+ * pair with a high ratio never hides a large one. Null without a complete
+ * pair: pairs are never mixed across repeats.
  */
-function worstPair(pairs: MetricPair[]): MetricPair {
+function worstPair(pairs: MetricPair[]): { baseline: number; candidate: number } | null {
   let worst: { baseline: number; candidate: number } | null = null;
   for (const pair of pairs) {
     if (pair.baseline === null || pair.candidate === null) continue;
     const complete = { baseline: pair.baseline, candidate: pair.candidate };
-    if (!worst || pairIncrease(complete) > pairIncrease(worst)) worst = complete;
+    const added = complete.candidate - complete.baseline;
+    const worstAdded = worst ? worst.candidate - worst.baseline : Number.NEGATIVE_INFINITY;
+    if (!worst || added > worstAdded || (added === worstAdded && complete.candidate > worst.candidate)) worst = complete;
   }
-  if (worst) return worst;
-  const baselines = pairs.map((pair) => pair.baseline).filter((value): value is number => value !== null);
-  const candidates = pairs.map((pair) => pair.candidate).filter((value): value is number => value !== null);
-  return { baseline: baselines.at(-1) ?? null, candidate: candidates.length > 0 ? Math.max(...candidates) : null };
+  return worst;
 }
 
 function numberOrNull(value: unknown): number | null {
@@ -1115,7 +1111,7 @@ export class ReleaseService {
       groups.set(key, list);
     }
     const cases: ReleaseGateCase[] = [];
-    let repeatsUnchecked = false;
+    const uncheckedLimits = new Set<"latency" | "guard">();
     for (const [key, results] of groups) {
       const status = aggregateReleaseRepeats(results.map((result) => caseStatus(result.status)), aggregate);
       const scorerPass = new Map<string, boolean>();
@@ -1125,7 +1121,7 @@ export class ReleaseService {
         }
       }
       // Repeats: each repeat's candidate is paired with the run it was compared with (the recording, or that repeat's own
-      // baseline rerun), and the case counts at its worst pair, by increase over its own baseline.
+      // baseline rerun), and the case counts at its worst pair: the one that adds the most over its own baseline.
       const costPairs: MetricPair[] = [];
       const latencyPairs: MetricPair[] = [];
       let newGuardBlocks = 0;
@@ -1147,34 +1143,37 @@ export class ReleaseService {
         const decidingCost = { baseline: numberOrNull(cost.baseline), candidate: numberOrNull(cost.candidate) };
         const decidingLatency = { baseline: numberOrNull(latency.baseline), candidate: numberOrNull(latency.candidate) };
         const attempts = Array.isArray(replay.attempts) ? (replay.attempts as unknown[]).map(asRecord) : [];
+        const repeated = attempts.length > 1;
         // Only attempts whose candidate ran have figures (an attempt whose baseline rerun was inconclusive never ran it).
         const ran = attempts.filter((attempt) => typeof attempt.executionId === "string");
-        // Latency and guard verdicts count per attempt only when the replay recorded them for every attempt that ran; with
-        // baseline reruns each attempt must also carry its own baseline. Results stored before that are unchecked.
-        const recorded = (attempt: Record<string, unknown>) => "latencyMs" in attempt && "newGuardBlocks" in attempt && (!rerun || "baselineLatencyMs" in attempt);
-        const perAttempt = attempts.length > 1 && ran.length > 0 && ran.every(recorded);
-        if (attempts.length > 1 && !perAttempt) repeatsUnchecked = true;
-        if (rerun) {
-          // Every repeat has its own baseline: a candidate is never compared with another repeat's baseline.
-          const pricedPairs = attempts.length > 1 && ran.length > 0 && ran.every((attempt) => "baselineCostUsd" in attempt);
-          costPairs.push(pricedPairs ? worstPair(ran.map((attempt) => ({ baseline: numberOrNull(attempt.baselineCostUsd), candidate: numberOrNull(attempt.costUsd) }))) : decidingCost);
-          latencyPairs.push(perAttempt ? worstPair(ran.map((attempt) => ({ baseline: numberOrNull(attempt.baselineLatencyMs), candidate: numberOrNull(attempt.latencyMs) }))) : decidingLatency);
-        } else {
-          // One recorded baseline for every repeat: the candidate counts at its most expensive and slowest attempt.
-          const attemptCosts = attempts.map((attempt) => numberOrNull(attempt.costUsd)).filter((value): value is number => value !== null);
-          costPairs.push({ baseline: decidingCost.baseline, candidate: attemptCosts.length > 0 ? Math.max(...attemptCosts) : decidingCost.candidate });
-          const attemptLatencies = ran.map((attempt) => numberOrNull(attempt.latencyMs)).filter((value): value is number => value !== null);
-          latencyPairs.push({ baseline: decidingLatency.baseline, candidate: perAttempt ? (attemptLatencies.length > 0 ? Math.max(...attemptLatencies) : null) : decidingLatency.candidate });
-        }
-        const attemptGuards = ran.map((attempt) => numberOrNull(attempt.newGuardBlocks)).filter((value): value is number => value !== null);
+        // A metric counts per attempt only when the replay recorded it for every attempt that ran, with the baseline it
+        // was compared with under baseline reruns (with the recording, that is the case diff's own baseline).
+        const recorded = (...keys: string[]) => repeated && ran.length > 0 && ran.every((attempt) => keys.every((key) => key in attempt));
+        const own = (attempt: Record<string, unknown>, key: string, fallback: number | null) => (key in attempt ? numberOrNull(attempt[key]) : fallback);
+        // Cost: the candidate's model cost (judge calls excluded, like the baseline's). Results stored before it was
+        // recorded per attempt count at the deciding repeat's own pair, as a single repeat would.
+        const costRecorded = recorded("candidateCostUsd", ...(rerun ? ["baselineCostUsd"] : []));
+        const costPair = costRecorded ? worstPair(ran.map((attempt) => ({ baseline: own(attempt, "baselineCostUsd", decidingCost.baseline), candidate: numberOrNull(attempt.candidateCostUsd) }))) : null;
+        costPairs.push(costPair ?? decidingCost);
+        // Latency: results stored before it was recorded per attempt are unchecked for a latency limit, and so is a case
+        // where no attempt has both figures while its diff does (its attempts disagree with its diff).
+        const latencyRecorded = recorded("latencyMs", ...(rerun ? ["baselineLatencyMs"] : []));
+        const latencyPair = latencyRecorded ? worstPair(ran.map((attempt) => ({ baseline: own(attempt, "baselineLatencyMs", decidingLatency.baseline), candidate: numberOrNull(attempt.latencyMs) }))) : null;
+        if (repeated && (!latencyRecorded || (!latencyPair && decidingLatency.baseline !== null && decidingLatency.candidate !== null))) uncheckedLimits.add("latency");
+        latencyPairs.push(latencyPair ?? decidingLatency);
+        // Guard verdicts: the most new blocks any attempt added; results stored before they were recorded per attempt
+        // are unchecked for a guard limit.
+        const guardRecorded = recorded("newGuardBlocks");
+        if (repeated && !guardRecorded) uncheckedLimits.add("guard");
+        const attemptGuards = guardRecorded ? ran.map((attempt) => numberOrNull(attempt.newGuardBlocks)).filter((value): value is number => value !== null) : [];
         const caseGuardBlocks = replayNewGuardBlocks({
           added: guard.added as Parameters<typeof replayNewGuardBlocks>[0]["added"],
           changed: guard.changed as Parameters<typeof replayNewGuardBlocks>[0]["changed"]
         });
-        newGuardBlocks = Math.max(newGuardBlocks, perAttempt && attemptGuards.length > 0 ? Math.max(caseGuardBlocks, ...attemptGuards) : caseGuardBlocks);
+        newGuardBlocks = Math.max(newGuardBlocks, caseGuardBlocks, ...attemptGuards);
       }
-      const casePairCost = worstPair(costPairs);
-      const casePairLatency = worstPair(latencyPairs);
+      const casePairCost = worstPair(costPairs) ?? costPairs[0] ?? { baseline: null, candidate: null };
+      const casePairLatency = worstPair(latencyPairs) ?? latencyPairs[0] ?? { baseline: null, candidate: null };
       const first = results[0]!;
       const baseline = typeof first.baselineStatus === "string" ? caseStatus(first.baselineStatus) : null;
       cases.push({
@@ -1218,7 +1217,7 @@ export class ReleaseService {
         staleSets: jobSnapshot ? staleSets : [],
         ...(jobSnapshot ? { staleSetCounts } : {}),
         ...(jobSnapshot ? {} : { noSetSnapshot: true }),
-        ...(repeatsUnchecked ? { repeatsUnchecked: true } : {})
+        ...(uncheckedLimits.size > 0 ? { repeatsUnchecked: true, repeatsUncheckedLimits: [...uncheckedLimits].sort() } : {})
       },
       cases
     };
