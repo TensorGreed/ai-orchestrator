@@ -245,7 +245,7 @@ describe("a standby instance and the leader's sync (Phase 13.1)", () => {
 });
 
 describe("a tick node-cron runs twice (an early timer)", () => {
-  it("is fired once: a second fire within half a second of the last is skipped", async () => {
+  async function everySecond() {
     const scheduler = new SchedulerService({} as Store, quiet);
     services.push(scheduler);
     const fired: string[] = [];
@@ -255,10 +255,27 @@ describe("a tick node-cron runs twice (an early timer)", () => {
     const task = (scheduler as unknown as { jobs: Map<string, { options?: unknown }> }).jobs.get("wf-reload::tick") as unknown as {
       runner: { onMatch: (date: Date, execution: unknown) => Promise<unknown> };
     };
-    // The task's own callback, as node-cron calls it on each match.
-    await task.runner.onMatch(new Date(), { id: "a" });
-    await task.runner.onMatch(new Date(), { id: "b" });
+    // The task's own callback, as node-cron calls it on each match with the matched second (milliseconds cut).
+    const match = async (second: number, id: string) => await task.runner.onMatch(new Date(second * 1000), { id });
+    return { fired, match };
+  }
+
+  it("is fired once: a second run of the same matched second is skipped", async () => {
+    const { fired, match } = await everySecond();
+    const second = Math.floor(Date.now() / 1000);
+    await match(second, "a");
+    await match(second, "b");
     await new Promise((resolve) => setTimeout(resolve, 10));
     expect(fired).toHaveLength(1);
+  });
+
+  it("a lagging event loop runs two seconds' ticks moments apart: both fire", async () => {
+    const { fired, match } = await everySecond();
+    const second = Math.floor(Date.now() / 1000);
+    // Tick N ran late (the loop was blocked past the boundary) and tick N + 1 on time: well under a second apart.
+    await match(second, "late");
+    await match(second + 1, "on-time");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(fired).toHaveLength(2);
   });
 });

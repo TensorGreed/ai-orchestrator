@@ -154,16 +154,17 @@ export class SchedulerService {
       return;
     }
 
-    // node-cron 4 can run one tick twice when its timer wakes a moment early: it runs the second that is ending, then
-    // the one starting, a few milliseconds apart (seen with crons that match every second). No schedule fires
-    // more often than once a second, so a fire within half a second of the last one is that repeat and is skipped.
-    let lastFireAt = 0;
+    // node-cron 4 can run one tick twice when its timer wakes a moment early: it runs the second that is ending (which
+    // already fired) again, then the one starting, a few milliseconds apart (seen with crons that match every second).
+    // A repeat of the matched second that last fired is skipped. Keyed on the matched second, not on the time between fires: a blocked
+    // event loop can run two different seconds' ticks moments apart, and both must fire.
+    let lastFiredSecond: number | null = null;
     const task = cron.schedule(
       schedule.cronExpression,
-      () => {
-        const now = Date.now();
-        if (now - lastFireAt < 500) return;
-        lastFireAt = now;
+      (context) => {
+        const second = Math.floor(context.date.getTime() / 1000);
+        if (second === lastFiredSecond) return;
+        lastFiredSecond = second;
         void this.handleScheduledTick(workflow, schedule);
       },
       {
