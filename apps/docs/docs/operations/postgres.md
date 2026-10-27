@@ -215,6 +215,8 @@ Every feature works on Postgres, and several API instances can share one Postgre
 
 **Restarts.** With a shared database an instance only marks work as interrupted when no instance has touched it recently: runs older than the longest a run may last plus a minute, and eval or replay jobs with no progress for five minutes. A job another live instance is running is left alone.
 
+An approval resume that was interrupted (the instance stopped after the decision was recorded, before the run finished) is picked up again by the leader once its claim is older than `WORKFLOW_EXECUTION_TIMEOUT_MS` plus one minute (`STUCK_JOB_MARGIN_MS`), at the next approval sweep (`APPROVAL_SWEEP_INTERVAL_MS`, default one minute): about 7 minutes after the stop with the defaults, longer if the run timeout is raised, and about two minutes in queue mode (a one-minute claim age). This holds for a lone Postgres instance too, since it cannot tell its own interrupted resume from one another instance is still running. Nothing is lost: the decision stays recorded and the run waits until then. On SQLite the restarted process resumes it at once.
+
 **Upgrading to migration 41.** If a database already holds more than one pending approval request for a run (possible before this release when two instances backfilled the same paused run), the upgrade keeps the newest, cancels the others as "Superseded by a newer request of the same run", and logs the count once at startup. SQLite does the same at its next start.
 
 **Webhook-only replicas** (`WORKER_MODE=webhook`) do not take part in the election and never run background work.
