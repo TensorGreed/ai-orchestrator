@@ -262,4 +262,37 @@ describe.skipIf(!url)("db:export / db:import round trip [postgres]", () => {
     expect(report.audit?.changedWarning).toMatch(/^WARNING: .*before \(backup\) intact \(2 rows verified\), after \(restored\) broken at row m1/);
     expect((await auditOrder(dstUrl)).map((r) => r.id)).toEqual(["m1", "m2"]);
   }, 120_000);
+
+  it("a failing later table in --merge rolls back the earlier tables too", async () => {
+    const srcUrl = await freshDatabase("rsrc");
+    const source = await openStore(srcUrl);
+    await source.upsertWorkflow({ id: "wf-new", name: "New", schemaVersion: "1.0.0", workflowVersion: 1, nodes: [], edges: [] } as never);
+    await source.writeAuditLog({ id: "r1", eventType: "e", category: "c", action: "a", outcome: "success" });
+    await source.close();
+    process.env.DB_TYPE = "postgres";
+    process.env.DB_POSTGRESDB_URL = srcUrl;
+    const exporter = await openBackupAdapter();
+    const dump = JSON.parse(JSON.stringify(await exportDump(exporter))) as BackupDump;
+    await exporter.close();
+
+    const dstUrl = await freshDatabase("rdst");
+    const dest = await openStore(dstUrl);
+    await dest.writeAuditLog({ id: "before", eventType: "e", category: "c", action: "a", outcome: "success" });
+    await dest.close();
+    // workflows (first table) inserts cleanly; audit_logs then hits the destination's existing "before" id.
+    dump.tables.audit_logs![0]!.id = "before";
+    dump.tables.audit_logs![0]!.seq = 1000;
+    process.env.DB_POSTGRESDB_URL = dstUrl;
+    const importer = await openBackupAdapter();
+    const error = await importDump(importer, dump, { merge: true }).then(() => undefined, (e: unknown) => e as Error);
+    await importer.close();
+    expect(error?.message).toMatch(/Failed to insert into audit_logs/);
+    const pool = new Pool(postgresPoolConfig(postgresStoreConfig(parsePostgresSettings({ DB_POSTGRESDB_URL: dstUrl })), { max: 1 }));
+    try {
+      expect((await pool.query(`SELECT id FROM workflows`)).rows).toEqual([]);
+    } finally {
+      await pool.end();
+    }
+    expect((await auditOrder(dstUrl)).map((r) => r.id)).toEqual(["before"]);
+  }, 120_000);
 });

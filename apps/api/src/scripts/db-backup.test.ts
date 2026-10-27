@@ -497,5 +497,21 @@ describe("db:export records the audit verdict; db:import refuses a restore that 
       expect(await auditIds()).toEqual(["old"]);
     });
 
+    it("a failing later table in --merge rolls back the earlier tables too", async () => {
+      const store = await SqliteStore.create(sourcePath);
+      await store.upsertWorkflow({ id: "wf-new", name: "New", schemaVersion: "1.0.0", workflowVersion: 1, nodes: [], edges: [] } as never);
+      await store.writeAuditLog({ id: "a1", eventType: "e", category: "c", action: "a", outcome: "success" });
+      await store.close();
+      const dump = await exportFrom(sourcePath);
+      await destinationWithData();
+      // workflows (first table) inserts cleanly; audit_logs then hits the destination's existing "before" id.
+      dump.tables.audit_logs![0]!.id = "before";
+      const before = await destinationState();
+      const error = await importInto(destPath, dump, { merge: true }).then(() => undefined, (e: unknown) => e as Error);
+      expect(error?.message).toMatch(/Failed to insert into audit_logs/);
+      const after = await destinationState();
+      expect(after.workflows).not.toContain("wf-new");
+      expect(after).toEqual(before);
+    });
   });
 });
