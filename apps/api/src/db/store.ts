@@ -789,19 +789,25 @@ export interface Store {
    * together (Postgres: `SELECT … FOR UPDATE`), so of two concurrent calls (two API instances too) one unpublishes
    * and the other is refused. Clears the published version, marks when it was unpublished (production then runs the
    * draft, gated or not) and appends an `unpublished` history entry whose `version` and `previousVersion` are the
-   * version that was live and whose hash is the one that version was released with. Null when nothing is published.
-   * A publish clears the mark again.
+   * version that was live and whose hash is the one that version was released with. Null, with nothing written, when
+   * nothing is published or, given `expectedVersion`, when another version is live. A publish clears the mark again.
    */
   unpublishWorkflowVersion(entry: {
     id: string;
     workflowId: string;
     reason: string | null;
+    /** Only unpublish this version; when another one is live the call writes nothing and answers null. */
+    expectedVersion?: number | null;
     unpublishedAt: string;
     unpublishedBy: string | null;
     unpublishedByUserId: string | null;
   }): Promise<WorkflowReleaseRecord | null>;
-  /** When the published version was taken down (see `unpublishWorkflowVersion`); null when it was not, or it was published since. */
-  getUnpublishedAt(workflowId: string): Promise<string | null>;
+  /**
+   * The published version and the unpublish mark (see `unpublishWorkflowVersion`), read together from the workflow's
+   * row so a concurrent publish cannot show one without the other. `unpublishedAt` is null when it was not
+   * unpublished, or was published since. Both are null for a workflow that does not exist.
+   */
+  getPublishState(workflowId: string): Promise<{ publishedVersion: number | null; unpublishedAt: string | null }>;
 
   // ---- RBAC: project roles, custom roles, SSO group mappings
 

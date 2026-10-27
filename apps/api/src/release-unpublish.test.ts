@@ -47,6 +47,8 @@ describe("migration 42", () => {
     const migration = MIGRATIONS.find((entry) => entry.version === 42)!;
     expect(migration.up).toContain("ALTER TABLE workflows ADD COLUMN IF NOT EXISTS unpublished_at TIMESTAMPTZ");
     expect(migration.down).toContain("ALTER TABLE workflows DROP COLUMN IF EXISTS unpublished_at");
+    expect(migration.up).toContain("ALTER TABLE workflow_releases ADD COLUMN seq BIGINT");
+    expect(migration.down).toContain("ALTER TABLE workflow_releases DROP COLUMN IF EXISTS seq");
     const ctx = await context();
     const sql = testSql(ctx.store);
     const columns =
@@ -116,7 +118,7 @@ describe("unpublish without a gate", () => {
     const published = await callAs(ctx, "POST", "/api/workflows/wf-twice/publish", builder.cookie, { version: v2 });
     expect(published.statusCode, published.body).toBe(200);
     expect(published.json<{ release: WorkflowRelease }>().release).toMatchObject({ version: v2, verdict: "ungated", previousVersion: null });
-    expect(await ctx.store.getUnpublishedAt("wf-twice")).toBeNull();
+    expect((await ctx.store.getPublishState("wf-twice")).unpublishedAt).toBeNull();
     expect((await stateOf(ctx, builder.cookie, "wf-twice")).unpublishedAt).toBeNull();
     await saveVersion(ctx, hookWorkflow("wf-twice", "three"));
     expect(await productionHook(ctx, "hook-wf-twice")).toMatchObject({ output: { result: "two" } });
@@ -143,6 +145,88 @@ describe("unpublish without a gate", () => {
     expect(await ctx.store.unpublishWorkflowVersion(entry("rel_c"))).toBeNull();
   });
 
+  it("getPublishState reads the version and the mark together", async () => {
+    const ctx = await context();
+    const builder = await loginAs(ctx, "builder");
+    expect(await ctx.store.getPublishState("missing")).toEqual({ publishedVersion: null, unpublishedAt: null });
+    const v1 = await saveVersion(ctx, hookWorkflow("wf-state", "one"));
+    expect(await ctx.store.getPublishState("wf-state")).toEqual({ publishedVersion: null, unpublishedAt: null });
+    expect((await callAs(ctx, "POST", "/api/workflows/wf-state/publish", builder.cookie, { version: v1 })).statusCode).toBe(200);
+    expect(await ctx.store.getPublishState("wf-state")).toEqual({ publishedVersion: v1, unpublishedAt: null });
+    expect((await unpublish(ctx, builder.cookie, "wf-state")).statusCode).toBe(200);
+    const state = await ctx.store.getPublishState("wf-state");
+    expect(state.publishedVersion).toBeNull();
+    expect(state.unpublishedAt).not.toBeNull();
+  });
+
+  it("expectedVersion: unpublishes only the version the caller named", async () => {
+    const ctx = await context();
+    const builder = await loginAs(ctx, "builder");
+    const v1 = await saveVersion(ctx, hookWorkflow("wf-expect", "one"));
+    expect((await callAs(ctx, "POST", "/api/workflows/wf-expect/publish", builder.cookie, { version: v1 })).statusCode).toBe(200);
+    const v2 = await saveVersion(ctx, hookWorkflow("wf-expect", "two"));
+    expect((await callAs(ctx, "POST", "/api/workflows/wf-expect/publish", builder.cookie, { version: v2 })).statusCode).toBe(200);
+
+    // The dialog named v1, but v2 is live: refused, nothing changed.
+    const stale = await unpublish(ctx, builder.cookie, "wf-expect", { expectedVersion: v1 });
+    expect(stale.statusCode).toBe(409);
+    expect(stale.json<{ error: string }>().error).toContain(`v${v2} is live now`);
+    expect(await ctx.store.getPublishState("wf-expect")).toEqual({ publishedVersion: v2, unpublishedAt: null });
+    expect((await releasesOf(ctx, builder.cookie, "wf-expect")).releases.some((entry) => entry.verdict === "unpublished")).toBe(false);
+    expect(await ctx.store.listAuditLogs({ eventType: "release.unpublished", pageSize: 5 }).then((page) => page.items.length)).toBe(0);
+    expect(await productionHook(ctx, "hook-wf-expect")).toMatchObject({ output: { result: "two" } });
+
+    // The store method alone, as a second instance would call it.
+    const entry = (id: string, expectedVersion: number | null) => ({
+      id,
+      workflowId: "wf-expect",
+      reason: null,
+      expectedVersion,
+      unpublishedAt: new Date().toISOString(),
+      unpublishedBy: "x@example.com",
+      unpublishedByUserId: null
+    });
+    expect(await ctx.store.unpublishWorkflowVersion(entry("rel_x", v1))).toBeNull();
+    expect(await ctx.store.getPublishedVersion("wf-expect")).toBe(v2);
+
+    // The right version goes through; a body without the field behaves as before.
+    const done = await unpublish(ctx, builder.cookie, "wf-expect", { expectedVersion: v2 });
+    expect(done.statusCode, done.body).toBe(200);
+    expect(done.json<ReleaseUnpublishResult>().release).toMatchObject({ verdict: "unpublished", version: v2 });
+    const nothing = await unpublish(ctx, builder.cookie, "wf-expect", { expectedVersion: v2 });
+    expect(nothing.statusCode).toBe(409);
+    expect(nothing.json<{ error: string }>().error).toMatch(/Nothing is published/);
+    expect((await unpublish(ctx, builder.cookie, "wf-expect", { expectedVersion: 0 })).statusCode).toBe(400);
+  });
+
+  it("lists same-millisecond history entries in the order they were written", async () => {
+    const ctx = await context();
+    const v1 = await saveVersion(ctx, hookWorkflow("wf-order", "one"));
+    const at = "2026-10-27T10:00:00.000Z";
+    const release = (id: string) => ({
+      id,
+      workflowId: "wf-order",
+      version: v1,
+      workflowHash: "hash-1",
+      replayRunId: null,
+      verdict: "ungated" as const,
+      reason: null,
+      gateReasons: [],
+      approval: null,
+      publishedAt: at,
+      publishedBy: "x@example.com",
+      publishedByUserId: null
+    });
+    // Ids deliberately sort against the write order.
+    for (const round of ["rel_z", "rel_y", "rel_x"]) {
+      expect(await ctx.store.publishWorkflowVersion(release(`${round}_pub`), await ctx.store.getPublishedVersion("wf-order"))).not.toBeNull();
+      const taken = await ctx.store.unpublishWorkflowVersion({ id: `${round}_unpub`, workflowId: "wf-order", reason: null, unpublishedAt: at, unpublishedBy: "x@example.com", unpublishedByUserId: null });
+      expect(taken).not.toBeNull();
+    }
+    const ids = (await ctx.store.listWorkflowReleases("wf-order")).map((entry) => entry.id);
+    expect(ids).toEqual(["rel_x_unpub", "rel_x_pub", "rel_y_unpub", "rel_y_pub", "rel_z_unpub", "rel_z_pub"]);
+  });
+
   it("rollback after an unpublish publishes that version again, through the same rules as before", async () => {
     const ctx = await context();
     const builder = await loginAs(ctx, "builder");
@@ -157,7 +241,7 @@ describe("unpublish without a gate", () => {
     expect(back.statusCode, back.body).toBe(200);
     expect(back.json<{ release: WorkflowRelease }>().release).toMatchObject({ version: v1, verdict: "rollback", previousVersion: null });
     expect(await productionHook(ctx, "hook-wf-back")).toMatchObject({ output: { result: "one" } });
-    expect(await ctx.store.getUnpublishedAt("wf-back")).toBeNull();
+    expect((await ctx.store.getPublishState("wf-back")).unpublishedAt).toBeNull();
     expect((await releasesOf(ctx, builder.cookie, "wf-back")).releases.map((entry) => entry.verdict)).toEqual(["rollback", "unpublished", "ungated"]);
   });
 

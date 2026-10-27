@@ -387,11 +387,12 @@ export class ReleaseService {
     // On a gated workflow deactivating is the kill switch: it stops production whatever version is published.
     // Without a gate, deactivating only unregisters schedules and triggers, as it always did.
     if (gateOn && isWorkflowDeactivated(draft)) return null;
-    const published = await this.store.getPublishedVersion(workflowId);
+    // One read of the row: a republish between two reads must not show "nothing published" without its mark.
+    const { publishedVersion: published, unpublishedAt } = await this.store.getPublishState(workflowId);
     if (published === null) {
       // A gate that is on has a published version unless someone unpublished it (production runs the draft) or the
       // workflow was created again under a gated id (no unpublish mark on the new row): that one fails closed.
-      if (gateOn && await this.store.getUnpublishedAt(workflowId) === null) {
+      if (gateOn && unpublishedAt === null) {
         this.options.logger?.warn("The release gate is on but no version is published; production traffic is refused", { workflowId });
         return null;
       }
@@ -421,9 +422,9 @@ export class ReleaseService {
   async deactivatedProductionWorkflow(workflowId: string): Promise<Workflow | null> {
     const draft = await this.store.getWorkflow(workflowId);
     if (!draft || !isWorkflowDeactivated(draft) || !(await this.store.getReleaseGate(workflowId))?.enabled) return null;
-    const published = await this.store.getPublishedVersion(workflowId);
+    const { publishedVersion: published, unpublishedAt } = await this.store.getPublishState(workflowId);
     // Unpublished: what production would run is the draft.
-    if (published === null) return await this.store.getUnpublishedAt(workflowId) === null ? null : draft;
+    if (published === null) return unpublishedAt === null ? null : draft;
     try {
       return await this.options.resolveVersion(workflowId, published);
     } catch {
@@ -460,10 +461,9 @@ export class ReleaseService {
   async state(user: SafeUser, workflowId: string): Promise<ReleaseStateView> {
     await this.check(user, workflowId, "workflow:read");
     const draftVersion = await this.store.maxWorkflowVersionNumber(workflowId) || null;
-    const publishedVersion = await this.publishedVersion(workflowId);
+    const { publishedVersion, unpublishedAt } = await this.store.getPublishState(workflowId);
     const gate = await this.store.getReleaseGate(workflowId);
     const aheadBy = publishedVersion !== null && draftVersion !== null ? Math.max(0, draftVersion - publishedVersion) : 0;
-    const unpublishedAt = publishedVersion === null ? await this.store.getUnpublishedAt(workflowId) : null;
     return {
       draftVersion,
       publishedVersion,
@@ -471,7 +471,7 @@ export class ReleaseService {
       gateEnabled: gate?.enabled ?? false,
       gateEnforced: gate?.enforced ?? false,
       productionRefused: Boolean(gate?.enabled) && ((publishedVersion === null && unpublishedAt === null) || await this.resolveRunnableWorkflow(workflowId, "production") === null),
-      unpublishedAt,
+      unpublishedAt: publishedVersion === null ? unpublishedAt : null,
       canPublish: (await this.options.access(user, workflowId, "workflow:publish")).ok,
       canEditGate: (await this.options.access(user, workflowId, "workflow:write")).ok
     };
@@ -689,7 +689,7 @@ export class ReleaseService {
     const saved = draft === undefined ? await this.store.getWorkflow(workflowId) : draft;
     const gateOn = Boolean((await this.store.getReleaseGate(workflowId))?.enabled);
     if (!gateOn && !saved) return [];
-    const published = await this.store.getPublishedVersion(workflowId);
+    const { publishedVersion: published, unpublishedAt } = await this.store.getPublishState(workflowId);
     if (published !== null) {
       try {
         return productionRoutingKeys(await this.options.resolveVersion(workflowId, published));
@@ -699,7 +699,7 @@ export class ReleaseService {
       }
     }
     if (!saved) return [];
-    return gateOn && await this.store.getUnpublishedAt(workflowId) === null ? [] : productionRoutingKeys(saved);
+    return gateOn && unpublishedAt === null ? [] : productionRoutingKeys(saved);
   }
 
   /** The workflows other than `workflowId` that claim each production path. */
@@ -1468,12 +1468,21 @@ export class ReleaseService {
    * the gate never blocks it, and with a gate on the answer says plainly that
    * production now runs the ungated draft. Refused (409) when nothing is
    * published, a second call included, and when the draft's production paths
-   * are another workflow's. Audited as `release.unpublished`.
+   * are another workflow's. With `expectedVersion` it takes down only that version (409 when another one is live,
+   * nothing changed). Audited as `release.unpublished`.
    */
   async unpublish(user: SafeUser, workflowId: string, input: ReleaseUnpublishInput): Promise<ReleaseUnpublishResult> {
     await this.check(user, workflowId, "workflow:publish");
     const nothingPublished = () => new ReleaseError("Nothing is published: production already runs the draft", 409);
-    if (await this.store.getPublishedVersion(workflowId) === null) throw nothingPublished();
+    const versionChanged = (live: number) =>
+      new ReleaseError(`v${live} is live now, not v${input.expectedVersion}: it was published or rolled back after you opened this. Reload and check before unpublishing`, 409);
+    const refusal = async (): Promise<ReleaseError> => {
+      const { publishedVersion } = await this.store.getPublishState(workflowId);
+      return publishedVersion === null ? nothingPublished() : versionChanged(publishedVersion);
+    };
+    const live = (await this.store.getPublishState(workflowId)).publishedVersion;
+    if (live === null) throw nothingPublished();
+    if (input.expectedVersion !== undefined && input.expectedVersion !== live) throw versionChanged(live);
     // The draft is about to serve production: its paths must be its own, as for a publish.
     await this.assertNoRoutingConflicts(user, workflowId, await this.store.getWorkflow(workflowId), "unpublish");
     const gate = await this.store.getReleaseGate(workflowId);
@@ -1482,12 +1491,13 @@ export class ReleaseService {
       id: `rel_${randomUUID()}`,
       workflowId,
       reason,
+      expectedVersion: input.expectedVersion ?? null,
       unpublishedAt: this.now().toISOString(),
       unpublishedBy: user.email,
       unpublishedByUserId: user.id
     });
-    // Another unpublish got there first: the store wrote nothing.
-    if (!record) throw nothingPublished();
+    // Another unpublish or a republish got there first: the store wrote nothing.
+    if (!record) throw await refusal();
     const release = this.toRelease(record);
     const gateEnabled = gate?.enabled ?? false;
     const gateEnforced = gateEnabled && (gate?.enforced ?? false);

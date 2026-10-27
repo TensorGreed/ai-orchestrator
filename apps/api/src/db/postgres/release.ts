@@ -338,7 +338,7 @@ export async function upsertReleaseGate(ctx: PgContext, record: ReleaseGateRecor
 }
 
 export async function listWorkflowReleases(ctx: PgContext, workflowId: string, limit = 100): Promise<WorkflowReleaseRecord[]> {
-  const rows = await ctx.query<Row>(`SELECT * FROM workflow_releases WHERE workflow_id = $1 ORDER BY published_at DESC, id DESC LIMIT $2`, [
+  const rows = await ctx.query<Row>(`SELECT * FROM workflow_releases WHERE workflow_id = $1 ORDER BY published_at DESC, seq DESC LIMIT $2`, [
     workflowId,
     Math.max(1, Math.min(500, limit))
   ]);
@@ -376,8 +376,9 @@ export async function unpublishWorkflowVersion(ctx: PgContext, entry: Parameters
   return await ctx.withTransaction(async (client) => {
     const current = await readPublishedVersion(client, entry.workflowId, true);
     if (current === null) return null;
+    if (entry.expectedVersion !== undefined && entry.expectedVersion !== null && entry.expectedVersion !== current) return null;
     const released = await client.query(
-      `SELECT workflow_hash FROM workflow_releases WHERE workflow_id = $1 AND version = $2 AND verdict <> 'unpublished' ORDER BY published_at DESC, id DESC LIMIT 1`,
+      `SELECT workflow_hash FROM workflow_releases WHERE workflow_id = $1 AND version = $2 AND verdict <> 'unpublished' ORDER BY published_at DESC, seq DESC LIMIT 1`,
       [entry.workflowId, current]
     );
     const record: WorkflowReleaseRecord = {
@@ -405,9 +406,13 @@ export async function unpublishWorkflowVersion(ctx: PgContext, entry: Parameters
   });
 }
 
-export async function getUnpublishedAt(ctx: PgContext, workflowId: string): Promise<string | null> {
-  const row = await ctx.queryOne<Row>(`SELECT unpublished_at FROM workflows WHERE id = $1`, [workflowId]);
-  return row && row.unpublished_at !== null && row.unpublished_at !== undefined ? String(row.unpublished_at) : null;
+export async function getPublishState(ctx: PgContext, workflowId: string): Promise<{ publishedVersion: number | null; unpublishedAt: string | null }> {
+  const row = await ctx.queryOne<Row>(`SELECT published_version, unpublished_at FROM workflows WHERE id = $1`, [workflowId]);
+  if (!row) return { publishedVersion: null, unpublishedAt: null };
+  return {
+    publishedVersion: nullableNumber(row.published_version),
+    unpublishedAt: row.unpublished_at !== null && row.unpublished_at !== undefined ? String(row.unpublished_at) : null
+  };
 }
 
 export async function listReplayRunIdsForHash(ctx: PgContext, workflowId: string, workflowHash: string): Promise<string[]> {

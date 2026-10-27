@@ -8153,7 +8153,7 @@ export class SqliteStore implements Store {
 
   async listWorkflowReleases(workflowId: string, limit = 100): Promise<WorkflowReleaseRecord[]> {
     return this.queryAll<Record<string, unknown>>(
-      `SELECT * FROM workflow_releases WHERE workflow_id = ? ORDER BY published_at DESC, id DESC LIMIT ?`,
+      `SELECT * FROM workflow_releases WHERE workflow_id = ? ORDER BY published_at DESC, rowid DESC LIMIT ?`,
       [workflowId, Math.max(1, Math.min(500, limit))]
     ).map(mapWorkflowReleaseRow);
   }
@@ -8259,13 +8259,14 @@ export class SqliteStore implements Store {
     return { channel: row.release_channel === "production" ? "production" : "draft", version: nullableNumber(row.release_version) };
   }
 
-  /** The hashes `version` had when it was released (any release, rollbacks included). */
+  /** Unpublish in one transaction (see `Store.unpublishWorkflowVersion`). */
   async unpublishWorkflowVersion(entry: Parameters<Store["unpublishWorkflowVersion"]>[0]): Promise<WorkflowReleaseRecord | null> {
     return this.transaction(() => {
       const current = this.getPublishedVersionSync(entry.workflowId);
       if (current === null) return null;
+      if (entry.expectedVersion !== undefined && entry.expectedVersion !== null && entry.expectedVersion !== current) return null;
       const released = this.queryOne<{ workflow_hash: string }>(
-        `SELECT workflow_hash FROM workflow_releases WHERE workflow_id = ? AND version = ? AND verdict <> 'unpublished' ORDER BY published_at DESC, id DESC LIMIT 1`,
+        `SELECT workflow_hash FROM workflow_releases WHERE workflow_id = ? AND version = ? AND verdict <> 'unpublished' ORDER BY published_at DESC, rowid DESC LIMIT 1`,
         [entry.workflowId, current]
       );
       const changed = this.db
@@ -8297,11 +8298,13 @@ export class SqliteStore implements Store {
     });
   }
 
-  async getUnpublishedAt(workflowId: string): Promise<string | null> {
-    const row = this.queryOne<{ unpublished_at: string | null }>(`SELECT unpublished_at FROM workflows WHERE id = ?`, [workflowId]);
-    return row?.unpublished_at ? toString(row.unpublished_at) : null;
+  async getPublishState(workflowId: string): Promise<{ publishedVersion: number | null; unpublishedAt: string | null }> {
+    const row = this.queryOne<{ published_version: number | null; unpublished_at: string | null }>(`SELECT published_version, unpublished_at FROM workflows WHERE id = ?`, [workflowId]);
+    if (!row) return { publishedVersion: null, unpublishedAt: null };
+    return { publishedVersion: nullableNumber(row.published_version), unpublishedAt: row.unpublished_at ? toString(row.unpublished_at) : null };
   }
 
+  /** The hashes `version` had when it was released (any release, rollbacks included). */
   async listReleasedVersionHashes(workflowId: string, version: number): Promise<string[]> {
     return this.queryAll<{ workflow_hash: string }>(`SELECT DISTINCT workflow_hash FROM workflow_releases WHERE workflow_id = ? AND version = ?`, [workflowId, version]).map((row) =>
       toString(row.workflow_hash)

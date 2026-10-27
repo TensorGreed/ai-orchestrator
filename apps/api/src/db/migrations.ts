@@ -48,6 +48,17 @@ export const INSERTION_SEQ_TABLES: ReadonlyArray<{ table: string; backfillOrder:
 ];
 
 /**
+ * v42: the release history is listed newest first, and entries written in the same millisecond (a publish and an
+ * unpublish from a script or two instances) must keep their write order, so it gets the same `seq` identity.
+ */
+export const RELEASE_SEQ_TABLES: ReadonlyArray<{ table: string; backfillOrder: string }> = [
+  { table: "workflow_releases", backfillOrder: `published_at, id COLLATE "C"` }
+];
+
+/** Every table with a Postgres `seq` identity standing in for SQLite's rowid (v40 and v42). */
+export const ALL_INSERTION_SEQ_TABLES: ReadonlyArray<{ table: string; backfillOrder: string }> = [...INSERTION_SEQ_TABLES, ...RELEASE_SEQ_TABLES];
+
+/**
  * v40: the Postgres columns created as REAL (float4, about 7 significant digits) where SQLite's REAL is an 8-byte
  * double. Up widens them through text, so a stored 0.1 stays 0.1; down narrows them back.
  */
@@ -1993,12 +2004,16 @@ export const MIGRATIONS: Migration[] = [
     // Set by an unpublish, cleared by the next publish. With a release gate on, production runs the draft only while it
     // is set: a workflow created again under a gated id has no published version and no mark, so it still fails closed.
     // SQLite's embedded migrate() adds the same column.
-    up: `
-      ALTER TABLE workflows ADD COLUMN IF NOT EXISTS unpublished_at TIMESTAMPTZ;
-    `,
-    down: `
-      ALTER TABLE workflows DROP COLUMN IF EXISTS unpublished_at;
-    `
+    // The release history also gets an insertion-order `seq` (Postgres; SQLite orders by rowid) so same-millisecond
+    // entries list in the order they were written.
+    up: [
+      `ALTER TABLE workflows ADD COLUMN IF NOT EXISTS unpublished_at TIMESTAMPTZ;`,
+      ...RELEASE_SEQ_TABLES.map(({ table, backfillOrder }) => insertionSeqUp(table, backfillOrder))
+    ].join("\n"),
+    down: [
+      ...RELEASE_SEQ_TABLES.map(({ table }) => `ALTER TABLE ${table} DROP COLUMN IF EXISTS seq;`),
+      `ALTER TABLE workflows DROP COLUMN IF EXISTS unpublished_at;`
+    ].join("\n")
   }
 ];
 

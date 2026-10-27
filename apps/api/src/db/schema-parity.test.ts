@@ -15,7 +15,7 @@ import os from "node:os";
 import path from "node:path";
 import { Pool as PgPool, type Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { INSERTION_SEQ_TABLES, MIGRATIONS, rollbackMigrations, runMigrations } from "./migrations.js";
+import { ALL_INSERTION_SEQ_TABLES, INSERTION_SEQ_TABLES, MIGRATIONS, rollbackMigrations, runMigrations } from "./migrations.js";
 import { SqliteStore } from "./database.js";
 import { createStore, postgresStoreConfig } from "./create-store.js";
 import { PostgresStore, postgresPoolConfig, withMigrationLock } from "./postgres-store.js";
@@ -72,7 +72,7 @@ const SEQ_INDEXES: ReadonlyArray<{ table: string; index: string; definition: str
 const Q3B_SEQ_TABLES = ["eval_fixtures", "eval_runs", "eval_results", "mcp_cassettes", "replay_recordings", "guard_simulations", "execution_history"];
 
 export const ALLOWED_DIFFERENCES: ReadonlyArray<SchemaDifference & { reason: string }> = [
-  ...INSERTION_SEQ_TABLES.map(({ table }) => ({
+  ...ALL_INSERTION_SEQ_TABLES.map(({ table }) => ({
     kind: "column-missing" as const,
     table,
     object: "seq",
@@ -503,7 +503,7 @@ describe.skipIf(!postgresUrl)("Postgres schema parity and migration walk", () =>
         ["public"]
       );
       expect(columns.rows).toEqual(
-        INSERTION_SEQ_TABLES.map(({ table }) => ({ table_name: table, data_type: "bigint", is_nullable: "NO", is_identity: "YES", identity_generation: "ALWAYS" })).sort((a, b) =>
+        ALL_INSERTION_SEQ_TABLES.map(({ table }) => ({ table_name: table, data_type: "bigint", is_nullable: "NO", is_identity: "YES", identity_generation: "ALWAYS" })).sort((a, b) =>
           a.table_name < b.table_name ? -1 : 1
         )
       );

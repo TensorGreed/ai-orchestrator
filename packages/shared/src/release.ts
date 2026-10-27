@@ -187,7 +187,9 @@ export type ReleaseRollbackInput = z.infer<typeof releaseRollbackInputSchema>;
 /** `POST /api/workflows/:id/unpublish`: take the published version down; production runs the draft. The reason is optional. */
 export const releaseUnpublishInputSchema = z
   .object({
-    reason: z.string().trim().max(APPROVAL_REASON_MAX_LENGTH).optional()
+    reason: z.string().trim().max(APPROVAL_REASON_MAX_LENGTH).optional(),
+    /** The version the caller means to take down; when another one is live the call is refused (409) and changes nothing. */
+    expectedVersion: z.number().int().positive().optional()
   })
   .strict();
 export type ReleaseUnpublishInput = z.infer<typeof releaseUnpublishInputSchema>;

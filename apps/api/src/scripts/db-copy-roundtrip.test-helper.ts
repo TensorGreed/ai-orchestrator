@@ -220,6 +220,12 @@ export async function seedAllDomains(target: Store): Promise<void> {
     { id: "rel-2", workflowId: "wf-support", version: 2, workflowHash: "hash-support-2", replayRunId: "replay-run-1", verdict: "pass", reason: null, gateReasons: ["ok"], approval: null, publishedAt: T(20), publishedBy: "admin@example.com", publishedByUserId: "u-admin" },
     1
   );
+  // An unpublished workflow: its mark (workflows.unpublished_at) and the history order of a same-millisecond pair.
+  await store.publishWorkflowVersion(
+    { id: "rel-r1", workflowId: "wf-report", version: 1, workflowHash: "hash-report-1", replayRunId: null, verdict: "ungated", reason: null, gateReasons: [], approval: null, publishedAt: T(30), publishedBy: "admin@example.com", publishedByUserId: "u-admin" },
+    null
+  );
+  await store.unpublishWorkflowVersion({ id: "rel-r2", workflowId: "wf-report", reason: "bad answers", unpublishedAt: T(30), unpublishedBy: "admin@example.com", unpublishedByUserId: "u-admin" });
 
   // ---- Secrets, shares, external providers and their cache
   await store.saveSecret({ id: "sec-openai", name: "OpenAI key", provider: "openai", iv: "aXYtMQ==", authTag: "dGFnLTE=", ciphertext: "Y3QtMQ==", projectId: "proj-ops" });
@@ -578,7 +584,8 @@ export function roundTripReads(): NamedRead[] {
     { name: "getTemplate", read: (s) => s.getTemplate("tpl-rag") },
     { name: "getPublishedVersion", read: (s) => s.getPublishedVersion("wf-support") },
     { name: "isWorkflowVersionPinned", read: async (s) => [await s.isWorkflowVersionPinned("wf-support", 1), await s.isWorkflowVersionPinned("wf-support", 3)] },
-    { name: "listWorkflowReleases", read: (s) => s.listWorkflowReleases("wf-support") },
+    { name: "listWorkflowReleases", read: async (s) => [await s.listWorkflowReleases("wf-support"), await s.listWorkflowReleases("wf-report")] },
+    { name: "getPublishState", read: async (s) => [await s.getPublishState("wf-support"), await s.getPublishState("wf-report"), await s.getPublishState("wf-lab")] },
     { name: "hasReleasedVersion", read: (s) => s.hasReleasedVersion("wf-support", 1) },
     { name: "listReleasedVersionHashes", read: (s) => s.listReleasedVersionHashes("wf-support", 2) },
     { name: "listWorkflowConfigsForDestinations", read: (s) => s.listWorkflowConfigsForDestinations() },
