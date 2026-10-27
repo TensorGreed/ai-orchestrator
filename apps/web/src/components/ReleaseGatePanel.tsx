@@ -315,8 +315,8 @@ function WorkflowReleaseView({ workflowId, activeProjectId, canEdit, isAdmin }: 
         workflowId={workflowId}
         history={history}
         canRollback={canEdit && !locks.adminOnly}
-        canUnpublish={canEdit && !locks.adminOnly}
-        unpublishAdminOnly={canEdit && locks.adminOnly}
+        canUnpublish={canEdit && (isAdmin || !(gate.enabled && gate.enforced))}
+        unpublishAdminOnly={canEdit && !isAdmin && gate.enabled && gate.enforced}
         gate={gate}
         onChanged={() => void load()}
       />

@@ -284,6 +284,21 @@ describe("Unpublish in the Releases card", () => {
     expect(await within(await screen.findByRole("dialog")).findByRole("button", { name: "Unpublish v3" })).toBeInTheDocument();
   });
 
+  it("a gate that is switched off but still flagged enforced does not hide Unpublish from a builder", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.fetchReleaseGate).mockResolvedValue({ gate: { ...defaultReleaseGate("wf-1"), enabled: false, enforced: true } });
+    vi.mocked(api.fetchEvalDatasets).mockResolvedValue({ datasets: [] } as never);
+    vi.mocked(api.fetchReleases).mockResolvedValue({ releases: [release()], publishedVersion: 3 });
+    const { unmount } = render(<ReleaseGatePanel workflows={workflows} canEdit isAdmin={false} />);
+    const card = (await screen.findByRole("heading", { name: "Releases" })).closest("section")!;
+    expect(await within(card).findByRole("button", { name: "Unpublish v3" })).toBeInTheDocument();
+    unmount();
+    vi.mocked(api.fetchReleaseState).mockResolvedValue({ state: state({ gateEnabled: false, gateEnforced: true }) });
+    render(<ReleasePill workflowId="wf-1" canPublish isAdmin={false} />);
+    await user.click(await screen.findByRole("button", { name: /Release:/ }));
+    expect(await within(await screen.findByRole("dialog")).findByRole("button", { name: "Unpublish v3" })).toBeInTheDocument();
+  });
+
   it("a viewer is not offered Unpublish", async () => {
     vi.mocked(api.fetchReleaseGate).mockResolvedValue({ gate: defaultReleaseGate("wf-1") });
     vi.mocked(api.fetchEvalDatasets).mockResolvedValue({ datasets: [] } as never);
