@@ -122,7 +122,7 @@ import {
 } from "./services/rbac-service";
 import { ExternalSecretsService } from "./services/external-secrets-service";
 import { GitSyncService } from "./services/git-sync-service";
-import { LeaderElectionService } from "./services/leader-election-service";
+import { LeaderElectionService, NEVER_LEAD } from "./services/leader-election-service";
 import { reconcileInterruptedRuns } from "./services/run-reconcile-service.js";
 import { MetricsService } from "./services/metrics-service";
 import { TracingService, parseKeyValueList, parseTraceparent } from "./services/tracing-service";
@@ -3530,12 +3530,17 @@ export async function createApp(
     }
   }
   // Postgres: instances that run the scheduler and triggers elect one leader with an advisory lock on a dedicated
-  // connection, with or without HA_ENABLED, so a cron fires once however many instances share the database. SQLite
-  // (one process) keeps the lease row, used only when HA_ENABLED is set.
+  // connection, with or without HA_ENABLED, so a cron fires once however many instances share the database. An
+  // instance without background workers never takes the lock (it could not run the schedules); with HA_ENABLED it
+  // follows, as before. SQLite (one process) keeps the lease row, used only when HA_ENABLED is set.
   const leaderInstanceId = config.HA_INSTANCE_ID ?? `${os.hostname()}-${crypto.randomBytes(4).toString("hex")}`;
   const leaderLock =
-    store instanceof PostgresStore && (config.HA_ENABLED || runsBackgroundWorkers)
-      ? store.leaderLock({ leaseName: "primary", holderId: leaderInstanceId, ttlMs: config.HA_LEASE_TTL_MS })
+    store instanceof PostgresStore
+      ? runsBackgroundWorkers
+        ? store.leaderLock({ leaseName: "primary", holderId: leaderInstanceId, ttlMs: config.HA_LEASE_TTL_MS })
+        : config.HA_ENABLED
+          ? NEVER_LEAD
+          : undefined
       : undefined;
   // On a shared database, schedules and triggers saved through another instance reach the leader's at the next sync.
   let scheduleSyncTimer: NodeJS.Timeout | null = null;

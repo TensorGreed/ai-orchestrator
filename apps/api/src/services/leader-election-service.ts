@@ -20,6 +20,13 @@ export interface LeaderElectionOptions {
   lock?: LeaderLock;
 }
 
+/** A lock that is never granted: the instance follows (Postgres instances without background workers, with HA on). */
+export const NEVER_LEAD: LeaderLock = {
+  check: async () => false,
+  release: async () => undefined,
+  onLost: () => undefined
+};
+
 export interface LeaderStatus {
   enabled: boolean;
   instanceId: string;

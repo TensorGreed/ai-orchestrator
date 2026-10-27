@@ -9,7 +9,7 @@ import { createApp } from "./app";
 import type { Store } from "./db/store.js";
 import { AuthService } from "./services/auth-service";
 import { SecretService } from "./services/secret-service";
-import { LeaderElectionService } from "./services/leader-election-service";
+import { LeaderElectionService, NEVER_LEAD } from "./services/leader-election-service";
 import { openTestStore, testStoreKind } from "./test-support/test-store.js";
 
 interface TestContext {
@@ -356,6 +356,18 @@ describe("Phase 7.1 — LeaderElectionService", () => {
     expect(bLeader).toBe(false);
     await a.stop();
     await b.stop();
+  });
+
+  it("with a lock that is never granted the instance follows and never runs the leader callbacks", async () => {
+    const ctx = await createTestContext();
+    let became = 0;
+    const service = new LeaderElectionService(ctx.store, { instanceId: "follower", renewIntervalMs: 60_000, lock: NEVER_LEAD, onBecomeLeader: () => void (became += 1) });
+    await service.acquireEarly();
+    await service.start();
+    expect(service.isLeader()).toBe(false);
+    expect((await service.getStatus()).enabled).toBe(true);
+    expect(became).toBe(0);
+    await service.stop();
   });
 
   it("after leader resigns, the other instance can take over on next tick", async () => {

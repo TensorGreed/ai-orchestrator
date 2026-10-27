@@ -64,7 +64,7 @@ run("two API instances on one Postgres database", () => {
   let primary: TestStore | undefined;
   const instances: Instance[] = [];
   const tempDirs: string[] = [];
-  let fires: Array<{ instance: number; second: string }> = [];
+  let fires: Array<{ instance: number; at: number }> = [];
 
   afterEach(async () => {
     for (const instance of instances.splice(0)) {
@@ -100,7 +100,7 @@ run("two API instances on one Postgres database", () => {
       const setHandler = scheduler.setExecutionHandler.bind(scheduler);
       scheduler.setExecutionHandler = (handler) =>
         setHandler(async (input) => {
-          fires.push({ instance: i, second: input.firedAt.slice(0, 19) });
+          fires.push({ instance: i, at: Date.now() });
           await handler(input);
         });
       const triggers = new TriggerService(store, quiet);
@@ -111,8 +111,16 @@ run("two API instances on one Postgres database", () => {
     return instances;
   }
 
-  /** The second of each tick fired, by any instance; a cron that fired twice in one tick shows a second twice. */
-  const cronSeconds = async (): Promise<string[]> => fires.map((fire) => fire.second);
+  const cronSeconds = async (): Promise<number[]> => fires.map((fire) => fire.at);
+  /**
+   * The shortest gap between two fires, by any instance. The cron ticks every second; a tick fired twice (two
+   * leaders, or two jobs for one schedule) shows a gap near zero. Timer jitter and a busy event loop move a fire by tens of milliseconds, not
+   * a second.
+   */
+  const shortestGap = (): number => {
+    const times = fires.map((fire) => fire.at).sort((x, y) => x - y);
+    return Math.min(...times.slice(1).map((time, index) => time - times[index]!));
+  };
 
   async function lockHolderPid(): Promise<number | null> {
     const pool = testStorePool(primary!);
@@ -152,8 +160,7 @@ run("two API instances on one Postgres database", () => {
     expect(jobCount(standby.scheduler)).toBe(0);
 
     await until(async () => (await cronSeconds()).length >= 3, "three scheduled runs");
-    const before = await cronSeconds();
-    expect(new Set(before).size, JSON.stringify(fires)).toBe(before.length);
+    expect(shortestGap(), JSON.stringify(fires)).toBeGreaterThan(150);
 
     // Kill the leader's lock session: it steps down at once (its schedules stop), and whichever instance takes the
     // free lock first leads from then on, on a new session.
@@ -169,8 +176,7 @@ run("two API instances on one Postgres database", () => {
     expect(standby).toBeDefined();
     const taken = (await cronSeconds()).length;
     await until(async () => (await cronSeconds()).length >= taken + 3, "three runs after the failover");
-    const after = await cronSeconds();
-    expect(new Set(after).size, JSON.stringify(fires)).toBe(after.length);
+    expect(shortestGap(), JSON.stringify(fires)).toBeGreaterThan(150);
   }, 90_000);
 
   it("the health output keeps its shape: enabled, one leader, the holder named by both", async () => {
