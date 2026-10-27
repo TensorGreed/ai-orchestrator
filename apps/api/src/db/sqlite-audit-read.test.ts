@@ -10,9 +10,11 @@ import Database from "better-sqlite3";
 import { randomBytes } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
+  AuditChainWalker,
   auditEntryHash,
   exactSqliteTextRows,
   GENESIS_HASH,
+  iterateSqliteAuditChainRows,
   readSqliteAuditChainRows,
   SQLITE_AUDIT_TEXT_COLUMNS,
   storedSqliteAuditText,
@@ -232,6 +234,28 @@ describe("readSqliteAuditChainRows equals the all-bytes reader", () => {
     expect(reads[1]).toMatch(/CAST\("id" AS BLOB\)/);
   });
 
+  it("iterateSqliteAuditChainRows reads the same rows in rowid batches (rows without entry_hash skipped, any batch size)", () => {
+    const random = rng(0xba7c4);
+    for (let i = 0; i < 1_000; i++) {
+      const values: Parameters<typeof insertRaw>[0] = { prev_hash: "p", entry_hash: i % 97 === 0 ? null : `e${i}` };
+      for (const column of SQLITE_AUDIT_TEXT_COLUMNS) values[column] = random() < 0.5 ? Buffer.from(fuzzBytes(random)) : Buffer.from(utf8(`ok-${i}`));
+      insertRaw(values);
+    }
+    const all = readSqliteAuditChainRows(db);
+    for (const batch of [1, 7, 333, 990, 1_000, 5_000]) expect([...iterateSqliteAuditChainRows(db, batch)]).toEqual(all);
+    const reads: string[] = [];
+    let batches = 0;
+    const spy = {
+      prepare: (sql: string) => {
+        reads.push(sql);
+        const statement = db.prepare(sql);
+        return { all: (...params: unknown[]) => ((batches += sql.includes("LIMIT") ? 1 : 0), statement.all(...params)) };
+      }
+    };
+    expect([...iterateSqliteAuditChainRows(spy, 100)]).toHaveLength(all.length);
+    expect(batches).toBe(Math.ceil(all.length / 100) + (all.length % 100 === 0 ? 1 : 0));
+  });
+
   it("exactSqliteTextRows leaves rows without a U+FFFD untouched and makes no second read", () => {
     db.prepare(`INSERT INTO audit_logs (id, message) VALUES ('a', 'x')`).run();
     const rows = db.prepare(`SELECT rowid AS r, id, message FROM audit_logs`).all() as Array<Record<string, unknown>>;
@@ -302,6 +326,29 @@ describe("verdicts are identical", () => {
     const unverifiable = new Set(expected.unverifiable?.map((row) => row.id));
     for (const back of [4, 3, 2]) expect(unverifiable.has(`r${rows.length - back}`)).toBe(false);
     expect(expected.firstBrokenAt?.id).toBe(`r${rows.length - 1}`);
+  });
+
+  it("AuditChainWalker fed row by row gives verifyAuditRows' verdict, and stops at the break", () => {
+    const random = rng(0xfeed);
+    const rows: Parameters<typeof writeChain>[0] = [];
+    for (let i = 0; i < 300; i++) {
+      const bytes = Buffer.from(fuzzBytes(random));
+      rows.push({ written: { message: storedSqliteAuditText(bytes) }, stored: random() < 0.7 ? { message: bytes } : undefined });
+    }
+    rows.push({ written: { message: "honest" }, stored: { message: Buffer.from(utf8("edited")) } });
+    rows.push({ written: { message: "after the break" } });
+    writeChain(rows);
+    const chain = readSqliteAuditChainRows(db);
+    const walker = new AuditChainWalker();
+    let walked = 0;
+    for (const row of chain) {
+      walked += 1;
+      if (!walker.push(row)) break;
+    }
+    expect(walker.result()).toEqual(verifyAuditRows(chain));
+    expect(walker.result().firstBrokenAt?.id).toBe(`r${rows.length - 2}`);
+    expect(walked).toBe(rows.length - 1);
+    expect(walker.push(chain.at(-1)!)).toBe(false);
   });
 
   it("on a clean legacy chain both readers say ok", () => {

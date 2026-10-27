@@ -52,9 +52,10 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Pool, type PoolClient } from "pg";
 import {
+  AuditChainWalker,
   exactSqliteTextRows,
+  iterateSqliteAuditChainRows,
   LEGACY_TEXT_FIELDS,
-  readSqliteAuditChainRows,
   SQLITE_AUDIT_TEXT_COLUMNS,
   verifyAuditRows,
   wellFormedAuditText,
@@ -64,8 +65,7 @@ import {
 } from "../db/audit-chain.js";
 import { SqliteStore } from "../db/database.js";
 import { INSERTION_SEQ_TABLES, MIGRATIONS } from "../db/migrations.js";
-import { verifyAuditChain as verifyPostgresAuditChain } from "../db/postgres/audit.js";
-import { pgParams, type PgContext } from "../db/postgres/context.js";
+import { pgParams } from "../db/postgres/context.js";
 import { describePostgresSettings, parsePostgresSettings } from "../config.js";
 import { postgresStoreConfig } from "../db/create-store.js";
 import { loadApiEnvFiles } from "./api-env.js";
@@ -474,32 +474,69 @@ function preview(items: string[], max = 8): string {
   return items.length <= max ? items.join(", ") : `${items.slice(0, max).join(", ")} and ${items.length - max} more`;
 }
 
-/** A PgContext on one client (inside the copy transaction), for postgres/audit.ts verifyAuditChain. */
-function clientContext(client: PoolClient): PgContext {
-  const query = async <T extends object>(sql: string, params?: unknown[]): Promise<T[]> => (await client.query(sql, pgParams(params))).rows as T[];
-  const unsupported = () => {
-    throw new Error("db:copy: this context only runs queries on the copy's connection.");
-  };
-  return {
-    pool: undefined as never,
-    store: undefined as never,
-    query,
-    queryOne: async <T extends object>(sql: string, params?: unknown[]): Promise<T | null> => (await query<T>(sql, params))[0] ?? null,
-    execute: async (sql, params) => {
-      await query(sql, params);
-    },
-    withClient: unsupported,
-    withTransaction: unsupported
-  };
+/** A source row as Postgres will store it: lone surrogates and U+0000 become U+FFFD (pg / pgParams). */
+function asPostgresStores(row: AuditChainRow): AuditChainRow {
+  const fields = { ...row.fields } as Record<keyof AuditCanonicalInput, string | null>;
+  for (const key of Object.keys(fields) as Array<keyof AuditCanonicalInput>) fields[key] = wellFormedAuditText(fields[key]);
+  return { ...row, fields: fields as unknown as AuditCanonicalInput };
 }
 
-/** The source chain as Postgres will store it: lone surrogates and U+0000 become U+FFFD (pg / pgParams). */
-function asPostgresStores(rows: AuditChainRow[]): AuditChainRow[] {
-  return rows.map((row) => {
-    const fields = { ...row.fields } as Record<keyof AuditCanonicalInput, string | null>;
-    for (const key of Object.keys(fields) as Array<keyof AuditCanonicalInput>) fields[key] = wellFormedAuditText(fields[key]);
-    return { ...row, fields: fields as unknown as AuditCanonicalInput };
-  });
+function optionalText(value: unknown): string | null {
+  return value === null || value === undefined ? null : String(value);
+}
+
+/**
+ * The copied chain's verdict, read through a cursor in the copy transaction (seq order) and walked row by row, so the
+ * chain is never held in memory. Reads and maps the rows exactly as postgres/audit.ts verifyAuditChain does (same
+ * query, required fields as text, optional ones NULL → null, the sub-millisecond flag); the db:copy tests compare the
+ * two verdicts.
+ */
+async function verifyTargetAuditChain(client: PoolClient): Promise<AuditChainResult> {
+  const walker = new AuditChainWalker();
+  await client.query(
+    `DECLARE db_copy_audit NO SCROLL CURSOR FOR
+       SELECT id, event_type, category, action, outcome, actor_user_id, actor_email, actor_type,
+              resource_type, resource_id, project_id, ip_address, user_agent, metadata_json, message,
+              created_at, prev_hash, entry_hash,
+              date_trunc('milliseconds', created_at) <> created_at AS created_at_sub_ms
+         FROM audit_logs WHERE entry_hash IS NOT NULL
+        ORDER BY seq ASC`
+  );
+  try {
+    const text = (value: unknown) => (typeof value === "string" ? value : String(value ?? ""));
+    for (;;) {
+      const batch = await client.query<Record<string, unknown>>(`FETCH 2000 FROM db_copy_audit`);
+      for (const row of batch.rows) {
+        const more = walker.push({
+          fields: {
+            id: text(row.id),
+            createdAt: text(row.created_at),
+            eventType: text(row.event_type),
+            category: text(row.category),
+            action: text(row.action),
+            outcome: text(row.outcome),
+            actorUserId: optionalText(row.actor_user_id),
+            actorEmail: optionalText(row.actor_email),
+            actorType: text(row.actor_type),
+            resourceType: optionalText(row.resource_type),
+            resourceId: optionalText(row.resource_id),
+            projectId: optionalText(row.project_id),
+            ipAddress: optionalText(row.ip_address),
+            userAgent: optionalText(row.user_agent),
+            metadataJson: optionalText(row.metadata_json),
+            message: optionalText(row.message)
+          },
+          prevHash: text(row.prev_hash ?? ""),
+          entryHash: text(row.entry_hash ?? ""),
+          createdAtHasSubMillisecond: row.created_at_sub_ms === true
+        });
+        if (!more) return walker.result();
+      }
+      if (batch.rows.length < 2000) return walker.result();
+    }
+  } finally {
+    await client.query(`CLOSE db_copy_audit`);
+  }
 }
 
 function verdictLine(result: AuditChainResult): string {
@@ -703,8 +740,9 @@ export async function runDbCopy(options: DbCopyOptions): Promise<DbCopyReport> {
     checkSourceSchema(sourceSchema, await codeSqliteSchema(), options.sqlitePath);
     log(`Source: SQLite ${sqlitePath} (read-only), schema matches this build.`);
 
-    const sourceAuditRows = readSqliteAuditChainRows(db);
-    const sourceAudit = verifyAuditRows(sourceAuditRows);
+    // Two streaming walks over the chain (rowid batches inside the read transaction): the verdict as SQLite stores it,
+    // then as Postgres will store it. Neither holds the chain in memory.
+    const sourceAudit = verifyAuditRows(iterateSqliteAuditChainRows(db));
     const sourceBrokenAt = sourceAudit.firstBrokenAt ? { id: sourceAudit.firstBrokenAt.id, position: brokenPosition(sourceAudit)! } : undefined;
     if (sourceBrokenAt && !options.allowBrokenAudit) {
       throw new DbCopyRefusal(
@@ -715,8 +753,15 @@ export async function runDbCopy(options: DbCopyOptions): Promise<DbCopyReport> {
           `Nothing was copied.`
       );
     }
-    const explainedBySource = new Set(sourceAuditRows.filter((row) => unverifiableOnPostgresBySource(row.fields)).map((row) => row.fields.id));
-    const expectedTarget = verifyAuditRows(asPostgresStores(sourceAuditRows));
+    const explainedBySource = new Set<string>();
+    const expectedTarget = verifyAuditRows(
+      (function* () {
+        for (const row of iterateSqliteAuditChainRows(db)) {
+          if (unverifiableOnPostgresBySource(row.fields)) explainedBySource.add(row.fields.id);
+          yield asPostgresStores(row);
+        }
+      })()
+    );
     const predicted = auditCarryOver(sourceAudit, expectedTarget, explainedBySource);
     if (predicted.problems.length > 0) {
       throw new DbCopyRefusal(
@@ -911,7 +956,7 @@ async function copyInto(client: PoolClient, ctx: CopyContext): Promise<DbCopyRep
       if (sourceDigest.set !== targetDigest.set) mismatches.push(`${plan.table}: primary-key checksum differs`);
       if (sourceDigest.order !== targetDigest.order) mismatches.push(`${plan.table}: seq order differs from SQLite rowid order`);
     }
-    const targetAudit = await verifyPostgresAuditChain(clientContext(client));
+    const targetAudit = await verifyTargetAuditChain(client);
     if (!sameVerdict(targetAudit, ctx.expectedTarget)) {
       mismatches.push(`audit chain on Postgres is ${verdictLine(targetAudit)}, expected ${verdictLine(ctx.expectedTarget)}`);
     }

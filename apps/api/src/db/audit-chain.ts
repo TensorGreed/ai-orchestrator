@@ -328,37 +328,47 @@ function splitAtCandidate(first: string, second: string): { prefix: string; suff
   return { prefix: first.slice(0, at), suffix: first.slice(at + 6) };
 }
 
-/** Walks `rows` (insertion order, entry_hash IS NOT NULL) by the rule above. */
-export function verifyAuditRows(rows: Iterable<AuditChainRow>): AuditChainResult {
-  let prev = GENESIS_HASH;
-  let checked = 0;
-  let position = 0;
-  const unverifiable: AuditUnverifiableRow[] = [];
-  const finish = (result: AuditChainResult): AuditChainResult =>
-    unverifiable.length > 0 ? { ...result, ok: false, unverifiable } : result;
-  for (const row of rows) {
+/**
+ * The walk of the rule above, one row at a time, keeping only the previous hash (and the unverifiable rows), so a
+ * caller can feed it from a cursor without holding the chain. verifyAuditRows is this walker over an iterable.
+ */
+export class AuditChainWalker {
+  private prev = GENESIS_HASH;
+  private checked = 0;
+  private position = 0;
+  private readonly unverifiable: AuditUnverifiableRow[] = [];
+  private broken: AuditChainResult["firstBrokenAt"];
+
+  /** Walks the next row (insertion order, entry_hash IS NOT NULL). False once the chain is broken: stop feeding. */
+  push(row: AuditChainRow): boolean {
+    if (this.broken) return false;
+    const prev = this.prev;
     const { id, createdAt } = row.fields;
-    position += 1;
+    this.position += 1;
     if (row.prevHash !== prev) {
-      return finish({ ok: false, rowsChecked: checked, firstBrokenAt: { id, createdAt, expected: prev, stored: row.prevHash } });
+      this.broken = { id, createdAt, expected: prev, stored: row.prevHash };
+      return false;
     }
     const expected = auditEntryHash(prev, row.fields);
     if (row.createdAtHasSubMillisecond) {
-      return finish({ ok: false, rowsChecked: checked, firstBrokenAt: { id, createdAt, expected, stored: row.entryHash } });
+      this.broken = { id, createdAt, expected, stored: row.entryHash };
+      return false;
     }
     if (expected !== row.entryHash) {
       if (holdsLoneSurrogate(row.fields)) {
-        return finish({ ok: false, rowsChecked: checked, firstBrokenAt: { id, createdAt, expected, stored: row.entryHash } });
+        this.broken = { id, createdAt, expected, stored: row.entryHash };
+        return false;
       }
       const legacy = legacyReplacementCheck(prev, row);
       if (legacy.outcome === "broken") {
-        return finish({ ok: false, rowsChecked: checked, firstBrokenAt: { id, createdAt, expected, stored: row.entryHash } });
+        this.broken = { id, createdAt, expected, stored: row.entryHash };
+        return false;
       }
       if (legacy.outcome === "unverifiable") {
-        unverifiable.push({
+        this.unverifiable.push({
           id,
           createdAt,
-          position,
+          position: this.position,
           prevHash: row.prevHash,
           entryHash: row.entryHash,
           reason:
@@ -367,14 +377,29 @@ export function verifyAuditRows(rows: Iterable<AuditChainRow>): AuditChainResult
             `characters, too many combinations to check. Its id and created_at are as stored (unverified); the row is ` +
             `pinned by its chain position. The chain continues from its stored hash.`
         });
-        prev = row.entryHash;
-        continue;
+        this.prev = row.entryHash;
+        return true;
       }
     }
-    prev = row.entryHash;
-    checked += 1;
+    this.prev = row.entryHash;
+    this.checked += 1;
+    return true;
   }
-  return finish({ ok: true, rowsChecked: checked });
+
+  /** The verdict over the rows pushed so far. */
+  result(): AuditChainResult {
+    const result: AuditChainResult = this.broken
+      ? { ok: false, rowsChecked: this.checked, firstBrokenAt: this.broken }
+      : { ok: true, rowsChecked: this.checked };
+    return this.unverifiable.length > 0 ? { ...result, ok: false, unverifiable: [...this.unverifiable] } : result;
+  }
+}
+
+/** Walks `rows` (insertion order, entry_hash IS NOT NULL) by the rule above. */
+export function verifyAuditRows(rows: Iterable<AuditChainRow>): AuditChainResult {
+  const walker = new AuditChainWalker();
+  for (const row of rows) if (!walker.push(row)) break;
+  return walker.result();
 }
 
 /**
@@ -463,9 +488,34 @@ export function readSqliteAuditChainRows(db: SqliteAuditReader): AuditChainRow[]
     )
     .all() as SqliteAuditTextRow[];
   exactSqliteTextRows(db, "audit_logs", rows, SQLITE_AUDIT_TEXT_COLUMNS, "__rowid");
+  return rows.map(sqliteAuditChainRow);
+}
+
+/**
+ * The same rows as readSqliteAuditChainRows, read in rowid batches of `batchRows`, so a long chain is never held in
+ * memory (verifyAuditRows only keeps the previous hash). Read inside one read transaction when the file may change
+ * meanwhile (each batch is its own statement).
+ */
+export function* iterateSqliteAuditChainRows(db: SqliteAuditReader, batchRows = 2000): Generator<AuditChainRow> {
+  const statement = db.prepare(
+    `SELECT rowid AS __rowid, ${SQLITE_AUDIT_TEXT_COLUMNS.join(", ")}, prev_hash, entry_hash
+       FROM audit_logs WHERE entry_hash IS NOT NULL AND rowid > ? ORDER BY rowid ASC LIMIT ?`
+  );
+  let after = -1;
+  for (;;) {
+    const rows = statement.all(after, batchRows) as SqliteAuditTextRow[];
+    if (rows.length === 0) return;
+    after = Number(rows[rows.length - 1]!.__rowid);
+    exactSqliteTextRows(db, "audit_logs", rows, SQLITE_AUDIT_TEXT_COLUMNS, "__rowid");
+    for (const row of rows) yield sqliteAuditChainRow(row);
+    if (rows.length < batchRows) return;
+  }
+}
+
+function sqliteAuditChainRow(row: SqliteAuditTextRow): AuditChainRow {
   const required = (value: string | null) => value ?? "";
   const text = (value: unknown) => (typeof value === "string" ? value : String(value ?? ""));
-  return rows.map((row) => ({
+  return {
     fields: {
       id: required(row.id),
       createdAt: required(row.created_at),
@@ -486,7 +536,7 @@ export function readSqliteAuditChainRows(db: SqliteAuditReader): AuditChainRow[]
     },
     prevHash: text(row.prev_hash),
     entryHash: text(row.entry_hash)
-  }));
+  };
 }
 
 /** verifyAuditRows over a SQLite database's chain, read by readSqliteAuditChainRows. */

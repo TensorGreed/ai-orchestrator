@@ -17,6 +17,7 @@ import { parsePostgresSettings } from "../config.js";
 import { postgresStoreConfig } from "../db/create-store.js";
 import { SqliteStore } from "../db/database.js";
 import { MIGRATIONS } from "../db/migrations.js";
+import { auditEntryHash, GENESIS_HASH, SQLITE_AUDIT_TEXT_COLUMNS } from "../db/audit-chain.js";
 import { PostgresStore, postgresPoolConfig, type PostgresStoreConfig } from "../db/postgres-store.js";
 import { noticePostgresSkipped, testPostgresUrl } from "../test-support/test-store.js";
 import { API_ROOT, CODE_SCHEMA_VERSION, DbCopyRefusal, parseDbCopyArgs, requireConfirmation, runDbCopy, runDbCopyCli } from "./db-copy-core.js";
@@ -659,6 +660,49 @@ describe.skipIf(!postgresUrl)("db:copy into Postgres", () => {
     expect(error!.message).toContain("start this build once against it");
     expect((await targetCounts()).guard_token_vault).toBe(0);
   }, 120_000);
+
+  it("a long audit chain is verified and copied without holding it in memory (60k rows under a 96 MB heap)", async () => {
+    await sqliteSource();
+    const raw = new Database(sourcePath);
+    const insert = raw.prepare(
+      `INSERT INTO audit_logs (${SQLITE_AUDIT_TEXT_COLUMNS.join(", ")}, prev_hash, entry_hash) VALUES (${SQLITE_AUDIT_TEXT_COLUMNS.map(() => "?").join(", ")}, ?, ?)`
+    );
+    const rows = 60_000;
+    raw.transaction(() => {
+      let prev = GENESIS_HASH;
+      for (let i = 0; i < rows; i++) {
+        const f = {
+          id: `id-${i}`, createdAt: new Date(1_700_000_000_000 + i).toISOString(), eventType: "auth.login", category: "auth", action: "login",
+          outcome: "success", actorUserId: `u-${i % 50}`, actorEmail: `user${i % 50}@example.com`, actorType: "user", resourceType: "session",
+          resourceId: `s-${i}`, projectId: "default", ipAddress: "127.0.0.1", userAgent: "Mozilla/5.0 (X11; Linux x86_64)",
+          metadataJson: JSON.stringify({ n: i, note: "ordinary row" }), message: `login ${i}`
+        };
+        const hash = auditEntryHash(prev, f);
+        insert.run(f.id, f.eventType, f.category, f.action, f.outcome, f.actorUserId, f.actorEmail, f.actorType, f.resourceType, f.resourceId,
+          f.projectId, f.ipAddress, f.userAgent, f.metadataJson, f.message, f.createdAt, prev, hash);
+        prev = hash;
+      }
+    })();
+    raw.close();
+    // In a child with a small heap: holding the chain (as before) needs well over 96 MB for 60k rows.
+    const script = path.join(dir, "copy-small-heap.mts");
+    fs.writeFileSync(
+      script,
+      [
+        `import { runDbCopy } from ${JSON.stringify(path.join(API_ROOT, "src", "scripts", "db-copy-core.ts"))};`,
+        `const report = await runDbCopy({ sqlitePath: process.env.SRC!, postgres: JSON.parse(process.env.CFG!) });`,
+        `console.log(JSON.stringify(report.audit.target));`
+      ].join("\n")
+    );
+    const tsx = path.join(API_ROOT, "node_modules", ".bin", "tsx");
+    const { stdout } = await run(tsx, [script], {
+      env: { ...process.env, NODE_OPTIONS: "--max-old-space-size=96", SRC: sourcePath, CFG: JSON.stringify(config) },
+      cwd: API_ROOT,
+      timeout: 240_000
+    });
+    expect(JSON.parse(stdout.trim().split("\n").at(-1)!)).toEqual({ ok: true, rowsChecked: rows });
+    expect((await (await targetStore()).verifyAuditChain())).toEqual({ ok: true, rowsChecked: rows });
+  }, 300_000);
 
   it("converts values as the Postgres store writes them: '' timestamps to NULL, fractional integers rounded (reported), NUL in text to U+FFFD", async () => {
     await sqliteSource(async (store) => {
