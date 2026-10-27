@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Workflow } from "@ai-orchestrator/shared";
-import { APPROVAL_RESUME_MESSAGE, ARMED_RUN_TTL_MS, CREDENTIALS_MESSAGE, DEMO_STATE_STORAGE_KEY, NOT_IN_DEMO, createFakeBackend, graphDigest, shiftFixtures, type DemoNotice, type DemoStorage } from "./fake-backend";
+import { APPROVAL_RESUME_MESSAGE, ARMED_RUN_TTL_MS, CREDENTIALS_MESSAGE, DEMO_STATE_STORAGE_KEY, NOT_IN_DEMO, NOT_IN_DEMO_MESSAGE, createFakeBackend, graphDigest, shiftFixtures, type DemoNotice, type DemoStorage } from "./fake-backend";
 import { demoFixtures } from "./fixtures";
 
 const transport = vi.hoisted(() => ({ backend: null as null | { fetch: (input: string, init?: RequestInit) => Promise<Response>; openEventSource: (url: string) => EventSource } }));
@@ -172,6 +172,20 @@ describe("what the demo does not do", () => {
     expect(demo.misses()).toEqual(["GET /api/nothing-recorded-here", "POST /api/knowledge-bases"]);
   });
 
+  it("answers a request for a telemetry window only with a recording for that window", async () => {
+    const fixtures = structuredClone(demoFixtures);
+    fixtures.responses.get["GET /api/demo-check/rollup"] = { status: 200, body: { calls: 5 } };
+    fixtures.responses.get["GET /api/demo-check/windowed"] = { status: 200, body: { window: "7d", calls: 5 } };
+    const demo = createFakeBackend({ fixtures, storage: null, pace: 0 });
+    // A recording made without a window, which says for none, is no answer for a window.
+    expect(await call(demo, "GET", "/api/demo-check/rollup?window=24h")).toMatchObject({ status: 501, body: { error: NOT_IN_DEMO_MESSAGE, code: NOT_IN_DEMO } });
+    expect(await call(demo, "GET", "/api/demo-check/rollup")).toMatchObject({ status: 200, body: { calls: 5 } });
+    // A recording that says which window it is answers that window only.
+    expect((await call(demo, "GET", "/api/demo-check/windowed?window=7d")).status).toBe(200);
+    expect((await call(demo, "GET", "/api/demo-check/windowed?window=30d")).status).toBe(501);
+    expect(demo.misses()).toEqual(["GET /api/demo-check/rollup?window=24h", "GET /api/demo-check/windowed?window=30d"]);
+  });
+
   it("signs in as the recorded demo user", async () => {
     backend();
     expect((await api.fetchAuthMe()).user).toEqual(demoFixtures.meta.user);
@@ -201,7 +215,11 @@ describe("runs", () => {
     expect(frames.at(-1)!.data.status).toBe("success");
     expect(frames.at(-1)!.data.executionId).toBe(recorded.executionId);
     const toolCalls = frames.filter((frame) => frame.event === "node_activity" && frame.data.kind === "tool_call" && frame.data.phase === "end");
-    expect(toolCalls.map((frame) => frame.data.toolName)).toEqual(["mock-mcp__lookup_kb", "mock-mcp__calculator"]);
+    expect(toolCalls.map((frame) => [frame.data.toolName, frame.data.outcome])).toEqual([
+      ["http_mcp__lookup_kb", "ok"],
+      ["http_mcp__calculator", "error"],
+      ["http_mcp__calculator", "ok"]
+    ]);
     // Replayed frames carry the replay's time, not the recording's.
     const started = Date.parse(frames[0]!.data.startedAt);
     expect(Math.abs(Date.now() - started)).toBeLessThan(10_000);

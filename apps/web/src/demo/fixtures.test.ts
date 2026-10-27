@@ -58,6 +58,8 @@ describe("demo fixtures", () => {
     expect(result("wf-demo-refund-approval").status).toBe("waiting_approval");
     const activity = (workflowId: string) => demoFixtures.runs[workflowId]!.frames.filter((frame) => frame.event === "node_activity").map((frame) => frame.data as { kind: string; toolName?: string; outcome?: string });
     expect(activity("wf-demo-support-agent").filter((entry) => entry.kind === "tool_call" && entry.outcome === "ok")).toHaveLength(2);
+    // The registered MCP server refuses one calculator expression; the agent retries it.
+    expect(activity("wf-demo-support-agent").filter((entry) => entry.kind === "tool_call" && entry.outcome === "error").map((entry) => entry.toolName)).toEqual(["http_mcp__calculator"]);
     expect(activity("wf-demo-research-swarm").filter((entry) => entry.kind === "tool_call" && entry.toolName?.startsWith("delegate_to_") && entry.outcome === "ok")).toHaveLength(2);
     const guardEvents = get("GET /api/guard/events?workflowId=wf-demo-guarded-intake").events as Array<{ effectiveAction: string }>;
     expect(guardEvents.some((event) => event.effectiveAction === "block")).toBe(true);

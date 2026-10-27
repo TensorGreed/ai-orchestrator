@@ -493,7 +493,7 @@ export function createFakeBackend(options: FakeBackendOptions): FakeBackend {
     if (exactGets.has(`${pathname}${query}`)) return { body: clone(exactGets.get(`${pathname}${query}`)) };
     // Otherwise the recorded variant that agrees with every parameter it has, preferring the most specific.
     const requested = new URLSearchParams(search);
-    let best: { score: number; body: unknown } | null = null;
+    let best: { score: number; body: unknown; query: string } | null = null;
     for (const variant of byPath.get(pathname) ?? []) {
       let score = 0;
       let agrees = true;
@@ -501,7 +501,14 @@ export function createFakeBackend(options: FakeBackendOptions): FakeBackend {
         if (requested.get(key) === value) score += 1;
         else agrees = false;
       });
-      if (agrees && (!best || score > best.score)) best = { score, body: variant.body };
+      if (agrees && (!best || score > best.score)) best = { score, body: variant.body, query: variant.query };
+    }
+    // A telemetry answer is for one window: another window's numbers, or an answer that says for none,
+    // would be wrong, so a request for a window has no answer unless the recording is for that window.
+    const window = requested.get("window");
+    if (best && window) {
+      const answered = (best.body as { window?: unknown } | null)?.window;
+      if (typeof answered === "string" ? answered !== window : !new URLSearchParams(best.query).has("window")) return null;
     }
     return best ? { body: clone(best.body) } : null;
   };
