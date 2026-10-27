@@ -525,7 +525,7 @@ export function judgeReleaseGate(
   if (job.repeatsUnchecked && (policy.maxP95LatencyIncreasePct !== undefined || policy.noNewGuardBlocks)) {
     add(
       "repeats_unchecked",
-      `This gate checks latency and guard limits per run, but replay job ${job.id} repeated its cases and recorded them for only one repeat: run the gate's suite with repeats 1, or remove those limits.`
+      `This gate checks latency and guard limits per run, but replay job ${job.id} repeated its cases and recorded them for only one repeat (it ran before replays recorded every repeat): run the gate again, or remove those limits.`
     );
   }
   if (job.scorerMismatch) add(options.expected.scorersKey ? `scorer_mismatch:${options.expected.scorersKey}` : "scorer_mismatch", `Replay job ${job.id} ${job.scorerMismatch}: the gate judges with its own scorers.`);

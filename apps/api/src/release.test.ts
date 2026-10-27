@@ -1646,7 +1646,7 @@ describe("repeats and old jobs (M1, L2, L3)", () => {
     await seedJob(context, { workflowId: "wf-rep-lat", datasetIds: ["set-wf-rep-lat"], version, hash, statuses: ["pass", "pass", "pass"], options: { repeats: 2, aggregate: "all" }, diff: withAttempts([0.01, 0.01]) });
     const blocked = await publish(context, admin.cookie, "wf-rep-lat", version);
     expect(blocked.statusCode).toBe(409);
-    expect(blocked.json<{ reasons: string[] }>().reasons.join()).toMatch(/repeats 1, or remove those limits/);
+    expect(blocked.json<{ reasons: string[] }>().reasons.join()).toMatch(/recorded them for only one repeat \(it ran before replays recorded every repeat\): run the gate again, or remove those limits/);
     await seedJob(context, { workflowId: "wf-rep-lat", datasetIds: ["set-wf-rep-lat"], version, hash, statuses: ["pass", "pass", "pass"], options: { repeats: 2, aggregate: "all" }, diff: withAttempts([0.01, 0.01], { latencyMs: 100, newGuardBlocks: 0 }) });
     expect((await publish(context, admin.cookie, "wf-rep-lat", version)).statusCode).toBe(200);
   });

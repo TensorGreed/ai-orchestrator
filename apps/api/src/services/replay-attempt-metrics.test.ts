@@ -272,7 +272,7 @@ describe("replay repeats record latency and guard blocks per attempt", () => {
       expect(evidence.job.repeatsUnchecked).toBe(true);
       expect(judgement.verdict).toBe("blocked");
       expect(codes).toEqual(["repeats_unchecked"]);
-      expect(judgement.reasons.join()).toMatch(/recorded them for only one repeat: run the gate's suite with repeats 1, or remove those limits/);
+      expect(judgement.reasons.join()).toMatch(/recorded them for only one repeat \(it ran before replays recorded every repeat\): run the gate again, or remove those limits/);
     }
     // A cost-only gate never needed them.
     expect((await judge(job, { maxCostIncreasePct: 10, noNewGuardBlocks: false }, legacy)).judgement.verdict).toBe("passed");
@@ -358,7 +358,7 @@ describe("baseline reruns with repeats: each repeat is judged against its own ba
     const latency = await judge(job, { maxP95LatencyIncreasePct: 10, noNewGuardBlocks: false }, legacy);
     expect(latency.evidence.job.repeatsUnchecked).toBe(true);
     expect(latency.codes).toEqual(["repeats_unchecked"]);
-    expect(latency.judgement.reasons.join()).toMatch(/run the gate's suite with repeats 1, or remove those limits/);
+    expect(latency.judgement.reasons.join()).toMatch(/run the gate again, or remove those limits/);
     // Cost: the deciding repeat's own pair (+5%), never a repeat's candidate against another repeat's baseline (+200%).
     const cost = await judge(job, { maxCostIncreasePct: 10, noNewGuardBlocks: false }, legacy);
     expect(cost.judgement.stats.costIncreasePct).toBeCloseTo(5, 6);
