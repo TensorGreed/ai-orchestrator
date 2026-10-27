@@ -4,9 +4,10 @@
  * gate on, the answer says production runs the ungated draft). Runs on SQLite and, under TEST_STORE=postgres, on
  * Postgres.
  */
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ReleaseStateView, ReleaseUnpublishResult, Workflow, WorkflowRelease } from "@ai-orchestrator/shared";
 import { releaseUnpublishNotice } from "@ai-orchestrator/shared";
+import { UnpublishGateEnforcedError } from "./db/store-errors.js";
 import { MIGRATIONS } from "./db/migrations.js";
 import { testSql } from "./test-support/test-sql.js";
 import {
@@ -139,7 +140,7 @@ describe("unpublish without a gate", () => {
     const entry = (id: string) => ({ id, workflowId: "wf-race", reason: null, unpublishedAt: new Date().toISOString(), unpublishedBy: "x@example.com", unpublishedByUserId: null });
     const results = await Promise.all([ctx.store.unpublishWorkflowVersion(entry("rel_a")), ctx.store.unpublishWorkflowVersion(entry("rel_b"))]);
     expect(results.filter((record) => record !== null)).toHaveLength(1);
-    expect(results.find((record) => record !== null)).toMatchObject({ verdict: "unpublished", version: v1, previousVersion: v1 });
+    expect(results.find((result) => result !== null)?.record).toMatchObject({ verdict: "unpublished", version: v1, previousVersion: v1 });
     expect((await ctx.store.listWorkflowReleases("wf-race")).filter((record) => record.verdict === "unpublished")).toHaveLength(2);
     expect(await ctx.store.getPublishedVersion("wf-race")).toBeNull();
     expect(await ctx.store.unpublishWorkflowVersion(entry("rel_c"))).toBeNull();
@@ -225,6 +226,40 @@ describe("unpublish without a gate", () => {
     }
     const ids = (await ctx.store.listWorkflowReleases("wf-order")).map((entry) => entry.id);
     expect(ids).toEqual(["rel_x_unpub", "rel_x_pub", "rel_y_unpub", "rel_y_pub", "rel_z_unpub", "rel_z_pub"]);
+  });
+
+  it("history time never runs behind write order: a write stamped earlier than the newest entry is stored at that entry's time", async () => {
+    const ctx = await context();
+    const v1 = await saveVersion(ctx, hookWorkflow("wf-clock", "one"));
+    const release = (id: string, publishedAt: string) => ({
+      id, workflowId: "wf-clock", version: v1, workflowHash: "hash-1", replayRunId: null, verdict: "ungated" as const, reason: null, gateReasons: [], approval: null,
+      publishedAt, publishedBy: "x@example.com", publishedByUserId: null
+    });
+    expect(await ctx.store.publishWorkflowVersion(release("rel_a", "2026-10-27T10:00:05.000Z"), null)).not.toBeNull();
+    // Taken later, but stamped earlier (a lock wait, or a clock a few seconds behind).
+    const taken = await ctx.store.unpublishWorkflowVersion({ id: "rel_b", workflowId: "wf-clock", reason: null, unpublishedAt: "2026-10-27T10:00:01.000Z", unpublishedBy: "x@example.com", unpublishedByUserId: null });
+    expect(taken?.record.publishedAt).toBe("2026-10-27T10:00:05.000Z");
+    expect(await ctx.store.publishWorkflowVersion(release("rel_c", "2026-10-27T10:00:02.000Z"), null)).toMatchObject({ publishedAt: "2026-10-27T10:00:05.000Z" });
+    const history = await ctx.store.listWorkflowReleases("wf-clock");
+    expect(history.map((entry) => entry.id)).toEqual(["rel_c", "rel_b", "rel_a"]);
+    const times = history.map((entry) => entry.publishedAt);
+    expect([...times].sort().reverse()).toEqual(times);
+    expect((await ctx.store.getPublishState("wf-clock")).publishedVersion).toBe(v1);
+  });
+
+  it("a lost race without expectedVersion gets a plain message, never 'vundefined'", async () => {
+    const ctx = await context();
+    const builder = await loginAs(ctx, "builder");
+    const v1 = await saveVersion(ctx, hookWorkflow("wf-msg", "one"));
+    expect((await callAs(ctx, "POST", "/api/workflows/wf-msg/publish", builder.cookie, { version: v1 })).statusCode).toBe(200);
+    // Another unpublish and a republish happened between this call's read and its write.
+    const spy = vi.spyOn(ctx.store, "unpublishWorkflowVersion").mockResolvedValueOnce(null);
+    const response = await unpublish(ctx, builder.cookie, "wf-msg");
+    spy.mockRestore();
+    expect(response.statusCode).toBe(409);
+    const message = response.json<{ error: string }>().error;
+    expect(message).not.toMatch(/undefined/);
+    expect(message).toMatch(/changed while you were unpublishing/);
   });
 
   it("rollback after an unpublish publishes that version again, through the same rules as before", async () => {
@@ -350,6 +385,53 @@ describe("unpublish with a release gate", () => {
     const response = await unpublish(ctx, builder.cookie, "wf-observing");
     expect(response.statusCode, response.body).toBe(200);
     expect(response.json<ReleaseUnpublishResult>()).toMatchObject({ gateEnabled: true, gateEnforced: false });
+  });
+
+  it("a gate enforced between the role check and the write still refuses a builder, inside the transaction", async () => {
+    const ctx = await context();
+    const admin = await loginAs(ctx, "admin");
+    const builder = await loginAs(ctx, "builder");
+    await saveVersion(ctx, hookWorkflow("wf-late", "reviewed"));
+    expect((await enableReleaseGate(ctx, admin.cookie, "wf-late")).statusCode).toBe(200);
+    const real = ctx.store.unpublishWorkflowVersion.bind(ctx.store);
+    // An admin enforces the gate after the service looked at it and before the store writes.
+    const spy = vi.spyOn(ctx.store, "unpublishWorkflowVersion").mockImplementationOnce(async (entry) => {
+      const gate = (await ctx.store.getReleaseGate("wf-late"))!;
+      await ctx.store.upsertReleaseGate({ ...gate, enabled: true, enforced: true });
+      return real(entry);
+    });
+    const refused = await unpublish(ctx, builder.cookie, "wf-late");
+    spy.mockRestore();
+    expect(refused.statusCode, refused.body).toBe(403);
+    expect(refused.json<{ error: string }>().error).toMatch(/only an admin can unpublish/);
+    expect(await ctx.store.getPublishedVersion("wf-late")).toBe(1);
+    expect((await releasesOf(ctx, admin.cookie, "wf-late")).releases.some((entry) => entry.verdict === "unpublished")).toBe(false);
+    expect((await ctx.store.listAuditLogs({ eventType: "release.unpublish.refused", pageSize: 5 })).items).toHaveLength(1);
+    expect((await ctx.store.listAuditLogs({ eventType: "release.unpublished", pageSize: 5 })).items).toHaveLength(0);
+
+    // The store method on its own: a non-admin caller is refused on an enforced gate; an admin's call (no flag) goes through
+    // and reports the gate state the transaction saw.
+    const entry = (id: string, refuseIfGateEnforced: boolean) => ({ id, workflowId: "wf-late", reason: null, unpublishedAt: new Date().toISOString(), unpublishedBy: "x@example.com", unpublishedByUserId: null, refuseIfGateEnforced });
+    await expect(ctx.store.unpublishWorkflowVersion(entry("rel_no", true))).rejects.toBeInstanceOf(UnpublishGateEnforcedError);
+    expect(await ctx.store.getPublishedVersion("wf-late")).toBe(1);
+    const done = await ctx.store.unpublishWorkflowVersion(entry("rel_yes", false));
+    expect(done).toMatchObject({ gateEnabled: true, gateEnforced: true });
+  });
+
+  it("a gate that is switched off no longer restricts unpublish, even when still flagged enforced", async () => {
+    const ctx = await context();
+    const admin = await loginAs(ctx, "admin");
+    const builder = await loginAs(ctx, "builder");
+    await saveVersion(ctx, hookWorkflow("wf-off", "one"));
+    expect((await enableReleaseGate(ctx, admin.cookie, "wf-off", { enforced: true })).statusCode).toBe(200);
+    const gate = (await ctx.store.getReleaseGate("wf-off"))!;
+    await ctx.store.upsertReleaseGate({ ...gate, enabled: false, enforced: true });
+    const response = await unpublish(ctx, builder.cookie, "wf-off");
+    expect(response.statusCode, response.body).toBe(200);
+    expect(response.json<ReleaseUnpublishResult>()).toMatchObject({ gateEnabled: false, gateEnforced: false });
+    expect((await ctx.store.listAuditLogs({ eventType: "release.unpublished", pageSize: 5 })).items[0]!.metadata).toMatchObject({ gateEnabled: false, gateEnforced: false });
+    // Rollback keeps following the enforced flag.
+    expect((await callAs(ctx, "POST", "/api/workflows/wf-off/rollback", builder.cookie, { version: 1, reason: "back" })).statusCode).toBe(403);
   });
 
   it("a gate that is on but not enforced says so too; deactivating is still the kill switch; a workflow created again under the id still fails closed", async () => {

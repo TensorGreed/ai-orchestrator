@@ -791,6 +791,7 @@ export interface Store {
    * draft, gated or not) and appends an `unpublished` history entry whose `version` and `previousVersion` are the
    * version that was live and whose hash is the one that version was released with. Null, with nothing written, when
    * nothing is published or, given `expectedVersion`, when another version is live. A publish clears the mark again.
+   * The answer says which gate state the transaction saw (on = enabled; enforced = enabled and enforced).
    */
   unpublishWorkflowVersion(entry: {
     id: string;
@@ -798,10 +799,16 @@ export interface Store {
     reason: string | null;
     /** Only unpublish this version; when another one is live the call writes nothing and answers null. */
     expectedVersion?: number | null;
+    /** The time the caller read; the store never writes one earlier than the workflow's newest history entry. */
     unpublishedAt: string;
     unpublishedBy: string | null;
     unpublishedByUserId: string | null;
-  }): Promise<WorkflowReleaseRecord | null>;
+    /**
+     * Set for a caller who is not an admin: the gate row is read in the same transaction and, when it is on and
+     * enforced, the call throws `UnpublishGateEnforcedError` and writes nothing.
+     */
+    refuseIfGateEnforced?: boolean;
+  }): Promise<{ record: WorkflowReleaseRecord; gateEnabled: boolean; gateEnforced: boolean } | null>;
   /**
    * The published version and the unpublish mark (see `unpublishWorkflowVersion`), read together from the workflow's
    * row so a concurrent publish cannot show one without the other. `unpublishedAt` is null when it was not

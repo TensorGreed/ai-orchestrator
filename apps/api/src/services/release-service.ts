@@ -31,7 +31,7 @@
  * change who approves (approvers, self-approval, the request timeout) or the
  * replay job settings it accepts (candidate options, scorers included),
  * remove cases from or change case scorers in its golden sets, roll back,
- * and delete the workflow. Allowing self-approval is an admin's call on
+ * unpublish (while the gate is also switched on), and delete the workflow. Allowing self-approval is an admin's call on
  * every gate; without it neither the requester nor the person who saved the
  * version may approve the release.
  *
@@ -124,6 +124,7 @@ import type { SafeUser } from "./auth-service.js";
 import type { NotificationEvent } from "./notification-service.js";
 import type { RunAccessResult } from "../run-access.js";
 import type { Store } from "../db/store.js";
+import { UnpublishGateEnforcedError } from "../db/store-errors.js";
 import { mapAsync } from "../async-array.js";
 
 /** The gate's sets as they are now (see `ReleaseService.gateSets`). */
@@ -1473,39 +1474,53 @@ export class ReleaseService {
    */
   async unpublish(user: SafeUser, workflowId: string, input: ReleaseUnpublishInput): Promise<ReleaseUnpublishResult> {
     await this.check(user, workflowId, "workflow:publish");
-    // As for a rollback: unpublishing runs the ungated draft in production, so an enforced gate keeps it with admins.
-    if (await this.enforcedGateOf(workflowId) && user.role !== "admin") {
+    // Unpublishing runs the ungated draft in production, so a gate that is on and enforced keeps it with admins (a
+    // gate that is switched off restricts nothing). Checked here to refuse early, and again inside the store's
+    // transaction for a gate that became enforced since.
+    const refuseNonAdmin = async (): Promise<ReleaseError> => {
       await this.refuse(user, workflowId, "release.unpublish.refused", "unpublish", {});
-      throw new ReleaseError("This workflow's release gate is enforced: only an admin can unpublish", 403);
-    }
+      return new ReleaseError("This workflow's release gate is enforced: only an admin can unpublish", 403);
+    };
+    const gateBefore = await this.store.getReleaseGate(workflowId);
+    if (gateBefore?.enabled && gateBefore.enforced && user.role !== "admin") throw await refuseNonAdmin();
     const nothingPublished = () => new ReleaseError("Nothing is published: production already runs the draft", 409);
     const versionChanged = (live: number) =>
       new ReleaseError(`v${live} is live now, not v${input.expectedVersion}: it was published or rolled back after you opened this. Reload and check before unpublishing`, 409);
     const refusal = async (): Promise<ReleaseError> => {
       const { publishedVersion } = await this.store.getPublishState(workflowId);
-      return publishedVersion === null ? nothingPublished() : versionChanged(publishedVersion);
+      if (publishedVersion === null) return nothingPublished();
+      if (input.expectedVersion === undefined || publishedVersion === input.expectedVersion) {
+        return new ReleaseError("The published version changed while you were unpublishing: reload and check before unpublishing", 409);
+      }
+      return versionChanged(publishedVersion);
     };
     const live = (await this.store.getPublishState(workflowId)).publishedVersion;
     if (live === null) throw nothingPublished();
     if (input.expectedVersion !== undefined && input.expectedVersion !== live) throw versionChanged(live);
     // The draft is about to serve production: its paths must be its own, as for a publish.
     await this.assertNoRoutingConflicts(user, workflowId, await this.store.getWorkflow(workflowId), "unpublish");
-    const gate = await this.store.getReleaseGate(workflowId);
     const reason = input.reason?.trim() ? input.reason.trim() : null;
-    const record = await this.store.unpublishWorkflowVersion({
-      id: `rel_${randomUUID()}`,
-      workflowId,
-      reason,
-      expectedVersion: input.expectedVersion ?? null,
-      unpublishedAt: this.now().toISOString(),
-      unpublishedBy: user.email,
-      unpublishedByUserId: user.id
-    });
+    let committed: Awaited<ReturnType<Store["unpublishWorkflowVersion"]>>;
+    try {
+      committed = await this.store.unpublishWorkflowVersion({
+        id: `rel_${randomUUID()}`,
+        workflowId,
+        reason,
+        expectedVersion: input.expectedVersion ?? null,
+        unpublishedAt: this.now().toISOString(),
+        unpublishedBy: user.email,
+        unpublishedByUserId: user.id,
+        refuseIfGateEnforced: user.role !== "admin"
+      });
+    } catch (error) {
+      if (error instanceof UnpublishGateEnforcedError) throw await refuseNonAdmin();
+      throw error;
+    }
     // Another unpublish or a republish got there first: the store wrote nothing.
-    if (!record) throw await refusal();
+    if (!committed) throw await refusal();
+    // The gate state is the one the transaction saw, not the one read before it.
+    const { record, gateEnabled, gateEnforced } = committed;
     const release = this.toRelease(record);
-    const gateEnabled = gate?.enabled ?? false;
-    const gateEnforced = gateEnabled && (gate?.enforced ?? false);
     await this.options.audit({
       category: "release",
       eventType: "release.unpublished",
