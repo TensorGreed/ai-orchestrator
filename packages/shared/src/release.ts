@@ -312,6 +312,12 @@ export interface ReleaseGateJob {
   noSetSnapshot?: boolean;
   /** The job repeated its cases and the replay recorded latency or guard verdicts for only one repeat of some case. */
   repeatsUnchecked?: boolean;
+  /**
+   * With `repeatsUnchecked`, the limits that cannot be checked per repeat
+   * (a job may hold every repeat's guard verdicts but not their latencies).
+   * Absent means both.
+   */
+  repeatsUncheckedLimits?: Array<"latency" | "guard">;
 }
 
 export interface ReleaseGateEvidence {
@@ -522,7 +528,8 @@ export function judgeReleaseGate(
     const why = job.releaseIneligibleReasons && job.releaseIneligibleReasons.length > 0 ? ` (${job.releaseIneligibleReasons.join("; ")})` : "";
     add(job.releaseIneligibleReasons && job.releaseIneligibleReasons.length > 0 ? job.releaseIneligibleReasons.map((entry) => `ineligible:${entry}`) : "ineligible", `Replay job ${job.id} is not eligible to prove a release${why}.`);
   }
-  if (job.repeatsUnchecked && (policy.maxP95LatencyIncreasePct !== undefined || policy.noNewGuardBlocks)) {
+  const uncheckedLimits = job.repeatsUnchecked ? (job.repeatsUncheckedLimits ?? ["latency", "guard"]) : [];
+  if ((uncheckedLimits.includes("latency") && policy.maxP95LatencyIncreasePct !== undefined) || (uncheckedLimits.includes("guard") && policy.noNewGuardBlocks)) {
     add(
       "repeats_unchecked",
       `This gate checks latency and guard limits per run, but replay job ${job.id} repeated its cases and recorded them for only one repeat (it ran before replays recorded every repeat): run the gate again, or remove those limits.`

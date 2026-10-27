@@ -225,6 +225,19 @@ describe("Phase 15.4 review fixes", () => {
     expect(releaseScorersMatch([{ type: "regex", pattern: "a" }], [{ pattern: "a", type: "regex" }])).toBe(true);
   });
 
+  it("refuses unchecked repeats only for the limits they cannot check", () => {
+    const codes = (job: Partial<ReleaseGateEvidence["job"]>, input: Parameters<typeof policy>[0]) => judgeReleaseGate(evidence(cases, job), policy(input), { expected, now: NOW }).checks.map((check) => check.code);
+    const latencyOnly = { repeatsUnchecked: true, repeatsUncheckedLimits: ["latency" as const] };
+    expect(codes(latencyOnly, { noNewGuardBlocks: true })).not.toContain("repeats_unchecked");
+    expect(codes(latencyOnly, { noNewGuardBlocks: false, maxP95LatencyIncreasePct: 10 })).toContain("repeats_unchecked");
+    const guardOnly = { repeatsUnchecked: true, repeatsUncheckedLimits: ["guard" as const] };
+    expect(codes(guardOnly, { noNewGuardBlocks: false, maxP95LatencyIncreasePct: 10 })).not.toContain("repeats_unchecked");
+    expect(codes(guardOnly, { noNewGuardBlocks: true })).toContain("repeats_unchecked");
+    // Without the list (evidence built before it existed) both limits are unchecked.
+    expect(codes({ repeatsUnchecked: true }, { noNewGuardBlocks: true })).toContain("repeats_unchecked");
+    expect(codes({ repeatsUnchecked: true }, { noNewGuardBlocks: false, maxCostIncreasePct: 10 })).not.toContain("repeats_unchecked");
+  });
+
   it("counts a case without a complete diff as an error when the policy has cost, latency or guard limits (L5)", () => {
     const blind = [passing("c1"), passing("c2"), passing("c3", { diffMissing: true })];
     const judged = judgeReleaseGate(evidence(blind), policy(), { expected, now: NOW });
