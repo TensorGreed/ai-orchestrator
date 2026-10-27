@@ -285,6 +285,65 @@ describe("SQLite schema: migration 39 objects", () => {
   });
 });
 
+const APPROVAL_INSERT_COLUMNS = `id, execution_id, workflow_id, project_id, node_id, kind, status, spec_json, created_at, updated_at`;
+const SUPERSEDED = "Superseded by a newer request of the same run";
+const V41_NOTE = "v41 upgrade: 3 duplicate pending approval requests were canceled (a run has one open request).";
+/** Seed rows for the v41 upgrade tests: run-1 has three pending requests, run-2 two, run-3 one plus a decided one. */
+const DUPLICATE_APPROVALS: ReadonlyArray<[id: string, executionId: string, status: string, createdAt: string]> = [
+  ["a-old", "run-1", "pending", "2026-10-01T00:00:00.000Z"],
+  ["a-new", "run-1", "pending", "2026-10-03T00:00:00.000Z"],
+  ["a-mid", "run-1", "pending", "2026-10-02T00:00:00.000Z"],
+  ["b-1", "run-2", "pending", "2026-10-05T00:00:00.000Z"],
+  ["b-2", "run-2", "pending", "2026-10-05T00:00:00.000Z"],
+  ["c-pending", "run-3", "pending", "2026-10-01T00:00:00.000Z"],
+  ["c-decided", "run-3", "approved", "2026-10-09T00:00:00.000Z"]
+];
+const V41_EXPECTED_STATUS: Record<string, string> = {
+  "a-old": "canceled", "a-mid": "canceled", "a-new": "pending",
+  // Equal created_at: the greater id is kept.
+  "b-1": "canceled", "b-2": "pending",
+  "c-pending": "pending", "c-decided": "approved"
+};
+
+describe("SQLite schema: migration 41 (one pending approval request per run)", () => {
+  it("a copy of a v40 database holding duplicate pending requests boots: the newest stays pending, the others are canceled and counted", async () => {
+    const { file } = await freshSqliteShape();
+    const db = new Database(file);
+    db.exec(`DROP INDEX idx_approval_requests_one_pending`);
+    const insert = db.prepare(`INSERT INTO approval_requests (${APPROVAL_INSERT_COLUMNS}) VALUES (?, ?, 'wf', 'default', 'n', 'approval_gate', ?, '{}', ?, ?)`);
+    for (const [id, executionId, status, createdAt] of DUPLICATE_APPROVALS) insert.run(id, executionId, status, createdAt, createdAt);
+    db.close();
+    const copy = `${file}.copy.db`;
+    fs.copyFileSync(file, copy);
+
+    const firstLog: string[] = [];
+    const store = await createStore({ env: { DB_SQLITE_PATH: copy }, log: { info: (m) => firstLog.push(m), warn: (m) => firstLog.push(m) } });
+    expect((store as SqliteStore).upgradeNotes).toEqual([V41_NOTE]);
+    expect(firstLog).toEqual([`Database: ${V41_NOTE}`]);
+    expect((await store.getApprovalRequest("a-old"))).toMatchObject({ status: "canceled", reason: SUPERSEDED });
+    expect((await store.getPendingApprovalRequestForExecution("run-1"))?.id).toBe("a-new");
+    await store.close();
+    const logged: string[] = [];
+    const again = await createStore({ env: { DB_SQLITE_PATH: copy }, log: { info: (m) => logged.push(m), warn: (m) => logged.push(m) } });
+    await again.close();
+    expect(logged).toEqual([]);
+
+    const after = new Database(copy, { readonly: true });
+    const original = new Database(file, { readonly: true });
+    try {
+      const rows = after.prepare(`SELECT id, status, decided_at FROM approval_requests`).all() as Array<{ id: string; status: string; decided_at: string | null }>;
+      expect(Object.fromEntries(rows.map((row) => [row.id, row.status]))).toEqual(V41_EXPECTED_STATUS);
+      expect(rows.find((row) => row.id === "a-old")?.decided_at).toBeTruthy();
+      expect(after.prepare(`SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_approval_requests_one_pending'`).get()).toBeTruthy();
+      // The upgrade ran on the copy only.
+      expect((original.prepare(`SELECT COUNT(*) AS n FROM approval_requests WHERE status = 'pending'`).get() as { n: number }).n).toBe(6);
+    } finally {
+      after.close();
+      original.close();
+    }
+  });
+});
+
 describe("schema introspection: foreign keys and NOT NULL defaults", () => {
   it("reports a foreign key or a NOT NULL default present on one side only, and a differing ON DELETE action", () => {
     const db = new Database(":memory:");
@@ -607,6 +666,41 @@ describe.skipIf(!postgresUrl)("Postgres schema parity and migration walk", () =>
       expect(byId.old.finished_at).toBeTruthy();
       expect(byId.done.status).toBe("completed");
       await expect(pool.query(insert, ["another", "running", null, "2026-10-22T00:00:00Z"])).rejects.toMatchObject({ code: "23505" });
+    } finally {
+      await pool.end();
+      await admin.end();
+      await dropTestSchema(schema);
+    }
+  }, 180_000);
+
+  it("v41 on a database holding duplicate pending approval requests keeps the newest per run, cancels the rest, and builds the index", async () => {
+    const schema = randomTestSchema();
+    const admin = testPostgresPool();
+    await admin.query(`CREATE SCHEMA "${schema}"`);
+    const pool = testPostgresPool(schema);
+    const cb = chainCallbacks(pool);
+    try {
+      await pool.query(`CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP)`);
+      await runMigrations(cb.run, cb.current, cb.setApplied);
+      await rollbackMigrations(cb.run, cb.current, cb.setRolledBack, 40);
+      expect(await chainVersion(pool)).toBe(40);
+      for (const [id, executionId, status, createdAt] of DUPLICATE_APPROVALS) {
+        await pool.query(
+          `INSERT INTO approval_requests (${APPROVAL_INSERT_COLUMNS}) VALUES ($1, $2, 'wf', 'default', 'n', 'approval_gate', $3, '{}', $4, $4)`,
+          [id, executionId, status, createdAt]
+        );
+      }
+
+      const store = await PostgresStore.create(postgresStoreConfig(testPostgresSettings(), { schema, maxConnections: 2 }));
+      expect(store.upgradeNotes).toEqual([V41_NOTE]);
+      expect(await store.getApprovalRequest("a-mid")).toMatchObject({ status: "canceled", reason: SUPERSEDED });
+      await store.close();
+      expect(await chainVersion(pool)).toBe(LATEST);
+      const rows = await pool.query<{ id: string; status: string }>(`SELECT id, status FROM approval_requests`);
+      expect(Object.fromEntries(rows.rows.map((row) => [row.id, row.status]))).toEqual(V41_EXPECTED_STATUS);
+      await expect(
+        pool.query(`INSERT INTO approval_requests (${APPROVAL_INSERT_COLUMNS}) VALUES ('x', 'run-1', 'wf', 'default', 'n', 'approval_gate', 'pending', '{}', 'now', 'now')`)
+      ).rejects.toMatchObject({ code: "23505", constraint: "idx_approval_requests_one_pending" });
     } finally {
       await pool.end();
       await admin.end();

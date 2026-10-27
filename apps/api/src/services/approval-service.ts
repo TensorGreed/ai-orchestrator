@@ -55,6 +55,7 @@ import type { RunAccessResult, RunPermission } from "../run-access.js";
 import type { NotificationEvent } from "./notification-service.js";
 import type { Store } from "../db/store.js";
 import { someAsync } from "../async-array.js";
+import { isOnePendingApprovalViolation } from "../db/store-errors.js";
 
 export interface ApprovalResumeJob {
   executionId: string;
@@ -284,7 +285,7 @@ export class ApprovalService {
     const requester = first ? { userId: first.requestedByUserId, email: first.requestedBy } : requesterFromState(input.state);
     const createdAt = this.now();
     const timeoutMinutes = input.timeoutMinutes > 0 ? Math.floor(input.timeoutMinutes) : null;
-    const record = await this.store.insertApprovalRequest({
+    const insert = () => this.store.insertApprovalRequest({
       id: `apr_${randomUUID()}`,
       executionId: input.executionId,
       workflowId: input.workflowId,
@@ -305,6 +306,16 @@ export class ApprovalService {
       editsSalt: newApprovalEditsSalt(),
       createdAt: createdAt.toISOString()
     });
+    let record: ApprovalRequestRecord;
+    try {
+      record = await insert();
+    } catch (error) {
+      // Another instance backfilled a request for this pause between the cancel above and the insert (v41 allows one
+      // pending request per run): this pause's own request replaces it.
+      if (!isOnePendingApprovalViolation(error)) throw error;
+      await this.store.cancelPendingApprovalRequests({ executionId: input.executionId }, "Superseded by a newer request of the same run");
+      record = await insert();
+    }
     await this.options.audit({
       category: "approval",
       eventType: "approval.requested",
@@ -339,27 +350,33 @@ export class ApprovalService {
     if (fromUpgrade) grace?.push(pending.id);
     const timeoutMinutes = pending.timeoutMinutes && pending.timeoutMinutes > 0 ? pending.timeoutMinutes : null;
     const requester = requesterFromState(state);
-    return await this.store.insertApprovalRequest({
-      id: `apr_${randomUUID()}`,
-      executionId: pending.id,
-      workflowId: pending.workflowId,
-      workflowName: pending.workflowName,
-      projectId: state.workflow.projectId ?? "default",
-      nodeId: info.nodeId,
-      nodeType: info.nodeType,
-      kind: info.request.kind,
-      message: pending.approvalMessage,
-      spec: info.request,
-      path: info.path,
-      details: info.details,
-      requestedByUserId: requester.userId,
-      requestedBy: requester.email,
-      timeoutMinutes,
-      expiresAt: timeoutMinutes && Number.isFinite(countFrom) ? new Date(countFrom + timeoutMinutes * 60_000).toISOString() : null,
-      askingWorkflowId: info.workflowId || null,
-      editsSalt: newApprovalEditsSalt(),
-      createdAt: Number.isFinite(pausedAt) ? new Date(pausedAt).toISOString() : pending.createdAt
-    });
+    try {
+      return await this.store.insertApprovalRequest({
+        id: `apr_${randomUUID()}`,
+        executionId: pending.id,
+        workflowId: pending.workflowId,
+        workflowName: pending.workflowName,
+        projectId: state.workflow.projectId ?? "default",
+        nodeId: info.nodeId,
+        nodeType: info.nodeType,
+        kind: info.request.kind,
+        message: pending.approvalMessage,
+        spec: info.request,
+        path: info.path,
+        details: info.details,
+        requestedByUserId: requester.userId,
+        requestedBy: requester.email,
+        timeoutMinutes,
+        expiresAt: timeoutMinutes && Number.isFinite(countFrom) ? new Date(countFrom + timeoutMinutes * 60_000).toISOString() : null,
+        askingWorkflowId: info.workflowId || null,
+        editsSalt: newApprovalEditsSalt(),
+        createdAt: Number.isFinite(pausedAt) ? new Date(pausedAt).toISOString() : pending.createdAt
+      });
+    } catch (error) {
+      // Another instance backfilled this run first (v41: one pending request per run); nothing new was created.
+      if (isOnePendingApprovalViolation(error)) return null;
+      throw error;
+    }
   }
 
   /** Requests for paused runs that have none yet. */
@@ -381,7 +398,8 @@ export class ApprovalService {
     const existing = await this.store.getPendingApprovalRequestForExecution(executionId);
     if (existing) return existing;
     const pending = await this.store.getWorkflowExecutionState(executionId);
-    return pending && pending.status === "waiting_approval" ? await this.backfill(pending) : null;
+    if (!pending || pending.status !== "waiting_approval") return null;
+    return (await this.backfill(pending)) ?? (await this.store.getPendingApprovalRequestForExecution(executionId));
   }
 
   private async decisionCheck(record: ApprovalRequestRecord, user: SafeUser): Promise<ApprovalCheck> {

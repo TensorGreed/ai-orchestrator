@@ -5,6 +5,7 @@
 import { expect, it } from "vitest";
 import type { ApprovalRequestInsert } from "../database.js";
 import type { Store } from "../store.js";
+import { isOnePendingApprovalViolation } from "../store-errors.js";
 import { describeStoreContract } from "../../test-support/test-store.js";
 
 const ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
@@ -54,40 +55,60 @@ describeStoreContract("store contract: approvals", (ctx) => {
     expect(await store.getApprovalRequest("r1")).toMatchObject({ status: "pending", decidedBy: null, decidedAt: null, reason: null, edits: null, editedFields: [] });
     expect(await store.reopenApprovalRequest("r1")).toBe(false);
 
-    await store.insertApprovalRequest(request("r2"));
+    await store.insertApprovalRequest(request("r2", { executionId: "run-3" }));
     await store.insertApprovalRequest(request("r3", { executionId: "run-2" }));
-    expect(await store.cancelPendingApprovalRequests({ executionId: "run-1" }, "Run canceled")).toBe(2);
-    expect(await store.getApprovalRequest("r2")).toMatchObject({ status: "canceled", reason: "Run canceled" });
-    expect(await store.reopenApprovalRequest("r2")).toBe(false);
-    expect(await store.cancelPendingApprovalRequests({ workflowId: "wf" }, "gone")).toBe(1);
+    expect(await store.cancelPendingApprovalRequests({ executionId: "run-1" }, "Run canceled")).toBe(1);
+    expect(await store.getApprovalRequest("r1")).toMatchObject({ status: "canceled", reason: "Run canceled" });
+    expect(await store.reopenApprovalRequest("r1")).toBe(false);
+    expect(await store.cancelPendingApprovalRequests({ workflowId: "wf" }, "gone")).toBe(2);
     expect(await store.cancelPendingApprovalRequests({}, "nothing")).toBe(0);
   });
 
   it("lists per execution, pending first-newest, decided by decision time, scoped and limited", async () => {
     const store = ctx.store();
+    // One run's requests: each earlier pause decided before the next one asks (one pending request per run, v41).
+    await store.insertApprovalRequest(request("r-d", { createdAt: "2026-01-01T00:00:00.000Z", expiresAt: "2026-01-01T00:10:00.000Z" }));
+    await store.insertApprovalRequest(request("r-a2", { createdAt: "2026-01-01T00:00:01.000Z", executionId: "run-2" }));
+    expect((await store.listApprovalRequests({ status: "pending" })).map((r) => r.id)).toEqual(["r-a2", "r-d"]);
+    expect((await store.listApprovalRequests({ status: "pending", limit: 1 })).map((r) => r.id)).toEqual(["r-a2"]);
+    await store.decideApprovalRequest({ id: "r-a2", status: "rejected", decidedAt: "2026-02-01T00:00:00.000Z" });
+    await store.decideApprovalRequest({ id: "r-d", status: "approved", decidedAt: "2026-04-01T00:00:00.000Z" });
     await store.insertApprovalRequest(request("r-a", { createdAt: "2026-01-01T00:00:01.000Z" }));
+    await store.decideApprovalRequest({ id: "r-a", status: "rejected", decidedAt: "2026-03-01T00:00:00.000Z" });
     await store.insertApprovalRequest(request("r-b", { createdAt: "2026-01-01T00:00:02.000Z" }));
     await store.insertApprovalRequest(request("r-C", { createdAt: "2026-01-01T00:00:02.000Z", workflowId: "wf-other", executionId: "run-9" }));
-    await store.insertApprovalRequest(request("r-d", { createdAt: "2026-01-01T00:00:00.000Z", expiresAt: "2026-01-01T00:10:00.000Z" }));
     expect((await store.listApprovalRequestsForExecution("run-1")).map((r) => r.id)).toEqual(["r-d", "r-a", "r-b"]);
     expect((await store.getPendingApprovalRequestForExecution("run-1"))?.id).toBe("r-b");
     expect(await store.getPendingApprovalRequestForExecution("run-x")).toBeNull();
 
-    expect((await store.listApprovalRequests({ status: "pending" })).map((r) => r.id)).toEqual(["r-b", "r-C", "r-a", "r-d"]);
-    expect((await store.listApprovalRequests({ status: "pending", limit: 2 })).map((r) => r.id)).toEqual(["r-b", "r-C"]);
+    expect((await store.listApprovalRequests({ status: "pending" })).map((r) => r.id)).toEqual(["r-b", "r-C"]);
+    expect((await store.listApprovalRequests({ status: "pending", limit: 1 })).map((r) => r.id)).toEqual(["r-b"]);
     expect((await store.listApprovalRequests({ status: "all", scope: { workflowIds: ["wf-other"] } })).map((r) => r.id)).toEqual(["r-C"]);
     expect(await store.listApprovalRequests({ status: "all", scope: { workflowIds: [] } })).toEqual([]);
     expect((await store.listApprovalRequests({ status: "all", scope: { all: true }, executionId: "run-9" })).map((r) => r.id)).toEqual(["r-C"]);
 
-    await store.decideApprovalRequest({ id: "r-a", status: "rejected", decidedAt: "2026-03-01T00:00:00.000Z" });
-    await store.decideApprovalRequest({ id: "r-d", status: "approved", decidedAt: "2026-04-01T00:00:00.000Z" });
-    expect((await store.listApprovalRequests({ status: "decided" })).map((r) => r.id)).toEqual(["r-d", "r-a"]);
+    expect((await store.listApprovalRequests({ status: "decided" })).map((r) => r.id)).toEqual(["r-d", "r-a", "r-a2"]);
     expect((await store.listApprovalRequests({ status: "decided", workflowId: "wf-other" }))).toEqual([]);
 
-    await store.insertApprovalRequest(request("r-e", { expiresAt: "2026-01-01T00:05:00.000Z" }));
-    await store.insertApprovalRequest(request("r-f", { expiresAt: "2026-01-01T00:01:00.000Z" }));
+    await store.insertApprovalRequest(request("r-e", { executionId: "run-5", expiresAt: "2026-01-01T00:05:00.000Z" }));
+    await store.insertApprovalRequest(request("r-f", { executionId: "run-6", expiresAt: "2026-01-01T00:01:00.000Z" }));
     expect((await store.listExpiredApprovalRequests("2026-01-01T00:06:00.000Z")).map((r) => r.id)).toEqual(["r-f", "r-e"]);
     expect((await store.listExpiredApprovalRequests("2026-01-01T00:06:00.000Z", 1)).map((r) => r.id)).toEqual(["r-f"]);
+  });
+
+  it("v41: a run has one pending request; a second is refused by the index, a decided one may sit beside a new one", async () => {
+    const store = ctx.store();
+    await store.insertApprovalRequest(request("p1"));
+    const second = await store.insertApprovalRequest(request("p2")).then(() => null, (error: unknown) => error);
+    expect(isOnePendingApprovalViolation(second)).toBe(true);
+    expect(await store.getApprovalRequest("p2")).toBeNull();
+    expect(await store.decideApprovalRequest({ id: "p1", status: "approved" })).toBe(true);
+    await store.insertApprovalRequest(request("p2"));
+    expect((await store.getPendingApprovalRequestForExecution("run-1"))?.id).toBe("p2");
+    // Reopening a decided request while a newer one is pending is refused the same way.
+    const reopened = await store.reopenApprovalRequest("p1").then((ok) => ok, (error: unknown) => error);
+    expect(isOnePendingApprovalViolation(reopened)).toBe(true);
+    expect(isOnePendingApprovalViolation(new Error("other"))).toBe(false);
   });
 
   it("a deleted workflow's requests leave scoped lists", async () => {

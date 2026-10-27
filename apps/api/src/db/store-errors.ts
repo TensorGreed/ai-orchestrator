@@ -1,3 +1,7 @@
+import { ONE_PENDING_APPROVAL_INDEX } from "./migrations.js";
+
+export { ONE_PENDING_APPROVAL_INDEX };
+
 /**
  * A project still owns workflows, secrets, knowledge bases, MCP servers or eval datasets. Deleting it would hand them to
  * the default project, where other users could reach them, so the delete is
@@ -56,5 +60,18 @@ export function isOneRunningSimulationViolation(error: unknown): boolean {
   const { code, constraint, message } = error as { code?: unknown; constraint?: unknown; message?: unknown };
   if (code === "SQLITE_CONSTRAINT_UNIQUE") return typeof message === "string" && /\bguard_simulations\.status\b/.test(message);
   if (code === "23505") return constraint === ONE_RUNNING_SIMULATION_INDEX;
+  return false;
+}
+
+/**
+ * Whether `error` is the v41 one-pending-approval index refusing an insert, on either store, and only that index:
+ * SQLite reports SQLITE_CONSTRAINT_UNIQUE on `approval_requests.execution_id` (the only unique index on that column),
+ * Postgres 23505 naming the index as its constraint.
+ */
+export function isOnePendingApprovalViolation(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const { code, constraint, message } = error as { code?: unknown; constraint?: unknown; message?: unknown };
+  if (code === "SQLITE_CONSTRAINT_UNIQUE") return typeof message === "string" && /\bapproval_requests\.execution_id\b/.test(message);
+  if (code === "23505") return constraint === ONE_PENDING_APPROVAL_INDEX;
   return false;
 }
