@@ -72,3 +72,37 @@ describe("trigger URLs go through the outbound guard", () => {
     expect(JSON.stringify(logs[0]!.metadata)).toMatch(/metadata|link local/i);
   });
 });
+
+describe("stop() and a concurrent initialize()", () => {
+  it("keeps the triggers a restart registers while a slow dispose is still pending", async () => {
+    let live = 0;
+    const fileNode = { id: "t", type: "file_trigger", name: "t", position: { x: 0, y: 0 }, config: { path: "/tmp/x" } } as WorkflowNode;
+    const outNode = { id: "o", type: "output", name: "o", position: { x: 1, y: 0 }, config: {} } as WorkflowNode;
+    const wf: Workflow = { id: "w1", name: "w1", schemaVersion: "1.0.0", workflowVersion: 1, nodes: [fileNode, outNode], edges: [{ id: "e", source: "t", target: "o" }] };
+    const store = {
+      listWorkflows: async () => [{ id: "w1" }],
+      getWorkflow: async () => wf,
+      deleteTriggerStatesForWorkflow: async () => undefined
+    } as unknown as Store;
+    const triggers = new TriggerService(store, () => undefined);
+    (triggers as unknown as Record<string, unknown>).startFileTrigger = () => {
+      live += 1;
+      let disposed = false;
+      return async () => {
+        if (disposed) return;
+        disposed = true;
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        live -= 1;
+      };
+    };
+    await triggers.initialize();
+    void triggers.stop();
+    await triggers.initialize();
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    expect(live).toBe(1);
+    expect(triggers.isRunning()).toBe(true);
+    await triggers.stop();
+    expect(live).toBe(0);
+    expect(triggers.isRunning()).toBe(false);
+  });
+});

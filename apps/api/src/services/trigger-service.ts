@@ -290,8 +290,12 @@ export class TriggerService {
   /** Stops every trigger; saves start nothing until the next initialize() (a standby instance). */
   async stop(): Promise<void> {
     this.standby = true;
+    // Forget the triggers before awaiting their disposal: an initialize() that runs meanwhile registers into a clean
+    // map, and those entries are neither dropped nor skipped as already active.
+    const stopping = Array.from(this.active.values());
+    this.active.clear();
     await Promise.allSettled(
-      Array.from(this.active.values()).map(async (trigger) => {
+      stopping.map(async (trigger) => {
         try {
           await trigger.dispose();
         } catch {
@@ -299,7 +303,6 @@ export class TriggerService {
         }
       })
     );
-    this.active.clear();
   }
 
   private stopAll(): void {
