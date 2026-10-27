@@ -485,20 +485,17 @@ describe("db:export records the audit verdict; db:import refuses a restore that 
       expect(report.audit?.changedWarning).toBeUndefined();
     });
 
-    it("a failing table in --merge rolls the whole merge back", async () => {
-      const store = await SqliteStore.create(sourcePath);
-      await store.writeAuditLog({ id: "a1", eventType: "e", category: "c", action: "a", outcome: "success" });
-      await store.upsertWorkflow({ id: "wf-dup", name: "Dup", schemaVersion: "1.0.0", workflowVersion: 1, nodes: [], edges: [] } as never);
-      await store.close();
-      const dump = await exportFrom(sourcePath);
-      await destinationWithData();
-      // Tables restore in EXPORTED_TABLES order; a duplicate workflow id fails the merge after earlier tables went in.
-      const dup = { ...dump.tables.workflows![0]!, id: "wf-before" };
-      dump.tables.workflows = [dump.tables.workflows![0]!, dup];
-      const before = await destinationState();
+    it("--merge into an audit log holding only unchained (pre-hash) rows compares the verdict like an empty one (L-C)", async () => {
+      const dump = await tamperedDump();
+      await emptyDestination();
+      const raw = new Database(destPath);
+      raw.prepare(`INSERT INTO audit_logs (id, event_type, category, action, outcome, created_at) VALUES ('old', 'e', 'c', 'a', 'success', '2020-01-01T00:00:00.000Z')`).run();
+      expect((raw.prepare(`SELECT COUNT(*) AS n FROM audit_logs WHERE entry_hash IS NOT NULL`).get() as { n: number }).n).toBe(0);
+      raw.close();
       const error = await importInto(destPath, dump, { merge: true }).then(() => undefined, (e: unknown) => e as Error);
-      expect(error?.message).toMatch(/Failed to insert into workflows/);
-      expect(await destinationState()).toEqual(before);
+      expect(error).toBeInstanceOf(AuditVerdictMismatch);
+      expect(await auditIds()).toEqual(["old"]);
     });
+
   });
 });

@@ -51,6 +51,8 @@ export interface BackupAdapter {
   truncate(table: string): Promise<void>;
   /** Rows currently in `table` (inside the transaction, when one is open). */
   countRows(table: string): Promise<number>;
+  /** audit_logs rows the chain walks (entry_hash set); unchained pre-Phase-8.4 rows do not count. */
+  countChainedAuditRows(): Promise<number>;
   /**
    * Runs `fn` in one transaction: every read sees one snapshot (`readOnly`, for db:export), or every write commits
    * together and a throw rolls all of them back (db:import).
@@ -190,6 +192,10 @@ class SqliteAdapter implements BackupAdapter {
 
   async countRows(table: string): Promise<number> {
     return Number((this.db.prepare(`SELECT COUNT(*) AS n FROM ${quoteIdent(table)}`).get() as { n: number | bigint }).n);
+  }
+
+  async countChainedAuditRows(): Promise<number> {
+    return Number((this.db.prepare(`SELECT COUNT(*) AS n FROM audit_logs WHERE entry_hash IS NOT NULL`).get() as { n: number | bigint }).n);
   }
 
   async transaction<T>(fn: () => Promise<T>): Promise<T> {
@@ -351,6 +357,11 @@ class PostgresAdapter implements BackupAdapter {
     return Number(r.rows[0]?.n ?? 0);
   }
 
+  async countChainedAuditRows(): Promise<number> {
+    const r = await this.q<{ n: string | number }>(`SELECT COUNT(*) AS n FROM audit_logs WHERE entry_hash IS NOT NULL`);
+    return Number(r.rows[0]?.n ?? 0);
+  }
+
   async verifyAuditChain(): Promise<AuditChainResult> {
     // A cursor needs a transaction: inside the caller's when one is open, else a read-only one of its own.
     if (this.client) return verifyPostgresAuditChainByCursor(this.client);
@@ -493,8 +504,8 @@ export async function importDump(adapter: BackupAdapter, dump: BackupDump, optio
   const warn = options.warn ?? log;
   const restoresAudit = (dump.tables.audit_logs?.length ?? 0) > 0 || dump.auditVerdict !== undefined;
   return adapter.transaction(async () => {
-    // A merge into an empty audit log restores the whole chain, so it is compared like a plain restore.
-    const auditWasEmpty = !options.merge || !restoresAudit || (await adapter.countRows("audit_logs")) === 0;
+    // A merge into an audit log with no chained rows (the chain walks only those) restores the whole chain, so it is compared like a plain restore.
+    const auditWasEmpty = !options.merge || !restoresAudit || (await adapter.countChainedAuditRows()) === 0;
     if (!options.merge) {
       log("Truncating destination tables...");
       // Reverse order, so a later non-cascading SQLite delete doesn't hit a parent before its children (CASCADE on
