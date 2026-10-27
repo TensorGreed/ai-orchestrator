@@ -158,10 +158,38 @@ describe("leader election with a lock", () => {
     const started = service.start();
     await until(() => lock.checks > 0, "the first check");
     await new Promise((resolve) => setTimeout(resolve, 5));
-    await service.stop();
+    const stopped = service.stop();
     release();
+    await stopped;
     await started;
     expect(running).toBe(false);
+  });
+
+  it("a stop that lands while onBecomeLeader runs frees the lock only after the start-up finished and resigned", async () => {
+    const events: string[] = [];
+    const lock = new FakeLock(events);
+    let release: () => void = () => undefined;
+    const service = new LeaderElectionService(store, {
+      lock,
+      renewIntervalMs: 60_000,
+      onBecomeLeader: async () => {
+        await new Promise<void>((resolve) => (release = resolve));
+        events.push("started");
+      },
+      onResignLeader: () => void events.push("resign")
+    });
+    const started = service.start();
+    await until(() => lock.checks > 0, "the first check");
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const stopped = service.stop();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(events).toEqual([]);
+    release();
+    await stopped;
+    await started;
+    expect(events.indexOf("release")).toBeGreaterThan(events.lastIndexOf("started"));
+    expect(events.indexOf("release")).toBeGreaterThan(events.indexOf("resign"));
+    expect(events.slice(0, 2)).toEqual(["started", "resign"]);
   });
 
   it("leader work found running on a non-leader is stopped at the next tick", async () => {

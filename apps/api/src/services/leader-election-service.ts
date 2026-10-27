@@ -61,6 +61,9 @@ export interface LeaderStatus {
  * reports the loss), so in that window the old and the new holder can overlap briefly; it then tries for the lock
  * again at once. A stop resigns before it frees the lock.
  */
+/** How long stop() waits for a leader start-up still in flight before it gives up the lock anyway. */
+const STOP_WAIT_MS = 10_000;
+
 export class LeaderElectionService {
   private readonly enabled: boolean;
   private readonly leaseTtlMs: number;
@@ -79,6 +82,8 @@ export class LeaderElectionService {
   private unannounced = false;
   /** A tick in flight: a slow check or leader callback never overlaps the next interval's tick. */
   private ticking = false;
+  /** The election tick in flight (its start-up included), so stop() can wait for it. */
+  private tickRun: Promise<void> | null = null;
   /** Run one more tick as soon as the current one ends (the lock was just lost). */
   private retryRequested = false;
   /** onBecomeLeader was called and no onResignLeader since (this instance's own view of its leader work). */
@@ -155,6 +160,21 @@ export class LeaderElectionService {
       clearInterval(this.timer);
       this.timer = null;
     }
+    // A start-up still running (onBecomeLeader) resigns itself once it returns and sees `stopped`; wait for that, so
+    // the lock is not freed while it is still starting schedules and triggers. Bounded: a hung start-up must not block
+    // shutdown.
+    const inFlight = this.tickRun;
+    if (inFlight) {
+      let timer: NodeJS.Timeout | undefined;
+      await Promise.race([
+        inFlight.catch(() => undefined),
+        new Promise<void>((resolve) => {
+          timer = setTimeout(resolve, STOP_WAIT_MS);
+          timer.unref?.();
+        })
+      ]);
+      clearTimeout(timer);
+    }
     // Stop this instance's leader work first, then give up the lock or lease: freed first, a standby could start its
     // schedules while this instance's are still registered.
     if (this.enabled && (this.holder || this.leading || this.workRunning())) {
@@ -200,14 +220,19 @@ export class LeaderElectionService {
   private async tick(): Promise<void> {
     if (this.stopped || this.ticking) return;
     this.ticking = true;
-    try {
-      do {
-        this.retryRequested = false;
-        await this.tickOnce();
-      } while (this.retryRequested && !this.stopped);
-    } finally {
-      this.ticking = false;
-    }
+    const run = (async () => {
+      try {
+        do {
+          this.retryRequested = false;
+          await this.tickOnce();
+        } while (this.retryRequested && !this.stopped);
+      } finally {
+        this.ticking = false;
+        this.tickRun = null;
+      }
+    })();
+    this.tickRun = run;
+    await run;
   }
 
   /** Re-tries the lock at once instead of at the next interval; only once the election loop runs. */
