@@ -374,3 +374,120 @@ export function verifyAuditRows(rows: Iterable<AuditChainRow>): AuditChainResult
   }
   return finish({ ok: true, rowsChecked: checked });
 }
+
+/**
+ * Phase 13.1 — reading SQLite audit text exactly, for verify, db:export and db:copy.
+ *
+ * The driver reads a stored text value with TextDecoder's lenient rule (U+FFFD for every invalid sequence, a lone
+ * surrogate's generalized UTF-8 included), which is what storedSqliteAuditText gives for any value without a U+FFFD:
+ * such a value was valid UTF-8, and valid UTF-8 decodes the same both ways (the differential test in
+ * sqlite-audit-read.test.ts compares the two readers over valid text, generalized UTF-8 surrogates, invalid bytes and
+ * NUL, on Node 20 and 24). So the text is read through the driver, and only rows where a text column reads with a
+ * U+FFFD (or as anything but a string or NULL) are read again as bytes (`CAST(column AS BLOB)`) and decoded by
+ * storedSqliteAuditText. On a chain of ordinary rows that is one plain read, instead of one Buffer per value.
+ */
+
+/** The audit_logs text columns the canonical payload hashes. */
+export const SQLITE_AUDIT_TEXT_COLUMNS = [
+  "id", "event_type", "category", "action", "outcome", "actor_user_id", "actor_email", "actor_type", "resource_type",
+  "resource_id", "project_id", "ip_address", "user_agent", "metadata_json", "message", "created_at"
+] as const;
+
+/** What these helpers use of a better-sqlite3 Database (structural, so this module does not load the driver). */
+export interface SqliteAuditReader {
+  prepare(sql: string): { all(...params: unknown[]): unknown[] };
+}
+
+const SQLITE_IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+function sqliteIdentifier(name: string): string {
+  if (!SQLITE_IDENTIFIER.test(name)) throw new Error(`Refusing to quote suspicious identifier: ${name}`);
+  return `"${name}"`;
+}
+
+/** Whether the driver's reading of a text column may differ from its stored bytes decoded exactly. */
+function driverTextMayDiffer(value: unknown): boolean {
+  if (value === null || value === undefined) return false;
+  return typeof value !== "string" || value.includes(REPLACEMENT);
+}
+
+/**
+ * `rows` (read through the driver from `table`, each with its rowid under `rowidKey`) with every column in
+ * `textColumns` exactly as stored: rows whose text may differ from the stored bytes are read again as bytes and
+ * decoded by storedSqliteAuditText. Other columns, and the rows' order, are unchanged. Rows are changed in place and
+ * returned.
+ */
+export function exactSqliteTextRows<R extends Record<string, unknown>>(
+  db: SqliteAuditReader,
+  table: string,
+  rows: R[],
+  textColumns: readonly string[],
+  rowidKey: string
+): R[] {
+  const pending = rows.filter((row) => textColumns.some((column) => driverTextMayDiffer(row[column])));
+  if (pending.length === 0) return rows;
+  const select = textColumns.map((column) => `CAST(${sqliteIdentifier(column)} AS BLOB) AS ${sqliteIdentifier(column)}`).join(", ");
+  const CHUNK = 500;
+  for (let at = 0; at < pending.length; at += CHUNK) {
+    const chunk = pending.slice(at, at + CHUNK);
+    const byRowid = new Map(chunk.map((row) => [Number(row[rowidKey]), row]));
+    const bytes = db
+      .prepare(`SELECT rowid AS __exact_rowid, ${select} FROM ${sqliteIdentifier(table)} WHERE rowid IN (${chunk.map(() => "?").join(", ")})`)
+      .all(...chunk.map((row) => row[rowidKey])) as Array<Record<string, Uint8Array | null> & { __exact_rowid: number | bigint }>;
+    for (const stored of bytes) {
+      const row = byRowid.get(Number(stored.__exact_rowid));
+      if (!row) continue;
+      for (const column of textColumns) (row as Record<string, unknown>)[column] = storedSqliteAuditText(stored[column] ?? null);
+    }
+  }
+  return rows;
+}
+
+type SqliteAuditTextRow = Record<(typeof SQLITE_AUDIT_TEXT_COLUMNS)[number], string | null> & {
+  __rowid: number;
+  prev_hash: string | null;
+  entry_hash: string | null;
+};
+
+/**
+ * The hashed audit_logs rows of a SQLite database (entry_hash IS NOT NULL, rowid order), their text exact. An optional
+ * field keeps NULL as null and "" as "" (the writer hashes `value ?? null`).
+ */
+export function readSqliteAuditChainRows(db: SqliteAuditReader): AuditChainRow[] {
+  const rows = db
+    .prepare(
+      `SELECT rowid AS __rowid, ${SQLITE_AUDIT_TEXT_COLUMNS.join(", ")}, prev_hash, entry_hash
+         FROM audit_logs WHERE entry_hash IS NOT NULL ORDER BY rowid ASC`
+    )
+    .all() as SqliteAuditTextRow[];
+  exactSqliteTextRows(db, "audit_logs", rows, SQLITE_AUDIT_TEXT_COLUMNS, "__rowid");
+  const required = (value: string | null) => value ?? "";
+  const text = (value: unknown) => (typeof value === "string" ? value : String(value ?? ""));
+  return rows.map((row) => ({
+    fields: {
+      id: required(row.id),
+      createdAt: required(row.created_at),
+      eventType: required(row.event_type),
+      category: required(row.category),
+      action: required(row.action),
+      outcome: required(row.outcome),
+      actorUserId: row.actor_user_id,
+      actorEmail: row.actor_email,
+      actorType: required(row.actor_type),
+      resourceType: row.resource_type,
+      resourceId: row.resource_id,
+      projectId: row.project_id,
+      ipAddress: row.ip_address,
+      userAgent: row.user_agent,
+      metadataJson: row.metadata_json,
+      message: row.message
+    },
+    prevHash: text(row.prev_hash),
+    entryHash: text(row.entry_hash)
+  }));
+}
+
+/** verifyAuditRows over a SQLite database's chain, read by readSqliteAuditChainRows. */
+export function verifySqliteAuditChain(db: SqliteAuditReader): AuditChainResult {
+  return verifyAuditRows(readSqliteAuditChainRows(db));
+}

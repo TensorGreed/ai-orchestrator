@@ -66,8 +66,7 @@ import {
   auditEntryHash,
   type AuditChainResult,
   GENESIS_HASH,
-  storedSqliteAuditText,
-  verifyAuditRows,
+  verifySqliteAuditChain,
   wellFormedAuditEntry,
   wellFormedAuditText
 } from "./audit-chain.js";
@@ -7388,45 +7387,12 @@ export class SqliteStore implements Store {
    * we can only attest the chain from the first hash onwards.
    */
   async verifyAuditChain(): Promise<AuditChainResult> {
-    // Text columns are read as their stored bytes and decoded by storedSqliteAuditText, the same on every Node version:
+    // Text is read exactly as stored (audit-chain.ts verifySqliteAuditChain: the driver's text, and the stored bytes
+    // decoded by storedSqliteAuditText for any row whose text reads with a U+FFFD), the same on every Node version:
     // better-sqlite3 on Node 20 stored a lone surrogate as generalized UTF-8, which the driver reads as three U+FFFD.
     // An optional field keeps NULL as null and "" as "" (the writer hashes `value ?? null`; reading by truthiness would
     // turn "" into null and break the chain at that row).
-    const text = [
-      "id", "event_type", "category", "action", "outcome", "actor_user_id", "actor_email", "actor_type", "resource_type",
-      "resource_id", "project_id", "ip_address", "user_agent", "metadata_json", "message", "created_at"
-    ] as const;
-    type Bytes = Uint8Array | null;
-    const rows = this.queryAll<Record<(typeof text)[number], Bytes> & { prev_hash: string | null; entry_hash: string | null }>(
-      `SELECT ${text.map((column) => `CAST(${column} AS BLOB) AS ${column}`).join(", ")}, prev_hash, entry_hash
-       FROM audit_logs WHERE entry_hash IS NOT NULL
-       ORDER BY rowid ASC`
-    );
-    const required = (value: Bytes) => storedSqliteAuditText(value) ?? "";
-    return verifyAuditRows(
-      rows.map((row) => ({
-        fields: {
-          id: required(row.id),
-          createdAt: required(row.created_at),
-          eventType: required(row.event_type),
-          category: required(row.category),
-          action: required(row.action),
-          outcome: required(row.outcome),
-          actorUserId: storedSqliteAuditText(row.actor_user_id),
-          actorEmail: storedSqliteAuditText(row.actor_email),
-          actorType: required(row.actor_type),
-          resourceType: storedSqliteAuditText(row.resource_type),
-          resourceId: storedSqliteAuditText(row.resource_id),
-          projectId: storedSqliteAuditText(row.project_id),
-          ipAddress: storedSqliteAuditText(row.ip_address),
-          userAgent: storedSqliteAuditText(row.user_agent),
-          metadataJson: storedSqliteAuditText(row.metadata_json),
-          message: storedSqliteAuditText(row.message)
-        },
-        prevHash: toString(row.prev_hash ?? ""),
-        entryHash: toString(row.entry_hash ?? "")
-      }))
-    );
+    return verifySqliteAuditChain(this.db);
   }
 
   async listAuditLogs(filter: {
