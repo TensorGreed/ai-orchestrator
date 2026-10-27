@@ -273,12 +273,12 @@ describe("approvals inbox", () => {
     const lead = await login(context, "builder", "lead");
     const run = await startRun(context, gateWorkflow("wf-reject", GATE), requester.cookie);
     expect((await call(context, "POST", `/api/approvals/${run.executionId}/reject`, lead.cookie, {})).statusCode).toBe(400);
-    const [first, second] = await Promise.all([
-      call(context, "POST", `/api/approvals/${run.executionId}/reject`, lead.cookie, { reason: "Off-brand" }),
-      call(context, "POST", `/api/approvals/${run.executionId}/approve`, lead.cookie, {})
-    ]);
+    // One after the other: which of two concurrent decisions wins is the store's race (Postgres runs both requests at
+    // once), and "concurrent decisions" below covers it.
+    const first = await call(context, "POST", `/api/approvals/${run.executionId}/reject`, lead.cookie, { reason: "Off-brand" });
     expect(first.statusCode).toBe(200);
     expect(first.json<RunResult>().nodeResults.find((entry) => entry.nodeId === "stopped")?.status).toBe("success");
+    const second = await call(context, "POST", `/api/approvals/${run.executionId}/approve`, lead.cookie, {});
     expect([404, 409]).toContain(second.statusCode);
     const [decided] = await inbox(context, lead.cookie, "?status=all");
     expect(decided).toMatchObject({ status: "rejected", reason: "Off-brand" });
