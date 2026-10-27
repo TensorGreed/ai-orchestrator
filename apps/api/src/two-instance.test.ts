@@ -122,6 +122,7 @@ run("two API instances on one Postgres database", () => {
       MCP_PROBE_INTERVAL_MS: "0",
       GIT_SYNC_WORKDIR: path.join(tempDir, `sync-${i}`),
       HA_INSTANCE_ID: `instance-${i}`,
+      HA_ENABLED: "true",
       HA_RENEW_INTERVAL_MS: "100",
       ...overrides
     });
@@ -251,6 +252,47 @@ run("two API instances on one Postgres database", () => {
     expect(statuses.map((s) => s.enabled)).toEqual([true, true]);
     expect(statuses.filter((s) => s.isLeader)).toHaveLength(1);
     expect(statuses.map((s) => s.leaseHolder)).toEqual([holder, holder]);
+  }, 60_000);
+
+  /** /api/ha/status's leader block, as an admin. */
+  async function haStatus(instance: Instance): Promise<{ enabled: boolean; isLeader: boolean }> {
+    const cookie = await loginAs(instance, "admin", "admin");
+    return (await instance.app.inject({ method: "GET", url: "/api/ha/status", headers: { cookie } })).json<{
+      leader: { enabled: boolean; isLeader: boolean };
+    }>().leader;
+  }
+
+  async function leaderSessions(): Promise<number> {
+    const pool = testStorePool(primary!);
+    try {
+      const found = await pool.query<{ n: number }>(
+        `SELECT count(*)::int AS n FROM pg_stat_activity WHERE application_name = $1 AND datname = current_database()`,
+        [LEADER_APPLICATION_NAME]
+      );
+      return found.rows[0]!.n;
+    } finally {
+      await pool.end();
+    }
+  }
+
+  it("HA off (the default single-instance mode): two Postgres instances both lead and both run schedules, with no lock", async () => {
+    const [a, b] = await start(2, { HA_ENABLED: "false" });
+    expect(await haStatus(a!)).toMatchObject({ enabled: false, isLeader: true });
+    expect(await haStatus(b!)).toMatchObject({ enabled: false, isLeader: true });
+    expect([a!.scheduler.isRunning(), b!.scheduler.isRunning()]).toEqual([true, true]);
+    expect([a!.triggers.isRunning(), b!.triggers.isRunning()]).toEqual([true, true]);
+    expect(await lockHolderPid()).toBeNull();
+    expect(await leaderSessions()).toBe(0);
+  }, 60_000);
+
+  it("HA off: a lone Postgres instance opens no lock connection", async () => {
+    const [a] = await start(1, { HA_ENABLED: "false" });
+    expect(await haStatus(a!)).toMatchObject({ enabled: false, isLeader: true });
+    // Give an election loop, if one ran, time to connect.
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    expect(await leaderSessions()).toBe(0);
+    expect(await lockHolderPid()).toBeNull();
+    expect(await a!.store.getLease("primary")).toBeNull();
   }, 60_000);
 
   it("a webhook idempotency key sent to both instances at once runs the workflow once", async () => {

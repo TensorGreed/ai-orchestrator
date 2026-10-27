@@ -10,7 +10,7 @@ import type { Store } from "./db/store.js";
 import { AuthService } from "./services/auth-service";
 import { SecretService } from "./services/secret-service";
 import { LeaderElectionService, NEVER_LEAD } from "./services/leader-election-service";
-import { openTestStore, testStoreKind } from "./test-support/test-store.js";
+import { openTestStore } from "./test-support/test-store.js";
 
 interface TestContext {
   app: FastifyInstance;
@@ -407,8 +407,8 @@ describe("Phase 7.1 — /api/ha/status route", () => {
       leases: unknown[];
     };
     expect(body.workerMode).toBe("all");
-    // Postgres elects a leader (an advisory lock) with or without HA_ENABLED; SQLite has one process.
-    expect(body.leader.enabled).toBe(testStoreKind() === "postgres");
+    // HA off (the default): every instance is its own leader, on SQLite and on Postgres.
+    expect(body.leader.enabled).toBe(false);
     expect(body.leader.isLeader).toBe(true);
     expect(Array.isArray(body.leases)).toBe(true);
   });

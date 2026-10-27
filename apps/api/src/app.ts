@@ -3554,13 +3554,14 @@ export async function createApp(
       });
     }
   }
-  // Postgres: instances that run the scheduler and triggers elect one leader with an advisory lock on a dedicated
-  // connection, with or without HA_ENABLED, so one instance runs the crons however many share the database. An
-  // instance without background workers never takes the lock (it could not run the schedules); with HA_ENABLED it
-  // follows, as before. SQLite (one process) keeps the lease row, used only when HA_ENABLED is set.
+  // Leader election runs only with HA_ENABLED=true. Off (the default), every instance leads, with no lock and no lock
+  // connection, exactly as before: the single-instance mode, on SQLite and on Postgres. On, Postgres instances that
+  // run the scheduler and triggers elect one leader with an advisory lock on a dedicated connection; an instance
+  // without background workers never takes it (it could not run the schedules) and follows. SQLite with HA on keeps
+  // the lease row.
   const leaderInstanceId = config.HA_INSTANCE_ID ?? `${os.hostname()}-${crypto.randomBytes(4).toString("hex")}`;
   const leaderLock =
-    store instanceof PostgresStore
+    config.HA_ENABLED && store instanceof PostgresStore
       ? runsBackgroundWorkers
         ? store.leaderLock({
             leaseName: "primary",
@@ -3572,11 +3573,9 @@ export async function createApp(
               info: (message, fields) => app.log.info(fields ?? {}, message)
             }
           })
-        : config.HA_ENABLED
-          ? NEVER_LEAD
-          : undefined
+        : NEVER_LEAD
       : undefined;
-  // On a shared database, schedules and triggers saved through another instance reach the leader's at the next sync.
+  // With HA on, schedules and triggers saved through another instance reach the leader's at the next sync.
   let scheduleSyncTimer: NodeJS.Timeout | null = null;
   const startScheduleSync = () => {
     if (scheduleSyncTimer) return;
@@ -3623,7 +3622,7 @@ export async function createApp(
         try {
           await schedulerService?.initialize();
           await triggerService?.initialize();
-          if (sharedDatabase) startScheduleSync();
+          if (config.HA_ENABLED) startScheduleSync();
           app.log.info({ instanceId: leaderElection.getInstanceId() }, "Acquired leader lease — scheduler + trigger services started");
         } catch (err) {
           app.log.warn(
@@ -4014,9 +4013,10 @@ export async function createApp(
     queueMode: Boolean(queueService),
     isResumeActive: (executionId) => approvalResumes.isActive(executionId),
     resumeStaleAfterMs: config.WORKFLOW_EXECUTION_TIMEOUT_MS + STUCK_JOB_MARGIN_MS,
-    // A database other instances share (Postgres, or HA on): a resume another live instance runs is not this boot's to
-    // re-drive, so only claims older than the grace are recovered; one process on SQLite owns every claim it finds.
-    recoverAtStartupImmediately: !sharedDatabase,
+    // With HA on, other instances share the database: a resume another live instance runs is not this boot's to
+    // re-drive, so only claims older than the grace are recovered. With HA off this instance is the only leader and
+    // owns every claim it finds, as before.
+    recoverAtStartupImmediately: !config.HA_ENABLED,
     logger: {
       info: (msg, fields) => app.log.info(fields ?? {}, msg),
       warn: (msg, fields) => app.log.warn(fields ?? {}, msg)
@@ -12166,8 +12166,8 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       );
     });
 
-    // On a shared database the stuck-job sweep runs on the leader only (each requeue is conditional either way).
-    if (sharedDatabase) queueService.setSweepGate(() => leaderElection.isLeader());
+    // With HA on the stuck-job sweep runs on the leader only (each requeue is conditional either way).
+    if (config.HA_ENABLED) queueService.setSweepGate(() => leaderElection.isLeader());
     queueService.start();
 
     app.addHook("onClose", async () => {

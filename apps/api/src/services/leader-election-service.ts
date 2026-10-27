@@ -56,7 +56,7 @@ export interface LeaderStatus {
  * Without a lock and with `HA_ENABLED=false` this service always reports itself as the leader
  * — single-instance deployments get the same API without HA overhead.
  *
- * With a `lock` (Postgres, whatever HA_ENABLED says) the lock decides instead of the row. One session holds it at a
+ * With a `lock` (Postgres with HA_ENABLED=true) the lock decides instead of the row. One session holds it at a
  * time. An instance that loses it stops its leader work within one renew interval (at once when its connection
  * reports the loss), so in that window the old and the new holder can overlap briefly; it then tries for the lock
  * again at once. A stop resigns before it frees the lock.
