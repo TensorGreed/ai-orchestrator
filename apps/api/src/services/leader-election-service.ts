@@ -45,10 +45,13 @@ export interface LeaderStatus {
  * steal it. Works on both SQLite (single-writer, trivially) and Postgres
  * (row-level atomic updates).
  *
- * When `HA_ENABLED=false` this service always reports itself as the leader
+ * Without a lock and with `HA_ENABLED=false` this service always reports itself as the leader
  * — single-instance deployments get the same API without HA overhead.
  *
- * With a `lock` (Postgres) the lock decides instead of the row: one holder at a time, freed when its session ends.
+ * With a `lock` (Postgres, whatever HA_ENABLED says) the lock decides instead of the row. One session holds it at a
+ * time. An instance that loses it stops its leader work within one renew interval (at once when its connection
+ * reports the loss), so in that window the old and the new holder can overlap briefly; it then tries for the lock
+ * again at once. A stop resigns before it frees the lock.
  */
 export class LeaderElectionService {
   private readonly enabled: boolean;

@@ -3546,7 +3546,7 @@ export async function createApp(
     }
   }
   // Postgres: instances that run the scheduler and triggers elect one leader with an advisory lock on a dedicated
-  // connection, with or without HA_ENABLED, so a cron fires once however many instances share the database. An
+  // connection, with or without HA_ENABLED, so one instance runs the crons however many share the database. An
   // instance without background workers never takes the lock (it could not run the schedules); with HA_ENABLED it
   // follows, as before. SQLite (one process) keeps the lease row, used only when HA_ENABLED is set.
   const leaderInstanceId = config.HA_INSTANCE_ID ?? `${os.hostname()}-${crypto.randomBytes(4).toString("hex")}`;
