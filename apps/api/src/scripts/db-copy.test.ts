@@ -374,6 +374,12 @@ describe("settings are loaded as the API loads them, before anything is resolved
       expect(fromRoot).toContain("from root .env");
     });
 
+    it("a padded DB_TYPE (\" Postgres \") is trimmed like the API does, so it is still warned about", () => {
+      const hint = upgradeHint("/b/snap.db", origins(origin("unset"), origin("environment", " Postgres ")));
+      expect(hint).toContain("DB_TYPE=sqlite pnpm");
+      expect(hint).toContain("WARNING: DB_TYPE resolves to postgres, from environment");
+    });
+
     it("resolveSettingOrigins: apps/api/.env beats the environment, which beats the root .env", () => {
       const apiRoot = layout("A=root\nB=root\nC=root\n", "A=api\n");
       expect(resolveSettingOrigins(apiRoot, { A: "env", B: "env" }, ["A", "B", "C", "D"])).toEqual({

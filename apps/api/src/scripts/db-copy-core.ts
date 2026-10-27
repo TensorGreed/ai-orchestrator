@@ -66,7 +66,7 @@ import {
 import { SqliteStore } from "../db/database.js";
 import { INSERTION_SEQ_TABLES, MIGRATIONS } from "../db/migrations.js";
 import { pgParams } from "../db/postgres/context.js";
-import { describePostgresSettings, parsePostgresSettings } from "../config.js";
+import { describePostgresSettings, isPostgresDbType, parsePostgresSettings } from "../config.js";
 import { postgresStoreConfig } from "../db/create-store.js";
 import { loadApiEnvFiles, resolveSettingOrigins, type SettingOrigin } from "./api-env.js";
 import { auditCarryOver, brokenPosition, unverifiableOnPostgresBySource, verdictText, verifyPostgresAuditChainByCursor } from "./audit-carry-over.js";
@@ -227,9 +227,8 @@ export function upgradeHint(sqlitePath: string, origins?: SettingOrigins): strin
     shell.push(`DB_SQLITE_PATH=${sqlitePath}`);
   }
   const typeOrigin = origins?.DB_TYPE;
-  const typeValue = typeOrigin?.value?.toLowerCase();
   let warning = "";
-  if (typeValue === "postgres" || typeValue === "postgresql") {
+  if (isPostgresDbType(typeOrigin?.value)) {
     warning =
       ` (WARNING: DB_TYPE resolves to postgres, from ${typeOrigin!.source}, so a start without changing it would boot against the ` +
       `Postgres target db:copy writes to and bootstrap an admin there, and the copy would then refuse the target as non-empty)`;
