@@ -16,6 +16,7 @@ import { LEADER_APPLICATION_NAME, type PostgresStore } from "./db/postgres-store
 import { ADVISORY_LOCK_CLASS_LEADER } from "./db/postgres/leader-lock.js";
 import { AuthService } from "./services/auth-service.js";
 import { LeaderElectionService } from "./services/leader-election-service.js";
+import { QueueService } from "./services/queue-service.js";
 import { SchedulerService } from "./services/scheduler-service.js";
 import { SecretService } from "./services/secret-service.js";
 import { TriggerService } from "./services/trigger-service.js";
@@ -31,6 +32,7 @@ interface Instance {
   store: PostgresStore;
   scheduler: SchedulerService;
   triggers: TriggerService;
+  queue?: QueueService;
 }
 
 const jobCount = (scheduler: SchedulerService) => (scheduler as unknown as { jobs: Map<string, unknown> }).jobs.size;
@@ -100,14 +102,14 @@ run("two API instances on one Postgres database", () => {
     fires = [];
   }, 60_000);
 
-  async function start(count: number, overrides: Record<string, string> = {}): Promise<Instance[]> {
+  async function start(count: number, overrides: Record<string, string> = {}, options: { queue?: boolean } = {}): Promise<Instance[]> {
     primary = await createTestStore({ kind: "postgres" });
-    for (let i = 0; i < count; i += 1) await addInstance(i, overrides);
+    for (let i = 0; i < count; i += 1) await addInstance(i, overrides, options);
     return instances;
   }
 
   /** Boots one more full app on the primary's database (a deploy that brings an instance up later). */
-  async function addInstance(i: number, overrides: Record<string, string> = {}): Promise<Instance> {
+  async function addInstance(i: number, overrides: Record<string, string> = {}, options: { queue?: boolean } = {}): Promise<Instance> {
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "l2m-two-instance-"));
     tempDirs.push(tempDir);
     const store = await openTestStoreTwin(primary!, { maxConnections: 6 });
@@ -139,9 +141,10 @@ run("two API instances on one Postgres database", () => {
         await handler(input);
       });
     const triggers = new TriggerService(store, quiet);
-    const app = await createApp(config, store, new SecretService(store, config.SECRET_MASTER_KEY_BASE64), new AuthService(store, config.SESSION_TTL_HOURS), scheduler, undefined, triggers);
+    const queue = options.queue ? new QueueService(store, { pollIntervalMs: 50 }) : undefined;
+    const app = await createApp(config, store, new SecretService(store, config.SECRET_MASTER_KEY_BASE64), new AuthService(store, config.SESSION_TTL_HOURS), scheduler, queue, triggers);
     await app.ready();
-    const instance = { app, store, scheduler, triggers };
+    const instance = { app, store, scheduler, triggers, ...(queue ? { queue } : {}) };
     instances.push(instance);
     return instance;
   }
@@ -345,6 +348,17 @@ run("two API instances on one Postgres database", () => {
     } finally {
       await pool.end();
     }
+  }, 60_000);
+
+  it("only the leader re-queues stuck jobs", async () => {
+    const [a, b] = await start(2, {}, { queue: true });
+    await until(async () => (await a!.store.getLease("primary"))?.holderId, "the lease row");
+    const holder = (await a!.store.getLease("primary"))!.holderId;
+    const leader = holder === "instance-0" ? a! : b!;
+    const standby = leader === a ? b! : a!;
+    const sweeps = [leader, standby].map((instance) => vi.spyOn(instance.store, "requeueStuckItems"));
+    for (const instance of [leader, standby]) await (instance.queue as unknown as { sweepStuck(): Promise<void> }).sweepStuck();
+    expect(sweeps.map((spy) => spy.mock.calls.length)).toEqual([1, 0]);
   }, 60_000);
 
   it("leader election alone: one holder at a time; stopping the holder hands the lock over", async () => {

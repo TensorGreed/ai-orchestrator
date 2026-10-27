@@ -12149,6 +12149,8 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       );
     });
 
+    // On a shared database the stuck-job sweep runs on the leader only (each requeue is conditional either way).
+    if (sharedDatabase) queueService.setSweepGate(() => leaderElection.isLeader());
     queueService.start();
 
     app.addHook("onClose", async () => {

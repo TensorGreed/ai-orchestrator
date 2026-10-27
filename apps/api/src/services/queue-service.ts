@@ -61,6 +61,8 @@ export class QueueService {
   private stuckTimer: NodeJS.Timeout | null = null;
   private started = false;
   private polling = false;
+  /** Phase 13.1 — whether this instance re-queues stuck jobs (on a shared database only the leader does). */
+  private sweepGate: () => boolean = () => true;
 
   constructor(store: Store, config: QueueServiceConfig = {}) {
     this.store = store;
@@ -74,6 +76,14 @@ export class QueueService {
 
   setHandler(handler: ExecutionHandler): void {
     this.handler = handler;
+  }
+
+  /**
+   * Phase 13.1 — on a database instances share, only the leader re-queues stuck jobs (createApp passes isLeader).
+   * Every instance still warns about its own long-running jobs. Without a gate (one process) it always sweeps.
+   */
+  setSweepGate(gate: () => boolean): void {
+    this.sweepGate = gate;
   }
 
   start(): void {
@@ -101,6 +111,7 @@ export class QueueService {
         console.warn(`[queue] Job ${id} still running after ${nowMs - startedAtMs}ms; it is not re-queued while this process holds it`);
       }
     }
+    if (!this.sweepGate()) return;
     try {
       // A shared database can hold running jobs of other instances; the store applies each job's own run time limit.
       const requeued = await this.store.requeueStuckItems(this.config.stuckJobTimeoutMs, [...this.inFlight.keys()], STUCK_JOB_MARGIN_MS);
