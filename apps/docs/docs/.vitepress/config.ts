@@ -131,6 +131,7 @@ export default defineConfig({
           { text: "CI Pipeline", link: "/operations/ci" },
           { text: "Testing + Quality Gates", link: "/operations/testing-and-quality" },
           { text: "Observability (OTel, metrics, traces)", link: "/operations/observability" },
+          { text: "Postgres", link: "/operations/postgres" },
           { text: "Troubleshooting", link: "/troubleshooting/common-issues" }
         ]
       }
