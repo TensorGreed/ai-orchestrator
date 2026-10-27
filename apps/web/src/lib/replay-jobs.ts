@@ -366,6 +366,11 @@ export function formatDuration(ms: number | null | undefined): string {
   return `${Math.floor(ms / 60_000)} m ${Math.round((ms % 60_000) / 1000)} s`;
 }
 
+/** One repeat's new guard blocks (added or escalated blocks and reviews), for the case's repeat list. */
+export function guardBlocksLabel(count: number): string {
+  return count === 0 ? "no new guard blocks" : `${count} new guard block${count === 1 ? "" : "s"}`;
+}
+
 /** The `.status-pill` tone for a run or case status. */
 export function statusTone(status: string): "success" | "error" | "partial" | "running" | "skipped" {
   switch (status) {

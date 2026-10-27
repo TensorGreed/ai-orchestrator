@@ -44,6 +44,7 @@ import {
   formatDuration,
   formatSpend,
   formatUsd,
+  guardBlocksLabel,
   jobCounts,
   jobWarnings,
   overrideLines,
@@ -1457,6 +1458,8 @@ export function CaseDrawer({ runId, resultId, onClose }: { runId: string; result
                           {attempt.executionId && <span className="mono-cell">{attempt.executionId}</span>}
                           {attempt.baselineExecutionId && <span className="mono-cell">baseline {attempt.baselineExecutionId}</span>}
                           <span className="mono-cell">{formatUsd(attempt.costUsd)}</span>
+                          {typeof attempt.latencyMs === "number" && <span className="mono-cell">{formatDuration(attempt.latencyMs)}</span>}
+                          {typeof attempt.newGuardBlocks === "number" && <span className="mono-cell">{guardBlocksLabel(attempt.newGuardBlocks)}</span>}
                         </span>
                         {attempt.reasons.length > 0 && <span className="evals-score-reason">{attempt.reasons.join(" ")}</span>}
                       </li>
