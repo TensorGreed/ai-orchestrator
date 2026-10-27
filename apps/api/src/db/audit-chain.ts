@@ -63,8 +63,10 @@ import { createHash } from "node:crypto";
 
 export const GENESIS_HASH = "0".repeat(64);
 
-const strictUtf8 = new TextDecoder("utf-8", { fatal: true });
-const lenientUtf8 = new TextDecoder("utf-8");
+// ignoreBOM: a leading EF BB BF is the character U+FEFF, kept as stored (as the drivers keep it). Without it the
+// decoder drops it, so a value starting with U+FEFF would not be the text the writer hashed.
+const strictUtf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+const lenientUtf8 = new TextDecoder("utf-8", { ignoreBOM: true });
 
 /**
  * A SQLite text value from its stored bytes (read with `CAST(column AS BLOB)`), decoded the same on every Node version.

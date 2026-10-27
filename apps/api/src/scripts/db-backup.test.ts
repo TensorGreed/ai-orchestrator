@@ -14,7 +14,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import Database from "better-sqlite3";
 import { SqliteStore } from "../db/database.js";
-import { appendLegacySqliteAuditRow } from "./legacy-audit.test-helper.js";
+import { appendLegacySqliteAuditRow, bomAuditEntry, sqliteAuditBytes } from "./legacy-audit.test-helper.js";
 import { SecretService } from "../services/secret-service.js";
 import {
   EXPORTED_TABLES,
@@ -204,6 +204,46 @@ describe("db:export / db:import round trip", () => {
       expect(await restored.verifyAuditChain()).toEqual({ ok: true, rowsChecked: 4 });
     } finally {
       await restored.close();
+      fs.rmSync(path.dirname(destPath), { recursive: true, force: true });
+    }
+  });
+  it("audit rows whose every text field starts with U+FEFF survive export -> JSON -> import byte for byte and still verify", async () => {
+    const sourceStore = await SqliteStore.create(dbPath);
+    await sourceStore.writeAuditLog({ id: "a1", eventType: "auth.login", category: "auth", action: "login", outcome: "success" });
+    await sourceStore.writeAuditLog(bomAuditEntry("bom-plain"));
+    // With a U+FFFD in the row, the text is taken from the stored bytes (the exact reader): U+FEFF must survive that too.
+    await sourceStore.writeAuditLog(bomAuditEntry("bom-real-fffd", "\ufeffreal \ufffd"));
+    await sourceStore.writeAuditLog(bomAuditEntry("bom-surrogate", "\ufeffx \ud800"));
+    expect(await sourceStore.verifyAuditChain()).toEqual({ ok: true, rowsChecked: 4 });
+    await sourceStore.close();
+    const sourceRaw = new Database(dbPath, { readonly: true });
+    const sourceBytes = sqliteAuditBytes(sourceRaw);
+    sourceRaw.close();
+    expect(sourceBytes[2]!.resource_id).toBe(Buffer.from("\ufeffwf-1").toString("hex").toUpperCase());
+
+    const exporter = await openBackupAdapter();
+    const audit = await exporter.selectAll("audit_logs");
+    await exporter.close();
+    expect(audit.slice(1).every((row) => String(row.id).startsWith("\ufeff") && String(row.resource_id).startsWith("\ufeff"))).toBe(true);
+    expect(audit[2]!.message).toBe("\ufeffreal \ufffd");
+    const file = JSON.stringify({ audit });
+
+    const destPath = tempPath("dest-bom");
+    process.env.DB_SQLITE_PATH = destPath;
+    const dest = await openBackupAdapter();
+    await dest.insertRows("audit_logs", (JSON.parse(file) as { audit: Record<string, unknown>[] }).audit);
+    await dest.close();
+    const restored = await SqliteStore.create(destPath);
+    try {
+      expect(await restored.verifyAuditChain()).toEqual({ ok: true, rowsChecked: 4 });
+    } finally {
+      await restored.close();
+    }
+    const restoredRaw = new Database(destPath, { readonly: true });
+    try {
+      expect(sqliteAuditBytes(restoredRaw)).toEqual(sourceBytes);
+    } finally {
+      restoredRaw.close();
       fs.rmSync(path.dirname(destPath), { recursive: true, force: true });
     }
   });

@@ -50,3 +50,24 @@ export function appendLegacySqliteAuditRow(
   ).run(...keys.map((key) => (fields[key] === null ? null : wtf8(fields[key] as string))), prev, auditEntryHash(prev, fields));
   return fields;
 }
+
+/**
+ * A writeAuditLog input whose every free-text field (id included) starts with U+FEFF, the character a decoder without
+ * `ignoreBOM` drops. `message` may add a U+FFFD (or a lone surrogate, stored as U+FFFD), so the row is one the exact
+ * reader takes from its stored bytes.
+ */
+export function bomAuditEntry(id: string, message = "﻿plain") {
+  return {
+    id: `﻿${id}`, eventType: "﻿tag.create", category: "﻿workflow", action: "﻿create", outcome: "success" as const,
+    actorUserId: "﻿u-1", actorEmail: "﻿a@example.com", resourceType: "﻿tag", resourceId: "﻿wf-1",
+    projectId: "﻿default", ipAddress: "﻿127.0.0.1", userAgent: "﻿agent", metadata: "﻿note", message
+  };
+}
+
+/** The stored bytes of every audit_logs text column, by id, in rowid order (hex), to compare a copy byte for byte. */
+export function sqliteAuditBytes(db: Database.Database): Array<Record<string, string | null>> {
+  const columns = Object.values(COLUMNS);
+  return db.prepare(`SELECT ${columns.map((c) => `CASE WHEN ${c} IS NULL THEN NULL ELSE hex(CAST(${c} AS BLOB)) END AS ${c}`).join(", ")} FROM audit_logs ORDER BY rowid`).all() as Array<
+    Record<string, string | null>
+  >;
+}

@@ -20,7 +20,7 @@ import { MIGRATIONS } from "../db/migrations.js";
 import { PostgresStore, postgresPoolConfig, type PostgresStoreConfig } from "../db/postgres-store.js";
 import { noticePostgresSkipped, testPostgresUrl } from "../test-support/test-store.js";
 import { API_ROOT, CODE_SCHEMA_VERSION, DbCopyRefusal, parseDbCopyArgs, runDbCopy } from "./db-copy-core.js";
-import { appendLegacySqliteAuditRow } from "./legacy-audit.test-helper.js";
+import { appendLegacySqliteAuditRow, bomAuditEntry, sqliteAuditBytes } from "./legacy-audit.test-helper.js";
 
 const run = promisify(execFile);
 
@@ -332,6 +332,29 @@ describe.skipIf(!postgresUrl)("db:copy into Postgres", () => {
     const seqs = await q<{ id: string; seq: string }>(`SELECT id, seq::text AS seq FROM $S.audit_logs ORDER BY seq`);
     expect(seqs.map((row) => row.id)).toEqual(["a1", "surrogate", "nul", "two-nul", "two-surrogates", "a2", "a3"]);
     expect(seqs.map((row) => Number(row.seq))).toEqual([1, 2, 3, 4, 5, 6, 7]);
+  }, 120_000);
+
+  it("audit text starting with U+FEFF is copied byte for byte and verifies on both sides", async () => {
+    await sqliteSource(async (store) => {
+      await store.writeAuditLog({ id: "a1", eventType: "auth.login", category: "auth", action: "login", outcome: "success" });
+      await store.writeAuditLog(bomAuditEntry("bom-plain"));
+      await store.writeAuditLog(bomAuditEntry("bom-real-fffd", "\ufeffreal \ufffd"));
+      await store.writeAuditLog(bomAuditEntry("bom-surrogate", "\ufeffx \ud800"));
+      expect(await store.verifyAuditChain()).toEqual({ ok: true, rowsChecked: 4 });
+    });
+    const raw = new Database(sourcePath, { readonly: true });
+    const sourceBytes = sqliteAuditBytes(raw);
+    raw.close();
+    const { report } = await copy();
+    expect(report.audit.source).toEqual({ ok: true, rowsChecked: 4 });
+    expect(report.audit.target).toEqual({ ok: true, rowsChecked: 4 });
+    const columns = Object.keys(sourceBytes[0]!);
+    const targetBytes = await q<Record<string, string | null>>(
+      `SELECT ${columns.map((c) => `upper(encode(convert_to(${c === "created_at" ? `to_char(${c} AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')` : c}, 'UTF8'), 'hex')) AS ${c}`).join(", ")}
+         FROM $S.audit_logs ORDER BY seq`
+    );
+    expect(targetBytes).toEqual(sourceBytes);
+    expect(await (await targetStore()).verifyAuditChain()).toEqual({ ok: true, rowsChecked: 4 });
   }, 120_000);
 
   it("seq order is SQLite rowid order (not id or time order), and inserts after the copy continue it", async () => {
