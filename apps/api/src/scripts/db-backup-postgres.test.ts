@@ -233,4 +233,33 @@ describe.skipIf(!url)("db:export / db:import round trip [postgres]", () => {
     expect(report.audit?.restored).toEqual({ ok: true, rowsChecked: 2 });
     expect((await auditOrder(dstUrl)).map((r) => r.id)).toEqual(["p1", "p2"]);
   }, 120_000);
+
+  it("--merge into an empty audit log refuses a changed verdict; --allow-audit-change restores it with a warning", async () => {
+    const srcUrl = await freshDatabase("msrc");
+    const source = await openStore(srcUrl);
+    await source.writeAuditLog({ id: "m1", eventType: "e", category: "c", action: "a", outcome: "success" });
+    await source.writeAuditLog({ id: "m2", eventType: "e", category: "c", action: "a", outcome: "success" });
+    await source.close();
+    process.env.DB_TYPE = "postgres";
+    process.env.DB_POSTGRESDB_URL = srcUrl;
+    const exporter = await openBackupAdapter();
+    const dump = JSON.parse(JSON.stringify(await exportDump(exporter))) as BackupDump;
+    await exporter.close();
+    dump.tables.audit_logs![0]!.message = "approved by mallory";
+
+    const dstUrl = await freshDatabase("mdst");
+    await (await openStore(dstUrl)).close();
+    process.env.DB_POSTGRESDB_URL = dstUrl;
+    let importer = await openBackupAdapter();
+    const error = await importDump(importer, dump, { merge: true }).then(() => undefined, (e: unknown) => e as Error);
+    await importer.close();
+    expect(error).toBeInstanceOf(AuditVerdictMismatch);
+    expect(await auditOrder(dstUrl)).toEqual([]);
+
+    importer = await openBackupAdapter();
+    const report = await importDump(importer, dump, { merge: true, allowAuditChange: true });
+    await importer.close();
+    expect(report.audit?.changedWarning).toMatch(/^WARNING: .*before \(backup\) intact \(2 rows verified\), after \(restored\) broken at row m1/);
+    expect((await auditOrder(dstUrl)).map((r) => r.id)).toEqual(["m1", "m2"]);
+  }, 120_000);
 });

@@ -23,7 +23,8 @@ import {
   exportDump,
   importDump,
   openBackupAdapter,
-  type BackupDump
+  type BackupDump,
+  type ImportOptions
 } from "./db-shared.js";
 
 const KEY_A = crypto.randomBytes(32).toString("base64");
@@ -295,11 +296,11 @@ describe("db:export records the audit verdict; db:import refuses a restore that 
     }
   }
 
-  async function importInto(file: string, dump: BackupDump) {
+  async function importInto(file: string, dump: BackupDump, options: ImportOptions = {}) {
     process.env.DB_SQLITE_PATH = file;
     const adapter = await openBackupAdapter();
     try {
-      return await importDump(adapter, dump, { log });
+      return await importDump(adapter, dump, { log, ...options });
     } finally {
       await adapter.close();
     }
@@ -416,5 +417,88 @@ describe("db:export records the audit verdict; db:import refuses a restore that 
       "Note: this backup does not record its audit-chain verdict (written by an older db:export), so the restored chain is not compared with it. " +
         "Restored audit chain: broken at row a1"
     );
+  });
+  describe("--merge and --allow-audit-change", () => {
+    async function tamperedDump(): Promise<BackupDump> {
+      const store = await SqliteStore.create(sourcePath);
+      await store.writeAuditLog({ id: "a1", eventType: "e", category: "c", action: "a", outcome: "success" });
+      await store.writeAuditLog({ id: "a2", eventType: "e", category: "c", action: "a", outcome: "success" });
+      await store.close();
+      const dump = await exportFrom(sourcePath);
+      dump.tables.audit_logs![0]!.message = "approved by mallory";
+      return dump;
+    }
+
+    async function emptyDestination(): Promise<void> {
+      const store = await SqliteStore.create(destPath);
+      await store.close();
+    }
+
+    async function auditIds(): Promise<string[]> {
+      const raw = new Database(destPath, { readonly: true });
+      try {
+        return (raw.prepare(`SELECT id FROM audit_logs ORDER BY rowid`).all() as Array<{ id: string }>).map((row) => row.id);
+      } finally {
+        raw.close();
+      }
+    }
+
+    it("--merge into an empty audit log compares the verdict like a plain restore, and refuses (probe r5)", async () => {
+      const dump = await tamperedDump();
+      await emptyDestination();
+      const error = await importInto(destPath, dump, { merge: true }).then(() => undefined, (e: unknown) => e as Error);
+      expect(error).toBeInstanceOf(AuditVerdictMismatch);
+      expect(error!.message).toContain("pass --allow-audit-change to restore anyway");
+      expect(await auditIds()).toEqual([]);
+    });
+
+    it("--allow-audit-change restores a changed verdict on a plain and an empty-target merge import, and prints both verdicts and a WARNING", async () => {
+      const dump = await tamperedDump();
+      for (const merge of [false, true]) {
+        lines.length = 0;
+        fs.rmSync(destPath, { force: true });
+        await emptyDestination();
+        const report = await importInto(destPath, dump, { merge, allowAuditChange: true });
+        expect(await auditIds()).toEqual(["a1", "a2"]);
+        expect(lines.join("\n")).toMatch(/Audit chain before \(backup\): intact \(2 rows verified\)\. After \(restored\): broken at row a1/);
+        expect(report.audit?.changedWarning).toMatch(/^WARNING: .*before \(backup\) intact \(2 rows verified\), after \(restored\) broken at row a1/);
+      }
+    });
+
+    it("--allow-audit-change prints no warning when the verdict is unchanged", async () => {
+      const store = await SqliteStore.create(sourcePath);
+      await store.writeAuditLog({ id: "a1", eventType: "e", category: "c", action: "a", outcome: "success" });
+      await store.close();
+      const report = await importInto(destPath, await exportFrom(sourcePath), { allowAuditChange: true });
+      expect(report.audit?.changedWarning).toBeUndefined();
+    });
+
+    it("--merge into a non-empty audit log keeps merging, says the verdict was not compared, and shows the restored chain's verdict", async () => {
+      const dump = await tamperedDump();
+      await destinationWithData();
+      const report = await importInto(destPath, dump, { merge: true });
+      expect(await auditIds()).toEqual(["before", "a1", "a2"]);
+      expect(lines.join("\n")).toContain(
+        "Note: --merge keeps the audit rows already in the database, so the audit verdict was not compared with the backup's (intact (2 rows verified)). Restored audit chain: "
+      );
+      expect(report.audit?.restored).toBeDefined();
+      expect(report.audit?.changedWarning).toBeUndefined();
+    });
+
+    it("a failing table in --merge rolls the whole merge back", async () => {
+      const store = await SqliteStore.create(sourcePath);
+      await store.writeAuditLog({ id: "a1", eventType: "e", category: "c", action: "a", outcome: "success" });
+      await store.upsertWorkflow({ id: "wf-dup", name: "Dup", schemaVersion: "1.0.0", workflowVersion: 1, nodes: [], edges: [] } as never);
+      await store.close();
+      const dump = await exportFrom(sourcePath);
+      await destinationWithData();
+      // Tables restore in EXPORTED_TABLES order; a duplicate workflow id fails the merge after earlier tables went in.
+      const dup = { ...dump.tables.workflows![0]!, id: "wf-before" };
+      dump.tables.workflows = [dump.tables.workflows![0]!, dup];
+      const before = await destinationState();
+      const error = await importInto(destPath, dump, { merge: true }).then(() => undefined, (e: unknown) => e as Error);
+      expect(error?.message).toMatch(/Failed to insert into workflows/);
+      expect(await destinationState()).toEqual(before);
+    });
   });
 });

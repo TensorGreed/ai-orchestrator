@@ -18,7 +18,8 @@
  * before committing and must give the same verdict, except rows that become
  * unverifiable because this store cannot keep a character they hold (two or
  * more U+FFFD once U+0000 and lone surrogates become U+FFFD); otherwise the
- * restore rolls back. An older backup without the verdict restores as
+ * restore rolls back (--allow-audit-change restores anyway, printing both verdicts and a final WARNING). With --merge
+ * the verdict is compared only when audit_logs was empty before; otherwise a note says it was not. An older backup without the verdict restores as
  * before, with a printed note.
  */
 
@@ -37,6 +38,7 @@ interface Args {
   yes: boolean;
   sourceMasterKey: string | null;
   merge: boolean;
+  allowAuditChange: boolean;
 }
 
 type DumpFile = Omit<BackupDump, "format" | "formatVersion"> & { format: string; formatVersion: number };
@@ -46,6 +48,7 @@ function parseArgs(argv: string[]): Args {
   let yes = false;
   let sourceMasterKey: string | null = null;
   let merge = false;
+  let allowAuditChange = false;
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === "--in" || arg === "-i") {
@@ -60,6 +63,8 @@ function parseArgs(argv: string[]): Args {
       sourceMasterKey = next;
     } else if (arg === "--merge") {
       merge = true;
+    } else if (arg === "--allow-audit-change") {
+      allowAuditChange = true;
     } else if (arg === "--help" || arg === "-h") {
       printUsageAndExit(0);
     } else {
@@ -67,14 +72,14 @@ function parseArgs(argv: string[]): Args {
     }
   }
   if (!inPath) throw new Error("--in <file.json> is required");
-  return { in: inPath, yes, sourceMasterKey, merge };
+  return { in: inPath, yes, sourceMasterKey, merge, allowAuditChange };
 }
 
 function printUsageAndExit(code: number): never {
   console.log(
     [
       "Usage: pnpm --filter @ai-orchestrator/api db:import -- --in <file.json> --yes \\",
-      "         [--source-master-key <base64>] [--merge]",
+      "         [--source-master-key <base64>] [--merge] [--allow-audit-change]",
       "",
       "Options:",
       "  --in, -i <file.json>       Backup file produced by db:export.",
@@ -82,6 +87,8 @@ function printUsageAndExit(code: number): never {
       "  --source-master-key <b64>  Base64 master key the backup was encrypted with.",
       "                             Required when rotating SECRET_MASTER_KEY_BASE64.",
       "  --merge                    Insert without truncating (default: truncate first).",
+      "  --allow-audit-change       Restore even if the restored audit chain's verdict differs from the",
+      "                             one the backup recorded (both are printed, then a WARNING).",
       "  --help, -h                 Show this message.",
       "",
       "Default mode TRUNCATES every restored table before insert. The restore is one",
@@ -215,18 +222,21 @@ async function main() {
       console.log("--source-master-key matches current SECRET_MASTER_KEY_BASE64; skipping re-encryption.");
     }
 
-    const { totalInserted, totalTouched: totalReencrypted } = await importDump(adapter, dump as BackupDump, {
+    const report = await importDump(adapter, dump as BackupDump, {
       merge: args.merge,
+      allowAuditChange: args.allowAuditChange,
       prepare: (table, rows) => (willReencrypt ? reencryptRows(table, rows, sourceKey ?? destKey, destKey) : { rows, touched: 0 }),
       log: (line) => console.log(line),
       warn: (line) => console.warn(line)
     });
 
+    const { totalInserted, totalTouched: totalReencrypted } = report;
     console.log(
       `\nRestored ${totalInserted} rows from ${inPath} ` +
         `(backup schema v${dump.schemaVersion} -> destination v${destSchemaVersion}, ${adapter.kind})` +
         (totalReencrypted > 0 ? `. Re-encrypted ${totalReencrypted} secrets.` : "")
     );
+    if (report.audit?.changedWarning) console.log(report.audit.changedWarning);
   } finally {
     await adapter.close();
   }

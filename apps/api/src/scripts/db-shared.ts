@@ -49,6 +49,8 @@ export interface BackupAdapter {
   selectAll(table: string): Promise<Record<string, unknown>[]>;
   insertRows(table: string, rows: Record<string, unknown>[]): Promise<void>;
   truncate(table: string): Promise<void>;
+  /** Rows currently in `table` (inside the transaction, when one is open). */
+  countRows(table: string): Promise<number>;
   /**
    * Runs `fn` in one transaction: every read sees one snapshot (`readOnly`, for db:export), or every write commits
    * together and a throw rolls all of them back (db:import).
@@ -184,6 +186,10 @@ class SqliteAdapter implements BackupAdapter {
 
   async truncate(table: string): Promise<void> {
     this.db.prepare(`DELETE FROM ${quoteIdent(table)}`).run();
+  }
+
+  async countRows(table: string): Promise<number> {
+    return Number((this.db.prepare(`SELECT COUNT(*) AS n FROM ${quoteIdent(table)}`).get() as { n: number | bigint }).n);
   }
 
   async transaction<T>(fn: () => Promise<T>): Promise<T> {
@@ -340,6 +346,11 @@ class PostgresAdapter implements BackupAdapter {
     }
   }
 
+  async countRows(table: string): Promise<number> {
+    const r = await this.q<{ n: string | number }>(`SELECT COUNT(*) AS n FROM ${quoteIdent(table)}`);
+    return Number(r.rows[0]?.n ?? 0);
+  }
+
   async verifyAuditChain(): Promise<AuditChainResult> {
     // A cursor needs a transaction: inside the caller's when one is open, else a read-only one of its own.
     if (this.client) return verifyPostgresAuditChainByCursor(this.client);
@@ -447,6 +458,11 @@ export class AuditVerdictMismatch extends Error {
 
 export interface ImportOptions {
   merge?: boolean;
+  /**
+   * Restore even though the restored audit chain's verdict differs from the one the backup recorded (refused by
+   * default, rolled back). Both verdicts are logged and the report carries `audit.changedWarning`.
+   */
+  allowAuditChange?: boolean;
   /** Rows of a table as they go in (db:import re-encrypts secrets here); returns the rows and how many were changed. */
   prepare?: (table: string, rows: Record<string, unknown>[]) => { rows: Record<string, unknown>[]; touched: number };
   log?: (line: string) => void;
@@ -457,7 +473,13 @@ export interface ImportReport {
   totalInserted: number;
   totalTouched: number;
   /** The restored chain's verdict (when audit_logs was restored), and the rows that became unverifiable as allowed. */
-  audit?: { restored: AuditChainResult; recorded?: AuditVerdictRecord; becameUnverifiable: string[] };
+  audit?: {
+    restored: AuditChainResult;
+    recorded?: AuditVerdictRecord;
+    becameUnverifiable: string[];
+    /** Set when `allowAuditChange` let a changed verdict through: the line to print last. */
+    changedWarning?: string;
+  };
 }
 
 /**
@@ -471,6 +493,8 @@ export async function importDump(adapter: BackupAdapter, dump: BackupDump, optio
   const warn = options.warn ?? log;
   const restoresAudit = (dump.tables.audit_logs?.length ?? 0) > 0 || dump.auditVerdict !== undefined;
   return adapter.transaction(async () => {
+    // A merge into an empty audit log restores the whole chain, so it is compared like a plain restore.
+    const auditWasEmpty = !options.merge || !restoresAudit || (await adapter.countRows("audit_logs")) === 0;
     if (!options.merge) {
       log("Truncating destination tables...");
       // Reverse order, so a later non-cascading SQLite delete doesn't hit a parent before its children (CASCADE on
@@ -511,20 +535,28 @@ export async function importDump(adapter: BackupAdapter, dump: BackupDump, optio
       );
       return { totalInserted, totalTouched, audit: { restored, becameUnverifiable: [] } };
     }
-    if (options.merge) {
+    if (!auditWasEmpty) {
       log(
-        `Note: --merge keeps rows already in the database, so the restored audit chain is not compared with the backup's ` +
-          `verdict. Restored audit chain: ${verdictText(restored)}.`
+        `Note: --merge keeps the audit rows already in the database, so the audit verdict was not compared with the ` +
+          `backup's (${verdictText(auditVerdictFromRecord(dump.auditVerdict))}). Restored audit chain: ${verdictText(restored)}.`
       );
       return { totalInserted, totalTouched, audit: { restored, recorded: dump.auditVerdict, becameUnverifiable: [] } };
     }
     const recorded = auditVerdictFromRecord(dump.auditVerdict);
     const { problems, becameUnverifiable } = restoredAuditProblems(recorded, restored, explainedAuditRows(dump.tables.audit_logs ?? []));
+    if (problems.length > 0 && options.allowAuditChange) {
+      const changedWarning =
+        `WARNING: the restored audit chain differs from the backup's recorded verdict (--allow-audit-change): ` +
+        `before (backup) ${verdictText(recorded)}, after (restored) ${verdictText(restored)}; ${problems.join("; ")}. ` +
+        `Treat the chain as unproven and keep the backup file as the record.`;
+      log(`Audit chain before (backup): ${verdictText(recorded)}. After (restored): ${verdictText(restored)}.`);
+      return { totalInserted, totalTouched, audit: { restored, recorded: dump.auditVerdict, becameUnverifiable, changedWarning } };
+    }
     if (problems.length > 0) {
       throw new AuditVerdictMismatch(
         `The restored audit chain does not match the backup's recorded verdict (${verdictText(recorded)}): ${problems.join("; ")}. ` +
           `Nothing was restored (rolled back). Restore on the same kind of store and Node version that wrote the backup, ` +
-          `or investigate the backup file.`
+          `investigate the backup file, or pass --allow-audit-change to restore anyway.`
       );
     }
     log(`Audit chain: ${verdictText(restored)}, as the backup recorded (${verdictText(recorded)}).`);

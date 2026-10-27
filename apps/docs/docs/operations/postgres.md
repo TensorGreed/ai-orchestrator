@@ -167,7 +167,13 @@ would turn *broken* on Postgres, or a row that would become unverifiable without
   in one transaction and checks the restored chain before committing: it must give the recorded verdict (a broken
   chain broken at the same row), the only allowed change being the "two or more U+FFFD" rows above (on SQLite, Node 24
   stores a lone surrogate as U+FFFD). Otherwise nothing is restored. A backup from an older `db:export`, without the
-  verdict, restores as before and prints a note. `--merge` restores without that comparison.
+  verdict, restores as before and prints a note.
+- `--merge` compares the verdict the same way when the destination's audit log is empty. When it already holds rows,
+  the merge goes ahead, prints that the audit verdict was not compared, and shows the restored chain's verdict.
+- `--allow-audit-change` restores even when the verdict changed (a plain restore, or a `--merge` into an empty audit
+  log). It prints both verdicts, before (the backup's) and after (the restored chain's), and ends with a `WARNING`
+  line. Use it for a backup you know is broken (for example one taken on Node 20 and restored on Node 24), and keep
+  the backup file as the record.
 
 ```bash
 pnpm --filter @ai-orchestrator/api db:export -- --out backup.json
