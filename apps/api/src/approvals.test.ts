@@ -1312,7 +1312,8 @@ describe("who a resume runs as, and what it re-checks", () => {
     expect(entry.error).toMatch(/no longer run this workflow/);
     expect(nodeStatus(entry, "late")).not.toBe("success");
     expect(nodeStatus(entry, "stopped")).not.toBe("success");
-    expect(await context.store.getWorkflowExecutionState(run.executionId!)).toBeNull();
+    // The paused state is removed just after the final history is written (a second round trip on Postgres).
+    await waitFor(async () => (await context.store.getWorkflowExecutionState(run.executionId!)) === null);
     expect((await context.store.listApprovalRequestsForExecution(run.executionId!)).map((request) => request.status)).toEqual(["timed_out"]);
     expect(await refusals(context)).toEqual([expect.objectContaining({ outcome: "denied", metadata: expect.objectContaining({ reason: "user_not_found" }) })]);
   });
