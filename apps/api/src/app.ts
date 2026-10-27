@@ -8974,7 +8974,10 @@ export async function createApp(
       reply.code(409);
       return { error: "The approval was already decided, so the run is resuming. It cannot be canceled while it waits any more." };
     }
-    if (outcome === "not_cancelable") {
+    // The run this cancel aborted can record its own canceled ending (with its node results) before the write above
+    // commits: the cancel took effect, so it is not refused.
+    const recordedByRun = outcome === "not_cancelable" && Boolean(active) && (await store.getExecutionHistory(request.params.id))?.status === "canceled";
+    if (outcome === "not_cancelable" && !recordedByRun) {
       reply.code(409);
       return { error: "Only running or waiting executions can be canceled" };
     }

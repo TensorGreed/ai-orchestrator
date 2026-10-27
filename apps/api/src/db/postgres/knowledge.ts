@@ -235,11 +235,22 @@ export async function bm25SearchKnowledgeBase(ctx: PgContext, input: { knowledge
     [websearch, input.knowledgeBaseId, limit]
   );
   if (rows.length === 0) return [];
-  // Higher is better already; min-max normalise to [0, 1] as SQLite does with its negated bm25.
+  // Higher is better already; min-max normalise to [0, 1] as SQLite does with its negated bm25. ts_rank_cd is coarser
+  // than bm25 and often ties: tied best rows all score 1 (SQLite's distinct bm25 values put its best row at 1 too).
   const scores = rows.map((row) => toNum(row.raw_score));
   const min = Math.min(...scores);
   const max = Math.max(...scores);
-  const range = max - min || 1;
+  if (max === min) {
+    return rows.map((row) => ({
+      id: toStr(row.id),
+      sourceId: row.source_id ? toStr(row.source_id) : null,
+      chunkIndex: toNum(row.chunk_index),
+      content: toStr(row.content),
+      metadata: metadataOf(row.metadata_json),
+      score: 1
+    }));
+  }
+  const range = max - min;
   return rows.map((row, index) => ({
     id: toStr(row.id),
     sourceId: row.source_id ? toStr(row.source_id) : null,

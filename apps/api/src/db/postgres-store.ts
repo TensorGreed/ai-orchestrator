@@ -186,8 +186,12 @@ export class PostgresStore implements Store {
     }
   }
 
+  private closing: Promise<void> | undefined;
+
   async close(): Promise<void> {
-    await this.pool.end();
+    // Idempotent like SqliteStore.close: the app's onClose and a caller may both close it; both wait for the end.
+    this.closing ??= this.pool.end();
+    await this.closing;
   }
 
   /**
