@@ -44,6 +44,42 @@ describe("attachPoolErrorHandler", () => {
     for (const fn of listeners.connect ?? []) fn({ on: (event: string) => void clientListeners.push(event) });
     expect(clientListeners).toEqual(["error"]);
   });
+
+  function capture(logIntervalMs: number) {
+    const listeners: Array<(error: Error) => void> = [];
+    const pool = { on: (event: string, fn: (error: Error) => void) => void (event === "error" && listeners.push(fn)) };
+    const lines: Array<Record<string, unknown>> = [];
+    attachPoolErrorHandler(pool as never, { logIntervalMs, logger: { warn: (_m, fields) => void lines.push(fields ?? {}) } });
+    return { lines, fail: (message: string) => listeners.forEach((fn) => fn(new Error(message))) };
+  }
+
+  it("masks the password in every URL and conninfo form", () => {
+    const { lines, fail } = capture(0);
+    for (const message of [
+      "connect to postgres://user:p@ss@host:5432/db failed",
+      "connect to postgres://:pw1@host/db failed",
+      "host=db user=l2m password=hunter2 dbname=x refused",
+      "host=db password='two words' dbname=x refused"
+    ]) {
+      fail(message);
+    }
+    const text = JSON.stringify(lines);
+    for (const secret of ["p@ss", "ss@", "pw1", "hunter2", "two words", "words"]) expect(text).not.toContain(secret);
+    expect(text).toContain("***@host");
+    expect(text).toContain("dbname=x");
+    expect(lines).toHaveLength(4);
+  });
+
+  it("reports a burst's held-back count when the interval ends, without another error", async () => {
+    const { lines, fail } = capture(40);
+    fail("first");
+    fail("second");
+    fail("third");
+    expect(lines).toHaveLength(1);
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    expect(lines).toHaveLength(2);
+    expect(lines[1]).toMatchObject({ heldBack: 2 });
+  });
 });
 
 run("Postgres connections the server ends", () => {

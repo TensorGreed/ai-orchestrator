@@ -33,9 +33,11 @@ const consoleLogger: PoolErrorLogger = {
   warn: (message, fields) => console.warn(fields ? `${message} ${JSON.stringify(fields)}` : message)
 };
 
-/** A connection string's password, if a message ever carries one. */
+/** A connection string's password, if a message ever carries one: URL userinfo (also an empty user, or a password containing `@`) and `password=` key/value conninfo. */
 function withoutPassword(message: string): string {
-  return message.replace(/(\/\/[^:/@\s]+:)[^@\s]*@/g, "$1***@");
+  return message
+    .replace(/(\/\/[^:/@\s]*:)\S*@/g, "$1***@")
+    .replace(/(password\s*=\s*)(?:'(?:[^'\\]|\\.)*'|\S+)/gi, "$1***");
 }
 
 type ErrorEmitter = { on(event: "error", listener: (error: Error) => void): unknown };
@@ -46,13 +48,9 @@ export function attachPoolErrorHandler(pool: Pool, options: PoolErrorOptions = {
   const now = options.now ?? Date.now;
   let lastLoggedAt: number | null = null;
   let heldBack = 0;
-  pool.on("error", (error: Error & { code?: string }) => {
-    const at = now();
-    if (lastLoggedAt !== null && at - lastLoggedAt < interval) {
-      heldBack += 1;
-      return;
-    }
-    lastLoggedAt = at;
+  let flushTimer: NodeJS.Timeout | null = null;
+  const log = (error: Error & { code?: string }) => {
+    lastLoggedAt = now();
     logger.warn("Postgres ended an idle pooled connection; the pool opens a new one on the next query", {
       pool: options.label ?? "postgres",
       ...(error.code ? { code: error.code } : {}),
@@ -60,6 +58,20 @@ export function attachPoolErrorHandler(pool: Pool, options: PoolErrorOptions = {
       heldBack
     });
     heldBack = 0;
+  };
+  pool.on("error", (error: Error & { code?: string }) => {
+    const at = now();
+    if (lastLoggedAt !== null && at - lastLoggedAt < interval) {
+      heldBack += 1;
+      // The burst may be the last error: report its count when the interval ends instead of waiting for another one.
+      flushTimer ??= setTimeout(() => {
+        flushTimer = null;
+        if (heldBack > 0) log(error);
+      }, Math.max(0, interval - (at - lastLoggedAt)));
+      flushTimer.unref?.();
+      return;
+    }
+    log(error);
   });
   pool.on("connect", (client) => {
     (client as unknown as ErrorEmitter).on("error", () => undefined);
