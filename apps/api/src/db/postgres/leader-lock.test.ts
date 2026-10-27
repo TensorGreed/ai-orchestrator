@@ -5,12 +5,12 @@
  * server keeps the idle session, and its lock, for about two hours. Postgres only (skipped without TEST_POSTGRES_URL).
  */
 import net from "node:net";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { postgresPoolConfig } from "../postgres-store.js";
 import { createTestStore, noticePostgresSkipped, testPostgresUrl, testStorePool, type TestStore } from "../../test-support/test-store.js";
 import type { Store } from "../store.js";
 import { LeaderElectionService } from "../../services/leader-election-service.js";
-import { leaderSessionSettings, PgLeaderLock } from "./leader-lock.js";
+import { describeRefusedSettings, leaderSessionSettings, PgLeaderLock, resetLeaderSettingNotices } from "./leader-lock.js";
 
 describe("leaderSessionSettings", () => {
   it("sizes the server-side liveness settings from the renew interval", () => {
@@ -22,6 +22,26 @@ describe("leaderSessionSettings", () => {
     });
     // A short interval keeps a floor, so a busy event loop does not end a live leader's session.
     expect(Object.fromEntries(leaderSessionSettings(100))).toMatchObject({ idle_session_timeout: "5000", tcp_keepalives_idle: "1" });
+  });
+});
+
+describe("describeRefusedSettings", () => {
+  it("says what is lost for each refused set (PostgreSQL 13 refuses only idle_session_timeout: info, keepalives still apply)", () => {
+    const pg13 = describeRefusedSettings(["idle_session_timeout"], 10_000);
+    expect(pg13.level).toBe("info");
+    expect(pg13.message).toMatch(/keepalives still end a lost leader's session/);
+    expect(pg13.message).toMatch(/about 50 s/);
+    expect(pg13.message).not.toMatch(/two hours/);
+
+    const keepalives = describeRefusedSettings(["tcp_keepalives_idle", "tcp_keepalives_count"], 10_000);
+    expect(keepalives.level).toBe("warn");
+    expect(keepalives.message).toMatch(/idle_session_timeout still ends a lost leader's session after 30 s/);
+
+    const both = describeRefusedSettings(["idle_session_timeout", "tcp_keepalives_idle", "tcp_keepalives_interval", "tcp_keepalives_count"], 10_000);
+    expect(both.level).toBe("warn");
+    expect(both.message).toMatch(/server's own keepalive default.*about two hours/);
+
+    expect(describeRefusedSettings(["no_such_leader_setting"], 10_000)).toMatchObject({ level: "warn" });
   });
 });
 
@@ -56,6 +76,8 @@ async function startProxy(target: { host: string; port: number }) {
 run("Postgres leader lock liveness", () => {
   let test: TestStore | undefined;
   const cleanups: Array<() => Promise<void>> = [];
+
+  beforeEach(() => resetLeaderSettingNotices());
 
   afterEach(async () => {
     while (cleanups.length > 0) await cleanups.pop()!().catch(() => undefined);
@@ -144,6 +166,10 @@ run("Postgres leader lock liveness", () => {
       if (Date.now() > deadline) throw new Error("the lock never came back on a new connection");
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
+    expect(warnings).toHaveLength(1);
+    // Another lock in the same process (a second store, a restart of the election) does not log it again.
+    const again = make("B", config.port);
+    expect(await again.check()).toBe(false);
     expect(warnings).toHaveLength(1);
   }, 30_000);
 });

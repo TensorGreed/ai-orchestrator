@@ -3558,7 +3558,10 @@ export async function createApp(
             holderId: leaderInstanceId,
             ttlMs: config.HA_LEASE_TTL_MS,
             renewIntervalMs: config.HA_RENEW_INTERVAL_MS,
-            logger: { warn: (message, fields) => app.log.warn(fields ?? {}, message) }
+            logger: {
+              warn: (message, fields) => app.log.warn(fields ?? {}, message),
+              info: (message, fields) => app.log.info(fields ?? {}, message)
+            }
           })
         : config.HA_ENABLED
           ? NEVER_LEAD

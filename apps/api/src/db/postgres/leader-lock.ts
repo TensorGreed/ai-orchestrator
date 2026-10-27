@@ -9,9 +9,10 @@
  * The server only frees the lock once it ends the old session, and by default it notices a lost client (a network
  * partition, a host that vanished without closing its sockets) after about two hours. So the dedicated connection
  * asks the server to end it much sooner: `idle_session_timeout` (PostgreSQL 14+) a few renew intervals long, which a
- * healthy leader never reaches because each check runs a query, and short TCP keepalives on both ends. A server or
- * pooler that refuses one of these settings is warned about once and the lock still works; it then frees a lost
- * leader's lock only when it notices the dead link itself.
+ * healthy leader never reaches because each check runs a query, and short TCP keepalives on both ends. Either one
+ * alone still frees a lost leader's lock within a few renew intervals. A server or pooler that refuses settings is
+ * told about once per process (describeRefusedSettings says what is lost) and the lock still works; with both refused
+ * it frees a lost leader's lock only when its own keepalive default notices the dead link (about two hours on Linux).
  *
  * While the lock is held the connection also runs a liveness query (`SELECT 1`) every renew interval on its own timer,
  * independent of the election's checks, so a leader whose start-up (or any other work between checks) runs longer than
@@ -55,8 +56,8 @@ export interface PgLeaderLockOptions {
   checkTimeoutMs?: number;
   /** How often the lock is checked (HA_RENEW_INTERVAL_MS); sizes the server-side liveness settings. Default 10 s. */
   renewIntervalMs?: number;
-  /** Told once when the server refuses a liveness setting. */
-  logger?: { warn: (message: string, fields?: Record<string, unknown>) => void };
+  /** Told once per process when the server refuses a liveness setting (info when little is lost, else warn). */
+  logger?: { warn: (message: string, fields?: Record<string, unknown>) => void; info?: (message: string, fields?: Record<string, unknown>) => void };
   /** Test seam: the session settings applied on each new connection (default: leaderSessionSettings). */
   sessionSettings?: Array<[name: string, value: string]>;
 }
@@ -79,6 +80,65 @@ export function leaderSessionSettings(renewIntervalMs: number): Array<[name: str
 /** A floor for idle_session_timeout, so a short renew interval and a busy event loop do not end a live leader's session. */
 const MIN_IDLE_SESSION_TIMEOUT_MS = 5_000;
 
+const KEEPALIVE_SETTINGS = new Set(["tcp_keepalives_idle", "tcp_keepalives_interval", "tcp_keepalives_count"]);
+
+/**
+ * What a refused set of liveness settings costs, as one log line. Only idle_session_timeout refused (PostgreSQL 13 and
+ * older): keepalives still end a lost leader's session (about 4 renew intervals: one of silence, then three probes),
+ * so this is info. Keepalives refused: idle_session_timeout still ends it after 3 renew intervals. Both refused: only
+ * the server's own keepalive default notices a dead link.
+ */
+export function describeRefusedSettings(
+  refusedNames: readonly string[],
+  renewIntervalMs: number
+): { level: "info" | "warn"; message: string } {
+  const refused = new Set(refusedNames);
+  const known = refusedNames.every((name) => name === "idle_session_timeout" || KEEPALIVE_SETTINGS.has(name));
+  const idleLost = refused.has("idle_session_timeout");
+  const keepalivesLost = [...KEEPALIVE_SETTINGS].some((name) => refused.has(name));
+  const keepaliveBoundS = Math.ceil((4 * Math.max(1_000, renewIntervalMs)) / 1000);
+  const idleBoundS = Math.ceil(Math.max(3 * renewIntervalMs, MIN_IDLE_SESSION_TIMEOUT_MS) / 1000);
+  const tail = ` Refused: ${refusedNames.join(", ")}.`;
+  if (known && idleLost && !keepalivesLost) {
+    return {
+      level: "info",
+      message:
+        `Postgres does not support idle_session_timeout on the leader connection (PostgreSQL 13 or older); TCP keepalives ` +
+        `still end a lost leader's session, so another instance takes over within about ${keepaliveBoundS + 10} s. Only a ` +
+        `middlebox that keeps a dead TCP connection open is not covered.` + tail
+    };
+  }
+  if (known && keepalivesLost && !idleLost) {
+    return {
+      level: "warn",
+      message:
+        `Postgres refused the leader connection's TCP keepalive settings; idle_session_timeout still ends a lost leader's ` +
+        `session after ${idleBoundS} s, so another instance takes over within about ${idleBoundS + 10} s.` + tail
+    };
+  }
+  if (known && idleLost && keepalivesLost) {
+    return {
+      level: "warn",
+      message:
+        `Postgres refused both idle_session_timeout and the TCP keepalive settings on the leader connection; if the ` +
+        `leader's host or network is lost, its lock is freed only when the server's own keepalive default notices the ` +
+        `dead link (about two hours on Linux).` + tail
+    };
+  }
+  return {
+    level: "warn",
+    message: `Postgres refused a leader-connection setting; the lock still works, with the remaining settings.` + tail
+  };
+}
+
+/** Refusal notices already logged in this process (one line per kind, not per lock or connection). */
+const loggedRefusals = new Set<string>();
+
+/** Test seam: forget the notices already logged. */
+export function resetLeaderSettingNotices(): void {
+  loggedRefusals.clear();
+}
+
 export class PgLeaderLock implements LeaderLock {
   private client: pg.Client | null = null;
   private held = false;
@@ -86,7 +146,6 @@ export class PgLeaderLock implements LeaderLock {
   private readonly listeners: Array<() => void> = [];
   /** The check in flight: checks never overlap, so there is never a second connection asking for the lock. */
   private checking: Promise<boolean> | null = null;
-  private warnedSettings = false;
   /** The liveness timer of the current connection; its query uses the check slot, so it never overlaps itself or a check. */
   private heartbeat: NodeJS.Timeout | null = null;
 
@@ -230,13 +289,15 @@ export class PgLeaderLock implements LeaderLock {
         refused.push({ setting: name, error: error instanceof Error ? error.message : String(error) });
       }
     }
-    if (refused.length > 0 && !this.warnedSettings) {
-      this.warnedSettings = true;
-      this.options.logger?.warn(
-        "Postgres refused a leader-connection setting; if the leader's host or network is lost, its lock is only freed when the server notices the dead link",
-        { refused }
-      );
-    }
+    if (refused.length === 0) return;
+    const names = refused.map((entry) => entry.setting);
+    const key = [...names].sort().join(",");
+    if (loggedRefusals.has(key)) return;
+    loggedRefusals.add(key);
+    const { level, message } = describeRefusedSettings(names, renewIntervalMs);
+    const logger = this.options.logger;
+    if (level === "info" && logger?.info) logger.info(message, { refused });
+    else logger?.warn(message, { refused });
   }
 
   /** Forgets the connection (and the lock with it); tells listeners when a held lock was lost. */
