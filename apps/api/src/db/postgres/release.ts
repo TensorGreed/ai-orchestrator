@@ -269,7 +269,7 @@ async function publishOn(client: PoolClient, release: Omit<WorkflowReleaseRecord
   if (current !== expectedPrevious) return null;
   const pinned = await client.query(`UPDATE workflow_versions SET pinned = 1 WHERE workflow_id = $1 AND version = $2`, [release.workflowId, release.version]);
   if ((pinned.rowCount ?? 0) === 0) return null;
-  await client.query(`UPDATE workflows SET published_version = $1 WHERE id = $2`, [release.version, release.workflowId]);
+  await client.query(`UPDATE workflows SET published_version = $1, unpublished_at = NULL WHERE id = $2`, [release.version, release.workflowId]);
   await client.query(
     `INSERT INTO workflow_releases (id, workflow_id, version, workflow_hash, previous_version, replay_run_id, verdict, reason, gate_reasons_json, approval_json, published_at, published_by, published_by_user_id)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
@@ -366,6 +366,48 @@ export async function publishWorkflowVersion(
     if (error === refusal) return null;
     throw error;
   }
+}
+
+/**
+ * Unpublish: the workflow row is locked first, so of two concurrent calls the second sees no published version and
+ * is refused (null), leaving nothing behind.
+ */
+export async function unpublishWorkflowVersion(ctx: PgContext, entry: Parameters<Store["unpublishWorkflowVersion"]>[0]): Promise<WorkflowReleaseRecord | null> {
+  return await ctx.withTransaction(async (client) => {
+    const current = await readPublishedVersion(client, entry.workflowId, true);
+    if (current === null) return null;
+    const released = await client.query(
+      `SELECT workflow_hash FROM workflow_releases WHERE workflow_id = $1 AND version = $2 AND verdict <> 'unpublished' ORDER BY published_at DESC, id DESC LIMIT 1`,
+      [entry.workflowId, current]
+    );
+    const record: WorkflowReleaseRecord = {
+      id: entry.id,
+      workflowId: entry.workflowId,
+      version: current,
+      workflowHash: released.rows[0] ? String((released.rows[0] as Row).workflow_hash) : "",
+      previousVersion: current,
+      replayRunId: null,
+      verdict: "unpublished",
+      reason: entry.reason,
+      gateReasons: [],
+      approval: null,
+      publishedAt: entry.unpublishedAt,
+      publishedBy: entry.unpublishedBy,
+      publishedByUserId: entry.unpublishedByUserId
+    };
+    await client.query(`UPDATE workflows SET published_version = NULL, unpublished_at = $1 WHERE id = $2`, [entry.unpublishedAt, entry.workflowId]);
+    await client.query(
+      `INSERT INTO workflow_releases (id, workflow_id, version, workflow_hash, previous_version, replay_run_id, verdict, reason, gate_reasons_json, approval_json, published_at, published_by, published_by_user_id)
+       VALUES ($1, $2, $3, $4, $5, NULL, 'unpublished', $6, '[]', NULL, $7, $8, $9)`,
+      [record.id, record.workflowId, record.version, record.workflowHash, record.previousVersion, record.reason, record.publishedAt, record.publishedBy, record.publishedByUserId]
+    );
+    return record;
+  });
+}
+
+export async function getUnpublishedAt(ctx: PgContext, workflowId: string): Promise<string | null> {
+  const row = await ctx.queryOne<Row>(`SELECT unpublished_at FROM workflows WHERE id = $1`, [workflowId]);
+  return row && row.unpublished_at !== null && row.unpublished_at !== undefined ? String(row.unpublished_at) : null;
 }
 
 export async function listReplayRunIdsForHash(ctx: PgContext, workflowId: string, workflowHash: string): Promise<string[]> {

@@ -784,6 +784,24 @@ export interface Store {
    * there first) or the version row is gone.
    */
   publishWorkflowVersion(release: Omit<WorkflowReleaseRecord, "previousVersion">, expectedPrevious: number | null): Promise<WorkflowReleaseRecord | null>;
+  /**
+   * Takes the published version down and records it, in one transaction: the workflow row is read and changed
+   * together (Postgres: `SELECT … FOR UPDATE`), so of two concurrent calls (two API instances too) one unpublishes
+   * and the other is refused. Clears the published version, marks when it was unpublished (production then runs the
+   * draft, gated or not) and appends an `unpublished` history entry whose `version` and `previousVersion` are the
+   * version that was live and whose hash is the one that version was released with. Null when nothing is published.
+   * A publish clears the mark again.
+   */
+  unpublishWorkflowVersion(entry: {
+    id: string;
+    workflowId: string;
+    reason: string | null;
+    unpublishedAt: string;
+    unpublishedBy: string | null;
+    unpublishedByUserId: string | null;
+  }): Promise<WorkflowReleaseRecord | null>;
+  /** When the published version was taken down (see `unpublishWorkflowVersion`); null when it was not, or it was published since. */
+  getUnpublishedAt(workflowId: string): Promise<string | null>;
 
   // ---- RBAC: project roles, custom roles, SSO group mappings
 

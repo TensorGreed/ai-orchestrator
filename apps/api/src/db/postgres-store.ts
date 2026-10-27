@@ -1019,6 +1019,12 @@ export class PostgresStore implements Store {
   async publishWorkflowVersion(...args: Parameters<Store["publishWorkflowVersion"]>): ReturnType<Store["publishWorkflowVersion"]> {
     return release.publishWorkflowVersion(this.ctx, ...args);
   }
+  async unpublishWorkflowVersion(...args: Parameters<Store["unpublishWorkflowVersion"]>): ReturnType<Store["unpublishWorkflowVersion"]> {
+    return release.unpublishWorkflowVersion(this.ctx, ...args);
+  }
+  async getUnpublishedAt(...args: Parameters<Store["getUnpublishedAt"]>): ReturnType<Store["getUnpublishedAt"]> {
+    return release.getUnpublishedAt(this.ctx, ...args);
+  }
   async countProjectMemberships(...args: Parameters<Store["countProjectMemberships"]>): ReturnType<Store["countProjectMemberships"]> {
     return auth.countProjectMemberships(this.ctx, ...args);
   }

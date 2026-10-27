@@ -1986,6 +1986,19 @@ export const MIGRATIONS: Migration[] = [
     down: `
       DROP INDEX IF EXISTS ${ONE_PENDING_APPROVAL_INDEX};
     `
+  },
+  {
+    version: 42,
+    description: "Unpublish — when a workflow's published version was taken down, so production runs the draft",
+    // Set by an unpublish, cleared by the next publish. With a release gate on, production runs the draft only while it
+    // is set: a workflow created again under a gated id has no published version and no mark, so it still fails closed.
+    // SQLite's embedded migrate() adds the same column.
+    up: `
+      ALTER TABLE workflows ADD COLUMN IF NOT EXISTS unpublished_at TIMESTAMPTZ;
+    `,
+    down: `
+      ALTER TABLE workflows DROP COLUMN IF EXISTS unpublished_at;
+    `
   }
 ];
 

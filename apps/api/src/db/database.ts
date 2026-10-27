@@ -3707,6 +3707,9 @@ export class SqliteStore implements Store {
       }
     });
 
+    // Migration 42 — when the published version was taken down (unpublish): production runs the draft, gated or not.
+    this.ensureColumn("workflows", "unpublished_at", "TEXT");
+
     this.exec(`CREATE INDEX IF NOT EXISTS idx_workflows_project_id ON workflows(project_id)`);
     this.exec(`CREATE INDEX IF NOT EXISTS idx_workflows_folder_id ON workflows(folder_id)`);
     this.exec(`CREATE INDEX IF NOT EXISTS idx_secrets_project_id ON secrets(project_id)`);
@@ -8176,7 +8179,7 @@ export class SqliteStore implements Store {
       if (current !== expectedPrevious) return null;
       const pinned = this.db.prepare(`UPDATE workflow_versions SET pinned = 1 WHERE workflow_id = ? AND version = ?`).run(release.workflowId, release.version);
       if (pinned.changes === 0) return null;
-      this.db.prepare(`UPDATE workflows SET published_version = ? WHERE id = ?`).run(release.version, release.workflowId);
+      this.db.prepare(`UPDATE workflows SET published_version = ?, unpublished_at = NULL WHERE id = ?`).run(release.version, release.workflowId);
       this.db
         .prepare(
           `INSERT INTO workflow_releases (id, workflow_id, version, workflow_hash, previous_version, replay_run_id, verdict, reason, gate_reasons_json, approval_json, published_at, published_by, published_by_user_id)
@@ -8257,6 +8260,48 @@ export class SqliteStore implements Store {
   }
 
   /** The hashes `version` had when it was released (any release, rollbacks included). */
+  async unpublishWorkflowVersion(entry: Parameters<Store["unpublishWorkflowVersion"]>[0]): Promise<WorkflowReleaseRecord | null> {
+    return this.transaction(() => {
+      const current = this.getPublishedVersionSync(entry.workflowId);
+      if (current === null) return null;
+      const released = this.queryOne<{ workflow_hash: string }>(
+        `SELECT workflow_hash FROM workflow_releases WHERE workflow_id = ? AND version = ? AND verdict <> 'unpublished' ORDER BY published_at DESC, id DESC LIMIT 1`,
+        [entry.workflowId, current]
+      );
+      const changed = this.db
+        .prepare(`UPDATE workflows SET published_version = NULL, unpublished_at = ? WHERE id = ? AND published_version = ?`)
+        .run(entry.unpublishedAt, entry.workflowId, current);
+      if (changed.changes === 0) return null;
+      const record: WorkflowReleaseRecord = {
+        id: entry.id,
+        workflowId: entry.workflowId,
+        version: current,
+        workflowHash: released ? toString(released.workflow_hash) : "",
+        previousVersion: current,
+        replayRunId: null,
+        verdict: "unpublished",
+        reason: entry.reason,
+        gateReasons: [],
+        approval: null,
+        publishedAt: entry.unpublishedAt,
+        publishedBy: entry.unpublishedBy,
+        publishedByUserId: entry.unpublishedByUserId
+      };
+      this.db
+        .prepare(
+          `INSERT INTO workflow_releases (id, workflow_id, version, workflow_hash, previous_version, replay_run_id, verdict, reason, gate_reasons_json, approval_json, published_at, published_by, published_by_user_id)
+           VALUES (?, ?, ?, ?, ?, NULL, 'unpublished', ?, '[]', NULL, ?, ?, ?)`
+        )
+        .run(record.id, record.workflowId, record.version, record.workflowHash, record.previousVersion, record.reason, record.publishedAt, record.publishedBy, record.publishedByUserId);
+      return record;
+    });
+  }
+
+  async getUnpublishedAt(workflowId: string): Promise<string | null> {
+    const row = this.queryOne<{ unpublished_at: string | null }>(`SELECT unpublished_at FROM workflows WHERE id = ?`, [workflowId]);
+    return row?.unpublished_at ? toString(row.unpublished_at) : null;
+  }
+
   async listReleasedVersionHashes(workflowId: string, version: number): Promise<string[]> {
     return this.queryAll<{ workflow_hash: string }>(`SELECT DISTINCT workflow_hash FROM workflow_releases WHERE workflow_id = ? AND version = ?`, [workflowId, version]).map((row) =>
       toString(row.workflow_hash)
