@@ -350,6 +350,43 @@ run("two API instances on one Postgres database", () => {
     }
   }, 60_000);
 
+  it("a trigger the other instance disconnected does not run on the leader before the next sync", async () => {
+    const [a, b] = await start(2);
+    const watchDir = fs.mkdtempSync(path.join(os.tmpdir(), "l2m-two-instance-watch-"));
+    tempDirs.push(watchDir);
+    fs.writeFileSync(path.join(watchDir, "existing.txt"), "before");
+    const watch = node("watch", "file_trigger", { watchPath: watchDir, pollIntervalSeconds: 1, events: ["created"], active: true });
+    const connected: Workflow = { ...workflow("wf-file", watch), nodes: [watch, node("out", "output", { responseTemplate: "ran" })] };
+    await a!.store.upsertWorkflow(connected);
+    await a!.triggers.syncAllWorkflows();
+    await b!.triggers.syncAllWorkflows();
+    const activeTriggers = (instance: Instance) => (instance.triggers as unknown as { active: Map<string, unknown> }).active.size;
+    const leader = await until(() => [a!, b!].find((instance) => activeTriggers(instance) > 0), "a leader with the trigger");
+    const other = leader === a ? b! : a!;
+    await until(async () => await leader.store.getTriggerState("wf-file", "watch"), "the trigger's baseline");
+    const skipped = vi.spyOn(leader.app.log, "debug");
+
+    // Saved through the other instance with the trigger node left active but no longer wired to anything.
+    const cookie = await loginAs(other, "admin", "admin");
+    const saved = await other.app.inject({ method: "PUT", url: "/api/workflows/wf-file", headers: { cookie }, payload: { ...connected, edges: [] } });
+    expect(saved.statusCode).toBe(200);
+    expect(activeTriggers(leader)).toBe(1); // the leader still has it until its next sync
+    fs.writeFileSync(path.join(watchDir, "new.txt"), "hello");
+
+    await until(
+      () => skipped.mock.calls.some((call) => String(call[1] ?? "").includes("Skipped triggered execution")),
+      "the fire to be skipped",
+      10_000
+    );
+    const pool = testStorePool(primary!);
+    try {
+      const rows = await pool.query(`SELECT id FROM execution_history WHERE workflow_id = 'wf-file'`);
+      expect(rows.rows).toEqual([]);
+    } finally {
+      await pool.end();
+    }
+  }, 60_000);
+
   it("only the leader re-queues stuck jobs", async () => {
     const [a, b] = await start(2, {}, { queue: true });
     await until(async () => (await a!.store.getLease("primary"))?.holderId, "the lease row");

@@ -107,7 +107,7 @@ import { AuthService, type SafeUser, type UserRole } from "./services/auth-servi
 import { SchedulerService } from "./services/scheduler-service";
 import { RunWriteChains } from "./services/run-write-chains.js";
 import { NonRetryableQueueError, QueueService } from "./services/queue-service";
-import { TriggerService } from "./services/trigger-service";
+import { isConnectedEntrypoint, TriggerService } from "./services/trigger-service";
 import { ApiKeyService } from "./services/api-key-service";
 import { MfaService } from "./services/mfa-service";
 import { SamlService, type SamlAssertionProfile } from "./services/saml-service";
@@ -2996,12 +2996,21 @@ export async function createApp(
     // re-registered. Like a schedule, the published version when there is one.
     const workflow = await productionWorkflow(input.workflow.id);
     const triggerNode = workflow?.nodes.find((candidate) => candidate.id === input.node.id && candidate.type === input.node.type);
-    if (!workflow || !triggerNode || asRecord(triggerNode.config).active === false) {
+    // Turned off or no longer wired in since it was registered (a save through another instance, before the next
+    // sync unregisters it): an expected state, so a debug line.
+    if (workflow && triggerNode && (asRecord(triggerNode.config).active === false || !isConnectedEntrypoint(workflow, triggerNode.id))) {
+      app.log.debug(
+        { workflowId: workflow.id, nodeId: triggerNode.id, reason: asRecord(triggerNode.config).active === false ? "off" : "not connected" },
+        "Skipped triggered execution because the trigger is off or no longer connected"
+      );
+      return;
+    }
+    if (!workflow || !triggerNode) {
       app.log.warn(
         {
           workflowId: input.workflow.id,
           nodeId: input.node.id,
-          reason: workflow ? "the trigger is no longer in the workflow, or is off" : await releaseService.productionRefusal(input.workflow.id) ?? "not found"
+          reason: workflow ? "the trigger is no longer in the workflow" : await releaseService.productionRefusal(input.workflow.id) ?? "not found"
         },
         "Skipped triggered execution because production has no workflow with this trigger to run"
       );

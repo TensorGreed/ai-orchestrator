@@ -78,7 +78,8 @@ function isActive(node: WorkflowNode): boolean {
   return config.active !== false;
 }
 
-function isConnectedEntrypoint(workflow: Workflow, nodeId: string): boolean {
+/** A trigger node with no incoming execution edge and at least one outgoing one: the only kind that is registered. */
+export function isConnectedEntrypoint(workflow: Workflow, nodeId: string): boolean {
   let incoming = 0;
   let outgoing = 0;
   for (const edge of workflow.edges.filter(isExecutionEdge)) {
