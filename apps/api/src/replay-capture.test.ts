@@ -393,6 +393,49 @@ describe("sampling and limits", () => {
     expect(await decide()).not.toBeNull();
   });
 
+  it("counts a capture that commits while the day's count is being read once, never zero times", async () => {
+    const context = await createTestContext();
+    await save(context, hookWorkflow("wf-race"));
+    await context.store.saveReplayCaptureSettings({ workflowId: "wf-race", enabled: true, rate: 1, maxPerDay: 2, onlyStatuses: ["success"], dlp: true, dlpOffReason: null, targetDatasetId: null, updatedBy: null });
+    // One capture is stored today and one is in flight. The count is read before the in-flight one commits;
+    // it commits and gives its slot back while the count is on its way back.
+    let duringCount: (() => void) | null = null;
+    const store = new Proxy(context.store, {
+      get(target, property) {
+        if (property === "countReplayCapturesSince") {
+          return async () => {
+            const commit = duringCount;
+            duringCount = null;
+            commit?.();
+            return 1;
+          };
+        }
+        const value = Reflect.get(target, property) as unknown;
+        return typeof value === "function" ? (value as (...args: unknown[]) => unknown).bind(target) : value;
+      }
+    });
+    const capture = new ReplayCaptureService({
+      store,
+      recordings: {} as never,
+      datasets: {} as never,
+      surrogateKey: SURROGATE_KEY,
+      dictionariesFor: async () => [],
+      dictionaryClasses: async () => [],
+      publishedVersion: async () => null,
+      deployment: { enabled: true, maxRate: 1, retentionDays: 14, maxPerWorkflow: 200, maxBytesPerWorkflow: 209_715_200 },
+      random: seededRandom(1),
+      log: { warn: () => undefined, info: () => undefined }
+    });
+    const decide = async () => await capture.decide({ workflow: { id: "wf-race" }, channel: "production", triggerType: "webhook", releaseVersion: null, excluded: false });
+    const inFlight = (await decide())!;
+    expect(inFlight).not.toBeNull();
+    expect(capture.inFlightFor("wf-race")).toBe(1);
+    duringCount = () => capture.abandon(inFlight);
+    // Stored 1 + the one that just committed = the limit of 2.
+    expect(await decide()).toBeNull();
+    expect(capture.inFlightFor("wf-race")).toBe(0);
+  });
+
   it("captures only runs of the published version once there is one", async () => {
     const context = await createTestContext();
     const builder = await login(context, "builder");
