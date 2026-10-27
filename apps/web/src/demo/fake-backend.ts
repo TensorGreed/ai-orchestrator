@@ -503,6 +503,10 @@ export function createFakeBackend(options: FakeBackendOptions): FakeBackend {
       });
       if (agrees && (!best || score > best.score)) best = { score, body: variant.body };
     }
+    // A telemetry answer is for one window: another window's numbers would be wrong, so it has no answer.
+    const window = requested.get("window");
+    const answered = (best?.body as { window?: unknown } | undefined)?.window;
+    if (best && window && typeof answered === "string" && answered !== window) return null;
     return best ? { body: clone(best.body) } : null;
   };
 

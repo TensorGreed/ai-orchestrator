@@ -201,7 +201,11 @@ describe("runs", () => {
     expect(frames.at(-1)!.data.status).toBe("success");
     expect(frames.at(-1)!.data.executionId).toBe(recorded.executionId);
     const toolCalls = frames.filter((frame) => frame.event === "node_activity" && frame.data.kind === "tool_call" && frame.data.phase === "end");
-    expect(toolCalls.map((frame) => frame.data.toolName)).toEqual(["mock-mcp__lookup_kb", "mock-mcp__calculator"]);
+    expect(toolCalls.map((frame) => [frame.data.toolName, frame.data.outcome])).toEqual([
+      ["http_mcp__lookup_kb", "ok"],
+      ["http_mcp__calculator", "error"],
+      ["http_mcp__calculator", "ok"]
+    ]);
     // Replayed frames carry the replay's time, not the recording's.
     const started = Date.parse(frames[0]!.data.startedAt);
     expect(Math.abs(Date.now() - started)).toBeLessThan(10_000);

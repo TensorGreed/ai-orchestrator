@@ -1,1 +1,1 @@
-{"recordedAt":"2026-10-26T17:37:31.568Z","user":{"id":"usr_JT0H3b9EILOe","email":"demo@example.com","role":"admin"},"blankWorkflowId":"wf-basic-llm","note":"Recorded by apps/web/demo/record-fixtures.mts from the real API with a scripted local model and the mock MCP adapter."}
+{"recordedAt":"2026-10-27T17:40:42.529Z","user":{"id":"usr_MrnvqW5wpUir","email":"demo@example.com","role":"admin"},"blankWorkflowId":"wf-basic-llm","note":"Recorded by apps/web/demo/record-fixtures.mts from the real API with a scripted local model, a local MCP server and the mock MCP adapter."}

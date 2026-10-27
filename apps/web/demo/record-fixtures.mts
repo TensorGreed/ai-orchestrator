@@ -4,10 +4,12 @@
  * Boots the real API in-process against a temporary SQLite database, seeds a
  * curated set of the sample workflows plus a few demo workflows, and runs them
  * with no network and no keys: the built-in echo provider and a scripted
- * OpenAI-style model on 127.0.0.1 stand in for a model, the in-process mock MCP
- * adapter for tools. The API answers and run event streams are scrubbed
- * (loopback hosts, temp paths, anything shaped like a credential) and written
- * to `apps/web/src/demo/fixtures/`.
+ * OpenAI-style model on 127.0.0.1 stand in for a model; a small MCP server on
+ * 127.0.0.1, registered as "Demo tools" and called through the HTTP MCP
+ * adapter, and the in-process mock MCP adapter stand in for tools. The API
+ * answers and run event streams are scrubbed (loopback hosts, temp paths,
+ * anything shaped like a credential) and written to
+ * `apps/web/src/demo/fixtures/`.
  *
  * Re-record from the repo root:
  *   pnpm --filter @ai-orchestrator/web demo:record
@@ -49,6 +51,10 @@ const REQUESTER = { email: "alex.requester@example.com", password: "Demo-Only-Pa
 /** What the studio's editor and chat send as `system_prompt` when no System Prompt node sets one (apps/web/src/App.tsx). */
 const STUDIO_DEFAULT_SYSTEM_PROMPT = "You are a precise tool-using AI assistant.";
 const MODEL_HOST_PLACEHOLDER = "https://models.example.com/v1";
+const TOOLS_HOST_PLACEHOLDER = "tools.example.com";
+const TOOLS_ENDPOINT_PLACEHOLDER = `https://${TOOLS_HOST_PLACEHOLDER}/mcp`;
+/** Every window the MCP pages can ask telemetry for (`McpTelemetryWindow` in src/lib/api.ts). */
+const MCP_TELEMETRY_WINDOWS = ["24h", "7d", "30d"] as const;
 
 type Json = Record<string, unknown>;
 type ScriptedCall = { name: string; args: Record<string, unknown> };
@@ -90,6 +96,8 @@ const SCRIPTS: AgentScript[] = [
     match: "[support-agent]",
     calls: [
       { name: "lookup_kb", args: { topic: "plans" } },
+      // The first try reads like the question; the server refuses it and the agent retries with plain arithmetic.
+      { name: "calculator", args: { expression: "49 seats * $12 * 12 months" } },
       { name: "calculator", args: { expression: "49*12*12" } }
     ],
     answer:
@@ -132,6 +140,130 @@ const DEMO_KB = {
   rag: "Retrieval-augmented generation grounds a prompt with passages retrieved from your own documents, so answers can cite them."
 };
 
+/**
+ * What each call to the demo MCP server takes, in call order per tool. A
+ * knowledge-base search takes a few hundred ms and its first search after a
+ * cold start over a second; arithmetic is quick. Fixed, so a recording reads
+ * the same every time.
+ */
+const DEMO_TOOL_DELAYS_MS: Record<string, number[]> = {
+  lookup_kb: [236, 1184, 318],
+  calculator: [11, 9, 14, 12]
+};
+
+const DEMO_TOOLS = [
+  {
+    name: "lookup_kb",
+    title: "Knowledge base lookup",
+    description: "Look up a product topic in the help-centre knowledge base.",
+    inputSchema: { type: "object", properties: { topic: { type: "string", description: "Topic, for example plans or rag." } }, required: ["topic"] },
+    annotations: { readOnlyHint: true, openWorldHint: false }
+  },
+  {
+    name: "calculator",
+    title: "Calculator",
+    description: "Evaluate an arithmetic expression with + - * / and parentheses.",
+    inputSchema: { type: "object", properties: { expression: { type: "string", description: "For example 49*12*12." } }, required: ["expression"] },
+    annotations: { readOnlyHint: true, openWorldHint: false }
+  }
+];
+
+/** Arithmetic only: digits, + - * / ( ) and spaces. */
+function evaluateArithmetic(expression: string): number {
+  if (!/^[\d+\-*/().\s]+$/.test(expression)) {
+    throw new Error("Expression contains unsupported characters. Use digits and + - * / ( ) only.");
+  }
+  const value = Function(`"use strict"; return (${expression});`)() as unknown;
+  if (typeof value !== "number" || !Number.isFinite(value)) throw new Error("Expression did not resolve to a finite number.");
+  return value;
+}
+
+/**
+ * The "Demo tools" MCP server: streamable HTTP (JSON responses) on
+ * 127.0.0.1, with the knowledge-base lookup and calculator tools. The API
+ * reaches it through its HTTP MCP adapter, as it would any remote server, so
+ * the calls land in the server's telemetry.
+ */
+async function startDemoMcpServer() {
+  const calls = new Map<string, number>();
+  const server = http.createServer((request, response) => {
+    const chunks: Buffer[] = [];
+    request.on("data", (chunk: Buffer) => chunks.push(chunk));
+    request.on("end", () => {
+      void (async () => {
+        let rpc: { id?: string | number; method?: string; params?: { name?: string; arguments?: Record<string, unknown> } } = {};
+        try {
+          rpc = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}") as typeof rpc;
+        } catch {
+          response.writeHead(400, { "content-type": "application/json" });
+          response.end(JSON.stringify({ jsonrpc: "2.0", id: null, error: { code: -32700, message: "Parse error" } }));
+          return;
+        }
+        if (rpc.id === undefined) {
+          response.writeHead(202);
+          response.end();
+          return;
+        }
+        const reply = (result: unknown) => {
+          response.writeHead(200, { "content-type": "application/json", "mcp-session-id": "demo-tools-session" });
+          response.end(JSON.stringify({ jsonrpc: "2.0", id: rpc.id, result }));
+        };
+        switch (rpc.method) {
+          case "initialize":
+            return reply({ protocolVersion: "2025-03-26", capabilities: { tools: { listChanged: false } }, serverInfo: { name: "demo-tools", version: "1.4.0" } });
+          case "ping":
+            return reply({});
+          case "tools/list":
+            return reply({ tools: DEMO_TOOLS });
+          case "resources/list":
+            return reply({ resources: [] });
+          case "prompts/list":
+            return reply({ prompts: [] });
+          case "tools/call": {
+            const name = String(rpc.params?.name ?? "");
+            const args = rpc.params?.arguments ?? {};
+            const count = calls.get(name) ?? 0;
+            calls.set(name, count + 1);
+            const delays = DEMO_TOOL_DELAYS_MS[name] ?? [10];
+            await new Promise((resolve) => setTimeout(resolve, delays[count % delays.length]));
+            const text = (value: unknown) => [{ type: "text", text: typeof value === "string" ? value : JSON.stringify(value) }];
+            if (name === "lookup_kb") {
+              const topic = String(args.topic ?? "").trim().toLowerCase();
+              const content = (DEMO_KB as Record<string, string>)[topic];
+              return reply({ content: text(content ? { topic, found: true, content } : { topic, found: false, content: `No KB entry for topic '${topic}'.` }) });
+            }
+            if (name === "calculator") {
+              const expression = String(args.expression ?? "").trim();
+              try {
+                return reply({ content: text({ expression, result: evaluateArithmetic(expression) }) });
+              } catch (error) {
+                return reply({ content: text(error instanceof Error ? error.message : "Calculation failed."), isError: true });
+              }
+            }
+            return reply({ content: text(`Unknown tool '${name}'.`), isError: true });
+          }
+          default:
+            response.writeHead(200, { "content-type": "application/json" });
+            response.end(JSON.stringify({ jsonrpc: "2.0", id: rpc.id, error: { code: -32601, message: `Method not found: ${rpc.method}` } }));
+        }
+      })();
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("Unable to bind the demo MCP server");
+  return {
+    host: `127.0.0.1:${address.port}`,
+    endpoint: `http://127.0.0.1:${address.port}/mcp`,
+    close: () => new Promise<void>((resolve) => server.close(() => resolve()))
+  };
+}
+
+/** An MCP Tool node on the registered "Demo tools" server. */
+function demoToolConfig(registryServerId: string, toolName: string, argsTemplate: string): Json {
+  return { serverId: "http_mcp", registryServerId, toolName, argsTemplate };
+}
+
 function modelProvider(baseUrl: string) {
   return { providerId: "openai_compatible", model: "demo-model", baseUrl, temperature: 0.2, extra: { maxRetries: 0 } };
 }
@@ -140,7 +272,7 @@ function node(id: string, type: string, name: string, x: number, y: number, conf
   return { id, type, name, position: { x, y }, config };
 }
 
-function supportAgentWorkflow(baseUrl: string): Json {
+function supportAgentWorkflow(baseUrl: string, toolsServerId: string): Json {
   return {
     id: "wf-demo-support-agent",
     name: "Support agent with MCP tools and memory",
@@ -159,8 +291,8 @@ function supportAgentWorkflow(baseUrl: string): Json {
       }),
       node("model", "llm_call", "Chat model", 140, 340, { provider: modelProvider(baseUrl), promptKey: "prompt", systemPromptKey: "system_prompt" }),
       node("memory", "local_memory", "Session memory", 300, 340, { namespace: "demo", sessionIdTemplate: "demo-support", maxMessages: 20, persistToolMessages: false }),
-      node("kb", "mcp_tool", "Knowledge base", 460, 340, { serverId: "mock-mcp", toolName: "lookup_kb", argsTemplate: "{\"topic\":\"plans\"}", connection: { transport: "mock", kbOverrides: DEMO_KB } }),
-      node("calc", "mcp_tool", "Calculator", 620, 340, { serverId: "mock-mcp", toolName: "calculator", argsTemplate: "{\"expression\":\"1+1\"}", connection: { transport: "mock" } }),
+      node("kb", "mcp_tool", "Knowledge base", 460, 340, demoToolConfig(toolsServerId, "lookup_kb", "{\"topic\":\"plans\"}")),
+      node("calc", "mcp_tool", "Calculator", 620, 340, demoToolConfig(toolsServerId, "calculator", "{\"expression\":\"1+1\"}")),
       node("output", "output", "Answer", 600, 120, { responseTemplate: "{{answer}}", outputKey: "result" })
     ],
     edges: [
@@ -174,7 +306,7 @@ function supportAgentWorkflow(baseUrl: string): Json {
   };
 }
 
-function swarmWorkflow(baseUrl: string): Json {
+function swarmWorkflow(baseUrl: string, toolsServerId: string): Json {
   return {
     id: "wf-demo-research-swarm",
     name: "Research supervisor with two workers",
@@ -198,7 +330,7 @@ function swarmWorkflow(baseUrl: string): Json {
         toolCallingEnabled: true
       }),
       node("researcher_model", "llm_call", "Researcher model", 260, 560, { provider: modelProvider(baseUrl), promptKey: "prompt", systemPromptKey: "system_prompt" }),
-      node("researcher_kb", "mcp_tool", "Knowledge base", 420, 560, { serverId: "mock-mcp", toolName: "lookup_kb", argsTemplate: "{\"topic\":\"rag\"}", connection: { transport: "mock", kbOverrides: DEMO_KB } }),
+      node("researcher_kb", "mcp_tool", "Knowledge base", 420, 560, demoToolConfig(toolsServerId, "lookup_kb", "{\"topic\":\"rag\"}")),
       node("analyst", "agent_orchestrator", "analyst", 620, 360, {
         systemPromptTemplate: "[analyst] Answer arithmetic with the calculator tool.",
         userPromptTemplate: "{{user_prompt}}",
@@ -206,7 +338,7 @@ function swarmWorkflow(baseUrl: string): Json {
         toolCallingEnabled: true
       }),
       node("analyst_model", "llm_call", "Analyst model", 580, 560, { provider: modelProvider(baseUrl), promptKey: "prompt", systemPromptKey: "system_prompt" }),
-      node("analyst_calc", "mcp_tool", "Calculator", 740, 560, { serverId: "mock-mcp", toolName: "calculator", argsTemplate: "{\"expression\":\"1+1\"}", connection: { transport: "mock" } }),
+      node("analyst_calc", "mcp_tool", "Calculator", 740, 560, demoToolConfig(toolsServerId, "calculator", "{\"expression\":\"1+1\"}")),
       node("output", "output", "Team summary", 620, 140, { responseTemplate: "{{answer}}", outputKey: "result" })
     ],
     edges: [
@@ -346,10 +478,10 @@ function parseSse(body: string): Array<{ event: string; data: unknown; t: number
   return frames;
 }
 
-/** Replaces the scripted model's loopback address, temp paths and credential-shaped strings everywhere in a recorded value. */
-function scrub<T>(value: T, baseUrls: string[]): T {
+/** Replaces the loopback addresses (longest first), temp paths and credential-shaped strings everywhere in a recorded value. */
+function scrub<T>(value: T, replacements: Array<[from: string, to: string]>): T {
   let text = JSON.stringify(value);
-  for (const url of baseUrls) text = text.split(url).join(MODEL_HOST_PLACEHOLDER);
+  for (const [from, to] of replacements) text = text.split(from).join(to);
   text = text
     .replace(new RegExp(os.tmpdir().replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "[^\"\\\\]*", "g"), "/data")
     .replace(/\b(?:sk|pk|rk)-[A-Za-z0-9_-]{12,}|\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{12,}|\bgithub_pat_[A-Za-z0-9_]{12,}|\bxox[abposr]-[A-Za-z0-9-]{10,}|\bAKIA[0-9A-Z]{16}\b|\beyJ[\w-]+\.[\w-]+\.[\w-]+/g, "[redacted]")
@@ -361,6 +493,7 @@ function scrub<T>(value: T, baseUrls: string[]): T {
 async function main() {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "l2m-demo-record-"));
   const model = await startScriptedModel(SCRIPTS);
+  const tools = await startDemoMcpServer();
   const store = await SqliteStore.create(path.join(tempDir, "orchestrator.db"));
   await store.ensureDefaultProject();
   const config = parseConfig({
@@ -410,16 +543,24 @@ async function main() {
   for (const template of await store.listTemplates()) {
     if (!sampleNames.has(template.name)) await store.deleteTemplate(template.id);
   }
-  for (const workflow of [supportAgentWorkflow(model.baseUrl), swarmWorkflow(model.baseUrl), guardedWorkflow(), approvalWorkflow()]) {
+  // The registered MCP server the demo agents call; its probe takes the tool snapshot the pages show.
+  const mcpServer = (await must("POST", "/api/mcp/servers", {
+    name: "Demo tools",
+    description: "Help-centre knowledge base and a calculator, used by the support agent and the research workers.",
+    adapterId: "http_mcp",
+    connection: { endpoint: tools.endpoint },
+    probeEnabled: false
+  })) as { server: { id: string } };
+  await must("POST", `/api/mcp/servers/${mcpServer.server.id}/probe`);
+  for (const workflow of [supportAgentWorkflow(model.baseUrl, mcpServer.server.id), swarmWorkflow(model.baseUrl, mcpServer.server.id), guardedWorkflow(), approvalWorkflow()]) {
     await must("POST", "/api/workflows", workflow);
   }
   await must("POST", "/api/guard/profiles", { document: GUARD_PROFILE });
-  const mcpServer = (await must("POST", "/api/mcp/servers", { name: "Demo tools", adapterId: "mock-mcp", probeEnabled: false })) as { server: { id: string } };
-  await call("POST", `/api/mcp/servers/${mcpServer.server.id}/probe`);
   for (const destination of [
     { name: "Help centre API", kind: "http", host: "help.example.com", tier: "public", region: "eu-west", holdsDataClasses: [] },
     { name: "CRM (private)", kind: "http", host: "*.crm.example.org", tier: "private", region: "eu-west", holdsDataClasses: ["email", "phone"] },
-    { name: "Model gateway", kind: "http", host: "models.example.com", tier: "vendor", region: "us-east", holdsDataClasses: [] }
+    { name: "Model gateway", kind: "http", host: "models.example.com", tier: "vendor", region: "us-east", holdsDataClasses: [] },
+    { name: "Demo tools (MCP)", kind: "http", host: TOOLS_HOST_PLACEHOLDER, tier: "private", region: "eu-west", holdsDataClasses: [] }
   ]) {
     await call("POST", "/api/data-destinations", destination);
   }
@@ -535,8 +676,12 @@ async function main() {
     "/api/mcp/tools",
     "/api/mcp/catalog",
     "/api/mcp/presets",
-    "/api/mcp/overview?window=24h",
-    "/api/mcp/telemetry?window=24h",
+    ...MCP_TELEMETRY_WINDOWS.flatMap((window) => [
+      `/api/mcp/overview?window=${window}`,
+      `/api/mcp/telemetry?window=${window}`,
+      // The tools page adds `projectId`; the demo answers it from the variant with the same window.
+      `/api/mcp/tools?window=${window}`
+    ]),
     "/api/mcp/policies",
     "/api/mcp/toolsets",
     "/api/mcp/changes",
@@ -581,7 +726,7 @@ async function main() {
   for (const server of servers.servers ?? []) {
     await record(`/api/mcp/servers/${server.id}`);
     await record(`/api/mcp/servers/${server.id}/tools`);
-    await record(`/api/mcp/servers/${server.id}/telemetry?window=24h`);
+    for (const window of MCP_TELEMETRY_WINDOWS) await record(`/api/mcp/servers/${server.id}/telemetry?window=${window}`);
   }
 
   // Recorded answers to a few writes, with what they were made against: the demo replays one only
@@ -604,7 +749,11 @@ async function main() {
   const workflows: Json[] = [];
   for (const entry of workflowList) workflows.push((await must("GET", `/api/workflows/${entry.id}`)) as Json);
 
-  const baseUrls = [model.baseUrl];
+  const replacements: Array<[string, string]> = [
+    [model.baseUrl, MODEL_HOST_PLACEHOLDER],
+    [tools.endpoint, TOOLS_ENDPOINT_PLACEHOLDER],
+    [tools.host, TOOLS_HOST_PLACEHOLDER]
+  ];
   const fixture = scrub(
     {
       meta: {
@@ -612,7 +761,7 @@ async function main() {
         user: { id: user.id, email: DEMO_USER.email, role: DEMO_USER.role },
         // Stored as seeded and never saved through the API: no versions, releases, sets or captures.
         blankWorkflowId: "wf-basic-llm",
-        note: "Recorded by apps/web/demo/record-fixtures.mts from the real API with a scripted local model and the mock MCP adapter."
+        note: "Recorded by apps/web/demo/record-fixtures.mts from the real API with a scripted local model, a local MCP server and the mock MCP adapter."
       },
       workflows,
       workflowList: workflowList as unknown,
@@ -620,7 +769,7 @@ async function main() {
       responses,
       posts
     },
-    baseUrls
+    replacements
   );
 
   // Refuse to write anything credential-shaped or anything that identifies this machine or this recording.
@@ -644,6 +793,7 @@ async function main() {
   const pathPattern = (value: string) => new RegExp(`${value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?=[/"\\\\])`);
   const machine: Array<{ name: string; pattern: RegExp | null; value: string }> = [
     { name: "scripted model address", value: new URL(model.baseUrl).host, pattern: literalPattern(new URL(model.baseUrl).host) },
+    { name: "demo MCP server address", value: tools.host, pattern: literalPattern(tools.host) },
     // "/" and "/tmp" are on every machine and in ordinary paths; temp paths are scrubbed above.
     { name: "temp directory", value: os.tmpdir(), pattern: ["/", "/tmp"].includes(os.tmpdir()) ? null : pathPattern(os.tmpdir()) },
     { name: "home directory", value: os.homedir(), pattern: os.homedir() === "/" ? null : pathPattern(os.homedir()) },
@@ -683,6 +833,7 @@ async function main() {
 
   await app.close();
   await model.close();
+  await tools.close();
   try {
     await store.close();
   } catch {

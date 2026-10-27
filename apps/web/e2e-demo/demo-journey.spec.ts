@@ -170,6 +170,29 @@ test("the demo journey: banner, template, edit, save, persist, recorded run, sec
   await expect(page.getByRole("button", { name: "Approve" })).toHaveCount(1);
   await notice.getByRole("button", { name: "Close" }).click();
 
+  // MCP overview: the recorded calls to the registered server, in every window, as numbers.
+  await page.locator("aside.app-sidebar").getByRole("button", { name: "Overview", exact: true }).click();
+  const mcpOverview = page.locator(".mcp-overview");
+  await expect(mcpOverview.getByRole("heading", { name: "MCP overview" })).toBeVisible();
+  const totals = mcpOverview.getByLabel("Totals");
+  const busiest = mcpOverview.getByRole("region", { name: "Busiest tools" });
+  for (const window of ["7d", "24h", "30d"]) {
+    if (window !== "7d") await mcpOverview.getByRole("group", { name: "Telemetry window" }).getByRole("button", { name: window, exact: true }).click();
+    await expect(mcpOverview.getByRole("button", { name: window, exact: true })).toHaveAttribute("aria-pressed", "true");
+    await expect(totals).toContainText(`Tool calls · ${window}`);
+    await expect(totals.locator(".mcp-stat").filter({ hasText: "Tool calls" }).locator(".mcp-stat-value")).toHaveText(/^[1-9]\d*$/);
+    await expect(totals.locator(".mcp-stat").filter({ hasText: "Failed calls" }).locator(".mcp-stat-value")).toHaveText(/^[1-9]\d*$/);
+    await expect(mcpOverview).not.toContainText("Not available in the demo");
+    await expect(busiest.getByRole("button", { name: /^lookup_kb on Demo tools: \d+ calls$/ })).toBeVisible();
+    await expect(mcpOverview.getByRole("region", { name: "Most error-prone tools" })).toContainText(/calculator.*\d+% · 1 of \d+ failed/);
+    await shot(page, `12-mcp-overview-${window}`);
+  }
+  await busiest.getByRole("button", { name: "Show table" }).click();
+  for (const row of await busiest.getByRole("row").all().then((rows) => rows.slice(1))) {
+    await expect(row).toContainText(/\d+ ms|\d+\.\d s/);
+    await expect(row).not.toContainText("—");
+  }
+
   // Links straight to the API (exports) get the demo's answer instead of the host's 404.
   await sidebarItem(page, "Settings").click();
   await page.getByRole("tab", { name: "Audit Log", exact: true }).click();

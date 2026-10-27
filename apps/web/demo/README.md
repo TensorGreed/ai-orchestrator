@@ -56,7 +56,10 @@ does not block the site: it deploys without `/demo/` and the run shows a warning
   Approvals (approve and reject work on demo data and persist; the demo says that on a real
   deployment the paused run would now resume), Evaluations (golden sets, replay jobs, release
   gates), the release gate and golden-run replay diff on "FAQ answerer (release gated)", and the
-  MCP pages.
+  MCP pages. MCP Overview, Servers and Tools show the recorded tool calls to the registered "Demo
+  tools" server (calls, failures, p50/p95 latency, tokens and cost per tool) in every telemetry
+  window the pages offer (24h, 7d, 30d). A window with no recording gets the typed error, never
+  another window's numbers.
 - Links that point straight at the API (audit, cassette and guard-profile exports) show "Not
   available in the demo" instead of the static host's 404.
 - Recorded timestamps are moved forward to the visit, so approvals are not expired and the
@@ -72,29 +75,37 @@ no model is called, no MCP server is reached, no code runs.
 
 ## The fixtures
 
-`src/demo/fixtures/*.json` (about 1.5 MB) are recorded, not written by hand.
+`src/demo/fixtures/*.json` (about 1.6 MB) are recorded, not written by hand.
 `demo/record-fixtures.mts` boots the real API in-process against a temporary SQLite database and:
 
-1. seeds the sample workflows that run without cloud accounts, their templates, a guard profile,
-   an MCP server registration (the in-process mock MCP adapter) and three data destinations;
+1. starts "Demo tools", a small streamable-HTTP MCP server on 127.0.0.1 (knowledge-base lookup and
+   calculator, with fixed per-call delays), registers and probes it through the HTTP MCP adapter,
+   and seeds the sample workflows that run without cloud accounts, their templates, a guard
+   profile and four data destinations;
 2. runs, over the real streaming endpoint, the basic flow and MCP quickstart (built-in echo
-   provider), an MCP agent with tools and memory, a supervisor with two workers, a guard block and
-   three approval pauses (started by a second user so the demo user may decide them), with a scripted
-   OpenAI-style model on 127.0.0.1 and the mock MCP adapter, so no key is needed;
+   provider and the mock MCP adapter), an MCP agent with tools and memory, a supervisor with two
+   workers, a guard block and three approval pauses (started by a second user so the demo user may
+   decide them), with a scripted OpenAI-style model on 127.0.0.1, so no key is needed. The agents'
+   MCP Tool nodes pick the registered "Demo tools" server, so their calls land in its telemetry:
+   the support agent's first calculator expression is refused and retried, and the first
+   knowledge-base search is a cold one of over a second;
 3. saves a golden run of the support agent;
 4. publishes v1 of a gated workflow, builds a golden set of three runs, saves a regressing draft,
    runs a real replay job against it, records the blocked publish and the draft's replay diff
    against a golden run, each with the request and graph it answered;
-5. reads back every API answer the studio needs and writes them with the run streams.
+5. reads back every API answer the studio needs (the MCP telemetry reads once per window) and
+   writes them with the run streams.
 
-Before writing, it replaces the scripted model's address with `models.example.com`, removes temp
+Before writing, it replaces the scripted model's address with `models.example.com` and the MCP
+server's with `tools.example.com`, removes temp
 paths and anything shaped like a credential, and refuses to write if anything is still found: the
 patterns in `src/demo/leak-patterns.ts` (API keys, GitHub, Slack and AWS keys, JWTs, PEM blocks,
 bearer tokens, `/home/<name>/`, `/Users/<name>/` and `C:\Users\` paths) and this machine's values:
 home directory, repository path, the recording's master key and session cookie, and the user and
 host names at any length as whole JSON-string tokens (`"vm"`, `/vm/`). Host and user names are
 first replaced by `demo-host` / `demo-user` everywhere except the node definitions, which are
-compiled from source (their placeholders, such as a database user `root`, are product defaults). `src/demo/fixtures.test.ts` checks the committed fixtures against the same
+compiled from source (their placeholders, such as a database user `root`, are product defaults). `src/demo/mcp-telemetry.test.tsx` checks that every window `McpTelemetryWindow` allows has a
+recording with real calls and that MCP Overview renders numbers in each. `src/demo/fixtures.test.ts` checks the committed fixtures against the same
 patterns, validates them against the `@ai-orchestrator/shared` schemas, and checks the size budget
 and that only `example.com` / `example.org` addresses appear.
 
