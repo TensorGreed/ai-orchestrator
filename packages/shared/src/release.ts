@@ -309,7 +309,7 @@ export interface ReleaseGateMetricPair {
  */
 export type ReleaseGateRepeatSelection =
   | { by: "deciding" }
-  | { by: "repeat"; repeat: number }
+  | { by: "repeat"; repeat: number; /** Some cases had no usable pair at this repeat and counted at their deciding one. */ partial?: boolean }
   | { by: "largest_increase" }
   | { by: "largest_relative_increase" };
 
@@ -520,10 +520,13 @@ function worstRepeatSelection(
 ): { value: number | null; selection?: ReleaseGateRepeatSelection } {
   const deciding: ReleaseGateRepeatSelection = { by: "deciding" };
   const value = measure(cases.map((entry) => entry[metric]));
-  const longest = Math.max(0, ...cases.map((entry) => entry.repeats?.[metric]?.length ?? 0));
+  const longest = cases.reduce((most, entry) => Math.max(most, entry.repeats?.[metric]?.length ?? 0), 0);
   if (longest === 0) return { value };
   const selections: ReleaseGateRepeatSelection[] = [
-    ...Array.from({ length: longest }, (_unused, index) => ({ by: "repeat" as const, repeat: index + 1 })),
+    ...Array.from({ length: longest }, (_unused, index): ReleaseGateRepeatSelection => {
+      const partial = cases.some((entry) => !completePair(entry.repeats?.[metric]?.[index]));
+      return { by: "repeat", repeat: index + 1, ...(partial ? { partial: true } : {}) };
+    }),
     { by: "largest_increase" },
     { by: "largest_relative_increase" }
   ];
@@ -548,11 +551,13 @@ function p95IncreaseOf(pairs: ReleaseGateMetricPair[]): number | null {
 }
 
 /** How a reason names the selection a figure was taken at ("" for the deciding repeats). */
-function selectionPhrase(selection: ReleaseGateRepeatSelection | undefined, metric: "cost" | "latency"): string {
+function selectionPhrase(selection: ReleaseGateRepeatSelection | undefined, metric: "cost" | "latency", compare: string): string {
   if (!selection || selection.by === "deciding") return "";
-  if (selection.by === "repeat") return ` at repeat ${selection.repeat}`;
+  if (selection.by === "repeat") {
+    return selection.partial ? ` at repeat ${selection.repeat} (cases without a usable repeat ${selection.repeat} at their deciding repeat)` : ` at repeat ${selection.repeat}`;
+  }
   if (selection.by === "largest_increase") return metric === "cost" ? " at each case's repeat that added the most cost" : " at each case's repeat that added the most time";
-  return " at each case's repeat that rose the most over its own baseline";
+  return ` at each case's repeat that rose the most over ${compare === "baseline_rerun" ? "its own baseline" : "the recording"}`;
 }
 
 function statsOf(evidence: ReleaseGateEvidence, policy: ReleaseGatePolicy, now: number): ReleaseGateStats {
@@ -585,7 +590,7 @@ function statsOf(evidence: ReleaseGateEvidence, policy: ReleaseGatePolicy, now: 
     costIncreasePct: cost.value,
     p95LatencyIncreasePct: latency.value,
     newGuardBlocks: cases.reduce((sum, entry) => sum + entry.newGuardBlocks, 0),
-    oldestRecordingDays: ages.length > 0 ? Math.floor(Math.max(...ages)) : null,
+    oldestRecordingDays: ages.length > 0 ? Math.floor(ages.reduce((most, age) => Math.max(most, age), 0)) : null,
     ...(cost.selection || latency.selection
       ? { repeatSelection: { ...(cost.selection ? { cost: cost.selection } : {}), ...(latency.selection ? { latency: latency.selection } : {}) } }
       : {})
@@ -705,10 +710,10 @@ export function judgeReleaseGate(
     if (failing.length > 0) add(`required_scorer:${scorer}`, `Required scorer ${scorer} did not pass on ${failing.length} case${failing.length === 1 ? "" : "s"}.`, failing.length);
   }
   if (policy.maxCostIncreasePct !== undefined && stats.costIncreasePct !== null && stats.costIncreasePct > policy.maxCostIncreasePct) {
-    add("cost", `Cost rose ${formatPct(stats.costIncreasePct)}${selectionPhrase(stats.repeatSelection?.cost, "cost")}; the gate allows ${policy.maxCostIncreasePct}%.`, stats.costIncreasePct - policy.maxCostIncreasePct);
+    add("cost", `Cost rose ${formatPct(stats.costIncreasePct)}${selectionPhrase(stats.repeatSelection?.cost, "cost", job.compare ?? "recording")}; the gate allows ${policy.maxCostIncreasePct}%.`, stats.costIncreasePct - policy.maxCostIncreasePct);
   }
   if (policy.maxP95LatencyIncreasePct !== undefined && stats.p95LatencyIncreasePct !== null && stats.p95LatencyIncreasePct > policy.maxP95LatencyIncreasePct) {
-    add("latency", `p95 latency rose ${formatPct(stats.p95LatencyIncreasePct)}${selectionPhrase(stats.repeatSelection?.latency, "latency")}; the gate allows ${policy.maxP95LatencyIncreasePct}%.`, stats.p95LatencyIncreasePct - policy.maxP95LatencyIncreasePct);
+    add("latency", `p95 latency rose ${formatPct(stats.p95LatencyIncreasePct)}${selectionPhrase(stats.repeatSelection?.latency, "latency", job.compare ?? "recording")}; the gate allows ${policy.maxP95LatencyIncreasePct}%.`, stats.p95LatencyIncreasePct - policy.maxP95LatencyIncreasePct);
   }
   if (policy.noNewGuardBlocks && stats.newGuardBlocks > 0) {
     add("guard_blocks", `The candidate added ${stats.newGuardBlocks} guard block${stats.newGuardBlocks === 1 ? "" : "s"} or review${stats.newGuardBlocks === 1 ? "" : "s"}.`, stats.newGuardBlocks);

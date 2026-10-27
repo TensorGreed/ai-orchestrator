@@ -474,7 +474,33 @@ describe("repeats: cost and p95 latency at the worst selection of the repeats", 
     );
     expect(relative.stats.p95LatencyIncreasePct).toBeCloseTo(50, 6);
     expect(relative.stats.repeatSelection?.latency).toEqual({ by: "largest_relative_increase" });
-    expect(relative.reasons).toEqual(["p95 latency rose 50% at each case's repeat that rose the most over its own baseline; the gate allows 30%."]);
+    expect(relative.reasons).toEqual(["p95 latency rose 50% at each case's repeat that rose the most over the recording; the gate allows 30%."]);
+    const rerun = judgeReleaseGate(
+      evidence(
+        [
+          passing("a", { latencyMs: pair(2000, 2100), repeats: { latencyMs: [pair(100, 150), pair(2000, 2100)] } }),
+          passing("b", { latencyMs: pair(2000, 2100), repeats: { latencyMs: [pair(2000, 2100), pair(100, 150)] } })
+        ],
+        { compare: "baseline_rerun" }
+      ),
+      policy({ minCases: 1, maxP95LatencyIncreasePct: 30 }),
+      { expected, now: NOW }
+    );
+    expect(rerun.reasons).toEqual(["p95 latency rose 50% at each case's repeat that rose the most over its own baseline; the gate allows 30%."]);
+  });
+
+  it("counts a case without a repeat-k pair at its deciding pair inside that repeat's selection, and says so", () => {
+    // Case b has no repeat 2: dropping it would make repeat 2 look like +20% (below the deciding +30%); at its deciding
+    // pair it makes repeat 2 +40%.
+    const cost = (deciding: [number, number], repeats: Array<[number, number]>) => ({ costUsd: pair(...deciding), repeats: { costUsd: repeats.map(([b, c]) => pair(b, c)) } });
+    const judgement = judgeReleaseGate(
+      evidence([passing("a", cost([10, 10], [[10, 10], [10, 12]])), passing("b", cost([10, 16], [[10, 16]]))]),
+      policy({ minCases: 1, maxCostIncreasePct: 35 }),
+      { expected, now: NOW }
+    );
+    expect(judgement.stats.costIncreasePct).toBeCloseTo(40, 6);
+    expect(judgement.stats.repeatSelection?.cost).toEqual({ by: "repeat", repeat: 2, partial: true });
+    expect(judgement.reasons).toEqual(["Cost rose 40% at repeat 2 (cases without a usable repeat 2 at their deciding repeat); the gate allows 35%."]);
   });
 
   it("falls back to the largest increase for a case whose baselines are all zero", () => {
