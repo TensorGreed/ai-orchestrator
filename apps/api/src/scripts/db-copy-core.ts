@@ -68,7 +68,7 @@ import { INSERTION_SEQ_TABLES, MIGRATIONS } from "../db/migrations.js";
 import { pgParams } from "../db/postgres/context.js";
 import { describePostgresSettings, parsePostgresSettings } from "../config.js";
 import { postgresStoreConfig } from "../db/create-store.js";
-import { loadApiEnvFiles } from "./api-env.js";
+import { loadApiEnvFiles, resolveSettingOrigins, type SettingOrigin } from "./api-env.js";
 import { auditCarryOver, brokenPosition, unverifiableOnPostgresBySource, verdictText, verifyPostgresAuditChainByCursor } from "./audit-carry-over.js";
 import { applyMigrationChain, currentChainVersion, postgresPoolConfig, withMigrationLock, type PostgresStoreConfig } from "../db/postgres-store.js";
 
@@ -100,6 +100,8 @@ export interface DbCopyOptions {
    * verdict cannot be trusted to show the break.
    */
   allowBrokenAudit?: boolean;
+  /** Where DB_SQLITE_PATH / DB_TYPE come from, so the "start this build once" hint works with apps/api/.env. */
+  settingOrigins?: SettingOrigins;
   /** Rows per INSERT (default 500, fewer for wide tables). */
   batchRows?: number;
   log?: (line: string) => void;
@@ -204,12 +206,47 @@ async function codeSqliteSchema(): Promise<SqliteSchema> {
   }
 }
 
+/** Where DB_SQLITE_PATH and DB_TYPE come from (the CLI resolves them with the API's .env rule). */
+export type SettingOrigins = Record<"DB_SQLITE_PATH" | "DB_TYPE", SettingOrigin>;
+
+/**
+ * How to start this build once against `sqlitePath`, given where the API reads its settings. apps/api/.env beats the
+ * shell, so a shell prefix is ignored when that file sets the variable: the hint then names the file. A DB_TYPE that
+ * resolves to postgres would boot the API against the copy target (and bootstrap an admin into it), so it is flagged.
+ */
+export function upgradeHint(sqlitePath: string, origins?: SettingOrigins): string {
+  const resolved = path.resolve(sqlitePath);
+  const settings: string[] = [];
+  const shell: string[] = [];
+  const pathOrigin = origins?.DB_SQLITE_PATH;
+  if (pathOrigin?.source === "apps/api/.env") {
+    if (pathOrigin.value === undefined || path.resolve(pathOrigin.value) !== resolved) {
+      settings.push(`DB_SQLITE_PATH=${sqlitePath} in apps/api/.env (it sets DB_SQLITE_PATH and beats the shell; put it back afterwards)`);
+    }
+  } else {
+    shell.push(`DB_SQLITE_PATH=${sqlitePath}`);
+  }
+  const typeOrigin = origins?.DB_TYPE;
+  const typeValue = typeOrigin?.value?.toLowerCase();
+  let warning = "";
+  if (typeValue === "postgres" || typeValue === "postgresql") {
+    warning =
+      ` (WARNING: DB_TYPE resolves to postgres, from ${typeOrigin!.source}, so a start without changing it would boot against the ` +
+      `Postgres target db:copy writes to and bootstrap an admin there, and the copy would then refuse the target as non-empty)`;
+    if (typeOrigin!.source === "apps/api/.env") settings.push(`DB_TYPE=sqlite in apps/api/.env (it sets DB_TYPE=postgres and beats the shell; put it back afterwards)`);
+    else shell.push("DB_TYPE=sqlite");
+  }
+  const command = `${shell.length > 0 ? `${shell.join(" ")} ` : ""}pnpm --filter @ai-orchestrator/api start`;
+  const edit = settings.length > 0 ? `set ${settings.join(" and ")}, then ` : "";
+  return `${edit}start this build once against it (${command}, wait for "listening", stop it), then run db:copy again${warning}`;
+}
+
 /**
  * Refuses a source whose schema is not this build's: older (boot once to upgrade) or newer (copy from that build).
  * Tables, columns, indexes, triggers and schema markers all count: a migration that only adds a unique index (and
  * dedupes the rows it would refuse) or only transforms data (recording a marker) leaves tables and columns as they were.
  */
-function checkSourceSchema(source: SqliteSchema, code: SqliteSchema, sqlitePath: string): void {
+function checkSourceSchema(source: SqliteSchema, code: SqliteSchema, sqlitePath: string, origins?: SettingOrigins): void {
   const missing: string[] = [];
   const unknown: string[] = [];
   const differing: string[] = [];
@@ -233,9 +270,7 @@ function checkSourceSchema(source: SqliteSchema, code: SqliteSchema, sqlitePath:
   for (const name of source.triggers) if (!code.triggers.has(name)) unknown.push(`trigger ${name}`);
   for (const name of code.markers) if (!source.markers.has(name)) missing.push(`schema marker ${name}`);
   for (const name of source.markers) if (!code.markers.has(name)) unknown.push(`schema marker ${name}`);
-  const upgrade =
-    `start this build once against it (DB_SQLITE_PATH=${sqlitePath} pnpm --filter @ai-orchestrator/api start, wait for "listening", ` +
-    `stop it), then run db:copy again`;
+  const upgrade = upgradeHint(sqlitePath, origins);
   if (unknown.length > 0) {
     throw new DbCopyRefusal(
       `The SQLite database has ${unknown.length} schema object(s) this build does not know (${preview(unknown)}): it was written by a newer ` +
@@ -615,7 +650,7 @@ export async function runDbCopy(options: DbCopyOptions): Promise<DbCopyReport> {
     const sourceSchema = sqliteSchema(db);
     const source = sourceSchema.tables;
     if (source.size === 0) throw new DbCopyRefusal(`--from: ${sqlitePath} holds no tables; it is not an L2M database.`);
-    checkSourceSchema(sourceSchema, await codeSqliteSchema(), options.sqlitePath);
+    checkSourceSchema(sourceSchema, await codeSqliteSchema(), options.sqlitePath, options.settingOrigins);
     log(`Source: SQLite ${sqlitePath} (read-only), schema matches this build.`);
 
     // Two streaming walks over the chain (rowid batches inside the read transaction): the verdict as SQLite stores it,
@@ -1011,6 +1046,7 @@ export async function runDbCopyCli(argv: string[], options: DbCopyCliOptions): P
   const env = options.env ?? process.env;
   const out = options.out ?? ((line: string) => console.log(line));
   const err = options.err ?? ((line: string) => console.error(line));
+  const settingOrigins = resolveSettingOrigins(options.apiRoot, env, ["DB_SQLITE_PATH", "DB_TYPE"]) as SettingOrigins;
   loadApiEnvFiles(options.apiRoot, env);
   let args: DbCopyArgs;
   try {
@@ -1034,6 +1070,7 @@ export async function runDbCopyCli(argv: string[], options: DbCopyCliOptions): P
       postgres: postgresStoreConfig(settings, { maxConnections: 1 }),
       dryRun: args.dryRun,
       allowBrokenAudit: args.allowBrokenAudit,
+      settingOrigins,
       log: out
     });
     return 0;

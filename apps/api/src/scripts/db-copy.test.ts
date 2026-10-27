@@ -20,8 +20,8 @@ import { MIGRATIONS } from "../db/migrations.js";
 import { auditEntryHash, GENESIS_HASH, SQLITE_AUDIT_TEXT_COLUMNS } from "../db/audit-chain.js";
 import { PostgresStore, postgresPoolConfig, type PostgresStoreConfig } from "../db/postgres-store.js";
 import { noticePostgresSkipped, testPostgresUrl } from "../test-support/test-store.js";
-import { API_ROOT, CODE_SCHEMA_VERSION, DbCopyRefusal, parseDbCopyArgs, requireConfirmation, runDbCopy, runDbCopyCli } from "./db-copy-core.js";
-import { loadApiEnvFiles } from "./api-env.js";
+import { API_ROOT, CODE_SCHEMA_VERSION, DbCopyRefusal, parseDbCopyArgs, requireConfirmation, runDbCopy, runDbCopyCli, upgradeHint, type SettingOrigins } from "./db-copy-core.js";
+import { loadApiEnvFiles, resolveSettingOrigins } from "./api-env.js";
 import { appendLegacySqliteAuditRow, bomAuditEntry, sqliteAuditBytes, wtf8 } from "./legacy-audit.test-helper.js";
 
 const run = promisify(execFile);
@@ -334,6 +334,75 @@ describe("settings are loaded as the API loads them, before anything is resolved
     const env2: Record<string, string | undefined> = { A: "env" };
     loadApiEnvFiles(onlyRoot, env2);
     expect(env2).toEqual({ A: "env", B: "root", C: "root" });
+  });
+
+  describe("the upgrade hint follows the API's settings precedence (review L-A)", () => {
+    const origin = (source: SettingOrigins["DB_TYPE"]["source"], value?: string) => ({ source, value });
+    const origins = (pathOrigin: SettingOrigins["DB_SQLITE_PATH"], typeOrigin: SettingOrigins["DB_TYPE"] = origin("unset")): SettingOrigins => ({
+      DB_SQLITE_PATH: pathOrigin,
+      DB_TYPE: typeOrigin
+    });
+
+    it("nothing in apps/api/.env: the shell prefix works, as before", () => {
+      const hint = upgradeHint("/b/snap.db", origins(origin("unset")));
+      expect(hint).toBe('start this build once against it (DB_SQLITE_PATH=/b/snap.db pnpm --filter @ai-orchestrator/api start, wait for "listening", stop it), then run db:copy again');
+      expect(upgradeHint("/b/snap.db", origins(origin("environment", "/x.db"), origin("root .env", "sqlite")))).toBe(hint);
+      expect(upgradeHint("/b/snap.db")).toBe(hint);
+    });
+
+    it("apps/api/.env sets DB_SQLITE_PATH: the hint names that file, not a shell prefix", () => {
+      const hint = upgradeHint("/b/snap.db", origins(origin("apps/api/.env", "/srv/prod.db")));
+      expect(hint).toContain("set DB_SQLITE_PATH=/b/snap.db in apps/api/.env (it sets DB_SQLITE_PATH and beats the shell; put it back afterwards)");
+      expect(hint).toContain("(pnpm --filter @ai-orchestrator/api start,");
+      expect(hint).not.toContain("(DB_SQLITE_PATH=");
+    });
+
+    it("apps/api/.env already points DB_SQLITE_PATH at the file: nothing to change", () => {
+      const hint = upgradeHint("/b/snap.db", origins(origin("apps/api/.env", "/b/snap.db")));
+      expect(hint).toBe('start this build once against it (pnpm --filter @ai-orchestrator/api start, wait for "listening", stop it), then run db:copy again');
+    });
+
+    it("DB_TYPE resolving to postgres is warned about; the fix goes where it wins", () => {
+      const fromFile = upgradeHint("/b/snap.db", origins(origin("apps/api/.env", "/b/snap.db"), origin("apps/api/.env", "Postgres")));
+      expect(fromFile).toContain("set DB_TYPE=sqlite in apps/api/.env (it sets DB_TYPE=postgres and beats the shell; put it back afterwards)");
+      expect(fromFile).toContain("WARNING: DB_TYPE resolves to postgres, from apps/api/.env, so a start without changing it would boot against the Postgres target");
+      const fromShell = upgradeHint("/b/snap.db", origins(origin("unset"), origin("environment", "postgres")));
+      expect(fromShell).toContain("(DB_SQLITE_PATH=/b/snap.db DB_TYPE=sqlite pnpm --filter @ai-orchestrator/api start,");
+      expect(fromShell).toContain("WARNING: DB_TYPE resolves to postgres, from environment");
+      const fromRoot = upgradeHint("/b/snap.db", origins(origin("unset"), origin("root .env", "postgresql")));
+      expect(fromRoot).toContain("DB_TYPE=sqlite pnpm");
+      expect(fromRoot).toContain("from root .env");
+    });
+
+    it("resolveSettingOrigins: apps/api/.env beats the environment, which beats the root .env", () => {
+      const apiRoot = layout("A=root\nB=root\nC=root\n", "A=api\n");
+      expect(resolveSettingOrigins(apiRoot, { A: "env", B: "env" }, ["A", "B", "C", "D"])).toEqual({
+        A: { value: "api", source: "apps/api/.env" },
+        B: { value: "env", source: "environment" },
+        C: { value: "root", source: "root .env" },
+        D: { value: undefined, source: "unset" }
+      });
+    });
+
+    it("the CLI refusal for an old file under an apps/api/.env that sets both settings names that file", async () => {
+      await sqliteSource();
+      const raw = new Database(sourcePath);
+      raw.exec(`DROP TABLE budget_alerts;`);
+      raw.close();
+      const apiRoot = layout(undefined, `DB_SQLITE_PATH=${path.join(dir, "prod.db")}\nDB_TYPE=postgres\n`);
+      const err: string[] = [];
+      const code = await runDbCopyCli(["--from", `sqlite:${sourcePath}`, "--to", "postgres", "--yes"], {
+        apiRoot,
+        env: { DB_POSTGRESDB_URL: "postgres://u:p@127.0.0.1:1/x" },
+        out: () => undefined,
+        err: (line) => err.push(line)
+      });
+      expect(code).toBe(2);
+      const message = err.join("\n");
+      expect(message).toContain(`set DB_SQLITE_PATH=${sourcePath} in apps/api/.env`);
+      expect(message).toContain("set DB_SQLITE_PATH=" + sourcePath + " in apps/api/.env (it sets DB_SQLITE_PATH and beats the shell; put it back afterwards) and DB_TYPE=sqlite in apps/api/.env");
+      expect(message).toContain("WARNING: DB_TYPE resolves to postgres, from apps/api/.env");
+    });
   });
 
   it("`--from sqlite` and the Postgres target come from apps/api/.env when it disagrees with the environment, and are printed first", async () => {

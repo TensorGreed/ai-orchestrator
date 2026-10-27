@@ -89,8 +89,13 @@ pnpm --filter @ai-orchestrator/api db:copy -- --from sqlite:<path> --to postgres
 
 1. **Upgrade the SQLite file to this build.** db:copy refuses a file whose schema is older than the build running it
    (it names what is missing: a table, column, index, trigger or migration marker). Start this build once against
-   the file (`DB_SQLITE_PATH=<path> pnpm --filter @ai-orchestrator/api start`, wait until it listens, stop it). A
-   file written by a *newer* build is refused too; run db:copy from that build.
+   the file (`DB_SQLITE_PATH=<path> pnpm --filter @ai-orchestrator/api start`, wait until it listens, stop it).
+   `apps/api/.env` beats the shell, so if that file sets `DB_SQLITE_PATH` (or `DB_TYPE`), the shell prefix is ignored
+   and the start would open the file named there: set `DB_SQLITE_PATH=<path>` in `apps/api/.env` for that one start
+   and put it back afterwards. If `DB_TYPE` resolves to `postgres`, set `DB_TYPE=sqlite` where it wins too, or the
+   start boots against the Postgres target, bootstraps an admin there, and db:copy then refuses the target as
+   non-empty. The refusal prints the right command for the files you have and warns about `DB_TYPE=postgres`. A file
+   written by a *newer* build is refused too; run db:copy from that build.
 2. **Create an empty Postgres database.** db:copy migrates a database with no tables itself, through the same
    migrations the API runs. It refuses a database that holds any user or workflow, or rows the migrations did not put
    there, and one at a different schema version.
