@@ -12,13 +12,14 @@ import { workflowSchema, type Workflow } from "@ai-orchestrator/shared";
 import { validateWorkflowGraph, type ImportReport } from "@ai-orchestrator/workflow-engine";
 import { createApp } from "./app.js";
 import { parseConfig, type AppConfig } from "./config.js";
-import { SqliteStore } from "./db/database.js";
+import type { Store } from "./db/store.js";
 import { AuthService } from "./services/auth-service.js";
 import { SecretService } from "./services/secret-service.js";
+import { openTestStore } from "./test-support/test-store.js";
 
 interface TestContext {
   app: FastifyInstance;
-  store: SqliteStore;
+  store: Store;
   authService: AuthService;
   config: AppConfig;
   tempDir: string;
@@ -34,7 +35,7 @@ function loadFixture(name: string): Record<string, unknown> {
 
 async function createTestContext(): Promise<TestContext> {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-external-import-"));
-  const store = await SqliteStore.create(path.join(tempDir, "orchestrator.db"));
+  const store = await openTestStore(path.join(tempDir, "orchestrator.db"));
   await store.ensureDefaultProject();
   const config = parseConfig({
     LOG_LEVEL: "warn",

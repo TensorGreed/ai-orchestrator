@@ -20,7 +20,7 @@ import { parseConfig } from "../config.js";
 import { AuthService } from "../services/auth-service.js";
 import { AuditService } from "../services/audit-service.js";
 import { SecretService } from "../services/secret-service.js";
-import { createTestStore, noticePostgresSkipped, testPostgresPool, testPostgresUrl, type TestStore, type TestStoreKind } from "../test-support/test-store.js";
+import { createTestStore, noticePostgresSkipped, testPostgresUrl, type TestStore, type TestStoreKind, testStorePool } from "../test-support/test-store.js";
 import { auditEntryHash, GENESIS_HASH, wellFormedAuditText, type AuditCanonicalInput } from "./audit-chain.js";
 import { SqliteStore } from "./database.js";
 import type { Store } from "./store.js";
@@ -81,7 +81,7 @@ for (const kind of kinds) {
     async function raw(fn: (exec: (sql: string, params?: unknown[]) => Promise<Array<Record<string, unknown>>>) => Promise<void>): Promise<Store> {
       const test = current!;
       if (test.kind === "postgres") {
-        const pool = testPostgresPool(test.schema);
+        const pool = testStorePool(test!);
         try {
           await fn(async (sql, params = []) => {
             let i = 0;

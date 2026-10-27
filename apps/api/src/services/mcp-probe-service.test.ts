@@ -4,8 +4,9 @@ import os from "node:os";
 import path from "node:path";
 import { MCPRegistry, type MCPServerAdapter } from "@ai-orchestrator/mcp-sdk";
 import type { MCPServerConfig, MCPToolDefinition } from "@ai-orchestrator/shared";
-import { SqliteStore } from "../db/database.js";
+import type { Store } from "../db/store.js";
 import { McpProbeService, deriveStatus, latencyStats, percentile } from "./mcp-probe-service.js";
+import { openTestStore } from "../test-support/test-store.js";
 
 class ScriptedAdapter implements MCPServerAdapter {
   readonly definition = {
@@ -46,14 +47,14 @@ const tool = (name: string, required: string[] = [], extra: Record<string, unkno
 
 describe("McpProbeService", () => {
   let tempDir: string;
-  let store: SqliteStore;
+  let store: Store;
   let adapter: ScriptedAdapter;
   let leader: boolean;
   let service: McpProbeService;
 
   beforeEach(async () => {
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-mcp-probe-"));
-    store = await SqliteStore.create(path.join(tempDir, "orchestrator.db"));
+    store = await openTestStore(path.join(tempDir, "orchestrator.db"));
     adapter = new ScriptedAdapter();
     const registry = new MCPRegistry();
     registry.register(adapter);

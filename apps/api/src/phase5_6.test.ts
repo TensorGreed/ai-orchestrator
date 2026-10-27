@@ -7,13 +7,14 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
 import type { AppConfig } from "./config";
 import { createApp } from "./app";
-import { SqliteStore } from "./db/database";
+import type { Store } from "./db/store.js";
 import { AuthService } from "./services/auth-service";
 import { SecretService } from "./services/secret-service";
+import { openTestStore } from "./test-support/test-store.js";
 
 interface TestContext {
   app: FastifyInstance;
-  store: SqliteStore;
+  store: Store;
   authService: AuthService;
   secretService: SecretService;
   config: AppConfig;
@@ -200,7 +201,7 @@ async function createTestContext(overrides: Partial<AppConfig> = {}): Promise<Te
   fs.mkdirSync(bareRepo);
   spawnSync("git", ["init", "--bare", "-b", "main", bareRepo], { encoding: "utf8" });
 
-  const store = await SqliteStore.create(dbPath);
+  const store = await openTestStore(dbPath);
   const config = makeConfig({ GIT_SYNC_WORKDIR: gitWorkdir, ...overrides });
   await store.ensureDefaultProject();
   const secretService = new SecretService(store, config.SECRET_MASTER_KEY_BASE64);

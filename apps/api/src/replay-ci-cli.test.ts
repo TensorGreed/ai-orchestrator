@@ -26,14 +26,15 @@ import {
 import { main as cliMain, type CliIo } from "../../../packages/cli/src/main.js";
 import { createApp } from "./app.js";
 import { parseConfig, type AppConfig } from "./config.js";
-import { SqliteStore } from "./db/database.js";
+import type { Store } from "./db/store.js";
 import { AuthService } from "./services/auth-service.js";
 import { SecretService } from "./services/secret-service.js";
 import { WorkflowVersionService } from "./services/workflow-version-service.js";
+import { openTestStore } from "./test-support/test-store.js";
 
 interface TestContext {
   app: FastifyInstance;
-  store: SqliteStore;
+  store: Store;
   authService: AuthService;
   secretService: SecretService;
   config: AppConfig;
@@ -50,7 +51,7 @@ const MASTER_KEY = crypto.randomBytes(32).toString("base64");
 /** A listening app and an admin API key, as a CI job has them. */
 async function createTestContext(): Promise<TestContext> {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-ci-cli-"));
-  const store = await SqliteStore.create(path.join(tempDir, "orchestrator.db"));
+  const store = await openTestStore(path.join(tempDir, "orchestrator.db"));
   await store.ensureDefaultProject();
   const config = parseConfig({
     LOG_LEVEL: "warn",

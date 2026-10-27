@@ -8,9 +8,9 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { createApp } from "./app.js";
 import { parseConfig } from "./config.js";
-import { SqliteStore } from "./db/database.js";
 import { AuthService } from "./services/auth-service.js";
 import { SecretService } from "./services/secret-service.js";
+import { openTestStore } from "./test-support/test-store.js";
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -21,7 +21,7 @@ describe("store lifecycle", () => {
   it("app shutdown waits for the store's close to finish", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-store-close-"));
     dirs.push(dir);
-    const store = await SqliteStore.create(path.join(dir, "orchestrator.db"));
+    const store = await openTestStore(path.join(dir, "orchestrator.db"));
     await store.ensureDefaultProject();
     const close = store.close.bind(store);
     let closed = false;

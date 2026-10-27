@@ -30,6 +30,7 @@ import {
 import {
   createTestStore,
   dropTestSchema,
+  testStorePool,
   noticePostgresSkipped,
   randomTestSchema,
   testPostgresPool,
@@ -350,9 +351,9 @@ describe.skipIf(!postgresUrl)("Postgres schema parity and migration walk", () =>
 
   it("a fresh Postgres through the whole chain matches a fresh SQLite, apart from the documented differences", async () => {
     const test = await createTestStore({ kind: "postgres" });
-    const pool = testPostgresPool();
+    const pool = testStorePool(test);
     try {
-      const pgShape = await introspectPostgres(pool, test.schema!);
+      const pgShape = await introspectPostgres(pool, "public");
       expect(Object.keys(pgShape).length).toBeGreaterThan(70);
       // The whole table is allowed to be missing from SQLite, so pin its shape here.
       expect(Object.keys(pgShape.schema_migrations.columns).sort()).toEqual(["applied_at", "version"]);
@@ -360,7 +361,7 @@ describe.skipIf(!postgresUrl)("Postgres schema parity and migration walk", () =>
       const differences = diffSchemas(sqliteShape, pgShape);
       expect(unexpected(differences)).toEqual([]);
       expect(staleAllowances(differences)).toEqual([]);
-      const scoped = testPostgresPool(test.schema);
+      const scoped = testStorePool(test);
       try {
         expect(await chainVersion(scoped)).toBe(LATEST);
       } finally {
@@ -374,19 +375,19 @@ describe.skipIf(!postgresUrl)("Postgres schema parity and migration walk", () =>
 
   it("v40: no float4 (real) column remains; SQLite REAL is an 8-byte double, so Postgres uses double precision", async () => {
     const test = await createTestStore({ kind: "postgres" });
-    const pool = testPostgresPool();
+    const pool = testStorePool(test);
     try {
       const real = await pool.query<{ column: string }>(
         `SELECT table_name || '.' || column_name AS column FROM information_schema.columns
           WHERE table_schema = $1 AND data_type = 'real' ORDER BY 1`,
-        [test.schema]
+        ["public"]
       );
       expect(real.rows).toEqual([]);
       const widened = await pool.query<{ column: string; data_type: string }>(
         `SELECT table_name || '.' || column_name AS column, data_type FROM information_schema.columns
           WHERE table_schema = $1 AND (table_name, column_name) IN (('usage_events', 'cost_usd'), ('budgets', 'limit_value'),
             ('budgets', 'warn_threshold_pct'), ('budget_alerts', 'usage_value'), ('budget_alerts', 'limit_value')) ORDER BY 1`,
-        [test.schema]
+        ["public"]
       );
       expect(widened.rows).toEqual(
         ["budget_alerts.limit_value", "budget_alerts.usage_value", "budgets.limit_value", "budgets.warn_threshold_pct", "usage_events.cost_usd"].map((column) => ({
@@ -435,12 +436,12 @@ describe.skipIf(!postgresUrl)("Postgres schema parity and migration walk", () =>
 
   it("v40: every insertion-ordered table has seq BIGINT NOT NULL GENERATED ALWAYS AS IDENTITY, and the seq indexes are exactly as documented", async () => {
     const test = await createTestStore({ kind: "postgres" });
-    const pool = testPostgresPool();
+    const pool = testStorePool(test);
     try {
       const columns = await pool.query<{ table_name: string; data_type: string; is_nullable: string; is_identity: string; identity_generation: string | null }>(
         `SELECT table_name, data_type, is_nullable, is_identity, identity_generation
            FROM information_schema.columns WHERE table_schema = $1 AND column_name = 'seq' ORDER BY table_name`,
-        [test.schema]
+        ["public"]
       );
       expect(columns.rows).toEqual(
         INSERTION_SEQ_TABLES.map(({ table }) => ({ table_name: table, data_type: "bigint", is_nullable: "NO", is_identity: "YES", identity_generation: "ALWAYS" })).sort((a, b) =>
@@ -459,7 +460,7 @@ describe.skipIf(!postgresUrl)("Postgres schema parity and migration walk", () =>
             WHERE n.nspname = $1 AND a.attname = 'seq'
            OFFSET 0
          ) s ORDER BY indexname`,
-        [test.schema]
+        ["public"]
       );
       expect(indexes.rows.map((row) => ({ table: row.tablename, index: row.indexname, definition: row.indexdef }))).toEqual(
         [...SEQ_INDEXES].sort((a, b) => (a.index < b.index ? -1 : 1))
@@ -508,7 +509,7 @@ describe.skipIf(!postgresUrl)("Postgres schema parity and migration walk", () =>
 
   it("knowledge base chunks are searchable through the generated tsvector (ts_rank_cd / websearch_to_tsquery)", async () => {
     const test = await createTestStore({ kind: "postgres" });
-    const pool = testPostgresPool(test.schema);
+    const pool = testStorePool(test);
     try {
       const insert = `INSERT INTO knowledge_base_chunks (id, knowledge_base_id, chunk_index, content, vector_json, created_at) VALUES ($1, 'kb', $2, $3, '[]', now())`;
       await pool.query(insert, ["c1", 0, "Refund policy: customers may return items within thirty days."]);

@@ -6,7 +6,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Workflow, WorkflowNode } from "@ai-orchestrator/shared";
 import { DEFAULT_OUTBOUND_GUARD } from "@ai-orchestrator/workflow-engine";
-import type { SqliteStore } from "../db/database";
+import type { Store } from "../db/store.js";
 import { TriggerService } from "./trigger-service";
 
 type Logged = { level: string; message: string; metadata?: unknown };
@@ -16,7 +16,7 @@ const node = (type: string, config: Record<string, unknown>): WorkflowNode => ({
 
 function service(fetchImpl: typeof fetch, resolved: string[] = ["93.184.216.34"]) {
   const logs: Logged[] = [];
-  const store = { getTriggerState: () => undefined, saveTriggerState: () => undefined } as unknown as SqliteStore;
+  const store = { getTriggerState: () => undefined, saveTriggerState: () => undefined } as unknown as Store;
   const triggers = new TriggerService(store, (level, message, metadata) => logs.push({ level, message, metadata }), fetchImpl);
   triggers.setOutboundGuard(DEFAULT_OUTBOUND_GUARD, async () => resolved);
   return { triggers: triggers as unknown as Record<string, (wf: Workflow, n: WorkflowNode) => () => void>, logs };

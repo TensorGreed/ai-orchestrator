@@ -1,5 +1,5 @@
 /**
- * Phase 13.1 — Postgres only: two PostgresStore instances (two pools, as two API processes would have) on one schema.
+ * Phase 13.1 — Postgres only: two PostgresStore instances (two pools, as two API processes would have) on one database.
  * Version numbers are taken atomically, the guard profile cache follows the database revision written by the other
  * instance, one running simulation is enforced by the database, the vault keeps the first token for a value, and the
  * data-subject cursor never skips rows created in the same instant.
@@ -7,8 +7,7 @@
 import crypto from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
 import { createDefaultGuardProfile } from "@ai-orchestrator/guard-sdk";
-import { createTestStore, noticePostgresSkipped, testPostgresPool, testPostgresSettings, testPostgresUrl, type TestStore } from "../../test-support/test-store.js";
-import { postgresStoreConfig } from "../create-store.js";
+import { createTestStore, noticePostgresSkipped, testPostgresUrl, type TestStore, openTestStoreTwin, testStorePool } from "../../test-support/test-store.js";
 import { PostgresStore } from "../postgres-store.js";
 import { isOneRunningSimulationViolation } from "../store-errors.js";
 import { GuardService } from "../../services/guard-service.js";
@@ -23,8 +22,8 @@ let second: PostgresStore | undefined;
 
 async function twoStores() {
   primary = await createTestStore({ kind: "postgres" });
-  second = await PostgresStore.create(postgresStoreConfig(testPostgresSettings(), { schema: primary.schema!, maxConnections: 4 }));
-  return { a: primary.store, b: second, schema: primary.schema! };
+  second = await openTestStoreTwin(primary!, { maxConnections: 4 });
+  return { a: primary.store, b: second, test: primary };
 }
 
 afterEach(async () => {
@@ -38,7 +37,7 @@ function strict(extra: Record<string, unknown> = {}): Record<string, unknown> {
   return JSON.parse(JSON.stringify({ ...createDefaultGuardProfile(), id: "strict", name: "Strict", ...extra })) as Record<string, unknown>;
 }
 
-postgres("guard on two Postgres stores sharing one schema", () => {
+postgres("guard on two Postgres stores sharing one database", () => {
   it("concurrent saves of one profile from both stores take consecutive version numbers", async () => {
     const { a, b } = await twoStores();
     await a.insertGuardProfile({ id: "p", name: "P", document: {}, hash: "h1", createdBy: null });
@@ -83,10 +82,10 @@ postgres("guard on two Postgres stores sharing one schema", () => {
   }, 60_000);
 
   it("a write made with plain SQL on another connection moves the revision and is seen", async () => {
-    const { a, schema } = await twoStores();
+    const { a, test } = await twoStores();
     await a.insertGuardProfile({ id: "p", name: "Before", document: {}, hash: "h1", createdBy: null });
     const before = (await a.guardProfileRevision())!;
-    const pool = testPostgresPool(schema);
+    const pool = testStorePool(test);
     try {
       await pool.query(`UPDATE guard_profiles SET name = 'After' WHERE id = 'p'`);
     } finally {
@@ -129,11 +128,11 @@ postgres("guard on two Postgres stores sharing one schema", () => {
   }, 60_000);
 
   it("data-subject paging returns every row once when many rows share one creation instant across page ends", async () => {
-    const { a, schema } = await twoStores();
+    const { a, test } = await twoStores();
     for (let index = 0; index < 25; index += 1) {
       await a.saveExecutionHistory({ id: `run-${String(index).padStart(2, "0")}`, workflowId: "wf", status: "success", startedAt: new Date().toISOString(), triggerType: "eval" });
     }
-    const pool = testPostgresPool(schema);
+    const pool = testStorePool(test);
     try {
       // Rows 5..19 created in the same microsecond, so one group straddles both page boundaries of size 7.
       await pool.query(`UPDATE execution_history SET created_at = '2026-10-01T00:00:00.123456Z' WHERE id BETWEEN 'run-05' AND 'run-19'`);

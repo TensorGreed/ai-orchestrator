@@ -9,7 +9,7 @@ import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
 import { SqliteStore } from "./database.js";
 import type { Store } from "./store.js";
-import { createTestStore, noticePostgresSkipped, testPostgresPool, testPostgresUrl, type TestStore, type TestStoreKind } from "../test-support/test-store.js";
+import { createTestStore, noticePostgresSkipped, testPostgresUrl, type TestStore, type TestStoreKind, testStorePool } from "../test-support/test-store.js";
 
 const OLD = "2001-01-01T00:00:00.000Z";
 const NEW = "2100-01-01T00:00:00.000Z";
@@ -52,7 +52,7 @@ for (const kind of kinds) {
     async function seed(statements: string[]): Promise<Store> {
       const test = current!;
       if (test.kind === "postgres") {
-        const pool = testPostgresPool(test.schema);
+        const pool = testStorePool(test!);
         try {
           for (const sql of statements) await pool.query(sql);
         } finally {
@@ -71,7 +71,7 @@ for (const kind of kinds) {
     async function remaining(store: Store): Promise<Record<string, string[]>> {
       const out: Record<string, string[]> = {};
       if (current!.kind === "postgres") {
-        const pool = testPostgresPool(current!.schema);
+        const pool = testStorePool(current!);
         try {
           for (const table of Object.keys(TABLES)) {
             out[table] = (await pool.query<{ id: string }>(`SELECT id FROM ${table} ORDER BY id`)).rows.map((row) => row.id);

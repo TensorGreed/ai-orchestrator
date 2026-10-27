@@ -2,19 +2,20 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { SqliteStore } from "./db/database.js";
+import type { Store } from "./db/store.js";
 import { UsageService } from "./services/usage-service.js";
 import { BudgetService, __test__ } from "./services/budget-service.js";
+import { openTestStore } from "./test-support/test-store.js";
 
 describe("Phase 8.3 — budget caps + alerts", () => {
   let tempDir: string;
-  let store: SqliteStore;
+  let store: Store;
   let usage: UsageService;
   let budgets: BudgetService;
 
   beforeEach(async () => {
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-phase8-3-"));
-    store = await SqliteStore.create(path.join(tempDir, "orchestrator.db"));
+    store = await openTestStore(path.join(tempDir, "orchestrator.db"));
     await store.ensureDefaultProject();
     usage = new UsageService(store);
     budgets = new BudgetService(store);

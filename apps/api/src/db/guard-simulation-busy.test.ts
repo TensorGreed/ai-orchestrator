@@ -4,7 +4,7 @@
  * Postgres's 23505 on idx_guard_simulations_one_running, and nothing else (a duplicate id is a different violation).
  */
 import { afterEach, describe, expect, it } from "vitest";
-import { createTestStore, noticePostgresSkipped, testPostgresPool, testPostgresUrl, type TestStore } from "../test-support/test-store.js";
+import { createTestStore, noticePostgresSkipped, testPostgresUrl, type TestStore, testStorePool } from "../test-support/test-store.js";
 import { isOneRunningSimulationViolation } from "./store-errors.js";
 
 const row = (id: string, status: string) => ({
@@ -58,7 +58,7 @@ postgres("one running guard simulation [postgres]", () => {
   it("a second running row is that violation; a duplicate id and a second finished row are not", async () => {
     // The rows go in with plain SQL on the migrated schema, so the index itself (not the store method) is tested.
     current = await createTestStore({ kind: "postgres" });
-    const pool = testPostgresPool(current.schema);
+    const pool = testStorePool(current!);
     try {
       const insert = (id: string, status: string) =>
         pool.query(

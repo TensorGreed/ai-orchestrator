@@ -11,13 +11,14 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
 import { createApp, type CreateAppOptions } from "./app";
 import { parseConfig, type AppConfig } from "./config";
-import { SqliteStore } from "./db/database";
+import type { Store } from "./db/store.js";
 import { AuthService } from "./services/auth-service";
 import { SecretService } from "./services/secret-service";
+import { openTestStore } from "./test-support/test-store.js";
 
 interface Ctx {
   app: FastifyInstance;
-  store: SqliteStore;
+  store: Store;
   authService: AuthService;
   config: AppConfig;
   tempDir: string;
@@ -36,7 +37,7 @@ function baseEnv(overrides: Record<string, string> = {}): Record<string, string>
 
 async function createCtx(env: Record<string, string>, options: CreateAppOptions): Promise<Ctx> {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-code-startup-"));
-  const store = await SqliteStore.create(path.join(tempDir, "orchestrator.db"));
+  const store = await openTestStore(path.join(tempDir, "orchestrator.db"));
   await store.ensureDefaultProject();
   const config = parseConfig(baseEnv(env));
   const secretService = new SecretService(store, config.SECRET_MASTER_KEY_BASE64);

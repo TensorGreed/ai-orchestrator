@@ -7,15 +7,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { Pool } from "pg";
-import {
-  createTestStore,
-  noticePostgresSkipped,
-  testPostgresPool,
-  testPostgresSettings,
-  testPostgresUrl,
-  type TestStore
-} from "../../test-support/test-store.js";
-import { postgresStoreConfig } from "../create-store.js";
+import { createTestStore, noticePostgresSkipped, testPostgresUrl, type TestStore, openTestStoreTwin, testStorePool } from "../../test-support/test-store.js";
 import { PostgresStore } from "../postgres-store.js";
 import type { Store } from "../store.js";
 import type { ReleaseApprovalRequestRecord, ReleaseGateRecord } from "../database.js";
@@ -102,8 +94,8 @@ if (!testPostgresUrl()) {
 
     beforeEach(async () => {
       first = await createTestStore({ kind: "postgres" });
-      second = await PostgresStore.create(postgresStoreConfig(testPostgresSettings(), { schema: first.schema!, maxConnections: 4 }));
-      sql = testPostgresPool(first.schema!);
+      second = await openTestStoreTwin(first!, { maxConnections: 4 });
+      sql = testStorePool(first!);
       a = first.store;
       b = second;
     }, 60_000);

@@ -4,11 +4,10 @@
  * Postgres only (SQLite's single writer already serialises them; see replay.contract.test.ts for both stores).
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { postgresStoreConfig } from "../create-store.js";
 import type { ReplayRecordingInsert } from "../database.js";
 import { PostgresStore } from "../postgres-store.js";
 import type { ReplayRecordingLimits, Store } from "../store.js";
-import { createTestStore, noticePostgresSkipped, testPostgresSettings, testPostgresUrl, type TestStore } from "../../test-support/test-store.js";
+import { createTestStore, noticePostgresSkipped, testPostgresUrl, type TestStore, openTestStoreTwin } from "../../test-support/test-store.js";
 
 const ROUNDS = 8;
 
@@ -61,7 +60,7 @@ postgres("checked golden-run writes from two stores on one Postgres database", (
 
   beforeEach(async () => {
     first = await createTestStore({ kind: "postgres" });
-    second = await PostgresStore.create(postgresStoreConfig(testPostgresSettings(), { schema: first.schema!, maxConnections: 4 }));
+    second = await openTestStoreTwin(first!, { maxConnections: 4 });
     a = first.store;
     b = second;
   }, 60_000);
