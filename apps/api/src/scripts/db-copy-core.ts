@@ -68,7 +68,7 @@ import { INSERTION_SEQ_TABLES, MIGRATIONS } from "../db/migrations.js";
 import { pgParams } from "../db/postgres/context.js";
 import { describePostgresSettings, isPostgresDbType, parsePostgresSettings } from "../config.js";
 import { postgresStoreConfig } from "../db/create-store.js";
-import { loadApiEnvFiles, resolveSettingOrigins, type SettingOrigin } from "./api-env.js";
+import { loadApiEnvFiles, resolveSettingOrigins, type SettingOrigin } from "../env-files.js";
 import { auditCarryOver, brokenPosition, unverifiableOnPostgresBySource, verdictText, verifyPostgresAuditChainByCursor } from "./audit-carry-over.js";
 import { applyMigrationChain, currentChainVersion, postgresPoolConfig, withMigrationLock, type PostgresStoreConfig } from "../db/postgres-store.js";
 

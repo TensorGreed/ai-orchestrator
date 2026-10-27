@@ -2,7 +2,7 @@
  * pnpm --filter @ai-orchestrator/api db:copy -- --from sqlite:<path> --to postgres [--yes] [--dry-run] [--allow-broken-audit]
  *
  * Optional: moves a SQLite database into an empty Postgres database (see db-copy-core.ts for what is copied, how
- * it is verified and what is refused). Settings are loaded exactly as the API loads them (api-env.ts: the repo
+ * it is verified and what is refused). Settings are loaded exactly as the API loads them (env-files.ts: the repo
  * root's .env, then apps/api/.env overriding the environment), so `--from sqlite` and the Postgres target are the
  * ones the API would use. The resolved source file and target (never the password) are printed before anything else.
  *

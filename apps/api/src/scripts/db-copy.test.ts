@@ -21,7 +21,7 @@ import { auditEntryHash, GENESIS_HASH, SQLITE_AUDIT_TEXT_COLUMNS } from "../db/a
 import { PostgresStore, postgresPoolConfig, type PostgresStoreConfig } from "../db/postgres-store.js";
 import { noticePostgresSkipped, testPostgresUrl } from "../test-support/test-store.js";
 import { API_ROOT, CODE_SCHEMA_VERSION, DbCopyRefusal, parseDbCopyArgs, requireConfirmation, runDbCopy, runDbCopyCli, upgradeHint, type SettingOrigins } from "./db-copy-core.js";
-import { loadApiEnvFiles, resolveSettingOrigins } from "./api-env.js";
+import { loadApiEnvFiles, resolveSettingOrigins } from "../env-files.js";
 import { appendLegacySqliteAuditRow, bomAuditEntry, sqliteAuditBytes, wtf8 } from "./legacy-audit.test-helper.js";
 
 const run = promisify(execFile);
