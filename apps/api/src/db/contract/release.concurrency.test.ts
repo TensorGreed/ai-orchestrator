@@ -235,6 +235,22 @@ if (!testPostgresUrl()) {
       expect(ids).toEqual(Array.from({ length: 20 }, (_, index) => `exp-${index}`).sort());
     });
 
+    it("a sweep skips a request whose row another transaction holds, without waiting; the next sweep closes it", async () => {
+      const past = new Date(Date.now() - 60_000).toISOString();
+      for (let index = 0; index < 5; index += 1) await a.insertReleaseApprovalRequest(releaseRequest(`held-${index}`, "wf-held", 1, past));
+      const holder = await sql.connect();
+      try {
+        await holder.query("BEGIN");
+        await holder.query(`SELECT id FROM release_approval_requests WHERE id = 'held-0' FOR UPDATE`);
+        const swept = await b.timeOutExpiredReleaseApprovalRequests(now());
+        expect(swept.map((request) => request.id).sort()).toEqual(["held-1", "held-2", "held-3", "held-4"]);
+        await holder.query("ROLLBACK");
+      } finally {
+        holder.release();
+      }
+      expect((await a.timeOutExpiredReleaseApprovalRequests(now())).map((request) => request.id)).toEqual(["held-0"]);
+    });
+
     it("two markers with different reasons on one run keep both reasons", async () => {
       for (let round = 0; round < ROUNDS; round += 1) {
         await sql.query(
