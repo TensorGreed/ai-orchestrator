@@ -187,4 +187,30 @@ pnpm --filter @ai-orchestrator/api db:import -- --in backup.json --yes
 
 ## Running more than one instance
 
-Several API instances can share one Postgres database; this section describes what that takes.
+Every feature works on Postgres, and several API instances can share one Postgres database. Nothing needs to be configured for it.
+
+**One leader.** Instances that run background work (`WORKER_MODE=all`, the default, or `worker`) elect one leader with a Postgres advisory lock held on a dedicated connection. Only the leader runs schedules, polling and app triggers, approval timeouts, the stuck-job sweep of the queue, and the recovery of interrupted resumes. This happens with or without `HA_ENABLED`. The other instances serve the API and webhooks as usual. A schedule or trigger saved through any instance reaches the leader within 15 seconds, and a trigger always runs the workflow as it is when it fires (the published version when there is one).
+
+**Failover.** One session holds the lock at a time. Postgres frees it when that session ends: the process stops or crashes, or the connection is killed. The leader checks its lock connection every `HA_RENEW_INTERVAL_MS` (default 10 seconds) and stops its leader work as soon as the connection fails, within one check. Another instance takes the lock at its next check. After the leader's host or network is lost without closing the connection, the server ends the old session once it has been idle for three renew intervals (30 seconds by default, `idle_session_timeout`, PostgreSQL 14 or later) or its TCP keepalives give up; with the defaults another instance leads within about 40 seconds. A lone instance whose connection drops tries for the lock again at once. A graceful stop stops the leader's work before it frees the lock.
+
+**Connect the leader directly or through a session-mode pooler.** The lock belongs to a database session. With transaction pooling (for example PgBouncer `pool_mode=transaction`), the lock lands on a server connection other clients reuse, so two instances could both believe they lead, and the store's `search_path` option is lost too. If a server or pooler refuses one of the leader connection's settings, the API logs one warning and keeps working; a lost leader's lock is then freed only when the server notices the dead link (about two hours with default keepalives).
+
+`GET /api/ha/status` (admin only) shows the election as enabled, whether this instance leads, and the holder's `HA_INSTANCE_ID` (set it per instance for readable names; it defaults to the host name plus a random suffix).
+
+**What the database guarantees across instances:**
+
+| What | How |
+|---|---|
+| A queued job runs on one instance | the claim is `FOR UPDATE SKIP LOCKED` |
+| An approval, release request or gate-case request is decided once | a conditional update; the losing decision gets `409` |
+| A paused run has one open approval request | a unique index (migration 41) |
+| One guard simulation runs at a time | a unique index (migration 39) |
+| A webhook idempotency key or replay fingerprint is accepted once | primary keys; a duplicate gets the stored result or `409` |
+| Workflow and guard-profile versions get distinct numbers | the parent row is locked while the next number is taken |
+| Timeouts expire a request once | the sweep locks rows with `SKIP LOCKED` |
+
+**Restarts.** With a shared database an instance only marks work as interrupted when no instance has touched it recently: runs older than the longest a run may last plus a minute, and eval or replay jobs with no progress for five minutes. A job another live instance is running is left alone.
+
+**Upgrading to migration 41.** If a database already holds more than one pending approval request for a run (possible before this release when two instances backfilled the same paused run), the upgrade keeps the newest, cancels the others as "Superseded by a newer request of the same run", and logs the count once at startup. SQLite does the same at its next start.
+
+**Webhook-only replicas** (`WORKER_MODE=webhook`) do not take part in the election and never run background work.
