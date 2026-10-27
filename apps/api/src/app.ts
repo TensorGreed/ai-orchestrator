@@ -3981,7 +3981,9 @@ export async function createApp(
     queueMode: Boolean(queueService),
     isResumeActive: (executionId) => approvalResumes.isActive(executionId),
     resumeStaleAfterMs: config.WORKFLOW_EXECUTION_TIMEOUT_MS + STUCK_JOB_MARGIN_MS,
-    recoverAtStartupImmediately: !config.HA_ENABLED,
+    // A database other instances share (Postgres, or HA on): a resume another live instance runs is not this boot's to
+    // re-drive, so only claims older than the grace are recovered; one process on SQLite owns every claim it finds.
+    recoverAtStartupImmediately: !sharedDatabase,
     logger: {
       info: (msg, fields) => app.log.info(fields ?? {}, msg),
       warn: (msg, fields) => app.log.warn(fields ?? {}, msg)

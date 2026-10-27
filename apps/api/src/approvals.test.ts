@@ -819,9 +819,10 @@ describe("a recorded decision is never lost", () => {
       const [item] = await inbox(first, lead.cookie);
       await closeContext(first);
 
-      // The process stopped between the decision and its resume (no queue item either).
+      // The process stopped between the decision and its resume (no queue item either), long enough ago that on a
+      // database instances share (Postgres) no live instance can still be running it.
       await whileStopped(tempDir, async (sql) => {
-        await sql.run("UPDATE workflow_executions SET status = 'resuming' WHERE id = ?", run.executionId);
+        await sql.run("UPDATE workflow_executions SET status = 'resuming', updated_at = ? WHERE id = ?", new Date(Date.now() - 86_400_000).toISOString(), run.executionId);
         await sql.run("UPDATE approval_requests SET status = 'approved', decided_by = ?, decided_at = ? WHERE id = ?", lead.email, new Date().toISOString(), item!.requestId);
       });
 
@@ -848,7 +849,8 @@ describe("a recorded decision is never lost", () => {
         "INSERT INTO approval_requests (id, execution_id, workflow_id, project_id, node_id, kind, status, spec_json, decided_by, created_at, updated_at) VALUES ('apr_old', ?, ?, 'default', 'earlier_gate', 'approval_gate', 'approved', '{}', 'someone', ?, ?)",
         run.executionId, "wf-stale", new Date(Date.now() - 60_000).toISOString(), new Date(Date.now() - 60_000).toISOString()
       );
-      await sql.run("UPDATE workflow_executions SET status = 'resuming' WHERE id = ?", run.executionId);
+      // Claimed long ago: on a database instances share (Postgres) only a stale claim is recovered at startup.
+      await sql.run("UPDATE workflow_executions SET status = 'resuming', updated_at = ? WHERE id = ?", new Date(Date.now() - 86_400_000).toISOString(), run.executionId);
     });
     const second = await createTestContext({ tempDir });
     await waitFor(async () => (await second.store.getWorkflowExecutionState(run.executionId!))?.status === "waiting_approval");

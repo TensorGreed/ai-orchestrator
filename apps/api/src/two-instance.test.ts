@@ -30,6 +30,7 @@ interface Instance {
   app: FastifyInstance;
   store: PostgresStore;
   scheduler: SchedulerService;
+  triggers: TriggerService;
 }
 
 const jobCount = (scheduler: SchedulerService) => (scheduler as unknown as { jobs: Map<string, unknown> }).jobs.size;
@@ -47,6 +48,27 @@ async function until<T>(read: () => T | Promise<T>, what: string, timeoutMs = 20
 
 function node(id: string, type: string, config: Record<string, unknown>): WorkflowNode {
   return { id, type: type as WorkflowNode["type"], name: id, position: { x: 0, y: 0 }, config };
+}
+
+/** A webhook-started run that pauses at an approval gate, then answers "sent" once approved. */
+function gateWorkflow(id: string): Workflow {
+  return {
+    id,
+    name: id,
+    schemaVersion: "1.0.0",
+    workflowVersion: 1,
+    nodes: [
+      node("hook", "webhook_input", { path: `hook-${id}`, method: "POST" }),
+      node("gate", "approval_gate", { message: "Send?", approverRoles: ["builder", "admin"], timeoutMinutes: 60, timeoutOutcome: "reject" }),
+      node("sent", "output", { responseTemplate: "sent" }),
+      node("stopped", "output", { responseTemplate: "rejected" })
+    ],
+    edges: [
+      { id: "e1", source: "hook", target: "gate" },
+      { id: "e2", source: "gate", sourceHandle: "approved", target: "sent" },
+      { id: "e3", source: "gate", sourceHandle: "rejected", target: "stopped" }
+    ]
+  } as Workflow;
 }
 
 function workflow(id: string, entry: WorkflowNode): Workflow {
@@ -80,43 +102,62 @@ run("two API instances on one Postgres database", () => {
 
   async function start(count: number, overrides: Record<string, string> = {}): Promise<Instance[]> {
     primary = await createTestStore({ kind: "postgres" });
+    for (let i = 0; i < count; i += 1) await addInstance(i, overrides);
+    return instances;
+  }
+
+  /** Boots one more full app on the primary's database (a deploy that brings an instance up later). */
+  async function addInstance(i: number, overrides: Record<string, string> = {}): Promise<Instance> {
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "l2m-two-instance-"));
     tempDirs.push(tempDir);
-    for (let i = 0; i < count; i += 1) {
-      const store = await openTestStoreTwin(primary, { maxConnections: 6 });
-      const config = parseConfig({
-        LOG_LEVEL: "warn",
-        SEED_SAMPLE_WORKFLOWS: "false",
-        SECRET_MASTER_KEY_BASE64: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
-        COOKIE_SECURE: "false",
-        RATE_LIMIT_ENABLED: "false",
-        MCP_PROBE_INTERVAL_MS: "0",
-        GIT_SYNC_WORKDIR: path.join(tempDir, `sync-${i}`),
-        HA_INSTANCE_ID: `instance-${i}`,
-        HA_RENEW_INTERVAL_MS: "100",
-        ...overrides
+    const store = await openTestStoreTwin(primary!, { maxConnections: 6 });
+    const config = parseConfig({
+      LOG_LEVEL: "warn",
+      SEED_SAMPLE_WORKFLOWS: "false",
+      SECRET_MASTER_KEY_BASE64: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
+      COOKIE_SECURE: "false",
+      RATE_LIMIT_ENABLED: "false",
+      MCP_PROBE_INTERVAL_MS: "0",
+      GIT_SYNC_WORKDIR: path.join(tempDir, `sync-${i}`),
+      HA_INSTANCE_ID: `instance-${i}`,
+      HA_RENEW_INTERVAL_MS: "100",
+      ...overrides
+    });
+    const scheduler = new SchedulerService(store, (_level, message) => {
+      if (message === "Registered schedule") fires.push({ instance: i, at: Date.now(), event: "registered" });
+    });
+    const stopScheduler = scheduler.stop.bind(scheduler);
+    scheduler.stop = () => {
+      fires.push({ instance: i, at: Date.now(), event: "stopped" });
+      stopScheduler();
+    };
+    // Record each tick as it fires (the cron's own time), before the app's handler runs it.
+    const setHandler = scheduler.setExecutionHandler.bind(scheduler);
+    scheduler.setExecutionHandler = (handler) =>
+      setHandler(async (input) => {
+        fires.push({ instance: i, at: Date.now() });
+        await handler(input);
       });
-      const scheduler = new SchedulerService(store, (_level, message) => {
-        if (message === "Registered schedule") fires.push({ instance: i, at: Date.now(), event: "registered" });
-      });
-      const stopScheduler = scheduler.stop.bind(scheduler);
-      scheduler.stop = () => {
-        fires.push({ instance: i, at: Date.now(), event: "stopped" });
-        stopScheduler();
-      };
-      // Record each tick as it fires (the cron's own time), before the app's handler runs it.
-      const setHandler = scheduler.setExecutionHandler.bind(scheduler);
-      scheduler.setExecutionHandler = (handler) =>
-        setHandler(async (input) => {
-          fires.push({ instance: i, at: Date.now() });
-          await handler(input);
-        });
-      const triggers = new TriggerService(store, quiet);
-      const app = await createApp(config, store, new SecretService(store, config.SECRET_MASTER_KEY_BASE64), new AuthService(store, config.SESSION_TTL_HOURS), scheduler, undefined, triggers);
-      await app.ready();
-      instances.push({ app, store, scheduler });
-    }
-    return instances;
+    const triggers = new TriggerService(store, quiet);
+    const app = await createApp(config, store, new SecretService(store, config.SECRET_MASTER_KEY_BASE64), new AuthService(store, config.SESSION_TTL_HOURS), scheduler, undefined, triggers);
+    await app.ready();
+    const instance = { app, store, scheduler, triggers };
+    instances.push(instance);
+    return instance;
+  }
+
+  async function stopInstance(instance: Instance): Promise<void> {
+    instances.splice(instances.indexOf(instance), 1);
+    await instance.app.close();
+    await instance.store.close();
+  }
+
+  async function loginAs(instance: Instance, role: "admin" | "builder", name: string): Promise<string> {
+    const email = `${name}@example.com`;
+    const password = `${name}-Pass-123!`;
+    if (!(await instance.store.getUserByEmail(email))) await new AuthService(instance.store, 24).register({ email, password, role });
+    const login = await instance.app.inject({ method: "POST", url: "/api/auth/login", payload: { email, password } });
+    return String([login.headers["set-cookie"]].flat()[0]).split(";")[0]!;
   }
 
   const ticks = () => fires.filter((fire) => !fire.event);
@@ -231,6 +272,36 @@ run("two API instances on one Postgres database", () => {
     } finally {
       await pool.end();
     }
+  }, 60_000);
+
+  it("an instance booting as leader leaves alone an approval resume another instance is running", async () => {
+    // B paused a run at an approval gate; a user approved it on B, and B claimed it (resuming) and is running it.
+    const [b] = await start(1);
+    const cookie = await loginAs(b!, "builder", "builder");
+    await b!.store.upsertWorkflow(gateWorkflow("wf-gate"));
+    const run = (await b!.app.inject({ method: "POST", url: "/api/workflows/wf-gate/execute", headers: { cookie }, payload: { user_prompt: "Ana" } })).json<{
+      status: string;
+      executionId: string;
+    }>();
+    expect(run.status).toBe("waiting_approval");
+    const pool = testStorePool(primary!);
+    try {
+      await pool.query(`UPDATE workflow_executions SET status = 'resuming', updated_at = $2 WHERE id = $1`, [run.executionId, new Date().toISOString()]);
+      await pool.query(`UPDATE approval_requests SET status = 'approved', decided_by = 'builder@example.com', decided_at = $2 WHERE execution_id = $1`, [
+        run.executionId,
+        new Date().toISOString()
+      ]);
+    } finally {
+      await pool.end();
+    }
+    // A rolling deploy: B's lock frees for a moment and A, booting, takes it. A's startup recovery must not re-drive
+    // B's resume (its nodes after the gate would run twice): on a shared database only a stale claim is recovered.
+    await stopInstance(b!);
+    const a = await addInstance(1);
+    await until(async () => (await a.store.getLease("primary"))?.holderId === "instance-1", "A to lead");
+    await new Promise((resolve) => setTimeout(resolve, 1_500));
+    expect((await a.store.getWorkflowExecutionState(run.executionId))?.status).toBe("resuming");
+    expect((await a.store.getExecutionHistory(run.executionId))?.status).not.toBe("success");
   }, 60_000);
 
   it("leader election alone: one holder at a time; stopping the holder hands the lock over", async () => {
