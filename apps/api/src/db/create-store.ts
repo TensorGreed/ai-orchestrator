@@ -35,7 +35,9 @@ export async function createStore(config?: {
     const settings = parsePostgresSettings(env);
     for (const warning of settings.warnings) log.warn(`Warning: ${warning}`);
     log.info(`Database: ${describePostgresSettings(settings)}`);
-    const store = await PostgresStore.create(postgresStoreConfig(settings));
+    const store = await PostgresStore.create(postgresStoreConfig(settings), {
+      logger: { warn: (message, fields) => log.warn(fields ? `${message} ${JSON.stringify(fields)}` : message) }
+    });
     for (const note of store.upgradeNotes) log.info(`Database: ${note}`);
     return store;
   }

@@ -12,7 +12,6 @@
  * and `/reject` with a `gcr_` id). Access goes through the shared
  * run-access helper (run-access.ts): a workflow the user cannot read
  * answers 404, one they can read but may not act on 403; admins always pass.
- * On Postgres every route answers 501.
  */
 
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
@@ -35,10 +34,6 @@ export function registerGateAdmissionRoutes(deps: GateAdmissionRoutesDeps): void
   const handle = async <T>(request: FastifyRequest, reply: FastifyReply, roles: UserRole[], work: (user: SafeUser) => T | Promise<T>) => {
     const user = await requireRole(request, reply, roles);
     if (!user) return reply;
-    if (!admission.available) {
-      reply.code(501);
-      return { error: "Release gates need the SQLite store in this release" };
-    }
     try {
       return await work(user);
     } catch (error) {

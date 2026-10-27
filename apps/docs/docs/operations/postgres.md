@@ -187,4 +187,36 @@ pnpm --filter @ai-orchestrator/api db:import -- --in backup.json --yes
 
 ## Running more than one instance
 
-Several API instances can share one Postgres database; this section describes what that takes.
+Every feature works on Postgres, and several API instances can share one Postgres database. **Running more than one instance needs `HA_ENABLED=true` on every instance.** Without it (the default) each instance is its own leader, with no lock and no lock connection: right for one instance, but with several, every instance runs every schedule and trigger.
+
+**One leader.** Instances that run background work (`WORKER_MODE=all`, the default, or `worker`) elect one leader with a Postgres advisory lock held on a dedicated connection when `HA_ENABLED=true`. Only the leader runs schedules, polling and app triggers, approval timeouts, the stuck-job sweep of the queue, and the recovery of interrupted resumes. The other instances serve the API and webhooks as usual. A schedule or trigger saved through any instance reaches the leader within 15 seconds, and a trigger always runs the workflow as it is when it fires (the published version when there is one).
+
+**Failover.** One session holds the lock at a time. Postgres frees it when that session ends: the process stops or crashes, or the connection is killed. The leader checks its lock connection every `HA_RENEW_INTERVAL_MS` (default 10 seconds) and stops its leader work as soon as the connection fails, within one check. Another instance takes the lock at its next check. The lock connection also runs a liveness query every renew interval on its own timer, so it is never idle for three renew intervals, even while a slow leader start-up (reconciling runs, loading every schedule) is still running; if the lock is lost during that start-up, the work it started is stopped as soon as it finishes, and an instance that is not the leader never keeps schedules or triggers running. After the leader's host or network is lost without closing the connection, the server ends the old session once it has been idle for three renew intervals (30 seconds by default, `idle_session_timeout`, PostgreSQL 14 or later) or its TCP keepalives give up; with the defaults another instance leads within about 40 seconds. A lone instance whose connection drops tries for the lock again at once. A graceful stop stops the leader's work before it frees the lock.
+
+**Connect the leader directly or through a session-mode pooler.** The lock belongs to a database session. With transaction pooling (for example PgBouncer `pool_mode=transaction`), the lock lands on a server connection other clients reuse, so two instances could both believe they lead, and the store's `search_path` option is lost too. The leader connection sets two independent liveness guards, and either one alone still frees a lost leader's lock within a few renew intervals. If a server or pooler refuses some of them, the API logs one line per process (not per connection) that says what is lost, and keeps working:
+
+- **Only `idle_session_timeout` refused** (PostgreSQL 13 and older): an info line. The TCP keepalives still end a lost leader's session, so another instance takes over within about 50 seconds with the defaults. Only a middlebox that keeps a dead TCP connection open is not covered.
+- **Only the TCP keepalive settings refused**: a warning. `idle_session_timeout` still ends a lost leader's session after three renew intervals (about 40 seconds to a takeover with the defaults).
+- **Both refused**: a warning. A lost leader's lock is freed only when the server's own keepalive default notices the dead link (about two hours on Linux).
+
+`GET /api/ha/status` (admin only) shows the election as enabled, whether this instance leads, and the holder's `HA_INSTANCE_ID` (set it per instance for readable names; it defaults to the host name plus a random suffix).
+
+**What the database guarantees across instances:**
+
+| What | How |
+|---|---|
+| A queued job runs on one instance | the claim is `FOR UPDATE SKIP LOCKED` |
+| An approval, release request or gate-case request is decided once | a conditional update; the losing decision gets `409` |
+| A paused run has one open approval request | a unique index (migration 41) |
+| One guard simulation runs at a time | a unique index (migration 39) |
+| A webhook idempotency key or replay fingerprint is accepted once | primary keys; a duplicate gets the stored result or `409` |
+| Workflow and guard-profile versions get distinct numbers | the parent row is locked while the next number is taken |
+| Timeouts expire a request once | the sweep locks rows with `SKIP LOCKED` |
+
+**Restarts.** With a shared database an instance only marks work as interrupted when no instance has touched it recently: runs older than the longest a run may last plus a minute, and eval or replay jobs with no progress for five minutes. A job another live instance is running is left alone.
+
+An approval resume that was interrupted (the instance stopped after the decision was recorded, before the run finished) is picked up again by the leader once its claim is older than `WORKFLOW_EXECUTION_TIMEOUT_MS` plus one minute (`STUCK_JOB_MARGIN_MS`), at the next approval sweep (`APPROVAL_SWEEP_INTERVAL_MS`, default one minute): about 7 minutes after the stop with the defaults, longer if the run timeout is raised, and about two minutes in queue mode (a one-minute claim age). With `HA_ENABLED=true` this holds for a lone instance too, since it cannot tell its own interrupted resume from one another instance is still running. Nothing is lost: the decision stays recorded and the run waits until then. With HA off (one instance, on SQLite or Postgres) the restarted process resumes it at once.
+
+**Upgrading to migration 41.** If a database already holds more than one pending approval request for a run (possible before this release when two instances backfilled the same paused run), the upgrade keeps the newest, cancels the others as "Superseded by a newer request of the same run", and logs the count once at startup. SQLite does the same at its next start.
+
+**Webhook-only replicas** (`WORKER_MODE=webhook`) do not take part in the election and never run background work.

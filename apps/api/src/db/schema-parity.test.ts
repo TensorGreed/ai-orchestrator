@@ -30,6 +30,7 @@ import {
 import {
   createTestStore,
   dropTestSchema,
+  testStorePool,
   noticePostgresSkipped,
   randomTestSchema,
   testPostgresPool,
@@ -284,6 +285,65 @@ describe("SQLite schema: migration 39 objects", () => {
   });
 });
 
+const APPROVAL_INSERT_COLUMNS = `id, execution_id, workflow_id, project_id, node_id, kind, status, spec_json, created_at, updated_at`;
+const SUPERSEDED = "Superseded by a newer request of the same run";
+const V41_NOTE = "v41 upgrade: 3 duplicate pending approval requests were canceled (a run has one open request).";
+/** Seed rows for the v41 upgrade tests: run-1 has three pending requests, run-2 two, run-3 one plus a decided one. */
+const DUPLICATE_APPROVALS: ReadonlyArray<[id: string, executionId: string, status: string, createdAt: string]> = [
+  ["a-old", "run-1", "pending", "2026-10-01T00:00:00.000Z"],
+  ["a-new", "run-1", "pending", "2026-10-03T00:00:00.000Z"],
+  ["a-mid", "run-1", "pending", "2026-10-02T00:00:00.000Z"],
+  ["b-1", "run-2", "pending", "2026-10-05T00:00:00.000Z"],
+  ["b-2", "run-2", "pending", "2026-10-05T00:00:00.000Z"],
+  ["c-pending", "run-3", "pending", "2026-10-01T00:00:00.000Z"],
+  ["c-decided", "run-3", "approved", "2026-10-09T00:00:00.000Z"]
+];
+const V41_EXPECTED_STATUS: Record<string, string> = {
+  "a-old": "canceled", "a-mid": "canceled", "a-new": "pending",
+  // Equal created_at: the greater id is kept.
+  "b-1": "canceled", "b-2": "pending",
+  "c-pending": "pending", "c-decided": "approved"
+};
+
+describe("SQLite schema: migration 41 (one pending approval request per run)", () => {
+  it("a copy of a v40 database holding duplicate pending requests boots: the newest stays pending, the others are canceled and counted", async () => {
+    const { file } = await freshSqliteShape();
+    const db = new Database(file);
+    db.exec(`DROP INDEX idx_approval_requests_one_pending`);
+    const insert = db.prepare(`INSERT INTO approval_requests (${APPROVAL_INSERT_COLUMNS}) VALUES (?, ?, 'wf', 'default', 'n', 'approval_gate', ?, '{}', ?, ?)`);
+    for (const [id, executionId, status, createdAt] of DUPLICATE_APPROVALS) insert.run(id, executionId, status, createdAt, createdAt);
+    db.close();
+    const copy = `${file}.copy.db`;
+    fs.copyFileSync(file, copy);
+
+    const firstLog: string[] = [];
+    const store = await createStore({ env: { DB_SQLITE_PATH: copy }, log: { info: (m) => firstLog.push(m), warn: (m) => firstLog.push(m) } });
+    expect((store as SqliteStore).upgradeNotes).toEqual([V41_NOTE]);
+    expect(firstLog).toEqual([`Database: ${V41_NOTE}`]);
+    expect((await store.getApprovalRequest("a-old"))).toMatchObject({ status: "canceled", reason: SUPERSEDED });
+    expect((await store.getPendingApprovalRequestForExecution("run-1"))?.id).toBe("a-new");
+    await store.close();
+    const logged: string[] = [];
+    const again = await createStore({ env: { DB_SQLITE_PATH: copy }, log: { info: (m) => logged.push(m), warn: (m) => logged.push(m) } });
+    await again.close();
+    expect(logged).toEqual([]);
+
+    const after = new Database(copy, { readonly: true });
+    const original = new Database(file, { readonly: true });
+    try {
+      const rows = after.prepare(`SELECT id, status, decided_at FROM approval_requests`).all() as Array<{ id: string; status: string; decided_at: string | null }>;
+      expect(Object.fromEntries(rows.map((row) => [row.id, row.status]))).toEqual(V41_EXPECTED_STATUS);
+      expect(rows.find((row) => row.id === "a-old")?.decided_at).toBeTruthy();
+      expect(after.prepare(`SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_approval_requests_one_pending'`).get()).toBeTruthy();
+      // The upgrade ran on the copy only.
+      expect((original.prepare(`SELECT COUNT(*) AS n FROM approval_requests WHERE status = 'pending'`).get() as { n: number }).n).toBe(6);
+    } finally {
+      after.close();
+      original.close();
+    }
+  });
+});
+
 describe("schema introspection: foreign keys and NOT NULL defaults", () => {
   it("reports a foreign key or a NOT NULL default present on one side only, and a differing ON DELETE action", () => {
     const db = new Database(":memory:");
@@ -350,9 +410,9 @@ describe.skipIf(!postgresUrl)("Postgres schema parity and migration walk", () =>
 
   it("a fresh Postgres through the whole chain matches a fresh SQLite, apart from the documented differences", async () => {
     const test = await createTestStore({ kind: "postgres" });
-    const pool = testPostgresPool();
+    const pool = testStorePool(test);
     try {
-      const pgShape = await introspectPostgres(pool, test.schema!);
+      const pgShape = await introspectPostgres(pool, "public");
       expect(Object.keys(pgShape).length).toBeGreaterThan(70);
       // The whole table is allowed to be missing from SQLite, so pin its shape here.
       expect(Object.keys(pgShape.schema_migrations.columns).sort()).toEqual(["applied_at", "version"]);
@@ -360,7 +420,7 @@ describe.skipIf(!postgresUrl)("Postgres schema parity and migration walk", () =>
       const differences = diffSchemas(sqliteShape, pgShape);
       expect(unexpected(differences)).toEqual([]);
       expect(staleAllowances(differences)).toEqual([]);
-      const scoped = testPostgresPool(test.schema);
+      const scoped = testStorePool(test);
       try {
         expect(await chainVersion(scoped)).toBe(LATEST);
       } finally {
@@ -374,19 +434,19 @@ describe.skipIf(!postgresUrl)("Postgres schema parity and migration walk", () =>
 
   it("v40: no float4 (real) column remains; SQLite REAL is an 8-byte double, so Postgres uses double precision", async () => {
     const test = await createTestStore({ kind: "postgres" });
-    const pool = testPostgresPool();
+    const pool = testStorePool(test);
     try {
       const real = await pool.query<{ column: string }>(
         `SELECT table_name || '.' || column_name AS column FROM information_schema.columns
           WHERE table_schema = $1 AND data_type = 'real' ORDER BY 1`,
-        [test.schema]
+        ["public"]
       );
       expect(real.rows).toEqual([]);
       const widened = await pool.query<{ column: string; data_type: string }>(
         `SELECT table_name || '.' || column_name AS column, data_type FROM information_schema.columns
           WHERE table_schema = $1 AND (table_name, column_name) IN (('usage_events', 'cost_usd'), ('budgets', 'limit_value'),
             ('budgets', 'warn_threshold_pct'), ('budget_alerts', 'usage_value'), ('budget_alerts', 'limit_value')) ORDER BY 1`,
-        [test.schema]
+        ["public"]
       );
       expect(widened.rows).toEqual(
         ["budget_alerts.limit_value", "budget_alerts.usage_value", "budgets.limit_value", "budgets.warn_threshold_pct", "usage_events.cost_usd"].map((column) => ({
@@ -435,12 +495,12 @@ describe.skipIf(!postgresUrl)("Postgres schema parity and migration walk", () =>
 
   it("v40: every insertion-ordered table has seq BIGINT NOT NULL GENERATED ALWAYS AS IDENTITY, and the seq indexes are exactly as documented", async () => {
     const test = await createTestStore({ kind: "postgres" });
-    const pool = testPostgresPool();
+    const pool = testStorePool(test);
     try {
       const columns = await pool.query<{ table_name: string; data_type: string; is_nullable: string; is_identity: string; identity_generation: string | null }>(
         `SELECT table_name, data_type, is_nullable, is_identity, identity_generation
            FROM information_schema.columns WHERE table_schema = $1 AND column_name = 'seq' ORDER BY table_name`,
-        [test.schema]
+        ["public"]
       );
       expect(columns.rows).toEqual(
         INSERTION_SEQ_TABLES.map(({ table }) => ({ table_name: table, data_type: "bigint", is_nullable: "NO", is_identity: "YES", identity_generation: "ALWAYS" })).sort((a, b) =>
@@ -459,7 +519,7 @@ describe.skipIf(!postgresUrl)("Postgres schema parity and migration walk", () =>
             WHERE n.nspname = $1 AND a.attname = 'seq'
            OFFSET 0
          ) s ORDER BY indexname`,
-        [test.schema]
+        ["public"]
       );
       expect(indexes.rows.map((row) => ({ table: row.tablename, index: row.indexname, definition: row.indexdef }))).toEqual(
         [...SEQ_INDEXES].sort((a, b) => (a.index < b.index ? -1 : 1))
@@ -508,7 +568,7 @@ describe.skipIf(!postgresUrl)("Postgres schema parity and migration walk", () =>
 
   it("knowledge base chunks are searchable through the generated tsvector (ts_rank_cd / websearch_to_tsquery)", async () => {
     const test = await createTestStore({ kind: "postgres" });
-    const pool = testPostgresPool(test.schema);
+    const pool = testStorePool(test);
     try {
       const insert = `INSERT INTO knowledge_base_chunks (id, knowledge_base_id, chunk_index, content, vector_json, created_at) VALUES ($1, 'kb', $2, $3, '[]', now())`;
       await pool.query(insert, ["c1", 0, "Refund policy: customers may return items within thirty days."]);
@@ -606,6 +666,41 @@ describe.skipIf(!postgresUrl)("Postgres schema parity and migration walk", () =>
       expect(byId.old.finished_at).toBeTruthy();
       expect(byId.done.status).toBe("completed");
       await expect(pool.query(insert, ["another", "running", null, "2026-10-22T00:00:00Z"])).rejects.toMatchObject({ code: "23505" });
+    } finally {
+      await pool.end();
+      await admin.end();
+      await dropTestSchema(schema);
+    }
+  }, 180_000);
+
+  it("v41 on a database holding duplicate pending approval requests keeps the newest per run, cancels the rest, and builds the index", async () => {
+    const schema = randomTestSchema();
+    const admin = testPostgresPool();
+    await admin.query(`CREATE SCHEMA "${schema}"`);
+    const pool = testPostgresPool(schema);
+    const cb = chainCallbacks(pool);
+    try {
+      await pool.query(`CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP)`);
+      await runMigrations(cb.run, cb.current, cb.setApplied);
+      await rollbackMigrations(cb.run, cb.current, cb.setRolledBack, 40);
+      expect(await chainVersion(pool)).toBe(40);
+      for (const [id, executionId, status, createdAt] of DUPLICATE_APPROVALS) {
+        await pool.query(
+          `INSERT INTO approval_requests (${APPROVAL_INSERT_COLUMNS}) VALUES ($1, $2, 'wf', 'default', 'n', 'approval_gate', $3, '{}', $4, $4)`,
+          [id, executionId, status, createdAt]
+        );
+      }
+
+      const store = await PostgresStore.create(postgresStoreConfig(testPostgresSettings(), { schema, maxConnections: 2 }));
+      expect(store.upgradeNotes).toEqual([V41_NOTE]);
+      expect(await store.getApprovalRequest("a-mid")).toMatchObject({ status: "canceled", reason: SUPERSEDED });
+      await store.close();
+      expect(await chainVersion(pool)).toBe(LATEST);
+      const rows = await pool.query<{ id: string; status: string }>(`SELECT id, status FROM approval_requests`);
+      expect(Object.fromEntries(rows.rows.map((row) => [row.id, row.status]))).toEqual(V41_EXPECTED_STATUS);
+      await expect(
+        pool.query(`INSERT INTO approval_requests (${APPROVAL_INSERT_COLUMNS}) VALUES ('x', 'run-1', 'wf', 'default', 'n', 'approval_gate', 'pending', '{}', 'now', 'now')`)
+      ).rejects.toMatchObject({ code: "23505", constraint: "idx_approval_requests_one_pending" });
     } finally {
       await pool.end();
       await admin.end();

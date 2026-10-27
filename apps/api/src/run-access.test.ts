@@ -16,7 +16,7 @@ import type { FastifyInstance } from "fastify";
 import type { Workflow } from "@ai-orchestrator/shared";
 import { createApp } from "./app.js";
 import { parseConfig, type AppConfig } from "./config.js";
-import { SqliteStore } from "./db/database.js";
+import type { Store } from "./db/store.js";
 import { createRunAccess } from "./run-access.js";
 import { AuthService, type SafeUser } from "./services/auth-service.js";
 import { QueueService } from "./services/queue-service.js";
@@ -25,10 +25,11 @@ import type { SchedulerService } from "./services/scheduler-service.js";
 
 type SchedulerExecutionHandler = Parameters<SchedulerService["setExecutionHandler"]>[0];
 import { SecretService } from "./services/secret-service.js";
+import { openTestStore } from "./test-support/test-store.js";
 
 interface TestContext {
   app: FastifyInstance;
-  store: SqliteStore;
+  store: Store;
   authService: AuthService;
   secretService: SecretService;
   config: AppConfig;
@@ -41,7 +42,7 @@ const contexts: TestContext[] = [];
 
 async function createTestContext(options: { env?: Record<string, string>; queuePollMs?: number; scheduler?: boolean } = {}): Promise<TestContext> {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-run-access-"));
-  const store = await SqliteStore.create(path.join(tempDir, "orchestrator.db"));
+  const store = await openTestStore(path.join(tempDir, "orchestrator.db"));
   await store.ensureDefaultProject();
   const config = parseConfig({
     LOG_LEVEL: "warn",
@@ -1001,7 +1002,8 @@ describe("project authorization: isolation mode (M7)", () => {
     expect(strictIsolationStartupWarning("role", 0)).toBeNull();
     const context = await createTestContext({ env: { PROJECT_ISOLATION: "strict" } });
     expect(await context.store.countProjectMemberships()).toBe(0);
-    await context.store.upsertProjectRole({ userId: "u1", projectId: "default", role: "viewer" });
+    const member = await context.authService.register({ email: "member@example.com", password: "member-Pass-123!", role: "viewer" });
+    await context.store.upsertProjectRole({ userId: member.id, projectId: "default", role: "viewer" });
     expect(await context.store.countProjectMemberships()).toBe(1);
   });
 
@@ -1130,7 +1132,7 @@ describe("project authorization: shares, imports, restores and other callers", (
   it("a scheduled run of a workflow in a locked-out project still runs (no user, by design)", async () => {
     const { context, admin } = await seed({ scheduler: true });
     const before = (await call(context, "GET", "/api/executions?workflowId=wf-hidden", admin.cookie)).json<{ total: number }>().total;
-    await context.fireSchedule!({ workflowId: "wf-hidden", workflowName: "hidden", scheduleNodeId: "start", cronExpression: "* * * * *", timezone: "UTC", firedAt: new Date().toISOString() });
+    await context.fireSchedule!({ workflowId: "wf-hidden", workflowName: "hidden", scheduleNodeId: "start", cronExpression: "* * * * *", timezone: "UTC", firedAt: new Date().toISOString(), scheduledFor: new Date(Math.floor(Date.now() / 1000) * 1000).toISOString() });
     expect((await call(context, "GET", "/api/executions?workflowId=wf-hidden", admin.cookie)).json<{ total: number }>().total).toBe(before + 1);
   });
 });

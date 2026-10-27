@@ -1,13 +1,10 @@
 /**
  * Phase 13.1 — PostgresStore: Trigger state for schedule and polling triggers.
- * Plain functions over a PgContext; PostgresStore delegates here. Every method is implemented;
- * UNIMPLEMENTED_METHODS is empty.
+ * Plain functions over a PgContext; PostgresStore delegates here. Every method is implemented.
  */
 import { type Store } from "../store.js";
 import { toStr } from "./helpers.js";
 import type { PgContext } from "./context.js";
-
-export const UNIMPLEMENTED_METHODS: readonly (keyof Store)[] = [];
 
 export async function getTriggerState(ctx: PgContext, workflowId: string, nodeId: string): Promise<Record<string, unknown> | null> {
   const rows = await ctx.query<{ state_json: string }>(

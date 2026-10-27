@@ -8,13 +8,14 @@ import type { FastifyInstance } from "fastify";
 import { WORKFLOW_SCHEMA_VERSION, type Workflow } from "@ai-orchestrator/shared";
 import type { AppConfig } from "./config";
 import { createApp } from "./app";
-import { SqliteStore } from "./db/database";
+import type { Store } from "./db/store.js";
 import { AuthService } from "./services/auth-service";
 import { SecretService } from "./services/secret-service";
+import { openTestStore } from "./test-support/test-store.js";
 
 interface TestContext {
   app: FastifyInstance;
-  store: SqliteStore;
+  store: Store;
   authService: AuthService;
   secretService: SecretService;
   config: AppConfig;
@@ -164,7 +165,7 @@ function delay(ms: number): Promise<void> {
 async function createTestContext(overrides: Partial<AppConfig> = {}): Promise<TestContext> {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-orchestrator-auth-test-"));
   const dbPath = path.join(tempDir, "orchestrator.db");
-  const store = await SqliteStore.create(dbPath);
+  const store = await openTestStore(dbPath);
   const masterKey = crypto.randomBytes(32).toString("base64");
 
   const config: AppConfig = {
@@ -1455,7 +1456,7 @@ describe("execution resilience and lifecycle", () => {
     const originalSaveExecutionHistory = context.store.saveExecutionHistory.bind(context.store);
     context.store.saveExecutionHistory = (() => {
       throw new Error("simulated execution history write failure");
-    }) as SqliteStore["saveExecutionHistory"];
+    }) as Store["saveExecutionHistory"];
 
     try {
       const executeResponse = await context.app.inject({
@@ -1818,7 +1819,7 @@ describe("execution resilience and lifecycle", () => {
     expect(retryBody.output?.result).toBe("recovered");
   });
 
-  it("cancels a running execution from history", async () => {
+  async function cancelRunningFromHistory(runRecordsFirst: boolean): Promise<void> {
     const context = await createTestContext();
     const builderCookie = await createRoleSession(context, {
       email: "builder-history-cancel@example.com",
@@ -1878,13 +1879,22 @@ describe("execution resilience and lifecycle", () => {
     }
     expect(executionId).not.toBe("");
 
+    if (runRecordsFirst) {
+      // The order a slower store can give: the aborted run records its own canceled ending before the route's
+      // cancel write runs. The cancel still took effect.
+      const cancelExecution = context.store.cancelExecution.bind(context.store);
+      context.store.cancelExecution = async (input) => {
+        for (let attempt = 0; attempt < 200 && (await context.store.getExecutionHistory(input.id))?.status !== "canceled"; attempt += 1) await delay(10);
+        return await cancelExecution(input);
+      };
+    }
     const cancelResponse = await context.app.inject({
       method: "POST",
       url: `/api/executions/${executionId}/cancel`,
       headers: { cookie: builderCookie },
       payload: { reason: "test cancellation" }
     });
-    expect(cancelResponse.statusCode).toBe(200);
+    expect(cancelResponse.statusCode, cancelResponse.body).toBe(200);
     expect(cancelResponse.json<{ status: string; abortedActiveRun: boolean }>().abortedActiveRun).toBe(true);
 
     const runResponse = await runPromise;
@@ -1900,6 +1910,14 @@ describe("execution resilience and lifecycle", () => {
     const detailBody = detailResponse.json<{ status: string; nodeResults: Array<{ status: string }> }>();
     expect(detailBody.status).toBe("canceled");
     expect(detailBody.nodeResults.some((entry) => entry.status === "canceled")).toBe(true);
+  }
+
+  it("cancels a running execution from history", async () => {
+    await cancelRunningFromHistory(false);
+  });
+
+  it("cancels a running execution from history when the run records its canceled ending first", async () => {
+    await cancelRunningFromHistory(true);
   });
 
   it("prunes execution history older than a retention cutoff", async () => {

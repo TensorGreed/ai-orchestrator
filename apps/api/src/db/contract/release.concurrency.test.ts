@@ -7,15 +7,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { Pool } from "pg";
-import {
-  createTestStore,
-  noticePostgresSkipped,
-  testPostgresPool,
-  testPostgresSettings,
-  testPostgresUrl,
-  type TestStore
-} from "../../test-support/test-store.js";
-import { postgresStoreConfig } from "../create-store.js";
+import { createTestStore, noticePostgresSkipped, testPostgresUrl, type TestStore, openTestStoreTwin, testStorePool } from "../../test-support/test-store.js";
 import { PostgresStore } from "../postgres-store.js";
 import type { Store } from "../store.js";
 import type { ReleaseApprovalRequestRecord, ReleaseGateRecord } from "../database.js";
@@ -102,8 +94,8 @@ if (!testPostgresUrl()) {
 
     beforeEach(async () => {
       first = await createTestStore({ kind: "postgres" });
-      second = await PostgresStore.create(postgresStoreConfig(testPostgresSettings(), { schema: first.schema!, maxConnections: 4 }));
-      sql = testPostgresPool(first.schema!);
+      second = await openTestStoreTwin(first!, { maxConnections: 4 });
+      sql = testStorePool(first!);
       a = first.store;
       b = second;
     }, 60_000);
@@ -241,6 +233,22 @@ if (!testPostgresUrl()) {
       const [left, right] = await Promise.all([a.timeOutExpiredReleaseApprovalRequests(now()), b.timeOutExpiredReleaseApprovalRequests(now())]);
       const ids = [...left, ...right].map((request) => request.id).sort();
       expect(ids).toEqual(Array.from({ length: 20 }, (_, index) => `exp-${index}`).sort());
+    });
+
+    it("a sweep skips a request whose row another transaction holds, without waiting; the next sweep closes it", async () => {
+      const past = new Date(Date.now() - 60_000).toISOString();
+      for (let index = 0; index < 5; index += 1) await a.insertReleaseApprovalRequest(releaseRequest(`held-${index}`, "wf-held", 1, past));
+      const holder = await sql.connect();
+      try {
+        await holder.query("BEGIN");
+        await holder.query(`SELECT id FROM release_approval_requests WHERE id = 'held-0' FOR UPDATE`);
+        const swept = await b.timeOutExpiredReleaseApprovalRequests(now());
+        expect(swept.map((request) => request.id).sort()).toEqual(["held-1", "held-2", "held-3", "held-4"]);
+        await holder.query("ROLLBACK");
+      } finally {
+        holder.release();
+      }
+      expect((await a.timeOutExpiredReleaseApprovalRequests(now())).map((request) => request.id)).toEqual(["held-0"]);
     });
 
     it("two markers with different reasons on one run keep both reasons", async () => {

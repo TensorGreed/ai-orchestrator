@@ -1,7 +1,6 @@
 /**
  * Phase 13.1 — PostgresStore: The execution queue and its dead-letter list.
- * Plain functions over a PgContext; PostgresStore delegates here. Every method is implemented;
- * UNIMPLEMENTED_METHODS is empty.
+ * Plain functions over a PgContext; PostgresStore delegates here. Every method is implemented.
  */
 import { randomUUID } from "node:crypto";
 import { queuedRunTimeoutMs, STUCK_JOB_MARGIN_MS } from "../queue-timeouts.js";
@@ -9,8 +8,6 @@ import { type Store } from "../store.js";
 import { toNum, toStr } from "./helpers.js";
 import type { PgContext } from "./context.js";
 import { clampLimit, LIMIT_MAX } from "../store-limits.js";
-
-export const UNIMPLEMENTED_METHODS: readonly (keyof Store)[] = [];
 
 export async function enqueueExecution(ctx: PgContext, input: {
   id: string;

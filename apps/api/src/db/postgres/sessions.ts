@@ -1,7 +1,6 @@
 /**
  * Phase 13.1 — PostgresStore: Login sessions, session memory, the session tool cache and session artifacts.
- * Plain functions over a PgContext; PostgresStore delegates here. Every method is implemented;
- * UNIMPLEMENTED_METHODS is empty.
+ * Plain functions over a PgContext; PostgresStore delegates here. Every method is implemented.
  */
 import { randomUUID } from "node:crypto";
 import { type ChatMessage, type DataLabels, isEmptyDataLabels, labelsForUntrackedSave, mergeDataLabels, parseStoredDataLabels } from "@ai-orchestrator/shared";
@@ -11,8 +10,6 @@ import type { PgContext } from "./context.js";
 import { withReferenceCheck } from "../store-errors.js";
 
 const MAX_SESSION_TOOL_CACHE_RECORDS = 400;
-
-export const UNIMPLEMENTED_METHODS: readonly (keyof Store)[] = [];
 
 export async function getSession(ctx: PgContext, sessionId: string): Promise<{
   id: string;

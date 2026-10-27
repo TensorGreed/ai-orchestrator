@@ -10,9 +10,8 @@
  *
  * Every change is audited (`data_destination.created|updated|deleted`) with
  * the row's match and classification. Built-in rows cannot be changed; an
- * admin row for the same host overrides one. On Postgres every route
- * answers 501. Destinations do nothing until a guard profile has
- * destination rules.
+ * admin row for the same host overrides one. Destinations do nothing until
+ * a guard profile has destination rules.
  */
 
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
@@ -41,10 +40,6 @@ export function registerDataDestinationRoutes(deps: DataDestinationRoutesDeps): 
   const handle = async <T>(request: FastifyRequest, reply: FastifyReply, roles: UserRole[], work: (user: SafeUser) => T | Promise<T>) => {
     const user = await requireRole(request, reply, roles);
     if (!user) return reply;
-    if (!destinations.available) {
-      reply.code(501);
-      return { error: "Data destinations need the SQLite store in this release" };
-    }
     try {
       return await work(user);
     } catch (error) {

@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import os from "node:os";
 import type { Store } from "../db/store.js";
+import type { LeaderLock } from "../db/postgres/leader-lock.js";
 
 export interface LeaderElectionOptions {
   enabled?: boolean;
@@ -11,7 +12,28 @@ export interface LeaderElectionOptions {
   onBecomeLeader?: () => void | Promise<void>;
   /** Called when this instance loses the lease (e.g. DB error, remote steal). */
   onResignLeader?: () => void | Promise<void>;
+  /**
+   * Phase 13.1 — decide leadership with this lock instead of the `leader_leases` row (Postgres: an advisory lock on
+   * a dedicated connection). Election is then on whatever `enabled` says, and losing the lock's connection steps
+   * this instance down at once, not at the next renewal.
+   */
+  lock?: LeaderLock;
+  /**
+   * Phase 13.1 — whether this instance's leader work (schedules, triggers, the schedule sync) is running now. Checked
+   * on every election tick and after every start-up: running while this instance is not the leader stops it at once
+   * (onResignLeader). Without it the service tracks its own become/resign calls.
+   */
+  leaderWorkRunning?: () => boolean;
+  /** Told when leader work had to be stopped because the lock was lost while it started, or found running without it. */
+  logger?: { warn: (message: string, fields?: Record<string, unknown>) => void };
 }
+
+/** A lock that is never granted: the instance follows (Postgres instances without background workers, with HA on). */
+export const NEVER_LEAD: LeaderLock = {
+  check: async () => false,
+  release: async () => undefined,
+  onLost: () => undefined
+};
 
 export interface LeaderStatus {
   enabled: boolean;
@@ -31,9 +53,17 @@ export interface LeaderStatus {
  * steal it. Works on both SQLite (single-writer, trivially) and Postgres
  * (row-level atomic updates).
  *
- * When `HA_ENABLED=false` this service always reports itself as the leader
+ * Without a lock and with `HA_ENABLED=false` this service always reports itself as the leader
  * — single-instance deployments get the same API without HA overhead.
+ *
+ * With a `lock` (Postgres with HA_ENABLED=true) the lock decides instead of the row. One session holds it at a
+ * time. An instance that loses it stops its leader work within one renew interval (at once when its connection
+ * reports the loss), so in that window the old and the new holder can overlap briefly; it then tries for the lock
+ * again at once. A stop resigns before it frees the lock.
  */
+/** How long stop() waits for a leader start-up still in flight before it gives up the lock anyway. */
+const STOP_WAIT_MS = 10_000;
+
 export class LeaderElectionService {
   private readonly enabled: boolean;
   private readonly leaseTtlMs: number;
@@ -47,19 +77,38 @@ export class LeaderElectionService {
   private timer: NodeJS.Timeout | null = null;
   private lastRenewAt: string | null = null;
   private stopped = false;
+  private readonly lock: LeaderLock | undefined;
+  /** Leading since acquireEarly(), with onBecomeLeader not yet run (start() runs it). */
+  private unannounced = false;
+  /** A tick in flight: a slow check or leader callback never overlaps the next interval's tick. */
+  private ticking = false;
+  /** The election tick in flight (its start-up included), so stop() can wait for it. */
+  private tickRun: Promise<void> | null = null;
+  /** Run one more tick as soon as the current one ends (the lock was just lost). */
+  private retryRequested = false;
+  /** onBecomeLeader was called and no onResignLeader since (this instance's own view of its leader work). */
+  private leading = false;
+  private readonly leaderWorkRunning: (() => boolean) | undefined;
+  private readonly logger: LeaderElectionOptions["logger"];
 
   constructor(
     private readonly store: Store,
     options: LeaderElectionOptions = {},
     leaseName = "primary"
   ) {
-    this.enabled = options.enabled === true;
+    this.lock = options.lock;
+    this.enabled = options.enabled === true || this.lock !== undefined;
+    // A dropped lock connection: step down now, then try to take the lock again at once (a lone instance whose
+    // connection blipped leads again within moments instead of a renew interval later).
+    this.lock?.onLost(() => void this.stepDown().then(() => this.retryNow()));
     this.leaseTtlMs = options.leaseTtlMs ?? 30000;
     this.renewIntervalMs = options.renewIntervalMs ?? 10000;
     this.instanceId = options.instanceId ?? `${os.hostname()}-${crypto.randomBytes(4).toString("hex")}`;
     this.leaseName = leaseName;
     this.onBecomeLeader = options.onBecomeLeader;
     this.onResignLeader = options.onResignLeader;
+    this.leaderWorkRunning = options.leaderWorkRunning;
+    this.logger = options.logger;
   }
 
   getInstanceId(): string {
@@ -68,6 +117,21 @@ export class LeaderElectionService {
 
   isLeader(): boolean {
     return this.enabled ? this.holder : true;
+  }
+
+  /**
+   * Phase 13.1 — with a lock: takes it now, if it is free, so isLeader() answers for this instance while the rest of
+   * startup runs (an approval sweep at boot asks before the election loop starts). onBecomeLeader still runs from
+   * start(). Without a lock this does nothing.
+   */
+  async acquireEarly(): Promise<void> {
+    if (!this.lock || this.stopped || this.timer || this.holder) return;
+    try {
+      this.holder = await this.lock.check();
+    } catch {
+      this.holder = false;
+    }
+    this.unannounced = this.holder;
   }
 
   /**
@@ -96,21 +160,33 @@ export class LeaderElectionService {
       clearInterval(this.timer);
       this.timer = null;
     }
-    if (this.enabled && this.holder) {
+    // A start-up still running (onBecomeLeader) resigns itself once it returns and sees `stopped`; wait for that, so
+    // the lock is not freed while it is still starting schedules and triggers. Bounded: a hung start-up must not block
+    // shutdown.
+    const inFlight = this.tickRun;
+    if (inFlight) {
+      let timer: NodeJS.Timeout | undefined;
+      await Promise.race([
+        inFlight.catch(() => undefined),
+        new Promise<void>((resolve) => {
+          timer = setTimeout(resolve, STOP_WAIT_MS);
+          timer.unref?.();
+        })
+      ]);
+      clearTimeout(timer);
+    }
+    // Stop this instance's leader work first, then give up the lock or lease: freed first, a standby could start its
+    // schedules while this instance's are still registered.
+    if (this.enabled && (this.holder || this.leading || this.workRunning())) {
+      this.holder = false;
+      await this.resign();
       try {
-        await this.store.releaseLease(this.leaseName, this.instanceId);
+        if (!this.lock) await this.store.releaseLease(this.leaseName, this.instanceId);
       } catch {
         // ignore
       }
-      this.holder = false;
-      if (this.onResignLeader) {
-        try {
-          await this.onResignLeader();
-        } catch {
-          // ignore
-        }
-      }
     }
+    if (this.lock) await this.lock.release();
   }
 
   async getStatus(): Promise<LeaderStatus> {
@@ -142,33 +218,102 @@ export class LeaderElectionService {
   }
 
   private async tick(): Promise<void> {
-    if (this.stopped) return;
+    if (this.stopped || this.ticking) return;
+    this.ticking = true;
+    const run = (async () => {
+      try {
+        do {
+          this.retryRequested = false;
+          await this.tickOnce();
+        } while (this.retryRequested && !this.stopped);
+      } finally {
+        this.ticking = false;
+        this.tickRun = null;
+      }
+    })();
+    this.tickRun = run;
+    await run;
+  }
+
+  /** Re-tries the lock at once instead of at the next interval; only once the election loop runs. */
+  private retryNow(): void {
+    if (this.stopped || !this.timer || !this.lock) return;
+    this.retryRequested = true;
+    void this.tick();
+  }
+
+  private async tickOnce(): Promise<void> {
     let acquired = false;
     try {
-      acquired = await this.store.tryAcquireLease({
-        leaseName: this.leaseName,
-        holderId: this.instanceId,
-        ttlMs: this.leaseTtlMs
-      });
+      acquired = this.lock
+        ? await this.lock.check()
+        : await this.store.tryAcquireLease({
+            leaseName: this.leaseName,
+            holderId: this.instanceId,
+            ttlMs: this.leaseTtlMs
+          });
     } catch {
       acquired = false;
     }
-    const wasLeader = this.holder;
+    if (this.stopped) return;
+    const wasLeader = this.holder && !this.unannounced;
+    this.unannounced = false;
     this.holder = acquired;
     this.lastRenewAt = new Date().toISOString();
     if (!wasLeader && acquired && this.onBecomeLeader) {
+      this.leading = true;
       try {
         await this.onBecomeLeader();
       } catch {
         // ignore — next tick will try again
       }
-    }
-    if (wasLeader && !acquired && this.onResignLeader) {
-      try {
-        await this.onResignLeader();
-      } catch {
-        // ignore
+      // The lock can be lost (or the service stopped) while the start-up runs; the step-down then ran before the
+      // start-up finished starting things. Stop them now, so nothing runs without the lock.
+      if (!this.holder || this.stopped) {
+        this.logger?.warn("Leader lock lost while this instance was starting its leader work; stopped it again", {
+          instanceId: this.instanceId
+        });
+        await this.resign();
+        return;
       }
     }
+    if (wasLeader && !acquired) {
+      await this.resign();
+      // The check found the lock's connection gone: try for the lock again at once on a new one.
+      if (this.lock) this.retryRequested = true;
+      return;
+    }
+    // Invariant: no leader work runs while this instance is not the leader, whatever path started it.
+    if (!this.holder && (this.leading || this.workRunning())) {
+      this.logger?.warn("Leader work was running on an instance that is not the leader; stopped it", { instanceId: this.instanceId });
+      await this.resign();
+    }
+  }
+
+  private workRunning(): boolean {
+    try {
+      return this.leaderWorkRunning?.() === true;
+    } catch {
+      return false;
+    }
+  }
+
+  private async resign(): Promise<void> {
+    this.leading = false;
+    if (!this.onResignLeader) return;
+    try {
+      await this.onResignLeader();
+    } catch {
+      // ignore
+    }
+  }
+
+  /** The lock's connection ended or failed while this instance led: stop leading now. */
+  private async stepDown(): Promise<void> {
+    if (!this.holder || this.stopped) return;
+    this.holder = false;
+    const announced = !this.unannounced;
+    this.unannounced = false;
+    if (announced) await this.resign();
   }
 }

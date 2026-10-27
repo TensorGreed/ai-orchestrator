@@ -16,12 +16,10 @@ import type {
   GuardProfileVersionRecord,
   GuardVaultRow
 } from "../database.js";
-import { SUBJECT_EXECUTION_TRIGGERS } from "../database.js";
+import { SUBJECT_EXECUTION_TRIGGERS } from "../store-shared.js";
 import { type Store } from "../store.js";
 import { storedJsonb, toNum, toStr } from "./helpers.js";
 import type { PgContext } from "./context.js";
-
-export const UNIMPLEMENTED_METHODS: readonly (keyof Store)[] = [];
 
 type Row = Record<string, unknown>;
 

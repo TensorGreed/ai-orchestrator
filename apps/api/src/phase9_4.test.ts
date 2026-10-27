@@ -5,14 +5,15 @@ import path from "node:path";
 import type { FastifyInstance } from "fastify";
 import { WORKFLOW_SCHEMA_VERSION, type Workflow } from "@ai-orchestrator/shared";
 import { createApp } from "./app.js";
-import { SqliteStore } from "./db/database.js";
+import type { Store } from "./db/store.js";
 import { AuthService } from "./services/auth-service.js";
 import { SecretService } from "./services/secret-service.js";
 import type { AppConfig } from "./config.js";
+import { openTestStore } from "./test-support/test-store.js";
 
 interface Ctx {
   app: FastifyInstance;
-  store: SqliteStore;
+  store: Store;
   tempDir: string;
 }
 
@@ -30,7 +31,7 @@ afterEach(async () => {
 async function makeCtx(): Promise<Ctx> {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-phase9-4-"));
   const dbPath = path.join(tempDir, "orchestrator.db");
-  const store = await SqliteStore.create(dbPath);
+  const store = await openTestStore(dbPath);
   await store.ensureDefaultProject();
   const config: AppConfig = makeTestConfig({
     SECRET_MASTER_KEY_BASE64: Buffer.alloc(32, 7).toString("base64")

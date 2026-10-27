@@ -20,8 +20,6 @@ import { parseJsonSafe, toNum, toStr } from "./helpers.js";
 import type { PgContext } from "./context.js";
 import { auditEntryHash, GENESIS_HASH, verifyAuditRows, wellFormedAuditEntry, wellFormedAuditText } from "../audit-chain.js";
 
-export const UNIMPLEMENTED_METHODS: readonly (keyof Store)[] = [];
-
 export const ADVISORY_LOCK_CLASS_AUDIT = 0x4c324f;
 const AUDIT_LOCK_CHAIN = 1;
 const AUDIT_LOCK_SIGNING_KEYS = 2;

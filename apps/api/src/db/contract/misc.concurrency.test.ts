@@ -3,17 +3,9 @@
  * Exactly one holder wins a free or expired lease, and one alert is recorded per (budget, window, severity).
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { postgresStoreConfig } from "../create-store.js";
 import { PostgresStore } from "../postgres-store.js";
 import type { Store } from "../store.js";
-import {
-  createTestStore,
-  noticePostgresSkipped,
-  testPostgresPool,
-  testPostgresSettings,
-  testPostgresUrl,
-  type TestStore
-} from "../../test-support/test-store.js";
+import { createTestStore, noticePostgresSkipped, testPostgresUrl, type TestStore, openTestStoreTwin, testStorePool } from "../../test-support/test-store.js";
 
 const enabled = Boolean(testPostgresUrl());
 if (!enabled) noticePostgresSkipped("misc concurrency (leases, budget alerts)");
@@ -26,7 +18,7 @@ describe.skipIf(!enabled)("Postgres concurrency: leases and budget alerts (two s
 
   beforeEach(async () => {
     first = await createTestStore({ kind: "postgres" });
-    second = await PostgresStore.create(postgresStoreConfig(testPostgresSettings(), { schema: first.schema!, maxConnections: 8 }));
+    second = await openTestStoreTwin(first!, { maxConnections: 8 });
     a = first.store;
     b = second;
   }, 60_000);
@@ -100,7 +92,7 @@ describe.skipIf(!enabled)("Postgres concurrency: leases and budget alerts (two s
   });
 
   async function orphanAlerts(): Promise<number> {
-    const pool = testPostgresPool(first!.schema!);
+    const pool = testStorePool(first!);
     try {
       const r = await pool.query<{ n: string }>(
         `SELECT count(*) AS n FROM budget_alerts al WHERE NOT EXISTS (SELECT 1 FROM budgets b WHERE b.id = al.budget_id)`
@@ -113,7 +105,7 @@ describe.skipIf(!enabled)("Postgres concurrency: leases and budget alerts (two s
 
   it("an alert that commits while deleteBudget waits is deleted with the budget (no orphan)", async () => {
     await a.createBudget({ id: "det", name: "Det", scopeType: "global", period: "month", limitType: "usd", limitValue: 1, action: "warn" });
-    const pool = testPostgresPool(first!.schema!);
+    const pool = testStorePool(first!);
     const client = await pool.connect();
     try {
       // recordBudgetAlert's own steps on a raw connection: lock the budget, then insert the alert.

@@ -61,8 +61,7 @@
  * unregisters schedules and triggers, as before releases existed.
  *
  * Every gate change, publish, override, rollback and release-request event is
- * audited (category `release`). Release tables need the SQLite store; on
- * Postgres the routes answer 501 and every channel runs the draft.
+ * audited (category `release`).
  */
 
 import { createHash, randomUUID } from "node:crypto";
@@ -129,7 +128,7 @@ export type ReleasePermission = "workflow:read" | "workflow:write" | "workflow:p
 export class ReleaseError extends Error {
   constructor(
     message: string,
-    readonly statusCode: 400 | 403 | 404 | 409 | 501,
+    readonly statusCode: 400 | 403 | 404 | 409,
     readonly details?: Record<string, unknown>
   ) {
     super(message);
@@ -144,8 +143,6 @@ export const DATA_SUBJECT_EVIDENCE_REMOVED = "Stale: a data-subject delete remov
 
 export interface ReleaseServiceOptions {
   store: Store;
-  /** False on stores without release tables (Postgres in this release): every channel runs the draft. */
-  available: boolean;
   /**
    * A saved version as a runnable workflow, under the workflow's current
    * project and folder: the same candidate a replay job builds for it.
@@ -348,20 +345,12 @@ export class ReleaseService {
 
   constructor(private readonly options: ReleaseServiceOptions) {}
 
-  get available(): boolean {
-    return this.options.available;
-  }
-
   private now(): Date {
     return this.options.now?.() ?? new Date();
   }
 
   private get store(): Store {
     return this.options.store;
-  }
-
-  private requireAvailable(): void {
-    if (!this.options.available) throw new ReleaseError("Releases need the SQLite store in this release", 501);
   }
 
   private async check(user: SafeUser, workflowId: string, permission: ReleasePermission): Promise<void> {
@@ -381,7 +370,7 @@ export class ReleaseService {
    */
   async resolveRunnableWorkflow(workflowId: string, channel: ReleaseChannel): Promise<Workflow | null> {
     const draft = await this.store.getWorkflow(workflowId);
-    if (!draft || channel === "draft" || !this.options.available) return draft;
+    if (!draft || channel === "draft") return draft;
     const gateOn = Boolean((await this.store.getReleaseGate(workflowId))?.enabled);
     // On a gated workflow deactivating is the kill switch: it stops production whatever version is published.
     // Without a gate, deactivating only unregisters schedules and triggers, as it always did.
@@ -404,7 +393,6 @@ export class ReleaseService {
    * when production runs it, or when the workflow does not exist.
    */
   async productionRefusal(workflowId: string): Promise<string | null> {
-    if (!this.options.available) return null;
     const draft = await this.store.getWorkflow(workflowId);
     if (!draft) return null;
     const gateOn = Boolean((await this.store.getReleaseGate(workflowId))?.enabled);
@@ -418,7 +406,6 @@ export class ReleaseService {
    * rather than "not found".
    */
   async deactivatedProductionWorkflow(workflowId: string): Promise<Workflow | null> {
-    if (!this.options.available) return null;
     const draft = await this.store.getWorkflow(workflowId);
     if (!draft || !isWorkflowDeactivated(draft) || !(await this.store.getReleaseGate(workflowId))?.enabled) return null;
     const published = await this.store.getPublishedVersion(workflowId);
@@ -453,14 +440,14 @@ export class ReleaseService {
 
   /** The published version of a workflow, or null (gate off: the draft runs everywhere). */
   async publishedVersion(workflowId: string): Promise<number | null> {
-    return this.options.available ? await this.store.getPublishedVersion(workflowId) : null;
+    return await this.store.getPublishedVersion(workflowId);
   }
 
   async state(user: SafeUser, workflowId: string): Promise<ReleaseStateView> {
     await this.check(user, workflowId, "workflow:read");
     const draftVersion = await this.store.maxWorkflowVersionNumber(workflowId) || null;
     const publishedVersion = await this.publishedVersion(workflowId);
-    const gate = this.options.available ? await this.store.getReleaseGate(workflowId) : null;
+    const gate = await this.store.getReleaseGate(workflowId);
     const aheadBy = publishedVersion !== null && draftVersion !== null ? Math.max(0, draftVersion - publishedVersion) : 0;
     return {
       draftVersion,
@@ -499,7 +486,6 @@ export class ReleaseService {
   }
 
   async gate(user: SafeUser, workflowId: string): Promise<ReleaseGateView> {
-    this.requireAvailable();
     await this.check(user, workflowId, "workflow:read");
     return this.settingsOf(await this.store.getReleaseGate(workflowId), workflowId);
   }
@@ -516,7 +502,6 @@ export class ReleaseService {
    * saving the draft as a version first when it differs from the newest one.
    */
   async updateGate(user: SafeUser, workflowId: string, input: ReleaseGateSettingsInput): Promise<ReleaseGateView> {
-    this.requireAvailable();
     await this.check(user, workflowId, "workflow:write");
     const parsed = releaseGateSettingsSchema.safeParse(input);
     if (!parsed.success) throw new ReleaseError("Invalid gate settings", 400, { issues: parsed.error.issues });
@@ -715,7 +700,7 @@ export class ReleaseService {
 
   /** The paths in `keys` another workflow claims. */
   private async claimedByOthers(workflowId: string, keys: ProductionRoutingKey[]): Promise<RoutingConflict[]> {
-    if (!this.options.available || keys.length === 0) return [];
+    if (keys.length === 0) return [];
     const claims = await this.otherClaims(workflowId);
     const conflicts: RoutingConflict[] = [];
     for (const entry of keys) {
@@ -733,7 +718,7 @@ export class ReleaseService {
     for (const summary of await this.store.listWorkflows()) {
       const draft = await this.store.getWorkflow(summary.id);
       if (draft) for (const entry of productionRoutingKeys(draft)) used.add(entry.key);
-      const published = this.options.available ? await this.store.getPublishedVersion(summary.id) : null;
+      const published = await this.store.getPublishedVersion(summary.id);
       if (published === null) continue;
       try {
         for (const entry of productionRoutingKeys(await this.options.resolveVersion(summary.id, published))) used.add(entry.key);
@@ -761,7 +746,6 @@ export class ReleaseService {
    * save never blocks it.
    */
   async claimConflict(user: SafeUser, workflow: Workflow): Promise<string | null> {
-    if (!this.options.available) return null;
     const before = new Set(await this.store.getWorkflow(workflow.id) ? (await this.claimedKeys(workflow.id)).map((entry) => entry.key) : []);
     const added = (await this.claimedKeys(workflow.id, workflow)).filter((entry) => !before.has(entry.key));
     const conflicts = await this.claimedByOthers(workflow.id, added);
@@ -789,7 +773,6 @@ export class ReleaseService {
   // -------------------------------------------------------------------------
 
   private async enforcedGateOf(workflowId: string): Promise<ReleaseGateRecord | null> {
-    if (!this.options.available) return null;
     const gate = await this.store.getReleaseGate(workflowId);
     return gate?.enforced ? gate : null;
   }
@@ -884,7 +867,6 @@ export class ReleaseService {
       | { via: "workflow" }
       | { via: "data_subject"; fixtureIds: readonly string[]; kind: string; id: string }
   ): Promise<(() => Promise<void>) | null> {
-    if (!this.options.available) return null;
     const snapshot = await gateAdmissionSnapshot(this.store, await this.store.getReleaseGate(workflowId));
     if (!snapshot) return null;
     const hit = (fixture: EvalFixtureRecord) => {
@@ -950,7 +932,6 @@ export class ReleaseService {
    *     (`release.jobs.evidence_removed`).
    */
   async dataSubjectRemoval(user: SafeUser, row: { kind: string; id: string }): Promise<(() => Promise<void>) | null> {
-    if (!this.options.available) return null;
     let workflowId: string | null = null;
     let fixtureIds: string[] = [];
     let resultIds: string[] = [];
@@ -998,7 +979,6 @@ export class ReleaseService {
    * left out here: the job view reports it on its own. Null otherwise.
    */
   async jobGateAdmission(job: JobView): Promise<ReleaseGateJobAdmission | null> {
-    if (!this.options.available) return null;
     const record = await this.store.getReleaseGate(job.workflowId);
     const jobSets = job.datasetIds ?? [];
     if (!record?.enforced || !record.datasetIds.some((datasetId) => jobSets.includes(datasetId))) return null;
@@ -1234,7 +1214,6 @@ export class ReleaseService {
 
   /** The publish dialog's preview: the verdict publishing would get now. */
   async preview(user: SafeUser, workflowId: string, version: number, replayRunId?: string): Promise<ReleasePublishPreview> {
-    this.requireAvailable();
     await this.check(user, workflowId, "workflow:read");
     const gate = this.settingsOf(await this.store.getReleaseGate(workflowId), workflowId);
     const { workflowHash } = await this.versionCandidate(workflowId, version);
@@ -1282,7 +1261,6 @@ export class ReleaseService {
   }
 
   async releases(user: SafeUser, workflowId: string, limit?: number): Promise<{ releases: WorkflowRelease[]; publishedVersion: number | null }> {
-    this.requireAvailable();
     await this.check(user, workflowId, "workflow:read");
     return {
       releases: (await this.store.listWorkflowReleases(workflowId, limit)).map((record) => this.toRelease(record)),
@@ -1354,7 +1332,6 @@ export class ReleaseService {
   }
 
   async publish(user: SafeUser, workflowId: string, input: ReleasePublishInput): Promise<PublishOutcome> {
-    this.requireAvailable();
     await this.check(user, workflowId, "workflow:publish");
     const { workflowHash } = await this.versionCandidate(workflowId, input.version);
     const gate = this.settingsOf(await this.store.getReleaseGate(workflowId), workflowId);
@@ -1448,7 +1425,6 @@ export class ReleaseService {
    * another project, or created again under the same id, does not).
    */
   async rollback(user: SafeUser, workflowId: string, input: ReleaseRollbackInput): Promise<WorkflowRelease> {
-    this.requireAvailable();
     await this.check(user, workflowId, "workflow:publish");
     if (await this.enforcedGateOf(workflowId) && user.role !== "admin") {
       await this.refuse(user, workflowId, "release.rollback.refused", "rollback", { version: input.version });
@@ -1706,7 +1682,6 @@ export class ReleaseService {
 
   /** Release requests of workflows the user can read, narrowed in SQL before the limit. */
   async listRequests(user: SafeUser, filter: { status: "pending" | "decided" | "all"; workflowId?: string; limit?: number }): Promise<ReleaseApprovalRequestView[]> {
-    if (!this.options.available) return [];
     await this.sweepExpired();
     const workflowIds = await this.options.readableWorkflowIds(user);
     const rows = await this.store.listReleaseApprovalRequests({ ...filter, now: this.now().toISOString(), scope: workflowIds === null ? { all: true } : { workflowIds } });
@@ -1742,7 +1717,6 @@ export class ReleaseService {
    * together. Throws a `ReleaseError` with the HTTP status when refused.
    */
   async decide(user: SafeUser, requestId: string, decision: "approve" | "reject", reason?: string): Promise<{ request: ReleaseApprovalRequestView; release: WorkflowRelease | null }> {
-    this.requireAvailable();
     const record = await this.store.getReleaseApprovalRequest(requestId);
     if (!record || !(await this.options.access(user, record.workflowId, "workflow:read")).ok) throw new ReleaseError("Pending approval not found", 404);
     if (record.status !== "pending") throw new ReleaseError("This approval was already decided", 409);

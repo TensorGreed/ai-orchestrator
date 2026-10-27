@@ -47,7 +47,9 @@ import type {
   ReplayCaptureStatus,
   ReplayGoldenBadge
 } from "@ai-orchestrator/shared";
-import { DESTINATION_KINDS, DESTINATION_TIERS, type DataDestinationRow, DEFAULT_MCP_SAMPLING_SETTINGS, DEFAULT_PROJECT_ID, GUARD_SIMULATION_JOB_DATASET_PREFIX, MCP_POLICY_KINDS, MCP_POLICY_ROLES, MCP_TOOL_HINT_CONDITIONS, REPLAY_CAPTURE_API_KEY_FILTER, REPLAY_CAPTURE_STATUSES } from "@ai-orchestrator/shared";
+import { DESTINATION_KINDS, DESTINATION_TIERS, type DataDestinationRow, DEFAULT_PROJECT_ID, GUARD_SIMULATION_JOB_DATASET_PREFIX, MCP_POLICY_KINDS, MCP_POLICY_ROLES, MCP_TOOL_HINT_CONDITIONS, REPLAY_CAPTURE_API_KEY_FILTER, REPLAY_CAPTURE_STATUSES } from "@ai-orchestrator/shared";
+import { normalizeMcpSamplingSettings, SUBJECT_CASSETTE_SOURCES, SUBJECT_EXECUTION_TRIGGERS } from "./store-shared.js";
+import { ONE_PENDING_APPROVAL_INDEX } from "./migrations.js";
 import {
   normalizeMcpRuntimeLimits,
   normalizeMcpSandboxSettings,
@@ -1116,28 +1118,6 @@ interface McpElicitationRow {
 const MCP_ELICITATION_STATUSES = new Set<McpElicitationStatus>(["pending", "accepted", "declined", "cancelled", "expired", "auto_declined"]);
 
 /** Phase 10.5 — sampling settings as stored; unknown or partial JSON falls back to the defaults (off). */
-export function normalizeMcpSamplingSettings(value: unknown): McpSamplingSettings {
-  const raw = value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
-  const defaultModel =
-    raw.defaultModel && typeof raw.defaultModel === "object" && !Array.isArray(raw.defaultModel)
-      ? (raw.defaultModel as Record<string, unknown>)
-      : null;
-  const providerId = typeof defaultModel?.providerId === "string" ? defaultModel.providerId.trim() : "";
-  const model = typeof defaultModel?.model === "string" ? defaultModel.model.trim() : "";
-  const maxTokens = Number(raw.maxTokens);
-  const maxRequests = Number(raw.maxRequestsPerCall);
-  return {
-    allow: raw.allow === true,
-    maxTokens: Number.isFinite(maxTokens) && maxTokens >= 1 ? Math.floor(maxTokens) : DEFAULT_MCP_SAMPLING_SETTINGS.maxTokens,
-    allowedModels: Array.isArray(raw.allowedModels)
-      ? raw.allowedModels.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0).map((entry) => entry.trim())
-      : [],
-    maxRequestsPerCall:
-      Number.isFinite(maxRequests) && maxRequests >= 0 ? Math.floor(maxRequests) : DEFAULT_MCP_SAMPLING_SETTINGS.maxRequestsPerCall,
-    defaultModel: providerId && model ? { providerId, model } : null
-  };
-}
-
 function mapMcpServerCatalog(row: McpServerCatalogRow): McpServerCatalogRecord {
   const parse = <T>(value: string | null, fallback: T): T => {
     if (!value) return fallback;
@@ -1554,10 +1534,6 @@ export interface SubjectTextRow {
   texts: Record<string, string | null>;
 }
 
-/** Trigger types of runs made from golden runs and golden-set cases (replays, replay jobs, gate and eval runs). */
-export const SUBJECT_EXECUTION_TRIGGERS = ["replay", "mcp_replay", "eval", "eval_judge"] as const;
-/** Cassette sources made from golden runs and golden-set cases. */
-export const SUBJECT_CASSETTE_SOURCES = ["replay", "eval"] as const;
 
 const SUBJECT_QUERIES: Record<SubjectStoreKind, { select: string; rowid: string; idColumn: string }> = {
   recording: {
@@ -2271,6 +2247,8 @@ export const GUARD_PROFILE_REVISION_TRIGGERS: ReadonlyArray<readonly [string, "I
   ["guard_profile_versions_revision_au", "UPDATE", "guard_profile_versions"],
   ["guard_profile_versions_revision_ad", "DELETE", "guard_profile_versions"]
 ];
+
+export { normalizeMcpSamplingSettings, SUBJECT_CASSETTE_SOURCES, SUBJECT_EXECUTION_TRIGGERS };
 
 export class SqliteStore implements Store {
   private closed = false;
@@ -3696,6 +3674,35 @@ export class SqliteStore implements Store {
       if (changes > 0) {
         this.upgradeNotes.push(
           `v39 upgrade: ${changes} running guard simulation${changes === 1 ? " was" : "s were"} interrupted (only one can run at a time).`
+        );
+      }
+    });
+
+    // Migration 41 — at most one pending approval request per run (a partial unique index), so two API instances
+    // backfilling the same paused run cannot both add one. Several pending requests for one run left by an older
+    // build: the newest stays pending, the others are canceled as superseded (as recording a new pause does).
+    this.transaction(() => {
+      if (this.queryOne<{ name: string }>(`SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?`, [ONE_PENDING_APPROVAL_INDEX])) return;
+      const now = new Date().toISOString();
+      const { changes } = this.db
+        .prepare(
+          `UPDATE approval_requests
+              SET status = 'canceled',
+                  reason = 'Superseded by a newer request of the same run',
+                  decided_at = COALESCE(decided_at, ?),
+                  updated_at = ?
+            WHERE status = 'pending'
+              AND id <> (
+                SELECT newest.id FROM approval_requests newest
+                 WHERE newest.execution_id = approval_requests.execution_id AND newest.status = 'pending'
+                 ORDER BY newest.created_at DESC, newest.id DESC LIMIT 1
+              )`
+        )
+        .run(now, now);
+      this.exec(`CREATE UNIQUE INDEX ${ONE_PENDING_APPROVAL_INDEX} ON approval_requests(execution_id) WHERE status = 'pending'`);
+      if (changes > 0) {
+        this.upgradeNotes.push(
+          `v41 upgrade: ${changes} duplicate pending approval request${changes === 1 ? " was" : "s were"} canceled (a run has one open request).`
         );
       }
     });
@@ -8946,9 +8953,6 @@ export class SqliteStore implements Store {
 
   // ---------------------------------------------------------------------------
   // Phase 7.3 — Agent eval framework
-  //
-  // SQLite-only at the moment. PostgresStore parity is a follow-up — see
-  // the eval-framework docs for the interim story for prod-Postgres users.
   // ---------------------------------------------------------------------------
 
   async createEvalDataset(input: {
@@ -12798,7 +12802,7 @@ export class SqliteStore implements Store {
   }
 
   // ---------------------------------------------------------------------------
-  // Migration 38 — data destinations (Phase 16). SQLite only; the routes answer 501 on Postgres.
+  // Migration 38 — data destinations (Phase 16).
   // ---------------------------------------------------------------------------
 
   /**

@@ -14,16 +14,17 @@ import type { FastifyInstance } from "fastify";
 import { dataDestinationRowSchema, findUnclassifiedDestinations, resolveDestination, type DataDestinationRow, type UnclassifiedDestination, type Workflow } from "@ai-orchestrator/shared";
 import { createApp } from "./app.js";
 import { parseConfig, type AppConfig } from "./config.js";
-import { SqliteStore } from "./db/database.js";
+import type { Store } from "./db/store.js";
 import { MIGRATIONS } from "./db/migrations.js";
 import { contiguousMigrationVersions } from "./db/migration-versions.test-helper.js";
 import { AuthService } from "./services/auth-service.js";
-import { collectConfiguredDestinations, DataDestinationService } from "./services/data-destination-service.js";
+import { collectConfiguredDestinations } from "./services/data-destination-service.js";
 import { SecretService } from "./services/secret-service.js";
+import { openTestStore } from "./test-support/test-store.js";
 
 interface TestContext {
   app: FastifyInstance;
-  store: SqliteStore;
+  store: Store;
   authService: AuthService;
   config: AppConfig;
   tempDir: string;
@@ -34,7 +35,7 @@ const MASTER_KEY = crypto.randomBytes(32).toString("base64");
 
 async function createTestContext(overrides: Record<string, string> = {}): Promise<TestContext> {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-destinations-"));
-  const store = await SqliteStore.create(path.join(tempDir, "orchestrator.db"));
+  const store = await openTestStore(path.join(tempDir, "orchestrator.db"));
   await store.ensureDefaultProject();
   const config = parseConfig({
     LOG_LEVEL: "warn",
@@ -217,13 +218,6 @@ describe("data destination routes", () => {
     const after = (await call(context, "GET", "/api/data-destinations/unclassified", admin.cookie)).json() as { destinations: UnclassifiedDestination[] };
     expect(after.destinations.map((entry) => entry.host)).not.toContain("llm.example.net");
   });
-
-  it("answers 501 when the store is not SQLite", async () => {
-    const service = new DataDestinationService({ store: null, readableWorkflowIds: async () => null, readableProjectIds: async () => null });
-    expect(service.available).toBe(false);
-    expect(await service.rows()).toEqual([]);
-    await expect(service.list()).rejects.toThrow(/SQLite/);
-  });
 });
 
 describe("collectConfiguredDestinations", () => {
@@ -394,11 +388,11 @@ describe("migration 38", () => {
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-destinations-db-"));
     try {
       const file = path.join(tempDir, "orchestrator.db");
-      const store = await SqliteStore.create(file);
+      const store = await openTestStore(file);
       await store.insertDataDestination({ id: "dst_1", name: "Lab", kind: "http", targetId: null, host: "10.0.0.0/8", tier: "local", region: "unknown", holdsDataClasses: [], note: null, actor: "a" });
       await expect(store.insertDataDestination({ id: "dst_2", name: "Lab again", kind: "http", targetId: null, host: "10.0.0.0/8", tier: "private", region: "unknown", holdsDataClasses: [], note: null, actor: "a" })).rejects.toThrow();
       await store.close();
-      const reopened = await SqliteStore.create(file);
+      const reopened = await openTestStore(file);
       expect((await reopened.listDataDestinations()).map((row) => [row.id, row.tier])).toEqual([["dst_1", "local"]]);
       await reopened.close();
     } finally {

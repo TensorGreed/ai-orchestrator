@@ -15,7 +15,9 @@ import type { DataLabels, RunFacts, Workflow } from "@ai-orchestrator/shared";
 import { createDefaultGuardProfile } from "@ai-orchestrator/guard-sdk";
 import { createApp } from "./app.js";
 import { parseConfig, type AppConfig } from "./config.js";
-import { SqliteStore } from "./db/database.js";
+import type { Store } from "./db/store.js";
+import { openTestStore } from "./test-support/test-store.js";
+import { testSql } from "./test-support/test-sql.js";
 import { MIGRATIONS } from "./db/migrations.js";
 import { contiguousMigrationVersions } from "./db/migration-versions.test-helper.js";
 import { AuthService } from "./services/auth-service.js";
@@ -26,7 +28,7 @@ import { createReplaySandbox } from "./services/replay-sandbox.js";
 
 interface TestContext {
   app: FastifyInstance;
-  store: SqliteStore;
+  store: Store;
   authService: AuthService;
   config: AppConfig;
   tempDir: string;
@@ -37,7 +39,7 @@ const EMAIL = "maria.gonzalez@example.org";
 
 async function createTestContext(): Promise<TestContext> {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-labels-"));
-  const store = await SqliteStore.create(path.join(tempDir, "orchestrator.db"));
+  const store = await openTestStore(path.join(tempDir, "orchestrator.db"));
   await store.ensureDefaultProject();
   const config = parseConfig({
     LOG_LEVEL: "info",
@@ -111,10 +113,10 @@ function labelledWorkflow(id: string, profileId: string): Workflow {
 
 type RunResult = { status: string; executionId: string; nodeResults: Array<{ nodeId: string; status: string; labels?: DataLabels; output?: Record<string, unknown> }> };
 
-function storedNodeResults(context: TestContext, executionId: string): string {
-  const row = (context.store as unknown as { queryOne: (sql: string, params: unknown[]) => { node_results_json: string } | undefined }).queryOne(
-    "SELECT node_results_json FROM execution_history WHERE id = ?",
-    [executionId]
+async function storedNodeResults(context: TestContext, executionId: string): Promise<string> {
+  const row = await testSql(context.store).get<{ node_results_json: string }>(
+    "SELECT CAST(node_results_json AS TEXT) AS node_results_json FROM execution_history WHERE id = ?",
+    executionId
   );
   return row?.node_results_json ?? "";
 }
@@ -148,17 +150,22 @@ describe("migration 37", () => {
     expect(migration.down).toContain("DROP TABLE IF EXISTS guard_profile_revision");
   });
 
-  it("exists in the SQLite schema", async () => {
+  it("exists in the schema", async () => {
     const context = await createTestContext();
-    const columns = (table: string) =>
-      (context.store as unknown as { queryAll: (sql: string) => Array<{ name: string }> }).queryAll(`PRAGMA table_info(${table})`).map((column) => column.name);
-    expect(columns("session_memory")).toContain("labels_json");
-    expect(columns("session_tool_cache")).toContain("labels_json");
-    expect(columns("session_artifacts")).toContain("labels_json");
-    const triggers = (context.store as unknown as { queryAll: (sql: string) => Array<{ name: string }> })
-      .queryAll(`SELECT name FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'guard_profile%revision%' ORDER BY name`)
-      .map((row) => row.name);
-    expect(triggers).toHaveLength(6);
+    const sql = testSql(context.store);
+    const columns = async (table: string) => (sql.kind === "sqlite"
+      ? await sql.all<{ name: string }>(`PRAGMA table_info(${table})`)
+      : await sql.all<{ name: string }>(`SELECT column_name AS name FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = ?`, table)
+    ).map((column) => column.name);
+    expect(await columns("session_memory")).toContain("labels_json");
+    expect(await columns("session_tool_cache")).toContain("labels_json");
+    expect(await columns("session_artifacts")).toContain("labels_json");
+    const triggers = (sql.kind === "sqlite"
+      ? await sql.all<{ name: string }>(`SELECT name FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'guard_profile%revision%' ORDER BY name`)
+      : await sql.all<{ name: string }>(`SELECT DISTINCT trigger_name AS name FROM information_schema.triggers WHERE trigger_name LIKE 'guard_profile%revision%' ORDER BY 1`)
+    ).map((row) => row.name);
+    // SQLite: one trigger per table and write kind; Postgres: one per table covering all three.
+    expect(triggers).toHaveLength(sql.kind === "sqlite" ? 6 : 2);
     const before = (await context.store.guardProfileRevision())!;
     await context.store.insertGuardProfile({ id: "p", name: "P", document: {}, hash: "h", createdBy: null });
     expect(await context.store.guardProfileRevision()).toBeGreaterThan(before);
@@ -173,7 +180,7 @@ describe("labels on runs", () => {
     const run = (await call(context, "POST", "/api/workflows/wf-plain/execute", cookie, { user_prompt: `Write to ${EMAIL}` })).json<RunResult>();
     expect(run.status).toBe("success");
     expect(run.nodeResults.every((entry) => entry.labels === undefined)).toBe(true);
-    expect(storedNodeResults(context, run.executionId)).not.toContain("labels");
+    expect(await storedNodeResults(context, run.executionId)).not.toContain("labels");
   });
 
   it("a profile that tracks labels: an editor run's input is user input, scanned classes are stored per node", async () => {
@@ -189,7 +196,7 @@ describe("labels on runs", () => {
     expect(labels("note")).toEqual(L(["user"], ["email"]));
     // The guard allowed the email (the default actions), so the class stays.
     expect(labels("guard")).toEqual(L(["user"], ["email"]));
-    const stored = JSON.parse(storedNodeResults(context, run.executionId)) as Array<{ nodeId: string; labels?: DataLabels }>;
+    const stored = JSON.parse(await storedNodeResults(context, run.executionId)) as Array<{ nodeId: string; labels?: DataLabels }>;
     expect(stored.find((entry) => entry.nodeId === "note")?.labels).toEqual(L(["user"], ["email"]));
 
     // A recording keeps the propagated labels on its facts.
@@ -207,7 +214,7 @@ describe("labels on runs", () => {
     const response = await context.app.inject({ method: "POST", url: "/webhook/hook-wf-hook", payload: { user_prompt: "hello" } });
     expect(response.statusCode, response.body).toBeLessThan(300);
     const latest = await context.store.listExecutionHistory({ workflowId: "wf-hook" } as never) as unknown as { items: Array<{ id: string }> };
-    const stored = JSON.parse(storedNodeResults(context, latest.items[0]!.id)) as Array<{ nodeId: string; labels?: DataLabels }>;
+    const stored = JSON.parse(await storedNodeResults(context, latest.items[0]!.id)) as Array<{ nodeId: string; labels?: DataLabels }>;
     expect(stored.find((entry) => entry.nodeId === "hook")?.labels).toEqual(L(["untrusted_external"]));
   });
 });
@@ -410,7 +417,7 @@ describe("round 1 fixes", () => {
     const replayed = await call(context, "POST", `/api/replay/recordings/${recordingId}/replay`, admin, { draft: true });
     expect(replayed.statusCode, replayed.body).toBe(200);
     const executionId = replayed.json<{ executionId: string }>().executionId;
-    const stored = JSON.parse(storedNodeResults(context, executionId)) as Array<{ nodeId: string; labels?: DataLabels }>;
+    const stored = JSON.parse(await storedNodeResults(context, executionId)) as Array<{ nodeId: string; labels?: DataLabels }>;
     expect(stored.find((entry) => entry.nodeId === "hook")?.labels).toEqual(L(["untrusted_external"]));
   });
 
@@ -423,7 +430,7 @@ describe("round 1 fixes", () => {
     expect(recorded.status).toBe("success");
     expect(recorded.mcpCassette?.id).toBeTruthy();
     // The source run came from outside (a webhook-style trigger): its replay must say so, whoever replays it.
-    (context.store as unknown as { exec: (sql: string, params: unknown[]) => void }).exec("UPDATE execution_history SET trigger_type = ? WHERE id = ?", ["webhook", recorded.executionId]);
+    await testSql(context.store).run("UPDATE execution_history SET trigger_type = ? WHERE id = ?", "webhook", recorded.executionId);
     await context.store.upsertWorkflow(labelledWorkflow("wf-mcp-replay", "tracking"));
     const replay = await call(context, "POST", `/api/executions/${recorded.executionId}/replay`, admin, {});
     expect(replay.statusCode, replay.body).toBe(200);
@@ -480,7 +487,7 @@ describe("round 2: imported golden runs and eval cases", () => {
     const replayed = async (id: string) => {
       const response = await call(context, "POST", `/api/replay/recordings/${id}/replay`, admin, { draft: true });
       expect(response.statusCode, response.body).toBe(200);
-      const stored = JSON.parse(storedNodeResults(context, response.json<{ executionId: string }>().executionId)) as Array<{ nodeId: string; labels?: DataLabels }>;
+      const stored = JSON.parse(await storedNodeResults(context, response.json<{ executionId: string }>().executionId)) as Array<{ nodeId: string; labels?: DataLabels }>;
       return stored.find((entry) => entry.nodeId === "hook")?.labels;
     };
     let importedId: string | undefined;
@@ -504,12 +511,12 @@ describe("round 2: imported golden runs and eval cases", () => {
     expect(fixture.statusCode, fixture.body).toBe(200);
     const evaluated = await call(context, "POST", "/api/eval/runs?wait=true", admin, { datasetId: dataset.id, workflowId: "wf-eval-labels" });
     expect(evaluated.statusCode, evaluated.body).toBe(200);
-    const rows = (context.store as unknown as { queryAll: (sql: string, params: unknown[]) => Array<{ id: string }> }).queryAll(
+    const rows = await testSql(context.store).all<{ id: string }>(
       "SELECT id FROM execution_history WHERE workflow_id = ? AND trigger_type = 'eval'",
-      ["wf-eval-labels"]
+      "wf-eval-labels"
     );
     expect(rows).toHaveLength(1);
-    const stored = JSON.parse(storedNodeResults(context, rows[0]!.id)) as Array<{ nodeId: string; labels?: DataLabels }>;
+    const stored = JSON.parse(await storedNodeResults(context, rows[0]!.id)) as Array<{ nodeId: string; labels?: DataLabels }>;
     expect(stored.find((entry) => entry.nodeId === "hook")?.labels).toEqual(L(["user"]));
   }, 30_000);
 });

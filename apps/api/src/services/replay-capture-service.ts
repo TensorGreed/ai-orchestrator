@@ -92,7 +92,8 @@ import {
   type GuardDictionary,
   type SubjectSpan
 } from "@ai-orchestrator/guard-sdk";
-import { SUBJECT_CASSETTE_SOURCES, SUBJECT_EXECUTION_TRIGGERS, type ReplayCaptureSettingsRecord, type SubjectTextRow } from "../db/database.js";
+import type { ReplayCaptureSettingsRecord, SubjectTextRow } from "../db/database.js";
+import { SUBJECT_CASSETTE_SOURCES, SUBJECT_EXECUTION_TRIGGERS } from "../db/store-shared.js";
 import { inputProvenance, type CaptureInputOrigin } from "./capture-masking.js";
 import type { McpCassetteRunPlan } from "./mcp-cassette-service.js";
 import { ReplayRecordingError, type ReplayRecordingService } from "./replay-recording-service.js";
@@ -392,17 +393,33 @@ export class ReplayCaptureService {
         return null;
       }
       const since = startOfUtcDay(this.now());
-      let used = await this.options.store.countReplayCapturesSince(input.workflow.id, since) + (this.inFlight.get(input.workflow.id) ?? 0);
-      if (used >= settings.maxPerDay && this.options.sweepStale) {
-        // Tickets of runs that never finished may hold the day's slots: give them back first.
-        this.options.sweepStale();
-        used = await this.options.store.countReplayCapturesSince(input.workflow.id, since) + (this.inFlight.get(input.workflow.id) ?? 0);
+      // The slot is held before the count is read: a capture that commits and gives its slot back
+      // while the count is in flight is then counted once (in flight or stored), never zero times.
+      const workflowId = input.workflow.id;
+      this.inFlight.set(workflowId, (this.inFlight.get(workflowId) ?? 0) + 1);
+      const others = () => (this.inFlight.get(workflowId) ?? 1) - 1;
+      const unreserve = () => {
+        const count = (this.inFlight.get(workflowId) ?? 1) - 1;
+        if (count <= 0) this.inFlight.delete(workflowId);
+        else this.inFlight.set(workflowId, count);
+      };
+      let used: number;
+      try {
+        used = others() + await this.options.store.countReplayCapturesSince(workflowId, since);
+        if (used >= settings.maxPerDay && this.options.sweepStale) {
+          // Tickets of runs that never finished may hold the day's slots: give them back first.
+          this.options.sweepStale();
+          used = others() + await this.options.store.countReplayCapturesSince(workflowId, since);
+        }
+      } catch (error) {
+        unreserve();
+        throw error;
       }
       if (used >= settings.maxPerDay) {
+        unreserve();
         this.metric("skipped_daily_limit");
         return null;
       }
-      this.inFlight.set(input.workflow.id, (this.inFlight.get(input.workflow.id) ?? 0) + 1);
       return {
         workflowId: input.workflow.id,
         rate,

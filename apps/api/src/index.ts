@@ -1,7 +1,6 @@
-import dotenv from "dotenv";
-import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { loadApiEnvFiles } from "./env-files.js";
 import { getConfig } from "./config";
 import { createStore } from "./db/create-store";
 import { createApp } from "./app";
@@ -15,15 +14,9 @@ import { TriggerService } from "./services/trigger-service";
 const currentFilePath = fileURLToPath(import.meta.url);
 const apiRoot = path.resolve(path.dirname(currentFilePath), "..");
 const workspaceRoot = path.resolve(apiRoot, "..", "..");
-const rootEnvPath = path.resolve(workspaceRoot, ".env");
-const apiEnvPath = path.resolve(apiRoot, ".env");
 
-if (fs.existsSync(rootEnvPath)) {
-  dotenv.config({ path: rootEnvPath });
-}
-if (fs.existsSync(apiEnvPath)) {
-  dotenv.config({ path: apiEnvPath, override: true });
-}
+// The same .env rule db:copy follows (env-files.ts): the repo root's .env without override, then apps/api/.env with it.
+loadApiEnvFiles(apiRoot);
 
 async function bootstrap() {
   const config = getConfig();

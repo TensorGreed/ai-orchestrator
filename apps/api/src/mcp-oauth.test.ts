@@ -19,10 +19,11 @@ import type { FastifyInstance } from "fastify";
 import type { McpOAuthConnectionStatus } from "@ai-orchestrator/shared";
 import { createApp } from "./app.js";
 import { parseConfig, type AppConfig } from "./config.js";
-import { SqliteStore } from "./db/database.js";
+import type { Store } from "./db/store.js";
 import { MIGRATIONS } from "./db/migrations.js";
 import { AuthService } from "./services/auth-service.js";
 import { SecretService } from "./services/secret-service.js";
+import { openTestStore } from "./test-support/test-store.js";
 
 // ---------------------------------------------------------------------------
 // Fake authorization server + protected MCP resource
@@ -255,7 +256,7 @@ afterAll(async () => {
 
 interface TestContext {
   app: FastifyInstance;
-  store: SqliteStore;
+  store: Store;
   authService: AuthService;
   config: AppConfig;
   tempDir: string;
@@ -266,7 +267,7 @@ const REDIRECT_BASE = "https://l2m.example.test";
 
 async function createTestContext(overrides: Record<string, string> = {}): Promise<TestContext> {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-mcp-oauth-"));
-  const store = await SqliteStore.create(path.join(tempDir, "orchestrator.db"));
+  const store = await openTestStore(path.join(tempDir, "orchestrator.db"));
   await store.ensureDefaultProject();
   const config = parseConfig({
     LOG_LEVEL: "info",
@@ -922,7 +923,7 @@ describe("Phase 10.5 schema", () => {
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-mcp-oauth-schema-"));
     try {
       const file = path.join(tempDir, "orchestrator.db");
-      const first = await SqliteStore.create(file);
+      const first = await openTestStore(file);
       await first.createMcpToolPolicy({
         id: "legacy",
         name: null,
@@ -935,7 +936,7 @@ describe("Phase 10.5 schema", () => {
         enabled: true
       });
       await first.close();
-      const reopened = await SqliteStore.create(file);
+      const reopened = await openTestStore(file);
       expect((await reopened.getMcpToolPolicy("legacy"))?.annotationHint).toBeNull();
       expect(await reopened.getMcpOAuthConnection("nope")).toBeNull();
       await reopened.close();

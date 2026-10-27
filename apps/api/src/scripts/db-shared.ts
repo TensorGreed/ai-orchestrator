@@ -10,10 +10,11 @@
 import path from "node:path";
 import fs from "node:fs";
 import Database, { type Database as BetterSqlite3Database } from "better-sqlite3";
-import { Pool, type PoolClient } from "pg";
+import type { Pool, PoolClient } from "pg";
 import { parsePostgresSettings } from "../config.js";
 import { postgresStoreConfig } from "../db/create-store.js";
 import { applyMigrationChain, postgresPoolConfig, withMigrationLock } from "../db/postgres-store.js";
+import { createPostgresPool } from "../db/postgres/pool.js";
 import { INSERTION_SEQ_TABLES, MIGRATIONS } from "../db/migrations.js";
 import {
   exactSqliteTextRows,
@@ -271,7 +272,7 @@ class PostgresAdapter implements BackupAdapter {
   }
 
   static async create(): Promise<PostgresAdapter> {
-    const pool = new Pool(postgresPoolConfig(postgresStoreConfig(parsePostgresSettings(process.env)), { max: 4 }));
+    const pool = createPostgresPool(postgresPoolConfig(postgresStoreConfig(parsePostgresSettings(process.env)), { max: 4 }), { label: "db:import/export" });
     try {
       // Under the migrations lock, like a booting instance, so a restore and a boot never run the chain together.
       await withMigrationLock(pool, undefined, (client) => applyMigrationChain(client));

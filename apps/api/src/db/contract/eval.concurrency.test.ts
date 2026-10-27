@@ -3,10 +3,9 @@
  * conditional writes apply once whichever process gets there first. Postgres only; skipped without TEST_POSTGRES_URL.
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { postgresStoreConfig } from "../create-store.js";
 import { PostgresStore } from "../postgres-store.js";
 import type { Store } from "../store.js";
-import { createTestStore, noticePostgresSkipped, testPostgresSettings, testPostgresUrl, type TestStore } from "../../test-support/test-store.js";
+import { createTestStore, noticePostgresSkipped, testPostgresUrl, type TestStore, openTestStoreTwin } from "../../test-support/test-store.js";
 
 const enabled = Boolean(testPostgresUrl());
 if (!enabled) noticePostgresSkipped("eval and capture concurrency");
@@ -46,7 +45,7 @@ describe.skipIf(!enabled)("eval and capture writes across two Postgres stores", 
 
   beforeEach(async () => {
     first = await createTestStore({ kind: "postgres" });
-    second = await PostgresStore.create(postgresStoreConfig(testPostgresSettings(), { schema: first.schema!, maxConnections: 4 }));
+    second = await openTestStoreTwin(first!, { maxConnections: 4 });
   }, 60_000);
 
   afterEach(async () => {

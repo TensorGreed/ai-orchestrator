@@ -1,15 +1,12 @@
 /**
  * Phase 13.1 — PostgresStore: Store lifecycle, git sync, leases, variables, usage and budgets, notification configs.
- * Plain functions over a PgContext; PostgresStore delegates here. Every method is implemented;
- * UNIMPLEMENTED_METHODS is empty.
+ * Plain functions over a PgContext; PostgresStore delegates here. Every method is implemented.
  */
 import { type Store } from "../store.js";
 import type { BudgetRecord } from "../database.js";
 import { toNum, toStr } from "./helpers.js";
 import type { PgContext } from "./context.js";
 import { clampLimit, LIMIT_MAX } from "../store-limits.js";
-
-export const UNIMPLEMENTED_METHODS: readonly (keyof Store)[] = [];
 
 export async function listNotificationConfigs(ctx: PgContext): Promise<Array<{
   id: string; channel: string; enabled: boolean;

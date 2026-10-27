@@ -50,7 +50,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { Pool, type PoolClient } from "pg";
+import type { Pool, PoolClient } from "pg";
 import {
   AuditChainWalker,
   exactSqliteTextRows,
@@ -68,9 +68,10 @@ import { INSERTION_SEQ_TABLES, MIGRATIONS } from "../db/migrations.js";
 import { pgParams } from "../db/postgres/context.js";
 import { describePostgresSettings, isPostgresDbType, parsePostgresSettings } from "../config.js";
 import { postgresStoreConfig } from "../db/create-store.js";
-import { loadApiEnvFiles, resolveSettingOrigins, type SettingOrigin } from "./api-env.js";
+import { loadApiEnvFiles, resolveSettingOrigins, type SettingOrigin } from "../env-files.js";
 import { auditCarryOver, brokenPosition, unverifiableOnPostgresBySource, verdictText, verifyPostgresAuditChainByCursor } from "./audit-carry-over.js";
 import { applyMigrationChain, currentChainVersion, postgresPoolConfig, withMigrationLock, type PostgresStoreConfig } from "../db/postgres-store.js";
+import { createPostgresPool } from "../db/postgres/pool.js";
 
 /** The chain version this build migrates to (whatever MIGRATIONS' highest is; never a fixed number). */
 export const CODE_SCHEMA_VERSION = Math.max(...MIGRATIONS.map((migration) => migration.version));
@@ -683,7 +684,7 @@ export async function runDbCopy(options: DbCopyOptions): Promise<DbCopyReport> {
     }
     const becameUnverifiable = predicted.becameUnverifiable;
 
-    const pool = new Pool(postgresPoolConfig(options.postgres, { max: 1 }));
+    const pool = createPostgresPool(postgresPoolConfig(options.postgres, { max: 1 }), { label: "db:copy" });
     try {
       return await withMigrationLock(pool, options.postgres.schema, async (client) => {
         await client.query("SET TimeZone = 'UTC'");

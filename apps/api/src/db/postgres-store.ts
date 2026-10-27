@@ -1,8 +1,9 @@
-import pg, { Pool, type PoolClient, type PoolConfig } from "pg";
+import pg, { type Pool, type PoolClient, type PoolConfig } from "pg";
 import { runMigrations } from "./migrations.js";
 import type { Store } from "./store.js";
 import type { PostgresSslSettings } from "../config.js";
 import { createPgContext, type PgContext } from "./postgres/context.js";
+import { createPostgresPool, type PoolErrorLogger } from "./postgres/pool.js";
 import { PG_TIMESTAMPTZ_OID, parseTimestamptz, toNum } from "./postgres/helpers.js";
 import * as approvals from "./postgres/approvals.js";
 import * as audit from "./postgres/audit.js";
@@ -25,6 +26,7 @@ import * as secrets from "./postgres/secrets.js";
 import * as sessions from "./postgres/sessions.js";
 import * as webhooks from "./postgres/webhooks.js";
 import * as workflows from "./postgres/workflows.js";
+import { ADVISORY_LOCK_CLASS_LEADER, PgLeaderLock, type LeaderLock, type PgLeaderLockOptions } from "./postgres/leader-lock.js";
 
 export { parseTimestamptz };
 
@@ -60,7 +62,9 @@ export interface PostgresStoreConfig {
  * Add a new class here rather than reusing one.
  */
 export const ADVISORY_LOCK_CLASS_MIGRATIONS = 0x4c324d;
-export const ADVISORY_LOCK_CLASS_LEADER = 0x4c324e;
+export { ADVISORY_LOCK_CLASS_LEADER };
+/** Phase 13.1 — application_name of the dedicated leader-lock connection. */
+export const LEADER_APPLICATION_NAME = "l2m-leader";
 
 /** TIMESTAMPTZ through parseTimestamptz; every other type keeps pg's default parser. */
 const POSTGRES_TYPES = {
@@ -163,46 +167,26 @@ export async function applyMigrationChain(client: PoolClient): Promise<string[]>
 }
 
 export class PostgresStore implements Store {
-  /**
-   * Store methods this store does not implement yet: each throws
-   * StoreNotImplementedError (501). Feature checks read this through
-   * `storeImplements` instead of probing for the method.
-   */
-  static readonly unimplemented: ReadonlySet<keyof Store> = new Set<keyof Store>([
-    ...approvals.UNIMPLEMENTED_METHODS,
-    ...audit.UNIMPLEMENTED_METHODS,
-    ...auth.UNIMPLEMENTED_METHODS,
-    ...capture.UNIMPLEMENTED_METHODS,
-    ...data_destinations.UNIMPLEMENTED_METHODS,
-    ...data_labels.UNIMPLEMENTED_METHODS,
-    ...evals.UNIMPLEMENTED_METHODS,
-    ...executions.UNIMPLEMENTED_METHODS,
-    ...guard.UNIMPLEMENTED_METHODS,
-    ...guard_simulation.UNIMPLEMENTED_METHODS,
-    ...knowledge.UNIMPLEMENTED_METHODS,
-    ...mcp.UNIMPLEMENTED_METHODS,
-    ...misc.UNIMPLEMENTED_METHODS,
-    ...queue.UNIMPLEMENTED_METHODS,
-    ...release.UNIMPLEMENTED_METHODS,
-    ...replay.UNIMPLEMENTED_METHODS,
-    ...secrets.UNIMPLEMENTED_METHODS,
-    ...workflows.UNIMPLEMENTED_METHODS
-  ]);
   private readonly pool: Pool;
   private readonly ctx: PgContext;
 
   /** Phase 13.1 — one-line notes from this start's migrations (e.g. simulations an upgrade interrupted), for the log. */
   readonly upgradeNotes: string[] = [];
 
-  private constructor(pool: Pool) {
+  private readonly config: PostgresStoreConfig;
+  private readonly leaderLocks = new Set<PgLeaderLock>();
+
+  private constructor(pool: Pool, config: PostgresStoreConfig) {
     this.pool = pool;
+    this.config = config;
     this.ctx = createPgContext(pool, this);
   }
 
-  static async create(config: PostgresStoreConfig): Promise<PostgresStore> {
-    const pool = new Pool(postgresPoolConfig(config));
+  static async create(config: PostgresStoreConfig, options: { logger?: PoolErrorLogger } = {}): Promise<PostgresStore> {
+    // An idle connection the server ends is logged, not an unhandled 'error' event that ends the process.
+    const pool = createPostgresPool(postgresPoolConfig(config), { label: "store", ...(options.logger ? { logger: options.logger } : {}) });
     try {
-      const store = new PostgresStore(pool);
+      const store = new PostgresStore(pool, config);
       await store.migrate(config.schema);
       return store;
     } catch (error) {
@@ -211,8 +195,38 @@ export class PostgresStore implements Store {
     }
   }
 
+  private closing: Promise<void> | undefined;
+
   async close(): Promise<void> {
-    await this.pool.end();
+    // Idempotent like SqliteStore.close: the app's onClose and a caller may both close it; both wait for the end.
+    // promise-ok: kept and awaited below (and by every later close)
+    this.closing ??= (async () => {
+      await Promise.all([...this.leaderLocks].map((lock) => lock.release()));
+      await this.pool.end();
+    })();
+    await this.closing;
+  }
+
+  /**
+   * Phase 13.1 — the leader lock for `leaseName`: a session advisory lock on a dedicated connection (not one of the
+   * pool's), released when the lock is released, the store closes, or the connection ends.
+   */
+  leaderLock(input: {
+    leaseName: string;
+    holderId: string;
+    ttlMs: number;
+    /** HA_RENEW_INTERVAL_MS: how often the lock is checked; sizes the session's liveness settings. */
+    renewIntervalMs?: number;
+    logger?: PgLeaderLockOptions["logger"];
+  }): LeaderLock {
+    const lock = new PgLeaderLock({
+      // Named, so an operator can find the leader's session (pg_stat_activity.application_name).
+      clientConfig: postgresPoolConfig(this.config, { max: 1, application_name: LEADER_APPLICATION_NAME }),
+      pool: this.pool,
+      ...input
+    });
+    this.leaderLocks.add(lock);
+    return lock;
   }
 
   /**

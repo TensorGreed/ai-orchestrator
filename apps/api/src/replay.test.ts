@@ -10,13 +10,14 @@ import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
-import Database from "better-sqlite3";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { FastifyInstance } from "fastify";
 import type { ReplayRecordingDetail, ReplayRecordingSummary, ReplayRunResponse, Workflow } from "@ai-orchestrator/shared";
 import { createApp } from "./app.js";
 import { parseConfig, type AppConfig } from "./config.js";
-import { SqliteStore } from "./db/database.js";
+import type { Store } from "./db/store.js";
+import { openTestStore } from "./test-support/test-store.js";
+import { testSql } from "./test-support/test-sql.js";
 import { MIGRATIONS } from "./db/migrations.js";
 import { contiguousMigrationVersions } from "./db/migration-versions.test-helper.js";
 import { AuthService } from "./services/auth-service.js";
@@ -26,7 +27,7 @@ import { SecretService } from "./services/secret-service.js";
 
 interface TestContext {
   app: FastifyInstance;
-  store: SqliteStore;
+  store: Store;
   authService: AuthService;
   secretService: SecretService;
   config: AppConfig;
@@ -41,7 +42,7 @@ const PLANTED = "sk-planted-REPLAY-value-1a2b3c4d5e6f7a8b9c0d";
 async function createTestContext(overrides: Record<string, string> = {}): Promise<TestContext> {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-replay-"));
   const dbPath = path.join(tempDir, "orchestrator.db");
-  const store = await SqliteStore.create(dbPath);
+  const store = await openTestStore(dbPath);
   await store.ensureDefaultProject();
   const config = parseConfig({
     LOG_LEVEL: "warn",
@@ -260,14 +261,19 @@ async function replay(context: TestContext, cookie: string, recordingId: string,
   return response.json<ReplayRunResponse>();
 }
 
-function rawRows(context: TestContext): string {
-  const db = new Database(context.dbPath, { readonly: true });
-  try {
-    return JSON.stringify(db.prepare("SELECT * FROM replay_recordings").all());
-  } finally {
-    db.close();
-  }
+async function rawRows(context: TestContext): Promise<string> {
+  return JSON.stringify(await testSql(context.store).all("SELECT * FROM replay_recordings"));
 }
+
+async function tableColumns(context: TestContext, table: string): Promise<string[]> {
+  const sql = testSql(context.store);
+  const rows =
+    sql.kind === "sqlite"
+      ? await sql.all<{ name: string }>(`PRAGMA table_info(${table})`)
+      : await sql.all<{ name: string }>("SELECT column_name AS name FROM information_schema.columns WHERE table_name = ?", table);
+  return rows.map((row) => row.name);
+}
+
 
 // ~2 s of fixed waits plus polling per test: CI's 2-core runners need more than vitest's 5 s default.
 describe("golden runs with side effects stubbed", { timeout: 30_000 }, () => {
@@ -493,7 +499,7 @@ describe("golden runs with side effects stubbed", { timeout: 30_000 }, () => {
     expect(memoryBefore.length).toBeGreaterThan(0);
 
     const golden = await saveGolden(context, builder.cookie, run.json<{ executionId: string }>().executionId);
-    const raw = rawRows(context);
+    const raw = await rawRows(context);
     expect(raw).toContain(golden.id);
     expect(raw).not.toContain(PLANTED);
     expect(raw).not.toContain(Buffer.from(PLANTED).toString("base64"));
@@ -910,14 +916,11 @@ describe("migration 30", () => {
     }
   });
 
-  it("creates the same table in SQLite", async () => {
+  it("creates the same table in the live store", async () => {
     const context = await createTestContext();
-    const db = new Database(context.dbPath, { readonly: true });
-    try {
-      const columns = (db.prepare("PRAGMA table_info(replay_recordings)").all() as Array<{ name: string }>).map((row) => row.name);
+    {
+      const columns = await tableColumns(context, "replay_recordings");
       expect(columns).toEqual(expect.arrayContaining(["id", "workflow_id", "project_id", "source_execution_id", "captured_workflow_json", "node_outputs_json", "facts_json", "mcp_cassette_json", "capabilities_json", "truncated", "created_at"]));
-    } finally {
-      db.close();
     }
   });
 });

@@ -1,7 +1,6 @@
 /**
  * Phase 13.1 — PostgresStore: Replay capture settings, captured runs and retention.
- * Plain functions over a PgContext; PostgresStore delegates here. Every method is implemented;
- * UNIMPLEMENTED_METHODS is empty.
+ * Plain functions over a PgContext; PostgresStore delegates here. Every method is implemented.
  *
  * Each write is one statement (a conditional UPDATE / DELETE whose row count is the answer), so two API processes on
  * one database never promote the same candidate twice or double-count a prune. SQLite orders candidates captured in
@@ -19,8 +18,6 @@ import type { ReplayCaptureSettingsRecord } from "../database.js";
 import { type Store } from "../store.js";
 import type { PgContext } from "./context.js";
 import { storedJsonb, toNum, toStr } from "./helpers.js";
-
-export const UNIMPLEMENTED_METHODS: readonly (keyof Store)[] = [];
 
 const REPLAY_RECORDING_SUMMARY_COLUMNS =
   "id, workflow_id, project_id, name, notes, source_execution_id, source_trigger_type, source_status, workflow_hash, workflow_saved_version, capabilities_json, bytes, truncated, created_at, created_by, status, captured_at";

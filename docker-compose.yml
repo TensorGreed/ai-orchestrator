@@ -28,8 +28,7 @@ services:
   #   docker compose --profile postgres up --build
   # API on http://localhost:4001, web on http://localhost:5174, Postgres data in the l2m-postgres volume.
   # Without --profile postgres none of the services below start.
-  # Works once Phase 13.1 is complete (this profile ships stacked under the async store and the Postgres store work);
-  # until then the API migrates the database and then stops at startup.
+  # Every feature works on this profile, the same as on the default SQLite stack.
   postgres:
     profiles: ["postgres"]
     image: postgres:16-alpine

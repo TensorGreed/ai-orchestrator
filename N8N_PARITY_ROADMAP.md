@@ -569,7 +569,7 @@ git-backed environments, Prometheus metrics, tracing and a Helm chart. The gaps 
 by what blocks adoption first. All of it stays self-hosted.
 
 ### 13.1 Production data tier
-- [ ] Full Postgres parity: every SQLite store method implemented for Postgres (recent features ship schema-only there) and the whole API test suite run against Postgres in CI
+- [x] Full Postgres parity: every store method implemented for Postgres, multi-instance invariants enforced by the database, one leader per deployment (advisory lock), and the whole API test suite run against Postgres in CI
 - [ ] Horizontal scaling: shared work queue (Postgres `SKIP LOCKED` or Redis) with stateless API replicas and worker pools, load-tested with several replicas
 - [ ] Zero-downtime upgrades: expand-and-contract migrations, rolling deploys, migration dry runs
 - [ ] Backup, restore and disaster-recovery runbook with stated RPO and RTO; restore drills in CI

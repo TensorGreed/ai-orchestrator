@@ -201,7 +201,6 @@ Resumes are **at-least-once**: a recovered resume runs the nodes after the gate 
 
 ## Not covered yet
 
-- Postgres deployments: migration 32 creates the tables, but the Postgres store does not implement approvals yet. On Postgres the approvals routes answer `501`, no requests are recorded and no timeouts run; paused runs stay paused.
 - Escalation, reminders and one-click approve links inside Slack, Teams or email messages.
 - Groups as approvers; approvers are roles or individual users.
 - Approval Gates inside Loop node bodies.

@@ -6,14 +6,15 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
 import type { AppConfig } from "./config";
 import { createApp } from "./app";
-import { SqliteStore } from "./db/database";
+import type { Store } from "./db/store.js";
 import { AuthService } from "./services/auth-service";
 import { SecretService } from "./services/secret-service";
-import { LeaderElectionService } from "./services/leader-election-service";
+import { LeaderElectionService, NEVER_LEAD } from "./services/leader-election-service";
+import { openTestStore } from "./test-support/test-store.js";
 
 interface TestContext {
   app: FastifyInstance;
-  store: SqliteStore;
+  store: Store;
   authService: AuthService;
   secretService: SecretService;
   config: AppConfig;
@@ -193,7 +194,7 @@ function makeConfig(overrides: Partial<AppConfig> = {}): AppConfig {
 async function createTestContext(overrides: Partial<AppConfig> = {}): Promise<TestContext> {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-phase7-1-"));
   const dbPath = path.join(tempDir, "orchestrator.db");
-  const store = await SqliteStore.create(dbPath);
+  const store = await openTestStore(dbPath);
   const config = makeConfig(overrides);
   await store.ensureDefaultProject();
   const secretService = new SecretService(store, config.SECRET_MASTER_KEY_BASE64);
@@ -236,37 +237,38 @@ afterEach(async () => {
 });
 
 describe("Phase 7.1 — Leader lease primitive (store-level)", () => {
+  // Not the app's own "primary" lease: on Postgres the running app's leader writes that row.
   it("first acquirer wins, second sees it held, and holder can renew", async () => {
     const ctx = await createTestContext();
-    const a = await ctx.store.tryAcquireLease({ leaseName: "primary", holderId: "node-a", ttlMs: 60000 });
-    const b = await ctx.store.tryAcquireLease({ leaseName: "primary", holderId: "node-b", ttlMs: 60000 });
+    const a = await ctx.store.tryAcquireLease({ leaseName: "primitive", holderId: "node-a", ttlMs: 60000 });
+    const b = await ctx.store.tryAcquireLease({ leaseName: "primitive", holderId: "node-b", ttlMs: 60000 });
     expect(a).toBe(true);
     expect(b).toBe(false);
 
-    const renewed = await ctx.store.tryAcquireLease({ leaseName: "primary", holderId: "node-a", ttlMs: 60000 });
+    const renewed = await ctx.store.tryAcquireLease({ leaseName: "primitive", holderId: "node-a", ttlMs: 60000 });
     expect(renewed).toBe(true);
-    const lease = await ctx.store.getLease("primary");
+    const lease = await ctx.store.getLease("primitive");
     expect(lease?.holderId).toBe("node-a");
   });
 
   it("expired leases can be stolen by any other holder", async () => {
     const ctx = await createTestContext();
     // Acquire with a 1ms TTL so it's immediately expired.
-    await ctx.store.tryAcquireLease({ leaseName: "primary", holderId: "dead-node", ttlMs: 1 });
+    await ctx.store.tryAcquireLease({ leaseName: "primitive", holderId: "dead-node", ttlMs: 1 });
     await new Promise((resolve) => setTimeout(resolve, 10));
-    const stolen = await ctx.store.tryAcquireLease({ leaseName: "primary", holderId: "new-node", ttlMs: 60000 });
+    const stolen = await ctx.store.tryAcquireLease({ leaseName: "primitive", holderId: "new-node", ttlMs: 60000 });
     expect(stolen).toBe(true);
-    const lease = await ctx.store.getLease("primary");
+    const lease = await ctx.store.getLease("primitive");
     expect(lease?.holderId).toBe("new-node");
   });
 
   it("releaseLease only removes the row if the caller matches the holder", async () => {
     const ctx = await createTestContext();
-    await ctx.store.tryAcquireLease({ leaseName: "primary", holderId: "node-a", ttlMs: 60000 });
-    expect(await ctx.store.releaseLease("primary", "node-b")).toBe(false);
-    expect((await ctx.store.getLease("primary"))?.holderId).toBe("node-a");
-    expect(await ctx.store.releaseLease("primary", "node-a")).toBe(true);
-    expect(await ctx.store.getLease("primary")).toBeNull();
+    await ctx.store.tryAcquireLease({ leaseName: "primitive", holderId: "node-a", ttlMs: 60000 });
+    expect(await ctx.store.releaseLease("primitive", "node-b")).toBe(false);
+    expect((await ctx.store.getLease("primitive"))?.holderId).toBe("node-a");
+    expect(await ctx.store.releaseLease("primitive", "node-a")).toBe(true);
+    expect(await ctx.store.getLease("primitive")).toBeNull();
   });
 });
 
@@ -356,6 +358,18 @@ describe("Phase 7.1 — LeaderElectionService", () => {
     await b.stop();
   });
 
+  it("with a lock that is never granted the instance follows and never runs the leader callbacks", async () => {
+    const ctx = await createTestContext();
+    let became = 0;
+    const service = new LeaderElectionService(ctx.store, { instanceId: "follower", renewIntervalMs: 60_000, lock: NEVER_LEAD, onBecomeLeader: () => void (became += 1) });
+    await service.acquireEarly();
+    await service.start();
+    expect(service.isLeader()).toBe(false);
+    expect((await service.getStatus()).enabled).toBe(true);
+    expect(became).toBe(0);
+    await service.stop();
+  });
+
   it("after leader resigns, the other instance can take over on next tick", async () => {
     const ctx = await createTestContext();
     const a = new LeaderElectionService(
@@ -393,6 +407,7 @@ describe("Phase 7.1 — /api/ha/status route", () => {
       leases: unknown[];
     };
     expect(body.workerMode).toBe("all");
+    // HA off (the default): every instance is its own leader, on SQLite and on Postgres.
     expect(body.leader.enabled).toBe(false);
     expect(body.leader.isLeader).toBe(true);
     expect(Array.isArray(body.leases)).toBe(true);

@@ -23,6 +23,9 @@ export interface Migration {
  * v40: the Postgres tables whose SQLite queries order by rowid (insertion order). `backfillOrder` numbers the rows
  * that exist when v40 runs, in the order the store listed them before (created_at / started_at, then id).
  */
+/** v41: the partial unique index that allows one pending approval request per run (both stores). */
+export const ONE_PENDING_APPROVAL_INDEX = "idx_approval_requests_one_pending";
+
 export const INSERTION_SEQ_TABLES: ReadonlyArray<{ table: string; backfillOrder: string }> = [
   { table: "audit_logs", backfillOrder: `created_at, id COLLATE "C"` },
   { table: "knowledge_base_chunks", backfillOrder: `created_at, id COLLATE "C"` },
@@ -1948,6 +1951,41 @@ export const MIGRATIONS: Migration[] = [
       `DROP INDEX IF EXISTS idx_audit_logs_seq;`,
       ...INSERTION_SEQ_TABLES.map(({ table }) => `ALTER TABLE ${table} DROP COLUMN IF EXISTS seq;`)
     ].join("\n")
+  },
+  {
+    version: 41,
+    description: "Phase 13.1 — multi-instance invariants: at most one pending approval request per run",
+    // A paused run has one open approval request. Two API instances that both find a paused run without one (the
+    // inbox and the leader's sweep backfill it) could each insert one; this partial unique index lets the database
+    // refuse the second. A database that already holds several pending requests for one run keeps the newest and
+    // cancels the others as superseded, which is what recording a new pause does; the count goes to the startup log.
+    // SQLite's embedded migrate() does the same.
+    up: `
+      DO $$
+      DECLARE superseded integer;
+      BEGIN
+        UPDATE approval_requests r
+           SET status = 'canceled',
+               reason = 'Superseded by a newer request of the same run',
+               decided_at = COALESCE(r.decided_at, now()),
+               updated_at = now()
+          FROM (
+            SELECT id, row_number() OVER (PARTITION BY execution_id ORDER BY created_at DESC, id DESC) AS rank
+              FROM approval_requests WHERE status = 'pending'
+          ) ranked
+         WHERE r.id = ranked.id AND ranked.rank > 1;
+        GET DIAGNOSTICS superseded = ROW_COUNT;
+        IF superseded > 0 THEN
+          RAISE NOTICE 'L2M v41 upgrade: % duplicate pending approval request% canceled (a run has one open request).',
+            superseded, CASE WHEN superseded = 1 THEN ' was' ELSE 's were' END;
+        END IF;
+      END
+      $$;
+      CREATE UNIQUE INDEX IF NOT EXISTS ${ONE_PENDING_APPROVAL_INDEX} ON approval_requests(execution_id) WHERE status = 'pending';
+    `,
+    down: `
+      DROP INDEX IF EXISTS ${ONE_PENDING_APPROVAL_INDEX};
+    `
   }
 ];
 

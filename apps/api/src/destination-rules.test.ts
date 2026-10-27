@@ -4,29 +4,28 @@
  * counted by the observing banner and enforced with one switch; only admins
  * change it; HTTP Request egress is checked at call time against the stored
  * destination rows; "Preview impact" replays recent runs with unsaved rows
- * (never stored) and names where newly blocked content was going; and on
- * Postgres the routes answer 501.
+ * (never stored) and names where newly blocked content was going.
  */
 import crypto from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
-import Fastify from "fastify";
 import { afterEach, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
 import type { DestinationRulesStatus, GuardSimulationView, Workflow } from "@ai-orchestrator/shared";
 import { createApp } from "./app.js";
 import { parseConfig, type AppConfig } from "./config.js";
-import { SqliteStore } from "./db/database.js";
-import { registerGuardRoutes } from "./guard-routes.js";
-import { AuthService, type SafeUser } from "./services/auth-service.js";
+import type { Store } from "./db/store.js";
+import { openTestStore } from "./test-support/test-store.js";
+import { testSql } from "./test-support/test-sql.js";
+import { AuthService } from "./services/auth-service.js";
 import { GuardService } from "./services/guard-service.js";
 import { SecretService } from "./services/secret-service.js";
 
 interface TestContext {
   app: FastifyInstance;
-  store: SqliteStore;
+  store: Store;
   authService: AuthService;
   config: AppConfig;
   tempDir: string;
@@ -39,7 +38,7 @@ const CARD = "4111 1111 1111 1111";
 
 async function createTestContext(): Promise<TestContext> {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-dest-rules-"));
-  const store = await SqliteStore.create(path.join(tempDir, "orchestrator.db"));
+  const store = await openTestStore(path.join(tempDir, "orchestrator.db"));
   await store.ensureDefaultProject();
   const config = parseConfig({
     LOG_LEVEL: "warn",
@@ -293,29 +292,29 @@ describe("deployment destination rules", () => {
 
   it("the opt-in check reads profiles as JSON: reformatted or reordered documents are seen, look-alike text is not", async () => {
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-dest-optin-"));
-    const store = await SqliteStore.create(path.join(tempDir, "orchestrator.db"));
+    const store = await openTestStore(path.join(tempDir, "orchestrator.db"));
     try {
-      const raw = (store as unknown as { db: { prepare(sql: string): { run(...args: unknown[]): unknown } } }).db;
-      const write = (id: string, json: string) => {
-        raw.prepare(`INSERT INTO guard_profiles (id, name, description, built_in, latest_version, created_at, created_by, updated_at, updated_by) VALUES (?, ?, NULL, 0, 1, '2026-01-01', NULL, '2026-01-01', NULL)`).run(id, id);
-        raw.prepare(`INSERT INTO guard_profile_versions (profile_id, version, hash, document_json, note, created_at, created_by) VALUES (?, 1, ?, ?, NULL, '2026-01-01', NULL)`).run(id, `h-${id}`, json);
+      const raw = testSql(store);
+      const write = async (id: string, json: string) => {
+        await raw.run(`INSERT INTO guard_profiles (id, name, description, built_in, latest_version, created_at, created_by, updated_at, updated_by) VALUES (?, ?, NULL, ?, 1, '2026-01-01', NULL, '2026-01-01', NULL)`, id, id, 0);
+        await raw.run(`INSERT INTO guard_profile_versions (profile_id, version, hash, document_json, note, created_at, created_by) VALUES (?, 1, ?, ?, NULL, '2026-01-01', NULL)`, id, `h-${id}`, json);
       };
       // Look-alike text that is not a rule, an empty rule list and an egress action category: no opt-in.
-      write("lookalike", JSON.stringify({ id: "lookalike", description: '"destinations":{"rules":[{', destinations: { rules: [] }, actions: { egress: { action: "block" } } }, null, 2));
+      await write("lookalike", JSON.stringify({ id: "lookalike", description: '"destinations":{"rules":[{', destinations: { rules: [] }, actions: { egress: { action: "block" } } }, null, 2));
       expect(await store.anyGuardProfileUsesLabels()).toBe(false);
       // Pretty-printed, with a key that sorts before "rules": still seen.
-      write("pretty", JSON.stringify({ id: "pretty", destinations: { aardvark: true, rules: [{ allow: { maxTier: "private" }, action: "block" }] } }, null, 2));
+      await write("pretty", JSON.stringify({ id: "pretty", destinations: { aardvark: true, rules: [{ allow: { maxTier: "private" }, action: "block" }] } }, null, 2));
       expect(await store.anyGuardProfileUsesLabels()).toBe(true);
     } finally {
       await store.close();
       fs.rmSync(tempDir, { recursive: true, force: true });
     }
     const egressTemp = fs.mkdtempSync(path.join(os.tmpdir(), "ao-dest-optin-"));
-    const egressStore = await SqliteStore.create(path.join(egressTemp, "orchestrator.db"));
+    const egressStore = await openTestStore(path.join(egressTemp, "orchestrator.db"));
     try {
-      const raw = (egressStore as unknown as { db: { prepare(sql: string): { run(...args: unknown[]): unknown } } }).db;
-      raw.prepare(`INSERT INTO guard_profiles (id, name, description, built_in, latest_version, created_at, created_by, updated_at, updated_by) VALUES ('e', 'e', NULL, 0, 1, '2026-01-01', NULL, '2026-01-01', NULL)`).run();
-      raw.prepare(`INSERT INTO guard_profile_versions (profile_id, version, hash, document_json, note, created_at, created_by) VALUES ('e', 1, 'h', ?, NULL, '2026-01-01', NULL)`).run(
+      const raw = testSql(egressStore);
+      await raw.run(`INSERT INTO guard_profiles (id, name, description, built_in, latest_version, created_at, created_by, updated_at, updated_by) VALUES ('e', 'e', NULL, ?, 1, '2026-01-01', NULL, '2026-01-01', NULL)`, 0);
+      await raw.run(`INSERT INTO guard_profile_versions (profile_id, version, hash, document_json, note, created_at, created_by) VALUES ('e', 1, 'h', ?, NULL, '2026-01-01', NULL)`,
         JSON.stringify({ channels: { egress: { defaultAction: { action: "allow" }, actions: {} } }, id: "e" }, null, 1)
       );
       expect(await egressStore.anyGuardProfileUsesLabels()).toBe(true);
@@ -356,7 +355,7 @@ describe("deployment destination rules", () => {
 
   it("the rules profile comes after a run's own profiles, a candidate's too, and keeps the instance default", async () => {
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-dest-resolve-"));
-    const store = await SqliteStore.create(path.join(tempDir, "orchestrator.db"));
+    const store = await openTestStore(path.join(tempDir, "orchestrator.db"));
     try {
       const guard = new GuardService(store, new SecretService(store, MASTER_KEY), { autoApply: true });
       await guard.ensureBuiltIns();
@@ -374,42 +373,6 @@ describe("deployment destination rules", () => {
       // A rules profile without rules is not applied.
       await guard.setDestinationRules([], null);
       expect((await guard.resolveRun({ workflowId: "wf" })).stack.map((entry) => entry.profileId)).toEqual(["default"]);
-    } finally {
-      await store.close();
-      fs.rmSync(tempDir, { recursive: true, force: true });
-    }
-  });
-
-  it("on Postgres the destination rules routes answer 501", async () => {
-    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-dest-pg-"));
-    const store = await SqliteStore.create(path.join(tempDir, "orchestrator.db"));
-    try {
-      const secrets = new SecretService(store, MASTER_KEY);
-      const guard = new GuardService(store, secrets, { autoApply: false });
-      const app = Fastify();
-      const admin = { id: "u1", email: "admin@example.com", role: "admin" } as SafeUser;
-      registerGuardRoutes({
-        app,
-        store,
-        guard,
-        requireRole: async () => admin,
-        runAccess: { readableWorkflowIds: () => null } as never,
-        canAccessWorkflow: async () => true,
-        canInProject: async () => true,
-        audit: () => undefined,
-        destinationRulesAvailable: false
-      });
-      await app.ready();
-      for (const [method, url, payload] of [
-        ["GET", "/api/guard/destination-rules", undefined],
-        ["POST", "/api/guard/destination-rules/starter", undefined],
-        ["POST", "/api/guard/destination-rules/enforcement", { enforce: true }],
-        ["PUT", "/api/guard/destination-rules", { rules: [] }]
-      ] as const) {
-        const response = await app.inject({ method, url, ...(payload ? { payload } : {}) });
-        expect(response.statusCode, url).toBe(501);
-      }
-      await app.close();
     } finally {
       await store.close();
       fs.rmSync(tempDir, { recursive: true, force: true });

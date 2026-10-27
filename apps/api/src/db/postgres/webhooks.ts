@@ -1,13 +1,10 @@
 /**
  * Phase 13.1 — PostgresStore: Webhook replay keys and idempotency state.
- * Plain functions over a PgContext; PostgresStore delegates here. Every method is implemented;
- * UNIMPLEMENTED_METHODS is empty.
+ * Plain functions over a PgContext; PostgresStore delegates here. Every method is implemented.
  */
 import { type Store } from "../store.js";
 import { parseJsonSafe, toStr } from "./helpers.js";
 import type { PgContext } from "./context.js";
-
-export const UNIMPLEMENTED_METHODS: readonly (keyof Store)[] = [];
 
 export async function clearExpiredWebhookSecurityState(ctx: PgContext, nowIso = new Date().toISOString()): Promise<void> {
   await ctx.execute(`DELETE FROM webhook_replay_keys WHERE expires_at <= $1`, [nowIso]);

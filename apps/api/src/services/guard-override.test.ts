@@ -10,7 +10,8 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { createDefaultGuardProfile } from "@ai-orchestrator/guard-sdk";
-import { SqliteStore } from "../db/database.js";
+import type { Store } from "../db/store.js";
+import { openTestStore } from "../test-support/test-store.js";
 import { GuardNotFoundError, GuardService, GuardValidationError } from "./guard-service.js";
 import { SecretService } from "./secret-service.js";
 import { GuardSimulationSink, GuardSimulationVault } from "./guard-simulation-sink.js";
@@ -23,7 +24,7 @@ afterEach(() => {
 async function setup() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-guard-override-"));
   dirs.push(dir);
-  const store = await SqliteStore.create(path.join(dir, "db.sqlite"));
+  const store = await openTestStore(path.join(dir, "db.sqlite"));
   await store.ensureDefaultProject();
   const secrets = new SecretService(store, crypto.randomBytes(32).toString("base64"));
   const guard = new GuardService(store, secrets, { autoApply: true });

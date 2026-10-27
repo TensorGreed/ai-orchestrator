@@ -12,15 +12,17 @@ import type { FastifyInstance } from "fastify";
 import type { Workflow } from "@ai-orchestrator/shared";
 import { createApp } from "./app.js";
 import { parseConfig, type AppConfig } from "./config.js";
-import { SqliteStore, type McpToolCallRecord } from "./db/database.js";
+import { type McpToolCallRecord } from "./db/database.js";
+import type { Store } from "./db/store.js";
 import { AuthService } from "./services/auth-service.js";
 import { extractMcpToolCalls, rollupMcpToolCalls, splitEvenly } from "./services/mcp-tool-telemetry.js";
 import { SecretService } from "./services/secret-service.js";
 import { UsageService } from "./services/usage-service.js";
+import { openTestStore } from "./test-support/test-store.js";
 
 interface TestContext {
   app: FastifyInstance;
-  store: SqliteStore;
+  store: Store;
   authService: AuthService;
   secretService: SecretService;
   config: AppConfig;
@@ -31,7 +33,7 @@ const contexts: TestContext[] = [];
 
 async function createTestContext(): Promise<TestContext> {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-mcp-telemetry-"));
-  const store = await SqliteStore.create(path.join(tempDir, "orchestrator.db"));
+  const store = await openTestStore(path.join(tempDir, "orchestrator.db"));
   await store.ensureDefaultProject();
   const config = parseConfig({
     LOG_LEVEL: "warn",
@@ -329,7 +331,7 @@ describe("MCP tool telemetry: end to end", () => {
 });
 
 describe("MCP tool telemetry: extraction", () => {
-  const price = new UsageService({} as SqliteStore);
+  const price = new UsageService({} as Store);
   const priceTurn = (providerId: string, model: string, i: number, o: number, c: number) =>
     price.estimateCostUsd(providerId, model, i, o, c);
   const workflow = {

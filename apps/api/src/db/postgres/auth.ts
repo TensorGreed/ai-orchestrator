@@ -1,7 +1,6 @@
 /**
  * Phase 13.1 — PostgresStore: Users, RBAC, API keys, MFA and SSO identities.
- * Plain functions over a PgContext; PostgresStore delegates here. Every method is implemented, so
- * UNIMPLEMENTED_METHODS is empty.
+ * Plain functions over a PgContext; PostgresStore delegates here. Every method is implemented.
  *
  * Postgres keeps foreign keys from sessions, api_keys, mfa_secrets, sso_identities and user_project_roles to users
  * (and projects). A write whose user or project was deleted meanwhile throws StoreReferenceMissingError (409), not the
@@ -11,8 +10,6 @@ import { type Store } from "../store.js";
 import { toNum, toStr } from "./helpers.js";
 import type { PgContext } from "./context.js";
 import { withReferenceCheck } from "../store-errors.js";
-
-export const UNIMPLEMENTED_METHODS: readonly (keyof Store)[] = [];
 
 export async function countUsers(ctx: PgContext): Promise<number> {
   const row = await ctx.queryOne<{ count: string }>(`SELECT COUNT(*) as count FROM users`);

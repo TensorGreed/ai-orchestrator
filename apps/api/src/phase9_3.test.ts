@@ -2,20 +2,21 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { SqliteStore } from "./db/database.js";
+import type { Store } from "./db/store.js";
 import {
   KnowledgeBaseVectorStoreAdapter,
   TokenEmbeddingAdapter,
   reciprocalRankFusion
 } from "@ai-orchestrator/workflow-engine";
+import { openTestStore } from "./test-support/test-store.js";
 
 describe("Phase 9.3 — hybrid search + rerank", () => {
   let tempDir: string;
-  let store: SqliteStore;
+  let store: Store;
 
   beforeEach(async () => {
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-phase9-3-"));
-    store = await SqliteStore.create(path.join(tempDir, "orchestrator.db"));
+    store = await openTestStore(path.join(tempDir, "orchestrator.db"));
     await store.ensureDefaultProject();
   });
 

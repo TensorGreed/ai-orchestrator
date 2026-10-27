@@ -20,8 +20,6 @@ import type {
 } from "../database.js";
 import type { PgContext } from "./context.js";
 
-export const UNIMPLEMENTED_METHODS: readonly (keyof Store)[] = [];
-
 type Row = Record<string, unknown>;
 type Queryable = Pick<PoolClient, "query">;
 
@@ -435,11 +433,11 @@ export async function listEnabledReleaseGateWorkflowIds(ctx: PgContext): Promise
 
 // ---- Release approval requests
 
-/** Each expired request is closed (and returned) by one caller only: the rows are locked, then closed by id. */
+/** Each expired request is closed (and returned) by one caller only: the rows are locked (skipping rows another sweep or a decision holds; the next sweep finds them), then closed by id. */
 export async function timeOutExpiredReleaseApprovalRequests(ctx: PgContext, nowIso: string): Promise<ReleaseApprovalRequestRecord[]> {
   return ctx.withTransaction(async (client) => {
     const expired = (
-      await client.query(`SELECT * FROM release_approval_requests WHERE status = 'pending' AND expires_at IS NOT NULL AND expires_at <= $1 ORDER BY id FOR UPDATE`, [nowIso])
+      await client.query(`SELECT * FROM release_approval_requests WHERE status = 'pending' AND expires_at IS NOT NULL AND expires_at <= $1 ORDER BY id FOR UPDATE SKIP LOCKED`, [nowIso])
     ).rows.map((row) => mapReleaseApprovalRequestRow(row as Row));
     if (expired.length === 0) return [];
     await client.query(
@@ -581,7 +579,7 @@ export async function listGateCaseRequests(
 export async function timeOutExpiredGateCaseRequests(ctx: PgContext, nowIso: string): Promise<GateCaseRequestRecord[]> {
   return ctx.withTransaction(async (client) => {
     const expired = (
-      await client.query(`SELECT * FROM gate_case_requests WHERE status = 'pending' AND expires_at IS NOT NULL AND expires_at <= $1 ORDER BY id FOR UPDATE`, [nowIso])
+      await client.query(`SELECT * FROM gate_case_requests WHERE status = 'pending' AND expires_at IS NOT NULL AND expires_at <= $1 ORDER BY id FOR UPDATE SKIP LOCKED`, [nowIso])
     ).rows.map((row) => mapGateCaseRequestRow(row as Row));
     if (expired.length === 0) return [];
     await client.query(

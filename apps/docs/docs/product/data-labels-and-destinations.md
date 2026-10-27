@@ -243,5 +243,4 @@ Profile simulations ("Simulate on recent traffic" in the profile editor) count d
 
 ### Limits
 
-- Destination rows and the deployment's destination rules are stored in SQLite. On Postgres the destination, destination rules and preview routes answer 501 in this release.
 - A redirect chain's approved data classes are the ones every hop is approved for, so a chain can be stopped more often than a single hop would be. It never lets more through.

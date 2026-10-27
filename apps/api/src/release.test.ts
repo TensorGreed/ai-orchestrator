@@ -17,7 +17,9 @@ import type { FastifyInstance } from "fastify";
 import type { EvalRunView, ReleaseApprovalRequestView, ReleaseGateView, Workflow, WorkflowNode, WorkflowRelease } from "@ai-orchestrator/shared";
 import { createApp } from "./app.js";
 import { parseConfig, type AppConfig } from "./config.js";
-import { SqliteStore } from "./db/database.js";
+import type { Store } from "./db/store.js";
+import { openTestStore } from "./test-support/test-store.js";
+import { testSql } from "./test-support/test-sql.js";
 import { MIGRATIONS } from "./db/migrations.js";
 import { AuthService } from "./services/auth-service.js";
 import { SchedulerService } from "./services/scheduler-service.js";
@@ -30,7 +32,7 @@ const SAMPLES_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "
 
 interface TestContext {
   app: FastifyInstance;
-  store: SqliteStore;
+  store: Store;
   authService: AuthService;
   config: AppConfig;
   tempDir: string;
@@ -41,7 +43,7 @@ const contexts: TestContext[] = [];
 
 async function createTestContext(options: { overrides?: Record<string, string>; scheduler?: boolean } = {}): Promise<TestContext> {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-release-"));
-  const store = await SqliteStore.create(path.join(tempDir, "orchestrator.db"));
+  const store = await openTestStore(path.join(tempDir, "orchestrator.db"));
   await store.ensureDefaultProject();
   const config = parseConfig({
     LOG_LEVEL: "warn",
@@ -219,13 +221,16 @@ describe("migration 33", () => {
       expect(migration.down).toContain(`DROP TABLE IF EXISTS ${table}`);
     }
     const context = await createTestContext();
-    const db = (context.store as unknown as { db: { prepare: (sql: string) => { all: () => Array<{ name: string }> } } }).db;
-    const columns = (table: string) => db.prepare(`PRAGMA table_info(${table})`).all().map((row) => row.name);
-    expect(columns("workflows")).toContain("published_version");
-    expect(columns("workflow_versions")).toContain("pinned");
-    expect(columns("release_gates")).toEqual(expect.arrayContaining(["enforced", "policy_json", "require_approval", "approvers_json"]));
-    expect(columns("workflow_releases")).toEqual(expect.arrayContaining(["version", "workflow_hash", "verdict", "reason", "approval_json"]));
-    expect(columns("release_approval_requests")).toEqual(expect.arrayContaining(["version", "workflow_hash", "spec_json", "status", "release_id"]));
+    const sql = testSql(context.store);
+    const columns = async (table: string): Promise<string[]> =>
+      sql.kind === "sqlite"
+        ? (await sql.all<{ name: string }>(`PRAGMA table_info(${table})`)).map((row) => row.name)
+        : (await sql.all<{ column_name: string }>("SELECT column_name FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = ?", table)).map((row) => row.column_name);
+    expect(await columns("workflows")).toContain("published_version");
+    expect(await columns("workflow_versions")).toContain("pinned");
+    expect(await columns("release_gates")).toEqual(expect.arrayContaining(["enforced", "policy_json", "require_approval", "approvers_json"]));
+    expect(await columns("workflow_releases")).toEqual(expect.arrayContaining(["version", "workflow_hash", "verdict", "reason", "approval_json"]));
+    expect(await columns("release_approval_requests")).toEqual(expect.arrayContaining(["version", "workflow_hash", "spec_json", "status", "release_id"]));
   });
 });
 
@@ -393,8 +398,7 @@ describe("the release gate", () => {
     const job = async (extra: { options?: Record<string, unknown>; candidate?: Record<string, unknown> } = {}) => {
       const id = await seedJob(context, { workflowId: "wf-ovr", datasetIds: ["set-wf-ovr"], version, hash, statuses: ["pass", "pass", "pass"], ...(extra.options ? { options: extra.options } : {}) });
       if (extra.candidate) {
-        const db = (context.store as unknown as { db: { prepare: (sql: string) => { run: (...args: unknown[]) => void } } }).db;
-        db.prepare("UPDATE eval_runs SET candidate_json = ? WHERE id = ?").run(JSON.stringify({ kind: "version", version, workflowHash: hash, ...extra.candidate }), id);
+        await testSql(context.store).run("UPDATE eval_runs SET candidate_json = ? WHERE id = ?", JSON.stringify({ kind: "version", version, workflowHash: hash, ...extra.candidate }), id);
       }
       return id;
     };
@@ -791,7 +795,6 @@ describe("the MCP gateway", () => {
 // Review fixes (H1-H3, M1-M8, L1-L7, contract addendum)
 // ---------------------------------------------------------------------------
 
-const rawDb = (context: TestContext) => (context.store as unknown as { db: { prepare: (sql: string) => { run: (...args: unknown[]) => void } } }).db;
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** Saves the draft and snapshots it as `actor`'s version, as the save route does. */
@@ -930,11 +933,11 @@ describe("what counts as passing is the gate's call", () => {
     const v2 = await save(context, hookWorkflow("wf-elig", "v2"));
     const hash = await versionHash(context, builder.cookie, "wf-elig", v2);
     const job = await seedJob(context, { workflowId: "wf-elig", datasetIds: ["set-wf-elig"], version: v2, hash, statuses: ["pass", "pass", "pass"] });
-    rawDb(context).prepare("UPDATE eval_runs SET candidate_json = ? WHERE id = ?").run(JSON.stringify({ kind: "version", version: v2, workflowHash: hash, releaseEligible: false, releaseIneligibleReasons: ["a guard profile override"] }), job);
+    await testSql(context.store).run("UPDATE eval_runs SET candidate_json = ? WHERE id = ?", JSON.stringify({ kind: "version", version: v2, workflowHash: hash, releaseEligible: false, releaseIneligibleReasons: ["a guard profile override"] }), job);
     const refused = await call(context, "POST", "/api/workflows/wf-elig/publish", builder.cookie, { version: v2, replayRunId: job });
     expect(refused.statusCode).toBe(409);
     expect(refused.json<{ reasons: string[] }>().reasons.join()).toMatch(/not eligible to prove a release \(a guard profile override\)/);
-    rawDb(context).prepare("UPDATE eval_runs SET candidate_json = ? WHERE id = ?").run(JSON.stringify({ kind: "version", version: v2, workflowHash: hash, releaseEligible: true, releaseIneligibleReasons: [] }), job);
+    await testSql(context.store).run("UPDATE eval_runs SET candidate_json = ? WHERE id = ?", JSON.stringify({ kind: "version", version: v2, workflowHash: hash, releaseEligible: true, releaseIneligibleReasons: [] }), job);
     expect((await call(context, "POST", "/api/workflows/wf-elig/publish", builder.cookie, { version: v2, replayRunId: job })).statusCode).toBe(200);
   });
 
@@ -947,14 +950,14 @@ describe("what counts as passing is the gate's call", () => {
     const recording = await call(context, "POST", "/api/replay/recordings", builder.cookie, { executionId: run.json<{ executionId: string }>().executionId, name: "Old golden run" });
     expect(recording.statusCode, recording.body).toBe(201);
     const recordingId = recording.json<{ recording: { id: string } }>().recording.id;
-    rawDb(context).prepare("UPDATE replay_recordings SET created_at = ? WHERE id = ?").run(new Date(Date.now() - 40 * 86_400_000).toISOString(), recordingId);
+    await testSql(context.store).run("UPDATE replay_recordings SET created_at = ? WHERE id = ?", new Date(Date.now() - 40 * 86_400_000).toISOString(), recordingId);
     await save(context, hookWorkflow("wf-m3", "v1"));
     await enableGate(context, builder.cookie, "wf-m3", { policy: { minCases: 1 } });
     const v2 = await save(context, hookWorkflow("wf-m3", "v2"));
     const hash = await versionHash(context, builder.cookie, "wf-m3", v2);
     const aged = async (compare?: string) => {
       const id = await seedJob(context, { workflowId: "wf-m3", datasetIds: ["set-wf-m3"], version: v2, hash, statuses: ["pass"], ...(compare ? { options: { compare } } : {}) });
-      rawDb(context).prepare("UPDATE eval_results SET recording_id = ? WHERE run_id = ?").run(recordingId, id);
+      await testSql(context.store).run("UPDATE eval_results SET recording_id = ? WHERE run_id = ?", recordingId, id);
       return id;
     };
     const recordingJob = await aged();
@@ -1250,7 +1253,7 @@ describe("API-key callers and retries (M7)", () => {
     // A production run records its version; retrying it (once it failed) runs that version again.
     const production = viaKey.json<{ executionId: string }>().executionId;
     expect(await context.store.getExecutionRelease(production)).toEqual({ channel: "production", version: v1 });
-    rawDb(context).prepare("UPDATE execution_history SET status = 'error' WHERE id = ?").run(production);
+    await testSql(context.store).run("UPDATE execution_history SET status = 'error' WHERE id = ?", production);
     const retried = await call(context, "POST", `/api/executions/${production}/retry`, builder.cookie, {});
     expect(retried.statusCode, retried.body).toBe(200);
     expect(JSON.stringify(retried.json())).toContain("published");
@@ -1276,7 +1279,7 @@ describe("release requests: expiry and duplicates (L1, L2)", () => {
     const pending = (await call(context, "GET", "/api/approvals?status=pending", lead.cookie)).json<{ items: ReleaseApprovalRequestView[] }>().items;
     expect(pending.filter((entry) => entry.kind === "release").map((entry) => entry.requestReason).sort()).toEqual(["first reason", "second reason"]);
 
-    rawDb(context).prepare("UPDATE release_approval_requests SET expires_at = ? WHERE id = ?").run(new Date(Date.now() - 60_000).toISOString(), a);
+    await testSql(context.store).run("UPDATE release_approval_requests SET expires_at = ? WHERE id = ?", new Date(Date.now() - 60_000).toISOString(), a);
     const afterExpiry = (await call(context, "GET", "/api/approvals?status=pending", lead.cookie)).json<{ items: ReleaseApprovalRequestView[] }>().items;
     expect(afterExpiry.map((entry) => entry.id)).toEqual([b]);
     const decided = (await call(context, "GET", "/api/approvals?status=decided", lead.cookie)).json<{ items: ReleaseApprovalRequestView[] }>().items;
@@ -1486,7 +1489,7 @@ describe("deactivation (L9, N3)", () => {
     await enableGate(context, builder.cookie, "wf-broken");
     expect((await call(context, "POST", "/api/workflows/wf-broken/deactivate", builder.cookie, {})).statusCode).toBe(200);
     // The published version can no longer be read back as a workflow.
-    rawDb(context).prepare("UPDATE workflow_versions SET workflow_json = ? WHERE workflow_id = ?").run("{not json", "wf-broken");
+    await testSql(context.store).run("UPDATE workflow_versions SET workflow_json = ? WHERE workflow_id = ?", "{not json", "wf-broken");
 
     const unmatched = await context.app.inject({ method: "POST", url: "/webhook/no-such-path", payload: {} });
     expect(unmatched.statusCode, unmatched.body).toBe(404);
@@ -1517,7 +1520,7 @@ describe("API keys and retries (N4, N5)", () => {
 
     // A production run of version 1, retried after version 3 is published, runs version 3.
     const failed = (await run("")).json<{ executionId: string }>().executionId;
-    rawDb(context).prepare("UPDATE execution_history SET status = 'error' WHERE id = ?").run(failed);
+    await testSql(context.store).run("UPDATE execution_history SET status = 'error' WHERE id = ?", failed);
     const v3 = await save(context, hookWorkflow("wf-n4", "three"));
     expect((await call(context, "POST", "/api/workflows/wf-n4/publish", builder.cookie, { version: v3 })).statusCode).toBe(200);
     const retried = await call(context, "POST", `/api/executions/${failed}/retry`, builder.cookie, {});
@@ -1546,13 +1549,13 @@ describe("execute channels and fail-closed retries", () => {
     expect(await context.store.getExecutionRelease(editorId)).toEqual({ channel: "draft", version: null });
 
     // A recorded editor run retries the draft.
-    rawDb(context).prepare("UPDATE execution_history SET status = 'error' WHERE id = ?").run(editorId);
+    await testSql(context.store).run("UPDATE execution_history SET status = 'error' WHERE id = ?", editorId);
     const draftRetry = await call(context, "POST", `/api/executions/${editorId}/retry`, builder.cookie, {});
     expect(draftRetry.statusCode, draftRetry.body).toBe(200);
     expect(JSON.stringify(draftRetry.json())).toContain("draft");
 
     // The same run with its channel lost retries as production on the gated workflow: the published version.
-    rawDb(context).prepare("UPDATE execution_history SET release_channel = NULL, release_version = NULL WHERE id = ?").run(editorId);
+    await testSql(context.store).run("UPDATE execution_history SET release_channel = NULL, release_version = NULL WHERE id = ?", editorId);
     const unknownRetry = await call(context, "POST", `/api/executions/${editorId}/retry`, builder.cookie, {});
     expect(unknownRetry.statusCode, unknownRetry.body).toBe(200);
     expect(JSON.stringify(unknownRetry.json())).toContain("published");
@@ -1563,7 +1566,7 @@ describe("execute channels and fail-closed retries", () => {
     const plain = await save(context, hookWorkflow("wf-fc-plain", "plain-draft"));
     expect(plain).toBeGreaterThan(0);
     const plainRun = (await call(context, "POST", "/api/workflows/wf-fc-plain/execute", builder.cookie, {})).json<{ executionId: string }>().executionId;
-    rawDb(context).prepare("UPDATE execution_history SET status = 'error', release_channel = NULL WHERE id = ?").run(plainRun);
+    await testSql(context.store).run("UPDATE execution_history SET status = 'error', release_channel = NULL WHERE id = ?", plainRun);
     const plainRetry = await call(context, "POST", `/api/executions/${plainRun}/retry`, builder.cookie, {});
     expect(plainRetry.statusCode, plainRetry.body).toBe(200);
     expect(JSON.stringify(plainRetry.json())).toContain("plain-draft");
@@ -1660,7 +1663,7 @@ describe("repeats and old jobs (M1, L2, L3)", () => {
     expect((await preview()).reasons).toEqual([]);
     await context.store.setEvalRunSetSnapshot(job, {});
     expect((await preview()).reasons.join()).toMatch(/changed after replay job/);
-    (context.store as unknown as { exec: (sql: string, params: unknown[]) => void }).exec("UPDATE eval_runs SET set_snapshot_json = NULL WHERE id = ?", [job]);
+    await testSql(context.store).run("UPDATE eval_runs SET set_snapshot_json = NULL WHERE id = ?", job);
     expect((await preview()).reasons.join()).toMatch(/queued before release gates existed/);
   });
 });

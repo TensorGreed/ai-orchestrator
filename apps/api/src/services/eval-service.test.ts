@@ -8,16 +8,18 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { ReplayRunResponse, RunFacts, Workflow } from "@ai-orchestrator/shared";
-import { SqliteStore, type ReplayRecordingRecord } from "../db/database.js";
+import { type ReplayRecordingRecord } from "../db/database.js";
+import type { Store } from "../db/store.js";
 import { EVAL_RUN_STALE_MS, EvalService, EvalSlots, type EvalReplayDeps, type EvalWorkflowExecutor } from "./eval-service.js";
 import { GuardSimulationVault } from "./guard-simulation-sink.js";
+import { openTestStore } from "../test-support/test-store.js";
 
 let tempDir: string;
-let store: SqliteStore;
+let store: Store;
 
 beforeEach(async () => {
   tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-eval-runner-"));
-  store = await SqliteStore.create(path.join(tempDir, "orchestrator.db"));
+  store = await openTestStore(path.join(tempDir, "orchestrator.db"));
   await store.ensureDefaultProject();
   await store.upsertWorkflow({ id: "wf", name: "WF", schemaVersion: "1.0.0", workflowVersion: 1, nodes: [], edges: [] } as Workflow);
 });

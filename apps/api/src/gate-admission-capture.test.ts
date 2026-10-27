@@ -15,7 +15,9 @@ import type { FastifyInstance } from "fastify";
 import type { ReleaseGateCasesView, ReleaseGateView, ReleasePublishPreview, ReplayCaptureView, ReplayFindSubjectDeleteResult, ReplayFindSubjectResult, Workflow } from "@ai-orchestrator/shared";
 import { createApp } from "./app.js";
 import { parseConfig, type AppConfig } from "./config.js";
-import { SqliteStore } from "./db/database.js";
+import type { Store } from "./db/store.js";
+import { openTestStore } from "./test-support/test-store.js";
+import { testSql } from "./test-support/test-sql.js";
 import { AuthService } from "./services/auth-service.js";
 import { SecretService } from "./services/secret-service.js";
 import { goldenSetSnapshots } from "./services/release-snapshot.js";
@@ -23,7 +25,7 @@ import { WorkflowVersionService } from "./services/workflow-version-service.js";
 
 interface TestContext {
   app: FastifyInstance;
-  store: SqliteStore;
+  store: Store;
   authService: AuthService;
   config: AppConfig;
   tempDir: string;
@@ -34,7 +36,7 @@ const EMAIL = "jane.doe@example.com";
 
 async function createTestContext(): Promise<TestContext> {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-admission-capture-"));
-  const store = await SqliteStore.create(path.join(tempDir, "orchestrator.db"));
+  const store = await openTestStore(path.join(tempDir, "orchestrator.db"));
   await store.ensureDefaultProject();
   const config = parseConfig({
     LOG_LEVEL: "warn",
@@ -146,16 +148,15 @@ async function seedJob(context: TestContext, input: { workflowId: string; datase
 }
 
 /** Fixtures of any golden set that point at a captured candidate: must always be none. */
-function fixturesOnCandidates(context: TestContext): number {
-  const db = (context.store as unknown as { db: { prepare: (sql: string) => { get: () => { count: number } } } }).db;
-  return Number(
-    db.prepare("SELECT COUNT(*) AS count FROM eval_fixtures f JOIN replay_recordings r ON r.id = f.recording_id WHERE r.status = 'candidate'").get().count
+async function fixturesOnCandidates(context: TestContext): Promise<number> {
+  const row = await testSql(context.store).get<{ n: unknown }>(
+    "SELECT COUNT(*) AS n FROM eval_fixtures f JOIN replay_recordings r ON r.id = f.recording_id WHERE r.status = 'candidate'"
   );
+  return Number(row!.n);
 }
 
-function rawRecording(context: TestContext, id: string): string {
-  const db = (context.store as unknown as { db: { prepare: (sql: string) => { get: (...args: unknown[]) => unknown } } }).db;
-  return JSON.stringify(db.prepare("SELECT * FROM replay_recordings WHERE id = ?").get(id));
+async function rawRecording(context: TestContext, id: string): Promise<string> {
+  return JSON.stringify(await testSql(context.store).get("SELECT * FROM replay_recordings WHERE id = ?", id));
 }
 
 /**
@@ -208,7 +209,7 @@ describe("captured runs on an enforced release gate", () => {
     // The ordinary add path refuses the candidate: no case may replay it while promote can still rewrite it.
     const added = await call(context, "POST", `/api/eval/datasets/${setId}/recordings`, builder.cookie, { recordingId: capture.id });
     expect(added.statusCode, added.body).toBe(409);
-    expect(fixturesOnCandidates(context)).toBe(0);
+    expect(await fixturesOnCandidates(context)).toBe(0);
 
     const promoted = await call(context, "POST", `/api/replay/captures/${capture.id}/promote`, builder.cookie, { datasetId: setId });
     expect(promoted.statusCode, promoted.body).toBe(200);
@@ -216,7 +217,7 @@ describe("captured runs on an enforced release gate", () => {
     expect(fixtureId).toBeTruthy();
     expect(await context.store.getEvalFixture(fixtureId)).toMatchObject({ recordingId: capture.id, required: false });
     expect(await context.store.getReplayRecordingSummary(capture.id)).toMatchObject({ status: "golden" });
-    expect(fixturesOnCandidates(context)).toBe(0);
+    expect(await fixturesOnCandidates(context)).toBe(0);
 
     // Pending on the enforced gate: it does not count, and the earlier job is not stale.
     const view = await casesOf(context, builder.cookie, "wf-cap-pending");
@@ -227,11 +228,11 @@ describe("captured runs on an enforced release gate", () => {
     expect(judged.reasons.join(" ")).not.toMatch(/changed after replay job/);
 
     // Promote only rewrites candidates: a second promote of the now-golden run is refused and changes nothing.
-    const before = rawRecording(context, capture.id);
+    const before = await rawRecording(context, capture.id);
     const again = await call(context, "POST", `/api/replay/captures/${capture.id}/promote`, builder.cookie, { datasetId: setId });
     expect(again.statusCode).toBe(404);
     expect(again.json<{ error: string }>().error).toBe("Captured run not found");
-    expect(rawRecording(context, capture.id)).toBe(before);
+    expect(await rawRecording(context, capture.id)).toBe(before);
     expect((await context.store.listEvalFixtures(setId)).filter((fixture) => fixture.recordingId === capture.id)).toHaveLength(1);
   }, 60_000);
 

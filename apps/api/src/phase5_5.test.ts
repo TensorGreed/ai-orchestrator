@@ -8,14 +8,15 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
 import type { AppConfig } from "./config";
 import { createApp } from "./app";
-import { SqliteStore } from "./db/database";
+import type { Store } from "./db/store.js";
 import { AuthService } from "./services/auth-service";
 import { SecretService } from "./services/secret-service";
 import { LogStreamingService } from "./services/log-streaming-service";
+import { openTestStore } from "./test-support/test-store.js";
 
 interface TestContext {
   app: FastifyInstance;
-  store: SqliteStore;
+  store: Store;
   authService: AuthService;
   secretService: SecretService;
   config: AppConfig;
@@ -195,7 +196,7 @@ function makeConfig(overrides: Partial<AppConfig> = {}): AppConfig {
 async function createTestContext(overrides: Partial<AppConfig> = {}): Promise<TestContext> {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-phase5-5-"));
   const dbPath = path.join(tempDir, "orchestrator.db");
-  const store = await SqliteStore.create(dbPath);
+  const store = await openTestStore(dbPath);
   const config = makeConfig(overrides);
   await store.ensureDefaultProject();
   const secretService = new SecretService(store, config.SECRET_MASTER_KEY_BASE64);
@@ -617,7 +618,7 @@ describe("Phase 5.5 — LogStreamingService unit behavior", () => {
     ).rejects.toThrow(/url/);
   });
 
-  it("keeps secrets encrypted at rest on the SqliteStore row", async () => {
+  it("keeps secrets encrypted at rest on the Store row", async () => {
     const ctx = await createTestContext();
     const service = new LogStreamingService(ctx.store, ctx.config.SECRET_MASTER_KEY_BASE64);
     const created = await service.createDestination({

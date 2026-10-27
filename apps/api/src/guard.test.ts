@@ -16,7 +16,9 @@ import type { GuardEventView, GuardProfileSummary, GuardResolutionView, Workflow
 import { createDefaultGuardProfile } from "@ai-orchestrator/guard-sdk";
 import { createApp } from "./app.js";
 import { parseConfig, type AppConfig } from "./config.js";
-import { SqliteStore } from "./db/database.js";
+import type { Store } from "./db/store.js";
+import { testSql } from "./test-support/test-sql.js";
+import { openTestStore, testStoreKind } from "./test-support/test-store.js";
 import { MIGRATIONS } from "./db/migrations.js";
 import { contiguousMigrationVersions } from "./db/migration-versions.test-helper.js";
 import { AuthService } from "./services/auth-service.js";
@@ -25,7 +27,7 @@ import { SecretService } from "./services/secret-service.js";
 
 interface TestContext {
   app: FastifyInstance;
-  store: SqliteStore;
+  store: Store;
   authService: AuthService;
   secretService: SecretService;
   config: AppConfig;
@@ -40,7 +42,7 @@ const EMAIL = "maria.gonzalez@example.org";
 async function createTestContext(overrides: Record<string, string> = {}): Promise<TestContext> {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-guard-"));
   const dbPath = path.join(tempDir, "orchestrator.db");
-  const store = await SqliteStore.create(dbPath);
+  const store = await openTestStore(dbPath);
   await store.ensureDefaultProject();
   const config = parseConfig({
     LOG_LEVEL: "info",
@@ -173,7 +175,7 @@ describe("migration 28", () => {
     expect(eventsDdl).not.toMatch(/\b(content|raw|value|input|payload)\b/);
   });
 
-  it("creates the SQLite tables, and opening an existing database again keeps its rows", async () => {
+  it("creates the guard tables, and opening an existing database again keeps its rows", async () => {
     const context = await createTestContext();
     const tables = ["guard_profiles", "guard_profile_versions", "guard_bindings", "guard_events", "guard_token_vault"];
     const admin = await login(context, "admin");
@@ -182,11 +184,19 @@ describe("migration 28", () => {
     await context.app.close();
     await context.store.close();
 
-    const copy = path.join(context.tempDir, "copy.db");
-    fs.copyFileSync(context.dbPath, copy);
-    const reopened = await SqliteStore.create(copy);
+    // SQLite: reopen a copy of the file. Postgres: the same database again (a file copy is a different database).
+    let target = context.dbPath;
+    if (testStoreKind() === "sqlite") {
+      target = path.join(context.tempDir, "copy.db");
+      fs.copyFileSync(context.dbPath, target);
+    }
+    const reopened = await openTestStore(target);
+    const sql = testSql(reopened);
     for (const table of tables) {
-      expect((reopened as unknown as { queryAll: (sql: string) => unknown[] }).queryAll(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = '${table}'`)).toHaveLength(1);
+      const found = sql.kind === "sqlite"
+        ? await sql.all(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?`, table)
+        : await sql.all(`SELECT table_name AS name FROM information_schema.tables WHERE table_schema = current_schema() AND table_name = ?`, table);
+      expect(found).toHaveLength(1);
     }
     expect((await reopened.getGuardProfile("kept"))?.latestVersion).toBe(1);
     await reopened.close();
@@ -370,7 +380,7 @@ describe("guard events and the token vault", () => {
     const stats = await call(context, "GET", "/api/guard/stats?workflowId=wf-events", admin.cookie);
     expect(stats.json<{ stats: { verdicts: Array<{ key: string; count: number }> } }>().stats.verdicts).toEqual([{ key: "redact", count: 1 }]);
     const auditLogs = JSON.stringify(await context.store.listAuditLogs({} as never));
-    const rows = JSON.stringify((context.store as unknown as { queryAll: (sql: string) => unknown[] }).queryAll("SELECT * FROM guard_events"));
+    const rows = JSON.stringify(await testSql(context.store).all("SELECT * FROM guard_events"));
     for (const haystack of [JSON.stringify(events), listed.body, stats.body, auditLogs, rows, written.join("")]) {
       expect(haystack).not.toContain(SECRET);
       expect(haystack).not.toContain(EMAIL);
@@ -395,7 +405,7 @@ describe("guard events and the token vault", () => {
     const second = (await call(context, "POST", "/api/workflows/wf-vault/execute", builder.cookie, { user_prompt: `Email ${EMAIL}` })).json<RunResult>();
     expect(String(second.nodeResults.find((entry) => entry.nodeId === "guard")!.output!.user_prompt)).toContain(token!);
 
-    const rows = (context.store as unknown as { queryAll: (sql: string) => Array<Record<string, string>> }).queryAll("SELECT * FROM guard_token_vault");
+    const rows = (await testSql(context.store).all<Record<string, string>>("SELECT * FROM guard_token_vault"));
     expect(rows).toHaveLength(1);
     expect(JSON.stringify(rows)).not.toContain(EMAIL);
     expect(rows[0]!.value_sealed.startsWith("v1.")).toBe(true);

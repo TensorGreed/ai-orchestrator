@@ -2,19 +2,20 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import Database from "better-sqlite3";
-import { SqliteStore } from "./db/database.js";
+import type { Store } from "./db/store.js";
+import { openTestStore } from "./test-support/test-store.js";
+import { testSql } from "./test-support/test-sql.js";
 import { AuditService } from "./services/audit-service.js";
 import { AuditExportService } from "./services/audit-export-service.js";
 
 describe("Phase 8.4 — audit hash chain + export", () => {
   let tempDir: string;
-  let store: SqliteStore;
+  let store: Store;
   let audit: AuditService;
 
   beforeEach(async () => {
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-phase8-4-"));
-    store = await SqliteStore.create(path.join(tempDir, "orchestrator.db"));
+    store = await openTestStore(path.join(tempDir, "orchestrator.db"));
     audit = new AuditService(store, { enabled: true });
   });
 
@@ -44,16 +45,13 @@ describe("Phase 8.4 — audit hash chain + export", () => {
       await audit.record({ category: "auth", eventType: "login", action: "auth", outcome: "success", actor: { email: "alice@example.com" } });
       await audit.record({ category: "auth", eventType: "login", action: "auth", outcome: "success", actor: { email: "bob@example.com" } });
 
-      // Tamper directly through a parallel better-sqlite3 connection so we
-      // mimic an attacker with DB write access — exactly the threat model
-      // the chain is meant to defend against.
+      // Tamper with the rows directly (not through the store) to mimic an attacker with
+      // DB write access — exactly the threat model the chain is meant to defend against.
       const dbPath = path.join(tempDir, "orchestrator.db");
+      await testSql(store).run(`UPDATE audit_logs SET actor_email = 'eve@evil.example.com' WHERE actor_email = 'bob@example.com'`);
       await store.close();
-      const tamper = new Database(dbPath);
-      tamper.exec(`UPDATE audit_logs SET actor_email = 'eve@evil.example.com' WHERE actor_email = 'bob@example.com'`);
-      tamper.close();
 
-      const reopened = await SqliteStore.create(dbPath);
+      const reopened = await openTestStore(dbPath);
       const result = await reopened.verifyAuditChain();
       expect(result.ok).toBe(false);
       expect(result.firstBrokenAt).toBeDefined();

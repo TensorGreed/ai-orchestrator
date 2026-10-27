@@ -54,7 +54,13 @@ interface ActiveTrigger {
   workflowId: string;
   nodeId: string;
   type: ManagedTriggerType;
+  /** The node it was built from, so a sync can tell a changed trigger. */
+  signature: string;
   dispose: () => void | Promise<void>;
+}
+
+function triggerSignature(node: WorkflowNode): string {
+  return JSON.stringify({ type: node.type, config: node.config ?? null });
 }
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -72,7 +78,8 @@ function isActive(node: WorkflowNode): boolean {
   return config.active !== false;
 }
 
-function isConnectedEntrypoint(workflow: Workflow, nodeId: string): boolean {
+/** A trigger node with no incoming execution edge and at least one outgoing one: the only kind that is registered. */
+export function isConnectedEntrypoint(workflow: Workflow, nodeId: string): boolean {
   let incoming = 0;
   let outgoing = 0;
   for (const edge of workflow.edges.filter(isExecutionEdge)) {
@@ -160,6 +167,8 @@ function parseFeed(xml: string): RssItem[] {
 
 export class TriggerService {
   private readonly active = new Map<string, ActiveTrigger>();
+  /** Stopped (a standby instance, or after stop()): nothing registers until initialize(). */
+  private standby = false;
   /** Reloads one at a time per workflow; a removal asked for meanwhile wins. */
   private readonly reloads = new SerialReloads();
   private executeHandler: TriggerExecutionHandler | null = null;
@@ -212,7 +221,39 @@ export class TriggerService {
   }
 
   async initialize(): Promise<void> {
+    this.standby = false;
     await this.reloadAllWorkflows();
+  }
+
+  /**
+   * Phase 13.1 — brings the running triggers in line with the database, leaving unchanged ones running (their poll
+   * state and connections stay). The leader runs it on an interval when several instances share the database, so a
+   * trigger saved through another instance starts here.
+   */
+  async syncAllWorkflows(): Promise<void> {
+    if (this.standby) return;
+    const desired = new Map<string, { workflow: Workflow; node: WorkflowNode }>();
+    for (const summary of await this.store.listWorkflows()) {
+      const workflow = await this.loadWorkflow(summary.id);
+      if (!workflow) continue;
+      for (const node of workflow.nodes) {
+        if (isManaged(node) && isActive(node) && isConnectedEntrypoint(workflow, node.id)) desired.set(this.key(workflow.id, node.id), { workflow, node });
+      }
+    }
+    if (this.standby) return;
+    for (const [key, trigger] of this.active.entries()) {
+      const want = desired.get(key);
+      if (want && trigger.signature === triggerSignature(want.node)) continue;
+      try {
+        void trigger.dispose();
+      } catch {
+        /* best effort */
+      }
+      this.active.delete(key);
+    }
+    for (const [key, { workflow, node }] of desired) {
+      if (!this.active.has(key)) this.registerNode(workflow, node, node.type as ManagedTriggerType);
+    }
   }
 
   async reloadAllWorkflows(): Promise<void> {
@@ -241,9 +282,20 @@ export class TriggerService {
     await this.store.deleteTriggerStatesForWorkflow(workflowId);
   }
 
+  /** Phase 13.1 — started (initialize() since the last stop()) or still holding a running trigger. */
+  isRunning(): boolean {
+    return !this.standby || this.active.size > 0;
+  }
+
+  /** Stops every trigger; saves start nothing until the next initialize() (a standby instance). */
   async stop(): Promise<void> {
+    this.standby = true;
+    // Forget the triggers before awaiting their disposal: an initialize() that runs meanwhile registers into a clean
+    // map, and those entries are neither dropped nor skipped as already active.
+    const stopping = Array.from(this.active.values());
+    this.active.clear();
     await Promise.allSettled(
-      Array.from(this.active.values()).map(async (trigger) => {
+      stopping.map(async (trigger) => {
         try {
           await trigger.dispose();
         } catch {
@@ -251,7 +303,6 @@ export class TriggerService {
         }
       })
     );
-    this.active.clear();
   }
 
   private stopAll(): void {
@@ -294,7 +345,7 @@ export class TriggerService {
 
   private registerNode(workflow: Workflow, node: WorkflowNode, type: ManagedTriggerType): void {
     const key = this.key(workflow.id, node.id);
-    if (this.active.has(key)) return;
+    if (this.standby || this.active.has(key)) return;
     try {
       let dispose: () => void | Promise<void>;
       switch (type) {
@@ -313,7 +364,7 @@ export class TriggerService {
           dispose = this.startMqTrigger(workflow, node, type);
           break;
       }
-      this.active.set(key, { workflowId: workflow.id, nodeId: node.id, type, dispose });
+      this.active.set(key, { workflowId: workflow.id, nodeId: node.id, type, signature: triggerSignature(node), dispose });
       this.logger("info", "Registered trigger", {
         workflowId: workflow.id,
         nodeId: node.id,

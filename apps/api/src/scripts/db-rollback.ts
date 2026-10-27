@@ -14,10 +14,10 @@
  *   rm apps/api/data/orchestrator.db && restart
  */
 
-import { Pool } from "pg";
 import { parsePostgresSettings } from "../config.js";
 import { postgresStoreConfig } from "../db/create-store.js";
 import { currentChainVersion, ensureMigrationsTable, postgresPoolConfig, withMigrationLock } from "../db/postgres-store.js";
+import { createPostgresPool } from "../db/postgres/pool.js";
 import { MIGRATIONS, rollbackMigrations } from "../db/migrations.js";
 
 interface Args {
@@ -91,7 +91,7 @@ async function main() {
     process.exit(2);
   }
 
-  const pool = new Pool(postgresPoolConfig(postgresStoreConfig(parsePostgresSettings(process.env)), { max: 2 }));
+  const pool = createPostgresPool(postgresPoolConfig(postgresStoreConfig(parsePostgresSettings(process.env)), { max: 2 }), { label: "db:rollback" });
 
   try {
     // Under the migrations lock, so a rollback never interleaves with an instance migrating at boot.

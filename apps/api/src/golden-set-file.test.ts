@@ -8,7 +8,6 @@ import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
-import Database from "better-sqlite3";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { FastifyInstance } from "fastify";
 import {
@@ -27,13 +26,15 @@ import { main as cliMain, type CliIo } from "../../../packages/cli/src/main.js";
 import { SecretScrubber } from "./services/audit-scrub.js";
 import { createApp } from "./app.js";
 import { parseConfig, type AppConfig } from "./config.js";
-import { SqliteStore } from "./db/database.js";
+import type { Store } from "./db/store.js";
+import { openTestStore } from "./test-support/test-store.js";
+import { testSql } from "./test-support/test-sql.js";
 import { AuthService } from "./services/auth-service.js";
 import { SecretService } from "./services/secret-service.js";
 
 interface TestContext {
   app: FastifyInstance;
-  store: SqliteStore;
+  store: Store;
   authService: AuthService;
   secretService: SecretService;
   config: AppConfig;
@@ -49,7 +50,7 @@ const PLANTED_SECRET = "sk-planted-GOLDEN-FILE-secret-7c1e9a40b2d8f635";
 async function createTestContext(overrides: Record<string, string> = {}): Promise<TestContext> {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-golden-file-"));
   const dbPath = path.join(tempDir, "orchestrator.db");
-  const store = await SqliteStore.create(dbPath);
+  const store = await openTestStore(dbPath);
   await store.ensureDefaultProject();
   const config = parseConfig({
     LOG_LEVEL: "warn",
@@ -193,14 +194,8 @@ function rehash<T extends GoldenSetFile>(file: T): T {
   return file;
 }
 
-const countRows = (context: TestContext, table: string): number => {
-  const db = new Database(context.dbPath, { readonly: true });
-  try {
-    return (db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n;
-  } finally {
-    db.close();
-  }
-};
+const countRows = async (context: TestContext, table: string): Promise<number> =>
+  Number((await testSql(context.store).get<{ n: number | string }>(`SELECT COUNT(*) AS n FROM ${table}`))!.n);
 
 describe("golden-set files", () => {
   it("exports a golden set, imports it as a new set and replays the imported cases", async () => {
@@ -266,16 +261,14 @@ describe("golden-set files", () => {
     const body = imported.json<{ dataset: { id: string }; warnings: string[] }>();
     expect(body.warnings.join(" ")).toContain("lost the credential reference");
 
-    const db = new Database(context.dbPath, { readonly: true });
-    try {
-      const rows = db.prepare("SELECT * FROM replay_recordings WHERE source_execution_id IS NULL").all();
+    {
+      const sql = testSql(context.store);
+      const rows = await sql.all("SELECT * FROM replay_recordings WHERE source_execution_id IS NULL");
       expect(rows).toHaveLength(1);
-      const stored = JSON.stringify([rows, db.prepare("SELECT * FROM eval_fixtures WHERE dataset_id = ?").all(body.dataset.id)]);
+      const stored = JSON.stringify([rows, await sql.all("SELECT * FROM eval_fixtures WHERE dataset_id = ?", body.dataset.id)]);
       expect(stored).not.toContain(PLANTED_SECRET);
       expect(stored).not.toContain(secret.secretId);
       expect(stored).toContain("[REDACTED]");
-    } finally {
-      db.close();
     }
     // And the response of the API never echoes it either.
     expect(imported.body).not.toContain(PLANTED_SECRET);
@@ -291,17 +284,17 @@ describe("golden-set files", () => {
     await context.store.upsertWorkflow(setWorkflow(counter.base));
     const setId = await suite(context, builder.cookie, "wf-set", 2);
     const file = await exportFile(context, builder.cookie, setId);
-    const datasetsBefore = countRows(context, "eval_datasets");
-    const recordingsBefore = countRows(context, "replay_recordings");
+    const datasetsBefore = await countRows(context, "eval_datasets");
+    const recordingsBefore = await countRows(context, "replay_recordings");
 
     // The second case is too big for REPLAY_RECORDING_MAX_BYTES: the first one is not kept either.
     const big = JSON.parse(JSON.stringify(file)) as GoldenSetFile;
     big.cases[1]!.recording.input = { blob: "x".repeat(40_000) };
     const tooBig = await importFile(context, builder.cookie, big);
     expect(tooBig.statusCode, tooBig.body).toBe(413);
-    expect(countRows(context, "eval_datasets")).toBe(datasetsBefore);
-    expect(countRows(context, "replay_recordings")).toBe(recordingsBefore);
-    expect(countRows(context, "eval_fixtures")).toBe(2);
+    expect((await countRows(context, "eval_datasets"))).toBe(datasetsBefore);
+    expect((await countRows(context, "replay_recordings"))).toBe(recordingsBefore);
+    expect((await countRows(context, "eval_fixtures"))).toBe(2);
 
     // More cases than a replay job can run.
     const many = JSON.parse(JSON.stringify(file)) as GoldenSetFile;
@@ -315,8 +308,8 @@ describe("golden-set files", () => {
     bad.cases[1]!.recording.cassette = { format: "nope" };
     const rejected = await importFile(context, builder.cookie, bad);
     expect(rejected.statusCode, rejected.body).toBe(400);
-    expect(countRows(context, "replay_recordings")).toBe(recordingsBefore);
-    expect(countRows(context, "eval_datasets")).toBe(datasetsBefore);
+    expect((await countRows(context, "replay_recordings"))).toBe(recordingsBefore);
+    expect((await countRows(context, "eval_datasets"))).toBe(datasetsBefore);
   });
 
   it("rejects files that do not match the schema", async () => {
@@ -345,7 +338,7 @@ describe("golden-set files", () => {
     expect((await call(context, "POST", "/api/eval/datasets/import", builder.cookie, { file })).statusCode).toBe(400);
     expect((await importFile(context, builder.cookie, file, { workflowId: "wf-missing" })).statusCode).toBe(404);
     expect((await importFile(context, builder.cookie, file, { projectId: "elsewhere" })).statusCode).toBe(400);
-    expect(countRows(context, "eval_datasets")).toBe(1);
+    expect((await countRows(context, "eval_datasets"))).toBe(1);
   });
 
   it("signs an export with the audit key (admins only) and flags a tampered file on import", async () => {
@@ -405,13 +398,13 @@ describe("golden-set files", () => {
     await context.store.upsertWorkflow(fork);
     const setId = await suite(context, builder.cookie, "wf-set", 1);
     const file = await exportFile(context, builder.cookie, setId);
-    const datasetsBefore = countRows(context, "eval_datasets");
+    const datasetsBefore = await countRows(context, "eval_datasets");
 
     const refused = await importFile(context, builder.cookie, file, { workflowId: "wf-other" });
     expect(refused.statusCode, refused.body).toBe(409);
     expect(refused.json<{ code: string; error: string }>()).toMatchObject({ code: "workflow_mismatch" });
     expect(refused.json<{ error: string }>().error).toContain("allowWorkflowMismatch");
-    expect(countRows(context, "eval_datasets")).toBe(datasetsBefore);
+    expect((await countRows(context, "eval_datasets"))).toBe(datasetsBefore);
 
     const imported = await importFile(context, builder.cookie, file, { workflowId: "wf-other", allowWorkflowMismatch: true });
     expect(imported.statusCode, imported.body).toBe(201);
@@ -456,7 +449,7 @@ describe("golden-set files", () => {
     expect((await importFile(context, outsider.cookie, file)).statusCode).toBe(404);
 
     // Nothing was created by any of the refused imports.
-    expect(countRows(context, "eval_datasets")).toBe(1);
+    expect((await countRows(context, "eval_datasets"))).toBe(1);
 
     // A dataset without a workflow is not a golden set.
     const plain = await call(context, "POST", "/api/eval/datasets", admin.cookie, { name: "Plain", projectId: "default" });
@@ -479,17 +472,15 @@ describe("golden-set files", () => {
     expect((await importFile(context, builder.cookie, tampered)).statusCode).toBe(201);
     const { signature: _signature, ...unsigned } = file;
     expect((await importFile(context, builder.cookie, unsigned)).statusCode).toBe(201);
-    const db = new Database(context.dbPath, { readonly: true });
-    try {
-      const events = db.prepare("SELECT event_type, metadata_json FROM audit_logs WHERE event_type LIKE 'replay.golden_set.%' ORDER BY created_at, rowid").all() as Array<{ event_type: string; metadata_json: string }>;
+    {
+      const sql = testSql(context.store);
+      const events = await sql.all<{ event_type: string; metadata_json: unknown }>(`SELECT event_type, CAST(metadata_json AS TEXT) AS metadata_json FROM audit_logs WHERE event_type LIKE 'replay.golden_set.%' ORDER BY created_at, ${sql.kind === "sqlite" ? "rowid" : "id"}`);
       const types = events.map((event) => event.event_type);
       expect(types).toContain("replay.golden_set.exported");
       expect(types).toContain("replay.golden_set.imported");
       expect(events.find((event) => event.event_type === "replay.golden_set.exported")!.metadata_json).toContain('"signed":true');
-      const imports = events.filter((event) => event.event_type === "replay.golden_set.imported").map((event) => (JSON.parse(event.metadata_json) as { signature: string }).signature);
+      const imports = events.filter((event) => event.event_type === "replay.golden_set.imported").map((event) => (JSON.parse(event.metadata_json as string) as { signature: string }).signature);
       expect(imports).toEqual(["verified", "unverified", "absent"]);
-    } finally {
-      db.close();
     }
   });
 });
@@ -542,17 +533,13 @@ function expectNoNeedles(text: string, where: string) {
   for (const needle of PLANTED_NEEDLES) expect(text, `${where} still holds ${needle}`).not.toContain(needle);
 }
 
-function storedRows(context: TestContext, datasetId?: string): string {
-  const db = new Database(context.dbPath, { readonly: true });
-  try {
-    return JSON.stringify([
-      db.prepare("SELECT * FROM replay_recordings").all(),
-      datasetId ? db.prepare("SELECT * FROM eval_fixtures WHERE dataset_id = ?").all(datasetId) : [],
-      db.prepare("SELECT * FROM eval_datasets").all()
-    ]);
-  } finally {
-    db.close();
-  }
+async function storedRows(context: TestContext, datasetId?: string): Promise<string> {
+  const sql = testSql(context.store);
+  return JSON.stringify([
+    await sql.all("SELECT * FROM replay_recordings"),
+    datasetId ? await sql.all("SELECT * FROM eval_fixtures WHERE dataset_id = ?", datasetId) : [],
+    await sql.all("SELECT * FROM eval_datasets")
+  ]);
 }
 
 const memoryIo = (env: Record<string, string | undefined>) => {
@@ -621,7 +608,7 @@ describe("golden-set files: the importer and exporter do not trust what they car
     const body = imported.json<{ dataset: { id: string }; warnings: string[] }>();
     expect(body.warnings.join(" ")).not.toMatch(/tape/);
     expectNoNeedles(imported.body, "the import response");
-    expectNoNeedles(storedRows(context, body.dataset.id), "the stored rows");
+    expectNoNeedles(await storedRows(context, body.dataset.id), "the stored rows");
     // Structure survives the scrub: node ids and types, the cassette's match fields.
     const stored = (await context.store.getReplayRecording((await context.store.listEvalFixtures(body.dataset.id))[0]!.recordingId!))!;
     expect((stored.capturedWorkflow.nodes as Array<{ id: string; type: string }>).map((node) => `${node.id}:${node.type}`)).toEqual(["start:manual_trigger", "label:set_node", "notify:slack_send_message", "output:output"]);
@@ -665,7 +652,7 @@ describe("golden-set files: the importer and exporter do not trust what they car
     expect(imported.statusCode, imported.body).toBe(201);
     const body = imported.json<{ dataset: { id: string } }>();
     expectNoNeedles(imported.body, "the import response");
-    expectNoNeedles(storedRows(context, body.dataset.id), "the stored rows");
+    expectNoNeedles(await storedRows(context, body.dataset.id), "the stored rows");
     const stored = (await context.store.getReplayRecording((await context.store.listEvalFixtures(body.dataset.id))[0]!.recordingId!))!;
     const output = stored.nodes.label!.output as Record<string, unknown>;
     expect(Object.keys(output)).toEqual(expect.arrayContaining(["keep"]));
@@ -941,20 +928,19 @@ describe("golden-set files: the importer and exporter do not trust what they car
     const textSpy = vi.spyOn(SecretScrubber.prototype, "text");
     const treeSpy = vi.spyOn(SecretScrubber.prototype, "tree");
     const immediateSpy = vi.spyOn(globalThis, "setImmediate");
-    const original = context.store.transaction.bind(context.store);
+    // importGoldenSet is the one store call that holds the transaction (on either store): scrubbing must not happen inside it.
+    const original = context.store.importGoldenSet.bind(context.store);
     let scrubCallsInside = 0;
     let transactions = 0;
-    vi.spyOn(context.store, "transaction").mockImplementation(<T,>(fn: () => T): T =>
-      original(() => {
-        transactions += 1;
-        const before = textSpy.mock.calls.length + treeSpy.mock.calls.length;
-        try {
-          return fn();
-        } finally {
-          scrubCallsInside += textSpy.mock.calls.length + treeSpy.mock.calls.length - before;
-        }
-      })
-    );
+    vi.spyOn(context.store, "importGoldenSet").mockImplementation(async (input) => {
+      transactions += 1;
+      const before = textSpy.mock.calls.length + treeSpy.mock.calls.length;
+      try {
+        return await original(input);
+      } finally {
+        scrubCallsInside += textSpy.mock.calls.length + treeSpy.mock.calls.length - before;
+      }
+    });
     const imported = await importFile(context, builder.cookie, file);
     expect(imported.statusCode, imported.body).toBe(201);
     expect(transactions).toBe(1);

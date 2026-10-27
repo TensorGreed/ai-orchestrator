@@ -25,9 +25,15 @@ import type {
   RunFacts,
   Workflow
 } from "@ai-orchestrator/shared";
+import Fastify from "fastify";
 import { createApp } from "./app.js";
+import { registerReplayCaptureRoutes } from "./replay-capture-routes.js";
+import type { RunAccess } from "./run-access.js";
+import type { SafeUser } from "./services/auth-service.js";
 import { parseConfig, type AppConfig } from "./config.js";
-import { SqliteStore } from "./db/database.js";
+import type { Store } from "./db/store.js";
+import { openTestStore } from "./test-support/test-store.js";
+import { testSql } from "./test-support/test-sql.js";
 import { MIGRATIONS } from "./db/migrations.js";
 import { AuthService } from "./services/auth-service.js";
 import { deriveCaptureSurrogateKey, ReplayCaptureService, seededRandom } from "./services/replay-capture-service.js";
@@ -36,7 +42,7 @@ import { WorkflowVersionService } from "./services/workflow-version-service.js";
 
 interface TestContext {
   app: FastifyInstance;
-  store: SqliteStore;
+  store: Store;
   authService: AuthService;
   secretService: SecretService;
   config: AppConfig;
@@ -55,7 +61,7 @@ const CARD = "4111 1111 1111 1111";
 async function createTestContext(overrides: Record<string, string> = {}, existing?: { tempDir: string; dbPath: string }): Promise<TestContext> {
   const tempDir = existing?.tempDir ?? fs.mkdtempSync(path.join(os.tmpdir(), "ao-capture-"));
   const dbPath = existing?.dbPath ?? path.join(tempDir, "orchestrator.db");
-  const store = await SqliteStore.create(dbPath);
+  const store = await openTestStore(dbPath);
   await store.ensureDefaultProject();
   const config = parseConfig({
     LOG_LEVEL: "warn",
@@ -234,6 +240,35 @@ async function runJob(context: TestContext, cookie: string, body: Record<string,
   }
 }
 
+describe("without a 32-byte master key", () => {
+  // createApp itself refuses to start without the key (MFA needs it, and index.ts checks it), so the routes are
+  // registered here on their own with capture off: they answer 501, exactly as before on SQLite.
+  it("every capture route answers 501", async () => {
+    const app = Fastify();
+    closers.push(async () => await app.close());
+    const user = { id: "u1", email: "admin@example.com", role: "admin" } as SafeUser;
+    registerReplayCaptureRoutes({
+      app,
+      store: {} as Store,
+      captures: {} as ReplayCaptureService,
+      requireRole: async () => user,
+      runAccess: {} as RunAccess,
+      audit: () => undefined,
+      available: false
+    });
+    await app.ready();
+    for (const [method, url] of [
+      ["GET", "/api/workflows/wf-any/replay-capture"],
+      ["PUT", "/api/workflows/wf-any/replay-capture"],
+      ["GET", "/api/workflows/wf-any/replay-captures"]
+    ] as const) {
+      const response = await app.inject({ method, url, ...(method === "PUT" ? { payload: {} } : {}) });
+      expect(response.statusCode, `${method} ${url}`).toBe(501);
+      expect(response.json<{ error: string }>().error).toMatch(/32-byte SECRET_MASTER_KEY_BASE64/);
+    }
+  });
+});
+
 describe("migration 34", () => {
   it("adds capture settings and recording status in Postgres DDL with a down path, and the same in SQLite", async () => {
     const migration = MIGRATIONS.find((entry) => entry.version === 34)!;
@@ -244,10 +279,14 @@ describe("migration 34", () => {
     expect(migration.down).toContain("DROP TABLE IF EXISTS replay_capture_settings");
     expect(migration.down).toContain("DROP COLUMN IF EXISTS status");
     const context = await createTestContext();
-    const db = (context.store as unknown as { db: { prepare: (sql: string) => { all: () => Array<{ name: string }> } } }).db;
-    const columns = (table: string) => db.prepare(`PRAGMA table_info(${table})`).all().map((row) => row.name);
-    expect(columns("replay_recordings")).toEqual(expect.arrayContaining(["status", "captured_at"]));
-    expect(columns("replay_capture_settings")).toEqual(
+    const sql = testSql(context.store);
+    const columns = async (table: string) =>
+      (sql.kind === "sqlite"
+        ? await sql.all<{ name: string }>(`PRAGMA table_info(${table})`)
+        : await sql.all<{ name: string }>("SELECT column_name AS name FROM information_schema.columns WHERE table_name = ?", table)
+      ).map((row) => row.name);
+    expect(await columns("replay_recordings")).toEqual(expect.arrayContaining(["status", "captured_at"]));
+    expect(await columns("replay_capture_settings")).toEqual(
       expect.arrayContaining(["workflow_id", "enabled", "rate", "max_per_day", "only_statuses_json", "dlp", "dlp_off_reason", "target_dataset_id", "last_drop_outcome", "last_drop_at"])
     );
   });
@@ -326,7 +365,7 @@ describe("sampling and limits", () => {
     expect(capped.sampled).toBeLessThan(300);
     // Same seed, same decisions.
     expect((await draws(0.1, 1, 42)).sampled).toBe(tenth.sampled);
-  });
+  }, 120_000); // 40,000 sampling decisions, each reading the settings row: far slower over a network database
 
   it("counts runs in flight against the daily limit, and excludes non-production runs", async () => {
     const context = await createTestContext();
@@ -352,6 +391,49 @@ describe("sampling and limits", () => {
     expect(await decide()).toBeNull();
     capture.abandon(tickets[0]!);
     expect(await decide()).not.toBeNull();
+  });
+
+  it("counts a capture that commits while the day's count is being read once, never zero times", async () => {
+    const context = await createTestContext();
+    await save(context, hookWorkflow("wf-race"));
+    await context.store.saveReplayCaptureSettings({ workflowId: "wf-race", enabled: true, rate: 1, maxPerDay: 2, onlyStatuses: ["success"], dlp: true, dlpOffReason: null, targetDatasetId: null, updatedBy: null });
+    // One capture is stored today and one is in flight. The count is read before the in-flight one commits;
+    // it commits and gives its slot back while the count is on its way back.
+    let duringCount: (() => void) | null = null;
+    const store = new Proxy(context.store, {
+      get(target, property) {
+        if (property === "countReplayCapturesSince") {
+          return async () => {
+            const commit = duringCount;
+            duringCount = null;
+            commit?.();
+            return 1;
+          };
+        }
+        const value = Reflect.get(target, property) as unknown;
+        return typeof value === "function" ? (value as (...args: unknown[]) => unknown).bind(target) : value;
+      }
+    });
+    const capture = new ReplayCaptureService({
+      store,
+      recordings: {} as never,
+      datasets: {} as never,
+      surrogateKey: SURROGATE_KEY,
+      dictionariesFor: async () => [],
+      dictionaryClasses: async () => [],
+      publishedVersion: async () => null,
+      deployment: { enabled: true, maxRate: 1, retentionDays: 14, maxPerWorkflow: 200, maxBytesPerWorkflow: 209_715_200 },
+      random: seededRandom(1),
+      log: { warn: () => undefined, info: () => undefined }
+    });
+    const decide = async () => await capture.decide({ workflow: { id: "wf-race" }, channel: "production", triggerType: "webhook", releaseVersion: null, excluded: false });
+    const inFlight = (await decide())!;
+    expect(inFlight).not.toBeNull();
+    expect(capture.inFlightFor("wf-race")).toBe(1);
+    duringCount = () => capture.abandon(inFlight);
+    // Stored 1 + the one that just committed = the limit of 2.
+    expect(await decide()).toBeNull();
+    expect(capture.inFlightFor("wf-race")).toBe(0);
   });
 
   it("captures only runs of the published version once there is one", async () => {
@@ -672,9 +754,8 @@ describe("sampling and limits", () => {
     const [first, second] = await waitForCaptures(context, builder.cookie, "wf-old", 2);
     const promoted = await call(context, "POST", `/api/replay/captures/${second!.id}/promote`, builder.cookie, {});
     expect(promoted.statusCode, promoted.body).toBe(200);
-    const db = (context.store as unknown as { db: { prepare: (sql: string) => { run: (...args: unknown[]) => unknown } } }).db;
     const old = new Date(Date.now() - 20 * 24 * 60 * 60 * 1000).toISOString();
-    db.prepare("UPDATE replay_recordings SET captured_at = ?").run(old);
+    await testSql(context.store).run("UPDATE replay_recordings SET captured_at = ?", old);
     await context.app.close();
     const reopened = await createTestContext({}, { tempDir: context.tempDir, dbPath: context.dbPath });
     contexts.push(reopened);
@@ -1170,7 +1251,7 @@ describe("re-review round 2: lookup precision, lifecycle, audit and import trust
       recordings: {
         createCapture: async (_input: unknown, capture: { beforeSave: (bytes: number) => Promise<void> }) => {
           // Masking yields; meanwhile someone deletes the run (for privacy, say).
-          (context.store as unknown as { exec(sql: string, params: unknown[]): void }).exec("DELETE FROM execution_history WHERE id = ?", [executionId]);
+          await testSql(context.store).run("DELETE FROM execution_history WHERE id = ?", executionId);
           await capture.beforeSave(10);
           saved.push("saved");
           return { id: "x", bytes: 10 };
@@ -1247,31 +1328,33 @@ describe("re-review round 2: lookup precision, lifecycle, audit and import trust
     const found = (await call(context, "POST", "/api/replay/recordings/find-subject", admin.cookie, { value: EMAIL })).json<ReplayFindSubjectResult>();
     const executions = found.matches.filter((match) => match.kind === "execution").map((match) => match.id);
     expect(executions.length).toBeGreaterThan(0);
-    const exec = (context.store as unknown as { exec(sql: string, params: unknown[]): void }).exec.bind(context.store);
+    const sql = testSql(context.store);
     const now = new Date().toISOString();
     for (const executionId of executions) {
-      exec("INSERT INTO mcp_tool_calls (id, execution_id, workflow_id, node_id, adapter_id, tool_name, started_at, ok, error) VALUES (?, ?, 'wf-crash', 'n', 'mock-mcp', 'find', ?, 0, ?)", [`tc-${executionId}`, executionId, now, `failed for ${EMAIL}`]);
-      exec(
+      await sql.run("INSERT INTO mcp_tool_calls (id, execution_id, workflow_id, node_id, adapter_id, tool_name, started_at, ok, error) VALUES (?, ?, 'wf-crash', 'n', 'mock-mcp', 'find', ?, 0, ?)", `tc-${executionId}`, executionId, now, `failed for ${EMAIL}`);
+      await sql.run(
         "INSERT INTO guard_events (id, verdict_id, execution_id, node_id, placement, channel, requested_action, effective_action, verdict_action, profile_id, profile_version, profile_hash, created_at) VALUES (?, 'v', ?, 'n', 'input', 'input', 'mask', 'mask', 'mask', 'p', 1, 'h', ?)",
-        [`ge-${executionId}`, executionId, now]
+        `ge-${executionId}`,
+        executionId,
+        now
       );
-      exec("INSERT INTO usage_events (id, execution_id, workflow_id, status) VALUES (?, ?, 'wf-crash', 'success')", [`ue-${executionId}`, executionId]);
+      await sql.run("INSERT INTO usage_events (id, execution_id, workflow_id, status) VALUES (?, ?, 'wf-crash', 'success')", `ue-${executionId}`, executionId);
     }
-    const sideRows = () =>
-      ["mcp_tool_calls", "guard_events", "usage_events"].map((table) => {
-        const row = (context.store as unknown as { queryOne(sql: string, params: unknown[]): { n: number } | null }).queryOne(
-          `SELECT COUNT(*) AS n FROM ${table} WHERE execution_id IN (${executions.map(() => "?").join(", ")})`,
-          executions
-        );
-        return Number(row?.n ?? 0);
-      });
-    expect(sideRows().every((count) => count >= 1)).toBe(true);
+    const sideRows = async () => {
+      const counts: number[] = [];
+      for (const table of ["mcp_tool_calls", "guard_events", "usage_events"]) {
+        const row = await sql.get<{ n: number | string }>(`SELECT COUNT(*) AS n FROM ${table} WHERE execution_id IN (${executions.map(() => "?").join(", ")})`, ...executions);
+        counts.push(Number(row?.n ?? 0));
+      }
+      return counts;
+    };
+    expect((await sideRows()).every((count) => count >= 1)).toBe(true);
     const removed = await call(context, "POST", "/api/replay/recordings/find-subject/delete", admin.cookie, {
       value: EMAIL,
       targets: found.matches.map((match) => ({ kind: match.kind, id: match.id }))
     });
     expect(removed.statusCode, removed.body).toBe(200);
-    expect(sideRows()).toEqual([0, 0, 0]);
+    expect(await sideRows()).toEqual([0, 0, 0]);
     const trail = (await context.store.listAuditLogs({ pageSize: 200 })).items.filter((entry) => entry.eventType.startsWith("replay.find_subject.delete"));
     expect(trail.filter((entry) => entry.eventType === "replay.find_subject.delete_started")).toHaveLength(2);
     expect(trail.filter((entry) => entry.eventType === "replay.find_subject.deleted")).toHaveLength(1);
@@ -1703,7 +1786,7 @@ describe("replay comparison of guard-masked spans", () => {
     const context = await createTestContext();
     const builder = await login(context, "builder");
     await save(context, hookWorkflow("wf-masked-diff", "Card {{user_prompt}} on file"));
-    const exec = (context.store as unknown as { exec(sql: string, params: unknown[]): void }).exec.bind(context.store);
+    const sql = testSql(context.store);
     // The golden run's output masked one card; the replay masks another (as a surrogate's mask reads differently).
     const used = new Set<string>();
     const record = async (masked: boolean) => {
@@ -1718,7 +1801,7 @@ describe("replay comparison of guard-masked spans", () => {
       const capabilities = masked
         ? { ...recording.capabilities, capture: { rate: 1, masked: true, dataClasses: ["card_number"], values: { card_number: 1 }, notDetectableAfterMasking: [], keptFromWorkflow: 0, publishedVersion: 1 } }
         : recording.capabilities;
-      exec("UPDATE replay_recordings SET facts_json = ?, capabilities_json = ? WHERE id = ?", [facts, JSON.stringify(capabilities), id]);
+      await sql.run("UPDATE replay_recordings SET facts_json = ?, capabilities_json = ? WHERE id = ?", facts, JSON.stringify(capabilities), id);
       return id;
     };
     const replayOf = async (id: string) => {

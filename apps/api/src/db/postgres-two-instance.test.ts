@@ -4,12 +4,11 @@
  * (skipped without TEST_POSTGRES_URL).
  */
 import { afterEach, describe, expect, it } from "vitest";
-import { postgresStoreConfig } from "./create-store.js";
 import { PostgresStore } from "./postgres-store.js";
 import type { Store } from "./store.js";
 import { StoreReferenceMissingError } from "./store-errors.js";
-import { testPostgresPool } from "../test-support/test-store.js";
-import { createTestStore, noticePostgresSkipped, testPostgresSettings, testPostgresUrl, type TestStore } from "../test-support/test-store.js";
+import { openTestStoreTwin, testStorePool } from "../test-support/test-store.js";
+import { createTestStore, noticePostgresSkipped, testPostgresUrl, type TestStore } from "../test-support/test-store.js";
 
 const run = testPostgresUrl() ? describe : describe.skip;
 if (!testPostgresUrl()) noticePostgresSkipped("postgres two-instance races");
@@ -22,7 +21,7 @@ run("two instances on one Postgres schema", () => {
 
   async function open(): Promise<[Store, Store]> {
     primary = await createTestStore({ kind: "postgres" });
-    second = await PostgresStore.create(postgresStoreConfig(testPostgresSettings(), { schema: primary.schema!, maxConnections: 4 }));
+    second = await openTestStoreTwin(primary!, { maxConnections: 4 });
     return [primary.store, second];
   }
 
@@ -65,8 +64,8 @@ run("two instances on one Postgres schema", () => {
 
   it("80 concurrent appends to one workflow from two instances (10 connections each): no errors, versions 1..80", async () => {
     primary = await createTestStore({ kind: "postgres" });
-    const wide = await PostgresStore.create(postgresStoreConfig(testPostgresSettings(), { schema: primary.schema!, maxConnections: 10 }));
-    second = await PostgresStore.create(postgresStoreConfig(testPostgresSettings(), { schema: primary.schema!, maxConnections: 10 }));
+    const wide = await openTestStoreTwin(primary!, { maxConnections: 10 });
+    second = await openTestStoreTwin(primary!, { maxConnections: 10 });
     try {
       const stores = [wide, second];
       const results = await Promise.allSettled(
@@ -106,7 +105,7 @@ run("two instances on one Postgres schema", () => {
         }
       }
     }
-    const pool = testPostgresPool(primary!.schema);
+    const pool = testStorePool(primary!);
     try {
       const left = await pool.query(`SELECT (SELECT COUNT(*) FROM sessions)::int + (SELECT COUNT(*) FROM api_keys)::int AS n`);
       expect(left.rows[0].n).toBe(0);

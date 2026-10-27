@@ -1,7 +1,6 @@
 /**
  * Phase 13.1 — PostgresStore: Eval datasets, fixtures, runs and results.
- * Plain functions over a PgContext; PostgresStore delegates here. Every method is implemented;
- * UNIMPLEMENTED_METHODS is empty.
+ * Plain functions over a PgContext; PostgresStore delegates here. Every method is implemented.
  *
  * Ordering: where SQLite breaks ties by rowid (insert order), these queries use `seq`, the identity column v40 adds
  * to eval_fixtures, eval_runs and eval_results as Postgres's stand-in for rowid.
@@ -11,8 +10,6 @@ import type { EvalDatasetRecord, EvalFixtureRecord, EvalResultRecord, EvalRunRec
 import { type Store } from "../store.js";
 import type { PgContext } from "./context.js";
 import { toNum, toStr } from "./helpers.js";
-
-export const UNIMPLEMENTED_METHODS: readonly (keyof Store)[] = [];
 
 function rowCount(result: { rowCount: number | null }): number {
   return result.rowCount ?? 0;

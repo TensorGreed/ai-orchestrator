@@ -10,20 +10,21 @@ import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
-import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
 import type { EvalCaseDetail, EvalCaseResult, EvalRunView, ReplayRecordingSummary, Workflow } from "@ai-orchestrator/shared";
 import { createApp } from "./app.js";
 import { parseConfig, type AppConfig } from "./config.js";
-import { SqliteStore } from "./db/database.js";
+import type { Store } from "./db/store.js";
+import { openTestStore } from "./test-support/test-store.js";
+import { testSql } from "./test-support/test-sql.js";
 import { MIGRATIONS } from "./db/migrations.js";
 import { AuthService } from "./services/auth-service.js";
 import { SecretService } from "./services/secret-service.js";
 
 interface TestContext {
   app: FastifyInstance;
-  store: SqliteStore;
+  store: Store;
   authService: AuthService;
   secretService: SecretService;
   config: AppConfig;
@@ -39,7 +40,7 @@ const MASTER_KEY = crypto.randomBytes(32).toString("base64");
 async function createTestContext(overrides: Record<string, string> = {}, existing?: { tempDir: string; dbPath: string }): Promise<TestContext> {
   const tempDir = existing?.tempDir ?? fs.mkdtempSync(path.join(os.tmpdir(), "ao-replay-jobs-"));
   const dbPath = existing?.dbPath ?? path.join(tempDir, "orchestrator.db");
-  const store = await SqliteStore.create(dbPath);
+  const store = await openTestStore(dbPath);
   await store.ensureDefaultProject();
   const config = parseConfig({
     LOG_LEVEL: "warn",
@@ -217,6 +218,15 @@ async function waitForJob(context: TestContext, cookie: string, runId: string, t
   }
 }
 
+async function tableColumns(context: TestContext, table: string): Promise<string[]> {
+  const sql = testSql(context.store);
+  const rows =
+    sql.kind === "sqlite"
+      ? await sql.all<{ name: string }>(`PRAGMA table_info(${table})`)
+      : await sql.all<{ name: string }>("SELECT column_name AS name FROM information_schema.columns WHERE table_name = ?", table);
+  return rows.map((row) => row.name);
+}
+
 describe("replay jobs over golden sets", () => {
   it("replays ten golden runs in the background, scores each one and judges with a secret from SecretService", async () => {
     const judge = await startModel('{"score": 0.9, "reason": "answers the question"}');
@@ -293,24 +303,19 @@ describe("replay jobs over golden sets", () => {
     expect((await call(context, "POST", `/api/replay/runs/${job.id}/cancel`, viewer.cookie)).statusCode).toBe(403);
 
     // Every judge call is a usage event of the workflow's project.
-    const usage = new Database(context.dbPath, { readonly: true });
-    try {
-      const rows = usage.prepare("SELECT * FROM usage_events WHERE trigger_type = 'eval_judge'").all() as Array<{ project_id: string; workflow_id: string; user_email: string; llm_call_count: number; cost_usd: number }>;
+    {
+      const rows = await testSql(context.store).all<{ project_id: string; workflow_id: string; user_email: string; llm_call_count: number; cost_usd: number }>("SELECT * FROM usage_events WHERE trigger_type = 'eval_judge'");
       expect(rows).toHaveLength(10);
       expect(rows[0]).toMatchObject({ project_id: "default", workflow_id: "wf-set", user_email: "builder@example.com", llm_call_count: 1 });
-      expect(rows[0]!.cost_usd).toBeGreaterThan(0);
-    } finally {
-      usage.close();
+      expect(Number(rows[0]!.cost_usd)).toBeGreaterThan(0);
     }
 
     // The judge's key appears nowhere in what was stored.
-    const db = new Database(context.dbPath, { readonly: true });
-    try {
-      const stored = JSON.stringify([db.prepare("SELECT * FROM eval_runs").all(), db.prepare("SELECT * FROM eval_results").all(), db.prepare("SELECT * FROM eval_fixtures").all()]);
+    {
+      const sql = testSql(context.store);
+      const stored = JSON.stringify([await sql.all("SELECT * FROM eval_runs"), await sql.all("SELECT * FROM eval_results"), await sql.all("SELECT * FROM eval_fixtures")]);
       expect(stored).not.toContain(JUDGE_KEY);
       expect(stored).toContain(secret.secretId);
-    } finally {
-      db.close();
     }
   }, 60_000);
 
@@ -422,7 +427,7 @@ describe("eval runs on the background runner", () => {
 
   it("marks runs left running by a stopped server as interrupted on the next boot", async () => {
     const first = await createTestContext();
-    await first.store.createEvalRun({ id: "run_left", datasetId: "ds", workflowId: "wf-set", kind: "replay", status: "running", progress: { updatedAt: new Date().toISOString() } });
+    await first.store.createEvalRun({ id: "run_left", datasetId: "ds", workflowId: "wf-set", kind: "replay", status: "running", progress: { updatedAt: new Date(Date.now() - 60 * 60_000).toISOString() } }); // a shared database (Postgres) only interrupts runs no live instance touched lately
     await closeContext(first);
     contexts.splice(contexts.indexOf(first), 1);
     const second = await createTestContext({}, { tempDir: first.tempDir, dbPath: first.dbPath });
@@ -567,7 +572,7 @@ describe("review fixes over the API", () => {
 
   it("boots on a store without eval storage instead of crashing", async () => {
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-replay-jobs-noeval-"));
-    const real = await SqliteStore.create(path.join(tempDir, "orchestrator.db"));
+    const real = await openTestStore(path.join(tempDir, "orchestrator.db"));
     await real.ensureDefaultProject();
     const missing = new Set(["listEvalRuns", "pruneEvalRuns"]);
     const store = new Proxy(real, {
@@ -917,12 +922,7 @@ describe("authorization review fixes", () => {
     const started = await call(context, "POST", "/api/eval/runs", builder.cookie, { datasetId: dataset.id, workflowId: "wf-set" });
     const runId = started.json<{ runId: string }>().runId;
     await waitForEvalRunAs(context, builder.cookie, runId);
-    const db = new Database(context.dbPath, { readonly: true });
-    try {
-      expect(db.prepare("SELECT triggered_by, triggered_by_user_id FROM eval_runs WHERE id = ?").get(runId)).toEqual({ triggered_by: "builder@example.com", triggered_by_user_id: builder.id });
-    } finally {
-      db.close();
-    }
+    expect(await testSql(context.store).get("SELECT triggered_by, triggered_by_user_id FROM eval_runs WHERE id = ?", runId)).toEqual({ triggered_by: "builder@example.com", triggered_by_user_id: builder.id });
   }, 30_000);
 
   it("fails a judge whose secret resolves to nothing instead of falling back to the server's provider keys", async () => {
@@ -1088,17 +1088,14 @@ describe("migration 31", () => {
     expect(migration.down).toContain("ALTER TABLE eval_runs DROP COLUMN IF EXISTS kind");
   });
 
-  it("adds the same columns in SQLite, and old eval runs read as kind eval", async () => {
+  it("adds the same columns in the live store, and old eval runs read as kind eval", async () => {
     const context = await createTestContext();
-    const db = new Database(context.dbPath, { readonly: true });
-    try {
-      const columns = (table: string) => (db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((row) => row.name);
-      expect(columns("eval_datasets")).toContain("workflow_id");
-      expect(columns("eval_fixtures")).toContain("recording_id");
-      expect(columns("eval_runs")).toEqual(expect.arrayContaining(["kind", "triggered_by_user_id", "dataset_ids_json", "candidate_json", "workflow_hash", "workflow_version", "options_json", "progress_json"]));
-      expect(columns("eval_results")).toEqual(expect.arrayContaining(["recording_id", "verdict", "diff_json", "cost_usd"]));
-    } finally {
-      db.close();
+    {
+      const columns = (table: string) => tableColumns(context, table);
+      expect(await columns("eval_datasets")).toContain("workflow_id");
+      expect(await columns("eval_fixtures")).toContain("recording_id");
+      expect(await columns("eval_runs")).toEqual(expect.arrayContaining(["kind", "triggered_by_user_id", "dataset_ids_json", "candidate_json", "workflow_hash", "workflow_version", "options_json", "progress_json"]));
+      expect(await columns("eval_results")).toEqual(expect.arrayContaining(["recording_id", "verdict", "diff_json", "cost_usd"]));
     }
     await context.store.createEvalRun({ id: "run_legacy", datasetId: "ds", workflowId: "wf" });
     expect(await context.store.getEvalRun("run_legacy")).toMatchObject({ kind: "eval", datasetIds: ["ds"], candidate: null });

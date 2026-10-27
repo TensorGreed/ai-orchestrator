@@ -10,7 +10,7 @@ import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
 import { AuditService } from "../services/audit-service.js";
 import type { Store } from "./store.js";
-import { createTestStore, noticePostgresSkipped, testPostgresPool, testPostgresUrl, type TestStore, type TestStoreKind } from "../test-support/test-store.js";
+import { createTestStore, noticePostgresSkipped, testPostgresUrl, type TestStore, type TestStoreKind, testStorePool } from "../test-support/test-store.js";
 import { SqliteStore } from "./database.js";
 
 type Entry = Parameters<Store["writeAuditLog"]>[0];
@@ -52,7 +52,7 @@ for (const kind of kinds) {
     async function tamper(sql: string): Promise<Store> {
       const test = current!;
       if (test.kind === "postgres") {
-        const pool = testPostgresPool(test.schema);
+        const pool = testStorePool(test!);
         try {
           await pool.query(sql);
         } finally {

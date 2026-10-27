@@ -10,20 +10,21 @@ import { afterEach, describe, expect, it } from "vitest";
 import { MCP_CASSETTE_FORMAT, MCP_CASSETTE_VERSION, type Workflow } from "@ai-orchestrator/shared";
 import { createApp } from "./app.js";
 import { parseConfig } from "./config.js";
-import { SqliteStore } from "./db/database.js";
+import type { Store } from "./db/store.js";
 import { QueueService, resolveStuckJobTimeoutMs, STUCK_JOB_MARGIN_MS } from "./services/queue-service.js";
 import { MAX_RUN_TIMEOUT_MS, queuedRunTimeoutMs } from "./db/queue-timeouts.js";
 import { AuthService } from "./services/auth-service.js";
 import { SecretService } from "./services/secret-service.js";
 import { INTERRUPTED_RUN_ERROR, reconcileInterruptedRuns } from "./services/run-reconcile-service.js";
+import { openTestStore } from "./test-support/test-store.js";
 
 const dirs: string[] = [];
-const stores: SqliteStore[] = [];
+const stores: Store[] = [];
 
-async function makeStore(): Promise<{ store: SqliteStore; dir: string }> {
+async function makeStore(): Promise<{ store: Store; dir: string }> {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-reconcile-"));
   dirs.push(dir);
-  const store = await SqliteStore.create(path.join(dir, "orchestrator.db"));
+  const store = await openTestStore(path.join(dir, "orchestrator.db"));
   stores.push(store);
   await store.ensureDefaultProject();
   return { store, dir };
@@ -40,7 +41,7 @@ afterEach(async () => {
   for (const dir of dirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
 });
 
-async function saveRun(store: SqliteStore, id: string, status: string, startedAt: string): Promise<void> {
+async function saveRun(store: Store, id: string, status: string, startedAt: string): Promise<void> {
   await store.saveExecutionHistory({ id, workflowId: "wf", status, startedAt });
 }
 
@@ -98,7 +99,9 @@ describe("reconcileInterruptedRuns", () => {
 describe("reconcile at boot", () => {
   async function bootWith(extra: Record<string, string>): Promise<string> {
     const { store, dir } = await makeStore();
-    await saveRun(store, "old-run", "running", new Date(Date.now() - 3_600_000).toISOString());
+    // Older than the longest a run may last plus the margin: interrupted on one instance and on a shared database
+    // (Postgres) alike.
+    await saveRun(store, "old-run", "running", new Date(Date.now() - MAX_RUN_TIMEOUT_MS - STUCK_JOB_MARGIN_MS - 60_000).toISOString());
     const config = parseConfig({ ...baseEnv(dir), ...extra });
     const app = await createApp(config, store, new SecretService(store, config.SECRET_MASTER_KEY_BASE64), new AuthService(store, config.SESSION_TTL_HOURS));
     try {

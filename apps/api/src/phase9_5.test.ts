@@ -2,8 +2,9 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { SqliteStore } from "./db/database.js";
+import type { Store } from "./db/store.js";
 import { EvalService, __test__, type EvalLlmJudge, type ScorerSpec } from "./services/eval-service.js";
+import { openTestStore } from "./test-support/test-store.js";
 
 const { scoreContextPrecision, scoreContextRecall, parseJudgeJson, extractDocuments } = __test__;
 
@@ -136,11 +137,11 @@ describe("Phase 9.5 — RAG-specific eval scorers", () => {
   // ---------------------------------------------------------------------------
 
   let tempDir: string;
-  let store: SqliteStore;
+  let store: Store;
 
   beforeEach(async () => {
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-phase9-5-"));
-    store = await SqliteStore.create(path.join(tempDir, "orchestrator.db"));
+    store = await openTestStore(path.join(tempDir, "orchestrator.db"));
     await store.ensureDefaultProject();
   });
 
