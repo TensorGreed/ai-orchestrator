@@ -364,6 +364,30 @@ describe("baseline reruns with repeats: each repeat is judged against its own ba
     expect(evidence.job.repeatsUnchecked).toBeUndefined();
     expect(evidence.cases.find((entry) => entry.id === result.fixtureId)?.status).toBe("pass");
     expect(judgement.verdict).toBe("passed");
+    // The inconclusive repeat keeps its slot, so index k stays repeat k: the first is empty, the second is repeat 2's pair.
+    const latency = evidence.cases.find((entry) => entry.id === result.fixtureId)?.repeats?.latencyMs;
+    expect(latency?.[0]).toBeNull();
+    expect(latency?.[1]).toEqual({ baseline: 100, candidate: 105 });
+    expect(latency).toHaveLength(3);
+  });
+
+  it("merges several result rows of one case position by position, at the worst pair of each repeat", async () => {
+    const job = await runJob(() => ({ latencyMs: 100 }), { repeats: 2 });
+    const original = job.run.results.find((entry) => entry.fixtureName === "rec_a")!;
+    const extra = { ...original, id: "extra-row" };
+    // The second row's repeat 2 ran slow.
+    const slower = async (runId: string, resultId: string): Promise<EvalCaseDetail | null> => {
+      const detail = await job.svc.getCase(runId, resultId === "extra-row" ? original.id : resultId);
+      if (resultId !== "extra-row" || !detail?.replay?.attempts) return detail;
+      return { ...detail, replay: { ...detail.replay, attempts: detail.replay.attempts.map((attempt) => (attempt.repeatIndex === 1 ? { ...attempt, latencyMs: 300 } : attempt)) } };
+    };
+    const withExtra = { ...job, run: { ...job.run, results: [...job.run.results, extra] } };
+    const { evidence } = await judge(withExtra, { maxP95LatencyIncreasePct: 50, noNewGuardBlocks: false }, slower);
+    const merged = evidence.cases.find((entry) => entry.id === original.fixtureId);
+    expect(merged?.repeats?.latencyMs).toEqual([
+      { baseline: 100, candidate: 100 },
+      { baseline: 100, candidate: 300 }
+    ]);
   });
 
   it("treats repeats stored without their own baseline as unchecked for latency, and judges cost on the deciding repeat", async () => {

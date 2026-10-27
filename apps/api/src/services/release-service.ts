@@ -1178,13 +1178,13 @@ export class ReleaseService {
           added: guard.added as Parameters<typeof replayNewGuardBlocks>[0]["added"],
           changed: guard.changed as Parameters<typeof replayNewGuardBlocks>[0]["changed"]
         });
-        newGuardBlocks = Math.max(newGuardBlocks, caseGuardBlocks, ...attemptGuards);
+        newGuardBlocks = attemptGuards.reduce((most, value) => Math.max(most, value), Math.max(newGuardBlocks, caseGuardBlocks));
       }
       const casePairCost = worstPair(costPairs) ?? costPairs[0] ?? { baseline: null, candidate: null };
       const casePairLatency = worstPair(latencyPairs) ?? latencyPairs[0] ?? { baseline: null, candidate: null };
       // Several result rows for one case (rare): repeat k counts at the worst of the rows' k-th pairs.
       const mergeRepeats = (rows: Array<Array<MetricPair | null>>): Array<MetricPair | null> =>
-        Array.from({ length: Math.max(0, ...rows.map((row) => row.length)) }, (_unused, index) => worstPair(rows.map((row) => row[index] ?? { baseline: null, candidate: null })));
+        Array.from({ length: rows.reduce((most, row) => Math.max(most, row.length), 0) }, (_unused, index) => worstPair(rows.map((row) => row[index] ?? { baseline: null, candidate: null })));
       const repeats = {
         ...(costRepeats.length > 0 ? { costUsd: mergeRepeats(costRepeats) } : {}),
         ...(latencyRepeats.length > 0 ? { latencyMs: mergeRepeats(latencyRepeats) } : {})
