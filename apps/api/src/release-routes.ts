@@ -9,8 +9,11 @@
  *        409 { verdict: "blocked", reasons, replayRunId?, canRequestApproval }
  *   GET  /api/workflows/:id/releases         release history and the published version (viewer)
  *   POST /api/workflows/:id/rollback         back to a version published before (workflow:publish)
- *   POST /api/workflows/:id/unpublish        take the published version down; production runs the draft (workflow:publish)
- *        200 { release, productionRuns: "draft", gateEnabled, gateEnforced, notice }   409 nothing is published
+ *   POST /api/workflows/:id/unpublish        take the published version down; production runs the draft (workflow:publish; admin while the gate is on and enforced)
+ *        body { reason?, expectedVersion? }
+ *        200 { release, productionRuns: "draft", gateEnabled, gateEnforced, notice }
+ *        403 the gate is on and enforced and the caller is not an admin (audited release.unpublish.refused)
+ *        409 nothing is published, or expectedVersion is not the live version
  *   GET  /api/workflows/:id/release-state    the editor's version pill: draft, published, ahead by (viewer)
  *   GET  /api/workflows/:id/publish-preview  ?version=N[&replayRunId=]: the verdict publishing would get now (viewer)
  *
