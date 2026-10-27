@@ -37,6 +37,7 @@ import {
 } from "../lib/api";
 import {
   buildReplayJobRequest,
+  attemptLatencyLabel,
   candidateLabel,
   caseStatusLabel,
   comparisonLabel,
@@ -1458,8 +1459,16 @@ export function CaseDrawer({ runId, resultId, onClose }: { runId: string; result
                           {attempt.executionId && <span className="mono-cell">{attempt.executionId}</span>}
                           {attempt.baselineExecutionId && <span className="mono-cell">baseline {attempt.baselineExecutionId}</span>}
                           <span className="mono-cell">{formatUsd(attempt.costUsd)}</span>
-                          {typeof attempt.latencyMs === "number" && <span className="mono-cell">{formatDuration(attempt.latencyMs)}</span>}
-                          {typeof attempt.newGuardBlocks === "number" && <span className="mono-cell">{guardBlocksLabel(attempt.newGuardBlocks)}</span>}
+                          {typeof attempt.latencyMs === "number" && (
+                            <span className="mono-cell" title="The candidate's latency in this repeat">
+                              {attemptLatencyLabel(attempt.latencyMs, detail.replay?.compare === "baseline_rerun" ? attempt.baselineLatencyMs : null)}
+                            </span>
+                          )}
+                          {typeof attempt.newGuardBlocks === "number" && (
+                            <span className={attempt.newGuardBlocks > 0 ? "mono-cell is-danger" : "mono-cell"} title="Guard verdicts that block or hold for review which this repeat added">
+                              {guardBlocksLabel(attempt.newGuardBlocks)}
+                            </span>
+                          )}
                         </span>
                         {attempt.reasons.length > 0 && <span className="evals-score-reason">{attempt.reasons.join(" ")}</span>}
                       </li>

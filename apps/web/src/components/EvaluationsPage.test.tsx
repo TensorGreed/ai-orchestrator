@@ -478,6 +478,7 @@ describe("EvaluationsPage — replay jobs", () => {
       reasons: repeatIndex === 1 ? ["Output changed at 1 path (answer)"] : [],
       costUsd: 0.002,
       latencyMs: [120, 2400, 95][repeatIndex],
+      baselineLatencyMs: [110, 2300, 90][repeatIndex],
       newGuardBlocks: repeatIndex === 1 ? 2 : 0
     }));
     vi.mocked(api.fetchReplayJobCase).mockResolvedValue({ result: { ...repeated, output: {}, replay: { ...replayDiff, compare: "baseline_rerun", baselineExecutionId: "ex-b0", attempts } } });
@@ -501,11 +502,14 @@ describe("EvaluationsPage — replay jobs", () => {
     expect(await within(drawer).findByText(/each against its own baseline rerun/)).toBeInTheDocument();
     expect(within(drawer).getByText("baseline ex-b1")).toBeInTheDocument();
     expect(within(drawer).getByText("Output changed at 1 path (answer)")).toBeInTheDocument();
-    // Every repeat shows its own latency and new guard blocks beside its cost.
-    expect(within(drawer).getByText("120 ms")).toBeInTheDocument();
-    expect(within(drawer).getByText("2.4 s")).toBeInTheDocument();
-    expect(within(drawer).getByText("2 new guard blocks")).toBeInTheDocument();
-    expect(within(drawer).getAllByText("no new guard blocks")).toHaveLength(2);
+    // Every repeat shows its own latency (against its own baseline rerun) and new guard blocks beside its cost.
+    expect(within(drawer).getByText("latency 120 ms (baseline 110 ms)")).toBeInTheDocument();
+    expect(within(drawer).getByText("latency 2.4 s (baseline 2.3 s)")).toBeInTheDocument();
+    // A repeat that added guard blocks stands out; the others do not.
+    expect(within(drawer).getByText("2 new guard blocks")).toHaveClass("is-danger");
+    const clean = within(drawer).getAllByText("no new guard blocks");
+    expect(clean).toHaveLength(2);
+    for (const label of clean) expect(label).not.toHaveClass("is-danger");
   });
 
   it("lists a repeat stored before per-repeat latency and guard data with its cost only", async () => {

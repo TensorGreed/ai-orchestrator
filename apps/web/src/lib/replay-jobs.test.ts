@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { Workflow } from "@ai-orchestrator/shared";
 import {
+  attemptLatencyLabel,
   buildReplayJobRequest,
   candidateLabel,
   caseStatusLabel,
@@ -8,6 +9,7 @@ import {
   emptyReplayJobForm,
   formatSpend,
   formatUsd,
+  guardBlocksLabel,
   jobCounts,
   jobWarnings,
   modelNodesOf,
@@ -121,6 +123,15 @@ describe("labels", () => {
     expect(formatUsd(0.0042)).toBe("$0.0042");
     expect(formatUsd(1.5)).toBe("$1.50");
     expect(parseIgnorePaths("a\r\n b \n")).toEqual(["a", "b"]);
+  });
+
+  it("labels a repeat's latency, with its own baseline when it reran one, and its new guard blocks", () => {
+    expect(attemptLatencyLabel(2400)).toBe("latency 2.4 s");
+    expect(attemptLatencyLabel(2400, null)).toBe("latency 2.4 s");
+    expect(attemptLatencyLabel(120, 110)).toBe("latency 120 ms (baseline 110 ms)");
+    expect(guardBlocksLabel(0)).toBe("no new guard blocks");
+    expect(guardBlocksLabel(1)).toBe("1 new guard block");
+    expect(guardBlocksLabel(2)).toBe("2 new guard blocks");
   });
 
   it("counts from the summary once finished, else from progress", () => {
