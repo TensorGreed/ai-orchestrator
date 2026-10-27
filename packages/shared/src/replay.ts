@@ -633,6 +633,22 @@ export function judgeReplayDiff(diff: RunDiff): ReplayJudgement {
   return { verdict: reasons.length > 0 ? "fail" : "pass", reasons };
 }
 
+const blocksRun = (action: unknown) => action === "block" || action === "review";
+
+/**
+ * How many guard verdicts a replay added that block (or hold for review),
+ * plus those it escalated from a non-blocking action to a blocking one,
+ * compared with its reference run. Shadow verdicts never count. The release
+ * gate's `noNewGuardBlocks` measure, kept per repeat of a replay case.
+ */
+export function replayNewGuardBlocks(guard: Pick<RunDiff["guard"], "added" | "changed">): number {
+  const added = guard.added.filter((verdict) => !verdict?.shadow && blocksRun(verdict?.effectiveAction)).length;
+  const escalated = guard.changed.filter(
+    (change) => !change?.candidate?.shadow && blocksRun(change?.candidate?.effectiveAction) && !blocksRun(change?.baseline?.effectiveAction)
+  ).length;
+  return added + escalated;
+}
+
 export interface ReplayRunResponse {
   recordingId: string;
   executionId: string;

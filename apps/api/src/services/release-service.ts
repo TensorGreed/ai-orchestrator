@@ -93,6 +93,7 @@ import {
   releaseGatePolicySchema,
   releaseGateSettingsSchema,
   releaseUnpublishNotice,
+  replayNewGuardBlocks,
   type EvalCaseDetail,
   type EvalCaseResult,
   type EvalRunView,
@@ -1100,10 +1101,10 @@ export class ReleaseService {
       const latencies: number[] = [];
       let newGuardBlocks = 0;
       let diffMissing = false;
-      const blocking = (action: unknown) => action === "block" || action === "review";
       for (const result of results) {
         if (caseStatus(result.status) === "skipped") continue;
-        const diff = asRecord((await this.options.loadCase(job.id, result.id))?.replay?.diff);
+        const replay = asRecord((await this.options.loadCase(job.id, result.id))?.replay);
+        const diff = asRecord(replay.diff);
         const totals = asRecord(diff.totals);
         const guard = asRecord(diff.guard);
         if (!diff.totals || !Array.isArray(guard.added) || !Array.isArray(guard.changed)) {
@@ -1115,27 +1116,25 @@ export class ReleaseService {
         const latency = asRecord(totals.latencyMs);
         costBaseline = numberOrNull(cost.baseline) ?? costBaseline;
         latencyBaseline = numberOrNull(latency.baseline) ?? latencyBaseline;
-        // Repeats: the row's totals come from one attempt; cost is kept for every attempt, so the worst one counts.
-        const attempts = Array.isArray(diff.attempts) ? (diff.attempts as unknown[]).map(asRecord) : [];
+        // Repeats: the row's totals come from one attempt (the case diff); every attempt is listed beside it with its cost, so the worst one counts.
+        const attempts = Array.isArray(replay.attempts) ? (replay.attempts as unknown[]).map(asRecord) : [];
         const attemptCosts = attempts.map((attempt) => numberOrNull(attempt.costUsd)).filter((value): value is number => value !== null);
         const candidateCost = attemptCosts.length > 0 ? Math.max(...attemptCosts) : numberOrNull(cost.candidate);
         if (candidateCost !== null) costs.push(candidateCost);
-        // Latency and guard verdicts are per attempt only when the replay recorded them for every attempt.
-        const attemptLatencies = attempts.map((attempt) => numberOrNull(attempt.latencyMs)).filter((value): value is number => value !== null);
-        const attemptGuards = attempts.map((attempt) => numberOrNull(attempt.newGuardBlocks)).filter((value): value is number => value !== null);
-        const perAttemptLatency = attempts.length > 1 && attemptLatencies.length === attempts.length;
-        const perAttemptGuard = attempts.length > 1 && attemptGuards.length === attempts.length;
-        if (attempts.length > 1 && !(perAttemptLatency && perAttemptGuard)) repeatsUnchecked = true;
-        const candidateLatency = perAttemptLatency ? Math.max(...attemptLatencies) : numberOrNull(latency.candidate);
+        // Latency and guard verdicts count per attempt only when the replay recorded them for every attempt whose candidate ran
+        // (an attempt whose baseline rerun was inconclusive never ran the candidate). Results stored before that are unchecked.
+        const ran = attempts.filter((attempt) => typeof attempt.executionId === "string");
+        const perAttempt = attempts.length > 1 && ran.length > 0 && ran.every((attempt) => "latencyMs" in attempt && "newGuardBlocks" in attempt);
+        if (attempts.length > 1 && !perAttempt) repeatsUnchecked = true;
+        const attemptLatencies = ran.map((attempt) => numberOrNull(attempt.latencyMs)).filter((value): value is number => value !== null);
+        const attemptGuards = ran.map((attempt) => numberOrNull(attempt.newGuardBlocks)).filter((value): value is number => value !== null);
+        const candidateLatency = perAttempt ? (attemptLatencies.length > 0 ? Math.max(...attemptLatencies) : null) : numberOrNull(latency.candidate);
         if (candidateLatency !== null) latencies.push(candidateLatency);
-        const added = (guard.added as unknown[]).map(asRecord).filter((verdict) => !verdict.shadow && blocking(verdict.effectiveAction)).length;
-        const escalated = (guard.changed as unknown[])
-          .map(asRecord)
-          .filter((change) => {
-            const after = asRecord(change.candidate);
-            return !after.shadow && blocking(after.effectiveAction) && !blocking(asRecord(change.baseline).effectiveAction);
-          }).length;
-        newGuardBlocks = Math.max(newGuardBlocks, perAttemptGuard ? Math.max(...attemptGuards) : added + escalated);
+        const caseGuardBlocks = replayNewGuardBlocks({
+          added: guard.added as Parameters<typeof replayNewGuardBlocks>[0]["added"],
+          changed: guard.changed as Parameters<typeof replayNewGuardBlocks>[0]["changed"]
+        });
+        newGuardBlocks = Math.max(newGuardBlocks, perAttempt && attemptGuards.length > 0 ? Math.max(caseGuardBlocks, ...attemptGuards) : caseGuardBlocks);
       }
       const costCandidate = costs.length > 0 ? Math.max(...costs) : null;
       const latencyCandidate = latencies.length > 0 ? Math.max(...latencies) : null;
