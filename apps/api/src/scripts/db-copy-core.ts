@@ -1,0 +1,878 @@
+/**
+ * Phase 13.1 — db:copy: moves a SQLite database into an empty Postgres database (the CLI is db-copy.ts).
+ *
+ * What it does, in order:
+ *  1. Source: opens the SQLite file read-only, inside one read transaction (a consistent snapshot), and compares its
+ *     tables and columns with the schema this build's SqliteStore creates. Older (a table or column missing): refused,
+ *     start this build once against the file to upgrade it. Newer (a table or column this build does not know):
+ *     refused, run db:copy from the build that wrote it.
+ *  2. Target: everything runs on one connection holding the migrations advisory lock (withMigrationLock), so an API
+ *     instance starting against the target waits until the copy has committed or rolled back. An empty database with
+ *     no applied migrations is migrated first through the normal chain (applyMigrationChain, as PostgresStore does at
+ *     boot). A database whose applied version is not this build's (MIGRATIONS' highest) is refused; so is one with any
+ *     user or workflow row, or with rows a table's migration did not put there (rows whose primary key the source does
+ *     not hold).
+ *  3. Mapping: derived from the two live schemas, never from a hand list. Every source table and column must exist on
+ *     the target. The only target-only objects allowed are the ones the schema-parity allow-list documents for
+ *     copying: `schema_migrations`, `GENERATED ALWAYS AS (…) STORED` columns (knowledge_base_chunks.content_tsv, which
+ *     Postgres computes), and the `seq` identity of INSERTION_SEQ_TABLES (the stand-in for SQLite's rowid, assigned by
+ *     the identity as rows are copied in rowid order). Anything else fails loudly.
+ *  4. Copy: tables in foreign-key order (parents first), each read in rowid order in batches and written with
+ *     multi-row INSERTs, all in **one transaction**. Values are converted to the target column's type the way the
+ *     Postgres store writes them: text through the store's parameter mapping (U+0000 → U+FFFD, pgParams), timestamps
+ *     as SQLite holds them (ISO strings, read in UTC; an empty string is NULL, as the SQLite store already reads it),
+ *     integers (a fractional value is rounded, as Postgres casts numeric to integer, and reported), booleans, JSON
+ *     text verbatim. Audit text is read exactly as verify reads it (exactSqliteTextRows: a lone surrogate that
+ *     better-sqlite3 on Node 20 kept as generalized UTF-8 is that surrogate, not three U+FFFD) and is not
+ *     re-normalised. Secrets are copied as ciphertext / iv / auth tag, never decrypted.
+ *  5. Verify, inside the same transaction, before COMMIT: per-table row counts, a per-table checksum over primary keys
+ *     (order-independent), for seq tables the order (source rowid order = target seq order), and verifyAuditChain on
+ *     both sides. The target's audit verdict must be exactly the one predicted from the source rows as Postgres stores
+ *     them (lone surrogates and U+0000 become U+FFFD). Where Postgres cannot keep what SQLite kept, a row may go from
+ *     verified to unverifiable (two or more such characters in one row: too many candidates to try); that is reported,
+ *     and the copy goes on. A row that would turn *broken* stops the copy. Then sequences are moved past the copied
+ *     values and the transaction commits.
+ *
+ * Why one transaction (not one per table): a failed copy leaves the target exactly as it was (migrated and empty),
+ * so it can simply be re-run, and a copy that does not verify is never committed. Postgres has no transaction size
+ * limit beyond disk for WAL; the target is not in use during the copy (the advisory lock holds back API starts).
+ */
+import Database, { type Database as BetterSqlite3Database } from "better-sqlite3";
+import { createHash } from "node:crypto";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { Pool, type PoolClient } from "pg";
+import {
+  exactSqliteTextRows,
+  readSqliteAuditChainRows,
+  SQLITE_AUDIT_TEXT_COLUMNS,
+  verifyAuditRows,
+  wellFormedAuditText,
+  type AuditCanonicalInput,
+  type AuditChainResult,
+  type AuditChainRow
+} from "../db/audit-chain.js";
+import { SqliteStore } from "../db/database.js";
+import { INSERTION_SEQ_TABLES, MIGRATIONS } from "../db/migrations.js";
+import { verifyAuditChain as verifyPostgresAuditChain } from "../db/postgres/audit.js";
+import { pgParams, type PgContext } from "../db/postgres/context.js";
+import { applyMigrationChain, currentChainVersion, postgresPoolConfig, withMigrationLock, type PostgresStoreConfig } from "../db/postgres-store.js";
+
+/** The chain version this build migrates to (whatever MIGRATIONS' highest is; never a fixed number). */
+export const CODE_SCHEMA_VERSION = Math.max(...MIGRATIONS.map((migration) => migration.version));
+
+const SEQ_TABLES: ReadonlySet<string> = new Set(INSERTION_SEQ_TABLES.map(({ table }) => table));
+const DEFAULT_BATCH_ROWS = 500;
+/** Postgres binds at most 65535 parameters per statement. */
+const MAX_PARAMS = 60_000;
+
+/** A reason not to copy (exit code 2): nothing was written. */
+export class DbCopyRefusal extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "DbCopyRefusal";
+  }
+}
+
+export interface DbCopyOptions {
+  /** The SQLite file to copy from. */
+  sqlitePath: string;
+  /** The target (validated settings; `schema` only in tests). */
+  postgres: PostgresStoreConfig;
+  /** Report counts and refusals; write nothing. */
+  dryRun?: boolean;
+  /** Rows per INSERT (default 500, fewer for wide tables). */
+  batchRows?: number;
+  log?: (line: string) => void;
+}
+
+export interface DbCopyTableReport {
+  table: string;
+  rows: number;
+  /** Rows a migration had put in the target table, replaced by the source's (e.g. schema_markers). */
+  replacedSeedRows: number;
+  /** Fractional values written to integer columns, rounded (column → count). */
+  rounded: Record<string, number>;
+}
+
+export interface DbCopyReport {
+  dryRun: boolean;
+  schemaVersion: number;
+  /** The target had no applied migrations, so this run migrated it (a dry run rehearses it and rolls back). */
+  migratedTarget: boolean;
+  tables: DbCopyTableReport[];
+  totalRows: number;
+  audit: {
+    source: AuditChainResult;
+    /** The verdict the copied chain must have (the source rows as Postgres stores them). */
+    expectedTarget: AuditChainResult;
+    /** The copied chain's verdict (not on a dry run). */
+    target?: AuditChainResult;
+    /** Rows verified on SQLite that cannot be verified on Postgres (≥2 characters Postgres cannot store). */
+    becameUnverifiable: string[];
+  };
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Schemas
+
+interface SqliteTable {
+  columns: string[];
+}
+
+/** User tables of a SQLite database (FTS5 virtual tables, their shadow tables and sqlite_* excluded). */
+function sqliteTables(db: BetterSqlite3Database): Map<string, SqliteTable> {
+  const master = db.prepare(`SELECT name, sql FROM sqlite_master WHERE type = 'table'`).all() as Array<{ name: string; sql: string | null }>;
+  const virtual = master.filter((row) => /^CREATE VIRTUAL TABLE/i.test(row.sql ?? "")).map((row) => row.name);
+  const internal = (name: string) => name.startsWith("sqlite_") || virtual.some((v) => name === v || name.startsWith(`${v}_`));
+  const tables = new Map<string, SqliteTable>();
+  for (const { name } of master) {
+    if (internal(name)) continue;
+    const columns = (db.prepare(`PRAGMA table_info(${sqliteIdent(name)})`).all() as Array<{ name: string }>).map((c) => c.name);
+    tables.set(name, { columns });
+  }
+  return tables;
+}
+
+/** The schema this build's SqliteStore creates (a fresh file in a temp directory, removed afterwards). */
+async function codeSqliteTables(): Promise<Map<string, SqliteTable>> {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "l2m-db-copy-schema-"));
+  try {
+    const file = path.join(dir, "schema.db");
+    const store = await SqliteStore.create(file);
+    await store.close();
+    const db = new Database(file, { readonly: true });
+    try {
+      return sqliteTables(db);
+    } finally {
+      db.close();
+    }
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+/** Refuses a source whose schema is not this build's: older (boot once to upgrade) or newer (copy from that build). */
+function checkSourceSchema(source: Map<string, SqliteTable>, code: Map<string, SqliteTable>, sqlitePath: string): void {
+  const missing: string[] = [];
+  const unknown: string[] = [];
+  for (const [table, { columns }] of code) {
+    const have = source.get(table);
+    if (!have) missing.push(table);
+    else for (const column of columns) if (!have.columns.includes(column)) missing.push(`${table}.${column}`);
+  }
+  for (const [table, { columns }] of source) {
+    const known = code.get(table);
+    if (!known) unknown.push(table);
+    else for (const column of columns) if (!known.columns.includes(column)) unknown.push(`${table}.${column}`);
+  }
+  if (unknown.length > 0) {
+    throw new DbCopyRefusal(
+      `The SQLite database has ${unknown.length} table(s)/column(s) this build does not know (${preview(unknown)}): it was written by a newer ` +
+        `build. Run db:copy from that build (or a newer one), so nothing is dropped.`
+    );
+  }
+  if (missing.length > 0) {
+    throw new DbCopyRefusal(
+      `The SQLite database is older than this build (missing ${preview(missing)}). Upgrade it first: start this build once ` +
+        `against it (DB_SQLITE_PATH=${sqlitePath} pnpm --filter @ai-orchestrator/api start, wait for "listening", stop it), then run db:copy again.`
+    );
+  }
+}
+
+interface PgColumn {
+  name: string;
+  dataType: string;
+  notNull: boolean;
+  identity: "ALWAYS" | "BY DEFAULT" | null;
+  generated: boolean;
+}
+
+interface PgTable {
+  columns: Map<string, PgColumn>;
+  primaryKey: string[];
+  /** Tables this one references (foreign keys). */
+  references: Set<string>;
+  /** Columns backed by a sequence (identity or serial), whose sequence must move past the copied values. */
+  sequenceColumns: string[];
+}
+
+async function postgresTables(client: PoolClient): Promise<Map<string, PgTable>> {
+  const tables = new Map<string, PgTable>();
+  const tableRows = await client.query<{ table_name: string }>(
+    `SELECT table_name FROM information_schema.tables WHERE table_schema = current_schema() AND table_type = 'BASE TABLE'`
+  );
+  for (const { table_name } of tableRows.rows) tables.set(table_name, { columns: new Map(), primaryKey: [], references: new Set(), sequenceColumns: [] });
+  const columnRows = await client.query<{
+    table_name: string; column_name: string; data_type: string; is_nullable: string; is_identity: string;
+    identity_generation: string | null; is_generated: string; column_default: string | null;
+  }>(
+    `SELECT table_name, column_name, data_type, is_nullable, is_identity, identity_generation, is_generated, column_default
+       FROM information_schema.columns WHERE table_schema = current_schema() ORDER BY table_name, ordinal_position`
+  );
+  for (const row of columnRows.rows) {
+    const table = tables.get(row.table_name);
+    if (!table) continue;
+    const identity = row.is_identity === "YES" ? (row.identity_generation === "ALWAYS" ? "ALWAYS" : "BY DEFAULT") : null;
+    table.columns.set(row.column_name, {
+      name: row.column_name,
+      dataType: row.data_type.toLowerCase(),
+      notNull: row.is_nullable === "NO",
+      identity,
+      generated: row.is_generated === "ALWAYS"
+    });
+    if (identity || /^nextval\(/i.test(row.column_default ?? "")) table.sequenceColumns.push(row.column_name);
+  }
+  const keyRows = await client.query<{ table_name: string; column_name: string; ord: number }>(
+    `SELECT c.relname AS table_name, a.attname AS column_name, k.ord::int AS ord
+       FROM pg_index i
+       JOIN pg_class c ON c.oid = i.indrelid
+       JOIN LATERAL unnest(i.indkey) WITH ORDINALITY AS k(attnum, ord) ON true
+       JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = k.attnum
+      WHERE i.indisprimary AND c.relnamespace = current_schema()::regnamespace
+      ORDER BY c.relname, k.ord`
+  );
+  for (const row of keyRows.rows) tables.get(row.table_name)?.primaryKey.push(row.column_name);
+  const fkRows = await client.query<{ child: string; parent: string }>(
+    `SELECT c.relname AS child, p.relname AS parent
+       FROM pg_constraint k JOIN pg_class c ON c.oid = k.conrelid JOIN pg_class p ON p.oid = k.confrelid
+      WHERE k.contype = 'f' AND k.connamespace = current_schema()::regnamespace`
+  );
+  for (const row of fkRows.rows) if (row.child !== row.parent) tables.get(row.child)?.references.add(row.parent);
+  return tables;
+}
+
+interface TablePlan {
+  table: string;
+  /** Source columns, all mapped to target columns of the same name. */
+  columns: string[];
+  target: PgTable;
+  seq: boolean;
+}
+
+/** The table/column mapping from the two live schemas; throws on anything it cannot map. */
+function planTables(source: Map<string, SqliteTable>, target: Map<string, PgTable>): TablePlan[] {
+  const problems: string[] = [];
+  const plans: TablePlan[] = [];
+  for (const [table, { columns }] of source) {
+    const pg = target.get(table);
+    if (!pg) {
+      problems.push(`table ${table} has no Postgres counterpart`);
+      continue;
+    }
+    for (const column of columns) {
+      const pgColumn = pg.columns.get(column);
+      if (!pgColumn) problems.push(`column ${table}.${column} has no Postgres counterpart`);
+      else if (pgColumn.generated || pgColumn.identity === "ALWAYS") problems.push(`column ${table}.${column} is generated on Postgres and cannot be copied`);
+    }
+    for (const [name, column] of pg.columns) {
+      if (columns.includes(name)) continue;
+      const seqStandIn = name === "seq" && SEQ_TABLES.has(table) && column.identity === "ALWAYS";
+      if (!column.generated && !seqStandIn) problems.push(`Postgres column ${table}.${name} has no SQLite counterpart`);
+    }
+    if (pg.primaryKey.length === 0) problems.push(`Postgres table ${table} has no primary key (the copy checksums primary keys)`);
+    plans.push({ table, columns, target: pg, seq: SEQ_TABLES.has(table) });
+  }
+  for (const table of target.keys()) {
+    if (table !== "schema_migrations" && !source.has(table)) problems.push(`Postgres table ${table} has no SQLite counterpart`);
+  }
+  if (problems.length > 0) {
+    throw new Error(
+      `db:copy cannot map the schemas (${problems.length} problem(s)): ${problems.join("; ")}. Both stores should have the same ` +
+        `schema at this build (see db/schema-parity.test.ts); this is a bug, please report it.`
+    );
+  }
+  return plans;
+}
+
+/** Parents before children (foreign keys), ties by name, so every insert finds its referenced rows. */
+function dependencyOrder(plans: TablePlan[]): TablePlan[] {
+  const byName = new Map(plans.map((plan) => [plan.table, plan]));
+  const done = new Set<string>();
+  const visiting = new Set<string>();
+  const out: TablePlan[] = [];
+  const visit = (plan: TablePlan) => {
+    if (done.has(plan.table)) return;
+    if (visiting.has(plan.table)) throw new Error(`db:copy: foreign keys form a cycle through ${plan.table}.`);
+    visiting.add(plan.table);
+    for (const parent of [...plan.target.references].sort()) {
+      const parentPlan = byName.get(parent);
+      if (parentPlan) visit(parentPlan);
+    }
+    visiting.delete(plan.table);
+    done.add(plan.table);
+    out.push(plan);
+  };
+  for (const plan of [...plans].sort((a, b) => a.table.localeCompare(b.table))) visit(plan);
+  return out;
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Values
+
+type SourceRow = Record<string, unknown> & { __rowid: number | bigint };
+
+/** A source value as the target column's type takes it (before pgParams' U+0000 mapping). */
+function convertValue(value: unknown, column: PgColumn, where: () => string, rounded: Record<string, number>): unknown {
+  if (value === null || value === undefined) return null;
+  const type = column.dataType;
+  if (type.startsWith("timestamp") || type === "date") {
+    if (typeof value === "string") {
+      if (value.trim() !== "") return value;
+      if (column.notNull) throw new Error(`${where()}: empty timestamp in NOT NULL column ${column.name}`);
+      return null;
+    }
+    throw new Error(`${where()}: column ${column.name} holds ${typeof value} ${String(value)}, not a timestamp string`);
+  }
+  if (type === "integer" || type === "bigint" || type === "smallint") {
+    if (typeof value === "bigint") return Number.isSafeInteger(Number(value)) ? Number(value) : value.toString();
+    if (typeof value === "number") {
+      if (Number.isInteger(value)) return value;
+      if (!Number.isFinite(value)) throw new Error(`${where()}: column ${column.name} holds ${value}`);
+      rounded[column.name] = (rounded[column.name] ?? 0) + 1;
+      return Math.sign(value) * Math.round(Math.abs(value));
+    }
+    if (typeof value === "boolean") return value ? 1 : 0;
+    return value;
+  }
+  if (type === "boolean") {
+    if (typeof value === "number" || typeof value === "bigint") return Number(value) !== 0;
+    if (typeof value === "string") return value === "1" || value.toLowerCase() === "true";
+    return Boolean(value);
+  }
+  if (type === "double precision" || type === "real" || type === "numeric") {
+    return typeof value === "bigint" ? Number(value) : value;
+  }
+  if (type === "bytea") {
+    return Buffer.isBuffer(value) ? value : Buffer.from(String(value), "utf8");
+  }
+  // text, json, jsonb, character varying, …: SQLite text as is (JSON text verbatim).
+  if (typeof value === "string") return value;
+  if (Buffer.isBuffer(value) || value instanceof Uint8Array) return Buffer.from(value).toString("utf8");
+  return String(value);
+}
+
+/** A primary-key value as Postgres stores it, for the checksums: text with lone surrogates and U+0000 as U+FFFD. */
+function keyPart(value: unknown): string {
+  if (value === null || value === undefined) return "\u0000null";
+  if (typeof value === "string") return wellFormedAuditText(value);
+  if (typeof value === "bigint" || typeof value === "number") return String(value);
+  if (Buffer.isBuffer(value) || value instanceof Uint8Array) return Buffer.from(value).toString("hex");
+  return String(value);
+}
+
+function keyHash(values: unknown[]): Buffer {
+  return createHash("sha256").update(JSON.stringify(values.map(keyPart)), "utf8").digest();
+}
+
+/** Order-independent: the sum of the keys' hashes (mod 2^256) and the count. */
+class KeySet {
+  private sum = 0n;
+  count = 0;
+  add(values: unknown[]): void {
+    this.sum = (this.sum + BigInt(`0x${keyHash(values).toString("hex")}`)) & ((1n << 256n) - 1n);
+    this.count += 1;
+  }
+  digest(): string {
+    return `${this.count}:${this.sum.toString(16).padStart(64, "0")}`;
+  }
+}
+
+/** Order-dependent: a running hash over the keys in order. */
+class KeySequence {
+  private hash = Buffer.alloc(32);
+  add(values: unknown[]): void {
+    this.hash = createHash("sha256").update(this.hash).update(keyHash(values)).digest();
+  }
+  digest(): string {
+    return this.hash.toString("hex");
+  }
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// The run
+
+function sqliteIdent(name: string): string {
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) throw new Error(`Refusing to quote suspicious identifier: ${name}`);
+  return `"${name}"`;
+}
+const pgIdent = sqliteIdent;
+
+function preview(items: string[], max = 8): string {
+  return items.length <= max ? items.join(", ") : `${items.slice(0, max).join(", ")} and ${items.length - max} more`;
+}
+
+/** A PgContext on one client (inside the copy transaction), for postgres/audit.ts verifyAuditChain. */
+function clientContext(client: PoolClient): PgContext {
+  const query = async <T extends object>(sql: string, params?: unknown[]): Promise<T[]> => (await client.query(sql, pgParams(params))).rows as T[];
+  const unsupported = () => {
+    throw new Error("db:copy: this context only runs queries on the copy's connection.");
+  };
+  return {
+    pool: undefined as never,
+    store: undefined as never,
+    query,
+    queryOne: async <T extends object>(sql: string, params?: unknown[]): Promise<T | null> => (await query<T>(sql, params))[0] ?? null,
+    execute: async (sql, params) => {
+      await query(sql, params);
+    },
+    withClient: unsupported,
+    withTransaction: unsupported
+  };
+}
+
+/** The source chain as Postgres will store it: lone surrogates and U+0000 become U+FFFD (pg / pgParams). */
+function asPostgresStores(rows: AuditChainRow[]): AuditChainRow[] {
+  return rows.map((row) => {
+    const fields = { ...row.fields } as Record<keyof AuditCanonicalInput, string | null>;
+    for (const key of Object.keys(fields) as Array<keyof AuditCanonicalInput>) fields[key] = wellFormedAuditText(fields[key]);
+    return { ...row, fields: fields as unknown as AuditCanonicalInput };
+  });
+}
+
+function verdictLine(result: AuditChainResult): string {
+  if (result.firstBrokenAt) return `broken at row ${result.firstBrokenAt.id} (${result.rowsChecked} rows verified before it)`;
+  const unverifiable = result.unverifiable?.length ?? 0;
+  return unverifiable > 0
+    ? `${result.rowsChecked} rows verified, ${unverifiable} cannot be verified (${preview(result.unverifiable!.map((row) => row.id))})`
+    : `intact (${result.rowsChecked} rows verified)`;
+}
+
+function sameVerdict(a: AuditChainResult, b: AuditChainResult): boolean {
+  return (
+    a.ok === b.ok &&
+    a.rowsChecked === b.rowsChecked &&
+    (a.firstBrokenAt?.id ?? null) === (b.firstBrokenAt?.id ?? null) &&
+    JSON.stringify((a.unverifiable ?? []).map((row) => row.id)) === JSON.stringify((b.unverifiable ?? []).map((row) => row.id))
+  );
+}
+
+async function countRows(client: PoolClient, table: string): Promise<number> {
+  const r = await client.query<{ n: string }>(`SELECT COUNT(*)::text AS n FROM ${pgIdent(table)}`);
+  return Number(r.rows[0]?.n ?? 0);
+}
+
+/** Primary keys (and their order by seq) of a target table, read through a cursor in the copy transaction. */
+async function targetKeys(client: PoolClient, plan: TablePlan): Promise<{ set: string; order?: string }> {
+  const keys = plan.target.primaryKey;
+  const set = new KeySet();
+  const order = plan.seq ? new KeySequence() : undefined;
+  const cursor = `db_copy_keys_${plan.table}`;
+  await client.query(
+    `DECLARE ${pgIdent(cursor)} NO SCROLL CURSOR FOR SELECT ${keys.map(pgIdent).join(", ")} FROM ${pgIdent(plan.table)}${plan.seq ? " ORDER BY seq" : ""}`
+  );
+  try {
+    for (;;) {
+      const batch = await client.query({ text: `FETCH 5000 FROM ${pgIdent(cursor)}`, rowMode: "array" });
+      for (const row of batch.rows as unknown[][]) {
+        set.add(row);
+        order?.add(row);
+      }
+      if (batch.rows.length < 5000) break;
+    }
+  } finally {
+    await client.query(`CLOSE ${pgIdent(cursor)}`);
+  }
+  return { set: set.digest(), order: order?.digest() };
+}
+
+function sourceKeys(db: BetterSqlite3Database, plan: TablePlan): { set: string; order?: string } {
+  const keys = plan.target.primaryKey;
+  const set = new KeySet();
+  const order = plan.seq ? new KeySequence() : undefined;
+  const select = keys.map(sqliteIdent).join(", ");
+  if (plan.table === "audit_logs") {
+    // Keys as the copy wrote them: audit text exact.
+    for (const row of auditRowsInBatches(db, `SELECT rowid AS __rowid, ${select} FROM audit_logs`, keys)) {
+      const values = keys.map((key) => row[key]);
+      set.add(values);
+      order?.add(values);
+    }
+  } else {
+    const stmt = db.prepare(`SELECT ${select} FROM ${sqliteIdent(plan.table)} ORDER BY rowid`).raw(true).safeIntegers(true);
+    for (const row of stmt.iterate() as Iterable<unknown[]>) {
+      set.add(row);
+      order?.add(row);
+    }
+  }
+  return { set: set.digest(), order: order?.digest() };
+}
+
+/** `selectSql` (which must select `rowid AS __rowid`) over audit_logs in rowid batches, the text columns exact. */
+function* auditRowsInBatches(db: BetterSqlite3Database, selectSql: string, textColumns: readonly string[]): Generator<SourceRow> {
+  const exact = textColumns.filter((column) => (SQLITE_AUDIT_TEXT_COLUMNS as readonly string[]).includes(column));
+  let after: number | bigint = -1;
+  const stmt = db.prepare(`${selectSql} WHERE rowid > ? ORDER BY rowid LIMIT 2000`).safeIntegers(true);
+  for (;;) {
+    const rows = stmt.all(after) as SourceRow[];
+    if (rows.length === 0) return;
+    exactSqliteTextRows(db, "audit_logs", rows, exact, "__rowid");
+    yield* rows;
+    after = rows[rows.length - 1]!.__rowid;
+  }
+}
+
+/** Source rows of a table in rowid order, in batches (audit text exact). */
+function* sourceRows(db: BetterSqlite3Database, plan: TablePlan, batch: number): Generator<SourceRow[]> {
+  const select = `SELECT rowid AS __rowid, ${plan.columns.map(sqliteIdent).join(", ")} FROM ${sqliteIdent(plan.table)}`;
+  if (plan.table === "audit_logs") {
+    let pending: SourceRow[] = [];
+    for (const row of auditRowsInBatches(db, select, plan.columns)) {
+      pending.push(row);
+      if (pending.length >= batch) {
+        yield pending;
+        pending = [];
+      }
+    }
+    if (pending.length > 0) yield pending;
+    return;
+  }
+  const stmt = db.prepare(`${select} WHERE rowid > ? ORDER BY rowid LIMIT ?`).safeIntegers(true);
+  let after: number | bigint = -1;
+  for (;;) {
+    const rows = stmt.all(after, batch) as SourceRow[];
+    if (rows.length === 0) return;
+    yield rows;
+    after = rows[rows.length - 1]!.__rowid;
+  }
+}
+
+function describeError(error: unknown): string {
+  if (error instanceof Error) {
+    const pg = error as Error & { code?: string; column?: string; detail?: string };
+    return `${error.message}${pg.code ? ` (${pg.code})` : ""}${pg.detail ? `: ${pg.detail}` : ""}`;
+  }
+  return String(error);
+}
+
+export async function runDbCopy(options: DbCopyOptions): Promise<DbCopyReport> {
+  const log = options.log ?? (() => undefined);
+  const dryRun = options.dryRun === true;
+  const batchRows = Math.max(1, Math.floor(options.batchRows ?? DEFAULT_BATCH_ROWS));
+  const sqlitePath = path.resolve(options.sqlitePath);
+
+  if (!fs.existsSync(sqlitePath) || !fs.statSync(sqlitePath).isFile()) {
+    throw new DbCopyRefusal(`--from: no SQLite file at ${sqlitePath}.`);
+  }
+  let db: BetterSqlite3Database;
+  try {
+    db = new Database(sqlitePath, { readonly: true, fileMustExist: true });
+    db.prepare(`SELECT COUNT(*) FROM sqlite_master`).get();
+  } catch (error) {
+    throw new DbCopyRefusal(`--from: ${sqlitePath} is not a readable SQLite database (${describeError(error)}).`);
+  }
+
+  try {
+    // One read transaction: every read below sees the same snapshot, even if something writes the file meanwhile.
+    db.exec("BEGIN");
+    const source = sqliteTables(db);
+    if (source.size === 0) throw new DbCopyRefusal(`--from: ${sqlitePath} holds no tables; it is not an L2M database.`);
+    checkSourceSchema(source, await codeSqliteTables(), options.sqlitePath);
+    log(`Source: SQLite ${sqlitePath} (read-only), schema matches this build.`);
+
+    const sourceAuditRows = readSqliteAuditChainRows(db);
+    const sourceAudit = verifyAuditRows(sourceAuditRows);
+    const expectedTarget = verifyAuditRows(asPostgresStores(sourceAuditRows));
+    if (expectedTarget.firstBrokenAt && (expectedTarget.firstBrokenAt.id !== sourceAudit.firstBrokenAt?.id)) {
+      throw new DbCopyRefusal(
+        `The audit chain would break on Postgres at row ${expectedTarget.firstBrokenAt.id}, where SQLite says it is ${verdictLine(sourceAudit)}. ` +
+          `Nothing was copied.`
+      );
+    }
+    const unverifiableIds = (result: AuditChainResult) => new Set((result.unverifiable ?? []).map((row) => row.id));
+    const sourceUnverifiable = unverifiableIds(sourceAudit);
+    const becameUnverifiable = [...unverifiableIds(expectedTarget)].filter((id) => !sourceUnverifiable.has(id));
+
+    const pool = new Pool(postgresPoolConfig(options.postgres, { max: 1 }));
+    try {
+      return await withMigrationLock(pool, options.postgres.schema, async (client) => {
+        await client.query("SET TimeZone = 'UTC'");
+        // A dry run works inside a transaction it rolls back, its migration rehearsal included.
+        if (dryRun) await client.query("BEGIN");
+        // `schema` is set only by tests (each its own); a deployment uses the role's default schema, as PostgresStore does.
+        if (options.postgres.schema) await client.query(`CREATE SCHEMA IF NOT EXISTS ${pgIdent(options.postgres.schema)}`);
+        try {
+          const report = await copyInto(client, {
+            db, source, dryRun, batchRows, log, sourceAudit, expectedTarget, becameUnverifiable
+          });
+          if (dryRun) await client.query("ROLLBACK");
+          return report;
+        } catch (error) {
+          if (dryRun) await client.query("ROLLBACK").catch(() => undefined);
+          throw error;
+        }
+      });
+    } finally {
+      await pool.end().catch(() => undefined);
+    }
+  } finally {
+    try {
+      db.exec("ROLLBACK");
+    } catch {
+      // no read transaction open
+    }
+    db.close();
+  }
+}
+
+interface CopyContext {
+  db: BetterSqlite3Database;
+  source: Map<string, SqliteTable>;
+  dryRun: boolean;
+  batchRows: number;
+  log: (line: string) => void;
+  sourceAudit: AuditChainResult;
+  expectedTarget: AuditChainResult;
+  becameUnverifiable: string[];
+}
+
+async function copyInto(client: PoolClient, ctx: CopyContext): Promise<DbCopyReport> {
+  const { db, dryRun, log } = ctx;
+  const hasChain = (await client.query<{ t: string | null }>(`SELECT to_regclass('schema_migrations')::text AS t`)).rows[0]?.t !== null;
+  const version = hasChain ? await currentChainVersion(client) : 0;
+  let migratedTarget = false;
+  if (version === 0) {
+    const existing = (await client.query<{ table_name: string }>(
+      `SELECT table_name FROM information_schema.tables WHERE table_schema = current_schema() AND table_name <> 'schema_migrations'`
+    )).rows.map((row) => row.table_name);
+    if (existing.length > 0) {
+      throw new DbCopyRefusal(
+        `The Postgres database holds ${existing.length} table(s) (${preview(existing)}) but no applied L2M migrations. Point db:copy at an empty database.`
+      );
+    }
+    log(`Target: empty, no migrations applied: ${dryRun ? "would migrate" : "migrating"} it to v${CODE_SCHEMA_VERSION} first (the normal migration chain).`);
+    await applyMigrationChain(client);
+    migratedTarget = true;
+  } else if (version !== CODE_SCHEMA_VERSION) {
+    throw new DbCopyRefusal(
+      version > CODE_SCHEMA_VERSION
+        ? `The Postgres database is at schema v${version}, newer than this build (v${CODE_SCHEMA_VERSION}). Run db:copy from a build at v${version}.`
+        : `The Postgres database is at schema v${version}, this build is at v${CODE_SCHEMA_VERSION}. db:copy needs the same version: use an empty database ` +
+            `(db:copy migrates it), or start this build once against this one so it migrates, then run db:copy again.`
+    );
+  } else {
+    log(`Target: schema v${version} (this build's).`);
+  }
+
+  const target = await postgresTables(client);
+  const plans = planTables(ctx.source, target);
+
+  // Emptiness: no user or workflow, and no row in any table that is not a migration's own seed (a row whose primary key
+  // the source also holds, e.g. schema_markers, guard_profile_revision): those are replaced by the source's rows.
+  const seedRows = new Map<string, number>();
+  const refusals: string[] = [];
+  for (const plan of plans) {
+    const n = await countRows(client, plan.table);
+    if (n === 0) continue;
+    if (plan.table === "users" || plan.table === "workflows") {
+      refusals.push(`${plan.table}: ${n} row(s)`);
+      continue;
+    }
+    const keys = plan.target.primaryKey;
+    const targetKeyRows = (await client.query({ text: `SELECT ${keys.map(pgIdent).join(", ")} FROM ${pgIdent(plan.table)}`, rowMode: "array" })).rows as unknown[][];
+    const lookup = db.prepare(`SELECT 1 FROM ${sqliteIdent(plan.table)} WHERE ${keys.map((key) => `${sqliteIdent(key)} = ?`).join(" AND ")}`);
+    const foreign = targetKeyRows.filter((values) => !lookup.get(...values.map((value) => (typeof value === "boolean" ? Number(value) : value))));
+    if (foreign.length > 0) refusals.push(`${plan.table}: ${foreign.length} row(s) not in the source`);
+    else seedRows.set(plan.table, n);
+  }
+  if (refusals.length > 0) {
+    throw new DbCopyRefusal(`The Postgres database is not empty (${refusals.join("; ")}). db:copy only copies into an empty database; nothing was written.`);
+  }
+
+  // Seeded tables last, so a trigger bumping them while their dependents are copied (guard_profile_revision) does not
+  // change the value the source holds.
+  const ordered = dependencyOrder(plans);
+  const order = [...ordered.filter((plan) => !seedRows.has(plan.table)), ...ordered.filter((plan) => seedRows.has(plan.table))];
+  const sourceCount = (table: string) => Number((db.prepare(`SELECT COUNT(*) AS n FROM ${sqliteIdent(table)}`).get() as { n: number }).n);
+
+  const tables: DbCopyTableReport[] = [];
+  if (dryRun) {
+    for (const plan of order) {
+      tables.push({ table: plan.table, rows: sourceCount(plan.table), replacedSeedRows: seedRows.get(plan.table) ?? 0, rounded: {} });
+    }
+    const report = summary(tables, { dryRun, migratedTarget, audit: { source: ctx.sourceAudit, expectedTarget: ctx.expectedTarget, becameUnverifiable: ctx.becameUnverifiable } });
+    printSummary(report, log);
+    return report;
+  }
+
+  await client.query("BEGIN");
+  try {
+    for (const plan of order) {
+      const rounded: Record<string, number> = {};
+      const replaced = seedRows.get(plan.table) ?? 0;
+      if (replaced > 0) await client.query(`DELETE FROM ${pgIdent(plan.table)}`);
+      const columns = plan.columns.map((name) => plan.target.columns.get(name)!);
+      const perStatement = Math.max(1, Math.min(ctx.batchRows, Math.floor(MAX_PARAMS / Math.max(1, columns.length))));
+      const insertHead = `INSERT INTO ${pgIdent(plan.table)} (${columns.map((column) => pgIdent(column.name)).join(", ")}) VALUES `;
+      let copied = 0;
+      for (const rows of sourceRows(db, plan, perStatement)) {
+        const params: unknown[] = [];
+        const tuples: string[] = [];
+        for (const row of rows) {
+          const where = () => `${plan.table} (SQLite rowid ${String(row.__rowid)})`;
+          tuples.push(`(${columns.map((column) => {
+            params.push(convertValue(row[column.name], column, where, rounded));
+            return `$${params.length}`;
+          }).join(", ")})`);
+        }
+        try {
+          await client.query(insertHead + tuples.join(", "), pgParams(params));
+        } catch (error) {
+          throw new Error(
+            `Copying ${plan.table} failed in the batch from SQLite rowid ${String(rows[0]!.__rowid)} to ${String(rows[rows.length - 1]!.__rowid)}: ${describeError(error)}`
+          );
+        }
+        copied += rows.length;
+      }
+      tables.push({ table: plan.table, rows: copied, replacedSeedRows: replaced, rounded });
+      log(`  ${plan.table}: ${copied} row(s)${replaced ? ` (replaced ${replaced} migration seed row(s))` : ""}${Object.keys(rounded).length ? `, rounded to integers: ${JSON.stringify(rounded)}` : ""}`);
+    }
+
+    // Sequences: past the copied values (identities assigned while copying are already there; this also covers a
+    // column a future migration backs by a sequence and whose values were copied).
+    for (const plan of order) {
+      for (const column of plan.target.sequenceColumns) {
+        await client.query(
+          `SELECT setval(pg_get_serial_sequence($1, $2), COALESCE((SELECT MAX(${pgIdent(column)}) FROM ${pgIdent(plan.table)}), 0) + 1, false)`,
+          [plan.table, column]
+        );
+      }
+    }
+
+    // Verify before committing.
+    log("Verifying...");
+    const mismatches: string[] = [];
+    for (const plan of order) {
+      const expected = sourceCount(plan.table);
+      const actual = await countRows(client, plan.table);
+      if (expected !== actual) {
+        mismatches.push(`${plan.table}: ${expected} row(s) in SQLite, ${actual} on Postgres`);
+        continue;
+      }
+      const sourceDigest = sourceKeys(db, plan);
+      const targetDigest = await targetKeys(client, plan);
+      if (sourceDigest.set !== targetDigest.set) mismatches.push(`${plan.table}: primary-key checksum differs`);
+      if (sourceDigest.order !== targetDigest.order) mismatches.push(`${plan.table}: seq order differs from SQLite rowid order`);
+    }
+    const targetAudit = await verifyPostgresAuditChain(clientContext(client));
+    if (!sameVerdict(targetAudit, ctx.expectedTarget)) {
+      mismatches.push(`audit chain on Postgres is ${verdictLine(targetAudit)}, expected ${verdictLine(ctx.expectedTarget)}`);
+    }
+    if (mismatches.length > 0) {
+      throw new Error(`Verification failed, nothing was committed: ${mismatches.join("; ")}.`);
+    }
+    await client.query("COMMIT");
+    const report = summary(tables, {
+      dryRun,
+      migratedTarget,
+      audit: { source: ctx.sourceAudit, expectedTarget: ctx.expectedTarget, target: targetAudit, becameUnverifiable: ctx.becameUnverifiable }
+    });
+    printSummary(report, log);
+    return report;
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => undefined);
+    throw error;
+  }
+}
+
+function summary(tables: DbCopyTableReport[], rest: Omit<DbCopyReport, "tables" | "totalRows" | "schemaVersion">): DbCopyReport {
+  return { ...rest, schemaVersion: CODE_SCHEMA_VERSION, tables, totalRows: tables.reduce((sum, table) => sum + table.rows, 0) };
+}
+
+function printSummary(report: DbCopyReport, log: (line: string) => void): void {
+  log("");
+  if (report.dryRun) {
+    log(`Dry run: nothing was written. ${report.totalRows} row(s) in ${report.tables.length} table(s) would be copied:`);
+    for (const table of report.tables) if (table.rows > 0) log(`  ${table.table}: ${table.rows}`);
+  } else {
+    log(`Copied ${report.totalRows} row(s) in ${report.tables.length} table(s) at schema v${report.schemaVersion}; verified row counts, primary-key checksums and seq order.`);
+  }
+  log(`Audit chain on SQLite: ${verdictLine(report.audit.source)}.`);
+  log(`Audit chain on Postgres: ${verdictLine(report.audit.target ?? report.audit.expectedTarget)}${report.audit.target ? "" : " (expected)"}.`);
+  if (report.audit.becameUnverifiable.length > 0) {
+    log(
+      `Note: ${report.audit.becameUnverifiable.length} audit row(s) verified on SQLite cannot be verified on Postgres (${preview(report.audit.becameUnverifiable)}): ` +
+        `each holds two or more characters Postgres cannot store (U+0000 or a lone surrogate), stored as U+FFFD. Keep the SQLite file as the record for them.`
+    );
+  }
+  log(
+    `Secrets ${report.dryRun ? "would be" : "were"} copied encrypted (ciphertext, iv and auth tag only, never decrypted). Start the API on Postgres ` +
+      `with the same SECRET_MASTER_KEY_BASE64.`
+  );
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// CLI arguments (db-copy.ts)
+
+export interface DbCopyArgs {
+  /** The SQLite file (`sqlite:<path>`; `sqlite` alone: DB_SQLITE_PATH, else apps/api/data/orchestrator.db). */
+  from: string;
+  yes: boolean;
+  dryRun: boolean;
+  help: boolean;
+}
+
+/** apps/api (the default SQLite file is apps/api/data/orchestrator.db, as the API opens it). */
+export const API_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
+
+export const USAGE = [
+  "Usage: pnpm --filter @ai-orchestrator/api db:copy -- --from sqlite:<path> --to postgres [--dry-run | --yes]",
+  "",
+  "Copies a SQLite database into an empty Postgres database, then verifies it (row counts, primary-key checksums,",
+  "insertion order, the audit chain) before committing. One transaction: a failed copy writes nothing.",
+  "",
+  "Options:",
+  "  --from sqlite:<path>  The SQLite file (read-only). `--from sqlite` alone uses DB_SQLITE_PATH, else",
+  "                        apps/api/data/orchestrator.db. A relative path is relative to the current directory",
+  "                        (apps/api when run through pnpm --filter).",
+  "  --to postgres         The target: DB_POSTGRESDB_URL or DB_POSTGRESDB_HOST/PORT/DATABASE/USER/PASSWORD/SSL*.",
+  "  --dry-run             Check everything and report row counts; write nothing.",
+  "  --yes, -y             Copy (required unless --dry-run).",
+  "  --help, -h            Show this message.",
+  "",
+  "Stop the API first. An empty, unmigrated Postgres database is migrated first; a non-empty one, or one at",
+  "another schema version, is refused. Secrets are copied encrypted: start the API on Postgres with the same",
+  "SECRET_MASTER_KEY_BASE64."
+].join("\n");
+
+/** Parses the CLI arguments; throws DbCopyRefusal with a usage hint on anything wrong. */
+export function parseDbCopyArgs(argv: string[], env: Record<string, string | undefined> = process.env): DbCopyArgs {
+  let from: string | undefined;
+  let to: string | undefined;
+  let yes = false;
+  let dryRun = false;
+  let help = false;
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i]!;
+    if (arg === "--") continue;
+    const [flag, inline] = arg.startsWith("--") && arg.includes("=") ? [arg.slice(0, arg.indexOf("=")), arg.slice(arg.indexOf("=") + 1)] : [arg, undefined];
+    const value = () => {
+      const next = inline ?? argv[++i];
+      if (next === undefined || next === "") throw new DbCopyRefusal(`${flag} needs a value.\n\n${USAGE}`);
+      return next;
+    };
+    if (flag === "--from") from = value();
+    else if (flag === "--to") to = value();
+    else if (flag === "--yes" || flag === "-y") yes = true;
+    else if (flag === "--dry-run") dryRun = true;
+    else if (flag === "--help" || flag === "-h") help = true;
+    else throw new DbCopyRefusal(`Unknown argument: ${arg}\n\n${USAGE}`);
+  }
+  if (help) return { from: "", yes, dryRun, help };
+  if (from === undefined) throw new DbCopyRefusal(`--from sqlite:<path> is required.\n\n${USAGE}`);
+  let file: string;
+  if (from === "sqlite") {
+    file = env.DB_SQLITE_PATH?.trim() ? path.resolve(env.DB_SQLITE_PATH.trim()) : path.join(API_ROOT, "data", "orchestrator.db");
+  } else if (from.startsWith("sqlite:") && from.length > "sqlite:".length) {
+    file = path.resolve(from.slice("sqlite:".length).replace(/^\/\/(?=\/)/, ""));
+  } else {
+    throw new DbCopyRefusal(`--from must be sqlite:<path> (or sqlite for the API's default file), got '${from}'.\n\n${USAGE}`);
+  }
+  if (to === undefined) throw new DbCopyRefusal(`--to postgres is required.\n\n${USAGE}`);
+  if (to !== "postgres" && to !== "postgresql") throw new DbCopyRefusal(`--to must be postgres, got '${to}'.\n\n${USAGE}`);
+  if (yes && dryRun) throw new DbCopyRefusal(`--dry-run and --yes together: choose one.\n\n${USAGE}`);
+  if (!yes && !dryRun) throw new DbCopyRefusal(`Refusing to copy without --yes (or check first with --dry-run).\n\n${USAGE}`);
+  return { from: file, yes, dryRun, help };
+}
