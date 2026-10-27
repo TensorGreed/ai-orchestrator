@@ -1,9 +1,18 @@
 /**
  * Phase 13.1 — verifyAuditRows on its own (no store): what an unverifiable row reports, the single-U+FFFD search's
- * candidates (the 2048 lone surrogates and U+0000) and its cost on a large legacy row.
+ * candidates (the 2048 lone surrogates and U+0000) and its cost on a large legacy row; storedSqliteAuditText, which
+ * reads SQLite text bytes the same on every Node version.
  */
 import { describe, expect, it } from "vitest";
-import { auditEntryHash, GENESIS_HASH, verifyAuditRows, wellFormedAuditText, type AuditCanonicalInput, type AuditChainRow } from "./audit-chain.js";
+import {
+  auditEntryHash,
+  GENESIS_HASH,
+  storedSqliteAuditText,
+  verifyAuditRows,
+  wellFormedAuditText,
+  type AuditCanonicalInput,
+  type AuditChainRow
+} from "./audit-chain.js";
 
 function fields(id: string, message: string | null, overrides: Partial<AuditCanonicalInput> = {}): AuditCanonicalInput {
   return {
@@ -96,5 +105,49 @@ describe("verifyAuditRows", () => {
     const elapsed = performance.now() - started;
     expect(result).toMatchObject({ ok: false, firstBrokenAt: { id: "big" } });
     expect(elapsed).toBeLessThan(200);
+  });
+
+  it("a row whose stored text kept its lone surrogates verifies exactly; edited, it is broken, never searched or unverifiable", () => {
+    let prev = GENESIS_HASH;
+    const rows: AuditChainRow[] = [fields("a", "first"), fields("kept", "\ud800 x \udc00 \udbff"), fields("b", "after")].map((f) => {
+      const entryHash = auditEntryHash(prev, f);
+      const row = { fields: { ...f }, prevHash: prev, entryHash };
+      prev = entryHash;
+      return row;
+    });
+    expect(verifyAuditRows(rows)).toEqual({ ok: true, rowsChecked: 3 });
+    for (const edit of [{ action: "delete" }, { message: "\ud800 x \udc00 \udbfe" }, { message: "\ud800 x \udc00 \uFFFD" }]) {
+      const edited = rows.map((row) => (row.fields.id === "kept" ? { ...row, fields: { ...row.fields, ...edit } } : row));
+      const result = verifyAuditRows(edited);
+      expect(result).toMatchObject({ ok: false, rowsChecked: 1, firstBrokenAt: { id: "kept" } });
+      expect(result.unverifiable).toBeUndefined();
+    }
+  });
+});
+
+describe("storedSqliteAuditText", () => {
+  const bytes = (hex: string) => Buffer.from(hex.replace(/ /g, ""), "hex");
+
+  it("decodes valid UTF-8 as is, and NULL as null", () => {
+    expect(storedSqliteAuditText(bytes(""))).toBe("");
+    expect(storedSqliteAuditText(null)).toBeNull();
+    expect(storedSqliteAuditText(Buffer.from("ok 😀 � é \u0000 x", "utf8"))).toBe("ok 😀 � é \u0000 x");
+  });
+
+  it("decodes generalized UTF-8 to the lone surrogates it encodes, beside pairs and other text", () => {
+    expect(storedSqliteAuditText(bytes("61 ed a0 80 62"))).toBe("a\ud800b");
+    expect(storedSqliteAuditText(bytes("ed bf bf ed a0 80"))).toBe("\udfff\ud800");
+    expect(storedSqliteAuditText(bytes("ed af bf f0 9f 98 80 ed b0 80"))).toBe("\udbff😀\udc00");
+    expect(storedSqliteAuditText(bytes("f4 8f bf bf ed a0 80"))).toBe("\u{10ffff}\ud800");
+  });
+
+  it("reads any other invalid bytes with U+FFFD, a CESU-8 pair and overlong forms included", () => {
+    expect(storedSqliteAuditText(bytes("ed a0 80 ed b0 80"))).toBe(new TextDecoder().decode(bytes("ed a0 80 ed b0 80")));
+    expect(storedSqliteAuditText(bytes("ed a0 80 ed b0 80"))).not.toMatch(/[\ud800-\udfff]/);
+    for (const hex of ["ed a0", "c0 80 ed a0 80", "e0 80 80 ed a0 80", "f0 80 80 80", "f4 90 80 80", "ff ed a0 80", "80"]) {
+      const decoded = storedSqliteAuditText(bytes(hex));
+      expect(decoded).toBe(new TextDecoder().decode(bytes(hex)));
+      expect(decoded).toContain("\uFFFD");
+    }
   });
 });
