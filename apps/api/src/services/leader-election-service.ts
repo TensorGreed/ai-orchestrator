@@ -138,13 +138,9 @@ export class LeaderElectionService {
       clearInterval(this.timer);
       this.timer = null;
     }
-    if (this.lock) await this.lock.release();
+    // Stop this instance's leader work first, then give up the lock or lease: freed first, a standby could start its
+    // schedules while this instance's are still registered.
     if (this.enabled && this.holder) {
-      try {
-        if (!this.lock) await this.store.releaseLease(this.leaseName, this.instanceId);
-      } catch {
-        // ignore
-      }
       this.holder = false;
       if (this.onResignLeader) {
         try {
@@ -153,7 +149,13 @@ export class LeaderElectionService {
           // ignore
         }
       }
+      try {
+        if (!this.lock) await this.store.releaseLease(this.leaseName, this.instanceId);
+      } catch {
+        // ignore
+      }
     }
+    if (this.lock) await this.lock.release();
   }
 
   async getStatus(): Promise<LeaderStatus> {

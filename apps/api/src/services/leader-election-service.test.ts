@@ -87,4 +87,20 @@ describe("leader election with a lock", () => {
       await service.stop();
     }
   });
+
+  it("a graceful stop stops the leader's work before it frees the lock", async () => {
+    const events: string[] = [];
+    const lock = new FakeLock(events);
+    const service = new LeaderElectionService(store, {
+      lock,
+      renewIntervalMs: 60_000,
+      onBecomeLeader: () => void events.push("lead"),
+      onResignLeader: () => void events.push("resign")
+    });
+    await service.start();
+    await service.stop();
+    // Freed first, a standby could start its schedules while this instance's are still registered.
+    expect(events).toEqual(["lead", "resign", "release"]);
+    expect(service.isLeader()).toBe(false);
+  });
 });
