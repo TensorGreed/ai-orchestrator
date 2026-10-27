@@ -87,8 +87,8 @@ no model is called, no MCP server is reached, no code runs.
    workers, a guard block and three approval pauses (started by a second user so the demo user may
    decide them), with a scripted OpenAI-style model on 127.0.0.1, so no key is needed. The agents'
    MCP Tool nodes pick the registered "Demo tools" server, so their calls land in its telemetry:
-   the support agent's first calculator expression is refused and retried, and the first
-   knowledge-base search is a cold one of over a second;
+   the support agent's first calculator expression is refused and retried, and the second
+   knowledge-base search (the research worker's) takes over a second;
 3. saves a golden run of the support agent;
 4. publishes v1 of a gated workflow, builds a golden set of three runs, saves a regressing draft,
    runs a real replay job against it, records the blocked publish and the draft's replay diff

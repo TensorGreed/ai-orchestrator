@@ -74,7 +74,7 @@ describe("demo MCP telemetry", () => {
       const telemetry = get(`GET /api/mcp/servers/${demoTools.id}/telemetry?window=${window}`)!;
       expect(telemetry.totals.calls).toBe(overview.tools.calls);
       expect(telemetry.totals.p50Ms).toBeGreaterThan(0);
-      // The cold knowledge-base search is the slow call.
+      // The second knowledge-base search (the research worker's) is the slow call.
       expect(telemetry.tools.find((row: { toolName: string }) => row.toolName === "lookup_kb").p95Ms).toBeGreaterThan(1000);
     }
   });

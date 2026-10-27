@@ -142,9 +142,9 @@ const DEMO_KB = {
 
 /**
  * What each call to the demo MCP server takes, in call order per tool. A
- * knowledge-base search takes a few hundred ms and its first search after a
- * cold start over a second; arithmetic is quick. Fixed, so a recording reads
- * the same every time.
+ * knowledge-base search takes a few hundred ms, and its second one (the
+ * research worker's) over a second; arithmetic is quick. Fixed, so a
+ * recording reads the same every time.
  */
 const DEMO_TOOL_DELAYS_MS: Record<string, number[]> = {
   lookup_kb: [236, 1184, 318],
