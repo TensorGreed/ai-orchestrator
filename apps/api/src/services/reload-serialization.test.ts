@@ -243,3 +243,22 @@ describe("a standby instance and the leader's sync (Phase 13.1)", () => {
     expect(triggerKeys(triggers)).toEqual([]);
   });
 });
+
+describe("a tick node-cron runs twice (an early timer)", () => {
+  it("is fired once: a second fire within half a second of the last is skipped", async () => {
+    const scheduler = new SchedulerService({} as Store, quiet);
+    services.push(scheduler);
+    const fired: string[] = [];
+    scheduler.setExecutionHandler(async (input) => void fired.push(input.firedAt));
+    scheduler.setWorkflowLoader(async () => scheduleWorkflow("tick"));
+    await scheduler.reloadWorkflow("wf-reload");
+    const task = (scheduler as unknown as { jobs: Map<string, { options?: unknown }> }).jobs.get("wf-reload::tick") as unknown as {
+      runner: { onMatch: (date: Date, execution: unknown) => Promise<unknown> };
+    };
+    // The task's own callback, as node-cron calls it on each match.
+    await task.runner.onMatch(new Date(), { id: "a" });
+    await task.runner.onMatch(new Date(), { id: "b" });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(fired).toHaveLength(1);
+  });
+});
