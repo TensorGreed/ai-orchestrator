@@ -166,7 +166,7 @@ import { GuardService } from "./services/guard-service.js";
 import type { GuardSimulationRun } from "./services/guard-simulation-sink.js";
 import { startSseHeartbeat } from "./sse-heartbeat.js";
 import { createRunAccess, type RunAccessDenial } from "./run-access.js";
-import { ProjectNotEmptyError, rethrowStoreNotImplemented, StoreNotImplementedError } from "./db/store-errors.js";
+import { ProjectNotEmptyError, rethrowStoreNotImplemented, StoreNotImplementedError, StoreReferenceMissingError } from "./db/store-errors.js";
 import { createRunScope, type SecretScope } from "./run-scope.js";
 import {
   CODE_SANDBOX_INITIALISING,
@@ -6898,6 +6898,13 @@ export async function createApp(
       });
     } catch (error) {
       rethrowStoreNotImplemented(error);
+      // The user or project was deleted after the checks above (Postgres foreign key): 409 with a plain message.
+      if (error instanceof StoreReferenceMissingError) {
+        reply.code(409);
+        return { error: error.message };
+      }
+      // A database error goes to the error handler (logged, generic 500); its text names tables and constraints.
+      if (typeof (error as { code?: unknown }).code === "string") throw error;
       reply.code(400);
       return { error: error instanceof Error ? error.message : "Failed to add member" };
     }
@@ -12646,6 +12653,12 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     if (error instanceof StoreNotImplementedError) {
       app.log.warn({ method: error.method }, "Store method not implemented on this store");
       reply.code(501).send({ error: error.message });
+      return;
+    }
+
+    // A write whose user or project was deleted meanwhile (a race with a delete): a conflict, not a server error.
+    if (error instanceof StoreReferenceMissingError) {
+      reply.code(409).send({ error: error.message });
       return;
     }
 

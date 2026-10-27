@@ -1,5 +1,6 @@
 import { nanoid } from "nanoid";
 import type { Store } from "../db/store.js";
+import { wellFormedAuditText } from "../db/audit-chain.js";
 
 export type AuditOutcome = "success" | "failure" | "denied";
 
@@ -73,6 +74,15 @@ export interface AuditLogEntry {
   createdAt: string;
 }
 
+/**
+ * An optional audit field: an empty string (e.g. an empty User-Agent header) is stored as none, and text is made
+ * well-formed (lone surrogates and U+0000 → U+FFFD) as the store hashes and stores it, so the entry returned here is
+ * the one stored.
+ */
+function textOrNull(value: string | null | undefined): string | null {
+  return value ? wellFormedAuditText(value) : null;
+}
+
 export class AuditService {
   constructor(
     private readonly store: Store,
@@ -89,20 +99,20 @@ export class AuditService {
     const actor = event.actor ?? {};
     const entry = {
       id,
-      eventType: event.eventType,
-      category: event.category,
-      action: event.action,
+      eventType: wellFormedAuditText(event.eventType),
+      category: wellFormedAuditText(event.category),
+      action: wellFormedAuditText(event.action),
       outcome: event.outcome ?? "success",
-      actorUserId: actor.userId ?? null,
-      actorEmail: actor.email ?? null,
+      actorUserId: textOrNull(actor.userId),
+      actorEmail: textOrNull(actor.email),
       actorType: actor.type ?? "user",
-      resourceType: event.resourceType ?? null,
-      resourceId: event.resourceId ?? null,
-      projectId: event.projectId ?? null,
-      ipAddress: actor.ipAddress ?? null,
-      userAgent: actor.userAgent ?? null,
+      resourceType: textOrNull(event.resourceType),
+      resourceId: textOrNull(event.resourceId),
+      projectId: textOrNull(event.projectId),
+      ipAddress: textOrNull(actor.ipAddress),
+      userAgent: textOrNull(actor.userAgent),
       metadata: event.metadata,
-      message: event.message ?? null
+      message: textOrNull(event.message)
     };
     try {
       await this.store.writeAuditLog(entry);

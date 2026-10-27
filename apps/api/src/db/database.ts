@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { randomUUID, createHash } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import Database, { type Database as BetterSqlite3Database } from "better-sqlite3";
 import type {
   ApprovalRequestKind,
@@ -60,7 +60,17 @@ import {
 } from "@ai-orchestrator/shared";
 import { isEmptyDataLabels, labelsForUntrackedSave, mergeDataLabels, parseStoredDataLabels, type DataLabels } from "@ai-orchestrator/shared";
 import { queuedRunTimeoutMs, STUCK_JOB_MARGIN_MS } from "./queue-timeouts.js";
-import { ProjectNotEmptyError } from "./store-errors.js";
+import { isForeignKeyViolation, ProjectNotEmptyError, StoreReferenceMissingError } from "./store-errors.js";
+import { clampLimit, LIMIT_MAX } from "./store-limits.js";
+import {
+  auditEntryHash,
+  type AuditChainResult,
+  GENESIS_HASH,
+  storedSqliteAuditText,
+  verifyAuditRows,
+  wellFormedAuditEntry,
+  wellFormedAuditText
+} from "./audit-chain.js";
 import type {
   ApprovalDecisionInput,
   CancelExecutionResult,
@@ -2117,53 +2127,6 @@ function toString(value: unknown): string {
 
 function toNumber(value: unknown): number {
   return typeof value === "number" ? value : Number(value ?? 0);
-}
-
-// Phase 8.4 — audit-log hash chain helpers.
-// canonicalAuditPayload: stable, key-ordered JSON serialization. Same input
-// must yield byte-identical output across processes and Node versions.
-function canonicalAuditPayload(input: {
-  id: string;
-  createdAt: string;
-  eventType: string;
-  category: string;
-  action: string;
-  outcome: string;
-  actorUserId: string | null;
-  actorEmail: string | null;
-  actorType: string;
-  resourceType: string | null;
-  resourceId: string | null;
-  projectId: string | null;
-  ipAddress: string | null;
-  userAgent: string | null;
-  metadataJson: string | null;
-  message: string | null;
-}): string {
-  // Explicit field ordering — do NOT sort, so adding fields in future
-  // versions doesn't silently break the chain. New fields go at the end.
-  return JSON.stringify([
-    input.id,
-    input.createdAt,
-    input.eventType,
-    input.category,
-    input.action,
-    input.outcome,
-    input.actorUserId,
-    input.actorEmail,
-    input.actorType,
-    input.resourceType,
-    input.resourceId,
-    input.projectId,
-    input.ipAddress,
-    input.userAgent,
-    input.metadataJson,
-    input.message
-  ]);
-}
-
-function sha256Hex(input: string): string {
-  return createHash("sha256").update(input, "utf8").digest("hex");
 }
 
 function safeJsonParse(raw: string): unknown {
@@ -4357,11 +4320,19 @@ export class SqliteStore implements Store {
     return true;
   }
 
+  /**
+   * Phase 13.1 — removes the user with its sessions, API keys, MFA secret, SSO identities and project roles in one
+   * transaction (Postgres keeps foreign keys on those rows, so both stores remove them explicitly).
+   */
   async deleteUser(id: string): Promise<boolean> {
-    this.exec(`DELETE FROM sessions WHERE user_id = ?`, [id]);
-    this.exec(`DELETE FROM users WHERE id = ?`, [id]);
-    const changesRow = this.queryOne<{ count: number }>("SELECT changes() as count");
-    const changed = (changesRow ? toNumber(changesRow.count) : 0) > 0;
+    const changed = this.db.transaction(() => {
+      this.exec(`DELETE FROM sessions WHERE user_id = ?`, [id]);
+      this.exec(`DELETE FROM api_keys WHERE user_id = ?`, [id]);
+      this.exec(`DELETE FROM mfa_secrets WHERE user_id = ?`, [id]);
+      this.exec(`DELETE FROM sso_identities WHERE user_id = ?`, [id]);
+      this.exec(`DELETE FROM user_project_roles WHERE user_id = ?`, [id]);
+      return this.db.prepare(`DELETE FROM users WHERE id = ?`).run(id).changes > 0;
+    })();
     this.persist();
     return changed;
   }
@@ -4407,11 +4378,17 @@ export class SqliteStore implements Store {
   }> {
     const now = new Date().toISOString();
 
-    this.exec(
-      `INSERT INTO sessions (id, user_id, expires_at, created_at, last_seen_at, revoked_at)
-       VALUES (?, ?, ?, ?, ?, NULL)`,
-      [input.id, input.userId, input.expiresAt, now, now]
-    );
+    try {
+      this.exec(
+        `INSERT INTO sessions (id, user_id, expires_at, created_at, last_seen_at, revoked_at)
+         VALUES (?, ?, ?, ?, ?, NULL)`,
+        [input.id, input.userId, input.expiresAt, now, now]
+      );
+    } catch (error) {
+      // The sessions table declares its user key, so SQLite refuses a session for a user deleted meanwhile.
+      if (isForeignKeyViolation(error)) throw new StoreReferenceMissingError();
+      throw error;
+    }
 
     this.persist();
     return {
@@ -5772,7 +5749,7 @@ export class SqliteStore implements Store {
        WHERE status = 'pending' AND scheduled_at <= ?
        ORDER BY priority DESC, scheduled_at ASC
        LIMIT ?`,
-      [now, limit]
+      [now, clampLimit(limit, { fallback: 1, max: LIMIT_MAX.dequeueNext })]
     );
 
     if (rows.length === 0) {
@@ -7320,7 +7297,7 @@ export class SqliteStore implements Store {
   // Phase 5.4 — Audit log
   // ---------------------------------------------------------------------------
 
-  async writeAuditLog(entry: {
+  async writeAuditLog(input: {
     id: string;
     eventType: string;
     category: string;
@@ -7338,13 +7315,16 @@ export class SqliteStore implements Store {
     message?: string | null;
     createdAt?: string;
   }): Promise<void> {
+    // Text as the database stores it (lone surrogates and U+0000 → U+FFFD), so the hash covers exactly what is stored.
+    const entry = wellFormedAuditEntry(input);
     const createdAt = entry.createdAt ?? new Date().toISOString();
+    const metadataJson = wellFormedAuditText(entry.metadata === undefined ? null : JSON.stringify(entry.metadata));
     // Phase 8.4 — hash chain. prev_hash = the last row's entry_hash; for the
     // very first row it's 64 zeros. entry_hash = SHA-256(prev_hash || canonical
     // JSON of this row). Tampering with any historical row breaks every link
     // after it, which `verifyAuditChain()` surfaces.
-    const prevHash = this.getLastAuditEntryHash() ?? "0".repeat(64);
-    const canonical = canonicalAuditPayload({
+    const prevHash = this.getLastAuditEntryHash() ?? GENESIS_HASH;
+    const entryHash = auditEntryHash(prevHash, {
       id: entry.id,
       createdAt,
       eventType: entry.eventType,
@@ -7359,10 +7339,9 @@ export class SqliteStore implements Store {
       projectId: entry.projectId ?? null,
       ipAddress: entry.ipAddress ?? null,
       userAgent: entry.userAgent ?? null,
-      metadataJson: entry.metadata === undefined ? null : JSON.stringify(entry.metadata),
+      metadataJson,
       message: entry.message ?? null
     });
-    const entryHash = sha256Hex(prevHash + canonical);
     this.exec(
       `INSERT INTO audit_logs
          (id, event_type, category, action, outcome, actor_user_id, actor_email, actor_type,
@@ -7383,7 +7362,7 @@ export class SqliteStore implements Store {
         entry.projectId ?? null,
         entry.ipAddress ?? null,
         entry.userAgent ?? null,
-        entry.metadata === undefined ? null : JSON.stringify(entry.metadata),
+        metadataJson,
         entry.message ?? null,
         createdAt,
         prevHash,
@@ -7408,84 +7387,46 @@ export class SqliteStore implements Store {
    * Rows persisted before Phase 8.4 (where entry_hash IS NULL) are skipped —
    * we can only attest the chain from the first hash onwards.
    */
-  async verifyAuditChain(): Promise<{
-    ok: boolean;
-    rowsChecked: number;
-    firstBrokenAt?: { id: string; createdAt: string; expected: string; stored: string };
-  }> {
-    const rows = this.queryAll<{
-      id: string;
-      event_type: string;
-      category: string;
-      action: string;
-      outcome: string;
-      actor_user_id: string | null;
-      actor_email: string | null;
-      actor_type: string;
-      resource_type: string | null;
-      resource_id: string | null;
-      project_id: string | null;
-      ip_address: string | null;
-      user_agent: string | null;
-      metadata_json: string | null;
-      message: string | null;
-      created_at: string;
-      prev_hash: string | null;
-      entry_hash: string | null;
-    }>(
-      `SELECT id, event_type, category, action, outcome, actor_user_id, actor_email, actor_type,
-              resource_type, resource_id, project_id, ip_address, user_agent, metadata_json, message,
-              created_at, prev_hash, entry_hash
+  async verifyAuditChain(): Promise<AuditChainResult> {
+    // Text columns are read as their stored bytes and decoded by storedSqliteAuditText, the same on every Node version:
+    // better-sqlite3 on Node 20 stored a lone surrogate as generalized UTF-8, which the driver reads as three U+FFFD.
+    // An optional field keeps NULL as null and "" as "" (the writer hashes `value ?? null`; reading by truthiness would
+    // turn "" into null and break the chain at that row).
+    const text = [
+      "id", "event_type", "category", "action", "outcome", "actor_user_id", "actor_email", "actor_type", "resource_type",
+      "resource_id", "project_id", "ip_address", "user_agent", "metadata_json", "message", "created_at"
+    ] as const;
+    type Bytes = Uint8Array | null;
+    const rows = this.queryAll<Record<(typeof text)[number], Bytes> & { prev_hash: string | null; entry_hash: string | null }>(
+      `SELECT ${text.map((column) => `CAST(${column} AS BLOB) AS ${column}`).join(", ")}, prev_hash, entry_hash
        FROM audit_logs WHERE entry_hash IS NOT NULL
        ORDER BY rowid ASC`
     );
-    let prev = "0".repeat(64);
-    let checked = 0;
-    for (const row of rows) {
-      const stored = toString(row.entry_hash ?? "");
-      const storedPrev = toString(row.prev_hash ?? "");
-      if (storedPrev !== prev) {
-        return {
-          ok: false,
-          rowsChecked: checked,
-          firstBrokenAt: {
-            id: toString(row.id),
-            createdAt: toString(row.created_at),
-            expected: prev,
-            stored: storedPrev
-          }
-        };
-      }
-      const canonical = canonicalAuditPayload({
-        id: toString(row.id),
-        createdAt: toString(row.created_at),
-        eventType: toString(row.event_type),
-        category: toString(row.category),
-        action: toString(row.action),
-        outcome: toString(row.outcome),
-        actorUserId: row.actor_user_id ? toString(row.actor_user_id) : null,
-        actorEmail: row.actor_email ? toString(row.actor_email) : null,
-        actorType: toString(row.actor_type),
-        resourceType: row.resource_type ? toString(row.resource_type) : null,
-        resourceId: row.resource_id ? toString(row.resource_id) : null,
-        projectId: row.project_id ? toString(row.project_id) : null,
-        ipAddress: row.ip_address ? toString(row.ip_address) : null,
-        userAgent: row.user_agent ? toString(row.user_agent) : null,
-        metadataJson: row.metadata_json ? toString(row.metadata_json) : null,
-        message: row.message ? toString(row.message) : null
-      });
-      const expected = sha256Hex(prev + canonical);
-      if (expected !== stored) {
-        return {
-          ok: false,
-          rowsChecked: checked,
-          firstBrokenAt: { id: toString(row.id), createdAt: toString(row.created_at), expected, stored }
-        };
-      }
-      prev = expected;
-      checked += 1;
-    }
-    return { ok: true, rowsChecked: checked };
+    const required = (value: Bytes) => storedSqliteAuditText(value) ?? "";
+    return verifyAuditRows(
+      rows.map((row) => ({
+        fields: {
+          id: required(row.id),
+          createdAt: required(row.created_at),
+          eventType: required(row.event_type),
+          category: required(row.category),
+          action: required(row.action),
+          outcome: required(row.outcome),
+          actorUserId: storedSqliteAuditText(row.actor_user_id),
+          actorEmail: storedSqliteAuditText(row.actor_email),
+          actorType: required(row.actor_type),
+          resourceType: storedSqliteAuditText(row.resource_type),
+          resourceId: storedSqliteAuditText(row.resource_id),
+          projectId: storedSqliteAuditText(row.project_id),
+          ipAddress: storedSqliteAuditText(row.ip_address),
+          userAgent: storedSqliteAuditText(row.user_agent),
+          metadataJson: storedSqliteAuditText(row.metadata_json),
+          message: storedSqliteAuditText(row.message)
+        },
+        prevHash: toString(row.prev_hash ?? ""),
+        entryHash: toString(row.entry_hash ?? "")
+      }))
+    );
   }
 
   async listAuditLogs(filter: {
@@ -10605,7 +10546,7 @@ export class SqliteStore implements Store {
     id: string; sourceId: string | null; chunkIndex: number; content: string;
     metadata: Record<string, unknown> | null; createdAt: string;
   }>> {
-    const limit = Math.min(input.limit ?? 50, 500);
+    const limit = clampLimit(input.limit, { fallback: 50, max: LIMIT_MAX.knowledgeBaseChunkPreviews });
     const filters = ["knowledge_base_id = ?"];
     const params: Array<string | number> = [input.knowledgeBaseId];
     if (input.sourceId) { filters.push("source_id = ?"); params.push(input.sourceId); }
@@ -10904,7 +10845,7 @@ export class SqliteStore implements Store {
   async listMcpServerProbes(serverId: string, limit = 100): Promise<McpServerProbeRecord[]> {
     return this.queryAll<McpServerProbeRow>(
       `SELECT * FROM mcp_server_probes WHERE server_id = ? ORDER BY started_at DESC, rowid DESC LIMIT ?`,
-      [serverId, limit]
+      [serverId, clampLimit(limit, { fallback: 100, max: LIMIT_MAX.mcpServerProbes })]
     ).map(mapMcpServerProbe);
   }
 
@@ -10920,7 +10861,7 @@ export class SqliteStore implements Store {
   async listMcpToolSnapshots(serverId: string, limit = 50): Promise<McpToolSnapshotRecord[]> {
     return this.queryAll<McpToolSnapshotRow>(
       `SELECT * FROM mcp_tool_snapshots WHERE server_id = ? ORDER BY created_at DESC, rowid DESC LIMIT ?`,
-      [serverId, limit]
+      [serverId, clampLimit(limit, { fallback: 50, max: LIMIT_MAX.mcpToolSnapshots })]
     ).map(mapMcpToolSnapshot);
   }
 

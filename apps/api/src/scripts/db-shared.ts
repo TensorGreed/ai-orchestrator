@@ -14,7 +14,14 @@ import { Pool } from "pg";
 import { parsePostgresSettings } from "../config.js";
 import { postgresStoreConfig } from "../db/create-store.js";
 import { applyMigrationChain, postgresPoolConfig, withMigrationLock } from "../db/postgres-store.js";
-import { MIGRATIONS } from "../db/migrations.js";
+import { INSERTION_SEQ_TABLES, MIGRATIONS } from "../db/migrations.js";
+
+/**
+ * Tables that carry v40's `seq` identity on Postgres (insertion order). A Postgres backup keeps `seq`: export reads
+ * them in `seq` order, import writes `seq` back (OVERRIDING SYSTEM VALUE, since the identity is GENERATED ALWAYS) and
+ * then moves the identity past the restored max, so the chain and cursors walk the restored rows in the same order.
+ */
+const SEQ_TABLES: ReadonlySet<string> = new Set(INSERTION_SEQ_TABLES.map(({ table }) => table));
 
 export interface BackupAdapter {
   readonly kind: "sqlite" | "postgres";
@@ -152,7 +159,28 @@ class SqliteAdapter implements BackupAdapter {
 class PostgresAdapter implements BackupAdapter {
   readonly kind = "postgres" as const;
 
+  private readonly generatedColumns = new Map<string, ReadonlySet<string>>();
+
   private constructor(private readonly pool: Pool) {}
+
+  /**
+   * Generated columns of `table` (`GENERATED ALWAYS AS (...) STORED`, e.g. knowledge_base_chunks.content_tsv), read
+   * from the catalog. Postgres refuses a value for them, and recomputes them from the row, so a backup leaves them out
+   * and an import drops them from a backup that carries them. Identity columns (`seq`) are not generated columns here
+   * (is_generated = 'NEVER'); they are restored as above.
+   */
+  private async generatedColumnsOf(table: string): Promise<ReadonlySet<string>> {
+    const cached = this.generatedColumns.get(table);
+    if (cached) return cached;
+    const r = await this.pool.query<{ column_name: string }>(
+      `SELECT column_name FROM information_schema.columns
+        WHERE table_schema = current_schema() AND table_name = $1 AND is_generated = 'ALWAYS'`,
+      [table]
+    );
+    const columns = new Set(r.rows.map((row) => row.column_name));
+    this.generatedColumns.set(table, columns);
+    return columns;
+  }
 
   static async create(): Promise<PostgresAdapter> {
     const pool = new Pool(postgresPoolConfig(postgresStoreConfig(parsePostgresSettings(process.env)), { max: 4 }));
@@ -175,14 +203,21 @@ class PostgresAdapter implements BackupAdapter {
   }
 
   async selectAll(table: string): Promise<Record<string, unknown>[]> {
-    const r = await this.pool.query(`SELECT * FROM ${quoteIdent(table)}`);
-    return r.rows as Record<string, unknown>[];
+    const order = SEQ_TABLES.has(table) ? " ORDER BY seq" : "";
+    const generated = await this.generatedColumnsOf(table);
+    const r = await this.pool.query(`SELECT * FROM ${quoteIdent(table)}${order}`);
+    const rows = r.rows as Record<string, unknown>[];
+    if (generated.size === 0) return rows;
+    return rows.map((row) => Object.fromEntries(Object.entries(row).filter(([column]) => !generated.has(column))));
   }
 
   async insertRows(table: string, rows: Record<string, unknown>[]): Promise<void> {
     if (rows.length === 0) return;
-    const cols = Object.keys(rows[0]);
+    const generated = await this.generatedColumnsOf(table);
+    const cols = Object.keys(rows[0]).filter((column) => !generated.has(column));
     const colSql = cols.map(quoteIdent).join(", ");
+    const keepsSeq = SEQ_TABLES.has(table) && cols.includes("seq");
+    const overriding = keepsSeq ? " OVERRIDING SYSTEM VALUE" : "";
     const BATCH_SIZE = 500;
     for (let i = 0; i < rows.length; i += BATCH_SIZE) {
       const batch = rows.slice(i, i + BATCH_SIZE);
@@ -193,7 +228,15 @@ class PostgresAdapter implements BackupAdapter {
         })
         .join(", ");
       const params = batch.flatMap((row) => cols.map((c) => row[c] ?? null));
-      await this.pool.query(`INSERT INTO ${quoteIdent(table)} (${colSql}) VALUES ${valuesSql}`, params);
+      await this.pool.query(`INSERT INTO ${quoteIdent(table)} (${colSql})${overriding} VALUES ${valuesSql}`, params);
+    }
+    if (keepsSeq) {
+      // The restored rows carry their own seq; the next insert must get max + 1, not a value the identity already
+      // handed out before the import (or one a restored row now holds).
+      await this.pool.query(
+        `SELECT setval(pg_get_serial_sequence($1, 'seq'), COALESCE((SELECT MAX(seq) FROM ${quoteIdent(table)}), 0) + 1, false)`,
+        [table]
+      );
     }
   }
 

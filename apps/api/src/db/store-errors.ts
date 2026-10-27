@@ -13,6 +13,37 @@ export class ProjectNotEmptyError extends Error {
 }
 
 /**
+ * A write refers to a user or project that no longer exists: Postgres refused it with a foreign-key violation
+ * (23503). Routes check that the user or project exists first, so this is a race with a delete. The API answers 409
+ * with this message, never the database's text (which names constraints).
+ */
+export class StoreReferenceMissingError extends Error {
+  readonly statusCode = 409;
+
+  constructor() {
+    super("The user or project this change refers to no longer exists.");
+    this.name = "StoreReferenceMissingError";
+  }
+}
+
+/** Whether `error` is a foreign-key violation on either store (SQLite SQLITE_CONSTRAINT_FOREIGNKEY, Postgres 23503). */
+export function isForeignKeyViolation(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const { code } = error as { code?: unknown };
+  return code === "23503" || code === "SQLITE_CONSTRAINT_FOREIGNKEY";
+}
+
+/** Runs a write, turning a foreign-key violation into StoreReferenceMissingError. */
+export async function withReferenceCheck<T>(write: () => Promise<T>): Promise<T> {
+  try {
+    return await write();
+  } catch (error) {
+    if (isForeignKeyViolation(error)) throw new StoreReferenceMissingError();
+    throw error;
+  }
+}
+
+/**
  * A store method this store does not implement yet (the Postgres store, until it reaches parity with SQLite).
  * The API answers 501, as the routes that check for the SQLite store already do.
  */
