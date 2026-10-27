@@ -16,14 +16,15 @@ import type { FastifyInstance } from "fastify";
 import type { EvalCaseResult, EvalRunView, ReplayCaptureView, ReplayFindSubjectResult, ReplayRecordingSummary, Workflow } from "@ai-orchestrator/shared";
 import { createApp } from "./app.js";
 import { parseConfig, type AppConfig } from "./config.js";
-import { SqliteStore } from "./db/database.js";
+import type { Store } from "./db/store.js";
+import { openTestStore } from "./test-support/test-store.js";
 import { AuthService } from "./services/auth-service.js";
 import { SecretService } from "./services/secret-service.js";
 import { WorkflowVersionService } from "./services/workflow-version-service.js";
 
 interface TestContext {
   app: FastifyInstance;
-  store: SqliteStore;
+  store: Store;
   authService: AuthService;
   secretService: SecretService;
   config: AppConfig;
@@ -39,7 +40,7 @@ const EMAIL = "jane.doe@example.com";
 
 async function createTestContext(overrides: Record<string, string> = {}): Promise<TestContext> {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-dest-replay-"));
-  const store = await SqliteStore.create(path.join(tempDir, "orchestrator.db"));
+  const store = await openTestStore(path.join(tempDir, "orchestrator.db"));
   await store.ensureDefaultProject();
   const config = parseConfig({
     LOG_LEVEL: "warn",

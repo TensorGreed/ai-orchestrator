@@ -11,20 +11,21 @@ import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
-import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
 import type { EvalCaseDetail, EvalCaseResult, EvalRunView, ReplayJobEstimate, ReplayRecordingSummary, Workflow } from "@ai-orchestrator/shared";
 import { createApp } from "./app.js";
 import { parseConfig, type AppConfig } from "./config.js";
-import { SqliteStore } from "./db/database.js";
+import type { Store } from "./db/store.js";
+import { openTestStore } from "./test-support/test-store.js";
+import { testSql } from "./test-support/test-sql.js";
 import { projectSessionNamespace } from "./run-scope.js";
 import { AuthService } from "./services/auth-service.js";
 import { SecretService } from "./services/secret-service.js";
 
 interface TestContext {
   app: FastifyInstance;
-  store: SqliteStore;
+  store: Store;
   authService: AuthService;
   secretService: SecretService;
   config: AppConfig;
@@ -40,7 +41,7 @@ const MASTER_KEY = crypto.randomBytes(32).toString("base64");
 async function createTestContext(overrides: Record<string, string> = {}, existing?: { tempDir: string; dbPath: string }): Promise<TestContext> {
   const tempDir = existing?.tempDir ?? fs.mkdtempSync(path.join(os.tmpdir(), "ao-replay-cand-"));
   const dbPath = existing?.dbPath ?? path.join(tempDir, "orchestrator.db");
-  const store = await SqliteStore.create(dbPath);
+  const store = await openTestStore(dbPath);
   await store.ensureDefaultProject();
   const config = parseConfig({
     LOG_LEVEL: "warn",
@@ -606,13 +607,10 @@ describe("replay candidates: review fixes", () => {
     expect(detail.replay).toMatchObject({ modelTape: { replayedCalls: 1, liveCalls: 0 } });
     expect(detail.replay!.modelTape!.recordedUsage.inputTokens).toBe(400);
     // The cost dashboards record no spend for the replay executions either.
-    const usage = new Database(context.dbPath, { readonly: true });
-    try {
-      const rows = usage.prepare("SELECT cost_usd, input_tokens, llm_call_count FROM usage_events WHERE trigger_type = 'replay'").all() as Array<{ cost_usd: number; input_tokens: number; llm_call_count: number }>;
+    {
+      const rows = await testSql(context.store).all<{ cost_usd: number | string; input_tokens: number | string; llm_call_count: number | string }>("SELECT cost_usd, input_tokens, llm_call_count FROM usage_events WHERE trigger_type = 'replay'");
       expect(rows).toHaveLength(8);
-      expect(rows.every((row) => row.cost_usd === 0 && row.input_tokens === 0 && row.llm_call_count === 0)).toBe(true);
-    } finally {
-      usage.close();
+      expect(rows.every((row) => Number(row.cost_usd) === 0 && Number(row.input_tokens) === 0 && Number(row.llm_call_count) === 0)).toBe(true);
     }
   }, 60_000);
 

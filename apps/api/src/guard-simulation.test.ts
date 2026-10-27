@@ -23,7 +23,9 @@ import type { EvalRunView, GuardSimulationView, ReplayRecordingSummary, Workflow
 import { createApp } from "./app.js";
 import { WorkflowVersionService } from "./services/workflow-version-service.js";
 import { parseConfig, type AppConfig } from "./config.js";
-import { SqliteStore } from "./db/database.js";
+import type { Store } from "./db/store.js";
+import { openTestStore } from "./test-support/test-store.js";
+import { testSql } from "./test-support/test-sql.js";
 import { MIGRATIONS } from "./db/migrations.js";
 import { AuthService } from "./services/auth-service.js";
 import { GuardService } from "./services/guard-service.js";
@@ -32,7 +34,7 @@ import { SecretService } from "./services/secret-service.js";
 
 interface TestContext {
   app: FastifyInstance;
-  store: SqliteStore;
+  store: Store;
   authService: AuthService;
   secretService: SecretService;
   config: AppConfig;
@@ -45,7 +47,7 @@ const MASTER_KEY = crypto.randomBytes(32).toString("base64");
 
 async function createTestContext(overrides: Record<string, string> = {}): Promise<TestContext> {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-guard-sim-"));
-  const store = await SqliteStore.create(path.join(tempDir, "orchestrator.db"));
+  const store = await openTestStore(path.join(tempDir, "orchestrator.db"));
   await store.ensureDefaultProject();
   const config = parseConfig({
     LOG_LEVEL: "warn",
@@ -371,15 +373,15 @@ describe("guard policy simulation", () => {
   it("writes no guard events, stats or token vault rows for simulated replays", async () => {
     const { context, builder } = await guardedSetup();
     await recordRuns(context, builder.cookie, "wf-guarded", 2, { user_prompt: "Write to someone@example.com please" });
-    const db = (context.store as unknown as { db: { prepare: (sql: string) => { get: () => { count: number } } } }).db;
-    const count = (table: string) => Number(db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get().count);
-    const events = count("guard_events");
-    const vault = count("guard_token_vault");
+    const sql = testSql(context.store);
+    const count = async (table: string) => Number((await sql.get<{ n: number | string }>(`SELECT COUNT(*) AS n FROM ${table}`))!.n);
+    const events = await count("guard_events");
+    const vault = await count("guard_token_vault");
     const stats = JSON.stringify(await context.store.guardEventStats({}));
     const simulation = await simulate(context, builder.cookie, "sim-guard", { document: emailProfile("block") });
     expect(simulation.summary).toMatchObject({ runsNewlyBlocked: 2 });
-    expect(count("guard_events")).toBe(events);
-    expect(count("guard_token_vault")).toBe(vault);
+    expect(await count("guard_events")).toBe(events);
+    expect(await count("guard_token_vault")).toBe(vault);
     expect(JSON.stringify(await context.store.guardEventStats({}))).toBe(stats);
     for (const entry of simulation.workflows![0]!.cases) {
       expect(await context.store.listGuardEventsForExecution(entry.executionId!)).toHaveLength(0);
@@ -403,13 +405,13 @@ describe("guard policy simulation", () => {
     }
     const capture = captures[0]!;
     expect(capture).toMatchObject({ status: "candidate", masked: true });
-    const db = (context.store as unknown as { db: { prepare: (sql: string) => { get: (...args: unknown[]) => Record<string, unknown> } } }).db;
-    const raw = () => JSON.stringify(db.prepare("SELECT * FROM replay_recordings WHERE id = ?").get(capture.id));
-    expect(raw()).not.toContain("someone@example.com");
-    const before = raw();
-    const count = (table: string) => Number(db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get().count);
-    const events = count("guard_events");
-    const vault = count("guard_token_vault");
+    const sql = testSql(context.store);
+    const raw = async () => JSON.stringify(await sql.get("SELECT * FROM replay_recordings WHERE id = ?", capture.id));
+    expect(await raw()).not.toContain("someone@example.com");
+    const before = await raw();
+    const count = async (table: string) => Number((await sql.get<{ n: number | string }>(`SELECT COUNT(*) AS n FROM ${table}`))!.n);
+    const events = await count("guard_events");
+    const vault = await count("guard_token_vault");
 
     // The simulation's server-internal source takes the candidate (its surrogate email is still an email).
     const simulation = await simulate(context, builder.cookie, "sim-guard", { document: emailProfile("block") });
@@ -417,9 +419,9 @@ describe("guard policy simulation", () => {
     expect(simulation.summary).toMatchObject({ runs: 1, compared: 1, runsNewlyBlocked: 1 });
     expect(simulation.workflows![0]!.cases[0]).toMatchObject({ recordingId: capture.id });
     // Nothing reached live guard data, and the capture is untouched and still in the inbox.
-    expect(count("guard_events")).toBe(events);
-    expect(count("guard_token_vault")).toBe(vault);
-    expect(raw()).toBe(before);
+    expect(await count("guard_events")).toBe(events);
+    expect(await count("guard_token_vault")).toBe(vault);
+    expect(await raw()).toBe(before);
     expect(await context.store.getReplayRecordingSummary(capture.id)).toMatchObject({ status: "candidate" });
 
     // Public paths still refuse the same candidate.
@@ -640,6 +642,11 @@ describe("guard policy simulation", () => {
     context.store.listRunningGuardSimulations = original;
     expect([a.statusCode, b.statusCode].sort(), `${a.body} ${b.body}`).toEqual([202, 409]);
     expect(await context.store.listGuardSimulations({ profileId: "sim-guard" })).toHaveLength(1);
+    // The one that started keeps running in the background: let it settle before the store closes under it.
+    for (const until = Date.now() + 45_000; (await context.store.listRunningGuardSimulations()).length > 0; ) {
+      if (Date.now() > until) throw new Error("The started simulation never finished");
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
   }, 60_000);
 
   it("a simulation another instance starts between this start's last check and its insert answers 409, not 500", async () => {
@@ -804,8 +811,7 @@ describe("guard policy simulation", () => {
     await recordRuns(context, builder.cookie, "wf-guarded", 1, { user_prompt: "Write to someone@example.com please" });
     const old = await simulate(context, builder.cookie, "sim-guard", { document: emailProfile("block") });
     const fresh = await simulate(context, builder.cookie, "sim-guard", { document: emailProfile("block") });
-    const db = (context.store as unknown as { db: { prepare: (sql: string) => { run: (...args: unknown[]) => void } } }).db;
-    db.prepare("UPDATE guard_simulations SET created_at = ? WHERE id = ?").run(new Date(Date.now() - 31 * 86_400_000).toISOString(), old.id);
+    await testSql(context.store).run("UPDATE guard_simulations SET created_at = ? WHERE id = ?", new Date(Date.now() - 31 * 86_400_000).toISOString(), old.id);
     const deleted = await context.store.pruneGuardSimulations({ before: new Date(Date.now() - 30 * 86_400_000).toISOString() });
     expect(deleted).toBe(1);
     expect(await context.store.getGuardSimulation(old.id)).toBeNull();
@@ -822,8 +828,12 @@ describe("migration 35", () => {
     expect(migration.up).toContain("CREATE TABLE IF NOT EXISTS guard_simulations");
     expect(migration.down).toContain("DROP TABLE IF EXISTS guard_simulations");
     const context = await createTestContext();
-    const db = (context.store as unknown as { db: { prepare: (sql: string) => { all: () => Array<{ name: string }> } } }).db;
-    const columns = db.prepare("PRAGMA table_info(guard_simulations)").all().map((row) => row.name);
+    const sql = testSql(context.store);
+    const rows =
+      sql.kind === "sqlite"
+        ? await sql.all<{ name: string }>("PRAGMA table_info(guard_simulations)")
+        : await sql.all<{ name: string }>("SELECT column_name AS name FROM information_schema.columns WHERE table_name = 'guard_simulations'");
+    const columns = rows.map((row) => row.name);
     expect(columns).toEqual(
       expect.arrayContaining(["id", "profile_id", "source_kind", "source_version", "simulated_hash", "base_version", "job_ids_json", "summary_json", "status", "created_at", "created_by", "finished_at"])
     );
