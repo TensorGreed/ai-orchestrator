@@ -5,11 +5,10 @@
  * history rows removed. Rows are seeded with SQL because cassettes and guard events are not on PostgresStore in this
  * lane yet; the same statements run on both dialects.
  */
-import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
-import { SqliteStore } from "./database.js";
 import type { Store } from "./store.js";
-import { createTestStore, noticePostgresSkipped, testPostgresUrl, type TestStore, type TestStoreKind, testStorePool } from "../test-support/test-store.js";
+import { createTestStore, noticePostgresSkipped, testPostgresUrl, type TestStore, type TestStoreKind } from "../test-support/test-store.js";
+import { testSql } from "../test-support/test-sql.js";
 
 const OLD = "2001-01-01T00:00:00.000Z";
 const NEW = "2100-01-01T00:00:00.000Z";
@@ -40,56 +39,23 @@ if (!testPostgresUrl()) noticePostgresSkipped("execution history prune");
 for (const kind of kinds) {
   describe(`pruneExecutionHistory [${kind}]`, () => {
     let current: TestStore | undefined;
-    let reopened: SqliteStore | undefined;
     afterEach(async () => {
-      await reopened?.close();
-      reopened = undefined;
       await current?.cleanup().catch(() => undefined);
       current = undefined;
     });
 
-    /** Runs `statements` on the store's database and returns a store to use afterwards. */
+    /** Runs `statements` on the store's database. */
     async function seed(statements: string[]): Promise<Store> {
-      const test = current!;
-      if (test.kind === "postgres") {
-        const pool = testStorePool(test!);
-        try {
-          for (const sql of statements) await pool.query(sql);
-        } finally {
-          await pool.end();
-        }
-        return test.store;
-      }
-      await test.store.close();
-      const db = new Database(test.file!);
-      for (const sql of statements) db.exec(sql);
-      db.close();
-      reopened = await SqliteStore.create(test.file!);
-      return reopened;
+      const sql = testSql(current!.store);
+      for (const statement of statements) await sql.run(statement);
+      return current!.store;
     }
 
-    async function remaining(store: Store): Promise<Record<string, string[]>> {
+    async function remaining(): Promise<Record<string, string[]>> {
+      const sql = testSql(current!.store);
       const out: Record<string, string[]> = {};
-      if (current!.kind === "postgres") {
-        const pool = testStorePool(current!);
-        try {
-          for (const table of Object.keys(TABLES)) {
-            out[table] = (await pool.query<{ id: string }>(`SELECT id FROM ${table} ORDER BY id`)).rows.map((row) => row.id);
-          }
-        } finally {
-          await pool.end();
-        }
-        return out;
-      }
-      await store.close();
-      reopened = undefined;
-      const db = new Database(current!.file!, { readonly: true });
-      try {
-        for (const table of Object.keys(TABLES)) {
-          out[table] = (db.prepare(`SELECT id FROM ${table} ORDER BY id`).all() as Array<{ id: string }>).map((row) => row.id);
-        }
-      } finally {
-        db.close();
+      for (const table of Object.keys(TABLES)) {
+        out[table] = (await sql.all<{ id: string }>(`SELECT id FROM ${table} ORDER BY id`)).map((row) => row.id);
       }
       return out;
     }
@@ -98,7 +64,7 @@ for (const kind of kinds) {
       current = await createTestStore({ kind });
       const store = await seed(SEED);
       expect(await store.pruneExecutionHistory({ before: CUT })).toBe(1);
-      expect(await remaining(store)).toEqual({
+      expect(await remaining()).toEqual({
         execution_history: ["run-new"],
         mcp_tool_calls: ["call-new"],
         mcp_cassettes: ["cas-new"],

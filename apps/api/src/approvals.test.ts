@@ -10,13 +10,14 @@ import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
-import Database from "better-sqlite3";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { FastifyInstance } from "fastify";
 import type { ApprovalRequestView, Workflow, WorkflowNode } from "@ai-orchestrator/shared";
 import { createApp } from "./app.js";
 import { parseConfig, type AppConfig } from "./config.js";
-import { SqliteStore } from "./db/database.js";
+import type { Store } from "./db/store.js";
+import { openTestStore } from "./test-support/test-store.js";
+import { testSql, type TestSql } from "./test-support/test-sql.js";
 import { MIGRATIONS } from "./db/migrations.js";
 import { AuthService } from "./services/auth-service.js";
 import { QueueService } from "./services/queue-service.js";
@@ -28,7 +29,7 @@ import { SecretService } from "./services/secret-service.js";
 
 interface TestContext {
   app: FastifyInstance;
-  store: SqliteStore;
+  store: Store;
   authService: AuthService;
   config: AppConfig;
   tempDir: string;
@@ -44,7 +45,7 @@ async function createTestContext(options: { overrides?: Record<string, string>; 
   const tempDir = options.tempDir ?? fs.mkdtempSync(path.join(os.tmpdir(), "ao-approvals-"));
   if (!tempDirs.includes(tempDir)) tempDirs.push(tempDir);
   const dbPath = path.join(tempDir, "orchestrator.db");
-  const store = await SqliteStore.create(dbPath);
+  const store = await openTestStore(dbPath);
   await store.ensureDefaultProject();
   const config = parseConfig({
     LOG_LEVEL: "warn",
@@ -64,6 +65,16 @@ async function createTestContext(options: { overrides?: Record<string, string>; 
   const context = { app, store, authService, config, tempDir, dbPath, secretService, ...(queue ? { queue } : {}) };
   contexts.push(context);
   return context;
+}
+
+/** Raw SQL against a stopped API's database (the same file reopened), as if the process had died in a given state. */
+async function whileStopped(tempDir: string, work: (sql: TestSql) => Promise<void>): Promise<void> {
+  const store = await openTestStore(path.join(tempDir, "orchestrator.db"));
+  try {
+    await work(testSql(store));
+  } finally {
+    await store.close();
+  }
 }
 
 async function closeContext(context: TestContext) {
@@ -186,16 +197,14 @@ describe("migration 32", () => {
     expect(migration.down).toContain("DROP TABLE IF EXISTS approval_requests");
     expect(migration.down).toContain("DROP TABLE IF EXISTS schema_markers");
     const context = await createTestContext();
-    const db = new Database(context.dbPath, { readonly: true });
-    try {
-      const columns = (db.prepare("PRAGMA table_info(approval_requests)").all() as Array<{ name: string }>).map((row) => row.name);
-      expect(columns).toEqual(
-        expect.arrayContaining(["id", "execution_id", "project_id", "kind", "status", "spec_json", "requested_by_user_id", "expires_at", "decided_by", "reason", "edits_json", "edited_fields_json", "asking_workflow_id", "edits_salt", "workflow_deleted_at"])
-      );
-      expect(db.prepare("SELECT name FROM schema_markers WHERE name = 'approval_requests'").all()).toEqual([{ name: "approval_requests" }]);
-    } finally {
-      db.close();
-    }
+    const sql = testSql(context.store);
+    const columns = sql.kind === "sqlite"
+      ? (await sql.all<{ name: string }>("PRAGMA table_info(approval_requests)")).map((row) => row.name)
+      : (await sql.all<{ column_name: string }>("SELECT column_name FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'approval_requests'")).map((row) => row.column_name);
+    expect(columns).toEqual(
+      expect.arrayContaining(["id", "execution_id", "project_id", "kind", "status", "spec_json", "requested_by_user_id", "expires_at", "decided_by", "reason", "edits_json", "edited_fields_json", "asking_workflow_id", "edits_salt", "workflow_deleted_at"])
+    );
+    expect(await sql.all("SELECT name FROM schema_markers WHERE name = 'approval_requests'")).toEqual([{ name: "approval_requests" }]);
   });
 });
 
@@ -321,6 +330,51 @@ describe("approvals inbox", () => {
     expect(await inbox(context, requester.cookie)).toEqual([]);
     expect((await inbox(context, requester.cookie, "?status=decided"))[0]).toMatchObject({ status: "canceled" });
     expect(await auditTypes(context)).toContain("approval.canceled");
+  });
+});
+
+describe("one pending request per run (v41)", () => {
+  it("a request another instance backfilled first is superseded by the pause's own request", async () => {
+    const context = await createTestContext();
+    const requester = await login(context, "builder", "requester");
+    const insert = context.store.insertApprovalRequest.bind(context.store);
+    let raced = 0;
+    vi.spyOn(context.store, "insertApprovalRequest").mockImplementation(async (input) => {
+      if (raced === 0) {
+        raced += 1;
+        // Another instance's backfill lands between this pause's cancel and its insert.
+        await insert({ ...input, id: "apr_other_instance" });
+      }
+      return await insert(input);
+    });
+    const run = await startRun(context, gateWorkflow("wf-race", GATE), requester.cookie);
+    const pending = await context.store.getPendingApprovalRequestForExecution(run.executionId!);
+    expect(pending?.id).not.toBe("apr_other_instance");
+    expect(await context.store.getApprovalRequest("apr_other_instance")).toMatchObject({ status: "canceled", reason: "Superseded by a newer request of the same run" });
+    expect((await inbox(context, requester.cookie)).map((item) => item.requestId)).toEqual([pending!.id]);
+  });
+
+  it("a backfill that loses to another instance's backfill uses that request", async () => {
+    const context = await createTestContext();
+    const requester = await login(context, "builder", "requester");
+    const run = await startRun(context, gateWorkflow("wf-backfill", GATE), requester.cookie);
+    const own = await context.store.getPendingApprovalRequestForExecution(run.executionId!);
+    // The row is missing (as for a run paused before approval requests existed); another instance backfills it first.
+    await context.store.cancelPendingApprovalRequests({ executionId: run.executionId! }, "test");
+    const insert = context.store.insertApprovalRequest.bind(context.store);
+    let raced = false;
+    vi.spyOn(context.store, "getPendingApprovalRequestForExecution").mockImplementationOnce(async () => null);
+    vi.spyOn(context.store, "insertApprovalRequest").mockImplementation(async (input) => {
+      if (!raced) {
+        raced = true;
+        await insert({ ...input, id: "apr_other_backfill" });
+      }
+      return await insert(input);
+    });
+    const items = await inbox(context, requester.cookie);
+    expect(items.map((item) => item.requestId)).toEqual(["apr_other_backfill"]);
+    expect(own?.id).not.toBe("apr_other_backfill");
+    expect((await context.store.listApprovalRequestsForExecution(run.executionId!)).filter((r) => r.status === "pending").map((r) => r.id)).toEqual(["apr_other_backfill"]);
   });
 });
 
@@ -525,9 +579,9 @@ describe("timeouts", () => {
     await closeContext(first);
 
     // Past its expiry while the API was down.
-    const db = new Database(path.join(tempDir, "orchestrator.db"));
-    db.prepare("UPDATE approval_requests SET expires_at = ? WHERE execution_id = ?").run(new Date(Date.now() - 60_000).toISOString(), run.executionId);
-    db.close();
+    await whileStopped(tempDir, async (sql) => {
+      await sql.run("UPDATE approval_requests SET expires_at = ? WHERE execution_id = ?", new Date(Date.now() - 60_000).toISOString(), run.executionId);
+    });
 
     const second = await createTestContext({ tempDir, overrides });
     const history = await waitFor(async () => {
@@ -596,7 +650,6 @@ describe("sub-workflows and the queue", () => {
   });
 });
 
-const rawDb = (context: TestContext) => (context.store as unknown as { db: Database.Database }).db;
 
 function rejectFailsWorkflow(id: string): Workflow {
   const base = gateWorkflow(id, { ...GATE, approverRoles: [] });
@@ -703,8 +756,9 @@ describe("a recorded decision is never lost", () => {
     const again = await call(context, "POST", `/api/approvals/${run.executionId}/approve`, lead.cookie, { requestId: item!.requestId });
     expect(again.statusCode).toBe(202);
     // The queued resume carries the run timeout, so the stuck-job check follows it.
-    const queued = rawDb(context).prepare("SELECT payload_json FROM execution_queue WHERE id LIKE ?").get(`${run.executionId}:${item!.requestId}:%`) as { payload_json: string };
-    expect(JSON.parse(queued.payload_json).executionTimeoutMs).toBe(context.config.WORKFLOW_EXECUTION_TIMEOUT_MS);
+    const queued = (await testSql(context.store).get<{ payload_json: string | Record<string, any> }>("SELECT payload_json FROM execution_queue WHERE id LIKE ?", `${run.executionId}:${item!.requestId}:%`))!;
+    const payload = typeof queued.payload_json === "string" ? JSON.parse(queued.payload_json) : queued.payload_json;
+    expect(payload.executionTimeoutMs).toBe(context.config.WORKFLOW_EXECUTION_TIMEOUT_MS);
     await waitFor(async () => (await context.store.getExecutionHistory(run.executionId!))?.status === "success");
   });
 
@@ -731,9 +785,9 @@ describe("a recorded decision is never lost", () => {
     expect(JSON.stringify(sent?.output)).toContain("second words");
     expect(JSON.stringify(sent?.output)).not.toContain("first words");
     // One queue item per decision, neither retried by the queue itself.
-    const rows = rawDb(context).prepare("SELECT id, max_attempts FROM execution_queue WHERE id LIKE ?").all(`${run.executionId}:${item!.requestId}:%`) as Array<{ id: string; max_attempts: number }>;
+    const rows = await testSql(context.store).all<{ id: string; max_attempts: unknown }>("SELECT id, max_attempts FROM execution_queue WHERE id LIKE ?", `${run.executionId}:${item!.requestId}:%`);
     expect(rows).toHaveLength(2);
-    expect(rows.every((row) => row.max_attempts === 1)).toBe(true);
+    expect(rows.every((row) => Number(row.max_attempts) === 1)).toBe(true);
   });
 
   it("hands the request back with its expiry when the resume throws", async () => {
@@ -766,10 +820,10 @@ describe("a recorded decision is never lost", () => {
       await closeContext(first);
 
       // The process stopped between the decision and its resume (no queue item either).
-      const db = new Database(path.join(tempDir, "orchestrator.db"));
-      db.prepare("UPDATE workflow_executions SET status = 'resuming' WHERE id = ?").run(run.executionId);
-      db.prepare("UPDATE approval_requests SET status = 'approved', decided_by = ?, decided_at = ? WHERE id = ?").run(lead.email, new Date().toISOString(), item!.requestId);
-      db.close();
+      await whileStopped(tempDir, async (sql) => {
+        await sql.run("UPDATE workflow_executions SET status = 'resuming' WHERE id = ?", run.executionId);
+        await sql.run("UPDATE approval_requests SET status = 'approved', decided_by = ?, decided_at = ? WHERE id = ?", lead.email, new Date().toISOString(), item!.requestId);
+      });
 
       const second = await createTestContext({ tempDir, queue });
       const history = await waitFor(async () => {
@@ -786,15 +840,16 @@ describe("a recorded decision is never lost", () => {
     const requester = await login(first, "builder", "requester");
     const run = await startRun(first, gateWorkflow("wf-stale", GATE), requester.cookie);
     await closeContext(first);
-    const db = new Database(path.join(tempDir, "orchestrator.db"));
-    // An older decided request for another node, and the current one still pending.
-    const old = db.prepare("SELECT * FROM approval_requests WHERE execution_id = ?").get(run.executionId) as Record<string, unknown>;
-    db.prepare("UPDATE approval_requests SET created_at = ? WHERE id = ?").run(new Date(Date.now() - 1_000).toISOString(), old.id);
-    db.prepare(
-      "INSERT INTO approval_requests (id, execution_id, workflow_id, project_id, node_id, kind, status, spec_json, decided_by, created_at, updated_at) VALUES ('apr_old', ?, ?, 'default', 'earlier_gate', 'approval_gate', 'approved', '{}', 'someone', ?, ?)"
-    ).run(run.executionId, "wf-stale", new Date(Date.now() - 60_000).toISOString(), new Date(Date.now() - 60_000).toISOString());
-    db.prepare("UPDATE workflow_executions SET status = 'resuming' WHERE id = ?").run(run.executionId);
-    db.close();
+    await whileStopped(tempDir, async (sql) => {
+      // An older decided request for another node, and the current one still pending.
+      const old = (await sql.get<{ id: string }>("SELECT id FROM approval_requests WHERE execution_id = ?", run.executionId))!;
+      await sql.run("UPDATE approval_requests SET created_at = ? WHERE id = ?", new Date(Date.now() - 1_000).toISOString(), old.id);
+      await sql.run(
+        "INSERT INTO approval_requests (id, execution_id, workflow_id, project_id, node_id, kind, status, spec_json, decided_by, created_at, updated_at) VALUES ('apr_old', ?, ?, 'default', 'earlier_gate', 'approval_gate', 'approved', '{}', 'someone', ?, ?)",
+        run.executionId, "wf-stale", new Date(Date.now() - 60_000).toISOString(), new Date(Date.now() - 60_000).toISOString()
+      );
+      await sql.run("UPDATE workflow_executions SET status = 'resuming' WHERE id = ?", run.executionId);
+    });
     const second = await createTestContext({ tempDir });
     await waitFor(async () => (await second.store.getWorkflowExecutionState(run.executionId!))?.status === "waiting_approval");
     expect((await second.store.getExecutionHistory(run.executionId!))?.status).not.toBe("success");
@@ -807,7 +862,7 @@ describe("expiry and the upgrade", () => {
     const requester = await login(context, "builder", "requester");
     const lead = await login(context, "builder", "lead");
     const run = await startRun(context, gateWorkflow("wf-expired", GATE), requester.cookie);
-    rawDb(context).prepare("UPDATE approval_requests SET expires_at = ? WHERE execution_id = ?").run(new Date(Date.now() - 1_000).toISOString(), run.executionId);
+    await testSql(context.store).run("UPDATE approval_requests SET expires_at = ? WHERE execution_id = ?", new Date(Date.now() - 1_000).toISOString(), run.executionId);
     const late = await call(context, "POST", `/api/approvals/${run.executionId}/approve`, lead.cookie, {});
     expect(late.statusCode).toBe(409);
     expect(late.json<{ error: string }>().error).toMatch(/expired/);
@@ -836,14 +891,14 @@ describe("expiry and the upgrade", () => {
     await closeContext(first);
 
     const upgradedAt = new Date(Date.now() - 30 * 60_000);
-    const db = new Database(path.join(tempDir, "orchestrator.db"));
-    // As if both runs were waiting when approval requests came up: no request rows, and the upgrade 30 minutes ago.
-    db.prepare("DELETE FROM approval_requests").run();
-    db.prepare("UPDATE schema_markers SET created_at = ? WHERE name = 'approval_requests'").run(upgradedAt.toISOString());
-    db.prepare("UPDATE workflow_executions SET created_at = ?, updated_at = ? WHERE id = ?").run(new Date(Date.now() - 2 * 86_400_000).toISOString(), new Date(Date.now() - 2 * 86_400_000).toISOString(), before.executionId);
     const pausedAfter = new Date(Date.now() - 10 * 60_000).toISOString();
-    db.prepare("UPDATE workflow_executions SET created_at = ?, updated_at = ? WHERE id = ?").run(pausedAfter, pausedAfter, after.executionId);
-    db.close();
+    await whileStopped(tempDir, async (sql) => {
+      // As if both runs were waiting when approval requests came up: no request rows, and the upgrade 30 minutes ago.
+      await sql.run("DELETE FROM approval_requests");
+      await sql.run("UPDATE schema_markers SET created_at = ? WHERE name = 'approval_requests'", upgradedAt.toISOString());
+      await sql.run("UPDATE workflow_executions SET created_at = ?, updated_at = ? WHERE id = ?", new Date(Date.now() - 2 * 86_400_000).toISOString(), new Date(Date.now() - 2 * 86_400_000).toISOString(), before.executionId);
+      await sql.run("UPDATE workflow_executions SET created_at = ?, updated_at = ? WHERE id = ?", pausedAfter, pausedAfter, after.executionId);
+    });
 
     const second = await createTestContext({ tempDir });
     const reader = await login(second, "builder", "requester");
@@ -868,16 +923,14 @@ describe("who may see and decide", () => {
     await context.store.upsertProjectRole({ userId: member.id, projectId: "busy", role: "custom", customRoleId: "none-busy" });
     const run = await startRun(context, gateWorkflow("wf-mine", { ...GATE, approverRoles: [] }), requester.cookie);
     const now = Date.now();
-    const db = rawDb(context);
-    const insert = db.prepare(
-      "INSERT INTO approval_requests (id, execution_id, workflow_id, project_id, node_id, kind, status, spec_json, created_at, updated_at) VALUES (?, ?, 'wf-busy', 'busy', 'gate', 'approval_gate', 'pending', '{}', ?, ?)"
-    );
-    db.transaction(() => {
-      for (let index = 0; index < 900; index += 1) {
-        const at = new Date(now + 60_000 + index).toISOString();
-        insert.run(`apr_busy_${index}`, `exec-busy-${index}`, at, at);
-      }
-    })();
+    const sql = testSql(context.store);
+    for (let index = 0; index < 900; index += 1) {
+      const at = new Date(now + 60_000 + index).toISOString();
+      await sql.run(
+        "INSERT INTO approval_requests (id, execution_id, workflow_id, project_id, node_id, kind, status, spec_json, created_at, updated_at) VALUES (?, ?, 'wf-busy', 'busy', 'gate', 'approval_gate', 'pending', '{}', ?, ?)",
+        `apr_busy_${index}`, `exec-busy-${index}`, at, at
+      );
+    }
     const items = await inbox(context, member.cookie, "?limit=200");
     expect(items.map((entry) => entry.executionId)).toEqual([run.executionId]);
   });
@@ -890,10 +943,10 @@ describe("who may see and decide", () => {
     await context.store.upsertCustomRole({ id: "none-secret", projectId: "secret-team", name: "No access", permissions: [] });
     await context.store.upsertProjectRole({ userId: outsider.id, projectId: "secret-team", role: "custom", customRoleId: "none-secret" });
     const run = await startRun(context, gateWorkflow("wf-hidden", GATE, "secret-team"), requester.cookie);
-    rawDb(context).prepare("DELETE FROM approval_requests WHERE execution_id = ?").run(run.executionId);
-    rawDb(context).prepare("UPDATE workflow_executions SET status = 'resuming' WHERE id = ?").run(run.executionId);
+    await testSql(context.store).run("DELETE FROM approval_requests WHERE execution_id = ?", run.executionId);
+    await testSql(context.store).run("UPDATE workflow_executions SET status = 'resuming' WHERE id = ?", run.executionId);
     expect((await call(context, "POST", `/api/approvals/${run.executionId}/approve`, outsider.cookie, {})).statusCode).toBe(404);
-    rawDb(context).prepare("UPDATE workflow_executions SET status = 'waiting_approval' WHERE id = ?").run(run.executionId);
+    await testSql(context.store).run("UPDATE workflow_executions SET status = 'waiting_approval' WHERE id = ?", run.executionId);
     expect((await call(context, "POST", `/api/approvals/${run.executionId}/approve`, outsider.cookie, {})).statusCode).toBe(404);
     // Nothing was written for the outsider's attempt.
     expect(await context.store.listApprovalRequestsForExecution(run.executionId!)).toEqual([]);
@@ -1074,7 +1127,7 @@ describe("project authorization (run-access)", () => {
 
     const gone = await startRun(context, gateWorkflow("wf-gone", GATE), requester.cookie);
     // Only the workflow row goes (deleting through the store also clears its runs).
-    rawDb(context).prepare("DELETE FROM workflows WHERE id = ?").run("wf-gone");
+    await testSql(context.store).run("DELETE FROM workflows WHERE id = ?", "wf-gone");
     expect((await inbox(context, lead.cookie)).map((item) => item.workflowId)).not.toContain("wf-gone");
     expect((await call(context, "POST", `/api/approvals/${gone.executionId}/approve`, lead.cookie, {})).statusCode).toBe(404);
     const admin = await login(context, "admin");
@@ -1172,7 +1225,7 @@ describe("project authorization (run-access)", () => {
 
 describe("who a resume runs as, and what it re-checks", () => {
   const expireNow = async (context: TestContext, executionId: string) => {
-    rawDb(context).prepare("UPDATE approval_requests SET expires_at = ? WHERE execution_id = ?").run(new Date(Date.now() - 1_000).toISOString(), executionId);
+    await testSql(context.store).run("UPDATE approval_requests SET expires_at = ? WHERE execution_id = ?", new Date(Date.now() - 1_000).toISOString(), executionId);
     // A decision past the expiry answers 409 and starts a sweep, which resumes the run with the timeout.
     const lead = await login(context, "admin", "sweeper");
     expect((await call(context, "POST", `/api/approvals/${executionId}/approve`, lead.cookie, {})).statusCode).toBe(409);
@@ -1234,7 +1287,7 @@ describe("who a resume runs as, and what it re-checks", () => {
       await context.store.upsertWorkflow(workflow);
       const started = await context.app.inject({ method: "POST", url: "/webhook/hook-wf-timeout-trigger", payload: { user_prompt: "Ana" } });
       expect(started.json<{ output: { waitingForApproval: boolean } }>().output.waitingForApproval).toBe(true);
-      const executionId = (rawDb(context).prepare("SELECT id FROM workflow_executions WHERE workflow_id = ?").get("wf-timeout-trigger") as { id: string }).id;
+      const executionId = (await testSql(context.store).get<{ id: string }>("SELECT id FROM workflow_executions WHERE workflow_id = ?", "wf-timeout-trigger"))!.id;
       expect((await context.store.getWorkflowExecutionState(executionId))?.status).toBe("waiting_approval");
       expect((await context.store.listApprovalRequestsForExecution(executionId))[0]).toMatchObject({ requestedByUserId: null });
       await expireNow(context, executionId);

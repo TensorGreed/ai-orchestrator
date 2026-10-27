@@ -12,12 +12,11 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { createApp } from "./app.js";
 import { parseConfig } from "./config.js";
-import { SqliteStore } from "./db/database.js";
 import { StoreReferenceMissingError } from "./db/store-errors.js";
 import type { Store } from "./db/store.js";
 import { AuthService } from "./services/auth-service.js";
 import { SecretService } from "./services/secret-service.js";
-import { createTestStore, noticePostgresSkipped, testPostgresUrl, type TestStore, type TestStoreKind } from "./test-support/test-store.js";
+import { createTestStore, noticePostgresSkipped, openTestStore, testPostgresUrl, type TestStore, type TestStoreKind } from "./test-support/test-store.js";
 
 const writes: Record<string, (store: Store) => Promise<unknown>> = {
   upsertProjectRole: (store) => store.upsertProjectRole({ userId: "ghost", projectId: "default", role: "viewer" }),
@@ -73,7 +72,7 @@ describe("POST /api/projects/:id/members when the user disappears before the wri
   async function appWithFailingWrite(failure: () => Error) {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-ref-missing-"));
     dirs.push(dir);
-    const real = await SqliteStore.create(path.join(dir, "orchestrator.db"));
+    const real = await openTestStore(path.join(dir, "orchestrator.db"));
     await real.ensureDefaultProject();
     const store = new Proxy(real, {
       get(target, property, receiver) {

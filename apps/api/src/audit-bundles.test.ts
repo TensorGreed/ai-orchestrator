@@ -12,7 +12,6 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { inflateRawSync } from "node:zlib";
-import Database from "better-sqlite3";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { FastifyInstance } from "fastify";
 import {
@@ -28,7 +27,9 @@ import {
 } from "@ai-orchestrator/shared";
 import { createApp } from "./app.js";
 import { parseConfig, type AppConfig } from "./config.js";
-import { SqliteStore } from "./db/database.js";
+import type { Store } from "./db/store.js";
+import { testSql } from "./test-support/test-sql.js";
+import { openTestStore } from "./test-support/test-store.js";
 import { MIGRATIONS } from "./db/migrations.js";
 import { contiguousMigrationVersions } from "./db/migration-versions.test-helper.js";
 import { AuthService } from "./services/auth-service.js";
@@ -39,7 +40,7 @@ import { UsageService } from "./services/usage-service.js";
 
 interface TestContext {
   app: FastifyInstance;
-  store: SqliteStore;
+  store: Store;
   authService: AuthService;
   secretService: SecretService;
   config: AppConfig;
@@ -54,7 +55,7 @@ const PLANTED = "sk-planted-AUDIT-value-9f8e7d6c5b4a39281706";
 async function createTestContext(overrides: Record<string, string> = {}): Promise<TestContext> {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-audit-bundles-"));
   const dbPath = path.join(tempDir, "orchestrator.db");
-  const store = await SqliteStore.create(dbPath);
+  const store = await openTestStore(dbPath);
   await store.ensureDefaultProject();
   const config = parseConfig({
     LOG_LEVEL: "warn",
@@ -1009,16 +1010,15 @@ describe("migration 29", () => {
     }
   });
 
-  it("creates the same tables in SQLite, with one active key at most", async () => {
+  it("creates the same tables on either store, with one active key at most", async () => {
     const context = await createTestContext();
-    const db = new Database(context.dbPath, { readonly: true });
-    try {
-      const columns = (table: string) => (db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((row) => row.name);
-      expect(columns("execution_manifests")).toEqual(["execution_id", "run_context_json", "manifest_json", "manifest_digest", "key_id", "signature", "signed_at", "created_at"]);
-      expect(columns("audit_signing_keys")).toEqual(["key_id", "algorithm", "public_key", "source", "secret_id", "status", "created_at", "retired_at"]);
-    } finally {
-      db.close();
-    }
+    const sql = testSql(context.store);
+    const columns = async (table: string) => (sql.kind === "sqlite"
+      ? await sql.all<{ name: string }>(`PRAGMA table_info(${table})`)
+      : await sql.all<{ name: string }>(`SELECT column_name AS name FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = ? ORDER BY ordinal_position`, table)
+    ).map((row) => row.name);
+    expect(await columns("execution_manifests")).toEqual(["execution_id", "run_context_json", "manifest_json", "manifest_digest", "key_id", "signature", "signed_at", "created_at"]);
+    expect(await columns("audit_signing_keys")).toEqual(["key_id", "algorithm", "public_key", "source", "secret_id", "status", "created_at", "retired_at"]);
     const now = new Date().toISOString();
     expect(await context.store.activateAuditSigningKey({ keyId: "a".repeat(16), algorithm: "Ed25519", publicKey: "x", source: "generated", secretId: null, createdAt: now }, null)).toBe(true);
     // A writer that expected no active key loses the race instead of creating a second active key.

@@ -5,19 +5,19 @@ import { afterEach, describe, expect, it } from "vitest";
 import { randomBytes } from "node:crypto";
 import { MfaService } from "../services/mfa-service.js";
 import { WorkflowVersionService } from "../services/workflow-version-service.js";
-import { SqliteStore } from "./database.js";
+import { openTestStore } from "../test-support/test-store.js";
 import type { Store } from "./store.js";
 
 // Two callers that read the same state before either writes: on Postgres every store call yields, so each
 // check-then-act must be one conditional write. These tests interleave the two callers by hand.
 
 const dirs: string[] = [];
-const stores: SqliteStore[] = [];
+const stores: Store[] = [];
 
-async function openStore(): Promise<SqliteStore> {
+async function openStore(): Promise<Store> {
   const dir = mkdtempSync(path.join(tmpdir(), "l2m-atomic-"));
   dirs.push(dir);
-  const store = await SqliteStore.create(path.join(dir, "orchestrator.db"));
+  const store = await openTestStore(path.join(dir, "orchestrator.db"));
   stores.push(store);
   return store;
 }
@@ -38,6 +38,7 @@ describe("atomic store writes under interleaving", () => {
 
   it("a backup code is spent once when two sign-ins read the same codes before either writes", async () => {
     const store = await openStore();
+    await store.saveUser({ id: "u1", email: "u1@example.com", passwordHash: "x", role: "viewer" });
     await store.upsertMfaSecret({ userId: "u1", secretIv: "iv", secretAuthTag: "tag", secretCiphertext: "ct", backupCodes: ["a", "b"], enabled: true, activatedAt: null });
     const first = (await store.getMfaSecret("u1"))!;
     const second = (await store.getMfaSecret("u1"))!;
@@ -66,6 +67,7 @@ describe("atomic store writes under interleaving", () => {
         };
       }
     }) as Store;
+    await store.saveUser({ id: "u2", email: "u2@example.com", passwordHash: "x", role: "viewer" });
     const mfa = new MfaService(slow, randomBytes(32).toString("base64"));
     const { backupCodes } = await mfa.enroll("u2", "u2@example.com");
     await store.upsertMfaSecret({ ...(await store.getMfaSecret("u2"))!, enabled: true, activatedAt: new Date().toISOString() });
@@ -155,7 +157,8 @@ describe("atomic store writes under interleaving", () => {
     const appended = await Promise.all(
       [1, 2, 3, 4].map((n) => store.appendWorkflowVersion({ id: `wfv-${n}`, workflowId: "wf-keep", workflowJson: JSON.stringify({ n }), createdBy: null, changeNote: `v${n}`, retention: 2 }))
     );
-    expect(appended.map((entry) => entry.version)).toEqual([1, 2, 3, 4]);
+    // Concurrent appends finish in any order; what matters is that each took a distinct next number.
+    expect(appended.map((entry) => entry.version).sort((a, b) => a - b)).toEqual([1, 2, 3, 4]);
     expect((await store.listWorkflowVersions("wf-keep", 10)).map((entry) => entry.version).sort()).toEqual([3, 4]);
     expect(await store.maxWorkflowVersionNumber("wf-keep")).toBe(4);
   });

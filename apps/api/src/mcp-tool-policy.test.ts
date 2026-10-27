@@ -13,13 +13,15 @@ import type { McpToolPolicyRule, Workflow } from "@ai-orchestrator/shared";
 import { createApp } from "./app.js";
 import { parseConfig, type AppConfig } from "./config.js";
 import { SqliteStore } from "./db/database.js";
+import type { Store } from "./db/store.js";
+import { openTestStore } from "./test-support/test-store.js";
 import { AuthService } from "./services/auth-service.js";
 import { resolveMcpToolPolicySubject } from "./services/mcp-tool-policy.js";
 import { SecretService } from "./services/secret-service.js";
 
 interface TestContext {
   app: FastifyInstance;
-  store: SqliteStore;
+  store: Store;
   authService: AuthService;
   config: AppConfig;
   tempDir: string;
@@ -30,7 +32,7 @@ const tempDirs: string[] = [];
 
 async function createTestContext(): Promise<TestContext> {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-mcp-policy-"));
-  const store = await SqliteStore.create(path.join(tempDir, "orchestrator.db"));
+  const store = await openTestStore(path.join(tempDir, "orchestrator.db"));
   await store.ensureDefaultProject();
   const config = parseConfig({
     LOG_LEVEL: "warn",
@@ -471,6 +473,7 @@ describe("workflows.created_by", () => {
     expect(await context.store.getWorkflowCreatedBy("wf-imported")).toBe(other.id);
   });
 
+  // SQLite-specific: the embedded migrate() upgrading a pre-10.2 SQLite file rewound with better-sqlite3.
   it("is added to an existing database and backfilled from the earliest version author", async () => {
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-mcp-policy-migrate-"));
     tempDirs.push(tempDir);

@@ -4,7 +4,10 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { createDefaultGuardProfile } from "@ai-orchestrator/guard-sdk";
+import type { Store } from "./db/store.js";
 import { SqliteStore } from "./db/database.js";
+import { openTestStore, testStoreKind } from "./test-support/test-store.js";
+import { testSql } from "./test-support/test-sql.js";
 import { GuardService } from "./services/guard-service.js";
 import { SecretService } from "./services/secret-service.js";
 
@@ -15,14 +18,14 @@ import { SecretService } from "./services/secret-service.js";
  */
 
 const key = crypto.randomBytes(32).toString("base64");
-const opened: Array<{ store: SqliteStore; dir: string }> = [];
+const opened: Array<{ store: Store; dir: string }> = [];
 
 async function instances() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-guard-rev-"));
   const file = path.join(dir, "orchestrator.db");
-  const a = await SqliteStore.create(file);
+  const a = await openTestStore(file);
   await a.ensureDefaultProject();
-  const b = await SqliteStore.create(file);
+  const b = await openTestStore(file);
   opened.push({ store: a, dir }, { store: b, dir });
   const ga = new GuardService(a, new SecretService(a, key), { autoApply: true, logger: () => {} });
   const gb = new GuardService(b, new SecretService(b, key), { autoApply: true, logger: () => {} });
@@ -93,7 +96,7 @@ describe("guard profiles across instances on one database", () => {
     const { a, b, ga } = await instances();
     const before = (await a.guardProfileRevision())!;
     expect((await ga.loadProfile("default"))?.name).toBeDefined();
-    (b as unknown as { db: { exec(sql: string): void } }).db.exec(`UPDATE guard_profiles SET name = 'Renamed elsewhere' WHERE id = 'default'`);
+    await testSql(b).run(`UPDATE guard_profiles SET name = 'Renamed elsewhere' WHERE id = 'default'`);
     expect(await a.guardProfileRevision()).toBeGreaterThan(before);
     expect((await ga.loadProfile("default"))?.name).toBe("Renamed elsewhere");
   });
@@ -111,7 +114,8 @@ describe("guard profiles across instances on one database", () => {
     expect(reads).toEqual([]);
   });
 
-  it("a revision read inside an open SQLite transaction is no revision, so nothing read there is cached", async () => {
+  // SQLite-specific: a synchronous better-sqlite3 transaction() callback; Postgres has no such call shape.
+  it.skipIf(testStoreKind() !== "sqlite")("a revision read inside an open SQLite transaction is no revision, so nothing read there is cached", async () => {
     const { a, b, ga, gb } = await instances();
     await gb.createProfile({ document: strict({ name: "S1" }) }, null);
     const before = (await a.guardProfileRevision())!;
@@ -119,7 +123,7 @@ describe("guard profiles across instances on one database", () => {
     // Store methods run their SQLite body when called, so this read happens inside the transaction.
     let inside: Promise<number | undefined> | undefined;
     try {
-      a.transaction(() => {
+      (a as SqliteStore).transaction(() => {
         inside = a.guardProfileRevision();
         throw new Error("rollback");
       });
@@ -136,7 +140,7 @@ describe("guard profiles across instances on one database", () => {
 
   it("a missing revision row reads as no revision, so nothing is cached and changes are still seen", async () => {
     const { a, b, ga, gb } = await instances();
-    (b as unknown as { db: { exec(sql: string): void } }).db.exec(`DELETE FROM guard_profile_revision`);
+    await testSql(b).run(`DELETE FROM guard_profile_revision`);
     expect(await a.guardProfileRevision()).toBeUndefined();
     await gb.createProfile({ document: strict() }, null);
     await gb.setBinding("workflow", "wf", { mode: "override", profileId: "strict" }, null);

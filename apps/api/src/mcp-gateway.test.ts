@@ -20,6 +20,8 @@ import type { McpClient, McpToolset, Workflow } from "@ai-orchestrator/shared";
 import { createApp } from "./app.js";
 import { parseConfig, type AppConfig } from "./config.js";
 import { SqliteStore } from "./db/database.js";
+import type { Store } from "./db/store.js";
+import { openTestStore } from "./test-support/test-store.js";
 import { MIGRATIONS } from "./db/migrations.js";
 import { openApiSpec } from "./openapi.js";
 import { hashSecret } from "./services/api-key-service.js";
@@ -28,7 +30,7 @@ import { SecretService } from "./services/secret-service.js";
 
 interface TestContext {
   app: FastifyInstance;
-  store: SqliteStore;
+  store: Store;
   authService: AuthService;
   secretService: SecretService;
   config: AppConfig;
@@ -81,7 +83,7 @@ const INJECTED_SECRET = "echo-secret-value-9f3k2";
 
 async function createTestContext(overrides: Record<string, string> = {}): Promise<TestContext> {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-mcp-gateway-"));
-  const store = await SqliteStore.create(path.join(tempDir, "orchestrator.db"));
+  const store = await openTestStore(path.join(tempDir, "orchestrator.db"));
   await store.ensureDefaultProject();
   const config = parseConfig({
     LOG_LEVEL: "warn",
@@ -886,6 +888,7 @@ describe("MCP toolset and client admin API", () => {
 });
 
 describe("MCP gateway schema", () => {
+  // SQLite-specific: the embedded migrate() upgrading a legacy SQLite file, built with better-sqlite3.
   it("adds source and client_id to an existing mcp_tool_calls table and the new tables on SQLite", async () => {
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-mcp-gateway-legacy-"));
     try {

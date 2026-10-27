@@ -6,14 +6,16 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
 import type { AppConfig } from "./config";
 import { createApp } from "./app";
-import { SqliteStore } from "./db/database";
+import type { Store } from "./db/store.js";
+import { openTestStore } from "./test-support/test-store.js";
+import { testSql } from "./test-support/test-sql.js";
 import { AuthService } from "./services/auth-service";
 import { SecretService } from "./services/secret-service";
 import { generateTotpCode } from "./services/mfa-service";
 
 interface TestContext {
   app: FastifyInstance;
-  store: SqliteStore;
+  store: Store;
   authService: AuthService;
   secretService: SecretService;
   config: AppConfig;
@@ -193,7 +195,7 @@ function makeConfig(overrides: Partial<AppConfig> = {}): AppConfig {
 async function createTestContext(overrides: Partial<AppConfig> = {}): Promise<TestContext> {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-phase5-"));
   const dbPath = path.join(tempDir, "orchestrator.db");
-  const store = await SqliteStore.create(dbPath);
+  const store = await openTestStore(dbPath);
   const config = makeConfig(overrides);
   await store.ensureDefaultProject();
   const secretService = new SecretService(store, config.SECRET_MASTER_KEY_BASE64);
@@ -305,7 +307,7 @@ describe("Phase 5.1 — API keys", () => {
 
     // Poke the store to set the key as already expired.
     const past = new Date(Date.now() - 60_000).toISOString();
-    ctx.store["db"].prepare(`UPDATE api_keys SET expires_at = ? WHERE id = ?`).run(past, record.id);
+    await testSql(ctx.store).run(`UPDATE api_keys SET expires_at = ? WHERE id = ?`, past, record.id);
 
     const response = await ctx.app.inject({
       method: "GET",

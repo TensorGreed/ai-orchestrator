@@ -18,6 +18,9 @@ import type { GateCaseRequestView, ReleaseGateCasesView, ReleaseGateView, Releas
 import { createApp } from "./app.js";
 import { parseConfig, type AppConfig } from "./config.js";
 import { SqliteStore } from "./db/database.js";
+import type { Store } from "./db/store.js";
+import { openTestStore } from "./test-support/test-store.js";
+import { testSql } from "./test-support/test-sql.js";
 import { MIGRATIONS } from "./db/migrations.js";
 import { AuthService } from "./services/auth-service.js";
 import { SecretService } from "./services/secret-service.js";
@@ -26,7 +29,7 @@ import { WorkflowVersionService } from "./services/workflow-version-service.js";
 
 interface TestContext {
   app: FastifyInstance;
-  store: SqliteStore;
+  store: Store;
   authService: AuthService;
   config: AppConfig;
   tempDir: string;
@@ -35,10 +38,10 @@ interface TestContext {
 
 const contexts: TestContext[] = [];
 
-async function createTestContext(): Promise<TestContext> {
+async function createTestContext(options: { sqliteOnly?: boolean } = {}): Promise<TestContext> {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-admission-"));
   const dbPath = path.join(tempDir, "orchestrator.db");
-  const store = await SqliteStore.create(dbPath);
+  const store = options.sqliteOnly ? await SqliteStore.create(dbPath) : await openTestStore(dbPath);
   await store.ensureDefaultProject();
   const config = parseConfig({
     LOG_LEVEL: "warn",
@@ -534,6 +537,7 @@ describe("every add path lands pending", () => {
 });
 
 describe("migration 36", () => {
+  // SQLite-specific: drops columns from the SQLite file and reopens it so the embedded migrate() backfills (PRAGMA table_info too).
   it("adds the columns and table in SQLite and Postgres (with a down path), and admits every case of a gate enforced before it once (so old jobs judge the same), then fails closed", async () => {
     const migration = MIGRATIONS.find((entry) => entry.version === 36)!;
     expect(migration.up).toMatch(/ALTER TABLE eval_fixtures ADD COLUMN IF NOT EXISTS required INTEGER NOT NULL DEFAULT 0/);
@@ -542,7 +546,7 @@ describe("migration 36", () => {
     expect(migration.down).toMatch(/DROP TABLE IF EXISTS gate_case_requests/);
     expect(migration.down).toMatch(/ALTER TABLE eval_fixtures DROP COLUMN IF EXISTS required/);
 
-    const context = await createTestContext();
+    const context = await createTestContext({ sqliteOnly: true });
     const admin = await login(context, "admin");
     const builder = await login(context, "builder");
     expect(await context.store.getSchemaMarker("gate_admission_backfill")).not.toBeNull();
@@ -937,10 +941,11 @@ describe("on an enforced gate only admitted cases can make a job stale", () => {
     const setup = await waitingRequestSetup(context, "wf-legacy-snap", { policy: { minPassRate: 0.9 }, statuses: (ids) => statusesOf(ids, "pass") });
     const current = await goldenSetSnapshots([setup.setId], async (datasetId) => await context.store.listEvalFixtures(datasetId));
     // The 15.4 form: set id -> hash only.
-    (context.store as unknown as { exec(sql: string, params: unknown[]): void }).exec(`UPDATE eval_runs SET set_snapshot_json = ? WHERE id = ?`, [
+    await testSql(context.store).run(
+      "UPDATE eval_runs SET set_snapshot_json = ? WHERE id = ?",
       JSON.stringify({ [setup.setId]: current[setup.setId]!.hash }),
       setup.job
-    ]);
+    );
     expect(await context.store.getEvalRunSetSnapshot(setup.job)).toEqual({ [setup.setId]: { hash: current[setup.setId]!.hash, cases: null } });
     expect((await preview(context, setup.builder.cookie, "wf-legacy-snap", setup.version, setup.job)).reasons.join(" ")).not.toMatch(/changed after replay job/);
     await addCases(context, setup.setId, "legacy_late", 1);
@@ -1088,7 +1093,7 @@ describe("release requests go stale by who decides, and are judged again for the
   it("a request made before the fingerprint existed keeps the timestamp rule", async () => {
     const context = await createTestContext();
     const setup = await waitingRequestSetup(context, "wf-legacy-authority", { policy: { minPassRate: 0.5 }, statuses: (ids) => statusesOf(ids, "pass") });
-    (context.store as unknown as { exec(sql: string, params: unknown[]): void }).exec(`UPDATE release_approval_requests SET gate_authority = NULL WHERE id = ?`, [setup.requestId]);
+    await testSql(context.store).run("UPDATE release_approval_requests SET gate_authority = NULL WHERE id = ?", setup.requestId);
     await putGate(context, setup.builder.cookie, "wf-legacy-authority", { ...setup.settings, policy: { minPassRate: 0.6 } });
     const stale = await approve(context, setup.requestId, setup.approver.cookie);
     expect(stale.statusCode).toBe(409);
