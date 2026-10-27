@@ -25,7 +25,11 @@ import type {
   RunFacts,
   Workflow
 } from "@ai-orchestrator/shared";
+import Fastify from "fastify";
 import { createApp } from "./app.js";
+import { registerReplayCaptureRoutes } from "./replay-capture-routes.js";
+import type { RunAccess } from "./run-access.js";
+import type { SafeUser } from "./services/auth-service.js";
 import { parseConfig, type AppConfig } from "./config.js";
 import type { Store } from "./db/store.js";
 import { openTestStore } from "./test-support/test-store.js";
@@ -235,6 +239,35 @@ async function runJob(context: TestContext, cookie: string, body: Record<string,
     await sleep(50);
   }
 }
+
+describe("without a 32-byte master key", () => {
+  // createApp itself refuses to start without the key (MFA needs it, and index.ts checks it), so the routes are
+  // registered here on their own with capture off: they answer 501, exactly as before on SQLite.
+  it("every capture route answers 501", async () => {
+    const app = Fastify();
+    closers.push(async () => await app.close());
+    const user = { id: "u1", email: "admin@example.com", role: "admin" } as SafeUser;
+    registerReplayCaptureRoutes({
+      app,
+      store: {} as Store,
+      captures: {} as ReplayCaptureService,
+      requireRole: async () => user,
+      runAccess: {} as RunAccess,
+      audit: () => undefined,
+      available: false
+    });
+    await app.ready();
+    for (const [method, url] of [
+      ["GET", "/api/workflows/wf-any/replay-capture"],
+      ["PUT", "/api/workflows/wf-any/replay-capture"],
+      ["GET", "/api/workflows/wf-any/replay-captures"]
+    ] as const) {
+      const response = await app.inject({ method, url, ...(method === "PUT" ? { payload: {} } : {}) });
+      expect(response.statusCode, `${method} ${url}`).toBe(501);
+      expect(response.json<{ error: string }>().error).toMatch(/32-byte SECRET_MASTER_KEY_BASE64/);
+    }
+  });
+});
 
 describe("migration 34", () => {
   it("adds capture settings and recording status in Postgres DDL with a down path, and the same in SQLite", async () => {
