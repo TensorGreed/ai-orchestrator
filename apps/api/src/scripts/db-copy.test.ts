@@ -20,7 +20,7 @@ import { MIGRATIONS } from "../db/migrations.js";
 import { PostgresStore, postgresPoolConfig, type PostgresStoreConfig } from "../db/postgres-store.js";
 import { noticePostgresSkipped, testPostgresUrl } from "../test-support/test-store.js";
 import { API_ROOT, CODE_SCHEMA_VERSION, DbCopyRefusal, parseDbCopyArgs, runDbCopy } from "./db-copy-core.js";
-import { appendLegacySqliteAuditRow, bomAuditEntry, sqliteAuditBytes } from "./legacy-audit.test-helper.js";
+import { appendLegacySqliteAuditRow, bomAuditEntry, sqliteAuditBytes, wtf8 } from "./legacy-audit.test-helper.js";
 
 const run = promisify(execFile);
 
@@ -52,9 +52,49 @@ async function sqliteSource(seed?: (store: SqliteStore) => Promise<void>): Promi
   }
 }
 
+const BASE_AUDIT = { eventType: "tag.create", category: "workflow", action: "create", outcome: "success" as const };
+
+/**
+ * Sources whose SQLite chain is broken in ways Postgres would hide (review probe p4): the copy must not turn them
+ * into "intact" or "cannot be verified".
+ */
+const BROKEN_SOURCES: Record<string, { brokenAt: string; seed: (file: string) => Promise<void> }> = {
+  // A Node-20 row's stored lone surrogate rewritten as another one: on Postgres both are U+FFFD, and the search verifies it.
+  "surrogate swapped": {
+    brokenAt: "legacy",
+    seed: async (file) => {
+      const store = await SqliteStore.create(file);
+      await store.writeAuditLog({ id: "a1", ...BASE_AUDIT });
+      await store.close();
+      const raw = new Database(file);
+      appendLegacySqliteAuditRow(raw, "legacy", { message: "tag \ud800 here" });
+      raw.prepare(`UPDATE audit_logs SET message = CAST(? AS TEXT) WHERE id = 'legacy'`).run(wtf8("tag \udfff here"));
+      raw.close();
+      const again = await SqliteStore.create(file);
+      await again.writeAuditLog({ id: "a2", ...BASE_AUDIT });
+      await again.close();
+    }
+  },
+  // A real content edit that adds two NULs: broken on SQLite, merely "cannot be verified" on Postgres.
+  "edit plus two NULs": {
+    brokenAt: "edited",
+    seed: async (file) => {
+      const store = await SqliteStore.create(file);
+      await store.writeAuditLog({ id: "a1", ...BASE_AUDIT });
+      await store.writeAuditLog({ id: "edited", ...BASE_AUDIT, message: "approved by alice" });
+      await store.writeAuditLog({ id: "a3", ...BASE_AUDIT });
+      await store.close();
+      const raw = new Database(file);
+      raw.prepare(`UPDATE audit_logs SET message = ? WHERE id = 'edited'`).run("approved by mallory\u0000\u0000");
+      raw.close();
+    }
+  }
+};
+
 describe("parseDbCopyArgs", () => {
   it("reads sqlite:<path>, --to postgres and one of --yes / --dry-run", () => {
-    expect(parseDbCopyArgs(["--from", "sqlite:/tmp/a.db", "--to", "postgres", "--yes"])).toEqual({ from: "/tmp/a.db", yes: true, dryRun: false, help: false });
+    expect(parseDbCopyArgs(["--from", "sqlite:/tmp/a.db", "--to", "postgres", "--yes"])).toEqual({ from: "/tmp/a.db", yes: true, dryRun: false, allowBrokenAudit: false, help: false });
+    expect(parseDbCopyArgs(["--from", "sqlite:/tmp/a.db", "--to", "postgres", "--yes", "--allow-broken-audit"]).allowBrokenAudit).toBe(true);
     expect(parseDbCopyArgs(["--", "--from=sqlite:/tmp/a.db", "--to=postgresql", "--dry-run"])).toMatchObject({ from: "/tmp/a.db", dryRun: true });
     expect(parseDbCopyArgs(["--from", "sqlite:rel/a.db", "--to", "postgres", "-y"]).from).toBe(path.resolve("rel/a.db"));
     expect(parseDbCopyArgs(["--from", "sqlite:///abs/a.db", "--to", "postgres", "-y"]).from).toBe("/abs/a.db");
@@ -127,6 +167,42 @@ describe("source refusals (before any connection)", () => {
     expect(message).toMatch(/written by a newer build/);
     expect(message).toContain("future_feature");
     expect(message).toContain("workflows.future_column");
+  });
+
+  for (const [name, { brokenAt, seed }] of Object.entries(BROKEN_SOURCES)) {
+    it(`a source whose audit chain is broken (${name}) is refused by default, naming the row`, async () => {
+      await seed(sourcePath);
+      const message = await refusal();
+      expect(message).toMatch(new RegExp(`audit chain on SQLite is broken at row ${brokenAt} \\(position 2, `));
+      expect(message).toContain("db:export");
+      expect(message).toContain("--allow-broken-audit");
+      expect(message).toContain("Nothing was copied.");
+    });
+  }
+
+  it("a row SQLite verified that would be broken on Postgres is refused before anything is written", async () => {
+    await sqliteSource(async (store) => {
+      await store.writeAuditLog({ id: "a1", ...BASE_AUDIT });
+    });
+    const raw = new Database(sourcePath);
+    // U+0000 in metadata (never free text: the writer JSON-escapes it): Postgres stores U+FFFD, no candidate explains it.
+    appendLegacySqliteAuditRow(raw, "nul-in-metadata", { metadataJson: "{\"a\":\"x\u0000\"}" });
+    raw.close();
+    const message = await refusal();
+    expect(message).toMatch(/would not carry over to Postgres: row nul-in-metadata \(position 2\) would be broken on Postgres/);
+    expect(message).toContain("SQLite says the chain is intact (2 rows verified)");
+  });
+
+  it("a row SQLite verified that would be unverifiable on Postgres without its SQLite text explaining it is refused", async () => {
+    await sqliteSource(async (store) => {
+      await store.writeAuditLog({ id: "a1", ...BASE_AUDIT });
+    });
+    const raw = new Database(sourcePath);
+    // Two real U+FFFD in the message and U+0000 only in metadata: no free-text character Postgres cannot store.
+    appendLegacySqliteAuditRow(raw, "unexplained", { message: "\ufffd and \ufffd", metadataJson: "{\"a\":\"x\u0000\"}" });
+    raw.close();
+    const message = await refusal();
+    expect(message).toMatch(/row unexplained \(position 2\), verified on SQLite, would not be verifiable on Postgres, and its SQLite text does not explain it/);
   });
 
   it("opens the source read-only: its bytes are unchanged, also after a refusal", async () => {
@@ -318,7 +394,7 @@ describe.skipIf(!postgresUrl)("db:copy into Postgres", () => {
     const { report, lines } = await copy();
     expect(report.audit.source).toEqual({ ok: true, rowsChecked: 6 });
     expect(report.audit.becameUnverifiable).toEqual(["two-nul", "two-surrogates"]);
-    expect(lines.join("\n")).toContain("2 audit row(s) verified on SQLite cannot be verified on Postgres (two-nul, two-surrogates)");
+    expect(lines.join("\n")).toContain("2 audit row(s) verified on SQLite cannot be verified on Postgres (two-nul, two-surrogates): each holds two or more U+FFFD");
     const store = await targetStore();
     const verdict = await store.verifyAuditChain();
     expect(verdict).toMatchObject({ ok: false, rowsChecked: 4 });
@@ -355,6 +431,48 @@ describe.skipIf(!postgresUrl)("db:copy into Postgres", () => {
     );
     expect(targetBytes).toEqual(sourceBytes);
     expect(await (await targetStore()).verifyAuditChain()).toEqual({ ok: true, rowsChecked: 4 });
+  }, 120_000);
+
+  for (const [name, { brokenAt, seed }] of Object.entries(BROKEN_SOURCES)) {
+    it(`--allow-broken-audit copies a broken source (${name}) and never calls the target intact: the last line says so`, async () => {
+      await seed(sourcePath);
+      const lines: string[] = [];
+      const report = await runDbCopy({ sqlitePath: sourcePath, postgres: config, allowBrokenAudit: true, log: (line) => lines.push(line) });
+      expect(report.audit.source.firstBrokenAt?.id).toBe(brokenAt);
+      expect(report.audit.sourceBrokenAt).toEqual({ id: brokenAt, position: 2 });
+      // Rows from the break on were never verified on SQLite, so none of them is reported as "verified on SQLite".
+      expect(report.audit.becameUnverifiable).toEqual([]);
+      const text = lines.join("\n");
+      expect(text).toContain(`Audit chain on SQLite (verified from the stored bytes): broken at row ${brokenAt}`);
+      expect(text).toContain(`Audit chain on Postgres: not trusted. The SQLite chain was broken at row ${brokenAt} (position 2)`);
+      expect(text).not.toMatch(/Postgres: intact/);
+      expect(text).not.toContain("verified on SQLite cannot be verified");
+      expect(lines.at(-1)).toBe(
+        `WARNING: the SQLite audit chain was broken at row ${brokenAt} (position 2) before the copy (--allow-broken-audit). ` +
+          `The Postgres audit verdict cannot be trusted to show it: keep the SQLite file as the evidence.`
+      );
+      expect((await q<{ n: string }>(`SELECT COUNT(*)::text AS n FROM $S.audit_logs`))[0]!.n).toBe("3");
+    }, 120_000);
+  }
+
+  it("a row whose one U+0000 meets a real U+FFFD is verified on SQLite, may be unverifiable on Postgres, and is named; an unverifiable row stays so", async () => {
+    await sqliteSource(async (store) => {
+      await store.writeAuditLog({ id: "a1", ...BASE_AUDIT });
+    });
+    const raw = new Database(sourcePath);
+    appendLegacySqliteAuditRow(raw, "nul-plus-real-fffd", { message: "a\u0000b \ufffd c" });
+    // Hashed over two lone surrogates, stored (as Node 24 did) as two U+FFFD: unverifiable on SQLite already.
+    const hashed = appendLegacySqliteAuditRow(raw, "already-unverifiable", { message: "\ud800 and \udc01" });
+    raw.prepare(`UPDATE audit_logs SET message = ? WHERE id = 'already-unverifiable'`).run(hashed.message!.replace(/[\ud800-\udfff]/g, "\ufffd"));
+    raw.close();
+    const { report, lines } = await copy();
+    expect(report.audit.source).toMatchObject({ ok: false, rowsChecked: 2, unverifiable: [{ id: "already-unverifiable" }] });
+    expect(report.audit.becameUnverifiable).toEqual(["nul-plus-real-fffd"]);
+    expect(report.audit.target?.unverifiable?.map((row) => row.id)).toEqual(["nul-plus-real-fffd", "already-unverifiable"]);
+    expect(lines.join("\n")).toContain(
+      "1 audit row(s) verified on SQLite cannot be verified on Postgres (nul-plus-real-fffd): each holds two or more U+FFFD once U+0000 " +
+        "and lone surrogates (which Postgres cannot store) become U+FFFD"
+    );
   }, 120_000);
 
   it("seq order is SQLite rowid order (not id or time order), and inserts after the copy continue it", async () => {

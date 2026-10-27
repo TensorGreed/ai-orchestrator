@@ -214,7 +214,7 @@ const SINGLE_CANDIDATES: readonly number[] = [
 ];
 
 /** Free-text fields a lone surrogate could have reached before the fix (see the rule above). */
-const LEGACY_TEXT_FIELDS = [
+export const LEGACY_TEXT_FIELDS = [
   "eventType",
   "category",
   "action",

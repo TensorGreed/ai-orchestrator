@@ -45,6 +45,7 @@ async function main(): Promise<number> {
       sqlitePath: args.from,
       postgres: postgresStoreConfig(settings, { maxConnections: 1 }),
       dryRun: args.dryRun,
+      allowBrokenAudit: args.allowBrokenAudit,
       log: (line) => console.log(line)
     });
     return 0;

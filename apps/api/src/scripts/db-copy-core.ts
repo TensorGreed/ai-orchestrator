@@ -25,13 +25,19 @@
  *     text verbatim. Audit text is read exactly as verify reads it (exactSqliteTextRows: a lone surrogate that
  *     better-sqlite3 on Node 20 kept as generalized UTF-8 is that surrogate, not three U+FFFD) and is not
  *     re-normalised. Secrets are copied as ciphertext / iv / auth tag, never decrypted.
- *  5. Verify, inside the same transaction, before COMMIT: per-table row counts, a per-table checksum over primary keys
- *     (order-independent), for seq tables the order (source rowid order = target seq order), and verifyAuditChain on
- *     both sides. The target's audit verdict must be exactly the one predicted from the source rows as Postgres stores
- *     them (lone surrogates and U+0000 become U+FFFD). Where Postgres cannot keep what SQLite kept, a row may go from
- *     verified to unverifiable (two or more such characters in one row: too many candidates to try); that is reported,
- *     and the copy goes on. A row that would turn *broken* stops the copy. Then sequences are moved past the copied
- *     values and the transaction commits.
+ *  5. Audit chain, before anything is written: the source verdict is computed on SQLite from the exact stored bytes.
+ *     - Source broken: refused (name the row; investigate, or db:export first). With `allowBrokenAudit` the copy goes
+ *       on, and the summary says (also as its last line) that the target's verdict cannot be trusted to show the break;
+ *       the target is never reported as intact then. The rule below still holds for the rows before the break.
+ *     - Otherwise (ok, or rows that cannot be verified), predicted from the source rows as Postgres stores them (lone
+ *       surrogates and U+0000 become U+FFFD): every row SQLite verified must verify on Postgres, or may be unverifiable
+ *       there only if the source row itself holds a character Postgres cannot store and, once those become U+FFFD,
+ *       two or more U+FFFD (too many candidates to try; computed from the source row, never inferred from the target).
+ *       Rows unverifiable on SQLite must stay unverifiable. Anything else is refused.
+ *  6. Verify, inside the same transaction, before COMMIT: per-table row counts, a per-table checksum over primary keys
+ *     (order-independent), for seq tables the order (source rowid order = target seq order), and the audit chain on
+ *     Postgres: it must give exactly the predicted verdict and meet the rule above. Then sequences are moved past the
+ *     copied values and the transaction commits; anything that does not verify rolls back.
  *
  * Why one transaction (not one per table): a failed copy leaves the target exactly as it was (migrated and empty),
  * so it can simply be re-run, and a copy that does not verify is never committed. Postgres has no transaction size
@@ -46,6 +52,7 @@ import { fileURLToPath } from "node:url";
 import { Pool, type PoolClient } from "pg";
 import {
   exactSqliteTextRows,
+  LEGACY_TEXT_FIELDS,
   readSqliteAuditChainRows,
   SQLITE_AUDIT_TEXT_COLUMNS,
   verifyAuditRows,
@@ -83,6 +90,11 @@ export interface DbCopyOptions {
   postgres: PostgresStoreConfig;
   /** Report counts and refusals; write nothing. */
   dryRun?: boolean;
+  /**
+   * Copy even though the SQLite audit chain is broken (refused by default). The summary then says the target's
+   * verdict cannot be trusted to show the break.
+   */
+  allowBrokenAudit?: boolean;
   /** Rows per INSERT (default 500, fewer for wide tables). */
   batchRows?: number;
   log?: (line: string) => void;
@@ -110,8 +122,13 @@ export interface DbCopyReport {
     expectedTarget: AuditChainResult;
     /** The copied chain's verdict (not on a dry run). */
     target?: AuditChainResult;
-    /** Rows verified on SQLite that cannot be verified on Postgres (≥2 characters Postgres cannot store). */
+    /**
+     * Rows verified on SQLite that cannot be verified on Postgres: each holds a character Postgres cannot store, and two
+     * or more U+FFFD once U+0000 and lone surrogates become U+FFFD.
+     */
     becameUnverifiable: string[];
+    /** Where the SQLite chain was broken (only with allowBrokenAudit): the Postgres verdict cannot be trusted then. */
+    sourceBrokenAt?: { id: string; position: number };
   };
 }
 
@@ -449,6 +466,66 @@ function sameVerdict(a: AuditChainResult, b: AuditChainResult): boolean {
   );
 }
 
+/** 1-based walk position of the row where `result` found the chain broken. */
+function brokenPosition(result: AuditChainResult): number | undefined {
+  return result.firstBrokenAt ? result.rowsChecked + (result.unverifiable?.length ?? 0) + 1 : undefined;
+}
+
+const UNSTORABLE_ON_POSTGRES = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]|\u0000/g;
+
+/**
+ * Whether a source row's own text explains it being unverifiable on Postgres: its free-text fields hold at least one
+ * character Postgres cannot store (U+0000, a lone surrogate), and two or more U+FFFD once those become U+FFFD (the
+ * verifier tries one U+FFFD's candidates, not two). Computed from the source row, never from the target.
+ */
+function unverifiableOnPostgresBySource(fields: AuditCanonicalInput): boolean {
+  let unstorable = 0;
+  let replacements = 0;
+  for (const field of LEGACY_TEXT_FIELDS) {
+    const value = fields[field];
+    if (typeof value !== "string") continue;
+    unstorable += value.match(UNSTORABLE_ON_POSTGRES)?.length ?? 0;
+    replacements += wellFormedAuditText(value).split("\ufffd").length - 1;
+  }
+  return unstorable > 0 && replacements >= 2;
+}
+
+/**
+ * The audit rule for a copy (see the header, step 5): `target` (predicted or actual) against `source`, row by row up to
+ * the source's break (all rows when the source is not broken). Returns what breaks the rule, and the rows that became
+ * unverifiable as the rule allows.
+ */
+function auditCarryOver(
+  source: AuditChainResult,
+  target: AuditChainResult,
+  explainedBySource: ReadonlySet<string>
+): { problems: string[]; becameUnverifiable: string[] } {
+  const limit = brokenPosition(source) ?? Number.POSITIVE_INFINITY;
+  const problems: string[] = [];
+  const targetBreak = brokenPosition(target);
+  if (target.firstBrokenAt && targetBreak! < limit) {
+    problems.push(`row ${target.firstBrokenAt.id} (position ${targetBreak}) would be broken on Postgres, where SQLite verified the chain up to it`);
+  }
+  const before = (row: { position: number }) => row.position < limit && (targetBreak === undefined || row.position < targetBreak);
+  const sourceUnverifiable = new Set((source.unverifiable ?? []).filter(before).map((row) => row.id));
+  const targetUnverifiable = new Set((target.unverifiable ?? []).filter(before).map((row) => row.id));
+  for (const id of sourceUnverifiable) {
+    if (!targetUnverifiable.has(id)) problems.push(`row ${id} cannot be verified on SQLite but would count as verified on Postgres`);
+  }
+  const becameUnverifiable: string[] = [];
+  for (const row of (target.unverifiable ?? []).filter(before)) {
+    if (sourceUnverifiable.has(row.id)) continue;
+    if (explainedBySource.has(row.id)) becameUnverifiable.push(row.id);
+    else {
+      problems.push(
+        `row ${row.id} (position ${row.position}), verified on SQLite, would not be verifiable on Postgres, and its SQLite text does not ` +
+          `explain it (it needs a character Postgres cannot store and two or more U+FFFD once those become U+FFFD)`
+      );
+    }
+  }
+  return { problems, becameUnverifiable };
+}
+
 async function countRows(client: PoolClient, table: string): Promise<number> {
   const r = await client.query<{ n: string }>(`SELECT COUNT(*)::text AS n FROM ${pgIdent(table)}`);
   return Number(r.rows[0]?.n ?? 0);
@@ -574,16 +651,26 @@ export async function runDbCopy(options: DbCopyOptions): Promise<DbCopyReport> {
 
     const sourceAuditRows = readSqliteAuditChainRows(db);
     const sourceAudit = verifyAuditRows(sourceAuditRows);
-    const expectedTarget = verifyAuditRows(asPostgresStores(sourceAuditRows));
-    if (expectedTarget.firstBrokenAt && (expectedTarget.firstBrokenAt.id !== sourceAudit.firstBrokenAt?.id)) {
+    const sourceBrokenAt = sourceAudit.firstBrokenAt ? { id: sourceAudit.firstBrokenAt.id, position: brokenPosition(sourceAudit)! } : undefined;
+    if (sourceBrokenAt && !options.allowBrokenAudit) {
       throw new DbCopyRefusal(
-        `The audit chain would break on Postgres at row ${expectedTarget.firstBrokenAt.id}, where SQLite says it is ${verdictLine(sourceAudit)}. ` +
+        `The audit chain on SQLite is broken at row ${sourceBrokenAt.id} (position ${sourceBrokenAt.position}, created_at ` +
+          `${sourceAudit.firstBrokenAt!.createdAt} as stored; ${sourceAudit.rowsChecked} rows verified before it). Copying it would ` +
+          `leave a Postgres chain whose verdict cannot be trusted to show that. Investigate the row first (compare it with a backup), ` +
+          `or keep the evidence with db:export and keep this SQLite file. To copy anyway, run db:copy again with --allow-broken-audit. ` +
           `Nothing was copied.`
       );
     }
-    const unverifiableIds = (result: AuditChainResult) => new Set((result.unverifiable ?? []).map((row) => row.id));
-    const sourceUnverifiable = unverifiableIds(sourceAudit);
-    const becameUnverifiable = [...unverifiableIds(expectedTarget)].filter((id) => !sourceUnverifiable.has(id));
+    const explainedBySource = new Set(sourceAuditRows.filter((row) => unverifiableOnPostgresBySource(row.fields)).map((row) => row.fields.id));
+    const expectedTarget = verifyAuditRows(asPostgresStores(sourceAuditRows));
+    const predicted = auditCarryOver(sourceAudit, expectedTarget, explainedBySource);
+    if (predicted.problems.length > 0) {
+      throw new DbCopyRefusal(
+        `The audit chain would not carry over to Postgres: ${predicted.problems.join("; ")}. SQLite says the chain is ` +
+          `${verdictLine(sourceAudit)}. Nothing was copied.`
+      );
+    }
+    const becameUnverifiable = predicted.becameUnverifiable;
 
     const pool = new Pool(postgresPoolConfig(options.postgres, { max: 1 }));
     try {
@@ -595,7 +682,7 @@ export async function runDbCopy(options: DbCopyOptions): Promise<DbCopyReport> {
         if (options.postgres.schema) await client.query(`CREATE SCHEMA IF NOT EXISTS ${pgIdent(options.postgres.schema)}`);
         try {
           const report = await copyInto(client, {
-            db, source, dryRun, batchRows, log, sourceAudit, expectedTarget, becameUnverifiable
+            db, source, dryRun, batchRows, log, sourceAudit, expectedTarget, becameUnverifiable, sourceBrokenAt, explainedBySource
           });
           if (dryRun) await client.query("ROLLBACK");
           return report;
@@ -626,6 +713,8 @@ interface CopyContext {
   sourceAudit: AuditChainResult;
   expectedTarget: AuditChainResult;
   becameUnverifiable: string[];
+  sourceBrokenAt?: { id: string; position: number };
+  explainedBySource: ReadonlySet<string>;
 }
 
 async function copyInto(client: PoolClient, ctx: CopyContext): Promise<DbCopyReport> {
@@ -692,7 +781,11 @@ async function copyInto(client: PoolClient, ctx: CopyContext): Promise<DbCopyRep
     for (const plan of order) {
       tables.push({ table: plan.table, rows: sourceCount(plan.table), replacedSeedRows: seedRows.get(plan.table) ?? 0, rounded: {} });
     }
-    const report = summary(tables, { dryRun, migratedTarget, audit: { source: ctx.sourceAudit, expectedTarget: ctx.expectedTarget, becameUnverifiable: ctx.becameUnverifiable } });
+    const report = summary(tables, {
+      dryRun,
+      migratedTarget,
+      audit: { source: ctx.sourceAudit, expectedTarget: ctx.expectedTarget, becameUnverifiable: ctx.becameUnverifiable, sourceBrokenAt: ctx.sourceBrokenAt }
+    });
     printSummary(report, log);
     return report;
   }
@@ -760,6 +853,8 @@ async function copyInto(client: PoolClient, ctx: CopyContext): Promise<DbCopyRep
     if (!sameVerdict(targetAudit, ctx.expectedTarget)) {
       mismatches.push(`audit chain on Postgres is ${verdictLine(targetAudit)}, expected ${verdictLine(ctx.expectedTarget)}`);
     }
+    const carried = auditCarryOver(ctx.sourceAudit, targetAudit, ctx.explainedBySource);
+    mismatches.push(...carried.problems.map((problem) => `audit chain: ${problem}`));
     if (mismatches.length > 0) {
       throw new Error(`Verification failed, nothing was committed: ${mismatches.join("; ")}.`);
     }
@@ -767,7 +862,13 @@ async function copyInto(client: PoolClient, ctx: CopyContext): Promise<DbCopyRep
     const report = summary(tables, {
       dryRun,
       migratedTarget,
-      audit: { source: ctx.sourceAudit, expectedTarget: ctx.expectedTarget, target: targetAudit, becameUnverifiable: ctx.becameUnverifiable }
+      audit: {
+        source: ctx.sourceAudit,
+        expectedTarget: ctx.expectedTarget,
+        target: targetAudit,
+        becameUnverifiable: carried.becameUnverifiable,
+        sourceBrokenAt: ctx.sourceBrokenAt
+      }
     });
     printSummary(report, log);
     return report;
@@ -789,18 +890,34 @@ function printSummary(report: DbCopyReport, log: (line: string) => void): void {
   } else {
     log(`Copied ${report.totalRows} row(s) in ${report.tables.length} table(s) at schema v${report.schemaVersion}; verified row counts, primary-key checksums and seq order.`);
   }
-  log(`Audit chain on SQLite: ${verdictLine(report.audit.source)}.`);
-  log(`Audit chain on Postgres: ${verdictLine(report.audit.target ?? report.audit.expectedTarget)}${report.audit.target ? "" : " (expected)"}.`);
+  const broken = report.audit.sourceBrokenAt;
+  log(`Audit chain on SQLite (verified from the stored bytes): ${verdictLine(report.audit.source)}.`);
+  if (broken) {
+    // Never "intact": rows from the break on were not verified on SQLite, so a clean verdict on Postgres proves nothing.
+    log(
+      `Audit chain on Postgres: not trusted. The SQLite chain was broken at row ${broken.id} (position ${broken.position}), and the ` +
+        `Postgres verdict cannot be trusted to show it.`
+    );
+  } else {
+    log(`Audit chain on Postgres: ${verdictLine(report.audit.target ?? report.audit.expectedTarget)}${report.audit.target ? "" : " (expected)"}.`);
+  }
   if (report.audit.becameUnverifiable.length > 0) {
     log(
       `Note: ${report.audit.becameUnverifiable.length} audit row(s) verified on SQLite cannot be verified on Postgres (${preview(report.audit.becameUnverifiable)}): ` +
-        `each holds two or more characters Postgres cannot store (U+0000 or a lone surrogate), stored as U+FFFD. Keep the SQLite file as the record for them.`
+        `each holds two or more U+FFFD once U+0000 and lone surrogates (which Postgres cannot store) become U+FFFD, too many ` +
+        `combinations to check. Keep the SQLite file as the record for them.`
     );
   }
   log(
     `Secrets ${report.dryRun ? "would be" : "were"} copied encrypted (ciphertext, iv and auth tag only, never decrypted). Start the API on Postgres ` +
       `with the same SECRET_MASTER_KEY_BASE64.`
   );
+  if (broken) {
+    log(
+      `WARNING: the SQLite audit chain was broken at row ${broken.id} (position ${broken.position}) before the copy (--allow-broken-audit). ` +
+        `The Postgres audit verdict cannot be trusted to show it: keep the SQLite file as the evidence.`
+    );
+  }
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -811,6 +928,8 @@ export interface DbCopyArgs {
   from: string;
   yes: boolean;
   dryRun: boolean;
+  /** Copy even though the SQLite audit chain is broken (refused by default). */
+  allowBrokenAudit: boolean;
   help: boolean;
 }
 
@@ -830,6 +949,8 @@ export const USAGE = [
   "  --to postgres         The target: DB_POSTGRESDB_URL or DB_POSTGRESDB_HOST/PORT/DATABASE/USER/PASSWORD/SSL*.",
   "  --dry-run             Check everything and report row counts; write nothing.",
   "  --yes, -y             Copy (required unless --dry-run).",
+  "  --allow-broken-audit  Copy even though the SQLite audit chain is broken (refused by default). The summary then",
+  "                        says the Postgres audit verdict cannot be trusted to show the break.",
   "  --help, -h            Show this message.",
   "",
   "Stop the API first. An empty, unmigrated Postgres database is migrated first; a non-empty one, or one at",
@@ -844,6 +965,7 @@ export function parseDbCopyArgs(argv: string[], env: Record<string, string | und
   let yes = false;
   let dryRun = false;
   let help = false;
+  let allowBrokenAudit = false;
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]!;
     if (arg === "--") continue;
@@ -857,10 +979,11 @@ export function parseDbCopyArgs(argv: string[], env: Record<string, string | und
     else if (flag === "--to") to = value();
     else if (flag === "--yes" || flag === "-y") yes = true;
     else if (flag === "--dry-run") dryRun = true;
+    else if (flag === "--allow-broken-audit") allowBrokenAudit = true;
     else if (flag === "--help" || flag === "-h") help = true;
     else throw new DbCopyRefusal(`Unknown argument: ${arg}\n\n${USAGE}`);
   }
-  if (help) return { from: "", yes, dryRun, help };
+  if (help) return { from: "", yes, dryRun, allowBrokenAudit, help };
   if (from === undefined) throw new DbCopyRefusal(`--from sqlite:<path> is required.\n\n${USAGE}`);
   let file: string;
   if (from === "sqlite") {
@@ -874,5 +997,5 @@ export function parseDbCopyArgs(argv: string[], env: Record<string, string | und
   if (to !== "postgres" && to !== "postgresql") throw new DbCopyRefusal(`--to must be postgres, got '${to}'.\n\n${USAGE}`);
   if (yes && dryRun) throw new DbCopyRefusal(`--dry-run and --yes together: choose one.\n\n${USAGE}`);
   if (!yes && !dryRun) throw new DbCopyRefusal(`Refusing to copy without --yes (or check first with --dry-run).\n\n${USAGE}`);
-  return { from: file, yes, dryRun, help };
+  return { from: file, yes, dryRun, allowBrokenAudit, help };
 }

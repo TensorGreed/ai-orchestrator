@@ -31,7 +31,7 @@ const COLUMNS: Record<keyof AuditCanonicalInput, string> = {
 export function appendLegacySqliteAuditRow(
   db: Database.Database,
   id: string,
-  text: Partial<Pick<AuditCanonicalInput, "message" | "userAgent" | "resourceId" | "actorEmail">>,
+  text: Partial<Omit<AuditCanonicalInput, "id" | "createdAt">>,
   createdAt = new Date().toISOString()
 ): AuditCanonicalInput {
   const last = db.prepare(`SELECT entry_hash FROM audit_logs WHERE entry_hash IS NOT NULL ORDER BY rowid DESC LIMIT 1`).get() as
