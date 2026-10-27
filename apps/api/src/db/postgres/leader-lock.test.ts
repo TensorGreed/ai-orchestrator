@@ -41,6 +41,11 @@ describe("describeRefusedSettings", () => {
     expect(both.level).toBe("warn");
     expect(both.message).toMatch(/server's own keepalive default.*about two hours/);
 
+    // The times follow the configured renew interval, not a fixed 10 s check.
+    expect(describeRefusedSettings(["idle_session_timeout"], 30_000).message).toMatch(/about 150 s/);
+    expect(describeRefusedSettings(["tcp_keepalives_idle"], 30_000).message).toMatch(/after 90 s.*about 120 s/);
+    expect(describeRefusedSettings(["idle_session_timeout"], 2_000).message).toMatch(/about 10 s/);
+
     expect(describeRefusedSettings(["no_such_leader_setting"], 10_000)).toMatchObject({ level: "warn" });
   });
 });

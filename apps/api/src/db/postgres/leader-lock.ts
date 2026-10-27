@@ -96,7 +96,9 @@ export function describeRefusedSettings(
   const known = refusedNames.every((name) => name === "idle_session_timeout" || KEEPALIVE_SETTINGS.has(name));
   const idleLost = refused.has("idle_session_timeout");
   const keepalivesLost = [...KEEPALIVE_SETTINGS].some((name) => refused.has(name));
-  const keepaliveBoundS = Math.ceil((4 * Math.max(1_000, renewIntervalMs)) / 1000);
+  // One standby check (the renew interval) is added to the server-side bound.
+  const checkS = Math.max(1, Math.ceil(renewIntervalMs / 1000));
+  const keepaliveBoundS = 4 * checkS;
   const idleBoundS = Math.ceil(Math.max(3 * renewIntervalMs, MIN_IDLE_SESSION_TIMEOUT_MS) / 1000);
   const tail = ` Refused: ${refusedNames.join(", ")}.`;
   if (known && idleLost && !keepalivesLost) {
@@ -104,7 +106,7 @@ export function describeRefusedSettings(
       level: "info",
       message:
         `Postgres does not support idle_session_timeout on the leader connection (PostgreSQL 13 or older); TCP keepalives ` +
-        `still end a lost leader's session, so another instance takes over within about ${keepaliveBoundS + 10} s. Only a ` +
+        `still end a lost leader's session, so another instance takes over within about ${keepaliveBoundS + checkS} s. Only a ` +
         `middlebox that keeps a dead TCP connection open is not covered.` + tail
     };
   }
@@ -113,7 +115,7 @@ export function describeRefusedSettings(
       level: "warn",
       message:
         `Postgres refused the leader connection's TCP keepalive settings; idle_session_timeout still ends a lost leader's ` +
-        `session after ${idleBoundS} s, so another instance takes over within about ${idleBoundS + 10} s.` + tail
+        `session after ${idleBoundS} s, so another instance takes over within about ${idleBoundS + checkS} s.` + tail
     };
   }
   if (known && idleLost && keepalivesLost) {
