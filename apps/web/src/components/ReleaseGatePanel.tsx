@@ -315,7 +315,8 @@ function WorkflowReleaseView({ workflowId, activeProjectId, canEdit, isAdmin }: 
         workflowId={workflowId}
         history={history}
         canRollback={canEdit && !locks.adminOnly}
-        canUnpublish={canEdit}
+        canUnpublish={canEdit && !locks.adminOnly}
+        unpublishAdminOnly={canEdit && locks.adminOnly}
         gate={gate}
         onChanged={() => void load()}
       />
@@ -339,6 +340,7 @@ function ReleaseHistory({
   history,
   canRollback,
   canUnpublish,
+  unpublishAdminOnly,
   gate,
   onChanged
 }: {
@@ -346,6 +348,8 @@ function ReleaseHistory({
   history: WorkflowReleasesView;
   canRollback: boolean;
   canUnpublish: boolean;
+  /** Unpublish is not offered because the gate is enforced and the user is not an admin. */
+  unpublishAdminOnly: boolean;
   gate: Pick<ReleaseGateView, "enabled" | "enforced">;
   onChanged: () => void;
 }) {
@@ -411,6 +415,7 @@ function ReleaseHistory({
           />
         )}
       </header>
+      {unpublishAdminOnly && history.publishedVersion !== null && <p className="cfg-help">Only an admin can unpublish while the gate is enforced.</p>}
       {notice && (
         <div className="approvals-notice" role="status">
           {notice}

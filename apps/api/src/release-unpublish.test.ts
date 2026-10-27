@@ -299,7 +299,7 @@ describe("who may unpublish", () => {
 });
 
 describe("unpublish with a release gate", () => {
-  it("is never blocked by an enforced gate: production runs the ungated draft and the answer says so; publishing again goes through the gate", async () => {
+  it("on an enforced gate only an admin unpublishes; the gate does not block it: production runs the ungated draft and the answer says so; publishing again goes through the gate", async () => {
     const ctx = await context();
     const admin = await loginAs(ctx, "admin");
     const builder = await loginAs(ctx, "builder");
@@ -309,7 +309,15 @@ describe("unpublish with a release gate", () => {
     const v2 = await saveVersion(ctx, hookWorkflow("wf-gated", "unreviewed"));
     expect(await productionHook(ctx, "hook-wf-gated")).toMatchObject({ output: { result: "reviewed" } });
 
-    const response = await unpublish(ctx, builder.cookie, "wf-gated", { reason: "Incident" });
+    // A builder is refused on an enforced gate, as for a rollback: nothing changes, and the refusal is audited.
+    const refused = await unpublish(ctx, builder.cookie, "wf-gated", { reason: "Incident" });
+    expect(refused.statusCode).toBe(403);
+    expect(refused.json<{ error: string }>().error).toMatch(/enforced: only an admin can unpublish/);
+    expect(await ctx.store.getPublishedVersion("wf-gated")).toBe(1);
+    expect(await productionHook(ctx, "hook-wf-gated")).toMatchObject({ output: { result: "reviewed" } });
+    expect((await ctx.store.listAuditLogs({ eventType: "release.unpublish.refused", pageSize: 5 })).items).toHaveLength(1);
+
+    const response = await unpublish(ctx, admin.cookie, "wf-gated", { reason: "Incident" });
     expect(response.statusCode, response.body).toBe(200);
     const result = response.json<ReleaseUnpublishResult>();
     expect(result).toMatchObject({ productionRuns: "draft", gateEnabled: true, gateEnforced: true });
@@ -331,6 +339,17 @@ describe("unpublish with a release gate", () => {
     expect(back.statusCode, back.body).toBe(200);
     expect(back.json<{ release: WorkflowRelease }>().release).toMatchObject({ version: 1, verdict: "rollback", previousVersion: null });
     expect(await productionHook(ctx, "hook-wf-gated")).toMatchObject({ output: { result: "reviewed" } });
+  });
+
+  it("a builder may unpublish while the gate is on but not enforced", async () => {
+    const ctx = await context();
+    const admin = await loginAs(ctx, "admin");
+    const builder = await loginAs(ctx, "builder");
+    await saveVersion(ctx, hookWorkflow("wf-observing", "reviewed"));
+    expect((await enableReleaseGate(ctx, admin.cookie, "wf-observing")).statusCode).toBe(200);
+    const response = await unpublish(ctx, builder.cookie, "wf-observing");
+    expect(response.statusCode, response.body).toBe(200);
+    expect(response.json<ReleaseUnpublishResult>()).toMatchObject({ gateEnabled: true, gateEnforced: false });
   });
 
   it("a gate that is on but not enforced says so too; deactivating is still the kill switch; a workflow created again under the id still fails closed", async () => {

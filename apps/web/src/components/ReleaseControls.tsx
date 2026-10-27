@@ -366,7 +366,10 @@ export function PublishDialog({ workflowId, state, canPublish, isAdmin, onClose,
               Unpublished. {unpublishedNotice}
             </div>
           )}
-          {canPublish && state && state.publishedVersion !== null && result?.outcome !== "published" && !unpublishedNotice && (
+          {canPublish && state && state.publishedVersion !== null && state.gateEnforced && !isAdmin && result?.outcome !== "published" && !unpublishedNotice && (
+            <p className="settings-help release-unpublish-admin-only">Only an admin can unpublish while the gate is enforced.</p>
+          )}
+          {canPublish && state && state.publishedVersion !== null && (isAdmin || !state.gateEnforced) && result?.outcome !== "published" && !unpublishedNotice && (
             <section className="release-unpublish-row" aria-label="Unpublish">
               <p className="settings-help">v{state.publishedVersion} is live. Unpublish it to run the draft in production again.</p>
               <UnpublishControl

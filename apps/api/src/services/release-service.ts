@@ -1464,7 +1464,7 @@ export class ReleaseService {
 
   /**
    * Takes the published version down: production runs the draft until a
-   * version is published again. Needs `workflow:publish` (as publish does);
+   * version is published again. Needs `workflow:publish` (as publish does), and an admin while the gate is enforced;
    * the gate never blocks it, and with a gate on the answer says plainly that
    * production now runs the ungated draft. Refused (409) when nothing is
    * published, a second call included, and when the draft's production paths
@@ -1473,6 +1473,11 @@ export class ReleaseService {
    */
   async unpublish(user: SafeUser, workflowId: string, input: ReleaseUnpublishInput): Promise<ReleaseUnpublishResult> {
     await this.check(user, workflowId, "workflow:publish");
+    // As for a rollback: unpublishing runs the ungated draft in production, so an enforced gate keeps it with admins.
+    if (await this.enforcedGateOf(workflowId) && user.role !== "admin") {
+      await this.refuse(user, workflowId, "release.unpublish.refused", "unpublish", {});
+      throw new ReleaseError("This workflow's release gate is enforced: only an admin can unpublish", 403);
+    }
     const nothingPublished = () => new ReleaseError("Nothing is published: production already runs the draft", 409);
     const versionChanged = (live: number) =>
       new ReleaseError(`v${live} is live now, not v${input.expectedVersion}: it was published or rolled back after you opened this. Reload and check before unpublishing`, 409);
