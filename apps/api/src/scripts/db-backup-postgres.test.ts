@@ -14,7 +14,7 @@ import { parsePostgresSettings } from "../config.js";
 import { postgresStoreConfig } from "../db/create-store.js";
 import { PostgresStore, postgresPoolConfig } from "../db/postgres-store.js";
 import { noticePostgresSkipped, testPostgresUrl } from "../test-support/test-store.js";
-import { EXPORTED_TABLES, openBackupAdapter } from "./db-shared.js";
+import { AuditVerdictMismatch, EXPORTED_TABLES, exportDump, importDump, openBackupAdapter, type BackupDump } from "./db-shared.js";
 
 const url = testPostgresUrl();
 if (!url) noticePostgresSkipped("db:export / db:import on Postgres");
@@ -198,5 +198,101 @@ describe.skipIf(!url)("db:export / db:import round trip [postgres]", () => {
       await restored.close();
     }
     expect((await auditOrder(dstUrl)).map((r) => `${r.id}:${r.seq}`)).toEqual(["s0:1", "s1:2", "s2:3", "s-next:4"]);
+  }, 120_000);
+
+  it("records the audit verdict in one snapshot, and a restore that changes it rolls back on Postgres too", async () => {
+    const srcUrl = await freshDatabase("src");
+    const source = await openStore(srcUrl);
+    await source.writeAuditLog({ id: "p1", eventType: "e", category: "c", action: "a", outcome: "success", message: "approved by alice" });
+    await source.writeAuditLog({ id: "p2", eventType: "e", category: "c", action: "a", outcome: "success" });
+    await source.close();
+    process.env.DB_TYPE = "postgres";
+    process.env.DB_POSTGRESDB_URL = srcUrl;
+    const exporter = await openBackupAdapter();
+    const dump = JSON.parse(JSON.stringify(await exportDump(exporter))) as BackupDump;
+    await exporter.close();
+    expect(dump.auditVerdict).toEqual({ ok: true, rowsChecked: 2, unverifiable: [] });
+
+    const dstUrl = await freshDatabase("dst");
+    const dest = await openStore(dstUrl);
+    await dest.writeAuditLog({ id: "kept", eventType: "e", category: "c", action: "a", outcome: "success" });
+    await dest.close();
+    process.env.DB_POSTGRESDB_URL = dstUrl;
+    const tampered = JSON.parse(JSON.stringify(dump)) as BackupDump;
+    tampered.tables.audit_logs![0]!.message = "approved by mallory";
+    let importer = await openBackupAdapter();
+    const error = await importDump(importer, tampered).then(() => undefined, (e: unknown) => e as Error);
+    await importer.close();
+    expect(error).toBeInstanceOf(AuditVerdictMismatch);
+    expect(error!.message).toContain("row p1 (position 1) would be broken on the restored database");
+    expect((await auditOrder(dstUrl)).map((r) => r.id)).toEqual(["kept"]);
+
+    importer = await openBackupAdapter();
+    const report = await importDump(importer, dump);
+    await importer.close();
+    expect(report.audit?.restored).toEqual({ ok: true, rowsChecked: 2 });
+    expect((await auditOrder(dstUrl)).map((r) => r.id)).toEqual(["p1", "p2"]);
+  }, 120_000);
+
+  it("--merge into an empty audit log refuses a changed verdict; --allow-audit-change restores it with a warning", async () => {
+    const srcUrl = await freshDatabase("msrc");
+    const source = await openStore(srcUrl);
+    await source.writeAuditLog({ id: "m1", eventType: "e", category: "c", action: "a", outcome: "success" });
+    await source.writeAuditLog({ id: "m2", eventType: "e", category: "c", action: "a", outcome: "success" });
+    await source.close();
+    process.env.DB_TYPE = "postgres";
+    process.env.DB_POSTGRESDB_URL = srcUrl;
+    const exporter = await openBackupAdapter();
+    const dump = JSON.parse(JSON.stringify(await exportDump(exporter))) as BackupDump;
+    await exporter.close();
+    dump.tables.audit_logs![0]!.message = "approved by mallory";
+
+    const dstUrl = await freshDatabase("mdst");
+    await (await openStore(dstUrl)).close();
+    process.env.DB_POSTGRESDB_URL = dstUrl;
+    let importer = await openBackupAdapter();
+    const error = await importDump(importer, dump, { merge: true }).then(() => undefined, (e: unknown) => e as Error);
+    await importer.close();
+    expect(error).toBeInstanceOf(AuditVerdictMismatch);
+    expect(await auditOrder(dstUrl)).toEqual([]);
+
+    importer = await openBackupAdapter();
+    const report = await importDump(importer, dump, { merge: true, allowAuditChange: true });
+    await importer.close();
+    expect(report.audit?.changedWarning).toMatch(/^WARNING: .*before \(backup\) intact \(2 rows verified\), after \(restored\) broken at row m1/);
+    expect((await auditOrder(dstUrl)).map((r) => r.id)).toEqual(["m1", "m2"]);
+  }, 120_000);
+
+  it("a failing later table in --merge rolls back the earlier tables too", async () => {
+    const srcUrl = await freshDatabase("rsrc");
+    const source = await openStore(srcUrl);
+    await source.upsertWorkflow({ id: "wf-new", name: "New", schemaVersion: "1.0.0", workflowVersion: 1, nodes: [], edges: [] } as never);
+    await source.writeAuditLog({ id: "r1", eventType: "e", category: "c", action: "a", outcome: "success" });
+    await source.close();
+    process.env.DB_TYPE = "postgres";
+    process.env.DB_POSTGRESDB_URL = srcUrl;
+    const exporter = await openBackupAdapter();
+    const dump = JSON.parse(JSON.stringify(await exportDump(exporter))) as BackupDump;
+    await exporter.close();
+
+    const dstUrl = await freshDatabase("rdst");
+    const dest = await openStore(dstUrl);
+    await dest.writeAuditLog({ id: "before", eventType: "e", category: "c", action: "a", outcome: "success" });
+    await dest.close();
+    // workflows (first table) inserts cleanly; audit_logs then hits the destination's existing "before" id.
+    dump.tables.audit_logs![0]!.id = "before";
+    dump.tables.audit_logs![0]!.seq = 1000;
+    process.env.DB_POSTGRESDB_URL = dstUrl;
+    const importer = await openBackupAdapter();
+    const error = await importDump(importer, dump, { merge: true }).then(() => undefined, (e: unknown) => e as Error);
+    await importer.close();
+    expect(error?.message).toMatch(/Failed to insert into audit_logs/);
+    const pool = new Pool(postgresPoolConfig(postgresStoreConfig(parsePostgresSettings({ DB_POSTGRESDB_URL: dstUrl })), { max: 1 }));
+    try {
+      expect((await pool.query(`SELECT id FROM workflows`)).rows).toEqual([]);
+    } finally {
+      await pool.end();
+    }
+    expect((await auditOrder(dstUrl)).map((r) => r.id)).toEqual(["before"]);
   }, 120_000);
 });

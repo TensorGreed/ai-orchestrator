@@ -9,15 +9,15 @@
  * Excludes pure cache/runtime tables (session_tool_cache, webhook replay
  * windows, leader leases, log_stream_events, external_secret_cache) — see
  * EXPORTED_TABLES in db-shared.ts for the full list.
+ *
+ * Reads one snapshot (one read transaction) and, when audit_logs is exported,
+ * records the audit chain's verdict in the backup (`auditVerdict`), which
+ * db:import compares the restored chain with.
  */
 
 import fs from "node:fs";
 import path from "node:path";
-import {
-  EXPORTED_TABLES,
-  HISTORY_TABLES,
-  openBackupAdapter
-} from "./db-shared.js";
+import { exportDump, openBackupAdapter } from "./db-shared.js";
 
 interface Args {
   out: string;
@@ -53,6 +53,8 @@ function printUsageAndExit(code: number): never {
       "Options:",
       "  --out, -o <file.json>   Output path. Parent directories are created if missing.",
       "  --exclude-history       Skip execution_history + audit_logs (smaller backup).",
+      "                          Otherwise the audit chain's verdict is recorded in the backup,",
+      "                          and db:import checks the restored chain against it.",
       "  --help, -h              Show this message.",
       "",
       "Reads from DB_TYPE=sqlite (default, file at DB_SQLITE_PATH) or DB_TYPE=postgres",
@@ -71,35 +73,12 @@ async function main() {
   const adapter = await openBackupAdapter();
 
   try {
-    const schemaVersion = await adapter.schemaVersion();
-    const tables: Record<string, Record<string, unknown>[]> = {};
-
-    const targetTables = args.excludeHistory
-      ? EXPORTED_TABLES.filter((t) => !(HISTORY_TABLES as readonly string[]).includes(t))
-      : (EXPORTED_TABLES as readonly string[]);
-
-    for (const table of targetTables) {
-      try {
-        const rows = await adapter.selectAll(table);
-        tables[table] = rows;
-        console.log(`  ${table}: ${rows.length} rows`);
-      } catch (err) {
-        // A table may be missing on an old schema where this build never
-        // wrote it. Don't fail the whole export — record an empty list and
-        // warn so the operator can investigate if it matters.
-        console.warn(`  ${table}: skipped (${err instanceof Error ? err.message : String(err)})`);
-        tables[table] = [];
-      }
-    }
-
-    const dump = {
-      format: "ai-orchestrator-backup",
-      formatVersion: 1,
-      schemaVersion,
-      exportedAt: new Date().toISOString(),
-      dbType: adapter.kind,
-      tables
-    };
+    const dump = await exportDump(adapter, {
+      excludeHistory: args.excludeHistory,
+      log: (line) => console.log(line),
+      warn: (line) => console.warn(line)
+    });
+    const { tables, schemaVersion } = dump;
 
     const outPath = path.resolve(args.out);
     fs.mkdirSync(path.dirname(outPath), { recursive: true });
