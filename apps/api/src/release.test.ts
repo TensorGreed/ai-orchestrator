@@ -1009,7 +1009,7 @@ describe("gates outlive their workflow; turning one on publishes a baseline", ()
     expect(await prodHook(context, "hook-wf-h3")).toMatchObject({ status: 200, output: { result: "reviewed" } });
     const refused = await call(context, "DELETE", "/api/workflows/wf-h3", builder.cookie);
     expect(refused.statusCode).toBe(403);
-    expect(refused.json<{ error: string }>().error).toMatch(/enforced release gate/);
+    expect(refused.json<{ error: string }>().error).toMatch(/release gate is on and enforced: only an admin can delete it/);
     expect(await auditTypes(context)).toContain("release.workflow_delete.refused");
     expect((await call(context, "DELETE", "/api/workflows/wf-h3", admin.cookie)).statusCode).toBe(200);
     expect(await context.store.getReleaseGate("wf-h3")).toMatchObject({ enabled: true, enforced: true });

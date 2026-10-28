@@ -217,6 +217,14 @@ export function releaseUnpublishNotice(input: { version: number; gateEnabled: bo
   return `${base} ${gate}, but the gate does not check the draft: production runs the ungated draft, and every save goes live, until a version is published again.`;
 }
 
+/**
+ * Whether the gate keeps rolling back, unpublishing and deleting the workflow with admins: only while it is on and
+ * enforced. A gate that is switched off restricts none of them, even when it is still flagged enforced.
+ */
+export function releaseGateRestrictsToAdmins(gate: { enabled: boolean; enforced: boolean } | null | undefined): boolean {
+  return Boolean(gate?.enabled && gate.enforced);
+}
+
 export interface ReleaseApprovalInfo {
   requestId: string;
   requestedBy: string | null;

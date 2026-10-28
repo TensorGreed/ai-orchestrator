@@ -167,7 +167,7 @@ import { GuardService } from "./services/guard-service.js";
 import type { GuardSimulationRun } from "./services/guard-simulation-sink.js";
 import { startSseHeartbeat } from "./sse-heartbeat.js";
 import { createRunAccess, type RunAccessDenial } from "./run-access.js";
-import { ProjectNotEmptyError, StoreReferenceMissingError } from "./db/store-errors.js";
+import { ProjectNotEmptyError, ReleaseGateEnforcedError, StoreReferenceMissingError } from "./db/store-errors.js";
 import { createRunScope, type SecretScope } from "./run-scope.js";
 import {
   CODE_SANDBOX_INITIALISING,
@@ -7504,14 +7504,21 @@ export async function createApp(
 
     const access = await runAccess.workflow(user, request.params.id, "workflow:delete");
     if (!access.ok) return denyRunAccess(reply, access);
-    // Phase 15.4 — the gate and release history outlive the workflow; an enforced gate's workflow is the admin's to delete.
+    // Phase 15.4 — the gate and release history outlive the workflow; while its gate is on and enforced, the workflow is
+    // the admin's to delete. Checked here to refuse early, and again by the store before it deletes anything.
     const releaseDenial = await releaseService.deleteDenial(user, request.params.id);
     if (releaseDenial) return denyRunAccess(reply, { status: 403, error: releaseDenial });
     // Deleting the workflow deletes its golden runs: an enforced gate's admitted cases can no longer pass, which is audited.
     const gateCasesRemoved = await releaseService.gateCasesRemoval(user, request.params.id, { via: "workflow" });
 
     try {
-      const deleted = await store.deleteWorkflow(request.params.id);
+      let deleted: boolean;
+      try {
+        deleted = await store.deleteWorkflow(request.params.id, { refuseIfGateEnforced: user.role !== "admin" });
+      } catch (error) {
+        if (!(error instanceof ReleaseGateEnforcedError)) throw error;
+        return denyRunAccess(reply, { status: 403, error: await releaseService.deleteRefused(user, request.params.id) });
+      }
       if (!deleted) {
         reply.code(404);
         return { error: "Workflow not found" };

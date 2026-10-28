@@ -76,10 +76,13 @@ export function isOnePendingApprovalViolation(error: unknown): boolean {
   return false;
 }
 
-/** `unpublishWorkflowVersion` found the release gate on and enforced for a caller who may not unpublish then. */
-export class UnpublishGateEnforcedError extends Error {
+/**
+ * A store write made with `refuseIfGateEnforced` (unpublish, a rollback's publish, deleting the workflow) found the
+ * release gate on and enforced inside its transaction, and wrote nothing.
+ */
+export class ReleaseGateEnforcedError extends Error {
   constructor() {
-    super("The release gate is enforced: only an admin can unpublish");
-    this.name = "UnpublishGateEnforcedError";
+    super("The release gate is on and enforced: only an admin can do this");
+    this.name = "ReleaseGateEnforcedError";
   }
 }

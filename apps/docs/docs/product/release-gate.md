@@ -88,11 +88,9 @@ An admin can **enforce** a gate. Then only an admin can:
 - change the candidate options (scorers, MCP mode, repeats, aggregation, comparison, budget, timeout);
 - remove an admitted case from one of its golden sets, delete one of its golden sets, add a case that carries its own scorers, or delete a golden run an admitted case uses (adding a plain case is allowed, and the new case waits for admission without making earlier jobs stale: see [Case admission](#case-admission-and-required-cases));
 - admit cases, reject waiting ones, and mark cases required or stop requiring them;
-- roll back;
-- unpublish (while the gate is also switched on);
-- delete the workflow.
+- roll back, unpublish and delete the workflow (these three only while the gate is also switched on: a gate that is switched off restricts none of them, even when still flagged enforced).
 
-A builder can still tighten the policy and add golden sets. A refused change answers `403` naming what it changes, and is audited (`release.gate.update_refused`, `release.golden_set_change.refused`, `release.rollback.refused`, `release.workflow_delete.refused`, `release.unpublish.refused`).
+A builder can still tighten the policy and add golden sets. A refused change answers `403` naming what it changes, and is audited (`release.gate.update_refused`, `release.golden_set_change.refused`, `release.rollback.refused`, `release.workflow_delete.refused`, `release.unpublish.refused`). Rollback, unpublish and delete are checked again inside the store transaction that writes them, so a gate switched on and enforced a moment earlier is honoured, on SQLite and Postgres alike.
 
 ### Case admission and required cases
 
@@ -135,7 +133,7 @@ A request is refused (and canceled) when it went stale: the version's hash chang
 
 ## History and rollback
 
-**Releases** lists every publish: version, verdict (`passed`, `approved`, `overridden`, `ungated`, `rollback`), who, when, from which version, the reason and the replay job, and every [unpublish](#unpublish) (verdict `unpublished`). **Roll back** returns production to a version that was published before (with the same hash), with a reason; it skips the gate, since that version already shipped. It needs `workflow:publish`, and an admin on an enforced gate. It is audited as `release.rolled_back`.
+**Releases** lists every publish: version, verdict (`passed`, `approved`, `overridden`, `ungated`, `rollback`), who, when, from which version, the reason and the replay job, and every [unpublish](#unpublish) (verdict `unpublished`). **Roll back** returns production to a version that was published before (with the same hash), with a reason; it skips the gate, since that version already shipped. It needs `workflow:publish`, and an admin while the gate is on and enforced (a builder gets `403`, audited as `release.rollback.refused`, and the UI hides the button); with the gate switched off or only observing, builders keep it. It is audited as `release.rolled_back`.
 
 A published or released version is pinned: version retention never prunes it. The pinned set therefore grows with every release; there is no pruning for released versions in this release, so expect it to grow until an admin-only prune is added.
 
@@ -143,14 +141,14 @@ A published or released version is pinned: version retention never prunes it. Th
 
 **Unpublish** takes the live version down: from then on every production entry point (production webhooks, schedules, app triggers, chat, forms, API-key runs, queued runs, sub-workflow calls from production runs and the MCP gateway) runs the draft, the latest save, exactly as for a workflow that was never published. It is in the Publish dialog (from the version pill) and on the **Releases** card. A confirmation names the live version and says production runs the draft; the reason is optional and goes to the history and the audit log.
 
-- It needs `workflow:publish`, the same permission as publishing: admins and builders (and project roles that grant it). Operators and viewers cannot unpublish. While the gate is **on and enforced**, only an admin (the global admin role; a project admin who is a builder globally is refused) can unpublish: a builder gets `403`, the refusal is audited as `release.unpublish.refused`, and the UI hides the button and says why. The check is made again inside the unpublish transaction, so a gate enforced a moment earlier is honoured. With the gate switched off or only observing, builders keep it. Rollback and deleting the workflow differ here: they follow the gate's enforced flag even when the gate is switched off. History times never go backwards: an entry written on an instance whose clock is behind takes the time of the newest entry, so with clock skew between instances a time can be off by at most that skew, while the order is always the order of the writes.
+- It needs `workflow:publish`, the same permission as publishing: admins and builders (and project roles that grant it). Operators and viewers cannot unpublish. While the gate is **on and enforced**, only an admin (the global admin role; a project admin who is a builder globally is refused) can unpublish: a builder gets `403`, the refusal is audited as `release.unpublish.refused`, and the UI hides the button and says why. The check is made again inside the unpublish transaction, so a gate enforced a moment earlier is honoured. With the gate switched off or only observing, builders keep it. Rollback and deleting the workflow follow the same rule. History times never go backwards: an entry written on an instance whose clock is behind takes the time of the newest entry, so with clock skew between instances a time can be off by at most that skew, while the order is always the order of the writes.
 - The release gate never blocks it, enforced or not, and no approval is needed: it is the way out of a bad release. With a gate on, the confirmation and the API answer say plainly that the gate does not check the draft: production runs the ungated draft, and every save goes live, until a version is published again. Deactivating a gated workflow still stops production.
 - The dialog sends the version it named (`expectedVersion`): if someone published or rolled back meanwhile, it answers `409` ("v5 is live now, not v4") and changes nothing, so you never take down a version you did not see. API calls without `expectedVersion` take down whatever is live.
 - When nothing is published (a second unpublish included) it answers `409` and records nothing. Two unpublishes at the same time, on one API instance or two, record one entry.
 - It is refused with `409` when the draft's webhook, form or MCP trigger paths are served by another workflow, as a publish would be. While unpublished, the draft serves those paths and claims them, gated or not.
 - Runs already in progress finish on the version they started with, a paused run included.
 - The history records an `unpublished` entry: who, when, the reason and which version was live (`version`). It is audited as `release.unpublished` (version, reason, whether a gate was on and enforced).
-- Publishing again afterwards is an ordinary publish, through the gate when it is on. **Roll back** works as before: it returns production to a version that was published before (the one just unpublished included), with a reason, and on an enforced gate only an admin may roll back.
+- Publishing again afterwards is an ordinary publish, through the gate when it is on. **Roll back** works as before: it returns production to a version that was published before (the one just unpublished included), with a reason, and while the gate is on and enforced only an admin may roll back.
 - A pending release request goes stale once production is unpublished, as when another version is published.
 - A workflow created again under a gated id still fails closed: the unpublish belongs to the workflow it was made on.
 

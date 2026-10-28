@@ -7,7 +7,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ReleaseStateView, ReleaseUnpublishResult, Workflow, WorkflowRelease } from "@ai-orchestrator/shared";
 import { releaseUnpublishNotice } from "@ai-orchestrator/shared";
-import { UnpublishGateEnforcedError } from "./db/store-errors.js";
+import { ReleaseGateEnforcedError } from "./db/store-errors.js";
 import { MIGRATIONS } from "./db/migrations.js";
 import { testSql } from "./test-support/test-sql.js";
 import {
@@ -412,7 +412,7 @@ describe("unpublish with a release gate", () => {
     // The store method on its own: a non-admin caller is refused on an enforced gate; an admin's call (no flag) goes through
     // and reports the gate state the transaction saw.
     const entry = (id: string, refuseIfGateEnforced: boolean) => ({ id, workflowId: "wf-late", reason: null, unpublishedAt: new Date().toISOString(), unpublishedBy: "x@example.com", unpublishedByUserId: null, refuseIfGateEnforced });
-    await expect(ctx.store.unpublishWorkflowVersion(entry("rel_no", true))).rejects.toBeInstanceOf(UnpublishGateEnforcedError);
+    await expect(ctx.store.unpublishWorkflowVersion(entry("rel_no", true))).rejects.toBeInstanceOf(ReleaseGateEnforcedError);
     expect(await ctx.store.getPublishedVersion("wf-late")).toBe(1);
     const done = await ctx.store.unpublishWorkflowVersion(entry("rel_yes", false));
     expect(done).toMatchObject({ gateEnabled: true, gateEnforced: true });
@@ -430,8 +430,8 @@ describe("unpublish with a release gate", () => {
     expect(response.statusCode, response.body).toBe(200);
     expect(response.json<ReleaseUnpublishResult>()).toMatchObject({ gateEnabled: false, gateEnforced: false });
     expect((await ctx.store.listAuditLogs({ eventType: "release.unpublished", pageSize: 5 })).items[0]!.metadata).toMatchObject({ gateEnabled: false, gateEnforced: false });
-    // Rollback keeps following the enforced flag.
-    expect((await callAs(ctx, "POST", "/api/workflows/wf-off/rollback", builder.cookie, { version: 1, reason: "back" })).statusCode).toBe(403);
+    // Rollback follows the same rule: the switched-off gate does not restrict it either.
+    expect((await callAs(ctx, "POST", "/api/workflows/wf-off/rollback", builder.cookie, { version: 1, reason: "back" })).statusCode).toBe(200);
   });
 
   it("a gate that is on but not enforced says so too; deactivating is still the kill switch; a workflow created again under the id still fails closed", async () => {

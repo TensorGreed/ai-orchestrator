@@ -6,7 +6,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { RELEASE_APPROVER_ROLE_CHOICES, type WorkflowListItem, type WorkflowRelease } from "@ai-orchestrator/shared";
+import { RELEASE_APPROVER_ROLE_CHOICES, releaseGateRestrictsToAdmins, type WorkflowListItem, type WorkflowRelease } from "@ai-orchestrator/shared";
 import {
   ApiError,
   fetchEvalDatasets,
@@ -314,9 +314,9 @@ function WorkflowReleaseView({ workflowId, activeProjectId, canEdit, isAdmin }: 
       <ReleaseHistory
         workflowId={workflowId}
         history={history}
-        canRollback={canEdit && !locks.adminOnly}
-        canUnpublish={canEdit && (isAdmin || !(gate.enabled && gate.enforced))}
-        unpublishAdminOnly={canEdit && !isAdmin && gate.enabled && gate.enforced}
+        canRollback={canEdit && (isAdmin || !releaseGateRestrictsToAdmins(gate))}
+        canUnpublish={canEdit && (isAdmin || !releaseGateRestrictsToAdmins(gate))}
+        unpublishAdminOnly={canEdit && !isAdmin && releaseGateRestrictsToAdmins(gate)}
         gate={gate}
         onChanged={() => void load()}
       />
@@ -348,7 +348,7 @@ function ReleaseHistory({
   history: WorkflowReleasesView;
   canRollback: boolean;
   canUnpublish: boolean;
-  /** Unpublish is not offered because the gate is enforced and the user is not an admin. */
+  /** Unpublish is not offered because the gate is on and enforced and the user is not an admin. */
   unpublishAdminOnly: boolean;
   gate: Pick<ReleaseGateView, "enabled" | "enforced">;
   onChanged: () => void;

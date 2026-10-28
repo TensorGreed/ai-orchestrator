@@ -5,6 +5,7 @@ import {
   judgeReleaseGate,
   releaseGateAdminOnlyChanges,
   releaseGateLoosening,
+  releaseGateRestrictsToAdmins,
   releaseGatePolicySchema,
   releaseScorersMatch,
   releaseGateSettingsSchema,
@@ -563,5 +564,17 @@ describe("repeats: cost and p95 latency at the worst selection of the repeats", 
     }
     // The repeats are not ignored: some sets block only at a repeat the deciding ones hide.
     expect(stricter).toBeGreaterThan(0);
+  });
+});
+
+describe("releaseGateRestrictsToAdmins", () => {
+  it("restricts only while the gate is on and enforced", () => {
+    expect(releaseGateRestrictsToAdmins({ enabled: true, enforced: true })).toBe(true);
+    expect(releaseGateRestrictsToAdmins({ enabled: true, enforced: false })).toBe(false);
+    // Switched off but still flagged enforced: nothing is restricted.
+    expect(releaseGateRestrictsToAdmins({ enabled: false, enforced: true })).toBe(false);
+    expect(releaseGateRestrictsToAdmins({ enabled: false, enforced: false })).toBe(false);
+    expect(releaseGateRestrictsToAdmins(null)).toBe(false);
+    expect(releaseGateRestrictsToAdmins(undefined)).toBe(false);
   });
 });
