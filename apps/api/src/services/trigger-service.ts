@@ -268,35 +268,18 @@ export class TriggerService {
    * Reloads of one workflow run one after another, so the last save's triggers are the ones registered; a delete
    * that lands while the workflow is loading wins (it is not registered again).
    */
-  /**
-   * Re-reads one workflow's triggers. `announce` (default true): a save, publish or delete made through this
-   * instance; the change listener is told, so the leader on another instance reloads too (Phase 13.1). A reload that
-   * answers such an announcement passes false.
-   */
-  async reloadWorkflow(workflowId: string, options: { announce?: boolean } = {}): Promise<void> {
+  async reloadWorkflow(workflowId: string): Promise<void> {
     await this.reloads.reload(workflowId, async (removedSince) => {
       this.unregisterWorkflow(workflowId);
       const workflow = await this.loadWorkflow(workflowId);
       if (workflow && !removedSince()) this.registerWorkflow(workflow);
     });
-    if (options.announce !== false) this.changeListener?.(workflowId);
   }
 
   async removeWorkflow(workflowId: string): Promise<void> {
     this.reloads.removed(workflowId);
     this.unregisterWorkflow(workflowId);
     await this.store.deleteTriggerStatesForWorkflow(workflowId);
-    this.changeListener?.(workflowId);
-  }
-
-  private changeListener: ((workflowId: string) => void) | null = null;
-
-  /**
-   * Phase 13.1 — told after each reload or removal made through this instance (every save, publish or delete calls
-   * reloadWorkflow or removeWorkflow here after the scheduler's). Cluster mode announces it on the bus.
-   */
-  setChangeListener(listener: ((workflowId: string) => void) | null): void {
-    this.changeListener = listener;
   }
 
   /** Phase 13.1 — started (initialize() since the last stop()) or still holding a running trigger. */

@@ -161,7 +161,7 @@ import { reconcileInterruptedRuns } from "./services/run-reconcile-service.js";
 import type { ClusterBus } from "./services/cluster-bus.js";
 import { LocalClusterBus } from "./services/cluster-bus-local.js";
 import { startClusterSignals, type ClusterSignals } from "./services/cluster-signals.js";
-import { InstanceRegistry, RunOwnerTracker, type ClusterWarning } from "./services/instance-registry.js";
+import { DEAD_EXECUTOR_RUN_ERROR, InstanceRegistry, RunOwnerTracker, SelfFencedAbortError, type ClusterWarning } from "./services/instance-registry.js";
 import { ADVISORY_LOCK_CLASS_AUDIT_EXPORT, ADVISORY_LOCK_CLASS_GIT_SYNC } from "./db/postgres/cluster.js";
 import { MIGRATIONS } from "./db/migrations.js";
 import { MetricsService } from "./services/metrics-service";
@@ -1717,11 +1717,45 @@ export async function createApp(
     await clusterBus.close();
   });
   const runOwners = clusterMode ? new RunOwnerTracker(store, clusterInstanceId, clusterLogger) : null;
+  /**
+   * Runs the queue consumer is executing: they belong to the queue's lease, reaper and worker-loss policy, so no
+   * owner row is recorded for them and the dead-executor reconcile never acts on them.
+   */
+  const queueConsumedRuns = new Set<string>();
+  /** Inline runs executing here whose owner row this instance recorded (cluster mode). */
+  const ownedRuns = new Set<string>();
+  /**
+   * Cluster mode: true while this instance has fenced itself (its heartbeat has not been recorded for nearly the
+   * instance timeout, so the leader may fail its runs). Its owned runs are stopped, and a run that starts meanwhile
+   * stops at once: the leader would fail it too.
+   */
+  let clusterSelfFenced = false;
+  const stopOwnedRuns = () => {
+    for (const executionId of ownedRuns) {
+      const active = activeExecutions.get(executionId);
+      if (active && !active.controller.signal.aborted) active.controller.abort(new SelfFencedAbortError());
+    }
+  };
   /** Publishes on the bus without failing the caller: the state it announces is already stored (see cluster-bus.ts). */
   const announce = (message: { t: string; [key: string]: unknown }) => {
     clusterBus.publish("ctl", message).catch((error: unknown) => {
       app.log.warn({ t: message.t, error: error instanceof Error ? error.message : String(error) }, "Could not publish a cluster message");
     });
+  };
+  /**
+   * A workflow was saved, published, restored or deleted through this instance: reload its schedules and triggers here
+   * (an instance without background workers has neither), then, in cluster mode, tell the other instances so the leader
+   * reloads at once, whichever role (`all`, `worker`, `api`, `webhook`) took the save. Every save site calls this.
+   */
+  const workflowChanged = async (workflowId: string, change: "saved" | "removed" = "saved") => {
+    if (change === "removed") {
+      schedulerService?.removeWorkflow(workflowId);
+      await triggerService?.removeWorkflow(workflowId);
+    } else {
+      await schedulerService?.reloadWorkflow(workflowId);
+      await triggerService?.reloadWorkflow(workflowId);
+    }
+    if (clusterMode) announce({ t: "workflow_changed", id: workflowId });
   };
 
   const pruneExecutionHistory = async (reason: "startup" | "interval" | "write") => {
@@ -1832,7 +1866,11 @@ export async function createApp(
       triggerType: input.triggerType,
       triggeredBy: input.triggeredBy
     });
-    runOwners?.claim(input.executionId);
+    if (runOwners && !queueConsumedRuns.has(input.executionId)) {
+      ownedRuns.add(input.executionId);
+      runOwners.claim(input.executionId);
+      if (clusterSelfFenced) controller.abort(new SelfFencedAbortError());
+    }
     return controller;
   };
 
@@ -1843,7 +1881,7 @@ export async function createApp(
     const current = activeExecutions.get(executionId);
     if (current?.controller === controller) {
       activeExecutions.delete(executionId);
-      runOwners?.release(executionId);
+      if (ownedRuns.delete(executionId)) runOwners?.release(executionId);
       metricsService.setActiveExecutions(activeExecutions.size);
     }
   };
@@ -1935,10 +1973,15 @@ export async function createApp(
     try {
       // A progress write never replaces a finished run's record, and a final write never replaces a cancel that
       // committed after the abort check above (the store refuses both), whatever order writes commit in.
+      // Phase 13.1 — cluster mode: nor does a final write replace the record of a run the leader failed because it
+      // judged this instance dead (it may have been alive but unable to heartbeat). A queued run in cluster mode
+      // writes under its claim's fence as well.
       const fence = queueRunFences.get(meta.executionId)?.fence;
       const written = await store.saveExecutionHistory(
         record,
-        meta.phase === "progress" ? { unlessFinished: true, ...(fence ? { fence } : {}) } : { unlessCanceled: true, ...(fence ? { fence } : {}) }
+        meta.phase === "progress"
+          ? { unlessFinished: true, ...(fence ? { fence } : {}) }
+          : { unlessCanceled: true, ...(clusterMode ? { unlessInterruptedWith: DEAD_EXECUTOR_RUN_ERROR } : {}), ...(fence ? { fence } : {}) }
       );
       if (!written) {
         // Refused: the stored record (a cancel, or a finished run) stays, so this run is not stored. Like the
@@ -2384,6 +2427,18 @@ export async function createApp(
         }
         pendingCaptures.set(input.executionId, { ticket: captureTicket, plan: runPlan, workflow: input.workflow, issuedSurrogates: runIssuedSurrogates, staleAt: Date.now() + executionTimeoutMs + 60_000 });
         captureHandedOff = true;
+      }
+
+      // Phase 13.1 — cluster mode: stopped because this instance fenced itself. It ends with the record the leader
+      // writes for a dead instance's run, whichever of the two is stored.
+      if (runController.signal.aborted && runController.signal.reason instanceof SelfFencedAbortError) {
+        return {
+          ...result,
+          status: "error" as const,
+          completedAt: new Date().toISOString(),
+          customData: input.customData ?? result.customData,
+          error: DEAD_EXECUTOR_RUN_ERROR
+        };
       }
 
       // A person's Stop always ends as canceled. A timeout keeps the engine's
@@ -3867,6 +3922,19 @@ export async function createApp(
         heartbeatMs: config.CLUSTER_HEARTBEAT_MS,
         instanceTimeoutMs: config.CLUSTER_INSTANCE_TIMEOUT_MS,
         reconcileDeadExecutors: clusterMode,
+        ...(clusterMode
+          ? {
+              selfFence: {
+                onFenced: () => {
+                  clusterSelfFenced = true;
+                  stopOwnedRuns();
+                },
+                onRecovered: () => {
+                  clusterSelfFenced = false;
+                }
+              }
+            }
+          : {}),
         onDeadExecutorRuns: (runs) =>
           app.log.warn(
             { count: runs.length, runs: runs.slice(0, 50).map((run) => ({ executionId: run.id, instanceId: run.instanceId })) },
@@ -3906,7 +3974,7 @@ export async function createApp(
         isLeader: () => runsBackgroundWorkers && leaderElection.isLeader(),
         reload: async (workflowId) => {
           await schedulerService?.reloadWorkflow(workflowId);
-          await triggerService?.reloadWorkflow(workflowId, { announce: false });
+          await triggerService?.reloadWorkflow(workflowId);
         },
         syncAll: async () => {
           await schedulerService?.syncAllSchedules();
@@ -3916,13 +3984,10 @@ export async function createApp(
       cancelCheckMs: config.CLUSTER_CANCEL_CHECK_MS,
       logger: clusterLogger
     });
-    // Every save, publish or delete made here reloads this instance's triggers; the leader elsewhere reloads too.
-    triggerService?.setChangeListener((workflowId) => announce({ t: "workflow_changed", id: workflowId }));
   });
   // onClose hooks run last-registered first, so this runs before the store closes (registered earlier).
   app.addHook("onClose", async () => {
     clusterSignals?.stop();
-    triggerService?.setChangeListener(null);
     await runOwners?.settle();
     await instanceRegistry?.stop();
   });
@@ -4392,8 +4457,7 @@ export async function createApp(
     notify: (event) => notificationService.notify(event),
     redact: (value) => String(secretService.redact(value)),
     onPublished: async (workflowId) => {
-      await schedulerService?.reloadWorkflow(workflowId);
-      await triggerService?.reloadWorkflow(workflowId);
+      await workflowChanged(workflowId);
     },
     snapshotDraft: async (workflowId, actor) => {
       const draft = await store.getWorkflow(workflowId);
@@ -7643,8 +7707,7 @@ export async function createApp(
         createdBy: user.id,
         changeNote: `restored from v${version}`
       });
-      await schedulerService?.reloadWorkflow(saved.id);
-      await triggerService?.reloadWorkflow(saved.id);
+      await workflowChanged(saved.id);
       await audit(request, user, {
         category: "workflow",
         eventType: "workflow.restore",
@@ -8296,8 +8359,7 @@ export async function createApp(
       variables: parsed.data.variables
     };
     const saved = await store.upsertWorkflow(nextWorkflow);
-    await schedulerService?.reloadWorkflow(saved.id);
-    await triggerService?.reloadWorkflow(saved.id);
+    await workflowChanged(saved.id);
 
     return {
       workflowId: saved.id,
@@ -8334,8 +8396,7 @@ export async function createApp(
 
     const savedWorkflow = await store.upsertWorkflow(parsed.data, { createdBy: user.id });
     await workflowVersionService.snapshot({ workflow: savedWorkflow, createdBy: user.id, changeNote: "created" });
-    await schedulerService?.reloadWorkflow(savedWorkflow.id);
-    await triggerService?.reloadWorkflow(savedWorkflow.id);
+    await workflowChanged(savedWorkflow.id);
     await audit(request, user, {
       category: "workflow",
       eventType: "workflow.create",
@@ -8382,8 +8443,7 @@ export async function createApp(
 
     const savedWorkflow = await store.upsertWorkflow(parsed.data, { createdBy: user.id });
     await workflowVersionService.snapshot({ workflow: savedWorkflow, createdBy: user.id, changeNote: "updated" });
-    await schedulerService?.reloadWorkflow(savedWorkflow.id);
-    await triggerService?.reloadWorkflow(savedWorkflow.id);
+    await workflowChanged(savedWorkflow.id);
     await audit(request, user, {
       category: "workflow",
       eventType: "workflow.update",
@@ -8430,8 +8490,7 @@ export async function createApp(
     try {
       await gateCasesRemoved?.();
 
-      schedulerService?.removeWorkflow(request.params.id);
-      await triggerService?.removeWorkflow(request.params.id);
+      await workflowChanged(request.params.id, "removed");
       await audit(request, user, {
         category: "workflow",
         eventType: "workflow.delete",
@@ -8482,8 +8541,7 @@ export async function createApp(
     if (duplicateDenial) return denyRunAccess(reply, duplicateDenial);
 
     const savedWorkflow = await store.upsertWorkflow(duplicatedWorkflow, { createdBy: user.id });
-    await schedulerService?.reloadWorkflow(savedWorkflow.id);
-    await triggerService?.reloadWorkflow(savedWorkflow.id);
+    await workflowChanged(savedWorkflow.id);
     return savedWorkflow;
   });
 
@@ -8505,8 +8563,7 @@ export async function createApp(
       return { error: claim };
     }
     await store.upsertWorkflow(workflow);
-    await schedulerService?.reloadWorkflow(workflow.id);
-    await triggerService?.reloadWorkflow(workflow.id);
+    await workflowChanged(workflow.id);
     await audit(request, user, {
       category: "workflow",
       eventType: "workflow.activate",
@@ -8527,8 +8584,7 @@ export async function createApp(
     settings.active = false;
     workflow.settings = settings;
     await store.upsertWorkflow(workflow);
-    schedulerService?.removeWorkflow(workflow.id);
-    await triggerService?.removeWorkflow(workflow.id);
+    await workflowChanged(workflow.id, "removed");
     await audit(request, user, {
       category: "workflow",
       eventType: "workflow.deactivate",
@@ -8605,8 +8661,7 @@ export async function createApp(
       if (saveDenial) return denyRunAccess(reply, saveDenial);
 
       const savedWorkflow = await store.upsertWorkflow(workflow, { createdBy: user.id });
-      await schedulerService?.reloadWorkflow(savedWorkflow.id);
-      await triggerService?.reloadWorkflow(savedWorkflow.id);
+      await workflowChanged(savedWorkflow.id);
       return savedWorkflow;
     } catch (error) {
       reply.code(400);
@@ -8706,8 +8761,7 @@ export async function createApp(
 
     const savedWorkflow = await store.upsertWorkflow(workflow, { createdBy: user.id });
     await workflowVersionService.snapshot({ workflow: savedWorkflow, createdBy: user.id, changeNote: "imported from another builder" });
-    await schedulerService?.reloadWorkflow(savedWorkflow.id);
-    await triggerService?.reloadWorkflow(savedWorkflow.id);
+    await workflowChanged(savedWorkflow.id);
     await audit(request, user, {
       category: "workflow",
       eventType: "workflow.import_external",
@@ -9017,8 +9071,7 @@ export async function createApp(
       const moveDenial = await workflowSaveDenial(user, nextWorkflow);
       if (moveDenial) return denyRunAccess(reply, moveDenial);
       const saved = await store.upsertWorkflow(nextWorkflow);
-      await schedulerService?.reloadWorkflow(saved.id);
-      await triggerService?.reloadWorkflow(saved.id);
+      await workflowChanged(saved.id);
       return saved;
     }
   );
@@ -9066,8 +9119,7 @@ export async function createApp(
         }
       };
       const saved = await store.upsertWorkflow(nextWorkflow);
-      await schedulerService?.reloadWorkflow(saved.id);
-      await triggerService?.reloadWorkflow(saved.id);
+      await workflowChanged(saved.id);
       return {
         workflowId: saved.id,
         nodeId: request.params.nodeId,
@@ -9092,8 +9144,7 @@ export async function createApp(
         pinnedData: Object.keys(pinnedData).length > 0 ? pinnedData : undefined
       };
       const saved = await store.upsertWorkflow(nextWorkflow);
-      await schedulerService?.reloadWorkflow(saved.id);
-      await triggerService?.reloadWorkflow(saved.id);
+      await workflowChanged(saved.id);
       return {
         ok: true,
         workflowId: saved.id,
@@ -13125,6 +13176,11 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
 
   if (queueService) {
     queueService.setHandler(async (payload, context) => {
+      // Phase 13.1 — the run a job executes is the queue's (see queueConsumedRuns), keyed on the payload's execution
+      // id. Marked before the run is registered as active, so it never records an owner row and the self-fence never
+      // stops it: the queue's lease, heartbeat and reaper own it.
+      const queueOwnedExecutionId = payload.resume?.executionId ?? payload.executionId;
+      queueConsumedRuns.add(queueOwnedExecutionId);
       // Registered before the run starts, so a stop from the consumer (lease lost, or draining) reaches it whenever it
       // comes; the run reuses this controller and releases it when it ends.
       const controller = registerActiveExecution({
@@ -13149,6 +13205,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
           queueRunFences.delete(payload.executionId);
         }
         releaseActiveExecution(payload.executionId, controller);
+        queueConsumedRuns.delete(queueOwnedExecutionId);
       }
     });
 

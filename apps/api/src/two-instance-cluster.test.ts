@@ -9,7 +9,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { FastifyInstance } from "fastify";
 import type { Workflow, WorkflowNode } from "@ai-orchestrator/shared";
 import { createApp } from "./app.js";
@@ -19,6 +19,7 @@ import { AuthService } from "./services/auth-service.js";
 import { SchedulerService } from "./services/scheduler-service.js";
 import { SecretService } from "./services/secret-service.js";
 import { TriggerService } from "./services/trigger-service.js";
+import { QueueService } from "./services/queue-service.js";
 import { DEAD_EXECUTOR_RUN_ERROR } from "./services/instance-registry.js";
 import { createTestStore, noticePostgresSkipped, openTestStoreTwin, testPostgresUrl, testStorePool, type TestStore } from "./test-support/test-store.js";
 
@@ -29,7 +30,9 @@ interface Instance {
   id: string;
   app: FastifyInstance;
   store: PostgresStore;
-  scheduler: SchedulerService;
+  /** Absent on an `api`/`webhook` replica (no background workers), as in index.ts. */
+  scheduler: SchedulerService | undefined;
+  queue: QueueService | undefined;
 }
 
 async function until<T>(read: () => T | Promise<T>, what: string, timeoutMs = 20_000): Promise<NonNullable<T>> {
@@ -58,7 +61,7 @@ function waitingWorkflow(id: string, ms: number): Workflow {
   };
 }
 
-const jobCount = (scheduler: SchedulerService) => (scheduler as unknown as { jobs: Map<string, unknown> }).jobs.size;
+const jobCount = (scheduler: SchedulerService | undefined) => (scheduler as unknown as { jobs: Map<string, unknown> } | undefined)?.jobs.size ?? 0;
 
 run("cluster signalling across API instances on one Postgres database", () => {
   let primary: TestStore | undefined;
@@ -66,6 +69,7 @@ run("cluster signalling across API instances on one Postgres database", () => {
   const tempDirs: string[] = [];
 
   afterEach(async () => {
+    vi.restoreAllMocks();
     for (const instance of instances.splice(0)) {
       await instance.app.close();
       await instance.store.close();
@@ -75,7 +79,7 @@ run("cluster signalling across API instances on one Postgres database", () => {
     for (const dir of tempDirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
   }, 60_000);
 
-  async function addInstance(i: number, overrides: Record<string, string> = {}): Promise<Instance> {
+  async function addInstance(i: number, overrides: Record<string, string> = {}, options: { queue?: boolean } = {}): Promise<Instance> {
     primary ??= await createTestStore({ kind: "postgres" });
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "l2m-cluster-"));
     tempDirs.push(tempDir);
@@ -97,11 +101,13 @@ run("cluster signalling across API instances on one Postgres database", () => {
       CLUSTER_CANCEL_CHECK_MS: "0",
       ...overrides
     });
-    const scheduler = new SchedulerService(store, () => undefined);
-    const triggers = new TriggerService(store, () => undefined);
-    const app = await createApp(config, store, new SecretService(store, config.SECRET_MASTER_KEY_BASE64), new AuthService(store, config.SESSION_TTL_HOURS), scheduler, undefined, triggers);
+    const background = config.WORKER_MODE === "all" || config.WORKER_MODE === "worker";
+    const scheduler = background ? new SchedulerService(store, () => undefined) : undefined;
+    const triggers = background ? new TriggerService(store, () => undefined) : undefined;
+    const queue = background && options.queue ? new QueueService(store, { pollIntervalMs: 50 }) : undefined;
+    const app = await createApp(config, store, new SecretService(store, config.SECRET_MASTER_KEY_BASE64), new AuthService(store, config.SESSION_TTL_HOURS), scheduler, queue, triggers);
     await app.ready();
-    const instance = { id: `instance-${i}`, app, store, scheduler };
+    const instance = { id: `instance-${i}`, app, store, scheduler, queue };
     instances.push(instance);
     return instance;
   }
@@ -231,7 +237,7 @@ run("cluster signalling across API instances on one Postgres database", () => {
       expect(metrics).not.toMatch(/_cluster_bus_connected/);
     }
     // No behaviour change: both still run the scheduler (each leads, as before).
-    expect([a!.scheduler.isRunning(), b!.scheduler.isRunning()]).toEqual([true, true]);
+    expect([a!.scheduler!.isRunning(), b!.scheduler!.isRunning()]).toEqual([true, true]);
     const cookie = await loginAs(a!, "admin", "admin");
     const view = (await a!.app.inject({ method: "GET", url: "/api/cluster", headers: { cookie } })).json<{ clusterMode: boolean; bus: { kind: string } }>();
     expect(view).toMatchObject({ clusterMode: false, bus: { kind: "local" } });
@@ -279,7 +285,7 @@ run("cluster signalling across API instances on one Postgres database", () => {
 
   it("a schedule saved through the standby is registered by the leader at once (workflow_changed), not at the next sync", async () => {
     const [a, b] = await start(2);
-    const leader = await until(() => [a!, b!].find((instance) => instance.scheduler.isRunning()), "a leader");
+    const leader = await until(() => [a!, b!].find((instance) => instance.scheduler?.isRunning()), "a leader");
     const standby = leader === a ? b! : a!;
     const cookie = await loginAs(standby, "builder", "builder");
     const workflow: Workflow = {
@@ -299,7 +305,7 @@ run("cluster signalling across API instances on one Postgres database", () => {
     expect(jobCount(standby.scheduler)).toBe(0);
   }, 60_000);
 
-  it("the leader fails the running runs of an instance that stopped beating, and leaves live instances' runs alone", async () => {
+  it("the leader fails the running runs of an instance that stopped beating, and leaves live instances' and queued resumes' runs alone", async () => {
     const [a] = await start(1);
     // A run owned by an instance whose heartbeat stopped, and one owned by a live instance.
     const startedAt = new Date(Date.now() - 5_000).toISOString();
@@ -308,11 +314,21 @@ run("cluster signalling across API instances on one Postgres database", () => {
     await sql(
       `INSERT INTO cluster_instances (id, worker_mode, started_at, heartbeat_at) VALUES ('ghost', 'all', now() - interval '1 minute', now() - interval '1 minute')`
     );
+    // A run whose approval resume waits on the queue: the job's id is not the run's id, its payload names the run.
+    await a!.store.saveExecutionHistory({ id: "resumed-run", workflowId: "wf", status: "running", startedAt });
+    await a!.store.enqueueExecution({
+      id: "resumed-run:req-1:1730000000000",
+      workflowId: "wf",
+      payload: { executionId: "resumed-run", workflowId: "wf", triggerType: "approval_resume", resume: { executionId: "resumed-run" } },
+      scheduledAt: new Date().toISOString()
+    });
+    await a!.store.claimClusterRunOwner({ executionId: "resumed-run", instanceId: "ghost" });
     await a!.store.claimClusterRunOwner({ executionId: "ghost-run", instanceId: "ghost" });
     await a!.store.claimClusterRunOwner({ executionId: "self-run", instanceId: "instance-0" });
     await until(async () => (await a!.store.getExecutionHistory("ghost-run"))?.status === "error", "the ghost's run to fail");
     expect((await a!.store.getExecutionHistory("ghost-run"))!.error).toBe(DEAD_EXECUTOR_RUN_ERROR);
     expect((await a!.store.getExecutionHistory("self-run"))!.status).toBe("running");
+    expect((await a!.store.getExecutionHistory("resumed-run"))!.status).toBe("running");
   }, 60_000);
 
   it("an instance with a fixed id fails, at start, the runs its previous process left under that id", async () => {
@@ -337,5 +353,104 @@ run("cluster signalling across API instances on one Postgres database", () => {
     await a!.app.inject({ method: "POST", url: `/api/executions/${executionId}/cancel`, headers: { cookie }, payload: {} });
     await response;
     await until(async () => (await sql(`SELECT 1 FROM cluster_run_owners WHERE execution_id = $1`, [executionId])).length === 0, "the owner row to go");
+  }, 60_000);
+  it("an instance whose heartbeat stops: the leader fails its run, the instance stops it itself, and its late final write is refused", async () => {
+    const [a, b] = await start(2);
+    const leader = await until(() => [a!, b!].find((instance) => instance.scheduler?.isRunning()), "a leader");
+    const silent = leader === a ? b! : a!;
+    const { executionId, response } = await startLongRun(silent, "wf-silent");
+    await until(
+      async () => (await sql<{ instance_id: string }>(`SELECT instance_id FROM cluster_run_owners WHERE execution_id = $1`, [executionId]))[0]?.instance_id === silent.id,
+      "the owner row"
+    );
+    // The silent instance's final write waits until the leader has failed the run, so it is the late write. (With
+    // the database reachable for everything but the heartbeat, the instance would stop the run, release its owner
+    // and store the same error itself before the leader looked.)
+    const save = silent.store.saveExecutionHistory.bind(silent.store);
+    const lateWrites: Array<{ status: string; written: boolean }> = [];
+    vi.spyOn(silent.store, "saveExecutionHistory").mockImplementation(async (record, options) => {
+      if (record.id !== executionId || record.status === "running") return await save(record, options);
+      await until(async () => (await sql(`SELECT 1 FROM execution_history WHERE id = $1 AND status = 'error'`, [executionId])).length > 0, "the leader's reconcile");
+      const written = await save(record, options);
+      lateWrites.push({ status: record.status, written });
+      return written;
+    });
+    // Its owner release is held the same way (a partition delays every write; the reconcile has removed the row).
+    const release = silent.store.releaseClusterRunOwner.bind(silent.store);
+    vi.spyOn(silent.store, "releaseClusterRunOwner").mockImplementation(async (input) => {
+      await until(async () => (await sql(`SELECT 1 FROM execution_history WHERE id = $1 AND status = 'error'`, [executionId])).length > 0, "the leader's reconcile");
+      await release(input);
+    });
+    // Alive, but its heartbeats no longer reach the database.
+    vi.spyOn(silent.store, "heartbeatClusterInstance").mockRejectedValue(new Error("heartbeat blocked"));
+    const blockedAt = Date.now();
+
+    // The run (it waited a minute) stops on the silent instance, which fenced itself.
+    const ended = await response;
+    expect(Date.now() - blockedAt).toBeLessThan(15_000);
+    expect(JSON.parse(ended.body)).toMatchObject({ status: "error" });
+    expect(lateWrites).toEqual([{ status: "error", written: false }]);
+    expect(await leader.store.getExecutionHistory(executionId)).toMatchObject({ status: "error", error: DEAD_EXECUTOR_RUN_ERROR });
+    expect(await sql(`SELECT 1 FROM cluster_run_owners WHERE execution_id = $1`, [executionId])).toEqual([]);
+  }, 60_000);
+
+  it("a run the queue consumer executes records no owner: the queue's lease owns it", async () => {
+    const a = await addInstance(0, {}, { queue: true });
+    await a.store.upsertWorkflow(waitingWorkflow("wf-queued", 3_000));
+    await a.queue!.enqueue({ workflowId: "wf-queued", executionId: "queued-run" });
+    const running = async () => Number((await sql<{ running: number }>(`SELECT running FROM cluster_instances WHERE id = 'instance-0'`))[0]?.running ?? 0);
+    await until(async () => (await running()) >= 1, "the queued run to execute");
+    // An inline run started after it records its owner; by then the queued run's would have been written too.
+    const inline = await startLongRun(a, "wf-inline");
+    await until(async () => (await sql(`SELECT 1 FROM cluster_run_owners WHERE execution_id = $1`, [inline.executionId])).length === 1, "the inline run's owner");
+    await until(async () => (await running()) === 2, "both runs in the heartbeat");
+    expect(await sql(`SELECT execution_id FROM cluster_run_owners`)).toEqual([{ execution_id: inline.executionId }]);
+    await until(async () => (await sql(`SELECT 1 FROM execution_queue WHERE status IN ('pending', 'running')`)).length === 0, "the queued job to end");
+    const cookie = await loginAs(a, "builder", "builder");
+    expect((await a.app.inject({ method: "POST", url: `/api/executions/${inline.executionId}/cancel`, headers: { cookie }, payload: {} })).statusCode).toBe(200);
+    await inline.response;
+  }, 60_000);
+
+  it("HA off, one instance restarted without a clean stop: the previous process's row raises no several-leaders warning", async () => {
+    primary = await createTestStore({ kind: "postgres" });
+    // The process before this one (another generated id) died a moment ago; its row is still within the timeout.
+    await sql(
+      `INSERT INTO cluster_instances (id, worker_mode, ha_enabled, is_leader, started_at, heartbeat_at) VALUES ('host-1a2b3c4d', 'all', 0, 1, now() - interval '1 hour', now())`
+    );
+    const [a] = await start(1, { HA_ENABLED: "false", CLUSTER_INSTANCE_TIMEOUT_MS: "30000" });
+    const cookie = await loginAs(a!, "admin", "admin");
+    const view = async () => (await a!.app.inject({ method: "GET", url: "/api/cluster", headers: { cookie } })).json<{ instances: Array<{ live: boolean }>; warnings: unknown[] }>();
+    // Several heartbeats with both rows live.
+    const beats = async () => (await sql<{ n: string }>(`SELECT EXTRACT(EPOCH FROM (heartbeat_at - started_at::timestamptz)) * 1000 AS n FROM cluster_instances WHERE id = 'instance-0'`))[0]?.n;
+    await until(async () => Number(await beats()) >= 1_000, "a few heartbeats");
+    const current = await view();
+    expect(current.instances.filter((instance) => instance.live)).toHaveLength(2);
+    expect(current.warnings).toEqual([]);
+    expect((await a!.app.inject({ method: "GET", url: "/health" })).json()).not.toHaveProperty("warnings");
+    expect((await a!.app.inject({ method: "GET", url: "/metrics" })).body).toMatch(/_cluster_multiple_leaders 0/);
+  }, 60_000);
+
+  it("a schedule saved or deleted through an api-role replica reaches the leader at once (workflow_changed)", async () => {
+    const leader = await addInstance(0);
+    await until(() => leader.scheduler?.isRunning(), "the leader");
+    const api = await addInstance(1, { WORKER_MODE: "api" });
+    expect(api.scheduler).toBeUndefined();
+    const cookie = await loginAs(api, "builder", "builder");
+    const workflow: Workflow = {
+      id: "wf-sched-api",
+      name: "wf-sched-api",
+      schemaVersion: "1.0.0",
+      workflowVersion: 1,
+      nodes: [node("tick", "schedule_trigger", { cronExpression: "0 0 1 1 *", timezone: "UTC", active: true }), node("out", "output", { responseTemplate: "x" })],
+      edges: [{ id: "e1", source: "tick", target: "out" }]
+    };
+    const savedAt = Date.now();
+    const saved = await api.app.inject({ method: "POST", url: "/api/workflows", headers: { cookie }, payload: workflow });
+    expect(saved.statusCode, saved.body).toBe(200);
+    await until(() => jobCount(leader.scheduler) > 0, "the leader to register the schedule", 10_000);
+    expect(Date.now() - savedAt).toBeLessThan(10_000);
+    const deleted = await api.app.inject({ method: "DELETE", url: "/api/workflows/wf-sched-api", headers: { cookie } });
+    expect(deleted.statusCode, deleted.body).toBe(200);
+    await until(() => jobCount(leader.scheduler) === 0, "the leader to drop the schedule", 10_000);
   }, 60_000);
 });
