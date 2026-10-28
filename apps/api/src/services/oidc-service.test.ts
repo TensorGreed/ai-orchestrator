@@ -476,7 +476,7 @@ describe("OIDC login flow (service level)", () => {
         flowKey: crypto.randomBytes(32)
       });
       try {
-        service.assertLoginAllowed(profile);
+        service.assertLoginAllowed({ identityKey: "https://idp#sub-1", ...profile });
         return "ok";
       } catch (error) {
         return (error as OidcError).code;

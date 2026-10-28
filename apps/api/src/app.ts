@@ -1360,7 +1360,7 @@ export async function createApp(
         req: (req: FastifyRequest) => ({
           method: req.method,
           url: redactSensitiveUrl(req.url ?? ""),
-          version: req.headers?.["accept-version"],
+          version: [req.headers?.["accept-version"]].flat().join(", ") || undefined,
           host: req.host,
           remoteAddress: req.ip,
           remotePort: req.socket?.remotePort
