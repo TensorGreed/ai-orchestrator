@@ -278,8 +278,8 @@ export const openApiSpec = {
     "/api/auth/oidc/metadata": {
       get: {
         tags: ["Auth"],
-        summary: "OIDC SSO settings the login page needs (issuer, client id, login path); 404 when OIDC is off",
-        responses: { "200": { description: "OIDC is enabled" }, "404": { description: "OIDC is not enabled" } }
+        summary: "OIDC SSO settings the login page needs (issuer, client id, login path); { enabled: false } when OIDC is off",
+        responses: { "200": { description: "OIDC settings, or { enabled: false } when OIDC is off" } }
       }
     },
     "/api/auth/oidc/login": {

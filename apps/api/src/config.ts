@@ -88,6 +88,8 @@ const envSchema = z.object({
   OIDC_SCOPES: z.string().optional(),
   OIDC_GROUPS_CLAIM: z.string().optional(),
   OIDC_REQUIRE_EMAIL_VERIFIED: optionalBooleanFromEnv,
+  OIDC_ALLOWED_EMAIL_DOMAINS: z.string().optional(),
+  OIDC_ALLOWED_GROUPS: z.string().optional(),
 
   // Phase 5.3 — External secrets
   EXTERNAL_SECRETS_CACHE_TTL_MS: z.coerce.number().int().nonnegative().default(300000),
@@ -748,6 +750,10 @@ export interface OidcSettings {
   requireEmailVerified: boolean;
   /** Web page the browser lands on after the callback (success, or `?sso_error=<code>`). */
   postLoginUrl: string;
+  /** Lowercase email domains a login must belong to (exact match on the trusted email's domain); empty = any. */
+  allowedEmailDomains: string[];
+  /** Groups of which a login must hold at least one (exact match); empty = any. */
+  allowedGroups: string[];
 }
 
 type OidcConfigInput = Pick<
@@ -760,6 +766,8 @@ type OidcConfigInput = Pick<
   | "OIDC_SCOPES"
   | "OIDC_GROUPS_CLAIM"
   | "OIDC_REQUIRE_EMAIL_VERIFIED"
+  | "OIDC_ALLOWED_EMAIL_DOMAINS"
+  | "OIDC_ALLOWED_GROUPS"
   | "WEB_ORIGIN"
 >;
 
@@ -769,6 +777,13 @@ const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
 export function isAllowedOidcUrl(url: URL): boolean {
   if (url.protocol === "https:") return true;
   return url.protocol === "http:" && LOOPBACK_HOSTS.has(url.hostname.toLowerCase());
+}
+
+/** The API route the IdP must send the browser back to; OIDC_REDIRECT_URL's path has to be exactly this. */
+export const OIDC_CALLBACK_PATH = "/api/auth/oidc/callback";
+
+function splitList(value: string | undefined): string[] {
+  return [...new Set((value ?? "").split(",").map((entry) => entry.trim()).filter(Boolean))];
 }
 
 function firstWebOrigin(webOrigin: string): string {
@@ -794,14 +809,16 @@ export function resolveOidcSettings(config: OidcConfigInput): OidcSettings | nul
     fail("OIDC_ISSUER must be an absolute URL");
   }
   if (!issuerUrl || !isAllowedOidcUrl(issuerUrl)) fail("OIDC_ISSUER must use https (plain http only on localhost)");
-  if (issuerUrl && (issuerUrl.search || issuerUrl.hash)) fail("OIDC_ISSUER must not have a query or fragment");
+  if (issuerUrl && (issuerUrl.search || issuerUrl.hash || issuer.includes("#"))) {
+    fail("OIDC_ISSUER must not have a query or fragment");
+  }
 
   const clientId = config.OIDC_CLIENT_ID?.trim() ?? "";
   if (!clientId) fail("OIDC_CLIENT_ID is required when OIDC_ENABLED=true");
   const clientSecret = config.OIDC_CLIENT_SECRET?.trim() ? config.OIDC_CLIENT_SECRET.trim() : undefined;
 
   const webBase = firstWebOrigin(config.WEB_ORIGIN);
-  const redirectUrl = config.OIDC_REDIRECT_URL?.trim() || `${webBase}/api/auth/oidc/callback`;
+  const redirectUrl = config.OIDC_REDIRECT_URL?.trim() || `${webBase}${OIDC_CALLBACK_PATH}`;
   let parsedRedirect: URL | null = null;
   try {
     parsedRedirect = new URL(redirectUrl);
@@ -811,12 +828,30 @@ export function resolveOidcSettings(config: OidcConfigInput): OidcSettings | nul
   if (!parsedRedirect || (parsedRedirect.protocol !== "https:" && parsedRedirect.protocol !== "http:")) {
     fail("OIDC_REDIRECT_URL must be an http(s) URL");
   }
-  if (parsedRedirect?.hash) fail("OIDC_REDIRECT_URL must not have a fragment");
+  if (parsedRedirect && !isAllowedOidcUrl(parsedRedirect)) {
+    fail("OIDC_REDIRECT_URL must use https (plain http only on localhost); set it, or WEB_ORIGIN, to an https origin");
+  }
+  if (parsedRedirect && parsedRedirect.pathname !== OIDC_CALLBACK_PATH) {
+    fail(`OIDC_REDIRECT_URL must point at the API callback route ${OIDC_CALLBACK_PATH} (no prefix or rewrite)`);
+  }
+  if (parsedRedirect && (parsedRedirect.search || parsedRedirect.hash || redirectUrl.includes("#"))) {
+    fail("OIDC_REDIRECT_URL must not have a query or fragment");
+  }
 
   const scopeList = (config.OIDC_SCOPES?.trim() || "openid email profile").split(/\s+/).filter(Boolean);
   if (!scopeList.includes("openid")) fail("OIDC_SCOPES must include openid");
 
   const groupsClaim = config.OIDC_GROUPS_CLAIM?.trim() || "groups";
+
+  const allowedEmailDomains = [
+    ...new Set(splitList(config.OIDC_ALLOWED_EMAIL_DOMAINS).map((entry) => entry.replace(/^@/, "").toLowerCase()))
+  ];
+  for (const domain of allowedEmailDomains) {
+    if (!/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*$/.test(domain)) {
+      fail("OIDC_ALLOWED_EMAIL_DOMAINS must be a comma-separated list of domains such as example.com");
+    }
+  }
+  const allowedGroups = splitList(config.OIDC_ALLOWED_GROUPS);
 
   return {
     issuer,
@@ -826,6 +861,8 @@ export function resolveOidcSettings(config: OidcConfigInput): OidcSettings | nul
     scopes: [...new Set(scopeList)].join(" "),
     groupsClaim,
     requireEmailVerified: config.OIDC_REQUIRE_EMAIL_VERIFIED !== false,
-    postLoginUrl: `${webBase}/`
+    postLoginUrl: `${webBase}/`,
+    allowedEmailDomains,
+    allowedGroups
   };
 }

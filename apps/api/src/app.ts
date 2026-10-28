@@ -4254,7 +4254,7 @@ export async function createApp(
     userFilter: config.LDAP_USER_FILTER,
     groupsAttribute: config.LDAP_GROUPS_ATTRIBUTE
   });
-  // Phase 13.2 — OIDC SSO; null settings (OIDC_ENABLED unset) leave every OIDC route answering 404.
+  // Phase 13.2 — OIDC SSO; null settings (OIDC_ENABLED unset) make the login routes answer 404 and metadata `enabled: false`.
   const oidcSettings = resolveOidcSettings(config);
   const oidcService = new OidcService(store, oidcSettings, {
     flowKey: deriveOidcFlowKey(config.SECRET_MASTER_KEY_BASE64),
@@ -4394,6 +4394,8 @@ export async function createApp(
     groups: string[];
     /** The user an existing SSO identity already points at (OIDC); otherwise the user is found by email. */
     userId?: string;
+    /** OIDC only: the issuer and raw `sub` behind the issuer-scoped `subject`, kept with the identity. */
+    oidc?: { issuer: string; sub: string };
   }): Promise<{ user: SafeUser; created: boolean }> => {
     const normalizedEmail = input.email.trim().toLowerCase();
     let storeUser = input.userId ? await store.getUserById(input.userId) : await store.getUserByEmail(normalizedEmail);
@@ -4461,7 +4463,9 @@ export async function createApp(
       });
     } else if (input.provider === "oidc") {
       await oidcService.recordIdentity(storeUser.id, {
-        subject: input.subject,
+        identityKey: input.subject,
+        issuer: input.oidc?.issuer ?? "",
+        subject: input.oidc?.sub ?? "",
         email: normalizedEmail,
         groups: input.groups
       });
@@ -6208,10 +6212,10 @@ export async function createApp(
     return url.toString();
   };
 
-  app.get("/api/auth/oidc/metadata", async (_request, reply) => {
+  // Answers 200 with `enabled: false` when off, so the signed-out login page does not log a 404 on every visit.
+  app.get("/api/auth/oidc/metadata", async () => {
     if (!oidcSettings) {
-      reply.code(404);
-      return { error: "OIDC is not enabled" };
+      return { enabled: false };
     }
     return {
       enabled: true,
@@ -6260,9 +6264,12 @@ export async function createApp(
     clearOidcFlowCookie(reply);
     try {
       const profile = await oidcService.completeLogin({ query: asRecord(request.query), flowCookie });
-      // A known (provider, sub) keeps its user even if the IdP email changed; anything else links or creates by
-      // email, and only a verified one (unless OIDC_REQUIRE_EMAIL_VERIFIED=false).
-      const identity = await store.findSsoIdentity("oidc", profile.subject);
+      // Optional allow-lists (OIDC_ALLOWED_EMAIL_DOMAINS / OIDC_ALLOWED_GROUPS) apply to new and returning users.
+      oidcService.assertLoginAllowed(profile);
+      // A known (issuer, sub) keeps its user even if the IdP email changed; anything else links or creates by
+      // email, and only a verified one (unless OIDC_REQUIRE_EMAIL_VERIFIED=false). The key is issuer-scoped, so a
+      // changed OIDC_ISSUER never matches an old link.
+      const identity = await store.findSsoIdentity("oidc", profile.identityKey);
       const linkedUser = identity ? await store.getUserById(identity.userId) : null;
       if (!linkedUser) {
         if (!profile.email) {
@@ -6274,12 +6281,32 @@ export async function createApp(
       }
       const { user, created } = await provisionSsoUser({
         provider: "oidc",
-        subject: profile.subject,
+        subject: profile.identityKey,
         email: profile.email ?? linkedUser!.email,
         groups: profile.groups,
-        userId: linkedUser?.id
+        userId: linkedUser?.id,
+        oidc: { issuer: profile.issuer, sub: profile.subject }
       });
+      // A session the browser already holds is replaced, not left alive next to the new one.
+      const previousSessionId = getSessionIdFromRequest(request);
+      if (previousSessionId) {
+        await store.revokeSession(previousSessionId).catch((revokeError: unknown) => {
+          request.log.warn({ reason: revokeError instanceof Error ? revokeError.message : "unknown" }, "Previous session not revoked");
+        });
+      }
       await issueSessionForUser(user, reply);
+      if (!linkedUser && !created) {
+        // First OIDC link to an account that already existed (possibly with local MFA): make it visible.
+        const mfaEnrolled = (await mfaService.status(user.id)).enabled;
+        await audit(request, user, {
+          category: "auth",
+          eventType: "user.sso_linked",
+          action: "link",
+          resourceType: "user",
+          resourceId: user.id,
+          metadata: { provider: "oidc", email: user.email, role: user.role, mfaEnrolled }
+        });
+      }
       await audit(request, user, {
         category: "auth",
         eventType: "user.login",

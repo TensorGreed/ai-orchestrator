@@ -7,6 +7,7 @@ import { MockOidcProvider } from "../test-support/mock-oidc-provider.js";
 import {
   JwksCache,
   OidcError,
+  oidcIdentitySubject,
   OidcService,
   deriveOidcFlowKey,
   extractGroups,
@@ -47,6 +48,8 @@ function settingsFor(provider: MockOidcProvider, overrides: Partial<OidcSettings
     groupsClaim: "groups",
     requireEmailVerified: true,
     postLoginUrl: "http://localhost:5173/",
+    allowedEmailDomains: [],
+    allowedGroups: [],
     ...overrides
   };
 }
@@ -187,6 +190,44 @@ describe("OIDC JWKS cache", () => {
     await expectRejected(validateIdToken(await provider.sign(baseClaims(provider)), opts()), /no applicable key|JWKS/i);
     expect(fetches).toBe(3);
   });
+
+  it("keeps the last good key set when a periodic refresh fails, and throws only with no cached keys", async () => {
+    const provider = await MockOidcProvider.create();
+    let now = 1_000_000;
+    let fail = false;
+    let fetches = 0;
+    const logged: string[] = [];
+    const cache = new JwksCache(
+      "https://idp/certs",
+      async () => {
+        fetches += 1;
+        if (fail) throw new OidcError("discovery_failed", "JWKS fetch failed: HTTP 503");
+        return provider.jwks();
+      },
+      () => now,
+      30_000,
+      (message) => logged.push(message)
+    );
+    const opts = { issuer: provider.issuer, clientId: provider.clientId, nonce: NONCE, getKey: cache.getKey };
+    await validateIdToken(await provider.sign(baseClaims(provider)), opts);
+
+    fail = true;
+    now += 2 * 60 * 60 * 1000; // past the one-hour TTL
+    const stillValid = await validateIdToken(await provider.sign(baseClaims(provider)), opts);
+    expect(stillValid.sub).toBe("user-1");
+    expect(fetches).toBe(2);
+    expect(logged).toEqual(["OIDC JWKS refresh failed; keeping the cached keys"]);
+    // A failed refresh is not retried on every login: the cooldown applies.
+    await validateIdToken(await provider.sign(baseClaims(provider)), opts);
+    expect(fetches).toBe(2);
+
+    const empty = new JwksCache("https://idp/certs", async () => {
+      throw new OidcError("discovery_failed", "JWKS fetch failed: HTTP 503");
+    }, () => now, 30_000);
+    await expect(empty.getKey({ alg: "RS256", kid: "x" }, { payload: "", signature: "" } as never)).rejects.toMatchObject({
+      code: "discovery_failed"
+    });
+  });
 });
 
 describe("OIDC flow cookie", () => {
@@ -236,7 +277,15 @@ describe("OIDC login flow (service level)", () => {
 
     const callback = new URL(provider.authorize(begun.authorizationUrl));
     const profile = await service.completeLogin({ query: Object.fromEntries(callback.searchParams), flowCookie: begun.flowCookie });
-    expect(profile).toEqual({ subject: "u-42", email: "bob@example.com", emailVerified: true, displayName: "Bob", groups: ["eng", "ops"] });
+    expect(profile).toEqual({
+      issuer: provider.issuer,
+      subject: "u-42",
+      identityKey: `${provider.issuer}#u-42`,
+      email: "bob@example.com",
+      emailVerified: true,
+      displayName: "Bob",
+      groups: ["eng", "ops"]
+    });
     // Confidential client: client_secret_basic, secret never in the body.
     expect(provider.tokenRequests[0]!.authorization).toMatch(/^Basic /);
     expect(provider.tokenRequests[0]!.body.get("client_secret")).toBeNull();
@@ -332,6 +381,125 @@ describe("OIDC login flow (service level)", () => {
     expect(profile2.groups).toEqual([]);
   });
 
+  it("asks userinfo for email_verified when the ID token has email only, for the same sub and email", async () => {
+    const provider = await MockOidcProvider.create();
+    provider.user = { sub: "u-8", email: "dee@example.com", email_verified: true };
+    provider.omitFromIdToken = ["email_verified"];
+    const { service, begun } = await start(provider);
+    const callback = new URL(provider.authorize(begun.authorizationUrl));
+    const profile = await service.completeLogin({ query: Object.fromEntries(callback.searchParams), flowCookie: begun.flowCookie });
+    expect(profile).toMatchObject({ email: "dee@example.com", emailVerified: true });
+    expect(provider.userinfoCalls).toBe(1);
+
+    // Userinfo vouches for a different address: its email_verified is not applied to the ID token's email.
+    provider.userinfoExtra = { email: "other@example.com" };
+    const again = await service.beginLogin();
+    const cb2 = new URL(provider.authorize(again.authorizationUrl));
+    const profile2 = await service.completeLogin({ query: Object.fromEntries(cb2.searchParams), flowCookie: again.flowCookie });
+    expect(profile2).toMatchObject({ email: "dee@example.com", emailVerified: false });
+
+    // Userinfo for another sub is ignored.
+    provider.userinfoExtra = { sub: "someone-else" };
+    const third = await service.beginLogin();
+    const cb3 = new URL(provider.authorize(third.authorizationUrl));
+    const profile3 = await service.completeLogin({ query: Object.fromEntries(cb3.searchParams), flowCookie: third.flowCookie });
+    expect(profile3.emailVerified).toBe(false);
+  });
+
+  it("refuses a discovery document with a plain-http jwks_uri or token_endpoint on a non-loopback host", async () => {
+    for (const key of ["jwks_uri", "token_endpoint"]) {
+      const provider = await MockOidcProvider.create();
+      const service = new OidcService(noStore, settingsFor(provider), {
+        flowKey: crypto.randomBytes(32),
+        fetch: async (input, init) => {
+          if (input.endsWith("/.well-known/openid-configuration")) {
+            return Response.json({ ...provider.discovery, [key]: "http://idp.example.test/insecure" });
+          }
+          return await provider.fetch(input, init);
+        }
+      });
+      await expect(service.beginLogin()).rejects.toMatchObject({ code: "discovery_failed", message: expect.stringContaining(key) });
+    }
+  });
+
+  it("remembers a failed discovery briefly instead of refetching on every login", async () => {
+    const provider = await MockOidcProvider.create();
+    let now = 5_000_000;
+    let attempts = 0;
+    let down = true;
+    const service = new OidcService(noStore, settingsFor(provider), {
+      flowKey: crypto.randomBytes(32),
+      now: () => now,
+      fetch: async (input, init) => {
+        if (input.endsWith("/.well-known/openid-configuration")) {
+          attempts += 1;
+          if (down) return Response.json({ error: "temporarily_unavailable" }, { status: 503 });
+        }
+        return await provider.fetch(input, init);
+      }
+    });
+    await expect(service.beginLogin()).rejects.toMatchObject({ code: "discovery_failed" });
+    await expect(service.beginLogin()).rejects.toMatchObject({ code: "discovery_failed" });
+    expect(attempts).toBe(1);
+    down = false;
+    now += 31_000;
+    await expect(service.beginLogin()).resolves.toHaveProperty("authorizationUrl");
+    expect(attempts).toBe(2);
+  });
+
+  it("reports a 4xx from the token endpoint as a failed exchange without the IdP's description", async () => {
+    const provider = await MockOidcProvider.create({ clientSecret: "s3cret" });
+    const service = new OidcService(noStore, settingsFor(provider), {
+      flowKey: crypto.randomBytes(32),
+      fetch: async (input, init) => {
+        if (input === provider.discovery.token_endpoint) {
+          return Response.json({ error: "invalid_client", error_description: "secret s3cret is wrong for user@example.com" }, { status: 401 });
+        }
+        return await provider.fetch(input, init);
+      }
+    });
+    const begun = await service.beginLogin();
+    const callback = new URL(provider.authorize(begun.authorizationUrl));
+    const error = await service
+      .completeLogin({ query: Object.fromEntries(callback.searchParams), flowCookie: begun.flowCookie })
+      .catch((caught: unknown) => caught);
+    expect(error).toMatchObject({ code: "token_exchange_failed" });
+    expect((error as Error).message).toContain("HTTP 401");
+    expect((error as Error).message).toContain("error=invalid_client");
+    expect((error as Error).message).not.toMatch(/s3cret|user@example.com|error_description/);
+    expect(oidcUserErrorCode(error)).toBe("oidc_failed");
+  });
+
+  it("applies the optional email-domain and group allow-lists", () => {
+    const check = (overrides: Partial<OidcSettings>, profile: { email?: string; emailVerified: boolean; groups: string[] }) => {
+      const service = new OidcService(noStore, { ...settingsFor({ issuer: "https://idp", clientId: "c" } as MockOidcProvider), ...overrides }, {
+        flowKey: crypto.randomBytes(32)
+      });
+      try {
+        service.assertLoginAllowed(profile);
+        return "ok";
+      } catch (error) {
+        return (error as OidcError).code;
+      }
+    };
+    const user = { email: "ann@example.com", emailVerified: true, groups: ["eng"] };
+    expect(check({}, user)).toBe("ok");
+    expect(check({ allowedEmailDomains: ["example.com"] }, user)).toBe("ok");
+    expect(check({ allowedEmailDomains: ["example.org"] }, user)).toBe("not_allowed");
+    // Exact domain: a subdomain or a look-alike suffix does not match.
+    expect(check({ allowedEmailDomains: ["example.com"] }, { ...user, email: "ann@eu.example.com" })).toBe("not_allowed");
+    expect(check({ allowedEmailDomains: ["example.com"] }, { ...user, email: "ann@badexample.com" })).toBe("not_allowed");
+    // The domain must come from a trusted email.
+    expect(check({ allowedEmailDomains: ["example.com"] }, { ...user, emailVerified: false })).toBe("not_allowed");
+    expect(check({ allowedEmailDomains: ["example.com"], requireEmailVerified: false }, { ...user, emailVerified: false })).toBe("ok");
+    expect(check({ allowedEmailDomains: ["example.com"] }, { ...user, email: undefined })).toBe("not_allowed");
+    expect(check({ allowedGroups: ["eng", "ops"] }, user)).toBe("ok");
+    expect(check({ allowedGroups: ["ops"] }, user)).toBe("not_allowed");
+    expect(check({ allowedGroups: ["ENG"] }, user)).toBe("not_allowed");
+    expect(check({ allowedEmailDomains: ["example.com"], allowedGroups: ["ops"] }, user)).toBe("not_allowed");
+    expect(oidcUserErrorCode(new OidcError("not_allowed", "x"))).toBe("oidc_not_allowed");
+  });
+
   it("refuses a discovery document whose issuer differs from OIDC_ISSUER", async () => {
     const provider = await MockOidcProvider.create();
     const service = new OidcService(noStore, settingsFor(provider, { issuer: `${provider.issuer}/` }), {
@@ -366,6 +534,11 @@ describe("OIDC helpers", () => {
     expect(extractGroups({}, "groups")).toEqual([]);
   });
 
+  it("scopes the stored identity to the issuer", () => {
+    expect(oidcIdentitySubject("https://a.example/realms/x", "1")).not.toBe(oidcIdentitySubject("https://b.example/realms/x", "1"));
+    expect(oidcIdentitySubject("https://a.example", "1")).toBe("https://a.example#1");
+  });
+
   it("maps errors to short user-facing codes", () => {
     expect(oidcUserErrorCode(new OidcError("state_mismatch", "x"))).toBe("oidc_state");
     expect(oidcUserErrorCode(new OidcError("email_not_verified", "x"))).toBe("oidc_email");
@@ -396,7 +569,9 @@ describe("OIDC configuration", () => {
       scopes: "openid email profile",
       groupsClaim: "groups",
       requireEmailVerified: true,
-      postLoginUrl: "http://localhost:5173/"
+      postLoginUrl: "http://localhost:5173/",
+      allowedEmailDomains: [],
+      allowedGroups: []
     });
   });
 
@@ -413,6 +588,27 @@ describe("OIDC configuration", () => {
     } catch (error) {
       expect(String(error)).not.toContain("top-secret-value");
     }
+    const ok = { ...enabled, OIDC_ISSUER: "https://idp.example.com", OIDC_CLIENT_ID: "c" };
+    expect(() => parseConfig({ ...enabled, OIDC_ISSUER: "https://idp.example.com/#", OIDC_CLIENT_ID: "c" })).toThrow(/fragment/);
+    // The redirect URL must be the API callback route, over https unless on loopback.
+    expect(() => parseConfig({ ...ok, OIDC_REDIRECT_URL: "https://l2m.example.com/sso/callback" })).toThrow(/\/api\/auth\/oidc\/callback/);
+    expect(() => parseConfig({ ...ok, OIDC_REDIRECT_URL: "http://l2m.example.com/api/auth/oidc/callback" })).toThrow(/https/);
+    expect(() => parseConfig({ ...ok, OIDC_REDIRECT_URL: "https://l2m.example.com/api/auth/oidc/callback?x=1" })).toThrow(/query/);
+    expect(() => parseConfig({ ...ok, OIDC_REDIRECT_URL: "/api/auth/oidc/callback" })).toThrow(/absolute/);
+    expect(() => parseConfig({ ...ok, WEB_ORIGIN: "http://l2m.example.com" })).toThrow(/OIDC_REDIRECT_URL must use https/);
+    expect(resolveOidcSettings(parseConfig({ ...ok, OIDC_REDIRECT_URL: "https://l2m.example.com/api/auth/oidc/callback" }))?.redirectUrl).toBe(
+      "https://l2m.example.com/api/auth/oidc/callback"
+    );
+    expect(resolveOidcSettings(parseConfig({ ...ok, OIDC_REDIRECT_URL: "http://127.0.0.1:4000/api/auth/oidc/callback" }))?.redirectUrl).toBe(
+      "http://127.0.0.1:4000/api/auth/oidc/callback"
+    );
+    // Allow-lists: trimmed, deduplicated, domains lowercased (a leading @ is accepted), bad domains refused.
+    const lists = resolveOidcSettings(
+      parseConfig({ ...ok, OIDC_ALLOWED_EMAIL_DOMAINS: " Example.com, @corp.example.org ,example.com", OIDC_ALLOWED_GROUPS: "l2m-users, admins" })
+    );
+    expect(lists?.allowedEmailDomains).toEqual(["example.com", "corp.example.org"]);
+    expect(lists?.allowedGroups).toEqual(["l2m-users", "admins"]);
+    expect(() => parseConfig({ ...ok, OIDC_ALLOWED_EMAIL_DOMAINS: "*.example.com" })).toThrow(/OIDC_ALLOWED_EMAIL_DOMAINS/);
     // Plain http is allowed only on loopback.
     expect(resolveOidcSettings(parseConfig({ ...enabled, OIDC_ISSUER: "http://localhost:8080/realms/dev", OIDC_CLIENT_ID: "c" }))?.issuer).toBe(
       "http://localhost:8080/realms/dev"

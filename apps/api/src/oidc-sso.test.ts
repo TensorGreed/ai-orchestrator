@@ -15,6 +15,8 @@ import type { Store } from "./db/store.js";
 import { openTestStore } from "./test-support/test-store.js";
 import { MockOidcProvider } from "./test-support/mock-oidc-provider.js";
 import { AuthService } from "./services/auth-service.js";
+import { MfaService, generateTotpCode } from "./services/mfa-service.js";
+import { oidcIdentitySubject } from "./services/oidc-service.js";
 import { SecretService } from "./services/secret-service.js";
 
 const CLIENT_SECRET = "oidc-client-secret-do-not-echo";
@@ -26,6 +28,8 @@ interface TestContext {
   authService: AuthService;
   tempDir: string;
   provider: MockOidcProvider;
+  masterKey: string;
+  logs: string[];
 }
 
 const contexts: TestContext[] = [];
@@ -43,15 +47,19 @@ afterEach(async () => {
   }
 });
 
-async function createContext(options: { enabled?: boolean; env?: Record<string, string>; provider?: MockOidcProvider } = {}): Promise<TestContext> {
+async function createContext(
+  options: { enabled?: boolean; env?: Record<string, string>; provider?: MockOidcProvider; captureLogs?: boolean } = {}
+): Promise<TestContext> {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-oidc-"));
   const store = await openTestStore(path.join(tempDir, "orchestrator.db"));
   await store.ensureDefaultProject();
   const provider = options.provider ?? (await MockOidcProvider.create({ clientSecret: CLIENT_SECRET }));
+  const masterKey = crypto.randomBytes(32).toString("base64");
+  const logs: string[] = [];
   const config = parseConfig({
-    LOG_LEVEL: "fatal",
+    LOG_LEVEL: options.captureLogs ? "info" : "fatal",
     SEED_SAMPLE_WORKFLOWS: "false",
-    SECRET_MASTER_KEY_BASE64: crypto.randomBytes(32).toString("base64"),
+    SECRET_MASTER_KEY_BASE64: masterKey,
     COOKIE_SECURE: "false",
     RATE_LIMIT_ENABLED: "false",
     MCP_PROBE_INTERVAL_MS: "0",
@@ -70,10 +78,11 @@ async function createContext(options: { enabled?: boolean; env?: Record<string, 
   const secretService = new SecretService(store, config.SECRET_MASTER_KEY_BASE64);
   const authService = new AuthService(store, config.SESSION_TTL_HOURS);
   const app = await createApp(config, store, secretService, authService, undefined, undefined, undefined, {
-    oidcFetch: provider.fetch
+    oidcFetch: provider.fetch,
+    ...(options.captureLogs ? { logStream: { write: (line: string) => void logs.push(line) } } : {})
   });
   await app.ready();
-  const context = { app, store, authService, tempDir, provider };
+  const context = { app, store, authService, tempDir, provider, masterKey, logs };
   contexts.push(context);
   return context;
 }
@@ -89,7 +98,7 @@ function cookieValue(cookies: string[], name: string): string | undefined {
 }
 
 /** Browser walk-through: start login, approve at the IdP, follow the redirect back. */
-async function runLogin(context: TestContext, tamper?: (callback: URL) => void) {
+async function runLogin(context: TestContext, tamper?: (callback: URL) => void, extraCookies: Record<string, string> = {}) {
   const start = await context.app.inject({ method: "GET", url: "/api/auth/oidc/login" });
   expect(start.statusCode).toBe(302);
   const flowCookies = setCookies(start.headers["set-cookie"]);
@@ -100,10 +109,18 @@ async function runLogin(context: TestContext, tamper?: (callback: URL) => void) 
   const finish = await context.app.inject({
     method: "GET",
     url: `${callback.pathname}${callback.search}`,
-    cookies: flow ? { l2m_oidc_flow: flow } : {}
+    cookies: { ...extraCookies, ...(flow ? { l2m_oidc_flow: flow } : {}) }
   });
   const finishCookies = setCookies(finish.headers["set-cookie"]);
-  return { start, flowCookies, finish, finishCookies, session: cookieValue(finishCookies, "ao_session") || undefined };
+  return {
+    start,
+    flow,
+    callback,
+    flowCookies,
+    finish,
+    finishCookies,
+    session: cookieValue(finishCookies, "ao_session") || undefined
+  };
 }
 
 async function adminCookie(context: TestContext): Promise<string> {
@@ -118,9 +135,12 @@ async function adminCookie(context: TestContext): Promise<string> {
 }
 
 describe("OIDC SSO is off by default", () => {
-  it("answers 404 on every OIDC route and changes nothing else", async () => {
+  it("reports itself off, answers 404 on the login routes and changes nothing else", async () => {
     const context = await createContext({ enabled: false });
-    for (const url of ["/api/auth/oidc/metadata", "/api/auth/oidc/login", "/api/auth/oidc/callback?code=x&state=y"]) {
+    const metadata = await context.app.inject({ method: "GET", url: "/api/auth/oidc/metadata" });
+    expect(metadata.statusCode).toBe(200);
+    expect(metadata.json()).toEqual({ enabled: false });
+    for (const url of ["/api/auth/oidc/login", "/api/auth/oidc/callback?code=x&state=y"]) {
       const response = await context.app.inject({ method: "GET", url });
       expect(response.statusCode).toBe(404);
       expect(response.headers["set-cookie"]).toBeUndefined();
@@ -179,7 +199,7 @@ describe("OIDC SSO login", () => {
     const meBody = me.json() as { user: { id: string; email: string; role: string } };
     expect(meBody.user).toMatchObject({ email: "dana@example.com", role: "builder" });
 
-    const identity = await context.store.findSsoIdentity("oidc", "kc-001");
+    const identity = await context.store.findSsoIdentity("oidc", oidcIdentitySubject(context.provider.issuer, "kc-001"));
     expect(identity).toMatchObject({ userId: meBody.user.id, email: "dana@example.com" });
     const members = await context.store.listProjectMembers("default");
     expect(members.find((member) => member.userId === meBody.user.id)?.role).toBe("editor");
@@ -199,7 +219,7 @@ describe("OIDC SSO login", () => {
     context.provider.user = { sub: "kc-erin", email: "erin@example.com", email_verified: true };
     const first = await runLogin(context);
     expect(first.finish.headers.location).toBe(`${WEB}/`);
-    expect((await context.store.findSsoIdentity("oidc", "kc-erin"))?.userId).toBe(existing.id);
+    expect((await context.store.findSsoIdentity("oidc", oidcIdentitySubject(context.provider.issuer, "kc-erin")))?.userId).toBe(existing.id);
     const user = await context.store.getUserById(existing.id);
     expect(user?.role).toBe("operator");
 
@@ -221,7 +241,7 @@ describe("OIDC SSO login", () => {
       expect(finish.statusCode).toBe(302);
       expect(finish.headers.location).toBe(`${WEB}/?sso_error=oidc_email`);
       expect(session).toBeUndefined();
-      expect(await context.store.findSsoIdentity("oidc", `kc-attacker-${String(verified)}`)).toBeNull();
+      expect(await context.store.findSsoIdentity("oidc", oidcIdentitySubject(context.provider.issuer, `kc-attacker-${String(verified)}`))).toBeNull();
     }
     context.provider.user = { sub: "kc-new", email: "newbie@example.com", email_verified: false };
     const { finish } = await runLogin(context);
@@ -294,5 +314,166 @@ describe("OIDC SSO login", () => {
     expect(created.statusCode).toBe(200);
     const list = await context.app.inject({ method: "GET", url: "/api/auth/sso/mappings?provider=oidc", cookies: { ao_session: admin } });
     expect((list.json() as { mappings: Array<{ groupName: string }> }).mappings.map((m) => m.groupName)).toEqual(["admins"]);
+  });
+});
+
+describe("OIDC identities are bound to the issuer", () => {
+  it("does not sign in a user linked under another issuer with the same sub", async () => {
+    const context = await createContext();
+    const victim = await context.authService.register({ email: "owner@example.com", password: "OwnerPassword123!", role: "admin" });
+    // Linked while OIDC_ISSUER pointed at another IdP, whose subjects happen to collide with the new one's.
+    await context.store.upsertSsoIdentity({
+      id: "sso_old_issuer",
+      userId: victim.id,
+      provider: "oidc",
+      subject: oidcIdentitySubject("https://old-idp.example.test/realms/l2m", "1"),
+      email: "owner@example.com",
+      attributes: {}
+    });
+
+    // Same sub at the new issuer, no verified email: refused, not signed in as the old link's user.
+    context.provider.user = { sub: "1", email: "intruder@example.com", email_verified: false };
+    const refused = await runLogin(context);
+    expect(refused.finish.headers.location).toBe(`${WEB}/?sso_error=oidc_email`);
+    expect(refused.session).toBeUndefined();
+
+    // Same sub with a verified email of their own: a new viewer, not the old link's admin.
+    context.provider.user = { sub: "1", email: "intruder@example.com", email_verified: true };
+    const fresh = await runLogin(context);
+    const me = await context.app.inject({ method: "GET", url: "/api/auth/me", cookies: { ao_session: fresh.session! } });
+    expect((me.json() as { user: { id: string; email: string; role: string } }).user).toMatchObject({
+      email: "intruder@example.com",
+      role: "viewer"
+    });
+    expect((me.json() as { user: { id: string } }).user.id).not.toBe(victim.id);
+    const identity = await context.store.findSsoIdentity("oidc", oidcIdentitySubject(context.provider.issuer, "1"));
+    expect(identity?.attributes).toMatchObject({ iss: context.provider.issuer, sub: "1" });
+  });
+});
+
+describe("OIDC allow-lists", () => {
+  it("refuses new and returning users outside OIDC_ALLOWED_EMAIL_DOMAINS", async () => {
+    const context = await createContext({ env: { OIDC_ALLOWED_EMAIL_DOMAINS: "example.com" } });
+    context.provider.user = { sub: "g-1", email: "outsider@gmail.test", email_verified: true };
+    const outsider = await runLogin(context);
+    expect(outsider.finish.headers.location).toBe(`${WEB}/?sso_error=oidc_not_allowed`);
+    expect(outsider.session).toBeUndefined();
+    expect(await context.store.getUserByEmail("outsider@gmail.test")).toBeNull();
+
+    context.provider.user = { sub: "g-2", email: "member@example.com", email_verified: true };
+    const member = await runLogin(context);
+    expect(member.finish.headers.location).toBe(`${WEB}/`);
+    // A returning user whose IdP email moved out of the allowed domain is refused too.
+    context.provider.user = { sub: "g-2", email: "member@elsewhere.test", email_verified: true };
+    const moved = await runLogin(context);
+    expect(moved.finish.headers.location).toBe(`${WEB}/?sso_error=oidc_not_allowed`);
+    expect(moved.session).toBeUndefined();
+
+    const failures = await context.store.listAuditLogs({ eventType: "user.login", outcome: "failure" });
+    expect(failures.items.map((item) => (item.metadata as { reason?: string }).reason)).toEqual(["not_allowed", "not_allowed"]);
+    expect(JSON.stringify(failures.items)).not.toContain(CLIENT_SECRET);
+  });
+
+  it("refuses users holding none of OIDC_ALLOWED_GROUPS", async () => {
+    const context = await createContext({ env: { OIDC_ALLOWED_GROUPS: "l2m-users,l2m-admins" } });
+    context.provider.user = { sub: "u-1", email: "nogroup@example.com", email_verified: true, groups: ["sales"] };
+    const refused = await runLogin(context);
+    expect(refused.finish.headers.location).toBe(`${WEB}/?sso_error=oidc_not_allowed`);
+    expect(await context.store.getUserByEmail("nogroup@example.com")).toBeNull();
+
+    context.provider.user = { sub: "u-2", email: "member@example.com", email_verified: true, groups: ["sales", "l2m-users"] };
+    const allowed = await runLogin(context);
+    expect(allowed.finish.headers.location).toBe(`${WEB}/`);
+    // Removed from the group at the IdP: the next login is refused.
+    context.provider.user = { sub: "u-2", email: "member@example.com", email_verified: true, groups: ["sales"] };
+    expect((await runLogin(context)).finish.headers.location).toBe(`${WEB}/?sso_error=oidc_not_allowed`);
+  });
+});
+
+describe("OIDC linking, sessions and failure paths", () => {
+  it("audits the first link to an existing account (with TOTP enrolled) as user.sso_linked, once", async () => {
+    const context = await createContext();
+    const existing = await context.authService.register({ email: "totp@example.com", password: "TotpPassword123!", role: "admin" });
+    const mfa = new MfaService(context.store, context.masterKey);
+    const enrollment = await mfa.enroll(existing.id, existing.email);
+    expect(await mfa.activate(existing.id, generateTotpCode(enrollment.secret))).toBe(true);
+
+    context.provider.user = { sub: "kc-totp", email: "totp@example.com", email_verified: true };
+    const first = await runLogin(context);
+    // Parity with SAML: the IdP's MFA applies; L2M does not ask for the local TOTP code.
+    expect(first.finish.headers.location).toBe(`${WEB}/`);
+    expect(first.session).toBeTruthy();
+    await runLogin(context);
+
+    const linked = await context.store.listAuditLogs({ eventType: "user.sso_linked" });
+    expect(linked.items).toHaveLength(1);
+    expect(linked.items[0]).toMatchObject({
+      outcome: "success",
+      resourceId: existing.id,
+      metadata: { provider: "oidc", email: "totp@example.com", mfaEnrolled: true }
+    });
+    expect(JSON.stringify(linked.items)).not.toMatch(/at_kc-totp|eyJ/);
+
+    // A JIT-created user is not a link to an existing account.
+    context.provider.user = { sub: "kc-new", email: "brand-new@example.com", email_verified: true };
+    await runLogin(context);
+    expect((await context.store.listAuditLogs({ eventType: "user.sso_linked" })).items).toHaveLength(1);
+  });
+
+  it("refuses a replayed callback (same code and flow cookie) without creating a session", async () => {
+    const context = await createContext();
+    const first = await runLogin(context);
+    expect(first.session).toBeTruthy();
+    const replay = await context.app.inject({
+      method: "GET",
+      url: `${first.callback.pathname}${first.callback.search}`,
+      cookies: { l2m_oidc_flow: first.flow! }
+    });
+    expect(replay.headers.location).toBe(`${WEB}/?sso_error=oidc_failed`);
+    expect(cookieValue(setCookies(replay.headers["set-cookie"]), "ao_session")).toBeFalsy();
+  });
+
+  it("revokes a session the browser already holds when a new one is issued", async () => {
+    const context = await createContext();
+    const admin = await adminCookie(context);
+    const login = await runLogin(context, undefined, { ao_session: admin });
+    expect(login.session).toBeTruthy();
+    const old = await context.app.inject({ method: "GET", url: "/api/auth/me", cookies: { ao_session: admin } });
+    expect(old.statusCode).toBe(401);
+  });
+
+  it("logs a public client in end to end (PKCE only, no client secret)", async () => {
+    const provider = await MockOidcProvider.create();
+    const context = await createContext({ provider });
+    provider.user = { sub: "pub-1", email: "public@example.com", email_verified: true };
+    const { finish, session } = await runLogin(context);
+    expect(finish.headers.location).toBe(`${WEB}/`);
+    expect(session).toBeTruthy();
+    expect(provider.tokenRequests[0]!.authorization).toBeNull();
+    expect(provider.tokenRequests[0]!.body.get("client_secret")).toBeNull();
+    expect(provider.tokenRequests[0]!.body.get("client_id")).toBe(provider.clientId);
+  });
+
+  it("keeps the code, state, tokens and client secret out of request logs and server spans", async () => {
+    const context = await createContext({ captureLogs: true, env: { TRACING_ENABLED: "true" } });
+    const admin = await adminCookie(context);
+    const { callback, finish } = await runLogin(context);
+    expect(finish.headers.location).toBe(`${WEB}/`);
+    const code = callback.searchParams.get("code")!;
+    const state = callback.searchParams.get("state")!;
+    expect(code.length).toBeGreaterThan(8);
+
+    const logText = context.logs.join("");
+    expect(logText).toContain("/api/auth/oidc/callback?code=REDACTED&state=REDACTED");
+    for (const secret of [code, state, CLIENT_SECRET, "at_user-1", "eyJ"]) {
+      expect(logText).not.toContain(secret);
+    }
+
+    const traces = await context.app.inject({ method: "GET", url: "/api/observability/traces?limit=200", cookies: { ao_session: admin } });
+    expect(traces.statusCode).toBe(200);
+    expect(traces.body).toContain("/api/auth/oidc/callback");
+    for (const secret of [code, state, CLIENT_SECRET]) {
+      expect(traces.body).not.toContain(secret);
+    }
   });
 });

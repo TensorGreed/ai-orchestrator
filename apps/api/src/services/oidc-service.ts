@@ -8,7 +8,11 @@
  * HS* are refused), `iss`, `aud`, `azp`, `exp`/`iat` with a small clock skew, and `nonce`.
  *
  * Discovery and the JWKS are cached; an ID token signed with an unknown `kid` refetches the JWKS once (rate limited),
- * so IdP key rotation needs no restart. User provisioning and role mapping reuse the SAML/LDAP path in app.ts; this
+ * so IdP key rotation needs no restart. A failed periodic JWKS refresh keeps the last good key set, and a failed
+ * discovery is remembered briefly so an IdP outage does not turn every login click into an outbound request.
+ *
+ * Identities are stored under an issuer-scoped key (`oidcIdentitySubject`), because `sub` is unique only within one
+ * issuer: after OIDC_ISSUER changes, an old link never matches and the user goes through verified-email linking. User provisioning and role mapping reuse the SAML/LDAP path in app.ts; this
  * service only resolves the mappings stored for provider `oidc`.
  *
  * Nothing here logs or returns tokens, codes or the client secret; error messages carry reasons only.
@@ -40,6 +44,7 @@ export const OIDC_MAX_ID_TOKEN_AGE_SECONDS = 10 * 60;
 const DISCOVERY_TTL_MS = 60 * 60 * 1000;
 const JWKS_TTL_MS = 60 * 60 * 1000;
 const JWKS_REFETCH_COOLDOWN_MS = 30 * 1000;
+const DISCOVERY_FAILURE_CACHE_MS = 30 * 1000;
 const HTTP_TIMEOUT_MS = 10 * 1000;
 const FLOW_AAD = Buffer.from("l2m-oidc-flow-v1");
 
@@ -52,7 +57,9 @@ export type OidcErrorCode =
   | "token_exchange_failed"
   | "invalid_id_token"
   | "missing_email"
-  | "email_not_verified";
+  | "email_not_verified"
+  | "not_allowed"
+  | "http_error";
 
 export class OidcError extends Error {
   constructor(
@@ -75,6 +82,8 @@ export function oidcUserErrorCode(error: unknown): string {
       case "missing_email":
       case "email_not_verified":
         return "oidc_email";
+      case "not_allowed":
+        return "oidc_not_allowed";
       case "not_configured":
       case "discovery_failed":
         return "oidc_unavailable";
@@ -83,6 +92,14 @@ export function oidcUserErrorCode(error: unknown): string {
     }
   }
   return "oidc_failed";
+}
+
+/**
+ * The `sso_identities.subject` stored for an OIDC login: the issuer and `sub` together, because `sub` is unique only
+ * within one issuer. OIDC_ISSUER never contains `#` (config refuses it), so the first `#` separates the two.
+ */
+export function oidcIdentitySubject(issuer: string, sub: string): string {
+  return `${issuer}#${sub}`;
 }
 
 export type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
@@ -114,7 +131,12 @@ interface FlowState {
 }
 
 export interface OidcProfile {
+  /** The ID token's `iss` (always OIDC_ISSUER after validation). */
+  issuer: string;
+  /** The ID token's `sub`, unique only within `issuer`. */
   subject: string;
+  /** Issuer-scoped key used for `sso_identities.subject` (see oidcIdentitySubject). */
+  identityKey: string;
   email?: string;
   emailVerified: boolean;
   displayName?: string;
@@ -232,27 +254,44 @@ export async function validateIdToken(
   return payload;
 }
 
-/** JWKS cache with refetch on an unknown `kid` (at most once per cooldown) and a periodic refresh. */
+/**
+ * JWKS cache with refetch on an unknown `kid` and a periodic refresh, both at most once per cooldown. When a periodic
+ * refresh fails, the last good key set stays in use (keys rotate slowly; an IdP blip should not stop every login).
+ */
 export class JwksCache {
   private keySet: JWTVerifyGetKey | null = null;
   private fetchedAt = 0;
+  private attemptedAt = Number.NEGATIVE_INFINITY;
   private inflight: Promise<void> | null = null;
 
   constructor(
     readonly uri: string,
     private readonly fetchJson: (url: string) => Promise<unknown>,
     private readonly now: () => number,
-    private readonly cooldownMs: number
+    private readonly cooldownMs: number,
+    private readonly logger?: (message: string, metadata?: Record<string, unknown>) => void
   ) {}
 
+  private canRetry(): boolean {
+    return this.now() - this.attemptedAt >= this.cooldownMs;
+  }
+
   readonly getKey: JWTVerifyGetKey = async (header, token) => {
-    if (!this.keySet || this.now() - this.fetchedAt > JWKS_TTL_MS) {
+    if (!this.keySet) {
       await this.refresh();
+    } else if (this.now() - this.fetchedAt > JWKS_TTL_MS && this.canRetry()) {
+      try {
+        await this.refresh();
+      } catch (error) {
+        this.logger?.("OIDC JWKS refresh failed; keeping the cached keys", {
+          reason: error instanceof Error ? error.message : "unknown"
+        });
+      }
     }
     try {
       return await this.keySet!(header, token);
     } catch (error) {
-      if (error instanceof joseErrors.JWKSNoMatchingKey && this.now() - this.fetchedAt >= this.cooldownMs) {
+      if (error instanceof joseErrors.JWKSNoMatchingKey && this.canRetry()) {
         await this.refresh();
         return await this.keySet!(header, token);
       }
@@ -262,6 +301,7 @@ export class JwksCache {
 
   private async refresh(): Promise<void> {
     if (!this.inflight) {
+      this.attemptedAt = this.now();
       this.inflight = (async () => {
         try {
           const body = await this.fetchJson(this.uri);
@@ -311,6 +351,7 @@ export class OidcService {
   private readonly cooldownMs: number;
   private discovery: { doc: DiscoveryDocument; fetchedAt: number } | null = null;
   private discoveryInflight: Promise<DiscoveryDocument> | null = null;
+  private discoveryFailure: { error: OidcError; at: number } | null = null;
   private jwks: JwksCache | null = null;
 
   constructor(
@@ -353,7 +394,7 @@ export class OidcService {
     }
     if (!response.ok) {
       const errorCode = body && typeof body === "object" ? sanitizeCode((body as Record<string, unknown>).error) : "unknown";
-      throw new OidcError("token_exchange_failed", `HTTP ${response.status} from ${new URL(url).origin} (error=${errorCode})`);
+      throw new OidcError("http_error", `HTTP ${response.status} from ${new URL(url).origin} (error=${errorCode})`);
     }
     if (body === null || typeof body !== "object") {
       throw new OidcError("invalid_response", `Non-JSON response from ${new URL(url).origin}`);
@@ -365,6 +406,9 @@ export class OidcService {
     const settings = this.requireSettings();
     if (this.discovery && this.now() - this.discovery.fetchedAt < DISCOVERY_TTL_MS) {
       return this.discovery.doc;
+    }
+    if (this.discoveryFailure && this.now() - this.discoveryFailure.at < DISCOVERY_FAILURE_CACHE_MS) {
+      throw this.discoveryFailure.error;
     }
     if (!this.discoveryInflight) {
       this.discoveryInflight = (async () => {
@@ -389,10 +433,17 @@ export class OidcService {
                 }
               },
               this.now,
-              this.cooldownMs
+              this.cooldownMs,
+              this.options.logger
             );
           }
+          this.discoveryFailure = null;
           return doc;
+        } catch (error) {
+          const failure =
+            error instanceof OidcError ? error : new OidcError("discovery_failed", "Discovery failed: unexpected error");
+          this.discoveryFailure = { error: failure, at: this.now() };
+          throw failure;
         } finally {
           this.discoveryInflight = null;
         }
@@ -496,7 +547,9 @@ export class OidcService {
     const rawEmail = typeof merged.email === "string" ? merged.email.trim().toLowerCase() : "";
     const verifiedRaw = merged.email_verified;
     return {
+      issuer: settings.issuer,
       subject: claims.sub as string,
+      identityKey: oidcIdentitySubject(settings.issuer, claims.sub as string),
       email: rawEmail || undefined,
       emailVerified: verifiedRaw === true || verifiedRaw === "true",
       displayName: typeof merged.name === "string" ? merged.name : undefined,
@@ -549,8 +602,10 @@ export class OidcService {
   }
 
   /**
-   * Fills email / email_verified / name / groups from the userinfo endpoint when the ID token lacks them. Userinfo is
-   * used only when its `sub` equals the ID token's; a failure leaves the ID token claims as they are.
+   * Fills email / email_verified / name / groups from the userinfo endpoint when the ID token lacks them, including an
+   * ID token that has `email` but no `email_verified` (some IdPs put that only in userinfo). Userinfo is used only when
+   * its `sub` equals the ID token's, and its `email_verified` only for the same email; a failure leaves the ID token
+   * claims as they are.
    */
   private async mergeUserInfo(
     doc: DiscoveryDocument,
@@ -559,8 +614,9 @@ export class OidcService {
     accessToken: string | undefined
   ): Promise<Record<string, unknown>> {
     const missingEmail = typeof claims.email !== "string" || claims.email.length === 0;
+    const missingVerified = !missingEmail && claims.email_verified === undefined;
     const missingGroups = readClaimPath(claims, settings.groupsClaim) === undefined;
-    if ((!missingEmail && !missingGroups) || !accessToken || !doc.userinfo_endpoint) {
+    if ((!missingEmail && !missingVerified && !missingGroups) || !accessToken || !doc.userinfo_endpoint) {
       return claims;
     }
     let info: Record<string, unknown>;
@@ -582,6 +638,12 @@ export class OidcService {
     if (missingEmail && typeof info.email === "string") {
       merged.email = info.email;
       merged.email_verified = info.email_verified;
+    } else if (
+      missingVerified &&
+      typeof info.email === "string" &&
+      info.email.trim().toLowerCase() === (claims.email as string).trim().toLowerCase()
+    ) {
+      merged.email_verified = info.email_verified;
     }
     if (merged.name === undefined && typeof info.name === "string") {
       merged.name = info.name;
@@ -591,6 +653,26 @@ export class OidcService {
       if (groups !== undefined) merged[settings.groupsClaim] = groups;
     }
     return merged;
+  }
+
+  /**
+   * Applies the optional OIDC_ALLOWED_EMAIL_DOMAINS / OIDC_ALLOWED_GROUPS allow-lists (nothing when both are unset).
+   * The domain check uses only a trusted email: verified, or any email when OIDC_REQUIRE_EMAIL_VERIFIED=false.
+   * Throws `not_allowed` with a reason that names the list, never a token.
+   */
+  assertLoginAllowed(profile: Pick<OidcProfile, "email" | "emailVerified" | "groups">): void {
+    const settings = this.requireSettings();
+    if (settings.allowedEmailDomains.length > 0) {
+      const trusted = profile.email && (profile.emailVerified || !settings.requireEmailVerified) ? profile.email : "";
+      const at = trusted.lastIndexOf("@");
+      const domain = at > 0 ? trusted.slice(at + 1).toLowerCase() : "";
+      if (!domain || !settings.allowedEmailDomains.includes(domain)) {
+        throw new OidcError("not_allowed", "Login refused: no trusted email in OIDC_ALLOWED_EMAIL_DOMAINS");
+      }
+    }
+    if (settings.allowedGroups.length > 0 && !profile.groups.some((group) => settings.allowedGroups.includes(group))) {
+      throw new OidcError("not_allowed", "Login refused: the user holds none of OIDC_ALLOWED_GROUPS");
+    }
   }
 
   async resolveGlobalRole(groups: string[]): Promise<UserRole | null> {
@@ -619,14 +701,18 @@ export class OidcService {
     return assignments;
   }
 
-  async recordIdentity(userId: string, profile: { subject: string; email?: string; groups: string[] }): Promise<void> {
+  /** Stores the link under the issuer-scoped key; `iss` and `sub` are kept in attributes for operators. */
+  async recordIdentity(
+    userId: string,
+    profile: { identityKey: string; issuer: string; subject: string; email?: string; groups: string[] }
+  ): Promise<void> {
     await this.store.upsertSsoIdentity({
       id: `sso_${nanoid(16)}`,
       userId,
       provider: "oidc",
-      subject: profile.subject,
+      subject: profile.identityKey,
       email: profile.email ?? null,
-      attributes: { groups: profile.groups }
+      attributes: { iss: profile.issuer, sub: profile.subject, groups: profile.groups }
     });
   }
 }
