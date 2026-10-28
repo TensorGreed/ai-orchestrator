@@ -4385,7 +4385,7 @@ export async function createApp(
    * and the auth layer share the result. A cookie that is not shaped like a session ID costs no lookup. A failed
    * lookup is not remembered as a miss for the auth layer (it looks again); the exemption treats it as no session.
    */
-  const getRequestSession = (request: FastifyRequest, sessionId: string): Promise<StoredSession | null> => {
+  const getRequestSession = (request: object, sessionId: string): Promise<StoredSession | null> => {
     if (!SESSION_ID_FORMAT.test(sessionId)) return Promise.resolve(null);
     const cached = requestSessions.get(request);
     if (cached) return cached;
