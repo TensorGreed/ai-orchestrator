@@ -126,11 +126,15 @@ describeStoreContract("store contract: cluster registry", (ctx) => {
       scheduledAt: new Date().toISOString()
     });
     for (const id of [resumed, lookalike, "r-plain"]) await store.claimClusterRunOwner({ executionId: id, instanceId: "gone" });
-    const failed = await until(async () => {
-      const result = await store.reconcileDeadExecutorRuns({ error: "lost", deadAfterMs: 20, selfId: "self" });
-      return result.length > 0 ? result : null;
+    // The owners were claimed one after another, so they age past the window one after another: collect every pass.
+    const failed: string[] = [];
+    await until(async () => {
+      failed.push(...(await store.reconcileDeadExecutorRuns({ error: "lost", deadAfterMs: 20, selfId: "self" })).map((run) => run.id));
+      return failed.length >= 2;
     }, "the unregistered owner's runs to age");
-    expect(failed.map((run) => run.id).sort()).toEqual([lookalike, "r-plain"].sort());
+    // Once the last owner has aged, one more pass changes nothing (the queued run stays skipped).
+    failed.push(...(await store.reconcileDeadExecutorRuns({ error: "lost", deadAfterMs: 20, selfId: "self" })).map((run) => run.id));
+    expect(failed.sort()).toEqual([lookalike, "r-plain"].sort());
     expect((await store.getExecutionHistory(resumed))!.status).toBe("running");
     expect((await store.getExecutionHistory(lookalike))!.status).toBe("error");
 
