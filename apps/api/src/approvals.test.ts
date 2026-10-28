@@ -796,7 +796,8 @@ describe("a recorded decision is never lost", () => {
         return entry && entry.status === "success" ? entry : null;
       });
       expect((history.nodeResults as Array<{ nodeId: string; status: string }>).find((entry) => entry.nodeId === "sent")?.status).toBe("success");
-      expect(await restarted.store.getWorkflowExecutionState(run.executionId!)).toBeNull();
+      // The history is final before the paused state is cleared, so wait for the clear.
+      await waitFor(async () => ((await restarted.store.getWorkflowExecutionState(run.executionId!)) === null ? true : null));
       expect(await restarted.store.listApprovalRequestsForExecution(run.executionId!)).toHaveLength(1);
     } finally {
       holding = false;

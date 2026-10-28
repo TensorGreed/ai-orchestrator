@@ -507,9 +507,10 @@ run("the queue across replicas on one Postgres database", () => {
       server.release();
       const w2 = await addReplica("worker-2", "worker");
       await until(async () => (await api.store.getExecutionHistory(executionId))?.status === "success", "another worker to resume it", 30_000);
+      // The history is final before the paused state is cleared and the queue row settles, so wait for those too.
+      await until(async () => (await api.store.getWorkflowExecutionState(executionId)) === null, "the paused state to be cleared");
+      await until(async () => (await resumeJob(executionId))?.status === "completed", "the resume to settle");
       expect(w2.ran).toEqual([executionId]);
-      expect(await api.store.getWorkflowExecutionState(executionId)).toBeNull();
-      expect(await resumeJob(executionId)).toMatchObject({ status: "completed" });
     } finally {
       await server.close();
     }
@@ -600,8 +601,8 @@ run("the queue across replicas on one Postgres database", () => {
       await until(async () => (await api.store.getExecutionHistory(executionId))?.status === "waiting_approval", "the healthy worker's pause", 30_000);
       await approve(leader, lead, executionId);
       await until(async () => (await api.store.getExecutionHistory(executionId))?.status === "success", "the resumed run to finish", 30_000);
+      await until(async () => (await api.store.getWorkflowExecutionState(executionId)) === null, "the paused state to be cleared");
       expect(healthy.ran).toEqual([executionId, executionId]);
-      expect(await api.store.getWorkflowExecutionState(executionId)).toBeNull();
 
       // The stalled worker's call answers only now: its progress write is refused, the run stops before the gate.
       server.release();
