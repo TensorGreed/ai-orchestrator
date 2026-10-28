@@ -1,4 +1,4 @@
-import type { ReleaseGateStats, ReleaseGateView, ReleaseStateView, ReleaseVerdict } from "@ai-orchestrator/shared";
+import type { ReleaseGateRepeatSelection, ReleaseGateStats, ReleaseGateView, ReleaseStateView, ReleaseVerdict } from "@ai-orchestrator/shared";
 
 /** Phase 15.4 — helpers behind the version pill, the Publish dialog and the Gates tab. */
 
@@ -64,12 +64,27 @@ function pct(value: number): string {
 }
 
 /** Short facts about the judged job, for the Publish dialog. */
+/**
+ * Which of the repeated cases' repeats a cost or latency figure was taken at, as a short suffix ("" at the deciding
+ * repeats, or when nothing was repeated).
+ */
+function repeatSelectionSuffix(selection: ReleaseGateRepeatSelection | undefined, metric: "cost" | "latency"): string {
+  if (!selection || selection.by === "deciding") return "";
+  if (selection.by === "repeat") return selection.partial ? ` (at repeat ${selection.repeat}, some cases at their deciding repeat)` : ` (at repeat ${selection.repeat})`;
+  if (selection.by === "largest_increase") return metric === "cost" ? " (at each case's costliest repeat)" : " (at each case's slowest repeat)";
+  return " (at each case's largest relative rise)";
+}
+
 export function gateStatsLines(stats: ReleaseGateStats | null): string[] {
   if (!stats) return [];
   const lines = [`${stats.pass} of ${stats.cases} cases passed (${pct(stats.passRate)})`];
   if (stats.regressions > 0) lines.push(`${stats.regressions} regression${stats.regressions === 1 ? "" : "s"}`);
-  if (stats.costIncreasePct !== null) lines.push(`cost ${stats.costIncreasePct >= 0 ? "+" : ""}${Math.round(stats.costIncreasePct)}%`);
-  if (stats.p95LatencyIncreasePct !== null) lines.push(`p95 latency ${stats.p95LatencyIncreasePct >= 0 ? "+" : ""}${Math.round(stats.p95LatencyIncreasePct)}%`);
+  if (stats.costIncreasePct !== null) {
+    lines.push(`cost ${stats.costIncreasePct >= 0 ? "+" : ""}${Math.round(stats.costIncreasePct)}%${repeatSelectionSuffix(stats.repeatSelection?.cost, "cost")}`);
+  }
+  if (stats.p95LatencyIncreasePct !== null) {
+    lines.push(`p95 latency ${stats.p95LatencyIncreasePct >= 0 ? "+" : ""}${Math.round(stats.p95LatencyIncreasePct)}%${repeatSelectionSuffix(stats.repeatSelection?.latency, "latency")}`);
+  }
   if (stats.newGuardBlocks > 0) lines.push(`${stats.newGuardBlocks} new guard block${stats.newGuardBlocks === 1 ? "" : "s"}`);
   const admission = stats.admission;
   if (admission && admission.pending > 0) lines.push(`${admission.pending} case${admission.pending === 1 ? "" : "s"} pending admission (run, not counted)`);
