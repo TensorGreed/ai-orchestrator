@@ -502,6 +502,12 @@ const envSchema = z.object({
   HA_INSTANCE_ID: z.string().optional(),
   HA_LEASE_TTL_MS: z.coerce.number().int().positive().default(30000),
   HA_RENEW_INTERVAL_MS: z.coerce.number().int().positive().default(10000),
+  /** Phase 13.1 — registry heartbeat period (Postgres; every instance, HA on or off). */
+  CLUSTER_HEARTBEAT_MS: z.coerce.number().int().min(100).max(300_000).default(10_000),
+  /** Phase 13.1 — an instance without a heartbeat this long counts as stopped (its inline runs fail in cluster mode). */
+  CLUSTER_INSTANCE_TIMEOUT_MS: z.coerce.number().int().min(300).max(3_600_000).default(45_000),
+  /** Phase 13.1 — cluster mode: how often an instance re-reads its running runs for a cancel it may have missed. 0 = off. */
+  CLUSTER_CANCEL_CHECK_MS: z.coerce.number().int().nonnegative().max(300_000).default(10_000),
 
   // Phase 7.5 — Notifications
   NOTIFICATIONS_ENABLED: booleanFromEnv.default(false),
@@ -568,6 +574,7 @@ export function parseConfig(env: Record<string, string | undefined>): AppConfig 
   parseTrustProxy(parsed.data.TRUST_PROXY);
   // Phase 13.1 — queue settings that only work in cluster mode fail fast outside it.
   resolveQueueSettings(parsed.data, { clusterMode: isPostgresDbType(env.DB_TYPE) && parsed.data.HA_ENABLED === true });
+  checkClusterTimings(parsed.data);
 
   return parsed.data;
 }
@@ -659,6 +666,19 @@ export function resolveQueueSettings(config: QueueConfigInput, options: { cluste
     shutdownDrainMs: config.SHUTDOWN_DRAIN_MS ?? QUEUE_SETTING_DEFAULTS.shutdownDrainMs,
     drainOnSignal: options.clusterMode || config.SHUTDOWN_DRAIN_MS !== undefined
   };
+}
+/**
+ * Phase 13.1 — an instance counts as stopped after CLUSTER_INSTANCE_TIMEOUT_MS without a heartbeat, and in cluster mode
+ * its running runs are then failed. A timeout under three heartbeats would fail a live instance's runs after one late
+ * heartbeat, so it is refused at startup.
+ */
+function checkClusterTimings(config: { CLUSTER_HEARTBEAT_MS: number; CLUSTER_INSTANCE_TIMEOUT_MS: number }): void {
+  if (config.CLUSTER_INSTANCE_TIMEOUT_MS < 3 * config.CLUSTER_HEARTBEAT_MS) {
+    throw new Error(
+      `Invalid environment configuration: CLUSTER_INSTANCE_TIMEOUT_MS (${config.CLUSTER_INSTANCE_TIMEOUT_MS}) must be at least ` +
+        `three times CLUSTER_HEARTBEAT_MS (${config.CLUSTER_HEARTBEAT_MS}), so one late heartbeat never counts a live instance as stopped`
+    );
+  }
 }
 
 const TRUST_PROXY_NAMED_RANGES = new Set(["loopback", "linklocal", "uniquelocal"]);
