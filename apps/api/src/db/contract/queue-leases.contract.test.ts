@@ -219,6 +219,25 @@ describeStoreContract("store contract: leased queue claims", (ctx) => {
     expect(next.map((job) => job.id)).toEqual(["urgent"]);
   });
 
+  it("a job records the execution it drives, so other recovery can skip runs the queue owns", async () => {
+    const store = ctx.store();
+    await store.enqueueExecution({ id: "run-1", workflowId: "wf", payload: { executionId: "run-1" }, scheduledAt: past(1_000) });
+    // An approval resume: its queue id is not its execution id.
+    await store.enqueueExecution({ id: "run-2:req-9:1700000000000", workflowId: "wf", payload: { executionId: "run-2", resume: {} }, scheduledAt: past(1_000) });
+    // No execution id in the payload: the queue id is the execution id.
+    await store.enqueueExecution({ id: "run-3", workflowId: "wf", payload: {}, scheduledAt: past(1_000) });
+    await store.enqueueExecution({ id: "run-4", workflowId: "wf", payload: { executionId: "run-4" }, scheduledAt: past(1_000) });
+    await store.markQueueItemCompleted("run-4");
+
+    expect(await store.listExecutionIdsWithActiveQueueJob([])).toEqual([]);
+    expect(await store.listExecutionIdsWithActiveQueueJob(["run-1", "run-2", "run-3", "run-4", "run-2:req-9", "other"])).toEqual(["run-1", "run-2", "run-3"]);
+    // Running counts too; a finished job does not.
+    const [claimed] = await store.claimQueueItems({ limit: 1, owner: "w1", pools: ["default"] });
+    expect(await store.listExecutionIdsWithActiveQueueJob([claimed!.id.split(":")[0]!])).toEqual([claimed!.id.split(":")[0]]);
+    await store.markQueueItemCompleted(claimed!.id, { claimToken: claimed!.claimToken! });
+    expect(await store.listExecutionIdsWithActiveQueueJob([claimed!.id.split(":")[0]!])).toEqual([]);
+  });
+
   it("concurrent leased claimers claim every job exactly once", async () => {
     const store = ctx.store();
     const ids = Array.from({ length: 40 }, (_, i) => `job-${i}`);

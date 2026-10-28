@@ -29,6 +29,7 @@ export const ONE_PENDING_APPROVAL_INDEX = "idx_approval_requests_one_pending";
 export const QUEUE_CLAIM_INDEX = "idx_execution_queue_claim";
 /** v43: running jobs by heartbeat, for the reaper (both stores). */
 export const QUEUE_RUNNING_HEARTBEAT_INDEX = "idx_execution_queue_running_hb";
+export const QUEUE_ACTIVE_EXECUTION_INDEX = "idx_execution_queue_active_execution";
 
 export const INSERTION_SEQ_TABLES: ReadonlyArray<{ table: string; backfillOrder: string }> = [
   { table: "audit_logs", backfillOrder: `created_at, id COLLATE "C"` },
@@ -2027,7 +2028,11 @@ export const MIGRATIONS: Migration[] = [
     // than the lease. Completions and the run's history writes are fenced on the token. Outside cluster mode these
     // columns stay NULL (pool 'default', lost_count 0) and the queue runs exactly as before. All additive: an older
     // binary lists its columns explicitly and keeps working. SQLite's embedded migrate() adds the same.
+    // execution_id is the run a job drives (an approval resume's queue id is not its execution id), written at enqueue;
+    // rows from before stay NULL and are matched by id instead.
     up: `
+      ALTER TABLE execution_queue ADD COLUMN IF NOT EXISTS execution_id TEXT;
+      CREATE INDEX IF NOT EXISTS ${QUEUE_ACTIVE_EXECUTION_INDEX} ON execution_queue (execution_id);
       ALTER TABLE execution_queue ADD COLUMN IF NOT EXISTS claimed_by TEXT;
       ALTER TABLE execution_queue ADD COLUMN IF NOT EXISTS claim_token TEXT;
       ALTER TABLE execution_queue ADD COLUMN IF NOT EXISTS heartbeat_at TIMESTAMPTZ;
@@ -2048,6 +2053,8 @@ export const MIGRATIONS: Migration[] = [
       ALTER TABLE execution_queue DROP COLUMN IF EXISTS heartbeat_at;
       ALTER TABLE execution_queue DROP COLUMN IF EXISTS claim_token;
       ALTER TABLE execution_queue DROP COLUMN IF EXISTS claimed_by;
+      DROP INDEX IF EXISTS ${QUEUE_ACTIVE_EXECUTION_INDEX};
+      ALTER TABLE execution_queue DROP COLUMN IF EXISTS execution_id;
     `
   }
 ];

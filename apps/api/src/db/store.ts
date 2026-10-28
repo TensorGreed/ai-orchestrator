@@ -1583,6 +1583,12 @@ export interface Store {
 
   /** Phase 11.2 — whether a queue item with this id, or one that extends it (`<id>:…`), is still waiting or running. */
   hasActiveQueueItem(id: string): Promise<boolean>;
+  /**
+   * Phase 13.1 — of these execution ids, the ones a queue job (pending or running) drives: by the job's execution_id,
+   * or, for a job enqueued before migration 43, by its id or an id that extends it (`<executionId>:…`). Queue-run
+   * ownership is the queue's (leases, fencing, the reaper); other recovery skips these runs.
+   */
+  listExecutionIdsWithActiveQueueJob(executionIds: string[]): Promise<string[]>;
   enqueueExecution(input: {
     id: string;
     workflowId: string;

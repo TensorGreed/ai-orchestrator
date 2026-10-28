@@ -1217,6 +1217,9 @@ export class PostgresStore implements Store {
   async hasActiveQueueItem(...args: Parameters<Store["hasActiveQueueItem"]>): ReturnType<Store["hasActiveQueueItem"]> {
     return queue.hasActiveQueueItem(this.ctx, ...args);
   }
+  async listExecutionIdsWithActiveQueueJob(...args: Parameters<Store["listExecutionIdsWithActiveQueueJob"]>): ReturnType<Store["listExecutionIdsWithActiveQueueJob"]> {
+    return queue.listExecutionIdsWithActiveQueueJob(this.ctx, ...args);
+  }
   async getGitConfig(...args: Parameters<Store["getGitConfig"]>): ReturnType<Store["getGitConfig"]> {
     return misc.getGitConfig(this.ctx, ...args);
   }

@@ -49,7 +49,7 @@ import type {
 } from "@ai-orchestrator/shared";
 import { DESTINATION_KINDS, DESTINATION_TIERS, type DataDestinationRow, DEFAULT_PROJECT_ID, GUARD_SIMULATION_JOB_DATASET_PREFIX, MCP_POLICY_KINDS, MCP_POLICY_ROLES, MCP_TOOL_HINT_CONDITIONS, REPLAY_CAPTURE_API_KEY_FILTER, REPLAY_CAPTURE_STATUSES } from "@ai-orchestrator/shared";
 import { normalizeMcpSamplingSettings, SUBJECT_CASSETTE_SOURCES, SUBJECT_EXECUTION_TRIGGERS } from "./store-shared.js";
-import { ONE_PENDING_APPROVAL_INDEX, QUEUE_CLAIM_INDEX, QUEUE_RUNNING_HEARTBEAT_INDEX } from "./migrations.js";
+import { ONE_PENDING_APPROVAL_INDEX, QUEUE_ACTIVE_EXECUTION_INDEX, QUEUE_CLAIM_INDEX, QUEUE_RUNNING_HEARTBEAT_INDEX } from "./migrations.js";
 import {
   normalizeMcpRuntimeLimits,
   normalizeMcpSandboxSettings,
@@ -3725,6 +3725,8 @@ export class SqliteStore implements Store {
 
     // Migration 43 — queue leases (claim owner, fencing token, heartbeat, pool, lost count) and the run's executor.
     // Written only by consumers in cluster mode (Postgres); on SQLite they keep their defaults and the queue runs as before.
+    this.ensureColumn("execution_queue", "execution_id", "TEXT");
+    this.exec(`CREATE INDEX IF NOT EXISTS ${QUEUE_ACTIVE_EXECUTION_INDEX} ON execution_queue (execution_id)`);
     this.ensureColumn("execution_queue", "claimed_by", "TEXT");
     this.ensureColumn("execution_queue", "claim_token", "TEXT");
     this.ensureColumn("execution_queue", "heartbeat_at", "TEXT");
@@ -5567,6 +5569,27 @@ export class SqliteStore implements Store {
   }
 
   /** Phase 11.2 — whether a queue item with this id, or one that extends it (`<id>:…`), is still waiting or running. */
+  async listExecutionIdsWithActiveQueueJob(executionIds: string[]): Promise<string[]> {
+    const ids = [...new Set(executionIds.filter((id) => typeof id === "string" && id.length > 0))];
+    const found: string[] = [];
+    for (let start = 0; start < ids.length; start += 200) {
+      const chunk = ids.slice(start, start + 200);
+      const placeholders = chunk.map(() => "?").join(", ");
+      const rows = this.queryAll<{ id: string; execution_id: string | null }>(
+        `SELECT id, execution_id FROM execution_queue
+          WHERE status IN ('pending', 'running')
+            AND (execution_id IN (${placeholders}) OR execution_id IS NULL)`,
+        chunk
+      );
+      for (const id of chunk) {
+        if (rows.some((row) => (row.execution_id !== null ? row.execution_id === id : row.id === id || row.id.startsWith(`${id}:`)))) {
+          found.push(id);
+        }
+      }
+    }
+    return found.sort();
+  }
+
   async hasActiveQueueItem(id: string): Promise<boolean> {
     const row = this.queryOne<{ id: string }>(
       `SELECT id FROM execution_queue WHERE (id = ? OR id LIKE ? ESCAPE '\\') AND status IN ('pending', 'running') LIMIT 1`,
@@ -5773,8 +5796,8 @@ export class SqliteStore implements Store {
   }): Promise<void> {
     const now = new Date().toISOString();
     this.exec(
-      `INSERT INTO execution_queue (id, workflow_id, workflow_name, payload_json, status, priority, attempts, max_attempts, last_error, scheduled_at, started_at, completed_at, created_at, updated_at, pool)
-       VALUES (?, ?, ?, ?, 'pending', ?, 0, ?, NULL, ?, NULL, NULL, ?, ?, ?)
+      `INSERT INTO execution_queue (id, workflow_id, workflow_name, payload_json, status, priority, attempts, max_attempts, last_error, scheduled_at, started_at, completed_at, created_at, updated_at, pool, execution_id)
+       VALUES (?, ?, ?, ?, 'pending', ?, 0, ?, NULL, ?, NULL, NULL, ?, ?, ?, ?)
        ON CONFLICT(id) DO NOTHING`,
       [
         input.id,
@@ -5786,7 +5809,8 @@ export class SqliteStore implements Store {
         input.scheduledAt ?? now,
         now,
         now,
-        input.pool ?? DEFAULT_QUEUE_POOL
+        input.pool ?? DEFAULT_QUEUE_POOL,
+        payloadExecutionId(input.payload, input.id)
       ]
     );
     this.persist();

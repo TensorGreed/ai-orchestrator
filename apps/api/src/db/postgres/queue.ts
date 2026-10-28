@@ -33,8 +33,8 @@ export async function enqueueExecution(ctx: PgContext, input: {
 }): Promise<void> {
   const now = new Date().toISOString();
   await ctx.execute(
-    `INSERT INTO execution_queue (id, workflow_id, workflow_name, payload_json, status, priority, attempts, max_attempts, last_error, scheduled_at, started_at, completed_at, created_at, updated_at, pool)
-       VALUES ($1, $2, $3, $4, 'pending', $5, 0, $6, NULL, $7, NULL, NULL, $8, $9, $10)
+    `INSERT INTO execution_queue (id, workflow_id, workflow_name, payload_json, status, priority, attempts, max_attempts, last_error, scheduled_at, started_at, completed_at, created_at, updated_at, pool, execution_id)
+       VALUES ($1, $2, $3, $4, 'pending', $5, 0, $6, NULL, $7, NULL, NULL, $8, $9, $10, $11)
        ON CONFLICT (id) DO NOTHING`,
     [
       input.id,
@@ -46,7 +46,8 @@ export async function enqueueExecution(ctx: PgContext, input: {
       input.scheduledAt ?? now,
       now,
       now,
-      input.pool ?? DEFAULT_QUEUE_POOL
+      input.pool ?? DEFAULT_QUEUE_POOL,
+      payloadExecutionId(input.payload, input.id)
     ]
   );
 }
@@ -309,6 +310,21 @@ export async function listDlqItems(ctx: PgContext, limit = 50, workflowIds?: str
 }
 
 /** Whether `id`, or a job keyed `<id>:…`, is pending or running. LIKE is case-insensitive on SQLite, so ILIKE here. */
+export async function listExecutionIdsWithActiveQueueJob(ctx: PgContext, executionIds: string[]): Promise<string[]> {
+  const ids = [...new Set(executionIds.filter((id) => typeof id === "string" && id.length > 0))];
+  if (ids.length === 0) return [];
+  const rows = await ctx.query<{ execution_id: string }>(
+    `SELECT DISTINCT wanted.id AS execution_id
+       FROM unnest($1::text[]) AS wanted(id)
+       JOIN execution_queue q
+         ON q.status IN ('pending', 'running')
+        AND (q.execution_id = wanted.id
+             OR (q.execution_id IS NULL AND (q.id = wanted.id OR starts_with(q.id, wanted.id || ':'))))`,
+    [ids]
+  );
+  return rows.map((row) => row.execution_id).sort();
+}
+
 export async function hasActiveQueueItem(ctx: PgContext, id: string): Promise<boolean> {
   const row = await ctx.queryOne<{ id: string }>(
     `SELECT id FROM execution_queue WHERE (id = $1 OR id ILIKE $2 ESCAPE '\\') AND status IN ('pending', 'running') LIMIT 1`,
