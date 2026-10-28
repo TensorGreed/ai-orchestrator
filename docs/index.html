@@ -4,14 +4,14 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>L²M: run and govern MCP agents, self-hosted</title>
-    <meta name="description" content="L2M is an open-source, self-hosted studio and runtime for MCP agents: build them visually, run them with tool calling, and govern them with an MCP control plane, Guard, approvals, signed audit bundles and release gates. Try the live demo in your browser." />
+    <meta name="description" content="L2M is an open-source, self-hosted studio and runtime for MCP agents: build them visually, run them with tool calling, and govern them with an MCP control plane, approvals, signed audit bundles and release gates. Try the live demo in your browser." />
     <link rel="canonical" href="https://lsquarem.com/" />
     <meta name="theme-color" content="#07090f" />
     <meta property="og:type" content="website" />
     <meta property="og:site_name" content="L2M" />
     <meta property="og:url" content="https://lsquarem.com/" />
     <meta property="og:title" content="L2M: run and govern MCP agents, self-hosted" />
-    <meta property="og:description" content="Build MCP agents visually, run them, and govern every tool call: control plane, Guard, approvals, signed audit bundles and release gates. Open source, self-hosted. Live demo in your browser." />
+    <meta property="og:description" content="Build MCP agents visually, run them, and govern every tool call: control plane, approvals, signed audit bundles and release gates. Open source, self-hosted. Live demo in your browser." />
     <meta property="og:image" content="https://lsquarem.com/assets/social-card.png" />
     <meta property="og:image:width" content="1200" />
     <meta property="og:image:height" content="630" />
@@ -85,7 +85,7 @@
           </ul>
           <h1 id="hero-title">The place your <span class="accent">MCP agents</span> run and are governed.</h1>
           <p class="lead">
-            Build tool-calling agents in a visual studio, run them against your MCP servers, and decide what every tool call may do: policies, Guard, approvals, signed audit bundles and a release gate. It all runs on your own infrastructure.
+            Build tool-calling agents in a visual studio, run them against your MCP servers, and decide what every tool call may do: policies, approvals, signed audit bundles and a release gate. It all runs on your own infrastructure.
           </p>
           <div class="hero-actions">
             <a class="btn btn-primary btn-lg" href="./demo/">
@@ -121,12 +121,6 @@
               <a href="./demo/?mode=editor&amp;workflowId=wf-demo-research-swarm&amp;demoRun=recorded">
                 <strong>Watch a recorded run</strong>
                 <span>A Supervisor delegates to two workers. Follow it on the run tape.</span>
-              </a>
-            </li>
-            <li>
-              <a href="./demo/?mode=editor&amp;workflowId=wf-demo-guarded-intake&amp;demoRun=recorded">
-                <strong>See Guard block a call</strong>
-                <span>Personal data in a request is caught before it reaches the agent.</span>
               </a>
             </li>
             <li>
@@ -209,17 +203,11 @@
             <span class="eyebrow">Govern</span>
             <h2 id="govern-title">Decide what agents may do, and prove what they did.</h2>
           </header>
-          <div class="cards two">
-            <article class="card">
-              <span class="card-icon tone-guard" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" /></svg></span>
-              <h3>L2M Guard</h3>
-              <p>Checks prompts, tool arguments, tool results and answers: prompt-injection rules, SQL, shell, path and egress checks on tool arguments, and DLP for personal data and credentials. Versioned guard profiles, protection providers to mask, hash, encrypt or tokenise, and a Security page with every verdict.</p>
-              <a class="text-link card-link" href="./docs/product/guard">Guard →</a>
-            </article>
+          <div class="cards">
             <article class="card">
               <span class="card-icon tone-tool" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3 8-8" /><path d="M20 12v7a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h9" /></svg></span>
               <h3>Approval gates</h3>
-              <p>Pause a run on a person. Approval gates, human approvals, guard reviews, write tools an agent wants to call and versions waiting to be published all land in one Approvals inbox.</p>
+              <p>Pause a run on a person. Approval gates, human approvals, write tools an agent wants to call and versions waiting to be published all land in one Approvals inbox.</p>
               <a class="text-link card-link" href="./docs/product/approvals">Approvals →</a>
             </article>
             <article class="card">
@@ -235,11 +223,7 @@
               <a class="text-link card-link" href="./docs/product/data-labels-and-destinations">Data destinations →</a>
             </article>
           </div>
-          <div class="cards two shot-row">
-            <figure class="shot">
-              <img src="./assets/screens/guard-security.webp" width="1440" height="900" loading="lazy" decoding="async" alt="The Security page in the L2M studio: guard verdict totals for the last 14 days, a verdicts-per-day chart, and breakdowns by action, category, channel and top detector." />
-              <figcaption>Security: every guard verdict, by action, channel and detector.</figcaption>
-            </figure>
+          <div class="shot-row shot-single">
             <figure class="shot">
               <img src="./assets/screens/approvals-inbox.webp" width="1440" height="900" loading="lazy" decoding="async" alt="The Approvals inbox in the L2M studio: two pending approval-gate requests from a refund workflow, each with an editable reply, the requester, the allowed approver roles, and Reject and Approve buttons." />
               <figcaption>Approvals: decide paused runs, and edit fields before approving.</figcaption>
@@ -257,7 +241,7 @@
             <p class="lead">Treat a prompt or tool change like a code change: replay it against known-good runs before it reaches production.</p>
             <ul class="feature-list">
               <li><strong>Golden runs and sets.</strong> Save good runs, group them, and replay a draft or a saved version against them.</li>
-              <li><strong>Scorers.</strong> JSON equality and schema, text similarity, tool sequence, status, budget, no new guard blocks, and an LLM judge.</li>
+              <li><strong>Scorers.</strong> JSON equality and schema, text similarity, tool sequence, status, budget and an LLM judge.</li>
               <li><strong>Release gate on publish.</strong> A version reaches production only after its replay job passes the gate's policy; an override needs a written reason and is audited.</li>
               <li><strong>Production capture.</strong> Sample real runs with personal data masked, and promote the useful ones into a golden set.</li>
               <li><strong>A CLI for your pipeline.</strong> Run replays, write JUnit results and publish from CI.</li>
@@ -319,7 +303,7 @@
 
           <div class="callout">
             <span class="card-icon tone-accent" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v18M3 12h18" /></svg></span>
-            <p><strong>Everything is optional.</strong> A simple workflow runs with no extra configuration. Approvals, release gates, data labels and destinations, production capture and sandboxing stay off until you turn them on. A built-in guard profile checks agents by default; set <code>GUARD_AUTO_APPLY=false</code> to apply only the profiles you bind.</p>
+            <p><strong>Everything is optional.</strong> A simple workflow runs with no extra configuration. Approvals, release gates, data labels and destinations, production capture and sandboxing stay off until you turn them on.</p>
           </div>
         </div>
       </section>
@@ -351,7 +335,7 @@
           <div class="cta-panel">
             <span class="eyebrow">Open source · MIT</span>
             <h2 id="cta-title">See it before you install it.</h2>
-            <p>The live demo is the real studio with recorded runs: build an agent, run it, and watch Guard and the release gate at work. When you're ready, self-host it.</p>
+            <p>The live demo is the real studio with recorded runs: build an agent, run it, and watch the release gate at work. When you're ready, self-host it.</p>
             <div class="hero-actions">
               <a class="btn btn-primary btn-lg" href="./demo/">Try the live demo</a>
               <a class="btn btn-lg" href="https://github.com/TensorGreed/ai-orchestrator" rel="noopener">View on GitHub</a>
