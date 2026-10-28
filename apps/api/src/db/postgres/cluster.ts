@@ -6,6 +6,7 @@ import type { Pool, PoolClient } from "pg";
 import type { ClusterInstanceHeartbeat, ClusterInstanceRecord } from "../store.js";
 import type { PgContext } from "./context.js";
 import { parseJsonSafe, toNum, toStr } from "./helpers.js";
+import { executionIdsHeldByQueue, payloadExecutionIdPatterns } from "../cluster-queue-guard.js";
 
 interface ClusterInstanceRow {
   id: string;
@@ -110,6 +111,33 @@ export async function releaseClusterRunOwner(ctx: PgContext, input: { executionI
   await ctx.execute(`DELETE FROM cluster_run_owners WHERE execution_id = $1 AND instance_id = $2`, [input.executionId, input.instanceId]);
 }
 
+/**
+ * Fails the `running` history rows among `ids` with `error`, except runs a live queue job owns (keyed on the
+ * execution id in the job's payload, see cluster-queue-guard.ts). Runs inside the caller's transaction.
+ */
+async function failRunningUnlessQueued(
+  client: PoolClient,
+  ids: string[],
+  error: string
+): Promise<{ rows: Array<{ id: string; workflow_id: string }> }> {
+  const queued = await client.query<{ id: string; payload_json: string | null }>(
+    `SELECT id, payload_json FROM execution_queue
+      WHERE status IN ('pending', 'running') AND (id = ANY($1::text[]) OR payload_json LIKE ANY($2::text[]))`,
+    [ids, payloadExecutionIdPatterns(ids)]
+  );
+  const held = executionIdsHeldByQueue(ids, queued.rows.map((row) => ({ id: row.id, payloadJson: row.payload_json })));
+  const eligible = ids.filter((id) => !held.has(id));
+  if (eligible.length === 0) return { rows: [] };
+  return await client.query<{ id: string; workflow_id: string }>(
+    `UPDATE execution_history
+        SET status = 'error', completed_at = now(), error = $2,
+            duration_ms = GREATEST(0, (EXTRACT(EPOCH FROM (now() - started_at::timestamptz)) * 1000)::bigint)
+      WHERE id = ANY($1::text[]) AND status = 'running'
+      RETURNING id, workflow_id`,
+    [eligible, error]
+  );
+}
+
 export async function reconcileDeadExecutorRuns(
   ctx: PgContext,
   input: { error: string; deadAfterMs: number; selfId: string }
@@ -132,15 +160,7 @@ export async function reconcileDeadExecutorRuns(
     if (dead.rows.length === 0) return [];
     const ids = dead.rows.map((row) => row.execution_id);
     const ownerOf = new Map(dead.rows.map((row) => [row.execution_id, row.instance_id]));
-    const failed = await client.query<{ id: string; workflow_id: string }>(
-      `UPDATE execution_history
-          SET status = 'error', completed_at = now(), error = $2,
-              duration_ms = GREATEST(0, (EXTRACT(EPOCH FROM (now() - started_at::timestamptz)) * 1000)::bigint)
-        WHERE id = ANY($1::text[]) AND status = 'running'
-          AND id NOT IN (SELECT id FROM execution_queue WHERE status IN ('pending', 'running'))
-        RETURNING id, workflow_id`,
-      [ids, input.error]
-    );
+    const failed = await failRunningUnlessQueued(client, ids, input.error);
     await client.query(`DELETE FROM cluster_run_owners WHERE execution_id = ANY($1::text[])`, [ids]);
     return failed.rows.map((row) => ({ id: row.id, workflowId: row.workflow_id, instanceId: ownerOf.get(row.id) ?? "" }));
   });
@@ -157,15 +177,7 @@ export async function failRunsOwnedBy(
     );
     if (owned.rows.length === 0) return [];
     const ids = owned.rows.map((row) => row.execution_id);
-    const failed = await client.query<{ id: string; workflow_id: string }>(
-      `UPDATE execution_history
-          SET status = 'error', completed_at = now(), error = $2,
-              duration_ms = GREATEST(0, (EXTRACT(EPOCH FROM (now() - started_at::timestamptz)) * 1000)::bigint)
-        WHERE id = ANY($1::text[]) AND status = 'running'
-          AND id NOT IN (SELECT id FROM execution_queue WHERE status IN ('pending', 'running'))
-        RETURNING id, workflow_id`,
-      [ids, input.error]
-    );
+    const failed = await failRunningUnlessQueued(client, ids, input.error);
     await client.query(`DELETE FROM cluster_run_owners WHERE execution_id = ANY($1::text[]) AND instance_id = $2`, [ids, input.instanceId]);
     return failed.rows.map((row) => ({ id: row.id, workflowId: row.workflow_id, instanceId: input.instanceId }));
   });

@@ -64,6 +64,7 @@ import { isEmptyDataLabels, labelsForUntrackedSave, mergeDataLabels, parseStored
 import { queuedRunTimeoutMs, STUCK_JOB_MARGIN_MS } from "./queue-timeouts.js";
 import { isForeignKeyViolation, ProjectNotEmptyError, StoreReferenceMissingError, ReleaseGateEnforcedError } from "./store-errors.js";
 import { clampLimit, LIMIT_MAX } from "./store-limits.js";
+import { executionIdsHeldByQueue } from "./cluster-queue-guard.js";
 import {
   auditEntryHash,
   type AuditChainResult,
@@ -5010,7 +5011,7 @@ export class SqliteStore implements Store {
     nodeResultsJson?: unknown;
     customData?: unknown;
     error?: string;
-  }, options?: { unlessFinished?: boolean; unlessCanceled?: boolean; fence?: QueueClaimFence }): Promise<boolean> {
+  }, options?: { unlessFinished?: boolean; unlessCanceled?: boolean; unlessInterruptedWith?: string; fence?: QueueClaimFence }): Promise<boolean> {
     const fence = options?.fence;
     if (fence) {
       // Phase 13.1 — a queued run in cluster mode writes only while its claim still holds the queue item (one
@@ -5020,13 +5021,24 @@ export class SqliteStore implements Store {
     return this.writeExecutionHistory(input, options);
   }
 
-  private writeExecutionHistory(input: Parameters<Store["saveExecutionHistory"]>[0], options?: { unlessFinished?: boolean; unlessCanceled?: boolean }): boolean {
-    const guard = options?.unlessFinished
-      ? `
-        WHERE ${FINISHED_HISTORY_SQL("execution_history")} = 0`
+  private writeExecutionHistory(
+    input: Parameters<Store["saveExecutionHistory"]>[0],
+    options?: { unlessFinished?: boolean; unlessCanceled?: boolean; unlessInterruptedWith?: string }
+  ): boolean {
+    const condition = options?.unlessFinished
+      ? `${FINISHED_HISTORY_SQL("execution_history")} = 0`
       : options?.unlessCanceled
+        ? `execution_history.status <> 'canceled' OR excluded.status = 'canceled'`
+        : "";
+    // Phase 13.1 — a run the dead-executor reconcile already failed keeps that record (see Store.saveExecutionHistory).
+    const interrupted = options?.unlessInterruptedWith !== undefined;
+    const fence = `NOT (execution_history.status = 'error' AND execution_history.error = ?)`;
+    const guard = interrupted
+      ? `
+        WHERE ${condition ? `(${condition}) AND ` : ""}${fence}`
+      : condition
         ? `
-        WHERE execution_history.status <> 'canceled' OR excluded.status = 'canceled'`
+        WHERE ${condition}`
         : "";
     const result = this.db.prepare(
       `INSERT INTO execution_history (
@@ -5073,7 +5085,8 @@ export class SqliteStore implements Store {
         input.outputJson === undefined ? null : JSON.stringify(input.outputJson),
         input.nodeResultsJson === undefined ? null : JSON.stringify(input.nodeResultsJson),
         input.customData === undefined ? null : JSON.stringify(input.customData),
-        input.error ?? null
+        input.error ?? null,
+        ...(interrupted ? [options.unlessInterruptedWith] : [])
     );
     this.persist();
     return result.changes > 0;
@@ -9345,16 +9358,16 @@ export class SqliteStore implements Store {
           ORDER BY o.execution_id`,
         [input.selfId, cutoff, cutoff]
       );
+      const queueHeld = this.executionIdsHeldByLiveQueueJobs(dead.map((owner) => toString(owner.execution_id)));
       const completedAt = new Date().toISOString();
       const failed: Array<{ id: string; workflowId: string; instanceId: string }> = [];
       for (const owner of dead) {
         const executionId = toString(owner.execution_id);
-        const run = this.queryOne<{ workflow_id: unknown; started_at: unknown }>(
-          `SELECT workflow_id, started_at FROM execution_history
-            WHERE id = ? AND status = 'running'
-              AND id NOT IN (SELECT id FROM execution_queue WHERE status IN ('pending', 'running'))`,
-          [executionId]
-        );
+        const run = queueHeld.has(executionId)
+          ? undefined
+          : this.queryOne<{ workflow_id: unknown; started_at: unknown }>(`SELECT workflow_id, started_at FROM execution_history WHERE id = ? AND status = 'running'`, [
+              executionId
+            ]);
         if (run) {
           this.exec(`UPDATE execution_history SET status = 'error', completed_at = ?, duration_ms = ?, error = ? WHERE id = ?`, [
             completedAt,
@@ -9374,16 +9387,16 @@ export class SqliteStore implements Store {
   async failRunsOwnedBy(input: { instanceId: string; error: string }): Promise<Array<{ id: string; workflowId: string; instanceId: string }>> {
     return this.transaction(() => {
       const owned = this.queryAll<{ execution_id: unknown }>(`SELECT execution_id FROM cluster_run_owners WHERE instance_id = ? ORDER BY execution_id`, [input.instanceId]);
+      const queueHeld = this.executionIdsHeldByLiveQueueJobs(owned.map((owner) => toString(owner.execution_id)));
       const completedAt = new Date().toISOString();
       const failed: Array<{ id: string; workflowId: string; instanceId: string }> = [];
       for (const owner of owned) {
         const executionId = toString(owner.execution_id);
-        const run = this.queryOne<{ workflow_id: unknown; started_at: unknown }>(
-          `SELECT workflow_id, started_at FROM execution_history
-            WHERE id = ? AND status = 'running'
-              AND id NOT IN (SELECT id FROM execution_queue WHERE status IN ('pending', 'running'))`,
-          [executionId]
-        );
+        const run = queueHeld.has(executionId)
+          ? undefined
+          : this.queryOne<{ workflow_id: unknown; started_at: unknown }>(`SELECT workflow_id, started_at FROM execution_history WHERE id = ? AND status = 'running'`, [
+              executionId
+            ]);
         if (run) {
           this.exec(`UPDATE execution_history SET status = 'error', completed_at = ?, duration_ms = ?, error = ? WHERE id = ?`, [
             completedAt,
@@ -9398,6 +9411,16 @@ export class SqliteStore implements Store {
       if (owned.length > 0) this.persist();
       return failed;
     });
+  }
+
+  /** The ids a live queue job runs (see cluster-queue-guard.ts); one process, so every live job is read. */
+  private executionIdsHeldByLiveQueueJobs(ids: string[]): Set<string> {
+    if (ids.length === 0) return new Set();
+    const rows = this.queryAll<{ id: unknown; payload_json: unknown }>(`SELECT id, payload_json FROM execution_queue WHERE status IN ('pending', 'running')`);
+    return executionIdsHeldByQueue(
+      ids,
+      rows.map((row) => ({ id: toString(row.id), payloadJson: row.payload_json === null || row.payload_json === undefined ? null : toString(row.payload_json) }))
+    );
   }
 
   async listCanceledExecutionIds(executionIds: readonly string[]): Promise<string[]> {

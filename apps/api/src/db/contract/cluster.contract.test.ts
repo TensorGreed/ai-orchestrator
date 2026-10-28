@@ -113,6 +113,35 @@ describeStoreContract("store contract: cluster registry", (ctx) => {
     expect(await store.reconcileDeadExecutorRuns({ error: "x", deadAfterMs: 40, selfId: "self" })).toEqual([]);
   });
 
+  it("skips a run a live queue job carries under another id (an approval resume), keyed on the payload's execution id", async () => {
+    const store = ctx.store();
+    // Ids with LIKE wildcards and a quote, so the preselection must escape them.
+    const resumed = 'r-res_1%"q';
+    const lookalike = "r-res-1xq";
+    for (const id of [resumed, lookalike, "r-plain"]) await runningRun(store, id);
+    await store.enqueueExecution({
+      id: `${resumed}:req-1:1730000000000`,
+      workflowId: "wf",
+      payload: { executionId: resumed, workflowId: "wf", triggerType: "approval_resume", resume: { executionId: resumed } },
+      scheduledAt: new Date().toISOString()
+    });
+    for (const id of [resumed, lookalike, "r-plain"]) await store.claimClusterRunOwner({ executionId: id, instanceId: "gone" });
+    const failed = await until(async () => {
+      const result = await store.reconcileDeadExecutorRuns({ error: "lost", deadAfterMs: 20, selfId: "self" });
+      return result.length > 0 ? result : null;
+    }, "the unregistered owner's runs to age");
+    expect(failed.map((run) => run.id).sort()).toEqual([lookalike, "r-plain"].sort());
+    expect((await store.getExecutionHistory(resumed))!.status).toBe("running");
+    expect((await store.getExecutionHistory(lookalike))!.status).toBe("error");
+
+    // The same for a restarted instance's own runs.
+    await runningRun(store, "r-mine-resumed");
+    await store.enqueueExecution({ id: "r-mine-resumed:req-2:1", workflowId: "wf", payload: { executionId: "r-mine-resumed", workflowId: "wf" }, scheduledAt: new Date().toISOString() });
+    await store.claimClusterRunOwner({ executionId: "r-mine-resumed", instanceId: "fixed" });
+    expect(await store.failRunsOwnedBy({ instanceId: "fixed", error: "restarted" })).toEqual([]);
+    expect((await store.getExecutionHistory("r-mine-resumed"))!.status).toBe("running");
+  });
+
   it("re-assigns a run's owner, and releases it only for the owner named", async () => {
     const store = ctx.store();
     await runningRun(store, "r1");
@@ -143,6 +172,61 @@ describeStoreContract("store contract: cluster registry", (ctx) => {
     expect(await store.failRunsOwnedBy({ instanceId: "fixed-id", error: "again" })).toEqual([]);
     // The other instance's owner row is untouched: once it is old and unregistered it is reconciled as its own.
     await until(async () => (await store.reconcileDeadExecutorRuns({ error: "x", deadAfterMs: 20, selfId: "fixed-id" })).some((run) => run.id === "theirs"), "the other's run");
+  });
+
+  it("a final write fenced with the reconcile's mark never replaces a run the reconcile failed", async () => {
+    const store = ctx.store();
+    const mark = "interrupted: the instance running this run stopped responding";
+    const final = (id: string, status: string, options: { unlessCanceled?: boolean; unlessInterruptedWith?: string } = { unlessCanceled: true, unlessInterruptedWith: mark }) =>
+      store.saveExecutionHistory({ id, workflowId: "wf", status, startedAt: new Date().toISOString(), completedAt: new Date().toISOString() }, options);
+    for (const id of ["f-taken", "f-kept"]) await runningRun(store, id);
+    await store.claimClusterRunOwner({ executionId: "f-taken", instanceId: "silent" });
+    await until(async () => (await store.reconcileDeadExecutorRuns({ error: mark, deadAfterMs: 20, selfId: "leader" })).length === 1, "the reconcile");
+    // The silent instance's late result, whatever it is, is refused.
+    expect(await final("f-taken", "success")).toBe(false);
+    expect(await final("f-taken", "canceled")).toBe(false);
+    expect(await final("f-taken", "error")).toBe(false);
+    expect(await store.getExecutionHistory("f-taken")).toMatchObject({ status: "error", error: mark });
+    // A run the reconcile never touched is written as before, and the fence alone (no other guard) works too.
+    expect(await final("f-kept", "success")).toBe(true);
+    expect((await store.getExecutionHistory("f-kept"))!.status).toBe("success");
+    expect(await final("f-kept", "success", { unlessInterruptedWith: mark })).toBe(true);
+    // The canceled guard still applies beside it.
+    await runningRun(store, "f-canceled");
+    await final("f-canceled", "canceled", {});
+    expect(await final("f-canceled", "success")).toBe(false);
+    expect(await final("f-canceled", "canceled")).toBe(true);
+  });
+
+  it("a reconcile racing the owner's final writes: each run ends exactly one way", async () => {
+    const store = ctx.store();
+    const mark = "interrupted: raced";
+    const ids = Array.from({ length: 24 }, (_, i) => `race-${i}`);
+    for (const id of ids) {
+      await runningRun(store, id);
+      await store.claimClusterRunOwner({ executionId: id, instanceId: "racer" });
+    }
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    const [reconciled, ...written] = await Promise.all([
+      store.reconcileDeadExecutorRuns({ error: mark, deadAfterMs: 20, selfId: "leader" }),
+      ...ids.map((id) =>
+        store.saveExecutionHistory(
+          { id, workflowId: "wf", status: "success", startedAt: new Date().toISOString(), completedAt: new Date().toISOString() },
+          { unlessCanceled: true, unlessInterruptedWith: mark }
+        )
+      )
+    ]);
+    const failed = new Set(reconciled.map((run) => run.id));
+    for (const [index, id] of ids.entries()) {
+      const record = (await store.getExecutionHistory(id))!;
+      if (failed.has(id)) {
+        expect(written[index], id).toBe(false);
+        expect(record).toMatchObject({ status: "error", error: mark });
+      } else {
+        expect(written[index], id).toBe(true);
+        expect(record.status).toBe("success");
+      }
+    }
   });
 
   it("lists which of the given runs were canceled", async () => {

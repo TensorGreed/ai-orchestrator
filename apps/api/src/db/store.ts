@@ -1453,6 +1453,15 @@ export interface Store {
      * zombie worker whose claim was taken back writes nothing.
      */
     fence?: QueueClaimFence;
+    /**
+     * Phase 13.1 — cluster mode, a run's final write: also refused when the stored record is `error` with exactly
+     * this error, the mark the dead-executor reconcile leaves (DEAD_EXECUTOR_RUN_ERROR). The leader took the run from
+     * an instance it judged dead, so that instance's late result (success, error or canceled) never replaces it.
+     * Combined with the other guard: Postgres adds `AND NOT (execution_history.status = 'error' AND
+     * execution_history.error = $n)` to the `ON CONFLICT ... DO UPDATE` condition, so a reconcile and a final write
+     * that race resolve on the row lock: whichever commits first wins and the other changes nothing.
+     */
+    unlessInterruptedWith?: string;
   }): Promise<boolean>;
   listExecutionHistory(input: {
     page?: number;

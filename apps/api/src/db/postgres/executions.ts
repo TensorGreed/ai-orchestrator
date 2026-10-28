@@ -23,13 +23,21 @@ export async function saveExecutionHistory(ctx: PgContext, input: {
   nodeResultsJson?: unknown;
   customData?: unknown;
   error?: string;
-}, options?: { unlessFinished?: boolean; unlessCanceled?: boolean; fence?: QueueClaimFence }): Promise<boolean> {
-  const guard = options?.unlessFinished
-    ? `
-       WHERE NOT (execution_history.status IN ('success', 'error', 'canceled') OR (execution_history.status = 'partial' AND execution_history.completed_at IS NOT NULL))`
+}, options?: { unlessFinished?: boolean; unlessCanceled?: boolean; unlessInterruptedWith?: string; fence?: QueueClaimFence }): Promise<boolean> {
+  const condition = options?.unlessFinished
+    ? `NOT (execution_history.status IN ('success', 'error', 'canceled') OR (execution_history.status = 'partial' AND execution_history.completed_at IS NOT NULL))`
     : options?.unlessCanceled
+      ? `execution_history.status <> 'canceled' OR EXCLUDED.status = 'canceled'`
+      : "";
+  // Phase 13.1 — a run the dead-executor reconcile already failed keeps that record (see Store.saveExecutionHistory).
+  const interrupted = options?.unlessInterruptedWith !== undefined;
+  const notInterrupted = `NOT (execution_history.status = 'error' AND execution_history.error = $15)`;
+  const guard = interrupted
+    ? `
+       WHERE ${condition ? `(${condition}) AND ` : ""}${notInterrupted}`
+    : condition
       ? `
-       WHERE execution_history.status <> 'canceled' OR EXCLUDED.status = 'canceled'`
+       WHERE ${condition}`
       : "";
   const fence = options?.fence;
   const sql =
@@ -63,7 +71,8 @@ export async function saveExecutionHistory(ctx: PgContext, input: {
       input.outputJson === undefined ? null : JSON.stringify(input.outputJson),
       input.nodeResultsJson === undefined ? null : JSON.stringify(input.nodeResultsJson),
       input.customData === undefined ? null : JSON.stringify(input.customData),
-      input.error ?? null
+      input.error ?? null,
+      ...(interrupted ? [options.unlessInterruptedWith] : [])
   ];
   if (!fence) {
     const result = await ctx.pool.query(sql, params);
