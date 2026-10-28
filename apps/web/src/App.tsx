@@ -41,6 +41,9 @@ import {
   executeWorkflowStream,
   fetchAuthMe,
   fetchOidcLoginUrl,
+  isSsoMfaLanding,
+  SSO_MFA_CHALLENGE,
+  stripSsoLandingParams,
   ssoErrorMessage,
   fetchExecutionById,
   fetchExecutions,
@@ -1095,7 +1098,11 @@ function StudioApp() {
   const [authError, setAuthError] = useState<string | null>(null);
   const [loginEmail, setLoginEmail] = useState("");
   const [loginPassword, setLoginPassword] = useState("");
-  const [mfaChallengeId, setMfaChallengeId] = useState<string | null>(null);
+  // Phase 13.2 — an SSO sign-in that needs the local TOTP step lands here with ?sso_mfa=totp (the challenge itself is in
+  // an HttpOnly cookie), and goes straight to the verification code form.
+  const [mfaChallengeId, setMfaChallengeId] = useState<string | null>(() =>
+    typeof window !== "undefined" && isSsoMfaLanding(window.location.search) ? SSO_MFA_CHALLENGE : null
+  );
   const [mfaCode, setMfaCode] = useState("");
   // Phase 13.2 — set when the API has OIDC SSO on; the login card then offers "Sign in with SSO (OIDC)".
   const [oidcLoginUrl, setOidcLoginUrl] = useState<string | null>(null);
@@ -1106,13 +1113,10 @@ function StudioApp() {
     return code ? ssoErrorMessage(code) : null;
   });
   useEffect(() => {
-    if (!ssoError) return;
-    const params = new URLSearchParams(window.location.search);
-    if (!params.has("sso_error")) return;
-    params.delete("sso_error");
-    const query = params.toString();
-    window.history.replaceState(window.history.state, "", `${window.location.pathname}${query ? `?${query}` : ""}${window.location.hash}`);
-  }, [ssoError]);
+    const cleaned = stripSsoLandingParams(window.location.pathname, window.location.search, window.location.hash);
+    if (cleaned === null) return;
+    window.history.replaceState(window.history.state, "", cleaned);
+  }, []);
   const [showWelcome, setShowWelcome] = useState<boolean>(() => !isWelcomeDismissed());
   const [templateInitialCategory, setTemplateInitialCategory] = useState<string | undefined>(undefined);
   const [writeToolDialogOpen, setWriteToolDialogOpen] = useState(false);
