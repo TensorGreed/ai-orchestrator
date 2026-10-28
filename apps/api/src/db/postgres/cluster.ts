@@ -112,6 +112,20 @@ export async function releaseClusterRunOwner(ctx: PgContext, input: { executionI
 }
 
 /**
+ * The ids among `ids` that a live (pending or running) queue job executes, read from the execution id each job's
+ * payload carries (approval resumes included; see cluster-queue-guard.ts). The one place the reconcile asks the
+ * queue; once the queue table records the execution id itself, only this body changes.
+ */
+async function executionIdsOwnedByQueue(client: PoolClient, ids: string[]): Promise<Set<string>> {
+  const queued = await client.query<{ id: string; payload_json: string | null }>(
+    `SELECT id, payload_json FROM execution_queue
+      WHERE status IN ('pending', 'running') AND (id = ANY($1::text[]) OR payload_json LIKE ANY($2::text[]))`,
+    [ids, payloadExecutionIdPatterns(ids)]
+  );
+  return executionIdsHeldByQueue(ids, queued.rows.map((row) => ({ id: row.id, payloadJson: row.payload_json })));
+}
+
+/**
  * Fails the `running` history rows among `ids` with `error`, except runs a live queue job owns (keyed on the
  * execution id in the job's payload, see cluster-queue-guard.ts). Runs inside the caller's transaction.
  */
@@ -120,12 +134,7 @@ async function failRunningUnlessQueued(
   ids: string[],
   error: string
 ): Promise<{ rows: Array<{ id: string; workflow_id: string }> }> {
-  const queued = await client.query<{ id: string; payload_json: string | null }>(
-    `SELECT id, payload_json FROM execution_queue
-      WHERE status IN ('pending', 'running') AND (id = ANY($1::text[]) OR payload_json LIKE ANY($2::text[]))`,
-    [ids, payloadExecutionIdPatterns(ids)]
-  );
-  const held = executionIdsHeldByQueue(ids, queued.rows.map((row) => ({ id: row.id, payloadJson: row.payload_json })));
+  const held = await executionIdsOwnedByQueue(client, ids);
   const eligible = ids.filter((id) => !held.has(id));
   if (eligible.length === 0) return { rows: [] };
   return await client.query<{ id: string; workflow_id: string }>(

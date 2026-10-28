@@ -9358,7 +9358,7 @@ export class SqliteStore implements Store {
           ORDER BY o.execution_id`,
         [input.selfId, cutoff, cutoff]
       );
-      const queueHeld = this.executionIdsHeldByLiveQueueJobs(dead.map((owner) => toString(owner.execution_id)));
+      const queueHeld = this.executionIdsOwnedByQueue(dead.map((owner) => toString(owner.execution_id)));
       const completedAt = new Date().toISOString();
       const failed: Array<{ id: string; workflowId: string; instanceId: string }> = [];
       for (const owner of dead) {
@@ -9387,7 +9387,7 @@ export class SqliteStore implements Store {
   async failRunsOwnedBy(input: { instanceId: string; error: string }): Promise<Array<{ id: string; workflowId: string; instanceId: string }>> {
     return this.transaction(() => {
       const owned = this.queryAll<{ execution_id: unknown }>(`SELECT execution_id FROM cluster_run_owners WHERE instance_id = ? ORDER BY execution_id`, [input.instanceId]);
-      const queueHeld = this.executionIdsHeldByLiveQueueJobs(owned.map((owner) => toString(owner.execution_id)));
+      const queueHeld = this.executionIdsOwnedByQueue(owned.map((owner) => toString(owner.execution_id)));
       const completedAt = new Date().toISOString();
       const failed: Array<{ id: string; workflowId: string; instanceId: string }> = [];
       for (const owner of owned) {
@@ -9413,8 +9413,12 @@ export class SqliteStore implements Store {
     });
   }
 
-  /** The ids a live queue job runs (see cluster-queue-guard.ts); one process, so every live job is read. */
-  private executionIdsHeldByLiveQueueJobs(ids: string[]): Set<string> {
+  /**
+   * The ids a live queue job executes, from the execution id its payload carries (see cluster-queue-guard.ts); one
+   * process, so every live job is read. The one place the reconcile asks the queue: only this body changes once the
+   * queue table records the execution id itself.
+   */
+  private executionIdsOwnedByQueue(ids: string[]): Set<string> {
     if (ids.length === 0) return new Set();
     const rows = this.queryAll<{ id: unknown; payload_json: unknown }>(`SELECT id, payload_json FROM execution_queue WHERE status IN ('pending', 'running')`);
     return executionIdsHeldByQueue(
