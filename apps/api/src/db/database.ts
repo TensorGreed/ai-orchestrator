@@ -5032,7 +5032,7 @@ export class SqliteStore implements Store {
         : "";
     // Phase 13.1 — a run the dead-executor reconcile already failed keeps that record (see Store.saveExecutionHistory).
     const interrupted = options?.unlessInterruptedWith !== undefined;
-    const fence = `NOT (execution_history.status = 'error' AND execution_history.error = ?)`;
+    const fence = `NOT (execution_history.status = 'error' AND (execution_history.error IS NULL OR execution_history.error = ?))`;
     const guard = interrupted
       ? `
         WHERE ${condition ? `(${condition}) AND ` : ""}${fence}`

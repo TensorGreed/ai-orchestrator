@@ -31,7 +31,7 @@ export async function saveExecutionHistory(ctx: PgContext, input: {
       : "";
   // Phase 13.1 — a run the dead-executor reconcile already failed keeps that record (see Store.saveExecutionHistory).
   const interrupted = options?.unlessInterruptedWith !== undefined;
-  const notInterrupted = `NOT (execution_history.status = 'error' AND execution_history.error = $15)`;
+  const notInterrupted = `NOT (execution_history.status = 'error' AND (execution_history.error IS NULL OR execution_history.error = $15))`;
   const guard = interrupted
     ? `
        WHERE ${condition ? `(${condition}) AND ` : ""}${notInterrupted}`

@@ -211,17 +211,23 @@ describeStoreContract("store contract: cluster registry", (ctx) => {
       await store.claimClusterRunOwner({ executionId: id, instanceId: "racer" });
     }
     await new Promise((resolve) => setTimeout(resolve, 30));
-    const [reconciled, written] = await Promise.all([
-      store.reconcileDeadExecutorRuns({ error: mark, deadAfterMs: 20, selfId: "leader" }),
-      Promise.all(
-        ids.map(async (id) =>
-          await store.saveExecutionHistory(
-            { id, workflowId: "wf", status: "success", startedAt: new Date().toISOString(), completedAt: new Date().toISOString() },
-            { unlessCanceled: true, unlessInterruptedWith: mark }
-          )
-        )
-      )
-    ]);
+    // Both sides wait at a barrier and start in the same tick, so the reconcile and the 24 writes collide.
+    let release: () => void = () => undefined;
+    const barrier = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const reconciling = barrier.then(() => store.reconcileDeadExecutorRuns({ error: mark, deadAfterMs: 20, selfId: "leader" }));
+    const writing = Promise.all(
+      ids.map(async (id) => {
+        await barrier;
+        return await store.saveExecutionHistory(
+          { id, workflowId: "wf", status: "success", startedAt: new Date().toISOString(), completedAt: new Date().toISOString() },
+          { unlessCanceled: true, unlessInterruptedWith: mark }
+        );
+      })
+    );
+    release();
+    const [reconciled, written] = await Promise.all([reconciling, writing]);
     const failed = new Set(reconciled.map((run) => run.id));
     for (const [index, id] of ids.entries()) {
       const record = (await store.getExecutionHistory(id))!;
@@ -233,6 +239,20 @@ describeStoreContract("store contract: cluster registry", (ctx) => {
         expect(record.status).toBe("success");
       }
     }
+  });
+
+  it("an error record with no message is final too: the fenced write is refused", async () => {
+    const store = ctx.store();
+    const mark = "interrupted: null";
+    await runningRun(store, "n-null");
+    await store.saveExecutionHistory({ id: "n-null", workflowId: "wf", status: "error", startedAt: new Date().toISOString(), completedAt: new Date().toISOString() });
+    expect(
+      await store.saveExecutionHistory(
+        { id: "n-null", workflowId: "wf", status: "success", startedAt: new Date().toISOString(), completedAt: new Date().toISOString() },
+        { unlessInterruptedWith: mark }
+      )
+    ).toBe(false);
+    expect((await store.getExecutionHistory("n-null"))!.status).toBe("error");
   });
 
   it("lists which of the given runs were canceled", async () => {
