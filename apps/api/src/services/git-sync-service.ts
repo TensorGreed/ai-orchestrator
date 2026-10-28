@@ -21,8 +21,16 @@ export interface GitSyncServiceOptions {
 /** Phase 13.1 — the answer when another instance holds the git sync lock. */
 export const GIT_SYNC_BUSY_ERROR = "Another instance is running a git sync; try again shortly.";
 
+/**
+ * Phase 13.1 — how long a pull or push waits for another instance's to finish before answering busy. A request holds
+ * a pooled connection while it waits, so this stays short; a sync is retried by the person who asked for it.
+ */
+export const GIT_SYNC_LOCK_WAIT_MS = 10_000;
+
 export interface GitSyncResult {
   ok: boolean;
+  /** Phase 13.1 — another instance held the git sync lock past the wait (answered 409). */
+  busy?: true;
   branch?: string;
   commit?: string;
   error?: string;
@@ -81,7 +89,7 @@ export class GitSyncService {
   private async alone(work: () => Promise<GitSyncResult>): Promise<GitSyncResult> {
     if (!this.exclusive) return await work();
     const outcome = await this.exclusive(work);
-    return outcome.acquired ? outcome.value : { ok: false, error: GIT_SYNC_BUSY_ERROR };
+    return outcome.acquired ? outcome.value : { ok: false, busy: true, error: GIT_SYNC_BUSY_ERROR };
   }
 
   async getConfig(): Promise<GitSyncConfig | null> {

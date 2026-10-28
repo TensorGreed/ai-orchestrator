@@ -39,8 +39,8 @@ describe("git sync cluster lock", () => {
       asked += 1;
       return { acquired: false };
     });
-    expect(await sync.push({})).toEqual({ ok: false, error: GIT_SYNC_BUSY_ERROR });
-    expect(await sync.pull({})).toEqual({ ok: false, error: GIT_SYNC_BUSY_ERROR });
+    expect(await sync.push({})).toEqual({ ok: false, busy: true, error: GIT_SYNC_BUSY_ERROR });
+    expect(await sync.pull({})).toEqual({ ok: false, busy: true, error: GIT_SYNC_BUSY_ERROR });
     expect(asked).toBe(2);
     expect(fs.existsSync(path.join(tempDir, "sync"))).toBe(false);
   });

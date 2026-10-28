@@ -155,12 +155,12 @@ import {
   type ProjectRole
 } from "./services/rbac-service";
 import { ExternalSecretsService } from "./services/external-secrets-service";
-import { GitSyncService } from "./services/git-sync-service";
+import { GIT_SYNC_LOCK_WAIT_MS, GitSyncService } from "./services/git-sync-service.js";
 import { LeaderElectionService, NEVER_LEAD } from "./services/leader-election-service";
 import { reconcileInterruptedRuns } from "./services/run-reconcile-service.js";
 import type { ClusterBus } from "./services/cluster-bus.js";
 import { LocalClusterBus } from "./services/cluster-bus-local.js";
-import { startClusterSignals, type ClusterSignals } from "./services/cluster-signals.js";
+import { clusterCancelReason, startClusterSignals, type ClusterSignals } from "./services/cluster-signals.js";
 import { DEAD_EXECUTOR_RUN_ERROR, InstanceRegistry, RunOwnerTracker, SelfFencedAbortError, type ClusterWarning } from "./services/instance-registry.js";
 import { ADVISORY_LOCK_CLASS_AUDIT_EXPORT, ADVISORY_LOCK_CLASS_GIT_SYNC } from "./db/postgres/cluster.js";
 import { MIGRATIONS } from "./db/migrations.js";
@@ -169,7 +169,7 @@ import { TracingService, parseKeyValueList, parseTraceparent } from "./services/
 import { OtlpMetricsExporter } from "./services/otlp-metrics-exporter";
 import { UsageService } from "./services/usage-service";
 import { BudgetService } from "./services/budget-service";
-import { AuditExportBusyError, AuditExportService } from "./services/audit-export-service";
+import { AuditExportBusyError, AuditExportService } from "./services/audit-export-service.js";
 import { McpProbeService, McpProbeSkippedError, serverConfigFromRecord } from "./services/mcp-probe-service";
 import { McpElicitationService } from "./services/mcp-elicitation-service.js";
 import { registerMcpClientFeatureRoutes } from "./mcp-client-features-routes.js";
@@ -1712,7 +1712,11 @@ export async function createApp(
   };
   const clusterBus: ClusterBus =
     clusterMode && clusterStore ? clusterStore.clusterBus({ instanceId: clusterInstanceId, logger: clusterLogger }) : new LocalClusterBus(clusterInstanceId, clusterLogger);
-  await clusterBus.start();
+  // Opened when the app is ready (before the registry and signals, registered later), so a createApp that fails
+  // part-way leaves no listener connection behind.
+  app.addHook("onReady", async () => {
+    await clusterBus.start();
+  });
   app.addHook("onClose", async () => {
     await clusterBus.close();
   });
@@ -3460,7 +3464,7 @@ export async function createApp(
     ...(clusterMode && clusterStore
       ? {
           exclusive: async <T>(work: () => Promise<T>) =>
-            await clusterStore.withClusterLock(ADVISORY_LOCK_CLASS_GIT_SYNC, "git-sync", { waitMs: config.GIT_COMMAND_TIMEOUT_MS }, work)
+            await clusterStore.withClusterLock(ADVISORY_LOCK_CLASS_GIT_SYNC, "git-sync", { waitMs: GIT_SYNC_LOCK_WAIT_MS }, work)
         }
       : {})
   });
@@ -3903,6 +3907,10 @@ export async function createApp(
   // reports several instances leading at once). In cluster mode the leader also fails the runs of instances that
   // stopped beating, and every instance acts on the bus's control messages.
   let clusterWarnings: ClusterWarning[] = [];
+  const CLUSTER_WARNING_HEALTH_TEXT: Record<ClusterWarning["code"], string> = {
+    multiple_leaders:
+      "Several instances run schedules and triggers with HA_ENABLED=false, so each fires them. Set HA_ENABLED=true on every instance; details in GET /api/cluster."
+  };
   const instanceRegistry = clusterStore
     ? new InstanceRegistry({
         store,
@@ -5350,7 +5358,8 @@ export async function createApp(
       uptime: Math.floor(process.uptime()),
       sloHealthy: slo.healthy,
       // Phase 13.1 — only when there is one (several instances leading at once, from the registry).
-      ...(clusterWarnings.length > 0 ? { warnings: clusterWarnings.map((warning) => ({ code: warning.code, message: warning.message })) } : {})
+      // Unauthenticated: the code and a pointer only (instance counts and ids are in GET /api/cluster, admin).
+      ...(clusterWarnings.length > 0 ? { warnings: clusterWarnings.map((warning) => ({ code: warning.code, message: CLUSTER_WARNING_HEALTH_TEXT[warning.code] })) } : {})
     };
   });
 
@@ -7820,7 +7829,8 @@ export async function createApp(
           error: result.error
         }
       });
-      if (!result.ok) reply.code(400);
+      // Phase 13.1 — another instance is syncing (cluster mode): a conflict to retry, not a bad request.
+      if (!result.ok) reply.code(result.busy ? 409 : 400);
       return result;
     } catch (err) {
       reply.code(400);
@@ -7855,7 +7865,7 @@ export async function createApp(
           error: result.error
         }
       });
-      if (!result.ok) reply.code(400);
+      if (!result.ok) reply.code(result.busy ? 409 : 400);
       return result;
     } catch (err) {
       reply.code(400);
@@ -10038,7 +10048,8 @@ export async function createApp(
     // record is stored, so the instance running it stops it on this message, or at its next cancel check if the
     // message is lost.
     const abortSignalled = clusterMode && !active;
-    if (abortSignalled) announce({ t: "cancel", id: request.params.id, reason });
+    // The reason is cut and cleaned for the bus; the run's stored record keeps the full one.
+    if (abortSignalled) announce({ t: "cancel", id: request.params.id, reason: clusterCancelReason(reason) });
 
     await approvalService.auditCanceledRequests(canceledRequestIds, user);
     await auditRunAction(

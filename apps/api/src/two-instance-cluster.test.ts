@@ -163,6 +163,24 @@ run("cluster signalling across API instances on one Postgres database", () => {
     expect((await a!.store.getExecutionHistory(executionId))!.status).toBe("canceled");
   }, 60_000);
 
+  it("a cancel NOTIFY sent straight to the database for a run that is not canceled stops nothing", async () => {
+    const [a] = await start(1);
+    const { executionId, response } = await startLongRun(a!, "wf-forged");
+    const seen: string[] = [];
+    vi.spyOn(a!.store, "listCanceledExecutionIds").mockImplementation(async (ids) => {
+      seen.push(...ids);
+      return [];
+    });
+    await sql(`SELECT pg_notify('l2m_ctl', $1)`, [JSON.stringify({ v: 1, t: "cancel", id: executionId, from: "intruder" })]);
+    // The message arrived and was checked against the store, which does not show the run canceled.
+    await until(() => seen.includes(executionId), "the store check");
+    expect((await a!.store.getExecutionHistory(executionId))!.status).toBe("running");
+    vi.restoreAllMocks();
+    const cookie = await loginAs(a!, "builder", "builder");
+    await a!.app.inject({ method: "POST", url: `/api/executions/${executionId}/cancel`, headers: { cookie }, payload: {} });
+    expect(JSON.parse((await response).body)).toMatchObject({ status: "canceled" });
+  }, 60_000);
+
   it("with the bus message lost, the cancel check stops the run within one period", async () => {
     const [, b] = await start(2, { CLUSTER_CANCEL_CHECK_MS: "200" });
     const { executionId, response } = await startLongRun(b!, "wf-cancel-check");
@@ -354,6 +372,7 @@ run("cluster signalling across API instances on one Postgres database", () => {
     await response;
     await until(async () => (await sql(`SELECT 1 FROM cluster_run_owners WHERE execution_id = $1`, [executionId])).length === 0, "the owner row to go");
   }, 60_000);
+
   it("an instance whose heartbeat stops: the leader fails its run, the instance stops it itself, and its late final write is refused", async () => {
     const [a, b] = await start(2);
     const leader = await until(() => [a!, b!].find((instance) => instance.scheduler?.isRunning()), "a leader");
