@@ -175,6 +175,9 @@ export const workflowEdgeSchema = z.object({
   label: z.string().optional()
 });
 
+/** Phase 13.1 — a queue worker pool name: a letter or digit, then letters, digits, `_` or `-` (at most 63). */
+export const QUEUE_POOL_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$/;
+
 export const workflowSettingsSchema = z
   .object({
     errorWorkflowId: z.string().min(1).optional(),
@@ -182,7 +185,7 @@ export const workflowSettingsSchema = z
     /** Phase 13.1 — the worker pool that runs this workflow's queued jobs (cluster mode); unset is `default`. */
     executionPool: z
       .string()
-      .regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$/, "executionPool must be letters, digits, _ or - (at most 63, starting with a letter or digit)")
+      .regex(QUEUE_POOL_NAME_PATTERN, "executionPool must be letters, digits, _ or - (at most 63, starting with a letter or digit)")
       .optional(),
     saveDataSuccessExecution: z.enum(["all", "none"]).optional(),
     saveDataErrorExecution: z.enum(["all", "none"]).optional(),

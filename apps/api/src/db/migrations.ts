@@ -29,6 +29,7 @@ export const ONE_PENDING_APPROVAL_INDEX = "idx_approval_requests_one_pending";
 export const QUEUE_CLAIM_INDEX = "idx_execution_queue_claim";
 /** v43: running jobs by heartbeat, for the reaper (both stores). */
 export const QUEUE_RUNNING_HEARTBEAT_INDEX = "idx_execution_queue_running_hb";
+/** v43: pending and running jobs by the execution they drive (both stores). */
 export const QUEUE_ACTIVE_EXECUTION_INDEX = "idx_execution_queue_active_execution";
 
 export const INSERTION_SEQ_TABLES: ReadonlyArray<{ table: string; backfillOrder: string }> = [
@@ -2022,32 +2023,37 @@ export const MIGRATIONS: Migration[] = [
   },
   {
     version: 43,
-    description: "Phase 13.1 — queue leases: claim owner, fencing token, heartbeat, pool and lost count; the run's executor",
+    description: "Phase 13.1 — queue leases: claim owner, fencing token, heartbeat, pool, lost count and a resume's progress",
     // Written only by consumers in cluster mode (Postgres with HA_ENABLED=true): a claim records who holds the job and
     // a fresh token, the holder renews heartbeat_at, and the leader's reaper takes back a job whose heartbeat is older
-    // than the lease. Completions and the run's history writes are fenced on the token. Outside cluster mode these
-    // columns stay NULL (pool 'default', lost_count 0) and the queue runs exactly as before. All additive: an older
-    // binary lists its columns explicitly and keeps working. SQLite's embedded migrate() adds the same.
-    // execution_id is the run a job drives (an approval resume's queue id is not its execution id), written at enqueue;
-    // rows from before stay NULL and are matched by id instead.
+    // than the lease. Completions, the run's history, its paused state and its approval request are fenced on the
+    // token; nodes_completed counts the nodes an approval resume completed under its claims (its history still reads
+    // as the pause), so the reaper can apply the worker-loss policy to it. Outside cluster mode these columns stay
+    // NULL / their defaults and the queue runs exactly as before. All additive: an older binary lists its columns
+    // explicitly and keeps working. SQLite's embedded migrate() adds the same.
+    // execution_id is the run a job drives (an approval resume's queue id is `<executionId>:…`), written at enqueue and
+    // backfilled here for active rows; a row an older binary enqueues later stays NULL and is matched by id instead.
     up: `
       ALTER TABLE execution_queue ADD COLUMN IF NOT EXISTS execution_id TEXT;
-      CREATE INDEX IF NOT EXISTS ${QUEUE_ACTIVE_EXECUTION_INDEX} ON execution_queue (execution_id);
+      UPDATE execution_queue SET execution_id = split_part(id, ':', 1)
+       WHERE execution_id IS NULL AND status IN ('pending', 'running');
+      CREATE INDEX IF NOT EXISTS ${QUEUE_ACTIVE_EXECUTION_INDEX}
+        ON execution_queue (execution_id) WHERE status = 'pending' OR status = 'running';
       ALTER TABLE execution_queue ADD COLUMN IF NOT EXISTS claimed_by TEXT;
       ALTER TABLE execution_queue ADD COLUMN IF NOT EXISTS claim_token TEXT;
       ALTER TABLE execution_queue ADD COLUMN IF NOT EXISTS heartbeat_at TIMESTAMPTZ;
       ALTER TABLE execution_queue ADD COLUMN IF NOT EXISTS pool TEXT NOT NULL DEFAULT 'default';
       ALTER TABLE execution_queue ADD COLUMN IF NOT EXISTS lost_count INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE execution_queue ADD COLUMN IF NOT EXISTS nodes_completed INTEGER NOT NULL DEFAULT 0;
       CREATE INDEX IF NOT EXISTS ${QUEUE_CLAIM_INDEX}
-        ON execution_queue (pool, priority DESC, scheduled_at, created_at) WHERE status = 'pending';
+        ON execution_queue (pool, priority DESC, scheduled_at, created_at, id) WHERE status = 'pending';
       CREATE INDEX IF NOT EXISTS ${QUEUE_RUNNING_HEARTBEAT_INDEX}
         ON execution_queue (heartbeat_at) WHERE status = 'running';
-      ALTER TABLE execution_history ADD COLUMN IF NOT EXISTS executor_id TEXT;
     `,
     down: `
-      ALTER TABLE execution_history DROP COLUMN IF EXISTS executor_id;
       DROP INDEX IF EXISTS ${QUEUE_RUNNING_HEARTBEAT_INDEX};
       DROP INDEX IF EXISTS ${QUEUE_CLAIM_INDEX};
+      ALTER TABLE execution_queue DROP COLUMN IF EXISTS nodes_completed;
       ALTER TABLE execution_queue DROP COLUMN IF EXISTS lost_count;
       ALTER TABLE execution_queue DROP COLUMN IF EXISTS pool;
       ALTER TABLE execution_queue DROP COLUMN IF EXISTS heartbeat_at;

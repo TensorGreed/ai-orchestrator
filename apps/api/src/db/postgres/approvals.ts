@@ -13,8 +13,9 @@ import type {
   PendingApprovalInfo
 } from "@ai-orchestrator/shared";
 import type { ApprovalReadScope, ApprovalRequestInsert, ApprovalRequestRecord } from "../database.js";
-import type { ApprovalDecisionInput, Store } from "../store.js";
-import { claimExecutionForResumeOn, releaseExecutionClaimOn } from "./executions.js";
+import type { ApprovalDecisionInput, QueueClaimFence, Store } from "../store.js";
+import { QueueClaimLostError } from "../queue-leases.js";
+import { claimExecutionForResumeOn, releaseExecutionClaimOn, withQueueClaim } from "./executions.js";
 import { parseJsonSafe, toNum, toStr } from "./helpers.js";
 import type { PgContext } from "./context.js";
 
@@ -95,9 +96,9 @@ function mapApprovalRequestRow(row: ApprovalRequestRow): ApprovalRequestRecord {
   };
 }
 
-export async function insertApprovalRequest(ctx: PgContext, input: ApprovalRequestInsert): Promise<ApprovalRequestRecord> {
+export async function insertApprovalRequest(ctx: PgContext, input: ApprovalRequestInsert, options: { fence?: QueueClaimFence } = {}): Promise<ApprovalRequestRecord> {
   const now = input.createdAt ?? new Date().toISOString();
-  const rows = await ctx.query<ApprovalRequestRow>(
+  const insert = async (db: Queryable) => (await db.query<ApprovalRequestRow>(
     `INSERT INTO approval_requests (
        id, execution_id, workflow_id, workflow_name, project_id, node_id, node_type, kind, status, message,
        spec_json, path_json, details_json, requested_by_user_id, requested_by, timeout_minutes, expires_at,
@@ -126,8 +127,12 @@ export async function insertApprovalRequest(ctx: PgContext, input: ApprovalReque
       now,
       now
     ]
-  );
-  return mapApprovalRequestRow(rows[0]!);
+  )).rows[0]!;
+  if (!options.fence) return mapApprovalRequestRow(await insert(ctx.pool));
+  // Phase 13.1 — a queued run in cluster mode asks for approval only while its claim still holds the queue item.
+  const row = await withQueueClaim(ctx, options.fence, insert);
+  if (!row) throw new QueueClaimLostError("an approval request");
+  return mapApprovalRequestRow(row);
 }
 
 export async function getApprovalRequest(ctx: PgContext, id: string): Promise<ApprovalRequestRecord | null> {

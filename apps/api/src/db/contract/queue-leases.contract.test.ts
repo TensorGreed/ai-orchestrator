@@ -6,7 +6,7 @@
 import { expect, it } from "vitest";
 import { describeStoreContract } from "../../test-support/test-store.js";
 import type { Store } from "../store.js";
-import { WORKER_LOST_ERROR, WORKER_LOST_INTERRUPTED_ERROR, WORKER_SHUTDOWN_INTERRUPTED_ERROR } from "../queue-leases.js";
+import { QueueClaimLostError, WORKER_LOST_ERROR, WORKER_LOST_INTERRUPTED_ERROR, WORKER_SHUTDOWN_INTERRUPTED_ERROR } from "../queue-leases.js";
 
 const past = (ms: number) => new Date(Date.now() - ms).toISOString();
 
@@ -135,15 +135,17 @@ describeStoreContract("store contract: leased queue claims", (ctx) => {
     expect(await store.getQueueDepth()).toEqual({ pending: 1, running: 1, dlq: 0 });
   });
 
-  it("the legacy stuck rule skips a claim with a recent heartbeat", async () => {
+  it("the legacy stuck rule leaves every leased claim to the reaper, however old its heartbeat", async () => {
     const store = ctx.store();
     await store.enqueueExecution({ id: "live", workflowId: "wf", payload: {}, scheduledAt: past(1_000) });
-    const [live] = await store.claimQueueItems({ limit: 1, owner: "w1", pools: ["default"] });
+    await store.claimQueueItems({ limit: 1, owner: "w1", pools: ["default"] });
+    await store.enqueueExecution({ id: "plain", workflowId: "wf", payload: {}, scheduledAt: past(1_000) });
+    await store.dequeueNext(1);
     await new Promise((resolve) => setTimeout(resolve, 30));
-    await store.renewQueueLeases({ owner: "w1", claimTokens: [live!.claimToken] });
-    // Started more than 10 ms ago, but its heartbeat is newer than that.
-    expect(await store.requeueStuckItems(10, [], 0)).toBe(0);
-    expect(await store.getQueueDepth()).toEqual({ pending: 0, running: 1, dlq: 0 });
+    // Both started (and the lease last renewed) more than 10 ms ago: only the unleased claim is the legacy rule's.
+    expect(await store.requeueStuckItems(10, [], 0)).toBe(1);
+    expect(await store.getQueueDepth()).toEqual({ pending: 1, running: 1, dlq: 0 });
+    expect(await store.hasActiveQueueItem("plain")).toBe(true);
   });
 
   it("a shutdown release gives the job back without counting an attempt, unless a node completed", async () => {
@@ -256,5 +258,115 @@ describeStoreContract("store contract: leased queue claims", (ctx) => {
       })
     );
     expect(claimed.sort()).toEqual([...ids].sort());
+  });
+
+  /** A paused run whose decision was taken: state `resuming`, history still reading as the pause. */
+  async function decidedPause(store: Store, executionId: string): Promise<void> {
+    await history(store, executionId, "waiting_approval", [{ nodeId: "draft", status: "success" }, { nodeId: "gate", status: "waiting_approval" }]);
+    await store.saveWorkflowExecutionState({
+      id: executionId,
+      workflowId: "wf",
+      status: "waiting_approval",
+      waitingNodeId: "gate",
+      startedAt: past(1_000),
+      state: { paused: true }
+    });
+    expect(await store.claimWorkflowExecutionForResume(executionId)).toBe(true);
+  }
+
+  const resumePayload = (executionId: string) => ({ executionId, resume: { executionId, requestId: "req", decision: "approve" } });
+
+  it("a lost approval resume with no node completed since it started is re-queued, its paused state intact", async () => {
+    const store = ctx.store();
+    await decidedPause(store, "run-r");
+    await store.enqueueExecution({ id: "run-r:req:1", workflowId: "wf", payload: resumePayload("run-r"), scheduledAt: past(1_000) });
+    await store.claimQueueItems({ limit: 1, owner: "w1", pools: ["default"] });
+    const reaped = await until(() => store.reapExpiredQueueLeases({ leaseMs: 1 }), "the reap");
+    expect(reaped.map((outcome) => [outcome.id, outcome.decision, outcome.attempts])).toEqual([["run-r:req:1", "requeue", 1]]);
+    expect((await store.getWorkflowExecutionState("run-r"))?.status).toBe("resuming");
+    expect(await store.getExecutionHistory("run-r")).toMatchObject({ status: "waiting_approval" });
+    expect(await store.listDlqItems()).toEqual([]);
+  });
+
+  it("a lost approval resume that completed a node is interrupted and dead-lettered, and its paused state is gone", async () => {
+    const store = ctx.store();
+    await decidedPause(store, "run-s");
+    await store.enqueueExecution({ id: "run-s:req:1", workflowId: "wf", payload: resumePayload("run-s"), scheduledAt: past(1_000) });
+    const [claim] = await store.claimQueueItems({ limit: 1, owner: "w1", pools: ["default"] });
+    const fence = { queueItemId: claim!.id, claimToken: claim!.claimToken };
+    expect(await store.recordQueueJobProgress({ ...fence, claimToken: "stale" })).toBe(false);
+    expect(await store.recordQueueJobProgress(fence)).toBe(true);
+    const reaped = await until(() => store.reapExpiredQueueLeases({ leaseMs: 1 }), "the reap");
+    expect(reaped.map((outcome) => [outcome.id, outcome.decision])).toEqual([["run-s:req:1", "interrupt"]]);
+    expect(await store.recordQueueJobProgress(fence)).toBe(false);
+    expect(await store.getExecutionHistory("run-s")).toMatchObject({ status: "error", error: WORKER_LOST_INTERRUPTED_ERROR });
+    // Approval recovery lists only runs in `resuming`: this one has one way forward, the dead-letter entry.
+    expect(await store.getWorkflowExecutionState("run-s")).toBeNull();
+    expect((await store.listDlqItems()).map((item) => [item.originalId, item.finalError])).toEqual([["run-s:req:1", WORKER_LOST_INTERRUPTED_ERROR]]);
+  });
+
+  it("a lost approval resume out of attempts is dead-lettered as worker lost; one whose run moved on is finished", async () => {
+    const store = ctx.store();
+    await decidedPause(store, "run-t");
+    await store.enqueueExecution({ id: "run-t:req:1", workflowId: "wf", payload: resumePayload("run-t"), scheduledAt: past(1_000), maxAttempts: 1 });
+    await decidedPause(store, "run-u");
+    await store.enqueueExecution({ id: "run-u:req:1", workflowId: "wf2", payload: resumePayload("run-u"), scheduledAt: past(1_000) });
+    await store.claimQueueItems({ limit: 2, owner: "w1", pools: ["default"] });
+    // run-u paused again at a later gate before its worker was lost.
+    await store.releaseWorkflowExecutionClaim("run-u");
+    const reaped = await until(() => store.reapExpiredQueueLeases({ leaseMs: 1 }), "the reap");
+    expect(reaped.map((outcome) => [outcome.id, outcome.decision]).sort()).toEqual([
+      ["run-t:req:1", "dead_letter"],
+      ["run-u:req:1", "finished"]
+    ]);
+    expect(await store.getExecutionHistory("run-t")).toMatchObject({ status: "error", error: WORKER_LOST_ERROR });
+    expect(await store.getWorkflowExecutionState("run-t")).toBeNull();
+    expect((await store.getWorkflowExecutionState("run-u"))?.status).toBe("waiting_approval");
+  });
+
+  it("a shutdown release gives an approval resume back with its paused state intact, even after a node completed", async () => {
+    const store = ctx.store();
+    await decidedPause(store, "run-v");
+    await store.enqueueExecution({ id: "run-v:req:1", workflowId: "wf", payload: resumePayload("run-v"), scheduledAt: past(1_000) });
+    const [claim] = await store.claimQueueItems({ limit: 1, owner: "w1", pools: ["default"] });
+    await store.recordQueueJobProgress({ queueItemId: claim!.id, claimToken: claim!.claimToken });
+    expect(await store.releaseQueueItem({ id: claim!.id, claimToken: claim!.claimToken })).toMatchObject({ decision: "requeue", attempts: 0 });
+    expect((await store.getWorkflowExecutionState("run-v"))?.status).toBe("resuming");
+    expect(await store.getExecutionHistory("run-v")).toMatchObject({ status: "waiting_approval" });
+    // An unleased claim (one instance) the same way.
+    const [again] = await store.dequeueNext(1);
+    expect(await store.releaseQueueItem({ id: again!.id, claimToken: null })).toMatchObject({ decision: "requeue" });
+    expect((await store.getWorkflowExecutionState("run-v"))?.status).toBe("resuming");
+  });
+
+  it("a zombie's late pause leaves no paused state and no approval request; the holder's pause lands", async () => {
+    const store = ctx.store();
+    await store.enqueueExecution({ id: "z", workflowId: "wf", payload: { executionId: "z" }, scheduledAt: past(1_000) });
+    const [stale] = await store.claimQueueItems({ limit: 1, owner: "w1", pools: ["default"] });
+    await until(() => store.reapExpiredQueueLeases({ leaseMs: 1 }), "the reap");
+    const [current] = await store.claimQueueItems({ limit: 1, owner: "w2", pools: ["default"] });
+    const pause = { id: "z", workflowId: "wf", status: "waiting_approval", waitingNodeId: "gate", startedAt: past(500), state: { paused: true } };
+    const request = (id: string) => ({
+      id,
+      executionId: "z",
+      workflowId: "wf",
+      projectId: "default",
+      nodeId: "gate",
+      kind: "human_approval" as const,
+      spec: { kind: "human_approval", approverRoles: [], approverUsers: [] } as never
+    });
+    const staleFence = { queueItemId: "z", claimToken: stale!.claimToken };
+    expect(await store.isQueueClaimHeld(staleFence)).toBe(false);
+    expect(await store.saveWorkflowExecutionState(pause, { fence: staleFence })).toBe(false);
+    await expect(store.insertApprovalRequest(request("apr-zombie"), { fence: staleFence })).rejects.toBeInstanceOf(QueueClaimLostError);
+    expect(await store.getWorkflowExecutionState("z")).toBeNull();
+    expect(await store.listApprovalRequestsForExecution("z")).toEqual([]);
+
+    const fence = { queueItemId: "z", claimToken: current!.claimToken };
+    expect(await store.isQueueClaimHeld(fence)).toBe(true);
+    expect(await store.saveWorkflowExecutionState(pause, { fence })).toBe(true);
+    expect(await store.insertApprovalRequest(request("apr-holder"), { fence })).toMatchObject({ id: "apr-holder", status: "pending" });
+    // Unfenced (one instance) as before.
+    expect(await store.saveWorkflowExecutionState({ ...pause, id: "plain" })).toBe(true);
   });
 });

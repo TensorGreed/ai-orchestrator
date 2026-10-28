@@ -4,7 +4,7 @@
  */
 import { randomUUID } from "node:crypto";
 import { queuedRunTimeoutMs, STUCK_JOB_MARGIN_MS } from "../queue-timeouts.js";
-import type { QueueClaimedItem, Store } from "../store.js";
+import type { QueueClaimedItem, QueueClaimFence, Store } from "../store.js";
 import { toNum, toStr } from "./helpers.js";
 import type { PgContext } from "./context.js";
 import { clampLimit, LIMIT_MAX } from "../store-limits.js";
@@ -217,7 +217,7 @@ export async function requeueStuckItems(ctx: PgContext, stuckAfterMs = 600_000, 
   const candidates = await ctx.pool.query(
     `SELECT id, started_at, payload_json FROM execution_queue
        WHERE status = 'running' AND started_at <= $1 AND NOT (id = ANY($2::text[]))
-         AND (heartbeat_at IS NULL OR heartbeat_at <= $1)`,
+         AND heartbeat_at IS NULL`,
     [stuckBefore, excludeIds]
   );
   const ids = candidates.rows
@@ -230,7 +230,7 @@ export async function requeueStuckItems(ctx: PgContext, stuckAfterMs = 600_000, 
   if (ids.length === 0) return 0;
   const result = await ctx.pool.query(
     `UPDATE execution_queue SET status = 'pending', started_at = NULL, updated_at = $1, claimed_by = NULL, claim_token = NULL, heartbeat_at = NULL
-       WHERE status = 'running' AND id = ANY($2::text[]) AND started_at <= $3 AND (heartbeat_at IS NULL OR heartbeat_at <= $3)`,
+       WHERE status = 'running' AND id = ANY($2::text[]) AND started_at <= $3 AND heartbeat_at IS NULL`,
     [new Date(nowMs).toISOString(), ids, stuckBefore]
   );
   return result.rowCount ?? 0;
@@ -309,7 +309,7 @@ export async function listDlqItems(ctx: PgContext, limit = 50, workflowIds?: str
   }));
 }
 
-/** Whether `id`, or a job keyed `<id>:…`, is pending or running. LIKE is case-insensitive on SQLite, so ILIKE here. */
+/** Of these execution ids, the ones a pending or running job drives (by execution_id, else by its id or `<id>:…`). */
 export async function listExecutionIdsWithActiveQueueJob(ctx: PgContext, executionIds: string[]): Promise<string[]> {
   const ids = [...new Set(executionIds.filter((id) => typeof id === "string" && id.length > 0))];
   if (ids.length === 0) return [];
@@ -325,6 +325,7 @@ export async function listExecutionIdsWithActiveQueueJob(ctx: PgContext, executi
   return rows.map((row) => row.execution_id).sort();
 }
 
+/** Whether `id`, or a job keyed `<id>:…`, is pending or running. LIKE is case-insensitive on SQLite, so ILIKE here. */
 export async function hasActiveQueueItem(ctx: PgContext, id: string): Promise<boolean> {
   const row = await ctx.queryOne<{ id: string }>(
     `SELECT id FROM execution_queue WHERE (id = $1 OR id ILIKE $2 ESCAPE '\\') AND status IN ('pending', 'running') LIMIT 1`,
@@ -356,6 +357,8 @@ function parsePayload(raw: unknown): Record<string, unknown> {
 export async function claimQueueItems(ctx: PgContext, input: { limit: number; owner: string; pools: string[] }): Promise<QueueClaimedItem[]> {
   const limit = clampLimit(input.limit, { fallback: 1, max: LIMIT_MAX.dequeueNext });
   if (input.pools.length === 0) return [];
+  // One pool (the usual case) reads the window as an ordered scan of the claim index, stopping at the window size.
+  const poolMatch = input.pools.length === 1 ? "pool = $1::text" : "pool = ANY($1::text[])";
   const rows = await ctx.query<{
     id: string;
     workflow_id: string;
@@ -373,17 +376,17 @@ export async function claimQueueItems(ctx: PgContext, input: { limit: number; ow
   }>(
     `WITH cand AS (
        SELECT id, workflow_id, priority, scheduled_at, created_at FROM execution_queue
-        WHERE status = 'pending' AND pool = ANY($1::text[]) AND scheduled_at <= now()
-        ORDER BY priority DESC, scheduled_at, created_at, id COLLATE "C"
+        WHERE status = 'pending' AND ${poolMatch} AND scheduled_at <= now()
+        ORDER BY priority DESC, scheduled_at, created_at, id
         LIMIT $2
      ), ranked AS (
        SELECT id, priority, scheduled_at, created_at,
-              row_number() OVER (PARTITION BY workflow_id ORDER BY priority DESC, scheduled_at, created_at, id COLLATE "C") AS rk
+              row_number() OVER (PARTITION BY workflow_id ORDER BY priority DESC, scheduled_at, created_at, id) AS rk
          FROM cand
      ), picked AS (
        SELECT q.id, r.rk FROM execution_queue q JOIN ranked r ON r.id = q.id
         WHERE q.status = 'pending'
-        ORDER BY r.rk, r.priority DESC, r.scheduled_at, r.created_at, q.id COLLATE "C"
+        ORDER BY r.rk, r.priority DESC, r.scheduled_at, r.created_at, q.id
         LIMIT $3
         FOR UPDATE OF q SKIP LOCKED
      )
@@ -395,7 +398,7 @@ export async function claimQueueItems(ctx: PgContext, input: { limit: number; ow
      RETURNING q.id, q.workflow_id, q.workflow_name, q.payload_json, q.attempts, q.max_attempts, q.scheduled_at, q.pool,
                q.claim_token, q.priority, q.created_at, picked.rk,
                GREATEST(0, EXTRACT(EPOCH FROM (now() - q.scheduled_at)) * 1000) AS wait_ms`,
-    [input.pools, fairClaimWindow(limit), limit, input.owner]
+    [input.pools.length === 1 ? input.pools[0] : input.pools, fairClaimWindow(limit), limit, input.owner]
   );
   // RETURNING has no order; give the claim order back.
   rows.sort((a, b) =>
@@ -430,6 +433,22 @@ export async function renewQueueLeases(ctx: PgContext, input: { owner: string; c
   return rows.map((row) => toStr(row.claim_token));
 }
 
+export async function isQueueClaimHeld(ctx: PgContext, fence: QueueClaimFence): Promise<boolean> {
+  const row = await ctx.queryOne<{ id: string }>(
+    `SELECT id FROM execution_queue WHERE id = $1 AND claim_token = $2 AND status = 'running'`,
+    [fence.queueItemId, fence.claimToken]
+  );
+  return Boolean(row);
+}
+
+export async function recordQueueJobProgress(ctx: PgContext, fence: QueueClaimFence): Promise<boolean> {
+  const result = await ctx.pool.query(
+    `UPDATE execution_queue SET nodes_completed = nodes_completed + 1 WHERE id = $1 AND claim_token = $2 AND status = 'running'`,
+    [fence.queueItemId, fence.claimToken]
+  );
+  return (result.rowCount ?? 0) > 0;
+}
+
 export async function listCanceledExecutionIds(ctx: PgContext, executionIds: string[]): Promise<string[]> {
   if (executionIds.length === 0) return [];
   const rows = await ctx.query<{ id: string }>(
@@ -446,11 +465,15 @@ interface LockedQueueRow {
   payload_json: string;
   attempts: number;
   max_attempts: number;
+  nodes_completed: number;
 }
+
+const LOCKED_QUEUE_COLUMNS = "id, workflow_id, workflow_name, payload_json, attempts, max_attempts, nodes_completed";
 
 /**
  * Settles one locked running item by the worker-loss policy. The caller holds the item's row lock; the run's history
- * row is locked here (queue row, then history row: the order a fenced history write takes them too).
+ * row (and, for an approval resume, its paused state) is locked here: queue row, then history row, then paused state,
+ * the order fenced writes take them too.
  */
 async function settleLostJob(
   client: PoolClient,
@@ -465,11 +488,17 @@ async function settleLostJob(
     `SELECT status, completed_at, node_results_json FROM execution_history WHERE id = $1 FOR UPDATE`,
     [executionId]
   )).rows[0];
+  const resume = payloadIsResume(row.payload_json);
+  const pausedState = resume
+    ? (await client.query<{ status: string }>(`SELECT status FROM workflow_executions WHERE id = $1 FOR UPDATE`, [executionId])).rows[0]
+    : undefined;
   const decision = decideLostJob({
     attempts,
     maxAttempts: toNum(row.max_attempts),
     countsAttempt,
-    resume: payloadIsResume(row.payload_json),
+    resume,
+    resumeStateStatus: pausedState ? toStr(pausedState.status) : null,
+    resumeNodesCompleted: toNum(row.nodes_completed),
     history: history ? { status: toStr(history.status), completedAt: history.completed_at, nodeResultsJson: history.node_results_json } : null
   });
   const lost = countsAttempt ? 1 : 0;
@@ -489,14 +518,18 @@ async function settleLostJob(
     );
   } else {
     const reason = decision === "interrupt" ? reasons.interrupted : reasons.exhausted;
-    // The run's record says why it stopped; only a record still running is changed (a cancel or a final write stays).
+    // The run's record says why it stopped; only a record still running (or, for a resume, still reading as the
+    // pause) is changed: a cancel or a final write stays.
     await client.query(
       `UPDATE execution_history
           SET status = 'error', error = $2, completed_at = now(),
-              duration_ms = GREATEST(0, (EXTRACT(EPOCH FROM (now() - started_at)) * 1000)::bigint)
-        WHERE id = $1 AND status = 'running'`,
-      [executionId, reason]
+              duration_ms = GREATEST(0, (EXTRACT(EPOCH FROM (now() - started_at::timestamptz)) * 1000)::bigint)
+        WHERE id = $1 AND status = ANY($3::text[])`,
+      [executionId, reason, resume ? ["running", "waiting_approval"] : ["running"]]
     );
+    // A resume's paused state goes with it, so approval recovery never drives the run on again: the dead-letter
+    // entry is its one way forward (a manual retry).
+    if (resume) await client.query(`DELETE FROM workflow_executions WHERE id = $1 AND status = 'resuming'`, [executionId]);
     await client.query(
       `INSERT INTO execution_queue_dlq (id, original_id, workflow_id, workflow_name, payload_json, attempts, final_error, failed_at, created_at)
          VALUES ($1, $2, $3, $4, $5, $6, $7, now(), now())`,
@@ -515,7 +548,7 @@ async function settleLostJob(
 export async function reapExpiredQueueLeases(ctx: PgContext, input: { leaseMs: number; limit?: number }): Promise<LostJobOutcome[]> {
   return await ctx.withTransaction(async (client) => {
     const rows = (await client.query<LockedQueueRow>(
-      `SELECT id, workflow_id, workflow_name, payload_json, attempts, max_attempts FROM execution_queue
+      `SELECT ${LOCKED_QUEUE_COLUMNS} FROM execution_queue
         WHERE status = 'running' AND heartbeat_at IS NOT NULL
           AND heartbeat_at < now() - make_interval(secs => $1::double precision / 1000)
         ORDER BY heartbeat_at, id COLLATE "C"
@@ -534,7 +567,7 @@ export async function reapExpiredQueueLeases(ctx: PgContext, input: { leaseMs: n
 export async function releaseQueueItem(ctx: PgContext, input: { id: string; claimToken: string | null }): Promise<LostJobOutcome | null> {
   return await ctx.withTransaction(async (client) => {
     const row = (await client.query<LockedQueueRow>(
-      `SELECT id, workflow_id, workflow_name, payload_json, attempts, max_attempts FROM execution_queue
+      `SELECT ${LOCKED_QUEUE_COLUMNS} FROM execution_queue
         WHERE id = $1 AND status = 'running' AND ($2::text IS NULL OR claim_token = $2)
         FOR UPDATE`,
       [input.id, input.claimToken]

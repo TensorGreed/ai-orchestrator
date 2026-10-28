@@ -92,6 +92,7 @@ import {
   WORKER_LOST_ERROR,
   WORKER_LOST_INTERRUPTED_ERROR,
   WORKER_SHUTDOWN_INTERRUPTED_ERROR,
+  QueueClaimLostError,
   type LostJobOutcome
 } from "./queue-leases.js";
 
@@ -3723,20 +3724,24 @@ export class SqliteStore implements Store {
     // Migration 42 — when the published version was taken down (unpublish): production runs the draft, gated or not.
     this.ensureColumn("workflows", "unpublished_at", "TEXT");
 
-    // Migration 43 — queue leases (claim owner, fencing token, heartbeat, pool, lost count) and the run's executor.
+    // Migration 43 — queue leases (claim owner, fencing token, heartbeat, pool, lost count, a resume's progress).
     // Written only by consumers in cluster mode (Postgres); on SQLite they keep their defaults and the queue runs as before.
     this.ensureColumn("execution_queue", "execution_id", "TEXT");
-    this.exec(`CREATE INDEX IF NOT EXISTS ${QUEUE_ACTIVE_EXECUTION_INDEX} ON execution_queue (execution_id)`);
+    this.exec(
+      `UPDATE execution_queue SET execution_id = CASE WHEN instr(id, ':') > 0 THEN substr(id, 1, instr(id, ':') - 1) ELSE id END
+       WHERE execution_id IS NULL AND status IN ('pending', 'running')`
+    );
+    this.exec(`CREATE INDEX IF NOT EXISTS ${QUEUE_ACTIVE_EXECUTION_INDEX} ON execution_queue (execution_id) WHERE status = 'pending' OR status = 'running'`);
     this.ensureColumn("execution_queue", "claimed_by", "TEXT");
     this.ensureColumn("execution_queue", "claim_token", "TEXT");
     this.ensureColumn("execution_queue", "heartbeat_at", "TEXT");
     this.ensureColumn("execution_queue", "pool", "TEXT NOT NULL", "'default'");
     this.ensureColumn("execution_queue", "lost_count", "INTEGER NOT NULL", "0");
+    this.ensureColumn("execution_queue", "nodes_completed", "INTEGER NOT NULL", "0");
     this.exec(
-      `CREATE INDEX IF NOT EXISTS ${QUEUE_CLAIM_INDEX} ON execution_queue (pool, priority DESC, scheduled_at, created_at) WHERE status = 'pending'`
+      `CREATE INDEX IF NOT EXISTS ${QUEUE_CLAIM_INDEX} ON execution_queue (pool, priority DESC, scheduled_at, created_at, id) WHERE status = 'pending'`
     );
     this.exec(`CREATE INDEX IF NOT EXISTS ${QUEUE_RUNNING_HEARTBEAT_INDEX} ON execution_queue (heartbeat_at) WHERE status = 'running'`);
-    this.ensureColumn("execution_history", "executor_id", "TEXT");
 
     this.exec(`CREATE INDEX IF NOT EXISTS idx_workflows_project_id ON workflows(project_id)`);
     this.exec(`CREATE INDEX IF NOT EXISTS idx_workflows_folder_id ON workflows(folder_id)`);
@@ -4978,16 +4983,7 @@ export class SqliteStore implements Store {
     if (fence) {
       // Phase 13.1 — a queued run in cluster mode writes only while its claim still holds the queue item (one
       // transaction: nothing can take the item back in between on this single-process store).
-      return this.db.transaction(() => {
-        const held = this.queryOne<{ id: unknown }>(
-          `SELECT id FROM execution_queue WHERE id = ? AND claim_token = ? AND status = 'running'`,
-          [fence.queueItemId, fence.claimToken]
-        );
-        if (!held) return false;
-        const written = this.writeExecutionHistory(input, options);
-        if (written) this.exec(`UPDATE execution_history SET executor_id = ? WHERE id = ?`, [fence.claimToken, input.id]);
-        return written;
-      })();
+      return this.db.transaction(() => this.queueClaimHeldSync(fence) && this.writeExecutionHistory(input, options))();
     }
     return this.writeExecutionHistory(input, options);
   }
@@ -5342,9 +5338,9 @@ export class SqliteStore implements Store {
     triggeredBy?: string;
     startedAt: string;
     state: unknown;
-  }): Promise<void> {
+  }, options: { fence?: QueueClaimFence } = {}): Promise<boolean> {
     const now = new Date().toISOString();
-    this.exec(
+    const write = () => this.exec(
       `INSERT INTO workflow_executions (
           id,
           workflow_id,
@@ -5388,7 +5384,20 @@ export class SqliteStore implements Store {
         now
       ]
     );
+    const fence = options.fence;
+    if (fence) {
+      // Phase 13.1 — a queued run in cluster mode pauses only while its claim still holds the queue item.
+      const written = this.db.transaction(() => {
+        if (!this.queueClaimHeldSync(fence)) return false;
+        write();
+        return true;
+      })();
+      if (written) this.persist();
+      return written;
+    }
+    write();
     this.persist();
+    return true;
   }
 
   async getWorkflowExecutionState(id: string): Promise<{
@@ -5568,7 +5577,7 @@ export class SqliteStore implements Store {
     return row ? toString(row.created_at) : null;
   }
 
-  /** Phase 11.2 — whether a queue item with this id, or one that extends it (`<id>:…`), is still waiting or running. */
+  /** Phase 13.1 — of these execution ids, the ones a pending or running queue job drives (see Store). */
   async listExecutionIdsWithActiveQueueJob(executionIds: string[]): Promise<string[]> {
     const ids = [...new Set(executionIds.filter((id) => typeof id === "string" && id.length > 0))];
     const found: string[] = [];
@@ -5590,6 +5599,7 @@ export class SqliteStore implements Store {
     return found.sort();
   }
 
+  /** Phase 11.2 — whether a queue item with this id, or one that extends it (`<id>:…`), is still waiting or running. */
   async hasActiveQueueItem(id: string): Promise<boolean> {
     const row = this.queryOne<{ id: string }>(
       `SELECT id FROM execution_queue WHERE (id = ? OR id LIKE ? ESCAPE '\\') AND status IN ('pending', 'running') LIMIT 1`,
@@ -5602,9 +5612,9 @@ export class SqliteStore implements Store {
   // Phase 11.2 — approval requests
   // -------------------------------------------------------------------------
 
-  async insertApprovalRequest(input: ApprovalRequestInsert): Promise<ApprovalRequestRecord> {
+  async insertApprovalRequest(input: ApprovalRequestInsert, options: { fence?: QueueClaimFence } = {}): Promise<ApprovalRequestRecord> {
     const now = input.createdAt ?? new Date().toISOString();
-    this.exec(
+    const insert = () => this.exec(
       `INSERT INTO approval_requests (
          id, execution_id, workflow_id, workflow_name, project_id, node_id, node_type, kind, status, message,
          spec_json, path_json, details_json, requested_by_user_id, requested_by, timeout_minutes, expires_at,
@@ -5633,6 +5643,18 @@ export class SqliteStore implements Store {
         now
       ]
     );
+    const fence = options.fence;
+    if (fence) {
+      // Phase 13.1 — a queued run in cluster mode asks for approval only while its claim still holds the queue item.
+      const inserted = this.db.transaction(() => {
+        if (!this.queueClaimHeldSync(fence)) return false;
+        insert();
+        return true;
+      })();
+      if (!inserted) throw new QueueClaimLostError("an approval request");
+    } else {
+      insert();
+    }
     this.persist();
     return this.getApprovalRequestSync(input.id)!;
   }
@@ -5958,8 +5980,8 @@ export class SqliteStore implements Store {
     const skip = new Set(excludeIds);
     const stuck = this.queryAll<ExecutionQueueRow & { started_at: unknown; payload_json: unknown }>(
       `SELECT id, started_at, payload_json FROM execution_queue
-       WHERE status = 'running' AND started_at <= ? AND (heartbeat_at IS NULL OR heartbeat_at <= ?)`,
-      [stuckBefore, stuckBefore]
+       WHERE status = 'running' AND started_at <= ? AND heartbeat_at IS NULL`,
+      [stuckBefore]
     ).filter((row) => {
       if (skip.has(toString(row.id))) return false;
       // A job may carry its own, longer run time limit; it is not stuck before that limit and the margin have passed.
@@ -6127,6 +6149,27 @@ export class SqliteStore implements Store {
     })();
   }
 
+  private queueClaimHeldSync(fence: QueueClaimFence): boolean {
+    return Boolean(
+      this.queryOne<{ id: unknown }>(`SELECT id FROM execution_queue WHERE id = ? AND claim_token = ? AND status = 'running'`, [
+        fence.queueItemId,
+        fence.claimToken
+      ])
+    );
+  }
+
+  async isQueueClaimHeld(fence: QueueClaimFence): Promise<boolean> {
+    return this.queueClaimHeldSync(fence);
+  }
+
+  async recordQueueJobProgress(fence: QueueClaimFence): Promise<boolean> {
+    const result = this.db
+      .prepare(`UPDATE execution_queue SET nodes_completed = nodes_completed + 1 WHERE id = ? AND claim_token = ? AND status = 'running'`)
+      .run(fence.queueItemId, fence.claimToken);
+    if (result.changes > 0) this.persist();
+    return result.changes > 0;
+  }
+
   async listCanceledExecutionIds(executionIds: string[]): Promise<string[]> {
     if (executionIds.length === 0) return [];
     return this.queryAll<{ id: unknown }>(
@@ -6136,7 +6179,7 @@ export class SqliteStore implements Store {
   }
 
   /** Settles one running item by the worker-loss policy (queue-leases.ts); the caller runs it in a transaction. */
-  private settleLostQueueItem(row: ExecutionQueueRow, countsAttempt: boolean, reasons: { interrupted: string; exhausted: string }): LostJobOutcome {
+  private settleLostQueueItem(row: ExecutionQueueRow & { nodes_completed?: unknown }, countsAttempt: boolean, reasons: { interrupted: string; exhausted: string }): LostJobOutcome {
     const id = toString(row.id);
     const now = new Date().toISOString();
     const executionId = payloadExecutionId(row.payload_json, id);
@@ -6146,11 +6189,15 @@ export class SqliteStore implements Store {
       `SELECT status, completed_at, node_results_json, started_at FROM execution_history WHERE id = ?`,
       [executionId]
     );
+    const resume = payloadIsResume(row.payload_json);
+    const pausedState = resume ? this.queryOne<{ status: unknown }>(`SELECT status FROM workflow_executions WHERE id = ?`, [executionId]) : null;
     const decision = decideLostJob({
       attempts,
       maxAttempts: toNumber(row.max_attempts),
       countsAttempt,
-      resume: payloadIsResume(row.payload_json),
+      resume,
+      resumeStateStatus: pausedState ? toString(pausedState.status) : null,
+      resumeNodesCompleted: toNumber(row.nodes_completed ?? 0),
       history: history ? { status: toString(history.status), completedAt: history.completed_at, nodeResultsJson: history.node_results_json } : null
     });
     if (decision === "finished") {
@@ -6168,14 +6215,18 @@ export class SqliteStore implements Store {
       );
     } else {
       const reason = decision === "interrupt" ? reasons.interrupted : reasons.exhausted;
-      if (history && toString(history.status) === "running") {
-        this.exec(`UPDATE execution_history SET status = 'error', error = ?, completed_at = ?, duration_ms = ? WHERE id = ? AND status = 'running'`, [
+      // Only a record still running (or, for a resume, still reading as the pause) is changed.
+      const open = resume ? ["running", "waiting_approval"] : ["running"];
+      if (history && open.includes(toString(history.status))) {
+        this.exec(`UPDATE execution_history SET status = 'error', error = ?, completed_at = ?, duration_ms = ? WHERE id = ?`, [
           reason,
           now,
           toDurationMsForStore(toString(history.started_at), now),
           executionId
         ]);
       }
+      // A resume's paused state goes with it, so approval recovery never drives the run on again.
+      if (resume) this.exec(`DELETE FROM workflow_executions WHERE id = ? AND status = 'resuming'`, [executionId]);
       this.exec(
         `INSERT INTO execution_queue_dlq (id, original_id, workflow_id, workflow_name, payload_json, attempts, final_error, failed_at, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -6194,7 +6245,7 @@ export class SqliteStore implements Store {
     const expiredBefore = new Date(Date.now() - input.leaseMs).toISOString();
     return this.db.transaction(() =>
       this.queryAll<ExecutionQueueRow>(
-        `SELECT id, workflow_id, workflow_name, payload_json, attempts, max_attempts FROM execution_queue
+        `SELECT id, workflow_id, workflow_name, payload_json, attempts, max_attempts, nodes_completed FROM execution_queue
          WHERE status = 'running' AND heartbeat_at IS NOT NULL AND heartbeat_at < ?
          ORDER BY heartbeat_at, id
          LIMIT ?`,
@@ -6206,7 +6257,7 @@ export class SqliteStore implements Store {
   async releaseQueueItem(input: { id: string; claimToken: string | null }): Promise<LostJobOutcome | null> {
     return this.db.transaction(() => {
       const row = this.queryOne<ExecutionQueueRow>(
-        `SELECT id, workflow_id, workflow_name, payload_json, attempts, max_attempts FROM execution_queue
+        `SELECT id, workflow_id, workflow_name, payload_json, attempts, max_attempts, nodes_completed FROM execution_queue
          WHERE id = ? AND status = 'running' AND (? IS NULL OR claim_token = ?)`,
         [input.id, input.claimToken, input.claimToken]
       );

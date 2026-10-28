@@ -7,6 +7,7 @@
  * effects such as e-mails or tool writes are never repeated silently. A lost worker always counts an attempt, so a
  * job that kills its worker every time ends in the dead-letter queue instead of looping.
  */
+import { QUEUE_POOL_NAME_PATTERN } from "@ai-orchestrator/shared";
 
 /** The history error and dead-letter reason of a run interrupted because its worker was lost. */
 export const WORKER_LOST_INTERRUPTED_ERROR = "interrupted: worker lost";
@@ -15,11 +16,22 @@ export const WORKER_LOST_ERROR = "worker lost";
 /** The history error and dead-letter reason of a run a worker stopped while shutting down, after a node completed. */
 export const WORKER_SHUTDOWN_INTERRUPTED_ERROR = "interrupted: worker shut down";
 
+/**
+ * A write fenced on a queue claim that no longer holds its item (the job was taken back, so another worker may run
+ * it): nothing was written.
+ */
+export class QueueClaimLostError extends Error {
+  constructor(what: string) {
+    super(`Refused ${what}: this worker's queue claim was taken back`);
+    this.name = "QueueClaimLostError";
+  }
+}
+
 /** The node statuses that mean a node ran to an end (and so may have had side effects). */
 const COMPLETED_NODE_STATUSES = new Set(["success", "error", "waiting_approval"]);
 
-/** A run record that is over: its final write landed (or it paused for approval), so nothing should run it again. */
-const FINISHED_RUN_STATUSES = new Set(["success", "error", "canceled", "partial", "waiting_approval"]);
+/** Run record statuses a final write leaves (`partial` counts only with a completed_at). */
+const FINAL_RUN_STATUSES = new Set(["success", "error", "canceled", "partial"]);
 
 /** Whether a stored node-results JSON (an array of `{ nodeId, status }`) holds a node that completed. */
 export function hasCompletedNode(nodeResultsJson: unknown): boolean {
@@ -54,22 +66,40 @@ export interface LostJobInput {
   maxAttempts: number;
   /** Whether this loss counts an attempt (a lost worker does; a clean shutdown does not). */
   countsAttempt: boolean;
-  /** The payload carries an approval resume (Phase 11.2): it writes no progress, so its record says nothing. */
+  /**
+   * The payload carries an approval resume (Phase 11.2). Its history record still reads as the pause (a resume writes
+   * no progress there), so what it did is read from the paused state and the queue row instead.
+   */
   resume: boolean;
+  /** A resume only: the status of the run's paused state (`resuming` while the resume is due), or null when it is gone. */
+  resumeStateStatus?: string | null;
+  /** A resume only: nodes the resume completed under its claims (the queue row's nodes_completed). */
+  resumeNodesCompleted?: number;
   /** The run's history record, if one was written. */
   history: { status: string; completedAt: unknown; nodeResultsJson: unknown } | null;
 }
 
+/** A record whose final write landed: `partial` only once it has a completed_at. */
+function isFinalRecord(history: NonNullable<LostJobInput["history"]>): boolean {
+  if (history.status === "partial") return history.completedAt !== null && history.completedAt !== undefined;
+  return FINAL_RUN_STATUSES.has(history.status);
+}
+
 export function decideLostJob(input: LostJobInput): LostJobDecision {
-  const status = input.history?.status;
-  if (status !== undefined) {
-    // `partial` is over only once it has a completed_at; a resume's record reads waiting_approval while it resumes.
-    const over =
-      status === "partial"
-        ? input.history?.completedAt !== null && input.history?.completedAt !== undefined
-        : FINISHED_RUN_STATUSES.has(status) && !(input.resume && status === "waiting_approval");
-    if (over) return "finished";
-    if (!input.resume && status === "running" && hasCompletedNode(input.history?.nodeResultsJson)) return "interrupt";
+  if (input.resume) {
+    // The resume is over once its run's final write landed, or once the paused state left `resuming` (it paused again
+    // at a later gate, finished, or was handed back to waiting): nothing runs it again.
+    if (input.history && isFinalRecord(input.history)) return "finished";
+    if (input.resumeStateStatus !== "resuming") return "finished";
+    // A clean shutdown gives a resume back with its paused state intact; the next worker resumes it from the decision.
+    if (!input.countsAttempt) return "requeue";
+    // A lost worker: like any run, re-run only if nothing completed since the resume started.
+    if ((input.resumeNodesCompleted ?? 0) > 0) return "interrupt";
+    return input.attempts >= input.maxAttempts ? "dead_letter" : "requeue";
+  }
+  if (input.history) {
+    if (isFinalRecord(input.history) || input.history.status === "waiting_approval") return "finished";
+    if (input.history.status === "running" && hasCompletedNode(input.history.nodeResultsJson)) return "interrupt";
   }
   if (input.countsAttempt && input.attempts >= input.maxAttempts) return "dead_letter";
   return "requeue";
@@ -112,8 +142,8 @@ export function payloadIsResume(payloadJson: unknown): boolean {
   return Boolean(value && typeof value === "object");
 }
 
-/** Pool names: a letter or digit, then letters, digits, `_` or `-` (at most 63). */
-export const QUEUE_POOL_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$/;
+/** Pool names: a letter or digit, then letters, digits, `_` or `-` (at most 63); one definition, in the shared schema. */
+export const QUEUE_POOL_PATTERN = QUEUE_POOL_NAME_PATTERN;
 export const DEFAULT_QUEUE_POOL = "default";
 
 /**

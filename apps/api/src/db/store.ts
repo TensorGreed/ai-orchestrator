@@ -1418,8 +1418,8 @@ export interface Store {
     unlessCanceled?: boolean;
     /**
      * Phase 13.1 — a queued run in cluster mode: written only while the queue item is still `running` under this
-     * claim token (the item's row is share-locked for the write, so the reaper cannot take it back in between), and
-     * the record's `executor_id` becomes the token. A zombie worker whose claim was taken back writes nothing.
+     * claim token (the item's row is key-share-locked for the write, so the reaper cannot take it back in between). A
+     * zombie worker whose claim was taken back writes nothing.
      */
     fence?: QueueClaimFence;
   }): Promise<boolean>;
@@ -1507,7 +1507,13 @@ export interface Store {
     triggeredBy?: string;
     startedAt: string;
     state: unknown;
-  }): Promise<void>;
+  }, options?: {
+    /**
+     * Phase 13.1 — a queued run in cluster mode: written only while its claim still holds the queue item (false when
+     * it does not), so a zombie worker cannot leave a pause behind for a run another worker owns now.
+     */
+    fence?: QueueClaimFence;
+  }): Promise<boolean>;
   getWorkflowExecutionState(id: string): Promise<{
     id: string;
     workflowId: string;
@@ -1551,7 +1557,11 @@ export interface Store {
 
   // ---- Approval requests
 
-  insertApprovalRequest(input: ApprovalRequestInsert): Promise<ApprovalRequestRecord>;
+  /**
+   * With `fence` (Phase 13.1, a queued run in cluster mode) the request is inserted only while that claim still holds
+   * its queue item; otherwise nothing is inserted and it throws QueueClaimLostError.
+   */
+  insertApprovalRequest(input: ApprovalRequestInsert, options?: { fence?: QueueClaimFence }): Promise<ApprovalRequestRecord>;
   getApprovalRequest(id: string): Promise<ApprovalRequestRecord | null>;
   /** The newest pending request of a paused run. */
   getPendingApprovalRequestForExecution(executionId: string): Promise<ApprovalRequestRecord | null>;
@@ -1632,6 +1642,13 @@ export interface Store {
    * token and a heartbeat, all in database time. An item is handed to one caller only.
    */
   claimQueueItems(input: { limit: number; owner: string; pools: string[] }): Promise<QueueClaimedItem[]>;
+  /** Whether this claim still holds its queue item (`running` under the token). */
+  isQueueClaimHeld(fence: QueueClaimFence): Promise<boolean>;
+  /**
+   * Counts one node an approval resume completed under this claim (the queue row's nodes_completed), so the reaper
+   * can tell a lost resume that did something from one that did not. False when the claim no longer holds the item.
+   */
+  recordQueueJobProgress(fence: QueueClaimFence): Promise<boolean>;
   /** Renews the heartbeat of the owner's claims; returns the tokens it still holds (a missing one was taken back). */
   renewQueueLeases(input: { owner: string; claimTokens: string[] }): Promise<string[]>;
   /** Of these execution ids, the ones whose history reads `canceled` (a cancel another instance recorded). */

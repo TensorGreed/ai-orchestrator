@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import net from "node:net";
 import { z } from "zod";
+import { QUEUE_POOL_NAME_PATTERN } from "@ai-orchestrator/shared";
 
 /** Phase 15.6 — production capture defaults (see the REPLAY_CAPTURE_* settings). */
 export const REPLAY_CAPTURE_DEFAULTS = { enabled: true, maxRate: 1, retentionDays: 14, maxPerWorkflow: 200, maxBytesPerWorkflow: 209_715_200 } as const;
@@ -599,8 +600,6 @@ export const QUEUE_SETTING_DEFAULTS = {
   shutdownDrainMs: 30_000
 } as const;
 
-const QUEUE_POOL_NAME = /^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$/;
-
 type QueueConfigInput = Partial<
   Pick<
     AppConfig,
@@ -628,7 +627,7 @@ export function resolveQueueSettings(config: QueueConfigInput, options: { cluste
   };
   const pools = splitList(config.QUEUE_POOLS);
   for (const pool of pools) {
-    if (!QUEUE_POOL_NAME.test(pool)) fail(`QUEUE_POOLS entry "${pool.slice(0, 64)}" must be letters, digits, _ or - (at most 63, starting with a letter or digit)`);
+    if (!QUEUE_POOL_NAME_PATTERN.test(pool)) fail(`QUEUE_POOLS entry "${pool.slice(0, 64)}" must be letters, digits, _ or - (at most 63, starting with a letter or digit)`);
   }
   const resolvedPools = pools.length > 0 ? [...new Set(pools)] : ["default"];
   if (!options.clusterMode && (resolvedPools.length !== 1 || resolvedPools[0] !== "default")) {

@@ -33,10 +33,9 @@ export async function saveExecutionHistory(ctx: PgContext, input: {
       : "";
   const fence = options?.fence;
   const sql =
-    `INSERT INTO execution_history (id, workflow_id, workflow_name, status, started_at, completed_at, duration_ms, trigger_type, triggered_by, input_json, output_json, node_results_json, custom_data_json, error${fence ? ", executor_id" : ""})
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14${fence ? ", $15" : ""})
-       ON CONFLICT (id) DO UPDATE SET${fence ? `
-         executor_id = EXCLUDED.executor_id,` : ""}
+    `INSERT INTO execution_history (id, workflow_id, workflow_name, status, started_at, completed_at, duration_ms, trigger_type, triggered_by, input_json, output_json, node_results_json, custom_data_json, error)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+       ON CONFLICT (id) DO UPDATE SET
          workflow_id = EXCLUDED.workflow_id,
          workflow_name = EXCLUDED.workflow_name,
          status = EXCLUDED.status,
@@ -64,24 +63,33 @@ export async function saveExecutionHistory(ctx: PgContext, input: {
       input.outputJson === undefined ? null : JSON.stringify(input.outputJson),
       input.nodeResultsJson === undefined ? null : JSON.stringify(input.nodeResultsJson),
       input.customData === undefined ? null : JSON.stringify(input.customData),
-      input.error ?? null,
-      ...(fence ? [fence.claimToken] : [])
+      input.error ?? null
   ];
   if (!fence) {
     const result = await ctx.pool.query(sql, params);
     return (result.rowCount ?? 0) > 0;
   }
-  // Phase 13.1 — a queued run in cluster mode writes only while its claim still holds the queue item. FOR SHARE keeps
-  // the reaper (and a drain release) from taking the item back until this write commits; one taken back already is
-  // skipped by the re-check, so a zombie worker writes nothing. Lock order: queue row, then history row (as the reaper).
-  return await ctx.withTransaction(async (client) => {
-    const held = await client.query(
-      `SELECT 1 FROM execution_queue WHERE id = $1 AND claim_token = $2 AND status = 'running' FOR SHARE`,
-      [fence.queueItemId, fence.claimToken]
-    );
-    if ((held.rowCount ?? 0) === 0) return false;
+  // Phase 13.1 — a queued run in cluster mode writes only while its claim still holds the queue item.
+  return await withQueueClaim(ctx, fence, async (client) => {
     const result = await client.query(sql, params);
     return (result.rowCount ?? 0) > 0;
+  }) ?? false;
+}
+
+/**
+ * Phase 13.1 — runs `write` in one transaction only while `fence`'s claim still holds its queue item; null when it
+ * does not (a zombie worker writes nothing). FOR KEY SHARE on the queue row keeps the reaper, a drain release and a
+ * failure (all FOR UPDATE) from taking the item back until the write commits, without blocking the holder's own
+ * heartbeat. Lock order: queue row, then the rows `write` touches (as the reaper: queue row, history row, paused state).
+ */
+export async function withQueueClaim<T>(ctx: PgContext, fence: QueueClaimFence, write: (client: PoolClient) => Promise<T>): Promise<T | null> {
+  return await ctx.withTransaction(async (client) => {
+    const held = await client.query(
+      `SELECT 1 FROM execution_queue WHERE id = $1 AND claim_token = $2 AND status = 'running' FOR KEY SHARE`,
+      [fence.queueItemId, fence.claimToken]
+    );
+    if ((held.rowCount ?? 0) === 0) return null;
+    return await write(client);
   });
 }
 
@@ -341,9 +349,9 @@ export async function saveWorkflowExecutionState(ctx: PgContext, input: {
   triggeredBy?: string;
   startedAt: string;
   state: unknown;
-}): Promise<void> {
+}, options: { fence?: QueueClaimFence } = {}): Promise<boolean> {
   const now = new Date().toISOString();
-  await ctx.execute(
+  const sql =
     `INSERT INTO workflow_executions (id, workflow_id, workflow_name, status, waiting_node_id, approval_message, timeout_minutes, trigger_type, triggered_by, started_at, state_json, created_at, updated_at)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
        ON CONFLICT (id) DO UPDATE SET
@@ -357,8 +365,8 @@ export async function saveWorkflowExecutionState(ctx: PgContext, input: {
          triggered_by = EXCLUDED.triggered_by,
          started_at = EXCLUDED.started_at,
          state_json = EXCLUDED.state_json,
-         updated_at = EXCLUDED.updated_at`,
-    [
+         updated_at = EXCLUDED.updated_at`;
+  const params = [
       input.id,
       input.workflowId,
       input.workflowName ?? null,
@@ -372,8 +380,16 @@ export async function saveWorkflowExecutionState(ctx: PgContext, input: {
       JSON.stringify(input.state),
       now,
       now
-    ]
-  );
+  ];
+  if (!options.fence) {
+    await ctx.execute(sql, params);
+    return true;
+  }
+  // Phase 13.1 — a queued run in cluster mode pauses only while its claim still holds the queue item.
+  return (await withQueueClaim(ctx, options.fence, async (client) => {
+    await client.query(sql, params);
+    return true;
+  })) ?? false;
 }
 
 export async function getWorkflowExecutionState(ctx: PgContext, id: string): Promise<{

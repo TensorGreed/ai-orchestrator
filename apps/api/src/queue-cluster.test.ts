@@ -236,11 +236,9 @@ run("the queue across replicas on one Postgres database", () => {
     );
     expect(queueRows.map((row) => row.claimed_by).every((owner) => owner === "worker-1" || owner === "worker-2")).toBe(true);
     expect(queueRows.every((row) => row.lost_count === 0 && row.attempts === 0)).toBe(true);
-    // Every history row was written under its claim.
-    const unfenced = await sql<{ n: string }>(
-      `SELECT COUNT(*) AS n FROM execution_history h JOIN execution_queue q ON q.id = h.id WHERE h.executor_id IS DISTINCT FROM q.claim_token`
-    );
-    expect(Number(unfenced[0]!.n)).toBe(0);
+    // Both workers took part, so "never run twice" was tested under contention.
+    expect(w1.ran.length).toBeGreaterThan(0);
+    expect(w2.ran.length).toBeGreaterThan(0);
     expect(await sql(`SELECT id FROM execution_queue_dlq`)).toEqual([]);
   }, 120_000);
 

@@ -428,6 +428,12 @@ export class PostgresStore implements Store {
   async claimQueueItems(...args: Parameters<Store["claimQueueItems"]>): ReturnType<Store["claimQueueItems"]> {
     return queue.claimQueueItems(this.ctx, ...args);
   }
+  async isQueueClaimHeld(...args: Parameters<Store["isQueueClaimHeld"]>): ReturnType<Store["isQueueClaimHeld"]> {
+    return queue.isQueueClaimHeld(this.ctx, ...args);
+  }
+  async recordQueueJobProgress(...args: Parameters<Store["recordQueueJobProgress"]>): ReturnType<Store["recordQueueJobProgress"]> {
+    return queue.recordQueueJobProgress(this.ctx, ...args);
+  }
   async renewQueueLeases(...args: Parameters<Store["renewQueueLeases"]>): ReturnType<Store["renewQueueLeases"]> {
     return queue.renewQueueLeases(this.ctx, ...args);
   }
