@@ -3,8 +3,8 @@
 //   - the nav's "Live demo" button is visible at 360 px and 1440 px;
 //   - every internal link and asset on the landing pages answers 200, and every #fragment exists;
 //   - no request leaves the site's origin (fonts are self-hosted, no trackers);
-//   - the links into the demo open the workflow they name, `demoRun=recorded` starts its recorded
-//     run, and the Guard link shows GUARD BLOCKED on the run tape;
+//   - the links into the demo open the workflow they name, and `demoRun=recorded` starts its
+//     recorded run;
 //   - no console errors on the landing pages or the demo.
 //
 //   pnpm docs:build && pnpm --filter @ai-orchestrator/web build:demo
@@ -211,7 +211,7 @@ for (const pathname of landingPages) {
 }
 
 // The landing's links into the demo open what they promise: the studio shows the linked
-// workflow, `demoRun=recorded` starts its recorded run, and the Guard link shows the block.
+// workflow and `demoRun=recorded` starts its recorded run.
 // The demo stays on its origin and logs no errors while doing it.
 console.log("Demo links");
 {
@@ -224,7 +224,7 @@ console.log("Demo links");
     }))
   );
   await context.close();
-  if (demoLinks.length < 5) fail(`expected the screenshot link and four "what to try" links, found ${demoLinks.length}`);
+  if (demoLinks.length < 4) fail(`expected the screenshot link and three "what to try" links, found ${demoLinks.length}`);
 
   const noRunYet = "No run yet. Run the workflow to see per-node timing";
   for (const { href, label } of demoLinks) {
@@ -269,14 +269,6 @@ console.log("Demo links");
       } catch {
         const status = await tab.evaluate(() => document.querySelector(".hud-run-status")?.textContent?.trim() ?? "no run status");
         fail(`${name}: no recorded run within 10 s (run status: ${status})`);
-      }
-    }
-    if (workflowId === "wf-demo-guarded-intake") {
-      try {
-        await tab.waitForFunction(() => /guard blocked/i.test(document.body.innerText), undefined, { timeout: 20_000 });
-        pass(`${name}: the run tape shows GUARD BLOCKED`);
-      } catch {
-        fail(`${name}: no "GUARD BLOCKED" on the run tape after 20 s`);
       }
     }
     await demo.close();

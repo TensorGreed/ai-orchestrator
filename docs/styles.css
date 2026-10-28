@@ -523,7 +523,7 @@ section {
 
 .try-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 14px;
   margin: 22px 0 0;
   padding: 0;
@@ -1069,4 +1069,9 @@ section {
 
 .shot-row {
   margin-top: 16px;
+}
+
+.shot-single {
+  max-width: 720px;
+  margin-inline: auto;
 }
