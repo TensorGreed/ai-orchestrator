@@ -201,14 +201,23 @@ export async function listGuardProfileVersions(ctx: PgContext, profileId: string
   return rows.map(mapGuardProfileVersionRow);
 }
 
-export async function insertGuardProfile(ctx: PgContext, input: Parameters<Store["insertGuardProfile"]>[0]): Promise<GuardProfileRecord> {
+export async function insertGuardProfile(
+  ctx: PgContext,
+  input: Parameters<Store["insertGuardProfile"]>[0],
+  options: Parameters<Store["insertGuardProfile"]>[1] = {}
+): Promise<GuardProfileRecord> {
   const now = new Date().toISOString();
   return ctx.withTransaction(async (client) => {
-    await client.query(
+    const inserted = await client.query(
       `INSERT INTO guard_profiles (id, name, description, built_in, latest_version, created_at, created_by, updated_at, updated_by)
-       VALUES ($1, $2, $3, $4, 1, $5, $6, $7, $8)`,
+       VALUES ($1, $2, $3, $4, 1, $5, $6, $7, $8)${options.ifAbsent ? " ON CONFLICT (id) DO NOTHING" : ""}`,
       [input.id, input.name, input.description ?? null, input.builtIn ? 1 : 0, now, input.createdBy, now, input.createdBy]
     );
+    if ((inserted.rowCount ?? 0) === 0) {
+      // Present already (another instance seeded it first; its insert committed before this one could).
+      const existing = await oneRow(client, `${PROFILE_SELECT} WHERE p.id = $1`, [input.id]);
+      return mapGuardProfileRow(existing!);
+    }
     await client.query(
       `INSERT INTO guard_profile_versions (profile_id, version, hash, document_json, note, created_at, created_by) VALUES ($1, 1, $2, $3, $4, $5, $6)`,
       [input.id, input.hash, JSON.stringify(input.document), input.note ?? null, now, input.createdBy]
@@ -222,10 +231,18 @@ export async function insertGuardProfile(ctx: PgContext, input: Parameters<Store
  * Appends an immutable version and makes it the latest. The profile row is locked (`FOR UPDATE`) while the next
  * number is read and taken, so two concurrent saves get consecutive versions instead of colliding.
  */
-export async function addGuardProfileVersion(ctx: PgContext, input: Parameters<Store["addGuardProfileVersion"]>[0]): Promise<GuardProfileVersionRecord> {
+export async function addGuardProfileVersion(
+  ctx: PgContext,
+  input: Parameters<Store["addGuardProfileVersion"]>[0],
+  options: Parameters<Store["addGuardProfileVersion"]>[1] = {}
+): Promise<GuardProfileVersionRecord> {
   return ctx.withTransaction(async (client) => {
     const current = await oneRow(client, `SELECT latest_version FROM guard_profiles WHERE id = $1 FOR UPDATE`, [input.profileId]);
     if (!current) throw new Error(`Guard profile '${input.profileId}' not found`);
+    if (options.unlessLatestHash) {
+      const latest = await readProfileVersion((sql, params) => oneRow(client, sql, params), input.profileId, Number(current.latest_version));
+      if (latest && latest.hash === input.hash) return latest;
+    }
     const version = Number(current.latest_version) + 1;
     const now = new Date().toISOString();
     await client.query(

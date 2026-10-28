@@ -466,7 +466,10 @@ export interface Store {
   /** One version of a profile; the latest when `version` is omitted. */
   getGuardProfileVersion(profileId: string, version?: number): Promise<GuardProfileVersionRecord | null>;
   listGuardProfileVersions(profileId: string): Promise<GuardProfileVersionRecord[]>;
-  /** Creates a profile with its first version. */
+  /**
+   * Creates a profile with its first version. With `ifAbsent` (seeding a built-in profile, which several instances may
+   * do at once) a profile that already exists is returned unchanged instead of failing on its id.
+   */
   insertGuardProfile(input: {
     id: string;
     name: string;
@@ -476,8 +479,12 @@ export interface Store {
     hash: string;
     note?: string | null;
     createdBy: string | null;
-  }): Promise<GuardProfileRecord>;
-  /** Appends an immutable version and makes it the latest (one transaction: the next number is read and taken together). */
+  }, options?: { ifAbsent?: boolean }): Promise<GuardProfileRecord>;
+  /**
+   * Appends an immutable version and makes it the latest (one transaction: the next number is read and taken
+   * together). With `unlessLatestHash` the latest version is returned unchanged when it already has this hash (two
+   * instances updating a built-in profile at once add one version).
+   */
   addGuardProfileVersion(input: {
     profileId: string;
     name: string;
@@ -486,7 +493,7 @@ export interface Store {
     hash: string;
     note?: string | null;
     createdBy: string | null;
-  }): Promise<GuardProfileVersionRecord>;
+  }, options?: { unlessLatestHash?: boolean }): Promise<GuardProfileVersionRecord>;
   deleteGuardProfile(id: string): Promise<boolean>;
   getGuardBinding(scope: GuardBindingScope, scopeId: string): Promise<GuardBindingRecord | null>;
   listGuardBindingsForProfile(profileId: string): Promise<GuardBindingRecord[]>;

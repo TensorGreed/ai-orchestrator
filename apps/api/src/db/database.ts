@@ -12214,7 +12214,10 @@ export class SqliteStore implements Store {
     hash: string;
     note?: string | null;
     createdBy: string | null;
-  }): Promise<GuardProfileRecord> {
+  }, options: { ifAbsent?: boolean } = {}): Promise<GuardProfileRecord> {
+    // One process owns the file, so a check and the insert cannot interleave with another seed.
+    const existing = options.ifAbsent ? this.getGuardProfileSync(input.id) : null;
+    if (existing) return existing;
     const now = new Date().toISOString();
     this.exec(
       `INSERT INTO guard_profiles (id, name, description, built_in, latest_version, created_at, created_by, updated_at, updated_by)
@@ -12238,9 +12241,13 @@ export class SqliteStore implements Store {
     hash: string;
     note?: string | null;
     createdBy: string | null;
-  }): Promise<GuardProfileVersionRecord> {
+  }, options: { unlessLatestHash?: boolean } = {}): Promise<GuardProfileVersionRecord> {
     const current = this.getGuardProfileSync(input.profileId);
     if (!current) throw new Error(`Guard profile '${input.profileId}' not found`);
+    if (options.unlessLatestHash) {
+      const latest = this.getGuardProfileVersionSync(input.profileId, current.latestVersion);
+      if (latest && latest.hash === input.hash) return latest;
+    }
     const version = current.latestVersion + 1;
     const now = new Date().toISOString();
     this.exec(
