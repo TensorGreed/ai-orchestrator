@@ -1124,6 +1124,9 @@ export class PostgresStore implements Store {
   async upsertSsoIdentity(...args: Parameters<Store["upsertSsoIdentity"]>): ReturnType<Store["upsertSsoIdentity"]> {
     return auth.upsertSsoIdentity(this.ctx, ...args);
   }
+  async renameSsoIdentitySubject(...args: Parameters<Store["renameSsoIdentitySubject"]>): ReturnType<Store["renameSsoIdentitySubject"]> {
+    return auth.renameSsoIdentitySubject(this.ctx, ...args);
+  }
   async deleteSecret(...args: Parameters<Store["deleteSecret"]>): ReturnType<Store["deleteSecret"]> {
     return secrets.deleteSecret(this.ctx, ...args);
   }

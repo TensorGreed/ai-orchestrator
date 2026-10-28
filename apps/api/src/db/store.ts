@@ -1140,6 +1140,11 @@ export interface Store {
     email?: string | null;
     attributes?: unknown;
   }): Promise<void>;
+  /**
+   * Phase 13.2 — moves an identity from subject `from` to `to` (a one-time key upgrade, such as a bare SAML NameID to
+   * the IdP-scoped key). Does nothing and returns false when `from` does not exist or `to` already does.
+   */
+  renameSsoIdentitySubject(input: { provider: string; from: string; to: string }): Promise<boolean>;
 
   // ---- Secrets and external secret providers
 

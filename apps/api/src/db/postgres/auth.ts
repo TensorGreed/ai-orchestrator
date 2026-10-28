@@ -575,6 +575,26 @@ export async function findSsoIdentity(ctx: PgContext, provider: string, subject:
   };
 }
 
+export async function renameSsoIdentitySubject(
+  ctx: PgContext,
+  input: Parameters<Store["renameSsoIdentitySubject"]>[0]
+): ReturnType<Store["renameSsoIdentitySubject"]> {
+  // ON CONFLICT cannot apply to an UPDATE: the NOT EXISTS guard covers the usual case and a concurrent insert of `to`
+  // that slips past it surfaces as a unique violation, reported as "not renamed".
+  try {
+    const result = await ctx.pool.query(
+      `UPDATE sso_identities SET subject = $1, updated_at = $2
+         WHERE provider = $3 AND subject = $4
+           AND NOT EXISTS (SELECT 1 FROM sso_identities WHERE provider = $3 AND subject = $1)`,
+      [input.to, new Date().toISOString(), input.provider, input.from]
+    );
+    return (result.rowCount ?? 0) > 0;
+  } catch (error) {
+    if ((error as { code?: string }).code === "23505") return false;
+    throw error;
+  }
+}
+
 export async function upsertSsoIdentity(ctx: PgContext, input: Parameters<Store["upsertSsoIdentity"]>[0]): ReturnType<Store["upsertSsoIdentity"]> {
   const now = new Date().toISOString();
   // An existing (provider, subject) keeps its id and created_at, as in SQLite.
