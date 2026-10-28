@@ -20,6 +20,12 @@ const booleanFromEnv = z.preprocess((value) => {
   return value;
 }, z.boolean());
 
+/** Like booleanFromEnv, but unset or blank stays undefined (for settings that are only read when a feature is on). */
+const optionalBooleanFromEnv = z.preprocess(
+  (value) => (typeof value === "string" && value.trim() === "" ? undefined : value),
+  booleanFromEnv.optional()
+);
+
 const envSchema = z.object({
   LOG_LEVEL: z.enum(["fatal", "error", "warn", "info", "debug", "trace"]).default("warn"),
   API_PORT: z.coerce.number().int().positive().default(4000),
@@ -72,6 +78,16 @@ const envSchema = z.object({
   LDAP_BASE_DN: z.string().optional(),
   LDAP_USER_FILTER: z.string().default("(mail={{email}})"),
   LDAP_GROUPS_ATTRIBUTE: z.string().default("memberOf"),
+  // Phase 13.2 — OpenID Connect SSO. Off unless OIDC_ENABLED=true; the rest is checked (and defaulted) by
+  // resolveOidcSettings only then. No zod defaults here, so hand-built AppConfig objects keep typechecking.
+  OIDC_ENABLED: optionalBooleanFromEnv,
+  OIDC_ISSUER: z.string().optional(),
+  OIDC_CLIENT_ID: z.string().optional(),
+  OIDC_CLIENT_SECRET: z.string().optional(),
+  OIDC_REDIRECT_URL: z.string().optional(),
+  OIDC_SCOPES: z.string().optional(),
+  OIDC_GROUPS_CLAIM: z.string().optional(),
+  OIDC_REQUIRE_EMAIL_VERIFIED: optionalBooleanFromEnv,
 
   // Phase 5.3 — External secrets
   EXTERNAL_SECRETS_CACHE_TTL_MS: z.coerce.number().int().nonnegative().default(300000),
@@ -492,6 +508,8 @@ export function parseConfig(env: Record<string, string | undefined>): AppConfig 
   }
   // Phase 13.1 — the Postgres settings are checked only when DB_TYPE=postgres (fail fast, before the store opens).
   if (isPostgresDbType(env.DB_TYPE)) parsePostgresSettings(env);
+  // Phase 13.2 — the OIDC settings are checked only when OIDC_ENABLED=true (fail fast at startup).
+  resolveOidcSettings(parsed.data);
 
   return parsed.data;
 }
@@ -707,4 +725,107 @@ export function parsePostgresSettings(env: Record<string, string | undefined>): 
 export function describePostgresSettings(settings: Pick<PostgresSettings, "host" | "port" | "database" | "user" | "ssl">): string {
   const tls = settings.ssl === false ? "no TLS" : settings.ssl.rejectUnauthorized ? "TLS, certificate verified" : "TLS, certificate NOT verified";
   return `postgres ${settings.user}@${settings.host}:${settings.port}/${settings.database} (${tls})`;
+}
+
+// ---------------------------------------------------------------------------
+// Phase 13.2 — OpenID Connect single sign-on. Everything is optional; with OIDC_ENABLED unset nothing is read.
+// OIDC_CLIENT_SECRET is never part of an error message or log line.
+// ---------------------------------------------------------------------------
+
+export interface OidcSettings {
+  /** Exactly the IdP's `issuer` value (compared verbatim with discovery and the ID token's `iss`). */
+  issuer: string;
+  clientId: string;
+  /** Unset for a public client (PKCE only). */
+  clientSecret?: string;
+  /** Where the IdP sends the browser back: `<origin>/api/auth/oidc/callback`. */
+  redirectUrl: string;
+  /** Space-separated; always contains `openid`. */
+  scopes: string;
+  /** Claim (or dotted path, e.g. `realm_access.roles`) holding the user's groups. */
+  groupsClaim: string;
+  /** Link or create users by email only when the IdP marks it verified (`email_verified: true`). */
+  requireEmailVerified: boolean;
+  /** Web page the browser lands on after the callback (success, or `?sso_error=<code>`). */
+  postLoginUrl: string;
+}
+
+type OidcConfigInput = Pick<
+  AppConfig,
+  | "OIDC_ENABLED"
+  | "OIDC_ISSUER"
+  | "OIDC_CLIENT_ID"
+  | "OIDC_CLIENT_SECRET"
+  | "OIDC_REDIRECT_URL"
+  | "OIDC_SCOPES"
+  | "OIDC_GROUPS_CLAIM"
+  | "OIDC_REQUIRE_EMAIL_VERIFIED"
+  | "WEB_ORIGIN"
+>;
+
+const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
+
+/** https, or plain http on a loopback host (local IdPs in development and tests). */
+export function isAllowedOidcUrl(url: URL): boolean {
+  if (url.protocol === "https:") return true;
+  return url.protocol === "http:" && LOOPBACK_HOSTS.has(url.hostname.toLowerCase());
+}
+
+function firstWebOrigin(webOrigin: string): string {
+  const base = webOrigin.split(",").map((entry) => entry.trim()).find(Boolean) || "http://localhost:5173";
+  return base.replace(/\/+$/, "");
+}
+
+/**
+ * Returns the OIDC settings when OIDC_ENABLED=true, null otherwise. Throws a clear error (naming the variable, never
+ * its value for the secret) when OIDC is on but misconfigured.
+ */
+export function resolveOidcSettings(config: OidcConfigInput): OidcSettings | null {
+  if (config.OIDC_ENABLED !== true) return null;
+  const fail = (detail: string): never => {
+    throw new Error(`Invalid OIDC configuration: ${detail}`);
+  };
+  const issuer = config.OIDC_ISSUER?.trim() ?? "";
+  if (!issuer) fail("OIDC_ISSUER is required when OIDC_ENABLED=true");
+  let issuerUrl: URL | null = null;
+  try {
+    issuerUrl = new URL(issuer);
+  } catch {
+    fail("OIDC_ISSUER must be an absolute URL");
+  }
+  if (!issuerUrl || !isAllowedOidcUrl(issuerUrl)) fail("OIDC_ISSUER must use https (plain http only on localhost)");
+  if (issuerUrl && (issuerUrl.search || issuerUrl.hash)) fail("OIDC_ISSUER must not have a query or fragment");
+
+  const clientId = config.OIDC_CLIENT_ID?.trim() ?? "";
+  if (!clientId) fail("OIDC_CLIENT_ID is required when OIDC_ENABLED=true");
+  const clientSecret = config.OIDC_CLIENT_SECRET?.trim() ? config.OIDC_CLIENT_SECRET.trim() : undefined;
+
+  const webBase = firstWebOrigin(config.WEB_ORIGIN);
+  const redirectUrl = config.OIDC_REDIRECT_URL?.trim() || `${webBase}/api/auth/oidc/callback`;
+  let parsedRedirect: URL | null = null;
+  try {
+    parsedRedirect = new URL(redirectUrl);
+  } catch {
+    fail("OIDC_REDIRECT_URL must be an absolute URL");
+  }
+  if (!parsedRedirect || (parsedRedirect.protocol !== "https:" && parsedRedirect.protocol !== "http:")) {
+    fail("OIDC_REDIRECT_URL must be an http(s) URL");
+  }
+  if (parsedRedirect?.hash) fail("OIDC_REDIRECT_URL must not have a fragment");
+
+  const scopeList = (config.OIDC_SCOPES?.trim() || "openid email profile").split(/\s+/).filter(Boolean);
+  if (!scopeList.includes("openid")) fail("OIDC_SCOPES must include openid");
+
+  const groupsClaim = config.OIDC_GROUPS_CLAIM?.trim() || "groups";
+
+  return {
+    issuer,
+    clientId,
+    clientSecret,
+    redirectUrl,
+    scopes: [...new Set(scopeList)].join(" "),
+    groupsClaim,
+    requireEmailVerified: config.OIDC_REQUIRE_EMAIL_VERIFIED !== false,
+    postLoginUrl: `${webBase}/`
+  };
 }
