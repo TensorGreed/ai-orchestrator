@@ -49,7 +49,11 @@ Capture never fails or slows a production run. The run answers first; the captur
 
 The settings panel shows the last run capture dropped, with when and why in plain words ("Last run not captured: …, because a personal value was in an MCP server or tool name"), so a workflow whose runs are always dropped does not just show an empty inbox. The `GET` settings answer carries it as `lastDrop` (`{ outcome, at }`, or null); the outcomes noted are `dropped_identifier_value`, `dropped_unscannable`, `dropped_incomplete_mask`, `skipped_too_large` and `failed`.
 
-A run whose final history is never written gives its slot back once its own timeout (at most 24 hours) plus a minute has passed. That check runs every minute, and again before a run is refused for the daily limit. Failure logs carry the error's class and a scrubbed message (secrets removed, personal data masked, long digit runs hidden), never a value.
+A run whose final history is never written gives its slot back once its own timeout (at most 24 hours) plus a minute has passed. That check runs every minute, and again before a run is refused for the daily limit.
+
+On one API instance the daily limit is never exceeded: a sampled run holds its slot before the day's count is read, so two runs starting together cannot both take the last slot. Runs that start together near the limit can all be skipped, though, so a day can end a few captures under it. The captures stored that day are counted from the database, which every instance shares, but the runs being recorded right now are counted in each API process's memory. With several API instances, each one sees the stored captures and only its own runs in flight, so the limit is approximate: a day can end over it by at most the runs the other instances were recording when a run was admitted. The "today" figure in the settings line is counted the same way, by the instance that answers.
+
+Failure logs carry the error's class and a scrubbed message (secrets removed, personal data masked, long digit runs hidden), never a value.
 
 ## Masking
 

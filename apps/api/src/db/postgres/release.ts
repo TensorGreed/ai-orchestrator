@@ -6,11 +6,14 @@
  * Concurrency: every check-then-write runs in one transaction on one client and takes a row lock on what it checks
  * (`SELECT … FOR UPDATE`), or is a single conditional UPDATE whose row count is the answer, so a decision or a
  * publish applies once even when two API processes race on the same row.
+ *
+ * Lock order: a transaction that locks a workflow's row does so before any other row of that workflow (gate, request,
+ * version), so publish, rollback, unpublish, approval publish, gate save and workflow delete never wait in a cycle.
  */
 import type { PoolClient } from "pg";
-import { GUARD_SIMULATION_JOB_DATASET_PREFIX } from "@ai-orchestrator/shared";
+import { GUARD_SIMULATION_JOB_DATASET_PREFIX, releaseGateRestrictsToAdmins } from "@ai-orchestrator/shared";
 import type { Store, ReleaseApprovalDecisionInput, ReleaseGateCasesChange, GateCaseDecisionRecordInput } from "../store.js";
-import { UnpublishGateEnforcedError } from "../store-errors.js";
+import { ReleaseGateEnforcedError } from "../store-errors.js";
 import type {
   ApprovalReadScope,
   GateCaseRequestRecord,
@@ -194,6 +197,22 @@ async function readReleaseGate(db: Queryable, workflowId: string, forUpdate: boo
   return row ? mapReleaseGateRow(row) : null;
 }
 
+/**
+ * The gate state a write sees (on = enabled; enforced = enabled and enforced), read in the write's transaction after
+ * it locked the workflow row, so a gate that was enforced before the lock was granted is seen. With
+ * `refuseIfGateEnforced` an enforced gate throws `ReleaseGateEnforcedError`, which rolls the transaction back.
+ */
+export async function gateStateForWrite(
+  client: Queryable,
+  workflowId: string,
+  refuseIfGateEnforced: boolean | undefined
+): Promise<{ gateEnabled: boolean; gateEnforced: boolean }> {
+  const gate = await readReleaseGate(client, workflowId, false);
+  const gateEnforced = releaseGateRestrictsToAdmins(gate);
+  if (refuseIfGateEnforced && gateEnforced) throw new ReleaseGateEnforcedError();
+  return { gateEnabled: Boolean(gate?.enabled), gateEnforced };
+}
+
 const RELEASE_GATE_COLUMNS = `workflow_id, enabled, enforced, dataset_ids_json, candidate_options_json, policy_json, require_approval, approvers_json, updated_at, updated_by`;
 
 function releaseGateParams(record: ReleaseGateRecord): unknown[] {
@@ -265,8 +284,14 @@ async function decideGateCaseRequestOn(db: Queryable, input: GateCaseDecisionRec
  * The publish itself, on a transaction's client: the workflow row is locked first, so two publishes of one workflow
  * run one after the other and the second sees the first's version (and is refused when it expected the old one).
  */
-async function publishOn(client: PoolClient, release: Omit<WorkflowReleaseRecord, "previousVersion">, expectedPrevious: number | null): Promise<WorkflowReleaseRecord | null> {
+async function publishOn(
+  client: PoolClient,
+  release: Omit<WorkflowReleaseRecord, "previousVersion">,
+  expectedPrevious: number | null,
+  options: { refuseIfGateEnforced?: boolean } = {}
+): Promise<WorkflowReleaseRecord | null> {
   const current = await readPublishedVersion(client, release.workflowId, true);
+  if (options.refuseIfGateEnforced) await gateStateForWrite(client, release.workflowId, true);
   if (current !== expectedPrevious) return null;
   const pinned = await client.query(`UPDATE workflow_versions SET pinned = 1 WHERE workflow_id = $1 AND version = $2`, [release.workflowId, release.version]);
   if ((pinned.rowCount ?? 0) === 0) return null;
@@ -362,12 +387,13 @@ export async function hasReleasedVersion(ctx: PgContext, workflowId: string, ver
 export async function publishWorkflowVersion(
   ctx: PgContext,
   release: Omit<WorkflowReleaseRecord, "previousVersion">,
-  expectedPrevious: number | null
+  expectedPrevious: number | null,
+  options: { refuseIfGateEnforced?: boolean } = {}
 ): Promise<WorkflowReleaseRecord | null> {
   const refusal = new Refused("conflict");
   try {
     return await ctx.withTransaction(async (client) => {
-      const committed = await publishOn(client, release, expectedPrevious);
+      const committed = await publishOn(client, release, expectedPrevious, options);
       // A refusal leaves nothing behind (as the SQLite transaction did: it wrote nothing before refusing).
       if (!committed) throw refusal;
       return committed;
@@ -385,11 +411,7 @@ export async function publishWorkflowVersion(
 export async function unpublishWorkflowVersion(ctx: PgContext, entry: Parameters<Store["unpublishWorkflowVersion"]>[0]): ReturnType<Store["unpublishWorkflowVersion"]> {
   return await ctx.withTransaction(async (client) => {
     const current = await readPublishedVersion(client, entry.workflowId, true);
-    // The gate row is read under the workflow lock, so a gate that was enforced before the lock was granted is seen.
-    const gate = await readReleaseGate(client, entry.workflowId, false);
-    const gateEnabled = Boolean(gate?.enabled);
-    const gateEnforced = gateEnabled && Boolean(gate?.enforced);
-    if (entry.refuseIfGateEnforced && gateEnforced) throw new UnpublishGateEnforcedError();
+    const { gateEnabled, gateEnforced } = await gateStateForWrite(client, entry.workflowId, entry.refuseIfGateEnforced);
     if (current === null) return null;
     if (entry.expectedVersion !== undefined && entry.expectedVersion !== null && entry.expectedVersion !== current) return null;
     const released = await client.query(
@@ -692,6 +714,14 @@ export async function markEvalRunsReleaseIneligible(ctx: PgContext, runIds: read
 /**
  * Compare-and-set on the stored gate: the row is locked and compared with `expected`; with no row yet, the insert
  * itself is the check (ON CONFLICT DO NOTHING: a gate created meanwhile refuses this save).
+ *
+ * Lock order: the workflow row first, then the gate row. A publish, rollback, unpublish or workflow delete locks the
+ * workflow row and then reads the gate, so a gate save waits for one already holding the workflow row (which then
+ * acted on the gate as it was), and one that starts after the save waits for it and reads the saved gate. This holds
+ * when no gate row exists yet, which a lock on the gate row alone would not cover. No transaction locks the gate row
+ * and then the workflow row (gate case changes lock the gate row only; a baseline publish after a gate save runs in
+ * its own transaction), so the order cannot deadlock. A gate whose workflow is gone has no row to lock, and nothing
+ * is then left to publish or delete.
  */
 export async function saveReleaseGate(
   ctx: PgContext,
@@ -701,6 +731,7 @@ export async function saveReleaseGate(
   try {
     return await ctx.withTransaction(async (client) => {
       const workflowId = input.gate?.workflowId ?? input.expected?.workflowId ?? "";
+      await readPublishedVersion(client, workflowId, true);
       const current = await readReleaseGate(client, workflowId, true);
       if (JSON.stringify(current) !== JSON.stringify(input.expected)) return null;
       let saved: ReleaseGateRecord | null = current;
@@ -764,6 +795,9 @@ export async function approveReleaseRequestAndPublish(
 ): Promise<{ release: WorkflowReleaseRecord } | { refused: "decided" | "conflict" }> {
   try {
     return await ctx.withTransaction(async (client) => {
+      // The workflow row before the request row, the order every release write takes (see saveReleaseGate), so this
+      // never waits for the workflow row while a workflow delete holding it waits for the request row.
+      await readPublishedVersion(client, release.workflowId, true);
       if (!(await decideReleaseRequestOn(client, decision))) throw new Refused("decided");
       const committed = await publishOn(client, release, expectedPrevious);
       // Throwing rolls the decision back.

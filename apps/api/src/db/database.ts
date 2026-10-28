@@ -60,9 +60,9 @@ import {
   type McpSandboxSettings,
   type McpSandboxStatus
 } from "@ai-orchestrator/shared";
-import { isEmptyDataLabels, labelsForUntrackedSave, mergeDataLabels, parseStoredDataLabels, type DataLabels } from "@ai-orchestrator/shared";
+import { isEmptyDataLabels, labelsForUntrackedSave, mergeDataLabels, parseStoredDataLabels, releaseGateRestrictsToAdmins, type DataLabels } from "@ai-orchestrator/shared";
 import { queuedRunTimeoutMs, STUCK_JOB_MARGIN_MS } from "./queue-timeouts.js";
-import { isForeignKeyViolation, ProjectNotEmptyError, StoreReferenceMissingError, UnpublishGateEnforcedError } from "./store-errors.js";
+import { isForeignKeyViolation, ProjectNotEmptyError, StoreReferenceMissingError, ReleaseGateEnforcedError } from "./store-errors.js";
 import { clampLimit, LIMIT_MAX } from "./store-limits.js";
 import {
   auditEntryHash,
@@ -3946,7 +3946,10 @@ export class SqliteStore implements Store {
     return row?.created_by ? toString(row.created_by) : null;
   }
 
-  async deleteWorkflow(id: string): Promise<boolean> {
+  async deleteWorkflow(id: string, options: { refuseIfGateEnforced?: boolean } = {}): Promise<boolean> {
+    // The whole delete runs synchronously, so nothing can change the gate between this read and the last delete. A
+    // workflow that is already gone is not refused: the delete finds nothing and the caller answers 404.
+    if (options.refuseIfGateEnforced && this.queryOne(`SELECT id FROM workflows WHERE id = ?`, [id])) this.gateStateForWriteSync(id, true);
     const hasTable = (tableName: string): boolean => {
       const row = this.queryOne<{ count: number }>(
         `SELECT COUNT(*) as count FROM sqlite_master WHERE type = 'table' AND name = ?`,
@@ -8117,6 +8120,17 @@ export class SqliteStore implements Store {
     return row ? mapReleaseGateRow(row) : null;
   }
 
+  /**
+   * The gate state a write sees (on = enabled; enforced = enabled and enforced). Called inside the write's
+   * transaction; with `refuseIfGateEnforced` an enforced gate throws `ReleaseGateEnforcedError` before anything is written.
+   */
+  private gateStateForWriteSync(workflowId: string, refuseIfGateEnforced: boolean | undefined): { gateEnabled: boolean; gateEnforced: boolean } {
+    const gate = this.getReleaseGateSync(workflowId);
+    const gateEnforced = releaseGateRestrictsToAdmins(gate);
+    if (refuseIfGateEnforced && gateEnforced) throw new ReleaseGateEnforcedError();
+    return { gateEnabled: Boolean(gate?.enabled), gateEnforced };
+  }
+
   async upsertReleaseGate(record: ReleaseGateRecord): Promise<ReleaseGateRecord> {
     return this.upsertReleaseGateSync(record);
   }
@@ -8169,12 +8183,21 @@ export class SqliteStore implements Store {
    * published version is no longer `expectedPrevious` (another publish got
    * there first) or the version row is gone.
    */
-  async publishWorkflowVersion(release: Omit<WorkflowReleaseRecord, "previousVersion">, expectedPrevious: number | null): Promise<WorkflowReleaseRecord | null> {
-    return this.publishWorkflowVersionSync(release, expectedPrevious);
+  async publishWorkflowVersion(
+    release: Omit<WorkflowReleaseRecord, "previousVersion">,
+    expectedPrevious: number | null,
+    options: { refuseIfGateEnforced?: boolean } = {}
+  ): Promise<WorkflowReleaseRecord | null> {
+    return this.publishWorkflowVersionSync(release, expectedPrevious, options);
   }
 
-  private publishWorkflowVersionSync(release: Omit<WorkflowReleaseRecord, "previousVersion">, expectedPrevious: number | null): WorkflowReleaseRecord | null {
+  private publishWorkflowVersionSync(
+    release: Omit<WorkflowReleaseRecord, "previousVersion">,
+    expectedPrevious: number | null,
+    options: { refuseIfGateEnforced?: boolean } = {}
+  ): WorkflowReleaseRecord | null {
     return this.transaction(() => {
+      if (options.refuseIfGateEnforced) this.gateStateForWriteSync(release.workflowId, true);
       const current = this.getPublishedVersionSync(release.workflowId);
       if (current !== expectedPrevious) return null;
       const pinned = this.db.prepare(`UPDATE workflow_versions SET pinned = 1 WHERE workflow_id = ? AND version = ?`).run(release.workflowId, release.version);
@@ -8263,10 +8286,7 @@ export class SqliteStore implements Store {
   /** Unpublish in one transaction (see `Store.unpublishWorkflowVersion`). */
   async unpublishWorkflowVersion(entry: Parameters<Store["unpublishWorkflowVersion"]>[0]): ReturnType<Store["unpublishWorkflowVersion"]> {
     return this.transaction(() => {
-      const gate = this.getReleaseGateSync(entry.workflowId);
-      const gateEnabled = Boolean(gate?.enabled);
-      const gateEnforced = gateEnabled && Boolean(gate?.enforced);
-      if (entry.refuseIfGateEnforced && gateEnforced) throw new UnpublishGateEnforcedError();
+      const { gateEnabled, gateEnforced } = this.gateStateForWriteSync(entry.workflowId, entry.refuseIfGateEnforced);
       const current = this.getPublishedVersionSync(entry.workflowId);
       if (current === null) return null;
       if (entry.expectedVersion !== undefined && entry.expectedVersion !== null && entry.expectedVersion !== current) return null;

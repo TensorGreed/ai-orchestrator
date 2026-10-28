@@ -7,6 +7,7 @@ import type { PoolClient } from "pg";
 import { ProjectNotEmptyError } from "../store-errors.js";
 import { type Store } from "../store.js";
 import { parseTagsJson, toNum, toStr } from "./helpers.js";
+import { gateStateForWrite } from "./release.js";
 import type { PgContext } from "./context.js";
 
 // Workflow methods
@@ -140,11 +141,17 @@ export async function upsertWorkflow(ctx: PgContext, workflow: Workflow, options
   return payload;
 }
 
-export async function deleteWorkflow(ctx: PgContext, id: string): Promise<boolean> {
+export async function deleteWorkflow(ctx: PgContext, id: string, options: { refuseIfGateEnforced?: boolean } = {}): Promise<boolean> {
   // Read before the row goes: its nodes name its legacy session namespaces.
   const legacyNamespaces = ((await ctx.store.getWorkflow(id))?.nodes ?? []).map((node) => `${id}:${node.id}`);
   return ctx.withTransaction(async (client) => {
     const run = (sql: string, params: unknown[]) => client.query(sql, params);
+    // The workflow row is locked first, as a publish, an unpublish or a gate save does (workflow row, then the rest), so
+    // a delete never holds a workflow version row while waiting for the workflow row. With `refuseIfGateEnforced` the
+    // gate is then read before anything goes; a gate save holds the workflow row while it writes, so it is seen.
+    // A workflow that is already gone is not refused: the delete finds nothing and the caller answers 404.
+    const locked = await run(`SELECT id FROM workflows WHERE id = $1 FOR UPDATE`, [id]);
+    if (options.refuseIfGateEnforced && locked.rows.length > 0) await gateStateForWrite(client, id, true);
     await run(`DELETE FROM execution_history WHERE workflow_id = $1`, [id]);
     await run(`DELETE FROM workflow_executions WHERE workflow_id = $1`, [id]);
     // Phase 11.2 — decided requests stay as the audit trail; pending ones end with their paused run.
