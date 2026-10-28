@@ -17,6 +17,7 @@ import {
 import type { ReplayCaptureSettingsRecord } from "../database.js";
 import { type Store } from "../store.js";
 import type { PgContext } from "./context.js";
+import { deleteUnlockedInBatches } from "./prune.js";
 import { storedJsonb, toNum, toStr } from "./helpers.js";
 
 const REPLAY_RECORDING_SUMMARY_COLUMNS =
@@ -160,8 +161,8 @@ export async function oldestReplayCaptureIds(ctx: PgContext, ...[workflowId, cou
 }
 
 export async function pruneReplayCaptures(ctx: PgContext, ...[before]: Parameters<Store["pruneReplayCaptures"]>): ReturnType<Store["pruneReplayCaptures"]> {
-  const result = await ctx.pool.query(`DELETE FROM replay_recordings WHERE status = 'candidate' AND captured_at < $1`, [before]);
-  return result.rowCount ?? 0;
+  // Never waits for a row lock (see prune.ts): a capture a workflow delete or a promotion holds is left for a later run.
+  return await deleteUnlockedInBatches(ctx.pool, "replay_recordings", "status = 'candidate' AND captured_at < $1", [before]);
 }
 
 export async function promoteReplayCapture(ctx: PgContext, ...[id, input]: Parameters<Store["promoteReplayCapture"]>): ReturnType<Store["promoteReplayCapture"]> {

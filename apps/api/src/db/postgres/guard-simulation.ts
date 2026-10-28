@@ -7,6 +7,7 @@ import type { GuardSimulationRecord } from "../database.js";
 import { type Store } from "../store.js";
 import { toNum, toStr } from "./helpers.js";
 import type { PgContext } from "./context.js";
+import { deleteRunsUnlocked, deleteUnlockedInBatches } from "./prune.js";
 
 type Row = Record<string, unknown>;
 
@@ -115,7 +116,11 @@ export async function listRunningGuardSimulations(ctx: PgContext): Promise<Guard
   return rows.map(mapGuardSimulationRow);
 }
 
-/** Deletes simulations created before `before`, with their replay jobs and case results (one transaction). */
+/**
+ * Deletes simulations created before `before`, with their finished replay jobs and case results (one transaction).
+ * Never waits for a row lock (see prune.ts): a job or simulation another transaction holds (a workflow delete under
+ * way, a job being finished) is left for a later run. Returns the simulations deleted.
+ */
 export async function pruneGuardSimulations(ctx: PgContext, input: { before: string }): Promise<number> {
   return ctx.withTransaction(async (client) => {
     const rows = (await client.query<{ id: string; job_ids_json: string | null }>(`SELECT id, job_ids_json FROM guard_simulations WHERE created_at < $1`, [input.before])).rows;
@@ -125,12 +130,7 @@ export async function pruneGuardSimulations(ctx: PgContext, input: { before: str
       const parsed = row.job_ids_json ? safeJsonParse(toStr(row.job_ids_json)) : null;
       if (Array.isArray(parsed)) jobIds.push(...parsed.map((entry) => String(entry)));
     }
-    if (jobIds.length > 0) {
-      await client.query(`DELETE FROM eval_results WHERE run_id = ANY($1::text[])`, [jobIds]);
-      await client.query(`DELETE FROM eval_runs WHERE id = ANY($1::text[]) AND status NOT IN ('queued', 'running')`, [jobIds]);
-    }
-    const ids = rows.map((row) => toStr(row.id));
-    await client.query(`DELETE FROM guard_simulations WHERE id = ANY($1::text[])`, [ids]);
-    return ids.length;
+    await deleteRunsUnlocked(client, jobIds);
+    return await deleteUnlockedInBatches(client, "guard_simulations", "id = ANY($1::text[])", [rows.map((row) => toStr(row.id))]);
   });
 }
