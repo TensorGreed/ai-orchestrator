@@ -228,6 +228,7 @@ type ClaimedItem = {
   workflowId: string;
   payload: Record<string, unknown>;
   attempts: number;
+  scheduledAt?: string;
   pool?: string;
   claimToken?: string;
   waitMs?: number;
@@ -618,7 +619,10 @@ export class QueueConsumer {
       settled: Promise.resolve()
     };
     this.active.set(item.id, job);
-    this.observer.onClaimed?.({ id: item.id, pool: item.pool ?? DEFAULT_QUEUE_POOL, waitMs: item.waitMs ?? null });
+    // A leased claim measured its wait in database time; an unleased one (one process) measures it here.
+    const dueAtMs = item.scheduledAt ? Date.parse(item.scheduledAt) : Number.NaN;
+    const waitMs = item.waitMs ?? (Number.isFinite(dueAtMs) ? Math.max(0, Date.now() - dueAtMs) : null);
+    this.observer.onClaimed?.({ id: item.id, pool: item.pool ?? DEFAULT_QUEUE_POOL, waitMs });
     job.settled = this.executeItem(item, job);
   }
 

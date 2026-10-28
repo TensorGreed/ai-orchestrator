@@ -90,6 +90,13 @@ export class MetricsService {
   /** Phase 15.6 — production capture outcomes (captured, skipped_daily_limit, discarded_status, failed, ...). */
   private replayCaptures = new Map<string, number>();
 
+  /** Phase 13.1 — queue depth per pool (sampled by the leader), dead letters, waits, lost workers, free slots. */
+  private queueDepth: Array<{ pool: string; pending: number; running: number }> | null = null;
+  private queueDlq = 0;
+  private queueWait = new Histogram([0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 300]);
+  private queueLostTotal = 0;
+  private workerSlotsFree: number | null = null;
+
   private readonly startTime = Date.now();
 
   constructor(options: MetricsOptions = {}) {
@@ -135,6 +142,31 @@ export class MetricsService {
 
   replayCaptureCounts(): Record<string, number> {
     return Object.fromEntries(this.replayCaptures);
+  }
+
+  /** Phase 13.1 — the queue's pending and running jobs per pool and its dead letters. */
+  setQueueDepth(byPool: Array<{ pool: string; pending: number; running: number }>, dlq: number): void {
+    if (!this.enabled) return;
+    this.queueDepth = byPool.map((entry) => ({ ...entry }));
+    this.queueDlq = dlq;
+  }
+
+  /** Phase 13.1 — how long a job waited between becoming due and being claimed. */
+  recordQueueWait(waitMs: number): void {
+    if (!this.enabled || !Number.isFinite(waitMs)) return;
+    this.queueWait.observe(Math.max(0, waitMs) / 1000);
+  }
+
+  /** Phase 13.1 — jobs the reaper took back because their worker was lost. */
+  recordQueueLost(count: number): void {
+    if (!this.enabled) return;
+    this.queueLostTotal += count;
+  }
+
+  /** Phase 13.1 — this worker's free job slots. */
+  setWorkerSlotsFree(free: number): void {
+    if (!this.enabled) return;
+    this.workerSlotsFree = free;
   }
 
   setActiveExecutions(count: number): void {
@@ -230,6 +262,26 @@ export class MetricsService {
       lines.push(`# HELP ${p}_replay_captures_total Production runs considered for capture, by outcome`);
       lines.push(`# TYPE ${p}_replay_captures_total counter`);
       for (const [outcome, count] of this.replayCaptures) lines.push(`${p}_replay_captures_total{outcome="${outcome}"} ${count}`);
+    }
+
+    if (this.queueDepth !== null) {
+      const label = (pool: string) => pool.replace(/[\\"\n]/g, "_");
+      lines.push(`# HELP ${p}_queue_pending Pending queue jobs per pool`);
+      lines.push(`# TYPE ${p}_queue_pending gauge`);
+      for (const entry of this.queueDepth) lines.push(`${p}_queue_pending{pool="${label(entry.pool)}"} ${entry.pending}`);
+      lines.push(`# HELP ${p}_queue_running Running queue jobs per pool`);
+      lines.push(`# TYPE ${p}_queue_running gauge`);
+      for (const entry of this.queueDepth) lines.push(`${p}_queue_running{pool="${label(entry.pool)}"} ${entry.running}`);
+      g(`${p}_queue_dlq`, "Dead-lettered queue jobs", this.queueDlq);
+    }
+    if (this.queueWait.getCount() > 0) {
+      h(`${p}_queue_wait_seconds`, "Time a queue job waited between becoming due and being claimed, in seconds", this.queueWait);
+    }
+    if (this.queueDepth !== null || this.queueLostTotal > 0) {
+      c(`${p}_queue_lost_total`, "Queue jobs taken back because their worker was lost", this.queueLostTotal);
+    }
+    if (this.workerSlotsFree !== null) {
+      g(`${p}_worker_slots_free`, "Free job slots on this worker", this.workerSlotsFree);
     }
 
     const slo = this.getSloStatus();

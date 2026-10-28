@@ -100,6 +100,7 @@ import {
   resolveSamlSettings,
   parseTrustProxy,
   resolveSsoMfaSettings,
+  resolveQueueSettings,
   ssoPostLoginUrl,
   type AppConfig
 } from "./config";
@@ -115,7 +116,9 @@ import { JUDGE_PROMPT_MAX_CHARS } from "./services/eval-scorers";
 import { AuthService, type SafeUser, type UserRole } from "./services/auth-service";
 import { SchedulerService } from "./services/scheduler-service";
 import { RunWriteChains } from "./services/run-write-chains.js";
-import { NonRetryableQueueError, QueueService } from "./services/queue-service";
+import { NonRetryableQueueError, QueueFullError, QueueProducer, QueueService } from "./services/queue-service";
+import { AppLifecycle } from "./services/app-lifecycle.js";
+import { DEFAULT_QUEUE_POOL, QUEUE_POOL_PATTERN } from "./db/queue-leases.js";
 import { isConnectedEntrypoint, TriggerService } from "./services/trigger-service";
 import { ApiKeyService } from "./services/api-key-service";
 import { MfaService } from "./services/mfa-service";
@@ -245,7 +248,7 @@ import {
   resolveMcpOAuthRedirectUri
 } from "./services/mcp-oauth-service.js";
 import { isInternalSecretProvider } from "./services/secret-service.js";
-import type { Store } from "./db/store.js";
+import type { QueueClaimFence, Store } from "./db/store.js";
 
 interface Tier1IntegrationSpec {
   id: string;
@@ -1348,6 +1351,8 @@ export interface CreateAppOptions {
   samlClientFactory?: SamlClientFactory;
   /** Where the Fastify logger writes (tests capture log lines); stdout when unset. */
   logStream?: { write(line: string): void };
+  /** Phase 13.1 — readiness and the shutdown drain index.ts runs on SIGTERM/SIGINT; one is made when unset. */
+  lifecycle?: AppLifecycle;
 }
 
 /** What provisionSsoUser needs to link or create the local user of an SSO login. */
@@ -1391,6 +1396,9 @@ const SSO_MFA_CHALLENGE_COOKIE_PATH = "/api/auth/login/mfa";
 
 /** Phase 13.1 — how often the leader re-reads schedules and triggers when several instances share the database. */
 export const SCHEDULE_SYNC_INTERVAL_MS = 15_000;
+
+/** Phase 13.1 — how often the leader samples the queue depth for /metrics. */
+const QUEUE_DEPTH_SAMPLE_INTERVAL_MS = 15_000;
 
 export async function createApp(
   config: AppConfig,
@@ -1850,6 +1858,12 @@ export async function createApp(
     app.log.error({ executionId, error: secretService.redact(error instanceof Error ? error.message : String(error)) }, "Progress write failed");
   });
 
+  /**
+   * Phase 13.1 — queued runs in cluster mode, by execution id: the claim their history writes are fenced on, so a
+   * worker whose claim was taken back cannot overwrite the record of the attempt that replaced it.
+   */
+  const queueRunFences = new Map<string, QueueClaimFence>();
+
   const persistExecutionHistoryRecord = async (
     record: ExecutionHistoryRecord,
     meta: {
@@ -1875,7 +1889,11 @@ export async function createApp(
     try {
       // A progress write never replaces a finished run's record, and a final write never replaces a cancel that
       // committed after the abort check above (the store refuses both), whatever order writes commit in.
-      const written = await store.saveExecutionHistory(record, meta.phase === "progress" ? { unlessFinished: true } : { unlessCanceled: true });
+      const fence = queueRunFences.get(meta.executionId);
+      const written = await store.saveExecutionHistory(
+        record,
+        meta.phase === "progress" ? { unlessFinished: true, ...(fence ? { fence } : {}) } : { unlessCanceled: true, ...(fence ? { fence } : {}) }
+      );
       if (!written) {
         // Refused: the stored record (a cancel, or a finished run) stays, so this run is not stored. Like the
         // aborted branch above: no capture, no metrics, and the caller skips the release and run context.
@@ -4900,7 +4918,7 @@ export async function createApp(
       "/api/auth/mfa/disable"
     ];
     const WEBHOOK_PREFIXES = ["/webhook/", "/webhook-test/", "/api/webhooks/"];
-    const PROBE_URLS = new Set(["/health", "/metrics"]);
+    const PROBE_URLS = new Set(["/health", "/ready", "/metrics"]);
     app.addHook("onRoute", (routeOptions) => {
       const url = String(routeOptions.url ?? "");
       const isProbe = PROBE_URLS.has(url);
@@ -4993,7 +5011,7 @@ export async function createApp(
   // useful spans.
   if (config.OTEL_HTTP_SERVER_SPANS) {
     const spanByReqId = new Map<string, ReturnType<typeof tracingService.startSpan>>();
-    const skipPaths = new Set(["/health", "/metrics"]);
+    const skipPaths = new Set(["/health", "/ready", "/metrics"]);
     app.addHook("onRequest", async (request) => {
       if (skipPaths.has(request.url.split("?")[0] ?? "")) return;
       const headers = request.headers;
@@ -12731,149 +12749,290 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
   // Queue endpoints
   // -------------------------------------------------------------------------
 
+  // Phase 13.1 — cluster mode (Postgres with HA on) adds heartbeat leases, the lease reaper and pools. Outside it the
+  // consumer runs today's unleased path.
+  const queueClusterMode = config.HA_ENABLED && store instanceof PostgresStore;
+  const queueSettings = resolveQueueSettings(config, { clusterMode: queueClusterMode });
+  // The producer exists on every instance (any WORKER_MODE), so an api replica accepts /enqueue for the workers.
+  const queueProducer = queueService?.producer ?? new QueueProducer(store, { maxPending: queueSettings.maxPending });
+  const lifecycle = options.lifecycle ?? new AppLifecycle();
+  lifecycle.setLogger({
+    info: (message, fields) => app.log.info(fields ?? {}, message),
+    warn: (message, fields) => app.log.warn(fields ?? {}, message)
+  });
+
+  /** A queued job: a decided approval resume, or a run of the published version. */
+  const runQueuedJob = async (payload: Parameters<Parameters<QueueService["setHandler"]>[0]>[0], context: Parameters<Parameters<QueueService["setHandler"]>[0]>[1]) => {
+    // Phase 11.2 — a decided approval resumes on the queue.
+    if (payload.resume) {
+      const resumed = await runApprovalResume(payload.resume);
+      app.log.info({ executionId: payload.resume.executionId, status: resumed?.status ?? "skipped" }, "Queued approval resume completed");
+      return;
+    }
+    // Queued runs (`POST /api/workflows/:id/enqueue`) are production traffic: the version published when the job runs.
+    const workflow = await productionWorkflow(payload.workflowId);
+    if (!workflow) {
+      throw new Error(await releaseService.productionRefusal(payload.workflowId) ?? `Workflow not found: ${payload.workflowId}`);
+    }
+    // A job a user enqueued runs only if that user may still run the
+    // workflow: a revoked membership or a deleted account stops it.
+    // Retrying cannot fix that, so the job goes straight to the DLQ.
+    let enqueuedBy: SafeUser | null = null;
+    if (payload.enqueuedByUserId) {
+      const found = await store.getUserById(payload.enqueuedByUserId);
+      enqueuedBy = found ? { id: found.id, email: found.email, role: found.role as UserRole } : null;
+      if (!enqueuedBy || !(await runAccess.workflow(enqueuedBy, workflow.id, "workflow:execute")).ok) {
+        const reason = enqueuedBy ? "no_execute_permission" : "user_not_found";
+        await auditService.record({
+          category: "workflow",
+          eventType: "queue.job_refused",
+          action: "execute",
+          outcome: "denied",
+          actor: enqueuedBy ? { userId: enqueuedBy.id, email: enqueuedBy.email, type: "user" } : { userId: payload.enqueuedByUserId, type: "user" },
+          resourceType: "workflow",
+          resourceId: workflow.id,
+          projectId: workflow.projectId ?? DEFAULT_PROJECT_ID,
+          metadata: { executionId: payload.executionId, reason },
+          message: "Queued run refused: the user who queued it may no longer run this workflow."
+        });
+        throw new NonRetryableQueueError(
+          `The user who queued this run can no longer run workflow ${payload.workflowId} (workflow:execute is required).`
+        );
+      }
+    }
+    const startedAt = new Date().toISOString();
+    const result = await runWorkflowExecution({
+      policyActor: enqueuedBy,
+      elicitationsForWorkflow: true,
+      workflow,
+      executionId: payload.executionId,
+      directInput: payload.input,
+      variables: payload.variables,
+      systemPrompt: payload.systemPrompt,
+      userPrompt: payload.userPrompt,
+      sessionId: payload.sessionId,
+      triggerType: payload.triggerType ?? "queue",
+      triggeredBy: payload.triggeredBy,
+      executionTimeoutMs: payload.executionTimeoutMs,
+      customData: payload.customData,
+      channel: "production",
+      // A caller may name its queued run anything ("cron" included): it is a user's run, never the scheduler's.
+      captureInputOrigin: "user"
+    });
+    if (context.signal.aborted) {
+      // The consumer stopped it (lease lost, or draining): its record is the next attempt's, or the reaper's.
+      app.log.warn({ executionId: payload.executionId, workflowId: payload.workflowId, reason: String(context.signal.reason) }, "Queued run stopped by the queue");
+      return;
+    }
+    await persistExecutionHistory({
+      executionId: payload.executionId,
+      workflow,
+      result,
+      triggerType: payload.triggerType ?? "queue",
+      triggeredBy: payload.triggeredBy,
+      requestInput: payload.input,
+      customData: payload.customData
+    });
+    app.log.info(
+      { executionId: payload.executionId, workflowId: payload.workflowId, status: result.status },
+      "Queued workflow execution completed"
+    );
+  };
+
   if (queueService) {
-    queueService.setHandler(async (payload) => {
-      // Phase 11.2 — a decided approval resumes on the queue.
-      if (payload.resume) {
-        const resumed = await runApprovalResume(payload.resume);
-        app.log.info({ executionId: payload.resume.executionId, status: resumed?.status ?? "skipped" }, "Queued approval resume completed");
-        return;
-      }
-      // Queued runs (`POST /api/workflows/:id/enqueue`) are production traffic: the version published when the job runs.
-      const workflow = await productionWorkflow(payload.workflowId);
-      if (!workflow) {
-        throw new Error(await releaseService.productionRefusal(payload.workflowId) ?? `Workflow not found: ${payload.workflowId}`);
-      }
-      // A job a user enqueued runs only if that user may still run the
-      // workflow: a revoked membership or a deleted account stops it.
-      // Retrying cannot fix that, so the job goes straight to the DLQ.
-      let enqueuedBy: SafeUser | null = null;
-      if (payload.enqueuedByUserId) {
-        const found = await store.getUserById(payload.enqueuedByUserId);
-        enqueuedBy = found ? { id: found.id, email: found.email, role: found.role as UserRole } : null;
-        if (!enqueuedBy || !(await runAccess.workflow(enqueuedBy, workflow.id, "workflow:execute")).ok) {
-          const reason = enqueuedBy ? "no_execute_permission" : "user_not_found";
-          await auditService.record({
-            category: "workflow",
-            eventType: "queue.job_refused",
-            action: "execute",
-            outcome: "denied",
-            actor: enqueuedBy ? { userId: enqueuedBy.id, email: enqueuedBy.email, type: "user" } : { userId: payload.enqueuedByUserId, type: "user" },
-            resourceType: "workflow",
-            resourceId: workflow.id,
-            projectId: workflow.projectId ?? DEFAULT_PROJECT_ID,
-            metadata: { executionId: payload.executionId, reason },
-            message: "Queued run refused: the user who queued it may no longer run this workflow."
-          });
-          throw new NonRetryableQueueError(
-            `The user who queued this run can no longer run workflow ${payload.workflowId} (workflow:execute is required).`
-          );
+    queueService.setHandler(async (payload, context) => {
+      // Registered before the run starts, so a stop from the consumer (lease lost, or draining) reaches it whenever it
+      // comes; the run reuses this controller and releases it when it ends.
+      const controller = registerActiveExecution({
+        executionId: payload.executionId,
+        workflowId: payload.workflowId,
+        triggerType: payload.triggerType ?? "queue",
+        triggeredBy: payload.triggeredBy
+      });
+      const stop = () => {
+        if (!controller.signal.aborted) controller.abort(context.signal.reason);
+      };
+      if (context.signal.aborted) stop();
+      else context.signal.addEventListener("abort", stop, { once: true });
+      if (context.claimToken !== null) queueRunFences.set(payload.executionId, { queueItemId: context.queueItemId, claimToken: context.claimToken });
+      try {
+        await runQueuedJob(payload, context);
+      } finally {
+        context.signal.removeEventListener("abort", stop);
+        if (context.claimToken !== null && queueRunFences.get(payload.executionId)?.claimToken === context.claimToken) {
+          queueRunFences.delete(payload.executionId);
         }
+        releaseActiveExecution(payload.executionId, controller);
       }
-      const startedAt = new Date().toISOString();
-      const result = await runWorkflowExecution({
-        policyActor: enqueuedBy,
-        elicitationsForWorkflow: true,
-        workflow,
-        executionId: payload.executionId,
-        directInput: payload.input,
-        variables: payload.variables,
-        systemPrompt: payload.systemPrompt,
-        userPrompt: payload.userPrompt,
-        sessionId: payload.sessionId,
-        triggerType: payload.triggerType ?? "queue",
-        triggeredBy: payload.triggeredBy,
-        executionTimeoutMs: payload.executionTimeoutMs,
-        customData: payload.customData,
-        channel: "production",
-        // A caller may name its queued run anything ("cron" included): it is a user's run, never the scheduler's.
-        captureInputOrigin: "user"
-      });
-      await persistExecutionHistory({
-        executionId: payload.executionId,
-        workflow,
-        result,
-        triggerType: payload.triggerType ?? "queue",
-        triggeredBy: payload.triggeredBy,
-        requestInput: payload.input,
-        customData: payload.customData
-      });
-      app.log.info(
-        { executionId: payload.executionId, workflowId: payload.workflowId, status: result.status },
-        "Queued workflow execution completed"
-      );
     });
 
-    // With HA on the stuck-job sweep runs on the leader only (each requeue is conditional either way).
+    if (queueClusterMode) {
+      queueService.enableLeases({
+        instanceId: leaderInstanceId,
+        heartbeatMs: queueSettings.heartbeatMs,
+        leaseMs: queueSettings.leaseMs,
+        reaperIntervalMs: queueSettings.reaperIntervalMs,
+        pools: queueSettings.pools
+      });
+      // A cancel recorded on another instance stops the run here at the next heartbeat at the latest.
+      queueService.setCancelHandler((executionId) => {
+        const active = activeExecutions.get(executionId);
+        if (active && !active.controller.signal.aborted) active.controller.abort("Execution canceled on another instance");
+      });
+    }
+    queueService.setObserver({
+      onClaimed: (job) => {
+        if (job.waitMs !== null) metricsService.recordQueueWait(job.waitMs);
+      },
+      onLost: (outcomes) => metricsService.recordQueueLost(outcomes.length),
+      onSlotsChanged: (free) => metricsService.setWorkerSlotsFree(free),
+      log: (level, message, fields) => app.log[level](fields ?? {}, message)
+    });
+    metricsService.setWorkerSlotsFree(queueService.concurrency());
+
+    // With HA on the stuck-job sweep and the lease reaper run on the leader only (each requeue is conditional either way).
     if (config.HA_ENABLED) queueService.setSweepGate(() => leaderElection.isLeader());
     queueService.start();
 
     app.addHook("onClose", async () => {
       queueService.stop();
     });
-
-    app.get("/api/queue/depth", async (request, reply) => {
-      const user = await requireRole(request, reply, ["operator", "builder", "admin"]);
-      if (!user) return;
-      return await queueService.getDepth();
-    });
-
-    app.get("/api/queue/dlq", async (request, reply) => {
-      const user = await requireRole(request, reply, ["operator", "builder", "admin"]);
-      if (!user) return;
-      const limit = typeof (request.query as Record<string, unknown>).limit === "string"
-        ? Math.min(200, Math.max(1, Number((request.query as Record<string, unknown>).limit)))
-        : 50;
-      return await queueService.listDlq(limit, await runAccess.readableWorkflowIds(user) ?? undefined);
-    });
-
-    app.post<{ Params: { id: string }; Body: unknown }>(
-      "/api/workflows/:id/enqueue",
-      async (request, reply) => {
-        const user = await requireRole(request, reply, ["operator", "builder", "admin"]);
-        if (!user) return;
-
-        const access = await runAccess.workflow(user, request.params.id, "workflow:execute");
-        if (!access.ok) return denyRunAccess(reply, access);
-        const workflow = access.workflow;
-
-        const body = asRecord(request.body);
-        const executionId = await queueService.enqueue({
-          workflowId: workflow.id,
-          input: body.input && typeof body.input === "object" && !Array.isArray(body.input)
-            ? (body.input as Record<string, unknown>)
-            : undefined,
-          variables: body.variables && typeof body.variables === "object" && !Array.isArray(body.variables)
-            ? (body.variables as Record<string, unknown>)
-            : undefined,
-          systemPrompt: typeof body.systemPrompt === "string" ? body.systemPrompt : undefined,
-          userPrompt: typeof body.userPrompt === "string" ? body.userPrompt : undefined,
-          sessionId: typeof body.sessionId === "string" ? body.sessionId : undefined,
-          triggerType: typeof body.triggerType === "string" ? body.triggerType : "api_queue",
-          // Who queued it comes from the session, never from the body.
-          triggeredBy: user.email,
-          enqueuedByUserId: user.id,
-          executionTimeoutMs: typeof body.executionTimeoutMs === "number" ? body.executionTimeoutMs : undefined,
-          customData: (() => {
-            const custom = body.customData && typeof body.customData === "object" && !Array.isArray(body.customData)
-              ? { ...(body.customData as Record<string, unknown>) }
-              : undefined;
-            // A caller-supplied triggeredBy is kept as data, not as the audit actor.
-            if (typeof body.triggeredBy === "string" && body.triggeredBy !== user.email) {
-              return { ...(custom ?? {}), requestedBy: body.triggeredBy };
-            }
-            return custom;
-          })(),
-          priority: typeof body.priority === "number" ? body.priority : 0
-        });
-
-        await auditRunAction(request, user, "execution.started", { executionId, workflowId: workflow.id, projectId: workflow.projectId }, { triggerType: "queue" });
-
-        const depth = await queueService.getDepth();
-        return { queued: true, executionId, queueDepth: depth };
-      }
-    );
   }
+
+  // Phase 13.1 — queue depth for /metrics, sampled by the leader so N replicas do not each count the queue.
+  if (metricsService.isEnabled()) {
+    const sampleQueueDepth = async () => {
+      if (!leaderElection.isLeader()) return;
+      try {
+        const [byPool, depth] = await Promise.all([queueProducer.getDepthByPool(), queueProducer.getDepth()]);
+        metricsService.setQueueDepth(byPool, depth.dlq);
+      } catch (error) {
+        app.log.warn({ err: error instanceof Error ? error.message : String(error) }, "Failed to sample the queue depth");
+      }
+    };
+    // promise-ok: the sampler catches and logs its own errors
+    const queueDepthTimer = setInterval(async () => await sampleQueueDepth(), QUEUE_DEPTH_SAMPLE_INTERVAL_MS);
+    queueDepthTimer.unref?.();
+    app.addHook("onReady", async () => await sampleQueueDepth());
+    app.addHook("onClose", async () => {
+      clearInterval(queueDepthTimer);
+    });
+  }
+
+  // Phase 13.1 — graceful shutdown (index.ts runs lifecycle.drain on SIGTERM/SIGINT): /ready turns 503 at once, this
+  // instance stops claiming and hands leader work on, then queue jobs get the drain budget to finish; the rest are given
+  // back to the queue without counting an attempt.
+  lifecycle.onDrain("stop-claiming-and-resign", async () => {
+    queueService?.stopClaiming();
+    await leaderElection.stop();
+    if (!config.HA_ENABLED) {
+      // Without election every instance leads; stop its schedules and triggers so nothing new starts while draining.
+      schedulerService?.stop();
+      await triggerService?.stop();
+    }
+  });
+  lifecycle.onDrain("queue-jobs", async (budgetMs) => {
+    if (!queueService) return;
+    const running = queueService.inFlightCount();
+    const { finished, released } = await queueService.drain(budgetMs);
+    if (running > 0) app.log.info({ finished, released, budgetMs }, "Queue drained for shutdown");
+  });
+
+  // Readiness (load balancers, Kubernetes readinessProbe): 503 while draining or while a readiness check fails.
+  // /health stays the liveness probe.
+  app.get("/ready", async (_request, reply) => {
+    const { ready, reasons } = lifecycle.readiness();
+    if (!ready) reply.code(503);
+    return { ready, reasons };
+  });
+
+  app.get("/api/queue/depth", async (request, reply) => {
+    const user = await requireRole(request, reply, ["operator", "builder", "admin"]);
+    if (!user) return;
+    return await queueProducer.getDepth();
+  });
+
+  app.get("/api/queue/dlq", async (request, reply) => {
+    const user = await requireRole(request, reply, ["operator", "builder", "admin"]);
+    if (!user) return;
+    const limit = typeof (request.query as Record<string, unknown>).limit === "string"
+      ? Math.min(200, Math.max(1, Number((request.query as Record<string, unknown>).limit)))
+      : 50;
+    return await queueProducer.listDlq(limit, await runAccess.readableWorkflowIds(user) ?? undefined);
+  });
+
+  app.post<{ Params: { id: string }; Body: unknown }>(
+    "/api/workflows/:id/enqueue",
+    async (request, reply) => {
+      const user = await requireRole(request, reply, ["operator", "builder", "admin"]);
+      if (!user) return;
+
+      const access = await runAccess.workflow(user, request.params.id, "workflow:execute");
+      if (!access.ok) return denyRunAccess(reply, access);
+      const workflow = access.workflow;
+
+      const body = asRecord(request.body);
+      // Phase 13.1 — the pool: a builder may name one; otherwise the workflow's settings.executionPool, else default.
+      let pool = DEFAULT_QUEUE_POOL;
+      if (body.pool !== undefined) {
+        if (typeof body.pool !== "string" || !QUEUE_POOL_PATTERN.test(body.pool)) {
+          reply.code(400);
+          return { error: "pool must be letters, digits, _ or - (at most 63, starting with a letter or digit)" };
+        }
+        if (user.role !== "builder" && user.role !== "admin") {
+          reply.code(403);
+          return { error: "Choosing a queue pool needs the builder role" };
+        }
+        pool = body.pool;
+      } else {
+        const configured = workflow.settings?.executionPool;
+        if (typeof configured === "string" && QUEUE_POOL_PATTERN.test(configured)) pool = configured;
+      }
+      let executionId: string;
+      try {
+        executionId = await queueProducer.enqueue({
+        workflowId: workflow.id,
+        input: body.input && typeof body.input === "object" && !Array.isArray(body.input)
+          ? (body.input as Record<string, unknown>)
+          : undefined,
+        variables: body.variables && typeof body.variables === "object" && !Array.isArray(body.variables)
+          ? (body.variables as Record<string, unknown>)
+          : undefined,
+        systemPrompt: typeof body.systemPrompt === "string" ? body.systemPrompt : undefined,
+        userPrompt: typeof body.userPrompt === "string" ? body.userPrompt : undefined,
+        sessionId: typeof body.sessionId === "string" ? body.sessionId : undefined,
+        triggerType: typeof body.triggerType === "string" ? body.triggerType : "api_queue",
+        // Who queued it comes from the session, never from the body.
+        triggeredBy: user.email,
+        enqueuedByUserId: user.id,
+        executionTimeoutMs: typeof body.executionTimeoutMs === "number" ? body.executionTimeoutMs : undefined,
+        customData: (() => {
+          const custom = body.customData && typeof body.customData === "object" && !Array.isArray(body.customData)
+            ? { ...(body.customData as Record<string, unknown>) }
+            : undefined;
+          // A caller-supplied triggeredBy is kept as data, not as the audit actor.
+          if (typeof body.triggeredBy === "string" && body.triggeredBy !== user.email) {
+            return { ...(custom ?? {}), requestedBy: body.triggeredBy };
+          }
+          return custom;
+        })(),
+        priority: typeof body.priority === "number" ? body.priority : 0,
+        pool
+      }, { enforceBackpressure: true });
+      } catch (error) {
+        if (error instanceof QueueFullError) {
+          reply.code(429).header("retry-after", String(error.retryAfterSeconds));
+          return { error: error.message, pool: error.pool };
+        }
+        throw error;
+      }
+
+      await auditRunAction(request, user, "execution.started", { executionId, workflowId: workflow.id, projectId: workflow.projectId }, { triggerType: "queue" });
+
+      const depth = await queueProducer.getDepth();
+      return { queued: true, executionId, queueDepth: depth };
+    }
+  );
 
   // ── Phase 7.3: Tag management ─────────────────────────────────────────
 
