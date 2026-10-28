@@ -16,7 +16,7 @@
  *  3. Mapping: derived from the two live schemas, never from a hand list. Every source table and column must exist on
  *     the target. The only target-only objects allowed are the ones the schema-parity allow-list documents for
  *     copying: `schema_migrations`, `GENERATED ALWAYS AS (…) STORED` columns (knowledge_base_chunks.content_tsv, which
- *     Postgres computes), and the `seq` identity of INSERTION_SEQ_TABLES (the stand-in for SQLite's rowid, assigned by
+ *     Postgres computes), and the `seq` identity of ALL_INSERTION_SEQ_TABLES (the stand-in for SQLite's rowid, assigned by
  *     the identity as rows are copied in rowid order). Anything else fails loudly.
  *  4. Copy: tables in foreign-key order (parents first), each read in rowid order in batches and written with
  *     multi-row INSERTs, all in **one transaction**. Values are converted to the target column's type the way the
@@ -64,7 +64,7 @@ import {
   type AuditChainRow
 } from "../db/audit-chain.js";
 import { SqliteStore } from "../db/database.js";
-import { INSERTION_SEQ_TABLES, MIGRATIONS } from "../db/migrations.js";
+import { ALL_INSERTION_SEQ_TABLES, MIGRATIONS } from "../db/migrations.js";
 import { pgParams } from "../db/postgres/context.js";
 import { describePostgresSettings, isPostgresDbType, parsePostgresSettings } from "../config.js";
 import { postgresStoreConfig } from "../db/create-store.js";
@@ -76,7 +76,7 @@ import { createPostgresPool } from "../db/postgres/pool.js";
 /** The chain version this build migrates to (whatever MIGRATIONS' highest is; never a fixed number). */
 export const CODE_SCHEMA_VERSION = Math.max(...MIGRATIONS.map((migration) => migration.version));
 
-const SEQ_TABLES: ReadonlySet<string> = new Set(INSERTION_SEQ_TABLES.map(({ table }) => table));
+const SEQ_TABLES: ReadonlySet<string> = new Set(ALL_INSERTION_SEQ_TABLES.map(({ table }) => table));
 const DEFAULT_BATCH_ROWS = 500;
 /** Postgres binds at most 65535 parameters per statement. */
 const MAX_PARAMS = 60_000;

@@ -62,7 +62,7 @@ import {
 } from "@ai-orchestrator/shared";
 import { isEmptyDataLabels, labelsForUntrackedSave, mergeDataLabels, parseStoredDataLabels, type DataLabels } from "@ai-orchestrator/shared";
 import { queuedRunTimeoutMs, STUCK_JOB_MARGIN_MS } from "./queue-timeouts.js";
-import { isForeignKeyViolation, ProjectNotEmptyError, StoreReferenceMissingError } from "./store-errors.js";
+import { isForeignKeyViolation, ProjectNotEmptyError, StoreReferenceMissingError, UnpublishGateEnforcedError } from "./store-errors.js";
 import { clampLimit, LIMIT_MAX } from "./store-limits.js";
 import {
   auditEntryHash,
@@ -3706,6 +3706,9 @@ export class SqliteStore implements Store {
         );
       }
     });
+
+    // Migration 42 — when the published version was taken down (unpublish): production runs the draft, gated or not.
+    this.ensureColumn("workflows", "unpublished_at", "TEXT");
 
     this.exec(`CREATE INDEX IF NOT EXISTS idx_workflows_project_id ON workflows(project_id)`);
     this.exec(`CREATE INDEX IF NOT EXISTS idx_workflows_folder_id ON workflows(folder_id)`);
@@ -8150,7 +8153,7 @@ export class SqliteStore implements Store {
 
   async listWorkflowReleases(workflowId: string, limit = 100): Promise<WorkflowReleaseRecord[]> {
     return this.queryAll<Record<string, unknown>>(
-      `SELECT * FROM workflow_releases WHERE workflow_id = ? ORDER BY published_at DESC, id DESC LIMIT ?`,
+      `SELECT * FROM workflow_releases WHERE workflow_id = ? ORDER BY published_at DESC, rowid DESC LIMIT ?`,
       [workflowId, Math.max(1, Math.min(500, limit))]
     ).map(mapWorkflowReleaseRow);
   }
@@ -8176,7 +8179,8 @@ export class SqliteStore implements Store {
       if (current !== expectedPrevious) return null;
       const pinned = this.db.prepare(`UPDATE workflow_versions SET pinned = 1 WHERE workflow_id = ? AND version = ?`).run(release.workflowId, release.version);
       if (pinned.changes === 0) return null;
-      this.db.prepare(`UPDATE workflows SET published_version = ? WHERE id = ?`).run(release.version, release.workflowId);
+      this.db.prepare(`UPDATE workflows SET published_version = ?, unpublished_at = NULL WHERE id = ?`).run(release.version, release.workflowId);
+      const publishedAt = this.historyTimeSync(release.workflowId, release.publishedAt);
       this.db
         .prepare(
           `INSERT INTO workflow_releases (id, workflow_id, version, workflow_hash, previous_version, replay_run_id, verdict, reason, gate_reasons_json, approval_json, published_at, published_by, published_by_user_id)
@@ -8193,11 +8197,11 @@ export class SqliteStore implements Store {
           release.reason,
           JSON.stringify(release.gateReasons),
           release.approval ? JSON.stringify(release.approval) : null,
-          release.publishedAt,
+          publishedAt,
           release.publishedBy,
           release.publishedByUserId
         );
-      return { ...release, previousVersion: current };
+      return { ...release, publishedAt, previousVersion: current };
     });
   }
 
@@ -8254,6 +8258,63 @@ export class SqliteStore implements Store {
     const row = this.queryOne<{ release_channel: string | null; release_version: number | null }>(`SELECT release_channel, release_version FROM execution_history WHERE id = ?`, [executionId]);
     if (!row || !row.release_channel) return null;
     return { channel: row.release_channel === "production" ? "production" : "draft", version: nullableNumber(row.release_version) };
+  }
+
+  /** Unpublish in one transaction (see `Store.unpublishWorkflowVersion`). */
+  async unpublishWorkflowVersion(entry: Parameters<Store["unpublishWorkflowVersion"]>[0]): ReturnType<Store["unpublishWorkflowVersion"]> {
+    return this.transaction(() => {
+      const gate = this.getReleaseGateSync(entry.workflowId);
+      const gateEnabled = Boolean(gate?.enabled);
+      const gateEnforced = gateEnabled && Boolean(gate?.enforced);
+      if (entry.refuseIfGateEnforced && gateEnforced) throw new UnpublishGateEnforcedError();
+      const current = this.getPublishedVersionSync(entry.workflowId);
+      if (current === null) return null;
+      if (entry.expectedVersion !== undefined && entry.expectedVersion !== null && entry.expectedVersion !== current) return null;
+      const released = this.queryOne<{ workflow_hash: string }>(
+        `SELECT workflow_hash FROM workflow_releases WHERE workflow_id = ? AND version = ? AND verdict <> 'unpublished' ORDER BY published_at DESC, rowid DESC LIMIT 1`,
+        [entry.workflowId, current]
+      );
+      const at = this.historyTimeSync(entry.workflowId, entry.unpublishedAt);
+      const changed = this.db
+        .prepare(`UPDATE workflows SET published_version = NULL, unpublished_at = ? WHERE id = ? AND published_version = ?`)
+        .run(at, entry.workflowId, current);
+      if (changed.changes === 0) return null;
+      const record: WorkflowReleaseRecord = {
+        id: entry.id,
+        workflowId: entry.workflowId,
+        version: current,
+        workflowHash: released ? toString(released.workflow_hash) : "",
+        previousVersion: current,
+        replayRunId: null,
+        verdict: "unpublished",
+        reason: entry.reason,
+        gateReasons: [],
+        approval: null,
+        publishedAt: at,
+        publishedBy: entry.unpublishedBy,
+        publishedByUserId: entry.unpublishedByUserId
+      };
+      this.db
+        .prepare(
+          `INSERT INTO workflow_releases (id, workflow_id, version, workflow_hash, previous_version, replay_run_id, verdict, reason, gate_reasons_json, approval_json, published_at, published_by, published_by_user_id)
+           VALUES (?, ?, ?, ?, ?, NULL, 'unpublished', ?, '[]', NULL, ?, ?, ?)`
+        )
+        .run(record.id, record.workflowId, record.version, record.workflowHash, record.previousVersion, record.reason, record.publishedAt, record.publishedBy, record.publishedByUserId);
+      return { record, gateEnabled, gateEnforced };
+    });
+  }
+
+  /** Inside a transaction: `at`, or the workflow's newest history time when that is later, so time order never disagrees with write order. */
+  private historyTimeSync(workflowId: string, at: string): string {
+    const newest = this.queryOne<{ newest: string | null }>(`SELECT MAX(published_at) AS newest FROM workflow_releases WHERE workflow_id = ?`, [workflowId]);
+    const latest = newest?.newest ? toString(newest.newest) : null;
+    return latest !== null && latest > at ? latest : at;
+  }
+
+  async getPublishState(workflowId: string): Promise<{ publishedVersion: number | null; unpublishedAt: string | null }> {
+    const row = this.queryOne<{ published_version: number | null; unpublished_at: string | null }>(`SELECT published_version, unpublished_at FROM workflows WHERE id = ?`, [workflowId]);
+    if (!row) return { publishedVersion: null, unpublishedAt: null };
+    return { publishedVersion: nullableNumber(row.published_version), unpublishedAt: row.unpublished_at ? toString(row.unpublished_at) : null };
   }
 
   /** The hashes `version` had when it was released (any release, rollbacks included). */

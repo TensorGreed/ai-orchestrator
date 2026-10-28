@@ -75,3 +75,11 @@ export function isOnePendingApprovalViolation(error: unknown): boolean {
   if (code === "23505") return constraint === ONE_PENDING_APPROVAL_INDEX;
   return false;
 }
+
+/** `unpublishWorkflowVersion` found the release gate on and enforced for a caller who may not unpublish then. */
+export class UnpublishGateEnforcedError extends Error {
+  constructor() {
+    super("The release gate is enforced: only an admin can unpublish");
+    this.name = "UnpublishGateEnforcedError";
+  }
+}

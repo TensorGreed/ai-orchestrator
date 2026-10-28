@@ -14,6 +14,15 @@ export function releasePillLabel(state: ReleaseStateView | null): { text: string
       title: "The release gate is on and no version is published: production refuses runs until a version passes the gate, is approved or an admin overrides"
     };
   }
+  if (state.publishedVersion === null && state.unpublishedAt) {
+    return {
+      text: state.draftVersion ? `v${state.draftVersion} · unpublished` : "Unpublished",
+      tone: "draft",
+      title: state.gateEnabled
+        ? "Unpublished: production runs the latest save, which the release gate does not check, until a version is published again"
+        : "Unpublished: production runs the latest save until a version is published again"
+    };
+  }
   if (state.publishedVersion === null) {
     return {
       text: state.draftVersion ? `v${state.draftVersion} · not published` : "Not saved",
@@ -36,7 +45,8 @@ const VERDICT_LABELS: Record<ReleaseVerdict, string> = {
   overridden: "Admin override",
   ungated: "No gate",
   rollback: "Rollback",
-  approved: "Approved"
+  approved: "Approved",
+  unpublished: "Unpublished"
 };
 
 export function releaseVerdictLabel(verdict: ReleaseVerdict): string {
@@ -45,7 +55,7 @@ export function releaseVerdictLabel(verdict: ReleaseVerdict): string {
 
 export function releaseVerdictTone(verdict: ReleaseVerdict): "ok" | "warn" | "neutral" {
   if (verdict === "passed" || verdict === "approved") return "ok";
-  if (verdict === "overridden" || verdict === "rollback") return "warn";
+  if (verdict === "overridden" || verdict === "rollback" || verdict === "unpublished") return "warn";
   return "neutral";
 }
 

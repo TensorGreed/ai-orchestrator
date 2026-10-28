@@ -784,6 +784,37 @@ export interface Store {
    * there first) or the version row is gone.
    */
   publishWorkflowVersion(release: Omit<WorkflowReleaseRecord, "previousVersion">, expectedPrevious: number | null): Promise<WorkflowReleaseRecord | null>;
+  /**
+   * Takes the published version down and records it, in one transaction: the workflow row is read and changed
+   * together (Postgres: `SELECT … FOR UPDATE`), so of two concurrent calls (two API instances too) one unpublishes
+   * and the other is refused. Clears the published version, marks when it was unpublished (production then runs the
+   * draft, gated or not) and appends an `unpublished` history entry whose `version` and `previousVersion` are the
+   * version that was live and whose hash is the one that version was released with. Null, with nothing written, when
+   * nothing is published or, given `expectedVersion`, when another version is live. A publish clears the mark again.
+   * The answer says which gate state the transaction saw (on = enabled; enforced = enabled and enforced).
+   */
+  unpublishWorkflowVersion(entry: {
+    id: string;
+    workflowId: string;
+    reason: string | null;
+    /** Only unpublish this version; when another one is live the call writes nothing and answers null. */
+    expectedVersion?: number | null;
+    /** The time the caller read; the store never writes one earlier than the workflow's newest history entry. */
+    unpublishedAt: string;
+    unpublishedBy: string | null;
+    unpublishedByUserId: string | null;
+    /**
+     * Set for a caller who is not an admin: the gate row is read in the same transaction and, when it is on and
+     * enforced, the call throws `UnpublishGateEnforcedError` and writes nothing.
+     */
+    refuseIfGateEnforced?: boolean;
+  }): Promise<{ record: WorkflowReleaseRecord; gateEnabled: boolean; gateEnforced: boolean } | null>;
+  /**
+   * The published version and the unpublish mark (see `unpublishWorkflowVersion`), read together from the workflow's
+   * row so a concurrent publish cannot show one without the other. `unpublishedAt` is null when it was not
+   * unpublished, or was published since. Both are null for a workflow that does not exist.
+   */
+  getPublishState(workflowId: string): Promise<{ publishedVersion: number | null; unpublishedAt: string | null }>;
 
   // ---- RBAC: project roles, custom roles, SSO group mappings
 

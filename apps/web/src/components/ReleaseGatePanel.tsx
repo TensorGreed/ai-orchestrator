@@ -1,11 +1,12 @@
 /**
  * Phase 15.4 — Evaluations → Release gates: one workflow's gate settings
  * (golden sets, policy, approvers, enforcement) and its release history,
- * with rollback to a version published before.
+ * with rollback to a version published before and unpublish (production runs
+ * the draft again).
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { RELEASE_APPROVER_ROLE_CHOICES, type WorkflowListItem } from "@ai-orchestrator/shared";
+import { RELEASE_APPROVER_ROLE_CHOICES, type WorkflowListItem, type WorkflowRelease } from "@ai-orchestrator/shared";
 import {
   ApiError,
   fetchEvalDatasets,
@@ -19,6 +20,7 @@ import {
 } from "../lib/api";
 import { gateFormFrom, gateLocks, gateSettingsFromForm, releaseVerdictLabel, releaseVerdictTone, type GateForm } from "../lib/release";
 import { GateCasesCard } from "./GateCasesCard";
+import { UnpublishControl } from "./UnpublishControl";
 
 /** Only roles that can hold workflow:publish can approve a release. */
 const APPROVER_ROLES = RELEASE_APPROVER_ROLE_CHOICES;
@@ -309,7 +311,15 @@ function WorkflowReleaseView({ workflowId, activeProjectId, canEdit, isAdmin }: 
 
       {gate.enforced && <GateCasesCard workflowId={workflowId} gateVersion={gate.updatedAt} />}
 
-      <ReleaseHistory workflowId={workflowId} history={history} canRollback={canEdit && !locks.adminOnly} onChanged={() => void load()} />
+      <ReleaseHistory
+        workflowId={workflowId}
+        history={history}
+        canRollback={canEdit && !locks.adminOnly}
+        canUnpublish={canEdit && (isAdmin || !(gate.enabled && gate.enforced))}
+        unpublishAdminOnly={canEdit && !isAdmin && gate.enabled && gate.enforced}
+        gate={gate}
+        onChanged={() => void load()}
+      />
     </div>
   );
 }
@@ -325,17 +335,40 @@ function NumberField({ id, label, value, placeholder, onChange }: { id: string; 
   );
 }
 
-function ReleaseHistory({ workflowId, history, canRollback, onChanged }: { workflowId: string; history: WorkflowReleasesView; canRollback: boolean; onChanged: () => void }) {
+function ReleaseHistory({
+  workflowId,
+  history,
+  canRollback,
+  canUnpublish,
+  unpublishAdminOnly,
+  gate,
+  onChanged
+}: {
+  workflowId: string;
+  history: WorkflowReleasesView;
+  canRollback: boolean;
+  canUnpublish: boolean;
+  /** Unpublish is not offered because the gate is enforced and the user is not an admin. */
+  unpublishAdminOnly: boolean;
+  gate: Pick<ReleaseGateView, "enabled" | "enforced">;
+  onChanged: () => void;
+}) {
   const [target, setTarget] = useState<number | null>(null);
   const [reason, setReason] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // Rollback is offered once per version, on its newest release.
+  const [notice, setNotice] = useState<string | null>(null);
+  const unpublished = history.publishedVersion === null && history.releases[0]?.verdict === "unpublished";
+  // The "Unpublished" notice describes the moment after the unpublish: a later publish or rollback ends it.
+  useEffect(() => {
+    if (history.publishedVersion !== null) setNotice(null);
+  }, [history.publishedVersion]);
+  // Rollback is offered once per version, on its newest release (an unpublish entry is not a release of it).
   const newestOfVersion = useMemo(() => {
     const seen = new Set<number>();
     const ids = new Set<string>();
     for (const release of history.releases) {
-      if (seen.has(release.version)) continue;
+      if (release.verdict === "unpublished" || seen.has(release.version)) continue;
       seen.add(release.version);
       ids.add(release.id);
     }
@@ -362,20 +395,46 @@ function ReleaseHistory({ workflowId, history, canRollback, onChanged }: { workf
     <section className="release-card" aria-labelledby="release-history-title">
       <header className="release-card-head">
         <h3 id="release-history-title">Releases</h3>
-        <span className="release-tag">{history.publishedVersion === null ? "Not published: production runs the latest save" : `v${history.publishedVersion} live`}</span>
+        <span className="release-tag">
+          {history.publishedVersion !== null
+            ? `v${history.publishedVersion} live`
+            : unpublished
+              ? "Unpublished: production runs the latest save"
+              : "Not published: production runs the latest save"}
+        </span>
+        {canUnpublish && history.publishedVersion !== null && (
+          <UnpublishControl
+            workflowId={workflowId}
+            liveVersion={history.publishedVersion}
+            gateEnabled={gate.enabled}
+            gateEnforced={gate.enforced}
+            onUnpublished={(result) => {
+              setNotice(`Unpublished. ${result.notice}`);
+              onChanged();
+            }}
+          />
+        )}
       </header>
+      {unpublishAdminOnly && history.publishedVersion !== null && <p className="cfg-help">Only an admin can unpublish while the gate is enforced.</p>}
+      {notice && (
+        <div className="approvals-notice" role="status">
+          {notice}
+        </div>
+      )}
       {history.releases.length === 0 ? (
         <div className="evals-empty">No version was published yet.</div>
       ) : (
         <ol className="release-history">
-          {history.releases.map((release) => (
-            <li key={release.id} className={release.version === history.publishedVersion ? "is-live" : undefined}>
+          {history.releases.map((release, index) => (
+            <li key={release.id} className={release.verdict !== "unpublished" && release.version === history.publishedVersion ? "is-live" : undefined}>
               <div className="release-history-head">
-                <strong>v{release.version}</strong>
+                <strong>{release.verdict === "unpublished" ? `v${release.version} taken down` : `v${release.version}`}</strong>
                 <span className={`release-tag is-${releaseVerdictTone(release.verdict)}`}>{releaseVerdictLabel(release.verdict)}</span>
                 <span className="cfg-help">
                   {release.publishedBy ?? "unknown"} · {formatWhen(release.publishedAt)}
-                  {release.previousVersion !== null ? ` · from v${release.previousVersion}` : ""}
+                  {release.verdict === "unpublished"
+                    ? unpublishedSuffix(index === 0 && unpublished, history.releases[index - 1])
+                    : release.previousVersion !== null ? ` · from v${release.previousVersion}` : ""}
                 </span>
               </div>
               {release.reason && <div className="release-history-reason">“{release.reason}”</div>}
@@ -424,4 +483,13 @@ function ReleaseHistory({ workflowId, history, canRollback, onChanged }: { workf
       )}
     </section>
   );
+}
+
+/**
+ * What an `unpublished` history entry says about production: it runs the draft only while this is the newest entry
+ * and nothing was published since; an older one says how long it ran the draft.
+ */
+function unpublishedSuffix(current: boolean, next: WorkflowRelease | undefined): string {
+  if (current) return " · production runs the draft";
+  return next && next.verdict !== "unpublished" ? ` · production ran the draft until v${next.version}` : " · production ran the draft";
 }

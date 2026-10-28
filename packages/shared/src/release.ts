@@ -31,8 +31,11 @@ export type ReleaseCompareMode = (typeof RELEASE_COMPARE_MODES)[number];
 export const RELEASE_AGGREGATE_MODES = ["all", "majority", "any"] as const;
 export type ReleaseAggregateMode = (typeof RELEASE_AGGREGATE_MODES)[number];
 
-/** How a release came about. `approved`: an approver accepted a release request. */
-export const RELEASE_VERDICTS = ["passed", "overridden", "ungated", "rollback", "approved"] as const;
+/**
+ * How a release came about. `approved`: an approver accepted a release request. `unpublished`: not a release but the
+ * history entry of taking the published version down (production runs the draft from then on).
+ */
+export const RELEASE_VERDICTS = ["passed", "overridden", "ungated", "rollback", "approved", "unpublished"] as const;
 export type ReleaseVerdict = (typeof RELEASE_VERDICTS)[number];
 
 export const RELEASE_CHANNELS = ["production", "draft"] as const;
@@ -181,6 +184,39 @@ export const releaseRollbackInputSchema = z
   .strict();
 export type ReleaseRollbackInput = z.infer<typeof releaseRollbackInputSchema>;
 
+/** `POST /api/workflows/:id/unpublish`: take the published version down; production runs the draft. The reason is optional. */
+export const releaseUnpublishInputSchema = z
+  .object({
+    reason: z.string().trim().max(APPROVAL_REASON_MAX_LENGTH).optional(),
+    /** The version the caller means to take down; when another one is live the call is refused (409) and changes nothing. */
+    expectedVersion: z.number().int().positive().optional()
+  })
+  .strict();
+export type ReleaseUnpublishInput = z.infer<typeof releaseUnpublishInputSchema>;
+
+/** What an unpublish answers: the history entry and, in plain words, what production runs now. */
+export interface ReleaseUnpublishResult {
+  /** The `unpublished` history entry; its `version` is the version that was live. */
+  release: WorkflowRelease;
+  /** Always the draft: production runs the workflow as saved, as a never-published workflow does. */
+  productionRuns: "draft";
+  gateEnabled: boolean;
+  gateEnforced: boolean;
+  /** What production runs now; with a gate on it says the draft is not checked by the gate. */
+  notice: string;
+}
+
+/**
+ * The plain sentences an unpublish shows, in its confirmation and in its answer: production runs the draft, and with
+ * a release gate on, that the draft is not checked by it. `version` is the version that is (or was) live.
+ */
+export function releaseUnpublishNotice(input: { version: number; gateEnabled: boolean; gateEnforced: boolean }): string {
+  const base = `Production stops running v${input.version} and runs the draft (the latest save) instead, as if the workflow had never been published.`;
+  if (!input.gateEnabled) return base;
+  const gate = input.gateEnforced ? "This workflow's release gate is enforced" : "This workflow's release gate is on";
+  return `${base} ${gate}, but the gate does not check the draft: production runs the ungated draft, and every save goes live, until a version is published again.`;
+}
+
 export interface ReleaseApprovalInfo {
   requestId: string;
   requestedBy: string | null;
@@ -188,6 +224,11 @@ export interface ReleaseApprovalInfo {
   decidedAt: string | null;
 }
 
+/**
+ * One entry of a workflow's release history. An `unpublished` entry records taking production down to the draft:
+ * `version` and `previousVersion` are the version that was live, `reason` the optional reason, `publishedAt` and
+ * `publishedBy` when and by whom it was unpublished.
+ */
 export interface WorkflowRelease {
   id: string;
   workflowId: string;
@@ -920,6 +961,11 @@ export interface ReleaseStateView {
    * production entry point refuses runs until a version is published.
    */
   productionRefused: boolean;
+  /**
+   * When the published version was taken down (unpublish); null otherwise. While set, production runs the draft,
+   * on a gated workflow too, until a version is published again.
+   */
+  unpublishedAt: string | null;
   /** Whether the caller holds `workflow:publish` on this workflow (project roles included). */
   canPublish: boolean;
   /** Whether the caller may change the gate's settings (`workflow:write`; admin-only fields on an enforced gate aside). */

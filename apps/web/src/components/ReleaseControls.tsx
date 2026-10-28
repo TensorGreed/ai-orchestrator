@@ -5,7 +5,8 @@
  * the draft is ahead of it. The dialog picks a saved version, shows the
  * verdict its release gate gives now, and publishes it bound to the hash
  * that was judged: through a passing replay job, by sending it to the
- * gate's approvers, or (admins only) by an override with a reason.
+ * gate's approvers, or (admins only) by an override with a reason. It also
+ * offers Unpublish: production then runs the draft again.
  */
 
 import { useCallback, useEffect, useState } from "react";
@@ -21,6 +22,7 @@ import {
   type WorkflowVersionSummary
 } from "../lib/api";
 import { gateStatsLines, releasePillLabel, releaseVerdictLabel } from "../lib/release";
+import { UnpublishControl } from "./UnpublishControl";
 
 function errorText(err: unknown, fallback: string): string {
   if (err instanceof ApiError || err instanceof Error) return err.message || fallback;
@@ -127,6 +129,7 @@ export function PublishDialog({ workflowId, state, canPublish, isAdmin, onClose,
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<PublishResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [unpublishedNotice, setUnpublishedNotice] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -184,7 +187,11 @@ export function PublishDialog({ workflowId, state, canPublish, isAdmin, onClose,
         ...extra
       });
       setResult(outcome);
-      if (outcome.outcome === "published") onPublished();
+      if (outcome.outcome === "published") {
+        // A version is live again: the unpublish notice no longer describes production.
+        setUnpublishedNotice(null);
+        onPublished();
+      }
     } catch (err) {
       setError(errorText(err, "Publish failed"));
     } finally {
@@ -353,6 +360,30 @@ export function PublishDialog({ workflowId, state, canPublish, isAdmin, onClose,
             </div>
           )}
           {result?.outcome === "published" && <p className="settings-help">Verdict: {releaseVerdictLabel(result.release.verdict)}</p>}
+
+          {unpublishedNotice && (
+            <div className="approvals-notice" role="status">
+              Unpublished. {unpublishedNotice}
+            </div>
+          )}
+          {canPublish && state && state.publishedVersion !== null && state.gateEnabled && state.gateEnforced && !isAdmin && result?.outcome !== "published" && !unpublishedNotice && (
+            <p className="settings-help release-unpublish-admin-only">Only an admin can unpublish while the gate is enforced.</p>
+          )}
+          {canPublish && state && state.publishedVersion !== null && (isAdmin || !(state.gateEnabled && state.gateEnforced)) && result?.outcome !== "published" && !unpublishedNotice && (
+            <section className="release-unpublish-row" aria-label="Unpublish">
+              <p className="settings-help">v{state.publishedVersion} is live. Unpublish it to run the draft in production again.</p>
+              <UnpublishControl
+                workflowId={workflowId}
+                liveVersion={state.publishedVersion}
+                gateEnabled={state.gateEnabled}
+                gateEnforced={state.gateEnforced}
+                onUnpublished={(outcome) => {
+                  setUnpublishedNotice(outcome.notice);
+                  onPublished();
+                }}
+              />
+            </section>
+          )}
         </div>
       </div>
     </div>

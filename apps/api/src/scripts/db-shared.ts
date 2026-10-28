@@ -15,7 +15,7 @@ import { parsePostgresSettings } from "../config.js";
 import { postgresStoreConfig } from "../db/create-store.js";
 import { applyMigrationChain, postgresPoolConfig, withMigrationLock } from "../db/postgres-store.js";
 import { createPostgresPool } from "../db/postgres/pool.js";
-import { INSERTION_SEQ_TABLES, MIGRATIONS } from "../db/migrations.js";
+import { ALL_INSERTION_SEQ_TABLES, MIGRATIONS } from "../db/migrations.js";
 import {
   exactSqliteTextRows,
   iterateSqliteAuditChainRows,
@@ -42,7 +42,7 @@ const ROWID_KEY = "__backup_rowid";
  * them in `seq` order, import writes `seq` back (OVERRIDING SYSTEM VALUE, since the identity is GENERATED ALWAYS) and
  * then moves the identity past the restored max, so the chain and cursors walk the restored rows in the same order.
  */
-const SEQ_TABLES: ReadonlySet<string> = new Set(INSERTION_SEQ_TABLES.map(({ table }) => table));
+const SEQ_TABLES: ReadonlySet<string> = new Set(ALL_INSERTION_SEQ_TABLES.map(({ table }) => table));
 
 export interface BackupAdapter {
   readonly kind: "sqlite" | "postgres";

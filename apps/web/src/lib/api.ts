@@ -21,6 +21,7 @@ import type {
   ReleaseGateView,
   ReleasePublishPreview,
   ReleaseStateView,
+  ReleaseUnpublishResult,
   WorkflowRelease,
   WorkflowReleasesView,
   AuditSigningKeysResponse,
@@ -3825,7 +3826,7 @@ export async function checkApprovalEligibility(payload: {
 }
 
 // Phase 15.4 — release gate and publish.
-export type { ReleaseApprovalRequestView, ReleaseGateView, ReleasePublishPreview, ReleaseStateView, WorkflowRelease, WorkflowReleasesView };
+export type { ReleaseApprovalRequestView, ReleaseGateView, ReleasePublishPreview, ReleaseStateView, ReleaseUnpublishResult, WorkflowRelease, WorkflowReleasesView };
 
 const releasePath = (workflowId: string, rest: string) => `/api/workflows/${encodeURIComponent(workflowId)}/${rest}`;
 
@@ -3895,6 +3896,11 @@ export async function publishWorkflowVersion(workflowId: string, payload: Publis
 
 export async function rollbackWorkflowRelease(workflowId: string, payload: { version: number; reason: string }) {
   return apiRequest<{ release: WorkflowRelease }>(releasePath(workflowId, "rollback"), { method: "POST", body: JSON.stringify(payload) });
+}
+
+/** Takes the published version down: production runs the draft until a version is published again. */
+export async function unpublishWorkflowRelease(workflowId: string, payload: { reason?: string; expectedVersion?: number } = {}) {
+  return apiRequest<ReleaseUnpublishResult>(releasePath(workflowId, "unpublish"), { method: "POST", body: JSON.stringify(payload) });
 }
 
 // Release gate admission — enforced gates count only admitted cases; required cases must pass.

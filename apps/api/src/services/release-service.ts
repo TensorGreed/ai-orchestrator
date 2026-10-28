@@ -31,7 +31,7 @@
  * change who approves (approvers, self-approval, the request timeout) or the
  * replay job settings it accepts (candidate options, scorers included),
  * remove cases from or change case scorers in its golden sets, roll back,
- * and delete the workflow. Allowing self-approval is an admin's call on
+ * unpublish (while the gate is also switched on), and delete the workflow. Allowing self-approval is an admin's call on
  * every gate; without it neither the requester nor the person who saved the
  * version may approve the release.
  *
@@ -60,8 +60,16 @@
  * with "this workflow is deactivated". Without a gate, deactivating only
  * unregisters schedules and triggers, as before releases existed.
  *
- * Every gate change, publish, override, rollback and release-request event is
- * audited (category `release`).
+ * Unpublishing (`unpublish`, `workflow:publish`) takes the published version
+ * down: production runs the draft, as a never-published workflow does, until
+ * a version is published again. The gate never blocks it (it is the way out),
+ * and on a gated workflow the draft then serves production ungated: the
+ * workflow row's unpublish mark tells it apart from a workflow created again
+ * under a gated id, which still fails closed. Rollback afterwards is a
+ * rollback as before (to a version published before, same rules).
+ *
+ * Every gate change, publish, override, rollback, unpublish and
+ * release-request event is audited (category `release`).
  */
 
 import { createHash, randomUUID } from "node:crypto";
@@ -84,6 +92,7 @@ import {
   releaseGateLoosening,
   releaseGatePolicySchema,
   releaseGateSettingsSchema,
+  releaseUnpublishNotice,
   type EvalCaseDetail,
   type EvalCaseResult,
   type EvalRunView,
@@ -103,6 +112,8 @@ import {
   type ReleasePublishPreview,
   type ReleaseRollbackInput,
   type ReleaseStateView,
+  type ReleaseUnpublishInput,
+  type ReleaseUnpublishResult,
   type ReleaseVerdict,
   type Workflow,
   type WorkflowRelease
@@ -113,6 +124,7 @@ import type { SafeUser } from "./auth-service.js";
 import type { NotificationEvent } from "./notification-service.js";
 import type { RunAccessResult } from "../run-access.js";
 import type { Store } from "../db/store.js";
+import { UnpublishGateEnforcedError } from "../db/store-errors.js";
 import { mapAsync } from "../async-array.js";
 
 /** The gate's sets as they are now (see `ReleaseService.gateSets`). */
@@ -366,7 +378,8 @@ export class ReleaseService {
    * The workflow an entry point runs: the published version for `production`
    * when one is set, otherwise the draft. A published version whose snapshot
    * is gone or unreadable fails closed (null), so production never falls back
-   * to an unreviewed draft.
+   * to an unreviewed draft. After an unpublish production runs the draft, on
+   * a gated workflow too (the gate does not check it).
    */
   async resolveRunnableWorkflow(workflowId: string, channel: ReleaseChannel): Promise<Workflow | null> {
     const draft = await this.store.getWorkflow(workflowId);
@@ -375,10 +388,12 @@ export class ReleaseService {
     // On a gated workflow deactivating is the kill switch: it stops production whatever version is published.
     // Without a gate, deactivating only unregisters schedules and triggers, as it always did.
     if (gateOn && isWorkflowDeactivated(draft)) return null;
-    const published = await this.store.getPublishedVersion(workflowId);
+    // One read of the row: a republish between two reads must not show "nothing published" without its mark.
+    const { publishedVersion: published, unpublishedAt } = await this.store.getPublishState(workflowId);
     if (published === null) {
-      // A gate that is on always has a published version, except for a workflow created again under a gated id: fail closed.
-      if (gateOn) {
+      // A gate that is on has a published version unless someone unpublished it (production runs the draft) or the
+      // workflow was created again under a gated id (no unpublish mark on the new row): that one fails closed.
+      if (gateOn && unpublishedAt === null) {
         this.options.logger?.warn("The release gate is on but no version is published; production traffic is refused", { workflowId });
         return null;
       }
@@ -408,8 +423,9 @@ export class ReleaseService {
   async deactivatedProductionWorkflow(workflowId: string): Promise<Workflow | null> {
     const draft = await this.store.getWorkflow(workflowId);
     if (!draft || !isWorkflowDeactivated(draft) || !(await this.store.getReleaseGate(workflowId))?.enabled) return null;
-    const published = await this.store.getPublishedVersion(workflowId);
-    if (published === null) return null;
+    const { publishedVersion: published, unpublishedAt } = await this.store.getPublishState(workflowId);
+    // Unpublished: what production would run is the draft.
+    if (published === null) return unpublishedAt === null ? null : draft;
     try {
       return await this.options.resolveVersion(workflowId, published);
     } catch {
@@ -446,7 +462,7 @@ export class ReleaseService {
   async state(user: SafeUser, workflowId: string): Promise<ReleaseStateView> {
     await this.check(user, workflowId, "workflow:read");
     const draftVersion = await this.store.maxWorkflowVersionNumber(workflowId) || null;
-    const publishedVersion = await this.publishedVersion(workflowId);
+    const { publishedVersion, unpublishedAt } = await this.store.getPublishState(workflowId);
     const gate = await this.store.getReleaseGate(workflowId);
     const aheadBy = publishedVersion !== null && draftVersion !== null ? Math.max(0, draftVersion - publishedVersion) : 0;
     return {
@@ -455,7 +471,8 @@ export class ReleaseService {
       aheadBy,
       gateEnabled: gate?.enabled ?? false,
       gateEnforced: gate?.enforced ?? false,
-      productionRefused: Boolean(gate?.enabled) && (publishedVersion === null || await this.resolveRunnableWorkflow(workflowId, "production") === null),
+      productionRefused: Boolean(gate?.enabled) && ((publishedVersion === null && unpublishedAt === null) || await this.resolveRunnableWorkflow(workflowId, "production") === null),
+      unpublishedAt: publishedVersion === null ? unpublishedAt : null,
       canPublish: (await this.options.access(user, workflowId, "workflow:publish")).ok,
       canEditGate: (await this.options.access(user, workflowId, "workflow:write")).ok
     };
@@ -661,7 +678,8 @@ export class ReleaseService {
   /**
    * The production paths a workflow claims: those of what actually serves
    * its production traffic. A gated workflow claims its published version's
-   * paths (its draft claims nothing); an ungated workflow, active or not,
+   * paths (its draft claims nothing, unless it was unpublished: then the
+   * draft serves production and claims its paths); an ungated workflow, active or not,
    * claims its published version's paths when it has one, else its saved
    * workflow's: deactivating an ungated workflow only unregisters schedules
    * and triggers, so its webhooks, forms and MCP triggers keep serving
@@ -672,7 +690,7 @@ export class ReleaseService {
     const saved = draft === undefined ? await this.store.getWorkflow(workflowId) : draft;
     const gateOn = Boolean((await this.store.getReleaseGate(workflowId))?.enabled);
     if (!gateOn && !saved) return [];
-    const published = await this.store.getPublishedVersion(workflowId);
+    const { publishedVersion: published, unpublishedAt } = await this.store.getPublishState(workflowId);
     if (published !== null) {
       try {
         return productionRoutingKeys(await this.options.resolveVersion(workflowId, published));
@@ -681,7 +699,8 @@ export class ReleaseService {
         return [];
       }
     }
-    return gateOn || !saved ? [] : productionRoutingKeys(saved);
+    if (!saved) return [];
+    return gateOn && unpublishedAt === null ? [] : productionRoutingKeys(saved);
   }
 
   /** The workflows other than `workflowId` that claim each production path. */
@@ -1444,6 +1463,83 @@ export class ReleaseService {
     return await this.commitRelease({ actor: user, workflowId, version: input.version, workflowHash, verdict: "rollback", replayRunId: null, reason: input.reason, gateReasons: [], approval: null, expectedPrevious: previous });
   }
 
+  /**
+   * Takes the published version down: production runs the draft until a
+   * version is published again. Needs `workflow:publish` (as publish does), and an admin while the gate is enforced;
+   * the gate never blocks it, and with a gate on the answer says plainly that
+   * production now runs the ungated draft. Refused (409) when nothing is
+   * published, a second call included, and when the draft's production paths
+   * are another workflow's. With `expectedVersion` it takes down only that version (409 when another one is live,
+   * nothing changed). Audited as `release.unpublished`.
+   */
+  async unpublish(user: SafeUser, workflowId: string, input: ReleaseUnpublishInput): Promise<ReleaseUnpublishResult> {
+    await this.check(user, workflowId, "workflow:publish");
+    // Unpublishing runs the ungated draft in production, so a gate that is on and enforced keeps it with admins (a
+    // gate that is switched off restricts nothing). Checked here to refuse early, and again inside the store's
+    // transaction for a gate that became enforced since.
+    const refuseNonAdmin = async (): Promise<ReleaseError> => {
+      await this.refuse(user, workflowId, "release.unpublish.refused", "unpublish", {});
+      return new ReleaseError("This workflow's release gate is enforced: only an admin can unpublish", 403);
+    };
+    const gateBefore = await this.store.getReleaseGate(workflowId);
+    if (gateBefore?.enabled && gateBefore.enforced && user.role !== "admin") throw await refuseNonAdmin();
+    const nothingPublished = () => new ReleaseError("Nothing is published: production already runs the draft", 409);
+    const versionChanged = (live: number) =>
+      new ReleaseError(`v${live} is live now, not v${input.expectedVersion}: it was published or rolled back after you opened this. Reload and check before unpublishing`, 409);
+    const refusal = async (): Promise<ReleaseError> => {
+      const { publishedVersion } = await this.store.getPublishState(workflowId);
+      if (publishedVersion === null) return nothingPublished();
+      if (input.expectedVersion === undefined || publishedVersion === input.expectedVersion) {
+        return new ReleaseError("The published version changed while you were unpublishing: reload and check before unpublishing", 409);
+      }
+      return versionChanged(publishedVersion);
+    };
+    const live = (await this.store.getPublishState(workflowId)).publishedVersion;
+    if (live === null) throw nothingPublished();
+    if (input.expectedVersion !== undefined && input.expectedVersion !== live) throw versionChanged(live);
+    // The draft is about to serve production: its paths must be its own, as for a publish.
+    await this.assertNoRoutingConflicts(user, workflowId, await this.store.getWorkflow(workflowId), "unpublish");
+    const reason = input.reason?.trim() ? input.reason.trim() : null;
+    let committed: Awaited<ReturnType<Store["unpublishWorkflowVersion"]>>;
+    try {
+      committed = await this.store.unpublishWorkflowVersion({
+        id: `rel_${randomUUID()}`,
+        workflowId,
+        reason,
+        expectedVersion: input.expectedVersion ?? null,
+        unpublishedAt: this.now().toISOString(),
+        unpublishedBy: user.email,
+        unpublishedByUserId: user.id,
+        refuseIfGateEnforced: user.role !== "admin"
+      });
+    } catch (error) {
+      if (error instanceof UnpublishGateEnforcedError) throw await refuseNonAdmin();
+      throw error;
+    }
+    // Another unpublish or a republish got there first: the store wrote nothing.
+    if (!committed) throw await refusal();
+    // The gate state is the one the transaction saw, not the one read before it.
+    const { record, gateEnabled, gateEnforced } = committed;
+    const release = this.toRelease(record);
+    await this.options.audit({
+      category: "release",
+      eventType: "release.unpublished",
+      action: "unpublish",
+      outcome: "success",
+      actor: { userId: user.id, email: user.email, type: "user" },
+      resourceType: "workflow",
+      resourceId: workflowId,
+      projectId: await this.projectOf(workflowId),
+      metadata: { releaseId: release.id, version: release.version, workflowHash: release.workflowHash, reason: release.reason, gateEnabled, gateEnforced }
+    });
+    try {
+      await this.options.onPublished(workflowId);
+    } catch (error) {
+      this.options.logger?.warn("Re-registering triggers after an unpublish failed", { workflowId, error: error instanceof Error ? error.message : String(error) });
+    }
+    return { release, productionRuns: "draft", gateEnabled, gateEnforced, notice: releaseUnpublishNotice({ version: release.version, gateEnabled, gateEnforced }) };
+  }
+
   // -------------------------------------------------------------------------
   // Release requests (the approvals inbox)
   // -------------------------------------------------------------------------
@@ -1590,7 +1686,10 @@ export class ReleaseService {
     } else if ((gate?.updatedAt ?? null) !== record.gateUpdatedAt) {
       return "The release gate's settings changed after the request was made.";
     }
-    if (await this.store.getPublishedVersion(record.workflowId) !== record.publishedVersionAtRequest) return "Another version was published after the request was made.";
+    const publishedNow = await this.store.getPublishedVersion(record.workflowId);
+    if (publishedNow !== record.publishedVersionAtRequest) {
+      return publishedNow === null ? "Production was unpublished after the request was made." : "Another version was published after the request was made.";
+    }
     return null;
   }
 

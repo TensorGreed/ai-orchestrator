@@ -10,6 +10,7 @@
 import type { PoolClient } from "pg";
 import { GUARD_SIMULATION_JOB_DATASET_PREFIX } from "@ai-orchestrator/shared";
 import type { Store, ReleaseApprovalDecisionInput, ReleaseGateCasesChange, GateCaseDecisionRecordInput } from "../store.js";
+import { UnpublishGateEnforcedError } from "../store-errors.js";
 import type {
   ApprovalReadScope,
   GateCaseRequestRecord,
@@ -269,7 +270,8 @@ async function publishOn(client: PoolClient, release: Omit<WorkflowReleaseRecord
   if (current !== expectedPrevious) return null;
   const pinned = await client.query(`UPDATE workflow_versions SET pinned = 1 WHERE workflow_id = $1 AND version = $2`, [release.workflowId, release.version]);
   if ((pinned.rowCount ?? 0) === 0) return null;
-  await client.query(`UPDATE workflows SET published_version = $1 WHERE id = $2`, [release.version, release.workflowId]);
+  await client.query(`UPDATE workflows SET published_version = $1, unpublished_at = NULL WHERE id = $2`, [release.version, release.workflowId]);
+  const publishedAt = await historyTime(client, release.workflowId, release.publishedAt);
   await client.query(
     `INSERT INTO workflow_releases (id, workflow_id, version, workflow_hash, previous_version, replay_run_id, verdict, reason, gate_reasons_json, approval_json, published_at, published_by, published_by_user_id)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
@@ -284,12 +286,20 @@ async function publishOn(client: PoolClient, release: Omit<WorkflowReleaseRecord
       release.reason,
       JSON.stringify(release.gateReasons),
       release.approval ? JSON.stringify(release.approval) : null,
-      release.publishedAt,
+      publishedAt,
       release.publishedBy,
       release.publishedByUserId
     ]
   );
-  return { ...release, previousVersion: current };
+  return { ...release, publishedAt, previousVersion: current };
+}
+
+/** In the transaction that holds the workflow row: `at`, or the workflow's newest history time when that is later, so time order never disagrees with write order. */
+async function historyTime(client: PoolClient, workflowId: string, at: string): Promise<string> {
+  const result = await client.query(`SELECT MAX(published_at) AS newest FROM workflow_releases WHERE workflow_id = $1`, [workflowId]);
+  const newest = (result.rows[0] as Row | undefined)?.newest;
+  const latest = newest === null || newest === undefined ? null : String(newest);
+  return latest !== null && latest > at ? latest : at;
 }
 
 /** The WHERE clauses and params of an inbox listing (pending / decided / all, by workflow, by readable scope). */
@@ -338,7 +348,7 @@ export async function upsertReleaseGate(ctx: PgContext, record: ReleaseGateRecor
 }
 
 export async function listWorkflowReleases(ctx: PgContext, workflowId: string, limit = 100): Promise<WorkflowReleaseRecord[]> {
-  const rows = await ctx.query<Row>(`SELECT * FROM workflow_releases WHERE workflow_id = $1 ORDER BY published_at DESC, id DESC LIMIT $2`, [
+  const rows = await ctx.query<Row>(`SELECT * FROM workflow_releases WHERE workflow_id = $1 ORDER BY published_at DESC, seq DESC LIMIT $2`, [
     workflowId,
     Math.max(1, Math.min(500, limit))
   ]);
@@ -366,6 +376,59 @@ export async function publishWorkflowVersion(
     if (error === refusal) return null;
     throw error;
   }
+}
+
+/**
+ * Unpublish: the workflow row is locked first, so of two concurrent calls the second sees no published version and
+ * is refused (null), leaving nothing behind.
+ */
+export async function unpublishWorkflowVersion(ctx: PgContext, entry: Parameters<Store["unpublishWorkflowVersion"]>[0]): ReturnType<Store["unpublishWorkflowVersion"]> {
+  return await ctx.withTransaction(async (client) => {
+    const current = await readPublishedVersion(client, entry.workflowId, true);
+    // The gate row is read under the workflow lock, so a gate that was enforced before the lock was granted is seen.
+    const gate = await readReleaseGate(client, entry.workflowId, false);
+    const gateEnabled = Boolean(gate?.enabled);
+    const gateEnforced = gateEnabled && Boolean(gate?.enforced);
+    if (entry.refuseIfGateEnforced && gateEnforced) throw new UnpublishGateEnforcedError();
+    if (current === null) return null;
+    if (entry.expectedVersion !== undefined && entry.expectedVersion !== null && entry.expectedVersion !== current) return null;
+    const released = await client.query(
+      `SELECT workflow_hash FROM workflow_releases WHERE workflow_id = $1 AND version = $2 AND verdict <> 'unpublished' ORDER BY published_at DESC, seq DESC LIMIT 1`,
+      [entry.workflowId, current]
+    );
+    const at = await historyTime(client, entry.workflowId, entry.unpublishedAt);
+    const record: WorkflowReleaseRecord = {
+      id: entry.id,
+      workflowId: entry.workflowId,
+      version: current,
+      workflowHash: released.rows[0] ? String((released.rows[0] as Row).workflow_hash) : "",
+      previousVersion: current,
+      replayRunId: null,
+      verdict: "unpublished",
+      reason: entry.reason,
+      gateReasons: [],
+      approval: null,
+      publishedAt: at,
+      publishedBy: entry.unpublishedBy,
+      publishedByUserId: entry.unpublishedByUserId
+    };
+    await client.query(`UPDATE workflows SET published_version = NULL, unpublished_at = $1 WHERE id = $2`, [at, entry.workflowId]);
+    await client.query(
+      `INSERT INTO workflow_releases (id, workflow_id, version, workflow_hash, previous_version, replay_run_id, verdict, reason, gate_reasons_json, approval_json, published_at, published_by, published_by_user_id)
+       VALUES ($1, $2, $3, $4, $5, NULL, 'unpublished', $6, '[]', NULL, $7, $8, $9)`,
+      [record.id, record.workflowId, record.version, record.workflowHash, record.previousVersion, record.reason, record.publishedAt, record.publishedBy, record.publishedByUserId]
+    );
+    return { record, gateEnabled, gateEnforced };
+  });
+}
+
+export async function getPublishState(ctx: PgContext, workflowId: string): Promise<{ publishedVersion: number | null; unpublishedAt: string | null }> {
+  const row = await ctx.queryOne<Row>(`SELECT published_version, unpublished_at FROM workflows WHERE id = $1`, [workflowId]);
+  if (!row) return { publishedVersion: null, unpublishedAt: null };
+  return {
+    publishedVersion: nullableNumber(row.published_version),
+    unpublishedAt: row.unpublished_at !== null && row.unpublished_at !== undefined ? String(row.unpublished_at) : null
+  };
 }
 
 export async function listReplayRunIdsForHash(ctx: PgContext, workflowId: string, workflowHash: string): Promise<string[]> {
