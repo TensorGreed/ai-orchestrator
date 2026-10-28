@@ -150,6 +150,8 @@ export async function deleteWorkflow(ctx: PgContext, id: string, options: { refu
     // a delete never holds a workflow version row while waiting for the workflow row. With `refuseIfGateEnforced` the
     // gate is then read before anything goes; a gate save holds the workflow row while it writes, so it is seen.
     // A workflow that is already gone is not refused: the delete finds nothing and the caller answers 404.
+    // Retention pruning never waits for the rows this delete holds (it skips them, prune.ts), so the order of the
+    // child tables below cannot deadlock with it.
     const locked = await run(`SELECT id FROM workflows WHERE id = $1 FOR UPDATE`, [id]);
     if (options.refuseIfGateEnforced && locked.rows.length > 0) await gateStateForWrite(client, id, true);
     await run(`DELETE FROM execution_history WHERE workflow_id = $1`, [id]);

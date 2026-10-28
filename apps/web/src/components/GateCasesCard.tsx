@@ -4,6 +4,10 @@
  * for admission: they run with every gate job but do not count yet. Admins
  * admit or reject them and mark cases required; builders ask the gate's
  * approvers in the approvals inbox. Nothing shows for an unenforced gate.
+ * An enforced gate that is switched off keeps its admission state, so the card
+ * stays for admins to curate, with a note that it applies once the gate is on;
+ * builders may then remove a case directly, so they are not offered a removal
+ * request.
  */
 
 import { useCallback, useEffect, useState } from "react";
@@ -112,6 +116,11 @@ export function GateCasesCard({ workflowId, gateVersion }: GateCasesCardProps) {
           {view.counts.admitted} admitted · {view.counts.required} required
         </span>
       </header>
+      {!view.enabled && (
+        <p className="cfg-help gate-off-note" role="note">
+          The gate is off: admission and required cases apply once it is switched on.
+        </p>
+      )}
       {banner && (
         <div className="gate-admission-banner" role="status">
           <span>{banner}</span>
@@ -178,7 +187,7 @@ export function GateCasesCard({ workflowId, gateVersion }: GateCasesCardProps) {
                     <span>Required</span>
                   </label>
                 )}
-                {view.canRequest && entry.admission === "admitted" && !entry.requestId && (
+                {view.canRequest && view.enabled && entry.admission === "admitted" && !entry.requestId && (
                   <button
                     type="button"
                     className="pg-btn small ghost"

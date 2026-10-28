@@ -815,9 +815,15 @@ export class ReleaseService {
   // What only admins may do on an enforced gate
   // -------------------------------------------------------------------------
 
-  private async enforcedGateOf(workflowId: string): Promise<ReleaseGateRecord | null> {
+  /**
+   * The workflow's gate when it keeps golden-set changes and golden-run deletes with admins: only while it is on and
+   * enforced (`releaseGateRestrictsToAdmins`, the rule rollback, unpublish and delete follow). A gate switched off
+   * restricts nothing, even when it is still flagged enforced; its stored admission state is kept for when it is
+   * switched on again.
+   */
+  private async adminOnlyGateOf(workflowId: string): Promise<ReleaseGateRecord | null> {
     const gate = await this.store.getReleaseGate(workflowId);
-    return gate?.enforced ? gate : null;
+    return releaseGateRestrictsToAdmins(gate) ? gate : null;
   }
 
   private async refuse(user: SafeUser, workflowId: string, eventType: string, action: string, metadata: Record<string, unknown>): Promise<void> {
@@ -852,7 +858,7 @@ export class ReleaseService {
 
   /**
    * Why `user` may not make this change to a golden set (null when they
-   * may), on a set an enforced gate uses: deleting the set and adding a case
+   * may), on a set a gate that is on and enforced uses: deleting the set and adding a case
    * with its own scorers are admin-only, and so is removing a case the gate
    * counts (an admitted case: `releaseAdmissionLoosening`). A builder may
    * remove a case still pending admission, or ask for removal of an
@@ -862,7 +868,7 @@ export class ReleaseService {
     if (user.role === "admin") return null;
     const dataset = await this.store.getEvalDataset(datasetId);
     if (!dataset?.workflowId) return null;
-    const gate = await this.enforcedGateOf(dataset.workflowId);
+    const gate = await this.adminOnlyGateOf(dataset.workflowId);
     if (!gate || !gate.datasetIds.includes(datasetId)) return null;
     if (change === "remove_case") {
       const snapshot = await gateAdmissionSnapshot(this.store, gate);
@@ -884,13 +890,14 @@ export class ReleaseService {
   }
 
   /**
-   * Why `user` may not delete a golden run that an admitted case of an
-   * enforced gate's golden set replays (admins only); null when they may.
+   * Why `user` may not delete a golden run that an admitted case of a
+   * golden set of a gate that is on and enforced replays (admins only);
+   * null when they may.
    * Audits a refusal.
    */
   async recordingDeleteDenial(user: SafeUser, workflowId: string, recordingId: string): Promise<string | null> {
     if (user.role === "admin") return null;
-    const gate = await this.enforcedGateOf(workflowId);
+    const gate = await this.adminOnlyGateOf(workflowId);
     if (!gate) return null;
     const snapshot = await gateAdmissionSnapshot(this.store, gate);
     const counted = snapshot?.fixtures.find((fixture) => fixture.recordingId === recordingId && snapshot.admittedIds.has(fixture.id));

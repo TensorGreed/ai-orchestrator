@@ -65,7 +65,7 @@ function versions() {
   };
 }
 
-const NOT_ENFORCED: ReleaseGateCasesView = { workflowId: "wf-1", enforced: false, cases: [], counts: { admitted: 0, pending: 0, required: 0 }, canAdmit: false, canRequest: false };
+const NOT_ENFORCED: ReleaseGateCasesView = { workflowId: "wf-1", enforced: false, enabled: false, cases: [], counts: { admitted: 0, pending: 0, required: 0 }, canAdmit: false, canRequest: false };
 
 beforeEach(() => {
   vi.resetAllMocks();
@@ -326,6 +326,7 @@ describe("gate admission on an enforced gate", () => {
   const enforcedCases = (overrides: Partial<ReleaseGateCasesView> = {}): ReleaseGateCasesView => ({
     workflowId: "wf-1",
     enforced: true,
+    enabled: true,
     cases: [
       caseView({}),
       caseView({ fixtureId: "fx_2", name: "Easy 1", admission: "pending" }),
@@ -337,8 +338,8 @@ describe("gate admission on an enforced gate", () => {
     canRequest: true,
     ...overrides
   });
-  const mountGate = (enforced: boolean, isAdmin: boolean) => {
-    vi.mocked(api.fetchReleaseGate).mockResolvedValue({ gate: { ...defaultReleaseGate("wf-1"), enabled: true, enforced, datasetIds: ["set-1"] } });
+  const mountGate = (enforced: boolean, isAdmin: boolean, enabled = true) => {
+    vi.mocked(api.fetchReleaseGate).mockResolvedValue({ gate: { ...defaultReleaseGate("wf-1"), enabled, enforced, datasetIds: ["set-1"] } });
     vi.mocked(api.fetchEvalDatasets).mockResolvedValue({ datasets: [] });
     vi.mocked(api.fetchReleases).mockResolvedValue({ releases: [], publishedVersion: null });
     render(<ReleaseGatePanel workflows={[{ id: "wf-1", name: "Refunds" } as never]} canEdit isAdmin={isAdmin} />);
@@ -361,6 +362,30 @@ describe("gate admission on an enforced gate", () => {
     expect(await screen.findByText("Sent to the gate's approvers in the approvals inbox.")).toBeInTheDocument();
     // An admitted case: the builder asks for its removal.
     expect(screen.getByRole("button", { name: "Request removal of Refund over limit" })).toBeInTheDocument();
+  });
+
+  it("an enforced gate switched off: the cases stay with a note; a builder may still ask for admission but is not offered a removal request", async () => {
+    vi.mocked(api.fetchReleaseGateCases).mockResolvedValue({ cases: enforcedCases({ enabled: false }) });
+    mountGate(true, false, false);
+    expect(await screen.findByText("The gate is off: admission and required cases apply once it is switched on.")).toBeInTheDocument();
+    expect(screen.getByText("3 new cases waiting for admin admission. They run but don't count yet.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Request admission" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Request removal of Refund over limit" })).toBeNull();
+  });
+
+  it("an enforced gate switched off: an admin still admits and marks cases required, under the note", async () => {
+    vi.mocked(api.fetchReleaseGateCases).mockResolvedValue({ cases: enforcedCases({ enabled: false, canAdmit: true, canRequest: false }) });
+    mountGate(true, true, false);
+    expect(await screen.findByText("The gate is off: admission and required cases apply once it is switched on.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Admit Easy 1" })).toBeInTheDocument();
+    expect(screen.getByLabelText("Refund over limit is required")).toBeInTheDocument();
+  });
+
+  it("a switched-on enforced gate shows no gate-off note", async () => {
+    vi.mocked(api.fetchReleaseGateCases).mockResolvedValue({ cases: enforcedCases() });
+    mountGate(true, false);
+    expect(await screen.findByRole("button", { name: "Request removal of Refund over limit" })).toBeInTheDocument();
+    expect(screen.queryByText(/The gate is off/)).toBeNull();
   });
 
   it("an admin admits or rejects inline and marks a case required; the chip shows", async () => {

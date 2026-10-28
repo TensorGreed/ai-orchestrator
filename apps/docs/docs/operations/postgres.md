@@ -212,6 +212,7 @@ Every feature works on Postgres, and several API instances can share one Postgre
 | A webhook idempotency key or replay fingerprint is accepted once | primary keys; a duplicate gets the stored result or `409` |
 | Workflow and guard-profile versions get distinct numbers | the parent row is locked while the next number is taken |
 | Timeouts expire a request once | the sweep locks rows with `SKIP LOCKED` |
+| Retention pruning never deadlocks with a workflow delete or a decision | each prune deletes in short batches and skips rows another transaction holds (`SKIP LOCKED`); a replay job goes whole, with all its results, or stays; a guard simulation stays while one of its finished jobs does; a skipped row goes at the next prune |
 
 **Restarts.** With a shared database an instance only marks work as interrupted when no instance has touched it recently: runs older than the longest a run may last plus a minute, and eval or replay jobs with no progress for five minutes. A job another live instance is running is left alone.
 

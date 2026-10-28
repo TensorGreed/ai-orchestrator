@@ -70,7 +70,7 @@ function unpublished(gateEnabled: boolean, gateEnforced: boolean): ReleaseUnpubl
   };
 }
 
-const NOT_ENFORCED: ReleaseGateCasesView = { workflowId: "wf-1", enforced: false, cases: [], counts: { admitted: 0, pending: 0, required: 0 }, canAdmit: false, canRequest: false };
+const NOT_ENFORCED: ReleaseGateCasesView = { workflowId: "wf-1", enforced: false, enabled: false, cases: [], counts: { admitted: 0, pending: 0, required: 0 }, canAdmit: false, canRequest: false };
 
 beforeEach(() => {
   vi.resetAllMocks();

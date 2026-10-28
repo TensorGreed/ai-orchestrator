@@ -6,6 +6,7 @@ import type { PoolClient } from "pg";
 import { type CancelExecutionResult, type Store } from "../store.js";
 import { parseJsonSafe, toNum, toStr } from "./helpers.js";
 import type { PgContext } from "./context.js";
+import { deleteUnlockedInBatches } from "./prune.js";
 
 export async function saveExecutionHistory(ctx: PgContext, input: {
   id: string;
@@ -292,20 +293,23 @@ export async function cancelExecution(ctx: PgContext, input: {
   }
 }
 
-/** The same deletes as SqliteStore.pruneExecutionHistory, in one transaction; returns the history rows removed. */
+/**
+ * The same deletes as SqliteStore.pruneExecutionHistory; returns the history rows removed. Never waits for a row lock
+ * (see prune.ts): rows a workflow delete or another writer holds are skipped and go on a later run. Tables in the
+ * order a workflow delete takes them.
+ */
 export async function pruneExecutionHistory(ctx: PgContext, input: { before: string }): Promise<number> {
-  return ctx.withTransaction(async (client) => {
-    const result = await client.query(`DELETE FROM execution_history WHERE started_at < $1`, [input.before]);
-    // Phase 10.1 — tool-call telemetry follows the execution-history retention.
-    await client.query(`DELETE FROM mcp_tool_calls WHERE started_at < $1`, [input.before]);
-    // Phase 10.8 — so do cassettes recorded from those runs.
-    await client.query(`DELETE FROM mcp_cassettes WHERE created_at < $1`, [input.before]);
-    // Phase 12.1 — and so do guard events.
-    await client.query(`DELETE FROM guard_events WHERE created_at < $1`, [input.before]);
-    // Phase 11.2 — and decided approval requests; pending ones stay with their paused run.
-    await client.query(`DELETE FROM approval_requests WHERE status <> 'pending' AND created_at < $1`, [input.before]);
-    return result.rowCount ?? 0;
-  });
+  const before = [input.before];
+  const deleted = await deleteUnlockedInBatches(ctx.pool, "execution_history", "started_at < $1", before);
+  // Phase 11.2 — and decided approval requests; pending ones stay with their paused run.
+  await deleteUnlockedInBatches(ctx.pool, "approval_requests", "status <> 'pending' AND created_at < $1", before);
+  // Phase 10.8 — so do cassettes recorded from those runs.
+  await deleteUnlockedInBatches(ctx.pool, "mcp_cassettes", "created_at < $1", before);
+  // Phase 12.1 — and so do guard events.
+  await deleteUnlockedInBatches(ctx.pool, "guard_events", "created_at < $1", before);
+  // Phase 10.1 — tool-call telemetry follows the execution-history retention.
+  await deleteUnlockedInBatches(ctx.pool, "mcp_tool_calls", "started_at < $1", before);
+  return deleted;
 }
 
 export async function saveWorkflowExecutionState(ctx: PgContext, input: {

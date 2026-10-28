@@ -172,7 +172,7 @@ beforeEach(() => {
   vi.mocked(api.fetchGuardProfiles).mockResolvedValue({ profiles: [{ id: "strict", name: "Strict support", builtIn: false, latestVersion: 2, hash: "h", createdAt: "", updatedAt: "" }], autoApply: false, builtInId: "default" });
   vi.mocked(api.fetchMcpServers).mockResolvedValue({ servers: [{ id: "srv_docs", name: "Docs" }], adapters: [], defaultProbeIntervalMs: 0 } as never);
   vi.mocked(api.estimateReplayJob).mockResolvedValue({ cases: 1, runsPerCase: 1, modelCallsEstimate: 1, estimatedCostUsd: 0.002, costUnknown: false, warnings: [] });
-  vi.mocked(api.fetchReleaseGateCases).mockResolvedValue({ cases: { workflowId: "wf-1", enforced: false, cases: [], counts: { admitted: 0, pending: 0, required: 0 }, canAdmit: false, canRequest: false } });
+  vi.mocked(api.fetchReleaseGateCases).mockResolvedValue({ cases: { workflowId: "wf-1", enforced: false, enabled: false, cases: [], counts: { admitted: 0, pending: 0, required: 0 }, canAdmit: false, canRequest: false } });
 });
 
 /** wf-1 with an agent (chat model attached), a read node and a write node. */
@@ -244,6 +244,7 @@ describe("EvaluationsPage — golden sets", () => {
       cases: {
         workflowId: "wf-1",
         enforced: true,
+        enabled: true,
         cases: [{ fixtureId: "fix_1", datasetId: "set_1", datasetName: "Refund regressions", name: "Refund baseline", recordingId: "rec_aaa", admission: "admitted", required: true, requestId: null, requestKind: null, createdAt: "" }],
         counts: { admitted: 1, pending: 0, required: 1 },
         canAdmit: false,
@@ -254,6 +255,26 @@ describe("EvaluationsPage — golden sets", () => {
     await user.click(await screen.findByRole("button", { name: /Refund regressions/ }));
     const cases = await screen.findByRole("region", { name: "Cases" });
     expect(await within(cases).findByText("required")).toBeInTheDocument();
+  });
+
+  it("hides the required chip while the enforced gate is switched off", async () => {
+    vi.mocked(api.fetchReleaseGateCases).mockResolvedValue({
+      cases: {
+        workflowId: "wf-1",
+        enforced: true,
+        enabled: false,
+        cases: [{ fixtureId: "fix_1", datasetId: "set_1", datasetName: "Refund regressions", name: "Refund baseline", recordingId: "rec_aaa", admission: "admitted", required: true, requestId: null, requestKind: null, createdAt: "" }],
+        counts: { admitted: 1, pending: 0, required: 1 },
+        canAdmit: false,
+        canRequest: true
+      }
+    });
+    const user = renderPage();
+    await user.click(await screen.findByRole("button", { name: /Refund regressions/ }));
+    const cases = await screen.findByRole("region", { name: "Cases" });
+    expect(await within(cases).findByText("rec_aaa")).toBeInTheDocument();
+    await waitFor(() => expect(api.fetchReleaseGateCases).toHaveBeenCalledWith("wf-1"));
+    expect(within(cases).queryByText("required")).toBeNull();
   });
 
   it("marks golden runs imported from a golden-set file", async () => {
@@ -278,6 +299,29 @@ describe("EvaluationsPage — golden sets", () => {
     await user.click(screen.getByRole("button", { name: "Delete set" }));
     await waitFor(() => expect(api.deleteEvalDataset).toHaveBeenCalledWith("set_1"));
     expect(confirm).toHaveBeenCalledTimes(2);
+    confirm.mockRestore();
+  });
+
+  it("a builder keeps Remove and Delete set on a set a gate flagged enforced uses: the gate restricts them only while it is on, so the server decides", async () => {
+    vi.mocked(api.fetchReleaseGateCases).mockResolvedValue({
+      cases: {
+        workflowId: "wf-1",
+        enforced: true,
+        enabled: false,
+        cases: [{ fixtureId: "fix_1", datasetId: "set_1", datasetName: "Refund regressions", name: "Refund baseline", recordingId: "rec_aaa", admission: "admitted", required: false, requestId: null, requestKind: null, createdAt: "" }],
+        counts: { admitted: 1, pending: 0, required: 0 },
+        canAdmit: false,
+        canRequest: true
+      }
+    });
+    vi.mocked(api.deleteEvalFixture).mockResolvedValue({ ok: true });
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const user = renderPage();
+    await user.click(await screen.findByRole("button", { name: /Refund regressions/ }));
+    await waitFor(() => expect(api.fetchReleaseGateCases).toHaveBeenCalledWith("wf-1"));
+    expect(screen.getByRole("button", { name: "Delete set" })).toBeEnabled();
+    await user.click(await screen.findByRole("button", { name: "Remove Refund baseline" }));
+    await waitFor(() => expect(api.deleteEvalFixture).toHaveBeenCalledWith("fix_1"));
     confirm.mockRestore();
   });
 

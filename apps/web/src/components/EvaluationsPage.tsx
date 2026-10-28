@@ -453,7 +453,7 @@ function GoldenSetDetail({ set, workflowName, canEdit, onBack, onChanged, onDele
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [replayOpen, setReplayOpen] = useState(false);
-  // Cases an enforced release gate requires (admitted ones only); empty when the gate is not enforced.
+  // Cases an enforced release gate requires (admitted ones only); empty unless the gate is switched on and enforced.
   const [gateRequired, setGateRequired] = useState<ReadonlySet<string>>(new Set());
 
   const refresh = useCallback(async () => {
@@ -466,7 +466,7 @@ function GoldenSetDetail({ set, workflowName, canEdit, onBack, onChanged, onDele
       ]);
       setFixtures(fixtureResponse.fixtures);
       setRecordings(recordingResponse.items);
-      setGateRequired(new Set(gateCases?.cases.enforced ? gateCases.cases.cases.filter((entry) => entry.required).map((entry) => entry.fixtureId) : []));
+      setGateRequired(new Set(gateCases?.cases.enforced && gateCases.cases.enabled ? gateCases.cases.cases.filter((entry) => entry.required).map((entry) => entry.fixtureId) : []));
       setError(null);
     } catch (err) {
       setError(errorText(err, "Could not load the golden set"));

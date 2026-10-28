@@ -10,6 +10,7 @@ import type { EvalDatasetRecord, EvalFixtureRecord, EvalResultRecord, EvalRunRec
 import { type Store } from "../store.js";
 import type { PgContext } from "./context.js";
 import { toNum, toStr } from "./helpers.js";
+import { deleteRunsWhole } from "./prune.js";
 
 function rowCount(result: { rowCount: number | null }): number {
   return result.rowCount ?? 0;
@@ -182,47 +183,52 @@ export async function updateEvalRunProgress(ctx: PgContext, ...[input]: Paramete
   }
 }
 
+/** Runs one pruneEvalRuns transaction deletes at most, with their results. */
+const EVAL_PRUNE_CHUNK_RUNS = 100;
+
+/**
+ * Never waits for a row lock (see prune.ts): the runs to delete are read without locking, then each chunk goes in its
+ * own short transaction, each run whole or not at all (deleteRunsWhole): a run whose row or any of whose results
+ * another transaction holds stays, with all its results, for a later run.
+ */
 export async function pruneEvalRuns(ctx: PgContext, ...[input]: Parameters<Store["pruneEvalRuns"]>): ReturnType<Store["pruneEvalRuns"]> {
-  return ctx.withTransaction(async (client) => {
-    const { rows } = await client.query<{ id: string; dataset_id: string; dataset_ids_json: string | null; status: string; started_at: string }>(
-      `SELECT id, dataset_id, dataset_ids_json, status, started_at FROM eval_runs ORDER BY started_at DESC, seq DESC`
-    );
-    const newest = new Set<string>();
-    const newestFinished = new Set<string>();
-    const keep = new Set<string>();
-    const doomed: string[] = [];
-    for (const row of rows) {
-      const id = toStr(row.id);
-      const status = toStr(row.status);
-      const finished = status !== "queued" && status !== "running";
-      let sets: string[] = [toStr(row.dataset_id)];
-      try {
-        const parsed = row.dataset_ids_json ? (JSON.parse(toStr(row.dataset_ids_json)) as unknown) : null;
-        if (Array.isArray(parsed)) sets = [...new Set([...sets, ...parsed.map((entry) => String(entry))])];
-      } catch {
-        // A malformed list: the first set still counts.
-      }
-      for (const set of sets) {
-        if (!newest.has(set)) {
-          newest.add(set);
-          keep.add(id);
-        }
-        if (finished && !newestFinished.has(set)) {
-          newestFinished.add(set);
-          keep.add(id);
-        }
-      }
-      if (finished && !keep.has(id) && toStr(row.started_at) < input.before) doomed.push(id);
+  const rows = await ctx.query<{ id: string; dataset_id: string; dataset_ids_json: string | null; status: string; started_at: string }>(
+    `SELECT id, dataset_id, dataset_ids_json, status, started_at FROM eval_runs ORDER BY started_at DESC, seq DESC`
+  );
+  const newest = new Set<string>();
+  const newestFinished = new Set<string>();
+  const keep = new Set<string>();
+  const doomed: string[] = [];
+  for (const row of rows) {
+    const id = toStr(row.id);
+    const status = toStr(row.status);
+    const finished = status !== "queued" && status !== "running";
+    let sets: string[] = [toStr(row.dataset_id)];
+    try {
+      const parsed = row.dataset_ids_json ? (JSON.parse(toStr(row.dataset_ids_json)) as unknown) : null;
+      if (Array.isArray(parsed)) sets = [...new Set([...sets, ...parsed.map((entry) => String(entry))])];
+    } catch {
+      // A malformed list: the first set still counts.
     }
-    // Counted from the deletes, so a prune running beside another one never counts a run twice.
-    let deleted = 0;
-    for (let index = 0; index < doomed.length; index += 500) {
-      const chunk = doomed.slice(index, index + 500);
-      await client.query(`DELETE FROM eval_results WHERE run_id = ANY($1::text[])`, [chunk]);
-      deleted += rowCount(await client.query(`DELETE FROM eval_runs WHERE id = ANY($1::text[])`, [chunk]));
+    for (const set of sets) {
+      if (!newest.has(set)) {
+        newest.add(set);
+        keep.add(id);
+      }
+      if (finished && !newestFinished.has(set)) {
+        newestFinished.add(set);
+        keep.add(id);
+      }
     }
-    return deleted;
-  });
+    if (finished && !keep.has(id) && toStr(row.started_at) < input.before) doomed.push(id);
+  }
+  // Counted from the deletes, so a prune running beside another one never counts a run twice.
+  let deleted = 0;
+  for (let index = 0; index < doomed.length; index += EVAL_PRUNE_CHUNK_RUNS) {
+    const chunk = doomed.slice(index, index + EVAL_PRUNE_CHUNK_RUNS);
+    deleted += (await ctx.withTransaction((client) => deleteRunsWhole(client, chunk))).size;
+  }
+  return deleted;
 }
 
 export async function finalizeEvalRun(ctx: PgContext, ...[input]: Parameters<Store["finalizeEvalRun"]>): ReturnType<Store["finalizeEvalRun"]> {

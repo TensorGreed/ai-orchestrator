@@ -18,7 +18,7 @@ A hand-written case (an input and an expected value, without a golden run) can s
 
 Deleting a golden run that a set uses does not remove the case: the next job reports it as inconclusive ("the golden run for this case was deleted"), so a suite never shrinks without anyone noticing.
 
-When an [enforced release gate](./release-gate.md#case-admission-and-required-cases) uses the set, a case you add waits for admission before the gate counts it, only an admin can remove a case the gate counts (and that removal is audited), and a case the gate requires shows a **required** chip. The chip is not shown when the gate is not enforced, since required marks are ignored then.
+When an [enforced release gate](./release-gate.md#case-admission-and-required-cases) uses the set, a case you add waits for admission before the gate counts it, only an admin can remove a case the gate counts while the gate is switched on (and that removal is audited), and a case the gate requires shows a **required** chip. The chip is not shown when the gate is not enforced, since required marks are ignored then.
 
 ## Replay jobs
 
