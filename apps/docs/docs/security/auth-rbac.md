@@ -177,12 +177,117 @@ Triggers without a user (production webhooks, schedules, chat and form
 triggers in public or bearer mode, the MCP gateway) are not checked against a
 user, by design; they still get the run-time limits above.
 
+## OIDC single sign-on
+
+OpenID Connect login works alongside password, SAML and LDAP login. It is off
+unless `OIDC_ENABLED=true`; with it unset nothing changes and none of the other
+`OIDC_*` settings are read. When it is on, the login page shows **Sign in with
+SSO (OIDC)** under the password form.
+
+The API uses the Authorization Code flow with PKCE (S256), `state` and `nonce`.
+The ID token must be signed with an asymmetric algorithm (RS*, PS* or ES*; `none`
+and HS* are refused) by a key in the IdP's JWKS, and its `iss`, `aud` (your client
+id), `azp`, `exp`, `iat` (60 seconds of clock skew, at most ten minutes old) and
+`nonce` are checked. Discovery and the JWKS are cached for an hour; a token
+signed with an unknown key id refetches the JWKS, so IdP key rotation needs no
+restart.
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `OIDC_ENABLED` | off | Turns OIDC on. |
+| `OIDC_ISSUER` | (required when on) | The IdP's `issuer`, exactly as its `/.well-known/openid-configuration` reports it (trailing slash included or not). Must be `https`; plain `http` only on `localhost`. |
+| `OIDC_CLIENT_ID` | (required when on) | The client (application) id registered at the IdP. |
+| `OIDC_CLIENT_SECRET` | unset | Confidential clients only; sent with `client_secret_basic` (or `client_secret_post` when that is all the IdP supports). Leave unset for a public client: PKCE alone then protects the code. Never logged or returned by the API. |
+| `OIDC_REDIRECT_URL` | `<first WEB_ORIGIN>/api/auth/oidc/callback` | Register this exact URL at the IdP. It must reach the API on the same host the login started on (the web server proxies `/api` to the API). |
+| `OIDC_SCOPES` | `openid email profile` | Must include `openid`. Add `groups` if your IdP needs a scope for the groups claim. |
+| `OIDC_GROUPS_CLAIM` | `groups` | Claim with the user's groups, for [group-to-role mappings](#group-to-role-mappings). A dotted path such as `realm_access.roles` reads a nested claim. |
+| `OIDC_REQUIRE_EMAIL_VERIFIED` | `true` | See [Linking accounts](#linking-accounts). |
+
+The API checks these at startup and refuses to start with a clear message when
+OIDC is on but misconfigured.
+
+### Linking accounts
+
+- An IdP account that has signed in before (same issuer, same `sub`) always
+  gets the same L2M user, even if its email changed at the IdP.
+- Otherwise the user is matched by email: an existing L2M user with that email
+  is linked, or a new user is created (role `viewer` unless a mapping says
+  otherwise). This happens only when the ID token (or the userinfo endpoint)
+  says `email_verified: true`. An unverified email is never linked to an
+  existing account and never creates one; the user sees "did not share a
+  verified email address".
+- Some IdPs (for example Microsoft Entra ID) do not send `email_verified`. If
+  your IdP alone controls every email address in it, set
+  `OIDC_REQUIRE_EMAIL_VERIFIED=false`; otherwise keep the default, because an
+  unverified email would let anyone who can set that address at the IdP sign
+  in as the matching L2M user.
+- Users created through SSO get a random password, so they sign in through
+  SSO only.
+
+Sessions are the same as for password login (`SESSION_TTL_HOURS`, the session
+cookie, `POST /api/auth/logout`). As with SAML, multi-factor authentication is
+the IdP's job: the L2M TOTP step is not asked for SSO logins. Logout ends the
+L2M session only, not the IdP session. Every OIDC login, successful or not, is
+recorded in the audit log as `user.login` with `metadata.method = "oidc"` (the
+failure reason is a short code; tokens are never logged).
+
+When a login fails, the browser returns to the login page with a short
+`sso_error` code (`oidc_state`, `oidc_denied`, `oidc_email`, `oidc_unavailable`
+or `oidc_failed`) and the reason is in the API log. A login started in one
+browser tab and finished more than ten minutes later, or started twice in
+parallel, fails with `oidc_state`; start it again.
+
+### Group-to-role mappings
+
+Mappings for provider `oidc` work like the SAML and LDAP ones (Settings → SSO
+group-to-role mappings, or `POST /api/auth/sso/mappings` with `"provider": "oidc"`). A
+mapping without a project sets the user's global role on each login (never
+lowering it); one with a project adds a project membership.
+
+### Setting up an IdP
+
+Register a web application (confidential client) or a single-page/native
+application (public client), allow the Authorization Code grant, and add the
+redirect URL. Then:
+
+- **Keycloak**: `OIDC_ISSUER=https://<host>/realms/<realm>`. Add a "Group
+  Membership" mapper to the client's dedicated scope with token claim name
+  `groups`, "Add to ID token" on and "Full group path" off. Realm roles are at
+  `OIDC_GROUPS_CLAIM=realm_access.roles`.
+- **Microsoft Entra ID**:
+  `OIDC_ISSUER=https://login.microsoftonline.com/<tenant-id>/v2.0`. Under Token
+  configuration add a groups claim (Entra sends group object ids, so map those
+  ids). Entra does not send `email_verified` by default; read the linking
+  rules above before setting `OIDC_REQUIRE_EMAIL_VERIFIED=false`.
+- **Okta**: `OIDC_ISSUER=https://<org>.okta.com/oauth2/default` (a custom
+  authorization server). Add a `groups` claim to the ID token on that
+  authorization server, with a filter for the groups L2M should see.
+
+Example (Keycloak, confidential client):
+
+```bash
+OIDC_ENABLED=true
+OIDC_ISSUER=https://keycloak.example.com/realms/acme
+OIDC_CLIENT_ID=l2m
+OIDC_CLIENT_SECRET=<from the client's Credentials tab>
+OIDC_REDIRECT_URL=https://l2m.example.com/api/auth/oidc/callback
+COOKIE_SECURE=true
+```
+
+In production set `COOKIE_SECURE=true` (HTTPS) and give every API instance the
+same `SECRET_MASTER_KEY_BASE64`: the short-lived login cookie that carries the
+`state`, `nonce` and PKCE verifier is encrypted with a key derived from it, so a
+login can start on one instance and finish on another.
+
 ## Endpoints
 
 - `POST /api/auth/register`
 - `POST /api/auth/login`
 - `POST /api/auth/logout`
 - `GET /api/auth/me`
+- `GET /api/auth/oidc/metadata` (public; `404` when OIDC is off)
+- `GET /api/auth/oidc/login` (browser navigation; redirects to the IdP)
+- `GET /api/auth/oidc/callback` (IdP redirect target)
 
 ## Error contracts
 

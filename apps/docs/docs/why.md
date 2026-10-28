@@ -64,7 +64,7 @@ This is harder to get right than it looks. Most workflow tools' webhook auth sto
 
 The features that closed-source agent platforms put behind enterprise SKUs are open here:
 
-- **SSO** — SAML 2.0 (Okta, Azure AD, OneLogin) and LDAP / Active Directory, both as optional dependencies.
+- **SSO** — OpenID Connect (Keycloak, Entra ID, Okta), SAML 2.0 (Okta, Azure AD, OneLogin) and LDAP / Active Directory; SAML and LDAP as optional dependencies.
 - **MFA / TOTP** — RFC 6238, AES-256-GCM-encrypted secret at rest, single-use SHA-256-hashed backup codes, optional `MFA_ENFORCE`.
 - **API keys** — `Authorization: Bearer ao_<prefix>.<secret>` works on any `/api/*` route alongside session cookies.
 - **External secret managers** — HashiCorp Vault (KV v1/v2), AWS Secrets Manager, Google Secret Manager, Azure Key Vault, with TTL-based rotation cache.

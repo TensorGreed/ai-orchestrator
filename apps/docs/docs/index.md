@@ -22,7 +22,7 @@ features:
   - title: VS Code agent surface
     details: First-party extension turns any workflow into a coding agent inside the editor — streaming responses, patch previews with workspace-path safety, and command approval. Bring your own backend agent topology.
   - title: Production-ready foundations
-    details: TOTP MFA and SSO through SAML or LDAP (optional packages). AES-256-GCM secrets with master-key rotation through db:export / db:import, and external secret managers (HashiCorp Vault built in; AWS, Google Cloud and Azure once their SDK is installed). RBAC with projects and custom roles, a tamper-evident audit log, Prometheus metrics and OpenTelemetry traces over OTLP.
+    details: TOTP MFA and SSO through OpenID Connect, SAML or LDAP (SAML and LDAP as optional packages). AES-256-GCM secrets with master-key rotation through db:export / db:import, and external secret managers (HashiCorp Vault built in; AWS, Google Cloud and Azure once their SDK is installed). RBAC with projects and custom roles, a tamper-evident audit log, Prometheus metrics and OpenTelemetry traces over OTLP.
 ---
 
 ## Documentation map
