@@ -56,6 +56,8 @@ export function pauseAfter(store: PostgresStore, after: RegExp): { reached: Prom
 /**
  * Every transaction of this store's pool gets a lock timeout, so a lock order regression that leaves a statement
  * waiting for good fails the test within seconds (a lock timeout error) instead of at the test's own timeout.
+ * Statements run with `pool.query` (outside a transaction) get no lock timeout: a regressed one waits until the paused
+ * transaction resumes and then fails as a deadlock, which is still a clear failure.
  */
 export function limitLockWaits(store: PostgresStore, timeout = "5s"): void {
   const pool = (store as unknown as { pool: Pool }).pool;
