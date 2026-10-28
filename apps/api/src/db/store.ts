@@ -1777,7 +1777,7 @@ export interface Store {
     renewedAt: string;
   }>>;
 
-  // ---- Phase 13.1 cluster registry (v44). Written on Postgres only; on SQLite the methods work but the app never calls them.
+  // ---- Phase 13.1 cluster registry (cluster signalling migration). Written on Postgres only; on SQLite the methods work but the app never calls them.
 
   /** Inserts or refreshes this instance's registry row; `heartbeat_at` is the database clock. */
   heartbeatClusterInstance(input: ClusterInstanceHeartbeat): Promise<void>;

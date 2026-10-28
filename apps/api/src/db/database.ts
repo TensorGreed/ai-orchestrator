@@ -3744,8 +3744,9 @@ export class SqliteStore implements Store {
       `CREATE INDEX IF NOT EXISTS ${QUEUE_CLAIM_INDEX} ON execution_queue (pool, priority DESC, scheduled_at, created_at, id) WHERE status = 'pending'`
     );
     this.exec(`CREATE INDEX IF NOT EXISTS ${QUEUE_RUNNING_HEARTBEAT_INDEX} ON execution_queue (heartbeat_at) WHERE status = 'running'`);
-    // Migration 44 — the cluster instance registry and inline-run owners. Postgres writes them; on SQLite (one process)
-    // they exist for schema parity and stay empty.
+
+    // Phase 13.1 cluster signalling migration — the cluster instance registry and inline-run owners. Postgres writes
+    // them; on SQLite (one process) they exist for schema parity and stay empty.
     this.exec(`
       CREATE TABLE IF NOT EXISTS cluster_instances (
         id TEXT PRIMARY KEY,
@@ -9244,7 +9245,7 @@ export class SqliteStore implements Store {
   }
 
   // ---------------------------------------------------------------------------
-  // Phase 13.1 — cluster registry (v44). The app writes it on Postgres only (one SQLite process is the whole cluster);
+  // Phase 13.1 — cluster registry. The app writes it on Postgres only (one SQLite process is the whole cluster);
   // these keep the Store contract, on the process clock.
   // ---------------------------------------------------------------------------
 

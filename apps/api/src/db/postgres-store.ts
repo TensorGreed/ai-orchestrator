@@ -1,5 +1,5 @@
 import pg, { type Pool, type PoolClient, type PoolConfig } from "pg";
-import { runMigrations } from "./migrations.js";
+import { MigrationGapError, missingMigrationVersions, runMigrations } from "./migrations.js";
 import type { Store } from "./store.js";
 import type { PostgresSslSettings } from "../config.js";
 import { createPgContext, type PgContext } from "./postgres/context.js";
@@ -147,6 +147,18 @@ export async function ensureMigrationsTable(client: Pool | PoolClient): Promise<
 }
 
 /**
+ * Refuses to migrate a database that recorded a version above one this build defines but never applied (a migration
+ * merged with a lower number than one already deployed): the chain would skip it for good. Contiguous databases,
+ * empty ones and ones ahead of this build pass unchanged.
+ */
+export async function refuseMigrationGaps(client: Pool | PoolClient): Promise<void> {
+  const result = await client.query<{ version: string | number }>(`SELECT version FROM schema_migrations`);
+  const applied = result.rows.map((row) => toNum(row.version));
+  const missing = missingMigrationVersions(applied);
+  if (missing.length > 0) throw new MigrationGapError(missing, Math.max(...applied));
+}
+
+/**
  * Applies every pending chain migration on `client` (call it inside withMigrationLock). Returns the NOTICE messages
  * the migrations raised (for example how many running guard simulations v39 interrupted), for one startup line each.
  */
@@ -158,6 +170,7 @@ export async function applyMigrationChain(client: PoolClient): Promise<string[]>
   client.on("notice", onNotice);
   try {
     await ensureMigrationsTable(client);
+    await refuseMigrationGaps(client);
     await runMigrations(
       async (sql) => { await client.query(sql); },
       () => currentChainVersion(client),

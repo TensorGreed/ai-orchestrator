@@ -322,7 +322,7 @@ run("cluster signalling across API instances on one Postgres database", () => {
     await primary.store.claimClusterRunOwner({ executionId: "left-behind", instanceId: "instance-0" });
     await primary.store.heartbeatClusterInstance({
       id: "instance-0", workerMode: "all", haEnabled: true, isLeader: true, pools: [], concurrency: null, running: 1, appVersion: null,
-      schemaVersion: 44, capabilities: ["bus-v1"], hostname: "old", busConnected: true, startedAt: new Date().toISOString()
+      schemaVersion: 7, capabilities: ["bus-v1"], hostname: "old", busConnected: true, startedAt: new Date().toISOString()
     });
     const [a] = await start(1);
     expect(await a!.store.getExecutionHistory("left-behind")).toMatchObject({ status: "error", error: DEAD_EXECUTOR_RUN_ERROR });

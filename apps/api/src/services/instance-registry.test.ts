@@ -45,7 +45,7 @@ function registry(id: string, overrides: Partial<InstanceRegistryOptions> = {}):
     concurrency: null,
     capabilities: [],
     appVersion: null,
-    schemaVersion: 44,
+    schemaVersion: 7,
     runtime: () => ({ isLeader: false, running: 0, busConnected: false }),
     heartbeatMs: 60_000,
     instanceTimeoutMs: 60_000,
@@ -110,7 +110,7 @@ describe("InstanceRegistry", () => {
     await store.saveExecutionHistory({ id: "r1", workflowId: "wf", status: "running", startedAt: new Date().toISOString() });
     await store.heartbeatClusterInstance({
       id: "dead", workerMode: "all", haEnabled: true, isLeader: false, pools: [], concurrency: null, running: 1, appVersion: null,
-      schemaVersion: 44, capabilities: [], hostname: "h", busConnected: true, startedAt: new Date().toISOString()
+      schemaVersion: 7, capabilities: [], hostname: "h", busConnected: true, startedAt: new Date().toISOString()
     });
     await store.claimClusterRunOwner({ executionId: "r1", instanceId: "dead" });
     for (let i = 0; i < 100 && !(await store.listClusterInstances({ liveWithinMs: 30 })).some((row) => row.id === "dead" && !row.live); i += 1) {

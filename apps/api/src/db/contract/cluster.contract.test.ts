@@ -1,5 +1,5 @@
 /**
- * Phase 13.1 — store contract: the cluster registry (v44) and inline-run owners, on both stores. Liveness is judged
+ * Phase 13.1 — store contract: the cluster registry and inline-run owners, on both stores. Liveness is judged
  * on the store's clock (the database's on Postgres), so the tests wait for a heartbeat to age rather than fake a time.
  */
 import { expect, it } from "vitest";
@@ -16,7 +16,7 @@ function beat(id: string, overrides: Partial<ClusterInstanceHeartbeat> = {}): Cl
     concurrency: 5,
     running: 0,
     appVersion: "1.2.3",
-    schemaVersion: 44,
+    schemaVersion: 7,
     capabilities: ["bus-v1"],
     hostname: "host-a",
     busConnected: true,

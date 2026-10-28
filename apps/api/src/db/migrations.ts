@@ -2070,7 +2070,7 @@ export const MIGRATIONS: Migration[] = [
     // on the database clock; it backs the cluster view, the dead-executor reconcile and the warning for several
     // instances that each lead because HA is off. cluster_run_owners: which instance executes each inline run, written
     // in cluster mode only, so the leader can fail a dead instance's runs at once instead of after a day. SQLite's
-    // embedded migrate() creates the same tables; nothing writes them there. v43 belongs to the queue lane.
+    // embedded migrate() creates the same tables; nothing writes them there. The number is settled at merge (see migration-versions.test-helper.ts).
     up: `
       CREATE TABLE IF NOT EXISTS cluster_instances (
         id TEXT PRIMARY KEY,
@@ -2103,6 +2103,39 @@ export const MIGRATIONS: Migration[] = [
     `
   }
 ];
+
+/**
+ * Versions this build defines below the highest applied one that were never applied. `runMigrations` applies only
+ * versions above the highest applied one, so a migration that merged with a number below a version a database already
+ * recorded would be skipped for good, silently. Postgres refuses to start on such a database (applyMigrationChain).
+ */
+export function missingMigrationVersions(applied: Iterable<number>, migrations: ReadonlyArray<Pick<Migration, "version">> = MIGRATIONS): number[] {
+  const recorded = new Set(applied);
+  const highest = Math.max(0, ...recorded);
+  return migrations
+    .map((migration) => migration.version)
+    .filter((version) => version < highest && !recorded.has(version))
+    .sort((a, b) => a - b);
+}
+
+/** The database recorded a migration above one this build defines but never applied (see missingMigrationVersions). */
+export class MigrationGapError extends Error {
+  constructor(
+    readonly missing: number[],
+    readonly highestApplied: number
+  ) {
+    const list = missing.map((version) => `v${version}`).join(", ");
+    super(
+      `Postgres schema_migrations is at v${highestApplied} but never applied ${list}, which this build defines below it; ` +
+        `the migration chain only moves forward, so ${missing.length === 1 ? "it" : "they"} would never run. ` +
+        `This happens when a build carrying a later migration ran on this database before the build that added ${list}. ` +
+        `To fix: apply the 'up' SQL of ${list} from apps/api/src/db/migrations.ts by hand (each is idempotent) and insert ` +
+        `${missing.length === 1 ? "its version" : "their versions"} into schema_migrations, or recreate a disposable database. ` +
+        `Refusing to start rather than run without ${missing.length === 1 ? "that migration" : "those migrations"}.`
+    );
+    this.name = "MigrationGapError";
+  }
+}
 
 export async function runMigrations(
   runSql: (sql: string) => Promise<void>,

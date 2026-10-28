@@ -1,5 +1,5 @@
 /**
- * Phase 13.1 — the cluster registry (v44) and cross-instance advisory locks on Postgres. Every time comparison uses the
+ * Phase 13.1 — the cluster registry and cross-instance advisory locks on Postgres. Every time comparison uses the
  * database clock (`now()`), so instances whose clocks disagree still agree on who is alive.
  */
 import type { Pool, PoolClient } from "pg";
