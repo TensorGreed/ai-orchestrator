@@ -324,6 +324,23 @@ describe("SAML allow-lists", () => {
   });
 });
 
+describe("SAML callback rate limit", () => {
+  it("stays in the auth rate-limit bucket (form posts included)", async () => {
+    const context = await createContext({ env: { RATE_LIMIT_ENABLED: "true", RATE_LIMIT_AUTH_MAX: "2" } });
+    const statuses: number[] = [];
+    for (let i = 0; i < 3; i += 1) {
+      const response = await context.app.inject({
+        method: "POST",
+        url: "/api/auth/saml/callback",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        payload: "SAMLResponse=forged"
+      });
+      statuses.push(response.statusCode);
+    }
+    expect(statuses).toEqual([302, 302, 429]);
+  });
+});
+
 describe("SAML secrets stay out of logs and audits", () => {
   it("never writes the SAMLResponse to a log line, response or audit", async () => {
     const context = await createContext({ captureLogs: true });

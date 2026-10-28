@@ -6422,6 +6422,15 @@ export async function createApp(
   // The SAMLResponse only ever travels in the request body (there is no Redirect-binding callback), so it never
   // reaches a request URL, log line or span.
   app.register(async (scope) => {
+    // Routes in this scope sit in the auth rate-limit bucket; answer a burst with 429 (the app-wide handler would make
+    // it a 500) and leave every other error to that handler.
+    scope.setErrorHandler((error, _request, reply) => {
+      if ((error as { statusCode?: unknown }).statusCode === 429) {
+        reply.code(429).send({ error: "Too many requests, retry later" });
+        return;
+      }
+      throw error;
+    });
     scope.addContentTypeParser("application/x-www-form-urlencoded", { parseAs: "string" }, (_request, body, done) => {
       done(null, Object.fromEntries(new URLSearchParams(typeof body === "string" ? body : body.toString("utf8"))));
     });
