@@ -12,6 +12,12 @@
  *
  * Every handler is idempotent: aborting an aborted run, stopping a stopped eval run or reloading a workflow twice does
  * nothing more.
+ *
+ * Trust: Postgres has no privilege on NOTIFY channels, so any role that can connect to the database can send on the
+ * bus. The database role is the trust boundary (every cluster member shares it); operators must not grant the app's
+ * database to untrusted roles. Within that, each message is validated (known type, field types, lengths; anything
+ * else is ignored), and a message never decides anything on its own: a `cancel` or `eval_cancel` aborts only a run
+ * the store shows canceled, and `workflow_changed` only makes the leader re-read the stored workflow.
  */
 import type { Store } from "../db/store.js";
 import type { ClusterBus, ClusterMessage } from "./cluster-bus.js";
@@ -19,6 +25,54 @@ import { errorText } from "./cluster-bus-local.js";
 
 export const CLUSTER_CANCEL_CHECK_MS_DEFAULT = 10_000;
 export const REMOTE_CANCEL_REASON = "The run was canceled.";
+/** Longest cancel reason sent on (or taken from) the bus. */
+export const CLUSTER_CANCEL_REASON_MAX_LENGTH = 200;
+/** Longest id (execution, eval run, workflow, instance) a control message may carry. */
+const CLUSTER_ID_MAX_LENGTH = 512;
+
+const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f]/;
+const CONTROL_CHARACTER_RUNS = /[\u0000-\u001f\u007f-\u009f]+/g;
+
+/**
+ * A cancel reason fit for the bus: control characters become spaces, whitespace is collapsed and the text is cut to
+ * CLUSTER_CANCEL_REASON_MAX_LENGTH characters. Undefined when nothing is left.
+ */
+export function clusterCancelReason(reason: unknown): string | undefined {
+  if (typeof reason !== "string") return undefined;
+  const clean = reason.replace(CONTROL_CHARACTER_RUNS, " ").replace(/\s+/g, " ").trim();
+  if (!clean) return undefined;
+  return clean.length > CLUSTER_CANCEL_REASON_MAX_LENGTH ? `${clean.slice(0, CLUSTER_CANCEL_REASON_MAX_LENGTH - 1)}…` : clean;
+}
+
+function clusterId(value: unknown): string | null {
+  return typeof value === "string" && value.length > 0 && value.length <= CLUSTER_ID_MAX_LENGTH && !CONTROL_CHARACTERS.test(value) ? value : null;
+}
+
+/** A control message this build acts on, validated. */
+export type ClusterControlMessage =
+  | { t: "cancel"; id: string; reason: string | undefined; from: string | null }
+  | { t: "eval_cancel"; runId: string; from: string | null }
+  | { t: "workflow_changed"; id: string; from: string | null };
+
+/** The validated form of a `ctl` message, or null for anything else (unknown type, wrong field types or lengths). */
+export function parseControlMessage(message: ClusterMessage): ClusterControlMessage | null {
+  const from = message.from === undefined ? null : clusterId(message.from);
+  if (message.from !== undefined && from === null) return null;
+  if (message.t === "cancel") {
+    const id = clusterId(message.id);
+    if (!id || (message.reason !== undefined && typeof message.reason !== "string")) return null;
+    return { t: "cancel", id, reason: clusterCancelReason(message.reason), from };
+  }
+  if (message.t === "eval_cancel") {
+    const runId = clusterId(message.runId);
+    return runId ? { t: "eval_cancel", runId, from } : null;
+  }
+  if (message.t === "workflow_changed") {
+    const id = clusterId(message.id);
+    return id ? { t: "workflow_changed", id, from } : null;
+  }
+  return null;
+}
 
 export interface ClusterSignalsOptions {
   bus: ClusterBus;
@@ -28,7 +82,8 @@ export interface ClusterSignalsOptions {
   /** Aborts a run executing in this process; a no-op when it is not here (or is already ending). */
   abortExecution: (executionId: string, reason: string) => void;
   evalRuns?: {
-    stopCanceledElsewhere(runId: string): boolean;
+    /** Stops the run here if it runs here and the store shows it canceled. */
+    stopIfCanceledElsewhere(runId: string): Promise<boolean>;
     stopRunsCanceledElsewhere(): Promise<number>;
   };
   workflows?: {
@@ -66,20 +121,23 @@ export function startClusterSignals(options: ClusterSignalsOptions): ClusterSign
     return await checking;
   };
 
-  const onControl = async (message: ClusterMessage): Promise<void> => {
-    if (message.t === "cancel" && typeof message.id === "string") {
-      options.abortExecution(message.id, typeof message.reason === "string" && message.reason ? message.reason : REMOTE_CANCEL_REASON);
+  const onControl = async (raw: ClusterMessage): Promise<void> => {
+    const message = parseControlMessage(raw);
+    if (!message) return;
+    if (message.t === "cancel") {
+      // Only a run executing here, and only once the store confirms the cancel (one indexed read).
+      if (!options.activeExecutionIds().includes(message.id)) return;
+      if (!(await options.store.listCanceledExecutionIds([message.id])).includes(message.id)) return;
+      options.abortExecution(message.id, message.reason ?? REMOTE_CANCEL_REASON);
       return;
     }
-    if (message.t === "eval_cancel" && typeof message.runId === "string") {
-      options.evalRuns?.stopCanceledElsewhere(message.runId);
+    if (message.t === "eval_cancel") {
+      await options.evalRuns?.stopIfCanceledElsewhere(message.runId);
       return;
     }
-    if (message.t === "workflow_changed" && typeof message.id === "string") {
-      // The publisher already reloaded its own services.
-      if (message.from === bus.instanceId || !options.workflows?.isLeader()) return;
-      await options.workflows.reload(message.id);
-    }
+    // The publisher already reloaded its own services.
+    if (message.from === bus.instanceId || !options.workflows?.isLeader()) return;
+    await options.workflows.reload(message.id);
   };
 
   const onResync = async (): Promise<void> => {

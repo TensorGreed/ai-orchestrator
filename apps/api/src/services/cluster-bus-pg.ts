@@ -24,7 +24,7 @@
  *   - Channels are per database and are scoped by schema here, so deployments (and test files) that share a database
  *     but not a schema never see each other's messages.
  */
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import pg, { type PoolConfig } from "pg";
 import {
   CLUSTER_BUS_MAX_PAYLOAD_BYTES,
@@ -251,7 +251,8 @@ export class PgClusterBus implements ClusterBus {
       connected: this.client !== null,
       disconnectedSince: this.client ? null : (this.disconnectedSince?.toISOString() ?? null),
       reconnects: this.reconnects,
-      channels: this.listened.size
+      channels: this.listened.size,
+      verified: this.verified
     };
   }
 
@@ -343,6 +344,7 @@ export class PgClusterBus implements ClusterBus {
     this.disconnectedSince = null;
     this.failedAttempts = 0;
     this.startPing(client);
+    void this.selfTest(client);
     const reconnected = this.everConnected;
     this.everConnected = true;
     if (reconnected) {
@@ -358,6 +360,45 @@ export class PgClusterBus implements ClusterBus {
 
   /** The first connect failed after subscribers registered, so they get a resync once it succeeds. */
   private resyncPending = false;
+  /** The last self-test's result (see ClusterBusStatus.verified). */
+  private verified: boolean | null = null;
+
+  /**
+   * Self-test after each connect: LISTEN on a one-off channel, NOTIFY it through the pool (the path every publish
+   * takes), and expect the notification on the listener within `queryTimeoutMs`. Behind a pooler in transaction mode
+   * the two connections can land on different server sessions and the notification never arrives; that is logged once
+   * per failed test and shown as `verified: false`. Runs beside the serial chain (pg queues the listener's queries),
+   * so a slow test never delays a subscription.
+   */
+  private async selfTest(client: pg.Client): Promise<void> {
+    if (client !== this.client || this.closed || !this.schema) return;
+    const channel = `l2m_probe_${hashHex(`${this.schema}\u0000${this.instanceId}\u0000${randomUUID()}`, 32)}`;
+    const nonce = randomUUID();
+    let heard!: () => void;
+    const arrived = new Promise<void>((resolve) => {
+      heard = resolve;
+    });
+    const onNotification = (notification: pg.Notification) => {
+      if (notification.channel === channel && notification.payload === nonce) heard();
+    };
+    client.on("notification", onNotification);
+    try {
+      await withTimeout(client.query(`LISTEN ${quoteChannel(channel)}`), this.queryTimeoutMs);
+      await this.options.query(`SELECT pg_notify($1, $2)`, [channel, nonce]);
+      await withTimeout(arrived, this.queryTimeoutMs);
+      if (client === this.client) this.verified = true;
+    } catch (error) {
+      if (client !== this.client || this.closed) return;
+      this.verified = false;
+      this.options.logger?.warn(
+        "Cluster bus self-test failed: a notification sent through the pool did not reach the listener. Connect directly or through a session-mode pooler (not PgBouncer in transaction mode); until then cancels and reloads wait for their periodic checks",
+        { error: errorText(error) }
+      );
+    } finally {
+      client.off("notification", onNotification);
+      if (client === this.client) await withTimeout(client.query(`UNLISTEN ${quoteChannel(channel)}`), this.queryTimeoutMs).catch(() => undefined);
+    }
+  }
 
   /** Forgets a broken connection and schedules a reconnect. Safe to call more than once per connection. */
   private drop(client: pg.Client, reason: unknown): void {

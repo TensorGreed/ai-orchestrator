@@ -1096,6 +1096,17 @@ export class EvalService {
     return true;
   }
 
+  /**
+   * Phase 13.1 — a cancel signal for `runId` arrived: stops it here only if it runs here and its stored status is
+   * `canceled` (the signal itself is not trusted). Returns whether it was stopped.
+   */
+  async stopIfCanceledElsewhere(runId: string): Promise<boolean> {
+    const active = this.active.get(runId);
+    if (!active || active.canceled) return false;
+    if ((await this.store.getEvalRun(runId))?.status !== "canceled") return false;
+    return this.stopCanceledElsewhere(runId);
+  }
+
   /** Phase 13.1 — re-reads every run this process executes and stops those canceled elsewhere (a missed signal). */
   async stopRunsCanceledElsewhere(): Promise<number> {
     let stopped = 0;

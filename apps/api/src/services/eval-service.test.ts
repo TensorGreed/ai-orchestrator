@@ -241,13 +241,16 @@ describe("eval runs in the background", () => {
       const other = new EvalService(store, executor, undefined, {
         onCancelNotLocal: (runId) => {
           signalled.push(runId);
-          if (!lostSignal) owner.stopCanceledElsewhere(runId);
+          if (!lostSignal) void owner.stopIfCanceledElsewhere(runId);
         }
       });
       const dataset = await datasetWith(owner, 3);
       const run = await owner.enqueueRun({ datasetId: dataset.id, workflowId: "wf", triggeredBy: "b@example.com", triggeredByUserId: "u1" });
       await caseStarted.promise;
       await owner.flush();
+      // A signal the store does not confirm (the run is not canceled) stops nothing.
+      expect(await owner.stopIfCanceledElsewhere(run.id)).toBe(false);
+      expect(aborted).toEqual([]);
       expect((await other.cancel(run.id))!.status).toBe("canceled");
       expect(signalled).toEqual([run.id]);
       for (let i = 0; i < 200 && aborted.length === 0; i += 1) await sleep(10);

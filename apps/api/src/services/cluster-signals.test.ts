@@ -4,7 +4,7 @@
  */
 import { describe, expect, it } from "vitest";
 import type { ClusterBus, ClusterBusStatus, ClusterMessage, ClusterMessageHandler } from "./cluster-bus.js";
-import { REMOTE_CANCEL_REASON, startClusterSignals } from "./cluster-signals.js";
+import { CLUSTER_CANCEL_REASON_MAX_LENGTH, REMOTE_CANCEL_REASON, clusterCancelReason, startClusterSignals } from "./cluster-signals.js";
 
 async function until(read: () => boolean | Promise<boolean>, what: string, timeoutMs = 5_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
@@ -62,7 +62,7 @@ function harness(options: { canceled?: string[]; isLeader?: boolean; cancelCheck
       if (active.has(id)) aborted.push([id, reason]);
     },
     evalRuns: {
-      stopCanceledElsewhere: (runId) => {
+      stopIfCanceledElsewhere: async (runId) => {
         evalStopped.push(runId);
         return true;
       },
@@ -86,9 +86,20 @@ function harness(options: { canceled?: string[]; isLeader?: boolean; cancelCheck
   return { bus, signals, aborted, evalStopped, reloaded, counts };
 }
 
+describe("clusterCancelReason", () => {
+  it("drops control characters, collapses whitespace and caps the length", () => {
+    expect(clusterCancelReason("  stop\u0000 it\n\tnow\u001b[31m ")).toBe("stop it now [31m");
+    expect(clusterCancelReason("\u0000\n")).toBeUndefined();
+    expect(clusterCancelReason(7)).toBeUndefined();
+    const long = clusterCancelReason("x".repeat(1_000))!;
+    expect(long).toHaveLength(CLUSTER_CANCEL_REASON_MAX_LENGTH);
+    expect(long.endsWith("…")).toBe(true);
+  });
+});
+
 describe("cluster signals", () => {
   it("aborts a local run on `cancel`, with the message's reason, and ignores runs that are not here", async () => {
-    const h = harness();
+    const h = harness({ canceled: ["run-1", "run-2", "elsewhere"] });
     await h.bus.deliver({ t: "cancel", id: "run-1", reason: "stop" });
     await h.bus.deliver({ t: "cancel", id: "elsewhere" });
     await h.bus.deliver({ t: "cancel", id: "run-2" });
@@ -96,6 +107,26 @@ describe("cluster signals", () => {
       ["run-1", "stop"],
       ["run-2", REMOTE_CANCEL_REASON]
     ]);
+    h.signals.stop();
+  });
+
+  it("does not abort a local run on a `cancel` the store does not confirm (a NOTIFY from anyone with database access)", async () => {
+    const h = harness({ canceled: [] });
+    await h.bus.deliver({ t: "cancel", id: "run-1", reason: "forged" });
+    expect(h.aborted).toEqual([]);
+    h.signals.stop();
+  });
+
+  it("ignores messages with wrong field types, oversized or control-character ids, or a bad sender", async () => {
+    const h = harness({ canceled: ["run-1"], isLeader: true });
+    await h.bus.deliver({ t: "cancel", id: "run-1", reason: 42 });
+    await h.bus.deliver({ t: "cancel", id: "run-1", from: { forged: true } });
+    await h.bus.deliver({ t: "workflow_changed", id: "x".repeat(513) });
+    await h.bus.deliver({ t: "workflow_changed", id: "wf\u0000evil" });
+    await h.bus.deliver({ t: "eval_cancel", runId: ["eval-1"] });
+    expect(h.aborted).toEqual([]);
+    expect(h.reloaded).toEqual([]);
+    expect(h.evalStopped).toEqual([]);
     h.signals.stop();
   });
 

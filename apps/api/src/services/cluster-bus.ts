@@ -99,6 +99,12 @@ export interface ClusterBusStatus {
   reconnects: number;
   /** Channels currently listened to (run channels included). */
   channels: number;
+  /**
+   * Whether a self-test notification, sent through the pool after the listener connected, reached the listener: false
+   * points at a pooler in transaction mode or a listener on another server (messages then never arrive, and every
+   * effect waits for its reconciliation). Null until tested; always true for the local bus.
+   */
+  verified?: boolean | null;
 }
 
 export class ClusterBusPayloadTooLargeError extends Error {

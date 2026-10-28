@@ -5,7 +5,7 @@
  * restored.
  */
 import { afterEach, describe, expect, it } from "vitest";
-import type { PostgresStore } from "../db/postgres-store.js";
+import { postgresPoolConfig, type PostgresStore } from "../db/postgres-store.js";
 import { createTestStore, noticePostgresSkipped, openTestStoreTwin, testPostgresUrl, testStorePool, type TestStore } from "../test-support/test-store.js";
 import { CLUSTER_BUS_MAX_PAYLOAD_BYTES, ClusterBusPayloadTooLargeError, type ClusterBus, type ClusterMessage, type RunBusEvent } from "./cluster-bus.js";
 import { LocalClusterBus } from "./cluster-bus-local.js";
@@ -152,6 +152,8 @@ runPg("PgClusterBus (two instances on one database)", () => {
     expect(seenB[0]).toEqual({ v: 1, t: "cancel", id: "e1", reason: "stop", from: "a" });
     expect(seenA[0]).toEqual(seenB[0]);
     expect(a.status()).toMatchObject({ kind: "postgres", connected: true, disconnectedSince: null });
+    // The self-test notification sent through the pool reached each listener.
+    await until(() => a.status().verified === true && b.status().verified === true, "both self-tests");
   }, 60_000);
 
   it("ignores a newer message version and refuses an oversized control message", async () => {
@@ -306,6 +308,30 @@ runPg("PgClusterBus (two instances on one database)", () => {
       await until(() => bus.status().connected, "the listener to connect");
       await until(() => resyncs === 1, "a resync once connected");
       await marker(bus, seen);
+    } finally {
+      await bus.close();
+      await pool.end();
+    }
+  }, 60_000);
+
+  it("reports a failed self-test (a notification that never reaches the listener, as behind a transaction pooler)", async () => {
+    primary = await createTestStore({ kind: "postgres" });
+    const { PgClusterBus } = await import("./cluster-bus-pg.js");
+    const pool = testStorePool(primary);
+    const warnings: string[] = [];
+    const bus = new PgClusterBus({
+      instanceId: "pooled",
+      clientConfig: postgresPoolConfig(primary.postgres!.config, { max: 1 }),
+      // The pool's notify lands on another session's channel: here, dropped for the self-test's channel.
+      query: async (sql, params) => (String(params?.[0] ?? "").startsWith("l2m_probe_") ? { rows: [] } : await pool.query(sql, params)),
+      queryTimeoutMs: 300,
+      logger: { warn: (message) => warnings.push(message) }
+    });
+    try {
+      await bus.start();
+      await until(() => bus.status().verified === false, "the failed self-test");
+      expect(bus.status().connected).toBe(true);
+      expect(warnings.some((message) => message.startsWith("Cluster bus self-test failed"))).toBe(true);
     } finally {
       await bus.close();
       await pool.end();

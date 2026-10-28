@@ -110,6 +110,6 @@ export class LocalClusterBus implements ClusterBus {
   }
 
   status(): ClusterBusStatus {
-    return { kind: "local", connected: !this.closed, disconnectedSince: null, reconnects: 0, channels: this.topics.size + this.runs.size };
+    return { kind: "local", connected: !this.closed, disconnectedSince: null, reconnects: 0, channels: this.topics.size + this.runs.size, verified: true };
   }
 }
