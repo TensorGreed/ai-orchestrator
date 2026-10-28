@@ -244,6 +244,8 @@ OIDC is on but misconfigured.
   separate `user.sso_linked` event with the provider, the user, the email and
   whether that user has local TOTP enrolled. Review these events: from then on,
   that account can be reached through the IdP.
+- SAML links differently: it trusts the email the configured IdP asserts (see
+  [SAML single sign-on](#saml-single-sign-on)).
 - Users created through SSO get a random password, so they sign in through
   SSO only.
 
@@ -254,10 +256,11 @@ not the IdP session. Every OIDC login, successful or not, is recorded in the
 audit log as `user.login` with `metadata.method = "oidc"` (the failure reason is
 a short code; tokens are never logged).
 
-::: warning SSO logins do not ask for the L2M TOTP code
-OIDC and SAML logins skip the local TOTP step and `MFA_ENFORCE`, including for
-users who enrolled TOTP for password login. Multi-factor authentication for SSO
-is the IdP's job: require MFA for the L2M application in your IdP's policy.
+::: warning By default SSO logins do not ask for MFA
+With `SSO_MFA` unset, OIDC and SAML logins skip the local TOTP step and
+`MFA_ENFORCE`, including for users who enrolled TOTP for password login. Either
+require MFA for the L2M application in your IdP's policy, or set `SSO_MFA` (see
+[MFA on SSO](#mfa-on-sso)).
 :::
 
 The `code` and `state` on the callback URL are replaced with `REDACTED` in the
@@ -266,8 +269,8 @@ OAuth callback).
 
 When a login fails, the browser returns to the login page with a short
 `sso_error` code (`oidc_state`, `oidc_denied`, `oidc_email`,
-`oidc_not_allowed` for a login refused by an allow-list, `oidc_unavailable` or
-`oidc_failed`) and the reason is in the API log. A login started in one
+`oidc_not_allowed` for a login refused by an allow-list, `oidc_unavailable`,
+`oidc_failed`, or `sso_mfa_required` (see [MFA on SSO](#mfa-on-sso))) and the reason is in the API log. A login started in one
 browser tab and finished more than ten minutes later, or started twice in
 parallel, fails with `oidc_state`; start it again.
 
@@ -330,15 +333,185 @@ same `SECRET_MASTER_KEY_BASE64`: the short-lived login cookie that carries the
 `state`, `nonce` and PKCE verifier is encrypted with a key derived from it, so a
 login can start on one instance and finish on another.
 
+## SAML single sign-on
+
+SAML 2.0 login is off unless `SAML_ENABLED=true` with `SAML_ENTRY_POINT`,
+`SAML_ISSUER` (L2M's own entity ID), `SAML_CALLBACK_URL` and `SAML_IDP_CERT`. It
+needs the optional `@node-saml/node-saml` package installed in `apps/api`
+(`pnpm --filter @ai-orchestrator/api add @node-saml/node-saml@^5`); without it
+the login and callback routes answer that SAML is not configured. L2M uses the
+library's `getAuthorizeUrlAsync`, `validatePostResponseAsync` and the parsed
+assertion of `profile.getAssertion()`, and was tested against 5.2.0 with a
+signed response; use a 5.x release (`>=5.0.0 <6`). Start a login at
+`GET /api/auth/saml/login`, or from the IdP (IdP-initiated).
+
+The IdP posts the `SAMLResponse` to `POST /api/auth/saml/callback` (HTTP-POST
+binding). The browser's form post is answered like the OIDC callback: a
+redirect to the web app on success, or to the login page with a short
+`sso_error` code (`saml_failed`, `saml_not_allowed`, `saml_unavailable`,
+`sso_mfa_required`). An API client that posts JSON gets JSON answers instead
+(`{ user, expiresAt, provisioned }`, `401`, or `403` with
+`code: "saml_not_allowed"`). L2M has no Redirect-binding callback, so the
+`SAMLResponse` only travels in the request body: it never appears in a URL,
+request log line, trace span or audit entry.
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `SAML_GROUPS_ATTRIBUTE` | `groups` | Assertion attribute with the user's groups, for [group-to-role mappings](#group-to-role-mappings). |
+| `SAML_IDP_ISSUER` | unset | The IdP's entity ID. When set, an assertion whose `Issuer` differs is refused. Must not contain `#`. |
+| `SAML_ALLOWED_EMAIL_DOMAINS` | unset (any) | Same as `OIDC_ALLOWED_EMAIL_DOMAINS`, on the asserted email (or the NameID when it is the email). |
+| `SAML_ALLOWED_GROUPS` | unset (any) | Same as `OIDC_ALLOWED_GROUPS`, on the groups from `SAML_GROUPS_ATTRIBUTE`. |
+| `SAML_REQUIRE_IN_RESPONSE_TO` | `false` | Accept only answers to a login started at `GET /api/auth/saml/login` from the same browser; IdP-initiated sign-in is refused. See [Replay and unsolicited responses](#replay-and-unsolicited-responses). |
+
+A login refused by an allow-list gets `saml_not_allowed`; both lists are
+checked on every login, for new and returning users, exactly as for OIDC. The
+API checks these settings at startup when SAML is on.
+
+### Replay and unsolicited responses
+
+- **Each assertion is accepted once.** L2M remembers the ID of every assertion
+  it accepts (with its IdP's entity ID) in the database until the assertion
+  expires: its `NotOnOrAfter` plus five minutes, at most 24 hours (an assertion
+  without `NotOnOrAfter` is held for the 24 hours). A second post of the same
+  `SAMLResponse` is refused with `reason: "replayed_assertion"`, on any API
+  instance that shares the database. An assertion without an `ID` is refused
+  (`missing_assertion_id`).
+- **IdP-initiated sign-in and login CSRF.** By default the callback accepts any
+  valid response, including one the IdP sends without a login started here
+  (IdP-initiated, for example from the Entra ID "My Apps" portal). The trade-off:
+  another user of the same IdP can have a page auto-post *their own* fresh
+  assertion to the callback from your browser, signing your browser into
+  *their* L2M account (login CSRF), so that work you then do lands in their
+  account. Replay protection does not stop this, because the assertion is new.
+- **`SAML_REQUIRE_IN_RESPONSE_TO=true`** closes it. `GET /api/auth/saml/login`
+  then sets a ten-minute cookie (`l2m_saml_req`, HttpOnly, `Secure`,
+  `SameSite=None`, path `/api/auth/saml`, sealed with a key derived from
+  `SECRET_MASTER_KEY_BASE64`) holding the ID of the AuthnRequest it sends, and
+  the callback accepts only an assertion whose `InResponseTo` equals that ID;
+  the cookie is cleared on the callback. Responses without the cookie (another
+  browser, an attacker's page), IdP-initiated responses and answers to another
+  login are refused with `reason: "unsolicited_response"`. `SameSite=None` is
+  needed because the IdP's form post is a cross-site request; browsers keep a
+  `Secure` cookie only over https (and, in Chromium and Firefox, on
+  `localhost`; Safari drops it on plain-http `localhost`), so the API refuses
+  to start with this setting and a plain-http `SAML_CALLBACK_URL` on another
+  host. There is one request cookie per browser: starting a sign-in in a second
+  tab overwrites it, and the first tab then fails with `unsolicited_response`.
+  Finish one sign-in before starting the next.
+  Users must then start from L2M's login page, not from the IdP's portal.
+
+### Linking SAML accounts
+
+- A SAML identity is stored as `<IdP entity ID>#<NameID>`, taken from the
+  assertion's `Issuer` (an assertion without an `Issuer`, or with `#` in it, is
+  refused). The same NameID from another IdP never matches it. An identity that
+  has signed in before keeps its L2M user, even if the asserted email changed.
+- **Upgrade of existing links.** Identities recorded before this change hold
+  the bare NameID. On that identity's next login L2M looks up the scoped key
+  first, then the bare NameID. If it finds the old row, and the login passes
+  the allow-lists and `SSO_MFA` (including the TOTP step), it rewrites the row
+  in place to `<IdP entity ID>#<NameID>` (once; the audit `user.login` of that
+  login has `identityUpgraded: true`). A refused login leaves the row as it
+  was. Nothing needs to be migrated by hand. Because only one IdP is configured
+  at a time, the first login after the upgrade binds the old link to that IdP.
+- Otherwise the user is matched by email (the `email` or `mail` attribute, else
+  the NameID): an existing L2M user with that email is linked, or a new user is
+  created. Unlike OIDC there is no `email_verified` in SAML: **the configured
+  IdP is trusted for the email it asserts**, because its signing certificate is
+  pinned in `SAML_IDP_CERT`. Only connect an IdP whose users cannot choose an
+  arbitrary email address, and use `SAML_ALLOWED_GROUPS` or IdP-side assignment
+  to limit who can sign in.
+- As for OIDC, the first link to an L2M account that already existed is
+  audited as `user.sso_linked` (`provider: "saml"`, email, role,
+  `mfaEnrolled`), and every login, successful or refused, is audited as
+  `user.login` with `metadata.method = "saml"` and a short reason code.
+- A browser's SAML sign-in cannot see the L2M session cookie it already holds:
+  the IdP's form post is a cross-site request, which does not carry the
+  `SameSite=Lax` session cookie. The new session replaces the cookie in the
+  browser, but the earlier session is not revoked on the server; it ends at
+  its normal expiry (`SESSION_TTL_HOURS`) or at logout. Sign out before
+  switching accounts if the earlier session must end at once. (A JSON client
+  that sends the cookie has it revoked, as with OIDC.)
+
+## MFA on SSO
+
+`SSO_MFA` decides whether an OIDC or SAML login must show multi-factor
+authentication. It is read only when OIDC or SAML is on. LDAP login is not
+affected.
+
+| `SSO_MFA` | Behaviour |
+|---|---|
+| `off` (default, or unset) | No MFA check on SSO logins, as before. |
+| `idp` | The login is accepted only if the IdP asserts MFA. Otherwise the browser returns to the login page with `sso_error=sso_mfa_required`; local TOTP is not offered. |
+| `idp_or_local` | IdP-asserted MFA is accepted. Otherwise, a user with local TOTP enrolled gets the usual **Verification code** step (the same challenge as a password login: one attempt, five minutes) and has no session until the code passes. A user without TOTP is treated like a password login under `MFA_ENFORCE`: an admin (the role the login would end with, after group mappings) gets a session and is expected to enrol (recorded as `mfaEnrollmentRequired: true` in the `user.login` audit and, for a JSON SAML client, in the answer, as the password login does; the browser redirect carries no flag); anyone else is refused with `sso_mfa_required`. |
+
+What counts as IdP-asserted MFA:
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `SSO_MFA_OIDC_AMR` | `mfa` | OIDC: the ID token's `amr` (RFC 8176) contains one of these. Only `mfa` says that several factors were used (Entra ID, Okta, Auth0 and Ping send it after a second factor). The other RFC 8176 values name single methods: `otp` or `sms` alone can be a passwordless one-time code, `hwk`/`swk` a key on its own, `mca` several channels rather than factors, and `pwd`, `pin`, `kba`, `face`, `fpt` one factor each. If your IdP reports a second factor only as a method (for example `["pwd","otp"]`), list those methods, such as `SSO_MFA_OIDC_AMR=mfa,otp,hwk`. Keycloak sends no `amr` by default; use `SSO_MFA_OIDC_ACR` with its step-up levels instead. |
+| `SSO_MFA_OIDC_ACR` | unset | OIDC: the ID token's `acr` is one of these. When set, L2M also sends them as `acr_values` to ask the IdP for that level. |
+| `SSO_MFA_SAML_AUTHN_CONTEXTS` | see below | SAML: one of the assertion's `AuthnContextClassRef` values is in the list. |
+
+The SAML default list is `https://refeds.org/profile/mfa`,
+`http://schemas.microsoft.com/claims/multipleauthn` (Entra ID and AD FS after
+MFA), `urn:oasis:names:tc:SAML:2.0:ac:classes:MultiFactor`,
+`urn:oasis:names:tc:SAML:2.0:ac:classes:MobileTwoFactorContract`,
+`urn:oasis:names:tc:SAML:2.0:ac:classes:MobileTwoFactorUnregistered` and
+`urn:oasis:names:tc:SAML:2.0:ac:classes:SmartcardPKI`. When `SSO_MFA` is on, L2M's
+SAML request carries no `RequestedAuthnContext`, so the IdP reports the method
+it really used rather than echoing a requested password class; enforce MFA in
+the IdP's policy (for example Entra ID Conditional Access) for `idp` mode.
+
+Only the signed ID token is read for `amr` and `acr` (never userinfo), and only
+the validated assertion for `AuthnContextClassRef`. Settings with a bad value
+stop the API at startup with a message naming the setting.
+
+Notes:
+
+- The IdP check happens before any account is created or linked, so a refused
+  login changes nothing. In the TOTP step the identity is linked, group
+  mappings are applied and the session is issued only after the code passes.
+- The TOTP step reaches the web app through an HttpOnly cookie
+  (`l2m_sso_mfa`, path `/api/auth/login/mfa`, five minutes) and the
+  `?sso_mfa=totp` parameter; the challenge is never in the URL. A JSON SAML
+  client gets `{ mfaChallenge, expiresInSeconds }`, like the password login.
+- Pending challenges live in the API process, as for password logins: with
+  several API instances, the callback and the code must reach the same
+  instance (sticky sessions), or the code is refused and the user starts again.
+- Audit: `user.login` records how MFA was satisfied: `mfa: "idp"` with
+  `mfaClaim` (`amr`, `acr` or `authn_context`) and `mfaValue`, or
+  `mfa: "local_totp"`, or `mfaEnrollmentRequired: true`. The TOTP step itself is
+  `user.login.mfa_challenge`; a refusal is a `user.login` failure with
+  `reason: "mfa_required"` and the `amr`/`acr` or `authnContext` values the IdP
+  sent; a wrong code is `reason: "mfa_invalid"`. Never a token, assertion or
+  code.
+- Under `idp_or_local` a user without local TOTP and without IdP MFA cannot
+  sign in through SSO to enrol TOTP (except admins under `MFA_ENFORCE`). Use it
+  when the IdP normally performs MFA and local TOTP is the fallback for
+  accounts that already have it.
+
+Example (Entra ID SAML, MFA required by the IdP):
+
+```bash
+SAML_ENABLED=true
+SAML_IDP_ISSUER=https://sts.windows.net/<tenant-id>/
+SAML_ALLOWED_GROUPS=<object id of the L2M users group>
+SSO_MFA=idp
+```
+
 ## Endpoints
 
 - `POST /api/auth/register`
 - `POST /api/auth/login`
+- `POST /api/auth/login/mfa` (`{ challenge?, code }`; an SSO login's challenge comes from the `l2m_sso_mfa` cookie)
 - `POST /api/auth/logout`
 - `GET /api/auth/me`
 - `GET /api/auth/oidc/metadata` (public; `{ "enabled": false }` when OIDC is off)
 - `GET /api/auth/oidc/login` (browser navigation; redirects to the IdP)
 - `GET /api/auth/oidc/callback` (IdP redirect target)
+- `GET /api/auth/saml/login` (redirects to the SAML IdP)
+- `POST /api/auth/saml/callback` (IdP form post, or JSON)
 
 ## Error contracts
 

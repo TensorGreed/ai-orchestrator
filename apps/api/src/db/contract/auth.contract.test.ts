@@ -243,4 +243,27 @@ describeStoreContract("store contract: users and auth", (ctx) => {
     expect(second).toMatchObject({ id: "i1", userId: "u2", email: null, attributes: null, createdAt: first?.createdAt });
     expect(await store.findSsoIdentity("oidc", "SUB")).toBeNull();
   });
+
+  it("SSO identities: renameSsoIdentitySubject moves a subject once and never over an existing one", async () => {
+    const store = ctx.store();
+    await user(store, "u1");
+    await user(store, "u2");
+    await store.upsertSsoIdentity({ id: "legacy", userId: "u1", provider: "saml", subject: "alice", email: "a@example.com" });
+    const before = await store.findSsoIdentity("saml", "alice");
+    await tick();
+    expect(await store.renameSsoIdentitySubject({ provider: "saml", from: "alice", to: "https://idp.example/x#alice" })).toBe(true);
+    expect(await store.findSsoIdentity("saml", "alice")).toBeNull();
+    const moved = await store.findSsoIdentity("saml", "https://idp.example/x#alice");
+    expect(moved).toMatchObject({ id: "legacy", userId: "u1", email: "a@example.com", createdAt: before?.createdAt });
+    expect(moved!.updatedAt >= before!.updatedAt).toBe(true);
+    // Already moved, missing, other provider: nothing happens.
+    expect(await store.renameSsoIdentitySubject({ provider: "saml", from: "alice", to: "https://idp.example/x#alice" })).toBe(false);
+    expect(await store.renameSsoIdentitySubject({ provider: "oidc", from: "https://idp.example/x#alice", to: "z" })).toBe(false);
+    // The target already exists: both rows stay as they were.
+    await store.upsertSsoIdentity({ id: "other", userId: "u2", provider: "saml", subject: "bob" });
+    await store.upsertSsoIdentity({ id: "scoped", userId: "u1", provider: "saml", subject: "https://idp.example/x#bob" });
+    expect(await store.renameSsoIdentitySubject({ provider: "saml", from: "bob", to: "https://idp.example/x#bob" })).toBe(false);
+    expect(await store.findSsoIdentity("saml", "bob")).toMatchObject({ id: "other", userId: "u2" });
+    expect(await store.findSsoIdentity("saml", "https://idp.example/x#bob")).toMatchObject({ id: "scoped", userId: "u1" });
+  });
 });

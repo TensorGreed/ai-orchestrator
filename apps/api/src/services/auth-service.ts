@@ -131,12 +131,19 @@ export class AuthService {
     };
   }
 
-  async getSessionUser(sessionId: string): Promise<SafeUser | null> {
+  /**
+   * `knownSession` is the row a caller already looked up for this ID (`null`: it does not exist). Leave it out to
+   * look the session up here.
+   */
+  async getSessionUser(
+    sessionId: string,
+    knownSession?: Awaited<ReturnType<Store["getSession"]>>
+  ): Promise<SafeUser | null> {
     if (!sessionId) {
       return null;
     }
 
-    const session = await this.store.getSession(sessionId);
+    const session = knownSession === undefined ? await this.store.getSession(sessionId) : knownSession;
     if (!session || session.revokedAt) {
       return null;
     }

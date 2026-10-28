@@ -6562,6 +6562,18 @@ export class SqliteStore implements Store {
     this.persist();
   }
 
+  async renameSsoIdentitySubject(input: { provider: string; from: string; to: string }): Promise<boolean> {
+    const result = this.db
+      .prepare(
+        `UPDATE sso_identities SET subject = ?, updated_at = ?
+         WHERE provider = ? AND subject = ?
+           AND NOT EXISTS (SELECT 1 FROM sso_identities WHERE provider = ? AND subject = ?)`
+      )
+      .run(input.to, new Date().toISOString(), input.provider, input.from, input.provider, input.to);
+    this.persist();
+    return result.changes > 0;
+  }
+
   // ---------------------------------------------------------------------------
   // Phase 5.2 — Project-level roles
   // ---------------------------------------------------------------------------

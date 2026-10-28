@@ -94,7 +94,15 @@ import {
 import { loadDocuments, inferDocumentKind, type DocumentKind } from "./services/document-loader-service";
 import { type McpServerRecord } from "./db/database";
 import { PostgresStore } from "./db/postgres-store.js";
-import { REPLAY_CAPTURE_DEFAULTS, resolveOidcSettings, type AppConfig } from "./config";
+import {
+  REPLAY_CAPTURE_DEFAULTS,
+  resolveOidcSettings,
+  resolveSamlSettings,
+  parseTrustProxy,
+  resolveSsoMfaSettings,
+  ssoPostLoginUrl,
+  type AppConfig
+} from "./config";
 import { redactSensitiveUrl } from "./services/url-redaction.js";
 import { SecretService } from "./services/secret-service";
 import { McpCatalogService } from "./services/mcp-catalog.js";
@@ -111,7 +119,19 @@ import { NonRetryableQueueError, QueueService } from "./services/queue-service";
 import { isConnectedEntrypoint, TriggerService } from "./services/trigger-service";
 import { ApiKeyService } from "./services/api-key-service";
 import { MfaService } from "./services/mfa-service";
-import { SamlService, type SamlAssertionProfile } from "./services/saml-service";
+import {
+  SAML_REQUEST_COOKIE_NAME,
+  SAML_REQUEST_COOKIE_PATH,
+  SAML_REQUEST_MAX_AGE_MS,
+  SamlLoginError,
+  SamlService,
+  deriveSamlRequestKey,
+  samlIdentitySubject,
+  samlUserErrorCode,
+  type SamlAssertionProfile,
+  type SamlClientFactory
+} from "./services/saml-service.js";
+import { decideSsoMfa, evaluateOidcMfa, evaluateSamlMfa, projectSsoRole, type SsoMfaEvidence } from "./services/sso-policy.js";
 import { LdapService } from "./services/ldap-service";
 import {
   OIDC_FLOW_COOKIE_NAME,
@@ -1324,9 +1344,50 @@ export interface CreateAppOptions {
   codeSandboxDeps?: Parameters<typeof resolveCodeSandboxPlan>[1];
   /** Phase 13.2 — HTTP seam for OIDC discovery, JWKS, token and userinfo calls (tests use an in-process IdP). */
   oidcFetch?: OidcFetch;
+  /** Phase 13.2 — builds the SAML client instead of @node-saml/node-saml (tests use an in-process IdP). */
+  samlClientFactory?: SamlClientFactory;
   /** Where the Fastify logger writes (tests capture log lines); stdout when unset. */
   logStream?: { write(line: string): void };
 }
+
+/** What provisionSsoUser needs to link or create the local user of an SSO login. */
+interface SsoProvisionInput {
+  provider: "saml" | "ldap" | "oidc";
+  subject: string;
+  email: string;
+  groups: string[];
+  /** The user an existing SSO identity already points at (OIDC, SAML); otherwise the user is found by email. */
+  userId?: string;
+  /** OIDC only: the issuer and raw `sub` behind the issuer-scoped `subject`, kept with the identity. */
+  oidc?: { issuer: string; sub: string };
+  /**
+   * SAML only: the IdP entity ID and NameID behind the entity-scoped `subject`, kept with the identity, and the bare
+   * NameID of a pre-upgrade identity row that is re-keyed to `subject` once the login completes.
+   */
+  saml?: { entityId: string; nameId: string; legacySubject?: string };
+}
+
+/** Phase 13.2 — an SSO sign-in waiting for the local TOTP step (SSO_MFA=idp_or_local); no token or assertion in it. */
+interface PendingSsoLogin {
+  method: "oidc" | "saml";
+  provision: SsoProvisionInput;
+  /** No SSO identity pointed at the user yet: the link is made (and audited) only after the code passes. */
+  firstLink: boolean;
+}
+
+interface PendingMfaChallenge {
+  userId: string;
+  createdAt: number;
+  sso?: PendingSsoLogin;
+}
+
+function safeUserRole(role: string): UserRole {
+  return role === "admin" || role === "builder" || role === "operator" || role === "viewer" ? role : "viewer";
+}
+
+/** Phase 13.2 — cookie that carries an SSO login's TOTP challenge to `POST /api/auth/login/mfa` (HttpOnly). */
+const SSO_MFA_CHALLENGE_COOKIE = "l2m_sso_mfa";
+const SSO_MFA_CHALLENGE_COOKIE_PATH = "/api/auth/login/mfa";
 
 /** Phase 13.1 — how often the leader re-reads schedules and triggers when several instances share the database. */
 export const SCHEDULE_SYNC_INTERVAL_MS = 15_000;
@@ -1369,6 +1430,8 @@ export async function createApp(
       ...(options.logStream ? { stream: options.logStream } : {})
     },
     bodyLimit: config.API_BODY_LIMIT_BYTES,
+    // TRUST_PROXY unset = false: request.ip (and so the rate-limit key) is the address that connected.
+    trustProxy: parseTrustProxy(config.TRUST_PROXY),
     requestIdHeader: "x-request-id",
     requestIdLogLabel: "reqId",
     genReqId: () => nanoid()
@@ -4237,14 +4300,27 @@ export async function createApp(
       metadata: { executionId: run.executionId, ...metadata }
     });
   };
-  const samlService = new SamlService(store, {
-    enabled: config.SAML_ENABLED,
-    entryPoint: config.SAML_ENTRY_POINT,
-    issuer: config.SAML_ISSUER,
-    callbackUrl: config.SAML_CALLBACK_URL,
-    idpCert: config.SAML_IDP_CERT,
-    groupsAttribute: config.SAML_GROUPS_ATTRIBUTE
-  });
+  // Phase 13.2 — MFA on SSO (SSO_MFA, `off` unless set) and the optional SAML issuer pin / allow-lists.
+  const ssoMfaSettings = resolveSsoMfaSettings(config);
+  const samlSettings = resolveSamlSettings(config);
+  const samlService = new SamlService(
+    store,
+    {
+      enabled: config.SAML_ENABLED,
+      entryPoint: config.SAML_ENTRY_POINT,
+      issuer: config.SAML_ISSUER,
+      callbackUrl: config.SAML_CALLBACK_URL,
+      idpCert: config.SAML_IDP_CERT,
+      groupsAttribute: config.SAML_GROUPS_ATTRIBUTE,
+      idpIssuer: samlSettings?.idpIssuer,
+      allowedEmailDomains: samlSettings?.allowedEmailDomains,
+      allowedGroups: samlSettings?.allowedGroups,
+      reportActualAuthnContext: ssoMfaSettings.mode !== "off",
+      requireInResponseTo: samlSettings?.requireInResponseTo ?? false,
+      requestCookieKey: deriveSamlRequestKey(config.SECRET_MASTER_KEY_BASE64)
+    },
+    options.samlClientFactory
+  );
   const ldapService = new LdapService(store, {
     enabled: config.LDAP_ENABLED,
     url: config.LDAP_URL,
@@ -4259,29 +4335,32 @@ export async function createApp(
   const oidcService = new OidcService(store, oidcSettings, {
     flowKey: deriveOidcFlowKey(config.SECRET_MASTER_KEY_BASE64),
     fetch: options.oidcFetch,
-    logger: (message, metadata) => app.log.warn(metadata ?? {}, message)
+    logger: (message, metadata) => app.log.warn(metadata ?? {}, message),
+    requestAcrValues: ssoMfaSettings.mode !== "off" ? ssoMfaSettings.oidcAcr : []
   });
 
-  const pendingMfaChallenges = new Map<string, { userId: string; createdAt: number }>();
+  const pendingMfaChallenges = new Map<string, PendingMfaChallenge>();
   const MFA_CHALLENGE_TTL_MS = 5 * 60 * 1000;
 
-  const issueMfaChallenge = (userId: string): string => {
+  // An SSO login that ends in the TOTP step carries what it still has to do once the code passes (link the identity,
+  // apply group mappings, audit). It holds no token or assertion.
+  const issueMfaChallenge = (userId: string, sso?: PendingSsoLogin): string => {
     for (const [key, entry] of pendingMfaChallenges.entries()) {
       if (Date.now() - entry.createdAt > MFA_CHALLENGE_TTL_MS) {
         pendingMfaChallenges.delete(key);
       }
     }
     const challengeId = `mfa_${crypto.randomUUID()}`;
-    pendingMfaChallenges.set(challengeId, { userId, createdAt: Date.now() });
+    pendingMfaChallenges.set(challengeId, { userId, createdAt: Date.now(), ...(sso ? { sso } : {}) });
     return challengeId;
   };
 
-  const consumeMfaChallenge = (challengeId: string): string | null => {
+  const consumeMfaChallenge = (challengeId: string): PendingMfaChallenge | null => {
     const entry = pendingMfaChallenges.get(challengeId);
     if (!entry) return null;
     pendingMfaChallenges.delete(challengeId);
     if (Date.now() - entry.createdAt > MFA_CHALLENGE_TTL_MS) return null;
-    return entry.userId;
+    return entry;
   };
 
   const getSessionIdFromRequest = (request: { cookies: Record<string, string | undefined> }) => {
@@ -4294,6 +4373,44 @@ export async function createApp(
     if (!value) return null;
     const match = value.match(/^Bearer\s+(.+)$/i);
     return match ? match[1].trim() : null;
+  };
+
+  type StoredSession = NonNullable<Awaited<ReturnType<typeof store.getSession>>>;
+  // Session IDs this server issues: `sess_` plus 24 to 64 URL-safe characters. Anything else cannot name a session.
+  const SESSION_ID_FORMAT = /^sess_[A-Za-z0-9_-]{24,64}$/;
+  const requestSessions = new WeakMap<object, Promise<StoredSession | null>>();
+
+  /**
+   * The session row the request's cookie names, looked up at most once per request: the rate-limit exemption check
+   * and the auth layer share the result. A cookie that is not shaped like a session ID costs no lookup. A failed
+   * lookup is not remembered as a miss for the auth layer (it looks again); the exemption treats it as no session.
+   */
+  const getRequestSession = (request: object, sessionId: string): Promise<StoredSession | null> => {
+    if (!SESSION_ID_FORMAT.test(sessionId)) return Promise.resolve(null);
+    const cached = requestSessions.get(request);
+    if (cached) return cached;
+    const lookup = store.getSession(sessionId) as Promise<StoredSession | null>;
+    requestSessions.set(request, lookup);
+    lookup.catch(() => requestSessions.delete(request));
+    return lookup;
+  };
+
+  /**
+   * True when a request is studio traffic from a signed-in browser: a session cookie naming a live session, and no
+   * Authorization or X-API-Key header (API-key and bearer traffic stays under the global rate limit). Any lookup
+   * failure counts as false, so the request is limited as usual. Any signed-in session is exempt from the global
+   * bucket, whatever its role.
+   */
+  const isBrowserSessionRequest = async (request: FastifyRequest): Promise<boolean> => {
+    if (request.headers.authorization || request.headers["x-api-key"]) return false;
+    const sessionId = (request.cookies as Record<string, string | undefined> | undefined)?.[config.SESSION_COOKIE_NAME];
+    if (!sessionId) return false;
+    try {
+      const session = await getRequestSession(request, sessionId);
+      return Boolean(session && !session.revokedAt && new Date(session.expiresAt).getTime() > Date.now());
+    } catch {
+      return false;
+    }
   };
 
   const authenticateApiKey = async (headers: Record<string, unknown>): Promise<SafeUser | null> => {
@@ -4357,7 +4474,7 @@ export async function createApp(
       return null;
     }
 
-    const user = await authService.getSessionUser(sessionId);
+    const user = await authService.getSessionUser(sessionId, await getRequestSession(request, sessionId).catch(() => undefined));
     if (!user) {
       clearSessionCookie(reply);
       deny(reply, 401, "Session expired or invalid");
@@ -4387,24 +4504,19 @@ export async function createApp(
     return user;
   };
 
-  const provisionSsoUser = async (input: {
-    provider: "saml" | "ldap" | "oidc";
-    subject: string;
-    email: string;
-    groups: string[];
-    /** The user an existing SSO identity already points at (OIDC); otherwise the user is found by email. */
-    userId?: string;
-    /** OIDC only: the issuer and raw `sub` behind the issuer-scoped `subject`, kept with the identity. */
-    oidc?: { issuer: string; sub: string };
-  }): Promise<{ user: SafeUser; created: boolean }> => {
+  const provisionSsoUser = async (input: SsoProvisionInput): Promise<{ user: SafeUser; created: boolean }> => {
     const normalizedEmail = input.email.trim().toLowerCase();
     let storeUser = input.userId ? await store.getUserById(input.userId) : await store.getUserByEmail(normalizedEmail);
+    // The login was resolved to this user (a linked identity, or the account an SSO TOTP step was issued for); if it
+    // was deleted meanwhile, refuse rather than create a fresh account by email.
+    if (input.userId && !storeUser) {
+      throw new Error("The account this sign-in belongs to no longer exists");
+    }
     let created = false;
     const ssoRoles = input.provider === "saml" ? samlService : input.provider === "ldap" ? ldapService : oidcService;
 
-    // Determine global role: group-mapped role > default viewer.
+    // Determine global role: group-mapped role > default viewer; a mapping raises an existing user, never lowers one.
     const mappedGlobalRole = await ssoRoles.resolveGlobalRole(input.groups);
-    const desiredRole: UserRole = mappedGlobalRole ?? "viewer";
 
     if (!storeUser) {
       const id = `usr_${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`;
@@ -4413,15 +4525,13 @@ export async function createApp(
       const registered = await authService.register({
         email: normalizedEmail,
         password: randomPassword,
-        role: desiredRole
+        role: projectSsoRole(null, mappedGlobalRole)
       });
       storeUser = await store.getUserById(registered.id);
       created = true;
     } else if (mappedGlobalRole && storeUser.role !== mappedGlobalRole) {
-      // Update role when SSO group mapping indicates a change (do NOT downgrade admins unless explicitly mapped).
-      const currentPriority = rolePriority[(storeUser.role as UserRole) ?? "viewer"] ?? 1;
-      const targetPriority = rolePriority[mappedGlobalRole];
-      if (targetPriority >= currentPriority) {
+      const targetRole = projectSsoRole(safeUserRole(storeUser.role), mappedGlobalRole);
+      if (targetRole === mappedGlobalRole) {
         await store.saveUser({
           id: storeUser.id,
           email: storeUser.email,
@@ -4456,10 +4566,11 @@ export async function createApp(
     // Persist SSO identity linkage.
     if (input.provider === "saml") {
       await samlService.recordIdentity(storeUser.id, {
-        nameId: input.subject,
+        identityKey: input.subject,
+        entityId: input.saml?.entityId ?? "",
+        nameId: input.saml?.nameId ?? input.subject,
         email: normalizedEmail,
-        groups: input.groups,
-        attributes: {}
+        groups: input.groups
       });
     } else if (input.provider === "oidc") {
       await oidcService.recordIdentity(storeUser.id, {
@@ -4501,6 +4612,200 @@ export async function createApp(
     await store.saveSession({ id: sessionId, userId: user.id, expiresAt });
     setSessionCookie(reply, sessionId);
     return { expiresAt };
+  };
+
+  // ---------------------------------------------------------------------------
+  // Phase 13.2 — the end of an OIDC or SAML sign-in, shared by both providers (and by the TOTP step of an SSO login).
+  // ---------------------------------------------------------------------------
+
+  /** Audit metadata saying how MFA was satisfied: never a token, assertion or code, only the claim name and value. */
+  const ssoMfaAuditFields = (mfa: { evidence: SsoMfaEvidence } | "local_totp" | "enroll" | null): Record<string, unknown> => {
+    if (mfa === null) return {};
+    if (mfa === "local_totp") return { mfa: "local_totp" };
+    if (mfa === "enroll") return { mfaEnrollmentRequired: true };
+    return { mfa: "idp", mfaClaim: mfa.evidence.claim, mfaValue: mfa.evidence.value };
+  };
+
+  /**
+   * Links or creates the user, replaces any session the browser holds with a new one, and writes the audits
+   * (`user.sso_linked` on the first link to an account that already existed, then `user.login`). From the moment the
+   * session exists a failing audit is logged and never turns the login into a failure.
+   */
+  const completeSsoSession = async (
+    request: FastifyRequest,
+    reply: FastifyReply,
+    input: {
+      method: "oidc" | "saml";
+      provision: SsoProvisionInput;
+      firstLink: boolean;
+      mfa: { evidence: SsoMfaEvidence } | "local_totp" | "enroll" | null;
+    }
+  ): Promise<{ user: SafeUser; created: boolean; expiresAt: string; mfaEnrollmentRequired?: true }> => {
+    // A pre-upgrade bare-NameID SAML identity is re-keyed only now, after the allow-lists and MFA have passed.
+    const legacySubject = input.provision.saml?.legacySubject;
+    const identityUpgraded = legacySubject ? await samlService.upgradeLegacyIdentity(legacySubject, input.provision.subject) : false;
+    if (identityUpgraded) {
+      request.log.info({ provider: "saml" }, "Legacy SAML identity upgraded to the IdP-scoped key");
+    }
+    const { user, created } = await provisionSsoUser(input.provision);
+    const previousSessionId = getSessionIdFromRequest(request);
+    if (previousSessionId) {
+      await store.revokeSession(previousSessionId).catch((revokeError: unknown) => {
+        request.log.warn({ reason: revokeError instanceof Error ? revokeError.message : "unknown" }, "Previous session not revoked");
+      });
+    }
+    const { expiresAt } = await issueSessionForUser(user, reply);
+    try {
+      if (input.firstLink && !created) {
+        // First SSO link to an account that already existed (possibly with local MFA): make it visible.
+        const mfaEnrolled = (await mfaService.status(user.id)).enabled;
+        await audit(request, user, {
+          category: "auth",
+          eventType: "user.sso_linked",
+          action: "link",
+          resourceType: "user",
+          resourceId: user.id,
+          metadata: { provider: input.method, email: user.email, role: user.role, mfaEnrolled }
+        });
+      }
+    } catch (linkAuditError) {
+      request.log.warn(
+        { method: input.method, reason: linkAuditError instanceof Error ? linkAuditError.message : "unknown" },
+        `${input.method.toUpperCase()} link audit not recorded`
+      );
+    }
+    await audit(request, user, {
+      category: "auth",
+      eventType: "user.login",
+      action: "login",
+      resourceType: "user",
+      resourceId: user.id,
+      metadata: {
+        method: input.method,
+        provisioned: created,
+        ...ssoMfaAuditFields(input.mfa),
+        ...(identityUpgraded ? { identityUpgraded: true } : {})
+      }
+    }).catch((loginAuditError: unknown) => {
+      request.log.warn(
+        { method: input.method, reason: loginAuditError instanceof Error ? loginAuditError.message : "unknown" },
+        `${input.method.toUpperCase()} login audit not recorded`
+      );
+    });
+    return { user, created, expiresAt, ...(input.mfa === "enroll" ? { mfaEnrollmentRequired: true as const } : {}) };
+  };
+
+  type SsoLoginOutcome =
+    | { kind: "session"; user: SafeUser; created: boolean; expiresAt: string; mfaEnrollmentRequired?: true }
+    | { kind: "challenge"; challengeId: string }
+    | { kind: "mfa_required" };
+
+  /**
+   * Applies SSO_MFA to a sign-in the provider has already accepted, then signs the user in, hands them to the
+   * existing local TOTP step, or refuses with `sso_mfa_required`. Provisioning (JIT creation, linking, role mappings)
+   * happens only once MFA is satisfied, so a refused or still-pending sign-in changes no account and opens no session.
+   */
+  const finishSsoLogin = async (
+    request: FastifyRequest,
+    reply: FastifyReply,
+    input: {
+      method: "oidc" | "saml";
+      /** `userId` set when an SSO identity already points at the user. */
+      provision: SsoProvisionInput;
+      evidence: SsoMfaEvidence | null;
+      /** Assertion-free facts for a refusal audit (identity key, the amr/acr or AuthnContext values received). */
+      refusalDetails: Record<string, string>;
+    }
+  ): Promise<SsoLoginOutcome> => {
+    const firstLink = !input.provision.userId;
+    if (ssoMfaSettings.mode === "off" || input.evidence) {
+      const session = await completeSsoSession(request, reply, {
+        method: input.method,
+        provision: input.provision,
+        firstLink,
+        mfa: input.evidence ? { evidence: input.evidence } : null
+      });
+      return { kind: "session", ...session };
+    }
+    // No IdP MFA. The account the login resolves to: the linked user, else the one its email would link to.
+    const target = input.provision.userId
+      ? await store.getUserById(input.provision.userId)
+      : await store.getUserByEmail(input.provision.email.trim().toLowerCase());
+    const localTotp = target ? (await mfaService.status(target.id)).enabled : false;
+    const ssoRoles = input.method === "saml" ? samlService : oidcService;
+    const projectedRole = projectSsoRole(target ? safeUserRole(target.role) : null, await ssoRoles.resolveGlobalRole(input.provision.groups));
+    const decision = decideSsoMfa({
+      mode: ssoMfaSettings.mode,
+      evidence: null,
+      localTotp,
+      // The password login's rule: MFA_ENFORCE applies to admins.
+      mfaEnforcedForRole: config.MFA_ENFORCE && projectedRole === "admin"
+    });
+    if (decision.kind === "local_totp" && target) {
+      const challengeId = issueMfaChallenge(target.id, {
+        method: input.method,
+        provision: { ...input.provision, userId: target.id },
+        firstLink
+      });
+      await audit(request, { id: target.id, email: target.email, role: safeUserRole(target.role) }, {
+        category: "auth",
+        eventType: "user.login.mfa_challenge",
+        action: "login",
+        resourceType: "user",
+        resourceId: target.id,
+        metadata: { method: input.method, mfaChallengeIssued: true }
+      }).catch((auditError: unknown) => {
+        request.log.warn({ reason: auditError instanceof Error ? auditError.message : "unknown" }, "SSO MFA challenge audit not recorded");
+      });
+      return { kind: "challenge", challengeId };
+    }
+    if (decision.kind === "enroll") {
+      const session = await completeSsoSession(request, reply, {
+        method: input.method,
+        provision: input.provision,
+        firstLink,
+        mfa: "enroll"
+      });
+      return { kind: "session", ...session };
+    }
+    request.log.warn({ method: input.method, mode: ssoMfaSettings.mode }, "SSO login refused: no acceptable MFA");
+    await audit(request, null, {
+      category: "auth",
+      eventType: "user.login",
+      action: "login",
+      outcome: "failure",
+      metadata: { method: input.method, reason: "mfa_required", ssoMfa: ssoMfaSettings.mode, ...input.refusalDetails }
+    }).catch((auditError: unknown) => {
+      request.log.warn({ reason: auditError instanceof Error ? auditError.message : "unknown" }, "SSO failure audit not recorded");
+    });
+    return { kind: "mfa_required" };
+  };
+
+  /** Hands an SSO login's TOTP challenge to the web app in an HttpOnly cookie (never in the URL). */
+  const setSsoMfaChallengeCookie = (reply: FastifyReply, challengeId: string) => {
+    reply.setCookie(SSO_MFA_CHALLENGE_COOKIE, challengeId, {
+      path: SSO_MFA_CHALLENGE_COOKIE_PATH,
+      httpOnly: true,
+      sameSite: "lax",
+      secure: config.COOKIE_SECURE,
+      maxAge: Math.floor(MFA_CHALLENGE_TTL_MS / 1000)
+    });
+  };
+
+  const clearSsoMfaChallengeCookie = (reply: FastifyReply) => {
+    reply.clearCookie(SSO_MFA_CHALLENGE_COOKIE, {
+      path: SSO_MFA_CHALLENGE_COOKIE_PATH,
+      httpOnly: true,
+      sameSite: "lax",
+      secure: config.COOKIE_SECURE
+    });
+  };
+
+  /** The web page an SSO login lands on, with an optional `sso_error` code or the `sso_mfa=totp` hand-off. */
+  const ssoLandingUrl = (base: string, params: Record<string, string> = {}): string => {
+    const url = new URL(base);
+    for (const [key, value] of Object.entries(params)) url.searchParams.set(key, value);
+    return url.toString();
   };
 
   const allowedOrigins = parseConfiguredOrigins(config.WEB_ORIGIN);
@@ -4568,7 +4873,10 @@ export async function createApp(
 
   // Phase 4.1 — Rate limiting via @fastify/rate-limit
   // Global default: RATE_LIMIT_GLOBAL_MAX requests per RATE_LIMIT_GLOBAL_WINDOW_MS
-  // per IP. Stricter per-route limits for auth (brute-force protection) and
+  // per client address (see TRUST_PROXY), for unauthenticated and API-key traffic.
+  // Requests carrying a live browser session are not counted against it: a busy
+  // studio tab measured up to ~290 requests a minute, and every user behind one
+  // proxy or NAT shares an address. Stricter per-route limits for auth (brute-force protection) and
   // public webhook routes (flood protection) are applied via the onRoute hook
   // below — that way we don't have to touch ~15 route definitions individually.
   // Disable entirely with RATE_LIMIT_ENABLED=false (default true; tests opt out).
@@ -4578,13 +4886,18 @@ export async function createApp(
     // installs its own onRoute hook that snapshots routeOptions.config.rateLimit
     // at registration time. If our hook ran second, the plugin would already
     // have read the default and our per-route limits would never apply.
+    // Sign-in (password, its TOTP step at /api/auth/login/mfa, LDAP, OIDC, SAML), registration, and the TOTP
+    // checks of enrolment and removal. There is no password-reset route.
     const AUTH_BURST_PREFIXES = [
       "/api/auth/login",
       "/api/auth/register",
+      "/api/auth/saml/login",
       "/api/auth/saml/callback",
       "/api/auth/ldap/login",
       "/api/auth/oidc/login",
-      "/api/auth/oidc/callback"
+      "/api/auth/oidc/callback",
+      "/api/auth/mfa/activate",
+      "/api/auth/mfa/disable"
     ];
     const WEBHOOK_PREFIXES = ["/webhook/", "/webhook-test/", "/api/webhooks/"];
     const PROBE_URLS = new Set(["/health", "/metrics"]);
@@ -4601,18 +4914,21 @@ export async function createApp(
       if (existingConfig.rateLimit !== undefined) {
         return;
       }
-      let perRouteLimit: false | { max: number; timeWindow: number };
+      // `allowList` answers false: a signed-in browser is still counted on these routes.
+      let perRouteLimit: false | { max: number; timeWindow: number; allowList: () => boolean };
       if (isProbe) {
         perRouteLimit = false;
       } else if (matchesAuth) {
         perRouteLimit = {
           max: config.RATE_LIMIT_AUTH_MAX,
-          timeWindow: config.RATE_LIMIT_AUTH_WINDOW_MS
+          timeWindow: config.RATE_LIMIT_AUTH_WINDOW_MS,
+          allowList: () => false
         };
       } else {
         perRouteLimit = {
           max: config.RATE_LIMIT_WEBHOOK_MAX,
-          timeWindow: config.RATE_LIMIT_WEBHOOK_WINDOW_MS
+          timeWindow: config.RATE_LIMIT_WEBHOOK_WINDOW_MS,
+          allowList: () => false
         };
       }
       routeOptions.config = {
@@ -4621,10 +4937,14 @@ export async function createApp(
       };
     });
 
-    app.register(rateLimit, {
+    // Awaited so the plugin (and its onRoute hook) is loaded before any route below is declared; without the await it
+    // loaded only after every route on the root app existed, and none of them was limited.
+    await app.register(rateLimit, {
       global: true,
       max: config.RATE_LIMIT_GLOBAL_MAX,
       timeWindow: config.RATE_LIMIT_GLOBAL_WINDOW_MS,
+      // Global limit only: a request with a live session cookie and no API key or bearer token is not counted.
+      allowList: async (request) => await isBrowserSessionRequest(request),
       addHeadersOnExceeding: {
         "x-ratelimit-limit": true,
         "x-ratelimit-remaining": true,
@@ -5886,20 +6206,52 @@ export async function createApp(
 
   app.post<{ Body: unknown }>("/api/auth/login/mfa", async (request, reply) => {
     const body = asRecord(request.body);
-    const challengeId = typeof body.challenge === "string" ? body.challenge : "";
+    // Phase 13.2 — an SSO login's challenge arrives in an HttpOnly cookie (set by the SSO callback) instead of the body.
+    const cookieChallenge = request.cookies[SSO_MFA_CHALLENGE_COOKIE] ?? "";
+    const challengeId = typeof body.challenge === "string" && body.challenge ? body.challenge : cookieChallenge;
     const code = typeof body.code === "string" ? body.code.trim() : "";
     if (!challengeId || !code) {
       reply.code(400);
       return { error: "challenge and code are required" };
     }
-    const userId = consumeMfaChallenge(challengeId);
-    if (!userId) {
+    // A challenge is single-use, so the cookie that carried it goes too.
+    if (cookieChallenge && challengeId === cookieChallenge) clearSsoMfaChallengeCookie(reply);
+    const challenge = consumeMfaChallenge(challengeId);
+    if (!challenge) {
       reply.code(401);
       return { error: "MFA challenge expired or invalid" };
     }
+    const userId = challenge.userId;
     if (!await mfaService.verify(userId, code)) {
+      if (challenge.sso) {
+        await audit(request, null, {
+          category: "auth",
+          eventType: "user.login",
+          action: "login",
+          outcome: "failure",
+          metadata: { method: challenge.sso.method, reason: "mfa_invalid", identityKey: challenge.sso.provision.subject }
+        }).catch((auditError: unknown) => {
+          request.log.warn({ reason: auditError instanceof Error ? auditError.message : "unknown" }, "SSO MFA failure audit not recorded");
+        });
+      }
       reply.code(401);
       return { error: "Invalid MFA code" };
+    }
+    if (challenge.sso) {
+      // The SSO sign-in passed its TOTP step: only now is the identity linked, the roles mapped and a session issued.
+      try {
+        const { user, expiresAt } = await completeSsoSession(request, reply, {
+          method: challenge.sso.method,
+          provision: challenge.sso.provision,
+          firstLink: challenge.sso.firstLink,
+          mfa: "local_totp"
+        });
+        return { user, expiresAt };
+      } catch (error) {
+        request.log.warn({ reason: error instanceof Error ? error.message : "unknown" }, "SSO sign-in failed after the MFA step");
+        reply.code(401);
+        return { error: "Sign-in could not be completed. Try again." };
+      }
     }
     const storeUser = await store.getUserById(userId);
     if (!storeUser) {
@@ -6122,8 +6474,20 @@ export async function createApp(
 
   app.get("/api/auth/saml/login", async (_request, reply) => {
     try {
-      const redirectUrl = await samlService.buildLoginUrl();
-      reply.redirect(redirectUrl);
+      const { url: redirectUrl, requestCookie } = await samlService.buildLoginUrl();
+      reply.header("cache-control", "no-store");
+      if (requestCookie) {
+        // SAML_REQUIRE_IN_RESPONSE_TO: binds the AuthnRequest to this browser. SameSite=None so the IdP's cross-site
+        // form post carries it back; Secure is required with None (browsers keep it on https and on localhost).
+        reply.setCookie(SAML_REQUEST_COOKIE_NAME, requestCookie, {
+          path: SAML_REQUEST_COOKIE_PATH,
+          httpOnly: true,
+          sameSite: "none",
+          secure: true,
+          maxAge: Math.floor(SAML_REQUEST_MAX_AGE_MS / 1000)
+        });
+      }
+      return reply.redirect(redirectUrl);
     } catch (error) {
       reply.code(503);
       return {
@@ -6132,34 +6496,122 @@ export async function createApp(
     }
   });
 
-  app.post<{ Body: unknown }>("/api/auth/saml/callback", async (request, reply) => {
-    const body = asRecord(request.body);
-    const samlResponse = typeof body.SAMLResponse === "string" ? body.SAMLResponse : "";
-    if (!samlResponse) {
-      reply.code(400);
-      return { error: "SAMLResponse is required" };
-    }
-    try {
-      const profile: SamlAssertionProfile = await samlService.consumeAssertion(samlResponse);
-      const email = profile.email ?? profile.nameId;
-      if (!email) {
-        reply.code(400);
-        return { error: "SAML assertion did not include an email or nameId" };
+  // The IdP's HTTP-POST binding sends the SAMLResponse as a browser form post (application/x-www-form-urlencoded), so the
+  // callback parses that body type (in its own scope; no other route changes). A form post gets redirects to the web
+  // app like the OIDC callback (`/`, `/?sso_error=<code>` or `/?sso_mfa=totp`); a JSON post keeps the JSON answers.
+  // The SAMLResponse only ever travels in the request body (there is no Redirect-binding callback), so it never
+  // reaches a request URL, log line or span.
+  app.register(async (scope) => {
+    scope.addContentTypeParser("application/x-www-form-urlencoded", { parseAs: "string" }, (_request, body, done) => {
+      done(null, Object.fromEntries(new URLSearchParams(typeof body === "string" ? body : body.toString("utf8"))));
+    });
+
+    scope.post<{ Body: unknown }>("/api/auth/saml/callback", async (request, reply) => {
+      const browserPost = String(request.headers["content-type"] ?? "").toLowerCase().startsWith("application/x-www-form-urlencoded");
+      const landingBase = samlSettings?.postLoginUrl ?? ssoPostLoginUrl(config.WEB_ORIGIN);
+      if (browserPost) reply.header("cache-control", "no-store");
+      const body = asRecord(request.body);
+      const samlResponse = typeof body.SAMLResponse === "string" ? body.SAMLResponse : "";
+      // The request cookie (SAML_REQUIRE_IN_RESPONSE_TO) is single-use: cleared whatever the outcome.
+      const requestCookie = request.cookies[SAML_REQUEST_COOKIE_NAME];
+      if (requestCookie) {
+        reply.clearCookie(SAML_REQUEST_COOKIE_NAME, { path: SAML_REQUEST_COOKIE_PATH, httpOnly: true, sameSite: "none", secure: true });
       }
-      const { user, created } = await provisionSsoUser({
-        provider: "saml",
-        subject: profile.nameId,
-        email,
-        groups: profile.groups
-      });
-      const { expiresAt } = await issueSessionForUser(user, reply);
-      return { user, expiresAt, provisioned: created };
-    } catch (error) {
-      reply.code(401);
-      return {
-        error: error instanceof Error ? error.message : "SAML assertion failed"
-      };
-    }
+      if (!samlResponse) {
+        if (browserPost) return reply.redirect(ssoLandingUrl(landingBase, { sso_error: "saml_failed" }));
+        reply.code(400);
+        return { error: "SAMLResponse is required" };
+      }
+      try {
+        const profile: SamlAssertionProfile = await samlService.consumeAssertion(samlResponse);
+        // Each assertion is accepted once (remembered in the store until it expires), and, with
+        // SAML_REQUIRE_IN_RESPONSE_TO, only as the answer to a login this browser started.
+        await samlService.recordAssertion(profile);
+        samlService.assertSolicited(profile, requestCookie);
+        const email = profile.email ?? profile.nameId;
+        if (!email) {
+          throw new SamlLoginError("missing_identity", "SAML assertion did not include an email or nameId");
+        }
+        // Identities are bound to the IdP (`<entityId>#<nameId>`); a pre-upgrade bare-NameID row is found here and
+        // re-keyed once the login completes (after the allow-lists and MFA).
+        const entityId = samlService.resolveEntityId(profile);
+        const identity = await samlService.findIdentity(entityId, profile.nameId);
+        const identityKey = samlIdentitySubject(entityId, profile.nameId);
+        const linkedUser = identity ? await store.getUserById(identity.userId) : null;
+        // Optional allow-lists (SAML_ALLOWED_EMAIL_DOMAINS / SAML_ALLOWED_GROUPS) apply to new and returning users.
+        // The configured IdP is trusted for the email it asserts (SAML has no email_verified).
+        samlService.assertLoginAllowed({ identityKey, email, groups: profile.groups });
+        const outcome = await finishSsoLogin(request, reply, {
+          method: "saml",
+          provision: {
+            provider: "saml",
+            subject: identityKey,
+            email,
+            groups: profile.groups,
+            userId: linkedUser?.id,
+            saml: {
+              entityId,
+              nameId: profile.nameId,
+              ...(linkedUser && identity?.legacySubject ? { legacySubject: identity.legacySubject } : {})
+            }
+          },
+          evidence: ssoMfaSettings.mode === "off" ? null : evaluateSamlMfa(profile.authnContexts, ssoMfaSettings),
+          refusalDetails: { identityKey, authnContext: profile.authnContexts.join(" ") }
+        });
+        if (outcome.kind === "challenge") {
+          if (browserPost) {
+            setSsoMfaChallengeCookie(reply, outcome.challengeId);
+            return reply.redirect(ssoLandingUrl(landingBase, { sso_mfa: "totp" }));
+          }
+          return { mfaChallenge: outcome.challengeId, expiresInSeconds: Math.floor(MFA_CHALLENGE_TTL_MS / 1000) };
+        }
+        if (outcome.kind === "mfa_required") {
+          if (browserPost) return reply.redirect(ssoLandingUrl(landingBase, { sso_error: "sso_mfa_required" }));
+          reply.code(401);
+          return { error: "Your identity provider did not report multi-factor authentication", code: "sso_mfa_required" };
+        }
+        if (browserPost) return reply.redirect(landingBase);
+        return {
+          user: outcome.user,
+          expiresAt: outcome.expiresAt,
+          provisioned: outcome.created,
+          ...(outcome.mfaEnrollmentRequired ? { mfaEnrollmentRequired: true } : {})
+        };
+      } catch (error) {
+        const code =
+          error instanceof SamlLoginError
+            ? error.code
+            : (error as { code?: unknown }).code === "CONFIGURATION_ERROR"
+              ? "not_configured"
+              : "invalid_assertion";
+        request.log.warn({ code, reason: error instanceof Error ? error.message : "unknown" }, "SAML login failed");
+        // With SAML off there is no login to audit (the answer stays the configuration error it always was).
+        if (config.SAML_ENABLED) {
+          await audit(request, null, {
+            category: "auth",
+            eventType: "user.login",
+            action: "login",
+            outcome: "failure",
+            metadata: { method: "saml", reason: code, ...(error instanceof SamlLoginError ? error.details : {}) }
+          }).catch((auditError: unknown) => {
+            request.log.warn({ reason: auditError instanceof Error ? auditError.message : "unknown" }, "SAML failure audit not recorded");
+          });
+        }
+        if (browserPost) return reply.redirect(ssoLandingUrl(landingBase, { sso_error: samlUserErrorCode(error) }));
+        if (error instanceof SamlLoginError && error.code === "missing_identity") {
+          reply.code(400);
+          return { error: error.message };
+        }
+        if (error instanceof SamlLoginError && error.code === "not_allowed") {
+          reply.code(403);
+          return { error: error.message, code: "saml_not_allowed" };
+        }
+        reply.code(401);
+        return {
+          error: error instanceof Error ? error.message : "SAML assertion failed"
+        };
+      }
+    });
   });
 
   // ---------------------------------------------------------------------------
@@ -6279,49 +6731,30 @@ export async function createApp(
           throw new OidcError("email_not_verified", "IdP did not mark the email as verified");
         }
       }
-      const { user, created } = await provisionSsoUser({
-        provider: "oidc",
-        subject: profile.identityKey,
-        email: profile.email ?? linkedUser!.email,
-        groups: profile.groups,
-        userId: linkedUser?.id,
-        oidc: { issuer: profile.issuer, sub: profile.subject }
-      });
-      // A session the browser already holds is replaced, not left alive next to the new one.
-      const previousSessionId = getSessionIdFromRequest(request);
-      if (previousSessionId) {
-        await store.revokeSession(previousSessionId).catch((revokeError: unknown) => {
-          request.log.warn({ reason: revokeError instanceof Error ? revokeError.message : "unknown" }, "Previous session not revoked");
-        });
-      }
-      await issueSessionForUser(user, reply);
-      // The session is live from here: a failing audit or MFA lookup is logged and never turns the login into a failure.
-      try {
-        if (!linkedUser && !created) {
-          // First OIDC link to an account that already existed (possibly with local MFA): make it visible.
-          const mfaEnrolled = (await mfaService.status(user.id)).enabled;
-          await audit(request, user, {
-            category: "auth",
-            eventType: "user.sso_linked",
-            action: "link",
-            resourceType: "user",
-            resourceId: user.id,
-            metadata: { provider: "oidc", email: user.email, role: user.role, mfaEnrolled }
-          });
+      const outcome = await finishSsoLogin(request, reply, {
+        method: "oidc",
+        provision: {
+          provider: "oidc",
+          subject: profile.identityKey,
+          email: profile.email ?? linkedUser!.email,
+          groups: profile.groups,
+          userId: linkedUser?.id,
+          oidc: { issuer: profile.issuer, sub: profile.subject }
+        },
+        evidence: ssoMfaSettings.mode === "off" ? null : evaluateOidcMfa(profile, ssoMfaSettings),
+        refusalDetails: {
+          identityKey: profile.identityKey,
+          amr: profile.amr.join(" "),
+          ...(profile.acr !== undefined ? { acr: profile.acr } : {})
         }
-      } catch (linkAuditError) {
-        request.log.warn({ reason: linkAuditError instanceof Error ? linkAuditError.message : "unknown" }, "OIDC link audit not recorded");
-      }
-      await audit(request, user, {
-        category: "auth",
-        eventType: "user.login",
-        action: "login",
-        resourceType: "user",
-        resourceId: user.id,
-        metadata: { method: "oidc", provisioned: created }
-      }).catch((loginAuditError: unknown) => {
-        request.log.warn({ reason: loginAuditError instanceof Error ? loginAuditError.message : "unknown" }, "OIDC login audit not recorded");
       });
+      if (outcome.kind === "challenge") {
+        setSsoMfaChallengeCookie(reply, outcome.challengeId);
+        return reply.redirect(ssoLandingUrl(oidcSettings.postLoginUrl, { sso_mfa: "totp" }));
+      }
+      if (outcome.kind === "mfa_required") {
+        return reply.redirect(oidcLoginPageUrl("sso_mfa_required"));
+      }
       return reply.redirect(oidcSettings.postLoginUrl);
     } catch (error) {
       const code = error instanceof OidcError ? error.code : "unexpected";
@@ -12911,6 +13344,18 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     // A write whose user or project was deleted meanwhile (a race with a delete): a conflict, not a server error.
     if (error instanceof StoreReferenceMissingError) {
       reply.code(409).send({ error: error.message });
+      return;
+    }
+
+    // Rate limited: answered as 429; the plugin already set Retry-After and the x-ratelimit-* headers on the reply.
+    if (statusCode === 429 && reply.getHeader("retry-after") !== undefined) {
+      reply.code(429).send({ error: "Too many requests, retry later", retryAfterSeconds: Number(reply.getHeader("retry-after")) || undefined });
+      return;
+    }
+
+    // Fastify's own request errors (unsupported media type, malformed JSON, ...) keep their 4xx status.
+    if (errorCode.startsWith("FST_") && statusCode >= 400 && statusCode < 500) {
+      reply.code(statusCode).send({ error: message });
       return;
     }
 

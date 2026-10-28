@@ -31,6 +31,7 @@ import { nanoid } from "nanoid";
 import { isAllowedOidcUrl, type OidcSettings } from "../config.js";
 import type { Store } from "../db/store.js";
 import type { UserRole } from "./auth-service.js";
+import { checkSsoAllowLists, emailDomainOf } from "./sso-policy.js";
 
 export const OIDC_FLOW_COOKIE_NAME = "l2m_oidc_flow";
 export const OIDC_FLOW_COOKIE_PATH = "/api/auth/oidc";
@@ -113,6 +114,8 @@ export interface OidcServiceOptions {
   now?: () => number;
   jwksRefetchCooldownMs?: number;
   logger?: (message: string, metadata?: Record<string, unknown>) => void;
+  /** SSO_MFA_OIDC_ACR when SSO_MFA is on: sent as `acr_values` to ask the IdP for MFA (empty = not sent). */
+  requestAcrValues?: readonly string[];
 }
 
 interface DiscoveryDocument {
@@ -143,6 +146,10 @@ export interface OidcProfile {
   emailVerified: boolean;
   displayName?: string;
   groups: string[];
+  /** The ID token's `amr` values (RFC 8176); only the validated ID token is read, never userinfo. */
+  amr: string[];
+  /** The ID token's `acr`, when it has one. */
+  acr?: string;
 }
 
 function base64Url(buffer: Buffer): string {
@@ -504,6 +511,9 @@ export class OidcService {
     url.searchParams.set("nonce", nonce);
     url.searchParams.set("code_challenge", pkce.challenge);
     url.searchParams.set("code_challenge_method", "S256");
+    if (this.options.requestAcrValues && this.options.requestAcrValues.length > 0) {
+      url.searchParams.set("acr_values", this.options.requestAcrValues.join(" "));
+    }
     const flowCookie = sealOidcFlow(
       { v: 1, state, nonce, verifier: pkce.verifier, createdAt: this.now() },
       this.options.flowKey
@@ -555,7 +565,10 @@ export class OidcService {
       email: rawEmail || undefined,
       emailVerified: verifiedRaw === true || verifiedRaw === "true",
       displayName: typeof merged.name === "string" ? merged.name : undefined,
-      groups: extractGroups(merged, settings.groupsClaim)
+      groups: extractGroups(merged, settings.groupsClaim),
+      // MFA facts come from the signed ID token only: userinfo is not bound to this authentication event.
+      amr: Array.isArray(claims.amr) ? claims.amr.filter((value): value is string => typeof value === "string") : [],
+      acr: typeof claims.acr === "string" ? claims.acr : undefined
     };
   }
 
@@ -664,25 +677,23 @@ export class OidcService {
    */
   assertLoginAllowed(profile: Pick<OidcProfile, "identityKey" | "email" | "emailVerified" | "groups">): void {
     const settings = this.requireSettings();
-    const refusedBy = (list: string): Record<string, string> => {
-      const at = profile.email ? profile.email.lastIndexOf("@") : -1;
-      return {
-        list,
-        identityKey: profile.identityKey,
-        ...(at > 0 ? { emailDomain: profile.email!.slice(at + 1).toLowerCase() } : {})
-      };
-    };
-    if (settings.allowedEmailDomains.length > 0) {
-      const trusted = profile.email && (profile.emailVerified || !settings.requireEmailVerified) ? profile.email : "";
-      const at = trusted.lastIndexOf("@");
-      const domain = at > 0 ? trusted.slice(at + 1).toLowerCase() : "";
-      if (!domain || !settings.allowedEmailDomains.includes(domain)) {
-        throw new OidcError("not_allowed", "Login refused: no trusted email in OIDC_ALLOWED_EMAIL_DOMAINS", refusedBy("OIDC_ALLOWED_EMAIL_DOMAINS"));
-      }
-    }
-    if (settings.allowedGroups.length > 0 && !profile.groups.some((group) => settings.allowedGroups.includes(group))) {
-      throw new OidcError("not_allowed", "Login refused: the user holds none of OIDC_ALLOWED_GROUPS", refusedBy("OIDC_ALLOWED_GROUPS"));
-    }
+    const refused = checkSsoAllowLists({
+      allowedEmailDomains: settings.allowedEmailDomains,
+      allowedGroups: settings.allowedGroups,
+      trustedEmail: profile.email && (profile.emailVerified || !settings.requireEmailVerified) ? profile.email : undefined,
+      groups: profile.groups
+    });
+    if (!refused) return;
+    const list = refused === "email_domains" ? "OIDC_ALLOWED_EMAIL_DOMAINS" : "OIDC_ALLOWED_GROUPS";
+    const domain = emailDomainOf(profile.email);
+    const details = { list, identityKey: profile.identityKey, ...(domain ? { emailDomain: domain } : {}) };
+    throw new OidcError(
+      "not_allowed",
+      refused === "email_domains"
+        ? "Login refused: no trusted email in OIDC_ALLOWED_EMAIL_DOMAINS"
+        : "Login refused: the user holds none of OIDC_ALLOWED_GROUPS",
+      details
+    );
   }
 
   async resolveGlobalRole(groups: string[]): Promise<UserRole | null> {

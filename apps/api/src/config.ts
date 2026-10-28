@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import net from "node:net";
 import { z } from "zod";
 
 /** Phase 15.6 — production capture defaults (see the REPLAY_CAPTURE_* settings). */
@@ -90,6 +91,16 @@ const envSchema = z.object({
   OIDC_REQUIRE_EMAIL_VERIFIED: optionalBooleanFromEnv,
   OIDC_ALLOWED_EMAIL_DOMAINS: z.string().optional(),
   OIDC_ALLOWED_GROUPS: z.string().optional(),
+  // Phase 13.2 — optional SAML hardening and MFA on SSO (SAML and OIDC). Read only when that SSO is on; checked by
+  // resolveSamlSettings / resolveSsoMfaSettings. No zod defaults, so hand-built AppConfig objects keep typechecking.
+  SAML_IDP_ISSUER: z.string().optional(),
+  SAML_ALLOWED_EMAIL_DOMAINS: z.string().optional(),
+  SAML_ALLOWED_GROUPS: z.string().optional(),
+  SAML_REQUIRE_IN_RESPONSE_TO: optionalBooleanFromEnv,
+  SSO_MFA: z.string().optional(),
+  SSO_MFA_OIDC_AMR: z.string().optional(),
+  SSO_MFA_OIDC_ACR: z.string().optional(),
+  SSO_MFA_SAML_AUTHN_CONTEXTS: z.string().optional(),
 
   // Phase 5.3 — External secrets
   EXTERNAL_SECRETS_CACHE_TTL_MS: z.coerce.number().int().nonnegative().default(300000),
@@ -481,6 +492,12 @@ const envSchema = z.object({
   RATE_LIMIT_AUTH_WINDOW_MS: z.coerce.number().int().positive().default(60_000),
   RATE_LIMIT_WEBHOOK_MAX: z.coerce.number().int().positive().default(120),
   RATE_LIMIT_WEBHOOK_WINDOW_MS: z.coerce.number().int().positive().default(60_000),
+  /**
+   * Which reverse proxies may set the client address (X-Forwarded-For) that rate limits are counted by. Unset = none:
+   * every request counts against the address that connected (behind a proxy, all clients then share one count).
+   * `true` (every hop), a hop count, or a comma list of proxy addresses / CIDRs (see parseTrustProxy).
+   */
+  TRUST_PROXY: z.string().optional(),
   HELMET_ENABLED: booleanFromEnv.default(true),
   HELMET_HSTS_ENABLED: booleanFromEnv.default(false),
   HELMET_CSP_ENABLED: booleanFromEnv.default(false),
@@ -512,8 +529,41 @@ export function parseConfig(env: Record<string, string | undefined>): AppConfig 
   if (isPostgresDbType(env.DB_TYPE)) parsePostgresSettings(env);
   // Phase 13.2 — the OIDC settings are checked only when OIDC_ENABLED=true (fail fast at startup).
   resolveOidcSettings(parsed.data);
+  // Phase 13.2 — the SAML allow-lists / IdP issuer and SSO_MFA settings are checked only when SSO is on.
+  resolveSamlSettings(parsed.data);
+  resolveSsoMfaSettings(parsed.data);
+  parseTrustProxy(parsed.data.TRUST_PROXY);
 
   return parsed.data;
+}
+
+const TRUST_PROXY_NAMED_RANGES = new Set(["loopback", "linklocal", "uniquelocal"]);
+
+/**
+ * TRUST_PROXY as Fastify's `trustProxy`: unset, empty or `false` → false (today's behaviour: the connecting address
+ * counts); `true` → every hop is trusted; a whole number → that many hops; otherwise a comma list of IP addresses,
+ * CIDR ranges or `loopback` / `linklocal` / `uniquelocal`. Anything else fails fast with the setting's name.
+ */
+export function parseTrustProxy(raw: string | undefined): boolean | number | string[] {
+  const value = (raw ?? "").trim();
+  if (!value || value.toLowerCase() === "false") return false;
+  if (value.toLowerCase() === "true") return true;
+  if (/^\d+$/.test(value)) return Number(value);
+  const entries = value.split(",").map((entry) => entry.trim()).filter(Boolean);
+  for (const entry of entries) {
+    if (TRUST_PROXY_NAMED_RANGES.has(entry)) continue;
+    const [address, prefix, extra] = entry.split("/");
+    const family = net.isIP(address ?? "");
+    const prefixOk =
+      prefix === undefined || (/^\d+$/.test(prefix) && Number(prefix) <= (family === 6 ? 128 : 32));
+    if (family === 0 || !prefixOk || extra !== undefined) {
+      throw new Error(
+        `Invalid environment configuration: TRUST_PROXY entry "${entry}" is not an IP address, a CIDR range, ` +
+          "loopback, linklocal or uniquelocal (or use true, false or a hop count)"
+      );
+    }
+  }
+  return entries;
 }
 
 export function getConfig(): AppConfig {
@@ -786,6 +836,23 @@ function splitList(value: string | undefined): string[] {
   return [...new Set((value ?? "").split(",").map((entry) => entry.trim()).filter(Boolean))];
 }
 
+/**
+ * Lower-cased, de-duplicated email domains from a comma list (a leading `@` is dropped); empty when unset. Returns null
+ * when an entry is not a plain domain such as example.com.
+ */
+export function parseAllowedEmailDomains(value: string | undefined): string[] | null {
+  const domains = [...new Set(splitList(value).map((entry) => entry.replace(/^@/, "").toLowerCase()))];
+  for (const domain of domains) {
+    if (!/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*$/.test(domain)) return null;
+  }
+  return domains;
+}
+
+/** The web page an SSO login lands on (success, `?sso_error=<code>` or `?sso_mfa=totp`): the first WEB_ORIGIN. */
+export function ssoPostLoginUrl(webOrigin: string): string {
+  return `${firstWebOrigin(webOrigin)}/`;
+}
+
 function firstWebOrigin(webOrigin: string): string {
   const base = webOrigin.split(",").map((entry) => entry.trim()).find(Boolean) || "http://localhost:5173";
   return base.replace(/\/+$/, "");
@@ -843,14 +910,8 @@ export function resolveOidcSettings(config: OidcConfigInput): OidcSettings | nul
 
   const groupsClaim = config.OIDC_GROUPS_CLAIM?.trim() || "groups";
 
-  const allowedEmailDomains = [
-    ...new Set(splitList(config.OIDC_ALLOWED_EMAIL_DOMAINS).map((entry) => entry.replace(/^@/, "").toLowerCase()))
-  ];
-  for (const domain of allowedEmailDomains) {
-    if (!/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*$/.test(domain)) {
-      fail("OIDC_ALLOWED_EMAIL_DOMAINS must be a comma-separated list of domains such as example.com");
-    }
-  }
+  const allowedEmailDomains = parseAllowedEmailDomains(config.OIDC_ALLOWED_EMAIL_DOMAINS);
+  if (!allowedEmailDomains) fail("OIDC_ALLOWED_EMAIL_DOMAINS must be a comma-separated list of domains such as example.com");
   const allowedGroups = splitList(config.OIDC_ALLOWED_GROUPS);
 
   return {
@@ -861,8 +922,160 @@ export function resolveOidcSettings(config: OidcConfigInput): OidcSettings | nul
     scopes: [...new Set(scopeList)].join(" "),
     groupsClaim,
     requireEmailVerified: config.OIDC_REQUIRE_EMAIL_VERIFIED !== false,
-    postLoginUrl: `${webBase}/`,
-    allowedEmailDomains,
+    postLoginUrl: ssoPostLoginUrl(config.WEB_ORIGIN),
+    allowedEmailDomains: allowedEmailDomains ?? [],
     allowedGroups
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Phase 13.2 — SAML parity with OIDC (optional IdP issuer pin and allow-lists). Nothing is read unless SAML_ENABLED=true.
+// ---------------------------------------------------------------------------
+
+export interface SamlSettings {
+  /** The IdP entity ID a response's Issuer must equal; unset = whatever the (certificate-pinned) IdP sends. */
+  idpIssuer?: string;
+  /** Lowercase email domains a login must belong to (exact match on the asserted email's domain); empty = any. */
+  allowedEmailDomains: string[];
+  /** Groups (from SAML_GROUPS_ATTRIBUTE) of which a login must hold at least one (exact match); empty = any. */
+  allowedGroups: string[];
+  /** Web page the browser lands on after a form-posted callback (success, `?sso_error=<code>`, `?sso_mfa=totp`). */
+  postLoginUrl: string;
+  /**
+   * SAML_REQUIRE_IN_RESPONSE_TO (default false): only responses to a login started from the same browser are accepted
+   * (InResponseTo bound by a cookie); IdP-initiated sign-in is refused.
+   */
+  requireInResponseTo: boolean;
+}
+
+type SamlConfigInput = Pick<
+  AppConfig,
+  | "SAML_ENABLED"
+  | "SAML_IDP_ISSUER"
+  | "SAML_ALLOWED_EMAIL_DOMAINS"
+  | "SAML_ALLOWED_GROUPS"
+  | "SAML_REQUIRE_IN_RESPONSE_TO"
+  | "SAML_CALLBACK_URL"
+  | "WEB_ORIGIN"
+>;
+
+/** Returns the extra SAML settings when SAML_ENABLED=true, null otherwise; throws a clear error on a bad value. */
+export function resolveSamlSettings(config: SamlConfigInput): SamlSettings | null {
+  if (config.SAML_ENABLED !== true) return null;
+  const fail = (detail: string): never => {
+    throw new Error(`Invalid SAML configuration: ${detail}`);
+  };
+  const idpIssuer = config.SAML_IDP_ISSUER?.trim() || undefined;
+  if (idpIssuer !== undefined) {
+    // Identities are stored as `<entityId>#<nameId>`, so the entity ID must not contain the separator.
+    if (idpIssuer.includes("#")) fail("SAML_IDP_ISSUER must not contain '#'");
+    if (/\s/.test(idpIssuer)) fail("SAML_IDP_ISSUER must not contain whitespace");
+  }
+  const allowedEmailDomains = parseAllowedEmailDomains(config.SAML_ALLOWED_EMAIL_DOMAINS);
+  if (!allowedEmailDomains) fail("SAML_ALLOWED_EMAIL_DOMAINS must be a comma-separated list of domains such as example.com");
+  const requireInResponseTo = config.SAML_REQUIRE_IN_RESPONSE_TO === true;
+  if (requireInResponseTo && config.SAML_CALLBACK_URL) {
+    // The request cookie must be Secure (SameSite=None), which a browser keeps only for https (or localhost).
+    let callback: URL | null = null;
+    try {
+      callback = new URL(config.SAML_CALLBACK_URL);
+    } catch {
+      fail("SAML_CALLBACK_URL must be a URL");
+    }
+    const localhost = callback !== null && ["localhost", "127.0.0.1", "[::1]"].includes(callback.hostname);
+    if (callback !== null && callback.protocol !== "https:" && !localhost) {
+      fail("SAML_REQUIRE_IN_RESPONSE_TO needs an https SAML_CALLBACK_URL (its request cookie is Secure)");
+    }
+  }
+  return {
+    idpIssuer,
+    allowedEmailDomains: allowedEmailDomains ?? [],
+    allowedGroups: splitList(config.SAML_ALLOWED_GROUPS),
+    postLoginUrl: ssoPostLoginUrl(config.WEB_ORIGIN),
+    requireInResponseTo
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Phase 13.2 — MFA on SSO (SAML and OIDC). SSO_MFA unset (or `off`) keeps SSO sign-in exactly as before.
+// ---------------------------------------------------------------------------
+
+export type SsoMfaMode = "off" | "idp" | "idp_or_local";
+
+export interface SsoMfaSettings {
+  /** `off`: no MFA check on SSO; `idp`: the IdP must assert MFA; `idp_or_local`: IdP MFA, else the local TOTP step. */
+  mode: SsoMfaMode;
+  /** OIDC `amr` values (RFC 8176) any one of which counts as MFA. */
+  oidcAmr: string[];
+  /** OIDC `acr` values that count as MFA; also sent as `acr_values` on the authorization request when set. */
+  oidcAcr: string[];
+  /** SAML AuthnContextClassRef values that count as MFA. */
+  samlAuthnContexts: string[];
+}
+
+/**
+ * RFC 8176 `amr` values counted as MFA by default: only `mfa`, the one value that states multiple factors were used
+ * (Entra ID, Okta, Auth0 and Ping send it after a second factor). The others name single methods: `otp` or `sms` alone
+ * can be a passwordless one-time code, `hwk` / `swk` a key on its own, and `mca` multiple channels, not factors. Add
+ * them with SSO_MFA_OIDC_AMR if your IdP reports a second factor only that way.
+ */
+export const SSO_MFA_DEFAULT_OIDC_AMR: readonly string[] = ["mfa"];
+
+/**
+ * SAML AuthnContextClassRef values counted as MFA by default: REFEDS MFA, Entra ID / AD FS `multipleauthn`, the
+ * `MultiFactor` class some IdPs send, and the SAML 2.0 classes that are two-factor by definition.
+ */
+export const SSO_MFA_DEFAULT_SAML_AUTHN_CONTEXTS: readonly string[] = [
+  "https://refeds.org/profile/mfa",
+  "http://schemas.microsoft.com/claims/multipleauthn",
+  "urn:oasis:names:tc:SAML:2.0:ac:classes:MultiFactor",
+  "urn:oasis:names:tc:SAML:2.0:ac:classes:MobileTwoFactorContract",
+  "urn:oasis:names:tc:SAML:2.0:ac:classes:MobileTwoFactorUnregistered",
+  "urn:oasis:names:tc:SAML:2.0:ac:classes:SmartcardPKI"
+];
+
+type SsoMfaConfigInput = Pick<
+  AppConfig,
+  "SSO_MFA" | "SSO_MFA_OIDC_AMR" | "SSO_MFA_OIDC_ACR" | "SSO_MFA_SAML_AUTHN_CONTEXTS" | "OIDC_ENABLED" | "SAML_ENABLED"
+>;
+
+/**
+ * Returns the SSO MFA settings. They are read and checked only when OIDC or SAML is enabled (a bad value then fails
+ * fast); with both off, or SSO_MFA unset, the mode is `off`.
+ */
+export function resolveSsoMfaSettings(config: SsoMfaConfigInput): SsoMfaSettings {
+  const defaults: SsoMfaSettings = {
+    mode: "off",
+    oidcAmr: [...SSO_MFA_DEFAULT_OIDC_AMR],
+    oidcAcr: [],
+    samlAuthnContexts: [...SSO_MFA_DEFAULT_SAML_AUTHN_CONTEXTS]
+  };
+  if (config.OIDC_ENABLED !== true && config.SAML_ENABLED !== true) return defaults;
+  const fail = (detail: string): never => {
+    throw new Error(`Invalid SSO MFA configuration: ${detail}`);
+  };
+  const rawMode = (config.SSO_MFA ?? "").trim().toLowerCase() || "off";
+  if (rawMode !== "off" && rawMode !== "idp" && rawMode !== "idp_or_local") {
+    fail("SSO_MFA must be off, idp or idp_or_local");
+  }
+  const list = (name: string, value: string | undefined, fallback: readonly string[], pattern: RegExp, hint: string): string[] => {
+    if (value === undefined || value.trim() === "") return [...fallback];
+    const entries = splitList(value);
+    for (const entry of entries) {
+      if (!pattern.test(entry)) fail(`${name} must be a comma-separated list of ${hint}`);
+    }
+    return entries;
+  };
+  return {
+    mode: rawMode as SsoMfaMode,
+    oidcAmr: list("SSO_MFA_OIDC_AMR", config.SSO_MFA_OIDC_AMR, SSO_MFA_DEFAULT_OIDC_AMR, /^[A-Za-z0-9_.-]{1,64}$/, "amr values such as mfa,otp"),
+    oidcAcr: list("SSO_MFA_OIDC_ACR", config.SSO_MFA_OIDC_ACR, [], /^[\x21-\x7e]{1,512}$/, "acr values (no spaces)"),
+    samlAuthnContexts: list(
+      "SSO_MFA_SAML_AUTHN_CONTEXTS",
+      config.SSO_MFA_SAML_AUTHN_CONTEXTS,
+      SSO_MFA_DEFAULT_SAML_AUTHN_CONTEXTS,
+      /^[A-Za-z][A-Za-z0-9+.-]*:[\x21-\x7e]{1,512}$/,
+      "AuthnContextClassRef URIs"
+    )
   };
 }

@@ -578,7 +578,7 @@ by what blocks adoption first. All of it stays self-hosted.
 ### 13.2 Identity and access
 - [x] OIDC single sign-on alongside SAML (Authorization Code + PKCE, optional, `OIDC_*` settings; see the Authentication and RBAC docs page)
 - [ ] SCIM 2.0 provisioning and deprovisioning of users and groups, with immediate session revocation
-- [ ] Session policy: idle and absolute timeouts, concurrent-session limits, MFA required per role, step-up authentication for sensitive actions
+- [ ] Session policy: idle and absolute timeouts, concurrent-session limits, MFA required per role, step-up authentication for sensitive actions (partial: MFA on SSO delivered, optional `SSO_MFA` for OIDC and SAML with IdP-asserted MFA or the local TOTP step; missing: timeouts, session limits, per-role MFA, step-up)
 - [ ] Network controls: IP allowlists for UI, API and webhooks, trusted-proxy configuration, mutual TLS option for the MCP gateway
 - [ ] Service accounts with scoped, rotating keys; break-glass admin access with alerting
 

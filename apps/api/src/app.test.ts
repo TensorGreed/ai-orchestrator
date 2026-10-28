@@ -6,11 +6,11 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
 import { WORKFLOW_SCHEMA_VERSION, type Workflow } from "@ai-orchestrator/shared";
-import type { AppConfig } from "./config";
-import { createApp } from "./app";
+import { parseTrustProxy, type AppConfig } from "./config.js";
+import { createApp } from "./app.js";
 import type { Store } from "./db/store.js";
-import { AuthService } from "./services/auth-service";
-import { SecretService } from "./services/secret-service";
+import { AuthService } from "./services/auth-service.js";
+import { SecretService } from "./services/secret-service.js";
 import { openTestStore } from "./test-support/test-store.js";
 
 interface TestContext {
@@ -2891,12 +2891,168 @@ describe("Phase 4.1 rate limiting", () => {
   });
 
   it("disables all rate limiting when RATE_LIMIT_ENABLED is false (default for tests)", async () => {
-    const context = await createTestContext({ RATE_LIMIT_ENABLED: false });
+    const context = await createTestContext({ RATE_LIMIT_ENABLED: false, RATE_LIMIT_AUTH_MAX: 2, RATE_LIMIT_GLOBAL_MAX: 2 });
     // Burst far past any sane limit on a route that would normally be limited.
     for (let i = 0; i < 50; i += 1) {
       const r = await context.app.inject({ method: "GET", url: "/api/definitions" });
       expect(r.statusCode).not.toBe(429);
+      expect(r.headers["x-ratelimit-limit"]).toBeUndefined();
     }
+    for (let i = 0; i < 6; i += 1) {
+      const r = await context.app.inject({ method: "POST", url: "/api/auth/login", payload: { email: "nobody@example.com", password: "wrong-password" } });
+      expect(r.statusCode).toBe(401);
+    }
+  });
+
+  const burst = async (
+    context: TestContext,
+    count: number,
+    request: { method: string; url: string; headers?: Record<string, string>; payload?: unknown }
+  ) => {
+    const responses = [];
+    for (let i = 0; i < count; i += 1) responses.push(await context.app.inject(request as never));
+    return responses;
+  };
+
+  it("limits password sign-in in the auth bucket and answers 429 with Retry-After (not 500)", async () => {
+    const context = await createTestContext({ RATE_LIMIT_ENABLED: true, RATE_LIMIT_AUTH_MAX: 3, RATE_LIMIT_GLOBAL_MAX: 1000 });
+    const responses = await burst(context, 4, {
+      method: "POST",
+      url: "/api/auth/login",
+      payload: { email: "nobody@example.com", password: "wrong-password" }
+    });
+    expect(responses.map((r) => r.statusCode)).toEqual([401, 401, 401, 429]);
+    expect(responses[0].headers["x-ratelimit-limit"]).toBe("3");
+    const limited = responses[3];
+    expect(Number(limited.headers["retry-after"])).toBeGreaterThan(0);
+    expect(limited.headers["x-ratelimit-remaining"]).toBe("0");
+    expect(limited.json<{ error: string }>().error).toMatch(/too many requests/i);
+  });
+
+  it("limits the TOTP step, OIDC, SAML, LDAP, registration and TOTP enrolment checks in the auth bucket", async () => {
+    const context = await createTestContext({ RATE_LIMIT_ENABLED: true, RATE_LIMIT_AUTH_MAX: 2, RATE_LIMIT_GLOBAL_MAX: 1000 });
+    const routes: Array<{ method: "GET" | "POST"; url: string; payload?: Record<string, unknown> }> = [
+      { method: "POST", url: "/api/auth/login/mfa", payload: { challenge: "mfa_unknown", code: "123456" } },
+      { method: "GET", url: "/api/auth/oidc/login" },
+      { method: "GET", url: "/api/auth/oidc/callback?code=x&state=y" },
+      { method: "GET", url: "/api/auth/saml/login" },
+      { method: "POST", url: "/api/auth/saml/callback", payload: {} },
+      { method: "POST", url: "/api/auth/ldap/login", payload: { email: "a@example.com", password: "x" } },
+      { method: "POST", url: "/api/auth/register", payload: { email: "a@example.com", password: "x" } },
+      { method: "POST", url: "/api/auth/mfa/activate", payload: { code: "123456" } },
+      { method: "POST", url: "/api/auth/mfa/disable", payload: { code: "123456" } }
+    ];
+    for (const route of routes) {
+      const responses = await burst(context, 3, route);
+      expect(responses.map((r) => r.statusCode === 429), route.url).toEqual([false, false, true]);
+      expect(Number(responses[2].headers["retry-after"]), route.url).toBeGreaterThan(0);
+    }
+  });
+
+  it("applies the global limit to ordinary routes", async () => {
+    const context = await createTestContext({ RATE_LIMIT_ENABLED: true, RATE_LIMIT_GLOBAL_MAX: 2 });
+    const responses = await burst(context, 3, { method: "GET", url: "/api/definitions" });
+    expect(responses.map((r) => r.statusCode)).toEqual([401, 401, 429]);
+    expect(responses[0].headers["x-ratelimit-limit"]).toBe("2");
+    expect(Number(responses[2].headers["retry-after"])).toBeGreaterThan(0);
+  });
+
+  it("does not count signed-in browser traffic against the global limit, but still counts API-key and stale-cookie traffic", async () => {
+    const context = await createTestContext({ RATE_LIMIT_ENABLED: true, RATE_LIMIT_GLOBAL_MAX: 2, RATE_LIMIT_AUTH_MAX: 2 });
+    await context.authService.register({ email: "busy@example.com", password: "Busy-password-123", role: "builder" });
+    const { sessionId } = await context.authService.login("busy@example.com", "Busy-password-123");
+    const cookie = `${context.config.SESSION_COOKIE_NAME}=${sessionId}`;
+    const signedIn = await burst(context, 8, { method: "GET", url: "/api/definitions", headers: { cookie } });
+    expect(signedIn.every((r) => r.statusCode === 200)).toBe(true);
+    // The same browser with an API key or bearer token header is API traffic.
+    const withBearer = await burst(context, 3, { method: "GET", url: "/api/definitions", headers: { cookie, authorization: "Bearer not-a-key" } });
+    expect(withBearer.map((r) => r.statusCode === 429)).toEqual([false, false, true]);
+    // A revoked session is not a pass either.
+    const revoked = await createTestContext({ RATE_LIMIT_ENABLED: true, RATE_LIMIT_GLOBAL_MAX: 2 });
+    await revoked.authService.register({ email: "gone@example.com", password: "Gone-password-123", role: "builder" });
+    const gone = await revoked.authService.login("gone@example.com", "Gone-password-123");
+    await revoked.store.revokeSession(gone.sessionId);
+    const stale = await burst(revoked, 3, { method: "GET", url: "/api/definitions", headers: { cookie: `${revoked.config.SESSION_COOKIE_NAME}=${gone.sessionId}` } });
+    expect(stale.map((r) => r.statusCode === 429)).toEqual([false, false, true]);
+    // Sign-in routes count a signed-in browser too.
+    const logins = await burst(context, 3, { method: "POST", url: "/api/auth/login", headers: { cookie }, payload: { email: "busy@example.com", password: "wrong" } });
+    expect(logins.map((r) => r.statusCode)).toEqual([401, 401, 429]);
+  });
+
+  it("looks the session up once per signed-in request and not at all for a cookie that cannot be a session", async () => {
+    const context = await createTestContext({ RATE_LIMIT_ENABLED: true, RATE_LIMIT_GLOBAL_MAX: 5 });
+    await context.authService.register({ email: "once@example.com", password: "Once-password-123", role: "builder" });
+    const { sessionId } = await context.authService.login("once@example.com", "Once-password-123");
+    const original = context.store.getSession.bind(context.store);
+    const lookups: string[] = [];
+    context.store.getSession = async (id: string) => {
+      lookups.push(id);
+      return original(id);
+    };
+    const cookieName = context.config.SESSION_COOKIE_NAME;
+    const signedIn = await context.app.inject({ method: "GET", url: "/api/workflows", headers: { cookie: `${cookieName}=${sessionId}` } });
+    expect(signedIn.statusCode).toBe(200);
+    expect(lookups).toEqual([sessionId]);
+    lookups.length = 0;
+    const junk = await context.app.inject({ method: "GET", url: "/api/definitions", headers: { cookie: `${cookieName}=not-a-session` } });
+    expect(junk.statusCode).toBe(401);
+    expect(lookups).toEqual([]);
+  });
+
+  it("applies the webhook limit to public webhook routes", async () => {
+    const context = await createTestContext({ RATE_LIMIT_ENABLED: true, RATE_LIMIT_WEBHOOK_MAX: 2, RATE_LIMIT_GLOBAL_MAX: 1000 });
+    const responses = await burst(context, 3, { method: "POST", url: "/webhook/no-such-hook", payload: {} });
+    expect(responses[0].headers["x-ratelimit-limit"]).toBe("2");
+    expect(responses.map((r) => r.statusCode === 429)).toEqual([false, false, true]);
+  });
+
+  it("counts by the connecting address unless TRUST_PROXY names the proxy", async () => {
+    const login = (forwardedFor: string) => ({
+      method: "POST" as const,
+      url: "/api/auth/login",
+      headers: { "x-forwarded-for": forwardedFor },
+      payload: { email: "nobody@example.com", password: "wrong-password" }
+    });
+    // Unset: a client cannot pick a fresh count by sending its own X-Forwarded-For.
+    const direct = await createTestContext({ RATE_LIMIT_ENABLED: true, RATE_LIMIT_AUTH_MAX: 1, RATE_LIMIT_GLOBAL_MAX: 1000 });
+    expect((await direct.app.inject(login("198.51.100.1"))).statusCode).toBe(401);
+    expect((await direct.app.inject(login("198.51.100.2"))).statusCode).toBe(429);
+    // Behind a trusted proxy (inject connects from 127.0.0.1) each forwarded client has its own count.
+    const proxied = await createTestContext({ RATE_LIMIT_ENABLED: true, RATE_LIMIT_AUTH_MAX: 1, RATE_LIMIT_GLOBAL_MAX: 1000, TRUST_PROXY: "127.0.0.1" });
+    expect((await proxied.app.inject(login("198.51.100.1"))).statusCode).toBe(401);
+    expect((await proxied.app.inject(login("198.51.100.2"))).statusCode).toBe(401);
+    expect((await proxied.app.inject(login("198.51.100.1"))).statusCode).toBe(429);
+  });
+
+  it("parses TRUST_PROXY and refuses entries that are not addresses", () => {
+    expect(parseTrustProxy(undefined)).toBe(false);
+    expect(parseTrustProxy("")).toBe(false);
+    expect(parseTrustProxy("false")).toBe(false);
+    expect(parseTrustProxy("true")).toBe(true);
+    expect(parseTrustProxy("1")).toBe(1);
+    expect(parseTrustProxy("10.0.0.0/8, 127.0.0.1, ::1, loopback")).toEqual(["10.0.0.0/8", "127.0.0.1", "::1", "loopback"]);
+    expect(() => parseTrustProxy("nginx")).toThrow(/TRUST_PROXY/);
+    expect(() => parseTrustProxy("10.0.0.0/33")).toThrow(/TRUST_PROXY/);
+  });
+});
+
+describe("API error handler", () => {
+  it("keeps Fastify's own 4xx request errors instead of answering 500", async () => {
+    const context = await createTestContext();
+    const unsupported = await context.app.inject({
+      method: "POST",
+      url: "/api/auth/login",
+      headers: { "content-type": "application/xml" },
+      payload: "<login/>"
+    });
+    expect(unsupported.statusCode).toBe(415);
+    const malformed = await context.app.inject({
+      method: "POST",
+      url: "/api/auth/login",
+      headers: { "content-type": "application/json" },
+      payload: "{not json"
+    });
+    expect(malformed.statusCode).toBe(400);
   });
 });
 

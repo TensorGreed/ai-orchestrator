@@ -224,7 +224,11 @@ export function ssoErrorMessage(code: string): string {
     case "oidc_email":
       return "Your identity provider did not share a verified email address, so no account could be matched. Ask your administrator.";
     case "oidc_not_allowed":
+    case "saml_not_allowed":
       return "Your account is not allowed to sign in to this workspace. Ask your administrator.";
+    case "sso_mfa_required":
+      return "This workspace requires multi-factor authentication. Sign in again and complete MFA at your identity provider, or ask your administrator.";
+    case "saml_unavailable":
     case "oidc_unavailable":
       return "Single sign-on is unavailable right now. Try again later or sign in with your password.";
     default:
@@ -1211,7 +1215,34 @@ export async function disableMfa(payload: { code?: string } = {}) {
   });
 }
 
+/**
+ * Phase 13.2 — the challenge id the web app keeps for an SSO sign-in waiting for the TOTP step. The API sent the real
+ * challenge in an HttpOnly cookie, so the request carries only the code.
+ */
+export const SSO_MFA_CHALLENGE = "sso";
+
+/** Phase 13.2 — true when an SSO callback landed here with `?sso_mfa=totp` (the local TOTP step comes next). */
+export function isSsoMfaLanding(search: string): boolean {
+  return new URLSearchParams(search).get("sso_mfa") === "totp";
+}
+
+/** Phase 13.2 — the URL without the one-shot SSO landing parameters (`sso_error`, `sso_mfa`). */
+export function stripSsoLandingParams(pathname: string, search: string, hash: string): string | null {
+  const params = new URLSearchParams(search);
+  if (!params.has("sso_error") && !params.has("sso_mfa")) return null;
+  params.delete("sso_error");
+  params.delete("sso_mfa");
+  const query = params.toString();
+  return `${pathname}${query ? `?${query}` : ""}${hash}`;
+}
+
 export async function completeMfaLogin(payload: { challenge: string; code: string }) {
+  if (payload.challenge === SSO_MFA_CHALLENGE) {
+    return apiRequest<{ user: AuthUser; expiresAt: string }>("/api/auth/login/mfa", {
+      method: "POST",
+      body: JSON.stringify({ code: payload.code })
+    });
+  }
   return apiRequest<{ user: AuthUser; expiresAt: string }>("/api/auth/login/mfa", {
     method: "POST",
     body: JSON.stringify(payload)

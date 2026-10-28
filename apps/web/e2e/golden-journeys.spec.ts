@@ -1,6 +1,6 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type BrowserContext, type Page } from "@playwright/test";
 
 const EXTERNAL_FIXTURE = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -10,6 +10,8 @@ const EXTERNAL_FIXTURE = path.resolve(
 const ADMIN_EMAIL = process.env.E2E_ADMIN_EMAIL ?? "admin@example.com";
 const ADMIN_PASSWORD = process.env.E2E_ADMIN_PASSWORD ?? "ChangeThisPassword123!";
 const API_URL = process.env.E2E_API_URL ?? "http://localhost:4000";
+
+let savedSessionCookies: Awaited<ReturnType<BrowserContext["cookies"]>> | null = null;
 
 async function ensureAuthenticated(page: Page): Promise<void> {
   await expect
@@ -23,6 +25,9 @@ async function ensureAuthenticated(page: Page): Promise<void> {
     )
     .toBeTruthy();
 
+  // Sign in once per run and carry the session into each test's fresh browser context: sign-in sits in the API's
+  // auth rate-limit bucket (10 a minute by default), and the suite has more tests than that.
+  if (savedSessionCookies) await page.context().addCookies(savedSessionCookies);
   const sessionCheck = await page.request.get("/api/auth/me");
   if (!sessionCheck.ok()) {
     const loginResponse = await page.request.post("/api/auth/login", {
@@ -32,6 +37,7 @@ async function ensureAuthenticated(page: Page): Promise<void> {
       }
     });
     expect(loginResponse.ok()).toBeTruthy();
+    savedSessionCookies = await page.context().cookies();
   }
 }
 

@@ -9,6 +9,8 @@
 - `GET /api/auth/oidc/metadata` (public; `{ "enabled": false }` when OIDC is off; see [OIDC single sign-on](../security/auth-rbac.md#oidc-single-sign-on))
 - `GET /api/auth/oidc/login` (browser navigation; redirects to the IdP)
 - `GET /api/auth/oidc/callback?code=&state=` (IdP redirect target; redirects to the web app)
+- `POST /api/auth/login/mfa` (`{ challenge?, code }`; after an SSO login that needs the TOTP step the challenge comes from the HttpOnly `l2m_sso_mfa` cookie; see [MFA on SSO](../security/auth-rbac.md#mfa-on-sso))
+- `POST /api/auth/saml/callback` (IdP HTTP-POST binding form post → redirect to the web app; JSON → JSON; see [SAML single sign-on](../security/auth-rbac.md#saml-single-sign-on))
 
 ## Workflows
 
