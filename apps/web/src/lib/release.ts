@@ -1,3 +1,4 @@
+import { releaseGateRestrictsToAdmins } from "@ai-orchestrator/shared";
 import type { ReleaseGateRepeatSelection, ReleaseGateStats, ReleaseGateView, ReleaseStateView, ReleaseVerdict } from "@ai-orchestrator/shared";
 
 /** Phase 15.4 — helpers behind the version pill, the Publish dialog and the Gates tab. */
@@ -136,6 +137,15 @@ export interface GateLocks {
   adminOnly: boolean;
   /** Self-approval can only be turned on by an admin. */
   selfApproval: boolean;
+}
+
+/**
+ * Why a non-admin may not delete a workflow whose release gate is on and enforced (the gate and its history outlive the
+ * workflow); null when they may, or when the state is unknown (the server answers then).
+ */
+export function workflowDeleteDenial(state: Pick<ReleaseStateView, "gateEnabled" | "gateEnforced"> | null, isAdmin: boolean): string | null {
+  if (!state || isAdmin || !releaseGateRestrictsToAdmins({ enabled: state.gateEnabled, enforced: state.gateEnforced })) return null;
+  return "This workflow's release gate is enforced: only an admin can delete it";
 }
 
 export function gateLocks(gate: Pick<ReleaseGateView, "enforced">, isAdmin: boolean): GateLocks {

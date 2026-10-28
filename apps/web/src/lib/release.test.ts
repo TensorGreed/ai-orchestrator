@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { defaultReleaseGate } from "@ai-orchestrator/shared";
-import { gateAdmissionBanner, gateFormFrom, gateLocks, gateSettingsFromForm, gateStatsLines, releasePillLabel, releaseVerdictTone } from "./release";
+import { gateAdmissionBanner, gateFormFrom, gateLocks, gateSettingsFromForm, gateStatsLines, releasePillLabel, releaseVerdictTone, workflowDeleteDenial } from "./release";
 
 describe("release helpers", () => {
   it("labels the version pill by what production runs", () => {
@@ -95,5 +95,15 @@ describe("gate admission helpers", () => {
     expect(gateStatsLines(base)).toEqual(["18 of 20 cases passed (90%)"]);
     const lines = gateStatsLines({ ...base, admission: { admitted: 20, pending: 40, pendingNotPassing: 0, required: 2, requiredFailures: [{ id: "a", name: "A", problem: "failed" }] } });
     expect(lines).toEqual(["18 of 20 cases passed (90%)", "40 cases pending admission (run, not counted)", "2 required cases, 1 not passing"]);
+  });
+});
+
+describe("workflowDeleteDenial", () => {
+  it("refuses a non-admin only while the gate is on and enforced", () => {
+    expect(workflowDeleteDenial({ gateEnabled: true, gateEnforced: true }, false)).toBe("This workflow's release gate is enforced: only an admin can delete it");
+    expect(workflowDeleteDenial({ gateEnabled: true, gateEnforced: false }, false)).toBeNull();
+    expect(workflowDeleteDenial({ gateEnabled: false, gateEnforced: true }, false)).toBeNull();
+    expect(workflowDeleteDenial({ gateEnabled: true, gateEnforced: true }, true)).toBeNull();
+    expect(workflowDeleteDenial(null, false)).toBeNull();
   });
 });

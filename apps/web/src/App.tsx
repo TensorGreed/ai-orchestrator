@@ -36,6 +36,7 @@ import {
   deleteProject,
   deleteWorkflow,
   duplicateWorkflow,
+  fetchReleaseState,
   executeWorkflow,
   executeWorkflowStream,
   fetchAuthMe,
@@ -132,6 +133,7 @@ import { McpMyConnectionsPage } from "./components/McpRuntimeSafety";
 import { GuardSecurityPage } from "./components/GuardSecurityPage";
 import { EvaluationsPage, type EvaluationsTab } from "./components/EvaluationsPage";
 import { ReleasePill } from "./components/ReleaseControls";
+import { workflowDeleteDenial } from "./lib/release";
 import { ApprovalsPage } from "./components/ApprovalsPage";
 import { McpToolsPage } from "./components/McpToolsPage";
 import { McpChangesPage } from "./components/McpChangesPage";
@@ -3697,6 +3699,17 @@ function StudioApp() {
         return;
       }
 
+      // The list does not know each workflow's gate: a non-admin hears an enforced gate's refusal before the confirm
+      // (the server checks it too, and answers if the state cannot be read).
+      if (authUser?.role !== "admin") {
+        const release = await fetchReleaseState(workflowId).catch(() => null);
+        const denial = workflowDeleteDenial(release?.state ?? null, false);
+        if (denial) {
+          setError(denial);
+          return;
+        }
+      }
+
       const candidate = workflowList.find((workflow) => workflow.id === workflowId);
       const confirmed = window.confirm(`Delete workflow '${candidate?.name ?? workflowId}'? This cannot be undone.`);
       if (!confirmed) {
@@ -3734,7 +3747,7 @@ function StudioApp() {
         setBusy(false);
       }
     },
-    [activeMode, activeProjectId, canManageWorkflows, currentWorkflow.id, handleApiError, hydrateWorkflow, setEdges, setNodes, workflowList]
+    [activeMode, activeProjectId, authUser?.role, canManageWorkflows, currentWorkflow.id, handleApiError, hydrateWorkflow, setEdges, setNodes, workflowList]
   );
 
   // --- Phase 4.2: project/folder/tag handlers --------------------------------
