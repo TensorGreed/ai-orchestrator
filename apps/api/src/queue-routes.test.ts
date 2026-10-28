@@ -235,8 +235,12 @@ describe("queue settings", () => {
       maxPending: 0,
       maxRssMb: 0,
       maxEventLoopLagMs: 0,
-      shutdownDrainMs: 30_000
+      shutdownDrainMs: 20_000,
+      // No settings, no cluster: SIGTERM/SIGINT exit at once, as before.
+      drainOnSignal: false
     });
+    expect(resolveQueueSettings({}, { clusterMode: true }).drainOnSignal).toBe(true);
+    expect(resolveQueueSettings({ SHUTDOWN_DRAIN_MS: 3_000 }, { clusterMode: false })).toMatchObject({ drainOnSignal: true, shutdownDrainMs: 3_000 });
     expect(resolveQueueSettings({ QUEUE_HEARTBEAT_MS: 20_000 }, { clusterMode: true }).leaseMs).toBe(60_000);
     expect(resolveQueueSettings({ QUEUE_POOLS: " gpu , default,gpu " }, { clusterMode: true }).pools).toEqual(["gpu", "default"]);
     expect(() => resolveQueueSettings({ QUEUE_POOLS: "gpu" }, { clusterMode: false })).toThrow(/QUEUE_POOLS needs cluster mode/);

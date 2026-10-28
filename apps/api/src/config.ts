@@ -65,7 +65,10 @@ const envSchema = z.object({
   QUEUE_MAX_RSS_MB: optionalIntFromEnv(64, 1_048_576),
   /** A consumer stops claiming while its event loop lags more than this many ms (p99 over the last second; default off). */
   QUEUE_MAX_EVENT_LOOP_LAG_MS: optionalIntFromEnv(10, 60_000),
-  /** On SIGTERM/SIGINT, how long running queue jobs may finish before they are stopped and given back, in ms (default 30000). */
+  /**
+   * On SIGTERM/SIGINT, how long running queue jobs may finish before they are stopped and given back, in ms. The drain
+   * runs in cluster mode (default 20000) or when this is set; otherwise the signals exit at once, as before.
+   */
   SHUTDOWN_DRAIN_MS: optionalIntFromEnv(0, 3_600_000),
   // How often a streamed run (SSE) sends a `: ping` comment while nothing else
   // is sent. The web client treats 45s without any bytes as a lost connection,
@@ -588,7 +591,13 @@ export interface QueueSettings {
   maxRssMb: number;
   /** Stop claiming while the event loop's p99 lag exceeds this (ms); 0 = off. */
   maxEventLoopLagMs: number;
+  /** The drain budget on SIGTERM/SIGINT, when the drain runs at all (see drainOnSignal). */
   shutdownDrainMs: number;
+  /**
+   * Whether SIGTERM/SIGINT drain before exiting: in cluster mode, or when SHUTDOWN_DRAIN_MS is set. Otherwise the
+   * signals behave as before (the process exits at once).
+   */
+  drainOnSignal: boolean;
 }
 
 export const QUEUE_SETTING_DEFAULTS = {
@@ -597,7 +606,8 @@ export const QUEUE_SETTING_DEFAULTS = {
   heartbeatMs: 10_000,
   leaseMs: 45_000,
   reaperIntervalMs: 15_000,
-  shutdownDrainMs: 30_000
+  /** Fits Kubernetes' default 30 s termination grace with the close grace (5 s) and margin to spare. */
+  shutdownDrainMs: 20_000
 } as const;
 
 type QueueConfigInput = Partial<
@@ -646,7 +656,8 @@ export function resolveQueueSettings(config: QueueConfigInput, options: { cluste
     maxPending: config.QUEUE_MAX_PENDING ?? 0,
     maxRssMb: config.QUEUE_MAX_RSS_MB ?? 0,
     maxEventLoopLagMs: config.QUEUE_MAX_EVENT_LOOP_LAG_MS ?? 0,
-    shutdownDrainMs: config.SHUTDOWN_DRAIN_MS ?? QUEUE_SETTING_DEFAULTS.shutdownDrainMs
+    shutdownDrainMs: config.SHUTDOWN_DRAIN_MS ?? QUEUE_SETTING_DEFAULTS.shutdownDrainMs,
+    drainOnSignal: options.clusterMode || config.SHUTDOWN_DRAIN_MS !== undefined
   };
 }
 

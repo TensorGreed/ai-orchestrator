@@ -80,43 +80,46 @@ async function bootstrap() {
     `API listening on http://${config.API_HOST}:${config.API_PORT} (worker_mode=${config.WORKER_MODE}, ha=${config.HA_ENABLED})`
   );
 
-  // Phase 13.1 — graceful shutdown. /ready turns 503, no new queue jobs are claimed, leadership is handed on, running
-  // jobs get SHUTDOWN_DRAIN_MS to finish and the rest are given back to the queue; then the app (and the store) closes. A second
-  // signal, or a drain that overruns its budget by more than the grace below, exits at once.
-  let shuttingDown = false;
-  const shutdown = async (signal: NodeJS.Signals) => {
-    if (shuttingDown) {
-      app.log.warn({ signal }, "Second shutdown signal: exiting now");
-      process.exit(1);
+  // Phase 13.1 — graceful shutdown, in cluster mode or when SHUTDOWN_DRAIN_MS is set (otherwise SIGTERM/SIGINT keep
+  // Node's default: the process exits at once). /ready turns 503, no new queue jobs are claimed, leadership is handed
+  // on, running jobs get SHUTDOWN_DRAIN_MS to finish and the rest are given back to the queue; then the app (and the
+  // store) closes. A second signal, or a drain that overruns its budget by more than the close grace, exits at once.
+  if (queueSettings.drainOnSignal) {
+    let shuttingDown = false;
+    const shutdown = async (signal: NodeJS.Signals) => {
+      if (shuttingDown) {
+        app.log.warn({ signal }, "Second shutdown signal: exiting now");
+        process.exit(1);
+      }
+      shuttingDown = true;
+      app.log.info({ signal, drainMs: queueSettings.shutdownDrainMs }, "Shutting down: draining");
+      const hardStop = setTimeout(() => {
+        app.log.error({ signal }, "Shutdown did not finish in time: exiting");
+        process.exit(1);
+      }, queueSettings.shutdownDrainMs + SHUTDOWN_CLOSE_GRACE_MS);
+      hardStop.unref();
+      let exitCode = 0;
+      try {
+        await lifecycle.drain(queueSettings.shutdownDrainMs);
+        // Closing the app closes the store too (its onClose hook).
+        await app.close();
+      } catch (error) {
+        exitCode = 1;
+        app.log.error({ err: error instanceof Error ? error.message : String(error) }, "Shutdown failed");
+      }
+      clearTimeout(hardStop);
+      process.exit(exitCode);
+    };
+    for (const signal of ["SIGTERM", "SIGINT"] as const) {
+      process.on(signal, (received) => {
+        void shutdown(received);
+      });
     }
-    shuttingDown = true;
-    app.log.info({ signal, drainMs: queueSettings.shutdownDrainMs }, "Shutting down: draining");
-    const hardStop = setTimeout(() => {
-      app.log.error({ signal }, "Shutdown did not finish in time: exiting");
-      process.exit(1);
-    }, queueSettings.shutdownDrainMs + SHUTDOWN_CLOSE_GRACE_MS);
-    hardStop.unref();
-    let exitCode = 0;
-    try {
-      await lifecycle.drain(queueSettings.shutdownDrainMs);
-      // Closing the app closes the store too (its onClose hook).
-      await app.close();
-    } catch (error) {
-      exitCode = 1;
-      app.log.error({ err: error instanceof Error ? error.message : String(error) }, "Shutdown failed");
-    }
-    clearTimeout(hardStop);
-    process.exit(exitCode);
-  };
-  for (const signal of ["SIGTERM", "SIGINT"] as const) {
-    process.on(signal, (received) => {
-      void shutdown(received);
-    });
   }
 }
 
-/** Time allowed after the drain budget for closing the app and the database. */
-const SHUTDOWN_CLOSE_GRACE_MS = 15_000;
+/** Time allowed after the drain budget for closing the app and the database (20 s + 5 s fits a 30 s grace period). */
+const SHUTDOWN_CLOSE_GRACE_MS = 5_000;
 
 bootstrap().catch((error) => {
   // eslint-disable-next-line no-console
