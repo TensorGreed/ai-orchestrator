@@ -26,8 +26,9 @@ the optional `OIDC_ALLOWED_EMAIL_DOMAINS` and `OIDC_ALLOWED_GROUPS` limit who
 can sign in (recommended for shared or self-registration IdPs); see
 [OIDC single sign-on](../security/auth-rbac.md#oidc-single-sign-on). SAML has
 the same optional allow-lists (`SAML_ALLOWED_EMAIL_DOMAINS`,
-`SAML_ALLOWED_GROUPS`) and an optional `SAML_IDP_ISSUER` pin; see
-[SAML single sign-on](../security/auth-rbac.md#saml-single-sign-on).
+`SAML_ALLOWED_GROUPS`), an optional `SAML_IDP_ISSUER` pin and an optional
+`SAML_REQUIRE_IN_RESPONSE_TO` (SP-initiated sign-in only, against login CSRF);
+see [SAML single sign-on](../security/auth-rbac.md#saml-single-sign-on).
 
 `SSO_MFA` (`off` by default, `idp` or `idp_or_local`) requires MFA on OIDC and
 SAML logins, from the IdP or the local TOTP step; `SSO_MFA_OIDC_AMR`,
