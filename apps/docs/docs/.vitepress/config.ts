@@ -176,6 +176,7 @@ export default defineConfig({
           { text: "Observability (OTel, metrics, traces)", link: "/operations/observability" },
           { text: "Postgres", link: "/operations/postgres" },
           { text: "Queue and workers", link: "/operations/queue-and-workers" },
+          { text: "Cluster operations", link: "/operations/cluster" },
           { text: "Troubleshooting", link: "/troubleshooting/common-issues" }
         ]
       }
