@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import net from "node:net";
 import { z } from "zod";
 
 /** Phase 15.6 — production capture defaults (see the REPLAY_CAPTURE_* settings). */
@@ -490,6 +491,12 @@ const envSchema = z.object({
   RATE_LIMIT_AUTH_WINDOW_MS: z.coerce.number().int().positive().default(60_000),
   RATE_LIMIT_WEBHOOK_MAX: z.coerce.number().int().positive().default(120),
   RATE_LIMIT_WEBHOOK_WINDOW_MS: z.coerce.number().int().positive().default(60_000),
+  /**
+   * Which reverse proxies may set the client address (X-Forwarded-For) that rate limits are counted by. Unset = none:
+   * every request counts against the address that connected (behind a proxy, all clients then share one count).
+   * `true` (every hop), a hop count, or a comma list of proxy addresses / CIDRs (see parseTrustProxy).
+   */
+  TRUST_PROXY: z.string().optional(),
   HELMET_ENABLED: booleanFromEnv.default(true),
   HELMET_HSTS_ENABLED: booleanFromEnv.default(false),
   HELMET_CSP_ENABLED: booleanFromEnv.default(false),
@@ -524,8 +531,38 @@ export function parseConfig(env: Record<string, string | undefined>): AppConfig 
   // Phase 13.2 — the SAML allow-lists / IdP issuer and SSO_MFA settings are checked only when SSO is on.
   resolveSamlSettings(parsed.data);
   resolveSsoMfaSettings(parsed.data);
+  parseTrustProxy(parsed.data.TRUST_PROXY);
 
   return parsed.data;
+}
+
+const TRUST_PROXY_NAMED_RANGES = new Set(["loopback", "linklocal", "uniquelocal"]);
+
+/**
+ * TRUST_PROXY as Fastify's `trustProxy`: unset, empty or `false` → false (today's behaviour: the connecting address
+ * counts); `true` → every hop is trusted; a whole number → that many hops; otherwise a comma list of IP addresses,
+ * CIDR ranges or `loopback` / `linklocal` / `uniquelocal`. Anything else fails fast with the setting's name.
+ */
+export function parseTrustProxy(raw: string | undefined): boolean | number | string[] {
+  const value = (raw ?? "").trim();
+  if (!value || value.toLowerCase() === "false") return false;
+  if (value.toLowerCase() === "true") return true;
+  if (/^\d+$/.test(value)) return Number(value);
+  const entries = value.split(",").map((entry) => entry.trim()).filter(Boolean);
+  for (const entry of entries) {
+    if (TRUST_PROXY_NAMED_RANGES.has(entry)) continue;
+    const [address, prefix, extra] = entry.split("/");
+    const family = net.isIP(address ?? "");
+    const prefixOk =
+      prefix === undefined || (/^\d+$/.test(prefix) && Number(prefix) <= (family === 6 ? 128 : 32));
+    if (family === 0 || !prefixOk || extra !== undefined) {
+      throw new Error(
+        `Invalid environment configuration: TRUST_PROXY entry "${entry}" is not an IP address, a CIDR range, ` +
+          "loopback, linklocal or uniquelocal (or use true, false or a hop count)"
+      );
+    }
+  }
+  return entries;
 }
 
 export function getConfig(): AppConfig {

@@ -98,6 +98,7 @@ import {
   REPLAY_CAPTURE_DEFAULTS,
   resolveOidcSettings,
   resolveSamlSettings,
+  parseTrustProxy,
   resolveSsoMfaSettings,
   ssoPostLoginUrl,
   type AppConfig
@@ -1424,6 +1425,8 @@ export async function createApp(
       ...(options.logStream ? { stream: options.logStream } : {})
     },
     bodyLimit: config.API_BODY_LIMIT_BYTES,
+    // TRUST_PROXY unset = false: request.ip (and so the rate-limit key) is the address that connected.
+    trustProxy: parseTrustProxy(config.TRUST_PROXY),
     requestIdHeader: "x-request-id",
     requestIdLogLabel: "reqId",
     genReqId: () => nanoid()
@@ -4365,6 +4368,23 @@ export async function createApp(
     return match ? match[1].trim() : null;
   };
 
+  /**
+   * True when a request is studio traffic from a signed-in browser: a session cookie naming a live session, and no
+   * Authorization or X-API-Key header (API-key and bearer traffic stays under the global rate limit). Any lookup
+   * failure counts as false, so the request is limited as usual.
+   */
+  const isBrowserSessionRequest = async (request: FastifyRequest): Promise<boolean> => {
+    if (request.headers.authorization || request.headers["x-api-key"]) return false;
+    const sessionId = (request.cookies as Record<string, string | undefined> | undefined)?.[config.SESSION_COOKIE_NAME];
+    if (!sessionId) return false;
+    try {
+      const session = await store.getSession(sessionId);
+      return Boolean(session && !session.revokedAt && new Date(session.expiresAt).getTime() > Date.now());
+    } catch {
+      return false;
+    }
+  };
+
   const authenticateApiKey = async (headers: Record<string, unknown>): Promise<SafeUser | null> => {
     const token = extractBearerToken(headers);
     if (!token) return null;
@@ -4819,7 +4839,10 @@ export async function createApp(
 
   // Phase 4.1 — Rate limiting via @fastify/rate-limit
   // Global default: RATE_LIMIT_GLOBAL_MAX requests per RATE_LIMIT_GLOBAL_WINDOW_MS
-  // per IP. Stricter per-route limits for auth (brute-force protection) and
+  // per client address (see TRUST_PROXY), for unauthenticated and API-key traffic.
+  // Requests carrying a live browser session are not counted against it: a busy
+  // studio tab measured up to ~290 requests a minute, and every user behind one
+  // proxy or NAT shares an address. Stricter per-route limits for auth (brute-force protection) and
   // public webhook routes (flood protection) are applied via the onRoute hook
   // below — that way we don't have to touch ~15 route definitions individually.
   // Disable entirely with RATE_LIMIT_ENABLED=false (default true; tests opt out).
@@ -4829,13 +4852,18 @@ export async function createApp(
     // installs its own onRoute hook that snapshots routeOptions.config.rateLimit
     // at registration time. If our hook ran second, the plugin would already
     // have read the default and our per-route limits would never apply.
+    // Sign-in (password, its TOTP step at /api/auth/login/mfa, LDAP, OIDC, SAML), registration, and the TOTP
+    // checks of enrolment and removal. There is no password-reset route.
     const AUTH_BURST_PREFIXES = [
       "/api/auth/login",
       "/api/auth/register",
+      "/api/auth/saml/login",
       "/api/auth/saml/callback",
       "/api/auth/ldap/login",
       "/api/auth/oidc/login",
-      "/api/auth/oidc/callback"
+      "/api/auth/oidc/callback",
+      "/api/auth/mfa/activate",
+      "/api/auth/mfa/disable"
     ];
     const WEBHOOK_PREFIXES = ["/webhook/", "/webhook-test/", "/api/webhooks/"];
     const PROBE_URLS = new Set(["/health", "/metrics"]);
@@ -4852,18 +4880,21 @@ export async function createApp(
       if (existingConfig.rateLimit !== undefined) {
         return;
       }
-      let perRouteLimit: false | { max: number; timeWindow: number };
+      // `allowList` answers false: a signed-in browser is still counted on these routes.
+      let perRouteLimit: false | { max: number; timeWindow: number; allowList: () => boolean };
       if (isProbe) {
         perRouteLimit = false;
       } else if (matchesAuth) {
         perRouteLimit = {
           max: config.RATE_LIMIT_AUTH_MAX,
-          timeWindow: config.RATE_LIMIT_AUTH_WINDOW_MS
+          timeWindow: config.RATE_LIMIT_AUTH_WINDOW_MS,
+          allowList: () => false
         };
       } else {
         perRouteLimit = {
           max: config.RATE_LIMIT_WEBHOOK_MAX,
-          timeWindow: config.RATE_LIMIT_WEBHOOK_WINDOW_MS
+          timeWindow: config.RATE_LIMIT_WEBHOOK_WINDOW_MS,
+          allowList: () => false
         };
       }
       routeOptions.config = {
@@ -4872,10 +4903,14 @@ export async function createApp(
       };
     });
 
-    app.register(rateLimit, {
+    // Awaited so the plugin (and its onRoute hook) is loaded before any route below is declared; without the await it
+    // loaded only after every route on the root app existed, and none of them was limited.
+    await app.register(rateLimit, {
       global: true,
       max: config.RATE_LIMIT_GLOBAL_MAX,
       timeWindow: config.RATE_LIMIT_GLOBAL_WINDOW_MS,
+      // Global limit only: a request with a live session cookie and no API key or bearer token is not counted.
+      allowList: async (request) => await isBrowserSessionRequest(request),
       addHeadersOnExceeding: {
         "x-ratelimit-limit": true,
         "x-ratelimit-remaining": true,
@@ -6422,15 +6457,6 @@ export async function createApp(
   // The SAMLResponse only ever travels in the request body (there is no Redirect-binding callback), so it never
   // reaches a request URL, log line or span.
   app.register(async (scope) => {
-    // Routes in this scope sit in the auth rate-limit bucket; answer a burst with 429 (the app-wide handler would make
-    // it a 500) and leave every other error to that handler.
-    scope.setErrorHandler((error, _request, reply) => {
-      if ((error as { statusCode?: unknown }).statusCode === 429) {
-        reply.code(429).send({ error: "Too many requests, retry later" });
-        return;
-      }
-      throw error;
-    });
     scope.addContentTypeParser("application/x-www-form-urlencoded", { parseAs: "string" }, (_request, body, done) => {
       done(null, Object.fromEntries(new URLSearchParams(typeof body === "string" ? body : body.toString("utf8"))));
     });
@@ -13258,6 +13284,18 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     // A write whose user or project was deleted meanwhile (a race with a delete): a conflict, not a server error.
     if (error instanceof StoreReferenceMissingError) {
       reply.code(409).send({ error: error.message });
+      return;
+    }
+
+    // Rate limited: answered as 429; the plugin already set Retry-After and the x-ratelimit-* headers on the reply.
+    if (statusCode === 429) {
+      reply.code(429).send({ error: "Too many requests, retry later", retryAfterSeconds: Number(reply.getHeader("retry-after")) || undefined });
+      return;
+    }
+
+    // Fastify's own request errors (unsupported media type, malformed JSON, ...) keep their 4xx status.
+    if (errorCode.startsWith("FST_") && statusCode >= 400 && statusCode < 500) {
+      reply.code(statusCode).send({ error: message });
       return;
     }
 
