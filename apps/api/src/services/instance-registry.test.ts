@@ -1,6 +1,7 @@
 /**
  * Phase 13.1 — the instance registry: the several-leaders rule, heartbeats and their warnings (logged once per
- * change), leader-only pruning and the dead-executor reconcile, and the ordered run-owner writes.
+ * change, never for a predecessor's row after a restart), leader-only pruning and the dead-executor reconcile,
+ * self-fencing, and the ordered run-owner writes.
  */
 import fs from "node:fs";
 import os from "node:os";
@@ -155,6 +156,127 @@ describe("InstanceRegistry", () => {
     await r.start();
     expect(l.lines).toEqual([{ level: "warn", message: "Cluster registry heartbeat failed" }]);
     await r.stop();
+  });
+});
+
+async function until(check: () => boolean | Promise<boolean>, what: string, timeoutMs = 5_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!(await check())) {
+    if (Date.now() > deadline) throw new Error(`Timed out waiting for ${what}`);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
+/** The store with heartbeats that fail while `down.value` is true. */
+function flakyStore(down: { value: boolean }): Store {
+  return new Proxy(store, {
+    get(target, prop, receiver) {
+      const value = Reflect.get(target, prop, receiver);
+      if (prop === "heartbeatClusterInstance") {
+        return async (...args: unknown[]) => {
+          if (down.value) throw new Error("db unreachable");
+          return await (value as (...a: unknown[]) => Promise<void>).apply(target, args);
+        };
+      }
+      return typeof value === "function" ? (value as (...a: unknown[]) => unknown).bind(target) : value;
+    }
+  });
+}
+
+describe("InstanceRegistry self-fencing (cluster mode)", () => {
+  it("fences when no heartbeat was recorded for the timeout minus the margin, stops runs at every check, and lifts on the next recorded beat", async () => {
+    const down = { value: false };
+    const l = logs();
+    const events: string[] = [];
+    const r = registry("silent", {
+      store: flakyStore(down),
+      logger: l.logger,
+      heartbeatMs: 100,
+      instanceTimeoutMs: 400,
+      selfFence: { onFenced: () => events.push("fenced"), onRecovered: () => events.push("recovered") }
+    });
+    await r.start();
+    // Healthy beats: never fenced.
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    expect(r.isFenced()).toBe(false);
+    expect(events).toEqual([]);
+
+    down.value = true;
+    const blockedAt = Date.now();
+    await until(() => r.isFenced(), "the fence");
+    // Not before timeout - margin (300 ms) since the last recorded beat, which was sent at most one period earlier.
+    expect(Date.now() - blockedAt).toBeGreaterThanOrEqual(150);
+    await until(() => events.filter((event) => event === "fenced").length >= 2, "a second stop at the next check");
+    expect(l.lines.filter((line) => line.level === "error")).toHaveLength(1);
+
+    down.value = false;
+    await r.beat();
+    expect(r.isFenced()).toBe(false);
+    expect(events.at(-1)).toBe("recovered");
+    const fencedCount = events.filter((event) => event === "fenced").length;
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(events.filter((event) => event === "fenced").length).toBe(fencedCount);
+    await r.stop();
+  });
+
+  it("fences when the heartbeat hangs rather than fails, and never without the option", async () => {
+    let hang = false;
+    const hung: Array<() => void> = [];
+    const hanging = new Proxy(store, {
+      get(target, prop, receiver) {
+        const value = Reflect.get(target, prop, receiver);
+        if (prop === "heartbeatClusterInstance") {
+          return async (...args: unknown[]) => {
+            if (hang) await new Promise<void>((resolve) => hung.push(resolve));
+            return await (value as (...a: unknown[]) => Promise<void>).apply(target, args);
+          };
+        }
+        return typeof value === "function" ? (value as (...a: unknown[]) => unknown).bind(target) : value;
+      }
+    });
+    let fenced = 0;
+    const r = registry("hung", { store: hanging, heartbeatMs: 50, instanceTimeoutMs: 200, selfFence: { onFenced: () => (fenced += 1) } });
+    const plain = registry("plain", { store: hanging, heartbeatMs: 50, instanceTimeoutMs: 200 });
+    await r.start();
+    await plain.start();
+    hang = true;
+    await until(() => fenced > 0, "the fence");
+    expect(r.isFenced()).toBe(true);
+    expect(plain.isFenced()).toBe(false);
+    hang = false;
+    for (const resolve of hung.splice(0)) resolve();
+    await r.stop();
+    await plain.stop();
+  });
+});
+
+describe("InstanceRegistry several-leaders rule across a restart", () => {
+  it("a predecessor's row that never beats again does not raise the warning; a live second instance does", async () => {
+    // The previous process (HA off, another id) died without removing its row; it is still within the timeout.
+    await store.heartbeatClusterInstance({
+      id: "previous", workerMode: "all", haEnabled: false, isLeader: true, pools: [], concurrency: null, running: 0, appVersion: null,
+      schemaVersion: 7, capabilities: [], hostname: "same-host", busConnected: false, startedAt: new Date(Date.now() - 60_000).toISOString()
+    });
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const l = logs();
+    const me = registry("me", { logger: l.logger });
+    await me.start();
+    await me.beat();
+    await me.beat();
+    expect(me.liveInstances()).toBe(2);
+    expect(me.warnings()).toEqual([]);
+    expect(l.lines.filter((line) => line.level === "error")).toEqual([]);
+
+    // It was in fact alive: it beats again, and the warning appears at the next heartbeat.
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    await store.heartbeatClusterInstance({
+      id: "previous", workerMode: "all", haEnabled: false, isLeader: true, pools: [], concurrency: null, running: 0, appVersion: null,
+      schemaVersion: 7, capabilities: [], hostname: "same-host", busConnected: false, startedAt: new Date(Date.now() - 60_000).toISOString()
+    });
+    await me.beat();
+    expect(me.warnings()).toHaveLength(1);
+    expect(me.warnings()[0]!.instances).toEqual(["me", "previous"]);
+    await me.stop();
   });
 });
 

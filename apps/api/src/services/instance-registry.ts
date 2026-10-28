@@ -22,6 +22,18 @@ export const CLUSTER_INSTANCE_PRUNE_AFTER_MS = 60 * 60 * 1000;
 
 export const DEAD_EXECUTOR_RUN_ERROR = "interrupted: the instance running this run stopped responding";
 
+/**
+ * The abort reason of a run this instance stopped because it fenced itself: its heartbeat has not been recorded for
+ * so long that the leader may already have failed the run (see InstanceRegistryOptions.selfFence). The run ends as an
+ * error with DEAD_EXECUTOR_RUN_ERROR, the same record the leader writes, whichever of the two lands.
+ */
+export class SelfFencedAbortError extends Error {
+  constructor() {
+    super(DEAD_EXECUTOR_RUN_ERROR);
+    this.name = "SelfFencedAbortError";
+  }
+}
+
 export interface ClusterWarning {
   code: "multiple_leaders";
   message: string;
@@ -57,6 +69,15 @@ export interface InstanceRegistryOptions {
   reconcileDeadExecutors?: boolean;
   /** The leader's runs it failed for a dead instance, for the log and audit. */
   onDeadExecutorRuns?: (runs: Array<{ id: string; workflowId: string; instanceId: string }>) => void;
+  /**
+   * Cluster mode: self-fencing, the instance-side half of the dead-executor reconcile. While this instance's last
+   * recorded heartbeat is older than `instanceTimeoutMs - marginMs` (default margin: one heartbeat), the leader may
+   * count it as stopped and fail its runs at any moment, so it stops them itself: `onFenced` is called at once and then
+   * at every check (about twice per margin) until a heartbeat is recorded again, which calls `onRecovered`. The age is
+   * measured on the process's monotonic clock from when the last successful heartbeat was sent, which is never later
+   * than the database time it recorded, so the instance always fences before the leader can judge it dead.
+   */
+  selfFence?: { onFenced: () => void; onRecovered?: () => void; marginMs?: number };
   /** Called after every heartbeat with the current warnings (the metric and health output read them). */
   onWarnings?: (warnings: ClusterWarning[], live: number) => void;
   logger: { warn: (message: string, fields?: Record<string, unknown>) => void; error: (message: string, fields?: Record<string, unknown>) => void; info: (message: string, fields?: Record<string, unknown>) => void };
@@ -100,6 +121,12 @@ export class InstanceRegistry {
   private readonly heartbeatMs: number;
   readonly instanceTimeoutMs: number;
   private readonly hostname = os.hostname();
+  private fenceTimer: NodeJS.Timeout | null = null;
+  /** Monotonic time (performance.now) when the last heartbeat that was recorded was sent. */
+  private lastRecordedBeatSentAt = performance.now();
+  private fenced = false;
+  /** This instance's first recorded heartbeat_at (database clock, ms), for the several-leaders rule. */
+  private firstRecordedBeatAt: number | null = null;
 
   constructor(private readonly options: InstanceRegistryOptions) {
     this.startedAt = new Date((options.now ?? Date.now)()).toISOString();
@@ -127,11 +154,47 @@ export class InstanceRegistry {
         this.options.logger.warn("Could not reconcile the runs of this instance's previous process", { error: errorText(error) });
       }
     }
+    this.lastRecordedBeatSentAt = performance.now();
     await this.beat();
     this.timer = setInterval(() => {
       void this.beat();
     }, this.heartbeatMs);
     this.timer.unref?.();
+    if (this.options.selfFence) {
+      const marginMs = this.fenceMarginMs();
+      this.fenceTimer = setInterval(() => this.checkFence(), Math.max(25, Math.min(1_000, Math.floor(marginMs / 2))));
+      this.fenceTimer.unref?.();
+      this.checkFence();
+    }
+  }
+
+  /** True while this instance has fenced itself (cluster mode; see InstanceRegistryOptions.selfFence). */
+  isFenced(): boolean {
+    return this.fenced;
+  }
+
+  private fenceMarginMs(): number {
+    return Math.max(0, Math.min(this.options.selfFence?.marginMs ?? this.heartbeatMs, this.instanceTimeoutMs));
+  }
+
+  /** Fences this instance when its last recorded heartbeat is too old (see InstanceRegistryOptions.selfFence). */
+  checkFence(): void {
+    const selfFence = this.options.selfFence;
+    if (!selfFence || this.stopped) return;
+    const ageMs = performance.now() - this.lastRecordedBeatSentAt;
+    if (ageMs <= this.instanceTimeoutMs - this.fenceMarginMs()) return;
+    if (!this.fenced) {
+      this.fenced = true;
+      this.options.logger.error(
+        "No cluster heartbeat recorded for too long: this instance fenced itself and stops its runs, since the leader may already count it as stopped",
+        { lastHeartbeatAgeMs: Math.round(ageMs), instanceTimeoutMs: this.instanceTimeoutMs }
+      );
+    }
+    try {
+      selfFence.onFenced();
+    } catch (error) {
+      this.options.logger.warn("Self-fencing failed", { error: errorText(error) });
+    }
   }
 
   /** Stops beating and removes this instance's row, so the others stop counting it at once. */
@@ -140,6 +203,8 @@ export class InstanceRegistry {
     this.stopped = true;
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
+    if (this.fenceTimer) clearInterval(this.fenceTimer);
+    this.fenceTimer = null;
     await this.beating?.catch(() => undefined);
     await this.options.store.deleteClusterInstance(this.options.instanceId).catch((error: unknown) => {
       this.options.logger.warn("Could not remove this instance from the cluster registry", { error: errorText(error) });
@@ -173,6 +238,7 @@ export class InstanceRegistry {
 
   private async beatOnce(): Promise<void> {
     const runtime = this.options.runtime();
+    const sentAt = performance.now();
     try {
       await this.options.store.heartbeatClusterInstance({
         id: this.options.instanceId,
@@ -189,15 +255,46 @@ export class InstanceRegistry {
         busConnected: runtime.busConnected,
         startedAt: this.startedAt
       });
+      this.recorded(sentAt);
       const live = (await this.list()).filter((instance) => instance.live);
       this.liveCount = live.length;
-      this.updateWarnings(clusterWarnings(live));
+      this.updateWarnings(clusterWarnings(this.runningBesideThis(live)));
     } catch (error) {
       this.options.logger.warn("Cluster registry heartbeat failed", { error: errorText(error) });
       return;
     }
     if (!runtime.isLeader) return;
     await this.leaderWork();
+  }
+
+  /**
+   * The live instances that are running at the same time as this one: this one, and every other whose heartbeat was
+   * recorded at or after this instance's first one (database clock). A row left by a process that died just before
+   * this one started (a restart without a clean shutdown, under a new id) stays live until the timeout but never beats
+   * again, so it never counts; a real second instance counts from its next heartbeat. Without it, every unclean
+   * restart of a single instance would report several leaders for up to the instance timeout.
+   */
+  private runningBesideThis(live: ClusterInstanceRecord[]): ClusterInstanceRecord[] {
+    if (this.firstRecordedBeatAt === null) {
+      const own = live.find((instance) => instance.id === this.options.instanceId);
+      const at = own ? Date.parse(own.heartbeatAt) : Number.NaN;
+      if (Number.isFinite(at)) this.firstRecordedBeatAt = at;
+    }
+    const since = this.firstRecordedBeatAt;
+    return live.filter((instance) => instance.id === this.options.instanceId || (since !== null && Date.parse(instance.heartbeatAt) >= since));
+  }
+
+  /** A heartbeat sent at `sentAt` was recorded: the fence (if any) lifts. */
+  private recorded(sentAt: number): void {
+    this.lastRecordedBeatSentAt = Math.max(this.lastRecordedBeatSentAt, sentAt);
+    if (!this.fenced || this.stopped) return;
+    this.fenced = false;
+    this.options.logger.info("Cluster heartbeat recorded again: this instance is no longer fenced", {});
+    try {
+      this.options.selfFence?.onRecovered?.();
+    } catch (error) {
+      this.options.logger.warn("Self-fence recovery failed", { error: errorText(error) });
+    }
   }
 
   private async leaderWork(): Promise<void> {
