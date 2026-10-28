@@ -1302,6 +1302,9 @@ export class PostgresStore implements Store {
   async reconcileDeadExecutorRuns(...args: Parameters<Store["reconcileDeadExecutorRuns"]>): ReturnType<Store["reconcileDeadExecutorRuns"]> {
     return cluster.reconcileDeadExecutorRuns(this.ctx, ...args);
   }
+  async failRunsOwnedBy(...args: Parameters<Store["failRunsOwnedBy"]>): ReturnType<Store["failRunsOwnedBy"]> {
+    return cluster.failRunsOwnedBy(this.ctx, ...args);
+  }
   async listCanceledExecutionIds(...args: Parameters<Store["listCanceledExecutionIds"]>): ReturnType<Store["listCanceledExecutionIds"]> {
     return cluster.listCanceledExecutionIds(this.ctx, ...args);
   }

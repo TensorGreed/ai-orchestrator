@@ -128,6 +128,23 @@ describeStoreContract("store contract: cluster registry", (ctx) => {
     expect(await store.reconcileDeadExecutorRuns({ error: "x", deadAfterMs: 20, selfId: "self" })).toEqual([]);
   });
 
+  it("fails the running runs recorded under one instance id (its previous process) and forgets them", async () => {
+    const store = ctx.store();
+    for (const id of ["mine-1", "mine-done", "mine-queued", "theirs"]) await runningRun(store, id);
+    await store.saveExecutionHistory({ id: "mine-done", workflowId: "wf", status: "success", startedAt: new Date().toISOString(), completedAt: new Date().toISOString() });
+    await store.enqueueExecution({ id: "mine-queued", workflowId: "wf", payload: {}, scheduledAt: new Date().toISOString() });
+    for (const id of ["mine-1", "mine-done", "mine-queued"]) await store.claimClusterRunOwner({ executionId: id, instanceId: "fixed-id" });
+    await store.claimClusterRunOwner({ executionId: "theirs", instanceId: "other" });
+    const failed = await store.failRunsOwnedBy({ instanceId: "fixed-id", error: "restarted" });
+    expect(failed).toEqual([{ id: "mine-1", workflowId: "wf", instanceId: "fixed-id" }]);
+    expect(await store.getExecutionHistory("mine-1")).toMatchObject({ status: "error", error: "restarted" });
+    expect((await store.getExecutionHistory("mine-queued"))!.status).toBe("running");
+    expect((await store.getExecutionHistory("theirs"))!.status).toBe("running");
+    expect(await store.failRunsOwnedBy({ instanceId: "fixed-id", error: "again" })).toEqual([]);
+    // The other instance's owner row is untouched: once it is old and unregistered it is reconciled as its own.
+    await until(async () => (await store.reconcileDeadExecutorRuns({ error: "x", deadAfterMs: 20, selfId: "fixed-id" })).some((run) => run.id === "theirs"), "the other's run");
+  });
+
   it("lists which of the given runs were canceled", async () => {
     const store = ctx.store();
     await runningRun(store, "a");

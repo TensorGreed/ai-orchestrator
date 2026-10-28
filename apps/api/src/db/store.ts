@@ -1797,6 +1797,11 @@ export interface Store {
    * and forgets those owners. Returns the runs it failed.
    */
   reconcileDeadExecutorRuns(input: { error: string; deadAfterMs: number; selfId: string }): Promise<Array<{ id: string; workflowId: string; instanceId: string }>>;
+  /**
+   * Fails every `running` run owned by `instanceId` (skipping runs the queue still owns) and forgets its owners. Called
+   * once when an instance with a fixed HA_INSTANCE_ID starts: rows under its id belong to the process it replaces.
+   */
+  failRunsOwnedBy(input: { instanceId: string; error: string }): Promise<Array<{ id: string; workflowId: string; instanceId: string }>>;
   /** The ids among `executionIds` whose history row is `canceled` (the cancel reconciliation for a lost message). */
   listCanceledExecutionIds(executionIds: readonly string[]): Promise<string[]>;
 

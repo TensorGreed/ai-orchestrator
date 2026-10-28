@@ -9370,6 +9370,35 @@ export class SqliteStore implements Store {
     });
   }
 
+  async failRunsOwnedBy(input: { instanceId: string; error: string }): Promise<Array<{ id: string; workflowId: string; instanceId: string }>> {
+    return this.transaction(() => {
+      const owned = this.queryAll<{ execution_id: unknown }>(`SELECT execution_id FROM cluster_run_owners WHERE instance_id = ? ORDER BY execution_id`, [input.instanceId]);
+      const completedAt = new Date().toISOString();
+      const failed: Array<{ id: string; workflowId: string; instanceId: string }> = [];
+      for (const owner of owned) {
+        const executionId = toString(owner.execution_id);
+        const run = this.queryOne<{ workflow_id: unknown; started_at: unknown }>(
+          `SELECT workflow_id, started_at FROM execution_history
+            WHERE id = ? AND status = 'running'
+              AND id NOT IN (SELECT id FROM execution_queue WHERE status IN ('pending', 'running'))`,
+          [executionId]
+        );
+        if (run) {
+          this.exec(`UPDATE execution_history SET status = 'error', completed_at = ?, duration_ms = ?, error = ? WHERE id = ?`, [
+            completedAt,
+            toDurationMsForStore(toString(run.started_at), completedAt),
+            input.error,
+            executionId
+          ]);
+          failed.push({ id: executionId, workflowId: toString(run.workflow_id), instanceId: input.instanceId });
+        }
+      }
+      this.exec(`DELETE FROM cluster_run_owners WHERE instance_id = ?`, [input.instanceId]);
+      if (owned.length > 0) this.persist();
+      return failed;
+    });
+  }
+
   async listCanceledExecutionIds(executionIds: readonly string[]): Promise<string[]> {
     if (executionIds.length === 0) return [];
     const placeholders = executionIds.map(() => "?").join(", ");

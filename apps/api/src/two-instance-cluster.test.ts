@@ -315,6 +315,20 @@ run("cluster signalling across API instances on one Postgres database", () => {
     expect((await a!.store.getExecutionHistory("self-run"))!.status).toBe("running");
   }, 60_000);
 
+  it("an instance with a fixed id fails, at start, the runs its previous process left under that id", async () => {
+    primary = await createTestStore({ kind: "postgres" });
+    // The previous process of instance-0 died mid-run, and instance-0 comes back before its heartbeat aged out.
+    await primary.store.saveExecutionHistory({ id: "left-behind", workflowId: "wf", status: "running", startedAt: new Date().toISOString() });
+    await primary.store.claimClusterRunOwner({ executionId: "left-behind", instanceId: "instance-0" });
+    await primary.store.heartbeatClusterInstance({
+      id: "instance-0", workerMode: "all", haEnabled: true, isLeader: true, pools: [], concurrency: null, running: 1, appVersion: null,
+      schemaVersion: 44, capabilities: ["bus-v1"], hostname: "old", busConnected: true, startedAt: new Date().toISOString()
+    });
+    const [a] = await start(1);
+    expect(await a!.store.getExecutionHistory("left-behind")).toMatchObject({ status: "error", error: DEAD_EXECUTOR_RUN_ERROR });
+    expect(await sql(`SELECT 1 FROM cluster_run_owners`)).toEqual([]);
+  }, 60_000);
+
   it("an inline run records its owner while it runs and forgets it when it ends", async () => {
     const [a] = await start(1);
     const { executionId, response } = await startLongRun(a!, "wf-owner");

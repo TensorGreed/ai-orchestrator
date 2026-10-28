@@ -111,9 +111,22 @@ export class InstanceRegistry {
     return this.options.instanceId;
   }
 
-  /** Writes the first heartbeat (awaited, so the instance is listed before it serves), then one every heartbeatMs. */
+  /**
+   * Writes the first heartbeat (awaited, so the instance is listed before it serves), then one every heartbeatMs. In
+   * cluster mode it first fails the runs still recorded under this instance's id: no run has started in this process
+   * yet, so they belong to an earlier process with the same HA_INSTANCE_ID that stopped without finishing them (one
+   * that restarts within the timeout would otherwise never count as dead, since its id keeps beating).
+   */
   async start(): Promise<void> {
     if (this.timer || this.stopped) return;
+    if (this.options.reconcileDeadExecutors) {
+      try {
+        const failed = await this.options.store.failRunsOwnedBy({ instanceId: this.options.instanceId, error: DEAD_EXECUTOR_RUN_ERROR });
+        if (failed.length > 0) this.options.onDeadExecutorRuns?.(failed);
+      } catch (error) {
+        this.options.logger.warn("Could not reconcile the runs of this instance's previous process", { error: errorText(error) });
+      }
+    }
     await this.beat();
     this.timer = setInterval(() => {
       void this.beat();

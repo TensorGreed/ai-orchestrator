@@ -146,6 +146,31 @@ export async function reconcileDeadExecutorRuns(
   });
 }
 
+export async function failRunsOwnedBy(
+  ctx: PgContext,
+  input: { instanceId: string; error: string }
+): Promise<Array<{ id: string; workflowId: string; instanceId: string }>> {
+  return await ctx.withTransaction(async (client) => {
+    const owned = await client.query<{ execution_id: string }>(
+      `SELECT execution_id FROM cluster_run_owners WHERE instance_id = $1 ORDER BY execution_id FOR UPDATE SKIP LOCKED`,
+      [input.instanceId]
+    );
+    if (owned.rows.length === 0) return [];
+    const ids = owned.rows.map((row) => row.execution_id);
+    const failed = await client.query<{ id: string; workflow_id: string }>(
+      `UPDATE execution_history
+          SET status = 'error', completed_at = now(), error = $2,
+              duration_ms = GREATEST(0, (EXTRACT(EPOCH FROM (now() - started_at::timestamptz)) * 1000)::bigint)
+        WHERE id = ANY($1::text[]) AND status = 'running'
+          AND id NOT IN (SELECT id FROM execution_queue WHERE status IN ('pending', 'running'))
+        RETURNING id, workflow_id`,
+      [ids, input.error]
+    );
+    await client.query(`DELETE FROM cluster_run_owners WHERE execution_id = ANY($1::text[]) AND instance_id = $2`, [ids, input.instanceId]);
+    return failed.rows.map((row) => ({ id: row.id, workflowId: row.workflow_id, instanceId: input.instanceId }));
+  });
+}
+
 export async function listCanceledExecutionIds(ctx: PgContext, executionIds: readonly string[]): Promise<string[]> {
   if (executionIds.length === 0) return [];
   const rows = await ctx.query<{ id: string }>(

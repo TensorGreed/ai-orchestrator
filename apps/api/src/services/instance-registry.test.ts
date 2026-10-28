@@ -125,6 +125,21 @@ describe("InstanceRegistry", () => {
     await leader.stop();
   });
 
+  it("in cluster mode, fails at start the runs an earlier process left under the same id; outside it, leaves them", async () => {
+    await store.saveExecutionHistory({ id: "old", workflowId: "wf", status: "running", startedAt: new Date().toISOString() });
+    await store.claimClusterRunOwner({ executionId: "old", instanceId: "fixed" });
+    const plain = registry("fixed");
+    await plain.start();
+    expect((await store.getExecutionHistory("old"))!.status).toBe("running");
+    await plain.stop();
+    const reported: string[] = [];
+    const cluster = registry("fixed", { reconcileDeadExecutors: true, onDeadExecutorRuns: (runs) => reported.push(...runs.map((run) => run.id)) });
+    await cluster.start();
+    expect(reported).toEqual(["old"]);
+    expect(await store.getExecutionHistory("old")).toMatchObject({ status: "error", error: DEAD_EXECUTOR_RUN_ERROR });
+    await cluster.stop();
+  });
+
   it("logs a failed heartbeat and keeps going", async () => {
     const l = logs();
     const broken = new Proxy(store, {
