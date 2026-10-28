@@ -21,6 +21,7 @@ import { testSql, type TestSql } from "./test-support/test-sql.js";
 import { MIGRATIONS } from "./db/migrations.js";
 import { AuthService } from "./services/auth-service.js";
 import { QueueService } from "./services/queue-service.js";
+import { AppLifecycle } from "./services/app-lifecycle.js";
 import { ApprovalResumeRunner } from "./services/approval-service.js";
 import { approvalEditsDigest } from "./services/approval-digest.js";
 import { escapeTeams } from "./services/notification-service.js";
@@ -41,7 +42,7 @@ interface TestContext {
 const contexts: TestContext[] = [];
 const tempDirs: string[] = [];
 
-async function createTestContext(options: { overrides?: Record<string, string>; tempDir?: string; queue?: boolean } = {}): Promise<TestContext> {
+async function createTestContext(options: { overrides?: Record<string, string>; tempDir?: string; queue?: boolean; lifecycle?: AppLifecycle } = {}): Promise<TestContext> {
   const tempDir = options.tempDir ?? fs.mkdtempSync(path.join(os.tmpdir(), "ao-approvals-"));
   if (!tempDirs.includes(tempDir)) tempDirs.push(tempDir);
   const dbPath = path.join(tempDir, "orchestrator.db");
@@ -60,7 +61,7 @@ async function createTestContext(options: { overrides?: Record<string, string>; 
   const secretService = new SecretService(store, config.SECRET_MASTER_KEY_BASE64);
   const authService = new AuthService(store, config.SESSION_TTL_HOURS);
   const queue = options.queue ? new QueueService(store, { pollIntervalMs: 20 }) : undefined;
-  const app = await createApp(config, store, secretService, authService, undefined, queue);
+  const app = await createApp(config, store, secretService, authService, undefined, queue, undefined, options.lifecycle ? { lifecycle: options.lifecycle } : {});
   await app.ready();
   const context = { app, store, authService, config, tempDir, dbPath, secretService, ...(queue ? { queue } : {}) };
   contexts.push(context);
@@ -740,6 +741,70 @@ describe("a recorded decision is never lost", () => {
     expect(runner.isActive("exec-1")).toBe(false);
   });
 
+  it("a shutdown drain during a queued resume (one instance, default settings) gives it back resumable: never canceled, paused state kept", async () => {
+    // The node after the gate calls a server that holds its answer, so the resume is still running when the drain
+    // stops it.
+    let hits = 0;
+    let holding = true;
+    const held: Array<() => void> = [];
+    const server = http.createServer((_request, response) => {
+      hits += 1;
+      const answer = () => {
+        response.setHeader("content-type", "application/json");
+        response.end("{\"ok\":true}");
+      };
+      if (holding) held.push(answer);
+      else answer();
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const port = (server.address() as { port: number }).port;
+      const lifecycle = new AppLifecycle();
+      const context = await createTestContext({ queue: true, lifecycle });
+      const requester = await login(context, "builder", "requester");
+      const lead = await login(context, "builder", "lead");
+      const workflow = gateWorkflow("wf-drain-resume", { ...GATE, editableFields: [] });
+      workflow.nodes.push(node("call", "http_request", { method: "GET", urlTemplate: `http://127.0.0.1:${port}/` }));
+      workflow.edges = workflow.edges.map((edge) => (edge.id === "e3" ? { ...edge, target: "call" } : edge));
+      workflow.edges.push({ id: "e6", source: "call", target: "sent" });
+      const run = await startRun(context, workflow, requester.cookie);
+      const [item] = await inbox(context, lead.cookie);
+      expect((await call(context, "POST", `/api/approvals/${run.executionId}/approve`, lead.cookie, { requestId: item!.requestId })).statusCode).toBe(202);
+      await waitFor(() => hits > 0);
+
+      await lifecycle.drain(50);
+      expect(context.queue!.inFlightCount()).toBe(0);
+      // Nothing was destroyed: the run still reads as the pause, its decision stands, the job waits for the next worker.
+      expect((await context.store.getExecutionHistory(run.executionId!))?.status).toBe("waiting_approval");
+      expect((await context.store.getWorkflowExecutionState(run.executionId!))?.status).toBe("resuming");
+      expect(await context.store.getApprovalRequest(item!.requestId)).toMatchObject({ status: "approved" });
+      const [job] = await testSql(context.store).all<{ status: string; attempts: unknown }>(
+        "SELECT status, attempts FROM execution_queue WHERE id LIKE ?",
+        `${run.executionId}:${item!.requestId}:%`
+      );
+      expect([job!.status, Number(job!.attempts)]).toEqual(["pending", 0]);
+      expect(await context.store.listDlqItems()).toEqual([]);
+
+      // The next process on the same database resumes it from the recorded decision, once.
+      const { tempDir } = context;
+      await closeContext(context);
+      holding = false;
+      while (held.length) held.shift()!();
+      const restarted = await createTestContext({ queue: true, tempDir });
+      const history = await waitFor(async () => {
+        const entry = await restarted.store.getExecutionHistory(run.executionId!);
+        return entry && entry.status === "success" ? entry : null;
+      });
+      expect((history.nodeResults as Array<{ nodeId: string; status: string }>).find((entry) => entry.nodeId === "sent")?.status).toBe("success");
+      expect(await restarted.store.getWorkflowExecutionState(run.executionId!)).toBeNull();
+      expect(await restarted.store.listApprovalRequestsForExecution(run.executionId!)).toHaveLength(1);
+    } finally {
+      holding = false;
+      while (held.length) held.shift()!();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
   it("hands the request back when the queue cannot take the resume, and the decision can be taken again", async () => {
     const context = await createTestContext({ queue: true });
     const requester = await login(context, "builder", "requester");
@@ -784,10 +849,13 @@ describe("a recorded decision is never lost", () => {
     const sent = (history.nodeResults as Array<{ nodeId: string; output?: Record<string, any> }>).find((entry) => entry.nodeId === "sent");
     expect(JSON.stringify(sent?.output)).toContain("second words");
     expect(JSON.stringify(sent?.output)).not.toContain("first words");
-    // One queue item per decision, neither retried by the queue itself.
-    const rows = await testSql(context.store).all<{ id: string; max_attempts: unknown }>("SELECT id, max_attempts FROM execution_queue WHERE id LIKE ?", `${run.executionId}:${item!.requestId}:%`);
-    expect(rows).toHaveLength(2);
-    expect(rows.every((row) => Number(row.max_attempts) === 1)).toBe(true);
+    // One queue item per decision; the failed one is not retried by the queue itself (its attempts are for a lost
+    // worker): it went to the dead-letter queue after its one try.
+    const rows = await testSql(context.store).all<{ id: string; status: string; attempts: unknown }>(
+      "SELECT id, status, attempts FROM execution_queue WHERE id LIKE ? ORDER BY created_at",
+      `${run.executionId}:${item!.requestId}:%`
+    );
+    expect(rows.map((row) => [row.status, Number(row.attempts)])).toEqual([["dead", 1], ["completed", 0]]);
   });
 
   it("hands the request back with its expiry when the resume throws", async () => {

@@ -53,7 +53,7 @@ import type { AuditEventInput } from "./audit-service.js";
 import type { SafeUser } from "./auth-service.js";
 import type { RunAccessResult, RunPermission } from "../run-access.js";
 import type { NotificationEvent } from "./notification-service.js";
-import type { Store } from "../db/store.js";
+import type { QueueClaimFence, Store } from "../db/store.js";
 import { someAsync } from "../async-array.js";
 import { isOnePendingApprovalViolation } from "../db/store-errors.js";
 
@@ -277,7 +277,11 @@ export class ApprovalService {
    * person who started the run (kept from the run's first request, since a
    * resumed run is triggered by its approver).
    */
-  async recordPause(input: { executionId: string; workflowId: string; workflowName?: string; projectId: string; state: WorkflowExecutionState; message: string; timeoutMinutes: number }): Promise<ApprovalRequestRecord> {
+  /**
+   * With `fence` (Phase 13.1, a queued run in cluster mode) the request is inserted only while that claim holds its
+   * queue item; otherwise QueueClaimLostError is thrown and nothing is audited or sent.
+   */
+  async recordPause(input: { executionId: string; workflowId: string; workflowName?: string; projectId: string; state: WorkflowExecutionState; message: string; timeoutMinutes: number; fence?: QueueClaimFence }): Promise<ApprovalRequestRecord> {
     const info = resolvePendingApproval(input.state);
     const earlier = await this.store.listApprovalRequestsForExecution(input.executionId);
     await this.store.cancelPendingApprovalRequests({ executionId: input.executionId }, "Superseded by a newer request of the same run");
@@ -305,7 +309,7 @@ export class ApprovalService {
       askingWorkflowId: info.workflowId || null,
       editsSalt: newApprovalEditsSalt(),
       createdAt: createdAt.toISOString()
-    });
+    }, input.fence ? { fence: input.fence } : {});
     let record: ApprovalRequestRecord;
     try {
       record = await insert();

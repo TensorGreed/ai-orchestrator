@@ -17,7 +17,7 @@ import { AppLifecycle } from "./services/app-lifecycle.js";
 import { AuthService } from "./services/auth-service.js";
 import { QueueService } from "./services/queue-service.js";
 import { SecretService } from "./services/secret-service.js";
-import { openTestStore } from "./test-support/test-store.js";
+import { openTestStore, testStoreKind } from "./test-support/test-store.js";
 
 const dirs: string[] = [];
 const apps: FastifyInstance[] = [];
@@ -145,11 +145,17 @@ describe("readiness and the shutdown drain", () => {
 });
 
 describe("enqueue", () => {
-  it("an api replica (no consumer) still accepts /enqueue and serves the queue routes", async () => {
+  it("an api replica (no consumer) accepts /enqueue on Postgres; on SQLite, where nothing else could run it, the routes stay off", async () => {
     const booted = await boot({ WORKER_MODE: "api" }, { queue: false });
     const cookie = await booted.login("builder");
     await createWorkflow(booted, cookie, workflow("wf-api"));
     const queued = await booted.app.inject({ method: "POST", url: "/api/workflows/wf-api/enqueue", headers: { cookie }, payload: {} });
+    if (testStoreKind() === "sqlite") {
+      expect(queued.statusCode).toBe(404);
+      expect((await booted.app.inject({ method: "GET", url: "/api/queue/depth", headers: { cookie } })).statusCode).toBe(404);
+      expect(await booted.store.getQueueDepth()).toEqual({ pending: 0, running: 0, dlq: 0 });
+      return;
+    }
     expect(queued.statusCode).toBe(200);
     expect(queued.json()).toMatchObject({ queued: true, queueDepth: { pending: 1, running: 0, dlq: 0 } });
     expect((await booted.app.inject({ method: "GET", url: "/api/queue/depth", headers: { cookie } })).json()).toEqual({ pending: 1, running: 0, dlq: 0 });
@@ -157,7 +163,8 @@ describe("enqueue", () => {
   });
 
   it("a pool comes from the workflow's settings or, for builders, the body", async () => {
-    const booted = await boot({ WORKER_MODE: "api" }, { queue: false });
+    // A consumer that does not poll during the test, so the jobs stay pending.
+    const booted = await boot({}, { queueConfig: { pollIntervalMs: 600_000 } });
     const builder = await booted.login("builder");
     const operator = await booted.login("operator");
     await createWorkflow(booted, builder, workflow("wf-gpu", { executionPool: "gpu-local" }));
@@ -185,7 +192,7 @@ describe("enqueue", () => {
   });
 
   it("QUEUE_MAX_PENDING turns a full pool's /enqueue into 429 with Retry-After", async () => {
-    const booted = await boot({ WORKER_MODE: "api", QUEUE_MAX_PENDING: "2" }, { queue: false });
+    const booted = await boot({ QUEUE_MAX_PENDING: "2" }, { queueConfig: { pollIntervalMs: 600_000, maxPending: 2 } });
     const cookie = await booted.login("builder");
     await createWorkflow(booted, cookie, workflow("wf-full"));
     const enqueue = () => booted.app.inject({ method: "POST", url: "/api/workflows/wf-full/enqueue", headers: { cookie }, payload: {} });
