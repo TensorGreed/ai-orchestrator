@@ -984,11 +984,12 @@ export interface SsoMfaSettings {
 }
 
 /**
- * RFC 8176 `amr` values counted as MFA by default: `mfa` and `mca` say so outright; `otp`, `hwk`, `swk` and `sms` are
- * possession factors IdPs list as the second step. `pwd`, `pin`, `kba`, `face`, `fpt` and the like are one factor on
- * their own and are not counted (add them with SSO_MFA_OIDC_AMR if your IdP only sends them after a second factor).
+ * RFC 8176 `amr` values counted as MFA by default: only `mfa`, the one value that states multiple factors were used
+ * (Entra ID, Okta, Auth0 and Ping send it after a second factor). The others name single methods: `otp` or `sms` alone
+ * can be a passwordless one-time code, `hwk` / `swk` a key on its own, and `mca` multiple channels, not factors. Add
+ * them with SSO_MFA_OIDC_AMR if your IdP reports a second factor only that way.
  */
-export const SSO_MFA_DEFAULT_OIDC_AMR: readonly string[] = ["mfa", "mca", "otp", "hwk", "swk", "sms"];
+export const SSO_MFA_DEFAULT_OIDC_AMR: readonly string[] = ["mfa"];
 
 /**
  * SAML AuthnContextClassRef values counted as MFA by default: REFEDS MFA, Entra ID / AD FS `multipleauthn`, the

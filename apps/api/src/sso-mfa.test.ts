@@ -182,12 +182,16 @@ describe("SSO_MFA=off keeps SSO sign-in as it was", () => {
 describe("SSO_MFA=idp", () => {
   it("OIDC: accepts amr MFA and records the claim; refuses a password-only login without provisioning or a session", async () => {
     const context = await createContext({ SSO_MFA: "idp" });
-    context.oidc.user = { sub: "amy", email: "amy@example.com", email_verified: true, amr: ["pwd", "otp"] };
+    context.oidc.user = { sub: "amy", email: "amy@example.com", email_verified: true, amr: ["pwd", "mfa"] };
     const ok = await oidcLogin(context);
     expect(ok.finish.headers.location).toBe(`${WEB}/`);
     expect(ok.session).toBeTruthy();
     const success = (await loginAudits(context, "success"))[0]!;
-    expect(success.metadata).toMatchObject({ method: "oidc", mfa: "idp", mfaClaim: "amr", mfaValue: "otp" });
+    expect(success.metadata).toMatchObject({ method: "oidc", mfa: "idp", mfaClaim: "amr", mfaValue: "mfa" });
+
+    // A lone one-time code (a passwordless email code) is one factor: not MFA by default.
+    context.oidc.user = { sub: "otp-only", email: "otp-only@example.com", email_verified: true, amr: ["otp"] };
+    expect((await oidcLogin(context)).finish.headers.location).toBe(`${WEB}/?sso_error=sso_mfa_required`);
 
     // A TOTP-enrolled user does not get the local step in `idp` mode: the IdP must assert MFA.
     await withTotp(context, "ben@example.com");
@@ -204,7 +208,7 @@ describe("SSO_MFA=idp", () => {
     expect(await context.store.getUserByEmail("newbie@example.com")).toBeNull();
 
     const failures = await loginAudits(context, "failure");
-    expect(failures).toHaveLength(2);
+    expect(failures).toHaveLength(3);
     expect(failures.map((item) => item.metadata)).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ method: "oidc", reason: "mfa_required", ssoMfa: "idp", amr: "pwd", identityKey: oidcIdentitySubject(context.oidc.issuer, "ben") }),

@@ -52,13 +52,16 @@ describe("SSO allow-lists (shared by OIDC and SAML)", () => {
 describe("IdP-asserted MFA", () => {
   const settings = { oidcAmr: [...SSO_MFA_DEFAULT_OIDC_AMR], oidcAcr: [] as string[], samlAuthnContexts: [...SSO_MFA_DEFAULT_SAML_AUTHN_CONTEXTS] };
 
-  it("OIDC: an amr value from the list counts; one-factor values do not", () => {
+  it("OIDC: by default only amr `mfa` counts; single methods (a lone one-time code or key) do not", () => {
+    expect(SSO_MFA_DEFAULT_OIDC_AMR).toEqual(["mfa"]);
     expect(evaluateOidcMfa({ amr: ["pwd", "mfa"] }, settings)).toEqual({ claim: "amr", value: "mfa" });
-    expect(evaluateOidcMfa({ amr: ["pwd", "otp"] }, settings)).toEqual({ claim: "amr", value: "otp" });
-    expect(evaluateOidcMfa({ amr: ["hwk"] }, settings)).toEqual({ claim: "amr", value: "hwk" });
-    for (const single of [["pwd"], ["pin"], ["face"], ["fpt"], ["kba"], []]) {
+    for (const single of [["pwd"], ["otp"], ["sms"], ["hwk"], ["swk"], ["mca"], ["pin"], ["face"], ["fpt"], ["kba"], []]) {
       expect(evaluateOidcMfa({ amr: single }, settings)).toBeNull();
     }
+    // Configured method lists still work (SSO_MFA_OIDC_AMR=mfa,otp,hwk).
+    const configured = { ...settings, oidcAmr: ["mfa", "otp", "hwk"] };
+    expect(evaluateOidcMfa({ amr: ["pwd", "otp"] }, configured)).toEqual({ claim: "amr", value: "otp" });
+    expect(evaluateOidcMfa({ amr: ["hwk"] }, configured)).toEqual({ claim: "amr", value: "hwk" });
     expect(evaluateOidcMfa({}, settings)).toBeNull();
     expect(evaluateOidcMfa({ amr: ["MFA"] }, settings)).toBeNull();
   });
