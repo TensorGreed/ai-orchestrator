@@ -60,7 +60,7 @@ run instead of starting the node, and claims nothing new until a renewal answers
 within one heartbeat counts as failed.
 
 Side effects are not fenced: a stopped worker may still finish a call already in flight (an HTTP request, a model or
-tool call), and session memory, the tool cache, tool-call telemetry and notifications it writes are not checked
+tool call, or a code node, which runs to its own timeout), and session memory, the tool cache, tool-call telemetry and notifications it writes are not checked
 against the token. A node whose progress write failed for another reason (a database error) is not seen as completed
 by the reaper, so if that worker is lost too, the run may be re-run from the start.
 
@@ -109,10 +109,12 @@ stuck-job sweep, and an approval resume by approval recovery). With the drain, o
 1. turns `/ready` to `503`;
 2. stops claiming jobs and hands on leadership;
 3. gives running jobs up to `SHUTDOWN_DRAIN_MS` to finish;
-4. gives back the jobs still running, by the worker-loss rules above but without counting an attempt (a job with no
-   completed node returns to the queue, one with a completed node is marked `interrupted: worker shut down`); an
-   approval resume always returns to the queue with its paused state and decision intact, and the next worker resumes
-   it from the decision;
+4. gives back the jobs still running, by the worker-loss rules above but without counting an attempt: a job with no
+   completed node returns to the queue, and one with a completed node is marked `interrupted: worker shut down` and
+   dead-lettered. An approval resume with no node completed since the decision returns to the queue with its paused
+   state and decision intact, and the next worker resumes it from the decision. One with a completed node is marked
+   `interrupted: worker shut down` and dead-lettered too; its paused state and decision are kept, but nothing drives
+   it on automatically (retry it once you have checked its side effects);
 5. closes the server and the database (up to 5 seconds more), and exits.
 
 A second signal exits at once. Give the platform a termination grace period above `SHUTDOWN_DRAIN_MS` plus 5 seconds,
