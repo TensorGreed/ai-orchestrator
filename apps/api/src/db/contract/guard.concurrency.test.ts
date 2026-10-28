@@ -55,7 +55,7 @@ postgres("guard on two Postgres stores sharing one database", () => {
   it("two instances booting at once both seed the built-in profile without a duplicate-key failure, and update it once", async () => {
     for (let round = 0; round < 5; round += 1) {
       const { a, b } = await twoStores();
-      const boot = (store: typeof a) => new GuardService(store, new SecretService(store, key), { logger: () => {} }).ensureBuiltIns();
+      const boot = (store: typeof a) => new GuardService(store, new SecretService(store, key), { autoApply: false, logger: () => {} }).ensureBuiltIns();
       await Promise.all([boot(a), boot(b), boot(a), boot(b)]);
       const builtIn = await a.getGuardProfile("default");
       expect(builtIn).toMatchObject({ builtIn: true, latestVersion: 1 });

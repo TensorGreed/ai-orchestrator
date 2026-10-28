@@ -7,6 +7,7 @@
  * Postgres only (skipped without TEST_POSTGRES_URL).
  */
 import fs from "node:fs";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -18,7 +19,7 @@ import type { PostgresStore } from "./db/postgres-store.js";
 import { WORKER_LOST_ERROR, WORKER_LOST_INTERRUPTED_ERROR } from "./db/queue-leases.js";
 import { AppLifecycle } from "./services/app-lifecycle.js";
 import { AuthService } from "./services/auth-service.js";
-import { QueueService, type QueueJobContext, type QueuedExecutionPayload } from "./services/queue-service.js";
+import { QueueLeaseLostAbort, QueueService, type QueueJobContext, type QueuedExecutionPayload } from "./services/queue-service.js";
 import { SecretService } from "./services/secret-service.js";
 import { createTestStore, noticePostgresSkipped, openTestStoreTwin, testPostgresUrl, testStorePool, type TestStore } from "./test-support/test-store.js";
 
@@ -40,6 +41,51 @@ interface Replica {
   queue?: QueueService;
   /** Execution ids this replica's consumer ran, in order. */
   ran: string[];
+  /** The job context of each run, by execution id (the last attempt here). */
+  contexts: Map<string, QueueJobContext>;
+}
+
+/** A server the workflows' HTTP nodes call; while `holding`, it keeps each answer until released. */
+async function callServer() {
+  let holding = false;
+  /** Hold only this many more requests (then answer at once), when set. */
+  let holdBudget: number | null = null;
+  let hits = 0;
+  const held: Array<() => void> = [];
+  const server = http.createServer((_request, response) => {
+    hits += 1;
+    const answer = () => {
+      response.setHeader("content-type", "application/json");
+      response.end("{\"ok\":true}");
+    };
+    if (holding && (holdBudget === null || holdBudget > 0)) {
+      if (holdBudget !== null) holdBudget -= 1;
+      held.push(answer);
+    } else answer();
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  return {
+    /** Holds the next request only; later ones are answered at once. */
+    holdNext: () => {
+      holding = true;
+      holdBudget = 1;
+    },
+    port: (server.address() as { port: number }).port,
+    hits: () => hits,
+    hold: () => {
+      holding = true;
+    },
+    release: () => {
+      holding = false;
+      holdBudget = null;
+      while (held.length) held.shift()!();
+    },
+    close: async () => {
+      holding = false;
+      while (held.length) held.shift()!();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  };
 }
 
 async function until<T>(read: () => T | Promise<T>, what: string, timeoutMs = 20_000): Promise<NonNullable<T>> {
@@ -66,6 +112,33 @@ function quickWorkflow(id: string, settings?: Workflow["settings"]): Workflow {
     edges: [{ id: "e1", source: "input", target: "out" }],
     ...(settings ? { settings } : {})
   };
+}
+
+/**
+ * A gated run: an HTTP call (`before`) or none, the approval gate, then an HTTP call (`after`) or none and the output.
+ * Builders and admins approve.
+ */
+function gatedWorkflow(id: string, port: number, calls: { before?: boolean; after?: boolean }): Workflow {
+  // With a call before the gate, the call is the first node, so nothing has completed while it is in flight.
+  const nodes: WorkflowNode[] = calls.before
+    ? [node("before", "http_request", { method: "GET", urlTemplate: `http://127.0.0.1:${port}/before` })]
+    : [node("input", "text_input", { text: "hi" })];
+  const chain = [calls.before ? "before" : "input"];
+  nodes.push(node("gate", "approval_gate", { message: "Go on?", approverRoles: ["builder", "admin"], timeoutMinutes: 60 }));
+  chain.push("gate");
+  if (calls.after) {
+    nodes.push(node("after", "http_request", { method: "GET", urlTemplate: `http://127.0.0.1:${port}/after` }));
+    chain.push("after");
+  }
+  nodes.push(node("sent", "output", { responseTemplate: "sent" }));
+  chain.push("sent");
+  const edges = chain.slice(1).map((target, index) => ({
+    id: `e${index}`,
+    source: chain[index]!,
+    target,
+    ...(chain[index] === "gate" ? { sourceHandle: "approved" } : {})
+  }));
+  return { id, name: id, schemaVersion: "1.0.0", workflowVersion: 1, nodes, edges } as Workflow;
 }
 
 /** A run whose first node waits `delayMs` (abortable), so no node has completed while it waits. */
@@ -127,6 +200,7 @@ run("the queue across replicas on one Postgres database", () => {
       ...overrides
     });
     const ran: string[] = [];
+    const contexts = new Map<string, QueueJobContext>();
     const queue = mode === "worker" ? new QueueService(store, { pollIntervalMs: 25, concurrency: 5 }) : undefined;
     if (queue) {
       // Record each job this replica's consumer runs, before the app's handler.
@@ -134,6 +208,7 @@ run("the queue across replicas on one Postgres database", () => {
       queue.setHandler = (handler) =>
         setHandler(async (payload, context) => {
           ran.push(payload.executionId);
+          contexts.set(payload.executionId, context);
           await handler(payload, context);
         });
     }
@@ -149,14 +224,14 @@ run("the queue across replicas on one Postgres database", () => {
       { lifecycle }
     );
     await app.ready();
-    const replica: Replica = { name, app, store, lifecycle, ...(queue ? { queue } : {}), ran };
+    const replica: Replica = { name, app, store, lifecycle, ...(queue ? { queue } : {}), ran, contexts };
     replicas.push(replica);
     return replica;
   }
 
-  async function builderCookie(replica: Replica): Promise<string> {
-    const email = "builder@example.com";
-    const password = "builder-Pass-123!";
+  async function builderCookie(replica: Replica, name = "builder"): Promise<string> {
+    const email = `${name}@example.com`;
+    const password = `${name}-Pass-123!`;
     if (!(await replica.store.getUserByEmail(email))) await new AuthService(replica.store, 24).register({ email, password, role: "builder" });
     const login = await replica.app.inject({ method: "POST", url: "/api/auth/login", payload: { email, password } });
     return String([login.headers["set-cookie"]].flat()[0]).split(";")[0]!;
@@ -385,4 +460,161 @@ run("the queue across replicas on one Postgres database", () => {
     const next = await addReplica("worker-2", "worker");
     await until(() => next.ran.includes(long), "another worker to take the given-back job");
   }, 60_000);
+
+  /** Saves a gated workflow, runs it inline on `api` until it pauses, and returns the paused run's id. */
+  async function pausedRun(api: Replica, cookie: string, workflow: Workflow): Promise<string> {
+    const created = await api.app.inject({ method: "POST", url: "/api/workflows", headers: { cookie }, payload: workflow as unknown as Record<string, unknown> });
+    expect(created.statusCode, created.body).toBeLessThan(300);
+    const run = await api.app.inject({ method: "POST", url: `/api/workflows/${workflow.id}/execute`, headers: { cookie }, payload: {} });
+    const body = run.json<{ status: string; executionId: string }>();
+    expect(body.status, run.body).toBe("waiting_approval");
+    return body.executionId;
+  }
+
+  /** Approves on `replica` (one with a consumer, so the resume goes on the queue). */
+  async function approve(replica: Replica, cookie: string, executionId: string): Promise<void> {
+    const response = await replica.app.inject({ method: "POST", url: `/api/approvals/${executionId}/approve`, headers: { cookie }, payload: {} });
+    expect(response.statusCode, response.body).toBe(202);
+    expect(response.json()).toMatchObject({ queued: true });
+  }
+
+  const resumeJob = async (executionId: string) =>
+    (await sql<{ id: string; status: string; attempts: number; lost_count: number; claim_token: string | null; nodes_completed: number }>(
+      `SELECT id, status, attempts, lost_count, claim_token, nodes_completed FROM execution_queue WHERE execution_id = $1 AND id <> $1`,
+      [executionId]
+    ))[0];
+
+  it("a drain during a queued approval resume gives it back with its paused state; another worker resumes it", async () => {
+    const server = await callServer();
+    try {
+      await database();
+      const api = await addReplica("api-0", "api");
+      const w1 = await addReplica("worker-1", "worker");
+      const requester = await builderCookie(api, "requester");
+      const lead = await builderCookie(api, "lead");
+      const executionId = await pausedRun(api, requester, gatedWorkflow("wf-drain-resume", server.port, { after: true }));
+      server.hold();
+      await approve(w1, lead, executionId);
+      await until(() => server.hits() === 1, "the resume to reach the call after the gate");
+      await w1.lifecycle.drain(100);
+
+      expect(await api.store.getExecutionHistory(executionId)).toMatchObject({ status: "waiting_approval" });
+      expect((await api.store.getWorkflowExecutionState(executionId))?.status).toBe("resuming");
+      expect((await api.store.listApprovalRequestsForExecution(executionId)).map((request) => request.status)).toEqual(["approved"]);
+      expect(await resumeJob(executionId)).toMatchObject({ status: "pending", attempts: 0, claim_token: null });
+      expect(await api.store.listDlqItems()).toEqual([]);
+
+      server.release();
+      const w2 = await addReplica("worker-2", "worker");
+      await until(async () => (await api.store.getExecutionHistory(executionId))?.status === "success", "another worker to resume it", 30_000);
+      expect(w2.ran).toEqual([executionId]);
+      expect(await api.store.getWorkflowExecutionState(executionId)).toBeNull();
+      expect(await resumeJob(executionId)).toMatchObject({ status: "completed" });
+    } finally {
+      await server.close();
+    }
+  }, 90_000);
+
+  it("a worker lost during a resume before any node completed: the resume is re-queued and runs once on a survivor", async () => {
+    const server = await callServer();
+    try {
+      await database();
+      const api = await addReplica("api-0", "api");
+      // Leads (reaps) and enqueues the resume on approve, but serves another pool, so it never runs it.
+      const leader = await addReplica("leader-only", "worker", { QUEUE_POOLS: "unused" });
+      const requester = await builderCookie(api, "requester");
+      const lead = await builderCookie(api, "lead");
+      const executionId = await pausedRun(api, requester, gatedWorkflow("wf-lost-resume", server.port, { after: true }));
+      await approve(leader, lead, executionId);
+      await dyingWorker("doomed");
+      await until(async () => (await resumeJob(executionId))?.status === "pending", "the reaper to re-queue the resume", 30_000);
+      expect(await resumeJob(executionId)).toMatchObject({ attempts: 1, lost_count: 1, nodes_completed: 0 });
+      expect((await api.store.getWorkflowExecutionState(executionId))?.status).toBe("resuming");
+
+      const survivor = await addReplica("worker-1", "worker");
+      await until(async () => (await api.store.getExecutionHistory(executionId))?.status === "success", "the survivor to resume it", 30_000);
+      expect(survivor.ran).toEqual([executionId]);
+      expect(server.hits()).toBe(1);
+      expect(await api.store.listDlqItems()).toEqual([]);
+      expect(leader.ran).toEqual([]);
+    } finally {
+      await server.close();
+    }
+  }, 90_000);
+
+  it("a worker lost during a resume after a node completed: interrupted and dead-lettered, and approval recovery never drives it again", async () => {
+    const server = await callServer();
+    try {
+      await database();
+      const api = await addReplica("api-0", "api");
+      const leader = await addReplica("leader-only", "worker", { QUEUE_POOLS: "unused" });
+      const requester = await builderCookie(api, "requester");
+      const lead = await builderCookie(api, "lead");
+      const executionId = await pausedRun(api, requester, gatedWorkflow("wf-sent-resume", server.port, { after: true }));
+      await approve(leader, lead, executionId);
+      await dyingWorker("doomed", async (_payload, context, store) => {
+        // The call after the gate completed under the dead worker's claim.
+        expect(await store.recordQueueJobProgress({ queueItemId: context.queueItemId, claimToken: context.claimToken! })).toBe(true);
+      });
+      await until(async () => (await api.store.getExecutionHistory(executionId))?.status === "error", "the run to be interrupted", 30_000);
+      expect(await api.store.getExecutionHistory(executionId)).toMatchObject({ error: WORKER_LOST_INTERRUPTED_ERROR });
+      expect(await resumeJob(executionId)).toMatchObject({ status: "dead", attempts: 1, nodes_completed: 1 });
+      const dlq = await api.store.listDlqItems();
+      expect(dlq.map((item) => item.finalError)).toEqual([WORKER_LOST_INTERRUPTED_ERROR]);
+      expect(dlq[0]!.originalId.startsWith(`${executionId}:`)).toBe(true);
+      // The paused state is gone with the resume: nothing is left in `resuming` for recovery to pick up.
+      expect(await api.store.getWorkflowExecutionState(executionId)).toBeNull();
+      expect(await api.store.listResumingWorkflowExecutions()).toEqual([]);
+      const survivor = await addReplica("worker-1", "worker");
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      expect(survivor.ran).toEqual([]);
+      expect(server.hits()).toBe(0);
+      expect(leader.ran).toEqual([]);
+    } finally {
+      await server.close();
+    }
+  }, 90_000);
+
+  it("a stalled worker whose job was taken back stops at its next write: no further node runs, and its late pause asks for no approval", async () => {
+    const server = await callServer();
+    try {
+      await database();
+      const api = await addReplica("api-0", "api");
+      const leader = await addReplica("leader-only", "worker", { QUEUE_POOLS: "unused" });
+      const stalled = await addReplica("worker-1", "worker");
+      const requester = await builderCookie(api, "requester");
+      const lead = await builderCookie(api, "lead");
+      const workflow = gatedWorkflow("wf-zombie", server.port, { before: true });
+      const created = await api.app.inject({ method: "POST", url: "/api/workflows", headers: { cookie: requester }, payload: workflow as unknown as Record<string, unknown> });
+      expect(created.statusCode).toBeLessThan(300);
+      server.holdNext();
+      const executionId = await enqueue(api, requester, "wf-zombie");
+      await until(() => server.hits() === 1, "the first worker to reach the call");
+      // The worker stalls (no timers fire: no heartbeat, no self-fence) while its call is in flight.
+      stalled.queue!.stop();
+      await until(async () => (await sql<{ attempts: number }>(`SELECT attempts FROM execution_queue WHERE id = $1`, [executionId]))[0]!.attempts === 1, "the reaper to take the job back", 30_000);
+
+      // A healthy worker runs it to the gate (its call answers at once), the run is approved, resumed and finished.
+      expect(await sql(`SELECT id FROM execution_queue_dlq`)).toEqual([]);
+      const healthy = await addReplica("worker-2", "worker");
+      await until(async () => (await api.store.getExecutionHistory(executionId))?.status === "waiting_approval", "the healthy worker's pause", 30_000);
+      await approve(leader, lead, executionId);
+      await until(async () => (await api.store.getExecutionHistory(executionId))?.status === "success", "the resumed run to finish", 30_000);
+      expect(healthy.ran).toEqual([executionId, executionId]);
+      expect(await api.store.getWorkflowExecutionState(executionId)).toBeNull();
+
+      // The stalled worker's call answers only now: its progress write is refused, the run stops before the gate.
+      server.release();
+      const zombie = stalled.contexts.get(executionId)!;
+      await until(() => zombie.signal.aborted, "the stalled worker to stop its run", 30_000);
+      expect(zombie.signal.reason).toBeInstanceOf(QueueLeaseLostAbort);
+      await until(() => stalled.queue!.inFlightCount() === 0, "the stalled worker's run to end");
+      expect((await api.store.listApprovalRequestsForExecution(executionId)).map((request) => request.status)).toEqual(["approved"]);
+      expect(await api.store.getWorkflowExecutionState(executionId)).toBeNull();
+      expect(await api.store.getExecutionHistory(executionId)).toMatchObject({ status: "success" });
+      expect(server.hits()).toBe(2);
+    } finally {
+      await server.close();
+    }
+  }, 120_000);
 });
