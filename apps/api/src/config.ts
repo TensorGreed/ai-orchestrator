@@ -574,7 +574,7 @@ export function parseConfig(env: Record<string, string | undefined>): AppConfig 
   parseTrustProxy(parsed.data.TRUST_PROXY);
   // Phase 13.1 — queue settings that only work in cluster mode fail fast outside it.
   resolveQueueSettings(parsed.data, { clusterMode: isPostgresDbType(env.DB_TYPE) && parsed.data.HA_ENABLED === true });
-  checkClusterTimings(parsed.data);
+  checkClusterTimings(parsed.data, env.DB_TYPE);
 
   return parsed.data;
 }
@@ -667,16 +667,24 @@ export function resolveQueueSettings(config: QueueConfigInput, options: { cluste
     drainOnSignal: options.clusterMode || config.SHUTDOWN_DRAIN_MS !== undefined
   };
 }
+
 /**
- * Phase 13.1 — an instance counts as stopped after CLUSTER_INSTANCE_TIMEOUT_MS without a heartbeat, and in cluster mode
- * its running runs are then failed. A timeout under three heartbeats would fail a live instance's runs after one late
- * heartbeat, so it is refused at startup.
+ * Phase 13.1 — in cluster mode (Postgres with HA on) an instance counts as stopped after CLUSTER_INSTANCE_TIMEOUT_MS
+ * without a heartbeat, and its running runs are then failed. An instance stops its own runs one heartbeat before that
+ * point, so a timeout under four heartbeats would abort live runs after one late heartbeat. It is refused at startup.
  */
-function checkClusterTimings(config: { CLUSTER_HEARTBEAT_MS: number; CLUSTER_INSTANCE_TIMEOUT_MS: number }): void {
-  if (config.CLUSTER_INSTANCE_TIMEOUT_MS < 3 * config.CLUSTER_HEARTBEAT_MS) {
+export const CLUSTER_TIMEOUT_HEARTBEATS = 4;
+
+export function checkClusterTimings(
+  config: { HA_ENABLED: boolean; CLUSTER_HEARTBEAT_MS: number; CLUSTER_INSTANCE_TIMEOUT_MS: number },
+  dbType: string | undefined
+): void {
+  if (!config.HA_ENABLED || !isPostgresDbType(dbType)) return;
+  if (config.CLUSTER_INSTANCE_TIMEOUT_MS < CLUSTER_TIMEOUT_HEARTBEATS * config.CLUSTER_HEARTBEAT_MS) {
     throw new Error(
       `Invalid environment configuration: CLUSTER_INSTANCE_TIMEOUT_MS (${config.CLUSTER_INSTANCE_TIMEOUT_MS}) must be at least ` +
-        `three times CLUSTER_HEARTBEAT_MS (${config.CLUSTER_HEARTBEAT_MS}), so one late heartbeat never counts a live instance as stopped`
+        `${CLUSTER_TIMEOUT_HEARTBEATS} times CLUSTER_HEARTBEAT_MS (${config.CLUSTER_HEARTBEAT_MS}) when HA_ENABLED=true on Postgres, ` +
+        `so one late heartbeat never makes an instance stop its own runs or lets a peer count it as stopped`
     );
   }
 }

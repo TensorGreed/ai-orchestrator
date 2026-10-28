@@ -308,3 +308,20 @@ describe.skipIf(!process.env.TEST_POSTGRES_URL)("createStore against TEST_POSTGR
     expect(error.message).toMatch(/does not support SSL/i);
   }, 30_000);
 });
+
+describe("cluster timings", () => {
+  const pg = { DB_TYPE: "postgres", HA_ENABLED: "true" };
+
+  it("with HA on Postgres, the timeout must be at least four heartbeats", () => {
+    const error = errorOf(() => parseConfig({ ...pg, CLUSTER_HEARTBEAT_MS: "10000", CLUSTER_INSTANCE_TIMEOUT_MS: "30000" }));
+    expect(error.message).toMatch(/CLUSTER_INSTANCE_TIMEOUT_MS \(30000\) must be at least 4 times CLUSTER_HEARTBEAT_MS \(10000\)/);
+    expect(() => parseConfig({ ...pg, CLUSTER_HEARTBEAT_MS: "10000", CLUSTER_INSTANCE_TIMEOUT_MS: "39999" })).toThrow(/at least 4 times/);
+    expect(() => parseConfig({ ...pg, CLUSTER_HEARTBEAT_MS: "10000", CLUSTER_INSTANCE_TIMEOUT_MS: "40000" })).not.toThrow();
+  });
+
+  it("keeps the defaults valid and ignores the rule without HA or on SQLite", () => {
+    expect(() => parseConfig({ ...pg })).not.toThrow();
+    expect(() => parseConfig({ DB_TYPE: "postgres", CLUSTER_HEARTBEAT_MS: "10000", CLUSTER_INSTANCE_TIMEOUT_MS: "30000" })).not.toThrow();
+    expect(() => parseConfig({ HA_ENABLED: "true", CLUSTER_HEARTBEAT_MS: "10000", CLUSTER_INSTANCE_TIMEOUT_MS: "30000" })).not.toThrow();
+  });
+});

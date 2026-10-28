@@ -63,7 +63,7 @@ All optional.
 | Setting | Default | Meaning |
 |---|---|---|
 | `CLUSTER_HEARTBEAT_MS` | 10000 | Registry heartbeat period (Postgres, every instance). |
-| `CLUSTER_INSTANCE_TIMEOUT_MS` | 45000 | An instance without a heartbeat this long counts as stopped. Must be at least three heartbeats. |
+| `CLUSTER_INSTANCE_TIMEOUT_MS` | 45000 | An instance without a heartbeat this long counts as stopped. With HA on, it must be at least four heartbeats (startup refuses less). |
 | `CLUSTER_CANCEL_CHECK_MS` | 10000 | Cluster mode: how often an instance re-reads its running runs for a cancel it missed. `0` turns the backstop off. |
 
 ## Metrics
