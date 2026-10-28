@@ -21,4 +21,21 @@ describe("redactSensitiveUrl", () => {
     expect(redactSensitiveUrl("/api/auth/oidc/callback")).toBe("/api/auth/oidc/callback");
     expect(redactSensitiveUrl("/api/auth/oidc/callback?error=access_denied")).toBe("/api/auth/oidc/callback?error=access_denied");
   });
+
+  it("redacts when the callback path is percent-encoded, mixed case or malformed", () => {
+    const encodedLetter = redactSensitiveUrl("/api/auth/oidc/%63allback?code=abc123&state=xyz");
+    expect(encodedLetter).not.toMatch(/abc123|xyz/);
+    const encodedSlash = redactSensitiveUrl("/api/auth%2Foidc%2Fcallback?code=abc123");
+    expect(encodedSlash).not.toContain("abc123");
+    const mixedCase = redactSensitiveUrl("/API/Auth/OIDC/CallBack?code=abc123");
+    expect(mixedCase).not.toContain("abc123");
+    const mcpEncoded = redactSensitiveUrl("/api/mcp/oauth/%43allback/?state=st");
+    expect(mcpEncoded).not.toContain("=st");
+    const malformed = redactSensitiveUrl("/api/auth/oidc/callback%?code=abc123");
+    expect(malformed).not.toContain("abc123");
+  });
+
+  it("still leaves unrelated encoded paths unchanged", () => {
+    expect(redactSensitiveUrl("/api/work%66lows?code=keep")).toBe("/api/work%66lows?code=keep");
+  });
 });

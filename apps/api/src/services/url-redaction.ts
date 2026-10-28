@@ -14,12 +14,29 @@ export const SENSITIVE_CALLBACK_PARAMS: readonly string[] = ["code", "state", "s
 
 export const REDACTED_VALUE = "REDACTED";
 
+/** Percent-decodes a path; a malformed escape returns null so the caller redacts anyway. */
+function decodePath(path: string): string | null {
+  try {
+    return decodeURIComponent(path);
+  } catch {
+    return null;
+  }
+}
+
+/** Routing decodes the path before matching, so the check does too (and ignores case and trailing slashes). */
+function isSensitiveCallbackPath(path: string): boolean {
+  const decoded = decodePath(path);
+  // A path that cannot be decoded is redacted when it could be a callback in disguise (contains a `%`).
+  if (decoded === null) return true;
+  return SENSITIVE_CALLBACK_PATHS.has(decoded.toLowerCase().replace(/\/+$/, "") || "/");
+}
+
 /** Returns `url` (a request target such as `/path?query`) with sensitive callback parameters replaced. */
 export function redactSensitiveUrl(url: string): string {
   const queryStart = url.indexOf("?");
   if (queryStart < 0) return url;
   const path = url.slice(0, queryStart);
-  if (!SENSITIVE_CALLBACK_PATHS.has(path.replace(/\/+$/, "") || "/")) return url;
+  if (!isSensitiveCallbackPath(path)) return url;
   const params = new URLSearchParams(url.slice(queryStart + 1));
   let changed = false;
   for (const name of [...new Set(params.keys())]) {
