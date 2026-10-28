@@ -284,7 +284,8 @@ describe("OIDC login flow (service level)", () => {
       email: "bob@example.com",
       emailVerified: true,
       displayName: "Bob",
-      groups: ["eng", "ops"]
+      groups: ["eng", "ops"],
+      amr: []
     });
     // Confidential client: client_secret_basic, secret never in the body.
     expect(provider.tokenRequests[0]!.authorization).toMatch(/^Basic /);
