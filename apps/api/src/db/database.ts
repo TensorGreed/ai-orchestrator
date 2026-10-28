@@ -89,11 +89,11 @@ import {
   fairClaimWindow,
   payloadExecutionId,
   payloadIsResume,
-  WORKER_LOST_ERROR,
-  WORKER_LOST_INTERRUPTED_ERROR,
-  WORKER_SHUTDOWN_INTERRUPTED_ERROR,
+  WORKER_LOST_REASONS,
+  WORKER_SHUTDOWN_REASONS,
   QueueClaimLostError,
-  type LostJobOutcome
+  type LostJobOutcome,
+  type LostJobReasons
 } from "./queue-leases.js";
 
 type BindParams = unknown[];
@@ -6179,7 +6179,7 @@ export class SqliteStore implements Store {
   }
 
   /** Settles one running item by the worker-loss policy (queue-leases.ts); the caller runs it in a transaction. */
-  private settleLostQueueItem(row: ExecutionQueueRow & { nodes_completed?: unknown }, countsAttempt: boolean, reasons: { interrupted: string; exhausted: string }): LostJobOutcome {
+  private settleLostQueueItem(row: ExecutionQueueRow & { nodes_completed?: unknown }, countsAttempt: boolean, reasons: LostJobReasons): LostJobOutcome {
     const id = toString(row.id);
     const now = new Date().toISOString();
     const executionId = payloadExecutionId(row.payload_json, id);
@@ -6225,8 +6225,9 @@ export class SqliteStore implements Store {
           executionId
         ]);
       }
-      // A resume's paused state goes with it, so approval recovery never drives the run on again.
-      if (resume) this.exec(`DELETE FROM workflow_executions WHERE id = ? AND status = 'resuming'`, [executionId]);
+      // The record is final now, so approval recovery never drives the run on again. A lost worker's resume also loses
+      // its paused state; a shutdown release keeps it.
+      if (resume && !reasons.keepPausedState) this.exec(`DELETE FROM workflow_executions WHERE id = ? AND status = 'resuming'`, [executionId]);
       this.exec(
         `INSERT INTO execution_queue_dlq (id, original_id, workflow_id, workflow_name, payload_json, attempts, final_error, failed_at, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -6250,7 +6251,7 @@ export class SqliteStore implements Store {
          ORDER BY heartbeat_at, id
          LIMIT ?`,
         [expiredBefore, Math.max(1, Math.min(1_000, input.limit ?? 100))]
-      ).map((row) => this.settleLostQueueItem(row, true, { interrupted: WORKER_LOST_INTERRUPTED_ERROR, exhausted: WORKER_LOST_ERROR }))
+      ).map((row) => this.settleLostQueueItem(row, true, WORKER_LOST_REASONS))
     )();
   }
 
@@ -6262,7 +6263,7 @@ export class SqliteStore implements Store {
         [input.id, input.claimToken, input.claimToken]
       );
       if (!row) return null;
-      return this.settleLostQueueItem(row, false, { interrupted: WORKER_SHUTDOWN_INTERRUPTED_ERROR, exhausted: WORKER_SHUTDOWN_INTERRUPTED_ERROR });
+      return this.settleLostQueueItem(row, false, WORKER_SHUTDOWN_REASONS);
     })();
   }
 

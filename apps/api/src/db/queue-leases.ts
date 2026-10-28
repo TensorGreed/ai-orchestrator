@@ -5,7 +5,8 @@
  * Worker-loss policy (user decision 2): a run is re-queued automatically only if none of its nodes had completed;
  * a run with a completed node is marked `interrupted: worker lost` and dead-lettered for a person to retry, so side
  * effects such as e-mails or tool writes are never repeated silently. A lost worker always counts an attempt, so a
- * job that kills its worker every time ends in the dead-letter queue instead of looping.
+ * job that kills its worker every time ends in the dead-letter queue instead of looping. A shutdown release follows
+ * the same rules without counting an attempt.
  */
 import { QUEUE_POOL_NAME_PATTERN } from "@ai-orchestrator/shared";
 
@@ -32,6 +33,31 @@ const COMPLETED_NODE_STATUSES = new Set(["success", "error", "waiting_approval"]
 
 /** Run record statuses a final write leaves (`partial` counts only with a completed_at). */
 const FINAL_RUN_STATUSES = new Set(["success", "error", "canceled", "partial"]);
+
+/**
+ * How a settled resume's paused state is treated when the run is interrupted or dead-lettered. A lost worker removes
+ * it; a shutdown release keeps it (nothing a drain does destroys a paused run). Either way approval recovery skips
+ * the run, since its record is final (isFinalRunRecord).
+ */
+export interface LostJobReasons {
+  interrupted: string;
+  exhausted: string;
+  keepPausedState: boolean;
+}
+
+/** A lost worker: counts an attempt, removes an interrupted resume's paused state. */
+export const WORKER_LOST_REASONS: LostJobReasons = {
+  interrupted: WORKER_LOST_INTERRUPTED_ERROR,
+  exhausted: WORKER_LOST_ERROR,
+  keepPausedState: false
+};
+
+/** A shutdown release: no attempt counted, an interrupted resume keeps its paused state. */
+export const WORKER_SHUTDOWN_REASONS: LostJobReasons = {
+  interrupted: WORKER_SHUTDOWN_INTERRUPTED_ERROR,
+  exhausted: WORKER_SHUTDOWN_INTERRUPTED_ERROR,
+  keepPausedState: true
+};
 
 /** Whether a stored node-results JSON (an array of `{ nodeId, status }`) holds a node that completed. */
 export function hasCompletedNode(nodeResultsJson: unknown): boolean {
@@ -80,7 +106,7 @@ export interface LostJobInput {
 }
 
 /** A record whose final write landed: `partial` only once it has a completed_at. */
-function isFinalRecord(history: NonNullable<LostJobInput["history"]>): boolean {
+export function isFinalRunRecord(history: { status: string; completedAt?: unknown }): boolean {
   if (history.status === "partial") return history.completedAt !== null && history.completedAt !== undefined;
   return FINAL_RUN_STATUSES.has(history.status);
 }
@@ -89,16 +115,17 @@ export function decideLostJob(input: LostJobInput): LostJobDecision {
   if (input.resume) {
     // The resume is over once its run's final write landed, or once the paused state left `resuming` (it paused again
     // at a later gate, finished, or was handed back to waiting): nothing runs it again.
-    if (input.history && isFinalRecord(input.history)) return "finished";
+    if (input.history && isFinalRunRecord(input.history)) return "finished";
     if (input.resumeStateStatus !== "resuming") return "finished";
-    // A clean shutdown gives a resume back with its paused state intact; the next worker resumes it from the decision.
-    if (!input.countsAttempt) return "requeue";
-    // A lost worker: like any run, re-run only if nothing completed since the resume started.
+    // Like any run, lost or given back at shutdown: re-run only if nothing completed since the resume started.
     if ((input.resumeNodesCompleted ?? 0) > 0) return "interrupt";
+    // A clean shutdown gives a resume that did nothing back with its paused state intact; the next worker resumes it
+    // from the decision.
+    if (!input.countsAttempt) return "requeue";
     return input.attempts >= input.maxAttempts ? "dead_letter" : "requeue";
   }
   if (input.history) {
-    if (isFinalRecord(input.history) || input.history.status === "waiting_approval") return "finished";
+    if (isFinalRunRecord(input.history) || input.history.status === "waiting_approval") return "finished";
     if (input.history.status === "running" && hasCompletedNode(input.history.nodeResultsJson)) return "interrupt";
   }
   if (input.countsAttempt && input.attempts >= input.maxAttempts) return "dead_letter";

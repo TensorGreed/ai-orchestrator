@@ -19,6 +19,7 @@ import type { Store } from "./db/store.js";
 import { openTestStore } from "./test-support/test-store.js";
 import { testSql, type TestSql } from "./test-support/test-sql.js";
 import { MIGRATIONS } from "./db/migrations.js";
+import { WORKER_SHUTDOWN_INTERRUPTED_ERROR } from "./db/queue-leases.js";
 import { AuthService } from "./services/auth-service.js";
 import { QueueService } from "./services/queue-service.js";
 import { AppLifecycle } from "./services/app-lifecycle.js";
@@ -741,7 +742,7 @@ describe("a recorded decision is never lost", () => {
     expect(runner.isActive("exec-1")).toBe(false);
   });
 
-  it("a shutdown drain during a queued resume (one instance, default settings) gives it back resumable: never canceled, paused state kept", async () => {
+  it("a shutdown drain during a queued resume (one instance, drain called) with no node completed gives it back resumable: never canceled, paused state kept", async () => {
     // The node after the gate calls a server that holds its answer, so the resume is still running when the drain
     // stops it.
     let hits = 0;
@@ -799,6 +800,71 @@ describe("a recorded decision is never lost", () => {
       // The history is final before the paused state is cleared, so wait for the clear.
       await waitFor(async () => ((await restarted.store.getWorkflowExecutionState(run.executionId!)) === null ? true : null));
       expect(await restarted.store.listApprovalRequestsForExecution(run.executionId!)).toHaveLength(1);
+    } finally {
+      holding = false;
+      while (held.length) held.shift()!();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("a shutdown drain after a resume's node completed dead-letters it with its paused state kept; recovery never drives it again", async () => {
+    let hits = 0;
+    let holding = true;
+    const held: Array<() => void> = [];
+    const server = http.createServer((_request, response) => {
+      hits += 1;
+      const answer = () => {
+        response.setHeader("content-type", "application/json");
+        response.end("{\"ok\":true}");
+      };
+      if (holding) held.push(answer);
+      else answer();
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const port = (server.address() as { port: number }).port;
+      const lifecycle = new AppLifecycle();
+      const context = await createTestContext({ queue: true, lifecycle });
+      const requester = await login(context, "builder", "requester");
+      const lead = await login(context, "builder", "lead");
+      const workflow = gateWorkflow("wf-drain-interrupt", { ...GATE, editableFields: [] });
+      workflow.nodes.push(node("call", "http_request", { method: "GET", urlTemplate: `http://127.0.0.1:${port}/` }));
+      workflow.edges = workflow.edges.map((edge) => (edge.id === "e3" ? { ...edge, target: "call" } : edge));
+      workflow.edges.push({ id: "e6", source: "call", target: "sent" });
+      const run = await startRun(context, workflow, requester.cookie);
+      const [item] = await inbox(context, lead.cookie);
+      expect((await call(context, "POST", `/api/approvals/${run.executionId}/approve`, lead.cookie, { requestId: item!.requestId })).statusCode).toBe(202);
+      await waitFor(() => hits > 0);
+      // A node after the decision completed under this claim (as a leased claim in cluster mode counts it).
+      const jobPattern = `${run.executionId}:${item!.requestId}:%`;
+      await testSql(context.store).run("UPDATE execution_queue SET nodes_completed = 1 WHERE id LIKE ?", jobPattern);
+
+      await lifecycle.drain(50);
+      expect(context.queue!.inFlightCount()).toBe(0);
+      expect(await context.store.getExecutionHistory(run.executionId!)).toMatchObject({ status: "error", error: WORKER_SHUTDOWN_INTERRUPTED_ERROR });
+      // Nothing destroyed: the paused state and the decision stay; the dead-letter entry is the run's way forward.
+      expect((await context.store.getWorkflowExecutionState(run.executionId!))?.status).toBe("resuming");
+      expect(await context.store.getApprovalRequest(item!.requestId)).toMatchObject({ status: "approved" });
+      const [job] = await testSql(context.store).all<{ status: string; attempts: unknown }>("SELECT status, attempts FROM execution_queue WHERE id LIKE ?", jobPattern);
+      expect([job!.status, Number(job!.attempts)]).toEqual(["dead", 0]);
+      expect((await context.store.listDlqItems()).map((entry) => entry.finalError)).toEqual([WORKER_SHUTDOWN_INTERRUPTED_ERROR]);
+
+      // The next process recovers interrupted resumes at startup (before it is ready): this one is not driven again.
+      const { tempDir } = context;
+      await closeContext(context);
+      holding = false;
+      while (held.length) held.shift()!();
+      const restarted = await createTestContext({ queue: true, tempDir });
+      const queued = await testSql(restarted.store).all<{ id: string; status: string }>("SELECT id, status FROM execution_queue WHERE id LIKE ?", `${run.executionId}:%`);
+      expect(queued.map((row) => row.status)).toEqual(["dead"]);
+      expect(await restarted.store.getExecutionHistory(run.executionId!)).toMatchObject({ status: "error", error: WORKER_SHUTDOWN_INTERRUPTED_ERROR });
+      expect(hits).toBe(1);
+
+      // A person retries it from history once its side effects are checked.
+      const retryOwner = await login(restarted, "builder", "requester");
+      const retried = await call(restarted, "POST", `/api/executions/${run.executionId}/retry`, retryOwner.cookie, {});
+      expect(retried.statusCode).toBe(200);
+      expect(retried.json<RunResult>().status).toBe("waiting_approval");
     } finally {
       holding = false;
       while (held.length) held.shift()!();

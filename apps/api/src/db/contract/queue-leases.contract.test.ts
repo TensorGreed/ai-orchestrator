@@ -324,19 +324,37 @@ describeStoreContract("store contract: leased queue claims", (ctx) => {
     expect((await store.getWorkflowExecutionState("run-u"))?.status).toBe("waiting_approval");
   });
 
-  it("a shutdown release gives an approval resume back with its paused state intact, even after a node completed", async () => {
+  it("a shutdown release gives an approval resume with no node completed back, its paused state intact", async () => {
     const store = ctx.store();
     await decidedPause(store, "run-v");
     await store.enqueueExecution({ id: "run-v:req:1", workflowId: "wf", payload: resumePayload("run-v"), scheduledAt: past(1_000) });
     const [claim] = await store.claimQueueItems({ limit: 1, owner: "w1", pools: ["default"] });
-    await store.recordQueueJobProgress({ queueItemId: claim!.id, claimToken: claim!.claimToken });
     expect(await store.releaseQueueItem({ id: claim!.id, claimToken: claim!.claimToken })).toMatchObject({ decision: "requeue", attempts: 0 });
     expect((await store.getWorkflowExecutionState("run-v"))?.status).toBe("resuming");
     expect(await store.getExecutionHistory("run-v")).toMatchObject({ status: "waiting_approval" });
     // An unleased claim (one instance) the same way.
     const [again] = await store.dequeueNext(1);
-    expect(await store.releaseQueueItem({ id: again!.id, claimToken: null })).toMatchObject({ decision: "requeue" });
+    expect(await store.releaseQueueItem({ id: again!.id, claimToken: null })).toMatchObject({ decision: "requeue", attempts: 0 });
     expect((await store.getWorkflowExecutionState("run-v"))?.status).toBe("resuming");
+    expect(await store.listDlqItems()).toEqual([]);
+  });
+
+  it("a shutdown release interrupts an approval resume after a node completed: dead-lettered, its paused state kept", async () => {
+    const store = ctx.store();
+    await decidedPause(store, "run-w");
+    await store.enqueueExecution({ id: "run-w:req:1", workflowId: "wf", payload: resumePayload("run-w"), scheduledAt: past(1_000) });
+    const [claim] = await store.claimQueueItems({ limit: 1, owner: "w1", pools: ["default"] });
+    expect(await store.recordQueueJobProgress({ queueItemId: claim!.id, claimToken: claim!.claimToken })).toBe(true);
+    expect(await store.releaseQueueItem({ id: claim!.id, claimToken: "stale" })).toBeNull();
+    expect(await store.releaseQueueItem({ id: claim!.id, claimToken: claim!.claimToken })).toMatchObject({ decision: "interrupt", attempts: 0 });
+    // Never re-run silently: the record is final (so approval recovery skips it) and the dead-letter entry is its way
+    // forward; nothing a drain does destroys the paused run.
+    expect(await store.getExecutionHistory("run-w")).toMatchObject({ status: "error", error: WORKER_SHUTDOWN_INTERRUPTED_ERROR });
+    expect((await store.getWorkflowExecutionState("run-w"))?.status).toBe("resuming");
+    expect((await store.listDlqItems()).map((item) => [item.originalId, item.finalError, item.attempts])).toEqual([["run-w:req:1", WORKER_SHUTDOWN_INTERRUPTED_ERROR, 0]]);
+    expect(await store.getQueueDepth()).toEqual({ pending: 0, running: 0, dlq: 1 });
+    expect(await store.dequeueNext(1)).toEqual([]);
+    expect(await store.releaseQueueItem({ id: claim!.id, claimToken: claim!.claimToken })).toBeNull();
   });
 
   it("a zombie's late pause leaves no paused state and no approval request; the holder's pause lands", async () => {

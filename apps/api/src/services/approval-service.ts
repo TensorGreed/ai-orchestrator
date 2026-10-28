@@ -56,6 +56,7 @@ import type { NotificationEvent } from "./notification-service.js";
 import type { QueueClaimFence, Store } from "../db/store.js";
 import { someAsync } from "../async-array.js";
 import { isOnePendingApprovalViolation } from "../db/store-errors.js";
+import { isFinalRunRecord } from "../db/queue-leases.js";
 
 export interface ApprovalResumeJob {
   executionId: string;
@@ -703,6 +704,11 @@ export class ApprovalService {
         continue;
       }
       if (this.options.queueMode && await this.store.hasActiveQueueItem(`${executionId}:${latest.id}`)) continue;
+      // A run whose record is final is over (a resume a shutdown gave back after a node completed is dead-lettered with
+      // its paused state kept): its one way forward is a manual retry. Read after the queue check, so a release that
+      // committed in between is seen here.
+      const record = await this.store.getExecutionHistory(executionId);
+      if (record && isFinalRunRecord(record)) continue;
       recovered += 1;
       const decision: ApprovalDecisionValue = approvalDecisionOf(latest.status) ?? "timeout";
       const job: ApprovalResumeJob = {

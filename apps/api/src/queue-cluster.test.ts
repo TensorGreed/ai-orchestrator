@@ -16,7 +16,7 @@ import type { Workflow, WorkflowNode } from "@ai-orchestrator/shared";
 import { createApp } from "./app.js";
 import { parseConfig } from "./config.js";
 import type { PostgresStore } from "./db/postgres-store.js";
-import { WORKER_LOST_ERROR, WORKER_LOST_INTERRUPTED_ERROR } from "./db/queue-leases.js";
+import { WORKER_LOST_ERROR, WORKER_LOST_INTERRUPTED_ERROR, WORKER_SHUTDOWN_INTERRUPTED_ERROR } from "./db/queue-leases.js";
 import { AppLifecycle } from "./services/app-lifecycle.js";
 import { AuthService } from "./services/auth-service.js";
 import { QueueLeaseLostAbort, QueueService, type QueueJobContext, type QueuedExecutionPayload } from "./services/queue-service.js";
@@ -50,6 +50,8 @@ async function callServer() {
   let holding = false;
   /** Hold only this many more requests (then answer at once), when set. */
   let holdBudget: number | null = null;
+  /** Answer this many more requests at once before holding, when set. */
+  let answerFirst = 0;
   let hits = 0;
   const held: Array<() => void> = [];
   const server = http.createServer((_request, response) => {
@@ -58,7 +60,10 @@ async function callServer() {
       response.setHeader("content-type", "application/json");
       response.end("{\"ok\":true}");
     };
-    if (holding && (holdBudget === null || holdBudget > 0)) {
+    if (holding && answerFirst > 0) {
+      answerFirst -= 1;
+      answer();
+    } else if (holding && (holdBudget === null || holdBudget > 0)) {
       if (holdBudget !== null) holdBudget -= 1;
       held.push(answer);
     } else answer();
@@ -70,6 +75,11 @@ async function callServer() {
       holding = true;
       holdBudget = 1;
     },
+    /** Answers the next `count` requests at once, then holds every later one. */
+    holdAfter: (count: number) => {
+      holding = true;
+      answerFirst = count;
+    },
     port: (server.address() as { port: number }).port,
     hits: () => hits,
     hold: () => {
@@ -78,6 +88,7 @@ async function callServer() {
     release: () => {
       holding = false;
       holdBudget = null;
+      answerFirst = 0;
       while (held.length) held.shift()!();
     },
     close: async () => {
@@ -118,7 +129,7 @@ function quickWorkflow(id: string, settings?: Workflow["settings"]): Workflow {
  * A gated run: an HTTP call (`before`) or none, the approval gate, then an HTTP call (`after`) or none and the output.
  * Builders and admins approve.
  */
-function gatedWorkflow(id: string, port: number, calls: { before?: boolean; after?: boolean }): Workflow {
+function gatedWorkflow(id: string, port: number, calls: { before?: boolean; after?: boolean; afterTwice?: boolean }): Workflow {
   // With a call before the gate, the call is the first node, so nothing has completed while it is in flight.
   const nodes: WorkflowNode[] = calls.before
     ? [node("before", "http_request", { method: "GET", urlTemplate: `http://127.0.0.1:${port}/before` })]
@@ -129,6 +140,10 @@ function gatedWorkflow(id: string, port: number, calls: { before?: boolean; afte
   if (calls.after) {
     nodes.push(node("after", "http_request", { method: "GET", urlTemplate: `http://127.0.0.1:${port}/after` }));
     chain.push("after");
+  }
+  if (calls.afterTwice) {
+    nodes.push(node("after2", "http_request", { method: "GET", urlTemplate: `http://127.0.0.1:${port}/after2` }));
+    chain.push("after2");
   }
   nodes.push(node("sent", "output", { responseTemplate: "sent" }));
   chain.push("sent");
@@ -511,6 +526,42 @@ run("the queue across replicas on one Postgres database", () => {
       await until(async () => (await api.store.getWorkflowExecutionState(executionId)) === null, "the paused state to be cleared");
       await until(async () => (await resumeJob(executionId))?.status === "completed", "the resume to settle");
       expect(w2.ran).toEqual([executionId]);
+    } finally {
+      await server.close();
+    }
+  }, 90_000);
+
+  it("a drain after a resume's node completed: interrupted and dead-lettered with its paused state kept, and no worker runs it again", async () => {
+    const server = await callServer();
+    try {
+      await database();
+      const api = await addReplica("api-0", "api");
+      const w1 = await addReplica("worker-1", "worker");
+      const requester = await builderCookie(api, "requester");
+      const lead = await builderCookie(api, "lead");
+      const executionId = await pausedRun(api, requester, gatedWorkflow("wf-drain-sent", server.port, { after: true, afterTwice: true }));
+      // The first call after the gate answers (a side effect happened); the second is still in flight at the drain.
+      server.holdAfter(1);
+      await approve(w1, lead, executionId);
+      await until(() => server.hits() === 2, "the resume to reach the second call after the gate");
+      await until(async () => (await resumeJob(executionId))?.nodes_completed === 1, "the first call to be counted");
+      await w1.lifecycle.drain(100);
+
+      expect(await api.store.getExecutionHistory(executionId)).toMatchObject({ status: "error", error: WORKER_SHUTDOWN_INTERRUPTED_ERROR });
+      expect(await resumeJob(executionId)).toMatchObject({ status: "dead", attempts: 0, nodes_completed: 1 });
+      const dlq = await api.store.listDlqItems();
+      expect(dlq.map((item) => [item.finalError, item.attempts])).toEqual([[WORKER_SHUTDOWN_INTERRUPTED_ERROR, 0]]);
+      expect(dlq[0]!.originalId.startsWith(`${executionId}:`)).toBe(true);
+      // Nothing destroyed: the paused state and the decision stay for a person to look at.
+      expect((await api.store.getWorkflowExecutionState(executionId))?.status).toBe("resuming");
+      expect((await api.store.listApprovalRequestsForExecution(executionId)).map((request) => request.status)).toEqual(["approved"]);
+
+      server.release();
+      const w2 = await addReplica("worker-2", "worker");
+      await until(() => w2.queue!.inFlightCount() === 0 && w1.queue!.inFlightCount() === 0, "the workers to be idle");
+      expect(await sql(`SELECT id FROM execution_queue WHERE status IN ('pending', 'running')`)).toEqual([]);
+      expect(w2.ran).toEqual([]);
+      expect(server.hits()).toBe(2);
     } finally {
       await server.close();
     }

@@ -14,10 +14,10 @@ import {
   fairClaimWindow,
   payloadExecutionId,
   payloadIsResume,
-  WORKER_LOST_ERROR,
-  WORKER_LOST_INTERRUPTED_ERROR,
-  WORKER_SHUTDOWN_INTERRUPTED_ERROR,
-  type LostJobOutcome
+  WORKER_LOST_REASONS,
+  WORKER_SHUTDOWN_REASONS,
+  type LostJobOutcome,
+  type LostJobReasons
 } from "../queue-leases.js";
 import type { PoolClient } from "pg";
 
@@ -479,7 +479,7 @@ async function settleLostJob(
   client: PoolClient,
   row: LockedQueueRow,
   countsAttempt: boolean,
-  reasons: { interrupted: string; exhausted: string }
+  reasons: LostJobReasons
 ): Promise<LostJobOutcome> {
   const id = toStr(row.id);
   const executionId = payloadExecutionId(row.payload_json, id);
@@ -527,9 +527,9 @@ async function settleLostJob(
         WHERE id = $1 AND status = ANY($3::text[])`,
       [executionId, reason, resume ? ["running", "waiting_approval"] : ["running"]]
     );
-    // A resume's paused state goes with it, so approval recovery never drives the run on again: the dead-letter
-    // entry is its one way forward (a manual retry).
-    if (resume) await client.query(`DELETE FROM workflow_executions WHERE id = $1 AND status = 'resuming'`, [executionId]);
+    // The record is final now, so approval recovery never drives the run on again: the dead-letter entry is its one
+    // way forward (a manual retry). A lost worker's resume also loses its paused state; a shutdown release keeps it.
+    if (resume && !reasons.keepPausedState) await client.query(`DELETE FROM workflow_executions WHERE id = $1 AND status = 'resuming'`, [executionId]);
     await client.query(
       `INSERT INTO execution_queue_dlq (id, original_id, workflow_id, workflow_name, payload_json, attempts, final_error, failed_at, created_at)
          VALUES ($1, $2, $3, $4, $5, $6, $7, now(), now())`,
@@ -558,7 +558,7 @@ export async function reapExpiredQueueLeases(ctx: PgContext, input: { leaseMs: n
     )).rows;
     const outcomes: LostJobOutcome[] = [];
     for (const row of rows) {
-      outcomes.push(await settleLostJob(client, row, true, { interrupted: WORKER_LOST_INTERRUPTED_ERROR, exhausted: WORKER_LOST_ERROR }));
+      outcomes.push(await settleLostJob(client, row, true, WORKER_LOST_REASONS));
     }
     return outcomes;
   });
@@ -573,7 +573,7 @@ export async function releaseQueueItem(ctx: PgContext, input: { id: string; clai
       [input.id, input.claimToken]
     )).rows[0];
     if (!row) return null;
-    return await settleLostJob(client, row, false, { interrupted: WORKER_SHUTDOWN_INTERRUPTED_ERROR, exhausted: WORKER_SHUTDOWN_INTERRUPTED_ERROR });
+    return await settleLostJob(client, row, false, WORKER_SHUTDOWN_REASONS);
   });
 }
 
