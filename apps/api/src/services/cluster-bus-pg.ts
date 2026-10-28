@@ -300,8 +300,7 @@ export class PgClusterBus implements ClusterBus {
         if (want) this.listened.add(channel);
         else this.listened.delete(channel);
       } catch (error) {
-        this.options.logger?.warn("Cluster bus LISTEN failed; reconnecting", { error: errorText(error) });
-        this.drop(client);
+        this.drop(client, error);
       }
     });
   }
@@ -316,11 +315,8 @@ export class PgClusterBus implements ClusterBus {
       keepAliveInitialDelayMillis: this.pingIntervalMs
     });
     // Registered before connect, so an error during connect is never an unhandled 'error' event.
-    client.on("error", (error) => {
-      this.options.logger?.warn("Cluster bus connection failed; reconnecting", { error: errorText(error) });
-      this.drop(client);
-    });
-    client.on("end", () => this.drop(client));
+    client.on("error", (error) => this.drop(client, error));
+    client.on("end", () => this.drop(client, new Error("connection ended")));
     client.on("notification", (notification) => this.receive(notification.channel, notification.payload));
     try {
       await withTimeout(client.connect(), this.queryTimeoutMs);
@@ -364,7 +360,7 @@ export class PgClusterBus implements ClusterBus {
   private resyncPending = false;
 
   /** Forgets a broken connection and schedules a reconnect. Safe to call more than once per connection. */
-  private drop(client: pg.Client): void {
+  private drop(client: pg.Client, reason: unknown): void {
     if (client !== this.client) return;
     this.client = null;
     this.listened.clear();
@@ -374,7 +370,7 @@ export class PgClusterBus implements ClusterBus {
     client.on("error", () => undefined);
     void client.end().catch(() => undefined);
     if (this.closed) return;
-    this.options.logger?.warn("Cluster bus listener lost; reconnecting", {});
+    this.options.logger?.warn("Cluster bus listener lost; reconnecting", { error: errorText(reason) });
     this.scheduleReconnect();
   }
 
@@ -398,8 +394,7 @@ export class PgClusterBus implements ClusterBus {
         try {
           await withTimeout(client.query(`SELECT 1`), this.queryTimeoutMs);
         } catch (error) {
-          this.options.logger?.warn("Cluster bus liveness check failed; reconnecting", { error: errorText(error) });
-          this.drop(client);
+          this.drop(client, error);
         }
       });
     }, this.pingIntervalMs);
