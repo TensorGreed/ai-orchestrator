@@ -4114,8 +4114,10 @@ export async function createApp(
         const hooks = queueJob
           ? queueJobHooks(queueJob, undefined, queueFence
               ? async (event) => {
-                  // The decided node itself is not progress: re-running it has no side effect.
-                  if (event.nodeId === state.waitingNodeId) return;
+                  // The decided node itself is not progress: re-running it has no side effect. Nor is a node that ended
+                  // after the queue stopped the run (drained or lease lost): like an ordinary run, whose progress writes
+                  // are refused once it is stopped, nothing more is counted.
+                  if (event.nodeId === state.waitingNodeId || queueJob.signal.aborted) return;
                   try {
                     if (!(await store.recordQueueJobProgress(queueFence))) queueJob.leaseLost("a resume progress write was refused");
                   } catch (error) {
