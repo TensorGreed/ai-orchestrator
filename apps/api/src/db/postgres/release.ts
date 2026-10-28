@@ -10,9 +10,10 @@
  * Lock order: a transaction that locks a workflow's row does so before any other row of that workflow (gate, request,
  * version), so publish, rollback, unpublish, approval publish, gate save and workflow delete never wait in a cycle.
  * Retention pruning (execution history, approval requests, cassettes, guard events, captures, replay jobs, guard
- * simulations) never waits for a row lock at all: it skips rows another transaction holds (prune.ts), so it cannot
- * deadlock with a workflow delete, which locks the workflow row, then execution_history, workflow_executions,
- * approval_requests, mcp_cassettes, replay_recordings, guard_events, …, eval_results, eval_runs.
+ * simulations) never waits for a row lock at all: it skips rows another transaction holds and deletes a replay job
+ * only whole, with all its results (prune.ts), so it cannot deadlock with a workflow delete, which locks the workflow
+ * row, then execution_history, workflow_executions, approval_requests, mcp_cassettes, replay_recordings,
+ * guard_events, …, eval_results, eval_runs.
  */
 import type { PoolClient } from "pg";
 import { GUARD_SIMULATION_JOB_DATASET_PREFIX, releaseGateRestrictsToAdmins } from "@ai-orchestrator/shared";

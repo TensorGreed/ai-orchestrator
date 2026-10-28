@@ -7,7 +7,7 @@ import type { GuardSimulationRecord } from "../database.js";
 import { type Store } from "../store.js";
 import { toNum, toStr } from "./helpers.js";
 import type { PgContext } from "./context.js";
-import { deleteRunsUnlocked, deleteUnlockedInBatches } from "./prune.js";
+import { deleteRunsWhole } from "./prune.js";
 
 type Row = Record<string, unknown>;
 
@@ -116,21 +116,56 @@ export async function listRunningGuardSimulations(ctx: PgContext): Promise<Guard
   return rows.map(mapGuardSimulationRow);
 }
 
+/** Simulations one pruneGuardSimulations transaction deletes at most, with their jobs. */
+const SIMULATION_PRUNE_CHUNK = 50;
+
 /**
- * Deletes simulations created before `before`, with their finished replay jobs and case results (one transaction).
- * Never waits for a row lock (see prune.ts): a job or simulation another transaction holds (a workflow delete under
- * way, a job being finished) is left for a later run. Returns the simulations deleted.
+ * Deletes simulations created before `before`, with their finished replay jobs and case results. Returns the
+ * simulations deleted.
+ *
+ * Never waits for a row lock (see prune.ts): the simulations are read without locking, then each chunk goes in its
+ * own short transaction. It locks the simulation rows it can get, then deletes their finished jobs whole or not at
+ * all (deleteRunsWhole). A simulation is deleted only when none of its finished jobs is left: one whose job another
+ * transaction holds (a workflow delete under way, a data-subject delete marking it ineligible) stays, with that job,
+ * for a later run, so its job list is never lost while the job remains. Queued or running jobs are not waited for and
+ * do not keep a simulation, as on SQLite.
  */
 export async function pruneGuardSimulations(ctx: PgContext, input: { before: string }): Promise<number> {
-  return ctx.withTransaction(async (client) => {
-    const rows = (await client.query<{ id: string; job_ids_json: string | null }>(`SELECT id, job_ids_json FROM guard_simulations WHERE created_at < $1`, [input.before])).rows;
-    if (rows.length === 0) return 0;
-    const jobIds: string[] = [];
-    for (const row of rows) {
-      const parsed = row.job_ids_json ? safeJsonParse(toStr(row.job_ids_json)) : null;
-      if (Array.isArray(parsed)) jobIds.push(...parsed.map((entry) => String(entry)));
-    }
-    await deleteRunsUnlocked(client, jobIds);
-    return await deleteUnlockedInBatches(client, "guard_simulations", "id = ANY($1::text[])", [rows.map((row) => toStr(row.id))]);
-  });
+  const candidates = (await ctx.query<{ id: string }>(`SELECT id FROM guard_simulations WHERE created_at < $1 ORDER BY created_at, id`, [input.before])).map((row) =>
+    toStr(row.id)
+  );
+  let deleted = 0;
+  for (let index = 0; index < candidates.length; index += SIMULATION_PRUNE_CHUNK) {
+    const chunk = candidates.slice(index, index + SIMULATION_PRUNE_CHUNK);
+    deleted += await ctx.withTransaction(async (client) => {
+      const rows = (
+        await client.query<{ id: string; job_ids_json: string | null }>(
+          `SELECT id, job_ids_json FROM guard_simulations WHERE id = ANY($1::text[]) AND created_at < $2 ORDER BY id FOR UPDATE SKIP LOCKED`,
+          [chunk, input.before]
+        )
+      ).rows;
+      if (rows.length === 0) return 0;
+      const jobsOf = new Map<string, string[]>();
+      for (const row of rows) {
+        const parsed = row.job_ids_json ? safeJsonParse(toStr(row.job_ids_json)) : null;
+        jobsOf.set(toStr(row.id), Array.isArray(parsed) ? parsed.map((entry) => String(entry)) : []);
+      }
+      const jobIds = [...new Set([...jobsOf.values()].flat())];
+      const gone = await deleteRunsWhole(client, jobIds);
+      const kept = jobIds.filter((id) => !gone.has(id));
+      const left = new Set(
+        kept.length === 0
+          ? []
+          : (await client.query<{ id: string }>(`SELECT id FROM eval_runs WHERE id = ANY($1::text[]) AND status NOT IN ('queued', 'running')`, [kept])).rows.map((row) =>
+              toStr(row.id)
+            )
+      );
+      const doomed = [...jobsOf].filter(([, jobs]) => !jobs.some((job) => left.has(job))).map(([id]) => id);
+      if (doomed.length === 0) return 0;
+      // Every doomed row is locked above, so this never waits.
+      const result = await client.query(`DELETE FROM guard_simulations WHERE id = ANY($1::text[])`, [doomed]);
+      return result.rowCount ?? 0;
+    });
+  }
+  return deleted;
 }

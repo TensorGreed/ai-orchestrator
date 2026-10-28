@@ -16,7 +16,7 @@ import type { PostgresStore } from "./postgres-store.js";
 import type { Store } from "./store.js";
 import { deleteUnlockedInBatches } from "./postgres/prune.js";
 import { createTestStore, noticePostgresSkipped, openTestStoreTwin, testPostgresUrl, testStorePool, type TestStore } from "../test-support/test-store.js";
-import { delay, limitLockWaits, pauseAfter, resumeAllPaused, stillPending } from "../test-support/pg-interleave.js";
+import { delay, limitLockWaits, pauseAfter, resumeAllPaused, stillPending, waitsOnBackend } from "../test-support/pg-interleave.js";
 
 const run = testPostgresUrl() ? describe : describe.skip;
 if (!testPostgresUrl()) noticePostgresSkipped("postgres prune lock order");
@@ -115,15 +115,18 @@ run("Postgres: retention pruning never waits behind a workflow delete", () => {
     const pause = pauseAfter(builder, /SET workflow_deleted_at/);
     const removal = builder.deleteWorkflow(wf);
     removal.catch(() => undefined);
-    await pause.reached;
+    const pid = await pause.reached;
 
     const prune = admin.pruneExecutionHistory({ before: CUT });
     prune.catch(() => undefined);
-    // The old prune held the cassette here and waited for the request: resuming the delete then deadlocked.
+    // The old prune held the cassette here and waited for the request: resuming the delete then deadlocked. Nothing
+    // may wait on the paused delete (pg_blocking_pids), and the prune finishes while it is still paused.
+    const waited = await waitsOnBackend(sql!, pid);
     const blocked = await stillPending(prune, 1_000);
     pause.resume();
     const settled = await Promise.allSettled([removal, prune]);
     expect(settled.filter((entry) => entry.status === "rejected").map((entry) => String((entry as PromiseRejectedResult).reason))).toEqual([]);
+    expect(waited).toBe(false);
     expect(blocked).toBe(false);
     expect(await removal).toBe(true);
     // The prune took the cassette and guard event; it skipped the request, which the delete kept as the audit trail.
@@ -144,24 +147,36 @@ run("Postgres: retention pruning never waits behind a workflow delete", () => {
     const pause = pauseAfter(builder, /DELETE FROM eval_runs WHERE workflow_id/);
     const removal = builder.deleteWorkflow(wf);
     removal.catch(() => undefined);
-    await pause.reached;
+    const pid = await pause.reached;
 
-    const outcomes = {
-      history: await within(admin.pruneExecutionHistory({ before: CUT }), 5_000),
-      evalRuns: await within(admin.pruneEvalRuns({ before: CUT }), 5_000),
-      captures: await within(admin.pruneReplayCaptures(CUT), 5_000),
-      simulations: await within(admin.pruneGuardSimulations({ before: CUT }), 5_000)
-    };
-    // Every prune finished while the delete still held its rows. Only the other workflow's rows went (two old jobs).
-    expect(outcomes).toEqual({ history: { value: 1 }, evalRuns: { value: 2 }, captures: { value: 1 }, simulations: { value: 2 } });
+    const [waited, outcomes] = await Promise.all([
+      waitsOnBackend(sql!, pid),
+      (async () => ({
+        history: await within(admin.pruneExecutionHistory({ before: CUT }), 5_000),
+        evalRuns: await within(admin.pruneEvalRuns({ before: CUT }), 5_000),
+        captures: await within(admin.pruneReplayCaptures(CUT), 5_000),
+        simulations: await within(admin.pruneGuardSimulations({ before: CUT }), 5_000)
+      }))()
+    ]);
+    // Every prune finished while the delete still held its rows, and none waited on it. Only the other workflow's rows
+    // went (its two old jobs and its simulation).
+    expect(waited).toBe(false);
+    expect(outcomes).toEqual({ history: { value: 1 }, evalRuns: { value: 2 }, captures: { value: 1 }, simulations: { value: 1 } });
     expect(await left(other)).toEqual({ eval_runs: [`job-${other}-3`], eval_results: [`res-${other}-3`] });
-    // The workflow's own simulation went; its job was held by the delete and stays with it.
-    expect(await left(wf)).toMatchObject({ execution_history: [`run-${wf}`], approval_requests: [`req-${wf}`], mcp_cassettes: [`cas-${wf}`], guard_events: [`ge-${wf}`] });
+    // The workflow's own simulation stays: its job is held by the delete, and the simulation is its only pointer.
+    expect(await left(wf)).toMatchObject({
+      execution_history: [`run-${wf}`],
+      approval_requests: [`req-${wf}`],
+      mcp_cassettes: [`cas-${wf}`],
+      guard_events: [`ge-${wf}`],
+      guard_simulations: [`sim-${wf}`]
+    });
 
     pause.resume();
     expect(await removal).toBe(true);
-    expect(await left(wf)).toEqual({ approval_requests: [`req-${wf}`] });
+    expect(await left(wf)).toEqual({ approval_requests: [`req-${wf}`], guard_simulations: [`sim-${wf}`] });
     await admin.pruneExecutionHistory({ before: CUT });
+    expect(await admin.pruneGuardSimulations({ before: CUT })).toBe(1);
     expect(await left(wf)).toEqual({});
   }, 60_000);
 
@@ -182,8 +197,113 @@ run("Postgres: retention pruning never waits behind a workflow delete", () => {
       admin.pruneExecutionHistory({ before: CUT })
     ]);
     expect(results.filter((entry) => entry.status === "rejected").map((entry) => String((entry as PromiseRejectedResult).reason))).toEqual([]);
+    // What the racing prunes skipped (requests a delete was marking, simulations whose job a delete held) goes next.
     await admin.pruneExecutionHistory({ before: CUT });
+    await admin.pruneGuardSimulations({ before: CUT });
     for (const id of ids) expect(await left(id)).toEqual({});
+  }, 60_000);
+
+  /** Runs `body` while a third connection holds `FOR UPDATE` locks from `locks` (plain SELECTs), then commits. */
+  async function holding(locks: string[], body: () => Promise<void>): Promise<void> {
+    const holder = await sql!.connect();
+    try {
+      await holder.query("BEGIN");
+      for (const lock of locks) await holder.query(lock);
+      await body();
+      await holder.query("COMMIT");
+    } catch (error) {
+      await holder.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      holder.release();
+    }
+  }
+
+  it("prunes a replay job whole or not at all: a held run row or one held result keeps the run and all its results", async () => {
+    const { admin } = await open();
+    const wf = "wf-prune-whole";
+    await admin.upsertWorkflow(workflow(wf));
+    await seed(oldRows(wf, { jobs: true }));
+    // A second result on job 1, so holding one of them leaves the other unheld.
+    await seed([`INSERT INTO eval_results (id, run_id, fixture_id, status, created_at) VALUES ('res-${wf}-1b', 'job-${wf}-1', 'fix2', 'pass', '${at(1)}')`]);
+    // The guard simulation's job (sim-job) is the newest of its own set, so it is never pruned here.
+    const jobs = {
+      eval_runs: [`job-${wf}-1`, `job-${wf}-2`, `job-${wf}-3`, `sim-job-${wf}`],
+      eval_results: [`res-${wf}-1`, `res-${wf}-1b`, `res-${wf}-2`, `res-${wf}-3`, `sim-res-${wf}`]
+    };
+
+    await holding(
+      [`SELECT id FROM eval_results WHERE id = 'res-${wf}-1' FOR UPDATE`, `SELECT id FROM eval_runs WHERE id = 'job-${wf}-2' FOR UPDATE`],
+      async () => {
+        // Job 1's other result and job 2's results are free, but neither job is taken in part.
+        expect(await within(admin.pruneEvalRuns({ before: CUT }), 5_000)).toEqual({ value: 0 });
+        expect(await left(wf)).toMatchObject(jobs);
+      }
+    );
+    // Once the locks are gone the next prune takes both old jobs whole; the newest stays.
+    expect(await admin.pruneEvalRuns({ before: CUT })).toBe(2);
+    expect(await left(wf)).toMatchObject({ eval_runs: [`job-${wf}-3`, `sim-job-${wf}`], eval_results: [`res-${wf}-3`, `sim-res-${wf}`] });
+  }, 60_000);
+
+  it("keeps a guard simulation while its finished job is held, and prunes the others in the same pass", async () => {
+    const { admin } = await open();
+    const [free, heldJob, heldSim] = ["wf-sim-free", "wf-sim-held-job", "wf-sim-held-sim"];
+    for (const id of [free, heldJob, heldSim]) {
+      await admin.upsertWorkflow(workflow(id));
+      await seed(oldRows(id, { jobs: true }));
+    }
+    const simRows = (wf: string) => ({
+      eval_runs: expect.arrayContaining([`sim-job-${wf}`]),
+      eval_results: expect.arrayContaining([`sim-res-${wf}`]),
+      guard_simulations: [`sim-${wf}`]
+    });
+
+    await holding(
+      [`SELECT id FROM eval_runs WHERE id = 'sim-job-${heldJob}' FOR UPDATE`, `SELECT id FROM guard_simulations WHERE id = 'sim-${heldSim}' FOR UPDATE`],
+      async () => {
+        expect(await within(admin.pruneGuardSimulations({ before: CUT }), 5_000)).toEqual({ value: 1 });
+        // The free simulation went with its job and results.
+        expect(await left(free)).not.toHaveProperty("guard_simulations");
+        expect((await left(free)).eval_runs).not.toContain(`sim-job-${free}`);
+        expect((await left(free)).eval_results).not.toContain(`sim-res-${free}`);
+        // A held job keeps its simulation (its only pointer); a held simulation keeps itself and its job.
+        expect(await left(heldJob)).toMatchObject(simRows(heldJob));
+        expect(await left(heldSim)).toMatchObject(simRows(heldSim));
+      }
+    );
+    expect(await admin.pruneGuardSimulations({ before: CUT })).toBe(2);
+    for (const wf of [heldJob, heldSim]) {
+      const rows = await left(wf);
+      expect(rows).not.toHaveProperty("guard_simulations");
+      expect(rows.eval_runs).not.toContain(`sim-job-${wf}`);
+      expect(rows.eval_results).not.toContain(`sim-res-${wf}`);
+    }
+  }, 60_000);
+
+  it("prunes guard simulations in bounded chunks", async () => {
+    const { admin } = await open();
+    const statements: string[] = [];
+    for (let index = 0; index < 120; index += 1) {
+      statements.push(
+        `INSERT INTO eval_runs (id, dataset_id, workflow_id, status, started_at, created_at) VALUES ('chunk-job-${index}', 'chunk-set-${index}', 'wf', 'completed', '${OLD}', '${OLD}')`,
+        `INSERT INTO eval_results (id, run_id, fixture_id, status, created_at) VALUES ('chunk-res-${index}', 'chunk-job-${index}', 'fix', 'pass', '${OLD}')`,
+        `INSERT INTO guard_simulations (id, profile_id, source_kind, simulated_hash, job_ids_json, status, created_at)
+           VALUES ('chunk-sim-${index}', 'p', 'draft', 'h', '["chunk-job-${index}"]', 'completed', '${OLD}')`
+      );
+    }
+    await seed(statements);
+    const store = primary!.store as unknown as PostgresStore;
+    const pool = (store as unknown as { pool: Pool }).pool;
+    const connect = pool.connect.bind(pool) as (callback?: unknown) => Promise<unknown>;
+    let transactions = 0;
+    (pool as unknown as { connect: (callback?: unknown) => unknown }).connect = (callback?: unknown) => {
+      if (callback === undefined) transactions += 1;
+      return connect(callback);
+    };
+    expect(await admin.pruneGuardSimulations({ before: CUT })).toBe(120);
+    // 120 simulations in chunks of 50: three short transactions, not one.
+    expect(transactions).toBe(3);
+    expect(await left("chunk-")).toEqual({});
   }, 60_000);
 
   it("deletes in batches and skips a row another transaction holds", async () => {

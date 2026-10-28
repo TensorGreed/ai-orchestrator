@@ -10,7 +10,7 @@ import type { EvalDatasetRecord, EvalFixtureRecord, EvalResultRecord, EvalRunRec
 import { type Store } from "../store.js";
 import type { PgContext } from "./context.js";
 import { toNum, toStr } from "./helpers.js";
-import { deleteRunsUnlocked } from "./prune.js";
+import { deleteRunsWhole } from "./prune.js";
 
 function rowCount(result: { rowCount: number | null }): number {
   return result.rowCount ?? 0;
@@ -188,8 +188,8 @@ const EVAL_PRUNE_CHUNK_RUNS = 100;
 
 /**
  * Never waits for a row lock (see prune.ts): the runs to delete are read without locking, then each chunk goes in its
- * own short transaction, results before their runs as a workflow delete takes them, skipping rows another
- * transaction holds (they go on a later run).
+ * own short transaction, each run whole or not at all (deleteRunsWhole): a run whose row or any of whose results
+ * another transaction holds stays, with all its results, for a later run.
  */
 export async function pruneEvalRuns(ctx: PgContext, ...[input]: Parameters<Store["pruneEvalRuns"]>): ReturnType<Store["pruneEvalRuns"]> {
   const rows = await ctx.query<{ id: string; dataset_id: string; dataset_ids_json: string | null; status: string; started_at: string }>(
@@ -226,7 +226,7 @@ export async function pruneEvalRuns(ctx: PgContext, ...[input]: Parameters<Store
   let deleted = 0;
   for (let index = 0; index < doomed.length; index += EVAL_PRUNE_CHUNK_RUNS) {
     const chunk = doomed.slice(index, index + EVAL_PRUNE_CHUNK_RUNS);
-    deleted += await ctx.withTransaction((client) => deleteRunsUnlocked(client, chunk));
+    deleted += (await ctx.withTransaction((client) => deleteRunsWhole(client, chunk))).size;
   }
   return deleted;
 }
