@@ -75,6 +75,8 @@ import {
 import type {
   ApprovalDecisionInput,
   CancelExecutionResult,
+  ClusterInstanceHeartbeat,
+  ClusterInstanceRecord,
   ReleaseApprovalDecisionInput,
   ReleaseGateCasesChange,
   ReplayRecordingLimits,
@@ -3742,6 +3744,35 @@ export class SqliteStore implements Store {
       `CREATE INDEX IF NOT EXISTS ${QUEUE_CLAIM_INDEX} ON execution_queue (pool, priority DESC, scheduled_at, created_at, id) WHERE status = 'pending'`
     );
     this.exec(`CREATE INDEX IF NOT EXISTS ${QUEUE_RUNNING_HEARTBEAT_INDEX} ON execution_queue (heartbeat_at) WHERE status = 'running'`);
+    // Migration 44 — the cluster instance registry and inline-run owners. Postgres writes them; on SQLite (one process)
+    // they exist for schema parity and stay empty.
+    this.exec(`
+      CREATE TABLE IF NOT EXISTS cluster_instances (
+        id TEXT PRIMARY KEY,
+        worker_mode TEXT NOT NULL,
+        ha_enabled INTEGER NOT NULL DEFAULT 0,
+        is_leader INTEGER NOT NULL DEFAULT 0,
+        pools_json TEXT,
+        concurrency INTEGER,
+        running INTEGER NOT NULL DEFAULT 0,
+        app_version TEXT,
+        schema_version INTEGER,
+        capabilities_json TEXT,
+        hostname TEXT,
+        bus_connected INTEGER NOT NULL DEFAULT 0,
+        started_at TEXT NOT NULL,
+        heartbeat_at TEXT NOT NULL
+      )
+    `);
+    this.exec(`CREATE INDEX IF NOT EXISTS idx_cluster_instances_heartbeat_at ON cluster_instances(heartbeat_at)`);
+    this.exec(`
+      CREATE TABLE IF NOT EXISTS cluster_run_owners (
+        execution_id TEXT PRIMARY KEY,
+        instance_id TEXT NOT NULL,
+        started_at TEXT NOT NULL
+      )
+    `);
+    this.exec(`CREATE INDEX IF NOT EXISTS idx_cluster_run_owners_instance_id ON cluster_run_owners(instance_id)`);
 
     this.exec(`CREATE INDEX IF NOT EXISTS idx_workflows_project_id ON workflows(project_id)`);
     this.exec(`CREATE INDEX IF NOT EXISTS idx_workflows_folder_id ON workflows(folder_id)`);
@@ -9210,6 +9241,143 @@ export class SqliteStore implements Store {
       acquiredAt: toString(row.acquired_at),
       renewedAt: toString(row.renewed_at)
     }));
+  }
+
+  // ---------------------------------------------------------------------------
+  // Phase 13.1 — cluster registry (v44). The app writes it on Postgres only (one SQLite process is the whole cluster);
+  // these keep the Store contract, on the process clock.
+  // ---------------------------------------------------------------------------
+
+  async heartbeatClusterInstance(input: ClusterInstanceHeartbeat): Promise<void> {
+    this.exec(
+      `INSERT INTO cluster_instances
+         (id, worker_mode, ha_enabled, is_leader, pools_json, concurrency, running, app_version, schema_version,
+          capabilities_json, hostname, bus_connected, started_at, heartbeat_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT (id) DO UPDATE SET
+         worker_mode = excluded.worker_mode, ha_enabled = excluded.ha_enabled, is_leader = excluded.is_leader,
+         pools_json = excluded.pools_json, concurrency = excluded.concurrency, running = excluded.running,
+         app_version = excluded.app_version, schema_version = excluded.schema_version,
+         capabilities_json = excluded.capabilities_json, hostname = excluded.hostname,
+         bus_connected = excluded.bus_connected, started_at = excluded.started_at, heartbeat_at = excluded.heartbeat_at`,
+      [
+        input.id,
+        input.workerMode,
+        input.haEnabled ? 1 : 0,
+        input.isLeader ? 1 : 0,
+        JSON.stringify(input.pools),
+        input.concurrency,
+        input.running,
+        input.appVersion,
+        input.schemaVersion,
+        JSON.stringify(input.capabilities),
+        input.hostname,
+        input.busConnected ? 1 : 0,
+        input.startedAt,
+        new Date().toISOString()
+      ]
+    );
+    this.persist();
+  }
+
+  async listClusterInstances(input: { liveWithinMs: number }): Promise<ClusterInstanceRecord[]> {
+    const liveSince = new Date(Date.now() - input.liveWithinMs).toISOString();
+    const rows = this.queryAll<Record<string, unknown>>(`SELECT * FROM cluster_instances ORDER BY heartbeat_at DESC, id`);
+    const list = (value: unknown): string[] => {
+      const parsed = parseJsonSafe(value);
+      return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === "string") : [];
+    };
+    return rows.map((row) => ({
+      id: toString(row.id),
+      workerMode: toString(row.worker_mode),
+      haEnabled: Number(row.ha_enabled) === 1,
+      isLeader: Number(row.is_leader) === 1,
+      pools: list(row.pools_json),
+      concurrency: row.concurrency === null || row.concurrency === undefined ? null : Number(row.concurrency),
+      running: Number(row.running ?? 0),
+      appVersion: row.app_version === null || row.app_version === undefined ? null : toString(row.app_version),
+      schemaVersion: row.schema_version === null || row.schema_version === undefined ? null : Number(row.schema_version),
+      capabilities: list(row.capabilities_json),
+      hostname: toString(row.hostname ?? ""),
+      busConnected: Number(row.bus_connected) === 1,
+      startedAt: toString(row.started_at),
+      heartbeatAt: toString(row.heartbeat_at),
+      live: toString(row.heartbeat_at) >= liveSince
+    }));
+  }
+
+  async deleteClusterInstance(id: string): Promise<void> {
+    this.exec(`DELETE FROM cluster_instances WHERE id = ?`, [id]);
+    this.persist();
+  }
+
+  async pruneClusterInstances(input: { olderThanMs: number }): Promise<number> {
+    const cutoff = new Date(Date.now() - input.olderThanMs).toISOString();
+    const { changes } = this.db.prepare(`DELETE FROM cluster_instances WHERE heartbeat_at < ?`).run(cutoff);
+    if (changes > 0) this.persist();
+    return changes;
+  }
+
+  async claimClusterRunOwner(input: { executionId: string; instanceId: string }): Promise<void> {
+    this.exec(
+      `INSERT INTO cluster_run_owners (execution_id, instance_id, started_at) VALUES (?, ?, ?)
+       ON CONFLICT (execution_id) DO UPDATE SET instance_id = excluded.instance_id, started_at = excluded.started_at`,
+      [input.executionId, input.instanceId, new Date().toISOString()]
+    );
+    this.persist();
+  }
+
+  async releaseClusterRunOwner(input: { executionId: string; instanceId: string }): Promise<void> {
+    this.exec(`DELETE FROM cluster_run_owners WHERE execution_id = ? AND instance_id = ?`, [input.executionId, input.instanceId]);
+    this.persist();
+  }
+
+  async reconcileDeadExecutorRuns(input: { error: string; deadAfterMs: number; selfId: string }): Promise<Array<{ id: string; workflowId: string; instanceId: string }>> {
+    const cutoff = new Date(Date.now() - input.deadAfterMs).toISOString();
+    return this.transaction(() => {
+      const dead = this.queryAll<{ execution_id: unknown; instance_id: unknown }>(
+        `SELECT o.execution_id, o.instance_id
+           FROM cluster_run_owners o
+           LEFT JOIN cluster_instances i ON i.id = o.instance_id
+          WHERE o.instance_id <> ?
+            AND ((i.id IS NULL AND o.started_at < ?) OR i.heartbeat_at < ?)
+          ORDER BY o.execution_id`,
+        [input.selfId, cutoff, cutoff]
+      );
+      const completedAt = new Date().toISOString();
+      const failed: Array<{ id: string; workflowId: string; instanceId: string }> = [];
+      for (const owner of dead) {
+        const executionId = toString(owner.execution_id);
+        const run = this.queryOne<{ workflow_id: unknown; started_at: unknown }>(
+          `SELECT workflow_id, started_at FROM execution_history
+            WHERE id = ? AND status = 'running'
+              AND id NOT IN (SELECT id FROM execution_queue WHERE status IN ('pending', 'running'))`,
+          [executionId]
+        );
+        if (run) {
+          this.exec(`UPDATE execution_history SET status = 'error', completed_at = ?, duration_ms = ?, error = ? WHERE id = ?`, [
+            completedAt,
+            toDurationMsForStore(toString(run.started_at), completedAt),
+            input.error,
+            executionId
+          ]);
+          failed.push({ id: executionId, workflowId: toString(run.workflow_id), instanceId: toString(owner.instance_id) });
+        }
+        this.exec(`DELETE FROM cluster_run_owners WHERE execution_id = ?`, [executionId]);
+      }
+      if (dead.length > 0) this.persist();
+      return failed;
+    });
+  }
+
+  async listCanceledExecutionIds(executionIds: readonly string[]): Promise<string[]> {
+    if (executionIds.length === 0) return [];
+    const placeholders = executionIds.map(() => "?").join(", ");
+    const rows = this.queryAll<{ id: unknown }>(
+      `SELECT id FROM execution_history WHERE status = 'canceled' AND id IN (${placeholders})`,
+      [...executionIds]
+    );
+    return rows.map((row) => toString(row.id));
   }
 
   // ---------------------------------------------------------------------------

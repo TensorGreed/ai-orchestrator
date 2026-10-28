@@ -157,6 +157,30 @@ export interface CancelExecutionResult {
   canceledRequestIds: string[];
 }
 
+/** Phase 13.1 — one instance's registry heartbeat. */
+export interface ClusterInstanceHeartbeat {
+  id: string;
+  workerMode: string;
+  haEnabled: boolean;
+  isLeader: boolean;
+  pools: string[];
+  concurrency: number | null;
+  running: number;
+  appVersion: string | null;
+  schemaVersion: number | null;
+  capabilities: string[];
+  hostname: string;
+  busConnected: boolean;
+  startedAt: string;
+}
+
+/** Phase 13.1 — a registry row as listed. */
+export interface ClusterInstanceRecord extends ClusterInstanceHeartbeat {
+  heartbeatAt: string;
+  /** The heartbeat is recent enough (database clock). */
+  live: boolean;
+}
+
 export interface Store {
   // ---- Store lifecycle
 
@@ -1752,6 +1776,29 @@ export interface Store {
     acquiredAt: string;
     renewedAt: string;
   }>>;
+
+  // ---- Phase 13.1 cluster registry (v44). Written on Postgres only; on SQLite the methods work but the app never calls them.
+
+  /** Inserts or refreshes this instance's registry row; `heartbeat_at` is the database clock. */
+  heartbeatClusterInstance(input: ClusterInstanceHeartbeat): Promise<void>;
+  /** Every registry row, newest heartbeat first, with `live` judged on the database clock against `liveWithinMs`. */
+  listClusterInstances(input: { liveWithinMs: number }): Promise<ClusterInstanceRecord[]>;
+  /** Removes one instance's row (a clean shutdown). */
+  deleteClusterInstance(id: string): Promise<void>;
+  /** Removes rows whose heartbeat is older than `olderThanMs`. Returns how many. */
+  pruneClusterInstances(input: { olderThanMs: number }): Promise<number>;
+  /** Records that `instanceId` executes the inline run `executionId` (cluster mode). */
+  claimClusterRunOwner(input: { executionId: string; instanceId: string }): Promise<void>;
+  /** Forgets the owner of a run that ended, if it is still `instanceId`. */
+  releaseClusterRunOwner(input: { executionId: string; instanceId: string }): Promise<void>;
+  /**
+   * Fails every `running` run owned by an instance other than `selfId` whose registry heartbeat is older than
+   * `deadAfterMs` (or that has no registry row and was claimed that long ago), skipping runs the queue still owns,
+   * and forgets those owners. Returns the runs it failed.
+   */
+  reconcileDeadExecutorRuns(input: { error: string; deadAfterMs: number; selfId: string }): Promise<Array<{ id: string; workflowId: string; instanceId: string }>>;
+  /** The ids among `executionIds` whose history row is `canceled` (the cancel reconciliation for a lost message). */
+  listCanceledExecutionIds(executionIds: readonly string[]): Promise<string[]>;
 
   // ---- Audit log, log streaming, audit export, signing keys and execution manifests
 

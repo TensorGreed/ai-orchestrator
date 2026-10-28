@@ -2062,6 +2062,45 @@ export const MIGRATIONS: Migration[] = [
       DROP INDEX IF EXISTS ${QUEUE_ACTIVE_EXECUTION_INDEX};
       ALTER TABLE execution_queue DROP COLUMN IF EXISTS execution_id;
     `
+  },
+  {
+    version: 44,
+    description: "Phase 13.1 — cluster signalling: the instance registry and the owners of inline runs",
+    // cluster_instances: one row per running API instance on Postgres (written whether HA is on or off), heartbeated
+    // on the database clock; it backs the cluster view, the dead-executor reconcile and the warning for several
+    // instances that each lead because HA is off. cluster_run_owners: which instance executes each inline run, written
+    // in cluster mode only, so the leader can fail a dead instance's runs at once instead of after a day. SQLite's
+    // embedded migrate() creates the same tables; nothing writes them there. v43 belongs to the queue lane.
+    up: `
+      CREATE TABLE IF NOT EXISTS cluster_instances (
+        id TEXT PRIMARY KEY,
+        worker_mode TEXT NOT NULL,
+        ha_enabled INTEGER NOT NULL DEFAULT 0,
+        is_leader INTEGER NOT NULL DEFAULT 0,
+        pools_json TEXT,
+        concurrency INTEGER,
+        running INTEGER NOT NULL DEFAULT 0,
+        app_version TEXT,
+        schema_version INTEGER,
+        capabilities_json TEXT,
+        hostname TEXT,
+        bus_connected INTEGER NOT NULL DEFAULT 0,
+        started_at TIMESTAMPTZ NOT NULL,
+        heartbeat_at TIMESTAMPTZ NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_cluster_instances_heartbeat_at ON cluster_instances(heartbeat_at);
+
+      CREATE TABLE IF NOT EXISTS cluster_run_owners (
+        execution_id TEXT PRIMARY KEY,
+        instance_id TEXT NOT NULL,
+        started_at TIMESTAMPTZ NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_cluster_run_owners_instance_id ON cluster_run_owners(instance_id);
+    `,
+    down: `
+      DROP TABLE IF EXISTS cluster_run_owners;
+      DROP TABLE IF EXISTS cluster_instances;
+    `
   }
 ];
 
