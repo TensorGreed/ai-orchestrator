@@ -3,7 +3,7 @@
  * Plain functions over a PgContext; PostgresStore delegates here. Every method is implemented.
  */
 import type { PoolClient } from "pg";
-import { type CancelExecutionResult, type Store } from "../store.js";
+import { type CancelExecutionResult, type QueueClaimFence, type Store } from "../store.js";
 import { parseJsonSafe, toNum, toStr } from "./helpers.js";
 import type { PgContext } from "./context.js";
 import { deleteUnlockedInBatches } from "./prune.js";
@@ -23,7 +23,7 @@ export async function saveExecutionHistory(ctx: PgContext, input: {
   nodeResultsJson?: unknown;
   customData?: unknown;
   error?: string;
-}, options?: { unlessFinished?: boolean; unlessCanceled?: boolean }): Promise<boolean> {
+}, options?: { unlessFinished?: boolean; unlessCanceled?: boolean; fence?: QueueClaimFence }): Promise<boolean> {
   const guard = options?.unlessFinished
     ? `
        WHERE NOT (execution_history.status IN ('success', 'error', 'canceled') OR (execution_history.status = 'partial' AND execution_history.completed_at IS NOT NULL))`
@@ -31,10 +31,12 @@ export async function saveExecutionHistory(ctx: PgContext, input: {
       ? `
        WHERE execution_history.status <> 'canceled' OR EXCLUDED.status = 'canceled'`
       : "";
-  const result = await ctx.pool.query(
-    `INSERT INTO execution_history (id, workflow_id, workflow_name, status, started_at, completed_at, duration_ms, trigger_type, triggered_by, input_json, output_json, node_results_json, custom_data_json, error)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
-       ON CONFLICT (id) DO UPDATE SET
+  const fence = options?.fence;
+  const sql =
+    `INSERT INTO execution_history (id, workflow_id, workflow_name, status, started_at, completed_at, duration_ms, trigger_type, triggered_by, input_json, output_json, node_results_json, custom_data_json, error${fence ? ", executor_id" : ""})
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14${fence ? ", $15" : ""})
+       ON CONFLICT (id) DO UPDATE SET${fence ? `
+         executor_id = EXCLUDED.executor_id,` : ""}
          workflow_id = EXCLUDED.workflow_id,
          workflow_name = EXCLUDED.workflow_name,
          status = EXCLUDED.status,
@@ -47,8 +49,8 @@ export async function saveExecutionHistory(ctx: PgContext, input: {
          output_json = EXCLUDED.output_json,
          node_results_json = EXCLUDED.node_results_json,
          custom_data_json = EXCLUDED.custom_data_json,
-         error = EXCLUDED.error${guard}`,
-    [
+         error = EXCLUDED.error${guard}`;
+  const params = [
       input.id,
       input.workflowId,
       input.workflowName ?? null,
@@ -62,10 +64,25 @@ export async function saveExecutionHistory(ctx: PgContext, input: {
       input.outputJson === undefined ? null : JSON.stringify(input.outputJson),
       input.nodeResultsJson === undefined ? null : JSON.stringify(input.nodeResultsJson),
       input.customData === undefined ? null : JSON.stringify(input.customData),
-      input.error ?? null
-    ]
-  );
-  return (result.rowCount ?? 0) > 0;
+      input.error ?? null,
+      ...(fence ? [fence.claimToken] : [])
+  ];
+  if (!fence) {
+    const result = await ctx.pool.query(sql, params);
+    return (result.rowCount ?? 0) > 0;
+  }
+  // Phase 13.1 — a queued run in cluster mode writes only while its claim still holds the queue item. FOR SHARE keeps
+  // the reaper (and a drain release) from taking the item back until this write commits; one taken back already is
+  // skipped by the re-check, so a zombie worker writes nothing. Lock order: queue row, then history row (as the reaper).
+  return await ctx.withTransaction(async (client) => {
+    const held = await client.query(
+      `SELECT 1 FROM execution_queue WHERE id = $1 AND claim_token = $2 AND status = 'running' FOR SHARE`,
+      [fence.queueItemId, fence.claimToken]
+    );
+    if ((held.rowCount ?? 0) === 0) return false;
+    const result = await client.query(sql, params);
+    return (result.rowCount ?? 0) > 0;
+  });
 }
 
 export async function listExecutionHistory(ctx: PgContext, input: {

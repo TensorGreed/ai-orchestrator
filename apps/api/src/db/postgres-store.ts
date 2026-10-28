@@ -425,6 +425,27 @@ export class PostgresStore implements Store {
   async listDlqItems(...args: Parameters<Store["listDlqItems"]>): ReturnType<Store["listDlqItems"]> {
     return queue.listDlqItems(this.ctx, ...args);
   }
+  async claimQueueItems(...args: Parameters<Store["claimQueueItems"]>): ReturnType<Store["claimQueueItems"]> {
+    return queue.claimQueueItems(this.ctx, ...args);
+  }
+  async renewQueueLeases(...args: Parameters<Store["renewQueueLeases"]>): ReturnType<Store["renewQueueLeases"]> {
+    return queue.renewQueueLeases(this.ctx, ...args);
+  }
+  async listCanceledExecutionIds(...args: Parameters<Store["listCanceledExecutionIds"]>): ReturnType<Store["listCanceledExecutionIds"]> {
+    return queue.listCanceledExecutionIds(this.ctx, ...args);
+  }
+  async reapExpiredQueueLeases(...args: Parameters<Store["reapExpiredQueueLeases"]>): ReturnType<Store["reapExpiredQueueLeases"]> {
+    return queue.reapExpiredQueueLeases(this.ctx, ...args);
+  }
+  async releaseQueueItem(...args: Parameters<Store["releaseQueueItem"]>): ReturnType<Store["releaseQueueItem"]> {
+    return queue.releaseQueueItem(this.ctx, ...args);
+  }
+  async getQueueDepthByPool(...args: Parameters<Store["getQueueDepthByPool"]>): ReturnType<Store["getQueueDepthByPool"]> {
+    return queue.getQueueDepthByPool(this.ctx, ...args);
+  }
+  async countPendingQueueItems(...args: Parameters<Store["countPendingQueueItems"]>): ReturnType<Store["countPendingQueueItems"]> {
+    return queue.countPendingQueueItems(this.ctx, ...args);
+  }
   async getTriggerState(...args: Parameters<Store["getTriggerState"]>): ReturnType<Store["getTriggerState"]> {
     return schedules.getTriggerState(this.ctx, ...args);
   }

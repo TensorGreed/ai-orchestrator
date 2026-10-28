@@ -93,6 +93,7 @@ import type {
   SubjectTextRow,
   WorkflowReleaseRecord
 } from "./database.js";
+import type { LostJobOutcome } from "./queue-leases.js";
 
 /** The decision `decideApprovalRequest` records. */
 export type ApprovalDecisionInput = Parameters<Store["decideApprovalRequest"]>[0];
@@ -100,6 +101,27 @@ export type ApprovalDecisionInput = Parameters<Store["decideApprovalRequest"]>[0
 export type ReleaseApprovalDecisionInput = Parameters<Store["decideReleaseApprovalRequest"]>[0];
 /** The decision `decideGateCaseRequest` records. */
 export type GateCaseDecisionRecordInput = Parameters<Store["decideGateCaseRequest"]>[0];
+
+/** Phase 13.1 — the claim a queued run's writes are fenced on. */
+export interface QueueClaimFence {
+  queueItemId: string;
+  claimToken: string;
+}
+
+/** Phase 13.1 — a leased claim of a queue item. */
+export interface QueueClaimedItem {
+  id: string;
+  workflowId: string;
+  workflowName: string | null;
+  payload: Record<string, unknown>;
+  attempts: number;
+  maxAttempts: number;
+  scheduledAt: string;
+  pool: string;
+  claimToken: string;
+  /** How long it waited between becoming due and this claim (database time), in ms. */
+  waitMs: number;
+}
 
 /** Golden-run limits a save is checked against inside its transaction (the REPLAY_RECORDINGS_* settings). */
 export interface ReplayRecordingLimits {
@@ -1394,6 +1416,12 @@ export interface Store {
      * `WHERE execution_history.status <> 'canceled' OR EXCLUDED.status = 'canceled'` on `ON CONFLICT (id) DO UPDATE`.
      */
     unlessCanceled?: boolean;
+    /**
+     * Phase 13.1 — a queued run in cluster mode: written only while the queue item is still `running` under this
+     * claim token (the item's row is share-locked for the write, so the reaper cannot take it back in between), and
+     * the record's `executor_id` becomes the token. A zombie worker whose claim was taken back writes nothing.
+     */
+    fence?: QueueClaimFence;
   }): Promise<boolean>;
   listExecutionHistory(input: {
     page?: number;
@@ -1563,6 +1591,8 @@ export interface Store {
     priority?: number;
     maxAttempts?: number;
     scheduledAt?: string;
+    /** Phase 13.1 — the worker pool that runs it (default `default`). */
+    pool?: string;
   }): Promise<void>;
   /** Claims up to `limit` due pending items for this process: an item is handed to one caller only. */
   dequeueNext(limit?: number): Promise<Array<{
@@ -1575,10 +1605,47 @@ export interface Store {
     scheduledAt: string;
   }>>;
   markQueueItemRunning(id: string): Promise<void>;
-  markQueueItemCompleted(id: string): Promise<void>;
-  /** Retries with backoff until max attempts; `retryable: false` moves the job to the DLQ now. */
-  markQueueItemFailed(id: string, error: string, options?: { retryable?: boolean }): Promise<void>;
+  /**
+   * Marks the item completed. With `claimToken` (a leased claim) only while it is still `running` under that token;
+   * returns whether the item was updated (false: a zombie's late completion, refused).
+   */
+  markQueueItemCompleted(id: string, options?: { claimToken?: string }): Promise<boolean>;
+  /**
+   * Retries with backoff until max attempts; `retryable: false` moves the job to the DLQ now. With `claimToken`, only
+   * while the item is still `running` under that token. Returns whether the item was updated.
+   */
+  markQueueItemFailed(id: string, error: string, options?: { retryable?: boolean; claimToken?: string }): Promise<boolean>;
+  /**
+   * The legacy stuck-job rule: running items past their run time limit and margin go back to pending. Items with a
+   * recent heartbeat (leased claims, which the lease reaper handles) are left alone.
+   */
   requeueStuckItems(stuckAfterMs?: number, excludeIds?: string[], marginMs?: number): Promise<number>;
+  /**
+   * Phase 13.1 — a leased claim (cluster mode): up to `limit` due pending items of `pools`, fairly across workflows
+   * within a bounded window (one per workflow before a second), moved to `running` with this owner, a new fencing
+   * token and a heartbeat, all in database time. An item is handed to one caller only.
+   */
+  claimQueueItems(input: { limit: number; owner: string; pools: string[] }): Promise<QueueClaimedItem[]>;
+  /** Renews the heartbeat of the owner's claims; returns the tokens it still holds (a missing one was taken back). */
+  renewQueueLeases(input: { owner: string; claimTokens: string[] }): Promise<string[]>;
+  /** Of these execution ids, the ones whose history reads `canceled` (a cancel another instance recorded). */
+  listCanceledExecutionIds(executionIds: string[]): Promise<string[]>;
+  /**
+   * The lease reaper: running items whose heartbeat is older than `leaseMs` (database time) are settled by the
+   * worker-loss policy (queue-leases.ts decideLostJob), each counting an attempt. Items without a heartbeat (claimed
+   * by an older binary or outside cluster mode) are left to requeueStuckItems.
+   */
+  reapExpiredQueueLeases(input: { leaseMs: number; limit?: number }): Promise<LostJobOutcome[]>;
+  /**
+   * A worker shutting down gives a job back: by the worker-loss policy, but without counting an attempt (a clean stop
+   * is not a failure). Only while the item is still `running` under `claimToken` (null: an unleased claim). Returns
+   * null when the item was not held.
+   */
+  releaseQueueItem(input: { id: string; claimToken: string | null }): Promise<LostJobOutcome | null>;
+  /** Pending and running items per pool. */
+  getQueueDepthByPool(): Promise<Array<{ pool: string; pending: number; running: number }>>;
+  /** Pending items of one pool (backpressure). */
+  countPendingQueueItems(pool: string): Promise<number>;
   /**
    * Marks runs still recorded as running that no live process owns as errors. Runs the queue still
    * owns (pending/running queue rows) and runs paused for approval are left alone.

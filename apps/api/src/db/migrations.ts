@@ -25,6 +25,10 @@ export interface Migration {
  */
 /** v41: the partial unique index that allows one pending approval request per run (both stores). */
 export const ONE_PENDING_APPROVAL_INDEX = "idx_approval_requests_one_pending";
+/** v43: the pending jobs a consumer claims from, per pool in claim order (both stores). */
+export const QUEUE_CLAIM_INDEX = "idx_execution_queue_claim";
+/** v43: running jobs by heartbeat, for the reaper (both stores). */
+export const QUEUE_RUNNING_HEARTBEAT_INDEX = "idx_execution_queue_running_hb";
 
 export const INSERTION_SEQ_TABLES: ReadonlyArray<{ table: string; backfillOrder: string }> = [
   { table: "audit_logs", backfillOrder: `created_at, id COLLATE "C"` },
@@ -2014,6 +2018,37 @@ export const MIGRATIONS: Migration[] = [
       ...RELEASE_SEQ_TABLES.map(({ table }) => `ALTER TABLE ${table} DROP COLUMN IF EXISTS seq;`),
       `ALTER TABLE workflows DROP COLUMN IF EXISTS unpublished_at;`
     ].join("\n")
+  },
+  {
+    version: 43,
+    description: "Phase 13.1 — queue leases: claim owner, fencing token, heartbeat, pool and lost count; the run's executor",
+    // Written only by consumers in cluster mode (Postgres with HA_ENABLED=true): a claim records who holds the job and
+    // a fresh token, the holder renews heartbeat_at, and the leader's reaper takes back a job whose heartbeat is older
+    // than the lease. Completions and the run's history writes are fenced on the token. Outside cluster mode these
+    // columns stay NULL (pool 'default', lost_count 0) and the queue runs exactly as before. All additive: an older
+    // binary lists its columns explicitly and keeps working. SQLite's embedded migrate() adds the same.
+    up: `
+      ALTER TABLE execution_queue ADD COLUMN IF NOT EXISTS claimed_by TEXT;
+      ALTER TABLE execution_queue ADD COLUMN IF NOT EXISTS claim_token TEXT;
+      ALTER TABLE execution_queue ADD COLUMN IF NOT EXISTS heartbeat_at TIMESTAMPTZ;
+      ALTER TABLE execution_queue ADD COLUMN IF NOT EXISTS pool TEXT NOT NULL DEFAULT 'default';
+      ALTER TABLE execution_queue ADD COLUMN IF NOT EXISTS lost_count INTEGER NOT NULL DEFAULT 0;
+      CREATE INDEX IF NOT EXISTS ${QUEUE_CLAIM_INDEX}
+        ON execution_queue (pool, priority DESC, scheduled_at, created_at) WHERE status = 'pending';
+      CREATE INDEX IF NOT EXISTS ${QUEUE_RUNNING_HEARTBEAT_INDEX}
+        ON execution_queue (heartbeat_at) WHERE status = 'running';
+      ALTER TABLE execution_history ADD COLUMN IF NOT EXISTS executor_id TEXT;
+    `,
+    down: `
+      ALTER TABLE execution_history DROP COLUMN IF EXISTS executor_id;
+      DROP INDEX IF EXISTS ${QUEUE_RUNNING_HEARTBEAT_INDEX};
+      DROP INDEX IF EXISTS ${QUEUE_CLAIM_INDEX};
+      ALTER TABLE execution_queue DROP COLUMN IF EXISTS lost_count;
+      ALTER TABLE execution_queue DROP COLUMN IF EXISTS pool;
+      ALTER TABLE execution_queue DROP COLUMN IF EXISTS heartbeat_at;
+      ALTER TABLE execution_queue DROP COLUMN IF EXISTS claim_token;
+      ALTER TABLE execution_queue DROP COLUMN IF EXISTS claimed_by;
+    `
   }
 ];
 

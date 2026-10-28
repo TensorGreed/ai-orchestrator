@@ -49,7 +49,7 @@ import type {
 } from "@ai-orchestrator/shared";
 import { DESTINATION_KINDS, DESTINATION_TIERS, type DataDestinationRow, DEFAULT_PROJECT_ID, GUARD_SIMULATION_JOB_DATASET_PREFIX, MCP_POLICY_KINDS, MCP_POLICY_ROLES, MCP_TOOL_HINT_CONDITIONS, REPLAY_CAPTURE_API_KEY_FILTER, REPLAY_CAPTURE_STATUSES } from "@ai-orchestrator/shared";
 import { normalizeMcpSamplingSettings, SUBJECT_CASSETTE_SOURCES, SUBJECT_EXECUTION_TRIGGERS } from "./store-shared.js";
-import { ONE_PENDING_APPROVAL_INDEX } from "./migrations.js";
+import { ONE_PENDING_APPROVAL_INDEX, QUEUE_CLAIM_INDEX, QUEUE_RUNNING_HEARTBEAT_INDEX } from "./migrations.js";
 import {
   normalizeMcpRuntimeLimits,
   normalizeMcpSandboxSettings,
@@ -78,9 +78,22 @@ import type {
   ReleaseApprovalDecisionInput,
   ReleaseGateCasesChange,
   ReplayRecordingLimits,
+  QueueClaimedItem,
+  QueueClaimFence,
   ReplayRecordingRefusal,
   Store
 } from "./store.js";
+import {
+  decideLostJob,
+  DEFAULT_QUEUE_POOL,
+  fairClaimWindow,
+  payloadExecutionId,
+  payloadIsResume,
+  WORKER_LOST_ERROR,
+  WORKER_LOST_INTERRUPTED_ERROR,
+  WORKER_SHUTDOWN_INTERRUPTED_ERROR,
+  type LostJobOutcome
+} from "./queue-leases.js";
 
 type BindParams = unknown[];
 
@@ -3710,6 +3723,19 @@ export class SqliteStore implements Store {
     // Migration 42 — when the published version was taken down (unpublish): production runs the draft, gated or not.
     this.ensureColumn("workflows", "unpublished_at", "TEXT");
 
+    // Migration 43 — queue leases (claim owner, fencing token, heartbeat, pool, lost count) and the run's executor.
+    // Written only by consumers in cluster mode (Postgres); on SQLite they keep their defaults and the queue runs as before.
+    this.ensureColumn("execution_queue", "claimed_by", "TEXT");
+    this.ensureColumn("execution_queue", "claim_token", "TEXT");
+    this.ensureColumn("execution_queue", "heartbeat_at", "TEXT");
+    this.ensureColumn("execution_queue", "pool", "TEXT NOT NULL", "'default'");
+    this.ensureColumn("execution_queue", "lost_count", "INTEGER NOT NULL", "0");
+    this.exec(
+      `CREATE INDEX IF NOT EXISTS ${QUEUE_CLAIM_INDEX} ON execution_queue (pool, priority DESC, scheduled_at, created_at) WHERE status = 'pending'`
+    );
+    this.exec(`CREATE INDEX IF NOT EXISTS ${QUEUE_RUNNING_HEARTBEAT_INDEX} ON execution_queue (heartbeat_at) WHERE status = 'running'`);
+    this.ensureColumn("execution_history", "executor_id", "TEXT");
+
     this.exec(`CREATE INDEX IF NOT EXISTS idx_workflows_project_id ON workflows(project_id)`);
     this.exec(`CREATE INDEX IF NOT EXISTS idx_workflows_folder_id ON workflows(folder_id)`);
     this.exec(`CREATE INDEX IF NOT EXISTS idx_secrets_project_id ON secrets(project_id)`);
@@ -4945,7 +4971,26 @@ export class SqliteStore implements Store {
     nodeResultsJson?: unknown;
     customData?: unknown;
     error?: string;
-  }, options?: { unlessFinished?: boolean; unlessCanceled?: boolean }): Promise<boolean> {
+  }, options?: { unlessFinished?: boolean; unlessCanceled?: boolean; fence?: QueueClaimFence }): Promise<boolean> {
+    const fence = options?.fence;
+    if (fence) {
+      // Phase 13.1 — a queued run in cluster mode writes only while its claim still holds the queue item (one
+      // transaction: nothing can take the item back in between on this single-process store).
+      return this.db.transaction(() => {
+        const held = this.queryOne<{ id: unknown }>(
+          `SELECT id FROM execution_queue WHERE id = ? AND claim_token = ? AND status = 'running'`,
+          [fence.queueItemId, fence.claimToken]
+        );
+        if (!held) return false;
+        const written = this.writeExecutionHistory(input, options);
+        if (written) this.exec(`UPDATE execution_history SET executor_id = ? WHERE id = ?`, [fence.claimToken, input.id]);
+        return written;
+      })();
+    }
+    return this.writeExecutionHistory(input, options);
+  }
+
+  private writeExecutionHistory(input: Parameters<Store["saveExecutionHistory"]>[0], options?: { unlessFinished?: boolean; unlessCanceled?: boolean }): boolean {
     const guard = options?.unlessFinished
       ? `
         WHERE ${FINISHED_HISTORY_SQL("execution_history")} = 0`
@@ -5724,11 +5769,12 @@ export class SqliteStore implements Store {
     priority?: number;
     maxAttempts?: number;
     scheduledAt?: string;
+    pool?: string;
   }): Promise<void> {
     const now = new Date().toISOString();
     this.exec(
-      `INSERT INTO execution_queue (id, workflow_id, workflow_name, payload_json, status, priority, attempts, max_attempts, last_error, scheduled_at, started_at, completed_at, created_at, updated_at)
-       VALUES (?, ?, ?, ?, 'pending', ?, 0, ?, NULL, ?, NULL, NULL, ?, ?)
+      `INSERT INTO execution_queue (id, workflow_id, workflow_name, payload_json, status, priority, attempts, max_attempts, last_error, scheduled_at, started_at, completed_at, created_at, updated_at, pool)
+       VALUES (?, ?, ?, ?, 'pending', ?, 0, ?, NULL, ?, NULL, NULL, ?, ?, ?)
        ON CONFLICT(id) DO NOTHING`,
       [
         input.id,
@@ -5739,7 +5785,8 @@ export class SqliteStore implements Store {
         input.maxAttempts ?? 3,
         input.scheduledAt ?? now,
         now,
-        now
+        now,
+        input.pool ?? DEFAULT_QUEUE_POOL
       ]
     );
     this.persist();
@@ -5808,24 +5855,33 @@ export class SqliteStore implements Store {
     this.persist();
   }
 
-  async markQueueItemCompleted(id: string): Promise<void> {
+  async markQueueItemCompleted(id: string, options: { claimToken?: string } = {}): Promise<boolean> {
     const now = new Date().toISOString();
-    this.exec(
-      `UPDATE execution_queue SET status = 'completed', completed_at = ?, updated_at = ? WHERE id = ?`,
-      [now, now, id]
-    );
+    const result =
+      options.claimToken !== undefined
+        ? this.db
+            .prepare(
+              `UPDATE execution_queue SET status = 'completed', completed_at = ?, updated_at = ?, heartbeat_at = NULL
+               WHERE id = ? AND claim_token = ? AND status = 'running'`
+            )
+            .run(now, now, id, options.claimToken)
+        : this.db.prepare(`UPDATE execution_queue SET status = 'completed', completed_at = ?, updated_at = ? WHERE id = ?`).run(now, now, id);
     this.persist();
+    return result.changes > 0;
   }
 
   /** Retries with backoff until max attempts; `retryable: false` moves the job to the DLQ now. */
-  async markQueueItemFailed(id: string, error: string, options: { retryable?: boolean } = {}): Promise<void> {
+  async markQueueItemFailed(id: string, error: string, options: { retryable?: boolean; claimToken?: string } = {}): Promise<boolean> {
     const now = new Date().toISOString();
-    const row = this.queryOne<ExecutionQueueRow>(
-      `SELECT id, workflow_id, workflow_name, payload_json, attempts, max_attempts FROM execution_queue WHERE id = ?`,
+    const row = this.queryOne<ExecutionQueueRow & { status: unknown; claim_token: unknown }>(
+      `SELECT id, workflow_id, workflow_name, payload_json, attempts, max_attempts, status, claim_token FROM execution_queue WHERE id = ?`,
       [id]
     );
     if (!row) {
-      return;
+      return false;
+    }
+    if (options.claimToken !== undefined && (toString(row.status) !== "running" || row.claim_token !== options.claimToken)) {
+      return false;
     }
 
     const attempts = toNumber(row.attempts) + 1;
@@ -5849,7 +5905,7 @@ export class SqliteStore implements Store {
           now
         ]
       );
-      this.exec(`UPDATE execution_queue SET status = 'dead', attempts = ?, last_error = ?, updated_at = ? WHERE id = ?`, [
+      this.exec(`UPDATE execution_queue SET status = 'dead', attempts = ?, last_error = ?, updated_at = ?, heartbeat_at = NULL WHERE id = ?`, [
         attempts,
         error,
         now,
@@ -5860,11 +5916,15 @@ export class SqliteStore implements Store {
       const backoffMs = 1000 * Math.pow(2, attempts - 1);
       const retryAt = new Date(Date.now() + backoffMs).toISOString();
       this.exec(
-        `UPDATE execution_queue SET status = 'pending', attempts = ?, last_error = ?, scheduled_at = ?, updated_at = ? WHERE id = ?`,
+        options.claimToken !== undefined
+          ? `UPDATE execution_queue SET status = 'pending', attempts = ?, last_error = ?, scheduled_at = ?, updated_at = ?,
+               claimed_by = NULL, claim_token = NULL, heartbeat_at = NULL, started_at = NULL WHERE id = ?`
+          : `UPDATE execution_queue SET status = 'pending', attempts = ?, last_error = ?, scheduled_at = ?, updated_at = ? WHERE id = ?`,
         [attempts, error, retryAt, now, id]
       );
     }
     this.persist();
+    return true;
   }
 
   async requeueStuckItems(stuckAfterMs = 600_000, excludeIds: string[] = [], marginMs = STUCK_JOB_MARGIN_MS): Promise<number> {
@@ -5873,8 +5933,9 @@ export class SqliteStore implements Store {
     const now = new Date(nowMs).toISOString();
     const skip = new Set(excludeIds);
     const stuck = this.queryAll<ExecutionQueueRow & { started_at: unknown; payload_json: unknown }>(
-      `SELECT id, started_at, payload_json FROM execution_queue WHERE status = 'running' AND started_at <= ?`,
-      [stuckBefore]
+      `SELECT id, started_at, payload_json FROM execution_queue
+       WHERE status = 'running' AND started_at <= ? AND (heartbeat_at IS NULL OR heartbeat_at <= ?)`,
+      [stuckBefore, stuckBefore]
     ).filter((row) => {
       if (skip.has(toString(row.id))) return false;
       // A job may carry its own, longer run time limit; it is not stuck before that limit and the margin have passed.
@@ -5885,7 +5946,8 @@ export class SqliteStore implements Store {
 
     for (const row of stuck) {
       this.exec(
-        `UPDATE execution_queue SET status = 'pending', started_at = NULL, updated_at = ? WHERE id = ?`,
+        `UPDATE execution_queue SET status = 'pending', started_at = NULL, updated_at = ?, claimed_by = NULL, claim_token = NULL, heartbeat_at = NULL
+         WHERE id = ?`,
         [now, toString(row.id)]
       );
     }
@@ -5967,6 +6029,186 @@ export class SqliteStore implements Store {
       finalError: toString(row.final_error),
       failedAt: toString(row.failed_at)
     }));
+  }
+
+  // Phase 13.1 — leased claims. Used by consumers in cluster mode (Postgres); implemented here too so both stores keep
+  // one contract. One process owns a SQLite file, so its clock is the only one and each method runs as one transaction.
+
+  async claimQueueItems(input: { limit: number; owner: string; pools: string[] }): Promise<QueueClaimedItem[]> {
+    const limit = clampLimit(input.limit, { fallback: 1, max: LIMIT_MAX.dequeueNext });
+    if (input.pools.length === 0) return [];
+    return this.db.transaction((): QueueClaimedItem[] => {
+      const nowMs = Date.now();
+      const now = new Date(nowMs).toISOString();
+      const window = this.queryAll<ExecutionQueueRow & { priority: unknown; created_at: unknown; pool: unknown }>(
+        `SELECT id, workflow_id, workflow_name, payload_json, attempts, max_attempts, scheduled_at, priority, created_at, pool
+         FROM execution_queue
+         WHERE status = 'pending' AND pool IN (${input.pools.map(() => "?").join(", ")}) AND scheduled_at <= ?
+         ORDER BY priority DESC, scheduled_at, created_at, id
+         LIMIT ?`,
+        [...input.pools, now, fairClaimWindow(limit)]
+      );
+      // One per workflow before a second of any; priority then due time decide within a rank.
+      const seen = new Map<string, number>();
+      const ranked = window.map((row, index) => {
+        const workflowId = toString(row.workflow_id);
+        const rank = (seen.get(workflowId) ?? 0) + 1;
+        seen.set(workflowId, rank);
+        return { row, rank, index };
+      });
+      ranked.sort((a, b) => a.rank - b.rank || a.index - b.index);
+      const picked = ranked.slice(0, limit);
+      const claim = this.db.prepare(
+        `UPDATE execution_queue SET status = 'running', started_at = ?, heartbeat_at = ?, claimed_by = ?, claim_token = ?, updated_at = ?
+         WHERE id = ? AND status = 'pending'`
+      );
+      return picked.map(({ row }) => {
+        const claimToken = randomUUID();
+        claim.run(now, now, input.owner, claimToken, now, toString(row.id));
+        let payload: Record<string, unknown> = {};
+        try {
+          const parsed = JSON.parse(toString(row.payload_json));
+          if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) payload = parsed as Record<string, unknown>;
+        } catch {
+          // a malformed payload runs with none
+        }
+        return {
+          id: toString(row.id),
+          workflowId: toString(row.workflow_id),
+          workflowName: row.workflow_name ? toString(row.workflow_name) : null,
+          payload,
+          attempts: toNumber(row.attempts),
+          maxAttempts: toNumber(row.max_attempts),
+          scheduledAt: toString(row.scheduled_at),
+          pool: toString(row.pool),
+          claimToken,
+          waitMs: Math.max(0, nowMs - (Date.parse(toString(row.scheduled_at)) || nowMs))
+        };
+      });
+    })();
+  }
+
+  async renewQueueLeases(input: { owner: string; claimTokens: string[] }): Promise<string[]> {
+    if (input.claimTokens.length === 0) return [];
+    const now = new Date().toISOString();
+    return this.db.transaction(() => {
+      const held = this.queryAll<{ claim_token: unknown }>(
+        `SELECT claim_token FROM execution_queue
+         WHERE status = 'running' AND claimed_by = ? AND claim_token IN (${input.claimTokens.map(() => "?").join(", ")})`,
+        [input.owner, ...input.claimTokens]
+      ).map((row) => toString(row.claim_token));
+      const renew = this.db.prepare(`UPDATE execution_queue SET heartbeat_at = ? WHERE claim_token = ? AND status = 'running'`);
+      for (const token of held) renew.run(now, token);
+      return held;
+    })();
+  }
+
+  async listCanceledExecutionIds(executionIds: string[]): Promise<string[]> {
+    if (executionIds.length === 0) return [];
+    return this.queryAll<{ id: unknown }>(
+      `SELECT id FROM execution_history WHERE status = 'canceled' AND id IN (${executionIds.map(() => "?").join(", ")})`,
+      executionIds
+    ).map((row) => toString(row.id));
+  }
+
+  /** Settles one running item by the worker-loss policy (queue-leases.ts); the caller runs it in a transaction. */
+  private settleLostQueueItem(row: ExecutionQueueRow, countsAttempt: boolean, reasons: { interrupted: string; exhausted: string }): LostJobOutcome {
+    const id = toString(row.id);
+    const now = new Date().toISOString();
+    const executionId = payloadExecutionId(row.payload_json, id);
+    const attempts = toNumber(row.attempts) + (countsAttempt ? 1 : 0);
+    const lost = countsAttempt ? 1 : 0;
+    const history = this.queryOne<{ status: unknown; completed_at: unknown; node_results_json: unknown; started_at: unknown }>(
+      `SELECT status, completed_at, node_results_json, started_at FROM execution_history WHERE id = ?`,
+      [executionId]
+    );
+    const decision = decideLostJob({
+      attempts,
+      maxAttempts: toNumber(row.max_attempts),
+      countsAttempt,
+      resume: payloadIsResume(row.payload_json),
+      history: history ? { status: toString(history.status), completedAt: history.completed_at, nodeResultsJson: history.node_results_json } : null
+    });
+    if (decision === "finished") {
+      this.exec(
+        `UPDATE execution_queue SET status = 'completed', completed_at = ?, updated_at = ?, heartbeat_at = NULL, attempts = ?, lost_count = lost_count + ?
+         WHERE id = ?`,
+        [now, now, attempts, lost, id]
+      );
+    } else if (decision === "requeue") {
+      this.exec(
+        `UPDATE execution_queue SET status = 'pending', claimed_by = NULL, claim_token = NULL, started_at = NULL, heartbeat_at = NULL,
+           attempts = ?, lost_count = lost_count + ?, scheduled_at = ?, updated_at = ?
+         WHERE id = ?`,
+        [attempts, lost, now, now, id]
+      );
+    } else {
+      const reason = decision === "interrupt" ? reasons.interrupted : reasons.exhausted;
+      if (history && toString(history.status) === "running") {
+        this.exec(`UPDATE execution_history SET status = 'error', error = ?, completed_at = ?, duration_ms = ? WHERE id = ? AND status = 'running'`, [
+          reason,
+          now,
+          toDurationMsForStore(toString(history.started_at), now),
+          executionId
+        ]);
+      }
+      this.exec(
+        `INSERT INTO execution_queue_dlq (id, original_id, workflow_id, workflow_name, payload_json, attempts, final_error, failed_at, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [randomUUID(), id, toString(row.workflow_id), row.workflow_name ? toString(row.workflow_name) : null, toString(row.payload_json), attempts, reason, now, now]
+      );
+      this.exec(
+        `UPDATE execution_queue SET status = 'dead', last_error = ?, attempts = ?, lost_count = lost_count + ?, heartbeat_at = NULL, updated_at = ?
+         WHERE id = ?`,
+        [reason, attempts, lost, now, id]
+      );
+    }
+    return { id, workflowId: toString(row.workflow_id), executionId, decision, attempts };
+  }
+
+  async reapExpiredQueueLeases(input: { leaseMs: number; limit?: number }): Promise<LostJobOutcome[]> {
+    const expiredBefore = new Date(Date.now() - input.leaseMs).toISOString();
+    return this.db.transaction(() =>
+      this.queryAll<ExecutionQueueRow>(
+        `SELECT id, workflow_id, workflow_name, payload_json, attempts, max_attempts FROM execution_queue
+         WHERE status = 'running' AND heartbeat_at IS NOT NULL AND heartbeat_at < ?
+         ORDER BY heartbeat_at, id
+         LIMIT ?`,
+        [expiredBefore, Math.max(1, Math.min(1_000, input.limit ?? 100))]
+      ).map((row) => this.settleLostQueueItem(row, true, { interrupted: WORKER_LOST_INTERRUPTED_ERROR, exhausted: WORKER_LOST_ERROR }))
+    )();
+  }
+
+  async releaseQueueItem(input: { id: string; claimToken: string | null }): Promise<LostJobOutcome | null> {
+    return this.db.transaction(() => {
+      const row = this.queryOne<ExecutionQueueRow>(
+        `SELECT id, workflow_id, workflow_name, payload_json, attempts, max_attempts FROM execution_queue
+         WHERE id = ? AND status = 'running' AND (? IS NULL OR claim_token = ?)`,
+        [input.id, input.claimToken, input.claimToken]
+      );
+      if (!row) return null;
+      return this.settleLostQueueItem(row, false, { interrupted: WORKER_SHUTDOWN_INTERRUPTED_ERROR, exhausted: WORKER_SHUTDOWN_INTERRUPTED_ERROR });
+    })();
+  }
+
+  async getQueueDepthByPool(): Promise<Array<{ pool: string; pending: number; running: number }>> {
+    const rows = this.queryAll<{ pool: unknown; status: unknown; count: unknown }>(
+      `SELECT pool, status, COUNT(*) AS count FROM execution_queue WHERE status IN ('pending', 'running') GROUP BY pool, status`
+    );
+    const byPool = new Map<string, { pool: string; pending: number; running: number }>();
+    for (const row of rows) {
+      const pool = toString(row.pool);
+      const entry = byPool.get(pool) ?? { pool, pending: 0, running: 0 };
+      if (toString(row.status) === "pending") entry.pending = toNumber(row.count);
+      else entry.running = toNumber(row.count);
+      byPool.set(pool, entry);
+    }
+    return [...byPool.values()].sort((a, b) => (a.pool < b.pool ? -1 : a.pool > b.pool ? 1 : 0));
+  }
+
+  async countPendingQueueItems(pool: string): Promise<number> {
+    const row = this.queryOne<{ count: unknown }>(`SELECT COUNT(*) AS count FROM execution_queue WHERE status = 'pending' AND pool = ?`, [pool]);
+    return row ? toNumber(row.count) : 0;
   }
 
   async getTriggerState(workflowId: string, nodeId: string): Promise<Record<string, unknown> | null> {
