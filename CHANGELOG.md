@@ -161,6 +161,8 @@ The initial GA release covers production hardening, OSS-growth foundations, and 
 
 - **Default chat-model provider for the Basic LLM Flow** is now `echo` instead of Ollama at `localhost:11434`. Existing instances with the old sample remain functional but no longer error silently when Ollama isn't running.
 - **Top-nav Quickstart link** in the docs site now points at the 5-minute MCP-agent tutorial (was the env-vars-and-`pnpm-install` quickstart). The plain quickstart is still in the Getting Started sidebar.
+- **Rollback and workflow delete follow the unpublish gate rule** — all three are admin-only while the release gate is on and enforced, and open to builders when the gate is switched off (even if still flagged enforced) or only observing. Builders can now roll back or delete a workflow whose gate is off but was flagged enforced. The check is made again inside the write's own transaction on SQLite and Postgres; refusals answer `403` and are audited as before (`release.rollback.refused`, `release.workflow_delete.refused`). The Releases card hides rollback with a reason only in that case, and deleting from the workflow list explains the refusal before asking to confirm.
+- **Publish dialog names the repeat** cost and p95 latency were taken at for repeated cases ("cost +12% at repeat 2", "at each case's repeat that added the most"), when the judgement says so.
 
 ### Security
 
