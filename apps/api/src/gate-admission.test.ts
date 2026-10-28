@@ -229,7 +229,12 @@ describe("dilution on an enforced gate", () => {
     expect(published.statusCode).toBe(409);
 
     const view = await casesOf(context, builder.cookie, "wf-dilute");
-    expect(view).toMatchObject({ enforced: true, counts: { admitted: 20, pending: 40, required: 0 }, canAdmit: false, canRequest: true });
+    expect(view).toMatchObject({ enforced: true, enabled: true, counts: { admitted: 20, pending: 40, required: 0 }, canAdmit: false, canRequest: true });
+    // Switched off, the enforced gate keeps its cases and says it is off; switched on again, it says so.
+    await putGate(context, admin.cookie, "wf-dilute", { enabled: false, datasetIds: [setId], policy: { minPassRate: 0.95, maxRegressions: 5 }, enforced: true });
+    expect(await casesOf(context, builder.cookie, "wf-dilute")).toMatchObject({ enforced: true, enabled: false, counts: { admitted: 20, pending: 40, required: 0 } });
+    await putGate(context, admin.cookie, "wf-dilute", { datasetIds: [setId], policy: { minPassRate: 0.95, maxRegressions: 5 }, enforced: true });
+    expect(await casesOf(context, builder.cookie, "wf-dilute")).toMatchObject({ enforced: true, enabled: true });
 
     // A builder cannot admit; an admin can, and the same job then passes at 58/60.
     expect((await call(context, "POST", "/api/workflows/wf-dilute/release-gate/cases/admit", builder.cookie, { fixtureIds: easy })).statusCode).toBe(403);
@@ -256,6 +261,7 @@ describe("dilution on an enforced gate", () => {
     expect(await casesOf(context, builder.cookie, "wf-open")).toEqual({
       workflowId: "wf-open",
       enforced: false,
+      enabled: true,
       cases: [],
       counts: { admitted: 0, pending: 0, required: 0 },
       canAdmit: false,

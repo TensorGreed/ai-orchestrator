@@ -896,6 +896,11 @@ export interface ReleaseGateCaseView {
 export interface ReleaseGateCasesView {
   workflowId: string;
   enforced: boolean;
+  /**
+   * Whether the gate is switched on. An enforced gate that is switched off keeps its admission state, but admission and
+   * required cases only apply once it is switched on again.
+   */
+  enabled: boolean;
   cases: ReleaseGateCaseView[];
   counts: { admitted: number; pending: number; required: number };
   /** Admins admit, reject and mark cases required directly. */

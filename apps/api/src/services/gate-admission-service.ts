@@ -140,7 +140,7 @@ export class GateAdmissionService {
     const snapshot = await gateAdmissionSnapshot(this.store, gate);
     const canWrite = (await this.options.access(user, workflowId, "workflow:write")).ok;
     if (!snapshot) {
-      return { workflowId, enforced: false, cases: [], counts: { admitted: 0, pending: 0, required: 0 }, canAdmit: false, canRequest: false };
+      return { workflowId, enforced: false, enabled: Boolean(gate?.enabled), cases: [], counts: { admitted: 0, pending: 0, required: 0 }, canAdmit: false, canRequest: false };
     }
     await this.sweepExpired();
     const asked = new Map<string, { id: string; kind: GateCaseRequestKind }>();
@@ -171,6 +171,7 @@ export class GateAdmissionService {
     return {
       workflowId,
       enforced: true,
+      enabled: Boolean(gate?.enabled),
       cases,
       counts: {
         admitted: cases.filter((entry) => entry.admission === "admitted").length,
