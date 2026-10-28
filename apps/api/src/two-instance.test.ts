@@ -400,7 +400,7 @@ run("two API instances on one Postgres database", () => {
     }
   }, 60_000);
 
-  it("a trigger the other instance disconnected does not run on the leader before the next sync", async () => {
+  it("a trigger the other instance disconnected does not run on the leader before the next sync (workflow_changed lost)", async () => {
     const [a, b] = await start(2);
     const watchDir = fs.mkdtempSync(path.join(os.tmpdir(), "l2m-two-instance-watch-"));
     tempDirs.push(watchDir);
@@ -415,6 +415,13 @@ run("two API instances on one Postgres database", () => {
     const other = leader === a ? b! : a!;
     await until(async () => await leader.store.getTriggerState("wf-file", "watch"), "the trigger's baseline");
     const skipped = vi.spyOn(leader.app.log, "debug");
+    // The bus normally reloads the leader at once; drop that reload so the fire-time check is what keeps the stale
+    // trigger from running until the next sync.
+    const leaderReload = leader.triggers.reloadWorkflow.bind(leader.triggers);
+    vi.spyOn(leader.triggers, "reloadWorkflow").mockImplementation(async (workflowId, options) => {
+      if (options?.announce === false) return;
+      await leaderReload(workflowId, options);
+    });
 
     // Saved through the other instance with the trigger node left active but no longer wired to anything.
     const cookie = await loginAs(other, "admin", "admin");
