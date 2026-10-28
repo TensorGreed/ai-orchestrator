@@ -262,7 +262,7 @@ describe("Unpublish in the Releases card", () => {
     const card = (await screen.findByRole("heading", { name: "Releases" })).closest("section")!;
     expect(within(card).getByText("v3 live")).toBeInTheDocument();
     expect(within(card).queryByRole("button", { name: /Unpublish/ })).toBeNull();
-    expect(within(card).getByText("Only an admin can unpublish while the gate is enforced.")).toBeInTheDocument();
+    expect(within(card).getByText("Only an admin can unpublish or roll back while the gate is enforced.")).toBeInTheDocument();
     unmount();
     render(<ReleaseGatePanel workflows={workflows} canEdit isAdmin />);
     const adminCard = (await screen.findByRole("heading", { name: "Releases" })).closest("section")!;
@@ -307,5 +307,54 @@ describe("Unpublish in the Releases card", () => {
     const card = (await screen.findByRole("heading", { name: "Releases" })).closest("section")!;
     expect(within(card).getByText("v3 live")).toBeInTheDocument();
     expect(within(card).queryByRole("button", { name: /Unpublish/ })).toBeNull();
+  });
+});
+
+describe("Rollback in the Releases card follows the unpublish rule", () => {
+  const workflows = [{ id: "wf-1", name: "Support", projectId: "default" }] as never;
+  const history = { releases: [release({ id: "rel_4", version: 4, previousVersion: 3 }), release()], publishedVersion: 4 };
+
+  it("a builder on a gate that is on and enforced is offered no rollback and is told why; an admin is offered it", async () => {
+    vi.mocked(api.fetchReleaseGate).mockResolvedValue({ gate: { ...defaultReleaseGate("wf-1"), enabled: true, enforced: true, datasetIds: ["set-1"] } });
+    vi.mocked(api.fetchEvalDatasets).mockResolvedValue({ datasets: [] } as never);
+    vi.mocked(api.fetchReleases).mockResolvedValue(history);
+    const { unmount } = render(<ReleaseGatePanel workflows={workflows} canEdit isAdmin={false} />);
+    const card = (await screen.findByRole("heading", { name: "Releases" })).closest("section")!;
+    expect(within(card).getByText("v4 live")).toBeInTheDocument();
+    expect(within(card).queryByRole("button", { name: /Roll back/ })).toBeNull();
+    expect(within(card).getByText("Only an admin can unpublish or roll back while the gate is enforced.")).toBeInTheDocument();
+    unmount();
+    render(<ReleaseGatePanel workflows={workflows} canEdit isAdmin />);
+    const adminCard = (await screen.findByRole("heading", { name: "Releases" })).closest("section")!;
+    expect(await within(adminCard).findByRole("button", { name: "Roll back to v3" })).toBeInTheDocument();
+    expect(within(adminCard).queryByText(/Only an admin can/)).toBeNull();
+  });
+
+  it("with nothing live, the reason names rollback only", async () => {
+    vi.mocked(api.fetchReleaseGate).mockResolvedValue({ gate: { ...defaultReleaseGate("wf-1"), enabled: true, enforced: true, datasetIds: ["set-1"] } });
+    vi.mocked(api.fetchEvalDatasets).mockResolvedValue({ datasets: [] } as never);
+    vi.mocked(api.fetchReleases).mockResolvedValue({ releases: [release({ id: "rel_2", verdict: "unpublished", previousVersion: 3 }), release()], publishedVersion: null });
+    render(<ReleaseGatePanel workflows={workflows} canEdit isAdmin={false} />);
+    const card = (await screen.findByRole("heading", { name: "Releases" })).closest("section")!;
+    expect(await within(card).findByText("Only an admin can roll back while the gate is enforced.")).toBeInTheDocument();
+    expect(within(card).queryByRole("button", { name: /Roll back/ })).toBeNull();
+  });
+
+  it.each([
+    ["observing", { enabled: true, enforced: false }],
+    ["switched off but still flagged enforced", { enabled: false, enforced: true }]
+  ])("a builder may roll back when the gate is %s, with no admin-only note", async (_label, flags) => {
+    const user = userEvent.setup();
+    vi.mocked(api.fetchReleaseGate).mockResolvedValue({ gate: { ...defaultReleaseGate("wf-1"), ...flags } });
+    vi.mocked(api.fetchEvalDatasets).mockResolvedValue({ datasets: [] } as never);
+    vi.mocked(api.fetchReleases).mockResolvedValue(history);
+    vi.mocked(api.rollbackWorkflowRelease).mockResolvedValue({} as never);
+    render(<ReleaseGatePanel workflows={workflows} canEdit isAdmin={false} />);
+    const card = (await screen.findByRole("heading", { name: "Releases" })).closest("section")!;
+    await user.click(await within(card).findByRole("button", { name: "Roll back to v3" }));
+    await user.type(within(card).getByLabelText("Why roll back to v3?"), "Incident");
+    await user.click(within(card).getAllByRole("button", { name: "Roll back to v3" }).at(-1)!);
+    expect(api.rollbackWorkflowRelease).toHaveBeenCalledWith("wf-1", { version: 3, reason: "Incident" });
+    expect(within(card).queryByText(/Only an admin can/)).toBeNull();
   });
 });

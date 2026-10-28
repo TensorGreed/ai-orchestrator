@@ -4,7 +4,8 @@
  */
 import { DEFAULT_PROJECT_ID, type Folder, type Project, type Workflow, type WorkflowListItem } from "@ai-orchestrator/shared";
 import type { PoolClient } from "pg";
-import { ProjectNotEmptyError } from "../store-errors.js";
+import { ProjectNotEmptyError, ReleaseGateEnforcedError } from "../store-errors.js";
+import { lockedReleaseGateEnforced } from "./release.js";
 import { type Store } from "../store.js";
 import { parseTagsJson, toNum, toStr } from "./helpers.js";
 import type { PgContext } from "./context.js";
@@ -140,10 +141,12 @@ export async function upsertWorkflow(ctx: PgContext, workflow: Workflow, options
   return payload;
 }
 
-export async function deleteWorkflow(ctx: PgContext, id: string): Promise<boolean> {
+export async function deleteWorkflow(ctx: PgContext, id: string, options: { refuseIfGateEnforced?: boolean } = {}): Promise<boolean> {
   // Read before the row goes: its nodes name its legacy session namespaces.
   const legacyNamespaces = ((await ctx.store.getWorkflow(id))?.nodes ?? []).map((node) => `${id}:${node.id}`);
   return ctx.withTransaction(async (client) => {
+    // Under the workflow row lock, before anything is deleted (an enforced gate keeps the delete with admins).
+    if (options.refuseIfGateEnforced && (await lockedReleaseGateEnforced(client, id))) throw new ReleaseGateEnforcedError("delete");
     const run = (sql: string, params: unknown[]) => client.query(sql, params);
     await run(`DELETE FROM execution_history WHERE workflow_id = $1`, [id]);
     await run(`DELETE FROM workflow_executions WHERE workflow_id = $1`, [id]);

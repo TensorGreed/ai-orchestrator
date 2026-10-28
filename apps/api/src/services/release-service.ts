@@ -125,7 +125,7 @@ import type { SafeUser } from "./auth-service.js";
 import type { NotificationEvent } from "./notification-service.js";
 import type { RunAccessResult } from "../run-access.js";
 import type { Store } from "../db/store.js";
-import { UnpublishGateEnforcedError } from "../db/store-errors.js";
+import { ReleaseGateEnforcedError } from "../db/store-errors.js";
 import { mapAsync } from "../async-array.js";
 
 /** The gate's sets as they are now (see `ReleaseService.gateSets`). */
@@ -833,9 +833,27 @@ export class ReleaseService {
     });
   }
 
-  /** Why `user` may not delete this workflow (an enforced gate: admins only); null when they may. Audits a refusal. */
+  /**
+   * Unpublish, rollback and deleting the workflow are admin-only while the gate is on and enforced; a gate that is
+   * switched off (whatever its enforced flag says) or only observing leaves them to anyone who may publish.
+   */
+  private async gateOnAndEnforced(workflowId: string): Promise<boolean> {
+    const gate = await this.store.getReleaseGate(workflowId);
+    return Boolean(gate?.enabled && gate.enforced);
+  }
+
+  /**
+   * Why `user` may not delete this workflow (a gate that is on and enforced: admins only); null when they may.
+   * Audits a refusal. The store checks it again in the delete's own transaction (`refuseIfGateEnforced`); a refusal
+   * there goes through `deleteRefused`.
+   */
   async deleteDenial(user: SafeUser, workflowId: string): Promise<string | null> {
-    if (user.role === "admin" || !await this.enforcedGateOf(workflowId)) return null;
+    if (user.role === "admin" || !await this.gateOnAndEnforced(workflowId)) return null;
+    return await this.deleteRefused(user, workflowId);
+  }
+
+  /** Audits a delete refused because the gate is on and enforced (`release.workflow_delete.refused`) and says why. */
+  async deleteRefused(user: SafeUser, workflowId: string): Promise<string> {
     await this.refuse(user, workflowId, "release.workflow_delete.refused", "delete", {});
     return "This workflow has an enforced release gate: only an admin can delete it.";
   }
@@ -1351,6 +1369,8 @@ export class ReleaseService {
     expectedPrevious: number | null;
     /** The baseline a gate publishes when it is turned on. */
     baseline?: boolean;
+    /** Refuse in the store's transaction when the gate is on and enforced (`ReleaseGateEnforcedError`). */
+    refuseIfGateEnforced?: boolean;
   }): Promise<WorkflowRelease> {
     const record = await this.store.publishWorkflowVersion(
       {
@@ -1367,7 +1387,8 @@ export class ReleaseService {
         publishedBy: input.actor.email,
         publishedByUserId: input.actor.id
       },
-      input.expectedPrevious
+      input.expectedPrevious,
+      input.refuseIfGateEnforced ? { refuseIfGateEnforced: true } : undefined
     );
     if (!record) throw new ReleaseError("Another release was published at the same time; reload and try again", 409);
     const release = this.toRelease(record);
@@ -1490,16 +1511,18 @@ export class ReleaseService {
   /**
    * Back to a version that was published before, with a reason (audited).
    * The gate's replay check is skipped because that version was released
-   * once; on an enforced gate only an admin may roll back. The version must
-   * still have the hash it had when it was released (a workflow moved to
-   * another project, or created again under the same id, does not).
+   * once; while the gate is on and enforced only an admin may roll back (as
+   * for unpublish: checked here, and again in the store's transaction). The
+   * version must still have the hash it had when it was released (a workflow
+   * moved to another project, or created again under the same id, does not).
    */
   async rollback(user: SafeUser, workflowId: string, input: ReleaseRollbackInput): Promise<WorkflowRelease> {
     await this.check(user, workflowId, "workflow:publish");
-    if (await this.enforcedGateOf(workflowId) && user.role !== "admin") {
+    const refuseNonAdmin = async (): Promise<ReleaseError> => {
       await this.refuse(user, workflowId, "release.rollback.refused", "rollback", { version: input.version });
-      throw new ReleaseError("This workflow's release gate is enforced: only an admin can roll back", 403);
-    }
+      return new ReleaseError("This workflow's release gate is enforced: only an admin can roll back", 403);
+    };
+    if (user.role !== "admin" && await this.gateOnAndEnforced(workflowId)) throw await refuseNonAdmin();
     const previous = await this.store.getPublishedVersion(workflowId);
     if (previous === input.version) throw new ReleaseError(`Version ${input.version} is already published`, 409);
     if (!await this.store.hasReleasedVersion(workflowId, input.version)) {
@@ -1511,7 +1534,24 @@ export class ReleaseService {
     }
     const conflicts = await this.conflictReasons(user, workflowId, workflow);
     if (conflicts.length > 0) throw new ReleaseError(conflicts.join(" "), 409);
-    return await this.commitRelease({ actor: user, workflowId, version: input.version, workflowHash, verdict: "rollback", replayRunId: null, reason: input.reason, gateReasons: [], approval: null, expectedPrevious: previous });
+    try {
+      return await this.commitRelease({
+        actor: user,
+        workflowId,
+        version: input.version,
+        workflowHash,
+        verdict: "rollback",
+        replayRunId: null,
+        reason: input.reason,
+        gateReasons: [],
+        approval: null,
+        expectedPrevious: previous,
+        refuseIfGateEnforced: user.role !== "admin"
+      });
+    } catch (error) {
+      if (error instanceof ReleaseGateEnforcedError) throw await refuseNonAdmin();
+      throw error;
+    }
   }
 
   /**
@@ -1532,8 +1572,7 @@ export class ReleaseService {
       await this.refuse(user, workflowId, "release.unpublish.refused", "unpublish", {});
       return new ReleaseError("This workflow's release gate is enforced: only an admin can unpublish", 403);
     };
-    const gateBefore = await this.store.getReleaseGate(workflowId);
-    if (gateBefore?.enabled && gateBefore.enforced && user.role !== "admin") throw await refuseNonAdmin();
+    if (user.role !== "admin" && await this.gateOnAndEnforced(workflowId)) throw await refuseNonAdmin();
     const nothingPublished = () => new ReleaseError("Nothing is published: production already runs the draft", 409);
     const versionChanged = (live: number) =>
       new ReleaseError(`v${live} is live now, not v${input.expectedVersion}: it was published or rolled back after you opened this. Reload and check before unpublishing`, 409);
@@ -1564,7 +1603,7 @@ export class ReleaseService {
         refuseIfGateEnforced: user.role !== "admin"
       });
     } catch (error) {
-      if (error instanceof UnpublishGateEnforcedError) throw await refuseNonAdmin();
+      if (error instanceof ReleaseGateEnforcedError) throw await refuseNonAdmin();
       throw error;
     }
     // Another unpublish or a republish got there first: the store wrote nothing.

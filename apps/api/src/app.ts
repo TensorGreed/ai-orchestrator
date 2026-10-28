@@ -167,7 +167,7 @@ import { GuardService } from "./services/guard-service.js";
 import type { GuardSimulationRun } from "./services/guard-simulation-sink.js";
 import { startSseHeartbeat } from "./sse-heartbeat.js";
 import { createRunAccess, type RunAccessDenial } from "./run-access.js";
-import { ProjectNotEmptyError, StoreReferenceMissingError } from "./db/store-errors.js";
+import { ProjectNotEmptyError, ReleaseGateEnforcedError, StoreReferenceMissingError } from "./db/store-errors.js";
 import { createRunScope, type SecretScope } from "./run-scope.js";
 import {
   CODE_SANDBOX_INITIALISING,
@@ -7511,7 +7511,14 @@ export async function createApp(
     const gateCasesRemoved = await releaseService.gateCasesRemoval(user, request.params.id, { via: "workflow" });
 
     try {
-      const deleted = await store.deleteWorkflow(request.params.id);
+      let deleted: boolean;
+      try {
+        // Checked again in the delete's own transaction, for a gate that became enforced since.
+        deleted = await store.deleteWorkflow(request.params.id, { refuseIfGateEnforced: user.role !== "admin" });
+      } catch (error) {
+        if (error instanceof ReleaseGateEnforcedError) return denyRunAccess(reply, { status: 403, error: await releaseService.deleteRefused(user, request.params.id) });
+        throw error;
+      }
       if (!deleted) {
         reply.code(404);
         return { error: "Workflow not found" };

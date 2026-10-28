@@ -62,7 +62,7 @@ import {
 } from "@ai-orchestrator/shared";
 import { isEmptyDataLabels, labelsForUntrackedSave, mergeDataLabels, parseStoredDataLabels, type DataLabels } from "@ai-orchestrator/shared";
 import { queuedRunTimeoutMs, STUCK_JOB_MARGIN_MS } from "./queue-timeouts.js";
-import { isForeignKeyViolation, ProjectNotEmptyError, StoreReferenceMissingError, UnpublishGateEnforcedError } from "./store-errors.js";
+import { isForeignKeyViolation, ProjectNotEmptyError, ReleaseGateEnforcedError, StoreReferenceMissingError, UnpublishGateEnforcedError } from "./store-errors.js";
 import { clampLimit, LIMIT_MAX } from "./store-limits.js";
 import {
   auditEntryHash,
@@ -3946,7 +3946,9 @@ export class SqliteStore implements Store {
     return row?.created_by ? toString(row.created_by) : null;
   }
 
-  async deleteWorkflow(id: string): Promise<boolean> {
+  async deleteWorkflow(id: string, options: { refuseIfGateEnforced?: boolean } = {}): Promise<boolean> {
+    // Read and deleted with no await in between, so no other write lands between the gate check and the delete.
+    if (options.refuseIfGateEnforced && this.releaseGateEnforcedSync(id)) throw new ReleaseGateEnforcedError("delete");
     const hasTable = (tableName: string): boolean => {
       const row = this.queryOne<{ count: number }>(
         `SELECT COUNT(*) as count FROM sqlite_master WHERE type = 'table' AND name = ?`,
@@ -8169,12 +8171,27 @@ export class SqliteStore implements Store {
    * published version is no longer `expectedPrevious` (another publish got
    * there first) or the version row is gone.
    */
-  async publishWorkflowVersion(release: Omit<WorkflowReleaseRecord, "previousVersion">, expectedPrevious: number | null): Promise<WorkflowReleaseRecord | null> {
-    return this.publishWorkflowVersionSync(release, expectedPrevious);
+  async publishWorkflowVersion(
+    release: Omit<WorkflowReleaseRecord, "previousVersion">,
+    expectedPrevious: number | null,
+    options: { refuseIfGateEnforced?: boolean } = {}
+  ): Promise<WorkflowReleaseRecord | null> {
+    return this.publishWorkflowVersionSync(release, expectedPrevious, options);
   }
 
-  private publishWorkflowVersionSync(release: Omit<WorkflowReleaseRecord, "previousVersion">, expectedPrevious: number | null): WorkflowReleaseRecord | null {
+  /** Inside a transaction: the workflow's release gate is on and enforced (a gate that is switched off restricts nothing). */
+  private releaseGateEnforcedSync(workflowId: string): boolean {
+    const gate = this.getReleaseGateSync(workflowId);
+    return Boolean(gate?.enabled) && Boolean(gate?.enforced);
+  }
+
+  private publishWorkflowVersionSync(
+    release: Omit<WorkflowReleaseRecord, "previousVersion">,
+    expectedPrevious: number | null,
+    options: { refuseIfGateEnforced?: boolean } = {}
+  ): WorkflowReleaseRecord | null {
     return this.transaction(() => {
+      if (options.refuseIfGateEnforced && this.releaseGateEnforcedSync(release.workflowId)) throw new ReleaseGateEnforcedError("rollback");
       const current = this.getPublishedVersionSync(release.workflowId);
       if (current !== expectedPrevious) return null;
       const pinned = this.db.prepare(`UPDATE workflow_versions SET pinned = 1 WHERE workflow_id = ? AND version = ?`).run(release.workflowId, release.version);

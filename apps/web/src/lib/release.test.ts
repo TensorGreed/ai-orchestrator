@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { defaultReleaseGate } from "@ai-orchestrator/shared";
-import { gateAdmissionBanner, gateFormFrom, gateLocks, gateSettingsFromForm, gateStatsLines, releasePillLabel, releaseVerdictTone } from "./release";
+import { gateAdmissionBanner, gateFormFrom, gateLocks, gateSettingsFromForm, gateStatsLines, releaseActionsAdminOnly, releasePillLabel, releaseVerdictTone, repeatSelectionPhrase, workflowDeleteDenial } from "./release";
 
 describe("release helpers", () => {
   it("labels the version pill by what production runs", () => {
@@ -81,5 +81,43 @@ describe("gate admission helpers", () => {
     expect(gateStatsLines(base)).toEqual(["18 of 20 cases passed (90%)"]);
     const lines = gateStatsLines({ ...base, admission: { admitted: 20, pending: 40, pendingNotPassing: 0, required: 2, requiredFailures: [{ id: "a", name: "A", problem: "failed" }] } });
     expect(lines).toEqual(["18 of 20 cases passed (90%)", "40 cases pending admission (run, not counted)", "2 required cases, 1 not passing"]);
+  });
+});
+
+describe("repeat selection in the gate summary", () => {
+  const base = { cases: 2, pass: 2, fail: 0, error: 0, skipped: 0, passRate: 1, regressions: 0, costIncreasePct: 12, p95LatencyIncreasePct: 30, newGuardBlocks: 0, oldestRecordingDays: null };
+
+  it("says which repeat cost and latency were taken at, in plain words", () => {
+    expect(gateStatsLines({ ...base, repeatSelection: { cost: { by: "repeat", repeat: 2 }, latency: { by: "largest_increase" } } })).toEqual([
+      "2 of 2 cases passed (100%)",
+      "cost +12% at repeat 2",
+      "p95 latency +30% at each case's repeat that added the most"
+    ]);
+    expect(repeatSelectionPhrase({ by: "repeat", repeat: 3, partial: true })).toBe(" at repeat 3 (some cases at their deciding repeat)");
+    expect(repeatSelectionPhrase({ by: "largest_relative_increase" })).toBe(" at each case's repeat that rose the most");
+  });
+
+  it("says nothing when the judgement does not name a selection, or names the deciding repeat", () => {
+    expect(gateStatsLines(base)).toEqual(["2 of 2 cases passed (100%)", "cost +12%", "p95 latency +30%"]);
+    expect(gateStatsLines({ ...base, repeatSelection: { cost: { by: "deciding" } } })).toEqual(["2 of 2 cases passed (100%)", "cost +12%", "p95 latency +30%"]);
+    expect(repeatSelectionPhrase(undefined)).toBe("");
+  });
+});
+
+describe("rollback, unpublish and delete: one rule", () => {
+  it("is the admin's only while the gate is on and enforced", () => {
+    expect(releaseActionsAdminOnly({ enabled: true, enforced: true }, false)).toBe(true);
+    expect(releaseActionsAdminOnly({ enabled: true, enforced: true }, true)).toBe(false);
+    expect(releaseActionsAdminOnly({ enabled: true, enforced: false }, false)).toBe(false);
+    // Switched off but still flagged enforced: restricts nothing.
+    expect(releaseActionsAdminOnly({ enabled: false, enforced: true }, false)).toBe(false);
+  });
+
+  it("explains a refused delete before the confirm, and leaves an unknown state to the server", () => {
+    expect(workflowDeleteDenial({ gateEnabled: true, gateEnforced: true }, false)).toBe("This workflow has an enforced release gate: only an admin can delete it.");
+    expect(workflowDeleteDenial({ gateEnabled: false, gateEnforced: true }, false)).toBeNull();
+    expect(workflowDeleteDenial({ gateEnabled: true, gateEnforced: false }, false)).toBeNull();
+    expect(workflowDeleteDenial({ gateEnabled: true, gateEnforced: true }, true)).toBeNull();
+    expect(workflowDeleteDenial(null, false)).toBeNull();
   });
 });

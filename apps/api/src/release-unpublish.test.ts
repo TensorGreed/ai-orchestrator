@@ -430,8 +430,8 @@ describe("unpublish with a release gate", () => {
     expect(response.statusCode, response.body).toBe(200);
     expect(response.json<ReleaseUnpublishResult>()).toMatchObject({ gateEnabled: false, gateEnforced: false });
     expect((await ctx.store.listAuditLogs({ eventType: "release.unpublished", pageSize: 5 })).items[0]!.metadata).toMatchObject({ gateEnabled: false, gateEnforced: false });
-    // Rollback keeps following the enforced flag.
-    expect((await callAs(ctx, "POST", "/api/workflows/wf-off/rollback", builder.cookie, { version: 1, reason: "back" })).statusCode).toBe(403);
+    // Rollback follows the same rule: a switched-off gate leaves it to the builder too.
+    expect((await callAs(ctx, "POST", "/api/workflows/wf-off/rollback", builder.cookie, { version: 1, reason: "back" })).statusCode).toBe(200);
   });
 
   it("a gate that is on but not enforced says so too; deactivating is still the kill switch; a workflow created again under the id still fails closed", async () => {

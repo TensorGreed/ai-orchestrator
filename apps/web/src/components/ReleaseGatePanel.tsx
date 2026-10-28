@@ -18,7 +18,7 @@ import {
   type ReleaseGateView,
   type WorkflowReleasesView
 } from "../lib/api";
-import { gateFormFrom, gateLocks, gateSettingsFromForm, releaseVerdictLabel, releaseVerdictTone, type GateForm } from "../lib/release";
+import { gateFormFrom, gateLocks, gateSettingsFromForm, releaseActionsAdminOnly, releaseVerdictLabel, releaseVerdictTone, type GateForm } from "../lib/release";
 import { GateCasesCard } from "./GateCasesCard";
 import { UnpublishControl } from "./UnpublishControl";
 
@@ -314,9 +314,8 @@ function WorkflowReleaseView({ workflowId, activeProjectId, canEdit, isAdmin }: 
       <ReleaseHistory
         workflowId={workflowId}
         history={history}
-        canRollback={canEdit && !locks.adminOnly}
-        canUnpublish={canEdit && (isAdmin || !(gate.enabled && gate.enforced))}
-        unpublishAdminOnly={canEdit && !isAdmin && gate.enabled && gate.enforced}
+        canAct={canEdit}
+        adminOnly={releaseActionsAdminOnly(gate, isAdmin)}
         gate={gate}
         onChanged={() => void load()}
       />
@@ -338,18 +337,17 @@ function NumberField({ id, label, value, placeholder, onChange }: { id: string; 
 function ReleaseHistory({
   workflowId,
   history,
-  canRollback,
-  canUnpublish,
-  unpublishAdminOnly,
+  canAct,
+  adminOnly,
   gate,
   onChanged
 }: {
   workflowId: string;
   history: WorkflowReleasesView;
-  canRollback: boolean;
-  canUnpublish: boolean;
-  /** Unpublish is not offered because the gate is enforced and the user is not an admin. */
-  unpublishAdminOnly: boolean;
+  /** The user may publish this workflow, so may roll back and unpublish unless `adminOnly`. */
+  canAct: boolean;
+  /** Rollback and unpublish are not offered: the gate is on and enforced and the user is not an admin. */
+  adminOnly: boolean;
   gate: Pick<ReleaseGateView, "enabled" | "enforced">;
   onChanged: () => void;
 }) {
@@ -359,6 +357,8 @@ function ReleaseHistory({
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const unpublished = history.publishedVersion === null && history.releases[0]?.verdict === "unpublished";
+  // The server's rule for both (and for deleting the workflow): admins only while the gate is on and enforced.
+  const mayChangeRelease = canAct && !adminOnly;
   // The "Unpublished" notice describes the moment after the unpublish: a later publish or rollback ends it.
   useEffect(() => {
     if (history.publishedVersion !== null) setNotice(null);
@@ -402,7 +402,7 @@ function ReleaseHistory({
               ? "Unpublished: production runs the latest save"
               : "Not published: production runs the latest save"}
         </span>
-        {canUnpublish && history.publishedVersion !== null && (
+        {mayChangeRelease && history.publishedVersion !== null && (
           <UnpublishControl
             workflowId={workflowId}
             liveVersion={history.publishedVersion}
@@ -415,7 +415,11 @@ function ReleaseHistory({
           />
         )}
       </header>
-      {unpublishAdminOnly && history.publishedVersion !== null && <p className="cfg-help">Only an admin can unpublish while the gate is enforced.</p>}
+      {canAct && adminOnly && (history.publishedVersion !== null || history.releases.length > 0) && (
+        <p className="cfg-help">
+          {history.publishedVersion !== null ? "Only an admin can unpublish or roll back while the gate is enforced." : "Only an admin can roll back while the gate is enforced."}
+        </p>
+      )}
       {notice && (
         <div className="approvals-notice" role="status">
           {notice}
@@ -444,7 +448,7 @@ function ReleaseHistory({
                   Replay job <code>{release.replayRunId}</code>
                 </div>
               )}
-              {canRollback && release.version !== history.publishedVersion && newestOfVersion.has(release.id) && (
+              {mayChangeRelease && release.version !== history.publishedVersion && newestOfVersion.has(release.id) && (
                 <button
                   type="button"
                   className="pg-btn small ghost"

@@ -781,9 +781,16 @@ export interface Store {
    * Moves the published version and records the release, in one transaction:
    * the version is pinned (exempt from retention). Refused (null) when the
    * published version is no longer `expectedPrevious` (another publish got
-   * there first) or the version row is gone.
+   * there first) or the version row is gone. With `refuseIfGateEnforced` (a
+   * rollback by a caller who is not an admin) the gate row is read in the same
+   * transaction (Postgres: after the workflow row lock) and, when it is on and
+   * enforced, the call throws `ReleaseGateEnforcedError` and writes nothing.
    */
-  publishWorkflowVersion(release: Omit<WorkflowReleaseRecord, "previousVersion">, expectedPrevious: number | null): Promise<WorkflowReleaseRecord | null>;
+  publishWorkflowVersion(
+    release: Omit<WorkflowReleaseRecord, "previousVersion">,
+    expectedPrevious: number | null,
+    options?: { refuseIfGateEnforced?: boolean }
+  ): Promise<WorkflowReleaseRecord | null>;
   /**
    * Takes the published version down and records it, in one transaction: the workflow row is read and changed
    * together (Postgres: `SELECT … FOR UPDATE`), so of two concurrent calls (two API instances too) one unpublishes
@@ -942,7 +949,12 @@ export interface Store {
   upsertWorkflow(workflow: Workflow, options?: { createdBy?: string | null }): Promise<Workflow>;
   /** Phase 10.2 — user id of the workflow's creator, or null when unknown. */
   getWorkflowCreatedBy(id: string): Promise<string | null>;
-  deleteWorkflow(id: string): Promise<boolean>;
+  /**
+   * With `refuseIfGateEnforced` (a caller who is not an admin) the release gate row is read before anything is
+   * deleted, in the same transaction (Postgres: after the workflow row lock); when the gate is on and enforced the
+   * call throws `ReleaseGateEnforcedError` and deletes nothing.
+   */
+  deleteWorkflow(id: string, options?: { refuseIfGateEnforced?: boolean }): Promise<boolean>;
   countWorkflows(): Promise<number>;
   listTemplates(filters?: { category?: string; search?: string }): Promise<Array<{
     id: string; name: string; description: string; category: string;

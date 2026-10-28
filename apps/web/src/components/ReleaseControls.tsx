@@ -21,7 +21,7 @@ import {
   type ReleaseStateView,
   type WorkflowVersionSummary
 } from "../lib/api";
-import { gateStatsLines, releasePillLabel, releaseVerdictLabel } from "../lib/release";
+import { gateStatsLines, releaseActionsAdminOnly, releasePillLabel, releaseVerdictLabel } from "../lib/release";
 import { UnpublishControl } from "./UnpublishControl";
 
 function errorText(err: unknown, fallback: string): string {
@@ -366,10 +366,10 @@ export function PublishDialog({ workflowId, state, canPublish, isAdmin, onClose,
               Unpublished. {unpublishedNotice}
             </div>
           )}
-          {canPublish && state && state.publishedVersion !== null && state.gateEnabled && state.gateEnforced && !isAdmin && result?.outcome !== "published" && !unpublishedNotice && (
+          {canPublish && state && state.publishedVersion !== null && releaseActionsAdminOnly({ enabled: state.gateEnabled, enforced: state.gateEnforced }, isAdmin) && result?.outcome !== "published" && !unpublishedNotice && (
             <p className="settings-help release-unpublish-admin-only">Only an admin can unpublish while the gate is enforced.</p>
           )}
-          {canPublish && state && state.publishedVersion !== null && (isAdmin || !(state.gateEnabled && state.gateEnforced)) && result?.outcome !== "published" && !unpublishedNotice && (
+          {canPublish && state && state.publishedVersion !== null && !releaseActionsAdminOnly({ enabled: state.gateEnabled, enforced: state.gateEnforced }, isAdmin) && result?.outcome !== "published" && !unpublishedNotice && (
             <section className="release-unpublish-row" aria-label="Unpublish">
               <p className="settings-help">v{state.publishedVersion} is live. Unpublish it to run the draft in production again.</p>
               <UnpublishControl

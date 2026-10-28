@@ -104,6 +104,25 @@ describe("version pill and Publish dialog", () => {
     expect(await within(dialog).findByText(/Published v3/)).toBeInTheDocument();
   });
 
+  it("names the repeat cost and latency were taken at when the judgement says, and nothing when it does not", async () => {
+    const user = userEvent.setup();
+    const stats = { cases: 3, pass: 3, fail: 0, error: 0, skipped: 0, passRate: 1, regressions: 0, costIncreasePct: 4, p95LatencyIncreasePct: 10, newGuardBlocks: 0, oldestRecordingDays: 2 };
+    vi.mocked(api.fetchReleaseState).mockResolvedValue({ state: { draftVersion: 3, publishedVersion: 2, aheadBy: 1, gateEnabled: true, gateEnforced: false, productionRefused: false, unpublishedAt: null, canPublish: true, canEditGate: true } });
+    vi.mocked(api.fetchWorkflowVersions).mockResolvedValue(versions());
+    vi.mocked(api.fetchPublishPreview).mockResolvedValue({ preview: preview({ stats: { ...stats, repeatSelection: { cost: { by: "repeat", repeat: 2 }, latency: { by: "largest_increase" } } } }) });
+    const { unmount } = render(<ReleasePill workflowId="wf-1" canPublish isAdmin={false} />);
+    await user.click(await screen.findByRole("button", { name: /Release:/ }));
+    const dialog = await screen.findByRole("dialog", { name: "Publish to production" });
+    expect(await within(dialog).findByText(/cost \+4% at repeat 2 · p95 latency \+10% at each case's repeat that added the most/)).toBeInTheDocument();
+    unmount();
+    vi.mocked(api.fetchPublishPreview).mockResolvedValue({ preview: preview({ stats }) });
+    render(<ReleasePill workflowId="wf-1" canPublish isAdmin={false} />);
+    await user.click(await screen.findByRole("button", { name: /Release:/ }));
+    const plain = await screen.findByRole("dialog", { name: "Publish to production" });
+    expect(await within(plain).findByText(/cost \+4% · p95 latency \+10%/)).toBeInTheDocument();
+    expect(within(plain).queryByText(/at repeat|at each case/)).toBeNull();
+  });
+
   it("a blocked version: a builder asks an approver with a reason; an admin may override with a reason", async () => {
     const user = userEvent.setup();
     vi.mocked(api.fetchReleaseState).mockResolvedValue({ state: { draftVersion: 3, publishedVersion: 2, aheadBy: 1, gateEnabled: true, gateEnforced: false, productionRefused: false, canPublish: true, canEditGate: true } });

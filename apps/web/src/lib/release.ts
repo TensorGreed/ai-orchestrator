@@ -1,4 +1,4 @@
-import type { ReleaseGateStats, ReleaseGateView, ReleaseStateView, ReleaseVerdict } from "@ai-orchestrator/shared";
+import type { ReleaseGateRepeatSelection, ReleaseGateStats, ReleaseGateView, ReleaseStateView, ReleaseVerdict } from "@ai-orchestrator/shared";
 
 /** Phase 15.4 — helpers behind the version pill, the Publish dialog and the Gates tab. */
 
@@ -63,13 +63,24 @@ function pct(value: number): string {
   return `${Math.round(value * 1000) / 10}%`;
 }
 
+/**
+ * Which repeat of the repeated cases a cost or latency figure was taken at, in plain words (" at repeat 2"); empty
+ * when the judgement does not say, or took it at each case's deciding repeat (the usual reading).
+ */
+export function repeatSelectionPhrase(selection: ReleaseGateRepeatSelection | undefined): string {
+  if (!selection || selection.by === "deciding") return "";
+  if (selection.by === "repeat") return selection.partial ? ` at repeat ${selection.repeat} (some cases at their deciding repeat)` : ` at repeat ${selection.repeat}`;
+  if (selection.by === "largest_increase") return " at each case's repeat that added the most";
+  return " at each case's repeat that rose the most";
+}
+
 /** Short facts about the judged job, for the Publish dialog. */
 export function gateStatsLines(stats: ReleaseGateStats | null): string[] {
   if (!stats) return [];
   const lines = [`${stats.pass} of ${stats.cases} cases passed (${pct(stats.passRate)})`];
   if (stats.regressions > 0) lines.push(`${stats.regressions} regression${stats.regressions === 1 ? "" : "s"}`);
-  if (stats.costIncreasePct !== null) lines.push(`cost ${stats.costIncreasePct >= 0 ? "+" : ""}${Math.round(stats.costIncreasePct)}%`);
-  if (stats.p95LatencyIncreasePct !== null) lines.push(`p95 latency ${stats.p95LatencyIncreasePct >= 0 ? "+" : ""}${Math.round(stats.p95LatencyIncreasePct)}%`);
+  if (stats.costIncreasePct !== null) lines.push(`cost ${stats.costIncreasePct >= 0 ? "+" : ""}${Math.round(stats.costIncreasePct)}%${repeatSelectionPhrase(stats.repeatSelection?.cost)}`);
+  if (stats.p95LatencyIncreasePct !== null) lines.push(`p95 latency ${stats.p95LatencyIncreasePct >= 0 ? "+" : ""}${Math.round(stats.p95LatencyIncreasePct)}%${repeatSelectionPhrase(stats.repeatSelection?.latency)}`);
   if (stats.newGuardBlocks > 0) lines.push(`${stats.newGuardBlocks} new guard block${stats.newGuardBlocks === 1 ? "" : "s"}`);
   const admission = stats.admission;
   if (admission && admission.pending > 0) lines.push(`${admission.pending} case${admission.pending === 1 ? "" : "s"} pending admission (run, not counted)`);
@@ -121,6 +132,24 @@ export interface GateLocks {
   adminOnly: boolean;
   /** Self-approval can only be turned on by an admin. */
   selfApproval: boolean;
+}
+
+/**
+ * Unpublish, rollback and deleting the workflow are the admin's while the gate is on and enforced; a gate that is
+ * switched off, or only observing, leaves them to anyone who may publish (the server checks it too).
+ */
+export function releaseActionsAdminOnly(gate: { enabled: boolean; enforced: boolean }, isAdmin: boolean): boolean {
+  return !isAdmin && gate.enabled && gate.enforced;
+}
+
+/**
+ * Why `isAdmin` may not delete the workflow whose release state is `state` (the same rule as rollback and unpublish:
+ * the gate and its history outlive the workflow); null when they may, or when the state is unknown (the server
+ * answers then).
+ */
+export function workflowDeleteDenial(state: Pick<ReleaseStateView, "gateEnabled" | "gateEnforced"> | null, isAdmin: boolean): string | null {
+  if (!state || !releaseActionsAdminOnly({ enabled: state.gateEnabled, enforced: state.gateEnforced }, isAdmin)) return null;
+  return "This workflow has an enforced release gate: only an admin can delete it.";
 }
 
 export function gateLocks(gate: Pick<ReleaseGateView, "enforced">, isAdmin: boolean): GateLocks {

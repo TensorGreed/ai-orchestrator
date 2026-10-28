@@ -10,7 +10,7 @@
 import type { PoolClient } from "pg";
 import { GUARD_SIMULATION_JOB_DATASET_PREFIX } from "@ai-orchestrator/shared";
 import type { Store, ReleaseApprovalDecisionInput, ReleaseGateCasesChange, GateCaseDecisionRecordInput } from "../store.js";
-import { UnpublishGateEnforcedError } from "../store-errors.js";
+import { ReleaseGateEnforcedError, UnpublishGateEnforcedError } from "../store-errors.js";
 import type {
   ApprovalReadScope,
   GateCaseRequestRecord,
@@ -359,14 +359,26 @@ export async function hasReleasedVersion(ctx: PgContext, workflowId: string, ver
   return Boolean(await ctx.queryOne(`SELECT id FROM workflow_releases WHERE workflow_id = $1 AND version = $2 LIMIT 1`, [workflowId, version]));
 }
 
+/**
+ * Inside a transaction: locks the workflow row, then reads its release gate, so a gate that was enforced before the
+ * lock was granted is seen. True when the gate is on and enforced (a gate that is switched off restricts nothing).
+ */
+export async function lockedReleaseGateEnforced(client: PoolClient, workflowId: string): Promise<boolean> {
+  await readPublishedVersion(client, workflowId, true);
+  const gate = await readReleaseGate(client, workflowId, false);
+  return Boolean(gate?.enabled) && Boolean(gate?.enforced);
+}
+
 export async function publishWorkflowVersion(
   ctx: PgContext,
   release: Omit<WorkflowReleaseRecord, "previousVersion">,
-  expectedPrevious: number | null
+  expectedPrevious: number | null,
+  options: { refuseIfGateEnforced?: boolean } = {}
 ): Promise<WorkflowReleaseRecord | null> {
   const refusal = new Refused("conflict");
   try {
     return await ctx.withTransaction(async (client) => {
+      if (options.refuseIfGateEnforced && (await lockedReleaseGateEnforced(client, release.workflowId))) throw new ReleaseGateEnforcedError("rollback");
       const committed = await publishOn(client, release, expectedPrevious);
       // A refusal leaves nothing behind (as the SQLite transaction did: it wrote nothing before refusing).
       if (!committed) throw refusal;
