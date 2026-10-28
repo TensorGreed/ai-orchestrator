@@ -22,7 +22,9 @@ Use this to create an initial admin automatically when DB is empty.
 
 SAML (`SAML_*`), LDAP (`LDAP_*`) and OpenID Connect (`OIDC_*`) are all off by
 default. OIDC needs `OIDC_ENABLED=true`, `OIDC_ISSUER` and `OIDC_CLIENT_ID`;
-see [OIDC single sign-on](../security/auth-rbac.md#oidc-single-sign-on).
+the optional `OIDC_ALLOWED_EMAIL_DOMAINS` and `OIDC_ALLOWED_GROUPS` limit who
+can sign in (recommended for shared or self-registration IdPs); see
+[OIDC single sign-on](../security/auth-rbac.md#oidc-single-sign-on).
 
 ## MCP server registry probes (optional)
 
