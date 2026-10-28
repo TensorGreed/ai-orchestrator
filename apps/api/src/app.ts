@@ -7511,18 +7511,23 @@ export async function createApp(
     // Deleting the workflow deletes its golden runs: an enforced gate's admitted cases can no longer pass, which is audited.
     const gateCasesRemoved = await releaseService.gateCasesRemoval(user, request.params.id, { via: "workflow" });
 
+    let deleted: boolean;
     try {
-      let deleted: boolean;
-      try {
-        deleted = await store.deleteWorkflow(request.params.id, { refuseIfGateEnforced: user.role !== "admin" });
-      } catch (error) {
-        if (!(error instanceof ReleaseGateEnforcedError)) throw error;
-        return denyRunAccess(reply, { status: 403, error: await releaseService.deleteRefused(user, request.params.id) });
+      deleted = await store.deleteWorkflow(request.params.id, { refuseIfGateEnforced: user.role !== "admin" });
+    } catch (error) {
+      if (!(error instanceof ReleaseGateEnforcedError)) {
+        reply.code(400);
+        return { error: error instanceof Error ? error.message : "Failed to delete workflow" };
       }
-      if (!deleted) {
-        reply.code(404);
-        return { error: "Workflow not found" };
-      }
+      // Outside the catch-all below: a failure to audit the refusal is a server error, never a 400.
+      return denyRunAccess(reply, { status: 403, error: await releaseService.deleteRefused(user, request.params.id) });
+    }
+    if (!deleted) {
+      reply.code(404);
+      return { error: "Workflow not found" };
+    }
+
+    try {
       await gateCasesRemoved?.();
 
       schedulerService?.removeWorkflow(request.params.id);

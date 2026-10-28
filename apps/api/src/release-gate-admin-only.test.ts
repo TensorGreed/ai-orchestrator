@@ -98,7 +98,7 @@ describe("rollback and delete with the gate on and enforced", () => {
 
     const refusedDelete = await remove(ctx, builder.cookie, "wf-enf");
     expect(refusedDelete.statusCode).toBe(403);
-    expect(refusedDelete.json<{ error: string }>().error).toMatch(/only an admin can delete it/);
+    expect(refusedDelete.json<{ error: string }>().error).toMatch(/release gate is enforced: only an admin can delete it/);
     expect(await ctx.store.getWorkflow("wf-enf")).not.toBeNull();
     expect(await auditCount(ctx, "release.workflow_delete.refused")).toBe(1);
 
@@ -109,6 +109,11 @@ describe("rollback and delete with the gate on and enforced", () => {
   });
 });
 
+/**
+ * The gate is enforced by a spy after the service's check and before the store call: these cover the store's own
+ * re-check. A gate committed while the store's transaction is open is covered on Postgres by
+ * db/postgres-gate-lock-order.test.ts; on SQLite a store write runs synchronously, so nothing commits inside it.
+ */
 describe("a gate enforced between the check and the write", () => {
   it("refuses a builder's rollback inside the transaction and writes nothing", async () => {
     const ctx = await context();
@@ -160,7 +165,7 @@ describe("a gate enforced between the check and the write", () => {
     });
     const refused = await remove(ctx, builder.cookie, "wf-late-del");
     expect(refused.statusCode, refused.body).toBe(403);
-    expect(refused.json<{ error: string }>().error).toMatch(/only an admin can delete it/);
+    expect(refused.json<{ error: string }>().error).toMatch(/release gate is enforced: only an admin can delete it/);
     expect(await ctx.store.getWorkflow("wf-late-del")).not.toBeNull();
     expect((await ctx.store.listWorkflowVersions("wf-late-del")).length).toBeGreaterThan(0);
     expect(await auditCount(ctx, "release.workflow_delete.refused")).toBe(1);
@@ -171,5 +176,36 @@ describe("a gate enforced between the check and the write", () => {
     expect(await ctx.store.getWorkflow("wf-late-del")).not.toBeNull();
     expect((await remove(ctx, admin.cookie, "wf-late-del")).statusCode).toBe(200);
     expect(await ctx.store.getWorkflow("wf-late-del")).toBeNull();
+
+    // A workflow already gone is not refused (its gate outlives it, still enforced): nothing to delete, so false.
+    expect((await ctx.store.getReleaseGate("wf-late-del"))?.enforced).toBe(true);
+    expect(await ctx.store.deleteWorkflow("wf-late-del", { refuseIfGateEnforced: true })).toBe(false);
+  });
+});
+
+describe("workflow delete failures", () => {
+  it("a store error answers 400, and a refusal whose audit fails is a server error rather than a 400", async () => {
+    const ctx = await context();
+    const { builder } = await publishedTwiceWithGate(ctx, "wf-del-fail", { enabled: false, enforced: false });
+    vi.spyOn(ctx.store, "deleteWorkflow").mockRejectedValueOnce(new Error("disk full"));
+    const failed = await remove(ctx, builder.cookie, "wf-del-fail");
+    expect(failed.statusCode).toBe(400);
+    expect(failed.json<{ error: string }>().error).toBe("disk full");
+
+    // The store refuses, then the refusal's audit cannot read the workflow.
+    let refused = false;
+    const realGet = ctx.store.getWorkflow.bind(ctx.store);
+    vi.spyOn(ctx.store, "deleteWorkflow").mockImplementationOnce(async () => {
+      refused = true;
+      throw new ReleaseGateEnforcedError();
+    });
+    vi.spyOn(ctx.store, "getWorkflow").mockImplementation(async (...args) => {
+      if (refused) throw new Error("read failed");
+      return realGet(...args);
+    });
+    const broken = await remove(ctx, builder.cookie, "wf-del-fail");
+    expect(broken.statusCode).toBe(500);
+    vi.mocked(ctx.store.getWorkflow).mockRestore();
+    expect(await ctx.store.getWorkflow("wf-del-fail")).not.toBeNull();
   });
 });

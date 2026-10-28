@@ -847,7 +847,7 @@ export class ReleaseService {
   /** Audits a refused workflow delete and answers why. */
   async deleteRefused(user: SafeUser, workflowId: string): Promise<string> {
     await this.refuse(user, workflowId, "release.workflow_delete.refused", "delete", {});
-    return "This workflow's release gate is on and enforced: only an admin can delete it.";
+    return "This workflow's release gate is enforced: only an admin can delete it";
   }
 
   /**

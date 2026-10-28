@@ -3947,8 +3947,9 @@ export class SqliteStore implements Store {
   }
 
   async deleteWorkflow(id: string, options: { refuseIfGateEnforced?: boolean } = {}): Promise<boolean> {
-    // The whole delete runs synchronously, so nothing can change the gate between this read and the last delete.
-    if (options.refuseIfGateEnforced) this.gateStateForWriteSync(id, true);
+    // The whole delete runs synchronously, so nothing can change the gate between this read and the last delete. A
+    // workflow that is already gone is not refused: the delete finds nothing and the caller answers 404.
+    if (options.refuseIfGateEnforced && this.queryOne(`SELECT id FROM workflows WHERE id = ?`, [id])) this.gateStateForWriteSync(id, true);
     const hasTable = (tableName: string): boolean => {
       const row = this.queryOne<{ count: number }>(
         `SELECT COUNT(*) as count FROM sqlite_master WHERE type = 'table' AND name = ?`,
