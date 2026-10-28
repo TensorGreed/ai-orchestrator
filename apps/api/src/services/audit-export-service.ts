@@ -36,6 +36,24 @@ interface AuditExportDestinationConfig {
   path?: string;
 }
 
+/**
+ * Phase 13.1 — cluster mode: runs one destination's export under a cluster-wide lock keyed by the destination, so two
+ * instances never read the same cursor and ship the same rows. Resolves `{ acquired: false }` when another instance
+ * still holds it after `waitMs`.
+ */
+export type AuditExportLock = <T>(destinationId: string, waitMs: number, work: () => Promise<T>) => Promise<{ acquired: true; value: T } | { acquired: false }>;
+
+/** Another instance is exporting this destination right now. */
+export class AuditExportBusyError extends Error {
+  constructor(destinationId: string) {
+    super(`Another instance is exporting audit destination ${destinationId}; try again shortly.`);
+    this.name = "AuditExportBusyError";
+  }
+}
+
+/** How long "Export now" waits for another instance's export of the same destination. */
+export const AUDIT_EXPORT_NOW_LOCK_WAIT_MS = 10_000;
+
 interface ExportRunOutcome {
   status: "success" | "failure" | "partial";
   rowsExported: number;
@@ -51,10 +69,12 @@ export class AuditExportService {
   private readonly checkIntervalMs: number;
   private readonly batchSize: number;
   private readonly safeFsRoot: string;
+  private readonly lock: AuditExportLock | undefined;
   private logger?: { info: (msg: string, fields?: Record<string, unknown>) => void; warn: (msg: string, fields?: Record<string, unknown>) => void };
 
-  constructor(store: Store, options: { checkIntervalMs?: number; batchSize?: number; safeFsRoot?: string } = {}) {
+  constructor(store: Store, options: { checkIntervalMs?: number; batchSize?: number; safeFsRoot?: string; lock?: AuditExportLock } = {}) {
     this.store = store;
+    this.lock = options.lock;
     this.checkIntervalMs = options.checkIntervalMs ?? 60_000;
     this.batchSize = options.batchSize ?? 500;
     this.safeFsRoot = path.resolve(options.safeFsRoot ?? "apps/api/data");
@@ -62,6 +82,11 @@ export class AuditExportService {
 
   setLogger(logger: { info: (msg: string, fields?: Record<string, unknown>) => void; warn: (msg: string, fields?: Record<string, unknown>) => void }): void {
     this.logger = logger;
+  }
+
+  /** Whether the periodic export runs here (cluster mode starts it only on the leader). */
+  isRunning(): boolean {
+    return this.timer !== null;
   }
 
   start(): void {
@@ -93,8 +118,10 @@ export class AuditExportService {
       if (now - lastMs < dest.intervalSeconds * 1000) continue;
       this.inFlight.add(dest.id);
       try {
-        await this.runDestination(dest.id);
+        // Another instance exporting this destination now: its batch moves the cursor; this tick skips it.
+        await this.runDestination(dest.id, { waitMs: 0 });
       } catch (err) {
+        if (err instanceof AuditExportBusyError) continue;
         this.logger?.warn("Audit export tick failed", {
           destinationId: dest.id,
           error: err instanceof Error ? err.message : String(err)
@@ -109,7 +136,15 @@ export class AuditExportService {
    * Synchronously run one destination — exposed so admin "Export now"
    * endpoint can drive a destination on demand.
    */
-  async runDestination(id: string): Promise<ExportRunOutcome> {
+  async runDestination(id: string, options: { waitMs?: number } = {}): Promise<ExportRunOutcome> {
+    if (!this.lock) return await this.exportBatch(id);
+    const outcome = await this.lock(id, options.waitMs ?? AUDIT_EXPORT_NOW_LOCK_WAIT_MS, async () => await this.exportBatch(id));
+    if (!outcome.acquired) throw new AuditExportBusyError(id);
+    return outcome.value;
+  }
+
+  /** Reads the batch after the destination's cursor, delivers it and records the run (which moves the cursor). */
+  private async exportBatch(id: string): Promise<ExportRunOutcome> {
     const dest = await this.store.getAuditExportDestination(id);
     if (!dest) throw new Error(`Audit export destination not found: ${id}`);
     const runId = `aex_${randomUUID()}`;

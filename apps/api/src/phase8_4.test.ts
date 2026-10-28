@@ -6,7 +6,7 @@ import type { Store } from "./db/store.js";
 import { openTestStore } from "./test-support/test-store.js";
 import { testSql } from "./test-support/test-sql.js";
 import { AuditService } from "./services/audit-service.js";
-import { AuditExportService } from "./services/audit-export-service.js";
+import { AuditExportBusyError, AuditExportService, type AuditExportLock } from "./services/audit-export-service.js";
 
 describe("Phase 8.4 — audit hash chain + export", () => {
   let tempDir: string;
@@ -136,6 +136,42 @@ describe("Phase 8.4 — audit hash chain + export", () => {
       // Cursor advanced — second run with no new rows is a no-op
       const second = await exporter.runDestination("axd_file");
       expect(second.rowsExported).toBe(0);
+    });
+
+    it("Phase 13.1: with a cluster lock, exports inside it; a lock held elsewhere fails Export now and skips the tick", async () => {
+      const filePath = path.join(tempDir, "locked.ndjson");
+      await store.createAuditExportDestination({ id: "axd_lock", name: "file", kind: "file", config: { path: filePath }, intervalSeconds: 0 });
+      await audit.record({ category: "auth", eventType: "login", action: "auth", outcome: "success" });
+      let held = false;
+      const calls: Array<{ id: string; waitMs: number }> = [];
+      const lock: AuditExportLock = async (destinationId, waitMs, work) => {
+        calls.push({ id: destinationId, waitMs });
+        if (held) return { acquired: false };
+        return { acquired: true, value: await work() };
+      };
+      const exporter = new AuditExportService(store, { batchSize: 100, safeFsRoot: tempDir, lock });
+      expect((await exporter.runDestination("axd_lock")).rowsExported).toBe(1);
+      expect(calls).toEqual([{ id: "axd_lock", waitMs: 10_000 }]);
+
+      held = true;
+      await audit.record({ category: "auth", eventType: "logout", action: "auth", outcome: "success" });
+      await expect(exporter.runDestination("axd_lock")).rejects.toBeInstanceOf(AuditExportBusyError);
+      const warnings: string[] = [];
+      exporter.setLogger({ info: () => undefined, warn: (message) => warnings.push(message) });
+      await exporter.tick();
+      // The tick tried without waiting and skipped quietly; nothing was exported meanwhile.
+      expect(calls.at(-1)).toEqual({ id: "axd_lock", waitMs: 0 });
+      expect(warnings).toEqual([]);
+      expect(fs.readFileSync(filePath, "utf8").trim().split("\n")).toHaveLength(1);
+
+      held = false;
+      await exporter.tick();
+      expect(fs.readFileSync(filePath, "utf8").trim().split("\n")).toHaveLength(2);
+      expect(exporter.isRunning()).toBe(false);
+      exporter.start();
+      expect(exporter.isRunning()).toBe(true);
+      await exporter.stop();
+      expect(exporter.isRunning()).toBe(false);
     });
 
     it("rejects file paths outside the safeFsRoot", async () => {

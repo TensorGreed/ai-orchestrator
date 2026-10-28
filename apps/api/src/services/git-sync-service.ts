@@ -11,7 +11,15 @@ export interface GitSyncServiceOptions {
   gitBin?: string;
   commandTimeoutMs?: number;
   enabled?: boolean;
+  /**
+   * Phase 13.1 — cluster mode: runs a pull or push under a cluster-wide lock, so two instances never sync to or from
+   * the remote at once. Resolves `{ acquired: false }` when another instance kept the lock past the wait.
+   */
+  exclusive?: <T>(work: () => Promise<T>) => Promise<{ acquired: true; value: T } | { acquired: false }>;
 }
+
+/** Phase 13.1 — the answer when another instance holds the git sync lock. */
+export const GIT_SYNC_BUSY_ERROR = "Another instance is running a git sync; try again shortly.";
 
 export interface GitSyncResult {
   ok: boolean;
@@ -55,6 +63,7 @@ export class GitSyncService {
   private readonly workdirRoot: string;
   private readonly gitBin: string;
   private readonly commandTimeoutMs: number;
+  private readonly exclusive: GitSyncServiceOptions["exclusive"];
 
   constructor(
     private readonly store: Store,
@@ -65,6 +74,14 @@ export class GitSyncService {
     this.workdirRoot = path.resolve(options.workdirRoot);
     this.gitBin = options.gitBin ?? "git";
     this.commandTimeoutMs = options.commandTimeoutMs ?? 60000;
+    this.exclusive = options.exclusive;
+  }
+
+  /** Runs one pull or push alone across the cluster (cluster mode), or directly (one instance). */
+  private async alone(work: () => Promise<GitSyncResult>): Promise<GitSyncResult> {
+    if (!this.exclusive) return await work();
+    const outcome = await this.exclusive(work);
+    return outcome.acquired ? outcome.value : { ok: false, error: GIT_SYNC_BUSY_ERROR };
   }
 
   async getConfig(): Promise<GitSyncConfig | null> {
@@ -162,6 +179,10 @@ export class GitSyncService {
   }
 
   async push(options: { branch?: string; message?: string; createdBy?: string }): Promise<GitSyncResult> {
+    return await this.alone(async () => await this.pushNow(options));
+  }
+
+  private async pushNow(options: { branch?: string; message?: string; createdBy?: string }): Promise<GitSyncResult> {
     const config = await this.requireConfig();
     const dir = this.ensureClone(config, options.branch);
     try {
@@ -212,6 +233,10 @@ export class GitSyncService {
   }
 
   async pull(options: { branch?: string; createdBy?: string; canImport?: GitSyncImportCheck }): Promise<GitSyncResult> {
+    return await this.alone(async () => await this.pullNow(options));
+  }
+
+  private async pullNow(options: { branch?: string; createdBy?: string; canImport?: GitSyncImportCheck }): Promise<GitSyncResult> {
     const config = await this.requireConfig();
     const dir = this.ensureClone(config, options.branch);
     try {
