@@ -5612,9 +5612,9 @@ export class SqliteStore implements Store {
   // Phase 11.2 — approval requests
   // -------------------------------------------------------------------------
 
-  async insertApprovalRequest(input: ApprovalRequestInsert, options: { fence?: QueueClaimFence } = {}): Promise<ApprovalRequestRecord> {
+  async insertApprovalRequest(input: ApprovalRequestInsert, options: { fence?: QueueClaimFence; supersedeReason?: string } = {}): Promise<ApprovalRequestRecord> {
     const now = input.createdAt ?? new Date().toISOString();
-    const insert = () => this.exec(
+    const insertRow = () => this.exec(
       `INSERT INTO approval_requests (
          id, execution_id, workflow_id, workflow_name, project_id, node_id, node_type, kind, status, message,
          spec_json, path_json, details_json, requested_by_user_id, requested_by, timeout_minutes, expires_at,
@@ -5643,9 +5643,16 @@ export class SqliteStore implements Store {
         now
       ]
     );
+    // The run's earlier pending request is superseded in the same transaction as the insert.
+    const supersedeReason = options.supersedeReason;
+    const insert = () => {
+      if (supersedeReason !== undefined) this.cancelPendingApprovalRequestsSync({ executionId: input.executionId }, supersedeReason);
+      insertRow();
+    };
     const fence = options.fence;
     if (fence) {
-      // Phase 13.1 — a queued run in cluster mode asks for approval only while its claim still holds the queue item.
+      // Phase 13.1 — a queued run in cluster mode asks for approval (and supersedes its earlier request) only while its
+      // claim still holds the queue item.
       const inserted = this.db.transaction(() => {
         if (!this.queueClaimHeldSync(fence)) return false;
         insert();
@@ -5653,7 +5660,7 @@ export class SqliteStore implements Store {
       })();
       if (!inserted) throw new QueueClaimLostError("an approval request");
     } else {
-      insert();
+      this.db.transaction(insert)();
     }
     this.persist();
     return this.getApprovalRequestSync(input.id)!;
@@ -5791,15 +5798,19 @@ export class SqliteStore implements Store {
 
   /** Cancels every pending request of a run (the run was canceled or its workflow deleted). */
   async cancelPendingApprovalRequests(filter: { executionId?: string; workflowId?: string }, reason: string): Promise<number> {
+    const changes = this.cancelPendingApprovalRequestsSync(filter, reason);
+    if (changes > 0) this.persist();
+    return changes;
+  }
+
+  private cancelPendingApprovalRequestsSync(filter: { executionId?: string; workflowId?: string }, reason: string): number {
     const column = filter.executionId ? "execution_id" : "workflow_id";
     const value = filter.executionId ?? filter.workflowId;
     if (!value) return 0;
     const now = new Date().toISOString();
-    const result = this.db
+    return this.db
       .prepare(`UPDATE approval_requests SET status = 'canceled', reason = ?, decided_at = ?, updated_at = ? WHERE ${column} = ? AND status = 'pending'`)
-      .run(reason, now, now, value);
-    if (result.changes > 0) this.persist();
-    return result.changes;
+      .run(reason, now, now, value).changes;
   }
 
   // -------------------------------------------------------------------------

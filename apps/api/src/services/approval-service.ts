@@ -159,6 +159,8 @@ export class ApprovalResumeRunner {
 const SYSTEM_ACTOR = "system";
 /** Queue mode: a claim this old with no live queue item is re-driven. */
 const QUEUE_RECOVERY_GRACE_MS = 60_000;
+/** Why a pause's new request cancels the run's earlier pending one. */
+const SUPERSEDED_REASON = "Superseded by a newer request of the same run";
 const DECIDED_STATUSES = new Set(["approved", "rejected", "timed_out"]);
 
 /** The decision a request status stands for; null while it is pending or expired without a decision. */
@@ -285,7 +287,6 @@ export class ApprovalService {
   async recordPause(input: { executionId: string; workflowId: string; workflowName?: string; projectId: string; state: WorkflowExecutionState; message: string; timeoutMinutes: number; fence?: QueueClaimFence }): Promise<ApprovalRequestRecord> {
     const info = resolvePendingApproval(input.state);
     const earlier = await this.store.listApprovalRequestsForExecution(input.executionId);
-    await this.store.cancelPendingApprovalRequests({ executionId: input.executionId }, "Superseded by a newer request of the same run");
     const first = earlier[0];
     const requester = first ? { userId: first.requestedByUserId, email: first.requestedBy } : requesterFromState(input.state);
     const createdAt = this.now();
@@ -310,15 +311,16 @@ export class ApprovalService {
       askingWorkflowId: info.workflowId || null,
       editsSalt: newApprovalEditsSalt(),
       createdAt: createdAt.toISOString()
-    }, input.fence ? { fence: input.fence } : {});
+    }, { supersedeReason: SUPERSEDED_REASON, ...(input.fence ? { fence: input.fence } : {}) });
     let record: ApprovalRequestRecord;
     try {
+      // The run's earlier pending request is canceled in the insert's transaction, under the same fence: a worker whose
+      // claim was taken back cancels nothing.
       record = await insert();
     } catch (error) {
-      // Another instance backfilled a request for this pause between the cancel above and the insert (v41 allows one
+      // Another instance backfilled a request for this pause after the cancel and before the insert (v41 allows one
       // pending request per run): this pause's own request replaces it.
       if (!isOnePendingApprovalViolation(error)) throw error;
-      await this.store.cancelPendingApprovalRequests({ executionId: input.executionId }, "Superseded by a newer request of the same run");
       record = await insert();
     }
     await this.options.audit({

@@ -341,13 +341,14 @@ describe("one pending request per run (v41)", () => {
     const requester = await login(context, "builder", "requester");
     const insert = context.store.insertApprovalRequest.bind(context.store);
     let raced = 0;
-    vi.spyOn(context.store, "insertApprovalRequest").mockImplementation(async (input) => {
+    vi.spyOn(context.store, "insertApprovalRequest").mockImplementation(async (input, options) => {
       if (raced === 0) {
         raced += 1;
-        // Another instance's backfill lands between this pause's cancel and its insert.
+        // Another instance's backfill commits after this pause's cancel and before its insert, so the insert collides.
         await insert({ ...input, id: "apr_other_instance" });
+        return await insert(input, options?.fence ? { fence: options.fence } : {});
       }
-      return await insert(input);
+      return await insert(input, options);
     });
     const run = await startRun(context, gateWorkflow("wf-race", GATE), requester.cookie);
     const pending = await context.store.getPendingApprovalRequestForExecution(run.executionId!);
@@ -366,12 +367,12 @@ describe("one pending request per run (v41)", () => {
     const insert = context.store.insertApprovalRequest.bind(context.store);
     let raced = false;
     vi.spyOn(context.store, "getPendingApprovalRequestForExecution").mockImplementationOnce(async () => null);
-    vi.spyOn(context.store, "insertApprovalRequest").mockImplementation(async (input) => {
+    vi.spyOn(context.store, "insertApprovalRequest").mockImplementation(async (input, options) => {
       if (!raced) {
         raced = true;
         await insert({ ...input, id: "apr_other_backfill" });
       }
-      return await insert(input);
+      return await insert(input, options);
     });
     const items = await inbox(context, requester.cookie);
     expect(items.map((item) => item.requestId)).toEqual(["apr_other_backfill"]);

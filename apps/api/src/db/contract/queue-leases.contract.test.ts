@@ -384,7 +384,15 @@ describeStoreContract("store contract: leased queue claims", (ctx) => {
     expect(await store.isQueueClaimHeld(fence)).toBe(true);
     expect(await store.saveWorkflowExecutionState(pause, { fence })).toBe(true);
     expect(await store.insertApprovalRequest(request("apr-holder"), { fence })).toMatchObject({ id: "apr-holder", status: "pending" });
+    // A zombie's later pause supersedes nothing: the cancel of the holder's request is fenced with its insert.
+    await expect(store.insertApprovalRequest(request("apr-zombie-2"), { fence: staleFence, supersedeReason: "superseded" })).rejects.toBeInstanceOf(QueueClaimLostError);
+    expect((await store.listApprovalRequestsForExecution("z")).map((entry) => [entry.id, entry.status])).toEqual([["apr-holder", "pending"]]);
+    // The holder's next pause supersedes its own earlier request in the same transaction.
+    expect(await store.insertApprovalRequest(request("apr-holder-2"), { fence, supersedeReason: "superseded" })).toMatchObject({ id: "apr-holder-2", status: "pending" });
+    expect(await store.getApprovalRequest("apr-holder")).toMatchObject({ status: "canceled", reason: "superseded" });
     // Unfenced (one instance) as before.
     expect(await store.saveWorkflowExecutionState({ ...pause, id: "plain" })).toBe(true);
+    expect(await store.insertApprovalRequest({ ...request("apr-plain-2"), executionId: "z" }, { supersedeReason: "superseded" })).toMatchObject({ status: "pending" });
+    expect(await store.getApprovalRequest("apr-holder-2")).toMatchObject({ status: "canceled" });
   });
 });

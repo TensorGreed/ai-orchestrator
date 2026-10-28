@@ -96,9 +96,14 @@ function mapApprovalRequestRow(row: ApprovalRequestRow): ApprovalRequestRecord {
   };
 }
 
-export async function insertApprovalRequest(ctx: PgContext, input: ApprovalRequestInsert, options: { fence?: QueueClaimFence } = {}): Promise<ApprovalRequestRecord> {
+export async function insertApprovalRequest(
+  ctx: PgContext,
+  input: ApprovalRequestInsert,
+  options: { fence?: QueueClaimFence; supersedeReason?: string } = {}
+): Promise<ApprovalRequestRecord> {
   const now = input.createdAt ?? new Date().toISOString();
-  const insert = async (db: Queryable) => (await db.query<ApprovalRequestRow>(
+  const supersedeReason = options.supersedeReason;
+  const insertRow = async (db: Queryable) => (await db.query<ApprovalRequestRow>(
     `INSERT INTO approval_requests (
        id, execution_id, workflow_id, workflow_name, project_id, node_id, node_type, kind, status, message,
        spec_json, path_json, details_json, requested_by_user_id, requested_by, timeout_minutes, expires_at,
@@ -128,8 +133,17 @@ export async function insertApprovalRequest(ctx: PgContext, input: ApprovalReque
       now
     ]
   )).rows[0]!;
-  if (!options.fence) return mapApprovalRequestRow(await insert(ctx.pool));
-  // Phase 13.1 — a queued run in cluster mode asks for approval only while its claim still holds the queue item.
+  // The run's earlier pending request is superseded in the same transaction as the insert.
+  const insert = async (db: Queryable) => {
+    if (supersedeReason !== undefined) await cancelPendingOn(db, { executionId: input.executionId }, supersedeReason);
+    return await insertRow(db);
+  };
+  if (!options.fence) {
+    if (supersedeReason === undefined) return mapApprovalRequestRow(await insert(ctx.pool));
+    return mapApprovalRequestRow(await ctx.withTransaction(insert));
+  }
+  // Phase 13.1 — a queued run in cluster mode asks for approval (and supersedes its earlier request) only while its
+  // claim still holds the queue item.
   const row = await withQueueClaim(ctx, options.fence, insert);
   if (!row) throw new QueueClaimLostError("an approval request");
   return mapApprovalRequestRow(row);
@@ -250,11 +264,15 @@ export async function reopenApprovalRequest(ctx: PgContext, id: string): Promise
 
 /** Cancels every pending request of a run (the run was canceled or its workflow deleted). */
 export async function cancelPendingApprovalRequests(ctx: PgContext, filter: { executionId?: string; workflowId?: string }, reason: string): Promise<number> {
+  return await cancelPendingOn(ctx.pool, filter, reason);
+}
+
+async function cancelPendingOn(db: Queryable, filter: { executionId?: string; workflowId?: string }, reason: string): Promise<number> {
   const column = filter.executionId ? "execution_id" : "workflow_id";
   const value = filter.executionId ?? filter.workflowId;
   if (!value) return 0;
   const now = new Date().toISOString();
-  const result = await ctx.pool.query(
+  const result = await db.query(
     `UPDATE approval_requests SET status = 'canceled', reason = $1, decided_at = $2, updated_at = $2 WHERE ${column} = $3 AND status = 'pending'`,
     [reason, now, value]
   );

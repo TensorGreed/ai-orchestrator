@@ -1566,9 +1566,10 @@ export interface Store {
 
   /**
    * With `fence` (Phase 13.1, a queued run in cluster mode) the request is inserted only while that claim still holds
-   * its queue item; otherwise nothing is inserted and it throws QueueClaimLostError.
+   * its queue item; otherwise nothing is inserted and it throws QueueClaimLostError. With `supersedeReason`, the run's
+   * pending requests are canceled with that reason first, in the same transaction (and under the same fence).
    */
-  insertApprovalRequest(input: ApprovalRequestInsert, options?: { fence?: QueueClaimFence }): Promise<ApprovalRequestRecord>;
+  insertApprovalRequest(input: ApprovalRequestInsert, options?: { fence?: QueueClaimFence; supersedeReason?: string }): Promise<ApprovalRequestRecord>;
   getApprovalRequest(id: string): Promise<ApprovalRequestRecord | null>;
   /** The newest pending request of a paused run. */
   getPendingApprovalRequestForExecution(executionId: string): Promise<ApprovalRequestRecord | null>;
