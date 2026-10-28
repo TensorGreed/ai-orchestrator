@@ -4,13 +4,14 @@
  * (two pools) on one schema: the builder's store is paused inside its transaction at a chosen query, while the
  * admin's store saves the gate as on and enforced. The builder's action either completes before the gate change
  * commits or is refused; it never completes after an enforced gate was committed. Postgres only (skipped without
- * TEST_POSTGRES_URL). SQLite runs each store write synchronously in one process, so nothing can commit inside it.
+ * TEST_POSTGRES_URL). The approval publish takes the workflow row before the request row, as a workflow delete does;
+ * the last paused test pins that order. SQLite runs each store write synchronously in one process, so nothing can commit inside it.
  */
 import { afterEach, describe, expect, it } from "vitest";
 import type { Pool, PoolClient } from "pg";
 import type { Workflow } from "@ai-orchestrator/shared";
 import type { PostgresStore } from "./postgres-store.js";
-import type { ReleaseGateRecord, WorkflowReleaseRecord } from "./database.js";
+import type { ReleaseApprovalRequestRecord, ReleaseGateRecord, WorkflowReleaseRecord } from "./database.js";
 import type { Store } from "./store.js";
 import { ReleaseGateEnforcedError } from "./store-errors.js";
 import { createTestStore, noticePostgresSkipped, openTestStoreTwin, testPostgresUrl, testStorePool, type TestStore } from "../test-support/test-store.js";
@@ -24,10 +25,10 @@ type QueryFn = (...args: unknown[]) => Promise<unknown>;
 const resumers: Array<() => void> = [];
 
 /** Pauses the store's next transaction right after the first query whose text matches `after`. */
-function pauseAfter(store: PostgresStore, after: RegExp): { reached: Promise<void>; resume: () => void } {
-  let reach!: () => void;
+function pauseAfter(store: PostgresStore, after: RegExp): { reached: Promise<number>; resume: () => void } {
+  let reach!: (pid: number) => void;
   let resume!: () => void;
-  const reached = new Promise<void>((resolve) => (reach = resolve));
+  const reached = new Promise<number>((resolve) => (reach = resolve));
   const resumed = new Promise<void>((resolve) => (resume = resolve));
   resumers.push(resume);
   let armed = true;
@@ -48,7 +49,7 @@ function pauseAfter(store: PostgresStore, after: RegExp): { reached: Promise<voi
       const text = typeof args[0] === "string" ? args[0] : String((args[0] as { text?: unknown })?.text ?? "");
       if (armed && after.test(text)) {
         armed = false;
-        reach();
+        reach((client as unknown as { processID: number }).processID);
         await resumed;
       }
       return result;
@@ -56,6 +57,22 @@ function pauseAfter(store: PostgresStore, after: RegExp): { reached: Promise<voi
     return client;
   };
   return { reached, resume };
+}
+
+/**
+ * Every transaction of this store's pool gets a lock timeout, so a lock order regression that leaves a statement
+ * waiting for good fails the test within seconds (a lock timeout error) instead of at the test's own timeout.
+ */
+function limitLockWaits(store: PostgresStore, timeout = "5s"): void {
+  const pool = (store as unknown as { pool: Pool }).pool;
+  const connect = pool.connect.bind(pool) as (callback?: unknown) => Promise<PoolClient>;
+  (pool as unknown as { connect: (callback?: unknown) => unknown }).connect = (callback?: unknown) => {
+    if (callback !== undefined) return connect(callback);
+    return connect().then(async (client) => {
+      await client.query(`SET lock_timeout = '${timeout}'`);
+      return client;
+    });
+  };
 }
 
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -86,14 +103,17 @@ run("Postgres: gate saves serialise with builder release writes", () => {
     primary = await createTestStore({ kind: "postgres" });
     builderStore = await openTestStoreTwin(primary, { maxConnections: 2 });
     watcher = testStorePool(primary, { max: 1 });
+    limitLockWaits(primary.store as unknown as PostgresStore);
+    limitLockWaits(builderStore);
     return { admin: primary.store, builder: builderStore };
   }
 
-  /** Waits until some backend of this database waits on a row lock (the gate save behind the workflow row). */
-  async function someoneWaitsOnALock(): Promise<boolean> {
+  /** Waits until a backend of this database is blocked by the backend `blockerPid` (the paused transaction). */
+  async function waitsOnBackend(blockerPid: number): Promise<boolean> {
     for (let attempt = 0; attempt < 50; attempt += 1) {
       const result = await watcher!.query<{ n: number }>(
-        `SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'`
+        `SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND $1::int = ANY(pg_blocking_pids(pid))`,
+        [blockerPid]
       );
       if ((result.rows[0]?.n ?? 0) > 0) return true;
       await delay(20);
@@ -160,10 +180,10 @@ run("Postgres: gate saves serialise with builder release writes", () => {
     const current = await seed(admin, "wf-lock-rb");
     const pause = pauseAfter(builder, /FROM release_gates WHERE workflow_id/);
     const rollback = builder.publishWorkflowVersion(release("rb", "wf-lock-rb", 1, "rollback"), 2, { refuseIfGateEnforced: true });
-    await pause.reached;
+    const blocker = await pause.reached;
 
     const save = enforce(admin, current);
-    expect(await someoneWaitsOnALock()).toBe(true);
+    expect(await waitsOnBackend(blocker)).toBe(true);
     expect(await stillPending(save)).toBe(true);
     expect((await admin.getReleaseGate("wf-lock-rb"))?.enforced).toBe(false);
 
@@ -185,7 +205,7 @@ run("Postgres: gate saves serialise with builder release writes", () => {
     // The gate save runs on the paused store this time: it stops after writing the gate, before its commit.
     const pause = pauseAfter(builder, /INSERT INTO release_gates/);
     const save = enforce(builder, current);
-    await pause.reached;
+    const blocker = await pause.reached;
 
     const unpublish = admin.unpublishWorkflowVersion({
       id: "un",
@@ -197,7 +217,7 @@ run("Postgres: gate saves serialise with builder release writes", () => {
       refuseIfGateEnforced: true
     });
     unpublish.catch(() => undefined);
-    expect(await someoneWaitsOnALock()).toBe(true);
+    expect(await waitsOnBackend(blocker)).toBe(true);
     expect(await stillPending(unpublish)).toBe(true);
 
     pause.resume();
@@ -211,10 +231,10 @@ run("Postgres: gate saves serialise with builder release writes", () => {
     const current = await seed(admin, "wf-lock-del");
     const pause = pauseAfter(builder, /FROM release_gates WHERE workflow_id/);
     const removal = builder.deleteWorkflow("wf-lock-del", { refuseIfGateEnforced: true });
-    await pause.reached;
+    const blocker = await pause.reached;
 
     const save = enforce(admin, current);
-    expect(await someoneWaitsOnALock()).toBe(true);
+    expect(await waitsOnBackend(blocker)).toBe(true);
     expect(await stillPending(save)).toBe(true);
 
     pause.resume();
@@ -222,6 +242,67 @@ run("Postgres: gate saves serialise with builder release writes", () => {
     expect(await admin.getWorkflow("wf-lock-del")).toBeNull();
     // The gate outlives the workflow; the save went through after the delete.
     expect(await save).toMatchObject({ enabled: true, enforced: true });
+  }, 60_000);
+
+  const approvalRequest = (workflowId: string): ReleaseApprovalRequestRecord => ({
+    id: `rr-${workflowId}`,
+    workflowId,
+    workflowName: workflowId,
+    projectId: "default",
+    version: 1,
+    workflowHash: "h",
+    replayRunId: null,
+    origin: "policy",
+    gateReasons: ["needs approval"],
+    gateUpdatedAt: "2026-10-28T00:00:00.000Z",
+    gateChecks: [],
+    gateAuthority: "auth-1",
+    publishedVersionAtRequest: null,
+    spec: { approvers: ["admin"] },
+    status: "pending",
+    requestReason: null,
+    requestedByUserId: null,
+    requestedBy: "builder@example.com",
+    expiresAt: null,
+    decidedByUserId: null,
+    decidedBy: null,
+    decidedAt: null,
+    decisionReason: null,
+    releaseId: null,
+    createdAt: "2026-10-28T00:00:00.000Z",
+    updatedAt: "2026-10-28T00:00:00.000Z"
+  } as ReleaseApprovalRequestRecord);
+
+  it("an approval publish waits for the workflow row a delete holds, and neither deadlocks", async () => {
+    const { admin, builder } = await open();
+    const workflowId = "wf-lock-appr";
+    await admin.upsertWorkflow(workflow(workflowId));
+    await admin.appendWorkflowVersion({ id: `${workflowId}-v1`, workflowId, workflowJson: JSON.stringify(workflow(workflowId)), retention: 0 });
+    await admin.insertReleaseApprovalRequest(approvalRequest(workflowId));
+    // The delete stops right after it locked the workflow row, before it touches the pending request.
+    const pause = pauseAfter(builder, /FROM workflows WHERE id = \$1 FOR UPDATE/);
+    const removal = builder.deleteWorkflow(workflowId);
+    removal.catch(() => undefined);
+    const blocker = await pause.reached;
+
+    const approval = admin.approveReleaseRequestAndPublish(
+      { id: `rr-${workflowId}`, status: "approved", decidedByUserId: null, decidedBy: "admin", decisionReason: null, releaseId: "appr-rel" },
+      release("appr-rel", workflowId, 1, "pass"),
+      null
+    );
+    approval.catch(() => undefined);
+    // The approval waits behind the delete's workflow lock without holding the request row. Locking the request row
+    // first would leave the delete (workflow row, then request row) and the approval (request row, then workflow row)
+    // waiting for each other until Postgres aborts one of them.
+    expect(await waitsOnBackend(blocker)).toBe(true);
+    expect(await stillPending(approval)).toBe(true);
+
+    pause.resume();
+    expect(await removal).toBe(true);
+    // The delete canceled the pending request, so the approval finds it decided or the workflow gone; it never errors.
+    expect(await approval).toMatchObject({ refused: expect.stringMatching(/^(decided|conflict)$/) });
+    expect(await admin.getPublishedVersion(workflowId)).toBeNull();
+    expect((await admin.getReleaseApprovalRequest(`rr-${workflowId}`))?.status).not.toBe("approved");
   }, 60_000);
 
   it("a gate save, a rollback, an unpublish and a delete of one workflow racing never deadlock", async () => {
