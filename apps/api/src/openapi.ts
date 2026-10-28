@@ -140,16 +140,18 @@ export const openApiSpec = {
     "/api/auth/login/mfa": {
       post: {
         tags: ["Auth"],
-        summary: "Complete MFA challenge during login",
+        summary: "Complete MFA challenge during login (password or SSO sign-in)",
+        description:
+          "An SSO sign-in that ends in the TOTP step (SSO_MFA=idp_or_local) carries its challenge in the HttpOnly l2m_sso_mfa cookie; `challenge` may then be omitted.",
         requestBody: {
           required: true,
           content: {
             "application/json": {
               schema: {
                 type: "object",
-                required: ["challenge", "code"],
+                required: ["code"],
                 properties: {
-                  challenge: { type: "string" },
+                  challenge: { type: "string", description: "The mfaChallenge from the login response; defaults to the l2m_sso_mfa cookie" },
                   code: { type: "string" }
                 }
               }
@@ -271,8 +273,13 @@ export const openApiSpec = {
     "/api/auth/saml/callback": {
       post: {
         tags: ["Auth"],
-        summary: "SAML SSO assertion callback",
-        responses: { "200": { description: "User authenticated via SAML" } }
+        summary: "SAML SSO assertion callback (HTTP-POST binding form post, or JSON)",
+        responses: {
+          "200": { description: "JSON post: user authenticated via SAML, or { mfaChallenge } when the local TOTP step is required" },
+          "302": { description: "Form post: redirect to the web app (with sso_error on failure, or sso_mfa=totp for the TOTP step)" },
+          "401": { description: "JSON post: assertion refused, or code sso_mfa_required" },
+          "403": { description: "JSON post: refused by SAML_ALLOWED_EMAIL_DOMAINS / SAML_ALLOWED_GROUPS (code saml_not_allowed)" }
+        }
       }
     },
     "/api/auth/oidc/metadata": {
@@ -293,7 +300,10 @@ export const openApiSpec = {
       get: {
         tags: ["Auth"],
         summary: "OIDC SSO redirect target: validates state, PKCE and the ID token, then signs the user in",
-        responses: { "302": { description: "Redirect to the web app, with sso_error on failure" }, "404": { description: "OIDC is not enabled" } }
+        responses: {
+          "302": { description: "Redirect to the web app, with sso_error on failure, or sso_mfa=totp for the TOTP step" },
+          "404": { description: "OIDC is not enabled" }
+        }
       }
     },
     "/api/auth/ldap/login": {
