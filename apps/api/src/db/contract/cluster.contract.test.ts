@@ -207,12 +207,14 @@ describeStoreContract("store contract: cluster registry", (ctx) => {
       await store.claimClusterRunOwner({ executionId: id, instanceId: "racer" });
     }
     await new Promise((resolve) => setTimeout(resolve, 30));
-    const [reconciled, ...written] = await Promise.all([
+    const [reconciled, written] = await Promise.all([
       store.reconcileDeadExecutorRuns({ error: mark, deadAfterMs: 20, selfId: "leader" }),
-      ...ids.map((id) =>
-        store.saveExecutionHistory(
-          { id, workflowId: "wf", status: "success", startedAt: new Date().toISOString(), completedAt: new Date().toISOString() },
-          { unlessCanceled: true, unlessInterruptedWith: mark }
+      Promise.all(
+        ids.map(async (id) =>
+          await store.saveExecutionHistory(
+            { id, workflowId: "wf", status: "success", startedAt: new Date().toISOString(), completedAt: new Date().toISOString() },
+            { unlessCanceled: true, unlessInterruptedWith: mark }
+          )
         )
       )
     ]);
