@@ -86,11 +86,13 @@ An admin can **enforce** a gate. Then only an admin can:
 - turn it off, lift enforcement or loosen the policy (lower the pass rate, allow more regressions, raise or remove a limit, remove a golden set, accept older golden runs);
 - change the approvers in any way, or self-approval;
 - change the candidate options (scorers, MCP mode, repeats, aggregation, comparison, budget, timeout);
-- remove an admitted case from one of its golden sets, delete one of its golden sets, add a case that carries its own scorers, or delete a golden run an admitted case uses (adding a plain case is allowed, and the new case waits for admission without making earlier jobs stale: see [Case admission](#case-admission-and-required-cases));
+- remove an admitted case from one of its golden sets, delete one of its golden sets, add a case that carries its own scorers, or delete a golden run an admitted case uses (adding a plain case is allowed, and the new case waits for admission without making earlier jobs stale: see [Case admission](#case-admission-and-required-cases)), only while the gate is also switched on;
 - admit cases, reject waiting ones, and mark cases required or stop requiring them;
-- roll back, unpublish and delete the workflow (these three only while the gate is also switched on: a gate that is switched off restricts none of them, even when still flagged enforced).
+- roll back, unpublish and delete the workflow, only while the gate is also switched on.
 
-A builder can still tighten the policy and add golden sets. A refused change answers `403` naming what it changes, and is audited (`release.gate.update_refused`, `release.golden_set_change.refused`, `release.rollback.refused`, `release.workflow_delete.refused`, `release.unpublish.refused`). Rollback, unpublish and delete are checked again inside the store transaction that writes them, so a gate switched on and enforced a moment earlier is honoured, on SQLite and Postgres alike. On Postgres a gate save waits for a rollback, unpublish or delete of the same workflow that is already under way, so that action either completes before the gate changes or sees the saved gate.
+A gate that is switched off restricts none of the golden-set changes, golden-run deletes, rollbacks, unpublishes and deletes above, even when it is still flagged enforced. It keeps its admission state, so cases a builder removes meanwhile are simply gone when it is switched on again.
+
+A builder can still tighten the policy and add golden sets. A refused change answers `403` naming what it changes, and is audited (`release.gate.update_refused`, `release.golden_set_change.refused`, `release.rollback.refused`, `release.workflow_delete.refused`, `release.unpublish.refused`). Golden-set changes and golden-run deletes are checked when the request arrives. Rollback, unpublish and delete are checked again inside the store transaction that writes them, so a gate switched on and enforced a moment earlier is honoured, on SQLite and Postgres alike. On Postgres a gate save waits for a rollback, unpublish or delete of the same workflow that is already under way, so that action either completes before the gate changes or sees the saved gate.
 
 ### Case admission and required cases
 

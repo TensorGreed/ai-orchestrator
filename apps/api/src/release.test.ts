@@ -1615,6 +1615,71 @@ describe("enforced gates and golden runs, turning a gate on (N7, N8)", () => {
   });
 });
 
+describe("golden sets follow the gate only while it is on and enforced", () => {
+  it("a builder may change a golden set and delete its golden runs while the gate is switched off, even flagged enforced; on and enforced only an admin may", async () => {
+    const context = await createTestContext();
+    const admin = await login(context, "admin");
+    const builder = await login(context, "builder");
+    const workflow: Workflow = {
+      id: "wf-golden-off",
+      name: "Golden off",
+      schemaVersion: "1.0.0",
+      workflowVersion: 1,
+      projectId: "default",
+      nodes: [node("start", "manual_trigger"), node("out", "output", { responseTemplate: "ok" })],
+      edges: [{ id: "e1", source: "start", target: "out" }]
+    } as Workflow;
+    await context.store.upsertWorkflow(workflow);
+    const record = async (name: string) => {
+      const executed = await call(context, "POST", "/api/workflows/wf-golden-off/execute", builder.cookie, {});
+      const recording = await call(context, "POST", "/api/replay/recordings", builder.cookie, { executionId: executed.json<{ executionId: string }>().executionId, name });
+      expect(recording.statusCode, recording.body).toBe(201);
+      return recording.json<{ recording: { id: string } }>().recording.id;
+    };
+    const [runA, runB, runC, runD] = [await record("A"), await record("B"), await record("C"), await record("D")];
+    const setId = (await call(context, "POST", "/api/eval/datasets", builder.cookie, { name: "Suite", workflowId: "wf-golden-off" })).json<{ dataset: { id: string } }>().dataset.id;
+    const otherSetId = (await call(context, "POST", "/api/eval/datasets", builder.cookie, { name: "Second suite", workflowId: "wf-golden-off" })).json<{ dataset: { id: string } }>().dataset.id;
+    for (const recordingId of [runA, runB, runC]) expect((await call(context, "POST", `/api/eval/datasets/${setId}/recordings`, builder.cookie, { recordingId })).statusCode).toBe(201);
+    expect((await call(context, "POST", `/api/eval/datasets/${otherSetId}/recordings`, builder.cookie, { recordingId: runD })).statusCode).toBe(201);
+    const gate = (settings: Record<string, unknown>) => call(context, "PUT", "/api/workflows/wf-golden-off/release-gate", admin.cookie, { datasetIds: [setId, otherSetId], ...settings });
+    expect((await gate({ enabled: true, enforced: true })).statusCode).toBe(200);
+    const caseOf = async (recordingId: string) => (await context.store.listEvalFixtures(setId)).find((fixture) => fixture.recordingId === recordingId)!;
+    const scored = { name: "Scored", input: {}, scorers: [{ type: "status" }] };
+
+    // On and enforced: a builder is refused every admin-only change, and nothing changes.
+    const builderTries = async () => ({
+      removeCase: (await call(context, "DELETE", `/api/eval/fixtures/${(await caseOf(runA)).id}`, builder.cookie)).statusCode,
+      addScoredCase: (await call(context, "POST", `/api/eval/datasets/${setId}/fixtures`, builder.cookie, scored)).statusCode,
+      addScoredRun: (await call(context, "POST", `/api/eval/datasets/${setId}/recordings`, builder.cookie, { recordingId: runD, scorers: [{ type: "status" }] })).statusCode,
+      deleteRun: (await call(context, "DELETE", `/api/replay/recordings/${runB}`, builder.cookie)).statusCode,
+      deleteSet: (await call(context, "DELETE", `/api/eval/datasets/${otherSetId}`, builder.cookie)).statusCode
+    });
+    expect(await builderTries()).toEqual({ removeCase: 403, addScoredCase: 403, addScoredRun: 403, deleteRun: 403, deleteSet: 403 });
+    expect(await context.store.listEvalFixtures(setId)).toHaveLength(3);
+    expect(await context.store.getEvalDataset(otherSetId)).not.toBeNull();
+    const refusals = (await context.store.listAuditLogs({ category: "release", pageSize: 200 })).items.filter((entry) => entry.eventType === "release.golden_set_change.refused");
+    expect(refusals).toHaveLength(5);
+
+    // Switched off but still flagged enforced: the gate restricts none of them.
+    expect((await gate({ enabled: false, enforced: true })).statusCode).toBe(200);
+    expect(await context.store.getReleaseGate("wf-golden-off")).toMatchObject({ enabled: false, enforced: true });
+    expect(await builderTries()).toEqual({ removeCase: 200, addScoredCase: 200, addScoredRun: 201, deleteRun: 200, deleteSet: 200 });
+    expect((await context.store.listAuditLogs({ category: "release", pageSize: 200 })).items.filter((entry) => entry.eventType === "release.golden_set_change.refused")).toHaveLength(5);
+    expect(await caseOf(runA)).toBeUndefined();
+    expect(await context.store.getReplayRecordingSummary(runB)).toBeNull();
+    expect(await context.store.getEvalDataset(otherSetId)).toBeNull();
+
+    // Switched on again: a builder is refused, an admin is not.
+    expect((await gate({ enabled: true, enforced: true, datasetIds: [setId] })).statusCode).toBe(200);
+    const runCCase = await caseOf(runC);
+    expect((await call(context, "DELETE", `/api/eval/fixtures/${runCCase.id}`, builder.cookie)).statusCode).toBe(403);
+    expect((await call(context, "DELETE", `/api/replay/recordings/${runC}`, builder.cookie)).statusCode).toBe(403);
+    expect((await call(context, "POST", `/api/eval/datasets/${setId}/fixtures`, admin.cookie, scored)).statusCode).toBe(200);
+    expect((await call(context, "DELETE", `/api/replay/recordings/${runC}`, admin.cookie)).statusCode).toBe(200);
+    expect((await call(context, "DELETE", `/api/eval/datasets/${setId}`, admin.cookie)).statusCode).toBe(200);
+  });
+});
+
 describe("repeats and old jobs (M1, L2, L3)", () => {
   // The replay runner lists the attempts beside the case's run diff, not inside it.
   const withAttempts = (costs: number[], extra: Record<string, unknown> = {}) => ({

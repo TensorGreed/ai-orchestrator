@@ -281,6 +281,28 @@ describe("EvaluationsPage — golden sets", () => {
     confirm.mockRestore();
   });
 
+  it("a builder keeps Remove and Delete set on a set a gate flagged enforced uses: the gate restricts them only while it is on, so the server decides", async () => {
+    vi.mocked(api.fetchReleaseGateCases).mockResolvedValue({
+      cases: {
+        workflowId: "wf-1",
+        enforced: true,
+        cases: [{ fixtureId: "fix_1", datasetId: "set_1", datasetName: "Refund regressions", name: "Refund baseline", recordingId: "rec_aaa", admission: "admitted", required: false, requestId: null, requestKind: null, createdAt: "" }],
+        counts: { admitted: 1, pending: 0, required: 0 },
+        canAdmit: false,
+        canRequest: true
+      }
+    });
+    vi.mocked(api.deleteEvalFixture).mockResolvedValue({ ok: true });
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const user = renderPage();
+    await user.click(await screen.findByRole("button", { name: /Refund regressions/ }));
+    await waitFor(() => expect(api.fetchReleaseGateCases).toHaveBeenCalledWith("wf-1"));
+    expect(screen.getByRole("button", { name: "Delete set" })).toBeEnabled();
+    await user.click(await screen.findByRole("button", { name: "Remove Refund baseline" }));
+    await waitFor(() => expect(api.deleteEvalFixture).toHaveBeenCalledWith("fix_1"));
+    confirm.mockRestore();
+  });
+
   it("viewers read a set without edit actions", async () => {
     const user = renderPage("viewer");
     expect(screen.queryByRole("button", { name: "+ New golden set" })).not.toBeInTheDocument();
