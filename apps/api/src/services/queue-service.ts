@@ -35,7 +35,28 @@ export interface QueueServiceConfig {
   maxRssMb?: number;
   /** Phase 13.1 — skip claiming while the event loop's p99 lag over the last second exceeds this many ms (0 = off). */
   maxEventLoopLagMs?: number;
+  /** Where the claim gates read memory and event-loop lag (tests pass fakes); the process's own by default. */
+  probes?: QueueClaimProbes;
 }
+
+/** An event-loop delay histogram, as monitorEventLoopDelay returns (values in nanoseconds). */
+export interface LagHistogram {
+  enable(): void;
+  disable(): void;
+  reset(): void;
+  percentile(percentile: number): number;
+  readonly count: number;
+}
+
+export interface QueueClaimProbes {
+  rssBytes?: () => number;
+  createLagHistogram?: () => LagHistogram;
+}
+
+/** A closed claim gate re-opens only once memory is below this share of QUEUE_MAX_RSS_MB. */
+export const RSS_RESUME_RATIO = 0.9;
+/** A closed claim gate re-opens only once event-loop lag is below this share of QUEUE_MAX_EVENT_LOOP_LAG_MS. */
+export const LAG_RESUME_RATIO = 0.8;
 
 export { STUCK_JOB_MARGIN_MS };
 
@@ -54,6 +75,14 @@ export interface QueueJobContext {
   /** Attempts already counted before this one. */
   attempts: number;
   pool: string;
+  /**
+   * Cluster mode: whether this worker can still count on its lease (renewed recently enough). When it cannot, the job
+   * is stopped here (the signal aborts) and false is returned; call it before a step with side effects starts.
+   * Always true for an unleased claim.
+   */
+  leaseFresh: () => boolean;
+  /** A write fenced on this claim was refused (the claim was taken back): the job is stopped here. */
+  leaseLost: (detail: string) => void;
 }
 
 export type ExecutionHandler = (payload: QueuedExecutionPayload, context: QueueJobContext) => Promise<void>;
@@ -218,7 +247,7 @@ interface ActiveJob {
   releasedByDrain: boolean;
   startedAtMs: number;
   stuckAfterMs: number;
-  /** performance.now() when its lease was last renewed (or claimed). */
+  /** performance.now() when its lease was last confirmed: the start of the last renew that succeeded (or the claim). */
   renewedAtMs: number;
   settled: Promise<void>;
 }
@@ -243,7 +272,7 @@ type ClaimedItem = {
 export class QueueConsumer {
   readonly producer: QueueProducer;
   private readonly store: Store;
-  private readonly config: Required<Omit<QueueServiceConfig, "maxPending">>;
+  private readonly config: Required<Omit<QueueServiceConfig, "maxPending" | "probes">>;
   private readonly active = new Map<string, ActiveJob>();
   private readonly warnedStuck = new Set<string>();
   private handler: ExecutionHandler | null = null;
@@ -260,8 +289,15 @@ export class QueueConsumer {
   private leases: QueueLeaseOptions | null = null;
   private observer: QueueConsumerObserver = {};
   private cancelHandler: ((executionId: string) => void) | null = null;
-  private lagMonitor: IntervalHistogram | null = null;
+  private lagMonitor: LagHistogram | null = null;
   private lagResetTimer: NodeJS.Timeout | null = null;
+  /** The p99 event-loop lag (ms) of the last full window, kept across the reset so a fresh window is never "no lag". */
+  private lastWindowLagMs = 0;
+  /** Why claiming is paused for self-protection; it re-opens only below the resume thresholds. */
+  private gatedBy: "rss" | "event_loop_lag" | null = null;
+  /** Cluster mode: set when this worker stopped jobs because it could not confirm its leases; no claims until it can. */
+  private leaseUnconfirmed = false;
+  private readonly probes: Required<QueueClaimProbes>;
   /** Phase 13.1 — whether this instance re-queues stuck jobs (on a shared database only the leader does). */
   private sweepGate: () => boolean = () => true;
 
@@ -275,6 +311,10 @@ export class QueueConsumer {
       executionTimeoutMs: config.executionTimeoutMs ?? 0,
       maxRssMb: config.maxRssMb ?? 0,
       maxEventLoopLagMs: config.maxEventLoopLagMs ?? 0
+    };
+    this.probes = {
+      rssBytes: config.probes?.rssBytes ?? (() => process.memoryUsage().rss),
+      createLagHistogram: config.probes?.createLagHistogram ?? ((): LagHistogram => monitorEventLoopDelay({ resolution: 20 }) as IntervalHistogram)
     };
   }
 
@@ -343,10 +383,10 @@ export class QueueConsumer {
       }, this.leases.reaperIntervalMs);
     }
     if (this.config.maxEventLoopLagMs > 0) {
-      this.lagMonitor = monitorEventLoopDelay({ resolution: 20 });
+      this.lagMonitor = this.probes.createLagHistogram();
       this.lagMonitor.enable();
-      // The gate reads the p99 of the last second, so the histogram starts over every second.
-      this.lagResetTimer = setInterval(() => this.lagMonitor?.reset(), 1_000);
+      // The gate reads the p99 of one-second windows; the last full window is kept when a new one starts.
+      this.lagResetTimer = setInterval(() => this.rollLagWindow(), 1_000);
       this.lagResetTimer.unref?.();
     }
   }
@@ -476,37 +516,51 @@ export class QueueConsumer {
     }
   }
 
-  /** Cluster mode: renews this worker's leases, stops jobs it no longer holds, and notices canceled runs. */
+  /**
+   * Cluster mode: renews this worker's leases, stops jobs it no longer holds, and notices canceled runs. The self-fence
+   * runs on every tick, also while an earlier renew is still waiting on the database: a renew counts only if it answers
+   * within one heartbeat, and a job whose lease was not confirmed for lease - heartbeat is stopped before the reaper
+   * can hand it on. Until a later renew (or, with nothing running, a probe) answers in time, nothing new is claimed.
+   */
   private async heartbeat(): Promise<void> {
     const leases = this.leases;
-    if (!leases || this.heartbeating) return;
+    if (!leases) return;
+    this.selfFence(leases);
+    if (this.heartbeating) return;
     this.heartbeating = true;
     try {
       const jobs = [...this.active.values()].filter((job) => job.claimToken !== null && job.stoppedBy === null);
-      if (jobs.length === 0) return;
       const startedAtMs = performance.now();
+      let answered = false;
       try {
-        const held = new Set(await this.store.renewQueueLeases({ owner: leases.instanceId, claimTokens: jobs.map((job) => job.claimToken!) }));
+        if (jobs.length === 0) {
+          if (this.leaseUnconfirmed) {
+            await this.withinHeartbeat(this.store.countPendingQueueItems(leases.pools[0]!), leases);
+            answered = true;
+          }
+          return;
+        }
+        const held = new Set(await this.withinHeartbeat(this.store.renewQueueLeases({ owner: leases.instanceId, claimTokens: jobs.map((job) => job.claimToken!) }), leases));
+        answered = true;
         for (const job of jobs) {
-          if (held.has(job.claimToken!)) job.renewedAtMs = startedAtMs;
+          if (held.has(job.claimToken!)) job.renewedAtMs = Math.max(job.renewedAtMs, startedAtMs);
           else this.stopJob(job, "lost", new QueueLeaseLostAbort("taken back by the queue"));
         }
       } catch (error) {
         this.log("warn", "Failed to renew queue leases", { error: error instanceof Error ? error.message : String(error) });
-      }
-      // Self-fencing: a worker that could not renew for most of a lease stops before the reaper hands the job on.
-      const nowMs = performance.now();
-      for (const job of jobs) {
-        if (job.stoppedBy === null && nowMs - job.renewedAtMs > leases.leaseMs - leases.heartbeatMs) {
-          this.stopJob(job, "lost", new QueueLeaseLostAbort("not renewed in time"));
+      } finally {
+        if (answered && this.leaseUnconfirmed) {
+          this.leaseUnconfirmed = false;
+          this.log("info", "Queue leases confirmed again: claiming resumes");
         }
       }
+      this.selfFence(leases);
       // A cancel recorded on another instance (its signal may have been missed) stops the run here too.
       if (this.cancelHandler) {
         const running = jobs.filter((job) => job.stoppedBy === null);
         if (running.length > 0) {
           try {
-            for (const executionId of await this.store.listCanceledExecutionIds(running.map((job) => job.executionId))) {
+            for (const executionId of await this.withinHeartbeat(this.store.listCanceledExecutionIds(running.map((job) => job.executionId)), leases)) {
               this.cancelHandler(executionId);
             }
           } catch (error) {
@@ -517,6 +571,48 @@ export class QueueConsumer {
     } finally {
       this.heartbeating = false;
     }
+  }
+
+  /** A database call of the heartbeat that does not answer within one heartbeat counts as failed. */
+  private async withinHeartbeat<T>(call: Promise<T>, leases: QueueLeaseOptions): Promise<T> {
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      return await Promise.race([
+        call,
+        new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => reject(new Error(`no answer within ${leases.heartbeatMs} ms`)), leases.heartbeatMs);
+        })
+      ]);
+    } finally {
+      clearTimeout(timer);
+      // A late answer (or failure) of a call given up on is dropped.
+      call.catch(() => undefined);
+    }
+  }
+
+  /** Stops every leased job whose lease was not confirmed in time; claiming waits until a lease is confirmed again. */
+  private selfFence(leases: QueueLeaseOptions): void {
+    const nowMs = performance.now();
+    for (const job of this.active.values()) {
+      if (job.claimToken === null || job.stoppedBy !== null) continue;
+      if (nowMs - job.renewedAtMs > leases.leaseMs - leases.heartbeatMs) {
+        if (!this.leaseUnconfirmed) {
+          this.leaseUnconfirmed = true;
+          this.log("warn", "Queue leases could not be confirmed in time: stopping their jobs and claiming nothing new");
+        }
+        this.stopJob(job, "lost", new QueueLeaseLostAbort("not renewed in time"));
+      }
+    }
+  }
+
+  /** Whether this job's lease is still confirmed recently enough; stops the job when it is not. */
+  private leaseFresh(job: ActiveJob): boolean {
+    if (job.stoppedBy !== null) return false;
+    const leases = this.leases;
+    if (!leases || job.claimToken === null) return true;
+    if (performance.now() - job.renewedAtMs <= leases.leaseMs - leases.heartbeatMs) return true;
+    this.stopJob(job, "lost", new QueueLeaseLostAbort("not renewed in time"));
+    return false;
   }
 
   /** Cluster mode, leader only: settles jobs whose lease ran out (their worker is gone). */
@@ -547,11 +643,49 @@ export class QueueConsumer {
     job.controller.abort(abortReason);
   }
 
-  /** Why claiming is paused for self-protection, or null. */
-  private claimGate(): string | null {
-    if (this.config.maxRssMb > 0 && process.memoryUsage().rss > this.config.maxRssMb * 1024 * 1024) return "rss";
-    if (this.lagMonitor && this.lagMonitor.count > 0 && this.lagMonitor.percentile(99) / 1e6 > this.config.maxEventLoopLagMs) return "event_loop_lag";
-    return null;
+  private rollLagWindow(): void {
+    const monitor = this.lagMonitor;
+    if (!monitor) return;
+    this.lastWindowLagMs = monitor.count > 0 ? monitor.percentile(99) / 1e6 : 0;
+    monitor.reset();
+  }
+
+  /** The p99 event-loop lag to gate on: the worse of the last full window and the one filling now. */
+  private eventLoopLagMs(): number {
+    const monitor = this.lagMonitor;
+    if (!monitor) return 0;
+    const current = monitor.count > 0 ? monitor.percentile(99) / 1e6 : 0;
+    return Math.max(this.lastWindowLagMs, current);
+  }
+
+  /**
+   * How many jobs this poll may claim (0: paused for self-protection). The memory and event-loop gates close above
+   * their limits and re-open only once both are below their resume thresholds (RSS_RESUME_RATIO, LAG_RESUME_RATIO),
+   * so a value hovering at a limit does not flap; the first poll after re-opening claims one job. In cluster mode a
+   * worker that could not confirm its leases claims nothing.
+   */
+  private claimAllowance(available: number): number {
+    if (available <= 0 || (this.leases && this.leaseUnconfirmed)) return 0;
+    const maxRss = this.config.maxRssMb * 1024 * 1024;
+    const maxLag = this.config.maxEventLoopLagMs;
+    if (maxRss === 0 && maxLag === 0) return available;
+    const rss = maxRss > 0 ? this.probes.rssBytes() : 0;
+    const lag = maxLag > 0 ? this.eventLoopLagMs() : 0;
+    if (this.gatedBy !== null) {
+      const rssLow = maxRss === 0 || rss <= maxRss * RSS_RESUME_RATIO;
+      const lagLow = maxLag === 0 || lag <= maxLag * LAG_RESUME_RATIO;
+      if (!rssLow || !lagLow) return 0;
+      this.log("info", "Queue claiming resumes", { pausedBy: this.gatedBy });
+      this.gatedBy = null;
+      return Math.min(1, available);
+    }
+    if (maxRss > 0 && rss > maxRss) this.gatedBy = "rss";
+    else if (maxLag > 0 && lag > maxLag) this.gatedBy = "event_loop_lag";
+    if (this.gatedBy !== null) {
+      this.log("warn", "Queue claiming paused to protect this worker", { pausedBy: this.gatedBy });
+      return 0;
+    }
+    return available;
   }
 
   private async poll(): Promise<void> {
@@ -577,11 +711,10 @@ export class QueueConsumer {
       return;
     }
 
-    const available = this.config.concurrency - this.active.size;
+    const available = this.claimAllowance(this.config.concurrency - this.active.size);
     if (available <= 0) {
       return;
     }
-    if (this.claimGate() !== null) return;
 
     let items: ClaimedItem[];
     try {
@@ -645,7 +778,9 @@ export class QueueConsumer {
           claimToken: job.claimToken,
           signal: job.controller.signal,
           attempts: item.attempts,
-          pool: item.pool ?? DEFAULT_QUEUE_POOL
+          pool: item.pool ?? DEFAULT_QUEUE_POOL,
+          leaseFresh: () => this.leaseFresh(job),
+          leaseLost: (detail) => this.stopJob(job, "lost", new QueueLeaseLostAbort(detail))
         });
         if (job.stoppedBy !== null) {
           await this.settleStopped(job);
