@@ -851,10 +851,14 @@ describe("a recorded decision is never lost", () => {
     expect(JSON.stringify(sent?.output)).not.toContain("first words");
     // One queue item per decision; the failed one is not retried by the queue itself (its attempts are for a lost
     // worker): it went to the dead-letter queue after its one try.
-    const rows = await testSql(context.store).all<{ id: string; status: string; attempts: unknown }>(
-      "SELECT id, status, attempts FROM execution_queue WHERE id LIKE ? ORDER BY created_at",
-      `${run.executionId}:${item!.requestId}:%`
-    );
+    // The run's history is final before the consumer settles its queue row, so wait for the row too.
+    const rows = await waitFor(async () => {
+      const found = await testSql(context.store).all<{ id: string; status: string; attempts: unknown }>(
+        "SELECT id, status, attempts FROM execution_queue WHERE id LIKE ? ORDER BY created_at",
+        `${run.executionId}:${item!.requestId}:%`
+      );
+      return found.some((row) => row.status === "running" || row.status === "pending") ? null : found;
+    });
     expect(rows.map((row) => [row.status, Number(row.attempts)])).toEqual([["dead", 1], ["completed", 0]]);
   });
 
