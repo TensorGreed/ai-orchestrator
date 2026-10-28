@@ -339,7 +339,7 @@ describeStoreContract("store contract: leased queue claims", (ctx) => {
     expect(await store.listDlqItems()).toEqual([]);
   });
 
-  it("a shutdown release interrupts an approval resume after a node completed: dead-lettered, its paused state kept", async () => {
+  it("a shutdown release interrupts an approval resume after a node completed: dead-lettered, its paused state gone", async () => {
     const store = ctx.store();
     await decidedPause(store, "run-w");
     await store.enqueueExecution({ id: "run-w:req:1", workflowId: "wf", payload: resumePayload("run-w"), scheduledAt: past(1_000) });
@@ -347,10 +347,10 @@ describeStoreContract("store contract: leased queue claims", (ctx) => {
     expect(await store.recordQueueJobProgress({ queueItemId: claim!.id, claimToken: claim!.claimToken })).toBe(true);
     expect(await store.releaseQueueItem({ id: claim!.id, claimToken: "stale" })).toBeNull();
     expect(await store.releaseQueueItem({ id: claim!.id, claimToken: claim!.claimToken })).toMatchObject({ decision: "interrupt", attempts: 0 });
-    // Never re-run silently: the record is final (so approval recovery skips it) and the dead-letter entry is its way
-    // forward; nothing a drain does destroys the paused run.
+    // Never re-run silently: the record is final and the paused state goes in the same write, so the dead-letter entry
+    // is the run's one way forward.
     expect(await store.getExecutionHistory("run-w")).toMatchObject({ status: "error", error: WORKER_SHUTDOWN_INTERRUPTED_ERROR });
-    expect((await store.getWorkflowExecutionState("run-w"))?.status).toBe("resuming");
+    expect(await store.getWorkflowExecutionState("run-w")).toBeNull();
     expect((await store.listDlqItems()).map((item) => [item.originalId, item.finalError, item.attempts])).toEqual([["run-w:req:1", WORKER_SHUTDOWN_INTERRUPTED_ERROR, 0]]);
     expect(await store.getQueueDepth()).toEqual({ pending: 0, running: 0, dlq: 1 });
     expect(await store.dequeueNext(1)).toEqual([]);

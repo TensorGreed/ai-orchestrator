@@ -808,7 +808,7 @@ describe("a recorded decision is never lost", () => {
     }
   });
 
-  it("a shutdown drain after a resume's node completed dead-letters it with its paused state kept; recovery never drives it again", async () => {
+  it("a shutdown drain after a resume's node completed dead-letters it and removes its paused state; recovery does nothing, and a manual retry still works", async () => {
     let hits = 0;
     let holding = true;
     const held: Array<() => void> = [];
@@ -843,8 +843,9 @@ describe("a recorded decision is never lost", () => {
       await lifecycle.drain(50);
       expect(context.queue!.inFlightCount()).toBe(0);
       expect(await context.store.getExecutionHistory(run.executionId!)).toMatchObject({ status: "error", error: WORKER_SHUTDOWN_INTERRUPTED_ERROR });
-      // Nothing destroyed: the paused state and the decision stay; the dead-letter entry is the run's way forward.
-      expect((await context.store.getWorkflowExecutionState(run.executionId!))?.status).toBe("resuming");
+      // The paused state goes in the same write; the decision row stays, and the dead-letter entry is the run's way forward.
+      expect(await context.store.getWorkflowExecutionState(run.executionId!)).toBeNull();
+      expect(await context.store.listResumingWorkflowExecutions()).toEqual([]);
       expect(await context.store.getApprovalRequest(item!.requestId)).toMatchObject({ status: "approved" });
       const [job] = await testSql(context.store).all<{ status: string; attempts: unknown }>("SELECT status, attempts FROM execution_queue WHERE id LIKE ?", jobPattern);
       expect([job!.status, Number(job!.attempts)]).toEqual(["dead", 0]);
@@ -860,6 +861,8 @@ describe("a recorded decision is never lost", () => {
       expect(queued.map((row) => row.status)).toEqual(["dead"]);
       expect(await restarted.store.getExecutionHistory(run.executionId!)).toMatchObject({ status: "error", error: WORKER_SHUTDOWN_INTERRUPTED_ERROR });
       expect(hits).toBe(1);
+      expect(await restarted.store.getWorkflowExecutionState(run.executionId!)).toBeNull();
+      expect(await restarted.store.listApprovalRequestsForExecution(run.executionId!)).toHaveLength(1);
 
       // A person retries it from history once its side effects are checked.
       const retryOwner = await login(restarted, "builder", "requester");
@@ -974,6 +977,30 @@ describe("a recorded decision is never lost", () => {
       expect((history.nodeResults as Array<{ nodeId: string; status: string }>).find((entry) => entry.nodeId === "sent")?.status).toBe("success");
     });
   }
+
+  it("removes the paused state of a resuming run whose record is already final, without re-driving it or asking again", async () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-approvals-final-"));
+    const first = await createTestContext({ tempDir });
+    const requester = await login(first, "builder", "requester");
+    const lead = await login(first, "builder", "lead");
+    const run = await startRun(first, gateWorkflow("wf-final-leftover", GATE), requester.cookie);
+    const [item] = await inbox(first, lead.cookie);
+    await closeContext(first);
+
+    // A crash between the run's final write and its paused-state delete.
+    await whileStopped(tempDir, async (sql) => {
+      const stamp = new Date().toISOString();
+      await sql.run("UPDATE workflow_executions SET status = 'resuming', updated_at = ? WHERE id = ?", new Date(Date.now() - 86_400_000).toISOString(), run.executionId);
+      await sql.run("UPDATE approval_requests SET status = 'approved', decided_by = ?, decided_at = ? WHERE id = ?", lead.email, stamp, item!.requestId);
+      await sql.run("UPDATE execution_history SET status = 'error', error = 'finished elsewhere', completed_at = ? WHERE id = ?", stamp, run.executionId);
+    });
+
+    const second = await createTestContext({ tempDir });
+    await waitFor(async () => (await second.store.getWorkflowExecutionState(run.executionId!)) === null);
+    expect(await second.store.getExecutionHistory(run.executionId!)).toMatchObject({ status: "error", error: "finished elsewhere" });
+    expect((await second.store.listApprovalRequestsForExecution(run.executionId!)).map((request) => request.status)).toEqual(["approved"]);
+    expect(await second.store.listResumingWorkflowExecutions()).toEqual([]);
+  });
 
   it("never applies an earlier pause's decision: a resuming run with no decision for its current pause waits again", async () => {
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-approvals-stale-"));

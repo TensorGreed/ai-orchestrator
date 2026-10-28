@@ -706,11 +706,14 @@ export class ApprovalService {
         continue;
       }
       if (this.options.queueMode && await this.store.hasActiveQueueItem(`${executionId}:${latest.id}`)) continue;
-      // A run whose record is final is over (a resume a shutdown gave back after a node completed is dead-lettered with
-      // its paused state kept): its one way forward is a manual retry. Read after the queue check, so a release that
-      // committed in between is seen here.
+      // A run whose record is final is over: its one way forward is a manual retry, which rebuilds from history, so
+      // any paused state left behind (a crash between the final write and its delete) is removed, never re-driven.
+      // Read after the queue check, so a release that committed in between is seen here.
       const record = await this.store.getExecutionHistory(executionId);
-      if (record && isFinalRunRecord(record)) continue;
+      if (record && isFinalRunRecord(record)) {
+        await this.store.deleteWorkflowExecution(executionId);
+        continue;
+      }
       recovered += 1;
       const decision: ApprovalDecisionValue = approvalDecisionOf(latest.status) ?? "timeout";
       const job: ApprovalResumeJob = {

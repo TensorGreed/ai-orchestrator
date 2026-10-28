@@ -528,8 +528,8 @@ async function settleLostJob(
       [executionId, reason, resume ? ["running", "waiting_approval"] : ["running"]]
     );
     // The record is final now, so approval recovery never drives the run on again: the dead-letter entry is its one
-    // way forward (a manual retry). A lost worker's resume also loses its paused state; a shutdown release keeps it.
-    if (resume && !reasons.keepPausedState) await client.query(`DELETE FROM workflow_executions WHERE id = $1 AND status = 'resuming'`, [executionId]);
+    // way forward (a manual retry). An interrupted resume also loses its paused state, for a lost worker and a shutdown release alike.
+    if (resume) await client.query(`DELETE FROM workflow_executions WHERE id = $1 AND status = 'resuming'`, [executionId]);
     await client.query(
       `INSERT INTO execution_queue_dlq (id, original_id, workflow_id, workflow_name, payload_json, attempts, final_error, failed_at, created_at)
          VALUES ($1, $2, $3, $4, $5, $6, $7, now(), now())`,

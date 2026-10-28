@@ -6236,9 +6236,9 @@ export class SqliteStore implements Store {
           executionId
         ]);
       }
-      // The record is final now, so approval recovery never drives the run on again. A lost worker's resume also loses
-      // its paused state; a shutdown release keeps it.
-      if (resume && !reasons.keepPausedState) this.exec(`DELETE FROM workflow_executions WHERE id = ? AND status = 'resuming'`, [executionId]);
+      // The record is final now, so approval recovery never drives the run on again. An interrupted resume also loses
+      // its paused state, for a lost worker and a shutdown release alike.
+      if (resume) this.exec(`DELETE FROM workflow_executions WHERE id = ? AND status = 'resuming'`, [executionId]);
       this.exec(
         `INSERT INTO execution_queue_dlq (id, original_id, workflow_id, workflow_name, payload_json, attempts, final_error, failed_at, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,

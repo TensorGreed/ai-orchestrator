@@ -113,8 +113,8 @@ stuck-job sweep, and an approval resume by approval recovery). With the drain, o
    completed node returns to the queue, and one with a completed node is marked `interrupted: worker shut down` and
    dead-lettered. An approval resume with no node completed since the decision returns to the queue with its paused
    state and decision intact, and the next worker resumes it from the decision. One with a completed node is marked
-   `interrupted: worker shut down` and dead-lettered too; its paused state and decision are kept, but nothing drives
-   it on automatically (retry it once you have checked its side effects);
+   `interrupted: worker shut down` and dead-lettered too; its paused state is removed with it, so nothing drives it
+   on automatically (retry it once you have checked its side effects);
 5. closes the server and the database (up to 5 seconds more), and exits.
 
 A second signal exits at once. Give the platform a termination grace period above `SHUTDOWN_DRAIN_MS` plus 5 seconds,

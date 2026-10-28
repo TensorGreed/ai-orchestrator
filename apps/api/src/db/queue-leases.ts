@@ -35,28 +35,25 @@ const COMPLETED_NODE_STATUSES = new Set(["success", "error", "waiting_approval"]
 const FINAL_RUN_STATUSES = new Set(["success", "error", "canceled", "partial"]);
 
 /**
- * How a settled resume's paused state is treated when the run is interrupted or dead-lettered. A lost worker removes
- * it; a shutdown release keeps it (nothing a drain does destroys a paused run). Either way approval recovery skips
- * the run, since its record is final (isFinalRunRecord).
+ * Why a run is interrupted or dead-lettered, in the record's words. A resume that is interrupted or dead-lettered
+ * loses its paused state in the same write, whether the worker was lost or shut down: its record is final
+ * (isFinalRunRecord), a manual retry rebuilds from history under a new id, and approval recovery never drives it on.
  */
 export interface LostJobReasons {
   interrupted: string;
   exhausted: string;
-  keepPausedState: boolean;
 }
 
 /** A lost worker: counts an attempt, removes an interrupted resume's paused state. */
 export const WORKER_LOST_REASONS: LostJobReasons = {
   interrupted: WORKER_LOST_INTERRUPTED_ERROR,
-  exhausted: WORKER_LOST_ERROR,
-  keepPausedState: false
+  exhausted: WORKER_LOST_ERROR
 };
 
-/** A shutdown release: no attempt counted, an interrupted resume keeps its paused state. */
+/** A shutdown release: no attempt counted. */
 export const WORKER_SHUTDOWN_REASONS: LostJobReasons = {
   interrupted: WORKER_SHUTDOWN_INTERRUPTED_ERROR,
-  exhausted: WORKER_SHUTDOWN_INTERRUPTED_ERROR,
-  keepPausedState: true
+  exhausted: WORKER_SHUTDOWN_INTERRUPTED_ERROR
 };
 
 /** Whether a stored node-results JSON (an array of `{ nodeId, status }`) holds a node that completed. */

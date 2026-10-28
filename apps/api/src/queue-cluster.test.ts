@@ -531,7 +531,7 @@ run("the queue across replicas on one Postgres database", () => {
     }
   }, 90_000);
 
-  it("a drain after a resume's node completed: interrupted and dead-lettered with its paused state kept, and no worker runs it again", async () => {
+  it("a drain after a resume's node completed: interrupted and dead-lettered and its paused state removed, and no worker runs it again", async () => {
     const server = await callServer();
     try {
       await database();
@@ -552,8 +552,9 @@ run("the queue across replicas on one Postgres database", () => {
       const dlq = await api.store.listDlqItems();
       expect(dlq.map((item) => [item.finalError, item.attempts])).toEqual([[WORKER_SHUTDOWN_INTERRUPTED_ERROR, 0]]);
       expect(dlq[0]!.originalId.startsWith(`${executionId}:`)).toBe(true);
-      // Nothing destroyed: the paused state and the decision stay for a person to look at.
-      expect((await api.store.getWorkflowExecutionState(executionId))?.status).toBe("resuming");
+      // The paused state goes with the resume; the decision stays, and a retry rebuilds from history.
+      expect(await api.store.getWorkflowExecutionState(executionId)).toBeNull();
+      expect(await api.store.listResumingWorkflowExecutions()).toEqual([]);
       expect((await api.store.listApprovalRequestsForExecution(executionId)).map((request) => request.status)).toEqual(["approved"]);
 
       server.release();
