@@ -90,7 +90,18 @@ run("queue chaos with real worker processes", () => {
     return url.toString();
   }
 
+  /** Starts a worker; a port taken between the probe and the bind (another test's server) is retried on a new port. */
   async function startWorker(name: string, extra: Record<string, string> = {}): Promise<Worker> {
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        return await bootWorker(name, extra);
+      } catch (error) {
+        if (attempt >= 3 || !String(error).includes("EADDRINUSE")) throw error;
+      }
+    }
+  }
+
+  async function bootWorker(name: string, extra: Record<string, string>): Promise<Worker> {
     const port = await freePort();
     const env: Record<string, string> = {
       PATH: process.env.PATH ?? "",
@@ -123,7 +134,6 @@ run("queue chaos with real worker processes", () => {
     child.stderr?.on("data", (chunk: Buffer) => output.push(chunk.toString()));
     const exited = new Promise<number | null>((resolve) => child.once("exit", (code) => resolve(code)));
     const worker = { name, child, port, output, exited };
-    workers.push(worker);
     await until(async () => {
       if (child.exitCode !== null) throw new Error(`${name} exited during boot:\n${output.join("")}`);
       try {
@@ -131,7 +141,12 @@ run("queue chaos with real worker processes", () => {
       } catch {
         return false;
       }
-    }, `${name} to be ready`, 60_000);
+    }, `${name} to be ready`, 60_000).catch(async (error: unknown) => {
+      if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+      await exited;
+      throw error;
+    });
+    workers.push(worker);
     return worker;
   }
 
