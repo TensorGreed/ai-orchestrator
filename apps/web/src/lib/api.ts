@@ -201,7 +201,7 @@ export async function fetchAuthMe() {
 
 /**
  * Phase 13.2 — where "Sign in with SSO (OIDC)" sends the browser, or null when the API has OIDC off (its metadata
- * route answers 404) or cannot be reached.
+ * route answers `enabled: false`, or 404 on an older API) or cannot be reached.
  */
 export async function fetchOidcLoginUrl(): Promise<string | null> {
   try {
@@ -223,6 +223,8 @@ export function ssoErrorMessage(code: string): string {
       return "Single sign-on was cancelled or denied by your identity provider.";
     case "oidc_email":
       return "Your identity provider did not share a verified email address, so no account could be matched. Ask your administrator.";
+    case "oidc_not_allowed":
+      return "Your account is not allowed to sign in to this workspace. Ask your administrator.";
     case "oidc_unavailable":
       return "Single sign-on is unavailable right now. Try again later or sign in with your password.";
     default:

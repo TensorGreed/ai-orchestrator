@@ -13,7 +13,9 @@ describe("OIDC login (Phase 13.2)", () => {
     expect(fetchMock).toHaveBeenCalledWith("/api/auth/oidc/metadata", expect.objectContaining({ credentials: "include" }));
   });
 
-  it("returns null when OIDC is off (404) or the API is unreachable", async () => {
+  it("returns null when OIDC is off (enabled: false, or 404) or the API is unreachable", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ enabled: false }), { status: 200 })));
+    expect(await fetchOidcLoginUrl()).toBeNull();
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ error: "OIDC is not enabled" }), { status: 404 })));
     expect(await fetchOidcLoginUrl()).toBeNull();
     vi.stubGlobal("fetch", vi.fn(async () => {
@@ -30,6 +32,7 @@ describe("OIDC login (Phase 13.2)", () => {
   it("maps sso_error codes to messages, with a generic fallback", () => {
     expect(ssoErrorMessage("oidc_email")).toMatch(/verified email/);
     expect(ssoErrorMessage("oidc_state")).toMatch(/Try again/);
+    expect(ssoErrorMessage("oidc_not_allowed")).toMatch(/not allowed/);
     expect(ssoErrorMessage("<script>")).toBe("Single sign-on failed. Try again or contact your administrator.");
   });
 });
