@@ -120,13 +120,17 @@ import { isConnectedEntrypoint, TriggerService } from "./services/trigger-servic
 import { ApiKeyService } from "./services/api-key-service";
 import { MfaService } from "./services/mfa-service";
 import {
+  SAML_REQUEST_COOKIE_NAME,
+  SAML_REQUEST_COOKIE_PATH,
+  SAML_REQUEST_MAX_AGE_MS,
   SamlLoginError,
   SamlService,
+  deriveSamlRequestKey,
   samlIdentitySubject,
   samlUserErrorCode,
   type SamlAssertionProfile,
   type SamlClientFactory
-} from "./services/saml-service";
+} from "./services/saml-service.js";
 import { decideSsoMfa, evaluateOidcMfa, evaluateSamlMfa, projectSsoRole, type SsoMfaEvidence } from "./services/sso-policy.js";
 import { LdapService } from "./services/ldap-service";
 import {
@@ -1356,8 +1360,11 @@ interface SsoProvisionInput {
   userId?: string;
   /** OIDC only: the issuer and raw `sub` behind the issuer-scoped `subject`, kept with the identity. */
   oidc?: { issuer: string; sub: string };
-  /** SAML only: the IdP entity ID and NameID behind the entity-scoped `subject`, kept with the identity. */
-  saml?: { entityId: string; nameId: string };
+  /**
+   * SAML only: the IdP entity ID and NameID behind the entity-scoped `subject`, kept with the identity, and the bare
+   * NameID of a pre-upgrade identity row that is re-keyed to `subject` once the login completes.
+   */
+  saml?: { entityId: string; nameId: string; legacySubject?: string };
 }
 
 /** Phase 13.2 — an SSO sign-in waiting for the local TOTP step (SSO_MFA=idp_or_local); no token or assertion in it. */
@@ -1366,8 +1373,6 @@ interface PendingSsoLogin {
   provision: SsoProvisionInput;
   /** No SSO identity pointed at the user yet: the link is made (and audited) only after the code passes. */
   firstLink: boolean;
-  /** A legacy bare-NameID SAML identity was upgraded to the scoped key during this login. */
-  identityUpgraded?: boolean;
 }
 
 interface PendingMfaChallenge {
@@ -4310,7 +4315,9 @@ export async function createApp(
       idpIssuer: samlSettings?.idpIssuer,
       allowedEmailDomains: samlSettings?.allowedEmailDomains,
       allowedGroups: samlSettings?.allowedGroups,
-      reportActualAuthnContext: ssoMfaSettings.mode !== "off"
+      reportActualAuthnContext: ssoMfaSettings.mode !== "off",
+      requireInResponseTo: samlSettings?.requireInResponseTo ?? false,
+      requestCookieKey: deriveSamlRequestKey(config.SECRET_MASTER_KEY_BASE64)
     },
     options.samlClientFactory
   );
@@ -4479,6 +4486,11 @@ export async function createApp(
   const provisionSsoUser = async (input: SsoProvisionInput): Promise<{ user: SafeUser; created: boolean }> => {
     const normalizedEmail = input.email.trim().toLowerCase();
     let storeUser = input.userId ? await store.getUserById(input.userId) : await store.getUserByEmail(normalizedEmail);
+    // The login was resolved to this user (a linked identity, or the account an SSO TOTP step was issued for); if it
+    // was deleted meanwhile, refuse rather than create a fresh account by email.
+    if (input.userId && !storeUser) {
+      throw new Error("The account this sign-in belongs to no longer exists");
+    }
     let created = false;
     const ssoRoles = input.provider === "saml" ? samlService : input.provider === "ldap" ? ldapService : oidcService;
 
@@ -4606,9 +4618,14 @@ export async function createApp(
       provision: SsoProvisionInput;
       firstLink: boolean;
       mfa: { evidence: SsoMfaEvidence } | "local_totp" | "enroll" | null;
-      identityUpgraded?: boolean;
     }
-  ): Promise<{ user: SafeUser; created: boolean; expiresAt: string }> => {
+  ): Promise<{ user: SafeUser; created: boolean; expiresAt: string; mfaEnrollmentRequired?: true }> => {
+    // A pre-upgrade bare-NameID SAML identity is re-keyed only now, after the allow-lists and MFA have passed.
+    const legacySubject = input.provision.saml?.legacySubject;
+    const identityUpgraded = legacySubject ? await samlService.upgradeLegacyIdentity(legacySubject, input.provision.subject) : false;
+    if (identityUpgraded) {
+      request.log.info({ provider: "saml" }, "Legacy SAML identity upgraded to the IdP-scoped key");
+    }
     const { user, created } = await provisionSsoUser(input.provision);
     const previousSessionId = getSessionIdFromRequest(request);
     if (previousSessionId) {
@@ -4646,7 +4663,7 @@ export async function createApp(
         method: input.method,
         provisioned: created,
         ...ssoMfaAuditFields(input.mfa),
-        ...(input.identityUpgraded ? { identityUpgraded: true } : {})
+        ...(identityUpgraded ? { identityUpgraded: true } : {})
       }
     }).catch((loginAuditError: unknown) => {
       request.log.warn(
@@ -4654,11 +4671,11 @@ export async function createApp(
         `${input.method.toUpperCase()} login audit not recorded`
       );
     });
-    return { user, created, expiresAt };
+    return { user, created, expiresAt, ...(input.mfa === "enroll" ? { mfaEnrollmentRequired: true as const } : {}) };
   };
 
   type SsoLoginOutcome =
-    | { kind: "session"; user: SafeUser; created: boolean; expiresAt: string }
+    | { kind: "session"; user: SafeUser; created: boolean; expiresAt: string; mfaEnrollmentRequired?: true }
     | { kind: "challenge"; challengeId: string }
     | { kind: "mfa_required" };
 
@@ -4677,7 +4694,6 @@ export async function createApp(
       evidence: SsoMfaEvidence | null;
       /** Assertion-free facts for a refusal audit (identity key, the amr/acr or AuthnContext values received). */
       refusalDetails: Record<string, string>;
-      identityUpgraded?: boolean;
     }
   ): Promise<SsoLoginOutcome> => {
     const firstLink = !input.provision.userId;
@@ -4686,8 +4702,7 @@ export async function createApp(
         method: input.method,
         provision: input.provision,
         firstLink,
-        mfa: input.evidence ? { evidence: input.evidence } : null,
-        identityUpgraded: input.identityUpgraded
+        mfa: input.evidence ? { evidence: input.evidence } : null
       });
       return { kind: "session", ...session };
     }
@@ -4709,8 +4724,7 @@ export async function createApp(
       const challengeId = issueMfaChallenge(target.id, {
         method: input.method,
         provision: { ...input.provision, userId: target.id },
-        firstLink,
-        identityUpgraded: input.identityUpgraded
+        firstLink
       });
       await audit(request, { id: target.id, email: target.email, role: safeUserRole(target.role) }, {
         category: "auth",
@@ -4729,8 +4743,7 @@ export async function createApp(
         method: input.method,
         provision: input.provision,
         firstLink,
-        mfa: "enroll",
-        identityUpgraded: input.identityUpgraded
+        mfa: "enroll"
       });
       return { kind: "session", ...session };
     }
@@ -6210,8 +6223,7 @@ export async function createApp(
           method: challenge.sso.method,
           provision: challenge.sso.provision,
           firstLink: challenge.sso.firstLink,
-          mfa: "local_totp",
-          identityUpgraded: challenge.sso.identityUpgraded
+          mfa: "local_totp"
         });
         return { user, expiresAt };
       } catch (error) {
@@ -6441,8 +6453,20 @@ export async function createApp(
 
   app.get("/api/auth/saml/login", async (_request, reply) => {
     try {
-      const redirectUrl = await samlService.buildLoginUrl();
-      reply.redirect(redirectUrl);
+      const { url: redirectUrl, requestCookie } = await samlService.buildLoginUrl();
+      reply.header("cache-control", "no-store");
+      if (requestCookie) {
+        // SAML_REQUIRE_IN_RESPONSE_TO: binds the AuthnRequest to this browser. SameSite=None so the IdP's cross-site
+        // form post carries it back; Secure is required with None (browsers keep it on https and on localhost).
+        reply.setCookie(SAML_REQUEST_COOKIE_NAME, requestCookie, {
+          path: SAML_REQUEST_COOKIE_PATH,
+          httpOnly: true,
+          sameSite: "none",
+          secure: true,
+          maxAge: Math.floor(SAML_REQUEST_MAX_AGE_MS / 1000)
+        });
+      }
+      return reply.redirect(redirectUrl);
     } catch (error) {
       reply.code(503);
       return {
@@ -6467,6 +6491,11 @@ export async function createApp(
       if (browserPost) reply.header("cache-control", "no-store");
       const body = asRecord(request.body);
       const samlResponse = typeof body.SAMLResponse === "string" ? body.SAMLResponse : "";
+      // The request cookie (SAML_REQUIRE_IN_RESPONSE_TO) is single-use: cleared whatever the outcome.
+      const requestCookie = request.cookies[SAML_REQUEST_COOKIE_NAME];
+      if (requestCookie) {
+        reply.clearCookie(SAML_REQUEST_COOKIE_NAME, { path: SAML_REQUEST_COOKIE_PATH, httpOnly: true, sameSite: "none", secure: true });
+      }
       if (!samlResponse) {
         if (browserPost) return reply.redirect(ssoLandingUrl(landingBase, { sso_error: "saml_failed" }));
         reply.code(400);
@@ -6474,18 +6503,20 @@ export async function createApp(
       }
       try {
         const profile: SamlAssertionProfile = await samlService.consumeAssertion(samlResponse);
+        // Each assertion is accepted once (remembered in the store until it expires), and, with
+        // SAML_REQUIRE_IN_RESPONSE_TO, only as the answer to a login this browser started.
+        await samlService.recordAssertion(profile);
+        samlService.assertSolicited(profile, requestCookie);
         const email = profile.email ?? profile.nameId;
         if (!email) {
           throw new SamlLoginError("missing_identity", "SAML assertion did not include an email or nameId");
         }
-        // Identities are bound to the IdP (`<entityId>#<nameId>`); a pre-upgrade bare-NameID row is upgraded once.
+        // Identities are bound to the IdP (`<entityId>#<nameId>`); a pre-upgrade bare-NameID row is found here and
+        // re-keyed once the login completes (after the allow-lists and MFA).
         const entityId = samlService.resolveEntityId(profile);
         const identity = await samlService.findIdentity(entityId, profile.nameId);
         const identityKey = samlIdentitySubject(entityId, profile.nameId);
         const linkedUser = identity ? await store.getUserById(identity.userId) : null;
-        if (identity?.upgraded) {
-          request.log.info({ provider: "saml" }, "Legacy SAML identity upgraded to the IdP-scoped key");
-        }
         // Optional allow-lists (SAML_ALLOWED_EMAIL_DOMAINS / SAML_ALLOWED_GROUPS) apply to new and returning users.
         // The configured IdP is trusted for the email it asserts (SAML has no email_verified).
         samlService.assertLoginAllowed({ identityKey, email, groups: profile.groups });
@@ -6497,11 +6528,14 @@ export async function createApp(
             email,
             groups: profile.groups,
             userId: linkedUser?.id,
-            saml: { entityId, nameId: profile.nameId }
+            saml: {
+              entityId,
+              nameId: profile.nameId,
+              ...(linkedUser && identity?.legacySubject ? { legacySubject: identity.legacySubject } : {})
+            }
           },
           evidence: ssoMfaSettings.mode === "off" ? null : evaluateSamlMfa(profile.authnContexts, ssoMfaSettings),
-          refusalDetails: { identityKey, authnContext: profile.authnContexts.join(" ") },
-          identityUpgraded: identity?.upgraded
+          refusalDetails: { identityKey, authnContext: profile.authnContexts.join(" ") }
         });
         if (outcome.kind === "challenge") {
           if (browserPost) {
@@ -6516,7 +6550,12 @@ export async function createApp(
           return { error: "Your identity provider did not report multi-factor authentication", code: "sso_mfa_required" };
         }
         if (browserPost) return reply.redirect(landingBase);
-        return { user: outcome.user, expiresAt: outcome.expiresAt, provisioned: outcome.created };
+        return {
+          user: outcome.user,
+          expiresAt: outcome.expiresAt,
+          provisioned: outcome.created,
+          ...(outcome.mfaEnrollmentRequired ? { mfaEnrollmentRequired: true } : {})
+        };
       } catch (error) {
         const code =
           error instanceof SamlLoginError

@@ -266,8 +266,8 @@ export const openApiSpec = {
     "/api/auth/saml/login": {
       get: {
         tags: ["Auth"],
-        summary: "Initiate SAML SSO login (redirects to IdP)",
-        responses: { "302": { description: "Redirect to SAML IdP" } }
+        summary: "Initiate SAML SSO login (redirects to IdP; with SAML_REQUIRE_IN_RESPONSE_TO also sets the l2m_saml_req cookie)",
+        responses: { "302": { description: "Redirect to SAML IdP" }, "429": { description: "Auth rate limit reached (Retry-After)" } }
       }
     },
     "/api/auth/saml/callback": {
@@ -275,10 +275,14 @@ export const openApiSpec = {
         tags: ["Auth"],
         summary: "SAML SSO assertion callback (HTTP-POST binding form post, or JSON)",
         responses: {
-          "200": { description: "JSON post: user authenticated via SAML, or { mfaChallenge } when the local TOTP step is required" },
+          "200": {
+            description:
+              "JSON post: user authenticated via SAML ({ user, expiresAt, provisioned, mfaEnrollmentRequired? }), or { mfaChallenge } when the local TOTP step is required"
+          },
           "302": { description: "Form post: redirect to the web app (with sso_error on failure, or sso_mfa=totp for the TOTP step)" },
-          "401": { description: "JSON post: assertion refused, or code sso_mfa_required" },
-          "403": { description: "JSON post: refused by SAML_ALLOWED_EMAIL_DOMAINS / SAML_ALLOWED_GROUPS (code saml_not_allowed)" }
+          "401": { description: "JSON post: assertion refused (invalid, replayed, unsolicited under SAML_REQUIRE_IN_RESPONSE_TO), or code sso_mfa_required" },
+          "403": { description: "JSON post: refused by SAML_ALLOWED_EMAIL_DOMAINS / SAML_ALLOWED_GROUPS (code saml_not_allowed)" },
+          "429": { description: "Auth rate limit reached (Retry-After)" }
         }
       }
     },

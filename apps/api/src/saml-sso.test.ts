@@ -251,7 +251,8 @@ describe("SAML SSO login", () => {
 
   it("refuses an assertion from an issuer other than SAML_IDP_ISSUER, and one without an Issuer", async () => {
     const context = await createContext({ env: { SAML_IDP_ISSUER: IDP } });
-    expect(context.idp.clientOptions[0]).toMatchObject({ idpIssuer: IDP });
+    // Checked by the app on the assertion's Issuer, not by the library (which may demand a Response-level Issuer).
+    expect(context.idp.clientOptions[0]).not.toHaveProperty("idpIssuer");
     const wrong = await formLogin(context, { nameID: "x", email: "x@example.com", issuer: "https://evil.example/idp" });
     expect(wrong.response.headers.location).toBe(`${WEB}/?sso_error=saml_failed`);
     expect(wrong.session).toBeUndefined();
@@ -263,10 +264,11 @@ describe("SAML SSO login", () => {
     expect(failures.items.map((item) => (item.metadata as { reason?: string }).reason).sort()).toEqual(["issuer_mismatch", "missing_issuer"]);
   });
 
-  it("refuses a forged or replayed response without a session, and audits it", async () => {
+  it("refuses a replayed (still valid) or forged response without a session, and audits it", async () => {
     const context = await createContext();
     const first = await formLogin(context, { nameID: "hal", email: "hal@example.com" });
     expect(first.session).toBeTruthy();
+    // The library (and the IdP double) would accept the same response again until it expires; the app refuses it.
     const replay = await context.app.inject({
       method: "POST",
       url: "/api/auth/saml/callback",
@@ -275,14 +277,44 @@ describe("SAML SSO login", () => {
     });
     expect(replay.headers.location).toBe(`${WEB}/?sso_error=saml_failed`);
     expect(cookieValue(setCookies(replay.headers["set-cookie"]), "ao_session")).toBeUndefined();
+    const replayJson = await context.app.inject({ method: "POST", url: "/api/auth/saml/callback", payload: { SAMLResponse: first.samlResponse } });
+    expect(replayJson.statusCode).toBe(401);
     const forged = await context.app.inject({ method: "POST", url: "/api/auth/saml/callback", payload: { SAMLResponse: "forged" } });
     expect(forged.statusCode).toBe(401);
+    // An assertion without an ID cannot be checked for replay, so it is refused.
+    const noId = await context.app.inject({
+      method: "POST",
+      url: "/api/auth/saml/callback",
+      payload: { SAMLResponse: context.idp.issue({ nameID: "hal", email: "hal@example.com" }, { omitAssertionId: true }) }
+    });
+    expect(noId.statusCode).toBe(401);
     const failures = await context.store.listAuditLogs({ eventType: "user.login", outcome: "failure" });
-    expect(failures.items).toHaveLength(2);
+    expect(failures.items.map((item) => (item.metadata as { reason?: string }).reason).sort()).toEqual([
+      "invalid_assertion",
+      "missing_assertion_id",
+      "replayed_assertion",
+      "replayed_assertion"
+    ]);
     expect(failures.items.every((item) => (item.metadata as { method?: string }).method === "saml")).toBe(true);
+    expect((await context.store.listAuditLogs({ eventType: "user.login", outcome: "success" })).items).toHaveLength(1);
   });
 
-  it("replaces a session the browser already holds", async () => {
+  it("does not re-key a legacy identity when the login is refused (allow-lists)", async () => {
+    const context = await createContext({ env: { SAML_ALLOWED_GROUPS: "l2m-users" } });
+    const existing = await context.authService.register({ email: "lee@example.com", password: "LeePassword123!", role: "builder" });
+    await context.store.upsertSsoIdentity({ id: "sso_lee", userId: existing.id, provider: "saml", subject: "lee-id", email: "lee@example.com" });
+    const refused = await formLogin(context, { nameID: "lee-id", email: "lee@example.com", groups: [] });
+    expect(refused.response.headers.location).toBe(`${WEB}/?sso_error=saml_not_allowed`);
+    expect(await context.store.findSsoIdentity("saml", "lee-id")).toMatchObject({ id: "sso_lee" });
+    expect(await context.store.findSsoIdentity("saml", samlIdentitySubject(IDP, "lee-id"))).toBeNull();
+    const allowed = await formLogin(context, { nameID: "lee-id", email: "lee@example.com", groups: ["l2m-users"] });
+    expect((await me(context, allowed.session!)).id).toBe(existing.id);
+    expect(await context.store.findSsoIdentity("saml", samlIdentitySubject(IDP, "lee-id"))).toMatchObject({ id: "sso_lee" });
+  });
+
+  // A browser's IdP form post is cross-site, so its SameSite=Lax session cookie is not sent and the earlier session
+  // stays valid until it expires (documented). A client that does send the cookie gets it replaced.
+  it("replaces a session the request carries (a same-site post or an API client)", async () => {
     const context = await createContext();
     const first = await formLogin(context, { nameID: "ivy", email: "ivy@example.com" });
     const second = await formLogin(context, { nameID: "ivy", email: "ivy@example.com" }, { ao_session: first.session! });
@@ -321,6 +353,84 @@ describe("SAML allow-lists", () => {
       ])
     );
     expect(JSON.stringify(failures.items)).not.toContain("out@gmail.test");
+  });
+});
+
+describe("SAML_REQUIRE_IN_RESPONSE_TO", () => {
+  const REQUEST_COOKIE = "l2m_saml_req";
+
+  async function startLogin(context: TestContext) {
+    const response = await context.app.inject({ method: "GET", url: "/api/auth/saml/login" });
+    expect(response.statusCode).toBe(302);
+    const cookies = setCookies(response.headers["set-cookie"]);
+    return { response, cookies, requestCookie: cookieValue(cookies, REQUEST_COOKIE) };
+  }
+
+  async function post(context: TestContext, samlResponse: string, cookies: Record<string, string> = {}) {
+    const response = await context.app.inject({
+      method: "POST",
+      url: "/api/auth/saml/callback",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      payload: new URLSearchParams({ SAMLResponse: samlResponse }).toString(),
+      cookies
+    });
+    const set = setCookies(response.headers["set-cookie"]);
+    return { response, set, session: cookieValue(set, "ao_session") };
+  }
+
+  it("is off by default: no request cookie, and IdP-initiated sign-in keeps working", async () => {
+    const context = await createContext();
+    const { requestCookie } = await startLogin(context);
+    expect(requestCookie).toBeUndefined();
+    expect((await formLogin(context, { nameID: "kim", email: "kim@example.com" })).session).toBeTruthy();
+  });
+
+  it("binds the login to the browser with a SameSite=None, Secure, HttpOnly cookie and accepts only its answer", async () => {
+    const context = await createContext({ env: { SAML_REQUIRE_IN_RESPONSE_TO: "true" } });
+    const { cookies, requestCookie } = await startLogin(context);
+    const header = cookies.find((cookie) => cookie.startsWith(`${REQUEST_COOKIE}=`))!;
+    expect(header).toMatch(/HttpOnly/i);
+    expect(header).toMatch(/Secure/i);
+    expect(header).toMatch(/SameSite=None/i);
+    expect(header).toMatch(/Path=\/api\/auth\/saml/i);
+    expect(requestCookie).not.toContain(context.idp.latestRequestId());
+
+    const ok = await post(context, context.idp.issue({ nameID: "lou", email: "lou@example.com" }, { inResponseTo: context.idp.latestRequestId() }), {
+      [REQUEST_COOKIE]: requestCookie!
+    });
+    expect(ok.response.headers.location).toBe(`${WEB}/`);
+    expect(ok.session).toBeTruthy();
+    // Single-use: the callback clears the request cookie.
+    expect(ok.set.find((cookie) => cookie.startsWith(`${REQUEST_COOKIE}=`))).toMatch(/Expires=Thu, 01 Jan 1970|Max-Age=0/i);
+  });
+
+  it("refuses a cross-site auto-post of a fresh assertion (no cookie), an IdP-initiated one and another login's answer", async () => {
+    const context = await createContext({ env: { SAML_REQUIRE_IN_RESPONSE_TO: "true" } });
+    // An attacker starts a login of their own and has their browser's fresh assertion posted from the victim's.
+    const attacker = await startLogin(context);
+    expect(attacker.requestCookie).toBeTruthy();
+    const crossSite = await post(context, context.idp.issue({ nameID: "mallory", email: "mallory@example.com" }, { inResponseTo: context.idp.latestRequestId() }));
+    expect(crossSite.response.headers.location).toBe(`${WEB}/?sso_error=saml_failed`);
+    expect(crossSite.session).toBeUndefined();
+
+    const victim = await startLogin(context);
+    const idpInitiated = await post(context, context.idp.issue({ nameID: "mallory", email: "mallory@example.com" }), {
+      [REQUEST_COOKIE]: victim.requestCookie!
+    });
+    expect(idpInitiated.session).toBeUndefined();
+    const victimAgain = await startLogin(context);
+    const otherLogin = await post(context, context.idp.issue({ nameID: "mallory", email: "mallory@example.com" }, { inResponseTo: context.idp.requestIds[0] }), {
+      [REQUEST_COOKIE]: victimAgain.requestCookie!
+    });
+    expect(otherLogin.session).toBeUndefined();
+
+    expect(await context.store.getUserByEmail("mallory@example.com")).toBeNull();
+    const failures = await context.store.listAuditLogs({ eventType: "user.login", outcome: "failure" });
+    expect(failures.items.map((item) => (item.metadata as { reason?: string }).reason)).toEqual([
+      "unsolicited_response",
+      "unsolicited_response",
+      "unsolicited_response"
+    ]);
   });
 });
 

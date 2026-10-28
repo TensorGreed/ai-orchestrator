@@ -96,6 +96,7 @@ const envSchema = z.object({
   SAML_IDP_ISSUER: z.string().optional(),
   SAML_ALLOWED_EMAIL_DOMAINS: z.string().optional(),
   SAML_ALLOWED_GROUPS: z.string().optional(),
+  SAML_REQUIRE_IN_RESPONSE_TO: optionalBooleanFromEnv,
   SSO_MFA: z.string().optional(),
   SSO_MFA_OIDC_AMR: z.string().optional(),
   SSO_MFA_OIDC_ACR: z.string().optional(),
@@ -940,9 +941,23 @@ export interface SamlSettings {
   allowedGroups: string[];
   /** Web page the browser lands on after a form-posted callback (success, `?sso_error=<code>`, `?sso_mfa=totp`). */
   postLoginUrl: string;
+  /**
+   * SAML_REQUIRE_IN_RESPONSE_TO (default false): only responses to a login started from the same browser are accepted
+   * (InResponseTo bound by a cookie); IdP-initiated sign-in is refused.
+   */
+  requireInResponseTo: boolean;
 }
 
-type SamlConfigInput = Pick<AppConfig, "SAML_ENABLED" | "SAML_IDP_ISSUER" | "SAML_ALLOWED_EMAIL_DOMAINS" | "SAML_ALLOWED_GROUPS" | "WEB_ORIGIN">;
+type SamlConfigInput = Pick<
+  AppConfig,
+  | "SAML_ENABLED"
+  | "SAML_IDP_ISSUER"
+  | "SAML_ALLOWED_EMAIL_DOMAINS"
+  | "SAML_ALLOWED_GROUPS"
+  | "SAML_REQUIRE_IN_RESPONSE_TO"
+  | "SAML_CALLBACK_URL"
+  | "WEB_ORIGIN"
+>;
 
 /** Returns the extra SAML settings when SAML_ENABLED=true, null otherwise; throws a clear error on a bad value. */
 export function resolveSamlSettings(config: SamlConfigInput): SamlSettings | null {
@@ -958,11 +973,26 @@ export function resolveSamlSettings(config: SamlConfigInput): SamlSettings | nul
   }
   const allowedEmailDomains = parseAllowedEmailDomains(config.SAML_ALLOWED_EMAIL_DOMAINS);
   if (!allowedEmailDomains) fail("SAML_ALLOWED_EMAIL_DOMAINS must be a comma-separated list of domains such as example.com");
+  const requireInResponseTo = config.SAML_REQUIRE_IN_RESPONSE_TO === true;
+  if (requireInResponseTo && config.SAML_CALLBACK_URL) {
+    // The request cookie must be Secure (SameSite=None), which a browser keeps only for https (or localhost).
+    let callback: URL | null = null;
+    try {
+      callback = new URL(config.SAML_CALLBACK_URL);
+    } catch {
+      fail("SAML_CALLBACK_URL must be a URL");
+    }
+    const localhost = callback !== null && ["localhost", "127.0.0.1", "[::1]"].includes(callback.hostname);
+    if (callback !== null && callback.protocol !== "https:" && !localhost) {
+      fail("SAML_REQUIRE_IN_RESPONSE_TO needs an https SAML_CALLBACK_URL (its request cookie is Secure)");
+    }
+  }
   return {
     idpIssuer,
     allowedEmailDomains: allowedEmailDomains ?? [],
     allowedGroups: splitList(config.SAML_ALLOWED_GROUPS),
-    postLoginUrl: ssoPostLoginUrl(config.WEB_ORIGIN)
+    postLoginUrl: ssoPostLoginUrl(config.WEB_ORIGIN),
+    requireInResponseTo
   };
 }
 

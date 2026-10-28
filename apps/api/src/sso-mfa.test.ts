@@ -411,6 +411,54 @@ describe("SSO_MFA=idp_or_local", () => {
     expect((await context.store.listAuditLogs({ eventType: "user.sso_linked" })).items).toHaveLength(1);
   });
 
+  it("SAML: JSON tells an MFA_ENFORCE admin without TOTP that enrolment is required, like the password login", async () => {
+    const context = await createContext({ SSO_MFA: "idp_or_local", MFA_ENFORCE: "true" });
+    await context.authService.register({ email: "rae@example.com", password: "RaePassword123!", role: "admin" });
+    const json = await context.app.inject({
+      method: "POST",
+      url: "/api/auth/saml/callback",
+      payload: { SAMLResponse: context.saml.issue({ nameID: "rae", email: "rae@example.com", authnContexts: [PASSWORD_ONLY] }) }
+    });
+    expect(json.statusCode).toBe(200);
+    expect(json.json()).toMatchObject({ user: { email: "rae@example.com", role: "admin" }, mfaEnrollmentRequired: true });
+    // Signed in with IdP MFA: no flag.
+    const withMfa = await context.app.inject({
+      method: "POST",
+      url: "/api/auth/saml/callback",
+      payload: { SAMLResponse: context.saml.issue({ nameID: "rae", email: "rae@example.com", authnContexts: [ENTRA_MFA] }) }
+    });
+    expect(withMfa.json()).not.toHaveProperty("mfaEnrollmentRequired");
+  });
+
+  it("SAML: a legacy identity is re-keyed only once the TOTP step passes", async () => {
+    const context = await createContext({ SSO_MFA: "idp_or_local" });
+    const { user, secret } = await withTotp(context, "sid@example.com");
+    await context.store.upsertSsoIdentity({ id: "sso_sid", userId: user.id, provider: "saml", subject: "sid-id", email: "sid@example.com" });
+    const pending = await samlFormLogin(context, { nameID: "sid-id", email: "sid@example.com", authnContexts: [PASSWORD_ONLY] });
+    expect(pending.finish.headers.location).toBe(`${WEB}/?sso_mfa=totp`);
+    expect(await context.store.findSsoIdentity("saml", "sid-id")).toMatchObject({ id: "sso_sid" });
+    expect(await context.store.findSsoIdentity("saml", samlIdentitySubject(SAML_IDP, "sid-id"))).toBeNull();
+    const done = await completeTotp(context, { cookie: pending.challengeCookie, code: generateTotpCode(secret) });
+    expect(done.statusCode).toBe(200);
+    expect(await context.store.findSsoIdentity("saml", "sid-id")).toBeNull();
+    expect(await context.store.findSsoIdentity("saml", samlIdentitySubject(SAML_IDP, "sid-id"))).toMatchObject({ id: "sso_sid", userId: user.id });
+    expect((await loginAudits(context, "success"))[0]!.metadata).toMatchObject({ method: "saml", mfa: "local_totp", identityUpgraded: true });
+  });
+
+  it("refuses the TOTP step of an SSO sign-in whose account was deleted meanwhile, without creating a new one", async () => {
+    const context = await createContext({ SSO_MFA: "idp_or_local" });
+    const { user, secret } = await withTotp(context, "tess@example.com");
+    const pending = await samlFormLogin(context, { nameID: "tess", email: "tess@example.com", authnContexts: [PASSWORD_ONLY] });
+    expect(pending.challengeCookie).toBeTruthy();
+    const code = generateTotpCode(secret);
+    expect(await context.store.deleteUser(user.id)).toBe(true);
+    const done = await completeTotp(context, { cookie: pending.challengeCookie, code });
+    expect(done.statusCode).toBe(401);
+    expect(cookieValue(setCookies(done.headers["set-cookie"]), "ao_session")).toBeUndefined();
+    expect(await context.store.getUserByEmail("tess@example.com")).toBeNull();
+    expect(await context.store.findSsoIdentity("saml", samlIdentitySubject(SAML_IDP, "tess"))).toBeNull();
+  });
+
   it("SAML: IdP MFA signs in directly and a user without TOTP is refused", async () => {
     const context = await createContext({ SSO_MFA: "idp_or_local" });
     await withTotp(context, "pat@example.com");

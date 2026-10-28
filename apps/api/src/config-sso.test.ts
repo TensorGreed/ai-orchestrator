@@ -73,8 +73,21 @@ describe("SAML parity settings", () => {
       idpIssuer: undefined,
       allowedEmailDomains: [],
       allowedGroups: [],
-      postLoginUrl: "https://l2m.example.com/"
+      postLoginUrl: "https://l2m.example.com/",
+      requireInResponseTo: false
     });
+  });
+
+  it("read SAML_REQUIRE_IN_RESPONSE_TO and refuse it with a plain-http callback (its cookie is Secure)", () => {
+    const on = { SAML_ENABLED: "true", SAML_REQUIRE_IN_RESPONSE_TO: "true" };
+    expect(resolveSamlSettings(parseConfig({ ...on, SAML_CALLBACK_URL: "https://l2m.example.com/api/auth/saml/callback" }))?.requireInResponseTo).toBe(true);
+    expect(resolveSamlSettings(parseConfig({ ...on, SAML_CALLBACK_URL: "http://localhost:4000/api/auth/saml/callback" }))?.requireInResponseTo).toBe(true);
+    expect(resolveSamlSettings(parseConfig({ SAML_ENABLED: "true", SAML_REQUIRE_IN_RESPONSE_TO: "" }))?.requireInResponseTo).toBe(false);
+    expect(() => parseConfig({ ...on, SAML_CALLBACK_URL: "http://l2m.example.com/api/auth/saml/callback" })).toThrow(
+      /SAML_REQUIRE_IN_RESPONSE_TO needs an https SAML_CALLBACK_URL/
+    );
+    // Read only when SAML is on.
+    expect(() => parseConfig({ SAML_REQUIRE_IN_RESPONSE_TO: "true", SAML_CALLBACK_URL: "http://l2m.example.com/cb" })).not.toThrow();
   });
 
   it("parse the IdP issuer pin and allow-lists like OIDC's", () => {

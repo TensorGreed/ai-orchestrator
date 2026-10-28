@@ -1,10 +1,27 @@
+import { AsyncLocalStorage } from "node:async_hooks";
+import crypto from "node:crypto";
 import { createRequire } from "node:module";
 import { nanoid } from "nanoid";
-import type { UserRole } from "./auth-service";
+import type { UserRole } from "./auth-service.js";
 import type { Store } from "../db/store.js";
 import { checkSsoAllowLists, emailDomainOf } from "./sso-policy.js";
 
 const require = createRequire(import.meta.url);
+
+/**
+ * Phase 13.2 — cookie that binds an SP-initiated SAML login to the browser that started it (SAML_REQUIRE_IN_RESPONSE_TO).
+ * SameSite=None (the IdP's HTTP-POST to the callback is a cross-site request, which a Lax cookie would not join),
+ * Secure, HttpOnly, path-scoped to the SAML routes, ten minutes. It holds the sealed AuthnRequest ID only.
+ */
+export const SAML_REQUEST_COOKIE_NAME = "l2m_saml_req";
+export const SAML_REQUEST_COOKIE_PATH = "/api/auth/saml";
+export const SAML_REQUEST_MAX_AGE_MS = 10 * 60 * 1000;
+/** How long a consumed assertion ID is remembered at most (an assertion valid for longer is still held this long). */
+export const SAML_ASSERTION_REPLAY_CAP_MS = 24 * 60 * 60 * 1000;
+/** Kept past an assertion's NotOnOrAfter so a clock difference with the IdP cannot reopen it. */
+const SAML_ASSERTION_REPLAY_SKEW_MS = 5 * 60 * 1000;
+const SAML_REQUEST_AAD = Buffer.from("l2m-saml-request-v1");
+const SAML_REPLAY_ENDPOINT_KEY = "saml_assertion";
 
 export interface SamlConfig {
   enabled: boolean;
@@ -24,6 +41,14 @@ export interface SamlConfig {
    * the method it really used (the library's default request for PasswordProtectedTransport would hide MFA).
    */
   reportActualAuthnContext?: boolean;
+  /**
+   * Phase 13.2 — SAML_REQUIRE_IN_RESPONSE_TO: accept only responses to a login this browser started here (the
+   * assertion's InResponseTo must equal the AuthnRequest ID sealed in its request cookie); IdP-initiated sign-in is
+   * then refused.
+   */
+  requireInResponseTo?: boolean;
+  /** Key the request cookie is sealed with (32 bytes); instances behind one load balancer must share it. */
+  requestCookieKey?: Buffer;
 }
 
 export interface SamlAssertionProfile {
@@ -36,6 +61,12 @@ export interface SamlAssertionProfile {
   issuer?: string;
   /** Phase 13.2 — every AuthnContextClassRef of the assertion's AuthnStatements. */
   authnContexts: string[];
+  /** Phase 13.2 — the assertion's ID (remembered so the assertion is accepted once). */
+  assertionId?: string;
+  /** Phase 13.2 — the latest moment the assertion is valid (its NotOnOrAfter bounds), epoch ms. */
+  validUntilMs?: number;
+  /** Phase 13.2 — the AuthnRequest ID the assertion answers, when it answers one. */
+  inResponseTo?: string;
 }
 
 /** Options handed to the SAML library (exported for the test seam). */
@@ -45,12 +76,14 @@ export interface NodeSamlOptions {
   callbackUrl?: string;
   cert?: string;
   idpCert?: string;
-  idpIssuer?: string;
   disableRequestedAuthnContext?: boolean;
+  /** The AuthnRequest ID generator; the app supplies it so it knows the ID it binds to the browser. */
+  generateUniqueId?: () => string;
 }
 
+/** The part of `@node-saml/node-saml`'s `SAML` class the app uses (4.x and 5.x signatures). */
 export interface NodeSamlLike {
-  generateAuthorizeUrl(req?: unknown): Promise<string> | string;
+  getAuthorizeUrlAsync(relayState: string, host: string | undefined, options: Record<string, unknown>): Promise<string>;
   validatePostResponseAsync(body: { SAMLResponse: string }): Promise<{ profile: Record<string, unknown> | null }>;
 }
 
@@ -66,7 +99,10 @@ export type SamlLoginErrorCode =
   | "issuer_mismatch"
   | "invalid_issuer"
   | "missing_identity"
-  | "not_allowed";
+  | "not_allowed"
+  | "replayed_assertion"
+  | "missing_assertion_id"
+  | "unsolicited_response";
 
 /** A refused SAML login: `message` is a reason for the log, `details` are assertion-free facts safe for the audit. */
 export class SamlLoginError extends Error {
@@ -126,6 +162,16 @@ function childElements(node: unknown, name: string): unknown[] {
   return out;
 }
 
+function elementAttribute(node: unknown, name: string): string | undefined {
+  if (!node || typeof node !== "object") return undefined;
+  const attributes = (node as Record<string, unknown>).$;
+  if (!attributes || typeof attributes !== "object") return undefined;
+  for (const [key, value] of Object.entries(attributes as Record<string, unknown>)) {
+    if (localName(key) === name && typeof value === "string" && value.trim()) return value.trim();
+  }
+  return undefined;
+}
+
 function elementText(node: unknown): string | undefined {
   if (typeof node === "string") return node.trim() || undefined;
   if (node && typeof node === "object" && typeof (node as Record<string, unknown>)._ === "string") {
@@ -134,11 +180,8 @@ function elementText(node: unknown): string | undefined {
   return undefined;
 }
 
-/**
- * The AuthnContextClassRef values of a validated assertion, read from the library's parsed assertion
- * (`profile.getAssertion()`, xml2js with the namespace prefixes stripped or kept). Never parsed from raw XML text.
- */
-export function extractAuthnContextClassRefs(profile: Record<string, unknown>): string[] {
+/** The top-level Assertion element(s) of the library's parsed, validated assertion (`profile.getAssertion()`). */
+function parsedAssertions(profile: Record<string, unknown>): unknown[] {
   const getAssertion = profile.getAssertion;
   if (typeof getAssertion !== "function") return [];
   let parsed: unknown;
@@ -147,8 +190,17 @@ export function extractAuthnContextClassRefs(profile: Record<string, unknown>): 
   } catch {
     return [];
   }
+  if (!parsed || typeof parsed !== "object") return [];
   const roots = childElements(parsed, "Assertion");
-  const assertions = roots.length > 0 ? roots : [parsed];
+  return roots.length > 0 ? roots : [parsed];
+}
+
+/**
+ * The AuthnContextClassRef values of a validated assertion, read from the library's parsed assertion
+ * (`profile.getAssertion()`, xml2js with the namespace prefixes stripped or kept). Never parsed from raw XML text.
+ */
+export function extractAuthnContextClassRefs(profile: Record<string, unknown>): string[] {
+  const assertions = parsedAssertions(profile);
   const refs: string[] = [];
   for (const assertion of assertions) {
     for (const statement of childElements(assertion, "AuthnStatement")) {
@@ -163,8 +215,84 @@ export function extractAuthnContextClassRefs(profile: Record<string, unknown>): 
   return refs;
 }
 
+/**
+ * Facts of the validated assertion used against replay and unsolicited responses, from the parsed assertion only: its
+ * Issuer and ID, the latest NotOnOrAfter that bounds it (Conditions, and the latest bearer SubjectConfirmationData;
+ * the earlier of the two), and the InResponseTo of its SubjectConfirmationData.
+ */
+export function extractAssertionFacts(profile: Record<string, unknown>): {
+  issuer?: string;
+  assertionId?: string;
+  validUntilMs?: number;
+  inResponseTo?: string;
+} {
+  const [assertion] = parsedAssertions(profile);
+  if (!assertion) return {};
+  const issuer = childElements(assertion, "Issuer").map(elementText).find(Boolean);
+  const assertionId = elementAttribute(assertion, "ID");
+  const toMs = (value: string | undefined): number | undefined => {
+    const ms = value ? Date.parse(value) : Number.NaN;
+    return Number.isFinite(ms) ? ms : undefined;
+  };
+  const limits: number[] = [];
+  const conditionsLimit = toMs(childElements(assertion, "Conditions").map((c) => elementAttribute(c, "NotOnOrAfter")).find(Boolean));
+  if (conditionsLimit !== undefined) limits.push(conditionsLimit);
+  const confirmationData = childElements(assertion, "Subject")
+    .flatMap((subject) => childElements(subject, "SubjectConfirmation"))
+    .flatMap((confirmation) => childElements(confirmation, "SubjectConfirmationData"));
+  const confirmationLimits = confirmationData
+    .map((data) => toMs(elementAttribute(data, "NotOnOrAfter")))
+    .filter((ms): ms is number => ms !== undefined);
+  if (confirmationLimits.length > 0) limits.push(Math.max(...confirmationLimits));
+  const inResponseTo = confirmationData.map((data) => elementAttribute(data, "InResponseTo")).find(Boolean);
+  return {
+    issuer,
+    assertionId,
+    ...(limits.length > 0 ? { validUntilMs: Math.min(...limits) } : {}),
+    inResponseTo
+  };
+}
+
+/** Key the SAML request cookie is sealed with: HKDF of the master key (a random per-process key without one). */
+export function deriveSamlRequestKey(masterKeyBase64: string | undefined): Buffer {
+  const master = Buffer.from(masterKeyBase64 ?? "", "base64");
+  if (master.length === 0) return crypto.randomBytes(32);
+  return Buffer.from(crypto.hkdfSync("sha256", master, Buffer.alloc(0), Buffer.from("l2m-saml-request-cookie"), 32));
+}
+
+export function sealSamlRequest(requestId: string, key: Buffer, now: number): string {
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv("aes-256-gcm", key, iv);
+  cipher.setAAD(SAML_REQUEST_AAD);
+  const plain = JSON.stringify({ v: 1, id: requestId, createdAt: now });
+  const ciphertext = Buffer.concat([cipher.update(plain, "utf8"), cipher.final()]);
+  return Buffer.concat([iv, cipher.getAuthTag(), ciphertext]).toString("base64url");
+}
+
+/** The AuthnRequest ID in a request cookie, or null when it is missing, tampered with or older than ten minutes. */
+export function openSamlRequest(value: string | undefined, key: Buffer, now: number): string | null {
+  if (!value) return null;
+  try {
+    const raw = Buffer.from(value, "base64url");
+    if (raw.length < 29) return null;
+    const decipher = crypto.createDecipheriv("aes-256-gcm", key, raw.subarray(0, 12));
+    decipher.setAAD(SAML_REQUEST_AAD);
+    decipher.setAuthTag(raw.subarray(12, 28));
+    const plain = Buffer.concat([decipher.update(raw.subarray(28)), decipher.final()]).toString("utf8");
+    const parsed = JSON.parse(plain) as { v?: unknown; id?: unknown; createdAt?: unknown };
+    if (parsed.v !== 1 || typeof parsed.id !== "string" || !parsed.id || typeof parsed.createdAt !== "number") return null;
+    const age = now - parsed.createdAt;
+    if (age < -SAML_ASSERTION_REPLAY_SKEW_MS || age > SAML_REQUEST_MAX_AGE_MS) return null;
+    return parsed.id;
+  } catch {
+    return null;
+  }
+}
+
 export class SamlService {
   private readonly client: NodeSamlLike | null;
+  /** The AuthnRequest ID the library should use for the login being started (see `generateUniqueId`). */
+  private readonly pendingRequestId = new AsyncLocalStorage<string>();
 
   constructor(
     private readonly store: Store,
@@ -185,8 +313,10 @@ export class SamlService {
       callbackUrl: config.callbackUrl,
       cert: config.idpCert,
       idpCert: config.idpCert,
-      ...(config.idpIssuer ? { idpIssuer: config.idpIssuer } : {}),
-      ...(config.reportActualAuthnContext ? { disableRequestedAuthnContext: true } : {})
+      // SAML_IDP_ISSUER is checked by the app on the assertion's Issuer (resolveEntityId), not handed to the library:
+      // some library versions would also demand the optional Response-level Issuer.
+      ...(config.reportActualAuthnContext ? { disableRequestedAuthnContext: true } : {}),
+      generateUniqueId: () => this.pendingRequestId.getStore() ?? newSamlRequestId()
     };
     if (clientFactory) {
       this.client = clientFactory(options);
@@ -204,16 +334,71 @@ export class SamlService {
     return Boolean(this.client);
   }
 
-  async buildLoginUrl(): Promise<string> {
+  /**
+   * The IdP redirect for an SP-initiated login. With SAML_REQUIRE_IN_RESPONSE_TO it also returns the sealed request
+   * cookie holding the AuthnRequest ID, which the callback then requires as the assertion's InResponseTo.
+   */
+  async buildLoginUrl(now = Date.now()): Promise<{ url: string; requestCookie?: string }> {
     if (!this.config.enabled) {
       throw CONFIGURATION_ERROR("SAML_ENABLED is false");
     }
-    if (!this.client) {
+    const client = this.client;
+    if (!client) {
       throw CONFIGURATION_ERROR(
         "SAML_ENTRY_POINT/SAML_ISSUER/SAML_CALLBACK_URL must be set and @node-saml/node-saml must be installed"
       );
     }
-    return await this.client.generateAuthorizeUrl();
+    const requestId = newSamlRequestId();
+    const url = await this.pendingRequestId.run(requestId, async () => await client.getAuthorizeUrlAsync("", undefined, {}));
+    if (!this.config.requireInResponseTo) return { url };
+    return { url, requestCookie: sealSamlRequest(requestId, this.requestCookieKey(), now) };
+  }
+
+  private requestCookieKey(): Buffer {
+    if (!this.config.requestCookieKey || this.config.requestCookieKey.length !== 32) {
+      throw CONFIGURATION_ERROR("the SAML request cookie key is missing");
+    }
+    return this.config.requestCookieKey;
+  }
+
+  /**
+   * Accepts each assertion once: its (Issuer, ID) is remembered in the store until it expires (its NotOnOrAfter plus
+   * five minutes, at most 24 hours), so a second post of the same SAMLResponse, on this instance or another one sharing
+   * the database, is refused. An assertion without an ID is refused.
+   */
+  async recordAssertion(profile: Pick<SamlAssertionProfile, "issuer" | "assertionId" | "validUntilMs">, now = Date.now()): Promise<void> {
+    if (!profile.assertionId) {
+      throw new SamlLoginError("missing_assertion_id", "SAML assertion has no ID, so it cannot be checked for replay");
+    }
+    const cap = now + SAML_ASSERTION_REPLAY_CAP_MS;
+    const until = profile.validUntilMs === undefined ? cap : Math.min(profile.validUntilMs + SAML_ASSERTION_REPLAY_SKEW_MS, cap);
+    if (until <= now) return; // already expired: the library refuses it anyway
+    const replayKey = `saml-assertion:${crypto.createHash("sha256").update(JSON.stringify([profile.issuer ?? "", profile.assertionId])).digest("hex")}`;
+    await this.store.clearExpiredWebhookSecurityState(new Date(now).toISOString());
+    const first = await this.store.saveWebhookReplayKey({
+      replayKey,
+      endpointKey: SAML_REPLAY_ENDPOINT_KEY,
+      expiresAt: new Date(until).toISOString()
+    });
+    if (!first) {
+      throw new SamlLoginError("replayed_assertion", "SAML assertion was already used");
+    }
+  }
+
+  /**
+   * SAML_REQUIRE_IN_RESPONSE_TO: the assertion must answer the AuthnRequest this browser started (the ID sealed in its
+   * request cookie). No cookie, an expired or tampered one, an IdP-initiated response or another request's answer are
+   * refused. Does nothing when the setting is off.
+   */
+  assertSolicited(profile: Pick<SamlAssertionProfile, "inResponseTo">, requestCookie: string | undefined, now = Date.now()): void {
+    if (!this.config.requireInResponseTo) return;
+    const expected = openSamlRequest(requestCookie, this.requestCookieKey(), now);
+    if (!expected) {
+      throw new SamlLoginError("unsolicited_response", "SAML response arrived without a login started from this browser");
+    }
+    if (!profile.inResponseTo || profile.inResponseTo !== expected) {
+      throw new SamlLoginError("unsolicited_response", "SAML response does not answer the login this browser started");
+    }
   }
 
   async consumeAssertion(samlResponse: string): Promise<SamlAssertionProfile> {
@@ -254,7 +439,13 @@ export class SamlService {
 
     // Attribute values only: the library's accessors (raw assertion and response XML) are left out.
     const attributes = Object.fromEntries(Object.entries(profile).filter(([, value]) => typeof value !== "function"));
-    const issuer = typeof profile.issuer === "string" && profile.issuer.trim() ? profile.issuer.trim() : undefined;
+    // Issuer, ID, validity and InResponseTo come from the parsed assertion (an IdP attribute named `issuer` cannot
+    // shadow them); `profile.issuer` / `profile.inResponseTo` only when the library offers no parsed assertion.
+    const facts = extractAssertionFacts(profile);
+    const issuer =
+      facts.issuer ?? (typeof profile.issuer === "string" && profile.issuer.trim() ? profile.issuer.trim() : undefined);
+    const inResponseTo =
+      facts.inResponseTo ?? (typeof profile.inResponseTo === "string" && profile.inResponseTo ? profile.inResponseTo : undefined);
 
     return {
       nameId: nameId || email || "",
@@ -263,7 +454,10 @@ export class SamlService {
       groups,
       attributes,
       issuer,
-      authnContexts: extractAuthnContextClassRefs(profile)
+      authnContexts: extractAuthnContextClassRefs(profile),
+      ...(facts.assertionId ? { assertionId: facts.assertionId } : {}),
+      ...(facts.validUntilMs !== undefined ? { validUntilMs: facts.validUntilMs } : {}),
+      ...(inResponseTo ? { inResponseTo } : {})
     };
   }
 
@@ -286,21 +480,28 @@ export class SamlService {
   }
 
   /**
-   * Finds the SSO identity of an assertion under the entity-scoped key. A row from before identities were scoped holds
-   * the bare NameID: it is upgraded in place to the scoped key once (on its first login after the upgrade), then used.
-   * Returns null when neither exists.
+   * Finds the SSO identity of an assertion under the entity-scoped key, else a row from before identities were scoped
+   * (the bare NameID), reported as `legacySubject`. Reads only: the legacy row is upgraded by `upgradeLegacyIdentity`
+   * once the login has passed the allow-lists and MFA. Returns null when neither exists.
    */
-  async findIdentity(entityId: string, nameId: string): Promise<{ userId: string; identityKey: string; upgraded: boolean } | null> {
+  async findIdentity(
+    entityId: string,
+    nameId: string
+  ): Promise<{ userId: string; identityKey: string; legacySubject?: string } | null> {
     const identityKey = samlIdentitySubject(entityId, nameId);
     const scoped = await this.store.findSsoIdentity("saml", identityKey);
-    if (scoped) return { userId: scoped.userId, identityKey, upgraded: false };
+    if (scoped) return { userId: scoped.userId, identityKey };
     const legacy = await this.store.findSsoIdentity("saml", nameId);
     if (!legacy) return null;
-    const renamed = await this.store.renameSsoIdentitySubject({ provider: "saml", from: nameId, to: identityKey });
-    // Another login may have upgraded (or the scoped key been created) meanwhile: read whatever is there now.
-    const current = await this.store.findSsoIdentity("saml", identityKey);
-    if (current) return { userId: current.userId, identityKey, upgraded: renamed };
-    return null;
+    return { userId: legacy.userId, identityKey, legacySubject: nameId };
+  }
+
+  /**
+   * Re-keys a pre-upgrade bare-NameID identity to the entity-scoped key, once (a concurrent login may have done it).
+   * True when this call renamed the row.
+   */
+  async upgradeLegacyIdentity(legacySubject: string, identityKey: string): Promise<boolean> {
+    return await this.store.renameSsoIdentitySubject({ provider: "saml", from: legacySubject, to: identityKey });
   }
 
   /** Applies SAML_ALLOWED_EMAIL_DOMAINS / SAML_ALLOWED_GROUPS (nothing when both are unset). */
@@ -375,4 +576,9 @@ export class SamlService {
 
 function isUserRole(value: string): value is UserRole {
   return value === "admin" || value === "builder" || value === "operator" || value === "viewer";
+}
+
+/** An AuthnRequest ID: `_` and 160 random bits in hex (an XML ID must not start with a digit). */
+function newSamlRequestId(): string {
+  return `_${crypto.randomBytes(20).toString("hex")}`;
 }
