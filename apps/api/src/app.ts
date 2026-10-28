@@ -4375,17 +4375,38 @@ export async function createApp(
     return match ? match[1].trim() : null;
   };
 
+  type StoredSession = NonNullable<Awaited<ReturnType<typeof store.getSession>>>;
+  // Session IDs this server issues: `sess_` plus 24 to 64 URL-safe characters. Anything else cannot name a session.
+  const SESSION_ID_FORMAT = /^sess_[A-Za-z0-9_-]{24,64}$/;
+  const requestSessions = new WeakMap<object, Promise<StoredSession | null>>();
+
+  /**
+   * The session row the request's cookie names, looked up at most once per request: the rate-limit exemption check
+   * and the auth layer share the result. A cookie that is not shaped like a session ID costs no lookup. A failed
+   * lookup is not remembered as a miss for the auth layer (it looks again); the exemption treats it as no session.
+   */
+  const getRequestSession = (request: FastifyRequest, sessionId: string): Promise<StoredSession | null> => {
+    if (!SESSION_ID_FORMAT.test(sessionId)) return Promise.resolve(null);
+    const cached = requestSessions.get(request);
+    if (cached) return cached;
+    const lookup = store.getSession(sessionId) as Promise<StoredSession | null>;
+    requestSessions.set(request, lookup);
+    lookup.catch(() => requestSessions.delete(request));
+    return lookup;
+  };
+
   /**
    * True when a request is studio traffic from a signed-in browser: a session cookie naming a live session, and no
    * Authorization or X-API-Key header (API-key and bearer traffic stays under the global rate limit). Any lookup
-   * failure counts as false, so the request is limited as usual.
+   * failure counts as false, so the request is limited as usual. Any signed-in session is exempt from the global
+   * bucket, whatever its role.
    */
   const isBrowserSessionRequest = async (request: FastifyRequest): Promise<boolean> => {
     if (request.headers.authorization || request.headers["x-api-key"]) return false;
     const sessionId = (request.cookies as Record<string, string | undefined> | undefined)?.[config.SESSION_COOKIE_NAME];
     if (!sessionId) return false;
     try {
-      const session = await store.getSession(sessionId);
+      const session = await getRequestSession(request, sessionId);
       return Boolean(session && !session.revokedAt && new Date(session.expiresAt).getTime() > Date.now());
     } catch {
       return false;
@@ -4453,7 +4474,7 @@ export async function createApp(
       return null;
     }
 
-    const user = await authService.getSessionUser(sessionId);
+    const user = await authService.getSessionUser(sessionId, await getRequestSession(request, sessionId).catch(() => undefined));
     if (!user) {
       clearSessionCookie(reply);
       deny(reply, 401, "Session expired or invalid");
@@ -13327,7 +13348,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     }
 
     // Rate limited: answered as 429; the plugin already set Retry-After and the x-ratelimit-* headers on the reply.
-    if (statusCode === 429) {
+    if (statusCode === 429 && reply.getHeader("retry-after") !== undefined) {
       reply.code(429).send({ error: "Too many requests, retry later", retryAfterSeconds: Number(reply.getHeader("retry-after")) || undefined });
       return;
     }

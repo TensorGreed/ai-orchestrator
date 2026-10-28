@@ -6,11 +6,11 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
 import { WORKFLOW_SCHEMA_VERSION, type Workflow } from "@ai-orchestrator/shared";
-import { parseTrustProxy, type AppConfig } from "./config";
-import { createApp } from "./app";
+import { parseTrustProxy, type AppConfig } from "./config.js";
+import { createApp } from "./app.js";
 import type { Store } from "./db/store.js";
-import { AuthService } from "./services/auth-service";
-import { SecretService } from "./services/secret-service";
+import { AuthService } from "./services/auth-service.js";
+import { SecretService } from "./services/secret-service.js";
 import { openTestStore } from "./test-support/test-store.js";
 
 interface TestContext {
@@ -2977,6 +2977,26 @@ describe("Phase 4.1 rate limiting", () => {
     // Sign-in routes count a signed-in browser too.
     const logins = await burst(context, 3, { method: "POST", url: "/api/auth/login", headers: { cookie }, payload: { email: "busy@example.com", password: "wrong" } });
     expect(logins.map((r) => r.statusCode)).toEqual([401, 401, 429]);
+  });
+
+  it("looks the session up once per signed-in request and not at all for a cookie that cannot be a session", async () => {
+    const context = await createTestContext({ RATE_LIMIT_ENABLED: true, RATE_LIMIT_GLOBAL_MAX: 5 });
+    await context.authService.register({ email: "once@example.com", password: "Once-password-123", role: "builder" });
+    const { sessionId } = await context.authService.login("once@example.com", "Once-password-123");
+    const original = context.store.getSession.bind(context.store);
+    const lookups: string[] = [];
+    context.store.getSession = async (id: string) => {
+      lookups.push(id);
+      return original(id);
+    };
+    const cookieName = context.config.SESSION_COOKIE_NAME;
+    const signedIn = await context.app.inject({ method: "GET", url: "/api/workflows", headers: { cookie: `${cookieName}=${sessionId}` } });
+    expect(signedIn.statusCode).toBe(200);
+    expect(lookups).toEqual([sessionId]);
+    lookups.length = 0;
+    const junk = await context.app.inject({ method: "GET", url: "/api/definitions", headers: { cookie: `${cookieName}=not-a-session` } });
+    expect(junk.statusCode).toBe(401);
+    expect(lookups).toEqual([]);
   });
 
   it("applies the webhook limit to public webhook routes", async () => {
