@@ -94,7 +94,8 @@ import {
 import { loadDocuments, inferDocumentKind, type DocumentKind } from "./services/document-loader-service";
 import { type McpServerRecord } from "./db/database";
 import { PostgresStore } from "./db/postgres-store.js";
-import { REPLAY_CAPTURE_DEFAULTS, type AppConfig } from "./config";
+import { REPLAY_CAPTURE_DEFAULTS, resolveOidcSettings, type AppConfig } from "./config";
+import { redactSensitiveUrl } from "./services/url-redaction.js";
 import { SecretService } from "./services/secret-service";
 import { McpCatalogService } from "./services/mcp-catalog.js";
 import { computeTemplateDependencies } from "./services/template-dependencies";
@@ -112,6 +113,16 @@ import { ApiKeyService } from "./services/api-key-service";
 import { MfaService } from "./services/mfa-service";
 import { SamlService, type SamlAssertionProfile } from "./services/saml-service";
 import { LdapService } from "./services/ldap-service";
+import {
+  OIDC_FLOW_COOKIE_NAME,
+  OIDC_FLOW_COOKIE_PATH,
+  OIDC_FLOW_MAX_AGE_MS,
+  OidcError,
+  OidcService,
+  deriveOidcFlowKey,
+  oidcUserErrorCode,
+  type FetchLike as OidcFetch
+} from "./services/oidc-service.js";
 import {
   ALL_PERMISSIONS,
   RbacService,
@@ -1311,6 +1322,10 @@ function openToolResults(secretService: SecretService, state: WorkflowExecutionS
 export interface CreateAppOptions {
   /** Runtime/image detection seams for the code sandbox plan (tests). */
   codeSandboxDeps?: Parameters<typeof resolveCodeSandboxPlan>[1];
+  /** Phase 13.2 — HTTP seam for OIDC discovery, JWKS, token and userinfo calls (tests use an in-process IdP). */
+  oidcFetch?: OidcFetch;
+  /** Where the Fastify logger writes (tests capture log lines); stdout when unset. */
+  logStream?: { write(line: string): void };
 }
 
 /** Phase 13.1 — how often the leader re-reads schedules and triggers when several instances share the database. */
@@ -1338,7 +1353,21 @@ export async function createApp(
   // The X-Request-ID response header is set in the onSend hook below so
   // clients (and curl --include) see the same ID their request carried.
   const app = Fastify({
-    logger: { level: config.LOG_LEVEL },
+    logger: {
+      level: config.LOG_LEVEL,
+      // Phase 13.2 — request logs never carry an auth callback's one-time `code` or `state` (see url-redaction.ts).
+      serializers: {
+        req: (req: FastifyRequest) => ({
+          method: req.method,
+          url: redactSensitiveUrl(req.url ?? ""),
+          version: [req.headers?.["accept-version"]].flat().join(", ") || undefined,
+          host: req.host,
+          remoteAddress: req.ip,
+          remotePort: req.socket?.remotePort
+        })
+      },
+      ...(options.logStream ? { stream: options.logStream } : {})
+    },
     bodyLimit: config.API_BODY_LIMIT_BYTES,
     requestIdHeader: "x-request-id",
     requestIdLogLabel: "reqId",
@@ -4225,6 +4254,13 @@ export async function createApp(
     userFilter: config.LDAP_USER_FILTER,
     groupsAttribute: config.LDAP_GROUPS_ATTRIBUTE
   });
+  // Phase 13.2 — OIDC SSO; null settings (OIDC_ENABLED unset) make the login routes answer 404 and metadata `enabled: false`.
+  const oidcSettings = resolveOidcSettings(config);
+  const oidcService = new OidcService(store, oidcSettings, {
+    flowKey: deriveOidcFlowKey(config.SECRET_MASTER_KEY_BASE64),
+    fetch: options.oidcFetch,
+    logger: (message, metadata) => app.log.warn(metadata ?? {}, message)
+  });
 
   const pendingMfaChallenges = new Map<string, { userId: string; createdAt: number }>();
   const MFA_CHALLENGE_TTL_MS = 5 * 60 * 1000;
@@ -4352,20 +4388,22 @@ export async function createApp(
   };
 
   const provisionSsoUser = async (input: {
-    provider: "saml" | "ldap";
+    provider: "saml" | "ldap" | "oidc";
     subject: string;
     email: string;
     groups: string[];
+    /** The user an existing SSO identity already points at (OIDC); otherwise the user is found by email. */
+    userId?: string;
+    /** OIDC only: the issuer and raw `sub` behind the issuer-scoped `subject`, kept with the identity. */
+    oidc?: { issuer: string; sub: string };
   }): Promise<{ user: SafeUser; created: boolean }> => {
     const normalizedEmail = input.email.trim().toLowerCase();
-    let storeUser = await store.getUserByEmail(normalizedEmail);
+    let storeUser = input.userId ? await store.getUserById(input.userId) : await store.getUserByEmail(normalizedEmail);
     let created = false;
+    const ssoRoles = input.provider === "saml" ? samlService : input.provider === "ldap" ? ldapService : oidcService;
 
     // Determine global role: group-mapped role > default viewer.
-    const mappedGlobalRole =
-      input.provider === "saml"
-        ? await samlService.resolveGlobalRole(input.groups)
-        : await ldapService.resolveGlobalRole(input.groups);
+    const mappedGlobalRole = await ssoRoles.resolveGlobalRole(input.groups);
     const desiredRole: UserRole = mappedGlobalRole ?? "viewer";
 
     if (!storeUser) {
@@ -4399,10 +4437,7 @@ export async function createApp(
     }
 
     // Apply project-level role assignments from group mappings.
-    const projectAssignments =
-      input.provider === "saml"
-        ? await samlService.listProjectRoleAssignments(input.groups)
-        : await ldapService.listProjectRoleAssignments(input.groups);
+    const projectAssignments = await ssoRoles.listProjectRoleAssignments(input.groups);
     for (const assignment of projectAssignments) {
       const project = await store.getProject(assignment.projectId);
       if (!project) continue;
@@ -4425,6 +4460,14 @@ export async function createApp(
         email: normalizedEmail,
         groups: input.groups,
         attributes: {}
+      });
+    } else if (input.provider === "oidc") {
+      await oidcService.recordIdentity(storeUser.id, {
+        identityKey: input.subject,
+        issuer: input.oidc?.issuer ?? "",
+        subject: input.oidc?.sub ?? "",
+        email: normalizedEmail,
+        groups: input.groups
       });
     } else {
       await store.upsertSsoIdentity({
@@ -4539,7 +4582,9 @@ export async function createApp(
       "/api/auth/login",
       "/api/auth/register",
       "/api/auth/saml/callback",
-      "/api/auth/ldap/login"
+      "/api/auth/ldap/login",
+      "/api/auth/oidc/login",
+      "/api/auth/oidc/callback"
     ];
     const WEBHOOK_PREFIXES = ["/webhook/", "/webhook-test/", "/api/webhooks/"];
     const PROBE_URLS = new Set(["/health", "/metrics"]);
@@ -4636,14 +4681,14 @@ export async function createApp(
         typeof headers["traceparent"] === "string" ? (headers["traceparent"] as string) : undefined
       );
       const span = tracingService.startSpan({
-        operationName: `${request.method} ${request.routeOptions?.url ?? request.url}`,
+        operationName: `${request.method} ${request.routeOptions?.url ?? redactSensitiveUrl(request.url)}`,
         kind: "server",
         traceId: incoming?.traceId,
         parentSpanId: incoming?.parentSpanId,
         attributes: {
           "http.method": request.method,
-          "http.target": request.url,
-          "http.route": request.routeOptions?.url ?? request.url,
+          "http.target": redactSensitiveUrl(request.url),
+          "http.route": request.routeOptions?.url ?? redactSensitiveUrl(request.url),
           "http.scheme": request.protocol,
           "net.peer.ip": request.ip ?? "",
           "request.id": request.id ?? ""
@@ -6147,11 +6192,159 @@ export async function createApp(
   });
 
   // ---------------------------------------------------------------------------
+  // Phase 13.2 — OpenID Connect SSO (Authorization Code + PKCE). Off unless OIDC_ENABLED=true.
+  // The browser navigates here (not fetch), so outcomes are redirects to the web app; failures carry only a short
+  // `sso_error` code and the reason goes to the log (never a token, code or the client secret).
+  // ---------------------------------------------------------------------------
+
+  const clearOidcFlowCookie = (reply: FastifyReply) => {
+    reply.clearCookie(OIDC_FLOW_COOKIE_NAME, {
+      path: OIDC_FLOW_COOKIE_PATH,
+      httpOnly: true,
+      sameSite: "lax",
+      secure: config.COOKIE_SECURE
+    });
+  };
+
+  const oidcLoginPageUrl = (errorCode: string): string => {
+    const url = new URL(oidcSettings?.postLoginUrl ?? "http://localhost:5173/");
+    url.searchParams.set("sso_error", errorCode);
+    return url.toString();
+  };
+
+  // Answers 200 with `enabled: false` when off, so the signed-out login page does not log a 404 on every visit.
+  app.get("/api/auth/oidc/metadata", async () => {
+    if (!oidcSettings) {
+      return { enabled: false };
+    }
+    return {
+      enabled: true,
+      issuer: oidcSettings.issuer,
+      clientId: oidcSettings.clientId,
+      redirectUrl: oidcSettings.redirectUrl,
+      scopes: oidcSettings.scopes,
+      groupsClaim: oidcSettings.groupsClaim,
+      loginPath: "/api/auth/oidc/login"
+    };
+  });
+
+  app.get("/api/auth/oidc/login", async (request, reply) => {
+    if (!oidcSettings) {
+      reply.code(404);
+      return { error: "OIDC is not enabled" };
+    }
+    reply.header("cache-control", "no-store");
+    try {
+      const { authorizationUrl, flowCookie } = await oidcService.beginLogin();
+      reply.setCookie(OIDC_FLOW_COOKIE_NAME, flowCookie, {
+        path: OIDC_FLOW_COOKIE_PATH,
+        httpOnly: true,
+        sameSite: "lax",
+        secure: config.COOKIE_SECURE,
+        maxAge: Math.floor(OIDC_FLOW_MAX_AGE_MS / 1000)
+      });
+      return reply.redirect(authorizationUrl);
+    } catch (error) {
+      request.log.warn(
+        { code: error instanceof OidcError ? error.code : "unexpected", reason: error instanceof Error ? error.message : "unknown" },
+        "OIDC login could not start"
+      );
+      return reply.redirect(oidcLoginPageUrl(oidcUserErrorCode(error)));
+    }
+  });
+
+  app.get<{ Querystring: Record<string, unknown> }>("/api/auth/oidc/callback", async (request, reply) => {
+    if (!oidcSettings) {
+      reply.code(404);
+      return { error: "OIDC is not enabled" };
+    }
+    reply.header("cache-control", "no-store");
+    // The flow cookie is single-use: clear it whatever the outcome.
+    const flowCookie = request.cookies[OIDC_FLOW_COOKIE_NAME];
+    clearOidcFlowCookie(reply);
+    try {
+      const profile = await oidcService.completeLogin({ query: asRecord(request.query), flowCookie });
+      // Optional allow-lists (OIDC_ALLOWED_EMAIL_DOMAINS / OIDC_ALLOWED_GROUPS) apply to new and returning users.
+      oidcService.assertLoginAllowed(profile);
+      // A known (issuer, sub) keeps its user even if the IdP email changed; anything else links or creates by
+      // email, and only a verified one (unless OIDC_REQUIRE_EMAIL_VERIFIED=false). The key is issuer-scoped, so a
+      // changed OIDC_ISSUER never matches an old link.
+      const identity = await store.findSsoIdentity("oidc", profile.identityKey);
+      const linkedUser = identity ? await store.getUserById(identity.userId) : null;
+      if (!linkedUser) {
+        if (!profile.email) {
+          throw new OidcError("missing_email", "ID token and userinfo have no email for a user not linked yet");
+        }
+        if (oidcSettings.requireEmailVerified && !profile.emailVerified) {
+          throw new OidcError("email_not_verified", "IdP did not mark the email as verified");
+        }
+      }
+      const { user, created } = await provisionSsoUser({
+        provider: "oidc",
+        subject: profile.identityKey,
+        email: profile.email ?? linkedUser!.email,
+        groups: profile.groups,
+        userId: linkedUser?.id,
+        oidc: { issuer: profile.issuer, sub: profile.subject }
+      });
+      // A session the browser already holds is replaced, not left alive next to the new one.
+      const previousSessionId = getSessionIdFromRequest(request);
+      if (previousSessionId) {
+        await store.revokeSession(previousSessionId).catch((revokeError: unknown) => {
+          request.log.warn({ reason: revokeError instanceof Error ? revokeError.message : "unknown" }, "Previous session not revoked");
+        });
+      }
+      await issueSessionForUser(user, reply);
+      // The session is live from here: a failing audit or MFA lookup is logged and never turns the login into a failure.
+      try {
+        if (!linkedUser && !created) {
+          // First OIDC link to an account that already existed (possibly with local MFA): make it visible.
+          const mfaEnrolled = (await mfaService.status(user.id)).enabled;
+          await audit(request, user, {
+            category: "auth",
+            eventType: "user.sso_linked",
+            action: "link",
+            resourceType: "user",
+            resourceId: user.id,
+            metadata: { provider: "oidc", email: user.email, role: user.role, mfaEnrolled }
+          });
+        }
+      } catch (linkAuditError) {
+        request.log.warn({ reason: linkAuditError instanceof Error ? linkAuditError.message : "unknown" }, "OIDC link audit not recorded");
+      }
+      await audit(request, user, {
+        category: "auth",
+        eventType: "user.login",
+        action: "login",
+        resourceType: "user",
+        resourceId: user.id,
+        metadata: { method: "oidc", provisioned: created }
+      }).catch((loginAuditError: unknown) => {
+        request.log.warn({ reason: loginAuditError instanceof Error ? loginAuditError.message : "unknown" }, "OIDC login audit not recorded");
+      });
+      return reply.redirect(oidcSettings.postLoginUrl);
+    } catch (error) {
+      const code = error instanceof OidcError ? error.code : "unexpected";
+      request.log.warn({ code, reason: error instanceof Error ? error.message : "unknown" }, "OIDC login failed");
+      await audit(request, null, {
+        category: "auth",
+        eventType: "user.login",
+        action: "login",
+        outcome: "failure",
+        metadata: { method: "oidc", reason: code, ...(error instanceof OidcError ? error.details : {}) }
+      }).catch((auditError: unknown) => {
+        request.log.warn({ reason: auditError instanceof Error ? auditError.message : "unknown" }, "OIDC failure audit not recorded");
+      });
+      return reply.redirect(oidcLoginPageUrl(oidcUserErrorCode(error)));
+    }
+  });
+
+  // ---------------------------------------------------------------------------
   // Phase 5.1 — SSO group-to-role mappings
   // ---------------------------------------------------------------------------
 
   const ssoMappingSchema = z.object({
-    provider: z.enum(["saml", "ldap"]),
+    provider: z.enum(["saml", "ldap", "oidc"]),
     groupName: z.string().min(1).max(200),
     projectId: z.string().min(1).max(120).nullable().optional(),
     role: z.string().min(1).max(60),

@@ -40,6 +40,8 @@ import {
   executeWorkflow,
   executeWorkflowStream,
   fetchAuthMe,
+  fetchOidcLoginUrl,
+  ssoErrorMessage,
   fetchExecutionById,
   fetchExecutions,
   fetchDefinitions,
@@ -1095,6 +1097,22 @@ function StudioApp() {
   const [loginPassword, setLoginPassword] = useState("");
   const [mfaChallengeId, setMfaChallengeId] = useState<string | null>(null);
   const [mfaCode, setMfaCode] = useState("");
+  // Phase 13.2 — set when the API has OIDC SSO on; the login card then offers "Sign in with SSO (OIDC)".
+  const [oidcLoginUrl, setOidcLoginUrl] = useState<string | null>(null);
+  // Phase 13.2 — a failed SSO login comes back as ?sso_error=<code>; show it once and drop it from the URL.
+  const [ssoError] = useState<string | null>(() => {
+    if (typeof window === "undefined") return null;
+    const code = new URLSearchParams(window.location.search).get("sso_error");
+    return code ? ssoErrorMessage(code) : null;
+  });
+  useEffect(() => {
+    if (!ssoError) return;
+    const params = new URLSearchParams(window.location.search);
+    if (!params.has("sso_error")) return;
+    params.delete("sso_error");
+    const query = params.toString();
+    window.history.replaceState(window.history.state, "", `${window.location.pathname}${query ? `?${query}` : ""}${window.location.hash}`);
+  }, [ssoError]);
   const [showWelcome, setShowWelcome] = useState<boolean>(() => !isWelcomeDismissed());
   const [templateInitialCategory, setTemplateInitialCategory] = useState<string | undefined>(undefined);
   const [writeToolDialogOpen, setWriteToolDialogOpen] = useState(false);
@@ -2166,6 +2184,7 @@ function StudioApp() {
         if (!cancelled) {
           if (sessionError instanceof ApiError && sessionError.status === 401) {
             setAuthUser(null);
+            if (ssoError) setAuthError(ssoError);
           } else {
             setAuthError(sessionError instanceof Error ? sessionError.message : "Unable to verify session");
           }
@@ -2181,7 +2200,18 @@ function StudioApp() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [ssoError]);
+
+  useEffect(() => {
+    if (authUser || authChecking) return;
+    let cancelled = false;
+    void fetchOidcLoginUrl().then((url) => {
+      if (!cancelled) setOidcLoginUrl(url);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [authUser, authChecking]);
 
   useEffect(() => {
     if (!authUser) {
@@ -4599,6 +4629,16 @@ function StudioApp() {
           <button className="auth-submit" type="submit" disabled={authBusy}>
             {authBusy ? "Signing in..." : "Sign in"}
           </button>
+          {oidcLoginUrl && (
+            <>
+              <div className="auth-divider" aria-hidden="true">
+                <span>or</span>
+              </div>
+              <a className="auth-sso-btn" href={oidcLoginUrl}>
+                Sign in with SSO (OIDC)
+              </a>
+            </>
+          )}
         </form>
       </div>
     );

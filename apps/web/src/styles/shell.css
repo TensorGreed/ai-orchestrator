@@ -1022,6 +1022,46 @@ body {
   cursor: not-allowed;
 }
 
+/* Phase 13.2 — "Sign in with SSO (OIDC)", shown only when the API has OIDC on. */
+.auth-divider {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 6px 0 2px;
+  color: var(--fg-muted);
+  font-size: var(--fs-sm);
+}
+
+.auth-divider::before,
+.auth-divider::after {
+  content: "";
+  flex: 1;
+  border-top: 1px solid var(--line);
+}
+
+.auth-sso-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 40px;
+  border: 1px solid var(--accent-line);
+  border-radius: var(--r-pill);
+  background: transparent;
+  color: var(--fg);
+  font-weight: 600;
+  text-decoration: none;
+  transition: background var(--dur) var(--ease);
+}
+
+.auth-sso-btn:hover {
+  background: var(--accent-soft);
+}
+
+.auth-sso-btn:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
 .auth-link-btn {
   background: transparent;
   border: 0;

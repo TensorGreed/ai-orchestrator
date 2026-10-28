@@ -576,7 +576,7 @@ by what blocks adoption first. All of it stays self-hosted.
 - [ ] External object storage for execution payloads and binaries (S3-compatible, server-side encryption with customer keys)
 
 ### 13.2 Identity and access
-- [ ] OIDC single sign-on alongside SAML
+- [x] OIDC single sign-on alongside SAML (Authorization Code + PKCE, optional, `OIDC_*` settings; see the Authentication and RBAC docs page)
 - [ ] SCIM 2.0 provisioning and deprovisioning of users and groups, with immediate session revocation
 - [ ] Session policy: idle and absolute timeouts, concurrent-session limits, MFA required per role, step-up authentication for sensitive actions
 - [ ] Network controls: IP allowlists for UI, API and webhooks, trusted-proxy configuration, mutual TLS option for the MCP gateway

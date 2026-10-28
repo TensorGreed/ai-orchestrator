@@ -65,6 +65,7 @@ import {
   type McpPreset,
   type SecretListItem,
   type SsoGroupMapping,
+  type SsoProvider,
   type VariableRecord,
   deleteNotificationConfig,
   fetchNotificationConfigs,
@@ -1031,7 +1032,7 @@ function CustomRolesTab({
 
 function SsoMappingsTab({ projects }: { projects: Project[] }) {
   const [mappings, setMappings] = useState<SsoGroupMapping[]>([]);
-  const [provider, setProvider] = useState<"saml" | "ldap">("saml");
+  const [provider, setProvider] = useState<SsoProvider>("saml");
   const [groupName, setGroupName] = useState("");
   const [projectId, setProjectId] = useState<string>("");
   const [role, setRole] = useState<string>("viewer");
@@ -1106,7 +1107,7 @@ function SsoMappingsTab({ projects }: { projects: Project[] }) {
     <div className="settings-section">
       <h3>SSO group-to-role mappings</h3>
       <p className="settings-help">
-        When users log in via SAML or LDAP, their group memberships are matched against these rules. A mapping without
+        When users log in via SAML, LDAP or OIDC, their group memberships are matched against these rules. A mapping without
         a project assigns a global role; a mapping with a project creates a project-level membership on first login.
       </p>
       {error && <div className="settings-error">{error}</div>}
@@ -1117,10 +1118,11 @@ function SsoMappingsTab({ projects }: { projects: Project[] }) {
         <select
           id="sso-provider"
           value={provider}
-          onChange={(event) => setProvider(event.target.value as "saml" | "ldap")}
+          onChange={(event) => setProvider(event.target.value as SsoProvider)}
         >
           <option value="saml">SAML</option>
           <option value="ldap">LDAP</option>
+          <option value="oidc">OIDC</option>
         </select>
         <label htmlFor="sso-group">Group name</label>
         <input

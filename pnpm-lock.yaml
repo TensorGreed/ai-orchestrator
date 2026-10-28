@@ -74,6 +74,9 @@ importers:
       fastify-raw-body:
         specifier: 5.0.0
         version: 5.0.0
+      jose:
+        specifier: ^6.2.13
+        version: 6.2.13
       nanoid:
         specifier: ^5.1.5
         version: 5.1.7

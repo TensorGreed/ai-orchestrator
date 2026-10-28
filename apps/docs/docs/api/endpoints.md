@@ -6,6 +6,9 @@
 - `POST /api/auth/login`
 - `POST /api/auth/logout`
 - `GET /api/auth/me`
+- `GET /api/auth/oidc/metadata` (public; `{ "enabled": false }` when OIDC is off; see [OIDC single sign-on](../security/auth-rbac.md#oidc-single-sign-on))
+- `GET /api/auth/oidc/login` (browser navigation; redirects to the IdP)
+- `GET /api/auth/oidc/callback?code=&state=` (IdP redirect target; redirects to the web app)
 
 ## Workflows
 

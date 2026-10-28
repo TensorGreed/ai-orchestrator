@@ -199,6 +199,39 @@ export async function fetchAuthMe() {
   return apiRequest<{ user: AuthUser }>("/api/auth/me");
 }
 
+/**
+ * Phase 13.2 — where "Sign in with SSO (OIDC)" sends the browser, or null when the API has OIDC off (its metadata
+ * route answers `enabled: false`, or 404 on an older API) or cannot be reached.
+ */
+export async function fetchOidcLoginUrl(): Promise<string | null> {
+  try {
+    const metadata = await apiRequest<{ enabled?: boolean; loginPath?: string }>("/api/auth/oidc/metadata");
+    if (metadata.enabled !== true) return null;
+    const loginPath = typeof metadata.loginPath === "string" && metadata.loginPath.startsWith("/api/") ? metadata.loginPath : "/api/auth/oidc/login";
+    return `${API_BASE}${loginPath}`;
+  } catch {
+    return null;
+  }
+}
+
+/** Phase 13.2 — the message for the `sso_error` code the API puts on the login page URL after a failed SSO login. */
+export function ssoErrorMessage(code: string): string {
+  switch (code) {
+    case "oidc_state":
+      return "Single sign-on did not complete: the sign-in attempt expired or was started in another browser. Try again.";
+    case "oidc_denied":
+      return "Single sign-on was cancelled or denied by your identity provider.";
+    case "oidc_email":
+      return "Your identity provider did not share a verified email address, so no account could be matched. Ask your administrator.";
+    case "oidc_not_allowed":
+      return "Your account is not allowed to sign in to this workspace. Ask your administrator.";
+    case "oidc_unavailable":
+      return "Single sign-on is unavailable right now. Try again later or sign in with your password.";
+    default:
+      return "Single sign-on failed. Try again or contact your administrator.";
+  }
+}
+
 export async function fetchWorkflows(
   filters: { projectId?: string; folderId?: string | null; tag?: string; search?: string } = {}
 ) {
@@ -1240,9 +1273,11 @@ export async function revokeApiKey(id: string) {
 // Phase 5.1 — SSO group mappings
 // ---------------------------------------------------------------------------
 
+export type SsoProvider = "saml" | "ldap" | "oidc";
+
 export interface SsoGroupMapping {
   id: string;
-  provider: "saml" | "ldap";
+  provider: SsoProvider;
   groupName: string;
   projectId: string | null;
   role: string;
@@ -1251,13 +1286,13 @@ export interface SsoGroupMapping {
   updatedAt: string;
 }
 
-export async function fetchSsoMappings(provider?: "saml" | "ldap") {
+export async function fetchSsoMappings(provider?: SsoProvider) {
   const query = provider ? `?provider=${provider}` : "";
   return apiRequest<{ mappings: SsoGroupMapping[] }>(`/api/auth/sso/mappings${query}`);
 }
 
 export async function createSsoMapping(payload: {
-  provider: "saml" | "ldap";
+  provider: SsoProvider;
   groupName: string;
   projectId?: string | null;
   role: string;

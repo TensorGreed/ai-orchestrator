@@ -275,6 +275,27 @@ export const openApiSpec = {
         responses: { "200": { description: "User authenticated via SAML" } }
       }
     },
+    "/api/auth/oidc/metadata": {
+      get: {
+        tags: ["Auth"],
+        summary: "OIDC SSO settings the login page needs (issuer, client id, login path); { enabled: false } when OIDC is off",
+        responses: { "200": { description: "OIDC settings, or { enabled: false } when OIDC is off" } }
+      }
+    },
+    "/api/auth/oidc/login": {
+      get: {
+        tags: ["Auth"],
+        summary: "Start OIDC SSO login: sets a short-lived flow cookie and redirects to the IdP (Authorization Code + PKCE)",
+        responses: { "302": { description: "Redirect to the IdP, or to the login page with sso_error" }, "404": { description: "OIDC is not enabled" } }
+      }
+    },
+    "/api/auth/oidc/callback": {
+      get: {
+        tags: ["Auth"],
+        summary: "OIDC SSO redirect target: validates state, PKCE and the ID token, then signs the user in",
+        responses: { "302": { description: "Redirect to the web app, with sso_error on failure" }, "404": { description: "OIDC is not enabled" } }
+      }
+    },
     "/api/auth/ldap/login": {
       post: {
         tags: ["Auth"],
@@ -301,7 +322,7 @@ export const openApiSpec = {
         summary: "Create or update an SSO group-to-role mapping",
         requestBody: {
           required: true,
-          content: { "application/json": { schema: { type: "object", required: ["provider", "groupName", "role"], properties: { provider: { type: "string", enum: ["saml", "ldap"] }, groupName: { type: "string" }, role: { type: "string" }, projectId: { type: "string", nullable: true }, customRoleId: { type: "string", nullable: true } } } } }
+          content: { "application/json": { schema: { type: "object", required: ["provider", "groupName", "role"], properties: { provider: { type: "string", enum: ["saml", "ldap", "oidc"] }, groupName: { type: "string" }, role: { type: "string" }, projectId: { type: "string", nullable: true }, customRoleId: { type: "string", nullable: true } } } } }
         },
         responses: { "200": { description: "Mapping upserted" } }
       }
