@@ -79,6 +79,13 @@ export interface RunBusEvent {
   [key: string]: unknown;
 }
 
+/** A message as published: `v` defaults to CLUSTER_BUS_VERSION and `from` is set by the bus. */
+export interface ClusterMessageInput {
+  t: string;
+  v?: number;
+  [key: string]: unknown;
+}
+
 export type ClusterMessageHandler = (message: ClusterMessage) => void | Promise<void>;
 export type RunEventHandler = (event: RunBusEvent) => void | Promise<void>;
 
@@ -116,7 +123,7 @@ export interface ClusterBus {
    * Postgres: one autocommit `pg_notify` on a pooled connection, never inside a transaction (a NOTIFY in a
    * transaction takes a database-wide lock at commit). Rejects when the payload is too large or the database refuses.
    */
-  publish(topic: ClusterBusTopic, message: Omit<ClusterMessage, "v"> & { v?: number }): Promise<void>;
+  publish(topic: ClusterBusTopic, message: ClusterMessageInput): Promise<void>;
   /** Adds a handler for `topic`; returns the unsubscribe function. A handler that throws is logged, never retried. */
   subscribe(topic: ClusterBusTopic, handler: ClusterMessageHandler): () => void;
 
