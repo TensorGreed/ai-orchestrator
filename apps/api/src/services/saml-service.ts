@@ -349,6 +349,8 @@ export class SamlService {
       );
     }
     const requestId = newSamlRequestId();
+    // The three-argument form is kept on purpose: it is the signature of node-saml 5.0 and 5.1, and 5.2 still
+    // accepts it. Do not "modernise" it without checking the whole supported range.
     const url = await this.pendingRequestId.run(requestId, async () => await client.getAuthorizeUrlAsync("", undefined, {}));
     if (!this.config.requireInResponseTo) return { url };
     return { url, requestCookie: sealSamlRequest(requestId, this.requestCookieKey(), now) };

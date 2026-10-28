@@ -392,8 +392,12 @@ API checks these settings at startup when SAML is on.
   browser, an attacker's page), IdP-initiated responses and answers to another
   login are refused with `reason: "unsolicited_response"`. `SameSite=None` is
   needed because the IdP's form post is a cross-site request; browsers keep a
-  `Secure` cookie only over https (and on `localhost`), so the API refuses to
-  start with this setting and a plain-http `SAML_CALLBACK_URL` on another host.
+  `Secure` cookie only over https (and, in Chromium and Firefox, on
+  `localhost`; Safari drops it on plain-http `localhost`), so the API refuses
+  to start with this setting and a plain-http `SAML_CALLBACK_URL` on another
+  host. There is one request cookie per browser: starting a sign-in in a second
+  tab overwrites it, and the first tab then fails with `unsolicited_response`.
+  Finish one sign-in before starting the next.
   Users must then start from L2M's login page, not from the IdP's portal.
 
 ### Linking SAML accounts

@@ -67,6 +67,19 @@ header and keep the API unreachable except through them: a client that can
 reach the API directly could otherwise pick its own address. Unset (the
 default) trusts no proxy.
 
+::: warning The shipped nginx appends to `X-Forwarded-For`
+The `web` image's nginx (`apps/web/nginx.conf`) sets
+`X-Forwarded-For $proxy_add_x_forwarded_for`, which adds the connecting address
+to whatever the client sent. With `TRUST_PROXY=true` the API reads the
+leftmost entry, which the client wrote, so every request can choose its own
+rate-limit key and the sign-in limit stops protecting anything. Behind the
+shipped nginx use the hop count `TRUST_PROXY=1` (the API then reads the
+address nginx appended, one hop from the API), or the nginx container's
+address or network as a CIDR (for example `TRUST_PROXY=172.18.0.0/16` for the
+compose network). Never `true`. Do not publish port 4000 next to it: a direct
+caller arrives from an address you may trust.
+:::
+
 ## MCP server registry probes (optional)
 
 - `MCP_PROBE_INTERVAL_MS` (default `300000`; `0` turns scheduled probes off)
