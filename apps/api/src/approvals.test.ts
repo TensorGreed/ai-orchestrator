@@ -1457,6 +1457,30 @@ describe("who a resume runs as, and what it re-checks", () => {
     expect(await refusals(context)).toEqual([expect.objectContaining({ outcome: "denied", metadata: expect.objectContaining({ reason: "user_not_found" }) })]);
   });
 
+  it("a timeout that fails closed keeps the paused state when its final write is refused", async () => {
+    const context = await createTestContext();
+    const requester = await login(context, "builder", "requester");
+    const run = await startRun(context, gateWorkflow("wf-timeout-refused", GATE), requester.cookie);
+    await context.store.deleteUser(requester.id);
+    // The final write is refused (as for a stopped run or a claim taken back): the record and the paused state stay.
+    const save = context.store.saveExecutionHistory.bind(context.store);
+    let refused = false;
+    vi.spyOn(context.store, "saveExecutionHistory").mockImplementation(async (record, options) => {
+      if (record.id === run.executionId && record.status === "error") {
+        refused = true;
+        return false;
+      }
+      return await save(record, options);
+    });
+    const deleted = vi.spyOn(context.store, "deleteWorkflowExecution");
+    await expireNow(context, run.executionId!);
+    await waitFor(() => refused);
+    await waitFor(async () => (await refusals(context)).length > 0);
+    expect(deleted.mock.calls.filter(([id]) => id === run.executionId)).toEqual([]);
+    expect(await context.store.getWorkflowExecutionState(run.executionId!)).not.toBeNull();
+    expect(await context.store.getExecutionHistory(run.executionId!)).toMatchObject({ status: "waiting_approval" });
+  });
+
   it("a timeout fails closed when the person who started the run lost execute access", async () => {
     const context = await createTestContext();
     const requester = await login(context, "builder", "requester");

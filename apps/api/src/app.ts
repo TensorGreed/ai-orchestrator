@@ -3974,7 +3974,7 @@ export async function createApp(
     const existing = await store.getExecutionHistory(executionId);
     const completedAt = new Date().toISOString();
     const startedAt = existing?.startedAt ?? completedAt;
-    await persistExecutionHistoryRecord(
+    const persisted = await persistExecutionHistoryRecord(
       {
         id: executionId,
         workflowId: workflow.id,
@@ -3991,7 +3991,8 @@ export async function createApp(
       },
       { phase: "final", executionId, workflowId: workflow.id, triggerType: existing?.triggerType ?? undefined, status: "error" }
     );
-    await deleteWorkflowExecutionSafely(executionId, workflow.id);
+    // A refused write (the run was stopped, or its queue claim was taken back) leaves the paused run as it was.
+    if (persisted) await deleteWorkflowExecutionSafely(executionId, workflow.id);
   };
   /**
    * Phase 13.1 — the hooks a queued run gets from its job: before each node starts, a leased claim checks its lease is
