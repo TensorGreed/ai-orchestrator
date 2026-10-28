@@ -90,7 +90,7 @@ An admin can **enforce** a gate. Then only an admin can:
 - admit cases, reject waiting ones, and mark cases required or stop requiring them;
 - roll back, unpublish and delete the workflow (these three only while the gate is also switched on: a gate that is switched off restricts none of them, even when still flagged enforced).
 
-A builder can still tighten the policy and add golden sets. A refused change answers `403` naming what it changes, and is audited (`release.gate.update_refused`, `release.golden_set_change.refused`, `release.rollback.refused`, `release.workflow_delete.refused`, `release.unpublish.refused`). Rollback, unpublish and delete are checked again inside the store transaction that writes them, so a gate switched on and enforced a moment earlier is honoured, on SQLite and Postgres alike.
+A builder can still tighten the policy and add golden sets. A refused change answers `403` naming what it changes, and is audited (`release.gate.update_refused`, `release.golden_set_change.refused`, `release.rollback.refused`, `release.workflow_delete.refused`, `release.unpublish.refused`). Rollback, unpublish and delete are checked again inside the store transaction that writes them, so a gate switched on and enforced a moment earlier is honoured, on SQLite and Postgres alike. On Postgres a gate save waits for a rollback, unpublish or delete of the same workflow that is already under way, so that action either completes before the gate changes or sees the saved gate.
 
 ### Case admission and required cases
 

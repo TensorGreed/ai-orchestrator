@@ -13,7 +13,7 @@
 - `GET /api/workflows/:id`
 - `POST /api/workflows`
 - `PUT /api/workflows/:id`
-- `DELETE /api/workflows/:id` (an admin while the workflow's release gate is on and enforced: `403` otherwise, audited as `release.workflow_delete.refused`)
+- `DELETE /api/workflows/:id` (while the workflow's release gate is on and enforced, only an admin: others get `403`, audited as `release.workflow_delete.refused`)
 - `POST /api/workflows/:id/duplicate`
 - `POST /api/workflows/import`
 - `POST /api/workflows/import/external` — convert an export from another builder; see [Importing from another builder](../product/importing-from-another-builder.md)
@@ -204,7 +204,7 @@ See [Release gate and publish](../product/release-gate.md). Every route answers 
 - `PUT /api/workflows/:id/release-gate` (`workflow:write`; only admins enforce a gate, lift enforcement or loosen an enforced one; `400` for a golden set of another workflow; audited as `release.gate.updated`)
 - `POST /api/workflows/:id/publish` (`workflow:publish`; `{ version, workflowHash?, replayRunId?, override?: { reason } (admins), requestApproval?: { reason } }`; `200 { release }`, `202 { verdict: "needs_approval", approvalRequestId }`, `409 { verdict: "blocked", reasons, replayRunId?, canRequestApproval }`; `409` for a hash mismatch; audited as `release.published`, `release.overridden` or `release.blocked`)
 - `GET /api/workflows/:id/releases` (viewer; `{ releases, publishedVersion }`)
-- `POST /api/workflows/:id/rollback` (`workflow:publish`, and an admin while the gate is on and enforced (`403` otherwise, audited as `release.rollback.refused`); `{ version, reason }`; only to a version published before; `409` when it is already live; audited as `release.rolled_back`)
+- `POST /api/workflows/:id/rollback` (`workflow:publish`, and, while the gate is on and enforced, only an admin (others get `403`, audited as `release.rollback.refused`); `{ version, reason }`; only to a version published before; `409` when it is already live; audited as `release.rolled_back`)
 - `POST /api/workflows/:id/unpublish` (`workflow:publish`, and an admin while the gate is on and enforced (`403` otherwise, audited as `release.unpublish.refused`); `{ reason?, expectedVersion? }`; production runs the draft until a version is published again; never blocked by the release gate, and with a gate on `notice` says production runs the ungated draft; answers `{ release, productionRuns: "draft", gateEnabled, gateEnforced, notice }` where `release` is the `unpublished` history entry; `409` when nothing is published or, given `expectedVersion`, when another version is live (nothing changes); audited as `release.unpublished`)
 - `GET /api/workflows/:id/release-state`, `GET /api/workflows/:id/publish-preview?version=` (viewer)
 - `GET /api/workflows/:id/release-gate/cases` (viewer; an enforced gate's cases: admitted or pending admission, required; `enforced: false` and no cases otherwise)
