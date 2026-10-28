@@ -64,7 +64,9 @@ export type OidcErrorCode =
 export class OidcError extends Error {
   constructor(
     public readonly code: OidcErrorCode,
-    message: string
+    message: string,
+    /** Token-free facts safe for the audit trail (for example the issuer-scoped subject and the email domain). */
+    public readonly details: Record<string, string> = {}
   ) {
     super(message);
     this.name = "OidcError";
@@ -660,18 +662,26 @@ export class OidcService {
    * The domain check uses only a trusted email: verified, or any email when OIDC_REQUIRE_EMAIL_VERIFIED=false.
    * Throws `not_allowed` with a reason that names the list, never a token.
    */
-  assertLoginAllowed(profile: Pick<OidcProfile, "email" | "emailVerified" | "groups">): void {
+  assertLoginAllowed(profile: Pick<OidcProfile, "identityKey" | "email" | "emailVerified" | "groups">): void {
     const settings = this.requireSettings();
+    const refusedBy = (list: string): Record<string, string> => {
+      const at = profile.email ? profile.email.lastIndexOf("@") : -1;
+      return {
+        list,
+        identityKey: profile.identityKey,
+        ...(at > 0 ? { emailDomain: profile.email!.slice(at + 1).toLowerCase() } : {})
+      };
+    };
     if (settings.allowedEmailDomains.length > 0) {
       const trusted = profile.email && (profile.emailVerified || !settings.requireEmailVerified) ? profile.email : "";
       const at = trusted.lastIndexOf("@");
       const domain = at > 0 ? trusted.slice(at + 1).toLowerCase() : "";
       if (!domain || !settings.allowedEmailDomains.includes(domain)) {
-        throw new OidcError("not_allowed", "Login refused: no trusted email in OIDC_ALLOWED_EMAIL_DOMAINS");
+        throw new OidcError("not_allowed", "Login refused: no trusted email in OIDC_ALLOWED_EMAIL_DOMAINS", refusedBy("OIDC_ALLOWED_EMAIL_DOMAINS"));
       }
     }
     if (settings.allowedGroups.length > 0 && !profile.groups.some((group) => settings.allowedGroups.includes(group))) {
-      throw new OidcError("not_allowed", "Login refused: the user holds none of OIDC_ALLOWED_GROUPS");
+      throw new OidcError("not_allowed", "Login refused: the user holds none of OIDC_ALLOWED_GROUPS", refusedBy("OIDC_ALLOWED_GROUPS"));
     }
   }
 

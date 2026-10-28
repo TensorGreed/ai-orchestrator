@@ -1360,7 +1360,7 @@ export async function createApp(
         req: (req: FastifyRequest) => ({
           method: req.method,
           url: redactSensitiveUrl(req.url ?? ""),
-          version: typeof req.headers?.["accept-version"] === "string" ? req.headers["accept-version"] : undefined,
+          version: req.headers?.["accept-version"],
           host: req.host,
           remoteAddress: req.ip,
           remotePort: req.socket?.remotePort
@@ -6295,17 +6295,22 @@ export async function createApp(
         });
       }
       await issueSessionForUser(user, reply);
-      if (!linkedUser && !created) {
-        // First OIDC link to an account that already existed (possibly with local MFA): make it visible.
-        const mfaEnrolled = (await mfaService.status(user.id)).enabled;
-        await audit(request, user, {
-          category: "auth",
-          eventType: "user.sso_linked",
-          action: "link",
-          resourceType: "user",
-          resourceId: user.id,
-          metadata: { provider: "oidc", email: user.email, role: user.role, mfaEnrolled }
-        });
+      // The session is live from here: a failing audit or MFA lookup is logged and never turns the login into a failure.
+      try {
+        if (!linkedUser && !created) {
+          // First OIDC link to an account that already existed (possibly with local MFA): make it visible.
+          const mfaEnrolled = (await mfaService.status(user.id)).enabled;
+          await audit(request, user, {
+            category: "auth",
+            eventType: "user.sso_linked",
+            action: "link",
+            resourceType: "user",
+            resourceId: user.id,
+            metadata: { provider: "oidc", email: user.email, role: user.role, mfaEnrolled }
+          });
+        }
+      } catch (linkAuditError) {
+        request.log.warn({ reason: linkAuditError instanceof Error ? linkAuditError.message : "unknown" }, "OIDC link audit not recorded");
       }
       await audit(request, user, {
         category: "auth",
@@ -6314,6 +6319,8 @@ export async function createApp(
         resourceType: "user",
         resourceId: user.id,
         metadata: { method: "oidc", provisioned: created }
+      }).catch((loginAuditError: unknown) => {
+        request.log.warn({ reason: loginAuditError instanceof Error ? loginAuditError.message : "unknown" }, "OIDC login audit not recorded");
       });
       return reply.redirect(oidcSettings.postLoginUrl);
     } catch (error) {
@@ -6324,7 +6331,7 @@ export async function createApp(
         eventType: "user.login",
         action: "login",
         outcome: "failure",
-        metadata: { method: "oidc", reason: code }
+        metadata: { method: "oidc", reason: code, ...(error instanceof OidcError ? error.details : {}) }
       }).catch((auditError: unknown) => {
         request.log.warn({ reason: auditError instanceof Error ? auditError.message : "unknown" }, "OIDC failure audit not recorded");
       });

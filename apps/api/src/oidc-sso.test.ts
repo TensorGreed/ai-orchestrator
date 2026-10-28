@@ -371,6 +371,12 @@ describe("OIDC allow-lists", () => {
 
     const failures = await context.store.listAuditLogs({ eventType: "user.login", outcome: "failure" });
     expect(failures.items.map((item) => (item.metadata as { reason?: string }).reason)).toEqual(["not_allowed", "not_allowed"]);
+    expect(failures.items.find((item) => (item.metadata as { emailDomain?: string }).emailDomain === "gmail.test")?.metadata).toMatchObject({
+      list: "OIDC_ALLOWED_EMAIL_DOMAINS",
+      emailDomain: "gmail.test",
+      identityKey: oidcIdentitySubject(context.provider.issuer, "g-1")
+    });
+    expect(JSON.stringify(failures.items)).not.toContain("outsider@gmail.test");
     expect(JSON.stringify(failures.items)).not.toContain(CLIENT_SECRET);
   });
 
@@ -418,6 +424,27 @@ describe("OIDC linking, sessions and failure paths", () => {
     context.provider.user = { sub: "kc-new", email: "brand-new@example.com", email_verified: true };
     await runLogin(context);
     expect((await context.store.listAuditLogs({ eventType: "user.sso_linked" })).items).toHaveLength(1);
+  });
+
+  it("keeps a successful login signed in when the post-session link audit fails, and logs the error", async () => {
+    const context = await createContext({ captureLogs: true });
+    await context.authService.register({ email: "linkfail@example.com", password: "LinkFailPassword123!", role: "admin" });
+    const realGetMfaSecret = context.store.getMfaSecret.bind(context.store);
+    context.store.getMfaSecret = async () => {
+      throw new Error("mfa store unavailable");
+    };
+    context.provider.user = { sub: "kc-linkfail", email: "linkfail@example.com", email_verified: true };
+    const { finish, session } = await runLogin(context);
+    context.store.getMfaSecret = realGetMfaSecret;
+    expect(finish.headers.location).toBe(`${WEB}/`);
+    expect(session).toBeTruthy();
+    const me = await context.app.inject({ method: "GET", url: "/api/auth/me", cookies: { ao_session: session! } });
+    expect(me.statusCode).toBe(200);
+    const logText = context.logs.join("");
+    expect(logText).toContain("OIDC link audit not recorded");
+    expect(logText).not.toMatch(/at_kc-linkfail|eyJ/);
+    const failures = await context.store.listAuditLogs({ eventType: "user.login", outcome: "failure" });
+    expect(failures.items).toHaveLength(0);
   });
 
   it("refuses a replayed callback (same code and flow cookie) without creating a session", async () => {
