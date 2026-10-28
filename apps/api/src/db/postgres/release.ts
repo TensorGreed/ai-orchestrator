@@ -6,6 +6,9 @@
  * Concurrency: every check-then-write runs in one transaction on one client and takes a row lock on what it checks
  * (`SELECT … FOR UPDATE`), or is a single conditional UPDATE whose row count is the answer, so a decision or a
  * publish applies once even when two API processes race on the same row.
+ *
+ * Lock order: a transaction that locks a workflow's row does so before any other row of that workflow (gate, request,
+ * version), so publish, rollback, unpublish, approval publish, gate save and workflow delete never wait in a cycle.
  */
 import type { PoolClient } from "pg";
 import { GUARD_SIMULATION_JOB_DATASET_PREFIX, releaseGateRestrictsToAdmins } from "@ai-orchestrator/shared";
@@ -711,6 +714,14 @@ export async function markEvalRunsReleaseIneligible(ctx: PgContext, runIds: read
 /**
  * Compare-and-set on the stored gate: the row is locked and compared with `expected`; with no row yet, the insert
  * itself is the check (ON CONFLICT DO NOTHING: a gate created meanwhile refuses this save).
+ *
+ * Lock order: the workflow row first, then the gate row. A publish, rollback, unpublish or workflow delete locks the
+ * workflow row and then reads the gate, so a gate save waits for one already holding the workflow row (which then
+ * acted on the gate as it was), and one that starts after the save waits for it and reads the saved gate. This holds
+ * when no gate row exists yet, which a lock on the gate row alone would not cover. No transaction locks the gate row
+ * and then the workflow row (gate case changes lock the gate row only; a baseline publish after a gate save runs in
+ * its own transaction), so the order cannot deadlock. A gate whose workflow is gone has no row to lock, and nothing
+ * is then left to publish or delete.
  */
 export async function saveReleaseGate(
   ctx: PgContext,
@@ -720,6 +731,7 @@ export async function saveReleaseGate(
   try {
     return await ctx.withTransaction(async (client) => {
       const workflowId = input.gate?.workflowId ?? input.expected?.workflowId ?? "";
+      await readPublishedVersion(client, workflowId, true);
       const current = await readReleaseGate(client, workflowId, true);
       if (JSON.stringify(current) !== JSON.stringify(input.expected)) return null;
       let saved: ReleaseGateRecord | null = current;
@@ -783,6 +795,9 @@ export async function approveReleaseRequestAndPublish(
 ): Promise<{ release: WorkflowReleaseRecord } | { refused: "decided" | "conflict" }> {
   try {
     return await ctx.withTransaction(async (client) => {
+      // The workflow row before the request row, the order every release write takes (see saveReleaseGate), so this
+      // never waits for the workflow row while a workflow delete holding it waits for the request row.
+      await readPublishedVersion(client, release.workflowId, true);
       if (!(await decideReleaseRequestOn(client, decision))) throw new Refused("decided");
       const committed = await publishOn(client, release, expectedPrevious);
       // Throwing rolls the decision back.

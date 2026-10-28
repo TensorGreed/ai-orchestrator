@@ -146,11 +146,11 @@ export async function deleteWorkflow(ctx: PgContext, id: string, options: { refu
   const legacyNamespaces = ((await ctx.store.getWorkflow(id))?.nodes ?? []).map((node) => `${id}:${node.id}`);
   return ctx.withTransaction(async (client) => {
     const run = (sql: string, params: unknown[]) => client.query(sql, params);
-    if (options.refuseIfGateEnforced) {
-      // The workflow row is locked first, as an unpublish or a publish does, then the gate is read before anything goes.
-      await run(`SELECT id FROM workflows WHERE id = $1 FOR UPDATE`, [id]);
-      await gateStateForWrite(client, id, true);
-    }
+    // The workflow row is locked first, as a publish, an unpublish or a gate save does (workflow row, then the rest), so
+    // a delete never holds a workflow version row while waiting for the workflow row. With `refuseIfGateEnforced` the
+    // gate is then read before anything goes; a gate save holds the workflow row while it writes, so it is seen.
+    await run(`SELECT id FROM workflows WHERE id = $1 FOR UPDATE`, [id]);
+    if (options.refuseIfGateEnforced) await gateStateForWrite(client, id, true);
     await run(`DELETE FROM execution_history WHERE workflow_id = $1`, [id]);
     await run(`DELETE FROM workflow_executions WHERE workflow_id = $1`, [id]);
     // Phase 11.2 — decided requests stay as the audit trail; pending ones end with their paused run.
