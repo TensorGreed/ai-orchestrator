@@ -95,6 +95,7 @@ import { loadDocuments, inferDocumentKind, type DocumentKind } from "./services/
 import { type McpServerRecord } from "./db/database";
 import { PostgresStore } from "./db/postgres-store.js";
 import { REPLAY_CAPTURE_DEFAULTS, resolveOidcSettings, type AppConfig } from "./config";
+import { redactSensitiveUrl } from "./services/url-redaction.js";
 import { SecretService } from "./services/secret-service";
 import { McpCatalogService } from "./services/mcp-catalog.js";
 import { computeTemplateDependencies } from "./services/template-dependencies";
@@ -1323,6 +1324,8 @@ export interface CreateAppOptions {
   codeSandboxDeps?: Parameters<typeof resolveCodeSandboxPlan>[1];
   /** Phase 13.2 — HTTP seam for OIDC discovery, JWKS, token and userinfo calls (tests use an in-process IdP). */
   oidcFetch?: OidcFetch;
+  /** Where the Fastify logger writes (tests capture log lines); stdout when unset. */
+  logStream?: { write(line: string): void };
 }
 
 /** Phase 13.1 — how often the leader re-reads schedules and triggers when several instances share the database. */
@@ -1350,7 +1353,21 @@ export async function createApp(
   // The X-Request-ID response header is set in the onSend hook below so
   // clients (and curl --include) see the same ID their request carried.
   const app = Fastify({
-    logger: { level: config.LOG_LEVEL },
+    logger: {
+      level: config.LOG_LEVEL,
+      // Phase 13.2 — request logs never carry an auth callback's one-time `code` or `state` (see url-redaction.ts).
+      serializers: {
+        req: (req: FastifyRequest) => ({
+          method: req.method,
+          url: redactSensitiveUrl(req.url ?? ""),
+          version: typeof req.headers?.["accept-version"] === "string" ? req.headers["accept-version"] : undefined,
+          host: req.host,
+          remoteAddress: req.ip,
+          remotePort: req.socket?.remotePort
+        })
+      },
+      ...(options.logStream ? { stream: options.logStream } : {})
+    },
     bodyLimit: config.API_BODY_LIMIT_BYTES,
     requestIdHeader: "x-request-id",
     requestIdLogLabel: "reqId",
@@ -4660,14 +4677,14 @@ export async function createApp(
         typeof headers["traceparent"] === "string" ? (headers["traceparent"] as string) : undefined
       );
       const span = tracingService.startSpan({
-        operationName: `${request.method} ${request.routeOptions?.url ?? request.url}`,
+        operationName: `${request.method} ${request.routeOptions?.url ?? redactSensitiveUrl(request.url)}`,
         kind: "server",
         traceId: incoming?.traceId,
         parentSpanId: incoming?.parentSpanId,
         attributes: {
           "http.method": request.method,
-          "http.target": request.url,
-          "http.route": request.routeOptions?.url ?? request.url,
+          "http.target": redactSensitiveUrl(request.url),
+          "http.route": request.routeOptions?.url ?? redactSensitiveUrl(request.url),
           "http.scheme": request.protocol,
           "net.peer.ip": request.ip ?? "",
           "request.id": request.id ?? ""
