@@ -277,7 +277,41 @@ export interface ReleaseGateCase {
    * policy such a case counts as an error.
    */
   diffMissing?: boolean;
+  /**
+   * With repeats above 1: each repeat's own pair (its candidate and the run it
+   * was compared with), in repeat order, null where that repeat has none (its
+   * baseline rerun was inconclusive). `costUsd` and `latencyMs` above are then
+   * the deciding repeat's pair. The gate judges cost and p95 latency at the
+   * worst of several selections of these (`ReleaseGateRepeatSelection`), so it
+   * is never more lenient than the deciding repeats alone. Absent per metric
+   * when the repeats did not record it: the case counts at its deciding pair.
+   */
+  repeats?: {
+    costUsd?: Array<ReleaseGateMetricPair | null>;
+    latencyMs?: Array<ReleaseGateMetricPair | null>;
+  };
 }
+
+/** A baseline/candidate pair of one metric. */
+export interface ReleaseGateMetricPair {
+  baseline: number | null;
+  candidate: number | null;
+}
+
+/**
+ * Which pair of each repeated case a job-level figure (summed cost, p95
+ * latency) was taken at: every case's deciding repeat; every case's repeat
+ * `repeat` (1-based; a case without that repeat's pair counts at its deciding
+ * one); each case's repeat that added the most over its own baseline; or each
+ * case's repeat that rose the most relative to its own baseline (a case whose
+ * baselines are all zero counts at the repeat that added the most). The gate
+ * takes the selection with the largest increase.
+ */
+export type ReleaseGateRepeatSelection =
+  | { by: "deciding" }
+  | { by: "repeat"; repeat: number; /** Some cases had no usable pair at this repeat and counted at their deciding one. */ partial?: boolean }
+  | { by: "largest_increase" }
+  | { by: "largest_relative_increase" };
 
 export interface ReleaseGateJob {
   id: string;
@@ -312,6 +346,12 @@ export interface ReleaseGateJob {
   noSetSnapshot?: boolean;
   /** The job repeated its cases and the replay recorded latency or guard verdicts for only one repeat of some case. */
   repeatsUnchecked?: boolean;
+  /**
+   * With `repeatsUnchecked`, the limits that cannot be checked per repeat
+   * (a job may hold every repeat's guard verdicts but not their latencies).
+   * Absent means both.
+   */
+  repeatsUncheckedLimits?: Array<"latency" | "guard">;
 }
 
 export interface ReleaseGateEvidence {
@@ -345,6 +385,12 @@ export interface ReleaseGateStats {
   p95LatencyIncreasePct: number | null;
   newGuardBlocks: number;
   oldestRecordingDays: number | null;
+  /**
+   * With repeated cases: which selection of their repeats each figure was
+   * taken at (the one with the largest increase). Absent per metric when no
+   * counted case carries that metric per repeat.
+   */
+  repeatSelection?: { cost?: ReleaseGateRepeatSelection; latency?: ReleaseGateRepeatSelection };
   /**
    * Gate admission (enforced gates only): which cases counted, which ran
    * while pending admission, and the required cases. Absent when the gate
@@ -422,6 +468,98 @@ function increasePct(baseline: number | null, candidate: number | null): number 
 
 const formatPct = (value: number) => (Number.isFinite(value) ? `${Math.round(value * 10) / 10}%` : "from zero");
 
+type CompletePair = { baseline: number; candidate: number };
+const completePair = (pair: ReleaseGateMetricPair | null | undefined): pair is CompletePair => Boolean(pair) && pair!.baseline !== null && pair!.candidate !== null;
+
+/** The complete pair that adds the most over its own baseline (ties go to the larger candidate). */
+function largestIncreasePair(pairs: Array<ReleaseGateMetricPair | null>): CompletePair | null {
+  let worst: CompletePair | null = null;
+  for (const pair of pairs) {
+    if (!completePair(pair)) continue;
+    const added = pair.candidate - pair.baseline;
+    const worstAdded = worst ? worst.candidate - worst.baseline : Number.NEGATIVE_INFINITY;
+    if (!worst || added > worstAdded || (added === worstAdded && pair.candidate > worst.candidate)) worst = pair;
+  }
+  return worst;
+}
+
+/** The complete pair over a positive baseline that rose the most relative to it (ties go to the larger increase). */
+function largestRelativePair(pairs: Array<ReleaseGateMetricPair | null>): CompletePair | null {
+  let worst: CompletePair | null = null;
+  for (const pair of pairs) {
+    if (!completePair(pair) || !(pair.baseline > 0)) continue;
+    const ratio = (pair.candidate - pair.baseline) / pair.baseline;
+    const worstRatio = worst ? (worst.candidate - worst.baseline) / worst.baseline : Number.NEGATIVE_INFINITY;
+    if (!worst || ratio > worstRatio || (ratio === worstRatio && pair.candidate - pair.baseline > worst.candidate - worst.baseline)) worst = pair;
+  }
+  return worst;
+}
+
+function pairAt(entry: ReleaseGateCase, metric: "costUsd" | "latencyMs", selection: ReleaseGateRepeatSelection): ReleaseGateMetricPair {
+  const deciding = entry[metric];
+  const repeats = entry.repeats?.[metric];
+  if (!repeats || selection.by === "deciding") return deciding;
+  if (selection.by === "repeat") {
+    const pair = repeats[selection.repeat - 1];
+    return completePair(pair) ? pair : deciding;
+  }
+  if (selection.by === "largest_increase") return largestIncreasePair(repeats) ?? deciding;
+  return largestRelativePair(repeats) ?? largestIncreasePair(repeats) ?? deciding;
+}
+
+/**
+ * A job-level increase at the worst selection of the cases' repeats: the
+ * deciding repeats (a single repeat's figure), each repeat index, and each
+ * case's repeat that added the most absolutely and relatively. Ties keep the
+ * earlier selection, so the deciding repeats win when nothing is worse.
+ */
+function worstRepeatSelection(
+  cases: ReleaseGateCase[],
+  metric: "costUsd" | "latencyMs",
+  measure: (pairs: ReleaseGateMetricPair[]) => number | null
+): { value: number | null; selection?: ReleaseGateRepeatSelection } {
+  const deciding: ReleaseGateRepeatSelection = { by: "deciding" };
+  const value = measure(cases.map((entry) => entry[metric]));
+  const longest = cases.reduce((most, entry) => Math.max(most, entry.repeats?.[metric]?.length ?? 0), 0);
+  if (longest === 0) return { value };
+  const selections: ReleaseGateRepeatSelection[] = [
+    ...Array.from({ length: longest }, (_unused, index): ReleaseGateRepeatSelection => {
+      const partial = cases.some((entry) => !completePair(entry.repeats?.[metric]?.[index]));
+      return { by: "repeat", repeat: index + 1, ...(partial ? { partial: true } : {}) };
+    }),
+    { by: "largest_increase" },
+    { by: "largest_relative_increase" }
+  ];
+  const rank = (candidate: number | null) => (candidate === null ? Number.NEGATIVE_INFINITY : candidate);
+  let worst: { value: number | null; selection: ReleaseGateRepeatSelection } = { value, selection: deciding };
+  for (const selection of selections) {
+    const candidate = measure(cases.map((entry) => pairAt(entry, metric, selection)));
+    if (rank(candidate) > rank(worst.value)) worst = { value: candidate, selection };
+  }
+  return worst;
+}
+
+function costIncreaseOf(pairs: ReleaseGateMetricPair[]): number | null {
+  const priced = pairs.filter(completePair);
+  if (priced.length === 0) return null;
+  return increasePct(priced.reduce((sum, pair) => sum + pair.baseline, 0), priced.reduce((sum, pair) => sum + pair.candidate, 0));
+}
+
+function p95IncreaseOf(pairs: ReleaseGateMetricPair[]): number | null {
+  const timed = pairs.filter(completePair);
+  return increasePct(percentile(timed.map((pair) => pair.baseline), 0.95), percentile(timed.map((pair) => pair.candidate), 0.95));
+}
+
+/** How a reason names the selection a figure was taken at ("" for the deciding repeats). */
+function selectionPhrase(selection: ReleaseGateRepeatSelection | undefined, metric: "cost" | "latency", compare: string): string {
+  if (!selection || selection.by === "deciding") return "";
+  if (selection.by === "repeat") {
+    return selection.partial ? ` at repeat ${selection.repeat} (cases without a usable repeat ${selection.repeat} at their deciding repeat)` : ` at repeat ${selection.repeat}`;
+  }
+  if (selection.by === "largest_increase") return metric === "cost" ? " at each case's repeat that added the most cost" : " at each case's repeat that added the most time";
+  return ` at each case's repeat that rose the most over ${compare === "baseline_rerun" ? "its own baseline" : "the recording"}`;
+}
+
 function statsOf(evidence: ReleaseGateEvidence, policy: ReleaseGatePolicy, now: number): ReleaseGateStats {
   const cases = evidence.cases;
   const count = (status: ReleaseCaseStatus) => cases.filter((entry) => entry.status === status).length;
@@ -434,12 +572,9 @@ function statsOf(evidence: ReleaseGateEvidence, policy: ReleaseGatePolicy, now: 
   const regressions = cases.filter(
     (entry) => baselinePassed(entry) && (entry.status === "fail" || (policy.errorsCountAsFailures && entry.status === "error"))
   ).length;
-  const priced = cases.filter((entry) => entry.costUsd.baseline !== null && entry.costUsd.candidate !== null);
-  const costBaseline = priced.length > 0 ? priced.reduce((sum, entry) => sum + entry.costUsd.baseline!, 0) : null;
-  const costCandidate = priced.length > 0 ? priced.reduce((sum, entry) => sum + entry.costUsd.candidate!, 0) : null;
-  const timed = cases.filter((entry) => entry.latencyMs.baseline !== null && entry.latencyMs.candidate !== null);
-  const p95Baseline = percentile(timed.map((entry) => entry.latencyMs.baseline!), 0.95);
-  const p95Candidate = percentile(timed.map((entry) => entry.latencyMs.candidate!), 0.95);
+  // Repeats: the worst of several selections of each case's repeats, never better than the deciding repeats alone.
+  const cost = worstRepeatSelection(cases, "costUsd", costIncreaseOf);
+  const latency = worstRepeatSelection(cases, "latencyMs", p95IncreaseOf);
   const ages = cases
     .map((entry) => (entry.recordingCreatedAt ? Date.parse(entry.recordingCreatedAt) : Number.NaN))
     .filter((value) => Number.isFinite(value))
@@ -452,10 +587,13 @@ function statsOf(evidence: ReleaseGateEvidence, policy: ReleaseGatePolicy, now: 
     skipped,
     passRate: denominator > 0 ? pass / denominator : 0,
     regressions,
-    costIncreasePct: increasePct(costBaseline, costCandidate),
-    p95LatencyIncreasePct: increasePct(p95Baseline, p95Candidate),
+    costIncreasePct: cost.value,
+    p95LatencyIncreasePct: latency.value,
     newGuardBlocks: cases.reduce((sum, entry) => sum + entry.newGuardBlocks, 0),
-    oldestRecordingDays: ages.length > 0 ? Math.floor(Math.max(...ages)) : null
+    oldestRecordingDays: ages.length > 0 ? Math.floor(ages.reduce((most, age) => Math.max(most, age), 0)) : null,
+    ...(cost.selection || latency.selection
+      ? { repeatSelection: { ...(cost.selection ? { cost: cost.selection } : {}), ...(latency.selection ? { latency: latency.selection } : {}) } }
+      : {})
   };
 }
 
@@ -522,10 +660,16 @@ export function judgeReleaseGate(
     const why = job.releaseIneligibleReasons && job.releaseIneligibleReasons.length > 0 ? ` (${job.releaseIneligibleReasons.join("; ")})` : "";
     add(job.releaseIneligibleReasons && job.releaseIneligibleReasons.length > 0 ? job.releaseIneligibleReasons.map((entry) => `ineligible:${entry}`) : "ineligible", `Replay job ${job.id} is not eligible to prove a release${why}.`);
   }
-  if (job.repeatsUnchecked && (policy.maxP95LatencyIncreasePct !== undefined || policy.noNewGuardBlocks)) {
+  const uncheckedLimits = job.repeatsUnchecked ? (job.repeatsUncheckedLimits ?? ["latency", "guard"]) : [];
+  const refusedLimits = [
+    ...(uncheckedLimits.includes("latency") && policy.maxP95LatencyIncreasePct !== undefined ? ["latency"] : []),
+    ...(uncheckedLimits.includes("guard") && policy.noNewGuardBlocks ? ["guard"] : [])
+  ];
+  if (refusedLimits.length > 0) {
+    const both = refusedLimits.length > 1;
     add(
       "repeats_unchecked",
-      `This gate checks latency and guard limits per run, but replay job ${job.id} repeated its cases and recorded them for only one repeat: run the gate's suite with repeats 1, or remove those limits.`
+      `This gate checks ${refusedLimits.join(" and ")} limits per run, but replay job ${job.id} repeated its cases and recorded ${both ? "them" : refusedLimits[0] === "latency" ? "latency" : "guard verdicts"} for only one repeat (it ran before replays recorded every repeat): run the gate again, or remove ${both ? "those limits" : "that limit"}.`
     );
   }
   if (job.scorerMismatch) add(options.expected.scorersKey ? `scorer_mismatch:${options.expected.scorersKey}` : "scorer_mismatch", `Replay job ${job.id} ${job.scorerMismatch}: the gate judges with its own scorers.`);
@@ -566,10 +710,10 @@ export function judgeReleaseGate(
     if (failing.length > 0) add(`required_scorer:${scorer}`, `Required scorer ${scorer} did not pass on ${failing.length} case${failing.length === 1 ? "" : "s"}.`, failing.length);
   }
   if (policy.maxCostIncreasePct !== undefined && stats.costIncreasePct !== null && stats.costIncreasePct > policy.maxCostIncreasePct) {
-    add("cost", `Cost rose ${formatPct(stats.costIncreasePct)}; the gate allows ${policy.maxCostIncreasePct}%.`, stats.costIncreasePct - policy.maxCostIncreasePct);
+    add("cost", `Cost rose ${formatPct(stats.costIncreasePct)}${selectionPhrase(stats.repeatSelection?.cost, "cost", job.compare ?? "recording")}; the gate allows ${policy.maxCostIncreasePct}%.`, stats.costIncreasePct - policy.maxCostIncreasePct);
   }
   if (policy.maxP95LatencyIncreasePct !== undefined && stats.p95LatencyIncreasePct !== null && stats.p95LatencyIncreasePct > policy.maxP95LatencyIncreasePct) {
-    add("latency", `p95 latency rose ${formatPct(stats.p95LatencyIncreasePct)}; the gate allows ${policy.maxP95LatencyIncreasePct}%.`, stats.p95LatencyIncreasePct - policy.maxP95LatencyIncreasePct);
+    add("latency", `p95 latency rose ${formatPct(stats.p95LatencyIncreasePct)}${selectionPhrase(stats.repeatSelection?.latency, "latency", job.compare ?? "recording")}; the gate allows ${policy.maxP95LatencyIncreasePct}%.`, stats.p95LatencyIncreasePct - policy.maxP95LatencyIncreasePct);
   }
   if (policy.noNewGuardBlocks && stats.newGuardBlocks > 0) {
     add("guard_blocks", `The candidate added ${stats.newGuardBlocks} guard block${stats.newGuardBlocks === 1 ? "" : "s"} or review${stats.newGuardBlocks === 1 ? "" : "s"}.`, stats.newGuardBlocks);

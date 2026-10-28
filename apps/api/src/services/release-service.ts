@@ -93,6 +93,7 @@ import {
   releaseGatePolicySchema,
   releaseGateSettingsSchema,
   releaseUnpublishNotice,
+  replayNewGuardBlocks,
   type EvalCaseDetail,
   type EvalCaseResult,
   type EvalRunView,
@@ -197,6 +198,28 @@ function asRecord(value: unknown): Record<string, unknown> {
 
 function caseStatus(status: string): ReleaseCaseStatus {
   return status === "pass" || status === "fail" || status === "error" || status === "skipped" ? status : "error";
+}
+
+interface MetricPair {
+  baseline: number | null;
+  candidate: number | null;
+}
+
+/**
+ * The complete baseline/candidate pair that adds the most over its own
+ * baseline (ties go to the larger candidate), used to combine a case's result
+ * rows. Null without a complete pair: pairs are never mixed across repeats.
+ */
+function worstPair(pairs: MetricPair[]): { baseline: number; candidate: number } | null {
+  let worst: { baseline: number; candidate: number } | null = null;
+  for (const pair of pairs) {
+    if (pair.baseline === null || pair.candidate === null) continue;
+    const complete = { baseline: pair.baseline, candidate: pair.candidate };
+    const added = complete.candidate - complete.baseline;
+    const worstAdded = worst ? worst.candidate - worst.baseline : Number.NEGATIVE_INFINITY;
+    if (!worst || added > worstAdded || (added === worstAdded && complete.candidate > worst.candidate)) worst = complete;
+  }
+  return worst;
 }
 
 function numberOrNull(value: unknown): number | null {
@@ -1072,6 +1095,7 @@ export class ReleaseService {
     const current = sets ?? await this.gateSets(gate);
     const options = asRecord(job.options);
     const aggregate = (typeof options.aggregate === "string" ? options.aggregate : "all") as ReleaseAggregateMode;
+    const rerun = options.compare === "baseline_rerun";
     const groups = new Map<string, Array<EvalCaseResult & Record<string, unknown>>>();
     for (const result of job.results as Array<EvalCaseResult & Record<string, unknown>>) {
       // A baseline rerun's own results are compared with, not judged.
@@ -1084,7 +1108,7 @@ export class ReleaseService {
       groups.set(key, list);
     }
     const cases: ReleaseGateCase[] = [];
-    let repeatsUnchecked = false;
+    const uncheckedLimits = new Set<"latency" | "guard">();
     for (const [key, results] of groups) {
       const status = aggregateReleaseRepeats(results.map((result) => caseStatus(result.status)), aggregate);
       const scorerPass = new Map<string, boolean>();
@@ -1093,17 +1117,19 @@ export class ReleaseService {
           scorerPass.set(detail.type, (scorerPass.get(detail.type) ?? true) && detail.pass);
         }
       }
-      // Repeats: the baseline is the same for every repeat; the candidate counts at its most expensive and slowest.
-      let costBaseline: number | null = null;
-      let latencyBaseline: number | null = null;
-      const costs: number[] = [];
-      const latencies: number[] = [];
+      // Repeats: the case carries its deciding repeat's pair (the case diff's) and, when every repeat recorded the
+      // metric, each repeat's own pair: its candidate with the run it was compared with (the recording, or that
+      // repeat's own baseline rerun). The gate judges the worst selection of them (`judgeReleaseGate`).
+      const costPairs: MetricPair[] = [];
+      const latencyPairs: MetricPair[] = [];
+      const costRepeats: Array<Array<MetricPair | null>> = [];
+      const latencyRepeats: Array<Array<MetricPair | null>> = [];
       let newGuardBlocks = 0;
       let diffMissing = false;
-      const blocking = (action: unknown) => action === "block" || action === "review";
       for (const result of results) {
         if (caseStatus(result.status) === "skipped") continue;
-        const diff = asRecord((await this.options.loadCase(job.id, result.id))?.replay?.diff);
+        const replay = asRecord((await this.options.loadCase(job.id, result.id))?.replay);
+        const diff = asRecord(replay.diff);
         const totals = asRecord(diff.totals);
         const guard = asRecord(diff.guard);
         if (!diff.totals || !Array.isArray(guard.added) || !Array.isArray(guard.changed)) {
@@ -1113,32 +1139,56 @@ export class ReleaseService {
         }
         const cost = asRecord(totals.costUsd);
         const latency = asRecord(totals.latencyMs);
-        costBaseline = numberOrNull(cost.baseline) ?? costBaseline;
-        latencyBaseline = numberOrNull(latency.baseline) ?? latencyBaseline;
-        // Repeats: the row's totals come from one attempt; cost is kept for every attempt, so the worst one counts.
-        const attempts = Array.isArray(diff.attempts) ? (diff.attempts as unknown[]).map(asRecord) : [];
-        const attemptCosts = attempts.map((attempt) => numberOrNull(attempt.costUsd)).filter((value): value is number => value !== null);
-        const candidateCost = attemptCosts.length > 0 ? Math.max(...attemptCosts) : numberOrNull(cost.candidate);
-        if (candidateCost !== null) costs.push(candidateCost);
-        // Latency and guard verdicts are per attempt only when the replay recorded them for every attempt.
-        const attemptLatencies = attempts.map((attempt) => numberOrNull(attempt.latencyMs)).filter((value): value is number => value !== null);
-        const attemptGuards = attempts.map((attempt) => numberOrNull(attempt.newGuardBlocks)).filter((value): value is number => value !== null);
-        const perAttemptLatency = attempts.length > 1 && attemptLatencies.length === attempts.length;
-        const perAttemptGuard = attempts.length > 1 && attemptGuards.length === attempts.length;
-        if (attempts.length > 1 && !(perAttemptLatency && perAttemptGuard)) repeatsUnchecked = true;
-        const candidateLatency = perAttemptLatency ? Math.max(...attemptLatencies) : numberOrNull(latency.candidate);
-        if (candidateLatency !== null) latencies.push(candidateLatency);
-        const added = (guard.added as unknown[]).map(asRecord).filter((verdict) => !verdict.shadow && blocking(verdict.effectiveAction)).length;
-        const escalated = (guard.changed as unknown[])
-          .map(asRecord)
-          .filter((change) => {
-            const after = asRecord(change.candidate);
-            return !after.shadow && blocking(after.effectiveAction) && !blocking(asRecord(change.baseline).effectiveAction);
-          }).length;
-        newGuardBlocks = Math.max(newGuardBlocks, perAttemptGuard ? Math.max(...attemptGuards) : added + escalated);
+        // The case diff comes from one attempt (the deciding one); every attempt is listed beside it.
+        const decidingCost = { baseline: numberOrNull(cost.baseline), candidate: numberOrNull(cost.candidate) };
+        const decidingLatency = { baseline: numberOrNull(latency.baseline), candidate: numberOrNull(latency.candidate) };
+        const attempts = (Array.isArray(replay.attempts) ? (replay.attempts as unknown[]).map(asRecord) : [])
+          .map((attempt, index) => ({ attempt, order: numberOrNull(attempt.repeatIndex) ?? index }))
+          .sort((a, b) => a.order - b.order)
+          .map((entry) => entry.attempt);
+        const repeated = attempts.length > 1;
+        // Only attempts whose candidate ran have figures (an attempt whose baseline rerun was inconclusive never ran it).
+        const ran = attempts.filter((attempt) => typeof attempt.executionId === "string");
+        // A metric counts per attempt only when the replay recorded it for every attempt that ran, with the baseline it
+        // was compared with under baseline reruns (with the recording, that is the case diff's own baseline).
+        const recorded = (...keys: string[]) => repeated && ran.length > 0 && ran.every((attempt) => keys.every((key) => key in attempt));
+        const own = (attempt: Record<string, unknown>, key: string, fallback: number | null) => (key in attempt ? numberOrNull(attempt[key]) : fallback);
+        // Each attempt's own pair in repeat order; null for one whose candidate never ran.
+        const ownPairs = (baselineKey: string, candidateKey: string, fallback: number | null): Array<MetricPair | null> =>
+          attempts.map((attempt) => (typeof attempt.executionId === "string" ? { baseline: own(attempt, baselineKey, fallback), candidate: numberOrNull(attempt[candidateKey]) } : null));
+        costPairs.push(decidingCost);
+        latencyPairs.push(decidingLatency);
+        // Cost: the candidate's model cost (judge calls excluded, like the baseline's). Results stored before it was
+        // recorded per attempt count at the deciding repeat's own pair only, as a single repeat would.
+        const costRecorded = recorded("candidateCostUsd", ...(rerun ? ["baselineCostUsd"] : []));
+        if (costRecorded) costRepeats.push(ownPairs("baselineCostUsd", "candidateCostUsd", decidingCost.baseline));
+        // Latency: results stored before it was recorded per attempt are unchecked for a latency limit, and so is a case
+        // where no attempt has both figures while its diff does (its attempts disagree with its diff).
+        const latencyRecorded = recorded("latencyMs", ...(rerun ? ["baselineLatencyMs"] : []));
+        const attemptLatencies = latencyRecorded ? ownPairs("baselineLatencyMs", "latencyMs", decidingLatency.baseline) : [];
+        const latencyComplete = attemptLatencies.some((pair) => pair !== null && pair.baseline !== null && pair.candidate !== null);
+        if (repeated && (!latencyRecorded || (!latencyComplete && decidingLatency.baseline !== null && decidingLatency.candidate !== null))) uncheckedLimits.add("latency");
+        if (latencyRecorded && latencyComplete) latencyRepeats.push(attemptLatencies);
+        // Guard verdicts: the most new blocks any attempt added; results stored before they were recorded per attempt
+        // are unchecked for a guard limit.
+        const guardRecorded = recorded("newGuardBlocks");
+        if (repeated && !guardRecorded) uncheckedLimits.add("guard");
+        const attemptGuards = guardRecorded ? ran.map((attempt) => numberOrNull(attempt.newGuardBlocks)).filter((value): value is number => value !== null) : [];
+        const caseGuardBlocks = replayNewGuardBlocks({
+          added: guard.added as Parameters<typeof replayNewGuardBlocks>[0]["added"],
+          changed: guard.changed as Parameters<typeof replayNewGuardBlocks>[0]["changed"]
+        });
+        newGuardBlocks = attemptGuards.reduce((most, value) => Math.max(most, value), Math.max(newGuardBlocks, caseGuardBlocks));
       }
-      const costCandidate = costs.length > 0 ? Math.max(...costs) : null;
-      const latencyCandidate = latencies.length > 0 ? Math.max(...latencies) : null;
+      const casePairCost = worstPair(costPairs) ?? costPairs[0] ?? { baseline: null, candidate: null };
+      const casePairLatency = worstPair(latencyPairs) ?? latencyPairs[0] ?? { baseline: null, candidate: null };
+      // Several result rows for one case (rare): repeat k counts at the worst of the rows' k-th pairs.
+      const mergeRepeats = (rows: Array<Array<MetricPair | null>>): Array<MetricPair | null> =>
+        Array.from({ length: rows.reduce((most, row) => Math.max(most, row.length), 0) }, (_unused, index) => worstPair(rows.map((row) => row[index] ?? { baseline: null, candidate: null })));
+      const repeats = {
+        ...(costRepeats.length > 0 ? { costUsd: mergeRepeats(costRepeats) } : {}),
+        ...(latencyRepeats.length > 0 ? { latencyMs: mergeRepeats(latencyRepeats) } : {})
+      };
       const first = results[0]!;
       const baseline = typeof first.baselineStatus === "string" ? caseStatus(first.baselineStatus) : null;
       cases.push({
@@ -1146,11 +1196,12 @@ export class ReleaseService {
         status,
         baselineStatus: baseline,
         scorers: [...scorerPass].map(([type, pass]) => ({ type, pass })),
-        costUsd: { baseline: costBaseline, candidate: costCandidate },
-        latencyMs: { baseline: latencyBaseline, candidate: latencyCandidate },
+        costUsd: casePairCost,
+        latencyMs: casePairLatency,
         newGuardBlocks,
         recordingCreatedAt: first.recordingId ? await this.options.recordingCreatedAt(first.recordingId) : null,
-        diffMissing
+        diffMissing,
+        ...(Object.keys(repeats).length > 0 ? { repeats } : {})
       });
     }
     const candidate = asRecord(job.candidate);
@@ -1182,7 +1233,7 @@ export class ReleaseService {
         staleSets: jobSnapshot ? staleSets : [],
         ...(jobSnapshot ? { staleSetCounts } : {}),
         ...(jobSnapshot ? {} : { noSetSnapshot: true }),
-        ...(repeatsUnchecked ? { repeatsUnchecked: true } : {})
+        ...(uncheckedLimits.size > 0 ? { repeatsUnchecked: true, repeatsUncheckedLimits: [...uncheckedLimits].sort() } : {})
       },
       cases
     };

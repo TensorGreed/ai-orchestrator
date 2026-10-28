@@ -944,6 +944,12 @@ button.evals-row:focus-visible {
   gap: 4px 10px;
 }
 
+/* A repeat that added guard blocks is what blocks a gate's noNewGuardBlocks. */
+.evals-score-top .mono-cell.is-danger {
+  color: var(--err);
+  font-weight: 600;
+}
+
 .evals-score-reason {
   color: var(--fg);
   font-size: var(--fs-sm);

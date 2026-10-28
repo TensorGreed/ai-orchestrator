@@ -79,6 +79,7 @@ import {
   guardSimulationJobDatasetId,
   REPLAY_STALE_RECORDING_DAYS,
   replayJobReleaseIneligibleReasons,
+  replayNewGuardBlocks,
   type ReplayAttemptStatus,
   type ReplayCandidateOverrides,
   type ReplayCaseAttempt,
@@ -491,6 +492,28 @@ function roundUsd(value: number): number {
 /** A model call of the run had no price, so its cost is not in `totals.costUsd`. */
 function modelCostIsUnknown(facts: RunFacts | undefined | null): boolean {
   return Boolean(facts?.modelCalls.some((call) => call.costUsd === null));
+}
+
+/**
+ * What one repeat of a replay case measured, by the definitions the case
+ * diff uses: the candidate's latency and model cost (`totals.latencyMs` and
+ * `totals.costUsd`, candidate side: judge calls are not model cost), the
+ * reference run's latency and cost it was compared with (the recording, or
+ * this repeat's own baseline rerun), and its new guard blocks against that
+ * reference run (`replayNewGuardBlocks`). Null when the diff does not carry
+ * the figure.
+ */
+function replayAttemptMetrics(response: ReplayRunResponse): Pick<ReplayCaseAttempt, "latencyMs" | "candidateCostUsd" | "baselineLatencyMs" | "baselineCostUsd" | "newGuardBlocks"> {
+  const diff = response.diff as Partial<ReplayRunResponse["diff"]> | undefined;
+  const finite = (value: unknown) => (typeof value === "number" && Number.isFinite(value) ? value : null);
+  const guard = diff?.guard;
+  return {
+    latencyMs: finite(diff?.totals?.latencyMs?.candidate),
+    candidateCostUsd: finite(diff?.totals?.costUsd?.candidate),
+    baselineLatencyMs: finite(diff?.totals?.latencyMs?.baseline),
+    baselineCostUsd: finite(diff?.totals?.costUsd?.baseline),
+    newGuardBlocks: guard && Array.isArray(guard.added) && Array.isArray(guard.changed) ? replayNewGuardBlocks(guard) : null
+  };
 }
 
 function isTruncation(value: unknown): value is EvalStoredTruncation {
@@ -1767,7 +1790,21 @@ export class EvalService {
         if (baselineResponse.verdict === "error") {
           const reason = `The baseline rerun was inconclusive: ${baselineResponse.reasons.join(" ") || "it could not be judged."}`;
           attempts.push({
-            record: { repeatIndex, status: "error", executionId: null, baselineExecutionId: baselineResponse.executionId, verdict: "error", reasons: [reason], costUsd: baselineResponse.facts.totals.costUsd },
+            record: {
+              repeatIndex,
+              status: "error",
+              executionId: null,
+              baselineExecutionId: baselineResponse.executionId,
+              verdict: "error",
+              reasons: [reason],
+              costUsd: baselineResponse.facts.totals.costUsd,
+              // The candidate never ran in this repeat: there is nothing to compare.
+              latencyMs: null,
+              candidateCostUsd: null,
+              baselineLatencyMs: null,
+              baselineCostUsd: null,
+              newGuardBlocks: null
+            },
             outcome: { status: "error", recordingId, error: reason, executionId: baselineResponse.executionId }
           });
           continue;
@@ -1816,7 +1853,8 @@ export class EvalService {
           baselineExecutionId: baseline?.executionId ?? null,
           verdict: response.verdict,
           reasons: response.reasons,
-          costUsd: outcome.costUsd ?? null
+          costUsd: outcome.costUsd ?? null,
+          ...replayAttemptMetrics(response)
         },
         outcome
       });

@@ -1616,9 +1616,10 @@ describe("enforced gates and golden runs, turning a gate on (N7, N8)", () => {
 });
 
 describe("repeats and old jobs (M1, L2, L3)", () => {
+  // The replay runner lists the attempts beside the case's run diff, not inside it.
   const withAttempts = (costs: number[], extra: Record<string, unknown> = {}) => ({
     ...plainDiff,
-    diff: { ...plainDiff.diff, attempts: costs.map((costUsd, repeatIndex) => ({ repeatIndex, status: "pass", costUsd, ...extra })) }
+    attempts: costs.map((costUsd, repeatIndex) => ({ repeatIndex, status: "pass", executionId: `exec-${repeatIndex}`, baselineExecutionId: null, verdict: "pass", reasons: [], costUsd, candidateCostUsd: costUsd, ...extra }))
   });
   const publish = async (context: TestContext, cookie: string, id: string, version: number) => call(context, "POST", `/api/workflows/${id}/publish`, cookie, { version });
 
@@ -1645,9 +1646,22 @@ describe("repeats and old jobs (M1, L2, L3)", () => {
     await seedJob(context, { workflowId: "wf-rep-lat", datasetIds: ["set-wf-rep-lat"], version, hash, statuses: ["pass", "pass", "pass"], options: { repeats: 2, aggregate: "all" }, diff: withAttempts([0.01, 0.01]) });
     const blocked = await publish(context, admin.cookie, "wf-rep-lat", version);
     expect(blocked.statusCode).toBe(409);
-    expect(blocked.json<{ reasons: string[] }>().reasons.join()).toMatch(/repeats 1, or remove those limits/);
+    expect(blocked.json<{ reasons: string[] }>().reasons.join()).toMatch(/recorded them for only one repeat \(it ran before replays recorded every repeat\): run the gate again, or remove those limits/);
     await seedJob(context, { workflowId: "wf-rep-lat", datasetIds: ["set-wf-rep-lat"], version, hash, statuses: ["pass", "pass", "pass"], options: { repeats: 2, aggregate: "all" }, diff: withAttempts([0.01, 0.01], { latencyMs: 100, newGuardBlocks: 0 }) });
     expect((await publish(context, admin.cookie, "wf-rep-lat", version)).statusCode).toBe(200);
+  });
+
+  it("judges latency and guard limits at the worst of three attempts", async () => {
+    const attempts = (latencies: number[], guards: number[]) => withAttempts([0.01, 0.01, 0.01]).attempts.map((attempt, index) => ({ ...attempt, latencyMs: latencies[index], newGuardBlocks: guards[index] }));
+    const { context, admin, version, hash } = await setup("wf-rep-worst", { maxP95LatencyIncreasePct: 50, noNewGuardBlocks: true }, 3);
+    const seed = async (latencies: number[], guards: number[]) =>
+      await seedJob(context, { workflowId: "wf-rep-worst", datasetIds: ["set-wf-rep-worst"], version, hash, statuses: ["pass", "pass", "pass"], options: { repeats: 3, aggregate: "all" }, diff: { ...plainDiff, attempts: attempts(latencies, guards) } });
+    const reasons = async (job: string) => (await call(context, "GET", `/api/workflows/wf-rep-worst/publish-preview?version=${version}&replayRunId=${job}`, admin.cookie)).json<{ preview: { reasons: string[] } }>().preview.reasons.join();
+    const slow = await reasons(await seed([100, 300, 100], [0, 0, 0]));
+    expect(slow).toMatch(/p95 latency rose 200%/);
+    expect(slow).not.toMatch(/repeats 1/);
+    expect(await reasons(await seed([100, 100, 100], [0, 0, 1]))).toMatch(/added 3 guard blocks/); // one attempt of each of the three cases
+    expect(await reasons(await seed([100, 120, 140], [0, 0, 0]))).toBe("");
   });
 
   it("leaves repeats 1 unchanged", async () => {

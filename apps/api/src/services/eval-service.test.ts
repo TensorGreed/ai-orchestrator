@@ -128,17 +128,34 @@ describe("eval runs in the background", () => {
     expect((await store.getEvalRun(queued.id))!.status).toBe("completed");
   });
 
-  it("wait returns once the writes queued before it have landed, not when another run's later writes do", async () => {
-    let otherRun = "";
+  it("wait returns once the writes queued before it have landed, not when another run's later writes do", { timeout: 30_000 }, async () => {
+    // Every run but the first is the other run (its id is known only once it is queued).
+    let firstRun: string | null = null;
     let gated = false;
     const gate = deferred();
+    // The other run's first case has finished and its slow progress write has started (and, later, landed).
+    const caseWriteStarted = deferred();
+    let caseWriteLanded = false;
     const slow = new Proxy(store, {
       get(target, prop, receiver) {
         const value = Reflect.get(target, prop, receiver);
         if (prop === "updateEvalRunProgress" && typeof value === "function") {
           return async (...args: unknown[]) => {
-            if ((args[0] as { id?: string }).id === otherRun) await (gated ? gate.promise : sleep(30));
-            return (value as (...a: unknown[]) => unknown).apply(target, args);
+            const write = args[0] as { id?: string; status?: string; progress?: { done?: number } };
+            const apply = () => (value as (...a: unknown[]) => unknown).apply(target, args);
+            if (firstRun === null || write.id === firstRun) return apply();
+            if (gated) {
+              await gate.promise;
+              return apply();
+            }
+            // Whether a write is held is decided when it starts: only the ones started before the gate are slow. The
+            // progress is read when a write starts, so the earlier `running` write (it sets a status) may carry done 1 too.
+            const caseWrite = write.status === undefined && (write.progress?.done ?? 0) >= 1;
+            if (caseWrite) caseWriteStarted.resolve();
+            await sleep(30);
+            const result = await apply();
+            if (caseWrite) caseWriteLanded = true;
+            return result;
           };
         }
         return typeof value === "function" ? (value as (...a: unknown[]) => unknown).bind(target) : value;
@@ -150,16 +167,18 @@ describe("eval runs in the background", () => {
       return { executionId: input.executionId, output: input.fixtureInput };
     });
     const first = await svc.startRun({ datasetId: (await datasetWith(svc, 1)).id, workflowId: "wf", triggeredBy: "b@example.com", triggeredByUserId: "u1" });
+    firstRun = first.runId;
     const other = (await svc.createDataset({ name: "other" }))!;
     for (const b of [0, 1]) await svc.addFixture({ datasetId: other.id, name: `b-${b}`, input: { b }, expected: { b } });
     const run = await svc.enqueueRun({ datasetId: other.id, workflowId: "wf", triggeredBy: "b@example.com", triggeredByUserId: "u1" });
-    otherRun = run.id;
-    await sleep(5);
-    // The other run has slow writes queued; from now on its writes hang until the gate opens.
-    const waiting = svc.wait(first.runId).then(() => "returned");
+    // The other run's case b-0 has a slow write in flight; case b-1 waits on `second`, so it queues nothing more until then.
+    await caseWriteStarted.promise;
+    const waiting = svc.wait(first.runId).then(() => ({ outcome: "returned", caseWriteLanded }));
+    // From now on the other run's writes hang until the gate opens; all of them are queued after wait's tail.
     gated = true;
     second.resolve();
-    expect(await Promise.race([waiting, sleep(1500).then(() => "still waiting")])).toBe("returned");
+    // The fallback is reached only when wait waits on a later write (the bug), so a correct run never pays for it.
+    expect(await Promise.race([waiting, sleep(10_000).then(() => ({ outcome: "still waiting", caseWriteLanded }))])).toEqual({ outcome: "returned", caseWriteLanded: true });
     // The other run's writes are still held at the gate: its stored status is not final yet.
     expect((await store.getEvalRun(run.id))!.status).not.toBe("completed");
     gate.resolve();
@@ -177,16 +196,18 @@ describe("eval runs in the background", () => {
     const gate = deferred();
     const started: string[] = [];
     const aborted: string[] = [];
+    const caseStarted = deferred();
     const executor: EvalWorkflowExecutor = async (input) => {
       started.push(input.fixtureName);
+      caseStarted.resolve();
       await gate.promise;
       return { executionId: input.executionId, output: input.fixtureInput };
     };
     const svc = new EvalService(store, executor, undefined, { concurrency: 1, abortExecution: (id) => aborted.push(id) });
     const dataset = await datasetWith(svc, 3);
     const run = await svc.enqueueRun({ datasetId: dataset.id, workflowId: "wf", triggeredBy: "b@example.com", triggeredByUserId: "u1" });
-    await sleep(5);
-    // The `running` status is a queued bookkeeping write; on a pooled store it may not have landed after 5 ms.
+    // The first case is running (its execution is in flight); the `running` status is a queued bookkeeping write.
+    await caseStarted.promise;
     await svc.flush();
     expect((await svc.getRunView(run.id))!.status).toBe("running");
     const canceled = (await svc.cancel(run.id))!;
@@ -222,13 +243,15 @@ describe("eval runs in the background", () => {
 
   it("marks its own runs interrupted on shutdown", async () => {
     const gate = deferred();
+    const caseStarted = deferred();
     const svc = new EvalService(store, async (input) => {
+      caseStarted.resolve();
       await gate.promise;
       return { executionId: input.executionId, output: null };
     });
     const dataset = await datasetWith(svc, 2);
     const run = await svc.enqueueRun({ datasetId: dataset.id, workflowId: "wf", triggeredBy: "b@example.com", triggeredByUserId: "u1" });
-    await sleep(5);
+    await caseStarted.promise;
     await svc.shutdown();
     gate.resolve();
     await svc.wait(run.id);
@@ -504,14 +527,17 @@ describe("review fixes: budgets, bookkeeping and storage", () => {
   it("drops a run that waits for a slot when it is canceled, without starting its cases", async () => {
     const gate = deferred();
     const started: string[] = [];
+    const holderStarted = deferred();
     const svc = new EvalService(store, async (input) => {
       started.push(`${input.runId}:${input.fixtureName}`);
+      holderStarted.resolve();
       await gate.promise;
       return { executionId: input.executionId, output: input.fixtureInput };
     }, undefined, { concurrency: 1 });
     const holder = await svc.enqueueRun({ datasetId: (await datasetWith(svc, 1)).id, workflowId: "wf", triggeredBy: "b@example.com", triggeredByUserId: "u1" });
     const waiting = await svc.enqueueRun({ datasetId: (await datasetWith(svc, 2)).id, workflowId: "wf", triggeredBy: "b@example.com", triggeredByUserId: "u1" });
-    await sleep(5);
+    // The holder's case has the only slot, so the other run waits for it.
+    await holderStarted.promise;
     expect((await svc.cancel(waiting.id))!.status).toBe("canceled");
     gate.resolve();
     await Promise.all([svc.wait(holder.id), svc.wait(waiting.id)]);

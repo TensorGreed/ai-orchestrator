@@ -476,7 +476,10 @@ describe("EvaluationsPage — replay jobs", () => {
       baselineExecutionId: `ex-b${repeatIndex}`,
       verdict: repeatIndex === 1 ? ("fail" as const) : ("pass" as const),
       reasons: repeatIndex === 1 ? ["Output changed at 1 path (answer)"] : [],
-      costUsd: 0.002
+      costUsd: 0.002,
+      latencyMs: [120, 2400, 95][repeatIndex],
+      baselineLatencyMs: [110, 2300, 90][repeatIndex],
+      newGuardBlocks: repeatIndex === 1 ? 2 : 0
     }));
     vi.mocked(api.fetchReplayJobCase).mockResolvedValue({ result: { ...repeated, output: {}, replay: { ...replayDiff, compare: "baseline_rerun", baselineExecutionId: "ex-b0", attempts } } });
     const user = renderPage();
@@ -499,6 +502,28 @@ describe("EvaluationsPage — replay jobs", () => {
     expect(await within(drawer).findByText(/each against its own baseline rerun/)).toBeInTheDocument();
     expect(within(drawer).getByText("baseline ex-b1")).toBeInTheDocument();
     expect(within(drawer).getByText("Output changed at 1 path (answer)")).toBeInTheDocument();
+    // Every repeat shows its own latency (against its own baseline rerun) and new guard blocks beside its cost.
+    expect(within(drawer).getByText("latency 120 ms (baseline 110 ms)")).toBeInTheDocument();
+    expect(within(drawer).getByText("latency 2.4 s (baseline 2.3 s)")).toBeInTheDocument();
+    // A repeat that added guard blocks stands out; the others do not.
+    expect(within(drawer).getByText("2 new guard blocks")).toHaveClass("is-danger");
+    const clean = within(drawer).getAllByText("no new guard blocks");
+    expect(clean).toHaveLength(2);
+    for (const label of clean) expect(label).not.toHaveClass("is-danger");
+  });
+
+  it("lists a repeat stored before per-repeat latency and guard data with its cost only", async () => {
+    const repeated = caseResult({ status: "pass", verdict: "pass", repeats: { total: 2, pass: 2, fail: 0, error: 0, aggregate: "all", flaky: false } });
+    vi.mocked(api.fetchReplayJob).mockResolvedValue({ run: { ...job(), results: [repeated] } });
+    const attempts = [0, 1].map((repeatIndex) => ({ repeatIndex, status: "pass" as const, executionId: `ex-old${repeatIndex}`, baselineExecutionId: null, verdict: "pass" as const, reasons: [], costUsd: 0.003 }));
+    vi.mocked(api.fetchReplayJobCase).mockResolvedValue({ result: { ...repeated, output: {}, replay: { ...replayDiff, attempts } } });
+    const user = renderPage();
+    await user.click(screen.getByRole("tab", { name: "Replay jobs" }));
+    await user.click(await screen.findByRole("button", { name: "Replay job job_1" }));
+    await user.click(await screen.findByRole("button", { name: /Open case Refund baseline/ }));
+    const drawer = await screen.findByRole("dialog", { name: "Refund baseline" });
+    expect(await within(drawer).findByText("ex-old1")).toBeInTheDocument();
+    expect(within(drawer).queryByText(/guard block/)).not.toBeInTheDocument();
   });
 
   it("explains a case without a replay diff", async () => {

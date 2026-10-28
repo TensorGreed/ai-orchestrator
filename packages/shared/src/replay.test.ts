@@ -6,9 +6,11 @@ import {
   REPLAY_NODE_CLASSES,
   REPLAY_IGNORE_PATH_MAX_LENGTH,
   REPLAY_IGNORE_PATHS_MAX,
+  replayNewGuardBlocks,
   replayNodeClass,
   replayRunRequestSchema,
-  type RunDiff
+  type RunDiff,
+  type RunFactGuardVerdict
 } from "./replay";
 
 function emptyDelta() {
@@ -137,5 +139,24 @@ describe("judgeReplayDiff", () => {
     expect(judgeReplayDiff(diff)).toEqual({ verdict: "error", reasons: ["1 MCP call had no recorded answer"] });
     const advisory = cleanDiff({ health: [{ kind: "unrecorded_stub", nodeId: "slack", message: "stubbed", blocking: false }] });
     expect(judgeReplayDiff(advisory).verdict).toBe("pass");
+  });
+});
+
+describe("replayNewGuardBlocks", () => {
+  const verdict = (effectiveAction: string, shadow = false): RunFactGuardVerdict => ({ nodeId: "n", placement: "output", channel: "model", detectorId: "pii", effectiveAction, shadow });
+
+  it("counts added blocks and reviews and escalations to them, never shadow verdicts or downgrades", () => {
+    expect(replayNewGuardBlocks({ added: [], changed: [] })).toBe(0);
+    expect(
+      replayNewGuardBlocks({
+        added: [verdict("block"), verdict("review"), verdict("block", true), verdict("allow"), verdict("redact")],
+        changed: [
+          { baseline: verdict("allow"), candidate: verdict("block") },
+          { baseline: verdict("review"), candidate: verdict("block") },
+          { baseline: verdict("allow"), candidate: verdict("review", true) },
+          { baseline: verdict("block"), candidate: verdict("allow") }
+        ]
+      })
+    ).toBe(3);
   });
 });
