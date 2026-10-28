@@ -5,8 +5,8 @@
  */
 import { afterEach, describe, expect, it } from "vitest";
 import type { PostgresStore } from "../postgres-store.js";
-import { createTestStore, noticePostgresSkipped, openTestStoreTwin, testPostgresUrl, type TestStore } from "../../test-support/test-store.js";
-import { ADVISORY_LOCK_CLASS_AUDIT_EXPORT, ADVISORY_LOCK_CLASS_GIT_SYNC } from "./cluster.js";
+import { createTestStore, noticePostgresSkipped, openTestStoreTwin, testPostgresUrl, testStorePool, type TestStore } from "../../test-support/test-store.js";
+import { ADVISORY_LOCK_CLASS_AUDIT_EXPORT, ADVISORY_LOCK_CLASS_GIT_SYNC, withAdvisoryLock } from "./cluster.js";
 
 const run = testPostgresUrl() ? describe : describe.skip;
 if (!testPostgresUrl()) noticePostgresSkipped("cluster advisory locks");
@@ -75,5 +75,24 @@ run("cluster advisory locks on Postgres", () => {
     expect(Date.now() - startedAt).toBeGreaterThanOrEqual(140);
     release.resolve();
     await holding;
+  }, 60_000);
+
+  it("keeps the connection when the body throws, and drops it when the lock query fails", async () => {
+    primary = await createTestStore({ kind: "postgres" });
+    const pool = testStorePool(primary, { max: 1 });
+    try {
+      const backend = async () => (await pool.query<{ pid: number }>(`SELECT pg_backend_pid() AS pid`)).rows[0]!.pid;
+      const before = await backend();
+      await expect(withAdvisoryLock(pool, ADVISORY_LOCK_CLASS_GIT_SYNC, "k", { waitMs: 0 }, async () => {
+        throw new Error("body failed");
+      })).rejects.toThrow("body failed");
+      // The same session is reused: the body's error said nothing about the connection.
+      expect(await backend()).toBe(before);
+      // A lock query that fails (here: an invalid class) leaves the session's state unknown, so it is dropped.
+      await expect(withAdvisoryLock(pool, Number.NaN, "k", { waitMs: 0 }, async () => "never")).rejects.toThrow();
+      expect(await backend()).not.toBe(before);
+    } finally {
+      await pool.end();
+    }
   }, 60_000);
 });

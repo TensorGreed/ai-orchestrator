@@ -62,7 +62,7 @@ import {
 } from "@ai-orchestrator/shared";
 import { isEmptyDataLabels, labelsForUntrackedSave, mergeDataLabels, parseStoredDataLabels, releaseGateRestrictsToAdmins, type DataLabels } from "@ai-orchestrator/shared";
 import { queuedRunTimeoutMs, STUCK_JOB_MARGIN_MS } from "./queue-timeouts.js";
-import { isForeignKeyViolation, ProjectNotEmptyError, StoreReferenceMissingError, ReleaseGateEnforcedError } from "./store-errors.js";
+import { AuditExportCursorMovedError, isForeignKeyViolation, ProjectNotEmptyError, StoreReferenceMissingError, ReleaseGateEnforcedError } from "./store-errors.js";
 import { clampLimit, LIMIT_MAX } from "./store-limits.js";
 import { executionIdsHeldByQueue } from "./cluster-queue-guard.js";
 import {
@@ -10854,7 +10854,13 @@ export class SqliteStore implements Store {
     firstId?: string | null;
     lastId?: string | null;
     error?: string | null;
+    cursorFrom?: string | null;
   }): Promise<void> {
+    if (input.status === "success" && input.lastId && input.cursorFrom !== undefined) {
+      const current = this.queryOne<{ last_export_id: unknown }>(`SELECT last_export_id FROM audit_export_destinations WHERE id = ?`, [input.destinationId]);
+      const cursor = current?.last_export_id === null || current?.last_export_id === undefined ? null : toString(current.last_export_id);
+      if (current && cursor !== input.cursorFrom) throw new AuditExportCursorMovedError(input.destinationId, input.cursorFrom);
+    }
     this.exec(
       `INSERT INTO audit_export_runs
          (id, destination_id, started_at, completed_at, status, rows_exported, first_id, last_id, error)

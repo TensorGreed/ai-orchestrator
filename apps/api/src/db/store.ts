@@ -1985,6 +1985,12 @@ export interface Store {
     firstId?: string | null;
     lastId?: string | null;
     error?: string | null;
+    /**
+     * Phase 13.1 — compare-and-set (cluster mode): the cursor (`last_export_id`) this batch was read after. When given,
+     * a successful run moves the cursor only if it still holds this value; otherwise nothing is recorded and
+     * AuditExportCursorMovedError is thrown. Omitted: the cursor moves unconditionally, as before.
+     */
+    cursorFrom?: string | null;
   }): Promise<void>;
   listAuditExportRuns(destinationId: string, limit?: number): Promise<Array<{
     id: string; destinationId: string; startedAt: string; completedAt: string | null;

@@ -7,6 +7,7 @@ import { openTestStore } from "./test-support/test-store.js";
 import { testSql } from "./test-support/test-sql.js";
 import { AuditService } from "./services/audit-service.js";
 import { AuditExportBusyError, AuditExportService, type AuditExportLock } from "./services/audit-export-service.js";
+import { AuditExportCursorMovedError } from "./db/store-errors.js";
 
 describe("Phase 8.4 — audit hash chain + export", () => {
   let tempDir: string;
@@ -172,6 +173,26 @@ describe("Phase 8.4 — audit hash chain + export", () => {
       expect(exporter.isRunning()).toBe(true);
       await exporter.stop();
       expect(exporter.isRunning()).toBe(false);
+    });
+
+    it("Phase 13.1: a cursor compare-and-set refuses a run whose batch was read after a cursor that has since moved", async () => {
+      await store.createAuditExportDestination({ id: "axd_cas", name: "file", kind: "file", config: { path: path.join(tempDir, "cas.ndjson") }, intervalSeconds: 0 });
+      const run = (id: string, lastId: string, cursorFrom?: string | null) =>
+        store.recordAuditExportRun({
+          id, destinationId: "axd_cas", startedAt: new Date().toISOString(), completedAt: new Date().toISOString(), status: "success",
+          rowsExported: 1, firstId: lastId, lastId, ...(cursorFrom !== undefined ? { cursorFrom } : {})
+        });
+      await run("r1", "a-1", null);
+      expect((await store.getAuditExportDestination("axd_cas"))!.lastExportId).toBe("a-1");
+      // A second shipper read the same (old) cursor: refused, nothing recorded, the cursor stays.
+      await expect(run("r2", "a-0", null)).rejects.toBeInstanceOf(AuditExportCursorMovedError);
+      expect((await store.getAuditExportDestination("axd_cas"))!.lastExportId).toBe("a-1");
+      expect((await store.listAuditExportRuns("axd_cas")).map((row) => row.id)).toEqual(["r1"]);
+      await run("r3", "a-2", "a-1");
+      expect((await store.getAuditExportDestination("axd_cas"))!.lastExportId).toBe("a-2");
+      // Without cursorFrom the cursor moves as before.
+      await run("r4", "a-0");
+      expect((await store.getAuditExportDestination("axd_cas"))!.lastExportId).toBe("a-0");
     });
 
     it("rejects file paths outside the safeFsRoot", async () => {

@@ -18,6 +18,7 @@ import type { AuditSigningKeyRecord, ExecutionManifestRecord, LogStreamDestinati
 import { type Store } from "../store.js";
 import { parseJsonSafe, toNum, toStr } from "./helpers.js";
 import type { PgContext } from "./context.js";
+import { AuditExportCursorMovedError } from "../store-errors.js";
 import { auditEntryHash, GENESIS_HASH, verifyAuditRows, wellFormedAuditEntry, wellFormedAuditText } from "../audit-chain.js";
 
 export const ADVISORY_LOCK_CLASS_AUDIT = 0x4c324f;
@@ -506,12 +507,18 @@ export async function recordAuditExportRun(ctx: PgContext, input: Parameters<Sto
       ]
     );
     if (input.status === "success" && input.lastId) {
-      await client.query(
+      const compare = input.cursorFrom !== undefined;
+      const moved = await client.query(
         `UPDATE audit_export_destinations
          SET last_export_id = $1, last_export_at = $2, last_status = $3, last_error = NULL, updated_at = $4
-         WHERE id = $5`,
-        [input.lastId, input.completedAt, input.status, new Date().toISOString(), input.destinationId]
+         WHERE id = $5${compare ? " AND last_export_id IS NOT DISTINCT FROM $6" : ""}`,
+        [input.lastId, input.completedAt, input.status, new Date().toISOString(), input.destinationId, ...(compare ? [input.cursorFrom] : [])]
       );
+      if (compare && (moved.rowCount ?? 0) === 0) {
+        const exists = await client.query(`SELECT 1 FROM audit_export_destinations WHERE id = $1`, [input.destinationId]);
+        // The transaction rolls back: no run row, no cursor change.
+        if (exists.rows.length > 0) throw new AuditExportCursorMovedError(input.destinationId, input.cursorFrom ?? null);
+      }
     } else if (input.status === "failure") {
       await client.query(
         `UPDATE audit_export_destinations

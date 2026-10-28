@@ -218,17 +218,24 @@ export async function withAdvisoryLock<T>(
   fn: () => Promise<T>
 ): Promise<AdvisoryLockOutcome<T>> {
   const client: PoolClient = await pool.connect();
+  // Dropped (not reused) only when a lock or unlock query failed, which leaves the session's lock state unknown; an
+  // error from `fn` itself says nothing about the connection.
   let discard = false;
   try {
-    const deadline = Date.now() + options.waitMs;
-    for (;;) {
-      const result = await client.query<{ locked: boolean }>(
-        `SELECT pg_try_advisory_lock($1, hashtext(current_schema() || ':' || $2::text)) AS locked`,
-        [lockClass, key]
-      );
-      if (result.rows[0]?.locked === true) break;
-      if (Date.now() >= deadline) return { acquired: false };
-      await new Promise((resolve) => setTimeout(resolve, Math.min(options.retryMs ?? 200, Math.max(1, deadline - Date.now()))));
+    try {
+      const deadline = Date.now() + options.waitMs;
+      for (;;) {
+        const result = await client.query<{ locked: boolean }>(
+          `SELECT pg_try_advisory_lock($1, hashtext(current_schema() || ':' || $2::text)) AS locked`,
+          [lockClass, key]
+        );
+        if (result.rows[0]?.locked === true) break;
+        if (Date.now() >= deadline) return { acquired: false };
+        await new Promise((resolve) => setTimeout(resolve, Math.min(options.retryMs ?? 200, Math.max(1, deadline - Date.now()))));
+      }
+    } catch (error) {
+      discard = true;
+      throw error;
     }
     try {
       return { acquired: true, value: await fn() };
@@ -239,10 +246,6 @@ export async function withAdvisoryLock<T>(
           discard = true;
         });
     }
-  } catch (error) {
-    // A failed lock query leaves the session's state unknown: drop the connection rather than reuse it.
-    discard = true;
-    throw error;
   } finally {
     client.release(discard);
   }

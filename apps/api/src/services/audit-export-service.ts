@@ -208,7 +208,10 @@ export class AuditExportService {
       rowsExported: outcome.rowsExported,
       firstId: outcome.firstId,
       lastId: outcome.lastId,
-      error: outcome.error
+      error: outcome.error,
+      // Phase 13.1 — cluster mode: the cursor moves only from the value read under the lock. If the lock was lost with
+      // its connection and another instance shipped meanwhile, this record fails loudly instead of moving it back.
+      ...(this.lock ? { cursorFrom: dest.lastExportId } : {})
     });
     return outcome;
   }
