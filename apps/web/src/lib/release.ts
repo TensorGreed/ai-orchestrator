@@ -63,7 +63,6 @@ function pct(value: number): string {
   return `${Math.round(value * 1000) / 10}%`;
 }
 
-/** Short facts about the judged job, for the Publish dialog. */
 /**
  * Which of the repeated cases' repeats a cost or latency figure was taken at, as a short suffix ("" at the deciding
  * repeats, or when nothing was repeated).
@@ -71,10 +70,11 @@ function pct(value: number): string {
 function repeatSelectionSuffix(selection: ReleaseGateRepeatSelection | undefined, metric: "cost" | "latency"): string {
   if (!selection || selection.by === "deciding") return "";
   if (selection.by === "repeat") return selection.partial ? ` (at repeat ${selection.repeat}, some cases at their deciding repeat)` : ` (at repeat ${selection.repeat})`;
-  if (selection.by === "largest_increase") return metric === "cost" ? " (at each case's costliest repeat)" : " (at each case's slowest repeat)";
-  return " (at each case's largest relative rise)";
+  if (selection.by === "largest_increase") return metric === "cost" ? " (at each case's repeat that added the most cost)" : " (at each case's repeat that added the most time)";
+  return " (at each case's repeat that rose the most)";
 }
 
+/** Short facts about the judged job, for the Publish dialog. */
 export function gateStatsLines(stats: ReleaseGateStats | null): string[] {
   if (!stats) return [];
   const lines = [`${stats.pass} of ${stats.cases} cases passed (${pct(stats.passRate)})`];

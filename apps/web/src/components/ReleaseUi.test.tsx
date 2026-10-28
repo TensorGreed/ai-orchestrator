@@ -218,6 +218,14 @@ describe("Release gates tab", () => {
     expect(screen.getByText("No version was published yet.")).toBeInTheDocument();
   });
 
+  it("a builder may roll back while the gate is switched off, even when it is still flagged enforced", async () => {
+    vi.mocked(api.fetchReleaseGate).mockResolvedValue({ gate: gate({ enabled: false, enforced: true, datasetIds: ["set-1"] }) });
+    vi.mocked(api.fetchEvalDatasets).mockResolvedValue({ datasets: [] });
+    vi.mocked(api.fetchReleases).mockResolvedValue({ releases: [release({ version: 2 }), release({ id: "rel_0", version: 1 })], publishedVersion: 2 });
+    render(<ReleaseGatePanel workflows={[{ id: "wf-1", name: "Refunds" } as never]} canEdit isAdmin={false} />);
+    expect(await screen.findByRole("button", { name: "Roll back to v1" })).toBeInTheDocument();
+  });
+
   it("on an enforced gate a builder can only tighten: approvers, self-approval, MCP mode and the gate's sets are locked; operators are never offered as approvers", async () => {
     vi.mocked(api.fetchReleaseGate).mockResolvedValue({ gate: gate({ enabled: true, enforced: true, datasetIds: ["set-1"], requireApproval: true, approvers: { approverRoles: ["admin"], approverUsers: [], allowSelfApproval: false } }) });
     vi.mocked(api.fetchEvalDatasets).mockResolvedValue({ datasets: [{ id: "set-1", name: "Refund cases", workflowId: "wf-1" }, { id: "set-2", name: "More cases", workflowId: "wf-1" }] as never });

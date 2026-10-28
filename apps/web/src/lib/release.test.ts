@@ -67,14 +67,14 @@ describe("release helpers", () => {
     const repeated = { cases: 2, pass: 2, fail: 0, error: 0, skipped: 0, passRate: 1, regressions: 0, costIncreasePct: 12.4, p95LatencyIncreasePct: 8, newGuardBlocks: 0, oldestRecordingDays: null };
     expect(gateStatsLines({ ...repeated, repeatSelection: { cost: { by: "repeat", repeat: 2 }, latency: { by: "largest_increase" } } }).slice(1)).toEqual([
       "cost +12% (at repeat 2)",
-      "p95 latency +8% (at each case's slowest repeat)"
+      "p95 latency +8% (at each case's repeat that added the most time)"
     ]);
     expect(gateStatsLines({ ...repeated, repeatSelection: { cost: { by: "largest_increase" }, latency: { by: "repeat", repeat: 3, partial: true } } }).slice(1)).toEqual([
-      "cost +12% (at each case's costliest repeat)",
+      "cost +12% (at each case's repeat that added the most cost)",
       "p95 latency +8% (at repeat 3, some cases at their deciding repeat)"
     ]);
     expect(gateStatsLines({ ...repeated, repeatSelection: { cost: { by: "largest_relative_increase" }, latency: { by: "deciding" } } }).slice(1)).toEqual([
-      "cost +12% (at each case's largest relative rise)",
+      "cost +12% (at each case's repeat that rose the most)",
       "p95 latency +8%"
     ]);
     expect(releaseVerdictTone("approved")).toBe("ok");
