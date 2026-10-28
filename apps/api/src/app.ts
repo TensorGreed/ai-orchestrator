@@ -12800,8 +12800,20 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         );
       }
     }
-    const startedAt = new Date().toISOString();
+    // Phase 13.1 — a leased claim (cluster mode) records the run's progress as it goes, under its claim: the reaper
+    // reads it to tell a run that has completed a node (never re-run silently) from one that has not.
+    const progressHooks = context.claimToken !== null
+      ? createProgressTrackingHooks({
+          executionId: payload.executionId,
+          workflow,
+          triggerType: payload.triggerType ?? "queue",
+          triggeredBy: payload.triggeredBy,
+          requestInput: payload.input,
+          customData: payload.customData
+        })
+      : undefined;
     const result = await runWorkflowExecution({
+      ...(progressHooks ? { hooks: progressHooks } : {}),
       policyActor: enqueuedBy,
       elicitationsForWorkflow: true,
       workflow,
