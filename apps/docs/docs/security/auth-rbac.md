@@ -291,11 +291,11 @@ redirect URL. Then:
 - **Microsoft Entra ID**:
   `OIDC_ISSUER=https://login.microsoftonline.com/<tenant-id>/v2.0`. Under Token
   configuration add the `email` optional claim (Entra leaves it out otherwise)
-  and, ideally, the `xms_edov` claim (email domain owner verified), and add a
-  groups claim (Entra sends group object ids, so map those ids). A user in more
-  than 200 groups gets no `groups` claim at all (groups overage), so mappings
-  and `OIDC_ALLOWED_GROUPS` do not see their groups; use app roles or assign
-  groups to the application to stay under the limit.
+  and add a groups claim (Entra sends group object ids, so map those ids).
+  L2M does not read `xms_edov`, so it does not count as email verification. A
+  user in more than 200 groups gets no `groups` claim at all (groups overage),
+  so mappings and `OIDC_ALLOWED_GROUPS` do not see their groups; use app roles
+  or assign groups to the application to stay under the limit.
 
   ::: danger Entra email is not verified
   Entra does not send `email_verified`, and its `email` claim is not verified
@@ -303,8 +303,12 @@ redirect URL. Then:
   multi-tenant apps the address is not controlled by your tenant. Setting
   `OIDC_REQUIRE_EMAIL_VERIFIED=false` is safe only for a **single-tenant app
   with no guest users**, where your tenant controls every address. Otherwise an
-  attacker can take over the L2M account with a matching email. Also set
-  `OIDC_ALLOWED_EMAIL_DOMAINS` to your own domains.
+  attacker can take over the L2M account with a matching email.
+  With `OIDC_REQUIRE_EMAIL_VERIFIED=false`, `OIDC_ALLOWED_EMAIL_DOMAINS` does
+  **not** protect against a forged address in your own domain, because the
+  address is trusted as sent. Rely on `OIDC_ALLOWED_GROUPS` and on IdP-side
+  controls (restrict user assignment to the application, block guest sign-in)
+  instead.
   :::
 - **Okta**: `OIDC_ISSUER=https://<org>.okta.com/oauth2/default` (a custom
   authorization server). Add a `groups` claim to the ID token on that
