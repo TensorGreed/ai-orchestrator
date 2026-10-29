@@ -614,15 +614,33 @@ export interface ImportReport {
   };
 }
 
-/** Exported tables that hold rows in the destination (a table missing on an old schema counts as empty). */
+/**
+ * Tables an exact restore (anything but `merge`) also empties although no backup holds them: live sign-in sessions
+ * of the destination must not outlive a restore, so everyone signs in again (Postgres's TRUNCATE ... CASCADE from
+ * `users` would empty them anyway; SQLite's DELETE does not cascade).
+ */
+export const EMPTIED_ON_RESTORE_TABLES = ["sessions"] as const;
+
+/** Whether `error` says the table does not exist (SQLite "no such table", Postgres 42P01), and nothing else. */
+export function isMissingTableError(error: unknown): boolean {
+  if ((error as { code?: unknown } | null)?.code === "42P01") return true;
+  return error instanceof Error && /no such table/i.test(error.message);
+}
+
+/**
+ * Exported tables that hold rows in the destination. A table missing on an old schema counts as empty; any other
+ * error fails the check, so a destination is never taken for empty because it could not be read.
+ */
 async function tablesWithRows(adapter: BackupAdapter): Promise<Array<{ table: string; rows: number }>> {
   const held: Array<{ table: string; rows: number }> = [];
   for (const table of EXPORTED_TABLES) {
     let rows = 0;
     try {
       rows = await adapter.countRows(table);
-    } catch {
-      rows = 0;
+    } catch (error) {
+      if (!isMissingTableError(error)) {
+        throw new Error(`Cannot tell whether the destination is empty: counting ${table} failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
     }
     if (rows > 0) held.push({ table, rows });
   }
@@ -660,15 +678,18 @@ export async function importDump(adapter: BackupAdapter, dump: BackupDump, optio
     const auditWasEmpty = !options.merge || !restoresAudit || (await adapter.countChainedAuditRows()) === 0;
     if (!options.merge) {
       // Every exported table, so nothing of what the destination held survives next to the backup (and rows a
-      // migration seeded are replaced by the backup's). Reverse order, so a later non-cascading SQLite delete doesn't
-      // hit a parent before its children (CASCADE on Postgres makes this moot).
-      for (const table of [...EXPORTED_TABLES].reverse()) {
+      // migration seeded are replaced by the backup's), and the destination's sessions. Reverse order, so a later
+      // non-cascading SQLite delete doesn't hit a parent before its children (CASCADE on Postgres makes this moot).
+      // A table that cannot be emptied fails the restore (rolled back): the log must never call a table emptied, or
+      // the result the backup, while old rows are left in it.
+      for (const table of [...EMPTIED_ON_RESTORE_TABLES, ...[...EXPORTED_TABLES].reverse()]) {
         try {
           await adapter.truncate(table);
         } catch (err) {
-          warn(`  ${table}: truncate skipped (${err instanceof Error ? err.message : String(err)})`);
+          throw new Error(`Failed to empty ${table} before the restore: ${err instanceof Error ? err.message : String(err)}`);
         }
       }
+      for (const table of EMPTIED_ON_RESTORE_TABLES) log(`  ${table}: emptied (never in a backup: everyone signs in again)`);
     }
     let totalInserted = 0;
     let totalTouched = 0;

@@ -159,12 +159,14 @@ sign-in session ids; `db:export` leaves sessions out.
      nothing written):
      - a destination that already holds data (for example one the API started on, which created the admin and the
        default project). `--replace` replaces everything in it with exactly the backup: every exported table is
-       emptied first, including ones the backup does not hold. `--merge` adds the backup's rows instead (best-effort;
+       emptied first, including ones the backup does not hold, and so are the destination's sign-in sessions, so
+       everyone signs in again. `--merge` adds the backup's rows instead (best-effort;
        a conflicting row aborts it);
      - a backup whose secrets or MFA enrolments `SECRET_MASTER_KEY_BASE64` cannot open: it was written with another
        key. Give that key with `--source-master-key-file` (see [Change the master key](#change-the-master-key-planned-rotation)),
        or, when it is lost, pass `--allow-key-mismatch` and recover as in
-       [Restore after losing the master key](#restore-after-losing-the-master-key).
+       [Restore after losing the master key](#restore-after-losing-the-master-key). The check opens only the
+       backup's first `secrets` and `mfa_secrets` rows: a backup with neither is not checked against the key.
 3. **Start the API with the same `SECRET_MASTER_KEY_BASE64`** (and the same build, or a newer one: it migrates the
    schema forward at start). Start one instance first, then the rest.
 4. **Verify** (below).

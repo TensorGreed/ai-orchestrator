@@ -13,6 +13,7 @@
  * Without --source-master-key, the backup's first secrets and mfa_secrets
  * rows must open with SECRET_MASTER_KEY_BASE64, or the import is refused
  * (--allow-key-mismatch restores anyway; neither key is ever printed).
+ * A backup holding neither is not checked against the key.
  *
  * Re-encryption: if the backup was made with a different
  * SECRET_MASTER_KEY_BASE64 than the current one, pass the original key as
@@ -116,6 +117,8 @@ function printUsageAndExit(code: number): never {
       "                             one the backup recorded (both are printed, then a WARNING).",
       "  --allow-key-mismatch       Restore even though SECRET_MASTER_KEY_BASE64 cannot open the backup's",
       "                             secrets (without --source-master-key); they stay unreadable.",
+      "                             The check opens the backup's first secrets and mfa_secrets rows only:",
+      "                             a backup with neither is not checked against the key.",
       "  --help, -h                 Show this message.",
       "",
       "By default the destination must be empty (no exported row); one that holds data is",

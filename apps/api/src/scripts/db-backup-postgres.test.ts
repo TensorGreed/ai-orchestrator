@@ -12,6 +12,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { parsePostgresSettings } from "../config.js";
 import { postgresStoreConfig } from "../db/create-store.js";
 import { PostgresStore, postgresPoolConfig } from "../db/postgres-store.js";
+import { AuthService } from "../services/auth-service.js";
 import { createEmptyTestDatabase, noticePostgresSkipped, testPostgresUrl } from "../test-support/test-store.js";
 import { AuditVerdictMismatch, EXPORTED_TABLES, ImportRefusal, NOT_EXPORTED_TABLES, exportDump, importDump, openBackupAdapter, type BackupDump } from "./db-shared.js";
 
@@ -86,6 +87,27 @@ describe.skipIf(!url)("db:export / db:import round trip [postgres]", () => {
       expect((await restored.getGuardVaultByToken("tok_1"))?.value_sealed).toBe("v1.a.b.c");
     } finally {
       await restored.close();
+    }
+  }, 120_000);
+
+  it("--replace empties the destination's sessions, so everyone signs in again", async () => {
+    const dstUrl = await freshDatabase();
+    const dest = await openStore(dstUrl);
+    const auth = new AuthService(dest, 24);
+    await auth.register({ email: "ana@example.com", password: "Ana-Pass-123!", role: "admin" });
+    await auth.login("ana@example.com", "Ana-Pass-123!");
+    await dest.close();
+    process.env.DB_TYPE = "postgres";
+    process.env.DB_POSTGRESDB_URL = dstUrl;
+    const importer = await openBackupAdapter();
+    try {
+      expect(await importer.countRows("sessions")).toBe(1);
+      const lines: string[] = [];
+      await importDump(importer, { format: "ai-orchestrator-backup", formatVersion: 1, schemaVersion: 1, exportedAt: "", dbType: "postgres", tables: { workflows: [] } }, { replace: true, log: (line) => lines.push(line) });
+      expect(lines).toContain("  sessions: emptied (never in a backup: everyone signs in again)");
+      expect(await importer.countRows("sessions")).toBe(0);
+    } finally {
+      await importer.close();
     }
   }, 120_000);
 

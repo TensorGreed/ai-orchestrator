@@ -20,6 +20,7 @@ import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { SqliteStore } from "../db/database.js";
+import { AuthService } from "../services/auth-service.js";
 import { SecretService } from "../services/secret-service.js";
 import {
   ENCRYPTED_COLUMNS,
@@ -30,7 +31,9 @@ import {
   SEALED_COLUMNS,
   exportDump,
   importDump,
+  isMissingTableError,
   openBackupAdapter,
+  type BackupAdapter,
   type BackupDump
 } from "./db-shared.js";
 import { readKeyFile, reencryptRows, resealValue, tablesTheKeyCannotOpen } from "./db-reencrypt.js";
@@ -180,6 +183,93 @@ describe("db:export table coverage", () => {
       expect((raw.prepare(`SELECT id FROM workflows`).all() as Array<{ id: string }>).map((row) => row.id)).toEqual(["wf-new"]);
     } finally {
       raw.close();
+    }
+  });
+
+  it("--replace also signs everyone out: the destination's sessions are emptied, never restored", async () => {
+    const dest = path.join(dir, "dest.db");
+    const store = await SqliteStore.create(dest);
+    const auth = new AuthService(store, 24);
+    await auth.register({ email: "ana@example.com", password: "Ana-Pass-123!", role: "admin" });
+    const { sessionId } = await auth.login("ana@example.com", "Ana-Pass-123!");
+    expect(await auth.getSessionUser(sessionId)).not.toBeNull();
+    await store.close();
+    const lines: string[] = [];
+    await importInto(dest, backupOf({ workflows: [] }), { replace: true, log: (line) => lines.push(line) });
+    expect(lines).toContain("  sessions: emptied (never in a backup: everyone signs in again)");
+    const raw = new Database(dest, { readonly: true });
+    try {
+      expect(raw.prepare(`SELECT COUNT(*) AS n FROM sessions`).get()).toEqual({ n: 0 });
+    } finally {
+      raw.close();
+    }
+  });
+
+  /** `adapter` with some methods replaced (the rest bound to it). */
+  function withFaults(adapter: BackupAdapter, faults: Partial<BackupAdapter>): BackupAdapter {
+    return new Proxy(adapter, {
+      get(target, property, receiver) {
+        if (property in faults) return faults[property as keyof BackupAdapter];
+        const value = Reflect.get(target, property, receiver);
+        return typeof value === "function" ? value.bind(target) : value;
+      }
+    });
+  }
+
+  it("a table that cannot be emptied fails the restore and rolls it back, never logged as emptied", async () => {
+    const dest = path.join(dir, "dest.db");
+    const store = await SqliteStore.create(dest);
+    await store.createMcpServer({ id: "mcp_kept", name: "Kept", adapterId: "mock-mcp" });
+    await store.close();
+    process.env.DB_SQLITE_PATH = dest;
+    const adapter = await openBackupAdapter();
+    const lines: string[] = [];
+    try {
+      const faulty = withFaults(adapter, {
+        truncate: async (table: string) => {
+          if (table === "mcp_servers") throw new Error("disk I/O error");
+          return adapter.truncate(table);
+        }
+      });
+      await expect(importDump(faulty, backupOf({ workflows: [] }), { replace: true, log: (line) => lines.push(line) })).rejects.toThrow(
+        /^Failed to empty mcp_servers before the restore: disk I\/O error$/
+      );
+    } finally {
+      await adapter.close();
+    }
+    expect(lines.some((line) => line.includes("mcp_servers"))).toBe(false);
+    const reopened = await SqliteStore.create(dest);
+    try {
+      expect((await reopened.getMcpServer("mcp_kept"))?.name).toBe("Kept");
+    } finally {
+      await reopened.close();
+    }
+  });
+
+  it("counts only a missing table as empty when deciding whether the destination holds data", async () => {
+    expect(isMissingTableError(new Error("no such table: mcp_servers"))).toBe(true);
+    expect(isMissingTableError(Object.assign(new Error('relation "mcp_servers" does not exist'), { code: "42P01" }))).toBe(true);
+    expect(isMissingTableError(new Error("database is locked"))).toBe(false);
+    expect(isMissingTableError(Object.assign(new Error("permission denied"), { code: "42501" }))).toBe(false);
+
+    const dest = path.join(dir, "dest.db");
+    process.env.DB_SQLITE_PATH = dest;
+    const adapter = await openBackupAdapter();
+    try {
+      const count = (failure: Error) =>
+        withFaults(adapter, {
+          countRows: async (table: string) => {
+            if (table === "mcp_servers") throw failure;
+            return adapter.countRows(table);
+          }
+        });
+      await expect(importDump(count(new Error("database is locked")), backupOf({ workflows: [] }))).rejects.toThrow(
+        /^Cannot tell whether the destination is empty: counting mcp_servers failed: database is locked$/
+      );
+      const report = await importDump(count(new Error("no such table: mcp_servers")), backupOf({ workflows: [] }));
+      expect(report.tables.find((entry) => entry.table === "workflows")?.action).toBe("restored");
+    } finally {
+      await adapter.close();
     }
   });
 
