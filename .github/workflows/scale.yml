@@ -1,0 +1,80 @@
+name: Scale smoke
+
+# The docker compose scale harness (docker-compose.scale.yml, ops/loadtest): a short smoke load and the chaos run at
+# small scale. Not on every push: run it by hand, or add the `scale` label to a pull request.
+on:
+  workflow_dispatch:
+    inputs:
+      workers:
+        description: Worker replicas
+        default: "2"
+      w1_rate:
+        description: W1 (webhook) runs per second
+        default: "5"
+      w2_rate:
+        description: W2 (agent through the queue) runs per second
+        default: "2"
+      duration:
+        description: Smoke load duration (k6 syntax)
+        default: "30s"
+  pull_request:
+    types: [labeled]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: scale-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  scale:
+    name: Scale smoke and chaos
+    if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'scale'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      WORKERS: ${{ inputs.workers || '2' }}
+      W1_RATE: ${{ inputs.w1_rate || '5' }}
+      W2_RATE: ${{ inputs.w2_rate || '2' }}
+      SMOKE_DURATION: ${{ inputs.duration || '30s' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Results folder
+        run: echo "RESULTS_DIR=$RUNNER_TEMP/scale-results" >> "$GITHUB_ENV"
+
+      - name: Start the stack
+        run: ops/loadtest/run.sh up
+
+      - name: W1 smoke (webhooks on the API replicas)
+        run: ops/loadtest/run.sh load w1 "$W1_RATE" "$SMOKE_DURATION"
+
+      - name: W2 smoke (agents through the queue)
+        run: ops/loadtest/run.sh load w2 "$W2_RATE" "$SMOKE_DURATION"
+
+      - name: Chaos (kill a worker, restart an API replica, pause the leader)
+        env:
+          CHAOS_W1_RATE: "3"
+          CHAOS_W2_RATE: "2"
+        run: ops/loadtest/chaos.sh
+
+      - name: Logs on failure
+        if: failure()
+        run: docker compose -p l2m-scale -f docker-compose.scale.yml logs --no-color --tail 300
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scale-results
+          path: ${{ runner.temp }}/scale-results
+          if-no-files-found: ignore
+          include-hidden-files: false
+
+      - name: Tear down
+        if: always()
+        env:
+          REMOVE_IMAGE: "1"
+        run: ops/loadtest/run.sh down

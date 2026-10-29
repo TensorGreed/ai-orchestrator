@@ -8,6 +8,8 @@ Several API instances can share one Postgres database ([Running more than one in
 
 **Cluster mode** means `DB_TYPE=postgres` and `HA_ENABLED=true` on every instance. The signalling below is active only in cluster mode; the instance registry runs on every Postgres instance.
 
+To plan a fleet (API replicas and workers, sizing, the connection budget) and to load-test it, see [Scaling](./scaling.md).
+
 ## What cluster mode adds
 
 | When | What happens | Backstop if a message is lost |

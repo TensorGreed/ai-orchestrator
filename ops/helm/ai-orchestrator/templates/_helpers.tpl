@@ -55,3 +55,47 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- define "ai-orchestrator.configMapName" -}}
 {{- printf "%s-config" (include "ai-orchestrator.fullname" .) -}}
 {{- end -}}
+
+{{/*
+The drain on SIGTERM in seconds, from config.SHUTDOWN_DRAIN_MS (milliseconds), or 0 when it is not set.
+*/}}
+{{- define "ai-orchestrator.drainSeconds" -}}
+{{- $drain := .Values.config.SHUTDOWN_DRAIN_MS | default "" | toString -}}
+{{- if $drain -}}
+{{- div (add (int $drain) 999) 1000 -}}
+{{- else -}}
+0
+{{- end -}}
+{{- end -}}
+
+{{/*
+"true" when the chart runs on Postgres (config.DB_TYPE postgres or postgresql, as the server reads it), else empty.
+*/}}
+{{- define "ai-orchestrator.isPostgres" -}}
+{{- if has (lower (.Values.config.DB_TYPE | default "" | toString)) (list "postgres" "postgresql") -}}true{{- end -}}
+{{- end -}}
+
+{{/*
+terminationGracePeriodSeconds for a pod: the explicit value (checked against the drain), else the drain plus 10 s,
+else the minimum (empty = leave the Kubernetes default). When config.SHUTDOWN_DRAIN_MS is not set, the server still
+drains 20 s in cluster mode, so that is the drain assumed for workers and for Postgres with HA on.
+Call with (dict "root" $ "explicit" <value> "minimum" <n> "worker" <bool>).
+*/}}
+{{- define "ai-orchestrator.terminationGracePeriod" -}}
+{{- $drain := int (include "ai-orchestrator.drainSeconds" .root) -}}
+{{- $unset := eq (.root.Values.config.SHUTDOWN_DRAIN_MS | default "" | toString) "" -}}
+{{- if and $unset (or .worker (and .root.Values.api.haEnabled (include "ai-orchestrator.isPostgres" .root))) -}}
+{{- $drain = 20 -}}
+{{- end -}}
+{{- $explicit := .explicit | default "" | toString -}}
+{{- if $explicit -}}
+{{- if and (gt $drain 0) (lt (int $explicit) (add $drain 5)) -}}
+{{- fail (printf "terminationGracePeriodSeconds (%s) must be at least the shutdown drain (config.SHUTDOWN_DRAIN_MS, 20 s in cluster mode) plus 5 s (%d)" $explicit (add $drain 5)) -}}
+{{- end -}}
+{{- int $explicit -}}
+{{- else if gt $drain 0 -}}
+{{- max (add $drain 10) (int (.minimum | default 0)) -}}
+{{- else if .minimum -}}
+{{- int .minimum -}}
+{{- end -}}
+{{- end -}}

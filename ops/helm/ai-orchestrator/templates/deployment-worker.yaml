@@ -1,0 +1,100 @@
+{{- if .Values.worker.enabled -}}
+{{- if not .Values.api.haEnabled -}}
+{{- fail "worker.enabled needs cluster mode: set api.haEnabled=true and run on Postgres (config.DB_TYPE=postgres)" -}}
+{{- end -}}
+{{- if not (include "ai-orchestrator.isPostgres" .) -}}
+{{- fail "worker.enabled needs Postgres: set config.DB_TYPE=postgres and secrets.databaseUrl (or secrets.existingSecret with DATABASE_URL); on SQLite each worker would run its own private database" -}}
+{{- end -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "ai-orchestrator.fullname" . }}-worker
+  labels:
+    {{- include "ai-orchestrator.labels" . | nindent 4 }}
+    app.kubernetes.io/component: worker
+spec:
+  replicas: {{ .Values.worker.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "ai-orchestrator.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: worker
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        {{- include "ai-orchestrator.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: worker
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "4000"
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: {{ include "ai-orchestrator.serviceAccountName" . }}
+      # Running jobs get the drain (SHUTDOWN_DRAIN_MS) to finish, then are handed back before the pod is killed.
+      terminationGracePeriodSeconds: {{ include "ai-orchestrator.terminationGracePeriod" (dict "root" $ "explicit" .Values.worker.terminationGracePeriodSeconds "minimum" 30 "worker" true) }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: worker
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 4000
+              protocol: TCP
+          env:
+            - name: WORKER_MODE
+              value: "worker"
+            - name: HA_ENABLED
+              value: "true"
+            - name: HA_INSTANCE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: DB_POSTGRESDB_POOL_SIZE
+              value: {{ .Values.worker.dbPoolSize | quote }}
+            {{- with .Values.worker.concurrency }}
+            - name: QUEUE_CONCURRENCY
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.worker.pools }}
+            - name: QUEUE_POOLS
+              value: {{ . | quote }}
+            {{- end }}
+            {{- range $key, $value := .Values.worker.env }}
+            - name: {{ $key }}
+              value: {{ $value | quote }}
+            {{- end }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "ai-orchestrator.configMapName" . }}
+            - secretRef:
+                name: {{ include "ai-orchestrator.secretName" . }}
+          livenessProbe:
+            {{- toYaml .Values.worker.livenessProbe | nindent 12 }}
+          readinessProbe:
+            {{- toYaml .Values.worker.readinessProbe | nindent 12 }}
+          resources:
+            {{- toYaml .Values.worker.resources | nindent 12 }}
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: data
+              mountPath: /app/apps/api/data
+      volumes:
+        # Runs, queue and secrets are in Postgres. Leader work that uses the data directory (for example the git-sync working tree) lands on this emptyDir and is cloned again after a restart.
+        - name: data
+          emptyDir: {}
+{{- end -}}

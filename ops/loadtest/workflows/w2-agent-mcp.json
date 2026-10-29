@@ -1,0 +1,95 @@
+{
+  "schemaVersion": "1.0.0",
+  "workflowVersion": 1,
+  "workflow": {
+    "id": "wf-load-w2-agent",
+    "name": "Load W2: agent with three MCP tool calls",
+    "description": "Scale harness workload W2: an agent that makes three MCP tool calls (four model calls) against the mock model and mock MCP server.",
+    "schemaVersion": "1.0.0",
+    "workflowVersion": 1,
+    "nodes": [
+      {
+        "id": "trigger_1",
+        "type": "manual_trigger",
+        "name": "Trigger",
+        "position": { "x": 80, "y": 200 },
+        "config": {}
+      },
+      {
+        "id": "agent_1",
+        "type": "agent_orchestrator",
+        "name": "Agent",
+        "position": { "x": 380, "y": 200 },
+        "config": {
+          "systemPromptTemplate": "You are a support agent. Use the tools to answer.",
+          "userPromptTemplate": "{{user_prompt}}",
+          "maxIterations": 6,
+          "toolCallingEnabled": true
+        }
+      },
+      {
+        "id": "llm_1",
+        "type": "llm_call",
+        "name": "Chat Model (mock)",
+        "position": { "x": 380, "y": 400 },
+        "config": {
+          "provider": {
+            "providerId": "openai_compatible",
+            "model": "mock",
+            "baseUrl": "http://mock-llm:8080/v1"
+          },
+          "promptKey": "prompt",
+          "systemPromptKey": "system_prompt"
+        }
+      },
+      {
+        "id": "tool_order",
+        "type": "mcp_tool",
+        "name": "MCP: lookup_order",
+        "position": { "x": 640, "y": 360 },
+        "config": {
+          "serverId": "http_mcp",
+          "toolName": "lookup_order",
+          "connection": { "endpoint": "http://mock-mcp:8081/mcp", "transport": "http_streamable", "timeoutMs": 30000, "authType": "none" }
+        }
+      },
+      {
+        "id": "tool_weather",
+        "type": "mcp_tool",
+        "name": "MCP: get_weather",
+        "position": { "x": 640, "y": 460 },
+        "config": {
+          "serverId": "http_mcp",
+          "toolName": "get_weather",
+          "connection": { "endpoint": "http://mock-mcp:8081/mcp", "transport": "http_streamable", "timeoutMs": 30000, "authType": "none" }
+        }
+      },
+      {
+        "id": "tool_add",
+        "type": "mcp_tool",
+        "name": "MCP: add_numbers",
+        "position": { "x": 640, "y": 560 },
+        "config": {
+          "serverId": "http_mcp",
+          "toolName": "add_numbers",
+          "connection": { "endpoint": "http://mock-mcp:8081/mcp", "transport": "http_streamable", "timeoutMs": 30000, "authType": "none" }
+        }
+      },
+      {
+        "id": "output_1",
+        "type": "output",
+        "name": "Output",
+        "position": { "x": 680, "y": 200 },
+        "config": { "responseTemplate": "{{answer}}", "outputKey": "result" }
+      }
+    ],
+    "edges": [
+      { "id": "e1", "source": "trigger_1", "target": "agent_1" },
+      { "id": "e2", "source": "agent_1", "target": "output_1" },
+      { "id": "a_model", "source": "agent_1", "sourceHandle": "chat_model", "target": "llm_1" },
+      { "id": "a_tool_order", "source": "agent_1", "sourceHandle": "tool", "target": "tool_order" },
+      { "id": "a_tool_weather", "source": "agent_1", "sourceHandle": "tool", "target": "tool_weather" },
+      { "id": "a_tool_add", "source": "agent_1", "sourceHandle": "tool", "target": "tool_add" }
+    ]
+  }
+}

@@ -1,0 +1,152 @@
+## Scale harness: two API replicas, N workers, Postgres in cluster mode, a round-robin balancer and mock model and MCP
+## servers. For load and chaos tests only (test credentials, Postgres with fsync off). Drive it with
+## ops/loadtest/run.sh and ops/loadtest/chaos.sh; see apps/docs/docs/operations/scaling.md.
+##
+##   docker compose -f docker-compose.scale.yml build
+##   docker compose -f docker-compose.scale.yml up -d --scale worker=2
+##   curl http://127.0.0.1:4229/ready
+##   docker compose -f docker-compose.scale.yml down -v
+##
+## Only the balancer is published, on 127.0.0.1:4229. Everything else stays inside the compose network.
+
+name: l2m-scale
+
+x-app-env: &app-env
+  API_HOST: 0.0.0.0
+  API_PORT: "4000"
+  WEB_ORIGIN: http://127.0.0.1:4229
+  DB_TYPE: postgres
+  DB_POSTGRESDB_URL: postgres://l2m:l2m-scale@postgres:5432/l2m_scale
+  # The same master key on every replica; ops/loadtest/run.sh creates a random one for the stack.
+  SECRET_MASTER_KEY_BASE64: ${SCALE_MASTER_KEY_BASE64:?run ops/loadtest/run.sh (it creates a random key), or set SCALE_MASTER_KEY_BASE64}
+  BOOTSTRAP_ADMIN_EMAIL: ${SCALE_ADMIN_EMAIL:-admin@example.com}
+  BOOTSTRAP_ADMIN_PASSWORD: ${SCALE_ADMIN_PASSWORD:-scale-harness-password}
+  SEED_SAMPLE_WORKFLOWS: "false"
+  # Cluster mode: Postgres + HA on every instance.
+  HA_ENABLED: "true"
+  METRICS_ENABLED: "true"
+  # One load generator sits behind one balancer address; per-replica limits would only measure the limiter.
+  RATE_LIMIT_ENABLED: "false"
+  CODE_SANDBOX_MODE: in_process
+  WORKFLOW_EXECUTION_TIMEOUT_MS: "120000"
+  LOG_LEVEL: ${SCALE_LOG_LEVEL:-warn}
+  QUEUE_CONCURRENCY: ${QUEUE_CONCURRENCY:-10}
+  QUEUE_HEARTBEAT_MS: ${QUEUE_HEARTBEAT_MS:-10000}
+  QUEUE_LEASE_MS: ${QUEUE_LEASE_MS:-45000}
+  QUEUE_REAPER_INTERVAL_MS: ${QUEUE_REAPER_INTERVAL_MS:-15000}
+
+x-app: &app
+  image: l2m-scale-api:local
+  build:
+    context: .
+    dockerfile: apps/api/Dockerfile
+  restart: "no"
+  depends_on:
+    postgres:
+      condition: service_healthy
+    mock-llm:
+      condition: service_healthy
+    mock-mcp:
+      condition: service_healthy
+  # SHUTDOWN_DRAIN_MS defaults to 20 s in cluster mode; give it 5 s more to hand jobs back and close.
+  stop_grace_period: 30s
+  healthcheck:
+    test: ["CMD", "wget", "-qO-", "http://127.0.0.1:4000/ready"]
+    interval: 3s
+    timeout: 3s
+    retries: 40
+    start_period: 10s
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: l2m_scale
+      POSTGRES_USER: l2m
+      POSTGRES_PASSWORD: l2m-scale
+    command:
+      - postgres
+      - -c
+      - max_connections=200
+      - -c
+      - fsync=off
+      - -c
+      - full_page_writes=off
+      - -c
+      - synchronous_commit=off
+      - -c
+      - track_io_timing=on
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U l2m -d l2m_scale"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  mock-llm:
+    image: node:24-alpine
+    command: ["node", "/mocks/mock-llm.mjs"]
+    environment:
+      PORT: "8080"
+      LLM_LATENCY_MS: ${LLM_LATENCY_MS:-800}
+      LLM_JITTER_MS: ${LLM_JITTER_MS:-200}
+      LLM_TOKENS_PER_SEC: ${LLM_TOKENS_PER_SEC:-50}
+      LLM_TOOL_CALLS: ${LLM_TOOL_CALLS:-3}
+    volumes:
+      - ./ops/loadtest/mocks:/mocks:ro
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/health"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+  mock-mcp:
+    image: node:24-alpine
+    command: ["node", "/mocks/mock-mcp.mjs"]
+    environment:
+      PORT: "8081"
+      MCP_LATENCY_MS: ${MCP_LATENCY_MS:-50}
+      MCP_JITTER_MS: ${MCP_JITTER_MS:-20}
+    volumes:
+      - ./ops/loadtest/mocks:/mocks:ro
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8081/health"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+  # API replicas: HTTP only. They accept /enqueue and webhooks; they never claim queue jobs or lead.
+  api:
+    <<: *app
+    environment:
+      <<: *app-env
+      WORKER_MODE: api
+    deploy:
+      replicas: 2
+
+  # Workers: claim and run queue jobs, one of them leads (schedules, reaper). Scale with --scale worker=N.
+  worker:
+    <<: *app
+    environment:
+      <<: *app-env
+      WORKER_MODE: worker
+      # Connection budget: instances x (pool + 2) <= max_connections; workers need a small pool.
+      DB_POSTGRESDB_POOL_SIZE: ${WORKER_POOL_SIZE:-5}
+    deploy:
+      replicas: 2
+
+  nginx:
+    image: nginx:1.27-alpine
+    depends_on:
+      api:
+        condition: service_healthy
+    volumes:
+      - ./ops/loadtest/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    ports:
+      - "127.0.0.1:4229:80"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/nginx-health"]
+      interval: 2s
+      timeout: 2s
+      retries: 15

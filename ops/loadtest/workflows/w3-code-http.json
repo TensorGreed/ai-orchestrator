@@ -1,0 +1,55 @@
+{
+  "schemaVersion": "1.0.0",
+  "workflowVersion": 1,
+  "workflow": {
+    "id": "wf-load-w3-code-http",
+    "name": "Load W3: code node and HTTP node",
+    "description": "Scale harness workload W3: an in-process JavaScript code node, then an HTTP request to the mock server (50 ms).",
+    "schemaVersion": "1.0.0",
+    "workflowVersion": 1,
+    "nodes": [
+      {
+        "id": "trigger_1",
+        "type": "manual_trigger",
+        "name": "Trigger",
+        "position": { "x": 80, "y": 200 },
+        "config": {}
+      },
+      {
+        "id": "code_1",
+        "type": "code_node",
+        "name": "Code",
+        "position": { "x": 320, "y": 200 },
+        "config": {
+          "timeout": 2000,
+          "code": "let acc = 0;\nfor (let i = 0; i < 20000; i += 1) acc = (acc * 31 + i) % 1000003;\nreturn { checksum: acc, tag: String(input.seq ?? 'none') };"
+        }
+      },
+      {
+        "id": "http_1",
+        "type": "http_request",
+        "name": "HTTP",
+        "position": { "x": 560, "y": 200 },
+        "config": {
+          "method": "GET",
+          "urlTemplate": "http://mock-llm:8080/echo?delay_ms=50&tag={{results.code_1.tag}}",
+          "headersTemplate": "{\"accept\":\"application/json\"}",
+          "responseType": "json",
+          "timeoutMs": 10000
+        }
+      },
+      {
+        "id": "output_1",
+        "type": "output",
+        "name": "Output",
+        "position": { "x": 800, "y": 200 },
+        "config": { "responseTemplate": "{{results.code_1.checksum}}", "outputKey": "result" }
+      }
+    ],
+    "edges": [
+      { "id": "e1", "source": "trigger_1", "target": "code_1" },
+      { "id": "e2", "source": "code_1", "target": "http_1" },
+      { "id": "e3", "source": "http_1", "target": "output_1" }
+    ]
+  }
+}
