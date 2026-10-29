@@ -73,17 +73,26 @@ export function summarize(reports, options) {
       : `fails on ${options.onlyFixed ? "fixable " : ""}${options.failOn.toUpperCase()} or above`;
   const lines = [`### Vulnerability gate: ${rule}`, "", "Counts are all findings (fixable in brackets).", "", "| Report | Critical | High | Medium | Low | Blocking |", "|---|---|---|---|---|---|"];
   const blocking = [];
+  // Every fixable HIGH or CRITICAL finding is listed, blocking or not, so a run summary shows what to update next.
+  const listed = [];
   for (const { name, findings } of reports) {
     const counts = countBySeverity(findings);
     const blocked = blockingFindings(findings, options);
     blocking.push(...blocked.map((f) => ({ ...f, report: name })));
+    for (const f of findings) {
+      if (blocked.includes(f) || (f.fixState === "fixed" && severityRank(f.severity) >= severityRank("high"))) {
+        listed.push({ ...f, report: name, blocks: blocked.includes(f) });
+      }
+    }
     const cell = (severity) => `${counts[severity].all} (${counts[severity].fixed})`;
     lines.push(`| ${name} | ${cell("critical")} | ${cell("high")} | ${cell("medium")} | ${cell("low")} | ${blocked.length} |`);
   }
-  if (blocking.length > 0) {
-    lines.push("", "| Report | Vulnerability | Severity | Package | Fixed in |", "|---|---|---|---|---|");
-    for (const f of blocking) {
-      lines.push(`| ${f.report} | ${f.id} | ${f.severity} | ${f.packageName} ${f.packageVersion} | ${f.fixVersions.join(", ") || "-"} |`);
+  if (listed.length > 0) {
+    lines.push("", "| Report | Vulnerability | Severity | Package | Fixed in | Blocks |", "|---|---|---|---|---|---|");
+    for (const f of listed) {
+      lines.push(
+        `| ${f.report} | ${f.id} | ${f.severity} | ${f.packageName} ${f.packageVersion} | ${f.fixVersions.join(", ") || "-"} | ${f.blocks ? "yes" : "no"} |`
+      );
     }
   }
   lines.push("", blocking.length > 0 ? `**Blocked:** ${blocking.length} finding(s).` : "**Passed.**", "");
