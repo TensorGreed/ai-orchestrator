@@ -30,7 +30,7 @@ COPY packages/shared packages/shared
 RUN pnpm --filter @ai-orchestrator/web build
 
 # ---------- runtime stage ----------
-FROM nginx:1.27-alpine AS runtime
+FROM nginx:1.30-alpine AS runtime
 RUN apk add --no-cache wget
 COPY apps/web/nginx.conf /etc/nginx/conf.d/default.conf
 COPY --from=build /app/apps/web/dist /usr/share/nginx/html
