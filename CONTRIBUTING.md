@@ -17,7 +17,7 @@ We're explicitly **not** chasing n8n connector parity for its own sake — commu
 
 ## Setting up
 
-Prerequisites: **Node 20+**, **pnpm 10+**.
+Prerequisites: **Node 24+**, **pnpm 10+**.
 
 ```bash
 git clone https://github.com/TensorGreed/ai-orchestrator.git

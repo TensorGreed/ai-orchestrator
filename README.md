@@ -91,7 +91,7 @@ For the GA roadmap, see the [public project board](https://github.com/orgs/Tenso
 
 ### Prerequisites
 
-- Node.js 20+
+- Node.js 24+
 - pnpm 10+
 - Optional for local LLM: Ollama running at `http://localhost:11434/v1`
 
