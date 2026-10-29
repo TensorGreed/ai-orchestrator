@@ -93,6 +93,7 @@ import type {
   SubjectTextRow,
   WorkflowReleaseRecord
 } from "./database.js";
+import type { LostJobOutcome } from "./queue-leases.js";
 
 /** The decision `decideApprovalRequest` records. */
 export type ApprovalDecisionInput = Parameters<Store["decideApprovalRequest"]>[0];
@@ -100,6 +101,27 @@ export type ApprovalDecisionInput = Parameters<Store["decideApprovalRequest"]>[0
 export type ReleaseApprovalDecisionInput = Parameters<Store["decideReleaseApprovalRequest"]>[0];
 /** The decision `decideGateCaseRequest` records. */
 export type GateCaseDecisionRecordInput = Parameters<Store["decideGateCaseRequest"]>[0];
+
+/** Phase 13.1 — the claim a queued run's writes are fenced on. */
+export interface QueueClaimFence {
+  queueItemId: string;
+  claimToken: string;
+}
+
+/** Phase 13.1 — a leased claim of a queue item. */
+export interface QueueClaimedItem {
+  id: string;
+  workflowId: string;
+  workflowName: string | null;
+  payload: Record<string, unknown>;
+  attempts: number;
+  maxAttempts: number;
+  scheduledAt: string;
+  pool: string;
+  claimToken: string;
+  /** How long it waited between becoming due and this claim (database time), in ms. */
+  waitMs: number;
+}
 
 /** Golden-run limits a save is checked against inside its transaction (the REPLAY_RECORDINGS_* settings). */
 export interface ReplayRecordingLimits {
@@ -444,7 +466,10 @@ export interface Store {
   /** One version of a profile; the latest when `version` is omitted. */
   getGuardProfileVersion(profileId: string, version?: number): Promise<GuardProfileVersionRecord | null>;
   listGuardProfileVersions(profileId: string): Promise<GuardProfileVersionRecord[]>;
-  /** Creates a profile with its first version. */
+  /**
+   * Creates a profile with its first version. With `ifAbsent` (seeding a built-in profile, which several instances may
+   * do at once) a profile that already exists is returned unchanged instead of failing on its id.
+   */
   insertGuardProfile(input: {
     id: string;
     name: string;
@@ -454,8 +479,12 @@ export interface Store {
     hash: string;
     note?: string | null;
     createdBy: string | null;
-  }): Promise<GuardProfileRecord>;
-  /** Appends an immutable version and makes it the latest (one transaction: the next number is read and taken together). */
+  }, options?: { ifAbsent?: boolean }): Promise<GuardProfileRecord>;
+  /**
+   * Appends an immutable version and makes it the latest (one transaction: the next number is read and taken
+   * together). With `unlessLatestHash` the latest version is returned unchanged when it already has this hash (two
+   * instances updating a built-in profile at once add one version).
+   */
   addGuardProfileVersion(input: {
     profileId: string;
     name: string;
@@ -464,7 +493,7 @@ export interface Store {
     hash: string;
     note?: string | null;
     createdBy: string | null;
-  }): Promise<GuardProfileVersionRecord>;
+  }, options?: { unlessLatestHash?: boolean }): Promise<GuardProfileVersionRecord>;
   deleteGuardProfile(id: string): Promise<boolean>;
   getGuardBinding(scope: GuardBindingScope, scopeId: string): Promise<GuardBindingRecord | null>;
   listGuardBindingsForProfile(profileId: string): Promise<GuardBindingRecord[]>;
@@ -1394,6 +1423,12 @@ export interface Store {
      * `WHERE execution_history.status <> 'canceled' OR EXCLUDED.status = 'canceled'` on `ON CONFLICT (id) DO UPDATE`.
      */
     unlessCanceled?: boolean;
+    /**
+     * Phase 13.1 — a queued run in cluster mode: written only while the queue item is still `running` under this
+     * claim token (the item's row is key-share-locked for the write, so the reaper cannot take it back in between). A
+     * zombie worker whose claim was taken back writes nothing.
+     */
+    fence?: QueueClaimFence;
   }): Promise<boolean>;
   listExecutionHistory(input: {
     page?: number;
@@ -1479,7 +1514,13 @@ export interface Store {
     triggeredBy?: string;
     startedAt: string;
     state: unknown;
-  }): Promise<void>;
+  }, options?: {
+    /**
+     * Phase 13.1 — a queued run in cluster mode: written only while its claim still holds the queue item (false when
+     * it does not), so a zombie worker cannot leave a pause behind for a run another worker owns now.
+     */
+    fence?: QueueClaimFence;
+  }): Promise<boolean>;
   getWorkflowExecutionState(id: string): Promise<{
     id: string;
     workflowId: string;
@@ -1523,7 +1564,12 @@ export interface Store {
 
   // ---- Approval requests
 
-  insertApprovalRequest(input: ApprovalRequestInsert): Promise<ApprovalRequestRecord>;
+  /**
+   * With `fence` (Phase 13.1, a queued run in cluster mode) the request is inserted only while that claim still holds
+   * its queue item; otherwise nothing is inserted and it throws QueueClaimLostError. With `supersedeReason`, the run's
+   * pending requests are canceled with that reason first, in the same transaction (and under the same fence).
+   */
+  insertApprovalRequest(input: ApprovalRequestInsert, options?: { fence?: QueueClaimFence; supersedeReason?: string }): Promise<ApprovalRequestRecord>;
   getApprovalRequest(id: string): Promise<ApprovalRequestRecord | null>;
   /** The newest pending request of a paused run. */
   getPendingApprovalRequestForExecution(executionId: string): Promise<ApprovalRequestRecord | null>;
@@ -1555,6 +1601,12 @@ export interface Store {
 
   /** Phase 11.2 — whether a queue item with this id, or one that extends it (`<id>:…`), is still waiting or running. */
   hasActiveQueueItem(id: string): Promise<boolean>;
+  /**
+   * Phase 13.1 — of these execution ids, the ones a queue job (pending or running) drives: by the job's execution_id,
+   * or, for a job enqueued before migration 43, by its id or an id that extends it (`<executionId>:…`). Queue-run
+   * ownership is the queue's (leases, fencing, the reaper); other recovery skips these runs.
+   */
+  listExecutionIdsWithActiveQueueJob(executionIds: string[]): Promise<string[]>;
   enqueueExecution(input: {
     id: string;
     workflowId: string;
@@ -1563,6 +1615,8 @@ export interface Store {
     priority?: number;
     maxAttempts?: number;
     scheduledAt?: string;
+    /** Phase 13.1 — the worker pool that runs it (default `default`). */
+    pool?: string;
   }): Promise<void>;
   /** Claims up to `limit` due pending items for this process: an item is handed to one caller only. */
   dequeueNext(limit?: number): Promise<Array<{
@@ -1575,10 +1629,54 @@ export interface Store {
     scheduledAt: string;
   }>>;
   markQueueItemRunning(id: string): Promise<void>;
-  markQueueItemCompleted(id: string): Promise<void>;
-  /** Retries with backoff until max attempts; `retryable: false` moves the job to the DLQ now. */
-  markQueueItemFailed(id: string, error: string, options?: { retryable?: boolean }): Promise<void>;
+  /**
+   * Marks the item completed. With `claimToken` (a leased claim) only while it is still `running` under that token;
+   * returns whether the item was updated (false: a zombie's late completion, refused).
+   */
+  markQueueItemCompleted(id: string, options?: { claimToken?: string }): Promise<boolean>;
+  /**
+   * Retries with backoff until max attempts; `retryable: false` moves the job to the DLQ now. With `claimToken`, only
+   * while the item is still `running` under that token. Returns whether the item was updated.
+   */
+  markQueueItemFailed(id: string, error: string, options?: { retryable?: boolean; claimToken?: string }): Promise<boolean>;
+  /**
+   * The legacy stuck-job rule: running items past their run time limit and margin go back to pending. Items with a
+   * recent heartbeat (leased claims, which the lease reaper handles) are left alone.
+   */
   requeueStuckItems(stuckAfterMs?: number, excludeIds?: string[], marginMs?: number): Promise<number>;
+  /**
+   * Phase 13.1 — a leased claim (cluster mode): up to `limit` due pending items of `pools`, fairly across workflows
+   * within a bounded window (one per workflow before a second), moved to `running` with this owner, a new fencing
+   * token and a heartbeat, all in database time. An item is handed to one caller only.
+   */
+  claimQueueItems(input: { limit: number; owner: string; pools: string[] }): Promise<QueueClaimedItem[]>;
+  /** Whether this claim still holds its queue item (`running` under the token). */
+  isQueueClaimHeld(fence: QueueClaimFence): Promise<boolean>;
+  /**
+   * Counts one node an approval resume completed under this claim (the queue row's nodes_completed), so the reaper
+   * can tell a lost resume that did something from one that did not. False when the claim no longer holds the item.
+   */
+  recordQueueJobProgress(fence: QueueClaimFence): Promise<boolean>;
+  /** Renews the heartbeat of the owner's claims; returns the tokens it still holds (a missing one was taken back). */
+  renewQueueLeases(input: { owner: string; claimTokens: string[] }): Promise<string[]>;
+  /** Of these execution ids, the ones whose history reads `canceled` (a cancel another instance recorded). */
+  listCanceledExecutionIds(executionIds: string[]): Promise<string[]>;
+  /**
+   * The lease reaper: running items whose heartbeat is older than `leaseMs` (database time) are settled by the
+   * worker-loss policy (queue-leases.ts decideLostJob), each counting an attempt. Items without a heartbeat (claimed
+   * by an older binary or outside cluster mode) are left to requeueStuckItems.
+   */
+  reapExpiredQueueLeases(input: { leaseMs: number; limit?: number }): Promise<LostJobOutcome[]>;
+  /**
+   * A worker shutting down gives a job back: by the worker-loss policy, but without counting an attempt (a clean stop
+   * is not a failure). Only while the item is still `running` under `claimToken` (null: an unleased claim). Returns
+   * null when the item was not held.
+   */
+  releaseQueueItem(input: { id: string; claimToken: string | null }): Promise<LostJobOutcome | null>;
+  /** Pending and running items per pool. */
+  getQueueDepthByPool(): Promise<Array<{ pool: string; pending: number; running: number }>>;
+  /** Pending items of one pool (backpressure). */
+  countPendingQueueItems(pool: string): Promise<number>;
   /**
    * Marks runs still recorded as running that no live process owns as errors. Runs the queue still
    * owns (pending/running queue rows) and runs paused for approval are left alone.

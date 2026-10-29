@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import net from "node:net";
 import { z } from "zod";
+import { QUEUE_POOL_NAME_PATTERN } from "@ai-orchestrator/shared";
 
 /** Phase 15.6 — production capture defaults (see the REPLAY_CAPTURE_* settings). */
 export const REPLAY_CAPTURE_DEFAULTS = { enabled: true, maxRate: 1, retentionDays: 14, maxPerWorkflow: 200, maxBytesPerWorkflow: 209_715_200 } as const;
@@ -27,6 +28,14 @@ const optionalBooleanFromEnv = z.preprocess(
   booleanFromEnv.optional()
 );
 
+/** An optional whole number within [min, max]; an empty value counts as unset (as the .env.example template leaves it). */
+function optionalIntFromEnv(min: number, max: number) {
+  return z.preprocess(
+    (value) => (typeof value === "string" && value.trim() === "" ? undefined : value),
+    z.coerce.number().int().min(min).max(max).optional()
+  );
+}
+
 const envSchema = z.object({
   LOG_LEVEL: z.enum(["fatal", "error", "warn", "info", "debug", "trace"]).default("warn"),
   API_PORT: z.coerce.number().int().positive().default(4000),
@@ -37,6 +46,30 @@ const envSchema = z.object({
   // Re-queue a queue job still running after this long; QueueService raises it to the run time limit + 60s.
   // Optional (no default) so hand-built AppConfig objects in tests still typecheck; QueueService defaults it to 600000.
   QUEUE_STUCK_JOB_TIMEOUT_MS: z.coerce.number().int().positive().optional(),
+  // Phase 13.1 — queue workers. All optional: unset keeps today's behaviour (see resolveQueueSettings for defaults).
+  /** Jobs one consumer runs at once (1-256, default 5). */
+  QUEUE_CONCURRENCY: optionalIntFromEnv(1, 256),
+  /** How often a consumer looks for due jobs, in ms (default 1000). */
+  QUEUE_POLL_INTERVAL_MS: optionalIntFromEnv(50, 60_000),
+  /** Cluster mode: how often a consumer renews the leases of its jobs, in ms (default 10000). */
+  QUEUE_HEARTBEAT_MS: optionalIntFromEnv(100, 300_000),
+  /** Cluster mode: a job whose heartbeat is older than this is taken back by the leader, in ms (default 45000). */
+  QUEUE_LEASE_MS: optionalIntFromEnv(300, 3_600_000),
+  /** Cluster mode: how often the leader looks for expired leases, in ms (default 15000). */
+  QUEUE_REAPER_INTERVAL_MS: optionalIntFromEnv(100, 600_000),
+  /** Cluster mode: comma-separated pools this consumer claims from (default `default`). */
+  QUEUE_POOLS: z.string().optional(),
+  /** Pending jobs per pool at which `/enqueue` answers 429 (default 0 = no limit). */
+  QUEUE_MAX_PENDING: optionalIntFromEnv(0, 10_000_000),
+  /** A consumer stops claiming while its resident memory is above this many MB (default off). */
+  QUEUE_MAX_RSS_MB: optionalIntFromEnv(64, 1_048_576),
+  /** A consumer stops claiming while its event loop lags more than this many ms (p99 over the last second; default off). */
+  QUEUE_MAX_EVENT_LOOP_LAG_MS: optionalIntFromEnv(10, 60_000),
+  /**
+   * On SIGTERM/SIGINT, how long running queue jobs may finish before they are stopped and given back, in ms. The drain
+   * runs in cluster mode (default 20000) or when this is set; otherwise the signals exit at once, as before.
+   */
+  SHUTDOWN_DRAIN_MS: optionalIntFromEnv(0, 3_600_000),
   // How often a streamed run (SSE) sends a `: ping` comment while nothing else
   // is sent. The web client treats 45s without any bytes as a lost connection,
   // so keep this well below that.
@@ -533,8 +566,99 @@ export function parseConfig(env: Record<string, string | undefined>): AppConfig 
   resolveSamlSettings(parsed.data);
   resolveSsoMfaSettings(parsed.data);
   parseTrustProxy(parsed.data.TRUST_PROXY);
+  // Phase 13.1 — queue settings that only work in cluster mode fail fast outside it.
+  resolveQueueSettings(parsed.data, { clusterMode: isPostgresDbType(env.DB_TYPE) && parsed.data.HA_ENABLED === true });
 
   return parsed.data;
+}
+
+// ---------------------------------------------------------------------------
+// Phase 13.1 — queue workers. Every setting is optional; with none set a single instance behaves exactly as before.
+// Cluster mode (DB_TYPE=postgres and HA_ENABLED=true) adds heartbeat leases, the lease reaper and pools.
+// ---------------------------------------------------------------------------
+
+export interface QueueSettings {
+  concurrency: number;
+  pollIntervalMs: number;
+  heartbeatMs: number;
+  leaseMs: number;
+  reaperIntervalMs: number;
+  /** The pools this consumer claims from (cluster mode). */
+  pools: string[];
+  /** Pending jobs per pool at which enqueue is refused; 0 = no limit. */
+  maxPending: number;
+  /** Stop claiming above this resident memory (MB); 0 = off. */
+  maxRssMb: number;
+  /** Stop claiming while the event loop's p99 lag exceeds this (ms); 0 = off. */
+  maxEventLoopLagMs: number;
+  /** The drain budget on SIGTERM/SIGINT, when the drain runs at all (see drainOnSignal). */
+  shutdownDrainMs: number;
+  /**
+   * Whether SIGTERM/SIGINT drain before exiting: in cluster mode, or when SHUTDOWN_DRAIN_MS is set. Otherwise the
+   * signals behave as before (the process exits at once).
+   */
+  drainOnSignal: boolean;
+}
+
+export const QUEUE_SETTING_DEFAULTS = {
+  concurrency: 5,
+  pollIntervalMs: 1_000,
+  heartbeatMs: 10_000,
+  leaseMs: 45_000,
+  reaperIntervalMs: 15_000,
+  /** Fits Kubernetes' default 30 s termination grace with the close grace (5 s) and margin to spare. */
+  shutdownDrainMs: 20_000
+} as const;
+
+type QueueConfigInput = Partial<
+  Pick<
+    AppConfig,
+    | "QUEUE_CONCURRENCY"
+    | "QUEUE_POLL_INTERVAL_MS"
+    | "QUEUE_HEARTBEAT_MS"
+    | "QUEUE_LEASE_MS"
+    | "QUEUE_REAPER_INTERVAL_MS"
+    | "QUEUE_POOLS"
+    | "QUEUE_MAX_PENDING"
+    | "QUEUE_MAX_RSS_MB"
+    | "QUEUE_MAX_EVENT_LOOP_LAG_MS"
+    | "SHUTDOWN_DRAIN_MS"
+  >
+>;
+
+/**
+ * The queue settings with their defaults. Throws a clear error naming the setting when QUEUE_POOLS lists anything
+ * but `default` outside cluster mode (one consumer there claims every job, so a pool filter would strand jobs), names
+ * an invalid pool, or when the lease is shorter than two heartbeats.
+ */
+export function resolveQueueSettings(config: QueueConfigInput, options: { clusterMode: boolean }): QueueSettings {
+  const fail = (detail: string): never => {
+    throw new Error(`Invalid queue configuration: ${detail}`);
+  };
+  const pools = splitList(config.QUEUE_POOLS);
+  for (const pool of pools) {
+    if (!QUEUE_POOL_NAME_PATTERN.test(pool)) fail(`QUEUE_POOLS entry "${pool.slice(0, 64)}" must be letters, digits, _ or - (at most 63, starting with a letter or digit)`);
+  }
+  const resolvedPools = pools.length > 0 ? [...new Set(pools)] : ["default"];
+  if (!options.clusterMode && (resolvedPools.length !== 1 || resolvedPools[0] !== "default")) {
+    fail("QUEUE_POOLS needs cluster mode (DB_TYPE=postgres and HA_ENABLED=true); a single instance claims every job");
+  }
+  const heartbeatMs = config.QUEUE_HEARTBEAT_MS ?? QUEUE_SETTING_DEFAULTS.heartbeatMs;
+  const leaseMs = config.QUEUE_LEASE_MS ?? Math.max(QUEUE_SETTING_DEFAULTS.leaseMs, heartbeatMs * 3);
+  if (leaseMs < heartbeatMs * 2) fail("QUEUE_LEASE_MS must be at least twice QUEUE_HEARTBEAT_MS");
+  return {
+    concurrency: config.QUEUE_CONCURRENCY ?? QUEUE_SETTING_DEFAULTS.concurrency,
+    pollIntervalMs: config.QUEUE_POLL_INTERVAL_MS ?? QUEUE_SETTING_DEFAULTS.pollIntervalMs,
+    heartbeatMs,
+    leaseMs,
+    reaperIntervalMs: config.QUEUE_REAPER_INTERVAL_MS ?? QUEUE_SETTING_DEFAULTS.reaperIntervalMs,
+    pools: resolvedPools,
+    maxPending: config.QUEUE_MAX_PENDING ?? 0,
+    maxRssMb: config.QUEUE_MAX_RSS_MB ?? 0,
+    maxEventLoopLagMs: config.QUEUE_MAX_EVENT_LOOP_LAG_MS ?? 0,
+    shutdownDrainMs: config.SHUTDOWN_DRAIN_MS ?? QUEUE_SETTING_DEFAULTS.shutdownDrainMs,
+    drainOnSignal: options.clusterMode || config.SHUTDOWN_DRAIN_MS !== undefined
+  };
 }
 
 const TRUST_PROXY_NAMED_RANGES = new Set(["loopback", "linklocal", "uniquelocal"]);

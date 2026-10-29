@@ -53,9 +53,10 @@ import type { AuditEventInput } from "./audit-service.js";
 import type { SafeUser } from "./auth-service.js";
 import type { RunAccessResult, RunPermission } from "../run-access.js";
 import type { NotificationEvent } from "./notification-service.js";
-import type { Store } from "../db/store.js";
+import type { QueueClaimFence, Store } from "../db/store.js";
 import { someAsync } from "../async-array.js";
 import { isOnePendingApprovalViolation } from "../db/store-errors.js";
+import { isFinalRunRecord } from "../db/queue-leases.js";
 
 export interface ApprovalResumeJob {
   executionId: string;
@@ -158,6 +159,8 @@ export class ApprovalResumeRunner {
 const SYSTEM_ACTOR = "system";
 /** Queue mode: a claim this old with no live queue item is re-driven. */
 const QUEUE_RECOVERY_GRACE_MS = 60_000;
+/** Why a pause's new request cancels the run's earlier pending one. */
+const SUPERSEDED_REASON = "Superseded by a newer request of the same run";
 const DECIDED_STATUSES = new Set(["approved", "rejected", "timed_out"]);
 
 /** The decision a request status stands for; null while it is pending or expired without a decision. */
@@ -277,10 +280,13 @@ export class ApprovalService {
    * person who started the run (kept from the run's first request, since a
    * resumed run is triggered by its approver).
    */
-  async recordPause(input: { executionId: string; workflowId: string; workflowName?: string; projectId: string; state: WorkflowExecutionState; message: string; timeoutMinutes: number }): Promise<ApprovalRequestRecord> {
+  /**
+   * With `fence` (Phase 13.1, a queued run in cluster mode) the request is inserted only while that claim holds its
+   * queue item; otherwise QueueClaimLostError is thrown and nothing is audited or sent.
+   */
+  async recordPause(input: { executionId: string; workflowId: string; workflowName?: string; projectId: string; state: WorkflowExecutionState; message: string; timeoutMinutes: number; fence?: QueueClaimFence }): Promise<ApprovalRequestRecord> {
     const info = resolvePendingApproval(input.state);
     const earlier = await this.store.listApprovalRequestsForExecution(input.executionId);
-    await this.store.cancelPendingApprovalRequests({ executionId: input.executionId }, "Superseded by a newer request of the same run");
     const first = earlier[0];
     const requester = first ? { userId: first.requestedByUserId, email: first.requestedBy } : requesterFromState(input.state);
     const createdAt = this.now();
@@ -305,15 +311,16 @@ export class ApprovalService {
       askingWorkflowId: info.workflowId || null,
       editsSalt: newApprovalEditsSalt(),
       createdAt: createdAt.toISOString()
-    });
+    }, { supersedeReason: SUPERSEDED_REASON, ...(input.fence ? { fence: input.fence } : {}) });
     let record: ApprovalRequestRecord;
     try {
+      // The run's earlier pending request is canceled in the insert's transaction, under the same fence: a worker whose
+      // claim was taken back cancels nothing.
       record = await insert();
     } catch (error) {
-      // Another instance backfilled a request for this pause between the cancel above and the insert (v41 allows one
+      // Another instance backfilled a request for this pause after the cancel and before the insert (v41 allows one
       // pending request per run): this pause's own request replaces it.
       if (!isOnePendingApprovalViolation(error)) throw error;
-      await this.store.cancelPendingApprovalRequests({ executionId: input.executionId }, "Superseded by a newer request of the same run");
       record = await insert();
     }
     await this.options.audit({
@@ -699,6 +706,14 @@ export class ApprovalService {
         continue;
       }
       if (this.options.queueMode && await this.store.hasActiveQueueItem(`${executionId}:${latest.id}`)) continue;
+      // A run whose record is final is over: its one way forward is a manual retry, which rebuilds from history, so
+      // any paused state left behind (a crash between the final write and its delete) is removed, never re-driven.
+      // Read after the queue check, so a release that committed in between is seen here.
+      const record = await this.store.getExecutionHistory(executionId);
+      if (record && isFinalRunRecord(record)) {
+        await this.store.deleteWorkflowExecution(executionId);
+        continue;
+      }
       recovered += 1;
       const decision: ApprovalDecisionValue = approvalDecisionOf(latest.status) ?? "timeout";
       const job: ApprovalResumeJob = {

@@ -52,6 +52,30 @@ postgres("guard on two Postgres stores sharing one database", () => {
     for (const record of saved) expect(versions.find((v) => v.version === record.version)?.hash).toBe(record.hash);
   }, 60_000);
 
+  it("two instances booting at once both seed the built-in profile without a duplicate-key failure, and update it once", async () => {
+    for (let round = 0; round < 5; round += 1) {
+      const { a, b } = await twoStores();
+      const boot = (store: typeof a) => new GuardService(store, new SecretService(store, key), { autoApply: false, logger: () => {} }).ensureBuiltIns();
+      await Promise.all([boot(a), boot(b), boot(a), boot(b)]);
+      const builtIn = await a.getGuardProfile("default");
+      expect(builtIn).toMatchObject({ builtIn: true, latestVersion: 1 });
+      // A newer shipped profile (an upgrade): both instances notice at once and one version is added.
+      const v1 = await a.getGuardProfileVersion("default", 1);
+      await Promise.all(
+        [a, b, a, b].map((store) =>
+          store.addGuardProfileVersion({ profileId: "default", name: "Default", document: { upgraded: true }, hash: `${v1!.hash}-next`, createdBy: null }, { unlessLatestHash: true })
+        )
+      );
+      expect((await b.getGuardProfile("default"))?.latestVersion).toBe(2);
+      // Plain inserts still refuse a taken id.
+      await expect(a.insertGuardProfile({ id: "default", name: "Again", document: {}, hash: "x", createdBy: null })).rejects.toThrow();
+      await second?.close();
+      second = undefined;
+      await primary?.cleanup();
+      primary = undefined;
+    }
+  }, 120_000);
+
   it("the profile cache of one instance sees versions, labels and deletes written through the other", async () => {
     const { a, b } = await twoStores();
     await a.ensureDefaultProject();

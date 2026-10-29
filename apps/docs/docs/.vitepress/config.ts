@@ -132,6 +132,7 @@ export default defineConfig({
           { text: "Testing + Quality Gates", link: "/operations/testing-and-quality" },
           { text: "Observability (OTel, metrics, traces)", link: "/operations/observability" },
           { text: "Postgres", link: "/operations/postgres" },
+          { text: "Queue and workers", link: "/operations/queue-and-workers" },
           { text: "Troubleshooting", link: "/troubleshooting/common-issues" }
         ]
       }

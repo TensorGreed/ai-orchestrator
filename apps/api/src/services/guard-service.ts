@@ -191,6 +191,7 @@ export class GuardService {
     const shipped = createDefaultGuardProfile();
     const document = this.documentOf(shipped);
     const hash = hashGuardProfile(shipped);
+    // Idempotent: several instances may boot on one database at once.
     const existing = await this.store.getGuardProfile(GUARD_BUILTIN_PROFILE_ID);
     if (!existing) {
       await this.store.insertGuardProfile({
@@ -202,7 +203,7 @@ export class GuardService {
         hash,
         note: "Built-in default profile",
         createdBy: null
-      });
+      }, { ifAbsent: true });
       return;
     }
     if (existing.latestHash !== hash) {
@@ -214,7 +215,7 @@ export class GuardService {
         hash,
         note: "Built-in default profile updated",
         createdBy: null
-      });
+      }, { unlessLatestHash: true });
     }
   }
 

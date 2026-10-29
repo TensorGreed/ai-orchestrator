@@ -205,7 +205,7 @@ Every feature works on Postgres, and several API instances can share one Postgre
 
 | What | How |
 |---|---|
-| A queued job runs on one instance | the claim is `FOR UPDATE SKIP LOCKED` |
+| A queued job runs on one instance | the claim is `FOR UPDATE SKIP LOCKED`, with a lease and a fencing token (see [Queue and workers](./queue-and-workers)) |
 | An approval, release request or gate-case request is decided once | a conditional update; the losing decision gets `409` |
 | A paused run has one open approval request | a unique index (migration 41) |
 | One guard simulation runs at a time | a unique index (migration 39) |

@@ -200,6 +200,11 @@ export interface WorkflowEdge {
 export interface WorkflowSettings {
   errorWorkflowId?: string;
   executionTimeoutMs?: number;
+  /**
+   * Phase 13.1 — the worker pool that runs this workflow's queued jobs (cluster mode; workers list their pools in
+   * QUEUE_POOLS). Unset is `default`. Letters, digits, `_` or `-`, at most 63.
+   */
+  executionPool?: string;
   saveDataSuccessExecution?: "all" | "none";
   saveDataErrorExecution?: "all" | "none";
   /** Phase 7.3 — workflow activation state. */

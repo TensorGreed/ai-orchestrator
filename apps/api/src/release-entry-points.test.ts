@@ -331,8 +331,11 @@ describe("production entry points load the published version", () => {
   });
 
   it("the queue, the gateway's tool calls and its catalog use the production loader", () => {
-    const queue = appSource.slice(appSource.indexOf("queueService.setHandler("), appSource.indexOf("queueService.setHandler(") + 1500);
-    expect(queue).toContain("productionWorkflow(");
+    // The queue handler runs each job through runQueuedJob, which loads the workflow.
+    expect(appSource.slice(appSource.indexOf("queueService.setHandler("), appSource.indexOf("queueService.setHandler(") + 1500)).toContain("runQueuedJob(");
+    const runQueued = appSource.indexOf("const runQueuedJob = ");
+    expect(runQueued).toBeGreaterThan(-1);
+    expect(appSource.slice(runQueued, runQueued + 1500)).toContain("productionWorkflow(");
     expect(appSource).toMatch(/loadProductionWorkflow:\s*productionWorkflow/);
     const gateway = read("mcp-gateway-routes.ts");
     const start = gateway.indexOf("const callWorkflowTool");
