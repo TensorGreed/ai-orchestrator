@@ -165,7 +165,7 @@ describe("RunDispatcher", () => {
   it("inline runs in this process and never touches the queue", async () => {
     const { dispatcher, calls } = make({ queue: false });
     expect(await dispatcher.run(spec(), { pool: "default", enforceBackpressure: true })).toBe(result);
-    expect(await dispatcher.fire(spec(), { pool: "default", queueItemId: "cron:x" })).toEqual({ queued: false });
+    expect(await dispatcher.fire(spec(), { pool: "default", queueItemId: "cron:x" })).toEqual({ queued: false, result });
     expect(calls).toEqual(["local", "local"]);
   });
 
@@ -185,11 +185,13 @@ describe("RunDispatcher", () => {
   it("a refused or failed enqueue ends the queued record and is thrown; a full pool is refused before anything is written", async () => {
     const failed = make({ queue: true, enqueueError: new Error("db down") });
     await expect(failed.dispatcher.run(spec(), { pool: "default" })).rejects.toThrow("db down");
-    expect(failed.calls).toEqual(["subscribe", "recordQueued", "enqueue:-", "recordNotQueued:The run could not be queued: db down", "close"]);
+    expect(failed.calls).toEqual(["backpressure", "subscribe", "recordQueued", "enqueue:-", "recordNotQueued:The run could not be queued: db down", "close"]);
 
     const full = make({ queue: true, backpressure: new QueueFullError("default", 1, 5) });
-    await expect(full.dispatcher.run(spec(), { pool: "default", enforceBackpressure: true })).rejects.toBeInstanceOf(QueueFullError);
+    await expect(full.dispatcher.run(spec(), { pool: "default" })).rejects.toBeInstanceOf(QueueFullError);
     expect(full.calls).toEqual(["backpressure"]);
+    const unchecked = make({ queue: true, backpressure: new QueueFullError("default", 1, 5), end: { kind: "result", result } });
+    expect(await unchecked.dispatcher.run(spec(), { pool: "default", enforceBackpressure: false })).toBe(result);
   });
 
   it("refuses with 503 once DISPATCH_MAX_WAITING requests wait", async () => {

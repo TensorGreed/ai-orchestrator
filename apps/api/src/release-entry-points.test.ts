@@ -279,9 +279,15 @@ function routeBlock(source: string, routePath: string): string {
 }
 
 describe("every run names its release channel", () => {
-  const calls = sourceFiles().flatMap((file) => callArguments(read(file), "runWorkflowExecution({").map((text) => ({ file, text })));
+  // Phase 13.1 — runs started through the dispatcher (inline or on a queue worker) name their channel in the spec's
+  // `run`; the two places that run a spec (executeRunSpec, and a worker's dispatched job) forward that `run` as it is.
+  const markers = ["runWorkflowExecution({", "runDispatcher.run(", "runDispatcher.fire("];
+  const allCalls = sourceFiles().flatMap((file) => markers.flatMap((marker) => callArguments(read(file), marker).map((text) => ({ file, text }))));
+  const forwardsSpec = (text: string) => /^runWorkflowExecution\(\{\s*\.\.\.run,/.test(text);
+  const calls = allCalls.filter((entry) => !forwardsSpec(entry.text));
 
   it("each runWorkflowExecution call, in any file, passes channel", () => {
+    expect(allCalls.filter((entry) => forwardsSpec(entry.text)).map((entry) => entry.file)).toEqual(["app.ts", "app.ts"]);
     expect(calls.length).toBeGreaterThanOrEqual(20);
     const missing = calls.filter((entry) => !/\bchannel\s*:/.test(entry.text)).map((entry) => `${entry.file}: ${entry.text.slice(0, 160)}`);
     expect(missing).toEqual([]);

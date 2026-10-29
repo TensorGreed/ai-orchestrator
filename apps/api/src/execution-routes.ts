@@ -18,14 +18,12 @@ import { z } from "zod";
 import {
   workflowExecuteRequestSchema,
   type DataLabels,
-  type McpCassetteSource,
   type McpReplayMode,
   type MCPServerConfig,
   type ReleaseChannel,
   type Workflow,
   type WorkflowExecutionResult
 } from "@ai-orchestrator/shared";
-import type { ProviderRegistry } from "@ai-orchestrator/provider-sdk";
 import type { MCPRegistry } from "@ai-orchestrator/mcp-sdk";
 import type { AppConfig } from "./config.js";
 import type { Store } from "./db/store.js";
@@ -40,6 +38,7 @@ import {
   retryAfterSeconds
 } from "./run-helpers.js";
 import { startSseHeartbeat } from "./sse-heartbeat.js";
+import { DISPATCH_SPEC_VERSION, type RunDispatcher } from "./services/run-dispatch.js";
 import type { SafeUser, UserRole } from "./services/auth-service.js";
 import type { ApprovalService } from "./services/approval-service.js";
 import type { BudgetService } from "./services/budget-service.js";
@@ -80,33 +79,8 @@ export interface ExecutionRoutesDeps {
     run: { executionId: string; workflowId: string; projectId?: string | null },
     metadata?: Record<string, unknown>
   ) => Promise<void>;
-  createProgressTrackingHooks: (input: {
-    executionId: string;
-    workflow: Workflow;
-    triggerType?: string;
-    triggeredBy?: string;
-    requestInput?: unknown;
-    customData?: Record<string, unknown>;
-    passthroughHooks?: WorkflowExecutionEventHooks;
-  }) => WorkflowExecutionEventHooks;
-  mcpCassetteService: Pick<McpCassetteService, "planRecording" | "planReplay">;
+  mcpCassetteService: Pick<McpCassetteService, "planReplay">;
   mcpRegistry: MCPRegistry;
-  providerRegistry: ProviderRegistry;
-  runWorkflowExecution: (input: RunWorkflowExecutionInput) => Promise<WorkflowExecutionResult>;
-  finishMcpCassettePlan: <T extends WorkflowExecutionResult>(
-    plan: McpCassetteRunPlan | undefined,
-    result: T,
-    meta: { executionId: string; workflow: Workflow; source: McpCassetteSource; createdBy: string | null; evalRunId?: string | null; fixtureId?: string | null }
-  ) => Promise<T>;
-  persistExecutionHistory: (input: {
-    executionId: string;
-    workflow: Workflow;
-    result: WorkflowExecutionResult;
-    triggerType?: string;
-    triggeredBy?: string;
-    requestInput?: unknown;
-    customData?: Record<string, unknown>;
-  }) => Promise<void>;
   mcpElicitationService: Pick<McpElicitationService, "subscribe">;
   resolveRegisteredMcpServer: (registryServerId: string, actor?: SafeUser | null) => Promise<MCPServerConfig>;
   replayRunInputFor: (
@@ -121,6 +95,10 @@ export interface ExecutionRoutesDeps {
   clusterMode: boolean;
   /** Publishes a control message on the cluster bus without failing the caller. */
   announce: (message: { t: string; [key: string]: unknown }) => void;
+  /** Phase 13.1 — starts a run inline or on a queue worker (EXECUTION_DISPATCH); see services/run-dispatch.ts. */
+  runDispatcher: Pick<RunDispatcher, "run">;
+  /** The queue pool a workflow's dispatched runs go to. */
+  dispatchPoolOf: (workflow: Workflow) => string;
 }
 
 export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
@@ -138,13 +116,8 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
     budgetService,
     prepareWorkflowExecutionPayload,
     auditRunAction,
-    createProgressTrackingHooks,
     mcpCassetteService,
     mcpRegistry,
-    providerRegistry,
-    runWorkflowExecution,
-    finishMcpCassettePlan,
-    persistExecutionHistory,
     mcpElicitationService,
     resolveRegisteredMcpServer,
     replayRunInputFor,
@@ -152,7 +125,9 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
     activeExecutions,
     approvalService,
     clusterMode,
-    announce
+    announce,
+    runDispatcher,
+    dispatchPoolOf
   } = deps;
 
   app.post<{ Params: { id: string }; Body: unknown }>("/api/workflows/:id/execute", async (request, reply) => {
@@ -219,20 +194,12 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
 
     const executionId = crypto.randomUUID();
     await auditRunAction(request, user, "execution.started", { executionId, workflowId: workflow.id, projectId: workflow.projectId }, { triggerType: executeTrigger });
-    const progressHooks = createProgressTrackingHooks({
-      executionId,
-      workflow,
-      triggerType: executeTrigger,
-      triggeredBy: user.email,
-      requestInput: prepared.requestInput,
-      customData: executionPayload.customData
-    });
-    // Phase 10.8 — "Record MCP calls": every MCP call of the run goes into a cassette.
-    const mcpPlan = parsed.data.record ? mcpCassetteService.planRecording(mcpRegistry, providerRegistry) : undefined;
-    const executed = await runWorkflowExecution({
+    // Phase 13.1 — inline (default) or on a worker (EXECUTION_DISPATCH=queue); the answer is the same either way.
+    const result = await runDispatcher.run({
+      v: DISPATCH_SPEC_VERSION,
+      run: {
       // Phase 15.4: API-key callers run the published version; the editor runs the draft.
       channel: executeChannel.channel,
-      mcpPlan,
       policyActor: user,
       workflow,
       startNodeId: executionPayload.startNodeId,
@@ -254,21 +221,14 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
       executionId,
       triggerType: executeTrigger,
       triggeredBy: user.email,
-      hooks: progressHooks,
       captureSource,
       captureInputOrigin: captureSource ? "user" : undefined
-    });
-    const result = await finishMcpCassettePlan(mcpPlan, executed, { executionId, workflow, source: "manual", createdBy: user.email });
-
-    await persistExecutionHistory({
-      executionId,
-      workflow,
-      result,
-      triggerType: executeTrigger,
-      triggeredBy: user.email,
-      requestInput: prepared.requestInput,
-      customData: executionPayload.customData
-    });
+      },
+      progress: { requestInput: prepared.requestInput, customData: executionPayload.customData },
+      history: { requestInput: prepared.requestInput, customData: executionPayload.customData },
+      // Phase 10.8 — "Record MCP calls": every MCP call of the run goes into a cassette.
+      ...(parsed.data.record ? { cassette: { kind: "record" as const, source: "manual" as const, createdBy: user.email } } : {})
+    }, { pool: dispatchPoolOf(workflow) });
 
     if (result.status === "error") {
       reply.code(400);
@@ -313,8 +273,14 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
     const executionId = crypto.randomUUID();
     await auditRunAction(request, user, "execution.started", { executionId, workflowId: workflow.id, projectId: workflow.projectId }, { triggerType: executeTrigger });
     let streamClosed = false;
+    let markClientGone: () => void = () => undefined;
+    // A dispatched run stops being relayed when the client goes away; it goes on, as an inline run does.
+    const clientGone = new Promise<void>((resolve) => {
+      markClientGone = resolve;
+    });
     request.raw.on("close", () => {
       streamClosed = true;
+      markClientGone();
     });
 
     const sendSseEvent = (event: string, payload: unknown) => {
@@ -352,36 +318,12 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
       sendSseEvent("mcp_elicitation", event);
     });
     try {
-      const progressHooks = createProgressTrackingHooks({
-        executionId,
-        workflow,
-        triggerType: executeTrigger,
-        triggeredBy: user.email,
-        requestInput: prepared.requestInput,
-        customData: executionPayload.customData,
-        passthroughHooks: {
-          onNodeStart: (event) => {
-            sendSseEvent("node_start", event);
-          },
-          onNodeComplete: (event) => {
-            sendSseEvent("node_complete", event);
-          },
-          onLLMDelta: (event) => {
-            sendSseEvent("llm_delta", event);
-          },
-          onMcpProgress: (event) => {
-            sendSseEvent("node_progress", event);
-          },
-          onNodeActivity: (event) => {
-            sendSseEvent("node_activity", event);
-          }
-        }
-      });
-      const mcpPlan = parsed.data.record ? mcpCassetteService.planRecording(mcpRegistry, providerRegistry) : undefined;
-      const executed = await runWorkflowExecution({
+      // Phase 13.1 — inline (default) or on a worker (EXECUTION_DISPATCH=queue), whose events are relayed here in order.
+      const result = await runDispatcher.run({
+        v: DISPATCH_SPEC_VERSION,
+        run: {
         // Phase 15.4: API-key callers run the published version; the editor runs the draft.
         channel: executeChannel.channel,
-        mcpPlan,
         policyActor: user,
         workflow,
         startNodeId: executionPayload.startNodeId,
@@ -403,20 +345,36 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
         executionId,
         triggerType: executeTrigger,
         triggeredBy: user.email,
-        hooks: progressHooks,
         captureSource,
         captureInputOrigin: captureSource ? "user" : undefined
-      });
-      const result = await finishMcpCassettePlan(mcpPlan, executed, { executionId, workflow, source: "manual", createdBy: user.email });
-
-      await persistExecutionHistory({
-        executionId,
-        workflow,
-        result,
-        triggerType: executeTrigger,
-        triggeredBy: user.email,
-        requestInput: prepared.requestInput,
-        customData: executionPayload.customData
+        },
+        progress: { requestInput: prepared.requestInput, customData: executionPayload.customData },
+        history: { requestInput: prepared.requestInput, customData: executionPayload.customData },
+        ...(parsed.data.record ? { cassette: { kind: "record" as const, source: "manual" as const, createdBy: user.email } } : {})
+      }, {
+        pool: dispatchPoolOf(workflow),
+        passthrough: {
+          onNodeStart: (event) => {
+            sendSseEvent("node_start", event);
+          },
+          onNodeComplete: (event) => {
+            sendSseEvent("node_complete", event);
+          },
+          onLLMDelta: (event) => {
+            sendSseEvent("llm_delta", event);
+          },
+          onMcpProgress: (event) => {
+            sendSseEvent("node_progress", event);
+          },
+          onNodeActivity: (event) => {
+            sendSseEvent("node_activity", event);
+          },
+          // A dispatched run's questions arrive through the relay (an inline run's through the subscription above).
+          onMcpElicitation: (event) => {
+            sendSseEvent("mcp_elicitation", event);
+          }
+        },
+        closed: clientGone
       });
 
       sendSseEvent("result", result);
@@ -533,16 +491,9 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
     const executionPayload = prepared.payload;
     const executionId = crypto.randomUUID();
     await auditRunAction(request, user, "execution.retried", { executionId, workflowId: workflow.id, projectId: workflow.projectId }, { sourceExecutionId: sourceExecution.id });
-    const progressHooks = createProgressTrackingHooks({
-      executionId,
-      workflow,
-      triggerType: "manual_retry",
-      triggeredBy: user.email,
-      requestInput: prepared.requestInput,
-      customData: executionPayload.customData
-    });
-
-    const result = await runWorkflowExecution({
+    const result = await runDispatcher.run({
+      v: DISPATCH_SPEC_VERSION,
+      run: {
       // Phase 15.4: the failed run's channel; a production retry records the version it runs now.
       channel: retryChannel,
       policyActor: user,
@@ -565,19 +516,11 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
       customData: executionPayload.customData,
       executionId,
       triggerType: "manual_retry",
-      triggeredBy: user.email,
-      hooks: progressHooks
-    });
-
-    await persistExecutionHistory({
-      executionId,
-      workflow,
-      result,
-      triggerType: "manual_retry",
-      triggeredBy: user.email,
-      requestInput: prepared.requestInput,
-      customData: executionPayload.customData
-    });
+      triggeredBy: user.email
+      },
+      progress: { requestInput: prepared.requestInput, customData: executionPayload.customData },
+      history: { requestInput: prepared.requestInput, customData: executionPayload.customData }
+    }, { pool: dispatchPoolOf(workflow) });
 
     if (result.status === "error") {
       reply.code(400);
@@ -634,38 +577,26 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
       ...asRecord(source.customData),
       mcpReplay: { sourceExecutionId: source.id, cassetteId: cassette.id, mode }
     };
-    const executed = await runWorkflowExecution({
+    const result = await runDispatcher.run({
+      v: DISPATCH_SPEC_VERSION,
+      run: {
       // Phase 15.4: not production traffic, so the draft (or the candidate given) runs.
       channel: "draft",
       ...replayRunInputFor(source.triggerType, storedInput),
       // Phase 16 — the source run's input origin, not the user replaying it.
       inputLabels: historyInputLabels(source, workflow),
-      mcpPlan,
       policyActor: user,
       workflow,
       customData,
       executionId,
       triggerType: "mcp_replay",
-      triggeredBy: user.email,
-      hooks: createProgressTrackingHooks({
-        executionId,
-        workflow,
-        triggerType: "mcp_replay",
-        triggeredBy: user.email,
-        requestInput: storedInput,
-        customData
-      })
-    });
-    const result = await finishMcpCassettePlan(mcpPlan, executed, { executionId, workflow, source: "replay", createdBy: user.email });
-    await persistExecutionHistory({
-      executionId,
-      workflow,
-      result,
-      triggerType: "mcp_replay",
-      triggeredBy: user.email,
-      requestInput: storedInput,
-      customData
-    });
+      triggeredBy: user.email
+      },
+      progress: { requestInput: storedInput, customData },
+      history: { requestInput: storedInput, customData },
+      // A worker plans the same replay from the cassette; inline uses the plan built above.
+      cassette: { kind: "replay", cassetteId: cassette.id, mode, source: "replay", createdBy: user.email }
+    }, { pool: dispatchPoolOf(workflow), local: { mcpPlan } });
     return { ...result, executionId };
   });
 

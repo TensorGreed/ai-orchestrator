@@ -18,6 +18,7 @@ import type { RunWorkflowExecutionInput, WorkflowExecutionEventHooks } from "../
 import type { SafeUser } from "./auth-service.js";
 import { QueueFullError } from "./queue-service.js";
 import type { RunRelay, RunRelayEnd } from "./run-event-relay.js";
+import type { McpCassetteRunPlan } from "./mcp-cassette-service.js";
 
 export type ExecutionDispatchMode = "inline" | "queue";
 
@@ -239,10 +240,15 @@ export class DispatchClientGoneError extends Error {
   }
 }
 
+/** In-process parts a route already built for an inline run (never sent: a worker builds its own from the spec). */
+export interface LocalRunParts {
+  mcpPlan?: McpCassetteRunPlan;
+}
+
 export interface RunDispatcherDeps {
   gate: DispatchGate;
   /** Runs the spec in this process: exactly the inline path (app.ts executeRunSpec). */
-  executeLocally: (spec: DispatchedRunSpec, passthrough?: WorkflowExecutionEventHooks) => Promise<WorkflowExecutionResult>;
+  executeLocally: (spec: DispatchedRunSpec, passthrough?: WorkflowExecutionEventHooks, local?: LocalRunParts) => Promise<WorkflowExecutionResult>;
   /** Refuses with QueueFullError when the pool is full (QUEUE_MAX_PENDING). */
   checkBackpressure: (pool: string) => Promise<void>;
   /** Writes the run's first `running` record, so it can be read, reattached to and canceled while it waits for a worker. */
@@ -284,19 +290,20 @@ export class RunDispatcher {
   /**
    * Runs the spec and resolves with its result. Inline: in this process (passthrough hooks get the events as they
    * happen). Queue: on a worker; the relayed events reach the passthrough hooks in order, and the result is the one
-   * the worker stored. `enforceBackpressure` (requests from outside) refuses with QueueFullError when the pool is full.
+   * the worker stored. A full pool (QUEUE_MAX_PENDING) is refused with QueueFullError before anything is written, unless
+   * `enforceBackpressure` is false.
    * `closed` (streams only: callers that do nothing more once the client is gone) resolves when the client went away:
    * the relay stops and DispatchClientGoneError is thrown; the run goes on (as an inline run does).
    */
   async run(
     spec: DispatchedRunSpec,
-    options: { pool: string; passthrough?: WorkflowExecutionEventHooks; enforceBackpressure?: boolean; closed?: Promise<void> }
+    options: { pool: string; passthrough?: WorkflowExecutionEventHooks; enforceBackpressure?: boolean; closed?: Promise<void>; local?: LocalRunParts }
   ): Promise<WorkflowExecutionResult> {
     if (!(await this.deps.gate.useQueue(options.pool))) {
-      return await this.deps.executeLocally(spec, options.passthrough);
+      return await this.deps.executeLocally(spec, options.passthrough, options.local);
     }
     if (this.waiting >= this.deps.maxWaiting) throw new DispatchBusyError(this.deps.maxWaiting);
-    if (options.enforceBackpressure) await this.deps.checkBackpressure(options.pool);
+    if (options.enforceBackpressure !== false) await this.deps.checkBackpressure(options.pool);
     this.waiting += 1;
     let relay: RunRelay | null = null;
     try {
@@ -328,12 +335,14 @@ export class RunDispatcher {
   /**
    * Starts a run nobody waits on (a schedule, an app trigger). Queue: enqueued under `queueItemId` when given (an
    * idempotent id: a second fire of the same event enqueues nothing) and resolves at once; inline: resolves when the
-   * run ends, as before. Resolves with whether it was queued.
+   * run ends, as before, with its result.
    */
-  async fire(spec: DispatchedRunSpec, options: { pool: string; queueItemId?: string }): Promise<{ queued: boolean }> {
+  async fire(
+    spec: DispatchedRunSpec,
+    options: { pool: string; queueItemId?: string }
+  ): Promise<{ queued: false; result: WorkflowExecutionResult } | { queued: true }> {
     if (!(await this.deps.gate.useQueue(options.pool))) {
-      await this.deps.executeLocally(spec);
-      return { queued: false };
+      return { queued: false, result: await this.deps.executeLocally(spec) };
     }
     await this.deps.enqueue(spec, { pool: options.pool, ...(options.queueItemId ? { queueItemId: options.queueItemId } : {}) });
     this.deps.onQueued?.(spec, options.pool);
