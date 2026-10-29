@@ -122,10 +122,10 @@ stuck-job sweep, and an approval resume by approval recovery). With the drain, o
 3. gives running jobs up to `SHUTDOWN_DRAIN_MS` to finish;
 4. gives back the jobs still running, by the worker-loss rules above but without counting an attempt: a job where
    only trigger or input nodes had started returns to the queue, and one where any other node had started is marked
-   `interrupted: worker shut down` and dead-lettered. An approval resume with no node completed since the decision returns to the queue with its paused
-   state and decision intact, and the next worker resumes it from the decision. One with a completed node is marked
-   `interrupted: worker shut down` and dead-lettered too; its paused state is removed with it, so nothing drives it
-   on automatically (retry it once you have checked its side effects);
+   `interrupted: worker shut down` and dead-lettered. An approval resume that started no node after its gate returns
+   to the queue with its paused state and decision intact, and the next worker resumes it from the decision. One that
+   had started a node after the gate is marked `interrupted: worker shut down` and dead-lettered too; its paused state
+   is removed with it, so nothing drives it on automatically (retry it once you have checked its side effects);
 5. closes the server and the database (up to 5 seconds more), and exits.
 
 A second signal exits at once. Give the platform a termination grace period above `SHUTDOWN_DRAIN_MS` plus 5 seconds,
@@ -143,6 +143,11 @@ services:
   api:
     stop_grace_period: 30s
 ```
+
+Rolling deploys: a run still in a node other than an entry node when the drain ends (a long model or tool call, a
+wait node) is dead-lettered, never re-run, so a deploy that restarts busy workers dead-letters long runs. Drain
+workers before a deploy: stop sending them work (or scale up new workers first), set `SHUTDOWN_DRAIN_MS` and the
+grace period above your longest usual run, and replace workers one at a time. Watch `ao_queue_dlq` during the deploy.
 
 ## Retention
 
@@ -200,10 +205,17 @@ What changes:
   runs (1000 by default) answers `503`.
 - **Disconnects.** When a stream's client goes away, the instance stops relaying and the run goes on, as an inline
   run does. Cancel it with `POST /api/executions/:id/cancel` from any instance.
+- **Streams and a full pool.** A stream has already answered `200` when the pool is found full, so it ends with an
+  SSE `error` event instead of `429`.
 - **Reattach.** `GET /api/executions/:id/events` (SSE, `workflow:read`) follows an execution from any instance: an
   `execution` event with the run as stored, its events from that point on, then `result`. Events come from the
   instance running it, or from the queue worker over the cluster bus; an inline run on another instance shows only
   its stored state and result. It works without queue dispatch too.
+
+Database load and sizing: each request waiting on a dispatched run reads the run's state every 2 seconds as the
+backstop for a lost bus message (one or two small queries), and a streamed `node_complete` reads the run's progress
+once. An API replica with 1000 waiting requests (`DISPATCH_MAX_WAITING`) adds about 500 to 1000 queries a second; size
+`DB_POSTGRESDB_POOL_SIZE` and Postgres for it, or lower `DISPATCH_MAX_WAITING` and add API replicas.
 
 Duplicate fires: a schedule fire is keyed on the second it matched, and an app trigger fire on what it reports (RSS
 item ids, an SSE event id, file events). A second fire with the same key within 10 minutes is dropped and logged; after
