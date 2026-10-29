@@ -7,6 +7,10 @@
 #   K6_IMAGE           k6 container image (grafana/k6:0.54.0)
 #   SETTLE_TIMEOUT_S   how long to wait for queued runs to finish after the load stops (300)
 #   SCALE_ADMIN_EMAIL / SCALE_ADMIN_PASSWORD   the bootstrap admin of the stack
+#   SCALE_MASTER_KEY_BASE64   the stack's secret master key (random, kept in RESULTS_DIR/.master-key, when unset)
+#   MAX_FAILED         runs that may end in an error before check_clean fails (0); "none" reports without gating
+#
+# Needs bash 3.2 or newer (macOS ships 3.2), docker, curl and jq.
 
 LOADTEST_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd "$LOADTEST_DIR/../.." && pwd)
@@ -21,6 +25,21 @@ SETTLE_TIMEOUT_S=${SETTLE_TIMEOUT_S:-300}
 ADMIN_EMAIL=${SCALE_ADMIN_EMAIL:-admin@example.com}
 ADMIN_PASSWORD=${SCALE_ADMIN_PASSWORD:-scale-harness-password}
 COOKIE_JAR="$RESULTS_DIR/.cookies"
+MASTER_KEY_FILE="$RESULTS_DIR/.master-key"
+
+# The stack's secret master key: SCALE_MASTER_KEY_BASE64 when set, else a random one kept for the life of the stack
+# (docker-compose.scale.yml refuses to start without it, so no usable key is committed).
+ensure_master_key() {
+  if [[ -z "${SCALE_MASTER_KEY_BASE64:-}" ]]; then
+    mkdir -p "$RESULTS_DIR"
+    if [[ ! -s "$MASTER_KEY_FILE" ]]; then
+      (umask 077 && head -c 32 /dev/urandom | base64 | tr -d '\n' >"$MASTER_KEY_FILE")
+    fi
+    SCALE_MASTER_KEY_BASE64=$(<"$MASTER_KEY_FILE")
+  fi
+  export SCALE_MASTER_KEY_BASE64
+}
+ensure_master_key
 
 dc() { docker compose -p "$PROJECT" -f "$COMPOSE_FILE" "$@"; }
 log() { printf '[%s] %s\n' "$(date +%H:%M:%S)" "$*" >&2; }
@@ -64,6 +83,7 @@ stack_up() {
 
 stack_down() {
   dc down -v --remove-orphans
+  rm -f "$MASTER_KEY_FILE"
   if [[ "${REMOVE_IMAGE:-0}" == "1" ]]; then
     if docker image rm l2m-scale-api:local >/dev/null 2>&1; then log "removed image l2m-scale-api:local"; fi
   fi
@@ -92,10 +112,11 @@ seed_workflows() {
 }
 
 # Queue dispatch (EXECUTION_DISPATCH=queue) lets streamed manual runs execute on workers. The server reports it as
-# `executionDispatch` in GET /api/cluster; a server without it (or with inline dispatch) prints nothing.
+# `executionDispatch` in GET /api/cluster, either the mode itself or an object with a `mode`; a server without it (or
+# with inline dispatch) prints nothing.
 queue_dispatch_supported() {
   login
-  [[ "$(api_get /api/cluster | jq -r '.executionDispatch // empty')" == "queue" ]]
+  [[ "$(api_get /api/cluster | jq -r '(.executionDispatch | if type == "object" then .mode else . end) // empty')" == "queue" ]]
 }
 
 mock_reset() {
@@ -137,10 +158,13 @@ sample_postgres() {
 
 # sample_containers FILE: every 10 s, CPU and memory of every container of the stack, until killed.
 sample_containers() {
-  local file=$1 ids
+  local file=$1 id ids
   echo "time,container,cpu,mem" >"$file"
   while true; do
-    mapfile -t ids < <(docker ps -q --filter "label=com.docker.compose.project=$PROJECT")
+    ids=()
+    while read -r id; do
+      [[ -n "$id" ]] && ids+=("$id")
+    done < <(docker ps -q --filter "label=com.docker.compose.project=$PROJECT")
     if ((${#ids[@]} > 0)); then
       docker stats --no-stream --format '{{.Name}},{{.CPUPerc}},{{.MemUsage}}' "${ids[@]}" 2>/dev/null \
         | sed "s#^#$(date +%H:%M:%S),#" >>"$file" || true
@@ -168,12 +192,18 @@ queue_rows_sql() {
   echo "SELECT *, substring(payload_json FROM '$SEQ_PATTERN') AS seq FROM execution_queue WHERE payload_json LIKE $tag"
 }
 
-# settle RUN_ID: wait until no queued or running work of the run is left (or SETTLE_TIMEOUT_S passes).
+# open_runs RUN_ID: how many queued or running jobs, and running history rows, the run still has.
+open_runs() {
+  psql_q "SELECT (SELECT count(*) FROM ($(queue_rows_sql "$1")) q WHERE q.status IN ('pending', 'running'))
+               + (SELECT count(*) FROM ($(run_rows_sql "$1")) h WHERE h.status = 'running')"
+}
+
+# settle RUN_ID: wait until no queued or running work of the run is left. After SETTLE_TIMEOUT_S it gives up and logs
+# it; reconcile then counts what is still open as `unfinished`, which fails check_clean.
 settle() {
   local run_id=$1 deadline=$((SECONDS + SETTLE_TIMEOUT_S)) open
   while true; do
-    open=$(psql_q "SELECT (SELECT count(*) FROM ($(queue_rows_sql "$run_id")) q WHERE q.status IN ('pending', 'running'))
-                        + (SELECT count(*) FROM ($(run_rows_sql "$run_id")) h WHERE h.status = 'running')")
+    open=$(open_runs "$run_id")
     [[ "$open" == "0" ]] && return 0
     if ((SECONDS >= deadline)); then
       log "settle: $open run(s) of $run_id still open after ${SETTLE_TIMEOUT_S}s"
@@ -182,6 +212,9 @@ settle() {
     sleep 2
   done
 }
+
+# stop_load RUN_ID: removes the k6 container of a load run (a no-op once it has finished).
+stop_load() { docker rm -f "l2m-scale-k6-$1" >/dev/null 2>&1 || true; }
 
 # start_load WORKLOAD RATE DURATION: starts k6 in the background. Sets LOAD_RUN_ID, LOAD_OUT and LOAD_PID for the
 # caller (finish_load takes them).
@@ -202,7 +235,7 @@ start_load() {
   echo $! >"$LOAD_OUT/.samplers"
   sample_containers "$LOAD_OUT/containers.csv" &
   echo $! >>"$LOAD_OUT/.samplers"
-  docker run --rm --network "$NETWORK" --user "$(id -u):$(id -g)" \
+  docker run --rm --name "l2m-scale-k6-$LOAD_RUN_ID" --network "$NETWORK" --user "$(id -u):$(id -g)" \
     -v "$LOADTEST_DIR/k6:/scripts:ro" -v "$LOAD_OUT:/out" \
     -e BASE_URL=http://nginx -e LOAD_RUN_ID="$LOAD_RUN_ID" -e RATE="$rate" -e DURATION="$duration" \
     -e ADMIN_EMAIL="$ADMIN_EMAIL" -e ADMIN_PASSWORD="$ADMIN_PASSWORD" -e W4_STREAMED="$streamed" \
@@ -243,16 +276,42 @@ collect() {
   psql_q "SELECT status, count(*) FROM ($(run_rows_sql "$run_id")) h GROUP BY status ORDER BY status" >"$out/run-status.txt"
 }
 
-# reconcile RUN_ID OUT: compares k6's accepted count with execution_history. Writes reconcile.env.
+# executions_over_budget OUT WORKLOAD ACCEPTED: how many of the mock counters exceed what ACCEPTED runs of the
+# workload may use. The history and queue rows are keyed by run number, so a run executed twice by two workers still
+# shows one row; the mocks count every model and tool call that really happened. Prints the number of exceeded
+# budgets, or "?" when the counters were not collected.
+executions_over_budget() {
+  local out=$1 workload=$2 accepted=$3 tool_calls=${LLM_TOOL_CALLS:-3}
+  [[ -s "$out/mocks.json" ]] || { echo "?"; return 0; }
+  case "$workload" in
+    w2)
+      jq -r --argjson n "$accepted" --argjson t "$tool_calls" \
+        '[(.mcp.initialize > $n), (.mcp.toolCalls > $t * $n), (.llm.completions > ($t + 1) * $n)] | map(select(.)) | length' "$out/mocks.json" || echo "?" ;;
+    w3 | w4)
+      jq -r --argjson n "$accepted" '[(.llm.echo > $n)] | map(select(.)) | length' "$out/mocks.json" || echo "?" ;;
+    *) echo 0 ;;
+  esac
+}
+
+# reconcile RUN_ID OUT: compares the run numbers k6 got accepted with the ones in execution_history (sets, not
+# counts), then counts runs still open, failed, and executions above budget. Writes reconcile.env.
 reconcile() {
-  local run_id=$1 out=$2 accepted rows seqs dups queue_seqs queue_dups dead interrupted lost extra
-  accepted=$(jq -r '.metrics.runs_accepted.count // 0' "$out/k6-summary.json" 2>/dev/null || echo 0)
+  local run_id=$1 out=$2 workload accepted rows seqs dups queue_seqs queue_dups dead interrupted lost extra unfinished failed budget
+  workload=$(sed -n 's/^workload=//p' "$out/params.txt")
+  { grep -o 'msg="accepted [0-9]*"' "$out/k6.txt" 2>/dev/null || true; } | grep -o '[0-9]*' | LC_ALL=C sort -u >"$out/accepted-seqs.txt"
+  psql_q "SELECT DISTINCT seq FROM ($(run_rows_sql "$run_id")) h WHERE seq IS NOT NULL" | LC_ALL=C sort -u >"$out/history-seqs.txt"
+  LC_ALL=C comm -23 "$out/accepted-seqs.txt" "$out/history-seqs.txt" >"$out/lost-seqs.txt"
+  LC_ALL=C comm -13 "$out/accepted-seqs.txt" "$out/history-seqs.txt" >"$out/unacknowledged-seqs.txt"
+  accepted=$(wc -l <"$out/accepted-seqs.txt" | tr -d ' ')
+  lost=$(wc -l <"$out/lost-seqs.txt" | tr -d ' ')
+  extra=$(wc -l <"$out/unacknowledged-seqs.txt" | tr -d ' ')
   IFS='|' read -r rows seqs dups <<<"$(psql_q "SELECT count(*), count(DISTINCT seq), (SELECT count(*) FROM (SELECT seq FROM ($(run_rows_sql "$run_id")) d GROUP BY seq HAVING count(*) > 1) x) FROM ($(run_rows_sql "$run_id")) h")"
   IFS='|' read -r queue_seqs queue_dups dead <<<"$(psql_q "WITH q AS (SELECT status, seq FROM ($(queue_rows_sql "$run_id")) r)
       SELECT count(DISTINCT seq), (SELECT count(*) FROM (SELECT seq FROM q GROUP BY seq HAVING count(*) > 1) x), count(*) FILTER (WHERE status = 'dead') FROM q")"
   interrupted=$(psql_q "SELECT count(*) FROM ($(run_rows_sql "$run_id")) h WHERE h.error LIKE '%interrupted%'")
-  lost=$((accepted > seqs ? accepted - seqs : 0))
-  extra=$((seqs > accepted ? seqs - accepted : 0))
+  failed=$(psql_q "SELECT count(*) FROM ($(run_rows_sql "$run_id")) h WHERE h.status NOT IN ('success', 'running') AND coalesce(h.error, '') NOT LIKE '%interrupted%'")
+  unfinished=$(open_runs "$run_id")
+  budget=$(executions_over_budget "$out" "$workload" $((accepted > seqs ? accepted : seqs)))
   {
     echo "accepted=$accepted"
     echo "history_rows=$rows"
@@ -260,6 +319,9 @@ reconcile() {
     echo "duplicates=$dups"
     echo "lost=$lost"
     echo "unacknowledged_but_recorded=$extra"
+    echo "unfinished=$unfinished"
+    echo "failed=$failed"
+    echo "executions_over_budget=$budget"
     echo "queue_runs=$queue_seqs"
     echo "queue_duplicates=$queue_dups"
     echo "dead_lettered=$dead"
@@ -310,15 +372,26 @@ report() {
   } | tee "$out/report.txt"
 }
 
-# check_clean OUT: fails when the run lost or duplicated anything.
+# check_clean OUT: fails when the run lost a run (by run number), left runs unfinished, executed anything twice (extra
+# rows, or more model and tool calls than the accepted runs may use), or ended more runs in an error than MAX_FAILED
+# allows (default 0; "none" reports them without gating, as the chaos run does). Runs dead-lettered as interrupted
+# are reported, not gated.
 check_clean() {
-  local out=$1 lost dups queue_dups
-  lost=$(sed -n 's/^lost=//p' "$out/reconcile.env")
-  dups=$(sed -n 's/^duplicates=//p' "$out/reconcile.env")
-  queue_dups=$(sed -n 's/^queue_duplicates=//p' "$out/reconcile.env")
-  if [[ "$lost" != "0" || "$dups" != "0" || "$queue_dups" != "0" ]]; then
-    log "FAILED $(basename "$out"): lost=$lost duplicates=$dups queue_duplicates=$queue_dups"
+  local out=$1 field value problems="" max_failed=${MAX_FAILED:-0}
+  for field in lost duplicates queue_duplicates unfinished executions_over_budget failed; do
+    value=$(sed -n "s/^$field=//p" "$out/reconcile.env")
+    if [[ "$field" == "failed" && "$max_failed" == "none" ]]; then continue; fi
+    if [[ ! "$value" =~ ^[0-9]+$ ]]; then
+      problems+=" $field=${value:-missing}"
+    elif [[ "$field" == "failed" ]]; then
+      ((value <= max_failed)) || problems+=" $field=$value"
+    elif [[ "$value" != "0" ]]; then
+      problems+=" $field=$value"
+    fi
+  done
+  if [[ -n "$problems" ]]; then
+    log "FAILED $(basename "$out"):$problems"
     return 1
   fi
-  log "clean $(basename "$out"): 0 lost, 0 duplicate"
+  log "clean $(basename "$out"): 0 lost, 0 unfinished, 0 duplicate, executions within budget"
 }

@@ -42,6 +42,6 @@ export function streamRun(session) {
     "stream 200": (r) => r.status === 200,
     "stream completed": (r) => typeof r.body === "string" && /^event: result$/m.test(r.body)
   });
-  record(response, ok);
+  record(response, ok, seq);
   if (ok) streamedRuns.add(1);
 }

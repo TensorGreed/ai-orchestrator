@@ -5,7 +5,7 @@
 #   1. kills a worker that does not lead with SIGKILL, and starts it again 10 s later;
 #   2. restarts an API replica (SIGTERM, drain, start);
 #   3. pauses the leading worker for 60 s (frozen, connections open), then resumes it.
-# Then it waits for the queue to settle and checks that no accepted run was lost or ran twice. Runs the worker-loss
+# Then it waits for the queue to settle and checks that no accepted run was lost (by run number), left unfinished, or ran twice (history, queue and the mock call counters). Runs the worker-loss
 # rules dead-lettered as "interrupted" are reported, not counted as lost: they are recorded and wait for a retry.
 #
 #   ops/loadtest/chaos.sh                 W2 at CHAOS_W2_RATE (3/s) and W1 at CHAOS_W1_RATE (5/s) for 150 s
@@ -26,18 +26,22 @@ wait_ready
 mock_reset
 mkdir -p "$RESULTS_DIR"
 
-start_load w2 "$W2_RATE" "${DURATION_S}s"
-W2_ID=$LOAD_RUN_ID W2_OUT=$LOAD_OUT W2_PID=$LOAD_PID
-start_load w1 "$W1_RATE" "${DURATION_S}s"
-W1_ID=$LOAD_RUN_ID W1_OUT=$LOAD_OUT W1_PID=$LOAD_PID
-PAUSED=""
+PAUSED="" W2_ID="" W2_OUT="" W1_ID="" W1_OUT=""
 # shellcheck disable=SC2317 # called by the EXIT trap
 cleanup() {
   if [[ -n "$PAUSED" ]]; then docker unpause "$PAUSED" >/dev/null 2>&1 || true; fi
   stop_samplers "$W2_OUT"
   stop_samplers "$W1_OUT"
+  if [[ -n "$W2_ID" ]]; then stop_load "$W2_ID"; fi
+  if [[ -n "$W1_ID" ]]; then stop_load "$W1_ID"; fi
 }
 trap cleanup EXIT
+trap 'exit 130' INT TERM
+
+start_load w2 "$W2_RATE" "${DURATION_S}s"
+W2_ID=$LOAD_RUN_ID W2_OUT=$LOAD_OUT W2_PID=$LOAD_PID
+start_load w1 "$W1_RATE" "${DURATION_S}s"
+W1_ID=$LOAD_RUN_ID W1_OUT=$LOAD_OUT W1_PID=$LOAD_PID
 
 EVENTS="$W2_OUT/chaos-events.txt"
 T0=$SECONDS
@@ -74,9 +78,8 @@ docker unpause "$leader" >/dev/null
 PAUSED=""
 event "unpaused $leader; leader now: $(leader_container)"
 
-failed=0
-finish_load "$W2_ID" "$W2_OUT" "$W2_PID" || failed=1
-finish_load "$W1_ID" "$W1_OUT" "$W1_PID" || failed=1
+finish_load "$W2_ID" "$W2_OUT" "$W2_PID"
+finish_load "$W1_ID" "$W1_OUT" "$W1_PID"
 
 # Recovery: how long after each fault its jobs were taken back (a job with a lost attempt is claimed again, or
 # dead-lettered when a node had completed). Attributed to the last fault before that moment.
@@ -92,10 +95,15 @@ finish_load "$W1_ID" "$W1_OUT" "$W1_PID" || failed=1
                  round(max(extract(epoch FROM (q.taken_back - f.at)) * 1000)), string_agg(DISTINCT q.status, ',')
             FROM f JOIN q ON q.taken_back >= f.at AND q.taken_back < f.until
            GROUP BY f.fault ORDER BY f.fault" | sed 's/^/  /'
+  echo "dead-lettered runs: $(sed -n 's/^dead_lettered=//p' "$W2_OUT/reconcile.env") of $(sed -n 's/^accepted=//p' "$W2_OUT/reconcile.env") accepted; they are recorded as interrupted, not lost, and wait for a retry (the worker-loss policy decides whether they are re-run)"
   echo "dead-lettered jobs and why:"
   psql_q "SELECT coalesce(last_error, '?'), count(*) FROM ($(queue_rows_sql "$W2_ID")) q WHERE status = 'dead' GROUP BY 1" | sed 's/^/  /'
 } | tee "$W2_OUT/chaos-report.txt"
 
+# Errors other than "interrupted" are reported by the check but do not fail a chaos run; lost, unfinished and
+# duplicated runs do.
+failed=0
+export MAX_FAILED=${MAX_FAILED:-none}
 check_clean "$W2_OUT" || failed=1
 check_clean "$W1_OUT" || failed=1
 exit "$failed"

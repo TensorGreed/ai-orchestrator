@@ -17,14 +17,18 @@ export const runsAccepted = new Counter("runs_accepted");
 export const runsRejected = new Counter("runs_rejected");
 export const runsThrottled = new Counter("runs_throttled");
 
-/** Constant arrival rate: RATE runs per second whatever the latency, so a slow system shows up as queueing. */
+/**
+ * Constant arrival rate: RATE runs per second whatever the latency, so a slow system shows up as queueing. Fractional
+ * rates work (0.5 is 5 runs per 10 s).
+ */
 export function arrivalScenario(exec, rate, extra = {}) {
-  const perSecond = Math.max(1, Math.round(rate));
+  const perTenSeconds = Math.max(1, Math.round(rate * 10));
+  const perSecond = Math.max(1, Math.ceil(rate));
   return {
     executor: "constant-arrival-rate",
     exec,
-    rate: perSecond,
-    timeUnit: "1s",
+    rate: perTenSeconds,
+    timeUnit: "10s",
     duration: DURATION,
     preAllocatedVUs: Math.min(500, perSecond * 4),
     maxVUs: Math.min(2000, perSecond * 40),
@@ -63,12 +67,18 @@ export function enqueue(session, workflowId, seq, body = {}) {
     JSON.stringify({ input: { ...tag }, customData: { ...tag }, ...body }),
     { headers: { "content-type": "application/json", cookie: session.cookie }, tags: { name: "enqueue" } }
   );
-  record(response, check(response, { "enqueue 200": (r) => r.status === 200 && r.json("queued") === true }));
+  record(response, check(response, { "enqueue 200": (r) => r.status === 200 && r.json("queued") === true }), seq);
   return response;
 }
 
-export function record(response, ok) {
-  if (ok) runsAccepted.add(1);
-  else if (response.status === 429) runsThrottled.add(1);
+/**
+ * Counts the outcome of one request. An accepted run also prints `accepted <seq>` (k6 writes it to stderr, which
+ * run.sh keeps in k6.txt), so the reconcile compares run numbers, not just counts.
+ */
+export function record(response, ok, seq) {
+  if (ok) {
+    runsAccepted.add(1);
+    console.log(`accepted ${seq}`);
+  } else if (response.status === 429) runsThrottled.add(1);
   else runsRejected.add(1);
 }

@@ -9,7 +9,7 @@
 #                                                (REMOVE_IMAGE=1 also removes the l2m-scale-api:local image)
 #
 # Each load run writes $RESULTS_DIR/<run id>/ (k6 output and summary, Postgres and container samples, metrics from
-# every replica, reconcile.env, report.txt) and fails when a run accepted by the API was lost or ran twice.
+# every replica, reconcile.env, report.txt) and fails when a run accepted by the API was lost, left unfinished or ran twice, or ended in an error (MAX_FAILED).
 # Needs docker (with compose), curl and jq. k6 runs in the grafana/k6 container.
 set -euo pipefail
 # shellcheck source=lib.sh source-path=SCRIPTDIR
@@ -22,9 +22,11 @@ load() {
   mkdir -p "$RESULTS_DIR"
   wait_ready
   mock_reset
+  CURRENT_OUT="" CURRENT_ID=""
+  trap 'stop_samplers "${CURRENT_OUT:-}"; if [[ -n "${CURRENT_ID:-}" ]]; then stop_load "$CURRENT_ID"; fi' EXIT
+  trap 'exit 130' INT TERM
   start_load "$workload" "$rate" "$duration"
-  CURRENT_OUT=$LOAD_OUT
-  trap 'stop_samplers "${CURRENT_OUT:-}"' EXIT
+  CURRENT_OUT=$LOAD_OUT CURRENT_ID=$LOAD_RUN_ID
   finish_load "$LOAD_RUN_ID" "$LOAD_OUT" "$LOAD_PID"
   check_clean "$LOAD_OUT"
 }

@@ -16,5 +16,5 @@ export function w1() {
     headers: { "content-type": "application/json" },
     tags: { name: "webhook" }
   });
-  record(response, check(response, { "webhook 200": (r) => r.status === 200 }));
+  record(response, check(response, { "webhook 200": (r) => r.status === 200 }), seq);
 }
