@@ -88,10 +88,11 @@ worker crashed, was killed, or lost its database). Each one counts as an attempt
 - **The run had already finished**: the queue row is closed to match.
 - **The job used up its attempts** (three by default): it goes to the dead-letter queue with `worker lost`.
 
-Approval resumes follow the same rules. A resume counts the nodes it completes after the decision (on its queue
-row, since the run's record still reads as the pause): a lost resume with none goes back to the queue and resumes from
-the recorded decision on another worker; one with a completed node is marked `interrupted: worker lost` and
-dead-lettered, and its paused state is removed with it, so approval recovery does not drive it again.
+Approval resumes follow the same rules, on the resume's own queue row (the run's record still reads as the pause).
+Re-entering the decided gate does not count: a lost resume that started no other node goes back to the queue and
+resumes from the recorded decision on another worker. Once any node after the gate had started (an agent mid-run, a
+call in flight), the resume is marked `interrupted: worker lost` and dead-lettered, and its paused state is removed
+with it, so approval recovery does not drive it again.
 
 Without cluster mode the earlier stuck-job sweep (`QUEUE_STUCK_JOB_TIMEOUT_MS`) still applies. It never touches a
 leased job: those are the reaper's alone.

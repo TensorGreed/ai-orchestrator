@@ -500,7 +500,7 @@ run("the queue across replicas on one Postgres database", () => {
       [executionId]
     ))[0];
 
-  it("a drain during a queued approval resume gives it back with its paused state; another worker resumes it", async () => {
+  it("a drain while a resume's call after the gate is in flight: interrupted and dead-lettered, never re-run (the call may have acted)", async () => {
     const server = await callServer();
     try {
       await database();
@@ -514,23 +514,56 @@ run("the queue across replicas on one Postgres database", () => {
       await until(() => server.hits() === 1, "the resume to reach the call after the gate");
       await w1.lifecycle.drain(100);
 
-      expect(await api.store.getExecutionHistory(executionId)).toMatchObject({ status: "waiting_approval" });
-      expect((await api.store.getWorkflowExecutionState(executionId))?.status).toBe("resuming");
-      expect((await api.store.listApprovalRequestsForExecution(executionId)).map((request) => request.status)).toEqual(["approved"]);
-      expect(await resumeJob(executionId)).toMatchObject({ status: "pending", attempts: 0, claim_token: null });
-      expect(await api.store.listDlqItems()).toEqual([]);
+      // Nothing completed after the gate, but the call had started: the production marker is on the resume's claim.
+      expect(await api.store.getExecutionHistory(executionId)).toMatchObject({ status: "error", error: WORKER_SHUTDOWN_INTERRUPTED_ERROR });
+      expect(await resumeJob(executionId)).toMatchObject({ status: "dead", attempts: 0, nodes_completed: 0 });
+      expect(await api.store.getWorkflowExecutionState(executionId)).toBeNull();
+      expect((await api.store.listDlqItems()).map((item) => item.finalError)).toEqual([WORKER_SHUTDOWN_INTERRUPTED_ERROR]);
 
       server.release();
       const w2 = await addReplica("worker-2", "worker");
-      await until(async () => (await api.store.getExecutionHistory(executionId))?.status === "success", "another worker to resume it", 30_000);
-      // The history is final before the paused state is cleared and the queue row settles, so wait for those too.
-      await until(async () => (await api.store.getWorkflowExecutionState(executionId)) === null, "the paused state to be cleared");
-      await until(async () => (await resumeJob(executionId))?.status === "completed", "the resume to settle");
-      expect(w2.ran).toEqual([executionId]);
+      await until(() => w2.queue!.inFlightCount() === 0 && w1.queue!.inFlightCount() === 0, "the workers to be idle");
+      expect(await sql(`SELECT id FROM execution_queue WHERE status IN ('pending', 'running')`)).toEqual([]);
+      expect(w2.ran).toEqual([]);
+      expect(server.hits()).toBe(1);
     } finally {
       await server.close();
     }
   }, 90_000);
+
+  it("a resume that re-enters only its decided gate never marks side effects on its claim", async () => {
+    await database();
+    const api = await addReplica("api-0", "api");
+    const w1 = await addReplica("worker-1", "worker");
+    const requester = await builderCookie(api, "requester");
+    const lead = await builderCookie(api, "lead");
+    // Nothing follows the approved branch (the output is on the rejected one): the resume runs the gate and ends.
+    const workflow = {
+      id: "wf-gate-only",
+      name: "wf-gate-only",
+      schemaVersion: "1.0.0",
+      workflowVersion: 1,
+      nodes: [
+        node("input", "text_input", { text: "hi" }),
+        node("gate", "approval_gate", { message: "Go on?", approverRoles: ["builder", "admin"], timeoutMinutes: 60 }),
+        node("sent", "output", { responseTemplate: "rejected" })
+      ],
+      edges: [
+        { id: "e0", source: "input", target: "gate" },
+        { id: "e1", source: "gate", target: "sent", sourceHandle: "rejected" }
+      ]
+    } as Workflow;
+    const executionId = await pausedRun(api, requester, workflow);
+    await approve(w1, lead, executionId);
+    await until(async () => (await resumeJob(executionId))?.status === "completed", "the resume to settle", 30_000);
+    const [row] = await sql<{ effects_token: string | null; effects_started: number }>(
+      `SELECT effects_token, effects_started FROM execution_queue WHERE execution_id = $1 AND id <> $1`,
+      [executionId]
+    );
+    expect(row!.effects_token).not.toBeNull();
+    expect(Number(row!.effects_started)).toBe(0);
+    expect(w1.ran).toEqual([executionId]);
+  }, 60_000);
 
   it("a drain after a resume's node completed: interrupted and dead-lettered and its paused state removed, and no worker runs it again", async () => {
     const server = await callServer();
@@ -607,7 +640,8 @@ run("the queue across replicas on one Postgres database", () => {
       const executionId = await pausedRun(api, requester, gatedWorkflow("wf-sent-resume", server.port, { after: true }));
       await approve(leader, lead, executionId);
       await dyingWorker("doomed", async (_payload, context, store) => {
-        // The call after the gate completed under the dead worker's claim.
+        // As a real worker: the call after the gate started (the marker) and completed under the dead worker's claim.
+        expect(await store.markQueueEffectsStarted({ queueItemId: context.queueItemId, claimToken: context.claimToken! })).toBe(true);
         expect(await store.recordQueueJobProgress({ queueItemId: context.queueItemId, claimToken: context.claimToken! })).toBe(true);
       });
       await until(async () => (await api.store.getExecutionHistory(executionId))?.status === "error", "the run to be interrupted", 30_000);

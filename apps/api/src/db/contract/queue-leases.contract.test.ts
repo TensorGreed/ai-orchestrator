@@ -347,21 +347,34 @@ describeStoreContract("store contract: leased queue claims", (ctx) => {
     expect(await store.listDlqItems()).toEqual([]);
   });
 
-  it("a lost approval resume that completed a node is interrupted and dead-lettered, and its paused state is gone", async () => {
+  it("a lost approval resume whose node beyond the gate started (an agent mid-run, nothing completed) is interrupted and dead-lettered, and its paused state is gone", async () => {
     const store = ctx.store();
     await decidedPause(store, "run-s");
     await store.enqueueExecution({ id: "run-s:req:1", workflowId: "wf", payload: resumePayload("run-s"), scheduledAt: past(1_000) });
     const [claim] = await store.claimQueueItems({ limit: 1, owner: "w1", pools: ["default"] });
     const fence = { queueItemId: claim!.id, claimToken: claim!.claimToken };
-    expect(await store.recordQueueJobProgress({ ...fence, claimToken: "stale" })).toBe(false);
-    expect(await store.recordQueueJobProgress(fence)).toBe(true);
+    // The worker re-entered the gate (no mark) and then started the agent after it: the marker, and no completed node.
+    expect(await store.markQueueEffectsStarted({ ...fence, claimToken: "stale" })).toBe(false);
+    expect(await store.markQueueEffectsStarted(fence)).toBe(true);
     const reaped = await until(() => store.reapExpiredQueueLeases({ leaseMs: 1 }), "the reap");
     expect(reaped.map((outcome) => [outcome.id, outcome.decision])).toEqual([["run-s:req:1", "interrupt"]]);
     expect(await store.recordQueueJobProgress(fence)).toBe(false);
+    expect(await store.markQueueEffectsStarted(fence)).toBe(false);
     expect(await store.getExecutionHistory("run-s")).toMatchObject({ status: "error", error: WORKER_LOST_INTERRUPTED_ERROR });
     // Approval recovery lists only runs in `resuming`: this one has one way forward, the dead-letter entry.
     expect(await store.getWorkflowExecutionState("run-s")).toBeNull();
     expect((await store.listDlqItems()).map((item) => [item.originalId, item.finalError])).toEqual([["run-s:req:1", WORKER_LOST_INTERRUPTED_ERROR]]);
+  });
+
+  it("a lost approval resume that only counted progress without the marker (a tracked claim) is re-queued: the marker decides", async () => {
+    const store = ctx.store();
+    await decidedPause(store, "run-q");
+    await store.enqueueExecution({ id: "run-q:req:1", workflowId: "wf", payload: resumePayload("run-q"), scheduledAt: past(1_000) });
+    const [claim] = await store.claimQueueItems({ limit: 1, owner: "w1", pools: ["default"] });
+    expect(await store.recordQueueJobProgress({ queueItemId: claim!.id, claimToken: claim!.claimToken })).toBe(true);
+    const reaped = await until(() => store.reapExpiredQueueLeases({ leaseMs: 1 }), "the reap");
+    expect(reaped.map((outcome) => [outcome.id, outcome.decision])).toEqual([["run-q:req:1", "requeue"]]);
+    expect((await store.getWorkflowExecutionState("run-q"))?.status).toBe("resuming");
   });
 
   it("a lost approval resume out of attempts is dead-lettered as worker lost; one whose run moved on is finished", async () => {
@@ -398,11 +411,12 @@ describeStoreContract("store contract: leased queue claims", (ctx) => {
     expect(await store.listDlqItems()).toEqual([]);
   });
 
-  it("a shutdown release interrupts an approval resume after a node completed: dead-lettered, its paused state gone", async () => {
+  it("a shutdown release interrupts an approval resume after a node beyond the gate started: dead-lettered, its paused state gone", async () => {
     const store = ctx.store();
     await decidedPause(store, "run-w");
     await store.enqueueExecution({ id: "run-w:req:1", workflowId: "wf", payload: resumePayload("run-w"), scheduledAt: past(1_000) });
     const [claim] = await store.claimQueueItems({ limit: 1, owner: "w1", pools: ["default"] });
+    expect(await store.markQueueEffectsStarted({ queueItemId: claim!.id, claimToken: claim!.claimToken })).toBe(true);
     expect(await store.recordQueueJobProgress({ queueItemId: claim!.id, claimToken: claim!.claimToken })).toBe(true);
     expect(await store.releaseQueueItem({ id: claim!.id, claimToken: "stale" })).toBeNull();
     expect(await store.releaseQueueItem({ id: claim!.id, claimToken: claim!.claimToken })).toMatchObject({ decision: "interrupt", attempts: 0 });

@@ -2,8 +2,9 @@
  * Phase 13.1 — queue leases: what happens to a job whose worker was lost (its lease ran out) or that a worker gave
  * back while shutting down. Shared by both stores so they decide identically.
  *
- * Worker-loss policy (user decision 2): a run is re-queued automatically only if none of its nodes had completed;
- * a run with a completed node is marked `interrupted: worker lost` and dead-lettered for a person to retry, so side
+ * Worker-loss policy (user decision 2): a run is re-queued automatically only while no node other than its
+ * effect-free entry nodes (for a resume, its decided gate) had started under the claim; otherwise it is marked
+ * `interrupted: worker lost` and dead-lettered for a person to retry, so side
  * effects such as e-mails or tool writes are never repeated silently. A lost worker always counts an attempt, so a
  * job that kills its worker every time ends in the dead-letter queue instead of looping. A shutdown release follows
  * the same rules without counting an attempt.
@@ -96,14 +97,14 @@ export interface LostJobInput {
   resume: boolean;
   /** A resume only: the status of the run's paused state (`resuming` while the resume is due), or null when it is gone. */
   resumeStateStatus?: string | null;
-  /** A resume only: nodes the resume completed under its claims (the queue row's nodes_completed). */
+  /** A resume only: nodes the resume completed under its claims (the queue row's nodes_completed); untracked claims only. */
   resumeNodesCompleted?: number;
   /** The run's history record, if one was written. */
   history: { status: string; completedAt: unknown; nodeResultsJson: unknown } | null;
   /**
    * Whether the claim that was lost tracked side effects (its effects_token is its claim token), and if so whether a
-   * node other than a trigger/entry node had started under it. Untracked claims (an instance without this) keep the
-   * earlier rule: interrupted once a node completed.
+   * node other than a trigger/entry node (for a resume, other than the decided gate) had started under it. Untracked
+   * claims (an instance without this) keep the earlier rule: interrupted once a node completed.
    */
   effects?: { tracked: boolean; started: boolean };
 }
@@ -127,8 +128,14 @@ export function decideLostJob(input: LostJobInput): LostJobDecision {
     // at a later gate, finished, or was handed back to waiting): nothing runs it again.
     if (input.history && isFinalRunRecord(input.history)) return "finished";
     if (input.resumeStateStatus !== "resuming") return "finished";
-    // Like any run, lost or given back at shutdown: re-run only if nothing completed since the resume started.
-    if ((input.resumeNodesCompleted ?? 0) > 0) return "interrupt";
+    // Like any run, lost or given back at shutdown: re-run only while no node other than the decided gate started
+    // under a tracked claim (an agent's tool calls happen before its node completes). An untracked claim (an instance
+    // without the marker) keeps the earlier rule: nothing completed since the resume started.
+    if (input.effects?.tracked) {
+      if (input.effects.started) return "interrupt";
+    } else if ((input.resumeNodesCompleted ?? 0) > 0) {
+      return "interrupt";
+    }
     // A clean shutdown gives a resume that did nothing back with its paused state intact; the next worker resumes it
     // from the decision.
     if (!input.countsAttempt) return "requeue";

@@ -4475,12 +4475,14 @@ export async function createApp(
   };
   /**
    * Phase 13.1 — the hooks a queued run gets from its job: before each node starts, a leased claim checks its lease is
-   * still confirmed (a stalled worker stops instead of running the node). `onNodeComplete` is added for resumes.
+   * still confirmed (a stalled worker stops instead of running the node). `onNodeComplete` is added for resumes, and
+   * `resumedNodeId` (the decided gate a resume re-enters) does not count as a side effect.
    */
   const queueJobHooks = (
     job: QueueJobContext,
     hooks: WorkflowExecutionEventHooks | undefined,
-    onNodeComplete?: WorkflowExecutionEventHooks["onNodeComplete"]
+    onNodeComplete?: WorkflowExecutionEventHooks["onNodeComplete"],
+    resumedNodeId?: string
   ): WorkflowExecutionEventHooks | undefined => {
     if (job.claimToken === null) return hooks;
     let effectsMarked = false;
@@ -4492,7 +4494,7 @@ export async function createApp(
         // Phase 13.1 — the worker-loss policy: before the first node that is not a trigger/entry node runs, the claim
         // records that side effects may begin, so a lost worker's job is not re-run from the start. A refused write
         // means the claim is gone: the run stops here. A failed write fails the run before the node runs.
-        if (!effectsMarked && !isEntryNodeType(event.nodeType)) {
+        if (!effectsMarked && !isEntryNodeType(event.nodeType) && event.nodeId !== resumedNodeId) {
           if (!(await store.markQueueEffectsStarted({ queueItemId: job.queueItemId, claimToken: job.claimToken! }))) {
             job.leaseLost("the side-effect marker write was refused");
             return;
@@ -4614,7 +4616,7 @@ export async function createApp(
                     app.log.warn({ executionId: job.executionId, error: error instanceof Error ? error.message : String(error) }, "Failed to record a queued resume's progress");
                   }
                 }
-              : undefined)
+              : undefined, state.waitingNodeId)
           : undefined;
         const result = await runWorkflowExecution({
           ...(hooks ? { hooks } : {}),

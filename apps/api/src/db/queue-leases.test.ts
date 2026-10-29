@@ -16,6 +16,19 @@ describe("entry node types", () => {
   });
 });
 
+describe("decideLostJob: approval resumes", () => {
+  const resume: LostJobInput = { ...base, resume: true, resumeStateStatus: "resuming", history: { status: "waiting_approval", completedAt: null, nodeResultsJson: "[]" } };
+  it("a tracked resume follows the marker, not the completed-node count", () => {
+    expect(decideLostJob({ ...resume, resumeNodesCompleted: 0, effects: { tracked: true, started: true } })).toBe("interrupt");
+    expect(decideLostJob({ ...resume, resumeNodesCompleted: 0, effects: { tracked: true, started: false } })).toBe("requeue");
+    expect(decideLostJob({ ...resume, resumeNodesCompleted: 0, countsAttempt: false, effects: { tracked: true, started: true } })).toBe("interrupt");
+  });
+  it("an untracked resume (an older instance's claim) keeps the completed-node rule", () => {
+    expect(decideLostJob({ ...resume, resumeNodesCompleted: 1, effects: { tracked: false, started: false } })).toBe("interrupt");
+    expect(decideLostJob({ ...resume, resumeNodesCompleted: 0 })).toBe("requeue");
+  });
+});
+
 describe("decideLostJob: side effects", () => {
   it("a tracked claim is re-run until a node other than an entry node started, whatever history says", () => {
     const history = running([{ nodeId: "webhook", status: "success" }]);
