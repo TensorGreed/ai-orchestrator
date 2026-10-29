@@ -1,0 +1,17 @@
+/* Contrast fixes on the default theme, to at least 4.5:1 for normal-size text. */
+
+/* The language label on code blocks: the default grey is too light on the code background. */
+:root {
+  --vp-code-lang-color: #5f5f66;
+}
+
+.dark {
+  --vp-code-lang-color: rgba(235, 235, 245, 0.6);
+}
+
+/* White on the light theme's brand buttons (the home page's hero actions). */
+:root:not(.dark) {
+  --vp-button-brand-bg: var(--vp-c-brand-2);
+  --vp-button-brand-hover-bg: var(--vp-c-brand-1);
+  --vp-button-brand-active-bg: var(--vp-c-brand-1);
+}

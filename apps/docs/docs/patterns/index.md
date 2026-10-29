@@ -1,3 +1,7 @@
+---
+description: "Agent workflow patterns for L2M with runnable samples: zero-key MCP agent, webhook to agent, Supervisor and worker swarm, workflow as MCP tool, RAG, branching and more."
+---
+
 # Pattern library
 
 Battle-tested topologies you can crib from when designing a workflow. Each pattern names the problem it solves, sketches the topology, points to a runnable sample, and calls out the sharp edges. Patterns are ordered roughly by how often they appear in real deployments.

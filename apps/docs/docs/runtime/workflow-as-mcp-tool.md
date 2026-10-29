@@ -1,3 +1,7 @@
+---
+description: "Expose any L2M workflow as a Model Context Protocol tool with the Expose as MCP Tool trigger, so other agents call a whole multi-step workflow as one tool."
+---
+
 # Expose a Workflow as an MCP Tool
 
 The `mcp_server_trigger` node ("Expose as MCP Tool") turns any L2M workflow into a Model Context Protocol tool that other agents can call. The agent doesn't know, and doesn't need to know, that the tool it's calling is a multi-node workflow with its own LLMs, retrieval, branching and side effects.

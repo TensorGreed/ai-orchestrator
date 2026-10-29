@@ -1,3 +1,7 @@
+---
+description: "Authentication and access control in L2M: session cookies, admin, builder, operator and viewer roles, projects, OIDC and SAML single sign-on, and MFA."
+---
+
 # Authentication and RBAC
 
 ## Session model

@@ -1,3 +1,7 @@
+---
+description: "The L2M MCP control plane: one place for every MCP server your agents call, with fleet health, a tool catalogue, policies, toolsets, the gateway and change history."
+---
+
 # MCP control plane
 
 The **MCP** section of the sidebar gathers everything about the MCP servers your agents call: their health, their tools, the rules that govern them, the gateway that re-exposes them and what changed. Builders and admins see the section; operators and viewers do not. Builders can read every page; actions that change the registry, policy, toolsets or clients stay admin-only inside the pages.

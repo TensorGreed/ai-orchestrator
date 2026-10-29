@@ -1,3 +1,7 @@
+---
+description: "The L2M Guard engine inspects content flowing between users, models and tools on five channels, decides what to do with it and records why. A standalone library."
+---
+
 # Guard engine
 
 L2M Guard is a security proxy for AI traffic. It inspects what flows between users, models and tools, decides what to do with it, and records why. The engine lives in `@ai-orchestrator/guard-sdk` as a standalone library: it knows nothing about workflows, nodes or HTTP, and it never makes a network call of its own.

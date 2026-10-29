@@ -2,8 +2,11 @@
 //   /        the marketing landing (`docs/`)
 //   /docs/   the VitePress build (`apps/docs/docs/.vitepress/dist`)
 //   /demo/   the static live demo (`apps/web/dist-demo`), only when it built
+//   /sitemap.xml  one sitemap for the site: the indexable landing pages, then every docs page
+//                 from the VitePress sitemap (which is folded in and not published on its own);
+//                 the demo is an app shell marked noindex and stays out of it
 //
-// The landing, the docs and the CNAME check are required. The demo is not:
+// The landing, the docs, their sitemap and the CNAME check are required. The demo is not:
 // without a usable demo build the site is assembled without /demo/ and a
 // GitHub Actions warning says so.
 //
@@ -63,11 +66,37 @@ const docsBuild = path.join(repoRoot, "apps", "docs", "docs", ".vitepress", "dis
 if (!existsSync(path.join(docsBuild, "index.html"))) fail(`No docs build at ${path.relative(repoRoot, docsBuild)}.`);
 await fs.cp(docsBuild, path.join(out, "docs"), { recursive: true });
 
-// 3. Pages needs the CNAME at the site root.
+// 3. One sitemap at the root: the landing pages (not 404.html or any page marked noindex), then the docs.
+const SITE = "https://lsquarem.com";
+const docsSitemap = path.join(out, "docs", "sitemap.xml");
+if (!existsSync(docsSitemap)) fail("The docs build has no sitemap.xml (VitePress `sitemap` option).");
+const docsUrls = [...(await fs.readFile(docsSitemap, "utf8")).matchAll(/<loc>\s*([^<\s]+)\s*<\/loc>/g)].map((match) => match[1]);
+if (docsUrls.length === 0) fail("The docs sitemap lists no pages.");
+const landingUrls = [];
+for (const name of (await fs.readdir(out)).filter((file) => file.endsWith(".html") && file !== "404.html").sort()) {
+  const html = await fs.readFile(path.join(out, name), "utf8");
+  if (/<meta\s+name="robots"\s+content="[^"]*noindex/i.test(html)) continue;
+  landingUrls.push(name === "index.html" ? `${SITE}/` : `${SITE}/${name}`);
+}
+landingUrls.sort((a, b) => (a === `${SITE}/` ? -1 : b === `${SITE}/` ? 1 : a.localeCompare(b)));
+const escapeXml = (value) => value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+const unescapeXml = (value) => value.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
+const sitemap = [
+  '<?xml version="1.0" encoding="UTF-8"?>',
+  '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">',
+  ...[...new Set([...landingUrls, ...docsUrls.map(unescapeXml)])].map((url) => `  <url><loc>${escapeXml(url)}</loc></url>`),
+  "</urlset>",
+  ""
+].join("\n");
+await fs.writeFile(path.join(out, "sitemap.xml"), sitemap);
+await fs.rm(docsSitemap);
+console.log(`Wrote sitemap.xml: ${landingUrls.length} landing page(s) and ${docsUrls.length} docs page(s)`);
+
+// 4. Pages needs the CNAME at the site root.
 const cname = path.join(out, "CNAME");
 if (!existsSync(cname) || !(await fs.readFile(cname, "utf8")).includes("lsquarem.com")) fail("CNAME for lsquarem.com is missing from the site root.");
 
-// 4. The live demo at /demo/, when it built.
+// 5. The live demo at /demo/, when it built.
 const demoBuild = path.join(repoRoot, "apps", "web", "dist-demo");
 if (await demoBuildIsUsable(demoBuild)) {
   await fs.cp(demoBuild, path.join(out, "demo"), { recursive: true });

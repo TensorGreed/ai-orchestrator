@@ -1,3 +1,7 @@
+---
+description: "Reference for the 2 nodes in the L2M Agent category, with every config field and default. Tool-calling agent runtimes and the multi-turn memory + artifact stores that back them."
+---
+
 <!--
   Generated from packages/shared/src/definitions.ts.
   DO NOT EDIT BY HAND — run `pnpm --filter @ai-orchestrator/docs gen:nodes`

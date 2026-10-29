@@ -1,3 +1,7 @@
+---
+description: "Save known-good runs as golden runs and replay a changed L2M workflow against them, with external calls answered from the recording, to get a pass or fail verdict."
+---
+
 # Golden runs and replay
 
 A **golden run** is a run you keep as a reference: what went in, what every node returned and which MCP calls it made. **Replay** runs a changed workflow (the draft, or a saved version) against that reference, with every node that reaches outside L2M and every code node answered from the recording, then shows what changed and gives a verdict: **pass**, **fail** or **inconclusive**. Use it to check a prompt, model or tool change before it reaches anyone.

@@ -1,3 +1,7 @@
+---
+description: "Ship l2m-nodes-* npm packages that add LLM providers, MCP transports and connectors to a running L2M instance without changing its source; admins install them by name."
+---
+
 # Community Nodes
 
 The community-node SDK lets third-party developers ship `l2m-nodes-*` npm packages that extend a running L2M instance with new LLM providers, MCP transports, and connectors — without modifying L2M source. Admins install them by package name from the Studio Settings UI; the loader validates each package's manifest, runs the registration function, and the new adapters are immediately usable.

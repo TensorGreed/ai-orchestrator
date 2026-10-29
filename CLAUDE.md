@@ -57,7 +57,7 @@ The split between SDK packages, the execution engine, and the Fastify app is del
 
 6. **`apps/web`** — React 19 + React Flow + Zustand. `WorkflowCanvasArea.tsx`, `WorkflowCanvasNode.tsx`, `NodeConfigModal.tsx` are the editor core. `lib/api.ts` is the thin API client (uses `credentials: "include"` for session cookies). `build:widget` produces an embeddable bundle via `widget/`.
 
-7. **`apps/docs`** — VitePress product docs. The repo-root `docs/` folder is a **legacy static site** — don't edit it unless specifically asked.
+7. **`apps/docs`** — VitePress product docs, served at lsquarem.com/docs/. The repo-root `docs/` folder is the **live marketing landing** at lsquarem.com/ (static HTML/CSS/JS, plus `robots.txt` and the root `404.html`); `scripts/assemble-pages-site.mjs` puts the landing, the docs and the demo together and writes the root `sitemap.xml`, and `scripts/check-pages-site.mjs` checks the result. Edit `docs/` only when the task is about the landing.
 
 ### Agent port semantics (non-DAG edges)
 

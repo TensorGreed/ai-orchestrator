@@ -1,3 +1,7 @@
+---
+description: "Reference for the 15 nodes in the L2M LLM category, with every config field and default. Chat-completion model adapters and prompt-template helpers."
+---
+
 <!--
   Generated from packages/shared/src/definitions.ts.
   DO NOT EDIT BY HAND — run `pnpm --filter @ai-orchestrator/docs gen:nodes`

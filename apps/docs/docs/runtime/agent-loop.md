@@ -1,3 +1,7 @@
+---
+description: "How the L2M agent loop runs: messages, tool discovery, model calls and tool execution until a final answer, plus attachment ports, the session tool cache and mid-run clarification."
+---
+
 # Agent Loop
 
 ## Execution model

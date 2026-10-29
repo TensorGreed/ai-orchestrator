@@ -1,3 +1,7 @@
+---
+description: "Every L2M HTTP API endpoint by area: auth and SSO, workflows, runs, MCP registry, tool policy and gateway, Guard, audit bundles, replay, releases, approvals, secrets and webhooks."
+---
+
 # API Endpoints
 
 ## Auth

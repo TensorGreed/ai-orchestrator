@@ -1,4 +1,6 @@
-// Checks the assembled lsquarem.com site (see scripts/assemble-pages-site.mjs) in a real browser:
+// Checks the assembled lsquarem.com site (see scripts/assemble-pages-site.mjs). First the static
+// search-engine checks in scripts/pages-seo-checks.mjs (robots.txt, sitemap.xml, title, description
+// and canonical on every indexable page, noindex on /demo/, the landing's JSON-LD), then in a real browser:
 //   - the hero's primary button goes to /demo/ and the demo loads;
 //   - the nav's "Live demo" button is visible at 360 px and 1440 px;
 //   - every internal link and asset on the landing pages answers 200, and every #fragment exists;
@@ -9,8 +11,9 @@
 //
 //   pnpm docs:build && pnpm --filter @ai-orchestrator/web build:demo
 //   node scripts/assemble-pages-site.mjs
-//   node scripts/check-pages-site.mjs [--site <dir>] [--port <n>]
-//   (needs a Playwright Chromium: `pnpm exec playwright install chromium`, or CHROMIUM_EXECUTABLE_PATH)
+//   node scripts/check-pages-site.mjs [--site <dir>] [--port <n>] [--seo-only]
+//   (needs a Playwright Chromium: `pnpm exec playwright install chromium`, or CHROMIUM_EXECUTABLE_PATH;
+//   `--seo-only` runs the static checks alone and needs no browser)
 //
 // The site is served by a small static server that resolves paths the way GitHub Pages does
 // (`/docs/foo` serves `foo.html`, `/demo` redirects to `/demo/`). Exit 1 on any failure.
@@ -19,7 +22,7 @@ import { createServer } from "node:http";
 import { existsSync, promises as fs, statSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { chromium } from "@playwright/test";
+import { checkSeo } from "./pages-seo-checks.mjs";
 
 const args = process.argv.slice(2);
 const option = (name, fallback) => {
@@ -37,6 +40,16 @@ if (!existsSync(path.join(site, "index.html")) || !existsSync(path.join(site, "d
   console.error(`No assembled site with a demo at ${site}. Build the docs and the demo, then run scripts/assemble-pages-site.mjs.`);
   process.exit(2);
 }
+
+console.log("Search engines");
+const seo = await checkSeo(site);
+for (const message of seo.passes) console.log(`  ✓ ${message}`);
+for (const message of seo.failures) console.log(`  ✗ ${message}`);
+if (args.includes("--seo-only")) {
+  console.log(seo.failures.length > 0 ? `\n${seo.failures.length} check(s) failed.` : "\nAll checks passed.");
+  process.exit(seo.failures.length > 0 ? 1 : 0);
+}
+const { chromium } = await import("@playwright/test");
 
 const types = {
   ".html": "text/html; charset=utf-8",
@@ -81,7 +94,7 @@ const server = createServer(async (req, res) => {
 await new Promise((resolve) => server.listen(port, "127.0.0.1", resolve));
 const origin = `http://127.0.0.1:${port}`;
 
-const failures = [];
+const failures = [...seo.failures];
 const fail = (message) => {
   failures.push(message);
   console.log(`  ✗ ${message}`);
@@ -118,7 +131,7 @@ async function scrollThrough(page) {
   await page.waitForLoadState("networkidle");
 }
 
-const landingPages = ["/", "/integrations.html"];
+const landingPages = ["/", "/integrations.html", "/404.html"];
 
 // 1. Hero primary button → /demo/, and the demo loads.
 console.log("Hero call to action");

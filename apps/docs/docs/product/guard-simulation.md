@@ -1,3 +1,7 @@
+---
+description: "Simulate a Guard profile change on recent golden and captured runs before saving it, and compare the outcome at every checkpoint with the current profile. No model calls."
+---
+
 # Guard policy simulation
 
 Before you save a change to a guard profile, you can see what it would do to real traffic. **Simulate on recent traffic** replays the most recent [golden runs](./golden-runs.md) and [captured runs](./production-capture.md) still waiting in the inbox of the workflows that use the profile twice: once under the profiles in force now, and once with your changed settings. It then compares the guard's outcome at every checkpoint of the two replays. The result is your change **compared with the current profile**, whatever the profiles were when each run was recorded.

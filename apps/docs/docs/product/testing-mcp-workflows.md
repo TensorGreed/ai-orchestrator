@@ -1,3 +1,7 @@
+---
+description: "Keep MCP-dependent L2M workflows testable: record and replay MCP calls as cassettes, generate snapshot mock servers, and fail CI with l2m mcp check."
+---
+
 # Testing MCP workflows
 
 MCP servers change, go down and return different answers from one run to the next. L2M gives you three tools to keep workflows that depend on them testable:

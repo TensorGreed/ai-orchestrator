@@ -1,3 +1,7 @@
+---
+description: "Built-in L2M knowledge bases: a SQLite-backed vector store with no external dependencies. Create one, ingest documents and query it from a RAG Retrieve node."
+---
+
 # Knowledge Bases (built-in persistent vector store)
 
 Phase 9.1 ships a SQLite-backed vector store with no external dependencies. Create a knowledge base, ingest documents (programmatically or via the upcoming Studio UI), and target it from a `rag_retrieve` node — chunks survive across workflow runs.

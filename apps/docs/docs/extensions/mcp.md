@@ -1,3 +1,7 @@
+---
+description: "How MCP tools reach L2M agents: MCP Tool nodes, the built-in HTTP and mock adapters, tool discovery and shortlisting, and best practices for wiring MCP servers."
+---
+
 # MCP Integration
 
 MCP tools are represented by `mcp_tool` nodes and exposed to agents as callable tool definitions.

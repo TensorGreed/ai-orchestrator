@@ -1,3 +1,7 @@
+---
+description: "The L2M visual workflow editor: the node palette, connections, node configuration, import and export, run logs, per-node status, common flow patterns and validation."
+---
+
 # Workflow Editor
 
 ## Core editor capabilities

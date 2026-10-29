@@ -1,3 +1,7 @@
+---
+description: "Track where each step's data came from and what it contains, sort models, servers and URLs into destination classes, and block, redact or require approval in L2M."
+---
+
 # Data labels and destinations
 
 You don't need any of this for simple workflows. Nothing here is on by

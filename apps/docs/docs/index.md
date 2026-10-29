@@ -1,5 +1,8 @@
 ---
 layout: home
+title: "L2M documentation: run and govern MCP agents, self-hosted"
+titleTemplate: false
+description: "Documentation for L2M, the open-source, self-hosted studio and runtime to build, run and govern MCP agents: tutorials, MCP control plane, approvals, audit and API reference."
 hero:
   name: L2M
   text: The MCP-native agent runtime

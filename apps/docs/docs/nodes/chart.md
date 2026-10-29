@@ -1,4 +1,5 @@
 ---
+description: "The L2M Chart node renders a Vega-Lite spec to SVG on the server, with no browser, for PDF reports, HTML email bodies and other workflow outputs."
 # Render `{{...}}` literally — they're workflow-template markers, not Vue interpolations.
 ---
 
