@@ -9,7 +9,7 @@
  *
  * A JS string can hold a lone UTF-16 surrogate. JSON.stringify escapes it as the ASCII text `\ud800`, but the drivers
  * store text as UTF-8, which has no form for it. pg turns it into U+FFFD on every Node version; better-sqlite3 does so
- * on Node 24, while on Node 20 (the runtime image, and CI) it writes the surrogate's 3-byte generalized UTF-8 form
+ * on Node 24, while on Node 20 (end of life; older deployments) it writes the surrogate's 3-byte generalized UTF-8 form
  * (WTF-8: ED A0 80 for U+D800), which reads back through the driver as three U+FFFD. Before this fix the writer hashed
  * the escaped surrogate and stored one of those, so verification could never match that row again and stopped there,
  * leaving every later row unchecked. One builder request (`POST /api/tags {"name":"\ud800"}`) was enough. Postgres

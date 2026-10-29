@@ -67,7 +67,7 @@ describe("N1: memory is bounded for many small allocations, results are capped, 
   });
 
   it("many small strings hit the expression limit, and the heap grows by at most the limit plus slack (mem2 PoC)", { timeout: 60_000 }, () => {
-    // A long deadline, so the memory limit is what stops each run even on a slow machine (filling 64 MB takes about 1 s on Node 20).
+    // A long deadline, so the memory limit is what stops each run even on a slow machine (filling 64 MB takes about 1 s on a typical machine).
     configureExpressionSandbox({ ...EXPRESSION_SANDBOX_DEFAULTS, timeoutMs: 20_000 });
     for (const body of ["a.push('x'.repeat(1000))", "a.push(String(a.length).padStart(1000, 'x'))", "a.push('x'.repeat(1000) + a.length)"]) {
       const before = quickJsActiveHeapBytes();

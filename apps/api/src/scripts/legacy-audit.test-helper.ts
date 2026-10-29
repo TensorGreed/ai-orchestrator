@@ -1,6 +1,6 @@
 /**
  * Test helper: audit rows the way builds before the audit-text fix wrote them to SQLite. The hash covers the text the
- * writer saw (lone surrogates, U+0000 as is); the stored bytes are what better-sqlite3 on Node 20 (the runtime image)
+ * writer saw (lone surrogates, U+0000 as is); the stored bytes are what better-sqlite3 on Node 20 (the former runtime image)
  * kept: a lone surrogate as its 3-byte generalized UTF-8 form (ED A0 80 for U+D800), U+0000 as a 0 byte. The bytes
  * are written with `CAST(? AS TEXT)`, so the row is the same whichever Node runs the test.
  */

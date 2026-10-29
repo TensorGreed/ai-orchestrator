@@ -426,7 +426,7 @@ describe("linear-time DLP: identical results to the previous regexes", () => {
 
 describe("linear-time DLP: time budget on 1 MB adversarial input", () => {
   const MB = 1_000_000;
-  // Generous for CI (Node 20, two slow cores); the previous code took minutes to hours on these.
+  // Generous for CI (two slow cores); the previous code took minutes to hours on these.
   const BUDGET_MS = 2_000;
   const units = [
     "1-", "a-1-", "a.", ".", "_", " ", "%", "9", "a", "a://", "eyJ-", "-----BEGIN PRIVATE KEY-----\n", "123 456 7890 ", "a@b.co ", "sk-", "1.", "ab.",
