@@ -19,6 +19,8 @@ describeStoreContract("store contract: workflows", (ctx) => {
     await store.upsertWorkflow(workflow("wf-a", { tags: ["Ops", "rag"] }), { createdBy: "u1" });
     await tick();
     await store.upsertWorkflow(workflow("wf-b", { name: "beta" }), { createdBy: "u2" });
+    // The list is newest-updated first: a distinct millisecond keeps the rename after wf-b's save.
+    await tick();
     await store.upsertWorkflow(workflow("wf-a", { name: "Alpha renamed", tags: ["Ops"] }), { createdBy: "u9" });
     const a = await store.getWorkflow("wf-a");
     expect(a).toMatchObject({ id: "wf-a", name: "Alpha renamed", tags: ["Ops"], projectId: "default" });
