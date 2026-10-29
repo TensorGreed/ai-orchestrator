@@ -59,20 +59,25 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: "20"
+          node-version: "24"
           cache: "pnpm"
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      # pg_dump / pg_restore must be at least the server's major version (16); point-in-time recovery runs its own
-      # throwaway cluster with the runner's initdb / pg_ctl / pg_basebackup.
-      - name: Postgres tools
+      # PostgreSQL 16, matching the service: pg_dump / pg_restore for the dump path, and initdb / pg_ctl /
+      # pg_basebackup for the point-in-time recovery path, which runs its own throwaway cluster. No main cluster is
+      # created, so nothing else listens on the service's port 5432.
+      - name: Postgres 16 tools
         run: |
           # The drill's work directory (instance logs, kept on failure) lands under TMPDIR.
           mkdir -p "$RUNNER_TEMP/dr-drill"
           echo "TMPDIR=$RUNNER_TEMP/dr-drill" >> "$GITHUB_ENV"
-          PG_BIN="$(ls -d /usr/lib/postgresql/*/bin | sort -V | tail -1)"
+          sudo mkdir -p /etc/postgresql-common/createcluster.d
+          echo "create_main_cluster = false" | sudo tee /etc/postgresql-common/createcluster.d/no-main-cluster.conf
+          sudo apt-get update -q
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q postgresql-16 postgresql-client-16
+          PG_BIN=/usr/lib/postgresql/16/bin
           echo "DR_DRILL_PG_BIN=$PG_BIN" >> "$GITHUB_ENV"
           echo "$PG_BIN" >> "$GITHUB_PATH"
           "$PG_BIN/pg_dump" --version
