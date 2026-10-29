@@ -63,6 +63,21 @@ export interface RunAccess {
 const notFound = (what: string): RunAccessDenial => ({ ok: false, status: 404, error: `${what} not found` });
 const forbidden = (permission: RunPermission): RunAccessDenial => ({ ok: false, status: 403, error: `Permission '${permission}' required for this workflow` });
 
+/**
+ * Who sees an MCP elicitation (the elicitation API and a run's event streams): like approvals, users who can read the
+ * run's workflow, and of those only admins, operators and the user who started the run (anyone when nobody did).
+ */
+export async function elicitationVisibleTo(
+  runAccess: RunAccess,
+  user: SafeUser,
+  record: { createdBy: string | null; workflowId: string }
+): Promise<boolean> {
+  return (
+    (user.role === "admin" || user.role === "operator" || !record.createdBy || record.createdBy === user.id) &&
+    (await runAccess.workflow(user, record.workflowId, "workflow:read")).ok
+  );
+}
+
 export function createRunAccess(deps: RunAccessDeps): RunAccess {
   const workflowVerdict = async (user: SafeUser, workflow: Workflow | null | undefined, permission: RunPermission, what: string): Promise<RunAccessDenial | null> => {
     if (user.role === "admin") return null;

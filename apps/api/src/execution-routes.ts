@@ -27,7 +27,7 @@ import {
 import type { MCPRegistry } from "@ai-orchestrator/mcp-sdk";
 import type { AppConfig } from "./config.js";
 import type { Store } from "./db/store.js";
-import type { RunAccess } from "./run-access.js";
+import { elicitationVisibleTo, type RunAccess } from "./run-access.js";
 import type { RunWorkflowExecutionInput, WorkflowExecutionEventHooks } from "./run-types.js";
 import {
   asRecord,
@@ -39,7 +39,8 @@ import {
 } from "./run-helpers.js";
 import { startSseHeartbeat } from "./sse-heartbeat.js";
 import { DISPATCH_SPEC_VERSION, type RunDispatcher } from "./services/run-dispatch.js";
-import { isRunSettled, type PersistedRun, type RunEventName, type RunRelay } from "./services/run-event-relay.js";
+import type { RunEventName, RunRelay } from "./services/run-event-relay.js";
+import { followExecution } from "./services/execution-follow.js";
 import type { SafeUser, UserRole } from "./services/auth-service.js";
 import type { ApprovalService } from "./services/approval-service.js";
 import type { BudgetService } from "./services/budget-service.js";
@@ -82,7 +83,7 @@ export interface ExecutionRoutesDeps {
   ) => Promise<void>;
   mcpCassetteService: Pick<McpCassetteService, "planReplay">;
   mcpRegistry: MCPRegistry;
-  mcpElicitationService: Pick<McpElicitationService, "subscribe">;
+  mcpElicitationService: Pick<McpElicitationService, "subscribe" | "get">;
   resolveRegisteredMcpServer: (registryServerId: string, actor?: SafeUser | null) => Promise<MCPServerConfig>;
   replayRunInputFor: (
     triggerType: string | null,
@@ -475,30 +476,27 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
     reply.raw.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache, no-transform", Connection: "keep-alive" });
     if (typeof reply.raw.flushHeaders === "function") reply.raw.flushHeaders();
     const stopHeartbeat = startSseHeartbeat(reply.raw, config.SSE_HEARTBEAT_INTERVAL_MS, () => closed);
-    let relay: RunRelay | null = null;
+    const follower = followExecution({
+      open: async (onEvent) => await openExecutionRelay(executionId, onEvent),
+      readExecution: async () => await store.getExecutionHistory(executionId),
+      // The elicitation API's own rule: a reattach shows no request that API would hide from this user.
+      elicitationVisible: async (elicitationId) => {
+        const record = await mcpElicitationService.get(elicitationId);
+        return record !== null && record.executionId === executionId && (await elicitationVisibleTo(runAccess, user, record));
+      },
+      send,
+      waitMs: executionRelayWaitMs
+    });
     const finish = () => {
       if (closed) return;
       closed = true;
       stopHeartbeat();
-      relay?.close();
+      follower.close();
       if (!reply.raw.writableEnded) reply.raw.end();
     };
     request.raw.on("close", finish);
-    try {
-      // Subscribed before the run is read again, so no event between the two is missed.
-      relay = await openExecutionRelay(executionId, (name, payload) => send(name, payload));
-      const current = await store.getExecutionHistory(executionId);
-      send("execution", current);
-      if (current && isRunSettled(current as PersistedRun)) relay.check();
-      const end = await relay.ended(executionRelayWaitMs);
-      if (end.kind === "result") send("result", end.result);
-      else if (end.kind === "failed") send("error", { message: end.error ?? "The run failed on its worker" });
-      else if (end.kind === "timeout") send("error", { message: "The run did not finish while this stream waited; it may still finish." });
-    } catch (error) {
-      send("error", { message: error instanceof Error ? error.message : "Could not follow the run" });
-    } finally {
-      finish();
-    }
+    await follower.done;
+    finish();
   });
 
   app.post<{ Params: { id: string }; Body: unknown }>("/api/executions/:id/retry", async (request, reply) => {

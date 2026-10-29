@@ -429,6 +429,57 @@ describe("elicitation", () => {
     expect(JSON.stringify(accepted.metadata)).toContain("\"fields\":[\"answer\"]");
   });
 
+  it("a reattach shows a run's elicitation only to those the elicitation API shows it to", async () => {
+    const context = await createTestContext();
+    const admin = await login(context, "admin");
+    const builder = await login(context, "builder");
+    const other = await login(context, "builder", "other");
+    const operator = await login(context, "operator");
+    const serverId = await registerMockServer(context, admin.cookie);
+    await call(context, "POST", "/api/workflows", builder.cookie, askWorkflow("wf-follow-ask", serverId));
+    const stream = call(context, "POST", "/api/workflows/wf-follow-ask/execute/stream", builder.cookie, { input: {} });
+    const pending = await waitFor(async () => (await context.store.listMcpElicitations({ status: "pending" }))[0]);
+
+    // Real streams on an ephemeral port, read until each has subscribed (its `execution` event).
+    const address = await context.app.listen({ port: 0, host: "127.0.0.1" });
+    const follow = async (cookie: string) => {
+      const response = await fetch(`${address}/api/executions/${pending.executionId}/events`, { headers: { cookie } });
+      expect(response.status).toBe(200);
+      const reader = response.body!.getReader();
+      const decoder = new TextDecoder();
+      let body = "";
+      while (!body.includes("event: execution")) {
+        const chunk = await reader.read();
+        if (chunk.done) break;
+        body += decoder.decode(chunk.value, { stream: true });
+      }
+      // Wrapped, so awaiting `follow` waits for the subscription only.
+      return {
+        rest: (async () => {
+          for (;;) {
+            const chunk = await reader.read();
+            if (chunk.done) return body;
+            body += decoder.decode(chunk.value, { stream: true });
+          }
+        })()
+      };
+    };
+    const otherStream = (await follow(other.cookie)).rest;
+    const operatorStream = (await follow(operator.cookie)).rest;
+    const ownerStream = (await follow(builder.cookie)).rest;
+    expect((await call(context, "POST", `/api/mcp/elicitations/${pending.id}/answer`, builder.cookie, { action: "accept", content: { answer: "eu" } })).statusCode).toBe(200);
+    expect((await stream).statusCode).toBe(200);
+
+    const [otherBody, operatorBody, ownerBody] = await Promise.all([otherStream, operatorStream, ownerStream]);
+    // The other builder reads the run but not the request: no elicitation event, the rest of the stream as usual.
+    expect(sseFrames(otherBody, "mcp_elicitation")).toEqual([]);
+    expect(sseFrames(otherBody, "result")[0]).toMatchObject({ status: "success" });
+    for (const body of [operatorBody, ownerBody]) {
+      expect(sseFrames(body, "mcp_elicitation").map((event) => event.phase)).toEqual(["settled"]);
+      expect(sseFrames(body, "result")[0]).toMatchObject({ status: "success" });
+    }
+  }, 20_000);
+
   it("a queued run's request belongs to the workflow: anyone who may run it can answer", async () => {
     const context = await createTestContext({}, { queuePollMs: 20 });
     const admin = await login(context, "admin");
