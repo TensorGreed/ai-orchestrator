@@ -1,0 +1,99 @@
+{
+  "schemaVersion": "1.0.0",
+  "workflowVersion": 1,
+  "workflow": {
+    "id": "wf-load-w1-webhook",
+    "name": "Load W1: webhook, set, respond",
+    "description": "Scale harness workload W1: the overhead of a run. Webhook in, one Set node, a Webhook Response, an Output.",
+    "schemaVersion": "1.0.0",
+    "workflowVersion": 1,
+    "nodes": [
+      {
+        "id": "webhook_1",
+        "type": "webhook_input",
+        "name": "Webhook",
+        "position": {
+          "x": 80,
+          "y": 200
+        },
+        "config": {
+          "path": "load-w1",
+          "method": "POST",
+          "authMode": "none",
+          "idempotencyEnabled": false,
+          "responseMode": "responseNode",
+          "responseCode": 200
+        }
+      },
+      {
+        "id": "set_1",
+        "type": "set_node",
+        "name": "Set",
+        "position": {
+          "x": 340,
+          "y": 200
+        },
+        "config": {
+          "assignments": [
+            {
+              "key": "loadRunId",
+              "valueTemplate": "{{webhook.loadRunId}}"
+            },
+            {
+              "key": "seq",
+              "valueTemplate": "{{webhook.seq}}"
+            },
+            {
+              "key": "status",
+              "valueTemplate": "accepted"
+            }
+          ]
+        }
+      },
+      {
+        "id": "respond_1",
+        "type": "webhook_response",
+        "name": "Respond",
+        "position": {
+          "x": 600,
+          "y": 200
+        },
+        "config": {
+          "statusCode": 200,
+          "headersTemplate": "{\"content-type\":\"application/json\"}",
+          "bodyTemplate": "{\"ok\":true,\"status\":\"{{results.set_1.status}}\",\"seq\":\"{{results.set_1.seq}}\"}"
+        }
+      },
+      {
+        "id": "output_1",
+        "type": "output",
+        "name": "Output",
+        "position": {
+          "x": 860,
+          "y": 200
+        },
+        "config": {
+          "responseTemplate": "{{results.set_1.status}}",
+          "outputKey": "result"
+        }
+      }
+    ],
+    "edges": [
+      {
+        "id": "e1",
+        "source": "webhook_1",
+        "target": "set_1"
+      },
+      {
+        "id": "e2",
+        "source": "set_1",
+        "target": "respond_1"
+      },
+      {
+        "id": "e3",
+        "source": "respond_1",
+        "target": "output_1"
+      }
+    ]
+  }
+}
