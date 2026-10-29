@@ -1,3 +1,7 @@
+---
+description: "Run several L2M instances on one Postgres database: cross-instance cancel, the instance registry, leader-only jobs, lost-instance recovery and troubleshooting."
+---
+
 # Cluster operations
 
 Several API instances can share one Postgres database ([Running more than one instance](./postgres.md#running-more-than-one-instance)). This page covers how they signal each other, how to see the cluster, and what to check when something looks wrong. Nothing here needs configuring: one instance (SQLite, or Postgres with `HA_ENABLED=false`) behaves exactly as before.

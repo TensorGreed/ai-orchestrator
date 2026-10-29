@@ -1,3 +1,7 @@
+---
+description: "How L2M queues workflow runs and runs them on workers: roles, pools, leases and fencing in cluster mode, lost workers, graceful drain and the dead-letter queue."
+---
+
 # Queue and workers
 
 Workflow runs sent to `POST /api/workflows/:id/enqueue` wait in a queue in the database and are run by a worker.

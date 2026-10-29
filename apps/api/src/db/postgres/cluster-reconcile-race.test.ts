@@ -29,7 +29,7 @@ function pausingAfterQueueRead(ctx: PgContext, pause: () => Promise<void>): PgCo
   };
 }
 
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 run("cluster reconcile on Postgres: owners that change after the queue read", () => {
   let primary: TestStore | undefined;
