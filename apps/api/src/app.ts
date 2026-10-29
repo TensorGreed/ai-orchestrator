@@ -160,7 +160,7 @@ import { LeaderElectionService, NEVER_LEAD } from "./services/leader-election-se
 import { reconcileInterruptedRuns } from "./services/run-reconcile-service.js";
 import type { ClusterBus } from "./services/cluster-bus.js";
 import { LocalClusterBus } from "./services/cluster-bus-local.js";
-import { clusterCancelReason, startClusterSignals, type ClusterSignals } from "./services/cluster-signals.js";
+import { clusterCancelReason, REMOTE_CANCEL_REASON, startClusterSignals, type ClusterSignals } from "./services/cluster-signals.js";
 import { DEAD_EXECUTOR_RUN_ERROR, InstanceRegistry, RunOwnerTracker, SelfFencedAbortError, type ClusterWarning } from "./services/instance-registry.js";
 import { ADVISORY_LOCK_CLASS_AUDIT_EXPORT, ADVISORY_LOCK_CLASS_GIT_SYNC } from "./db/postgres/cluster.js";
 import { MIGRATIONS } from "./db/migrations.js";
@@ -1876,6 +1876,19 @@ export async function createApp(
       if (clusterSelfFenced) controller.abort(new SelfFencedAbortError());
     }
     return controller;
+  };
+
+  /**
+   * Phase 13.1 — stops a run executing in this process because it was canceled elsewhere: a cancel message on the
+   * cluster bus, the cluster cancel check, or the queue heartbeat's canceled check (the backstop for a lost message).
+   * Whichever comes first stops the run; the others find it already aborted and do nothing, so a run canceled both
+   * ways is handled once. A run that hit its time limit (already aborted) is ending as a timeout and is not relabelled.
+   */
+  const abortLocalExecution = (executionId: string, reason: string): boolean => {
+    const active = activeExecutions.get(executionId);
+    if (!active || active.controller.signal.aborted) return false;
+    active.controller.abort(reason);
+    return true;
   };
 
   const releaseActiveExecution = (executionId: string | undefined, controller: AbortController | undefined) => {
@@ -3917,9 +3930,11 @@ export async function createApp(
         instanceId: clusterInstanceId,
         workerMode,
         haEnabled: config.HA_ENABLED,
-        pools: runsBackgroundWorkers && queueService ? ["default"] : [],
-        concurrency: null,
-        capabilities: clusterMode ? ["bus-v1"] : [],
+        // The queue consumer's pools and slots (outside cluster mode the one consumer claims every job: "default").
+        pools: runsBackgroundWorkers && queueService ? resolveQueueSettings(config, { clusterMode }).pools : [],
+        concurrency: runsBackgroundWorkers && queueService ? queueService.concurrency() : null,
+        // In cluster mode a queue consumer claims under heartbeat leases with fencing tokens.
+        capabilities: clusterMode ? ["bus-v1", ...(runsBackgroundWorkers && queueService ? ["fenced-claims-v1"] : [])] : [],
         appVersion: config.OTEL_SERVICE_VERSION || process.env.npm_package_version || null,
         schemaVersion: Math.max(...MIGRATIONS.map((migration) => migration.version)),
         runtime: () => ({
@@ -3972,10 +3987,7 @@ export async function createApp(
       store,
       activeExecutionIds: () => [...activeExecutions.keys()],
       abortExecution: (executionId, reason) => {
-        const active = activeExecutions.get(executionId);
-        // A run that hit its time limit is ending as a timeout; a cancel does not relabel it.
-        if (!active || active.controller.signal.aborted) return;
-        active.controller.abort(reason);
+        abortLocalExecution(executionId, reason);
       },
       evalRuns: evalService,
       workflows: {
@@ -13228,10 +13240,10 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         reaperIntervalMs: queueSettings.reaperIntervalMs,
         pools: queueSettings.pools
       });
-      // A cancel recorded on another instance stops the run here at the next heartbeat at the latest.
+      // A cancel recorded on another instance stops the run here at the next heartbeat at the latest: the database
+      // backstop for the cluster bus's cancel message, through the same abort helper, so the first of the two wins.
       queueService.setCancelHandler((executionId) => {
-        const active = activeExecutions.get(executionId);
-        if (active && !active.controller.signal.aborted) active.controller.abort("Execution canceled on another instance");
+        abortLocalExecution(executionId, REMOTE_CANCEL_REASON);
       });
     }
     queueService.setObserver({
