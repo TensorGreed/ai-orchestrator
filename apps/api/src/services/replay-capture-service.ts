@@ -219,7 +219,29 @@ export interface ReplayCaptureServiceOptions {
    * here, before a run is refused for the daily limit.
    */
   sweepStale?: () => void;
+  /**
+   * Phase 13.1 — cluster mode: the daily limit's slots are reserved in the database (serialized per workflow across
+   * instances) instead of this process's in-flight count. Unset: the in-memory count, as before.
+   */
+  reservations?: CaptureReservations;
 }
+
+/** Phase 13.1 — daily-limit slots shared by every instance (Store.reserveReplayCapture and friends). */
+export interface CaptureReservations {
+  /** A reservation id when a slot was free (captures since `since` plus live reservations below `maxPerDay`), else null. */
+  reserve(input: { workflowId: string; since: string; maxPerDay: number; ttlMs: number }): Promise<string | null>;
+  release(id: string): Promise<void>;
+  /** Live reservations of a workflow (the settings view's "captured today" counts them, as it counts runs in flight). */
+  countLive(workflowId: string): Promise<number>;
+}
+
+/**
+ * Phase 13.1 — how long a reservation outlives the run's own time limit: the stale-ticket sweep gives a ticket back a
+ * minute after the limit, and masking and saving a capture take a while after the run ends. A reservation still held
+ * then (its instance stopped) stops counting.
+ */
+export const CAPTURE_RESERVATION_MARGIN_MS = 10 * 60 * 1000;
+const CAPTURE_RESERVATION_DEFAULT_RUN_MS = 60 * 60 * 1000;
 
 /** A sampled run's capture, from `decide` to `finish`. */
 export interface CaptureTicket {
@@ -235,6 +257,8 @@ export interface CaptureTicket {
   /** When the ticket was given out (ms), for the stale-ticket sweep. */
   issuedAt: number;
   released?: boolean;
+  /** Phase 13.1 — cluster mode: the database reservation holding the ticket's daily slot. */
+  reservationId?: string;
 }
 
 /** A small deterministic generator (mulberry32) for seeded sampling. */
@@ -304,7 +328,9 @@ export class ReplayCaptureService {
       deployment: { enabled: deployment.enabled, maxRate: deployment.maxRate, retentionDays: deployment.retentionDays, maxCandidates: deployment.maxPerWorkflow },
       effectiveRate: active ? Math.min(base.rate, deployment.maxRate) : 0,
       candidates: await this.options.store.countReplayRecordingsForWorkflow(workflowId, "candidate"),
-      capturedToday: await this.options.store.countReplayCapturesSince(workflowId, startOfUtcDay(this.now())) + (this.inFlight.get(workflowId) ?? 0),
+      capturedToday:
+        await this.options.store.countReplayCapturesSince(workflowId, startOfUtcDay(this.now())) +
+        (this.options.reservations ? await this.options.reservations.countLive(workflowId) : (this.inFlight.get(workflowId) ?? 0)),
       lastDrop:
         stored?.lastDropOutcome && stored.lastDropAt && (REPLAY_CAPTURE_DROP_OUTCOMES as readonly string[]).includes(stored.lastDropOutcome)
           ? { outcome: stored.lastDropOutcome as ReplayCaptureDropOutcome, at: stored.lastDropAt }
@@ -374,6 +400,8 @@ export class ReplayCaptureService {
     inputOrigin?: CaptureInputOrigin;
     /** Server-side: an API key started the run (never from a request body). */
     captureSource?: CaptureSource;
+    /** Phase 13.1 — the run's time limit, so a cluster-mode reservation outlives it (default one hour). */
+    runTimeoutMs?: number;
   }): Promise<CaptureTicket | null> {
     try {
       const deployment = this.options.deployment;
@@ -393,6 +421,31 @@ export class ReplayCaptureService {
         return null;
       }
       const since = startOfUtcDay(this.now());
+      const ticketBase = {
+        workflowId: input.workflow.id,
+        rate,
+        publishedVersion: published,
+        settings,
+        triggerType: input.triggerType,
+        inputOrigin: input.inputOrigin ?? "external",
+        ...(input.captureSource ? { captureSource: input.captureSource } : {})
+      } satisfies Omit<CaptureTicket, "issuedAt">;
+      const reservations = this.options.reservations;
+      if (reservations) {
+        // Cluster mode: one database step per workflow counts the stored captures and every instance's live
+        // reservations, and reserves only below the limit.
+        const reservationId = await reservations.reserve({
+          workflowId: input.workflow.id,
+          since,
+          maxPerDay: settings.maxPerDay,
+          ttlMs: (input.runTimeoutMs ?? CAPTURE_RESERVATION_DEFAULT_RUN_MS) + CAPTURE_RESERVATION_MARGIN_MS
+        });
+        if (!reservationId) {
+          this.metric("skipped_daily_limit");
+          return null;
+        }
+        return { ...ticketBase, issuedAt: this.now().getTime(), reservationId };
+      }
       // The slot is held before the count is read: a capture that commits and gives its slot back
       // while the count is in flight is then counted once (in flight or stored), never zero times.
       const workflowId = input.workflow.id;
@@ -441,6 +494,14 @@ export class ReplayCaptureService {
     // A ticket is given back once, whichever path gets there first.
     if (ticket.released) return;
     ticket.released = true;
+    if (ticket.reservationId) {
+      const reservationId = ticket.reservationId;
+      // Best effort: a reservation that is not given back stops counting when it expires.
+      this.options.reservations?.release(reservationId).catch((error: unknown) => {
+        this.options.log.warn({ workflowId: ticket.workflowId, ...captureErrorLog(error, this.options.redact) }, "Could not give back a capture reservation; it lapses on its own");
+      });
+      return;
+    }
     const count = (this.inFlight.get(ticket.workflowId) ?? 1) - 1;
     if (count <= 0) this.inFlight.delete(ticket.workflowId);
     else this.inFlight.set(ticket.workflowId, count);

@@ -2205,7 +2205,8 @@ export async function createApp(
             releaseVersion,
             excluded: Boolean(input.mcpPlan || input.replay || input.resumeState || input.approvalDecision || input.startNodeId || input.runMode === "single_node" || input.providerRegistry),
             inputOrigin: input.captureInputOrigin,
-            captureSource: input.captureSource
+            captureSource: input.captureSource,
+            runTimeoutMs: normalizeExecutionTimeoutMs(input.executionTimeoutMs, undefined, config.WORKFLOW_EXECUTION_TIMEOUT_MS)
           })
         : null;
     let runPlan: McpCassetteRunPlan | undefined = input.mcpPlan;
@@ -13023,7 +13024,20 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     log: { warn: (data, message) => app.log.warn(data, message), info: (data, message) => app.log.info(data, message) },
     metric: (outcome) => metricsService.recordReplayCapture(outcome),
     redact: (text) => String(secretService.redact(text)),
-    sweepStale: () => sweepStaleCaptures()
+    sweepStale: () => sweepStaleCaptures(),
+    // Phase 13.1 — cluster mode: the daily limit holds across instances (reservations in the database).
+    ...(clusterMode
+      ? {
+          reservations: {
+            reserve: async (input: { workflowId: string; since: string; maxPerDay: number; ttlMs: number }) => {
+              const id = `cr_${crypto.randomUUID()}`;
+              return (await store.reserveReplayCapture({ id, ...input })) ? id : null;
+            },
+            release: async (id: string) => await store.releaseReplayCaptureReservation(id),
+            countLive: async (workflowId: string) => await store.countReplayCaptureReservations(workflowId)
+          }
+        }
+      : {})
   });
   if (captureAvailable) {
     replayCapture = captureService;
@@ -13041,7 +13055,15 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     const captureRetentionTimer = setInterval(async () => await pruneCaptures("interval"), config.EXECUTION_HISTORY_PRUNE_INTERVAL_MS);
     (captureRetentionTimer as { unref?: () => void }).unref?.();
     // Tickets of runs that never wrote their final history are given back on this timer too (the sweep is cheap).
-    const captureSweepTimer = setInterval(sweepStaleCaptures, CAPTURE_SWEEP_INTERVAL_MS);
+    const captureSweepTimer = setInterval(() => {
+      sweepStaleCaptures();
+      // Cluster mode: reservations whose instance stopped before giving them back lapse; remove the expired rows.
+      if (clusterMode) {
+        store.pruneReplayCaptureReservations().catch((error: unknown) => {
+          app.log.warn({ error: error instanceof Error ? error.message : String(error) }, "Failed to prune expired capture reservations");
+        });
+      }
+    }, CAPTURE_SWEEP_INTERVAL_MS);
     (captureSweepTimer as { unref?: () => void }).unref?.();
     app.addHook("onClose", async () => {
       clearInterval(captureRetentionTimer);
