@@ -39,6 +39,7 @@ import {
 } from "./run-helpers.js";
 import { startSseHeartbeat } from "./sse-heartbeat.js";
 import { DISPATCH_SPEC_VERSION, type RunDispatcher } from "./services/run-dispatch.js";
+import { isRunSettled, type PersistedRun, type RunEventName, type RunRelay } from "./services/run-event-relay.js";
 import type { SafeUser, UserRole } from "./services/auth-service.js";
 import type { ApprovalService } from "./services/approval-service.js";
 import type { BudgetService } from "./services/budget-service.js";
@@ -99,6 +100,12 @@ export interface ExecutionRoutesDeps {
   runDispatcher: Pick<RunDispatcher, "run">;
   /** The queue pool a workflow's dispatched runs go to. */
   dispatchPoolOf: (workflow: Workflow) => string;
+  /**
+   * Phase 13.1 — follows a run from its events (this process's when it executes here, else the cluster bus) and ends
+   * from the database (services/run-event-relay.ts). `waitMs` is how long a follower waits at most.
+   */
+  openExecutionRelay: (executionId: string, onEvent: (name: RunEventName, payload: Record<string, unknown>) => void) => Promise<RunRelay>;
+  executionRelayWaitMs: number;
 }
 
 export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
@@ -127,7 +134,9 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
     clusterMode,
     announce,
     runDispatcher,
-    dispatchPoolOf
+    dispatchPoolOf,
+    openExecutionRelay,
+    executionRelayWaitMs
   } = deps;
 
   app.post<{ Params: { id: string }; Body: unknown }>("/api/workflows/:id/execute", async (request, reply) => {
@@ -439,6 +448,57 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
     if (!access.ok) return denyRunAccess(reply, access);
 
     return access.run;
+  });
+
+  /**
+   * Phase 13.1 — reattach: follow a run from any instance. An `execution` event with the run as stored, then its
+   * events as they happen (node_start, node_complete, llm_delta, node_progress, node_activity, mcp_elicitation), then
+   * `result`. A finished run answers with `execution` and `result` at once. The run is not affected by the stream.
+   */
+  app.get<{ Params: { id: string } }>("/api/executions/:id/events", async (request, reply) => {
+    const user = await requireRole(request, reply, ["viewer"]);
+    if (!user) {
+      return;
+    }
+    const access = await runAccess.run(user, await store.getExecutionHistory(request.params.id), "workflow:read");
+    if (!access.ok) return denyRunAccess(reply, access);
+    const executionId = access.run.id;
+
+    let closed = false;
+    const send = (event: string, payload: unknown) => {
+      if (closed || reply.raw.writableEnded || reply.raw.destroyed) return;
+      reply.raw.write(`event: ${event}\n`);
+      for (const line of JSON.stringify(payload ?? null).split("\n")) reply.raw.write(`data: ${line}\n`);
+      reply.raw.write("\n");
+    };
+    reply.hijack();
+    reply.raw.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache, no-transform", Connection: "keep-alive" });
+    if (typeof reply.raw.flushHeaders === "function") reply.raw.flushHeaders();
+    const stopHeartbeat = startSseHeartbeat(reply.raw, config.SSE_HEARTBEAT_INTERVAL_MS, () => closed);
+    let relay: RunRelay | null = null;
+    const finish = () => {
+      if (closed) return;
+      closed = true;
+      stopHeartbeat();
+      relay?.close();
+      if (!reply.raw.writableEnded) reply.raw.end();
+    };
+    request.raw.on("close", finish);
+    try {
+      // Subscribed before the run is read again, so no event between the two is missed.
+      relay = await openExecutionRelay(executionId, (name, payload) => send(name, payload));
+      const current = await store.getExecutionHistory(executionId);
+      send("execution", current);
+      if (current && isRunSettled(current as PersistedRun)) relay.check();
+      const end = await relay.ended(executionRelayWaitMs);
+      if (end.kind === "result") send("result", end.result);
+      else if (end.kind === "failed") send("error", { message: end.error ?? "The run failed on its worker" });
+      else if (end.kind === "timeout") send("error", { message: "The run did not finish while this stream waited; it may still finish." });
+    } catch (error) {
+      send("error", { message: error instanceof Error ? error.message : "Could not follow the run" });
+    } finally {
+      finish();
+    }
   });
 
   app.post<{ Params: { id: string }; Body: unknown }>("/api/executions/:id/retry", async (request, reply) => {

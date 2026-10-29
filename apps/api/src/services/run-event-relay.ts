@@ -461,24 +461,3 @@ export class LocalRunEvents implements Pick<ClusterBus, "subscribeRun" | "onResy
     return () => undefined;
   }
 }
-
-/** Both sources of a run's events: the cluster bus (dispatched runs, any worker) and this process's inline runs. */
-export function combinedRunEvents(
-  sources: Array<Pick<ClusterBus, "subscribeRun" | "onResync">>
-): Pick<ClusterBus, "subscribeRun" | "onResync"> {
-  const unique = [...new Set(sources)];
-  return {
-    subscribeRun: async (executionId, handler) => {
-      const offs = await Promise.all(unique.map(async (source) => await source.subscribeRun(executionId, handler)));
-      return () => {
-        for (const off of offs) off();
-      };
-    },
-    onResync: (handler) => {
-      const offs = unique.map((source) => source.onResync(handler));
-      return () => {
-        for (const off of offs) off();
-      };
-    }
-  };
-}

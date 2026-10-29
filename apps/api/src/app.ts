@@ -225,7 +225,7 @@ import {
   triggerQueueItemId,
   type DispatchedRunSpec
 } from "./services/run-dispatch.js";
-import { combinedRunEvents, LocalRunEvents, openRunRelay, resultFromPersistedRun, RunEventPublisher, type PersistedRun, type RunEventName } from "./services/run-event-relay.js";
+import { LocalRunEvents, openRunRelay, resultFromPersistedRun, RunEventPublisher, type PersistedRun, type RunEventName } from "./services/run-event-relay.js";
 import type { RunWorkflowExecutionInput, WorkflowExecutionEventHooks } from "./run-types.js";
 import { createRunAccess, type RunAccessDenial } from "./run-access.js";
 import { ProjectNotEmptyError, ReleaseGateEnforcedError, StoreReferenceMissingError } from "./db/store-errors.js";
@@ -3273,6 +3273,34 @@ export async function createApp(
     if (executionDispatch.mode !== "queue") return { mode: "inline", fallbackReason: null };
     const queue = await runDispatcher.useQueue(DEFAULT_QUEUE_POOL);
     return { mode: queue ? "queue" : "inline", fallbackReason: queue ? null : dispatchGate.status().reason };
+  };
+
+  /**
+   * Phase 13.1 — reattach: a run executing in this process is followed from its own events (and its elicitations);
+   * any other from the cluster bus, where queue workers publish them. Either way it ends from the database.
+   */
+  const openExecutionRelay = async (executionId: string, onEvent: (name: RunEventName, payload: Record<string, unknown>) => void) => {
+    const local = activeExecutions.has(executionId);
+    const relay = await openRunRelay(
+      {
+        bus: local ? localRunEvents : clusterBus,
+        readRun: runPersistedView,
+        readOutcome: async (id) => await store.getQueueItemOutcome(id),
+        readElicitation: readElicitationView,
+        onError: (error) => app.log.warn({ executionId, error: error instanceof Error ? error.message : String(error) }, "Run relay read failed")
+      },
+      { executionId, queueItemId: executionId, onEvent }
+    );
+    if (!local) return relay;
+    const unsubscribe = mcpElicitationService.subscribe(executionId, (event) => onEvent("mcp_elicitation", { ...event }));
+    return {
+      ended: async (timeoutMs?: number) => await relay.ended(timeoutMs),
+      check: () => relay.check(),
+      close: () => {
+        unsubscribe();
+        relay.close();
+      }
+    };
   };
 
   /** The pool a workflow's runs go to (its settings.executionPool, else default). */
@@ -9499,6 +9527,8 @@ export async function createApp(
     clusterMode,
     runDispatcher,
     dispatchPoolOf,
+    openExecutionRelay,
+    executionRelayWaitMs: config.WORKFLOW_EXECUTION_TIMEOUT_MS + STUCK_JOB_MARGIN_MS,
     announce
   });
 

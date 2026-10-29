@@ -1,6 +1,8 @@
 /**
  * Phase 13.1 — with EXECUTION_DISPATCH unset (inline, the default) nothing changes: runs execute on the instance that
- * received them, /api/cluster reports `executionDispatch: "inline"`, and no dispatch warning or metric appears. SQLite.
+ * received them, /api/cluster reports `executionDispatch: "inline"`, and no dispatch warning or metric appears.
+ * `GET /api/executions/:id/events` follows a run on this instance (its own events) or answers at once for a finished
+ * one. SQLite.
  */
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -116,5 +118,53 @@ describe("inline dispatch (the default)", () => {
     expect((health.warnings ?? []).map((warning) => warning.code)).not.toContain("dispatch_inline_fallback");
     const metrics = (await context.app.inject({ method: "GET", url: "/metrics" })).body;
     expect(metrics).not.toMatch(/_dispatch_/);
+  });
+});
+
+describe("GET /api/executions/:id/events", () => {
+  it("answers a finished run at once with the run and its result", async () => {
+    const context = await start();
+    const builder = await login(context, "builder");
+    await context.app.inject({ method: "POST", url: "/api/workflows", headers: { cookie: builder }, payload: waitingWorkflow("wf-done", 1) as unknown as Record<string, unknown> });
+    const executed = await context.app.inject({ method: "POST", url: "/api/workflows/wf-done/execute", headers: { cookie: builder }, payload: {} });
+    const result = executed.json<{ executionId: string; status: string; output: unknown }>();
+    expect(result.status).toBe("success");
+
+    const stream = await context.app.inject({ method: "GET", url: `/api/executions/${result.executionId}/events`, headers: { cookie: builder } });
+    expect(stream.statusCode).toBe(200);
+    expect(stream.headers["content-type"]).toContain("text/event-stream");
+    const events = sseEvents(stream.body);
+    expect(events.map((entry) => entry.event)).toEqual(["execution", "result"]);
+    expect(events[0]!.data).toMatchObject({ id: result.executionId, status: "success" });
+    expect(events[1]!.data).toMatchObject({ status: "success", output: result.output });
+
+    expect((await context.app.inject({ method: "GET", url: `/api/executions/${result.executionId}/events` })).statusCode).toBe(401);
+    expect((await context.app.inject({ method: "GET", url: "/api/executions/missing/events", headers: { cookie: builder } })).statusCode).toBe(404);
+  });
+
+  it("follows a run executing on this instance: its events from then on, then the result", async () => {
+    const context = await start();
+    const builder = await login(context, "builder");
+    await context.app.inject({ method: "POST", url: "/api/workflows", headers: { cookie: builder }, payload: waitingWorkflow("wf-live", 600) as unknown as Record<string, unknown> });
+    const execution = context.app.inject({ method: "POST", url: "/api/workflows/wf-live/execute", headers: { cookie: builder }, payload: {} });
+    const executionId = await until(async () => {
+      const page = await context.store.listExecutionHistory({ page: 1, pageSize: 5 });
+      const running = page.items.find((item) => item.status === "running");
+      if (!running) return null;
+      const full = await context.store.getExecutionHistory(running.id);
+      const nodes = (full?.nodeResults ?? []) as Array<{ nodeId: string }>;
+      return nodes.some((entry) => entry.nodeId === "wait") ? running.id : null;
+    }, "the run to reach its wait node");
+
+    const stream = await context.app.inject({ method: "GET", url: `/api/executions/${executionId}/events`, headers: { cookie: builder } });
+    const events = sseEvents(stream.body);
+    const names = events.map((entry) => entry.event);
+    expect(names[0]).toBe("execution");
+    expect(events[0]!.data).toMatchObject({ id: executionId, status: "running" });
+    expect(names).toContain("node_complete");
+    expect(events.filter((entry) => entry.event === "node_complete").map((entry) => (entry.data as { nodeId: string }).nodeId)).toEqual(["wait", "out"]);
+    expect(names.at(-1)).toBe("result");
+    expect(events.at(-1)!.data).toMatchObject({ status: "success" });
+    expect((await execution).json<{ status: string }>().status).toBe("success");
   });
 });

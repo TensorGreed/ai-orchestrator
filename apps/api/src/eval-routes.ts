@@ -577,6 +577,9 @@ export function registerEvalRoutes(deps: EvalRoutesDeps): void {
 
   app.post<{ Params: { id: string } }>("/api/eval/runs/:id/cancel", async (request, reply) => cancelRun(request, reply));
 
+  /** How often the events stream re-reads an eval run that executes on another instance. */
+  const EVAL_REMOTE_POLL_MS = 2_000;
+
   app.get<{ Params: { id: string } }>("/api/eval/runs/:id/events", async (request, reply) => {
     const user = await requireRole(request, reply, ["viewer"]);
     if (!user) return reply;
@@ -605,9 +608,39 @@ export function registerEvalRoutes(deps: EvalRoutesDeps): void {
     request.raw.on("close", finish);
 
     if (!evals.isActive(run.id)) {
-      // Finished, or run by another instance: the stored state is all there is.
-      send(EVAL_RUN_FINISHED_STATUSES.has(run.status) ? "done" : "progress", run);
-      finish();
+      if (EVAL_RUN_FINISHED_STATUSES.has(run.status)) {
+        send("done", run);
+        finish();
+        return reply;
+      }
+      // Phase 13.1 — running on another instance (cluster mode): follow its stored state until it finishes. Each read
+      // is acted on as read; a progress event goes out only when the stored view changed.
+      send("progress", run);
+      stopHeartbeat = startSseHeartbeat(reply.raw, deps.sseHeartbeatMs, () => closed);
+      let last = JSON.stringify(run);
+      const follow = async (): Promise<void> => {
+        while (!closed) {
+          await new Promise((resolve) => setTimeout(resolve, EVAL_REMOTE_POLL_MS));
+          if (closed) return;
+          const latest = await evals.getRunView(run.id);
+          if (!latest) {
+            finish();
+            return;
+          }
+          const finished = EVAL_RUN_FINISHED_STATUSES.has(latest.status);
+          const text = JSON.stringify(latest);
+          if (finished || text !== last) send(finished ? "done" : "progress", latest);
+          last = text;
+          if (finished) {
+            finish();
+            return;
+          }
+        }
+      };
+      follow().catch((error: unknown) => {
+        app.log.warn({ runId: run.id, error: error instanceof Error ? error.message : String(error) }, "Could not follow an eval run on another instance");
+        finish();
+      });
       return reply;
     }
     send("progress", run);
