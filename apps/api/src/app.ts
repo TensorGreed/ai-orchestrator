@@ -249,8 +249,8 @@ import { openApiSpec } from "./openapi.js";
 import { gatewayAllowedOrigins, isGatewayOriginAllowed, registerMcpGatewayRoutes } from "./mcp-gateway-routes.js";
 import { registerMcpOnboardingRoutes } from "./mcp-onboarding-routes.js";
 import {
+  createClusterRefreshLock,
   MCP_OAUTH_MAX_PENDING,
-  MCP_OAUTH_REFRESH_LOCK_WAIT_MS,
   McpOAuthService,
   McpOAuthUserError,
   renderOAuthCallbackPage,
@@ -1632,11 +1632,9 @@ export async function createApp(
     // Cluster mode: one refresh per connection across the instances (a rotating refresh token is spent once).
     ...(clusterMode && clusterStore
       ? {
-          refreshLock: async <T>(key: string, fn: () => Promise<T>): Promise<T> => {
-            const outcome = await clusterStore.withClusterLock(ADVISORY_LOCK_CLASS_MCP_OAUTH_REFRESH, `mcp-oauth:${key}`, { waitMs: MCP_OAUTH_REFRESH_LOCK_WAIT_MS }, fn);
-            if (!outcome.acquired) throw new Error("Another API instance is still refreshing this MCP server's OAuth token. Try again shortly.");
-            return outcome.value;
-          }
+          refreshLock: createClusterRefreshLock(
+            async (key, waitMs, fn) => await clusterStore.withClusterLock(ADVISORY_LOCK_CLASS_MCP_OAUTH_REFRESH, `mcp-oauth:${key}`, { waitMs }, fn)
+          )
         }
       : {}),
     onAudit: async (event) => {

@@ -166,6 +166,67 @@ const MAX_PENDING = 200;
 export const MCP_OAUTH_MAX_PENDING = MAX_PENDING;
 /** Phase 13.1 — how long a refresh waits for another instance's refresh of the same connection (cluster mode). */
 export const MCP_OAUTH_REFRESH_LOCK_WAIT_MS = 30_000;
+/**
+ * Phase 13.1 — at most this many refreshes on one instance hold or wait for a cluster refresh lock at once. Each one
+ * keeps a pooled connection for the lock and needs another for its reads and writes, so without a bound a burst of
+ * distinct expiring connections could take the whole pool; the rest wait in this process without a connection.
+ */
+export const MCP_OAUTH_REFRESH_LOCK_CONCURRENCY = 2;
+
+/** Runs `fn` under the cluster lock for `key`, waiting at most `waitMs`; `{ acquired: false }` when it timed out. */
+export type ClusterLockRunner = <T>(key: string, waitMs: number, fn: () => Promise<T>) => Promise<{ acquired: true; value: T } | { acquired: false }>;
+
+const REFRESH_LOCK_BUSY_MESSAGE = "Another API instance is still refreshing this MCP server's OAuth token. Try again shortly.";
+
+/**
+ * Phase 13.1 — the `refreshLock` for cluster mode: `withLock` bounded to `concurrency` callers per process. A caller
+ * waits for a slot, then for the lock, within one `waitMs` budget, and fails with "try again shortly" past it. The slot
+ * is given back on every path (done, thrown, timed out).
+ */
+export function createClusterRefreshLock(
+  withLock: ClusterLockRunner,
+  options: { waitMs?: number; concurrency?: number } = {}
+): <T>(key: string, fn: () => Promise<T>) => Promise<T> {
+  const waitMs = options.waitMs ?? MCP_OAUTH_REFRESH_LOCK_WAIT_MS;
+  const concurrency = Math.max(1, options.concurrency ?? MCP_OAUTH_REFRESH_LOCK_CONCURRENCY);
+  let active = 0;
+  const queue: Array<() => void> = [];
+  const release = () => {
+    const next = queue.shift();
+    if (next) next();
+    else active -= 1;
+  };
+  const acquire = (timeoutMs: number): Promise<boolean> => {
+    if (active < concurrency) {
+      active += 1;
+      return Promise.resolve(true);
+    }
+    return new Promise<boolean>((resolve) => {
+      // A slot handed over by release() keeps `active` as it is: the releaser's slot becomes this caller's.
+      const grant = () => {
+        clearTimeout(timer);
+        resolve(true);
+      };
+      const timer = setTimeout(() => {
+        const index = queue.indexOf(grant);
+        if (index >= 0) queue.splice(index, 1);
+        resolve(false);
+      }, Math.max(0, timeoutMs));
+      queue.push(grant);
+    });
+  };
+  return async <T>(key: string, fn: () => Promise<T>): Promise<T> => {
+    const deadline = Date.now() + waitMs;
+    if (!(await acquire(waitMs))) throw new Error(REFRESH_LOCK_BUSY_MESSAGE);
+    try {
+      const outcome = await withLock(key, Math.max(0, deadline - Date.now()), fn);
+      if (!outcome.acquired) throw new Error(REFRESH_LOCK_BUSY_MESSAGE);
+      return outcome.value;
+    } finally {
+      release();
+    }
+  };
+}
 
 export class McpOAuthService implements McpOAuthTokenProvider {
   private readonly pending: ChallengeStore;
