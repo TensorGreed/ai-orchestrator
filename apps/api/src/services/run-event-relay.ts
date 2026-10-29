@@ -67,6 +67,23 @@ export function encodeRunEvent(name: RunEventName, payload: Record<string, unkno
   return { t: name, ref: true, nodeId };
 }
 
+/**
+ * Sends each elicitation event (one elicitation id and phase) once. A stream that subscribes to this instance's
+ * elicitations and also relays a dispatched run's events gets the same event twice when this instance runs the job.
+ */
+export function onceEachElicitationEvent(send: (event: Record<string, unknown>) => void): (event: Record<string, unknown>) => void {
+  const seen = new Set<string>();
+  return (event) => {
+    const id = asRecord(event.elicitation).id;
+    if (typeof id === "string") {
+      const key = `${id}\u0000${String(event.phase)}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+    }
+    send(event);
+  };
+}
+
 /** Splits one coalesced delta so each part fits the bus (a long burst of text). */
 function deltaParts(nodeId: string, delta: string, index: number, maxBytes: number): RunBusEvent[] {
   const whole: RunBusEvent = { t: "llm_delta", nodeId, delta, index };

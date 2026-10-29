@@ -6,6 +6,7 @@ import {
   decodeRunEvent,
   encodeRunEvent,
   LocalRunEvents,
+  onceEachElicitationEvent,
   openRunRelay,
   RunEventPublisher,
   type PersistedRun,
@@ -165,6 +166,23 @@ describe("decodeRunEvent", () => {
       payload: { nodeId: "n1", delta: "x", index: 0 }
     });
     expect(await decodeRunEvent({ t: "something_new" }, readers)).toBeNull();
+  });
+});
+
+describe("onceEachElicitationEvent", () => {
+  it("sends each elicitation id and phase once, whichever path reports it first", () => {
+    const sent: unknown[] = [];
+    const send = onceEachElicitationEvent((event) => void sent.push(event));
+    send({ phase: "created", elicitation: { id: "e1" } });
+    send({ phase: "created", elicitation: { id: "e1" } });
+    send({ phase: "settled", elicitation: { id: "e1", status: "accepted" } });
+    send({ phase: "settled", elicitation: { id: "e1", status: "accepted" } });
+    send({ phase: "created", elicitation: { id: "e2" } });
+    expect(sent).toEqual([
+      { phase: "created", elicitation: { id: "e1" } },
+      { phase: "settled", elicitation: { id: "e1", status: "accepted" } },
+      { phase: "created", elicitation: { id: "e2" } }
+    ]);
   });
 });
 

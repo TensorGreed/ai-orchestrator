@@ -39,7 +39,7 @@ import {
 } from "./run-helpers.js";
 import { startSseHeartbeat } from "./sse-heartbeat.js";
 import { DISPATCH_SPEC_VERSION, type RunDispatcher } from "./services/run-dispatch.js";
-import type { RunEventName, RunRelay } from "./services/run-event-relay.js";
+import { onceEachElicitationEvent, type RunEventName, type RunRelay } from "./services/run-event-relay.js";
 import { followExecution } from "./services/execution-follow.js";
 import type { SafeUser, UserRole } from "./services/auth-service.js";
 import type { ApprovalService } from "./services/approval-service.js";
@@ -323,9 +323,11 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
       startedAt: new Date().toISOString()
     });
 
-    // Phase 10.5 — questions a server asks during the run reach the chat as they happen.
+    // Phase 10.5 — questions a server asks during the run reach the chat as they happen, each once: a dispatched run
+    // this instance executes itself reports them here and through the relay.
+    const sendElicitation = onceEachElicitationEvent((event) => sendSseEvent("mcp_elicitation", event));
     const unsubscribeElicitations = mcpElicitationService.subscribe(executionId, (event) => {
-      sendSseEvent("mcp_elicitation", event);
+      sendElicitation({ ...event });
     });
     try {
       // Phase 13.1 — inline (default) or on a worker (EXECUTION_DISPATCH=queue), whose events are relayed here in order.
@@ -381,7 +383,7 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
           },
           // A dispatched run's questions arrive through the relay (an inline run's through the subscription above).
           onMcpElicitation: (event) => {
-            sendSseEvent("mcp_elicitation", event);
+            sendElicitation({ ...event });
           }
         },
         closed: clientGone
