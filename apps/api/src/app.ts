@@ -187,7 +187,7 @@ import { deriveCaptureSurrogateKey, ReplayCaptureService, type CaptureTicket } f
 import { inputProvenance, type CaptureInputOrigin } from "./services/capture-masking.js";
 import { registerEvalRoutes } from "./eval-routes.js";
 import { registerGoldenSetFileRoutes } from "./golden-set-file-routes.js";
-import { parseStoredDataLabels, recordedInputLabels, type DataLabels } from "@ai-orchestrator/shared";
+import { isEntryNodeType, parseStoredDataLabels, recordedInputLabels, type DataLabels } from "@ai-orchestrator/shared";
 import { GOLDEN_SET_FILE_DEFAULT_MAX_BYTES, GUARD_SIMULATION_MAX_CASES_DEFAULT, GUARD_SIMULATION_RETENTION_DAYS } from "@ai-orchestrator/shared";
 import { registerApprovalRoutes } from "./approval-routes.js";
 import { registerExecutionRoutes } from "./execution-routes.js";
@@ -4445,11 +4445,22 @@ export async function createApp(
     onNodeComplete?: WorkflowExecutionEventHooks["onNodeComplete"]
   ): WorkflowExecutionEventHooks | undefined => {
     if (job.claimToken === null) return hooks;
+    let effectsMarked = false;
     return {
       ...(hooks ?? {}),
       onNodeStart: async (event) => {
         // A stale lease aborts the run's signal here, so the engine does not start the node.
         if (!job.leaseFresh()) return;
+        // Phase 13.1 — the worker-loss policy: before the first node that is not a trigger/entry node runs, the claim
+        // records that side effects may begin, so a lost worker's job is not re-run from the start. A refused write
+        // means the claim is gone: the run stops here. A failed write fails the run before the node runs.
+        if (!effectsMarked && !isEntryNodeType(event.nodeType)) {
+          if (!(await store.markQueueEffectsStarted({ queueItemId: job.queueItemId, claimToken: job.claimToken! }))) {
+            job.leaseLost("the side-effect marker write was refused");
+            return;
+          }
+          effectsMarked = true;
+        }
         await hooks?.onNodeStart?.(event);
       },
       ...(onNodeComplete

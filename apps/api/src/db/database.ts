@@ -90,6 +90,7 @@ import type {
 } from "./store.js";
 import {
   decideLostJob,
+  lostJobEffects,
   DEFAULT_QUEUE_POOL,
   fairClaimWindow,
   payloadExecutionId,
@@ -3747,6 +3748,8 @@ export class SqliteStore implements Store {
     this.ensureColumn("execution_queue", "pool", "TEXT NOT NULL", "'default'");
     this.ensureColumn("execution_queue", "lost_count", "INTEGER NOT NULL", "0");
     this.ensureColumn("execution_queue", "nodes_completed", "INTEGER NOT NULL", "0");
+    this.ensureColumn("execution_queue", "effects_token", "TEXT");
+    this.ensureColumn("execution_queue", "effects_started", "INTEGER NOT NULL", "0");
     // Phase 13.1 — queue dispatch: the result a worker stored for the instance waiting on a dispatched run.
     this.ensureColumn("execution_queue", "result_json", "TEXT");
     this.exec(
@@ -6239,12 +6242,14 @@ export class SqliteStore implements Store {
       ranked.sort((a, b) => a.rank - b.rank || a.index - b.index);
       const picked = ranked.slice(0, limit);
       const claim = this.db.prepare(
-        `UPDATE execution_queue SET status = 'running', started_at = ?, heartbeat_at = ?, claimed_by = ?, claim_token = ?, updated_at = ?
+        `UPDATE execution_queue SET status = 'running', started_at = ?, heartbeat_at = ?, claimed_by = ?, claim_token = ?, updated_at = ?,
+                effects_token = ?, effects_started = 0
          WHERE id = ? AND status = 'pending'`
       );
       return picked.map(({ row }) => {
         const claimToken = randomUUID();
-        claim.run(now, now, input.owner, claimToken, now, toString(row.id));
+        // The claim tracks side effects (the worker-loss policy): none started yet.
+        claim.run(now, now, input.owner, claimToken, now, claimToken, toString(row.id));
         let payload: Record<string, unknown> = {};
         try {
           const parsed = JSON.parse(toString(row.payload_json));
@@ -6304,6 +6309,16 @@ export class SqliteStore implements Store {
     return result.changes > 0;
   }
 
+  async markQueueEffectsStarted(fence: QueueClaimFence): Promise<boolean> {
+    const held = this.queueClaimHeldSync(fence);
+    if (!held) return false;
+    const result = this.db
+      .prepare(`UPDATE execution_queue SET effects_started = 1 WHERE id = ? AND claim_token = ? AND status = 'running' AND effects_started = 0`)
+      .run(fence.queueItemId, fence.claimToken);
+    if (result.changes > 0) this.persist();
+    return true;
+  }
+
   async listCanceledExecutionIds(executionIds: readonly string[]): Promise<string[]> {
     if (executionIds.length === 0) return [];
     return this.queryAll<{ id: unknown }>(
@@ -6313,7 +6328,11 @@ export class SqliteStore implements Store {
   }
 
   /** Settles one running item by the worker-loss policy (queue-leases.ts); the caller runs it in a transaction. */
-  private settleLostQueueItem(row: ExecutionQueueRow & { nodes_completed?: unknown }, countsAttempt: boolean, reasons: LostJobReasons): LostJobOutcome {
+  private settleLostQueueItem(
+    row: ExecutionQueueRow & { nodes_completed?: unknown; claim_token?: unknown; effects_token?: unknown; effects_started?: unknown },
+    countsAttempt: boolean,
+    reasons: LostJobReasons
+  ): LostJobOutcome {
     const id = toString(row.id);
     const now = new Date().toISOString();
     const executionId = payloadExecutionId(row.payload_json, id);
@@ -6332,7 +6351,8 @@ export class SqliteStore implements Store {
       resume,
       resumeStateStatus: pausedState ? toString(pausedState.status) : null,
       resumeNodesCompleted: toNumber(row.nodes_completed ?? 0),
-      history: history ? { status: toString(history.status), completedAt: history.completed_at, nodeResultsJson: history.node_results_json } : null
+      history: history ? { status: toString(history.status), completedAt: history.completed_at, nodeResultsJson: history.node_results_json } : null,
+      effects: lostJobEffects(row)
     });
     if (decision === "finished") {
       this.exec(
@@ -6380,7 +6400,7 @@ export class SqliteStore implements Store {
     const expiredBefore = new Date(Date.now() - input.leaseMs).toISOString();
     return this.db.transaction(() =>
       this.queryAll<ExecutionQueueRow>(
-        `SELECT id, workflow_id, workflow_name, payload_json, attempts, max_attempts, nodes_completed FROM execution_queue
+        `SELECT id, workflow_id, workflow_name, payload_json, attempts, max_attempts, nodes_completed, claim_token, effects_token, effects_started FROM execution_queue
          WHERE status = 'running' AND heartbeat_at IS NOT NULL AND heartbeat_at < ?
          ORDER BY heartbeat_at, id
          LIMIT ?`,
@@ -6392,7 +6412,7 @@ export class SqliteStore implements Store {
   async releaseQueueItem(input: { id: string; claimToken: string | null }): Promise<LostJobOutcome | null> {
     return this.db.transaction(() => {
       const row = this.queryOne<ExecutionQueueRow>(
-        `SELECT id, workflow_id, workflow_name, payload_json, attempts, max_attempts, nodes_completed FROM execution_queue
+        `SELECT id, workflow_id, workflow_name, payload_json, attempts, max_attempts, nodes_completed, claim_token, effects_token, effects_started FROM execution_queue
          WHERE id = ? AND status = 'running' AND (? IS NULL OR claim_token = ?)`,
         [input.id, input.claimToken, input.claimToken]
       );

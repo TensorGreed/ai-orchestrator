@@ -385,6 +385,8 @@ run("the queue across replicas on one Postgres database", () => {
     await api.app.inject({ method: "POST", url: "/api/workflows", headers: { cookie }, payload: quickWorkflow("wf-sent") as unknown as Record<string, unknown> });
     const executionId = await enqueue(api, cookie, "wf-sent");
     await dyingWorker("doomed", async (payload, context, store) => {
+      // As a real worker: the claim is marked before the first node after the trigger starts.
+      await store.markQueueEffectsStarted({ queueItemId: context.queueItemId, claimToken: context.claimToken! });
       await store.saveExecutionHistory(
         {
           id: payload.executionId,
@@ -448,7 +450,7 @@ run("the queue across replicas on one Postgres database", () => {
     expect(await api.store.getExecutionHistory(executionId)).toMatchObject({ status: "canceled" });
   }, 60_000);
 
-  it("the shutdown drain lets a short job finish and gives back a long one without counting an attempt", async () => {
+  it("the shutdown drain lets a short job finish and interrupts a long one whose node had started, without counting an attempt", async () => {
     await database();
     const api = await addReplica("api-0", "api");
     const worker = await addReplica("worker-1", "worker");
@@ -469,11 +471,10 @@ run("the queue across replicas on one Postgres database", () => {
     );
     const byId = new Map(rows.map((row) => [row.id, row]));
     expect(byId.get(short)).toMatchObject({ status: "completed" });
-    expect(byId.get(long)).toMatchObject({ status: "pending", attempts: 0, claim_token: null });
-    // The given-back run was not recorded as canceled: the next worker runs it.
-    expect((await api.store.getExecutionHistory(long))?.status).not.toBe("canceled");
-    const next = await addReplica("worker-2", "worker");
-    await until(() => next.ran.includes(long), "another worker to take the given-back job");
+    // Its wait node had started (a node other than an entry node): never re-run silently.
+    expect(byId.get(long)).toMatchObject({ status: "dead", attempts: 0 });
+    expect(await api.store.getExecutionHistory(long)).toMatchObject({ status: "error", error: WORKER_SHUTDOWN_INTERRUPTED_ERROR });
+    expect((await api.store.listDlqItems()).map((item) => [item.originalId, item.finalError, item.attempts])).toEqual([[long, WORKER_SHUTDOWN_INTERRUPTED_ERROR, 0]]);
   }, 60_000);
 
   /** Saves a gated workflow, runs it inline on `api` until it pauses, and returns the paused run's id. */
@@ -628,7 +629,7 @@ run("the queue across replicas on one Postgres database", () => {
     }
   }, 90_000);
 
-  it("a stalled worker whose job was taken back stops at its next write: no further node runs, and its late pause asks for no approval", async () => {
+  it("a stalled worker whose job was taken back mid-call: interrupted, never re-run, and its late write and pause land nowhere", async () => {
     const server = await callServer();
     try {
       await database();
@@ -636,7 +637,6 @@ run("the queue across replicas on one Postgres database", () => {
       const leader = await addReplica("leader-only", "worker", { QUEUE_POOLS: "unused" });
       const stalled = await addReplica("worker-1", "worker");
       const requester = await builderCookie(api, "requester");
-      const lead = await builderCookie(api, "lead");
       const workflow = gatedWorkflow("wf-zombie", server.port, { before: true });
       const created = await api.app.inject({ method: "POST", url: "/api/workflows", headers: { cookie: requester }, payload: workflow as unknown as Record<string, unknown> });
       expect(created.statusCode).toBeLessThan(300);
@@ -645,16 +645,10 @@ run("the queue across replicas on one Postgres database", () => {
       await until(() => server.hits() === 1, "the first worker to reach the call");
       // The worker stalls (no timers fire: no heartbeat, no self-fence) while its call is in flight.
       stalled.queue!.stop();
-      await until(async () => (await sql<{ attempts: number }>(`SELECT attempts FROM execution_queue WHERE id = $1`, [executionId]))[0]!.attempts === 1, "the reaper to take the job back", 30_000);
-
-      // A healthy worker runs it to the gate (its call answers at once), the run is approved, resumed and finished.
-      expect(await sql(`SELECT id FROM execution_queue_dlq`)).toEqual([]);
+      // Its call had started (a side effect may have happened): interrupted and dead-lettered, not re-run.
+      await until(async () => (await sql<{ status: string }>(`SELECT status FROM execution_queue WHERE id = $1`, [executionId]))[0]!.status === "dead", "the reaper to interrupt the job", 30_000);
+      expect(await api.store.getExecutionHistory(executionId)).toMatchObject({ status: "error", error: WORKER_LOST_INTERRUPTED_ERROR });
       const healthy = await addReplica("worker-2", "worker");
-      await until(async () => (await api.store.getExecutionHistory(executionId))?.status === "waiting_approval", "the healthy worker's pause", 30_000);
-      await approve(leader, lead, executionId);
-      await until(async () => (await api.store.getExecutionHistory(executionId))?.status === "success", "the resumed run to finish", 30_000);
-      await until(async () => (await api.store.getWorkflowExecutionState(executionId)) === null, "the paused state to be cleared");
-      expect(healthy.ran).toEqual([executionId, executionId]);
 
       // The stalled worker's call answers only now: its progress write is refused, the run stops before the gate.
       server.release();
@@ -662,10 +656,12 @@ run("the queue across replicas on one Postgres database", () => {
       await until(() => zombie.signal.aborted, "the stalled worker to stop its run", 30_000);
       expect(zombie.signal.reason).toBeInstanceOf(QueueLeaseLostAbort);
       await until(() => stalled.queue!.inFlightCount() === 0, "the stalled worker's run to end");
-      expect((await api.store.listApprovalRequestsForExecution(executionId)).map((request) => request.status)).toEqual(["approved"]);
+      expect(await api.store.listApprovalRequestsForExecution(executionId)).toEqual([]);
       expect(await api.store.getWorkflowExecutionState(executionId)).toBeNull();
-      expect(await api.store.getExecutionHistory(executionId)).toMatchObject({ status: "success" });
-      expect(server.hits()).toBe(2);
+      expect(await api.store.getExecutionHistory(executionId)).toMatchObject({ status: "error", error: WORKER_LOST_INTERRUPTED_ERROR });
+      expect(healthy.ran).toEqual([]);
+      expect(leader.ran).toEqual([]);
+      expect(server.hits()).toBe(1);
     } finally {
       await server.close();
     }

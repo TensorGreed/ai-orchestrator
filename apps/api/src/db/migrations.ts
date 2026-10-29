@@ -2152,14 +2152,22 @@ export const MIGRATIONS: Migration[] = [
   },
   {
     version: 46,
-    description: "Phase 13.1 — queue dispatch: the result of a run a worker executed for another instance",
+    description: "Phase 13.1 — queue dispatch results, and whether a claimed run may have caused side effects",
     // Written only with EXECUTION_DISPATCH=queue (cluster mode): the worker that ran a dispatched run stores the run's
     // full result on its queue row (under its claim), so the API instance waiting on it answers with exactly what an
     // inline run returns; the history row lacks some of it (warnings, remediation, a clarification). Empty otherwise.
+    // effects_token / effects_started: the worker-loss policy. A claim sets effects_token to its claim token and
+    // effects_started to 0; the worker sets effects_started to 1 (under that claim) before the run's first node that is
+    // not a trigger/entry node starts. A lost job whose current claim tracks it is re-run only while it is still 0; a
+    // claim taken by an instance without this (effects_token differs) keeps the earlier rule.
     up: `
       ALTER TABLE execution_queue ADD COLUMN IF NOT EXISTS result_json TEXT;
+      ALTER TABLE execution_queue ADD COLUMN IF NOT EXISTS effects_token TEXT;
+      ALTER TABLE execution_queue ADD COLUMN IF NOT EXISTS effects_started INTEGER NOT NULL DEFAULT 0;
     `,
     down: `
+      ALTER TABLE execution_queue DROP COLUMN IF EXISTS effects_started;
+      ALTER TABLE execution_queue DROP COLUMN IF EXISTS effects_token;
       ALTER TABLE execution_queue DROP COLUMN IF EXISTS result_json;
     `
   }

@@ -3327,3 +3327,15 @@ export const nodeDefinitions: NodeDefinition[] = withCredentialSpecs(baseNodeDef
 export function getNodeDefinition(type: string): NodeDefinition | undefined {
   return nodeDefinitions.find((node) => node.type === type);
 }
+
+/**
+ * The workflow's start nodes that only pass the run's input through (triggers and static inputs): the node types of
+ * the Input category. Running one has no effect outside the run.
+ */
+export const ENTRY_NODE_TYPES: ReadonlySet<string> = new Set(
+  nodeDefinitions.filter((node) => node.category === "Input").map((node) => node.type)
+);
+
+export function isEntryNodeType(type: string): boolean {
+  return ENTRY_NODE_TYPES.has(type);
+}

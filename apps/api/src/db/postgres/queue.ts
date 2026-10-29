@@ -10,6 +10,7 @@ import type { PgContext } from "./context.js";
 import { clampLimit, LIMIT_MAX } from "../store-limits.js";
 import {
   decideLostJob,
+  lostJobEffects,
   DEFAULT_QUEUE_POOL,
   fairClaimWindow,
   payloadExecutionId,
@@ -384,7 +385,7 @@ export async function claimQueueItems(ctx: PgContext, input: { limit: number; ow
               row_number() OVER (PARTITION BY workflow_id ORDER BY priority DESC, scheduled_at, created_at, id) AS rk
          FROM cand
      ), picked AS (
-       SELECT q.id, r.rk FROM execution_queue q JOIN ranked r ON r.id = q.id
+       SELECT q.id, r.rk, gen_random_uuid()::text AS token FROM execution_queue q JOIN ranked r ON r.id = q.id
         WHERE q.status = 'pending'
         ORDER BY r.rk, r.priority DESC, r.scheduled_at, r.created_at, q.id
         LIMIT $3
@@ -392,7 +393,9 @@ export async function claimQueueItems(ctx: PgContext, input: { limit: number; ow
      )
      UPDATE execution_queue AS q
         SET status = 'running', started_at = now(), heartbeat_at = now(), claimed_by = $4,
-            claim_token = gen_random_uuid()::text, updated_at = now()
+            claim_token = picked.token, updated_at = now(),
+            -- This claim tracks side effects (the worker-loss policy): none started yet.
+            effects_token = picked.token, effects_started = 0
        FROM picked
       WHERE q.id = picked.id
      RETURNING q.id, q.workflow_id, q.workflow_name, q.payload_json, q.attempts, q.max_attempts, q.scheduled_at, q.pool,
@@ -483,6 +486,16 @@ export async function recordQueueJobProgress(ctx: PgContext, fence: QueueClaimFe
   return (result.rowCount ?? 0) > 0;
 }
 
+export async function markQueueEffectsStarted(ctx: PgContext, fence: QueueClaimFence): Promise<boolean> {
+  const result = await ctx.query<{ id: string }>(
+    `UPDATE execution_queue SET effects_started = 1
+      WHERE id = $1 AND claim_token = $2 AND status = 'running'
+      RETURNING id`,
+    [fence.queueItemId, fence.claimToken]
+  );
+  return result.length > 0;
+}
+
 export async function listCanceledExecutionIds(ctx: PgContext, executionIds: readonly string[]): Promise<string[]> {
   if (executionIds.length === 0) return [];
   const rows = await ctx.query<{ id: string }>(
@@ -500,9 +513,13 @@ interface LockedQueueRow {
   attempts: number;
   max_attempts: number;
   nodes_completed: number;
+  claim_token: string | null;
+  effects_token: string | null;
+  effects_started: number;
 }
 
-const LOCKED_QUEUE_COLUMNS = "id, workflow_id, workflow_name, payload_json, attempts, max_attempts, nodes_completed";
+const LOCKED_QUEUE_COLUMNS =
+  "id, workflow_id, workflow_name, payload_json, attempts, max_attempts, nodes_completed, claim_token, effects_token, effects_started";
 
 /**
  * Settles one locked running item by the worker-loss policy. The caller holds the item's row lock; the run's history
@@ -533,7 +550,8 @@ async function settleLostJob(
     resume,
     resumeStateStatus: pausedState ? toStr(pausedState.status) : null,
     resumeNodesCompleted: toNum(row.nodes_completed),
-    history: history ? { status: toStr(history.status), completedAt: history.completed_at, nodeResultsJson: history.node_results_json } : null
+    history: history ? { status: toStr(history.status), completedAt: history.completed_at, nodeResultsJson: history.node_results_json } : null,
+    effects: lostJobEffects(row)
   });
   const lost = countsAttempt ? 1 : 0;
   if (decision === "finished") {

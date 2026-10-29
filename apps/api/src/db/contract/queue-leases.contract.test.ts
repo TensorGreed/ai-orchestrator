@@ -109,7 +109,9 @@ describeStoreContract("store contract: leased queue claims", (ctx) => {
     const store = ctx.store();
     await store.enqueueExecution({ id: "sent", workflowId: "wf", payload: { executionId: "sent" }, scheduledAt: past(1_000), maxAttempts: 5 });
     await store.enqueueExecution({ id: "done", workflowId: "wf2", payload: { executionId: "done" }, scheduledAt: past(1_000) });
-    await store.claimQueueItems({ limit: 2, owner: "w1", pools: ["default"] });
+    const claims = await store.claimQueueItems({ limit: 2, owner: "w1", pools: ["default"] });
+    // The worker marks its claim before the email node starts.
+    expect(await store.markQueueEffectsStarted({ queueItemId: "sent", claimToken: claims.find((job) => job.id === "sent")!.claimToken })).toBe(true);
     await history(store, "sent", "running", [{ nodeId: "email", status: "success" }, { nodeId: "n2", status: "running" }]);
     await history(store, "done", "success");
     const reaped = await until(() => store.reapExpiredQueueLeases({ leaseMs: 1 }), "the reap");
@@ -121,6 +123,62 @@ describeStoreContract("store contract: leased queue claims", (ctx) => {
     expect(await store.getExecutionHistory("done")).toMatchObject({ status: "success" });
     expect((await store.listDlqItems()).map((item) => [item.originalId, item.finalError])).toEqual([["sent", WORKER_LOST_INTERRUPTED_ERROR]]);
     expect(await store.getQueueDepth()).toEqual({ pending: 0, running: 0, dlq: 1 });
+  });
+
+  it("worker loss: a run where only its trigger ran is re-queued and completes once; one where another node started is dead-lettered", async () => {
+    const store = ctx.store();
+    await store.enqueueExecution({ id: "trig", workflowId: "wf", payload: { executionId: "trig" }, scheduledAt: past(1_000), maxAttempts: 3 });
+    await store.enqueueExecution({ id: "agent", workflowId: "wf2", payload: { executionId: "agent" }, scheduledAt: past(1_000), maxAttempts: 3 });
+    await store.enqueueExecution({ id: "after", workflowId: "wf3", payload: { executionId: "after" }, scheduledAt: past(1_000), maxAttempts: 3 });
+    const claims = await store.claimQueueItems({ limit: 3, owner: "w1", pools: ["default"] });
+    const tokenOf = (id: string) => claims.find((job) => job.id === id)!.claimToken;
+    // Only the webhook trigger ran (and completed): no marker.
+    await history(store, "trig", "running", [{ nodeId: "webhook", status: "success" }]);
+    // The agent node started (its tool calls may have run) but has not completed.
+    expect(await store.markQueueEffectsStarted({ queueItemId: "agent", claimToken: tokenOf("agent") })).toBe(true);
+    await history(store, "agent", "running", [{ nodeId: "webhook", status: "success" }, { nodeId: "agent", status: "running" }]);
+    // A node after the trigger completed.
+    expect(await store.markQueueEffectsStarted({ queueItemId: "after", claimToken: tokenOf("after") })).toBe(true);
+    expect(await store.markQueueEffectsStarted({ queueItemId: "after", claimToken: tokenOf("after") })).toBe(true);
+    await history(store, "after", "running", [{ nodeId: "webhook", status: "success" }, { nodeId: "http", status: "success" }]);
+    // A stale token marks nothing.
+    expect(await store.markQueueEffectsStarted({ queueItemId: "trig", claimToken: "stale" })).toBe(false);
+
+    const reaped = await until(() => store.reapExpiredQueueLeases({ leaseMs: 1 }), "the reap");
+    expect(reaped.map((outcome) => [outcome.id, outcome.decision]).sort()).toEqual([
+      ["after", "interrupt"],
+      ["agent", "interrupt"],
+      ["trig", "requeue"]
+    ]);
+    expect((await store.listDlqItems()).map((item) => [item.originalId, item.finalError]).sort()).toEqual([
+      ["after", WORKER_LOST_INTERRUPTED_ERROR],
+      ["agent", WORKER_LOST_INTERRUPTED_ERROR]
+    ]);
+    expect(await store.getExecutionHistory("agent")).toMatchObject({ status: "error", error: WORKER_LOST_INTERRUPTED_ERROR });
+
+    // The re-run starts with a fresh marker, the zombie's token cannot mark it, and it completes once.
+    const [rerun] = await store.claimQueueItems({ limit: 1, owner: "w2", pools: ["default"] });
+    expect(rerun).toMatchObject({ id: "trig", attempts: 1 });
+    expect(await store.markQueueEffectsStarted({ queueItemId: "trig", claimToken: tokenOf("trig") })).toBe(false);
+    expect(await store.markQueueEffectsStarted({ queueItemId: "trig", claimToken: rerun!.claimToken })).toBe(true);
+    await history(store, "trig", "success");
+    expect(await store.markQueueItemCompleted("trig", { claimToken: rerun!.claimToken })).toBe(true);
+    expect(await store.markQueueItemCompleted("trig", { claimToken: tokenOf("trig") })).toBe(false);
+    expect(await store.getQueueDepth()).toEqual({ pending: 0, running: 0, dlq: 2 });
+  });
+
+  it("a shutdown release gives back a run where only its trigger ran, and dead-letters one where another node started", async () => {
+    const store = ctx.store();
+    await store.enqueueExecution({ id: "t", workflowId: "wf", payload: { executionId: "t" }, scheduledAt: past(1_000) });
+    await store.enqueueExecution({ id: "a", workflowId: "wf2", payload: { executionId: "a" }, scheduledAt: past(1_000) });
+    const claims = await store.claimQueueItems({ limit: 2, owner: "w1", pools: ["default"] });
+    const tokenOf = (id: string) => claims.find((job) => job.id === id)!.claimToken;
+    await history(store, "t", "running", [{ nodeId: "cron", status: "success" }]);
+    expect(await store.markQueueEffectsStarted({ queueItemId: "a", claimToken: tokenOf("a") })).toBe(true);
+    await history(store, "a", "running", [{ nodeId: "cron", status: "success" }, { nodeId: "agent", status: "running" }]);
+    expect(await store.releaseQueueItem({ id: "t", claimToken: tokenOf("t") })).toMatchObject({ decision: "requeue", attempts: 0 });
+    expect(await store.releaseQueueItem({ id: "a", claimToken: tokenOf("a") })).toMatchObject({ decision: "interrupt", attempts: 0 });
+    expect(await store.getExecutionHistory("a")).toMatchObject({ status: "error", error: WORKER_SHUTDOWN_INTERRUPTED_ERROR });
   });
 
   it("the reaper leaves unleased claims to the legacy rule", async () => {
@@ -158,6 +216,7 @@ describeStoreContract("store contract: leased queue claims", (ctx) => {
     // One attempt allowed, none counted: requeued, not dead-lettered.
     expect(await store.releaseQueueItem({ id: "r", claimToken: tokenOf("r") })).toMatchObject({ decision: "requeue", attempts: 0 });
     expect(await store.releaseQueueItem({ id: "r", claimToken: tokenOf("r") })).toBeNull();
+    expect(await store.markQueueEffectsStarted({ queueItemId: "s", claimToken: tokenOf("s") })).toBe(true);
     await history(store, "s", "running", [{ nodeId: "n1", status: "success" }]);
     expect(await store.releaseQueueItem({ id: "s", claimToken: tokenOf("s") })).toMatchObject({ decision: "interrupt", attempts: 0 });
     expect(await store.getExecutionHistory("s")).toMatchObject({ status: "error", error: WORKER_SHUTDOWN_INTERRUPTED_ERROR });

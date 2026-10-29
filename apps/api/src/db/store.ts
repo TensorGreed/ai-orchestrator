@@ -1731,6 +1731,11 @@ export interface Store {
    * can tell a lost resume that did something from one that did not. False when the claim no longer holds the item.
    */
   recordQueueJobProgress(fence: QueueClaimFence): Promise<boolean>;
+  /**
+   * Phase 13.1 — the worker-loss policy: marks that a node other than a trigger/entry node is about to start under
+   * this claim (so a lost worker's job is not re-run). True while the claim holds the item (also when already marked).
+   */
+  markQueueEffectsStarted(fence: QueueClaimFence): Promise<boolean>;
   /** Renews the heartbeat of the owner's claims; returns the tokens it still holds (a missing one was taken back). */
   renewQueueLeases(input: { owner: string; claimTokens: string[] }): Promise<string[]>;
   /**

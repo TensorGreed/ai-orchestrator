@@ -100,12 +100,25 @@ export interface LostJobInput {
   resumeNodesCompleted?: number;
   /** The run's history record, if one was written. */
   history: { status: string; completedAt: unknown; nodeResultsJson: unknown } | null;
+  /**
+   * Whether the claim that was lost tracked side effects (its effects_token is its claim token), and if so whether a
+   * node other than a trigger/entry node had started under it. Untracked claims (an instance without this) keep the
+   * earlier rule: interrupted once a node completed.
+   */
+  effects?: { tracked: boolean; started: boolean };
 }
 
 /** A record whose final write landed: `partial` only once it has a completed_at. */
 export function isFinalRunRecord(history: { status: string; completedAt?: unknown }): boolean {
   if (history.status === "partial") return history.completedAt !== null && history.completedAt !== undefined;
   return FINAL_RUN_STATUSES.has(history.status);
+}
+
+/** The side-effect marker of a locked queue row (effects_token / effects_started, migration v46). */
+export function lostJobEffects(row: { claim_token?: unknown; effects_token?: unknown; effects_started?: unknown }): { tracked: boolean; started: boolean } {
+  const claimToken = typeof row.claim_token === "string" ? row.claim_token : null;
+  const tracked = claimToken !== null && row.effects_token === claimToken;
+  return { tracked, started: tracked && Number(row.effects_started ?? 0) > 0 };
 }
 
 export function decideLostJob(input: LostJobInput): LostJobDecision {
@@ -123,7 +136,13 @@ export function decideLostJob(input: LostJobInput): LostJobDecision {
   }
   if (input.history) {
     if (isFinalRunRecord(input.history) || input.history.status === "waiting_approval") return "finished";
-    if (input.history.status === "running" && hasCompletedNode(input.history.nodeResultsJson)) return "interrupt";
+  }
+  // Re-run only a run that cannot have caused a side effect yet: no node other than its trigger/entry nodes started
+  // (an agent's tool calls happen before its node completes). The claim's marker is written before such a node runs.
+  if (input.effects?.tracked) {
+    if (input.effects.started) return "interrupt";
+  } else if (input.history?.status === "running" && hasCompletedNode(input.history.nodeResultsJson)) {
+    return "interrupt";
   }
   if (input.countsAttempt && input.attempts >= input.maxAttempts) return "dead_letter";
   return "requeue";

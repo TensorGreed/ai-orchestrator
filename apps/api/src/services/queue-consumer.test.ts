@@ -269,7 +269,9 @@ describe("queue consumer", () => {
     const halfway = await queue.enqueue({ workflowId: "wf2" });
     queue.start();
     await until(() => blocking.calls.length === 2, "both jobs to start");
-    // One run already completed a node: it is not re-run silently.
+    // One run already completed a node (its worker marked the claim before the node started): not re-run silently.
+    const halfwayContext = blocking.calls.find((call) => call.context.queueItemId === halfway)!.context;
+    expect(await store.markQueueEffectsStarted({ queueItemId: halfway, claimToken: halfwayContext.claimToken! })).toBe(true);
     await store.saveExecutionHistory({
       id: halfway,
       workflowId: "wf2",
