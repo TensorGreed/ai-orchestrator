@@ -65,13 +65,17 @@ export interface BackupAdapter {
 }
 
 /**
- * Tables exported by db:export. Anything truly transient (caches, replay
- * windows, leader leases, log stream delivery history) is intentionally
- * skipped — restoring those would either be wrong (resume an expired lease)
- * or pointless (caches refill on demand).
+ * Tables exported by db:export: every table that holds data a restored instance needs. Anything truly transient
+ * (NOT_EXPORTED_TABLES: caches, replay windows, leader leases, cluster liveness, log stream delivery history) is
+ * intentionally skipped — restoring those would either be wrong (resume an expired lease) or pointless (caches
+ * refill on demand).
  *
  * `schema_migrations` is also skipped: the importer ensures the destination
  * is at the right version via runMigrations, then writes data on top.
+ *
+ * Order matters on Postgres, where foreign keys are checked as rows go in: parents (users, projects) come before the
+ * tables that reference them. db-backup.test.ts checks that every table of the live schema is listed here or in
+ * NOT_EXPORTED_TABLES, so a new table cannot be left out of backups unnoticed.
  */
 export const EXPORTED_TABLES = [
   // Workflow data
@@ -110,13 +114,91 @@ export const EXPORTED_TABLES = [
   "execution_queue_dlq",
   // Optional history (skippable via --exclude-history)
   "execution_history",
-  "audit_logs"
+  "audit_logs",
+  // Phase 13.1 — everything else a restored instance needs (db:export wrote only the tables above before).
+  // Approvals and releases
+  "approval_requests",
+  "workflow_releases",
+  "release_gates",
+  "release_approval_requests",
+  "gate_case_requests",
+  // MCP registry, gateway, policy and history
+  "mcp_servers",
+  "mcp_server_catalogs",
+  "mcp_server_probes",
+  "mcp_tool_snapshots",
+  "mcp_tool_classifications",
+  "mcp_tool_policies",
+  "mcp_toolsets",
+  "mcp_toolset_members",
+  "mcp_clients",
+  "mcp_oauth_connections",
+  "mcp_user_oauth_connections",
+  "mcp_elicitations",
+  "mcp_tool_calls",
+  "mcp_cassettes",
+  // Guard
+  "guard_profiles",
+  "guard_profile_versions",
+  "guard_bindings",
+  "guard_events",
+  "guard_simulations",
+  "guard_token_vault",
+  "data_destinations",
+  // Knowledge bases (SQLite's full-text index is rebuilt from the chunks by its triggers; Postgres computes its own)
+  "knowledge_bases",
+  "knowledge_base_chunks",
+  // Evals, replay and capture
+  "eval_datasets",
+  "eval_fixtures",
+  "eval_runs",
+  "eval_results",
+  "replay_capture_settings",
+  "replay_recordings",
+  // Audit export and signed run manifests
+  "audit_signing_keys",
+  "execution_manifests",
+  "audit_export_destinations",
+  "audit_export_runs",
+  // Usage and budgets
+  "usage_events",
+  "budgets",
+  "budget_alerts"
 ] as const;
+
+/** Tables db:export leaves out on purpose, and why (the runbook lists them as safe to lose). */
+export const NOT_EXPORTED_TABLES: Record<string, string> = {
+  schema_migrations: "the importer migrates the destination itself",
+  schema_markers: "written by the SQLite store as it creates the schema",
+  session_tool_cache: "cache, refilled on demand",
+  external_secret_cache: "cache of external secret values, refilled on demand",
+  webhook_idempotency: "short replay window for webhook idempotency keys",
+  webhook_replay_keys: "short replay window for signed webhooks",
+  leader_leases: "leader election lease, taken again at start",
+  cluster_instances: "liveness of running instances",
+  cluster_run_owners: "which live instance runs a run",
+  log_stream_events: "log stream delivery history",
+  guard_profile_revision: "a change counter the guard tables' triggers bump; caches only compare it",
+  knowledge_base_chunks_fts: "SQLite full-text index, rebuilt from knowledge_base_chunks",
+  knowledge_base_chunks_fts_config: "SQLite full-text index storage",
+  knowledge_base_chunks_fts_data: "SQLite full-text index storage",
+  knowledge_base_chunks_fts_docsize: "SQLite full-text index storage",
+  knowledge_base_chunks_fts_idx: "SQLite full-text index storage"
+};
 
 export const HISTORY_TABLES = [
   "execution_history",
   "audit_logs"
 ] as const;
+
+/**
+ * The tables an import empties before writing (unless --merge): the ones the backup holds, and the history tables
+ * always (a backup taken with --exclude-history restores without the old instance's history, as before). A table
+ * the backup does not hold (an older db:export that wrote fewer tables) is left as it is.
+ */
+export function tablesToTruncate(dump: Pick<BackupDump, "tables">): string[] {
+  return EXPORTED_TABLES.filter((table) => table in dump.tables || (HISTORY_TABLES as readonly string[]).includes(table));
+}
 
 /**
  * Encrypted-blob columns the importer can re-encrypt with a new master key
@@ -128,6 +210,15 @@ export const ENCRYPTED_COLUMNS: Record<string, { iv: string; authTag: string; ci
   secrets: { iv: "iv", authTag: "auth_tag", ciphertext: "ciphertext", required: true },
   mfa_secrets: { iv: "secret_iv", authTag: "secret_auth_tag", ciphertext: "secret_ciphertext", required: true },
   log_stream_destinations: { iv: "config_iv", authTag: "config_auth_tag", ciphertext: "config_ciphertext", required: false }
+};
+
+/**
+ * Columns holding a value sealed with the master key (SecretService.sealValue: `v1.<iv>.<tag>.<ciphertext>`, the
+ * purpose bound as authenticated data), which db:import re-seals with --source-master-key. The purpose must match the
+ * one the service seals with (guard-service.ts VAULT_PURPOSE; db-backup.test.ts checks it).
+ */
+export const SEALED_COLUMNS: Record<string, { column: string; purpose: string }> = {
+  guard_token_vault: { column: "value_sealed", purpose: "guard-token-vault" }
 };
 
 class SqliteAdapter implements BackupAdapter {
@@ -511,7 +602,7 @@ export async function importDump(adapter: BackupAdapter, dump: BackupDump, optio
       log("Truncating destination tables...");
       // Reverse order, so a later non-cascading SQLite delete doesn't hit a parent before its children (CASCADE on
       // Postgres makes this moot; the symmetry keeps both paths predictable).
-      for (const table of [...EXPORTED_TABLES].reverse()) {
+      for (const table of tablesToTruncate(dump).reverse()) {
         try {
           await adapter.truncate(table);
         } catch (err) {

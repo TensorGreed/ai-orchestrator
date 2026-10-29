@@ -1,0 +1,92 @@
+name: DR drill
+
+# Phase 13.1 — the backup and restore drill (scripts/dr-drill.mjs): populates an API through its public endpoints, backs
+# it up with every documented method, restores each backup into a fresh instance (SQLite → SQLite, Postgres → Postgres,
+# SQLite → Postgres, Postgres point-in-time recovery, a new and a lost master key) and verifies it. The runbook is
+# apps/docs/docs/operations/backup-and-recovery.md.
+on:
+  pull_request:
+    paths:
+      - "apps/api/src/scripts/**"
+      - "apps/api/src/db/**"
+      - "apps/api/package.json"
+      - "scripts/dr-drill.mjs"
+      - "apps/docs/docs/operations/backup-and-recovery.md"
+      - ".github/workflows/dr-drill.yml"
+  schedule:
+    # Weekly, Monday 05:17 UTC.
+    - cron: "17 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dr-drill-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  dr-drill:
+    name: Backup and restore drill
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: l2m
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      DR_DRILL_POSTGRES_URL: postgres://postgres:l2m@127.0.0.1:5432/postgres
+      DR_DRILL_REQUIRE_POSTGRES: "true"
+      DR_DRILL_PITR: "true"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      # Corepack must run BEFORE setup-node: `cache: "pnpm"` invokes pnpm to compute the cache key.
+      - name: Enable Corepack
+        run: corepack enable
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "20"
+          cache: "pnpm"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # pg_dump / pg_restore must be at least the server's major version (16); point-in-time recovery runs its own
+      # throwaway cluster with the runner's initdb / pg_ctl / pg_basebackup.
+      - name: Postgres tools
+        run: |
+          # The drill's work directory (instance logs, kept on failure) lands under TMPDIR.
+          mkdir -p "$RUNNER_TEMP/dr-drill"
+          echo "TMPDIR=$RUNNER_TEMP/dr-drill" >> "$GITHUB_ENV"
+          PG_BIN="$(ls -d /usr/lib/postgresql/*/bin | sort -V | tail -1)"
+          echo "DR_DRILL_PG_BIN=$PG_BIN" >> "$GITHUB_ENV"
+          echo "$PG_BIN" >> "$GITHUB_PATH"
+          "$PG_BIN/pg_dump" --version
+          "$PG_BIN/initdb" --version
+
+      - name: Restore drill
+        run: node scripts/dr-drill.mjs --summary "$TMPDIR/dr-drill-summary.json"
+
+      - name: Upload drill summary and instance logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: dr-drill
+          path: |
+            ${{ runner.temp }}/dr-drill/dr-drill-summary.json
+            ${{ runner.temp }}/dr-drill/l2m-dr-drill-*/**/api.log
+          if-no-files-found: ignore

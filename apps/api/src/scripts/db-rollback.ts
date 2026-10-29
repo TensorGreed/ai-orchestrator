@@ -30,6 +30,8 @@ function parseArgs(argv: string[]): Args {
   let yes = false;
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
+    // pnpm passes the `--` that separates its own options from the script's (pnpm --filter … db:export -- --out x).
+    if (arg === "--") continue;
     if (arg === "--to" || arg === "-t") {
       const next = argv[++i];
       if (next === undefined) throw new Error("--to requires a version number");

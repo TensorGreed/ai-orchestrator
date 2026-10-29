@@ -45,4 +45,4 @@ features:
 - [Auth & RBAC](/security/auth-rbac) · [Secrets](/security/secrets) · [Secure webhooks](/security/secure-webhooks)
 - [API endpoints](/api/endpoints)
 - [Extension SDKs](/extensions/providers) · [Connectors](/extensions/connectors) · [MCP](/extensions/mcp)
-- [CI](/operations/ci) · [Testing & quality gates](/operations/testing-and-quality) · [Troubleshooting](/troubleshooting/common-issues)
+- [CI](/operations/ci) · [Testing & quality gates](/operations/testing-and-quality) · [Troubleshooting](/troubleshooting/common-issues) · [Backup and recovery](/operations/backup-and-recovery)

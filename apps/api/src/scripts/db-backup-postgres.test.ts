@@ -13,7 +13,7 @@ import { parsePostgresSettings } from "../config.js";
 import { postgresStoreConfig } from "../db/create-store.js";
 import { PostgresStore, postgresPoolConfig } from "../db/postgres-store.js";
 import { createEmptyTestDatabase, noticePostgresSkipped, testPostgresUrl } from "../test-support/test-store.js";
-import { AuditVerdictMismatch, EXPORTED_TABLES, exportDump, importDump, openBackupAdapter, type BackupDump } from "./db-shared.js";
+import { AuditVerdictMismatch, EXPORTED_TABLES, NOT_EXPORTED_TABLES, exportDump, importDump, openBackupAdapter, type BackupDump } from "./db-shared.js";
 
 const url = testPostgresUrl();
 if (!url) noticePostgresSkipped("db:export / db:import on Postgres");
@@ -52,6 +52,42 @@ describe.skipIf(!url)("db:export / db:import round trip [postgres]", () => {
   async function freshDatabase(): Promise<string> {
     return databaseUrl(await createEmptyTestDatabase());
   }
+
+  it("exports every table of the Postgres schema except the listed transient ones, and restores them in foreign-key order", async () => {
+    const srcUrl = await freshDatabase();
+    const source = await openStore(srcUrl);
+    await source.createMcpServer({ id: "mcp_one", name: "One", adapterId: "mock-mcp" });
+    await source.putGuardVault({ token: "tok_1", dataClass: "email", valueHash: "h1", valueSealed: "v1.a.b.c", createdAt: "2026-03-01T00:00:00.000Z" });
+    await source.close();
+    const pool = new Pool(postgresPoolConfig(postgresStoreConfig(parsePostgresSettings({ DB_POSTGRESDB_URL: srcUrl })), { max: 1 }));
+    const tables = (await pool.query<{ table_name: string }>(
+      `SELECT table_name FROM information_schema.tables WHERE table_schema = current_schema() AND table_type = 'BASE TABLE'`
+    )).rows.map((row) => row.table_name);
+    await pool.end();
+    const exported = new Set<string>(EXPORTED_TABLES);
+    expect(tables.filter((table) => !exported.has(table) && !(table in NOT_EXPORTED_TABLES))).toEqual([]);
+    expect(EXPORTED_TABLES.filter((table) => !tables.includes(table))).toEqual([]);
+
+    process.env.DB_TYPE = "postgres";
+    process.env.DB_POSTGRESDB_URL = srcUrl;
+    const exporter = await openBackupAdapter();
+    const dump = JSON.parse(JSON.stringify(await exportDump(exporter))) as BackupDump;
+    await exporter.close();
+    expect(Object.keys(dump.tables).sort()).toEqual([...EXPORTED_TABLES].sort());
+
+    const dstUrl = await freshDatabase();
+    process.env.DB_POSTGRESDB_URL = dstUrl;
+    const importer = await openBackupAdapter();
+    await importDump(importer, dump);
+    await importer.close();
+    const restored = await openStore(dstUrl);
+    try {
+      expect((await restored.getMcpServer("mcp_one"))?.name).toBe("One");
+      expect((await restored.getGuardVaultByToken("tok_1"))?.value_sealed).toBe("v1.a.b.c");
+    } finally {
+      await restored.close();
+    }
+  }, 120_000);
 
   it("keeps seq through export and import: same rows, same order, the chain verifies, the next insert is max + 1", async () => {
     const srcUrl = await freshDatabase();

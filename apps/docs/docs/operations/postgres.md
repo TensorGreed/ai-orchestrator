@@ -166,9 +166,13 @@ would turn *broken* on Postgres, or a row that would become unverifiable without
 
 ## Backup and restore
 
+The full runbook (what to keep, the master key, scheduled backups, point-in-time recovery, restore after losing the
+master key, RPO and RTO, and the restore drill CI runs) is [Backup and recovery](./backup-and-recovery.md).
+
 - **Postgres:** use your usual tools (`pg_dump` / `pg_restore`, or your provider's snapshots).
-- **SQLite:** stop the API and copy the file, or use `db:export`.
-- `db:export` / `db:import` write and read a JSON backup of the main tables on either store (`--exclude-history` skips
+- **SQLite:** stop the API and copy the file, take an online backup, or use `db:export`.
+- `db:export` / `db:import` write and read a JSON backup of every table a restored instance needs (not caches, leases
+  or replay windows) on either store (`--exclude-history` skips
   execution history and the audit log). A backup restores into the same kind of store it came from: to move from
   SQLite to Postgres, use db:copy. Secrets stay encrypted in the backup; `db:import --source-master-key` re-encrypts
   them when the master key changed.

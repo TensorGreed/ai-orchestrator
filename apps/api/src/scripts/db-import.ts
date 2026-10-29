@@ -1,6 +1,6 @@
 /**
  * pnpm --filter @ai-orchestrator/api db:import -- --in backup.json --yes \
- *     [--source-master-key <base64>]
+ *     [--source-master-key <base64> | --source-master-key-file <path>]
  *
  * Restores a backup written by db:export into the configured DB. Default
  * mode is destructive: every exported table is TRUNCATEd before insert.
@@ -11,7 +11,9 @@
  * SECRET_MASTER_KEY_BASE64 than the current one, pass the original key as
  * --source-master-key. The importer will decrypt every encrypted blob with
  * the source key and re-encrypt with the current SECRET_MASTER_KEY_BASE64
- * before insert.
+ * before insert. --source-master-key-file reads the key from a file instead
+ * (the first line, trimmed), so it never appears in the process list or the
+ * shell history.
  *
  * The whole restore is one transaction. When the backup records its audit
  * chain's verdict (db:export writes it), the restored chain is verified
@@ -25,13 +27,8 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import crypto from "node:crypto";
-import {
-  ENCRYPTED_COLUMNS,
-  importDump,
-  openBackupAdapter,
-  type BackupDump
-} from "./db-shared.js";
+import { importDump, openBackupAdapter, type BackupDump } from "./db-shared.js";
+import { readKeyFile, reencryptRows } from "./db-reencrypt.js";
 
 interface Args {
   in: string;
@@ -51,6 +48,8 @@ function parseArgs(argv: string[]): Args {
   let allowAuditChange = false;
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
+    // pnpm passes the `--` that separates its own options from the script's (pnpm --filter … db:export -- --out x).
+    if (arg === "--") continue;
     if (arg === "--in" || arg === "-i") {
       const next = argv[++i];
       if (next === undefined) throw new Error("--in requires a path");
@@ -61,6 +60,10 @@ function parseArgs(argv: string[]): Args {
       const next = argv[++i];
       if (next === undefined) throw new Error("--source-master-key requires a base64 key");
       sourceMasterKey = next;
+    } else if (arg === "--source-master-key-file") {
+      const next = argv[++i];
+      if (next === undefined) throw new Error("--source-master-key-file requires a path");
+      sourceMasterKey = readKeyFile(next);
     } else if (arg === "--merge") {
       merge = true;
     } else if (arg === "--allow-audit-change") {
@@ -79,13 +82,16 @@ function printUsageAndExit(code: number): never {
   console.log(
     [
       "Usage: pnpm --filter @ai-orchestrator/api db:import -- --in <file.json> --yes \\",
-      "         [--source-master-key <base64>] [--merge] [--allow-audit-change]",
+      "         [--source-master-key <base64> | --source-master-key-file <path>] [--merge] [--allow-audit-change]",
       "",
       "Options:",
       "  --in, -i <file.json>       Backup file produced by db:export.",
       "  --yes, -y                  Confirm the operation. Required.",
       "  --source-master-key <b64>  Base64 master key the backup was encrypted with.",
       "                             Required when rotating SECRET_MASTER_KEY_BASE64.",
+      "  --source-master-key-file <path>",
+      "                             The same, read from a file (first line), so the key stays off the",
+      "                             command line.",
       "  --merge                    Insert without truncating (default: truncate first).",
       "  --allow-audit-change       Restore even if the restored audit chain's verdict differs from the",
       "                             one the backup recorded (both are printed, then a WARNING).",
@@ -107,70 +113,6 @@ function loadKey(b64: string, label: string): Buffer {
     throw new Error(`${label} must decode to 32 bytes (got ${buf.length})`);
   }
   return buf;
-}
-
-function reencryptBlob(
-  iv: string,
-  authTag: string,
-  ciphertext: string,
-  sourceKey: Buffer,
-  destKey: Buffer
-): { iv: string; authTag: string; ciphertext: string } {
-  const decipher = crypto.createDecipheriv("aes-256-gcm", sourceKey, Buffer.from(iv, "base64"));
-  decipher.setAuthTag(Buffer.from(authTag, "base64"));
-  const plaintext = Buffer.concat([
-    decipher.update(Buffer.from(ciphertext, "base64")),
-    decipher.final()
-  ]);
-
-  const newIv = crypto.randomBytes(12);
-  const cipher = crypto.createCipheriv("aes-256-gcm", destKey, newIv);
-  const newCiphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
-  const newAuthTag = cipher.getAuthTag();
-  return {
-    iv: newIv.toString("base64"),
-    authTag: newAuthTag.toString("base64"),
-    ciphertext: newCiphertext.toString("base64")
-  };
-}
-
-function reencryptRows(
-  table: string,
-  rows: Record<string, unknown>[],
-  sourceKey: Buffer,
-  destKey: Buffer
-): { rows: Record<string, unknown>[]; touched: number } {
-  const cols = ENCRYPTED_COLUMNS[table];
-  if (!cols) return { rows, touched: 0 };
-  let touched = 0;
-  const out = rows.map((row) => {
-    const iv = row[cols.iv];
-    const authTag = row[cols.authTag];
-    const ciphertext = row[cols.ciphertext];
-    // Skip rows where the encrypted columns are null (e.g. log_stream_destinations
-    // can be configured without the optional config blob).
-    if (
-      iv === null || iv === undefined || iv === "" ||
-      authTag === null || authTag === undefined || authTag === "" ||
-      ciphertext === null || ciphertext === undefined || ciphertext === ""
-    ) {
-      if (cols.required) {
-        throw new Error(
-          `${table}: row missing required encrypted blob (iv/authTag/ciphertext)`
-        );
-      }
-      return row;
-    }
-    const fresh = reencryptBlob(String(iv), String(authTag), String(ciphertext), sourceKey, destKey);
-    touched++;
-    return {
-      ...row,
-      [cols.iv]: fresh.iv,
-      [cols.authTag]: fresh.authTag,
-      [cols.ciphertext]: fresh.ciphertext
-    };
-  });
-  return { rows: out, touched };
 }
 
 async function main() {
