@@ -1,0 +1,45 @@
+# Weekly dependency updates, grouped so each ecosystem opens at most one pull request for minor and patch
+# updates per week. Major updates still arrive as one pull request each, since they can change behaviour.
+# GitHub Actions stay pinned by commit SHA; Dependabot updates the SHA and the version comment together.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      github-actions:
+        patterns: ["*"]
+        update-types: [minor, patch]
+    commit-message:
+      prefix: "ci"
+
+  # The pnpm workspace: root package.json and pnpm-lock.yaml cover every apps/* and packages/* package.
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 10
+    groups:
+      npm:
+        patterns: ["*"]
+        update-types: [minor, patch]
+    commit-message:
+      prefix: "deps"
+
+  # Base images of the released API and Web images.
+  - package-ecosystem: docker
+    directories:
+      - /apps/api
+      - /apps/web
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      docker-base-images:
+        patterns: ["*"]
+        update-types: [minor, patch]
+    commit-message:
+      prefix: "docker"

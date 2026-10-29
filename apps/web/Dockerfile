@@ -10,19 +10,19 @@
 # Build:   docker build -f apps/web/Dockerfile -t l2m-web .
 # Run:     docker run -p 5173:80 l2m-web
 #
-# Note: pnpm-lock.yaml is gitignored in this repo, so the install uses
-# --no-frozen-lockfile. Commit a lockfile and switch to --frozen-lockfile if
-# you want fully reproducible image builds.
+# Dependencies install from the committed pnpm-lock.yaml (--frozen-lockfile),
+# so an image gets exactly the versions the lockfile, CI and the source SBOM
+# name; a lockfile out of step with a package.json fails the build.
 
 FROM node:20-alpine AS build
 WORKDIR /app
 RUN corepack enable
 
-COPY package.json pnpm-workspace.yaml tsconfig.base.json ./
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json ./
 COPY apps/web/package.json apps/web/
 COPY packages/shared/package.json packages/shared/
 
-RUN pnpm install --no-frozen-lockfile
+RUN pnpm install --frozen-lockfile
 
 COPY apps/web apps/web
 COPY packages/shared packages/shared

@@ -232,6 +232,8 @@ docker compose up --build
 - Web: `http://localhost:5173`
 - API: `http://localhost:4000`
 
+This builds the images from source. Tagged releases also publish signed multi-arch images to GHCR (`ghcr.io/tensorgreed/ai-orchestrator`, `ghcr.io/tensorgreed/ai-orchestrator-web`) with SBOMs and build provenance; see [Verify a release](https://lsquarem.com/docs/operations/verify-a-release) to check one and pin its digest.
+
 ## CI
 
 GitHub Actions CI is defined in `.github/workflows/ci.yml` and runs:
