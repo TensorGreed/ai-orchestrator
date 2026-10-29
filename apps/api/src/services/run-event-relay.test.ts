@@ -239,6 +239,35 @@ describe("openRunRelay", () => {
     expect(await open.ended()).toEqual({ kind: "closed" });
   });
 
+  it("a paused run that is being resumed is followed to the resume's end, not answered with the stale pause", async () => {
+    const paused = { status: "waiting_approval", output: null };
+    const state: { run: PersistedRun | null; outcome: QueueItemOutcome | null; resuming: boolean } = {
+      run: { id: "e", workflowId: "wf", status: "waiting_approval", startedAt: "s" },
+      outcome: { status: "completed", result: paused, lastError: null, attempts: 0 },
+      resuming: true
+    };
+    const { source } = setup(state);
+    const relay = await openRunRelay(
+      { ...source, readRun: async () => state.run, readOutcome: async () => state.outcome, resumeActive: async () => state.resuming },
+      { executionId: "e", queueItemId: "e", onEvent: () => undefined }
+    );
+    relay.check();
+    expect(await relay.ended(150)).toEqual({ kind: "timeout" });
+
+    const again = await openRunRelay(
+      { ...source, readRun: async () => state.run, readOutcome: async () => state.outcome, resumeActive: async () => state.resuming },
+      { executionId: "e", queueItemId: "e", onEvent: () => undefined }
+    );
+    // The resume's final write lands: the run's record is the end.
+    state.run = { id: "e", workflowId: "wf", status: "success", startedAt: "s", completedAt: "c" };
+    state.resuming = false;
+    expect(await again.ended(5_000)).toMatchObject({ kind: "result", result: { status: "success" } });
+
+    // No resume running: the pause is the end, as before.
+    const idle = setup({ run: { id: "e", workflowId: "wf", status: "waiting_approval", startedAt: "s" }, outcome: { status: "completed", result: paused, lastError: null, attempts: 0 } });
+    expect(await (await openRunRelay({ ...idle.source, resumeActive: async () => false }, { executionId: "e", queueItemId: "e", onEvent: () => undefined })).ended(5_000)).toEqual({ kind: "result", result: paused });
+  });
+
   it("reads LocalRunEvents like the bus, and emitting without a listener costs nothing", async () => {
     const local = new LocalRunEvents();
     expect(local.has("e")).toBe(false);

@@ -3305,6 +3305,8 @@ export async function createApp(
         readRun: runPersistedView,
         readOutcome: async (id) => await store.getQueueItemOutcome(id),
         readElicitation: readElicitationView,
+        // A reattach to a paused run that is being resumed follows the resume to its end.
+        resumeActive: async (id) => (await store.getWorkflowExecutionState(id))?.status === "resuming",
         onError: (error) => app.log.warn({ executionId, error: error instanceof Error ? error.message : String(error) }, "Run relay read failed")
       },
       { executionId, queueItemId: executionId, onEvent }

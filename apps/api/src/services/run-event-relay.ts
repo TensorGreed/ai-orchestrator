@@ -203,6 +203,11 @@ export interface RunRelaySource {
   readOutcome?: (queueItemId: string) => Promise<QueueItemOutcome | null>;
   /** An elicitation's current view, for an `mcp_elicitation` event that came by reference. */
   readElicitation?: (id: string) => Promise<unknown | null>;
+  /**
+   * Whether a decided approval is resuming the run now. A resume writes nothing to the run's record until it ends, so
+   * while it runs the stored pause is not the run's end.
+   */
+  resumeActive?: (executionId: string) => Promise<boolean>;
   pollMs?: number;
   onError?: (error: unknown) => void;
 }
@@ -344,14 +349,26 @@ export async function openRunRelay(
   };
   const report = (error: unknown) => source.onError?.(error);
 
+  // A pause is the run's end only while no resume of it runs (a resume writes the record only when it ends).
+  const resuming = async (): Promise<boolean> => (source.resumeActive ? await source.resumeActive(executionId) : false);
   const readEnd = async (): Promise<RunRelayEnd | null> => {
     const outcome = options.queueItemId && source.readOutcome ? await source.readOutcome(options.queueItemId) : null;
-    if (outcome && outcome.result !== null && outcome.result !== undefined) return { kind: "result", result: outcome.result };
-    if (outcome?.status === "dead") return { kind: "failed", error: outcome.lastError };
-    if (outcome?.status === "running") return null;
+    const stored = outcome && outcome.result !== null && outcome.result !== undefined ? outcome.result : null;
+    if (stored !== null) {
+      if (asRecord(stored).status !== "waiting_approval") return { kind: "result", result: stored };
+      // The stored result is a pause: the end while the run still reads as that pause and nothing resumes it. Once a
+      // resume ran (the record moved on) or runs, the record decides below.
+    } else {
+      if (outcome?.status === "dead") return { kind: "failed", error: outcome.lastError };
+      if (outcome?.status === "running") return null;
+    }
     const run = await source.readRun(executionId);
     // Canceled while it waited for a worker: the cancel is the run's end (the worker that claims it later skips it).
     if (outcome?.status === "pending") return run?.status === "canceled" ? { kind: "result", result: resultFromPersistedRun(run) } : null;
+    if (run?.status === "waiting_approval" || (stored !== null && !run)) {
+      if (await resuming()) return null;
+      if (stored !== null) return { kind: "result", result: stored };
+    }
     if (run && isRunSettled(run)) return { kind: "result", result: resultFromPersistedRun(run) };
     return null;
   };
