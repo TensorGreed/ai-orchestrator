@@ -30,6 +30,8 @@ x-app-env: &app-env
   CODE_SANDBOX_MODE: in_process
   WORKFLOW_EXECUTION_TIMEOUT_MS: "120000"
   LOG_LEVEL: ${SCALE_LOG_LEVEL:-warn}
+  # inline (default) or queue: with queue, the api replicas send every run to the workers (lane D measurements).
+  EXECUTION_DISPATCH: ${SCALE_EXECUTION_DISPATCH:-inline}
   QUEUE_CONCURRENCY: ${QUEUE_CONCURRENCY:-10}
   QUEUE_HEARTBEAT_MS: ${QUEUE_HEARTBEAT_MS:-10000}
   QUEUE_LEASE_MS: ${QUEUE_LEASE_MS:-45000}
