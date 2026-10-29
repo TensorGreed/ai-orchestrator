@@ -77,6 +77,8 @@ import type {
   CancelExecutionResult,
   ClusterInstanceHeartbeat,
   ClusterInstanceRecord,
+  ConsumedPendingChallenge,
+  PendingChallengeInput,
   ReleaseApprovalDecisionInput,
   ReleaseGateCasesChange,
   ReplayRecordingLimits,
@@ -652,6 +654,8 @@ export interface McpElicitationRecord extends McpElicitationView {
   /** User the run belongs to; only they (and operators) may answer. */
   createdBy: string | null;
   triggerType: string | null;
+  /** Phase 13.1 — cluster mode: the instance whose run waits on the request (absent outside cluster mode). */
+  holderId?: string | null;
 }
 
 export interface McpServerProbeRecord {
@@ -1129,6 +1133,7 @@ interface McpElicitationRow {
   reason: string | null;
   created_by: string | null;
   trigger_type: string | null;
+  holder_id?: string | null;
 }
 
 const MCP_ELICITATION_STATUSES = new Set<McpElicitationStatus>(["pending", "accepted", "declined", "cancelled", "expired", "auto_declined"]);
@@ -1172,7 +1177,8 @@ function mapMcpElicitation(row: McpElicitationRow): McpElicitationRecord {
     ...(row.answered_by ? { answeredBy: toString(row.answered_by) } : {}),
     ...(row.reason ? { reason: toString(row.reason) } : {}),
     createdBy: row.created_by ? toString(row.created_by) : null,
-    triggerType: row.trigger_type ? toString(row.trigger_type) : null
+    triggerType: row.trigger_type ? toString(row.trigger_type) : null,
+    ...(row.holder_id ? { holderId: toString(row.holder_id) } : {})
   };
 }
 
@@ -3774,6 +3780,41 @@ export class SqliteStore implements Store {
       )
     `);
     this.exec(`CREATE INDEX IF NOT EXISTS idx_cluster_run_owners_instance_id ON cluster_run_owners(instance_id)`);
+
+    // Phase 13.1 shared auth and per-user flow state migration — written in cluster mode only (Postgres); on SQLite
+    // (one process) the app keeps its in-memory maps and these exist for schema parity.
+    this.exec(`
+      CREATE TABLE IF NOT EXISTS pending_challenges (
+        id_hash TEXT PRIMARY KEY,
+        kind TEXT NOT NULL,
+        user_id TEXT,
+        scope TEXT,
+        payload_sealed TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL
+      )
+    `);
+    this.exec(`CREATE INDEX IF NOT EXISTS idx_pending_challenges_expires_at ON pending_challenges(expires_at)`);
+    this.exec(`CREATE INDEX IF NOT EXISTS idx_pending_challenges_scope ON pending_challenges(kind, scope)`);
+    this.ensureColumn("mcp_elicitations", "holder_id", "TEXT");
+    this.exec(`
+      CREATE TABLE IF NOT EXISTS rate_limit_buckets (
+        key TEXT PRIMARY KEY,
+        window_start TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        count INTEGER NOT NULL
+      )
+    `);
+    this.exec(`CREATE INDEX IF NOT EXISTS idx_rate_limit_buckets_expires_at ON rate_limit_buckets(expires_at)`);
+    this.exec(`
+      CREATE TABLE IF NOT EXISTS capture_reservations (
+        id TEXT PRIMARY KEY,
+        workflow_id TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL
+      )
+    `);
+    this.exec(`CREATE INDEX IF NOT EXISTS idx_capture_reservations_workflow ON capture_reservations(workflow_id, expires_at)`);
 
     this.exec(`CREATE INDEX IF NOT EXISTS idx_workflows_project_id ON workflows(project_id)`);
     this.exec(`CREATE INDEX IF NOT EXISTS idx_workflows_folder_id ON workflows(folder_id)`);
@@ -9429,6 +9470,125 @@ export class SqliteStore implements Store {
   }
 
   // ---------------------------------------------------------------------------
+  // Phase 13.1 shared auth and per-user flow state. The app uses these in cluster mode only (Postgres); here they keep
+  // the same contract for the contract tests. One process, synchronous statements: each method is atomic as written.
+  // ---------------------------------------------------------------------------
+
+  async createPendingChallenge(input: PendingChallengeInput): Promise<void> {
+    const now = Date.now();
+    this.exec(
+      `INSERT INTO pending_challenges (id_hash, kind, user_id, scope, payload_sealed, created_at, expires_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(id_hash) DO UPDATE SET kind = excluded.kind, user_id = excluded.user_id, scope = excluded.scope,
+         payload_sealed = excluded.payload_sealed, created_at = excluded.created_at, expires_at = excluded.expires_at`,
+      [
+        input.idHash,
+        input.kind,
+        input.userId,
+        input.scope,
+        input.payloadSealed,
+        new Date(now).toISOString(),
+        new Date(now + Math.max(0, input.ttlMs)).toISOString()
+      ]
+    );
+  }
+
+  async consumePendingChallenge(input: { idHash: string; kind: string }): Promise<ConsumedPendingChallenge | null> {
+    return this.transaction(() => {
+      const row = this.queryOne<{ user_id: unknown; scope: unknown; payload_sealed: unknown; expires_at: unknown }>(
+        `SELECT user_id, scope, payload_sealed, expires_at FROM pending_challenges WHERE id_hash = ? AND kind = ?`,
+        [input.idHash, input.kind]
+      );
+      if (!row) return null;
+      this.exec(`DELETE FROM pending_challenges WHERE id_hash = ?`, [input.idHash]);
+      return {
+        userId: row.user_id === null || row.user_id === undefined ? null : toString(row.user_id),
+        scope: row.scope === null || row.scope === undefined ? null : toString(row.scope),
+        payloadSealed: toString(row.payload_sealed),
+        expired: toString(row.expires_at) <= new Date().toISOString()
+      };
+    });
+  }
+
+  async deletePendingChallenges(input: { kind: string; scope: string; userId: string | null }): Promise<number> {
+    const { changes } = this.db
+      .prepare(`DELETE FROM pending_challenges WHERE kind = ? AND scope = ? AND user_id IS ?`)
+      .run(input.kind, input.scope, input.userId);
+    return changes;
+  }
+
+  async prunePendingChallenges(): Promise<number> {
+    const { changes } = this.db.prepare(`DELETE FROM pending_challenges WHERE expires_at <= ?`).run(new Date().toISOString());
+    return changes;
+  }
+
+  async hitRateLimitBucket(input: { key: string; windowMs: number }): Promise<{ count: number; ttlMs: number }> {
+    const windowMs = Math.max(1, Math.floor(input.windowMs));
+    return this.transaction(() => {
+      const nowMs = Date.now();
+      const now = new Date(nowMs).toISOString();
+      const row = this.queryOne<{ count: unknown; expires_at: unknown }>(`SELECT count, expires_at FROM rate_limit_buckets WHERE key = ?`, [input.key]);
+      if (!row || toString(row.expires_at) <= now) {
+        const expiresAt = new Date(nowMs + windowMs).toISOString();
+        this.exec(
+          `INSERT INTO rate_limit_buckets (key, window_start, expires_at, count) VALUES (?, ?, ?, 1)
+           ON CONFLICT(key) DO UPDATE SET window_start = excluded.window_start, expires_at = excluded.expires_at, count = 1`,
+          [input.key, now, expiresAt]
+        );
+        return { count: 1, ttlMs: windowMs };
+      }
+      const count = toNumber(row.count) + 1;
+      this.exec(`UPDATE rate_limit_buckets SET count = ? WHERE key = ?`, [count, input.key]);
+      return { count, ttlMs: Math.max(0, Date.parse(toString(row.expires_at)) - nowMs) };
+    });
+  }
+
+  async pruneRateLimitBuckets(): Promise<number> {
+    const { changes } = this.db.prepare(`DELETE FROM rate_limit_buckets WHERE expires_at <= ?`).run(new Date().toISOString());
+    return changes;
+  }
+
+  async reserveReplayCapture(input: { id: string; workflowId: string; since: string; maxPerDay: number; ttlMs: number }): Promise<boolean> {
+    return this.transaction(() => {
+      const nowMs = Date.now();
+      const now = new Date(nowMs).toISOString();
+      const captured = this.queryOne<{ count: unknown }>(`SELECT COUNT(*) AS count FROM replay_recordings WHERE workflow_id = ? AND captured_at >= ?`, [
+        input.workflowId,
+        input.since
+      ]);
+      const reserved = this.queryOne<{ count: unknown }>(`SELECT COUNT(*) AS count FROM capture_reservations WHERE workflow_id = ? AND expires_at > ?`, [
+        input.workflowId,
+        now
+      ]);
+      if (toNumber(captured?.count ?? 0) + toNumber(reserved?.count ?? 0) >= input.maxPerDay) return false;
+      this.exec(`INSERT INTO capture_reservations (id, workflow_id, created_at, expires_at) VALUES (?, ?, ?, ?)`, [
+        input.id,
+        input.workflowId,
+        now,
+        new Date(nowMs + Math.max(0, input.ttlMs)).toISOString()
+      ]);
+      return true;
+    });
+  }
+
+  async releaseReplayCaptureReservation(id: string): Promise<void> {
+    this.exec(`DELETE FROM capture_reservations WHERE id = ?`, [id]);
+  }
+
+  async countReplayCaptureReservations(workflowId: string): Promise<number> {
+    const row = this.queryOne<{ count: unknown }>(`SELECT COUNT(*) AS count FROM capture_reservations WHERE workflow_id = ? AND expires_at > ?`, [
+      workflowId,
+      new Date().toISOString()
+    ]);
+    return toNumber(row?.count ?? 0);
+  }
+
+  async pruneReplayCaptureReservations(): Promise<number> {
+    const { changes } = this.db.prepare(`DELETE FROM capture_reservations WHERE expires_at <= ?`).run(new Date().toISOString());
+    return changes;
+  }
+
+  // ---------------------------------------------------------------------------
   // Workflow Templates (Phase 7.4)
   // ---------------------------------------------------------------------------
 
@@ -11780,8 +11940,8 @@ export class SqliteStore implements Store {
     this.exec(
       `INSERT INTO mcp_elicitations (
          id, execution_id, workflow_id, workflow_name, node_id, server_id, registry_server_id, server_name,
-         tool_name, message, schema_json, status, created_at, expires_at, created_by, trigger_type
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)`,
+         tool_name, message, schema_json, status, created_at, expires_at, created_by, trigger_type, holder_id
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)`,
       [
         input.id,
         input.executionId,
@@ -11797,7 +11957,8 @@ export class SqliteStore implements Store {
         new Date().toISOString(),
         input.expiresAt,
         input.createdBy ?? null,
-        input.triggerType ?? null
+        input.triggerType ?? null,
+        input.holderId ?? null
       ]
     );
     return this.getMcpElicitationSync(input.id)!;

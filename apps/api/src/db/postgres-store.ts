@@ -14,6 +14,7 @@ import * as data_destinations from "./postgres/data-destinations.js";
 import * as data_labels from "./postgres/data-labels.js";
 import * as evals from "./postgres/eval.js";
 import * as executions from "./postgres/executions.js";
+import * as flow_state from "./postgres/flow-state.js";
 import * as guard from "./postgres/guard.js";
 import * as guard_simulation from "./postgres/guard-simulation.js";
 import * as knowledge from "./postgres/knowledge.js";
@@ -64,6 +65,10 @@ export interface PostgresStoreConfig {
  *   0x4c3258 ("L2X")  audit export — key: hashtext(schema:destination id); a session lock held for one export batch.
  *   0x4c3247 ("L2G")  git sync — key: hashtext(schema:"git-sync"); a session lock held for one pull or push.
  *                     Both: see postgres/cluster.ts.
+ *   0x4c3241 ("L2A")  MCP OAuth token refresh — key: hashtext(schema:server id[:user id]); a session lock held while one
+ *                     connection's token is re-read and refreshed (services/mcp-oauth-service.ts, cluster mode).
+ *   0x4c3243 ("L2C")  replay-capture reservations — key: hashtext(schema:workflow id), held for the reserving
+ *                     transaction (pg_advisory_xact_lock); see postgres/flow-state.ts.
  * Add a new class here rather than reusing one.
  */
 export const ADVISORY_LOCK_CLASS_MIGRATIONS = 0x4c324d;
@@ -1317,6 +1322,36 @@ export class PostgresStore implements Store {
   }
   async failRunsOwnedBy(...args: Parameters<Store["failRunsOwnedBy"]>): ReturnType<Store["failRunsOwnedBy"]> {
     return cluster.failRunsOwnedBy(this.ctx, ...args);
+  }
+  async createPendingChallenge(...args: Parameters<Store["createPendingChallenge"]>): ReturnType<Store["createPendingChallenge"]> {
+    return flow_state.createPendingChallenge(this.ctx, ...args);
+  }
+  async consumePendingChallenge(...args: Parameters<Store["consumePendingChallenge"]>): ReturnType<Store["consumePendingChallenge"]> {
+    return flow_state.consumePendingChallenge(this.ctx, ...args);
+  }
+  async deletePendingChallenges(...args: Parameters<Store["deletePendingChallenges"]>): ReturnType<Store["deletePendingChallenges"]> {
+    return flow_state.deletePendingChallenges(this.ctx, ...args);
+  }
+  async prunePendingChallenges(...args: Parameters<Store["prunePendingChallenges"]>): ReturnType<Store["prunePendingChallenges"]> {
+    return flow_state.prunePendingChallenges(this.ctx, ...args);
+  }
+  async hitRateLimitBucket(...args: Parameters<Store["hitRateLimitBucket"]>): ReturnType<Store["hitRateLimitBucket"]> {
+    return flow_state.hitRateLimitBucket(this.ctx, ...args);
+  }
+  async pruneRateLimitBuckets(...args: Parameters<Store["pruneRateLimitBuckets"]>): ReturnType<Store["pruneRateLimitBuckets"]> {
+    return flow_state.pruneRateLimitBuckets(this.ctx, ...args);
+  }
+  async reserveReplayCapture(...args: Parameters<Store["reserveReplayCapture"]>): ReturnType<Store["reserveReplayCapture"]> {
+    return flow_state.reserveReplayCapture(this.ctx, ...args);
+  }
+  async releaseReplayCaptureReservation(...args: Parameters<Store["releaseReplayCaptureReservation"]>): ReturnType<Store["releaseReplayCaptureReservation"]> {
+    return flow_state.releaseReplayCaptureReservation(this.ctx, ...args);
+  }
+  async countReplayCaptureReservations(...args: Parameters<Store["countReplayCaptureReservations"]>): ReturnType<Store["countReplayCaptureReservations"]> {
+    return flow_state.countReplayCaptureReservations(this.ctx, ...args);
+  }
+  async pruneReplayCaptureReservations(...args: Parameters<Store["pruneReplayCaptureReservations"]>): ReturnType<Store["pruneReplayCaptureReservations"]> {
+    return flow_state.pruneReplayCaptureReservations(this.ctx, ...args);
   }
   async writeAuditLog(...args: Parameters<Store["writeAuditLog"]>): ReturnType<Store["writeAuditLog"]> {
     return audit.writeAuditLog(this.ctx, ...args);

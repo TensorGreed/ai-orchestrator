@@ -2101,6 +2101,54 @@ export const MIGRATIONS: Migration[] = [
       DROP TABLE IF EXISTS cluster_run_owners;
       DROP TABLE IF EXISTS cluster_instances;
     `
+  },
+  {
+    version: 45,
+    description: "Phase 13.1 — shared auth and per-user flow state: pending challenges, elicitation holders, shared rate-limit buckets, capture reservations",
+    // Written only in cluster mode (Postgres with HA_ENABLED=true); outside it the app keeps today's in-memory maps and
+    // these stay empty. pending_challenges: a sign-in's TOTP step (password or SSO) and an MCP OAuth authorization
+    // waiting for its callback, keyed by the sha256 of the opaque id (the raw id is never stored) with the payload
+    // sealed by the master key; consumed once by a single DELETE ... RETURNING. mcp_elicitations.holder_id: the
+    // instance whose run waits on the request. rate_limit_buckets and capture_reservations are UNLOGGED: they hold
+    // counters and short reservations that a crash may lose without harm (a crash restarts the windows). SQLite's
+    // embedded migrate() creates the same tables as ordinary tables.
+    up: `
+      CREATE TABLE IF NOT EXISTS pending_challenges (
+        id_hash TEXT PRIMARY KEY,
+        kind TEXT NOT NULL,
+        user_id TEXT,
+        scope TEXT,
+        payload_sealed TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL,
+        expires_at TIMESTAMPTZ NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_pending_challenges_expires_at ON pending_challenges(expires_at);
+      CREATE INDEX IF NOT EXISTS idx_pending_challenges_scope ON pending_challenges(kind, scope);
+
+      ALTER TABLE mcp_elicitations ADD COLUMN IF NOT EXISTS holder_id TEXT;
+
+      CREATE UNLOGGED TABLE IF NOT EXISTS rate_limit_buckets (
+        key TEXT PRIMARY KEY,
+        window_start TIMESTAMPTZ NOT NULL,
+        expires_at TIMESTAMPTZ NOT NULL,
+        count INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_rate_limit_buckets_expires_at ON rate_limit_buckets(expires_at);
+
+      CREATE UNLOGGED TABLE IF NOT EXISTS capture_reservations (
+        id TEXT PRIMARY KEY,
+        workflow_id TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL,
+        expires_at TIMESTAMPTZ NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_capture_reservations_workflow ON capture_reservations(workflow_id, expires_at);
+    `,
+    down: `
+      DROP TABLE IF EXISTS capture_reservations;
+      DROP TABLE IF EXISTS rate_limit_buckets;
+      ALTER TABLE mcp_elicitations DROP COLUMN IF EXISTS holder_id;
+      DROP TABLE IF EXISTS pending_challenges;
+    `
   }
 ];
 
