@@ -53,11 +53,15 @@ export function parseArgs(argv) {
   return options;
 }
 
-function countBySeverity(findings) {
-  const counts = Object.fromEntries(["critical", "high", "medium", "low", "negligible", "unknown"].map((s) => [s, 0]));
+/** Findings per severity, as `{ all, fixed }` (fixed: a fixed version exists). */
+export function countBySeverity(findings) {
+  const counts = Object.fromEntries(
+    ["critical", "high", "medium", "low", "negligible", "unknown"].map((s) => [s, { all: 0, fixed: 0 }])
+  );
   for (const f of findings) {
     const key = severityRank(f.severity) >= 0 ? f.severity.toLowerCase() : "unknown";
-    counts[key] += 1;
+    counts[key].all += 1;
+    if (f.fixState === "fixed") counts[key].fixed += 1;
   }
   return counts;
 }
@@ -67,13 +71,14 @@ export function summarize(reports, options) {
     options.failOn === "none"
       ? "gate disabled (`--fail-on none`)"
       : `fails on ${options.onlyFixed ? "fixable " : ""}${options.failOn.toUpperCase()} or above`;
-  const lines = [`### Vulnerability gate: ${rule}`, "", "| Report | Critical | High | Medium | Low | Blocking |", "|---|---|---|---|---|---|"];
+  const lines = [`### Vulnerability gate: ${rule}`, "", "Counts are all findings (fixable in brackets).", "", "| Report | Critical | High | Medium | Low | Blocking |", "|---|---|---|---|---|---|"];
   const blocking = [];
   for (const { name, findings } of reports) {
     const counts = countBySeverity(findings);
     const blocked = blockingFindings(findings, options);
     blocking.push(...blocked.map((f) => ({ ...f, report: name })));
-    lines.push(`| ${name} | ${counts.critical} | ${counts.high} | ${counts.medium} | ${counts.low} | ${blocked.length} |`);
+    const cell = (severity) => `${counts[severity].all} (${counts[severity].fixed})`;
+    lines.push(`| ${name} | ${cell("critical")} | ${cell("high")} | ${cell("medium")} | ${cell("low")} | ${blocked.length} |`);
   }
   if (blocking.length > 0) {
     lines.push("", "| Report | Vulnerability | Severity | Package | Fixed in |", "|---|---|---|---|---|");

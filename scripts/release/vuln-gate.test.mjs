@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { blockingFindings, findingsOf, parseArgs, severityRank, summarize } from "./vuln-gate.mjs";
+import { blockingFindings, countBySeverity, findingsOf, parseArgs, severityRank, summarize } from "./vuln-gate.mjs";
 
 const match = (id, severity, state) => ({
   vulnerability: { id, severity, fix: { state, versions: state === "fixed" ? ["9.9.9"] : [] } },
@@ -55,6 +55,16 @@ test("an empty report and a report without matches pass", () => {
   const { blocking, markdown } = summarize([{ name: "api-linux-amd64", findings: [] }], { failOn: "critical", onlyFixed: true });
   assert.equal(blocking.length, 0);
   assert.match(markdown, /\*\*Passed\.\*\*/);
+});
+
+test("counts split all and fixable findings per severity", () => {
+  const counts = countBySeverity(findingsOf(report));
+  assert.deepEqual(counts.critical, { all: 2, fixed: 1 });
+  assert.deepEqual(counts.high, { all: 1, fixed: 1 });
+  assert.deepEqual(counts.medium, { all: 1, fixed: 0 });
+  assert.deepEqual(counts.unknown, { all: 1, fixed: 1 });
+  const { markdown } = summarize([{ name: "api-linux-amd64", findings: findingsOf(report) }], { failOn: "critical", onlyFixed: true });
+  assert.match(markdown, /\| api-linux-amd64 \| 2 \(1\) \| 1 \(1\) \| 1 \(0\) \| 0 \(0\) \| 1 \|/);
 });
 
 test("parseArgs reads options and requires a report", () => {
