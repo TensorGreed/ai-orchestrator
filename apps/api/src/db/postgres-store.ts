@@ -1318,9 +1318,6 @@ export class PostgresStore implements Store {
   async failRunsOwnedBy(...args: Parameters<Store["failRunsOwnedBy"]>): ReturnType<Store["failRunsOwnedBy"]> {
     return cluster.failRunsOwnedBy(this.ctx, ...args);
   }
-  async listCanceledExecutionIds(...args: Parameters<Store["listCanceledExecutionIds"]>): ReturnType<Store["listCanceledExecutionIds"]> {
-    return cluster.listCanceledExecutionIds(this.ctx, ...args);
-  }
   async writeAuditLog(...args: Parameters<Store["writeAuditLog"]>): ReturnType<Store["writeAuditLog"]> {
     return audit.writeAuditLog(this.ctx, ...args);
   }

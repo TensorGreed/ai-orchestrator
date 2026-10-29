@@ -1692,8 +1692,11 @@ export interface Store {
   recordQueueJobProgress(fence: QueueClaimFence): Promise<boolean>;
   /** Renews the heartbeat of the owner's claims; returns the tokens it still holds (a missing one was taken back). */
   renewQueueLeases(input: { owner: string; claimTokens: string[] }): Promise<string[]>;
-  /** Of these execution ids, the ones whose history reads `canceled` (a cancel another instance recorded). */
-  listCanceledExecutionIds(executionIds: string[]): Promise<string[]>;
+  /**
+   * Of these execution ids, the ones whose history reads `canceled` (a cancel another instance recorded). Used by the
+   * queue heartbeat and by the cluster cancel check (the backstop for a lost bus message).
+   */
+  listCanceledExecutionIds(executionIds: readonly string[]): Promise<string[]>;
   /**
    * The lease reaper: running items whose heartbeat is older than `leaseMs` (database time) are settled by the
    * worker-loss policy (queue-leases.ts decideLostJob), each counting an attempt. Items without a heartbeat (claimed
@@ -1811,8 +1814,6 @@ export interface Store {
    * once when an instance with a fixed HA_INSTANCE_ID starts: rows under its id belong to the process it replaces.
    */
   failRunsOwnedBy(input: { instanceId: string; error: string }): Promise<Array<{ id: string; workflowId: string; instanceId: string }>>;
-  /** The ids among `executionIds` whose history row is `canceled` (the cancel reconciliation for a lost message). */
-  listCanceledExecutionIds(executionIds: readonly string[]): Promise<string[]>;
 
   // ---- Audit log, log streaming, audit export, signing keys and execution manifests
 

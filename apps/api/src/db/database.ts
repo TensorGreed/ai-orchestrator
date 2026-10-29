@@ -6226,11 +6226,11 @@ export class SqliteStore implements Store {
     return result.changes > 0;
   }
 
-  async listCanceledExecutionIds(executionIds: string[]): Promise<string[]> {
+  async listCanceledExecutionIds(executionIds: readonly string[]): Promise<string[]> {
     if (executionIds.length === 0) return [];
     return this.queryAll<{ id: unknown }>(
       `SELECT id FROM execution_history WHERE status = 'canceled' AND id IN (${executionIds.map(() => "?").join(", ")})`,
-      executionIds
+      [...executionIds]
     ).map((row) => toString(row.id));
   }
 
@@ -9425,16 +9425,6 @@ export class SqliteStore implements Store {
       ids,
       rows.map((row) => ({ id: toString(row.id), payloadJson: row.payload_json === null || row.payload_json === undefined ? null : toString(row.payload_json) }))
     );
-  }
-
-  async listCanceledExecutionIds(executionIds: readonly string[]): Promise<string[]> {
-    if (executionIds.length === 0) return [];
-    const placeholders = executionIds.map(() => "?").join(", ");
-    const rows = this.queryAll<{ id: unknown }>(
-      `SELECT id FROM execution_history WHERE status = 'canceled' AND id IN (${placeholders})`,
-      [...executionIds]
-    );
-    return rows.map((row) => toString(row.id));
   }
 
   // ---------------------------------------------------------------------------

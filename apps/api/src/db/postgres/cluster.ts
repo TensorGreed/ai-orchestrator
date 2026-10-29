@@ -192,15 +192,6 @@ export async function failRunsOwnedBy(
   });
 }
 
-export async function listCanceledExecutionIds(ctx: PgContext, executionIds: readonly string[]): Promise<string[]> {
-  if (executionIds.length === 0) return [];
-  const rows = await ctx.query<{ id: string }>(
-    `SELECT id FROM execution_history WHERE id = ANY($1::text[]) AND status = 'canceled'`,
-    [[...executionIds]]
-  );
-  return rows.map((row) => row.id);
-}
-
 /**
  * Phase 13.1 — advisory lock classes for cluster-wide mutual exclusion (see the key space in postgres-store.ts):
  *   0x4c3258 ("L2X")  audit export — key: hashtext(schema:destination id). Held while one destination's batch is read,
