@@ -64,7 +64,7 @@ tool call, or a code node, which runs to its own timeout), and session memory, t
 against the token. A node whose progress write failed for another reason (a database error) is not seen as completed
 by the reaper, so if that worker is lost too, the run may be re-run from the start.
 
-A cancel sent to any instance stops the run on the worker running it within one heartbeat.
+A cancel sent to any instance stops the run on the worker running it, usually at once over the cluster bus ([Cluster operations](./cluster.md)) and within one heartbeat at the latest.
 
 ## When a worker is lost
 
