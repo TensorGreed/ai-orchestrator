@@ -1,5 +1,5 @@
 ---
-description: "How L2M queues workflow runs and runs them on workers: roles, pools, leases and fencing in cluster mode, lost workers, graceful drain and the dead-letter queue."
+description: "How L2M queues runs for workers: roles, pools, leases and fencing, lost workers, drain, the dead-letter queue and optional queue dispatch of every run."
 ---
 
 # Queue and workers
@@ -67,8 +67,9 @@ within one heartbeat counts as failed.
 
 Side effects are not fenced: a stopped worker may still finish a call already in flight (an HTTP request, a model or
 tool call, or a code node, which runs to its own timeout), and session memory, the tool cache, tool-call telemetry and notifications it writes are not checked
-against the token. A node whose progress write failed for another reason (a database error) is not seen as completed
-by the reaper, so if that worker is lost too, the run may be re-run from the start.
+against the token. Before the first node that is not a trigger or input node starts, the worker records on its claim
+that side effects may begin; if that write fails, the run fails before the node runs, so the reaper never re-runs a
+run whose side effects it could not see.
 
 A cancel sent to any instance stops the run on the worker running it, usually at once over the cluster bus ([Cluster operations](./cluster.md)) and within one heartbeat at the latest.
 
@@ -77,10 +78,11 @@ A cancel sent to any instance stops the run on the worker running it, usually at
 The leader checks every `QUEUE_REAPER_INTERVAL_MS` for jobs whose heartbeat is older than `QUEUE_LEASE_MS` (the
 worker crashed, was killed, or lost its database). Each one counts as an attempt, and then:
 
-- **No node had completed:** the job goes back to the queue and another worker runs it.
-- **A node had completed** (an email may have been sent, a record written): the run is marked
-  `interrupted: worker lost` and goes to the dead-letter queue. It is never re-run silently; retry it from the
-  dead-letter queue once you have checked its side effects.
+- **Only trigger or input nodes had started** (the workflow's entry nodes, such as a webhook, schedule, form, chat or
+  manual trigger, which only pass the input through): the job goes back to the queue and another worker runs it.
+- **Any other node had started** (an agent may have called a tool, an email may have been sent, a record written),
+  whether or not it completed: the run is marked `interrupted: worker lost` and goes to the dead-letter queue. It is
+  never re-run silently; retry it from the dead-letter queue once you have checked its side effects.
 - **The run had already finished**: the queue row is closed to match.
 - **The job used up its attempts** (three by default): it goes to the dead-letter queue with `worker lost`.
 
@@ -115,9 +117,9 @@ stuck-job sweep, and an approval resume by approval recovery). With the drain, o
 1. turns `/ready` to `503`;
 2. stops claiming jobs and hands on leadership;
 3. gives running jobs up to `SHUTDOWN_DRAIN_MS` to finish;
-4. gives back the jobs still running, by the worker-loss rules above but without counting an attempt: a job with no
-   completed node returns to the queue, and one with a completed node is marked `interrupted: worker shut down` and
-   dead-lettered. An approval resume with no node completed since the decision returns to the queue with its paused
+4. gives back the jobs still running, by the worker-loss rules above but without counting an attempt: a job where
+   only trigger or input nodes had started returns to the queue, and one where any other node had started is marked
+   `interrupted: worker shut down` and dead-lettered. An approval resume with no node completed since the decision returns to the queue with its paused
    state and decision intact, and the next worker resumes it from the decision. One with a completed node is marked
    `interrupted: worker shut down` and dead-lettered too; its paused state is removed with it, so nothing drives it
    on automatically (retry it once you have checked its side effects);
@@ -154,3 +156,52 @@ With metrics on, `/metrics` adds (with the `METRICS_PREFIX`, `ao` by default):
 
 Alert on a rising `ao_queue_pending` with `ao_worker_slots_free` at zero (add workers) and on any increase of
 `ao_queue_lost_total` (workers are crashing or losing the database).
+
+With `EXECUTION_DISPATCH=queue`, `/metrics` also has:
+
+| Metric | Type | Meaning |
+|---|---|---|
+| `ao_dispatch_runs_total` | counter | Runs this instance put on the queue for a worker |
+| `ao_dispatch_inline_fallback` | gauge | 1 while runs execute inline because the capability check failed |
+| `ao_dispatch_inline_fallbacks_total` | counter | Times the instance started falling back to inline |
+
+## Queue dispatch
+
+By default every run executes on the instance that received it (`EXECUTION_DISPATCH=inline`); only `/enqueue` uses
+the queue. In cluster mode, `EXECUTION_DISPATCH=queue` sends **every** run to the queue's workers, so `api` and
+`webhook` replicas take requests while `worker` replicas do the work. Set it on the instances that receive requests.
+Outside cluster mode the server refuses to start with it.
+
+| Run started by | With `queue` |
+|---|---|
+| `POST /api/workflows/:id/execute`, retry, replay, canvas test runs | runs on a worker; the instance answers with the same result body |
+| `POST /api/workflows/:id/execute/stream`, chat, `/api/webhooks/execute/stream` | runs on a worker; its events are relayed into the stream in order |
+| Webhooks, forms, Slack/GitHub/Stripe/Telegram/Discord, MCP server triggers, the MCP gateway | runs on a worker; the reply waits for it as before |
+| Schedules and app triggers | enqueued once per fire (two leaders firing the same second or event enqueue one job) |
+| Approval resumes | enqueued from any instance, including `api` replicas |
+
+What changes:
+
+- **Latency.** Each run waits for a worker to claim it. An enqueue wakes idle workers of its pool over the cluster bus,
+  so a free worker claims within milliseconds; the `QUEUE_POLL_INTERVAL_MS` poll stays as the backstop.
+- **Streaming.** `llm_delta` events are batched per node for up to 50 ms; large `node_complete` and other events are
+  sent by reference and read back from the run's progress. Event order is kept.
+- **Waiting.** A synchronous request waits up to the run's timeout plus a margin and then answers `504` (the run may
+  still finish; read it at `/api/executions/:id`). If the job dies on the workers the request answers `500`. A full
+  pool answers `429` with `Retry-After` (`QUEUE_MAX_PENDING`); an instance already waiting on `DISPATCH_MAX_WAITING`
+  runs (1000 by default) answers `503`.
+- **Disconnects.** When a stream's client goes away, the instance stops relaying and the run goes on, as an inline
+  run does. Cancel it with `POST /api/executions/:id/cancel` from any instance.
+- **Reattach.** `GET /api/executions/:id/events` (SSE, `workflow:read`) follows an execution from any instance: an
+  `execution` event with the run as stored, its events from that point on, then `result`. Events come from the
+  instance running it, or from the queue worker over the cluster bus; an inline run on another instance shows only
+  its stored state and result. It works without queue dispatch too.
+
+Capability check: queue dispatch is used only while every live worker serving the pool advertises it (an older
+worker would not know the job format). During a rolling upgrade, or with no live worker for the pool, the instance
+runs inline, `/health` lists a `dispatch_inline_fallback` warning, and `ao_dispatch_inline_fallback` is 1. The
+effective mode is `executionDispatch` in the admin `GET /api/cluster` answer.
+
+Limits: an MCP elicitation a dispatched run asks is answered on the worker's instance, as with any cluster run; replay
+gate checks and eval runs still execute where they are started (an eval run's events stream follows one running on
+another instance from its stored state).
