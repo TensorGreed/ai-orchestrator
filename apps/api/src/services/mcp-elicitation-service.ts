@@ -15,6 +15,18 @@
  * Requests whose schema asks for anything credential-looking are refused
  * before they reach a person: the protocol says elicitation must never carry
  * secrets.
+ *
+ * Phase 13.1 — cluster mode (Postgres with HA_ENABLED=true): the instance
+ * whose run waits on a request is its holder (`holder_id`). An answer that
+ * lands on another instance is checked there (who may answer, what the
+ * schema allows) and forwarded to the holder over the cluster bus as an
+ * `elicitation_answer` message, sealed with the master key (NOTIFY payloads
+ * can appear in Postgres statement logs, and the seal stops a forged one);
+ * the holder settles it, so there is still one settle point. A request whose
+ * holder stopped (no recent registry heartbeat) is expired, at once when
+ * someone answers it and on a periodic sweep; a starting instance expires
+ * only requests nobody holds, its own from before a restart and those of
+ * stopped instances, never a live replica's.
  */
 
 import { randomUUID } from "node:crypto";
@@ -33,6 +45,8 @@ import type {
 import type { McpElicitationRecord } from "../db/database.js";
 import type { AuditEventInput } from "./audit-service.js";
 import type { Store } from "../db/store.js";
+import type { ClusterBus, ClusterMessage } from "./cluster-bus.js";
+import type { ChallengeSealer } from "./challenge-store.js";
 
 /** Trigger types where a person is in front of the run and can answer. */
 export const ATTENDED_TRIGGER_TYPES = new Set(["manual", "manual_stream", "manual_retry", "approval_resume"]);
@@ -72,13 +86,42 @@ export interface McpElicitationEvent {
   elicitation: McpElicitationView;
 }
 
+/** Phase 13.1 — cluster mode: how answers reach the instance holding a request. */
+export interface McpElicitationClusterOptions {
+  instanceId: string;
+  bus: ClusterBus;
+  /** Ids of the instances whose registry heartbeat is recent (this one included). */
+  liveInstanceIds: () => Promise<ReadonlySet<string>>;
+  /** Seals the forwarded answer with the master key. */
+  sealer: ChallengeSealer;
+  /** How long an answer forwarded to the holder waits for it to settle before the API answers 202. Default 5 s. */
+  settleWaitMs?: number;
+  settlePollMs?: number;
+}
+
 export interface McpElicitationServiceOptions {
   /** Longest a request waits for a person (ms). */
   timeoutMs: number;
   audit: (event: AuditEventInput) => void | Promise<void>;
   logger?: { info: (msg: string, fields?: Record<string, unknown>) => void; warn: (msg: string, fields?: Record<string, unknown>) => void };
   now?: () => number;
+  /** Phase 13.1 — set in cluster mode only; without it the service is exactly the single-instance one. */
+  cluster?: McpElicitationClusterOptions;
 }
+
+/** Phase 13.1 — the bus message that carries an answer to the holder (its body sealed). */
+export const ELICITATION_ANSWER_MESSAGE = "elicitation_answer";
+const ELICITATION_ID_MAX_LENGTH = 200;
+const SEALED_ANSWER_MAX_LENGTH = 6_500;
+
+interface ForwardedAnswer {
+  action: McpElicitationAction;
+  content?: Record<string, unknown>;
+  actor: { userId: string; email: string };
+}
+
+/** What a stopped holder leaves behind: the request can no longer be answered. */
+export const ELICITATION_HOLDER_GONE_REASON = "The API instance running this request stopped.";
 
 interface PendingEntry {
   record: McpElicitationRecord;
@@ -107,26 +150,85 @@ const SETTLED_STATUS: Record<McpElicitationAction, Exclude<McpElicitationStatus,
 };
 
 export function toElicitationView(record: McpElicitationRecord): McpElicitationView {
-  const { createdBy: _createdBy, triggerType: _triggerType, ...view } = record;
+  const { createdBy: _createdBy, triggerType: _triggerType, holderId: _holderId, ...view } = record;
   return view;
+}
+
+function sealPurpose(id: string): string {
+  return `${ELICITATION_ANSWER_MESSAGE}:${id}`;
 }
 
 export class McpElicitationService {
   private readonly pending = new Map<string, PendingEntry>();
   private readonly executionListeners = new Map<string, Set<(event: McpElicitationEvent) => void>>();
 
+  private readonly unsubscribeBus: (() => void) | null = null;
+
   constructor(
     private readonly store: Store,
     private readonly options: McpElicitationServiceOptions
-  ) {}
+  ) {
+    const cluster = options.cluster;
+    if (cluster) {
+      this.unsubscribeBus = cluster.bus.subscribe("ctl", (message) => this.onBusMessage(message));
+    }
+  }
 
-  /** Requests still marked pending from before a restart cannot be answered any more. */
+  /**
+   * Requests still marked pending from before a restart cannot be answered any more. Phase 13.1 — in cluster mode
+   * only the ones nobody holds, this instance's own (from before a restart under the same id) and those of instances
+   * that stopped; a live replica's requests are left alone.
+   */
   async expireStale(reason = "The API restarted while the request was waiting."): Promise<number> {
-    const stale = (await this.store.listMcpElicitations({ status: "pending", limit: 500 })).filter((entry) => !this.pending.has(entry.id));
+    const cluster = this.options.cluster;
+    const live = cluster ? await cluster.liveInstanceIds() : null;
+    const stale = (await this.store.listMcpElicitations({ status: "pending", limit: 500 })).filter((entry) => {
+      if (this.pending.has(entry.id)) return false;
+      if (!cluster || !live) return true;
+      const holder = entry.holderId ?? null;
+      return holder === null || holder === cluster.instanceId || !live.has(holder);
+    });
     for (const entry of stale) {
       await this.store.settleMcpElicitation(entry.id, { status: "expired", reason });
     }
     return stale.length;
+  }
+
+  /**
+   * Phase 13.1 — cluster mode, periodically: expires the requests whose holder stopped (no recent registry heartbeat).
+   * Requests nobody holds or held here are left to expireStale at the next start: here they may still be on their way
+   * into this instance's map.
+   */
+  async expireOrphaned(): Promise<number> {
+    const cluster = this.options.cluster;
+    if (!cluster) return 0;
+    const pending = (await this.store.listMcpElicitations({ status: "pending", limit: 500 })).filter(
+      (entry) => entry.holderId && entry.holderId !== cluster.instanceId
+    );
+    if (pending.length === 0) return 0;
+    const live = await cluster.liveInstanceIds();
+    let expired = 0;
+    for (const entry of pending) {
+      if (live.has(entry.holderId!)) continue;
+      if (await this.expireHeldElsewhere(entry, ELICITATION_HOLDER_GONE_REASON)) expired += 1;
+    }
+    return expired;
+  }
+
+  private async expireHeldElsewhere(record: McpElicitationRecord, reason: string): Promise<boolean> {
+    const settled = await this.store.settleMcpElicitation(record.id, { status: "expired", reason });
+    if (!settled) return false;
+    await this.options.audit({
+      category: "system",
+      eventType: "mcp_elicitation.expired",
+      action: "expire",
+      outcome: "failure",
+      actor: { type: "system" },
+      resourceType: "mcp_elicitation",
+      resourceId: record.id,
+      metadata: { executionId: record.executionId, reason, holderId: record.holderId ?? null }
+    });
+    return true;
   }
 
   /** Listen for requests of one execution (the Chat stream); returns the unsubscribe. */
@@ -227,7 +329,11 @@ export class McpElicitationService {
 
     const timeoutMs = Math.max(1_000, Math.min(this.options.timeoutMs, input.timeoutMs ?? this.options.timeoutMs));
     const expiresAt = new Date(now() + timeoutMs).toISOString();
-    const record = await this.store.createMcpElicitation({ ...base, expiresAt });
+    const record = await this.store.createMcpElicitation({
+      ...base,
+      expiresAt,
+      ...(this.options.cluster ? { holderId: this.options.cluster.instanceId } : {})
+    });
     await this.options.audit({ ...auditBase, eventType: "mcp_elicitation.requested", outcome: "success", metadata: { ...metadata, expiresAt } });
 
     // A timeout or an abort settles the request in the background; a failed write is logged.
@@ -296,7 +402,7 @@ export class McpElicitationService {
       throw new McpElicitationAnswerError("Only the person who started the run, or an operator, can answer this request.", 403);
     }
     const entry = this.pending.get(id);
-    if (!entry) {
+    if (!entry && !this.options.cluster) {
       throw new McpElicitationAnswerError("This request is not waiting on this API instance any more; the run may have ended.", 409);
     }
     let content: Record<string, string | number | boolean> | undefined;
@@ -308,15 +414,29 @@ export class McpElicitationService {
       }
       content = checked.content;
     }
+    if (!entry) {
+      return await this.forwardAnswer(record, { action: answer.action, ...(content ? { content } : {}), actor: { userId: actor.userId, email: actor.email } });
+    }
+    return await this.settleAnswer(record, answer.action, content, actor);
+  }
+
+  /** The single settle point for a person's answer on the holder, then its audit (never the answer itself). */
+  private async settleAnswer(
+    record: McpElicitationRecord,
+    action: McpElicitationAction,
+    content: Record<string, string | number | boolean> | undefined,
+    actor: { userId: string; email: string }
+  ): Promise<McpElicitationRecord> {
+    const id = record.id;
     const settled = await this.finish(
       id,
-      { status: SETTLED_STATUS[answer.action], answeredBy: actor.email },
-      { id, action: answer.action, ...(content ? { content } : {}), source: "user" }
+      { status: SETTLED_STATUS[action], answeredBy: actor.email },
+      { id, action, ...(content ? { content } : {}), source: "user" }
     );
     await this.options.audit({
       category: "system",
-      eventType: `mcp_elicitation.${SETTLED_STATUS[answer.action]}`,
-      action: answer.action,
+      eventType: `mcp_elicitation.${SETTLED_STATUS[action]}`,
+      action,
       outcome: "success",
       actor: { userId: actor.userId, email: actor.email, type: "user" },
       resourceType: "mcp_elicitation",
@@ -334,6 +454,66 @@ export class McpElicitationService {
     return settled ?? (await this.store.getMcpElicitation(id))!;
   }
 
+  /**
+   * Phase 13.1 — cluster mode, an answer on an instance that does not hold the request: a stopped holder means the
+   * request expires now; otherwise the answer goes to the holder over the bus and this waits briefly for it to settle.
+   * Returns the record as it then stands (still `pending` when the holder has not settled it yet).
+   */
+  private async forwardAnswer(record: McpElicitationRecord, answer: ForwardedAnswer): Promise<McpElicitationRecord> {
+    const cluster = this.options.cluster!;
+    const holder = record.holderId ?? null;
+    const live = holder && holder !== cluster.instanceId ? await cluster.liveInstanceIds() : null;
+    if (!holder || holder === cluster.instanceId || !live?.has(holder)) {
+      await this.expireHeldElsewhere(record, ELICITATION_HOLDER_GONE_REASON);
+      throw new McpElicitationAnswerError("This request expired: the API instance running it stopped, so the run cannot take an answer any more.", 409);
+    }
+    const sealed = cluster.sealer.sealValue(sealPurpose(record.id), JSON.stringify(answer));
+    if (sealed.length > SEALED_ANSWER_MAX_LENGTH) {
+      throw new McpElicitationAnswerError("This answer is too large to pass to the API instance running the request.", 400);
+    }
+    try {
+      await cluster.bus.publish("ctl", { t: ELICITATION_ANSWER_MESSAGE, id: record.id, sealed });
+    } catch (error) {
+      this.options.logger?.warn("MCP elicitation answer could not be forwarded", { id: record.id, error: error instanceof Error ? error.message : String(error) });
+      throw new McpElicitationAnswerError("The answer could not be passed to the API instance running the request. Try again.", 409);
+    }
+    const deadline = Date.now() + (cluster.settleWaitMs ?? 5_000);
+    for (;;) {
+      const current = await this.store.getMcpElicitation(record.id);
+      if (!current || current.status !== "pending" || Date.now() >= deadline) return current ?? record;
+      await new Promise((resolve) => setTimeout(resolve, cluster.settlePollMs ?? 100));
+    }
+  }
+
+  /** Phase 13.1 — an answer another instance forwarded: settled here only if this instance holds the request. */
+  private async onBusMessage(message: ClusterMessage): Promise<void> {
+    if (message.t !== ELICITATION_ANSWER_MESSAGE) return;
+    const id = typeof message.id === "string" && message.id.length > 0 && message.id.length <= ELICITATION_ID_MAX_LENGTH ? message.id : null;
+    const sealed = typeof message.sealed === "string" && message.sealed.length <= SEALED_ANSWER_MAX_LENGTH ? message.sealed : null;
+    if (!id || !sealed) return;
+    const entry = this.pending.get(id);
+    if (!entry) return;
+    let answer: ForwardedAnswer;
+    try {
+      answer = JSON.parse(this.options.cluster!.sealer.openValue(sealPurpose(id), sealed)) as ForwardedAnswer;
+    } catch {
+      this.options.logger?.warn("Ignored an elicitation answer on the cluster bus that does not open", { id });
+      return;
+    }
+    if (!answer || !(answer.action in SETTLED_STATUS) || typeof answer.actor?.email !== "string" || typeof answer.actor?.userId !== "string") return;
+    // Checked once more where the request is held: the answering instance validated it against the same schema.
+    let content: Record<string, string | number | boolean> | undefined;
+    if (answer.action === "accept") {
+      const checked = validateElicitationContent(entry.record.requestedSchema, answer.content ?? {});
+      if (Object.keys(checked.errors).length > 0) {
+        this.options.logger?.warn("Ignored a forwarded elicitation answer that does not match the schema", { id });
+        return;
+      }
+      content = checked.content;
+    }
+    await this.settleAnswer(entry.record, answer.action, content, answer.actor);
+  }
+
   /** Expire every request an execution still has waiting (the run ended without answering them). */
   async releaseExecution(executionId: string, reason: string): Promise<number> {
     let count = 0;
@@ -346,6 +526,7 @@ export class McpElicitationService {
   }
 
   async stop(): Promise<void> {
+    this.unsubscribeBus?.();
     for (const [id] of this.pending) {
       await this.finish(id, { status: "expired", reason: "The API is shutting down." }, { id, action: "cancel", source: "timeout", note: "The API is shutting down." });
     }

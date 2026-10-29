@@ -4184,10 +4184,36 @@ export async function createApp(
     logger: {
       info: (msg, fields) => app.log.info(fields ?? {}, msg),
       warn: (msg, fields) => app.log.warn(fields ?? {}, msg)
-    }
+    },
+    // Phase 13.1 — cluster mode: answers that land on another instance reach the holder over the bus.
+    ...(clusterMode
+      ? {
+          cluster: {
+            instanceId: clusterInstanceId,
+            bus: clusterBus,
+            liveInstanceIds: async () =>
+              new Set(
+                (await store.listClusterInstances({ liveWithinMs: config.CLUSTER_INSTANCE_TIMEOUT_MS }))
+                  .filter((instance) => instance.live)
+                  .map((instance) => instance.id)
+              ),
+            sealer: secretService
+          }
+        }
+      : {})
   });
   await mcpElicitationService.expireStale();
+  // Phase 13.1 — cluster mode: requests whose holder stopped are expired within about one instance timeout.
+  const elicitationOrphanTimer = clusterMode
+    ? setInterval(() => {
+        mcpElicitationService.expireOrphaned().catch((error: unknown) => {
+          app.log.warn({ error: error instanceof Error ? error.message : String(error) }, "Could not expire elicitation requests of stopped instances");
+        });
+      }, config.CLUSTER_INSTANCE_TIMEOUT_MS)
+    : null;
+  elicitationOrphanTimer?.unref();
   app.addHook("onClose", async () => {
+    if (elicitationOrphanTimer) clearInterval(elicitationOrphanTimer);
     await mcpElicitationService.stop();
   });
   // Phase 10.6 — deployment-local MCP catalog. Every instance reads and

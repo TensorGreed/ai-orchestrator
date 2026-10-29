@@ -437,6 +437,11 @@ export function registerMcpClientFeatureRoutes(deps: McpClientFeatureDeps): void
         { action: parsed.data.action, ...(parsed.data.content ? { content: parsed.data.content } : {}) },
         { userId: user.id, email: user.email, role: user.role }
       );
+      // Phase 13.1 — cluster mode: the answer went to the instance running the request, which has not settled it yet.
+      if (settled.status === "pending") {
+        reply.code(202);
+        return { elicitation: toElicitationView(settled), delivered: "signalled" };
+      }
       return { elicitation: toElicitationView(settled) };
     } catch (error) {
       if (error instanceof McpElicitationAnswerError) {
