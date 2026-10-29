@@ -1,0 +1,119 @@
+name: Image vulnerability scan
+
+# Weekly Grype scan of the published images, so findings that appear after a release (new CVEs against packages
+# already shipped) reach code scanning without waiting for the next tag. Scans every platform image of
+# ghcr.io/tensorgreed/ai-orchestrator and ghcr.io/tensorgreed/ai-orchestrator-web at the given tag (latest by
+# default), uploads SARIF under the same categories as the release scan, and applies the same gate as the release
+# workflow: the run fails on a fixable CRITICAL finding. An image that has not been published yet is skipped.
+
+on:
+  schedule:
+    - cron: "17 5 * * 1"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Image tag to scan"
+        required: false
+        default: "latest"
+
+permissions: {}
+
+env:
+  # Same gate as .github/workflows/release-images.yml.
+  VULN_FAIL_ON: critical
+  VULN_ONLY_FIXED: "true"
+  GRYPE_VERSION: v0.121.0
+  GRYPE_CHECK_FOR_APP_UPDATE: "false"
+
+jobs:
+  scan:
+    name: Scan ${{ matrix.image.name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - name: api
+            repository: ai-orchestrator
+          - name: web
+            repository: ai-orchestrator-web
+    env:
+      IMAGE: ghcr.io/tensorgreed/${{ matrix.image.repository }}
+      TAG: ${{ inputs.tag || 'latest' }}
+      ASSET: l2m-${{ matrix.image.name }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Log in to GHCR
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve the image digest
+        id: image
+        run: |
+          set -euo pipefail
+          if ! digest=$(docker buildx imagetools inspect "$IMAGE:$TAG" --format '{{json .Manifest.Digest}}' 2>/dev/null); then
+            echo "::notice::$IMAGE:$TAG is not published yet; nothing to scan."
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          digest=$(echo "$digest" | tr -d '"')
+          echo "found=true" >> "$GITHUB_OUTPUT"
+          echo "ref=$IMAGE@$digest" >> "$GITHUB_OUTPUT"
+          echo "Scanning $IMAGE:$TAG ($digest)"
+
+      - name: Install Grype
+        if: steps.image.outputs.found == 'true'
+        id: grype
+        uses: anchore/scan-action/download-grype@27805bf3b4e84b4a5c980df22ed233c00390a439 # v7.4.2
+        with:
+          grype-version: ${{ env.GRYPE_VERSION }}
+          cache-db: true
+
+      - name: Scan every platform image
+        if: steps.image.outputs.found == 'true'
+        env:
+          GRYPE: ${{ steps.grype.outputs.cmd }}
+          REF: ${{ steps.image.outputs.ref }}
+        run: scripts/release/image-scan.sh "$REF" "$ASSET" scan
+
+      - name: Upload SARIF (linux/amd64)
+        if: steps.image.outputs.found == 'true'
+        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        with:
+          sarif_file: scan/${{ env.ASSET }}-linux-amd64.sarif
+          category: image-${{ matrix.image.name }}-linux-amd64
+
+      - name: Upload SARIF (linux/arm64)
+        if: steps.image.outputs.found == 'true'
+        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        with:
+          sarif_file: scan/${{ env.ASSET }}-linux-arm64.sarif
+          category: image-${{ matrix.image.name }}-linux-arm64
+
+      - name: Vulnerability gate
+        if: steps.image.outputs.found == 'true'
+        run: |
+          set -euo pipefail
+          args=(--fail-on "$VULN_FAIL_ON")
+          if [ "$VULN_ONLY_FIXED" = "true" ]; then args+=(--only-fixed); fi
+          node scripts/release/vuln-gate.mjs "${args[@]}" scan/*.grype.json
+
+      - name: Upload scan reports
+        if: always() && steps.image.outputs.found == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: scan-${{ matrix.image.name }}
+          path: scan
+          if-no-files-found: warn

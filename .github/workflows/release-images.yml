@@ -1,6 +1,6 @@
 name: Release Container Images
 
-# Build + push API and Web Docker images to GHCR when a release tag is pushed.
+# Builds, scans, signs and publishes the API and Web images to GHCR, with SBOMs and build provenance.
 #
 # Tag format: v<semver>, e.g.
 #   git tag v0.1.0 && git push origin v0.1.0
@@ -10,126 +10,618 @@ name: Release Container Images
 #   - ghcr.io/tensorgreed/ai-orchestrator:latest
 #   - ghcr.io/tensorgreed/ai-orchestrator-web:<tag> (the Web/Studio image)
 #   - ghcr.io/tensorgreed/ai-orchestrator-web:latest
+# and, for both images (linux/amd64 + linux/arm64, one multi-arch index each):
+#   - a keyless cosign signature on the index digest (GitHub OIDC + Sigstore public good instance)
+#   - SLSA build provenance for the index digest from actions/attest, stored in GitHub and pushed to GHCR
+#     (verify with `gh attestation verify`), next to the buildx provenance (mode=max) and SPDX SBOM attestations
+#     that buildx attaches to every platform image
+#   - a CycloneDX SBOM per platform image (Syft), attested on that platform digest with cosign
+#   - a Grype scan of every platform image: SARIF to code scanning; fixable CRITICAL findings stop the release
+# and a GitHub Release for the tag with the CycloneDX SBOMs (both images plus the pnpm workspace source), the
+# image digests and a SHA256SUMS file. Every SBOM file carries a provenance attestation as well.
 #
-# Both images are built for linux/amd64 + linux/arm64 so M-series Macs and
-# AWS Graviton nodes pull the right architecture without emulation. Build
-# cache is backed by GHA's cache service (cache-from / cache-to: gha).
+# Each platform image is built natively (amd64 on ubuntu-latest, arm64 on ubuntu-24.04-arm; no QEMU emulation),
+# pushed by digest, given its SBOM and scanned on its own runner; the assemble job then merges the two platform
+# images into one multi-arch index, also pushed by digest. The tags (<tag> and latest) are only added once every
+# platform passed the scan gate and the index digests are signed and attested.
+# Verification steps: apps/docs/docs/operations/verify-a-release.md.
 #
-# Required GitHub repo settings:
-#   - Settings → Actions → General → Workflow permissions → "Read and write"
-#   - The default GITHUB_TOKEN is auto-issued by Actions; no PAT needed.
+# Modes (resolved by the prepare job):
+#   release  - a v* tag push, or a manual run on a v* tag (Actions -> Run workflow -> "Use workflow from" the tag,
+#              or `gh workflow run release-images.yml --ref v0.1.0`) to publish that tag again. Either way the
+#              run's ref is the tag, so the signing identity and the provenance name the tag and its commit.
+#   staging  - a manual run on a branch: the full pipeline against GHCR (push, sign, attest, scan, verify) under
+#              the throwaway tag 0.0.0-ci-<sha>; no latest tag and no GitHub Release (the SBOMs stay as workflow
+#              artifacts). Signed with the branch's identity, so it never verifies as a release.
+#   check    - pull requests that touch the release files or dependencies: builds every platform image into a
+#              registry on its runner, smoke-tests the API image, writes the SBOMs, scans and applies the gate;
+#              pushes nothing to GHCR and signs nothing.
 
 on:
   push:
     tags:
       - "v*"
-  # Manual trigger with a custom tag — useful for back-publishing or testing.
+  # On a v* tag: publish that release. On a branch: staging dry run as 0.0.0-ci-<sha>.
   workflow_dispatch:
-    inputs:
-      tag:
-        description: "Override tag to publish (defaults to git tag)"
-        required: false
-        default: ""
+  pull_request:
+    paths:
+      - ".github/workflows/release-images.yml"
+      - "scripts/release/**"
+      - "apps/api/Dockerfile"
+      - "apps/web/Dockerfile"
+      - "apps/web/nginx.conf"
+      - ".dockerignore"
+      # Dependency changes (Dependabot's included) change what the images contain.
+      - "pnpm-lock.yaml"
+      - "package.json"
+      - "apps/api/package.json"
+      - "apps/web/package.json"
+      - "packages/*/package.json"
 
-permissions:
-  contents: read
-  packages: write
+permissions: {}
+
+concurrency:
+  group: release-images-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  IMAGE_REGISTRY: ghcr.io/tensorgreed
+  # Vulnerability gate (scripts/release/vuln-gate.mjs). VULN_FAIL_ON: negligible, low, medium, high, critical, or
+  # none to report without failing. VULN_ONLY_FIXED: "true" counts only findings that have a fixed version.
+  VULN_FAIL_ON: critical
+  VULN_ONLY_FIXED: "true"
+  SYFT_VERSION: v1.55.0
+  GRYPE_VERSION: v0.121.0
+  COSIGN_VERSION: v3.0.6
+  SYFT_CHECK_FOR_APP_UPDATE: "false"
+  GRYPE_CHECK_FOR_APP_UPDATE: "false"
+  # The keyless signing identity a release must carry (documented in the verify page and SECURITY.md).
+  RELEASE_IDENTITY_REGEXP: '^https://github\.com/TensorGreed/ai-orchestrator/\.github/workflows/release-images\.yml@refs/tags/v.+$'
+  OIDC_ISSUER: https://token.actions.githubusercontent.com
 
 jobs:
-  api:
-    name: Build + push API image
+  prepare:
+    name: Resolve release mode
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 5
+    permissions: {}
+    outputs:
+      mode: ${{ steps.mode.outputs.mode }}
+      version: ${{ steps.mode.outputs.version }}
+      registry: ${{ steps.mode.outputs.registry }}
+      created: ${{ steps.mode.outputs.created }}
+    steps:
+      - name: Resolve mode and version
+        id: mode
+        env:
+          EVENT: ${{ github.event_name }}
+          GIT_REF: ${{ github.ref }}
+          GIT_REF_NAME: ${{ github.ref_name }}
+          GIT_SHA: ${{ github.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          registry="$IMAGE_REGISTRY"
+          case "$EVENT" in
+            push | workflow_dispatch)
+              if [[ "$GIT_REF" == refs/tags/v* ]]; then
+                mode=release
+                version="$GIT_REF_NAME"
+              elif [[ "$EVENT" == workflow_dispatch && "$GIT_REF" == refs/heads/* ]]; then
+                mode=staging
+                version="0.0.0-ci-${GIT_SHA:0:12}"
+              else
+                echo "::error::Run on a v* tag to publish a release, or on a branch for a staging dry run (got $GIT_REF)."
+                exit 1
+              fi
+              ;;
+            pull_request)
+              mode=check
+              version="0.0.0-pr-${PR_NUMBER}"
+              registry="localhost:5000/tensorgreed"
+              ;;
+            *)
+              echo "::error::Unsupported event $EVENT"
+              exit 1
+              ;;
+          esac
+          if ! [[ "$version" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]; then
+            echo "::error::'$version' is not a valid image tag."
+            exit 1
+          fi
+          {
+            echo "mode=$mode"
+            echo "version=$version"
+            echo "registry=$registry"
+            echo "created=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          } >> "$GITHUB_OUTPUT"
+          echo "Mode: $mode, version: $version, source: $GIT_REF ($GIT_SHA)"
+
+  build:
+    name: Build, SBOM and scan ${{ matrix.image.name }} (${{ matrix.platform.arch }})
+    needs: prepare
+    runs-on: ${{ matrix.platform.runner }}
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - name: api
+            repository: ai-orchestrator
+            dockerfile: apps/api/Dockerfile
+            title: l2m-api
+            description: L2M Fastify API
+          - name: web
+            repository: ai-orchestrator-web
+            dockerfile: apps/web/Dockerfile
+            title: l2m-web
+            description: L2M Studio web UI (Nginx)
+        # Native runners for each platform: no QEMU emulation, which can crash Node mid-install.
+        platform:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    env:
+      MODE: ${{ needs.prepare.outputs.mode }}
+      VERSION: ${{ needs.prepare.outputs.version }}
+      IMAGE: ${{ needs.prepare.outputs.registry }}/${{ matrix.image.repository }}
+      ASSET: l2m-${{ matrix.image.name }}
+      ARCH: ${{ matrix.platform.arch }}
+      SYFT_REGISTRY_INSECURE_USE_HTTP: ${{ needs.prepare.outputs.mode == 'check' }}
+      GRYPE_REGISTRY_INSECURE_USE_HTTP: ${{ needs.prepare.outputs.mode == 'check' }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+      # Pull request checks push to a throwaway registry on the runner instead of GHCR.
+      - name: Start a local registry
+        if: env.MODE == 'check'
+        run: docker run -d --name registry -p 5000:5000 registry:3@sha256:d4032d4cc323c1731c707931ecada07a53076eac38e3b61ae57533f170f2c6c3 # 3.1.2
 
       - name: Set up Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          # Host networking lets the builder reach the local registry in check mode.
+          driver-opts: network=host
+          buildkitd-config-inline: |
+            [registry."localhost:5000"]
+              http = true
 
       - name: Log in to GHCR
-        uses: docker/login-action@v3
+        if: env.MODE != 'check'
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Compute image tags
-        id: tags
-        run: |
-          INPUT_TAG="${{ github.event.inputs.tag }}"
-          REF_TAG="${GITHUB_REF_NAME}"
-          TAG="${INPUT_TAG:-$REF_TAG}"
-          echo "release=$TAG" >> "$GITHUB_OUTPUT"
-          echo "Resolved release tag: $TAG"
+      - name: Resolve source revision
+        id: source
+        run: echo "revision=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
-      - name: Build + push
-        uses: docker/build-push-action@v6
+      # Pushed by digest only: the assemble job merges the platforms, the publish job adds the tags.
+      - name: Build + push by digest
+        id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
-          file: apps/api/Dockerfile
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: |
-            ghcr.io/tensorgreed/ai-orchestrator:${{ steps.tags.outputs.release }}
-            ghcr.io/tensorgreed/ai-orchestrator:latest
+          file: ${{ matrix.image.dockerfile }}
+          platforms: linux/${{ matrix.platform.arch }}
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          provenance: mode=max
+          sbom: true
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-            org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.version=${{ steps.tags.outputs.release }}
-            org.opencontainers.image.title=l2m-api
-            org.opencontainers.image.description=L2M Fastify API
-          cache-from: type=gha,scope=api
-          cache-to: type=gha,mode=max,scope=api
+            org.opencontainers.image.revision=${{ steps.source.outputs.revision }}
+            org.opencontainers.image.version=${{ env.VERSION }}
+            org.opencontainers.image.created=${{ needs.prepare.outputs.created }}
+            org.opencontainers.image.licenses=MIT
+            org.opencontainers.image.title=${{ matrix.image.title }}
+            org.opencontainers.image.description=${{ matrix.image.description }}
+          cache-from: type=gha,scope=${{ matrix.image.name }}-${{ matrix.platform.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image.name }}-${{ matrix.platform.arch }}
 
-  web:
-    name: Build + push Web image
+      - name: Record the image digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist/scan
+          echo "$IMAGE@$DIGEST" > "dist/$ASSET-$ARCH.digest"
+          echo "Pushed $IMAGE@$DIGEST (linux/$ARCH)"
+
+      # Starts the API image on SQLite and on a throwaway Postgres and checks health, sign-in, a sample workflow
+      # run, the code-node sandbox, the guard and community nodes; a broken image stops the release here.
+      - name: Smoke-test the API image
+        if: matrix.image.name == 'api'
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: scripts/release/smoke-api.sh "$IMAGE@$DIGEST"
+
+      - name: Install Syft
+        id: syft
+        uses: anchore/sbom-action/download-syft@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+        with:
+          syft-version: ${{ env.SYFT_VERSION }}
+
+      - name: Install Grype
+        id: grype
+        uses: anchore/scan-action/download-grype@27805bf3b4e84b4a5c980df22ed233c00390a439 # v7.4.2
+        with:
+          grype-version: ${{ env.GRYPE_VERSION }}
+          cache-db: true
+
+      - name: CycloneDX SBOM
+        env:
+          SYFT: ${{ steps.syft.outputs.cmd }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: scripts/release/image-sbom.sh "$IMAGE@$DIGEST" "$ASSET-$VERSION" "$VERSION" dist
+
+      - name: Scan the image
+        env:
+          GRYPE: ${{ steps.grype.outputs.cmd }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: scripts/release/image-scan.sh "$IMAGE@$DIGEST" "$ASSET" dist/scan
+
+      # Upload problems (code scanning off, a fork's read-only token) never block a release; the gate below does.
+      - name: Upload SARIF
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        with:
+          sarif_file: dist/scan/${{ env.ASSET }}-linux-${{ matrix.platform.arch }}.sarif
+          category: image-${{ matrix.image.name }}-linux-${{ matrix.platform.arch }}
+
+      - name: Vulnerability gate
+        run: |
+          set -euo pipefail
+          args=(--fail-on "$VULN_FAIL_ON")
+          if [ "$VULN_ONLY_FIXED" = "true" ]; then args+=(--only-fixed); fi
+          node scripts/release/vuln-gate.mjs "${args[@]}" dist/scan/*.grype.json
+
+      # The platforms list is written again by the assemble job, for the multi-arch index.
+      - name: Upload SBOM, digest and scan reports
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: image-${{ matrix.image.name }}-${{ matrix.platform.arch }}
+          path: |
+            dist
+            !dist/*.platforms.txt
+          if-no-files-found: warn
+
+  assemble:
+    name: Assemble the ${{ matrix.image.name }} multi-arch index
+    needs: [prepare, build]
+    if: needs.prepare.outputs.mode != 'check'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - name: api
+            repository: ai-orchestrator
+            title: l2m-api
+            description: L2M Fastify API
+          - name: web
+            repository: ai-orchestrator-web
+            title: l2m-web
+            description: L2M Studio web UI (Nginx)
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      IMAGE: ${{ needs.prepare.outputs.registry }}/${{ matrix.image.repository }}
+      ASSET: l2m-${{ matrix.image.name }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-
-      - name: Set up Buildx
-        uses: docker/setup-buildx-action@v3
+      - name: Download the platform digests
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: image-${{ matrix.image.name }}-*
+          path: dist
+          merge-multiple: true
 
       - name: Log in to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Compute image tags
-        id: tags
+      - name: Push the multi-arch index by digest
+        env:
+          REGISTRY_USERNAME: ${{ github.actor }}
+          REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+          REVISION: ${{ github.sha }}
+          CREATED: ${{ needs.prepare.outputs.created }}
+          SOURCE: ${{ github.server_url }}/${{ github.repository }}
+          TITLE: ${{ matrix.image.title }}
+          DESCRIPTION: ${{ matrix.image.description }}
         run: |
-          INPUT_TAG="${{ github.event.inputs.tag }}"
-          REF_TAG="${GITHUB_REF_NAME}"
-          TAG="${INPUT_TAG:-$REF_TAG}"
-          echo "release=$TAG" >> "$GITHUB_OUTPUT"
-          echo "Resolved release tag: $TAG"
+          set -euo pipefail
+          export INDEX_ANNOTATIONS="org.opencontainers.image.source=$SOURCE
+          org.opencontainers.image.revision=$REVISION
+          org.opencontainers.image.version=$VERSION
+          org.opencontainers.image.created=$CREATED
+          org.opencontainers.image.licenses=MIT
+          org.opencontainers.image.title=$TITLE
+          org.opencontainers.image.description=$DESCRIPTION"
+          mapfile -t sources < <(cat dist/"$ASSET"-*.digest)
+          ref=$(scripts/release/push-index.sh "$IMAGE" "${sources[@]}")
+          mkdir -p index
+          echo "$ref" > "index/$ASSET.image.txt"
+          scripts/release/image-platforms.sh "$ref" > "index/$ASSET-$VERSION.platforms.txt"
+          echo "Pushed $ref"
+          cat "index/$ASSET-$VERSION.platforms.txt"
 
-      - name: Build + push
-        uses: docker/build-push-action@v6
+      - name: Upload the index digest
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          context: .
-          file: apps/web/Dockerfile
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: |
-            ghcr.io/tensorgreed/ai-orchestrator-web:${{ steps.tags.outputs.release }}
-            ghcr.io/tensorgreed/ai-orchestrator-web:latest
-          labels: |
-            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-            org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.version=${{ steps.tags.outputs.release }}
-            org.opencontainers.image.title=l2m-web
-            org.opencontainers.image.description=L2M Studio web UI (Nginx)
-          cache-from: type=gha,scope=web
-          cache-to: type=gha,mode=max,scope=web
+          name: index-${{ matrix.image.name }}
+          path: index
+          if-no-files-found: error
+
+  source-sbom:
+    name: Source SBOM (pnpm workspace)
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Syft
+        id: syft
+        uses: anchore/sbom-action/download-syft@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+        with:
+          syft-version: ${{ env.SYFT_VERSION }}
+
+      # Catalogs pnpm-lock.yaml and the workspace package.json files (no install needed).
+      - name: CycloneDX SBOM of the source tree
+        env:
+          SYFT: ${{ steps.syft.outputs.cmd }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          "$SYFT" scan dir:. \
+            --source-name ai-orchestrator --source-version "$VERSION" \
+            -o "cyclonedx-json=dist/l2m-source-$VERSION.cdx.json"
+
+      - name: Upload the source SBOM
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: source-sbom
+          path: dist
+          if-no-files-found: error
+
+  sign:
+    name: Sign and attest
+    needs: [prepare, assemble, source-sbom]
+    if: needs.prepare.outputs.mode != 'check'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    env:
+      MODE: ${{ needs.prepare.outputs.mode }}
+      VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - name: Download SBOMs and digests
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: "{image-*,index-*,source-sbom}"
+          path: dist
+          merge-multiple: true
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: ${{ env.COSIGN_VERSION }}
+
+      - name: Log in to GHCR
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Read the image digests
+        id: images
+        run: |
+          set -euo pipefail
+          for name in api web; do
+            ref=$(cat "dist/l2m-$name.image.txt")
+            echo "$name-name=${ref%@*}" >> "$GITHUB_OUTPUT"
+            echo "$name-digest=${ref#*@}" >> "$GITHUB_OUTPUT"
+          done
+
+      - name: Sign the index digests (keyless)
+        run: |
+          set -euo pipefail
+          for name in api web; do
+            cosign sign --yes "$(cat "dist/l2m-$name.image.txt")"
+          done
+
+      - name: Build provenance for the API image
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ${{ steps.images.outputs.api-name }}
+          subject-digest: ${{ steps.images.outputs.api-digest }}
+          push-to-registry: true
+          create-storage-record: false
+
+      - name: Build provenance for the Web image
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ${{ steps.images.outputs.web-name }}
+          subject-digest: ${{ steps.images.outputs.web-digest }}
+          push-to-registry: true
+          create-storage-record: false
+
+      - name: Attest the CycloneDX SBOMs on the platform digests
+        run: |
+          set -euo pipefail
+          for name in api web; do
+            ref=$(cat "dist/l2m-$name.image.txt")
+            while read -r platform digest; do
+              cosign attest --yes --type cyclonedx \
+                --predicate "dist/l2m-$name-$VERSION-${platform//\//-}.cdx.json" \
+                "${ref%@*}@$digest"
+            done < "dist/l2m-$name-$VERSION.platforms.txt"
+          done
+
+      # Lets anyone check a downloaded SBOM file with `gh attestation verify <file> -R TensorGreed/ai-orchestrator`.
+      - name: Build provenance for the SBOM files
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: dist/*.cdx.json
+
+      # The same commands the verify page documents, run against what was just published.
+      - name: Verify signatures and attestations
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          identity="$RELEASE_IDENTITY_REGEXP"
+          if [ "$MODE" = "staging" ]; then
+            identity='^https://github\.com/TensorGreed/ai-orchestrator/\.github/workflows/release-images\.yml@refs/heads/.+$'
+          fi
+          for name in api web; do
+            ref=$(cat "dist/l2m-$name.image.txt")
+            cosign verify "$ref" \
+              --certificate-identity-regexp "$identity" \
+              --certificate-oidc-issuer "$OIDC_ISSUER" > /dev/null
+            gh attestation verify "oci://$ref" --repo "$GH_REPO" \
+              --signer-workflow "$GH_REPO/.github/workflows/release-images.yml" \
+              --source-ref "$GITHUB_REF" --deny-self-hosted-runners
+            while read -r platform digest; do
+              cosign verify-attestation --type cyclonedx "${ref%@*}@$digest" \
+                --certificate-identity-regexp "$identity" \
+                --certificate-oidc-issuer "$OIDC_ISSUER" > /dev/null
+              echo "$name $platform: SBOM attestation verified"
+            done < "dist/l2m-$name-$VERSION.platforms.txt"
+          done
+          for sbom in dist/*.cdx.json; do
+            gh attestation verify "$sbom" --repo "$GH_REPO" > /dev/null
+            echo "$(basename "$sbom"): provenance verified"
+          done
+
+  publish:
+    name: Tag images and publish the release
+    needs: [prepare, sign]
+    if: needs.prepare.outputs.mode != 'check'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      packages: write
+    env:
+      MODE: ${{ needs.prepare.outputs.mode }}
+      VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - name: Download SBOMs and digests
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: "{image-*,index-*,source-sbom}"
+          path: dist
+          merge-multiple: true
+
+      - name: Log in to GHCR
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Re-pushes the same index under its tags; the digest (and with it every signature) is unchanged.
+      - name: Tag the signed digests
+        run: |
+          set -euo pipefail
+          for name in api web; do
+            ref=$(cat "dist/l2m-$name.image.txt")
+            repo=${ref%@*}
+            digest=${ref#*@}
+            tags=(--tag "$repo:$VERSION")
+            if [ "$MODE" = "release" ]; then tags+=(--tag "$repo:latest"); fi
+            docker buildx imagetools create "${tags[@]}" "$ref"
+            tagged=$(docker buildx imagetools inspect "$repo:$VERSION" --format '{{json .Manifest.Digest}}' | tr -d '"')
+            if [ "$tagged" != "$digest" ]; then
+              echo "::error::$repo:$VERSION resolves to $tagged, expected $digest"
+              exit 1
+            fi
+            echo "$repo:$VERSION@$digest" >> "dist/l2m-images-$VERSION.txt"
+          done
+          cat "dist/l2m-images-$VERSION.txt"
+
+      - name: Collect release assets
+        run: |
+          set -euo pipefail
+          mkdir -p assets
+          cp dist/*.cdx.json dist/*.platforms.txt "dist/l2m-images-$VERSION.txt" assets/
+          (cd assets && sha256sum -- * > SHA256SUMS)
+          ls -l assets
+
+      - name: Attach SBOMs and digests to the GitHub Release
+        if: env.MODE == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if ! gh release view "$VERSION" > /dev/null 2>&1; then
+            {
+              echo "Images (multi-arch, signed, with SBOM and provenance attestations):"
+              echo
+              echo "~~~"
+              cat "dist/l2m-images-$VERSION.txt"
+              echo "~~~"
+              echo
+              echo "Verify: https://lsquarem.com/docs/operations/verify-a-release"
+            } > release-notes.md
+            flags=()
+            if [[ "$VERSION" == *-* ]]; then flags+=(--prerelease); fi
+            gh release create "$VERSION" --verify-tag --title "$VERSION" --notes "$(cat release-notes.md)" --generate-notes "${flags[@]}"
+          fi
+          gh release upload "$VERSION" assets/* --clobber
+
+      - name: Keep the assets with the run
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-assets-${{ env.VERSION }}
+          path: assets
+          if-no-files-found: error
+
+      - name: Summary
+        run: |
+          {
+            echo "### Published ($MODE)"
+            echo
+            echo "~~~"
+            cat "dist/l2m-images-$VERSION.txt"
+            echo "~~~"
+            echo
+            echo "Verify: https://lsquarem.com/docs/operations/verify-a-release"
+          } >> "$GITHUB_STEP_SUMMARY"

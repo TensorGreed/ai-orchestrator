@@ -39,6 +39,10 @@ pnpm dev
 - API: `http://localhost:4000`
 - Web UI: `http://localhost:5173`
 
+## Run the released images
+
+Each `v*` release also ships signed, multi-arch API and web images on GHCR with SBOMs and build provenance. Check them and pin their digests before deploying: [Verify a release](../operations/verify-a-release.md).
+
 ## Run docs site
 
 ```bash
