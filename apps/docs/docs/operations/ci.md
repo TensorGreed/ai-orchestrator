@@ -10,7 +10,7 @@ This repository uses GitHub Actions to enforce build and test gates on pull requ
 
 The CI workflow runs:
 
-- Node.js 20 setup with `corepack` and pnpm from `packageManager`
+- Node.js 24 setup with `corepack` and pnpm from `packageManager`
 - Dependency install with `pnpm install --frozen-lockfile`
 - Monorepo lint (`pnpm lint`)
 - Monorepo tests (`pnpm test`)

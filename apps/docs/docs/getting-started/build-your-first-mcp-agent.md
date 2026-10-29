@@ -13,7 +13,7 @@ By the end you'll have:
 
 ## 0. Prerequisites
 
-- Node.js 20+
+- Node.js 24+
 - pnpm 10+
 
 ## 1. Clone and install (≈ 60 s)

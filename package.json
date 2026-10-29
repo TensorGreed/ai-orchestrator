@@ -3,6 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
   "packageManager": "pnpm@10.14.0",
   "scripts": {
     "dev": "concurrently -n api,web,docs -c cyan,magenta,green \"pnpm --filter @ai-orchestrator/api dev\" \"pnpm --filter @ai-orchestrator/web dev\" \"pnpm --filter @ai-orchestrator/docs dev\"",

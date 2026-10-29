@@ -118,7 +118,7 @@ for (const kind of kinds) {
      * running the test:
      *  - "replacement": each lone surrogate stored as U+FFFD (pg on any Node; better-sqlite3 on Node 24).
      *  - "wtf8": each lone surrogate stored as its 3-byte generalized UTF-8 form, ED A0 80 for U+D800 (better-sqlite3 on
-     *    Node 20, the runtime image). SQLite only: Postgres refuses those bytes.
+     *    Node 20, the former runtime image). SQLite only: Postgres refuses those bytes.
      */
     function writeOldFormat(
       id: string,
