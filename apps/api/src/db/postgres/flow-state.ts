@@ -83,12 +83,19 @@ export async function pruneRateLimitBuckets(ctx: PgContext): Promise<number> {
 /**
  * Under a transaction lock per workflow: the captures since `since` plus the live reservations, then the insert only
  * when they are below the limit. A second instance reserving for the same workflow waits for the lock and then counts
- * this reservation, so the daily limit holds across instances.
+ * this reservation, so the daily limit holds across instances. A day's captures only grow, so an unlocked count of
+ * them that already reaches the limit refuses without taking the lock or a transaction (the usual case once the day's
+ * limit is used up); the locked count still decides every admission.
  */
 export async function reserveReplayCapture(
   ctx: PgContext,
   input: { id: string; workflowId: string; since: string; maxPerDay: number; ttlMs: number }
 ): Promise<boolean> {
+  const captured = await ctx.queryOne<{ count: string }>(
+    `SELECT COUNT(*) AS count FROM replay_recordings WHERE workflow_id = $1 AND captured_at >= $2`,
+    [input.workflowId, input.since]
+  );
+  if ((captured ? toNum(captured.count) : 0) >= input.maxPerDay) return false;
   return await ctx.withTransaction(async (client) => {
     await client.query(`SELECT pg_advisory_xact_lock($1, hashtext(current_schema() || ':' || $2::text))`, [
       ADVISORY_LOCK_CLASS_CAPTURE_RESERVATION,

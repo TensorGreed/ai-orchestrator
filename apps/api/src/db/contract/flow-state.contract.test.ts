@@ -4,6 +4,8 @@
  * the store's clock, so the tests wait for a short lifetime to pass rather than fake a time.
  */
 import { expect, it } from "vitest";
+import type { PostgresStore } from "../postgres-store.js";
+import { ADVISORY_LOCK_CLASS_CAPTURE_RESERVATION } from "../postgres/flow-state.js";
 import type { Store } from "../store.js";
 import { describeStoreContract } from "../../test-support/test-store.js";
 
@@ -160,6 +162,25 @@ describeStoreContract("store contract: replay-capture reservations", (ctx) => {
     );
     expect(results.filter(Boolean)).toHaveLength(5);
     expect(await store.countReplayCaptureReservations("wf-race")).toBe(5);
+  });
+
+  it("refuses at once when the day's captures already reach the limit, without waiting for the workflow's lock", async () => {
+    const store = ctx.store();
+    const since = new Date(Date.now() - 60_000).toISOString();
+    await capture(store, "wf-full", "full-1", new Date().toISOString());
+    await capture(store, "wf-full", "full-2", new Date().toISOString());
+    expect(await store.reserveReplayCapture({ id: "f1", workflowId: "wf-full", since, maxPerDay: 2, ttlMs: 60_000 })).toBe(false);
+    if (ctx.kind !== "postgres") return;
+    // Another instance holds the workflow's reservation lock: the refusal does not queue behind it.
+    const pg = store as PostgresStore;
+    const outcome = await pg.withClusterLock(ADVISORY_LOCK_CLASS_CAPTURE_RESERVATION, "wf-full", { waitMs: 0 }, async () => {
+      const startedAt = Date.now();
+      const admitted = await store.reserveReplayCapture({ id: "f2", workflowId: "wf-full", since, maxPerDay: 2, ttlMs: 60_000 });
+      return { admitted, tookMs: Date.now() - startedAt };
+    });
+    expect(outcome).toMatchObject({ acquired: true, value: { admitted: false } });
+    expect(outcome.acquired && outcome.value.tookMs).toBeLessThan(2_000);
+    expect(await store.countReplayCaptureReservations("wf-full")).toBe(0);
   });
 
   it("stops counting an expired reservation, and prunes it", async () => {
