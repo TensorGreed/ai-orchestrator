@@ -2,17 +2,20 @@
 // working instance, with every backup method the runbook documents (apps/docs/docs/operations/backup-and-recovery.md):
 //
 //   1. Starts the API on a temporary database and populates it through the public API only: users (one with MFA),
-//      a secret, an MCP server, workflows, finished runs, a run paused for approval, and the audit rows all of that
-//      writes.
+//      a secret, MCP servers, workflows, finished runs, a release, a guard profile, a knowledge base, a signed run
+//      manifest, a run paused for approval, an agent paused on its second write-tool approval (the first write's
+//      result sealed with the master key), and the audit rows all of that writes.
 //   2. Takes a backup with each method, then restores each into a fresh instance (new database, new port):
 //        SQLite:   online backup (SQLite's backup API, API running) · file copy (API stopped) · db:export / db:import
 //                  · db:import with a new master key (--source-master-key-file) · a lost master key
 //        Postgres: pg_dump / pg_restore (API running) · db:export / db:import · db:copy from the SQLite backup
 //                  · point-in-time recovery from a base backup and archived WAL (DR_DRILL_PITR)
 //   3. Verifies every restored instance: password and MFA logins work, the secret decrypts (a run sends it to a local
-//      echo server, which only reports whether it matched), users, workflows, runs, secrets, MCP servers and the
-//      pending approval match, every audit row of the backup is there and the chain verifies, the paused run can be
-//      approved and finishes, and a workflow runs.
+//      echo server, which only reports whether it matched), users, workflows, runs, secrets, MCP servers, releases,
+//      guard profiles, knowledge bases and the pending approvals match, every audit row of the backup is there and
+//      the chain verifies, the stored manifest is unchanged and a run signed after the restore verifies offline with
+//      the public key from before the backup, the paused run can be approved and finishes, and approving the agent
+//      runs its second write only (the first is answered from its sealed result), also after a key rotation.
 //   4. Prints the measured backup and restore times. Any mismatch fails the drill with a diff (exit 1).
 //
 //   node scripts/dr-drill.mjs [--only sqlite|postgres] [--keep] [--summary <file.json>]
@@ -115,7 +118,21 @@ async function timed(fn) {
   return { value, ms: performance.now() - started };
 }
 
-/** Runs a command; resolves with its output, rejects with the output's tail (commands never print a key or password). */
+/** `text` with the password of any URL in it replaced by ***. */
+const redact = (text) => String(text).replace(/(\/\/[^:/@\s]+):[^@\s]+@/g, "$1:***@");
+
+/**
+ * A Postgres URL for a client tool: the URL without its password (for --dbname / -d) and the password as PGPASSWORD
+ * for the child's environment, so it never appears in argv, the process list or an error message.
+ */
+function pgConnection(url) {
+  const parsed = new URL(url);
+  const password = decodeURIComponent(parsed.password);
+  parsed.password = "";
+  return { dbname: parsed.toString(), env: { ...process.env, ...(password ? { PGPASSWORD: password } : {}) } };
+}
+
+/** Runs a command; resolves with its output, rejects with the output's tail, URLs' passwords redacted. */
 function run(command, commandArgs, options = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, commandArgs, { cwd: options.cwd ?? repoRoot, env: options.env ?? process.env, stdio: ["ignore", "pipe", "pipe"] });
@@ -125,7 +142,7 @@ function run(command, commandArgs, options = {}) {
     child.once("error", reject);
     child.once("exit", (code) => {
       if (code === 0 || (options.allowFailure && code !== null)) resolve({ code, output });
-      else reject(new DrillFailure(`${path.basename(command)} ${commandArgs.join(" ")} exited ${code}:\n${output.trim().split("\n").slice(-25).join("\n")}`));
+      else reject(new DrillFailure(redact(`${path.basename(command)} ${commandArgs.join(" ")} exited ${code}:\n${output.trim().split("\n").slice(-25).join("\n")}`)));
     });
   });
 }
@@ -176,6 +193,53 @@ const echo = createServer((request, response) => {
   const authorized = request.headers.authorization === `Bearer ${SECRET_VALUE}`;
   response.writeHead(200, { "content-type": "application/json" });
   response.end(JSON.stringify({ authorized }));
+});
+
+// A chat model and an MCP server with one write tool, for the agent whose approved write result is sealed in its
+// paused state (see agentWorkflow). The model asks to write a@, then b@, then answers; the tool records each write.
+
+let fakeModelUrl = "";
+let fakeMcpUrl = "";
+const writeCalls = [];
+const readJson = (request) =>
+  new Promise((resolve) => {
+    let body = "";
+    request.on("data", (chunk) => (body += chunk));
+    request.on("end", () => resolve(body ? JSON.parse(body) : {}));
+  });
+const fakeModel = createServer(async (request, response) => {
+  const body = await readJson(request);
+  const done = (body.messages ?? []).filter((message) => message.role === "tool").length;
+  const email = done === 0 ? "a@example.org" : done === 1 ? "b@example.org" : "";
+  response.writeHead(200, { "content-type": "application/json" });
+  response.end(
+    JSON.stringify({
+      choices: [
+        {
+          message: {
+            role: "assistant",
+            content: email ? "" : "All done.",
+            tool_calls: email ? [{ id: `call-${done}`, type: "function", function: { name: "http_mcp__write_record", arguments: JSON.stringify({ email }) } }] : []
+          }
+        }
+      ]
+    })
+  );
+});
+const fakeMcp = createServer(async (request, response) => {
+  const rpc = await readJson(request);
+  response.setHeader("content-type", "application/json");
+  let result = {};
+  if (rpc.method === "initialize") result = { protocolVersion: "2024-11-05", capabilities: {} };
+  else if (rpc.method === "tools/list") {
+    result = { tools: [{ name: "write_record", description: "Write a record", inputSchema: { type: "object", properties: { email: { type: "string" } } } }] };
+  } else if (rpc.method === "tools/call") {
+    const email = String(rpc.params?.arguments?.email ?? "");
+    writeCalls.push(email);
+    const structured = { written: email };
+    result = { content: [{ type: "text", text: JSON.stringify(structured) }], structuredContent: structured };
+  }
+  response.end(JSON.stringify({ jsonrpc: "2.0", id: rpc.id ?? null, result }));
 });
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -328,12 +392,77 @@ const APPROVAL_WORKFLOW = {
   ]
 };
 
+/**
+ * An agent with a write tool that needs approval (settings.writeToolApproval): the model asks to write a@, then b@,
+ * then answers. Approving the first write runs it and pauses on the second with the first result sealed in the run's
+ * state (with the master key). Approving the second after a restore must answer the first from that sealed result:
+ * the write tool must see b@ only.
+ */
+function agentWorkflow(serverId) {
+  return {
+    id: "wf-drill-agent",
+    name: "Drill: agent with an approved write tool",
+    schemaVersion: "1.0.0",
+    workflowVersion: 1,
+    settings: { writeToolApproval: { enabled: true, approverRoles: ["admin"], timeoutMinutes: 10080 } },
+    nodes: [
+      node("in", "manual_trigger"),
+      node("agent", "agent_orchestrator", { userPromptTemplate: "write the records", maxIterations: 6, toolCallingEnabled: true }),
+      node("model", "llm_call", { provider: { providerId: "openai", model: "drill", baseUrl: fakeModelUrl, extra: { apiKey: "drill-not-a-key", maxRetries: 0 } } }),
+      node("tool", "mcp_tool", { registryServerId: serverId, toolName: "__all__" }),
+      node("out", "output")
+    ],
+    edges: [
+      { id: "e1", source: "in", target: "agent" },
+      { id: "e2", source: "agent", target: "out" },
+      { id: "e3", source: "agent", sourceHandle: "chat_model", target: "model" },
+      { id: "e4", source: "agent", sourceHandle: "tool", target: "tool" }
+    ]
+  };
+}
+
+const GUARD_PROFILE = {
+  id: "drill-guard",
+  name: "Drill guard profile",
+  version: "1",
+  channels: { prompt: { detectors: [{ id: "dlp.patterns", threshold: 0.5 }], actions: { email: { action: "mask" } }, defaultAction: { action: "allow" } } }
+};
+
 /** Runs the secret-check workflow; true when the echo server saw the right bearer token. */
 async function secretRunAuthorized(api) {
   const result = await api.call(ADMIN.email, "POST", "/api/workflows/wf-drill-secret/execute", { user_prompt: "drill" });
   const call = result.body?.nodeResults?.find((entry) => entry.nodeId === "call");
   const authorized = JSON.stringify(call?.output ?? {}).includes('"authorized":true');
-  return { authorized, status: result.body?.status, error: result.body?.error ?? call?.error };
+  return { authorized, status: result.body?.status, error: result.body?.error ?? call?.error, executionId: result.body?.executionId };
+}
+
+/** Waits until run `id` reaches one of `statuses` (a resume may be queued); returns the status it ended in. */
+async function waitForRun(api, id, statuses, timeoutMs = 60_000) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const status = (await api.call(ADMIN.email, "GET", `/api/executions/${id}`)).body?.status;
+    if (statuses.includes(status) || Date.now() > deadline) return status;
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+}
+
+/** Approves the pending request of run `id` as the admin; returns the status the run reaches next. */
+async function approveRun(api, id, until) {
+  const pending = (await api.ok(ADMIN.email, "GET", "/api/approvals")).items.find((item) => item.executionId === id);
+  if (!pending) return "no pending request";
+  const decided = await api.call(ADMIN.email, "POST", `/api/approvals/${id}/approve`, { requestId: pending.requestId });
+  if (decided.status !== 200 && decided.status !== 202) return `refused (${decided.status}: ${JSON.stringify(decided.body).slice(0, 200)})`;
+  // The resume may be queued: the run stays waiting_approval until it runs, so wait for a final status or for a new
+  // request on the same run (the next pause).
+  const deadline = Date.now() + 60_000;
+  for (;;) {
+    const status = (await api.call(ADMIN.email, "GET", `/api/executions/${id}`)).body?.status;
+    if (status !== "waiting_approval" && status !== "running" && status !== "queued" && until.includes(status)) return status;
+    const next = (await api.ok(ADMIN.email, "GET", "/api/approvals")).items.find((item) => item.executionId === id && item.requestId !== pending.requestId);
+    if (next && status === "waiting_approval" && until.includes(status)) return status;
+    if (Date.now() > deadline) return status ?? "unknown";
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
 }
 
 async function populate(api) {
@@ -348,20 +477,57 @@ async function populate(api) {
   await api.login(OPERATOR);
 
   const secret = await api.ok(ADMIN.email, "POST", "/api/secrets", { name: "DRILL_ECHO_TOKEN", provider: "custom", value: SECRET_VALUE });
-  await api.ok(ADMIN.email, "POST", "/api/mcp/servers", {
-    name: "Drill MCP server",
-    adapterId: "mock-mcp",
-    probeEnabled: false
+  await api.ok(ADMIN.email, "POST", "/api/mcp/servers", { name: "Drill MCP server", adapterId: "mock-mcp", probeEnabled: false });
+  const writeServer = await api.ok(ADMIN.email, "POST", "/api/mcp/servers", {
+    name: "Drill write tool",
+    adapterId: "http_mcp",
+    probeEnabled: false,
+    connection: { endpoint: fakeMcpUrl }
   });
   await api.ok(ADMIN.email, "POST", "/api/workflows", secretWorkflow(secret.id));
   await api.ok(ADMIN.email, "POST", "/api/workflows", APPROVAL_WORKFLOW);
+  await api.ok(ADMIN.email, "POST", "/api/workflows", agentWorkflow(writeServer.server.id));
+  const runIds = [];
   for (let i = 0; i < extraRuns; i += 1) {
     const run = await secretRunAuthorized(api);
     if (!run.authorized) throw new DrillFailure(`populate: the secret-check run did not authorize (${run.status}: ${run.error ?? ""})`);
+    runIds.push(run.executionId);
   }
+  // A release (production pinned to version 1), a guard profile and a knowledge base: tables db:export once missed.
+  await api.ok(ADMIN.email, "POST", "/api/workflows/wf-drill-secret/publish", { version: 1 });
+  await api.ok(ADMIN.email, "POST", "/api/guard/profiles", { document: GUARD_PROFILE });
+  const kb = await api.ok(ADMIN.email, "POST", "/api/knowledge-bases", { name: "Drill corpus", embedderId: "token-embedder", embedderConfig: {} });
+  await api.ok(ADMIN.email, "POST", `/api/knowledge-bases/${kb.knowledgeBase.id}/ingest`, {
+    sourceId: "drill-faq",
+    documents: [{ content: "To restore a backup, stop the API first." }, { content: "Keep the master key apart from the backups." }]
+  });
+  // A signed run manifest (this generates the audit signing key, stored as an encrypted secret). The second run is
+  // left without one: after a restore, signing it proves the restored key can be decrypted and is the same key.
+  const manifest = await api.ok(ADMIN.email, "GET", `/api/executions/${runIds[0]}/manifest`);
+  const signingKeys = await api.ok(ADMIN.email, "GET", "/api/audit/signing-keys");
+  const signingKey = signingKeys.keys.find((key) => key.keyId === signingKeys.activeKeyId);
+
   const paused = await api.ok(ADMIN.email, "POST", "/api/workflows/wf-drill-approval/execute", { user_prompt: "drill" });
   if (paused.status !== "waiting_approval") throw new DrillFailure(`populate: the approval run is ${paused.status}, not waiting_approval`);
-  return { secretId: secret.id, mfaSecret };
+  // The agent: the first write approved and run, paused on the second with the first result sealed.
+  const writesBefore = writeCalls.length;
+  const agent = await api.ok(MFA_USER.email, "POST", "/api/workflows/wf-drill-agent/execute", {});
+  if (agent.status !== "waiting_approval") throw new DrillFailure(`populate: the agent run is ${agent.status}, not waiting_approval`);
+  const second = await approveRun(api, agent.executionId, ["waiting_approval", "success", "error"]);
+  const writes = writeCalls.slice(writesBefore);
+  if (second !== "waiting_approval" || writes.join(",") !== "a@example.org") {
+    throw new DrillFailure(`populate: after the first approval the agent run is ${second} and the write tool saw ${JSON.stringify(writes)}`);
+  }
+  return {
+    mfaSecret,
+    approvalRunId: paused.executionId,
+    agentRunId: agent.executionId,
+    manifestRunId: runIds[0],
+    manifestDigest: manifest.digest,
+    unsignedRunId: runIds[1],
+    signingKeyId: signingKey.keyId,
+    signingPublicKey: signingKey.publicKey
+  };
 }
 
 /** Every item of a paged listing (`items` + `total`), whatever page size the server clamps to. */
@@ -375,18 +541,23 @@ async function allItems(api, url) {
   }
 }
 
+const listOf = (body, ...keys) => (Array.isArray(body) ? body : keys.map((key) => body?.[key]).find(Array.isArray) ?? []);
+
 /** What a restored instance must hold. Read as the admin, who sees everything. */
 async function snapshot(api) {
   const users = (await api.ok(ADMIN.email, "GET", "/api/users")).users.map((user) => `${user.email}:${user.role}`).sort();
   const workflows = (await api.ok(ADMIN.email, "GET", "/api/workflows")).map((workflow) => workflow.id).sort();
   const runs = (await allItems(api, "/api/executions")).map((run) => `${run.id}:${run.status}`).sort();
-  const secretsBody = await api.ok(ADMIN.email, "GET", "/api/secrets");
-  const secrets = (Array.isArray(secretsBody) ? secretsBody : secretsBody.secrets ?? secretsBody.items ?? []).map((secret) => `${secret.id}:${secret.name}`).sort();
+  const secrets = listOf(await api.ok(ADMIN.email, "GET", "/api/secrets"), "secrets", "items").map((secret) => `${secret.id}:${secret.name}`).sort();
   const mcpServers = (await api.ok(ADMIN.email, "GET", "/api/mcp/servers")).servers.map((server) => `${server.id}:${server.name}`).sort();
   const approvals = (await api.ok(ADMIN.email, "GET", "/api/approvals")).items.map((item) => `${item.executionId}:${item.requestId}:${item.status}`).sort();
+  const releaseBody = await api.ok(ADMIN.email, "GET", "/api/workflows/wf-drill-secret/releases");
+  const releases = [`published:${releaseBody.publishedVersion}`, ...releaseBody.releases.map((release) => `${release.id ?? release.version}:${release.version}:${release.verdict}`)].sort();
+  const guardProfiles = listOf(await api.ok(ADMIN.email, "GET", "/api/guard/profiles"), "profiles", "items").map((profile) => `${profile.id}:${profile.version ?? profile.currentVersion ?? ""}`).sort();
+  const knowledgeBases = listOf(await api.ok(ADMIN.email, "GET", "/api/knowledge-bases"), "knowledgeBases", "items").map((kb) => `${kb.id}:${kb.name}:${kb.chunkCount}`).sort();
   const chain = await api.ok(ADMIN.email, "GET", "/api/audit-log/verify-chain");
   const auditIds = (await allItems(api, "/api/audit")).map((entry) => entry.id);
-  return { users, workflows, runs, secrets, mcpServers, approvals, chain, auditIds };
+  return { users, workflows, runs, secrets, mcpServers, approvals, releases, guardProfiles, knowledgeBases, chain, auditIds };
 }
 
 function listDiff(label, expected, actual) {
@@ -401,9 +572,19 @@ function chainText(chain) {
   return chain.ok ? `intact (${chain.rowsChecked} rows${unverifiable ? `, ${unverifiable} unverifiable` : ""})` : `BROKEN at ${chain.firstBrokenAt?.id}`;
 }
 
+/** Downloads run `id`'s audit bundle and verifies it offline with `l2m audit verify` against `publicKey`. */
+async function bundleVerifies(api, id, publicKey) {
+  const response = await fetch(`${api.url}/api/executions/${id}/bundle`, { headers: { cookie: api.jar.get(ADMIN.email) ?? "" } });
+  if (!response.ok) return `the bundle answered ${response.status}: ${(await response.text()).slice(0, 200)}`;
+  const file = path.join(api.dir, `bundle-${id}.zip`);
+  fs.writeFileSync(file, Buffer.from(await response.arrayBuffer()));
+  const verified = await run(process.execPath, [path.join(repoRoot, "packages", "cli", "bin", "l2m.mjs"), "audit", "verify", file, "--public-key", publicKey], { allowFailure: true });
+  return verified.code === 0 ? null : `l2m audit verify exited ${verified.code}: ${verified.output.trim().split("\n").slice(-5).join(" | ")}`;
+}
+
 /**
  * Checks a restored instance against the snapshot taken before the backup. `keyKnown` false: the master key was lost,
- * so secrets and MFA cannot be read (checked separately by the key-loss scenario).
+ * so secrets, MFA and the signing key cannot be read (checked separately by the key-loss scenario).
  */
 async function verifyRestore(api, expected, options = { keyKnown: true }) {
   const problems = [];
@@ -427,25 +608,33 @@ async function verifyRestore(api, expected, options = { keyKnown: true }) {
   problems.push(...listDiff("secrets", expected.secrets, actual.secrets));
   problems.push(...listDiff("MCP servers", expected.mcpServers, actual.mcpServers));
   problems.push(...listDiff("pending approvals", expected.approvals, actual.approvals));
+  problems.push(...listDiff("releases", expected.releases, actual.releases));
+  problems.push(...listDiff("guard profiles", expected.guardProfiles, actual.guardProfiles));
+  problems.push(...listDiff("knowledge bases (id:name:chunks)", expected.knowledgeBases, actual.knowledgeBases));
   const missingAudit = expected.auditIds.filter((id) => !actual.auditIds.includes(id));
   if (missingAudit.length > 0) problems.push(`audit rows missing after the restore: ${missingAudit.length} of ${expected.auditIds.length} (${missingAudit.slice(0, 5).join(", ")})`);
   if (!actual.chain.ok || (actual.chain.unverifiable?.length ?? 0) !== (expected.chain.unverifiable?.length ?? 0) || actual.chain.rowsChecked < expected.chain.rowsChecked) {
     problems.push(`audit chain: before ${chainText(expected.chain)}, after ${chainText(actual.chain)}`);
   }
+  const manifest = await api.call(ADMIN.email, "GET", `/api/executions/${expected.manifestRunId}/manifest`);
+  if (manifest.body?.digest !== expected.manifestDigest) problems.push(`the stored run manifest changed: digest ${manifest.body?.digest ?? manifest.status}, was ${expected.manifestDigest}`);
   if (options.keyKnown) {
     const run = await secretRunAuthorized(api);
     if (!run.authorized) problems.push(`the secret did not decrypt into the run (${run.status}: ${run.error ?? "no error"})`);
-    const pending = (await api.ok(ADMIN.email, "GET", "/api/approvals")).items[0];
-    if (pending) {
-      const decided = await api.call(ADMIN.email, "POST", `/api/approvals/${pending.executionId}/approve`, { requestId: pending.requestId });
-      // 200 with the finished run, or 202 when the resume was queued: then the run finishes on the queue.
-      let status = decided.status === 200 ? decided.body?.status : undefined;
-      const deadline = Date.now() + 60_000;
-      while (decided.status === 202 && status !== "success" && status !== "error" && Date.now() < deadline) {
-        await new Promise((resolve) => setTimeout(resolve, 250));
-        status = (await api.call(ADMIN.email, "GET", `/api/executions/${pending.executionId}`)).body?.status;
-      }
-      if (status !== "success") problems.push(`approving the restored paused run: ${decided.status}, the run ended ${status ?? "unknown"}`);
+    // The signing key: a run signed after the restore uses the same key, and its bundle verifies with the public key
+    // taken before the backup.
+    const keys = await api.ok(ADMIN.email, "GET", "/api/audit/signing-keys");
+    if (keys.activeKeyId !== expected.signingKeyId) problems.push(`the active signing key is ${keys.activeKeyId}, was ${expected.signingKeyId}`);
+    const bundle = await bundleVerifies(api, expected.unsignedRunId, expected.signingPublicKey);
+    if (bundle) problems.push(`a manifest signed after the restore does not verify with the key from before the backup: ${bundle}`);
+    const approved = await approveRun(api, expected.approvalRunId, ["success", "error"]);
+    if (approved !== "success") problems.push(`approving the restored paused run: it ended ${approved}`);
+    // The agent's second write: the first must be answered from its sealed result, so the tool sees b@ only.
+    const callsBefore = writeCalls.length;
+    const agent = await approveRun(api, expected.agentRunId, ["success", "error"]);
+    const calls = writeCalls.slice(callsBefore);
+    if (agent !== "success" || calls.join(",") !== "b@example.org") {
+      problems.push(`approving the restored agent run: it ended ${agent}, and the write tool saw ${JSON.stringify(calls)} (expected ["b@example.org"]: the first write's sealed result must answer it)`);
     }
   }
   if (problems.length > 0) throw new DrillFailure(`${api.name}: the restore does not match the backup:\n  - ${problems.join("\n  - ")}`);
@@ -464,7 +653,7 @@ async function scenario(name, method, fn) {
   } catch (error) {
     failures.push({ name, message: error instanceof Error ? error.message : String(error) });
     results.push({ name, method, ok: false });
-    log(`  ✗ ${error instanceof Error ? error.message : String(error)}`);
+    log(`  ✗ ${redact(error instanceof Error ? error.message : String(error))}`);
   }
 }
 
@@ -493,8 +682,8 @@ async function sqliteDrill(context) {
   log("\n▶ SQLite source: start and populate through the API");
   await source.start();
   const populated = await populate(source);
-  const expected = { ...(await snapshot(source)), mfaSecret: populated.mfaSecret };
-  log(`  ${expected.users.length} users, ${expected.workflows.length} workflows, ${expected.runs.length} runs, ${expected.secrets.length} secret, ${expected.mcpServers.length} MCP server, ${expected.approvals.length} pending approval, audit chain ${chainText(expected.chain)}`);
+  const expected = { ...(await snapshot(source)), ...populated };
+  log(`  ${expected.users.length} users, ${expected.workflows.length} workflows, ${expected.runs.length} runs, ${expected.secrets.length} secret, ${expected.mcpServers.length} MCP servers, ${expected.approvals.length} pending approvals, ${expected.releases.length - 1} release, ${expected.guardProfiles.length} guard profile, ${expected.knowledgeBases.join(" ")} (knowledge base:chunks), audit chain ${chainText(expected.chain)}`);
 
   // Taken while the API runs: the online backup and db:export.
   const onlineFile = path.join(workDir, "backups", "online.db");
@@ -539,6 +728,14 @@ async function sqliteDrill(context) {
     const newKey = randomKey();
     const file = path.join(workDir, "restore-sqlite-rekey", "orchestrator.db");
     const api = new Api("restore-sqlite-rekey", { masterKey: newKey, dbEnv: { DB_SQLITE_PATH: file } });
+    // Without the old key, db:import refuses: the new key cannot open the backup's secrets (exit 2, nothing written).
+    const refused = await run("pnpm", ["--silent", "--filter", "@ai-orchestrator/api", "db:import", "--", "--in", exportFile, "--yes"], {
+      env: baseEnv({ DB_TYPE: "sqlite", DB_SQLITE_PATH: file, SECRET_MASTER_KEY_BASE64: newKey }),
+      allowFailure: true
+    });
+    if (refused.code !== 2 || !/cannot open the backup's secrets/.test(refused.output)) {
+      throw new DrillFailure(`db:import with the wrong key: expected a refusal (exit 2), got ${refused.code}: ${refused.output.trim().split("\n").slice(-3).join(" | ")}`);
+    }
     const oldKeyFile = path.join(workDir, "old-master-key.txt");
     fs.writeFileSync(oldKeyFile, `${masterKey}\n`, { mode: 0o600 });
     const restored = await timed(() =>
@@ -564,12 +761,23 @@ async function sqliteDrill(context) {
         ? await api.call(MFA_USER.email, "POST", "/api/auth/login/mfa", { challenge: mfa.body.mfaChallenge, code: totp(expected.mfaSecret) })
         : mfa;
       if (mfaStep.status === 200) problems.push("the MFA user signed in although the MFA secret cannot be decrypted");
+      // The agent's sealed write result cannot be opened: approving asks for the first write again, nothing runs yet.
+      const callsBefore = writeCalls.length;
+      const again = await approveRun(api, expected.agentRunId, ["waiting_approval", "success", "error"]);
+      if (again !== "waiting_approval" || writeCalls.length !== callsBefore) {
+        problems.push(`the agent run with an unreadable sealed result: expected it to ask again, it ended ${again} with writes ${JSON.stringify(writeCalls.slice(callsBefore))}`);
+      }
+      // The signing key is an encrypted secret too: signing a new manifest fails until an admin rotates.
+      const unsigned = await api.call(ADMIN.email, "GET", `/api/executions/${expected.unsignedRunId}/manifest`);
+      if (unsigned.status < 400 || !/cannot be read/.test(JSON.stringify(unsigned.body))) {
+        problems.push(`signing with the unreadable key: expected "cannot be read", got ${unsigned.status} ${JSON.stringify(unsigned.body).slice(0, 200)}`);
+      }
     } finally {
       await api.stop();
     }
     // Recovery as the runbook says: clear MFA enrolments with the API stopped, start, re-create the secret, re-point the workflow.
     const db = new Database(file);
-    db.prepare("DELETE FROM mfa_secrets").run();
+    db.prepare("DELETE FROM mfa_secrets WHERE user_id IN (SELECT id FROM users WHERE email IN (?))").run(MFA_USER.email);
     db.close();
     await api.start();
     try {
@@ -579,11 +787,14 @@ async function sqliteDrill(context) {
       await api.ok(ADMIN.email, "POST", "/api/workflows", secretWorkflow(secret.id));
       const run = await secretRunAuthorized(api);
       if (!run.authorized) problems.push(`after re-entering the secret the run still failed (${run.status}: ${run.error ?? ""})`);
+      await api.ok(ADMIN.email, "POST", "/api/audit/signing-keys/rotate", {});
+      const signed = await api.call(ADMIN.email, "GET", `/api/executions/${expected.unsignedRunId}/manifest`);
+      if (signed.status !== 200) problems.push(`after rotating the signing key, signing still failed (${signed.status})`);
     } finally {
       await api.stop();
     }
     if (problems.length > 0) throw new DrillFailure(problems.join("; "));
-    return { backupMs: copied.ms, restoreMs: prepare.ms + startMs, bytes: fileSize(copyFile), note: "data and logins back; secrets re-entered, MFA re-enrolled" };
+    return { backupMs: copied.ms, restoreMs: prepare.ms + startMs, bytes: fileSize(copyFile), note: "data and logins back; secrets re-entered, MFA reset, signing key rotated" };
   });
 }
 
@@ -627,7 +838,7 @@ async function postgresDrill(context) {
   log("\n▶ Postgres source: start and populate through the API");
   await source.start();
   const populated = await populate(source);
-  const expected = { ...(await snapshot(source)), mfaSecret: populated.mfaSecret };
+  const expected = { ...(await snapshot(source)), ...populated };
   log(`  ${expected.runs.length} runs, audit chain ${chainText(expected.chain)}`);
 
   const serverMajor = Number((await adminQuery("SHOW server_version_num")).rows[0].server_version_num.slice(0, -4));
@@ -636,7 +847,8 @@ async function postgresDrill(context) {
 
   const dumpFile = path.join(workDir, "backups", "postgres.dump");
   fs.mkdirSync(path.dirname(dumpFile), { recursive: true });
-  const dumped = await timed(() => run("pg_dump", ["--format=custom", "--no-owner", "--no-privileges", `--file=${dumpFile}`, `--dbname=${sourceUrl}`]));
+  const sourceConnection = pgConnection(sourceUrl);
+  const dumped = await timed(() => run("pg_dump", ["--format=custom", "--no-owner", "--no-privileges", `--file=${dumpFile}`, `--dbname=${sourceConnection.dbname}`], { env: sourceConnection.env }));
   const exportFile = path.join(workDir, "backups", "postgres-export.json");
   const exported = await timed(() => apiScript("db:export", ["--out", exportFile], pgEnv(sourceUrl)));
   await source.stop();
@@ -644,7 +856,8 @@ async function postgresDrill(context) {
   await scenario("pg_dump → pg_restore (Postgres → Postgres)", "native", async () => {
     const url = await createDatabase(`${prefix}_pgrestore`);
     const api = new Api("restore-pg-dump", { masterKey, dbEnv: pgEnv(url) });
-    const restored = await timed(() => run("pg_restore", ["--no-owner", "--no-privileges", "--exit-on-error", `--dbname=${url}`, dumpFile]));
+    const target = pgConnection(url);
+    const restored = await timed(() => run("pg_restore", ["--no-owner", "--no-privileges", "--exit-on-error", `--dbname=${target.dbname}`, dumpFile], { env: target.env }));
     return { backupMs: dumped.ms, restoreMs: await startAndVerify(api, expected, restored.ms), bytes: fileSize(dumpFile) };
   });
 
@@ -681,10 +894,10 @@ function findPgBin() {
 }
 
 /** Postgres refuses to run as root: under root the cluster runs as the `postgres` system user (runuser). */
-function pgCommand(bin, tool, toolArgs) {
+function pgCommand(bin, tool, toolArgs, env) {
   const binary = path.join(bin, tool);
-  if (process.getuid?.() === 0) return run("runuser", ["-u", "postgres", "--", binary, ...toolArgs]);
-  return run(binary, toolArgs);
+  if (process.getuid?.() === 0) return run("runuser", ["-u", "postgres", "--", binary, ...toolArgs], env ? { env } : {});
+  return run(binary, toolArgs, env ? { env } : {});
 }
 
 async function pitrDrill(prefix) {
@@ -742,11 +955,11 @@ async function pitrDrill(prefix) {
     try {
       const populated = await populate(api);
       // The base backup: taken while the API runs.
-      base_ms = (await timed(() => pgCommand(bin, "pg_basebackup", ["-h", "127.0.0.1", "-p", String(port), "-U", "postgres", "-D", base, "-X", "stream", "-c", "fast", "-d", `password=${password}`]))).ms;
+      base_ms = (await timed(() => pgCommand(bin, "pg_basebackup", ["-h", "127.0.0.1", "-p", String(port), "-U", "postgres", "-D", base, "-X", "stream", "-c", "fast"], { ...process.env, PGPASSWORD: password }))).ms;
       // Changes after the base backup, before the target: another finished run.
       const before = await secretRunAuthorized(api);
       if (!before.authorized) throw new DrillFailure("PITR: the run before the target time failed");
-      expected = { ...(await snapshot(api)), mfaSecret: populated.mfaSecret };
+      expected = { ...(await snapshot(api)), ...populated };
       await new Promise((resolve) => setTimeout(resolve, 1200));
       const target = (await query(dbUrl, "SELECT to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS.US') || '+00' AS t")).rows[0].t;
       await new Promise((resolve) => setTimeout(resolve, 1200));
@@ -813,6 +1026,10 @@ function dirSize(dir) {
 async function main() {
   await new Promise((resolve) => echo.listen(0, "127.0.0.1", resolve));
   echoUrl = `http://127.0.0.1:${echo.address().port}/echo`;
+  await new Promise((resolve) => fakeModel.listen(0, "127.0.0.1", resolve));
+  fakeModelUrl = `http://127.0.0.1:${fakeModel.address().port}/v1`;
+  await new Promise((resolve) => fakeMcp.listen(0, "127.0.0.1", resolve));
+  fakeMcpUrl = `http://127.0.0.1:${fakeMcp.address().port}/mcp`;
   log(`Restore drill — work directory ${workDir}`);
   const context = {};
   if (only !== "postgres") {
@@ -820,7 +1037,7 @@ async function main() {
       await sqliteDrill(context);
     } catch (error) {
       failures.push({ name: "SQLite source", message: error instanceof Error ? error.message : String(error) });
-      log(`  ✗ ${error instanceof Error ? error.message : String(error)}`);
+      log(`  ✗ ${redact(error instanceof Error ? error.message : String(error))}`);
     }
   }
   if (only !== "sqlite") {
@@ -833,7 +1050,7 @@ async function main() {
         await postgresDrill(context);
       } catch (error) {
         failures.push({ name: "Postgres source", message: error instanceof Error ? error.message : String(error) });
-        log(`  ✗ ${error instanceof Error ? error.message : String(error)}`);
+        log(`  ✗ ${redact(error instanceof Error ? error.message : String(error))}`);
       }
     }
   }
@@ -862,10 +1079,12 @@ try {
 }
 for (const cleanup of cleanups.reverse()) await cleanup().catch(() => undefined);
 echo.close();
+fakeModel.close();
+fakeMcp.close();
 if (failures.length > 0) {
   exitCode = 1;
   console.error(`\nRestore drill FAILED (${failures.length}):`);
-  for (const failure of failures) console.error(`- ${failure.name}: ${failure.message}`);
+  for (const failure of failures) console.error(`- ${failure.name}: ${redact(failure.message)}`);
   console.error(`Instance logs: ${workDir} (kept)`);
 } else {
   log(`\nRestore drill passed: ${results.length} scenarios.`);

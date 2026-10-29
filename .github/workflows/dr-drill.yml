@@ -9,6 +9,9 @@ on:
     paths:
       - "apps/api/src/scripts/**"
       - "apps/api/src/db/**"
+      - "apps/api/src/services/**"
+      - "apps/api/src/app.ts"
+      - "pnpm-lock.yaml"
       - "apps/api/package.json"
       - "scripts/dr-drill.mjs"
       - "apps/docs/docs/operations/backup-and-recovery.md"

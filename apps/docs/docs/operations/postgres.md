@@ -181,6 +181,8 @@ master key, RPO and RTO, and the restore drill CI runs) is [Backup and recovery]
   chain broken at the same row), the only allowed change being the "two or more U+FFFD" rows above (on SQLite, Node 24
   stores a lone surrogate as U+FFFD). Otherwise nothing is restored. A backup from an older `db:export`, without the
   verdict, restores as before and prints a note.
+- `db:import` refuses a destination that already holds data; `--replace` replaces everything in it with exactly the
+  backup (see [Backup and recovery](./backup-and-recovery.md#restore-to-a-fresh-instance)).
 - `--merge` compares the verdict the same way when the destination has no chained audit rows (an empty log, or only old unchained rows). When it already holds chained rows,
   the merge goes ahead, prints that the audit verdict was not compared, and shows the restored chain's verdict.
 - `--allow-audit-change` restores even when the verdict changed (a plain restore, or a `--merge` into an empty audit

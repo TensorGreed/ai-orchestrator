@@ -35,10 +35,12 @@ plugins and git working tree are there. With Helm, they are on the API's persist
 ### What is safe to lose
 
 These are not in a [`db:export`](#scheduled-backup-portable) backup and come back by themselves:
-caches (MCP tool cache, external secret values), leader leases and the cluster's instance registry, the webhook replay
-and idempotency windows, log-stream delivery history, and SQLite's full-text index (rebuilt from the knowledge-base
-chunks as they are restored). A native backup (file copy, `pg_dump`, PITR) carries them too; they are stale after a
-restore and expire as usual.
+live sign-in sessions (users sign in again), pending sign-in and MCP OAuth challenges, caches (MCP tool cache, external
+secret values), rate-limit counters and production-capture reservations, leader leases and the cluster's instance
+registry, the webhook replay and idempotency windows, log-stream delivery history, and SQLite's full-text index
+(rebuilt from the knowledge-base chunks as they are restored). A native backup (file copy, `pg_dump`, PITR) carries
+them too; they are stale after a restore and expire as usual, except sessions, which stay valid until they expire
+(see [Keep backups secret](#keep-backups-secret)).
 
 ### What happens to work in progress
 
@@ -106,6 +108,8 @@ pg_dump --format=custom --no-owner --no-privileges \
 ```
 
 `pg_dump` reads one consistent snapshot while the API runs. Use client tools of the server's major version or newer.
+Keep the password out of the command line: give `--dbname` a URL without it and put the password in `PGPASSWORD` or
+a `~/.pgpass` file (mode 600).
 Managed Postgres services have their own snapshots and point-in-time restore: restore into a new database with them,
 then continue at step 3 of [Restore to a fresh instance](#restore-to-a-fresh-instance).
 
@@ -116,8 +120,23 @@ export DB_TYPE=sqlite DB_SQLITE_PATH=/srv/l2m/apps/api/data/orchestrator.db   # 
 pnpm --filter @ai-orchestrator/api db:export -- --out "/backups/l2m-$(date +%Y%m%d-%H%M).json"
 ```
 
-The file holds secrets, MFA secrets and sealed values **encrypted**, never in clear. `--exclude-history` leaves out run
-history and the audit log (smaller, but the audit verdict is then not recorded).
+Secrets, MFA secrets and sealed values are in the file **encrypted**; much else is not (below). `--exclude-history`
+leaves out run history and the audit log (smaller, but the audit verdict is then not recorded).
+
+### Keep backups secret
+
+Every backup, native or portable, is as sensitive as the database. Stored secrets are encrypted with the master key,
+but a backup also holds, in clear: user emails and password hashes, API key and MCP client token hashes, workflow
+definitions (with anything typed into them), run inputs and outputs, the audit log, audit-export destination settings
+(including their bearer tokens) and notification settings (including webhook URLs). A native backup also holds live
+sign-in session ids; `db:export` leaves sessions out.
+
+- **Encrypt backups at rest** (an encrypted bucket or volume, or `age` / `gpg` on the file) and **restrict who can
+  read them**, as you would the database. Never store the master key in the same place.
+- **After restoring from a copy you do not fully trust** (one that left your control, or a native backup of a
+  compromised host), sign everyone out by deleting the sessions before reopening access
+  (`DELETE FROM sessions`, with the API stopped), and rotate the API keys, MCP client tokens and audit-export tokens
+  it holds.
 
 ### Restore to a fresh instance
 
@@ -128,15 +147,24 @@ history and the audit log (smaller, but the audit verdict is then not recorded).
      `-wal` or `-shm` file of an older database beside it.
    - `pg_dump` file: create an empty database, then
      `pg_restore --no-owner --no-privileges --exit-on-error --dbname="$DB_POSTGRESDB_URL" backup.dump`.
-   - `db:export` file:
+   - `db:export` file, into a database the API has **not** started on yet:
      ```bash
      export DB_TYPE=sqlite DB_SQLITE_PATH=/srv/l2m/apps/api/data/orchestrator.db  # or the Postgres settings
      export SECRET_MASTER_KEY_BASE64=...   # the key the backup was written with
      pnpm --filter @ai-orchestrator/api db:import -- --in /backups/l2m.json --yes
      ```
-     `db:import` empties the tables the backup holds (and always the run history and audit log), writes it in one
-     transaction, and checks the restored audit
-     chain against the verdict in the backup before committing; anything that fails rolls the whole restore back.
+     `db:import` writes the whole backup in one transaction and checks the restored audit chain against the verdict
+     in the backup before committing; anything that fails rolls the whole restore back. It logs each table as
+     `restored`, or `emptied (not in the backup)` for a table an older backup does not hold. It refuses (exit code 2,
+     nothing written):
+     - a destination that already holds data (for example one the API started on, which created the admin and the
+       default project). `--replace` replaces everything in it with exactly the backup: every exported table is
+       emptied first, including ones the backup does not hold. `--merge` adds the backup's rows instead (best-effort;
+       a conflicting row aborts it);
+     - a backup whose secrets or MFA enrolments `SECRET_MASTER_KEY_BASE64` cannot open: it was written with another
+       key. Give that key with `--source-master-key-file` (see [Change the master key](#change-the-master-key-planned-rotation)),
+       or, when it is lost, pass `--allow-key-mismatch` and recover as in
+       [Restore after losing the master key](#restore-after-losing-the-master-key).
 3. **Start the API with the same `SECRET_MASTER_KEY_BASE64`** (and the same build, or a newer one: it migrates the
    schema forward at start). Start one instance first, then the rest.
 4. **Verify** (below).
@@ -152,8 +180,11 @@ keeps its own users and passwords.
 - Compare counts with the source or with the backup: users (`GET /api/users`), workflows, runs (`GET /api/executions`
   `total`), secrets, MCP servers, pending approvals (`GET /api/approvals`).
 - Run a workflow that uses a stored secret. If it authenticates, the master key matches.
+- Check the releases, guard profiles and knowledge bases you rely on, and export the audit bundle of a recent run:
+  `l2m audit verify bundle.zip --public-key <key>` with the public key from **Settings → Audit Signing** before the
+  incident proves the signing key came back.
 
-The drill does exactly these checks, plus approving a restored paused run.
+The drill does these checks, plus approving a restored paused run and an agent's pending write-tool approval.
 
 ### Restore after losing the master key
 
@@ -168,41 +199,62 @@ log and its chain, projects, roles, MCP servers, guard profiles, knowledge bases
 - **Stored secrets.** A run that uses one fails. Create each secret again with its value (from the provider), point
   the workflows and MCP servers that used it at the new secret, and delete the old one.
 - **MFA.** Users with MFA cannot sign in: the code cannot be checked, and backup codes are checked after it, so they
-  fail too. With the API stopped, remove their enrolment, then start it; they sign in with their password and enrol
-  again:
-  ```bash
-  # SQLite
-  pnpm --filter @ai-orchestrator/api exec node -e \
-    "const Database = require('better-sqlite3'); new Database(process.argv[1]).prepare('DELETE FROM mfa_secrets').run()" \
-    /srv/l2m/apps/api/data/orchestrator.db
-  # Postgres
-  psql "$DB_POSTGRESDB_URL" -c "DELETE FROM mfa_secrets"
-  ```
-  (Add `WHERE user_id = '...'` to reset one user.) If `MFA_ENFORCE=true`, admins are asked to enrol at their next
-  sign-in.
+  fail too. Removing an enrolment turns a second factor off, so treat it as part of the incident:
+  1. **Record it** in the incident log: who ran it, when, and which accounts.
+  2. With the API stopped, remove the enrolments of the affected users only (list them explicitly):
+     ```bash
+     # SQLite
+     pnpm --filter @ai-orchestrator/api exec node -e \
+       "const Database = require('better-sqlite3'); new Database(process.argv[1]).prepare(\"DELETE FROM mfa_secrets WHERE user_id IN (SELECT id FROM users WHERE email IN ('ana@example.com', 'ben@example.com'))\").run()" \
+       /srv/l2m/apps/api/data/orchestrator.db
+     # Postgres: check you are connected to the deployment's database, in one transaction
+     psql "$DB_POSTGRESDB_URL" -v ON_ERROR_STOP=1 <<'SQL'
+     BEGIN;
+     SELECT current_database();
+     DELETE FROM mfa_secrets WHERE user_id IN (SELECT id FROM users WHERE email IN ('ana@example.com', 'ben@example.com'));
+     COMMIT;
+     SQL
+     ```
+  3. **Before reopening access**, set `MFA_ENFORCE=true`, so admins must enrol again at their next sign-in, and
+     ask every affected user to enrol again right after signing in. L2M has no forced password reset: if a reset
+     account's password may be known to someone else, keep access closed for it (or delete the account and create it
+     again with a new password) until that is settled.
+
+  An admin route to reset one user's MFA is planned; until then this is the procedure.
 - **Log-stream destinations** whose credentials were stored encrypted: enter them again.
 - **MCP OAuth connections** (their tokens are stored secrets): connect again.
 - **The guard token vault**: values tokenized before the loss cannot be turned back into the original.
 - **The audit signing key** (when generated by L2M, not set with `AUDIT_SIGNING_KEY_BASE64`): signing fails with
-  "cannot be read (was SECRET_MASTER_KEY_BASE64 changed?)" until an admin rotates to a new key.
+  "cannot be read (was SECRET_MASTER_KEY_BASE64 changed?)" until an admin rotates to a new key
+  (**Settings → Audit Signing**, or `POST /api/audit/signing-keys/rotate`).
+- **Approved agent write-tool results** in runs paused for approval: they are sealed with the key, so after the
+  restore the agent asks to approve those writes again. **Approving them runs the write a second time**: check what was
+  already written first, or reject and re-run.
+- **Production-capture surrogates** (the stand-ins replay capture writes in place of masked values) come from the key:
+  values captured after the change get new surrogates that no longer match earlier recordings.
 
 Set the new key in `SECRET_MASTER_KEY_BASE64` and keep it safe, as above.
 
 ### Change the master key (planned rotation)
 
 Restore a portable backup with the new key, and give `db:import` the old one. It decrypts every encrypted column and
-sealed value with the old key and encrypts it again with the new one: secrets, MFA secrets, log-stream credentials and
-the guard token vault.
+sealed value with the old key and encrypts it again with the new one: secrets, MFA secrets, log-stream credentials,
+the guard token vault, and the approved write-tool results sealed inside paused runs (so an approved write is not run
+again). A value the old key cannot open stops the import with the table's name, and nothing is written.
 
 ```bash
+umask 077
+printf '%s\n' "$OLD_KEY" > /secure/old-key.txt && chmod 600 /secure/old-key.txt
 export DB_TYPE=sqlite DB_SQLITE_PATH=/srv/l2m-new/orchestrator.db     # an empty target
 export SECRET_MASTER_KEY_BASE64="$NEW_KEY"
 pnpm --filter @ai-orchestrator/api db:import -- --in /backups/l2m.json --yes --source-master-key-file /secure/old-key.txt
 ```
 
 `--source-master-key-file` reads the old key from the first line of a file, so it never appears in the process list or
-shell history (`--source-master-key <base64>` also works). Start the API on the new database with the new key. Keep
-the old key while you keep backups written with it.
+shell history (`--source-master-key <base64>` also works), and warns when the file is readable by its group or others.
+Start the API on the new database with the new key. Keep the old key while you keep backups written with it.
+Production-capture surrogates are derived from the key, so values captured after the change get surrogates that no
+longer match earlier recordings.
 
 ### Point-in-time recovery on Postgres
 
@@ -272,21 +324,21 @@ above achieve with the schedule you choose; L2M promises neither.
 | `db:export` / `db:import` | the interval between exports | reading and writing every row as JSON in one transaction, then the API start |
 | `db:copy` from a SQLite backup | the SQLite backup's interval | copying and verifying every row, then the API start |
 
-Times the drill measured on a development machine (local disk, Postgres 16 on the same host), for its default
-database (3 finished runs, about 20 audit rows) and with `DR_DRILL_RUNS=2000` (2,001 runs, about 4,000 audit rows).
-"Restore" runs from the start of the restore to the API answering `/health`, which includes the API's own start of
-about 2 seconds:
+Times the drill measured on a development machine (Node 24, local disk, Postgres 16 on the same host), for its
+default database (3 finished runs plus the agent and approval runs, about 30 audit rows) and with
+`DR_DRILL_RUNS=2000` (2,000 finished runs, about 4,000 audit rows). "Restore" runs from the start of the restore to
+the API answering `/health`, which includes the API's own start of about 2 seconds:
 
 | Method | Backup (default / 2,000 runs) | Restore (default / 2,000 runs) | Backup size at 2,000 runs |
 |---|---|---|---|
-| SQLite online backup | 0.02 s / 0.08 s | 2.0 s / 2.0 s | 15 MB |
-| SQLite file copy (API stopped) | 0.00 s / 0.01 s | 2.3 s / 2.0 s | 15 MB |
-| `db:export` / `db:import`, SQLite | 1.3 s / 1.6 s | 3.8 s / 3.8 s | 13.4 MB |
-| `db:import` with a new master key | 1.3 s / 1.6 s | 3.5 s / 4.1 s | 13.4 MB |
-| `pg_dump` / `pg_restore` | 0.14 s / 0.20 s | 2.9 s / 2.6 s | 0.9 MB (compressed) |
-| `db:export` / `db:import`, Postgres | 1.6 s / 2.8 s | 4.5 s / 4.9 s | 13.5 MB |
-| `db:copy` from a SQLite backup | — | 4.4 s / 5.2 s | (the SQLite backup) |
-| PITR (base backup + WAL) | 0.46 s / 0.71 s | 3.3 s / 3.1 s | 61 MB (base backup) |
+| SQLite online backup | 0.01 s / 0.07 s | 2.5 s / 2.5 s | 15 MB |
+| SQLite file copy (API stopped) | 0.00 s / 0.01 s | 2.3 s / 2.5 s | 15 MB |
+| `db:export` / `db:import`, SQLite | 1.2 s / 1.6 s | 3.4 s / 4.6 s | 13.4 MB |
+| `db:import` with a new master key | 1.2 s / 1.6 s | 3.6 s / 5.0 s | 13.4 MB |
+| `pg_dump` / `pg_restore` | 0.12 s / 0.26 s | 2.7 s / 3.5 s | 0.9 MB (compressed) |
+| `db:export` / `db:import`, Postgres | 1.2 s / 1.9 s | 4.1 s / 5.5 s | 13.6 MB |
+| `db:copy` from a SQLite backup | — | 4.0 s / 5.6 s | (the SQLite backup) |
+| PITR (base backup + WAL) | 0.39 s / 0.41 s | 3.2 s / 3.3 s | 62 MB (base backup) |
 
 These are small databases, so the API start dominates. **Measure your own**: run the drill with `DR_DRILL_RUNS` near
 your data size, or time a restore of a real backup into a scratch instance, and add the time to notice the failure,
@@ -308,19 +360,30 @@ pnpm dr:drill                                                   # SQLite scenari
 DR_DRILL_POSTGRES_URL=postgres://postgres:...@localhost:5432/postgres pnpm dr:drill   # and Postgres
 ```
 
-It starts the API on a temporary database (random free ports), populates it through the public API (an admin, a user
-with MFA, an operator, a secret, an MCP server, workflows, finished runs, a run paused for approval), backs it up with
-every method above, restores each backup into a fresh instance and verifies it: password and MFA sign-in, the secret
-decrypts (a run sends it to a local echo server that only reports whether it matched), users, workflows, runs (with
-their status), secrets, MCP servers and the pending approval match, every audit row is there and the chain verifies,
-the paused run can be approved and finishes, and a workflow runs. It also restores with a lost master key and walks
-the recovery above. Any difference fails it with a diff. It prints the measured times.
+It starts the API on a temporary database (random free ports) and populates it through the public API: an admin, a
+user with MFA, an operator, a secret, MCP servers, workflows, finished runs, a release, a guard profile, a knowledge
+base, a signed run manifest, a run paused for approval, and an agent paused on its second write-tool approval with the
+first write's result sealed. It backs that up with every method above, restores each backup into a fresh instance and
+verifies it:
+
+- password and MFA sign-in;
+- the secret decrypts (a run sends it to a local echo server that only reports whether it matched);
+- users, workflows, runs (with their status), secrets, MCP servers, releases, guard profiles, knowledge bases and the
+  pending approvals (with their request ids) match;
+- every audit row is there and the chain verifies; the stored manifest is unchanged, and a run signed after the
+  restore verifies with `l2m audit verify` against the public key taken before the backup;
+- the paused run can be approved and finishes; approving the agent runs its second write only, the first being
+  answered from its sealed result, also after a key rotation.
+
+It also restores with a lost master key and walks the recovery above (the agent asks for its first write again;
+signing fails until the key is rotated), and checks that `db:import` refuses a key that cannot open the backup. Any
+difference fails it with a diff. It prints the measured times.
 
 | Setting | Effect |
 |---|---|
 | `DR_DRILL_POSTGRES_URL` (or `TEST_POSTGRES_URL`) | A Postgres server where the role can create databases; the drill creates and drops its own `l2m_drill_*` databases. Without it, the Postgres scenarios are skipped. |
 | `DR_DRILL_REQUIRE_POSTGRES=true` | Fail instead of skipping without Postgres. |
-| `DR_DRILL_PITR=true` | Also run point-in-time recovery on a throwaway cluster (needs `initdb`, `pg_ctl` and `pg_basebackup`; `DR_DRILL_PG_BIN` names their directory). |
+| `DR_DRILL_PITR=true` | Also run point-in-time recovery on a throwaway cluster (needs `initdb`, `pg_ctl` and `pg_basebackup`; `DR_DRILL_PG_BIN` names their directory). The cluster's Unix socket lives in a directory under `TMPDIR`, and a socket path is limited to about 100 characters: with a long `TMPDIR`, point it at a short directory (for example `TMPDIR=/tmp`). |
 | `DR_DRILL_RUNS=<n>` | Give the source `n` finished runs instead of 3, to time a bigger database. |
 | `--only sqlite` / `--only postgres`, `--keep`, `--summary <file.json>` | Run one store; keep the work directory; write the results as JSON. |
 
@@ -328,4 +391,5 @@ The master keys, passwords and the secret value are generated per run and never 
 `apps/api/.env` sets a database, port, key or bootstrap setting, since the API would load it over the drill's own.
 
 CI runs it in the **DR drill** workflow (`.github/workflows/dr-drill.yml`) on pull requests that touch the backup
-scripts, the database layer, the drill or this page, every week, and on demand, with Postgres and PITR.
+scripts, the database layer, the API's services or `app.ts`, the lockfile, the drill or this page, every week, and on
+demand, with Postgres and PITR.

@@ -13,7 +13,7 @@ import { parsePostgresSettings } from "../config.js";
 import { postgresStoreConfig } from "../db/create-store.js";
 import { PostgresStore, postgresPoolConfig } from "../db/postgres-store.js";
 import { createEmptyTestDatabase, noticePostgresSkipped, testPostgresUrl } from "../test-support/test-store.js";
-import { AuditVerdictMismatch, EXPORTED_TABLES, NOT_EXPORTED_TABLES, exportDump, importDump, openBackupAdapter, type BackupDump } from "./db-shared.js";
+import { AuditVerdictMismatch, EXPORTED_TABLES, ImportRefusal, NOT_EXPORTED_TABLES, exportDump, importDump, openBackupAdapter, type BackupDump } from "./db-shared.js";
 
 const url = testPostgresUrl();
 if (!url) noticePostgresSkipped("db:export / db:import on Postgres");
@@ -238,14 +238,16 @@ describe.skipIf(!url)("db:export / db:import round trip [postgres]", () => {
     const tampered = JSON.parse(JSON.stringify(dump)) as BackupDump;
     tampered.tables.audit_logs![0]!.message = "approved by mallory";
     let importer = await openBackupAdapter();
-    const error = await importDump(importer, tampered).then(() => undefined, (e: unknown) => e as Error);
+    // The destination holds a row, so it takes --replace (a plain import refuses it, below).
+    expect(await importDump(importer, tampered).then(() => undefined, (e: unknown) => e as Error)).toBeInstanceOf(ImportRefusal);
+    const error = await importDump(importer, tampered, { replace: true }).then(() => undefined, (e: unknown) => e as Error);
     await importer.close();
     expect(error).toBeInstanceOf(AuditVerdictMismatch);
     expect(error!.message).toContain("row p1 (position 1) would be broken on the restored database");
     expect((await auditOrder(dstUrl)).map((r) => r.id)).toEqual(["kept"]);
 
     importer = await openBackupAdapter();
-    const report = await importDump(importer, dump);
+    const report = await importDump(importer, dump, { replace: true });
     await importer.close();
     expect(report.audit?.restored).toEqual({ ok: true, rowsChecked: 2 });
     expect((await auditOrder(dstUrl)).map((r) => r.id)).toEqual(["p1", "p2"]);

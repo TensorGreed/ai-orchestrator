@@ -351,7 +351,7 @@ describe("db:export records the audit verdict; db:import refuses a restore that 
     dump.tables.audit_logs![0]!.message = "approved by mallory";
     await destinationWithData();
     const before = await destinationState();
-    const error = await importInto(destPath, dump).then(() => undefined, (e: unknown) => e as Error);
+    const error = await importInto(destPath, dump, { replace: true }).then(() => undefined, (e: unknown) => e as Error);
     expect(error).toBeInstanceOf(AuditVerdictMismatch);
     expect(error!.message).toMatch(/does not match the backup's recorded verdict \(intact \(2 rows verified\)\): row a1 \(position 1\) would be broken on the restored database/);
     expect(error!.message).toContain("Nothing was restored (rolled back).");
@@ -370,7 +370,7 @@ describe("db:export records the audit verdict; db:import refuses a restore that 
     expect(dump.auditVerdict).toEqual({ ok: false, rowsChecked: 1, firstBrokenAt: { id: "legacy", position: 2 }, unverifiable: [] });
     await destinationWithData();
     const before = await destinationState();
-    const result = await importInto(destPath, dump).then((report) => report, (e: unknown) => e as Error);
+    const result = await importInto(destPath, dump, { replace: true }).then((report) => report, (e: unknown) => e as Error);
     if (sqliteKeepsLoneSurrogates()) {
       // Node 20 stores the swapped surrogate exactly again: still broken at the same row.
       expect(result).not.toBeInstanceOf(Error);
