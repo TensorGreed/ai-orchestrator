@@ -32,6 +32,51 @@ Out of scope:
 - Denial-of-service via resource exhaustion when an admin has explicitly disabled rate limiting / body-size limits.
 - Self-XSS that requires the victim to paste attacker-controlled content into their own DevTools.
 
+## Verifying releases
+
+Every `v*` release publishes `ghcr.io/tensorgreed/ai-orchestrator` (API) and `ghcr.io/tensorgreed/ai-orchestrator-web` (Studio UI) for `linux/amd64` and `linux/arm64`, built by [`.github/workflows/release-images.yml`](.github/workflows/release-images.yml). Nothing is signed with a long-lived key: signatures and attestations use short-lived Sigstore certificates issued to that workflow through GitHub Actions OIDC, and are recorded in the public Rekor transparency log. For each image:
+
+- a **cosign signature** on the image digest the release tag points to;
+- **SLSA build provenance** for that digest (repository, tag, commit, workflow run), stored by GitHub and in GHCR;
+- a **CycloneDX SBOM** per platform image, attested on that platform's digest; BuildKit's SPDX SBOM and provenance are in the image index as well.
+
+The GitHub Release carries the CycloneDX SBOMs of both images and of the source tree (`pnpm-lock.yaml`), the image digests and a `SHA256SUMS` file; each SBOM file has its own provenance attestation.
+
+```bash
+VERSION=v0.1.0
+DIGEST=$(docker buildx imagetools inspect ghcr.io/tensorgreed/ai-orchestrator:$VERSION --format '{{json .Manifest.Digest}}' | tr -d '"')
+
+cosign verify ghcr.io/tensorgreed/ai-orchestrator@$DIGEST \
+  --certificate-identity "https://github.com/TensorGreed/ai-orchestrator/.github/workflows/release-images.yml@refs/tags/$VERSION" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+
+gh attestation verify oci://ghcr.io/tensorgreed/ai-orchestrator@$DIGEST \
+  --repo TensorGreed/ai-orchestrator \
+  --signer-workflow TensorGreed/ai-orchestrator/.github/workflows/release-images.yml \
+  --source-ref refs/tags/$VERSION
+```
+
+Any release tag matches `--certificate-identity-regexp '^https://github\.com/TensorGreed/ai-orchestrator/\.github/workflows/release-images\.yml@refs/tags/v.+$'` with the same issuer. The web image, the SBOMs, and pinning a verified digest in Helm or Docker Compose: [Verify a release](https://lsquarem.com/docs/operations/verify-a-release).
+
+## Vulnerability policy
+
+**What is scanned, and how often**
+
+- **Every release:** each platform image of both images is scanned with [Grype](https://github.com/anchore/grype) before the release tags are added. Results go to the repository's code scanning. A **CRITICAL finding with a fixed version available stops the release**; other findings are reported, not blocking (the threshold is set in the release workflow).
+- **Weekly:** the published `latest` images are scanned again ([`.github/workflows/image-scan.yml`](.github/workflows/image-scan.yml)) with the same gate, so advisories published after a release show up without waiting for the next one.
+- **Dependencies:** Dependabot proposes grouped weekly updates for the pnpm workspace, the GitHub Actions the workflows use (pinned by commit SHA) and the Docker base images.
+
+**Fix targets** for vulnerabilities in third-party packages shipped in the images (scan findings and Dependabot alerts), counted from the day one is confirmed to affect the latest release:
+
+| Severity | Target |
+| --- | --- |
+| Critical | Fixed release within **7 days** |
+| High | Fixed release within **30 days** |
+| Medium | Fixed in a release within **90 days** |
+| Low | With routine dependency updates |
+
+A vulnerability reported in L2M's own code follows the reporting timeline above whatever its severity: acknowledgement within 72 hours, triage within 7 days, and a target of at most 30 days from a confirmed report to a fixed release and public advisory. When no upstream fix exists yet for a third-party package, the finding stays open in code scanning, we document a mitigation where one exists, and the target counts from the day the upstream fix is published.
+
 ## Supported versions
 
 We maintain security fixes for the **latest released minor version** on `main`. Older versions are unsupported — backporting will be considered case-by-case for critical issues affecting deployed users.

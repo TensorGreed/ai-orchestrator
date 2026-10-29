@@ -15,15 +15,17 @@
 # Build:   docker build -f apps/api/Dockerfile -t l2m-api .
 # Run:     docker run -p 4000:4000 -e SECRET_MASTER_KEY_BASE64=... l2m-api
 #
-# Note: pnpm-lock.yaml is gitignored in this repo, so the install uses
-# --no-frozen-lockfile. Commit a lockfile and switch to --frozen-lockfile if
-# you want fully reproducible image builds.
+# Dependencies install from the committed pnpm-lock.yaml (--frozen-lockfile),
+# so an image gets exactly the versions the lockfile, CI and the source SBOM
+# name; a lockfile out of step with a package.json fails the build. Every
+# workspace package the api depends on (directly or through another package)
+# needs its package.json copied into the deps stage.
 
 FROM node:20-alpine AS deps
 WORKDIR /app
 RUN corepack enable \
     && apk add --no-cache python3 make g++ libc6-compat
-COPY package.json pnpm-workspace.yaml tsconfig.base.json ./
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json ./
 COPY apps/api/package.json apps/api/
 COPY packages/shared/package.json packages/shared/
 COPY packages/provider-sdk/package.json packages/provider-sdk/
@@ -31,7 +33,9 @@ COPY packages/mcp-sdk/package.json packages/mcp-sdk/
 COPY packages/connector-sdk/package.json packages/connector-sdk/
 COPY packages/agent-runtime/package.json packages/agent-runtime/
 COPY packages/workflow-engine/package.json packages/workflow-engine/
-RUN pnpm install --no-frozen-lockfile
+COPY packages/guard-sdk/package.json packages/guard-sdk/
+COPY packages/community-sdk/package.json packages/community-sdk/
+RUN pnpm install --frozen-lockfile
 
 # ---------- build stage ----------
 FROM deps AS build

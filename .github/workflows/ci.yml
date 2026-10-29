@@ -37,6 +37,10 @@ jobs:
       - name: Lint
         run: pnpm lint
 
+      # The release workflow's vulnerability gate (scripts/release/vuln-gate.mjs).
+      - name: Release script tests
+        run: node --test scripts/release/vuln-gate.test.mjs
+
       # The workflow-engine web_browse rendering tests need a real Chromium;
       # without it they skip themselves, which would hide regressions.
       - name: Install Playwright Chromium

@@ -11,6 +11,8 @@ The chart's default `image.repository` values point at GHCR images published by 
 
 Both images are multi-arch (`linux/amd64` + `linux/arm64`), so M-series Macs and AWS Graviton nodes get the right architecture without emulation. Pin a specific tag in production via `--set image.tag=v0.1.0 --set web.image.tag=v0.1.0` instead of `latest`.
 
+Each release image is signed (keyless cosign) and carries SLSA build provenance and CycloneDX SBOMs. To deploy exactly the image you verified, append its digest to the tag, e.g. `--set image.tag=v0.1.0@sha256:<api digest> --set web.image.tag=v0.1.0@sha256:<web digest>`. The verification commands are on the docs page [Verify a release](https://lsquarem.com/docs/operations/verify-a-release).
+
 ## Quick start
 
 ```bash

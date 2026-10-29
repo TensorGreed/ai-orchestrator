@@ -32,6 +32,10 @@ pnpm docs:build
 pnpm --filter @ai-orchestrator/web e2e
 ```
 
+## Release workflow
+
+`.github/workflows/release-images.yml` runs on every `v*` tag. It builds the API and web images for `linux/amd64` and `linux/arm64`, writes a CycloneDX SBOM per platform image and one for the source tree, scans every platform image with Grype (SARIF to code scanning; a fixable CRITICAL finding stops the release), signs the digests with keyless cosign, attests SLSA build provenance and the SBOMs, verifies all of it, and only then tags the images and attaches the SBOMs to the GitHub Release. Pull requests that change the release files run the same build, SBOM, scan and gate against a registry on the runner, without publishing; a manual run on a branch is a staging dry run that publishes `0.0.0-ci-<sha>` images only. `.github/workflows/image-scan.yml` rescans the published images weekly. How to check a release: [Verify a release](./verify-a-release.md).
+
 ## CI notes
 
 - E2E uses an isolated SQLite reset step (`pnpm e2e:prepare`) before server startup.

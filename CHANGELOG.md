@@ -165,10 +165,15 @@ The initial GA release covers production hardening, OSS-growth foundations, and 
 - **Default chat-model provider for the Basic LLM Flow** is now `echo` instead of Ollama at `localhost:11434`. Existing instances with the old sample remain functional but no longer error silently when Ollama isn't running.
 - **Top-nav Quickstart link** in the docs site now points at the 5-minute MCP-agent tutorial (was the env-vars-and-`pnpm-install` quickstart). The plain quickstart is still in the Getting Started sidebar.
 
+### Fixed
+
+- **API image build fixed** — the deps stage now copies `packages/guard-sdk` and `packages/community-sdk` manifests, without which `pnpm install` failed for `apps/api/Dockerfile` (`docker compose up --build` and release builds). Both Dockerfiles install from the committed `pnpm-lock.yaml` with `--frozen-lockfile`.
+
 ### Security
 
 - **Rate limiting + security headers** described above directly close gaps from the production-readiness audit.
 - **Master-key rotation** is now a first-class operation via the `db:export` / `db:import` CLIs.
+- **Verifiable releases** — the release workflow pushes the API and web images by digest, writes a CycloneDX SBOM per platform image (Syft) plus one for the source tree, scans every platform image with Grype (SARIF to code scanning; a fixable CRITICAL finding stops the release), signs the digests with keyless cosign (GitHub OIDC), attests SLSA build provenance (`actions/attest`, also pushed to GHCR) and the SBOMs, verifies all of it, and only then adds the `<tag>` / `latest` tags and attaches the SBOMs, digests and `SHA256SUMS` to the GitHub Release. OCI labels and index annotations now include `created` and `licenses=MIT`. Pull requests touching the release files run build, SBOM, scan and gate against a registry on the runner; a manual run on a branch is a staging dry run (`0.0.0-ci-<sha>`). A weekly workflow rescans the published images; Dependabot proposes grouped weekly updates for npm, GitHub Actions and Docker base images. All third-party actions in the release workflows are pinned by commit SHA. `SECURITY.md` gains "Verifying releases" and a vulnerability policy; the docs gain [Verify a release](apps/docs/docs/operations/verify-a-release.md).
 
 ---
 

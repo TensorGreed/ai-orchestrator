@@ -188,6 +188,7 @@ export default defineConfig({
           { text: "Postgres", link: "/operations/postgres" },
           { text: "Queue and workers", link: "/operations/queue-and-workers" },
           { text: "Cluster operations", link: "/operations/cluster" },
+          { text: "Verify a release", link: "/operations/verify-a-release" },
           { text: "Troubleshooting", link: "/troubleshooting/common-issues" }
         ]
       }
