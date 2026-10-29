@@ -6,6 +6,14 @@ import type { ApprovalResumeJob } from "./approval-service.js";
 import type { Store } from "../db/store.js";
 import type { DispatchedRunSpec } from "./run-dispatch.js";
 
+/**
+ * Phase 13.1 — the payload `workflowId` of a dispatched job. An instance older than queue dispatch ignores `dispatch`
+ * and would run the published version of `workflowId` with no input; with this id it finds no workflow and the job
+ * fails there instead (and is retried, so a consumer that knows `dispatch` can run it). The queue row keeps the real
+ * workflow id, and the dispatched spec carries the workflow itself.
+ */
+export const DISPATCHED_PAYLOAD_WORKFLOW_ID = "queue-dispatch-v1:see-dispatch";
+
 export interface QueuedExecutionPayload {
   workflowId: string;
   executionId: string;
@@ -188,7 +196,7 @@ export class QueueProducer {
       id: queueItemId ?? executionId,
       workflowId: rest.workflowId,
       workflowName: undefined,
-      payload: { executionId, ...rest } as Record<string, unknown>,
+      payload: { executionId, ...rest, ...(rest.dispatch !== undefined ? { workflowId: DISPATCHED_PAYLOAD_WORKFLOW_ID } : {}) } as Record<string, unknown>,
       priority: priority ?? 0,
       maxAttempts: maxAttempts ?? 3,
       ...(pool !== DEFAULT_QUEUE_POOL ? { pool } : {}),

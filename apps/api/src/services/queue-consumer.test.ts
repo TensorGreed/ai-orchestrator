@@ -7,6 +7,7 @@ import { performance } from "node:perf_hooks";
 import { afterEach, describe, expect, it } from "vitest";
 import { createTestStore, type TestStore } from "../test-support/test-store.js";
 import {
+  DISPATCHED_PAYLOAD_WORKFLOW_ID,
   QueueConsumer,
   QueueDrainAbort,
   QueueFullError,
@@ -18,6 +19,7 @@ import {
   type QueuedExecutionPayload
 } from "./queue-service.js";
 import type { Store } from "../db/store.js";
+import type { DispatchedRunSpec } from "./run-dispatch.js";
 import { WORKER_SHUTDOWN_INTERRUPTED_ERROR } from "../db/queue-leases.js";
 
 async function until<T>(read: () => T | Promise<T>, what: string, timeoutMs = 10_000): Promise<NonNullable<T>> {
@@ -429,5 +431,20 @@ describe("queue producer", () => {
     // No limit set: never refused.
     const open = new QueueProducer(test.store);
     for (let i = 0; i < 5; i += 1) await open.enqueue({ workflowId: "wf" }, { enforceBackpressure: true });
+  });
+
+  it("a dispatched job names no runnable workflow in its payload, so an older consumer cannot run it as a plain job", async () => {
+    test = await createTestStore({ kind: "sqlite" });
+    const producer = new QueueProducer(test.store);
+    const dispatch = { v: 1, run: { executionId: "run-d", workflow: { id: "wf-real" } } } as unknown as DispatchedRunSpec;
+    await producer.enqueue({ workflowId: "wf-real", executionId: "run-d", dispatch });
+    await producer.enqueue({ workflowId: "wf-plain", executionId: "run-p" });
+    const claimed = await test.store.dequeueNext(2);
+    const dispatched = claimed.find((job) => job.id === "run-d")!;
+    // The queue row keeps the real workflow (lists, deletes, the reaper); the payload's id matches no workflow.
+    expect(dispatched.workflowId).toBe("wf-real");
+    expect(dispatched.payload).toMatchObject({ workflowId: DISPATCHED_PAYLOAD_WORKFLOW_ID, executionId: "run-d", dispatch });
+    expect(claimed.find((job) => job.id === "run-p")!.payload).toMatchObject({ workflowId: "wf-plain" });
+    expect(await test.store.getWorkflow(DISPATCHED_PAYLOAD_WORKFLOW_ID)).toBeNull();
   });
 });
