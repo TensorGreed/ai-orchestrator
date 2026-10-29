@@ -75,4 +75,31 @@ run("Postgres start with a migration gap", () => {
       await pool.end();
     }
   });
+
+  it("a database at the cluster signalling migration (shared flow state rolled back) starts and gains its tables", async () => {
+    test = await createTestStore({ kind: "postgres" });
+    const flowState = MIGRATIONS.find((migration) => migration.description.includes("shared auth and per-user flow state"))!;
+    expect(flowState).toBeDefined();
+    await sql(flowState.down);
+    await sql(`DELETE FROM schema_migrations WHERE version >= $1`, [flowState.version]);
+    const twin = await openTestStoreTwin(test);
+    await twin.close();
+    const pool = testStorePool(test);
+    try {
+      const tables = (await pool.query<{ table_name: string }>(
+        `SELECT table_name FROM information_schema.tables WHERE table_schema = current_schema()
+            AND table_name IN ('pending_challenges', 'rate_limit_buckets', 'capture_reservations') ORDER BY table_name`
+      )).rows.map((row) => row.table_name);
+      expect(tables).toEqual(["capture_reservations", "pending_challenges", "rate_limit_buckets"]);
+      const unlogged = (await pool.query<{ relname: string }>(
+        `SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+          WHERE n.nspname = current_schema() AND c.relpersistence = 'u' AND c.relkind = 'r' ORDER BY c.relname`
+      )).rows.map((row) => row.relname);
+      expect(unlogged).toEqual(["capture_reservations", "rate_limit_buckets"]);
+      const holder = (await pool.query(`SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'mcp_elicitations' AND column_name = 'holder_id'`)).rows;
+      expect(holder).toHaveLength(1);
+    } finally {
+      await pool.end();
+    }
+  });
 });
