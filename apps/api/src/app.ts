@@ -1404,6 +1404,11 @@ function safeUserRole(role: string): UserRole {
 const SSO_MFA_CHALLENGE_COOKIE = "l2m_sso_mfa";
 const SSO_MFA_CHALLENGE_COOKIE_PATH = "/api/auth/login/mfa";
 
+/** Phase 13.1 — why community-node install and uninstall are refused in cluster mode. */
+export const COMMUNITY_NODES_CLUSTER_REFUSAL =
+  "Community nodes cannot be installed or removed from the UI in cluster mode (HA_ENABLED=true on Postgres): the change would reach this instance only. " +
+  "Bake the packages into the image (install them into COMMUNITY_NODES_DIR at build time) or mount COMMUNITY_NODES_DIR from a shared volume on every instance, then restart the instances or call POST /api/community-nodes/reload on each.";
+
 /** Phase 13.1 — how long /health keeps warning after a request with X-Forwarded-For arrived while TRUST_PROXY is off. */
 const FORWARDED_FOR_WARNING_MS = 15 * 60 * 1000;
 const FORWARDED_FOR_HEALTH_TEXT =
@@ -6375,6 +6380,15 @@ export async function createApp(
     return communityLoader;
   };
 
+  // Phase 13.1 — cluster mode: an install or uninstall from the UI would change one instance's COMMUNITY_NODES_DIR
+  // only, and runs on the others would fail. Packages are baked into the image or put on a shared volume instead.
+  const refuseCommunityChangeInCluster = (reply: FastifyReply): boolean => {
+    if (!clusterMode) return false;
+    reply.code(409);
+    reply.send({ error: COMMUNITY_NODES_CLUSTER_REFUSAL, code: "community_nodes_cluster_mode" });
+    return true;
+  };
+
   app.get("/api/community-nodes", async (request, reply) => {
     const user = await requireRole(request, reply, ["admin"]);
     if (!user) return;
@@ -6384,7 +6398,9 @@ export async function createApp(
       enabled: true,
       pluginsDir: path.resolve(config.COMMUNITY_NODES_DIR),
       allowlist: config.COMMUNITY_NODES_ALLOWLIST.split(",").map((s) => s.trim()).filter(Boolean),
-      packages: loader.list()
+      packages: loader.list(),
+      // Phase 13.1 — false in cluster mode (install and uninstall answer 409; see the cluster operations docs).
+      installAllowed: !clusterMode
     };
   });
 
@@ -6393,6 +6409,7 @@ export async function createApp(
     if (!user) return;
     const loader = requireCommunityLoader(reply);
     if (!loader) return;
+    if (refuseCommunityChangeInCluster(reply)) return;
     const spec = String(request.body?.packageSpec ?? "").trim();
     if (!spec) {
       reply.code(400);
@@ -6421,6 +6438,7 @@ export async function createApp(
     if (!user) return;
     const loader = requireCommunityLoader(reply);
     if (!loader) return;
+    if (refuseCommunityChangeInCluster(reply)) return;
     try {
       await loader.uninstall(request.params.packageName);
       return { ok: true };
