@@ -6,6 +6,7 @@ const baseNodeDefinitions: NodeDefinition[] = [
     type: "schedule_trigger",
     label: "Schedule Trigger",
     category: "Input",
+    effectFreeEntry: true,
     description: "Triggers workflow execution automatically from a cron schedule.",
     configSchema: {
       type: "object",
@@ -26,6 +27,7 @@ const baseNodeDefinitions: NodeDefinition[] = [
     type: "webhook_input",
     label: "Webhook Input",
     category: "Input",
+    effectFreeEntry: true,
     description: "Injects webhook payload into workflow context.",
     configSchema: {
       type: "object",
@@ -66,6 +68,7 @@ const baseNodeDefinitions: NodeDefinition[] = [
     type: "text_input",
     label: "Text Input",
     category: "Input",
+    effectFreeEntry: true,
     description: "Provides static input text for a workflow run.",
     configSchema: { type: "object", properties: { text: { type: "string" } }, required: ["text"] },
     sampleConfig: { text: "What is the latest release?" }
@@ -74,6 +77,7 @@ const baseNodeDefinitions: NodeDefinition[] = [
     type: "system_prompt",
     label: "System Prompt",
     category: "Input",
+    effectFreeEntry: true,
     description: "Static system prompt node.",
     configSchema: { type: "object", properties: { text: { type: "string" } }, required: ["text"] },
     sampleConfig: { text: "You are an assistant that answers with concise factual output." }
@@ -82,6 +86,7 @@ const baseNodeDefinitions: NodeDefinition[] = [
     type: "user_prompt",
     label: "User Prompt",
     category: "Input",
+    effectFreeEntry: true,
     description: "Static user prompt node.",
     configSchema: { type: "object", properties: { text: { type: "string" } }, required: ["text"] },
     sampleConfig: { text: "Summarize this context." }
@@ -1580,6 +1585,7 @@ const baseNodeDefinitions: NodeDefinition[] = [
     type: "sub_workflow_trigger",
     label: "Sub-Workflow Trigger",
     category: "Input",
+    effectFreeEntry: true,
     description: "Entry point for workflows invoked as sub-workflows via Execute Workflow node.",
     configSchema: {
       type: "object",
@@ -1596,6 +1602,7 @@ const baseNodeDefinitions: NodeDefinition[] = [
     type: "error_trigger",
     label: "Error Trigger",
     category: "Input",
+    effectFreeEntry: true,
     description: "Fires when a designated production workflow fails. Configure target workflows in their Error Workflow setting.",
     configSchema: {
       type: "object",
@@ -2083,6 +2090,7 @@ const baseNodeDefinitions: NodeDefinition[] = [
     type: "slack_trigger",
     label: "Slack Trigger",
     category: "Input",
+    effectFreeEntry: true,
     description: "Webhook-based trigger that validates Slack signing secret. Point Slack Events at /api/webhooks/slack/:workflowId.",
     configSchema: {
       type: "object",
@@ -2453,6 +2461,7 @@ const baseNodeDefinitions: NodeDefinition[] = [
     type: "github_webhook_trigger",
     label: "GitHub Webhook Trigger",
     category: "Input",
+    effectFreeEntry: true,
     description: "Webhook trigger that validates the X-Hub-Signature-256 header.",
     configSchema: {
       type: "object",
@@ -2472,6 +2481,7 @@ const baseNodeDefinitions: NodeDefinition[] = [
     type: "manual_trigger",
     label: "Manual Trigger",
     category: "Input",
+    effectFreeEntry: true,
     description: "Start the workflow manually from the editor or via POST /api/triggers/manual/:workflowId.",
     configSchema: {
       type: "object",
@@ -2489,6 +2499,7 @@ const baseNodeDefinitions: NodeDefinition[] = [
     type: "form_trigger",
     label: "Form Trigger",
     category: "Input",
+    effectFreeEntry: true,
     description: "Public HTML form that starts a workflow. GET /api/forms/:path renders the form, POST submits.",
     configSchema: {
       type: "object",
@@ -2535,6 +2546,7 @@ const baseNodeDefinitions: NodeDefinition[] = [
     type: "chat_trigger",
     label: "Chat Trigger",
     category: "Input",
+    effectFreeEntry: true,
     description: "Receive chat messages via POST /api/chat/:workflowId. Pairs naturally with agent_orchestrator.",
     configSchema: {
       type: "object",
@@ -2559,6 +2571,7 @@ const baseNodeDefinitions: NodeDefinition[] = [
     type: "file_trigger",
     label: "File Trigger",
     category: "Input",
+    effectFreeEntry: true,
     description: "Watches a filesystem path (polling) and fires on created/modified/deleted files.",
     configSchema: {
       type: "object",
@@ -2585,6 +2598,7 @@ const baseNodeDefinitions: NodeDefinition[] = [
     type: "rss_trigger",
     label: "RSS / Atom Trigger",
     category: "Input",
+    effectFreeEntry: true,
     description: "Poll an RSS or Atom feed and fire the workflow for new items (deduplicated by GUID).",
     configSchema: {
       type: "object",
@@ -2608,6 +2622,7 @@ const baseNodeDefinitions: NodeDefinition[] = [
     type: "sse_trigger",
     label: "SSE Trigger",
     category: "Input",
+    effectFreeEntry: true,
     description: "Connects to a Server-Sent Events URL and fires the workflow for each event.",
     configSchema: {
       type: "object",
@@ -2634,6 +2649,7 @@ const baseNodeDefinitions: NodeDefinition[] = [
     type: "mcp_server_trigger",
     label: "Expose as MCP Tool",
     category: "Input",
+    effectFreeEntry: true,
     description: "Turn this workflow into an MCP tool that other agents (including other L2M agents) can invoke. Add the workflow to a toolset on the MCP servers page to serve it to MCP clients at /mcp/:toolset; the legacy REST routes GET /api/mcp-server/:path/manifest and POST /api/mcp-server/:path/invoke keep working. Downstream nodes receive the tool arguments as input.",
     configSchema: {
       type: "object",
@@ -3068,6 +3084,7 @@ const baseNodeDefinitions: NodeDefinition[] = [
     type: "stripe_webhook_trigger",
     label: "Stripe Webhook Trigger",
     category: "Input",
+    effectFreeEntry: true,
     description: "Webhook-based trigger that validates Stripe signatures. Point Stripe at /api/webhooks/stripe/:workflowId.",
     configSchema: {
       type: "object",
@@ -3177,6 +3194,7 @@ const baseNodeDefinitions: NodeDefinition[] = [
     type: "telegram_trigger",
     label: "Telegram Trigger",
     category: "Input",
+    effectFreeEntry: true,
     description: "Webhook-based trigger validated by X-Telegram-Bot-Api-Secret-Token. Point setWebhook at /api/webhooks/telegram/:workflowId.",
     configSchema: {
       type: "object",
@@ -3214,6 +3232,7 @@ const baseNodeDefinitions: NodeDefinition[] = [
     type: "discord_trigger",
     label: "Discord Trigger",
     category: "Input",
+    effectFreeEntry: true,
     description: "Webhook-based trigger validated with Ed25519 signature (X-Signature-Ed25519 + X-Signature-Timestamp).",
     configSchema: {
       type: "object",
@@ -3329,11 +3348,12 @@ export function getNodeDefinition(type: string): NodeDefinition | undefined {
 }
 
 /**
- * The workflow's start nodes that only pass the run's input through (triggers and static inputs): the node types of
- * the Input category. Running one has no effect outside the run.
+ * The workflow's start nodes that only pass the run's input through (triggers and static inputs): the definitions
+ * flagged `effectFreeEntry`. Running one has no effect outside the run. Entry nodes that read or consume from an
+ * external system (polling, query and queue or stream consumer triggers) and unknown node types are not in the set.
  */
 export const ENTRY_NODE_TYPES: ReadonlySet<string> = new Set(
-  nodeDefinitions.filter((node) => node.category === "Input").map((node) => node.type)
+  nodeDefinitions.filter((node) => node.effectFreeEntry === true).map((node) => node.type)
 );
 
 export function isEntryNodeType(type: string): boolean {

@@ -78,8 +78,10 @@ A cancel sent to any instance stops the run on the worker running it, usually at
 The leader checks every `QUEUE_REAPER_INTERVAL_MS` for jobs whose heartbeat is older than `QUEUE_LEASE_MS` (the
 worker crashed, was killed, or lost its database). Each one counts as an attempt, and then:
 
-- **Only trigger or input nodes had started** (the workflow's entry nodes, such as a webhook, schedule, form, chat or
-  manual trigger, which only pass the input through): the job goes back to the queue and another worker runs it.
+- **Only trigger or input nodes had started** (the workflow's entry nodes that only pass the input through, such as a
+  webhook, schedule, form, chat or manual trigger): the job goes back to the queue and another worker runs it.
+  Triggers that read or consume from another system when they run (Redis, Postgres, Kafka, RabbitMQ, MQTT, IMAP,
+  Google Sheets and Google Drive triggers) count as side effects, like any other node.
 - **Any other node had started** (an agent may have called a tool, an email may have been sent, a record written),
   whether or not it completed: the run is marked `interrupted: worker lost` and goes to the dead-letter queue. It is
   never re-run silently; retry it from the dead-letter queue once you have checked its side effects.

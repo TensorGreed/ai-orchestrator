@@ -6,12 +6,13 @@ const base: LostJobInput = { attempts: 1, maxAttempts: 3, countsAttempt: true, r
 const running = (nodeResults: unknown[]) => ({ status: "running", completedAt: null, nodeResultsJson: JSON.stringify(nodeResults) });
 
 describe("entry node types", () => {
-  it("are the Input category of the node definitions: triggers and static inputs, nothing that acts", () => {
+  it("are the effect-free triggers and static inputs: pollers, queries and consumers count as side effects", () => {
     for (const type of ["webhook_input", "manual_trigger", "schedule_trigger", "form_trigger", "chat_trigger", "mcp_server_trigger", "text_input"]) {
       expect(isEntryNodeType(type)).toBe(true);
     }
     for (const type of ["llm_call", "agent_orchestrator", "http_request", "mcp_tool", "code_node"]) expect(isEntryNodeType(type)).toBe(false);
-    expect(ENTRY_NODE_TYPES.size).toBe(nodeDefinitions.filter((node) => node.category === "Input").length);
+    for (const type of ["redis_trigger", "postgres_trigger", "kafka_trigger", "google_sheets_trigger"]) expect(isEntryNodeType(type)).toBe(false);
+    expect(ENTRY_NODE_TYPES.size).toBeLessThan(nodeDefinitions.filter((node) => node.category === "Input").length);
   });
 });
 
