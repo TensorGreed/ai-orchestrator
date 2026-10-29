@@ -6,7 +6,7 @@ import type { Pool, PoolClient } from "pg";
 import type { ClusterInstanceHeartbeat, ClusterInstanceRecord } from "../store.js";
 import type { PgContext } from "./context.js";
 import { parseJsonSafe, toNum, toStr } from "./helpers.js";
-import { executionIdsHeldByQueue, payloadExecutionIdPatterns } from "../cluster-queue-guard.js";
+import * as queue from "./queue.js";
 
 interface ClusterInstanceRow {
   id: string;
@@ -112,29 +112,18 @@ export async function releaseClusterRunOwner(ctx: PgContext, input: { executionI
 }
 
 /**
- * The ids among `ids` that a live (pending or running) queue job executes, read from the execution id each job's
- * payload carries (approval resumes included; see cluster-queue-guard.ts). The one place the reconcile asks the
- * queue; once the queue table records the execution id itself, only this body changes.
- */
-async function executionIdsOwnedByQueue(client: PoolClient, ids: string[]): Promise<Set<string>> {
-  const queued = await client.query<{ id: string; payload_json: string | null }>(
-    `SELECT id, payload_json FROM execution_queue
-      WHERE status IN ('pending', 'running') AND (id = ANY($1::text[]) OR payload_json LIKE ANY($2::text[]))`,
-    [ids, payloadExecutionIdPatterns(ids)]
-  );
-  return executionIdsHeldByQueue(ids, queued.rows.map((row) => ({ id: row.id, payloadJson: row.payload_json })));
-}
-
-/**
- * Fails the `running` history rows among `ids` with `error`, except runs a live queue job owns (keyed on the
- * execution id in the job's payload, see cluster-queue-guard.ts). Runs inside the caller's transaction.
+ * Fails the `running` history rows among `ids` with `error`, except runs a live (pending or running) queue job drives
+ * (`listExecutionIdsWithActiveQueueJob`, keyed on the job's execution id, so approval resumes are covered): those
+ * belong to the queue's lease, reaper and worker-loss policy. The queue is read outside the caller's transaction; the
+ * `UPDATE` re-checks `status = 'running'`, so a job that finishes in between changes nothing.
  */
 async function failRunningUnlessQueued(
+  ctx: PgContext,
   client: PoolClient,
   ids: string[],
   error: string
 ): Promise<{ rows: Array<{ id: string; workflow_id: string }> }> {
-  const held = await executionIdsOwnedByQueue(client, ids);
+  const held = new Set(await queue.listExecutionIdsWithActiveQueueJob(ctx, ids));
   const eligible = ids.filter((id) => !held.has(id));
   if (eligible.length === 0) return { rows: [] };
   return await client.query<{ id: string; workflow_id: string }>(
@@ -169,7 +158,7 @@ export async function reconcileDeadExecutorRuns(
     if (dead.rows.length === 0) return [];
     const ids = dead.rows.map((row) => row.execution_id);
     const ownerOf = new Map(dead.rows.map((row) => [row.execution_id, row.instance_id]));
-    const failed = await failRunningUnlessQueued(client, ids, input.error);
+    const failed = await failRunningUnlessQueued(ctx, client, ids, input.error);
     await client.query(`DELETE FROM cluster_run_owners WHERE execution_id = ANY($1::text[])`, [ids]);
     return failed.rows.map((row) => ({ id: row.id, workflowId: row.workflow_id, instanceId: ownerOf.get(row.id) ?? "" }));
   });
@@ -186,7 +175,7 @@ export async function failRunsOwnedBy(
     );
     if (owned.rows.length === 0) return [];
     const ids = owned.rows.map((row) => row.execution_id);
-    const failed = await failRunningUnlessQueued(client, ids, input.error);
+    const failed = await failRunningUnlessQueued(ctx, client, ids, input.error);
     await client.query(`DELETE FROM cluster_run_owners WHERE execution_id = ANY($1::text[]) AND instance_id = $2`, [ids, input.instanceId]);
     return failed.rows.map((row) => ({ id: row.id, workflowId: row.workflow_id, instanceId: input.instanceId }));
   });

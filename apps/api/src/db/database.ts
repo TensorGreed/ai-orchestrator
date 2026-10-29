@@ -64,7 +64,6 @@ import { isEmptyDataLabels, labelsForUntrackedSave, mergeDataLabels, parseStored
 import { queuedRunTimeoutMs, STUCK_JOB_MARGIN_MS } from "./queue-timeouts.js";
 import { AuditExportCursorMovedError, isForeignKeyViolation, ProjectNotEmptyError, StoreReferenceMissingError, ReleaseGateEnforcedError } from "./store-errors.js";
 import { clampLimit, LIMIT_MAX } from "./store-limits.js";
-import { executionIdsHeldByQueue } from "./cluster-queue-guard.js";
 import {
   auditEntryHash,
   type AuditChainResult,
@@ -9348,6 +9347,10 @@ export class SqliteStore implements Store {
 
   async reconcileDeadExecutorRuns(input: { error: string; deadAfterMs: number; selfId: string }): Promise<Array<{ id: string; workflowId: string; instanceId: string }>> {
     const cutoff = new Date(Date.now() - input.deadAfterMs).toISOString();
+    // Runs a live queue job drives belong to the queue's lease and reaper. Read before the (synchronous) transaction;
+    // the failing UPDATE re-checks `status = 'running'`, so a job that finishes in between changes nothing.
+    const candidates = this.queryAll<{ execution_id: unknown }>(`SELECT execution_id FROM cluster_run_owners WHERE instance_id <> ?`, [input.selfId]);
+    const queueHeld = new Set(await this.listExecutionIdsWithActiveQueueJob(candidates.map((owner) => toString(owner.execution_id))));
     return this.transaction(() => {
       const dead = this.queryAll<{ execution_id: unknown; instance_id: unknown }>(
         `SELECT o.execution_id, o.instance_id
@@ -9358,7 +9361,6 @@ export class SqliteStore implements Store {
           ORDER BY o.execution_id`,
         [input.selfId, cutoff, cutoff]
       );
-      const queueHeld = this.executionIdsOwnedByQueue(dead.map((owner) => toString(owner.execution_id)));
       const completedAt = new Date().toISOString();
       const failed: Array<{ id: string; workflowId: string; instanceId: string }> = [];
       for (const owner of dead) {
@@ -9385,9 +9387,11 @@ export class SqliteStore implements Store {
   }
 
   async failRunsOwnedBy(input: { instanceId: string; error: string }): Promise<Array<{ id: string; workflowId: string; instanceId: string }>> {
+    // As in reconcileDeadExecutorRuns: the queue's runs are read first, and the UPDATE re-checks the status.
+    const candidates = this.queryAll<{ execution_id: unknown }>(`SELECT execution_id FROM cluster_run_owners WHERE instance_id = ?`, [input.instanceId]);
+    const queueHeld = new Set(await this.listExecutionIdsWithActiveQueueJob(candidates.map((owner) => toString(owner.execution_id))));
     return this.transaction(() => {
       const owned = this.queryAll<{ execution_id: unknown }>(`SELECT execution_id FROM cluster_run_owners WHERE instance_id = ? ORDER BY execution_id`, [input.instanceId]);
-      const queueHeld = this.executionIdsOwnedByQueue(owned.map((owner) => toString(owner.execution_id)));
       const completedAt = new Date().toISOString();
       const failed: Array<{ id: string; workflowId: string; instanceId: string }> = [];
       for (const owner of owned) {
@@ -9411,20 +9415,6 @@ export class SqliteStore implements Store {
       if (owned.length > 0) this.persist();
       return failed;
     });
-  }
-
-  /**
-   * The ids a live queue job executes, from the execution id its payload carries (see cluster-queue-guard.ts); one
-   * process, so every live job is read. The one place the reconcile asks the queue: only this body changes once the
-   * queue table records the execution id itself.
-   */
-  private executionIdsOwnedByQueue(ids: string[]): Set<string> {
-    if (ids.length === 0) return new Set();
-    const rows = this.queryAll<{ id: unknown; payload_json: unknown }>(`SELECT id, payload_json FROM execution_queue WHERE status IN ('pending', 'running')`);
-    return executionIdsHeldByQueue(
-      ids,
-      rows.map((row) => ({ id: toString(row.id), payloadJson: row.payload_json === null || row.payload_json === undefined ? null : toString(row.payload_json) }))
-    );
   }
 
   // ---------------------------------------------------------------------------
