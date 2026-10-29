@@ -82,7 +82,10 @@ test("the CLI exits 1 on a blocking finding and 0 otherwise", () => {
 
   const blocked = spawnSync(process.execPath, [script, "--fail-on", "critical", "--only-fixed", file], { encoding: "utf8", env });
   assert.equal(blocked.status, 1);
-  assert.match(blocked.stdout, /\| web-linux-arm64 \| CVE-1 \| Critical \| pkg-CVE-1 1\.0\.0 \| 9\.9\.9 \|/);
+  assert.match(blocked.stdout, /\| web-linux-arm64 \| CVE-1 \| Critical \| pkg-CVE-1 1\.0\.0 \| 9\.9\.9 \| yes \|/);
+  // A fixable HIGH is listed without blocking; unfixed and lower findings are not listed.
+  assert.match(blocked.stdout, /\| web-linux-arm64 \| CVE-3 \| High \| pkg-CVE-3 1\.0\.0 \| 9\.9\.9 \| no \|/);
+  assert.doesNotMatch(blocked.stdout, /CVE-2|CVE-4/);
 
   const passed = spawnSync(process.execPath, [script, "--fail-on", "none", file], { encoding: "utf8", env });
   assert.equal(passed.status, 0);
