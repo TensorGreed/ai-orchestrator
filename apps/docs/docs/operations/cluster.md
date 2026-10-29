@@ -63,14 +63,16 @@ Some flows span two requests that a load balancer may send to different instance
 
 Only a hash of each challenge id is stored, never the id itself, and the payload is sealed with `SECRET_MASTER_KEY_BASE64` (every instance needs the same key, as it already does for secrets). The session cleanup tick removes expired challenges.
 
+During a rolling upgrade to this version, a TOTP step or MCP OAuth connect in progress may need restarting, and pending elicitations may expire.
+
 ## Rate limits in a cluster
 
 | Bucket | Cluster mode |
 |---|---|
-| Auth (`RATE_LIMIT_AUTH_MAX`) and webhook (`RATE_LIMIT_WEBHOOK_MAX`) | **Shared.** Each hit counts in an unlogged Postgres table with one statement, so the limit holds across all instances: 10 failed sign-ins a minute means 10 in total, not 10 per instance. If the database does not answer, an instance counts in its own memory until it does, and logs that once a minute. |
+| Auth (`RATE_LIMIT_AUTH_MAX`) and webhook (`RATE_LIMIT_WEBHOOK_MAX`) | **Shared.** Each hit counts in an unlogged Postgres table with one statement, so the limit holds across all instances: 10 sign-in attempts a minute means 10 in total, not 10 per instance. Each webhook request is one database write in cluster mode. If the database does not answer, an instance counts in its own memory until it does, and logs that once a minute. |
 | Global (`RATE_LIMIT_GLOBAL_MAX`) | **Per instance.** Every request would otherwise write to the database. With N instances behind a round-robin balancer, a client gets up to N times the limit. |
 
-Behind a load balancer or proxy, set `TRUST_PROXY` ([Environment](../getting-started/environment.md)). Without it every client is keyed by the proxy's address, so all of them share one auth bucket. In cluster mode, when requests arrive with `X-Forwarded-For` while `TRUST_PROXY` is off, `GET /health` carries a `forwarded_for_untrusted` warning for 15 minutes.
+Behind a load balancer or proxy, set `TRUST_PROXY` ([Environment](../getting-started/environment.md)). Without it every client is keyed by the proxy's address, so all of them share one auth bucket. In cluster mode, when requests arrive with `X-Forwarded-For` while `TRUST_PROXY` is off, `GET /health` carries a `forwarded_for_untrusted` warning for 15 minutes. Any client can send that header, so the warning is a hint to check the proxy setup, not proof that a proxy is in front.
 
 ## Community nodes in a cluster
 
@@ -81,23 +83,24 @@ In cluster mode **Install** and **Uninstall** under Community nodes (`POST /api/
 
 ## MCP gateway sessions
 
-Gateway sessions (`Mcp-Session-Id`) stay in the memory of the instance that opened them. A request that lands on another instance gets `404`, and a client following the MCP spec opens a new session, which works but restarts any stdio servers the session started. To avoid that churn, route a session's requests to one instance by its header. With nginx:
+Gateway sessions (`Mcp-Session-Id`) stay in the memory of the instance that opened them. A request that lands on another instance gets `404`, and a client following the MCP spec opens a new session, which works but restarts any stdio servers the session started. To avoid that churn, send a session's requests to the instance that opened it.
 
-```nginx
-upstream l2m_mcp {
-    hash $http_mcp_session_id consistent;
-    server api-1:4000;
-    server api-2:4000;
-}
+The session id is random and the instance that answers `initialize` chooses it, so hashing the request header does not help: the hash points at an unrelated instance. The balancer has to learn the id from the response of `initialize` and route later requests that carry it to the same server. HAProxy does this with a stick table:
 
-location /mcp/ {
-    proxy_pass http://l2m_mcp;
-    proxy_set_header Host $host;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-}
+```text
+backend l2m_mcp
+    balance roundrobin
+    stick-table type string len 64 size 100k expire 30m
+    stick store-response res.hdr(mcp-session-id)
+    stick match req.hdr(mcp-session-id)
+    server api-1 api-1:4000 check
+    server api-2 api-2:4000 check
 ```
 
-The first `initialize` has no session header yet and may land anywhere; every later request of that session goes to the instance that answered it. Other balancers offer the same as header-based affinity.
+Keep `expire` at or above `MCP_GATEWAY_SESSION_IDLE_MS` (30 minutes by default). Open-source nginx cannot learn a value from a response header, so it cannot route by session id. The alternatives are:
+
+- **nginx Plus:** `sticky learn create=$upstream_http_mcp_session_id lookup=$http_mcp_session_id zone=mcp:1m;` in the upstream.
+- **Open-source nginx, by client address:** `hash $remote_addr consistent;` in the upstream. This is coarser: every session from one address goes to one instance, and clients that all reach the balancer through one NAT or proxy share a single instance.
 
 ## The instance registry
 
