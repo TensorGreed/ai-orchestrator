@@ -108,6 +108,16 @@ export interface QueueClaimFence {
   claimToken: string;
 }
 
+/** Phase 13.1 — queue dispatch: a queue item as the instance waiting on its run sees it. */
+export interface QueueItemOutcome {
+  /** pending, running, completed or dead. */
+  status: string;
+  /** The run's result the worker stored (saveQueueItemResult); null until then. */
+  result: unknown;
+  lastError: string | null;
+  attempts: number;
+}
+
 /** Phase 13.1 — a leased claim of a queue item. */
 export interface QueueClaimedItem {
   id: string;
@@ -1673,7 +1683,13 @@ export interface Store {
     scheduledAt?: string;
     /** Phase 13.1 — the worker pool that runs it (default `default`). */
     pool?: string;
-  }): Promise<void>;
+    /**
+     * Phase 13.1 — an idempotent id (a schedule or trigger fire) is a duplicate only for a while: a finished item
+     * (`completed` or `dead`) created before this time is replaced by the new job. Without it an existing item always
+     * wins.
+     */
+    replaceFinishedBefore?: string;
+  }): Promise<boolean>;
   /** Claims up to `limit` due pending items for this process: an item is handed to one caller only. */
   dequeueNext(limit?: number): Promise<Array<{
     id: string;
@@ -1690,6 +1706,21 @@ export interface Store {
    * returns whether the item was updated (false: a zombie's late completion, refused).
    */
   markQueueItemCompleted(id: string, options?: { claimToken?: string }): Promise<boolean>;
+  /**
+   * Phase 13.1 — queue dispatch: stores the full result of the run a dispatched job executed on its item, for the
+   * instance waiting on it. With `claimToken` (a leased claim) only while the item is still `running` under that token;
+   * returns whether it was stored.
+   */
+  saveQueueItemResult(input: { id: string; claimToken: string | null; result: unknown }): Promise<boolean>;
+  /** Phase 13.1 — queue dispatch: where an item stands (status, stored result, last error); null when there is none. */
+  getQueueItemOutcome(id: string): Promise<QueueItemOutcome | null>;
+  /**
+   * Phase 13.1 — queue dispatch: once an item's result was delivered, drops the stored result and the run's spec from
+   * the item (its payload keeps only the execution id). It applies to a completed item, and to a running one whose
+   * holder already stored its result under its claim (the worker announces the result before the queue completes the
+   * item). A running item without a stored result, or a pending or dead one, is left as it is.
+   */
+  releaseQueueItemResult(id: string): Promise<void>;
   /**
    * Retries with backoff until max attempts; `retryable: false` moves the job to the DLQ now. With `claimToken`, only
    * while the item is still `running` under that token. Returns whether the item was updated.
@@ -1713,6 +1744,11 @@ export interface Store {
    * can tell a lost resume that did something from one that did not. False when the claim no longer holds the item.
    */
   recordQueueJobProgress(fence: QueueClaimFence): Promise<boolean>;
+  /**
+   * Phase 13.1 — the worker-loss policy: marks that a node other than a trigger/entry node is about to start under
+   * this claim (so a lost worker's job is not re-run). True while the claim holds the item (also when already marked).
+   */
+  markQueueEffectsStarted(fence: QueueClaimFence): Promise<boolean>;
   /** Renews the heartbeat of the owner's claims; returns the tokens it still holds (a missing one was taken back). */
   renewQueueLeases(input: { owner: string; claimTokens: string[] }): Promise<string[]>;
   /**

@@ -96,8 +96,8 @@ const WORKFLOW_LOADS: LoadSite[] = [
   { file: "app.ts", match: "const workflow = productionWorkflow(payload.workflowId);", kind: "production", why: "queued runs and dead-letter re-runs" },
   { file: "app.ts", match: '(channel === "production" ? productionWorkflow(payload.sourceWorkflowId) : store.getWorkflow(payload.sourceWorkflowId))', kind: "production", why: "the error workflow follows the failing run's channel" },
   { file: "app.ts", match: "const loadForRoute = (id: string) => (isTestRoute ? store.getWorkflow(id) : productionWorkflow(id));", kind: "production", why: "/webhook/ runs the published version, /webhook-test/ the draft" },
-  { file: "app.ts", match: 'const workflow = executeChannel.channel === "production" ? productionWorkflow(access.workflow.id) : access.workflow;', kind: "production", why: "/execute and /execute/stream: API-key callers run the published version (or the draft with channel=draft and workflow:write), the editor the draft", count: 2 },
-  { file: "app.ts", match: 'const workflow = retryChannel === "production" ? productionWorkflow(sourceExecution.workflowId) : store.getWorkflow(sourceExecution.workflowId);', kind: "production", why: "a retry of a production run runs what production runs now; a draft run's retry runs the draft" },
+  { file: "execution-routes.ts", match: 'const workflow = executeChannel.channel === "production" ? productionWorkflow(access.workflow.id) : access.workflow;', kind: "production", why: "/execute and /execute/stream: API-key callers run the published version (or the draft with channel=draft and workflow:write), the editor the draft", count: 2 },
+  { file: "execution-routes.ts", match: 'const workflow = retryChannel === "production" ? productionWorkflow(sourceExecution.workflowId) : store.getWorkflow(sourceExecution.workflowId);', kind: "production", why: "a retry of a production run runs what production runs now; a draft run's retry runs the draft" },
   { file: "app.ts", match: "const workflow = releaseService.deactivatedProductionWorkflow(summary.id);", kind: "not_run", why: "a deactivated gated workflow's paths, only to answer \"deactivated\" rather than \"not found\"" },
   { file: "app.ts", match: "const entry = workflowVersionService.get(request.params.id, version);", kind: "not_run", why: "reading or diffing a saved version in the history panel", count: 2 },
   { file: "app.ts", match: "load: WorkflowLoader = (id) => store.getWorkflow(id)", kind: "production", why: "webhook path helpers: production routes pass productionWorkflow (checked below)", count: 4, defaultOnly: true },
@@ -105,7 +105,7 @@ const WORKFLOW_LOADS: LoadSite[] = [
   // app.ts: the draft by design.
   { file: "app.ts", match: "const workflow = store.getWorkflow(input.workflowId);", kind: "draft", why: "an eval run runs the draft" },
   { file: "app.ts", match: "const current = store.getWorkflow(candidate.workflow.id);", kind: "draft", why: "a replay job's case: the candidate's current project" },
-  { file: "app.ts", match: "const workflow = store.getWorkflow(source.workflowId);", kind: "draft", why: "executions replay (cassette) runs the draft" },
+  { file: "execution-routes.ts", match: "const workflow = store.getWorkflow(source.workflowId);", kind: "draft", why: "executions replay (cassette) runs the draft" },
   { file: "app.ts", match: "const current = store.getWorkflow(pending.workflowId);", kind: "not_run", why: "an approval resume runs the paused snapshot; only its current project is read" },
   { file: "app.ts", match: "getWorkflow: (id) => store.getWorkflow(id),", kind: "draft", why: "run-access and run-scope dependencies: access checks and draft-run sub-workflows", count: 2 },
   { file: "app.ts", match: "store.getWorkflow(workflow.id)", exact: true, kind: "draft", why: "approval routes: whether a draft can be executed by the user" },
@@ -127,7 +127,7 @@ const WORKFLOW_LOADS: LoadSite[] = [
   { file: "app.ts", match: "const workflow = context ? store.getWorkflow(context.workflowId) : null;", kind: "not_run", why: "the LLM judge's project" },
   { file: "app.ts", match: "projectId: store.getWorkflow(pending.workflowId)?.projectId ?? request.projectId,", kind: "not_run", why: "audit project" },
   { file: "app.ts", match: "const workflow = store.getWorkflow(request.params.id);", kind: "not_run", why: "project transfer (admin)" },
-  { file: "app.ts", match: "projectId: store.getWorkflow(execution.workflowId)?.projectId", kind: "not_run", why: "audit project" },
+  { file: "execution-routes.ts", match: "projectId: store.getWorkflow(execution.workflowId)?.projectId", kind: "not_run", why: "audit project" },
   { file: "app.ts", match: "const full = store.getWorkflow(w.id);", kind: "not_run", why: "removing a tag" },
 
   // Other route files and services.
@@ -279,9 +279,15 @@ function routeBlock(source: string, routePath: string): string {
 }
 
 describe("every run names its release channel", () => {
-  const calls = sourceFiles().flatMap((file) => callArguments(read(file), "runWorkflowExecution({").map((text) => ({ file, text })));
+  // Phase 13.1 — runs started through the dispatcher (inline or on a queue worker) name their channel in the spec's
+  // `run`; the two places that run a spec (executeRunSpec, and a worker's dispatched job) forward that `run` as it is.
+  const markers = ["runWorkflowExecution({", "runDispatcher.run(", "runDispatcher.fire("];
+  const allCalls = sourceFiles().flatMap((file) => markers.flatMap((marker) => callArguments(read(file), marker).map((text) => ({ file, text }))));
+  const forwardsSpec = (text: string) => /^runWorkflowExecution\(\{\s*\.\.\.run,/.test(text);
+  const calls = allCalls.filter((entry) => !forwardsSpec(entry.text));
 
   it("each runWorkflowExecution call, in any file, passes channel", () => {
+    expect(allCalls.filter((entry) => forwardsSpec(entry.text)).map((entry) => entry.file)).toEqual(["app.ts", "app.ts"]);
     expect(calls.length).toBeGreaterThanOrEqual(20);
     const missing = calls.filter((entry) => !/\bchannel\s*:/.test(entry.text)).map((entry) => `${entry.file}: ${entry.text.slice(0, 160)}`);
     expect(missing).toEqual([]);

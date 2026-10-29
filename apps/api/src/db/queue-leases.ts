@@ -2,8 +2,9 @@
  * Phase 13.1 — queue leases: what happens to a job whose worker was lost (its lease ran out) or that a worker gave
  * back while shutting down. Shared by both stores so they decide identically.
  *
- * Worker-loss policy (user decision 2): a run is re-queued automatically only if none of its nodes had completed;
- * a run with a completed node is marked `interrupted: worker lost` and dead-lettered for a person to retry, so side
+ * Worker-loss policy (user decision 2): a run is re-queued automatically only while no node other than its
+ * effect-free entry nodes (for a resume, its decided gate) had started under the claim; otherwise it is marked
+ * `interrupted: worker lost` and dead-lettered for a person to retry, so side
  * effects such as e-mails or tool writes are never repeated silently. A lost worker always counts an attempt, so a
  * job that kills its worker every time ends in the dead-letter queue instead of looping. A shutdown release follows
  * the same rules without counting an attempt.
@@ -96,10 +97,16 @@ export interface LostJobInput {
   resume: boolean;
   /** A resume only: the status of the run's paused state (`resuming` while the resume is due), or null when it is gone. */
   resumeStateStatus?: string | null;
-  /** A resume only: nodes the resume completed under its claims (the queue row's nodes_completed). */
+  /** A resume only: nodes the resume completed under its claims (the queue row's nodes_completed); untracked claims only. */
   resumeNodesCompleted?: number;
   /** The run's history record, if one was written. */
   history: { status: string; completedAt: unknown; nodeResultsJson: unknown } | null;
+  /**
+   * Whether the claim that was lost tracked side effects (its effects_token is its claim token), and if so whether a
+   * node other than a trigger/entry node (for a resume, other than a decided Approval Gate) had started under it. Untracked
+   * claims (an instance without this) keep the earlier rule: interrupted once a node completed.
+   */
+  effects?: { tracked: boolean; started: boolean };
 }
 
 /** A record whose final write landed: `partial` only once it has a completed_at. */
@@ -108,14 +115,38 @@ export function isFinalRunRecord(history: { status: string; completedAt?: unknow
   return FINAL_RUN_STATUSES.has(history.status);
 }
 
+/** The side-effect marker of a locked queue row (effects_token / effects_started, migration v46). */
+export function lostJobEffects(row: { claim_token?: unknown; effects_token?: unknown; effects_started?: unknown }): { tracked: boolean; started: boolean } {
+  const claimToken = typeof row.claim_token === "string" ? row.claim_token : null;
+  const tracked = claimToken !== null && row.effects_token === claimToken;
+  return { tracked, started: tracked && Number(row.effects_started ?? 0) > 0 };
+}
+
+/**
+ * The node an approval resume may re-enter without marking side effects: only an Approval Gate node's own hand-off
+ * (`gate`), which does nothing but turn the decision into its output. Every other re-entered node is a side effect:
+ * an agent re-run for its approved tool call (`rerun`) makes the approved write, and a paused sub-workflow
+ * (`sub_workflow`) runs the rest of its child. A `route` hand-off, or none, starts after the waiting node.
+ */
+export function resumeEffectFreeNodeId(state: { waitingNodeId?: unknown; approvalHandoff?: { kind?: unknown } | null }): string | undefined {
+  if (state.approvalHandoff?.kind !== "gate") return undefined;
+  return typeof state.waitingNodeId === "string" ? state.waitingNodeId : undefined;
+}
+
 export function decideLostJob(input: LostJobInput): LostJobDecision {
   if (input.resume) {
     // The resume is over once its run's final write landed, or once the paused state left `resuming` (it paused again
     // at a later gate, finished, or was handed back to waiting): nothing runs it again.
     if (input.history && isFinalRunRecord(input.history)) return "finished";
     if (input.resumeStateStatus !== "resuming") return "finished";
-    // Like any run, lost or given back at shutdown: re-run only if nothing completed since the resume started.
-    if ((input.resumeNodesCompleted ?? 0) > 0) return "interrupt";
+    // Like any run, lost or given back at shutdown: re-run only while no node other than a decided Approval Gate started
+    // under a tracked claim (an agent's tool calls happen before its node completes). An untracked claim (an instance
+    // without the marker) keeps the earlier rule: nothing completed since the resume started.
+    if (input.effects?.tracked) {
+      if (input.effects.started) return "interrupt";
+    } else if ((input.resumeNodesCompleted ?? 0) > 0) {
+      return "interrupt";
+    }
     // A clean shutdown gives a resume that did nothing back with its paused state intact; the next worker resumes it
     // from the decision.
     if (!input.countsAttempt) return "requeue";
@@ -123,7 +154,13 @@ export function decideLostJob(input: LostJobInput): LostJobDecision {
   }
   if (input.history) {
     if (isFinalRunRecord(input.history) || input.history.status === "waiting_approval") return "finished";
-    if (input.history.status === "running" && hasCompletedNode(input.history.nodeResultsJson)) return "interrupt";
+  }
+  // Re-run only a run that cannot have caused a side effect yet: no node other than its trigger/entry nodes started
+  // (an agent's tool calls happen before its node completes). The claim's marker is written before such a node runs.
+  if (input.effects?.tracked) {
+    if (input.effects.started) return "interrupt";
+  } else if (input.history?.status === "running" && hasCompletedNode(input.history.nodeResultsJson)) {
+    return "interrupt";
   }
   if (input.countsAttempt && input.attempts >= input.maxAttempts) return "dead_letter";
   return "requeue";

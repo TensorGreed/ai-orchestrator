@@ -45,6 +45,16 @@ export const openApiSpec = {
         responses: { "200": { description: "Server is healthy", content: { "application/json": { schema: { type: "object", properties: { status: { type: "string" }, uptime: { type: "number" } } } } } } }
       }
     },
+    "/ready": {
+      get: {
+        tags: ["Observability"],
+        summary: "Readiness probe: 200 when the instance can take traffic, 503 with the reasons while it drains or a readiness check fails",
+        responses: {
+          "200": { description: "Ready", content: { "application/json": { schema: { type: "object", properties: { ready: { type: "boolean" } } } } } },
+          "503": { description: "Not ready (for example draining at shutdown)" }
+        }
+      }
+    },
     "/metrics": {
       get: {
         tags: ["Observability"],
@@ -87,7 +97,13 @@ export const openApiSpec = {
       get: {
         tags: ["Observability"],
         summary: "Cluster view (admin): instance registry with liveness, leader, bus status and warnings",
-        responses: { "200": { description: "Cluster view" }, "403": { description: "Not an admin" } }
+        responses: {
+          "200": {
+            description:
+              "Cluster view. executionDispatch is where runs execute now (inline, or queue: EXECUTION_DISPATCH=queue while every live worker of the pool supports it); executionDispatchConfigured and executionDispatchFallbackReason explain a fallback."
+          },
+          "403": { description: "Not an admin" }
+        }
       }
     },
 
@@ -430,7 +446,10 @@ export const openApiSpec = {
         responses: {
           "200": { description: "Execution result" },
           "400": { description: "Execution failed" },
-          "404": { description: "Workflow not found" }
+          "404": { description: "Workflow not found" },
+          "429": { description: "EXECUTION_DISPATCH=queue: the pool's queue is full (QUEUE_MAX_PENDING); see Retry-After" },
+          "503": { description: "EXECUTION_DISPATCH=queue: this instance already waits on DISPATCH_MAX_WAITING runs; retry shortly" },
+          "504": { description: "EXECUTION_DISPATCH=queue: the run did not finish on a worker within its timeout plus a margin; it may still finish" }
         }
       }
     },
@@ -590,8 +609,28 @@ export const openApiSpec = {
         tags: ["Queue"],
         summary: "Enqueue a workflow execution",
         parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
-        requestBody: { content: { "application/json": { schema: { type: "object", properties: { input: { type: "object" }, variables: { type: "object" }, systemPrompt: { type: "string" }, userPrompt: { type: "string" }, sessionId: { type: "string" }, priority: { type: "integer" } } } } } },
-        responses: { "200": { description: "Queued execution with executionId" } }
+        requestBody: {
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                properties: {
+                  input: { type: "object" },
+                  variables: { type: "object" },
+                  systemPrompt: { type: "string" },
+                  userPrompt: { type: "string" },
+                  sessionId: { type: "string" },
+                  priority: { type: "integer" },
+                  pool: { type: "string", description: "Builders and admins: the worker pool to run on (letters, digits, _ and -); the workflow's settings.executionPool otherwise" }
+                }
+              }
+            }
+          }
+        },
+        responses: {
+          "200": { description: "Queued execution with executionId" },
+          "429": { description: "The pool's queue is full (QUEUE_MAX_PENDING); see Retry-After" }
+        }
       }
     },
 
@@ -618,6 +657,19 @@ export const openApiSpec = {
         summary: "Get a single execution by ID",
         parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
         responses: { "200": { description: "Execution details" }, "404": { description: "Not found" } }
+      }
+    },
+    "/api/executions/{id}/events": {
+      get: {
+        tags: ["Executions"],
+        summary: "Follow an execution (SSE), from any instance",
+        description:
+          "An `execution` event with the run as stored, then its events as they happen (node_start, node_complete, llm_delta, node_progress, node_activity, mcp_elicitation) when it executes on this instance or on a queue worker, then `result` (or `error`). A finished run answers with `execution` and `result` at once. Following a run does not affect it. Needs workflow:read on the run's workflow.",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: {
+          "200": { description: "SSE stream", content: { "text/event-stream": { schema: { type: "string" } } } },
+          "404": { description: "Execution not found" }
+        }
       }
     },
     "/api/executions/{id}/retry": {

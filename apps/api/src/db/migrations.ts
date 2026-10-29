@@ -31,6 +31,8 @@ export const QUEUE_CLAIM_INDEX = "idx_execution_queue_claim";
 export const QUEUE_RUNNING_HEARTBEAT_INDEX = "idx_execution_queue_running_hb";
 /** v43: pending and running jobs by the execution they drive (both stores). */
 export const QUEUE_ACTIVE_EXECUTION_INDEX = "idx_execution_queue_active_execution";
+/** v46: finished jobs by their last update, for the retention prune (both stores). */
+export const QUEUE_FINISHED_INDEX = "idx_execution_queue_finished";
 
 export const INSERTION_SEQ_TABLES: ReadonlyArray<{ table: string; backfillOrder: string }> = [
   { table: "audit_logs", backfillOrder: `created_at, id COLLATE "C"` },
@@ -2148,6 +2150,32 @@ export const MIGRATIONS: Migration[] = [
       DROP TABLE IF EXISTS rate_limit_buckets;
       ALTER TABLE mcp_elicitations DROP COLUMN IF EXISTS holder_id;
       DROP TABLE IF EXISTS pending_challenges;
+    `
+  },
+  {
+    version: 46,
+    description: "Phase 13.1 — queue dispatch results, and whether a claimed run may have caused side effects",
+    // Written only with EXECUTION_DISPATCH=queue (cluster mode): the worker that ran a dispatched run stores the run's
+    // full result on its queue row (under its claim), so the API instance waiting on it answers with exactly what an
+    // inline run returns; the history row lacks some of it (warnings, remediation, a clarification). Empty otherwise.
+    // effects_token / effects_started: the worker-loss policy. A claim sets effects_token to its claim token and
+    // effects_started to 0; the worker sets effects_started to 1 (under that claim) before the run's first node that is
+    // not a trigger/entry node starts. A lost job whose current claim tracks it is re-run only while it is still 0; a
+    // claim taken by an instance without this (effects_token differs) keeps the earlier rule.
+    // The finished-jobs index serves the retention prune: finished queue rows (and their stored results and specs) go
+    // with the execution history they belong to.
+    up: `
+      ALTER TABLE execution_queue ADD COLUMN IF NOT EXISTS result_json TEXT;
+      ALTER TABLE execution_queue ADD COLUMN IF NOT EXISTS effects_token TEXT;
+      ALTER TABLE execution_queue ADD COLUMN IF NOT EXISTS effects_started INTEGER NOT NULL DEFAULT 0;
+      CREATE INDEX IF NOT EXISTS ${QUEUE_FINISHED_INDEX}
+        ON execution_queue (updated_at) WHERE status = 'completed' OR status = 'dead';
+    `,
+    down: `
+      DROP INDEX IF EXISTS ${QUEUE_FINISHED_INDEX};
+      ALTER TABLE execution_queue DROP COLUMN IF EXISTS effects_started;
+      ALTER TABLE execution_queue DROP COLUMN IF EXISTS effects_token;
+      ALTER TABLE execution_queue DROP COLUMN IF EXISTS result_json;
     `
   }
 ];

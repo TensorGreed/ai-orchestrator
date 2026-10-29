@@ -10,6 +10,8 @@ Several API instances can share one Postgres database ([Running more than one in
 
 To plan a fleet (API replicas and workers, sizing, the connection budget) and to load-test it, see [Scaling](./scaling.md).
 
+To have `api` and `webhook` replicas send every run to the workers instead of running it themselves, see [Queue dispatch](./queue-and-workers.md#queue-dispatch).
+
 ## What cluster mode adds
 
 | When | What happens | Backstop if a message is lost |

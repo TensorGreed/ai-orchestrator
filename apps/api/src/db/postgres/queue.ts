@@ -4,12 +4,13 @@
  */
 import { randomUUID } from "node:crypto";
 import { queuedRunTimeoutMs, STUCK_JOB_MARGIN_MS } from "../queue-timeouts.js";
-import type { QueueClaimedItem, QueueClaimFence, Store } from "../store.js";
+import type { QueueClaimedItem, QueueClaimFence, QueueItemOutcome, Store } from "../store.js";
 import { toNum, toStr } from "./helpers.js";
 import type { PgContext } from "./context.js";
 import { clampLimit, LIMIT_MAX } from "../store-limits.js";
 import {
   decideLostJob,
+  lostJobEffects,
   DEFAULT_QUEUE_POOL,
   fairClaimWindow,
   payloadExecutionId,
@@ -30,12 +31,24 @@ export async function enqueueExecution(ctx: PgContext, input: {
   maxAttempts?: number;
   scheduledAt?: string;
   pool?: string;
-}): Promise<void> {
+  replaceFinishedBefore?: string;
+}): Promise<boolean> {
   const now = new Date().toISOString();
-  await ctx.execute(
+  // A finished item past the window is replaced by the new job: every column back to a fresh pending item.
+  const onConflict = input.replaceFinishedBefore
+    ? `ON CONFLICT (id) DO UPDATE SET
+         workflow_id = EXCLUDED.workflow_id, workflow_name = EXCLUDED.workflow_name, payload_json = EXCLUDED.payload_json,
+         status = 'pending', priority = EXCLUDED.priority, attempts = 0, max_attempts = EXCLUDED.max_attempts, last_error = NULL,
+         scheduled_at = EXCLUDED.scheduled_at, started_at = NULL, completed_at = NULL, created_at = EXCLUDED.created_at,
+         updated_at = EXCLUDED.updated_at, pool = EXCLUDED.pool, execution_id = EXCLUDED.execution_id, claimed_by = NULL,
+         claim_token = NULL, heartbeat_at = NULL, lost_count = 0, nodes_completed = 0, result_json = NULL,
+         effects_token = NULL, effects_started = 0
+       WHERE execution_queue.status IN ('completed', 'dead') AND execution_queue.created_at < $12`
+    : `ON CONFLICT (id) DO NOTHING`;
+  const result = await ctx.pool.query(
     `INSERT INTO execution_queue (id, workflow_id, workflow_name, payload_json, status, priority, attempts, max_attempts, last_error, scheduled_at, started_at, completed_at, created_at, updated_at, pool, execution_id)
        VALUES ($1, $2, $3, $4, 'pending', $5, 0, $6, NULL, $7, NULL, NULL, $8, $9, $10, $11)
-       ON CONFLICT (id) DO NOTHING`,
+       ${onConflict}`,
     [
       input.id,
       input.workflowId,
@@ -47,9 +60,11 @@ export async function enqueueExecution(ctx: PgContext, input: {
       now,
       now,
       input.pool ?? DEFAULT_QUEUE_POOL,
-      payloadExecutionId(input.payload, input.id)
+      payloadExecutionId(input.payload, input.id),
+      ...(input.replaceFinishedBefore ? [input.replaceFinishedBefore] : [])
     ]
   );
+  return (result.rowCount ?? 0) > 0;
 }
 
 /**
@@ -384,7 +399,7 @@ export async function claimQueueItems(ctx: PgContext, input: { limit: number; ow
               row_number() OVER (PARTITION BY workflow_id ORDER BY priority DESC, scheduled_at, created_at, id) AS rk
          FROM cand
      ), picked AS (
-       SELECT q.id, r.rk FROM execution_queue q JOIN ranked r ON r.id = q.id
+       SELECT q.id, r.rk, gen_random_uuid()::text AS token FROM execution_queue q JOIN ranked r ON r.id = q.id
         WHERE q.status = 'pending'
         ORDER BY r.rk, r.priority DESC, r.scheduled_at, r.created_at, q.id
         LIMIT $3
@@ -392,7 +407,9 @@ export async function claimQueueItems(ctx: PgContext, input: { limit: number; ow
      )
      UPDATE execution_queue AS q
         SET status = 'running', started_at = now(), heartbeat_at = now(), claimed_by = $4,
-            claim_token = gen_random_uuid()::text, updated_at = now()
+            claim_token = picked.token, updated_at = now(),
+            -- This claim tracks side effects (the worker-loss policy): none started yet.
+            effects_token = picked.token, effects_started = 0
        FROM picked
       WHERE q.id = picked.id
      RETURNING q.id, q.workflow_id, q.workflow_name, q.payload_json, q.attempts, q.max_attempts, q.scheduled_at, q.pool,
@@ -441,12 +458,72 @@ export async function isQueueClaimHeld(ctx: PgContext, fence: QueueClaimFence): 
   return Boolean(row);
 }
 
+export async function saveQueueItemResult(ctx: PgContext, input: { id: string; claimToken: string | null; result: unknown }): Promise<boolean> {
+  const json = JSON.stringify(input.result ?? null);
+  const result = input.claimToken !== null
+    ? await ctx.pool.query(
+        `UPDATE execution_queue SET result_json = $3, updated_at = now() WHERE id = $1 AND claim_token = $2 AND status = 'running'`,
+        [input.id, input.claimToken, json]
+      )
+    : await ctx.pool.query(`UPDATE execution_queue SET result_json = $2, updated_at = now() WHERE id = $1`, [input.id, json]);
+  return (result.rowCount ?? 0) > 0;
+}
+
+/**
+ * Drops a delivered result and the run's spec from its queue item. A completed item, or one still `running` whose
+ * holder already stored its result: the worker stores the result (fenced on its claim) and announces it before the
+ * queue marks the item completed, so the waiting request usually releases it in between. A running item without a
+ * stored result is never touched.
+ */
+export async function releaseQueueItemResult(ctx: PgContext, id: string): Promise<void> {
+  await ctx.pool.query(
+    `UPDATE execution_queue SET result_json = NULL, payload_json = json_build_object('executionId', execution_id)::text
+      WHERE id = $1
+        AND ((status = 'completed' AND (result_json IS NOT NULL OR payload_json LIKE '%"dispatch"%'))
+          OR (status = 'running' AND result_json IS NOT NULL))`,
+    [id]
+  );
+}
+
+export async function getQueueItemOutcome(ctx: PgContext, id: string): Promise<QueueItemOutcome | null> {
+  const row = await ctx.queryOne<{ status: string; result_json: string | null; last_error: string | null; attempts: number }>(
+    `SELECT status, result_json, last_error, attempts FROM execution_queue WHERE id = $1`,
+    [id]
+  );
+  if (!row) return null;
+  return {
+    status: toStr(row.status),
+    result: parseStoredResult(row.result_json),
+    lastError: row.last_error === null || row.last_error === undefined ? null : toStr(row.last_error),
+    attempts: toNum(row.attempts)
+  };
+}
+
+function parseStoredResult(raw: unknown): unknown {
+  if (raw === null || raw === undefined) return null;
+  try {
+    return JSON.parse(toStr(raw));
+  } catch {
+    return null;
+  }
+}
+
 export async function recordQueueJobProgress(ctx: PgContext, fence: QueueClaimFence): Promise<boolean> {
   const result = await ctx.pool.query(
     `UPDATE execution_queue SET nodes_completed = nodes_completed + 1 WHERE id = $1 AND claim_token = $2 AND status = 'running'`,
     [fence.queueItemId, fence.claimToken]
   );
   return (result.rowCount ?? 0) > 0;
+}
+
+export async function markQueueEffectsStarted(ctx: PgContext, fence: QueueClaimFence): Promise<boolean> {
+  const result = await ctx.query<{ id: string }>(
+    `UPDATE execution_queue SET effects_started = 1
+      WHERE id = $1 AND claim_token = $2 AND status = 'running'
+      RETURNING id`,
+    [fence.queueItemId, fence.claimToken]
+  );
+  return result.length > 0;
 }
 
 export async function listCanceledExecutionIds(ctx: PgContext, executionIds: readonly string[]): Promise<string[]> {
@@ -466,9 +543,13 @@ interface LockedQueueRow {
   attempts: number;
   max_attempts: number;
   nodes_completed: number;
+  claim_token: string | null;
+  effects_token: string | null;
+  effects_started: number;
 }
 
-const LOCKED_QUEUE_COLUMNS = "id, workflow_id, workflow_name, payload_json, attempts, max_attempts, nodes_completed";
+const LOCKED_QUEUE_COLUMNS =
+  "id, workflow_id, workflow_name, payload_json, attempts, max_attempts, nodes_completed, claim_token, effects_token, effects_started";
 
 /**
  * Settles one locked running item by the worker-loss policy. The caller holds the item's row lock; the run's history
@@ -499,7 +580,8 @@ async function settleLostJob(
     resume,
     resumeStateStatus: pausedState ? toStr(pausedState.status) : null,
     resumeNodesCompleted: toNum(row.nodes_completed),
-    history: history ? { status: toStr(history.status), completedAt: history.completed_at, nodeResultsJson: history.node_results_json } : null
+    history: history ? { status: toStr(history.status), completedAt: history.completed_at, nodeResultsJson: history.node_results_json } : null,
+    effects: lostJobEffects(row)
   });
   const lost = countsAttempt ? 1 : 0;
   if (decision === "finished") {

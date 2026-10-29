@@ -49,7 +49,7 @@ import type {
 } from "@ai-orchestrator/shared";
 import { DESTINATION_KINDS, DESTINATION_TIERS, type DataDestinationRow, DEFAULT_PROJECT_ID, GUARD_SIMULATION_JOB_DATASET_PREFIX, MCP_POLICY_KINDS, MCP_POLICY_ROLES, MCP_TOOL_HINT_CONDITIONS, REPLAY_CAPTURE_API_KEY_FILTER, REPLAY_CAPTURE_STATUSES } from "@ai-orchestrator/shared";
 import { normalizeMcpSamplingSettings, SUBJECT_CASSETTE_SOURCES, SUBJECT_EXECUTION_TRIGGERS } from "./store-shared.js";
-import { ONE_PENDING_APPROVAL_INDEX, QUEUE_ACTIVE_EXECUTION_INDEX, QUEUE_CLAIM_INDEX, QUEUE_RUNNING_HEARTBEAT_INDEX } from "./migrations.js";
+import { ONE_PENDING_APPROVAL_INDEX, QUEUE_ACTIVE_EXECUTION_INDEX, QUEUE_CLAIM_INDEX, QUEUE_FINISHED_INDEX, QUEUE_RUNNING_HEARTBEAT_INDEX } from "./migrations.js";
 import {
   normalizeMcpRuntimeLimits,
   normalizeMcpSandboxSettings,
@@ -84,11 +84,13 @@ import type {
   ReplayRecordingLimits,
   QueueClaimedItem,
   QueueClaimFence,
+  QueueItemOutcome,
   ReplayRecordingRefusal,
   Store
 } from "./store.js";
 import {
   decideLostJob,
+  lostJobEffects,
   DEFAULT_QUEUE_POOL,
   fairClaimWindow,
   payloadExecutionId,
@@ -3746,10 +3748,15 @@ export class SqliteStore implements Store {
     this.ensureColumn("execution_queue", "pool", "TEXT NOT NULL", "'default'");
     this.ensureColumn("execution_queue", "lost_count", "INTEGER NOT NULL", "0");
     this.ensureColumn("execution_queue", "nodes_completed", "INTEGER NOT NULL", "0");
+    this.ensureColumn("execution_queue", "effects_token", "TEXT");
+    this.ensureColumn("execution_queue", "effects_started", "INTEGER NOT NULL", "0");
+    // Phase 13.1 — queue dispatch: the result a worker stored for the instance waiting on a dispatched run.
+    this.ensureColumn("execution_queue", "result_json", "TEXT");
     this.exec(
       `CREATE INDEX IF NOT EXISTS ${QUEUE_CLAIM_INDEX} ON execution_queue (pool, priority DESC, scheduled_at, created_at, id) WHERE status = 'pending'`
     );
     this.exec(`CREATE INDEX IF NOT EXISTS ${QUEUE_RUNNING_HEARTBEAT_INDEX} ON execution_queue (heartbeat_at) WHERE status = 'running'`);
+    this.exec(`CREATE INDEX IF NOT EXISTS ${QUEUE_FINISHED_INDEX} ON execution_queue (updated_at) WHERE status = 'completed' OR status = 'dead'`);
 
     // Phase 13.1 cluster signalling migration — the cluster instance registry and inline-run owners. Postgres writes
     // them; on SQLite (one process) they exist for schema parity and stay empty.
@@ -5404,6 +5411,10 @@ export class SqliteStore implements Store {
     this.exec(`DELETE FROM guard_events WHERE created_at < ?`, [input.before]);
     // Phase 11.2 — and decided approval requests; pending ones stay with their paused run.
     this.exec(`DELETE FROM approval_requests WHERE status <> 'pending' AND created_at < ?`, [input.before]);
+    // Phase 13.1 — and finished queue jobs and dead-letter entries: their payloads (a dispatched run's spec, with its
+    // input) and stored results never outlive the history.
+    this.exec(`DELETE FROM execution_queue WHERE (status = 'completed' OR status = 'dead') AND updated_at < ?`, [input.before]);
+    this.exec(`DELETE FROM execution_queue_dlq WHERE failed_at < ?`, [input.before]);
     const deleted = before ? toNumber(before.count) : 0;
     if (deleted > 0) {
       this.persist();
@@ -5911,13 +5922,26 @@ export class SqliteStore implements Store {
     maxAttempts?: number;
     scheduledAt?: string;
     pool?: string;
-  }): Promise<void> {
+    replaceFinishedBefore?: string;
+  }): Promise<boolean> {
     const now = new Date().toISOString();
-    this.exec(
+    // A finished item past the window is replaced by the new job: every column back to a fresh pending item.
+    const onConflict = input.replaceFinishedBefore
+      ? `ON CONFLICT(id) DO UPDATE SET
+           workflow_id = excluded.workflow_id, workflow_name = excluded.workflow_name, payload_json = excluded.payload_json,
+           status = 'pending', priority = excluded.priority, attempts = 0, max_attempts = excluded.max_attempts, last_error = NULL,
+           scheduled_at = excluded.scheduled_at, started_at = NULL, completed_at = NULL, created_at = excluded.created_at,
+           updated_at = excluded.updated_at, pool = excluded.pool, execution_id = excluded.execution_id, claimed_by = NULL,
+           claim_token = NULL, heartbeat_at = NULL, lost_count = 0, nodes_completed = 0, result_json = NULL,
+           effects_token = NULL, effects_started = 0
+         WHERE execution_queue.status IN ('completed', 'dead') AND execution_queue.created_at < ?`
+      : `ON CONFLICT(id) DO NOTHING`;
+    const result = this.db.prepare(
       `INSERT INTO execution_queue (id, workflow_id, workflow_name, payload_json, status, priority, attempts, max_attempts, last_error, scheduled_at, started_at, completed_at, created_at, updated_at, pool, execution_id)
        VALUES (?, ?, ?, ?, 'pending', ?, 0, ?, NULL, ?, NULL, NULL, ?, ?, ?, ?)
-       ON CONFLICT(id) DO NOTHING`,
-      [
+       ${onConflict}`
+    ).run(
+      ...[
         input.id,
         input.workflowId,
         input.workflowName ?? null,
@@ -5928,10 +5952,12 @@ export class SqliteStore implements Store {
         now,
         now,
         input.pool ?? DEFAULT_QUEUE_POOL,
-        payloadExecutionId(input.payload, input.id)
+        payloadExecutionId(input.payload, input.id),
+        ...(input.replaceFinishedBefore ? [input.replaceFinishedBefore] : [])
       ]
     );
     this.persist();
+    return result.changes > 0;
   }
 
   async dequeueNext(limit = 1): Promise<Array<{
@@ -6010,6 +6036,54 @@ export class SqliteStore implements Store {
         : this.db.prepare(`UPDATE execution_queue SET status = 'completed', completed_at = ?, updated_at = ? WHERE id = ?`).run(now, now, id);
     this.persist();
     return result.changes > 0;
+  }
+
+  async saveQueueItemResult(input: { id: string; claimToken: string | null; result: unknown }): Promise<boolean> {
+    const json = JSON.stringify(input.result ?? null);
+    const now = new Date().toISOString();
+    const result =
+      input.claimToken !== null
+        ? this.db
+            .prepare(`UPDATE execution_queue SET result_json = ?, updated_at = ? WHERE id = ? AND claim_token = ? AND status = 'running'`)
+            .run(json, now, input.id, input.claimToken)
+        : this.db.prepare(`UPDATE execution_queue SET result_json = ?, updated_at = ? WHERE id = ?`).run(json, now, input.id);
+    this.persist();
+    return result.changes > 0;
+  }
+
+  /** See the Postgres store: a completed item, or a running one whose holder already stored its result. */
+  async releaseQueueItemResult(id: string): Promise<void> {
+    const result = this.db
+      .prepare(
+        `UPDATE execution_queue SET result_json = NULL, payload_json = json_object('executionId', execution_id)
+          WHERE id = ?
+            AND ((status = 'completed' AND (result_json IS NOT NULL OR payload_json LIKE '%"dispatch"%'))
+              OR (status = 'running' AND result_json IS NOT NULL))`
+      )
+      .run(id);
+    if (result.changes > 0) this.persist();
+  }
+
+  async getQueueItemOutcome(id: string): Promise<QueueItemOutcome | null> {
+    const row = this.queryOne<{ status: unknown; result_json: unknown; last_error: unknown; attempts: unknown }>(
+      `SELECT status, result_json, last_error, attempts FROM execution_queue WHERE id = ?`,
+      [id]
+    );
+    if (!row) return null;
+    let result: unknown = null;
+    if (row.result_json !== null && row.result_json !== undefined) {
+      try {
+        result = JSON.parse(toString(row.result_json));
+      } catch {
+        result = null;
+      }
+    }
+    return {
+      status: toString(row.status),
+      result,
+      lastError: row.last_error === null || row.last_error === undefined ? null : toString(row.last_error),
+      attempts: Number(row.attempts ?? 0)
+    };
   }
 
   /** Retries with backoff until max attempts; `retryable: false` moves the job to the DLQ now. */
@@ -6201,12 +6275,14 @@ export class SqliteStore implements Store {
       ranked.sort((a, b) => a.rank - b.rank || a.index - b.index);
       const picked = ranked.slice(0, limit);
       const claim = this.db.prepare(
-        `UPDATE execution_queue SET status = 'running', started_at = ?, heartbeat_at = ?, claimed_by = ?, claim_token = ?, updated_at = ?
+        `UPDATE execution_queue SET status = 'running', started_at = ?, heartbeat_at = ?, claimed_by = ?, claim_token = ?, updated_at = ?,
+                effects_token = ?, effects_started = 0
          WHERE id = ? AND status = 'pending'`
       );
       return picked.map(({ row }) => {
         const claimToken = randomUUID();
-        claim.run(now, now, input.owner, claimToken, now, toString(row.id));
+        // The claim tracks side effects (the worker-loss policy): none started yet.
+        claim.run(now, now, input.owner, claimToken, now, claimToken, toString(row.id));
         let payload: Record<string, unknown> = {};
         try {
           const parsed = JSON.parse(toString(row.payload_json));
@@ -6266,6 +6342,16 @@ export class SqliteStore implements Store {
     return result.changes > 0;
   }
 
+  async markQueueEffectsStarted(fence: QueueClaimFence): Promise<boolean> {
+    const held = this.queueClaimHeldSync(fence);
+    if (!held) return false;
+    const result = this.db
+      .prepare(`UPDATE execution_queue SET effects_started = 1 WHERE id = ? AND claim_token = ? AND status = 'running' AND effects_started = 0`)
+      .run(fence.queueItemId, fence.claimToken);
+    if (result.changes > 0) this.persist();
+    return true;
+  }
+
   async listCanceledExecutionIds(executionIds: readonly string[]): Promise<string[]> {
     if (executionIds.length === 0) return [];
     return this.queryAll<{ id: unknown }>(
@@ -6275,7 +6361,11 @@ export class SqliteStore implements Store {
   }
 
   /** Settles one running item by the worker-loss policy (queue-leases.ts); the caller runs it in a transaction. */
-  private settleLostQueueItem(row: ExecutionQueueRow & { nodes_completed?: unknown }, countsAttempt: boolean, reasons: LostJobReasons): LostJobOutcome {
+  private settleLostQueueItem(
+    row: ExecutionQueueRow & { nodes_completed?: unknown; claim_token?: unknown; effects_token?: unknown; effects_started?: unknown },
+    countsAttempt: boolean,
+    reasons: LostJobReasons
+  ): LostJobOutcome {
     const id = toString(row.id);
     const now = new Date().toISOString();
     const executionId = payloadExecutionId(row.payload_json, id);
@@ -6294,7 +6384,8 @@ export class SqliteStore implements Store {
       resume,
       resumeStateStatus: pausedState ? toString(pausedState.status) : null,
       resumeNodesCompleted: toNumber(row.nodes_completed ?? 0),
-      history: history ? { status: toString(history.status), completedAt: history.completed_at, nodeResultsJson: history.node_results_json } : null
+      history: history ? { status: toString(history.status), completedAt: history.completed_at, nodeResultsJson: history.node_results_json } : null,
+      effects: lostJobEffects(row)
     });
     if (decision === "finished") {
       this.exec(
@@ -6342,7 +6433,7 @@ export class SqliteStore implements Store {
     const expiredBefore = new Date(Date.now() - input.leaseMs).toISOString();
     return this.db.transaction(() =>
       this.queryAll<ExecutionQueueRow>(
-        `SELECT id, workflow_id, workflow_name, payload_json, attempts, max_attempts, nodes_completed FROM execution_queue
+        `SELECT id, workflow_id, workflow_name, payload_json, attempts, max_attempts, nodes_completed, claim_token, effects_token, effects_started FROM execution_queue
          WHERE status = 'running' AND heartbeat_at IS NOT NULL AND heartbeat_at < ?
          ORDER BY heartbeat_at, id
          LIMIT ?`,
@@ -6354,7 +6445,7 @@ export class SqliteStore implements Store {
   async releaseQueueItem(input: { id: string; claimToken: string | null }): Promise<LostJobOutcome | null> {
     return this.db.transaction(() => {
       const row = this.queryOne<ExecutionQueueRow>(
-        `SELECT id, workflow_id, workflow_name, payload_json, attempts, max_attempts, nodes_completed FROM execution_queue
+        `SELECT id, workflow_id, workflow_name, payload_json, attempts, max_attempts, nodes_completed, claim_token, effects_token, effects_started FROM execution_queue
          WHERE id = ? AND status = 'running' AND (? IS NULL OR claim_token = ?)`,
         [input.id, input.claimToken, input.claimToken]
       );

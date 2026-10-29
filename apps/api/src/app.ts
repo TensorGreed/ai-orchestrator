@@ -63,7 +63,6 @@ import {
   type Workflow,
   type WorkflowExecutionState,
   type WorkflowNode,
-  ErrorCategory,
   WorkflowError
 } from "@ai-orchestrator/shared";
 import {
@@ -101,6 +100,7 @@ import {
   parseTrustProxy,
   resolveSsoMfaSettings,
   resolveQueueSettings,
+  resolveExecutionDispatch,
   ssoPostLoginUrl,
   type AppConfig
 } from "./config";
@@ -118,7 +118,7 @@ import { SchedulerService } from "./services/scheduler-service";
 import { RunWriteChains } from "./services/run-write-chains.js";
 import { NonRetryableQueueError, QueueFullError, QueueProducer, QueueService, type QueueJobContext } from "./services/queue-service";
 import { AppLifecycle } from "./services/app-lifecycle.js";
-import { DEFAULT_QUEUE_POOL, QUEUE_POOL_PATTERN, QueueClaimLostError } from "./db/queue-leases.js";
+import { DEFAULT_QUEUE_POOL, QUEUE_POOL_PATTERN, QueueClaimLostError, resumeEffectFreeNodeId } from "./db/queue-leases.js";
 import { isConnectedEntrypoint, TriggerService } from "./services/trigger-service";
 import { ApiKeyService } from "./services/api-key-service";
 import { MfaService } from "./services/mfa-service";
@@ -173,7 +173,7 @@ import { UsageService } from "./services/usage-service";
 import { BudgetService } from "./services/budget-service";
 import { AuditExportBusyError, AuditExportService } from "./services/audit-export-service.js";
 import { McpProbeService, McpProbeSkippedError, serverConfigFromRecord } from "./services/mcp-probe-service";
-import { McpElicitationService } from "./services/mcp-elicitation-service.js";
+import { McpElicitationService, toElicitationView } from "./services/mcp-elicitation-service.js";
 import { registerMcpClientFeatureRoutes } from "./mcp-client-features-routes.js";
 import { registerMcpControlPlaneRoutes } from "./mcp-control-plane-routes.js";
 import { registerMcpTestingRoutes } from "./mcp-testing-routes.js";
@@ -183,13 +183,15 @@ import { GuardSimulationService } from "./services/guard-simulation-service.js";
 import { registerAuditBundleRoutes } from "./audit-bundle-routes.js";
 import { registerReplayRoutes } from "./replay-routes.js";
 import { registerReplayCaptureRoutes } from "./replay-capture-routes.js";
-import { deriveCaptureSurrogateKey, ReplayCaptureService, type CaptureSource, type CaptureTicket } from "./services/replay-capture-service.js";
+import { deriveCaptureSurrogateKey, ReplayCaptureService, type CaptureTicket } from "./services/replay-capture-service.js";
 import { inputProvenance, type CaptureInputOrigin } from "./services/capture-masking.js";
 import { registerEvalRoutes } from "./eval-routes.js";
 import { registerGoldenSetFileRoutes } from "./golden-set-file-routes.js";
-import { parseStoredDataLabels, recordedInputLabels, type DataLabels } from "@ai-orchestrator/shared";
+import { isEntryNodeType, parseStoredDataLabels, recordedInputLabels, type DataLabels } from "@ai-orchestrator/shared";
 import { GOLDEN_SET_FILE_DEFAULT_MAX_BYTES, GUARD_SIMULATION_MAX_CASES_DEFAULT, GUARD_SIMULATION_RETENTION_DAYS } from "@ai-orchestrator/shared";
 import { registerApprovalRoutes } from "./approval-routes.js";
+import { registerExecutionRoutes } from "./execution-routes.js";
+import { asRecord, isExecutionTimeoutAbort, normalizeExecutionTimeoutMs, normalizeSessionId, retryAfterSeconds } from "./run-helpers.js";
 import { registerReleaseRoutes } from "./release-routes.js";
 import { registerGateAdmissionRoutes } from "./gate-admission-routes.js";
 import { registerDataDestinationRoutes } from "./data-destination-routes.js";
@@ -208,6 +210,23 @@ import { AuditSigningService } from "./services/audit-signing-service.js";
 import { GuardService } from "./services/guard-service.js";
 import type { GuardSimulationRun } from "./services/guard-simulation-sink.js";
 import { startSseHeartbeat } from "./sse-heartbeat.js";
+import {
+  cronQueueItemId,
+  DISPATCH_SPEC_VERSION,
+  DispatchBusyError,
+  DispatchClientGoneError,
+  DispatchFailedError,
+  DispatchGate,
+  dispatchedPolicyActor,
+  DispatchTimeoutError,
+  QUEUE_DISPATCH_CAPABILITY,
+  readDispatchedRunSpec,
+  RunDispatcher,
+  triggerQueueItemId,
+  type DispatchedRunSpec
+} from "./services/run-dispatch.js";
+import { LocalRunEvents, openRunRelay, resultFromPersistedRun, RunEventPublisher, type PersistedRun, type RunEventName } from "./services/run-event-relay.js";
+import type { RunWorkflowExecutionInput, WorkflowExecutionEventHooks } from "./run-types.js";
 import { createRunAccess, type RunAccessDenial } from "./run-access.js";
 import { ProjectNotEmptyError, ReleaseGateEnforcedError, StoreReferenceMissingError } from "./db/store-errors.js";
 import { createRunScope, type SecretScope } from "./run-scope.js";
@@ -227,7 +246,7 @@ import {
   buildSnapshotFile,
   type McpCassetteRunPlan
 } from "./services/mcp-cassette-service.js";
-import type { McpCassetteRecord, McpCassetteSource, McpReplayMode } from "@ai-orchestrator/shared";
+import type { McpCassetteRecord, McpCassetteSource } from "@ai-orchestrator/shared";
 import {
   evaluateToolForContext,
   manualReadOnlyFor,
@@ -613,41 +632,8 @@ function stripSignaturePrefix(value: string): string {
   return trimmed;
 }
 
-/**
- * True when a run's abort signal fired because the execution timeout ran
- * out, not because a person stopped it. A timed-out run ends as an error
- * on the node that was running; a stopped run ends as canceled.
- */
-function isExecutionTimeoutAbort(signal: AbortSignal | undefined): boolean {
-  const reason: unknown = signal?.aborted ? signal.reason : undefined;
-  return reason instanceof WorkflowError && reason.category === ErrorCategory.WORKFLOW_TIMEOUT;
-}
 
-function normalizeExecutionTimeoutMs(
-  primary: unknown,
-  secondary: unknown,
-  fallbackMs: number
-): number {
-  const candidate =
-    typeof primary === "number" && Number.isFinite(primary) && primary > 0
-      ? primary
-      : typeof secondary === "number" && Number.isFinite(secondary) && secondary > 0
-        ? secondary
-        : fallbackMs;
-  const bounded = Math.floor(candidate);
-  return Math.max(1_000, Math.min(86_400_000, bounded));
-}
 
-function normalizeIsoDateFilter(value: unknown): string | undefined {
-  if (typeof value !== "string" || !value.trim()) {
-    return undefined;
-  }
-  const timestamp = Date.parse(value.trim());
-  if (!Number.isFinite(timestamp)) {
-    return undefined;
-  }
-  return new Date(timestamp).toISOString();
-}
 
 function normalizeWorkflowIdCandidate(value: string): string {
   const normalized = value
@@ -830,22 +816,6 @@ async function buildEmbedderFromKbConfig(
   }
 }
 
-// Phase 8.3 — surface a Retry-After hint when a budget block rejects.
-// Returns seconds until the start of the next budget period.
-function retryAfterSeconds(period: "day" | "week" | "month"): number {
-  const now = new Date();
-  let next: Date;
-  if (period === "day") {
-    next = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1));
-  } else if (period === "week") {
-    const day = now.getUTCDay();
-    const daysFromMonday = (day + 6) % 7;
-    next = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - daysFromMonday + 7));
-  } else {
-    next = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1));
-  }
-  return Math.max(60, Math.floor((next.getTime() - now.getTime()) / 1000));
-}
 
 function summarizeNodeStatuses(nodeResults: Array<{ status?: unknown }> | undefined): Record<string, number> {
   const summary: Record<string, number> = {};
@@ -856,11 +826,6 @@ function summarizeNodeStatuses(nodeResults: Array<{ status?: unknown }> | undefi
   return summary;
 }
 
-function normalizeSessionId(sessionId?: string, sessionIdSnakeCase?: string): string | undefined {
-  const camel = typeof sessionId === "string" && sessionId.trim() ? sessionId.trim() : undefined;
-  const snake = typeof sessionIdSnakeCase === "string" && sessionIdSnakeCase.trim() ? sessionIdSnakeCase.trim() : undefined;
-  return camel ?? snake;
-}
 
 function resolveWidgetBundlePath(): string {
   const appFilePath = fileURLToPath(import.meta.url);
@@ -956,9 +921,6 @@ function firstNonEmptyString(...values: unknown[]): string | undefined {
 
 const allowedWebhookMethods = new Set(["GET", "POST", "PUT", "PATCH", "DELETE"]);
 
-function asRecord(value: unknown): Record<string, unknown> {
-  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
-}
 
 function hasOwnRecordKey(record: Record<string, unknown>, key: string): boolean {
   return Object.prototype.hasOwnProperty.call(record, key);
@@ -1752,6 +1714,17 @@ export async function createApp(
     await clusterBus.close();
   });
   const runOwners = clusterMode ? new RunOwnerTracker(store, clusterInstanceId, clusterLogger) : null;
+  // Phase 13.1 — cluster mode (Postgres with HA on) adds heartbeat leases, the lease reaper and pools. Outside it the
+  // consumer runs today's unleased path.
+  const queueClusterMode = config.HA_ENABLED && store instanceof PostgresStore;
+  const queueSettings = resolveQueueSettings(config, { clusterMode: queueClusterMode });
+  // The producer exists on every instance (any WORKER_MODE), so an api replica accepts /enqueue for the workers.
+  const queueProducer = queueService?.producer ?? new QueueProducer(store, { maxPending: queueSettings.maxPending });
+  // Phase 13.1 — where runs execute (EXECUTION_DISPATCH): inline (default) here, or queue (cluster mode only) on the
+  // queue's workers with this instance relaying events and results (services/run-dispatch.ts).
+  const executionDispatch = resolveExecutionDispatch(config, { clusterMode });
+  /** Events of the runs executing in this process, for a reattach on this instance (nothing is built while nobody listens). */
+  const localRunEvents = new LocalRunEvents();
   /**
    * Runs the queue consumer is executing: they belong to the queue's lease, reaper and worker-loss policy, so no
    * owner row is recorded for them and the dead-executor reconcile never acts on them.
@@ -1866,26 +1839,6 @@ export async function createApp(
     await store.close();
   });
 
-  type WorkflowExecutionEventHooks = {
-    onNodeStart?: (event: { nodeId: string; nodeType: string; startedAt: string; input?: unknown }) => Promise<void> | void;
-    onNodeComplete?: (event: {
-      nodeId: string;
-      nodeType: string;
-      status: string;
-      completedAt: string;
-      durationMs: number;
-      input?: unknown;
-      output?: unknown;
-      error?: string;
-    }) => Promise<void> | void;
-    onLLMDelta?: (event: { nodeId: string; delta: string; index: number }) => Promise<void> | void;
-    /** Phase 10.5 — `notifications/progress` from an MCP server during an MCP Tool node or agent tool call. */
-    onMcpProgress?: (event: McpToolProgressEvent & { nodeId: string }) => Promise<void> | void;
-    /** Step-by-step node activity: resolved inputs, model calls, retries, agent steps and tool calls. */
-    onNodeActivity?: (event: NodeActivityEvent) => Promise<void> | void;
-    /** Phase 10.5 — an `elicitation/create` request started waiting for a person, or was settled. */
-    onMcpElicitation?: (event: { phase: "created" | "settled"; elicitation: McpElicitationView }) => Promise<void> | void;
-  };
   type ExecutionHistoryRecord = Parameters<Store["saveExecutionHistory"]>[0];
 
   const registerActiveExecution = (input: {
@@ -2102,95 +2055,7 @@ export async function createApp(
   // Bounded: a run whose history is never persisted must not grow it forever.
   const runReleases = new Map<string, { channel: ReleaseChannel; version: number | null }>();
 
-  const runWorkflowExecutionUnsettled = async (input: {
-    workflow: Workflow;
-    startNodeId?: string;
-    runMode?: "workflow" | "single_node";
-    usePinnedData?: boolean;
-    pinnedData?: Record<string, unknown>;
-    nodeOutputs?: Record<string, unknown>;
-    webhookPayload?: Record<string, unknown>;
-    variables?: Record<string, unknown>;
-    systemPrompt?: string;
-    userPrompt?: string;
-    sessionId?: string;
-    directInput?: Record<string, unknown>;
-    executionId?: string;
-    triggerType?: string;
-    triggeredBy?: string;
-    /**
-     * Phase 10.2 — the signed-in user who started this run. Set only by
-     * routes that authenticate a user; never derived from a request body.
-     * Without it the tool policy uses the workflow owner's role.
-     */
-    policyActor?: SafeUser | null;
-    /**
-     * Phase 10.4 — an explicit policy subject (an MCP gateway client). Wins
-     * over `policyActor` and the owner fallback.
-     */
-    policySubject?: McpToolPolicySubject;
-    /**
-     * MCP elicitations from this run belong to the workflow, not to
-     * `policyActor`: anyone with workflow:execute on it may answer them.
-     * Set for queued jobs, whose enqueuer is usually not watching.
-     */
-    elicitationsForWorkflow?: boolean;
-    executionTimeoutMs?: number;
-    customData?: Record<string, unknown>;
-    resumeState?: WorkflowExecutionState;
-    approvalDecision?: {
-      decision: "approve" | "reject" | "timeout";
-      actedBy?: string;
-      reason?: string;
-      edits?: Record<string, unknown>;
-      editedFields?: string[];
-      requestId?: string;
-    };
-    hooks?: WorkflowExecutionEventHooks;
-    /** Phase 10.8 — record this run's MCP calls, or answer them from a cassette. */
-    mcpPlan?: McpCassetteRunPlan;
-    /**
-     * Phase 15.1 — a golden-run replay: stubbed nodes answered by the plan's
-     * hook, session state in the sandbox's own stores, no error workflow,
-     * no notifications, no paused state, no elicitation prompts.
-     */
-    replay?: { hook: ReplayNodeHook; sandbox: ReplaySandbox };
-    /** Phase 15.3 — model calls answered from a golden run's model tape (a replay with `models: "replay"`). */
-    providerRegistry?: ProviderRegistry;
-    /** Phase 15.3 — a replay candidate's guard profile, evaluated in place of the bindings. */
-    guardProfileOverride?: { profileId: string; version?: number };
-    /** Phase 15.6 — a guard policy simulation's execution: the profile it swaps in, and where its verdicts and tokens go. */
-    guardSimulation?: GuardSimulationRun;
-    /**
-     * Phase 15.4 — `production` for production traffic (the caller resolved
-     * the published version): sub-workflows and the error workflow load their
-     * published versions too, and a pause remembers it for the resume.
-     * Default `draft`.
-     */
-    channel?: ReleaseChannel;
-    /** The published version a production run runs (default: the version the resolver returned this workflow object as). */
-    releaseVersion?: number | null;
-    /**
-     * Phase 15.6 — who produced the run's input, as the server knows it:
-     * `scheduler` for the scheduler's own runs, `user` for a signed-in user
-     * or API key. Never derived from a caller-supplied trigger name.
-     */
-    captureInputOrigin?: CaptureInputOrigin;
-    /**
-     * Phase 15.6 — set by the execute routes when an API key started the run
-     * on the production channel. The run keeps its `manual` trigger (the
-     * workflow, history and filters see it as before); this server-side
-     * marker alone makes it eligible for capture.
-     */
-    captureSource?: CaptureSource;
-    /**
-     * Phase 16 — where the run's input came from, when the server knows better
-     * than the starter: a replay, gate case, simulation, MCP replay or eval of a
-     * recorded case takes the recording's input origin (Q7), not the user who
-     * started it. Absent: decided from the trigger and who started the run.
-     */
-    inputLabels?: DataLabels;
-  }) => {
+  const runWorkflowExecutionUnsettled = async (input: RunWorkflowExecutionInput) => {
     const channel: ReleaseChannel = input.channel ?? "draft";
     const releaseVersion = channel === "production" ? (input.releaseVersion !== undefined ? input.releaseVersion : releaseService.versionOf(input.workflow)) : null;
     // Phase 15.4 — the run's history records which published version it ran, so a retry runs that version again.
@@ -2977,6 +2842,7 @@ export async function createApp(
         // The progress write starts first and is awaited after the event is passed on, so events reach
         // the stream in the order the engine emitted them (activity hooks are not awaited by the engine).
         const persisted = persistProgress();
+        localRunEvents.emit(input.executionId, "node_start", event);
         try {
           await input.passthroughHooks?.onNodeStart?.(event);
         } catch (error) {
@@ -3024,6 +2890,7 @@ export async function createApp(
           },
           "Workflow node completed"
         );
+        localRunEvents.emit(input.executionId, "node_complete", event);
         try {
           await input.passthroughHooks?.onNodeComplete?.(event);
         } catch (error) {
@@ -3058,6 +2925,7 @@ export async function createApp(
             persisted = persistProgress();
           }
         }
+        if (localRunEvents.has(input.executionId)) localRunEvents.emit(input.executionId, "node_progress", { nodeId, ...snapshot });
         try {
           await input.passthroughHooks?.onMcpProgress?.({ nodeId, ...snapshot });
         } catch (error) {
@@ -3086,6 +2954,7 @@ export async function createApp(
             persisted = persistProgress();
           }
         }
+        localRunEvents.emit(input.executionId, "node_activity", event);
         try {
           await input.passthroughHooks?.onNodeActivity?.(event);
         } catch (error) {
@@ -3102,6 +2971,7 @@ export async function createApp(
         await persisted;
       },
       onLLMDelta: async (event) => {
+        localRunEvents.emit(input.executionId, "llm_delta", event);
         try {
           await input.passthroughHooks?.onLLMDelta?.(event);
         } catch (error) {
@@ -3118,6 +2988,351 @@ export async function createApp(
         }
       }
     };
+  };
+
+  /**
+   * Phase 13.1 — a run as a DispatchedRunSpec describes it, in this process: what each route did inline before queue
+   * dispatch (progress hooks, an MCP recording or cassette replay, the run, the cassette, the history write), in the
+   * same order with the same arguments. Inline dispatch (the default) runs every spec through here. `mcpPlan` is a plan
+   * the route built already (a cassette replay), so it is not built twice.
+   */
+  const executeRunSpec = async (
+    spec: DispatchedRunSpec,
+    passthrough?: WorkflowExecutionEventHooks,
+    local: { mcpPlan?: McpCassetteRunPlan } = {}
+  ): Promise<Awaited<ReturnType<typeof runWorkflowExecution>>> => {
+    const { run } = spec;
+    const progressHooks = spec.progress
+      ? createProgressTrackingHooks({
+          executionId: run.executionId,
+          workflow: run.workflow,
+          triggerType: run.triggerType,
+          triggeredBy: run.triggeredBy,
+          requestInput: spec.progress.requestInput,
+          customData: spec.progress.customData,
+          ...(passthrough ? { passthroughHooks: passthrough } : {})
+        })
+      : undefined;
+    const mcpPlan = local.mcpPlan ?? (spec.cassette?.kind === "record" ? mcpCassetteService.planRecording(mcpRegistry, providerRegistry) : undefined);
+    const executed = await runWorkflowExecution({
+      ...run,
+      ...(mcpPlan ? { mcpPlan } : {}),
+      ...(progressHooks ? { hooks: progressHooks } : {})
+    });
+    const result = spec.cassette
+      ? await finishMcpCassettePlan(mcpPlan, executed, { executionId: run.executionId, workflow: run.workflow, source: spec.cassette.source, createdBy: spec.cassette.createdBy })
+      : executed;
+    await persistExecutionHistory({
+      executionId: run.executionId,
+      workflow: run.workflow,
+      result,
+      triggerType: run.triggerType,
+      triggeredBy: run.triggeredBy,
+      requestInput: spec.history.requestInput,
+      customData: spec.history.customData
+    });
+    return result;
+  };
+
+  /** Passthrough hooks that hand a run's events to `emit` under their SSE names. */
+  const runEventHooks = (emit: (name: RunEventName, payload: Record<string, unknown>) => void): WorkflowExecutionEventHooks => ({
+    onNodeStart: (event) => emit("node_start", { ...event }),
+    onNodeComplete: (event) => emit("node_complete", { ...event }),
+    onLLMDelta: (event) => emit("llm_delta", { ...event }),
+    onMcpProgress: (event) => emit("node_progress", { ...event }),
+    onNodeActivity: (event) => emit("node_activity", { ...event })
+  });
+
+  /**
+   * Phase 13.1 — a worker runs a job another instance dispatched (EXECUTION_DISPATCH=queue). The run is started exactly
+   * as the receiving route would have started it inline (the spec), records its progress under the job's claim,
+   * publishes its events on the run's bus channel, stores its result on the queue item, then sends `done`. A run
+   * canceled while it waited for a worker is not started: its canceled record is its result. A run the queue stopped
+   * (lease lost, draining) stores nothing and sends no `done`; the waiting instance keeps waiting for the next attempt.
+   */
+  const runDispatchedJob = async (spec: DispatchedRunSpec, context: QueueJobContext): Promise<void> => {
+    const { run } = spec;
+    const executionId = run.executionId;
+    const publisher = new RunEventPublisher({
+      publish: async (event) => await clusterBus.publishRunEvent(executionId, event),
+      onError: (error) => app.log.warn({ executionId, error: error instanceof Error ? error.message : String(error) }, "Could not publish a run event")
+    });
+    let result: Awaited<ReturnType<typeof runWorkflowExecution>>;
+    const recorded = await store.getExecutionHistory(executionId);
+    if (recorded?.status === "canceled") {
+      result = resultFromPersistedRun(recorded as PersistedRun) as unknown as Awaited<ReturnType<typeof runWorkflowExecution>>;
+    } else {
+      const unsubscribeElicitations = mcpElicitationService.subscribe(executionId, (event) => publisher.emit("mcp_elicitation", { ...event }));
+      try {
+        const tracked = spec.progress ?? spec.history;
+        const progressHooks = createProgressTrackingHooks({
+          executionId,
+          workflow: run.workflow,
+          triggerType: run.triggerType,
+          triggeredBy: run.triggeredBy,
+          requestInput: tracked.requestInput,
+          customData: tracked.customData,
+          passthroughHooks: runEventHooks((name, payload) => publisher.emit(name, payload))
+        });
+        let mcpPlan: McpCassetteRunPlan | undefined;
+        if (spec.cassette?.kind === "record") {
+          mcpPlan = mcpCassetteService.planRecording(mcpRegistry, providerRegistry);
+        } else if (spec.cassette?.kind === "replay") {
+          const cassette = await store.getMcpCassette(spec.cassette.cassetteId);
+          if (!cassette) throw new NonRetryableQueueError(`Cassette ${spec.cassette.cassetteId} no longer exists.`);
+          mcpPlan = mcpCassetteService.planReplay(cassette, spec.cassette.mode, mcpRegistry, resolveRegisteredMcpServer);
+        }
+        const executed = await runWorkflowExecution({
+          ...run,
+          ...(mcpPlan ? { mcpPlan } : {}),
+          hooks: queueJobHooks(context, progressHooks)
+        });
+        if (context.signal.aborted) {
+          // The consumer stopped it (lease lost, or draining): its record is the next attempt's, or the reaper's.
+          publisher.close();
+          abandonQueueStoppedRun(executionId, run.workflow.id, context);
+          return;
+        }
+        result = spec.cassette
+          ? await finishMcpCassettePlan(mcpPlan, executed, { executionId, workflow: run.workflow, source: spec.cassette.source, createdBy: spec.cassette.createdBy })
+          : executed;
+        await persistExecutionHistory({
+          executionId,
+          workflow: run.workflow,
+          result,
+          triggerType: run.triggerType,
+          triggeredBy: run.triggeredBy,
+          requestInput: spec.history.requestInput,
+          customData: spec.history.customData
+        });
+      } catch (error) {
+        publisher.close();
+        if (context.signal.aborted) throw error;
+        // As an inline run that threw: the run ends as an error; the queue does not run it again. The node results
+        // its progress recorded stay on the record, and the write holds only while this claim holds the job.
+        const message = error instanceof Error ? error.message : String(error);
+        const progress = await store.getExecutionHistory(executionId).catch(() => null);
+        await store.saveExecutionHistory(
+          {
+            id: executionId,
+            workflowId: run.workflow.id,
+            workflowName: run.workflow.name,
+            status: "error",
+            startedAt: progress?.startedAt ?? recorded?.startedAt ?? new Date().toISOString(),
+            completedAt: new Date().toISOString(),
+            triggerType: run.triggerType,
+            triggeredBy: run.triggeredBy,
+            inputJson: redactSensitiveInput(spec.history.requestInput),
+            customData: spec.history.customData,
+            ...(progress?.nodeResults !== undefined && progress?.nodeResults !== null ? { nodeResultsJson: progress.nodeResults } : {}),
+            error: message
+          },
+          {
+            unlessCanceled: true,
+            ...(context.claimToken !== null ? { fence: { queueItemId: context.queueItemId, claimToken: context.claimToken } } : {})
+          }
+        ).catch(() => false);
+        throw error instanceof NonRetryableQueueError ? error : new NonRetryableQueueError(message);
+      } finally {
+        unsubscribeElicitations();
+      }
+    }
+    const stored = await store.saveQueueItemResult({ id: context.queueItemId, claimToken: context.claimToken, result });
+    if (!stored) {
+      app.log.warn({ executionId, queueItemId: context.queueItemId }, "A dispatched run's result was not stored: its claim no longer holds the job");
+    }
+    await publisher.done(result.status);
+    app.log.info({ executionId, workflowId: run.workflow.id, status: result.status }, "Dispatched workflow execution completed");
+  };
+
+  /**
+   * Phase 13.1 — the capability gate and the dispatcher every run-starting path goes through. With `inline` (the
+   * default) the gate never reads anything and every run takes executeRunSpec, as before.
+   */
+  const dispatchGate = new DispatchGate({
+    mode: executionDispatch.mode,
+    listInstances: async () => (instanceRegistry ? await instanceRegistry.list() : []),
+    onChange: (fallback, reason) => {
+      metricsService.setDispatchFallback(fallback);
+      if (fallback) {
+        metricsService.recordDispatchFallback();
+        app.log.warn({ reason }, "EXECUTION_DISPATCH=queue: runs execute inline on this instance until every queue consumer supports dispatch");
+      } else {
+        app.log.info({}, "EXECUTION_DISPATCH=queue: runs are dispatched to the queue's workers");
+      }
+    }
+  });
+  const runPersistedView = async (executionId: string): Promise<PersistedRun | null> => {
+    const run = await store.getExecutionHistory(executionId);
+    return run ? (run as PersistedRun) : null;
+  };
+  const readElicitationView = async (id: string): Promise<unknown | null> => {
+    const record = await mcpElicitationService.get(id);
+    return record ? toElicitationView(record) : null;
+  };
+  const runDispatcher = new RunDispatcher({
+    gate: dispatchGate,
+    executeLocally: async (spec, passthrough, local) => await executeRunSpec(spec, passthrough, local),
+    checkBackpressure: async (pool) => await queueProducer.checkBackpressure(pool),
+    recordQueued: async (spec) => {
+      const tracked = spec.progress ?? spec.history;
+      await persistExecutionHistoryRecord(
+        {
+          id: spec.run.executionId,
+          workflowId: spec.run.workflow.id,
+          workflowName: spec.run.workflow.name,
+          status: "running",
+          startedAt: new Date().toISOString(),
+          triggerType: spec.run.triggerType,
+          triggeredBy: spec.run.triggeredBy,
+          inputJson: redactSensitiveInput(tracked.requestInput),
+          customData: tracked.customData,
+          nodeResultsJson: []
+        },
+        { phase: "progress", executionId: spec.run.executionId, workflowId: spec.run.workflow.id, triggerType: spec.run.triggerType, status: "running" }
+      );
+    },
+    recordNotQueued: async (spec, error) => {
+      await store
+        .saveExecutionHistory(
+          {
+            id: spec.run.executionId,
+            workflowId: spec.run.workflow.id,
+            workflowName: spec.run.workflow.name,
+            status: "error",
+            startedAt: new Date().toISOString(),
+            completedAt: new Date().toISOString(),
+            triggerType: spec.run.triggerType,
+            triggeredBy: spec.run.triggeredBy,
+            inputJson: redactSensitiveInput((spec.progress ?? spec.history).requestInput),
+            customData: (spec.progress ?? spec.history).customData,
+            error
+          },
+          { unlessCanceled: true }
+        )
+        .catch((writeError: unknown) => {
+          app.log.warn({ executionId: spec.run.executionId, error: writeError instanceof Error ? writeError.message : String(writeError) }, "Could not end the record of a run that was not queued");
+          return false;
+        });
+    },
+    enqueue: async (spec, options) => {
+      // The published version a production run runs travels with it (the worker cannot recognise the object).
+      const run = spec.run.channel === "production" && spec.run.releaseVersion === undefined
+        ? { ...spec.run, releaseVersion: releaseService.versionOf(spec.run.workflow) }
+        : spec.run;
+      // The history input travels redacted, as the history stores it (the worker only writes it there).
+      const dispatched: DispatchedRunSpec = {
+        ...spec,
+        run: { ...run, policyActor: dispatchedPolicyActor(run.policyActor) },
+        progress: spec.progress ? { ...spec.progress, requestInput: redactSensitiveInput(spec.progress.requestInput) } : spec.progress,
+        history: { ...spec.history, requestInput: redactSensitiveInput(spec.history.requestInput) }
+      };
+      const { added } = await queueProducer.add({
+        workflowId: run.workflow.id,
+        executionId: run.executionId,
+        triggerType: run.triggerType,
+        ...(run.triggeredBy !== undefined ? { triggeredBy: run.triggeredBy } : {}),
+        executionTimeoutMs: normalizeExecutionTimeoutMs(run.executionTimeoutMs, undefined, config.WORKFLOW_EXECUTION_TIMEOUT_MS),
+        dispatch: dispatched,
+        pool: options.pool,
+        ...(options.queueItemId ? { queueItemId: options.queueItemId } : {}),
+        ...(options.priority !== undefined ? { priority: options.priority } : {})
+      }, options.dedupeWindowMs !== undefined ? { dedupeWindowMs: options.dedupeWindowMs } : {});
+      if (added) wakeQueue(options.pool);
+      return added;
+    },
+    // The waiting request has the result: the queue row keeps neither it nor the run's spec (input included).
+    releaseResult: async (spec) => {
+      try {
+        await store.releaseQueueItemResult(spec.run.executionId);
+      } catch (error) {
+        app.log.warn({ executionId: spec.run.executionId, error: secretService.redact(error instanceof Error ? error.message : String(error)) }, "Could not drop a delivered dispatched result from its queue item");
+      }
+    },
+    onDeduplicated: (spec, queueItemId) => {
+      app.log.info({ workflowId: spec.run.workflow.id, queueItemId, triggerType: spec.run.triggerType }, "A fire already queued within the dedupe window was not queued again");
+    },
+    openRelay: async (spec, passthrough) =>
+      await openRunRelay(
+        {
+          bus: clusterBus,
+          readRun: runPersistedView,
+          readOutcome: async (id) => await store.getQueueItemOutcome(id),
+          readElicitation: readElicitationView,
+          onError: (error) => app.log.warn({ executionId: spec.run.executionId, error: error instanceof Error ? error.message : String(error) }, "Run relay read failed")
+        },
+        {
+          executionId: spec.run.executionId,
+          queueItemId: spec.run.executionId,
+          onEvent: async (name, payload) => {
+            if (!passthrough) return;
+            const hook =
+              name === "node_start" ? passthrough.onNodeStart
+              : name === "node_complete" ? passthrough.onNodeComplete
+              : name === "llm_delta" ? passthrough.onLLMDelta
+              : name === "node_progress" ? passthrough.onMcpProgress
+              : name === "node_activity" ? passthrough.onNodeActivity
+              : passthrough.onMcpElicitation;
+            await (hook as ((event: unknown) => Promise<void> | void) | undefined)?.(payload);
+          }
+        }
+      ),
+    // The run's own time limit plus the queue's margin (a job waiting for a worker, a worker lost and re-run).
+    waitTimeoutMs: (spec) => normalizeExecutionTimeoutMs(spec.run.executionTimeoutMs, undefined, config.WORKFLOW_EXECUTION_TIMEOUT_MS) + STUCK_JOB_MARGIN_MS,
+    maxWaiting: executionDispatch.maxWaiting,
+    onQueued: () => metricsService.recordDispatchedRun()
+  });
+  /** Phase 13.1 — cluster mode: after an enqueue, idle consumers of the pool claim at once instead of at their next poll. */
+  const wakeQueue = (pool: string): void => {
+    if (!clusterMode) return;
+    clusterBus.publish("queue", { t: "wake", pool }).catch((error: unknown) => {
+      app.log.debug({ pool, error: error instanceof Error ? error.message : String(error) }, "Could not publish a queue wake-up");
+    });
+  };
+  /**
+   * Phase 13.1 — where runs execute now: `queue` only with EXECUTION_DISPATCH=queue while the capability gate allows it
+   * (checked for the default pool; cached for a few seconds), else `inline`.
+   */
+  const effectiveDispatch = async (): Promise<{ mode: "inline" | "queue"; fallbackReason: string | null }> => {
+    if (executionDispatch.mode !== "queue") return { mode: "inline", fallbackReason: null };
+    const queue = await runDispatcher.useQueue(DEFAULT_QUEUE_POOL);
+    return { mode: queue ? "queue" : "inline", fallbackReason: queue ? null : dispatchGate.status().reason };
+  };
+
+  /**
+   * Phase 13.1 — reattach: a run executing in this process is followed from its own events (and its elicitations);
+   * any other from the cluster bus, where queue workers publish them. Either way it ends from the database.
+   */
+  const openExecutionRelay = async (executionId: string, onEvent: (name: RunEventName, payload: Record<string, unknown>) => void) => {
+    const local = activeExecutions.has(executionId);
+    const relay = await openRunRelay(
+      {
+        bus: local ? localRunEvents : clusterBus,
+        readRun: runPersistedView,
+        readOutcome: async (id) => await store.getQueueItemOutcome(id),
+        readElicitation: readElicitationView,
+        // A reattach to a paused run that is being resumed follows the resume to its end.
+        resumeActive: async (id) => (await store.getWorkflowExecutionState(id))?.status === "resuming",
+        onError: (error) => app.log.warn({ executionId, error: error instanceof Error ? error.message : String(error) }, "Run relay read failed")
+      },
+      { executionId, queueItemId: executionId, onEvent }
+    );
+    if (!local) return relay;
+    const unsubscribe = mcpElicitationService.subscribe(executionId, (event) => onEvent("mcp_elicitation", { ...event }));
+    return {
+      ended: async (timeoutMs?: number) => await relay.ended(timeoutMs),
+      check: () => relay.check(),
+      close: () => {
+        unsubscribe();
+        relay.close();
+      }
+    };
+  };
+
+  /** The pool a workflow's runs go to (its settings.executionPool, else default). */
+  const dispatchPoolOf = (workflow: Workflow): string => {
+    const configured = workflow.settings?.executionPool;
+    return typeof configured === "string" && QUEUE_POOL_PATTERN.test(configured) ? configured : DEFAULT_QUEUE_POOL;
   };
 
   type ParsedWorkflowExecutePayload = z.infer<typeof workflowExecuteRequestSchema>;
@@ -3196,6 +3411,8 @@ export async function createApp(
     cronExpression: string;
     timezone: string;
     firedAt: string;
+    /** The second the cron expression matched (the scheduler's tick). */
+    scheduledFor?: string;
   }) => {
     // Schedules are production traffic: the published version when there is one.
     const workflow = await productionWorkflow(input.workflowId);
@@ -3220,30 +3437,33 @@ export async function createApp(
       firedAt: input.firedAt
     } as const;
 
-    const result = await runWorkflowExecution({
-      workflow,
-      directInput: {
-        trigger_type: "cron",
-        scheduled_at: input.firedAt,
-        schedule_node_id: input.scheduleNodeId,
-        cron_expression: input.cronExpression,
-        timezone: input.timezone
+    // Phase 13.1 — with EXECUTION_DISPATCH=queue the fire is queued under an id keyed on the matched second, so two
+    // leaders (a handover) firing the same second enqueue it once; inline it runs here, as before.
+    const fired = await runDispatcher.fire(
+      {
+        v: DISPATCH_SPEC_VERSION,
+        run: {
+          workflow,
+          directInput: {
+            trigger_type: "cron",
+            scheduled_at: input.firedAt,
+            schedule_node_id: input.scheduleNodeId,
+            cron_expression: input.cronExpression,
+            timezone: input.timezone
+          },
+          executionId,
+          triggerType: "cron",
+          triggeredBy: "scheduler",
+          channel: "production",
+          captureInputOrigin: "scheduler"
+        },
+        progress: null,
+        history: { requestInput }
       },
-      executionId,
-      triggerType: "cron",
-      triggeredBy: "scheduler",
-      channel: "production",
-      captureInputOrigin: "scheduler"
-    });
-
-    await persistExecutionHistory({
-      executionId,
-      workflow,
-      result,
-      triggerType: "cron",
-      triggeredBy: "scheduler",
-      requestInput
-    });
+      { pool: dispatchPoolOf(workflow), queueItemId: cronQueueItemId(workflow.id, input.scheduleNodeId, input.scheduledFor, input.firedAt) }
+    );
+    if (fired.queued) return;
+    const { result } = fired;
 
     if (result.status === "error") {
       app.log.warn(
@@ -3298,35 +3518,29 @@ export async function createApp(
       return;
     }
     const executionId = crypto.randomUUID();
-    const progressHooks = createProgressTrackingHooks({
-      executionId,
-      workflow,
-      triggerType: input.triggerType,
-      triggeredBy: "trigger-service",
-      requestInput: input.input
-    });
-    const result = await runWorkflowExecution({
-      workflow,
-      directInput: {
-        trigger_type: input.triggerType,
-        trigger_node_id: input.node.id,
-        ...input.input
+    // Phase 13.1 — with EXECUTION_DISPATCH=queue the fire is queued, under an id keyed on what it reports when it names
+    // it (RSS item ids, an SSE event id, file events), so two leaders that both saw it enqueue it once.
+    await runDispatcher.fire(
+      {
+        v: DISPATCH_SPEC_VERSION,
+        run: {
+          workflow,
+          directInput: {
+            trigger_type: input.triggerType,
+            trigger_node_id: input.node.id,
+            ...input.input
+          },
+          executionId,
+          triggerType: input.triggerType,
+          triggeredBy: "trigger-service",
+          // App triggers register from the production version (setWorkflowLoader below).
+          channel: "production"
+        },
+        progress: { requestInput: input.input },
+        history: { requestInput: input.input }
       },
-      executionId,
-      triggerType: input.triggerType,
-      triggeredBy: "trigger-service",
-      hooks: progressHooks,
-      // App triggers register from the production version (setWorkflowLoader below).
-      channel: "production"
-    });
-    await persistExecutionHistory({
-      executionId,
-      workflow,
-      result,
-      triggerType: input.triggerType,
-      triggeredBy: "trigger-service",
-      requestInput: input.input
-    });
+      { pool: dispatchPoolOf(workflow), queueItemId: triggerQueueItemId(workflow.id, input.node.id, input.triggerType, input.input) ?? executionId }
+    );
   };
 
   if (triggerService) {
@@ -3963,6 +4177,9 @@ export async function createApp(
     multiple_leaders:
       "Several instances run schedules and triggers with HA_ENABLED=false, so each fires them. Set HA_ENABLED=true on every instance; details in GET /api/cluster."
   };
+  // Unauthenticated: no instance ids, versions or database errors; the reason is in GET /api/cluster and the log.
+  const DISPATCH_FALLBACK_HEALTH_TEXT =
+    "EXECUTION_DISPATCH=queue, but runs execute inline on this instance; the reason is in GET /api/cluster.";
   const CLUSTER_BUS_DOWN_HEALTH_TEXT =
     "The cluster bus listener is disconnected. Cancels, queue wake-ups and schedule reloads fall back to the database (a few seconds late); details in GET /api/cluster.";
   const instanceRegistry = clusterStore
@@ -3975,7 +4192,8 @@ export async function createApp(
         pools: runsBackgroundWorkers && queueService ? resolveQueueSettings(config, { clusterMode }).pools : [],
         concurrency: runsBackgroundWorkers && queueService ? queueService.concurrency() : null,
         // In cluster mode a queue consumer claims under heartbeat leases with fencing tokens.
-        capabilities: clusterMode ? ["bus-v1", ...(runsBackgroundWorkers && queueService ? ["fenced-claims-v1"] : [])] : [],
+        // ... and runs jobs another instance dispatched (EXECUTION_DISPATCH=queue checks every live consumer has this).
+        capabilities: clusterMode ? ["bus-v1", ...(runsBackgroundWorkers && queueService ? ["fenced-claims-v1", QUEUE_DISPATCH_CAPABILITY] : [])] : [],
         appVersion: config.OTEL_SERVICE_VERSION || process.env.npm_package_version || null,
         schemaVersion: Math.max(...MIGRATIONS.map((migration) => migration.version)),
         runtime: () => ({
@@ -4286,19 +4504,34 @@ export async function createApp(
   };
   /**
    * Phase 13.1 — the hooks a queued run gets from its job: before each node starts, a leased claim checks its lease is
-   * still confirmed (a stalled worker stops instead of running the node). `onNodeComplete` is added for resumes.
+   * still confirmed (a stalled worker stops instead of running the node). `onNodeComplete` is added for resumes, and
+   * `resumedNodeId` (a decided Approval Gate a resume re-enters, which only passes the decision on) does not count as
+   * a side effect. Any other node a resume re-enters does (an agent re-run for its approved write, a paused
+   * sub-workflow): see `resumeEffectFreeNodeId`.
    */
   const queueJobHooks = (
     job: QueueJobContext,
     hooks: WorkflowExecutionEventHooks | undefined,
-    onNodeComplete?: WorkflowExecutionEventHooks["onNodeComplete"]
+    onNodeComplete?: WorkflowExecutionEventHooks["onNodeComplete"],
+    resumedNodeId?: string
   ): WorkflowExecutionEventHooks | undefined => {
     if (job.claimToken === null) return hooks;
+    let effectsMarked = false;
     return {
       ...(hooks ?? {}),
       onNodeStart: async (event) => {
         // A stale lease aborts the run's signal here, so the engine does not start the node.
         if (!job.leaseFresh()) return;
+        // Phase 13.1 — the worker-loss policy: before the first node that is not a trigger/entry node runs, the claim
+        // records that side effects may begin, so a lost worker's job is not re-run from the start. A refused write
+        // means the claim is gone: the run stops here. A failed write fails the run before the node runs.
+        if (!effectsMarked && !isEntryNodeType(event.nodeType) && event.nodeId !== resumedNodeId) {
+          if (!(await store.markQueueEffectsStarted({ queueItemId: job.queueItemId, claimToken: job.claimToken! }))) {
+            job.leaseLost("the side-effect marker write was refused");
+            return;
+          }
+          effectsMarked = true;
+        }
         await hooks?.onNodeStart?.(event);
       },
       ...(onNodeComplete
@@ -4401,20 +4634,23 @@ export async function createApp(
           requestId: job.requestId
         };
         const queueFence = queueJob?.claimToken ? { queueItemId: queueJob.queueItemId, claimToken: queueJob.claimToken } : null;
+        // Only a decided Approval Gate is re-entered without effects; an agent's approved write or a paused
+        // sub-workflow re-entered here is a side effect, so the marker is written before that node runs.
+        const effectFreeNodeId = resumeEffectFreeNodeId(state);
         const hooks = queueJob
           ? queueJobHooks(queueJob, undefined, queueFence
               ? async (event) => {
-                  // The decided node itself is not progress: re-running it has no side effect. Nor is a node that ended
+                  // A decided Approval Gate is not progress: re-running it has no side effect. Nor is a node that ended
                   // after the queue stopped the run (drained or lease lost): like an ordinary run, whose progress writes
                   // are refused once it is stopped, nothing more is counted.
-                  if (event.nodeId === state.waitingNodeId || queueJob.signal.aborted) return;
+                  if (event.nodeId === effectFreeNodeId || queueJob.signal.aborted) return;
                   try {
                     if (!(await store.recordQueueJobProgress(queueFence))) queueJob.leaseLost("a resume progress write was refused");
                   } catch (error) {
                     app.log.warn({ executionId: job.executionId, error: error instanceof Error ? error.message : String(error) }, "Failed to record a queued resume's progress");
                   }
                 }
-              : undefined)
+              : undefined, effectFreeNodeId)
           : undefined;
         const result = await runWorkflowExecution({
           ...(hooks ? { hooks } : {}),
@@ -4457,11 +4693,13 @@ export async function createApp(
       }
     });
   const dispatchApprovalResume = async (job: ApprovalResumeJob): Promise<{ queued: true } | { queued: false; result: Awaited<ReturnType<typeof runWorkflowExecution>> } | null> => {
-    if (queueService) {
+    // Phase 13.1 — with EXECUTION_DISPATCH=queue an instance without a consumer (WORKER_MODE=api) sends the resume to
+    // the workers through the producer too, unless the capability gate falls back to inline.
+    if (queueService || (runDispatcher.mode === "queue" && (await runDispatcher.useQueue(DEFAULT_QUEUE_POOL)))) {
       const pending = await store.getWorkflowExecutionState(job.executionId);
       // One item per decision: a request that is reopened and decided again must not collide with the first.
       const decidedAt = Date.parse((await store.getApprovalRequest(job.requestId))?.decidedAt ?? "") || Date.now();
-      await queueService.enqueue({
+      await (queueService ?? queueProducer).enqueue({
         workflowId: pending?.workflowId ?? "",
         executionId: job.executionId,
         queueItemId: `${job.executionId}:${job.requestId}:${decidedAt}${job.retryTag ? `:retry-${job.retryTag}` : ""}`,
@@ -4474,6 +4712,7 @@ export async function createApp(
         executionTimeoutMs: config.WORKFLOW_EXECUTION_TIMEOUT_MS,
         resume: job
       });
+      wakeQueue(DEFAULT_QUEUE_POOL);
       return { queued: true };
     }
     const result = await runApprovalResume(job);
@@ -4503,7 +4742,7 @@ export async function createApp(
     redact: (value) => secretService.redact(value),
     sweepIntervalMs: config.APPROVAL_SWEEP_INTERVAL_MS,
     appPublicUrl: config.APP_PUBLIC_URL,
-    queueMode: Boolean(queueService),
+    queueMode: Boolean(queueService) || executionDispatch.mode === "queue",
     isResumeActive: (executionId) => approvalResumes.isActive(executionId),
     resumeStaleAfterMs: config.WORKFLOW_EXECUTION_TIMEOUT_MS + STUCK_JOB_MARGIN_MS,
     // With HA on, other instances share the database: a resume another live instance runs is not this boot's to
@@ -5457,7 +5696,12 @@ export async function createApp(
     const slo = metricsService.getSloStatus();
     // The bus is an accelerator with a database fallback for every message, so a lost listener is a warning here and
     // a gauge in metrics, never a reason to fail /ready (a Postgres restart would otherwise turn every replica 503).
+    const dispatch = await effectiveDispatch();
     const healthWarnings = [
+      // Phase 13.1 — EXECUTION_DISPATCH=queue while the capability gate runs everything inline.
+      ...(executionDispatch.mode === "queue" && dispatch.mode === "inline"
+        ? [{ code: "dispatch_inline_fallback", message: DISPATCH_FALLBACK_HEALTH_TEXT }]
+        : []),
       ...clusterWarnings.map((warning) => ({ code: warning.code as string, message: CLUSTER_WARNING_HEALTH_TEXT[warning.code] })),
       ...(clusterMode && !clusterBus.status().connected ? [{ code: "bus_disconnected", message: CLUSTER_BUS_DOWN_HEALTH_TEXT }] : []),
       ...(forwardedForSeenAt > 0 && Date.now() - forwardedForSeenAt < FORWARDED_FOR_WARNING_MS
@@ -6334,6 +6578,7 @@ export async function createApp(
     const user = await requireRole(request, reply, ["admin"]);
     if (!user) return;
     const instances = instanceRegistry ? await instanceRegistry.list() : [];
+    const dispatch = await effectiveDispatch();
     return {
       clusterMode,
       instanceId: clusterInstanceId,
@@ -6342,6 +6587,10 @@ export async function createApp(
       instanceTimeoutMs: config.CLUSTER_INSTANCE_TIMEOUT_MS,
       leader: await leaderElection.getStatus(),
       bus: clusterBus.status(),
+      // Phase 13.1 — the effective dispatch mode (EXECUTION_DISPATCH after the capability gate), and why it fell back.
+      executionDispatch: dispatch.mode,
+      executionDispatchConfigured: executionDispatch.mode,
+      executionDispatchFallbackReason: dispatch.fallbackReason,
       instances: instances.map((instance) => ({ ...instance, self: instance.id === clusterInstanceId })),
       warnings: clusterWarnings
     };
@@ -9289,284 +9538,34 @@ export async function createApp(
     }
   );
 
-  app.post<{ Params: { id: string }; Body: unknown }>("/api/workflows/:id/execute", async (request, reply) => {
-    const user = await requireRole(request, reply, ["builder"]);
-    if (!user) {
-      return;
-    }
-
-    const access = await runAccess.workflow(user, request.params.id, "workflow:execute");
-    if (!access.ok) return denyRunAccess(reply, access);
-    const executeChannel = await executeChannelFor(request, user, access.workflow.id);
-    // Phase 15.6 — an API-key run on the production channel may be captured; it stays a `manual` run everywhere else.
-    const executeTrigger = "manual";
-    const captureSource: CaptureSource | undefined = "channel" in executeChannel && executeChannel.channel === "production" ? "api_key" : undefined;
-    if ("error" in executeChannel) return denyRunAccess(reply, executeChannel);
-    const workflow = executeChannel.channel === "production" ? await productionWorkflow(access.workflow.id) : access.workflow;
-    if (!workflow) {
-      reply.code(409);
-      return { error: await releaseService.productionRefusal(access.workflow.id) ?? "Workflow not found" };
-    }
-
-    // Phase 8.3 — pre-execution budget check. Block-action budgets reject
-    // here (HTTP 402); warn-action budgets only fire post-execution.
-    const budgetCheck = await budgetService.checkExecution({
-      workflowId: workflow.id,
-      projectId: workflow.projectId ?? null,
-      userEmail: user.email,
-      userId: user.id
-    });
-    if (!budgetCheck.allowed && budgetCheck.blocked) {
-      reply.code(402);
-      reply.header("retry-after", retryAfterSeconds(budgetCheck.blocked.budget.period));
-      return {
-        error: "budget_exceeded",
-        message: `Budget "${budgetCheck.blocked.budget.name}" exceeded for the current ${budgetCheck.blocked.budget.period}.`,
-        budgetId: budgetCheck.blocked.budget.id,
-        currentUsage: budgetCheck.blocked.current,
-        limit: budgetCheck.blocked.limit,
-        periodStart: budgetCheck.blocked.periodStart
-      };
-    }
-    if (budgetCheck.approachingLimit.length > 0) {
-      reply.header(
-        "x-budget-warning",
-        budgetCheck.approachingLimit
-          .map((a) => `${a.budget.name}=${Math.round(a.pct * 100)}%`)
-          .join(",")
-      );
-    }
-
-    const parsed = workflowExecuteRequestSchema.safeParse(request.body ?? {});
-    if (!parsed.success) {
-      reply.code(400);
-      return {
-        error: "Invalid execution payload",
-        details: parsed.error.issues
-      };
-    }
-    const prepared = await prepareWorkflowExecutionPayload(parsed.data, reply, user);
-    if (!prepared) {
-      return { error: "Source execution not found" };
-    }
-    const executionPayload = prepared.payload;
-
-    const executionId = crypto.randomUUID();
-    await auditRunAction(request, user, "execution.started", { executionId, workflowId: workflow.id, projectId: workflow.projectId }, { triggerType: executeTrigger });
-    const progressHooks = createProgressTrackingHooks({
-      executionId,
-      workflow,
-      triggerType: executeTrigger,
-      triggeredBy: user.email,
-      requestInput: prepared.requestInput,
-      customData: executionPayload.customData
-    });
-    // Phase 10.8 — "Record MCP calls": every MCP call of the run goes into a cassette.
-    const mcpPlan = parsed.data.record ? mcpCassetteService.planRecording(mcpRegistry, providerRegistry) : undefined;
-    const executed = await runWorkflowExecution({
-      // Phase 15.4: API-key callers run the published version; the editor runs the draft.
-      channel: executeChannel.channel,
-      mcpPlan,
-      policyActor: user,
-      workflow,
-      startNodeId: executionPayload.startNodeId,
-      runMode: executionPayload.runMode,
-      usePinnedData: executionPayload.usePinnedData,
-      pinnedData: executionPayload.pinnedData,
-      nodeOutputs: prepared.nodeOutputs,
-      directInput: executionPayload.input,
-      variables: executionPayload.variables,
-      systemPrompt: executionPayload.system_prompt,
-      userPrompt: executionPayload.user_prompt,
-      sessionId: normalizeSessionId(executionPayload.sessionId, executionPayload.session_id),
-      executionTimeoutMs: normalizeExecutionTimeoutMs(
-        executionPayload.executionTimeoutMs,
-        executionPayload.execution_timeout_ms,
-        config.WORKFLOW_EXECUTION_TIMEOUT_MS
-      ),
-      customData: executionPayload.customData,
-      executionId,
-      triggerType: executeTrigger,
-      triggeredBy: user.email,
-      hooks: progressHooks,
-      captureSource,
-      captureInputOrigin: captureSource ? "user" : undefined
-    });
-    const result = await finishMcpCassettePlan(mcpPlan, executed, { executionId, workflow, source: "manual", createdBy: user.email });
-
-    await persistExecutionHistory({
-      executionId,
-      workflow,
-      result,
-      triggerType: executeTrigger,
-      triggeredBy: user.email,
-      requestInput: prepared.requestInput,
-      customData: executionPayload.customData
-    });
-
-    if (result.status === "error") {
-      reply.code(400);
-    }
-
-    return result;
-  });
-
-  app.post<{ Params: { id: string }; Body: unknown }>("/api/workflows/:id/execute/stream", async (request, reply) => {
-    const user = await requireRole(request, reply, ["builder"]);
-    if (!user) {
-      return;
-    }
-
-    const access = await runAccess.workflow(user, request.params.id, "workflow:execute");
-    if (!access.ok) return denyRunAccess(reply, access);
-    const executeChannel = await executeChannelFor(request, user, access.workflow.id);
-    // Phase 15.6 — an API-key run on the production channel may be captured; it stays a `manual_stream` run everywhere else.
-    const executeTrigger = "manual_stream";
-    const captureSource: CaptureSource | undefined = "channel" in executeChannel && executeChannel.channel === "production" ? "api_key" : undefined;
-    if ("error" in executeChannel) return denyRunAccess(reply, executeChannel);
-    const workflow = executeChannel.channel === "production" ? await productionWorkflow(access.workflow.id) : access.workflow;
-    if (!workflow) {
-      reply.code(409);
-      return { error: await releaseService.productionRefusal(access.workflow.id) ?? "Workflow not found" };
-    }
-
-    const parsed = workflowExecuteRequestSchema.safeParse(request.body ?? {});
-    if (!parsed.success) {
-      reply.code(400);
-      return {
-        error: "Invalid execution payload",
-        details: parsed.error.issues
-      };
-    }
-    const prepared = await prepareWorkflowExecutionPayload(parsed.data, reply, user);
-    if (!prepared) {
-      return { error: "Source execution not found" };
-    }
-    const executionPayload = prepared.payload;
-
-    const executionId = crypto.randomUUID();
-    await auditRunAction(request, user, "execution.started", { executionId, workflowId: workflow.id, projectId: workflow.projectId }, { triggerType: executeTrigger });
-    let streamClosed = false;
-    request.raw.on("close", () => {
-      streamClosed = true;
-    });
-
-    const sendSseEvent = (event: string, payload: unknown) => {
-      if (streamClosed) {
-        return;
-      }
-      reply.raw.write(`event: ${event}\n`);
-      const serialized = JSON.stringify(payload ?? null);
-      for (const line of serialized.split("\n")) {
-        reply.raw.write(`data: ${line}\n`);
-      }
-      reply.raw.write("\n");
-    };
-
-    reply.hijack();
-    reply.raw.writeHead(200, {
-      "Content-Type": "text/event-stream",
-      "Cache-Control": "no-cache, no-transform",
-      Connection: "keep-alive"
-    });
-    if (typeof reply.raw.flushHeaders === "function") {
-      reply.raw.flushHeaders();
-    }
-    const stopHeartbeat = startSseHeartbeat(reply.raw, config.SSE_HEARTBEAT_INTERVAL_MS, () => streamClosed);
-
-    sendSseEvent("execution_started", {
-      executionId,
-      workflowId: workflow.id,
-      triggerType: executeTrigger,
-      startedAt: new Date().toISOString()
-    });
-
-    // Phase 10.5 — questions a server asks during the run reach the chat as they happen.
-    const unsubscribeElicitations = mcpElicitationService.subscribe(executionId, (event) => {
-      sendSseEvent("mcp_elicitation", event);
-    });
-    try {
-      const progressHooks = createProgressTrackingHooks({
-        executionId,
-        workflow,
-        triggerType: executeTrigger,
-        triggeredBy: user.email,
-        requestInput: prepared.requestInput,
-        customData: executionPayload.customData,
-        passthroughHooks: {
-          onNodeStart: (event) => {
-            sendSseEvent("node_start", event);
-          },
-          onNodeComplete: (event) => {
-            sendSseEvent("node_complete", event);
-          },
-          onLLMDelta: (event) => {
-            sendSseEvent("llm_delta", event);
-          },
-          onMcpProgress: (event) => {
-            sendSseEvent("node_progress", event);
-          },
-          onNodeActivity: (event) => {
-            sendSseEvent("node_activity", event);
-          }
-        }
-      });
-      const mcpPlan = parsed.data.record ? mcpCassetteService.planRecording(mcpRegistry, providerRegistry) : undefined;
-      const executed = await runWorkflowExecution({
-        // Phase 15.4: API-key callers run the published version; the editor runs the draft.
-        channel: executeChannel.channel,
-        mcpPlan,
-        policyActor: user,
-        workflow,
-        startNodeId: executionPayload.startNodeId,
-        runMode: executionPayload.runMode,
-        usePinnedData: executionPayload.usePinnedData,
-        pinnedData: executionPayload.pinnedData,
-        nodeOutputs: prepared.nodeOutputs,
-        directInput: executionPayload.input,
-        variables: executionPayload.variables,
-        systemPrompt: executionPayload.system_prompt,
-        userPrompt: executionPayload.user_prompt,
-        sessionId: normalizeSessionId(executionPayload.sessionId, executionPayload.session_id),
-        executionTimeoutMs: normalizeExecutionTimeoutMs(
-          executionPayload.executionTimeoutMs,
-          executionPayload.execution_timeout_ms,
-          config.WORKFLOW_EXECUTION_TIMEOUT_MS
-        ),
-        customData: executionPayload.customData,
-        executionId,
-        triggerType: executeTrigger,
-        triggeredBy: user.email,
-        hooks: progressHooks,
-        captureSource,
-        captureInputOrigin: captureSource ? "user" : undefined
-      });
-      const result = await finishMcpCassettePlan(mcpPlan, executed, { executionId, workflow, source: "manual", createdBy: user.email });
-
-      await persistExecutionHistory({
-        executionId,
-        workflow,
-        result,
-        triggerType: executeTrigger,
-        triggeredBy: user.email,
-        requestInput: prepared.requestInput,
-        customData: executionPayload.customData
-      });
-
-      sendSseEvent("result", result);
-      if (result.status === "error") {
-        sendSseEvent("error", { message: result.error ?? "Execution failed" });
-      }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Execution failed";
-      sendSseEvent("error", { message });
-    } finally {
-      stopHeartbeat();
-      unsubscribeElicitations();
-      if (!streamClosed) {
-        reply.raw.end();
-      }
-    }
+  registerExecutionRoutes({
+    app,
+    store,
+    config,
+    requireRole: (request, reply, roles) => requireRole(request, reply, roles),
+    runAccess,
+    denyRunAccess,
+    executeChannelFor,
+    productionWorkflow,
+    productionMissing,
+    releaseService,
+    budgetService,
+    prepareWorkflowExecutionPayload,
+    auditRunAction,
+    mcpCassetteService,
+    mcpRegistry,
+    mcpElicitationService,
+    resolveRegisteredMcpServer,
+    replayRunInputFor,
+    historyInputLabels,
+    activeExecutions,
+    approvalService,
+    clusterMode,
+    runDispatcher,
+    dispatchPoolOf,
+    openExecutionRelay,
+    executionRelayWaitMs: config.WORKFLOW_EXECUTION_TIMEOUT_MS + STUCK_JOB_MARGIN_MS,
+    announce
   });
 
   app.post<{ Body: unknown }>("/api/code-node/test", async (request, reply) => {
@@ -9867,333 +9866,6 @@ export async function createApp(
     }
   });
 
-  app.get<{ Querystring: Record<string, unknown> }>("/api/executions", async (request, reply) => {
-    const user = await requireRole(request, reply, ["viewer"]);
-    if (!user) {
-      return;
-    }
-
-    const query = asRecord(request.query);
-    const page = Number(query.page);
-    const pageSize = Number(query.pageSize);
-
-    const history = await store.listExecutionHistory({
-      page: Number.isFinite(page) ? page : 1,
-      pageSize: Number.isFinite(pageSize) ? pageSize : 20,
-      status: typeof query.status === "string" && query.status.trim() ? query.status.trim() : undefined,
-      workflowId: typeof query.workflowId === "string" && query.workflowId.trim() ? query.workflowId.trim() : undefined,
-      // Only runs of workflows the user can read, filtered before paging so totals match.
-      workflowIds: await runAccess.readableWorkflowIds(user) ?? undefined,
-      triggerType:
-        typeof query.triggerType === "string" && query.triggerType.trim() ? query.triggerType.trim() : undefined,
-      startedFrom: normalizeIsoDateFilter(query.startedFrom),
-      startedTo: normalizeIsoDateFilter(query.startedTo)
-    });
-    // Phase 10.8 — runs recorded with "Record MCP calls" carry a cassette badge.
-    const badges = await store.mcpCassetteBadgesForExecutions(history.items.map((item) => item.id));
-    // Phase 15.1 — runs saved as golden runs carry a golden badge.
-    const golden = await store.replayGoldenBadgesForExecutions(history.items.map((item) => item.id));
-    return {
-      ...history,
-      items: history.items.map((item) => {
-        const badge = badges.get(item.id);
-        const goldenBadge = golden.get(item.id);
-        return { ...item, ...(badge ? { mcpCassette: badge } : {}), ...(goldenBadge ? { goldenRuns: goldenBadge } : {}) };
-      })
-    };
-  });
-
-  app.get<{ Params: { id: string } }>("/api/executions/:id", async (request, reply) => {
-    const user = await requireRole(request, reply, ["viewer"]);
-    if (!user) {
-      return;
-    }
-
-    const access = await runAccess.run(user, await store.getExecutionHistory(request.params.id), "workflow:read");
-    if (!access.ok) return denyRunAccess(reply, access);
-
-    return access.run;
-  });
-
-  app.post<{ Params: { id: string }; Body: unknown }>("/api/executions/:id/retry", async (request, reply) => {
-    const user = await requireRole(request, reply, ["builder"]);
-    if (!user) {
-      return;
-    }
-
-    const sourceAccess = await runAccess.run(user, await store.getExecutionHistory(request.params.id), "workflow:execute");
-    if (!sourceAccess.ok) return denyRunAccess(reply, sourceAccess);
-    const sourceExecution = sourceAccess.run;
-
-    if (!["error", "partial", "canceled"].includes(sourceExecution.status)) {
-      reply.code(409);
-      return { error: "Only failed or canceled executions can be retried from history" };
-    }
-
-    // Phase 15.4 — a retry runs on the failed run's channel. A production run is retried as production runs now:
-    // the version published today (never a superseded or rolled-back one, nor the draft once a version is
-    // published), and not at all while a gated workflow is deactivated. An editor run retries the draft.
-    // A run whose channel went unrecorded (older history, a record that failed to save, a run that fell out of
-    // the in-flight bookkeeping) fails closed: on a gated workflow it retries as production, never the draft.
-    const ranOn = await store.getExecutionRelease(sourceExecution.id);
-    const retryChannel: ReleaseChannel = ranOn
-      ? ranOn.channel
-      : (await store.getReleaseGate(sourceExecution.workflowId))?.enabled
-        ? "production"
-        : "draft";
-    const workflow = retryChannel === "production" ? await productionWorkflow(sourceExecution.workflowId) : await store.getWorkflow(sourceExecution.workflowId);
-    if (!workflow) return await productionMissing(reply, sourceExecution.workflowId);
-
-    const parsed = workflowExecuteRequestSchema.safeParse(request.body ?? {});
-    if (!parsed.success) {
-      reply.code(400);
-      return {
-        error: "Invalid retry payload",
-        details: parsed.error.issues
-      };
-    }
-
-    const prepared = await prepareWorkflowExecutionPayload({
-      ...parsed.data,
-      sourceExecutionId: sourceExecution.id,
-      usePinnedData: parsed.data.usePinnedData ?? true
-    }, reply, user);
-    if (!prepared) {
-      return { error: "Source execution not found" };
-    }
-
-    const executionPayload = prepared.payload;
-    const executionId = crypto.randomUUID();
-    await auditRunAction(request, user, "execution.retried", { executionId, workflowId: workflow.id, projectId: workflow.projectId }, { sourceExecutionId: sourceExecution.id });
-    const progressHooks = createProgressTrackingHooks({
-      executionId,
-      workflow,
-      triggerType: "manual_retry",
-      triggeredBy: user.email,
-      requestInput: prepared.requestInput,
-      customData: executionPayload.customData
-    });
-
-    const result = await runWorkflowExecution({
-      // Phase 15.4: the failed run's channel; a production retry records the version it runs now.
-      channel: retryChannel,
-      policyActor: user,
-      workflow,
-      startNodeId: executionPayload.startNodeId,
-      runMode: executionPayload.runMode,
-      usePinnedData: executionPayload.usePinnedData,
-      pinnedData: executionPayload.pinnedData,
-      nodeOutputs: prepared.nodeOutputs,
-      directInput: executionPayload.input,
-      variables: executionPayload.variables,
-      systemPrompt: executionPayload.system_prompt,
-      userPrompt: executionPayload.user_prompt,
-      sessionId: normalizeSessionId(executionPayload.sessionId, executionPayload.session_id),
-      executionTimeoutMs: normalizeExecutionTimeoutMs(
-        executionPayload.executionTimeoutMs,
-        executionPayload.execution_timeout_ms,
-        config.WORKFLOW_EXECUTION_TIMEOUT_MS
-      ),
-      customData: executionPayload.customData,
-      executionId,
-      triggerType: "manual_retry",
-      triggeredBy: user.email,
-      hooks: progressHooks
-    });
-
-    await persistExecutionHistory({
-      executionId,
-      workflow,
-      result,
-      triggerType: "manual_retry",
-      triggeredBy: user.email,
-      requestInput: prepared.requestInput,
-      customData: executionPayload.customData
-    });
-
-    if (result.status === "error") {
-      reply.code(400);
-    }
-
-    return result;
-  });
-
-  // Phase 10.8 — run a past execution again with its MCP calls answered from its cassette.
-  const executionReplaySchema = z.object({
-    mode: z.enum(["strict", "lenient"]).optional(),
-    cassetteId: z.string().trim().min(1).optional()
-  });
-
-  app.post<{ Params: { id: string }; Body: unknown }>("/api/executions/:id/replay", async (request, reply) => {
-    const user = await requireRole(request, reply, ["builder"]);
-    if (!user) {
-      return;
-    }
-    const parsed = executionReplaySchema.safeParse(request.body ?? {});
-    if (!parsed.success) {
-      reply.code(400);
-      return { error: "Invalid replay payload", details: parsed.error.issues };
-    }
-    const sourceAccess = await runAccess.run(user, await store.getExecutionHistory(request.params.id), "workflow:execute");
-    if (!sourceAccess.ok) return denyRunAccess(reply, sourceAccess);
-    const source = sourceAccess.run;
-    const cassette = parsed.data.cassetteId ? await store.getMcpCassette(parsed.data.cassetteId) : await store.getMcpCassetteForExecution(source.id);
-    if (!cassette) {
-      reply.code(404);
-      return { error: "No cassette was recorded for this execution. Run it with Record MCP calls turned on first." };
-    }
-    // An unreadable cassette reads as missing; a readable one must belong to
-    // this workflow (a cassette with no workflow never does).
-    if (parsed.data.cassetteId) {
-      const cassetteAccess = await runAccess.run(user, { id: cassette.id, workflowId: cassette.workflowId ?? "" }, "workflow:read", "Cassette");
-      if (!cassetteAccess.ok) return denyRunAccess(reply, cassetteAccess);
-    }
-    if (cassette.workflowId !== source.workflowId) {
-      reply.code(409);
-      return { error: "That cassette was recorded for a different workflow." };
-    }
-    const workflow = await store.getWorkflow(source.workflowId);
-    if (!workflow) {
-      reply.code(404);
-      return { error: "Workflow not found" };
-    }
-    const mode: McpReplayMode = parsed.data.mode ?? "strict";
-    const mcpPlan = mcpCassetteService.planReplay(cassette, mode, mcpRegistry, resolveRegisteredMcpServer);
-    const executionId = crypto.randomUUID();
-    await auditRunAction(request, user, "execution.replayed", { executionId, workflowId: workflow.id, projectId: workflow.projectId }, { sourceExecutionId: source.id, cassetteId: cassette.id, mode });
-    const storedInput = asRecord(source.input);
-    const customData = {
-      ...asRecord(source.customData),
-      mcpReplay: { sourceExecutionId: source.id, cassetteId: cassette.id, mode }
-    };
-    const executed = await runWorkflowExecution({
-      // Phase 15.4: not production traffic, so the draft (or the candidate given) runs.
-      channel: "draft",
-      ...replayRunInputFor(source.triggerType, storedInput),
-      // Phase 16 — the source run's input origin, not the user replaying it.
-      inputLabels: historyInputLabels(source, workflow),
-      mcpPlan,
-      policyActor: user,
-      workflow,
-      customData,
-      executionId,
-      triggerType: "mcp_replay",
-      triggeredBy: user.email,
-      hooks: createProgressTrackingHooks({
-        executionId,
-        workflow,
-        triggerType: "mcp_replay",
-        triggeredBy: user.email,
-        requestInput: storedInput,
-        customData
-      })
-    });
-    const result = await finishMcpCassettePlan(mcpPlan, executed, { executionId, workflow, source: "replay", createdBy: user.email });
-    await persistExecutionHistory({
-      executionId,
-      workflow,
-      result,
-      triggerType: "mcp_replay",
-      triggeredBy: user.email,
-      requestInput: storedInput,
-      customData
-    });
-    return { ...result, executionId };
-  });
-
-  app.post<{ Params: { id: string }; Body: unknown }>("/api/executions/:id/cancel", async (request, reply) => {
-    const user = await requireRole(request, reply, ["operator", "builder", "admin"]);
-    if (!user) {
-      return;
-    }
-
-    const access = await runAccess.run(user, await store.getExecutionHistory(request.params.id), "workflow:execute");
-    if (!access.ok) return denyRunAccess(reply, access);
-    const execution = access.run;
-
-    const cancelable =
-      execution.status === "running" ||
-      execution.status === "waiting_approval" ||
-      (execution.status === "partial" && !execution.completedAt);
-    if (!cancelable) {
-      reply.code(409);
-      return { error: "Only running or waiting executions can be canceled" };
-    }
-
-    const reasonRecord = asRecord(request.body);
-    const reason =
-      typeof reasonRecord.reason === "string" && reasonRecord.reason.trim()
-        ? reasonRecord.reason.trim()
-        : `Execution canceled by ${user.email}`;
-    const active = activeExecutions.get(request.params.id);
-    // The run already hit its time limit and is ending; it is saved as a timeout error, not a cancel.
-    if (active && isExecutionTimeoutAbort(active.controller.signal)) {
-      reply.code(409);
-      return { error: "Execution already timed out and is stopping" };
-    }
-    const waiting = execution.status === "waiting_approval";
-    // A paused run belongs to whoever moves it first: the cancel takes the pending request (a decision that took it
-    // already wins), then cancels the history and drops the paused state in one write that refuses once a
-    // decision has claimed that state.
-    // A waiting run that is active here is a decided run resuming in this process (a resume writes no progress, so
-    // its history still reads waiting): it is stopped like a running run, whatever the decision was.
-    const resumingHere = waiting && Boolean(active);
-    if (waiting && (await approvalService.cancelForExecution(execution.id, reason, user)) === "decided" && !resumingHere) {
-      reply.code(409);
-      return { error: "The approval was already decided, so the run is resuming. It cannot be canceled while it waits any more." };
-    }
-    // Aborted before the write: the run's own final write is then skipped, so it cannot replace the canceled
-    // record; a run that finished first makes the conditional write refuse (409).
-    active?.controller.abort(reason);
-    const completedAt = new Date().toISOString();
-    const { outcome, canceledRequestIds } = await store.cancelExecution({
-      id: request.params.id,
-      onlyFrom: resumingHere ? ["waiting_approval", "running", "partial"] : waiting ? ["waiting_approval"] : ["running", "partial"],
-      completedAt,
-      error: reason,
-      deletePausedState: waiting,
-      cancelClaimed: resumingHere
-    });
-    if (outcome === "missing") {
-      reply.code(404);
-      return { error: "Execution not found" };
-    }
-    if (outcome === "decided") {
-      reply.code(409);
-      return { error: "The approval was already decided, so the run is resuming. It cannot be canceled while it waits any more." };
-    }
-    // The run this cancel aborted can record its own canceled ending (with its node results) before the write above
-    // commits: the cancel took effect, so it is not refused.
-    const recordedByRun = outcome === "not_cancelable" && Boolean(active) && (await store.getExecutionHistory(request.params.id))?.status === "canceled";
-    if (outcome === "not_cancelable" && !recordedByRun) {
-      reply.code(409);
-      return { error: "Only running or waiting executions can be canceled" };
-    }
-    // Phase 13.1 — cluster mode: a run that is not executing here may be executing on another instance. The canceled
-    // record is stored, so the instance running it stops it on this message, or at its next cancel check if the
-    // message is lost.
-    const abortSignalled = clusterMode && !active;
-    // The reason is cut and cleaned for the bus; the run's stored record keeps the full one.
-    if (abortSignalled) announce({ t: "cancel", id: request.params.id, reason: clusterCancelReason(reason) });
-
-    await approvalService.auditCanceledRequests(canceledRequestIds, user);
-    await auditRunAction(
-      request,
-      user,
-      "execution.cancel_requested",
-      { executionId: execution.id, workflowId: execution.workflowId, projectId: (await store.getWorkflow(execution.workflowId))?.projectId },
-      { abortedActiveRun: Boolean(active), previousStatus: execution.status, ...(abortSignalled ? { abortSignalled } : {}) }
-    );
-    return {
-      ok: true,
-      id: request.params.id,
-      status: "canceled",
-      abortedActiveRun: Boolean(active),
-      ...(abortSignalled ? { abortSignalled } : {}),
-      completedAt
-    };
-  });
-
   registerApprovalRoutes({
     app,
     approvals: approvalService,
@@ -10253,49 +9925,38 @@ export async function createApp(
     if (!executeAccess.ok) return denyRunAccess(reply, executeAccess);
 
     const executionId = crypto.randomUUID();
-    const progressHooks = createProgressTrackingHooks({
-      executionId,
-      workflow,
-      triggerType: "webhook_api",
-      triggeredBy: user.email,
-      requestInput: parsed.data,
-      customData: parsed.data.customData
-    });
-    const result = await runWorkflowExecution({
-      channel: "production",
-      policyActor: user,
-      workflow,
-      webhookPayload: {
-        system_prompt: parsed.data.system_prompt,
-        user_prompt: parsed.data.user_prompt,
-        session_id: parsed.data.session_id,
-        variables: parsed.data.variables
+    const result = await runDispatcher.run(
+      {
+        v: DISPATCH_SPEC_VERSION,
+        run: {
+          channel: "production",
+          policyActor: user,
+          workflow,
+          webhookPayload: {
+            system_prompt: parsed.data.system_prompt,
+            user_prompt: parsed.data.user_prompt,
+            session_id: parsed.data.session_id,
+            variables: parsed.data.variables
+          },
+          variables: parsed.data.variables,
+          systemPrompt: parsed.data.system_prompt,
+          userPrompt: parsed.data.user_prompt,
+          sessionId: parsed.data.session_id,
+          executionTimeoutMs: normalizeExecutionTimeoutMs(
+            parsed.data.executionTimeoutMs,
+            parsed.data.execution_timeout_ms,
+            config.WORKFLOW_EXECUTION_TIMEOUT_MS
+          ),
+          customData: parsed.data.customData,
+          executionId,
+          triggerType: "webhook_api",
+          triggeredBy: user.email
+        },
+        progress: { requestInput: parsed.data, customData: parsed.data.customData },
+        history: { requestInput: parsed.data, customData: parsed.data.customData }
       },
-      variables: parsed.data.variables,
-      systemPrompt: parsed.data.system_prompt,
-      userPrompt: parsed.data.user_prompt,
-      sessionId: parsed.data.session_id,
-      executionTimeoutMs: normalizeExecutionTimeoutMs(
-        parsed.data.executionTimeoutMs,
-        parsed.data.execution_timeout_ms,
-        config.WORKFLOW_EXECUTION_TIMEOUT_MS
-      ),
-      customData: parsed.data.customData,
-      executionId,
-      triggerType: "webhook_api",
-      triggeredBy: user.email,
-      hooks: progressHooks
-    });
-
-    await persistExecutionHistory({
-      executionId,
-      workflow,
-      result,
-      triggerType: "webhook_api",
-      triggeredBy: user.email,
-      requestInput: parsed.data,
-      customData: parsed.data.customData
-    });
+      { pool: dispatchPoolOf(workflow) }
+    );
 
     if (result.status === "error") {
       reply.code(400);
@@ -10358,30 +10019,22 @@ export async function createApp(
       }
 
       const executionId = crypto.randomUUID();
-      const progressHooks = createProgressTrackingHooks({
-        executionId,
-        workflow,
-        triggerType: "slack_webhook",
-        triggeredBy: "slack",
-        requestInput: body ?? {}
-      });
-      const result = await runWorkflowExecution({
-        channel: "production",
-        workflow,
-        webhookPayload: (body as Record<string, unknown>) ?? {},
-        executionId,
-        triggerType: "slack_webhook",
-        triggeredBy: "slack",
-        hooks: progressHooks
-      });
-      await persistExecutionHistory({
-        executionId,
-        workflow,
-        result,
-        triggerType: "slack_webhook",
-        triggeredBy: "slack",
-        requestInput: body ?? {}
-      });
+      const result = await runDispatcher.run(
+        {
+          v: DISPATCH_SPEC_VERSION,
+          run: {
+            channel: "production",
+            workflow,
+            webhookPayload: (body as Record<string, unknown>) ?? {},
+            executionId,
+            triggerType: "slack_webhook",
+            triggeredBy: "slack"
+          },
+          progress: { requestInput: body ?? {} },
+          history: { requestInput: body ?? {} }
+        },
+        { pool: dispatchPoolOf(workflow) }
+      );
       return { ok: true, status: result.status };
     }
   );
@@ -10420,30 +10073,22 @@ export async function createApp(
       }
       const body = request.body as Record<string, unknown> | undefined;
       const executionId = crypto.randomUUID();
-      const progressHooks = createProgressTrackingHooks({
-        executionId,
-        workflow,
-        triggerType: "github_webhook",
-        triggeredBy: "github",
-        requestInput: body ?? {}
-      });
-      const result = await runWorkflowExecution({
-        channel: "production",
-        workflow,
-        webhookPayload: (body as Record<string, unknown>) ?? {},
-        executionId,
-        triggerType: "github_webhook",
-        triggeredBy: "github",
-        hooks: progressHooks
-      });
-      await persistExecutionHistory({
-        executionId,
-        workflow,
-        result,
-        triggerType: "github_webhook",
-        triggeredBy: "github",
-        requestInput: body ?? {}
-      });
+      const result = await runDispatcher.run(
+        {
+          v: DISPATCH_SPEC_VERSION,
+          run: {
+            channel: "production",
+            workflow,
+            webhookPayload: (body as Record<string, unknown>) ?? {},
+            executionId,
+            triggerType: "github_webhook",
+            triggeredBy: "github"
+          },
+          progress: { requestInput: body ?? {} },
+          history: { requestInput: body ?? {} }
+        },
+        { pool: dispatchPoolOf(workflow) }
+      );
       return { ok: true, status: result.status };
     }
   );
@@ -10494,30 +10139,22 @@ export async function createApp(
 
       const body = request.body as Record<string, unknown> | undefined;
       const executionId = crypto.randomUUID();
-      const progressHooks = createProgressTrackingHooks({
-        executionId,
-        workflow,
-        triggerType: "stripe_webhook",
-        triggeredBy: "stripe",
-        requestInput: body ?? {}
-      });
-      const result = await runWorkflowExecution({
-        channel: "production",
-        workflow,
-        webhookPayload: body ?? {},
-        executionId,
-        triggerType: "stripe_webhook",
-        triggeredBy: "stripe",
-        hooks: progressHooks
-      });
-      await persistExecutionHistory({
-        executionId,
-        workflow,
-        result,
-        triggerType: "stripe_webhook",
-        triggeredBy: "stripe",
-        requestInput: body ?? {}
-      });
+      const result = await runDispatcher.run(
+        {
+          v: DISPATCH_SPEC_VERSION,
+          run: {
+            channel: "production",
+            workflow,
+            webhookPayload: body ?? {},
+            executionId,
+            triggerType: "stripe_webhook",
+            triggeredBy: "stripe"
+          },
+          progress: { requestInput: body ?? {} },
+          history: { requestInput: body ?? {} }
+        },
+        { pool: dispatchPoolOf(workflow) }
+      );
       return { ok: true, status: result.status };
     }
   );
@@ -10546,30 +10183,22 @@ export async function createApp(
 
       const body = request.body as Record<string, unknown> | undefined;
       const executionId = crypto.randomUUID();
-      const progressHooks = createProgressTrackingHooks({
-        executionId,
-        workflow,
-        triggerType: "telegram_webhook",
-        triggeredBy: "telegram",
-        requestInput: body ?? {}
-      });
-      const result = await runWorkflowExecution({
-        channel: "production",
-        workflow,
-        webhookPayload: body ?? {},
-        executionId,
-        triggerType: "telegram_webhook",
-        triggeredBy: "telegram",
-        hooks: progressHooks
-      });
-      await persistExecutionHistory({
-        executionId,
-        workflow,
-        result,
-        triggerType: "telegram_webhook",
-        triggeredBy: "telegram",
-        requestInput: body ?? {}
-      });
+      const result = await runDispatcher.run(
+        {
+          v: DISPATCH_SPEC_VERSION,
+          run: {
+            channel: "production",
+            workflow,
+            webhookPayload: body ?? {},
+            executionId,
+            triggerType: "telegram_webhook",
+            triggeredBy: "telegram"
+          },
+          progress: { requestInput: body ?? {} },
+          history: { requestInput: body ?? {} }
+        },
+        { pool: dispatchPoolOf(workflow) }
+      );
       return { ok: true, status: result.status };
     }
   );
@@ -10627,30 +10256,22 @@ export async function createApp(
         return { type: 1 };
       }
       const executionId = crypto.randomUUID();
-      const progressHooks = createProgressTrackingHooks({
-        executionId,
-        workflow,
-        triggerType: "discord_webhook",
-        triggeredBy: "discord",
-        requestInput: body ?? {}
-      });
-      const result = await runWorkflowExecution({
-        channel: "production",
-        workflow,
-        webhookPayload: body ?? {},
-        executionId,
-        triggerType: "discord_webhook",
-        triggeredBy: "discord",
-        hooks: progressHooks
-      });
-      await persistExecutionHistory({
-        executionId,
-        workflow,
-        result,
-        triggerType: "discord_webhook",
-        triggeredBy: "discord",
-        requestInput: body ?? {}
-      });
+      const result = await runDispatcher.run(
+        {
+          v: DISPATCH_SPEC_VERSION,
+          run: {
+            channel: "production",
+            workflow,
+            webhookPayload: body ?? {},
+            executionId,
+            triggerType: "discord_webhook",
+            triggeredBy: "discord"
+          },
+          progress: { requestInput: body ?? {} },
+          history: { requestInput: body ?? {} }
+        },
+        { pool: dispatchPoolOf(workflow) }
+      );
       return { ok: true, status: result.status };
     }
   );
@@ -10675,32 +10296,24 @@ export async function createApp(
       }
       const body = asRecord(request.body);
       const executionId = crypto.randomUUID();
-      const progressHooks = createProgressTrackingHooks({
-        executionId,
-        workflow,
-        triggerType: "manual",
-        triggeredBy: user.email,
-        requestInput: body
-      });
-      const result = await runWorkflowExecution({
-        // Phase 15.4: not production traffic, so the draft (or the candidate given) runs.
-        channel: "draft",
-        policyActor: user,
-        workflow,
-        directInput: { trigger_type: "manual", trigger_node_id: manualNode.id, ...body },
-        executionId,
-        triggerType: "manual",
-        triggeredBy: user.email,
-        hooks: progressHooks
-      });
-      await persistExecutionHistory({
-        executionId,
-        workflow,
-        result,
-        triggerType: "manual",
-        triggeredBy: user.email,
-        requestInput: body
-      });
+      const result = await runDispatcher.run(
+        {
+          v: DISPATCH_SPEC_VERSION,
+          run: {
+            // Phase 15.4: not production traffic, so the draft (or the candidate given) runs.
+            channel: "draft",
+            policyActor: user,
+            workflow,
+            directInput: { trigger_type: "manual", trigger_node_id: manualNode.id, ...body },
+            executionId,
+            triggerType: "manual",
+            triggeredBy: user.email
+          },
+          progress: { requestInput: body },
+          history: { requestInput: body }
+        },
+        { pool: dispatchPoolOf(workflow) }
+      );
       return { ok: true, executionId, status: result.status, output: result.output };
     }
   );
@@ -10820,37 +10433,29 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       }
       const submission = asRecord(request.body);
       const executionId = crypto.randomUUID();
-      const progressHooks = createProgressTrackingHooks({
-        executionId,
-        workflow: found.workflow,
-        triggerType: "form",
-        triggeredBy: "form-submitter",
-        requestInput: submission
-      });
-      const result = await runWorkflowExecution({
-        channel: "production",
-        workflow: found.workflow,
-        directInput: {
-          trigger_type: "form",
-          trigger_node_id: found.node.id,
-          form_path: request.params.path,
-          form_submission: submission,
-          submitted_at: new Date().toISOString(),
-          ...submission
+      const result = await runDispatcher.run(
+        {
+          v: DISPATCH_SPEC_VERSION,
+          run: {
+            channel: "production",
+            workflow: found.workflow,
+            directInput: {
+              trigger_type: "form",
+              trigger_node_id: found.node.id,
+              form_path: request.params.path,
+              form_submission: submission,
+              submitted_at: new Date().toISOString(),
+              ...submission
+            },
+            executionId,
+            triggerType: "form",
+            triggeredBy: "form-submitter"
+          },
+          progress: { requestInput: submission },
+          history: { requestInput: submission }
         },
-        executionId,
-        triggerType: "form",
-        triggeredBy: "form-submitter",
-        hooks: progressHooks
-      });
-      await persistExecutionHistory({
-        executionId,
-        workflow: found.workflow,
-        result,
-        triggerType: "form",
-        triggeredBy: "form-submitter",
-        requestInput: submission
-      });
+        { pool: dispatchPoolOf(found.workflow) }
+      );
       const accept = getHeaderValue(request.headers, "accept");
       if (accept.includes("text/html")) {
         reply.redirect(`/api/forms/${encodeURIComponent(request.params.path)}?submitted=1`, 303);
@@ -10909,38 +10514,30 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
             ? body.sessionId.trim()
             : crypto.randomUUID();
       const executionId = crypto.randomUUID();
-      const progressHooks = createProgressTrackingHooks({
-        executionId,
-        workflow,
-        triggerType: "chat",
-        triggeredBy: "chat-client",
-        requestInput: body
-      });
-      const result = await runWorkflowExecution({
-        channel: "production",
-        workflow,
-        directInput: {
-          trigger_type: "chat",
-          trigger_node_id: chatNode.id,
-          message,
-          user_prompt: message,
-          ...body
+      const result = await runDispatcher.run(
+        {
+          v: DISPATCH_SPEC_VERSION,
+          run: {
+            channel: "production",
+            workflow,
+            directInput: {
+              trigger_type: "chat",
+              trigger_node_id: chatNode.id,
+              message,
+              user_prompt: message,
+              ...body
+            },
+            sessionId,
+            userPrompt: message || undefined,
+            executionId,
+            triggerType: "chat",
+            triggeredBy: "chat-client"
+          },
+          progress: { requestInput: body },
+          history: { requestInput: body }
         },
-        sessionId,
-        userPrompt: message || undefined,
-        executionId,
-        triggerType: "chat",
-        triggeredBy: "chat-client",
-        hooks: progressHooks
-      });
-      await persistExecutionHistory({
-        executionId,
-        workflow,
-        result,
-        triggerType: "chat",
-        triggeredBy: "chat-client",
-        requestInput: body
-      });
+        { pool: dispatchPoolOf(workflow) }
+      );
       return {
         ok: true,
         executionId,
@@ -11007,36 +10604,28 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       const body = asRecord(request.body);
       const args = asRecord(body.arguments ?? body.args ?? body);
       const executionId = crypto.randomUUID();
-      const progressHooks = createProgressTrackingHooks({
-        executionId,
-        workflow: found.workflow,
-        triggerType: "mcp_server",
-        triggeredBy: "mcp-client",
-        requestInput: body
-      });
-      const result = await runWorkflowExecution({
-        channel: "production",
-        workflow: found.workflow,
-        directInput: {
-          trigger_type: "mcp_server",
-          trigger_node_id: found.node.id,
-          arguments: args,
-          call_id: typeof body.call_id === "string" ? body.call_id : undefined,
-          ...args
+      const result = await runDispatcher.run(
+        {
+          v: DISPATCH_SPEC_VERSION,
+          run: {
+            channel: "production",
+            workflow: found.workflow,
+            directInput: {
+              trigger_type: "mcp_server",
+              trigger_node_id: found.node.id,
+              arguments: args,
+              call_id: typeof body.call_id === "string" ? body.call_id : undefined,
+              ...args
+            },
+            executionId,
+            triggerType: "mcp_server",
+            triggeredBy: "mcp-client"
+          },
+          progress: { requestInput: body },
+          history: { requestInput: body }
         },
-        executionId,
-        triggerType: "mcp_server",
-        triggeredBy: "mcp-client",
-        hooks: progressHooks
-      });
-      await persistExecutionHistory({
-        executionId,
-        workflow: found.workflow,
-        result,
-        triggerType: "mcp_server",
-        triggeredBy: "mcp-client",
-        requestInput: body
-      });
+        { pool: dispatchPoolOf(found.workflow) }
+      );
       if (result.status === "error") {
         reply.code(500);
         return { error: result.error ?? "mcp_server trigger execution failed" };
@@ -11073,43 +10662,37 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       const triggerType = "mcp_gateway";
       const triggeredBy = `mcp-client:${input.client.name}`;
       const requestInput = { tool: input.toolName, arguments: input.args, clientId: input.client.id };
-      const hooks = createProgressTrackingHooks({
-        executionId: input.executionId,
-        workflow: input.workflow,
-        triggerType,
-        triggeredBy,
-        requestInput,
-        passthroughHooks: {
-          onNodeComplete: (event) => input.onNodeComplete({ nodeId: event.nodeId, status: event.status })
-        }
-      });
-      const result = await runWorkflowExecution({
-        channel: "production",
-        workflow: input.workflow,
-        directInput: {
-          trigger_type: triggerType,
-          trigger_node_id: input.nodeId,
-          arguments: input.args,
-          ...input.args
+      const result = await runDispatcher.run(
+        {
+          v: DISPATCH_SPEC_VERSION,
+          run: {
+            channel: "production",
+            workflow: input.workflow,
+            directInput: {
+              trigger_type: triggerType,
+              trigger_node_id: input.nodeId,
+              arguments: input.args,
+              ...input.args
+            },
+            executionId: input.executionId,
+            triggerType,
+            triggeredBy,
+            policySubject: input.subject
+          },
+          progress: { requestInput },
+          history: { requestInput }
         },
-        executionId: input.executionId,
-        triggerType,
-        triggeredBy,
-        policySubject: input.subject,
-        hooks
-      });
-      await persistExecutionHistory({
-        executionId: input.executionId,
-        workflow: input.workflow,
-        result,
-        triggerType,
-        triggeredBy,
-        requestInput
-      });
+        { pool: dispatchPoolOf(input.workflow), passthrough: {
+          onNodeComplete: (event) => input.onNodeComplete({ nodeId: event.nodeId, status: event.status })
+        } }
+      );
       return { status: result.status, output: result.output, error: result.error };
     },
     cancelExecution: (executionId, reason) => {
-      activeExecutions.get(executionId)?.controller.abort(reason);
+      const local = activeExecutions.get(executionId);
+      local?.controller.abort(reason);
+      // Phase 13.1 — a dispatched tool run executes on a worker: the instance running it stops it on this message.
+      if (!local && clusterMode) announce({ t: "cancel", id: executionId, reason: clusterCancelReason(reason) });
     }
   });
 
@@ -11148,8 +10731,14 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
 
     const executionId = crypto.randomUUID();
     let streamClosed = false;
+    let markClientGone: () => void = () => undefined;
+    // A dispatched run stops being relayed when the client goes away; it goes on, as an inline run does.
+    const clientGone = new Promise<void>((resolve) => {
+      markClientGone = resolve;
+    });
     request.raw.on("close", () => {
       streamClosed = true;
+      markClientGone();
     });
 
     const sendSseEvent = (event: string, payload: unknown) => {
@@ -11183,13 +10772,36 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     });
 
     try {
-      const progressHooks = createProgressTrackingHooks({
-        executionId,
-        workflow,
-        triggerType: "webhook_api_stream",
-        triggeredBy: user.email,
-        requestInput: parsed.data,
-        passthroughHooks: {
+      const result = await runDispatcher.run(
+        {
+          v: DISPATCH_SPEC_VERSION,
+          run: {
+            channel: "production",
+            policyActor: user,
+            workflow,
+            webhookPayload: {
+              system_prompt: parsed.data.system_prompt,
+              user_prompt: parsed.data.user_prompt,
+              session_id: parsed.data.session_id,
+              variables: parsed.data.variables
+            },
+            variables: parsed.data.variables,
+            systemPrompt: parsed.data.system_prompt,
+            userPrompt: parsed.data.user_prompt,
+            sessionId: parsed.data.session_id,
+            executionTimeoutMs: normalizeExecutionTimeoutMs(
+              parsed.data.executionTimeoutMs,
+              parsed.data.execution_timeout_ms,
+              config.WORKFLOW_EXECUTION_TIMEOUT_MS
+            ),
+            executionId,
+            triggerType: "webhook_api_stream",
+            triggeredBy: user.email
+          },
+          progress: { requestInput: parsed.data },
+          history: { requestInput: parsed.data }
+        },
+        { pool: dispatchPoolOf(workflow), closed: clientGone, passthrough: {
           onNodeStart: (event) => {
             sendSseEvent("node_start", event);
           },
@@ -11205,41 +10817,8 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
           onNodeActivity: (event) => {
             sendSseEvent("node_activity", event);
           }
-        }
-      });
-      const result = await runWorkflowExecution({
-        channel: "production",
-        policyActor: user,
-        workflow,
-        webhookPayload: {
-          system_prompt: parsed.data.system_prompt,
-          user_prompt: parsed.data.user_prompt,
-          session_id: parsed.data.session_id,
-          variables: parsed.data.variables
-        },
-        variables: parsed.data.variables,
-        systemPrompt: parsed.data.system_prompt,
-        userPrompt: parsed.data.user_prompt,
-        sessionId: parsed.data.session_id,
-        executionTimeoutMs: normalizeExecutionTimeoutMs(
-          parsed.data.executionTimeoutMs,
-          parsed.data.execution_timeout_ms,
-          config.WORKFLOW_EXECUTION_TIMEOUT_MS
-        ),
-        executionId,
-        triggerType: "webhook_api_stream",
-        triggeredBy: user.email,
-        hooks: progressHooks
-      });
-
-      await persistExecutionHistory({
-        executionId,
-        workflow,
-        result,
-        triggerType: "webhook_api_stream",
-        triggeredBy: user.email,
-        requestInput: parsed.data
-      });
+        } }
+      );
 
       sendSseEvent("result", result);
       if (result.status === "error") {
@@ -11508,42 +11087,33 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
 
         const executionId = crypto.randomUUID();
         const triggerType = isTestRoute ? "webhook_test" : "webhook";
-        const progressHooks = createProgressTrackingHooks({
-          executionId,
-          workflow: match.workflow,
-          triggerType,
-          triggeredBy: "webhook",
-          requestInput: parsedInput.body
-        });
-        const result = await runWorkflowExecution({
-          workflow: match.workflow,
-          webhookPayload: {
-            ...parsedInput.body,
-            ...(parsedInput.systemPrompt ? { system_prompt: parsedInput.systemPrompt } : {}),
-            ...(parsedInput.userPrompt ? { user_prompt: parsedInput.userPrompt } : {}),
-            session_id: parsedInput.sessionId,
-            variables: parsedInput.variables
+        const result = await runDispatcher.run(
+          {
+            v: DISPATCH_SPEC_VERSION,
+            run: {
+              workflow: match.workflow,
+              webhookPayload: {
+                ...parsedInput.body,
+                ...(parsedInput.systemPrompt ? { system_prompt: parsedInput.systemPrompt } : {}),
+                ...(parsedInput.userPrompt ? { user_prompt: parsedInput.userPrompt } : {}),
+                session_id: parsedInput.sessionId,
+                variables: parsedInput.variables
+              },
+              variables: parsedInput.variables,
+              systemPrompt: parsedInput.systemPrompt,
+              userPrompt: parsedInput.userPrompt,
+              sessionId: parsedInput.sessionId,
+              executionTimeoutMs: parsedInput.executionTimeoutMs,
+              executionId,
+              triggerType,
+              triggeredBy: "webhook",
+              channel: isTestRoute ? "draft" : "production"
+            },
+            progress: { requestInput: parsedInput.body },
+            history: { requestInput: parsedInput.body }
           },
-          variables: parsedInput.variables,
-          systemPrompt: parsedInput.systemPrompt,
-          userPrompt: parsedInput.userPrompt,
-          sessionId: parsedInput.sessionId,
-          executionTimeoutMs: parsedInput.executionTimeoutMs,
-          executionId,
-          triggerType,
-          triggeredBy: "webhook",
-          hooks: progressHooks,
-          channel: isTestRoute ? "draft" : "production"
-        });
-
-        await persistExecutionHistory({
-          executionId,
-          workflow: match.workflow,
-          result,
-          triggerType,
-          triggeredBy: "webhook",
-          requestInput: parsedInput.body
-        });
+          { pool: dispatchPoolOf(match.workflow) }
+        );
 
         const defaultResponsePayload = {
           output: result.output ?? null,
@@ -13219,12 +12789,6 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
   // Queue endpoints
   // -------------------------------------------------------------------------
 
-  // Phase 13.1 — cluster mode (Postgres with HA on) adds heartbeat leases, the lease reaper and pools. Outside it the
-  // consumer runs today's unleased path.
-  const queueClusterMode = config.HA_ENABLED && store instanceof PostgresStore;
-  const queueSettings = resolveQueueSettings(config, { clusterMode: queueClusterMode });
-  // The producer exists on every instance (any WORKER_MODE), so an api replica accepts /enqueue for the workers.
-  const queueProducer = queueService?.producer ?? new QueueProducer(store, { maxPending: queueSettings.maxPending });
   const lifecycle = options.lifecycle ?? new AppLifecycle();
   lifecycle.setLogger({
     info: (message, fields) => app.log.info(fields ?? {}, message),
@@ -13246,6 +12810,13 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       if (!context.signal.aborted) {
         app.log.info({ executionId: payload.resume.executionId, status: resumed?.status ?? "skipped" }, "Queued approval resume completed");
       }
+      return;
+    }
+    // Phase 13.1 — queue dispatch: a run another instance received, started exactly as that route would have.
+    if (payload.dispatch !== undefined) {
+      const spec = readDispatchedRunSpec(payload.dispatch);
+      if (!spec) throw new NonRetryableQueueError("This worker cannot read the dispatched run (an unknown format).");
+      await runDispatchedJob(spec, context);
       return;
     }
     // Queued runs (`POST /api/workflows/:id/enqueue`) are production traffic: the version published when the job runs.
@@ -13378,6 +12949,13 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       // backstop for the cluster bus's cancel message, through the same abort helper, so the first of the two wins.
       queueService.setCancelHandler((executionId) => {
         abortLocalExecution(executionId, REMOTE_CANCEL_REASON);
+      });
+      // An enqueue on any instance wakes the consumers of its pool at once (the poll stays as the backstop).
+      const stopWakes = clusterBus.subscribe("queue", (message) => {
+        if (message.t === "wake" && typeof message.pool === "string" && queueSettings.pools.includes(message.pool)) queueService.wake();
+      });
+      app.addHook("onClose", async () => {
+        stopWakes();
       });
     }
     queueService.setObserver({
@@ -13531,6 +13109,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
           throw error;
         }
 
+        wakeQueue(pool);
         await auditRunAction(request, user, "execution.started", { executionId, workflowId: workflow.id, projectId: workflow.projectId }, { triggerType: "queue" });
 
         const depth = await queueProducer.getDepth();
@@ -14010,6 +13589,32 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     // A write whose user or project was deleted meanwhile (a race with a delete): a conflict, not a server error.
     if (error instanceof StoreReferenceMissingError) {
       reply.code(409).send({ error: error.message });
+      return;
+    }
+
+    // Phase 13.1 — queue dispatch (EXECUTION_DISPATCH=queue): the pool is full, this instance waits on too many runs,
+    // a dispatched run outlived the wait, or its job died on the workers.
+    if (error instanceof QueueFullError) {
+      reply.header("Retry-After", String(error.retryAfterSeconds));
+      reply.code(429).send({ error: error.message, pool: error.pool, retryAfterSeconds: error.retryAfterSeconds });
+      return;
+    }
+    if (error instanceof DispatchBusyError) {
+      reply.header("Retry-After", "1");
+      reply.code(503).send({ error: error.message });
+      return;
+    }
+    if (error instanceof DispatchTimeoutError) {
+      reply.code(504).send({ error: error.message, executionId: error.executionId });
+      return;
+    }
+    if (error instanceof DispatchFailedError) {
+      // Answered as an inline run that threw: no raw error text; the cause is logged, redacted.
+      app.log.error({ executionId: error.executionId, err: secretService.redact(error.reason ?? error.message) }, "A dispatched run failed on the workers");
+      reply.code(500).send({ error: "Internal server error" });
+      return;
+    }
+    if (error instanceof DispatchClientGoneError) {
       return;
     }
 

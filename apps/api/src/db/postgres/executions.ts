@@ -343,6 +343,10 @@ export async function pruneExecutionHistory(ctx: PgContext, input: { before: str
   await deleteUnlockedInBatches(ctx.pool, "guard_events", "created_at < $1", before);
   // Phase 10.1 — tool-call telemetry follows the execution-history retention.
   await deleteUnlockedInBatches(ctx.pool, "mcp_tool_calls", "started_at < $1", before);
+  // Phase 13.1 — and finished queue jobs and dead-letter entries: their payloads (a dispatched run's spec, with its
+  // input) and stored results never outlive the history.
+  await deleteUnlockedInBatches(ctx.pool, "execution_queue", "(status = 'completed' OR status = 'dead') AND updated_at < $1", before);
+  await deleteUnlockedInBatches(ctx.pool, "execution_queue_dlq", "failed_at < $1", before);
   return deleted;
 }
 

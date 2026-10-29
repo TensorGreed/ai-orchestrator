@@ -4,6 +4,15 @@ import { STUCK_JOB_MARGIN_MS, queuedRunTimeoutMs } from "../db/queue-timeouts.js
 import { DEFAULT_QUEUE_POOL, QUEUE_POOL_PATTERN, type LostJobOutcome } from "../db/queue-leases.js";
 import type { ApprovalResumeJob } from "./approval-service.js";
 import type { Store } from "../db/store.js";
+import type { DispatchedRunSpec } from "./run-dispatch.js";
+
+/**
+ * Phase 13.1 — the payload `workflowId` of a dispatched job. An instance older than queue dispatch ignores `dispatch`
+ * and would run the published version of `workflowId` with no input; with this id it finds no workflow and the job
+ * fails there instead (and is retried, so a consumer that knows `dispatch` can run it). The queue row keeps the real
+ * workflow id, and the dispatched spec carries the workflow itself.
+ */
+export const DISPATCHED_PAYLOAD_WORKFLOW_ID = "queue-dispatch-v1:see-dispatch";
 
 export interface QueuedExecutionPayload {
   workflowId: string;
@@ -21,6 +30,11 @@ export interface QueuedExecutionPayload {
   customData?: Record<string, unknown>;
   /** Phase 11.2 — resume a paused run with a recorded approval decision instead of starting one. */
   resume?: ApprovalResumeJob;
+  /**
+   * Phase 13.1 — queue dispatch: a run another instance received, as it would have started it inline (run-dispatch.ts).
+   * Only consumers that advertise queue-dispatch-v1 are sent such jobs.
+   */
+  dispatch?: DispatchedRunSpec;
 }
 
 export interface QueueServiceConfig {
@@ -160,31 +174,47 @@ export class QueueProducer {
    * a second, so a burst can overshoot the limit by what arrives within that second.
    */
   async enqueue(payload: EnqueueInput, options: { enforceBackpressure?: boolean } = {}): Promise<string> {
+    return (await this.add(payload, options)).executionId;
+  }
+
+  /**
+   * As `enqueue`, and says whether the job was added. With `dedupeWindowMs` and a `queueItemId`, an existing item with
+   * that id is a duplicate (nothing added) unless it is finished and older than the window, when the new job replaces
+   * it. Without it an existing item always wins.
+   */
+  async add(payload: EnqueueInput, options: { enforceBackpressure?: boolean; dedupeWindowMs?: number } = {}): Promise<{ executionId: string; added: boolean }> {
     const executionId = payload.executionId ?? randomUUID();
     const { priority, executionId: _id, queueItemId, maxAttempts, pool: requestedPool, ...rest } = payload;
     const pool = requestedPool ?? DEFAULT_QUEUE_POOL;
     if (!QUEUE_POOL_PATTERN.test(pool)) {
       throw new Error(`Invalid queue pool "${pool.slice(0, 64)}": letters, digits, _ or - (at most 63).`);
     }
-    if (options.enforceBackpressure && this.maxPending > 0) {
-      const pending = await this.pendingCount(pool);
-      if (pending >= this.maxPending) throw new QueueFullError(pool, this.maxPending, QUEUE_FULL_RETRY_AFTER_SECONDS);
-    }
+    if (options.enforceBackpressure) await this.checkBackpressure(pool);
 
-    await this.store.enqueueExecution({
+    const added = await this.store.enqueueExecution({
       // A resume reuses its run's execution id, so its queue item needs its own id.
       id: queueItemId ?? executionId,
       workflowId: rest.workflowId,
       workflowName: undefined,
-      payload: { executionId, ...rest } as Record<string, unknown>,
+      payload: { executionId, ...rest, ...(rest.dispatch !== undefined ? { workflowId: DISPATCHED_PAYLOAD_WORKFLOW_ID } : {}) } as Record<string, unknown>,
       priority: priority ?? 0,
       maxAttempts: maxAttempts ?? 3,
-      ...(pool !== DEFAULT_QUEUE_POOL ? { pool } : {})
+      ...(pool !== DEFAULT_QUEUE_POOL ? { pool } : {}),
+      ...(queueItemId && options.dedupeWindowMs !== undefined
+        ? { replaceFinishedBefore: new Date(Date.now() - options.dedupeWindowMs).toISOString() }
+        : {})
     });
     const cached = this.pendingCounts.get(pool);
-    if (cached) cached.count += 1;
+    if (cached && added) cached.count += 1;
 
-    return executionId;
+    return { executionId, added };
+  }
+
+  /** Throws QueueFullError when `pool` already holds QUEUE_MAX_PENDING pending jobs (never with no limit set). */
+  async checkBackpressure(pool: string): Promise<void> {
+    if (this.maxPending <= 0) return;
+    const pending = await this.pendingCount(pool);
+    if (pending >= this.maxPending) throw new QueueFullError(pool, this.maxPending, QUEUE_FULL_RETRY_AFTER_SECONDS);
   }
 
   private async pendingCount(pool: string): Promise<number> {

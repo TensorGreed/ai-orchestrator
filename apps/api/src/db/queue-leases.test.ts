@@ -1,0 +1,71 @@
+import { describe, expect, it } from "vitest";
+import { ENTRY_NODE_TYPES, isEntryNodeType, nodeDefinitions } from "@ai-orchestrator/shared";
+import { decideLostJob, lostJobEffects, resumeEffectFreeNodeId, type LostJobInput } from "./queue-leases.js";
+
+const base: LostJobInput = { attempts: 1, maxAttempts: 3, countsAttempt: true, resume: false, history: null };
+const running = (nodeResults: unknown[]) => ({ status: "running", completedAt: null, nodeResultsJson: JSON.stringify(nodeResults) });
+
+describe("entry node types", () => {
+  it("are the effect-free triggers and static inputs: pollers, queries and consumers count as side effects", () => {
+    for (const type of ["webhook_input", "manual_trigger", "schedule_trigger", "form_trigger", "chat_trigger", "mcp_server_trigger", "text_input"]) {
+      expect(isEntryNodeType(type)).toBe(true);
+    }
+    for (const type of ["llm_call", "agent_orchestrator", "http_request", "mcp_tool", "code_node"]) expect(isEntryNodeType(type)).toBe(false);
+    for (const type of ["redis_trigger", "postgres_trigger", "kafka_trigger", "google_sheets_trigger"]) expect(isEntryNodeType(type)).toBe(false);
+    expect(ENTRY_NODE_TYPES.size).toBeLessThan(nodeDefinitions.filter((node) => node.category === "Input").length);
+  });
+});
+
+describe("resumeEffectFreeNodeId: the node a resume re-enters without a side effect", () => {
+  it("is the waiting node only for an Approval Gate's own hand-off", () => {
+    expect(resumeEffectFreeNodeId({ waitingNodeId: "gate", approvalHandoff: { kind: "gate" } })).toBe("gate");
+  });
+
+  it("is none for an agent re-run (its approved write), a paused sub-workflow, a route, or no hand-off", () => {
+    expect(resumeEffectFreeNodeId({ waitingNodeId: "agent", approvalHandoff: { kind: "rerun" } })).toBeUndefined();
+    expect(resumeEffectFreeNodeId({ waitingNodeId: "call", approvalHandoff: { kind: "sub_workflow" } })).toBeUndefined();
+    expect(resumeEffectFreeNodeId({ waitingNodeId: "guard", approvalHandoff: { kind: "route" } })).toBeUndefined();
+    expect(resumeEffectFreeNodeId({ waitingNodeId: "approval" })).toBeUndefined();
+    expect(resumeEffectFreeNodeId({ waitingNodeId: "approval", approvalHandoff: null })).toBeUndefined();
+    expect(resumeEffectFreeNodeId({ approvalHandoff: { kind: "gate" } })).toBeUndefined();
+  });
+});
+
+describe("decideLostJob: approval resumes", () => {
+  const resume: LostJobInput = { ...base, resume: true, resumeStateStatus: "resuming", history: { status: "waiting_approval", completedAt: null, nodeResultsJson: "[]" } };
+  it("a tracked resume follows the marker, not the completed-node count", () => {
+    expect(decideLostJob({ ...resume, resumeNodesCompleted: 0, effects: { tracked: true, started: true } })).toBe("interrupt");
+    expect(decideLostJob({ ...resume, resumeNodesCompleted: 0, effects: { tracked: true, started: false } })).toBe("requeue");
+    expect(decideLostJob({ ...resume, resumeNodesCompleted: 0, countsAttempt: false, effects: { tracked: true, started: true } })).toBe("interrupt");
+  });
+  it("an untracked resume (an older instance's claim) keeps the completed-node rule", () => {
+    expect(decideLostJob({ ...resume, resumeNodesCompleted: 1, effects: { tracked: false, started: false } })).toBe("interrupt");
+    expect(decideLostJob({ ...resume, resumeNodesCompleted: 0 })).toBe("requeue");
+  });
+});
+
+describe("decideLostJob: side effects", () => {
+  it("a tracked claim is re-run until a node other than an entry node started, whatever history says", () => {
+    const history = running([{ nodeId: "webhook", status: "success" }]);
+    expect(decideLostJob({ ...base, history, effects: { tracked: true, started: false } })).toBe("requeue");
+    expect(decideLostJob({ ...base, history: running([{ nodeId: "webhook", status: "success" }, { nodeId: "agent", status: "running" }]), effects: { tracked: true, started: true } })).toBe("interrupt");
+    // The progress write of the started node may have failed: the marker still decides.
+    expect(decideLostJob({ ...base, history: null, effects: { tracked: true, started: true } })).toBe("interrupt");
+    // Out of attempts with nothing started: dead-lettered as worker lost.
+    expect(decideLostJob({ ...base, attempts: 3, history, effects: { tracked: true, started: false } })).toBe("dead_letter");
+    // A finished run stays finished.
+    expect(decideLostJob({ ...base, history: { status: "success", completedAt: "c", nodeResultsJson: "[]" }, effects: { tracked: true, started: true } })).toBe("finished");
+  });
+
+  it("an untracked claim (taken by an instance without the marker) keeps the earlier rule", () => {
+    expect(decideLostJob({ ...base, history: running([{ nodeId: "n1", status: "success" }]), effects: { tracked: false, started: false } })).toBe("interrupt");
+    expect(decideLostJob({ ...base, history: running([{ nodeId: "n1", status: "running" }]) })).toBe("requeue");
+  });
+
+  it("lostJobEffects trusts the marker only when it belongs to the claim that was lost", () => {
+    expect(lostJobEffects({ claim_token: "t", effects_token: "t", effects_started: 1 })).toEqual({ tracked: true, started: true });
+    expect(lostJobEffects({ claim_token: "t", effects_token: "t", effects_started: 0 })).toEqual({ tracked: true, started: false });
+    expect(lostJobEffects({ claim_token: "t2", effects_token: "t", effects_started: 1 })).toEqual({ tracked: false, started: false });
+    expect(lostJobEffects({ claim_token: null, effects_token: null, effects_started: 0 })).toEqual({ tracked: false, started: false });
+  });
+});

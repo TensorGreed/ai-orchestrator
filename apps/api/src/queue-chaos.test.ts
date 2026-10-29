@@ -173,10 +173,11 @@ run("queue chaos with real worker processes", () => {
 
   const workerNamed = (name: string | null) => workers.find((worker) => worker.name === name)!;
 
-  it("survives SIGKILL before and after a node completed, and drains on SIGTERM", async () => {
+  it("survives SIGKILL before any node and after a node started, and drains on SIGTERM", async () => {
     primary = await createTestStore({ kind: "postgres" });
     const store = primary.store;
     await store.upsertWorkflow(workflow("wf-wait-first", [node("wait", "wait_node", { delayMs: 2_500, maxDelayMs: 2_500 }), node("out", "output", { responseTemplate: "done" })]));
+    await store.upsertWorkflow(workflow("wf-first", [node("input", "text_input", { text: "hi" }), node("out", "output", { responseTemplate: "done" })]));
     await store.upsertWorkflow(
       workflow("wf-node-then-wait", [
         node("input", "text_input", { text: "hi" }),
@@ -190,16 +191,22 @@ run("queue chaos with real worker processes", () => {
     try {
       await Promise.all([startWorker("chaos-a"), startWorker("chaos-b")]);
 
-      // 1. SIGKILL while the run waits in its first node: taken back, re-run once on the survivor.
+      // 1. SIGKILL while the run waits in its first node (a node other than an entry node had started): the worker
+      // marked its claim before the node ran, so the run is interrupted and dead-lettered, never re-run.
       const first = await enqueue("wf-wait-first");
-      const firstOwner = await until(async () => (await queueRow(first)).claimed_by, "a worker to claim the first job");
+      const firstOwner = await until(async () => {
+        const history = await store.getExecutionHistory(first);
+        const nodes = (history?.nodeResults ?? []) as Array<{ nodeId: string; status: string }>;
+        return nodes.some((entry) => entry.nodeId === "wait") ? (await queueRow(first)).claimed_by : null;
+      }, "the first run to start its wait node");
       workerNamed(firstOwner).child.kill("SIGKILL");
       await workerNamed(firstOwner).exited;
-      await until(async () => (await queueRow(first)).status === "completed", "the first job to complete on the survivor", 60_000);
-      const firstRow = await queueRow(first);
-      expect(firstRow).toMatchObject({ attempts: 1, lost_count: 1 });
-      expect(firstRow.claimed_by).not.toBe(firstOwner);
-      expect(await store.getExecutionHistory(first)).toMatchObject({ status: "success" });
+      await until(async () => (await queueRow(first)).status === "dead", "the first job to be dead-lettered", 60_000);
+      expect(await queueRow(first)).toMatchObject({ attempts: 1, lost_count: 1 });
+      expect(await store.getExecutionHistory(first)).toMatchObject({ status: "error", error: WORKER_LOST_INTERRUPTED_ERROR });
+      // The survivor takes new work (a job lost before any non-entry node started is re-run: queue-cluster.test.ts).
+      const fine = await enqueue("wf-first");
+      await until(async () => (await queueRow(fine)).status === "completed", "a fresh job to complete on the survivor", 60_000);
 
       // 2. SIGKILL after the run's first node completed: interrupted and dead-lettered, never re-run.
       await startWorker("chaos-c");
@@ -213,7 +220,9 @@ run("queue chaos with real worker processes", () => {
       await workerNamed(secondOwner).exited;
       await until(async () => (await queueRow(second)).status === "dead", "the second job to be dead-lettered", 60_000);
       expect(await store.getExecutionHistory(second)).toMatchObject({ status: "error", error: WORKER_LOST_INTERRUPTED_ERROR });
-      expect((await store.listDlqItems()).map((item) => [item.originalId, item.finalError])).toEqual([[second, WORKER_LOST_INTERRUPTED_ERROR]]);
+      expect((await store.listDlqItems()).map((item) => [item.originalId, item.finalError]).sort()).toEqual(
+        [[first, WORKER_LOST_INTERRUPTED_ERROR], [second, WORKER_LOST_INTERRUPTED_ERROR]].sort()
+      );
       expect(await queueRow(second)).toMatchObject({ attempts: 1, lost_count: 1 });
 
       // 3. SIGTERM with a short drain: one worker left, running a short and a long job.
@@ -231,7 +240,8 @@ run("queue chaos with real worker processes", () => {
       const code = await last.exited;
       expect(code, last.output.join("")).toBe(0);
       expect(await store.getExecutionHistory(short)).toMatchObject({ status: "success" });
-      expect(await queueRow(long)).toMatchObject({ status: "pending", attempts: 0, lost_count: 0, claimed_by: null });
+      // The long job's wait node had started: interrupted and dead-lettered without counting an attempt.
+      expect(await queueRow(long)).toMatchObject({ status: "dead", attempts: 0, lost_count: 0 });
     } catch (error) {
       for (const worker of workers) {
         // eslint-disable-next-line no-console

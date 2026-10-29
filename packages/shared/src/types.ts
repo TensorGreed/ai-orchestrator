@@ -306,6 +306,11 @@ export interface NodeDefinition {
   sampleConfig: Record<string, unknown>;
   /** Optional, additive: credentials the handler needs. Does not change the workflow JSON contract. */
   credentials?: NodeCredentialSpec[];
+  /**
+   * Optional: an entry node (Input category) whose executor only passes the run's input through, so running it has no
+   * effect outside the run. Unset means the node may read or consume from an external system.
+   */
+  effectFreeEntry?: boolean;
 }
 
 export type NodeExecutionStatus =

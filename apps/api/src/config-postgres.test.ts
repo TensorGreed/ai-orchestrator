@@ -7,7 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { describePostgresSettings, isPostgresDbType, parseConfig, parsePostgresSettings } from "./config.js";
+import { describePostgresSettings, isPostgresDbType, parseConfig, parsePostgresSettings, resolveExecutionDispatch } from "./config.js";
 import { createStore, postgresStoreConfig } from "./db/create-store.js";
 import { SqliteStore } from "./db/database.js";
 import { postgresPoolConfig } from "./db/postgres-store.js";
@@ -323,5 +323,20 @@ describe("cluster timings", () => {
     expect(() => parseConfig({ ...pg })).not.toThrow();
     expect(() => parseConfig({ DB_TYPE: "postgres", CLUSTER_HEARTBEAT_MS: "10000", CLUSTER_INSTANCE_TIMEOUT_MS: "30000" })).not.toThrow();
     expect(() => parseConfig({ HA_ENABLED: "true", CLUSTER_HEARTBEAT_MS: "10000", CLUSTER_INSTANCE_TIMEOUT_MS: "30000" })).not.toThrow();
+  });
+});
+
+describe("EXECUTION_DISPATCH", () => {
+  const pg = { DB_TYPE: "postgres", HA_ENABLED: "true" };
+
+  it("defaults to inline everywhere, and accepts queue only in cluster mode", () => {
+    expect(resolveExecutionDispatch(parseConfig({}), { clusterMode: false })).toEqual({ mode: "inline", maxWaiting: 1_000 });
+    expect(parseConfig({ ...pg, EXECUTION_DISPATCH: "queue", DISPATCH_MAX_WAITING: "50" })).toMatchObject({ EXECUTION_DISPATCH: "queue", DISPATCH_MAX_WAITING: 50 });
+    expect(() => parseConfig({ EXECUTION_DISPATCH: "inline" })).not.toThrow();
+    for (const env of [{ EXECUTION_DISPATCH: "queue" }, { DB_TYPE: "postgres", EXECUTION_DISPATCH: "queue" }, { HA_ENABLED: "true", EXECUTION_DISPATCH: "queue" }]) {
+      expect(errorOf(() => parseConfig(env)).message).toMatch(/EXECUTION_DISPATCH=queue needs cluster mode \(DB_TYPE=postgres and HA_ENABLED=true\)/);
+    }
+    expect(() => parseConfig({ EXECUTION_DISPATCH: "workers" })).toThrow(/Invalid environment configuration/);
+    expect(() => parseConfig({ DISPATCH_MAX_WAITING: "0" })).toThrow();
   });
 });

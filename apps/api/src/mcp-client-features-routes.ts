@@ -25,7 +25,7 @@ import type { McpServerRecord } from "./db/database.js";
 import type { AuditEventInput } from "./services/audit-service.js";
 import type { SafeUser, UserRole } from "./services/auth-service.js";
 import { McpElicitationAnswerError, toElicitationView, type McpElicitationService } from "./services/mcp-elicitation-service.js";
-import type { RunAccess } from "./run-access.js";
+import { elicitationVisibleTo, type RunAccess } from "./run-access.js";
 import { captureCatalog } from "./services/mcp-probe-service.js";
 import { evaluateToolForContext } from "./services/mcp-tool-policy.js";
 import type { Store } from "./db/store.js";
@@ -382,8 +382,7 @@ export function registerMcpClientFeatureRoutes(deps: McpClientFeatureDeps): void
   // Like approvals: only users who can read the run's workflow see the
   // request; answering it needs `workflow:execute` there.
   const visibleTo = (user: SafeUser) => async (record: { createdBy: string | null; workflowId: string }) =>
-    (user.role === "admin" || user.role === "operator" || !record.createdBy || record.createdBy === user.id) &&
-    (await deps.runAccess.workflow(user, record.workflowId, "workflow:read")).ok;
+    await elicitationVisibleTo(deps.runAccess, user, record);
 
   app.get("/api/mcp/elicitations", async (request, reply) => {
     const user = await deps.requireRole(request, reply, ["viewer"]);

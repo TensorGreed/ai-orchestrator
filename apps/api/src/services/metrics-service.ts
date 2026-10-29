@@ -98,6 +98,8 @@ export class MetricsService {
   private queueWait = new Histogram([0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 300]);
   private queueLostTotal = 0;
   private workerSlotsFree: number | null = null;
+  /** Phase 13.1 — queue dispatch (EXECUTION_DISPATCH=queue only; null otherwise, so nothing is exported). */
+  private dispatch: { fallback: boolean; fallbacksTotal: number; dispatchedTotal: number } | null = null;
 
   private readonly startTime = Date.now();
 
@@ -163,6 +165,29 @@ export class MetricsService {
   recordQueueLost(count: number): void {
     if (!this.enabled) return;
     this.queueLostTotal += count;
+  }
+
+  /** Phase 13.1 — queue dispatch: whether runs currently fall back to inline (the capability gate). */
+  setDispatchFallback(fallback: boolean): void {
+    if (!this.enabled) return;
+    this.dispatchState().fallback = fallback;
+  }
+
+  /** Phase 13.1 — queue dispatch: the capability gate started falling back to inline. */
+  recordDispatchFallback(): void {
+    if (!this.enabled) return;
+    this.dispatchState().fallbacksTotal += 1;
+  }
+
+  /** Phase 13.1 — queue dispatch: a run was put on the queue for a worker. */
+  recordDispatchedRun(): void {
+    if (!this.enabled) return;
+    this.dispatchState().dispatchedTotal += 1;
+  }
+
+  private dispatchState(): { fallback: boolean; fallbacksTotal: number; dispatchedTotal: number } {
+    this.dispatch ??= { fallback: false, fallbacksTotal: 0, dispatchedTotal: 0 };
+    return this.dispatch;
   }
 
   /** Phase 13.1 — this worker's free job slots. */
@@ -289,6 +314,11 @@ export class MetricsService {
     }
     if (this.workerSlotsFree !== null) {
       g(`${p}_worker_slots_free`, "Free job slots on this worker", this.workerSlotsFree);
+    }
+    if (this.dispatch) {
+      g(`${p}_dispatch_inline_fallback`, "1 while EXECUTION_DISPATCH=queue runs execute inline because a live worker lacks dispatch support (or none serves the pool)", this.dispatch.fallback ? 1 : 0);
+      c(`${p}_dispatch_inline_fallbacks_total`, "Times queue dispatch started falling back to inline", this.dispatch.fallbacksTotal);
+      c(`${p}_dispatch_runs_total`, "Runs this instance put on the queue for a worker (EXECUTION_DISPATCH=queue)", this.dispatch.dispatchedTotal);
     }
     if (this.cluster) {
       g(`${p}_cluster_live_instances`, "Live API instances in the registry (Postgres)", this.cluster.liveInstances);

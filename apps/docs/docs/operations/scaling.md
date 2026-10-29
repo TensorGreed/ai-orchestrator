@@ -167,12 +167,13 @@ The `Scale smoke` GitHub workflow runs the smoke loads and the chaos run on dema
 
 ### What is measured after queue dispatch
 
-Queue dispatch (an optional `EXECUTION_DISPATCH=queue`) is planned and not in this release. With it, manual and
-streamed runs, webhooks and schedules all go through the queue, and the API replicas no longer execute runs. The
-harness is ready for it:
+[Queue dispatch](./queue-and-workers.md#queue-dispatch) (an optional `EXECUTION_DISPATCH=queue`) sends manual and
+streamed runs, webhooks and schedules through the queue, so the API replicas no longer execute runs. To measure it, start
+the harness with `SCALE_EXECUTION_DISPATCH=queue` (the compose file passes it to every replica; the default is
+`inline`):
 
-- W4 sends its streamed part only when `GET /api/cluster` reports `"executionDispatch": "queue"`; until then it runs
+- W4 sends its streamed part only when `GET /api/cluster` reports `"executionDispatch": "queue"`; otherwise it runs
   the enqueue part alone and says so.
-- The planned measurements are runs per second against the number of workers (2, 4 and 8, aiming at 80% scaling
+- The measurements are runs per second against the number of workers (2, 4 and 8, aiming at 80% scaling
   efficiency), queue wait p95 under 250 ms with the bus waking workers, stream relay lag from worker to browser, cancel
   propagation, recovery after a worker is killed, and the end-to-end overhead compared with one all-in-one instance.

@@ -70,6 +70,14 @@ const envSchema = z.object({
    * runs in cluster mode (default 20000) or when this is set; otherwise the signals exit at once, as before.
    */
   SHUTDOWN_DRAIN_MS: optionalIntFromEnv(0, 3_600_000),
+  /**
+   * Phase 13.1 — where runs execute: `inline` (default) in the instance that received the request, as before; `queue`
+   * on the execution queue's workers, with the receiving instance relaying events and the result. `queue` needs cluster
+   * mode (DB_TYPE=postgres and HA_ENABLED=true).
+   */
+  EXECUTION_DISPATCH: z.enum(["inline", "queue"]).optional(),
+  /** Queue dispatch: requests one instance lets wait on dispatched runs at once; more answer 503 (default 1000). */
+  DISPATCH_MAX_WAITING: optionalIntFromEnv(1, 1_000_000),
   // How often a streamed run (SSE) sends a `: ping` comment while nothing else
   // is sent. The web client treats 45s without any bytes as a lost connection,
   // so keep this well below that.
@@ -575,6 +583,7 @@ export function parseConfig(env: Record<string, string | undefined>): AppConfig 
   // Phase 13.1 — queue settings that only work in cluster mode fail fast outside it.
   resolveQueueSettings(parsed.data, { clusterMode: isPostgresDbType(env.DB_TYPE) && parsed.data.HA_ENABLED === true });
   checkClusterTimings(parsed.data, env.DB_TYPE);
+  resolveExecutionDispatch(parsed.data, { clusterMode: isPostgresDbType(env.DB_TYPE) && parsed.data.HA_ENABLED === true });
 
   return parsed.data;
 }
@@ -666,6 +675,34 @@ export function resolveQueueSettings(config: QueueConfigInput, options: { cluste
     shutdownDrainMs: config.SHUTDOWN_DRAIN_MS ?? QUEUE_SETTING_DEFAULTS.shutdownDrainMs,
     drainOnSignal: options.clusterMode || config.SHUTDOWN_DRAIN_MS !== undefined
   };
+}
+
+/** Phase 13.1 — queue dispatch defaults. */
+export const DISPATCH_MAX_WAITING_DEFAULT = 1_000;
+
+export interface ExecutionDispatchSettings {
+  mode: "inline" | "queue";
+  /** Requests that may wait on dispatched runs at once on one instance. */
+  maxWaiting: number;
+}
+
+/**
+ * EXECUTION_DISPATCH with its default (`inline`). `queue` outside cluster mode (DB_TYPE=postgres and HA_ENABLED=true) is
+ * refused with an error naming the setting: without the shared queue, bus and instance registry no worker could run the
+ * job or tell this instance about it.
+ */
+export function resolveExecutionDispatch(
+  config: Partial<Pick<AppConfig, "EXECUTION_DISPATCH" | "DISPATCH_MAX_WAITING">>,
+  options: { clusterMode: boolean }
+): ExecutionDispatchSettings {
+  const mode = config.EXECUTION_DISPATCH ?? "inline";
+  if (mode === "queue" && !options.clusterMode) {
+    throw new Error(
+      "Invalid environment configuration: EXECUTION_DISPATCH=queue needs cluster mode (DB_TYPE=postgres and HA_ENABLED=true); " +
+        "unset it (or set it to inline) to run workflows in the instance that receives them"
+    );
+  }
+  return { mode, maxWaiting: config.DISPATCH_MAX_WAITING ?? DISPATCH_MAX_WAITING_DEFAULT };
 }
 
 /**
