@@ -3,8 +3,10 @@
  * store and pool): a cancel on one instance stops the run executing on another (over the bus, and by the cancel check
  * when the message is lost or the listener was down), the registry lists every instance, several instances leading
  * with HA off raise the warning, only one instance at a time exports an audit destination, a save on a standby reaches
- * the leader's scheduler at once, and the leader fails the runs of an instance that stopped beating. Postgres only
- * (skipped without TEST_POSTGRES_URL).
+ * the leader's scheduler at once, and the leader fails the runs of an instance that stopped beating. With the queue
+ * lane: a queued run under a live lease is never failed by the dead-executor reconcile, and a queued run canceled
+ * both over the bus and by the queue heartbeat's check is stopped once. Postgres only (skipped without
+ * TEST_POSTGRES_URL).
  */
 import fs from "node:fs";
 import os from "node:os";
@@ -79,7 +81,11 @@ run("cluster signalling across API instances on one Postgres database", () => {
     for (const dir of tempDirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
   }, 60_000);
 
-  async function addInstance(i: number, overrides: Record<string, string> = {}, options: { queue?: boolean } = {}): Promise<Instance> {
+  async function addInstance(
+    i: number,
+    overrides: Record<string, string> = {},
+    options: { queue?: boolean; beforeApp?: (queue: QueueService) => void } = {}
+  ): Promise<Instance> {
     primary ??= await createTestStore({ kind: "postgres" });
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "l2m-cluster-"));
     tempDirs.push(tempDir);
@@ -105,6 +111,7 @@ run("cluster signalling across API instances on one Postgres database", () => {
     const scheduler = background ? new SchedulerService(store, () => undefined) : undefined;
     const triggers = background ? new TriggerService(store, () => undefined) : undefined;
     const queue = background && options.queue ? new QueueService(store, { pollIntervalMs: 50 }) : undefined;
+    if (queue) options.beforeApp?.(queue);
     const app = await createApp(config, store, new SecretService(store, config.SECRET_MASTER_KEY_BASE64), new AuthService(store, config.SESSION_TTL_HOURS), scheduler, queue, triggers);
     await app.ready();
     const instance = { id: `instance-${i}`, app, store, scheduler, queue };
@@ -471,5 +478,102 @@ run("cluster signalling across API instances on one Postgres database", () => {
     const deleted = await api.app.inject({ method: "DELETE", url: "/api/workflows/wf-sched-api", headers: { cookie } });
     expect(deleted.statusCode, deleted.body).toBe(200);
     await until(() => jobCount(leader.scheduler) === 0, "the leader to drop the schedule", 10_000);
+  }, 60_000);
+
+  /** Short queue leases, as in queue-cluster.test.ts. */
+  const QUEUE_LEASES = { QUEUE_HEARTBEAT_MS: "100", QUEUE_LEASE_MS: "600", QUEUE_REAPER_INTERVAL_MS: "100" };
+
+  it("a queued run whose worker stopped beating in the registry is not failed by the reconcile while its lease is live", async () => {
+    const leader = await addInstance(0, QUEUE_LEASES);
+    await until(() => leader.scheduler?.isRunning(), "the leader");
+    const worker = await addInstance(1, QUEUE_LEASES, { queue: true });
+    await worker.store.upsertWorkflow(waitingWorkflow("wf-leased", 5_000));
+    await worker.queue!.enqueue({ workflowId: "wf-leased", executionId: "leased-run" });
+    await until(async () => (await worker.store.getExecutionHistory("leased-run"))?.status === "running", "the queued run to start");
+    const [claim] = await sql<{ claim_token: string; claimed_by: string }>(`SELECT claim_token, claimed_by FROM execution_queue WHERE id = 'leased-run'`);
+    expect(claim).toMatchObject({ claimed_by: "instance-1" });
+    // The consumer recorded no owner for it; an owner row left under the worker's id (as an inline run would have)
+    // makes the reconcile look at it, so the queue's lookup is what keeps it.
+    expect(await sql(`SELECT 1 FROM cluster_run_owners WHERE execution_id = 'leased-run'`)).toEqual([]);
+    await worker.store.claimClusterRunOwner({ executionId: "leased-run", instanceId: "instance-1" });
+    // The worker's registry heartbeats stop reaching the database; its queue lease keeps renewing.
+    vi.spyOn(worker.store, "heartbeatClusterInstance").mockRejectedValue(new Error("heartbeat blocked"));
+
+    // The leader judged instance-1 dead and took its owner rows (the reconcile forgets every owner it looked at).
+    await until(async () => (await sql(`SELECT 1 FROM cluster_run_owners WHERE execution_id = 'leased-run'`)).length === 0, "the leader's reconcile", 15_000);
+    expect((await worker.store.getExecutionHistory("leased-run"))!.status).toBe("running");
+    const [during] = await sql<{ status: string; claim_token: string; lost_count: number }>(`SELECT status, claim_token, lost_count FROM execution_queue WHERE id = 'leased-run'`);
+    expect(during).toEqual({ status: "running", claim_token: claim!.claim_token, lost_count: 0 });
+
+    // The worker fenced itself for its inline runs, but the queued run is the lease's: it finishes, once.
+    await until(async () => (await sql<{ status: string }>(`SELECT status FROM execution_queue WHERE id = 'leased-run'`))[0]?.status === "completed", "the queued run to finish", 20_000);
+    expect(await worker.store.getExecutionHistory("leased-run")).toMatchObject({ status: "success" });
+    const [after] = await sql<{ attempts: number; lost_count: number }>(`SELECT attempts, lost_count FROM execution_queue WHERE id = 'leased-run'`);
+    expect(after).toEqual({ attempts: 0, lost_count: 0 });
+  }, 60_000);
+
+  it("a queued run canceled over the bus and again by the queue heartbeat's check is stopped and recorded once", async () => {
+    // A slow queue heartbeat (4 s) so the bus stops the run first; the heartbeat's check then finds it still running.
+    const leases = { QUEUE_HEARTBEAT_MS: "4000", QUEUE_LEASE_MS: "12000", QUEUE_REAPER_INTERVAL_MS: "1000" };
+    const api = await addInstance(0, leases);
+    const cancelChecks: string[] = [];
+    const worker = await addInstance(1, leases, {
+      queue: true,
+      beforeApp: (queue) => {
+        const setCancelHandler = queue.setCancelHandler.bind(queue);
+        queue.setCancelHandler = (handler) =>
+          setCancelHandler((executionId) => {
+            cancelChecks.push(executionId);
+            handler(executionId);
+          });
+      }
+    });
+    await worker.store.upsertWorkflow(waitingWorkflow("wf-cancel-queued", 60_000));
+    // The run's final write waits until the heartbeat's check has seen the cancel too, so both paths reach a live run.
+    const save = worker.store.saveExecutionHistory.bind(worker.store);
+    let finalWriteAt = 0;
+    const finalWrites: Array<{ status: string; written: boolean }> = [];
+    vi.spyOn(worker.store, "saveExecutionHistory").mockImplementation(async (record, options) => {
+      if (record.id !== "queued-cancel" || record.status === "running") return await save(record, options);
+      finalWriteAt ||= Date.now();
+      await until(() => cancelChecks.includes("queued-cancel"), "the queue heartbeat's cancel check", 15_000);
+      const written = await save(record, options);
+      finalWrites.push({ status: record.status, written });
+      return written;
+    });
+    await worker.queue!.enqueue({ workflowId: "wf-cancel-queued", executionId: "queued-cancel" });
+    await until(async () => (await worker.store.getExecutionHistory("queued-cancel"))?.status === "running", "the queued run to start");
+
+    const cookie = await loginAs(api, "builder", "builder");
+    const canceledAt = Date.now();
+    const cancel = await api.app.inject({ method: "POST", url: "/api/executions/queued-cancel/cancel", headers: { cookie }, payload: { reason: "stop it" } });
+    expect(cancel.statusCode, cancel.body).toBe(200);
+    expect(cancel.json()).toMatchObject({ status: "canceled", abortedActiveRun: false, abortSignalled: true });
+
+    await until(async () => (await sql<{ status: string }>(`SELECT status FROM execution_queue WHERE id = 'queued-cancel'`))[0]?.status === "completed", "the job to end", 20_000);
+    // The bus stopped it well before the heartbeat could, and the heartbeat's later check changed nothing.
+    expect(finalWriteAt - canceledAt).toBeLessThan(3_000);
+    expect(cancelChecks).toContain("queued-cancel");
+    expect(finalWrites).toEqual([{ status: "canceled", written: true }]);
+    expect(await worker.store.getExecutionHistory("queued-cancel")).toMatchObject({ status: "canceled" });
+    const [job] = await sql<{ attempts: number; lost_count: number }>(`SELECT attempts, lost_count FROM execution_queue WHERE id = 'queued-cancel'`);
+    expect(job).toEqual({ attempts: 0, lost_count: 0 });
+    expect(await sql(`SELECT 1 FROM execution_queue WHERE status <> 'completed'`)).toEqual([]);
+    expect(await sql(`SELECT 1 FROM cluster_run_owners`)).toEqual([]);
+  }, 60_000);
+
+  it("a queued run canceled without a bus message is stopped by the queue heartbeat's check", async () => {
+    const api = await addInstance(0, QUEUE_LEASES);
+    const worker = await addInstance(1, QUEUE_LEASES, { queue: true });
+    await worker.store.upsertWorkflow(waitingWorkflow("wf-cancel-hb", 60_000));
+    await worker.queue!.enqueue({ workflowId: "wf-cancel-hb", executionId: "hb-cancel" });
+    await until(async () => (await worker.store.getExecutionHistory("hb-cancel"))?.status === "running", "the queued run to start");
+    // A cancel written without a message (the bus is off for it); the cluster cancel check is off in these tests.
+    const result = await api.store.cancelExecution({ id: "hb-cancel", onlyFrom: ["running"], completedAt: new Date().toISOString(), error: "lost message" });
+    expect(result.outcome).toBe("canceled");
+    await until(async () => (await sql<{ status: string }>(`SELECT status FROM execution_queue WHERE id = 'hb-cancel'`))[0]?.status === "completed", "the heartbeat to stop the run", 10_000);
+    expect(await worker.store.getExecutionHistory("hb-cancel")).toMatchObject({ status: "canceled" });
+    const [job] = await sql<{ attempts: number; lost_count: number }>(`SELECT attempts, lost_count FROM execution_queue WHERE id = 'hb-cancel'`);
+    expect(job).toEqual({ attempts: 0, lost_count: 0 });
   }, 60_000);
 });
