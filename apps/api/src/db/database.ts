@@ -9350,6 +9350,7 @@ export class SqliteStore implements Store {
     // Runs a live queue job drives belong to the queue's lease and reaper. Read before the (synchronous) transaction;
     // the failing UPDATE re-checks `status = 'running'`, so a job that finishes in between changes nothing.
     const candidates = this.queryAll<{ execution_id: unknown }>(`SELECT execution_id FROM cluster_run_owners WHERE instance_id <> ?`, [input.selfId]);
+    const checked = new Set(candidates.map((owner) => toString(owner.execution_id)));
     const queueHeld = new Set(await this.listExecutionIdsWithActiveQueueJob(candidates.map((owner) => toString(owner.execution_id))));
     return this.transaction(() => {
       const dead = this.queryAll<{ execution_id: unknown; instance_id: unknown }>(
@@ -9363,8 +9364,12 @@ export class SqliteStore implements Store {
       );
       const completedAt = new Date().toISOString();
       const failed: Array<{ id: string; workflowId: string; instanceId: string }> = [];
+      let changed = false;
       for (const owner of dead) {
         const executionId = toString(owner.execution_id);
+        // An owner claimed after the queue read waits for the next pass, so no run is failed without its queue check.
+        if (!checked.has(executionId)) continue;
+        changed = true;
         const run = queueHeld.has(executionId)
           ? undefined
           : this.queryOne<{ workflow_id: unknown; started_at: unknown }>(`SELECT workflow_id, started_at FROM execution_history WHERE id = ? AND status = 'running'`, [
@@ -9381,7 +9386,7 @@ export class SqliteStore implements Store {
         }
         this.exec(`DELETE FROM cluster_run_owners WHERE execution_id = ?`, [executionId]);
       }
-      if (dead.length > 0) this.persist();
+      if (changed) this.persist();
       return failed;
     });
   }
@@ -9389,9 +9394,13 @@ export class SqliteStore implements Store {
   async failRunsOwnedBy(input: { instanceId: string; error: string }): Promise<Array<{ id: string; workflowId: string; instanceId: string }>> {
     // As in reconcileDeadExecutorRuns: the queue's runs are read first, and the UPDATE re-checks the status.
     const candidates = this.queryAll<{ execution_id: unknown }>(`SELECT execution_id FROM cluster_run_owners WHERE instance_id = ?`, [input.instanceId]);
-    const queueHeld = new Set(await this.listExecutionIdsWithActiveQueueJob(candidates.map((owner) => toString(owner.execution_id))));
+    const checked = new Set(candidates.map((owner) => toString(owner.execution_id)));
+    const queueHeld = new Set(await this.listExecutionIdsWithActiveQueueJob([...checked]));
     return this.transaction(() => {
-      const owned = this.queryAll<{ execution_id: unknown }>(`SELECT execution_id FROM cluster_run_owners WHERE instance_id = ? ORDER BY execution_id`, [input.instanceId]);
+      // Only the owners whose queue state was read above; one claimed in between is left for the next call.
+      const owned = this.queryAll<{ execution_id: unknown }>(`SELECT execution_id FROM cluster_run_owners WHERE instance_id = ? ORDER BY execution_id`, [
+        input.instanceId
+      ]).filter((owner) => checked.has(toString(owner.execution_id)));
       const completedAt = new Date().toISOString();
       const failed: Array<{ id: string; workflowId: string; instanceId: string }> = [];
       for (const owner of owned) {
@@ -9411,7 +9420,9 @@ export class SqliteStore implements Store {
           failed.push({ id: executionId, workflowId: toString(run.workflow_id), instanceId: input.instanceId });
         }
       }
-      this.exec(`DELETE FROM cluster_run_owners WHERE instance_id = ?`, [input.instanceId]);
+      for (const owner of owned) {
+        this.exec(`DELETE FROM cluster_run_owners WHERE execution_id = ? AND instance_id = ?`, [toString(owner.execution_id), input.instanceId]);
+      }
       if (owned.length > 0) this.persist();
       return failed;
     });

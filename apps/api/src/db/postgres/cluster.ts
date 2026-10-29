@@ -161,10 +161,17 @@ export async function reconcileDeadExecutorRuns(
         ORDER BY o.execution_id`;
   const params = [input.selfId, input.deadAfterMs];
   const candidates = await ctx.query<{ execution_id: string }>(deadSelect, params);
-  const held = await queueHeldAmong(ctx, candidates.map((row) => row.execution_id));
+  if (candidates.length === 0) return [];
+  const checked = candidates.map((row) => row.execution_id);
+  const held = await queueHeldAmong(ctx, checked);
   return await ctx.withTransaction(async (client) => {
-    // The owners of dead instances, locked so two reconciling leaders (a handover) never fail a run twice.
-    const dead = await client.query<{ execution_id: string; instance_id: string }>(`${deadSelect}\n        FOR UPDATE OF o SKIP LOCKED`, params);
+    // The owners of dead instances, locked so two reconciling leaders (a handover) never fail a run twice. Only the
+    // candidates whose queue state was read above: an owner that ages past the window in between waits for the next
+    // pass, so no run is failed without its queue check.
+    const dead = await client.query<{ execution_id: string; instance_id: string }>(
+      deadSelect.replace("ORDER BY", "AND o.execution_id = ANY($3::text[])\n        ORDER BY") + "\n        FOR UPDATE OF o SKIP LOCKED",
+      [...params, checked]
+    );
     if (dead.rows.length === 0) return [];
     const ids = dead.rows.map((row) => row.execution_id);
     const ownerOf = new Map(dead.rows.map((row) => [row.execution_id, row.instance_id]));
@@ -182,11 +189,14 @@ export async function failRunsOwnedBy(
     `SELECT execution_id FROM cluster_run_owners WHERE instance_id = $1 ORDER BY execution_id`,
     [input.instanceId]
   );
-  const held = await queueHeldAmong(ctx, candidates.map((row) => row.execution_id));
+  if (candidates.length === 0) return [];
+  const checked = candidates.map((row) => row.execution_id);
+  const held = await queueHeldAmong(ctx, checked);
   return await ctx.withTransaction(async (client) => {
+    // Only the owner rows whose queue state was read above; one claimed in between is left for the next call.
     const owned = await client.query<{ execution_id: string }>(
-      `SELECT execution_id FROM cluster_run_owners WHERE instance_id = $1 ORDER BY execution_id FOR UPDATE SKIP LOCKED`,
-      [input.instanceId]
+      `SELECT execution_id FROM cluster_run_owners WHERE instance_id = $1 AND execution_id = ANY($2::text[]) ORDER BY execution_id FOR UPDATE SKIP LOCKED`,
+      [input.instanceId, checked]
     );
     if (owned.rows.length === 0) return [];
     const ids = owned.rows.map((row) => row.execution_id);
