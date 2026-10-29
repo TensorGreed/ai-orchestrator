@@ -251,7 +251,7 @@
           <div>
             <span class="eyebrow">MCP control plane</span>
             <h2 id="cp-title">Every MCP server your agents call, in one place.</h2>
-            <p class="lead">Register a server once. L2M probes it, tracks its tools and what they cost, and enforces who may call what, for agents and outside clients alike.</p>
+            <p class="lead">One MCP registry for every server your agents call, and an MCP gateway that serves their tools to outside clients. L2M probes each server, tracks its tools and what they cost, and enforces who may call what, for agents and clients alike.</p>
             <ul class="feature-list">
               <li><strong>Registry and onboarding.</strong> Health probes, tool schema snapshots with breaking-change diffs, a playground, and import from MCP client config files.</li>
               <li><strong>Telemetry and policy.</strong> Calls, p95 latency, errors, tokens and cost per tool. Allow and deny rules by project, role, server and tool, plus a "no write tools" switch.</li>
@@ -260,6 +260,7 @@
               <li><strong>Testing.</strong> Record MCP calls into cassettes and replay them; <code>l2m mcp check</code> fails CI on breaking changes or blocked tools.</li>
               <li><strong>Runtime safety.</strong> Stdio servers in sandboxed containers, rate limits, concurrency caps and a circuit breaker.</li>
             </ul>
+            <p>Guides: <a class="text-link" href="./docs/guides/self-hosted-mcp-gateway">Run a self-hosted MCP gateway</a> · <a class="text-link" href="./docs/guides/govern-mcp-tools">Govern MCP tools</a> · <a class="text-link" href="./docs/guides/test-mcp-servers-in-ci">Test MCP servers in CI</a></p>
             <a class="text-link" href="./docs/product/mcp-control-plane">MCP control plane docs →</a>
           </div>
           <figure class="shot">
