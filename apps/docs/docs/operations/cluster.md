@@ -34,7 +34,7 @@ A self-fenced instance (see above) may keep claiming queue jobs. That is safe: a
 
 ## The bus connection
 
-Each instance in cluster mode holds **one extra connection** for listening (`application_name = 'l2m-bus'`), next to its pool and the leader-lock connection (`l2m-leader`). Budget `DB_POSTGRESDB_POOL_SIZE + 2` connections per instance.
+Each instance in cluster mode holds **one extra connection** for listening (`application_name = 'l2m-bus'`), next to its pool and the leader-lock connection (`l2m-leader`). Budget `DB_POSTGRESDB_POOL_SIZE + 2` connections per instance, and keep `DB_POSTGRESDB_POOL_SIZE` at 4 or more in cluster mode: up to two MCP OAuth refreshes per instance each hold one pooled connection for their cluster lock while they use another, so a pool of 1 or 2 leaves nothing for other requests while they run.
 
 - **Direct or session-mode pooling only.** PgBouncer in transaction mode breaks `LISTEN` (notifications go to whichever client holds the server connection), as it breaks the leader lock. Point the API at Postgres directly, or at a session-mode pooler.
 - **Reconnects.** The listener is checked by TCP keepalives and a `SELECT 1` every 10 seconds; a connection that errors, ends or does not answer is replaced with backoff (250 ms up to 10 s). Killing it (`pg_terminate_backend`) is safe.
@@ -89,6 +89,7 @@ The session id is random and the instance that answers `initialize` chooses it, 
 
 ```text
 backend l2m_mcp
+    mode http
     balance roundrobin
     stick-table type string len 64 size 100k expire 30m
     stick store-response res.hdr(mcp-session-id)
@@ -99,7 +100,7 @@ backend l2m_mcp
 
 Keep `expire` at or above `MCP_GATEWAY_SESSION_IDLE_MS` (30 minutes by default). Open-source nginx cannot learn a value from a response header, so it cannot route by session id. The alternatives are:
 
-- **nginx Plus:** `sticky learn create=$upstream_http_mcp_session_id lookup=$http_mcp_session_id zone=mcp:1m;` in the upstream.
+- **nginx Plus:** `sticky learn create=$upstream_http_mcp_session_id lookup=$http_mcp_session_id zone=mcp:1m timeout=30m;` in the upstream. Its default timeout is 10 minutes, shorter than a session, so set `timeout` to at least `MCP_GATEWAY_SESSION_IDLE_MS`.
 - **Open-source nginx, by client address:** `hash $remote_addr consistent;` in the upstream. This is coarser: every session from one address goes to one instance, and clients that all reach the balancer through one NAT or proxy share a single instance.
 
 ## The instance registry
