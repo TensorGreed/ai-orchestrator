@@ -113,17 +113,16 @@ export async function releaseClusterRunOwner(ctx: PgContext, input: { executionI
 
 /**
  * Fails the `running` history rows among `ids` with `error`, except runs a live (pending or running) queue job drives
- * (`listExecutionIdsWithActiveQueueJob`, keyed on the job's execution id, so approval resumes are covered): those
- * belong to the queue's lease, reaper and worker-loss policy. The queue is read outside the caller's transaction; the
- * `UPDATE` re-checks `status = 'running'`, so a job that finishes in between changes nothing.
+ * (`held`, from `listExecutionIdsWithActiveQueueJob`, keyed on the job's execution id so approval resumes are
+ * covered): those belong to the queue's lease, reaper and worker-loss policy. The `UPDATE` re-checks
+ * `status = 'running'`, so a job that finishes in between changes nothing.
  */
 async function failRunningUnlessQueued(
-  ctx: PgContext,
   client: PoolClient,
   ids: string[],
+  held: ReadonlySet<string>,
   error: string
 ): Promise<{ rows: Array<{ id: string; workflow_id: string }> }> {
-  const held = new Set(await queue.listExecutionIdsWithActiveQueueJob(ctx, ids));
   const eligible = ids.filter((id) => !held.has(id));
   if (eligible.length === 0) return { rows: [] };
   return await client.query<{ id: string; workflow_id: string }>(
@@ -136,14 +135,22 @@ async function failRunningUnlessQueued(
   );
 }
 
+/**
+ * The queue-held subset of `ids`, read before a reconcile opens its transaction, so the reconcile never holds owner
+ * row locks while it waits for a second pool connection. A run that becomes queue-held after this read cannot have an
+ * owner row: a queued run never gets one (the consumer registers none), so the locked rows are only ever inline runs
+ * and the reconcile acts on them as before.
+ */
+async function queueHeldAmong(ctx: PgContext, ids: string[]): Promise<Set<string>> {
+  if (ids.length === 0) return new Set();
+  return new Set(await queue.listExecutionIdsWithActiveQueueJob(ctx, ids));
+}
+
 export async function reconcileDeadExecutorRuns(
   ctx: PgContext,
   input: { error: string; deadAfterMs: number; selfId: string }
 ): Promise<Array<{ id: string; workflowId: string; instanceId: string }>> {
-  return await ctx.withTransaction(async (client) => {
-    // The owners of dead instances, locked so two reconciling leaders (a handover) never fail a run twice.
-    const dead = await client.query<{ execution_id: string; instance_id: string }>(
-      `SELECT o.execution_id, o.instance_id
+  const deadSelect = `SELECT o.execution_id, o.instance_id
          FROM cluster_run_owners o
          LEFT JOIN cluster_instances i ON i.id = o.instance_id
         WHERE o.instance_id <> $1
@@ -151,14 +158,17 @@ export async function reconcileDeadExecutorRuns(
             (i.id IS NULL AND o.started_at < now() - make_interval(secs => $2::double precision / 1000.0))
             OR i.heartbeat_at < now() - make_interval(secs => $2::double precision / 1000.0)
           )
-        ORDER BY o.execution_id
-        FOR UPDATE OF o SKIP LOCKED`,
-      [input.selfId, input.deadAfterMs]
-    );
+        ORDER BY o.execution_id`;
+  const params = [input.selfId, input.deadAfterMs];
+  const candidates = await ctx.query<{ execution_id: string }>(deadSelect, params);
+  const held = await queueHeldAmong(ctx, candidates.map((row) => row.execution_id));
+  return await ctx.withTransaction(async (client) => {
+    // The owners of dead instances, locked so two reconciling leaders (a handover) never fail a run twice.
+    const dead = await client.query<{ execution_id: string; instance_id: string }>(`${deadSelect}\n        FOR UPDATE OF o SKIP LOCKED`, params);
     if (dead.rows.length === 0) return [];
     const ids = dead.rows.map((row) => row.execution_id);
     const ownerOf = new Map(dead.rows.map((row) => [row.execution_id, row.instance_id]));
-    const failed = await failRunningUnlessQueued(ctx, client, ids, input.error);
+    const failed = await failRunningUnlessQueued(client, ids, held, input.error);
     await client.query(`DELETE FROM cluster_run_owners WHERE execution_id = ANY($1::text[])`, [ids]);
     return failed.rows.map((row) => ({ id: row.id, workflowId: row.workflow_id, instanceId: ownerOf.get(row.id) ?? "" }));
   });
@@ -168,6 +178,11 @@ export async function failRunsOwnedBy(
   ctx: PgContext,
   input: { instanceId: string; error: string }
 ): Promise<Array<{ id: string; workflowId: string; instanceId: string }>> {
+  const candidates = await ctx.query<{ execution_id: string }>(
+    `SELECT execution_id FROM cluster_run_owners WHERE instance_id = $1 ORDER BY execution_id`,
+    [input.instanceId]
+  );
+  const held = await queueHeldAmong(ctx, candidates.map((row) => row.execution_id));
   return await ctx.withTransaction(async (client) => {
     const owned = await client.query<{ execution_id: string }>(
       `SELECT execution_id FROM cluster_run_owners WHERE instance_id = $1 ORDER BY execution_id FOR UPDATE SKIP LOCKED`,
@@ -175,7 +190,7 @@ export async function failRunsOwnedBy(
     );
     if (owned.rows.length === 0) return [];
     const ids = owned.rows.map((row) => row.execution_id);
-    const failed = await failRunningUnlessQueued(ctx, client, ids, input.error);
+    const failed = await failRunningUnlessQueued(client, ids, held, input.error);
     await client.query(`DELETE FROM cluster_run_owners WHERE execution_id = ANY($1::text[]) AND instance_id = $2`, [ids, input.instanceId]);
     return failed.rows.map((row) => ({ id: row.id, workflowId: row.workflow_id, instanceId: input.instanceId }));
   });
