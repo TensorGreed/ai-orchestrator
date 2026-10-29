@@ -9479,8 +9479,7 @@ export class SqliteStore implements Store {
     this.exec(
       `INSERT INTO pending_challenges (id_hash, kind, user_id, scope, payload_sealed, created_at, expires_at)
        VALUES (?, ?, ?, ?, ?, ?, ?)
-       ON CONFLICT(id_hash) DO UPDATE SET kind = excluded.kind, user_id = excluded.user_id, scope = excluded.scope,
-         payload_sealed = excluded.payload_sealed, created_at = excluded.created_at, expires_at = excluded.expires_at`,
+       ON CONFLICT(id_hash) DO NOTHING`,
       [
         input.idHash,
         input.kind,
@@ -9491,6 +9490,8 @@ export class SqliteStore implements Store {
         new Date(now + Math.max(0, input.ttlMs)).toISOString()
       ]
     );
+    const changesRow = this.queryOne<{ count: number }>("SELECT changes() as count");
+    if ((changesRow ? toNumber(changesRow.count) : 0) === 0) throw new Error("A pending challenge is already stored under this id hash.");
   }
 
   async consumePendingChallenge(input: { idHash: string; kind: string }): Promise<ConsumedPendingChallenge | null> {

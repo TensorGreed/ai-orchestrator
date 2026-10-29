@@ -1841,7 +1841,7 @@ export interface Store {
   // ---- Phase 13.1 shared auth and per-user flow state. Used in cluster mode only (Postgres with HA_ENABLED=true);
   // ---- outside it the app keeps in-memory state. The methods work on SQLite too (contract tests run on both stores).
 
-  /** Stores a pending challenge; an id hash that is already there is replaced. */
+  /** Stores a pending challenge; throws when one is already stored under its id hash (it is never replaced). */
   createPendingChallenge(input: PendingChallengeInput): Promise<void>;
   /**
    * Takes a challenge out of the store: one atomic delete, so across every instance at most one caller gets it. Null

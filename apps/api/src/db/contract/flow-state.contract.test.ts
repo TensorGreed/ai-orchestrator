@@ -86,11 +86,12 @@ describeStoreContract("store contract: pending challenges", (ctx) => {
     expect(await store.consumePendingChallenge({ idHash: "fresh", kind: "mfa_login" })).toMatchObject({ expired: false });
   });
 
-  it("replaces a challenge stored under the same hash", async () => {
+  it("refuses a challenge under a hash already stored, and keeps the stored one", async () => {
     const store = ctx.store();
     await store.createPendingChallenge(challenge("same", { payloadSealed: "first" }));
-    await store.createPendingChallenge(challenge("same", { payloadSealed: "second" }));
-    expect(await store.consumePendingChallenge({ idHash: "same", kind: "mfa_login" })).toMatchObject({ payloadSealed: "second" });
+    await expect(store.createPendingChallenge(challenge("same", { kind: "mcp_oauth", payloadSealed: "second" }))).rejects.toThrow(/already stored/);
+    expect(await store.consumePendingChallenge({ idHash: "same", kind: "mcp_oauth" })).toBeNull();
+    expect(await store.consumePendingChallenge({ idHash: "same", kind: "mfa_login" })).toMatchObject({ payloadSealed: "first" });
   });
 
   it("deletes by kind, scope and holder (null holder = held for no user)", async () => {

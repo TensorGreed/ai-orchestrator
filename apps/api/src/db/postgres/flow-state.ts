@@ -17,14 +17,15 @@ export const ADVISORY_LOCK_CLASS_CAPTURE_RESERVATION = 0x4c3243;
 
 const MS_INTERVAL = `make_interval(secs => $2::double precision / 1000.0)`;
 
+/** Never replaces a row: ids are server-generated and random, so a clash is refused rather than silently resolved. */
 export async function createPendingChallenge(ctx: PgContext, input: PendingChallengeInput): Promise<void> {
-  await ctx.execute(
+  const result = await ctx.pool.query(
     `INSERT INTO pending_challenges (id_hash, kind, user_id, scope, payload_sealed, created_at, expires_at)
      VALUES ($1, $3, $4, $5, $6, now(), now() + ${MS_INTERVAL})
-     ON CONFLICT (id_hash) DO UPDATE SET kind = EXCLUDED.kind, user_id = EXCLUDED.user_id, scope = EXCLUDED.scope,
-       payload_sealed = EXCLUDED.payload_sealed, created_at = EXCLUDED.created_at, expires_at = EXCLUDED.expires_at`,
+     ON CONFLICT (id_hash) DO NOTHING`,
     [input.idHash, Math.max(0, input.ttlMs), input.kind, input.userId, input.scope, input.payloadSealed]
   );
+  if ((result.rowCount ?? 0) === 0) throw new Error("A pending challenge is already stored under this id hash.");
 }
 
 /** One DELETE … RETURNING: two instances consuming the same challenge at once get it once between them. */
