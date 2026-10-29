@@ -1992,7 +1992,9 @@ export async function createApp(
       // committed after the abort check above (the store refuses both), whatever order writes commit in.
       // Phase 13.1 — cluster mode: nor does a final write replace the record of a run the leader failed because it
       // judged this instance dead (it may have been alive but unable to heartbeat). A queued run in cluster mode
-      // writes under its claim's fence as well.
+      // writes under its claim's fence as well. The store recognises the leader's record as an `error` whose message
+      // is the mark, and counts an `error` with no message as final too: no current path rewrites a same-id run
+      // that ended that way, but a future same-id retry would be refused here in cluster mode, not written over.
       const fence = queueRunFences.get(meta.executionId)?.fence;
       const written = await store.saveExecutionHistory(
         record,
@@ -3924,6 +3926,8 @@ export async function createApp(
     multiple_leaders:
       "Several instances run schedules and triggers with HA_ENABLED=false, so each fires them. Set HA_ENABLED=true on every instance; details in GET /api/cluster."
   };
+  const CLUSTER_BUS_DOWN_HEALTH_TEXT =
+    "The cluster bus listener is disconnected. Cancels, queue wake-ups and schedule reloads fall back to the database (a few seconds late); details in GET /api/cluster.";
   const instanceRegistry = clusterStore
     ? new InstanceRegistry({
         store,
@@ -5364,6 +5368,12 @@ export async function createApp(
 
   app.get("/health", async () => {
     const slo = metricsService.getSloStatus();
+    // The bus is an accelerator with a database fallback for every message, so a lost listener is a warning here and
+    // a gauge in metrics, never a reason to fail /ready (a Postgres restart would otherwise turn every replica 503).
+    const healthWarnings = [
+      ...clusterWarnings.map((warning) => ({ code: warning.code as string, message: CLUSTER_WARNING_HEALTH_TEXT[warning.code] })),
+      ...(clusterMode && !clusterBus.status().connected ? [{ code: "bus_disconnected", message: CLUSTER_BUS_DOWN_HEALTH_TEXT }] : [])
+    ];
     return {
       ok: true,
       now: new Date().toISOString(),
@@ -5371,7 +5381,7 @@ export async function createApp(
       sloHealthy: slo.healthy,
       // Phase 13.1 — only when there is one (several instances leading at once, from the registry).
       // Unauthenticated: the code and a pointer only (instance counts and ids are in GET /api/cluster, admin).
-      ...(clusterWarnings.length > 0 ? { warnings: clusterWarnings.map((warning) => ({ code: warning.code, message: CLUSTER_WARNING_HEALTH_TEXT[warning.code] })) } : {})
+      ...(healthWarnings.length > 0 ? { warnings: healthWarnings } : {})
     };
   });
 

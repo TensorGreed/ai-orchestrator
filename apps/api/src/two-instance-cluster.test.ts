@@ -23,6 +23,7 @@ import { SecretService } from "./services/secret-service.js";
 import { TriggerService } from "./services/trigger-service.js";
 import { QueueService } from "./services/queue-service.js";
 import { DEAD_EXECUTOR_RUN_ERROR } from "./services/instance-registry.js";
+import { REMOTE_CANCEL_REASON } from "./services/cluster-signals.js";
 import { createTestStore, noticePostgresSkipped, openTestStoreTwin, testPostgresUrl, testStorePool, type TestStore } from "./test-support/test-store.js";
 
 const run = testPostgresUrl() ? describe : describe.skip;
@@ -196,6 +197,19 @@ run("cluster signalling across API instances on one Postgres database", () => {
     expect(result.outcome).toBe("canceled");
     const ended = await response;
     expect(JSON.parse(ended.body)).toMatchObject({ status: "canceled" });
+  }, 60_000);
+
+  it("while its bus listener is down, /health warns and /ready stays ready; the warning clears on reconnect", async () => {
+    const [a] = await start(1);
+    const killListeners = () => sql(`SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE application_name = 'l2m-bus' AND datname = current_database()`);
+    const warned = await until(async () => {
+      await killListeners();
+      const body = (await a!.app.inject({ method: "GET", url: "/health" })).json<{ warnings?: Array<{ code: string; message: string }> }>();
+      return body.warnings?.find((warning) => warning.code === "bus_disconnected") ?? null;
+    }, "the bus warning");
+    expect(warned.message).toContain("GET /api/cluster");
+    expect((await a!.app.inject({ method: "GET", url: "/ready" })).statusCode).toBe(200);
+    await until(async () => !(await a!.app.inject({ method: "GET", url: "/health" })).json<{ warnings?: unknown[] }>().warnings, "the warning to clear");
   }, 60_000);
 
   it("after its bus listener is killed, an instance reconnects and still receives cancels", async () => {
@@ -517,6 +531,13 @@ run("cluster signalling across API instances on one Postgres database", () => {
     const leases = { QUEUE_HEARTBEAT_MS: "4000", QUEUE_LEASE_MS: "12000", QUEUE_REAPER_INTERVAL_MS: "1000" };
     const api = await addInstance(0, leases);
     const cancelChecks: string[] = [];
+    // Every abort with its reason: the bus abort carries the route's reason, the heartbeat's check the remote one.
+    const abortReasons: unknown[] = [];
+    const abort = AbortController.prototype.abort;
+    vi.spyOn(AbortController.prototype, "abort").mockImplementation(function (this: AbortController, reason?: unknown) {
+      abortReasons.push(reason);
+      return abort.call(this, reason);
+    });
     const worker = await addInstance(1, leases, {
       queue: true,
       beforeApp: (queue) => {
@@ -551,9 +572,11 @@ run("cluster signalling across API instances on one Postgres database", () => {
     expect(cancel.json()).toMatchObject({ status: "canceled", abortedActiveRun: false, abortSignalled: true });
 
     await until(async () => (await sql<{ status: string }>(`SELECT status FROM execution_queue WHERE id = 'queued-cancel'`))[0]?.status === "completed", "the job to end", 20_000);
-    // The bus stopped it well before the heartbeat could, and the heartbeat's later check changed nothing.
-    expect(finalWriteAt - canceledAt).toBeLessThan(3_000);
+    // The bus stopped it, and the heartbeat's later check found it already aborted and changed nothing.
+    expect(finalWriteAt).toBeGreaterThanOrEqual(canceledAt);
     expect(cancelChecks).toContain("queued-cancel");
+    expect(abortReasons).toContain("stop it");
+    expect(abortReasons).not.toContain(REMOTE_CANCEL_REASON);
     expect(finalWrites).toEqual([{ status: "canceled", written: true }]);
     expect(await worker.store.getExecutionHistory("queued-cancel")).toMatchObject({ status: "canceled" });
     const [job] = await sql<{ attempts: number; lost_count: number }>(`SELECT attempts, lost_count FROM execution_queue WHERE id = 'queued-cancel'`);

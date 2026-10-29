@@ -24,6 +24,10 @@ The leader cannot tell a crashed instance from one that is alive but cut off fro
 
 Messages travel on Postgres `LISTEN/NOTIFY`. Delivery is best effort: the state a message announces is always written to the database first, and each consumer has the backstop above, so a lost message only makes the effect slower. After the listener reconnects, every instance re-reads at once (runs to stop, eval runs to stop, and on the leader all schedules and triggers).
 
+**While the bus is down** (a Postgres restart, a pooler in the way) the instance stays ready: `/ready` ignores the bus, because the outage is usually cluster-wide and failing it would take every replica out of the load balancer at once. `GET /health` carries a `bus_disconnected` warning and `ao_cluster_bus_connected` reads 0 until the listener is back; cancels, queue wake-ups and schedule reloads use the database fallbacks above in the meantime.
+
+A self-fenced instance (see above) may keep claiming queue jobs. That is safe: a queued run is held by its queue lease and claim token, not by the registry, and the queue stops claiming on its own when the database is unreachable.
+
 ## The bus connection
 
 Each instance in cluster mode holds **one extra connection** for listening (`application_name = 'l2m-bus'`), next to its pool and the leader-lock connection (`l2m-leader`). Budget `DB_POSTGRESDB_POOL_SIZE + 2` connections per instance.
