@@ -4151,6 +4151,9 @@ export async function createApp(
     multiple_leaders:
       "Several instances run schedules and triggers with HA_ENABLED=false, so each fires them. Set HA_ENABLED=true on every instance; details in GET /api/cluster."
   };
+  // Unauthenticated: no instance ids, versions or database errors; the reason is in GET /api/cluster and the log.
+  const DISPATCH_FALLBACK_HEALTH_TEXT =
+    "EXECUTION_DISPATCH=queue, but runs execute inline on this instance; the reason is in GET /api/cluster.";
   const CLUSTER_BUS_DOWN_HEALTH_TEXT =
     "The cluster bus listener is disconnected. Cancels, queue wake-ups and schedule reloads fall back to the database (a few seconds late); details in GET /api/cluster.";
   const instanceRegistry = clusterStore
@@ -5666,7 +5669,7 @@ export async function createApp(
     const healthWarnings = [
       // Phase 13.1 — EXECUTION_DISPATCH=queue while the capability gate runs everything inline.
       ...(executionDispatch.mode === "queue" && dispatch.mode === "inline"
-        ? [{ code: "dispatch_inline_fallback", message: `EXECUTION_DISPATCH=queue, but runs execute inline on this instance: ${dispatch.fallbackReason ?? "no queue worker can run dispatched jobs"}.` }]
+        ? [{ code: "dispatch_inline_fallback", message: DISPATCH_FALLBACK_HEALTH_TEXT }]
         : []),
       ...clusterWarnings.map((warning) => ({ code: warning.code as string, message: CLUSTER_WARNING_HEALTH_TEXT[warning.code] })),
       ...(clusterMode && !clusterBus.status().connected ? [{ code: "bus_disconnected", message: CLUSTER_BUS_DOWN_HEALTH_TEXT }] : []),

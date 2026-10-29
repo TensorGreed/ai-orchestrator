@@ -408,7 +408,11 @@ run("queue dispatch across replicas on one Postgres database", () => {
     expect(view).toMatchObject({ executionDispatch: "inline", executionDispatchConfigured: "queue" });
     expect(String(view.executionDispatchFallbackReason)).toContain("worker-old (0.9.0)");
     const health = (await api.app.inject({ method: "GET", url: "/health" })).json<{ warnings?: Array<{ code: string; message: string }> }>();
-    expect(health.warnings?.find((warning) => warning.code === "dispatch_inline_fallback")?.message).toContain("worker-old");
+    // The public /health names no instance, version or error text; the reason is admin-only.
+    const fallbackWarning = health.warnings?.find((warning) => warning.code === "dispatch_inline_fallback")?.message;
+    expect(fallbackWarning).toContain("GET /api/cluster");
+    expect(fallbackWarning).not.toContain("worker-old");
+    expect(fallbackWarning).not.toContain("0.9.0");
     const metrics = (await api.app.inject({ method: "GET", url: "/metrics" })).body;
     expect(metrics).toMatch(/_dispatch_inline_fallback 1/);
     expect(metrics).toMatch(/_dispatch_inline_fallbacks_total 1/);
