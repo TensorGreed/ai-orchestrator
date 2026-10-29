@@ -29,7 +29,8 @@ updates:
     commit-message:
       prefix: "deps"
 
-  # Base images of the released API and Web images.
+  # Base images of the released API and Web images. They are pinned by digest (image:tag@sha256:...);
+  # Dependabot updates the digest when the tag is rebuilt, and the tag when a newer version exists.
   - package-ecosystem: docker
     directories:
       - /apps/api
