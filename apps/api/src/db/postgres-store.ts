@@ -459,6 +459,12 @@ export class PostgresStore implements Store {
   async markQueueItemCompleted(...args: Parameters<Store["markQueueItemCompleted"]>): ReturnType<Store["markQueueItemCompleted"]> {
     return queue.markQueueItemCompleted(this.ctx, ...args);
   }
+  async saveQueueItemResult(...args: Parameters<Store["saveQueueItemResult"]>): ReturnType<Store["saveQueueItemResult"]> {
+    return queue.saveQueueItemResult(this.ctx, ...args);
+  }
+  async getQueueItemOutcome(...args: Parameters<Store["getQueueItemOutcome"]>): ReturnType<Store["getQueueItemOutcome"]> {
+    return queue.getQueueItemOutcome(this.ctx, ...args);
+  }
   async markQueueItemFailed(...args: Parameters<Store["markQueueItemFailed"]>): ReturnType<Store["markQueueItemFailed"]> {
     return queue.markQueueItemFailed(this.ctx, ...args);
   }

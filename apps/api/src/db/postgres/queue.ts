@@ -4,7 +4,7 @@
  */
 import { randomUUID } from "node:crypto";
 import { queuedRunTimeoutMs, STUCK_JOB_MARGIN_MS } from "../queue-timeouts.js";
-import type { QueueClaimedItem, QueueClaimFence, Store } from "../store.js";
+import type { QueueClaimedItem, QueueClaimFence, QueueItemOutcome, Store } from "../store.js";
 import { toNum, toStr } from "./helpers.js";
 import type { PgContext } from "./context.js";
 import { clampLimit, LIMIT_MAX } from "../store-limits.js";
@@ -439,6 +439,40 @@ export async function isQueueClaimHeld(ctx: PgContext, fence: QueueClaimFence): 
     [fence.queueItemId, fence.claimToken]
   );
   return Boolean(row);
+}
+
+export async function saveQueueItemResult(ctx: PgContext, input: { id: string; claimToken: string | null; result: unknown }): Promise<boolean> {
+  const json = JSON.stringify(input.result ?? null);
+  const result = input.claimToken !== null
+    ? await ctx.pool.query(
+        `UPDATE execution_queue SET result_json = $3, updated_at = now() WHERE id = $1 AND claim_token = $2 AND status = 'running'`,
+        [input.id, input.claimToken, json]
+      )
+    : await ctx.pool.query(`UPDATE execution_queue SET result_json = $2, updated_at = now() WHERE id = $1`, [input.id, json]);
+  return (result.rowCount ?? 0) > 0;
+}
+
+export async function getQueueItemOutcome(ctx: PgContext, id: string): Promise<QueueItemOutcome | null> {
+  const row = await ctx.queryOne<{ status: string; result_json: string | null; last_error: string | null; attempts: number }>(
+    `SELECT status, result_json, last_error, attempts FROM execution_queue WHERE id = $1`,
+    [id]
+  );
+  if (!row) return null;
+  return {
+    status: toStr(row.status),
+    result: parseStoredResult(row.result_json),
+    lastError: row.last_error === null || row.last_error === undefined ? null : toStr(row.last_error),
+    attempts: toNum(row.attempts)
+  };
+}
+
+function parseStoredResult(raw: unknown): unknown {
+  if (raw === null || raw === undefined) return null;
+  try {
+    return JSON.parse(toStr(raw));
+  } catch {
+    return null;
+  }
 }
 
 export async function recordQueueJobProgress(ctx: PgContext, fence: QueueClaimFence): Promise<boolean> {

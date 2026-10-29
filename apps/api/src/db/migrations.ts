@@ -2149,6 +2149,19 @@ export const MIGRATIONS: Migration[] = [
       ALTER TABLE mcp_elicitations DROP COLUMN IF EXISTS holder_id;
       DROP TABLE IF EXISTS pending_challenges;
     `
+  },
+  {
+    version: 46,
+    description: "Phase 13.1 — queue dispatch: the result of a run a worker executed for another instance",
+    // Written only with EXECUTION_DISPATCH=queue (cluster mode): the worker that ran a dispatched run stores the run's
+    // full result on its queue row (under its claim), so the API instance waiting on it answers with exactly what an
+    // inline run returns; the history row lacks some of it (warnings, remediation, a clarification). Empty otherwise.
+    up: `
+      ALTER TABLE execution_queue ADD COLUMN IF NOT EXISTS result_json TEXT;
+    `,
+    down: `
+      ALTER TABLE execution_queue DROP COLUMN IF EXISTS result_json;
+    `
   }
 ];
 

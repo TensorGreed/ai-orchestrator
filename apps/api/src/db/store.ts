@@ -108,6 +108,16 @@ export interface QueueClaimFence {
   claimToken: string;
 }
 
+/** Phase 13.1 — queue dispatch: a queue item as the instance waiting on its run sees it. */
+export interface QueueItemOutcome {
+  /** pending, running, completed or dead. */
+  status: string;
+  /** The run's result the worker stored (saveQueueItemResult); null until then. */
+  result: unknown;
+  lastError: string | null;
+  attempts: number;
+}
+
 /** Phase 13.1 — a leased claim of a queue item. */
 export interface QueueClaimedItem {
   id: string;
@@ -1690,6 +1700,14 @@ export interface Store {
    * returns whether the item was updated (false: a zombie's late completion, refused).
    */
   markQueueItemCompleted(id: string, options?: { claimToken?: string }): Promise<boolean>;
+  /**
+   * Phase 13.1 — queue dispatch: stores the full result of the run a dispatched job executed on its item, for the
+   * instance waiting on it. With `claimToken` (a leased claim) only while the item is still `running` under that token;
+   * returns whether it was stored.
+   */
+  saveQueueItemResult(input: { id: string; claimToken: string | null; result: unknown }): Promise<boolean>;
+  /** Phase 13.1 — queue dispatch: where an item stands (status, stored result, last error); null when there is none. */
+  getQueueItemOutcome(id: string): Promise<QueueItemOutcome | null>;
   /**
    * Retries with backoff until max attempts; `retryable: false` moves the job to the DLQ now. With `claimToken`, only
    * while the item is still `running` under that token. Returns whether the item was updated.

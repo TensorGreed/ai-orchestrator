@@ -84,6 +84,7 @@ import type {
   ReplayRecordingLimits,
   QueueClaimedItem,
   QueueClaimFence,
+  QueueItemOutcome,
   ReplayRecordingRefusal,
   Store
 } from "./store.js";
@@ -3746,6 +3747,8 @@ export class SqliteStore implements Store {
     this.ensureColumn("execution_queue", "pool", "TEXT NOT NULL", "'default'");
     this.ensureColumn("execution_queue", "lost_count", "INTEGER NOT NULL", "0");
     this.ensureColumn("execution_queue", "nodes_completed", "INTEGER NOT NULL", "0");
+    // Phase 13.1 — queue dispatch: the result a worker stored for the instance waiting on a dispatched run.
+    this.ensureColumn("execution_queue", "result_json", "TEXT");
     this.exec(
       `CREATE INDEX IF NOT EXISTS ${QUEUE_CLAIM_INDEX} ON execution_queue (pool, priority DESC, scheduled_at, created_at, id) WHERE status = 'pending'`
     );
@@ -6010,6 +6013,41 @@ export class SqliteStore implements Store {
         : this.db.prepare(`UPDATE execution_queue SET status = 'completed', completed_at = ?, updated_at = ? WHERE id = ?`).run(now, now, id);
     this.persist();
     return result.changes > 0;
+  }
+
+  async saveQueueItemResult(input: { id: string; claimToken: string | null; result: unknown }): Promise<boolean> {
+    const json = JSON.stringify(input.result ?? null);
+    const now = new Date().toISOString();
+    const result =
+      input.claimToken !== null
+        ? this.db
+            .prepare(`UPDATE execution_queue SET result_json = ?, updated_at = ? WHERE id = ? AND claim_token = ? AND status = 'running'`)
+            .run(json, now, input.id, input.claimToken)
+        : this.db.prepare(`UPDATE execution_queue SET result_json = ?, updated_at = ? WHERE id = ?`).run(json, now, input.id);
+    this.persist();
+    return result.changes > 0;
+  }
+
+  async getQueueItemOutcome(id: string): Promise<QueueItemOutcome | null> {
+    const row = this.queryOne<{ status: unknown; result_json: unknown; last_error: unknown; attempts: unknown }>(
+      `SELECT status, result_json, last_error, attempts FROM execution_queue WHERE id = ?`,
+      [id]
+    );
+    if (!row) return null;
+    let result: unknown = null;
+    if (row.result_json !== null && row.result_json !== undefined) {
+      try {
+        result = JSON.parse(toString(row.result_json));
+      } catch {
+        result = null;
+      }
+    }
+    return {
+      status: toString(row.status),
+      result,
+      lastError: row.last_error === null || row.last_error === undefined ? null : toString(row.last_error),
+      attempts: Number(row.attempts ?? 0)
+    };
   }
 
   /** Retries with backoff until max attempts; `retryable: false` moves the job to the DLQ now. */
