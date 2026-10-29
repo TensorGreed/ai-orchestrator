@@ -67,6 +67,8 @@ PAUSE_AT=$(psql_q "SELECT now()")
 docker pause "$leader" >/dev/null
 PAUSED=$leader
 event "paused leader $leader for ${PAUSE_S}s"
+at $((75 + PAUSE_S / 2))
+event "leader while $leader is paused: $(leader_container)"
 at $((75 + PAUSE_S))
 docker unpause "$leader" >/dev/null
 PAUSED=""
@@ -76,17 +78,19 @@ failed=0
 finish_load "$W2_ID" "$W2_OUT" "$W2_PID" || failed=1
 finish_load "$W1_ID" "$W1_OUT" "$W1_PID" || failed=1
 
-# Recovery: how long after each fault the reclaimed jobs ran again elsewhere (jobs with a lost attempt).
+# Recovery: how long after each fault its jobs were taken back (a job with a lost attempt is claimed again, or
+# dead-lettered when a node had completed). Attributed to the last fault before that moment.
 {
   echo "== chaos events"
   cat "$EVENTS"
-  echo "jobs taken back from a lost worker, by the fault before their new claim (claim delay after the fault, ms):"
-  psql_q "WITH q AS ($(queue_rows_sql "$W2_ID")),
+  echo "jobs taken back from a lost worker: fault|jobs|first ms after the fault|last ms after the fault|final statuses"
+  psql_q "WITH q AS (SELECT *, CASE WHEN status = 'dead' THEN updated_at ELSE started_at END AS taken_back
+                       FROM ($(queue_rows_sql "$W2_ID")) r WHERE lost_count > 0 OR status = 'dead'),
                f AS (SELECT 'sigkill' AS fault, '$KILL_AT'::timestamptz AS at, '$PAUSE_AT'::timestamptz AS until
                      UNION ALL SELECT 'pause', '$PAUSE_AT'::timestamptz, 'infinity'::timestamptz)
-          SELECT f.fault, count(q.id), round(min(extract(epoch FROM (q.started_at - f.at)) * 1000)),
-                 round(max(extract(epoch FROM (q.started_at - f.at)) * 1000)), string_agg(DISTINCT q.status, ',')
-            FROM f JOIN q ON q.lost_count > 0 AND q.started_at >= f.at AND q.started_at < f.until
+          SELECT f.fault, count(q.id), round(min(extract(epoch FROM (q.taken_back - f.at)) * 1000)),
+                 round(max(extract(epoch FROM (q.taken_back - f.at)) * 1000)), string_agg(DISTINCT q.status, ',')
+            FROM f JOIN q ON q.taken_back >= f.at AND q.taken_back < f.until
            GROUP BY f.fault ORDER BY f.fault" | sed 's/^/  /'
   echo "dead-lettered jobs and why:"
   psql_q "SELECT coalesce(last_error, '?'), count(*) FROM ($(queue_rows_sql "$W2_ID")) q WHERE status = 'dead' GROUP BY 1" | sed 's/^/  /'
