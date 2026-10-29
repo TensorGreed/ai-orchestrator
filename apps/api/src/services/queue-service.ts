@@ -166,6 +166,15 @@ export class QueueProducer {
    * a second, so a burst can overshoot the limit by what arrives within that second.
    */
   async enqueue(payload: EnqueueInput, options: { enforceBackpressure?: boolean } = {}): Promise<string> {
+    return (await this.add(payload, options)).executionId;
+  }
+
+  /**
+   * As `enqueue`, and says whether the job was added. With `dedupeWindowMs` and a `queueItemId`, an existing item with
+   * that id is a duplicate (nothing added) unless it is finished and older than the window, when the new job replaces
+   * it. Without it an existing item always wins.
+   */
+  async add(payload: EnqueueInput, options: { enforceBackpressure?: boolean; dedupeWindowMs?: number } = {}): Promise<{ executionId: string; added: boolean }> {
     const executionId = payload.executionId ?? randomUUID();
     const { priority, executionId: _id, queueItemId, maxAttempts, pool: requestedPool, ...rest } = payload;
     const pool = requestedPool ?? DEFAULT_QUEUE_POOL;
@@ -174,7 +183,7 @@ export class QueueProducer {
     }
     if (options.enforceBackpressure) await this.checkBackpressure(pool);
 
-    await this.store.enqueueExecution({
+    const added = await this.store.enqueueExecution({
       // A resume reuses its run's execution id, so its queue item needs its own id.
       id: queueItemId ?? executionId,
       workflowId: rest.workflowId,
@@ -182,12 +191,15 @@ export class QueueProducer {
       payload: { executionId, ...rest } as Record<string, unknown>,
       priority: priority ?? 0,
       maxAttempts: maxAttempts ?? 3,
-      ...(pool !== DEFAULT_QUEUE_POOL ? { pool } : {})
+      ...(pool !== DEFAULT_QUEUE_POOL ? { pool } : {}),
+      ...(queueItemId && options.dedupeWindowMs !== undefined
+        ? { replaceFinishedBefore: new Date(Date.now() - options.dedupeWindowMs).toISOString() }
+        : {})
     });
     const cached = this.pendingCounts.get(pool);
-    if (cached) cached.count += 1;
+    if (cached && added) cached.count += 1;
 
-    return executionId;
+    return { executionId, added };
   }
 
   /** Throws QueueFullError when `pool` already holds QUEUE_MAX_PENDING pending jobs (never with no limit set). */

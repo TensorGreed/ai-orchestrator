@@ -1683,7 +1683,13 @@ export interface Store {
     scheduledAt?: string;
     /** Phase 13.1 — the worker pool that runs it (default `default`). */
     pool?: string;
-  }): Promise<void>;
+    /**
+     * Phase 13.1 — an idempotent id (a schedule or trigger fire) is a duplicate only for a while: a finished item
+     * (`completed` or `dead`) created before this time is replaced by the new job. Without it an existing item always
+     * wins.
+     */
+    replaceFinishedBefore?: string;
+  }): Promise<boolean>;
   /** Claims up to `limit` due pending items for this process: an item is handed to one caller only. */
   dequeueNext(limit?: number): Promise<Array<{
     id: string;
@@ -1708,6 +1714,11 @@ export interface Store {
   saveQueueItemResult(input: { id: string; claimToken: string | null; result: unknown }): Promise<boolean>;
   /** Phase 13.1 — queue dispatch: where an item stands (status, stored result, last error); null when there is none. */
   getQueueItemOutcome(id: string): Promise<QueueItemOutcome | null>;
+  /**
+   * Phase 13.1 — queue dispatch: once a completed item's result was delivered, drops the stored result and the run's
+   * spec from the item (its payload keeps only the execution id). Nothing happens to an item that is not completed.
+   */
+  releaseQueueItemResult(id: string): Promise<void>;
   /**
    * Retries with backoff until max attempts; `retryable: false` moves the job to the DLQ now. With `claimToken`, only
    * while the item is still `running` under that token. Returns whether the item was updated.

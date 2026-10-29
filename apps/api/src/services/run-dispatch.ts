@@ -29,6 +29,12 @@ export const DISPATCH_SPEC_VERSION = 1;
 
 /** How long a gate decision is reused before the instance registry is read again. */
 export const DISPATCH_GATE_CACHE_MS = 5_000;
+/**
+ * How long a schedule or trigger fire's idempotent id suppresses a second fire of the same key: long enough for two
+ * leaders (a handover, a retried tick) firing seconds apart, short enough that an event id an upstream reuses later
+ * (an SSE server numbering from 1 again after a restart) runs again.
+ */
+export const FIRE_DEDUPE_WINDOW_MS = 10 * 60_000;
 
 /**
  * The parts of the run function's input that cross the queue. In-process objects (event hooks, an MCP plan, replay
@@ -255,7 +261,15 @@ export interface RunDispatcherDeps {
   recordQueued: (spec: DispatchedRunSpec) => Promise<void>;
   /** The queued record stays behind when the job could not be queued: it is ended with this error. */
   recordNotQueued: (spec: DispatchedRunSpec, error: string) => Promise<void>;
-  enqueue: (spec: DispatchedRunSpec, options: { pool: string; queueItemId?: string; priority?: number }) => Promise<void>;
+  /**
+   * Puts the job on the queue. With `dedupeWindowMs` (an idempotent `queueItemId`), resolves false when an item with
+   * that id created within the window exists (a duplicate fire: nothing was added).
+   */
+  enqueue: (spec: DispatchedRunSpec, options: { pool: string; queueItemId?: string; priority?: number; dedupeWindowMs?: number }) => Promise<boolean>;
+  /** A dispatched run's stored result was delivered: the queue item may drop it (and the run's spec). Best effort. */
+  releaseResult?: (spec: DispatchedRunSpec) => Promise<void>;
+  /** A fire whose idempotent id was already queued within the window: nothing was added. */
+  onDeduplicated?: (spec: DispatchedRunSpec, queueItemId: string) => void;
   /** Subscribes to the run's events (before the enqueue) and resolves with the relay that ends with its result. */
   openRelay: (spec: DispatchedRunSpec, passthrough: WorkflowExecutionEventHooks | undefined) => Promise<RunRelay>;
   /** How long the instance waits for a dispatched run to end: its run time limit plus the queue's margin. */
@@ -321,7 +335,10 @@ export class RunDispatcher {
       const ending: Array<Promise<RunRelayEnd>> = [relay.ended(timeoutMs)];
       if (options.closed) ending.push(options.closed.then(() => ({ kind: "closed" }) as const));
       const end = await Promise.race(ending);
-      if (end.kind === "result") return end.result as WorkflowExecutionResult;
+      if (end.kind === "result") {
+        await this.deps.releaseResult?.(spec);
+        return end.result as WorkflowExecutionResult;
+      }
       if (end.kind === "failed") throw new DispatchFailedError(spec.run.executionId, end.error);
       if (end.kind === "timeout") throw new DispatchTimeoutError(spec.run.executionId, timeoutMs);
       // The client went away: nobody reads the answer. The run goes on on its worker, as an inline run goes on.
@@ -334,19 +351,26 @@ export class RunDispatcher {
 
   /**
    * Starts a run nobody waits on (a schedule, an app trigger). Queue: enqueued under `queueItemId` when given (an
-   * idempotent id: a second fire of the same event enqueues nothing) and resolves at once; inline: resolves when the
-   * run ends, as before, with its result.
+   * idempotent id: a second fire of the same event within FIRE_DEDUPE_WINDOW_MS enqueues nothing, and says so with
+   * `deduplicated`) and resolves at once; inline: resolves when the run ends, as before, with its result.
    */
   async fire(
     spec: DispatchedRunSpec,
     options: { pool: string; queueItemId?: string }
-  ): Promise<{ queued: false; result: WorkflowExecutionResult } | { queued: true }> {
+  ): Promise<{ queued: false; result: WorkflowExecutionResult } | { queued: true; deduplicated: boolean }> {
     if (!(await this.deps.gate.useQueue(options.pool))) {
       return { queued: false, result: await this.deps.executeLocally(spec) };
     }
-    await this.deps.enqueue(spec, { pool: options.pool, ...(options.queueItemId ? { queueItemId: options.queueItemId } : {}) });
+    const added = await this.deps.enqueue(spec, {
+      pool: options.pool,
+      ...(options.queueItemId ? { queueItemId: options.queueItemId, dedupeWindowMs: FIRE_DEDUPE_WINDOW_MS } : {})
+    });
+    if (!added && options.queueItemId) {
+      this.deps.onDeduplicated?.(spec, options.queueItemId);
+      return { queued: true, deduplicated: true };
+    }
     this.deps.onQueued?.(spec, options.pool);
-    return { queued: true };
+    return { queued: true, deduplicated: false };
   }
 }
 

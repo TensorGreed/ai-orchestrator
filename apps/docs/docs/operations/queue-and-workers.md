@@ -144,6 +144,11 @@ services:
     stop_grace_period: 30s
 ```
 
+## Retention
+
+Finished jobs and dead-letter entries are deleted with the execution history, on its schedule
+(`EXECUTION_HISTORY_RETENTION_DAYS`, 30 days by default; `0` keeps everything). Retry a dead-lettered run before then.
+
 ## Metrics
 
 With metrics on, `/metrics` adds (with the `METRICS_PREFIX`, `ao` by default):
@@ -180,7 +185,7 @@ Outside cluster mode the server refuses to start with it.
 | `POST /api/workflows/:id/execute`, retry, replay, canvas test runs | runs on a worker; the instance answers with the same result body |
 | `POST /api/workflows/:id/execute/stream`, chat, `/api/webhooks/execute/stream` | runs on a worker; its events are relayed into the stream in order |
 | Webhooks, forms, Slack/GitHub/Stripe/Telegram/Discord, MCP server triggers, the MCP gateway | runs on a worker; the reply waits for it as before |
-| Schedules and app triggers | enqueued once per fire (two leaders firing the same second or event enqueue one job) |
+| Schedules and app triggers | enqueued once per fire (two leaders firing the same second or event within 10 minutes enqueue one job) |
 | Approval resumes | enqueued from any instance, including `api` replicas |
 
 What changes:
@@ -199,6 +204,16 @@ What changes:
   `execution` event with the run as stored, its events from that point on, then `result`. Events come from the
   instance running it, or from the queue worker over the cluster bus; an inline run on another instance shows only
   its stored state and result. It works without queue dispatch too.
+
+Duplicate fires: a schedule fire is keyed on the second it matched, and an app trigger fire on what it reports (RSS
+item ids, an SSE event id, file events). A second fire with the same key within 10 minutes is dropped and logged; after
+that the key is free again, so an upstream that reuses event ids (an SSE server numbering from 1 after a restart) still
+runs its events.
+
+Stored data: a dispatched run's job carries its spec (the workflow and its input, with secret-looking fields
+redacted as in the history) and, once it ends, its full result. The instance that answers the request drops both from
+the job as soon as it has the result, and the rest goes with the history ([Retention](#retention)), so nothing of a run
+stays in the queue longer than its history.
 
 Capability check: queue dispatch is used only while every live worker serving the pool advertises it (an older
 worker would not know the job format). During a rolling upgrade, or with no live worker for the pool, the instance

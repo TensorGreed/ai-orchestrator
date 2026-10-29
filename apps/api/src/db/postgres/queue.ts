@@ -31,12 +31,24 @@ export async function enqueueExecution(ctx: PgContext, input: {
   maxAttempts?: number;
   scheduledAt?: string;
   pool?: string;
-}): Promise<void> {
+  replaceFinishedBefore?: string;
+}): Promise<boolean> {
   const now = new Date().toISOString();
-  await ctx.execute(
+  // A finished item past the window is replaced by the new job: every column back to a fresh pending item.
+  const onConflict = input.replaceFinishedBefore
+    ? `ON CONFLICT (id) DO UPDATE SET
+         workflow_id = EXCLUDED.workflow_id, workflow_name = EXCLUDED.workflow_name, payload_json = EXCLUDED.payload_json,
+         status = 'pending', priority = EXCLUDED.priority, attempts = 0, max_attempts = EXCLUDED.max_attempts, last_error = NULL,
+         scheduled_at = EXCLUDED.scheduled_at, started_at = NULL, completed_at = NULL, created_at = EXCLUDED.created_at,
+         updated_at = EXCLUDED.updated_at, pool = EXCLUDED.pool, execution_id = EXCLUDED.execution_id, claimed_by = NULL,
+         claim_token = NULL, heartbeat_at = NULL, lost_count = 0, nodes_completed = 0, result_json = NULL,
+         effects_token = NULL, effects_started = 0
+       WHERE execution_queue.status IN ('completed', 'dead') AND execution_queue.created_at < $12`
+    : `ON CONFLICT (id) DO NOTHING`;
+  const result = await ctx.pool.query(
     `INSERT INTO execution_queue (id, workflow_id, workflow_name, payload_json, status, priority, attempts, max_attempts, last_error, scheduled_at, started_at, completed_at, created_at, updated_at, pool, execution_id)
        VALUES ($1, $2, $3, $4, 'pending', $5, 0, $6, NULL, $7, NULL, NULL, $8, $9, $10, $11)
-       ON CONFLICT (id) DO NOTHING`,
+       ${onConflict}`,
     [
       input.id,
       input.workflowId,
@@ -48,9 +60,11 @@ export async function enqueueExecution(ctx: PgContext, input: {
       now,
       now,
       input.pool ?? DEFAULT_QUEUE_POOL,
-      payloadExecutionId(input.payload, input.id)
+      payloadExecutionId(input.payload, input.id),
+      ...(input.replaceFinishedBefore ? [input.replaceFinishedBefore] : [])
     ]
   );
+  return (result.rowCount ?? 0) > 0;
 }
 
 /**
@@ -453,6 +467,14 @@ export async function saveQueueItemResult(ctx: PgContext, input: { id: string; c
       )
     : await ctx.pool.query(`UPDATE execution_queue SET result_json = $2, updated_at = now() WHERE id = $1`, [input.id, json]);
   return (result.rowCount ?? 0) > 0;
+}
+
+export async function releaseQueueItemResult(ctx: PgContext, id: string): Promise<void> {
+  await ctx.pool.query(
+    `UPDATE execution_queue SET result_json = NULL, payload_json = json_build_object('executionId', execution_id)::text
+      WHERE id = $1 AND status = 'completed' AND (result_json IS NOT NULL OR payload_json LIKE '%"dispatch"%')`,
+    [id]
+  );
 }
 
 export async function getQueueItemOutcome(ctx: PgContext, id: string): Promise<QueueItemOutcome | null> {

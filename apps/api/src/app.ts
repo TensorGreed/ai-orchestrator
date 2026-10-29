@@ -3214,8 +3214,14 @@ export async function createApp(
       const run = spec.run.channel === "production" && spec.run.releaseVersion === undefined
         ? { ...spec.run, releaseVersion: releaseService.versionOf(spec.run.workflow) }
         : spec.run;
-      const dispatched: DispatchedRunSpec = { ...spec, run: { ...run, policyActor: dispatchedPolicyActor(run.policyActor) } };
-      await queueProducer.enqueue({
+      // The history input travels redacted, as the history stores it (the worker only writes it there).
+      const dispatched: DispatchedRunSpec = {
+        ...spec,
+        run: { ...run, policyActor: dispatchedPolicyActor(run.policyActor) },
+        progress: spec.progress ? { ...spec.progress, requestInput: redactSensitiveInput(spec.progress.requestInput) } : spec.progress,
+        history: { ...spec.history, requestInput: redactSensitiveInput(spec.history.requestInput) }
+      };
+      const { added } = await queueProducer.add({
         workflowId: run.workflow.id,
         executionId: run.executionId,
         triggerType: run.triggerType,
@@ -3225,8 +3231,20 @@ export async function createApp(
         pool: options.pool,
         ...(options.queueItemId ? { queueItemId: options.queueItemId } : {}),
         ...(options.priority !== undefined ? { priority: options.priority } : {})
-      });
-      wakeQueue(options.pool);
+      }, options.dedupeWindowMs !== undefined ? { dedupeWindowMs: options.dedupeWindowMs } : {});
+      if (added) wakeQueue(options.pool);
+      return added;
+    },
+    // The waiting request has the result: the queue row keeps neither it nor the run's spec (input included).
+    releaseResult: async (spec) => {
+      try {
+        await store.releaseQueueItemResult(spec.run.executionId);
+      } catch (error) {
+        app.log.warn({ executionId: spec.run.executionId, error: secretService.redact(error instanceof Error ? error.message : String(error)) }, "Could not drop a delivered dispatched result from its queue item");
+      }
+    },
+    onDeduplicated: (spec, queueItemId) => {
+      app.log.info({ workflowId: spec.run.workflow.id, queueItemId, triggerType: spec.run.triggerType }, "A fire already queued within the dedupe window was not queued again");
     },
     openRelay: async (spec, passthrough) =>
       await openRunRelay(

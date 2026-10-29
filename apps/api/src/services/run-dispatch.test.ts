@@ -5,6 +5,7 @@ import {
   cronQueueItemId,
   decideDispatch,
   DispatchBusyError,
+  FIRE_DEDUPE_WINDOW_MS,
   DispatchClientGoneError,
   DispatchFailedError,
   DispatchGate,
@@ -133,7 +134,7 @@ describe("readDispatchedRunSpec", () => {
 
 describe("RunDispatcher", () => {
   const result = { workflowId: "wf", status: "success", startedAt: "s", completedAt: "c", nodeResults: [] } as WorkflowExecutionResult;
-  const make = (options: { queue: boolean; end?: RunRelayEnd; enqueueError?: Error; backpressure?: Error; maxWaiting?: number }) => {
+  const make = (options: { queue: boolean; end?: RunRelayEnd; enqueueError?: Error; backpressure?: Error; maxWaiting?: number; duplicate?: boolean }) => {
     const calls: string[] = [];
     const deps: RunDispatcherDeps = {
       gate: new DispatchGate({ mode: options.queue ? "queue" : "inline", listInstances: async () => [instance({})] }),
@@ -145,9 +146,13 @@ describe("RunDispatcher", () => {
       recordQueued: async () => void calls.push("recordQueued"),
       recordNotQueued: async (_spec, error) => void calls.push(`recordNotQueued:${error}`),
       enqueue: async (_spec, enqueueOptions) => {
-        calls.push(`enqueue:${enqueueOptions.queueItemId ?? "-"}`);
+        calls.push(`enqueue:${enqueueOptions.queueItemId ?? "-"}${enqueueOptions.dedupeWindowMs !== undefined ? `@${enqueueOptions.dedupeWindowMs}` : ""}`);
         if (options.enqueueError) throw options.enqueueError;
+        return !options.duplicate;
       },
+      releaseResult: async () => void calls.push("release"),
+      onDeduplicated: (_spec, id) => void calls.push(`deduplicated:${id}`),
+      onQueued: () => void calls.push("queued"),
       openRelay: async () => {
         calls.push("subscribe");
         return {
@@ -172,7 +177,8 @@ describe("RunDispatcher", () => {
   it("queue subscribes, records and enqueues in that order, then answers with the relayed result", async () => {
     const { dispatcher, calls } = make({ queue: true, end: { kind: "result", result: { ...result, warnings: ["w"] } } });
     expect(await dispatcher.run(spec(), { pool: "default", enforceBackpressure: true })).toEqual({ ...result, warnings: ["w"] });
-    expect(calls).toEqual(["backpressure", "subscribe", "recordQueued", "enqueue:-", "close"]);
+    // The delivered result is released from the queue row.
+    expect(calls).toEqual(["backpressure", "subscribe", "recordQueued", "enqueue:-", "queued", "release", "close"]);
     expect(dispatcher.waitingCount()).toBe(0);
   });
 
@@ -205,9 +211,15 @@ describe("RunDispatcher", () => {
     void first.catch(() => undefined);
   });
 
-  it("fire enqueues under the idempotent id without waiting", async () => {
+  it("fire enqueues under the idempotent id, deduplicated within the window, without waiting", async () => {
     const { dispatcher, calls } = make({ queue: true });
-    expect(await dispatcher.fire(spec(), { pool: "default", queueItemId: "cron:wf:n:1" })).toEqual({ queued: true });
-    expect(calls).toEqual(["enqueue:cron:wf:n:1"]);
+    expect(await dispatcher.fire(spec(), { pool: "default", queueItemId: "cron:wf:n:1" })).toEqual({ queued: true, deduplicated: false });
+    expect(calls).toEqual([`enqueue:cron:wf:n:1@${FIRE_DEDUPE_WINDOW_MS}`, "queued"]);
+  });
+
+  it("a duplicate fire is reported and not counted as a dispatched run", async () => {
+    const { dispatcher, calls } = make({ queue: true, duplicate: true });
+    expect(await dispatcher.fire(spec(), { pool: "default", queueItemId: "trig:wf:n:abc" })).toEqual({ queued: true, deduplicated: true });
+    expect(calls).toEqual([`enqueue:trig:wf:n:abc@${FIRE_DEDUPE_WINDOW_MS}`, "deduplicated:trig:wf:n:abc"]);
   });
 });

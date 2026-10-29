@@ -267,6 +267,10 @@ run("queue dispatch across replicas on one Postgres database", () => {
     expect(Object.keys(queuedBody).sort()).toEqual(Object.keys(direct.json()).sort());
     expect(stable(queuedBody)).toEqual(stable(direct.json()));
     expect(await api.store.getExecutionHistory(queuedBody.executionId)).toMatchObject({ status: "success", triggeredBy: "builder@example.com" });
+    // Delivered: the queue row keeps neither the result nor the run's spec.
+    const [deliveredRow] = await sql<{ result_json: string | null; payload_json: string }>(`SELECT result_json, payload_json FROM execution_queue WHERE id = $1`, [queuedBody.executionId]);
+    expect(deliveredRow!.result_json).toBeNull();
+    expect(JSON.parse(deliveredRow!.payload_json)).toEqual({ executionId: queuedBody.executionId });
 
     // /execute/stream: the same events in the same order, relayed from the worker.
     const streamed = await api.app.inject({ method: "POST", url: "/api/workflows/wf-quick/execute/stream", headers: { cookie: builder }, payload: {} });
@@ -464,6 +468,15 @@ run("queue dispatch across replicas on one Postgres database", () => {
     await until(async () => (await sql<{ status: string }>(`SELECT status FROM execution_queue WHERE id LIKE 'trig:wf-feed:%'`))[0]?.status === "completed", "the trigger fire to run");
     expect(await sql(`SELECT id FROM execution_queue WHERE workflow_id = 'wf-feed'`)).toHaveLength(1);
     expect(await sql(`SELECT id FROM execution_history WHERE workflow_id = 'wf-feed'`)).toHaveLength(1);
+
+    // The same event id again, still within the dedupe window: nothing runs.
+    await a.trigger!(triggerInput);
+    expect(await sql(`SELECT id FROM execution_history WHERE workflow_id = 'wf-feed'`)).toHaveLength(1);
+    // Past the window (an upstream that reuses ids after a restart): the event runs again.
+    await sql(`UPDATE execution_queue SET created_at = now() - interval '11 minutes' WHERE workflow_id = 'wf-feed'`);
+    await a.trigger!(triggerInput);
+    await until(async () => (await sql(`SELECT id FROM execution_history WHERE workflow_id = 'wf-feed' AND status = 'success'`)).length === 2, "the repeated event to run again");
+    expect(await sql(`SELECT id FROM execution_queue WHERE workflow_id = 'wf-feed'`)).toHaveLength(1);
   }, 60_000);
 
   it("an enqueue on an api replica wakes an idle worker well before its next poll", async () => {

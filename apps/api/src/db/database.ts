@@ -49,7 +49,7 @@ import type {
 } from "@ai-orchestrator/shared";
 import { DESTINATION_KINDS, DESTINATION_TIERS, type DataDestinationRow, DEFAULT_PROJECT_ID, GUARD_SIMULATION_JOB_DATASET_PREFIX, MCP_POLICY_KINDS, MCP_POLICY_ROLES, MCP_TOOL_HINT_CONDITIONS, REPLAY_CAPTURE_API_KEY_FILTER, REPLAY_CAPTURE_STATUSES } from "@ai-orchestrator/shared";
 import { normalizeMcpSamplingSettings, SUBJECT_CASSETTE_SOURCES, SUBJECT_EXECUTION_TRIGGERS } from "./store-shared.js";
-import { ONE_PENDING_APPROVAL_INDEX, QUEUE_ACTIVE_EXECUTION_INDEX, QUEUE_CLAIM_INDEX, QUEUE_RUNNING_HEARTBEAT_INDEX } from "./migrations.js";
+import { ONE_PENDING_APPROVAL_INDEX, QUEUE_ACTIVE_EXECUTION_INDEX, QUEUE_CLAIM_INDEX, QUEUE_FINISHED_INDEX, QUEUE_RUNNING_HEARTBEAT_INDEX } from "./migrations.js";
 import {
   normalizeMcpRuntimeLimits,
   normalizeMcpSandboxSettings,
@@ -3756,6 +3756,7 @@ export class SqliteStore implements Store {
       `CREATE INDEX IF NOT EXISTS ${QUEUE_CLAIM_INDEX} ON execution_queue (pool, priority DESC, scheduled_at, created_at, id) WHERE status = 'pending'`
     );
     this.exec(`CREATE INDEX IF NOT EXISTS ${QUEUE_RUNNING_HEARTBEAT_INDEX} ON execution_queue (heartbeat_at) WHERE status = 'running'`);
+    this.exec(`CREATE INDEX IF NOT EXISTS ${QUEUE_FINISHED_INDEX} ON execution_queue (updated_at) WHERE status = 'completed' OR status = 'dead'`);
 
     // Phase 13.1 cluster signalling migration — the cluster instance registry and inline-run owners. Postgres writes
     // them; on SQLite (one process) they exist for schema parity and stay empty.
@@ -5410,6 +5411,10 @@ export class SqliteStore implements Store {
     this.exec(`DELETE FROM guard_events WHERE created_at < ?`, [input.before]);
     // Phase 11.2 — and decided approval requests; pending ones stay with their paused run.
     this.exec(`DELETE FROM approval_requests WHERE status <> 'pending' AND created_at < ?`, [input.before]);
+    // Phase 13.1 — and finished queue jobs and dead-letter entries: their payloads (a dispatched run's spec, with its
+    // input) and stored results never outlive the history.
+    this.exec(`DELETE FROM execution_queue WHERE (status = 'completed' OR status = 'dead') AND updated_at < ?`, [input.before]);
+    this.exec(`DELETE FROM execution_queue_dlq WHERE failed_at < ?`, [input.before]);
     const deleted = before ? toNumber(before.count) : 0;
     if (deleted > 0) {
       this.persist();
@@ -5917,13 +5922,26 @@ export class SqliteStore implements Store {
     maxAttempts?: number;
     scheduledAt?: string;
     pool?: string;
-  }): Promise<void> {
+    replaceFinishedBefore?: string;
+  }): Promise<boolean> {
     const now = new Date().toISOString();
-    this.exec(
+    // A finished item past the window is replaced by the new job: every column back to a fresh pending item.
+    const onConflict = input.replaceFinishedBefore
+      ? `ON CONFLICT(id) DO UPDATE SET
+           workflow_id = excluded.workflow_id, workflow_name = excluded.workflow_name, payload_json = excluded.payload_json,
+           status = 'pending', priority = excluded.priority, attempts = 0, max_attempts = excluded.max_attempts, last_error = NULL,
+           scheduled_at = excluded.scheduled_at, started_at = NULL, completed_at = NULL, created_at = excluded.created_at,
+           updated_at = excluded.updated_at, pool = excluded.pool, execution_id = excluded.execution_id, claimed_by = NULL,
+           claim_token = NULL, heartbeat_at = NULL, lost_count = 0, nodes_completed = 0, result_json = NULL,
+           effects_token = NULL, effects_started = 0
+         WHERE execution_queue.status IN ('completed', 'dead') AND execution_queue.created_at < ?`
+      : `ON CONFLICT(id) DO NOTHING`;
+    const result = this.db.prepare(
       `INSERT INTO execution_queue (id, workflow_id, workflow_name, payload_json, status, priority, attempts, max_attempts, last_error, scheduled_at, started_at, completed_at, created_at, updated_at, pool, execution_id)
        VALUES (?, ?, ?, ?, 'pending', ?, 0, ?, NULL, ?, NULL, NULL, ?, ?, ?, ?)
-       ON CONFLICT(id) DO NOTHING`,
-      [
+       ${onConflict}`
+    ).run(
+      ...[
         input.id,
         input.workflowId,
         input.workflowName ?? null,
@@ -5934,10 +5952,12 @@ export class SqliteStore implements Store {
         now,
         now,
         input.pool ?? DEFAULT_QUEUE_POOL,
-        payloadExecutionId(input.payload, input.id)
+        payloadExecutionId(input.payload, input.id),
+        ...(input.replaceFinishedBefore ? [input.replaceFinishedBefore] : [])
       ]
     );
     this.persist();
+    return result.changes > 0;
   }
 
   async dequeueNext(limit = 1): Promise<Array<{
@@ -6029,6 +6049,16 @@ export class SqliteStore implements Store {
         : this.db.prepare(`UPDATE execution_queue SET result_json = ?, updated_at = ? WHERE id = ?`).run(json, now, input.id);
     this.persist();
     return result.changes > 0;
+  }
+
+  async releaseQueueItemResult(id: string): Promise<void> {
+    const result = this.db
+      .prepare(
+        `UPDATE execution_queue SET result_json = NULL, payload_json = json_object('executionId', execution_id)
+          WHERE id = ? AND status = 'completed' AND (result_json IS NOT NULL OR payload_json LIKE '%"dispatch"%')`
+      )
+      .run(id);
+    if (result.changes > 0) this.persist();
   }
 
   async getQueueItemOutcome(id: string): Promise<QueueItemOutcome | null> {
