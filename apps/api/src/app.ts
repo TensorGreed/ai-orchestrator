@@ -3265,6 +3265,16 @@ export async function createApp(
       app.log.debug({ pool, error: error instanceof Error ? error.message : String(error) }, "Could not publish a queue wake-up");
     });
   };
+  /**
+   * Phase 13.1 — where runs execute now: `queue` only with EXECUTION_DISPATCH=queue while the capability gate allows it
+   * (checked for the default pool; cached for a few seconds), else `inline`.
+   */
+  const effectiveDispatch = async (): Promise<{ mode: "inline" | "queue"; fallbackReason: string | null }> => {
+    if (executionDispatch.mode !== "queue") return { mode: "inline", fallbackReason: null };
+    const queue = await runDispatcher.useQueue(DEFAULT_QUEUE_POOL);
+    return { mode: queue ? "queue" : "inline", fallbackReason: queue ? null : dispatchGate.status().reason };
+  };
+
   /** The pool a workflow's runs go to (its settings.executionPool, else default). */
   const dispatchPoolOf = (workflow: Workflow): string => {
     const configured = workflow.settings?.executionPool;
@@ -5622,7 +5632,12 @@ export async function createApp(
     const slo = metricsService.getSloStatus();
     // The bus is an accelerator with a database fallback for every message, so a lost listener is a warning here and
     // a gauge in metrics, never a reason to fail /ready (a Postgres restart would otherwise turn every replica 503).
+    const dispatch = await effectiveDispatch();
     const healthWarnings = [
+      // Phase 13.1 — EXECUTION_DISPATCH=queue while the capability gate runs everything inline.
+      ...(executionDispatch.mode === "queue" && dispatch.mode === "inline"
+        ? [{ code: "dispatch_inline_fallback", message: `EXECUTION_DISPATCH=queue, but runs execute inline on this instance: ${dispatch.fallbackReason ?? "no queue worker can run dispatched jobs"}.` }]
+        : []),
       ...clusterWarnings.map((warning) => ({ code: warning.code as string, message: CLUSTER_WARNING_HEALTH_TEXT[warning.code] })),
       ...(clusterMode && !clusterBus.status().connected ? [{ code: "bus_disconnected", message: CLUSTER_BUS_DOWN_HEALTH_TEXT }] : []),
       ...(forwardedForSeenAt > 0 && Date.now() - forwardedForSeenAt < FORWARDED_FOR_WARNING_MS
@@ -6499,6 +6514,7 @@ export async function createApp(
     const user = await requireRole(request, reply, ["admin"]);
     if (!user) return;
     const instances = instanceRegistry ? await instanceRegistry.list() : [];
+    const dispatch = await effectiveDispatch();
     return {
       clusterMode,
       instanceId: clusterInstanceId,
@@ -6507,6 +6523,10 @@ export async function createApp(
       instanceTimeoutMs: config.CLUSTER_INSTANCE_TIMEOUT_MS,
       leader: await leaderElection.getStatus(),
       bus: clusterBus.status(),
+      // Phase 13.1 — the effective dispatch mode (EXECUTION_DISPATCH after the capability gate), and why it fell back.
+      executionDispatch: dispatch.mode,
+      executionDispatchConfigured: executionDispatch.mode,
+      executionDispatchFallbackReason: dispatch.fallbackReason,
       instances: instances.map((instance) => ({ ...instance, self: instance.id === clusterInstanceId })),
       warnings: clusterWarnings
     };
