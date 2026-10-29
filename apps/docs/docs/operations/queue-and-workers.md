@@ -11,6 +11,8 @@ the defaults below are the behaviour of earlier releases.
 Everything on this page beyond the defaults is opt-in. Leases, the reaper, pools and cross-instance cancel apply only
 in **cluster mode**: `DB_TYPE=postgres` and `HA_ENABLED=true` (see [Postgres](./postgres#running-more-than-one-instance)).
 
+Fleet layouts, sizing, the connection budget and the load-test harness are in [Scaling](./scaling.md).
+
 ## Roles
 
 `WORKER_MODE` picks what an instance does:

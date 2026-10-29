@@ -190,6 +190,7 @@ export default defineConfig({
           { text: "Cluster operations", link: "/operations/cluster" },
           { text: "Verify a release", link: "/operations/verify-a-release" },
           { text: "Backup and recovery", link: "/operations/backup-and-recovery" },
+          { text: "Scaling", link: "/operations/scaling" },
           { text: "Troubleshooting", link: "/troubleshooting/common-issues" }
         ]
       }
