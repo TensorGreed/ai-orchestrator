@@ -20,8 +20,11 @@ name: Release Container Images
 # and a GitHub Release for the tag with the CycloneDX SBOMs (both images plus the pnpm workspace source), the
 # image digests and a SHA256SUMS file. Every SBOM file carries a provenance attestation as well.
 #
-# Images are pushed by digest first; the tags (<tag> and latest) are only added once the scan gate passed and the
-# digests are signed and attested. Verification steps: apps/docs/docs/operations/verify-a-release.md.
+# Each platform image is built natively (amd64 on ubuntu-latest, arm64 on ubuntu-24.04-arm; no QEMU emulation),
+# pushed by digest, given its SBOM and scanned on its own runner; the assemble job then merges the two platform
+# images into one multi-arch index, also pushed by digest. The tags (<tag> and latest) are only added once every
+# platform passed the scan gate and the index digests are signed and attested.
+# Verification steps: apps/docs/docs/operations/verify-a-release.md.
 #
 # Modes (resolved by the prepare job):
 #   release  - a v* tag push, or a manual run on a v* tag (Actions -> Run workflow -> "Use workflow from" the tag,
@@ -30,8 +33,8 @@ name: Release Container Images
 #   staging  - a manual run on a branch: the full pipeline against GHCR (push, sign, attest, scan, verify) under
 #              the throwaway tag 0.0.0-ci-<sha>; no latest tag and no GitHub Release (the SBOMs stay as workflow
 #              artifacts). Signed with the branch's identity, so it never verifies as a release.
-#   check    - pull requests that touch the release files: builds both platforms into a registry on the runner,
-#              writes the SBOMs, scans and applies the gate; pushes nothing to GHCR and signs nothing.
+#   check    - pull requests that touch the release files: builds every platform image into a registry on its
+#              runner, writes the SBOMs, scans and applies the gate; pushes nothing to GHCR and signs nothing.
 
 on:
   push:
@@ -56,7 +59,6 @@ concurrency:
 
 env:
   IMAGE_REGISTRY: ghcr.io/tensorgreed
-  IMAGE_PLATFORMS: linux/amd64,linux/arm64
   # Vulnerability gate (scripts/release/vuln-gate.mjs). VULN_FAIL_ON: negligible, low, medium, high, critical, or
   # none to report without failing. VULN_ONLY_FIXED: "true" counts only findings that have a fixed version.
   VULN_FAIL_ON: critical
@@ -129,10 +131,10 @@ jobs:
           echo "Mode: $mode, version: $version, source: $GIT_REF ($GIT_SHA)"
 
   build:
-    name: Build, SBOM and scan ${{ matrix.image.name }}
+    name: Build, SBOM and scan ${{ matrix.image.name }} (${{ matrix.platform.arch }})
     needs: prepare
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
+    runs-on: ${{ matrix.platform.runner }}
+    timeout-minutes: 45
     permissions:
       contents: read
       packages: write
@@ -151,11 +153,18 @@ jobs:
             dockerfile: apps/web/Dockerfile
             title: l2m-web
             description: L2M Studio web UI (Nginx)
+        # Native runners for each platform: no QEMU emulation, which can crash Node mid-install.
+        platform:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
     env:
       MODE: ${{ needs.prepare.outputs.mode }}
       VERSION: ${{ needs.prepare.outputs.version }}
       IMAGE: ${{ needs.prepare.outputs.registry }}/${{ matrix.image.repository }}
       ASSET: l2m-${{ matrix.image.name }}
+      ARCH: ${{ matrix.platform.arch }}
       SYFT_REGISTRY_INSECURE_USE_HTTP: ${{ needs.prepare.outputs.mode == 'check' }}
       GRYPE_REGISTRY_INSECURE_USE_HTTP: ${{ needs.prepare.outputs.mode == 'check' }}
     steps:
@@ -168,9 +177,6 @@ jobs:
       - name: Start a local registry
         if: env.MODE == 'check'
         run: docker run -d --name registry -p 5000:5000 registry:3@sha256:d4032d4cc323c1731c707931ecada07a53076eac38e3b61ae57533f170f2c6c3 # 3.1.2
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
@@ -193,14 +199,14 @@ jobs:
         id: source
         run: echo "revision=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
-      # Pushed by digest only: tags are added by the publish job after the gate, signatures and attestations.
+      # Pushed by digest only: the assemble job merges the platforms, the publish job adds the tags.
       - name: Build + push by digest
         id: build
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: ${{ matrix.image.dockerfile }}
-          platforms: ${{ env.IMAGE_PLATFORMS }}
+          platforms: linux/${{ matrix.platform.arch }}
           outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
           provenance: mode=max
           sbom: true
@@ -212,16 +218,8 @@ jobs:
             org.opencontainers.image.licenses=MIT
             org.opencontainers.image.title=${{ matrix.image.title }}
             org.opencontainers.image.description=${{ matrix.image.description }}
-          annotations: |
-            index:org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-            index:org.opencontainers.image.revision=${{ steps.source.outputs.revision }}
-            index:org.opencontainers.image.version=${{ env.VERSION }}
-            index:org.opencontainers.image.created=${{ needs.prepare.outputs.created }}
-            index:org.opencontainers.image.licenses=MIT
-            index:org.opencontainers.image.title=${{ matrix.image.title }}
-            index:org.opencontainers.image.description=${{ matrix.image.description }}
-          cache-from: type=gha,scope=${{ matrix.image.name }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.image.name }}
+          cache-from: type=gha,scope=${{ matrix.image.name }}-${{ matrix.platform.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image.name }}-${{ matrix.platform.arch }}
 
       - name: Record the image digest
         env:
@@ -229,8 +227,8 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist/scan
-          echo "$IMAGE@$DIGEST" > "dist/$ASSET.image.txt"
-          echo "Pushed $IMAGE@$DIGEST"
+          echo "$IMAGE@$DIGEST" > "dist/$ASSET-$ARCH.digest"
+          echo "Pushed $IMAGE@$DIGEST (linux/$ARCH)"
 
       - name: Install Syft
         id: syft
@@ -245,32 +243,25 @@ jobs:
           grype-version: ${{ env.GRYPE_VERSION }}
           cache-db: true
 
-      - name: CycloneDX SBOM per platform
+      - name: CycloneDX SBOM
         env:
           SYFT: ${{ steps.syft.outputs.cmd }}
           DIGEST: ${{ steps.build.outputs.digest }}
         run: scripts/release/image-sbom.sh "$IMAGE@$DIGEST" "$ASSET-$VERSION" "$VERSION" dist
 
-      - name: Scan every platform image
+      - name: Scan the image
         env:
           GRYPE: ${{ steps.grype.outputs.cmd }}
           DIGEST: ${{ steps.build.outputs.digest }}
         run: scripts/release/image-scan.sh "$IMAGE@$DIGEST" "$ASSET" dist/scan
 
       # Upload problems (code scanning off, a fork's read-only token) never block a release; the gate below does.
-      - name: Upload SARIF (linux/amd64)
+      - name: Upload SARIF
         continue-on-error: true
         uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
         with:
-          sarif_file: dist/scan/${{ env.ASSET }}-linux-amd64.sarif
-          category: image-${{ matrix.image.name }}-linux-amd64
-
-      - name: Upload SARIF (linux/arm64)
-        continue-on-error: true
-        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
-        with:
-          sarif_file: dist/scan/${{ env.ASSET }}-linux-arm64.sarif
-          category: image-${{ matrix.image.name }}-linux-arm64
+          sarif_file: dist/scan/${{ env.ASSET }}-linux-${{ matrix.platform.arch }}.sarif
+          category: image-${{ matrix.image.name }}-linux-${{ matrix.platform.arch }}
 
       - name: Vulnerability gate
         run: |
@@ -279,13 +270,94 @@ jobs:
           if [ "$VULN_ONLY_FIXED" = "true" ]; then args+=(--only-fixed); fi
           node scripts/release/vuln-gate.mjs "${args[@]}" dist/scan/*.grype.json
 
-      - name: Upload SBOMs, digests and scan reports
+      # The platforms list is written again by the assemble job, for the multi-arch index.
+      - name: Upload SBOM, digest and scan reports
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: image-${{ matrix.image.name }}
-          path: dist
+          name: image-${{ matrix.image.name }}-${{ matrix.platform.arch }}
+          path: |
+            dist
+            !dist/*.platforms.txt
           if-no-files-found: warn
+
+  assemble:
+    name: Assemble the ${{ matrix.image.name }} multi-arch index
+    needs: [prepare, build]
+    if: needs.prepare.outputs.mode != 'check'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - name: api
+            repository: ai-orchestrator
+            title: l2m-api
+            description: L2M Fastify API
+          - name: web
+            repository: ai-orchestrator-web
+            title: l2m-web
+            description: L2M Studio web UI (Nginx)
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      IMAGE: ${{ needs.prepare.outputs.registry }}/${{ matrix.image.repository }}
+      ASSET: l2m-${{ matrix.image.name }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Download the platform digests
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: image-${{ matrix.image.name }}-*
+          path: dist
+          merge-multiple: true
+
+      - name: Log in to GHCR
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push the multi-arch index by digest
+        env:
+          REGISTRY_USERNAME: ${{ github.actor }}
+          REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+          REVISION: ${{ github.sha }}
+          CREATED: ${{ needs.prepare.outputs.created }}
+          SOURCE: ${{ github.server_url }}/${{ github.repository }}
+          TITLE: ${{ matrix.image.title }}
+          DESCRIPTION: ${{ matrix.image.description }}
+        run: |
+          set -euo pipefail
+          export INDEX_ANNOTATIONS="org.opencontainers.image.source=$SOURCE
+          org.opencontainers.image.revision=$REVISION
+          org.opencontainers.image.version=$VERSION
+          org.opencontainers.image.created=$CREATED
+          org.opencontainers.image.licenses=MIT
+          org.opencontainers.image.title=$TITLE
+          org.opencontainers.image.description=$DESCRIPTION"
+          mapfile -t sources < <(cat dist/"$ASSET"-*.digest)
+          ref=$(scripts/release/push-index.sh "$IMAGE" "${sources[@]}")
+          mkdir -p index
+          echo "$ref" > "index/$ASSET.image.txt"
+          scripts/release/image-platforms.sh "$ref" > "index/$ASSET-$VERSION.platforms.txt"
+          echo "Pushed $ref"
+          cat "index/$ASSET-$VERSION.platforms.txt"
+
+      - name: Upload the index digest
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: index-${{ matrix.image.name }}
+          path: index
+          if-no-files-found: error
 
   source-sbom:
     name: Source SBOM (pnpm workspace)
@@ -328,7 +400,7 @@ jobs:
 
   sign:
     name: Sign and attest
-    needs: [prepare, build, source-sbom]
+    needs: [prepare, assemble, source-sbom]
     if: needs.prepare.outputs.mode != 'check'
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -344,7 +416,7 @@ jobs:
       - name: Download SBOMs and digests
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          pattern: "{image-*,source-sbom}"
+          pattern: "{image-*,index-*,source-sbom}"
           path: dist
           merge-multiple: true
 
@@ -458,7 +530,7 @@ jobs:
       - name: Download SBOMs and digests
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          pattern: "{image-*,source-sbom}"
+          pattern: "{image-*,index-*,source-sbom}"
           path: dist
           merge-multiple: true
 
