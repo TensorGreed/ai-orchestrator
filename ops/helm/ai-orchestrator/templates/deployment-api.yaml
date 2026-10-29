@@ -27,6 +27,9 @@ spec:
         prometheus.io/path: "/metrics"
     spec:
       serviceAccountName: {{ include "ai-orchestrator.serviceAccountName" . }}
+      {{- with include "ai-orchestrator.terminationGracePeriod" (dict "root" $ "explicit" .Values.api.terminationGracePeriodSeconds) }}
+      terminationGracePeriodSeconds: {{ . }}
+      {{- end }}
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}

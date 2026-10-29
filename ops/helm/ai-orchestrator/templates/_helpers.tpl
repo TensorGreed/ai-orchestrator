@@ -55,3 +55,34 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- define "ai-orchestrator.configMapName" -}}
 {{- printf "%s-config" (include "ai-orchestrator.fullname" .) -}}
 {{- end -}}
+
+{{/*
+The drain on SIGTERM in seconds, from config.SHUTDOWN_DRAIN_MS (milliseconds), or 0 when it is not set.
+*/}}
+{{- define "ai-orchestrator.drainSeconds" -}}
+{{- $drain := .Values.config.SHUTDOWN_DRAIN_MS | default "" | toString -}}
+{{- if $drain -}}
+{{- div (add (int $drain) 999) 1000 -}}
+{{- else -}}
+0
+{{- end -}}
+{{- end -}}
+
+{{/*
+terminationGracePeriodSeconds for a pod: the explicit value (checked against the drain), else the drain plus 10 s,
+else the minimum (empty = leave the Kubernetes default). Call with (dict "root" $ "explicit" <value> "minimum" <n>).
+*/}}
+{{- define "ai-orchestrator.terminationGracePeriod" -}}
+{{- $drain := int (include "ai-orchestrator.drainSeconds" .root) -}}
+{{- $explicit := .explicit | default "" | toString -}}
+{{- if $explicit -}}
+{{- if and (gt $drain 0) (lt (int $explicit) (add $drain 5)) -}}
+{{- fail (printf "terminationGracePeriodSeconds (%s) must be at least config.SHUTDOWN_DRAIN_MS plus 5 s (%d)" $explicit (add $drain 5)) -}}
+{{- end -}}
+{{- int $explicit -}}
+{{- else if gt $drain 0 -}}
+{{- max (add $drain 10) (int (.minimum | default 0)) -}}
+{{- else if .minimum -}}
+{{- int .minimum -}}
+{{- end -}}
+{{- end -}}

@@ -51,12 +51,17 @@ api:
       port: http
     initialDelaySeconds: 10
     periodSeconds: 10
+  # Readiness uses /ready: it answers 503 while the instance drains on shutdown, so the Service stops sending it
+  # traffic before it exits. Liveness stays on /health.
   readinessProbe:
     httpGet:
-      path: /health
+      path: /ready
       port: http
     initialDelaySeconds: 5
     periodSeconds: 5
+  # Seconds Kubernetes waits after SIGTERM. Empty keeps the Kubernetes default (30 s), unless config.SHUTDOWN_DRAIN_MS
+  # is set: then it is the drain plus 10 s. A value set here must be at least the drain plus 5 s.
+  terminationGracePeriodSeconds: ""
   env:
     BOOTSTRAP_ADMIN_EMAIL: ""
     BOOTSTRAP_ADMIN_PASSWORD: ""
@@ -106,6 +111,52 @@ webhook:
     limits:
       cpu: 500m
       memory: 512Mi
+
+# ---------------------------------------------------------------------------
+# Queue workers (optional) — replicas with WORKER_MODE=worker that claim and
+# run queued workflow runs (/enqueue, approval resumes) and are eligible to
+# lead (schedules, triggers, the queue reaper). They take no traffic from the
+# Service or the ingress; /health and /metrics stay on port 4000.
+#
+# Needs cluster mode: Postgres (secrets.databaseUrl, config.DB_TYPE=postgres)
+# and api.haEnabled=true. With workers on, set api.workerMode=api so the API
+# replicas only serve HTTP. Budget Postgres connections:
+#   (api.replicaCount + worker.replicaCount) x (pool size + 2) <= max_connections
+# See apps/docs/docs/operations/scaling.md.
+# ---------------------------------------------------------------------------
+worker:
+  enabled: false
+  replicaCount: 2
+  # QUEUE_CONCURRENCY: jobs one worker runs at once (1-256). Empty keeps the server default (5).
+  concurrency: ""
+  # QUEUE_POOLS: comma-separated pools this worker claims from. Empty claims the default pool.
+  pools: ""
+  # DB_POSTGRESDB_POOL_SIZE for workers: a small pool keeps the connection budget down.
+  dbPoolSize: 5
+  # Seconds Kubernetes waits after SIGTERM: empty means the drain (config.SHUTDOWN_DRAIN_MS, 20 s in cluster mode)
+  # plus 10 s, at least 30. A value set here must be at least the drain plus 5 s.
+  terminationGracePeriodSeconds: ""
+  # Extra environment variables for workers only (for example CODE_SANDBOX_MODE or MCP_SANDBOX_DEFAULT).
+  env: {}
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+  livenessProbe:
+    httpGet:
+      path: /health
+      port: http
+    initialDelaySeconds: 10
+    periodSeconds: 10
+  readinessProbe:
+    httpGet:
+      path: /ready
+      port: http
+    initialDelaySeconds: 5
+    periodSeconds: 5
 
 # ---------------------------------------------------------------------------
 # Web (Studio UI)
