@@ -2,6 +2,9 @@
 {{- if not .Values.api.haEnabled -}}
 {{- fail "worker.enabled needs cluster mode: set api.haEnabled=true and run on Postgres (config.DB_TYPE=postgres)" -}}
 {{- end -}}
+{{- if not (include "ai-orchestrator.isPostgres" .) -}}
+{{- fail "worker.enabled needs Postgres: set config.DB_TYPE=postgres and secrets.databaseUrl (or secrets.existingSecret with DATABASE_URL); on SQLite each worker would run its own private database" -}}
+{{- end -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -32,7 +35,7 @@ spec:
     spec:
       serviceAccountName: {{ include "ai-orchestrator.serviceAccountName" . }}
       # Running jobs get the drain (SHUTDOWN_DRAIN_MS) to finish, then are handed back before the pod is killed.
-      terminationGracePeriodSeconds: {{ include "ai-orchestrator.terminationGracePeriod" (dict "root" $ "explicit" .Values.worker.terminationGracePeriodSeconds "minimum" 30) }}
+      terminationGracePeriodSeconds: {{ include "ai-orchestrator.terminationGracePeriod" (dict "root" $ "explicit" .Values.worker.terminationGracePeriodSeconds "minimum" 30 "worker" true) }}
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
@@ -91,7 +94,7 @@ spec:
             - name: data
               mountPath: /app/apps/api/data
       volumes:
-        # Workers keep no state of their own on disk: runs, queue and secrets are in Postgres.
+        # Runs, queue and secrets are in Postgres. Leader work that uses the data directory (for example the git-sync working tree) lands on this emptyDir and is cloned again after a restart.
         - name: data
           emptyDir: {}
 {{- end -}}

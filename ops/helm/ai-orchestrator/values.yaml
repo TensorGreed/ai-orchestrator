@@ -59,8 +59,8 @@ api:
       port: http
     initialDelaySeconds: 5
     periodSeconds: 5
-  # Seconds Kubernetes waits after SIGTERM. Empty keeps the Kubernetes default (30 s), unless config.SHUTDOWN_DRAIN_MS
-  # is set: then it is the drain plus 10 s. A value set here must be at least the drain plus 5 s.
+  # Seconds Kubernetes waits after SIGTERM. Empty keeps the Kubernetes default (30 s), unless the server drains (config.SHUTDOWN_DRAIN_MS
+  # is set, or Postgres with HA on, 20 s): then it is the drain plus 10 s. A value set here must be at least the drain plus 5 s.
   terminationGracePeriodSeconds: ""
   env:
     BOOTSTRAP_ADMIN_EMAIL: ""

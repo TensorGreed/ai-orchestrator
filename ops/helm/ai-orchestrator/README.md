@@ -88,7 +88,7 @@ The chart defaults (`api.replicaCount: 2`, `api.haEnabled: true`) assume Postgre
 
 ## Queue workers
 
-Optional `worker` replicas (`WORKER_MODE=worker`) claim and run queued runs and take the leader work; the API replicas then only serve HTTP. Disabled by default: without `worker.enabled` the chart renders as before. Workers need cluster mode (Postgres and `api.haEnabled=true`); the chart refuses `worker.enabled` with HA off.
+Optional `worker` replicas (`WORKER_MODE=worker`) claim and run queued runs and take the leader work; the API replicas then only serve HTTP. Disabled by default: without `worker.enabled` the chart renders as before. Workers need cluster mode (Postgres and `api.haEnabled=true`); the chart refuses `worker.enabled` with HA off or without `config.DB_TYPE=postgres`.
 
 ```bash
 helm upgrade ao ./ops/helm/ai-orchestrator \
@@ -108,7 +108,7 @@ helm upgrade ao ./ops/helm/ai-orchestrator \
 | `worker.terminationGracePeriodSeconds` | drain + 10 s, at least 30 | Must cover `config.SHUTDOWN_DRAIN_MS` plus 5 s; the chart refuses less. |
 | `worker.env` | `{}` | Extra variables for workers only. |
 
-Readiness probes use `/ready` (503 while an instance drains on SIGTERM); liveness stays on `/health`. With `config.SHUTDOWN_DRAIN_MS` set, the API, webhook and worker Deployments get `terminationGracePeriodSeconds` of the drain plus 10 s (or `api.terminationGracePeriodSeconds`, checked against the drain). Sizing and the load-test harness: [Scaling](../../../apps/docs/docs/operations/scaling.md).
+Readiness probes use `/ready` (503 while an instance drains on SIGTERM); liveness stays on `/health`. `/ready` needs an image from the release that added it: with an older `image.tag` the new pods never become Ready and `helm upgrade --wait` fails, so set `api.readinessProbe.httpGet.path=/health` (and `webhook.readinessProbe.httpGet.path`) until you upgrade the image. With `config.SHUTDOWN_DRAIN_MS` set (or unset on workers, and on Postgres with HA on, where the server drains 20 s), the API, webhook and worker Deployments get `terminationGracePeriodSeconds` of the drain plus 10 s (or `api.terminationGracePeriodSeconds`, checked against the drain). Sizing and the load-test harness: [Scaling](../../../apps/docs/docs/operations/scaling.md).
 
 ## Webhook autoscaling
 
