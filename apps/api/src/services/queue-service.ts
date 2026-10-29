@@ -4,6 +4,7 @@ import { STUCK_JOB_MARGIN_MS, queuedRunTimeoutMs } from "../db/queue-timeouts.js
 import { DEFAULT_QUEUE_POOL, QUEUE_POOL_PATTERN, type LostJobOutcome } from "../db/queue-leases.js";
 import type { ApprovalResumeJob } from "./approval-service.js";
 import type { Store } from "../db/store.js";
+import type { DispatchedRunSpec } from "./run-dispatch.js";
 
 export interface QueuedExecutionPayload {
   workflowId: string;
@@ -21,6 +22,11 @@ export interface QueuedExecutionPayload {
   customData?: Record<string, unknown>;
   /** Phase 11.2 — resume a paused run with a recorded approval decision instead of starting one. */
   resume?: ApprovalResumeJob;
+  /**
+   * Phase 13.1 — queue dispatch: a run another instance received, as it would have started it inline (run-dispatch.ts).
+   * Only consumers that advertise queue-dispatch-v1 are sent such jobs.
+   */
+  dispatch?: DispatchedRunSpec;
 }
 
 export interface QueueServiceConfig {
@@ -166,10 +172,7 @@ export class QueueProducer {
     if (!QUEUE_POOL_PATTERN.test(pool)) {
       throw new Error(`Invalid queue pool "${pool.slice(0, 64)}": letters, digits, _ or - (at most 63).`);
     }
-    if (options.enforceBackpressure && this.maxPending > 0) {
-      const pending = await this.pendingCount(pool);
-      if (pending >= this.maxPending) throw new QueueFullError(pool, this.maxPending, QUEUE_FULL_RETRY_AFTER_SECONDS);
-    }
+    if (options.enforceBackpressure) await this.checkBackpressure(pool);
 
     await this.store.enqueueExecution({
       // A resume reuses its run's execution id, so its queue item needs its own id.
@@ -185,6 +188,13 @@ export class QueueProducer {
     if (cached) cached.count += 1;
 
     return executionId;
+  }
+
+  /** Throws QueueFullError when `pool` already holds QUEUE_MAX_PENDING pending jobs (never with no limit set). */
+  async checkBackpressure(pool: string): Promise<void> {
+    if (this.maxPending <= 0) return;
+    const pending = await this.pendingCount(pool);
+    if (pending >= this.maxPending) throw new QueueFullError(pool, this.maxPending, QUEUE_FULL_RETRY_AFTER_SECONDS);
   }
 
   private async pendingCount(pool: string): Promise<number> {
