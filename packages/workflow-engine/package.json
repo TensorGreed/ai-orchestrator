@@ -18,11 +18,11 @@
     "@ai-orchestrator/shared": "workspace:*",
     "@jitl/quickjs-wasmfile-release-sync": "0.32.0",
     "ioredis": "^5.10.1",
-    "mongodb": "^7.1.1",
-    "mysql2": "^3.22.0",
+    "mongodb": "^7.7.0",
+    "mysql2": "^3.24.6",
     "nodemailer": "^8.0.5",
-    "pg": "^8.20.0",
-    "playwright": "^1.53.2",
+    "pg": "^8.23.1",
+    "playwright": "^1.64.1",
     "quickjs-emscripten-core": "0.32.0",
     "undici": "7.25.0",
     "vega": "^5.30.0",
@@ -30,7 +30,7 @@
   },
   "devDependencies": {
     "@types/nodemailer": "^8.0.0",
-    "@types/pg": "^8.20.0",
-    "tsx": "^4.20.5"
+    "@types/pg": "^8.23.1",
+    "tsx": "^4.23.15"
   }
 }

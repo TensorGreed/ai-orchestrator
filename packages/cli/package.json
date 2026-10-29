@@ -15,6 +15,6 @@
   "dependencies": {
     "@ai-orchestrator/mcp-sdk": "workspace:*",
     "@ai-orchestrator/shared": "workspace:*",
-    "tsx": "^4.20.5"
+    "tsx": "^4.23.15"
   }
 }
