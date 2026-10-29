@@ -155,15 +155,21 @@ import {
   type ProjectRole
 } from "./services/rbac-service";
 import { ExternalSecretsService } from "./services/external-secrets-service";
-import { GitSyncService } from "./services/git-sync-service";
+import { GIT_SYNC_LOCK_WAIT_MS, GitSyncService } from "./services/git-sync-service.js";
 import { LeaderElectionService, NEVER_LEAD } from "./services/leader-election-service";
 import { reconcileInterruptedRuns } from "./services/run-reconcile-service.js";
+import type { ClusterBus } from "./services/cluster-bus.js";
+import { LocalClusterBus } from "./services/cluster-bus-local.js";
+import { clusterCancelReason, REMOTE_CANCEL_REASON, startClusterSignals, type ClusterSignals } from "./services/cluster-signals.js";
+import { DEAD_EXECUTOR_RUN_ERROR, InstanceRegistry, RunOwnerTracker, SelfFencedAbortError, type ClusterWarning } from "./services/instance-registry.js";
+import { ADVISORY_LOCK_CLASS_AUDIT_EXPORT, ADVISORY_LOCK_CLASS_GIT_SYNC } from "./db/postgres/cluster.js";
+import { MIGRATIONS } from "./db/migrations.js";
 import { MetricsService } from "./services/metrics-service";
 import { TracingService, parseKeyValueList, parseTraceparent } from "./services/tracing-service";
 import { OtlpMetricsExporter } from "./services/otlp-metrics-exporter";
 import { UsageService } from "./services/usage-service";
 import { BudgetService } from "./services/budget-service";
-import { AuditExportService } from "./services/audit-export-service";
+import { AuditExportBusyError, AuditExportService } from "./services/audit-export-service.js";
 import { McpProbeService, McpProbeSkippedError, serverConfigFromRecord } from "./services/mcp-probe-service";
 import { McpElicitationService } from "./services/mcp-elicitation-service.js";
 import { registerMcpClientFeatureRoutes } from "./mcp-client-features-routes.js";
@@ -1693,6 +1699,69 @@ export async function createApp(
     }
   >();
 
+  // Phase 13.1 — cluster mode (Postgres with HA_ENABLED=true): the instances share a LISTEN/NOTIFY bus, and each
+  // records which inline runs it executes so the leader can fail a dead instance's runs. Outside it (SQLite, or
+  // Postgres with HA off) the in-process bus is used, nothing is published and no owner is recorded: one instance
+  // behaves exactly as before.
+  const clusterInstanceId = config.HA_INSTANCE_ID ?? `${os.hostname()}-${crypto.randomBytes(4).toString("hex")}`;
+  const clusterStore = store instanceof PostgresStore ? store : null;
+  const clusterMode = config.HA_ENABLED && clusterStore !== null;
+  const clusterLogger = {
+    warn: (message: string, fields?: Record<string, unknown>) => app.log.warn(fields ?? {}, message),
+    info: (message: string, fields?: Record<string, unknown>) => app.log.info(fields ?? {}, message)
+  };
+  const clusterBus: ClusterBus =
+    clusterMode && clusterStore ? clusterStore.clusterBus({ instanceId: clusterInstanceId, logger: clusterLogger }) : new LocalClusterBus(clusterInstanceId, clusterLogger);
+  // Opened when the app is ready (before the registry and signals, registered later), so a createApp that fails
+  // part-way leaves no listener connection behind.
+  app.addHook("onReady", async () => {
+    await clusterBus.start();
+  });
+  app.addHook("onClose", async () => {
+    await clusterBus.close();
+  });
+  const runOwners = clusterMode ? new RunOwnerTracker(store, clusterInstanceId, clusterLogger) : null;
+  /**
+   * Runs the queue consumer is executing: they belong to the queue's lease, reaper and worker-loss policy, so no
+   * owner row is recorded for them and the dead-executor reconcile never acts on them.
+   */
+  const queueConsumedRuns = new Set<string>();
+  /** Inline runs executing here whose owner row this instance recorded (cluster mode). */
+  const ownedRuns = new Set<string>();
+  /**
+   * Cluster mode: true while this instance has fenced itself (its heartbeat has not been recorded for nearly the
+   * instance timeout, so the leader may fail its runs). Its owned runs are stopped, and a run that starts meanwhile
+   * stops at once: the leader would fail it too.
+   */
+  let clusterSelfFenced = false;
+  const stopOwnedRuns = () => {
+    for (const executionId of ownedRuns) {
+      const active = activeExecutions.get(executionId);
+      if (active && !active.controller.signal.aborted) active.controller.abort(new SelfFencedAbortError());
+    }
+  };
+  /** Publishes on the bus without failing the caller: the state it announces is already stored (see cluster-bus.ts). */
+  const announce = (message: { t: string; [key: string]: unknown }) => {
+    clusterBus.publish("ctl", message).catch((error: unknown) => {
+      app.log.warn({ t: message.t, error: error instanceof Error ? error.message : String(error) }, "Could not publish a cluster message");
+    });
+  };
+  /**
+   * A workflow was saved, published, restored or deleted through this instance: reload its schedules and triggers here
+   * (an instance without background workers has neither), then, in cluster mode, tell the other instances so the leader
+   * reloads at once, whichever role (`all`, `worker`, `api`, `webhook`) took the save. Every save site calls this.
+   */
+  const workflowChanged = async (workflowId: string, change: "saved" | "removed" = "saved") => {
+    if (change === "removed") {
+      schedulerService?.removeWorkflow(workflowId);
+      await triggerService?.removeWorkflow(workflowId);
+    } else {
+      await schedulerService?.reloadWorkflow(workflowId);
+      await triggerService?.reloadWorkflow(workflowId);
+    }
+    if (clusterMode) announce({ t: "workflow_changed", id: workflowId });
+  };
+
   const pruneExecutionHistory = async (reason: "startup" | "interval" | "write") => {
     const retentionDays = config.EXECUTION_HISTORY_RETENTION_DAYS;
     if (!Number.isFinite(retentionDays) || retentionDays <= 0) {
@@ -1801,7 +1870,25 @@ export async function createApp(
       triggerType: input.triggerType,
       triggeredBy: input.triggeredBy
     });
+    if (runOwners && !queueConsumedRuns.has(input.executionId)) {
+      ownedRuns.add(input.executionId);
+      runOwners.claim(input.executionId);
+      if (clusterSelfFenced) controller.abort(new SelfFencedAbortError());
+    }
     return controller;
+  };
+
+  /**
+   * Phase 13.1 — stops a run executing in this process because it was canceled elsewhere: a cancel message on the
+   * cluster bus, the cluster cancel check, or the queue heartbeat's canceled check (the backstop for a lost message).
+   * Whichever comes first stops the run; the others find it already aborted and do nothing, so a run canceled both
+   * ways is handled once. A run that hit its time limit (already aborted) is ending as a timeout and is not relabelled.
+   */
+  const abortLocalExecution = (executionId: string, reason: string): boolean => {
+    const active = activeExecutions.get(executionId);
+    if (!active || active.controller.signal.aborted) return false;
+    active.controller.abort(reason);
+    return true;
   };
 
   const releaseActiveExecution = (executionId: string | undefined, controller: AbortController | undefined) => {
@@ -1811,6 +1898,7 @@ export async function createApp(
     const current = activeExecutions.get(executionId);
     if (current?.controller === controller) {
       activeExecutions.delete(executionId);
+      if (ownedRuns.delete(executionId)) runOwners?.release(executionId);
       metricsService.setActiveExecutions(activeExecutions.size);
     }
   };
@@ -1902,10 +1990,17 @@ export async function createApp(
     try {
       // A progress write never replaces a finished run's record, and a final write never replaces a cancel that
       // committed after the abort check above (the store refuses both), whatever order writes commit in.
+      // Phase 13.1 — cluster mode: nor does a final write replace the record of a run the leader failed because it
+      // judged this instance dead (it may have been alive but unable to heartbeat). A queued run in cluster mode
+      // writes under its claim's fence as well. The store recognises the leader's record as an `error` whose message
+      // is the mark, and counts an `error` with no message as final too: no current path rewrites a same-id run
+      // that ended that way, but a future same-id retry would be refused here in cluster mode, not written over.
       const fence = queueRunFences.get(meta.executionId)?.fence;
       const written = await store.saveExecutionHistory(
         record,
-        meta.phase === "progress" ? { unlessFinished: true, ...(fence ? { fence } : {}) } : { unlessCanceled: true, ...(fence ? { fence } : {}) }
+        meta.phase === "progress"
+          ? { unlessFinished: true, ...(fence ? { fence } : {}) }
+          : { unlessCanceled: true, ...(clusterMode ? { unlessInterruptedWith: DEAD_EXECUTOR_RUN_ERROR } : {}), ...(fence ? { fence } : {}) }
       );
       if (!written) {
         // Refused: the stored record (a cancel, or a finished run) stays, so this run is not stored. Like the
@@ -2351,6 +2446,18 @@ export async function createApp(
         }
         pendingCaptures.set(input.executionId, { ticket: captureTicket, plan: runPlan, workflow: input.workflow, issuedSurrogates: runIssuedSurrogates, staleAt: Date.now() + executionTimeoutMs + 60_000 });
         captureHandedOff = true;
+      }
+
+      // Phase 13.1 — cluster mode: stopped because this instance fenced itself. It ends with the record the leader
+      // writes for a dead instance's run, whichever of the two is stored.
+      if (runController.signal.aborted && runController.signal.reason instanceof SelfFencedAbortError) {
+        return {
+          ...result,
+          status: "error" as const,
+          completedAt: new Date().toISOString(),
+          customData: input.customData ?? result.customData,
+          error: DEAD_EXECUTOR_RUN_ERROR
+        };
       }
 
       // A person's Stop always ends as canceled. A timeout keeps the engine's
@@ -3367,7 +3474,14 @@ export async function createApp(
     workdirRoot: config.GIT_SYNC_WORKDIR,
     gitBin: config.GIT_BIN,
     commandTimeoutMs: config.GIT_COMMAND_TIMEOUT_MS,
-    enabled: config.GIT_SYNC_ENABLED
+    enabled: config.GIT_SYNC_ENABLED,
+    // Phase 13.1 — cluster mode: one pull or push at a time across instances (each has its own clone).
+    ...(clusterMode && clusterStore
+      ? {
+          exclusive: async <T>(work: () => Promise<T>) =>
+            await clusterStore.withClusterLock(ADVISORY_LOCK_CLASS_GIT_SYNC, "git-sync", { waitMs: GIT_SYNC_LOCK_WAIT_MS }, work)
+        }
+      : {})
   });
 
   // Phase 7.3 — Eval framework. Wires the existing runWorkflowExecution path
@@ -3630,6 +3744,9 @@ export async function createApp(
     // Provider error bodies and reasons are stored and shown to viewers: no secret value goes with them.
     scrub: async (text) => String(secretService.redact((await replayRecordingService.scrubber()).text(text))),
     abortExecution: (executionId, reason) => activeExecutions.get(executionId)?.controller.abort(reason),
+    // Phase 13.1 — cluster mode: a cancel made here for a run another instance executes reaches it over the bus, and
+    // each heartbeat re-reads the run in case that message was lost.
+    ...(clusterMode ? { onCancelNotLocal: (runId: string) => announce({ t: "eval_cancel", runId }), watchRemoteCancel: true } : {}),
     // Phase 15.2 — replay jobs use the 15.1 replay machinery, built further down.
     replay: {
       // Phase 15.3 — the draft, a saved version or an inline workflow file, with the overrides applied.
@@ -3696,7 +3813,7 @@ export async function createApp(
   // run the scheduler and triggers elect one leader with an advisory lock on a dedicated connection; an instance
   // without background workers never takes it (it could not run the schedules) and follows. SQLite with HA on keeps
   // the lease row.
-  const leaderInstanceId = config.HA_INSTANCE_ID ?? `${os.hostname()}-${crypto.randomBytes(4).toString("hex")}`;
+  const leaderInstanceId = clusterInstanceId;
   const leaderLock =
     config.HA_ENABLED && store instanceof PostgresStore
       ? runsBackgroundWorkers
@@ -3755,6 +3872,8 @@ export async function createApp(
             app.log.warn({ err: err instanceof Error ? err.message : String(err) }, "Failed to reconcile interrupted runs");
           }
         }
+        // Phase 13.1 — cluster mode: only the leader exports audit batches (each destination also takes a lock).
+        if (clusterMode && config.AUDIT_EXPORT_ENABLED) auditExportService.start();
         if (!runsBackgroundWorkers) return;
         try {
           await schedulerService?.initialize();
@@ -3769,6 +3888,7 @@ export async function createApp(
         }
       },
       onResignLeader: () => {
+        if (clusterMode) void auditExportService.stop();
         if (!runsBackgroundWorkers) return;
         stopScheduleSync();
         try {
@@ -3781,8 +3901,9 @@ export async function createApp(
       },
       // Checked on every election tick: schedules, triggers or the sync running on a non-leader are stopped at once.
       leaderWorkRunning: () =>
-        runsBackgroundWorkers &&
-        (scheduleSyncTimer !== null || schedulerService?.isRunning?.() === true || triggerService?.isRunning?.() === true),
+        (clusterMode && auditExportService.isRunning()) ||
+        (runsBackgroundWorkers &&
+          (scheduleSyncTimer !== null || schedulerService?.isRunning?.() === true || triggerService?.isRunning?.() === true)),
       logger: { warn: (message, fields) => app.log.warn(fields ?? {}, message) }
     },
     "primary"
@@ -3795,6 +3916,104 @@ export async function createApp(
   // Before the other startup hooks (the approval sweep at boot asks isLeader()); the election loop starts later.
   app.addHook("onReady", async () => {
     await leaderElection.acquireEarly();
+  });
+
+  // Phase 13.1 — the instance registry: every instance on Postgres heartbeats, HA on or off (with HA off it only
+  // reports several instances leading at once). In cluster mode the leader also fails the runs of instances that
+  // stopped beating, and every instance acts on the bus's control messages.
+  let clusterWarnings: ClusterWarning[] = [];
+  const CLUSTER_WARNING_HEALTH_TEXT: Record<ClusterWarning["code"], string> = {
+    multiple_leaders:
+      "Several instances run schedules and triggers with HA_ENABLED=false, so each fires them. Set HA_ENABLED=true on every instance; details in GET /api/cluster."
+  };
+  const CLUSTER_BUS_DOWN_HEALTH_TEXT =
+    "The cluster bus listener is disconnected. Cancels, queue wake-ups and schedule reloads fall back to the database (a few seconds late); details in GET /api/cluster.";
+  const instanceRegistry = clusterStore
+    ? new InstanceRegistry({
+        store,
+        instanceId: clusterInstanceId,
+        workerMode,
+        haEnabled: config.HA_ENABLED,
+        // The queue consumer's pools and slots (outside cluster mode the one consumer claims every job: "default").
+        pools: runsBackgroundWorkers && queueService ? resolveQueueSettings(config, { clusterMode }).pools : [],
+        concurrency: runsBackgroundWorkers && queueService ? queueService.concurrency() : null,
+        // In cluster mode a queue consumer claims under heartbeat leases with fencing tokens.
+        capabilities: clusterMode ? ["bus-v1", ...(runsBackgroundWorkers && queueService ? ["fenced-claims-v1"] : [])] : [],
+        appVersion: config.OTEL_SERVICE_VERSION || process.env.npm_package_version || null,
+        schemaVersion: Math.max(...MIGRATIONS.map((migration) => migration.version)),
+        runtime: () => ({
+          isLeader: runsBackgroundWorkers && leaderElection.isLeader(),
+          running: activeExecutions.size,
+          busConnected: clusterMode && clusterBus.status().connected
+        }),
+        heartbeatMs: config.CLUSTER_HEARTBEAT_MS,
+        instanceTimeoutMs: config.CLUSTER_INSTANCE_TIMEOUT_MS,
+        reconcileDeadExecutors: clusterMode,
+        ...(clusterMode
+          ? {
+              selfFence: {
+                onFenced: () => {
+                  clusterSelfFenced = true;
+                  stopOwnedRuns();
+                },
+                onRecovered: () => {
+                  clusterSelfFenced = false;
+                }
+              }
+            }
+          : {}),
+        onDeadExecutorRuns: (runs) =>
+          app.log.warn(
+            { count: runs.length, runs: runs.slice(0, 50).map((run) => ({ executionId: run.id, instanceId: run.instanceId })) },
+            "Marked runs of a stopped instance as interrupted"
+          ),
+        onWarnings: (warnings, live) => {
+          clusterWarnings = warnings;
+          metricsService.setClusterStatus({
+            liveInstances: live,
+            multipleLeaders: warnings.some((warning) => warning.code === "multiple_leaders"),
+            busConnected: clusterMode ? clusterBus.status().connected : null
+          });
+        },
+        logger: {
+          warn: (message, fields) => app.log.warn(fields ?? {}, message),
+          error: (message, fields) => app.log.error(fields ?? {}, message),
+          info: (message, fields) => app.log.info(fields ?? {}, message)
+        }
+      })
+    : null;
+  let clusterSignals: ClusterSignals | null = null;
+  app.addHook("onReady", async () => {
+    await instanceRegistry?.start();
+    if (!clusterMode) return;
+    clusterSignals = startClusterSignals({
+      bus: clusterBus,
+      store,
+      activeExecutionIds: () => [...activeExecutions.keys()],
+      abortExecution: (executionId, reason) => {
+        abortLocalExecution(executionId, reason);
+      },
+      evalRuns: evalService,
+      workflows: {
+        isLeader: () => runsBackgroundWorkers && leaderElection.isLeader(),
+        reload: async (workflowId) => {
+          await schedulerService?.reloadWorkflow(workflowId);
+          await triggerService?.reloadWorkflow(workflowId);
+        },
+        syncAll: async () => {
+          await schedulerService?.syncAllSchedules();
+          await triggerService?.syncAllWorkflows();
+        }
+      },
+      cancelCheckMs: config.CLUSTER_CANCEL_CHECK_MS,
+      logger: clusterLogger
+    });
+  });
+  // onClose hooks run last-registered first, so this runs before the store closes (registered earlier).
+  app.addHook("onClose", async () => {
+    clusterSignals?.stop();
+    await runOwners?.settle();
+    await instanceRegistry?.stop();
   });
   const metricsService = new MetricsService({
     enabled: config.METRICS_ENABLED,
@@ -3870,14 +4089,22 @@ export async function createApp(
   const auditExportService = new AuditExportService(store, {
     checkIntervalMs: config.AUDIT_EXPORT_CHECK_INTERVAL_MS,
     batchSize: config.AUDIT_EXPORT_BATCH_SIZE,
-    safeFsRoot: config.AUDIT_EXPORT_FILE_ROOT
+    safeFsRoot: config.AUDIT_EXPORT_FILE_ROOT,
+    // Phase 13.1 — cluster mode: one instance at a time exports a destination (the leader's timer and "Export now").
+    ...(clusterMode && clusterStore
+      ? {
+          lock: async <T>(destinationId: string, waitMs: number, work: () => Promise<T>) =>
+            await clusterStore.withClusterLock(ADVISORY_LOCK_CLASS_AUDIT_EXPORT, destinationId, { waitMs }, work)
+        }
+      : {})
   });
   auditExportService.setLogger({
     info: (msg, fields) => app.log.info(fields ?? {}, msg),
     warn: (msg, fields) => app.log.warn(fields ?? {}, msg)
   });
   if (config.AUDIT_EXPORT_ENABLED) {
-    auditExportService.start();
+    // Cluster mode starts it when this instance becomes the leader (and stops it when it steps down).
+    if (!clusterMode) auditExportService.start();
     app.addHook("onClose", async () => {
       await auditExportService.stop();
     });
@@ -4254,8 +4481,7 @@ export async function createApp(
     notify: (event) => notificationService.notify(event),
     redact: (value) => String(secretService.redact(value)),
     onPublished: async (workflowId) => {
-      await schedulerService?.reloadWorkflow(workflowId);
-      await triggerService?.reloadWorkflow(workflowId);
+      await workflowChanged(workflowId);
     },
     snapshotDraft: async (workflowId, actor) => {
       const draft = await store.getWorkflow(workflowId);
@@ -5142,11 +5368,20 @@ export async function createApp(
 
   app.get("/health", async () => {
     const slo = metricsService.getSloStatus();
+    // The bus is an accelerator with a database fallback for every message, so a lost listener is a warning here and
+    // a gauge in metrics, never a reason to fail /ready (a Postgres restart would otherwise turn every replica 503).
+    const healthWarnings = [
+      ...clusterWarnings.map((warning) => ({ code: warning.code as string, message: CLUSTER_WARNING_HEALTH_TEXT[warning.code] })),
+      ...(clusterMode && !clusterBus.status().connected ? [{ code: "bus_disconnected", message: CLUSTER_BUS_DOWN_HEALTH_TEXT }] : [])
+    ];
     return {
       ok: true,
       now: new Date().toISOString(),
       uptime: Math.floor(process.uptime()),
-      sloHealthy: slo.healthy
+      sloHealthy: slo.healthy,
+      // Phase 13.1 — only when there is one (several instances leading at once, from the registry).
+      // Unauthenticated: the code and a pointer only (instance counts and ids are in GET /api/cluster, admin).
+      ...(healthWarnings.length > 0 ? { warnings: healthWarnings } : {})
     };
   });
 
@@ -5551,6 +5786,10 @@ export async function createApp(
       const outcome = await auditExportService.runDestination(request.params.id);
       return { outcome };
     } catch (err) {
+      if (err instanceof AuditExportBusyError) {
+        reply.code(409);
+        return { error: err.message };
+      }
       reply.code(500);
       return { error: err instanceof Error ? err.message : String(err) };
     }
@@ -5996,6 +6235,25 @@ export async function createApp(
       workerMode,
       leader: await leaderElection.getStatus(),
       leases: await store.listLeases()
+    };
+  });
+
+  // Phase 13.1 — the cluster as this instance sees it (admin): the registry with liveness, the leader, the bus, and
+  // warnings. On SQLite there is one instance and no registry.
+  app.get("/api/cluster", async (request, reply) => {
+    const user = await requireRole(request, reply, ["admin"]);
+    if (!user) return;
+    const instances = instanceRegistry ? await instanceRegistry.list() : [];
+    return {
+      clusterMode,
+      instanceId: clusterInstanceId,
+      workerMode,
+      haEnabled: config.HA_ENABLED,
+      instanceTimeoutMs: config.CLUSTER_INSTANCE_TIMEOUT_MS,
+      leader: await leaderElection.getStatus(),
+      bus: clusterBus.status(),
+      instances: instances.map((instance) => ({ ...instance, self: instance.id === clusterInstanceId })),
+      warnings: clusterWarnings
     };
   });
 
@@ -7480,8 +7738,7 @@ export async function createApp(
         createdBy: user.id,
         changeNote: `restored from v${version}`
       });
-      await schedulerService?.reloadWorkflow(saved.id);
-      await triggerService?.reloadWorkflow(saved.id);
+      await workflowChanged(saved.id);
       await audit(request, user, {
         category: "workflow",
         eventType: "workflow.restore",
@@ -7594,7 +7851,8 @@ export async function createApp(
           error: result.error
         }
       });
-      if (!result.ok) reply.code(400);
+      // Phase 13.1 — another instance is syncing (cluster mode): a conflict to retry, not a bad request.
+      if (!result.ok) reply.code(result.busy ? 409 : 400);
       return result;
     } catch (err) {
       reply.code(400);
@@ -7629,7 +7887,7 @@ export async function createApp(
           error: result.error
         }
       });
-      if (!result.ok) reply.code(400);
+      if (!result.ok) reply.code(result.busy ? 409 : 400);
       return result;
     } catch (err) {
       reply.code(400);
@@ -8133,8 +8391,7 @@ export async function createApp(
       variables: parsed.data.variables
     };
     const saved = await store.upsertWorkflow(nextWorkflow);
-    await schedulerService?.reloadWorkflow(saved.id);
-    await triggerService?.reloadWorkflow(saved.id);
+    await workflowChanged(saved.id);
 
     return {
       workflowId: saved.id,
@@ -8171,8 +8428,7 @@ export async function createApp(
 
     const savedWorkflow = await store.upsertWorkflow(parsed.data, { createdBy: user.id });
     await workflowVersionService.snapshot({ workflow: savedWorkflow, createdBy: user.id, changeNote: "created" });
-    await schedulerService?.reloadWorkflow(savedWorkflow.id);
-    await triggerService?.reloadWorkflow(savedWorkflow.id);
+    await workflowChanged(savedWorkflow.id);
     await audit(request, user, {
       category: "workflow",
       eventType: "workflow.create",
@@ -8219,8 +8475,7 @@ export async function createApp(
 
     const savedWorkflow = await store.upsertWorkflow(parsed.data, { createdBy: user.id });
     await workflowVersionService.snapshot({ workflow: savedWorkflow, createdBy: user.id, changeNote: "updated" });
-    await schedulerService?.reloadWorkflow(savedWorkflow.id);
-    await triggerService?.reloadWorkflow(savedWorkflow.id);
+    await workflowChanged(savedWorkflow.id);
     await audit(request, user, {
       category: "workflow",
       eventType: "workflow.update",
@@ -8267,8 +8522,7 @@ export async function createApp(
     try {
       await gateCasesRemoved?.();
 
-      schedulerService?.removeWorkflow(request.params.id);
-      await triggerService?.removeWorkflow(request.params.id);
+      await workflowChanged(request.params.id, "removed");
       await audit(request, user, {
         category: "workflow",
         eventType: "workflow.delete",
@@ -8319,8 +8573,7 @@ export async function createApp(
     if (duplicateDenial) return denyRunAccess(reply, duplicateDenial);
 
     const savedWorkflow = await store.upsertWorkflow(duplicatedWorkflow, { createdBy: user.id });
-    await schedulerService?.reloadWorkflow(savedWorkflow.id);
-    await triggerService?.reloadWorkflow(savedWorkflow.id);
+    await workflowChanged(savedWorkflow.id);
     return savedWorkflow;
   });
 
@@ -8342,8 +8595,7 @@ export async function createApp(
       return { error: claim };
     }
     await store.upsertWorkflow(workflow);
-    await schedulerService?.reloadWorkflow(workflow.id);
-    await triggerService?.reloadWorkflow(workflow.id);
+    await workflowChanged(workflow.id);
     await audit(request, user, {
       category: "workflow",
       eventType: "workflow.activate",
@@ -8364,8 +8616,7 @@ export async function createApp(
     settings.active = false;
     workflow.settings = settings;
     await store.upsertWorkflow(workflow);
-    schedulerService?.removeWorkflow(workflow.id);
-    await triggerService?.removeWorkflow(workflow.id);
+    await workflowChanged(workflow.id, "removed");
     await audit(request, user, {
       category: "workflow",
       eventType: "workflow.deactivate",
@@ -8442,8 +8693,7 @@ export async function createApp(
       if (saveDenial) return denyRunAccess(reply, saveDenial);
 
       const savedWorkflow = await store.upsertWorkflow(workflow, { createdBy: user.id });
-      await schedulerService?.reloadWorkflow(savedWorkflow.id);
-      await triggerService?.reloadWorkflow(savedWorkflow.id);
+      await workflowChanged(savedWorkflow.id);
       return savedWorkflow;
     } catch (error) {
       reply.code(400);
@@ -8543,8 +8793,7 @@ export async function createApp(
 
     const savedWorkflow = await store.upsertWorkflow(workflow, { createdBy: user.id });
     await workflowVersionService.snapshot({ workflow: savedWorkflow, createdBy: user.id, changeNote: "imported from another builder" });
-    await schedulerService?.reloadWorkflow(savedWorkflow.id);
-    await triggerService?.reloadWorkflow(savedWorkflow.id);
+    await workflowChanged(savedWorkflow.id);
     await audit(request, user, {
       category: "workflow",
       eventType: "workflow.import_external",
@@ -8854,8 +9103,7 @@ export async function createApp(
       const moveDenial = await workflowSaveDenial(user, nextWorkflow);
       if (moveDenial) return denyRunAccess(reply, moveDenial);
       const saved = await store.upsertWorkflow(nextWorkflow);
-      await schedulerService?.reloadWorkflow(saved.id);
-      await triggerService?.reloadWorkflow(saved.id);
+      await workflowChanged(saved.id);
       return saved;
     }
   );
@@ -8903,8 +9151,7 @@ export async function createApp(
         }
       };
       const saved = await store.upsertWorkflow(nextWorkflow);
-      await schedulerService?.reloadWorkflow(saved.id);
-      await triggerService?.reloadWorkflow(saved.id);
+      await workflowChanged(saved.id);
       return {
         workflowId: saved.id,
         nodeId: request.params.nodeId,
@@ -8929,8 +9176,7 @@ export async function createApp(
         pinnedData: Object.keys(pinnedData).length > 0 ? pinnedData : undefined
       };
       const saved = await store.upsertWorkflow(nextWorkflow);
-      await schedulerService?.reloadWorkflow(saved.id);
-      await triggerService?.reloadWorkflow(saved.id);
+      await workflowChanged(saved.id);
       return {
         ok: true,
         workflowId: saved.id,
@@ -9820,6 +10066,12 @@ export async function createApp(
       reply.code(409);
       return { error: "Only running or waiting executions can be canceled" };
     }
+    // Phase 13.1 — cluster mode: a run that is not executing here may be executing on another instance. The canceled
+    // record is stored, so the instance running it stops it on this message, or at its next cancel check if the
+    // message is lost.
+    const abortSignalled = clusterMode && !active;
+    // The reason is cut and cleaned for the bus; the run's stored record keeps the full one.
+    if (abortSignalled) announce({ t: "cancel", id: request.params.id, reason: clusterCancelReason(reason) });
 
     await approvalService.auditCanceledRequests(canceledRequestIds, user);
     await auditRunAction(
@@ -9827,13 +10079,14 @@ export async function createApp(
       user,
       "execution.cancel_requested",
       { executionId: execution.id, workflowId: execution.workflowId, projectId: (await store.getWorkflow(execution.workflowId))?.projectId },
-      { abortedActiveRun: Boolean(active), previousStatus: execution.status }
+      { abortedActiveRun: Boolean(active), previousStatus: execution.status, ...(abortSignalled ? { abortSignalled } : {}) }
     );
     return {
       ok: true,
       id: request.params.id,
       status: "canceled",
       abortedActiveRun: Boolean(active),
+      ...(abortSignalled ? { abortSignalled } : {}),
       completedAt
     };
   });
@@ -12956,6 +13209,11 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
 
   if (queueService) {
     queueService.setHandler(async (payload, context) => {
+      // Phase 13.1 — the run a job executes is the queue's (see queueConsumedRuns), keyed on the payload's execution
+      // id. Marked before the run is registered as active, so it never records an owner row and the self-fence never
+      // stops it: the queue's lease, heartbeat and reaper own it.
+      const queueOwnedExecutionId = payload.resume?.executionId ?? payload.executionId;
+      queueConsumedRuns.add(queueOwnedExecutionId);
       // Registered before the run starts, so a stop from the consumer (lease lost, or draining) reaches it whenever it
       // comes; the run reuses this controller and releases it when it ends.
       const controller = registerActiveExecution({
@@ -12980,6 +13238,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
           queueRunFences.delete(payload.executionId);
         }
         releaseActiveExecution(payload.executionId, controller);
+        queueConsumedRuns.delete(queueOwnedExecutionId);
       }
     });
 
@@ -12991,10 +13250,10 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         reaperIntervalMs: queueSettings.reaperIntervalMs,
         pools: queueSettings.pools
       });
-      // A cancel recorded on another instance stops the run here at the next heartbeat at the latest.
+      // A cancel recorded on another instance stops the run here at the next heartbeat at the latest: the database
+      // backstop for the cluster bus's cancel message, through the same abort helper, so the first of the two wins.
       queueService.setCancelHandler((executionId) => {
-        const active = activeExecutions.get(executionId);
-        if (active && !active.controller.signal.aborted) active.controller.abort("Execution canceled on another instance");
+        abortLocalExecution(executionId, REMOTE_CANCEL_REASON);
       });
     }
     queueService.setObserver({

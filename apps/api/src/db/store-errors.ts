@@ -86,3 +86,15 @@ export class ReleaseGateEnforcedError extends Error {
     this.name = "ReleaseGateEnforcedError";
   }
 }
+
+/**
+ * Phase 13.1 — a successful audit export run named the cursor it read (`cursorFrom`), and the destination's cursor is
+ * no longer that value: another exporter moved it meanwhile (its cluster lock was lost with its connection). Nothing
+ * is recorded, so the cursor never moves backwards and the duplicate batch is reported instead of hidden.
+ */
+export class AuditExportCursorMovedError extends Error {
+  constructor(readonly destinationId: string, readonly expected: string | null) {
+    super(`Audit export destination ${destinationId}: its cursor moved while this batch was delivered (another exporter ran); the batch may have been shipped twice.`);
+    this.name = "AuditExportCursorMovedError";
+  }
+}

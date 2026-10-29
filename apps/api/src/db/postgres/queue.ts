@@ -449,11 +449,11 @@ export async function recordQueueJobProgress(ctx: PgContext, fence: QueueClaimFe
   return (result.rowCount ?? 0) > 0;
 }
 
-export async function listCanceledExecutionIds(ctx: PgContext, executionIds: string[]): Promise<string[]> {
+export async function listCanceledExecutionIds(ctx: PgContext, executionIds: readonly string[]): Promise<string[]> {
   if (executionIds.length === 0) return [];
   const rows = await ctx.query<{ id: string }>(
     `SELECT id FROM execution_history WHERE id = ANY($1::text[]) AND status = 'canceled'`,
-    [executionIds]
+    [[...executionIds]]
   );
   return rows.map((row) => toStr(row.id));
 }

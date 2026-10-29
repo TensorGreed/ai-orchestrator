@@ -83,6 +83,13 @@ export const openApiSpec = {
         responses: { "200": { description: "HA status" } }
       }
     },
+    "/api/cluster": {
+      get: {
+        tags: ["Observability"],
+        summary: "Cluster view (admin): instance registry with liveness, leader, bus status and warnings",
+        responses: { "200": { description: "Cluster view" }, "403": { description: "Not an admin" } }
+      }
+    },
 
     // ── Auth ───────────────────────────────────────────────────────────────
     "/api/auth/register": {

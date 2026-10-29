@@ -291,6 +291,16 @@ export interface EvalServiceOptions {
   abortExecution?: (executionId: string, reason: string) => void;
   /** Writes `progress.updatedAt` this often while a run is running, so another instance can tell it is alive. Default 30 s. */
   heartbeatMs?: number;
+  /**
+   * Phase 13.1 — a cancel found no local run (another instance runs it): told the run id after the run is marked
+   * canceled, so it can signal the owner (the cluster bus).
+   */
+  onCancelNotLocal?: (runId: string) => void;
+  /**
+   * Phase 13.1 — on each heartbeat, also re-read the run and stop it here when another instance canceled it (the
+   * backstop for a lost cancel signal). Off by default (one instance cancels its own runs directly).
+   */
+  watchRemoteCancel?: boolean;
   now?: () => Date;
   random?: () => number;
   logger?: { warn: (message: string, fields?: Record<string, unknown>) => void };
@@ -1068,7 +1078,44 @@ export class EvalService {
     });
     const view = this.view((await this.store.getEvalRun(runId))!);
     if (active) this.emit(active, view, false);
+    else if (view.status === "canceled") this.options.onCancelNotLocal?.(runId);
     return view;
+  }
+
+  /**
+   * Phase 13.1 — another instance canceled a run this process executes (its stored status is already `canceled`): no
+   * further cases start and its running executions are aborted, as for a local cancel. The run's own end keeps the
+   * canceled status and refreshes the summary. Returns whether the run was running here. Idempotent.
+   */
+  stopCanceledElsewhere(runId: string): boolean {
+    const active = this.active.get(runId);
+    if (!active || active.canceled) return false;
+    active.canceled = true;
+    for (const executionId of active.inFlight) this.options.abortExecution?.(executionId, "The eval run was canceled.");
+    this.wake(active);
+    return true;
+  }
+
+  /**
+   * Phase 13.1 — a cancel signal for `runId` arrived: stops it here only if it runs here and its stored status is
+   * `canceled` (the signal itself is not trusted). Returns whether it was stopped.
+   */
+  async stopIfCanceledElsewhere(runId: string): Promise<boolean> {
+    const active = this.active.get(runId);
+    if (!active || active.canceled) return false;
+    if ((await this.store.getEvalRun(runId))?.status !== "canceled") return false;
+    return this.stopCanceledElsewhere(runId);
+  }
+
+  /** Phase 13.1 — re-reads every run this process executes and stops those canceled elsewhere (a missed signal). */
+  async stopRunsCanceledElsewhere(): Promise<number> {
+    let stopped = 0;
+    for (const active of [...this.active.values()]) {
+      if (active.canceled) continue;
+      const record = await this.store.getEvalRun(active.runId);
+      if (record?.status === "canceled" && this.stopCanceledElsewhere(active.runId)) stopped += 1;
+    }
+    return stopped;
   }
 
   /**
@@ -1237,6 +1284,11 @@ export class EvalService {
       if (active.canceled) return;
       active.progress = { ...active.progress, updatedAt: this.now().toISOString() };
       this.safely(async () => await this.store.updateEvalRunProgress({ id: active.runId, progress: active.progress as unknown as Record<string, unknown> }));
+      if (this.options.watchRemoteCancel) {
+        this.safely(async () => {
+          if ((await this.store.getEvalRun(active.runId))?.status === "canceled") this.stopCanceledElsewhere(active.runId);
+        });
+      }
     }, this.options.heartbeatMs);
     heartbeat.unref?.();
     const running: Array<Promise<void>> = [];

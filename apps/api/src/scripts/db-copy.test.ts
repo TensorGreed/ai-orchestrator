@@ -554,7 +554,9 @@ describe.skipIf(!postgresUrl)("db:copy into Postgres", () => {
     await q(`INSERT INTO $S.schema_migrations (version) VALUES ($1)`, [CODE_SCHEMA_VERSION + 1]);
     expect(await refusalOf()).toMatch(new RegExp(`at schema v${CODE_SCHEMA_VERSION + 1}, newer than this build \\(v${CODE_SCHEMA_VERSION}\\)`));
     await q(`DELETE FROM $S.schema_migrations WHERE version >= $1`, [CODE_SCHEMA_VERSION]);
-    expect(await refusalOf()).toMatch(new RegExp(`at schema v${CODE_SCHEMA_VERSION - 1}, this build is at v${CODE_SCHEMA_VERSION}`));
+    // The previous applied migration (a version reserved for an unmerged lane leaves a gap).
+    const previous = Math.max(...MIGRATIONS.map((m) => m.version).filter((version) => version < CODE_SCHEMA_VERSION));
+    expect(await refusalOf()).toMatch(new RegExp(`at schema v${previous}, this build is at v${CODE_SCHEMA_VERSION}`));
 
     await q(`DROP SCHEMA $S CASCADE`);
     await q(`CREATE SCHEMA $S`);

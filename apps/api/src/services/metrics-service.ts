@@ -89,6 +89,8 @@ export class MetricsService {
   private nodeExecutionDuration = new Histogram([10, 50, 100, 250, 500, 1000, 5000, 10000]);
   /** Phase 15.6 — production capture outcomes (captured, skipped_daily_limit, discarded_status, failed, ...). */
   private replayCaptures = new Map<string, number>();
+  /** Phase 13.1 — the registry's view at the last heartbeat (Postgres only; null until the first one). */
+  private cluster: { liveInstances: number; multipleLeaders: boolean; busConnected: boolean | null } | null = null;
 
   /** Phase 13.1 — queue depth per pool (sampled by the leader), dead letters, waits, lost workers, free slots. */
   private queueDepth: Array<{ pool: string; pending: number; running: number }> | null = null;
@@ -167,6 +169,11 @@ export class MetricsService {
   setWorkerSlotsFree(free: number): void {
     if (!this.enabled) return;
     this.workerSlotsFree = free;
+  }
+
+  /** Phase 13.1 — set after each registry heartbeat; the gauges appear only once it is set (Postgres). */
+  setClusterStatus(status: { liveInstances: number; multipleLeaders: boolean; busConnected: boolean | null }): void {
+    this.cluster = status;
   }
 
   setActiveExecutions(count: number): void {
@@ -282,6 +289,15 @@ export class MetricsService {
     }
     if (this.workerSlotsFree !== null) {
       g(`${p}_worker_slots_free`, "Free job slots on this worker", this.workerSlotsFree);
+    }
+    if (this.cluster) {
+      g(`${p}_cluster_live_instances`, "Live API instances in the registry (Postgres)", this.cluster.liveInstances);
+      g(
+        `${p}_cluster_multiple_leaders`,
+        "1 when several instances lead at once (HA_ENABLED=false on more than one instance with schedules), 0 otherwise",
+        this.cluster.multipleLeaders ? 1 : 0
+      );
+      if (this.cluster.busConnected !== null) g(`${p}_cluster_bus_connected`, "1 while the cluster bus listener is connected", this.cluster.busConnected ? 1 : 0);
     }
 
     const slo = this.getSloStatus();

@@ -225,6 +225,49 @@ describe("eval runs in the background", () => {
     expect(await svc.cancel("run_missing")).toBeNull();
   });
 
+  it("Phase 13.1: a cancel made on another instance signals the owner, which stops the run (and its heartbeat catches a lost signal)", async () => {
+    for (const lostSignal of [false, true]) {
+      const gate = deferred();
+      const caseStarted = deferred();
+      const aborted: string[] = [];
+      const executor: EvalWorkflowExecutor = async (input) => {
+        caseStarted.resolve();
+        await gate.promise;
+        return { executionId: input.executionId, output: input.fixtureInput };
+      };
+      // The instance running the run (it re-reads its runs on each heartbeat), and another one on the same store.
+      const owner = new EvalService(store, executor, undefined, { concurrency: 1, abortExecution: (id) => aborted.push(id), watchRemoteCancel: true, heartbeatMs: 20 });
+      const signalled: string[] = [];
+      const other = new EvalService(store, executor, undefined, {
+        onCancelNotLocal: (runId) => {
+          signalled.push(runId);
+          if (!lostSignal) void owner.stopIfCanceledElsewhere(runId);
+        }
+      });
+      const dataset = await datasetWith(owner, 3);
+      const run = await owner.enqueueRun({ datasetId: dataset.id, workflowId: "wf", triggeredBy: "b@example.com", triggeredByUserId: "u1" });
+      await caseStarted.promise;
+      await owner.flush();
+      // A signal the store does not confirm (the run is not canceled) stops nothing.
+      expect(await owner.stopIfCanceledElsewhere(run.id)).toBe(false);
+      expect(aborted).toEqual([]);
+      expect((await other.cancel(run.id))!.status).toBe("canceled");
+      expect(signalled).toEqual([run.id]);
+      for (let i = 0; i < 200 && aborted.length === 0; i += 1) await sleep(10);
+      expect(aborted).toHaveLength(1);
+      // Stopping again is a no-op.
+      expect(owner.stopCanceledElsewhere(run.id)).toBe(false);
+      gate.resolve();
+      await owner.wait(run.id);
+      const after = (await owner.getRun(run.id))!;
+      expect(after.status).toBe("canceled");
+      expect(after.results).toHaveLength(1);
+      // A cancel of a run running here never signals.
+      expect(other.stopCanceledElsewhere("run_missing")).toBe(false);
+      expect(await owner.stopRunsCanceledElsewhere()).toBe(0);
+    }
+  });
+
   it("marks runs a stopped server left behind as interrupted, and only stale ones with several instances", async () => {
     let now = new Date("2026-10-23T10:00:00Z");
     const svc = new EvalService(store, async () => ({ output: null }), undefined, { now: () => now });

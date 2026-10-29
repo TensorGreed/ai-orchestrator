@@ -1,5 +1,5 @@
 import pg, { type Pool, type PoolClient, type PoolConfig } from "pg";
-import { runMigrations } from "./migrations.js";
+import { MigrationGapError, missingMigrationVersions, runMigrations } from "./migrations.js";
 import type { Store } from "./store.js";
 import type { PostgresSslSettings } from "../config.js";
 import { createPgContext, type PgContext } from "./postgres/context.js";
@@ -9,6 +9,7 @@ import * as approvals from "./postgres/approvals.js";
 import * as audit from "./postgres/audit.js";
 import * as auth from "./postgres/auth.js";
 import * as capture from "./postgres/capture.js";
+import * as cluster from "./postgres/cluster.js";
 import * as data_destinations from "./postgres/data-destinations.js";
 import * as data_labels from "./postgres/data-labels.js";
 import * as evals from "./postgres/eval.js";
@@ -27,6 +28,7 @@ import * as sessions from "./postgres/sessions.js";
 import * as webhooks from "./postgres/webhooks.js";
 import * as workflows from "./postgres/workflows.js";
 import { ADVISORY_LOCK_CLASS_LEADER, PgLeaderLock, type LeaderLock, type PgLeaderLockOptions } from "./postgres/leader-lock.js";
+import { CLUSTER_BUS_APPLICATION_NAME, PgClusterBus, type PgClusterBusOptions } from "../services/cluster-bus-pg.js";
 
 export { parseTimestamptz };
 
@@ -59,6 +61,9 @@ export interface PostgresStoreConfig {
  *   0x4c3252 ("L2R")  golden-run saves, capture promotions and golden-set imports — one key for the deployment,
  *                     held for the transaction (pg_advisory_xact_lock); see ADVISORY_LOCK_CLASS_REPLAY_GOLDEN in
  *                     postgres/replay.ts.
+ *   0x4c3258 ("L2X")  audit export — key: hashtext(schema:destination id); a session lock held for one export batch.
+ *   0x4c3247 ("L2G")  git sync — key: hashtext(schema:"git-sync"); a session lock held for one pull or push.
+ *                     Both: see postgres/cluster.ts.
  * Add a new class here rather than reusing one.
  */
 export const ADVISORY_LOCK_CLASS_MIGRATIONS = 0x4c324d;
@@ -142,6 +147,18 @@ export async function ensureMigrationsTable(client: Pool | PoolClient): Promise<
 }
 
 /**
+ * Refuses to migrate a database that recorded a version above one this build defines but never applied (a migration
+ * merged with a lower number than one already deployed): the chain would skip it for good. Contiguous databases,
+ * empty ones and ones ahead of this build pass unchanged.
+ */
+export async function refuseMigrationGaps(client: Pool | PoolClient): Promise<void> {
+  const result = await client.query<{ version: string | number }>(`SELECT version FROM schema_migrations`);
+  const applied = result.rows.map((row) => toNum(row.version));
+  const missing = missingMigrationVersions(applied);
+  if (missing.length > 0) throw new MigrationGapError(missing, Math.max(...applied));
+}
+
+/**
  * Applies every pending chain migration on `client` (call it inside withMigrationLock). Returns the NOTICE messages
  * the migrations raised (for example how many running guard simulations v39 interrupted), for one startup line each.
  */
@@ -153,6 +170,7 @@ export async function applyMigrationChain(client: PoolClient): Promise<string[]>
   client.on("notice", onNotice);
   try {
     await ensureMigrationsTable(client);
+    await refuseMigrationGaps(client);
     await runMigrations(
       async (sql) => { await client.query(sql); },
       () => currentChainVersion(client),
@@ -175,6 +193,7 @@ export class PostgresStore implements Store {
 
   private readonly config: PostgresStoreConfig;
   private readonly leaderLocks = new Set<PgLeaderLock>();
+  private readonly clusterBuses = new Set<PgClusterBus>();
 
   private constructor(pool: Pool, config: PostgresStoreConfig) {
     this.pool = pool;
@@ -202,6 +221,7 @@ export class PostgresStore implements Store {
     // promise-ok: kept and awaited below (and by every later close)
     this.closing ??= (async () => {
       await Promise.all([...this.leaderLocks].map((lock) => lock.release()));
+      await Promise.all([...this.clusterBuses].map((bus) => bus.close()));
       await this.pool.end();
     })();
     await this.closing;
@@ -227,6 +247,30 @@ export class PostgresStore implements Store {
     });
     this.leaderLocks.add(lock);
     return lock;
+  }
+
+  /**
+   * Phase 13.1 — the LISTEN/NOTIFY cluster bus: its listener is a dedicated connection (application_name `l2m-bus`,
+   * not one of the pool's); it publishes through the pool. Closed with the store.
+   */
+  clusterBus(input: Pick<PgClusterBusOptions, "instanceId" | "logger" | "pingIntervalMs" | "queryTimeoutMs" | "reconnectMinMs" | "reconnectMaxMs">): PgClusterBus {
+    const bus = new PgClusterBus({
+      ...input,
+      clientConfig: postgresPoolConfig(this.config, { max: 1, application_name: CLUSTER_BUS_APPLICATION_NAME }),
+      query: async (sql, params) => await this.pool.query(sql, params)
+    });
+    this.clusterBuses.add(bus);
+    return bus;
+  }
+
+  /** Phase 13.1 — runs `fn` under a cluster-wide session advisory lock (see postgres/cluster.ts withAdvisoryLock). */
+  async withClusterLock<T>(
+    lockClass: number,
+    key: string,
+    options: { waitMs: number; retryMs?: number },
+    fn: () => Promise<T>
+  ): Promise<cluster.AdvisoryLockOutcome<T>> {
+    return await cluster.withAdvisoryLock(this.pool, lockClass, key, options, fn);
   }
 
   /**
@@ -1249,6 +1293,30 @@ export class PostgresStore implements Store {
   }
   async listLeases(...args: Parameters<Store["listLeases"]>): ReturnType<Store["listLeases"]> {
     return misc.listLeases(this.ctx, ...args);
+  }
+  async heartbeatClusterInstance(...args: Parameters<Store["heartbeatClusterInstance"]>): ReturnType<Store["heartbeatClusterInstance"]> {
+    return cluster.heartbeatClusterInstance(this.ctx, ...args);
+  }
+  async listClusterInstances(...args: Parameters<Store["listClusterInstances"]>): ReturnType<Store["listClusterInstances"]> {
+    return cluster.listClusterInstances(this.ctx, ...args);
+  }
+  async deleteClusterInstance(...args: Parameters<Store["deleteClusterInstance"]>): ReturnType<Store["deleteClusterInstance"]> {
+    return cluster.deleteClusterInstance(this.ctx, ...args);
+  }
+  async pruneClusterInstances(...args: Parameters<Store["pruneClusterInstances"]>): ReturnType<Store["pruneClusterInstances"]> {
+    return cluster.pruneClusterInstances(this.ctx, ...args);
+  }
+  async claimClusterRunOwner(...args: Parameters<Store["claimClusterRunOwner"]>): ReturnType<Store["claimClusterRunOwner"]> {
+    return cluster.claimClusterRunOwner(this.ctx, ...args);
+  }
+  async releaseClusterRunOwner(...args: Parameters<Store["releaseClusterRunOwner"]>): ReturnType<Store["releaseClusterRunOwner"]> {
+    return cluster.releaseClusterRunOwner(this.ctx, ...args);
+  }
+  async reconcileDeadExecutorRuns(...args: Parameters<Store["reconcileDeadExecutorRuns"]>): ReturnType<Store["reconcileDeadExecutorRuns"]> {
+    return cluster.reconcileDeadExecutorRuns(this.ctx, ...args);
+  }
+  async failRunsOwnedBy(...args: Parameters<Store["failRunsOwnedBy"]>): ReturnType<Store["failRunsOwnedBy"]> {
+    return cluster.failRunsOwnedBy(this.ctx, ...args);
   }
   async writeAuditLog(...args: Parameters<Store["writeAuditLog"]>): ReturnType<Store["writeAuditLog"]> {
     return audit.writeAuditLog(this.ctx, ...args);

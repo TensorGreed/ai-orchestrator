@@ -157,6 +157,30 @@ export interface CancelExecutionResult {
   canceledRequestIds: string[];
 }
 
+/** Phase 13.1 — one instance's registry heartbeat. */
+export interface ClusterInstanceHeartbeat {
+  id: string;
+  workerMode: string;
+  haEnabled: boolean;
+  isLeader: boolean;
+  pools: string[];
+  concurrency: number | null;
+  running: number;
+  appVersion: string | null;
+  schemaVersion: number | null;
+  capabilities: string[];
+  hostname: string;
+  busConnected: boolean;
+  startedAt: string;
+}
+
+/** Phase 13.1 — a registry row as listed. */
+export interface ClusterInstanceRecord extends ClusterInstanceHeartbeat {
+  heartbeatAt: string;
+  /** The heartbeat is recent enough (database clock). */
+  live: boolean;
+}
+
 export interface Store {
   // ---- Store lifecycle
 
@@ -1429,6 +1453,15 @@ export interface Store {
      * zombie worker whose claim was taken back writes nothing.
      */
     fence?: QueueClaimFence;
+    /**
+     * Phase 13.1 — cluster mode, a run's final write: also refused when the stored record is `error` with exactly
+     * this error, the mark the dead-executor reconcile leaves (DEAD_EXECUTOR_RUN_ERROR). The leader took the run from
+     * an instance it judged dead, so that instance's late result (success, error or canceled) never replaces it.
+     * Combined with the other guard: Postgres adds `AND NOT (execution_history.status = 'error' AND
+     * execution_history.error = $n)` to the `ON CONFLICT ... DO UPDATE` condition, so a reconcile and a final write
+     * that race resolve on the row lock: whichever commits first wins and the other changes nothing.
+     */
+    unlessInterruptedWith?: string;
   }): Promise<boolean>;
   listExecutionHistory(input: {
     page?: number;
@@ -1659,8 +1692,11 @@ export interface Store {
   recordQueueJobProgress(fence: QueueClaimFence): Promise<boolean>;
   /** Renews the heartbeat of the owner's claims; returns the tokens it still holds (a missing one was taken back). */
   renewQueueLeases(input: { owner: string; claimTokens: string[] }): Promise<string[]>;
-  /** Of these execution ids, the ones whose history reads `canceled` (a cancel another instance recorded). */
-  listCanceledExecutionIds(executionIds: string[]): Promise<string[]>;
+  /**
+   * Of these execution ids, the ones whose history reads `canceled` (a cancel another instance recorded). Used by the
+   * queue heartbeat and by the cluster cancel check (the backstop for a lost bus message).
+   */
+  listCanceledExecutionIds(executionIds: readonly string[]): Promise<string[]>;
   /**
    * The lease reaper: running items whose heartbeat is older than `leaseMs` (database time) are settled by the
    * worker-loss policy (queue-leases.ts decideLostJob), each counting an attempt. Items without a heartbeat (claimed
@@ -1752,6 +1788,32 @@ export interface Store {
     acquiredAt: string;
     renewedAt: string;
   }>>;
+
+  // ---- Phase 13.1 cluster registry (cluster signalling migration). Written on Postgres only; on SQLite the methods work but the app never calls them.
+
+  /** Inserts or refreshes this instance's registry row; `heartbeat_at` is the database clock. */
+  heartbeatClusterInstance(input: ClusterInstanceHeartbeat): Promise<void>;
+  /** Every registry row, newest heartbeat first, with `live` judged on the database clock against `liveWithinMs`. */
+  listClusterInstances(input: { liveWithinMs: number }): Promise<ClusterInstanceRecord[]>;
+  /** Removes one instance's row (a clean shutdown). */
+  deleteClusterInstance(id: string): Promise<void>;
+  /** Removes rows whose heartbeat is older than `olderThanMs`. Returns how many. */
+  pruneClusterInstances(input: { olderThanMs: number }): Promise<number>;
+  /** Records that `instanceId` executes the inline run `executionId` (cluster mode). */
+  claimClusterRunOwner(input: { executionId: string; instanceId: string }): Promise<void>;
+  /** Forgets the owner of a run that ended, if it is still `instanceId`. */
+  releaseClusterRunOwner(input: { executionId: string; instanceId: string }): Promise<void>;
+  /**
+   * Fails every `running` run owned by an instance other than `selfId` whose registry heartbeat is older than
+   * `deadAfterMs` (or that has no registry row and was claimed that long ago), skipping runs the queue still owns,
+   * and forgets those owners. Returns the runs it failed.
+   */
+  reconcileDeadExecutorRuns(input: { error: string; deadAfterMs: number; selfId: string }): Promise<Array<{ id: string; workflowId: string; instanceId: string }>>;
+  /**
+   * Fails every `running` run owned by `instanceId` (skipping runs the queue still owns) and forgets its owners. Called
+   * once when an instance with a fixed HA_INSTANCE_ID starts: rows under its id belong to the process it replaces.
+   */
+  failRunsOwnedBy(input: { instanceId: string; error: string }): Promise<Array<{ id: string; workflowId: string; instanceId: string }>>;
 
   // ---- Audit log, log streaming, audit export, signing keys and execution manifests
 
@@ -1924,6 +1986,12 @@ export interface Store {
     firstId?: string | null;
     lastId?: string | null;
     error?: string | null;
+    /**
+     * Phase 13.1 — compare-and-set (cluster mode): the cursor (`last_export_id`) this batch was read after. When given,
+     * a successful run moves the cursor only if it still holds this value; otherwise nothing is recorded and
+     * AuditExportCursorMovedError is thrown. Omitted: the cursor moves unconditionally, as before.
+     */
+    cursorFrom?: string | null;
   }): Promise<void>;
   listAuditExportRuns(destinationId: string, limit?: number): Promise<Array<{
     id: string; destinationId: string; startedAt: string; completedAt: string | null;
