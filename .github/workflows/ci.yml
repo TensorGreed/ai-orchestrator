@@ -154,7 +154,7 @@ jobs:
       # One screenshot per step of the demo journey, for reviewers.
       - name: Upload demo screenshots
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: demo-screenshots
           path: apps/web/demo-screenshots
@@ -162,7 +162,7 @@ jobs:
 
       - name: Upload Playwright report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: playwright-report
           path: |
@@ -208,7 +208,7 @@ jobs:
         run: pnpm --filter ./apps/vscode-l2m-agent run package
 
       - name: Upload .vsix artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: vscode-l2m-agent-vsix
           path: apps/vscode-l2m-agent/vscode-l2m-agent.vsix
