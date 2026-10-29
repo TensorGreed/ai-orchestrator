@@ -1,5 +1,5 @@
 ---
-description: "Run several L2M instances on one Postgres database: cross-instance cancel, the instance registry, leader-only jobs, lost-instance recovery and troubleshooting."
+description: "Run several L2M instances on one Postgres database: cross-instance cancel, shared sign-in and rate limits, the registry, leader jobs and troubleshooting."
 ---
 
 # Cluster operations
@@ -40,13 +40,64 @@ Each instance in cluster mode holds **one extra connection** for listening (`app
 - **Reconnects.** The listener is checked by TCP keepalives and a `SELECT 1` every 10 seconds; a connection that errors, ends or does not answer is replaced with backoff (250 ms up to 10 s). Killing it (`pg_terminate_backend`) is safe.
 - **Notifications are sent outside transactions** (`SELECT pg_notify(...)` in autocommit), so they never take Postgres's commit-time notify lock.
 - **Payloads** stay under 7,000 bytes; larger run events are sent as references and read from the database.
-- **Statement logging.** With `log_statement = 'all'` Postgres logs `pg_notify` payloads. Messages carry run and workflow ids and cancel reasons, never secrets.
+- **Statement logging.** With `log_statement = 'all'` Postgres logs `pg_notify` payloads. Messages carry run and workflow ids and cancel reasons, never secrets. An elicitation answer (what a person typed into a tool's question) travels sealed with the master key, so the log shows ciphertext only.
 - Channels are scoped by schema (`l2m_ctl` in `public`), so deployments that share a database but not a schema never see each other's messages.
 - **Self-test.** After each connect the bus sends itself a notification through the pool; `bus.verified` in `GET /api/cluster` is `false` (with a warning in the log) when it never arrives, which usually means a transaction-mode pooler.
 
 ### Who can send on the bus
 
 Postgres has no privilege on `NOTIFY` channels: any role that can connect to the database can send a message. **The database role is the trust boundary**: every cluster member shares it, so do not grant the application's database to untrusted roles (for a reporting user, use a replica or a separate database). Within that boundary a message never decides anything alone: every message is validated (known type, field types and lengths; anything else is ignored), a `cancel` or `eval_cancel` stops a run only when the database shows it canceled, and `workflow_changed` only makes the leader re-read the saved workflow. Cancel reasons on the bus are cut to 200 characters with control characters removed.
+
+## Sign-in, OAuth and other per-user flows
+
+Some flows span two requests that a load balancer may send to different instances. In cluster mode their state is kept in the database, so no sticky sessions are needed. One instance (SQLite, or Postgres with `HA_ENABLED=false`) keeps it in memory exactly as before, and none of this needs configuring.
+
+| Flow | Cluster mode |
+|---|---|
+| Password sign-in with TOTP: `POST /api/auth/login`, then `POST /api/auth/login/mfa` | The challenge is stored in `pending_challenges`, so the second step may land on any instance. It is used once across all instances (one atomic delete) and lasts 5 minutes. |
+| SSO sign-in with a local TOTP step (the `l2m_sso_mfa` cookie) | The same. |
+| MCP OAuth connect: **Connect**, then the authorization server's redirect to `/api/mcp/oauth/callback` | The state, PKCE verifier and client registration are stored the same way, so the callback may land on any instance. They are still bound to the session that started the flow, used once and short-lived (`MCP_OAUTH_STATE_TTL_MS`). |
+| MCP OAuth token refresh | One refresh per connection across the instances: a refresh holds an advisory lock, re-reads the stored token, and uses one another instance stored meanwhile. A rotating refresh token is therefore never spent twice. A refresh that waits more than 30 s for another instance's refresh fails with "try again shortly". |
+| An MCP server asks the person running a workflow for input (elicitation) | The request records the instance whose run waits on it. An answer that lands on another instance is checked there (who may answer, what the server asked for), then sent to that instance over the bus, sealed with the master key, and settled there. The API answers `200` once the run has the answer, or `202` with `delivered: "signalled"` if it takes longer than about 5 s. If the instance holding the request has stopped, the request expires at once and the answer gets `409`. A sweep expires such requests within one `CLUSTER_INSTANCE_TIMEOUT_MS`. An instance that starts expires only requests nobody holds, its own from before a restart, and those of stopped instances, never a live replica's. |
+| Replay capture daily limit (`maxPerDay`) | A sampled run reserves its slot in the database, one workflow at a time across all instances, so the limit holds. The slot is given back when the capture is stored or dropped. A reservation whose instance stopped lapses after the run's time limit plus 10 minutes. |
+
+Only a hash of each challenge id is stored, never the id itself, and the payload is sealed with `SECRET_MASTER_KEY_BASE64` (every instance needs the same key, as it already does for secrets). The session cleanup tick removes expired challenges.
+
+## Rate limits in a cluster
+
+| Bucket | Cluster mode |
+|---|---|
+| Auth (`RATE_LIMIT_AUTH_MAX`) and webhook (`RATE_LIMIT_WEBHOOK_MAX`) | **Shared.** Each hit counts in an unlogged Postgres table with one statement, so the limit holds across all instances: 10 failed sign-ins a minute means 10 in total, not 10 per instance. If the database does not answer, an instance counts in its own memory until it does, and logs that once a minute. |
+| Global (`RATE_LIMIT_GLOBAL_MAX`) | **Per instance.** Every request would otherwise write to the database. With N instances behind a round-robin balancer, a client gets up to N times the limit. |
+
+Behind a load balancer or proxy, set `TRUST_PROXY` ([Environment](../getting-started/environment.md)). Without it every client is keyed by the proxy's address, so all of them share one auth bucket. In cluster mode, when requests arrive with `X-Forwarded-For` while `TRUST_PROXY` is off, `GET /health` carries a `forwarded_for_untrusted` warning for 15 minutes.
+
+## Community nodes in a cluster
+
+In cluster mode **Install** and **Uninstall** under Community nodes (`POST /api/community-nodes/install`, `DELETE /api/community-nodes/:name`) answer `409`: the change would reach one instance only, and runs on the others would fail. `GET /api/community-nodes` reports `installAllowed: false`. Give every instance the same packages instead, either way:
+
+- **Bake them into the image.** Install the packages into `COMMUNITY_NODES_DIR` at build time, for example `RUN cd /app/community-nodes && npm install --ignore-scripts l2m-nodes-cohere@1.2.3`, and roll the new image out.
+- **Mount a shared volume.** Mount one volume at `COMMUNITY_NODES_DIR` on every instance, install into it from a one-off job, then restart the instances or call `POST /api/community-nodes/reload` on each.
+
+## MCP gateway sessions
+
+Gateway sessions (`Mcp-Session-Id`) stay in the memory of the instance that opened them. A request that lands on another instance gets `404`, and a client following the MCP spec opens a new session, which works but restarts any stdio servers the session started. To avoid that churn, route a session's requests to one instance by its header. With nginx:
+
+```nginx
+upstream l2m_mcp {
+    hash $http_mcp_session_id consistent;
+    server api-1:4000;
+    server api-2:4000;
+}
+
+location /mcp/ {
+    proxy_pass http://l2m_mcp;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+}
+```
+
+The first `initialize` has no session header yet and may land anywhere; every later request of that session goes to the instance that answered it. Other balancers offer the same as header-based affinity.
 
 ## The instance registry
 
@@ -87,4 +138,6 @@ All optional.
 - **A cancel answers `abortSignalled: true` but the run keeps going for a few seconds.** The instance running it missed the message (its listener was reconnecting); it stops the run at its next cancel check. Check `bus.connected` and `bus.reconnects` in `GET /api/cluster` on that instance.
 - **`bus.connected` stays false.** The listener cannot reach Postgres directly: check the pooler mode and `max_connections`, and the log for "Cluster bus could not connect".
 - **An instance shows `live: false`** while it is running: its heartbeats fail (see "Cluster registry heartbeat failed" in its log) or `CLUSTER_INSTANCE_TIMEOUT_MS` is too short for the load. It fences itself and the leader fails its inline runs once it is not live, so keep the timeout well above the heartbeat.
+- **An elicitation answer returns `202 delivered: "signalled"`.** The instance running the request had not settled it within about 5 s: its bus listener may be reconnecting. The request still shows as pending; answer it again, or check `bus.connected` on the instance named in the log.
+- **Sign-in after the TOTP step fails with "MFA challenge expired or invalid" on some instances only.** The instances disagree on cluster mode: every instance needs `HA_ENABLED=true` and the same `SECRET_MASTER_KEY_BASE64`.
 - **The API refuses to start with "never applied vN".** The database recorded a later migration before the build that adds vN ran on it, so the forward-only chain would skip vN. Apply vN's `up` SQL from `apps/api/src/db/migrations.ts` by hand (each migration is idempotent), insert vN into `schema_migrations`, and start again.

@@ -93,6 +93,8 @@ COMMUNITY_NODES_ALLOWLIST=l2m-nodes-cohere,l2m-nodes-mistral,l2m-nodes-vendor-*
 4. The server runs `npm install --ignore-scripts <spec>`, validates the manifest, dynamic-imports the package, and calls `register()`.
 5. Newly registered providers / MCP adapters / connectors show up in their respective node-config dropdowns immediately — no restart required.
 
+In cluster mode (several instances on Postgres with `HA_ENABLED=true`) installing and uninstalling from the UI is refused, because the change would reach one instance only. Bake the packages into the image or mount `COMMUNITY_NODES_DIR` from a shared volume: see [Community nodes in a cluster](../operations/cluster.md#community-nodes-in-a-cluster).
+
 ## Hot-reload semantics
 
 | Operation | Effect on running process |
