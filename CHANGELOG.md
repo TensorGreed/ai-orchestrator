@@ -168,6 +168,7 @@ The initial GA release covers production hardening, OSS-growth foundations, and 
 ### Fixed
 
 - **API image build fixed** — the deps stage now copies `packages/guard-sdk` and `packages/community-sdk` manifests, without which `pnpm install` failed for `apps/api/Dockerfile` (`docker compose up --build` and release builds). Both Dockerfiles install from the committed `pnpm-lock.yaml` with `--frozen-lockfile`.
+- **Web image base moved to `nginx:1.30-alpine`** (current stable line) from `nginx:1.27-alpine`, which is no longer rebuilt: its Alpine 3.21 packages carried fixable CRITICAL vulnerabilities (OpenSSL, curl, libxml2, brotli) that the new release gate blocks on. `apps/web/nginx.conf` is unchanged.
 
 ### Security
 
