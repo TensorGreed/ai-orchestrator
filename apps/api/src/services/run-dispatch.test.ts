@@ -184,6 +184,12 @@ describe("RunDispatcher", () => {
 
   it("maps a dead job, a timeout and a client that went away to their errors", async () => {
     await expect(make({ queue: true, end: { kind: "failed", error: "boom" } }).dispatcher.run(spec(), { pool: "default" })).rejects.toBeInstanceOf(DispatchFailedError);
+    // The job's raw last error is kept for the log only, never in the message a client may see.
+    const failed = (await make({ queue: true, end: { kind: "failed", error: "pg: password authentication failed for user x" } })
+      .dispatcher.run(spec(), { pool: "default" })
+      .catch((error: unknown) => error)) as DispatchFailedError;
+    expect(failed.message).not.toContain("password");
+    expect(failed.reason).toBe("pg: password authentication failed for user x");
     await expect(make({ queue: true, end: { kind: "timeout" } }).dispatcher.run(spec(), { pool: "default" })).rejects.toBeInstanceOf(DispatchTimeoutError);
     await expect(make({ queue: true }).dispatcher.run(spec(), { pool: "default", closed: Promise.resolve() })).rejects.toBeInstanceOf(DispatchClientGoneError);
   });

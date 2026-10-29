@@ -228,13 +228,18 @@ export class DispatchTimeoutError extends Error {
   }
 }
 
-/** A dispatched run's job ended in the dead-letter queue without a result (it could not be run). */
+/**
+ * A dispatched run's job ended in the dead-letter queue without a result (it could not be run). The message names no
+ * cause (it may hold raw error text); `reason` is for the log, redacted there.
+ */
 export class DispatchFailedError extends Error {
   readonly executionId: string;
+  readonly reason: string | null;
   constructor(executionId: string, reason: string | null) {
-    super(`Execution ${executionId} could not be run on a worker: ${reason ?? "the job failed"}`);
+    super(`Execution ${executionId} could not be run on a worker.`);
     this.name = "DispatchFailedError";
     this.executionId = executionId;
+    this.reason = reason;
   }
 }
 

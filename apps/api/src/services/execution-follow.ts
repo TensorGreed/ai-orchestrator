@@ -82,7 +82,8 @@ export function followExecution(follow: ExecutionFollow): ExecutionFollower {
       const end = await opened.ended(follow.waitMs);
       await delivered;
       if (end.kind === "result") send("result", end.result);
-      else if (end.kind === "failed") send("error", { message: end.error ?? "The run failed on its worker" });
+      // The job's last error may hold raw text: the stream says only that it failed (the run's record has the rest).
+      else if (end.kind === "failed") send("error", { message: "The run failed on its worker" });
       else if (end.kind === "timeout") send("error", { message: "The run did not finish while this stream waited; it may still finish." });
     } catch (error) {
       send("error", { message: error instanceof Error ? error.message : "Could not follow the run" });

@@ -102,6 +102,22 @@ describe("followExecution", () => {
     expect(sent).toEqual([]);
   });
 
+  it("a job that died ends the stream with a generic error, never the job's raw last error", async () => {
+    const fake = fakeRelay();
+    const sent: Array<[string, unknown]> = [];
+    const follower = followExecution({
+      open: async () => fake.relay,
+      readExecution: async () => ({ id: "run-3", status: "running" }),
+      elicitationVisible: async () => true,
+      send: (event, payload) => void sent.push([event, payload]),
+      waitMs: 60_000
+    });
+    await flush();
+    fake.end({ kind: "failed", error: "connect ECONNREFUSED 10.0.0.5:5432 user=admin" });
+    await follower.done;
+    expect(sent.at(-1)).toEqual(["error", { message: "The run failed on its worker" }]);
+  });
+
   it("a client gone while it waits releases the relay, and a settled run is checked at once", async () => {
     const fake = fakeRelay();
     const sent: string[] = [];

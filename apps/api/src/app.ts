@@ -13596,8 +13596,9 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       return;
     }
     if (error instanceof DispatchFailedError) {
-      app.log.warn({ executionId: error.executionId, err: secretService.redact(error.message) }, "A dispatched run failed on the workers");
-      reply.code(500).send({ error: error.message, executionId: error.executionId });
+      // Answered as an inline run that threw: no raw error text; the cause is logged, redacted.
+      app.log.error({ executionId: error.executionId, err: secretService.redact(error.reason ?? error.message) }, "A dispatched run failed on the workers");
+      reply.code(500).send({ error: "Internal server error" });
       return;
     }
     if (error instanceof DispatchClientGoneError) {
