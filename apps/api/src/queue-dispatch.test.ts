@@ -55,6 +55,8 @@ interface ReplicaOptions {
   pollIntervalMs?: number;
   /** Drops the run events this replica publishes (a lost NOTIFY). */
   dropRunEvents?: boolean;
+  /** The side-effect marker write throws once (a database error after the entry node ran): the run throws. */
+  failEffectsMark?: boolean;
   background?: boolean;
 }
 
@@ -143,6 +145,17 @@ run("queue dispatch across replicas on one Postgres database", () => {
         bus.publishRunEvent = async () => undefined;
         return bus;
       }) as PostgresStore["clusterBus"];
+    }
+    if (options.failEffectsMark) {
+      let failed = false;
+      const mark = store.markQueueEffectsStarted.bind(store);
+      store.markQueueEffectsStarted = (async (...args: Parameters<PostgresStore["markQueueEffectsStarted"]>) => {
+        if (!failed) {
+          failed = true;
+          throw new Error("connection to 10.0.0.5 lost while marking the claim");
+        }
+        return await mark(...args);
+      }) as PostgresStore["markQueueEffectsStarted"];
     }
     const config = parseConfig({
       LOG_LEVEL: "error",
@@ -353,6 +366,21 @@ run("queue dispatch across replicas on one Postgres database", () => {
     expect(direct).toHaveProperty("errorRemediation");
     expect(Object.keys(relayed).sort()).toEqual(Object.keys(direct).sort());
     expect(stable(relayed)).toEqual(stable(direct));
+  }, 60_000);
+
+  it("a run that throws on its worker keeps its node results and answers as an inline run that threw", async () => {
+    const { worker, api, builder } = await cluster({ failEffectsMark: true });
+    await save(api, builder, quick("wf-throws"));
+    const answer = await api.app.inject({ method: "POST", url: "/api/workflows/wf-throws/execute", headers: { cookie: builder }, payload: {} });
+    expect(answer.statusCode, answer.body).toBe(500);
+    // No raw error text (the inline answer to a thrown error).
+    expect(answer.json()).toEqual({ error: "Internal server error" });
+    const [row] = await sql<{ id: string }>(`SELECT id FROM execution_history WHERE workflow_id = 'wf-throws'`);
+    expect(worker.ran).toContain(row!.id);
+    const record = await api.store.getExecutionHistory(row!.id);
+    expect(record).toMatchObject({ status: "error" });
+    // The progress the run recorded (its entry node) stays on the record.
+    expect(((record?.nodeResults ?? []) as Array<{ nodeId: string }>).map((entry) => entry.nodeId)).toContain("input");
   }, 60_000);
 
   it("a run whose NOTIFYs are all lost still ends, from the database", async () => {

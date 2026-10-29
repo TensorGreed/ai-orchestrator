@@ -3108,23 +3108,29 @@ export async function createApp(
       } catch (error) {
         publisher.close();
         if (context.signal.aborted) throw error;
-        // As an inline run that threw: the run ends as an error; the queue does not run it again.
+        // As an inline run that threw: the run ends as an error; the queue does not run it again. The node results
+        // its progress recorded stay on the record, and the write holds only while this claim holds the job.
         const message = error instanceof Error ? error.message : String(error);
+        const progress = await store.getExecutionHistory(executionId).catch(() => null);
         await store.saveExecutionHistory(
           {
             id: executionId,
             workflowId: run.workflow.id,
             workflowName: run.workflow.name,
             status: "error",
-            startedAt: recorded?.startedAt ?? new Date().toISOString(),
+            startedAt: progress?.startedAt ?? recorded?.startedAt ?? new Date().toISOString(),
             completedAt: new Date().toISOString(),
             triggerType: run.triggerType,
             triggeredBy: run.triggeredBy,
             inputJson: redactSensitiveInput(spec.history.requestInput),
             customData: spec.history.customData,
+            ...(progress?.nodeResults !== undefined && progress?.nodeResults !== null ? { nodeResultsJson: progress.nodeResults } : {}),
             error: message
           },
-          { unlessCanceled: true }
+          {
+            unlessCanceled: true,
+            ...(context.claimToken !== null ? { fence: { queueItemId: context.queueItemId, claimToken: context.claimToken } } : {})
+          }
         ).catch(() => false);
         throw error instanceof NonRetryableQueueError ? error : new NonRetryableQueueError(message);
       } finally {
