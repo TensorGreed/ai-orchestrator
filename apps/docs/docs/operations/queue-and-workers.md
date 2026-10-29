@@ -89,10 +89,13 @@ worker crashed, was killed, or lost its database). Each one counts as an attempt
 - **The job used up its attempts** (three by default): it goes to the dead-letter queue with `worker lost`.
 
 Approval resumes follow the same rules, on the resume's own queue row (the run's record still reads as the pause).
-Re-entering the decided gate does not count: a lost resume that started no other node goes back to the queue and
-resumes from the recorded decision on another worker. Once any node after the gate had started (an agent mid-run, a
-call in flight), the resume is marked `interrupted: worker lost` and dead-lettered, and its paused state is removed
-with it, so approval recovery does not drive it again.
+Only re-entering an **Approval Gate** node does not count, because the gate does nothing but pass the decision on: a
+lost resume that started no other node goes back to the queue and resumes from the recorded decision on another
+worker. Every other node a resume re-enters counts from its start: an agent that paused for approval of a write tool
+runs again to make the approved call, and a paused sub-workflow (Execute Workflow) runs the rest of its child. So a
+resume lost while that agent or sub-workflow runs, or once any node after the gate had started (a call in flight), is
+marked `interrupted: worker lost` and dead-lettered, never re-run, so the approved write happens at most once. Its
+paused state is removed with it, so approval recovery does not drive it again.
 
 Without cluster mode the earlier stuck-job sweep (`QUEUE_STUCK_JOB_TIMEOUT_MS`) still applies. It never touches a
 leased job: those are the reaper's alone.
@@ -122,10 +125,11 @@ stuck-job sweep, and an approval resume by approval recovery). With the drain, o
 3. gives running jobs up to `SHUTDOWN_DRAIN_MS` to finish;
 4. gives back the jobs still running, by the worker-loss rules above but without counting an attempt: a job where
    only trigger or input nodes had started returns to the queue, and one where any other node had started is marked
-   `interrupted: worker shut down` and dead-lettered. An approval resume that started no node after its gate returns
-   to the queue with its paused state and decision intact, and the next worker resumes it from the decision. One that
-   had started a node after the gate is marked `interrupted: worker shut down` and dead-lettered too; its paused state
-   is removed with it, so nothing drives it on automatically (retry it once you have checked its side effects);
+   `interrupted: worker shut down` and dead-lettered. An approval resume that had only re-entered its Approval Gate
+   returns to the queue with its paused state and decision intact, and the next worker resumes it from the decision.
+   One that had re-entered an agent or a paused sub-workflow, or started any node after the gate, is marked
+   `interrupted: worker shut down` and dead-lettered too; its paused state is removed with it, so nothing drives it on
+   automatically (retry it once you have checked its side effects);
 5. closes the server and the database (up to 5 seconds more), and exits.
 
 A second signal exits at once. Give the platform a termination grace period above `SHUTDOWN_DRAIN_MS` plus 5 seconds,
@@ -151,8 +155,10 @@ grace period above your longest usual run, and replace workers one at a time. Wa
 
 ## Retention
 
-Finished jobs and dead-letter entries are deleted with the execution history, on its schedule
-(`EXECUTION_HISTORY_RETENTION_DAYS`, 30 days by default; `0` keeps everything). Retry a dead-lettered run before then.
+Finished queue jobs (completed or dead) and dead-letter entries follow `EXECUTION_HISTORY_RETENTION_DAYS`: the
+execution history prune deletes those older than the cutoff, on every deployment, single instance or cluster. The
+default is 30 days; `0` keeps everything, as before this change. Retry a dead-lettered run before the cutoff. Pending
+and running jobs are never pruned.
 
 ## Metrics
 

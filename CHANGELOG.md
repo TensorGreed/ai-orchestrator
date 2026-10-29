@@ -7,6 +7,7 @@ All notable changes to L2M are documented here. The format follows [Keep a Chang
 ## [Unreleased]
 
 ### Changed
+- **Queue jobs and dead-letter entries follow execution history retention.** The history prune now also deletes finished queue jobs (completed or dead) and dead-letter entries older than `EXECUTION_HISTORY_RETENTION_DAYS` (30 days by default), on SQLite and Postgres. Before, they were kept forever. Set `EXECUTION_HISTORY_RETENTION_DAYS=0` to keep everything. Pending and running jobs are never pruned. See [`/docs/operations/queue-and-workers#retention`](apps/docs/docs/operations/queue-and-workers.md#retention).
 - **Runtime is now Node 24.** Node 20 reached end of life on 2026-04-30, so the Docker images, CI and docs move to Node 24 (current LTS), and the root `package.json` declares `engines.node >=24` with an `.nvmrc`. Docker users need to do nothing. Running from source needs Node 24. SQLite databases written under Node 20 keep verifying and copying: the legacy audit-text handling is unchanged.
 
 The initial GA release covers production hardening, OSS-growth foundations, and the docs/evangelism flywheel.
