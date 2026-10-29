@@ -1,3 +1,7 @@
+---
+description: "How L2M stores secrets: AES-256-GCM encryption at rest, secret references in workflow configs instead of values, project scope, the secrets API and operational guidance."
+---
+
 # Secrets
 
 ## Design

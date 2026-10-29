@@ -1,3 +1,7 @@
+---
+description: "Why L2M: MCP-first agents, Supervisor and worker swarms, a VS Code agent surface, webhook signature checks and production basics in an open-source, self-hosted platform."
+---
+
 # Why L2M?
 
 Most AI workflow tools were designed before the Model Context Protocol existed and before "multi-agent" meant anything more than chained prompts. L2M was built around both, and ships with the production basics that closed-source agent platforms charge for.

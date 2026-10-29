@@ -1,3 +1,7 @@
+---
+description: "Reference for the 27 nodes in the L2M Input category, with every config field and default. Workflow entry points: triggers (cron, webhook, manual, form, chat, MCP-server) and static-input helpers."
+---
+
 <!--
   Generated from packages/shared/src/definitions.ts.
   DO NOT EDIT BY HAND — run `pnpm --filter @ai-orchestrator/docs gen:nodes`

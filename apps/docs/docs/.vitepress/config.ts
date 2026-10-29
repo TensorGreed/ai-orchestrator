@@ -1,8 +1,20 @@
 import { defineConfig } from "vitepress";
 
+const SITE = "https://lsquarem.com";
+// The share card lives with the landing at the site root (source: scripts/social-card/).
+const SOCIAL_CARD = `${SITE}/assets/social-card.png`;
+const SOCIAL_CARD_ALT = "L2M: run and govern MCP agents, self-hosted. The L2M studio with an agent hub, its chat model, memory and MCP tools, and the run tape of a finished run.";
+
+/** The page's public URL: `/docs/` plus the clean path (`foo/index.md` → `foo/`, `foo.md` → `foo`). */
+function pageUrl(relativePath: string): string {
+  const clean = relativePath.replace(/(^|\/)index\.md$/, "$1").replace(/\.md$/, "");
+  return `${SITE}/docs/${clean}`;
+}
+
 export default defineConfig({
   title: "L2M",
-  description: "The MCP-native agent runtime — visual workflow builder, multi-agent Swarm, and a VS Code surface.",
+  description: "Documentation for L2M, the open-source, self-hosted studio and runtime to build, run and govern MCP agents.",
+  lang: "en",
   // Served as a subpath under lsquarem.com — the marketing landing lives at
   // the root, the VitePress build is mounted at /docs/. The Pages deployment
   // workflow at .github/workflows/pages.yml merges both into a single
@@ -10,6 +22,37 @@ export default defineConfig({
   base: "/docs/",
   cleanUrls: true,
   sitemap: { hostname: "https://lsquarem.com/docs/" },
+  // Generated table pulled into product/importing-from-another-builder.md with @include; not a page of its own.
+  srcExclude: ["product/external-import-coverage.md"],
+  head: [
+    ["link", { rel: "icon", type: "image/svg+xml", href: "/docs/favicon.svg" }],
+    ["meta", { name: "theme-color", content: "#07090f" }],
+    ["meta", { property: "og:type", content: "website" }],
+    ["meta", { property: "og:site_name", content: "L2M" }],
+    ["meta", { property: "og:image", content: SOCIAL_CARD }],
+    ["meta", { property: "og:image:width", content: "1200" }],
+    ["meta", { property: "og:image:height", content: "630" }],
+    ["meta", { property: "og:image:alt", content: SOCIAL_CARD_ALT }],
+    ["meta", { name: "twitter:card", content: "summary_large_image" }],
+    ["meta", { name: "twitter:image", content: SOCIAL_CARD }],
+    ["meta", { name: "twitter:image:alt", content: SOCIAL_CARD_ALT }]
+  ],
+  // Per page: canonical URL and the share tags that carry its own title and description.
+  // The 404 page is kept out of search results instead.
+  transformHead({ pageData, title, description }) {
+    if (pageData.isNotFound || pageData.relativePath === "404.md") {
+      return [["meta", { name: "robots", content: "noindex" }]];
+    }
+    const url = pageUrl(pageData.relativePath);
+    return [
+      ["link", { rel: "canonical", href: url }],
+      ["meta", { property: "og:url", content: url }],
+      ["meta", { property: "og:title", content: title }],
+      ["meta", { property: "og:description", content: description }],
+      ["meta", { name: "twitter:title", content: title }],
+      ["meta", { name: "twitter:description", content: description }]
+    ];
+  },
   themeConfig: {
     nav: [
       { text: "← lsquarem.com", link: "https://lsquarem.com/" },

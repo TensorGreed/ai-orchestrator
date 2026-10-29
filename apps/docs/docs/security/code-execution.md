@@ -1,3 +1,7 @@
+---
+description: "What L2M code nodes and template expressions can and cannot reach: expressions sandboxed in QuickJS on WebAssembly, JavaScript and Python code nodes, and host Python."
+---
+
 # Code execution and expressions
 
 Workflows run two kinds of user-authored code: **code nodes** (a JavaScript or

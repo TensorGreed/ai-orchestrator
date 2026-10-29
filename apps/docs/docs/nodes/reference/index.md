@@ -1,3 +1,7 @@
+---
+description: "Reference for all 139 L2M node types across 8 categories, generated from the node definitions: every config field and default value."
+---
+
 <!--
   Generated from packages/shared/src/definitions.ts.
   DO NOT EDIT BY HAND — run `pnpm --filter @ai-orchestrator/docs gen:nodes`.

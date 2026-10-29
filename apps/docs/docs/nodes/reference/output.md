@@ -1,3 +1,7 @@
+---
+description: "Reference for the 5 nodes in the L2M Output category, with every config field and default. Terminal nodes that shape the workflow's response payload."
+---
+
 <!--
   Generated from packages/shared/src/definitions.ts.
   DO NOT EDIT BY HAND — run `pnpm --filter @ai-orchestrator/docs gen:nodes`

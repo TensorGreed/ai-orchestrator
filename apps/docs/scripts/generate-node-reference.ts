@@ -43,6 +43,11 @@ const CATEGORY_BLURB: Record<NodeCategory, string> = {
   Output: "Terminal nodes that shape the workflow's response payload."
 };
 
+/** YAML frontmatter with the page's meta description (a JSON string is valid YAML). */
+function frontmatter(description: string): string[] {
+  return ["---", `description: ${JSON.stringify(description)}`, "---", ""];
+}
+
 function slugify(category: NodeCategory): string {
   return category.toLowerCase().replace(/[^a-z0-9]+/g, "-");
 }
@@ -130,7 +135,9 @@ function renderNodeSection(node: NodeDefinition): string {
 
 function renderCategoryPage(category: NodeCategory, nodes: NodeDefinition[]): string {
   const sorted = [...nodes].sort((a, b) => a.type.localeCompare(b.type));
+  const count = `${sorted.length} node${sorted.length === 1 ? "" : "s"}`;
   const header = [
+    ...frontmatter(`Reference for the ${count} in the L2M ${category} category, with every config field and default. ${CATEGORY_BLURB[category]}`),
     "<!--",
     "  Generated from packages/shared/src/definitions.ts.",
     "  DO NOT EDIT BY HAND — run `pnpm --filter @ai-orchestrator/docs gen:nodes`",
@@ -141,7 +148,7 @@ function renderCategoryPage(category: NodeCategory, nodes: NodeDefinition[]): st
     "",
     CATEGORY_BLURB[category],
     "",
-    `${sorted.length} node${sorted.length === 1 ? "" : "s"}.`,
+    `${count}.`,
     "",
     "---",
     ""
@@ -151,6 +158,9 @@ function renderCategoryPage(category: NodeCategory, nodes: NodeDefinition[]): st
 
 function renderIndexPage(byCategory: Map<NodeCategory, NodeDefinition[]>): string {
   const lines: string[] = [
+    ...frontmatter(
+      `Reference for all ${nodeDefinitions.length} L2M node types across ${byCategory.size} categories, generated from the node definitions: every config field and default value.`
+    ),
     "<!--",
     "  Generated from packages/shared/src/definitions.ts.",
     "  DO NOT EDIT BY HAND — run `pnpm --filter @ai-orchestrator/docs gen:nodes`.",

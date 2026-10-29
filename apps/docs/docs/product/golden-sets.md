@@ -1,3 +1,7 @@
+---
+description: "Golden sets are regression suites for an L2M workflow: replay jobs run every golden run against a candidate version, score each case and report what broke."
+---
+
 # Golden sets, replay jobs and scorers
 
 A **golden set** is a regression suite for one workflow: a list of [golden runs](./golden-runs.md) (and, if you like, hand-written cases). A **replay job** replays every golden run in one or more sets against a candidate (the draft, a saved version or a workflow file, with optional overrides) in the background, scores each case and reports pass, fail or inconclusive per case. Use it before you ship a prompt, model, tool or workflow change: one job tells you which real runs the change breaks.

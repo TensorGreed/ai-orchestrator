@@ -1,3 +1,7 @@
+---
+description: "The core L2M workflow nodes by group: inputs, prompting, LLM and agent, MCP tools, RAG and data, utilities and outputs, with notes on execution and the Output Parser."
+---
+
 # Core Nodes
 
 ## Input

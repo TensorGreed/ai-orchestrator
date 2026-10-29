@@ -1,3 +1,7 @@
+---
+description: "The L2M outbound URL guard checks every URL that HTTP Request, Web Browse, Chart, PDF, RAG and feed nodes fetch, blocking server-side request forgery and local file reads."
+---
+
 # Outbound URL guard
 
 Nodes that fetch a URL the workflow author or upstream data supplies —

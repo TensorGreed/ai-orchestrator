@@ -1,3 +1,7 @@
+---
+description: "Import a workflow exported from another visual workflow builder into L2M: node conversion, rebuilt edges, and a report of what needs a human look before it runs."
+---
+
 # Importing a workflow from another builder
 
 L2M can import a workflow exported from another visual workflow builder. The export format it understands has top-level `nodes[]`, `connections{}`, `settings` and `pinData`. The import converts every node it can into an L2M node, rebuilds the edges, carries positions and sticky notes over, and hands back a report that tells you exactly what needs a human look before the flow runs.

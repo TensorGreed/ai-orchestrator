@@ -1,3 +1,7 @@
+---
+description: "Fixes for common L2M problems: missing master key, webhook 404s, unexpected MCP tools, agents hitting max iterations, context overflow, local LLM crashes and parser errors."
+---
+
 # Common Issues
 
 ## `SECRET_MASTER_KEY_BASE64 environment variable is required`

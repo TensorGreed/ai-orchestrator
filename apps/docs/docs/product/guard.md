@@ -1,3 +1,7 @@
+---
+description: "Where L2M Guard runs in workflows: the Guard node, the agent guard port, automatic project and workflow profiles, the protection port, and where verdicts show up."
+---
+
 # Guard in workflows
 
 The [guard engine](./guard-engine.md) checks content against a profile. This page covers where it runs in L2M: the **Guard** node, the agent **guard** port, automatic profiles for projects and workflows, the **protection** port, and where the verdicts show up afterwards.

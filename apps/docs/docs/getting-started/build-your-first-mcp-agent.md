@@ -1,3 +1,7 @@
+---
+description: "Tutorial: from a fresh clone to a self-hosted L2M agent calling MCP tools in five minutes, with no API keys: the built-in echo model and a mock MCP server."
+---
+
 # Build your first MCP agent in 5 minutes
 
 This is the shortest path from a fresh clone to an agent that calls real tools via the [Model Context Protocol](https://modelcontextprotocol.io/). No API keys, no Ollama, no setup.

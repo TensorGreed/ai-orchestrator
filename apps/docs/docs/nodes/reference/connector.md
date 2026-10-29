@@ -1,3 +1,7 @@
+---
+description: "Reference for the 41 nodes in the L2M Connector category, with every config field and default. External system integrations — HTTP, SQL, NoSQL, cloud SDKs, SaaS APIs."
+---
+
 <!--
   Generated from packages/shared/src/definitions.ts.
   DO NOT EDIT BY HAND — run `pnpm --filter @ai-orchestrator/docs gen:nodes`

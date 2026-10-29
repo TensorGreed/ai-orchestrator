@@ -23,9 +23,21 @@ function demoMode(): Plugin {
       if (!id.endsWith("/src/styles/tokens.css")) return null;
       return code.replace(/@import url\("https:\/\/fonts\.googleapis\.com[^"]*"\);\n?/g, "");
     },
+    // The demo is an app shell on lsquarem.com/demo/: search engines are asked not to index it
+    // (the landing and the docs are the pages to find), and it gets its own title.
     transformIndexHtml: {
       order: "pre",
-      handler: (html) => html.replace("/src/main.tsx", "/src/demo/demo-main.tsx")
+      handler: (html) =>
+        html
+          .replace("/src/main.tsx", "/src/demo/demo-main.tsx")
+          .replace(
+            /<title>[^<]*<\/title>/,
+            [
+              "<title>L&sup2;M live demo: the studio with recorded runs</title>",
+              '<meta name="description" content="The L2M studio running in your browser against recorded runs: no sign-up, no server, nothing leaves your browser." />',
+              '<meta name="robots" content="noindex" />'
+            ].join("\n    ")
+          )
     }
   };
 }

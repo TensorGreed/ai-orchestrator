@@ -1,3 +1,7 @@
+---
+description: "Register each MCP server once in L2M: scheduled health probes, tool schema history, breaking-change detection, OAuth and sampling settings, shared by every workflow."
+---
+
 # MCP server registry
 
 The **MCP → Servers** page keeps one list of every MCP server your agents call. Each entry is probed on a schedule, its tool schemas are kept as history, and a schema change that could break existing callers is flagged before it reaches a run. Everything lives in your own deployment: the registry is a table in your L2M database and the probes run in your API process.

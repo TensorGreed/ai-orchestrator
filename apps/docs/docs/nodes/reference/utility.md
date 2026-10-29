@@ -1,3 +1,7 @@
+---
+description: "Reference for the 43 nodes in the L2M Utility category, with every config field and default. DAG control flow: branching, looping, merging, sub-workflows, code execution, set/wait."
+---
+
 <!--
   Generated from packages/shared/src/definitions.ts.
   DO NOT EDIT BY HAND — run `pnpm --filter @ai-orchestrator/docs gen:nodes`

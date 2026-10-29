@@ -1,3 +1,7 @@
+---
+description: "The L2M VS Code extension turns a workflow into a coding agent in the editor: streaming chat, patch previews with workspace-path checks, command approval and bounded context."
+---
+
 # VS Code Agent Extension
 
 The L2M VS Code extension turns any L2M workflow into a coding agent inside the editor. Streaming chat, structured patch previews with workspace-path safety, command approval, and bounded context bundling — backed by a workflow you own and can edit visually.

@@ -1,3 +1,7 @@
+---
+description: "The quality gates to run before merging or releasing L2M (lint, test, build, docs build), current test coverage areas and focused test suites."
+---
+
 # Testing and Quality Gates
 
 ## Monorepo gates

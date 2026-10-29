@@ -1,3 +1,7 @@
+---
+description: "Record a masked sample of an L2M workflow's real production runs into a Captured runs inbox and promote the useful ones into a golden set in one click."
+---
+
 # Production capture
 
 Golden sets are only as good as the runs in them. **Production capture** records a sample of a workflow's real production runs, masks the personal data in them, and puts them in a **Captured runs** inbox. From there a builder promotes the useful ones into a [golden set](./golden-sets.md) in one click, and discards the rest.

@@ -1,3 +1,7 @@
+---
+description: "Test an L2M workflow file from git against golden sets in CI with the l2m CLI, fail the build on regressions, upload JUnit results and publish through the release gate."
+---
+
 # Replay in CI and the release gate
 
 This page shows how a pipeline tests a workflow file from git against the golden sets on your deployment, fails the build on a regression, uploads a JUnit report and, when the workflow has a release gate, publishes the version that passed. It also describes the golden-set file you can keep in git or move between deployments.

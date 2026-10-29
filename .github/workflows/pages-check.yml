@@ -2,7 +2,9 @@ name: Pages site check
 
 # Builds the lsquarem.com site the way the Pages workflow does (landing from
 # `docs/`, the VitePress docs at /docs/, the live demo at /demo/), assembles
-# _site/ and checks it in a browser with scripts/check-pages-site.mjs: the hero
+# _site/ and checks it with scripts/check-pages-site.mjs: robots.txt, the sitemap,
+# title, description and canonical on every indexable page, noindex on the demo
+# and the landing's JSON-LD; then, in a browser, the hero
 # reaches a loading demo, the nav demo button shows at 360 and 1440 px, every
 # internal link answers 200, nothing is requested off the site's origin, and
 # no console errors. It publishes nothing; deploys stay in pages.yml.
@@ -14,6 +16,9 @@ on:
       - "apps/docs/**"
       - "scripts/assemble-pages-site.mjs"
       - "scripts/check-pages-site.mjs"
+      - "scripts/pages-seo-checks.mjs"
+      # The demo's head (title, noindex) is set by its Vite config.
+      - "apps/web/vite.config.ts"
       - ".github/workflows/pages.yml"
       - ".github/workflows/pages-check.yml"
 

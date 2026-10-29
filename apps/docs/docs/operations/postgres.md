@@ -1,3 +1,7 @@
+---
+description: "Run L2M on Postgres instead of the default SQLite: when to choose it, connection settings, copying data over from SQLite, backups and running more than one instance."
+---
+
 # Postgres
 
 L2M runs on **SQLite by default, with nothing to configure**: the API keeps its data in `apps/api/data/orchestrator.db`

@@ -1,3 +1,7 @@
+---
+description: "Reference for the 5 nodes in the L2M RAG category, with every config field and default. Retrieval-Augmented Generation: embedders, vector stores, document loaders, retrievers."
+---
+
 <!--
   Generated from packages/shared/src/definitions.ts.
   DO NOT EDIT BY HAND — run `pnpm --filter @ai-orchestrator/docs gen:nodes`

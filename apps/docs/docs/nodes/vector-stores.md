@@ -1,3 +1,7 @@
+---
+description: "L2M vector store nodes for Qdrant and Azure AI Search: supported actions, configuration and how they plug into RAG Retrieve."
+---
+
 # Vector Store Nodes
 
 Implemented vector-store nodes:

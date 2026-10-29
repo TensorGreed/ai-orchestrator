@@ -1,3 +1,7 @@
+---
+description: "The L2M connector SDK: what a connector adapter implements (config and auth schemas, testConnection, fetchData), the built-in connectors, and how to add a new one."
+---
+
 # Connector SDK
 
 Connectors are adapter-based and used by connector nodes and RAG workflows.

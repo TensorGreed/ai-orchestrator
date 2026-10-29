@@ -1,3 +1,7 @@
+---
+description: "Export any finished L2M run as an audit bundle with an Ed25519-signed run manifest, and verify offline that nothing changed after signing, with no hosted service."
+---
+
 # Audit bundles and signed run manifests
 
 Every finished run can be exported as an **audit bundle**: a zip holding a signed **run manifest**, the run's node inputs and outputs, its trace and logs, and the files it produced. Anyone with the deployment's public key can check, offline, that nothing in the bundle was changed after L2M signed it. The public key has to come from the deployment through a channel you trust: the key embedded in a bundle proves nothing about who signed it.

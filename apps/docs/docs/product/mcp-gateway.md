@@ -1,3 +1,7 @@
+---
+description: "L2M as an MCP server: serve workflows and registered tools to other MCP clients through toolsets with per-client tokens, under the same tool policy and telemetry."
+---
+
 # MCP gateway
 
 L2M is an MCP server as well as an MCP client. Any MCP client, such as an IDE agent, a desktop assistant, a command-line agent or another L2M instance, can connect to L2M and call two kinds of tools:

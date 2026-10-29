@@ -1,3 +1,7 @@
+---
+description: "MCP tool policy in L2M: allow and deny rules by project, role, server and tool, read-only versus write classification, and a per-workflow no-write-tools switch."
+---
+
 # MCP tool policy
 
 Tool policy decides which MCP tools agents and MCP Tool nodes may use. It has three parts:

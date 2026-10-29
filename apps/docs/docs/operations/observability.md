@@ -1,3 +1,7 @@
+---
+description: "Observability for self-hosted L2M: structured request logs with trace IDs, Prometheus metrics, OpenTelemetry traces and metrics over OTLP, and SLO budgets, all opt-in."
+---
+
 # Observability
 
 L2M ships first-class observability so you can run it in production with confidence: structured request logs with trace correlation, Prometheus metrics, OTLP traces, OTLP metrics, and SLO budgets — all opt-in via env vars.
