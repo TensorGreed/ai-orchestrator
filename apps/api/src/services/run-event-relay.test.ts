@@ -134,6 +134,31 @@ describe("decodeRunEvent", () => {
     expect((await decodeRunEvent({ t: "mcp_elicitation", ref: true, phase: "created", elicitationId: "e1" }, readers))?.payload).toEqual({ phase: "created", elicitation: { id: "e1" } });
   });
 
+  it("round-trips a failing node's node_complete to exactly the inline event, and trims only an oversized remediation", async () => {
+    const inline = {
+      nodeId: "n1",
+      nodeType: "llm",
+      status: "error",
+      completedAt: "c",
+      durationMs: 4,
+      input: { q: 1 },
+      output: { a: 2 },
+      error: "bad",
+      errorCategory: "auth",
+      errorRemediation: "Check the API key.",
+      retryable: false
+    };
+    const encoded = encodeRunEvent("node_complete", inline);
+    expect(encoded).not.toHaveProperty("input");
+    expect(encoded).not.toHaveProperty("error");
+    expect(await decodeRunEvent(JSON.parse(JSON.stringify(encoded)) as RunBusEvent, readers)).toEqual({ name: "node_complete", payload: inline });
+
+    const huge = encodeRunEvent("node_complete", { ...inline, errorRemediation: "é".repeat(20_000) }, 2_000);
+    expect(Buffer.byteLength(JSON.stringify(huge))).toBeLessThanOrEqual(2_000);
+    expect(String(huge.errorRemediation).length).toBeGreaterThan(100);
+    expect(huge).toMatchObject({ errorCategory: "auth", retryable: false, hasError: true });
+  });
+
   it("passes an inline event through without the bus fields and ignores unknown types", async () => {
     expect(await decodeRunEvent({ t: "llm_delta", v: 1, from: "a", nodeId: "n1", delta: "x", index: 0 } as RunBusEvent, readers)).toEqual({
       name: "llm_delta",

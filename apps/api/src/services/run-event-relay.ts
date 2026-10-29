@@ -6,7 +6,8 @@
  *   - node_start, node_progress, node_activity and mcp_elicitation as they are while the JSON fits the bus
  *     (RUN_EVENT_INLINE_BYTES); a larger one goes as a reference (`ref: true`) the receiver fills from the run's
  *     persisted progress;
- *   - node_complete always by reference (its input and output are in the progress record, written before the event);
+ *   - node_complete always by reference: its input, output and error are in the progress record (written before the
+ *     event); its other fields (status, errorCategory, errorRemediation, retryable, ...) travel with it;
  *   - llm_delta coalesced per node every RUN_EVENT_COALESCE_MS (about 20 messages a second per streaming node), and
  *     flushed before any other event so the order holds;
  *   - a final `done` after the run's history (and its result on the queue row) is stored.
@@ -42,16 +43,18 @@ function asRecord(value: unknown): Record<string, unknown> {
 export function encodeRunEvent(name: RunEventName, payload: Record<string, unknown>, maxBytes = RUN_EVENT_INLINE_BYTES): RunBusEvent {
   const nodeId = typeof payload.nodeId === "string" ? payload.nodeId : undefined;
   if (name === "node_complete") {
-    return {
-      t: name,
-      ref: true,
-      nodeId,
-      nodeType: payload.nodeType,
-      status: payload.status,
-      completedAt: payload.completedAt,
-      durationMs: payload.durationMs,
-      hasError: payload.error !== undefined
-    };
+    // Every field the inline event has (errorCategory, errorRemediation, retryable, ...) except input, output and
+    // error, which the receiver reads from the progress entry.
+    const { input: _input, output: _output, error, ...meta } = payload;
+    const event: RunBusEvent = { ...meta, t: name, ref: true, nodeId, hasError: error !== undefined };
+    // Only a remediation text far beyond the usual hint can overflow: keep the start that fits.
+    while (typeof event.errorRemediation === "string" && event.errorRemediation.length > 0 && byteLength(event) > maxBytes) {
+      const text = event.errorRemediation;
+      const bytesPerChar = Math.max(1, byteLength(text) / text.length);
+      const cut = Math.max(16, Math.ceil((byteLength(event) - maxBytes) / bytesPerChar));
+      event.errorRemediation = text.slice(0, Math.max(0, text.length - cut));
+    }
+    return event;
   }
   const event: RunBusEvent = { ...payload, t: name };
   if (byteLength(event) <= maxBytes) return event;
@@ -268,17 +271,19 @@ export async function decodeRunEvent(
   }
   const entry = nodeEntry(await readers.readRun(), rest.nodeId);
   if (name === "node_complete") {
+    const { hasError, nodeId, nodeType, status, completedAt, durationMs, ...meta } = rest;
     return {
       name,
       payload: {
-        nodeId: rest.nodeId,
-        nodeType: rest.nodeType,
-        status: rest.status,
-        completedAt: rest.completedAt,
-        durationMs: rest.durationMs,
+        nodeId,
+        nodeType,
+        status,
+        completedAt,
+        durationMs,
         input: entry?.input,
         output: entry?.output,
-        ...(rest.hasError && entry?.error !== undefined ? { error: entry.error } : {})
+        ...(hasError && entry?.error !== undefined ? { error: entry.error } : {}),
+        ...meta
       }
     };
   }

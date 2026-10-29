@@ -333,6 +333,24 @@ run("queue dispatch across replicas on one Postgres database", () => {
     expect((await api.app.inject({ method: "GET", url: "/api/cluster", headers: { cookie: admin } })).json()).toMatchObject({ executionDispatch: "queue" });
   }, 120_000);
 
+  it("a failing node's node_complete has the inline event's shape when relayed: error, category, remediation, retryable", async () => {
+    const { worker, api, inline, builder } = await cluster();
+    // Nothing listens on port 1: the call fails at once with a classified network error.
+    await save(api, builder, chain("wf-fail", [node("input", "text_input", { text: "hi" }), node("call", "http_request", { method: "GET", urlTemplate: "http://127.0.0.1:1/x" }), node("out", "output", { responseTemplate: "never" })]));
+    const streamed = await api.app.inject({ method: "POST", url: "/api/workflows/wf-fail/execute/stream", headers: { cookie: builder }, payload: {} });
+    const inlineStream = await inline.app.inject({ method: "POST", url: "/api/workflows/wf-fail/execute/stream", headers: { cookie: builder }, payload: {} });
+    const failed = (body: string) => sseEvents(body).find((entry) => entry.event === "node_complete" && entry.data.nodeId === "call")!.data;
+    const relayed = failed(streamed.body);
+    const direct = failed(inlineStream.body);
+    expect(worker.ran).toContain(String(sseEvents(streamed.body)[0]!.data.executionId));
+    expect(direct).toMatchObject({ status: "error" });
+    expect(typeof direct.error).toBe("string");
+    expect(direct).toHaveProperty("errorCategory");
+    expect(direct).toHaveProperty("errorRemediation");
+    expect(Object.keys(relayed).sort()).toEqual(Object.keys(direct).sort());
+    expect(stable(relayed)).toEqual(stable(direct));
+  }, 60_000);
+
   it("a run whose NOTIFYs are all lost still ends, from the database", async () => {
     const { worker, api, builder } = await cluster({ dropRunEvents: true });
     await save(api, builder, quick("wf-quiet"));
