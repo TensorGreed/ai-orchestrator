@@ -164,6 +164,7 @@ import { clusterCancelReason, REMOTE_CANCEL_REASON, startClusterSignals, type Cl
 import { DEAD_EXECUTOR_RUN_ERROR, InstanceRegistry, RunOwnerTracker, SelfFencedAbortError, type ClusterWarning } from "./services/instance-registry.js";
 import { ADVISORY_LOCK_CLASS_AUDIT_EXPORT, ADVISORY_LOCK_CLASS_GIT_SYNC, ADVISORY_LOCK_CLASS_MCP_OAUTH_REFRESH } from "./db/postgres/cluster.js";
 import { DbChallengeStore, MemoryChallengeStore, type ChallengeStore } from "./services/challenge-store.js";
+import { createSharedRateLimitStore, SHARED_RATE_LIMIT_BUCKET, type SharedRateLimitBucket } from "./services/shared-rate-limit-store.js";
 import { MIGRATIONS } from "./db/migrations.js";
 import { MetricsService } from "./services/metrics-service";
 import { TracingService, parseKeyValueList, parseTraceparent } from "./services/tracing-service";
@@ -1402,6 +1403,11 @@ function safeUserRole(role: string): UserRole {
 /** Phase 13.2 — cookie that carries an SSO login's TOTP challenge to `POST /api/auth/login/mfa` (HttpOnly). */
 const SSO_MFA_CHALLENGE_COOKIE = "l2m_sso_mfa";
 const SSO_MFA_CHALLENGE_COOKIE_PATH = "/api/auth/login/mfa";
+
+/** Phase 13.1 — how long /health keeps warning after a request with X-Forwarded-For arrived while TRUST_PROXY is off. */
+const FORWARDED_FOR_WARNING_MS = 15 * 60 * 1000;
+const FORWARDED_FOR_HEALTH_TEXT =
+  "Requests arrive with X-Forwarded-For but TRUST_PROXY is off, so every client behind the proxy shares one rate-limit bucket. Set TRUST_PROXY to the proxy's address; see the cluster operations docs.";
 
 /** Phase 13.1 — how often the leader re-reads schedules and triggers when several instances share the database. */
 export const SCHEDULE_SYNC_INTERVAL_MS = 15_000;
@@ -5237,6 +5243,15 @@ export async function createApp(
     });
   }
 
+  // Phase 13.1 — cluster mode with TRUST_PROXY off: a request carrying X-Forwarded-For came through a proxy, so every
+  // client behind it shares the proxy's address and rate-limit buckets. /health warns while that has been seen lately.
+  let forwardedForSeenAt = 0;
+  if (clusterMode && parseTrustProxy(config.TRUST_PROXY) === false) {
+    app.addHook("onRequest", async (request) => {
+      if (request.headers["x-forwarded-for"] !== undefined) forwardedForSeenAt = Date.now();
+    });
+  }
+
   // Phase 4.1 — Rate limiting via @fastify/rate-limit
   // Global default: RATE_LIMIT_GLOBAL_MAX requests per RATE_LIMIT_GLOBAL_WINDOW_MS
   // per client address (see TRUST_PROXY), for unauthenticated and API-key traffic.
@@ -5280,21 +5295,24 @@ export async function createApp(
       if (existingConfig.rateLimit !== undefined) {
         return;
       }
-      // `allowList` answers false: a signed-in browser is still counted on these routes.
-      let perRouteLimit: false | { max: number; timeWindow: number; allowList: () => boolean };
+      // `allowList` answers false: a signed-in browser is still counted on these routes. Phase 13.1 — in cluster mode
+      // these buckets are counted in the database, so the limit holds across instances (SharedRateLimitStore).
+      let perRouteLimit: false | { max: number; timeWindow: number; allowList: () => boolean; [SHARED_RATE_LIMIT_BUCKET]?: SharedRateLimitBucket };
       if (isProbe) {
         perRouteLimit = false;
       } else if (matchesAuth) {
         perRouteLimit = {
           max: config.RATE_LIMIT_AUTH_MAX,
           timeWindow: config.RATE_LIMIT_AUTH_WINDOW_MS,
-          allowList: () => false
+          allowList: () => false,
+          ...(clusterMode ? { [SHARED_RATE_LIMIT_BUCKET]: "auth" as const } : {})
         };
       } else {
         perRouteLimit = {
           max: config.RATE_LIMIT_WEBHOOK_MAX,
           timeWindow: config.RATE_LIMIT_WEBHOOK_WINDOW_MS,
-          allowList: () => false
+          allowList: () => false,
+          ...(clusterMode ? { [SHARED_RATE_LIMIT_BUCKET]: "webhook" as const } : {})
         };
       }
       routeOptions.config = {
@@ -5307,6 +5325,16 @@ export async function createApp(
     // loaded only after every route on the root app existed, and none of them was limited.
     await app.register(rateLimit, {
       global: true,
+      // Phase 13.1 — cluster mode: the auth and webhook buckets above are shared through the database; the global
+      // limit stays in each instance's memory (per replica).
+      ...(clusterMode
+        ? {
+            store: createSharedRateLimitStore({
+              store,
+              logger: { warn: (message, fields) => app.log.warn(fields ?? {}, message) }
+            }) as unknown as NonNullable<Parameters<typeof rateLimit>[1]>["store"]
+          }
+        : {}),
       max: config.RATE_LIMIT_GLOBAL_MAX,
       timeWindow: config.RATE_LIMIT_GLOBAL_WINDOW_MS,
       // Global limit only: a request with a live session cookie and no API key or bearer token is not counted.
@@ -5401,7 +5429,10 @@ export async function createApp(
     // a gauge in metrics, never a reason to fail /ready (a Postgres restart would otherwise turn every replica 503).
     const healthWarnings = [
       ...clusterWarnings.map((warning) => ({ code: warning.code as string, message: CLUSTER_WARNING_HEALTH_TEXT[warning.code] })),
-      ...(clusterMode && !clusterBus.status().connected ? [{ code: "bus_disconnected", message: CLUSTER_BUS_DOWN_HEALTH_TEXT }] : [])
+      ...(clusterMode && !clusterBus.status().connected ? [{ code: "bus_disconnected", message: CLUSTER_BUS_DOWN_HEALTH_TEXT }] : []),
+      ...(forwardedForSeenAt > 0 && Date.now() - forwardedForSeenAt < FORWARDED_FOR_WARNING_MS
+        ? [{ code: "forwarded_for_untrusted", message: FORWARDED_FOR_HEALTH_TEXT }]
+        : [])
     ];
     return {
       ok: true,
