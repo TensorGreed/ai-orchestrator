@@ -33,8 +33,9 @@ name: Release Container Images
 #   staging  - a manual run on a branch: the full pipeline against GHCR (push, sign, attest, scan, verify) under
 #              the throwaway tag 0.0.0-ci-<sha>; no latest tag and no GitHub Release (the SBOMs stay as workflow
 #              artifacts). Signed with the branch's identity, so it never verifies as a release.
-#   check    - pull requests that touch the release files: builds every platform image into a registry on its
-#              runner, writes the SBOMs, scans and applies the gate; pushes nothing to GHCR and signs nothing.
+#   check    - pull requests that touch the release files or dependencies: builds every platform image into a
+#              registry on its runner, smoke-tests the API image, writes the SBOMs, scans and applies the gate;
+#              pushes nothing to GHCR and signs nothing.
 
 on:
   push:
@@ -50,6 +51,12 @@ on:
       - "apps/web/Dockerfile"
       - "apps/web/nginx.conf"
       - ".dockerignore"
+      # Dependency changes (Dependabot's included) change what the images contain.
+      - "pnpm-lock.yaml"
+      - "package.json"
+      - "apps/api/package.json"
+      - "apps/web/package.json"
+      - "packages/*/package.json"
 
 permissions: {}
 
@@ -229,6 +236,14 @@ jobs:
           mkdir -p dist/scan
           echo "$IMAGE@$DIGEST" > "dist/$ASSET-$ARCH.digest"
           echo "Pushed $IMAGE@$DIGEST (linux/$ARCH)"
+
+      # Starts the API image on SQLite and on a throwaway Postgres and checks health, sign-in, a sample workflow
+      # run, the code-node sandbox, the guard and community nodes; a broken image stops the release here.
+      - name: Smoke-test the API image
+        if: matrix.image.name == 'api'
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: scripts/release/smoke-api.sh "$IMAGE@$DIGEST"
 
       - name: Install Syft
         id: syft

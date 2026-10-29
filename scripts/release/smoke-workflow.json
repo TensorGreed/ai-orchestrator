@@ -1,0 +1,46 @@
+{
+  "id": "wf-image-smoke",
+  "name": "Image smoke test",
+  "schemaVersion": "1.0.0",
+  "workflowVersion": 1,
+  "nodes": [
+    { "id": "trigger", "type": "manual_trigger", "name": "Trigger", "position": { "x": 0, "y": 0 }, "config": {} },
+    {
+      "id": "code",
+      "type": "code_node",
+      "name": "Code",
+      "position": { "x": 200, "y": 0 },
+      "config": {
+        "timeout": 3000,
+        "code": "const s = String(input.user_prompt ?? ''); return { upper: s.toUpperCase(), length: s.length };"
+      }
+    },
+    {
+      "id": "guard",
+      "type": "guard",
+      "name": "Guard",
+      "position": { "x": 400, "y": 0 },
+      "config": { "profileId": "effective", "channel": "prompt", "inputField": "user_prompt" }
+    },
+    {
+      "id": "out_pass",
+      "type": "output",
+      "name": "Passed",
+      "position": { "x": 600, "y": -80 },
+      "config": { "responseTemplate": "passed: {{upper}}", "outputKey": "result" }
+    },
+    {
+      "id": "out_blocked",
+      "type": "output",
+      "name": "Blocked",
+      "position": { "x": 600, "y": 80 },
+      "config": { "responseTemplate": "blocked by guard", "outputKey": "result" }
+    }
+  ],
+  "edges": [
+    { "id": "e1", "source": "trigger", "target": "code" },
+    { "id": "e2", "source": "code", "target": "guard" },
+    { "id": "e3", "source": "guard", "sourceHandle": "pass", "target": "out_pass" },
+    { "id": "e4", "source": "guard", "sourceHandle": "blocked", "target": "out_blocked" }
+  ]
+}
