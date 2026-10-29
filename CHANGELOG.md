@@ -169,7 +169,7 @@ The initial GA release covers production hardening, OSS-growth foundations, and 
 
 - **API image build fixed** — the deps stage now copies `packages/guard-sdk` and `packages/community-sdk` manifests, without which `pnpm install` failed for `apps/api/Dockerfile` (`docker compose up --build` and release builds). Both Dockerfiles install from the committed `pnpm-lock.yaml` with `--frozen-lockfile`.
 - **Web image base moved to `nginx:1.30-alpine-slim`** (current stable line) from `nginx:1.27-alpine`, which is no longer rebuilt: its Alpine 3.21 packages carried fixable CRITICAL vulnerabilities (OpenSSL, curl, libxml2, brotli) that the new release gate blocks on. The slim variant runs the same nginx without the curl and freetype packages the image never used (and the brotli library they pulled in, which still had a fixable CRITICAL in `nginx:1.30-alpine`). The web image no longer installs GNU `wget`: the HEALTHCHECK uses BusyBox's built-in `wget`. `apps/web/nginx.conf` is unchanged.
-- **Base images pinned by digest** — `node:20-alpine` (API and web build stages, API runtime) and `nginx:1.30-alpine-slim` (web runtime) are pinned to their multi-arch index digests, so release builds are reproducible; Dependabot's docker ecosystem proposes digest and version updates.
+- **Base images pinned by digest** — `node:24-alpine` (API deps and runtime stages, web build stage) and `nginx:1.30-alpine-slim` (web runtime) are pinned to their multi-arch index digests, so release builds are reproducible; Dependabot's docker ecosystem proposes digest and version updates.
 
 ### Security
 

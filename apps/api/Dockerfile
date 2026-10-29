@@ -7,7 +7,7 @@
 #   no separate compile step ships JS to disk).
 # - build stage runs `pnpm --filter api build` (tsc --noEmit) so a TS error
 #   fails the image build instead of crashing the container at startup.
-# - runtime stage is a slim node:20-alpine that runs as a non-root user,
+# - runtime stage is a slim node:24-alpine that runs as a non-root user,
 #   includes a /health HEALTHCHECK, and only carries the api app + the
 #   workspace packages it actually depends on (drops apps/web, apps/docs,
 #   apps/vscode-l2m-agent that aren't needed at runtime).
@@ -25,7 +25,7 @@
 # builds use the same release), keeping release builds reproducible;
 # Dependabot (.github/dependabot.yml) proposes digest updates weekly.
 
-FROM node:20-alpine@sha256:fb4cd12c85ee03686f6af5362a0b0d56d50c58a04632e6c0fb8363f609372293 AS deps
+FROM node:24-alpine@sha256:8a32c8cf649a49915a66e81e7a609223c708d0adabf288ee3f4077d765542f85 AS deps
 WORKDIR /app
 RUN corepack enable \
     && apk add --no-cache python3 make g++ libc6-compat
@@ -48,7 +48,7 @@ COPY packages packages
 RUN pnpm --filter @ai-orchestrator/api build
 
 # ---------- runtime stage ----------
-FROM node:20-alpine@sha256:fb4cd12c85ee03686f6af5362a0b0d56d50c58a04632e6c0fb8363f609372293 AS runtime
+FROM node:24-alpine@sha256:8a32c8cf649a49915a66e81e7a609223c708d0adabf288ee3f4077d765542f85 AS runtime
 ENV NODE_ENV=production
 WORKDIR /app
 RUN apk add --no-cache wget tini \
