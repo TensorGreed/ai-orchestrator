@@ -61,6 +61,10 @@ count against the global bucket: a busy studio tab was measured at up to about
 They still count in the auth and webhook buckets. Set `RATE_LIMIT_ENABLED=false`
 to turn all three off.
 
+With several instances in cluster mode the auth and webhook buckets are shared
+through Postgres and the global bucket stays per instance: see
+[Rate limits in a cluster](../operations/cluster.md#rate-limits-in-a-cluster).
+
 The client address is the one that connected. Behind a reverse proxy (the
 `web` image's nginx, a load balancer) every client then shares the proxy's
 address, so set `TRUST_PROXY` to let the proxy's `X-Forwarded-For` name the

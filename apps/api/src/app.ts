@@ -162,7 +162,9 @@ import type { ClusterBus } from "./services/cluster-bus.js";
 import { LocalClusterBus } from "./services/cluster-bus-local.js";
 import { clusterCancelReason, REMOTE_CANCEL_REASON, startClusterSignals, type ClusterSignals } from "./services/cluster-signals.js";
 import { DEAD_EXECUTOR_RUN_ERROR, InstanceRegistry, RunOwnerTracker, SelfFencedAbortError, type ClusterWarning } from "./services/instance-registry.js";
-import { ADVISORY_LOCK_CLASS_AUDIT_EXPORT, ADVISORY_LOCK_CLASS_GIT_SYNC } from "./db/postgres/cluster.js";
+import { ADVISORY_LOCK_CLASS_AUDIT_EXPORT, ADVISORY_LOCK_CLASS_GIT_SYNC, ADVISORY_LOCK_CLASS_MCP_OAUTH_REFRESH } from "./db/postgres/cluster.js";
+import { DbChallengeStore, MemoryChallengeStore, type ChallengeStore } from "./services/challenge-store.js";
+import { createSharedRateLimitStore, SHARED_RATE_LIMIT_BUCKET, type SharedRateLimitBucket } from "./services/shared-rate-limit-store.js";
 import { MIGRATIONS } from "./db/migrations.js";
 import { MetricsService } from "./services/metrics-service";
 import { TracingService, parseKeyValueList, parseTraceparent } from "./services/tracing-service";
@@ -247,6 +249,8 @@ import { openApiSpec } from "./openapi.js";
 import { gatewayAllowedOrigins, isGatewayOriginAllowed, registerMcpGatewayRoutes } from "./mcp-gateway-routes.js";
 import { registerMcpOnboardingRoutes } from "./mcp-onboarding-routes.js";
 import {
+  createClusterRefreshLock,
+  MCP_OAUTH_MAX_PENDING,
   McpOAuthService,
   McpOAuthUserError,
   renderOAuthCallbackPage,
@@ -1400,6 +1404,16 @@ function safeUserRole(role: string): UserRole {
 const SSO_MFA_CHALLENGE_COOKIE = "l2m_sso_mfa";
 const SSO_MFA_CHALLENGE_COOKIE_PATH = "/api/auth/login/mfa";
 
+/** Phase 13.1 — why community-node install and uninstall are refused in cluster mode. */
+export const COMMUNITY_NODES_CLUSTER_REFUSAL =
+  "Community nodes cannot be installed or removed from the UI in cluster mode (HA_ENABLED=true on Postgres): the change would reach this instance only. " +
+  "Bake the packages into the image (install them into COMMUNITY_NODES_DIR at build time) or mount COMMUNITY_NODES_DIR from a shared volume on every instance, then restart the instances or call POST /api/community-nodes/reload on each.";
+
+/** Phase 13.1 — how long /health keeps warning after a request with X-Forwarded-For arrived while TRUST_PROXY is off. */
+const FORWARDED_FOR_WARNING_MS = 15 * 60 * 1000;
+const FORWARDED_FOR_HEALTH_TEXT =
+  "Requests arrive with X-Forwarded-For but TRUST_PROXY is off, so every client behind the proxy shares one rate-limit bucket. Set TRUST_PROXY to the proxy's address; see the cluster operations docs.";
+
 /** Phase 13.1 — how often the leader re-reads schedules and triggers when several instances share the database. */
 export const SCHEDULE_SYNC_INTERVAL_MS = 15_000;
 
@@ -1597,6 +1611,16 @@ export async function createApp(
     await mcpSandboxLauncher.shutdown();
   });
 
+  // Phase 13.1 — cluster mode: Postgres with HA_ENABLED=true (see the cluster bus below).
+  const clusterInstanceId = config.HA_INSTANCE_ID ?? `${os.hostname()}-${crypto.randomBytes(4).toString("hex")}`;
+  const clusterStore = store instanceof PostgresStore ? store : null;
+  const clusterMode = config.HA_ENABLED && clusterStore !== null;
+  // Phase 13.1 — flows that wait on a person between two requests (a sign-in's TOTP step, an MCP OAuth callback):
+  // in this process outside cluster mode (as before), in the database in cluster mode so any instance can finish them.
+  const challengeStore: ChallengeStore = clusterMode
+    ? new DbChallengeStore(store, secretService, { warn: (message, fields) => app.log.warn(fields ?? {}, message) })
+    : new MemoryChallengeStore({ maxPerKind: { mcp_oauth: MCP_OAUTH_MAX_PENDING } });
+
   // Phase 10.5 — OAuth connections for remote MCP servers. The http adapter
   // asks this service for access tokens; tokens stay in SecretService.
   const mcpOAuthService = new McpOAuthService(store, secretService, {
@@ -1604,6 +1628,15 @@ export async function createApp(
     redirectUri: resolveMcpOAuthRedirectUri(config),
     stateTtlMs: config.MCP_OAUTH_STATE_TTL_MS,
     refreshSkewMs: config.MCP_OAUTH_REFRESH_SKEW_MS,
+    challenges: challengeStore,
+    // Cluster mode: one refresh per connection across the instances (a rotating refresh token is spent once).
+    ...(clusterMode && clusterStore
+      ? {
+          refreshLock: createClusterRefreshLock(
+            async (key, waitMs, fn) => await clusterStore.withClusterLock(ADVISORY_LOCK_CLASS_MCP_OAUTH_REFRESH, `mcp-oauth:${key}`, { waitMs }, fn)
+          )
+        }
+      : {}),
     onAudit: async (event) => {
       await auditService.record({
         category: "system",
@@ -1702,10 +1735,8 @@ export async function createApp(
   // Phase 13.1 — cluster mode (Postgres with HA_ENABLED=true): the instances share a LISTEN/NOTIFY bus, and each
   // records which inline runs it executes so the leader can fail a dead instance's runs. Outside it (SQLite, or
   // Postgres with HA off) the in-process bus is used, nothing is published and no owner is recorded: one instance
-  // behaves exactly as before.
-  const clusterInstanceId = config.HA_INSTANCE_ID ?? `${os.hostname()}-${crypto.randomBytes(4).toString("hex")}`;
-  const clusterStore = store instanceof PostgresStore ? store : null;
-  const clusterMode = config.HA_ENABLED && clusterStore !== null;
+  // behaves exactly as before. (clusterInstanceId, clusterStore and clusterMode are set above, before the MCP OAuth
+  // service.)
   const clusterLogger = {
     warn: (message: string, fields?: Record<string, unknown>) => app.log.warn(fields ?? {}, message),
     info: (message: string, fields?: Record<string, unknown>) => app.log.info(fields ?? {}, message)
@@ -1824,6 +1855,11 @@ export async function createApp(
     });
   }
 
+  if (clusterMode) {
+    // Phase 13.1 — the shared flow state expires on the database clock; the session cleanup tick removes what expired.
+    authService.addCleanupTask(async () => await challengeStore.prune());
+    authService.addCleanupTask(async () => await store.pruneRateLimitBuckets());
+  }
   authService.startSessionCleanup();
   app.addHook("onClose", async () => {
     authService.stopSessionCleanup();
@@ -2172,7 +2208,8 @@ export async function createApp(
             releaseVersion,
             excluded: Boolean(input.mcpPlan || input.replay || input.resumeState || input.approvalDecision || input.startNodeId || input.runMode === "single_node" || input.providerRegistry),
             inputOrigin: input.captureInputOrigin,
-            captureSource: input.captureSource
+            captureSource: input.captureSource,
+            runTimeoutMs: normalizeExecutionTimeoutMs(input.executionTimeoutMs, undefined, config.WORKFLOW_EXECUTION_TIMEOUT_MS)
           })
         : null;
     let runPlan: McpCassetteRunPlan | undefined = input.mcpPlan;
@@ -4151,10 +4188,36 @@ export async function createApp(
     logger: {
       info: (msg, fields) => app.log.info(fields ?? {}, msg),
       warn: (msg, fields) => app.log.warn(fields ?? {}, msg)
-    }
+    },
+    // Phase 13.1 — cluster mode: answers that land on another instance reach the holder over the bus.
+    ...(clusterMode
+      ? {
+          cluster: {
+            instanceId: clusterInstanceId,
+            bus: clusterBus,
+            liveInstanceIds: async () =>
+              new Set(
+                (await store.listClusterInstances({ liveWithinMs: config.CLUSTER_INSTANCE_TIMEOUT_MS }))
+                  .filter((instance) => instance.live)
+                  .map((instance) => instance.id)
+              ),
+            sealer: secretService
+          }
+        }
+      : {})
   });
   await mcpElicitationService.expireStale();
+  // Phase 13.1 — cluster mode: requests whose holder stopped are expired within about one instance timeout.
+  const elicitationOrphanTimer = clusterMode
+    ? setInterval(() => {
+        mcpElicitationService.expireOrphaned().catch((error: unknown) => {
+          app.log.warn({ error: error instanceof Error ? error.message : String(error) }, "Could not expire elicitation requests of stopped instances");
+        });
+      }, config.CLUSTER_INSTANCE_TIMEOUT_MS)
+    : null;
+  elicitationOrphanTimer?.unref();
   app.addHook("onClose", async () => {
+    if (elicitationOrphanTimer) clearInterval(elicitationOrphanTimer);
     await mcpElicitationService.stop();
   });
   // Phase 10.6 — deployment-local MCP catalog. Every instance reads and
@@ -4676,28 +4739,30 @@ export async function createApp(
     requestAcrValues: ssoMfaSettings.mode !== "off" ? ssoMfaSettings.oidcAcr : []
   });
 
-  const pendingMfaChallenges = new Map<string, PendingMfaChallenge>();
   const MFA_CHALLENGE_TTL_MS = 5 * 60 * 1000;
 
   // An SSO login that ends in the TOTP step carries what it still has to do once the code passes (link the identity,
-  // apply group mappings, audit). It holds no token or assertion.
-  const issueMfaChallenge = (userId: string, sso?: PendingSsoLogin): string => {
-    for (const [key, entry] of pendingMfaChallenges.entries()) {
-      if (Date.now() - entry.createdAt > MFA_CHALLENGE_TTL_MS) {
-        pendingMfaChallenges.delete(key);
-      }
-    }
+  // apply group mappings, audit). It holds no token or assertion. Phase 13.1 — kept in the challenge store: in this
+  // process outside cluster mode, in the database (sealed, id hashed) in cluster mode.
+  const issueMfaChallenge = async (userId: string, sso?: PendingSsoLogin): Promise<string> => {
     const challengeId = `mfa_${crypto.randomUUID()}`;
-    pendingMfaChallenges.set(challengeId, { userId, createdAt: Date.now(), ...(sso ? { sso } : {}) });
+    await challengeStore.issue<PendingMfaChallenge>({
+      kind: sso ? "sso_mfa" : "mfa_login",
+      id: challengeId,
+      userId,
+      payload: { userId, createdAt: Date.now(), ...(sso ? { sso } : {}) },
+      ttlMs: MFA_CHALLENGE_TTL_MS
+    });
     return challengeId;
   };
 
-  const consumeMfaChallenge = (challengeId: string): PendingMfaChallenge | null => {
-    const entry = pendingMfaChallenges.get(challengeId);
-    if (!entry) return null;
-    pendingMfaChallenges.delete(challengeId);
-    if (Date.now() - entry.createdAt > MFA_CHALLENGE_TTL_MS) return null;
-    return entry;
+  // Single use: whichever kind it is, the challenge is gone after this, valid or not.
+  const consumeMfaChallenge = async (challengeId: string): Promise<PendingMfaChallenge | null> => {
+    const entry =
+      (await challengeStore.consume<PendingMfaChallenge>("mfa_login", challengeId)) ??
+      (await challengeStore.consume<PendingMfaChallenge>("sso_mfa", challengeId));
+    if (!entry || entry.expired) return null;
+    return entry.payload;
   };
 
   const getSessionIdFromRequest = (request: { cookies: Record<string, string | undefined> }) => {
@@ -5079,7 +5144,7 @@ export async function createApp(
       mfaEnforcedForRole: config.MFA_ENFORCE && projectedRole === "admin"
     });
     if (decision.kind === "local_totp" && target) {
-      const challengeId = issueMfaChallenge(target.id, {
+      const challengeId = await issueMfaChallenge(target.id, {
         method: input.method,
         provision: { ...input.provision, userId: target.id },
         firstLink
@@ -5208,6 +5273,15 @@ export async function createApp(
     });
   }
 
+  // Phase 13.1 — cluster mode with TRUST_PROXY off: a request carrying X-Forwarded-For came through a proxy, so every
+  // client behind it shares the proxy's address and rate-limit buckets. /health warns while that has been seen lately.
+  let forwardedForSeenAt = 0;
+  if (clusterMode && parseTrustProxy(config.TRUST_PROXY) === false) {
+    app.addHook("onRequest", async (request) => {
+      if (request.headers["x-forwarded-for"] !== undefined) forwardedForSeenAt = Date.now();
+    });
+  }
+
   // Phase 4.1 — Rate limiting via @fastify/rate-limit
   // Global default: RATE_LIMIT_GLOBAL_MAX requests per RATE_LIMIT_GLOBAL_WINDOW_MS
   // per client address (see TRUST_PROXY), for unauthenticated and API-key traffic.
@@ -5251,21 +5325,24 @@ export async function createApp(
       if (existingConfig.rateLimit !== undefined) {
         return;
       }
-      // `allowList` answers false: a signed-in browser is still counted on these routes.
-      let perRouteLimit: false | { max: number; timeWindow: number; allowList: () => boolean };
+      // `allowList` answers false: a signed-in browser is still counted on these routes. Phase 13.1 — in cluster mode
+      // these buckets are counted in the database, so the limit holds across instances (SharedRateLimitStore).
+      let perRouteLimit: false | { max: number; timeWindow: number; allowList: () => boolean; [SHARED_RATE_LIMIT_BUCKET]?: SharedRateLimitBucket };
       if (isProbe) {
         perRouteLimit = false;
       } else if (matchesAuth) {
         perRouteLimit = {
           max: config.RATE_LIMIT_AUTH_MAX,
           timeWindow: config.RATE_LIMIT_AUTH_WINDOW_MS,
-          allowList: () => false
+          allowList: () => false,
+          ...(clusterMode ? { [SHARED_RATE_LIMIT_BUCKET]: "auth" as const } : {})
         };
       } else {
         perRouteLimit = {
           max: config.RATE_LIMIT_WEBHOOK_MAX,
           timeWindow: config.RATE_LIMIT_WEBHOOK_WINDOW_MS,
-          allowList: () => false
+          allowList: () => false,
+          ...(clusterMode ? { [SHARED_RATE_LIMIT_BUCKET]: "webhook" as const } : {})
         };
       }
       routeOptions.config = {
@@ -5278,6 +5355,16 @@ export async function createApp(
     // loaded only after every route on the root app existed, and none of them was limited.
     await app.register(rateLimit, {
       global: true,
+      // Phase 13.1 — cluster mode: the auth and webhook buckets above are shared through the database; the global
+      // limit stays in each instance's memory (per replica).
+      ...(clusterMode
+        ? {
+            store: createSharedRateLimitStore({
+              store,
+              logger: { warn: (message, fields) => app.log.warn(fields ?? {}, message) }
+            }) as unknown as NonNullable<Parameters<typeof rateLimit>[1]>["store"]
+          }
+        : {}),
       max: config.RATE_LIMIT_GLOBAL_MAX,
       timeWindow: config.RATE_LIMIT_GLOBAL_WINDOW_MS,
       // Global limit only: a request with a live session cookie and no API key or bearer token is not counted.
@@ -5372,7 +5459,10 @@ export async function createApp(
     // a gauge in metrics, never a reason to fail /ready (a Postgres restart would otherwise turn every replica 503).
     const healthWarnings = [
       ...clusterWarnings.map((warning) => ({ code: warning.code as string, message: CLUSTER_WARNING_HEALTH_TEXT[warning.code] })),
-      ...(clusterMode && !clusterBus.status().connected ? [{ code: "bus_disconnected", message: CLUSTER_BUS_DOWN_HEALTH_TEXT }] : [])
+      ...(clusterMode && !clusterBus.status().connected ? [{ code: "bus_disconnected", message: CLUSTER_BUS_DOWN_HEALTH_TEXT }] : []),
+      ...(forwardedForSeenAt > 0 && Date.now() - forwardedForSeenAt < FORWARDED_FOR_WARNING_MS
+        ? [{ code: "forwarded_for_untrusted", message: FORWARDED_FOR_HEALTH_TEXT }]
+        : [])
     ];
     return {
       ok: true,
@@ -6288,6 +6378,15 @@ export async function createApp(
     return communityLoader;
   };
 
+  // Phase 13.1 — cluster mode: an install or uninstall from the UI would change one instance's COMMUNITY_NODES_DIR
+  // only, and runs on the others would fail. Packages are baked into the image or put on a shared volume instead.
+  const refuseCommunityChangeInCluster = (reply: FastifyReply): boolean => {
+    if (!clusterMode) return false;
+    reply.code(409);
+    reply.send({ error: COMMUNITY_NODES_CLUSTER_REFUSAL, code: "community_nodes_cluster_mode" });
+    return true;
+  };
+
   app.get("/api/community-nodes", async (request, reply) => {
     const user = await requireRole(request, reply, ["admin"]);
     if (!user) return;
@@ -6297,7 +6396,9 @@ export async function createApp(
       enabled: true,
       pluginsDir: path.resolve(config.COMMUNITY_NODES_DIR),
       allowlist: config.COMMUNITY_NODES_ALLOWLIST.split(",").map((s) => s.trim()).filter(Boolean),
-      packages: loader.list()
+      packages: loader.list(),
+      // Phase 13.1 — false in cluster mode (install and uninstall answer 409; see the cluster operations docs).
+      installAllowed: !clusterMode
     };
   });
 
@@ -6306,6 +6407,7 @@ export async function createApp(
     if (!user) return;
     const loader = requireCommunityLoader(reply);
     if (!loader) return;
+    if (refuseCommunityChangeInCluster(reply)) return;
     const spec = String(request.body?.packageSpec ?? "").trim();
     if (!spec) {
       reply.code(400);
@@ -6334,6 +6436,7 @@ export async function createApp(
     if (!user) return;
     const loader = requireCommunityLoader(reply);
     if (!loader) return;
+    if (refuseCommunityChangeInCluster(reply)) return;
     try {
       await loader.uninstall(request.params.packageName);
       return { ok: true };
@@ -6531,7 +6634,7 @@ export async function createApp(
         }
         // Revoke the freshly-created session and exchange it for a short-lived MFA challenge token.
         await store.revokeSession(result.sessionId);
-        const challengeId = issueMfaChallenge(result.user.id);
+        const challengeId = await issueMfaChallenge(result.user.id);
         await audit(request, result.user, {
           category: "auth",
           eventType: "user.login.mfa_challenge",
@@ -6585,7 +6688,7 @@ export async function createApp(
     }
     // A challenge is single-use, so the cookie that carried it goes too.
     if (cookieChallenge && challengeId === cookieChallenge) clearSsoMfaChallengeCookie(reply);
-    const challenge = consumeMfaChallenge(challengeId);
+    const challenge = await consumeMfaChallenge(challengeId);
     if (!challenge) {
       reply.code(401);
       return { error: "MFA challenge expired or invalid" };
@@ -12937,7 +13040,20 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     log: { warn: (data, message) => app.log.warn(data, message), info: (data, message) => app.log.info(data, message) },
     metric: (outcome) => metricsService.recordReplayCapture(outcome),
     redact: (text) => String(secretService.redact(text)),
-    sweepStale: () => sweepStaleCaptures()
+    sweepStale: () => sweepStaleCaptures(),
+    // Phase 13.1 — cluster mode: the daily limit holds across instances (reservations in the database).
+    ...(clusterMode
+      ? {
+          reservations: {
+            reserve: async (input: { workflowId: string; since: string; maxPerDay: number; ttlMs: number }) => {
+              const id = `cr_${crypto.randomUUID()}`;
+              return (await store.reserveReplayCapture({ id, ...input })) ? id : null;
+            },
+            release: async (id: string) => await store.releaseReplayCaptureReservation(id),
+            countLive: async (workflowId: string) => await store.countReplayCaptureReservations(workflowId)
+          }
+        }
+      : {})
   });
   if (captureAvailable) {
     replayCapture = captureService;
@@ -12955,7 +13071,15 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     const captureRetentionTimer = setInterval(async () => await pruneCaptures("interval"), config.EXECUTION_HISTORY_PRUNE_INTERVAL_MS);
     (captureRetentionTimer as { unref?: () => void }).unref?.();
     // Tickets of runs that never wrote their final history are given back on this timer too (the sweep is cheap).
-    const captureSweepTimer = setInterval(sweepStaleCaptures, CAPTURE_SWEEP_INTERVAL_MS);
+    const captureSweepTimer = setInterval(() => {
+      sweepStaleCaptures();
+      // Cluster mode: reservations whose instance stopped before giving them back lapse; remove the expired rows.
+      if (clusterMode) {
+        store.pruneReplayCaptureReservations().catch((error: unknown) => {
+          app.log.warn({ error: error instanceof Error ? error.message : String(error) }, "Failed to prune expired capture reservations");
+        });
+      }
+    }, CAPTURE_SWEEP_INTERVAL_MS);
     (captureSweepTimer as { unref?: () => void }).unref?.();
     app.addHook("onClose", async () => {
       clearInterval(captureRetentionTimer);

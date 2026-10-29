@@ -44,6 +44,7 @@ function verifyPassword(password: string, storedHash: string): boolean {
 
 export class AuthService {
   private cleanupTimer: NodeJS.Timeout | null = null;
+  private readonly cleanupTasks: Array<() => Promise<unknown>> = [];
 
   constructor(
     private readonly store: Store,
@@ -52,6 +53,14 @@ export class AuthService {
 
   async countUsers(): Promise<number> {
     return await this.store.countUsers();
+  }
+
+  /**
+   * Phase 13.1 — more best-effort cleanup for the session cleanup tick (cluster mode: expired pending challenges and
+   * rate-limit windows). A task that fails is ignored until the next tick.
+   */
+  addCleanupTask(task: () => Promise<unknown>): void {
+    this.cleanupTasks.push(task);
   }
 
   startSessionCleanup(intervalMs = 5 * 60 * 1000): void {
@@ -64,6 +73,9 @@ export class AuthService {
         }
       } catch {
         // best-effort background cleanup; ignore failures
+      }
+      for (const task of this.cleanupTasks) {
+        await task().catch(() => undefined);
       }
     };
     // promise-ok: tick catches its own errors (best-effort cleanup)

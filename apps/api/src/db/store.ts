@@ -174,6 +174,29 @@ export interface ClusterInstanceHeartbeat {
   startedAt: string;
 }
 
+/** Phase 13.1 — what a flow waiting on a person (an MFA step, an OAuth callback) leaves for any instance to finish. */
+export interface PendingChallengeInput {
+  /** sha256 (hex) of the opaque id the client holds; the raw id is never stored. */
+  idHash: string;
+  kind: string;
+  userId: string | null;
+  /** What the challenge belongs to, for bulk removal (an MCP OAuth authorization: the registry server id). */
+  scope: string | null;
+  /** The payload sealed with the master key (SecretService.sealValue). */
+  payloadSealed: string;
+  /** Lifetime from now, on the store's clock (the database's on Postgres). */
+  ttlMs: number;
+}
+
+/** Phase 13.1 — a pending challenge taken out of the store (it is gone afterwards, whatever the caller does with it). */
+export interface ConsumedPendingChallenge {
+  userId: string | null;
+  scope: string | null;
+  payloadSealed: string;
+  /** Its lifetime had already passed (the caller refuses it). */
+  expired: boolean;
+}
+
 /** Phase 13.1 — a registry row as listed. */
 export interface ClusterInstanceRecord extends ClusterInstanceHeartbeat {
   heartbeatAt: string;
@@ -1814,6 +1837,39 @@ export interface Store {
    * once when an instance with a fixed HA_INSTANCE_ID starts: rows under its id belong to the process it replaces.
    */
   failRunsOwnedBy(input: { instanceId: string; error: string }): Promise<Array<{ id: string; workflowId: string; instanceId: string }>>;
+
+  // ---- Phase 13.1 shared auth and per-user flow state. Used in cluster mode only (Postgres with HA_ENABLED=true);
+  // ---- outside it the app keeps in-memory state. The methods work on SQLite too (contract tests run on both stores).
+
+  /** Stores a pending challenge; throws when one is already stored under its id hash (it is never replaced). */
+  createPendingChallenge(input: PendingChallengeInput): Promise<void>;
+  /**
+   * Takes a challenge out of the store: one atomic delete, so across every instance at most one caller gets it. Null
+   * when there is none of that kind under the hash (never issued, already used, or pruned).
+   */
+  consumePendingChallenge(input: { idHash: string; kind: string }): Promise<ConsumedPendingChallenge | null>;
+  /** Removes the challenges of `kind` under `scope` held for `userId` (null: those held for no user). Returns how many. */
+  deletePendingChallenges(input: { kind: string; scope: string; userId: string | null }): Promise<number>;
+  /** Removes expired challenges. Returns how many. */
+  prunePendingChallenges(): Promise<number>;
+  /**
+   * Counts one hit in the fixed window of `key`, in one atomic statement: a key whose window (`windowMs`) has passed
+   * starts a new one at 1. Returns the count in the current window and the milliseconds left in it.
+   */
+  hitRateLimitBucket(input: { key: string; windowMs: number }): Promise<{ count: number; ttlMs: number }>;
+  /** Removes buckets whose window has passed. Returns how many. */
+  pruneRateLimitBuckets(): Promise<number>;
+  /**
+   * Reserves one of a workflow's daily replay-capture slots, serialized per workflow: succeeds (and records reservation
+   * `id`, alive for `ttlMs`) only while the captures since `since` plus the live reservations are below `maxPerDay`.
+   */
+  reserveReplayCapture(input: { id: string; workflowId: string; since: string; maxPerDay: number; ttlMs: number }): Promise<boolean>;
+  /** Gives a reservation back (its capture was stored or dropped). Unknown ids are ignored. */
+  releaseReplayCaptureReservation(id: string): Promise<void>;
+  /** Live (unexpired) reservations of a workflow. */
+  countReplayCaptureReservations(workflowId: string): Promise<number>;
+  /** Removes expired reservations. Returns how many. */
+  pruneReplayCaptureReservations(): Promise<number>;
 
   // ---- Audit log, log streaming, audit export, signing keys and execution manifests
 

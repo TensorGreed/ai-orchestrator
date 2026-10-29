@@ -290,7 +290,8 @@ function mapMcpElicitation(row: Row): McpElicitationRecord {
     ...(row.answered_by ? { answeredBy: toStr(row.answered_by) } : {}),
     ...(row.reason ? { reason: toStr(row.reason) } : {}),
     createdBy: row.created_by ? toStr(row.created_by) : null,
-    triggerType: row.trigger_type ? toStr(row.trigger_type) : null
+    triggerType: row.trigger_type ? toStr(row.trigger_type) : null,
+    ...(row.holder_id ? { holderId: toStr(row.holder_id) } : {})
   };
 }
 
@@ -855,8 +856,8 @@ export async function createMcpElicitation(ctx: PgContext, ...[input]: Parameter
   const row = await ctx.queryOne<Row>(
     `INSERT INTO mcp_elicitations (
        id, execution_id, workflow_id, workflow_name, node_id, server_id, registry_server_id, server_name,
-       tool_name, message, schema_json, status, created_at, expires_at, created_by, trigger_type
-     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'pending', $12, $13, $14, $15)
+       tool_name, message, schema_json, status, created_at, expires_at, created_by, trigger_type, holder_id
+     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'pending', $12, $13, $14, $15, $16)
      RETURNING *`,
     [
       input.id,
@@ -873,7 +874,8 @@ export async function createMcpElicitation(ctx: PgContext, ...[input]: Parameter
       new Date().toISOString(),
       input.expiresAt,
       input.createdBy ?? null,
-      input.triggerType ?? null
+      input.triggerType ?? null,
+      input.holderId ?? null
     ]
   );
   return mapMcpElicitation(row!);

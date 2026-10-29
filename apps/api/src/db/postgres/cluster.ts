@@ -214,6 +214,12 @@ export async function failRunsOwnedBy(
  */
 export const ADVISORY_LOCK_CLASS_AUDIT_EXPORT = 0x4c3258;
 export const ADVISORY_LOCK_CLASS_GIT_SYNC = 0x4c3247;
+/**
+ * 0x4c3241 ("L2A")  MCP OAuth token refresh — key: hashtext(schema:server id[:user id]). Held while one connection's
+ *                   stored token is re-read and, if still due, refreshed, so two instances never spend one rotating
+ *                   refresh token twice.
+ */
+export const ADVISORY_LOCK_CLASS_MCP_OAUTH_REFRESH = 0x4c3241;
 
 export type AdvisoryLockOutcome<T> = { acquired: true; value: T } | { acquired: false };
 
