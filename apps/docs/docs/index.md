@@ -33,6 +33,7 @@ features:
 > **See it first:** the [live demo](https://lsquarem.com/demo/){target="_self"} is the real studio with recorded runs. It runs in your browser, with no sign-up.
 
 - [Build your first MCP agent in 5 min](/getting-started/build-your-first-mcp-agent) — fastest end-to-end path
+- [Guides](/guides/) — run an MCP gateway, govern MCP tools, test MCP servers and agents in CI, require approval for tool calls
 - [Pattern library](/patterns/) — 10 battle-tested topologies with runnable samples
 - [Sample projects (l2m-samples)](https://github.com/TensorGreed/l2m-samples) — full reference implementations: helpdesk agent, support triage, VS Code repo reviewer
 - [Why L2M?](/why) — the differentiators in detail

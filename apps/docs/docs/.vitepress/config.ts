@@ -81,6 +81,17 @@ export default defineConfig({
         ]
       },
       {
+        text: "Guides",
+        items: [
+          { text: "All guides", link: "/guides/" },
+          { text: "Run a self-hosted MCP gateway", link: "/guides/self-hosted-mcp-gateway" },
+          { text: "Govern MCP tools", link: "/guides/govern-mcp-tools" },
+          { text: "Test MCP servers in CI", link: "/guides/test-mcp-servers-in-ci" },
+          { text: "CI for AI agents", link: "/guides/ci-for-ai-agents" },
+          { text: "Human approval for agent tool calls", link: "/guides/human-approval-for-agent-tool-calls" }
+        ]
+      },
+      {
         text: "Patterns",
         items: [{ text: "Pattern library", link: "/patterns/" }]
       },
