@@ -12,5 +12,6 @@ export function setup() {
 }
 
 export function w2(session) {
-  enqueue(session, "wf-load-w2-agent", nextSeq(), { userPrompt: "Where is order 42, what is the weather in Lisbon, and what is 2 + 5?" });
+  const seq = nextSeq();
+  enqueue(session, "wf-load-w2-agent", seq, { userPrompt: `[run ${seq}] Where is order 42, what is the weather in Lisbon, and what is 2 + 5?` });
 }

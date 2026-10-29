@@ -150,8 +150,10 @@ runs against `execution_history`. Every request carries a run number and k6 prin
 reconcile compares sets of run numbers. It reports runs **lost** (accepted but not recorded), **unfinished** (still
 queued or running after the settle timeout), **failed** (recorded with an error), **duplicated** (recorded twice) and
 executions **over budget**: the mock model and tool servers count every call that really happened, and more calls than
-the accepted runs may make (four model calls and three tool calls per W2 run, one echo per W3 run) means a run executed
-twice, which one history row would hide. `run.sh load` and `chaos.sh` fail when a run is lost, unfinished, duplicated
+one run may make means a run executed twice, which one history row would hide. W2 prompts carry the run number and W3
+passes it as the echo tag, so the model and echo counters are checked per run: one doubled run fails the check even
+when other runs were dead-lettered. The tool server has no run number, so its calls are bounded in total (three per
+accepted W2 run). `run.sh load` and `chaos.sh` fail when a run is lost, unfinished, duplicated
 or over budget; `run.sh load` also fails on failed runs (`MAX_FAILED`, 0 by default).
 
 `chaos.sh` runs W2 and W1 together and, during the load, kills a worker with SIGKILL (and starts it again), restarts

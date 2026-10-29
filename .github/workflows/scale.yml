@@ -71,6 +71,7 @@ jobs:
           name: scale-results
           path: ${{ runner.temp }}/scale-results
           if-no-files-found: ignore
+          include-hidden-files: false
 
       - name: Tear down
         if: always()

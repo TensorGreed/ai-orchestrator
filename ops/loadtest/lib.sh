@@ -7,7 +7,7 @@
 #   K6_IMAGE           k6 container image (grafana/k6:0.54.0)
 #   SETTLE_TIMEOUT_S   how long to wait for queued runs to finish after the load stops (300)
 #   SCALE_ADMIN_EMAIL / SCALE_ADMIN_PASSWORD   the bootstrap admin of the stack
-#   SCALE_MASTER_KEY_BASE64   the stack's secret master key (random, kept in RESULTS_DIR/.master-key, when unset)
+#   SCALE_MASTER_KEY_BASE64   the stack's secret master key (random, kept in the private state dir, when unset)
 #   MAX_FAILED         runs that may end in an error before check_clean fails (0); "none" reports without gating
 #
 # Needs bash 3.2 or newer (macOS ships 3.2), docker, curl and jq.
@@ -24,14 +24,16 @@ RESULTS_DIR=${RESULTS_DIR:-$LOADTEST_DIR/results}
 SETTLE_TIMEOUT_S=${SETTLE_TIMEOUT_S:-300}
 ADMIN_EMAIL=${SCALE_ADMIN_EMAIL:-admin@example.com}
 ADMIN_PASSWORD=${SCALE_ADMIN_PASSWORD:-scale-harness-password}
-COOKIE_JAR="$RESULTS_DIR/.cookies"
-MASTER_KEY_FILE="$RESULTS_DIR/.master-key"
+# The master key and the session cookie live in a private directory outside RESULTS_DIR, which CI uploads.
+STATE_DIR=${SCALE_STATE_DIR:-${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/l2m-scale-state-$(id -u)}
+COOKIE_JAR="$STATE_DIR/cookies"
+MASTER_KEY_FILE="$STATE_DIR/master-key"
 
 # The stack's secret master key: SCALE_MASTER_KEY_BASE64 when set, else a random one kept for the life of the stack
 # (docker-compose.scale.yml refuses to start without it, so no usable key is committed).
 ensure_master_key() {
+  (umask 077 && mkdir -p "$STATE_DIR")
   if [[ -z "${SCALE_MASTER_KEY_BASE64:-}" ]]; then
-    mkdir -p "$RESULTS_DIR"
     if [[ ! -s "$MASTER_KEY_FILE" ]]; then
       (umask 077 && head -c 32 /dev/urandom | base64 | tr -d '\n' >"$MASTER_KEY_FILE")
     fi
@@ -276,19 +278,23 @@ collect() {
   psql_q "SELECT status, count(*) FROM ($(run_rows_sql "$run_id")) h GROUP BY status ORDER BY status" >"$out/run-status.txt"
 }
 
-# executions_over_budget OUT WORKLOAD ACCEPTED: how many of the mock counters exceed what ACCEPTED runs of the
-# workload may use. The history and queue rows are keyed by run number, so a run executed twice by two workers still
-# shows one row; the mocks count every model and tool call that really happened. Prints the number of exceeded
-# budgets, or "?" when the counters were not collected.
+# executions_over_budget OUT WORKLOAD ACCEPTED: how many runs (or totals) used more than their budget. The history and
+# queue rows are keyed by run number, so a run executed twice by two workers still shows one row; the mocks count what
+# really happened. W2 prompts carry "[run N]" and W3 passes the run number as the echo tag, so the mocks count per
+# run: a run with more model calls (tool calls + 1) or more echo hits than one execution allows is over budget,
+# whatever the other runs did. The MCP counters have no run number, so they are bounded in total. Prints the number
+# of exceeded budgets, or "?" when the counters were not collected.
 executions_over_budget() {
   local out=$1 workload=$2 accepted=$3 tool_calls=${LLM_TOOL_CALLS:-3}
   [[ -s "$out/mocks.json" ]] || { echo "?"; return 0; }
   case "$workload" in
     w2)
       jq -r --argjson n "$accepted" --argjson t "$tool_calls" \
-        '[(.mcp.initialize > $n), (.mcp.toolCalls > $t * $n), (.llm.completions > ($t + 1) * $n)] | map(select(.)) | length' "$out/mocks.json" || echo "?" ;;
+        '([(.llm.bySeq // {}) | to_entries[] | select(.value > $t + 1)] | length)
+         + ([(.mcp.initialize > $n), (.mcp.toolCalls > $t * $n), (.llm.completions > ($t + 1) * $n)] | map(select(.)) | length)' "$out/mocks.json" || echo "?" ;;
     w3 | w4)
-      jq -r --argjson n "$accepted" '[(.llm.echo > $n)] | map(select(.)) | length' "$out/mocks.json" || echo "?" ;;
+      jq -r --argjson n "$accepted" \
+        '([(.llm.echoByTag // {}) | to_entries[] | select(.value > 1)] | length) + (if .llm.echo > $n then 1 else 0 end)' "$out/mocks.json" || echo "?" ;;
     *) echo 0 ;;
   esac
 }
@@ -298,7 +304,14 @@ executions_over_budget() {
 reconcile() {
   local run_id=$1 out=$2 workload accepted rows seqs dups queue_seqs queue_dups dead interrupted lost extra unfinished failed budget
   workload=$(sed -n 's/^workload=//p' "$out/params.txt")
-  { grep -o 'msg="accepted [0-9]*"' "$out/k6.txt" 2>/dev/null || true; } | grep -o '[0-9]*' | LC_ALL=C sort -u >"$out/accepted-seqs.txt"
+  if [[ -f "$out/k6.txt" ]]; then
+    sed -n 's/.*msg="accepted \([0-9][0-9]*\)".*/\1/p' "$out/k6.txt" | LC_ALL=C sort -u >"$out/accepted-seqs.txt"
+  else
+    : >"$out/accepted-seqs.txt"
+  fi
+  if [[ ! -s "$out/accepted-seqs.txt" ]]; then
+    log "error: k6 accepted no runs (login failed, every request was rejected, or k6 crashed); see $out/k6.txt"
+  fi
   psql_q "SELECT DISTINCT seq FROM ($(run_rows_sql "$run_id")) h WHERE seq IS NOT NULL" | LC_ALL=C sort -u >"$out/history-seqs.txt"
   LC_ALL=C comm -23 "$out/accepted-seqs.txt" "$out/history-seqs.txt" >"$out/lost-seqs.txt"
   LC_ALL=C comm -13 "$out/accepted-seqs.txt" "$out/history-seqs.txt" >"$out/unacknowledged-seqs.txt"
@@ -389,6 +402,7 @@ check_clean() {
       problems+=" $field=$value"
     fi
   done
+  [[ "$(sed -n 's/^accepted=//p' "$out/reconcile.env")" == "0" ]] && problems+=" accepted=0 (k6 got no run accepted)"
   if [[ -n "$problems" ]]; then
     log "FAILED $(basename "$out"):$problems"
     return 1

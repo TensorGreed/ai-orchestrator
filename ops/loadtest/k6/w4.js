@@ -13,7 +13,7 @@ const STREAM_SEQ_OFFSET = 10000000;
 const streamedRuns = new Counter("streamed_runs_accepted");
 
 const scenarios = { enqueue: arrivalScenario("enqueueRun", STREAMED ? RATE * 0.8 : RATE) };
-if (STREAMED) scenarios.stream = arrivalScenario("streamRun", Math.max(1, RATE * 0.2));
+if (STREAMED) scenarios.stream = arrivalScenario("streamRun", RATE * 0.2);
 
 export const options = {
   scenarios,

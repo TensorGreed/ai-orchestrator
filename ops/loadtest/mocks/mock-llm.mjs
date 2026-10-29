@@ -31,7 +31,7 @@ const ANSWER_TOKENS = Math.max(1, intFromEnv("LLM_ANSWER_TOKENS", 20));
 const SKIP_TOOLS = new RegExp(process.env.LLM_SKIP_TOOLS || "^(agent_clarify|session_cache_)");
 const MAX_BODY_BYTES = 8 * 1024 * 1024;
 
-const stats = { completions: 0, streamed: 0, toolCallAnswers: 0, finalAnswers: 0, echo: 0, errors: 0 };
+const stats = { completions: 0, streamed: 0, toolCallAnswers: 0, finalAnswers: 0, echo: 0, errors: 0, bySeq: {}, echoByTag: {} };
 let callSeq = 0;
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -110,6 +110,13 @@ function usage(payload, completionTokens) {
   return { prompt_tokens: promptTokens, completion_tokens: completionTokens, total_tokens: promptTokens + completionTokens };
 }
 
+/** The run number a W2 prompt carries as "[run N]" (the first user message), or null. */
+function runSeq(payload) {
+  const first = (Array.isArray(payload.messages) ? payload.messages : []).find((message) => message?.role === "user");
+  const text = typeof first?.content === "string" ? first.content : JSON.stringify(first?.content ?? "");
+  return /\[run (\d+)\]/.exec(text)?.[1] ?? null;
+}
+
 async function chatCompletion(request, response) {
   let payload;
   try {
@@ -120,6 +127,8 @@ async function chatCompletion(request, response) {
     return;
   }
   stats.completions += 1;
+  const seq = runSeq(payload);
+  if (seq !== null) stats.bySeq[seq] = (stats.bySeq[seq] ?? 0) + 1;
   const model = typeof payload.model === "string" ? payload.model : "mock";
   const id = `chatcmpl-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
   const created = Math.floor(Date.now() / 1000);
@@ -184,6 +193,8 @@ const server = createServer(async (request, response) => {
     }
     if (url.pathname === "/echo") {
       stats.echo += 1;
+      const tag = url.searchParams.get("tag");
+      if (tag !== null) stats.echoByTag[tag] = (stats.echoByTag[tag] ?? 0) + 1;
       const delay = Math.min(60_000, Math.max(0, Number.parseInt(url.searchParams.get("delay_ms") ?? "0", 10) || 0));
       if (request.method !== "GET" && request.method !== "HEAD") await readBody(request);
       await sleep(delay);
@@ -195,7 +206,7 @@ const server = createServer(async (request, response) => {
       return;
     }
     if (url.pathname === "/stats/reset" && request.method === "POST") {
-      for (const key of Object.keys(stats)) stats[key] = 0;
+      for (const key of Object.keys(stats)) stats[key] = typeof stats[key] === "object" ? {} : 0;
       sendJson(response, 200, { ok: true });
       return;
     }
