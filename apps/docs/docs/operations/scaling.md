@@ -29,10 +29,10 @@ the queue or the leader puts them. Add workers for queued work, and API replicas
 
 Put the balancer's readiness check on `GET /ready` (it answers `503` while an instance drains on shutdown) and keep
 liveness on `GET /health`. Ordinary traffic needs no stickiness: sessions, runs, progress and secrets are in the
-database, and cancels reach the instance running a run over the cluster bus. In this release a few multi-step flows
-still keep their pending state in the replica that started them (the second step of an MFA sign-in, MCP OAuth
-callbacks and elicitation answers); if you use those, give the balancer cookie affinity, or expect a retry when the
-second step lands elsewhere.
+database, the second step of an MFA sign-in, MCP OAuth callbacks and elicitation answers are shared through it in
+cluster mode, and cancels reach the instance running a run over the cluster bus. Only MCP gateway sessions are kept
+per replica; if clients use the gateway, make the balancer learn the `Mcp-Session-Id` and route by it, with the
+snippets in [Cluster operations](./cluster.md#mcp-gateway-sessions).
 
 ## A worked compose example
 
@@ -130,7 +130,7 @@ Docker with Compose, `curl` and `jq`.
 ops/loadtest/run.sh up                      # build the image, start 2 API replicas + $WORKERS workers (2), seed
 ops/loadtest/run.sh load w1 10 60s          # W1 at 10 runs/s for 60 s
 ops/loadtest/run.sh load w2 4 60s           # W2 at 4 runs/s
-ops/loadtest/chaos.sh                       # faults under load, then 0 lost / 0 duplicate
+ops/loadtest/chaos.sh                       # faults under load, then 0 lost, 0 unfinished, 0 duplicate
 ops/loadtest/run.sh down                    # REMOVE_IMAGE=1 also removes the built image
 ```
 
@@ -146,13 +146,19 @@ Workloads:
 Each load run writes a folder under `ops/loadtest/results/` (or `RESULTS_DIR`): the k6 output and summary, Postgres
 connections and lock waits sampled every 2 seconds, container CPU and memory, every replica's queue and cluster
 metrics, queue wait (due to claimed) and end-to-end times from `execution_queue`, and a reconcile of k6's accepted
-runs against `execution_history`. Every request carries a run number, so the reconcile reports runs **lost** (accepted
-but never recorded) and **duplicated** (recorded twice); `run.sh load` and `chaos.sh` fail when either is not 0.
+runs against `execution_history`. Every request carries a run number and k6 prints the numbers it got accepted, so the
+reconcile compares sets of run numbers. It reports runs **lost** (accepted but not recorded), **unfinished** (still
+queued or running after the settle timeout), **failed** (recorded with an error), **duplicated** (recorded twice) and
+executions **over budget**: the mock model and tool servers count every call that really happened, and more calls than
+the accepted runs may make (four model calls and three tool calls per W2 run, one echo per W3 run) means a run executed
+twice, which one history row would hide. `run.sh load` and `chaos.sh` fail when a run is lost, unfinished, duplicated
+or over budget; `run.sh load` also fails on failed runs (`MAX_FAILED`, 0 by default).
 
 `chaos.sh` runs W2 and W1 together and, during the load, kills a worker with SIGKILL (and starts it again), restarts
 an API replica, and pauses the leading worker for 60 seconds. A run the worker-loss rules dead-lettered as
-`interrupted` is recorded, so it counts as neither lost nor duplicated; the report lists those separately, with how
-long after each fault the reclaimed jobs ran again.
+`interrupted` is recorded, so it counts as neither lost nor duplicated, but it still needs a retry: the report states
+how many runs were dead-lettered, lists them separately, and shows how long after each fault the reclaimed jobs were
+taken back. Whether a lost job is re-run or dead-lettered is the worker-loss policy's decision, not the harness's.
 
 The `Scale smoke` GitHub workflow runs the smoke loads and the chaos run on demand or when a pull request gets the
 `scale` label.
