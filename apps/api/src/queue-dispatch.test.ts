@@ -383,6 +383,42 @@ run("queue dispatch across replicas on one Postgres database", () => {
     expect(((record?.nodeResults ?? []) as Array<{ nodeId: string }>).map((entry) => entry.nodeId)).toContain("input");
   }, 60_000);
 
+  it("a result delivered before its worker marks the queue item completed is still dropped from the item", async () => {
+    const { worker, api, builder } = await cluster();
+    await save(api, builder, quick("wf-early-delivery"));
+    // The worker's completion write waits until the request has its answer: the release meets a `running` item.
+    let releaseCompletion: () => void = () => undefined;
+    const completionHeld = new Promise<void>((resolve) => (releaseCompletion = resolve));
+    let completionReached = false;
+    const complete = worker.store.markQueueItemCompleted.bind(worker.store);
+    worker.store.markQueueItemCompleted = async (...args) => {
+      completionReached = true;
+      await completionHeld;
+      return await complete(...args);
+    };
+    try {
+      const response = await api.app.inject({ method: "POST", url: "/api/workflows/wf-early-delivery/execute", headers: { cookie: builder }, payload: {} });
+      expect(response.statusCode, response.body).toBe(200);
+      const executionId = response.json<{ executionId: string; status: string }>().executionId;
+      expect(worker.ran).toEqual([executionId]);
+      await until(() => completionReached, "the worker to reach its completion write");
+      const row = async () =>
+        (await sql<{ status: string; result_json: string | null; payload_json: string }>(`SELECT status, result_json, payload_json FROM execution_queue WHERE id = $1`, [executionId]))[0]!;
+      const delivered = await row();
+      expect(delivered.status).toBe("running");
+      expect(delivered.result_json).toBeNull();
+      expect(JSON.parse(delivered.payload_json)).toEqual({ executionId });
+
+      releaseCompletion();
+      await until(async () => (await row()).status === "completed", "the worker to complete the item");
+      const completed = await row();
+      expect(completed.result_json).toBeNull();
+      expect(JSON.parse(completed.payload_json)).toEqual({ executionId });
+    } finally {
+      releaseCompletion();
+    }
+  }, 60_000);
+
   it("a run whose NOTIFYs are all lost still ends, from the database", async () => {
     const { worker, api, builder } = await cluster({ dropRunEvents: true });
     await save(api, builder, quick("wf-quiet"));

@@ -469,10 +469,18 @@ export async function saveQueueItemResult(ctx: PgContext, input: { id: string; c
   return (result.rowCount ?? 0) > 0;
 }
 
+/**
+ * Drops a delivered result and the run's spec from its queue item. A completed item, or one still `running` whose
+ * holder already stored its result: the worker stores the result (fenced on its claim) and announces it before the
+ * queue marks the item completed, so the waiting request usually releases it in between. A running item without a
+ * stored result is never touched.
+ */
 export async function releaseQueueItemResult(ctx: PgContext, id: string): Promise<void> {
   await ctx.pool.query(
     `UPDATE execution_queue SET result_json = NULL, payload_json = json_build_object('executionId', execution_id)::text
-      WHERE id = $1 AND status = 'completed' AND (result_json IS NOT NULL OR payload_json LIKE '%"dispatch"%')`,
+      WHERE id = $1
+        AND ((status = 'completed' AND (result_json IS NOT NULL OR payload_json LIKE '%"dispatch"%'))
+          OR (status = 'running' AND result_json IS NOT NULL))`,
     [id]
   );
 }

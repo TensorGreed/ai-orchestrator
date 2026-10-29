@@ -1715,8 +1715,10 @@ export interface Store {
   /** Phase 13.1 — queue dispatch: where an item stands (status, stored result, last error); null when there is none. */
   getQueueItemOutcome(id: string): Promise<QueueItemOutcome | null>;
   /**
-   * Phase 13.1 — queue dispatch: once a completed item's result was delivered, drops the stored result and the run's
-   * spec from the item (its payload keeps only the execution id). Nothing happens to an item that is not completed.
+   * Phase 13.1 — queue dispatch: once an item's result was delivered, drops the stored result and the run's spec from
+   * the item (its payload keeps only the execution id). It applies to a completed item, and to a running one whose
+   * holder already stored its result under its claim (the worker announces the result before the queue completes the
+   * item). A running item without a stored result, or a pending or dead one, is left as it is.
    */
   releaseQueueItemResult(id: string): Promise<void>;
   /**

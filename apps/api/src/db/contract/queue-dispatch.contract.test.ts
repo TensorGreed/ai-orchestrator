@@ -39,19 +39,30 @@ describeStoreContract("store contract: queue dispatch results", (ctx) => {
     expect(await store.getQueueItemOutcome("exec-3")).toEqual({ status: "dead", result: null, lastError: "could not run", attempts: 1 });
   });
 
-  it("drops a delivered result and the run's spec from a completed item only", async () => {
+  it("drops a delivered result and the run's spec from a completed item, or a running one that stored its result", async () => {
     const store = ctx.store();
     const spec = { v: 1, run: { executionId: "exec-4", directInput: { secretish: "raw body" } } };
     await store.enqueueExecution({ id: "exec-4", workflowId: "wf", payload: { executionId: "exec-4", dispatch: spec } });
     const [claim] = await store.claimQueueItems({ limit: 1, owner: "w1", pools: ["default"] });
-    expect(await store.saveQueueItemResult({ id: "exec-4", claimToken: claim!.claimToken, result: { status: "success" } })).toBe(true);
-    // Still running: nothing is dropped.
+    // Running without a stored result (the run is still going): nothing is dropped.
     await store.releaseQueueItemResult("exec-4");
-    expect((await store.getQueueItemOutcome("exec-4"))?.result).toEqual({ status: "success" });
+    expect(await store.getQueueItemOutcome("exec-4")).toMatchObject({ status: "running", result: null });
 
-    await store.markQueueItemCompleted("exec-4", { claimToken: claim!.claimToken });
+    // Delivered between the worker storing its result and the queue marking the item completed: dropped all the same,
+    // and the holder still completes it under its claim.
+    expect(await store.saveQueueItemResult({ id: "exec-4", claimToken: claim!.claimToken, result: { status: "success" } })).toBe(true);
     await store.releaseQueueItemResult("exec-4");
+    expect(await store.getQueueItemOutcome("exec-4")).toEqual({ status: "running", result: null, lastError: null, attempts: 0 });
+    expect(await store.markQueueItemCompleted("exec-4", { claimToken: claim!.claimToken })).toBe(true);
     expect(await store.getQueueItemOutcome("exec-4")).toEqual({ status: "completed", result: null, lastError: null, attempts: 0 });
+
+    // Delivered after the item completed.
+    await store.enqueueExecution({ id: "exec-5", workflowId: "wf", payload: { executionId: "exec-5", dispatch: spec } });
+    const [second] = await store.claimQueueItems({ limit: 1, owner: "w1", pools: ["default"] });
+    expect(await store.saveQueueItemResult({ id: "exec-5", claimToken: second!.claimToken, result: { status: "success" } })).toBe(true);
+    await store.markQueueItemCompleted("exec-5", { claimToken: second!.claimToken });
+    await store.releaseQueueItemResult("exec-5");
+    expect(await store.getQueueItemOutcome("exec-5")).toEqual({ status: "completed", result: null, lastError: null, attempts: 0 });
     await store.releaseQueueItemResult("missing");
   });
 

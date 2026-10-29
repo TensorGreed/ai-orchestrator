@@ -6051,11 +6051,14 @@ export class SqliteStore implements Store {
     return result.changes > 0;
   }
 
+  /** See the Postgres store: a completed item, or a running one whose holder already stored its result. */
   async releaseQueueItemResult(id: string): Promise<void> {
     const result = this.db
       .prepare(
         `UPDATE execution_queue SET result_json = NULL, payload_json = json_object('executionId', execution_id)
-          WHERE id = ? AND status = 'completed' AND (result_json IS NOT NULL OR payload_json LIKE '%"dispatch"%')`
+          WHERE id = ?
+            AND ((status = 'completed' AND (result_json IS NOT NULL OR payload_json LIKE '%"dispatch"%'))
+              OR (status = 'running' AND result_json IS NOT NULL))`
       )
       .run(id);
     if (result.changes > 0) this.persist();
