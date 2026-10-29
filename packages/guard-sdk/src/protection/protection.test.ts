@@ -58,7 +58,11 @@ describe("aes-gcm provider", () => {
     const wrongKey = createAesGcmProvider({ keys: staticKeyResolver({ a: keyB }) });
     await expect(wrongKey.reveal!(token, { dataClass: "credential" })).rejects.toThrow(/wrong key/);
     await expect(provider.reveal!(token, { dataClass: "email" })).rejects.toThrow(/wrong key/);
-    const tampered = token.slice(0, -2) + (token.endsWith("A") ? "BB" : "AA");
+    // Flip one byte of the decoded token: editing the base64 text's last characters can leave the bytes unchanged.
+    const prefix = token.slice(0, token.lastIndexOf(":") + 1);
+    const bytes = Buffer.from(token.slice(prefix.length), "base64url");
+    bytes[Math.floor(bytes.length / 2)] ^= 0x01;
+    const tampered = prefix + bytes.toString("base64url");
     await expect(provider.reveal!(tampered, { dataClass: "credential" })).rejects.toBeInstanceOf(GuardProtectionError);
     await expect(provider.reveal!("not-a-token", { dataClass: "credential" })).rejects.toThrow(/not an encrypted value/);
     await expect(createAesGcmProvider({ keys: staticKeyResolver({ a: randomBytes(16) }) }).protect("x", { dataClass: "email", keyId: "a" })).rejects.toThrow(/32 bytes/);

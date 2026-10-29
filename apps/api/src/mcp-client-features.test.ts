@@ -500,8 +500,16 @@ describe("elicitation", () => {
     expect(await waiting).toMatchObject({ action: "cancel", source: "timeout" });
     expect((await context.store.listMcpElicitations({ executionId: "exec_c" }))[0].status).toBe("expired");
 
+    // The row is visible in the store a moment before ask() holds it; release once the service has announced it.
+    const createdE = new Promise<void>((resolve) => {
+      const off = service.subscribe("exec_e", (event) => {
+        if (event.phase !== "created") return;
+        off();
+        resolve();
+      });
+    });
     const released = service.ask({ ...base, executionId: "exec_e" });
-    await waitFor(async () => ((await service.listPending({ executionId: "exec_e" })).length === 1 ? true : undefined));
+    await createdE;
     expect(await service.releaseExecution("exec_e", "The run ended.")).toBe(1);
     expect(await released).toMatchObject({ action: "cancel" });
 

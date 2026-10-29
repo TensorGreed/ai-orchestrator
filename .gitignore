@@ -6,6 +6,7 @@ coverage
 *.log
 *.tsbuildinfo
 apps/api/data
+**/apps/api/data/
 SprintPlan.md
 PRODUCTION_BEGINNER_ROADMAP.md
 apps/web/test-results
