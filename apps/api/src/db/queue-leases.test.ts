@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { ENTRY_NODE_TYPES, isEntryNodeType, nodeDefinitions } from "@ai-orchestrator/shared";
-import { decideLostJob, lostJobEffects, type LostJobInput } from "./queue-leases.js";
+import { decideLostJob, lostJobEffects, resumeEffectFreeNodeId, type LostJobInput } from "./queue-leases.js";
 
 const base: LostJobInput = { attempts: 1, maxAttempts: 3, countsAttempt: true, resume: false, history: null };
 const running = (nodeResults: unknown[]) => ({ status: "running", completedAt: null, nodeResultsJson: JSON.stringify(nodeResults) });
@@ -13,6 +13,21 @@ describe("entry node types", () => {
     for (const type of ["llm_call", "agent_orchestrator", "http_request", "mcp_tool", "code_node"]) expect(isEntryNodeType(type)).toBe(false);
     for (const type of ["redis_trigger", "postgres_trigger", "kafka_trigger", "google_sheets_trigger"]) expect(isEntryNodeType(type)).toBe(false);
     expect(ENTRY_NODE_TYPES.size).toBeLessThan(nodeDefinitions.filter((node) => node.category === "Input").length);
+  });
+});
+
+describe("resumeEffectFreeNodeId: the node a resume re-enters without a side effect", () => {
+  it("is the waiting node only for an Approval Gate's own hand-off", () => {
+    expect(resumeEffectFreeNodeId({ waitingNodeId: "gate", approvalHandoff: { kind: "gate" } })).toBe("gate");
+  });
+
+  it("is none for an agent re-run (its approved write), a paused sub-workflow, a route, or no hand-off", () => {
+    expect(resumeEffectFreeNodeId({ waitingNodeId: "agent", approvalHandoff: { kind: "rerun" } })).toBeUndefined();
+    expect(resumeEffectFreeNodeId({ waitingNodeId: "call", approvalHandoff: { kind: "sub_workflow" } })).toBeUndefined();
+    expect(resumeEffectFreeNodeId({ waitingNodeId: "guard", approvalHandoff: { kind: "route" } })).toBeUndefined();
+    expect(resumeEffectFreeNodeId({ waitingNodeId: "approval" })).toBeUndefined();
+    expect(resumeEffectFreeNodeId({ waitingNodeId: "approval", approvalHandoff: null })).toBeUndefined();
+    expect(resumeEffectFreeNodeId({ approvalHandoff: { kind: "gate" } })).toBeUndefined();
   });
 });
 

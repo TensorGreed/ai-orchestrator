@@ -6,7 +6,7 @@
 import { expect, it } from "vitest";
 import { describeStoreContract } from "../../test-support/test-store.js";
 import type { Store } from "../store.js";
-import { QueueClaimLostError, WORKER_LOST_ERROR, WORKER_LOST_INTERRUPTED_ERROR, WORKER_SHUTDOWN_INTERRUPTED_ERROR } from "../queue-leases.js";
+import { QueueClaimLostError, WORKER_LOST_ERROR, WORKER_LOST_INTERRUPTED_ERROR, WORKER_SHUTDOWN_INTERRUPTED_ERROR, resumeEffectFreeNodeId } from "../queue-leases.js";
 
 const past = (ms: number) => new Date(Date.now() - ms).toISOString();
 
@@ -364,6 +364,36 @@ describeStoreContract("store contract: leased queue claims", (ctx) => {
     // Approval recovery lists only runs in `resuming`: this one has one way forward, the dead-letter entry.
     expect(await store.getWorkflowExecutionState("run-s")).toBeNull();
     expect((await store.listDlqItems()).map((item) => [item.originalId, item.finalError])).toEqual([["run-s:req:1", WORKER_LOST_INTERRUPTED_ERROR]]);
+  });
+
+  it("a lost resume re-entering its agent (an approved write) or a paused sub-workflow is dead-lettered; one re-entering only its gate is re-queued", async () => {
+    const store = ctx.store();
+    const cases = [
+      { id: "run-agent", handoff: { kind: "rerun" }, decision: "interrupt" },
+      { id: "run-child", handoff: { kind: "sub_workflow" }, decision: "interrupt" },
+      { id: "run-gate", handoff: { kind: "gate" }, decision: "requeue" }
+    ] as const;
+    for (const entry of cases) {
+      await decidedPause(store, entry.id);
+      await store.enqueueExecution({ id: `${entry.id}:req:1`, workflowId: "wf", payload: resumePayload(entry.id), scheduledAt: past(1_000) });
+      const [claim] = await store.claimQueueItems({ limit: 1, owner: "w1", pools: ["default"] });
+      // As the worker's hooks do: the re-entered waiting node marks side effects unless the rule exempts it.
+      if (resumeEffectFreeNodeId({ waitingNodeId: "gate", approvalHandoff: entry.handoff }) !== "gate") {
+        expect(await store.markQueueEffectsStarted({ queueItemId: claim!.id, claimToken: claim!.claimToken })).toBe(true);
+      }
+    }
+    const reaped: Awaited<ReturnType<Store["reapExpiredQueueLeases"]>> = [];
+    await until(async () => {
+      reaped.push(...(await store.reapExpiredQueueLeases({ leaseMs: 1 })));
+      return reaped.length >= cases.length ? reaped : [];
+    }, "the reaps");
+    expect(reaped.map((outcome) => [outcome.id, outcome.decision]).sort()).toEqual(cases.map((entry) => [`${entry.id}:req:1`, entry.decision]).sort());
+    expect(await store.getWorkflowExecutionState("run-agent")).toBeNull();
+    expect(await store.getWorkflowExecutionState("run-child")).toBeNull();
+    expect(await store.getExecutionHistory("run-agent")).toMatchObject({ status: "error", error: WORKER_LOST_INTERRUPTED_ERROR });
+    expect((await store.getWorkflowExecutionState("run-gate"))?.status).toBe("resuming");
+    expect(await store.getExecutionHistory("run-gate")).toMatchObject({ status: "waiting_approval" });
+    expect((await store.listDlqItems()).map((item) => item.originalId).sort()).toEqual(["run-agent:req:1", "run-child:req:1"]);
   });
 
   it("a lost approval resume that only counted progress without the marker (a tracked claim) is re-queued: the marker decides", async () => {

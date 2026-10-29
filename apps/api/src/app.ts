@@ -118,7 +118,7 @@ import { SchedulerService } from "./services/scheduler-service";
 import { RunWriteChains } from "./services/run-write-chains.js";
 import { NonRetryableQueueError, QueueFullError, QueueProducer, QueueService, type QueueJobContext } from "./services/queue-service";
 import { AppLifecycle } from "./services/app-lifecycle.js";
-import { DEFAULT_QUEUE_POOL, QUEUE_POOL_PATTERN, QueueClaimLostError } from "./db/queue-leases.js";
+import { DEFAULT_QUEUE_POOL, QUEUE_POOL_PATTERN, QueueClaimLostError, resumeEffectFreeNodeId } from "./db/queue-leases.js";
 import { isConnectedEntrypoint, TriggerService } from "./services/trigger-service";
 import { ApiKeyService } from "./services/api-key-service";
 import { MfaService } from "./services/mfa-service";
@@ -4505,7 +4505,9 @@ export async function createApp(
   /**
    * Phase 13.1 — the hooks a queued run gets from its job: before each node starts, a leased claim checks its lease is
    * still confirmed (a stalled worker stops instead of running the node). `onNodeComplete` is added for resumes, and
-   * `resumedNodeId` (the decided gate a resume re-enters) does not count as a side effect.
+   * `resumedNodeId` (a decided Approval Gate a resume re-enters, which only passes the decision on) does not count as
+   * a side effect. Any other node a resume re-enters does (an agent re-run for its approved write, a paused
+   * sub-workflow): see `resumeEffectFreeNodeId`.
    */
   const queueJobHooks = (
     job: QueueJobContext,
@@ -4632,20 +4634,23 @@ export async function createApp(
           requestId: job.requestId
         };
         const queueFence = queueJob?.claimToken ? { queueItemId: queueJob.queueItemId, claimToken: queueJob.claimToken } : null;
+        // Only a decided Approval Gate is re-entered without effects; an agent's approved write or a paused
+        // sub-workflow re-entered here is a side effect, so the marker is written before that node runs.
+        const effectFreeNodeId = resumeEffectFreeNodeId(state);
         const hooks = queueJob
           ? queueJobHooks(queueJob, undefined, queueFence
               ? async (event) => {
-                  // The decided node itself is not progress: re-running it has no side effect. Nor is a node that ended
+                  // A decided Approval Gate is not progress: re-running it has no side effect. Nor is a node that ended
                   // after the queue stopped the run (drained or lease lost): like an ordinary run, whose progress writes
                   // are refused once it is stopped, nothing more is counted.
-                  if (event.nodeId === state.waitingNodeId || queueJob.signal.aborted) return;
+                  if (event.nodeId === effectFreeNodeId || queueJob.signal.aborted) return;
                   try {
                     if (!(await store.recordQueueJobProgress(queueFence))) queueJob.leaseLost("a resume progress write was refused");
                   } catch (error) {
                     app.log.warn({ executionId: job.executionId, error: error instanceof Error ? error.message : String(error) }, "Failed to record a queued resume's progress");
                   }
                 }
-              : undefined, state.waitingNodeId)
+              : undefined, effectFreeNodeId)
           : undefined;
         const result = await runWorkflowExecution({
           ...(hooks ? { hooks } : {}),

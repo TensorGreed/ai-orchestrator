@@ -103,7 +103,7 @@ export interface LostJobInput {
   history: { status: string; completedAt: unknown; nodeResultsJson: unknown } | null;
   /**
    * Whether the claim that was lost tracked side effects (its effects_token is its claim token), and if so whether a
-   * node other than a trigger/entry node (for a resume, other than the decided gate) had started under it. Untracked
+   * node other than a trigger/entry node (for a resume, other than a decided Approval Gate) had started under it. Untracked
    * claims (an instance without this) keep the earlier rule: interrupted once a node completed.
    */
   effects?: { tracked: boolean; started: boolean };
@@ -122,13 +122,24 @@ export function lostJobEffects(row: { claim_token?: unknown; effects_token?: unk
   return { tracked, started: tracked && Number(row.effects_started ?? 0) > 0 };
 }
 
+/**
+ * The node an approval resume may re-enter without marking side effects: only an Approval Gate node's own hand-off
+ * (`gate`), which does nothing but turn the decision into its output. Every other re-entered node is a side effect:
+ * an agent re-run for its approved tool call (`rerun`) makes the approved write, and a paused sub-workflow
+ * (`sub_workflow`) runs the rest of its child. A `route` hand-off, or none, starts after the waiting node.
+ */
+export function resumeEffectFreeNodeId(state: { waitingNodeId?: unknown; approvalHandoff?: { kind?: unknown } | null }): string | undefined {
+  if (state.approvalHandoff?.kind !== "gate") return undefined;
+  return typeof state.waitingNodeId === "string" ? state.waitingNodeId : undefined;
+}
+
 export function decideLostJob(input: LostJobInput): LostJobDecision {
   if (input.resume) {
     // The resume is over once its run's final write landed, or once the paused state left `resuming` (it paused again
     // at a later gate, finished, or was handed back to waiting): nothing runs it again.
     if (input.history && isFinalRunRecord(input.history)) return "finished";
     if (input.resumeStateStatus !== "resuming") return "finished";
-    // Like any run, lost or given back at shutdown: re-run only while no node other than the decided gate started
+    // Like any run, lost or given back at shutdown: re-run only while no node other than a decided Approval Gate started
     // under a tracked claim (an agent's tool calls happen before its node completes). An untracked claim (an instance
     // without the marker) keeps the earlier rule: nothing completed since the resume started.
     if (input.effects?.tracked) {
