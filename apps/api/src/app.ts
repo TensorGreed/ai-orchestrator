@@ -162,7 +162,8 @@ import type { ClusterBus } from "./services/cluster-bus.js";
 import { LocalClusterBus } from "./services/cluster-bus-local.js";
 import { clusterCancelReason, REMOTE_CANCEL_REASON, startClusterSignals, type ClusterSignals } from "./services/cluster-signals.js";
 import { DEAD_EXECUTOR_RUN_ERROR, InstanceRegistry, RunOwnerTracker, SelfFencedAbortError, type ClusterWarning } from "./services/instance-registry.js";
-import { ADVISORY_LOCK_CLASS_AUDIT_EXPORT, ADVISORY_LOCK_CLASS_GIT_SYNC } from "./db/postgres/cluster.js";
+import { ADVISORY_LOCK_CLASS_AUDIT_EXPORT, ADVISORY_LOCK_CLASS_GIT_SYNC, ADVISORY_LOCK_CLASS_MCP_OAUTH_REFRESH } from "./db/postgres/cluster.js";
+import { DbChallengeStore, MemoryChallengeStore, type ChallengeStore } from "./services/challenge-store.js";
 import { MIGRATIONS } from "./db/migrations.js";
 import { MetricsService } from "./services/metrics-service";
 import { TracingService, parseKeyValueList, parseTraceparent } from "./services/tracing-service";
@@ -247,6 +248,8 @@ import { openApiSpec } from "./openapi.js";
 import { gatewayAllowedOrigins, isGatewayOriginAllowed, registerMcpGatewayRoutes } from "./mcp-gateway-routes.js";
 import { registerMcpOnboardingRoutes } from "./mcp-onboarding-routes.js";
 import {
+  MCP_OAUTH_MAX_PENDING,
+  MCP_OAUTH_REFRESH_LOCK_WAIT_MS,
   McpOAuthService,
   McpOAuthUserError,
   renderOAuthCallbackPage,
@@ -1597,6 +1600,16 @@ export async function createApp(
     await mcpSandboxLauncher.shutdown();
   });
 
+  // Phase 13.1 — cluster mode: Postgres with HA_ENABLED=true (see the cluster bus below).
+  const clusterInstanceId = config.HA_INSTANCE_ID ?? `${os.hostname()}-${crypto.randomBytes(4).toString("hex")}`;
+  const clusterStore = store instanceof PostgresStore ? store : null;
+  const clusterMode = config.HA_ENABLED && clusterStore !== null;
+  // Phase 13.1 — flows that wait on a person between two requests (a sign-in's TOTP step, an MCP OAuth callback):
+  // in this process outside cluster mode (as before), in the database in cluster mode so any instance can finish them.
+  const challengeStore: ChallengeStore = clusterMode
+    ? new DbChallengeStore(store, secretService, { warn: (message, fields) => app.log.warn(fields ?? {}, message) })
+    : new MemoryChallengeStore({ maxPerKind: { mcp_oauth: MCP_OAUTH_MAX_PENDING } });
+
   // Phase 10.5 — OAuth connections for remote MCP servers. The http adapter
   // asks this service for access tokens; tokens stay in SecretService.
   const mcpOAuthService = new McpOAuthService(store, secretService, {
@@ -1604,6 +1617,17 @@ export async function createApp(
     redirectUri: resolveMcpOAuthRedirectUri(config),
     stateTtlMs: config.MCP_OAUTH_STATE_TTL_MS,
     refreshSkewMs: config.MCP_OAUTH_REFRESH_SKEW_MS,
+    challenges: challengeStore,
+    // Cluster mode: one refresh per connection across the instances (a rotating refresh token is spent once).
+    ...(clusterMode && clusterStore
+      ? {
+          refreshLock: async <T>(key: string, fn: () => Promise<T>): Promise<T> => {
+            const outcome = await clusterStore.withClusterLock(ADVISORY_LOCK_CLASS_MCP_OAUTH_REFRESH, `mcp-oauth:${key}`, { waitMs: MCP_OAUTH_REFRESH_LOCK_WAIT_MS }, fn);
+            if (!outcome.acquired) throw new Error("Another API instance is still refreshing this MCP server's OAuth token. Try again shortly.");
+            return outcome.value;
+          }
+        }
+      : {}),
     onAudit: async (event) => {
       await auditService.record({
         category: "system",
@@ -1702,10 +1726,8 @@ export async function createApp(
   // Phase 13.1 — cluster mode (Postgres with HA_ENABLED=true): the instances share a LISTEN/NOTIFY bus, and each
   // records which inline runs it executes so the leader can fail a dead instance's runs. Outside it (SQLite, or
   // Postgres with HA off) the in-process bus is used, nothing is published and no owner is recorded: one instance
-  // behaves exactly as before.
-  const clusterInstanceId = config.HA_INSTANCE_ID ?? `${os.hostname()}-${crypto.randomBytes(4).toString("hex")}`;
-  const clusterStore = store instanceof PostgresStore ? store : null;
-  const clusterMode = config.HA_ENABLED && clusterStore !== null;
+  // behaves exactly as before. (clusterInstanceId, clusterStore and clusterMode are set above, before the MCP OAuth
+  // service.)
   const clusterLogger = {
     warn: (message: string, fields?: Record<string, unknown>) => app.log.warn(fields ?? {}, message),
     info: (message: string, fields?: Record<string, unknown>) => app.log.info(fields ?? {}, message)
@@ -1824,6 +1846,11 @@ export async function createApp(
     });
   }
 
+  if (clusterMode) {
+    // Phase 13.1 — the shared flow state expires on the database clock; the session cleanup tick removes what expired.
+    authService.addCleanupTask(async () => await challengeStore.prune());
+    authService.addCleanupTask(async () => await store.pruneRateLimitBuckets());
+  }
   authService.startSessionCleanup();
   app.addHook("onClose", async () => {
     authService.stopSessionCleanup();
@@ -4676,28 +4703,30 @@ export async function createApp(
     requestAcrValues: ssoMfaSettings.mode !== "off" ? ssoMfaSettings.oidcAcr : []
   });
 
-  const pendingMfaChallenges = new Map<string, PendingMfaChallenge>();
   const MFA_CHALLENGE_TTL_MS = 5 * 60 * 1000;
 
   // An SSO login that ends in the TOTP step carries what it still has to do once the code passes (link the identity,
-  // apply group mappings, audit). It holds no token or assertion.
-  const issueMfaChallenge = (userId: string, sso?: PendingSsoLogin): string => {
-    for (const [key, entry] of pendingMfaChallenges.entries()) {
-      if (Date.now() - entry.createdAt > MFA_CHALLENGE_TTL_MS) {
-        pendingMfaChallenges.delete(key);
-      }
-    }
+  // apply group mappings, audit). It holds no token or assertion. Phase 13.1 — kept in the challenge store: in this
+  // process outside cluster mode, in the database (sealed, id hashed) in cluster mode.
+  const issueMfaChallenge = async (userId: string, sso?: PendingSsoLogin): Promise<string> => {
     const challengeId = `mfa_${crypto.randomUUID()}`;
-    pendingMfaChallenges.set(challengeId, { userId, createdAt: Date.now(), ...(sso ? { sso } : {}) });
+    await challengeStore.issue<PendingMfaChallenge>({
+      kind: sso ? "sso_mfa" : "mfa_login",
+      id: challengeId,
+      userId,
+      payload: { userId, createdAt: Date.now(), ...(sso ? { sso } : {}) },
+      ttlMs: MFA_CHALLENGE_TTL_MS
+    });
     return challengeId;
   };
 
-  const consumeMfaChallenge = (challengeId: string): PendingMfaChallenge | null => {
-    const entry = pendingMfaChallenges.get(challengeId);
-    if (!entry) return null;
-    pendingMfaChallenges.delete(challengeId);
-    if (Date.now() - entry.createdAt > MFA_CHALLENGE_TTL_MS) return null;
-    return entry;
+  // Single use: whichever kind it is, the challenge is gone after this, valid or not.
+  const consumeMfaChallenge = async (challengeId: string): Promise<PendingMfaChallenge | null> => {
+    const entry =
+      (await challengeStore.consume<PendingMfaChallenge>("mfa_login", challengeId)) ??
+      (await challengeStore.consume<PendingMfaChallenge>("sso_mfa", challengeId));
+    if (!entry || entry.expired) return null;
+    return entry.payload;
   };
 
   const getSessionIdFromRequest = (request: { cookies: Record<string, string | undefined> }) => {
@@ -5079,7 +5108,7 @@ export async function createApp(
       mfaEnforcedForRole: config.MFA_ENFORCE && projectedRole === "admin"
     });
     if (decision.kind === "local_totp" && target) {
-      const challengeId = issueMfaChallenge(target.id, {
+      const challengeId = await issueMfaChallenge(target.id, {
         method: input.method,
         provision: { ...input.provision, userId: target.id },
         firstLink
@@ -6531,7 +6560,7 @@ export async function createApp(
         }
         // Revoke the freshly-created session and exchange it for a short-lived MFA challenge token.
         await store.revokeSession(result.sessionId);
-        const challengeId = issueMfaChallenge(result.user.id);
+        const challengeId = await issueMfaChallenge(result.user.id);
         await audit(request, result.user, {
           category: "auth",
           eventType: "user.login.mfa_challenge",
@@ -6585,7 +6614,7 @@ export async function createApp(
     }
     // A challenge is single-use, so the cookie that carried it goes too.
     if (cookieChallenge && challengeId === cookieChallenge) clearSsoMfaChallengeCookie(reply);
-    const challenge = consumeMfaChallenge(challengeId);
+    const challenge = await consumeMfaChallenge(challengeId);
     if (!challenge) {
       reply.code(401);
       return { error: "MFA challenge expired or invalid" };

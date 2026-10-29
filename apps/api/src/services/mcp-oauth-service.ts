@@ -13,8 +13,15 @@
  * Storage: tokens, refresh tokens and the client registration live only in a
  * SecretService secret (provider `mcp_oauth`), which `resolveSecret` refuses
  * to hand to node configs. The `mcp_oauth_connections` row keeps what the UI
- * may show. Pending authorizations (state, PKCE verifier) stay in memory:
- * single-use, bound to the admin's session and the server, short-lived.
+ * may show. Pending authorizations (state, PKCE verifier) are single-use,
+ * bound to the admin's session and the server, short-lived, and kept in a
+ * ChallengeStore: in memory, or (Phase 13.1 cluster mode) in the database,
+ * sealed, so the callback may land on any instance.
+ *
+ * Phase 13.1 — in cluster mode a refresh runs under a cluster-wide lock per
+ * connection and re-reads the stored token first: when another instance has
+ * refreshed meanwhile, its token is used, so a rotating refresh token is
+ * never spent twice. The in-process de-dup map stays as the fast path.
  *
  * Phase 10.7 — delegated credentials. A server with `credentialMode:
  * "delegated"` has no service connection; every user connects their own
@@ -45,6 +52,7 @@ import type { McpOAuthConnectionStatus, McpUserConnectionView } from "@ai-orches
 import type { McpOAuthConnectionRecord, McpServerRecord, McpUserOAuthConnectionRecord } from "../db/database.js";
 import type { SecretService } from "./secret-service.js";
 import type { Store } from "../db/store.js";
+import { MemoryChallengeStore, type ChallengeStore } from "./challenge-store.js";
 
 export const MCP_OAUTH_CALLBACK_PATH = "/api/mcp/oauth/callback";
 export const MCP_OAUTH_SECRET_PROVIDER = "mcp_oauth";
@@ -118,6 +126,13 @@ export interface McpOAuthServiceOptions {
   onAudit?: (event: { eventType: string; serverId: string; outcome: "success" | "failure"; metadata: Record<string, unknown> }) => void | Promise<void>;
   /** Phase 10.7 — where a user connects their own account; named in "not connected" errors. */
   connectionsUrl?: string;
+  /** Phase 13.1 — where pending authorizations wait for their callback. Default: in this process. */
+  challenges?: ChallengeStore;
+  /**
+   * Phase 13.1 — cluster mode: runs a refresh while holding a cluster-wide lock for `key` (one connection). With it,
+   * the refresh re-reads the stored token and keeps one another instance stored meanwhile.
+   */
+  refreshLock?: <T>(key: string, fn: () => Promise<T>) => Promise<T>;
 }
 
 export class McpOAuthUserError extends Error {
@@ -147,16 +162,22 @@ function toRecord(value: unknown): Record<string, unknown> {
 }
 
 const MAX_PENDING = 200;
+/** Pending authorizations kept in memory at most (the oldest go first). */
+export const MCP_OAUTH_MAX_PENDING = MAX_PENDING;
+/** Phase 13.1 — how long a refresh waits for another instance's refresh of the same connection (cluster mode). */
+export const MCP_OAUTH_REFRESH_LOCK_WAIT_MS = 30_000;
 
 export class McpOAuthService implements McpOAuthTokenProvider {
-  private readonly pending = new Map<string, PendingAuthorization>();
+  private readonly pending: ChallengeStore;
   private readonly refreshing = new Map<string, Promise<string>>();
 
   constructor(
     private readonly store: Store,
     private readonly secretService: SecretService,
     private readonly options: McpOAuthServiceOptions
-  ) {}
+  ) {
+    this.pending = options.challenges ?? new MemoryChallengeStore({ maxPerKind: { mcp_oauth: MAX_PENDING } });
+  }
 
   get redirectUri(): string {
     return this.options.redirectUri;
@@ -247,17 +268,6 @@ export class McpOAuthService implements McpOAuthTokenProvider {
       value: json,
       projectId: server.projectId ?? undefined
     })).secretId;
-  }
-
-  private prunePending(now = Date.now()): void {
-    for (const [state, entry] of this.pending) {
-      if (entry.expiresAtMs <= now) this.pending.delete(state);
-    }
-    while (this.pending.size >= MAX_PENDING) {
-      const oldest = this.pending.keys().next().value;
-      if (oldest === undefined) break;
-      this.pending.delete(oldest);
-    }
   }
 
   /**
@@ -360,8 +370,7 @@ export class McpOAuthService implements McpOAuthTokenProvider {
     const pkce = createPkcePair();
     const state = createOAuthState();
     const expiresAtMs = Date.now() + this.options.stateTtlMs;
-    this.prunePending();
-    this.pending.set(state, {
+    const authorization: PendingAuthorization = {
       serverId: server.id,
       ...(input.userId ? { userId: input.userId } : {}),
       sessionHash: hashSession(input.sessionId),
@@ -374,6 +383,14 @@ export class McpOAuthService implements McpOAuthTokenProvider {
       ...(configuredScope ? { scope: configuredScope } : {}),
       client,
       expiresAtMs
+    };
+    await this.pending.issue({
+      kind: "mcp_oauth",
+      id: state,
+      userId: input.userId ?? null,
+      scope: server.id,
+      payload: authorization,
+      ttlMs: this.options.stateTtlMs
     });
     const authorizationUrl = buildAuthorizationUrl({
       authorizationEndpoint: metadata.authorization_endpoint,
@@ -405,12 +422,12 @@ export class McpOAuthService implements McpOAuthTokenProvider {
     actor?: { userId: string; isAdmin: boolean } | null;
   }): Promise<OAuthCallbackOutcome> {
     const state = typeof input.state === "string" ? input.state : "";
-    const pending = state ? this.pending.get(state) : undefined;
-    if (pending) this.pending.delete(state);
-    if (!pending) {
+    const consumed = state ? await this.pending.consume<PendingAuthorization>("mcp_oauth", state) : null;
+    if (!consumed) {
       return { serverId: null, ok: false, error: "This authorization link is unknown or was already used. Start again from the MCP servers page." };
     }
-    if (pending.expiresAtMs <= Date.now()) {
+    const pending = consumed.payload;
+    if (consumed.expired || pending.expiresAtMs <= Date.now()) {
       return { serverId: pending.serverId, ok: false, error: "This authorization link expired. Start again from the MCP servers page." };
     }
     if (!input.sessionId || hashSession(input.sessionId) !== pending.sessionHash) {
@@ -603,7 +620,7 @@ export class McpOAuthService implements McpOAuthTokenProvider {
     }
     const running = this.refreshing.get(registryServerId);
     if (running) return running;
-    const refresh = this.refresh(registryServerId, label).finally(() => {
+    const refresh = this.underRefreshLock(registryServerId, () => this.refresh(registryServerId, label, secret.accessToken)).finally(() => {
       this.refreshing.delete(registryServerId);
     });
     this.refreshing.set(registryServerId, refresh);
@@ -614,12 +631,29 @@ export class McpOAuthService implements McpOAuthTokenProvider {
     await this.store.upsertMcpOAuthConnection({ ...row, state: "expired", lastError: message.slice(0, 500) });
   }
 
-  private async refresh(serverId: string, label: string): Promise<string> {
+  /** Runs `fn` under the cluster-wide refresh lock for `key` when there is one (cluster mode), else directly. */
+  private async underRefreshLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
+    return this.options.refreshLock ? await this.options.refreshLock(key, fn) : await fn();
+  }
+
+  /**
+   * Cluster mode, under the refresh lock: the token another instance stored while this one waited, if any. `seen` is
+   * the access token that made this instance decide to refresh; a different, not yet due token replaces it.
+   */
+  private refreshedElsewhere(secret: StoredOAuthSecret, seen: string | undefined): string | null {
+    if (!this.options.refreshLock || seen === undefined || secret.accessToken === seen) return null;
+    const expiresAtMs = secret.expiresAt ? Date.parse(secret.expiresAt) : Number.POSITIVE_INFINITY;
+    return expiresAtMs - Date.now() > this.options.refreshSkewMs ? secret.accessToken : null;
+  }
+
+  private async refresh(serverId: string, label: string, seenAccessToken?: string): Promise<string> {
     const row = await this.store.getMcpOAuthConnection(serverId);
     const secret = await this.readSecret(row);
     if (!row || !secret?.refreshToken) {
       throw new Error(`MCP server '${label}' is not connected.`);
     }
+    const current = this.refreshedElsewhere(secret, seenAccessToken);
+    if (current !== null) return current;
     let tokens: OAuthTokenSet;
     try {
       tokens = await refreshOAuthToken(
@@ -696,19 +730,21 @@ export class McpOAuthService implements McpOAuthTokenProvider {
     const key = `${server.id}::${userId}`;
     const running = this.refreshing.get(key);
     if (running) return running;
-    const refresh = this.refreshUser(server, userId).finally(() => {
+    const refresh = this.underRefreshLock(key, () => this.refreshUser(server, userId, secret.accessToken)).finally(() => {
       this.refreshing.delete(key);
     });
     this.refreshing.set(key, refresh);
     return refresh;
   }
 
-  private async refreshUser(server: McpServerRecord, userId: string): Promise<string> {
+  private async refreshUser(server: McpServerRecord, userId: string, seenAccessToken?: string): Promise<string> {
     const row = await this.store.getMcpUserOAuthConnection(server.id, userId);
     const secret = await this.readSecret(row);
     if (!row || !secret?.refreshToken) {
       throw new McpDelegatedCredentialError(`MCP server '${server.name}': the user's account is not connected.${this.connectHint()}`, this.options.connectionsUrl);
     }
+    const current = this.refreshedElsewhere(secret, seenAccessToken);
+    if (current !== null) return current;
     let tokens: OAuthTokenSet;
     try {
       tokens = await refreshOAuthToken(
@@ -763,9 +799,7 @@ export class McpOAuthService implements McpOAuthTokenProvider {
       await this.secretService.deleteSecret(row.secretId);
     }
     const removed = await this.store.deleteMcpUserOAuthConnection(serverId, userId);
-    for (const [state, entry] of this.pending) {
-      if (entry.serverId === serverId && entry.userId === userId) this.pending.delete(state);
-    }
+    await this.pending.discard("mcp_oauth", { scope: serverId, userId });
     return removed || Boolean(row);
   }
 
@@ -796,16 +830,8 @@ export class McpOAuthService implements McpOAuthTokenProvider {
       await this.secretService.deleteSecret(row.secretId);
     }
     await this.store.deleteMcpOAuthConnection(serverId);
-    for (const [state, entry] of this.pending) {
-      if (entry.serverId === serverId && !entry.userId) this.pending.delete(state);
-    }
+    await this.pending.discard("mcp_oauth", { scope: serverId, userId: null });
     return await this.status(serverId);
-  }
-
-  /** Test seam: number of pending authorizations. */
-  pendingCount(): number {
-    this.prunePending();
-    return this.pending.size;
   }
 }
 
