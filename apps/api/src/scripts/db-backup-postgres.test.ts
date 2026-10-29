@@ -12,8 +12,9 @@ import { afterEach, describe, expect, it } from "vitest";
 import { parsePostgresSettings } from "../config.js";
 import { postgresStoreConfig } from "../db/create-store.js";
 import { PostgresStore, postgresPoolConfig } from "../db/postgres-store.js";
+import { AuthService } from "../services/auth-service.js";
 import { createEmptyTestDatabase, noticePostgresSkipped, testPostgresUrl } from "../test-support/test-store.js";
-import { AuditVerdictMismatch, EXPORTED_TABLES, exportDump, importDump, openBackupAdapter, type BackupDump } from "./db-shared.js";
+import { AuditVerdictMismatch, EXPORTED_TABLES, ImportRefusal, NOT_EXPORTED_TABLES, exportDump, importDump, openBackupAdapter, type BackupDump } from "./db-shared.js";
 
 const url = testPostgresUrl();
 if (!url) noticePostgresSkipped("db:export / db:import on Postgres");
@@ -52,6 +53,63 @@ describe.skipIf(!url)("db:export / db:import round trip [postgres]", () => {
   async function freshDatabase(): Promise<string> {
     return databaseUrl(await createEmptyTestDatabase());
   }
+
+  it("exports every table of the Postgres schema except the listed transient ones, and restores them in foreign-key order", async () => {
+    const srcUrl = await freshDatabase();
+    const source = await openStore(srcUrl);
+    await source.createMcpServer({ id: "mcp_one", name: "One", adapterId: "mock-mcp" });
+    await source.putGuardVault({ token: "tok_1", dataClass: "email", valueHash: "h1", valueSealed: "v1.a.b.c", createdAt: "2026-03-01T00:00:00.000Z" });
+    await source.close();
+    const pool = new Pool(postgresPoolConfig(postgresStoreConfig(parsePostgresSettings({ DB_POSTGRESDB_URL: srcUrl })), { max: 1 }));
+    const tables = (await pool.query<{ table_name: string }>(
+      `SELECT table_name FROM information_schema.tables WHERE table_schema = current_schema() AND table_type = 'BASE TABLE'`
+    )).rows.map((row) => row.table_name);
+    await pool.end();
+    const exported = new Set<string>(EXPORTED_TABLES);
+    expect(tables.filter((table) => !exported.has(table) && !(table in NOT_EXPORTED_TABLES))).toEqual([]);
+    expect(EXPORTED_TABLES.filter((table) => !tables.includes(table))).toEqual([]);
+
+    process.env.DB_TYPE = "postgres";
+    process.env.DB_POSTGRESDB_URL = srcUrl;
+    const exporter = await openBackupAdapter();
+    const dump = JSON.parse(JSON.stringify(await exportDump(exporter))) as BackupDump;
+    await exporter.close();
+    expect(Object.keys(dump.tables).sort()).toEqual([...EXPORTED_TABLES].sort());
+
+    const dstUrl = await freshDatabase();
+    process.env.DB_POSTGRESDB_URL = dstUrl;
+    const importer = await openBackupAdapter();
+    await importDump(importer, dump);
+    await importer.close();
+    const restored = await openStore(dstUrl);
+    try {
+      expect((await restored.getMcpServer("mcp_one"))?.name).toBe("One");
+      expect((await restored.getGuardVaultByToken("tok_1"))?.value_sealed).toBe("v1.a.b.c");
+    } finally {
+      await restored.close();
+    }
+  }, 120_000);
+
+  it("--replace empties the destination's sessions, so everyone signs in again", async () => {
+    const dstUrl = await freshDatabase();
+    const dest = await openStore(dstUrl);
+    const auth = new AuthService(dest, 24);
+    await auth.register({ email: "ana@example.com", password: "Ana-Pass-123!", role: "admin" });
+    await auth.login("ana@example.com", "Ana-Pass-123!");
+    await dest.close();
+    process.env.DB_TYPE = "postgres";
+    process.env.DB_POSTGRESDB_URL = dstUrl;
+    const importer = await openBackupAdapter();
+    try {
+      expect(await importer.countRows("sessions")).toBe(1);
+      const lines: string[] = [];
+      await importDump(importer, { format: "ai-orchestrator-backup", formatVersion: 1, schemaVersion: 1, exportedAt: "", dbType: "postgres", tables: { workflows: [] } }, { replace: true, log: (line) => lines.push(line) });
+      expect(lines).toContain("  sessions: emptied (never in a backup: everyone signs in again)");
+      expect(await importer.countRows("sessions")).toBe(0);
+    } finally {
+      await importer.close();
+    }
+  }, 120_000);
 
   it("keeps seq through export and import: same rows, same order, the chain verifies, the next insert is max + 1", async () => {
     const srcUrl = await freshDatabase();
@@ -202,14 +260,16 @@ describe.skipIf(!url)("db:export / db:import round trip [postgres]", () => {
     const tampered = JSON.parse(JSON.stringify(dump)) as BackupDump;
     tampered.tables.audit_logs![0]!.message = "approved by mallory";
     let importer = await openBackupAdapter();
-    const error = await importDump(importer, tampered).then(() => undefined, (e: unknown) => e as Error);
+    // The destination holds a row, so it takes --replace (a plain import refuses it, below).
+    expect(await importDump(importer, tampered).then(() => undefined, (e: unknown) => e as Error)).toBeInstanceOf(ImportRefusal);
+    const error = await importDump(importer, tampered, { replace: true }).then(() => undefined, (e: unknown) => e as Error);
     await importer.close();
     expect(error).toBeInstanceOf(AuditVerdictMismatch);
     expect(error!.message).toContain("row p1 (position 1) would be broken on the restored database");
     expect((await auditOrder(dstUrl)).map((r) => r.id)).toEqual(["kept"]);
 
     importer = await openBackupAdapter();
-    const report = await importDump(importer, dump);
+    const report = await importDump(importer, dump, { replace: true });
     await importer.close();
     expect(report.audit?.restored).toEqual({ ok: true, rowsChecked: 2 });
     expect((await auditOrder(dstUrl)).map((r) => r.id)).toEqual(["p1", "p2"]);

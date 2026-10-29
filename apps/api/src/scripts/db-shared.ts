@@ -65,13 +65,18 @@ export interface BackupAdapter {
 }
 
 /**
- * Tables exported by db:export. Anything truly transient (caches, replay
- * windows, leader leases, log stream delivery history) is intentionally
- * skipped — restoring those would either be wrong (resume an expired lease)
- * or pointless (caches refill on demand).
+ * Tables exported by db:export: every table that holds data a restored instance needs. Anything truly transient
+ * (NOT_EXPORTED_TABLES: caches, replay windows, leader leases, cluster liveness, log stream delivery history) is
+ * intentionally skipped — restoring those would either be wrong (resume an expired lease) or pointless (caches
+ * refill on demand).
  *
  * `schema_migrations` is also skipped: the importer ensures the destination
  * is at the right version via runMigrations, then writes data on top.
+ *
+ * Order matters on Postgres, where foreign keys are checked as rows go in: parents (users, projects) come before the
+ * tables that reference them. db-backup-coverage.test.ts (SQLite) and db-backup-postgres.test.ts check that every
+ * table of the live schema is listed here or in NOT_EXPORTED_TABLES, so a new table cannot be left out of backups
+ * unnoticed.
  */
 export const EXPORTED_TABLES = [
   // Workflow data
@@ -85,7 +90,6 @@ export const EXPORTED_TABLES = [
   "external_secret_providers",
   // Auth
   "users",
-  "sessions",
   "api_keys",
   "mfa_secrets",
   "sso_identities",
@@ -110,8 +114,81 @@ export const EXPORTED_TABLES = [
   "execution_queue_dlq",
   // Optional history (skippable via --exclude-history)
   "execution_history",
-  "audit_logs"
+  "audit_logs",
+  // Phase 13.1 — everything else a restored instance needs (db:export wrote only the tables above before).
+  // Approvals and releases
+  "approval_requests",
+  "workflow_releases",
+  "release_gates",
+  "release_approval_requests",
+  "gate_case_requests",
+  // MCP registry, gateway, policy and history
+  "mcp_servers",
+  "mcp_server_catalogs",
+  "mcp_server_probes",
+  "mcp_tool_snapshots",
+  "mcp_tool_classifications",
+  "mcp_tool_policies",
+  "mcp_toolsets",
+  "mcp_toolset_members",
+  "mcp_clients",
+  "mcp_oauth_connections",
+  "mcp_user_oauth_connections",
+  "mcp_elicitations",
+  "mcp_tool_calls",
+  "mcp_cassettes",
+  // Guard
+  "guard_profiles",
+  "guard_profile_versions",
+  "guard_bindings",
+  "guard_events",
+  "guard_simulations",
+  "guard_token_vault",
+  "data_destinations",
+  // Knowledge bases (SQLite's full-text index is rebuilt from the chunks by its triggers; Postgres computes its own)
+  "knowledge_bases",
+  "knowledge_base_chunks",
+  // Evals, replay and capture
+  "eval_datasets",
+  "eval_fixtures",
+  "eval_runs",
+  "eval_results",
+  "replay_capture_settings",
+  "replay_recordings",
+  // Audit export and signed run manifests
+  "audit_signing_keys",
+  "execution_manifests",
+  "audit_export_destinations",
+  "audit_export_runs",
+  // Usage and budgets
+  "usage_events",
+  "budgets",
+  "budget_alerts"
 ] as const;
+
+/** Tables db:export leaves out on purpose, and why (the runbook lists them as safe to lose). */
+export const NOT_EXPORTED_TABLES: Record<string, string> = {
+  schema_migrations: "the importer migrates the destination itself",
+  schema_markers: "written by the SQLite store as it creates the schema",
+  sessions: "live sign-in sessions: a backup would carry working session ids, and users simply sign in again",
+  pending_challenges: "short-lived sign-in and MCP OAuth state, sealed with the master key, expires in minutes",
+  rate_limit_buckets: "rate-limit counters",
+  capture_reservations: "short-lived production-capture reservations",
+  session_tool_cache: "cache, refilled on demand",
+  external_secret_cache: "cache of external secret values, refilled on demand",
+  webhook_idempotency: "short replay window for webhook idempotency keys",
+  webhook_replay_keys: "short replay window for signed webhooks",
+  leader_leases: "leader election lease, taken again at start",
+  cluster_instances: "liveness of running instances",
+  cluster_run_owners: "which live instance runs a run",
+  log_stream_events: "log stream delivery history",
+  guard_profile_revision: "a change counter the guard tables' triggers bump; caches only compare it",
+  knowledge_base_chunks_fts: "SQLite full-text index, rebuilt from knowledge_base_chunks",
+  knowledge_base_chunks_fts_config: "SQLite full-text index storage",
+  knowledge_base_chunks_fts_data: "SQLite full-text index storage",
+  knowledge_base_chunks_fts_docsize: "SQLite full-text index storage",
+  knowledge_base_chunks_fts_idx: "SQLite full-text index storage"
+};
 
 export const HISTORY_TABLES = [
   "execution_history",
@@ -129,6 +206,24 @@ export const ENCRYPTED_COLUMNS: Record<string, { iv: string; authTag: string; ci
   mfa_secrets: { iv: "secret_iv", authTag: "secret_auth_tag", ciphertext: "secret_ciphertext", required: true },
   log_stream_destinations: { iv: "config_iv", authTag: "config_auth_tag", ciphertext: "config_ciphertext", required: false }
 };
+
+/**
+ * Columns holding a value sealed with the master key (SecretService.sealValue: `v1.<iv>.<tag>.<ciphertext>`, the
+ * purpose bound as authenticated data), which db:import re-seals with --source-master-key. The purpose must match the
+ * one the service seals with (guard-service.ts VAULT_PURPOSE; db-backup-coverage.test.ts checks it).
+ */
+export const SEALED_COLUMNS: Record<string, { column: string; purpose: string }> = {
+  guard_token_vault: { column: "value_sealed", purpose: "guard-token-vault" }
+};
+
+/**
+ * Sealed values inside JSON columns, found by key at any depth (sub-workflow states nest). A paused run's state keeps
+ * the approved write-tool results sealed (app.ts sealToolResults, purpose TOOL_RESULTS_PURPOSE): a result that cannot be
+ * opened is dropped and the agent asks again, so a key change without re-sealing could run an approved tool twice.
+ */
+export const JSON_SEALED_FIELDS: ReadonlyArray<{ table: string; column: string; key: string; purpose: string }> = [
+  { table: "workflow_executions", column: "state_json", key: "approvedToolResultsSealed", purpose: "approval_tool_results" }
+];
 
 class SqliteAdapter implements BackupAdapter {
   readonly kind = "sqlite" as const;
@@ -354,7 +449,8 @@ class PostgresAdapter implements BackupAdapter {
   }
 
   async countRows(table: string): Promise<number> {
-    const r = await this.q<{ n: string | number }>(`SELECT COUNT(*) AS n FROM ${quoteIdent(table)}`);
+    // Guarded: a caller may skip a table missing on an old schema without aborting the open transaction.
+    const r = await this.guarded(() => this.q<{ n: string | number }>(`SELECT COUNT(*) AS n FROM ${quoteIdent(table)}`));
     return Number(r.rows[0]?.n ?? 0);
   }
 
@@ -468,8 +564,23 @@ export class AuditVerdictMismatch extends Error {
   }
 }
 
+/** A restore db:import refuses before writing anything (exit code 2): the destination already holds data. */
+export class ImportRefusal extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ImportRefusal";
+  }
+}
+
 export interface ImportOptions {
+  /** Add the backup's rows to what the destination holds (best-effort; a conflicting row aborts the import). */
   merge?: boolean;
+  /**
+   * Replace everything the destination holds with the backup: every exported table is emptied, including ones the
+   * backup does not hold (an older db:export wrote fewer tables), so the result is exactly the backup. Without it (or
+   * `merge`), a destination that holds any exported row is refused.
+   */
+  replace?: boolean;
   /**
    * Restore even though the restored audit chain's verdict differs from the one the backup recorded (refused by
    * default, rolled back). Both verdicts are logged and the report carries `audit.changedWarning`.
@@ -481,9 +592,18 @@ export interface ImportOptions {
   warn?: (line: string) => void;
 }
 
+/** What an import did to one exported table. */
+export interface ImportTableReport {
+  table: string;
+  /** restored: written from the backup; emptied: not in the backup, emptied; untouched: not in the backup (merge). */
+  action: "restored" | "emptied" | "untouched";
+  rows: number;
+}
+
 export interface ImportReport {
   totalInserted: number;
   totalTouched: number;
+  tables: ImportTableReport[];
   /** The restored chain's verdict (when audit_logs was restored), and the rows that became unverifiable as allowed. */
   audit?: {
     restored: AuditChainResult;
@@ -495,7 +615,43 @@ export interface ImportReport {
 }
 
 /**
- * Restores `dump` into `adapter` in one transaction. When the backup recorded its audit verdict, the restored chain is
+ * Tables an exact restore (anything but `merge`) also empties although no backup holds them: live sign-in sessions
+ * of the destination must not outlive a restore, so everyone signs in again (Postgres's TRUNCATE ... CASCADE from
+ * `users` would empty them anyway; SQLite's DELETE does not cascade).
+ */
+export const EMPTIED_ON_RESTORE_TABLES = ["sessions"] as const;
+
+/** Whether `error` says the table does not exist (SQLite "no such table", Postgres 42P01), and nothing else. */
+export function isMissingTableError(error: unknown): boolean {
+  if ((error as { code?: unknown } | null)?.code === "42P01") return true;
+  return error instanceof Error && /no such table/i.test(error.message);
+}
+
+/**
+ * Exported tables that hold rows in the destination. A table missing on an old schema counts as empty; any other
+ * error fails the check, so a destination is never taken for empty because it could not be read.
+ */
+async function tablesWithRows(adapter: BackupAdapter): Promise<Array<{ table: string; rows: number }>> {
+  const held: Array<{ table: string; rows: number }> = [];
+  for (const table of EXPORTED_TABLES) {
+    let rows = 0;
+    try {
+      rows = await adapter.countRows(table);
+    } catch (error) {
+      if (!isMissingTableError(error)) {
+        throw new Error(`Cannot tell whether the destination is empty: counting ${table} failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    if (rows > 0) held.push({ table, rows });
+  }
+  return held;
+}
+
+/**
+ * Restores `dump` into `adapter` in one transaction. By default the destination must hold no exported row (a database
+ * the importer just created, or one an API never started on); `replace` empties every exported table first, so the
+ * result is exactly the backup (tables an older backup does not hold end up empty, and the log says so); `merge`
+ * adds the rows. When the backup recorded its audit verdict, the restored chain is
  * verified before committing and must give the same verdict, except rows the rule allows to become unverifiable
  * (two or more U+FFFD once characters this store cannot keep become U+FFFD); otherwise everything rolls back.
  * A backup without a recorded verdict (older db:export) restores as before, with a note.
@@ -504,27 +660,53 @@ export async function importDump(adapter: BackupAdapter, dump: BackupDump, optio
   const log = options.log ?? (() => undefined);
   const warn = options.warn ?? log;
   const restoresAudit = (dump.tables.audit_logs?.length ?? 0) > 0 || dump.auditVerdict !== undefined;
+  if (options.merge && options.replace) throw new ImportRefusal("--merge and --replace together: choose one.");
   return adapter.transaction(async () => {
+    if (!options.merge && !options.replace) {
+      const held = await tablesWithRows(adapter);
+      if (held.length > 0) {
+        const listed = held.slice(0, 6).map(({ table, rows }) => `${table}: ${rows}`).join(", ");
+        throw new ImportRefusal(
+          `The destination already holds data (${listed}${held.length > 6 ? `, and ${held.length - 6} more tables` : ""}). ` +
+            `db:import restores into an empty database: restore before the first start of the API, or pass --replace to ` +
+            `replace everything in it with the backup (every exported table is emptied first, including ones the backup ` +
+            `does not hold). Nothing was changed.`
+        );
+      }
+    }
     // A merge into an audit log with no chained rows (the chain walks only those) restores the whole chain, so it is compared like a plain restore.
     const auditWasEmpty = !options.merge || !restoresAudit || (await adapter.countChainedAuditRows()) === 0;
     if (!options.merge) {
-      log("Truncating destination tables...");
-      // Reverse order, so a later non-cascading SQLite delete doesn't hit a parent before its children (CASCADE on
-      // Postgres makes this moot; the symmetry keeps both paths predictable).
-      for (const table of [...EXPORTED_TABLES].reverse()) {
+      // Every exported table, so nothing of what the destination held survives next to the backup (and rows a
+      // migration seeded are replaced by the backup's), and the destination's sessions. Reverse order, so a later
+      // non-cascading SQLite delete doesn't hit a parent before its children (CASCADE on Postgres makes this moot).
+      // A table that cannot be emptied fails the restore (rolled back): the log must never call a table emptied, or
+      // the result the backup, while old rows are left in it.
+      for (const table of [...EMPTIED_ON_RESTORE_TABLES, ...[...EXPORTED_TABLES].reverse()]) {
         try {
           await adapter.truncate(table);
         } catch (err) {
-          warn(`  ${table}: truncate skipped (${err instanceof Error ? err.message : String(err)})`);
+          throw new Error(`Failed to empty ${table} before the restore: ${err instanceof Error ? err.message : String(err)}`);
         }
       }
+      for (const table of EMPTIED_ON_RESTORE_TABLES) log(`  ${table}: emptied (never in a backup: everyone signs in again)`);
     }
     let totalInserted = 0;
     let totalTouched = 0;
+    const tables: ImportTableReport[] = [];
+    const notInBackup: string[] = [];
     for (const table of EXPORTED_TABLES) {
       const rows = dump.tables[table];
-      if (!rows || rows.length === 0) {
-        log(`  ${table}: 0 rows`);
+      if (!rows) {
+        const action = options.merge ? "untouched" : "emptied";
+        tables.push({ table, action, rows: 0 });
+        notInBackup.push(table);
+        log(`  ${table}: ${action} (not in the backup)`);
+        continue;
+      }
+      if (rows.length === 0) {
+        tables.push({ table, action: "restored", rows: 0 });
+        log(`  ${table}: restored, 0 rows`);
         continue;
       }
       const { rows: prepared, touched } = options.prepare ? options.prepare(table, rows) : { rows, touched: 0 };
@@ -535,9 +717,17 @@ export async function importDump(adapter: BackupAdapter, dump: BackupDump, optio
       }
       totalInserted += prepared.length;
       totalTouched += touched;
-      log(`  ${table}: ${prepared.length} rows${touched > 0 ? ` (${touched} re-encrypted)` : ""}`);
+      tables.push({ table, action: "restored", rows: prepared.length });
+      log(`  ${table}: restored, ${prepared.length} rows${touched > 0 ? ` (${touched} re-encrypted)` : ""}`);
     }
-    if (!restoresAudit) return { totalInserted, totalTouched };
+    if (notInBackup.length > 0) {
+      warn(
+        `Note: the backup does not hold ${notInBackup.length} table(s) this build exports (${notInBackup.slice(0, 8).join(", ")}` +
+          `${notInBackup.length > 8 ? ", …" : ""}): it was written by an older db:export or with --exclude-history. ` +
+          (options.merge ? "They were left as they were." : "They are empty now.")
+      );
+    }
+    if (!restoresAudit) return { totalInserted, totalTouched, tables };
 
     const restored = await adapter.verifyAuditChain();
     if (!dump.auditVerdict) {
@@ -545,14 +735,14 @@ export async function importDump(adapter: BackupAdapter, dump: BackupDump, optio
         `Note: this backup does not record its audit-chain verdict (written by an older db:export), so the restored chain ` +
           `is not compared with it. Restored audit chain: ${verdictText(restored)}.`
       );
-      return { totalInserted, totalTouched, audit: { restored, becameUnverifiable: [] } };
+      return { totalInserted, totalTouched, tables, audit: { restored, becameUnverifiable: [] } };
     }
     if (!auditWasEmpty) {
       log(
         `Note: --merge keeps the audit rows already in the database, so the audit verdict was not compared with the ` +
           `backup's (${verdictText(auditVerdictFromRecord(dump.auditVerdict))}). Restored audit chain: ${verdictText(restored)}.`
       );
-      return { totalInserted, totalTouched, audit: { restored, recorded: dump.auditVerdict, becameUnverifiable: [] } };
+      return { totalInserted, totalTouched, tables, audit: { restored, recorded: dump.auditVerdict, becameUnverifiable: [] } };
     }
     const recorded = auditVerdictFromRecord(dump.auditVerdict);
     const { problems, becameUnverifiable } = restoredAuditProblems(recorded, restored, explainedAuditRows(dump.tables.audit_logs ?? []));
@@ -562,7 +752,7 @@ export async function importDump(adapter: BackupAdapter, dump: BackupDump, optio
         `before (backup) ${verdictText(recorded)}, after (restored) ${verdictText(restored)}; ${problems.join("; ")}. ` +
         `Treat the chain as unproven and keep the backup file as the record.`;
       log(`Audit chain before (backup): ${verdictText(recorded)}. After (restored): ${verdictText(restored)}.`);
-      return { totalInserted, totalTouched, audit: { restored, recorded: dump.auditVerdict, becameUnverifiable, changedWarning } };
+      return { totalInserted, totalTouched, tables, audit: { restored, recorded: dump.auditVerdict, becameUnverifiable, changedWarning } };
     }
     if (problems.length > 0) {
       throw new AuditVerdictMismatch(
@@ -579,7 +769,7 @@ export async function importDump(adapter: BackupAdapter, dump: BackupDump, optio
           `U+0000 and lone surrogates (which this store cannot keep) become U+FFFD. Keep the backup file as the record for them.`
       );
     }
-    return { totalInserted, totalTouched, audit: { restored, recorded: dump.auditVerdict, becameUnverifiable } };
+    return { totalInserted, totalTouched, tables, audit: { restored, recorded: dump.auditVerdict, becameUnverifiable } };
   });
 }
 

@@ -6,9 +6,10 @@
  * configs) are exported as ciphertext — db:import can re-encrypt with a
  * new master key by passing --source-master-key.
  *
- * Excludes pure cache/runtime tables (session_tool_cache, webhook replay
- * windows, leader leases, log_stream_events, external_secret_cache) — see
- * EXPORTED_TABLES in db-shared.ts for the full list.
+ * Exports every table a restored instance needs (EXPORTED_TABLES in
+ * db-shared.ts) and excludes pure cache/runtime tables (session_tool_cache,
+ * webhook replay windows, leader leases, log_stream_events,
+ * external_secret_cache): NOT_EXPORTED_TABLES lists them with the reason.
  *
  * Reads one snapshot (one read transaction) and, when audit_logs is exported,
  * records the audit chain's verdict in the backup (`auditVerdict`), which
@@ -29,6 +30,8 @@ function parseArgs(argv: string[]): Args {
   let excludeHistory = false;
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
+    // pnpm passes the `--` that separates its own options from the script's (pnpm --filter … db:export -- --out x).
+    if (arg === "--") continue;
     if (arg === "--out" || arg === "-o") {
       const next = argv[++i];
       if (next === undefined) throw new Error("--out requires a path");

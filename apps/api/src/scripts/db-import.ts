@@ -1,17 +1,27 @@
 /**
  * pnpm --filter @ai-orchestrator/api db:import -- --in backup.json --yes \
- *     [--source-master-key <base64>]
+ *     [--source-master-key <base64> | --source-master-key-file <path>]
  *
- * Restores a backup written by db:export into the configured DB. Default
- * mode is destructive: every exported table is TRUNCATEd before insert.
- * Use --merge to insert without truncating (best-effort; conflicts will
- * abort the import).
+ * Restores a backup written by db:export into the configured DB. By default
+ * the destination must hold no exported row (an empty database, or one the
+ * API never started on); a database that holds data is refused. --replace
+ * empties every exported table first, including ones the backup does not
+ * hold, so the result is exactly the backup. --merge inserts without
+ * emptying anything (best-effort; conflicts will abort the import). Each
+ * table is logged as restored, emptied (not in the backup) or untouched.
+ *
+ * Without --source-master-key, the backup's first secrets and mfa_secrets
+ * rows must open with SECRET_MASTER_KEY_BASE64, or the import is refused
+ * (--allow-key-mismatch restores anyway; neither key is ever printed).
+ * A backup holding neither is not checked against the key.
  *
  * Re-encryption: if the backup was made with a different
  * SECRET_MASTER_KEY_BASE64 than the current one, pass the original key as
  * --source-master-key. The importer will decrypt every encrypted blob with
  * the source key and re-encrypt with the current SECRET_MASTER_KEY_BASE64
- * before insert.
+ * before insert. --source-master-key-file reads the key from a file instead
+ * (the first line, trimmed), so it never appears in the process list or the
+ * shell history.
  *
  * The whole restore is one transaction. When the backup records its audit
  * chain's verdict (db:export writes it), the restored chain is verified
@@ -25,20 +35,17 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import crypto from "node:crypto";
-import {
-  ENCRYPTED_COLUMNS,
-  importDump,
-  openBackupAdapter,
-  type BackupDump
-} from "./db-shared.js";
+import { ImportRefusal, importDump, openBackupAdapter, type BackupDump } from "./db-shared.js";
+import { readKeyFile, reencryptRows, tablesTheKeyCannotOpen } from "./db-reencrypt.js";
 
 interface Args {
   in: string;
   yes: boolean;
   sourceMasterKey: string | null;
   merge: boolean;
+  replace: boolean;
   allowAuditChange: boolean;
+  allowKeyMismatch: boolean;
 }
 
 type DumpFile = Omit<BackupDump, "format" | "formatVersion"> & { format: string; formatVersion: number };
@@ -48,9 +55,13 @@ function parseArgs(argv: string[]): Args {
   let yes = false;
   let sourceMasterKey: string | null = null;
   let merge = false;
+  let replace = false;
   let allowAuditChange = false;
+  let allowKeyMismatch = false;
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
+    // pnpm passes the `--` that separates its own options from the script's (pnpm --filter … db:export -- --out x).
+    if (arg === "--") continue;
     if (arg === "--in" || arg === "-i") {
       const next = argv[++i];
       if (next === undefined) throw new Error("--in requires a path");
@@ -61,10 +72,18 @@ function parseArgs(argv: string[]): Args {
       const next = argv[++i];
       if (next === undefined) throw new Error("--source-master-key requires a base64 key");
       sourceMasterKey = next;
+    } else if (arg === "--source-master-key-file") {
+      const next = argv[++i];
+      if (next === undefined) throw new Error("--source-master-key-file requires a path");
+      sourceMasterKey = readKeyFile(next, (line) => console.warn(line));
     } else if (arg === "--merge") {
       merge = true;
+    } else if (arg === "--replace") {
+      replace = true;
     } else if (arg === "--allow-audit-change") {
       allowAuditChange = true;
+    } else if (arg === "--allow-key-mismatch") {
+      allowKeyMismatch = true;
     } else if (arg === "--help" || arg === "-h") {
       printUsageAndExit(0);
     } else {
@@ -72,28 +91,41 @@ function parseArgs(argv: string[]): Args {
     }
   }
   if (!inPath) throw new Error("--in <file.json> is required");
-  return { in: inPath, yes, sourceMasterKey, merge, allowAuditChange };
+  if (merge && replace) throw new Error("--merge and --replace together: choose one.");
+  return { in: inPath, yes, sourceMasterKey, merge, replace, allowAuditChange, allowKeyMismatch };
 }
 
 function printUsageAndExit(code: number): never {
   console.log(
     [
       "Usage: pnpm --filter @ai-orchestrator/api db:import -- --in <file.json> --yes \\",
-      "         [--source-master-key <base64>] [--merge] [--allow-audit-change]",
+      "         [--source-master-key <base64> | --source-master-key-file <path>] [--replace | --merge]",
+      "         [--allow-audit-change] [--allow-key-mismatch]",
       "",
       "Options:",
       "  --in, -i <file.json>       Backup file produced by db:export.",
       "  --yes, -y                  Confirm the operation. Required.",
       "  --source-master-key <b64>  Base64 master key the backup was encrypted with.",
       "                             Required when rotating SECRET_MASTER_KEY_BASE64.",
-      "  --merge                    Insert without truncating (default: truncate first).",
+      "  --source-master-key-file <path>",
+      "                             The same, read from a file (first line), so the key stays off the",
+      "                             command line.",
+      "  --replace                  Replace everything the destination holds: every exported table is",
+      "                             emptied first, including ones the backup does not hold.",
+      "  --merge                    Add the backup's rows without emptying anything (best-effort).",
       "  --allow-audit-change       Restore even if the restored audit chain's verdict differs from the",
       "                             one the backup recorded (both are printed, then a WARNING).",
+      "  --allow-key-mismatch       Restore even though SECRET_MASTER_KEY_BASE64 cannot open the backup's",
+      "                             secrets (without --source-master-key); they stay unreadable.",
+      "                             The check opens the backup's first secrets and mfa_secrets rows only:",
+      "                             a backup with neither is not checked against the key.",
       "  --help, -h                 Show this message.",
       "",
-      "Default mode TRUNCATES every restored table before insert. The restore is one",
+      "By default the destination must be empty (no exported row); one that holds data is",
+      "refused, and --replace replaces it with exactly the backup. The restore is one",
       "transaction: it rolls back if any table fails, or if the restored audit chain",
-      "does not give the verdict the backup recorded. The destination",
+      "does not give the verdict the backup recorded. Exit codes: 0 restored, 2 refused",
+      "(nothing written), 1 failed (rolled back). The destination",
       "DB must be the same kind (sqlite or postgres) as the source — cross-store",
       "restore is not supported because column types differ."
     ].join("\n")
@@ -107,70 +139,6 @@ function loadKey(b64: string, label: string): Buffer {
     throw new Error(`${label} must decode to 32 bytes (got ${buf.length})`);
   }
   return buf;
-}
-
-function reencryptBlob(
-  iv: string,
-  authTag: string,
-  ciphertext: string,
-  sourceKey: Buffer,
-  destKey: Buffer
-): { iv: string; authTag: string; ciphertext: string } {
-  const decipher = crypto.createDecipheriv("aes-256-gcm", sourceKey, Buffer.from(iv, "base64"));
-  decipher.setAuthTag(Buffer.from(authTag, "base64"));
-  const plaintext = Buffer.concat([
-    decipher.update(Buffer.from(ciphertext, "base64")),
-    decipher.final()
-  ]);
-
-  const newIv = crypto.randomBytes(12);
-  const cipher = crypto.createCipheriv("aes-256-gcm", destKey, newIv);
-  const newCiphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
-  const newAuthTag = cipher.getAuthTag();
-  return {
-    iv: newIv.toString("base64"),
-    authTag: newAuthTag.toString("base64"),
-    ciphertext: newCiphertext.toString("base64")
-  };
-}
-
-function reencryptRows(
-  table: string,
-  rows: Record<string, unknown>[],
-  sourceKey: Buffer,
-  destKey: Buffer
-): { rows: Record<string, unknown>[]; touched: number } {
-  const cols = ENCRYPTED_COLUMNS[table];
-  if (!cols) return { rows, touched: 0 };
-  let touched = 0;
-  const out = rows.map((row) => {
-    const iv = row[cols.iv];
-    const authTag = row[cols.authTag];
-    const ciphertext = row[cols.ciphertext];
-    // Skip rows where the encrypted columns are null (e.g. log_stream_destinations
-    // can be configured without the optional config blob).
-    if (
-      iv === null || iv === undefined || iv === "" ||
-      authTag === null || authTag === undefined || authTag === "" ||
-      ciphertext === null || ciphertext === undefined || ciphertext === ""
-    ) {
-      if (cols.required) {
-        throw new Error(
-          `${table}: row missing required encrypted blob (iv/authTag/ciphertext)`
-        );
-      }
-      return row;
-    }
-    const fresh = reencryptBlob(String(iv), String(authTag), String(ciphertext), sourceKey, destKey);
-    touched++;
-    return {
-      ...row,
-      [cols.iv]: fresh.iv,
-      [cols.authTag]: fresh.authTag,
-      [cols.ciphertext]: fresh.ciphertext
-    };
-  });
-  return { rows: out, touched };
 }
 
 async function main() {
@@ -192,6 +160,30 @@ async function main() {
     throw new Error(`Unsupported backup formatVersion: ${dump.formatVersion}`);
   }
 
+  const destKeyB64 = process.env.SECRET_MASTER_KEY_BASE64;
+  if (!destKeyB64) {
+    throw new Error("SECRET_MASTER_KEY_BASE64 is required to import (used to verify or re-encrypt secrets).");
+  }
+  const destKey = loadKey(destKeyB64, "SECRET_MASTER_KEY_BASE64");
+  const sourceKey = args.sourceMasterKey ? loadKey(args.sourceMasterKey, "--source-master-key") : null;
+  const willReencrypt = sourceKey !== null && Buffer.compare(sourceKey, destKey) !== 0;
+  // Before anything is written: the key the rows will be read with must open them.
+  const unopened = tablesTheKeyCannotOpen(dump.tables, willReencrypt ? sourceKey! : destKey);
+  if (unopened.length > 0) {
+    const tables = unopened.join(" and ");
+    if (willReencrypt) {
+      throw new ImportRefusal(`--source-master-key cannot open the backup's ${tables}: pass the key the backup was written with. Nothing was changed.`);
+    }
+    if (!args.allowKeyMismatch) {
+      throw new ImportRefusal(
+        `SECRET_MASTER_KEY_BASE64 cannot open the backup's ${tables}: the backup was written with another master key. ` +
+          `Pass that key with --source-master-key-file (it is re-encrypted with SECRET_MASTER_KEY_BASE64), or ` +
+          `--allow-key-mismatch to restore with secrets and MFA enrolments that cannot be read. Nothing was changed.`
+      );
+    }
+    console.warn(`WARNING: SECRET_MASTER_KEY_BASE64 cannot open the backup's ${tables} (--allow-key-mismatch): they cannot be read after the restore.`);
+  }
+
   const adapter = await openBackupAdapter();
   try {
     if (dump.dbType !== adapter.kind) {
@@ -208,14 +200,6 @@ async function main() {
       );
     }
 
-    const destKeyB64 = process.env.SECRET_MASTER_KEY_BASE64;
-    if (!destKeyB64) {
-      throw new Error("SECRET_MASTER_KEY_BASE64 is required to import (used to verify or re-encrypt secrets).");
-    }
-    const destKey = loadKey(destKeyB64, "SECRET_MASTER_KEY_BASE64");
-    const sourceKey = args.sourceMasterKey ? loadKey(args.sourceMasterKey, "--source-master-key") : null;
-    const willReencrypt = sourceKey !== null && Buffer.compare(sourceKey, destKey) !== 0;
-
     if (willReencrypt) {
       console.log("Re-encrypting secrets with the current SECRET_MASTER_KEY_BASE64...");
     } else if (sourceKey) {
@@ -224,6 +208,7 @@ async function main() {
 
     const report = await importDump(adapter, dump as BackupDump, {
       merge: args.merge,
+      replace: args.replace,
       allowAuditChange: args.allowAuditChange,
       prepare: (table, rows) => (willReencrypt ? reencryptRows(table, rows, sourceKey ?? destKey, destKey) : { rows, touched: 0 }),
       log: (line) => console.log(line),
@@ -243,6 +228,10 @@ async function main() {
 }
 
 main().catch((err) => {
+  if (err instanceof ImportRefusal) {
+    console.error(`Refused: ${err.message}`);
+    process.exit(2);
+  }
   console.error(err instanceof Error ? err.message : err);
   process.exit(1);
 });

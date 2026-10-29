@@ -166,9 +166,13 @@ would turn *broken* on Postgres, or a row that would become unverifiable without
 
 ## Backup and restore
 
+The full runbook (what to keep, the master key, scheduled backups, point-in-time recovery, restore after losing the
+master key, RPO and RTO, and the restore drill CI runs) is [Backup and recovery](./backup-and-recovery.md).
+
 - **Postgres:** use your usual tools (`pg_dump` / `pg_restore`, or your provider's snapshots).
-- **SQLite:** stop the API and copy the file, or use `db:export`.
-- `db:export` / `db:import` write and read a JSON backup of the main tables on either store (`--exclude-history` skips
+- **SQLite:** stop the API and copy the file, take an online backup, or use `db:export`.
+- `db:export` / `db:import` write and read a JSON backup of every table a restored instance needs (not caches, leases
+  or replay windows) on either store (`--exclude-history` skips
   execution history and the audit log). A backup restores into the same kind of store it came from: to move from
   SQLite to Postgres, use db:copy. Secrets stay encrypted in the backup; `db:import --source-master-key` re-encrypts
   them when the master key changed.
@@ -177,6 +181,8 @@ would turn *broken* on Postgres, or a row that would become unverifiable without
   chain broken at the same row), the only allowed change being the "two or more U+FFFD" rows above (on SQLite, Node 24
   stores a lone surrogate as U+FFFD). Otherwise nothing is restored. A backup from an older `db:export`, without the
   verdict, restores as before and prints a note.
+- `db:import` refuses a destination that already holds data; `--replace` replaces everything in it with exactly the
+  backup (see [Backup and recovery](./backup-and-recovery.md#restore-to-a-fresh-instance)).
 - `--merge` compares the verdict the same way when the destination has no chained audit rows (an empty log, or only old unchained rows). When it already holds chained rows,
   the merge goes ahead, prints that the audit verdict was not compared, and shows the restored chain's verdict.
 - `--allow-audit-change` restores even when the verdict changed (a plain restore, or a `--merge` into an empty audit

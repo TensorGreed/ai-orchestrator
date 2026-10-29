@@ -72,4 +72,6 @@ Cookie: ao_session=...
 
 - Separate secrets by environment (dev/stage/prod).
 - Rotate keys periodically.
+- Back up `SECRET_MASTER_KEY_BASE64` apart from the database: without it, stored secrets cannot be decrypted. To
+  change it, or to recover after losing it, see [Backup and recovery](/operations/backup-and-recovery).
 - Avoid sharing one secret across unrelated nodes/providers.

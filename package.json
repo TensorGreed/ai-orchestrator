@@ -19,7 +19,8 @@
     "test": "pnpm -r --if-present test",
     "lint": "pnpm -r --if-present lint",
     "build": "pnpm -r --if-present build",
-    "l2m": "node packages/cli/bin/l2m.mjs"
+    "l2m": "node packages/cli/bin/l2m.mjs",
+    "dr:drill": "node scripts/dr-drill.mjs"
   },
   "devDependencies": {
     "@playwright/test": "^1.59.1",
