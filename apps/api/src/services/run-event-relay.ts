@@ -91,8 +91,13 @@ function deltaParts(nodeId: string, delta: string, index: number, maxBytes: numb
   const parts: RunBusEvent[] = [];
   // JSON can triple a character's size (escapes); a conservative slice keeps every part under the limit.
   const chunk = Math.max(256, Math.floor((maxBytes - 200) / 6));
-  for (let offset = 0; offset < delta.length; offset += chunk) {
-    parts.push({ t: "llm_delta", nodeId, delta: delta.slice(offset, offset + chunk), index });
+  for (let offset = 0; offset < delta.length; ) {
+    let end = Math.min(delta.length, offset + chunk);
+    // Never between the two halves of a surrogate pair (an emoji, say): each part stays valid text.
+    const last = delta.charCodeAt(end - 1);
+    if (end < delta.length && last >= 0xd800 && last <= 0xdbff) end -= 1;
+    parts.push({ t: "llm_delta", nodeId, delta: delta.slice(offset, end), index });
+    offset = end;
   }
   return parts;
 }

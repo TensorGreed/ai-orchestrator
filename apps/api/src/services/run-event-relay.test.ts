@@ -89,6 +89,22 @@ describe("RunEventPublisher", () => {
     for (const event of sent) expect(JSON.stringify(event).length).toBeLessThanOrEqual(1_000);
   });
 
+  it("never splits a burst between the halves of a surrogate pair", async () => {
+    const sent: RunBusEvent[] = [];
+    const publisher = new RunEventPublisher({ publish: async (event) => void sent.push(event), coalesceMs: 10, maxBytes: 1_000 });
+    const text = "x" + "😀".repeat(2_000);
+    publisher.emit("llm_delta", { nodeId: "n1", delta: text, index: 0 });
+    await waitFor(() => sent.map((event) => event.delta).join("").length === text.length, "every part");
+    expect(sent.length).toBeGreaterThan(1);
+    for (const event of sent) {
+      const part = String(event.delta);
+      // No lone surrogate at either end.
+      expect(/^[\udc00-\udfff]|[\ud800-\udbff]$/.test(part)).toBe(false);
+      expect(Buffer.byteLength(JSON.stringify(event))).toBeLessThanOrEqual(1_000);
+    }
+    expect(sent.map((event) => event.delta).join("")).toBe(text);
+  });
+
   it("a failed publish is reported and the next events still go out", async () => {
     const sent: string[] = [];
     const errors: unknown[] = [];
