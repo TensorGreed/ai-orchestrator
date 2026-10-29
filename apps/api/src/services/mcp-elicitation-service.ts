@@ -334,7 +334,6 @@ export class McpElicitationService {
       expiresAt,
       ...(this.options.cluster ? { holderId: this.options.cluster.instanceId } : {})
     });
-    await this.options.audit({ ...auditBase, eventType: "mcp_elicitation.requested", outcome: "success", metadata: { ...metadata, expiresAt } });
 
     // A timeout or an abort settles the request in the background; a failed write is logged.
     const settleLater = (outcome: Parameters<McpElicitationService["finish"]>[1], answer: McpElicitationAnswer) => {
@@ -342,7 +341,8 @@ export class McpElicitationService {
         this.options.logger?.warn("MCP elicitation could not be settled", { id, error: error instanceof Error ? error.message : String(error) });
       });
     };
-    return new Promise<McpElicitationAnswer>((resolve) => {
+    // Waiting before the audit write below, so an answer that arrives meanwhile finds the request held here.
+    const waiting = new Promise<McpElicitationAnswer>((resolve) => {
       const entry: PendingEntry = {
         record,
         resolve,
@@ -378,6 +378,14 @@ export class McpElicitationService {
       this.pending.set(id, entry);
       this.emit(input.executionId, { phase: "created", elicitation: toElicitationView(record) });
     });
+    try {
+      await this.options.audit({ ...auditBase, eventType: "mcp_elicitation.requested", outcome: "success", metadata: { ...metadata, expiresAt } });
+    } catch (error) {
+      const note = "The request could not be recorded.";
+      await this.finish(id, { status: "expired", reason: note }, { id, action: "cancel", source: "timeout", note }).catch(() => undefined);
+      throw error;
+    }
+    return await waiting;
   }
 
   /**
@@ -428,11 +436,15 @@ export class McpElicitationService {
     actor: { userId: string; email: string }
   ): Promise<McpElicitationRecord> {
     const id = record.id;
-    const settled = await this.finish(
+    const finished = await this.finish(
       id,
       { status: SETTLED_STATUS[action], answeredBy: actor.email },
       { id, action, ...(content ? { content } : {}), source: "user" }
     );
+    if (finished && !finished.won) {
+      throw new McpElicitationAnswerError(`This request was already ${(finished.settled?.status ?? "expired").replace("_", " ")}.`, 409);
+    }
+    const settled = finished?.settled ?? null;
     await this.options.audit({
       category: "system",
       eventType: `mcp_elicitation.${SETTLED_STATUS[action]}`,
@@ -462,8 +474,13 @@ export class McpElicitationService {
   private async forwardAnswer(record: McpElicitationRecord, answer: ForwardedAnswer): Promise<McpElicitationRecord> {
     const cluster = this.options.cluster!;
     const holder = record.holderId ?? null;
-    const live = holder && holder !== cluster.instanceId ? await cluster.liveInstanceIds() : null;
-    if (!holder || holder === cluster.instanceId || !live?.has(holder)) {
+    if (holder === cluster.instanceId) {
+      // Held here but not in the map: the run has just settled it, or it is from before a restart under the same id.
+      // Left to the run's own settle, releaseExecution or expireStale, as on a single instance.
+      throw new McpElicitationAnswerError("This request is not waiting on this API instance any more; the run may have ended.", 409);
+    }
+    const live = holder ? await cluster.liveInstanceIds() : null;
+    if (!holder || !live?.has(holder)) {
       await this.expireHeldElsewhere(record, ELICITATION_HOLDER_GONE_REASON);
       throw new McpElicitationAnswerError("This request expired: the API instance running it stopped, so the run cannot take an answer any more.", 409);
     }
@@ -536,13 +553,22 @@ export class McpElicitationService {
     id: string,
     outcome: { status: Exclude<McpElicitationStatus, "pending">; answeredBy?: string | null; reason?: string | null },
     answer: McpElicitationAnswer
-  ): Promise<McpElicitationRecord | null> {
+  ): Promise<{ settled: McpElicitationRecord | null; won: boolean } | null> {
     const entry = this.pending.get(id);
     if (!entry) return null;
     this.pending.delete(id);
     clearTimeout(entry.timer);
     if (entry.signal && entry.onAbort) entry.signal.removeEventListener("abort", entry.onAbort);
-    await this.store.settleMcpElicitation(id, outcome);
+    const won = await this.store.settleMcpElicitation(id, outcome);
+    if (!won && this.options.cluster) {
+      // Phase 13.1 — another instance settled it first (it took this one for stopped and expired it): the run is
+      // told so at once instead of with this outcome.
+      const current = await this.store.getMcpElicitation(id);
+      if (current) this.emit(entry.record.executionId, { phase: "settled", elicitation: toElicitationView(current) });
+      const note = `The request expired: ${current?.reason ?? ELICITATION_HOLDER_GONE_REASON}`;
+      entry.resolve({ id, action: "cancel", source: "timeout", note });
+      return { settled: current, won: false };
+    }
     if (outcome.status === "expired") {
       await this.options.audit({
         category: "system",
@@ -558,7 +584,7 @@ export class McpElicitationService {
     const settled = await this.store.getMcpElicitation(id);
     if (settled) this.emit(entry.record.executionId, { phase: "settled", elicitation: toElicitationView(settled) });
     entry.resolve(answer);
-    return settled;
+    return { settled, won: true };
   }
 
   private emit(executionId: string, event: McpElicitationEvent): void {

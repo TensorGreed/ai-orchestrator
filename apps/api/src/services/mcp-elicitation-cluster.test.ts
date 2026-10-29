@@ -174,6 +174,65 @@ describe("MCP elicitations across instances", () => {
     expect(settled).toMatchObject({ status: "declined", answeredBy: "y@example.com" });
   });
 
+  it("an answer on the holder while the request is still being recorded settles it", async () => {
+    const { store, bus, live, secrets } = await setup();
+    let releaseAudit!: () => void;
+    const auditHeld = new Promise<void>((resolve) => {
+      releaseAudit = resolve;
+    });
+    const slow = new McpElicitationService(store, {
+      timeoutMs: 60_000,
+      audit: async (event) => {
+        if (event.eventType === "mcp_elicitation.requested") await auditHeld;
+      },
+      cluster: { instanceId: "a2", bus, liveInstanceIds: async () => new Set([...live, "a2"]), sealer: secrets }
+    });
+    services.push(slow);
+    const asked = slow.ask({ ...question, executionId: "exec-early" });
+    const pending = await pendingOf(store, "exec-early");
+    const settled = await slow.answer(pending.id, { action: "decline" }, owner);
+    expect(settled).toMatchObject({ status: "declined" });
+    releaseAudit();
+    expect(await asked).toMatchObject({ action: "decline", source: "user" });
+  });
+
+  it("refuses an answer on the holder for a request it no longer waits on, without expiring it", async () => {
+    const { store, a } = await setup();
+    await store.createMcpElicitation({
+      id: "elc_held_here",
+      executionId: "exec-held-here",
+      workflowId: "wf",
+      nodeId: "n",
+      serverId: "s",
+      toolName: "t",
+      message: "m",
+      requestedSchema: { type: "object", properties: {} },
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      createdBy: null,
+      triggerType: "manual",
+      holderId: "a"
+    });
+    const refused = await a.answer("elc_held_here", { action: "decline" }, owner).catch((error: unknown) => error);
+    expect(refused).toBeInstanceOf(McpElicitationAnswerError);
+    expect(refused).toMatchObject({ statusCode: 409, message: expect.stringContaining("not waiting on this API instance") });
+    expect((await store.getMcpElicitation("elc_held_here"))?.status).toBe("pending");
+  });
+
+  it("a holder whose request another instance expired tells the run at once and audits nothing more", async () => {
+    const { store, a, b, bus, live, secrets, audits } = await setup();
+    const asked = a.ask({ ...question, executionId: "exec-lost" });
+    const pending = await pendingOf(store, "exec-lost");
+    // A heartbeat lapse: b takes a for stopped and expires the request; a is live again afterwards.
+    live.delete("a");
+    expect(await b.expireOrphaned()).toBe(1);
+    live.add("a");
+    // An answer forwarded to a before it learnt of the expiry: its settle loses, so the run gets the expiry instead.
+    await bus.publish("ctl", { t: ELICITATION_ANSWER_MESSAGE, id: pending.id, sealed: secrets.sealValue(`${ELICITATION_ANSWER_MESSAGE}:${pending.id}`, JSON.stringify({ action: "accept", content: { region: "eu" }, actor: { userId: owner.userId, email: owner.email } })) });
+    expect(await asked).toMatchObject({ action: "cancel", source: "timeout", note: expect.stringContaining(ELICITATION_HOLDER_GONE_REASON) });
+    expect(await store.getMcpElicitation(pending.id)).toMatchObject({ status: "expired", reason: ELICITATION_HOLDER_GONE_REASON });
+    expect(audits.filter((entry) => entry.instance === "a" && entry.event.eventType !== "mcp_elicitation.requested")).toEqual([]);
+  });
+
   it("without cluster options an answer elsewhere is refused as before", async () => {
     testStore = await createTestStore();
     const holder = new McpElicitationService(testStore.store, { timeoutMs: 60_000, audit: () => undefined });
