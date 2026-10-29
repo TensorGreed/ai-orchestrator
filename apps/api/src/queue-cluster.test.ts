@@ -663,6 +663,61 @@ run("the queue across replicas on one Postgres database", () => {
     }
   }, 90_000);
 
+  it("a worker stalled before its first effect: the job is re-run alongside the live zombie, whose late marker is refused", async () => {
+    const server = await callServer();
+    try {
+      await database();
+      const api = await addReplica("api-0", "api");
+      const leader = await addReplica("leader-only", "worker", { QUEUE_POOLS: "unused" });
+      const stalled = await addReplica("worker-1", "worker");
+      // The stalled worker's marker write hangs: it is about to start the call (the first effect) but has not.
+      let releaseMark: () => void = () => undefined;
+      const markHeld = new Promise<void>((resolve) => (releaseMark = resolve));
+      let markReached = false;
+      const mark = stalled.store.markQueueEffectsStarted.bind(stalled.store);
+      stalled.store.markQueueEffectsStarted = async (fence) => {
+        markReached = true;
+        await markHeld;
+        return await mark(fence);
+      };
+      const requester = await builderCookie(api, "requester");
+      const lead = await builderCookie(api, "lead");
+      const workflow = gatedWorkflow("wf-zombie-early", server.port, { before: true });
+      const created = await api.app.inject({ method: "POST", url: "/api/workflows", headers: { cookie: requester }, payload: workflow as unknown as Record<string, unknown> });
+      expect(created.statusCode).toBeLessThan(300);
+      const executionId = await enqueue(api, requester, "wf-zombie-early");
+      await until(() => markReached, "the first worker to reach its marker");
+      // The worker stalls (no heartbeat, no self-fence) with its run alive: nothing outside the run has happened.
+      stalled.queue!.stop();
+      await until(async () => (await sql<{ attempts: number; status: string }>(`SELECT attempts, status FROM execution_queue WHERE id = $1`, [executionId]))[0]?.status === "pending", "the reaper to re-queue the job", 30_000);
+      expect(await sql(`SELECT id FROM execution_queue_dlq`)).toEqual([]);
+
+      // A healthy worker runs it to the gate while the zombie is still alive; it is approved, resumed and finished.
+      const healthy = await addReplica("worker-2", "worker");
+      await until(async () => (await api.store.getExecutionHistory(executionId))?.status === "waiting_approval", "the healthy worker's pause", 30_000);
+      await approve(leader, lead, executionId);
+      await until(async () => (await api.store.getExecutionHistory(executionId))?.status === "success", "the resumed run to finish", 30_000);
+      await until(async () => (await api.store.getWorkflowExecutionState(executionId)) === null, "the paused state to be cleared");
+      expect(healthy.ran).toEqual([executionId, executionId]);
+      expect(stalled.contexts.get(executionId)!.signal.aborted).toBe(false);
+
+      // The zombie wakes: its marker write is refused (another claim holds the job), so its run stops before the call.
+      releaseMark();
+      const zombie = stalled.contexts.get(executionId)!;
+      await until(() => zombie.signal.aborted, "the stalled worker to stop its run", 30_000);
+      expect(zombie.signal.reason).toBeInstanceOf(QueueLeaseLostAbort);
+      await until(() => stalled.queue!.inFlightCount() === 0, "the stalled worker's run to end");
+      expect((await api.store.listApprovalRequestsForExecution(executionId)).map((request) => request.status)).toEqual(["approved"]);
+      expect(await api.store.getWorkflowExecutionState(executionId)).toBeNull();
+      expect(await api.store.getExecutionHistory(executionId)).toMatchObject({ status: "success" });
+      // The call ran once, on the healthy worker.
+      expect(server.hits()).toBe(1);
+      expect(leader.ran).toEqual([]);
+    } finally {
+      await server.close();
+    }
+  }, 120_000);
+
   it("a stalled worker whose job was taken back mid-call: interrupted, never re-run, and its late write and pause land nowhere", async () => {
     const server = await callServer();
     try {
