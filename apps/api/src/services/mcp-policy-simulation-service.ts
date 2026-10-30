@@ -17,6 +17,7 @@ import {
   MCP_POLICY_SIMULATION_MAX_EXAMPLES,
   emptyMcpPolicySimulationCounts,
   type McpPolicyDraftRule,
+  type McpPolicyShadowHitGroup,
   type McpPolicyShadowHitRow,
   type McpPolicyShadowHits,
   type McpPolicySimulationBucketName,
@@ -29,7 +30,7 @@ import {
   type McpToolClassificationOverride,
   type McpToolPolicyRule
 } from "@ai-orchestrator/shared";
-import { policyRuleMode, simulatePolicyTransition, type PolicySimulationCall } from "@ai-orchestrator/mcp-sdk";
+import { decidePolicyOutcome, policyRuleMode, simulatePolicyTransition, type PolicySimulationCall } from "@ai-orchestrator/mcp-sdk";
 import type { McpToolCallRecord } from "../db/database.js";
 import type { Store } from "../db/store.js";
 
@@ -42,6 +43,12 @@ export const MCP_POLICY_SCAN_CAP = 50_000;
 export const MCP_POLICY_SCAN_PAGE = 1_000;
 /** Most workflow / client groups listed in a simulation result. */
 export const MCP_POLICY_SIMULATION_MAX_GROUPS = 100;
+/**
+ * Most evaluation work one simulation may do: per call, the readings tried (2^undecided rules) times the rules in
+ * the call's scope, summed. 50,000 calls with a few rules each use well under a tenth of it; a draft built to make
+ * every call try 256 readings of hundreds of rules stops early instead of holding the event loop.
+ */
+export const MCP_POLICY_SIMULATION_WORK_BUDGET = 20_000_000;
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -84,11 +91,36 @@ export interface McpPolicySimulationInput {
   examples?: number;
 }
 
-/** What a page scan visits: each call, with a way to stop early. */
+/** What a page scan read; `stopped` when the visitor ended it early. */
 interface ScanOutcome {
   scanned: number;
   capped: boolean;
+  stopped: boolean;
   oldestScannedAt: string | null;
+}
+
+/**
+ * The annotations and admin mark a call's annotation-hint rules read, from today's snapshot: unknown (`{}`) when the
+ * snapshot was captured, or the mark set, after the call, since they may differ from what the call ran under.
+ */
+export function annotationsAtCall(
+  snapshot: { capturedAt: string; annotations: McpToolAnnotations | null },
+  mark: Pick<McpToolClassificationOverride, "readOnly" | "setAt"> | null,
+  startedAt: string
+): { annotations?: McpToolAnnotations | null; manualReadOnly?: boolean | null } {
+  if (laterThan(snapshot.capturedAt, startedAt)) return {};
+  if (mark && laterThan(mark.setAt, startedAt)) return {};
+  return { annotations: snapshot.annotations, manualReadOnly: mark ? mark.readOnly : null };
+}
+
+/** A visitor returns false to stop the scan. */
+type ScanVisitor = (call: McpToolCallRecord) => boolean | void;
+
+function laterThan(a: string | null | undefined, b: string): boolean {
+  if (!a) return false;
+  const left = Date.parse(a);
+  const right = Date.parse(b);
+  return Number.isFinite(left) && Number.isFinite(right) && left > right;
 }
 
 type ToolAnnotationLookup = (call: McpToolCallRecord) => { annotations?: McpToolAnnotations | null; manualReadOnly?: boolean | null };
@@ -100,36 +132,41 @@ export class McpPolicySimulationService {
   private readonly scanCap: number;
   private readonly pageSize: number;
 
-  constructor(options: { store: Store; hashKey: Uint8Array; now?: () => Date; scanCap?: number; pageSize?: number }) {
+  private readonly workBudget: number;
+
+  constructor(options: { store: Store; hashKey: Uint8Array; now?: () => Date; scanCap?: number; pageSize?: number; workBudget?: number }) {
     this.store = options.store;
     this.hashKey = options.hashKey;
     this.now = options.now ?? (() => new Date());
     this.scanCap = options.scanCap ?? MCP_POLICY_SCAN_CAP;
     this.pageSize = options.pageSize ?? MCP_POLICY_SCAN_PAGE;
+    this.workBudget = options.workBudget ?? MCP_POLICY_SIMULATION_WORK_BUDGET;
   }
 
-  /** Reads the window newest first, page by page, until it ends or the cap is reached. */
-  async scan(
-    filter: Omit<Parameters<Store["scanMcpToolCalls"]>[0], "before" | "limit">,
-    visit: (call: McpToolCallRecord) => void
-  ): Promise<ScanOutcome> {
+  /** The most calls one scan reads. */
+  get cap(): number {
+    return this.scanCap;
+  }
+
+  /** Reads the window newest first, page by page, until it ends, the cap is reached or the visitor returns false. */
+  async scan(filter: Omit<Parameters<Store["scanMcpToolCalls"]>[0], "before" | "limit">, visit: ScanVisitor): Promise<ScanOutcome> {
     let before: { startedAt: string; id: string } | null = null;
     let scanned = 0;
     let oldest: string | null = null;
     for (;;) {
       const page = await this.store.scanMcpToolCalls({ ...filter, before, limit: this.pageSize });
       for (const call of page) {
-        if (scanned >= this.scanCap) return { scanned, capped: true, oldestScannedAt: oldest };
+        if (scanned >= this.scanCap) return { scanned, capped: true, stopped: false, oldestScannedAt: oldest };
         scanned += 1;
         oldest = call.startedAt;
-        visit(call);
+        if (visit(call) === false) return { scanned, capped: true, stopped: true, oldestScannedAt: oldest };
       }
-      if (page.length < this.pageSize) return { scanned, capped: false, oldestScannedAt: oldest };
+      if (page.length < this.pageSize) return { scanned, capped: false, stopped: false, oldestScannedAt: oldest };
       const last = page[page.length - 1]!;
       before = { startedAt: last.startedAt, id: last.id };
       if (scanned >= this.scanCap) {
         const more = await this.store.scanMcpToolCalls({ ...filter, before, limit: 1 });
-        return { scanned, capped: more.length > 0, oldestScannedAt: oldest };
+        return { scanned, capped: more.length > 0, stopped: false, oldestScannedAt: oldest };
       }
     }
   }
@@ -164,17 +201,20 @@ export class McpPolicySimulationService {
     if (!rules.some((rule) => rule.enabled && rule.annotationHint)) return null;
     const classifications: McpToolClassificationOverride[] = await this.store.listMcpToolClassifications();
     const servers = new Map((await this.store.listMcpServers()).map((server) => [server.id, server]));
-    const snapshots = new Map<string, Map<string, McpToolAnnotations | null> | null>();
+    const snapshots = new Map<string, { capturedAt: string; tools: Map<string, McpToolAnnotations | null> } | null>();
     for (const server of servers.values()) {
       const snapshot = server.currentSnapshotId ? await this.store.getMcpToolSnapshot(server.currentSnapshotId) : null;
-      snapshots.set(server.id, snapshot ? new Map(snapshot.tools.map((tool) => [tool.name, tool.annotations ?? null])) : null);
+      snapshots.set(
+        server.id,
+        snapshot ? { capturedAt: snapshot.createdAt, tools: new Map(snapshot.tools.map((tool) => [tool.name, tool.annotations ?? null])) } : null
+      );
     }
     return (call) => {
       if (!call.registryServerId) return {};
-      const tools = snapshots.get(call.registryServerId);
-      if (!tools || !tools.has(call.toolName)) return {};
+      const snapshot = snapshots.get(call.registryServerId);
+      if (!snapshot || !snapshot.tools.has(call.toolName)) return {};
       const mark = classifications.find((entry) => entry.registryServerId === call.registryServerId && entry.toolName === call.toolName);
-      return { annotations: tools.get(call.toolName) ?? null, manualReadOnly: mark ? mark.readOnly : null };
+      return annotationsAtCall({ capturedAt: snapshot.capturedAt, annotations: snapshot.tools.get(call.toolName) ?? null }, mark ?? null, call.startedAt);
     };
   }
 
@@ -215,6 +255,7 @@ export class McpPolicySimulationService {
     // Examples are collected first and named once the scan is done.
     const pending: Array<{ bucket: McpPolicySimulationBucketName; example: Omit<McpPolicySimulationExample, "workflowName" | "clientName" | "serverName"> }> = [];
     const collected = emptyMcpPolicySimulationCounts();
+    let work = 0;
     const outcome = await this.scan(
       {
         since: since.toISOString(),
@@ -227,6 +268,7 @@ export class McpPolicySimulationService {
         ...(input.filters?.toolName ? { toolName: input.filters.toolName } : {})
       },
       (call) => {
+        if (work >= this.workBudget) return false;
         const gateway = call.source === "gateway";
         let bucket: McpPolicySimulationBucketName;
         let currentEffect: McpPolicySimulationExample["currentEffect"] = null;
@@ -252,6 +294,7 @@ export class McpPolicySimulationService {
             summary: call.argsSummary
           };
           const transition = simulatePolicyTransition(current, draft, recorded, context);
+          work += transition.work;
           bucket = transition.bucket;
           currentEffect = transition.current.effect;
           draftEffect = transition.draft.effect;
@@ -334,6 +377,7 @@ export class McpPolicySimulationService {
       until: until.toISOString(),
       scanned: outcome.scanned,
       capped: outcome.capped,
+      ...(outcome.capped ? { cappedReason: outcome.stopped ? ("work_budget" as const) : ("scan_cap" as const) } : {}),
       scanCap: this.scanCap,
       oldestScannedAt: outcome.oldestScannedAt,
       counts,
@@ -354,42 +398,78 @@ export class McpPolicySimulationService {
   }
 
   /**
-   * Shadow rule hits over the last `days` days, from the decisions recorded on tool calls: how often each shadow
-   * rule matched, and how often it would have changed the call's outcome had it been enforced. Every current shadow
-   * rule is listed, with zeros when it saw nothing.
+   * Shadow rule hits over the last `days` days, from the decisions recorded on tool calls (`policy_decision_json`).
+   * For each current shadow rule: how often it matched, and how often the outcome would have changed had THIS rule
+   * alone been enforced next to the rules enforced now ("if you enforce just this rule"). For each accepted
+   * suggestion with rules still in shadow: the same with all of those rules enforced together. Every shadow rule is
+   * listed, with zeros when it saw nothing. Rules are read as they are now; a matched rule since deleted is left out.
    */
   async shadowHits(days: number): Promise<McpPolicyShadowHits> {
     const until = this.now();
     const since = new Date(until.getTime() - days * DAY_MS);
     const rules = await this.store.listMcpToolPolicies();
-    const shadowIds = new Set(rules.filter((rule) => policyRuleMode(rule) === "shadow").map((rule) => rule.id));
+    const byId = new Map(rules.map((rule) => [rule.id, rule]));
+    const isShadow = (rule: McpToolPolicyRule) => policyRuleMode(rule) === "shadow";
+    const isEnforced = (rule: McpToolPolicyRule) => rule.enabled && policyRuleMode(rule) === "enforce";
     const hits = new Map<string, McpPolicyShadowHitRow>();
-    for (const id of shadowIds) hits.set(id, { ruleId: id, matched: 0, wouldChange: 0, lastMatchedAt: null, lastWouldChangeAt: null });
+    for (const rule of rules) {
+      if (isShadow(rule)) hits.set(rule.id, { ruleId: rule.id, matched: 0, wouldChange: 0, lastMatchedAt: null, lastWouldChangeAt: null });
+    }
+    const accepted = hits.size > 0 ? await this.store.listMcpPolicySuggestions({ status: "accepted" }) : [];
+    const groups: Array<McpPolicyShadowHitGroup & { members: Set<string> }> = [];
+    for (const suggestion of accepted) {
+      const ruleIds = suggestion.acceptedRuleIds.filter((id) => hits.has(id));
+      if (ruleIds.length > 0) groups.push({ suggestionId: suggestion.id, ruleIds, matched: 0, wouldChange: 0, lastWouldChangeAt: null, members: new Set(ruleIds) });
+    }
     const later = (a: string | null, b: string) => (a === null || b > a ? b : a);
-    const outcome = await this.scan(
-      { since: since.toISOString(), until: until.toISOString(), sources: ["workflow", "gateway", "playground"], withPolicyDecision: true },
-      (call) => {
-        const decision = call.policyDecision;
-        if (!decision) return;
-        const matchedShadow = [...new Set(decision.matched.filter((entry) => entry.mode === "shadow").map((entry) => entry.ruleId))];
-        for (const ruleId of matchedShadow) {
-          const row = hits.get(ruleId);
-          if (!row) continue;
-          row.matched += 1;
-          row.lastMatchedAt = later(row.lastMatchedAt, call.startedAt);
-        }
-        if (decision.shadow?.changed) {
-          const decider = decision.shadow.ruleId;
-          const credited = decider && matchedShadow.includes(decider) ? [decider] : matchedShadow;
-          for (const ruleId of credited) {
-            const row = hits.get(ruleId);
-            if (!row) continue;
-            row.wouldChange += 1;
-            row.lastWouldChangeAt = later(row.lastWouldChangeAt, call.startedAt);
-          }
-        }
-      }
-    );
-    return { days, since: since.toISOString(), scanned: outcome.scanned, capped: outcome.capped, rules: [...hits.values()] };
+    const outcome =
+      hits.size === 0
+        ? { scanned: 0, capped: false }
+        : await this.scan(
+            { since: since.toISOString(), until: until.toISOString(), sources: ["workflow", "gateway", "playground"], withPolicyDecision: true },
+            (call) => {
+              const decision = call.policyDecision;
+              if (!decision) return;
+              const matched = [...new Set(decision.matched.map((entry) => entry.ruleId))]
+                .map((id) => byId.get(id))
+                .filter((rule): rule is McpToolPolicyRule => rule !== undefined);
+              const matchedShadow = matched.filter((rule) => hits.has(rule.id));
+              if (matchedShadow.length === 0) return;
+              const enforcedNow = matched.filter(isEnforced);
+              const base = decidePolicyOutcome(enforcedNow).effect;
+              for (const rule of matchedShadow) {
+                const row = hits.get(rule.id)!;
+                row.matched += 1;
+                row.lastMatchedAt = later(row.lastMatchedAt, call.startedAt);
+                if (rule.enabled && decidePolicyOutcome([...enforcedNow, rule]).effect !== base) {
+                  row.wouldChange += 1;
+                  row.lastWouldChangeAt = later(row.lastWouldChangeAt, call.startedAt);
+                }
+              }
+              for (const group of groups) {
+                const members = matchedShadow.filter((rule) => group.members.has(rule.id) && rule.enabled);
+                if (!matchedShadow.some((rule) => group.members.has(rule.id))) continue;
+                group.matched += 1;
+                if (members.length > 0 && decidePolicyOutcome([...enforcedNow, ...members]).effect !== base) {
+                  group.wouldChange += 1;
+                  group.lastWouldChangeAt = later(group.lastWouldChangeAt, call.startedAt);
+                }
+              }
+            }
+          );
+    return {
+      days,
+      since: since.toISOString(),
+      scanned: outcome.scanned,
+      capped: outcome.capped,
+      rules: [...hits.values()],
+      groups: groups.map((group) => ({
+        suggestionId: group.suggestionId,
+        ruleIds: group.ruleIds,
+        matched: group.matched,
+        wouldChange: group.wouldChange,
+        lastWouldChangeAt: group.lastWouldChangeAt
+      }))
+    };
   }
 }

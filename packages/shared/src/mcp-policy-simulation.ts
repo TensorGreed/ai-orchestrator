@@ -135,8 +135,13 @@ export interface McpPolicySimulationResult {
   until: string;
   /** Calls read (newest first). */
   scanned: number;
-  /** True when the scan stopped at `scanCap` before the start of the window; `oldestScannedAt` says how far it got. */
+  /**
+   * True when the scan stopped before the start of the window; `oldestScannedAt` says how far it got and
+   * `cappedReason` why: `scan_cap` (it read `scanCap` calls) or `work_budget` (the rules and calls needed more
+   * evaluation work than one simulation may do).
+   */
   capped: boolean;
+  cappedReason?: "scan_cap" | "work_budget";
   scanCap: number;
   oldestScannedAt: string | null;
   counts: McpPolicySimulationCounts;
@@ -173,6 +178,13 @@ export const mcpPolicySuggestionGenerateSchema = z
   })
   .strict();
 
+/** Accept: the fingerprint of the proposal the admin reviewed; a suggestion regenerated since is refused (409). */
+export const mcpPolicySuggestionAcceptSchema = z
+  .object({
+    fingerprint: z.string().regex(/^[0-9a-f]{64}$/)
+  })
+  .strict();
+
 export const mcpPolicySuggestionListQuerySchema = z
   .object({
     status: z.enum(["open", "accepted", "dismissed", "all"]).optional()
@@ -205,7 +217,8 @@ export type McpPolicySuggestionSkipReason =
   | "location"
   | "not_positive"
   | "mixed_types"
-  | "both_values";
+  | "both_values"
+  | "normalised";
 
 export interface McpPolicySuggestionToolEvidence {
   toolName: string;
@@ -214,15 +227,31 @@ export interface McpPolicySuggestionToolEvidence {
   skipped: Array<{ path: string; reason: McpPolicySuggestionSkipReason }>;
 }
 
+/** An update to a scope's accepted suggestion: allows for tools it started using since. */
+export interface McpPolicySuggestionUpdate {
+  /** The accepted suggestions whose rules this one extends. */
+  suggestionIds: string[];
+  /** Their rules still in place. */
+  ruleIds: string[];
+  /** The tools this update adds allows for. */
+  addedTools: string[];
+}
+
 export interface McpPolicySuggestionEvidence {
-  /** Calls the suggestion is built from (reached the server, not by an admin, with a recorded role). */
+  /** Calls the suggestion is built from (reached the server, not by an admin; the role may be unrecorded). */
   calls: number;
   /** Calls of the workflow or client in the window, before those exclusions. */
   scopeCalls: number;
   roles: McpPolicyRole[];
   tools: McpPolicySuggestionToolEvidence[];
-  /** True when the scan stopped at its cap before the start of the window. */
+  /** True when the scan stopped at its cap before the start of the window (no suggestion is built then). */
   capped: boolean;
+  /** Calls without a recorded role (counted in `calls`). */
+  unknownRoleCalls?: number;
+  /** Set on an "Update accepted rules" suggestion: it adds allows next to an accepted suggestion's rules. */
+  updates?: McpPolicySuggestionUpdate;
+  /** Servers configured inline share their adapter id, so these rules cover every inline server of that adapter. */
+  inlineAdapter?: boolean;
 }
 
 export interface McpPolicySuggestion {
@@ -268,6 +297,8 @@ export interface McpPolicySuggestionGenerateResult {
   minCalls: number;
   scanned: number;
   capped: boolean;
+  /** Set when nothing was generated: `scan_capped`, the window held more calls than the scan reads. */
+  notGenerated?: "scan_capped";
   created: number;
   updated: number;
   unchanged: number;
@@ -280,9 +311,23 @@ export interface McpPolicyShadowHitRow {
   ruleId: string;
   /** Calls the shadow rule matched. */
   matched: number;
-  /** Calls whose outcome the shadow rule would have changed, had it been enforced. */
+  /**
+   * Calls whose outcome would have changed had THIS rule alone been enforced, next to the rules enforced now
+   * ("if you enforce just this rule"). Other shadow rules are left out, so a deny shows the calls it would block
+   * even while a shadow allow would carve them out.
+   */
   wouldChange: number;
   lastMatchedAt: string | null;
+  lastWouldChangeAt: string | null;
+}
+
+/** Shadow hits of an accepted suggestion's rules taken together (enforced now + all of its shadow rules). */
+export interface McpPolicyShadowHitGroup {
+  suggestionId: string;
+  /** Its rules still in shadow. */
+  ruleIds: string[];
+  matched: number;
+  wouldChange: number;
   lastWouldChangeAt: string | null;
 }
 
@@ -290,8 +335,10 @@ export interface McpPolicyShadowHits {
   days: number;
   since: string;
   scanned: number;
+  /** True when the window held more decided calls than the scan reads: the counts are partial. */
   capped: boolean;
   rules: McpPolicyShadowHitRow[];
+  groups: McpPolicyShadowHitGroup[];
 }
 
 export const mcpPolicyShadowHitsQuerySchema = z

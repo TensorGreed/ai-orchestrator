@@ -4,9 +4,10 @@
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { McpPolicyDraftRule, McpToolPolicyRule, ToolArgumentSummary, Workflow } from "@ai-orchestrator/shared";
+import { toolArgumentHashKeyId } from "@ai-orchestrator/mcp-sdk";
 import { createTestStore, type TestStore } from "../test-support/test-store.js";
 import type { McpToolCallWrite } from "../db/database.js";
-import { McpPolicySimulationService } from "./mcp-policy-simulation-service.js";
+import { McpPolicySimulationService, annotationsAtCall } from "./mcp-policy-simulation-service.js";
 import { McpPolicySuggestionError, McpPolicySuggestionService, callReachedServer, constraintsFromSummaries } from "./mcp-policy-suggestion-service.js";
 
 const NOW = new Date("2026-10-30T12:00:00.000Z");
@@ -30,7 +31,7 @@ function workflow(id: string, name: string): Workflow {
 }
 
 function summary(fields: ToolArgumentSummary["fields"]): ToolArgumentSummary {
-  return { v: 2, fields } as ToolArgumentSummary;
+  return { v: 3, kid: toolArgumentHashKeyId(hashKey), fields } as ToolArgumentSummary;
 }
 
 async function record(overrides: Partial<McpToolCallWrite> = {}): Promise<string> {
@@ -134,10 +135,35 @@ describe("policy simulation", () => {
     await expect(simulation().simulate({ windowDays: 7, rules: [{ keep: "mtp_missing" }] })).rejects.toThrow(/does not exist/);
   });
 
+  it("reads format 2 summaries, but not their text or their hashes", async () => {
+    await record({ argsSummary: { v: 2, fields: { repo: { type: "string", values: ["docs"] } } } });
+    await record({ argsSummary: { v: 2, fields: { limit: { type: "number", values: [50], min: 50, max: 50 } } } });
+    const result = await simulation().simulate({ windowDays: 7, addRule: denyDocs });
+    expect(result.counts).toMatchObject({ undetermined: 1, unchanged: 1 });
+    const byLimit = await simulation().simulate({ windowDays: 7, addRule: { effect: "deny", conditions: { all: [{ path: "limit", op: "gt", value: 10 }] } } });
+    expect(byLimit.counts).toMatchObject({ newly_denied: 1, unchanged: 1 });
+  });
+
+  it("stops when the evaluation work is over budget, and says why", async () => {
+    for (let index = 0; index < 6; index += 1) await record();
+    const result = await new McpPolicySimulationService({ store: test.store, hashKey, now: () => NOW, workBudget: 3 }).simulate({ windowDays: 7, addRule: denyDocs });
+    expect(result).toMatchObject({ capped: true, cappedReason: "work_budget" });
+    expect(result.scanned).toBeLessThan(6);
+    expect((await simulation().simulate({ windowDays: 7, addRule: denyDocs })).cappedReason).toBeUndefined();
+  });
+
+  it("does not read annotations from a snapshot taken, or a mark set, after the call", () => {
+    const snapshot = { capturedAt: ago(5), annotations: { readOnlyHint: true } };
+    expect(annotationsAtCall(snapshot, null, ago(1))).toEqual({ annotations: { readOnlyHint: true }, manualReadOnly: null });
+    expect(annotationsAtCall(snapshot, null, ago(6))).toEqual({});
+    expect(annotationsAtCall(snapshot, { readOnly: false, setAt: ago(2) }, ago(3))).toEqual({});
+    expect(annotationsAtCall(snapshot, { readOnly: false, setAt: ago(4) }, ago(3))).toEqual({ annotations: { readOnlyHint: true }, manualReadOnly: false });
+  });
+
   it("stops at the scan cap and says so", async () => {
     for (let index = 0; index < 7; index += 1) await record();
     const result = await simulation({ scanCap: 5, pageSize: 2 }).simulate({ windowDays: 7, addRule: denyDocs });
-    expect(result).toMatchObject({ scanned: 5, capped: true, scanCap: 5 });
+    expect(result).toMatchObject({ scanned: 5, capped: true, scanCap: 5, cappedReason: "scan_cap" });
     const exact = await simulation({ scanCap: 7, pageSize: 7 }).simulate({ windowDays: 7, addRule: denyDocs });
     expect(exact).toMatchObject({ scanned: 7, capped: false });
   });
@@ -149,16 +175,63 @@ describe("policy simulation", () => {
   });
 
   it("counts shadow rule hits from recorded decisions", async () => {
+    await test.store.createMcpToolPolicy(rule({ id: "mtp_enforced", effect: "deny", toolPattern: "create_issue" }));
     await test.store.createMcpToolPolicy(rule({ id: "mtp_shadow", effect: "deny", mode: "shadow" }));
     await test.store.createMcpToolPolicy(rule({ id: "mtp_quiet", effect: "deny", mode: "shadow", toolPattern: "nothing" }));
     const matched = [{ ruleId: "mtp_shadow", mode: "shadow" as const, effect: "deny" as const }];
     await record({ policyDecision: { effect: "allow", decidedBy: "default", matched, shadow: { effect: "deny", ruleId: "mtp_shadow", changed: true } } });
-    await record({ policyDecision: { effect: "deny", decidedBy: "rule", matched, shadow: { effect: "deny", changed: false } } });
+    // Denied already by an enforced rule: enforcing the shadow deny changes nothing.
+    await record({
+      policyDecision: {
+        effect: "deny",
+        decidedBy: "rule",
+        matched: [{ ruleId: "mtp_enforced", mode: "enforce", effect: "deny" }, ...matched],
+        shadow: { effect: "deny", changed: false }
+      }
+    });
     await record({ policyDecision: { effect: "allow", decidedBy: "default", matched }, startedAt: ago(24 * 3) });
     const hits = await simulation().shadowHits(1);
     expect(hits.rules.find((row) => row.ruleId === "mtp_shadow")).toMatchObject({ matched: 2, wouldChange: 1 });
     expect(hits.rules.find((row) => row.ruleId === "mtp_quiet")).toMatchObject({ matched: 0, wouldChange: 0, lastMatchedAt: null });
     expect((await simulation().shadowHits(7)).rules.find((row) => row.ruleId === "mtp_shadow")?.matched).toBe(3);
+  });
+
+  it("counts what a shadow deny would change if enforced alone, and what its suggestion would change together", async () => {
+    // An accepted suggestion: a shadow deny on every tool and a shadow allow carving out the tool the scope uses.
+    // Recorded with both in shadow, the calls show no change; the deny enforced alone would block all of them.
+    await test.store.createMcpToolPolicy(rule({ id: "mtp_deny", effect: "deny", mode: "shadow", serverId: "mcp_github", workflowIds: ["wf_notes"], roles: ["builder"] }));
+    await test.store.createMcpToolPolicy(
+      rule({ id: "mtp_allow", effect: "allow", mode: "shadow", serverId: "mcp_github", toolPattern: "create_issue", workflowIds: ["wf_notes"], roles: ["builder"] })
+    );
+    const stored = await test.store.upsertOpenMcpPolicySuggestion({
+      id: "mps_1",
+      scopeKind: "workflow",
+      scopeId: "wf_notes",
+      scopeName: "Release notes",
+      serverId: "mcp_github",
+      serverName: null,
+      fingerprint: "f".repeat(64),
+      rules: [],
+      evidence: { calls: 0, scopeCalls: 0, roles: [], tools: [], capped: false },
+      windowDays: 30,
+      windowStart: ago(24 * 30),
+      windowEnd: ago(0),
+      callCount: 0,
+      createdBy: null,
+      now: ago(0)
+    });
+    await test.store.transitionMcpPolicySuggestion(stored.suggestion.id, { from: "open", to: "accepted", decidedBy: "a", decidedAt: ago(0), acceptedRuleIds: ["mtp_deny", "mtp_allow"] });
+    const matched = [
+      { ruleId: "mtp_deny", mode: "shadow" as const, effect: "deny" as const },
+      { ruleId: "mtp_allow", mode: "shadow" as const, effect: "allow" as const }
+    ];
+    for (let index = 0; index < 6; index += 1) {
+      await record({ policyDecision: { effect: "allow", decidedBy: "default", matched, shadow: { effect: "allow", ruleId: "mtp_allow", changed: false } } });
+    }
+    const hits = await simulation().shadowHits(7);
+    expect(hits.rules.find((row) => row.ruleId === "mtp_deny")).toMatchObject({ matched: 6, wouldChange: 6 });
+    expect(hits.rules.find((row) => row.ruleId === "mtp_allow")).toMatchObject({ matched: 6, wouldChange: 0 });
+    expect(hits.groups).toEqual([expect.objectContaining({ suggestionId: "mps_1", matched: 6, wouldChange: 0 })]);
   });
 });
 
@@ -208,6 +281,9 @@ describe("constraints from summaries", () => {
     expect(callReachedServer({ ok: true, error: null })).toBe(true);
     expect(callReachedServer({ ok: false, error: "upstream 500" })).toBe(true);
     expect(callReachedServer({ ok: false, error: "Tool 'x' was blocked by the guard" })).toBe(false);
+    for (const error of ["connect ECONNREFUSED 127.0.0.1:9", "getaddrinfo ENOTFOUND mcp.invalid", "Connect Timeout Error (attempted address: x:443)"]) {
+      expect(callReachedServer({ ok: false, error }), error).toBe(false);
+    }
     expect(callReachedServer({ ok: false, error: null, rejection: { kind: "rate_limited" } as never })).toBe(false);
     expect(callReachedServer({ ok: true, error: null, policyDecision: { effect: "require_approval", decidedBy: "rule", approval: "pending", matched: [] } })).toBe(false);
     expect(callReachedServer({ ok: true, error: null, policyDecision: { effect: "require_approval", decidedBy: "rule", approval: "approved", matched: [] } })).toBe(true);
@@ -257,16 +333,92 @@ describe("least-privilege suggestions", () => {
     expect(again.suggestions[0]!.id).toBe(suggestion!.id);
   });
 
-  it("needs enough usable calls, and leaves out admin, unknown-role, refused and playground calls", async () => {
-    await usage(19);
-    await usage(5, { subjectRole: "admin" });
+  it("needs enough usable calls, and leaves out admin, refused, unconnected and playground calls", async () => {
+    await usage(14);
+    // A call whose role was not recorded still used its tool, so it counts.
     await usage(5, { subjectRole: null });
+    await usage(5, { subjectRole: "admin" });
     await usage(5, { ok: false, error: "Tool 'x' was blocked by the guard" });
+    await usage(5, { ok: false, error: "fetch failed: connect ECONNREFUSED 127.0.0.1:9" });
     await usage(5, { source: "playground", workflowId: "" });
     const result = await service().generate({ createdBy: null });
     expect(result.suggestions).toEqual([]);
     expect(result.skipped).toEqual([expect.objectContaining({ scopeId: "wf_notes", reason: "too_few_calls" })]);
     expect((await service().generate({ createdBy: null, minCalls: 5 })).created).toBe(1);
+  });
+
+  it("allows every tool a non-admin call used, including calls whose role was not recorded", async () => {
+    await usage(20);
+    // A direct MCP Tool node records no role when no rule matched its call.
+    await record({ toolName: "add_label", subjectRole: null });
+    await record({ toolName: "admin_only", subjectRole: "admin" });
+    const [suggestion] = (await service().generate({ createdBy: null })).suggestions;
+    expect(suggestion!.rules.filter((entry) => entry.effect === "allow").map((entry) => entry.toolPattern)).toEqual(["add_label", "create_issue", "list_issues"]);
+    expect(suggestion!.evidence).toMatchObject({ calls: 21, unknownRoleCalls: 1 });
+  });
+
+  it("builds nothing from a capped scan", async () => {
+    await usage(20);
+    const capped = new McpPolicySuggestionService({
+      store: test.store,
+      simulation: new McpPolicySimulationService({ store: test.store, hashKey, now: () => clock, scanCap: 10, pageSize: 4 }),
+      now: () => clock,
+      cooldownMs: 0
+    });
+    const result = await capped.generate({ createdBy: null });
+    expect(result).toMatchObject({ capped: true, notGenerated: "scan_capped", created: 0, suggestions: [] });
+    expect(await test.store.listMcpPolicySuggestions({ status: "open" })).toEqual([]);
+  });
+
+  /** Accepts a suggestion the way the API does: its rules in shadow, their ids on the row. */
+  async function acceptAll(suggestionId: string) {
+    const suggestion = (await test.store.getMcpPolicySuggestion(suggestionId))!;
+    const ids: string[] = [];
+    for (const [index, entry] of suggestion.rules.entries()) {
+      const id = `mtp_${suggestionId}_${index}`;
+      await test.store.createMcpToolPolicy(rule({ ...entry, id, mode: "shadow", annotationHint: null, enabled: true, workflowIds: entry.workflowIds ?? [], clientIds: entry.clientIds ?? [] }));
+      ids.push(id);
+    }
+    await test.store.transitionMcpPolicySuggestion(suggestionId, { from: "open", to: "accepted", decidedBy: "admin", decidedAt: NOW.toISOString(), acceptedRuleIds: ids });
+    return ids;
+  }
+
+  it("after an accepted suggestion, offers only the new tools as an update, and nothing when none are new", async () => {
+    await usage(20);
+    const [first] = (await service().generate({ createdBy: null })).suggestions;
+    const ids = await acceptAll(first!.id);
+
+    // The same calls again: the accepted rules are exactly the proposal, checked first.
+    const quiet = await service().generate({ createdBy: null });
+    expect(quiet.suggestions).toEqual([]);
+    expect(quiet.skipped).toEqual([expect.objectContaining({ reason: "already_in_place" })]);
+    // A different proposal (a rare value drops a constraint) with no new tool: the accepted rules already list them.
+    await record({ toolName: "create_issue", argsSummary: summary({ repo: { type: "string", values: ["zzz"] } }) });
+    const covered = await service().generate({ createdBy: null });
+    expect(covered.suggestions).toEqual([]);
+    expect(covered.skipped).toEqual([expect.objectContaining({ reason: "already_accepted" })]);
+
+    await usage(4, { toolName: "add_label" });
+    const result = await service().generate({ createdBy: null });
+    expect(result.skipped).toEqual([]);
+    const [update] = result.suggestions;
+    expect(update!.rules.map((entry) => [entry.effect, entry.toolPattern])).toEqual([["allow", "add_label"]]);
+    expect(update!.evidence.updates).toEqual({ suggestionIds: [first!.id], ruleIds: ids, addedTools: ["add_label"] });
+
+    // Another deny that the new allow would carve still counts.
+    await test.store.createMcpToolPolicy(rule({ id: "mtp_no_labels", effect: "deny", toolPattern: "add_label" }));
+    const blocked = await service().generate({ createdBy: null });
+    expect(blocked.skipped).toEqual([expect.objectContaining({ reason: "would_loosen" })]);
+  });
+
+  it("offers a proposal again once its accepted rules were deleted", async () => {
+    await usage(20);
+    const [first] = (await service().generate({ createdBy: null })).suggestions;
+    const ids = await acceptAll(first!.id);
+    for (const id of ids) await test.store.deleteMcpToolPolicy(id);
+    const result = await service().generate({ createdBy: null });
+    expect(result.created).toBe(1);
+    expect(result.suggestions[0]!.fingerprint).toBe(first!.fingerprint);
   });
 
   it("only tightens: never carves an exception out of an existing deny", async () => {

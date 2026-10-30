@@ -14,13 +14,21 @@
  * The rules apply to every role but admin (never for admins' own subject).
  *
  * Usable calls: reached the server (not refused by the runtime guard, a rule or the guard, not failed before the
- * call), made with a recorded non-admin role, by a workflow run or a gateway client. Playground calls are never
- * read. Constraints need a summary on every call of the tool.
+ * call or before it connected), made by a workflow run or a gateway client, not by an admin. A call whose role was
+ * not recorded counts: the tool was used, so the deny must not block it. Playground calls are never read.
+ * Constraints need a summary on every call of the tool.
+ *
+ * Never from partial data: when the scan stops at its cap, nothing is generated (`notGenerated: "scan_capped"`).
  *
  * Tighten-only: a suggestion is dropped when one of its allow rules would be strictly narrower than an existing deny
  * or require_approval rule (it would carve an exception out of it), so accepting never allows more than today.
  * Proposals are stored (one open per scope and server); a dismissed or accepted proposal is not offered again
- * unchanged. Accepting adds the rules in SHADOW mode; enforcing is a separate step.
+ * unchanged while its accepted rules are in place. Accepting adds the rules in SHADOW mode; enforcing is a separate
+ * step.
+ *
+ * Once a scope's suggestion is accepted, a later proposal that only adds tools becomes an "Update accepted rules"
+ * suggestion: the allows for the new tools, added in shadow next to the accepted set. Those allows carve the scope's
+ * own accepted deny on purpose, so that deny is left out of the tighten-only check; every other deny still counts.
  */
 import { createHash, randomUUID } from "node:crypto";
 import {
@@ -41,10 +49,11 @@ import {
   type McpPolicySuggestionSkip,
   type McpPolicySuggestionSkipReason,
   type McpPolicySuggestionToolEvidence,
+  type McpPolicySuggestionUpdate,
   type McpToolPolicyRule,
   type ToolArgumentFieldSummary
 } from "@ai-orchestrator/shared";
-import { hashMcpToolPolicyRule, isStrictlyNarrower, isToolArgumentLocationKey } from "@ai-orchestrator/mcp-sdk";
+import { hashMcpToolPolicyRule, isStrictlyNarrower, isToolArgumentLocationKey, policyRuleMode } from "@ai-orchestrator/mcp-sdk";
 import type { McpToolCallRecord } from "../db/database.js";
 import type { Store } from "../db/store.js";
 import { GATEWAY_WORKFLOW_TOOL_ADAPTER_ID, type McpPolicySimulationService } from "./mcp-policy-simulation-service.js";
@@ -62,9 +71,13 @@ const MAX_SKIPS = 200;
 const NON_ADMIN_ROLES: McpPolicyRole[] = MCP_POLICY_ROLES.filter((role) => role !== "admin");
 /** A plain dotted path of keys a summary kept (no lists, no hashed keys) that is also a valid rule path. */
 const PLAIN_PATH = /^[A-Za-z][A-Za-z0-9_-]{0,31}(\.[A-Za-z][A-Za-z0-9_-]{0,31}){0,15}$/;
-/** Error text of a call that never reached the server (agent runtime, policy and guard refusals). */
+/**
+ * Error text of a call that never reached the server: agent runtime, policy and guard refusals, and transport
+ * failures before a connection was made (refused, unresolvable or unreachable host, connect timeout). Telemetry
+ * records structured kinds only for runtime limits (`rejection`), so the rest is told apart by its text.
+ */
 const NOT_SENT_ERROR =
-  /blocked by the guard|was blocked by policy|is blocked by policy|needs approval by policy|is missing required arguments|has been disabled due to repeated failures|does not exist\. Available tools/i;
+  /blocked by the guard|was blocked by policy|is blocked by policy|needs approval by policy|is missing required arguments|has been disabled due to repeated failures|does not exist\. Available tools|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|EHOSTUNREACH|ENETUNREACH|UND_ERR_CONNECT_TIMEOUT|Connect Timeout Error|getaddrinfo/i;
 
 export class McpPolicySuggestionError extends Error {
   constructor(
@@ -105,16 +118,48 @@ export function suggestionFingerprint(rules: readonly McpPolicySuggestedRule[]):
   );
 }
 
-/** The existing deny / require_approval rule a suggested allow would carve an exception out of, if any. */
-export function loosenedRule(suggested: readonly McpPolicySuggestedRule[], current: readonly McpToolPolicyRule[]): McpToolPolicyRule | null {
-  const strict = current.filter((rule) => rule.effect !== "allow");
-  for (const [index, rule] of suggested.entries()) {
+export interface LoosenedRuleOptions {
+  /** Only enforced rules count (the check at enforce time: shadow rules decide nothing yet). */
+  enforcedOnly?: boolean;
+  /** Rules left out: the scope's own accepted deny, which its allows carve on purpose. */
+  ignoreIds?: ReadonlySet<string>;
+}
+
+/**
+ * The existing deny / require_approval rule an allow would carve an exception out of, if any. `rules` are suggested
+ * rules (read as enforced) or stored rules about to be enforced.
+ */
+export function loosenedRule(
+  rules: ReadonlyArray<McpPolicySuggestedRule | McpToolPolicyRule>,
+  current: readonly McpToolPolicyRule[],
+  options: LoosenedRuleOptions = {}
+): McpToolPolicyRule | null {
+  const ownIds = new Set(rules.flatMap((rule) => ("id" in rule && typeof rule.id === "string" ? [rule.id] : [])));
+  const strict = current.filter(
+    (rule) =>
+      rule.effect !== "allow" &&
+      !ownIds.has(rule.id) &&
+      !options.ignoreIds?.has(rule.id) &&
+      (!options.enforcedOnly || (rule.enabled && policyRuleMode(rule) === "enforce"))
+  );
+  for (const [index, rule] of rules.entries()) {
     if (rule.effect !== "allow") continue;
-    const candidate = asPolicyRule(rule, `suggested_${index}`);
+    const candidate: McpToolPolicyRule =
+      "id" in rule && typeof rule.id === "string" ? { ...rule, enabled: true, mode: "enforce" } : asPolicyRule(rule as McpPolicySuggestedRule, `suggested_${index}`);
     const carved = strict.find((existing) => isStrictlyNarrower(candidate, existing));
     if (carved) return carved;
   }
   return null;
+}
+
+/** The scope a suggestion belongs to: its accepted rules for one workflow or client on one server form a family. */
+export function suggestionScopeKey(suggestion: Pick<McpPolicySuggestion, "scopeKind" | "scopeId" | "serverId">): string {
+  return `${suggestion.scopeKind}\u0000${suggestion.scopeId}\u0000${suggestion.serverId}`;
+}
+
+/** An accepted suggestion counts only while every rule it created still exists. */
+export function acceptedRulesInPlace(suggestion: Pick<McpPolicySuggestion, "status" | "acceptedRuleIds">, ruleIds: ReadonlySet<string>): boolean {
+  return suggestion.status === "accepted" && suggestion.acceptedRuleIds.length > 0 && suggestion.acceptedRuleIds.every((id) => ruleIds.has(id));
 }
 
 interface ToolConstraints {
@@ -160,6 +205,11 @@ export function constraintsFromSummaries(calls: readonly McpToolCallRecord[]): T
     }
     if (present.some((field) => (field.hashes?.length ?? 0) > 0)) {
       skip(path, "hashed");
+      continue;
+    }
+    if (type === "string" && present.some((field) => field.adj)) {
+      // The kept text is a normalised form of the value: a one_of on it might not match the real value.
+      skip(path, "normalised");
       continue;
     }
     if (present.some((field) => (field.values?.length ?? 0) !== 1)) {
@@ -220,6 +270,13 @@ interface ScopeCalls {
   usable: McpToolCallRecord[];
 }
 
+/** The rule a tool's allow would be, and its evidence. */
+interface ToolProposal {
+  toolName: string;
+  rule: McpPolicySuggestedRule;
+  evidence: McpPolicySuggestionToolEvidence;
+}
+
 export class McpPolicySuggestionService {
   private readonly store: Store;
   private readonly simulation: McpPolicySimulationService;
@@ -267,14 +324,42 @@ export class McpPolicySuggestionService {
           scopes.set(key, scope);
         }
         scope.scopeCalls += 1;
-        const role = call.subjectRole ?? null;
-        if (role === null || role === "admin" || !callReachedServer(call)) return;
+        // Every call that reached the server shows a used tool, whatever its role; only admins' own calls are left
+        // out (the rules never apply to admins). A call with no recorded role still used the tool.
+        if (call.subjectRole === "admin" || !callReachedServer(call)) return;
         scope.usable.push(call);
       }
     );
 
+    if (outcome.capped) {
+      // Never suggest from partial data: tools used before the oldest call read would be denied.
+      return {
+        windowDays: MCP_POLICY_SUGGESTION_WINDOW_DAYS,
+        since: since.toISOString(),
+        until: until.toISOString(),
+        minCalls,
+        scanned: outcome.scanned,
+        capped: true,
+        notGenerated: "scan_capped",
+        created: 0,
+        updated: 0,
+        unchanged: 0,
+        skipped: [],
+        suggestions: []
+      };
+    }
+
     const current = await this.store.listMcpToolPolicies();
     const currentHashes = new Set(current.map((rule) => hashMcpToolPolicyRule(rule)));
+    const currentById = new Map(current.map((rule) => [rule.id, rule]));
+    const currentIds = new Set(currentById.keys());
+    // Accepted suggestions whose rules are all still in place, by scope and server.
+    const families = new Map<string, McpPolicySuggestion[]>();
+    for (const suggestion of await this.store.listMcpPolicySuggestions({ status: "accepted", limit: 10_000 })) {
+      if (!acceptedRulesInPlace(suggestion, currentIds)) continue;
+      const key = suggestionScopeKey(suggestion);
+      families.set(key, [...(families.get(key) ?? []), suggestion]);
+    }
     const [workflows, clients, servers] = await Promise.all([this.store.listWorkflows(), this.store.listMcpClients(), this.store.listMcpServers()]);
     const workflowNames = new Map(workflows.map((workflow) => [workflow.id, workflow.name]));
     const clientNames = new Map(clients.map((client) => [client.id, client.name]));
@@ -298,7 +383,8 @@ export class McpPolicySuggestionService {
         noteSkip({ scopeKind: scope.kind, scopeId: scope.id, scopeName, serverId: null, reason: "too_few_calls", detail: `${scope.usable.length} usable calls of ${minCalls} needed` });
         continue;
       }
-      const roles = [...new Set(scope.usable.map((call) => call.subjectRole!))].sort();
+      const roles = [...new Set(scope.usable.flatMap((call) => (call.subjectRole ? [call.subjectRole] : [])))].sort();
+      const unknownRoleCalls = scope.usable.filter((call) => !call.subjectRole).length;
       const byServer = new Map<string, McpToolCallRecord[]>();
       for (const call of scope.usable) {
         const serverId = call.registryServerId ?? call.adapterId;
@@ -324,48 +410,72 @@ export class McpPolicySuggestionService {
         const label = `${scopeName} on ${serverName ?? serverId}`;
         const principals = scope.kind === "workflow" ? { workflowIds: [scope.id], clientIds: [] } : { workflowIds: [], clientIds: [scope.id] };
         const description = `Suggested from ${calls.length} calls in the last ${MCP_POLICY_SUGGESTION_WINDOW_DAYS} days.`;
-        const rules: McpPolicySuggestedRule[] = [
-          {
-            name: clip(`Least privilege: ${label}, other tools`),
-            description,
-            effect: "deny",
-            projectId: null,
-            roles: NON_ADMIN_ROLES,
-            serverId,
-            toolPattern: "*",
-            ...principals,
-            conditions: null,
-            kind: "tool"
-          }
-        ];
-        const tools: McpPolicySuggestionToolEvidence[] = [];
-        for (const toolName of toolNames) {
+        const deny: McpPolicySuggestedRule = {
+          name: clip(`Least privilege: ${label}, other tools`),
+          description,
+          effect: "deny",
+          projectId: null,
+          roles: NON_ADMIN_ROLES,
+          serverId,
+          toolPattern: "*",
+          ...principals,
+          conditions: null,
+          kind: "tool"
+        };
+        const proposals: ToolProposal[] = toolNames.map((toolName) => {
           const toolCalls = byTool.get(toolName)!;
           const { conditions, evidence } = constraintsFromSummaries(toolCalls);
-          tools.push({ toolName, calls: toolCalls.length, ...evidence });
-          rules.push({
-            name: clip(`Least privilege: ${label}, ${toolName}`),
-            description,
-            effect: "allow",
-            projectId: null,
-            roles: NON_ADMIN_ROLES,
-            serverId,
-            toolPattern: toolName,
-            ...principals,
-            conditions: conditions.length > 0 ? { all: conditions } : null,
-            kind: "tool"
-          });
-        }
+          return {
+            toolName,
+            evidence: { toolName, calls: toolCalls.length, ...evidence },
+            rule: {
+              name: clip(`Least privilege: ${label}, ${toolName}`),
+              description,
+              effect: "allow",
+              projectId: null,
+              roles: NON_ADMIN_ROLES,
+              serverId,
+              toolPattern: toolName,
+              ...principals,
+              conditions: conditions.length > 0 ? { all: conditions } : null,
+              kind: "tool"
+            }
+          };
+        });
+        const fullRules = [deny, ...proposals.map((proposal) => proposal.rule)];
         // Every proposed rule must be one the API would accept as it stands.
-        const invalid = rules.find((rule) => !mcpToolPolicyRuleInputSchema.safeParse(rule).success);
-        if (invalid) continue;
-        const carved = loosenedRule(rules, current);
-        if (carved) {
-          noteSkip({ ...base, reason: "would_loosen", detail: `An allow here would carve an exception out of rule ${carved.name ? `'${carved.name}'` : carved.id}` });
+        if (fullRules.some((rule) => !mcpToolPolicyRuleInputSchema.safeParse(rule).success)) continue;
+        if (fullRules.every((rule, index) => currentHashes.has(hashMcpToolPolicyRule(asPolicyRule(rule, `s${index}`))))) {
+          noteSkip({ ...base, reason: "already_in_place" });
           continue;
         }
-        if (rules.every((rule, index) => currentHashes.has(hashMcpToolPolicyRule(asPolicyRule(rule, `s${index}`))))) {
-          noteSkip({ ...base, reason: "already_in_place" });
+
+        // A scope whose earlier suggestion is accepted (and in place) gets an update with only the new tools.
+        const family = families.get(suggestionScopeKey({ scopeKind: scope.kind, scopeId: scope.id, serverId })) ?? [];
+        let rules = fullRules;
+        let tools = proposals.map((proposal) => proposal.evidence);
+        let updates: McpPolicySuggestionUpdate | undefined;
+        let ownDenyIds: Set<string> | undefined;
+        if (family.length > 0) {
+          const familyRules = family.flatMap((suggestion) => suggestion.acceptedRuleIds).map((id) => currentById.get(id)!);
+          const allowedTools = new Set(familyRules.filter((rule) => rule.effect === "allow").map((rule) => rule.toolPattern));
+          const added = proposals.filter((proposal) => !allowedTools.has(proposal.toolName));
+          if (added.length === 0) {
+            noteSkip({ ...base, reason: "already_accepted", detail: "The accepted rules already allow every tool it used" });
+            continue;
+          }
+          rules = added.map((proposal) => proposal.rule);
+          tools = added.map((proposal) => proposal.evidence);
+          ownDenyIds = new Set(familyRules.filter((rule) => rule.effect !== "allow").map((rule) => rule.id));
+          updates = {
+            suggestionIds: family.map((suggestion) => suggestion.id),
+            ruleIds: familyRules.map((rule) => rule.id),
+            addedTools: added.map((proposal) => proposal.toolName)
+          };
+        }
+        const carved = loosenedRule(rules, current, ownDenyIds ? { ignoreIds: ownDenyIds } : {});
+        if (carved) {
+          noteSkip({ ...base, reason: "would_loosen", detail: `An allow here would carve an exception out of rule ${carved.name ? `'${carved.name}'` : carved.id}` });
           continue;
         }
         const fingerprint = suggestionFingerprint(rules);
@@ -374,10 +484,11 @@ export class McpPolicySuggestionService {
           noteSkip({ ...base, reason: "dismissed_before" });
           continue;
         }
-        if (decided.some((entry) => entry.status === "accepted")) {
+        if (decided.some((entry) => acceptedRulesInPlace(entry, currentIds))) {
           noteSkip({ ...base, reason: "already_accepted" });
           continue;
         }
+        const inlineAdapter = calls.some((call) => !call.registryServerId);
         const stored = await this.store.upsertOpenMcpPolicySuggestion({
           id: `mps_${randomUUID()}`,
           scopeKind: scope.kind,
@@ -387,7 +498,16 @@ export class McpPolicySuggestionService {
           serverName,
           fingerprint,
           rules,
-          evidence: { calls: calls.length, scopeCalls: scope.scopeCalls, roles, tools, capped: outcome.capped },
+          evidence: {
+            calls: calls.length,
+            scopeCalls: scope.scopeCalls,
+            roles,
+            tools,
+            capped: false,
+            ...(unknownRoleCalls > 0 ? { unknownRoleCalls } : {}),
+            ...(updates ? { updates } : {}),
+            ...(inlineAdapter ? { inlineAdapter: true } : {})
+          },
           windowDays: MCP_POLICY_SUGGESTION_WINDOW_DAYS,
           windowStart: since.toISOString(),
           windowEnd: until.toISOString(),
