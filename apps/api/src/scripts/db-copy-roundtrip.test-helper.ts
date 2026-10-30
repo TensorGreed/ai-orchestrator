@@ -359,7 +359,12 @@ export async function seedAllDomains(target: Store): Promise<void> {
   });
   await store.recordMcpServerProbe({ probe: { id: "probe-3", serverId: "mcp-search", startedAt: T(320), ok: false, latencyMs: 0, toolCount: 0, error: "timeout", snapshotId: null }, status: "down", keepProbes: 10 });
   await store.replaceMcpToolCallsForExecution("exec-1", [
-    toolCall("call-1"),
+    toolCall("call-1", {
+      argsSummary: { v: 1, fields: { query: { type: "string", len: "9-32" }, limit: { type: "number", values: [5], min: 5, max: 5 } } },
+      subjectRole: "builder",
+      subjectSource: "user",
+      projectId: "default"
+    }),
     toolCall("call-2", { startedAt: T(501), toolName: "fetch", ok: false, error: "404", durationMs: 40 }),
     toolCall("call-3", { startedAt: T(501), registryServerId: null, adapterId: "http-mcp", samplingRequests: 1, samplingInputTokens: 20, samplingOutputTokens: 8 })
   ]);

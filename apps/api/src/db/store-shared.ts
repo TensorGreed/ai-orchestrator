@@ -6,6 +6,7 @@ import {
   DEFAULT_MCP_SAMPLING_SETTINGS,
   MCP_TOOL_POLICY_EFFECTS,
   mcpToolPolicyConditionsSchema,
+  parseToolArgumentSummary,
   type McpGatewayApproval,
   type McpGatewayApprovalStatus,
   type McpSamplingSettings,
@@ -13,6 +14,7 @@ import {
   type McpToolPolicyEffect,
   type McpToolPolicyRule
 } from "@ai-orchestrator/shared";
+import type { McpToolCallRecord, McpToolCallWrite } from "./database.js";
 
 /** Trigger types of runs made from golden runs and golden-set cases (replays, replay jobs, gate and eval runs). */
 export const SUBJECT_EXECUTION_TRIGGERS = ["replay", "mcp_replay", "eval", "eval_judge"] as const;
@@ -156,4 +158,26 @@ export function mapMcpGatewayApproval(row: Record<string, unknown>): McpGatewayA
     decisionReason: text(row.decision_reason),
     usedAt: isoOrNull(row.used_at)
   };
+}
+
+/** Phase 12.4 — the argument summary and subject columns of an mcp_tool_calls row (shared with the Postgres store). */
+export function mapMcpToolCallContext(row: {
+  args_summary_json?: unknown;
+  subject_role?: unknown;
+  subject_source?: unknown;
+  project_id?: unknown;
+}): Pick<McpToolCallRecord, "argsSummary" | "subjectRole" | "subjectSource" | "projectId"> {
+  const role = row.subject_role;
+  const source = row.subject_source;
+  return {
+    argsSummary: row.args_summary_json ? parseToolArgumentSummary(String(row.args_summary_json)) : null,
+    subjectRole: role === "admin" || role === "builder" || role === "operator" || role === "viewer" ? role : null,
+    subjectSource: source === "user" || source === "owner" || source === "fallback" || source === "client" ? source : null,
+    projectId: row.project_id ? String(row.project_id) : null
+  };
+}
+
+/** Phase 12.4 — the values written to the argument summary and subject columns, in column order. */
+export function mcpToolCallContextValues(call: McpToolCallWrite): [string | null, string | null, string | null, string | null] {
+  return [call.argsSummary ? JSON.stringify(call.argsSummary) : null, call.subjectRole ?? null, call.subjectSource ?? null, call.projectId ?? null];
 }
