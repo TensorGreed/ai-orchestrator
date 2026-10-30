@@ -368,7 +368,7 @@ describe("MCP tool telemetry: argument summaries (Phase 12.4)", () => {
       [["card_number"], "33-128", undefined, 1]
     ]);
     const direct = rows.find((row) => row.nodeId === "direct")!;
-    expect(direct.argsSummary).toEqual({ v: 2, fields: {} });
+    expect(direct.argsSummary).toEqual({ v: 3, kid: expect.stringMatching(/^[0-9a-f]{8}$/), fields: {} });
     for (const row of rows) {
       expect(row).toMatchObject({ subjectRole: "admin", subjectSource: "user", projectId: "default" });
     }
@@ -386,7 +386,7 @@ describe("MCP tool telemetry: argument summaries (Phase 12.4)", () => {
     };
     const forAdmin = await catalog(admin);
     expect(forAdmin).toHaveLength(2);
-    expect(forAdmin.every((entry) => entry.subjectRole === "admin" && (entry.argsSummary as { v?: number } | null)?.v === 2)).toBe(true);
+    expect(forAdmin.every((entry) => entry.subjectRole === "admin" && (entry.argsSummary as { v?: number } | null)?.v === 3)).toBe(true);
     const forBuilder = await catalog(await login(context, "builder"));
     expect(forBuilder).toHaveLength(2);
     expect(forBuilder.some((entry) => "argsSummary" in entry || "subjectRole" in entry)).toBe(false);

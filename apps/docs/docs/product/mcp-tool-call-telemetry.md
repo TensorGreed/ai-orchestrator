@@ -61,6 +61,15 @@ Every other string, number and boolean keeps:
 
 A value hashed with the same key gives the same hash, so a rule's comparison value can be matched against recorded calls without the calls keeping the value.
 
+### Format 3 marks
+
+Summaries are written in format 3. It is format 2 plus two marks that [policy simulation](../guides/least-privilege-from-real-runs.md) uses to know which comparisons it can trust:
+
+- `adj: true` on a path when some value there is kept or hashed in a form that differs from what the policy evaluator reads at call time: text with surrounding whitespace (rules compare trimmed text), text that NFKC normalisation changed (full-width or other compatibility characters), or a number that was rounded (to four decimals, or to one under a location key). Simulation does not decide conditions on such a path from the summary.
+- `kid` on the summary: the hash key's id, the first 8 hex characters of an HMAC of a fixed label under the key. It is not the key and cannot be used to test guesses. After a master key rotation, hashes recorded under the old key carry the old id, and simulation treats comparisons against them as undetermined instead of as "not equal".
+
+Format 2 summaries, written before format 3, stay readable with no migration. Simulation reads them cautiously: their kept text and non-integer numbers may have been normalised or rounded, and their hashes carry no key id, so those comparisons are undetermined. Kept integers, booleans and nulls still decide.
+
 Object keys are kept in the path only when they are plain names: an ASCII letter followed by letters, digits, `_` or `-`, at most 32 characters, no run of four digits and not random-looking. The random check runs on the whole key, so hex digests, UUIDs and ids that mix letters and digits (`a1b2c3d4e5f6g7h8`) are hashed, and so are keys that read like random mixed-case letters or have few vowels (`XMLHttpRequest` included). Any other key (an email, an id, a number used as a key) is written `<k:HASH>`.
 
 Every value and key is also scanned with the same detectors as [production capture](./production-capture.md) masking, including URL-encoded and JSON-escaped forms. The data classes they find (`card_number`, `email`, `credential`, ...) are listed for the path, and a flagged value is never kept as it is. Large or deeply nested arguments are summarised up to fixed limits (depth, paths, array items, characters scanned); a value that could not be scanned within them is never kept as it is, and the summary is marked `truncated`.
@@ -76,7 +85,7 @@ For example, the arguments
 are summarised as (hashes shortened)
 
 ```json
-{ "v": 2, "fields": {
+{ "v": 3, "kid": "3f9c1a07", "fields": {
   "account_id": { "type": "number", "mag": 7, "hashes": ["SPFBgtsm…"] },
   "body": { "type": "string", "hashes": ["c0Esx-nM…"], "classes": ["card_number"], "len": "33-128" },
   "owner": { "type": "string", "hashes": ["mlsb-iLo…"], "len": "1-8" },

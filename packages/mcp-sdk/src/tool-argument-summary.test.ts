@@ -7,6 +7,7 @@ import {
   looksRandomToolArgument,
   looksRandomToolArgumentKey,
   summarizeToolArguments,
+  toolArgumentHashKeyId,
   toolArgumentKeySegments,
   toolArgumentLengthBucket,
   TOOL_ARGUMENT_SUMMARY_LIMITS,
@@ -45,7 +46,8 @@ describe("summarizeToolArguments: kept values", () => {
   it("keeps null, booleans, small numbers and safe tokens", () => {
     const summary = summarize({ state: "open", per_page: 30, draft: false, milestone: null, region: "us-east-1" });
     expect(summary).toEqual({
-      v: 2,
+      v: 3,
+      kid: toolArgumentHashKeyId(hashKey),
       fields: {
         draft: { type: "boolean", values: [false] },
         milestone: { type: "null" },
@@ -67,7 +69,7 @@ describe("summarizeToolArguments: kept values", () => {
     const summary = summarize({ s: "", n: -0, tiny: -0.00001 });
     expect(summary.fields.s).toEqual({ type: "string", values: [""] });
     expect(summary.fields.n).toEqual({ type: "number", values: [0], min: 0, max: 0 });
-    expect(summary.fields.tiny).toEqual({ type: "number", values: [0], min: 0, max: 0 });
+    expect(summary.fields.tiny).toEqual({ type: "number", values: [0], min: 0, max: 0, adj: true });
   });
 
   it("drops non-finite numbers but keeps their type", () => {
@@ -103,7 +105,7 @@ describe("summarizeToolArguments: kept values", () => {
 
   it("rounds kept numbers to four decimals and hides seven or more integer digits", () => {
     const summary = summarize({ ratio: 3.14159265, big: 999_999.5, card: 4111111111111111.5, id: 123456789.25, acct: 12345678, dob: 19850315, phone7: 5551234, neg: -2_000_000 });
-    expect(summary.fields.ratio).toEqual({ type: "number", values: [3.1416], min: 3.1416, max: 3.1416 });
+    expect(summary.fields.ratio).toEqual({ type: "number", values: [3.1416], min: 3.1416, max: 3.1416, adj: true });
     expect(summary.fields.big).toEqual({ type: "number", values: [999_999.5], min: 999_999.5, max: 999_999.5 });
     expect(summary.fields.card).toEqual({ type: "number", mag: 15, hashes: [h(4111111111111111.5)], classes: ["card_number"] });
     expect(summary.fields.id).toEqual({ type: "number", mag: 8, hashes: [h(123456789.25)] });
@@ -355,7 +357,7 @@ describe("summarizeToolArguments: tokens", () => {
 
   it("normalises full-width text and counts digits of every script (M4)", () => {
     const summary = summarize({ fullCard: "４１１１１１１１１１１１１１１１", arabic: "٤١١١١١١١", wide: "ｏｐｅｎ", mixed: "v٤١١١" });
-    expect(summary.fields.wide).toEqual({ type: "string", values: ["open"] });
+    expect(summary.fields.wide).toEqual({ type: "string", values: ["open"], adj: true });
     expect(summary.fields.fullCard?.classes).toEqual(["card_number"]);
     for (const path of ["fullCard", "arabic", "mixed"]) expect(summary.fields[path]?.values, path).toBeUndefined();
     expect(allText(summary)).not.toMatch(/４１|٤١/);
@@ -552,8 +554,8 @@ describe("summarizeToolArguments: arrays and objects", () => {
   it("summarises a non-object root under $", () => {
     expect(summarize(["a", "b"]).fields).toEqual({ $: { type: "array", items: 2 }, "$[]": { type: "string", count: 2, values: ["a", "b"] } });
     expect(summarize("hello").fields).toEqual({ $: { type: "string", values: ["hello"] } });
-    expect(summarize(null)).toEqual({ v: 2, fields: {} });
-    expect(summarize(undefined)).toEqual({ v: 2, fields: {} });
+    expect(summarize(null)).toEqual({ v: 3, kid: toolArgumentHashKeyId(hashKey), fields: {} });
+    expect(summarize(undefined)).toEqual({ v: 3, kid: toolArgumentHashKeyId(hashKey), fields: {} });
   });
 
   it("handles a __proto__ key as data, without touching prototypes", () => {
@@ -716,6 +718,39 @@ describe("summarizeToolArguments: property check", () => {
         for (const prefix of field.prefixes ?? []) expect(prefix, value).not.toMatch(/\p{Nd}{4}|\s|^[^@]+@/u);
       }
     }
+  });
+});
+
+describe("summarizeToolArguments: format 3 marks", () => {
+  it("marks a field whose kept or hashed form differs from what the evaluator reads (adj)", () => {
+    const summary = summarize({ branch: "main ", wide: "ｍａｉｎ", plain: "main", note: "Hello World", padded: " Hello", amount: 100.00004, whole: 100, lat: 51.54, address: { lat: 51.5074 } });
+    expect(summary.fields.branch).toMatchObject({ hashes: [h("main ")], adj: true });
+    expect(summary.fields.wide).toMatchObject({ values: ["main"], adj: true });
+    expect(summary.fields.plain?.adj).toBeUndefined();
+    expect(summary.fields.note?.adj).toBeUndefined();
+    expect(summary.fields.padded?.adj).toBe(true);
+    expect(summary.fields.amount).toMatchObject({ values: [100], adj: true });
+    expect(summary.fields.whole?.adj).toBeUndefined();
+    expect(summary.fields.lat).toMatchObject({ values: [51.5], adj: true });
+    // address is sensitive: the location number is rounded to one decimal, then hashed.
+    expect(summary.fields["address.lat"]).toMatchObject({ hashes: [h(51.5)], adj: true });
+    // A large number is hashed exactly.
+    expect(summarize({ size: 2_000_000 }).fields.size?.adj).toBeUndefined();
+  });
+
+  it("names the hash key by an id, never the key", () => {
+    const id = toolArgumentHashKeyId(hashKey);
+    expect(id).toMatch(/^[0-9a-f]{8}$/);
+    expect(summarize({}).kid).toBe(id);
+    expect(toolArgumentHashKeyId(new Uint8Array(32).fill(8))).not.toBe(id);
+    expect(allText(summarize({ a: 1 }))).not.toContain(Buffer.from(hashKey).toString("hex"));
+  });
+
+  it("still reads format 2 summaries, and refuses a malformed key id", () => {
+    expect(parseToolArgumentSummary({ v: 2, fields: { a: { type: "string", values: ["x"] } } })).toEqual({ v: 2, fields: { a: { type: "string", values: ["x"] } } });
+    expect(parseToolArgumentSummary(summarize({ amount: 1.00001 }))).toMatchObject({ v: 3, fields: { amount: { adj: true } } });
+    expect(parseToolArgumentSummary({ v: 3, kid: "XYZ", fields: {} })).toBeNull();
+    expect(parseToolArgumentSummary({ v: 4, fields: {} })).toBeNull();
   });
 });
 
