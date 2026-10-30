@@ -10,6 +10,8 @@ import type {
   ChatMessage,
   Folder,
   McpPolicyRole,
+  McpPolicySuggestion,
+  McpPolicySuggestionStatus,
   McpClient,
   McpCassette,
   ModelMemorySeed,
@@ -52,7 +54,9 @@ import type {
 import { DESTINATION_KINDS, DESTINATION_TIERS, type DataDestinationRow, DEFAULT_PROJECT_ID, GUARD_SIMULATION_JOB_DATASET_PREFIX, MCP_POLICY_KINDS, MCP_POLICY_ROLES, MCP_TOOL_HINT_CONDITIONS, REPLAY_CAPTURE_API_KEY_FILTER, REPLAY_CAPTURE_STATUSES } from "@ai-orchestrator/shared";
 import {
   mapMcpGatewayApproval,
+  mapMcpPolicySuggestion,
   mapMcpToolCallContext,
+  mcpToolCallScanWhere,
   mcpToolCallContextValues,
   mapMcpToolPolicyExtras,
   normalizeMcpSamplingSettings,
@@ -61,7 +65,7 @@ import {
   SUBJECT_EXECUTION_TRIGGERS,
   toMcpToolPolicyEffect
 } from "./store-shared.js";
-import { GATEWAY_APPROVAL_ONE_PENDING_INDEX, ONE_PENDING_APPROVAL_INDEX, QUEUE_ACTIVE_EXECUTION_INDEX, QUEUE_CLAIM_INDEX, QUEUE_FINISHED_INDEX, QUEUE_RUNNING_HEARTBEAT_INDEX } from "./migrations.js";
+import { GATEWAY_APPROVAL_ONE_PENDING_INDEX, ONE_PENDING_APPROVAL_INDEX, POLICY_SUGGESTION_ONE_OPEN_INDEX, QUEUE_ACTIVE_EXECUTION_INDEX, QUEUE_CLAIM_INDEX, QUEUE_FINISHED_INDEX, QUEUE_RUNNING_HEARTBEAT_INDEX } from "./migrations.js";
 import {
   normalizeMcpRuntimeLimits,
   normalizeMcpSandboxSettings,
@@ -103,6 +107,8 @@ import type {
   McpGatewayApprovalCallKey,
   McpGatewayApprovalCreate,
   McpGatewayApprovalCreateResult,
+  McpPolicySuggestionWrite,
+  McpToolCallScanFilter,
   McpToolPolicyPatch,
   Store
 } from "./store.js";
@@ -3906,6 +3912,38 @@ export class SqliteStore implements Store {
     );
     this.exec(`CREATE INDEX IF NOT EXISTS idx_mcp_gateway_approvals_call ON mcp_gateway_approvals (client_id, server_id, tool_name, args_hash, status)`);
     this.exec(`CREATE INDEX IF NOT EXISTS idx_mcp_gateway_approvals_status ON mcp_gateway_approvals (status, requested_at)`);
+
+    // Phase 12.4 — policies learned from real runs (v49): suggested least-privilege rules per workflow / gateway
+    // client and server (one open suggestion each), and the index the window scans of tool calls read.
+    this.exec(`
+      CREATE TABLE IF NOT EXISTS mcp_policy_suggestions (
+        id TEXT PRIMARY KEY,
+        scope_kind TEXT NOT NULL,
+        scope_id TEXT NOT NULL,
+        scope_name TEXT,
+        server_id TEXT NOT NULL,
+        server_name TEXT,
+        status TEXT NOT NULL,
+        fingerprint TEXT NOT NULL,
+        rules_json TEXT NOT NULL,
+        evidence_json TEXT NOT NULL,
+        window_days INTEGER NOT NULL,
+        window_start TEXT NOT NULL,
+        window_end TEXT NOT NULL,
+        call_count INTEGER NOT NULL,
+        accepted_rule_ids_json TEXT NOT NULL DEFAULT '[]',
+        created_by TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        decided_by TEXT,
+        decided_at TEXT
+      )
+    `);
+    this.exec(
+      `CREATE UNIQUE INDEX IF NOT EXISTS ${POLICY_SUGGESTION_ONE_OPEN_INDEX} ON mcp_policy_suggestions (scope_kind, scope_id, server_id) WHERE status = 'open'`
+    );
+    this.exec(`CREATE INDEX IF NOT EXISTS idx_mcp_policy_suggestions_status ON mcp_policy_suggestions (status, created_at)`);
+    this.exec(`CREATE INDEX IF NOT EXISTS idx_mcp_tool_calls_started ON mcp_tool_calls (started_at)`);
 
     this.exec(`CREATE INDEX IF NOT EXISTS idx_workflows_project_id ON workflows(project_id)`);
     this.exec(`CREATE INDEX IF NOT EXISTS idx_workflows_folder_id ON workflows(folder_id)`);
@@ -11934,6 +11972,105 @@ export class SqliteStore implements Store {
           [filter.registryServerId, filter.since]
         );
     return rows.map(mapMcpToolCall);
+  }
+
+  /** Phase 12.4 — one page of a tool-call window scan, newest first. */
+  async scanMcpToolCalls(filter: McpToolCallScanFilter): Promise<McpToolCallRecord[]> {
+    const { where, params } = mcpToolCallScanWhere(filter, () => "?", "id");
+    const limit = clampLimit(filter.limit, { fallback: 1000, max: LIMIT_MAX.mcpToolCallScan });
+    return this.queryAll<McpToolCallRow>(`SELECT * FROM mcp_tool_calls WHERE ${where} ORDER BY started_at DESC, id DESC LIMIT ${limit}`, params as BindParams).map(
+      mapMcpToolCall
+    );
+  }
+
+  async upsertOpenMcpPolicySuggestion(
+    input: McpPolicySuggestionWrite
+  ): Promise<{ suggestion: McpPolicySuggestion; outcome: "created" | "updated" | "unchanged" }> {
+    return this.db.transaction(() => {
+      const existing = this.queryOne<Record<string, unknown>>(
+        `SELECT * FROM mcp_policy_suggestions WHERE scope_kind = ? AND scope_id = ? AND server_id = ? AND status = 'open'`,
+        [input.scopeKind, input.scopeId, input.serverId]
+      );
+      const values = [
+        input.scopeName,
+        input.serverName,
+        input.fingerprint,
+        JSON.stringify(input.rules),
+        JSON.stringify(input.evidence),
+        input.windowDays,
+        input.windowStart,
+        input.windowEnd,
+        input.callCount,
+        input.now
+      ];
+      if (existing) {
+        this.exec(
+          `UPDATE mcp_policy_suggestions
+              SET scope_name = ?, server_name = ?, fingerprint = ?, rules_json = ?, evidence_json = ?, window_days = ?,
+                  window_start = ?, window_end = ?, call_count = ?, updated_at = ?
+            WHERE id = ?`,
+          [...values, String(existing.id)]
+        );
+        const row = this.queryOne<Record<string, unknown>>(`SELECT * FROM mcp_policy_suggestions WHERE id = ?`, [String(existing.id)])!;
+        return { suggestion: mapMcpPolicySuggestion(row), outcome: existing.fingerprint === input.fingerprint ? ("unchanged" as const) : ("updated" as const) };
+      }
+      this.exec(
+        `INSERT INTO mcp_policy_suggestions (
+           id, scope_kind, scope_id, server_id, status, created_by, created_at,
+           scope_name, server_name, fingerprint, rules_json, evidence_json, window_days, window_start, window_end, call_count, updated_at
+         ) VALUES (?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [input.id, input.scopeKind, input.scopeId, input.serverId, input.createdBy, input.now, ...values]
+      );
+      const row = this.queryOne<Record<string, unknown>>(`SELECT * FROM mcp_policy_suggestions WHERE id = ?`, [input.id])!;
+      return { suggestion: mapMcpPolicySuggestion(row), outcome: "created" as const };
+    })();
+  }
+
+  async listDecidedMcpPolicySuggestions(filter: {
+    scopeKind: "workflow" | "client";
+    scopeId: string;
+    serverId: string;
+    fingerprint: string;
+  }): Promise<McpPolicySuggestion[]> {
+    return this.queryAll<Record<string, unknown>>(
+      `SELECT * FROM mcp_policy_suggestions
+        WHERE scope_kind = ? AND scope_id = ? AND server_id = ? AND fingerprint = ? AND status <> 'open'
+        ORDER BY created_at DESC, id DESC`,
+      [filter.scopeKind, filter.scopeId, filter.serverId, filter.fingerprint]
+    ).map(mapMcpPolicySuggestion);
+  }
+
+  async listMcpPolicySuggestions(filter: { status?: McpPolicySuggestionStatus; limit?: number } = {}): Promise<McpPolicySuggestion[]> {
+    const limit = clampLimit(filter.limit, { fallback: 200, max: LIMIT_MAX.mcpPolicySuggestions });
+    const rows = filter.status
+      ? this.queryAll<Record<string, unknown>>(`SELECT * FROM mcp_policy_suggestions WHERE status = ? ORDER BY created_at DESC, id DESC LIMIT ${limit}`, [filter.status])
+      : this.queryAll<Record<string, unknown>>(`SELECT * FROM mcp_policy_suggestions ORDER BY created_at DESC, id DESC LIMIT ${limit}`);
+    return rows.map(mapMcpPolicySuggestion);
+  }
+
+  async getMcpPolicySuggestion(id: string): Promise<McpPolicySuggestion | null> {
+    const row = this.queryOne<Record<string, unknown>>(`SELECT * FROM mcp_policy_suggestions WHERE id = ?`, [id]);
+    return row ? mapMcpPolicySuggestion(row) : null;
+  }
+
+  async transitionMcpPolicySuggestion(
+    id: string,
+    input: { from: McpPolicySuggestionStatus; to: McpPolicySuggestionStatus; decidedBy: string | null; decidedAt: string | null; acceptedRuleIds?: string[] }
+  ): Promise<McpPolicySuggestion | null> {
+    return this.db.transaction(() => {
+      const accepted = input.acceptedRuleIds === undefined ? null : JSON.stringify(input.acceptedRuleIds);
+      const result = this.db
+        .prepare(
+          `UPDATE mcp_policy_suggestions
+              SET status = ?, decided_by = ?, decided_at = ?, updated_at = ?,
+                  accepted_rule_ids_json = COALESCE(?, accepted_rule_ids_json)
+            WHERE id = ? AND status = ?`
+        )
+        .run(input.to, input.decidedBy, input.decidedAt, input.decidedAt ?? new Date().toISOString(), accepted, id, input.from);
+      if (result.changes === 0) return null;
+      const row = this.queryOne<Record<string, unknown>>(`SELECT * FROM mcp_policy_suggestions WHERE id = ?`, [id]);
+      return row ? mapMcpPolicySuggestion(row) : null;
+    })();
   }
 
   // ---------------------------------------------------------------------------

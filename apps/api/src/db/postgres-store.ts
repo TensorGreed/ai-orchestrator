@@ -726,6 +726,24 @@ export class PostgresStore implements Store {
   async listMcpToolCalls(...args: Parameters<Store["listMcpToolCalls"]>): ReturnType<Store["listMcpToolCalls"]> {
     return mcp.listMcpToolCalls(this.ctx, ...args);
   }
+  async scanMcpToolCalls(...args: Parameters<Store["scanMcpToolCalls"]>): ReturnType<Store["scanMcpToolCalls"]> {
+    return mcp.scanMcpToolCalls(this.ctx, ...args);
+  }
+  async upsertOpenMcpPolicySuggestion(...args: Parameters<Store["upsertOpenMcpPolicySuggestion"]>): ReturnType<Store["upsertOpenMcpPolicySuggestion"]> {
+    return mcp.upsertOpenMcpPolicySuggestion(this.ctx, ...args);
+  }
+  async listDecidedMcpPolicySuggestions(...args: Parameters<Store["listDecidedMcpPolicySuggestions"]>): ReturnType<Store["listDecidedMcpPolicySuggestions"]> {
+    return mcp.listDecidedMcpPolicySuggestions(this.ctx, ...args);
+  }
+  async listMcpPolicySuggestions(...args: Parameters<Store["listMcpPolicySuggestions"]>): ReturnType<Store["listMcpPolicySuggestions"]> {
+    return mcp.listMcpPolicySuggestions(this.ctx, ...args);
+  }
+  async getMcpPolicySuggestion(...args: Parameters<Store["getMcpPolicySuggestion"]>): ReturnType<Store["getMcpPolicySuggestion"]> {
+    return mcp.getMcpPolicySuggestion(this.ctx, ...args);
+  }
+  async transitionMcpPolicySuggestion(...args: Parameters<Store["transitionMcpPolicySuggestion"]>): ReturnType<Store["transitionMcpPolicySuggestion"]> {
+    return mcp.transitionMcpPolicySuggestion(this.ctx, ...args);
+  }
   async getMcpOAuthConnection(...args: Parameters<Store["getMcpOAuthConnection"]>): ReturnType<Store["getMcpOAuthConnection"]> {
     return mcp.getMcpOAuthConnection(this.ctx, ...args);
   }

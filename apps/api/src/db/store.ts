@@ -30,6 +30,10 @@ import type {
   McpDelegatedFallback,
   McpElicitationStatus,
   McpPolicyRole,
+  McpPolicySuggestedRule,
+  McpPolicySuggestion,
+  McpPolicySuggestionEvidence,
+  McpPolicySuggestionStatus,
   McpSamplingSettings,
   McpSandboxSettings,
   McpSandboxStatus,
@@ -242,6 +246,45 @@ export interface McpGatewayApprovalCallKey {
   serverId: string;
   toolName: string;
   argsHash: string;
+}
+
+/** Phase 12.4 — a page request over `mcp_tool_calls` (see `Store.scanMcpToolCalls`). */
+export interface McpToolCallScanFilter {
+  since: string;
+  until: string;
+  /** Keyset cursor: only rows strictly older than this (started_at, then id). */
+  before?: { startedAt: string; id: string } | null;
+  limit: number;
+  /** Row sources to read; at least one. */
+  sources: ReadonlyArray<"workflow" | "gateway" | "playground">;
+  /** Leave out rows of this adapter (the gateway's own rows for workflow tools). */
+  excludeAdapterId?: string;
+  workflowId?: string;
+  clientId?: string;
+  /** A registry server id, or an adapter id for rows of servers configured inline. */
+  serverId?: string;
+  toolName?: string;
+  /** Only rows with a recorded policy decision. */
+  withPolicyDecision?: boolean;
+}
+
+/** Phase 12.4 — what `upsertOpenMcpPolicySuggestion` writes. */
+export interface McpPolicySuggestionWrite {
+  id: string;
+  scopeKind: "workflow" | "client";
+  scopeId: string;
+  scopeName: string | null;
+  serverId: string;
+  serverName: string | null;
+  fingerprint: string;
+  rules: McpPolicySuggestedRule[];
+  evidence: McpPolicySuggestionEvidence;
+  windowDays: number;
+  windowStart: string;
+  windowEnd: string;
+  callCount: number;
+  createdBy: string | null;
+  now: string;
 }
 
 export type McpGatewayApprovalCreate = Omit<
@@ -465,6 +508,29 @@ export interface Store {
    * calls to inline-configured servers; a string selects one registry entry.
    */
   listMcpToolCalls(filter: { registryServerId: string | null; since: string }): Promise<McpToolCallRecord[]>;
+  /**
+   * Phase 12.4 — one page of tool calls in [since, until), newest first (started_at, then id, descending), strictly
+   * older than `before` when given. Policy simulation, suggestions and shadow hits read the window page by page.
+   */
+  scanMcpToolCalls(filter: McpToolCallScanFilter): Promise<McpToolCallRecord[]>;
+  /**
+   * Phase 12.4 — insert the open suggestion for (scope, server), or refresh the one already open: `unchanged` when it
+   * proposes the same rules (only the evidence and window move), `updated` when the rules changed.
+   */
+  upsertOpenMcpPolicySuggestion(input: McpPolicySuggestionWrite): Promise<{ suggestion: McpPolicySuggestion; outcome: "created" | "updated" | "unchanged" }>;
+  /** Phase 12.4 — decided suggestions (accepted or dismissed) for (scope, server) with this fingerprint. */
+  listDecidedMcpPolicySuggestions(filter: { scopeKind: "workflow" | "client"; scopeId: string; serverId: string; fingerprint: string }): Promise<McpPolicySuggestion[]>;
+  /** Phase 12.4 — newest first; `status` absent lists every status. */
+  listMcpPolicySuggestions(filter?: { status?: McpPolicySuggestionStatus; limit?: number }): Promise<McpPolicySuggestion[]>;
+  getMcpPolicySuggestion(id: string): Promise<McpPolicySuggestion | null>;
+  /**
+   * Phase 12.4 — move a suggestion from `from` to `to` in one conditional update; null when it was not in `from`
+   * (someone else decided it first). `acceptedRuleIds` replaces the stored list when given.
+   */
+  transitionMcpPolicySuggestion(
+    id: string,
+    input: { from: McpPolicySuggestionStatus; to: McpPolicySuggestionStatus; decidedBy: string | null; decidedAt: string | null; acceptedRuleIds?: string[] }
+  ): Promise<McpPolicySuggestion | null>;
   getMcpOAuthConnection(serverId: string): Promise<McpOAuthConnectionRecord | null>;
   upsertMcpOAuthConnection(record: Omit<McpOAuthConnectionRecord, "updatedAt">): Promise<McpOAuthConnectionRecord>;
   getMcpUserOAuthConnection(serverId: string, userId: string): Promise<McpUserOAuthConnectionRecord | null>;

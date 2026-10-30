@@ -7,14 +7,19 @@ import {
   MCP_TOOL_POLICY_EFFECTS,
   mcpToolPolicyConditionsSchema,
   parseToolArgumentSummary,
+  MCP_POLICY_SUGGESTION_STATUSES,
   type McpGatewayApproval,
   type McpGatewayApprovalStatus,
+  type McpPolicySuggestedRule,
+  type McpPolicySuggestion,
+  type McpPolicySuggestionEvidence,
   type McpSamplingSettings,
   type McpToolPolicyDecisionRecord,
   type McpToolPolicyEffect,
   type McpToolPolicyRule
 } from "@ai-orchestrator/shared";
 import type { McpToolCallRecord, McpToolCallWrite } from "./database.js";
+import type { McpToolCallScanFilter } from "./store.js";
 
 /** Trigger types of runs made from golden runs and golden-set cases (replays, replay jobs, gate and eval runs). */
 export const SUBJECT_EXECUTION_TRIGGERS = ["replay", "mcp_replay", "eval", "eval_judge"] as const;
@@ -180,4 +185,81 @@ export function mapMcpToolCallContext(row: {
 /** Phase 12.4 — the values written to the argument summary and subject columns, in column order. */
 export function mcpToolCallContextValues(call: McpToolCallWrite): [string | null, string | null, string | null, string | null] {
   return [call.argsSummary ? JSON.stringify(call.argsSummary) : null, call.subjectRole ?? null, call.subjectSource ?? null, call.projectId ?? null];
+}
+
+/**
+ * Phase 12.4 — the WHERE clause and parameters of a tool-call scan page (both stores), with `placeholder(n)` writing
+ * the n-th parameter (`?` on SQLite, `$n` on Postgres) and `idOrder` the id column as the store orders it.
+ */
+export function mcpToolCallScanWhere(
+  filter: McpToolCallScanFilter,
+  placeholder: (index: number) => string,
+  idOrder: string
+): { where: string; params: unknown[] } {
+  const params: unknown[] = [];
+  const next = (value: unknown) => {
+    params.push(value);
+    return placeholder(params.length);
+  };
+  const clauses = [`started_at >= ${next(filter.since)}`, `started_at < ${next(filter.until)}`];
+  const sources: readonly string[] = filter.sources.length > 0 ? filter.sources : ["workflow"];
+  clauses.push(`source IN (${sources.map((source) => next(source)).join(", ")})`);
+  if (filter.before) {
+    const at = next(filter.before.startedAt);
+    const sameAt = next(filter.before.startedAt);
+    clauses.push(`(started_at < ${at} OR (started_at = ${sameAt} AND ${idOrder} < ${next(filter.before.id)}))`);
+  }
+  if (filter.excludeAdapterId) clauses.push(`adapter_id <> ${next(filter.excludeAdapterId)}`);
+  if (filter.workflowId) clauses.push(`workflow_id = ${next(filter.workflowId)}`);
+  if (filter.clientId) clauses.push(`client_id = ${next(filter.clientId)}`);
+  if (filter.serverId) {
+    const registry = next(filter.serverId);
+    clauses.push(`(registry_server_id = ${registry} OR (registry_server_id IS NULL AND adapter_id = ${next(filter.serverId)}))`);
+  }
+  if (filter.toolName) clauses.push(`tool_name = ${next(filter.toolName)}`);
+  if (filter.withPolicyDecision) clauses.push(`policy_decision_json IS NOT NULL`);
+  return { where: clauses.join(" AND "), params };
+}
+
+function parseJsonValue(value: unknown): unknown {
+  if (value === null || value === undefined || value === "") return null;
+  if (typeof value !== "string") return value;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
+}
+
+const EMPTY_SUGGESTION_EVIDENCE: McpPolicySuggestionEvidence = { calls: 0, scopeCalls: 0, roles: [], tools: [], capped: false };
+
+/** Phase 12.4 — an `mcp_policy_suggestions` row (both stores). */
+export function mapMcpPolicySuggestion(row: Record<string, unknown>): McpPolicySuggestion {
+  const text = (value: unknown) => (value === null || value === undefined || value === "" ? null : String(value));
+  const status = String(row.status) as McpPolicySuggestion["status"];
+  const rules = parseJsonValue(row.rules_json);
+  const evidence = parseJsonValue(row.evidence_json);
+  const accepted = parseJsonValue(row.accepted_rule_ids_json);
+  return {
+    id: String(row.id),
+    scopeKind: row.scope_kind === "client" ? "client" : "workflow",
+    scopeId: String(row.scope_id),
+    scopeName: text(row.scope_name),
+    serverId: String(row.server_id),
+    serverName: text(row.server_name),
+    status: MCP_POLICY_SUGGESTION_STATUSES.includes(status) ? status : "dismissed",
+    rules: Array.isArray(rules) ? (rules as McpPolicySuggestedRule[]) : [],
+    evidence: evidence && typeof evidence === "object" && !Array.isArray(evidence) ? (evidence as McpPolicySuggestionEvidence) : EMPTY_SUGGESTION_EVIDENCE,
+    fingerprint: String(row.fingerprint),
+    windowDays: Number(row.window_days),
+    windowStart: isoOrNull(row.window_start) ?? "",
+    windowEnd: isoOrNull(row.window_end) ?? "",
+    callCount: Number(row.call_count),
+    acceptedRuleIds: Array.isArray(accepted) ? accepted.filter((id): id is string => typeof id === "string") : [],
+    createdBy: text(row.created_by),
+    createdAt: isoOrNull(row.created_at) ?? "",
+    updatedAt: isoOrNull(row.updated_at) ?? "",
+    decidedBy: text(row.decided_by),
+    decidedAt: isoOrNull(row.decided_at)
+  };
 }

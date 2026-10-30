@@ -39,7 +39,9 @@ import {
 import type { PoolClient } from "pg";
 import {
   mapMcpGatewayApproval,
+  mapMcpPolicySuggestion,
   mapMcpToolCallContext,
+  mcpToolCallScanWhere,
   mcpToolCallContextValues,
   mapMcpToolPolicyExtras,
   normalizeMcpSamplingSettings,
@@ -684,6 +686,122 @@ export async function listMcpToolCalls(ctx: PgContext, ...[filter]: Parameters<S
         [filter.registryServerId, filter.since]
       );
   return result.map(mapMcpToolCall);
+}
+
+/** Phase 12.4 — one page of a tool-call window scan, newest first (SQLite parity: id compared by code point). */
+export async function scanMcpToolCalls(ctx: PgContext, ...[filter]: Parameters<Store["scanMcpToolCalls"]>): ReturnType<Store["scanMcpToolCalls"]> {
+  const { where, params } = mcpToolCallScanWhere(filter, (index) => `$${index}`, `id COLLATE "C"`);
+  const limit = clampLimit(filter.limit, { fallback: 1000, max: LIMIT_MAX.mcpToolCallScan });
+  const result = await ctx.query<Row>(`SELECT * FROM mcp_tool_calls WHERE ${where} ORDER BY started_at DESC, id COLLATE "C" DESC LIMIT ${limit}`, params);
+  return result.map(mapMcpToolCall);
+}
+
+const SUGGESTION_UPDATE_COLUMNS = [
+  "scope_name",
+  "server_name",
+  "fingerprint",
+  "rules_json",
+  "evidence_json",
+  "window_days",
+  "window_start",
+  "window_end",
+  "call_count",
+  "updated_at"
+] as const;
+
+export async function upsertOpenMcpPolicySuggestion(
+  ctx: PgContext,
+  ...[input]: Parameters<Store["upsertOpenMcpPolicySuggestion"]>
+): ReturnType<Store["upsertOpenMcpPolicySuggestion"]> {
+  // One statement: the CTE reads the open row as it was before, ON CONFLICT on the partial unique index refreshes it.
+  const row = await one(
+    ctx.pool,
+    `WITH previous AS (
+       SELECT fingerprint FROM mcp_policy_suggestions
+        WHERE scope_kind = $1 AND scope_id = $2 AND server_id = $3 AND status = 'open'
+     )
+     INSERT INTO mcp_policy_suggestions (
+       scope_kind, scope_id, server_id, id, status, created_by, created_at, ${SUGGESTION_UPDATE_COLUMNS.join(", ")}
+     ) VALUES ($1, $2, $3, $4, 'open', $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+     ON CONFLICT (scope_kind, scope_id, server_id) WHERE status = 'open'
+     DO UPDATE SET ${SUGGESTION_UPDATE_COLUMNS.map((column) => `${column} = EXCLUDED.${column}`).join(", ")}
+     RETURNING *, (SELECT fingerprint FROM previous) AS previous_fingerprint`,
+    [
+      input.scopeKind,
+      input.scopeId,
+      input.serverId,
+      input.id,
+      input.createdBy,
+      input.now,
+      input.scopeName,
+      input.serverName,
+      input.fingerprint,
+      JSON.stringify(input.rules),
+      JSON.stringify(input.evidence),
+      input.windowDays,
+      input.windowStart,
+      input.windowEnd,
+      input.callCount,
+      input.now
+    ]
+  );
+  if (!row) throw new Error("Policy suggestion could not be stored");
+  const previous = row.previous_fingerprint;
+  const outcome = previous === null || previous === undefined ? "created" : previous === input.fingerprint ? "unchanged" : "updated";
+  return { suggestion: mapMcpPolicySuggestion(row), outcome };
+}
+
+export async function listDecidedMcpPolicySuggestions(
+  ctx: PgContext,
+  ...[filter]: Parameters<Store["listDecidedMcpPolicySuggestions"]>
+): ReturnType<Store["listDecidedMcpPolicySuggestions"]> {
+  const result = await ctx.query<Row>(
+    `SELECT * FROM mcp_policy_suggestions
+      WHERE scope_kind = $1 AND scope_id = $2 AND server_id = $3 AND fingerprint = $4 AND status <> 'open'
+      ORDER BY created_at DESC, id COLLATE "C" DESC`,
+    [filter.scopeKind, filter.scopeId, filter.serverId, filter.fingerprint]
+  );
+  return result.map(mapMcpPolicySuggestion);
+}
+
+export async function listMcpPolicySuggestions(
+  ctx: PgContext,
+  ...[filter = {}]: Parameters<Store["listMcpPolicySuggestions"]>
+): ReturnType<Store["listMcpPolicySuggestions"]> {
+  const limit = clampLimit(filter.limit, { fallback: 200, max: LIMIT_MAX.mcpPolicySuggestions });
+  const result = filter.status
+    ? await ctx.query<Row>(`SELECT * FROM mcp_policy_suggestions WHERE status = $1 ORDER BY created_at DESC, id COLLATE "C" DESC LIMIT ${limit}`, [filter.status])
+    : await ctx.query<Row>(`SELECT * FROM mcp_policy_suggestions ORDER BY created_at DESC, id COLLATE "C" DESC LIMIT ${limit}`, []);
+  return result.map(mapMcpPolicySuggestion);
+}
+
+export async function getMcpPolicySuggestion(ctx: PgContext, ...[id]: Parameters<Store["getMcpPolicySuggestion"]>): ReturnType<Store["getMcpPolicySuggestion"]> {
+  const row = await one(ctx.pool, `SELECT * FROM mcp_policy_suggestions WHERE id = $1`, [id]);
+  return row ? mapMcpPolicySuggestion(row) : null;
+}
+
+export async function transitionMcpPolicySuggestion(
+  ctx: PgContext,
+  ...[id, input]: Parameters<Store["transitionMcpPolicySuggestion"]>
+): ReturnType<Store["transitionMcpPolicySuggestion"]> {
+  const row = await one(
+    ctx.pool,
+    `UPDATE mcp_policy_suggestions
+        SET status = $1, decided_by = $2, decided_at = $3, updated_at = $4,
+            accepted_rule_ids_json = COALESCE($5, accepted_rule_ids_json)
+      WHERE id = $6 AND status = $7
+      RETURNING *`,
+    [
+      input.to,
+      input.decidedBy,
+      tsOrNull(input.decidedAt),
+      input.decidedAt ?? new Date().toISOString(),
+      input.acceptedRuleIds === undefined ? null : JSON.stringify(input.acceptedRuleIds),
+      id,
+      input.from
+    ]
+  );
+  return row ? mapMcpPolicySuggestion(row) : null;
 }
 
 export async function listMcpToolCallsForExecution(ctx: PgContext, ...[executionId]: Parameters<Store["listMcpToolCallsForExecution"]>): ReturnType<Store["listMcpToolCallsForExecution"]> {
