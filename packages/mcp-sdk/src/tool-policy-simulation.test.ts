@@ -8,7 +8,7 @@
 import { describe, expect, it } from "vitest";
 import type { McpPolicyCondition, McpToolPolicyEffect, McpToolPolicyRule, ToolArgumentSummary } from "@ai-orchestrator/shared";
 import { evaluateMcpToolPolicy, MAX_RESOLVED_VALUES } from "./tool-policy";
-import { hashToolArgumentValue, summarizeToolArguments, type ToolArgumentDetector } from "./tool-argument-summary";
+import { hashToolArgumentValue, summarizeToolArguments, toolArgumentHashKeyId, type ToolArgumentDetector } from "./tool-argument-summary";
 import {
   evaluateConditionOnSummary,
   evaluateRuleOnSummary,
@@ -22,6 +22,7 @@ import {
 const hashKey = new Uint8Array(32).fill(11);
 const context = { hashKey };
 const h = (value: string | number | boolean) => hashToolArgumentValue(value, hashKey);
+const kid = toolArgumentHashKeyId(hashKey);
 const noDetect: ToolArgumentDetector = () => [];
 const summarize = (args: unknown, inputSchema?: unknown) => summarizeToolArguments(args, { detect: noDetect, hashKey, inputSchema });
 
@@ -175,7 +176,7 @@ describe("values the summary does not show", () => {
   });
 
   it("is undetermined when a truncated summary may hide the path", () => {
-    const summary: ToolArgumentSummary = { v: 2, fields: { a: { type: "string", values: ["x"] } }, truncated: true };
+    const summary: ToolArgumentSummary = { v: 3, kid, fields: { a: { type: "string", values: ["x"] } }, truncated: true };
     expect(any({ path: "b", op: "equals", value: "x" }, summary)).toBe("unknown");
     expect(any({ path: "b", op: "exists" }, summary)).toBe("unknown");
     // A value it does show can still prove a deny.
@@ -213,7 +214,8 @@ describe("values the summary does not show", () => {
     const deny = rule({ id: "d", effect: "deny", conditions: { all: [{ path: "docs", op: "equals", value: "x" }, { path: "env", op: "equals", value: "dev" }] } });
     expect(evaluateRuleOnSummary(deny, call(summary), context).state).toBe("no_match");
     const big: ToolArgumentSummary = {
-      v: 2,
+      v: 3,
+      kid,
       fields: { docs: { type: "array", items: 600 }, "docs[]": { type: "string", count: 600, len: "513-2048", hashes: [h("a")] }, env: { type: "string", values: ["prod"] } }
     };
     const onEnv = rule({ id: "e", effect: "deny", conditions: { all: [{ path: "docs", op: "equals", value: "zzz" }, { path: "env", op: "equals", value: "dev" }] } });
@@ -224,6 +226,73 @@ describe("values the summary does not show", () => {
     expect(evaluateRuleOnSummary(onDocs, call(big), context).state).toBe("match");
     const allowDocs = rule({ id: "g", effect: "allow", conditions: { all: [{ path: "docs", op: "not_one_of", value: ["zz"] }] } });
     expect(evaluateRuleOnSummary(allowDocs, call(big), context).state).toBe("unknown");
+  });
+});
+
+describe("values kept or hashed in another form", () => {
+  const deny = (condition: McpPolicyCondition) => rule({ id: "d", effect: "deny", conditions: { all: [condition] } });
+  const simulated = (args: Record<string, unknown>, condition: McpPolicyCondition) =>
+    simulatePolicyTransition([], [deny(condition)], call(summarize(args)), context).bucket;
+
+  it("never decides a hashed location number (rounded before hashing)", () => {
+    expect(simulated({ address: { lat: 51.5074 } }, { path: "address.lat", op: "equals", value: 51.5074 })).toBe("undetermined");
+    expect(simulated({ address: { lat: 51.54 } }, { path: "address.lat", op: "equals", value: 51.5 })).toBe("undetermined");
+    for (const op of ["one_of", "not_one_of"] as const) {
+      expect(any({ path: "address.lat", op, value: [51.5] }, summarize({ address: { lat: 51.54 } }))).toBe("unknown");
+    }
+    // Even with no adj mark (a value already at one decimal), the hash of a location number is not compared.
+    const unmarked: ToolArgumentSummary = { v: 3, kid, fields: { address: { type: "object", keys: 1 }, "address.lat": { type: "number", mag: 1, hashes: [h(51.5)] } } };
+    expect(any({ path: "address.lat", op: "equals", value: 51.5 }, unmarked)).toBe("unknown");
+    expect(any({ path: "address.lat", op: "not_one_of", value: [51.5] }, unmarked)).toBe("unknown");
+  });
+
+  it("does not decide text with surrounding whitespace or a compatibility form, nor a rounded number", () => {
+    expect(simulated({ branch: "main " }, { path: "branch", op: "equals", value: "main" })).toBe("undetermined");
+    expect(simulated({ branch: "ｍａｉｎ" }, { path: "branch", op: "equals", value: "main" })).toBe("undetermined");
+    expect(simulated({ branch: "ｍａｉｎ" }, { path: "branch", op: "starts_with", value: "ma" })).toBe("undetermined");
+    expect(simulated({ amount: 100.00004 }, { path: "amount", op: "gt", value: 100 })).toBe("undetermined");
+    expect(simulated({ amount: 1.00001 }, { path: "amount", op: "equals", value: 1 })).toBe("undetermined");
+    // Values kept as they are still decide.
+    expect(simulated({ branch: "main" }, { path: "branch", op: "equals", value: "main" })).toBe("newly_denied");
+    expect(simulated({ amount: 100.5 }, { path: "amount", op: "gt", value: 100 })).toBe("newly_denied");
+    expect(simulated({ title: "Hello World" }, { path: "title", op: "equals", value: "Hello World" })).toBe("newly_denied");
+  });
+
+  it("does not compare hashes made under another key", () => {
+    const other = summarizeToolArguments({ title: "Hello World" }, { detect: noDetect, hashKey: new Uint8Array(32).fill(12) });
+    expect(other.kid).not.toBe(kid);
+    expect(any({ path: "title", op: "equals", value: "Hello World" }, other)).toBe("unknown");
+    expect(any({ path: "title", op: "not_one_of", value: ["x"] }, other)).toBe("unknown");
+    const noKid = { ...summarize({ title: "Hello World" }) };
+    delete noKid.kid;
+    expect(any({ path: "title", op: "equals", value: "Hello World" }, noKid)).toBe("unknown");
+  });
+
+  it("reads format 2 summaries cautiously: text and non-integer numbers undetermined, integers decided", () => {
+    const legacy: ToolArgumentSummary = {
+      v: 2,
+      fields: {
+        env: { type: "string", values: ["prod"] },
+        title: { type: "string", hashes: [h("Hello World")], len: "9-32" },
+        limit: { type: "number", values: [50], min: 50, max: 50 },
+        ratio: { type: "number", values: [1.5], min: 1.5, max: 1.5 },
+        draft: { type: "boolean", values: [true] }
+      }
+    };
+    expect(any({ path: "env", op: "equals", value: "prod" }, legacy)).toBe("unknown");
+    expect(any({ path: "title", op: "equals", value: "Hello World" }, legacy)).toBe("unknown");
+    expect(any({ path: "ratio", op: "gt", value: 1 }, legacy)).toBe("unknown");
+    expect(any({ path: "limit", op: "gt", value: 10 }, legacy)).toBe(true);
+    expect(any({ path: "draft", op: "equals", value: true }, legacy)).toBe(true);
+  });
+
+  it("reads a malformed literal as the evaluator does, whatever the summary holds", () => {
+    const summary = summarize({ title: "Hello World", branch: "main " });
+    for (const path of ["title", "branch"]) {
+      const condition = { path, op: "not_one_of", value: "not a list" } as unknown as McpPolicyCondition;
+      expect(any(condition, summary)).toBe(false);
+      expect(every(condition, summary)).toBe(false);
+    }
   });
 });
 
@@ -252,7 +321,8 @@ describe("lists and wildcards", () => {
 
   it("fails closed when the path holds more values than the evaluator reads", () => {
     const summary: ToolArgumentSummary = {
-      v: 2,
+      v: 3,
+      kid,
       fields: { ids: { type: "array", items: 64, count: 30 }, "ids[]": { type: "string", count: MAX_RESOLVED_VALUES + 1, values: ["a"] } }
     };
     expect(any({ path: "ids", op: "equals", value: "zzz" }, summary)).toBe(true);
@@ -385,11 +455,12 @@ function seeded(seed: number) {
 describe("agreement with the evaluator on real arguments", () => {
   const random = seeded(20261030);
   const pick = <T>(items: readonly T[]): T => items[Math.floor(random() * items.length)]!;
-  // Texts without surrounding whitespace or compatibility characters (the documented approximations).
+  // Texts and numbers include forms the summary keeps differently: surrounding whitespace, compatibility
+  // characters, digits past the fourth decimal, and location numbers that are hashed under a sensitive key.
   const tokens = ["prod", "dev", "main", "alpha", "beta", "read", "write"];
-  const texts = ["Quarterly report", "Hello World", "release-2026", "PROD", "Prod", "0042", "42", "5.0", "true"];
-  const numbers = [0, 1, 5, 42, 51.47, 99.5, 100, 250, 1000, 12345678, -3];
-  const keys = ["env", "repo", "title", "limit", "count", "tags", "items", "lat", "flag", "1abc"];
+  const texts = ["Quarterly report", "Hello World", "release-2026", "PROD", "Prod", "0042", "42", "5.0", "true", "main ", " prod", "ｍａｉｎ", "Ｈello World "];
+  const numbers = [0, 1, 5, 42, 51.47, 51.5, 51.5074, 99.5, 100, 100.00004, 1.00001, 250, 1000, 12345678, -3];
+  const keys = ["env", "repo", "title", "limit", "count", "tags", "items", "lat", "flag", "1abc", "address"];
 
   const scalar = (): unknown => {
     const roll = random();
@@ -408,6 +479,7 @@ describe("agreement with the evaluator on real arguments", () => {
       return Array.from({ length }, (_, index) => (length > 4 ? `${pick(tokens)}${String.fromCharCode(97 + (index % 26))}` : random() < 0.3 ? value(depth + 1) : scalar()));
     }
     if (depth < 2 && random() < 0.1) return { name: scalar(), id: scalar() };
+    if (depth < 2 && random() < 0.08) return { lat: pick(numbers), lng: scalar() };
     return scalar();
   };
   const args = (): Record<string, unknown> => {
@@ -430,7 +502,7 @@ describe("agreement with the evaluator on real arguments", () => {
     if (roll < 0.6) return key;
     if (roll < 0.75) return `${key}[*]`;
     if (roll < 0.9) return `${key}[*].${pick(["name", "id"])}`;
-    return `${key}.${pick(["name", "id", "nested"])}`;
+    return `${key}.${pick(["name", "id", "nested", "lat", "lng"])}`;
   };
   const condition = (): McpPolicyCondition => {
     const op = pick(["equals", "one_of", "not_one_of", "starts_with", "ends_with", "matches", "lt", "lte", "gt", "gte", "between", "exists", "label_absent"] as const);
@@ -468,7 +540,7 @@ describe("agreement with the evaluator on real arguments", () => {
   it("never contradicts the evaluator on 10,000 random calls and rule sets", () => {
     let determined = 0;
     let undetermined = 0;
-    const seen = { truncated: 0, more: 0, lengthOnly: 0, hashed: 0 };
+    const seen = { truncated: 0, more: 0, lengthOnly: 0, hashed: 0, adjusted: 0, hashedLocation: 0 };
     for (let trial = 0; trial < 10_000; trial += 1) {
       const callArgs = args();
       const rules = Array.from({ length: 1 + Math.floor(random() * 3) }, (_, index) => randomRule(index));
@@ -480,6 +552,8 @@ describe("agreement with the evaluator on real arguments", () => {
       if (fields.some((field) => field.more)) seen.more += 1;
       if (fields.some((field) => field.len === "2049+")) seen.lengthOnly += 1;
       if (fields.some((field) => field.hashes?.length)) seen.hashed += 1;
+      if (fields.some((field) => field.adj)) seen.adjusted += 1;
+      if (Object.entries(recorded.summary.fields).some(([key, field]) => /^address\.lat$/.test(key) && field.hashes?.length)) seen.hashedLocation += 1;
       const real = evaluateMcpToolPolicy(rules, {
         role: "builder",
         projectId: "default",
@@ -512,6 +586,8 @@ describe("agreement with the evaluator on real arguments", () => {
     // The generator reaches every lossy part of a summary.
     expect(Math.min(seen.truncated, seen.more, seen.lengthOnly)).toBeGreaterThan(20);
     expect(seen.hashed).toBeGreaterThan(1000);
+    expect(seen.adjusted).toBeGreaterThan(500);
+    expect(seen.hashedLocation).toBeGreaterThan(20);
     expect(undetermined).toBeGreaterThan(200);
   });
 });

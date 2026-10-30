@@ -10,7 +10,7 @@ import {
   type ToolArgumentSummary,
   type ToolArgumentValueType
 } from "@ai-orchestrator/shared";
-import { hashToolArgumentValue, isToolArgumentLocationKey } from "./tool-argument-summary";
+import { hashToolArgumentValue, isToolArgumentLocationKey, toolArgumentHashKeyId } from "./tool-argument-summary";
 import {
   MAX_EVALUATED_ARGUMENT_CHARS,
   MAX_GLOB_STEPS_PER_EVALUATION,
@@ -71,12 +71,20 @@ import {
  * `more` list may hide; a call whose argument text could exhaust the
  * evaluator's per-call budgets.
  *
- * Known approximations, shared with the summary itself: a kept token is the
- * NFKC form of the value, a hash covers the NFKC form of the untrimmed text,
- * and other numbers are kept to four decimals. A value that differs from a
- * rule literal only by Unicode compatibility forms, surrounding whitespace,
- * or digits past the fourth decimal can therefore read differently here
- * than at call time.
+ * Values whose kept or hashed form is not what the evaluator reads:
+ *   - a format 3 field marked `adj` (surrounding whitespace, a form NFKC
+ *     changed, a rounded number): its text and hashed values are undetermined
+ *     for every operator, and so are its kept numbers (a location number
+ *     keeps its ±0.05 interval for the number compares);
+ *   - a hashed number under a location key was rounded to one decimal before
+ *     hashing: undetermined for every operator;
+ *   - hashes made under another key (the summary's `kid` differs from this
+ *     deployment's, or a format 2 summary, which has no `kid`): undetermined;
+ *   - format 2 summaries carry no `adj` mark, so their kept text is treated as
+ *     possibly adjusted (undetermined for every operator), and so are kept
+ *     numbers that are not integers for the number and equality operators.
+ *     Format 2 integers stay determined: one only differs from the value when
+ *     the value was within 0.00005 of it.
  */
 
 export type SimulationTruth = true | false | "unknown";
@@ -104,6 +112,32 @@ export interface PolicySimulationCall {
 export interface PolicySimulationContext {
   /** The deployment's summary hash key (`toolArgumentHashKey`). */
   hashKey: Uint8Array;
+}
+
+const keyIdCache = new WeakMap<Uint8Array, string>();
+
+function contextKeyId(context: PolicySimulationContext): string {
+  let id = keyIdCache.get(context.hashKey);
+  if (id === undefined) {
+    id = toolArgumentHashKeyId(context.hashKey);
+    keyIdCache.set(context.hashKey, id);
+  }
+  return id;
+}
+
+/** What the summary as a whole says about how far its values can be trusted. */
+interface SummaryTrust {
+  /** Its hashes were made under this deployment's key (format 3 with a matching `kid`). */
+  hashesComparable: boolean;
+  /** Format 2: no `adj` marks, so kept text and non-integer numbers may be adjusted. */
+  legacy: boolean;
+}
+
+function summaryTrust(summary: ToolArgumentSummary, context: PolicySimulationContext): SummaryTrust {
+  return {
+    hashesComparable: summary.v !== 2 && typeof summary.kid === "string" && summary.kid === contextKeyId(context),
+    legacy: summary.v === 2
+  };
 }
 
 export interface SimulatedRuleState {
@@ -292,6 +326,8 @@ interface FieldValues {
   extra: boolean;
   /** Types the hashed values may have. */
   types: ReadonlySet<ToolArgumentValueType>;
+  /** The field is marked `adj`: some kept or hashed value differs from what the evaluator reads. */
+  adjusted: boolean;
 }
 
 /** The values a field shows; `skipLists`: lists at the field are read element by element elsewhere, else each is unreadable. */
@@ -311,7 +347,7 @@ function fieldValues(view: FieldView, options: { skipLists: boolean; hidden: boo
     field.len === "2049+" ||
     (field.type === "mixed" && (field.types?.length ?? 0) === 0) ||
     (scalarTypes.length > 0 && shown === 0);
-  return { reps, extra, types };
+  return { reps, extra, types, adjusted: field.adj === true };
 }
 
 // ---------------------------------------------------------------------------
@@ -434,28 +470,86 @@ function rawNumberAtLocation(condition: McpPolicyCondition, value: number): Valu
   }
 }
 
+/**
+ * True when the condition's literal is malformed for its operator: the
+ * evaluator then reads every non-null scalar as `false`, whatever its value.
+ */
+function malformedLiteral(condition: McpPolicyCondition): boolean {
+  const expected = condition.value;
+  switch (condition.op) {
+    case "equals":
+    case "one_of":
+    case "not_one_of":
+      return equalityEntries(condition) === null;
+    case "starts_with":
+    case "ends_with":
+    case "matches":
+      return typeof expected !== "string";
+    case "lt":
+    case "lte":
+    case "gt":
+    case "gte":
+      return typeof expected !== "number" || !Number.isFinite(expected);
+    case "between":
+      return (
+        !Array.isArray(expected) ||
+        expected.length !== 2 ||
+        typeof expected[0] !== "number" ||
+        typeof expected[1] !== "number" ||
+        !Number.isFinite(expected[0]) ||
+        !Number.isFinite(expected[1])
+      );
+    default:
+      return false;
+  }
+}
+
+interface RepresentativeReading {
+  reading: ValueReading;
+  /** Why the reading is unknown. */
+  why?: string;
+}
+
+const unknownBecause = (why: string): RepresentativeReading => ({ reading: "unknown", why });
+
 function readRepresentative(
   condition: McpPolicyCondition,
   rep: Representative,
   values: FieldValues,
   location: boolean,
+  trust: SummaryTrust,
   context: PolicySimulationContext
-): ValueReading {
-  switch (rep.kind) {
-    case "unreadable":
-      return "unreadable";
-    case "null":
-      return evaluatePolicyConditionValue(condition, null);
-    case "raw":
-      if (location && typeof rep.value === "number") return rawNumberAtLocation(condition, rep.value);
-      return evaluatePolicyConditionValue(condition, rep.value);
-    case "hash": {
-      if (condition.op !== "equals" && condition.op !== "one_of" && condition.op !== "not_one_of") return "unknown";
-      const member = hashedMembership(condition, rep.hash, values.types, context);
-      if (condition.op === "not_one_of") return member === "unknown" ? "unknown" : !member;
-      return member;
+): RepresentativeReading {
+  if (rep.kind === "unreadable") return { reading: "unreadable" };
+  if (rep.kind === "null") return { reading: evaluatePolicyConditionValue(condition, null) };
+  // A malformed literal reads every non-null scalar as false at call time, whatever the value.
+  if (malformedLiteral(condition)) return { reading: false };
+  if (rep.kind === "raw") {
+    const value = rep.value;
+    if (typeof value === "string") {
+      if (values.adjusted) return unknownBecause("the kept text differs from the value (whitespace or a Unicode compatibility form)");
+      if (trust.legacy) return unknownBecause("a format 2 summary may keep text in a normalised form");
+      return { reading: evaluatePolicyConditionValue(condition, value) };
     }
+    if (typeof value === "number") {
+      if (location) {
+        const reading = rawNumberAtLocation(condition, value);
+        return reading === "unknown" ? unknownBecause("location numbers are kept to one decimal") : { reading };
+      }
+      if (values.adjusted) return unknownBecause("the kept number was rounded");
+      if (trust.legacy && !Number.isInteger(value)) return unknownBecause("a format 2 summary keeps numbers rounded to four decimals");
+    }
+    return { reading: evaluatePolicyConditionValue(condition, value) };
   }
+  if (condition.op !== "equals" && condition.op !== "one_of" && condition.op !== "not_one_of") {
+    return unknownBecause("the value is kept only as a hash");
+  }
+  if (!trust.hashesComparable) return unknownBecause("the value was hashed under another key, or by a format 2 summary");
+  if (location && values.types.has("number")) return unknownBecause("a location number is rounded to one decimal before it is hashed");
+  if (values.adjusted) return unknownBecause("the hashed text differs from the value (whitespace or a Unicode compatibility form)");
+  const member = hashedMembership(condition, rep.hash, values.types, context);
+  if (member === "unknown") return unknownBecause("the value is kept only as a hash");
+  return { reading: condition.op === "not_one_of" ? !member : member };
 }
 
 // ---------------------------------------------------------------------------
@@ -567,20 +661,18 @@ export function evaluateConditionOnSummary(
     // A list at the end of the path is read element by element (`elements`), as `evaluatePolicyCondition` does.
     if (final) groups.push(fieldValues(final, { skipLists: true, hidden }));
     if (elements) groups.push(fieldValues(elements, { skipLists: false, hidden }));
-    if (final?.types.has("array") && !elements && hidden) groups.push({ reps: [], extra: true, types: new Set() });
-    const readings: Array<{ reading: ValueReading; hashed: boolean }> = [];
+    if (final?.types.has("array") && !elements && hidden) groups.push({ reps: [], extra: true, types: new Set(), adjusted: false });
+    const trust = summaryTrust(call.summary, context);
+    const readings: RepresentativeReading[] = [];
     let extra = false;
     for (const group of groups) {
       extra ||= group.extra;
-      for (const rep of group.reps) {
-        readings.push({ reading: readRepresentative(condition, rep, group, location, context), hashed: rep.kind === "hash" });
-      }
+      for (const rep of group.reps) readings.push(readRepresentative(condition, rep, group, location, trust, context));
     }
     if (!final && hidden) extra = true;
     const unknownOne = readings.find((entry) => entry.reading === "unknown");
     const describeUnknown = () => {
-      if (unknownOne?.hashed) return "the value is kept only as a hash";
-      if (unknownOne) return location ? "location numbers are kept to one decimal" : "the summary cannot compare this value";
+      if (unknownOne) return unknownOne.why ?? "the summary cannot compare this value";
       if (hidden) return "the summary was cut short";
       return "some values are kept only by their length";
     };
@@ -712,6 +804,11 @@ export interface SimulatedTransition {
   reason?: string;
   /** Each enforced draft rule's match state, by its index in the draft list. */
   draftStates: SimulatedRuleState[];
+  /**
+   * The work this call cost: readings tried times the rules in scope (at
+   * least 1). A caller bounds a whole simulation with it.
+   */
+  work: number;
 }
 
 function ruleIdentity(rule: McpToolPolicyRule): string {
@@ -768,13 +865,15 @@ export function simulatePolicyTransition(
   const undecided = [...states.entries()].filter(([, state]) => state.state === "unknown").map(([identity]) => identity);
   const draftStateList = draft.map((rule) => (rule.enabled && policyRuleMode(rule) === "enforce" ? stateOf(rule) : { state: "no_match" as const }));
   const firstReason = () => [...states.values()].find((state) => state.state === "unknown")?.reason;
+  const scopedRules = Math.max(1, relevant.length);
   if (undecided.length > MAX_UNDECIDED_RULES_PER_CALL) {
     return {
       bucket: "undetermined",
       current: { effect: null },
       draft: { effect: null },
       reason: `${undecided.length} rules cannot be decided from the summary (${firstReason() ?? "lossy summary"})`,
-      draftStates: draftStateList
+      draftStates: draftStateList,
+      work: scopedRules
     };
   }
   const outcomes = new Set<string>();
@@ -810,7 +909,8 @@ export function simulatePolicyTransition(
     current: outcome(currentEffects, currentDeciders),
     draft: outcome(draftEffects, draftDeciders),
     ...(bucket === undefined ? { reason: firstReason() ?? "the summary cannot decide the outcome" } : {}),
-    draftStates: draftStateList
+    draftStates: draftStateList,
+    work: combinations * scopedRules
   };
 }
 
