@@ -21,7 +21,11 @@ vi.mock("../lib/api", async () => {
     updateMcpToolPolicy: vi.fn(),
     deleteMcpToolPolicy: vi.fn(),
     evaluateMcpToolPolicy: vi.fn(),
-    setMcpToolClassification: vi.fn()
+    setMcpToolClassification: vi.fn(),
+    fetchWorkflows: vi.fn(),
+    fetchMcpClients: vi.fn(),
+    fetchMcpGatewayApprovals: vi.fn(),
+    decideMcpGatewayApproval: vi.fn()
   };
 });
 
@@ -117,6 +121,14 @@ describe("MCP tool policy UI", () => {
       projects: [{ id: "default", name: "Default", createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z" }]
     });
     setupServers();
+    vi.mocked(api.fetchWorkflows).mockResolvedValue([
+      { id: "wf_1", name: "Release bot", schemaVersion: "1.0.0", workflowVersion: 1, createdAt: "2026-10-01T00:00:00.000Z", updatedAt: "2026-10-01T00:00:00.000Z" }
+    ]);
+    vi.mocked(api.fetchMcpClients).mockResolvedValue({
+      usageWindow: "7d",
+      clients: [{ id: "mcpc_1", name: "IDE agent", status: "active" } as api.McpClientView]
+    });
+    vi.mocked(api.fetchMcpGatewayApprovals).mockResolvedValue({ approvals: [], approvalWindowMs: 900000 });
   });
 
   it("shows read-only classification with its source, blocked marks, and lets admins override", async () => {
@@ -200,7 +212,11 @@ describe("MCP tool policy UI", () => {
       toolPattern: "delete_*",
       annotationHint: null,
       kind: "tool",
-      enabled: true
+      enabled: true,
+      mode: "enforce",
+      conditions: null,
+      workflowIds: [],
+      clientIds: []
     });
     expect(await within(list).findByText("Builders: no deletes")).toBeInTheDocument();
     expect(within(list).getByText("mock-mcp (inline)")).toBeInTheDocument();
@@ -245,6 +261,7 @@ describe("MCP tool policy UI", () => {
     const form = screen.getByRole("form", { name: "Add tool policy rule" });
     await user.type(within(form).getByLabelText("Name"), "Operators: no destructive tools");
     await user.click(within(form).getByLabelText("operator"));
+    await user.click(within(form).getByText("Advanced"));
     await user.selectOptions(within(form).getByLabelText("Annotation condition"), "destructive");
     await user.click(within(form).getByRole("button", { name: "Add rule" }));
 
@@ -299,5 +316,180 @@ describe("MCP tool policy UI", () => {
     expect(within(result).getByText("Blocked")).toBeInTheDocument();
     expect(within(result).getByText(/blocked by policy 'Viewers: no calculator'/)).toBeInTheDocument();
     expect(within(result).getByText(/unknown → write/)).toBeInTheDocument();
+  });
+
+  it("builds conditions, scopes a rule to a client and marks a shadow rule", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.fetchMcpToolPolicies).mockResolvedValue({ rules: [], roles: ["admin", "builder", "operator", "viewer"] });
+    vi.mocked(api.createMcpToolPolicy).mockImplementation(async (payload) => ({
+      rule: makeRule({
+        id: "rule_4",
+        name: payload.name ?? null,
+        effect: payload.effect,
+        roles: [],
+        mode: payload.mode,
+        conditions: payload.conditions ?? null,
+        clientIds: payload.clientIds ?? []
+      })
+    }));
+
+    render(<McpServersPage view="policies" isAdmin activeProjectId="default" />);
+    await user.click(await screen.findByRole("button", { name: "+ Add rule" }));
+    const form = screen.getByRole("form", { name: "Add tool policy rule" });
+    await user.type(within(form).getByLabelText("Name"), "Prod pushes need a person");
+    await user.selectOptions(within(form).getByLabelText("Effect"), "require_approval");
+
+    await user.click(within(form).getByRole("button", { name: "+ Add condition" }));
+    await user.type(within(form).getByLabelText("Condition 1 argument path"), "repo");
+    await user.selectOptions(within(form).getByLabelText("Condition 1 operator"), "one_of");
+    await user.type(within(form).getByLabelText("Condition 1 value"), "acme/prod, acme/infra");
+    await user.click(within(form).getByRole("button", { name: "+ Add condition" }));
+    await user.selectOptions(within(form).getByLabelText("Condition 2 operator"), "between");
+    await user.click(within(form).getByLabelText("Condition 2 argument path"));
+    await user.paste("files[*].size");
+    await user.type(within(form).getByLabelText("Condition 2 value"), "10");
+    await user.type(within(form).getByLabelText("Condition 2 upper bound"), "5");
+    await user.click(within(form).getByRole("button", { name: "Add rule" }));
+    // Bounds the wrong way round are caught before saving.
+    expect(within(form).getByText(/Condition 2: the lower bound is above the upper bound/)).toBeInTheDocument();
+    expect(api.createMcpToolPolicy).not.toHaveBeenCalled();
+    await user.click(within(form).getByLabelText("Remove condition 2"));
+
+    await user.click(within(form).getByRole("button", { name: "+ Add condition" }));
+    await user.selectOptions(within(form).getByLabelText("Condition 2 operator"), "label_present");
+    expect(within(form).queryByLabelText("Condition 2 argument path")).not.toBeInTheDocument();
+    await user.type(within(form).getByLabelText("Condition 2 value"), "pii");
+    await user.selectOptions(within(form).getByLabelText("Combine conditions"), "any");
+    await user.click(within(form).getByLabelText("Shadow mode"));
+    await user.click(within(form).getByText("Advanced"));
+    await user.selectOptions(within(form).getByLabelText("Only for gateway clients"), "mcpc_1");
+    await user.click(within(form).getByRole("button", { name: "Add rule" }));
+
+    expect(api.createMcpToolPolicy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        effect: "require_approval",
+        mode: "shadow",
+        conditions: { any: [{ path: "repo", op: "one_of", value: ["acme/prod", "acme/infra"] }, { op: "label_present", value: "pii" }] },
+        workflowIds: [],
+        clientIds: ["mcpc_1"]
+      })
+    );
+    const list = await screen.findByRole("list", { name: "Tool policy rules" });
+    expect(await within(list).findByText("Needs approval")).toBeInTheDocument();
+    expect(within(list).getByText("Shadow")).toBeInTheDocument();
+    expect(within(list).getByText('repo is one of "acme/prod", "acme/infra" or data has label pii')).toBeInTheDocument();
+    expect(within(list).getByText("IDE agent")).toBeInTheDocument();
+  });
+
+  it("tests a call with arguments and shows the matched rule, why, and what shadow rules would do", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.fetchMcpToolPolicies).mockResolvedValue({ rules: [], roles: ["admin", "builder", "operator", "viewer"] });
+    vi.mocked(api.evaluateMcpToolPolicy).mockResolvedValue({
+      allowed: true,
+      effect: "require_approval",
+      approval: { ruleId: "rule_9", ruleName: "Big sums", message: "MCP tool 'calculator' needs approval by policy 'Big sums' (rule_9)." },
+      reason: null,
+      ruleId: null,
+      ruleName: null,
+      message: null,
+      decidedBy: "rule",
+      decidingRuleId: "rule_9",
+      matchedRules: [],
+      overriddenDenies: [],
+      why: [{ ruleId: "rule_9", ruleName: "Big sums", effect: "require_approval", mode: "enforce", conditions: 'expression starts with "1000"' }],
+      undecided: [],
+      shadow: {
+        effect: "deny",
+        ruleId: "rule_s",
+        ruleName: "Trial",
+        changed: true,
+        matchedRules: [{ ruleId: "rule_s", ruleName: "Trial", effect: "deny", mode: "shadow", conditions: null }]
+      },
+      classification: { readOnly: false, source: "unknown" },
+      manualReadOnly: null,
+      server: { kind: "registry", id: "mcp_1", name: "Demo tools", adapterId: "mock-mcp" }
+    });
+
+    render(<McpServersPage view="policies" isAdmin={false} activeProjectId="default" />);
+    const form = await screen.findByRole("form", { name: "Test a tool against the policy" });
+    await user.type(within(form).getByLabelText("Tool"), "calculator");
+    await user.type(within(form).getByLabelText("Arguments (JSON, optional)"), "not json");
+    await user.click(within(form).getByRole("button", { name: "Check" }));
+    expect(await screen.findByText(/Arguments must be a JSON object/)).toBeInTheDocument();
+    expect(api.evaluateMcpToolPolicy).not.toHaveBeenCalled();
+
+    await user.clear(within(form).getByLabelText("Arguments (JSON, optional)"));
+    await user.click(within(form).getByLabelText("Arguments (JSON, optional)"));
+    await user.paste('{"expression": "1000*3"}');
+    await user.type(within(form).getByLabelText("Data labels (optional)"), "pii, email");
+    await user.selectOptions(within(form).getByLabelText("Gateway client (optional)"), "mcpc_1");
+    await user.click(within(form).getByRole("button", { name: "Check" }));
+
+    expect(api.evaluateMcpToolPolicy).toHaveBeenCalledWith({
+      projectId: "default",
+      role: "viewer",
+      serverId: "mcp_1",
+      toolName: "calculator",
+      noWriteTools: false,
+      arguments: { expression: "1000*3" },
+      labels: ["pii", "email"],
+      clientId: "mcpc_1"
+    });
+    const result = await screen.findByRole("status");
+    expect(within(result).getAllByText("Needs approval").length).toBeGreaterThan(0);
+    expect(within(result).getByText(/needs approval by policy 'Big sums'/)).toBeInTheDocument();
+    expect(within(result).getByText('Matched: needs approval Big sums (when expression starts with "1000")')).toBeInTheDocument();
+    expect(within(result).getByText(/Shadow rules would change this to: Deny/)).toBeInTheDocument();
+  });
+
+  it("lets admins approve and reject held-back gateway calls", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.fetchMcpToolPolicies).mockResolvedValue({ rules: [], roles: ["admin", "builder", "operator", "viewer"] });
+    const pending = {
+      id: "mga_1",
+      clientId: "mcpc_1",
+      clientName: "IDE agent",
+      toolsetId: "mts_1",
+      projectId: "default",
+      serverId: "mcp_1",
+      serverName: "Demo tools",
+      toolName: "calculator",
+      gatewayToolName: "demo_tools__calculator",
+      argsHash: "h",
+      argsPreview: '{"expression":"1000*3"}',
+      ruleId: "rule_9",
+      ruleName: "Big sums",
+      message: "needs approval",
+      status: "pending" as const,
+      requestedAt: "2026-10-30T10:00:00.000Z",
+      expiresAt: "2026-10-31T10:00:00.000Z",
+      decidedBy: null,
+      decidedAt: null,
+      decisionReason: null,
+      usedAt: null
+    };
+    vi.mocked(api.fetchMcpGatewayApprovals).mockResolvedValue({ approvals: [pending, { ...pending, id: "mga_2", argsPreview: "{}" }], approvalWindowMs: 900000 });
+    vi.mocked(api.decideMcpGatewayApproval).mockImplementation(async (id, decision) => ({
+      approval: { ...pending, id, status: decision === "approve" ? "approved" : "rejected", decidedBy: "admin@example.com" }
+    }));
+
+    render(<McpServersPage view="policies" isAdmin activeProjectId="default" />);
+    const list = await screen.findByRole("list", { name: "Gateway approval requests" });
+    expect(screen.getByText(/once within 15 minutes/)).toBeInTheDocument();
+    expect(within(list).getByLabelText("Arguments of mga_1")).toHaveTextContent('{"expression":"1000*3"}');
+    await user.click(within(within(list).getAllByRole("listitem")[0]).getByRole("button", { name: "Approve" }));
+    expect(api.decideMcpGatewayApproval).toHaveBeenCalledWith("mga_1", "approve");
+    await waitFor(() => expect(within(list).getAllByRole("listitem")).toHaveLength(1));
+    await user.click(within(list).getByRole("button", { name: "Reject" }));
+    expect(api.decideMcpGatewayApproval).toHaveBeenCalledWith("mga_2", "reject");
+    expect(await screen.findByText("Nothing is waiting for approval.")).toBeInTheDocument();
+  });
+
+  it("does not show gateway approvals to builders", async () => {
+    vi.mocked(api.fetchMcpToolPolicies).mockResolvedValue({ rules: [makeRule()], roles: ["admin", "builder", "operator", "viewer"] });
+    render(<McpServersPage view="policies" isAdmin={false} />);
+    await screen.findByText("Viewers: no calculator");
+    expect(screen.queryByText("Gateway approvals")).not.toBeInTheDocument();
+    expect(api.fetchMcpGatewayApprovals).not.toHaveBeenCalled();
   });
 });

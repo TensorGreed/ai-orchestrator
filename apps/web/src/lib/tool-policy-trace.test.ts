@@ -43,6 +43,30 @@ describe("tool policy trace view", () => {
     expect(view.noWriteTools).toBe(true);
   });
 
+  it("lists each call's decision, approvals and what shadow rules would do", () => {
+    const view = buildToolPolicyTraceView({
+      subject: { role: "builder", source: "user", email: "b@example.com" },
+      hidden: [],
+      decisions: [
+        { tool: "push", server: "github", effect: "require_approval", decidedBy: "rule", ruleId: "r1", ruleName: "Prod pushes", approval: "approved", matched: [] },
+        { tool: "push", server: "github", effect: "deny", decidedBy: "rule", ruleId: "r2", matched: [] },
+        {
+          tool: "search",
+          server: "github",
+          effect: "allow",
+          decidedBy: "default",
+          matched: [],
+          shadow: { effect: "deny", ruleId: "r3", ruleName: "Trial", changed: true }
+        }
+      ]
+    });
+    expect(view.lines).toEqual([
+      "push: needs approval by policy Prod pushes (approved)",
+      "push: blocked by policy r2",
+      "search: allowed; shadow rule Trial would make it blocked"
+    ]);
+  });
+
   it("ignores outputs without a policy trace", () => {
     expect(readToolPolicyTrace({ answer: "x" })).toBeUndefined();
     expect(readToolPolicyTrace(null)).toBeUndefined();
