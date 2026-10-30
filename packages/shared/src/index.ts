@@ -25,3 +25,4 @@ export * from "./golden-set-file";
 export * from "./guard-simulation";
 export * from "./mcp-tool-policy";
 export * from "./tool-argument-summary";
+export * from "./mcp-policy-simulation";
