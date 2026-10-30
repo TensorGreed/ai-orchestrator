@@ -6,6 +6,9 @@ import { QUEUE_POOL_NAME_PATTERN } from "@ai-orchestrator/shared";
 /** Phase 15.6 — production capture defaults (see the REPLAY_CAPTURE_* settings). */
 export const REPLAY_CAPTURE_DEFAULTS = { enabled: true, maxRate: 1, retentionDays: 14, maxPerWorkflow: 200, maxBytesPerWorkflow: 209_715_200 } as const;
 
+/** Phase 12.4 — MCP_GATEWAY_APPROVAL_WINDOW_MS when unset: 15 minutes. */
+export const DEFAULT_MCP_GATEWAY_APPROVAL_WINDOW_MS = 900_000;
+
 const booleanFromEnv = z.preprocess((value) => {
   if (typeof value === "boolean") {
     return value;
@@ -235,6 +238,15 @@ const envSchema = z.object({
    * tools, workflow tools, failures and denials are always recorded.
    */
   MCP_GATEWAY_AUDIT_READ_ONLY_CALLS: z.enum(["all", "first_per_session", "none"]).default("first_per_session"),
+  /**
+   * Phase 12.4 — how long an approved gateway call (a require_approval tool policy rule held it back) can be
+   * retried by the same client with the same arguments, from the approval. Each approval allows one call.
+   * Unset or empty = 900000 (15 minutes; see DEFAULT_MCP_GATEWAY_APPROVAL_WINDOW_MS).
+   */
+  MCP_GATEWAY_APPROVAL_WINDOW_MS: z.preprocess(
+    (value) => (typeof value === "string" && value.trim() === "" ? undefined : value),
+    z.coerce.number().int().min(10_000).max(7 * 24 * 60 * 60 * 1000).optional()
+  ),
   /** Base URL clients reach this instance at, used for the endpoint URLs shown in the UI. Empty = the browser's origin. */
   MCP_GATEWAY_PUBLIC_URL: z
     .string()

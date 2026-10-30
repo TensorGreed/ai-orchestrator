@@ -14,7 +14,7 @@ import type { AddressInfo } from "node:net";
 import Database from "better-sqlite3";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { FastifyInstance } from "fastify";
 import type { McpClient, McpToolset, Workflow } from "@ai-orchestrator/shared";
 import { createApp } from "./app.js";
@@ -776,6 +776,163 @@ describe("MCP gateway telemetry and audit", () => {
     expect(byTool("echo_workflow")).toHaveLength(1);
     expect(called.find((entry) => entry.outcome === "failure")).toBeTruthy();
     expect((await context.store.listAuditLogs({ eventType: "mcp_gateway.session_started" })).items.length).toBeGreaterThanOrEqual(1);
+  });
+});
+
+describe("MCP gateway: argument-aware tool policy and approval by retry", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const gatewayCall = (fixture: Fixture, headers: Record<string, string>) => (id: number, name: string, args: Record<string, unknown>) =>
+    rpc(fixture.context, fixture.toolset.slug, { jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } }, headers);
+
+  it("denies by argument condition as a tool error, keeps the tool listed, and scopes rules to clients", async () => {
+    const fixture = await setupFixture();
+    const { context, admin, toolset, token, client, mockServerId } = fixture;
+    const other = await createClientToken(context, admin.cookie, { name: "Other agent", toolsetIds: [toolset.id], role: "builder" });
+    const rule = await api<{ rule: { id: string; hash: string } }>(context, admin.cookie, "POST", "/api/mcp/policies", {
+      name: "No division",
+      effect: "deny",
+      serverId: mockServerId,
+      toolPattern: "calculator",
+      conditions: { all: [{ path: "expression", op: "matches", value: "*/*" }] },
+      clientIds: [client.id]
+    });
+    expect(rule.status).toBe(201);
+    expect(rule.body.rule.hash).toMatch(/^[0-9a-f]{64}$/);
+
+    const sessionId = await openSession(context, toolset.slug, token);
+    const headers = { authorization: `Bearer ${token}`, "mcp-session-id": sessionId };
+    const list = await rpc(context, toolset.slug, { jsonrpc: "2.0", id: 1, method: "tools/list" }, headers);
+    expect((list.json().result.tools as Array<{ name: string }>).map((tool) => tool.name)).toContain("mock_tools__calculator");
+
+    const call = gatewayCall(fixture, headers);
+    const denied = (await call(2, "mock_tools__calculator", { expression: "6/3" })).json().result;
+    expect(denied.isError).toBe(true);
+    expect(denied.content[0].text).toMatch(/blocked by policy 'No division'.*the call matches: expression matches "\*\/\*"/);
+    expect((await call(3, "mock_tools__calculator", { expression: "6*3" })).json().result.isError).toBeUndefined();
+
+    // The rule names one client: another client's identical call goes through.
+    const otherSession = await openSession(context, toolset.slug, other.token);
+    const otherCall = gatewayCall(fixture, { authorization: `Bearer ${other.token}`, "mcp-session-id": otherSession });
+    expect((await otherCall(4, "mock_tools__calculator", { expression: "6/3" })).json().result.isError).toBeUndefined();
+
+    const deniedAudit = (await context.store.listAuditLogs({ eventType: "mcp_gateway.tool_denied" })).items;
+    expect(deniedAudit).toHaveLength(1);
+    expect(deniedAudit[0]!.metadata).toMatchObject({ clientId: client.id, ruleId: rule.body.rule.id, policy: { effect: "deny", ruleId: rule.body.rule.id } });
+  });
+
+  it("holds a call for approval, lets the identical call through once inside the window, and asks again for other arguments", async () => {
+    const fixture = await setupFixture();
+    const { context, admin, toolset, token, client, mockServerId } = fixture;
+    const rule = await api<{ rule: { id: string } }>(context, admin.cookie, "POST", "/api/mcp/policies", {
+      name: "Big sums need a person",
+      effect: "require_approval",
+      serverId: mockServerId,
+      toolPattern: "calculator",
+      conditions: { all: [{ path: "expression", op: "starts_with", value: "1000" }] }
+    });
+    expect(rule.status).toBe(201);
+    const sessionId = await openSession(context, toolset.slug, token);
+    const call = gatewayCall(fixture, { authorization: `Bearer ${token}`, "mcp-session-id": sessionId });
+
+    // Arguments the condition does not match: no approval needed.
+    expect((await call(1, "mock_tools__calculator", { expression: "2+2" })).json().result.isError).toBeUndefined();
+
+    const pending = (await call(2, "mock_tools__calculator", { expression: "1000*3" })).json();
+    expect(pending.error.code).toBe(-32030);
+    expect(pending.error.message).toMatch(/^Approval pending: .*Big sums need a person/);
+    const requestId = pending.error.data.approvalRequestId as string;
+    expect(pending.error.data).toMatchObject({ status: "pending", ruleId: rule.body.rule.id, approvalWindowMs: 900_000 });
+    // Asking again before a decision: the same request.
+    expect((await call(3, "mock_tools__calculator", { expression: "1000*3" })).json().error.data.approvalRequestId).toBe(requestId);
+
+    const listed = await api<{ approvals: Array<{ id: string; status: string; argsPreview: string; clientId: string }> }>(
+      context, admin.cookie, "GET", "/api/mcp/gateway/approvals?status=pending"
+    );
+    expect(listed.body.approvals).toEqual([expect.objectContaining({ id: requestId, status: "pending", clientId: client.id, argsPreview: '{"expression":"1000*3"}' })]);
+    const builder = await login(context, "builder");
+    expect((await api(context, builder.cookie, "POST", `/api/mcp/gateway/approvals/${requestId}/approve`, {})).status).toBe(403);
+    const approved = await api<{ approval: { status: string; decidedBy: string } }>(context, admin.cookie, "POST", `/api/mcp/gateway/approvals/${requestId}/approve`, {});
+    expect(approved.status).toBe(200);
+    expect(approved.body.approval).toMatchObject({ status: "approved", decidedBy: admin.email });
+    expect((await api(context, admin.cookie, "POST", `/api/mcp/gateway/approvals/${requestId}/reject`, {})).status).toBe(409);
+
+    // Different arguments are not covered by the approval.
+    const differentArgs = (await call(4, "mock_tools__calculator", { expression: "1000*4" })).json();
+    expect(differentArgs.error.code).toBe(-32030);
+    expect(differentArgs.error.data.approvalRequestId).not.toBe(requestId);
+
+    // The identical call (key order does not matter) goes through once.
+    const retried = (await call(5, "mock_tools__calculator", { expression: "1000*3" })).json();
+    expect(retried.result.isError).toBeUndefined();
+    expect(retried.result.content[0].text).toContain("3000");
+    const again = (await call(6, "mock_tools__calculator", { expression: "1000*3" })).json();
+    expect(again.error.code).toBe(-32030);
+    expect(again.error.data.approvalRequestId).not.toBe(requestId);
+
+    const rows = await context.store.listMcpToolCallsForClient(client.id, new Date(Date.now() - 60_000).toISOString());
+    expect(rows.find((row) => row.policyDecision?.approval === "approved")?.policyDecision).toMatchObject({
+      effect: "require_approval",
+      ruleId: rule.body.rule.id
+    });
+    const events = async (eventType: string) => (await context.store.listAuditLogs({ eventType, pageSize: 100 })).items;
+    expect(await events("mcp_gateway.approval_requested")).toHaveLength(3);
+    expect(await events("mcp_gateway.approval_decided")).toHaveLength(1);
+    expect((await events("mcp_gateway.approval_used"))[0]!.metadata).toMatchObject({ approvalRequestId: requestId, decidedBy: admin.email });
+  });
+
+  it("an approval past its window is not used, and a rejection is final for its request", async () => {
+    vi.useFakeTimers({ toFake: ["Date"], now: new Date() });
+    const fixture = await setupFixture({ MCP_GATEWAY_APPROVAL_WINDOW_MS: "60000" });
+    const { context, admin, toolset, token, mockServerId } = fixture;
+    await api(context, admin.cookie, "POST", "/api/mcp/policies", {
+      name: "Every calculation",
+      effect: "require_approval",
+      serverId: mockServerId,
+      toolPattern: "calculator"
+    });
+    const sessionId = await openSession(context, toolset.slug, token);
+    const call = gatewayCall(fixture, { authorization: `Bearer ${token}`, "mcp-session-id": sessionId });
+
+    const first = (await call(1, "mock_tools__calculator", { expression: "1+1" })).json().error.data.approvalRequestId as string;
+    expect((await api(context, admin.cookie, "POST", `/api/mcp/gateway/approvals/${first}/approve`, {})).status).toBe(200);
+    vi.setSystemTime(Date.now() + 61_000);
+    const expired = (await call(2, "mock_tools__calculator", { expression: "1+1" })).json();
+    expect(expired.error.code).toBe(-32030);
+    expect(expired.error.data.approvalRequestId).not.toBe(first);
+
+    const second = expired.error.data.approvalRequestId as string;
+    const rejected = await api<{ approval: { status: string; decisionReason: string } }>(
+      context, admin.cookie, "POST", `/api/mcp/gateway/approvals/${second}/reject`, { reason: "Not today" }
+    );
+    expect(rejected.body.approval).toMatchObject({ status: "rejected", decisionReason: "Not today" });
+    const afterReject = (await call(3, "mock_tools__calculator", { expression: "1+1" })).json();
+    expect(afterReject.error.code).toBe(-32030);
+    expect(afterReject.error.data.approvalRequestId).not.toBe(second);
+
+    // A pending request past its 24h expiry can no longer be approved.
+    vi.setSystemTime(Date.now() + 25 * 60 * 60 * 1000);
+    expect((await api(context, admin.cookie, "POST", `/api/mcp/gateway/approvals/${afterReject.error.data.approvalRequestId}/approve`, {})).status).toBe(409);
+  });
+
+  it("shadow rules never change the call; their would-be decision is stored with it", async () => {
+    const fixture = await setupFixture();
+    const { context, admin, toolset, token, client, mockServerId } = fixture;
+    const shadow = await api<{ rule: { id: string; mode: string } }>(context, admin.cookie, "POST", "/api/mcp/policies", {
+      name: "Trial: no calculator",
+      effect: "deny",
+      mode: "shadow",
+      serverId: mockServerId,
+      toolPattern: "calculator"
+    });
+    expect(shadow.body.rule.mode).toBe("shadow");
+    const sessionId = await openSession(context, toolset.slug, token);
+    const call = gatewayCall(fixture, { authorization: `Bearer ${token}`, "mcp-session-id": sessionId });
+    expect((await call(1, "mock_tools__calculator", { expression: "2+3" })).json().result.isError).toBeUndefined();
+    const [row] = await context.store.listMcpToolCallsForClient(client.id, new Date(Date.now() - 60_000).toISOString());
+    expect(row!.policyDecision).toMatchObject({ effect: "allow", shadow: { effect: "deny", ruleId: shadow.body.rule.id, changed: true } });
   });
 });
 

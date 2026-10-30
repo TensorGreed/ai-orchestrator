@@ -2168,7 +2168,8 @@ export const openApiSpec = {
       },
       post: {
         tags: ["MCP"],
-        summary: "Create a tool policy rule (admin). Deny wins; a strictly narrower allow carves an exception out of a deny.",
+        summary:
+          "Create a tool policy rule (admin). Deny wins over require_approval, which wins over allow; a strictly narrower allow (or require_approval) carves an exception out of a deny, and a narrower allow out of a require_approval. Shadow rules are evaluated and recorded but never applied.",
         requestBody: {
           required: true,
           content: {
@@ -2179,7 +2180,16 @@ export const openApiSpec = {
                 properties: {
                   name: { type: "string", nullable: true },
                   description: { type: "string", nullable: true },
-                  effect: { type: "string", enum: ["allow", "deny"] },
+                  effect: { type: "string", enum: ["allow", "deny", "require_approval"], description: "require_approval applies to tool calls only" },
+                  mode: { type: "string", enum: ["enforce", "shadow"], default: "enforce", description: "shadow: record what the rule would decide, never apply it" },
+                  conditions: {
+                    type: "object",
+                    nullable: true,
+                    description:
+                      "Tool calls only. { all: [...] } or { any: [...] } of { path, op, value } (at most 20). Paths are dot keys with [n] or [*]; ops equals, one_of, not_one_of, starts_with, ends_with, matches (glob), lt, lte, gt, gte, between, exists, label_present, label_absent (value = a provenance label or data class, no path). An unknown path or a value of the wrong type does not match."
+                  },
+                  workflowIds: { type: "array", items: { type: "string" }, description: "Only runs of these workflows; empty = any" },
+                  clientIds: { type: "array", items: { type: "string" }, description: "Only these MCP gateway clients (directly or through a run they started); empty = any" },
                   projectId: { type: "string", nullable: true, description: "null = every project" },
                   roles: { type: "array", items: { type: "string", enum: ["admin", "builder", "operator", "viewer"] }, description: "empty = every role" },
                   serverId: { type: "string", nullable: true, description: "Registry server id, or an adapter id for inline servers; null = any server" },
@@ -2196,13 +2206,16 @@ export const openApiSpec = {
             }
           }
         },
-        responses: { "201": { description: "Rule created" }, "400": { description: "Invalid rule, project or server" } }
+        responses: {
+          "201": { description: "Rule created, with its stable `hash` (what the rule matches; not its name or mode)" },
+          "400": { description: "Invalid rule (field-level details), project, server, workflow or client" }
+        }
       }
     },
     "/api/mcp/policies/{id}": {
       put: {
         tags: ["MCP"],
-        summary: "Update a tool policy rule (admin); any field from the create payload",
+        summary: "Update a tool policy rule (admin); any field from the create payload. The updated rule must still be valid.",
         parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
         responses: { "200": { description: "Updated rule" }, "404": { description: "Not found" } }
       },
@@ -2229,14 +2242,21 @@ export const openApiSpec = {
                   role: { type: "string", enum: ["admin", "builder", "operator", "viewer"] },
                   serverId: { type: "string", description: "Registry server id or adapter id" },
                   toolName: { type: "string" },
-                  noWriteTools: { type: "boolean", description: "Also apply a workflow's No write tools setting" }
+                  noWriteTools: { type: "boolean", description: "Also apply a workflow's No write tools setting" },
+                  arguments: { type: "object", description: "The call's arguments; without them, rules with conditions are reported as undecided" },
+                  labels: { type: "array", items: { type: "string" }, description: "Data labels (provenance labels and data classes) the run carries" },
+                  workflowId: { type: "string", nullable: true },
+                  clientId: { type: "string", nullable: true }
                 }
               }
             }
           }
         },
         responses: {
-          "200": { description: "Decision, deciding and matching rules, set-aside denies and the tool's classification" },
+          "200": {
+            description:
+              "Decision (effect allow, deny or require_approval, with the approval message), the matched rules and why (their conditions), undecided rules, the shadow outcome, set-aside denies and the tool's classification"
+          },
           "404": { description: "Unknown server or adapter" }
         }
       }
@@ -2748,6 +2768,36 @@ export const openApiSpec = {
         summary: "Revoke a client credential (admin); its open sessions end",
         parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
         responses: { "200": { description: "Revoked client" }, "404": { description: "Not found" } }
+      }
+    },
+    "/api/mcp/gateway/approvals": {
+      get: {
+        tags: ["MCP"],
+        summary: "Gateway calls a require_approval tool policy rule held back, newest first (admin)",
+        parameters: [
+          { name: "status", in: "query", required: false, schema: { type: "string", enum: ["pending", "approved", "rejected", "expired", "used"] } },
+          { name: "limit", in: "query", required: false, schema: { type: "integer", minimum: 1, maximum: 500 } }
+        ],
+        responses: { "200": { description: "Approval requests and the approval window" }, "400": { description: "Invalid filter" } }
+      }
+    },
+    "/api/mcp/gateway/approvals/{id}/approve": {
+      post: {
+        tags: ["MCP"],
+        summary:
+          "Approve a pending gateway call (admin): the same client may retry the identical call (same tool, same arguments) once within MCP_GATEWAY_APPROVAL_WINDOW_MS",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        requestBody: { required: false, content: { "application/json": { schema: { type: "object", properties: { reason: { type: "string" } } } } } },
+        responses: { "200": { description: "The decided request" }, "404": { description: "Not found" }, "409": { description: "Already decided or expired" } }
+      }
+    },
+    "/api/mcp/gateway/approvals/{id}/reject": {
+      post: {
+        tags: ["MCP"],
+        summary: "Reject a pending gateway call (admin)",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        requestBody: { required: false, content: { "application/json": { schema: { type: "object", properties: { reason: { type: "string" } } } } } },
+        responses: { "200": { description: "The decided request" }, "404": { description: "Not found" }, "409": { description: "Already decided or expired" } }
       }
     },
     "/api/mcp/clients/{id}/usage": {
