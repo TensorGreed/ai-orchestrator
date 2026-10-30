@@ -7,10 +7,15 @@ import { z } from "zod";
  *
  * Keyed by argument path: object keys joined with `.`, array elements as
  * `[]` (`labels[]`, `files[].path`). A key that is not a short plain name, or
- * that a data detector flags, is written `*`. Free text is never kept: only
- * its type, length bucket and the data classes found in it.
+ * that a data detector flags, is written `<k:HASH>`.
+ *
+ * Format 2 is an allow-list: a raw string is kept only when the tool's schema
+ * lists it in an `enum` / `const`, or when it is a short lower-case token
+ * outside any sensitive path; every other scalar is kept as its shape plus a
+ * keyed hash (HMAC-SHA-256 under a key derived from the master key), so equal
+ * values can be counted and compared without being stored.
  */
-export const TOOL_ARGUMENT_SUMMARY_VERSION = 1;
+export const TOOL_ARGUMENT_SUMMARY_VERSION = 2;
 
 export type ToolArgumentValueType = "string" | "number" | "boolean" | "null" | "object" | "array";
 
@@ -25,11 +30,15 @@ export interface ToolArgumentFieldSummary {
   types?: ToolArgumentValueType[];
   /** How many values were seen at this path, when more than one. */
   count?: number;
-  /** Kept values: booleans, numbers and short enum-like strings; distinct and sorted. */
+  /** Kept values: booleans, small numbers and safe tokens or schema enum values; distinct and sorted. */
   values?: Array<string | number | boolean>;
-  /** Numbers: smallest and largest seen. */
+  /** Kept numbers: smallest and largest seen. */
   min?: number;
   max?: number;
+  /** Numbers not kept (seven or more integer digits, or under a sensitive path): largest order of magnitude, floor(log10(|n|)). */
+  mag?: number;
+  /** Keyed hashes (16 bytes, base64url) of the values not kept; distinct and sorted. */
+  hashes?: string[];
   /** Identifier prefixes: `owner/` of a repository, `@domain` of an email, scheme and host of a URL, a path root. */
   prefixes?: string[];
   /** Data classes a detector found (`email`, `card_number`, `credential`, ...). */
@@ -39,7 +48,7 @@ export interface ToolArgumentFieldSummary {
   /** Arrays: largest element count. Objects: largest key count. */
   items?: number;
   keys?: number;
-  /** More distinct values or prefixes than kept; `values` / `prefixes` are dropped then. */
+  /** More distinct values, hashes or prefixes than kept; that list is dropped then. */
   more?: true;
 }
 
@@ -60,6 +69,8 @@ export const toolArgumentFieldSummarySchema = z
     values: z.array(z.union([z.string(), z.number(), z.boolean()])).optional(),
     min: z.number().optional(),
     max: z.number().optional(),
+    mag: z.number().int().optional(),
+    hashes: z.array(z.string()).optional(),
     prefixes: z.array(z.string()).optional(),
     classes: z.array(z.string()).optional(),
     len: z.enum(TOOL_ARGUMENT_LENGTH_BUCKETS).optional(),

@@ -105,7 +105,7 @@ import {
 import { McpClientService, capRole, resolveMcpClientSubject, roleRank } from "./services/mcp-client-service.js";
 import { MCP_TELEMETRY_WINDOWS, parseMcpTelemetryWindow, rollupMcpToolCalls } from "./services/mcp-tool-telemetry.js";
 import { startSseHeartbeat } from "./sse-heartbeat.js";
-import { createToolArgumentSummarizer } from "./services/tool-argument-summary.js";
+import { createToolArgumentSummarizer, toolArgumentHashKey } from "./services/tool-argument-summary.js";
 import type { Store } from "./db/store.js";
 import { filterAsync, mapAsync } from "./async-array.js";
 
@@ -297,7 +297,10 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
   const allowedOrigins = gatewayAllowedOrigins(config);
   const approvalWindowMs = config.MCP_GATEWAY_APPROVAL_WINDOW_MS ?? DEFAULT_MCP_GATEWAY_APPROVAL_WINDOW_MS;
   // Phase 12.4 — a safe summary of each call's arguments and the client's role on its telemetry row (unless switched off).
-  const summarizeArguments = createToolArgumentSummarizer({ enabled: toolArgumentSummariesEnabled(config) });
+  const summarizeArguments = createToolArgumentSummarizer({
+    enabled: toolArgumentSummariesEnabled(config),
+    hashKey: toolArgumentHashKey(config.SECRET_MASTER_KEY_BASE64)
+  });
   const callContext = (args: Record<string, unknown>, inputSchema: Record<string, unknown>, auth: AuthenticatedClient, toolset: McpToolset) =>
     summarizeArguments
       ? {

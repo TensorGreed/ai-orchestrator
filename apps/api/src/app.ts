@@ -263,7 +263,7 @@ import {
   parseMcpTelemetryWindow,
   rollupMcpToolCalls
 } from "./services/mcp-tool-telemetry";
-import { createToolArgumentSummarizer } from "./services/tool-argument-summary";
+import { createToolArgumentSummarizer, toolArgumentHashKey } from "./services/tool-argument-summary";
 import { VariablesService } from "./services/variables-service";
 import { WorkflowVersionService } from "./services/workflow-version-service";
 import { AuditService, type AuditActor, type AuditCategory, type AuditEventInput } from "./services/audit-service";
@@ -2544,7 +2544,10 @@ export async function createApp(
   };
 
   // Phase 12.4 — safe argument summaries on MCP tool-call telemetry rows (on unless MCP_TOOL_ARGUMENT_SUMMARIES=false).
-  const summarizeToolArguments = createToolArgumentSummarizer({ enabled: toolArgumentSummariesEnabled(config) });
+  const summarizeToolArguments = createToolArgumentSummarizer({
+    enabled: toolArgumentSummariesEnabled(config),
+    hashKey: toolArgumentHashKey(config.SECRET_MASTER_KEY_BASE64)
+  });
   const recordMcpToolCalls = async (executionId: string, workflow: Workflow, nodeResults: unknown) => {
     try {
       // Adapters of the registry entries, read once, for direct MCP Tool nodes that failed before reporting theirs.

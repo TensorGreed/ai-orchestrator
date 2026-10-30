@@ -1,3 +1,4 @@
+import { createHmac } from "node:crypto";
 import {
   TOOL_ARGUMENT_LENGTH_BUCKETS,
   TOOL_ARGUMENT_SUMMARY_VERSION,
@@ -9,35 +10,56 @@ import {
 import { CREDENTIAL_NAME_PATTERN } from "./client-features";
 
 /**
- * Phase 12.4 — a safe summary of a tool call's arguments for telemetry.
+ * Phase 12.4 — a safe summary of a tool call's arguments for telemetry
+ * (summary format 2).
  *
- * Pure and deterministic: the same arguments (in any key order) and schema
- * give the same summary. What is kept, per argument path:
+ * Pure and deterministic for a given hash key: the same arguments (in any key
+ * order) and schema give the same summary. It is an ALLOW-LIST: a raw value is
+ * stored only when it is safe by construction, and everything else is stored
+ * as its shape plus a keyed hash.
  *
- *   - null, booleans and finite numbers below nine integer digits, as values
- *     (with min and max); a longer integer (an account, card or phone number
- *     written as a number) keeps only its type and any data class;
- *   - short enum-like strings (one word, at most 64 characters, not random-
- *     looking, no long digit run) and any string the tool's input schema
- *     lists in an `enum` / `const` at that path;
- *   - for identifier-like strings, only a stable prefix: `owner/` of
- *     `owner/name`, `@domain` of an email, scheme and host of a URL, the
- *     first two segments of a filesystem path;
- *   - for anything else (free text, long or random-looking strings) only the
- *     type and a length bucket; the text is never kept.
+ * Kept raw, per argument path:
+ *   - null, and booleans outside a sensitive path;
+ *   - numbers outside a sensitive path whose integer part has at most six
+ *     digits, rounded to four decimals (to one decimal under a location key
+ *     such as `lat` / `lng`);
+ *   - a string the tool's input schema lists in an `enum` / `const` at that
+ *     path, when the path is not sensitive;
+ *   - a string that is a safe token: NFKC-normalised it matches
+ *     `^[a-z][a-z0-9_.-]{0,31}$`, has no run of four digits (any script), does
+ *     not end in a `.word` part like a domain or a `first.last` name, is not
+ *     random-looking (see `looksRandomToolArgument`), and the path is not sensitive.
  *
- * Every string, object key and long integer is passed to `detect` (the
+ * A path is sensitive when the key itself or any ancestor key has a segment
+ * (split on case changes, `_`, `-`, `.` and digits) in `SENSITIVE_SEGMENTS`,
+ * or matches the shared credential-name pattern. A sensitive subtree keeps
+ * shape and hashes only: never a raw value, never a prefix.
+ *
+ * Kept as a prefix, outside sensitive paths, for strings that are not tokens:
+ * `owner/` of `owner/repo`, `@domain` of an email, scheme and host of a URL
+ * (IP hosts become `ip`; a host with more than one label before its
+ * registrable domain is reduced to that domain; shared hosting such as
+ * `*.github.io` keeps only the suffix), and the root of a file path with any
+ * home directory replaced by `~/` plus at most one more segment.
+ *
+ * Everything else keeps its type, length bucket, data classes and a keyed
+ * hash: HMAC-SHA-256 of the NFKC-normalised text (or the number's or
+ * boolean's canonical text) under `hashKey`, truncated to 16 bytes, base64url.
+ * The key is never stored; the caller derives it from the master key.
+ *
+ * Object keys are kept in the path only when they are a plain name (an ASCII
+ * letter then letters, digits, `_` or `-`, at most 32 characters, no run of
+ * four digits, not random-looking, nothing a detector flags); any other key is
+ * written `<k:HASH>`.
+ *
+ * Every string, object key and long number is passed to `detect` (the
  * production-capture DLP scan, injected by the caller so this package stays
- * free of the guard SDK). A value it flags is replaced by its data classes,
- * and a key it flags is written `*`. A string under a credential-like key
- * (`token`, `password`, `api_key`, ...) is kept only as `credential`; a
- * string under a key that usually holds people's words or names (`query`,
- * `message`, `body`, `assignee`, `to`, ...) is never kept as a value.
+ * free of the guard SDK), and the data classes it finds are listed.
  *
  * Caps bound the work on hostile input (depth, paths, array items, keys per
  * object, values visited and characters scanned); reaching one sets
- * `truncated`. A string that could not be scanned within the budget is
- * never kept as a value or prefix.
+ * `truncated`. A string that could not be scanned within the budget is never
+ * kept as a value or prefix.
  */
 
 /** Data classes found in `text` (empty when none). May throw; a throw counts as "not scanned". */
@@ -45,6 +67,8 @@ export type ToolArgumentDetector = (text: string) => readonly string[];
 
 export interface SummarizeToolArgumentsOptions {
   detect: ToolArgumentDetector;
+  /** The HMAC key for value hashes (at least 16 bytes); the API derives it from the master key. */
+  hashKey: Uint8Array;
   /** The tool's JSON Schema for its input, when known; only `enum` / `const` are read. */
   inputSchema?: unknown;
 }
@@ -60,11 +84,12 @@ export const TOOL_ARGUMENT_SUMMARY_LIMITS = {
   maxKeysPerObject: 64,
   /** Values visited in total. */
   maxNodes: 4_000,
-  /** Distinct values and prefixes kept per path. */
+  /** Distinct values, hashes and prefixes kept per path. */
   maxValues: 16,
+  maxHashes: 16,
   maxPrefixes: 16,
-  /** Longest string kept as a value. */
-  maxKeptLength: 64,
+  /** Longest string hashed; a longer one keeps only its length bucket and classes. */
+  maxHashedLength: 2_048,
   /** Longest string reduced to a prefix. */
   maxIdentifierLength: 2_048,
   /** Characters of one string passed to the detector. */
@@ -73,25 +98,123 @@ export const TOOL_ARGUMENT_SUMMARY_LIMITS = {
   scanBudgetChars: 262_144
 } as const;
 
+/**
+ * Key segments that make a path sensitive (compared lower-case, also without
+ * a plural `s`). `owner` is included: on most tools it holds a person's or an
+ * organisation's handle. A repository written `owner/repo` under a key that
+ * is not sensitive still keeps `owner/` as its prefix, so starts-with
+ * suggestions work on repositories.
+ */
+export const TOOL_ARGUMENT_SENSITIVE_SEGMENTS: readonly string[] = [
+  // credentials
+  "pass", "passwd", "passcode", "passphrase", "password", "pw", "pwd", "secret", "token", "key", "apikey", "auth",
+  "cred", "credential", "cookie", "session", "sid", "otp", "totp", "mfa", "pin", "nonce", "sig", "signature",
+  "bearer", "jwt", "private", "cert",
+  // financial and national identifiers
+  "ssn", "iban", "card", "cvv", "cvc", "account", "acct", "passport", "tax",
+  // people
+  "name", "user", "username", "login", "handle", "owner", "author", "assignee", "reviewer", "customer", "patient",
+  "employee", "member", "person", "contact", "recipient", "sender", "from", "to", "cc", "bcc",
+  "email", "mail", "phone", "mobile", "tel", "address", "addr", "street", "zip", "postcode", "dob", "birth",
+  // people's words
+  "body", "message", "text", "content", "query", "q", "search", "keyword", "prompt", "comment", "note",
+  "description", "title", "subject", "summary"
+];
+
 const LIMITS = TOOL_ARGUMENT_SUMMARY_LIMITS;
 const TYPE_ORDER: ToolArgumentValueType[] = ["null", "boolean", "number", "string", "array", "object"];
-const SAFE_KEY = /^[A-Za-z0-9_$-]{1,64}$/;
-const KEEPABLE = /^[\p{L}\p{N}][\p{L}\p{N}_.:+-]*$/u;
+const SENSITIVE = new Set(TOOL_ARGUMENT_SENSITIVE_SEGMENTS);
+const LOCATION_SEGMENTS = new Set(["lat", "lng", "lon", "long", "latitude", "longitude", "geo", "coord", "coordinate"]);
+const TOKEN = /^[a-z][a-z0-9_.-]{0,31}$/;
+const KEY_NAME = /^[A-Za-z][A-Za-z0-9_-]{0,31}$/;
+const DIGIT_RUN = /\p{Nd}{4,}/u;
+const DOMAIN_TAIL = /[a-z0-9]\.[a-z]{2,63}$/;
+/** Prefixes of well-known API keys and tokens; a value starting with one is never a token. */
+const SECRET_PREFIX = /^(?:(?:sk|pk|rk)[-_]|xox[a-z]?-|gh[pousr]_|github_pat_|glpat-|akia|asia|npm_|hf_|xai-)/;
 const URL_SHAPE = /^[a-z][a-z0-9+.-]{0,15}:\/\/\S/i;
-const EMAIL_SHAPE = /^[^\s@]{1,64}@([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,63})$/;
-const REPO_SHAPE = /^([A-Za-z0-9][A-Za-z0-9_.-]{0,63})\/[A-Za-z0-9_.-]{1,100}$/;
-const PATH_ROOT = /^(\/|~\/|\.\.?\/|[A-Za-z]:[\\/])/;
-const PREFIX_SEGMENT = /^[^\s\\/]{1,64}$/;
-/** Keys whose strings are people's words or names: never kept as values, even when one short word. */
-const FREE_TEXT_KEY =
-  /^(?:query|q|search|search_?term|keywords?|prompt|message|messages|text|body|content|comment|comments|note|notes|title|subject|description|summary|address|phone|email|emails|to|cc|bcc|from|recipient|recipients|user|username|user_?name|login|handle|first_?name|last_?name|full_?name|display_?name|author|assignee|assignees|reviewer|reviewers)$/i;
+const EMAIL_SHAPE = /^[^\s@]{1,64}@([A-Za-z0-9.-]{1,253})$/;
+/** `owner/repo`: the owner has a letter (so dates and fractions are not repositories) and no dots. */
+const REPO_SHAPE = /^((?=[A-Za-z0-9_-]*[A-Za-z])[A-Za-z0-9][A-Za-z0-9_-]{0,38})\/[A-Za-z0-9_.-]{1,100}$/;
+const PATH_ROOT = /^(\/|~[\\/]|\.\.?[\\/]|[A-Za-z]:[\\/])/;
+const PATH_SEGMENT = /^(?=[^/]*[A-Za-z])[A-Za-z0-9_.-]{1,32}$/;
+const IPV4 = /^\d{1,3}(?:\.\d{1,3}){3}$/;
+/** Shared hosting, where the label before the suffix is a customer's (often a person's) name. */
+const SHARED_HOST_SUFFIXES = [
+  "github.io",
+  "gitlab.io",
+  "pages.dev",
+  "netlify.app",
+  "vercel.app",
+  "herokuapp.com",
+  "azurewebsites.net",
+  "blogspot.com",
+  "wordpress.com",
+  "s3.amazonaws.com",
+  "ngrok.io",
+  "ngrok-free.app"
+];
+/** Second-level labels of two-letter country suffixes (`co.uk`, `com.au`). */
+const COUNTRY_SECOND_LEVEL = new Set(["co", "com", "net", "org", "ac", "gov", "edu", "ne", "or", "go"]);
 
-/** How the key that holds a value affects what is kept of it. */
-type KeyKind = "plain" | "credential" | "free_text";
+/** Lower-case segments of a key: split on case changes and on anything that is not a letter (`_`, `-`, `.`, digits). */
+export function toolArgumentKeySegments(key: string): string[] {
+  return key
+    .normalize("NFKC")
+    .replace(/([\p{Ll}\p{Nd}])(\p{Lu})/gu, "$1 $2")
+    .replace(/(\p{Lu})(\p{Lu}\p{Ll})/gu, "$1 $2")
+    .split(/[^\p{L}]+/u)
+    .filter((segment) => segment.length > 0)
+    .map((segment) => segment.toLowerCase());
+}
 
-function keyKindOf(key: string): KeyKind {
-  if (CREDENTIAL_NAME_PATTERN.test(key)) return "credential";
-  return FREE_TEXT_KEY.test(key) ? "free_text" : "plain";
+function hasSegment(set: ReadonlySet<string>, segments: string[]): boolean {
+  return segments.some((segment) => set.has(segment) || (segment.length > 2 && segment.endsWith("s") && set.has(segment.slice(0, -1))));
+}
+
+/** True when a value under `key` must never be kept raw. */
+export function isSensitiveToolArgumentKey(key: string): boolean {
+  return CREDENTIAL_NAME_PATTERN.test(key) || hasSegment(SENSITIVE, toolArgumentKeySegments(key));
+}
+
+function isLocationKey(key: string): boolean {
+  return hasSegment(LOCATION_SEGMENTS, toolArgumentKeySegments(key));
+}
+
+/**
+ * Ids, hashes, keys and passphrases, on lower-case text. Random-looking when
+ * it starts with a known secret prefix, or any part between `_`, `-` or `.`:
+ *   - is longer than 16 characters;
+ *   - is 12 or more hex characters;
+ *   - is 8 or more characters and mixes letters and digits;
+ *   - is 8 or more letters with fewer than one vowel in four.
+ */
+export function looksRandomToolArgument(text: string): boolean {
+  if (SECRET_PREFIX.test(text)) return true;
+  for (const part of text.split(/[_.\-]+/)) {
+    if (part.length > 16) return true;
+    if (part.length >= 12 && /^[0-9a-f]+$/.test(part)) return true;
+    if (part.length >= 8 && /[a-z]/.test(part) && /[0-9]/.test(part)) return true;
+    const letters = part.replace(/[^a-z]/g, "");
+    if (letters.length >= 8 && (letters.match(/[aeiouy]/g)?.length ?? 0) * 4 < letters.length) return true;
+  }
+  return false;
+}
+
+/** Rule 1 of the format: a short lower-case token that cannot carry a name, number, domain or secret. */
+export function isSafeToolArgumentToken(normalized: string): boolean {
+  return TOKEN.test(normalized) && !DIGIT_RUN.test(normalized) && !DOMAIN_TAIL.test(normalized) && !looksRandomToolArgument(normalized);
+}
+
+function isPlainKeyName(key: string): boolean {
+  if (!KEY_NAME.test(key) || DIGIT_RUN.test(key)) return false;
+  return !looksRandomToolArgument(toolArgumentKeySegments(key).join("_"));
+}
+
+/** The keyed hash of one value: HMAC-SHA-256 of its NFKC-normalised text, first 16 bytes, base64url. */
+export function hashToolArgumentValue(value: string | number | boolean, hashKey: Uint8Array): string {
+  if (hashKey.length < 16) throw new Error("The tool argument hash key must be at least 16 bytes.");
+  const text = typeof value === "string" ? value.normalize("NFKC") : String(Object.is(value, -0) ? 0 : value);
+  return createHmac("sha256", hashKey).update(text, "utf8").digest().subarray(0, 16).toString("base64url");
 }
 
 /** The length bucket for a string of `length` characters. */
@@ -105,6 +228,91 @@ export function toolArgumentLengthBucket(length: number): ToolArgumentLengthBuck
   return "2049+";
 }
 
+function hostLabelSafe(label: string): boolean {
+  return !DIGIT_RUN.test(label) && !looksRandomToolArgument(label);
+}
+
+/** The host part of a prefix: `ip`, the host, its registrable domain or `*.suffix`; null when unusable. */
+function hostPrefix(hostname: string): string | null {
+  const host = hostname.toLowerCase().replace(/\.$/, "");
+  if (host.startsWith("[") || IPV4.test(host)) return "ip";
+  const labels = host.split(".");
+  if (labels.some((label) => !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label))) return null;
+  for (const suffix of SHARED_HOST_SUFFIXES) {
+    if (host === suffix) return host;
+    if (host.endsWith(`.${suffix}`)) return `*.${suffix}`;
+  }
+  if (labels.length === 1) return hostLabelSafe(host) ? host : null;
+  const last = labels[labels.length - 1]!;
+  const suffixLength = labels.length >= 3 && last.length === 2 && COUNTRY_SECOND_LEVEL.has(labels[labels.length - 2]!) ? 2 : 1;
+  if (labels.length <= suffixLength) return null;
+  const registrable = labels.slice(-(suffixLength + 1));
+  const suffix = labels.slice(-suffixLength).join(".");
+  if (!hostLabelSafe(registrable[0]!)) return `*.${suffix}`;
+  const left = labels.slice(0, -(suffixLength + 1));
+  if (left.length === 1 && hostLabelSafe(left[0]!)) return host;
+  return registrable.join(".");
+}
+
+/** Root plus at most one segment, never the last one; home directories become `~/`. */
+function pathPrefix(text: string): string | null {
+  const root = PATH_ROOT.exec(text);
+  if (!root) return null;
+  let rootText = root[1]!.replace(/\\/g, "/");
+  let segments = text.slice(root[1]!.length).split(/[\\/]+/).filter((segment) => segment.length > 0);
+  const first = segments[0]?.toLowerCase();
+  const drive = /^[a-z]:\/$/i.test(rootText);
+  if (rootText.startsWith("~")) {
+    rootText = "~/";
+  } else if ((rootText === "/" && (first === "home" || first === "users")) || (drive && first === "users")) {
+    rootText = "~/";
+    segments = segments.slice(2);
+  } else if (drive && first === "documents and settings") {
+    rootText = "~/";
+    segments = segments.slice(2);
+  } else if (rootText === "/" && first === "root") {
+    rootText = "~/";
+    segments = segments.slice(1);
+  } else if (drive) {
+    rootText = rootText.toUpperCase();
+  }
+  const next = segments[0];
+  if (segments.length >= 2 && next !== undefined) {
+    const lower = next.toLowerCase();
+    if (PATH_SEGMENT.test(next) && !DIGIT_RUN.test(next) && !DOMAIN_TAIL.test(lower) && !looksRandomToolArgument(lower)) {
+      return `${rootText}${next}/`;
+    }
+  }
+  return rootText;
+}
+
+/** The stable prefix of an identifier-like string, or null when it is not one. */
+function identifierPrefix(text: string): string | null {
+  if (URL_SHAPE.test(text)) {
+    try {
+      const url = new URL(text);
+      if (!url.hostname) return null;
+      const host = hostPrefix(url.hostname);
+      return host === null ? null : `${url.protocol.toLowerCase()}//${host}`;
+    } catch {
+      return null;
+    }
+  }
+  const email = EMAIL_SHAPE.exec(text);
+  if (email) return emailPrefix(email[1]!);
+  const repo = REPO_SHAPE.exec(text);
+  if (repo) {
+    const owner = repo[1]!.toLowerCase();
+    return DIGIT_RUN.test(owner) || looksRandomToolArgument(owner) ? null : `${owner}/`;
+  }
+  return pathPrefix(text);
+}
+
+function emailPrefix(domain: string): string | null {
+  const host = hostPrefix(domain);
+  return host === null ? null : `@${host}`;
+}
+
 type Kept = string | number | boolean;
 
 interface FieldAccumulator {
@@ -114,6 +322,9 @@ interface FieldAccumulator {
   valuesOverflow: boolean;
   min: number | null;
   max: number | null;
+  mag: number | null;
+  hashes: Set<string>;
+  hashesOverflow: boolean;
   prefixes: Set<string>;
   prefixesOverflow: boolean;
   classes: Set<string>;
@@ -126,6 +337,12 @@ interface ScanResult {
   classes: string[];
   /** False when the string was not (fully) scanned: too long, out of budget, or the detector threw. */
   complete: boolean;
+}
+
+/** What the keys above a value say about it. */
+interface PathContext {
+  sensitive: boolean;
+  location: boolean;
 }
 
 type SchemaNode = Record<string, unknown>;
@@ -181,60 +398,6 @@ function schemaAllows(nodes: SchemaNode[], value: string): boolean {
   return false;
 }
 
-function shannonEntropy(text: string): number {
-  const counts = new Map<string, number>();
-  for (const char of text) counts.set(char, (counts.get(char) ?? 0) + 1);
-  let entropy = 0;
-  const length = [...text].length;
-  for (const count of counts.values()) {
-    const p = count / length;
-    entropy -= p * Math.log2(p);
-  }
-  return entropy;
-}
-
-/** Ids, hashes and tokens: not enum-like, even when short. */
-function looksRandom(text: string): boolean {
-  if (/\d{6,}/.test(text)) return true;
-  // Numbers written with separators (ids, account, phone and national numbers): mostly digits, six or more.
-  const digits = text.replace(/\D/g, "").length;
-  if (digits >= 6 && digits * 2 >= text.length) return true;
-  if (text.length >= 16 && /[A-Za-z]/.test(text) && /\d/.test(text) && shannonEntropy(text) >= 3) return true;
-  return text.length >= 32 && !/[_.:+-]/.test(text);
-}
-
-function isKeepable(text: string): boolean {
-  if (text === "") return true;
-  return text.length <= LIMITS.maxKeptLength && KEEPABLE.test(text) && !looksRandom(text);
-}
-
-/** The stable prefix of an identifier-like string, or null when it is not one. */
-function identifierPrefix(text: string): string | null {
-  if (URL_SHAPE.test(text)) {
-    try {
-      const url = new URL(text);
-      if (!url.hostname) return null;
-      return `${url.protocol}//${url.hostname}`.toLowerCase();
-    } catch {
-      return null;
-    }
-  }
-  const email = EMAIL_SHAPE.exec(text);
-  if (email) return `@${email[1]!.toLowerCase()}`;
-  const repo = REPO_SHAPE.exec(text);
-  if (repo) return `${repo[1]}/`;
-  const root = PATH_ROOT.exec(text);
-  if (root) {
-    const rootText = root[1]!.replace(/\\/g, "/");
-    const segments = text.slice(root[1]!.length).split(/[\\/]+/).filter((segment) => segment.length > 0);
-    // Never the whole path: at most two segments, and always fewer than all of them.
-    const kept = segments.slice(0, Math.min(2, segments.length - 1));
-    if (!kept.every((segment) => PREFIX_SEGMENT.test(segment))) return null;
-    return kept.length > 0 ? `${rootText}${kept.join("/")}/` : rootText;
-  }
-  return null;
-}
-
 function compareKept(a: Kept, b: Kept): number {
   const order = (value: Kept) => (typeof value === "boolean" ? 0 : typeof value === "number" ? 1 : 2);
   const byType = order(a) - order(b);
@@ -258,6 +421,7 @@ export function summarizeToolArguments(args: unknown, options: SummarizeToolArgu
   let truncated = false;
   let nodes = 0;
   let scanned = 0;
+  const hash = (value: string | number | boolean) => hashToolArgumentValue(value, options.hashKey);
 
   const scan = (text: string): ScanResult => {
     if (text.length > LIMITS.maxScanChars || scanned + text.length > LIMITS.scanBudgetChars) {
@@ -294,6 +458,9 @@ export function summarizeToolArguments(args: unknown, options: SummarizeToolArgu
       valuesOverflow: false,
       min: null,
       max: null,
+      mag: null,
+      hashes: new Set(),
+      hashesOverflow: false,
       prefixes: new Set(),
       prefixesOverflow: false,
       classes: new Set(),
@@ -317,6 +484,18 @@ export function summarizeToolArguments(args: unknown, options: SummarizeToolArgu
     field.values.set(key, value);
   };
 
+  const addHash = (field: FieldAccumulator, value: string | number | boolean) => {
+    if (field.hashesOverflow) return;
+    const digest = hash(value);
+    if (field.hashes.has(digest)) return;
+    if (field.hashes.size >= LIMITS.maxHashes) {
+      field.hashesOverflow = true;
+      field.hashes.clear();
+      return;
+    }
+    field.hashes.add(digest);
+  };
+
   const addPrefix = (field: FieldAccumulator, prefix: string) => {
     if (field.prefixesOverflow || field.prefixes.has(prefix)) return;
     if (field.prefixes.size >= LIMITS.maxPrefixes) {
@@ -331,72 +510,72 @@ export function summarizeToolArguments(args: unknown, options: SummarizeToolArgu
     field.lenIndex = Math.max(field.lenIndex, TOOL_ARGUMENT_LENGTH_BUCKETS.indexOf(toolArgumentLengthBucket(length)));
   };
 
-  const summarizeString = (field: FieldAccumulator, text: string, schema: SchemaNode[], keyKind: KeyKind) => {
-    const result = scan(text);
-    const isFreeText = /\s/.test(text) || text.length > LIMITS.maxKeptLength;
-    if (result.classes.length > 0) {
-      for (const dataClass of result.classes) field.classes.add(dataClass);
-      if (result.classes.includes("email") && result.complete) {
-        const email = EMAIL_SHAPE.exec(text);
-        if (email) addPrefix(field, `@${email[1]!.toLowerCase()}`);
-      }
-      if (isFreeText) addLength(field, text.length);
-      return;
-    }
-    if (!result.complete) {
-      addLength(field, text.length);
-      return;
-    }
-    if (schemaAllows(schema, text)) {
-      keep(field, text);
-      return;
-    }
-    if (keyKind === "credential") {
-      field.classes.add("credential");
-      return;
-    }
-    if (keyKind === "plain" && isKeepable(text)) {
-      keep(field, text);
-      return;
-    }
-    if (text.length <= LIMITS.maxIdentifierLength && !/\s/.test(text)) {
-      const prefix = identifierPrefix(text);
-      if (prefix !== null) {
-        const prefixScan = scan(prefix);
-        if (prefixScan.complete && prefixScan.classes.length === 0) {
-          addPrefix(field, prefix);
+  /** A prefix is kept only when the detector finds nothing in it. */
+  const addCleanPrefix = (field: FieldAccumulator, prefix: string | null) => {
+    if (prefix === null) return;
+    const prefixScan = scan(prefix);
+    if (prefixScan.complete && prefixScan.classes.length === 0) addPrefix(field, prefix);
+  };
+
+  const summarizeString = (field: FieldAccumulator, text: string, schema: SchemaNode[], context: PathContext) => {
+    const normalized = text.length <= LIMITS.maxScanChars ? text.normalize("NFKC") : text;
+    const result = scan(normalized);
+    for (const dataClass of result.classes) field.classes.add(dataClass);
+    if (result.complete && !context.sensitive) {
+      if (result.classes.length === 0) {
+        if (text === "" || schemaAllows(schema, text)) {
+          keep(field, text);
           return;
         }
-        for (const dataClass of prefixScan.classes) field.classes.add(dataClass);
+        if (isSafeToolArgumentToken(normalized)) {
+          keep(field, normalized);
+          return;
+        }
+      }
+      if (normalized.length <= LIMITS.maxIdentifierLength && !/\s/.test(normalized)) {
+        if (result.classes.length === 0) {
+          addCleanPrefix(field, identifierPrefix(normalized));
+        } else if (result.classes.includes("email")) {
+          const email = EMAIL_SHAPE.exec(normalized);
+          if (email) addCleanPrefix(field, emailPrefix(email[1]!));
+        }
       }
     }
     addLength(field, text.length);
+    if (text.length <= LIMITS.maxHashedLength) addHash(field, text);
   };
 
-  const summarizeNumber = (field: FieldAccumulator, value: number) => {
+  const summarizeNumber = (field: FieldAccumulator, value: number, context: PathContext) => {
     if (!Number.isFinite(value)) return;
-    // A long integer may be a card, account, phone or national number written as a JSON number: never kept, and
-    // checked with the detector for its class.
-    if (Number.isInteger(value) && Math.abs(value) >= 1e8) {
-      if (Math.abs(value) < 1e21) {
-        for (const dataClass of scan(String(Math.abs(value))).classes) field.classes.add(dataClass);
+    let number = Object.is(value, -0) ? 0 : value;
+    if (context.location) number = Math.round(number * 10) / 10;
+    const magnitude = Math.abs(number);
+    if (context.sensitive || magnitude >= 1e6) {
+      // Seven or more integer digits may be a card, account, phone or national number written as a JSON number.
+      const order = magnitude < 1 ? 0 : Math.floor(Math.log10(magnitude));
+      field.mag = field.mag === null ? order : Math.max(field.mag, order);
+      if (magnitude >= 1e6 && magnitude < 1e21) {
+        for (const dataClass of scan(String(Math.trunc(magnitude))).classes) field.classes.add(dataClass);
       }
+      addHash(field, number);
       return;
     }
-    const normalized = Object.is(value, -0) ? 0 : value;
+    const kept = Math.round(number * 1e4) / 1e4;
+    const normalized = Object.is(kept, -0) ? 0 : kept;
     keep(field, normalized);
     field.min = field.min === null ? normalized : Math.min(field.min, normalized);
     field.max = field.max === null ? normalized : Math.max(field.max, normalized);
   };
 
   const segmentFor = (key: string): string => {
-    // `__proto__` would not survive as a record key in every reader of the summary.
-    if (!SAFE_KEY.test(key) || key === "__proto__") return "*";
-    const result = scan(key);
-    return result.complete && result.classes.length === 0 ? key : "*";
+    if (isPlainKeyName(key)) {
+      const result = scan(key);
+      if (result.complete && result.classes.length === 0) return key;
+    }
+    return `<k:${hash(key)}>`;
   };
 
-  const walk = (value: unknown, path: string, depth: number, schema: SchemaNode[], keyKind: KeyKind): void => {
+  const walk = (value: unknown, path: string, depth: number, schema: SchemaNode[], context: PathContext): void => {
     if (value === undefined || typeof value === "function" || typeof value === "symbol") return;
     nodes += 1;
     if (nodes > LIMITS.maxNodes) {
@@ -413,17 +592,18 @@ export function summarizeToolArguments(args: unknown, options: SummarizeToolArgu
     }
     if (typeof value === "boolean") {
       field.types.add("boolean");
-      keep(field, value);
+      if (context.sensitive) addHash(field, value);
+      else keep(field, value);
       return;
     }
     if (typeof value === "number" || typeof value === "bigint") {
       field.types.add("number");
-      if (typeof value === "number") summarizeNumber(field, value);
+      if (typeof value === "number") summarizeNumber(field, value, context);
       return;
     }
     if (typeof value === "string") {
       field.types.add("string");
-      summarizeString(field, value, schema, keyKind);
+      summarizeString(field, value, schema, context);
       return;
     }
     if (Array.isArray(value)) {
@@ -437,13 +617,13 @@ export function summarizeToolArguments(args: unknown, options: SummarizeToolArgu
       const itemSchema = childSchemas(schema, null);
       const limit = Math.min(value.length, LIMITS.maxArrayItems);
       for (let index = 0; index < limit; index += 1) {
-        walk(value[index], `${path}[]`, depth + 1, itemSchema, keyKind);
+        walk(value[index], `${path}[]`, depth + 1, itemSchema, context);
       }
       return;
     }
     if (typeof value === "object") {
       field.types.add("object");
-      walkObject(value as Record<string, unknown>, path, depth, schema, field);
+      walkObject(value as Record<string, unknown>, path, depth, schema, field, context);
     }
   };
 
@@ -452,7 +632,8 @@ export function summarizeToolArguments(args: unknown, options: SummarizeToolArgu
     path: string,
     depth: number,
     schema: SchemaNode[],
-    field: FieldAccumulator | null
+    field: FieldAccumulator | null,
+    context: PathContext
   ): void => {
     let keys = Object.keys(value);
     if (field) field.keys = Math.max(field.keys, keys.length);
@@ -477,15 +658,21 @@ export function summarizeToolArguments(args: unknown, options: SummarizeToolArgu
       }
       const segment = segmentFor(key);
       const childPath = path ? `${path}.${segment}` : segment;
-      walk(child, childPath, depth + 1, childSchemas(schema, key), keyKindOf(key));
+      // Sensitivity and location are inherited: a value under `password.value` or `geo.point.x` is still one.
+      const childContext: PathContext = {
+        sensitive: context.sensitive || isSensitiveToolArgumentKey(key),
+        location: context.location || isLocationKey(key)
+      };
+      walk(child, childPath, depth + 1, childSchemas(schema, key), childContext);
     }
   };
 
   const rootSchema = expandSchema(options.inputSchema);
+  const rootContext: PathContext = { sensitive: false, location: false };
   if (isRecord(args)) {
-    walkObject(args, "", 0, rootSchema, null);
+    walkObject(args, "", 0, rootSchema, null, rootContext);
   } else if (args !== undefined && args !== null) {
-    walk(args, "$", 0, rootSchema, "plain");
+    walk(args, "$", 0, rootSchema, rootContext);
   }
 
   const entries: Array<[string, ToolArgumentFieldSummary]> = [...fields.entries()]
@@ -507,8 +694,10 @@ function finishField(field: FieldAccumulator): ToolArgumentFieldSummary {
     summary.min = field.min;
     summary.max = field.max;
   }
+  if (field.mag !== null) summary.mag = field.mag;
+  if (field.hashes.size > 0) summary.hashes = [...field.hashes].sort(compareText);
   if (field.prefixes.size > 0) summary.prefixes = [...field.prefixes].sort(compareText);
-  if (field.valuesOverflow || field.prefixesOverflow) summary.more = true;
+  if (field.valuesOverflow || field.hashesOverflow || field.prefixesOverflow) summary.more = true;
   if (field.classes.size > 0) summary.classes = [...field.classes].sort(compareText);
   if (field.lenIndex >= 0) summary.len = TOOL_ARGUMENT_LENGTH_BUCKETS[field.lenIndex];
   if (field.items >= 0) summary.items = field.items;
