@@ -361,12 +361,14 @@ describe("MCP tool telemetry: argument summaries (Phase 12.4)", () => {
     const rows = await context.store.listMcpToolCallsForExecution(executionId);
     expect(rows).toHaveLength(3);
     const agentRows = rows.filter((row) => row.nodeId === "agent");
-    expect(agentRows.map((row) => row.argsSummary?.fields.expression).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)))).toEqual([
-      { type: "string", classes: ["card_number"], len: "33-128" },
-      { type: "string", values: ["1+1"] }
+    // `1+1` is not a safe token and the card number is flagged: both keep only shape, class and a keyed hash.
+    const expressions = agentRows.map((row) => row.argsSummary?.fields.expression);
+    expect(expressions.map((field) => [field?.classes ?? [], field?.len, field?.values, field?.hashes?.length]).sort()).toEqual([
+      [[], "1-8", undefined, 1],
+      [["card_number"], "33-128", undefined, 1]
     ]);
     const direct = rows.find((row) => row.nodeId === "direct")!;
-    expect(direct.argsSummary).toEqual({ v: 1, fields: {} });
+    expect(direct.argsSummary).toEqual({ v: 2, fields: {} });
     for (const row of rows) {
       expect(row).toMatchObject({ subjectRole: "admin", subjectSource: "user", projectId: "default" });
     }
@@ -384,7 +386,7 @@ describe("MCP tool telemetry: argument summaries (Phase 12.4)", () => {
     };
     const forAdmin = await catalog(admin);
     expect(forAdmin).toHaveLength(2);
-    expect(forAdmin.every((entry) => entry.subjectRole === "admin" && (entry.argsSummary as { v?: number } | null)?.v === 1)).toBe(true);
+    expect(forAdmin.every((entry) => entry.subjectRole === "admin" && (entry.argsSummary as { v?: number } | null)?.v === 2)).toBe(true);
     const forBuilder = await catalog(await login(context, "builder"));
     expect(forBuilder).toHaveLength(2);
     expect(forBuilder.some((entry) => "argsSummary" in entry || "subjectRole" in entry)).toBe(false);
@@ -402,7 +404,11 @@ describe("MCP tool telemetry: argument summaries (Phase 12.4)", () => {
 
   it("stores and reads the summary columns, and reads an unknown summary version as null", async () => {
     const context = await createTestContext();
-    const summary = { v: 1 as const, fields: { state: { type: "string" as const, values: ["open"] } }, truncated: true as const };
+    const summary = {
+      v: 2 as const,
+      fields: { state: { type: "string" as const, values: ["open"] }, account: { type: "number" as const, mag: 7, hashes: ["AAAAAAAAAAAAAAAAAAAAAA"] } },
+      truncated: true as const
+    };
     await context.store.insertMcpToolCall({
       ...call({ id: "sum_1", executionId: "exec_sum" }),
       argsSummary: summary,
@@ -425,7 +431,7 @@ describe("MCP tool telemetry: argument summaries (Phase 12.4)", () => {
     });
     await context.store.insertMcpToolCall({
       ...call({ id: "sum_3", executionId: "exec_sum_3" }),
-      argsSummary: { v: 2, fields: {} } as unknown as typeof summary
+      argsSummary: { v: 1, fields: {} } as unknown as typeof summary
     });
     expect((await context.store.listMcpToolCallsForExecution("exec_sum_3"))[0]?.argsSummary).toBeNull();
   });

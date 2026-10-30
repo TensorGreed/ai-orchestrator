@@ -754,8 +754,8 @@ describe("MCP gateway telemetry and audit", () => {
     // Phase 12.4 — each row keeps a safe argument summary and the client's role, source and toolset project.
     for (const row of rows) expect(row).toMatchObject({ subjectRole: "builder", subjectSource: "client", projectId: "default" });
     expect(rows.filter((row) => row.toolName === "lookup_kb").map((row) => row.argsSummary?.fields.topic?.values?.[0]).sort()).toEqual(["mcp", "rag"]);
-    // `text` usually holds people's words: never kept as a value, even one letter.
-    expect(workflowRow.argsSummary?.fields.text).toEqual({ type: "string", len: "1-8" });
+    // `text` usually holds people's words: never kept as a value, even one letter; only its length bucket and keyed hash.
+    expect(workflowRow.argsSummary?.fields.text).toEqual({ type: "string", hashes: [expect.stringMatching(/^[A-Za-z0-9_-]{22}$/)], len: "1-8" });
 
     // Registry rows count toward the server's telemetry; gateway workflow rows stay out of the inline rollup.
     const serverTelemetry = await api<{ totals: { calls: number } }>(context, admin.cookie, "GET", `/api/mcp/servers/${mockServerId}/telemetry`);

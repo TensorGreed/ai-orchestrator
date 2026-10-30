@@ -6,9 +6,19 @@ import { describe, expect, it } from "vitest";
 import type { ToolArgumentSummary } from "@ai-orchestrator/shared";
 import { parseConfig, toolArgumentSummariesEnabled } from "../config.js";
 import { extractMcpToolCalls } from "./mcp-tool-telemetry.js";
-import { captureDetector, createToolArgumentSummarizer } from "./tool-argument-summary.js";
+import { deriveCaptureSurrogateKey } from "./replay-capture-service.js";
+import {
+  captureDetector,
+  createToolArgumentSummarizer,
+  deriveToolArgumentHashKey,
+  hashSummaryValue,
+  toolArgumentHashKey
+} from "./tool-argument-summary.js";
 
-const summarize = createToolArgumentSummarizer({ enabled: true })!;
+const masterKey = new Uint8Array(32).fill(3);
+const hashKey = deriveToolArgumentHashKey(masterKey);
+const h = (value: string | number | boolean) => hashSummaryValue(value, hashKey);
+const summarize = createToolArgumentSummarizer({ enabled: true, hashKey })!;
 
 const SECRETS = {
   card: "4111 1111 1111 1111",
@@ -28,7 +38,7 @@ const SECRETS = {
 };
 
 describe("tool argument summaries with the capture detectors", () => {
-  it("keeps no secret or personal value, only classes, prefixes and length buckets", () => {
+  it("keeps no secret or personal value, only classes, prefixes, length buckets and hashes", () => {
     const summary = summarize(SECRETS)!;
     const text = JSON.stringify(summary);
     for (const needle of [
@@ -49,20 +59,43 @@ describe("tool argument summaries with the capture detectors", () => {
       expect(text).not.toContain(needle);
     }
     expect(summary.fields.card?.classes).toEqual(["card_number"]);
-    expect(summary.fields.cardNumber).toEqual({ type: "number", classes: ["card_number"] });
+    expect(summary.fields.cardNumber).toEqual({ type: "number", mag: 15, hashes: [h(SECRETS.cardNumber)], classes: ["card_number"] });
     expect(summary.fields.iban?.classes).toEqual(["iban"]);
     expect(summary.fields.jwt?.classes).toEqual(["jwt"]);
     expect(summary.fields.aws?.classes).toEqual(["credential"]);
     expect(summary.fields.github?.classes).toEqual(["credential"]);
-    expect(summary.fields.email).toEqual({ type: "string", prefixes: ["@example.com"], classes: ["email"] });
+    // `email` is a sensitive key: class and hash only, not even the domain.
+    expect(summary.fields.email).toEqual({ type: "string", hashes: [h(SECRETS.email)], classes: ["email"], len: "9-32" });
     expect(summary.fields.encodedEmail?.classes).toEqual(["email"]);
     expect(summary.fields.phone?.classes).toEqual(["phone"]);
     expect(summary.fields.compactPhone?.classes).toEqual(["phone"]);
     expect(summary.fields.basicAuth?.classes).toContain("credential");
     expect(summary.fields.basicAuth?.prefixes).toBeUndefined();
-    expect(summary.fields.ssn).toEqual({ type: "string", len: "9-32" });
+    expect(summary.fields.ssn).toEqual({ type: "string", hashes: [h(SECRETS.ssn)], len: "9-32" });
     expect(summary.fields.privateKey?.classes).toEqual(["private_key"]);
-    expect(summary.fields.body).toEqual({ type: "string", classes: ["card_number", "email"], len: "33-128" });
+    expect(summary.fields.body).toEqual({ type: "string", hashes: [h(SECRETS.body)], classes: ["card_number", "email"], len: "33-128" });
+    for (const field of Object.values(summary.fields)) expect(field.values).toBeUndefined();
+  });
+
+  it("keeps no raw value for any reproduction from the review", () => {
+    const probes: Array<[Record<string, unknown>, string[]]> = [
+      [{ pass: "hunter2", pw: "hunter2", passphrase: "hunter2", pin: "hunter2", otp: "hunter2", sig: "hunter2", session: "hunter2" }, ["hunter2"]],
+      [{ password: { value: "hunter2" }, auth: [{ v: "hunter2" }], message: { name: "Alice" } }, ["hunter2", "Alice"]],
+      [{ customer: "Alice", recipient_name: "Alice", reviewer_login: "jsmith", owner: "jsmith", name: "Alice", ref: "john.smith" }, ["Alice", "jsmith", "john"]],
+      [{ a: "/home/jdoe/secret.txt", b: "/Users/john.smith/x/y", c: "C:\\Users\\jsmith\\Docs\\a" }, ["jdoe", "john", "jsmith", "secret"]],
+      [{ a: 4111111111111111.5, b: 123456789.25, acct: 12345678, phone7: 5551234, dob: 19850315 }, ["4111", "123456789", "12345678", "5551234", "19850315"]],
+      [{ a: "４１１１１１１１１１１１１１１１", b: "٤١١١١١١١١١١١١١١١" }, ["４１", "٤١"]],
+      [{ "550e8400-e29b-41d4-a716-446655440000": 1, "9fceb02d0ae598e95dc970b74767f19372d61af8": 2, "5551234567": 3, "123-45-6789": 4 }, ["550e8400", "9fceb02d", "5551234567", "6789"]],
+      [{ a: "https://alice-smith.github.io/x", b: "http://10.1.2.3/x" }, ["alice", "10.1"]],
+      [{ a: "deadbeefcafebabe", b: "aGVsbG8gd29ybGQ", c: "sk-abc123", d: "correcthorsebatterystaple", e: "03/1985" }, ["deadbeef", "aGVs", "abc123", "horse", "1985"]],
+      [{ lat: 51.501364, lon: -0.14189 }, ["501364", "14189"]]
+    ];
+    for (const [args, needles] of probes) {
+      const text = JSON.stringify(summarize(args));
+      for (const needle of needles) expect(text, needle).not.toContain(needle);
+    }
+    // A schema enum does not reopen a credential key.
+    expect(summarize({ password: "hunter2" }, { properties: { password: { enum: ["hunter2"] } } })?.fields.password?.values).toBeUndefined();
   });
 
   it("keeps what a policy needs from an ordinary call", () => {
@@ -82,17 +115,18 @@ describe("tool argument summaries with the capture detectors", () => {
       { properties: { direction: { enum: ["Oldest first", "Newest first"] } } }
     )!;
     expect(summary.fields).toEqual({
-      assignee: { type: "string", len: "1-8" },
+      assignee: { type: "string", hashes: [h("octocat")], len: "1-8" },
       direction: { type: "string", values: ["Oldest first"] },
       labels: { type: "array", items: 2 },
       "labels[]": { type: "string", count: 2, values: ["bug", "ui"] },
-      owner: { type: "string", values: ["octo-org"] },
-      path: { type: "string", prefixes: ["/srv/data/"] },
+      // `owner` is a sensitive key (often a person's handle); the repository still keeps `owner/` as its prefix.
+      owner: { type: "string", hashes: [h("octo-org")], len: "1-8" },
+      path: { type: "string", hashes: [h("/srv/data/reports/2026/q3.csv")], prefixes: ["/srv/"], len: "9-32" },
       per_page: { type: "number", values: [50], min: 50, max: 50 },
-      repo: { type: "string", prefixes: ["octo-org/"] },
+      repo: { type: "string", hashes: [h("octo-org/hello-world")], prefixes: ["octo-org/"], len: "9-32" },
       state: { type: "string", values: ["open"] },
-      title: { type: "string", len: "9-32" },
-      url: { type: "string", prefixes: ["https://api.github.com"] }
+      title: { type: "string", hashes: [h("Crash when saving")], len: "9-32" },
+      url: { type: "string", hashes: [h("https://api.github.com/repos/octo-org/hello-world/issues?page=2")], prefixes: ["https://api.github.com"], len: "33-128" }
     });
   });
 
@@ -102,10 +136,36 @@ describe("tool argument summaries with the capture detectors", () => {
   });
 
   it("returns undefined when switched off and null when the summariser throws", () => {
-    expect(createToolArgumentSummarizer({ enabled: false })).toBeUndefined();
-    const broken = createToolArgumentSummarizer({ enabled: true, detect: () => [] })!;
+    expect(createToolArgumentSummarizer({ enabled: false, hashKey })).toBeUndefined();
+    const broken = createToolArgumentSummarizer({ enabled: true, hashKey, detect: () => [] })!;
     const hostile = new Proxy({}, { ownKeys: () => { throw new Error("no keys"); } });
     expect(broken(hostile)).toBeNull();
+  });
+});
+
+describe("the summary hash key", () => {
+  it("is derived from the master key with its own label", () => {
+    expect(deriveToolArgumentHashKey(masterKey)).toEqual(hashKey);
+    expect(deriveToolArgumentHashKey(new Uint8Array(32).fill(4))).not.toEqual(hashKey);
+    expect(Buffer.from(hashKey).equals(Buffer.from(deriveCaptureSurrogateKey(masterKey)))).toBe(false);
+    expect(() => deriveToolArgumentHashKey(new Uint8Array(16))).toThrow();
+    expect(toolArgumentHashKey(Buffer.from(masterKey).toString("base64"))).toEqual(hashKey);
+  });
+
+  it("falls back to one random key per process without a valid master key", () => {
+    const fallback = toolArgumentHashKey(undefined);
+    expect(fallback).toHaveLength(32);
+    expect(toolArgumentHashKey("")).toBe(fallback);
+    expect(toolArgumentHashKey(Buffer.from("short").toString("base64"))).toBe(fallback);
+    expect(Buffer.from(fallback).equals(Buffer.from(hashKey))).toBe(false);
+  });
+
+  it("hashes a rule's comparison value the way the summary stores it", () => {
+    const summary = summarize({ account: "ACME-Corp", amount: 12_500_000, flag: "Ｙes" })!;
+    expect(summary.fields.account?.hashes).toEqual([hashSummaryValue("ACME-Corp", hashKey)]);
+    expect(summary.fields.amount?.hashes).toEqual([hashSummaryValue(12_500_000, hashKey)]);
+    // NFKC: the full-width form hashes like the ASCII one.
+    expect(summary.fields.flag?.hashes).toEqual([hashSummaryValue("Yes", hashKey)]);
   });
 });
 
@@ -182,7 +242,7 @@ describe("extracting argument summaries from a run", () => {
     const topics = rows.map((row) => (row.argsSummary as ToolArgumentSummary | null)?.fields.topic?.values?.[0] ?? null);
     expect(rows.map((row) => row.nodeId)).toEqual(["agent", "agent", "agent", "direct", "failed"]);
     expect(topics).toEqual(["beta", "alpha", "worker", "direct", null]);
-    expect(rows[0]?.argsSummary?.fields.note).toEqual({ type: "string", len: "9-32" });
+    expect(rows[0]?.argsSummary?.fields.note).toEqual({ type: "string", hashes: [h("free text here")], len: "9-32" });
     expect(rows[3]?.argsSummary?.fields.limit).toEqual({ type: "number", values: [3], min: 3, max: 3 });
     // Agent calls use the agent's subject; the worker its own; a direct node the run's.
     expect(rows.map((row) => [row.subjectRole, row.subjectSource])).toEqual([
