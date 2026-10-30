@@ -25,6 +25,7 @@ export * from "./sandbox";
 export * from "./runtime-limits";
 export * from "./delegated";
 export * from "./cassette";
+export * from "./tool-argument-summary";
 export * from "./snapshot-mock";
 export * from "./mock-stdio-server";
 export * from "./adapters/mock-mcp";
