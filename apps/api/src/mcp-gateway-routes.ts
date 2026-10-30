@@ -14,7 +14,7 @@
 
 import crypto from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
-import { policyDecisionRecord, secretValuesForScrub, type MCPExecutionContext, type MCPRegistry } from "@ai-orchestrator/mcp-sdk";
+import { policyDecisionRecord, secretValuesForScrub, type MCPExecutionContext, type McpToolAccessDecision, type MCPRegistry } from "@ai-orchestrator/mcp-sdk";
 import {
   canonicalPolicyJson,
   mcpClientCreateSchema,
@@ -27,6 +27,7 @@ import {
   type McpGatewayApproval,
   type McpPolicyRole,
   type McpToolPolicyDecisionRecord,
+  type McpToolPolicyRule,
   type McpToolPolicySubject,
   type McpToolset,
   type McpToolsetMemberSpec,
@@ -101,7 +102,46 @@ const MAX_ERROR_CHARS = 500;
 /** Phase 12.4 — how long a gateway approval request waits for a decision before it expires. */
 export const GATEWAY_APPROVAL_PENDING_MS = 24 * 60 * 60 * 1000;
 const GATEWAY_APPROVAL_PREVIEW_CHARS = 2000;
+/**
+ * Phase 12.4 — at most this many pending approval requests per gateway client. A client over the cap gets a
+ * "retry later" error instead of a new request, so an outside app cannot flood the admins' inbox.
+ */
+export const GATEWAY_APPROVAL_MAX_PENDING_PER_CLIENT = 20;
+/** Phase 12.4 — the retry hint sent with that error. */
+const GATEWAY_APPROVAL_CAP_RETRY_MS = 60_000;
 const GATEWAY_APPROVAL_STATUSES = ["pending", "approved", "rejected", "expired", "used"] as const;
+
+/**
+ * The tool policy for one sampling request a server makes during a gateway call. Phase 12.4: the calling client is
+ * the principal, so a sampling rule scoped to that client governs it like the client's own calls.
+ */
+export function evaluateGatewaySampling(
+  rules: readonly McpToolPolicyRule[],
+  input: {
+    role: McpPolicyRole;
+    projectId: string | null;
+    adapterId: string;
+    registryServerId: string;
+    serverLabel?: string;
+    clientId: string;
+    model: string;
+  }
+): McpToolAccessDecision {
+  return evaluateToolForContext(
+    {
+      rules,
+      classifications: [],
+      role: input.role,
+      projectId: input.projectId,
+      adapterId: input.adapterId,
+      registryServerId: input.registryServerId,
+      ...(input.serverLabel ? { serverLabel: input.serverLabel } : {}),
+      clientId: input.clientId
+    },
+    { name: input.model },
+    "sampling"
+  );
+}
 
 /** Phase 12.4 — the identical-call hash of gateway arguments: key order and nesting do not change it. */
 export function gatewayArgsHash(args: Record<string, unknown>): string {
@@ -431,19 +471,15 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
             resolveSecret: deps.resolveSecret,
             serverConfigs: [serverConfig],
             evaluatePolicy: async (subject) =>
-              evaluateToolForContext(
-                {
-                  rules: await store.listMcpToolPolicies(),
-                  classifications: [],
-                  role: auth.subject.role,
-                  projectId: toolset.projectId ?? null,
-                  adapterId: serverConfig.serverId,
-                  registryServerId: tool.serverId,
-                  serverLabel: tool.serverName
-                },
-                { name: subject.toolName },
-                "sampling"
-              ),
+              evaluateGatewaySampling(await store.listMcpToolPolicies(), {
+                role: auth.subject.role,
+                projectId: toolset.projectId ?? null,
+                adapterId: serverConfig.serverId,
+                registryServerId: tool.serverId,
+                serverLabel: tool.serverName,
+                clientId: auth.client.id,
+                model: subject.toolName
+              }),
             trace: samplingTrace,
             signal
           })
@@ -628,14 +664,19 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
   // ---------------------------------------------------------------------------
 
   type GatewayPolicyGate =
-    | { outcome: "call"; policyDecision?: McpToolPolicyDecisionRecord }
+    /** `approvalId`: the approval this call used, put back when the call is refused before it reaches the server. */
+    | { outcome: "call"; policyDecision?: McpToolPolicyDecisionRecord; approvalId?: string }
     | { outcome: "respond"; response: JsonRpcResponse };
+
+  /** Phase 12.4 — when each client's "too many pending requests" refusal was last audited (once per approval window). */
+  const capAuditedAt = new Map<string, number>();
 
   /**
    * The tool policy for one server-tool call, with its arguments and the client as principal (the catalog already
    * left out tools a rule denies outright). A deny is a tool error. A require_approval rule holds the call back: the
    * client gets an "approval pending" JSON-RPC error naming the request, and once an admin approves it the identical
-   * call (same client, server, tool and arguments) goes through once within MCP_GATEWAY_APPROVAL_WINDOW_MS.
+   * call (same client, server, tool and arguments) goes through once within MCP_GATEWAY_APPROVAL_WINDOW_MS. Once an
+   * admin rejects it, identical retries are refused at once until the same window has passed since the decision.
    */
   const gatewayPolicyGate = async (
     session: GatewaySession,
@@ -696,19 +737,67 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     const argsHash = gatewayArgsHash(args);
     const now = new Date();
     const callKey = { clientId: auth.client.id, serverId: tool.serverId, toolName: tool.toolName, argsHash };
+    const approvalMetadata = { ...callMetadata, argsHash, ruleId: decision.approval.ruleId, ruleName: decision.approval.ruleName ?? null };
+
+    // A rejection sticks: identical retries are refused until the window after the decision has passed.
+    const rejection = await store.findBlockingMcpGatewayRejection(callKey, now.toISOString());
+    if (rejection) {
+      const rejected = rejection.approval;
+      if (rejection.firstRefusal) {
+        await deps.auditRaw({
+          ...auditBase,
+          eventType: "mcp_gateway.approval_refused_rejected",
+          action: "execute",
+          outcome: "denied",
+          metadata: { ...approvalMetadata, approvalRequestId: rejected.id, decidedBy: rejected.decidedBy, retryAfter: rejected.expiresAt }
+        });
+      }
+      const retryAfterMs = Math.max(0, Date.parse(rejected.expiresAt) - now.getTime());
+      return {
+        outcome: "respond",
+        response: rpcError(
+          requestId,
+          JSON_RPC_ERRORS.approvalRejected,
+          `Rejected: an admin rejected this exact call (request ${rejected.id})${rejected.decisionReason ? `: ${rejected.decisionReason}` : "."} Identical calls are refused until ${rejected.expiresAt}.`,
+          {
+            approvalRequestId: rejected.id,
+            status: "rejected",
+            ruleId: rejected.ruleId,
+            ruleName: rejected.ruleName,
+            reason: rejected.decisionReason,
+            retryAfter: rejected.expiresAt,
+            retryAfterMs,
+            retryAfterSeconds: Math.max(1, Math.ceil(retryAfterMs / 1000))
+          }
+        )
+      };
+    }
+
     const usable = await store.findUsableMcpGatewayApproval(callKey, now.toISOString());
-    if (usable && await store.consumeMcpGatewayApproval(usable.id, now.toISOString())) {
-      await deps.auditRaw({
-        ...auditBase,
-        eventType: "mcp_gateway.approval_used",
-        action: "execute",
-        outcome: "success",
-        metadata: { ...callMetadata, approvalRequestId: usable.id, argsHash, ruleId: decision.approval.ruleId, decidedBy: usable.decidedBy }
-      });
-      return { outcome: "call", ...withRecord(policyDecisionRecord(decision.policy, "approved")) };
+    if (usable) {
+      if (await store.consumeMcpGatewayApproval(usable.id, now.toISOString())) {
+        await deps.auditRaw({
+          ...auditBase,
+          eventType: "mcp_gateway.approval_used",
+          action: "execute",
+          outcome: "success",
+          metadata: { ...callMetadata, approvalRequestId: usable.id, argsHash, ruleId: decision.approval.ruleId, decidedBy: usable.decidedBy }
+        });
+        return { outcome: "call", approvalId: usable.id, ...withRecord(policyDecisionRecord(decision.policy, "approved")) };
+      }
+      // An identical call used the approval a moment ago: say so rather than open a fresh request at once.
+      return {
+        outcome: "respond",
+        response: rpcError(
+          requestId,
+          JSON_RPC_ERRORS.approvalPending,
+          `Approval already used: an identical call just used approval ${usable.id}. Retry to ask for a new approval.`,
+          { approvalRequestId: usable.id, status: "used", ruleId: decision.approval.ruleId, ruleName: decision.approval.ruleName ?? null, approvalWindowMs }
+        )
+      };
     }
     const preview = deps.redact(canonicalPolicyJson(args));
-    const { approval, created } = await store.createMcpGatewayApproval(
+    const createdResult = await store.createMcpGatewayApproval(
       {
         id: `mga_${crypto.randomUUID()}`,
         clientId: auth.client.id,
@@ -727,8 +816,37 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
         requestedAt: now.toISOString(),
         expiresAt: new Date(now.getTime() + GATEWAY_APPROVAL_PENDING_MS).toISOString()
       },
-      now.toISOString()
+      now.toISOString(),
+      { maxPendingPerClient: GATEWAY_APPROVAL_MAX_PENDING_PER_CLIENT }
     );
+    if (createdResult.capped) {
+      const lastAudit = capAuditedAt.get(auth.client.id);
+      if (lastAudit === undefined || now.getTime() - lastAudit >= approvalWindowMs) {
+        capAuditedAt.set(auth.client.id, now.getTime());
+        await deps.auditRaw({
+          ...auditBase,
+          eventType: "mcp_gateway.approval_capped",
+          action: "execute",
+          outcome: "denied",
+          metadata: { ...approvalMetadata, maxPending: GATEWAY_APPROVAL_MAX_PENDING_PER_CLIENT }
+        });
+      }
+      return {
+        outcome: "respond",
+        response: rpcError(
+          requestId,
+          JSON_RPC_ERRORS.retryLater,
+          `Too many approval requests: this client already has ${GATEWAY_APPROVAL_MAX_PENDING_PER_CLIENT} waiting for an admin. Retry once some are decided.`,
+          {
+            reason: "approval_requests_pending",
+            maxPending: GATEWAY_APPROVAL_MAX_PENDING_PER_CLIENT,
+            retryAfterMs: GATEWAY_APPROVAL_CAP_RETRY_MS,
+            retryAfterSeconds: Math.ceil(GATEWAY_APPROVAL_CAP_RETRY_MS / 1000)
+          }
+        )
+      };
+    }
+    const { approval, created } = createdResult;
     if (created) {
       await deps.auditRaw({
         ...auditBase,
@@ -808,10 +926,12 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     }
 
     let policyDecision: McpToolPolicyDecisionRecord | undefined;
+    let usedApprovalId: string | undefined;
     if (tool.kind === "server") {
       const gate = await gatewayPolicyGate(session, auth, toolset, tool, args, request.id);
       if (gate.outcome === "respond") return gate.response;
       policyDecision = gate.policyDecision;
+      usedApprovalId = gate.approvalId;
     }
 
     const meta = asRecord(params._meta);
@@ -848,6 +968,8 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
           : await callServerTool({ session, auth, toolset, tool, args, signal: controller.signal, progress, ...(policyDecision ? { policyDecision } : {}) });
       if (controller.signal.aborted) return SUPPRESSED;
       if (isRetryLater(result)) {
+        // Phase 12.4 — the call never reached the server, so the approval it used is still good for a retry.
+        if (usedApprovalId) await store.restoreMcpGatewayApproval(usedApprovalId);
         // Phase 10.7 — refused before reaching the server: a JSON-RPC error with a retry hint.
         return rpcError(request.id, JSON_RPC_ERRORS.retryLater, result.message, {
           reason: result.reason,
@@ -1581,8 +1703,8 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
         decidedBy: user.email,
         decidedAt: now.toISOString(),
         reason,
-        // An approval is good for one identical call within the window; a rejection keeps the request's expiry.
-        expiresAt: status === "approved" ? new Date(now.getTime() + approvalWindowMs).toISOString() : existing.expiresAt
+        // An approval is good for one identical call within the window; a rejection refuses identical calls for as long.
+        expiresAt: new Date(now.getTime() + approvalWindowMs).toISOString()
       },
       now.toISOString()
     );

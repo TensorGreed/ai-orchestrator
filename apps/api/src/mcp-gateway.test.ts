@@ -16,8 +16,9 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { FastifyInstance } from "fastify";
-import type { McpClient, McpToolset, Workflow } from "@ai-orchestrator/shared";
+import type { McpClient, McpToolPolicyRule, McpToolset, Workflow } from "@ai-orchestrator/shared";
 import { createApp } from "./app.js";
+import { evaluateGatewaySampling, GATEWAY_APPROVAL_MAX_PENDING_PER_CLIENT } from "./mcp-gateway-routes.js";
 import { parseConfig, type AppConfig } from "./config.js";
 import { SqliteStore } from "./db/database.js";
 import type { Store } from "./db/store.js";
@@ -883,7 +884,7 @@ describe("MCP gateway: argument-aware tool policy and approval by retry", () => 
     expect((await events("mcp_gateway.approval_used"))[0]!.metadata).toMatchObject({ approvalRequestId: requestId, decidedBy: admin.email });
   });
 
-  it("an approval past its window is not used, and a rejection is final for its request", async () => {
+  it("an approval past its window is not used, and a rejection refuses identical calls for the window", async () => {
     vi.useFakeTimers({ toFake: ["Date"], now: new Date() });
     const fixture = await setupFixture({ MCP_GATEWAY_APPROVAL_WINDOW_MS: "60000" });
     const { context, admin, toolset, token, mockServerId } = fixture;
@@ -908,13 +909,97 @@ describe("MCP gateway: argument-aware tool policy and approval by retry", () => 
       context, admin.cookie, "POST", `/api/mcp/gateway/approvals/${second}/reject`, { reason: "Not today" }
     );
     expect(rejected.body.approval).toMatchObject({ status: "rejected", decisionReason: "Not today" });
-    const afterReject = (await call(3, "mock_tools__calculator", { expression: "1+1" })).json();
+    // The rejection's expiry is when it stops blocking: the decision plus the approval window.
+    expect(Date.parse((rejected.body.approval as { expiresAt?: string }).expiresAt!)).toBe(Date.now() + 60_000);
+    const refused = (await call(3, "mock_tools__calculator", { expression: "1+1" })).json();
+    expect(refused.error.code).toBe(-32031);
+    expect(refused.error.message).toMatch(/^Rejected: an admin rejected this exact call .*: Not today Identical calls are refused until/);
+    expect(refused.error.data).toMatchObject({ approvalRequestId: second, status: "rejected", reason: "Not today", retryAfterSeconds: 60 });
+    expect((await call(4, "mock_tools__calculator", { expression: "1+1" })).json().error.code).toBe(-32031);
+    // Other arguments are another call: they ask as usual.
+    expect((await call(5, "mock_tools__calculator", { expression: "2+2" })).json().error.code).toBe(-32030);
+    const events = async (eventType: string) => (await context.store.listAuditLogs({ eventType, pageSize: 100 })).items;
+    // Refusals are audited once per rejected request, and open no new request.
+    expect(await events("mcp_gateway.approval_refused_rejected")).toHaveLength(1);
+    expect(await events("mcp_gateway.approval_requested")).toHaveLength(3);
+
+    // Once the window has passed, the identical call asks again.
+    vi.setSystemTime(Date.now() + 61_000);
+    const afterReject = (await call(6, "mock_tools__calculator", { expression: "1+1" })).json();
     expect(afterReject.error.code).toBe(-32030);
     expect(afterReject.error.data.approvalRequestId).not.toBe(second);
 
     // A pending request past its 24h expiry can no longer be approved.
     vi.setSystemTime(Date.now() + 25 * 60 * 60 * 1000);
     expect((await api(context, admin.cookie, "POST", `/api/mcp/gateway/approvals/${afterReject.error.data.approvalRequestId}/approve`, {})).status).toBe(409);
+  });
+
+  it("caps pending requests per client and audits the refusal once", async () => {
+    const fixture = await setupFixture();
+    const { context, admin, toolset, token, mockServerId } = fixture;
+    await api(context, admin.cookie, "POST", "/api/mcp/policies", { effect: "require_approval", serverId: mockServerId, toolPattern: "calculator" });
+    const sessionId = await openSession(context, toolset.slug, token);
+    const call = gatewayCall(fixture, { authorization: `Bearer ${token}`, "mcp-session-id": sessionId });
+    for (let index = 0; index < GATEWAY_APPROVAL_MAX_PENDING_PER_CLIENT; index += 1) {
+      expect((await call(index + 1, "mock_tools__calculator", { expression: `${index}+1` })).json().error.code).toBe(-32030);
+    }
+    const capped = (await call(100, "mock_tools__calculator", { expression: "99+1" })).json();
+    expect(capped.error.code).toBe(-32029);
+    expect(capped.error.data).toMatchObject({ reason: "approval_requests_pending", maxPending: GATEWAY_APPROVAL_MAX_PENDING_PER_CLIENT, retryAfterSeconds: 60 });
+    expect((await call(101, "mock_tools__calculator", { expression: "98+1" })).json().error.code).toBe(-32029);
+    // A call that already has a pending request still gets it back.
+    expect((await call(102, "mock_tools__calculator", { expression: "0+1" })).json().error.code).toBe(-32030);
+    expect((await context.store.listAuditLogs({ eventType: "mcp_gateway.approval_capped", pageSize: 100 })).items).toHaveLength(1);
+    expect(await context.store.listMcpGatewayApprovals({ status: "pending" }, new Date().toISOString())).toHaveLength(GATEWAY_APPROVAL_MAX_PENDING_PER_CLIENT);
+  });
+
+  it("gives an approval back when the call is refused before reaching the server, and says so when a race used it", async () => {
+    const fixture = await setupFixture();
+    const { context, admin, toolset, token, mockServerId } = fixture;
+    await api(context, admin.cookie, "POST", "/api/mcp/policies", {
+      effect: "require_approval",
+      serverId: mockServerId,
+      toolPattern: "calculator",
+      conditions: { all: [{ path: "expression", op: "starts_with", value: "1000" }] }
+    });
+    expect((await api(context, admin.cookie, "PUT", `/api/mcp/servers/${mockServerId}`, { limits: { requestsPerMinute: 1, maxQueueWaitMs: 0 } })).status).toBe(200);
+    const sessionId = await openSession(context, toolset.slug, token);
+    const call = gatewayCall(fixture, { authorization: `Bearer ${token}`, "mcp-session-id": sessionId });
+    const requestId = (await call(1, "mock_tools__calculator", { expression: "1000*3" })).json().error.data.approvalRequestId as string;
+    expect((await api(context, admin.cookie, "POST", `/api/mcp/gateway/approvals/${requestId}/approve`, {})).status).toBe(200);
+    // Spend the server's one call a minute, so the approved retry is rate limited before it reaches the server.
+    expect((await call(2, "mock_tools__calculator", { expression: "2+2" })).json().result.isError).toBeUndefined();
+    const limited = (await call(3, "mock_tools__calculator", { expression: "1000*3" })).json();
+    expect(limited.error.code).toBe(-32029);
+    expect(await context.store.getMcpGatewayApproval(requestId)).toMatchObject({ status: "approved", usedAt: null });
+
+    // Another identical call used the approval between the lookup and the claim: no new request.
+    const consume = vi.spyOn(context.store, "consumeMcpGatewayApproval").mockResolvedValueOnce(false);
+    const raced = (await call(4, "mock_tools__calculator", { expression: "1000*3" })).json();
+    consume.mockRestore();
+    expect(raced.error.code).toBe(-32030);
+    expect(raced.error.message).toMatch(/^Approval already used:/);
+    expect(raced.error.data).toMatchObject({ approvalRequestId: requestId, status: "used" });
+    expect((await context.store.listAuditLogs({ eventType: "mcp_gateway.approval_requested", pageSize: 100 })).items).toHaveLength(1);
+  });
+
+  it("applies client-scoped sampling rules to that client's gateway calls", () => {
+    const deny: McpToolPolicyRule = {
+      id: "no-sampling",
+      name: null,
+      description: null,
+      effect: "deny",
+      kind: "sampling",
+      projectId: null,
+      roles: [],
+      serverId: null,
+      toolPattern: "*",
+      clientIds: ["mcpc_1"],
+      enabled: true
+    };
+    const input = { role: "builder" as const, projectId: "default", adapterId: "mock-mcp", registryServerId: "mcp_x", model: "gpt-4o-mini" };
+    expect(evaluateGatewaySampling([deny], { ...input, clientId: "mcpc_1" }).allowed).toBe(false);
+    expect(evaluateGatewaySampling([deny], { ...input, clientId: "mcpc_2" }).allowed).toBe(true);
   });
 
   it("shadow rules never change the call; their would-be decision is stored with it", async () => {

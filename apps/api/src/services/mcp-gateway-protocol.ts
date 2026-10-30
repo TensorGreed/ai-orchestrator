@@ -44,7 +44,13 @@ export const JSON_RPC_ERRORS = {
    * `data.approvalRequestId` names the request; once it is approved the identical call (same tool, same arguments)
    * can be retried once within the approval window.
    */
-  approvalPending: -32030
+  approvalPending: -32030,
+  /**
+   * Phase 12.4 — implementation-defined server error: an admin rejected this exact call (same client, tool and
+   * arguments). Identical retries are refused until `data.retryAfter` (the decision time plus the approval window)
+   * and open no new request.
+   */
+  approvalRejected: -32031
 } as const;
 
 export type JsonRpcId = string | number;

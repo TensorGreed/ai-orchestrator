@@ -69,6 +69,8 @@ export interface PostgresStoreConfig {
  *                     connection's token is re-read and refreshed (services/mcp-oauth-service.ts, cluster mode).
  *   0x4c3243 ("L2C")  replay-capture reservations — key: hashtext(schema:workflow id), held for the reserving
  *                     transaction (pg_advisory_xact_lock); see postgres/flow-state.ts.
+ *   0x4c3250 ("L2P")  MCP gateway approval requests — key: hashtext(schema:client id), held for the creating
+ *                     transaction (pg_advisory_xact_lock) so the per-client pending cap holds; see postgres/mcp.ts.
  * Add a new class here rather than reusing one.
  */
 export const ADVISORY_LOCK_CLASS_MIGRATIONS = 0x4c324d;
@@ -798,6 +800,12 @@ export class PostgresStore implements Store {
   }
   async consumeMcpGatewayApproval(...args: Parameters<Store["consumeMcpGatewayApproval"]>): ReturnType<Store["consumeMcpGatewayApproval"]> {
     return mcp.consumeMcpGatewayApproval(this.ctx, ...args);
+  }
+  async restoreMcpGatewayApproval(...args: Parameters<Store["restoreMcpGatewayApproval"]>): ReturnType<Store["restoreMcpGatewayApproval"]> {
+    return mcp.restoreMcpGatewayApproval(this.ctx, ...args);
+  }
+  async findBlockingMcpGatewayRejection(...args: Parameters<Store["findBlockingMcpGatewayRejection"]>): ReturnType<Store["findBlockingMcpGatewayRejection"]> {
+    return mcp.findBlockingMcpGatewayRejection(this.ctx, ...args);
   }
   async decideMcpGatewayApproval(...args: Parameters<Store["decideMcpGatewayApproval"]>): ReturnType<Store["decideMcpGatewayApproval"]> {
     return mcp.decideMcpGatewayApproval(this.ctx, ...args);

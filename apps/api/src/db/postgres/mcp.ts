@@ -58,7 +58,7 @@ import type {
   McpToolSnapshotRecord,
   McpUserOAuthConnectionRecord
 } from "../database.js";
-import { type Store } from "../store.js";
+import { mcpGatewayApprovalRetentionCutoff, type McpGatewayApprovalCreateResult, type Store } from "../store.js";
 import { parseJsonSafe, toNum, toStr } from "./helpers.js";
 import type { PgContext } from "./context.js";
 import { clampLimit, LIMIT_MAX } from "../store-limits.js";
@@ -1028,10 +1028,43 @@ export async function deleteMcpToolPolicy(ctx: PgContext, ...[id]: Parameters<St
 // Phase 12.4 — gateway approvals
 // ---------------------------------------------------------------------------
 
+/**
+ * Phase 12.4 — advisory lock class 0x4c3250 ("L2P"): gateway approval requests of one client — key:
+ * hashtext(schema:client id). Held for the creating transaction (pg_advisory_xact_lock), so the pending-request cap
+ * is counted and enforced atomically across instances.
+ */
+export const ADVISORY_LOCK_CLASS_GATEWAY_APPROVALS = 0x4c3250;
+
+/** Expires pending requests past their expiry and deletes decided ones past MCP_GATEWAY_APPROVAL_RETENTION_MS. */
+async function sweepMcpGatewayApprovals(executor: Queryable, now: string): Promise<void> {
+  await executor.query(`UPDATE mcp_gateway_approvals SET status = 'expired' WHERE status = 'pending' AND expires_at <= $1`, [now]);
+  const cutoff = mcpGatewayApprovalRetentionCutoff(now);
+  await executor.query(`DELETE FROM mcp_gateway_approvals WHERE status <> 'pending' AND requested_at < $1 AND expires_at < $1`, [cutoff]);
+}
+
 /** One pending request per identical call: the partial unique index (v47) makes a concurrent second insert a no-op. */
-export async function createMcpGatewayApproval(ctx: PgContext, ...[input, now]: Parameters<Store["createMcpGatewayApproval"]>): ReturnType<Store["createMcpGatewayApproval"]> {
-  return ctx.withTransaction(async (client) => {
-    await client.query(`UPDATE mcp_gateway_approvals SET status = 'expired' WHERE status = 'pending' AND expires_at <= $1`, [now]);
+export async function createMcpGatewayApproval(
+  ctx: PgContext,
+  ...[input, now, options = {}]: Parameters<Store["createMcpGatewayApproval"]>
+): ReturnType<Store["createMcpGatewayApproval"]> {
+  return ctx.withTransaction(async (client): Promise<McpGatewayApprovalCreateResult> => {
+    await sweepMcpGatewayApprovals(client, now);
+    if (options.maxPendingPerClient !== undefined) {
+      await client.query(`SELECT pg_advisory_xact_lock($1, hashtext(current_schema() || ':' || $2::text))`, [
+        ADVISORY_LOCK_CLASS_GATEWAY_APPROVALS,
+        input.clientId
+      ]);
+      const existing = await one(
+        client,
+        `SELECT * FROM mcp_gateway_approvals WHERE client_id = $1 AND server_id = $2 AND tool_name = $3 AND args_hash = $4 AND status = 'pending'`,
+        [input.clientId, input.serverId, input.toolName, input.argsHash]
+      );
+      if (existing) return { approval: mapMcpGatewayApproval(existing), created: false };
+      const pending = await one(client, `SELECT COUNT(*)::int AS count FROM mcp_gateway_approvals WHERE client_id = $1 AND status = 'pending'`, [
+        input.clientId
+      ]);
+      if (Number(pending?.count ?? 0) >= options.maxPendingPerClient) return { approval: null, created: false, capped: true };
+    }
     const inserted = await one(
       client,
       `INSERT INTO mcp_gateway_approvals (
@@ -1076,7 +1109,7 @@ export async function getMcpGatewayApproval(ctx: PgContext, ...[id]: Parameters<
 }
 
 export async function listMcpGatewayApprovals(ctx: PgContext, ...[filter, now]: Parameters<Store["listMcpGatewayApprovals"]>): ReturnType<Store["listMcpGatewayApprovals"]> {
-  await ctx.pool.query(`UPDATE mcp_gateway_approvals SET status = 'expired' WHERE status = 'pending' AND expires_at <= $1`, [now]);
+  await sweepMcpGatewayApprovals(ctx.pool, now);
   const limit = Math.max(1, Math.min(500, filter.limit ?? 200));
   const result = filter.status
     ? await ctx.query<Row>(
@@ -1105,6 +1138,28 @@ export async function consumeMcpGatewayApproval(ctx: PgContext, ...[id, now]: Pa
     [now, id]
   );
   return (result.rowCount ?? 0) > 0;
+}
+
+export async function restoreMcpGatewayApproval(ctx: PgContext, ...[id]: Parameters<Store["restoreMcpGatewayApproval"]>): ReturnType<Store["restoreMcpGatewayApproval"]> {
+  const result = await ctx.pool.query(`UPDATE mcp_gateway_approvals SET status = 'approved', used_at = NULL WHERE id = $1 AND status = 'used'`, [id]);
+  return (result.rowCount ?? 0) > 0;
+}
+
+/** The mark is one conditional UPDATE, so exactly one refused retry sees `firstRefusal`. */
+export async function findBlockingMcpGatewayRejection(
+  ctx: PgContext,
+  ...[call, now]: Parameters<Store["findBlockingMcpGatewayRejection"]>
+): ReturnType<Store["findBlockingMcpGatewayRejection"]> {
+  const row = await one(
+    ctx.pool,
+    `SELECT * FROM mcp_gateway_approvals
+      WHERE client_id = $1 AND server_id = $2 AND tool_name = $3 AND args_hash = $4 AND status = 'rejected' AND expires_at > $5
+      ORDER BY decided_at DESC, id COLLATE "C" DESC LIMIT 1`,
+    [call.clientId, call.serverId, call.toolName, call.argsHash, now]
+  );
+  if (!row) return null;
+  const marked = await one(ctx.pool, `UPDATE mcp_gateway_approvals SET used_at = $1 WHERE id = $2 AND used_at IS NULL RETURNING *`, [now, row.id]);
+  return { approval: mapMcpGatewayApproval(marked ?? row), firstRefusal: Boolean(marked) };
 }
 
 export async function decideMcpGatewayApproval(ctx: PgContext, ...[id, decision, now]: Parameters<Store["decideMcpGatewayApproval"]>): ReturnType<Store["decideMcpGatewayApproval"]> {

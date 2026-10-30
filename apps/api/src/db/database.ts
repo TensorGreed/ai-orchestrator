@@ -74,6 +74,7 @@ import { isEmptyDataLabels, labelsForUntrackedSave, mergeDataLabels, parseStored
 import { queuedRunTimeoutMs, STUCK_JOB_MARGIN_MS } from "./queue-timeouts.js";
 import { AuditExportCursorMovedError, isForeignKeyViolation, ProjectNotEmptyError, StoreReferenceMissingError, ReleaseGateEnforcedError } from "./store-errors.js";
 import { clampLimit, LIMIT_MAX } from "./store-limits.js";
+import { mcpGatewayApprovalRetentionCutoff } from "./store.js";
 import {
   auditEntryHash,
   type AuditChainResult,
@@ -98,6 +99,7 @@ import type {
   ReplayRecordingRefusal,
   McpGatewayApprovalCallKey,
   McpGatewayApprovalCreate,
+  McpGatewayApprovalCreateResult,
   McpToolPolicyPatch,
   Store
 } from "./store.js";
@@ -12261,14 +12263,25 @@ export class SqliteStore implements Store {
 
   // Phase 12.4 — gateway approvals.
 
-  async createMcpGatewayApproval(input: McpGatewayApprovalCreate, now: string): Promise<{ approval: McpGatewayApproval; created: boolean }> {
-    return this.db.transaction(() => {
-      this.exec(`UPDATE mcp_gateway_approvals SET status = 'expired' WHERE status = 'pending' AND expires_at <= ?`, [now]);
+  async createMcpGatewayApproval(
+    input: McpGatewayApprovalCreate,
+    now: string,
+    options: { maxPendingPerClient?: number } = {}
+  ): Promise<McpGatewayApprovalCreateResult> {
+    return this.db.transaction((): McpGatewayApprovalCreateResult => {
+      this.sweepMcpGatewayApprovals(now);
       const existing = this.queryOne<Record<string, unknown>>(
         `SELECT * FROM mcp_gateway_approvals WHERE client_id = ? AND server_id = ? AND tool_name = ? AND args_hash = ? AND status = 'pending'`,
         [input.clientId, input.serverId, input.toolName, input.argsHash]
       );
       if (existing) return { approval: mapMcpGatewayApproval(existing), created: false };
+      if (options.maxPendingPerClient !== undefined) {
+        const pending = this.queryOne<{ count: number }>(
+          `SELECT COUNT(*) AS count FROM mcp_gateway_approvals WHERE client_id = ? AND status = 'pending'`,
+          [input.clientId]
+        );
+        if (Number(pending?.count ?? 0) >= options.maxPendingPerClient) return { approval: null, created: false, capped: true };
+      }
       this.exec(
         `INSERT INTO mcp_gateway_approvals (
            id, client_id, client_name, toolset_id, project_id, server_id, server_name, tool_name, gateway_tool_name,
@@ -12297,6 +12310,13 @@ export class SqliteStore implements Store {
     })();
   }
 
+  /** Phase 12.4 — expires pending requests past their expiry and deletes decided ones past the retention. */
+  private sweepMcpGatewayApprovals(now: string): void {
+    this.exec(`UPDATE mcp_gateway_approvals SET status = 'expired' WHERE status = 'pending' AND expires_at <= ?`, [now]);
+    const cutoff = mcpGatewayApprovalRetentionCutoff(now);
+    this.exec(`DELETE FROM mcp_gateway_approvals WHERE status <> 'pending' AND requested_at < ? AND expires_at < ?`, [cutoff, cutoff]);
+  }
+
   private getMcpGatewayApprovalSync(id: string): McpGatewayApproval | null {
     const row = this.queryOne<Record<string, unknown>>(`SELECT * FROM mcp_gateway_approvals WHERE id = ?`, [id]);
     return row ? mapMcpGatewayApproval(row) : null;
@@ -12307,7 +12327,7 @@ export class SqliteStore implements Store {
   }
 
   async listMcpGatewayApprovals(filter: { status?: McpGatewayApproval["status"]; limit?: number }, now: string): Promise<McpGatewayApproval[]> {
-    this.exec(`UPDATE mcp_gateway_approvals SET status = 'expired' WHERE status = 'pending' AND expires_at <= ?`, [now]);
+    this.sweepMcpGatewayApprovals(now);
     const limit = Math.max(1, Math.min(500, filter.limit ?? 200));
     const rows = filter.status
       ? this.queryAll<Record<string, unknown>>(
@@ -12333,6 +12353,28 @@ export class SqliteStore implements Store {
       .prepare(`UPDATE mcp_gateway_approvals SET status = 'used', used_at = ? WHERE id = ? AND status = 'approved' AND expires_at > ?`)
       .run(now, id, now);
     return result.changes > 0;
+  }
+
+  async restoreMcpGatewayApproval(id: string): Promise<boolean> {
+    const result = this.db.prepare(`UPDATE mcp_gateway_approvals SET status = 'approved', used_at = NULL WHERE id = ? AND status = 'used'`).run(id);
+    return result.changes > 0;
+  }
+
+  async findBlockingMcpGatewayRejection(
+    call: McpGatewayApprovalCallKey,
+    now: string
+  ): Promise<{ approval: McpGatewayApproval; firstRefusal: boolean } | null> {
+    return this.db.transaction(() => {
+      const row = this.queryOne<Record<string, unknown>>(
+        `SELECT * FROM mcp_gateway_approvals
+          WHERE client_id = ? AND server_id = ? AND tool_name = ? AND args_hash = ? AND status = 'rejected' AND expires_at > ?
+          ORDER BY decided_at DESC, id DESC LIMIT 1`,
+        [call.clientId, call.serverId, call.toolName, call.argsHash, now]
+      );
+      if (!row) return null;
+      const marked = this.db.prepare(`UPDATE mcp_gateway_approvals SET used_at = ? WHERE id = ? AND used_at IS NULL`).run(now, String(row.id));
+      return { approval: this.getMcpGatewayApprovalSync(String(row.id))!, firstRefusal: marked.changes > 0 };
+    })();
   }
 
   async decideMcpGatewayApproval(
