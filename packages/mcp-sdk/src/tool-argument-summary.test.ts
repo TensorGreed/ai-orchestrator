@@ -5,6 +5,7 @@ import {
   isSafeToolArgumentToken,
   isSensitiveToolArgumentKey,
   looksRandomToolArgument,
+  looksRandomToolArgumentKey,
   summarizeToolArguments,
   toolArgumentKeySegments,
   toolArgumentLengthBucket,
@@ -155,13 +156,114 @@ describe("summarizeToolArguments: sensitive paths", () => {
       senderEmail: "x",
       firstName: "alice",
       to: ["bob"],
-      Customer_Id: "bob"
+      Customer_Id: "bob",
+      firstname: "alice",
+      lastname: "smith",
+      surname: "smith",
+      fullname: "alice-smith",
+      nickname: "bob",
+      givenname: "alice",
+      familyname: "smith",
+      displayname: "bob",
+      userid: "jsmith",
+      emailaddress: "x",
+      phonenumber: "x",
+      accountno: "x",
+      accountnumber: "x",
+      ownerid: "jsmith"
     });
     for (const [path, field] of Object.entries(summary.fields)) {
       expect(field.values, path).toBeUndefined();
       expect(field.prefixes, path).toBeUndefined();
     }
-    expect(allText(summary)).not.toMatch(/alice|jsmith|"bob"/);
+    expect(allText(summary)).not.toMatch(/alice|jsmith|"bob"|smith/);
+  });
+
+  it("matches sensitive stems inside joined and all-lower-case keys (M-A)", () => {
+    for (const key of ["firstname", "lastname", "surname", "fullname", "nickname", "givenname", "displayname", "userid", "emailaddress", "phonenumber", "accountno", "zipcode", "filename", "hostname"]) {
+      expect(isSensitiveToolArgumentKey(key), key).toBe(true);
+    }
+    for (const key of ["state", "per_page", "region", "kind", "mode", "ref", "labels", "branch", "namespace", "podNamespace"]) {
+      expect(isSensitiveToolArgumentKey(key), key).toBe(false);
+    }
+  });
+
+  it("keeps values under the documented safe segments only (M-A)", () => {
+    const summary = summarize({ namespace: "kube-system", pod_namespace: "default", rename: "x" });
+    expect(summary.fields.namespace?.values).toEqual(["kube-system"]);
+    expect(summary.fields.pod_namespace?.values).toEqual(["default"]);
+    expect(summary.fields.rename?.values).toBeUndefined();
+  });
+
+  it("hashes codes, written as numbers or strings, with their magnitude (M-B)", () => {
+    const summary = summarize({
+      security_code: 123,
+      verification_code: 482913,
+      code: 482913,
+      postal_code: 90210,
+      zip: 90210,
+      pin: 1234,
+      otp: "482913",
+      cvc: 123,
+      cvv: 123,
+      passcode: 9999,
+      verificationCode: "abc123",
+      country_code: "us"
+    });
+    expect(summary.fields.security_code).toEqual({ type: "number", mag: 2, hashes: [h(123)] });
+    expect(summary.fields.verification_code).toEqual({ type: "number", mag: 5, hashes: [h(482913)] });
+    expect(summary.fields.postal_code).toEqual({ type: "number", mag: 4, hashes: [h(90210)] });
+    for (const [path, field] of Object.entries(summary.fields)) {
+      expect(field.values, path).toBeUndefined();
+      expect(field.min, path).toBeUndefined();
+      expect(field.hashes, path).toHaveLength(1);
+    }
+    expect(allText(summary)).not.toMatch(/482913|90210|abc123|"us"|9999/);
+  });
+
+  it("keeps numbers only under the exact token-budget keys", () => {
+    const summary = summarize({
+      max_tokens: 1024,
+      MAX_OUTPUT_TOKENS: 2048,
+      max_completion_tokens: 512,
+      token_limit: 4096,
+      num_tokens: 7,
+      token: 1024,
+      maxTokens: 1024,
+      max_tokens_extra: 1024,
+      auth: { max_tokens: 1 },
+      big: { max_tokens: 12345678 },
+      strings: { max_tokens: "1024" },
+      flags: { max_tokens: true },
+      nested: { max_tokens: { n: 3 } }
+    });
+    expect(summary.fields.max_tokens).toEqual({ type: "number", values: [1024], min: 1024, max: 1024 });
+    expect(summary.fields.MAX_OUTPUT_TOKENS?.values).toEqual([2048]);
+    expect(summary.fields.max_completion_tokens?.values).toEqual([512]);
+    expect(summary.fields.token_limit?.values).toEqual([4096]);
+    expect(summary.fields.num_tokens?.values).toEqual([7]);
+    for (const path of ["token", "maxTokens", "max_tokens_extra", "auth.max_tokens", "strings.max_tokens", "flags.max_tokens", "nested.max_tokens.n"]) {
+      expect(summary.fields[path]?.values, path).toBeUndefined();
+      expect(summary.fields[path]?.hashes, path).toHaveLength(1);
+    }
+    expect(summary.fields["big.max_tokens"]).toEqual({ type: "number", mag: 7, hashes: [h(12345678)] });
+  });
+
+  it("never keeps first.last shaped values with trailing digits or a one-letter tail (L-A)", () => {
+    const summary = summarize({ tag: "john.smith1", x: "john.s", version: "v1.2", python: "python3.11" });
+    expect(summary.fields.tag?.values).toBeUndefined();
+    expect(summary.fields.x?.values).toBeUndefined();
+    expect(summary.fields.version?.values).toEqual(["v1.2"]);
+    expect(summary.fields.python?.values).toEqual(["python3.11"]);
+    expect(allText(summary)).not.toMatch(/john/);
+  });
+
+  it("keeps a schema enum value only up to 64 characters (review nit 3)", () => {
+    const long = "x".repeat(65);
+    const summary = summarize({ pick: "Alice Smith", other: long }, { properties: { pick: { enum: ["Alice Smith"] }, other: { enum: [long] } } });
+    expect(summary.fields.pick?.values).toEqual(["Alice Smith"]);
+    expect(summary.fields.other?.values).toBeUndefined();
+    expect(summary.fields.other?.hashes).toEqual([h(long)]);
   });
 
   it("never keeps first.last shaped values, even under a plain key (H3)", () => {
@@ -186,7 +288,8 @@ describe("summarizeToolArguments: sensitive paths", () => {
   it("splits keys into segments on case, separators and digits", () => {
     expect(toolArgumentKeySegments("recipientEmail2_addr-line.x")).toEqual(["recipient", "email", "addr", "line", "x"]);
     expect(toolArgumentKeySegments("HTTPHeaders")).toEqual(["http", "headers"]);
-    expect(isSensitiveToolArgumentKey("x2faCode")).toBe(false);
+    expect(isSensitiveToolArgumentKey("x2faCode")).toBe(true);
+    expect(isSensitiveToolArgumentKey("x2fa")).toBe(false);
     expect(isSensitiveToolArgumentKey("mfaCode")).toBe(true);
     expect(isSensitiveToolArgumentKey("emails")).toBe(true);
     expect(isSensitiveToolArgumentKey("per_page")).toBe(false);
@@ -272,14 +375,14 @@ describe("summarizeToolArguments: identifiers and free text", () => {
     const summary = summarize({
       ip: "http://10.1.2.3/x",
       ip6: "http://[::1]:8080/x",
-      personal: "https://alice-smith.github.io/x",
+      hosted: "https://alice-smith.github.io/x",
       deep: "https://jdoe.dev.corp.example.com/x",
       randomSub: "https://a1b2c3d4e5.example.com/x",
       local: "http://localhost:3000/x"
     });
     expect(summary.fields.ip?.prefixes).toEqual(["http://ip"]);
     expect(summary.fields.ip6?.prefixes).toEqual(["http://ip"]);
-    expect(summary.fields.personal?.prefixes).toEqual(["https://*.github.io"]);
+    expect(summary.fields.hosted?.prefixes).toEqual(["https://*.github.io"]);
     expect(summary.fields.deep?.prefixes).toEqual(["https://example.com"]);
     expect(summary.fields.randomSub?.prefixes).toEqual(["https://example.com"]);
     expect(summary.fields.local?.prefixes).toEqual(["http://localhost"]);
@@ -345,13 +448,35 @@ describe("summarizeToolArguments: identifiers and free text", () => {
       "9fceb02d0ae598e95dc970b74767f19372d61af8": 5,
       "5551234567": 6,
       "123-45-6789": 7,
+      "a1b2c3d4e5f6g7h8": 10,
+      Ab1Cd2Ef3Gh4Ij5Kl6Mn7Op8Qr9St0Uv: 11,
+      a3f2b9c1e7d4f8a2b6c3e9d1f7a4b8c2: 12,
       ok_key: 8,
-      perPage: 9
+      perPage: 9,
+      includeArchivedRepositories: 13
     });
     const paths = Object.keys(summary.fields);
-    expect(paths.filter((path) => !path.startsWith("<k:"))).toEqual(["ok_key", "perPage"]);
+    expect(paths.filter((path) => !path.startsWith("<k:"))).toEqual(["includeArchivedRepositories", "ok_key", "perPage"]);
+    expect(paths).toContain(`<k:${h("a1b2c3d4e5f6g7h8")}>`);
+    expect(paths).toContain(`<k:${h("Ab1Cd2Ef3Gh4Ij5Kl6Mn7Op8Qr9St0Uv")}>`);
+    expect(paths).toContain(`<k:${h("a3f2b9c1e7d4f8a2b6c3e9d1f7a4b8c2")}>`);
     expect(paths).toContain(`<k:${h("alice@example.com")}>`);
-    expect(allText(summary)).not.toMatch(/alice|space|4111|550e8400|9fceb02d|5551234567|6789/);
+    expect(allText(summary)).not.toMatch(/alice|space|4111|550e8400|9fceb02d|5551234567|6789|a1b2c3|Ab1Cd2|a3f2b9/);
+  });
+
+  it("checks the whole key, not its digit-split words, for random ids (M-C)", () => {
+    for (const key of ["a1b2c3d4e5f6g7h8", "Ab1Cd2Ef3Gh4Ij5Kl6Mn7Op8Qr9St0Uv", "a3f2b9c1e7d4f8a2b6c3e9d1f7a4b8c2", "ab12cd34", "a3f2b9c1-e7d4-f8a2-b6c3-e9d1f7a4b8c2", "TKlYVFDFZEJzQxqjvGno", "uCfbYrslYHZKEijyEgzB", "dCARfVVVOoMQX", "XMLHttpRequest", "oaXuNNybXEjxVUKd", "GOPbfKMqNhuo", "EfuIjUedANrlGcF"]) {
+      expect(looksRandomToolArgumentKey(key), key).toBe(true);
+    }
+    for (const key of ["perPage", "pageSize", "ok_key", "includeArchivedRepositories", "HTTPHeaders", "getHTTPSUrlForId", "maxPerPageCount", "maxResultsPerPage", "MAX_OUTPUT_TOKENS", "spreadsheetId", "valueInputOption", "threadTs", "sinceSeconds", "xAxisLabel", "v2"]) {
+      expect(looksRandomToolArgumentKey(key), key).toBe(false);
+    }
+  });
+
+  it("checks whole string values for random ids (M-C)", () => {
+    const summary = summarize({ a: "a1b2c3d4e5f6g7h8", b: "a3f2b9c1e7d4f8a2b6c3e9d1f7a4b8c2", c: "a3f2b9c1-e7d4-f8a2-b6c3-e9d1f7a4b8c2", d: "ab1cd2ef3gh4" });
+    for (const [path, field] of Object.entries(summary.fields)) expect(field.values, path).toBeUndefined();
+    expect(allText(summary)).not.toMatch(/a1b2|a3f2|ab1cd2/);
   });
 
   it("produces the same hash for the same value at any path, and another under another key", () => {
@@ -533,14 +658,23 @@ describe("summarizeToolArguments: property check", () => {
     for (let index = 0; index < 1_000; index += 1) {
       const value = pick(generators)();
       const sensitive = pick(sensitiveKeys);
-      const args = { [pick(plainKeys)]: value, [sensitive]: value, nested: { [sensitive]: { inner: value } }, list: [value] };
+      const args = { [pick(plainKeys)]: value, [sensitive]: value, nested: { [sensitive]: { inner: value } }, list: [value], map: { [value]: 1 } };
       const summary = summarize(args);
+      for (const path of Object.keys(summary.fields)) {
+        for (const segment of path.split(/\.|\[\]/)) {
+          if (segment === "" || segment.startsWith("<k:")) continue;
+          expect(segment, value).not.toMatch(/\p{Nd}{4}|@|\s/u);
+          expect(looksRandomToolArgumentKey(segment), `${segment} <- ${value}`).toBe(false);
+          // Long camelCase names are kept on purpose, so the value rule's length limit does not apply to keys.
+          if (segment.length <= 16) expect(looksRandomToolArgument(segment.toLowerCase()), `${segment} <- ${value}`).toBe(false);
+        }
+      }
       for (const kept of keptStrings(summary)) {
         expect(kept, value).not.toMatch(/\p{Nd}{4}|@|\s|\p{Lu}/u);
         expect(kept.length).toBeLessThanOrEqual(32);
       }
       for (const [path, field] of Object.entries(summary.fields)) {
-        if (path.split(/[.[\]]/).some((segment) => segment !== "" && isSensitiveToolArgumentKey(segment))) {
+        if (path.split(/[.[\]]/).some((segment) => segment !== "" && !segment.startsWith("<k:") && isSensitiveToolArgumentKey(segment))) {
           expect(field.values, `${path} <- ${value}`).toBeUndefined();
           expect(field.prefixes, `${path} <- ${value}`).toBeUndefined();
         }

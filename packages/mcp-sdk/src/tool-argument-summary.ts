@@ -23,17 +23,22 @@ import { CREDENTIAL_NAME_PATTERN } from "./client-features";
  *   - numbers outside a sensitive path whose integer part has at most six
  *     digits, rounded to four decimals (to one decimal under a location key
  *     such as `lat` / `lng`);
- *   - a string the tool's input schema lists in an `enum` / `const` at that
- *     path, when the path is not sensitive;
+ *   - a string of at most 64 characters the tool's input schema lists in an
+ *     `enum` / `const` at that path, when the path is not sensitive;
  *   - a string that is a safe token: NFKC-normalised it matches
  *     `^[a-z][a-z0-9_.-]{0,31}$`, has no run of four digits (any script), does
- *     not end in a `.word` part like a domain or a `first.last` name, is not
+ *     not end in a `.word` part like a domain or a `first.last` name (trailing
+ *     digits included), is not
  *     random-looking (see `looksRandomToolArgument`), and the path is not sensitive.
  *
  * A path is sensitive when the key itself or any ancestor key has a segment
- * (split on case changes, `_`, `-`, `.` and digits) in `SENSITIVE_SEGMENTS`,
- * or matches the shared credential-name pattern. A sensitive subtree keeps
- * shape and hashes only: never a raw value, never a prefix.
+ * (split on case changes, `_`, `-`, `.` and digits) that contains a stem of
+ * `TOOL_ARGUMENT_SENSITIVE_STEMS` or equals a word of
+ * `TOOL_ARGUMENT_SENSITIVE_SEGMENTS`, or matches the shared credential-name
+ * pattern. A sensitive subtree keeps shape and hashes only: never a raw value
+ * (numbers included, with their order of magnitude), never a prefix. The one
+ * exception: numbers directly under a token-budget key such as `max_tokens`
+ * (`TOOL_ARGUMENT_TOKEN_COUNT_KEYS`) follow the normal number rules.
  *
  * Kept as a prefix, outside sensitive paths, for strings that are not tokens:
  * `owner/` of `owner/repo`, `@domain` of an email, scheme and host of a URL
@@ -99,36 +104,72 @@ export const TOOL_ARGUMENT_SUMMARY_LIMITS = {
 } as const;
 
 /**
- * Key segments that make a path sensitive (compared lower-case, also without
- * a plural `s`). `owner` is included: on most tools it holds a person's or an
- * organisation's handle. A repository written `owner/repo` under a key that
- * is not sensitive still keeps `owner/` as its prefix, so starts-with
- * suggestions work on repositories.
+ * Sensitive stems, matched as SUBSTRINGS of each key segment (lower-case), so
+ * joined or all-lower-case keys such as `firstname`, `userid`,
+ * `emailaddress`, `phonenumber`, `accountno` or `zipcode` count too. This
+ * over-matches on purpose (`filename`, `hostname`, `wildcard`, `context`):
+ * an over-matched key only hashes values that could otherwise have been kept.
+ * `owner` is included: on most tools it holds a person's or an organisation's
+ * handle. A repository written `owner/repo` under a key that is not sensitive
+ * still keeps `owner/` as its prefix, so starts-with suggestions work on
+ * repositories.
+ */
+export const TOOL_ARGUMENT_SENSITIVE_STEMS: readonly string[] = [
+  // credentials
+  "pass", "passcode", "passphrase", "password", "secret", "token", "key", "auth", "cred", "cookie", "session",
+  "otp", "mfa", "pin", "nonce", "signature", "bearer", "jwt", "private", "cert",
+  // codes, financial and national identifiers
+  "code", "postal", "zip", "verification", "verify", "security", "ssn", "iban", "card", "cvv", "cvc", "account",
+  "acct", "passport",
+  // people
+  "name", "firstname", "lastname", "surname", "fullname", "nickname", "givenname", "user", "login", "handle",
+  "owner", "author", "assignee", "reviewer", "customer", "patient", "employee", "member", "person", "contact",
+  "recipient", "sender", "email", "mail", "phone", "mobile", "address", "addr", "street", "postcode", "birth",
+  // people's words
+  "body", "message", "text", "content", "query", "search", "keyword", "prompt", "comment", "note", "description",
+  "title", "subject", "summary"
+];
+
+/**
+ * Short sensitive words, matched only as a WHOLE segment (also without a
+ * plural `s`): as substrings they would hit most keys (`to` in `total`, `q`
+ * anywhere, `tax` in `syntax`).
  */
 export const TOOL_ARGUMENT_SENSITIVE_SEGMENTS: readonly string[] = [
-  // credentials
-  "pass", "passwd", "passcode", "passphrase", "password", "pw", "pwd", "secret", "token", "key", "apikey", "auth",
-  "cred", "credential", "cookie", "session", "sid", "otp", "totp", "mfa", "pin", "nonce", "sig", "signature",
-  "bearer", "jwt", "private", "cert",
-  // financial and national identifiers
-  "ssn", "iban", "card", "cvv", "cvc", "account", "acct", "passport", "tax",
-  // people
-  "name", "user", "username", "login", "handle", "owner", "author", "assignee", "reviewer", "customer", "patient",
-  "employee", "member", "person", "contact", "recipient", "sender", "from", "to", "cc", "bcc",
-  "email", "mail", "phone", "mobile", "tel", "address", "addr", "street", "zip", "postcode", "dob", "birth",
-  // people's words
-  "body", "message", "text", "content", "query", "q", "search", "keyword", "prompt", "comment", "note",
-  "description", "title", "subject", "summary"
+  "pw", "pwd", "sid", "sig", "tax", "tel", "dob", "to", "cc", "bcc", "from", "q"
+];
+
+/**
+ * Whole segments that contain a stem but are known not to hold people's data
+ * or secrets, so they are not matched by stem. The shared credential-name
+ * pattern and the whole-segment list still apply to them.
+ *   - `namespace`: a deployment namespace (`default`, `kube-system`).
+ */
+export const TOOL_ARGUMENT_SAFE_SEGMENTS: readonly string[] = ["namespace"];
+
+/**
+ * Keys whose NUMBERS are kept under the normal number rules although the key
+ * names a token: a model's token budget, not a credential. Compared as the
+ * whole key, any case. Strings and booleans under them stay hashed, and the
+ * exception does not apply under a sensitive ancestor.
+ */
+export const TOOL_ARGUMENT_TOKEN_COUNT_KEYS: readonly string[] = [
+  "max_tokens", "max_output_tokens", "max_completion_tokens", "token_limit", "num_tokens"
 ];
 
 const LIMITS = TOOL_ARGUMENT_SUMMARY_LIMITS;
 const TYPE_ORDER: ToolArgumentValueType[] = ["null", "boolean", "number", "string", "array", "object"];
-const SENSITIVE = new Set(TOOL_ARGUMENT_SENSITIVE_SEGMENTS);
+const SENSITIVE_WHOLE = new Set(TOOL_ARGUMENT_SENSITIVE_SEGMENTS);
+const SAFE_SEGMENTS = new Set(TOOL_ARGUMENT_SAFE_SEGMENTS);
+const TOKEN_COUNT_KEYS = new Set(TOOL_ARGUMENT_TOKEN_COUNT_KEYS);
 const LOCATION_SEGMENTS = new Set(["lat", "lng", "lon", "long", "latitude", "longitude", "geo", "coord", "coordinate"]);
 const TOKEN = /^[a-z][a-z0-9_.-]{0,31}$/;
 const KEY_NAME = /^[A-Za-z][A-Za-z0-9_-]{0,31}$/;
 const DIGIT_RUN = /\p{Nd}{4,}/u;
-const DOMAIN_TAIL = /[a-z0-9]\.[a-z]{2,63}$/;
+/** A domain (`example.com`) or a `first.last` name, with or without trailing digits (`john.s`, `john.smith1`). */
+const DOMAIN_TAIL = /[a-z0-9]\.[a-z]{2,63}$|[a-z]\.[a-z]+\d*$/;
+/** Longest schema `enum` / `const` string kept as it is. */
+const MAX_ENUM_LENGTH = 64;
 /** Prefixes of well-known API keys and tokens; a value starting with one is never a token. */
 const SECRET_PREFIX = /^(?:(?:sk|pk|rk)[-_]|xox[a-z]?-|gh[pousr]_|github_pat_|glpat-|akia|asia|npm_|hf_|xai-)/;
 const URL_SHAPE = /^[a-z][a-z0-9+.-]{0,15}:\/\/\S/i;
@@ -171,9 +212,22 @@ function hasSegment(set: ReadonlySet<string>, segments: string[]): boolean {
   return segments.some((segment) => set.has(segment) || (segment.length > 2 && segment.endsWith("s") && set.has(segment.slice(0, -1))));
 }
 
+function hasSensitiveStem(segments: string[]): boolean {
+  return segments.some(
+    (segment) => !SAFE_SEGMENTS.has(segment) && TOOL_ARGUMENT_SENSITIVE_STEMS.some((stem) => segment.includes(stem))
+  );
+}
+
 /** True when a value under `key` must never be kept raw. */
 export function isSensitiveToolArgumentKey(key: string): boolean {
-  return CREDENTIAL_NAME_PATTERN.test(key) || hasSegment(SENSITIVE, toolArgumentKeySegments(key));
+  if (CREDENTIAL_NAME_PATTERN.test(key)) return true;
+  const segments = toolArgumentKeySegments(key);
+  return hasSegment(SENSITIVE_WHOLE, segments) || hasSensitiveStem(segments);
+}
+
+/** True for a model token-budget key (`max_tokens`, ...), whose numbers are kept. */
+export function isToolArgumentTokenCountKey(key: string): boolean {
+  return TOKEN_COUNT_KEYS.has(key.normalize("NFKC").toLowerCase());
 }
 
 function isLocationKey(key: string): boolean {
@@ -205,9 +259,48 @@ export function isSafeToolArgumentToken(normalized: string): boolean {
   return TOKEN.test(normalized) && !DIGIT_RUN.test(normalized) && !DOMAIN_TAIL.test(normalized) && !looksRandomToolArgument(normalized);
 }
 
+/**
+ * A key looks random when the whole key, lower-cased and split only on `_`,
+ * `-` and `.`, has a secret prefix, a part of 12 or more hex characters or a
+ * part of 8 or more characters mixing letters and digits (hex digests, UUIDs,
+ * `a1b2c3d4...` ids) or a part of 8 or more letters with fewer than one vowel
+ * in four (`dCARfVVVOoMQX`; acronym-heavy names such as `XMLHttpRequest` are
+ * hashed too, which only costs readability). Its words (split on case changes too, digits kept) then
+ * go through `looksRandomToolArgument`, so a word longer than 16 characters or
+ * with fewer than one vowel in four is random; splitting on case changes for
+ * those rules keeps long camelCase names (`includeArchivedRepositories`)
+ * readable. Last, for random mixed-case letters (`TKlYVFDFZEJz...`), a key
+ * whose case words hold 10 or more letters is random when three or more words
+ * have at most two letters or the words average under three letters; and,
+ * without its upper-case runs of two or more letters (acronyms such as
+ * `HTTP`), a key with 8 or more letters left is random when fewer than one in
+ * four of them is `a`, `e`, `i`, `o` or `u`. Short mixed-case random keys can
+ * still pass; the docs list this under Limits.
+ */
+export function looksRandomToolArgumentKey(key: string): boolean {
+  const normalized = key.normalize("NFKC");
+  const whole = normalized.toLowerCase();
+  if (SECRET_PREFIX.test(whole)) return true;
+  for (const part of whole.split(/[_.\-]+/)) {
+    if (part.length >= 12 && /^[0-9a-f]+$/.test(part)) return true;
+    if (part.length >= 8 && /[a-z]/.test(part) && /[0-9]/.test(part)) return true;
+    const letters = part.replace(/[^a-z]/g, "");
+    if (letters.length >= 8 && (letters.match(/[aeiouy]/g)?.length ?? 0) * 4 < letters.length) return true;
+  }
+  const cased = normalized
+    .replace(/([\p{Ll}\p{Nd}])(\p{Lu})/gu, "$1_$2")
+    .replace(/(\p{Lu})(\p{Lu}\p{Ll})/gu, "$1_$2");
+  if (looksRandomToolArgument(cased.toLowerCase())) return true;
+  const words = cased.split(/[^A-Za-z]+/).filter((word) => word.length > 0);
+  const wordLetters = words.join("").length;
+  if (wordLetters >= 10 && (words.filter((word) => word.length <= 2).length >= 3 || words.length * 3 > wordLetters)) return true;
+  const letters = normalized.replace(/[A-Z]{2,}/g, "").replace(/[^A-Za-z]/g, "");
+  return letters.length >= 8 && (letters.match(/[aeiou]/gi)?.length ?? 0) * 4 < letters.length;
+}
+
 function isPlainKeyName(key: string): boolean {
   if (!KEY_NAME.test(key) || DIGIT_RUN.test(key)) return false;
-  return !looksRandomToolArgument(toolArgumentKeySegments(key).join("_"));
+  return !looksRandomToolArgumentKey(key);
 }
 
 /** The keyed hash of one value: HMAC-SHA-256 of its NFKC-normalised text, first 16 bytes, base64url. */
@@ -343,6 +436,8 @@ interface ScanResult {
 interface PathContext {
   sensitive: boolean;
   location: boolean;
+  /** Under a token-budget key (`max_tokens`) with no sensitive ancestor: numbers follow the normal rules. */
+  tokenCount: boolean;
 }
 
 type SchemaNode = Record<string, unknown>;
@@ -523,7 +618,7 @@ export function summarizeToolArguments(args: unknown, options: SummarizeToolArgu
     for (const dataClass of result.classes) field.classes.add(dataClass);
     if (result.complete && !context.sensitive) {
       if (result.classes.length === 0) {
-        if (text === "" || schemaAllows(schema, text)) {
+        if (text === "" || (text.length <= MAX_ENUM_LENGTH && schemaAllows(schema, text))) {
           keep(field, text);
           return;
         }
@@ -550,7 +645,7 @@ export function summarizeToolArguments(args: unknown, options: SummarizeToolArgu
     let number = Object.is(value, -0) ? 0 : value;
     if (context.location) number = Math.round(number * 10) / 10;
     const magnitude = Math.abs(number);
-    if (context.sensitive || magnitude >= 1e6) {
+    if ((context.sensitive && !context.tokenCount) || magnitude >= 1e6) {
       // Seven or more integer digits may be a card, account, phone or national number written as a JSON number.
       const order = magnitude < 1 ? 0 : Math.floor(Math.log10(magnitude));
       field.mag = field.mag === null ? order : Math.max(field.mag, order);
@@ -661,14 +756,15 @@ export function summarizeToolArguments(args: unknown, options: SummarizeToolArgu
       // Sensitivity and location are inherited: a value under `password.value` or `geo.point.x` is still one.
       const childContext: PathContext = {
         sensitive: context.sensitive || isSensitiveToolArgumentKey(key),
-        location: context.location || isLocationKey(key)
+        location: context.location || isLocationKey(key),
+        tokenCount: !context.sensitive && isToolArgumentTokenCountKey(key)
       };
       walk(child, childPath, depth + 1, childSchemas(schema, key), childContext);
     }
   };
 
   const rootSchema = expandSchema(options.inputSchema);
-  const rootContext: PathContext = { sensitive: false, location: false };
+  const rootContext: PathContext = { sensitive: false, location: false, tokenCount: false };
   if (isRecord(args)) {
     walkObject(args, "", 0, rootSchema, null, rootContext);
   } else if (args !== undefined && args !== null) {
