@@ -751,6 +751,11 @@ describe("MCP gateway telemetry and audit", () => {
     expect(workflowRow.adapterId).toBe("workflow");
     expect(workflowRow.workflowId).toBe("wf-echo");
     expect((await context.store.getExecutionHistory(workflowRow.executionId))?.status).toBe("success");
+    // Phase 12.4 — each row keeps a safe argument summary and the client's role, source and toolset project.
+    for (const row of rows) expect(row).toMatchObject({ subjectRole: "builder", subjectSource: "client", projectId: "default" });
+    expect(rows.filter((row) => row.toolName === "lookup_kb").map((row) => row.argsSummary?.fields.topic?.values?.[0]).sort()).toEqual(["mcp", "rag"]);
+    // `text` usually holds people's words: never kept as a value, even one letter.
+    expect(workflowRow.argsSummary?.fields.text).toEqual({ type: "string", len: "1-8" });
 
     // Registry rows count toward the server's telemetry; gateway workflow rows stay out of the inline rollup.
     const serverTelemetry = await api<{ totals: { calls: number } }>(context, admin.cookie, "GET", `/api/mcp/servers/${mockServerId}/telemetry`);
@@ -1189,6 +1194,57 @@ describe("MCP gateway schema", () => {
       check.close();
     } finally {
       fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("records gateway rows without a summary, subject or project when MCP_TOOL_ARGUMENT_SUMMARIES=false", async () => {
+    const { context, toolset, token, client } = await setupFixture({ MCP_TOOL_ARGUMENT_SUMMARIES: "false" });
+    const sessionId = await openSession(context, toolset.slug, token);
+    const headers = { authorization: `Bearer ${token}`, "mcp-session-id": sessionId };
+    await rpc(context, toolset.slug, { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "mock_tools__lookup_kb", arguments: { topic: "mcp" } } }, headers);
+    const rows = await context.store.listMcpToolCallsForClient(client.id, new Date(Date.now() - 60_000).toISOString());
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ argsSummary: null, subjectRole: null, subjectSource: null, projectId: null });
+  });
+
+  it("adds the argument summary and subject columns to an existing mcp_tool_calls table on SQLite (v48)", async () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-mcp-args-legacy-"));
+    try {
+      const file = path.join(tempDir, "legacy.db");
+      const legacy = new Database(file);
+      legacy.exec(`
+        CREATE TABLE mcp_tool_calls (
+          id TEXT PRIMARY KEY, execution_id TEXT NOT NULL, workflow_id TEXT NOT NULL, node_id TEXT NOT NULL,
+          registry_server_id TEXT, adapter_id TEXT NOT NULL, tool_name TEXT NOT NULL, started_at TEXT NOT NULL,
+          duration_ms INTEGER, ok INTEGER NOT NULL, error TEXT, turn_input_tokens INTEGER, turn_output_tokens INTEGER,
+          estimated_cost_usd REAL, source TEXT NOT NULL DEFAULT 'workflow', client_id TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        INSERT INTO mcp_tool_calls (id, execution_id, workflow_id, node_id, adapter_id, tool_name, started_at, ok)
+        VALUES ('old', 'exec', 'wf', 'n', 'mock-mcp', 'calculator', '2026-10-01T00:00:00.000Z', 1);
+      `);
+      legacy.close();
+
+      const store = await SqliteStore.create(file);
+      expect(await store.listMcpToolCallsForExecution("exec")).toEqual([
+        expect.objectContaining({ id: "old", argsSummary: null, subjectRole: null, subjectSource: null, projectId: null })
+      ]);
+      await store.close();
+      const check = new Database(file);
+      const columns = (check.prepare(`PRAGMA table_info(mcp_tool_calls)`).all() as Array<{ name: string }>).map((column) => column.name);
+      expect(columns).toEqual(expect.arrayContaining(["args_summary_json", "subject_role", "subject_source", "project_id"]));
+      check.close();
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("ships Postgres migration v48 with the argument summary columns and a reversing down", () => {
+    const migration = MIGRATIONS.find((entry) => entry.version === 48)!;
+    expect(migration.description).toContain("argument summaries");
+    for (const column of ["args_summary_json", "subject_role", "subject_source", "project_id"]) {
+      expect(migration.up).toContain(`ALTER TABLE mcp_tool_calls ADD COLUMN IF NOT EXISTS ${column} TEXT`);
+      expect(migration.down).toContain(`ALTER TABLE mcp_tool_calls DROP COLUMN IF EXISTS ${column}`);
     }
   });
 

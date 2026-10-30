@@ -31,7 +31,7 @@ interface TestContext {
 
 const contexts: TestContext[] = [];
 
-async function createTestContext(): Promise<TestContext> {
+async function createTestContext(overrides: Record<string, string> = {}): Promise<TestContext> {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-mcp-telemetry-"));
   const store = await openTestStore(path.join(tempDir, "orchestrator.db"));
   await store.ensureDefaultProject();
@@ -42,7 +42,8 @@ async function createTestContext(): Promise<TestContext> {
     COOKIE_SECURE: "false",
     RATE_LIMIT_ENABLED: "false",
     MCP_PROBE_INTERVAL_MS: "0",
-    GIT_SYNC_WORKDIR: path.join(tempDir, "git")
+    GIT_SYNC_WORKDIR: path.join(tempDir, "git"),
+    ...overrides
   });
   const secretService = new SecretService(store, config.SECRET_MASTER_KEY_BASE64);
   const authService = new AuthService(store, config.SESSION_TTL_HOURS);
@@ -327,6 +328,106 @@ describe("MCP tool telemetry: end to end", () => {
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ adapterId: "mock-mcp", toolName: "no_such_tool", ok: false });
     expect(rows[0].error).toBeTruthy();
+  });
+});
+
+describe("MCP tool telemetry: argument summaries (Phase 12.4)", () => {
+  const runAgent = async (context: TestContext) => {
+    const admin = await login(context, "admin");
+    const server = await createServer(context, admin);
+    const model = await startFakeModel([
+      {
+        toolCalls: [
+          { id: "c1", name: "mock-mcp__calculator", args: { expression: "1+1" } },
+          { id: "c2", name: "mock-mcp__calculator", args: { expression: "Add 4111 1111 1111 1111 to my total" } }
+        ],
+        usage: [10, 2]
+      },
+      { content: "Done.", usage: [5, 1] }
+    ]);
+    try {
+      await context.store.upsertWorkflow(agentWorkflow(server.id, model.baseUrl));
+      const run = await context.app.inject({ method: "POST", url: "/api/workflows/wf-telemetry/execute", headers: { cookie: admin }, payload: {} });
+      expect(run.statusCode).toBe(200);
+      return { admin, server, executionId: run.json<{ executionId: string }>().executionId };
+    } finally {
+      await model.close();
+    }
+  };
+
+  it("keeps a safe summary, the subject and the project on each workflow call, and shows it to admins only", async () => {
+    const context = await createTestContext();
+    const { admin, server, executionId } = await runAgent(context);
+    const rows = await context.store.listMcpToolCallsForExecution(executionId);
+    expect(rows).toHaveLength(3);
+    const agentRows = rows.filter((row) => row.nodeId === "agent");
+    expect(agentRows.map((row) => row.argsSummary?.fields.expression).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)))).toEqual([
+      { type: "string", classes: ["card_number"], len: "33-128" },
+      { type: "string", values: ["1+1"] }
+    ]);
+    const direct = rows.find((row) => row.nodeId === "direct")!;
+    expect(direct.argsSummary).toEqual({ v: 1, fields: {} });
+    for (const row of rows) {
+      expect(row).toMatchObject({ subjectRole: "admin", subjectSource: "user", projectId: "default" });
+    }
+    expect(JSON.stringify(rows)).not.toContain("4111");
+
+    const probe = await context.app.inject({ method: "POST", url: `/api/mcp/servers/${server.id}/probe`, headers: { cookie: admin } });
+    expect(probe.statusCode).toBe(200);
+    const catalog = async (cookie: string) => {
+      const response = await context.app.inject({ method: "GET", url: "/api/mcp/tools?detail=true", headers: { cookie } });
+      expect(response.statusCode).toBe(200);
+      const tool = response.json<{ tools: Array<{ serverId: string; name: string; recentCalls?: Array<Record<string, unknown>> }> }>().tools.find(
+        (entry) => entry.serverId === server.id && entry.name === "calculator"
+      );
+      return tool?.recentCalls ?? [];
+    };
+    const forAdmin = await catalog(admin);
+    expect(forAdmin).toHaveLength(2);
+    expect(forAdmin.every((entry) => entry.subjectRole === "admin" && (entry.argsSummary as { v?: number } | null)?.v === 1)).toBe(true);
+    const forBuilder = await catalog(await login(context, "builder"));
+    expect(forBuilder).toHaveLength(2);
+    expect(forBuilder.some((entry) => "argsSummary" in entry || "subjectRole" in entry)).toBe(false);
+  });
+
+  it("keeps the new columns empty with MCP_TOOL_ARGUMENT_SUMMARIES=false", async () => {
+    const context = await createTestContext({ MCP_TOOL_ARGUMENT_SUMMARIES: "false" });
+    const { executionId } = await runAgent(context);
+    const rows = await context.store.listMcpToolCallsForExecution(executionId);
+    expect(rows).toHaveLength(3);
+    for (const row of rows) {
+      expect(row).toMatchObject({ argsSummary: null, subjectRole: null, subjectSource: null, projectId: null });
+    }
+  });
+
+  it("stores and reads the summary columns, and reads an unknown summary version as null", async () => {
+    const context = await createTestContext();
+    const summary = { v: 1 as const, fields: { state: { type: "string" as const, values: ["open"] } }, truncated: true as const };
+    await context.store.insertMcpToolCall({
+      ...call({ id: "sum_1", executionId: "exec_sum" }),
+      argsSummary: summary,
+      subjectRole: "operator",
+      subjectSource: "client",
+      projectId: "proj-x"
+    });
+    await context.store.replaceMcpToolCallsForExecution("exec_sum_2", [call({ id: "sum_2", executionId: "exec_sum_2" })]);
+    expect((await context.store.listMcpToolCallsForExecution("exec_sum"))[0]).toMatchObject({
+      argsSummary: summary,
+      subjectRole: "operator",
+      subjectSource: "client",
+      projectId: "proj-x"
+    });
+    expect((await context.store.listMcpToolCallsForExecution("exec_sum_2"))[0]).toMatchObject({
+      argsSummary: null,
+      subjectRole: null,
+      subjectSource: null,
+      projectId: null
+    });
+    await context.store.insertMcpToolCall({
+      ...call({ id: "sum_3", executionId: "exec_sum_3" }),
+      argsSummary: { v: 2, fields: {} } as unknown as typeof summary
+    });
+    expect((await context.store.listMcpToolCallsForExecution("exec_sum_3"))[0]?.argsSummary).toBeNull();
   });
 });
 

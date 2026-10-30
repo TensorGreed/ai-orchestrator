@@ -19,13 +19,20 @@
  * (rate limit, concurrency cap, open breaker) are recorded with a `rejection`
  * and counted apart: they are not errors of the tool, so they stay out of the
  * error rate.
+ *
+ * Phase 12.4 — unless MCP_TOOL_ARGUMENT_SUMMARIES=false, each row also keeps a
+ * safe summary of the call's arguments (tool-argument-summary.ts), the role
+ * and subject source the run's tool policy used (`_toolPolicy.subject` on
+ * agent outputs; a direct MCP Tool node without its own uses the run's) and
+ * the workflow's project.
  */
 
 import { randomUUID } from "node:crypto";
 import { parseMcpRuntimeRejection } from "@ai-orchestrator/mcp-sdk";
-import type { McpToolPolicyDecisionRecord } from "@ai-orchestrator/shared";
+import type { McpToolPolicyDecisionRecord, McpToolPolicySubject } from "@ai-orchestrator/shared";
 import type { McpToolCallRecord, McpToolCallWrite } from "../db/database.js";
 import { percentile } from "./mcp-probe-service.js";
+import type { ToolArgumentSummarizer } from "./tool-argument-summary.js";
 
 export const MCP_TELEMETRY_WINDOWS = {
   "24h": 24 * 60 * 60 * 1000,
@@ -49,7 +56,7 @@ export type McpToolCallInput = McpToolCallWrite;
 
 export interface ExtractMcpToolCallsInput {
   executionId: string;
-  workflow: { id: string; nodes: Array<{ id: string; type: string; config?: Record<string, unknown> }> };
+  workflow: { id: string; projectId?: string; nodes: Array<{ id: string; type: string; config?: Record<string, unknown> }> };
   nodeResults: unknown;
   /** Price one share of a turn; null when the model's price is unknown. */
   priceTurn: (providerId: string, model: string, inputTokens: number, outputTokens: number, cachedInputTokens: number) => number | null;
@@ -57,7 +64,11 @@ export interface ExtractMcpToolCallsInput {
   registryAdapterId?: (registryServerId: string) => string | undefined;
   redact?: (value: string) => string;
   idFactory?: () => string;
+  /** Phase 12.4 — argument summaries; absent when switched off, and the summary, subject and project stay null. */
+  summarizeArguments?: ToolArgumentSummarizer;
 }
+
+type CallContext = Pick<McpToolCallWrite, "argsSummary" | "subjectRole" | "subjectSource" | "projectId">;
 
 interface Attribution {
   adapterId: string;
@@ -153,6 +164,30 @@ function policyColumn(decision: McpToolPolicyDecisionRecord | undefined): { poli
   return decision ? { policyDecision: decision } : {};
 }
 
+/** The tool policy subject an agent (or direct MCP Tool) node output records under `_toolPolicy`. */
+function readPolicySubject(output: Record<string, unknown> | null): McpToolPolicySubject | undefined {
+  const subject = asRecord(asRecord(output?._toolPolicy)?.subject);
+  const role = subject?.role;
+  const source = subject?.source;
+  if (role !== "admin" && role !== "builder" && role !== "operator" && role !== "viewer") return undefined;
+  if (source !== "user" && source !== "owner" && source !== "fallback" && source !== "client") return undefined;
+  return { role, source };
+}
+
+/** Arguments of each requested tool call of a step, by call id. */
+function readRequestedArguments(step: Record<string, unknown>): { byId: Map<string, unknown>; inOrder: unknown[] } {
+  const byId = new Map<string, unknown>();
+  const inOrder: unknown[] = [];
+  const requested = Array.isArray(step.requestedTools) ? step.requestedTools : [];
+  for (const raw of requested) {
+    const call = asRecord(raw);
+    inOrder.push(call?.arguments);
+    const id = asString(call?.id);
+    if (id && !byId.has(id)) byId.set(id, call?.arguments);
+  }
+  return { byId, inOrder };
+}
+
 export function extractMcpToolCalls(input: ExtractMcpToolCallsInput): McpToolCallInput[] {
   const nextId = input.idFactory ?? (() => `mtc_${randomUUID()}`);
   const redact = input.redact ?? ((value: string) => value);
@@ -163,10 +198,35 @@ export function extractMcpToolCalls(input: ExtractMcpToolCallsInput): McpToolCal
   };
   const nodeById = new Map(input.workflow.nodes.map((node) => [node.id, node]));
   const rows: McpToolCallInput[] = [];
+  const results = Array.isArray(input.nodeResults) ? input.nodeResults : [];
 
-  const scanAgentOutput = (output: Record<string, unknown>, nodeId: string, fallbackStartedAt: string, depth: number) => {
+  // One run has one policy subject; a node that did not record it (a direct MCP Tool node) uses the one another did.
+  let runSubject: McpToolPolicySubject | undefined;
+  for (const raw of results) {
+    runSubject = readPolicySubject(asRecord(asRecord(raw)?.output));
+    if (runSubject) break;
+  }
+  const summarize = input.summarizeArguments;
+  const callContext = (args: unknown, hasArgs: boolean, subject: McpToolPolicySubject | undefined): CallContext => {
+    if (!summarize) return {};
+    return {
+      argsSummary: hasArgs ? summarize(args) : null,
+      subjectRole: subject?.role ?? null,
+      subjectSource: subject?.source ?? null,
+      projectId: input.workflow.projectId ?? null
+    };
+  };
+
+  const scanAgentOutput = (
+    output: Record<string, unknown>,
+    nodeId: string,
+    fallbackStartedAt: string,
+    depth: number,
+    parentSubject: McpToolPolicySubject | undefined
+  ) => {
     const steps = Array.isArray(output.steps) ? output.steps : [];
     if (steps.length === 0) return;
+    const subject = readPolicySubject(output) ?? parentSubject;
     const attribution = readAttributionMap(output);
     const samplingShares = readSamplingShares(output);
     const policyDecisions = readPolicyDecisions(output).byCallId;
@@ -187,6 +247,7 @@ export function extractMcpToolCalls(input: ExtractMcpToolCallsInput): McpToolCal
       const turnOutput = asNumber(usage?.outputTokens);
       const turnCached = asNumber(usage?.cachedInputTokens) ?? 0;
       const hasUsage = turnInput !== undefined || turnOutput !== undefined;
+      const requestedArguments = summarize ? readRequestedArguments(step) : null;
 
       toolResults.forEach((rawResult, index) => {
         const result = asRecord(rawResult);
@@ -205,6 +266,11 @@ export function extractMcpToolCalls(input: ExtractMcpToolCallsInput): McpToolCal
           const rejection = parseMcpRuntimeRejection(result.error);
           const callNumber = (callsByTool.get(target.toolName) ?? 0) + 1;
           callsByTool.set(target.toolName, callNumber);
+          const callId = asString(result.toolCallId);
+          const args =
+            requestedArguments && callId && requestedArguments.byId.has(callId)
+              ? requestedArguments.byId.get(callId)
+              : requestedArguments?.inOrder[index];
           rows.push({
             id: nextId(),
             executionId: input.executionId,
@@ -222,19 +288,19 @@ export function extractMcpToolCalls(input: ExtractMcpToolCallsInput): McpToolCal
             estimatedCostUsd: cost,
             ...samplingColumns(samplingShares.get(`${target.toolName}\u0000${callNumber}`)),
             ...(rejection ? { rejection } : {}),
-            ...policyColumn(policyDecisions.get(asString(result.toolCallId) ?? ""))
+            ...policyColumn(policyDecisions.get(asString(result.toolCallId) ?? "")),
+            ...callContext(args, args !== undefined, subject)
           });
         }
         // A delegated worker agent returns its own output as the tool result.
         const nested = asRecord(result.output);
         if (nested && depth < MAX_WORKER_DEPTH && Array.isArray(nested.steps)) {
-          scanAgentOutput(nested, nodeId, asString(result.startedAt) ?? fallbackStartedAt, depth + 1);
+          scanAgentOutput(nested, nodeId, asString(result.startedAt) ?? fallbackStartedAt, depth + 1, subject);
         }
       });
     }
   };
 
-  const results = Array.isArray(input.nodeResults) ? input.nodeResults : [];
   for (const raw of results) {
     const result = asRecord(raw);
     const nodeId = asString(result?.nodeId);
@@ -257,6 +323,8 @@ export function extractMcpToolCalls(input: ExtractMcpToolCallsInput): McpToolCal
         asString(config.serverId);
       const toolName = asString(request?.tool_name) ?? asString(output?.tool_name) ?? asString(config.toolName);
       if (!adapterId || !toolName) continue;
+      // The arguments the node sent, as it reported them; a node that failed before calling reports none.
+      const hasArgs = request !== null && request.tool_args !== undefined;
       const error = status === "error" ? truncateError(result.error ?? "MCP tool invocation failed") : null;
       const rejection = status === "error" ? parseMcpRuntimeRejection(result.error) : null;
       // A direct node makes one call, so every sampling request it saw belongs to it.
@@ -289,13 +357,14 @@ export function extractMcpToolCalls(input: ExtractMcpToolCallsInput): McpToolCal
         ...samplingColumns(samplingTotal),
         ...(rejection ? { rejection } : {}),
         // A direct node makes one call: its decision is the last one recorded.
-        ...policyColumn(output ? readPolicyDecisions(output).all.at(-1) : undefined)
+        ...policyColumn(output ? readPolicyDecisions(output).all.at(-1) : undefined),
+        ...callContext(request?.tool_args, hasArgs, readPolicySubject(output) ?? runSubject)
       });
       continue;
     }
 
     if (output) {
-      scanAgentOutput(output, nodeId, startedAt, 0);
+      scanAgentOutput(output, nodeId, startedAt, 0, runSubject);
     }
   }
 

@@ -34,6 +34,7 @@ import {
 } from "./services/mcp-config-import.js";
 import { toolError, toolSuccess } from "./services/mcp-gateway-protocol.js";
 import { evaluateToolForContext } from "./services/mcp-tool-policy.js";
+import type { ToolArgumentSummarizer } from "./services/tool-argument-summary.js";
 import type { Store } from "./db/store.js";
 import { mapAsync } from "./async-array.js";
 
@@ -60,6 +61,8 @@ export interface McpOnboardingDeps {
   /** Probe a server in the background, like a normal registration. */
   probeInBackground: (serverId: string) => void;
   serverSummary: (server: McpServerRecord) => unknown;
+  /** Phase 12.4 — argument summaries for the playground's telemetry rows; absent when switched off. */
+  summarizeArguments?: ToolArgumentSummarizer;
 }
 
 function scrubValue(value: unknown, secrets: string[]): unknown {
@@ -463,7 +466,15 @@ export function registerMcpOnboardingRoutes(deps: McpOnboardingDeps): void {
         estimatedCostUsd: null,
         source: "playground",
         clientId: null,
-        rejection: parseMcpRuntimeRejection(errorText)
+        rejection: parseMcpRuntimeRejection(errorText),
+        ...(deps.summarizeArguments
+          ? {
+              argsSummary: deps.summarizeArguments(parsed.data.args, tool.inputSchema),
+              subjectRole: user.role as McpPolicyRole,
+              subjectSource: "user" as const,
+              projectId
+            }
+          : {})
       });
     } catch (error) {
       app.log.warn({ err: deps.redact(error instanceof Error ? error.message : String(error)) }, "Failed to record MCP playground telemetry");

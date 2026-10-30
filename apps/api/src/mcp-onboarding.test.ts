@@ -395,6 +395,9 @@ describe("MCP playground", () => {
     const rows = await context.store.listMcpToolCalls({ registryServerId: id, since: "2020-01-01T00:00:00.000Z" });
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ source: "playground", toolName: "lookup_kb", ok: true, clientId: null });
+    // Phase 12.4 — the playground row keeps a safe argument summary and the caller's role and project.
+    expect(rows[0]).toMatchObject({ subjectRole: "builder", subjectSource: "user", projectId: "default" });
+    expect(rows[0]?.argsSummary?.fields.topic).toEqual({ type: "string", values: ["mcp"] });
     expect((await context.store.listAuditLogs({ pageSize: 50 })).items.some((entry) => entry.eventType === "mcp_tool.playground_call")).toBe(true);
   });
 
