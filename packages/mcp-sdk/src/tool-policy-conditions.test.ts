@@ -12,6 +12,7 @@ import {
   evaluatePolicyCondition,
   hashMcpToolPolicyRule,
   isStrictlyNarrower,
+  MAX_EVALUATED_ARGUMENT_CHARS,
   MAX_GLOB_STEPS_PER_EVALUATION,
   MAX_GLOB_TEXT_LENGTH,
   MAX_RESOLVED_VALUES,
@@ -517,5 +518,102 @@ describe("evaluateMcpToolAccess with conditions", () => {
     expect(policyNeedsArguments([rule({ id: "a", effect: "deny" })])).toBe(false);
     expect(policyNeedsArguments([rule({ id: "a", effect: "deny", conditions: { all: [{ path: "a", op: "exists" }] } })])).toBe(true);
     expect(policyNeedsArguments([rule({ id: "a", effect: "deny", enabled: false, conditions: { all: [{ path: "a", op: "exists" }] } })])).toBe(false);
+  });
+});
+
+describe("evaluation cost is linear in the arguments read (N2-M1)", () => {
+  const entries = (count: number, make: (index: number) => McpPolicyCondition["value"]) => Array.from({ length: count }, (_, index) => make(index));
+  const listRules = (count: number, ops: { op: McpPolicyCondition["op"]; value: McpPolicyCondition["value"]; ignoreCase?: boolean }) =>
+    entries(count, (index) => index).map((index) =>
+      rule({
+        id: `r${String(index)}`,
+        effect: "deny",
+        conditions: { any: entries(20, (n) => n).map(() => ({ path: "v", ...ops })) as McpPolicyCondition[] }
+      })
+    );
+
+  it("decides the review's 9 MB value against 10 rules of 20 one_of lists quickly, and fails closed", () => {
+    const rules = listRules(10, { op: "one_of", value: entries(100, (index) => `Entry-${String(index)}`) as string[], ignoreCase: true });
+    const started = performance.now();
+    const decision = evaluateMcpToolPolicy(rules, request({ arguments: { v: "a".repeat(9 * 1024 * 1024) } }));
+    expect(performance.now() - started).toBeLessThan(250);
+    // Past the argument text budget the value cannot be read: the deny-list matches.
+    expect(decision).toMatchObject({ allowed: false, effect: "deny" });
+  });
+
+  it("reads a large value inside the budget once, however many conditions read it", () => {
+    const value = `${"a".repeat(MAX_EVALUATED_ARGUMENT_CHARS - 10)}`;
+    const rules = listRules(20, { op: "one_of", value: entries(100, (index) => `Entry-${String(index)}`) as string[], ignoreCase: true });
+    const numeric = listRules(20, { op: "one_of", value: entries(100, (index) => index) as number[] });
+    const started = performance.now();
+    expect(evaluateMcpToolPolicy([...rules, ...numeric], request({ arguments: { v: value } })).allowed).toBe(true);
+    expect(evaluateMcpToolPolicy([...rules, ...numeric], request({ arguments: { v: `${" ".repeat(MAX_EVALUATED_ARGUMENT_CHARS - 10)}7` } })).allowed).toBe(false);
+    expect(performance.now() - started).toBeLessThan(250);
+    const budget = createPolicyEvaluationBudget();
+    for (const op of ["equals", "starts_with", "ends_with"] as const) {
+      evaluatePolicyCondition({ path: "v", op, value: "x", ignoreCase: true }, { v: value }, undefined, "any", budget);
+    }
+    expect(budget.argumentChars).toBe(10);
+  });
+
+  it("over the budget: deny and approval match, allow does not; unread arguments are not counted", () => {
+    const big = "a".repeat(MAX_EVALUATED_ARGUMENT_CHARS + 1);
+    expect(holds({ path: "v", op: "one_of", value: ["b"] }, { v: big })).toBe(true);
+    expect(holds({ path: "v", op: "equals", value: "b" }, { v: big })).toBe(true);
+    expect(holds({ path: "v", op: "gt", value: 1 }, { v: big })).toBe(true);
+    expect(allowHolds({ path: "v", op: "starts_with", value: "a" }, { v: big })).toBe(false);
+    expect(allowHolds({ path: "v", op: "not_one_of", value: ["b"] }, { v: big })).toBe(false);
+    // `exists` does not read the text.
+    expect(allowHolds({ path: "v", op: "exists" }, { v: big })).toBe(true);
+    // A large argument no condition reads costs nothing.
+    const call = { path: "/srv/app.txt", content: big };
+    expect(allowHolds({ path: "path", op: "starts_with", value: "/srv/" }, call)).toBe(true);
+    expect(holds({ path: "path", op: "starts_with", value: "/etc/" }, call)).toBe(false);
+    // Values share the budget: the first ones read fit, the rest fail closed.
+    const half = "a".repeat(MAX_EVALUATED_ARGUMENT_CHARS / 2);
+    expect(allowHolds({ path: "v[*]", op: "starts_with", value: "a" }, { v: [half, half] })).toBe(true);
+    expect(allowHolds({ path: "v[*]", op: "starts_with", value: "a" }, { v: [half, half, "a"] })).toBe(false);
+  });
+
+  it("keeps scalar equality the same as comparing one by one", () => {
+    expect(holds({ path: "v", op: "one_of", value: [5000] }, { v: "5000" })).toBe(true);
+    expect(holds({ path: "v", op: "one_of", value: [5000] }, { v: " 5e3 " })).toBe(true);
+    expect(holds({ path: "v", op: "one_of", value: ["5000.0"] }, { v: 5000 })).toBe(true);
+    expect(holds({ path: "v", op: "one_of", value: ["5000"] }, { v: "5000.0" })).toBe(false);
+    expect(holds({ path: "v", op: "one_of", value: [5000] }, { v: "5000x" })).toBe(false);
+    expect(holds({ path: "v", op: "one_of", value: ["TRUE"], ignoreCase: true }, { v: true })).toBe(true);
+    expect(holds({ path: "v", op: "one_of", value: ["TRUE"] }, { v: true })).toBe(false);
+    expect(holds({ path: "v", op: "one_of", value: [true] }, { v: "true" })).toBe(true);
+    expect(holds({ path: "v", op: "equals", value: null }, { v: null })).toBe(true);
+    expect(holds({ path: "v", op: "equals", value: "Prod" }, { v: " prod " })).toBe(false);
+    expect(holds({ path: "v", op: "equals", value: "Prod", ignoreCase: true }, { v: " prod " })).toBe(true);
+    expect(holds({ path: "v", op: "not_one_of", value: ["dev", 1] }, { v: "1.0" })).toBe(false);
+    expect(holds({ path: "v", op: "not_one_of", value: ["dev", 1] }, { v: "DEV" })).toBe(true);
+    expect(holds({ path: "v", op: "not_one_of", value: ["dev", null] }, { v: null })).toBe(false);
+  });
+
+  it("an element reached through [*] whose list is empty does not satisfy an allow", () => {
+    const allow = { path: "r[*].n", op: "starts_with" as const, value: "myorg/" };
+    expect(allowHolds(allow, { r: [{ n: "myorg/a" }, { n: [] }] })).toBe(false);
+    expect(allowHolds(allow, { r: [{ n: "myorg/a" }, { n: ["myorg/b"] }] })).toBe(true);
+  });
+});
+
+describe("shadow rules have their own budget (N2-L1)", () => {
+  it("a shadow rule spending its glob budget never changes an enforced decision", () => {
+    const shadow = rule({
+      id: "shadow",
+      effect: "deny",
+      mode: "shadow",
+      toolPattern: "push",
+      conditions: { all: [{ path: "v[*]", op: "matches", value: `*${"a".repeat(498)}b` }] }
+    });
+    const deny = rule({ id: "deny", effect: "deny", toolPattern: "push" });
+    const allow = rule({ id: "allow", effect: "allow", toolPattern: "push", conditions: { all: [{ path: "r", op: "matches", value: "myorg/*" }] } });
+    const call = request({ toolName: "push", arguments: { v: Array.from({ length: 150 }, () => "a".repeat(64 * 1024)), r: "myorg/x" } });
+    const withShadow = evaluateMcpToolPolicy([shadow, deny, allow], call);
+    expect(withShadow).toMatchObject({ allowed: true, effect: "allow", rule: allow });
+    expect(withShadow.shadow).toMatchObject({ effect: "deny", changed: true });
+    expect(evaluateMcpToolPolicy([deny, allow], call)).toMatchObject({ allowed: true, rule: allow });
   });
 });

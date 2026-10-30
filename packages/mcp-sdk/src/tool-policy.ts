@@ -183,21 +183,45 @@ export interface McpToolPolicyDecision {
 
 /**
  * Glob comparison steps one tool-call evaluation may spend in total, across
- * every `matches` condition of every rule (about 0.1 s of work in the worst
- * case). Each value is linear to match, but many long values against a long
+ * every `matches` condition of every enforced rule (about 0.1 s of work in
+ * the worst case; shadow rules have a budget of their own). Each value is linear to match, but many long values against a long
  * self-overlapping pattern add up; once the budget is spent, every further
  * `matches` reads as a value the operator cannot read, so it fails closed:
  * a match for deny and require_approval, never for allow.
  */
 export const MAX_GLOB_STEPS_PER_EVALUATION = 20_000_000;
 
-/** Phase 12.4 — work left for one tool-call evaluation (see `MAX_GLOB_STEPS_PER_EVALUATION`). */
+/**
+ * Characters of argument text one tool-call evaluation reads in total (1 MB of
+ * text), each argument value counted once however many conditions read it.
+ * Every operator but `exists` reads a value's text; a value that does not fit
+ * in what is left reads as a value the operator cannot read, so it fails
+ * closed: a match for deny and require_approval, never for allow. Arguments no
+ * condition reads are not counted.
+ */
+export const MAX_EVALUATED_ARGUMENT_CHARS = 1_000_000;
+
+/** An argument string read once per evaluation: trimmed, with its folded and number forms made on first use. */
+interface ArgumentText {
+  text: string;
+  folded?: string;
+  number?: number | null;
+}
+
+/**
+ * Phase 12.4 — work left for one tool-call evaluation (see
+ * `MAX_GLOB_STEPS_PER_EVALUATION` and `MAX_EVALUATED_ARGUMENT_CHARS`), and
+ * the argument strings already read, by the object or list that holds them
+ * and their key (`null`: did not fit).
+ */
 export interface PolicyEvaluationBudget {
   globSteps: number;
+  argumentChars: number;
+  readonly texts: WeakMap<object, Map<string | number, ArgumentText | null>>;
 }
 
 export function createPolicyEvaluationBudget(): PolicyEvaluationBudget {
-  return { globSteps: MAX_GLOB_STEPS_PER_EVALUATION };
+  return { globSteps: MAX_GLOB_STEPS_PER_EVALUATION, argumentChars: MAX_EVALUATED_ARGUMENT_CHARS, texts: new WeakMap() };
 }
 
 /**
@@ -308,7 +332,7 @@ export function ruleScopeMatches(rule: McpToolPolicyRule, request: McpToolPolicy
  * Whether the rule matches the call: scope, then conditions. `undecided`
  * when the scope matches but the rule has conditions and the request carries
  * no arguments (discovery). `budget` is the call's evaluation budget, shared
- * by every rule evaluated for it; a fresh one when absent.
+ * by every enforced rule evaluated for it (shadow rules share their own); a fresh one when absent.
  */
 export function ruleMatchState(
   rule: McpToolPolicyRule,
@@ -357,36 +381,47 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
  * The values at a path, and how far they can be trusted:
  * `incomplete` when the path cannot be read (bad syntax, over the length or
  * step cap) or a cap cut the values; `partial` when some element reached
- * through `[*]` lacks the rest of the path.
+ * through `[*]` lacks the rest of the path (or ends on an empty list). Each
+ * value comes with the object or list holding it and its key there, so its
+ * text is read once per evaluation however many conditions reach it.
  */
+interface ResolvedSlot {
+  value: unknown;
+  holder: object | null;
+  key: string | number;
+}
+
 interface ResolvedValues {
-  values: unknown[];
+  slots: ResolvedSlot[];
   incomplete: boolean;
   partial: boolean;
 }
 
 function resolveValues(root: unknown, path: string, readEndArrays: boolean): ResolvedValues {
   const steps = pathSteps(path);
-  if (!steps) return { values: [], incomplete: true, partial: false };
-  let current: unknown[] = [root];
+  if (!steps) return { slots: [], incomplete: true, partial: false };
+  let current: ResolvedSlot[] = [{ value: root, holder: null, key: "" }];
   let afterWildcard = false;
   let incomplete = false;
   let partial = false;
-  const take = (into: unknown[], list: unknown[]) => {
+  const takeElements = (into: ResolvedSlot[], list: unknown[]) => {
     const room = MAX_RESOLVED_VALUES - into.length;
     if (list.length > room) incomplete = true;
-    into.push(...list.slice(0, Math.max(0, room)));
+    const count = Math.min(list.length, Math.max(0, room));
+    for (let index = 0; index < count; index += 1) into.push({ value: list[index], holder: list, key: index });
   };
   for (const step of steps) {
-    const next: unknown[] = [];
-    for (const value of current) {
+    const next: ResolvedSlot[] = [];
+    for (const { value } of current) {
       const before = next.length;
       if ("key" in step) {
-        if (isPlainObject(value) && Object.prototype.hasOwnProperty.call(value, step.key) && value[step.key] !== undefined) next.push(value[step.key]);
+        if (isPlainObject(value) && Object.prototype.hasOwnProperty.call(value, step.key) && value[step.key] !== undefined) {
+          next.push({ value: value[step.key], holder: value, key: step.key });
+        }
       } else if ("index" in step) {
-        if (Array.isArray(value) && step.index < value.length) next.push(value[step.index]);
+        if (Array.isArray(value) && step.index < value.length) next.push({ value: value[step.index], holder: value, key: step.index });
       } else if (Array.isArray(value)) {
-        take(next, value);
+        takeElements(next, value);
       }
       if (next.length === before && afterWildcard) partial = true;
       if (incomplete) break;
@@ -395,19 +430,25 @@ function resolveValues(root: unknown, path: string, readEndArrays: boolean): Res
     current = next;
     if (incomplete || current.length === 0) break;
   }
-  if (!readEndArrays || incomplete) return { values: current, incomplete, partial };
-  const values: unknown[] = [];
-  for (const value of current) {
-    if (Array.isArray(value)) take(values, value);
-    else take(values, [value]);
+  if (!readEndArrays || incomplete) return { slots: current, incomplete, partial };
+  const slots: ResolvedSlot[] = [];
+  for (const slot of current) {
+    if (Array.isArray(slot.value)) {
+      // An element reached through `[*]` whose list is empty gives nothing to check: like an element lacking the path.
+      if (slot.value.length === 0 && afterWildcard) partial = true;
+      takeElements(slots, slot.value);
+    } else {
+      if (slots.length >= MAX_RESOLVED_VALUES) incomplete = true;
+      else slots.push(slot);
+    }
     if (incomplete) break;
   }
-  return { values, incomplete, partial };
+  return { slots, incomplete, partial };
 }
 
 /** Every value at `path` in `root` (at most `MAX_RESOLVED_VALUES`); empty when the path does not resolve. */
 export function resolvePolicyPath(root: unknown, path: string): unknown[] {
-  return resolveValues(root, path, false).values;
+  return resolveValues(root, path, false).slots.map((slot) => slot.value);
 }
 
 function isScalar(value: unknown): value is McpPolicyScalar {
@@ -433,14 +474,11 @@ export const MAX_GLOB_TEXT_LENGTH = 64 * 1024;
 
 const NUMERIC_TEXT = /^\s*-?\d+(\.\d+)?(e[+-]?\d+)?\s*$/i;
 
-/** A finite number, or a string that holds one (trimmed). */
-function numberValue(value: unknown): number | undefined {
-  if (typeof value === "number") return Number.isFinite(value) ? value : undefined;
-  if (typeof value === "string" && NUMERIC_TEXT.test(value)) {
-    const parsed = Number(value);
-    return Number.isFinite(parsed) ? parsed : undefined;
-  }
-  return undefined;
+/** The number a trimmed text holds, if any. */
+function parseNumber(text: string): number | undefined {
+  if (!NUMERIC_TEXT.test(text)) return undefined;
+  const parsed = Number(text);
+  return Number.isFinite(parsed) ? parsed : undefined;
 }
 
 /** A non-null scalar as trimmed text, folded when `ignoreCase`; undefined for null, objects and arrays. */
@@ -453,17 +491,120 @@ function scalarText(value: unknown, ignoreCase: boolean): string | undefined {
   return ignoreCase ? text.toLowerCase() : text;
 }
 
-/** Scalar equality: identical, numerically equal when either side is a number, otherwise equal as trimmed text. */
-function sameScalar(expected: McpPolicyScalar, value: unknown, ignoreCase: boolean): boolean {
-  if (expected === value) return true;
-  if (expected === null || value === null || !isScalar(value)) return false;
-  if (typeof expected === "number" || typeof value === "number") {
-    const left = numberValue(expected);
-    const right = numberValue(value);
-    if (left !== undefined && right !== undefined) return left === right;
+/**
+ * A non-null scalar argument, read once per evaluation: its trimmed text, the
+ * folded text and the number it holds. Strings are charged to the
+ * evaluation's argument text budget the first time they are read; one that
+ * does not fit is `"unreadable"`.
+ */
+interface ScalarView {
+  kind: "string" | "number" | "boolean";
+  text: (ignoreCase: boolean) => string;
+  number: () => number | undefined;
+}
+
+function viewScalar(slot: ResolvedSlot, budget: PolicyEvaluationBudget): ScalarView | "unreadable" {
+  const value = slot.value;
+  if (typeof value === "number") {
+    const text = String(value);
+    return { kind: "number", text: (ignoreCase) => (ignoreCase ? text.toLowerCase() : text), number: () => value };
   }
-  const left = scalarText(expected, ignoreCase);
-  return left !== undefined && left === scalarText(value, ignoreCase);
+  if (typeof value === "boolean") {
+    const text = String(value);
+    return { kind: "boolean", text: () => text, number: () => undefined };
+  }
+  const raw = value as string;
+  let byKey = slot.holder ? budget.texts.get(slot.holder) : undefined;
+  let entry = byKey?.get(slot.key);
+  if (entry === undefined) {
+    if (raw.length > budget.argumentChars) {
+      entry = null;
+    } else {
+      budget.argumentChars -= raw.length;
+      entry = { text: raw.trim() };
+    }
+    if (slot.holder) {
+      if (!byKey) {
+        byKey = new Map();
+        budget.texts.set(slot.holder, byKey);
+      }
+      byKey.set(slot.key, entry);
+    }
+  }
+  if (entry === null) return "unreadable";
+  const read = entry;
+  return {
+    kind: "string",
+    text: (ignoreCase) => (ignoreCase ? (read.folded ??= read.text.toLowerCase()) : read.text),
+    number: () => {
+      if (read.number === undefined) read.number = parseNumber(read.text) ?? null;
+      return read.number ?? undefined;
+    }
+  };
+}
+
+/**
+ * The scalars of an `equals` / `one_of` / `not_one_of` condition, prepared
+ * once per condition so each value is checked in constant time. Equality is
+ * the same as comparing one by one: identical, numerically equal when either
+ * side is a number and both hold one, otherwise equal as trimmed (and, with
+ * `ignoreCase`, folded) text.
+ */
+interface ScalarSet {
+  hasNull: boolean;
+  /** Entries that are numbers. */
+  numbers: Set<number>;
+  /** Entries that are numeric strings, by the number they hold. */
+  numericStrings: Set<number>;
+  /** Text of the number entries. */
+  numberTexts: Set<string>;
+  /** Text of the string and boolean entries. */
+  texts: Set<string>;
+}
+
+const scalarSetCache = new WeakMap<McpPolicyCondition, ScalarSet | null>();
+
+function scalarSet(condition: McpPolicyCondition): ScalarSet | null {
+  const cached = scalarSetCache.get(condition);
+  if (cached !== undefined) return cached;
+  const expected = condition.value;
+  const ignoreCase = condition.ignoreCase === true;
+  let entries: unknown[] | null = null;
+  if (condition.op === "equals") entries = Array.isArray(expected) || expected === undefined ? null : [expected];
+  else entries = Array.isArray(expected) ? expected : null;
+  let set: ScalarSet | null = null;
+  if (entries) {
+    set = { hasNull: false, numbers: new Set(), numericStrings: new Set(), numberTexts: new Set(), texts: new Set() };
+    for (const entry of entries) {
+      if (entry === null) {
+        set.hasNull = true;
+      } else if (typeof entry === "number") {
+        if (!Number.isFinite(entry)) continue;
+        set.numbers.add(entry);
+        set.numberTexts.add(scalarText(entry, ignoreCase)!);
+      } else if (typeof entry === "string" || typeof entry === "boolean") {
+        const text = scalarText(entry, ignoreCase)!;
+        set.texts.add(text);
+        if (typeof entry === "string") {
+          const number = parseNumber(entry.trim());
+          if (number !== undefined) set.numericStrings.add(number);
+        }
+      }
+    }
+  }
+  scalarSetCache.set(condition, set);
+  return set;
+}
+
+function inScalarSet(set: ScalarSet, view: ScalarView, ignoreCase: boolean): boolean {
+  if (view.kind === "number") {
+    const number = view.number()!;
+    return set.numbers.has(number) || set.numericStrings.has(number);
+  }
+  const text = view.text(ignoreCase);
+  if (view.kind === "boolean") return set.texts.has(text);
+  const number = view.number();
+  return (number !== undefined ? set.numbers.has(number) : set.numberTexts.has(text)) || set.texts.has(text);
 }
 
 /** Glob for argument values: `*` any run of characters, `?` one character; everything else literal. */
@@ -475,31 +616,36 @@ export function matchesValueGlob(pattern: string, value: string): boolean {
  * One value against one argument operator. `true` / `false` when the value
  * can be read; `"unreadable"` when it is of a type the operator cannot read
  * (an object or a nested list for any operator, a non-numeric value for a
- * number operator), longer than `MAX_GLOB_TEXT_LENGTH` for `matches`, or the
- * call's glob budget is spent. The quantifier resolves it fail-closed.
+ * number operator), longer than `MAX_GLOB_TEXT_LENGTH` for `matches`, does
+ * not fit in the call's argument text budget, or the call's glob budget is
+ * spent. The quantifier resolves it fail-closed.
  */
-function valueSatisfies(condition: McpPolicyCondition, value: unknown, budget: PolicyEvaluationBudget): boolean | "unreadable" {
+function valueSatisfies(condition: McpPolicyCondition, slot: ResolvedSlot, budget: PolicyEvaluationBudget): boolean | "unreadable" {
   const expected = condition.value;
   const ignoreCase = condition.ignoreCase === true;
+  const value = slot.value;
   if (value !== null && !isScalar(value)) return "unreadable";
+  const view = value === null ? null : viewScalar(slot, budget);
+  if (view === "unreadable") return "unreadable";
   switch (condition.op) {
     case "equals":
-      if (Array.isArray(expected) || expected === undefined) return false;
-      return sameScalar(expected, value, ignoreCase);
-    case "one_of":
-      if (!Array.isArray(expected)) return false;
-      return expected.some((entry) => sameScalar(entry, value, ignoreCase));
-    case "not_one_of":
-      if (!Array.isArray(expected)) return false;
+    case "one_of": {
+      const set = scalarSet(condition);
+      if (!set) return false;
+      return view === null ? set.hasNull : inScalarSet(set, view, ignoreCase);
+    }
+    case "not_one_of": {
+      const set = scalarSet(condition);
+      if (!set) return false;
       // null reads like a missing argument: it "is not one of" the list for deny and approval, never for an allow.
-      if (value === null) return expected.includes(null) ? false : "unreadable";
-      return !expected.some((entry) => sameScalar(entry, value, ignoreCase));
+      if (view === null) return set.hasNull ? false : "unreadable";
+      return !inScalarSet(set, view, ignoreCase);
+    }
     case "starts_with":
     case "ends_with":
     case "matches": {
-      if (typeof expected !== "string") return false;
-      const text = scalarText(value, ignoreCase);
-      if (text === undefined) return false;
+      if (typeof expected !== "string" || view === null) return false;
+      const text = view.text(ignoreCase);
       const wanted = ignoreCase ? expected.toLowerCase() : expected;
       if (condition.op === "starts_with") return text.startsWith(wanted);
       if (condition.op === "ends_with") return text.endsWith(wanted);
@@ -512,8 +658,9 @@ function valueSatisfies(condition: McpPolicyCondition, value: unknown, budget: P
     case "gte": {
       const limit = typeof expected === "number" && Number.isFinite(expected) ? expected : undefined;
       if (limit === undefined) return false;
-      const actual = numberValue(value);
-      if (actual === undefined) return value === null ? false : "unreadable";
+      if (view === null) return false;
+      const actual = view.number();
+      if (actual === undefined) return "unreadable";
       if (condition.op === "lt") return actual < limit;
       if (condition.op === "lte") return actual <= limit;
       if (condition.op === "gt") return actual > limit;
@@ -523,8 +670,9 @@ function valueSatisfies(condition: McpPolicyCondition, value: unknown, budget: P
       if (!Array.isArray(expected) || expected.length !== 2) return false;
       const [min, max] = expected;
       if (typeof min !== "number" || typeof max !== "number" || !Number.isFinite(min) || !Number.isFinite(max)) return false;
-      const actual = numberValue(value);
-      if (actual === undefined) return value === null ? false : "unreadable";
+      if (view === null) return false;
+      const actual = view.number();
+      if (actual === undefined) return "unreadable";
       return actual >= min && actual <= max;
     }
     default:
@@ -542,9 +690,12 @@ const NEGATED_OPS = new Set<McpPolicyCondition["op"]>(["not_one_of", "label_abse
  *   operators; a value the operator cannot read (`"5000x"` for `gt`, an
  *   object or a nested list for any operator) satisfies it; and so does an
  *   incomplete reading: a path that cannot be read, more than
- *   `MAX_RESOLVED_VALUES` values, or a spent glob budget;
+ *   `MAX_RESOLVED_VALUES` values, a value past the argument text budget, or a
+ *   spent glob budget;
  * - under `every` (allow) none of those do, and neither does a `[*]` element
- *   that lacks the rest of the path.
+ *   that lacks the rest of the path or ends on an empty list.
+ * Work is linear in the arguments read: each value's text is read once per
+ * evaluation (`budget`), and list operators look values up in a set.
  * `exists` reads the path as given: true when some value is not null,
  * `exists: false` when none is. An operator with a malformed value is false.
  */
@@ -565,14 +716,14 @@ export function evaluatePolicyCondition(
   const resolved = resolveValues(args, condition.path, condition.op !== "exists");
   if (resolved.incomplete) return quantifier === "any";
   if (quantifier === "every" && resolved.partial) return false;
-  const { values } = resolved;
+  const { slots } = resolved;
   if (condition.op === "exists") {
-    const exists = values.some((value) => value !== null);
+    const exists = slots.some((slot) => slot.value !== null);
     return condition.value === false ? !exists : exists;
   }
-  if (values.length === 0) return quantifier === "any" && NEGATED_OPS.has(condition.op) && Array.isArray(condition.value);
-  if (quantifier === "every") return values.every((value) => valueSatisfies(condition, value, budget) === true);
-  return values.some((value) => valueSatisfies(condition, value, budget) !== false);
+  if (slots.length === 0) return quantifier === "any" && NEGATED_OPS.has(condition.op) && Array.isArray(condition.value);
+  if (quantifier === "every") return slots.every((slot) => valueSatisfies(condition, slot, budget) === true);
+  return slots.some((slot) => valueSatisfies(condition, slot, budget) !== false);
 }
 
 /**
@@ -727,9 +878,11 @@ export function evaluateMcpToolPolicy(
 ): McpToolPolicyDecision {
   const matchedAll: McpToolPolicyRule[] = [];
   const undecided: McpToolPolicyRule[] = [];
-  const budget = createPolicyEvaluationBudget();
+  // Shadow rules get their own budget, so their work can never change an enforced rule's reading.
+  const enforcedBudget = createPolicyEvaluationBudget();
+  const shadowBudget = createPolicyEvaluationBudget();
   for (const rule of rules) {
-    const state = ruleMatchState(rule, request, budget);
+    const state = ruleMatchState(rule, request, policyRuleMode(rule) === "shadow" ? shadowBudget : enforcedBudget);
     if (state === "match") matchedAll.push(rule);
     else if (state === "undecided") undecided.push(rule);
   }
