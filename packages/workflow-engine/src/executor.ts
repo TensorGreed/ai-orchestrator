@@ -5,9 +5,13 @@ import {
   classifyMcpTool,
   evaluateMcpToolAccess,
   invokeDirectMCPTool,
+  McpToolPolicyError,
+  policyDecisionRecord,
   policyNeedsAnnotations,
   resolveMCPTools,
+  type McpToolAccessCall,
   type McpToolAccessCheck,
+  type McpToolAccessDecision,
   type McpToolAccessSubjectTool,
   type MCPExecutionContext,
   type MCPRegistry,
@@ -29,6 +33,7 @@ import {
   networkDestinationRef,
   nodeContentSource,
   withoutDataClasses,
+  canonicalPolicyJson,
   type DestinationRef
 } from "@ai-orchestrator/shared";
 import type {
@@ -45,6 +50,7 @@ import type {
   McpToolClassificationOverride,
   McpToolPolicyRule,
   McpToolPolicySubject,
+  McpToolPolicyDecisionRecord,
   McpToolPolicyTrace,
   McpToolProgressEvent,
   McpElicitationTraceEntry,
@@ -132,6 +138,7 @@ import { executeGuardNodeStep } from "./guard-node";
 import {
   approvalGateOutcome,
   approvalGatePause,
+  writeToolApprovalKey,
   writeToolApprovalPause,
   writeToolGateSkips,
   WriteToolCallLedger,
@@ -1071,9 +1078,36 @@ const FALLBACK_POLICY_SUBJECT: McpToolPolicySubject = {
 interface RunToolPolicy {
   trace: McpToolPolicyTrace;
   accessCheck: McpToolAccessCheck;
-  evaluate: (tool: McpToolAccessSubjectTool) => ReturnType<typeof evaluateMcpToolAccess>;
+  /** Without `call`: the tool as discovery sees it. With `call`: one call, with its arguments and labels. */
+  evaluate: (tool: McpToolAccessSubjectTool, call?: McpToolAccessCall) => McpToolAccessDecision;
   /** Phase 10.5 — some rule has an annotation condition, so a tool's hints must be known to decide. */
   needsAnnotations: boolean;
+  /**
+   * Phase 12.4 — records one call's decision on the trace (`decisions`) when
+   * some rule, enforced or shadow, matched it; returns the record.
+   */
+  record: (
+    tool: McpToolAccessSubjectTool,
+    decision: McpToolAccessDecision,
+    extra?: { toolCallId?: string; approval?: "pending" | "approved" }
+  ) => McpToolPolicyDecisionRecord | undefined;
+}
+
+/** Phase 12.4 — what one agent tool call needs before it runs (see planToolCall in the agent handler). */
+type ToolCallPlan =
+  | { kind: "allow"; decision?: McpToolAccessDecision; policyTool?: McpToolAccessSubjectTool }
+  | { kind: "deny"; message: string; hidden: McpHiddenTool; decision?: McpToolAccessDecision; policyTool?: McpToolAccessSubjectTool }
+  | {
+      kind: "approval";
+      pause: ApprovalHandoffRequest;
+      approvalKey: string;
+      decision?: McpToolAccessDecision;
+      policyTool?: McpToolAccessSubjectTool;
+    };
+
+/** Phase 12.4 — the subset of a run's data labels a policy condition reads. */
+function policyLabels(labels: DataLabels | null | undefined): McpToolAccessCall["dataLabels"] {
+  return labels ? { provenance: labels.provenance, dataClasses: labels.dataClasses } : undefined;
 }
 
 /**
@@ -1104,11 +1138,15 @@ async function buildRunToolPolicy(
     noWriteTools,
     hidden: []
   };
-  const evaluate = (tool: McpToolAccessSubjectTool) =>
+  const evaluate = (tool: McpToolAccessSubjectTool, call?: McpToolAccessCall) =>
     evaluateMcpToolAccess({
       rules: snapshot.rules,
       projectId: projectId ?? null,
       role: subject.role,
+      // Phase 12.4 — workflow and gateway-client principals, and the call itself.
+      workflowId: context.workflow.id,
+      clientId: subject.clientId ?? null,
+      ...(call ? { arguments: call.arguments, dataLabels: call.dataLabels ?? null } : {}),
       adapterId: tool.adapterId,
       registryServerId: tool.registryServerId,
       toolName: tool.toolName,
@@ -1119,8 +1157,8 @@ async function buildRunToolPolicy(
       noWriteTools,
       ...(tool.serverLabel ? { serverLabel: tool.serverLabel } : {})
     });
-  const accessCheck: McpToolAccessCheck = (tool) => {
-    const decision = evaluate(tool);
+  const accessCheck: McpToolAccessCheck = (tool, call) => {
+    const decision = evaluate(tool, call);
     if (decision.allowed) {
       return { allowed: true };
     }
@@ -1137,7 +1175,104 @@ async function buildRunToolPolicy(
       }
     };
   };
-  return { trace, accessCheck, evaluate, needsAnnotations: policyNeedsAnnotations(snapshot.rules) };
+  const record: RunToolPolicy["record"] = (tool, decision, extra = {}) => {
+    const entry = policyDecisionRecord(decision.policy, extra.approval);
+    if (!entry) return undefined;
+    trace.decisions = [
+      ...(trace.decisions ?? []),
+      {
+        ...entry,
+        tool: tool.toolName,
+        server: tool.adapterId,
+        ...(tool.registryServerId ? { registryServerId: tool.registryServerId } : {}),
+        ...(extra.toolCallId ? { toolCallId: extra.toolCallId } : {})
+      }
+    ];
+    return entry;
+  };
+  return { trace, accessCheck, evaluate, needsAnnotations: policyNeedsAnnotations(snapshot.rules), record };
+}
+
+/** Phase 12.4 — the approval request of a direct MCP Tool call a require_approval rule matched. */
+function directMcpApprovalPause(
+  node: WorkflowNode,
+  context: Pick<NodeRuntimeContext, "workflow">,
+  serverConfig: MCPServerConfig,
+  toolName: string,
+  args: unknown,
+  policy: NonNullable<McpToolAccessDecision["approval"]>
+): ApprovalHandoffRequest {
+  const serverKey = serverConfig.registryServerId ?? serverConfig.serverId;
+  return writeToolApprovalPause({
+    settings: context.workflow.settings?.writeToolApproval ?? { enabled: false },
+    nodeId: node.id,
+    nodeName: node.name || node.id,
+    serverKey,
+    serverLabel: serverConfig.label ?? serverKey,
+    toolName,
+    args,
+    classificationSource: "tool_policy",
+    policy,
+    writeGate: false,
+    caller: "node"
+  });
+}
+
+/**
+ * Phase 12.4 — the tool policy decides a direct MCP Tool call before the
+ * guard's destination check (which runs ahead of every node handler): a deny
+ * fails the node and an unapproved require_approval pauses it, before any
+ * guard verdict. The handler checks again with the arguments it sends and
+ * records the decision. Rules that need the tool's annotations are left to
+ * the handler, which reads them from the server.
+ */
+async function directMcpPolicyPreCheck(
+  node: WorkflowNode,
+  config: Record<string, unknown>,
+  context: NodeRuntimeContext,
+  dependencies: WorkflowExecutionDependencies
+): Promise<void> {
+  if (node.type !== "mcp_tool" || !dependencies.guard || !dependencies.loadMcpToolPolicy || dependencies.replayNodeHook) return;
+  if (config.operation === "read_resource") return;
+  const toolName = String(config.toolName ?? "");
+  if (!toolName.trim() || toolName.trim() === ALL_MCP_TOOLS_SENTINEL) return;
+  const toolPolicy = await buildRunToolPolicy(context, dependencies);
+  if (!toolPolicy || toolPolicy.needsAnnotations) return;
+  const argsTemplate = typeof config.argsTemplate === "string" ? config.argsTemplate : "{}";
+  const args = tryParseJson(renderTemplate(argsTemplate, buildTemplateData(context, config)));
+  let serverConfig: MCPServerConfig;
+  try {
+    serverConfig = await applyRegisteredMcpServer(
+      { serverId: String(config.serverId ?? ""), registryServerId: readRegistryServerId(config), connection: toRecord(config.connection) },
+      dependencies,
+      context.toolPolicySubject
+    );
+  } catch {
+    // The handler reports a server it cannot resolve.
+    return;
+  }
+  const policyTool: McpToolAccessSubjectTool = {
+    adapterId: serverConfig.serverId,
+    ...(serverConfig.registryServerId ? { registryServerId: serverConfig.registryServerId } : {}),
+    ...(serverConfig.label ? { serverLabel: serverConfig.label } : {}),
+    toolName
+  };
+  const decision = toolPolicy.evaluate(policyTool, { arguments: toRecord(args), dataLabels: policyLabels(context.labelScope?.inputLabels()) });
+  if (!decision.allowed && decision.reason === "policy") {
+    throw mcpToolBlockedError(decision.message ?? `MCP tool '${toolName}' is blocked.`, {
+      tool: toolName,
+      server: serverConfig.serverId,
+      ...(serverConfig.registryServerId ? { registryServerId: serverConfig.registryServerId } : {}),
+      reason: "policy",
+      ...(decision.ruleId ? { ruleId: decision.ruleId } : {}),
+      ...(decision.ruleName ? { ruleName: decision.ruleName } : {})
+    });
+  }
+  if (decision.allowed && decision.approval) {
+    const pause = directMcpApprovalPause(node, context, serverConfig, toolName, args, decision.approval);
+    const approvalKey = pause.handoff.kind === "rerun" ? pause.handoff.approvalKey : "";
+    if (!context.writeToolCalls?.session().ready(approvalKey)) throw new ApprovalHandoffSignal(pause);
+  }
 }
 
 const MCP_TOOL_BLOCKED_REMEDIATION =
@@ -3410,6 +3545,8 @@ async function executeNodeHandler(
     return mergeParentOutputs(context.parentOutputs);
   }
 
+  // Phase 12.4 — the MCP tool policy decides a direct tool call before the guard's destination check.
+  await directMcpPolicyPreCheck(node, config, context, dependencies);
   // Phase 16 — outbound checks (egress, MCP destination rules) run before the handler, and before a replay's stub.
   const outbound = await outboundPreCheck(node, config, context, dependencies);
 
@@ -5334,6 +5471,8 @@ async function executeNodeHandler(
       }
 
       let result: Awaited<ReturnType<typeof invokeDirectMCPTool>>;
+      // Phase 12.4 — the policy decision for this call when a rule matched, for the trace and telemetry.
+      let directPolicyDecision: McpToolPolicyDecisionRecord | undefined;
       try {
         if (toolPolicy) {
           const policyTool: McpToolAccessSubjectTool = {
@@ -5349,7 +5488,12 @@ async function executeNodeHandler(
               policyTool.annotations = annotations;
             }
           }
-          let decision = toolPolicy.evaluate(policyTool);
+          // Phase 12.4 — the call's arguments and the node's input labels decide argument-aware rules.
+          const policyCall: McpToolAccessCall = {
+            arguments: toRecord(args),
+            dataLabels: policyLabels(context.labelScope?.inputLabels())
+          };
+          let decision = toolPolicy.evaluate(policyTool, policyCall);
           if (
             !decision.allowed &&
             decision.reason === "no_write_tools" &&
@@ -5358,10 +5502,11 @@ async function executeNodeHandler(
           ) {
             const annotations = await discoverToolAnnotations(serverConfig, toolName, dependencies.mcpRegistry, directMcpContext);
             if (annotations) {
-              decision = toolPolicy.evaluate({ ...policyTool, annotations });
+              decision = toolPolicy.evaluate({ ...policyTool, annotations }, policyCall);
             }
           }
           if (!decision.allowed) {
+            toolPolicy.record(policyTool, decision);
             throw mcpToolBlockedError(decision.message ?? `MCP tool '${toolName}' is blocked.`, {
               tool: toolName,
               server: serverConfig.serverId,
@@ -5370,6 +5515,18 @@ async function executeNodeHandler(
               ...(decision.ruleId ? { ruleId: decision.ruleId } : {}),
               ...(decision.ruleName ? { ruleName: decision.ruleName } : {})
             });
+          }
+          if (decision.approval && !dependencies.replayNodeHook) {
+            // Phase 12.4 — a require_approval rule: the node pauses, and runs the call once a person approves it.
+            const pause = directMcpApprovalPause(node, context, serverConfig, toolName, args, decision.approval);
+            const approvalKey = pause.handoff.kind === "rerun" ? pause.handoff.approvalKey : undefined;
+            if (!approvalKey || !context.writeToolCalls?.session().takeApproval(approvalKey)) {
+              toolPolicy.record(policyTool, decision, { approval: "pending" });
+              throw new ApprovalHandoffSignal(pause);
+            }
+            directPolicyDecision = toolPolicy.record(policyTool, decision, { approval: "approved" });
+          } else {
+            directPolicyDecision = toolPolicy.record(policyTool, decision);
           }
         }
         directMcp.samplingHandler.beginCall(toolName);
@@ -5399,6 +5556,8 @@ async function executeNodeHandler(
         ...(result.content !== undefined ? { content: result.content } : {}),
         tool_name: toolName,
         ...mcpTraceFields(directMcp),
+        // Phase 12.4 — what the tool policy decided for this call, when a rule (enforced or shadow) matched.
+        ...(toolPolicy && directPolicyDecision ? { _toolPolicy: toolPolicy.trace } : {}),
         // Phase 10.5 — sampling requests the tool made count in the run's usage like any model call.
         ...(directMcp.samplingHandler.requestCount() > 0 && samplingModel && samplingProvider
           ? {
@@ -5722,6 +5881,63 @@ async function executeNodeHandler(
         let workerPendingApproval: ApprovalHandoffRequest | undefined;
         let toolGatePendingApproval: ApprovalHandoffRequest | undefined;
         const writeToolSession = context.writeToolSession ?? context.writeToolCalls?.session();
+        const writeGate = context.workflow.settings?.writeToolApproval;
+        /**
+         * Phase 12.4 — what one MCP tool call needs: the tool policy with the
+         * call's arguments and labels (deny, require_approval, allow), then
+         * the workflow's write-tool gate. When both ask for approval the
+         * call pauses once, with one request that names the rule.
+         */
+        const planToolCall = (
+          resolvedEntry: (typeof resolvedTools.resolved)[number],
+          args: Record<string, unknown>,
+          labels: DataLabels | undefined
+        ): ToolCallPlan => {
+          const policyTool: McpToolAccessSubjectTool = {
+            adapterId: resolvedEntry.serverId,
+            ...(resolvedEntry.registryServerId ? { registryServerId: resolvedEntry.registryServerId } : {}),
+            toolName: resolvedEntry.originalName,
+            ...(resolvedEntry.annotations ? { annotations: resolvedEntry.annotations } : {})
+          };
+          const decision = toolPolicy?.evaluate(policyTool, { arguments: args, dataLabels: policyLabels(labels) });
+          if (decision && !decision.allowed) {
+            return {
+              kind: "deny",
+              message: decision.message ?? `MCP tool '${resolvedEntry.originalName}' is blocked.`,
+              hidden: {
+                tool: resolvedEntry.originalName,
+                server: resolvedEntry.serverId,
+                ...(resolvedEntry.registryServerId ? { registryServerId: resolvedEntry.registryServerId } : {}),
+                reason: decision.reason ?? "policy",
+                ...(decision.ruleId ? { ruleId: decision.ruleId } : {}),
+                ...(decision.ruleName ? { ruleName: decision.ruleName } : {})
+              },
+              decision,
+              policyTool
+            };
+          }
+          if (dependencies.replayNodeHook) return { kind: "allow", ...(decision ? { decision, policyTool } : {}) };
+          const classification = decision ? decision.classification : classifyMcpTool({ annotations: resolvedEntry.annotations });
+          const gateAsks = writeGate?.enabled === true && !writeToolGateSkips(classification);
+          if (!gateAsks && !decision?.approval) return { kind: "allow", ...(decision ? { decision, policyTool } : {}) };
+          const serverKey = resolvedEntry.registryServerId ?? resolvedEntry.serverId;
+          const pause = writeToolApprovalPause({
+            settings: writeGate ?? { enabled: false },
+            nodeId: node.id,
+            nodeName: node.name || node.id,
+            serverKey,
+            serverLabel: serverKey,
+            toolName: resolvedEntry.originalName,
+            args,
+            classificationSource: classification.source === "manual" ? "manual" : "not_marked_read_only",
+            ...(decision?.approval ? { policy: decision.approval } : {}),
+            writeGate: gateAsks
+          });
+          const approvalKey = pause.handoff.kind === "rerun" ? pause.handoff.approvalKey : writeToolApprovalKey(node.id, serverKey, resolvedEntry.originalName, args);
+          return { kind: "approval", pause, approvalKey, ...(decision ? { decision, policyTool } : {}) };
+        };
+        // Phase 12.4 — the tool-call check's plan for the call it just allowed, which invokeTool runs next.
+        let checkedCall: { toolName: string; argsKey: string; plan: ToolCallPlan; toolCallId: string } | undefined;
 
         emitNodeActivity(dependencies, node.id, {
           kind: "resolved_input",
@@ -5803,47 +6019,65 @@ async function executeNodeHandler(
                   }
                }
                const resolvedEntry = resolvedTools.resolved.find((entry) => entry.exposedName === toolName);
-               // Phase 11.2 — the workflow's write-tool gate: a person approves this exact call first.
-               const writeGate = context.workflow.settings?.writeToolApproval;
+               // Phase 12.4 — the plan the tool-call check made for this exact call, unless the guard rewrote the arguments since.
+               const argsKey = canonicalPolicyJson(args);
+               const checked = checkedCall && checkedCall.toolName === toolName && checkedCall.argsKey === argsKey ? checkedCall : undefined;
+               checkedCall = undefined;
+               const plan = resolvedEntry
+                 ? (checked?.plan ?? planToolCall(resolvedEntry, args, invocation?.labels))
+                 : ({ kind: "allow" } as ToolCallPlan);
+               const toolCallId = invocation?.toolCallId ?? checked?.toolCallId;
+               if (plan.kind === "deny") {
+                 if (plan.decision && plan.policyTool) toolPolicy?.record(plan.policyTool, plan.decision, toolCallId ? { toolCallId } : {});
+                 throw new McpToolPolicyError(plan.message, plan.hidden);
+               }
+               // Phase 11.2 — the workflow's write-tool gate, and (12.4) a require_approval policy rule: a person
+               // approves this exact call first, in one request when both ask.
                let approvedCallKey: string | undefined;
-               if (writeGate?.enabled && resolvedEntry && !dependencies.replayNodeHook) {
-                 const classification = toolPolicy
-                   ? toolPolicy.evaluate({
-                       adapterId: resolvedEntry.serverId,
-                       ...(resolvedEntry.registryServerId ? { registryServerId: resolvedEntry.registryServerId } : {}),
-                       toolName: resolvedEntry.originalName,
-                       ...(resolvedEntry.annotations ? { annotations: resolvedEntry.annotations } : {})
-                     }).classification
-                   : classifyMcpTool({ annotations: resolvedEntry.annotations });
-                 if (!writeToolGateSkips(classification)) {
-                   const serverKey = resolvedEntry.registryServerId ?? resolvedEntry.serverId;
-                   const pause = writeToolApprovalPause({
-                     settings: writeGate,
-                     nodeId: node.id,
-                     nodeName: node.name || node.id,
-                     serverKey,
-                     serverLabel: serverKey,
-                     toolName: resolvedEntry.originalName,
-                     args,
-                     classificationSource: classification.source === "manual" ? "manual" : "not_marked_read_only"
-                   });
-                   const approvalKey = pause.handoff.kind === "rerun" ? pause.handoff.approvalKey : undefined;
-                   // An approved call already ran in an earlier re-run: answer from its result.
-                   const replayed = approvalKey ? writeToolSession?.replay(approvalKey) : undefined;
-                   if (replayed?.hit) return replayed.result as Awaited<ReturnType<typeof resolvedTools.invokeByExposedName>>;
-                   if (!approvalKey || !writeToolSession?.takeApproval(approvalKey)) {
-                     toolGatePendingApproval = pause;
-                     throw new AgentGuardInterrupt("approval_required", "tool_arguments", 0, pause.message);
-                   }
-                   approvedCallKey = approvalKey;
+               if (plan.kind === "approval") {
+                 // An approved call already ran in an earlier re-run: answer from its result.
+                 const replayed = writeToolSession?.replay(plan.approvalKey);
+                 if (replayed?.hit) {
+                   if (plan.decision && plan.policyTool) toolPolicy?.record(plan.policyTool, plan.decision, { ...(toolCallId ? { toolCallId } : {}), approval: "approved" });
+                   return replayed.result as Awaited<ReturnType<typeof resolvedTools.invokeByExposedName>>;
                  }
+                 if (!writeToolSession?.takeApproval(plan.approvalKey)) {
+                   if (plan.decision && plan.policyTool) toolPolicy?.record(plan.policyTool, plan.decision, { ...(toolCallId ? { toolCallId } : {}), approval: "pending" });
+                   toolGatePendingApproval = plan.pause;
+                   throw new AgentGuardInterrupt("approval_required", "tool_arguments", 0, plan.pause.message);
+                 }
+                 approvedCallKey = plan.approvalKey;
+               }
+               if (plan.decision && plan.policyTool) {
+                 toolPolicy?.record(plan.policyTool, plan.decision, { ...(toolCallId ? { toolCallId } : {}), ...(approvedCallKey ? { approval: "approved" as const } : {}) });
                }
                // Phase 10.5 — each tool call gets a fresh sampling budget.
                const originalName = resolvedEntry?.originalName ?? toolName;
                agentMcp.samplingHandler.beginCall(originalName);
-               const toolResult = await resolvedTools.invokeByExposedName(toolName, args);
+               const toolResult = await resolvedTools.invokeByExposedName(toolName, args, {
+                 ...(invocation?.labels ? { dataLabels: policyLabels(invocation.labels) } : {}),
+                 ...(toolCallId ? { toolCallId } : {})
+               });
                if (approvedCallKey) writeToolSession?.record(approvedCallKey, toolResult);
                return toolResult;
+            },
+            // Phase 12.4 — the tool policy decides each MCP tool call before the guard: a deny becomes a tool error
+            // the model sees, a call that needs approval pauses the agent (unless it was approved or already ran).
+            checkToolCall: (toolName, args, call) => {
+              const resolvedEntry = resolvedTools.resolved.find((entry) => entry.exposedName === toolName);
+              if (!resolvedEntry) return { outcome: "allow" };
+              const plan = planToolCall(resolvedEntry, args, call.labels);
+              if (plan.kind === "deny") {
+                if (plan.decision && plan.policyTool) toolPolicy?.record(plan.policyTool, plan.decision, { toolCallId: call.toolCallId });
+                return { outcome: "block", message: plan.message };
+              }
+              if (plan.kind === "approval" && !writeToolSession?.ready(plan.approvalKey)) {
+                if (plan.decision && plan.policyTool) toolPolicy?.record(plan.policyTool, plan.decision, { toolCallId: call.toolCallId, approval: "pending" });
+                toolGatePendingApproval = plan.pause;
+                return { outcome: "pause", message: plan.pause.message };
+              }
+              checkedCall = { toolName, argsKey: canonicalPolicyJson(args), plan, toolCallId: call.toolCallId };
+              return { outcome: "allow" };
             }
           },
           {
