@@ -3494,12 +3494,19 @@ button.tag-chip:hover {
   color: var(--fg-muted);
 }
 
-.mcp-sim-examples ul {
+.mcp-sim-examples > ul {
   display: grid;
   gap: 8px;
+  max-height: 420px;
+  overflow-y: auto;
   margin: 0;
   padding: 0;
   list-style: none;
+}
+
+.mcp-sim-summary {
+  margin: 4px 0 0;
+  padding-left: 16px;
 }
 
 .mcp-sim-example {

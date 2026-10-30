@@ -402,7 +402,7 @@ export function PolicySuggestions({
                 {suggestion.callCount} calls, {suggestion.windowDays} days
               </span>
             </div>
-            <ul className="mcp-suggestion-rules">
+            <ul className="mcp-suggestion-rules" aria-label="Suggested rules">
               {suggestion.rules.map((rule, index) => (
                 <li key={index}>
                   <strong>{rule.effect === "allow" ? "Allow" : "Deny"}</strong> <code>{rule.effect === "deny" ? "every other tool" : rule.toolPattern}</code>
