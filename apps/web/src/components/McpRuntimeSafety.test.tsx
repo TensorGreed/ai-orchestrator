@@ -214,7 +214,8 @@ describe("registry page runtime safety", () => {
     await user.click(await screen.findByRole("button", { name: "+ Register server" }));
     const form = screen.getByRole("form", { name: "Register MCP server" });
     await user.type(within(form).getByLabelText("Name"), "Files");
-    await user.selectOptions(within(form).getByLabelText("Adapter"), "stdio_mcp");
+    await user.click(within(form).getByLabelText("Local command (stdio)"));
+    await user.type(within(form).getByLabelText("Command"), "npx");
     const sandbox = within(form).getByRole("group", { name: "Sandbox" });
     await user.selectOptions(within(sandbox).getByLabelText("Mode"), "container");
     await user.type(within(sandbox).getByLabelText("Image (pinned)"), "node:22-alpine");

@@ -5441,3 +5441,126 @@ img.mcp-pg-block {
   justify-content: flex-end;
   flex-wrap: wrap;
 }
+
+/* MCP server form: transport choice, stdio rows, advanced JSON */
+.mcp-kind {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.mcp-kind legend {
+  padding: 0;
+  font-weight: 600;
+}
+
+.mcp-kind-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 20px;
+}
+
+.mcp-stdio-fields {
+  display: grid;
+  gap: 12px;
+}
+
+.mcp-rows {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  background: var(--bg-elev);
+}
+
+.mcp-rows legend {
+  padding: 0 4px;
+  font-weight: 600;
+}
+
+.mcp-row-list {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.mcp-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto auto;
+  gap: 6px;
+  align-items: center;
+}
+
+.mcp-row-env {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 2fr) auto;
+}
+
+.mcp-field-error {
+  color: var(--err);
+  font-weight: 600;
+}
+
+.mcp-row-empty,
+.mcp-row-note {
+  grid-column: 1 / -1;
+}
+
+.mcp-row input[aria-invalid="true"],
+.mcp-stdio-fields input[aria-invalid="true"],
+.mcp-form input[aria-invalid="true"] {
+  border-color: var(--err);
+}
+
+.mcp-paste {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: end;
+}
+
+.mcp-host-note {
+  margin: 0;
+}
+
+.mcp-advanced {
+  display: grid;
+  gap: 8px;
+}
+
+.mcp-advanced > summary {
+  cursor: pointer;
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+
+.mcp-advanced textarea {
+  width: 100%;
+  font-family: var(--font-mono);
+}
+
+.mcp-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+@media (max-width: 640px) {
+  .mcp-row {
+    grid-template-columns: minmax(0, 1fr) auto auto;
+  }
+  .mcp-row > input:first-child {
+    grid-column: 1 / -1;
+  }
+  .mcp-paste {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

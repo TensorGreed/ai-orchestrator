@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, vi } from "vitest";
 import * as api from "../lib/api";
@@ -16,6 +16,7 @@ vi.mock("../lib/api", async () => {
     fetchMcpCatalog: vi.fn(),
     fetchSecrets: vi.fn(),
     createMcpServer: vi.fn(),
+    updateMcpServer: vi.fn(),
     probeMcpServer: vi.fn(),
     acceptMcpServerChange: vi.fn(),
     deleteMcpServer: vi.fn()
@@ -268,7 +269,8 @@ describe("McpServersPage", () => {
 
     const form = screen.getByRole("form", { name: "Register MCP server" });
     await user.type(within(form).getByLabelText("Name"), "Demo");
-    await user.selectOptions(within(form).getByLabelText("Adapter"), "mock-mcp");
+    await user.click(within(form).getByLabelText("Other"));
+    expect(within(form).getByLabelText("Adapter")).toHaveValue("mock-mcp");
     await user.click(within(form).getByLabelText(/Block runs/));
     await user.click(within(form).getByRole("button", { name: "Register server" }));
 
@@ -298,13 +300,297 @@ describe("McpServersPage", () => {
     await user.click(await screen.findByRole("button", { name: "+ Register server" }));
     const form = screen.getByRole("form", { name: "Register MCP server" });
     await user.type(within(form).getByLabelText("Name"), "Broken");
-    const connection = within(form).getByLabelText(/Connection/);
+    await user.click(within(form).getByText("Advanced: edit as JSON"));
+    const connection = within(form).getByLabelText(/Connection \(JSON\)/);
     await user.clear(connection);
     await user.type(connection, "[[1]"); // "[[" types a literal "["
     await user.click(within(form).getByRole("button", { name: "Register server" }));
 
     expect(await within(form).findByText("Connection must be a JSON object.")).toBeInTheDocument();
     expect(api.createMcpServer).not.toHaveBeenCalled();
+  });
+
+  describe("transport choice", () => {
+    const formAdapters = [
+      { id: "http_mcp", label: "HTTP MCP" },
+      { id: "stdio_mcp", label: "Stdio MCP Server" },
+      { id: "mock-mcp", label: "Mock MCP Server" }
+    ];
+
+    async function openForm(user: ReturnType<typeof userEvent.setup>) {
+      vi.mocked(api.fetchMcpServers).mockResolvedValue({ servers: [], adapters: formAdapters, defaultProbeIntervalMs: 300000 });
+      render(<McpServersPage isAdmin activeProjectId="proj_1" />);
+      await user.click(await screen.findByRole("button", { name: "+ Register server" }));
+      return screen.getByRole("form", { name: "Register MCP server" });
+    }
+
+    const json = (form: HTMLElement) => (within(form).getByLabelText(/Connection \(JSON\)/) as HTMLTextAreaElement).value;
+
+    it("starts as a remote server and swaps the connection template when switching", async () => {
+      const user = userEvent.setup();
+      const form = await openForm(user);
+      expect(within(form).getByLabelText("Remote server (HTTP)")).toBeChecked();
+      expect(within(form).getByLabelText("Endpoint URL")).toHaveValue("http://127.0.0.1:7001/mcp");
+
+      await user.click(within(form).getByLabelText("Local command (stdio)"));
+      expect(within(form).queryByLabelText("Endpoint URL")).not.toBeInTheDocument();
+      expect(JSON.parse(json(form))).toEqual({ command: "", args: [] });
+      expect(within(form).getByText(/runs on the machine running the L2M API/)).toBeInTheDocument();
+      expect(within(form).getByRole("group", { name: "Sandbox" })).toBeInTheDocument();
+
+      await user.click(within(form).getByLabelText("Remote server (HTTP)"));
+      expect(JSON.parse(json(form))).toEqual({ endpoint: "http://127.0.0.1:7001/mcp", transport: "http_streamable" });
+      expect(within(form).queryByRole("group", { name: "Sandbox" })).not.toBeInTheDocument();
+
+      await user.click(within(form).getByLabelText("Other"));
+      expect(JSON.parse(json(form))).toEqual({});
+    });
+
+    it("registers a stdio server from the fields, keeping spaces inside arguments", async () => {
+      const user = userEvent.setup();
+      vi.mocked(api.createMcpServer).mockResolvedValue({ server: makeServer({ id: "mcp_new" }) });
+      const form = await openForm(user);
+      await user.type(within(form).getByLabelText("Name"), "Files");
+      await user.click(within(form).getByLabelText("Local command (stdio)"));
+      await user.click(within(form).getByRole("button", { name: "Register server" }));
+      expect(await within(form).findByRole("alert")).toHaveTextContent("A local command server needs a command.");
+      expect(api.createMcpServer).not.toHaveBeenCalled();
+
+      await user.type(within(form).getByLabelText("Command"), "npx");
+      await user.click(within(form).getByRole("button", { name: "+ Add argument" }));
+      await user.type(within(form).getByLabelText("Argument 1"), "my docs");
+      await user.click(within(form).getByRole("button", { name: "+ Add argument" }));
+      await user.type(within(form).getByLabelText("Argument 2"), "-y");
+      await user.click(within(form).getByRole("button", { name: "Move argument 2 up" }));
+      await user.type(within(form).getByLabelText("Working folder (optional)"), "/srv");
+      await user.click(within(form).getByRole("button", { name: "+ Add variable" }));
+      await user.type(within(form).getByLabelText("Variable 1 name"), "DEBUG");
+      await user.type(within(form).getByLabelText("Variable 1 value"), "1");
+      expect(JSON.parse(json(form))).toEqual({ command: "npx", args: ["-y", "my docs"], cwd: "/srv", env: { DEBUG: "1" } });
+
+      await user.click(within(form).getByRole("button", { name: "Register server" }));
+      await waitFor(() =>
+        expect(api.createMcpServer).toHaveBeenCalledWith(
+          expect.objectContaining({
+            adapterId: "stdio_mcp",
+            connection: { command: "npx", args: ["-y", "my docs"], cwd: "/srv", env: { DEBUG: "1" } }
+          })
+        )
+      );
+    });
+
+    it("fills the command and arguments from a pasted command line", async () => {
+      const user = userEvent.setup();
+      const form = await openForm(user);
+      await user.click(within(form).getByLabelText("Local command (stdio)"));
+      await user.click(within(form).getByLabelText("Paste a command line"));
+      await user.paste(`npx -y server "/home/me/my docs"`);
+      await user.click(within(form).getByRole("button", { name: "Fill command and arguments" }));
+      expect(within(form).getByLabelText("Command")).toHaveValue("npx");
+      expect(within(form).getByLabelText("Argument 3")).toHaveValue("/home/me/my docs");
+      expect(JSON.parse(json(form)).args).toEqual(["-y", "server", "/home/me/my docs"]);
+
+      await user.click(within(form).getByLabelText("Paste a command line"));
+      await user.paste(`node "unclosed`);
+      await user.click(within(form).getByRole("button", { name: "Fill command and arguments" }));
+      expect(await within(form).findByText(/unclosed double quote/)).toBeInTheDocument();
+    });
+
+    it("keeps the fields and the JSON editor in sync both ways and refuses to save invalid JSON", async () => {
+      const user = userEvent.setup();
+      const form = await openForm(user);
+      await user.type(within(form).getByLabelText("Name"), "Sync");
+      await user.click(within(form).getByLabelText("Local command (stdio)"));
+      await user.click(within(form).getByText("Advanced: edit as JSON"));
+      const editor = within(form).getByLabelText(/Connection \(JSON\)/);
+      fireEvent.change(editor, { target: { value: '{"command":"node","args":["a b","c"],"env":{"K":"v"}}' } });
+      expect(within(form).getByLabelText("Command")).toHaveValue("node");
+      expect(within(form).getByLabelText("Argument 1")).toHaveValue("a b");
+      expect(within(form).getByLabelText("Variable 1 name")).toHaveValue("K");
+
+      await user.type(within(form).getByLabelText("Command"), "x");
+      expect(JSON.parse(json(form)).command).toBe("nodex");
+
+      fireEvent.change(editor, { target: { value: '{"command":' } });
+      expect(await within(form).findByText(/will not save until this is fixed/)).toBeInTheDocument();
+      expect(within(form).queryByLabelText("Command")).not.toBeInTheDocument();
+      await user.click(within(form).getByRole("button", { name: "Register server" }));
+      expect(api.createMcpServer).not.toHaveBeenCalled();
+    });
+
+    it("opens an existing stdio server on the local command option with its fields", async () => {
+      const user = userEvent.setup();
+      const server = makeServer({
+        connection: { command: "uvx", args: ["srv", "two words"], cwd: "/opt/x", env: { A: "b" }, secretEnvVar: "TOKEN" }
+      });
+      vi.mocked(api.fetchMcpServers).mockResolvedValue({ servers: [server], adapters: formAdapters, defaultProbeIntervalMs: 300000 });
+      mockDetail(server);
+      vi.mocked(api.updateMcpServer).mockResolvedValue({ server });
+      render(<McpServersPage isAdmin />);
+      await user.click(await screen.findByRole("button", { name: /GitHub tools/ }));
+      await user.click(await screen.findByRole("button", { name: "Edit" }));
+      const form = await screen.findByRole("form", { name: "Edit MCP server" });
+      expect(within(form).getByLabelText("Local command (stdio)")).toBeChecked();
+      expect(within(form).getByLabelText("Command")).toHaveValue("uvx");
+      expect(within(form).getByLabelText("Argument 2")).toHaveValue("two words");
+      expect(within(form).getByLabelText("Working folder (optional)")).toHaveValue("/opt/x");
+      expect(within(form).getByLabelText("Variable 1 value")).toHaveValue("b");
+
+      await user.click(within(form).getByRole("button", { name: "Remove argument 1" }));
+      await user.click(within(form).getByRole("button", { name: "Save changes" }));
+      await waitFor(() =>
+        expect(api.updateMcpServer).toHaveBeenCalledWith(
+          "mcp_1",
+          expect.objectContaining({
+            adapterId: "stdio_mcp",
+            connection: { command: "uvx", args: ["two words"], cwd: "/opt/x", env: { A: "b" }, secretEnvVar: "TOKEN" }
+          })
+        )
+      );
+    });
+
+    async function openEdit(user: ReturnType<typeof userEvent.setup>, connection: Record<string, unknown>) {
+      const server = makeServer({ connection });
+      vi.mocked(api.fetchMcpServers).mockResolvedValue({ servers: [server], adapters: formAdapters, defaultProbeIntervalMs: 300000 });
+      mockDetail(server);
+      vi.mocked(api.updateMcpServer).mockResolvedValue({ server });
+      render(<McpServersPage isAdmin />);
+      await user.click(await screen.findByRole("button", { name: /GitHub tools/ }));
+      await user.click(await screen.findByRole("button", { name: "Edit" }));
+      return screen.findByRole("form", { name: "Edit MCP server" });
+    }
+    const savedConnection = () => (vi.mocked(api.updateMcpServer).mock.calls[0]?.[1] as { connection: unknown }).connection;
+
+    it("keeps an empty-string argument through load, edit and save", async () => {
+      const user = userEvent.setup();
+      const form = await openEdit(user, { command: "x", args: ["a", "", "b"] });
+      expect(within(form).getByLabelText("Argument 2")).toHaveValue("");
+      expect(within(form).getByLabelText("Argument 2 is an empty argument")).toBeChecked();
+      await user.type(within(form).getByLabelText("Working folder (optional)"), "/srv");
+      await user.click(within(form).getByRole("button", { name: "Save changes" }));
+      await waitFor(() => expect(api.updateMcpServer).toHaveBeenCalled());
+      expect(savedConnection()).toEqual({ command: "x", args: ["a", "", "b"], cwd: "/srv" });
+    });
+
+    it("keeps a pasted empty argument, and drops an added blank row unless it is marked empty", async () => {
+      const user = userEvent.setup();
+      const form = await openForm(user);
+      await user.click(within(form).getByLabelText("Local command (stdio)"));
+      await user.click(within(form).getByLabelText("Paste a command line"));
+      await user.paste('cmd ""');
+      await user.click(within(form).getByRole("button", { name: "Fill command and arguments" }));
+      expect(JSON.parse(json(form))).toEqual({ command: "cmd", args: [""] });
+
+      await user.click(within(form).getByRole("button", { name: "+ Add argument" }));
+      expect(JSON.parse(json(form)).args).toEqual([""]);
+      await user.click(within(form).getByLabelText("Argument 2 is an empty argument"));
+      expect(JSON.parse(json(form)).args).toEqual(["", ""]);
+      await user.click(within(form).getByLabelText("Argument 2 is an empty argument"));
+      expect(JSON.parse(json(form)).args).toEqual([""]);
+    });
+
+    it("restores the saved connection after switching transport and back", async () => {
+      const user = userEvent.setup();
+      const original = { command: "uvx", args: ["srv", ""], env: { A: "b" }, secretEnvVar: "TOKEN", timeoutMs: 5000 };
+      const form = await openEdit(user, original);
+      await user.click(within(form).getByLabelText("Remote server (HTTP)"));
+      expect(within(form).getByLabelText("Endpoint URL")).toBeInTheDocument();
+      await user.click(within(form).getByLabelText("Local command (stdio)"));
+      expect(within(form).getByLabelText("Command")).toHaveValue("uvx");
+      await user.click(within(form).getByRole("button", { name: "Save changes" }));
+      await waitFor(() => expect(api.updateMcpServer).toHaveBeenCalled());
+      expect(savedConnection()).toEqual(original);
+    });
+
+    it("shows non-string args and env read-only and saves them unchanged", async () => {
+      const user = userEvent.setup();
+      const original = { command: "x", args: ["a", 1, { k: 2 }], env: { N: 3 } };
+      const form = await openEdit(user, original);
+      expect(within(form).getByText(/values the form can't edit; use Advanced: edit as JSON/)).toBeInTheDocument();
+      expect(within(form).getByLabelText("Argument 2")).toHaveAttribute("readonly");
+      expect(within(form).getByLabelText("Argument 2")).toHaveValue("1");
+      expect(within(form).queryByRole("button", { name: "+ Add argument" })).not.toBeInTheDocument();
+      await user.type(within(form).getByLabelText("Command"), "y");
+      await user.click(within(form).getByRole("button", { name: "Save changes" }));
+      await waitFor(() => expect(api.updateMcpServer).toHaveBeenCalled());
+      expect(savedConnection()).toEqual({ ...original, command: "xy" });
+    });
+
+    it("marks the empty command invalid, links its error, focuses it and shows an alert by the Save button", async () => {
+      const user = userEvent.setup();
+      const form = await openForm(user);
+      await user.type(within(form).getByLabelText("Name"), "Files");
+      await user.click(within(form).getByLabelText("Local command (stdio)"));
+      await user.click(within(form).getByRole("button", { name: "Register server" }));
+      const command = within(form).getByLabelText("Command");
+      await waitFor(() => expect(command).toHaveFocus());
+      expect(command).toHaveAttribute("aria-invalid", "true");
+      const describedBy = (command.getAttribute("aria-describedby") ?? "").split(" ");
+      expect(describedBy.map((id) => document.getElementById(id)?.textContent).join(" ")).toMatch(/needs a command/);
+      const alert = within(form).getByRole("alert");
+      expect(alert.compareDocumentPosition(within(form).getByRole("button", { name: "Register server" })) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      await user.type(command, "npx");
+      expect(command).not.toHaveAttribute("aria-invalid");
+    });
+
+    it("marks an empty endpoint invalid and focuses it", async () => {
+      const user = userEvent.setup();
+      const form = await openForm(user);
+      await user.type(within(form).getByLabelText("Name"), "Remote");
+      await user.clear(within(form).getByLabelText("Endpoint URL"));
+      await user.click(within(form).getByRole("button", { name: "Register server" }));
+      const endpoint = within(form).getByLabelText("Endpoint URL");
+      await waitFor(() => expect(endpoint).toHaveFocus());
+      expect(endpoint).toHaveAttribute("aria-invalid", "true");
+      expect(api.createMcpServer).not.toHaveBeenCalled();
+    });
+
+    it("offers the secret's variable name once an Auth secret is chosen and flags duplicate variables", async () => {
+      const user = userEvent.setup();
+      vi.mocked(api.fetchSecrets).mockResolvedValue([{ id: "sec_1", name: "Token" } as unknown as api.SecretListItem]);
+      const form = await openForm(user);
+      await user.click(within(form).getByLabelText("Local command (stdio)"));
+      expect(within(form).queryByLabelText(/Environment variable for the secret/)).not.toBeInTheDocument();
+      await user.selectOptions(await within(form).findByLabelText("Auth secret"), "sec_1");
+      await user.type(within(form).getByLabelText(/Environment variable for the secret/), "API_TOKEN");
+      expect(JSON.parse(json(form)).secretEnvVar).toBe("API_TOKEN");
+
+      await user.click(within(form).getByRole("button", { name: "+ Add variable" }));
+      await user.type(within(form).getByLabelText("Variable 1 name"), "A");
+      await user.click(within(form).getByRole("button", { name: "+ Add variable" }));
+      await user.type(within(form).getByLabelText("Variable 2 name"), "A");
+      expect(within(form).getByLabelText("Variable 2 name")).toHaveAttribute("aria-invalid", "true");
+      expect(within(form).getAllByText(/is used more than once/)).toHaveLength(2);
+    });
+
+    it("has a single Server type label", async () => {
+      const user = userEvent.setup();
+      const form = await openForm(user);
+      expect(within(form).getAllByText("Server type")).toHaveLength(1);
+      expect(within(form).getByRole("group", { name: "Server type" })).toBeInTheDocument();
+      expect(within(form).queryByRole("radiogroup")).not.toBeInTheDocument();
+    });
+
+    it("applies a preset's transport", async () => {
+      const user = userEvent.setup();
+      vi.mocked(api.fetchMcpPresets).mockResolvedValue({
+        presets: [
+          {
+            id: "fs",
+            name: "Filesystem",
+            description: "Files",
+            category: "Files",
+            serverAdapter: "stdio_mcp",
+            connection: { command: "npx", args: ["-y", "fs"] }
+          } as unknown as api.McpPreset
+        ]
+      });
+      const form = await openForm(user);
+      await user.selectOptions(await within(form).findByLabelText("Start from a preset"), "fs");
+      expect(within(form).getByLabelText("Local command (stdio)")).toBeChecked();
+      expect(within(form).getByLabelText("Command")).toHaveValue("npx");
+      expect(within(form).getByLabelText("Argument 2")).toHaveValue("fs");
+    });
   });
 
   it("offers config import and the playground to builders, and shows catalog errors", async () => {
