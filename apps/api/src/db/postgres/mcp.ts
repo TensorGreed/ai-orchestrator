@@ -39,6 +39,8 @@ import {
 import type { PoolClient } from "pg";
 import {
   mapMcpGatewayApproval,
+  mapMcpToolCallContext,
+  mcpToolCallContextValues,
   mapMcpToolPolicyExtras,
   normalizeMcpSamplingSettings,
   parseMcpPolicyDecision,
@@ -210,6 +212,7 @@ function mapMcpToolCall(row: Row): McpToolCallRecord {
     clientId: row.client_id ? toStr(row.client_id) : null,
     rejection:
       row.rejection === "rate_limited" || row.rejection === "concurrency_limited" || row.rejection === "circuit_open" ? row.rejection : null,
+    ...mapMcpToolCallContext(row),
     policyDecision: parseMcpPolicyDecision(row.policy_decision_json),
     createdAt: toStr(row.created_at)
   };
@@ -599,8 +602,8 @@ async function insertMcpToolCallRow(db: Queryable, call: McpToolCallWrite): Prom
        id, execution_id, workflow_id, node_id, registry_server_id, adapter_id, tool_name,
        started_at, duration_ms, ok, error, turn_input_tokens, turn_output_tokens,
        estimated_cost_usd, sampling_requests, sampling_input_tokens, sampling_output_tokens,
-       source, client_id, rejection, policy_decision_json, created_at
-     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)`,
+       source, client_id, rejection, policy_decision_json, args_summary_json, subject_role, subject_source, project_id, created_at
+     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26)`,
     [
       call.id,
       call.executionId,
@@ -623,6 +626,7 @@ async function insertMcpToolCallRow(db: Queryable, call: McpToolCallWrite): Prom
       call.clientId ?? null,
       call.rejection ?? null,
       call.policyDecision ? JSON.stringify(call.policyDecision) : null,
+      ...mcpToolCallContextValues(call),
       new Date().toISOString()
     ]
   );

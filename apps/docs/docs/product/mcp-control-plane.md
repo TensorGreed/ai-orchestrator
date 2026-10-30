@@ -41,7 +41,7 @@ Selecting a tool opens a drawer with:
 - its annotations as chips, its read-only classification and where that came from;
 - the input schema and the output schema, when the server declares one;
 - a **policy decision** for any role and project, evaluated by `POST /api/mcp/policies/evaluate`, with a link to the deciding rule;
-- the recent calls in the window (result, duration and where the call came from);
+- the recent calls in the window (result, duration and where the call came from; admins also see each call's [safe argument summary](./mcp-tool-call-telemetry.md) and role);
 - the workflows and nodes that use the tool, each opening the workflow in the editor.
 
 Escape or the close button returns focus to the tool you opened.

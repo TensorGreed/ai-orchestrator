@@ -43,7 +43,7 @@ import {
 import type { ProviderRegistry } from "@ai-orchestrator/provider-sdk";
 import { createMcpSamplingHandler } from "@ai-orchestrator/workflow-engine";
 import type { z } from "zod";
-import { DEFAULT_MCP_GATEWAY_APPROVAL_WINDOW_MS, type AppConfig } from "./config.js";
+import { DEFAULT_MCP_GATEWAY_APPROVAL_WINDOW_MS, toolArgumentSummariesEnabled, type AppConfig } from "./config.js";
 import type { AuditEventInput } from "./services/audit-service.js";
 import type { RunAccess } from "./run-access.js";
 import type { SafeUser, UserRole } from "./services/auth-service.js";
@@ -105,6 +105,7 @@ import {
 import { McpClientService, capRole, resolveMcpClientSubject, roleRank } from "./services/mcp-client-service.js";
 import { MCP_TELEMETRY_WINDOWS, parseMcpTelemetryWindow, rollupMcpToolCalls } from "./services/mcp-tool-telemetry.js";
 import { startSseHeartbeat } from "./sse-heartbeat.js";
+import { createToolArgumentSummarizer, toolArgumentHashKey } from "./services/tool-argument-summary.js";
 import type { Store } from "./db/store.js";
 import { filterAsync, mapAsync } from "./async-array.js";
 
@@ -295,6 +296,20 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
   const clientService = new McpClientService(store);
   const allowedOrigins = gatewayAllowedOrigins(config);
   const approvalWindowMs = config.MCP_GATEWAY_APPROVAL_WINDOW_MS ?? DEFAULT_MCP_GATEWAY_APPROVAL_WINDOW_MS;
+  // Phase 12.4 — a safe summary of each call's arguments and the client's role on its telemetry row (unless switched off).
+  const summarizeArguments = createToolArgumentSummarizer({
+    enabled: toolArgumentSummariesEnabled(config),
+    hashKey: toolArgumentHashKey(config.SECRET_MASTER_KEY_BASE64)
+  });
+  const callContext = (args: Record<string, unknown>, inputSchema: Record<string, unknown>, auth: AuthenticatedClient, toolset: McpToolset) =>
+    summarizeArguments
+      ? {
+          argsSummary: summarizeArguments(args, inputSchema),
+          subjectRole: auth.subject.role,
+          subjectSource: auth.subject.source,
+          projectId: toolset.projectId ?? null
+        }
+      : {};
 
   const sessions = new GatewaySessionManager({
     idleMs: config.MCP_GATEWAY_SESSION_IDLE_MS,
@@ -566,7 +581,8 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
         source: "gateway",
         clientId: auth.client.id,
         ...(refused ? { rejection: refused.reason } : {}),
-        ...(policyDecision ? { policyDecision } : {})
+        ...(policyDecision ? { policyDecision } : {}),
+        ...callContext(args, tool.inputSchema, auth, toolset)
       });
     } catch (error) {
       app.log.warn({ err: deps.redact(error instanceof Error ? error.message : String(error)) }, "Failed to record MCP gateway telemetry");
@@ -666,7 +682,8 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
         turnOutputTokens: null,
         estimatedCostUsd: null,
         source: "gateway",
-        clientId: auth.client.id
+        clientId: auth.client.id,
+        ...callContext(args, tool.inputSchema, auth, toolset)
       });
     } catch (error) {
       app.log.warn({ err: deps.redact(error instanceof Error ? error.message : String(error)) }, "Failed to record MCP gateway telemetry");

@@ -52,6 +52,8 @@ import type {
 import { DESTINATION_KINDS, DESTINATION_TIERS, type DataDestinationRow, DEFAULT_PROJECT_ID, GUARD_SIMULATION_JOB_DATASET_PREFIX, MCP_POLICY_KINDS, MCP_POLICY_ROLES, MCP_TOOL_HINT_CONDITIONS, REPLAY_CAPTURE_API_KEY_FILTER, REPLAY_CAPTURE_STATUSES } from "@ai-orchestrator/shared";
 import {
   mapMcpGatewayApproval,
+  mapMcpToolCallContext,
+  mcpToolCallContextValues,
   mapMcpToolPolicyExtras,
   normalizeMcpSamplingSettings,
   parseMcpPolicyDecision,
@@ -71,6 +73,7 @@ import {
   type McpSandboxStatus
 } from "@ai-orchestrator/shared";
 import { isEmptyDataLabels, labelsForUntrackedSave, mergeDataLabels, parseStoredDataLabels, releaseGateRestrictsToAdmins, type DataLabels } from "@ai-orchestrator/shared";
+import type { McpToolPolicySubject, ToolArgumentSummary } from "@ai-orchestrator/shared";
 import { queuedRunTimeoutMs, STUCK_JOB_MARGIN_MS } from "./queue-timeouts.js";
 import { AuditExportCursorMovedError, isForeignKeyViolation, ProjectNotEmptyError, StoreReferenceMissingError, ReleaseGateEnforcedError } from "./store-errors.js";
 import { clampLimit, LIMIT_MAX } from "./store-limits.js";
@@ -742,6 +745,14 @@ export interface McpToolCallRecord {
   rejection?: McpRuntimeRejection | null;
   /** Phase 12.4 — what the tool policy decided for the call (enforced and shadow); null when no rule matched. */
   policyDecision?: McpToolPolicyDecisionRecord | null;
+  /**
+   * Phase 12.4 — a safe summary of the call's arguments (no free text; personal data by class only), and the role,
+   * subject source and project the call ran under. All null when MCP_TOOL_ARGUMENT_SUMMARIES=false or not known.
+   */
+  argsSummary?: ToolArgumentSummary | null;
+  subjectRole?: McpPolicyRole | null;
+  subjectSource?: McpToolPolicySubject["source"] | null;
+  projectId?: string | null;
   createdAt: string;
 }
 
@@ -883,6 +894,10 @@ interface McpToolCallRow {
   client_id: string | null;
   rejection?: string | null;
   policy_decision_json?: string | null;
+  args_summary_json?: string | null;
+  subject_role?: string | null;
+  subject_source?: string | null;
+  project_id?: string | null;
   created_at: string;
 }
 
@@ -1077,6 +1092,7 @@ function mapMcpToolCall(row: McpToolCallRow): McpToolCallRecord {
     clientId: row.client_id ? toString(row.client_id) : null,
     rejection:
       row.rejection === "rate_limited" || row.rejection === "concurrency_limited" || row.rejection === "circuit_open" ? row.rejection : null,
+    ...mapMcpToolCallContext(row),
     policyDecision: parseMcpPolicyDecision(row.policy_decision_json),
     createdAt: toString(row.created_at)
   };
@@ -3241,6 +3257,11 @@ export class SqliteStore implements Store {
     // Phase 10.7 — calls refused before reaching the server, and per-user OAuth connections
     // to delegated servers (tokens only in the SecretService secret `secret_id` names).
     this.ensureColumn("mcp_tool_calls", "rejection", "TEXT");
+    // Phase 12.4 — a safe summary of each call's arguments, and the role, subject source and project it ran under.
+    this.ensureColumn("mcp_tool_calls", "args_summary_json", "TEXT");
+    this.ensureColumn("mcp_tool_calls", "subject_role", "TEXT");
+    this.ensureColumn("mcp_tool_calls", "subject_source", "TEXT");
+    this.ensureColumn("mcp_tool_calls", "project_id", "TEXT");
     this.exec(`
       CREATE TABLE IF NOT EXISTS mcp_user_oauth_connections (
         server_id TEXT NOT NULL,
@@ -11842,8 +11863,8 @@ export class SqliteStore implements Store {
          id, execution_id, workflow_id, node_id, registry_server_id, adapter_id, tool_name,
          started_at, duration_ms, ok, error, turn_input_tokens, turn_output_tokens,
          estimated_cost_usd, sampling_requests, sampling_input_tokens, sampling_output_tokens,
-         source, client_id, rejection, policy_decision_json, created_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         source, client_id, rejection, policy_decision_json, args_summary_json, subject_role, subject_source, project_id, created_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         call.id,
         call.executionId,
@@ -11866,6 +11887,7 @@ export class SqliteStore implements Store {
         call.clientId ?? null,
         call.rejection ?? null,
         call.policyDecision ? JSON.stringify(call.policyDecision) : null,
+        ...mcpToolCallContextValues(call),
         new Date().toISOString()
       ]
     );

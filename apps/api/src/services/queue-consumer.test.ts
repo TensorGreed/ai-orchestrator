@@ -3,7 +3,6 @@
  * claims with heartbeats, a lost lease stopping the job, self-fencing when renewals fail, the cancel backstop, the
  * shutdown drain (finish or give back without counting an attempt) and enqueue backpressure.
  */
-import { performance } from "node:perf_hooks";
 import { afterEach, describe, expect, it } from "vitest";
 import { createTestStore, type TestStore } from "../test-support/test-store.js";
 import {
@@ -338,20 +337,22 @@ describe("queue claim gates", () => {
   /** A consumer whose claims are counted, with fake probes. */
   async function gated(config: ConstructorParameters<typeof QueueConsumer>[1]) {
     test = await createTestStore({ kind: "sqlite" });
+    // The limit of each claim the consumer asks the store for, in order.
+    const claimLimits: number[] = [];
+    const dequeueNext = test.store.dequeueNext.bind(test.store);
+    test.store.dequeueNext = (limit) => {
+      claimLimits.push(limit ?? Number.NaN);
+      return dequeueNext(limit);
+    };
     const queue = new QueueConsumer(test.store, { pollIntervalMs: 15, concurrency: 5, ...config });
     consumers.push(queue);
     queue.setObserver({ log: () => undefined });
     const blocking = blockingHandler();
-    /** When each job was handed over: one poll claims its batch within one tick, the next poll comes 15 ms later. */
-    const claimedAt: number[] = [];
-    queue.setHandler(async (payload, context) => {
-      claimedAt.push(performance.now());
-      await blocking.handler(payload, context);
-    });
+    queue.setHandler(blocking.handler);
     for (let i = 0; i < 8; i += 1) await queue.enqueue({ workflowId: `wf-${i}` });
-    /** The first poll after the gate re-opened claimed exactly one job. */
-    const firstPollTookOne = () => claimedAt.length >= 2 && claimedAt[1]! - claimedAt[0]! >= 10;
-    return { queue, blocking, claimedAt, firstPollTookOne };
+    /** The first poll after the gate re-opened asked for exactly one job (no claim was made while it was closed). */
+    const firstPollTookOne = () => claimLimits[0] === 1 && claimLimits.length >= 2;
+    return { queue, blocking, claimLimits, firstPollTookOne };
   }
 
   it("memory: closes above the limit, stays closed between the resume threshold and the limit, then re-opens with one job", async () => {

@@ -105,6 +105,7 @@ import {
   resolveQueueSettings,
   resolveExecutionDispatch,
   ssoPostLoginUrl,
+  toolArgumentSummariesEnabled,
   type AppConfig
 } from "./config";
 import { redactSensitiveUrl } from "./services/url-redaction.js";
@@ -262,6 +263,7 @@ import {
   parseMcpTelemetryWindow,
   rollupMcpToolCalls
 } from "./services/mcp-tool-telemetry";
+import { createToolArgumentSummarizer, toolArgumentHashKey } from "./services/tool-argument-summary";
 import { VariablesService } from "./services/variables-service";
 import { WorkflowVersionService } from "./services/workflow-version-service";
 import { AuditService, type AuditActor, type AuditCategory, type AuditEventInput } from "./services/audit-service";
@@ -2541,6 +2543,11 @@ export async function createApp(
     };
   };
 
+  // Phase 12.4 — safe argument summaries on MCP tool-call telemetry rows (on unless MCP_TOOL_ARGUMENT_SUMMARIES=false).
+  const summarizeToolArguments = createToolArgumentSummarizer({
+    enabled: toolArgumentSummariesEnabled(config),
+    hashKey: toolArgumentHashKey(config.SECRET_MASTER_KEY_BASE64)
+  });
   const recordMcpToolCalls = async (executionId: string, workflow: Workflow, nodeResults: unknown) => {
     try {
       // Adapters of the registry entries, read once, for direct MCP Tool nodes that failed before reporting theirs.
@@ -2554,7 +2561,8 @@ export async function createApp(
         priceTurn: (providerId, model, inputTokens, outputTokens, cachedInputTokens) =>
           usageService.estimateCostUsd(providerId, model, inputTokens, outputTokens, cachedInputTokens),
         registryAdapterId: (registryServerId) => adapters.get(registryServerId),
-        redact: (value) => String(secretService.redact(value))
+        redact: (value) => String(secretService.redact(value)),
+        ...(summarizeToolArguments ? { summarizeArguments: summarizeToolArguments } : {})
       });
       await store.replaceMcpToolCallsForExecution(executionId, calls);
     } catch (err) {
@@ -12540,7 +12548,8 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     auditUser: async (request, user, event) => await audit(request, user, event),
     probeInBackground,
     sandboxSaveProblem,
-    serverSummary: async (server) => await mcpServerSummary(server)
+    serverSummary: async (server) => await mcpServerSummary(server),
+    ...(summarizeToolArguments ? { summarizeArguments: summarizeToolArguments } : {})
   });
 
   // Phase 10.5 — resources, prompts and elicitation requests.

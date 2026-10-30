@@ -8,7 +8,7 @@
  * migration to main's highest version + 1 (a one-line change of its `version`) and empties this set; a branch never
  * merges with a version at or below main's highest. Postgres refuses to start on a database that recorded a version
  * above one it never applied (MigrationGapError), so a mistake is loud rather than a silently skipped migration.
- * Reserved now: none (the queue lane's migration and the cluster signalling one follow each other).
+ * Nothing is reserved now: v47 (argument-aware rules) and v48 (argument summaries) both exist.
  */
 const RESERVED_UNTIL_MERGED = new Set<number>([]);
 

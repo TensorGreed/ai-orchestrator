@@ -261,6 +261,13 @@ const envSchema = z.object({
   MCP_CATALOG_MODE: z.enum(["merge", "exclusive"]).default("merge"),
   /** Admins may only register or import stdio servers whose command matches an approved catalog entry. */
   MCP_CATALOG_ENFORCE: booleanFromEnv.default(false),
+  /**
+   * Phase 12.4 — keep a safe summary of each MCP tool call's arguments on its telemetry row (an allow-list: small
+   * numbers, short tokens, schema enum values and identifier prefixes; every other value as its shape plus a keyed hash). Unset or blank = on;
+   * `false` switches it off and the summary, subject and project columns stay empty. Read it with
+   * toolArgumentSummariesEnabled().
+   */
+  MCP_TOOL_ARGUMENT_SUMMARIES: optionalBooleanFromEnv,
   // Phase 10.5 — OAuth 2.1 for remote MCP servers.
   /**
    * Base URL the authorization server redirects the admin's browser back to
@@ -577,6 +584,11 @@ const envSchema = z.object({
 });
 
 export type AppConfig = z.infer<typeof envSchema>;
+
+/** Phase 12.4 — argument summaries in MCP tool-call telemetry are on unless MCP_TOOL_ARGUMENT_SUMMARIES=false. */
+export function toolArgumentSummariesEnabled(config: Pick<AppConfig, "MCP_TOOL_ARGUMENT_SUMMARIES">): boolean {
+  return config.MCP_TOOL_ARGUMENT_SUMMARIES !== false;
+}
 
 /** Parses an environment-shaped record into AppConfig, applying the same defaults as the process environment. */
 export function parseConfig(env: Record<string, string | undefined>): AppConfig {

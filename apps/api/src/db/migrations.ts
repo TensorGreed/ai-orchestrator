@@ -2232,6 +2232,25 @@ export const MIGRATIONS: Migration[] = [
       ALTER TABLE mcp_tool_policies DROP COLUMN IF EXISTS mode;
       ALTER TABLE mcp_tool_policies DROP COLUMN IF EXISTS conditions_json;
     `
+  },
+  {
+    version: 48,
+    description: "Phase 12.4 — safe argument summaries in MCP tool-call telemetry (mcp_tool_calls summary, subject and project)",
+    // Written by the workflow and gateway telemetry writers unless MCP_TOOL_ARGUMENT_SUMMARIES=false; null otherwise and
+    // on rows written before. args_summary_json holds no argument text beyond short tokens, schema enum values and
+    // identifier prefixes; other values are keyed hashes (see packages/mcp-sdk/src/tool-argument-summary.ts). Rows follow the run history's retention.
+    up: `
+      ALTER TABLE mcp_tool_calls ADD COLUMN IF NOT EXISTS args_summary_json TEXT;
+      ALTER TABLE mcp_tool_calls ADD COLUMN IF NOT EXISTS subject_role TEXT;
+      ALTER TABLE mcp_tool_calls ADD COLUMN IF NOT EXISTS subject_source TEXT;
+      ALTER TABLE mcp_tool_calls ADD COLUMN IF NOT EXISTS project_id TEXT;
+    `,
+    down: `
+      ALTER TABLE mcp_tool_calls DROP COLUMN IF EXISTS project_id;
+      ALTER TABLE mcp_tool_calls DROP COLUMN IF EXISTS subject_source;
+      ALTER TABLE mcp_tool_calls DROP COLUMN IF EXISTS subject_role;
+      ALTER TABLE mcp_tool_calls DROP COLUMN IF EXISTS args_summary_json;
+    `
   }
 ];
 

@@ -455,7 +455,11 @@ export function registerMcpControlPlaneRoutes(deps: McpControlPlaneDeps): void {
           source: call.source,
           // A call from a run the user cannot read keeps its outcome but not its workflow or error text.
           workflowId: visibleCall ? call.workflowId || null : null,
-          error: visibleCall && call.error ? truncate(call.error) : null
+          error: visibleCall && call.error ? truncate(call.error) : null,
+          // Phase 12.4 — the call's safe argument summary and subject role, for admins only.
+          ...(user.role === "admin" && visibleCall
+            ? { argsSummary: call.argsSummary ?? null, subjectRole: call.subjectRole ?? null }
+            : {})
         });
         recentByTool.set(call.toolName, list);
       }
