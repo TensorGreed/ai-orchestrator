@@ -5501,6 +5501,22 @@ img.mcp-pg-block {
   grid-template-columns: minmax(0, 1fr) minmax(0, 2fr) auto;
 }
 
+.mcp-field-error {
+  color: var(--err);
+  font-weight: 600;
+}
+
+.mcp-row-empty,
+.mcp-row-note {
+  grid-column: 1 / -1;
+}
+
+.mcp-row input[aria-invalid="true"],
+.mcp-stdio-fields input[aria-invalid="true"],
+.mcp-form input[aria-invalid="true"] {
+  border-color: var(--err);
+}
+
 .mcp-paste {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;

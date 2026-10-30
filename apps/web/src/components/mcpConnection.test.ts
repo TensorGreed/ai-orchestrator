@@ -3,6 +3,8 @@ import {
   connectionFromDraft,
   connectionTemplate,
   draftFromConnection,
+  duplicateEnvNames,
+  hasUneditableValues,
   kindForAdapter,
   parseCommandLine,
   parseConnectionJson
@@ -55,6 +57,16 @@ describe("parseCommandLine", () => {
     expect(parseCommandLine("a \\")).toMatchObject({ ok: false });
   });
 
+  it("keeps a backslash literal before ordinary characters so Windows paths survive", () => {
+    expect(tokens(String.raw`C:\Users\me\server.exe --p C:\tmp`)).toEqual([String.raw`C:\Users\me\server.exe`, "--p", String.raw`C:\tmp`]);
+    expect(tokens(String.raw`"C:\Program Files\x.exe" arg`)).toEqual([String.raw`C:\Program Files\x.exe`, "arg"]);
+    expect(tokens(String.raw`a\ b \"q\" \'s\' \\`)).toEqual(["a b", '"q"', "'s'", "\\"]);
+  });
+
+  it("parses an empty quoted word as an empty argument", () => {
+    expect(tokens('cmd ""')).toEqual(["cmd", ""]);
+  });
+
   it("returns no tokens for blank input", () => {
     expect(tokens("   ")).toEqual([]);
   });
@@ -68,9 +80,46 @@ describe("stdio draft conversion", () => {
     expect(connectionFromDraft(base, draft)).toEqual(base);
   });
 
+  it("keeps empty-string arguments loaded from JSON through a load, edit, save round trip", () => {
+    const base = { command: "x", args: ["a", "", "b"] };
+    const draft = draftFromConnection(base);
+    draft.cwd = "/srv";
+    expect(connectionFromDraft(base, draft)).toEqual({ command: "x", args: ["a", "", "b"], cwd: "/srv" });
+  });
+
+  it("keeps an added blank row only when it is marked as an empty argument", () => {
+    const draft = draftFromConnection({ command: "x", args: ["a"] });
+    draft.args.push({ id: 90, value: "", allowEmpty: false });
+    expect(connectionFromDraft({ command: "x" }, draft).args).toEqual(["a"]);
+    draft.args[1] = { id: 90, value: "", allowEmpty: true };
+    expect(connectionFromDraft({ command: "x" }, draft).args).toEqual(["a", ""]);
+  });
+
+  it("passes args and env through untouched when they hold non-string values", () => {
+    const base = { command: "x", args: ["a", 1, { k: 1 }], env: { N: 2 }, secretEnvVar: "T" };
+    expect(hasUneditableValues(base)).toBe(true);
+    const draft = draftFromConnection(base);
+    draft.command = "y";
+    expect(connectionFromDraft(base, draft, { keepArgsAndEnv: true })).toEqual({ ...base, command: "y" });
+    expect(hasUneditableValues({ command: "x", args: ["a"], env: { A: "1" } })).toBe(false);
+    expect(hasUneditableValues({ command: "x", args: "a b" })).toBe(true);
+    expect(hasUneditableValues({ command: "x", env: ["A"] })).toBe(true);
+  });
+
+  it("finds duplicate environment names", () => {
+    const dupes = duplicateEnvNames([
+      { id: 1, key: "A", value: "1" },
+      { id: 2, key: " A ", value: "2" },
+      { id: 3, key: "B", value: "" },
+      { id: 4, key: "", value: "" },
+      { id: 5, key: "", value: "" }
+    ]);
+    expect([...dupes]).toEqual(["A"]);
+  });
+
   it("leaves out blank arguments, nameless variables and an empty folder", () => {
     const draft = draftFromConnection({ command: "x" });
-    draft.args.push({ id: 1, value: "" });
+    draft.args.push({ id: 1, value: "", allowEmpty: false });
     draft.env.push({ id: 2, key: " ", value: "v" });
     draft.cwd = "  ";
     expect(connectionFromDraft({ command: "x", args: ["old"], cwd: "/old" }, draft)).toEqual({ command: "x" });

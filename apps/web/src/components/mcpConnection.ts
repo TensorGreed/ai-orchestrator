@@ -40,6 +40,11 @@ export function parseConnectionJson(json: string): Record<string, unknown> | nul
 export interface ArgRow {
   id: number;
   value: string;
+  /**
+   * True when an empty value is a real argument: rows loaded from a saved connection or filled by the paste
+   * parser, and rows the user ticked "Empty argument" on. A blank row without it is dropped on save.
+   */
+  allowEmpty: boolean;
 }
 
 export interface EnvRow {
@@ -55,9 +60,25 @@ export interface StdioDraft {
   env: EnvRow[];
 }
 
+// Row ids only key React lists; they are not stable across reloads.
 let nextRowId = 1;
 export function newRowId(): number {
   return nextRowId++;
+}
+
+/**
+ * True when args or env hold something the rows cannot represent without changing it (non-string values, args
+ * that are not a list, env that is not a plain object). The form then shows them read-only and the JSON editor
+ * stays authoritative.
+ */
+export function hasUneditableValues(connection: Record<string, unknown>): boolean {
+  const { args, env } = connection;
+  if (args !== undefined && (!Array.isArray(args) || args.some((value) => typeof value !== "string"))) return true;
+  if (env !== undefined) {
+    if (!env || typeof env !== "object" || Array.isArray(env)) return true;
+    if (Object.values(env as Record<string, unknown>).some((value) => typeof value !== "string")) return true;
+  }
+  return false;
 }
 
 export function draftFromConnection(connection: Record<string, unknown>): StdioDraft {
@@ -68,22 +89,41 @@ export function draftFromConnection(connection: Record<string, unknown>): StdioD
   return {
     command: typeof connection.command === "string" ? connection.command : "",
     cwd: typeof connection.cwd === "string" ? connection.cwd : "",
-    args: args.map((value) => ({ id: newRowId(), value: String(value) })),
-    env: env.map(([key, value]) => ({ id: newRowId(), key, value: String(value) }))
+    args: args.map((value) => ({ id: newRowId(), value: typeof value === "string" ? value : "", allowEmpty: true })),
+    env: env.map(([key, value]) => ({ id: newRowId(), key, value: typeof value === "string" ? value : "" }))
   };
+}
+
+/** Names used by more than one environment row (trimmed, nameless rows ignored). */
+export function duplicateEnvNames(env: EnvRow[]): Set<string> {
+  const seen = new Set<string>();
+  const dupes = new Set<string>();
+  for (const row of env) {
+    const key = row.key.trim();
+    if (!key) continue;
+    if (seen.has(key)) dupes.add(key);
+    seen.add(key);
+  }
+  return dupes;
 }
 
 /**
  * Writes the stdio fields over `base`, keeping every other key (timeoutMs, secretEnvVar, ...).
- * Blank argument rows and environment rows without a name are left out.
+ * Blank argument rows are left out unless they are marked as intentionally empty; environment rows without a name
+ * are left out. With `keepArgsAndEnv` only command and folder are written and args/env pass through untouched.
  */
-export function connectionFromDraft(base: Record<string, unknown>, draft: StdioDraft): Record<string, unknown> {
+export function connectionFromDraft(
+  base: Record<string, unknown>,
+  draft: StdioDraft,
+  options: { keepArgsAndEnv?: boolean } = {}
+): Record<string, unknown> {
   const next: Record<string, unknown> = { ...base, command: draft.command };
-  const args = draft.args.map((row) => row.value).filter((value) => value !== "");
-  if (args.length > 0) next.args = args;
-  else delete next.args;
   if (draft.cwd.trim()) next.cwd = draft.cwd;
   else delete next.cwd;
+  if (options.keepArgsAndEnv) return next;
+  const args = draft.args.filter((row) => row.value !== "" || row.allowEmpty).map((row) => row.value);
+  if (args.length > 0) next.args = args;
+  else delete next.args;
   const env: Record<string, string> = {};
   for (const row of draft.env) {
     const key = row.key.trim();
@@ -97,9 +137,10 @@ export function connectionFromDraft(base: Record<string, unknown>, draft: StdioD
 export type CommandLineResult = { ok: true; tokens: string[] } | { ok: false; error: string };
 
 /**
- * Splits a pasted command line the way a POSIX shell would: whitespace separates words, single quotes keep
- * everything literally, double quotes allow \" and \\ escapes, and a backslash outside quotes escapes the next
- * character. Quoted empty strings ("" or '') stay as empty words.
+ * Splits a pasted command line like a POSIX shell, with one change so Windows paths survive: whitespace separates
+ * words, single quotes keep everything literally, double quotes allow \" and \\ escapes, and outside quotes a
+ * backslash escapes only a quote, a backslash or whitespace. Before any other character it is literal, so
+ * C:\Users\me\server.exe stays as typed. Quoted empty strings ("" or '') stay as empty words.
  */
 export function parseCommandLine(input: string): CommandLineResult {
   const tokens: string[] = [];
@@ -129,9 +170,14 @@ export function parseCommandLine(input: string): CommandLineResult {
       inWord = true;
     } else if (ch === "\\") {
       if (i + 1 >= input.length) return { ok: false, error: "The command line ends with a lone backslash." };
-      current += input[i + 1];
+      const next = input[i + 1] as string;
+      if (next === '"' || next === "'" || next === "\\" || /\s/.test(next)) {
+        current += next;
+        i += 1;
+      } else {
+        current += ch;
+      }
       inWord = true;
-      i += 1;
     } else if (/\s/.test(ch)) {
       if (inWord) {
         tokens.push(current);

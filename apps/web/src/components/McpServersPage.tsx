@@ -400,6 +400,10 @@ function McpServerForm({
     () => adapters.filter((adapter) => kindForAdapter(adapter.id) === "other"),
     [adapters]
   );
+  const drafts = useRef<Partial<Record<ConnectionKind, { adapterId: string; connectionJson: string }>>>({});
+  const formRef = useRef<HTMLFormElement>(null);
+  const [submitted, setSubmitted] = useState(false);
+  const [focusNonce, setFocusNonce] = useState(0);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const jsonInvalid = parseConnectionJson(connectionJson) === null;
   const [secretId, setSecretId] = useState(initial?.secretId ?? "");
@@ -432,7 +436,15 @@ function McpServerForm({
   /** Picking a transport swaps the adapter and starts from that transport's own connection template. */
   const chooseKind = (next: ConnectionKind) => {
     if (next === kind) return;
+    // Remember what the transport being left held, so switching back restores it instead of a blank template.
+    drafts.current[kind] = { adapterId, connectionJson };
     setKind(next);
+    const remembered = drafts.current[next];
+    if (remembered) {
+      setAdapterId(remembered.adapterId);
+      setConnectionJson(remembered.connectionJson);
+      return;
+    }
     if (next === "http") setAdapterId(HTTP_ADAPTER_ID);
     else if (next === "stdio") setAdapterId(STDIO_ADAPTER_ID);
     else setAdapterId(otherAdapters[0]?.id ?? "");
@@ -470,12 +482,30 @@ function McpServerForm({
     setPresetNote([preset.notes, preset.credentialHint?.description].filter(Boolean).join(" ") || null);
   };
 
+  // Field-level problems, derived from the current connection once a save was attempted so they clear as soon as fixed.
+  const parsedConnection = parseConnectionJson(connectionJson);
+  const endpointError =
+    submitted && adapterId === HTTP_ADAPTER_ID && parsedConnection && !(typeof parsedConnection.endpoint === "string" && parsedConnection.endpoint.trim())
+      ? "A remote server needs an endpoint URL."
+      : null;
+  const commandError =
+    submitted && adapterId === STDIO_ADAPTER_ID && parsedConnection && !(typeof parsedConnection.command === "string" && parsedConnection.command.trim())
+      ? "A local command server needs a command."
+      : null;
+
+  useEffect(() => {
+    if (focusNonce === 0) return;
+    formRef.current?.querySelector<HTMLElement>('[aria-invalid="true"]')?.focus();
+  }, [focusNonce]);
+
   const handleSubmit = async (event: React.FormEvent) => {
     event.preventDefault();
     setError(null);
     const connection = parseConnectionJson(connectionJson);
     if (!connection) {
+      setSubmitted(true);
       setError("Connection must be a JSON object.");
+      setFocusNonce((n) => n + 1);
       return;
     }
     if (!adapterId) {
@@ -483,11 +513,15 @@ function McpServerForm({
       return;
     }
     if (adapterId === HTTP_ADAPTER_ID && (typeof connection.endpoint !== "string" || !connection.endpoint.trim())) {
+      setSubmitted(true);
       setError("A remote server needs an endpoint URL.");
+      setFocusNonce((n) => n + 1);
       return;
     }
     if (adapterId === STDIO_ADAPTER_ID && (typeof connection.command !== "string" || !connection.command.trim())) {
+      setSubmitted(true);
       setError("A local command server needs a command.");
+      setFocusNonce((n) => n + 1);
       return;
     }
     const minutes = intervalMinutes.trim() ? Number(intervalMinutes) : null;
@@ -560,12 +594,7 @@ function McpServerForm({
   };
 
   return (
-    <form onSubmit={(event) => void handleSubmit(event)} className="kb-create-form mcp-form" aria-label={initial ? "Edit MCP server" : "Register MCP server"}>
-      {error && (
-        <div className="settings-error" role="alert">
-          {error}
-        </div>
-      )}
+    <form ref={formRef} onSubmit={(event) => void handleSubmit(event)} className="kb-create-form mcp-form" aria-label={initial ? "Edit MCP server" : "Register MCP server"}>
       {!initial && presets.length > 0 && (
         <div className="kb-form-row">
           <label>
@@ -598,9 +627,9 @@ function McpServerForm({
           <input type="text" value={description} onChange={(e) => setDescription(e.target.value)} placeholder="What agents use it for" />
         </label>
       </div>
-      <fieldset className="mcp-kind" aria-label="Server type">
+      <fieldset className="mcp-kind">
         <legend>Server type</legend>
-        <div className="mcp-kind-options" role="radiogroup" aria-label="Server type">
+        <div className="mcp-kind-options">
           <label className="mcp-check">
             <input type="radio" name="mcp-kind" checked={kind === "http"} onChange={() => chooseKind("http")} />
             Remote server (HTTP)
@@ -636,8 +665,15 @@ function McpServerForm({
           </label>
         </div>
       )}
-      {kind === "http" && <McpHttpFields connectionJson={connectionJson} onConnectionJsonChange={setConnectionJson} />}
-      {kind === "stdio" && <McpStdioFields connectionJson={connectionJson} onConnectionJsonChange={setConnectionJson} />}
+      {kind === "http" && <McpHttpFields connectionJson={connectionJson} onConnectionJsonChange={setConnectionJson} error={endpointError} />}
+      {kind === "stdio" && (
+        <McpStdioFields
+          connectionJson={connectionJson}
+          onConnectionJsonChange={setConnectionJson}
+          commandError={commandError}
+          secretSelected={Boolean(secretId)}
+        />
+      )}
       <div className="kb-form-row">
         <label>
           Auth secret
@@ -749,6 +785,11 @@ function McpServerForm({
           onFallbackChange={setDelegatedFallback}
           oauth={oauthConnection}
         />
+      )}
+      {error && (
+        <div className="settings-error" role="alert">
+          {error}
+        </div>
       )}
       <div className="kb-form-row mcp-form-actions">
         <button type="submit" className="pg-btn primary" disabled={busy || !name.trim()}>

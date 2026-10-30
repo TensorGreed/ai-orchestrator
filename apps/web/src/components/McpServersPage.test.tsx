@@ -353,7 +353,7 @@ describe("McpServersPage", () => {
       await user.type(within(form).getByLabelText("Name"), "Files");
       await user.click(within(form).getByLabelText("Local command (stdio)"));
       await user.click(within(form).getByRole("button", { name: "Register server" }));
-      expect(await within(form).findByText("A local command server needs a command.")).toBeInTheDocument();
+      expect(await within(form).findByRole("alert")).toHaveTextContent("A local command server needs a command.");
       expect(api.createMcpServer).not.toHaveBeenCalled();
 
       await user.type(within(form).getByLabelText("Command"), "npx");
@@ -447,6 +447,128 @@ describe("McpServersPage", () => {
           })
         )
       );
+    });
+
+    async function openEdit(user: ReturnType<typeof userEvent.setup>, connection: Record<string, unknown>) {
+      const server = makeServer({ connection });
+      vi.mocked(api.fetchMcpServers).mockResolvedValue({ servers: [server], adapters: formAdapters, defaultProbeIntervalMs: 300000 });
+      mockDetail(server);
+      vi.mocked(api.updateMcpServer).mockResolvedValue({ server });
+      render(<McpServersPage isAdmin />);
+      await user.click(await screen.findByRole("button", { name: /GitHub tools/ }));
+      await user.click(await screen.findByRole("button", { name: "Edit" }));
+      return screen.findByRole("form", { name: "Edit MCP server" });
+    }
+    const savedConnection = () => (vi.mocked(api.updateMcpServer).mock.calls[0]?.[1] as { connection: unknown }).connection;
+
+    it("keeps an empty-string argument through load, edit and save", async () => {
+      const user = userEvent.setup();
+      const form = await openEdit(user, { command: "x", args: ["a", "", "b"] });
+      expect(within(form).getByLabelText("Argument 2")).toHaveValue("");
+      expect(within(form).getByLabelText("Argument 2 is an empty argument")).toBeChecked();
+      await user.type(within(form).getByLabelText("Working folder (optional)"), "/srv");
+      await user.click(within(form).getByRole("button", { name: "Save changes" }));
+      await waitFor(() => expect(api.updateMcpServer).toHaveBeenCalled());
+      expect(savedConnection()).toEqual({ command: "x", args: ["a", "", "b"], cwd: "/srv" });
+    });
+
+    it("keeps a pasted empty argument, and drops an added blank row unless it is marked empty", async () => {
+      const user = userEvent.setup();
+      const form = await openForm(user);
+      await user.click(within(form).getByLabelText("Local command (stdio)"));
+      await user.click(within(form).getByLabelText("Paste a command line"));
+      await user.paste('cmd ""');
+      await user.click(within(form).getByRole("button", { name: "Fill command and arguments" }));
+      expect(JSON.parse(json(form))).toEqual({ command: "cmd", args: [""] });
+
+      await user.click(within(form).getByRole("button", { name: "+ Add argument" }));
+      expect(JSON.parse(json(form)).args).toEqual([""]);
+      await user.click(within(form).getByLabelText("Argument 2 is an empty argument"));
+      expect(JSON.parse(json(form)).args).toEqual(["", ""]);
+      await user.click(within(form).getByLabelText("Argument 2 is an empty argument"));
+      expect(JSON.parse(json(form)).args).toEqual([""]);
+    });
+
+    it("restores the saved connection after switching transport and back", async () => {
+      const user = userEvent.setup();
+      const original = { command: "uvx", args: ["srv", ""], env: { A: "b" }, secretEnvVar: "TOKEN", timeoutMs: 5000 };
+      const form = await openEdit(user, original);
+      await user.click(within(form).getByLabelText("Remote server (HTTP)"));
+      expect(within(form).getByLabelText("Endpoint URL")).toBeInTheDocument();
+      await user.click(within(form).getByLabelText("Local command (stdio)"));
+      expect(within(form).getByLabelText("Command")).toHaveValue("uvx");
+      await user.click(within(form).getByRole("button", { name: "Save changes" }));
+      await waitFor(() => expect(api.updateMcpServer).toHaveBeenCalled());
+      expect(savedConnection()).toEqual(original);
+    });
+
+    it("shows non-string args and env read-only and saves them unchanged", async () => {
+      const user = userEvent.setup();
+      const original = { command: "x", args: ["a", 1, { k: 2 }], env: { N: 3 } };
+      const form = await openEdit(user, original);
+      expect(within(form).getByText(/values the form can't edit; use Advanced: edit as JSON/)).toBeInTheDocument();
+      expect(within(form).getByLabelText("Argument 2")).toHaveAttribute("readonly");
+      expect(within(form).getByLabelText("Argument 2")).toHaveValue("1");
+      expect(within(form).queryByRole("button", { name: "+ Add argument" })).not.toBeInTheDocument();
+      await user.type(within(form).getByLabelText("Command"), "y");
+      await user.click(within(form).getByRole("button", { name: "Save changes" }));
+      await waitFor(() => expect(api.updateMcpServer).toHaveBeenCalled());
+      expect(savedConnection()).toEqual({ ...original, command: "xy" });
+    });
+
+    it("marks the empty command invalid, links its error, focuses it and shows an alert by the Save button", async () => {
+      const user = userEvent.setup();
+      const form = await openForm(user);
+      await user.type(within(form).getByLabelText("Name"), "Files");
+      await user.click(within(form).getByLabelText("Local command (stdio)"));
+      await user.click(within(form).getByRole("button", { name: "Register server" }));
+      const command = within(form).getByLabelText("Command");
+      await waitFor(() => expect(command).toHaveFocus());
+      expect(command).toHaveAttribute("aria-invalid", "true");
+      const describedBy = (command.getAttribute("aria-describedby") ?? "").split(" ");
+      expect(describedBy.map((id) => document.getElementById(id)?.textContent).join(" ")).toMatch(/needs a command/);
+      const alert = within(form).getByRole("alert");
+      expect(alert.compareDocumentPosition(within(form).getByRole("button", { name: "Register server" })) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      await user.type(command, "npx");
+      expect(command).not.toHaveAttribute("aria-invalid");
+    });
+
+    it("marks an empty endpoint invalid and focuses it", async () => {
+      const user = userEvent.setup();
+      const form = await openForm(user);
+      await user.type(within(form).getByLabelText("Name"), "Remote");
+      await user.clear(within(form).getByLabelText("Endpoint URL"));
+      await user.click(within(form).getByRole("button", { name: "Register server" }));
+      const endpoint = within(form).getByLabelText("Endpoint URL");
+      await waitFor(() => expect(endpoint).toHaveFocus());
+      expect(endpoint).toHaveAttribute("aria-invalid", "true");
+      expect(api.createMcpServer).not.toHaveBeenCalled();
+    });
+
+    it("offers the secret's variable name once an Auth secret is chosen and flags duplicate variables", async () => {
+      const user = userEvent.setup();
+      vi.mocked(api.fetchSecrets).mockResolvedValue([{ id: "sec_1", name: "Token" } as unknown as api.SecretListItem]);
+      const form = await openForm(user);
+      await user.click(within(form).getByLabelText("Local command (stdio)"));
+      expect(within(form).queryByLabelText(/Environment variable for the secret/)).not.toBeInTheDocument();
+      await user.selectOptions(await within(form).findByLabelText("Auth secret"), "sec_1");
+      await user.type(within(form).getByLabelText(/Environment variable for the secret/), "API_TOKEN");
+      expect(JSON.parse(json(form)).secretEnvVar).toBe("API_TOKEN");
+
+      await user.click(within(form).getByRole("button", { name: "+ Add variable" }));
+      await user.type(within(form).getByLabelText("Variable 1 name"), "A");
+      await user.click(within(form).getByRole("button", { name: "+ Add variable" }));
+      await user.type(within(form).getByLabelText("Variable 2 name"), "A");
+      expect(within(form).getByLabelText("Variable 2 name")).toHaveAttribute("aria-invalid", "true");
+      expect(within(form).getAllByText(/is used more than once/)).toHaveLength(2);
+    });
+
+    it("has a single Server type label", async () => {
+      const user = userEvent.setup();
+      const form = await openForm(user);
+      expect(within(form).getAllByText("Server type")).toHaveLength(1);
+      expect(within(form).getByRole("group", { name: "Server type" })).toBeInTheDocument();
+      expect(within(form).queryByRole("radiogroup")).not.toBeInTheDocument();
     });
 
     it("applies a preset's transport", async () => {
