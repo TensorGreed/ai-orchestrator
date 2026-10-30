@@ -235,6 +235,14 @@ function isLocationKey(key: string): boolean {
 }
 
 /**
+ * True for a location key (`lat`, `lng`, `geo`, ...): numbers under it, or
+ * under any key below it, are kept rounded to one decimal.
+ */
+export function isToolArgumentLocationKey(key: string): boolean {
+  return isLocationKey(key);
+}
+
+/**
  * Ids, hashes, keys and passphrases, on lower-case text. Random-looking when
  * it starts with a known secret prefix, or any part between `_`, `-` or `.`:
  *   - is longer than 16 characters;

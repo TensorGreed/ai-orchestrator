@@ -62,3 +62,4 @@ export function createDefaultMCPRegistry(options?: DefaultMCPRegistryOptions): M
   registry.register(new SnapshotMockMCPServerAdapter(options?.snapshots));
   return registry;
 }
+export * from "./tool-policy-simulation";

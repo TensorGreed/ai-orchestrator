@@ -680,6 +680,17 @@ function valueSatisfies(condition: McpPolicyCondition, slot: ResolvedSlot, budge
   }
 }
 
+/**
+ * Phase 12.4 (simulation) — one value against a condition's operator, read
+ * exactly as `evaluatePolicyCondition` reads each value a path resolves to:
+ * `true` / `false`, or `"unreadable"` for a value the operator cannot read.
+ * The policy simulator uses it on the values an argument summary keeps, so
+ * a kept value compares the same way it does at call time.
+ */
+export function evaluatePolicyConditionValue(condition: McpPolicyCondition, value: unknown): boolean | "unreadable" {
+  return valueSatisfies(condition, { value, holder: null, key: "" }, createPolicyEvaluationBudget());
+}
+
 const NEGATED_OPS = new Set<McpPolicyCondition["op"]>(["not_one_of", "label_absent"]);
 
 /**
@@ -870,6 +881,17 @@ function decideOutcome(matched: readonly McpToolPolicyRule[], possibleCarveOuts:
   const deciding =
     overriddenDenies.find((entry) => entry.by.effect === "allow")?.by ?? overriddenApprovals[0]?.by ?? matchedAllows[0] ?? carvedToApproval[0];
   return { effect: "allow", ...(deciding ? { rule: deciding } : {}), overriddenDenies, overriddenApprovals };
+}
+
+/**
+ * Phase 12.4 (simulation) — the precedence step of `evaluateMcpToolPolicy`
+ * (deny > require_approval > allow, with strictly narrower carve-outs) over
+ * rules already known to match the call. The caller passes the enforced
+ * rules only; the result is the enforced outcome and the rule deciding it.
+ */
+export function decidePolicyOutcome(matched: readonly McpToolPolicyRule[]): { effect: McpToolPolicyEffect; rule?: McpToolPolicyRule } {
+  const outcome = decideOutcome(matched, []);
+  return { effect: outcome.effect, ...(outcome.rule && matched.length > 0 ? { rule: outcome.rule } : {}) };
 }
 
 export function evaluateMcpToolPolicy(
