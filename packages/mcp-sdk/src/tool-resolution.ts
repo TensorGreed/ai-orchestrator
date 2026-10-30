@@ -17,7 +17,7 @@ export interface ResolvedToolSet {
    * structured result when the tool returned one (with its text content when
    * that says more than the JSON), otherwise the text output.
    */
-  invokeByExposedName: (toolName: string, args: Record<string, unknown>) => Promise<unknown>;
+  invokeByExposedName: (toolName: string, args: Record<string, unknown>, call?: McpToolAccessCallContext) => Promise<unknown>;
 }
 
 /** What the access check sees about one discovered tool. */
@@ -33,8 +33,28 @@ export interface McpToolAccessSubjectTool {
   serverLabel?: string;
 }
 
+/** Phase 12.4 — what the call-time check knows about the call beyond the tool. */
+export interface McpToolAccessCallContext {
+  /** The run's data labels at the call; absent when the run does not track labels. */
+  dataLabels?: { provenance: readonly string[]; dataClasses: readonly string[] } | null;
+  /** The agent's id for this tool call. */
+  toolCallId?: string;
+}
+
+/** Phase 12.4 — the call being checked: its arguments plus the call context. Absent at discovery. */
+export interface McpToolAccessCall extends McpToolAccessCallContext {
+  arguments: Record<string, unknown>;
+}
+
+/**
+ * Refuses denied tools. Called without `call` at discovery (rules with
+ * conditions cannot decide yet, so they never hide a tool) and with the
+ * call's arguments before each call. A require_approval outcome is not a
+ * refusal: the caller hands the call off for approval before invoking it.
+ */
 export type McpToolAccessCheck = (
-  tool: McpToolAccessSubjectTool
+  tool: McpToolAccessSubjectTool,
+  call?: McpToolAccessCall
 ) => { allowed: true } | { allowed: false; hidden: McpHiddenTool; message: string };
 
 export interface ResolveMCPToolsOptions {
@@ -138,7 +158,7 @@ export async function resolveMCPTools(
     describeBlocked(toolName: string) {
       return blocked.get(toolName)?.message;
     },
-    async invokeByExposedName(toolName: string, args: Record<string, unknown>) {
+    async invokeByExposedName(toolName: string, args: Record<string, unknown>, call?: McpToolAccessCallContext) {
       const refused = blocked.get(toolName);
       if (refused) {
         throw new McpToolPolicyError(refused.message, refused.hidden);
@@ -148,14 +168,17 @@ export async function resolveMCPTools(
         throw new Error(`Unknown resolved MCP tool '${toolName}'`);
       }
       if (options.accessCheck) {
-        // Re-check at call time, so no call path can skip the policy.
-        const verdict = options.accessCheck({
-          adapterId: target.serverConfig.serverId,
-          ...(target.serverConfig.registryServerId ? { registryServerId: target.serverConfig.registryServerId } : {}),
-          toolName: target.originalName,
-          ...(target.serverConfig.label ? { serverLabel: target.serverConfig.label } : {}),
-          ...(target.annotations ? { annotations: target.annotations } : {})
-        });
+        // Re-check at call time with the arguments, so no call path can skip the policy.
+        const verdict = options.accessCheck(
+          {
+            adapterId: target.serverConfig.serverId,
+            ...(target.serverConfig.registryServerId ? { registryServerId: target.serverConfig.registryServerId } : {}),
+            toolName: target.originalName,
+            ...(target.serverConfig.label ? { serverLabel: target.serverConfig.label } : {}),
+            ...(target.annotations ? { annotations: target.annotations } : {})
+          },
+          { ...call, arguments: args }
+        );
         if (!verdict.allowed) {
           throw new McpToolPolicyError(verdict.message, verdict.hidden);
         }
