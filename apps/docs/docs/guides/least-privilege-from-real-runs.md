@@ -43,27 +43,36 @@ Below the rules, **Least privilege from real runs** has a **Suggest rules** butt
 
 The rules name the workflow or client and apply to builders, operators and viewers, never to admins.
 
-Usable calls are calls that reached the server, made with a recorded non-admin role. Left out are:
+Usable calls are calls that reached the server, made by anyone but an admin. A call whose role was not recorded still counts: the tool was used, so the deny must not block it. Left out are:
 
+- admins' own calls;
 - playground calls;
 - calls refused by a rule, the guard or a runtime limit;
-- calls that failed before they were sent;
+- calls that failed before they were sent, or before they could connect (connection refused, unknown host, connect timeout);
 - the gateway's own rows for workflow tools.
 
-Free text and hashed values never become constraints: their real value is unknown, so a rule cannot name it. Open **Evidence** on a suggestion to see the calls behind it, the constraints, and why other arguments got none.
+Suggestions are never built from part of the calls. When the last 30 days hold more than 50,000 calls, nothing is suggested and the status line says so: a tool used before the oldest call read would otherwise be denied.
 
-Suggestions only tighten. If an allow would carve an exception out of an existing deny or needs-approval rule, the suggestion is skipped. The check runs again when you accept, in case the rules changed in between. A dismissed proposal is not offered again unless the calls change it. Generating is rate-limited to once every 30 seconds per API instance.
+Servers configured inline on nodes share their adapter id, so a suggestion for one covers every inline server of that adapter, with their tools taken together. The evidence says so.
 
-The status line says how many calls were read and why some callers got nothing (too few calls, would loosen, dismissed before, already in place).
+Free text and hashed values never become constraints: their real value is unknown, so a rule cannot name it. Neither does text the summary kept in a normalised form (surrounding spaces, full-width characters), since the rule would name a value the call did not send. Open **Evidence** on a suggestion to see the calls behind it, the constraints, and why other arguments got none.
+
+Suggestions only tighten. If an allow would carve an exception out of an existing deny or needs-approval rule, the suggestion is skipped. The check runs again when you accept, and again when you enforce, in case the rules changed in between. A dismissed proposal is not offered again unless the calls change it. An accepted one is not offered again while its rules are in place; delete them and it can come back. Generating is rate-limited to once every 30 seconds per API instance.
+
+Once a caller's suggestion is accepted, a later run of **Suggest rules** that finds it using new tools offers **Update accepted rules**: allows for just the new tools, added in shadow next to the accepted rules. Their own deny is meant to be carved by them, so it does not count as a rule they loosen; any other deny still does.
+
+The status line says how many calls were read and why some callers got nothing (too few calls, would loosen, dismissed before, already accepted, already in place).
 
 ## 3. Preview, accept in shadow, enforce
 
 On a suggestion:
 
 1. **Preview impact** simulates the current rules plus the suggested ones, as if enforced, on that server's calls of the last 30 days. You should see the scope's calls as *Unchanged*; anything *Newly denied* is a call it made that the rules would now block.
-2. **Accept in shadow mode** adds the rules in **shadow** mode: every call records what they would have decided, nothing is applied. The audit log records `mcp_policy.suggestion_accepted` and a `mcp_policy.created` per rule.
-3. While they run in shadow, each shadow rule shows **Last 7 days: matched N calls, would have changed M**. These counts come from the decisions recorded on each call (`GET /api/mcp/policies/shadow-hits`).
-4. **Enforce** switches the rules to enforce, allows first. It is marked ready after 7 days in shadow with no changed outcome. You can enforce earlier; L2M asks first, and the audit event `mcp_policy.enforced` records the shadow counts at that moment. Any single shadow rule also has an **Enforce** button.
+2. **Accept in shadow mode** adds the rules in **shadow** mode: every call records what they would have decided, nothing is applied. If the suggestion was regenerated after you looked at it, accepting is refused so you can review the new version. The audit log records `mcp_policy.suggestion_accepted` and a `mcp_policy.created` per rule.
+3. While they run in shadow, each shadow rule shows **Last 7 days: matched N calls; if you enforce just this rule, M would change**: the rules enforced now plus that one rule, without the other shadow rules. So a suggestion's deny shows every call it matched, because on its own it would block them; its allows are what carve them out. The suggestion itself shows what its rules would change taken together. These counts come from the decisions recorded on each call (`GET /api/mcp/policies/shadow-hits`).
+4. **Enforce suggestion** switches all of its rules to enforce in one step, allows first. It is marked ready after 7 days in shadow with no changed outcome, and never when the count stopped at the scan cap (it says *not ready (scan capped)*). You can enforce earlier; L2M asks first, and the audit event `mcp_policy.enforced` records the shadow counts at that moment.
+
+A suggestion's rules have no **Enforce** button of their own. Enforcing its deny alone through the API is refused while an allow of the same caller's accepted rules is still in shadow, since it would block the tools the caller uses. Enforcing is also refused when an allow would carve an exception out of a rule enforced now, such as a deny added during an incident after the suggestion was accepted. Each rule switches only while it is still in shadow, so two admins enforcing at once change and audit it once. Shadow rules you wrote yourself keep their own **Enforce** button.
 
 **Dismiss** keeps the decision on record (`mcp_policy.suggestion_dismissed`).
 
@@ -71,15 +80,19 @@ On a suggestion:
 
 Simulation reuses the policy evaluator's rules and reads them three-valued: a rule matches, does not match, or *cannot be decided from the summary*. A kept value is compared directly. A hashed value can prove equality or inequality, because L2M hashes the literal in the rule with the same key and compares. Text operators on a hashed value, a dropped list, a truncated summary or an unknown label make the rule undecided. The call is then tried with each undecided rule matching and not matching. It gets a bucket only when every reading agrees, otherwise it is *undetermined*. So a call is never reported as allowed or denied when its summary cannot tell.
 
-Some things are approximated:
+Summaries say when they cannot be compared exactly ([summary format 3](../product/mcp-tool-call-telemetry.md#format-3-marks)), and simulation then leaves the condition undecided:
 
-- Kept text is compared as summarised (Unicode-normalised, trimmed).
-- Kept numbers are rounded to 4 decimal places.
-- Location-like numbers are rounded to 1 decimal place and compared with that margin.
-- Annotation-hint rules use the tools' current snapshots.
+- text kept or hashed in a different form from the one rules compare (surrounding spaces, full-width or other compatibility characters);
+- numbers rounded to 4 decimal places, or to 1 under a location key such as `lat` (kept location numbers are still compared with a ±0.05 margin for `<`, `>` and `between`; hashed ones never);
+- hashes made under another master key, after a key rotation;
+- summaries written before format 3: their kept text, non-integer numbers and hashes.
+
+Two more limits:
+
+- Annotation-hint rules use the tools' current snapshots, and are undecided for calls made before the snapshot was taken or the admin mark was set.
 - A run that a gateway client started records its workflow but not the client, so client-scoped rules are undetermined for it.
 
-Scans read newest first, in pages of 1,000, up to 50,000 calls. When a window holds more, the report says how far back it got. Measured with 100,000 recorded calls, a 30-day simulation took about 1.6 s on SQLite and 3.3 s on Postgres.
+Scans read newest first, in pages of 1,000, up to 50,000 calls. When a window holds more, the report says how far back it got. A simulation also stops early, and says so, when its rules need more evaluation work than one simulation may do. Measured with 100,000 recorded calls, a 30-day simulation took about 1.6 s on SQLite and 3.3 s on Postgres. Each simulation is recorded in the audit log as `mcp_policy.simulated`, with its rule hashes and filters, because a simulation can confirm a guessed argument value against the hashed ones.
 
 ## What it does not do
 
