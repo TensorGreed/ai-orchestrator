@@ -101,6 +101,14 @@ export const ALLOWED_DIFFERENCES: ReadonlyArray<SchemaDifference & { reason: str
     reason: "Postgres full-text search: the GIN index over content_tsv (v19)."
   },
   {
+    kind: "index-shape",
+    table: "mcp_tool_calls",
+    object: "idx_mcp_tool_calls_started",
+    detail: "sqlite (started_at,id), postgres (started_at,idcollatec)",
+    reason:
+      "The keyset scan breaks started_at ties by id in code point order. SQLite compares text that way already; Postgres needs id COLLATE \"C\" in the index to serve the same ORDER BY (v49)."
+  },
+  {
     kind: "table-missing",
     table: "schema_migrations",
     object: "",
