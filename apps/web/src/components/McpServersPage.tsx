@@ -55,6 +55,16 @@ import {
 } from "../lib/api";
 import { McpAnnotationChips, McpOutputSchema } from "./McpToolMeta";
 import { McpAuthFields } from "./McpAuthFields";
+import { McpHttpFields, McpStdioFields } from "./McpConnectionFields";
+import {
+  HTTP_ADAPTER_ID,
+  STDIO_ADAPTER_ID,
+  connectionTemplate,
+  formatConnection,
+  kindForAdapter,
+  parseConnectionJson,
+  type ConnectionKind
+} from "./mcpConnection";
 import { McpCatalogBanner } from "./McpCatalogBanner";
 import { McpClientsView } from "./McpClientsView";
 import { McpImportDialog } from "./McpImportDialog";
@@ -382,9 +392,16 @@ function McpServerForm({
   const [name, setName] = useState(initial?.name ?? "");
   const [description, setDescription] = useState(initial?.description ?? "");
   const [adapterId, setAdapterId] = useState(initial?.adapterId ?? "http_mcp");
+  const [kind, setKind] = useState<ConnectionKind>(kindForAdapter(initial?.adapterId ?? HTTP_ADAPTER_ID));
   const [connectionJson, setConnectionJson] = useState(
-    JSON.stringify(initial?.connection ?? { endpoint: "http://127.0.0.1:7001/mcp", transport: "http_streamable" }, null, 2)
+    formatConnection(initial?.connection ?? connectionTemplate("http"))
   );
+  const otherAdapters = useMemo(
+    () => adapters.filter((adapter) => kindForAdapter(adapter.id) === "other"),
+    [adapters]
+  );
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const jsonInvalid = parseConnectionJson(connectionJson) === null;
   const [secretId, setSecretId] = useState(initial?.secretId ?? "");
   const [owner, setOwner] = useState(initial?.owner ?? "");
   const [probeEnabled, setProbeEnabled] = useState(initial?.probeEnabled ?? true);
@@ -408,13 +425,19 @@ function McpServerForm({
   const [error, setError] = useState<string | null>(null);
 
   const oauthConnection = useMemo(() => {
-    try {
-      const parsed = JSON.parse(connectionJson) as Record<string, unknown>;
-      return adapterId === "http_mcp" && String(parsed?.authType ?? "").toLowerCase() === "oauth";
-    } catch {
-      return false;
-    }
+    const parsed = parseConnectionJson(connectionJson);
+    return adapterId === HTTP_ADAPTER_ID && String(parsed?.authType ?? "").toLowerCase() === "oauth";
   }, [adapterId, connectionJson]);
+
+  /** Picking a transport swaps the adapter and starts from that transport's own connection template. */
+  const chooseKind = (next: ConnectionKind) => {
+    if (next === kind) return;
+    setKind(next);
+    if (next === "http") setAdapterId(HTTP_ADAPTER_ID);
+    else if (next === "stdio") setAdapterId(STDIO_ADAPTER_ID);
+    else setAdapterId(otherAdapters[0]?.id ?? "");
+    setConnectionJson(formatConnection(connectionTemplate(next)));
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -441,7 +464,8 @@ function McpServerForm({
     setName(preset.name);
     setDescription(preset.description);
     setAdapterId(preset.serverAdapter);
-    setConnectionJson(JSON.stringify(preset.connection, null, 2));
+    setKind(kindForAdapter(preset.serverAdapter));
+    setConnectionJson(formatConnection(preset.connection));
     if (preset.sandbox) setSandboxDraft(sandboxDraftFrom(preset.sandbox));
     setPresetNote([preset.notes, preset.credentialHint?.description].filter(Boolean).join(" ") || null);
   };
@@ -449,13 +473,21 @@ function McpServerForm({
   const handleSubmit = async (event: React.FormEvent) => {
     event.preventDefault();
     setError(null);
-    let connection: Record<string, unknown>;
-    try {
-      const parsed: unknown = connectionJson.trim() ? JSON.parse(connectionJson) : {};
-      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error();
-      connection = parsed as Record<string, unknown>;
-    } catch {
+    const connection = parseConnectionJson(connectionJson);
+    if (!connection) {
       setError("Connection must be a JSON object.");
+      return;
+    }
+    if (!adapterId) {
+      setError("Pick an adapter.");
+      return;
+    }
+    if (adapterId === HTTP_ADAPTER_ID && (typeof connection.endpoint !== "string" || !connection.endpoint.trim())) {
+      setError("A remote server needs an endpoint URL.");
+      return;
+    }
+    if (adapterId === STDIO_ADAPTER_ID && (typeof connection.command !== "string" || !connection.command.trim())) {
+      setError("A local command server needs a command.");
       return;
     }
     const minutes = intervalMinutes.trim() ? Number(intervalMinutes) : null;
@@ -473,7 +505,7 @@ function McpServerForm({
       setError("A default sampling model needs both a provider id and a model name.");
       return;
     }
-    const sandbox = adapterId === "stdio_mcp" ? sandboxFromDraft(sandboxDraft) : { value: null, error: null };
+    const sandbox = adapterId === STDIO_ADAPTER_ID ? sandboxFromDraft(sandboxDraft) : { value: null, error: null };
     if (sandbox.error) {
       setError(sandbox.error);
       return;
@@ -509,7 +541,7 @@ function McpServerForm({
           ? { providerId: samplingDefaultProvider.trim(), model: samplingDefaultModel.trim() }
           : null
       },
-      ...(adapterId === "stdio_mcp" ? { sandbox: sandbox.value } : initial?.sandbox ? { sandbox: null } : {}),
+      ...(adapterId === STDIO_ADAPTER_ID ? { sandbox: sandbox.value } : initial?.sandbox ? { sandbox: null } : {}),
       limits: limits.value,
       credentialMode,
       delegatedFallback
@@ -529,7 +561,11 @@ function McpServerForm({
 
   return (
     <form onSubmit={(event) => void handleSubmit(event)} className="kb-create-form mcp-form" aria-label={initial ? "Edit MCP server" : "Register MCP server"}>
-      {error && <div className="settings-error">{error}</div>}
+      {error && (
+        <div className="settings-error" role="alert">
+          {error}
+        </div>
+      )}
       {!initial && presets.length > 0 && (
         <div className="kb-form-row">
           <label>
@@ -562,18 +598,47 @@ function McpServerForm({
           <input type="text" value={description} onChange={(e) => setDescription(e.target.value)} placeholder="What agents use it for" />
         </label>
       </div>
-      <div className="kb-form-row kb-form-row-2">
-        <label>
-          Adapter
-          <select value={adapterId} onChange={(e) => setAdapterId(e.target.value)}>
-            {adapters.map((adapter) => (
-              <option key={adapter.id} value={adapter.id}>
-                {adapter.label}
-              </option>
-            ))}
-            {!adapters.some((adapter) => adapter.id === adapterId) && <option value={adapterId}>{adapterId}</option>}
-          </select>
-        </label>
+      <fieldset className="mcp-kind" aria-label="Server type">
+        <legend>Server type</legend>
+        <div className="mcp-kind-options" role="radiogroup" aria-label="Server type">
+          <label className="mcp-check">
+            <input type="radio" name="mcp-kind" checked={kind === "http"} onChange={() => chooseKind("http")} />
+            Remote server (HTTP)
+          </label>
+          <label className="mcp-check">
+            <input type="radio" name="mcp-kind" checked={kind === "stdio"} onChange={() => chooseKind("stdio")} />
+            Local command (stdio)
+          </label>
+          <label className="mcp-check">
+            <input
+              type="radio"
+              name="mcp-kind"
+              checked={kind === "other"}
+              disabled={kind !== "other" && otherAdapters.length === 0}
+              onChange={() => chooseKind("other")}
+            />
+            Other
+          </label>
+        </div>
+      </fieldset>
+      {kind === "other" && (
+        <div className="kb-form-row">
+          <label>
+            Adapter
+            <select value={adapterId} onChange={(e) => setAdapterId(e.target.value)}>
+              {otherAdapters.map((adapter) => (
+                <option key={adapter.id} value={adapter.id}>
+                  {adapter.label}
+                </option>
+              ))}
+              {!otherAdapters.some((adapter) => adapter.id === adapterId) && <option value={adapterId}>{adapterId || "Choose an adapter"}</option>}
+            </select>
+          </label>
+        </div>
+      )}
+      {kind === "http" && <McpHttpFields connectionJson={connectionJson} onConnectionJsonChange={setConnectionJson} />}
+      {kind === "stdio" && <McpStdioFields connectionJson={connectionJson} onConnectionJsonChange={setConnectionJson} />}
+      <div className="kb-form-row">
         <label>
           Auth secret
           <select value={secretId} onChange={(e) => setSecretId(e.target.value)}>
@@ -587,21 +652,34 @@ function McpServerForm({
           </select>
         </label>
       </div>
-      <div className="kb-form-row">
-        <label>
-          Connection (JSON)
-          <textarea value={connectionJson} onChange={(e) => setConnectionJson(e.target.value)} rows={5} spellCheck={false} />
-          <small className="kb-subtle">
-            http: <code>endpoint</code>, <code>transport</code>, <code>authType</code>. stdio: <code>command</code>, <code>args</code>,{" "}
-            <code>secretEnvVar</code>. Secret values never go here; pick a secret above.
-          </small>
-        </label>
-      </div>
-      {adapterId === "http_mcp" && (
+      {adapterId === HTTP_ADAPTER_ID && (
         <div className="kb-form-row">
           <McpAuthFields connectionJson={connectionJson} onConnectionJsonChange={setConnectionJson} />
         </div>
       )}
+      <details className="mcp-advanced" open={advancedOpen || jsonInvalid} onToggle={(e) => setAdvancedOpen(e.currentTarget.open)}>
+        <summary>Advanced: edit as JSON</summary>
+        <label>
+          Connection (JSON)
+          <textarea
+            value={connectionJson}
+            onChange={(e) => setConnectionJson(e.target.value)}
+            rows={8}
+            spellCheck={false}
+            aria-invalid={jsonInvalid ? true : undefined}
+            aria-describedby="mcp-json-hint"
+          />
+        </label>
+        {jsonInvalid && (
+          <div className="settings-error" role="alert">
+            Connection must be a JSON object. It will not save until this is fixed.
+          </div>
+        )}
+        <small id="mcp-json-hint" className="kb-subtle">
+          The fields above and this editor change the same connection. Secret values never go here; pick an Auth
+          secret.
+        </small>
+      </details>
       <div className="kb-form-row kb-form-row-2">
         <label className="mcp-check">
           <input type="checkbox" checked={probeEnabled} onChange={(e) => setProbeEnabled(e.target.checked)} />
@@ -661,9 +739,9 @@ function McpServerForm({
           </label>
         </div>
       </fieldset>
-      {adapterId === "stdio_mcp" && <McpSandboxFields draft={sandboxDraft} onChange={setSandboxDraft} policy={sandboxPolicy} />}
+      {adapterId === STDIO_ADAPTER_ID && <McpSandboxFields draft={sandboxDraft} onChange={setSandboxDraft} policy={sandboxPolicy} />}
       <McpLimitsFields draft={limitsDraft} onChange={setLimitsDraft} />
-      {adapterId === "http_mcp" && (
+      {adapterId === HTTP_ADAPTER_ID && (
         <McpCredentialFields
           mode={credentialMode}
           fallback={delegatedFallback}
