@@ -136,6 +136,7 @@ export const EXPORTED_TABLES = [
   "mcp_user_oauth_connections",
   "mcp_elicitations",
   "mcp_tool_calls",
+  "mcp_gateway_approvals",
   "mcp_cassettes",
   // Guard
   "guard_profiles",

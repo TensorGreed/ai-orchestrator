@@ -1183,7 +1183,7 @@ export interface McpToolPolicyDecisionRecord {
   ruleHash?: string;
   /** For `require_approval`: whether the call waited for a person, or ran on an approval. */
   approval?: "pending" | "approved";
-  /** Every matching rule, enforced and shadow, in evaluation order. */
+  /** Every matching rule: the enforced ones, then the shadow ones, each in evaluation order. */
   matched: Array<{ ruleId: string; mode: McpToolPolicyMode; effect: McpToolPolicyEffect }>;
   shadow?: {
     effect: McpToolPolicyEffect;
@@ -1212,6 +1212,42 @@ export interface McpToolPolicyTrace {
   hidden: McpHiddenTool[];
   /** Phase 12.4 — decisions for calls some rule matched (shadow rules included), in call order. */
   decisions?: McpToolPolicyCallTrace[];
+}
+
+/**
+ * Phase 12.4 — a gateway `tools/call` a require_approval rule held back.
+ * `pending` until an admin decides (or `expiresAt` passes: `expired`);
+ * `approved` lets the same client make the identical call (same server, tool
+ * and canonical arguments hash) once before `expiresAt`, after which it is
+ * `used`; `rejected` refuses it.
+ */
+export type McpGatewayApprovalStatus = "pending" | "approved" | "rejected" | "expired" | "used";
+
+export interface McpGatewayApproval {
+  id: string;
+  clientId: string;
+  clientName: string | null;
+  toolsetId: string;
+  projectId: string | null;
+  serverId: string;
+  serverName: string | null;
+  /** The upstream tool name on the server. */
+  toolName: string;
+  /** The name the client called (`<server-slug>__<tool>`). */
+  gatewayToolName: string;
+  argsHash: string;
+  /** Canonical JSON of the arguments, secrets scrubbed and bounded; redacted again when shown. */
+  argsPreview: string | null;
+  ruleId: string | null;
+  ruleName: string | null;
+  message: string | null;
+  status: McpGatewayApprovalStatus;
+  requestedAt: string;
+  expiresAt: string;
+  decidedBy: string | null;
+  decidedAt: string | null;
+  decisionReason: string | null;
+  usedAt: string | null;
 }
 
 export interface AgentRunState {

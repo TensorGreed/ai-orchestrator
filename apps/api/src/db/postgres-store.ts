@@ -784,6 +784,24 @@ export class PostgresStore implements Store {
   async deleteMcpToolPolicy(...args: Parameters<Store["deleteMcpToolPolicy"]>): ReturnType<Store["deleteMcpToolPolicy"]> {
     return mcp.deleteMcpToolPolicy(this.ctx, ...args);
   }
+  async createMcpGatewayApproval(...args: Parameters<Store["createMcpGatewayApproval"]>): ReturnType<Store["createMcpGatewayApproval"]> {
+    return mcp.createMcpGatewayApproval(this.ctx, ...args);
+  }
+  async getMcpGatewayApproval(...args: Parameters<Store["getMcpGatewayApproval"]>): ReturnType<Store["getMcpGatewayApproval"]> {
+    return mcp.getMcpGatewayApproval(this.ctx, ...args);
+  }
+  async listMcpGatewayApprovals(...args: Parameters<Store["listMcpGatewayApprovals"]>): ReturnType<Store["listMcpGatewayApprovals"]> {
+    return mcp.listMcpGatewayApprovals(this.ctx, ...args);
+  }
+  async findUsableMcpGatewayApproval(...args: Parameters<Store["findUsableMcpGatewayApproval"]>): ReturnType<Store["findUsableMcpGatewayApproval"]> {
+    return mcp.findUsableMcpGatewayApproval(this.ctx, ...args);
+  }
+  async consumeMcpGatewayApproval(...args: Parameters<Store["consumeMcpGatewayApproval"]>): ReturnType<Store["consumeMcpGatewayApproval"]> {
+    return mcp.consumeMcpGatewayApproval(this.ctx, ...args);
+  }
+  async decideMcpGatewayApproval(...args: Parameters<Store["decideMcpGatewayApproval"]>): ReturnType<Store["decideMcpGatewayApproval"]> {
+    return mcp.decideMcpGatewayApproval(this.ctx, ...args);
+  }
   async listMcpToolClassifications(...args: Parameters<Store["listMcpToolClassifications"]>): ReturnType<Store["listMcpToolClassifications"]> {
     return mcp.listMcpToolClassifications(this.ctx, ...args);
   }

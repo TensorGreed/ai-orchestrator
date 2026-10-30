@@ -33,6 +33,8 @@ export const QUEUE_RUNNING_HEARTBEAT_INDEX = "idx_execution_queue_running_hb";
 export const QUEUE_ACTIVE_EXECUTION_INDEX = "idx_execution_queue_active_execution";
 /** v46: finished jobs by their last update, for the retention prune (both stores). */
 export const QUEUE_FINISHED_INDEX = "idx_execution_queue_finished";
+/** v47: at most one pending gateway approval request per identical call (both stores). */
+export const GATEWAY_APPROVAL_ONE_PENDING_INDEX = "idx_mcp_gateway_approvals_one_pending";
 
 export const INSERTION_SEQ_TABLES: ReadonlyArray<{ table: string; backfillOrder: string }> = [
   { table: "audit_logs", backfillOrder: `created_at, id COLLATE "C"` },
@@ -2176,6 +2178,59 @@ export const MIGRATIONS: Migration[] = [
       ALTER TABLE execution_queue DROP COLUMN IF EXISTS effects_started;
       ALTER TABLE execution_queue DROP COLUMN IF EXISTS effects_token;
       ALTER TABLE execution_queue DROP COLUMN IF EXISTS result_json;
+    `
+  },
+  {
+    version: 47,
+    description: "Phase 12.4 — argument-aware MCP tool rules: rule conditions, mode and principals, per-call policy decisions, gateway approvals",
+    // mcp_tool_policies: conditions on the call's arguments and data labels (JSON, null = none), enforce/shadow mode
+    // (existing rules stay enforced) and the workflow / gateway-client principals (JSON lists, empty = all).
+    // mcp_tool_calls.policy_decision_json: what the policy decided for the call (enforced and shadow), null when no rule
+    // matched. mcp_gateway_approvals: a gateway tools/call a require_approval rule held back; once approved, the same
+    // client may make the identical call (same server, tool and canonical arguments hash) once before expires_at. At
+    // most one pending request per identical call.
+    up: `
+      ALTER TABLE mcp_tool_policies ADD COLUMN IF NOT EXISTS conditions_json TEXT;
+      ALTER TABLE mcp_tool_policies ADD COLUMN IF NOT EXISTS mode TEXT NOT NULL DEFAULT 'enforce';
+      ALTER TABLE mcp_tool_policies ADD COLUMN IF NOT EXISTS workflow_ids_json TEXT NOT NULL DEFAULT '[]';
+      ALTER TABLE mcp_tool_policies ADD COLUMN IF NOT EXISTS client_ids_json TEXT NOT NULL DEFAULT '[]';
+      ALTER TABLE mcp_tool_calls ADD COLUMN IF NOT EXISTS policy_decision_json TEXT;
+
+      CREATE TABLE IF NOT EXISTS mcp_gateway_approvals (
+        id TEXT PRIMARY KEY,
+        client_id TEXT NOT NULL,
+        client_name TEXT,
+        toolset_id TEXT NOT NULL,
+        project_id TEXT,
+        server_id TEXT NOT NULL,
+        server_name TEXT,
+        tool_name TEXT NOT NULL,
+        gateway_tool_name TEXT NOT NULL,
+        args_hash TEXT NOT NULL,
+        args_preview TEXT,
+        rule_id TEXT,
+        rule_name TEXT,
+        message TEXT,
+        status TEXT NOT NULL,
+        requested_at TIMESTAMPTZ NOT NULL,
+        expires_at TIMESTAMPTZ NOT NULL,
+        decided_by TEXT,
+        decided_at TIMESTAMPTZ,
+        decision_reason TEXT,
+        used_at TIMESTAMPTZ
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS ${GATEWAY_APPROVAL_ONE_PENDING_INDEX}
+        ON mcp_gateway_approvals (client_id, server_id, tool_name, args_hash) WHERE status = 'pending';
+      CREATE INDEX IF NOT EXISTS idx_mcp_gateway_approvals_call ON mcp_gateway_approvals (client_id, server_id, tool_name, args_hash, status);
+      CREATE INDEX IF NOT EXISTS idx_mcp_gateway_approvals_status ON mcp_gateway_approvals (status, requested_at);
+    `,
+    down: `
+      DROP TABLE IF EXISTS mcp_gateway_approvals;
+      ALTER TABLE mcp_tool_calls DROP COLUMN IF EXISTS policy_decision_json;
+      ALTER TABLE mcp_tool_policies DROP COLUMN IF EXISTS client_ids_json;
+      ALTER TABLE mcp_tool_policies DROP COLUMN IF EXISTS workflow_ids_json;
+      ALTER TABLE mcp_tool_policies DROP COLUMN IF EXISTS mode;
+      ALTER TABLE mcp_tool_policies DROP COLUMN IF EXISTS conditions_json;
     `
   }
 ];

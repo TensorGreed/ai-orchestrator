@@ -36,6 +36,7 @@ import type {
   McpServerCatalog,
   McpToolClassificationOverride,
   McpToolPolicyRule,
+  McpGatewayApproval,
   McpToolset,
   McpToolsetMemberSpec,
   Project,
@@ -213,6 +214,40 @@ export interface ClusterInstanceRecord extends ClusterInstanceHeartbeat {
   /** The heartbeat is recent enough (database clock). */
   live: boolean;
 }
+
+/** Phase 12.4 — what an update may change on a tool policy rule. */
+export type McpToolPolicyPatch = Partial<
+  Pick<
+    McpToolPolicyRule,
+    | "name"
+    | "description"
+    | "effect"
+    | "projectId"
+    | "roles"
+    | "serverId"
+    | "toolPattern"
+    | "annotationHint"
+    | "kind"
+    | "enabled"
+    | "conditions"
+    | "mode"
+    | "workflowIds"
+    | "clientIds"
+  >
+>;
+
+/** Phase 12.4 — the identical-call key of a gateway approval. */
+export interface McpGatewayApprovalCallKey {
+  clientId: string;
+  serverId: string;
+  toolName: string;
+  argsHash: string;
+}
+
+export type McpGatewayApprovalCreate = Omit<
+  McpGatewayApproval,
+  "status" | "decidedBy" | "decidedAt" | "decisionReason" | "usedAt"
+>;
 
 export interface Store {
   // ---- Store lifecycle
@@ -433,10 +468,27 @@ export interface Store {
   listMcpToolPolicies(): Promise<McpToolPolicyRule[]>;
   getMcpToolPolicy(id: string): Promise<McpToolPolicyRule | null>;
   createMcpToolPolicy(input: Omit<McpToolPolicyRule, "createdAt" | "updatedAt">): Promise<McpToolPolicyRule>;
-  updateMcpToolPolicy(id: string, patch: Partial<
-      Pick<McpToolPolicyRule, "name" | "description" | "effect" | "projectId" | "roles" | "serverId" | "toolPattern" | "annotationHint" | "kind" | "enabled">
-    >): Promise<McpToolPolicyRule | null>;
+  updateMcpToolPolicy(id: string, patch: McpToolPolicyPatch): Promise<McpToolPolicyRule | null>;
   deleteMcpToolPolicy(id: string): Promise<boolean>;
+  /**
+   * Phase 12.4 — a gateway call a require_approval rule held back. Expired pending requests are marked expired
+   * first; when a pending request for the identical call (client, server, tool, args hash) already exists it is
+   * returned instead of a new one (`created: false`).
+   */
+  createMcpGatewayApproval(input: McpGatewayApprovalCreate, now: string): Promise<{ approval: McpGatewayApproval; created: boolean }>;
+  getMcpGatewayApproval(id: string): Promise<McpGatewayApproval | null>;
+  /** Newest first. Requests past their expiry read as `expired` (pending) once listed. */
+  listMcpGatewayApprovals(filter: { status?: McpGatewayApproval["status"]; limit?: number }, now: string): Promise<McpGatewayApproval[]>;
+  /** Phase 12.4 — the approved, unused request for this identical call that is still inside its window, if any. */
+  findUsableMcpGatewayApproval(call: McpGatewayApprovalCallKey, now: string): Promise<McpGatewayApproval | null>;
+  /** Marks an approved request used, once: false when it was already used, or its window passed. */
+  consumeMcpGatewayApproval(id: string, now: string): Promise<boolean>;
+  /** Decides a pending request that has not expired: false when it was already decided or expired. */
+  decideMcpGatewayApproval(
+    id: string,
+    decision: { status: "approved" | "rejected"; decidedBy: string; decidedAt: string; reason: string | null; expiresAt: string },
+    now: string
+  ): Promise<boolean>;
   /** Admin read-only overrides; all of them, or one registry server's. */
   listMcpToolClassifications(registryServerId?: string): Promise<McpToolClassificationOverride[]>;
   /** `readOnly: null` removes the override, so annotations decide again. */
