@@ -70,7 +70,7 @@ Exit code 0 means every file matches the signed index and the signature verifies
 
 ## Other ways to put a person in the loop
 
-- A tool policy rule with the effect **Needs approval** (`require_approval`) asks for approval on matching calls only, for example pushes to `acme/prod`, whatever the workflow settings. It also covers direct **MCP Tool** nodes and [MCP gateway](../product/mcp-gateway.md) clients. When both the rule and **Ask before write tools** apply to a call, the inbox shows one request naming both. See [Require approval](../product/mcp-tool-policy.md#require-approval).
+- A tool policy rule with the effect **Needs approval** (`require_approval`) asks for approval on matching calls only, for example pushes to `acme/prod`, whatever the workflow settings. It also covers direct **MCP Tool** nodes and [MCP gateway](../product/mcp-gateway.md) clients. When both the rule and **Ask before write tools** apply to a call, the inbox shows one request naming both. Admins decide a rule's approval, whatever approvers the write-tool settings name. See [Require approval](../product/mcp-tool-policy.md#require-approval).
 - An **Approval Gate** node on a DAG edge pauses any workflow step, with approver rules, editable fields the approver can change before approving, and a fallback branch on timeout. A direct **MCP Tool** node is not covered by the write-tool setting, so put an Approval Gate before it.
 - A **release gate** can send every publish of a new workflow version to an approver ([CI for AI agents](./ci-for-ai-agents.md)).
 

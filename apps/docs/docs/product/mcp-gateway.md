@@ -73,7 +73,7 @@ Tool policy evaluates a gateway call as:
 - **Project**: the toolset's policy project.
 - **Source**: `client`, with the client's name. Policy traces show "Evaluated as builder — MCP client Team IDE".
 
-Tools that policy denies are absent from `tools/list`. A call to one anyway returns a tool error with the policy message, and is audited as `mcp_gateway.tool_denied`. Rules can also name the client (gateway clients on the rule) and match the call's arguments: a call whose arguments a deny rule matches returns the same tool error, though the tool stays listed. A call a require-approval rule matches returns the JSON-RPC error `-32030` "approval pending" with the request id; once an admin approves it, the client retries the identical call once within `MCP_GATEWAY_APPROVAL_WINDOW_MS`. See [Gateway: approval by retry](./mcp-tool-policy.md#gateway-approval-by-retry). The per-workflow **No write tools** setting does not apply to gateway calls; it belongs to workflows. Calls to a server whose pending breaking change blocks runs fail the same way they fail for agents.
+Tools that policy denies are absent from `tools/list`. A call to one anyway returns a tool error with the policy message, and is audited as `mcp_gateway.tool_denied`. Rules can also name the client (gateway clients on the rule) and match the call's arguments: a call whose arguments a deny rule matches returns the same tool error, though the tool stays listed. A call a require-approval rule matches returns the JSON-RPC error `-32030` "approval pending" with the request id; once an admin approves it, the client retries the identical call once within `MCP_GATEWAY_APPROVAL_WINDOW_MS`. After a rejection the identical call gets `-32031` "rejected" for the same window, and a client with 20 requests waiting gets `-32029` "retry later" instead of a new one. Sampling a server asks for during a gateway call follows sampling rules scoped to the calling client. See [Gateway: approval by retry](./mcp-tool-policy.md#gateway-approval-by-retry). The per-workflow **No write tools** setting does not apply to gateway calls; it belongs to workflows. Calls to a server whose pending breaking change blocks runs fail the same way they fail for agents.
 
 Workflow tools run as the workflow does for any trigger: the run is recorded in execution history with trigger type `mcp_gateway` and triggered by `mcp-client:<name>`, and agents inside the workflow evaluate tool policy with the client's capped role. The workflow trigger's own `authMode` and secret apply only to the legacy REST routes; on the gateway the client token is the credential.
 
@@ -109,6 +109,7 @@ Audit events:
 | `mcp_gateway.tool_called` | Every workflow tool call, every write-tool call, every failed call, and read-only calls per `MCP_GATEWAY_AUDIT_READ_ONLY_CALLS`. |
 | `mcp_gateway.tool_denied` | A call to a tool that policy hides, or whose arguments a deny rule matches. |
 | `mcp_gateway.approval_requested` / `approval_decided` / `approval_used` | A require-approval rule held a call back, an admin approved or rejected it, the approved retry went through. |
+| `mcp_gateway.approval_refused_rejected` / `approval_capped` | The first identical retry after a rejection was refused; a client with too many requests waiting was refused a new one (once per client per approval window). |
 | `mcp_toolset.created` / `updated` / `deleted` / `member_added` / `member_removed` | Toolset changes. |
 | `mcp_client.created` / `revoked` | Client changes. Metadata carries the token prefix, never the token. |
 
@@ -131,7 +132,7 @@ Audit events:
 | `MCP_GATEWAY_SESSION_IDLE_MS` | `1800000` | Idle time before a session closes (minimum 10000). |
 | `MCP_GATEWAY_MAX_SESSIONS` | `500` | Open sessions across all clients. |
 | `MCP_GATEWAY_AUDIT_READ_ONLY_CALLS` | `first_per_session` | `all`, `first_per_session` or `none`. |
-| `MCP_GATEWAY_APPROVAL_WINDOW_MS` | `900000` | How long after an approval the client can retry the identical call, once (10000 to 604800000). |
+| `MCP_GATEWAY_APPROVAL_WINDOW_MS` | `900000` | How long after an approval the client can retry the identical call, once; also how long after a rejection the identical call is refused (10000 to 604800000). |
 
 ## API
 

@@ -92,18 +92,39 @@ A tool rule can carry **conditions** on the call. The rule then matches only cal
 |---|---|
 | `equals` | equals the value (a string, number, boolean or `null`) |
 | `one_of` / `not_one_of` | is / is not one of a list of values (up to 100) |
-| `starts_with` / `ends_with` | is a string that starts / ends with the text |
-| `matches` | is a string that matches a glob: `*` any run of characters, `?` one character |
-| `lt`, `lte`, `gt`, `gte` | is a number less than, at most, greater than, at least the value |
+| `starts_with` / `ends_with` | starts / ends with the text |
+| `matches` | matches a glob: `*` any run of characters, `?` one character (at most 16 `*`) |
+| `lt`, `lte`, `gt`, `gte` | is a number (or a numeric string such as `"5000"`) less than, at most, greater than, at least the value |
 | `between` | is a number within `[min, max]`, both included |
 | `exists` | is present and not `null`; with `value: false`, is absent |
 | `label_present` / `label_absent` | (no path) the run's data carries / does not carry this provenance label or data class |
 
-**Paths** name an argument: `repo`, `options.branch`, `files[0].path`, or `files[*].path`, where `[*]` matches when any element of the list does. Keys are letters, digits, `_`, `$`, `@` and `-`; a path has at most 16 steps. A path that is missing, or a value of another type (a number compared with `starts_with`, a string with `gt`), **does not match**: a condition never matches by accident.
+**Paths** name an argument: `repo`, `options.branch`, `files[0].path`, or `files[*].path` for every element of a list. A path that ends on a list reads its elements too, so `env one_of ["prod"]` sees `"env": ["prod"]`. Keys are letters, digits, `_`, `$`, `@` and `-`; a path has at most 16 steps.
 
-**Labels** come from [data labels](./data-labels-and-destinations.md) on the run: the provenance labels and data classes the values flowing into the call carry. Both label operators do not match when the run tracks no labels, so `label_absent` never allows a call just because labels are unknown.
+**Values** compare the way a server would most likely read them. Text, numbers and booleans compare as trimmed text, so `5000` equals `"5000"` and `"prod "` equals `prod`; a number compares by value with a numeric string (`5000` equals `"5000.0"`). Number operators read numeric strings. Text comparisons are case-sensitive unless the condition has **Ignore case** (`ignoreCase: true`), which deny rules usually want: `PROD` is otherwise not `prod`.
 
-In the rule form, add conditions row by row (argument path, operator, value). For `equals` and lists, `42`, `true` and `false` are typed values; quote them (`"42"`) to compare as text.
+### Conditions fail closed
+
+A sloppy or unusual argument may cause an extra deny or approval, never an escaped deny or a wider allow. How a condition reads several values (a list) and a missing argument depends on the rule's effect:
+
+| | Deny and require approval | Allow (exceptions) |
+|---|---|---|
+| Several values (`[*]`, or a path that ends on a list) | match when **any** value matches | match only when **every** value matches, and there is at least one |
+| Missing argument, or an empty list | matches `not_one_of` and `label_absent` only | never matches |
+| A value the operator cannot read (`"lots"` for `gt`, an object for `not_one_of`) | matches | never matches |
+| Run tracks no data labels | matches `label_absent` only | never matches |
+
+For example, *deny `env` not one of `dev`* blocks a call that leaves `env` out, since the server may default to production: a missing argument "is not one of dev". *Deny `push`* with the exception *allow `push` where `repos[*]` starts with `myorg/`* still blocks `{"repos": ["myorg/a", "evil/b"]}`, because the exception needs every repository to match.
+
+Prefer allow-lists to deny-lists: deny broadly, then carve out exceptions with an allow rule that uses `one_of`. A deny-list has to foresee every spelling of the bad value; an allow-list only has to name the good ones.
+
+**Labels** come from [data labels](./data-labels-and-destinations.md) on the run: the provenance labels and data classes the values flowing into the call carry.
+
+In the rule form, add conditions row by row (argument path, operator, value). Values are kept as the text you type (`007` stays `007`); only `null` means null. The hint under the rows says how lists and missing arguments read for the effect you chose.
+
+### Rules with invalid conditions
+
+If a rule's stored conditions no longer validate (limits tightened in an upgrade, or a hand-edited or restored database), the rule is listed with **Invalid conditions — fix or delete** and the API returns it with `invalid: true`. Until it is fixed it fails closed: an allow rule never matches, and a deny or require-approval rule applies to every call in its scope. The API logs a warning once per rule.
 
 ### Discovery and conditions
 
@@ -113,10 +134,11 @@ When an agent starts it lists its tools before any call is made, so there are no
 
 A `require_approval` rule lets the call go ahead only after a person approves it.
 
-- **Agents and MCP Tool nodes.** The run pauses before the call, with a request in the **Approvals** inbox that names the tool, the server and the rule. Approve it and the run resumes and makes the call once; reject it and the call fails. When the workflow's **Ask before write tools** switch also applies to the call, there is **one** request, which names both reasons. A policy approval cannot be approved by the person who started the run. See [Human approval for agent tool calls](../guides/human-approval-for-agent-tool-calls.md).
+- **Agents and MCP Tool nodes.** The run pauses before the call, with a request in the **Approvals** inbox that names the tool, the server, the rule and the conditions the call matched. Approve it and the run resumes and makes the call once; reject it and the call fails. When the workflow's **Ask before write tools** switch also applies to the call, there is **one** request, which names both reasons.
+- **Who decides.** An admin wrote the rule, so **admins** decide a policy approval, whatever approvers the workflow's write-tool settings name, and nobody approves their own run. The approval is bound to the rule (its id and hash): an approval the write-tool switch alone asked for never stands in for a policy approval, while a policy approval does cover the write-tool switch for the same call.
 - **Gateway calls.** The client gets an "approval pending" error and retries after an admin approves. See [Gateway: approval by retry](#gateway-approval-by-retry).
 
-The policy is checked **before** the guard: a call a rule denies or holds for approval never reaches the guard's argument checks.
+The policy is checked **before** the guard: a call a rule denies or holds for approval never reaches the guard's argument checks. The **Ask before write tools** switch on its own keeps its place **after** the guard, so a call the guard blocks is never put to a person, and the person approves the arguments the guard let through. When the guard rewrites the arguments of a call a policy approval already covers, that approval still covers the rewritten call: one request.
 
 ### Gateway: approval by retry
 
@@ -135,6 +157,12 @@ A gateway client cannot wait inside one call, so a held-back gateway call return
 ```
 
 Admins see the request under **MCP → Policies → Gateway approvals**, with the client, the tool, the rule and the arguments, and approve or reject it. After an approval, the **identical** call (same client, server, tool, and arguments, whatever their key order) goes through **once** within `MCP_GATEWAY_APPROVAL_WINDOW_MS` (default 900000, 15 minutes). A call with other arguments, from another client, after the window, or a second retry asks again. Asking again before a decision returns the same pending request. A pending request that nobody decides expires after 24 hours.
+
+- **A rejection sticks.** After an admin rejects a request, the identical call is refused at once with JSON-RPC error **-32031** (`data.status: "rejected"`, the reason, and `retryAfter`, the decision time plus the approval window) and opens no new request. Once that window has passed, the identical call asks again. The first refused retry is audited (`mcp_gateway.approval_refused_rejected`), later ones are not.
+- **At most 20 pending requests per client.** Past that, a call that would open a new request gets **-32029** "retry later" (`data.reason: "approval_requests_pending"`) until some are decided or expire, audited once per client per approval window (`mcp_gateway.approval_capped`). The identical call of a request already pending still gets that request back.
+- **An approval is not lost to a refusal.** If the approved retry is refused before it reaches the server (rate limit, concurrency cap, open circuit), the approval is put back for a later retry inside the same window. If two identical retries race, one runs and the other is told the approval was just used (`data.status: "used"`) instead of opening a new request.
+- **Retention.** Decided and expired requests are deleted 30 days after they were made, and sooner with the run history retention.
+- **Telemetry.** Gateway calls a rule denied, held for approval or refused after a rejection are in the audit log only: they have no tool-call telemetry row, so their `policy_decision_json` is never recorded. Rows exist for calls that ran (allow, shadow, approved).
 
 ## Shadow mode
 
