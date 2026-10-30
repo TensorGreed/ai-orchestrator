@@ -5,11 +5,14 @@
  * Phase 12.4 — rules can match a call's arguments and data labels, require
  * approval, run in shadow mode and name workflows or gateway clients; admins
  * decide the gateway calls such rules held back.
+ * Phase 12.4 (part 2) — admins simulate a rule on recorded calls, review least-privilege suggestions (accepted in
+ * shadow mode) and enforce shadow rules once their recorded hits look right.
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type {
   McpGatewayApproval,
+  McpPolicyShadowHitRow,
   McpPolicyKind,
   McpPolicyRole,
   McpToolHintCondition,
@@ -29,7 +32,9 @@ import {
   createMcpToolPolicy,
   decideMcpGatewayApproval,
   deleteMcpToolPolicy,
+  enforceMcpToolPolicy,
   evaluateMcpToolPolicy,
+  fetchMcpPolicyShadowHits,
   fetchMcpClients,
   fetchMcpGatewayApprovals,
   fetchMcpServerTools,
@@ -45,6 +50,7 @@ import {
   draftToConditions,
   type ConditionsDraft
 } from "./McpPolicyConditionsEditor";
+import { ENFORCE_QUIET_DAYS, PolicySimulatePanel, PolicySuggestions } from "./McpPolicyLearning";
 
 const ROLES: McpPolicyRole[] = ["admin", "builder", "operator", "viewer"];
 
@@ -212,6 +218,7 @@ export function McpPoliciesView({
   const [editing, setEditing] = useState<McpToolPolicyRule | "new" | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [principals, setPrincipals] = useState<PrincipalLookups>({ workflows: [], clients: [] });
+  const [shadowHits, setShadowHits] = useState<Map<string, McpPolicyShadowHitRow>>(new Map());
 
   const lookups = useMemo<ScopeLookups>(() => ({ servers, adapters, projects }), [servers, adapters, projects]);
 
@@ -221,12 +228,18 @@ export function McpPoliciesView({
     try {
       const result = await fetchMcpToolPolicies();
       setRules(result.rules);
+      // Shadow hits label shadow rules for admins; the rules still show without them.
+      if (isAdmin && result.rules.some((rule) => rule.mode === "shadow")) {
+        fetchMcpPolicyShadowHits(ENFORCE_QUIET_DAYS)
+          .then(({ shadowHits: hits }) => setShadowHits(new Map(hits.rules.map((row) => [row.ruleId, row]))))
+          .catch(() => undefined);
+      }
     } catch (err) {
       setError(formatError(err));
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [isAdmin]);
 
   useEffect(() => {
     void refresh();
@@ -257,6 +270,22 @@ export function McpPoliciesView({
     setError(null);
     try {
       const result = await updateMcpToolPolicy(rule.id, { enabled: !rule.enabled });
+      setRules((current) => current.map((entry) => (entry.id === rule.id ? result.rule : entry)));
+    } catch (err) {
+      setError(formatError(err));
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const enforce = async (rule: McpToolPolicyRule) => {
+    const hits = shadowHits.get(rule.id);
+    const warning = hits && hits.wouldChange > 0 ? ` In the last ${ENFORCE_QUIET_DAYS} days it would have changed ${hits.wouldChange} calls.` : "";
+    if (!window.confirm(`Enforce the ${rule.effect} rule "${rule.name ?? rule.toolPattern}"?${warning} Runs pick up the change on their next node.`)) return;
+    setBusyId(rule.id);
+    setError(null);
+    try {
+      const result = await enforceMcpToolPolicy(rule.id);
       setRules((current) => current.map((entry) => (entry.id === rule.id ? result.rule : entry)));
     } catch (err) {
       setError(formatError(err));
@@ -305,6 +334,7 @@ export function McpPoliciesView({
         {editing !== null && isAdmin && (
           <McpPolicyForm
             initial={editing === "new" ? undefined : editing}
+            rules={rules}
             lookups={lookups}
             principals={principals}
             defaultProjectId={null}
@@ -393,6 +423,12 @@ export function McpPoliciesView({
                     <code>{describeConditions(rule.conditions)}</code>
                   </p>
                 )}
+                {isAdmin && rule.mode === "shadow" && shadowHits.has(rule.id) && (
+                  <p className="kb-subtle mcp-rule-shadow-hits" aria-label={`Shadow hits for ${rule.name ?? rule.id}`}>
+                    Last {ENFORCE_QUIET_DAYS} days: matched {shadowHits.get(rule.id)!.matched} calls, would have changed{" "}
+                    {shadowHits.get(rule.id)!.wouldChange}.
+                  </p>
+                )}
                 {isAdmin && (
                   <div className="mcp-rule-actions">
                     <label className="mcp-check">
@@ -408,6 +444,11 @@ export function McpPoliciesView({
                     <button type="button" className="pg-btn ghost" onClick={() => setEditing(rule)} disabled={busyId === rule.id}>
                       Edit
                     </button>
+                    {rule.mode === "shadow" && (
+                      <button type="button" className="pg-btn ghost" onClick={() => void enforce(rule)} disabled={busyId === rule.id}>
+                        Enforce
+                      </button>
+                    )}
                     <button
                       type="button"
                       className="pg-btn ghost danger"
@@ -424,6 +465,8 @@ export function McpPoliciesView({
         )}
       </section>
 
+      {isAdmin && <PolicySuggestions rules={rules} shadowHits={shadowHits} onRulesChanged={() => void refresh()} />}
+
       <PolicyEvaluator lookups={lookups} principals={principals} activeProjectId={activeProjectId ?? null} />
 
       {isAdmin && <GatewayApprovals />}
@@ -433,6 +476,7 @@ export function McpPoliciesView({
 
 function McpPolicyForm({
   initial,
+  rules,
   lookups,
   principals,
   defaultProjectId,
@@ -440,6 +484,8 @@ function McpPolicyForm({
   onCancel
 }: {
   initial?: McpToolPolicyRule;
+  /** The current rules, in order: an edit is simulated in place of the rule it changes. */
+  rules: McpToolPolicyRule[];
   lookups: ScopeLookups;
   principals: PrincipalLookups;
   defaultProjectId: string | null;
@@ -466,18 +512,11 @@ function McpPolicyForm({
   const toggleRole = (role: McpPolicyRole) =>
     setRoles((current) => (current.includes(role) ? current.filter((entry) => entry !== role) : [...current, role]));
 
-  const handleSubmit = async (event: React.FormEvent) => {
-    event.preventDefault();
-    setError(null);
+  /** The rule as the form describes it, or why it cannot be saved. */
+  const buildPayload = (): { payload: McpToolPolicyRuleInput; keepInvalidConditions: boolean } | { error: string } => {
     const parsedConditions = kind === "tool" ? draftToConditions(conditions) : { conditions: null };
-    if ("error" in parsedConditions) {
-      setError(parsedConditions.error);
-      return;
-    }
-    if (kind !== "tool" && effect === "require_approval") {
-      setError("Needs approval applies to tool calls only.");
-      return;
-    }
+    if ("error" in parsedConditions) return { error: parsedConditions.error };
+    if (kind !== "tool" && effect === "require_approval") return { error: "Needs approval applies to tool calls only." };
     // A rule whose stored conditions are invalid keeps them (failing closed) until new ones are entered, so saving
     // another change never turns it into a rule without conditions.
     const keepInvalidConditions = Boolean(initial?.invalid) && kind === "tool" && parsedConditions.conditions === null;
@@ -497,6 +536,31 @@ function McpPolicyForm({
       workflowIds,
       clientIds
     };
+    return { payload, keepInvalidConditions };
+  };
+
+  /** The draft to simulate: the edited rule in its place among the current rules (as if enforced), or one added rule. */
+  const buildSimulation = () => {
+    const built = buildPayload();
+    if ("error" in built) return built;
+    const draft = { ...built.payload, mode: "enforce" as const };
+    if (!initial) return { addRule: draft };
+    return {
+      rules: rules.map((rule) =>
+        rule.id !== initial.id ? { keep: rule.id } : built.keepInvalidConditions ? { keep: rule.id } : { ...draft, id: rule.id }
+      )
+    };
+  };
+
+  const handleSubmit = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setError(null);
+    const built = buildPayload();
+    if ("error" in built) {
+      setError(built.error);
+      return;
+    }
+    const { payload } = built;
     setBusy(true);
     try {
       const result = initial ? await updateMcpToolPolicy(initial.id, payload) : await createMcpToolPolicy(payload);
@@ -698,6 +762,7 @@ function McpPolicyForm({
           Enabled
         </label>
       </div>
+      <PolicySimulatePanel buildRequest={buildSimulation} />
       <div className="kb-form-row mcp-form-actions">
         <button type="submit" className="pg-btn primary" disabled={busy}>
           {busy ? "Saving…" : initial ? "Save rule" : "Add rule"}

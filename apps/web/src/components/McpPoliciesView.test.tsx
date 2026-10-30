@@ -26,7 +26,13 @@ vi.mock("../lib/api", async () => {
     fetchWorkflows: vi.fn(),
     fetchMcpClients: vi.fn(),
     fetchMcpGatewayApprovals: vi.fn(),
-    decideMcpGatewayApproval: vi.fn()
+    decideMcpGatewayApproval: vi.fn(),
+    simulateMcpToolPolicies: vi.fn(),
+    fetchMcpPolicyShadowHits: vi.fn(),
+    fetchMcpPolicySuggestions: vi.fn(),
+    generateMcpPolicySuggestions: vi.fn(),
+    decideMcpPolicySuggestion: vi.fn(),
+    enforceMcpToolPolicy: vi.fn()
   };
 });
 
@@ -130,6 +136,8 @@ describe("MCP tool policy UI", () => {
       clients: [{ id: "mcpc_1", name: "IDE agent", status: "active" } as api.McpClientView]
     });
     vi.mocked(api.fetchMcpGatewayApprovals).mockResolvedValue({ approvals: [], approvalWindowMs: 900000 });
+    vi.mocked(api.fetchMcpPolicySuggestions).mockResolvedValue({ suggestions: [] });
+    vi.mocked(api.fetchMcpPolicyShadowHits).mockResolvedValue({ shadowHits: { days: 7, since: "", scanned: 0, capped: false, rules: [] } });
   });
 
   it("shows read-only classification with its source, blocked marks, and lets admins override", async () => {

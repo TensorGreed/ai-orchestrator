@@ -3437,6 +3437,138 @@ button.tag-chip:hover {
   flex-wrap: wrap;
 }
 
+/* Phase 12.4 — simulation reports and least-privilege suggestions. */
+.mcp-sim-panel {
+  display: grid;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px dashed var(--line-strong);
+  border-radius: 8px;
+}
+
+.mcp-sim-panel-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.mcp-sim-window {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.mcp-sim-report {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.mcp-sim-buckets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.mcp-sim-count {
+  font-family: var(--font-mono);
+  font-weight: 600;
+}
+
+.mcp-sim-newly_denied .mcp-sim-count,
+.mcp-sim-newly_needs_approval .mcp-sim-count {
+  color: var(--err);
+}
+
+.mcp-sim-no_longer_denied .mcp-sim-count,
+.mcp-sim-no_longer_needs_approval .mcp-sim-count {
+  color: var(--warn);
+}
+
+.mcp-sim-undetermined .mcp-sim-count,
+.mcp-sim-not_summarised .mcp-sim-count {
+  color: var(--fg-muted);
+}
+
+.mcp-sim-examples ul {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.mcp-sim-example {
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  overflow-wrap: anywhere;
+}
+
+.mcp-sim-summary code,
+.mcp-sim-example code {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+}
+
+.mcp-sim-table {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  border-collapse: collapse;
+  font-size: var(--fs-xs);
+}
+
+.mcp-sim-table caption {
+  text-align: left;
+  color: var(--fg-muted);
+  padding-bottom: 4px;
+}
+
+.mcp-sim-table th,
+.mcp-sim-table td {
+  padding: 4px 10px 4px 0;
+  text-align: left;
+  border-bottom: 1px solid var(--line);
+}
+
+.mcp-suggestion-list {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.mcp-suggestion {
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  min-width: 0;
+}
+
+.mcp-suggestion.is-accepted {
+  border-style: dashed;
+}
+
+.mcp-suggestion-rules {
+  margin: 0;
+  padding-left: 18px;
+  overflow-wrap: anywhere;
+}
+
+.mcp-suggestion-evidence ul {
+  margin: 4px 0 0;
+  padding-left: 18px;
+  overflow-wrap: anywhere;
+}
+
 .mcp-role-picker {
   display: flex;
   flex-wrap: wrap;
