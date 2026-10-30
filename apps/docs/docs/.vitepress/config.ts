@@ -1,4 +1,14 @@
+import { copyFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { defineConfig } from "vitepress";
+
+// One consent script serves the landing and the docs. It lives with the landing (repo-root
+// docs/site-consent.js); copy it into public/ so VitePress serves it in dev and ships it in the
+// build at /docs/site-consent.js (public/site-consent.js is generated and git-ignored).
+copyFileSync(
+  fileURLToPath(new URL("../../../../docs/site-consent.js", import.meta.url)),
+  fileURLToPath(new URL("../public/site-consent.js", import.meta.url))
+);
 
 const SITE = "https://lsquarem.com";
 // The share card lives with the landing at the site root (source: scripts/social-card/).
@@ -25,6 +35,7 @@ export default defineConfig({
   // Generated table pulled into product/importing-from-another-builder.md with @include; not a page of its own.
   srcExclude: ["product/external-import-coverage.md"],
   head: [
+    ["script", { src: "/docs/site-consent.js", defer: "" }],
     ["link", { rel: "icon", type: "image/svg+xml", href: "/docs/favicon.svg" }],
     ["meta", { name: "theme-color", content: "#07090f" }],
     ["meta", { property: "og:type", content: "website" }],

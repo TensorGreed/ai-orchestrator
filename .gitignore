@@ -20,3 +20,4 @@ apps/web/demo-screenshots
 
 # Assembled Pages site (scripts/assemble-pages-site.mjs)
 _site/
+apps/docs/docs/public/site-consent.js

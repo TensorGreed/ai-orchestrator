@@ -1075,3 +1075,19 @@ section {
   max-width: 720px;
   margin-inline: auto;
 }
+
+.footer-note {
+  flex-basis: 100%;
+  margin: 0;
+  font-size: 0.85rem;
+  color: var(--fg-faint);
+}
+
+.footer-note a {
+  color: inherit;
+  text-decoration: underline;
+}
+
+.footer-note a:hover {
+  color: var(--fg);
+}
