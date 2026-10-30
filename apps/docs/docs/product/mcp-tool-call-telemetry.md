@@ -1,5 +1,5 @@
 ---
-description: "What L2M records for every MCP tool call: timings, errors, tokens and a safe argument summary that never keeps free text or personal data. How to switch it off."
+description: "What L2M records for every MCP tool call: timings, errors, tokens and an allow-list argument summary with keyed hashes. What it keeps, and how to switch it off."
 ---
 
 # MCP tool-call telemetry
@@ -18,50 +18,84 @@ The argument summary, role and project are what lets L2M later suggest and test 
 
 ## The argument summary
 
-The summary describes each argument by its path (`state`, `labels[]`, `files[].path`). For each path it keeps:
+The summary describes each argument by its path (`state`, `labels[]`, `files[].path`). It is an **allow-list**: a value is stored as it is only when it is safe by construction. Every other value is stored as its shape plus a **keyed hash**, so equal values can still be counted and compared, but not read back.
 
-| The argument holds | The summary keeps |
+### What is kept as it is
+
+| The argument holds | Kept as it is |
 | --- | --- |
-| A number, a boolean or null | The value, with the smallest and largest seen. An integer of nine or more digits keeps only its type. |
-| A short, single-word value such as `open`, `main`, `us-east-1` | The value. A value listed in the tool's input schema (`enum` or `const`) is kept too. |
-| A repository such as `octo-org/hello-world` | The owner: `octo-org/`. |
-| A URL | Its scheme and host: `https://api.github.com`. Never the path, query or credentials. |
-| A file path | Its first two segments: `/srv/data/`. Never the whole path. |
-| An email address | Its domain: `@example.com`, with the data class `email`. |
-| Free text, long or random-looking values (ids, hashes, tokens) | Only the type and a length bucket (`1-8`, `9-32`, `33-128`, ...). |
-| Anything the data detectors flag: card numbers, IBANs, national ids, phone numbers, keys, tokens, private keys | Only the data class, such as `card_number` or `credential`. |
+| null, or a boolean | The value. |
+| A number whose integer part has at most six digits | The value, rounded to four decimals, with the smallest and largest seen. Under a location key (`lat`, `lng`, `lon`, `latitude`, `longitude`, `geo`) it is rounded to one decimal. |
+| A value the tool's input schema lists (`enum` or `const`) at that path | The value. |
+| A short token: lower-case ASCII letters, digits, `_`, `.` and `-`, starting with a letter, at most 32 characters, such as `open`, `main`, `us-east-1` | The value, when it has no run of four digits, does not end like a domain or a `first.last` name (`john.smith`, `example.com`) and does not look random. |
 
-A few more rules keep the summary safe:
+A token looks random when it starts with a known key prefix (`sk-`, `pk_`, `ghp_`, `xoxb-`, `glpat-`, `AKIA`, ...) or any part between `_`, `-` and `.` is longer than 16 characters, is 12 or more hex characters, mixes letters and digits over 8 or more characters, or is 8 or more letters with fewer than one vowel in four. Text is compared after Unicode NFKC normalisation, and digits of every script count as digits, so full-width and other-script numbers are not tokens.
 
-- The values are scanned with the same detectors as [production capture](./production-capture.md) masking, including URL-encoded and JSON-escaped forms. Object keys are scanned too; a key that is data (an email used as a key, for example) is written `*`.
-- A string under a credential-like key (`token`, `password`, `api_key`, `secret`, ...) is kept only as `credential`.
-- A string under a key that usually holds people's words or names (`query`, `message`, `body`, `title`, `to`, `assignee`, `author`, ...) is never kept as a value, even when it is one short word.
-- Large or deeply nested arguments are summarised up to fixed limits (depth, paths, array items, characters scanned); a value that could not be scanned within them is never kept as a value. The summary is then marked `truncated`.
+None of this applies on a **sensitive path**: when the argument's key, or any key above it, contains a word such as `password`, `pw`, `pin`, `otp`, `token`, `key`, `secret`, `auth`, `session`, `cookie`, `signature`, `card`, `iban`, `account`, `ssn`, `name`, `user`, `login`, `owner`, `email`, `phone`, `address`, `dob`, `customer`, `recipient`, `to`, `cc`, `body`, `message`, `text`, `query`, `title`, `note` or `description`. Keys are split into words on case changes, `_`, `-`, `.` and digits, so `recipientEmail`, `customer_id` and `auth.value` all count. A sensitive path keeps only shape and hashes, whatever the schema says.
+
+### Prefixes
+
+Outside sensitive paths, an identifier that is not kept as it is can keep a stable prefix, for starts-with rules:
+
+| The argument holds | Prefix |
+| --- | --- |
+| A repository such as `octo-org/hello-world` | The owner: `octo-org/`. The owner can be a person's handle. |
+| A URL | Its scheme and host: `https://api.github.com`. An IP address becomes `ip`; a host with more than one label before its domain keeps only the domain (`https://a.b.example.com` becomes `https://example.com`); shared hosting keeps only its suffix (`https://*.github.io`). Never the path, query, port or credentials. |
+| An email address | Its domain, reduced the same way: `@example.com`. Never the local part. |
+| A file path | Its root and at most one more segment, never the last one: `/srv/`. A home directory (`/home/<user>`, `/Users/<user>`, `C:\Users\<user>`, `/root`) becomes `~/`, so `/home/jdoe/src/app.ts` gives `~/src/`. |
+
+### What is hashed
+
+Every other string, number and boolean keeps:
+
+- its type and, for strings, a length bucket (`1-8`, `9-32`, `33-128`, ...);
+- for numbers with seven or more integer digits or on a sensitive path, the order of magnitude (`mag`, the largest `floor(log10(|n|))` seen);
+- a **keyed hash**: HMAC-SHA-256 of the NFKC-normalised value, cut to 16 bytes and written in base64url. The key is derived from `SECRET_MASTER_KEY_BASE64` with HKDF and its own label, the same way as the [production capture](./production-capture.md) surrogate key, and is never stored. Without the master key a random key is used until the API restarts, so hashes then only compare within one run of the API. Strings over 2,048 characters keep no hash.
+
+A value hashed with the same key gives the same hash, so a rule's comparison value can be matched against recorded calls without the calls keeping the value.
+
+Object keys are kept in the path only when they are plain names: an ASCII letter followed by letters, digits, `_` or `-`, at most 32 characters, no run of four digits and not random-looking. Any other key (an email, an id, a number used as a key) is written `<k:HASH>`.
+
+Every value and key is also scanned with the same detectors as [production capture](./production-capture.md) masking, including URL-encoded and JSON-escaped forms. The data classes they find (`card_number`, `email`, `credential`, ...) are listed for the path, and a flagged value is never kept as it is. Large or deeply nested arguments are summarised up to fixed limits (depth, paths, array items, characters scanned); a value that could not be scanned within them is never kept as it is, and the summary is marked `truncated`.
 
 For example, the arguments
 
 ```json
 { "owner": "octo-org", "repo": "octo-org/hello-world", "state": "open", "per_page": 50,
+  "path": "/home/jdoe/src/app.ts", "account_id": 12345678,
   "title": "Crash when saving", "body": "Card 4111 1111 1111 1111 was charged twice" }
 ```
 
-are summarised as
+are summarised as (hashes shortened)
 
 ```json
-{ "v": 1, "fields": {
-  "body": { "type": "string", "classes": ["card_number"], "len": "33-128" },
-  "owner": { "type": "string", "values": ["octo-org"] },
+{ "v": 2, "fields": {
+  "account_id": { "type": "number", "mag": 7, "hashes": ["SPFBgtsm…"] },
+  "body": { "type": "string", "hashes": ["c0Esx-nM…"], "classes": ["card_number"], "len": "33-128" },
+  "owner": { "type": "string", "hashes": ["mlsb-iLo…"], "len": "1-8" },
+  "path": { "type": "string", "hashes": ["-Ky9LH7b…"], "prefixes": ["~/src/"], "len": "9-32" },
   "per_page": { "type": "number", "values": [50], "min": 50, "max": 50 },
-  "repo": { "type": "string", "prefixes": ["octo-org/"] },
+  "repo": { "type": "string", "hashes": ["N4YPel47…"], "prefixes": ["octo-org/"], "len": "9-32" },
   "state": { "type": "string", "values": ["open"] },
-  "title": { "type": "string", "len": "9-32" } } }
+  "title": { "type": "string", "hashes": ["s6GMfE1K…"], "len": "9-32" } } }
 ```
 
-Summaries are not a substitute for masking: a single word an agent passes as a plain value (a first name in a field called `name`, for example) can be kept. If your tools take personal data in such fields, switch summaries off.
+### Limits
+
+The summary keeps no free text, and detected personal data only by class and hash, but short plain values can still be kept. Know these before you rely on it:
+
+- a single lower-case word under an ordinary key (`ref`, `label`, `kind`) is kept, even when it happens to be a first name;
+- a lower-case object key is kept as a path segment, so a map keyed by names (`scores.alice`) keeps the names;
+- repository owners, email domains, URL hosts and a path's first directory are kept as prefixes, and can be a person's handle or personal domain;
+- a keyed hash cannot be reversed without the key, but anyone holding the master key can test guesses against it.
+
+If your tools take personal data in such places, switch summaries off.
 
 ## Who can see it
 
-Admins see each recent call's summary and role in the tool drawer of **MCP → Tools** (`GET /api/mcp/tools`, `recentCalls[].argsSummary`); builders see the calls without them. Audit bundles of a run include its telemetry rows, summaries included.
+Admins see each recent call's summary and role in the tool drawer of **MCP → Tools** (`GET /api/mcp/tools`, `recentCalls[].argsSummary`); builders see the calls without them. Audit bundles of a run include its telemetry rows, summaries included. A bundle also holds the run's full node outputs, raw tool arguments included, so the summaries add nothing to what anyone who can read a run's bundle already sees.
+
+The project on a row is a label taken when the call ran, not a link: after a project is deleted its rows keep the old project id.
 
 ## Retention
 

@@ -262,8 +262,8 @@ const envSchema = z.object({
   /** Admins may only register or import stdio servers whose command matches an approved catalog entry. */
   MCP_CATALOG_ENFORCE: booleanFromEnv.default(false),
   /**
-   * Phase 12.4 — keep a safe summary of each MCP tool call's arguments on its telemetry row (types, short enum-like
-   * values, numbers, identifier prefixes; never free text; personal data by class only). Unset or blank = on;
+   * Phase 12.4 — keep a safe summary of each MCP tool call's arguments on its telemetry row (an allow-list: small
+   * numbers, short tokens, schema enum values and identifier prefixes; every other value as its shape plus a keyed hash). Unset or blank = on;
    * `false` switches it off and the summary, subject and project columns stay empty. Read it with
    * toolArgumentSummariesEnabled().
    */
