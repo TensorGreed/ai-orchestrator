@@ -89,21 +89,27 @@ describe("evaluateGuard", () => {
   });
 
   it("applies the latency budget: fail closed blocks, fail open passes with what was found", async () => {
+    // The clock only moves inside the slow detector, so a slow test runner cannot spend the budget before it starts;
+    // the real 10 ms timeout still races the detector's 60 ms.
+    let clock = 0;
+    const now = () => clock;
     const slow = detector("slow", "rule", () => [], {
       detect: async () => {
+        clock += 60;
         await new Promise((resolve) => setTimeout(resolve, 60));
         return [];
       }
     });
     const registry = new GuardRegistry().register(slow).register(detector("after", "parser", () => []));
     const closed = profileWith({ latencyBudget: { ms: 10, onExceeded: "fail_closed" } }, { detectors: [{ id: "slow" }, { id: "after" }] });
-    const verdictClosed = await evaluateGuard(closed, { channel: "prompt", content: "hi" }, { registry });
+    const verdictClosed = await evaluateGuard(closed, { channel: "prompt", content: "hi" }, { registry, now });
     expect(verdictClosed.action).toBe("block");
     expect(verdictClosed.budget.exceeded).toBe(true);
     expect(verdictClosed.timings.detectors.map((t) => t.status)).toEqual(["timed_out", "skipped_budget"]);
     expect(verdictClosed.actions[0]).toMatchObject({ detectorId: "<engine>", effective: "block" });
+    clock = 0;
     const open = profileWith({ latencyBudget: { ms: 10, onExceeded: "fail_open" } }, { detectors: [{ id: "slow" }, { id: "after" }] });
-    const verdictOpen = await evaluateGuard(open, { channel: "prompt", content: "hi" }, { registry });
+    const verdictOpen = await evaluateGuard(open, { channel: "prompt", content: "hi" }, { registry, now });
     expect(verdictOpen.action).toBe("allow");
     expect(verdictOpen.budget.exceeded).toBe(true);
     expect(verdictOpen.trace.some((t) => t.kind === "budget" && /fail open/i.test(t.message))).toBe(true);
