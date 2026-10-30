@@ -133,6 +133,8 @@ describe("summarizeToolArguments: identifiers and free text", () => {
       uuid: "550e8400-e29b-41d4-a716-446655440000",
       sha: "9fceb02d0ae598e95dc970b74767f19372d61af8",
       account: "acct-0012345678",
+      ssnLike: "123-45-6789",
+      phoneLike: "020 7946",
       blob: "QWxhZGRpbjpvcGVuIHNlc2FtZQQWxhZGRpbjpvcGVu"
     });
     for (const field of Object.values(summary.fields)) {
@@ -155,11 +157,12 @@ describe("summarizeToolArguments: identifiers and free text", () => {
     expect(allText(summary)).not.toMatch(/4111|4155550100|a@b|sk-abc/);
   });
 
-  it("checks long integers with the detector", () => {
+  it("never keeps long integers and checks them with the detector", () => {
     const summary = summarize({ card: 4111111111111111, id: 123456789, small: 42 });
     expect(summary.fields.card).toEqual({ type: "number", classes: ["card_number"] });
-    expect(summary.fields.id).toEqual({ type: "number", values: [123456789], min: 123456789, max: 123456789 });
-    expect(allText(summary)).not.toContain("4111111111111111");
+    expect(summary.fields.id).toEqual({ type: "number" });
+    expect(summary.fields.small).toEqual({ type: "number", values: [42], min: 42, max: 42 });
+    expect(allText(summary)).not.toMatch(/4111111111111111|123456789/);
   });
 
   it("hides strings under credential-like keys but keeps their numbers and booleans", () => {

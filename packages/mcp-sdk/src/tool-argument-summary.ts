@@ -14,7 +14,9 @@ import { CREDENTIAL_NAME_PATTERN } from "./client-features";
  * Pure and deterministic: the same arguments (in any key order) and schema
  * give the same summary. What is kept, per argument path:
  *
- *   - null, booleans and finite numbers, as values (with min and max);
+ *   - null, booleans and finite numbers below nine integer digits, as values
+ *     (with min and max); a longer integer (an account, card or phone number
+ *     written as a number) keeps only its type and any data class;
  *   - short enum-like strings (one word, at most 64 characters, not random-
  *     looking, no long digit run) and any string the tool's input schema
  *     lists in an `enum` / `const` at that path;
@@ -194,6 +196,9 @@ function shannonEntropy(text: string): number {
 /** Ids, hashes and tokens: not enum-like, even when short. */
 function looksRandom(text: string): boolean {
   if (/\d{6,}/.test(text)) return true;
+  // Numbers written with separators (ids, account, phone and national numbers): mostly digits, six or more.
+  const digits = text.replace(/\D/g, "").length;
+  if (digits >= 6 && digits * 2 >= text.length) return true;
   if (text.length >= 16 && /[A-Za-z]/.test(text) && /\d/.test(text) && shannonEntropy(text) >= 3) return true;
   return text.length >= 32 && !/[_.:+-]/.test(text);
 }
@@ -370,13 +375,13 @@ export function summarizeToolArguments(args: unknown, options: SummarizeToolArgu
 
   const summarizeNumber = (field: FieldAccumulator, value: number) => {
     if (!Number.isFinite(value)) return;
-    // A long integer may be a card, account or phone number written as a JSON number.
-    if (Number.isInteger(value) && Math.abs(value) >= 1e8 && Math.abs(value) < 1e21) {
-      const result = scan(String(Math.abs(value)));
-      if (result.classes.length > 0 || !result.complete) {
-        for (const dataClass of result.classes) field.classes.add(dataClass);
-        return;
+    // A long integer may be a card, account, phone or national number written as a JSON number: never kept, and
+    // checked with the detector for its class.
+    if (Number.isInteger(value) && Math.abs(value) >= 1e8) {
+      if (Math.abs(value) < 1e21) {
+        for (const dataClass of scan(String(Math.abs(value))).classes) field.classes.add(dataClass);
       }
+      return;
     }
     const normalized = Object.is(value, -0) ? 0 : value;
     keep(field, normalized);
