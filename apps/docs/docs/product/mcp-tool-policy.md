@@ -1,12 +1,12 @@
 ---
-description: "MCP tool policy in L2M: allow and deny rules by project, role, server and tool, read-only versus write classification, and a per-workflow no-write-tools switch."
+description: "MCP tool policy rules in L2M: allow, deny or require approval by role, server, tool, arguments and data labels, with shadow mode and gateway retries."
 ---
 
 # MCP tool policy
 
 Tool policy decides which MCP tools agents and MCP Tool nodes may use. It has three parts:
 
-- **Rules.** Admins write allow and deny rules scoped by project, role, server and tool name.
+- **Rules.** Admins write allow, deny and require-approval rules scoped by project, role, server and tool name, and optionally by the call's arguments, the run's data labels, the workflow or the gateway client. A rule can run in shadow mode first.
 - **Read-only classification.** Every tool is either read-only or a write tool, taken from an admin override or from the server's own annotations.
 - **No write tools.** A per-workflow switch that blocks every write tool in that workflow.
 
@@ -20,7 +20,11 @@ Rules live under **MCP → Policies** in the sidebar.
 
 | Field | Meaning |
 |---|---|
-| Effect | `allow` or `deny`. |
+| Effect | `allow`, `deny` or `require_approval` (tool rules only). See [Require approval](#require-approval). |
+| Mode | `enforce` (the default) or `shadow`: a shadow rule is evaluated and recorded on every call, never applied. See [Shadow mode](#shadow-mode). |
+| Conditions | Optional, tool rules only. Match only calls whose arguments or data labels meet them. See [Conditions](#conditions). |
+| Workflows | Optional. Only runs of these workflows. Empty means any workflow, and gateway calls. |
+| Gateway clients | Optional. Only these [MCP gateway](./mcp-gateway.md) clients: their direct calls and the workflow runs they start. Empty means any caller. |
 | Applies to | What the rule governs: `tool` (the default), `resource`, `prompt` or `sampling`. See [Rule kinds](#rule-kinds). |
 | Project | One project, or all projects. |
 | Roles | Any subset of `admin`, `builder`, `operator`, `viewer`. Empty means every role. |
@@ -43,27 +47,30 @@ A rule applies to one kind of request. Rules of another kind are ignored, so a d
 | `prompt` | The prompt name. | Prompt lists, previews in the playground and server prompts bound to agent, LLM and chat model nodes. |
 | `sampling` | The model name the server's request resolves to. | A server's `sampling/createMessage` request, after the server's own sampling settings allowed it. |
 
-The same evaluation order applies within a kind: no rule means allowed, deny wins, and an allow strictly inside a deny carves an exception.
+The same evaluation order applies within a kind: no rule means allowed, deny wins, and an allow strictly inside a deny carves an exception. Conditions and `require_approval` exist for tools only.
 
 ### Evaluation order
 
 For one tool call:
 
-1. Collect the enabled rules whose scope matches the call. Project, role, server, tool pattern and annotation condition must all match.
-2. If no rule matches, the tool is **allowed**. This is the default.
-3. If no matching rule is a deny rule, the tool is **allowed**.
-4. A matching deny rule is set aside when a matching allow rule is **strictly narrower** than it. That is how an allow rule carves an exception out of a broader deny.
-5. If any matching deny rule is left, the tool is **denied**. The first such rule is reported, with rules taken oldest first.
+1. Collect the enabled, enforced rules whose scope matches the call. Project, role, server, tool pattern, annotation condition, workflows, clients and conditions must all match.
+2. If no rule matches, the call is **allowed**. This is the default.
+3. A matching deny rule is set aside when a matching allow or require-approval rule is **strictly narrower** than it. That is how a rule carves an exception out of a broader deny.
+4. If any matching deny rule is left, the call is **denied**. The first such rule is reported, with rules taken oldest first.
+5. Otherwise, a matching require-approval rule is set aside when a matching allow rule is strictly narrower than it. If one is left, the call **needs approval**.
+6. Otherwise the call is **allowed**.
 
-Deny wins every tie. An allow rule only beats a deny rule it sits inside.
+Precedence is deny, then require approval, then allow. A rule only beats a stricter rule it sits inside.
 
-An allow rule is **strictly narrower** than a deny rule when it is inside the deny in every field and smaller in at least one:
+A rule is **strictly narrower** than another when it is inside the other in every field and smaller in at least one:
 
 - **Project:** a specific project is inside "all projects", and inside the same project.
 - **Roles:** a subset is inside a larger set. Any set is inside "every role", but "every role" is not inside a specific set.
 - **Server:** a specific server is inside "any server", and inside the same server.
 - **Tool pattern:** containment is checked conservatively. Anything is inside `*`, and an exact name is inside a glob that matches it. Two different globs are never treated as nested.
 - **Annotation condition:** a rule with a condition is inside a rule without one, and inside a rule with the same condition. Two different conditions are never treated as nested.
+- **Workflows and clients:** a non-empty list is inside an empty one (any), and inside a list that contains it.
+- **Conditions:** a rule with conditions is inside a rule without any, and inside a rule with the same conditions (compared after sorting, so order does not matter). Two different sets of conditions are never treated as nested.
 
 ### Examples
 
@@ -76,6 +83,64 @@ An allow rule is **strictly narrower** than a deny rule when it is inside the de
 **No destructive tools for operators.** Rule: deny for `operator` with annotation condition **destructive**. Operators lose every tool that is not read-only and does not declare `destructiveHint: false`, on every server. Add an allow rule for `operator` on one tool name with the same condition to make an exception.
 
 **Inline stdio servers off.** Rule: deny server `stdio_mcp`. Every stdio server configured inline on a node is blocked. Registered stdio servers are not affected, because an adapter id never matches a registry entry.
+
+## Conditions
+
+A tool rule can carry **conditions** on the call. The rule then matches only calls that meet them, on top of its other fields. Conditions are combined with **all** (every condition must hold) or **any** (at least one), up to 20 per rule.
+
+| Operator | Matches when the value at the path... |
+|---|---|
+| `equals` | equals the value (a string, number, boolean or `null`) |
+| `one_of` / `not_one_of` | is / is not one of a list of values (up to 100) |
+| `starts_with` / `ends_with` | is a string that starts / ends with the text |
+| `matches` | is a string that matches a glob: `*` any run of characters, `?` one character |
+| `lt`, `lte`, `gt`, `gte` | is a number less than, at most, greater than, at least the value |
+| `between` | is a number within `[min, max]`, both included |
+| `exists` | is present and not `null`; with `value: false`, is absent |
+| `label_present` / `label_absent` | (no path) the run's data carries / does not carry this provenance label or data class |
+
+**Paths** name an argument: `repo`, `options.branch`, `files[0].path`, or `files[*].path`, where `[*]` matches when any element of the list does. Keys are letters, digits, `_`, `$`, `@` and `-`; a path has at most 16 steps. A path that is missing, or a value of another type (a number compared with `starts_with`, a string with `gt`), **does not match**: a condition never matches by accident.
+
+**Labels** come from [data labels](./data-labels-and-destinations.md) on the run: the provenance labels and data classes the values flowing into the call carry. Both label operators do not match when the run tracks no labels, so `label_absent` never allows a call just because labels are unknown.
+
+In the rule form, add conditions row by row (argument path, operator, value). For `equals` and lists, `42`, `true` and `false` are typed values; quote them (`"42"`) to compare as text.
+
+### Discovery and conditions
+
+When an agent starts it lists its tools before any call is made, so there are no arguments yet. A rule with conditions is **undecided** at that point: a conditional deny or require-approval rule does not hide the tool, and a conditional allow can still carve an exception. The rule is applied to each call, with its arguments. A model that calls the tool with arguments a conditional deny matches gets a tool error naming the rule and the condition, for example `... is blocked by policy 'No prod pushes' (mtp_…) for role builder (the call matches: repo is one of "acme/prod").`
+
+## Require approval
+
+A `require_approval` rule lets the call go ahead only after a person approves it.
+
+- **Agents and MCP Tool nodes.** The run pauses before the call, with a request in the **Approvals** inbox that names the tool, the server and the rule. Approve it and the run resumes and makes the call once; reject it and the call fails. When the workflow's **Ask before write tools** switch also applies to the call, there is **one** request, which names both reasons. A policy approval cannot be approved by the person who started the run. See [Human approval for agent tool calls](../guides/human-approval-for-agent-tool-calls.md).
+- **Gateway calls.** The client gets an "approval pending" error and retries after an admin approves. See [Gateway: approval by retry](#gateway-approval-by-retry).
+
+The policy is checked **before** the guard: a call a rule denies or holds for approval never reaches the guard's argument checks.
+
+### Gateway: approval by retry
+
+A gateway client cannot wait inside one call, so a held-back gateway call returns a JSON-RPC error instead:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 7,
+  "error": {
+    "code": -32030,
+    "message": "Approval pending: MCP tool 'push' on server 'GitHub' needs approval by policy 'Prod pushes' (mtp_…). Ask an admin to approve request mga_…, then retry the same call with the same arguments.",
+    "data": { "approvalRequestId": "mga_…", "status": "pending", "ruleId": "mtp_…", "ruleName": "Prod pushes", "expiresAt": "…", "approvalWindowMs": 900000 }
+  }
+}
+```
+
+Admins see the request under **MCP → Policies → Gateway approvals**, with the client, the tool, the rule and the arguments, and approve or reject it. After an approval, the **identical** call (same client, server, tool, and arguments, whatever their key order) goes through **once** within `MCP_GATEWAY_APPROVAL_WINDOW_MS` (default 900000, 15 minutes). A call with other arguments, from another client, after the window, or a second retry asks again. Asking again before a decision returns the same pending request. A pending request that nobody decides expires after 24 hours.
+
+## Shadow mode
+
+A rule in **shadow** mode is evaluated on every call but never changes what happens. Each call records what the enforced rules decided and, when a shadow rule matched, what the outcome would have been with the shadow rules enforced too, and whether that would have changed it. Use it to try a rule on real traffic before you enforce it: switch the mode to **enforce** when the recorded decisions look right. The rule list marks shadow rules with a **Shadow** badge.
+
+Every rule has a stable **hash** over what it matches (effect, scope, principals and conditions, not its name or mode), returned with the rule and written to its audit events, so you can tell whether an edit changed what a rule does.
 
 ## Whose role counts
 
@@ -176,11 +241,20 @@ followed by one line per hidden tool:
 - `calculator hidden by policy Viewers: no calculator`
 - `calculator hidden: write tool and this workflow allows no write tools`
 
+Phase 12.4 adds `decisions`, one entry per call a rule matched:
+
+```json
+{ "tool": "push", "server": "github_mcp", "toolCallId": "call_1", "effect": "require_approval", "decidedBy": "rule", "ruleId": "mtp_…", "ruleName": "Prod pushes", "ruleHash": "…", "approval": "approved", "matched": [{ "ruleId": "mtp_…", "mode": "enforce", "effect": "require_approval" }], "shadow": { "effect": "deny", "ruleId": "mtp_…", "changed": true } }
+```
+
+The Trace tab shows them as lines such as `push: needs approval by policy Prod pushes (approved)` or `search: allowed; shadow rule Trial would make it blocked`. The same decision is stored with the call in [MCP tool telemetry](./mcp-server-registry.md#tool-telemetry) (`policy_decision_json`), for agents, MCP Tool nodes and gateway calls.
+
 Traces never contain secret values.
 
 ## In the Studio
 
-- **MCP servers page, Policies view.** Lists the rules in evaluation order. Admins add, edit, delete and enable or disable them; builders see them read-only. A **Test a tool** form evaluates a project, role, server and tool, optionally with "No write tools", and shows the decision, the deciding rule and every matching rule.
+- **MCP servers page, Policies view.** Lists the rules in evaluation order, with their conditions in words and a **Shadow** badge on shadow rules. Admins add, edit, delete and enable or disable them; builders see them read-only. The form keeps description, kind, annotation condition and the workflow and client pickers under **Advanced**. A **Test a tool** form evaluates a project, role, server and tool, optionally with arguments (JSON), data labels, a workflow, a gateway client and "No write tools", and shows the decision, the matched rules and why, the rules that depend on arguments, and what shadow rules would do.
+- **Gateway approvals.** On the same view, admins approve or reject gateway calls a require-approval rule held back.
 - **Server Tools table.** An **Access** column shows **Read-only** or **Write** with its source: `annotation`, `manual`, or `unknown → write`. Admins pick **Mark read-only** or **Mark write**, or **Auto (annotation)** to let the server's annotation decide again. Tools your role cannot use in the active project show **Blocked for your role** with the rule's name.
 - **MCP Tool node inspector.** A "Blocked for you by MCP tool policy" note appears when the selected tool (or, in all-tools mode, any discovered tool) is blocked for you in the workflow's project, naming the rule.
 - **Editor ⋯ menu.** **No write tools** is a checkbox item for builders and admins; save the workflow to keep it.
@@ -191,18 +265,21 @@ Traces never contain secret values.
 |---|---|
 | List rules, dry-run a decision | builder and above |
 | Create, update, delete rules; override a tool's classification | admin |
+| List, approve and reject gateway approval requests | admin |
 
-Changes are written to the audit log with resource type `mcp_policy` and events `mcp_policy.created`, `mcp_policy.updated`, `mcp_policy.deleted`, `mcp_policy.classification_set` and `mcp_policy.classification_cleared`.
+Changes are written to the audit log with resource type `mcp_policy` and events `mcp_policy.created`, `mcp_policy.updated`, `mcp_policy.deleted`, `mcp_policy.classification_set` and `mcp_policy.classification_cleared`. Their metadata includes the rule's mode, conditions, workflows, clients and hash; updates also carry the previous hash. Gateway approvals add `mcp_gateway.approval_requested`, `mcp_gateway.approval_decided` and `mcp_gateway.approval_used`, and argument denials are `mcp_gateway.tool_denied` with the decision.
 
 ## Endpoints
 
 - `GET /api/mcp/policies`: rules in evaluation order, plus the roles a rule can target (builder)
-- `POST /api/mcp/policies`: create a rule; `kind` is `tool` (default), `resource`, `prompt` or `sampling`; `annotationHint` is one of the conditions above, or `null`, and only applies to tool rules (admin)
-- `PUT /api/mcp/policies/:id`: update any field of a rule (admin)
+- `POST /api/mcp/policies`: create a rule; `kind` is `tool` (default), `resource`, `prompt` or `sampling`; `annotationHint` is one of the conditions above, or `null`, and only applies to tool rules; `conditions` is `{ "all": [...] }` or `{ "any": [...] }` of `{ path, op, value }`; `mode` is `enforce` or `shadow`; `workflowIds` and `clientIds` are lists of ids. Invalid input returns 400 with field-level `details` (for example `conditions.all.0.value`) (admin)
+- `PUT /api/mcp/policies/:id`: update any field of a rule; the rule as updated must still be valid (admin)
 - `DELETE /api/mcp/policies/:id`: delete a rule (admin)
-- `POST /api/mcp/policies/evaluate`: dry-run `{ projectId, role, serverId, toolName, kind?, noWriteTools? }`; `toolName` is the URI, prompt or model name for the other kinds. Returns the decision, the deciding rule, the matching rules, the denies a narrower allow set aside, and the tool's classification (builder)
+- `POST /api/mcp/policies/evaluate`: dry-run `{ projectId, role, serverId, toolName, kind?, noWriteTools?, arguments?, labels?, workflowId?, clientId? }`; `toolName` is the URI, prompt or model name for the other kinds. Returns the decision and `effect`, the deciding rule, the matching rules with `why` (each rule's conditions in words), `undecided` rules (conditions without arguments), the `approval` when one is needed, the `shadow` outcome, the denies a narrower rule set aside, and the tool's classification (builder)
+- `GET /api/mcp/gateway/approvals?status=`: gateway calls held for approval, newest first, with the approval window (admin)
+- `POST /api/mcp/gateway/approvals/:id/approve` and `/reject`: decide a pending request, optionally `{ reason }`; 409 when it was already decided or expired (admin)
 - `PUT /api/mcp/servers/:id/tools/:toolName/classification`: `{ readOnly: true | false | null }`. `null` clears the override (admin)
 
 ## Storage
 
-Rules are kept in `mcp_tool_policies` and overrides in `mcp_tool_classifications`. SQLite creates both at startup. On Postgres, migration v22 creates them and adds `workflows.created_by`; migration v24 adds the `annotation_hint` column; migration v25 adds `kind`.
+Rules are kept in `mcp_tool_policies` and overrides in `mcp_tool_classifications`. SQLite creates both at startup. On Postgres, migration v22 creates them and adds `workflows.created_by`; migration v24 adds the `annotation_hint` column; migration v25 adds `kind`. Migration v47 (both stores) adds `conditions_json`, `mode` (default `enforce`, so existing rules keep their meaning), `workflow_ids_json` and `client_ids_json`, the `policy_decision_json` column on `mcp_tool_calls`, and the `mcp_gateway_approvals` table, which follows the execution-history retention.

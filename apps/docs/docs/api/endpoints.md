@@ -86,10 +86,12 @@ See [MCP server registry](../product/mcp-server-registry.md).
 See [MCP tool policy](../product/mcp-tool-policy.md).
 
 - `GET /api/mcp/policies` (builder)
-- `POST /api/mcp/policies` (admin; optional `kind` of `tool` | `resource` | `prompt` | `sampling`, see [Rule kinds](../product/mcp-tool-policy.md#rule-kinds); optional `annotationHint`, see [Annotation conditions](../product/mcp-tool-policy.md#annotation-conditions))
+- `POST /api/mcp/policies` (admin; optional `kind` of `tool` | `resource` | `prompt` | `sampling`, see [Rule kinds](../product/mcp-tool-policy.md#rule-kinds); optional `annotationHint`, see [Annotation conditions](../product/mcp-tool-policy.md#annotation-conditions); `effect` may be `require_approval`; optional `conditions`, `mode`, `workflowIds`, `clientIds`, see [Conditions](../product/mcp-tool-policy.md#conditions))
 - `PUT /api/mcp/policies/:id` (admin)
 - `DELETE /api/mcp/policies/:id` (admin)
-- `POST /api/mcp/policies/evaluate` (builder; `{ projectId, role, serverId, toolName, kind?, noWriteTools? }`)
+- `POST /api/mcp/policies/evaluate` (builder; `{ projectId, role, serverId, toolName, kind?, noWriteTools?, arguments?, labels?, workflowId?, clientId? }`)
+- `GET /api/mcp/gateway/approvals?status=` (admin; gateway calls held for approval)
+- `POST /api/mcp/gateway/approvals/:id/approve` and `/reject` (admin; optional `{ reason }`)
 
 ## MCP gateway
 

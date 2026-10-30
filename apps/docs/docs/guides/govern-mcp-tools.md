@@ -33,13 +33,14 @@ Annotations are hints from the server, not guarantees. Review the tools that mat
 
 ## 3. Write allow and deny rules
 
-Open **MCP → Policies**. A rule has an effect (`allow` or `deny`), a project (one or all), roles (empty means every role), a server (empty means any), a tool pattern (`*` globs) and an optional annotation condition.
+Open **MCP → Policies**. A rule has an effect (`allow`, `deny` or **Needs approval**), a project (one or all), roles (empty means every role), a server (empty means any), a tool pattern (`*` globs) and optional conditions on the call's arguments or data labels. Under **Advanced** you can add an annotation condition or limit the rule to some workflows or gateway clients.
 
 How rules combine:
 
 - no matching rule: allowed;
-- a matching deny: denied, unless a matching allow is **strictly narrower** than it, which carves an exception;
-- deny wins every tie.
+- a matching deny: denied, unless a matching allow or Needs approval rule is **strictly narrower** than it, which carves an exception;
+- otherwise a matching Needs approval rule: the call waits for a person;
+- deny wins every tie, then Needs approval, then allow.
 
 Common rules:
 
@@ -49,8 +50,12 @@ Common rules:
 | No deletes in one project | deny, project `Finance`, pattern `delete_*` |
 | Viewers get one tool on a server | deny server `GitHub` for `viewer`; allow `search_issues` on server `GitHub` for `viewer` |
 | No inline stdio servers | deny, server `stdio_mcp` (registered stdio servers are not affected) |
+| A person approves pushes to production | Needs approval, pattern `push*`, condition `repo` **is one of** `acme/prod` |
+| No PII to an outside tool | deny, server `Search`, condition **run data has label** `pii` |
 
-Before saving, use **Test a tool** on the same page: pick a project, role, server and tool (optionally with "No write tools") and see the decision, the deciding rule and every matching rule. The same check is available as `POST /api/mcp/policies/evaluate`.
+Not sure about a rule yet? Turn on **Shadow mode**: the rule is only recorded on each call, with what it would have decided, so you can check real traffic before you enforce it.
+
+Before saving, use **Test a tool** on the same page: pick a project, role, server and tool, paste example arguments, and see the decision, the matched rule and why, and what shadow rules would do. The same check is available as `POST /api/mcp/policies/evaluate`.
 
 ## 4. Block write tools where they don't belong
 
@@ -65,7 +70,7 @@ Policy is enforced in the runtime:
 
 - **Discovery.** When an agent or supervisor starts, denied tools are removed before the model sees the tool set, including the tools of its workers.
 - **Every call.** Each call is checked again. A model that asks for a hidden tool by name gets a tool error naming the rule; a direct MCP Tool node fails with the same message and is not retried.
-- **Gateway.** Clients of the [MCP gateway](./self-hosted-mcp-gateway.md) are evaluated with their own role, and denied tools are absent from their `tools/list`.
+- **Gateway.** Clients of the [MCP gateway](./self-hosted-mcp-gateway.md) are evaluated with their own role, and denied tools are absent from their `tools/list`. A call that needs approval returns an "approval pending" error; after an admin approves it under **Gateway approvals**, the client retries the same call.
 
 To see it, run a workflow and open the agent node's **Trace** tab. The **Tool policy** block says which role the run was evaluated as and lists every hidden tool with the reason, for example `calculator hidden by policy Viewers: no calculator`. The built-in `mock-mcp` server leaves `calculator` unannotated, so it counts as a write tool and is handy for trying the switches.
 
@@ -78,7 +83,7 @@ A run is evaluated with one role, its **subject**: the signed-in user for manual
 ## What it does not do
 
 - It does not verify what a tool actually does: classification relies on annotations or your override.
-- Two different globs are never treated as nested, so an allow with one glob does not carve an exception from a deny with another.
+- Two different globs, or two different sets of conditions, are never treated as nested, so an allow with one does not carve an exception from a deny with another.
 - No write tools does not apply to gateway calls; use a rule scoped to the toolset's policy project.
 
 ## Next steps
