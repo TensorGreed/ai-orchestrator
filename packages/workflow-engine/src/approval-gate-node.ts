@@ -192,6 +192,22 @@ export function writeToolApprovalKey(nodeId: string, serverKey: string, toolName
   return `tool_gate:${nodeId}:${serverKey}:${toolName}:${digest}`;
 }
 
+/**
+ * Phase 12.4 — the key of an approval a tool policy rule asked for: the
+ * call's key bound to the rule (id and hash). An approval the write-tool gate
+ * alone asked for (decided under the workflow's own approver settings) never
+ * carries this suffix, so it cannot stand in for a policy approval; a policy
+ * approval (admins only) does cover the gate for the same call.
+ */
+export function writeToolPolicyApprovalKey(callKey: string, policy: { ruleId: string; ruleHash?: string }): string {
+  return `${writeToolPolicyKeyPrefix(callKey)}${policy.ruleId}:${(policy.ruleHash ?? "").slice(0, 16)}`;
+}
+
+/** Phase 12.4 — every policy approval key of one call starts with this. */
+export function writeToolPolicyKeyPrefix(callKey: string): string {
+  return `${callKey}:policy:`;
+}
+
 const ARGUMENT_PREVIEW_CHARS = 2_000;
 
 export function writeToolApprovalPause(input: {
@@ -208,13 +224,14 @@ export function writeToolApprovalPause(input: {
    * this call. The person sees one request naming the rule; it never allows
    * approving one's own run, whatever the workflow's settings say.
    */
-  policy?: { ruleId: string; ruleName?: string; message: string };
+  policy?: { ruleId: string; ruleName?: string; message: string; ruleHash?: string };
   /** Phase 12.4 — false when only the policy asks (the write-tool gate is off or skips this tool). Default true. */
   writeGate?: boolean;
   /** Phase 12.4 — who makes the call: an agent (default) or a direct MCP Tool node. */
   caller?: "agent" | "node";
 }): ApprovalHandoffRequest {
-  const approvalKey = writeToolApprovalKey(input.nodeId, input.serverKey, input.toolName, input.args);
+  const callKey = writeToolApprovalKey(input.nodeId, input.serverKey, input.toolName, input.args);
+  const approvalKey = input.policy ? writeToolPolicyApprovalKey(callKey, input.policy) : callKey;
   let preview = canonicalJson(input.args ?? {});
   if (preview.length > ARGUMENT_PREVIEW_CHARS) preview = `${preview.slice(0, ARGUMENT_PREVIEW_CHARS)}…`;
   const writeGate = input.writeGate !== false;
@@ -233,7 +250,9 @@ export function writeToolApprovalPause(input: {
       kind: "rerun",
       source: "agent_tool_gate",
       approvalKey,
-      request: input.policy ? { ...request, allowSelfApproval: false } : request
+      // An admin wrote the rule, so admins decide: the workflow's approver settings (builders control them) only
+      // apply when the write-tool gate alone asks. Nobody approves their own run.
+      request: input.policy ? { ...request, approverRoles: ["admin"], approverUsers: [], allowSelfApproval: false } : request
     },
     details: {
       toolName: input.toolName,
@@ -245,6 +264,7 @@ export function writeToolApprovalPause(input: {
             policyRuleId: input.policy.ruleId,
             ...(input.policy.ruleName ? { policyRuleName: input.policy.ruleName } : {}),
             policyReason: input.policy.message,
+            ...(input.policy.ruleHash ? { policyRuleHash: input.policy.ruleHash } : {}),
             requiredBy: writeGate ? ["write_tool_gate", "tool_policy"] : ["tool_policy"]
           }
         : {})
@@ -305,6 +325,12 @@ export class WriteToolCallLedger {
         return this.approvedKeys.has(key);
       },
       takeApproval: (key) => this.approvedKeys.delete(key),
+      keysWithPrefix: (prefix) => {
+        const keys = new Set<string>();
+        for (const key of this.results.keys()) if (key.startsWith(prefix)) keys.add(key);
+        for (const key of this.approvedKeys) if (key.startsWith(prefix)) keys.add(key);
+        return [...keys];
+      },
       record: (key, result) => {
         const stored = this.results.get(key) ?? [];
         stored.push(boundedToolResult(toJsonSafe(result)));
@@ -332,6 +358,8 @@ export interface WriteToolCallSession {
   ready(key: string): boolean;
   /** Takes the one-time approval for this key; false when there is none. */
   takeApproval(key: string): boolean;
+  /** Phase 12.4 — the keys starting with `prefix` that hold an approval or stored results (policy approvals of one call). */
+  keysWithPrefix(prefix: string): string[];
   /** Stores the result of an approved call. */
   record(key: string, result: unknown): void;
 }

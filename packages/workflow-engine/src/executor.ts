@@ -8,6 +8,7 @@ import {
   McpToolPolicyError,
   policyDecisionRecord,
   policyNeedsAnnotations,
+  policyNeedsArguments,
   resolveMCPTools,
   type McpToolAccessCall,
   type McpToolAccessCheck,
@@ -140,6 +141,7 @@ import {
   approvalGatePause,
   writeToolApprovalKey,
   writeToolApprovalPause,
+  writeToolPolicyKeyPrefix,
   writeToolGateSkips,
   WriteToolCallLedger,
   type WriteToolCallSession
@@ -1082,6 +1084,8 @@ interface RunToolPolicy {
   evaluate: (tool: McpToolAccessSubjectTool, call?: McpToolAccessCall) => McpToolAccessDecision;
   /** Phase 10.5 — some rule has an annotation condition, so a tool's hints must be known to decide. */
   needsAnnotations: boolean;
+  /** Phase 12.4 — some rule has conditions, so a call's arguments must be readable to decide. */
+  needsArguments: boolean;
   /**
    * Phase 12.4 — records one call's decision on the trace (`decisions`) when
    * some rule, enforced or shadow, matched it; returns the record.
@@ -1099,8 +1103,14 @@ type ToolCallPlan =
   | { kind: "deny"; message: string; hidden: McpHiddenTool; decision?: McpToolAccessDecision; policyTool?: McpToolAccessSubjectTool }
   | {
       kind: "approval";
+      /** One request for everything that asks; its key is `policyKey` when a policy rule asks, else `callKey`. */
       pause: ApprovalHandoffRequest;
-      approvalKey: string;
+      /** The call's own key (node, server, tool, arguments). */
+      callKey: string;
+      /** Set when a require_approval rule asks: the call's key bound to that rule (admins decide). */
+      policyKey?: string;
+      /** The workflow's write-tool gate asks too. */
+      gateAsks: boolean;
       decision?: McpToolAccessDecision;
       policyTool?: McpToolAccessSubjectTool;
     };
@@ -1190,7 +1200,36 @@ async function buildRunToolPolicy(
     ];
     return entry;
   };
-  return { trace, accessCheck, evaluate, needsAnnotations: policyNeedsAnnotations(snapshot.rules), record };
+  return {
+    trace,
+    accessCheck,
+    evaluate,
+    needsAnnotations: policyNeedsAnnotations(snapshot.rules),
+    needsArguments: policyNeedsArguments(snapshot.rules),
+    record
+  };
+}
+
+/**
+ * Phase 12.4 — when some rule reads arguments, a direct MCP Tool call's
+ * arguments template must render to a JSON object: otherwise the node would
+ * quietly send `{}` and the rules would judge that instead of what the
+ * template meant. `rendered` is the rendered template (undefined when the
+ * arguments came from elsewhere).
+ */
+function assertPolicyReadableArguments(node: WorkflowNode, toolPolicy: RunToolPolicy, rendered: string | undefined): void {
+  if (!toolPolicy.needsArguments || rendered === undefined) return;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(rendered);
+  } catch {
+    parsed = undefined;
+  }
+  if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) return;
+  const got = Array.isArray(parsed) ? "an array" : parsed === undefined ? "text that is not JSON" : parsed === null ? "null" : `a ${typeof parsed}`;
+  throw WorkflowError.nodeConfig(
+    `MCP Tool node '${node.name || node.id}' must send its arguments as a JSON object (got ${got}); tool policy rules read the call's arguments by name.`
+  );
 }
 
 /** Phase 12.4 — the approval request of a direct MCP Tool call a require_approval rule matched. */
@@ -1239,7 +1278,9 @@ async function directMcpPolicyPreCheck(
   const toolPolicy = await buildRunToolPolicy(context, dependencies);
   if (!toolPolicy || toolPolicy.needsAnnotations) return;
   const argsTemplate = typeof config.argsTemplate === "string" ? config.argsTemplate : "{}";
-  const args = tryParseJson(renderTemplate(argsTemplate, buildTemplateData(context, config)));
+  const renderedArgs = renderTemplate(argsTemplate, buildTemplateData(context, config));
+  assertPolicyReadableArguments(node, toolPolicy, renderedArgs);
+  const args = tryParseJson(renderedArgs);
   let serverConfig: MCPServerConfig;
   try {
     serverConfig = await applyRegisteredMcpServer(
@@ -5400,11 +5441,14 @@ async function executeNodeHandler(
         throw new Error("Direct MCP Tool execution requires a specific tool name (single-tool mode).");
       }
       const argsTemplate = typeof config.argsTemplate === "string" ? config.argsTemplate : "{}";
+      // Phase 12.4 — the rendered template, kept so the tool policy can refuse one that is not a JSON object.
+      const renderedArgs =
+        operation === "call_tool" && outbound?.override.kind !== "mcp_args" ? renderTemplate(argsTemplate, templateData) : undefined;
       const args =
         outbound?.override.kind === "mcp_args" && operation === "call_tool"
           ? outbound.override.args
-          : operation === "call_tool"
-            ? tryParseJson(renderTemplate(argsTemplate, templateData))
+          : renderedArgs !== undefined
+            ? tryParseJson(renderedArgs)
             : {};
       const serverConfig = await applyRegisteredMcpServer(
         {
@@ -5489,6 +5533,7 @@ async function executeNodeHandler(
             }
           }
           // Phase 12.4 — the call's arguments and the node's input labels decide argument-aware rules.
+          assertPolicyReadableArguments(node, toolPolicy, renderedArgs);
           const policyCall: McpToolAccessCall = {
             arguments: toRecord(args),
             dataLabels: policyLabels(context.labelScope?.inputLabels())
@@ -5921,6 +5966,7 @@ async function executeNodeHandler(
           const gateAsks = writeGate?.enabled === true && !writeToolGateSkips(classification);
           if (!gateAsks && !decision?.approval) return { kind: "allow", ...(decision ? { decision, policyTool } : {}) };
           const serverKey = resolvedEntry.registryServerId ?? resolvedEntry.serverId;
+          const callKey = writeToolApprovalKey(node.id, serverKey, resolvedEntry.originalName, args);
           const pause = writeToolApprovalPause({
             settings: writeGate ?? { enabled: false },
             nodeId: node.id,
@@ -5933,11 +5979,35 @@ async function executeNodeHandler(
             ...(decision?.approval ? { policy: decision.approval } : {}),
             writeGate: gateAsks
           });
-          const approvalKey = pause.handoff.kind === "rerun" ? pause.handoff.approvalKey : writeToolApprovalKey(node.id, serverKey, resolvedEntry.originalName, args);
-          return { kind: "approval", pause, approvalKey, ...(decision ? { decision, policyTool } : {}) };
+          const policyKey = decision?.approval && pause.handoff.kind === "rerun" ? pause.handoff.approvalKey : undefined;
+          return { kind: "approval", pause, callKey, ...(policyKey ? { policyKey } : {}), gateAsks, ...(decision ? { decision, policyTool } : {}) };
         };
-        // Phase 12.4 — the tool-call check's plan for the call it just allowed, which invokeTool runs next.
+        /**
+         * Phase 12.4 — the tool-call check's plan for the call it just let
+         * through to the guard. The runtime calls the check, then the guard,
+         * then invokeTool for the same call, one call at a time, so the last
+         * plan belongs to the call invokeTool runs (a guard block leaves it
+         * behind, and the next check replaces it).
+         */
         let checkedCall: { toolName: string; argsKey: string; plan: ToolCallPlan; toolCallId: string } | undefined;
+        /**
+         * Phase 12.4 — the approval keys that can carry one call, in order:
+         * the policy approval the check asked for before the guard (it still
+         * covers the call when the guard rewrote the arguments, unless they
+         * now need a different rule's approval), then the call's own policy
+         * key, or, when only the write-tool gate asks, the call's key and any
+         * policy approval of the same call (a policy approval is the stricter
+         * one, so it covers the gate).
+         */
+        const approvalCandidates = (plan: ToolCallPlan, checked: typeof checkedCall): string[] => {
+          const keys: string[] = [];
+          const before = checked?.plan.kind === "approval" ? checked.plan : undefined;
+          const now = plan.kind === "approval" ? plan : undefined;
+          if (before?.policyKey && (!now?.policyKey || now.decision?.approval?.ruleId === before.decision?.approval?.ruleId)) keys.push(before.policyKey);
+          if (now?.policyKey) keys.push(now.policyKey);
+          else if (now) keys.push(now.callKey, ...(writeToolSession?.keysWithPrefix(writeToolPolicyKeyPrefix(now.callKey)) ?? []));
+          return [...new Set(keys)];
+        };
 
         emitNodeActivity(dependencies, node.id, {
           kind: "resolved_input",
@@ -6019,37 +6089,48 @@ async function executeNodeHandler(
                   }
                }
                const resolvedEntry = resolvedTools.resolved.find((entry) => entry.exposedName === toolName);
-               // Phase 12.4 — the plan the tool-call check made for this exact call, unless the guard rewrote the arguments since.
+               // Phase 12.4 — the plan the tool-call check made for this call; planned again when the guard rewrote the arguments.
                const argsKey = canonicalPolicyJson(args);
-               const checked = checkedCall && checkedCall.toolName === toolName && checkedCall.argsKey === argsKey ? checkedCall : undefined;
+               const checked =
+                 checkedCall && checkedCall.toolName === toolName && (!invocation?.toolCallId || invocation.toolCallId === checkedCall.toolCallId)
+                   ? checkedCall
+                   : undefined;
                checkedCall = undefined;
                const plan = resolvedEntry
-                 ? (checked?.plan ?? planToolCall(resolvedEntry, args, invocation?.labels))
+                 ? (checked && checked.argsKey === argsKey ? checked.plan : planToolCall(resolvedEntry, args, invocation?.labels))
                  : ({ kind: "allow" } as ToolCallPlan);
                const toolCallId = invocation?.toolCallId ?? checked?.toolCallId;
                if (plan.kind === "deny") {
                  if (plan.decision && plan.policyTool) toolPolicy?.record(plan.policyTool, plan.decision, toolCallId ? { toolCallId } : {});
                  throw new McpToolPolicyError(plan.message, plan.hidden);
                }
-               // Phase 11.2 — the workflow's write-tool gate, and (12.4) a require_approval policy rule: a person
-               // approves this exact call first, in one request when both ask.
+               // Phase 11.2 — the workflow's write-tool gate (after the guard, as before 12.4), and (12.4) a
+               // require_approval policy rule (asked before the guard by the check): a person approves this exact
+               // call first, in one request when both ask.
                let approvedCallKey: string | undefined;
-               if (plan.kind === "approval") {
+               const candidates = approvalCandidates(plan, checked);
+               if (candidates.length > 0) {
+                 const approvalTrace = (approval: "pending" | "approved") => {
+                   if (plan.decision && plan.policyTool) toolPolicy?.record(plan.policyTool, plan.decision, { ...(toolCallId ? { toolCallId } : {}), approval });
+                 };
                  // An approved call already ran in an earlier re-run: answer from its result.
-                 const replayed = writeToolSession?.replay(plan.approvalKey);
-                 if (replayed?.hit) {
-                   if (plan.decision && plan.policyTool) toolPolicy?.record(plan.policyTool, plan.decision, { ...(toolCallId ? { toolCallId } : {}), approval: "approved" });
-                   return replayed.result as Awaited<ReturnType<typeof resolvedTools.invokeByExposedName>>;
+                 for (const key of candidates) {
+                   const replayed = writeToolSession?.replay(key);
+                   if (replayed?.hit) {
+                     approvalTrace("approved");
+                     return replayed.result as Awaited<ReturnType<typeof resolvedTools.invokeByExposedName>>;
+                   }
                  }
-                 if (!writeToolSession?.takeApproval(plan.approvalKey)) {
-                   if (plan.decision && plan.policyTool) toolPolicy?.record(plan.policyTool, plan.decision, { ...(toolCallId ? { toolCallId } : {}), approval: "pending" });
-                   toolGatePendingApproval = plan.pause;
-                   throw new AgentGuardInterrupt("approval_required", "tool_arguments", 0, plan.pause.message);
+                 approvedCallKey = candidates.find((key) => writeToolSession?.takeApproval(key) === true);
+                 if (!approvedCallKey) {
+                   approvalTrace("pending");
+                   const pending = plan.kind === "approval" ? plan : checked?.plan;
+                   toolGatePendingApproval = pending?.kind === "approval" ? pending.pause : undefined;
+                   throw new AgentGuardInterrupt("approval_required", "tool_arguments", 0, toolGatePendingApproval?.message ?? "This tool call needs approval.");
                  }
-                 approvedCallKey = plan.approvalKey;
-               }
-               if (plan.decision && plan.policyTool) {
-                 toolPolicy?.record(plan.policyTool, plan.decision, { ...(toolCallId ? { toolCallId } : {}), ...(approvedCallKey ? { approval: "approved" as const } : {}) });
+                 approvalTrace("approved");
+               } else if (plan.decision && plan.policyTool) {
+                 toolPolicy?.record(plan.policyTool, plan.decision, toolCallId ? { toolCallId } : {});
                }
                // Phase 10.5 — each tool call gets a fresh sampling budget.
                const originalName = resolvedEntry?.originalName ?? toolName;
@@ -6064,6 +6145,7 @@ async function executeNodeHandler(
             // Phase 12.4 — the tool policy decides each MCP tool call before the guard: a deny becomes a tool error
             // the model sees, a call that needs approval pauses the agent (unless it was approved or already ran).
             checkToolCall: (toolName, args, call) => {
+              checkedCall = undefined;
               const resolvedEntry = resolvedTools.resolved.find((entry) => entry.exposedName === toolName);
               if (!resolvedEntry) return { outcome: "allow" };
               const plan = planToolCall(resolvedEntry, args, call.labels);
@@ -6071,7 +6153,9 @@ async function executeNodeHandler(
                 if (plan.decision && plan.policyTool) toolPolicy?.record(plan.policyTool, plan.decision, { toolCallId: call.toolCallId });
                 return { outcome: "block", message: plan.message };
               }
-              if (plan.kind === "approval" && !writeToolSession?.ready(plan.approvalKey)) {
+              // Only a policy rule's approval is asked before the guard; the write-tool gate alone keeps its place
+              // after the guard, so a call the guard blocks or rewrites is never put to a person first.
+              if (plan.kind === "approval" && plan.policyKey && !writeToolSession?.ready(plan.policyKey)) {
                 if (plan.decision && plan.policyTool) toolPolicy?.record(plan.policyTool, plan.decision, { toolCallId: call.toolCallId, approval: "pending" });
                 toolGatePendingApproval = plan.pause;
                 return { outcome: "pause", message: plan.pause.message };

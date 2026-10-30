@@ -752,7 +752,7 @@ export interface McpToolAccessDecision {
    * require_approval rule matched (and no deny). The caller hands it off
    * for approval; `evaluateMcpToolAccess` itself never blocks it.
    */
-  approval?: { ruleId: string; ruleName?: string; message: string };
+  approval?: { ruleId: string; ruleName?: string; message: string; ruleHash?: string };
 }
 
 export function describePolicyRule(rule: Pick<McpToolPolicyRule, "id" | "name">): string {
@@ -860,6 +860,7 @@ export function evaluateMcpToolAccess(input: McpToolAccessInput): McpToolAccessD
       classification,
       approval: {
         ruleId: policy.rule.id,
+        ruleHash: hashMcpToolPolicyRule(policy.rule),
         ...(policy.rule.name ? { ruleName: policy.rule.name } : {}),
         message: `${toolLabel} needs approval by policy ${describePolicyRule(policy.rule)}${ruleQualifiers(policy.rule)}.`
       }

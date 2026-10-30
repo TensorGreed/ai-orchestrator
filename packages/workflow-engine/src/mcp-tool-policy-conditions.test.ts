@@ -8,7 +8,7 @@
 import { describe, expect, it } from "vitest";
 import { DefaultAgentRuntime } from "@ai-orchestrator/agent-runtime";
 import { createDefaultConnectorRegistry } from "@ai-orchestrator/connector-sdk";
-import { createDefaultMCPRegistry, type MCPServerAdapter } from "@ai-orchestrator/mcp-sdk";
+import { createDefaultMCPRegistry, hashMcpToolPolicyRule, type MCPServerAdapter } from "@ai-orchestrator/mcp-sdk";
 import { ProviderRegistry, type LLMProviderAdapter, type ProviderCallRequest } from "@ai-orchestrator/provider-sdk";
 import {
   resolvePendingApproval,
@@ -22,7 +22,7 @@ import {
 } from "@ai-orchestrator/shared";
 import { createDefaultGuardRegistry, hashGuardProfile, InMemoryTokenVaultStorage, parseGuardProfile } from "@ai-orchestrator/guard-sdk";
 import { executeWorkflow, resumeWorkflowExecution, type WorkflowExecutionDependencies } from "./executor";
-import { writeToolApprovalKey } from "./approval-gate-node";
+import { writeToolApprovalKey, writeToolPolicyApprovalKey } from "./approval-gate-node";
 import type { GuardVerdictEvent, ResolvedGuardProfile } from "./guard-runtime";
 
 function node(id: string, type: string, config: Record<string, unknown> = {}, name = id): WorkflowNode {
@@ -153,8 +153,11 @@ describe("argument-aware rules for agent tool calls", () => {
     expect(invoked).toHaveLength(0);
     expect(paused).toHaveLength(1);
     const handoff = paused[0]!.approvalHandoff;
-    expect(handoff).toMatchObject({ kind: "rerun", source: "agent_tool_gate", request: { kind: "agent_tool", allowSelfApproval: false } });
-    expect(handoff?.kind === "rerun" ? handoff.approvalKey : "").toBe(writeToolApprovalKey("agent", "repo-mcp", "push", args));
+    expect(handoff).toMatchObject({ kind: "rerun", source: "agent_tool_gate", request: { kind: "agent_tool", approverRoles: ["admin"], approverUsers: [], allowSelfApproval: false } });
+    // The key binds the call to the rule that asked.
+    expect(handoff?.kind === "rerun" ? handoff.approvalKey : "").toBe(
+      writeToolPolicyApprovalKey(writeToolApprovalKey("agent", "repo-mcp", "push", args), { ruleId: "ask-prod", ruleHash: hashMcpToolPolicyRule(approve) })
+    );
     expect(first.output).toMatchObject({ approvalMessage: "Agent 'Repo agent' wants to call 'push' on 'repo-mcp', which needs approval by tool policy 'Prod needs a person'." });
     expect(resolvePendingApproval(paused[0]!).details).toMatchObject({ policyRuleId: "ask-prod", policyRuleName: "Prod needs a person", requiredBy: ["tool_policy"] });
 
@@ -181,14 +184,65 @@ describe("argument-aware rules for agent tool calls", () => {
       approvalMessage: "Agent 'Repo agent' wants to call the write tool 'push' on 'repo-mcp'; tool policy 'Every push' also requires approval."
     });
     const handoff = paused[0]!.approvalHandoff;
-    // The workflow's approvers decide, but a rule's approval is never self-approved.
-    expect(handoff).toMatchObject({ request: { approverRoles: ["admin"], allowSelfApproval: false } });
+    // A rule asks too, so admins decide and nobody approves their own run.
+    expect(handoff).toMatchObject({ request: { approverRoles: ["admin"], approverUsers: [], allowSelfApproval: false } });
     expect(resolvePendingApproval(paused[0]!).details).toMatchObject({ classification: "not_marked_read_only", requiredBy: ["write_tool_gate", "tool_policy"] });
 
     const again: WorkflowExecutionState[] = [];
     const approved = await resumeWorkflowExecution({ executionId: "exec-both", state: paused[0]!, decision: "approve" }, deps({ rules: [approve], provider: provider(), invoked, paused: again }));
     expect(approved.status).toBe("success");
     expect(again).toHaveLength(0);
+    expect(invoked).toEqual([{ tool: "push", repo: "acme/api" }]);
+  });
+
+  it("lets only admins decide a policy approval, whatever the workflow's approver settings say", async () => {
+    const paused: WorkflowExecutionState[] = [];
+    const approve = rule({ id: "ask-all", effect: "require_approval", toolPattern: "push" });
+    const settings: Workflow["settings"] = { writeToolApproval: { enabled: true, approverRoles: ["builder"], approverUsers: ["bob@example.org"], allowSelfApproval: true } };
+    await executeWorkflow(
+      { workflow: agentWorkflow(settings), executionId: "exec-admins", webhookPayload: { user_prompt: "Push" } },
+      deps({ rules: [approve], provider: new ToolThenAnswerProvider("repo-mcp__push", () => ({ repo: "acme/api" })), paused })
+    );
+    expect(paused[0]!.approvalHandoff).toMatchObject({ request: { approverRoles: ["admin"], approverUsers: [], allowSelfApproval: false } });
+
+    // The write-tool gate alone keeps the workflow's own approvers.
+    const gateOnly: WorkflowExecutionState[] = [];
+    await executeWorkflow(
+      { workflow: agentWorkflow(settings), executionId: "exec-gate", webhookPayload: { user_prompt: "Push" } },
+      deps({ rules: [], provider: new ToolThenAnswerProvider("repo-mcp__push", () => ({ repo: "acme/api" })), paused: gateOnly })
+    );
+    expect(gateOnly[0]!.approvalHandoff).toMatchObject({ request: { approverRoles: ["builder"], approverUsers: ["bob@example.org"], allowSelfApproval: true } });
+  });
+
+  it("never lets a write-gate approval stand in for a policy approval, but a policy approval covers the gate", async () => {
+    const settings: Workflow["settings"] = { writeToolApproval: { enabled: true, allowSelfApproval: true } };
+    const approve = rule({ id: "ask-all", name: "Every push", effect: "require_approval", toolPattern: "push" });
+    const provider = () => new ToolThenAnswerProvider("repo-mcp__push", () => ({ repo: "acme/api" }));
+
+    // Paused for the gate alone; a rule appears before the re-run: the gate's approval does not satisfy it.
+    const invoked: Array<Record<string, unknown>> = [];
+    const gatePause: WorkflowExecutionState[] = [];
+    await executeWorkflow({ workflow: agentWorkflow(settings), executionId: "exec-m4a", webhookPayload: { user_prompt: "Push" } }, deps({ rules: [], provider: provider(), paused: gatePause }));
+    expect(gatePause).toHaveLength(1);
+    const again: WorkflowExecutionState[] = [];
+    const resumed = await resumeWorkflowExecution(
+      { executionId: "exec-m4a", state: gatePause[0]!, decision: "approve" },
+      deps({ rules: [approve], provider: provider(), invoked, paused: again })
+    );
+    expect(resumed.status).toBe("waiting_approval");
+    expect(invoked).toHaveLength(0);
+    expect(resolvePendingApproval(again[0]!).details).toMatchObject({ policyRuleId: "ask-all", requiredBy: ["write_tool_gate", "tool_policy"] });
+
+    // Paused for the rule and the gate; the rule is gone at the re-run: the policy approval still covers the gate.
+    const bothPause: WorkflowExecutionState[] = [];
+    await executeWorkflow({ workflow: agentWorkflow(settings), executionId: "exec-m4b", webhookPayload: { user_prompt: "Push" } }, deps({ rules: [approve], provider: provider(), paused: bothPause }));
+    const none: WorkflowExecutionState[] = [];
+    const covered = await resumeWorkflowExecution(
+      { executionId: "exec-m4b", state: bothPause[0]!, decision: "approve" },
+      deps({ rules: [], provider: provider(), invoked, paused: none })
+    );
+    expect(covered.status).toBe("success");
+    expect(none).toHaveLength(0);
     expect(invoked).toEqual([{ tool: "push", repo: "acme/api" }]);
   });
 
@@ -246,6 +300,23 @@ describe("argument-aware rules for direct MCP Tool nodes", () => {
     expect(invoked).toEqual([{ tool: "push", repo: "acme/dev" }]);
   });
 
+  it("fails clearly when the arguments are not a JSON object and a rule reads arguments", async () => {
+    const invoked: Array<Record<string, unknown>> = [];
+    const listArgs = workflow(
+      "wf-direct-list",
+      [node("start", "manual_trigger"), node("tool", "mcp_tool", { serverId: "repo-mcp", toolName: "push", argsTemplate: '["acme/prod"]' }, "Push step"), node("out", "output")],
+      [
+        { source: "start", target: "tool" },
+        { source: "tool", target: "out" }
+      ]
+    );
+    const deny = rule({ id: "no-prod", effect: "deny", conditions: prodOnly });
+    const result = await executeWorkflow({ workflow: listArgs }, deps({ rules: [deny], invoked }));
+    expect(result.status).toBe("error");
+    expect(result.error).toContain("must send its arguments as a JSON object (got an array)");
+    expect(invoked).toHaveLength(0);
+  });
+
   it("pauses on require_approval and calls the tool once approved", async () => {
     const invoked: Array<Record<string, unknown>> = [];
     const paused: WorkflowExecutionState[] = [];
@@ -300,6 +371,63 @@ describe("the tool policy decides before the guard", () => {
     expect(result.status).toBe("error");
     expect(result.error).toContain("blocked by policy 'no-prod'");
     expect(events).toEqual([]);
+  });
+
+  describe("when the guard rewrites an agent's tool arguments", () => {
+    const EMAIL = "ana.lopez@example.org";
+    const redactProfile = parseGuardProfile({
+      id: "redact-email",
+      name: "redact-email",
+      version: "1",
+      channels: {
+        tool_arguments: { detectors: [{ id: "dlp.patterns", threshold: 0.5 }], actions: { email: { action: "redact" }, sensitive_data: { action: "allow" } }, defaultAction: { action: "allow" } }
+      }
+    } as never);
+    const redacting: ResolvedGuardProfile = { profileId: "redact-email", version: 1, hash: hashGuardProfile(redactProfile), name: "redact-email", profile: redactProfile };
+    const redactingGuard = (): WorkflowExecutionDependencies["guard"] => ({
+      registry: createDefaultGuardRegistry({ resolver: async () => ["93.184.215.14"] }),
+      resolveRun: () => ({ source: "project", stack: [redacting], chain: [] }),
+      loadProfile: () => redacting,
+      vault: new InMemoryTokenVaultStorage()
+    });
+    const settings: Workflow["settings"] = { writeToolApproval: { enabled: true, allowSelfApproval: true } };
+    const provider = () => new ToolThenAnswerProvider("repo-mcp__push", () => ({ repo: "acme/api", note: `ping ${EMAIL}` }));
+
+    async function approveUntilDone(rules: McpToolPolicyRule[], executionId: string) {
+      const invoked: Array<Record<string, unknown>> = [];
+      const pauses: WorkflowExecutionState[] = [];
+      let result = await executeWorkflow(
+        { workflow: agentWorkflow(settings), executionId, webhookPayload: { user_prompt: "Push" } },
+        { ...deps({ rules, provider: provider(), invoked, paused: pauses }), guard: redactingGuard() }
+      );
+      let requests = 0;
+      while (result.status === "waiting_approval" && requests < 4) {
+        requests += 1;
+        result = await resumeWorkflowExecution(
+          { executionId, state: pauses.at(-1)!, decision: "approve" },
+          { ...deps({ rules, provider: provider(), invoked, paused: pauses }), guard: redactingGuard() }
+        );
+      }
+      return { result, requests, invoked, pauses };
+    }
+
+    it("with no rules, the write-tool gate asks once, after the guard, for the rewritten call", async () => {
+      const { result, requests, invoked, pauses } = await approveUntilDone([], "exec-m7-gate");
+      expect(result.status).toBe("success");
+      expect(requests).toBe(1);
+      expect(invoked).toHaveLength(1);
+      expect(String(invoked[0]!.note)).not.toContain(EMAIL);
+      // The person saw the arguments that are sent.
+      expect(String(resolvePendingApproval(pauses[0]!).details?.arguments)).not.toContain(EMAIL);
+    });
+
+    it("a policy approval asked before the guard also covers the gate for the rewritten call", async () => {
+      const approve = rule({ id: "ask-all", effect: "require_approval", toolPattern: "push" });
+      const { result, requests, invoked } = await approveUntilDone([approve], "exec-m7-policy");
+      expect(result.status).toBe("success");
+      expect(requests).toBe(1);
+      expect(invoked).toHaveLength(1);
+    });
   });
 
   it("without the rule, the same call reaches the guard, which asks for approval", async () => {
