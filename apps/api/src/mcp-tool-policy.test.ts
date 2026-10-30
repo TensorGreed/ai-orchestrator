@@ -16,7 +16,8 @@ import { SqliteStore } from "./db/database.js";
 import type { Store } from "./db/store.js";
 import { openTestStore } from "./test-support/test-store.js";
 import { AuthService } from "./services/auth-service.js";
-import { resolveMcpToolPolicySubject } from "./services/mcp-tool-policy.js";
+import { evaluateToolForContext, resolveMcpToolPolicySubject } from "./services/mcp-tool-policy.js";
+import { mapMcpToolPolicyExtras } from "./db/store-shared.js";
 import { SecretService } from "./services/secret-service.js";
 
 interface TestContext {
@@ -304,6 +305,113 @@ describe("MCP tool policy routes", () => {
     expect((await evaluate({ role: "root", serverId, toolName: "x" })).statusCode).toBe(400);
   });
 
+  it("stores conditions, mode and principals, validates them field by field, and returns a stable hash", async () => {
+    const context = await createTestContext();
+    const admin = await login(context, "admin");
+    const serverId = await registerMockServer(context, admin.cookie);
+    const post = (payload: Record<string, unknown>) =>
+      context.app.inject({ method: "POST", url: "/api/mcp/policies", headers: { cookie: admin.cookie }, payload });
+    const put = (id: string, payload: Record<string, unknown>) =>
+      context.app.inject({ method: "PUT", url: `/api/mcp/policies/${id}`, headers: { cookie: admin.cookie }, payload });
+
+    const rule = await createRule(context, admin.cookie, {
+      name: "Prod pushes",
+      effect: "require_approval",
+      serverId,
+      toolPattern: "calculator",
+      mode: "shadow",
+      conditions: { any: [{ path: "expression", op: "starts_with", value: "9" }, { op: "label_present", value: "pii" }] }
+    });
+    expect(rule).toMatchObject({ effect: "require_approval", mode: "shadow", workflowIds: [], clientIds: [] });
+    expect(rule.hash).toMatch(/^[0-9a-f]{64}$/);
+
+    // Renaming or switching mode keeps the hash; changing what the rule matches changes it.
+    const renamed = (await put(rule.id, { name: "Renamed", mode: "enforce" })).json<{ rule: McpToolPolicyRule }>().rule;
+    expect(renamed.hash).toBe(rule.hash);
+    const narrowed = (await put(rule.id, { conditions: { all: [{ path: "expression", op: "equals", value: "9" }] } })).json<{ rule: McpToolPolicyRule }>().rule;
+    expect(narrowed.hash).not.toBe(rule.hash);
+
+    const badOp = await post({ effect: "deny", conditions: { all: [{ path: "a", op: "between", value: [5] }] } });
+    expect(badOp.statusCode).toBe(400);
+    expect(badOp.json().details[0].path).toEqual(["conditions", "all", 0, "value"]);
+    const badPath = await post({ effect: "deny", conditions: { all: [{ path: "a..b", op: "exists" }] } });
+    expect(badPath.json().details[0].path).toEqual(["conditions", "all", 0, "path"]);
+    const samplingApproval = await post({ effect: "require_approval", kind: "sampling" });
+    expect(samplingApproval.statusCode).toBe(400);
+    expect(samplingApproval.json().details[0].path).toEqual(["effect"]);
+    // The rule as it would be after an update must be valid too.
+    const mergedInvalid = await put(rule.id, { kind: "sampling" });
+    expect(mergedInvalid.statusCode).toBe(400);
+    expect(mergedInvalid.json().details.map((issue: { path: string[] }) => issue.path[0])).toEqual(["effect", "conditions"]);
+    // Principals must exist.
+    expect((await post({ effect: "deny", workflowIds: ["wf-missing"] })).json().error).toMatch(/Workflow 'wf-missing' does not exist/);
+    expect((await post({ effect: "deny", clientIds: ["mcpc_missing"] })).json().error).toMatch(/client 'mcpc_missing' does not exist/);
+
+    const audit = (await context.store.listAuditLogs({ eventType: "mcp_policy.updated", pageSize: 10 })).items;
+    expect(audit[0]!.metadata).toMatchObject({ hash: narrowed.hash, previousHash: rule.hash, mode: "enforce" });
+  });
+
+  it("audits an update that widens a rule's scope by emptying a principal list", async () => {
+    const context = await createTestContext();
+    const admin = await login(context, "admin");
+    const serverId = await registerMockServer(context, admin.cookie);
+    const rule = await createRule(context, admin.cookie, { effect: "allow", serverId, roles: ["builder"], toolPattern: "calculator" });
+    const put = (payload: Record<string, unknown>) =>
+      context.app.inject({ method: "PUT", url: `/api/mcp/policies/${rule.id}`, headers: { cookie: admin.cookie }, payload });
+    expect((await put({ name: "Renamed" })).statusCode).toBe(200);
+    expect((await put({ roles: [] })).statusCode).toBe(200);
+    const audit = (await context.store.listAuditLogs({ eventType: "mcp_policy.updated", pageSize: 10 })).items;
+    const widened = audit.find((entry) => (entry.metadata as { fields?: string[] }).fields?.includes("roles"));
+    expect(widened?.metadata).toMatchObject({ scopeWidened: true, widenedFields: ["roles"] });
+    const renamed = audit.find((entry) => (entry.metadata as { fields?: string[] }).fields?.includes("name"));
+    expect(renamed?.metadata).not.toHaveProperty("scopeWidened");
+  });
+
+  it("dry-runs a call with arguments: the matched rule and why, approvals and shadow rules", async () => {
+    const context = await createTestContext();
+    const admin = await login(context, "admin");
+    const builder = await login(context, "builder");
+    const serverId = await registerMockServer(context, admin.cookie);
+    const approval = await createRule(context, admin.cookie, {
+      name: "Large numbers",
+      effect: "require_approval",
+      serverId,
+      toolPattern: "calculator",
+      conditions: { all: [{ path: "expression", op: "starts_with", value: "1000" }] }
+    });
+    const shadow = await createRule(context, admin.cookie, {
+      name: "Trial: no PII",
+      effect: "deny",
+      mode: "shadow",
+      serverId,
+      conditions: { all: [{ op: "label_present", value: "pii" }] }
+    });
+    const evaluate = (payload: Record<string, unknown>) =>
+      context.app
+        .inject({ method: "POST", url: "/api/mcp/policies/evaluate", headers: { cookie: builder.cookie }, payload: { role: "builder", serverId, toolName: "calculator", ...payload } })
+        .then((response) => response.json());
+
+    const discovery = await evaluate({});
+    expect(discovery).toMatchObject({ allowed: true, effect: "allow", approval: null, why: [] });
+    expect(discovery.undecided.map((entry: { ruleId: string }) => entry.ruleId)).toEqual([approval.id, shadow.id]);
+
+    const held = await evaluate({ arguments: { expression: "1000*2" } });
+    expect(held).toMatchObject({
+      allowed: true,
+      effect: "require_approval",
+      approval: { ruleId: approval.id, ruleName: "Large numbers" },
+      shadow: null,
+      why: [{ ruleId: approval.id, effect: "require_approval", mode: "enforce", conditions: 'expression starts with "1000"' }]
+    });
+
+    const labelled = await evaluate({ arguments: { expression: "1+1" }, labels: ["pii"] });
+    expect(labelled).toMatchObject({
+      allowed: true,
+      effect: "allow",
+      shadow: { effect: "deny", ruleId: shadow.id, changed: true, matchedRules: [{ ruleId: shadow.id, mode: "shadow" }] }
+    });
+  });
+
   it("marks, but does not hide, tools the caller's role cannot use", async () => {
     const context = await createTestContext();
     const admin = await login(context, "admin");
@@ -339,6 +447,29 @@ describe("MCP tool policy routes", () => {
     expect(discoveredTools.find((tool) => tool.name === "lookup_kb")!.access.allowed).toBe(false);
     expect(discoveredTools.find((tool) => tool.name === "calculator")!.access.allowed).toBe(false);
     expect(discoveredTools.find((tool) => tool.name === "get_current_time")!.annotations).toEqual({ readOnlyHint: true });
+  });
+});
+
+describe("stored rule conditions that no longer validate", () => {
+  it("mark the rule invalid instead of dropping its conditions", () => {
+    const tooMany = { all: Array.from({ length: 21 }, () => ({ path: "a", op: "exists" })) };
+    const invalid = mapMcpToolPolicyExtras({ id: "mtp_bad", conditions_json: JSON.stringify(tooMany) });
+    expect(invalid).toMatchObject({ conditions: null, invalid: true });
+    const valid = mapMcpToolPolicyExtras({ id: "mtp_ok", conditions_json: JSON.stringify({ all: [{ path: "a", op: "exists" }] }) });
+    expect(valid.invalid).toBeUndefined();
+    expect(valid.conditions).toEqual({ all: [{ path: "a", op: "exists" }] });
+    expect(mapMcpToolPolicyExtras({ id: "mtp_none", conditions_json: null })).toMatchObject({ conditions: null });
+    expect(mapMcpToolPolicyExtras({ id: "mtp_none", conditions_json: null }).invalid).toBeUndefined();
+  });
+
+  it("fail closed when evaluated: an allow never matches, a deny covers its whole scope", () => {
+    const base = { name: null, description: null, projectId: null, roles: [], serverId: null, toolPattern: "calculator", enabled: true };
+    const deny: McpToolPolicyRule = { ...base, id: "deny-all", effect: "deny", toolPattern: "*" };
+    const invalidAllow: McpToolPolicyRule = { ...base, id: "bad-allow", effect: "allow", conditions: null, invalid: true };
+    const context = { rules: [deny, invalidAllow], classifications: [], role: "builder" as const, projectId: null, adapterId: "mock-mcp" };
+    expect(evaluateToolForContext(context, { name: "calculator" }, "tool", { arguments: {} }).allowed).toBe(false);
+    const invalidDeny: McpToolPolicyRule = { ...base, id: "bad-deny", effect: "deny", conditions: null, invalid: true };
+    expect(evaluateToolForContext({ ...context, rules: [invalidDeny] }, { name: "calculator" }, "tool", { arguments: { anything: 1 } }).allowed).toBe(false);
   });
 });
 

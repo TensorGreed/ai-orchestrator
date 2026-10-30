@@ -37,7 +37,13 @@ import {
   type McpToolsetMemberSpec
 } from "@ai-orchestrator/shared";
 import type { PoolClient } from "pg";
-import { normalizeMcpSamplingSettings } from "../store-shared.js";
+import {
+  mapMcpGatewayApproval,
+  mapMcpToolPolicyExtras,
+  normalizeMcpSamplingSettings,
+  parseMcpPolicyDecision,
+  toMcpToolPolicyEffect
+} from "../store-shared.js";
 import type {
   McpClientSecretRecord,
   McpClientUsageRow,
@@ -52,7 +58,7 @@ import type {
   McpToolSnapshotRecord,
   McpUserOAuthConnectionRecord
 } from "../database.js";
-import { type Store } from "../store.js";
+import { mcpGatewayApprovalRetentionCutoff, type McpGatewayApprovalCreateResult, type Store } from "../store.js";
 import { parseJsonSafe, toNum, toStr } from "./helpers.js";
 import type { PgContext } from "./context.js";
 import { clampLimit, LIMIT_MAX } from "../store-limits.js";
@@ -204,6 +210,7 @@ function mapMcpToolCall(row: Row): McpToolCallRecord {
     clientId: row.client_id ? toStr(row.client_id) : null,
     rejection:
       row.rejection === "rate_limited" || row.rejection === "concurrency_limited" || row.rejection === "circuit_open" ? row.rejection : null,
+    policyDecision: parseMcpPolicyDecision(row.policy_decision_json),
     createdAt: toStr(row.created_at)
   };
 }
@@ -303,13 +310,14 @@ function mapMcpToolPolicy(row: Row): McpToolPolicyRule {
     id: toStr(row.id),
     name: row.name ? toStr(row.name) : null,
     description: row.description ? toStr(row.description) : null,
-    effect: toStr(row.effect) === "allow" ? "allow" : "deny",
+    effect: toMcpToolPolicyEffect(toStr(row.effect)),
     projectId: row.project_id ? toStr(row.project_id) : null,
     roles: Array.isArray(roles) ? roles.filter((role): role is McpPolicyRole => MCP_POLICY_ROLES.includes(role as McpPolicyRole)) : [],
     serverId: row.server_id ? toStr(row.server_id) : null,
     toolPattern: toStr(row.tool_pattern) || "*",
     annotationHint: hint && MCP_TOOL_HINT_CONDITIONS.includes(hint as McpToolHintCondition) ? (hint as McpToolHintCondition) : null,
     kind: MCP_POLICY_KINDS.includes(kind as McpPolicyKind) ? (kind as McpPolicyKind) : "tool",
+    ...mapMcpToolPolicyExtras(row),
     enabled: toNum(row.enabled) === 1,
     createdBy: row.created_by ? toStr(row.created_by) : null,
     createdAt: toStr(row.created_at),
@@ -591,8 +599,8 @@ async function insertMcpToolCallRow(db: Queryable, call: McpToolCallWrite): Prom
        id, execution_id, workflow_id, node_id, registry_server_id, adapter_id, tool_name,
        started_at, duration_ms, ok, error, turn_input_tokens, turn_output_tokens,
        estimated_cost_usd, sampling_requests, sampling_input_tokens, sampling_output_tokens,
-       source, client_id, rejection, created_at
-     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)`,
+       source, client_id, rejection, policy_decision_json, created_at
+     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)`,
     [
       call.id,
       call.executionId,
@@ -614,6 +622,7 @@ async function insertMcpToolCallRow(db: Queryable, call: McpToolCallWrite): Prom
       call.source ?? "workflow",
       call.clientId ?? null,
       call.rejection ?? null,
+      call.policyDecision ? JSON.stringify(call.policyDecision) : null,
       new Date().toISOString()
     ]
   );
@@ -954,8 +963,8 @@ export async function createMcpToolPolicy(ctx: PgContext, ...[input]: Parameters
   const row = await ctx.queryOne<Row>(
     `INSERT INTO mcp_tool_policies (
        id, name, description, effect, project_id, roles_json, server_id, tool_pattern, annotation_hint, kind, enabled,
-       created_by, created_at, updated_at
-     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $13)
+       conditions_json, mode, workflow_ids_json, client_ids_json, created_by, created_at, updated_at
+     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $17)
      RETURNING *`,
     [
       input.id,
@@ -969,6 +978,10 @@ export async function createMcpToolPolicy(ctx: PgContext, ...[input]: Parameters
       input.annotationHint ?? null,
       input.kind ?? "tool",
       input.enabled ? 1 : 0,
+      input.conditions ? JSON.stringify(input.conditions) : null,
+      input.mode ?? "enforce",
+      JSON.stringify(input.workflowIds ?? []),
+      JSON.stringify(input.clientIds ?? []),
       input.createdBy ?? null,
       now
     ]
@@ -989,6 +1002,10 @@ export async function updateMcpToolPolicy(ctx: PgContext, ...[id, patch]: Parame
   if (patch.annotationHint !== undefined) { fields.push("annotation_hint = ?"); params.push(patch.annotationHint ?? null); }
   if (patch.kind !== undefined) { fields.push("kind = ?"); params.push(patch.kind ?? "tool"); }
   if (patch.enabled !== undefined) { fields.push("enabled = ?"); params.push(patch.enabled ? 1 : 0); }
+  if (patch.conditions !== undefined) { fields.push("conditions_json = ?"); params.push(patch.conditions ? JSON.stringify(patch.conditions) : null); }
+  if (patch.mode !== undefined) { fields.push("mode = ?"); params.push(patch.mode ?? "enforce"); }
+  if (patch.workflowIds !== undefined) { fields.push("workflow_ids_json = ?"); params.push(JSON.stringify(patch.workflowIds ?? [])); }
+  if (patch.clientIds !== undefined) { fields.push("client_ids_json = ?"); params.push(JSON.stringify(patch.clientIds ?? [])); }
   if (fields.length > 0) {
     fields.push("updated_at = ?");
     params.push(new Date().toISOString());
@@ -1004,6 +1021,153 @@ export async function updateMcpToolPolicy(ctx: PgContext, ...[id, patch]: Parame
 
 export async function deleteMcpToolPolicy(ctx: PgContext, ...[id]: Parameters<Store["deleteMcpToolPolicy"]>): ReturnType<Store["deleteMcpToolPolicy"]> {
   const result = await ctx.pool.query(`DELETE FROM mcp_tool_policies WHERE id = $1`, [id]);
+  return (result.rowCount ?? 0) > 0;
+}
+
+// ---------------------------------------------------------------------------
+// Phase 12.4 — gateway approvals
+// ---------------------------------------------------------------------------
+
+/**
+ * Phase 12.4 — advisory lock class 0x4c3250 ("L2P"): gateway approval requests of one client — key:
+ * hashtext(schema:client id). Held for the creating transaction (pg_advisory_xact_lock), so the pending-request cap
+ * is counted and enforced atomically across instances.
+ */
+export const ADVISORY_LOCK_CLASS_GATEWAY_APPROVALS = 0x4c3250;
+
+/** Expires pending requests past their expiry and deletes decided ones past MCP_GATEWAY_APPROVAL_RETENTION_MS. */
+async function sweepMcpGatewayApprovals(executor: Queryable, now: string): Promise<void> {
+  await executor.query(`UPDATE mcp_gateway_approvals SET status = 'expired' WHERE status = 'pending' AND expires_at <= $1`, [now]);
+  const cutoff = mcpGatewayApprovalRetentionCutoff(now);
+  await executor.query(`DELETE FROM mcp_gateway_approvals WHERE status <> 'pending' AND requested_at < $1 AND expires_at < $1`, [cutoff]);
+}
+
+/** One pending request per identical call: the partial unique index (v47) makes a concurrent second insert a no-op. */
+export async function createMcpGatewayApproval(
+  ctx: PgContext,
+  ...[input, now, options = {}]: Parameters<Store["createMcpGatewayApproval"]>
+): ReturnType<Store["createMcpGatewayApproval"]> {
+  return ctx.withTransaction(async (client): Promise<McpGatewayApprovalCreateResult> => {
+    await sweepMcpGatewayApprovals(client, now);
+    if (options.maxPendingPerClient !== undefined) {
+      await client.query(`SELECT pg_advisory_xact_lock($1, hashtext(current_schema() || ':' || $2::text))`, [
+        ADVISORY_LOCK_CLASS_GATEWAY_APPROVALS,
+        input.clientId
+      ]);
+      const existing = await one(
+        client,
+        `SELECT * FROM mcp_gateway_approvals WHERE client_id = $1 AND server_id = $2 AND tool_name = $3 AND args_hash = $4 AND status = 'pending'`,
+        [input.clientId, input.serverId, input.toolName, input.argsHash]
+      );
+      if (existing) return { approval: mapMcpGatewayApproval(existing), created: false };
+      const pending = await one(client, `SELECT COUNT(*)::int AS count FROM mcp_gateway_approvals WHERE client_id = $1 AND status = 'pending'`, [
+        input.clientId
+      ]);
+      if (Number(pending?.count ?? 0) >= options.maxPendingPerClient) return { approval: null, created: false, capped: true };
+    }
+    const inserted = await one(
+      client,
+      `INSERT INTO mcp_gateway_approvals (
+         id, client_id, client_name, toolset_id, project_id, server_id, server_name, tool_name, gateway_tool_name,
+         args_hash, args_preview, rule_id, rule_name, message, status, requested_at, expires_at
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, 'pending', $15, $16)
+       ON CONFLICT DO NOTHING
+       RETURNING *`,
+      [
+        input.id,
+        input.clientId,
+        input.clientName,
+        input.toolsetId,
+        input.projectId,
+        input.serverId,
+        input.serverName,
+        input.toolName,
+        input.gatewayToolName,
+        input.argsHash,
+        input.argsPreview,
+        input.ruleId,
+        input.ruleName,
+        input.message,
+        input.requestedAt,
+        input.expiresAt
+      ]
+    );
+    if (inserted) return { approval: mapMcpGatewayApproval(inserted), created: true };
+    const existing = await one(
+      client,
+      `SELECT * FROM mcp_gateway_approvals WHERE client_id = $1 AND server_id = $2 AND tool_name = $3 AND args_hash = $4 AND status = 'pending'`,
+      [input.clientId, input.serverId, input.toolName, input.argsHash]
+    );
+    if (!existing) throw new Error("Gateway approval request could not be created");
+    return { approval: mapMcpGatewayApproval(existing), created: false };
+  });
+}
+
+export async function getMcpGatewayApproval(ctx: PgContext, ...[id]: Parameters<Store["getMcpGatewayApproval"]>): ReturnType<Store["getMcpGatewayApproval"]> {
+  const row = await one(ctx.pool, `SELECT * FROM mcp_gateway_approvals WHERE id = $1`, [id]);
+  return row ? mapMcpGatewayApproval(row) : null;
+}
+
+export async function listMcpGatewayApprovals(ctx: PgContext, ...[filter, now]: Parameters<Store["listMcpGatewayApprovals"]>): ReturnType<Store["listMcpGatewayApprovals"]> {
+  await sweepMcpGatewayApprovals(ctx.pool, now);
+  const limit = Math.max(1, Math.min(500, filter.limit ?? 200));
+  const result = filter.status
+    ? await ctx.query<Row>(
+        `SELECT * FROM mcp_gateway_approvals WHERE status = $1 ORDER BY requested_at DESC, id COLLATE "C" DESC LIMIT $2`,
+        [filter.status, limit]
+      )
+    : await ctx.query<Row>(`SELECT * FROM mcp_gateway_approvals ORDER BY requested_at DESC, id COLLATE "C" DESC LIMIT $1`, [limit]);
+  return result.map(mapMcpGatewayApproval);
+}
+
+export async function findUsableMcpGatewayApproval(ctx: PgContext, ...[call, now]: Parameters<Store["findUsableMcpGatewayApproval"]>): ReturnType<Store["findUsableMcpGatewayApproval"]> {
+  const row = await one(
+    ctx.pool,
+    `SELECT * FROM mcp_gateway_approvals
+      WHERE client_id = $1 AND server_id = $2 AND tool_name = $3 AND args_hash = $4 AND status = 'approved' AND expires_at > $5
+      ORDER BY decided_at ASC, id COLLATE "C" ASC LIMIT 1`,
+    [call.clientId, call.serverId, call.toolName, call.argsHash, now]
+  );
+  return row ? mapMcpGatewayApproval(row) : null;
+}
+
+/** Single statement: two instances retrying the same approved call cannot both use it. */
+export async function consumeMcpGatewayApproval(ctx: PgContext, ...[id, now]: Parameters<Store["consumeMcpGatewayApproval"]>): ReturnType<Store["consumeMcpGatewayApproval"]> {
+  const result = await ctx.pool.query(
+    `UPDATE mcp_gateway_approvals SET status = 'used', used_at = $1 WHERE id = $2 AND status = 'approved' AND expires_at > $1`,
+    [now, id]
+  );
+  return (result.rowCount ?? 0) > 0;
+}
+
+export async function restoreMcpGatewayApproval(ctx: PgContext, ...[id]: Parameters<Store["restoreMcpGatewayApproval"]>): ReturnType<Store["restoreMcpGatewayApproval"]> {
+  const result = await ctx.pool.query(`UPDATE mcp_gateway_approvals SET status = 'approved', used_at = NULL WHERE id = $1 AND status = 'used'`, [id]);
+  return (result.rowCount ?? 0) > 0;
+}
+
+/** The mark is one conditional UPDATE, so exactly one refused retry sees `firstRefusal`. */
+export async function findBlockingMcpGatewayRejection(
+  ctx: PgContext,
+  ...[call, now]: Parameters<Store["findBlockingMcpGatewayRejection"]>
+): ReturnType<Store["findBlockingMcpGatewayRejection"]> {
+  const row = await one(
+    ctx.pool,
+    `SELECT * FROM mcp_gateway_approvals
+      WHERE client_id = $1 AND server_id = $2 AND tool_name = $3 AND args_hash = $4 AND status = 'rejected' AND expires_at > $5
+      ORDER BY decided_at DESC, id COLLATE "C" DESC LIMIT 1`,
+    [call.clientId, call.serverId, call.toolName, call.argsHash, now]
+  );
+  if (!row) return null;
+  const marked = await one(ctx.pool, `UPDATE mcp_gateway_approvals SET used_at = $1 WHERE id = $2 AND used_at IS NULL RETURNING *`, [now, row.id]);
+  return { approval: mapMcpGatewayApproval(marked ?? row), firstRefusal: Boolean(marked) };
+}
+
+export async function decideMcpGatewayApproval(ctx: PgContext, ...[id, decision, now]: Parameters<Store["decideMcpGatewayApproval"]>): ReturnType<Store["decideMcpGatewayApproval"]> {
+  const result = await ctx.pool.query(
+    `UPDATE mcp_gateway_approvals SET status = $1, decided_by = $2, decided_at = $3, decision_reason = $4, expires_at = $5
+      WHERE id = $6 AND status = 'pending' AND expires_at > $7`,
+    [decision.status, decision.decidedBy, decision.decidedAt, decision.reason, decision.expiresAt, id, now]
+  );
   return (result.rowCount ?? 0) > 0;
 }
 

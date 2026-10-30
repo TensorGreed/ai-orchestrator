@@ -1,11 +1,21 @@
-import type {
-  McpHiddenTool,
-  McpPolicyKind,
-  McpPolicyRole,
-  McpToolAnnotations,
-  McpToolClassification,
-  McpToolHintCondition,
-  McpToolPolicyRule
+import { createHash } from "node:crypto";
+import {
+  canonicalMcpToolPolicyRule,
+  conditionList,
+  parseMcpPolicyPath,
+  type McpHiddenTool,
+  type McpPolicyCondition,
+  type McpPolicyKind,
+  type McpPolicyPathStep,
+  type McpPolicyRole,
+  type McpPolicyScalar,
+  type McpToolAnnotations,
+  type McpToolClassification,
+  type McpToolHintCondition,
+  type McpToolPolicyDecisionRecord,
+  type McpToolPolicyEffect,
+  type McpToolPolicyMode,
+  type McpToolPolicyRule
 } from "@ai-orchestrator/shared";
 
 /**
@@ -26,6 +36,31 @@ import type {
  *      carves an exception out of a broader deny.
  *   5. Any matching deny rule left → denied by the first such rule (rules are
  *      considered in the order given, oldest first). Deny wins every tie.
+ *
+ * Phase 12.4 — argument-aware rules:
+ *   - Scope also covers workflows (`workflowIds`) and gateway clients
+ *     (`clientIds`); an empty list matches every workflow / caller.
+ *   - A rule with `conditions` matches a call only when they hold for the
+ *     call's arguments and data labels (`all` or `any` of them). Conditions
+ *     fail closed for the rule's effect (see `evaluatePolicyCondition`): an
+ *     odd argument may make a deny or require_approval match, never an allow.
+ *   - A rule whose stored conditions no longer validate (`invalid`) also
+ *     fails closed: an allow never matches, a deny or require_approval covers
+ *     its whole scope.
+ *   - Effects: deny > require_approval > allow. A deny is set aside by a
+ *     strictly narrower allow or require_approval rule (the call is then
+ *     allowed, or needs approval); a require_approval is set aside by a
+ *     strictly narrower allow. A rule with conditions is narrower than the
+ *     same scope without them; two rules with different conditions are never
+ *     nested (conditions are compared by their canonical form).
+ *   - Discovery (no arguments yet): a rule with conditions cannot be decided.
+ *     Its deny or require_approval does not hide the tool, and its allow
+ *     counts as a possible carve-out, so a tool is only hidden when some
+ *     unconditional deny blocks every call. The call itself is checked again
+ *     with its arguments.
+ *   - Shadow rules (`mode: "shadow"`) never change the outcome. When one
+ *     matches, the decision also says what the outcome would have been with
+ *     the shadow rules enforced (`shadow`), for logging.
  */
 
 export interface McpToolPolicyRequest {
@@ -46,6 +81,17 @@ export interface McpToolPolicyRequest {
   annotations?: McpToolAnnotations | null;
   /** Admin read-only override; it also decides `read_only` / `destructive` hints. */
   manualReadOnly?: boolean | null;
+  /** Phase 12.4 — the workflow whose run makes the call; absent for gateway calls. */
+  workflowId?: string | null;
+  /** Phase 12.4 — the MCP gateway client making the call (directly or through a run it started). */
+  clientId?: string | null;
+  /**
+   * Phase 12.4 — the call's arguments. Absent at discovery, when no call is
+   * being made yet: rules with conditions are then undecided (see above).
+   */
+  arguments?: Record<string, unknown>;
+  /** Phase 12.4 — the run's data labels at the call; absent when the run does not track labels. */
+  dataLabels?: { provenance: readonly string[]; dataClasses: readonly string[] } | null;
 }
 
 /**
@@ -107,28 +153,125 @@ export function describeHintCondition(condition: McpToolHintCondition): string {
 }
 
 export interface McpToolPolicyDecision {
+  /** False only when the outcome is `deny`; a call that needs approval is allowed once approved. */
   allowed: boolean;
+  /** Phase 12.4 — the enforced outcome. */
+  effect: McpToolPolicyEffect;
   /** `default`: no rule matched. `rule`: decided by `rule`. */
   decidedBy: "default" | "rule";
   rule?: McpToolPolicyRule;
-  /** Every enabled rule whose scope matched, in evaluation order. */
+  /** Every enabled, enforced rule that matched, in evaluation order. */
   matchedRules: McpToolPolicyRule[];
-  /** Deny rules that a narrower allow rule set aside. */
+  /** Deny rules that a narrower allow (or require_approval) rule set aside. */
   overriddenDenies: Array<{ deny: McpToolPolicyRule; by: McpToolPolicyRule }>;
+  /** Phase 12.4 — require_approval rules that a narrower allow rule set aside. */
+  overriddenApprovals?: Array<{ approval: McpToolPolicyRule; by: McpToolPolicyRule }>;
+  /** Phase 12.4 — rules with conditions that could not be decided (discovery: no arguments yet). */
+  undecided?: McpToolPolicyRule[];
+  /**
+   * Phase 12.4 — present when a shadow rule matched: the outcome had the
+   * matching shadow rules been enforced too. Never applied.
+   */
+  shadow?: {
+    effect: McpToolPolicyEffect;
+    rule?: McpToolPolicyRule;
+    matchedRules: McpToolPolicyRule[];
+    /** True when the shadow rules would have changed the outcome. */
+    changed: boolean;
+  };
 }
 
-const globCache = new Map<string, RegExp>();
+/**
+ * Glob comparison steps one tool-call evaluation may spend in total, across
+ * every `matches` condition of every enforced rule (about 0.1 s of work in
+ * the worst case; shadow rules have a budget of their own). Each value is linear to match, but many long values against a long
+ * self-overlapping pattern add up; once the budget is spent, every further
+ * `matches` reads as a value the operator cannot read, so it fails closed:
+ * a match for deny and require_approval, never for allow.
+ */
+export const MAX_GLOB_STEPS_PER_EVALUATION = 20_000_000;
 
-function globToRegExp(pattern: string): RegExp {
-  const cached = globCache.get(pattern);
-  if (cached) return cached;
-  const source = pattern
-    .split("*")
-    .map((part) => part.replace(/[.+?^${}()|[\]\\]/g, "\\$&"))
-    .join(".*");
-  const regex = new RegExp(`^${source}$`);
-  globCache.set(pattern, regex);
-  return regex;
+/**
+ * Characters of argument text one tool-call evaluation reads in total (1 MB of
+ * text), each argument value counted once however many conditions read it.
+ * Every operator but `exists` reads a value's text; a value that does not fit
+ * in what is left reads as a value the operator cannot read, so it fails
+ * closed: a match for deny and require_approval, never for allow. Arguments no
+ * condition reads are not counted.
+ */
+export const MAX_EVALUATED_ARGUMENT_CHARS = 1_000_000;
+
+/** An argument string read once per evaluation: trimmed, with its folded and number forms made on first use. */
+interface ArgumentText {
+  text: string;
+  folded?: string;
+  number?: number | null;
+}
+
+/**
+ * Phase 12.4 — work left for one tool-call evaluation (see
+ * `MAX_GLOB_STEPS_PER_EVALUATION` and `MAX_EVALUATED_ARGUMENT_CHARS`), and
+ * the argument strings already read, by the object or list that holds them
+ * and their key (`null`: did not fit).
+ */
+export interface PolicyEvaluationBudget {
+  globSteps: number;
+  argumentChars: number;
+  readonly texts: WeakMap<object, Map<string | number, ArgumentText | null>>;
+}
+
+export function createPolicyEvaluationBudget(): PolicyEvaluationBudget {
+  return { globSteps: MAX_GLOB_STEPS_PER_EVALUATION, argumentChars: MAX_EVALUATED_ARGUMENT_CHARS, texts: new WeakMap() };
+}
+
+/**
+ * The two-pointer walk behind `matchesGlob`. Charges one step per character
+ * comparison to `budget` when given; `undefined` when the budget ran out
+ * before an answer.
+ */
+function globWalk(pattern: string, text: string, questionMark: boolean, budget?: PolicyEvaluationBudget): boolean | undefined {
+  if (budget && budget.globSteps <= 0) return undefined;
+  let p = 0;
+  let t = 0;
+  let star = -1;
+  let resume = 0;
+  let steps = 0;
+  while (t < text.length) {
+    if (budget && ++steps >= budget.globSteps) {
+      budget.globSteps = 0;
+      return undefined;
+    }
+    const char = pattern[p];
+    if (p < pattern.length && char !== "*" && (char === text[t] || (questionMark && char === "?"))) {
+      p += 1;
+      t += 1;
+    } else if (p < pattern.length && char === "*") {
+      star = p;
+      resume = t;
+      p += 1;
+    } else if (star !== -1) {
+      p = star + 1;
+      resume += 1;
+      t = resume;
+    } else {
+      if (budget) budget.globSteps -= steps;
+      return false;
+    }
+  }
+  if (budget) budget.globSteps -= steps;
+  while (p < pattern.length && pattern[p] === "*") p += 1;
+  return p === pattern.length;
+}
+
+/**
+ * Glob match without regular expressions: `*` matches any run of characters
+ * (including none) and, when `questionMark` is set, `?` exactly one;
+ * everything else is literal. The classic two-pointer walk that only ever
+ * backtracks to the last `*`, so the worst case is O(text × pattern) with no
+ * catastrophic backtracking whatever the input.
+ */
+export function matchesGlob(pattern: string, text: string, questionMark = false): boolean {
+  return globWalk(pattern, text, questionMark) === true;
 }
 
 export function isToolGlob(pattern: string): boolean {
@@ -140,7 +283,7 @@ export function matchesToolPattern(pattern: string, toolName: string): boolean {
   const trimmed = pattern.trim();
   if (!trimmed || trimmed === "*") return true;
   if (!isToolGlob(trimmed)) return trimmed === toolName;
-  return globToRegExp(trimmed).test(toolName);
+  return matchesGlob(trimmed, toolName);
 }
 
 /**
@@ -159,11 +302,24 @@ export function policyRuleKind(rule: Pick<McpToolPolicyRule, "kind">): McpPolicy
   return rule.kind ?? "tool";
 }
 
-export function ruleMatches(rule: McpToolPolicyRule, request: McpToolPolicyRequest): boolean {
+/** Phase 12.4 — absent means `enforce`. */
+export function policyRuleMode(rule: Pick<McpToolPolicyRule, "mode">): McpToolPolicyMode {
+  return rule.mode === "shadow" ? "shadow" : "enforce";
+}
+
+/** True when a rule has at least one condition. */
+export function policyRuleHasConditions(rule: Pick<McpToolPolicyRule, "conditions">): boolean {
+  return conditionList(rule.conditions).items.length > 0;
+}
+
+/** Whether the rule's scope covers the call: everything but its conditions. */
+export function ruleScopeMatches(rule: McpToolPolicyRule, request: McpToolPolicyRequest): boolean {
   if (!rule.enabled) return false;
   if (policyRuleKind(rule) !== (request.kind ?? "tool")) return false;
   if (rule.projectId && rule.projectId !== (request.projectId ?? null)) return false;
   if (rule.roles.length > 0 && !rule.roles.includes(request.role)) return false;
+  if (rule.workflowIds?.length && !(request.workflowId && rule.workflowIds.includes(request.workflowId))) return false;
+  if (rule.clientIds?.length && !(request.clientId && rule.clientIds.includes(request.clientId))) return false;
   if (!matchesPolicyServer(rule.serverId, request)) return false;
   if (!matchesToolPattern(rule.toolPattern, request.toolName)) return false;
   if (rule.annotationHint) {
@@ -172,9 +328,437 @@ export function ruleMatches(rule: McpToolPolicyRule, request: McpToolPolicyReque
   return true;
 }
 
+/**
+ * Whether the rule matches the call: scope, then conditions. `undecided`
+ * when the scope matches but the rule has conditions and the request carries
+ * no arguments (discovery). `budget` is the call's evaluation budget, shared
+ * by every enforced rule evaluated for it (shadow rules share their own); a fresh one when absent.
+ */
+export function ruleMatchState(
+  rule: McpToolPolicyRule,
+  request: McpToolPolicyRequest,
+  budget: PolicyEvaluationBudget = createPolicyEvaluationBudget()
+): "match" | "no_match" | "undecided" {
+  if (!ruleScopeMatches(rule, request)) return "no_match";
+  // Stored conditions that no longer validate fail closed: an allow never matches, anything else covers its whole scope.
+  if (rule.invalid) return rule.effect === "allow" ? "no_match" : "match";
+  if (!policyRuleHasConditions(rule)) return "match";
+  if (request.arguments === undefined) return "undecided";
+  return matchesPolicyConditions(rule.conditions, request.arguments, request.dataLabels, rule.effect, budget) ? "match" : "no_match";
+}
+
+export function ruleMatches(rule: McpToolPolicyRule, request: McpToolPolicyRequest): boolean {
+  return ruleMatchState(rule, request) === "match";
+}
+
+// ---------------------------------------------------------------------------
+// Phase 12.4 — conditions
+// ---------------------------------------------------------------------------
+
+/**
+ * At most this many values are read for one condition (through `[*]` steps
+ * and a path that ends on an array). A value set cut by this cap is
+ * incomplete and fails closed: a match for deny and require_approval, never
+ * for allow.
+ */
+export const MAX_RESOLVED_VALUES = 1000;
+
+const pathCache = new Map<string, McpPolicyPathStep[] | null>();
+
+function pathSteps(path: string): McpPolicyPathStep[] | null {
+  if (pathCache.has(path)) return pathCache.get(path)!;
+  const steps = parseMcpPolicyPath(path);
+  if (pathCache.size > 2000) pathCache.clear();
+  pathCache.set(path, steps);
+  return steps;
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+/**
+ * The values at a path, and how far they can be trusted:
+ * `incomplete` when the path cannot be read (bad syntax, over the length or
+ * step cap) or a cap cut the values; `partial` when some element reached
+ * through `[*]` lacks the rest of the path (or ends on an empty list). Each
+ * value comes with the object or list holding it and its key there, so its
+ * text is read once per evaluation however many conditions reach it.
+ */
+interface ResolvedSlot {
+  value: unknown;
+  holder: object | null;
+  key: string | number;
+}
+
+interface ResolvedValues {
+  slots: ResolvedSlot[];
+  incomplete: boolean;
+  partial: boolean;
+}
+
+function resolveValues(root: unknown, path: string, readEndArrays: boolean): ResolvedValues {
+  const steps = pathSteps(path);
+  if (!steps) return { slots: [], incomplete: true, partial: false };
+  let current: ResolvedSlot[] = [{ value: root, holder: null, key: "" }];
+  let afterWildcard = false;
+  let incomplete = false;
+  let partial = false;
+  const takeElements = (into: ResolvedSlot[], list: unknown[]) => {
+    const room = MAX_RESOLVED_VALUES - into.length;
+    if (list.length > room) incomplete = true;
+    const count = Math.min(list.length, Math.max(0, room));
+    for (let index = 0; index < count; index += 1) into.push({ value: list[index], holder: list, key: index });
+  };
+  for (const step of steps) {
+    const next: ResolvedSlot[] = [];
+    for (const { value } of current) {
+      const before = next.length;
+      if ("key" in step) {
+        if (isPlainObject(value) && Object.prototype.hasOwnProperty.call(value, step.key) && value[step.key] !== undefined) {
+          next.push({ value: value[step.key], holder: value, key: step.key });
+        }
+      } else if ("index" in step) {
+        if (Array.isArray(value) && step.index < value.length) next.push({ value: value[step.index], holder: value, key: step.index });
+      } else if (Array.isArray(value)) {
+        takeElements(next, value);
+      }
+      if (next.length === before && afterWildcard) partial = true;
+      if (incomplete) break;
+    }
+    if ("any" in step) afterWildcard = true;
+    current = next;
+    if (incomplete || current.length === 0) break;
+  }
+  if (!readEndArrays || incomplete) return { slots: current, incomplete, partial };
+  const slots: ResolvedSlot[] = [];
+  for (const slot of current) {
+    if (Array.isArray(slot.value)) {
+      // An element reached through `[*]` whose list is empty gives nothing to check: like an element lacking the path.
+      if (slot.value.length === 0 && afterWildcard) partial = true;
+      takeElements(slots, slot.value);
+    } else {
+      if (slots.length >= MAX_RESOLVED_VALUES) incomplete = true;
+      else slots.push(slot);
+    }
+    if (incomplete) break;
+  }
+  return { slots, incomplete, partial };
+}
+
+/** Every value at `path` in `root` (at most `MAX_RESOLVED_VALUES`); empty when the path does not resolve. */
+export function resolvePolicyPath(root: unknown, path: string): unknown[] {
+  return resolveValues(root, path, false).slots.map((slot) => slot.value);
+}
+
+function isScalar(value: unknown): value is McpPolicyScalar {
+  return value === null || typeof value === "string" || typeof value === "boolean" || (typeof value === "number" && Number.isFinite(value));
+}
+
+/**
+ * How a condition reads several values (a `[*]` step, or a path that ends on
+ * an array), chosen by the rule's effect so that every reading fails closed:
+ * `any` (deny, require_approval) holds when one value satisfies the condition
+ * and treats a missing argument as satisfying the negated operators;
+ * `every` (allow) holds only when every value does, there is at least one, and
+ * no value is of a type the operator cannot read.
+ */
+export type PolicyConditionQuantifier = "any" | "every";
+
+export function conditionQuantifier(effect: McpToolPolicyEffect | undefined): PolicyConditionQuantifier {
+  return effect === "allow" ? "every" : "any";
+}
+
+/** Longest text a `matches` glob is run against; a longer value matches for deny and approval, never for allow. */
+export const MAX_GLOB_TEXT_LENGTH = 64 * 1024;
+
+const NUMERIC_TEXT = /^\s*-?\d+(\.\d+)?(e[+-]?\d+)?\s*$/i;
+
+/** The number a trimmed text holds, if any. */
+function parseNumber(text: string): number | undefined {
+  if (!NUMERIC_TEXT.test(text)) return undefined;
+  const parsed = Number(text);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+/** A non-null scalar as trimmed text, folded when `ignoreCase`; undefined for null, objects and arrays. */
+function scalarText(value: unknown, ignoreCase: boolean): string | undefined {
+  let text: string | undefined;
+  if (typeof value === "string") text = value.trim();
+  else if (typeof value === "boolean") text = String(value);
+  else if (typeof value === "number" && Number.isFinite(value)) text = String(value);
+  if (text === undefined) return undefined;
+  return ignoreCase ? text.toLowerCase() : text;
+}
+
+/**
+ * A non-null scalar argument, read once per evaluation: its trimmed text, the
+ * folded text and the number it holds. Strings are charged to the
+ * evaluation's argument text budget the first time they are read; one that
+ * does not fit is `"unreadable"`.
+ */
+interface ScalarView {
+  kind: "string" | "number" | "boolean";
+  text: (ignoreCase: boolean) => string;
+  number: () => number | undefined;
+}
+
+function viewScalar(slot: ResolvedSlot, budget: PolicyEvaluationBudget): ScalarView | "unreadable" {
+  const value = slot.value;
+  if (typeof value === "number") {
+    const text = String(value);
+    return { kind: "number", text: (ignoreCase) => (ignoreCase ? text.toLowerCase() : text), number: () => value };
+  }
+  if (typeof value === "boolean") {
+    const text = String(value);
+    return { kind: "boolean", text: () => text, number: () => undefined };
+  }
+  const raw = value as string;
+  let byKey = slot.holder ? budget.texts.get(slot.holder) : undefined;
+  let entry = byKey?.get(slot.key);
+  if (entry === undefined) {
+    if (raw.length > budget.argumentChars) {
+      entry = null;
+    } else {
+      budget.argumentChars -= raw.length;
+      entry = { text: raw.trim() };
+    }
+    if (slot.holder) {
+      if (!byKey) {
+        byKey = new Map();
+        budget.texts.set(slot.holder, byKey);
+      }
+      byKey.set(slot.key, entry);
+    }
+  }
+  if (entry === null) return "unreadable";
+  const read = entry;
+  return {
+    kind: "string",
+    text: (ignoreCase) => (ignoreCase ? (read.folded ??= read.text.toLowerCase()) : read.text),
+    number: () => {
+      if (read.number === undefined) read.number = parseNumber(read.text) ?? null;
+      return read.number ?? undefined;
+    }
+  };
+}
+
+/**
+ * The scalars of an `equals` / `one_of` / `not_one_of` condition, prepared
+ * once per condition so each value is checked in constant time. Equality is
+ * the same as comparing one by one: identical, numerically equal when either
+ * side is a number and both hold one, otherwise equal as trimmed (and, with
+ * `ignoreCase`, folded) text.
+ */
+interface ScalarSet {
+  hasNull: boolean;
+  /** Entries that are numbers. */
+  numbers: Set<number>;
+  /** Entries that are numeric strings, by the number they hold. */
+  numericStrings: Set<number>;
+  /** Text of the number entries. */
+  numberTexts: Set<string>;
+  /** Text of the string and boolean entries. */
+  texts: Set<string>;
+}
+
+const scalarSetCache = new WeakMap<McpPolicyCondition, ScalarSet | null>();
+
+function scalarSet(condition: McpPolicyCondition): ScalarSet | null {
+  const cached = scalarSetCache.get(condition);
+  if (cached !== undefined) return cached;
+  const expected = condition.value;
+  const ignoreCase = condition.ignoreCase === true;
+  let entries: unknown[] | null = null;
+  if (condition.op === "equals") entries = Array.isArray(expected) || expected === undefined ? null : [expected];
+  else entries = Array.isArray(expected) ? expected : null;
+  let set: ScalarSet | null = null;
+  if (entries) {
+    set = { hasNull: false, numbers: new Set(), numericStrings: new Set(), numberTexts: new Set(), texts: new Set() };
+    for (const entry of entries) {
+      if (entry === null) {
+        set.hasNull = true;
+      } else if (typeof entry === "number") {
+        if (!Number.isFinite(entry)) continue;
+        set.numbers.add(entry);
+        set.numberTexts.add(scalarText(entry, ignoreCase)!);
+      } else if (typeof entry === "string" || typeof entry === "boolean") {
+        const text = scalarText(entry, ignoreCase)!;
+        set.texts.add(text);
+        if (typeof entry === "string") {
+          const number = parseNumber(entry.trim());
+          if (number !== undefined) set.numericStrings.add(number);
+        }
+      }
+    }
+  }
+  scalarSetCache.set(condition, set);
+  return set;
+}
+
+function inScalarSet(set: ScalarSet, view: ScalarView, ignoreCase: boolean): boolean {
+  if (view.kind === "number") {
+    const number = view.number()!;
+    return set.numbers.has(number) || set.numericStrings.has(number);
+  }
+  const text = view.text(ignoreCase);
+  if (view.kind === "boolean") return set.texts.has(text);
+  const number = view.number();
+  return (number !== undefined ? set.numbers.has(number) : set.numberTexts.has(text)) || set.texts.has(text);
+}
+
+/** Glob for argument values: `*` any run of characters, `?` one character; everything else literal. */
+export function matchesValueGlob(pattern: string, value: string): boolean {
+  return matchesGlob(pattern, value, true);
+}
+
+/**
+ * One value against one argument operator. `true` / `false` when the value
+ * can be read; `"unreadable"` when it is of a type the operator cannot read
+ * (an object or a nested list for any operator, a non-numeric value for a
+ * number operator), longer than `MAX_GLOB_TEXT_LENGTH` for `matches`, does
+ * not fit in the call's argument text budget, or the call's glob budget is
+ * spent. The quantifier resolves it fail-closed.
+ */
+function valueSatisfies(condition: McpPolicyCondition, slot: ResolvedSlot, budget: PolicyEvaluationBudget): boolean | "unreadable" {
+  const expected = condition.value;
+  const ignoreCase = condition.ignoreCase === true;
+  const value = slot.value;
+  if (value !== null && !isScalar(value)) return "unreadable";
+  const view = value === null ? null : viewScalar(slot, budget);
+  if (view === "unreadable") return "unreadable";
+  switch (condition.op) {
+    case "equals":
+    case "one_of": {
+      const set = scalarSet(condition);
+      if (!set) return false;
+      return view === null ? set.hasNull : inScalarSet(set, view, ignoreCase);
+    }
+    case "not_one_of": {
+      const set = scalarSet(condition);
+      if (!set) return false;
+      // null reads like a missing argument: it "is not one of" the list for deny and approval, never for an allow.
+      if (view === null) return set.hasNull ? false : "unreadable";
+      return !inScalarSet(set, view, ignoreCase);
+    }
+    case "starts_with":
+    case "ends_with":
+    case "matches": {
+      if (typeof expected !== "string" || view === null) return false;
+      const text = view.text(ignoreCase);
+      const wanted = ignoreCase ? expected.toLowerCase() : expected;
+      if (condition.op === "starts_with") return text.startsWith(wanted);
+      if (condition.op === "ends_with") return text.endsWith(wanted);
+      if (text.length > MAX_GLOB_TEXT_LENGTH) return "unreadable";
+      return globWalk(wanted, text, true, budget) ?? "unreadable";
+    }
+    case "lt":
+    case "lte":
+    case "gt":
+    case "gte": {
+      const limit = typeof expected === "number" && Number.isFinite(expected) ? expected : undefined;
+      if (limit === undefined) return false;
+      if (view === null) return false;
+      const actual = view.number();
+      if (actual === undefined) return "unreadable";
+      if (condition.op === "lt") return actual < limit;
+      if (condition.op === "lte") return actual <= limit;
+      if (condition.op === "gt") return actual > limit;
+      return actual >= limit;
+    }
+    case "between": {
+      if (!Array.isArray(expected) || expected.length !== 2) return false;
+      const [min, max] = expected;
+      if (typeof min !== "number" || typeof max !== "number" || !Number.isFinite(min) || !Number.isFinite(max)) return false;
+      if (view === null) return false;
+      const actual = view.number();
+      if (actual === undefined) return "unreadable";
+      return actual >= min && actual <= max;
+    }
+    default:
+      return false;
+  }
+}
+
+const NEGATED_OPS = new Set<McpPolicyCondition["op"]>(["not_one_of", "label_absent"]);
+
+/**
+ * One condition against a call. Pure and total. Fails closed for the rule's
+ * effect (see `PolicyConditionQuantifier`):
+ * - under `any` (deny, require_approval, the default) a missing argument, an
+ *   empty array or labels the run does not track satisfy only the negated
+ *   operators; a value the operator cannot read (`"5000x"` for `gt`, an
+ *   object or a nested list for any operator) satisfies it; and so does an
+ *   incomplete reading: a path that cannot be read, more than
+ *   `MAX_RESOLVED_VALUES` values, a value past the argument text budget, or a
+ *   spent glob budget;
+ * - under `every` (allow) none of those do, and neither does a `[*]` element
+ *   that lacks the rest of the path or ends on an empty list.
+ * Work is linear in the arguments read: each value's text is read once per
+ * evaluation (`budget`), and list operators look values up in a set.
+ * `exists` reads the path as given: true when some value is not null,
+ * `exists: false` when none is. An operator with a malformed value is false.
+ */
+export function evaluatePolicyCondition(
+  condition: McpPolicyCondition,
+  args: Record<string, unknown>,
+  labels?: McpToolPolicyRequest["dataLabels"],
+  quantifier: PolicyConditionQuantifier = "any",
+  budget: PolicyEvaluationBudget = createPolicyEvaluationBudget()
+): boolean {
+  if (condition.op === "label_present" || condition.op === "label_absent") {
+    if (typeof condition.value !== "string") return false;
+    if (!labels) return condition.op === "label_absent" && quantifier === "any";
+    const present = labels.provenance.includes(condition.value) || labels.dataClasses.includes(condition.value);
+    return condition.op === "label_present" ? present : !present;
+  }
+  if (typeof condition.path !== "string") return quantifier === "any";
+  const resolved = resolveValues(args, condition.path, condition.op !== "exists");
+  if (resolved.incomplete) return quantifier === "any";
+  if (quantifier === "every" && resolved.partial) return false;
+  const { slots } = resolved;
+  if (condition.op === "exists") {
+    const exists = slots.some((slot) => slot.value !== null);
+    return condition.value === false ? !exists : exists;
+  }
+  if (slots.length === 0) return quantifier === "any" && NEGATED_OPS.has(condition.op) && Array.isArray(condition.value);
+  if (quantifier === "every") return slots.every((slot) => valueSatisfies(condition, slot, budget) === true);
+  return slots.some((slot) => valueSatisfies(condition, slot, budget) !== false);
+}
+
+/**
+ * True when the conditions hold (`all`: every one, `any`: at least one); a
+ * rule without conditions always holds. `effect` is the rule's: an allow
+ * reads several values with `every`, anything else with `any`.
+ */
+export function matchesPolicyConditions(
+  conditions: McpToolPolicyRule["conditions"],
+  args: Record<string, unknown>,
+  labels?: McpToolPolicyRequest["dataLabels"],
+  effect?: McpToolPolicyEffect,
+  budget: PolicyEvaluationBudget = createPolicyEvaluationBudget()
+): boolean {
+  const { combine, items } = conditionList(conditions);
+  if (items.length === 0) return true;
+  const quantifier = conditionQuantifier(effect);
+  return combine === "any"
+    ? items.some((condition) => evaluatePolicyCondition(condition, args, labels, quantifier, budget))
+    : items.every((condition) => evaluatePolicyCondition(condition, args, labels, quantifier, budget));
+}
+
+/** Phase 12.4 — sha256 of the rule's canonical form (see `canonicalMcpToolPolicyRule`). */
+export function hashMcpToolPolicyRule(rule: McpToolPolicyRule): string {
+  return createHash("sha256").update(canonicalMcpToolPolicyRule(rule)).digest("hex");
+}
+
 /** True when any enabled rule needs the tool's annotations to decide whether it matches. */
 export function policyNeedsAnnotations(rules: readonly McpToolPolicyRule[]): boolean {
   return rules.some((rule) => rule.enabled && Boolean(rule.annotationHint));
+}
+
+/** Phase 12.4 — true when any enabled rule has conditions, so the call's arguments (or labels) can change its outcome. */
+export function policyNeedsArguments(rules: readonly McpToolPolicyRule[]): boolean {
+  return rules.some((rule) => rule.enabled && policyRuleHasConditions(rule));
 }
 
 /**
@@ -200,50 +784,163 @@ function scalarWithin(inner: string | null | undefined, outer: string | null | u
   return outer === null || outer === undefined || inner === outer;
 }
 
+/** An empty list covers everything; otherwise `inner` must be non-empty and inside `outer`. */
+function idsWithin(inner: readonly string[] | undefined, outer: readonly string[] | undefined): boolean {
+  if (!outer || outer.length === 0) return true;
+  if (!inner || inner.length === 0) return false;
+  return inner.every((id) => outer.includes(id));
+}
+
+const canonicalConditionsCache = new WeakMap<object, string>();
+
+function canonicalConditions(rule: McpToolPolicyRule): string {
+  const conditions = rule.conditions;
+  if (!conditions) return "";
+  const cached = canonicalConditionsCache.get(conditions);
+  if (cached !== undefined) return cached;
+  // Only the conditions part of the canonical rule matters here.
+  const text = canonicalMcpToolPolicyRule({ ...rule, effect: "deny", kind: "tool", projectId: null, roles: [], workflowIds: [], clientIds: [], serverId: null, toolPattern: "*", annotationHint: null });
+  canonicalConditionsCache.set(conditions, text);
+  return text;
+}
+
+/** No conditions covers every call; otherwise only the same conditions (canonically) count as inside. */
+function conditionsWithin(inner: McpToolPolicyRule, outer: McpToolPolicyRule): boolean {
+  if (!policyRuleHasConditions(outer)) return true;
+  if (!policyRuleHasConditions(inner)) return false;
+  return canonicalConditions(inner) === canonicalConditions(outer);
+}
+
+function scopeWithin(inner: McpToolPolicyRule, outer: McpToolPolicyRule): boolean {
+  return (
+    scalarWithin(inner.projectId, outer.projectId) &&
+    rolesWithin(inner.roles, outer.roles) &&
+    idsWithin(inner.workflowIds, outer.workflowIds) &&
+    idsWithin(inner.clientIds, outer.clientIds) &&
+    scalarWithin(inner.serverId, outer.serverId) &&
+    patternWithin(inner.toolPattern, outer.toolPattern) &&
+    scalarWithin(inner.annotationHint, outer.annotationHint) &&
+    conditionsWithin(inner, outer)
+  );
+}
+
 /** True when `inner`'s scope sits inside `outer`'s in every field and is smaller in at least one. */
 export function isStrictlyNarrower(inner: McpToolPolicyRule, outer: McpToolPolicyRule): boolean {
   if (policyRuleKind(inner) !== policyRuleKind(outer)) return false;
-  const within =
-    scalarWithin(inner.projectId, outer.projectId) &&
-    rolesWithin(inner.roles, outer.roles) &&
-    scalarWithin(inner.serverId, outer.serverId) &&
-    patternWithin(inner.toolPattern, outer.toolPattern) &&
-    scalarWithin(inner.annotationHint, outer.annotationHint);
-  if (!within) return false;
-  const reverse =
-    scalarWithin(outer.projectId, inner.projectId) &&
-    rolesWithin(outer.roles, inner.roles) &&
-    scalarWithin(outer.serverId, inner.serverId) &&
-    patternWithin(outer.toolPattern, inner.toolPattern) &&
-    scalarWithin(outer.annotationHint, inner.annotationHint);
-  return !reverse;
+  return scopeWithin(inner, outer) && !scopeWithin(outer, inner);
+}
+
+interface PolicyOutcome {
+  effect: McpToolPolicyEffect;
+  rule?: McpToolPolicyRule;
+  overriddenDenies: McpToolPolicyDecision["overriddenDenies"];
+  overriddenApprovals: NonNullable<McpToolPolicyDecision["overriddenApprovals"]>;
+}
+
+/** Precedence over the rules that matched: deny > require_approval > allow, with strictly narrower carve-outs. */
+function decideOutcome(matched: readonly McpToolPolicyRule[], possibleCarveOuts: readonly McpToolPolicyRule[]): PolicyOutcome {
+  const allows = [...matched.filter((rule) => rule.effect === "allow"), ...possibleCarveOuts.filter((rule) => rule.effect === "allow")];
+  const approvals = matched.filter((rule) => rule.effect === "require_approval");
+  const denies = matched.filter((rule) => rule.effect === "deny");
+  const overriddenDenies: PolicyOutcome["overriddenDenies"] = [];
+  const overriddenApprovals: PolicyOutcome["overriddenApprovals"] = [];
+  let blocking: McpToolPolicyRule | undefined;
+  const carvedToApproval: McpToolPolicyRule[] = [];
+  for (const deny of denies) {
+    const carve = allows.find((allow) => isStrictlyNarrower(allow, deny)) ?? approvals.find((approval) => isStrictlyNarrower(approval, deny));
+    if (carve) {
+      overriddenDenies.push({ deny, by: carve });
+      if (carve.effect === "require_approval") carvedToApproval.push(carve);
+    } else if (!blocking) {
+      blocking = deny;
+    }
+  }
+  if (blocking) return { effect: "deny", rule: blocking, overriddenDenies, overriddenApprovals };
+  let pending: McpToolPolicyRule | undefined;
+  for (const approval of approvals) {
+    const carve = allows.find((allow) => isStrictlyNarrower(allow, approval));
+    if (carve) {
+      overriddenApprovals.push({ approval, by: carve });
+    } else if (!pending) {
+      pending = approval;
+    }
+  }
+  if (pending) return { effect: "require_approval", rule: pending, overriddenDenies, overriddenApprovals };
+  const matchedAllows = matched.filter((rule) => rule.effect === "allow");
+  const deciding =
+    overriddenDenies.find((entry) => entry.by.effect === "allow")?.by ?? overriddenApprovals[0]?.by ?? matchedAllows[0] ?? carvedToApproval[0];
+  return { effect: "allow", ...(deciding ? { rule: deciding } : {}), overriddenDenies, overriddenApprovals };
 }
 
 export function evaluateMcpToolPolicy(
   rules: readonly McpToolPolicyRule[],
   request: McpToolPolicyRequest
 ): McpToolPolicyDecision {
-  const matchedRules = rules.filter((rule) => ruleMatches(rule, request));
-  if (matchedRules.length === 0) {
-    return { allowed: true, decidedBy: "default", matchedRules, overriddenDenies: [] };
+  const matchedAll: McpToolPolicyRule[] = [];
+  const undecided: McpToolPolicyRule[] = [];
+  // Shadow rules get their own budget, so their work can never change an enforced rule's reading.
+  const enforcedBudget = createPolicyEvaluationBudget();
+  const shadowBudget = createPolicyEvaluationBudget();
+  for (const rule of rules) {
+    const state = ruleMatchState(rule, request, policyRuleMode(rule) === "shadow" ? shadowBudget : enforcedBudget);
+    if (state === "match") matchedAll.push(rule);
+    else if (state === "undecided") undecided.push(rule);
   }
-  const allows = matchedRules.filter((rule) => rule.effect === "allow");
-  const denies = matchedRules.filter((rule) => rule.effect === "deny");
-  const overriddenDenies: McpToolPolicyDecision["overriddenDenies"] = [];
-  let blocking: McpToolPolicyRule | undefined;
-  for (const deny of denies) {
-    const carve = allows.find((allow) => isStrictlyNarrower(allow, deny));
-    if (carve) {
-      overriddenDenies.push({ deny, by: carve });
-    } else if (!blocking) {
-      blocking = deny;
-    }
+  // Discovery: an undecided allow may carve an exception for some calls, so it keeps a tool visible.
+  const carveOuts = (shadowToo: boolean) => undecided.filter((rule) => shadowToo || policyRuleMode(rule) === "enforce");
+  const matchedRules = matchedAll.filter((rule) => policyRuleMode(rule) === "enforce");
+  const enforced = decideOutcome(matchedRules, carveOuts(false));
+  const decision: McpToolPolicyDecision = {
+    allowed: enforced.effect !== "deny",
+    effect: enforced.effect,
+    decidedBy: enforced.rule && matchedRules.length > 0 ? "rule" : "default",
+    ...(enforced.rule && matchedRules.length > 0 ? { rule: enforced.rule } : {}),
+    matchedRules,
+    overriddenDenies: enforced.overriddenDenies,
+    ...(enforced.overriddenApprovals.length > 0 ? { overriddenApprovals: enforced.overriddenApprovals } : {}),
+    ...(undecided.length > 0 ? { undecided } : {})
+  };
+  const shadowMatched = matchedAll.filter((rule) => policyRuleMode(rule) === "shadow");
+  if (shadowMatched.length > 0) {
+    const withShadow = decideOutcome(matchedAll, carveOuts(true));
+    decision.shadow = {
+      effect: withShadow.effect,
+      ...(withShadow.rule ? { rule: withShadow.rule } : {}),
+      matchedRules: shadowMatched,
+      changed: withShadow.effect !== enforced.effect
+    };
   }
-  if (blocking) {
-    return { allowed: false, decidedBy: "rule", rule: blocking, matchedRules, overriddenDenies };
-  }
-  const deciding = overriddenDenies[0]?.by ?? allows[0];
-  return { allowed: true, decidedBy: "rule", rule: deciding, matchedRules, overriddenDenies };
+  return decision;
+}
+
+/**
+ * Phase 12.4 — the record of one call's decision for the run trace and the
+ * telemetry row; undefined when no rule (enforced or shadow) matched.
+ */
+export function policyDecisionRecord(
+  decision: McpToolPolicyDecision,
+  approval?: McpToolPolicyDecisionRecord["approval"]
+): McpToolPolicyDecisionRecord | undefined {
+  const shadowRules = decision.shadow?.matchedRules ?? [];
+  if (decision.matchedRules.length === 0 && shadowRules.length === 0) return undefined;
+  return {
+    effect: decision.effect,
+    decidedBy: decision.decidedBy,
+    ...(decision.rule ? { ruleId: decision.rule.id, ruleHash: hashMcpToolPolicyRule(decision.rule) } : {}),
+    ...(decision.rule?.name ? { ruleName: decision.rule.name } : {}),
+    ...(approval && decision.effect === "require_approval" ? { approval } : {}),
+    matched: [...decision.matchedRules, ...shadowRules].map((rule) => ({ ruleId: rule.id, mode: policyRuleMode(rule), effect: rule.effect })),
+    ...(decision.shadow
+      ? {
+          shadow: {
+            effect: decision.shadow.effect,
+            ...(decision.shadow.rule ? { ruleId: decision.shadow.rule.id, ruleHash: hashMcpToolPolicyRule(decision.shadow.rule) } : {}),
+            ...(decision.shadow.rule?.name ? { ruleName: decision.shadow.rule.name } : {}),
+            changed: decision.shadow.changed
+          }
+        }
+      : {})
+  };
 }
 
 /**
@@ -285,10 +982,69 @@ export interface McpToolAccessDecision {
   classification: McpToolClassification;
   /** Human-readable explanation when the tool is blocked. */
   message?: string;
+  /**
+   * Phase 12.4 — the call is allowed once a person approves it: a
+   * require_approval rule matched (and no deny). The caller hands it off
+   * for approval; `evaluateMcpToolAccess` itself never blocks it.
+   */
+  approval?: { ruleId: string; ruleName?: string; message: string; ruleHash?: string };
 }
 
 export function describePolicyRule(rule: Pick<McpToolPolicyRule, "id" | "name">): string {
   return rule.name?.trim() ? `'${rule.name.trim()}' (${rule.id})` : `'${rule.id}'`;
+}
+
+const CONDITION_WORDS: Record<McpPolicyCondition["op"], string> = {
+  equals: "equals",
+  one_of: "is one of",
+  not_one_of: "is not one of",
+  starts_with: "starts with",
+  ends_with: "ends with",
+  matches: "matches",
+  lt: "<",
+  lte: "<=",
+  gt: ">",
+  gte: ">=",
+  between: "is between",
+  exists: "exists",
+  label_present: "label present:",
+  label_absent: "label absent:"
+};
+
+function describeValue(value: McpPolicyCondition["value"]): string {
+  if (Array.isArray(value)) {
+    const shown = value.slice(0, 5).map((entry) => JSON.stringify(entry)).join(", ");
+    return value.length > 5 ? `${shown}, ...` : shown;
+  }
+  return JSON.stringify(value ?? null);
+}
+
+/** Phase 12.4 — one condition in words, for messages and the UI: `repo is one of "a", "b"`. */
+export function describePolicyCondition(condition: McpPolicyCondition): string {
+  if (condition.op === "label_present" || condition.op === "label_absent") {
+    return `${CONDITION_WORDS[condition.op]} ${String(condition.value ?? "")}`;
+  }
+  if (condition.op === "exists") return `${condition.path ?? "?"} ${condition.value === false ? "does not exist" : "exists"}`;
+  if (condition.op === "between" && Array.isArray(condition.value)) {
+    return `${condition.path ?? "?"} is between ${describeValue(condition.value[0])} and ${describeValue(condition.value[1])}`;
+  }
+  const text = `${condition.path ?? "?"} ${CONDITION_WORDS[condition.op]} ${describeValue(condition.value)}`;
+  return condition.ignoreCase ? `${text} (ignoring case)` : text;
+}
+
+/** Phase 12.4 — a rule's conditions in words; empty when it has none. */
+export function describePolicyConditions(conditions: McpToolPolicyRule["conditions"]): string {
+  const { combine, items } = conditionList(conditions);
+  if (items.length === 0) return "";
+  return items.map(describePolicyCondition).join(combine === "any" ? " or " : " and ");
+}
+
+function ruleQualifiers(rule: McpToolPolicyRule): string {
+  const parts: string[] = [];
+  if (rule.annotationHint) parts.push(`rule applies to ${describeHintCondition(rule.annotationHint)} tools`);
+  const conditions = describePolicyConditions(rule.conditions);
+  if (conditions) parts.push(`the call matches: ${conditions}`);
+  return parts.length > 0 ? ` (${parts.join("; ")})` : "";
 }
 
 /** Policy first, then the workflow's "no write tools" switch. */
@@ -313,9 +1069,7 @@ export function evaluateMcpToolAccess(input: McpToolAccessInput): McpToolAccessD
       ...(policy.rule.name ? { ruleName: policy.rule.name } : {}),
       policy,
       classification,
-      message: `${toolLabel} is blocked by policy ${describePolicyRule(policy.rule)} for role ${input.role}${
-        policy.rule.annotationHint ? ` (rule applies to ${describeHintCondition(policy.rule.annotationHint)} tools)` : ""
-      }.`
+      message: `${toolLabel} is blocked by policy ${describePolicyRule(policy.rule)} for role ${input.role}${ruleQualifiers(policy.rule)}.`
     };
   }
   // Reading a resource and fetching a prompt never write; sampling is governed by its own rules.
@@ -332,6 +1086,19 @@ export function evaluateMcpToolAccess(input: McpToolAccessInput): McpToolAccessD
       policy,
       classification,
       message: `${toolLabel} is blocked: this workflow allows no write tools and ${why}.`
+    };
+  }
+  if (policy.effect === "require_approval" && policy.rule) {
+    return {
+      allowed: true,
+      policy,
+      classification,
+      approval: {
+        ruleId: policy.rule.id,
+        ruleHash: hashMcpToolPolicyRule(policy.rule),
+        ...(policy.rule.name ? { ruleName: policy.rule.name } : {}),
+        message: `${toolLabel} needs approval by policy ${describePolicyRule(policy.rule)}${ruleQualifiers(policy.rule)}.`
+      }
     };
   }
   return { allowed: true, policy, classification };

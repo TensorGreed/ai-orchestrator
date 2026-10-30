@@ -23,6 +23,7 @@
 
 import { randomUUID } from "node:crypto";
 import { parseMcpRuntimeRejection } from "@ai-orchestrator/mcp-sdk";
+import type { McpToolPolicyDecisionRecord } from "@ai-orchestrator/shared";
 import type { McpToolCallRecord, McpToolCallWrite } from "../db/database.js";
 import { percentile } from "./mcp-probe-service.js";
 
@@ -132,6 +133,26 @@ function readAttributionMap(output: Record<string, unknown>): Map<string, Attrib
   return map;
 }
 
+/** Phase 12.4 — the tool policy's decisions on a node output (`_toolPolicy.decisions`), by the agent's tool call id. */
+function readPolicyDecisions(output: Record<string, unknown>): { byCallId: Map<string, McpToolPolicyDecisionRecord>; all: McpToolPolicyDecisionRecord[] } {
+  const byCallId = new Map<string, McpToolPolicyDecisionRecord>();
+  const all: McpToolPolicyDecisionRecord[] = [];
+  const raw = asRecord(output._toolPolicy)?.decisions;
+  for (const value of Array.isArray(raw) ? raw : []) {
+    const entry = asRecord(value);
+    if (!entry || typeof entry.effect !== "string" || !Array.isArray(entry.matched)) continue;
+    const { tool: _tool, server: _server, registryServerId: _registry, toolCallId, ...decision } = entry;
+    const record = decision as unknown as McpToolPolicyDecisionRecord;
+    all.push(record);
+    if (typeof toolCallId === "string") byCallId.set(toolCallId, record);
+  }
+  return { byCallId, all };
+}
+
+function policyColumn(decision: McpToolPolicyDecisionRecord | undefined): { policyDecision?: McpToolPolicyDecisionRecord } {
+  return decision ? { policyDecision: decision } : {};
+}
+
 export function extractMcpToolCalls(input: ExtractMcpToolCallsInput): McpToolCallInput[] {
   const nextId = input.idFactory ?? (() => `mtc_${randomUUID()}`);
   const redact = input.redact ?? ((value: string) => value);
@@ -148,6 +169,7 @@ export function extractMcpToolCalls(input: ExtractMcpToolCallsInput): McpToolCal
     if (steps.length === 0) return;
     const attribution = readAttributionMap(output);
     const samplingShares = readSamplingShares(output);
+    const policyDecisions = readPolicyDecisions(output).byCallId;
     const callsByTool = new Map<string, number>();
     const telemetry = asRecord(output._telemetry);
     const providerId = asString(telemetry?.providerId);
@@ -199,7 +221,8 @@ export function extractMcpToolCalls(input: ExtractMcpToolCallsInput): McpToolCal
             turnOutputTokens: outputShare,
             estimatedCostUsd: cost,
             ...samplingColumns(samplingShares.get(`${target.toolName}\u0000${callNumber}`)),
-            ...(rejection ? { rejection } : {})
+            ...(rejection ? { rejection } : {}),
+            ...policyColumn(policyDecisions.get(asString(result.toolCallId) ?? ""))
           });
         }
         // A delegated worker agent returns its own output as the tool result.
@@ -264,7 +287,9 @@ export function extractMcpToolCalls(input: ExtractMcpToolCallsInput): McpToolCal
         turnOutputTokens: null,
         estimatedCostUsd: null,
         ...samplingColumns(samplingTotal),
-        ...(rejection ? { rejection } : {})
+        ...(rejection ? { rejection } : {}),
+        // A direct node makes one call: its decision is the last one recorded.
+        ...policyColumn(output ? readPolicyDecisions(output).all.at(-1) : undefined)
       });
       continue;
     }

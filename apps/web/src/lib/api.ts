@@ -116,6 +116,10 @@ import type {
   McpSamplingSettings,
   McpServerCapabilities,
   McpToolPolicyRule,
+  McpToolPolicyConditions,
+  McpToolPolicyEffect,
+  McpToolPolicyMode,
+  McpGatewayApproval,
   MCPToolDefinition,
   Project,
   Workflow,
@@ -2911,7 +2915,7 @@ export interface McpToolPolicyMarks {
 export interface McpToolPolicyRuleInput {
   name?: string | null;
   description?: string | null;
-  effect: "allow" | "deny";
+  effect: McpToolPolicyEffect;
   projectId?: string | null;
   roles?: McpPolicyRole[];
   serverId?: string | null;
@@ -2921,6 +2925,21 @@ export interface McpToolPolicyRuleInput {
   /** Phase 10.5 — what the rule governs; `tool` when left out. */
   kind?: McpPolicyKind;
   enabled?: boolean;
+  /** Phase 12.4 — conditions on the call's arguments and data labels; null = every call. */
+  conditions?: McpToolPolicyConditions | null;
+  /** Phase 12.4 — shadow rules are recorded, never applied. */
+  mode?: McpToolPolicyMode;
+  workflowIds?: string[];
+  clientIds?: string[];
+}
+
+/** Phase 12.4 — one rule in a dry run, with its conditions in words. */
+export interface McpToolPolicyRuleExplanation {
+  ruleId: string;
+  ruleName: string | null;
+  effect: McpToolPolicyEffect;
+  mode: McpToolPolicyMode;
+  conditions: string | null;
 }
 
 export interface McpToolPolicyEvaluation {
@@ -2936,6 +2955,19 @@ export interface McpToolPolicyEvaluation {
   classification: McpToolClassification;
   manualReadOnly: boolean | null;
   server: { kind: "registry"; id: string; name: string; adapterId: string } | { kind: "inline"; adapterId: string };
+  /** Phase 12.4 — the enforced outcome; absent from servers older than 12.4. */
+  effect?: McpToolPolicyEffect;
+  approval?: { ruleId: string; ruleName?: string; message: string } | null;
+  shadow?: {
+    effect: McpToolPolicyEffect;
+    ruleId: string | null;
+    ruleName: string | null;
+    changed: boolean;
+    matchedRules: McpToolPolicyRuleExplanation[];
+  } | null;
+  why?: McpToolPolicyRuleExplanation[];
+  /** Rules with conditions that could not decide because no arguments were given. */
+  undecided?: McpToolPolicyRuleExplanation[];
 }
 
 export async function fetchMcpToolPolicies() {
@@ -2966,10 +2998,27 @@ export async function evaluateMcpToolPolicy(payload: {
   serverId: string;
   toolName: string;
   noWriteTools?: boolean;
+  arguments?: Record<string, unknown>;
+  labels?: string[];
+  workflowId?: string | null;
+  clientId?: string | null;
 }) {
   return apiRequest<McpToolPolicyEvaluation>("/api/mcp/policies/evaluate", {
     method: "POST",
     body: JSON.stringify(payload)
+  });
+}
+
+/** Phase 12.4 — gateway calls a require_approval rule held back (admin). */
+export async function fetchMcpGatewayApprovals(filter: { status?: McpGatewayApproval["status"] } = {}) {
+  const suffix = filter.status ? `?status=${encodeURIComponent(filter.status)}` : "";
+  return apiRequest<{ approvals: McpGatewayApproval[]; approvalWindowMs: number }>(`/api/mcp/gateway/approvals${suffix}`);
+}
+
+export async function decideMcpGatewayApproval(id: string, decision: "approve" | "reject", reason?: string) {
+  return apiRequest<{ approval: McpGatewayApproval }>(`/api/mcp/gateway/approvals/${encodeURIComponent(id)}/${decision}`, {
+    method: "POST",
+    body: JSON.stringify(reason ? { reason } : {})
   });
 }
 

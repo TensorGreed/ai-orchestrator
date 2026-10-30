@@ -1462,6 +1462,24 @@ ${effectiveSystemPrompt}`;
                 return withLabels(clarifyResult);
               }
 
+              // Phase 12.4 — the caller's tool-call check (the MCP tool
+              // policy) decides before the guard sees the arguments.
+              if (!internalTool && tools.checkToolCall) {
+                const check = await tools.checkToolCall(call.name, callArguments, {
+                  toolCallId: call.id,
+                  iteration,
+                  ...(labelTracking ? { labels: accumulatedLabels() } : {})
+                });
+                if (check.outcome === "pause") throw new AgentGuardInterrupt("approval_required", "tool_arguments", iteration, check.message);
+                if (check.outcome === "block") {
+                  reportToolEnd("blocked", check.message);
+                  toolResults.push({ toolCallId: call.id, toolName: call.name, output: null, error: check.message });
+                  messages.push({ role: "tool", content: serializeToolMessage(false, check.message, toolOutputLimits), toolCallId: call.id, name: call.name });
+                  failedToolCount += 1;
+                  continue;
+                }
+              }
+
               // Phase 12.1 — guard hook: before each external tool call.
               // Internal tools (session cache, clarify) only replay content
               // that was already guarded, so they are not checked again.

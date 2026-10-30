@@ -69,6 +69,8 @@ export interface PostgresStoreConfig {
  *                     connection's token is re-read and refreshed (services/mcp-oauth-service.ts, cluster mode).
  *   0x4c3243 ("L2C")  replay-capture reservations — key: hashtext(schema:workflow id), held for the reserving
  *                     transaction (pg_advisory_xact_lock); see postgres/flow-state.ts.
+ *   0x4c3250 ("L2P")  MCP gateway approval requests — key: hashtext(schema:client id), held for the creating
+ *                     transaction (pg_advisory_xact_lock) so the per-client pending cap holds; see postgres/mcp.ts.
  * Add a new class here rather than reusing one.
  */
 export const ADVISORY_LOCK_CLASS_MIGRATIONS = 0x4c324d;
@@ -783,6 +785,30 @@ export class PostgresStore implements Store {
   }
   async deleteMcpToolPolicy(...args: Parameters<Store["deleteMcpToolPolicy"]>): ReturnType<Store["deleteMcpToolPolicy"]> {
     return mcp.deleteMcpToolPolicy(this.ctx, ...args);
+  }
+  async createMcpGatewayApproval(...args: Parameters<Store["createMcpGatewayApproval"]>): ReturnType<Store["createMcpGatewayApproval"]> {
+    return mcp.createMcpGatewayApproval(this.ctx, ...args);
+  }
+  async getMcpGatewayApproval(...args: Parameters<Store["getMcpGatewayApproval"]>): ReturnType<Store["getMcpGatewayApproval"]> {
+    return mcp.getMcpGatewayApproval(this.ctx, ...args);
+  }
+  async listMcpGatewayApprovals(...args: Parameters<Store["listMcpGatewayApprovals"]>): ReturnType<Store["listMcpGatewayApprovals"]> {
+    return mcp.listMcpGatewayApprovals(this.ctx, ...args);
+  }
+  async findUsableMcpGatewayApproval(...args: Parameters<Store["findUsableMcpGatewayApproval"]>): ReturnType<Store["findUsableMcpGatewayApproval"]> {
+    return mcp.findUsableMcpGatewayApproval(this.ctx, ...args);
+  }
+  async consumeMcpGatewayApproval(...args: Parameters<Store["consumeMcpGatewayApproval"]>): ReturnType<Store["consumeMcpGatewayApproval"]> {
+    return mcp.consumeMcpGatewayApproval(this.ctx, ...args);
+  }
+  async restoreMcpGatewayApproval(...args: Parameters<Store["restoreMcpGatewayApproval"]>): ReturnType<Store["restoreMcpGatewayApproval"]> {
+    return mcp.restoreMcpGatewayApproval(this.ctx, ...args);
+  }
+  async findBlockingMcpGatewayRejection(...args: Parameters<Store["findBlockingMcpGatewayRejection"]>): ReturnType<Store["findBlockingMcpGatewayRejection"]> {
+    return mcp.findBlockingMcpGatewayRejection(this.ctx, ...args);
+  }
+  async decideMcpGatewayApproval(...args: Parameters<Store["decideMcpGatewayApproval"]>): ReturnType<Store["decideMcpGatewayApproval"]> {
+    return mcp.decideMcpGatewayApproval(this.ctx, ...args);
   }
   async listMcpToolClassifications(...args: Parameters<Store["listMcpToolClassifications"]>): ReturnType<Store["listMcpToolClassifications"]> {
     return mcp.listMcpToolClassifications(this.ctx, ...args);

@@ -32,7 +32,9 @@ import type {
   McpToolAnnotations,
   McpToolClassificationOverride,
   McpToolHintCondition,
+  McpToolPolicyDecisionRecord,
   McpToolPolicyRule,
+  McpGatewayApproval,
   McpToolset,
   McpToolsetMember,
   McpToolsetMemberSpec,
@@ -48,8 +50,16 @@ import type {
   ReplayGoldenBadge
 } from "@ai-orchestrator/shared";
 import { DESTINATION_KINDS, DESTINATION_TIERS, type DataDestinationRow, DEFAULT_PROJECT_ID, GUARD_SIMULATION_JOB_DATASET_PREFIX, MCP_POLICY_KINDS, MCP_POLICY_ROLES, MCP_TOOL_HINT_CONDITIONS, REPLAY_CAPTURE_API_KEY_FILTER, REPLAY_CAPTURE_STATUSES } from "@ai-orchestrator/shared";
-import { normalizeMcpSamplingSettings, SUBJECT_CASSETTE_SOURCES, SUBJECT_EXECUTION_TRIGGERS } from "./store-shared.js";
-import { ONE_PENDING_APPROVAL_INDEX, QUEUE_ACTIVE_EXECUTION_INDEX, QUEUE_CLAIM_INDEX, QUEUE_FINISHED_INDEX, QUEUE_RUNNING_HEARTBEAT_INDEX } from "./migrations.js";
+import {
+  mapMcpGatewayApproval,
+  mapMcpToolPolicyExtras,
+  normalizeMcpSamplingSettings,
+  parseMcpPolicyDecision,
+  SUBJECT_CASSETTE_SOURCES,
+  SUBJECT_EXECUTION_TRIGGERS,
+  toMcpToolPolicyEffect
+} from "./store-shared.js";
+import { GATEWAY_APPROVAL_ONE_PENDING_INDEX, ONE_PENDING_APPROVAL_INDEX, QUEUE_ACTIVE_EXECUTION_INDEX, QUEUE_CLAIM_INDEX, QUEUE_FINISHED_INDEX, QUEUE_RUNNING_HEARTBEAT_INDEX } from "./migrations.js";
 import {
   normalizeMcpRuntimeLimits,
   normalizeMcpSandboxSettings,
@@ -64,6 +74,7 @@ import { isEmptyDataLabels, labelsForUntrackedSave, mergeDataLabels, parseStored
 import { queuedRunTimeoutMs, STUCK_JOB_MARGIN_MS } from "./queue-timeouts.js";
 import { AuditExportCursorMovedError, isForeignKeyViolation, ProjectNotEmptyError, StoreReferenceMissingError, ReleaseGateEnforcedError } from "./store-errors.js";
 import { clampLimit, LIMIT_MAX } from "./store-limits.js";
+import { mcpGatewayApprovalRetentionCutoff } from "./store.js";
 import {
   auditEntryHash,
   type AuditChainResult,
@@ -86,6 +97,10 @@ import type {
   QueueClaimFence,
   QueueItemOutcome,
   ReplayRecordingRefusal,
+  McpGatewayApprovalCallKey,
+  McpGatewayApprovalCreate,
+  McpGatewayApprovalCreateResult,
+  McpToolPolicyPatch,
   Store
 } from "./store.js";
 import {
@@ -725,6 +740,8 @@ export interface McpToolCallRecord {
   clientId: string | null;
   /** Phase 10.7 — set when the call was refused before reaching the server (rate limit, concurrency cap, open breaker). */
   rejection?: McpRuntimeRejection | null;
+  /** Phase 12.4 — what the tool policy decided for the call (enforced and shadow); null when no rule matched. */
+  policyDecision?: McpToolPolicyDecisionRecord | null;
   createdAt: string;
 }
 
@@ -733,9 +750,10 @@ export type McpToolCallSource = "workflow" | "gateway" | "playground";
 /** What callers write; `source` defaults to `workflow`. */
 export type McpToolCallWrite = Omit<
   McpToolCallRecord,
-  "createdAt" | "source" | "clientId" | "samplingRequests" | "samplingInputTokens" | "samplingOutputTokens" | "rejection"
+  "createdAt" | "source" | "clientId" | "samplingRequests" | "samplingInputTokens" | "samplingOutputTokens" | "rejection" | "policyDecision"
 > & {
   rejection?: McpRuntimeRejection | null;
+  policyDecision?: McpToolPolicyDecisionRecord | null;
   source?: McpToolCallSource;
   clientId?: string | null;
   samplingRequests?: number | null;
@@ -864,6 +882,7 @@ interface McpToolCallRow {
   source: string | null;
   client_id: string | null;
   rejection?: string | null;
+  policy_decision_json?: string | null;
   created_at: string;
 }
 
@@ -879,6 +898,10 @@ interface McpToolPolicyRow {
   tool_pattern: string;
   annotation_hint?: string | null;
   kind?: string | null;
+  conditions_json?: string | null;
+  mode?: string | null;
+  workflow_ids_json?: string | null;
+  client_ids_json?: string | null;
   enabled: number;
   created_by: string | null;
   created_at: string;
@@ -893,7 +916,7 @@ function mapMcpToolPolicy(row: McpToolPolicyRow): McpToolPolicyRule {
     id: toString(row.id),
     name: row.name ? toString(row.name) : null,
     description: row.description ? toString(row.description) : null,
-    effect: toString(row.effect) === "allow" ? "allow" : "deny",
+    effect: toMcpToolPolicyEffect(toString(row.effect)),
     projectId: row.project_id ? toString(row.project_id) : null,
     roles: Array.isArray(roles)
       ? roles.filter((role): role is McpPolicyRole => MCP_POLICY_ROLES.includes(role as McpPolicyRole))
@@ -903,6 +926,7 @@ function mapMcpToolPolicy(row: McpToolPolicyRow): McpToolPolicyRule {
     annotationHint:
       hint && MCP_TOOL_HINT_CONDITIONS.includes(hint as McpToolHintCondition) ? (hint as McpToolHintCondition) : null,
     kind: MCP_POLICY_KINDS.includes(kind as McpPolicyKind) ? (kind as McpPolicyKind) : "tool",
+    ...mapMcpToolPolicyExtras(row),
     enabled: toNumber(row.enabled) === 1,
     createdBy: row.created_by ? toString(row.created_by) : null,
     createdAt: toString(row.created_at),
@@ -1053,6 +1077,7 @@ function mapMcpToolCall(row: McpToolCallRow): McpToolCallRecord {
     clientId: row.client_id ? toString(row.client_id) : null,
     rejection:
       row.rejection === "rate_limited" || row.rejection === "concurrency_limited" || row.rejection === "circuit_open" ? row.rejection : null,
+    policyDecision: parseMcpPolicyDecision(row.policy_decision_json),
     createdAt: toString(row.created_at)
   };
 }
@@ -3823,6 +3848,44 @@ export class SqliteStore implements Store {
     `);
     this.exec(`CREATE INDEX IF NOT EXISTS idx_capture_reservations_workflow ON capture_reservations(workflow_id, expires_at)`);
 
+    // Phase 12.4 — argument-aware MCP tool rules (v47): rule conditions, mode and principals; per-call policy
+    // decisions; gateway calls a require_approval rule held back.
+    this.ensureColumn("mcp_tool_policies", "conditions_json", "TEXT");
+    this.ensureColumn("mcp_tool_policies", "mode", "TEXT NOT NULL", "'enforce'");
+    this.ensureColumn("mcp_tool_policies", "workflow_ids_json", "TEXT NOT NULL", "'[]'");
+    this.ensureColumn("mcp_tool_policies", "client_ids_json", "TEXT NOT NULL", "'[]'");
+    this.ensureColumn("mcp_tool_calls", "policy_decision_json", "TEXT");
+    this.exec(`
+      CREATE TABLE IF NOT EXISTS mcp_gateway_approvals (
+        id TEXT PRIMARY KEY,
+        client_id TEXT NOT NULL,
+        client_name TEXT,
+        toolset_id TEXT NOT NULL,
+        project_id TEXT,
+        server_id TEXT NOT NULL,
+        server_name TEXT,
+        tool_name TEXT NOT NULL,
+        gateway_tool_name TEXT NOT NULL,
+        args_hash TEXT NOT NULL,
+        args_preview TEXT,
+        rule_id TEXT,
+        rule_name TEXT,
+        message TEXT,
+        status TEXT NOT NULL,
+        requested_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        decided_by TEXT,
+        decided_at TEXT,
+        decision_reason TEXT,
+        used_at TEXT
+      )
+    `);
+    this.exec(
+      `CREATE UNIQUE INDEX IF NOT EXISTS ${GATEWAY_APPROVAL_ONE_PENDING_INDEX} ON mcp_gateway_approvals (client_id, server_id, tool_name, args_hash) WHERE status = 'pending'`
+    );
+    this.exec(`CREATE INDEX IF NOT EXISTS idx_mcp_gateway_approvals_call ON mcp_gateway_approvals (client_id, server_id, tool_name, args_hash, status)`);
+    this.exec(`CREATE INDEX IF NOT EXISTS idx_mcp_gateway_approvals_status ON mcp_gateway_approvals (status, requested_at)`);
+
     this.exec(`CREATE INDEX IF NOT EXISTS idx_workflows_project_id ON workflows(project_id)`);
     this.exec(`CREATE INDEX IF NOT EXISTS idx_workflows_folder_id ON workflows(folder_id)`);
     this.exec(`CREATE INDEX IF NOT EXISTS idx_secrets_project_id ON secrets(project_id)`);
@@ -5405,6 +5468,8 @@ export class SqliteStore implements Store {
     this.exec(`DELETE FROM execution_history WHERE started_at < ?`, [input.before]);
     // Phase 10.1 — tool-call telemetry follows the execution-history retention.
     this.exec(`DELETE FROM mcp_tool_calls WHERE started_at < ?`, [input.before]);
+    // Phase 12.4 — and gateway approval requests (their argument previews).
+    this.exec(`DELETE FROM mcp_gateway_approvals WHERE requested_at < ?`, [input.before]);
     // Phase 10.8 — so do cassettes recorded from those runs.
     this.exec(`DELETE FROM mcp_cassettes WHERE created_at < ?`, [input.before]);
     // Phase 12.1 — and so do guard events.
@@ -11777,8 +11842,8 @@ export class SqliteStore implements Store {
          id, execution_id, workflow_id, node_id, registry_server_id, adapter_id, tool_name,
          started_at, duration_ms, ok, error, turn_input_tokens, turn_output_tokens,
          estimated_cost_usd, sampling_requests, sampling_input_tokens, sampling_output_tokens,
-         source, client_id, rejection, created_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         source, client_id, rejection, policy_decision_json, created_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         call.id,
         call.executionId,
@@ -11800,6 +11865,7 @@ export class SqliteStore implements Store {
         call.source ?? "workflow",
         call.clientId ?? null,
         call.rejection ?? null,
+        call.policyDecision ? JSON.stringify(call.policyDecision) : null,
         new Date().toISOString()
       ]
     );
@@ -12137,8 +12203,8 @@ export class SqliteStore implements Store {
     this.exec(
       `INSERT INTO mcp_tool_policies (
          id, name, description, effect, project_id, roles_json, server_id, tool_pattern, annotation_hint, kind, enabled,
-         created_by, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         conditions_json, mode, workflow_ids_json, client_ids_json, created_by, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         input.id,
         input.name,
@@ -12151,6 +12217,10 @@ export class SqliteStore implements Store {
         input.annotationHint ?? null,
         input.kind ?? "tool",
         input.enabled ? 1 : 0,
+        input.conditions ? JSON.stringify(input.conditions) : null,
+        input.mode ?? "enforce",
+        JSON.stringify(input.workflowIds ?? []),
+        JSON.stringify(input.clientIds ?? []),
         input.createdBy ?? null,
         now,
         now
@@ -12159,12 +12229,7 @@ export class SqliteStore implements Store {
     return this.getMcpToolPolicySync(input.id)!;
   }
 
-  async updateMcpToolPolicy(
-    id: string,
-    patch: Partial<
-      Pick<McpToolPolicyRule, "name" | "description" | "effect" | "projectId" | "roles" | "serverId" | "toolPattern" | "annotationHint" | "kind" | "enabled">
-    >
-  ): Promise<McpToolPolicyRule | null> {
+  async updateMcpToolPolicy(id: string, patch: McpToolPolicyPatch): Promise<McpToolPolicyRule | null> {
     const fields: string[] = [];
     const params: Array<string | number | null> = [];
     if (patch.name !== undefined) { fields.push("name = ?"); params.push(patch.name); }
@@ -12177,6 +12242,10 @@ export class SqliteStore implements Store {
     if (patch.annotationHint !== undefined) { fields.push("annotation_hint = ?"); params.push(patch.annotationHint ?? null); }
     if (patch.kind !== undefined) { fields.push("kind = ?"); params.push(patch.kind ?? "tool"); }
     if (patch.enabled !== undefined) { fields.push("enabled = ?"); params.push(patch.enabled ? 1 : 0); }
+    if (patch.conditions !== undefined) { fields.push("conditions_json = ?"); params.push(patch.conditions ? JSON.stringify(patch.conditions) : null); }
+    if (patch.mode !== undefined) { fields.push("mode = ?"); params.push(patch.mode ?? "enforce"); }
+    if (patch.workflowIds !== undefined) { fields.push("workflow_ids_json = ?"); params.push(JSON.stringify(patch.workflowIds ?? [])); }
+    if (patch.clientIds !== undefined) { fields.push("client_ids_json = ?"); params.push(JSON.stringify(patch.clientIds ?? [])); }
     if (fields.length > 0) {
       fields.push("updated_at = ?");
       params.push(new Date().toISOString());
@@ -12190,6 +12259,136 @@ export class SqliteStore implements Store {
     if (!this.getMcpToolPolicySync(id)) return false;
     this.exec(`DELETE FROM mcp_tool_policies WHERE id = ?`, [id]);
     return true;
+  }
+
+  // Phase 12.4 — gateway approvals.
+
+  async createMcpGatewayApproval(
+    input: McpGatewayApprovalCreate,
+    now: string,
+    options: { maxPendingPerClient?: number } = {}
+  ): Promise<McpGatewayApprovalCreateResult> {
+    return this.db.transaction((): McpGatewayApprovalCreateResult => {
+      this.sweepMcpGatewayApprovals(now);
+      const existing = this.queryOne<Record<string, unknown>>(
+        `SELECT * FROM mcp_gateway_approvals WHERE client_id = ? AND server_id = ? AND tool_name = ? AND args_hash = ? AND status = 'pending'`,
+        [input.clientId, input.serverId, input.toolName, input.argsHash]
+      );
+      if (existing) return { approval: mapMcpGatewayApproval(existing), created: false };
+      if (options.maxPendingPerClient !== undefined) {
+        const pending = this.queryOne<{ count: number }>(
+          `SELECT COUNT(*) AS count FROM mcp_gateway_approvals WHERE client_id = ? AND status = 'pending'`,
+          [input.clientId]
+        );
+        if (Number(pending?.count ?? 0) >= options.maxPendingPerClient) return { approval: null, created: false, capped: true };
+      }
+      this.exec(
+        `INSERT INTO mcp_gateway_approvals (
+           id, client_id, client_name, toolset_id, project_id, server_id, server_name, tool_name, gateway_tool_name,
+           args_hash, args_preview, rule_id, rule_name, message, status, requested_at, expires_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
+        [
+          input.id,
+          input.clientId,
+          input.clientName,
+          input.toolsetId,
+          input.projectId,
+          input.serverId,
+          input.serverName,
+          input.toolName,
+          input.gatewayToolName,
+          input.argsHash,
+          input.argsPreview,
+          input.ruleId,
+          input.ruleName,
+          input.message,
+          input.requestedAt,
+          input.expiresAt
+        ]
+      );
+      return { approval: this.getMcpGatewayApprovalSync(input.id)!, created: true };
+    })();
+  }
+
+  /** Phase 12.4 — expires pending requests past their expiry and deletes decided ones past the retention. */
+  private sweepMcpGatewayApprovals(now: string): void {
+    this.exec(`UPDATE mcp_gateway_approvals SET status = 'expired' WHERE status = 'pending' AND expires_at <= ?`, [now]);
+    const cutoff = mcpGatewayApprovalRetentionCutoff(now);
+    this.exec(`DELETE FROM mcp_gateway_approvals WHERE status <> 'pending' AND requested_at < ? AND expires_at < ?`, [cutoff, cutoff]);
+  }
+
+  private getMcpGatewayApprovalSync(id: string): McpGatewayApproval | null {
+    const row = this.queryOne<Record<string, unknown>>(`SELECT * FROM mcp_gateway_approvals WHERE id = ?`, [id]);
+    return row ? mapMcpGatewayApproval(row) : null;
+  }
+
+  async getMcpGatewayApproval(id: string): Promise<McpGatewayApproval | null> {
+    return this.getMcpGatewayApprovalSync(id);
+  }
+
+  async listMcpGatewayApprovals(filter: { status?: McpGatewayApproval["status"]; limit?: number }, now: string): Promise<McpGatewayApproval[]> {
+    this.sweepMcpGatewayApprovals(now);
+    const limit = Math.max(1, Math.min(500, filter.limit ?? 200));
+    const rows = filter.status
+      ? this.queryAll<Record<string, unknown>>(
+          `SELECT * FROM mcp_gateway_approvals WHERE status = ? ORDER BY requested_at DESC, id DESC LIMIT ?`,
+          [filter.status, limit]
+        )
+      : this.queryAll<Record<string, unknown>>(`SELECT * FROM mcp_gateway_approvals ORDER BY requested_at DESC, id DESC LIMIT ?`, [limit]);
+    return rows.map(mapMcpGatewayApproval);
+  }
+
+  async findUsableMcpGatewayApproval(call: McpGatewayApprovalCallKey, now: string): Promise<McpGatewayApproval | null> {
+    const row = this.queryOne<Record<string, unknown>>(
+      `SELECT * FROM mcp_gateway_approvals
+        WHERE client_id = ? AND server_id = ? AND tool_name = ? AND args_hash = ? AND status = 'approved' AND expires_at > ?
+        ORDER BY decided_at ASC, id ASC LIMIT 1`,
+      [call.clientId, call.serverId, call.toolName, call.argsHash, now]
+    );
+    return row ? mapMcpGatewayApproval(row) : null;
+  }
+
+  async consumeMcpGatewayApproval(id: string, now: string): Promise<boolean> {
+    const result = this.db
+      .prepare(`UPDATE mcp_gateway_approvals SET status = 'used', used_at = ? WHERE id = ? AND status = 'approved' AND expires_at > ?`)
+      .run(now, id, now);
+    return result.changes > 0;
+  }
+
+  async restoreMcpGatewayApproval(id: string): Promise<boolean> {
+    const result = this.db.prepare(`UPDATE mcp_gateway_approvals SET status = 'approved', used_at = NULL WHERE id = ? AND status = 'used'`).run(id);
+    return result.changes > 0;
+  }
+
+  async findBlockingMcpGatewayRejection(
+    call: McpGatewayApprovalCallKey,
+    now: string
+  ): Promise<{ approval: McpGatewayApproval; firstRefusal: boolean } | null> {
+    return this.db.transaction(() => {
+      const row = this.queryOne<Record<string, unknown>>(
+        `SELECT * FROM mcp_gateway_approvals
+          WHERE client_id = ? AND server_id = ? AND tool_name = ? AND args_hash = ? AND status = 'rejected' AND expires_at > ?
+          ORDER BY decided_at DESC, id DESC LIMIT 1`,
+        [call.clientId, call.serverId, call.toolName, call.argsHash, now]
+      );
+      if (!row) return null;
+      const marked = this.db.prepare(`UPDATE mcp_gateway_approvals SET used_at = ? WHERE id = ? AND used_at IS NULL`).run(now, String(row.id));
+      return { approval: this.getMcpGatewayApprovalSync(String(row.id))!, firstRefusal: marked.changes > 0 };
+    })();
+  }
+
+  async decideMcpGatewayApproval(
+    id: string,
+    decision: { status: "approved" | "rejected"; decidedBy: string; decidedAt: string; reason: string | null; expiresAt: string },
+    now: string
+  ): Promise<boolean> {
+    const result = this.db
+      .prepare(
+        `UPDATE mcp_gateway_approvals SET status = ?, decided_by = ?, decided_at = ?, decision_reason = ?, expires_at = ?
+          WHERE id = ? AND status = 'pending' AND expires_at > ?`
+      )
+      .run(decision.status, decision.decidedBy, decision.decidedAt, decision.reason, decision.expiresAt, id, now);
+    return result.changes > 0;
   }
 
   /** Admin read-only overrides; all of them, or one registry server's. */

@@ -93,6 +93,8 @@ export async function buildGatewayCatalog(input: {
   toolset: McpToolset;
   role: McpPolicyRole;
   store: GatewayCatalogStore;
+  /** Phase 12.4 — the client asking, for rules scoped to clients; absent for the admin preview. */
+  clientId?: string | null;
 }): Promise<GatewayCatalog> {
   const { toolset, role, store } = input;
   const servers = await store.listMcpServers();
@@ -162,7 +164,8 @@ export async function buildGatewayCatalog(input: {
           projectId: toolset.projectId,
           adapterId: server.adapterId,
           registryServerId: server.id,
-          serverLabel: server.name
+          serverLabel: server.name,
+          clientId: input.clientId ?? null
         },
         { name: tool.name, ...(tool.annotations ? { annotations: tool.annotations } : {}) }
       );

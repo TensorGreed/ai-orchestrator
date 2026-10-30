@@ -84,6 +84,8 @@ const WORKFLOW_LOADS: LoadSite[] = [
   { file: "services/gate-admission-service.ts", match: "", kind: "not_run", why: "gate admission reads only a workflow's name and project (audit, requests, inbox views)", count: 3 },
   { file: "services/data-destination-service.ts", match: "", kind: "not_run", why: "the not-classified-yet list reads the draft and published node configs for their hosts in one query; nothing runs" },
 
+  { file: "app.ts", match: "if (!await store.getWorkflow(workflowId)) {", kind: "not_run", why: "a tool policy rule's workflow principal must exist when the rule is saved; nothing runs" },
+
   // app.ts: production traffic.
   { file: "app.ts", match: "const workflow = productionWorkflow(request.params.workflowId);", kind: "production", why: "Slack, GitHub, Stripe, Telegram, Discord app webhooks and chat", count: 6 },
   { file: "app.ts", match: "const workflow = productionWorkflow(input.workflowId);", kind: "production", why: "a schedule firing" },

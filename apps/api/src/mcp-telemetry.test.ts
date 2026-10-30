@@ -468,6 +468,38 @@ describe("MCP tool telemetry: extraction", () => {
     expect(direct).toMatchObject({ registryServerId: "mcp_reg", ok: false, durationMs: 7, estimatedCostUsd: null });
     expect(direct.error?.length).toBeLessThanOrEqual(500);
   });
+
+  it("carries the tool policy's decision to the call it was made for (agent by tool call id, direct node)", () => {
+    const shadow = { effect: "allow", decidedBy: "default", matched: [{ ruleId: "mtp_s", mode: "shadow", effect: "deny" }], shadow: { effect: "deny", ruleId: "mtp_s", changed: true } };
+    const approved = { effect: "require_approval", decidedBy: "rule", ruleId: "mtp_a", approval: "approved", matched: [{ ruleId: "mtp_a", mode: "enforce", effect: "require_approval" }] };
+    const output = {
+      ...agentOutput({ providerId: "openai", model: "gpt-4o" }),
+      _toolPolicy: { decisions: [{ tool: "calculator", server: "mock-mcp", toolCallId: "a", ...shadow }] }
+    };
+    const rows = extractMcpToolCalls({
+      executionId: "e5",
+      workflow,
+      priceTurn,
+      registryAdapterId: () => "stdio_mcp",
+      nodeResults: [
+        { nodeId: "agent", status: "success", startedAt: "2026-10-01T00:00:00.000Z", output },
+        {
+          nodeId: "direct",
+          status: "success",
+          startedAt: "2026-10-01T00:00:01.000Z",
+          output: {
+            invocation_request: { registry_server_id: "mcp_reg", tool_name: "calculator" },
+            _toolPolicy: { decisions: [{ tool: "calculator", server: "stdio_mcp", ...approved }] }
+          }
+        }
+      ]
+    });
+    expect(rows.map((row) => [row.nodeId, row.toolName, row.policyDecision ?? null])).toEqual([
+      ["agent", "calculator", shadow],
+      ["agent", "search", null],
+      ["direct", "calculator", approved]
+    ]);
+  });
 });
 
 describe("MCP tool telemetry: storage and endpoints", () => {

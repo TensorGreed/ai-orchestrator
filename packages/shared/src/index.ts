@@ -23,3 +23,4 @@ export * from "./approval-gate";
 export * from "./release";
 export * from "./golden-set-file";
 export * from "./guard-simulation";
+export * from "./mcp-tool-policy";

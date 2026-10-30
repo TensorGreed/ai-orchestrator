@@ -229,6 +229,18 @@
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+.approval-tool-policy {
+  margin: 0;
+  font-size: var(--fs-sm);
+  color: var(--fg);
+  overflow-wrap: anywhere;
+}
+.approval-tool-policy > span {
+  margin-right: 4px;
+  color: var(--fg-muted);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+}
 
 .approval-fields {
   display: grid;

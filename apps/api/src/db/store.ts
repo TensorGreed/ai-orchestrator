@@ -36,6 +36,7 @@ import type {
   McpServerCatalog,
   McpToolClassificationOverride,
   McpToolPolicyRule,
+  McpGatewayApproval,
   McpToolset,
   McpToolsetMemberSpec,
   Project,
@@ -212,6 +213,59 @@ export interface ClusterInstanceRecord extends ClusterInstanceHeartbeat {
   heartbeatAt: string;
   /** The heartbeat is recent enough (database clock). */
   live: boolean;
+}
+
+/** Phase 12.4 — what an update may change on a tool policy rule. */
+export type McpToolPolicyPatch = Partial<
+  Pick<
+    McpToolPolicyRule,
+    | "name"
+    | "description"
+    | "effect"
+    | "projectId"
+    | "roles"
+    | "serverId"
+    | "toolPattern"
+    | "annotationHint"
+    | "kind"
+    | "enabled"
+    | "conditions"
+    | "mode"
+    | "workflowIds"
+    | "clientIds"
+  >
+>;
+
+/** Phase 12.4 — the identical-call key of a gateway approval. */
+export interface McpGatewayApprovalCallKey {
+  clientId: string;
+  serverId: string;
+  toolName: string;
+  argsHash: string;
+}
+
+export type McpGatewayApprovalCreate = Omit<
+  McpGatewayApproval,
+  "status" | "decidedBy" | "decidedAt" | "decisionReason" | "usedAt"
+>;
+
+/**
+ * Phase 12.4 — what creating a gateway approval request did: a new pending request, the pending one that already
+ * exists for the identical call, or nothing because the client already has `maxPendingPerClient` pending requests.
+ */
+export type McpGatewayApprovalCreateResult =
+  | { approval: McpGatewayApproval; created: boolean; capped?: false }
+  | { approval: null; created: false; capped: true };
+
+/**
+ * Phase 12.4 — decided gateway approval requests (approved, rejected, used, expired) are deleted this long after they
+ * were requested, whatever the history retention, so the table and its argument previews never grow without bound.
+ */
+export const MCP_GATEWAY_APPROVAL_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+
+/** The cutoff for `MCP_GATEWAY_APPROVAL_RETENTION_MS` at `now`. */
+export function mcpGatewayApprovalRetentionCutoff(now: string): string {
+  return new Date(Date.parse(now) - MCP_GATEWAY_APPROVAL_RETENTION_MS).toISOString();
 }
 
 export interface Store {
@@ -433,10 +487,47 @@ export interface Store {
   listMcpToolPolicies(): Promise<McpToolPolicyRule[]>;
   getMcpToolPolicy(id: string): Promise<McpToolPolicyRule | null>;
   createMcpToolPolicy(input: Omit<McpToolPolicyRule, "createdAt" | "updatedAt">): Promise<McpToolPolicyRule>;
-  updateMcpToolPolicy(id: string, patch: Partial<
-      Pick<McpToolPolicyRule, "name" | "description" | "effect" | "projectId" | "roles" | "serverId" | "toolPattern" | "annotationHint" | "kind" | "enabled">
-    >): Promise<McpToolPolicyRule | null>;
+  updateMcpToolPolicy(id: string, patch: McpToolPolicyPatch): Promise<McpToolPolicyRule | null>;
   deleteMcpToolPolicy(id: string): Promise<boolean>;
+  /**
+   * Phase 12.4 — a gateway call a require_approval rule held back. Expired pending requests are marked expired
+   * first, and decided ones past MCP_GATEWAY_APPROVAL_RETENTION_MS deleted; when a pending request for the identical
+   * call (client, server, tool, args hash) already exists it is returned instead of a new one (`created: false`).
+   * With `maxPendingPerClient`, a client that already has that many pending requests gets none (`capped: true`);
+   * the count and the insert are atomic.
+   */
+  createMcpGatewayApproval(
+    input: McpGatewayApprovalCreate,
+    now: string,
+    options?: { maxPendingPerClient?: number }
+  ): Promise<McpGatewayApprovalCreateResult>;
+  getMcpGatewayApproval(id: string): Promise<McpGatewayApproval | null>;
+  /** Newest first. Requests past their expiry read as `expired` (pending) once listed. */
+  listMcpGatewayApprovals(filter: { status?: McpGatewayApproval["status"]; limit?: number }, now: string): Promise<McpGatewayApproval[]>;
+  /** Phase 12.4 — the approved, unused request for this identical call that is still inside its window, if any. */
+  findUsableMcpGatewayApproval(call: McpGatewayApprovalCallKey, now: string): Promise<McpGatewayApproval | null>;
+  /** Marks an approved request used, once: false when it was already used, or its window passed. */
+  consumeMcpGatewayApproval(id: string, now: string): Promise<boolean>;
+  /**
+   * Phase 12.4 — puts back an approval consumed by a call that was refused before it reached the server (rate limit,
+   * open circuit): `used` becomes `approved` again, inside its original window. False when it is not `used`.
+   */
+  restoreMcpGatewayApproval(id: string): Promise<boolean>;
+  /**
+   * Phase 12.4 — the rejected request for this identical call that still blocks it (`expiresAt`, set to the decision
+   * time plus the approval window on reject, is in the future), newest first. `firstRefusal` is true for exactly one
+   * caller: the first refused retry marks the request (`usedAt`), so the refusal is audited once per request.
+   */
+  findBlockingMcpGatewayRejection(
+    call: McpGatewayApprovalCallKey,
+    now: string
+  ): Promise<{ approval: McpGatewayApproval; firstRefusal: boolean } | null>;
+  /** Decides a pending request that has not expired: false when it was already decided or expired. */
+  decideMcpGatewayApproval(
+    id: string,
+    decision: { status: "approved" | "rejected"; decidedBy: string; decidedAt: string; reason: string | null; expiresAt: string },
+    now: string
+  ): Promise<boolean>;
   /** Admin read-only overrides; all of them, or one registry server's. */
   listMcpToolClassifications(registryServerId?: string): Promise<McpToolClassificationOverride[]>;
   /** `readOnly: null` removes the override, so annotations decide again. */

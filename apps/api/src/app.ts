@@ -18,7 +18,9 @@ import {
   ContainerSandboxLauncher,
   McpRuntimeGuard,
   createDefaultMCPRegistry,
+  describePolicyConditions,
   detectContainerRuntime,
+  hashMcpToolPolicyRule,
   invokeDirectMCPTool,
   sweepSandboxContainers,
   validateSandboxMounts,
@@ -43,6 +45,7 @@ import {
   mcpSamplingSettingsPatchSchema,
   mcpToolPolicyEvaluateSchema,
   mcpToolPolicyRuleInputSchema,
+  mcpToolPolicyRuleIssues,
   mcpToolPolicyRuleUpdateSchema,
   NODE_ACTIVITY_LIMIT,
   nodeDefinitions,
@@ -11877,7 +11880,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
 
   /** A rule's server is a registry entry or, for inline servers, an adapter id. */
   const validatePolicyScope = async (
-    input: { projectId?: string | null; serverId?: string | null },
+    input: { projectId?: string | null; serverId?: string | null; workflowIds?: string[] | null; clientIds?: string[] | null },
     reply: FastifyReply
   ): Promise<{ error: string } | null> => {
     if (input.projectId && !await store.getProject(input.projectId)) {
@@ -11888,8 +11891,24 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       reply.code(400);
       return { error: `'${input.serverId}' is neither a registered MCP server nor an MCP adapter id` };
     }
+    // Phase 12.4 — principals must exist when the rule is saved (a later delete leaves a rule that never matches it).
+    for (const workflowId of input.workflowIds ?? []) {
+      if (!await store.getWorkflow(workflowId)) {
+        reply.code(400);
+        return { error: `Workflow '${workflowId}' does not exist` };
+      }
+    }
+    for (const clientId of input.clientIds ?? []) {
+      if (!await store.getMcpClient(clientId)) {
+        reply.code(400);
+        return { error: `MCP gateway client '${clientId}' does not exist` };
+      }
+    }
     return null;
   };
+
+  /** Phase 12.4 — a rule as the API returns it: with its stable hash (the canonical form, without name or mode). */
+  const policyRuleResponse = (rule: McpToolPolicyRule) => ({ ...rule, hash: hashMcpToolPolicyRule(rule) });
 
   const recordPolicyAudit = async (
     user: SafeUser,
@@ -11921,7 +11940,12 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     toolPattern: rule.toolPattern,
     annotationHint: rule.annotationHint ?? null,
     kind: rule.kind ?? "tool",
-    enabled: rule.enabled
+    enabled: rule.enabled,
+    mode: rule.mode ?? "enforce",
+    conditions: rule.conditions ?? null,
+    workflowIds: rule.workflowIds ?? [],
+    clientIds: rule.clientIds ?? [],
+    hash: hashMcpToolPolicyRule(rule)
   });
 
   // Phase 10.5 — OAuth 2.1 connections for remote MCP servers. Status is
@@ -12237,7 +12261,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
   app.get("/api/mcp/policies", async (request, reply) => {
     const user = await requireRole(request, reply, ["builder"]);
     if (!user) return;
-    return { rules: await store.listMcpToolPolicies(), roles: MCP_POLICY_ROLES };
+    return { rules: (await store.listMcpToolPolicies()).map(policyRuleResponse), roles: MCP_POLICY_ROLES };
   });
 
   app.post<{ Body: unknown }>("/api/mcp/policies", async (request, reply) => {
@@ -12262,11 +12286,15 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       annotationHint: parsed.data.annotationHint ?? null,
       kind: parsed.data.kind ?? "tool",
       enabled: parsed.data.enabled !== false,
+      conditions: parsed.data.conditions ?? null,
+      mode: parsed.data.mode ?? "enforce",
+      workflowIds: [...new Set(parsed.data.workflowIds ?? [])],
+      clientIds: [...new Set(parsed.data.clientIds ?? [])],
       createdBy: user.email
     });
     await recordPolicyAudit(user, "mcp_policy.created", "create", rule.id, policyAuditMetadata(rule), rule.projectId);
     reply.code(201);
-    return { rule };
+    return { rule: policyRuleResponse(rule) };
   });
 
   app.put<{ Params: { id: string }; Body: unknown }>("/api/mcp/policies/:id", async (request, reply) => {
@@ -12282,24 +12310,52 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       reply.code(400);
       return { error: "Invalid MCP tool policy rule", details: parsed.error.issues };
     }
+    // Phase 12.4 — an allow whose stored conditions are invalid allows nothing; clearing them would make it allow every
+    // call in its scope. That takes new conditions, or deleting the rule and adding an unconditional one.
+    if (existing.invalid && parsed.data.conditions === null && (parsed.data.effect ?? existing.effect) === "allow") {
+      reply.code(400);
+      return {
+        error: "This allow rule's stored conditions are invalid. Enter new conditions, or delete the rule and add one without conditions."
+      };
+    }
+    // Phase 12.4 — the rule as it would be after the update must still be valid (e.g. no conditions on a sampling rule).
+    const mergedIssues = mcpToolPolicyRuleIssues({ ...existing, ...parsed.data });
+    if (mergedIssues.length > 0) {
+      reply.code(400);
+      return { error: "Invalid MCP tool policy rule", details: mergedIssues.map((issue) => ({ code: "custom", ...issue })) };
+    }
     const invalid = await validatePolicyScope(parsed.data, reply);
     if (invalid) return invalid;
-    const { name, description, roles, ...rest } = parsed.data;
+    const { name, description, roles, workflowIds, clientIds, ...rest } = parsed.data;
     const rule = (await store.updateMcpToolPolicy(existing.id, {
       ...rest,
       ...(name !== undefined ? { name: name?.trim() || null } : {}),
       ...(description !== undefined ? { description: description?.trim() || null } : {}),
-      ...(roles !== undefined ? { roles: [...new Set(roles)] } : {})
+      ...(roles !== undefined ? { roles: [...new Set(roles)] } : {}),
+      ...(workflowIds !== undefined ? { workflowIds: [...new Set(workflowIds ?? [])] } : {}),
+      ...(clientIds !== undefined ? { clientIds: [...new Set(clientIds ?? [])] } : {})
     }))!;
+    // Phase 12.4 — emptying a principal list (or clearing the project) makes the rule apply to everyone: say so.
+    const widened = [
+      ...(existing.projectId && rule.projectId === null ? ["projectId"] : []),
+      ...(existing.roles.length > 0 && rule.roles.length === 0 ? ["roles"] : []),
+      ...((existing.workflowIds?.length ?? 0) > 0 && (rule.workflowIds?.length ?? 0) === 0 ? ["workflowIds"] : []),
+      ...((existing.clientIds?.length ?? 0) > 0 && (rule.clientIds?.length ?? 0) === 0 ? ["clientIds"] : [])
+    ];
     await recordPolicyAudit(
       user,
       "mcp_policy.updated",
       "update",
       rule.id,
-      { ...policyAuditMetadata(rule), fields: Object.keys(parsed.data) },
+      {
+        ...policyAuditMetadata(rule),
+        fields: Object.keys(parsed.data),
+        previousHash: hashMcpToolPolicyRule(existing),
+        ...(widened.length > 0 ? { scopeWidened: true, widenedFields: widened } : {})
+      },
       rule.projectId
     );
-    return { rule };
+    return { rule: policyRuleResponse(rule) };
   });
 
   app.delete<{ Params: { id: string } }>("/api/mcp/policies/:id", async (request, reply) => {
@@ -12345,13 +12401,40 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         projectId,
         adapterId: registered ? registered.adapterId : serverId,
         ...(registered ? { registryServerId: registered.id, serverLabel: registered.name } : {}),
-        noWriteTools: parsed.data.noWriteTools === true
+        noWriteTools: parsed.data.noWriteTools === true,
+        workflowId: parsed.data.workflowId ?? null,
+        clientId: parsed.data.clientId ?? null
       },
       { name: toolName, ...(annotations ? { annotations } : {}) },
-      parsed.data.kind ?? "tool"
+      parsed.data.kind ?? "tool",
+      parsed.data.arguments
+        ? { arguments: parsed.data.arguments, dataLabels: parsed.data.labels ? { provenance: parsed.data.labels, dataClasses: [] } : null }
+        : undefined
     );
+    // Phase 12.4 — why each matching rule matched, for the "Test a tool" panel.
+    const explainRule = (rule: McpToolPolicyRule) => ({
+      ruleId: rule.id,
+      ruleName: rule.name ?? null,
+      effect: rule.effect,
+      mode: rule.mode ?? "enforce",
+      conditions: describePolicyConditions(rule.conditions) || null
+    });
+    const shadow = decision.policy.shadow;
     return {
       allowed: decision.allowed,
+      effect: decision.allowed ? decision.policy.effect : "deny",
+      approval: decision.approval ?? null,
+      shadow: shadow
+        ? {
+            effect: shadow.effect,
+            ruleId: shadow.rule?.id ?? null,
+            ruleName: shadow.rule?.name ?? null,
+            changed: shadow.changed,
+            matchedRules: shadow.matchedRules.filter((rule) => (rule.mode ?? "enforce") === "shadow").map(explainRule)
+          }
+        : null,
+      why: decision.policy.matchedRules.map(explainRule),
+      undecided: (decision.policy.undecided ?? []).map(explainRule),
       reason: decision.reason ?? null,
       ruleId: decision.ruleId ?? null,
       ruleName: decision.ruleName ?? null,
@@ -12365,7 +12448,17 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       server: registered
         ? { kind: "registry" as const, id: registered.id, name: registered.name, adapterId: registered.adapterId }
         : { kind: "inline" as const, adapterId: serverId },
-      request: { projectId, role, serverId, toolName, kind: parsed.data.kind ?? "tool", noWriteTools: parsed.data.noWriteTools === true }
+      request: {
+        projectId,
+        role,
+        serverId,
+        toolName,
+        kind: parsed.data.kind ?? "tool",
+        noWriteTools: parsed.data.noWriteTools === true,
+        workflowId: parsed.data.workflowId ?? null,
+        clientId: parsed.data.clientId ?? null,
+        hasArguments: parsed.data.arguments !== undefined
+      }
     };
   });
 

@@ -1,4 +1,4 @@
-import type { McpHiddenTool, McpToolPolicySubject, McpToolPolicyTrace } from "@ai-orchestrator/shared";
+import type { McpHiddenTool, McpToolPolicyCallTrace, McpToolPolicySubject, McpToolPolicyTrace } from "@ai-orchestrator/shared";
 
 /** Phase 10.2 — human-readable lines for the inspector Trace tab's "Tool policy" block. */
 export interface ToolPolicyTraceView {
@@ -47,11 +47,30 @@ export function describeHiddenTool(entry: McpHiddenTool): string {
   return rule ? `${entry.tool} hidden by policy ${rule}` : `${entry.tool} hidden by policy`;
 }
 
+const EFFECT_WORDS = { allow: "allowed", deny: "blocked", require_approval: "needs approval" } as const;
+
+/** Phase 12.4 — one call's decision: the enforced outcome, the rule, an approval, and what shadow rules would do. */
+export function describeToolPolicyDecision(entry: McpToolPolicyCallTrace): string {
+  const rule = entry.ruleName ?? entry.ruleId;
+  const effect = EFFECT_WORDS[entry.effect] ?? entry.effect;
+  let text = `${entry.tool}: ${effect}${rule ? ` by policy ${rule}` : ""}`;
+  if (entry.approval === "approved") text += " (approved)";
+  else if (entry.approval === "pending") text += " (waiting for approval)";
+  if (entry.shadow) {
+    const shadowRule = entry.shadow.ruleName ?? entry.shadow.ruleId;
+    text += entry.shadow.changed
+      ? `; shadow rule${shadowRule ? ` ${shadowRule}` : "s"} would make it ${EFFECT_WORDS[entry.shadow.effect] ?? entry.shadow.effect}`
+      : "; shadow rules agree";
+  }
+  return text;
+}
+
 export function buildToolPolicyTraceView(trace: McpToolPolicyTrace): ToolPolicyTraceView {
   const hidden = Array.isArray(trace.hidden) ? trace.hidden : [];
+  const decisions = Array.isArray(trace.decisions) ? trace.decisions : [];
   return {
     subject: describeToolPolicySubject(trace.subject),
-    lines: hidden.map(describeHiddenTool),
+    lines: [...hidden.map(describeHiddenTool), ...decisions.map(describeToolPolicyDecision)],
     noWriteTools: Boolean(trace.noWriteTools)
   };
 }

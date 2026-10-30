@@ -38,7 +38,19 @@ export const JSON_RPC_ERRORS = {
    * before it reached the upstream server (rate limit, concurrency cap or an
    * open circuit breaker). `data.retryAfterMs` says when to try again.
    */
-  retryLater: -32029
+  retryLater: -32029,
+  /**
+   * Phase 12.4 — implementation-defined server error: a tool policy rule requires a person to approve this call.
+   * `data.approvalRequestId` names the request; once it is approved the identical call (same tool, same arguments)
+   * can be retried once within the approval window.
+   */
+  approvalPending: -32030,
+  /**
+   * Phase 12.4 — implementation-defined server error: an admin rejected this exact call (same client, tool and
+   * arguments). Identical retries are refused until `data.retryAfter` (the decision time plus the approval window)
+   * and open no new request.
+   */
+  approvalRejected: -32031
 } as const;
 
 export type JsonRpcId = string | number;
