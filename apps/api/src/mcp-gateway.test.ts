@@ -983,6 +983,34 @@ describe("MCP gateway: argument-aware tool policy and approval by retry", () => 
     expect((await context.store.listAuditLogs({ eventType: "mcp_gateway.approval_requested", pageSize: 100 })).items).toHaveLength(1);
   });
 
+  it("gives an approval back when the call is cancelled while queued and the limiter then refuses it", async () => {
+    const fixture = await setupFixture();
+    const { context, admin, toolset, token, echoServerId } = fixture;
+    await api(context, admin.cookie, "POST", "/api/mcp/policies", { effect: "require_approval", serverId: echoServerId, toolPattern: "echo" });
+    expect((await api(context, admin.cookie, "PUT", `/api/mcp/servers/${echoServerId}`, { limits: { maxConcurrent: 1, maxQueueWaitMs: 400 } })).status).toBe(200);
+    const holder = { authorization: `Bearer ${token}`, "mcp-session-id": await openSession(context, toolset.slug, token) };
+    const caller = { authorization: `Bearer ${token}`, "mcp-session-id": await openSession(context, toolset.slug, token) };
+    const call = gatewayCall(fixture, caller);
+    const requestId = (await call(1, "echo_server__echo", { msg: "hi" })).json().error.data.approvalRequestId as string;
+    expect((await api(context, admin.cookie, "POST", `/api/mcp/gateway/approvals/${requestId}/approve`, {})).status).toBe(200);
+
+    // Another session holds the server's only slot with a call that never answers.
+    expect((await gatewayCall(fixture, holder)(1, "echo_server__pid", {})).json().result.isError).toBeUndefined();
+    const hanging = gatewayCall(fixture, holder)(2, "echo_server__hang", {});
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    // The approved call queues for the slot, and the client cancels it there.
+    const queued = call(2, "echo_server__echo", { msg: "hi" });
+    await waitFor(async () => (await context.store.getMcpGatewayApproval(requestId))?.status === "used", 2000);
+    await rpc(context, toolset.slug, { jsonrpc: "2.0", method: "notifications/cancelled", params: { requestId: 2, reason: "test" } }, caller);
+    await queued;
+    // The queue wait runs out, the limiter refuses the call before it reaches the server, and the approval comes back.
+    await waitFor(async () => (await context.store.getMcpGatewayApproval(requestId))?.status === "approved", 4000);
+    expect(await context.store.getMcpGatewayApproval(requestId)).toMatchObject({ status: "approved", usedAt: null });
+
+    await rpc(context, toolset.slug, { jsonrpc: "2.0", method: "notifications/cancelled", params: { requestId: 2, reason: "done" } }, holder);
+    await hanging;
+  });
+
   it("applies client-scoped sampling rules to that client's gateway calls", () => {
     const deny: McpToolPolicyRule = {
       id: "no-sampling",

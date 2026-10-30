@@ -14,7 +14,13 @@
 
 import crypto from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
-import { policyDecisionRecord, secretValuesForScrub, type MCPExecutionContext, type McpToolAccessDecision, type MCPRegistry } from "@ai-orchestrator/mcp-sdk";
+import {
+  policyDecisionRecord,
+  secretValuesForScrub,
+  type MCPExecutionContext,
+  type McpToolAccessDecision,
+  type MCPRegistry
+} from "@ai-orchestrator/mcp-sdk";
 import {
   canonicalPolicyJson,
   mcpClientCreateSchema,
@@ -43,7 +49,7 @@ import type { RunAccess } from "./run-access.js";
 import type { SafeUser, UserRole } from "./services/auth-service.js";
 import { evaluateToolForContext } from "./services/mcp-tool-policy.js";
 import { withDelegatedUser } from "@ai-orchestrator/mcp-sdk";
-import type { McpRuntimeRejection } from "@ai-orchestrator/shared";
+import type { MCPToolResult, McpRuntimeRejection } from "@ai-orchestrator/shared";
 import {
   buildGatewayCatalog,
   toMcpToolDescriptor,
@@ -85,6 +91,11 @@ interface GatewayRetryLater {
 
 function isRetryLater(value: unknown): value is GatewayRetryLater {
   return Boolean(value && typeof value === "object" && (value as { retryLater?: unknown }).retryLater === true);
+}
+
+/** The runtime guard refused the call before it reached the server. */
+function isRuntimeRefusal(kind: string | undefined): kind is McpRuntimeRejection {
+  return kind === "rate_limited" || kind === "concurrency_limited" || kind === "circuit_open";
 }
 import {
   GatewaySessionLimitError,
@@ -444,9 +455,12 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     progress: (progress: number, total: number | undefined, message: string) => void;
     /** Phase 12.4 — what the tool policy decided for this call (enforced and shadow), when a rule matched. */
     policyDecision?: McpToolPolicyDecisionRecord;
+    /** Phase 12.4 — the gateway approval this call used, given back if the call is cancelled and then refused unsent. */
+    approvalId?: string;
   }): Promise<McpCallToolResult | GatewayRetryLater> => {
-    const { session, auth, toolset, tool, args, signal, policyDecision } = input;
+    const { session, auth, toolset, tool, args, signal, policyDecision, approvalId } = input;
     let refused: GatewayRetryLater | null = null;
+    let invocation: Promise<MCPToolResult> | undefined;
     const startedAt = new Date();
     input.progress(0, 1, `Calling ${tool.toolName} on ${tool.serverName}`);
     let ok = false;
@@ -490,7 +504,7 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
         onElicitation: async () => ({ action: "decline" }),
         ...(sampling ? { onSampling: sampling.onSampling } : {})
       };
-      const invocation = adapter.invokeTool(tool.toolName, args, serverConfig, callContext);
+      invocation = adapter.invokeTool(tool.toolName, args, serverConfig, callContext);
       invocation.catch(() => undefined);
       const outcome = await Promise.race([invocation, cancelled]);
       if (samplingTrace.length > 0) {
@@ -509,13 +523,25 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
       } else {
         errorText = truncate(deps.redact(String(scrub(outcome.error ?? `MCP tool '${tool.toolName}' failed.`))));
         result = toolError(errorText);
-        if (outcome.errorKind === "rate_limited" || outcome.errorKind === "concurrency_limited" || outcome.errorKind === "circuit_open") {
+        if (isRuntimeRefusal(outcome.errorKind)) {
           refused = { retryLater: true, reason: outcome.errorKind, retryAfterMs: outcome.retryAfterMs ?? 0, message: errorText };
         }
       }
     } catch (error) {
       errorText = truncate(deps.redact(error instanceof Error ? error.message : String(error)));
       result = toolError(errorText);
+      // Phase 12.4 — cancelled while the call still waited for a rate limit or a concurrency slot: the call carries on
+      // without the client. If the limiter then refuses it, it never reached the server, so the approval is given back.
+      if (signal.aborted && approvalId && invocation) {
+        invocation.then(
+          async (late) => {
+            if (!late.ok && isRuntimeRefusal(late.errorKind)) await store.restoreMcpGatewayApproval(approvalId);
+          },
+          () => undefined
+        ).catch((restoreError: unknown) => {
+          app.log.warn({ err: deps.redact(restoreError instanceof Error ? restoreError.message : String(restoreError)) }, "MCP gateway approval put-back failed");
+        });
+      }
     }
     const durationMs = Date.now() - startedAt.getTime();
     try {
@@ -965,9 +991,19 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
       const result =
         tool.kind === "workflow"
           ? await callWorkflowTool({ session, auth, toolset, tool, args, executionId, progress })
-          : await callServerTool({ session, auth, toolset, tool, args, signal: controller.signal, progress, ...(policyDecision ? { policyDecision } : {}) });
+          : await callServerTool({
+              session,
+              auth,
+              toolset,
+              tool,
+              args,
+              signal: controller.signal,
+              progress,
+              ...(policyDecision ? { policyDecision } : {}),
+              ...(usedApprovalId ? { approvalId: usedApprovalId } : {})
+            });
       // Phase 12.4 — refused before reaching the server (even when the client cancelled meanwhile): the approval it
-      // used is still good for a retry.
+      // used is still good for a retry. A call cancelled while still queued is handled in callServerTool.
       if (isRetryLater(result) && usedApprovalId) await store.restoreMcpGatewayApproval(usedApprovalId);
       if (controller.signal.aborted) return SUPPRESSED;
       if (isRetryLater(result)) {
