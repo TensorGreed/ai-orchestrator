@@ -88,6 +88,16 @@ describe("mcpToolPolicyRuleInputSchema", () => {
     expect(mcpToolPolicyRuleInputSchema.safeParse({ effect: "deny", clientIds: Array.from({ length: 101 }, (_, i) => `c${i}`) }).success).toBe(false);
   });
 
+  it("takes ignoreCase on text operators only and caps glob wildcards", () => {
+    const parse = (condition: Record<string, unknown>) => mcpToolPolicyRuleInputSchema.safeParse({ effect: "deny", conditions: { all: [condition] } });
+    expect(parse({ path: "env", op: "one_of", value: ["prod"], ignoreCase: true }).success).toBe(true);
+    const numeric = parse({ path: "n", op: "gt", value: 1, ignoreCase: true });
+    expect(numeric.success).toBe(false);
+    expect(numeric.error!.issues[0].path).toEqual(["conditions", "all", 0, "ignoreCase"]);
+    expect(parse({ path: "repo", op: "matches", value: "*".repeat(16) }).success).toBe(true);
+    expect(parse({ path: "repo", op: "matches", value: "*a".repeat(17) }).success).toBe(false);
+  });
+
   it("limits approval and conditions to tool rules", () => {
     const approval = mcpToolPolicyRuleInputSchema.safeParse({ effect: "require_approval", kind: "resource" });
     expect(approval.success).toBe(false);
@@ -141,6 +151,12 @@ describe("canonicalMcpToolPolicyRule", () => {
     const all = rule({ conditions: { all: [{ path: "a", op: "exists" }, { path: "b", op: "exists" }] } });
     const any = rule({ conditions: { any: [{ path: "a", op: "exists" }, { path: "b", op: "exists" }] } });
     expect(canonicalMcpToolPolicyRule(all)).not.toBe(canonicalMcpToolPolicyRule(any));
+    const exact = rule({ conditions: { all: [{ path: "env", op: "equals", value: "prod" }] } });
+    const folded = rule({ conditions: { all: [{ path: "env", op: "equals", value: "prod", ignoreCase: true }] } });
+    expect(canonicalMcpToolPolicyRule(folded)).not.toBe(canonicalMcpToolPolicyRule(exact));
+    expect(canonicalMcpToolPolicyRule(rule({ conditions: { all: [{ path: "env", op: "equals", value: "prod", ignoreCase: false }] } }))).toBe(
+      canonicalMcpToolPolicyRule(exact)
+    );
     // One condition combines the same either way.
     expect(canonicalMcpToolPolicyRule(rule({ conditions: { any: [{ path: "a", op: "exists" }] } }))).toBe(
       canonicalMcpToolPolicyRule(rule({ conditions: { all: [{ path: "a", op: "exists" }] } }))

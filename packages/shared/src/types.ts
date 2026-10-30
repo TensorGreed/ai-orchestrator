@@ -1049,20 +1049,32 @@ export type McpPolicyScalar = string | number | boolean | null;
 /**
  * Phase 12.4 — one condition on a tool call. `path` addresses an argument:
  * dot-separated keys (`repo`, `owner.login`), where a key may end with `[n]`
- * (that element) or `[*]` (any element: the condition holds when any element
- * satisfies it). `value` by operator: `equals` a scalar; `one_of` /
- * `not_one_of` a list of scalars; `starts_with` / `ends_with` / `matches` a
- * string (`matches` is a glob: `*` any run of characters, `?` one
- * character); `lt` / `lte` / `gt` / `gte` a number; `between` `[min, max]`
- * inclusive; `exists` optional boolean (default true); label operators a
- * label name. A path that does not resolve, or a value of the wrong type,
- * makes the condition false (`exists: false` is true then).
+ * (that element) or `[*]` (every element). A path that ends on an array
+ * reads its elements, as if it ended with `[*]`. `value` by operator:
+ * `equals` a scalar; `one_of` / `not_one_of` a list of scalars;
+ * `starts_with` / `ends_with` / `matches` a string (`matches` is a glob: `*`
+ * any run of characters, `?` one character); `lt` / `lte` / `gt` / `gte` a
+ * number; `between` `[min, max]` inclusive; `exists` optional boolean
+ * (default true); label operators a label name.
+ *
+ * Evaluation fails closed (see `evaluatePolicyCondition` in the MCP SDK):
+ * when the path reads several values, a deny or require_approval rule's
+ * condition holds if ANY value satisfies it, an allow rule's only if EVERY
+ * value does (and there is at least one). Scalars compare as trimmed text
+ * (`5000` equals `"5000"`), number operators read numeric strings, and a
+ * missing argument satisfies only the negated operators (`not_one_of`,
+ * `label_absent`), and only for deny and require_approval rules.
  */
 export interface McpPolicyCondition {
   path?: string;
   op: McpPolicyConditionOp;
   value?: McpPolicyScalar | McpPolicyScalar[];
+  /** Text operators (equals, one_of, not_one_of, starts_with, ends_with, matches) compare without case. */
+  ignoreCase?: boolean;
 }
+
+/** Phase 12.4 — operators `ignoreCase` applies to. */
+export const MCP_POLICY_TEXT_OPS: readonly McpPolicyConditionOp[] = ["equals", "one_of", "not_one_of", "starts_with", "ends_with", "matches"];
 
 /** Phase 12.4 — a rule's conditions: every one must hold (`all`) or at least one (`any`). */
 export type McpToolPolicyConditions = { all: McpPolicyCondition[] } | { any: McpPolicyCondition[] };
@@ -1117,6 +1129,12 @@ export interface McpToolPolicyRule {
   updatedAt?: string;
   /** Phase 12.4 — stable hash of what the rule governs and does (API responses only); see `hashMcpToolPolicyRule`. */
   hash?: string;
+  /**
+   * Phase 12.4 — the stored conditions no longer validate. The rule fails
+   * closed: an allow never matches, a deny or require_approval applies to
+   * every call in its scope. Fix or delete it.
+   */
+  invalid?: boolean;
 }
 
 /**

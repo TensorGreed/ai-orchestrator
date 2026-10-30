@@ -59,7 +59,8 @@ function canonicalCondition(condition: McpPolicyCondition): Record<string, unkno
   return {
     op: condition.op,
     ...(condition.path !== undefined ? { path: condition.path } : {}),
-    ...(value !== undefined ? { value } : {})
+    ...(value !== undefined ? { value } : {}),
+    ...(condition.ignoreCase === true ? { ignoreCase: true } : {})
   };
 }
 

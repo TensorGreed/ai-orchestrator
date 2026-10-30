@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { WORKFLOW_SCHEMA_VERSION } from "./types";
+import { MCP_POLICY_TEXT_OPS, WORKFLOW_SCHEMA_VERSION } from "./types";
 import { writeToolApprovalSettingsSchema } from "./approval-gate";
 import { MCP_POLICY_PATH_MAX_LENGTH, parseMcpPolicyPath } from "./mcp-tool-policy";
 
@@ -294,6 +294,8 @@ export const MCP_POLICY_MAX_CONDITIONS = 20;
 export const MCP_POLICY_MAX_LIST_VALUES = 100;
 export const MCP_POLICY_MAX_VALUE_LENGTH = 500;
 export const MCP_POLICY_MAX_PRINCIPALS = 100;
+/** At most this many `*` in a `matches` glob. */
+export const MCP_POLICY_MAX_GLOB_STARS = 16;
 
 export const mcpToolPolicyEffectSchema = z.enum(["allow", "deny", "require_approval"]);
 export const mcpToolPolicyModeSchema = z.enum(["enforce", "shadow"]);
@@ -325,12 +327,16 @@ export const mcpPolicyConditionSchema = z
   .object({
     path: z.string().trim().max(MCP_POLICY_PATH_MAX_LENGTH).optional(),
     op: mcpPolicyConditionOpSchema,
-    value: z.union([policyScalarSchema, z.array(policyScalarSchema).max(MCP_POLICY_MAX_LIST_VALUES)]).optional()
+    value: z.union([policyScalarSchema, z.array(policyScalarSchema).max(MCP_POLICY_MAX_LIST_VALUES)]).optional(),
+    ignoreCase: z.boolean().optional()
   })
   .superRefine((condition, ctx) => {
     const issue = (path: "path" | "value", message: string) => ctx.addIssue({ code: z.ZodIssueCode.custom, path: [path], message });
     const { op, value } = condition;
     const labelOp = op === "label_present" || op === "label_absent";
+    if (condition.ignoreCase && !MCP_POLICY_TEXT_OPS.includes(op)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["ignoreCase"], message: "Ignore case applies to text comparisons only" });
+    }
     if (labelOp) {
       if (condition.path) issue("path", "Label conditions take no argument path");
       if (typeof value !== "string" || !/^[A-Za-z0-9_.:-]{1,64}$/.test(value)) {
@@ -356,6 +362,9 @@ export const mcpPolicyConditionSchema = z
       case "ends_with":
       case "matches":
         if (typeof value !== "string" || value.length === 0) issue("value", "Give a non-empty text value");
+        else if (op === "matches" && value.split("*").length - 1 > MCP_POLICY_MAX_GLOB_STARS) {
+          issue("value", `A pattern has at most ${MCP_POLICY_MAX_GLOB_STARS} * wildcards`);
+        }
         break;
       case "lt":
       case "lte":
