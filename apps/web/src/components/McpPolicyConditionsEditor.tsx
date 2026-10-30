@@ -177,8 +177,8 @@ function valuePlaceholder(op: McpPolicyConditionOp): string {
 /** How several values (a list argument, or [*]) and a missing argument read for a rule with this effect. */
 export function conditionsHint(effect: McpToolPolicyEffect | undefined): string {
   return effect === "allow"
-    ? "Paths are argument names with dots for nesting and [*] for list items. This rule allows a call only when every list item matches; a missing argument or a value of another type never matches."
-    : "Paths are argument names with dots for nesting and [*] for list items. This rule applies when any list item matches; a missing argument counts as “is not one of” and a value of another type (text for a number) counts as a match. Safest: deny broadly, then allow exceptions with “is one of”.";
+    ? "Paths are argument names with dots for nesting and [*] for list items. This rule allows a call only when every list item matches; a missing argument, a value of another type or a list over 1,000 items never matches."
+    : "Paths are argument names with dots for nesting and [*] for list items. This rule applies when any list item matches; a missing argument counts as “is not one of” (and matches no other operator), and a value of another type (text for a number, an object) counts as a match. Safest: deny broadly, then allow exceptions with “is one of”.";
 }
 
 export function McpPolicyConditionsEditor({

@@ -478,6 +478,9 @@ function McpPolicyForm({
       setError("Needs approval applies to tool calls only.");
       return;
     }
+    // A rule whose stored conditions are invalid keeps them (failing closed) until new ones are entered, so saving
+    // another change never turns it into a rule without conditions.
+    const keepInvalidConditions = Boolean(initial?.invalid) && kind === "tool" && parsedConditions.conditions === null;
     const payload: McpToolPolicyRuleInput = {
       name: name.trim() || null,
       description: description.trim() || null,
@@ -490,7 +493,7 @@ function McpPolicyForm({
       kind,
       enabled,
       mode,
-      conditions: parsedConditions.conditions,
+      ...(keepInvalidConditions ? {} : { conditions: parsedConditions.conditions }),
       workflowIds,
       clientIds
     };
@@ -550,6 +553,11 @@ function McpPolicyForm({
           />
         </label>
       </div>
+      {kind === "tool" && initial?.invalid && (
+        <p className="settings-error mcp-rule-invalid" role="note">
+          The stored conditions are invalid and stay in place, failing closed, until you enter new conditions here.
+        </p>
+      )}
       {kind === "tool" && <McpPolicyConditionsEditor draft={conditions} onChange={setConditions} effect={effect} />}
       <div className="kb-form-row">
         <label className="mcp-check">

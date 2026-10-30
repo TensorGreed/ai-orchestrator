@@ -532,6 +532,24 @@ describe("MCP tool policy UI", () => {
     expect(within(list).getByRole("alert")).toHaveTextContent("Invalid conditions — fix or delete. Until then this rule fails closed: it allows nothing.");
   });
 
+  it("editing an invalid rule without entering conditions keeps its stored conditions", async () => {
+    const user = userEvent.setup();
+    const bad = makeRule({ id: "rule_bad", name: "Old carve-out", effect: "allow", conditions: null, invalid: true });
+    vi.mocked(api.fetchMcpToolPolicies).mockResolvedValue({ rules: [bad], roles: ["admin", "builder", "operator", "viewer"] });
+    vi.mocked(api.updateMcpToolPolicy).mockImplementation(async (_id, patch) => ({ rule: { ...bad, ...patch } as McpToolPolicyRule }));
+    render(<McpServersPage view="policies" isAdmin activeProjectId="default" />);
+    const list = await screen.findByRole("list", { name: "Tool policy rules" });
+    await user.click(await within(list).findByRole("button", { name: "Edit" }));
+    const form = screen.getByRole("form", { name: "Edit tool policy rule" });
+    expect(within(form).getByRole("note")).toHaveTextContent("stay in place, failing closed, until you enter new conditions");
+    await user.clear(within(form).getByLabelText("Name"));
+    await user.type(within(form).getByLabelText("Name"), "Renamed");
+    await user.click(within(form).getByRole("button", { name: "Save rule" }));
+    const patch = vi.mocked(api.updateMcpToolPolicy).mock.lastCall![1];
+    expect(patch).toMatchObject({ name: "Renamed" });
+    expect("conditions" in patch).toBe(false);
+  });
+
   it("shows until when a rejected gateway call is refused", async () => {
     const user = userEvent.setup();
     vi.mocked(api.fetchMcpToolPolicies).mockResolvedValue({ rules: [], roles: ["admin", "builder", "operator", "viewer"] });
