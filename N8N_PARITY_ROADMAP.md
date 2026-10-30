@@ -68,7 +68,7 @@
 - [x] Main process: handle triggers, enqueue execution jobs via `POST /api/workflows/:id/enqueue`
 - [x] Worker processes: `QueueService` dequeues and executes jobs with concurrency control
 - [x] Configurable concurrency control (`QUEUE_CONCURRENCY` env var, default 5)
-- [ ] Horizontal scaling — add/remove workers dynamically (requires Redis/BullMQ migration)
+- [x] Horizontal scaling — add/remove workers dynamically (requires Redis/BullMQ migration) — delivered by 13.1 on Postgres (`SKIP LOCKED` queue, worker role, optional queue dispatch); no Redis needed
 - [x] Dead letter queue for permanently failed executions (DLQ with exponential backoff)
 
 ### 1.6 Database Upgrade Path
@@ -466,7 +466,7 @@ L2M the one governed MCP hub that every AI client in an organisation points at.
 ### 10.7 Runtime safety
 - [x] Sandboxed stdio servers: optional container runner (docker or podman) with CPU and memory limits, read-only root, an allowlist of mounted roots and networking off by default
 - [x] Per-server and per-tool rate limits, concurrency caps and a circuit breaker that opens on repeated failures and shows on the registry page
-- [ ] Tool output guard: secret and PII redaction plus prompt-injection heuristics on tool results before they reach the model, with findings in the trace (delivered by Phase 12, L2M Guard)
+- [x] Tool output guard: secret and PII redaction plus prompt-injection heuristics on tool results before they reach the model, with findings in the trace (delivered by Phase 12, L2M Guard)
 - [x] Delegated credentials: a tool call can use the triggering user's own token for a server instead of a shared service secret
 
 ### 10.8 Testing and reliability
@@ -570,9 +570,9 @@ by what blocks adoption first. All of it stays self-hosted.
 
 ### 13.1 Production data tier
 - [x] Full Postgres parity: every store method implemented for Postgres, multi-instance invariants enforced by the database, one leader per deployment (advisory lock), and the whole API test suite run against Postgres in CI
-- [ ] Horizontal scaling: shared work queue (Postgres `SKIP LOCKED` or Redis) with stateless API replicas and worker pools, load-tested with several replicas
+- [x] Horizontal scaling: shared work queue (Postgres `SKIP LOCKED` or Redis) with stateless API replicas and worker pools, load-tested with several replicas. Load test 2026-10-29 on one 20-core host with queue dispatch: 2→4→8 workers scaled linearly (100% efficiency at the offered load), queue wait p95 3 ms, chaos (worker kill, API restart, leader pause) with 0 lost or duplicated runs; harness in `ops/loadtest`, guide in Operations › Scaling
 - [ ] Zero-downtime upgrades: expand-and-contract migrations, rolling deploys, migration dry runs
-- [ ] Backup, restore and disaster-recovery runbook with stated RPO and RTO; restore drills in CI
+- [x] Backup, restore and disaster-recovery runbook with stated RPO and RTO; restore drills in CI
 - [ ] External object storage for execution payloads and binaries (S3-compatible, server-side encryption with customer keys)
 
 ### 13.2 Identity and access
@@ -595,7 +595,7 @@ by what blocks adoption first. All of it stays self-hosted.
 - [ ] Periodic access reviews: who can do what in each project, with attestation
 
 ### 13.5 Supply chain and deployment
-- [ ] SBOM (CycloneDX) per release, signed container images and build provenance; vulnerability policy with a disclosure SLA in SECURITY.md
+- [x] SBOM (CycloneDX) per release, signed container images and build provenance; vulnerability policy with a disclosure SLA in SECURITY.md
 - [ ] Air-gapped installation: offline image bundle, no outbound calls, bundled local guard models, documented ports and egress
 - [ ] FIPS 140-3 mode and hardened images (non-root, read-only filesystem, minimal base)
 - [ ] Kubernetes reference architecture (autoscaling, disruption budgets, network policies, external Postgres) and Terraform examples per cloud
@@ -639,52 +639,52 @@ providers and secrets.
 - Opt-in: a workflow without a release gate behaves exactly as before.
 
 ### 15.1 Golden runs and replay
-- [ ] Save any execution as a golden run (`replay_recordings`, migration v30): captured workflow and hash, scrubbed
+- [x] Save any execution as a golden run (`replay_recordings`, migration v30): captured workflow and hash, scrubbed
   input and node outputs, copied MCP cassette, normalised run facts shared with the run manifest
-- [ ] Side-effect classification on node definitions; replay plan stubs write and read connectors through pinned
+- [x] Side-effect classification on node definitions; replay plan stubs write and read connectors through pinned
   data and auto-resolves approvals and waits; a node the recording never saw is stubbed and flagged
-- [ ] Replay sandbox: `replay` trigger type, isolated memory, tool cache, artifacts and knowledge-base writes; no
+- [x] Replay sandbox: `replay` trigger type, isolated memory, tool cache, artifacts and knowledge-base writes; no
   error workflows, notifications, elicitation prompts or SLO impact
-- [ ] Run diff: status, structural output diff with ignore paths and tolerance, tool-call alignment with argument
+- [x] Run diff: status, structural output diff with ignore paths and tolerance, tool-call alignment with argument
   diffs, path, model, token, cost and latency deltas, guard verdict changes, replay-health warnings
-- [ ] "Save as golden run" and a replay diff drawer on the Runs page; `l2m replay run --recording` with exit codes
+- [x] "Save as golden run" and a replay diff drawer on the Runs page; `l2m replay run --recording` with exit codes
 
 ### 15.2 Golden sets, replay jobs and scorers
-- [ ] Golden sets as eval datasets tied to a workflow; replay jobs as background eval runs (concurrency cap, cancel,
+- [x] Golden sets as eval datasets tied to a workflow; replay jobs as background eval runs (concurrency cap, cancel,
   progress, interrupted-on-restart), migration v31; plain eval runs move to the same runner
-- [ ] Scorers: structural JSON equality, JSON Schema, text similarity, tool sequence, status, no new guard blocks,
+- [x] Scorers: structural JSON equality, JSON Schema, text similarity, tool sequence, status, no new guard blocks,
   cost / token / latency budgets, LLM judge (rubric, pairwise, votes, provider credentials through `SecretService`)
-- [ ] Evaluations page replaces the placeholder: golden sets, replay jobs, per-case scores and diffs
+- [x] Evaluations page replaces the placeholder: golden sets, replay jobs, per-case scores and diffs
 
 ### 15.3 Candidates and fair comparison
-- [ ] Candidate = saved version, draft or a workflow file, plus overrides: model per node or provider, guard profile
+- [x] Candidate = saved version, draft or a workflow file, plus overrides: model per node or provider, guard profile
   version, MCP live or stub per server
-- [ ] Model tape in `packages/provider-sdk` (record and replay model calls; misses fall back to live) and memory seed
+- [x] Model tape in `packages/provider-sdk` (record and replay model calls; misses fall back to live) and memory seed
   capture, so guard-only and MCP-only candidates replay without model calls
-- [ ] Compare against the recording or a baseline rerun in the same job; repeats with an aggregation rule for flaky
+- [x] Compare against the recording or a baseline rerun in the same job; repeats with an aggregation rule for flaky
   cases; cost estimate before a run and a per-job budget
-- [ ] Guard profile override per run, delivering the engine for 12.4 policy simulation
+- [x] Guard profile override per run, delivering the engine for 12.4 policy simulation
 
 ### 15.4 Release gate and publish
-- [ ] Published version per workflow (migration v32); production entry points (webhooks, schedules, app triggers,
+- [x] Published version per workflow (migration v32); production entry points (webhooks, schedules, app triggers,
   MCP gateway, chat, enqueue, sub-workflow calls) run the published version, the editor and test webhooks run the draft
-- [ ] Gate policy per workflow (pass rate, regressions, required scorers, cost and latency budgets, no new guard
+- [x] Gate policy per workflow (pass rate, regressions, required scorers, cost and latency budgets, no new guard
   blocks, minimum cases, recording age); publish requires a passing replay job for the exact workflow hash
-- [ ] Admin override with a reason, audited and recorded on the release; rollback to an earlier published version;
+- [x] Admin override with a reason, audited and recorded on the release; rollback to an earlier published version;
   published versions exempt from version retention; `needs_approval` verdict ready for 11.2
-- [ ] Version pill and Publish dialog in the editor HUD; gate settings and release history
+- [x] Version pill and Publish dialog in the editor HUD; gate settings and release history
 
 ### 15.5 CI entry point
-- [ ] `l2m replay run` (saved version, draft or workflow file; overrides; `--wait`; JSON and JUnit output; exit 0
+- [x] `l2m replay run` (saved version, draft or workflow file; overrides; `--wait`; JSON and JUnit output; exit 0
   pass, 1 regression, 4 could not complete), `l2m replay status`, `l2m release publish`
-- [ ] Golden-set export and import files (`l2m.golden-set`, scrubbed, optionally signed with the audit key) so
+- [x] Golden-set export and import files (`l2m.golden-set`, scrubbed, optionally signed with the audit key) so
   suites live in git next to the workflows
-- [ ] Docs with CI recipes that call the deployment's own API
+- [x] Docs with CI recipes that call the deployment's own API
 
 ### 15.6 Production capture
-- [ ] Sampled capture of cassettes and model tapes on production runs into a triage inbox; promote to a golden set in
+- [x] Sampled capture of cassettes and model tapes on production runs into a triage inbox; promote to a golden set in
   one click; short retention for unpromoted captures; optional DLP masking on record
-- [ ] Guard policy simulation over recent captured runs, shown on the Security page (12.4)
+- [x] Guard policy simulation over recent captured runs, shown on the Security page (12.4)
 
 ### Decided 2026-10-22
 - The draft and published split is opt-in per workflow; the gate applies on publish, never on save
@@ -725,7 +725,7 @@ with the same verdicts, profile hashes and latency.
 ### Later
 - [ ] DLP depth: exact-data match, file and OCR content, a local NER model through the classifier interface, an
   encoded-exfiltration decoder, false-positive review and audit reports
-- [ ] Postgres for labels, destinations and destination rules (13.1)
+- [x] Postgres for labels, destinations and destination rules (13.1)
 
 ## Implementation Priority Matrix
 
