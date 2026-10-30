@@ -994,18 +994,94 @@ export type McpPolicyKind = "tool" | "resource" | "prompt" | "sampling";
 export const MCP_POLICY_KINDS: readonly McpPolicyKind[] = ["tool", "resource", "prompt", "sampling"];
 
 /**
+ * Phase 12.4 — what a matching rule does. `require_approval` (tool rules
+ * only): a person approves the exact call first (in a run, through the
+ * write-tool approval hand-off; through the MCP gateway, an approval request
+ * and a retry of the same call).
+ */
+export type McpToolPolicyEffect = "allow" | "deny" | "require_approval";
+export const MCP_TOOL_POLICY_EFFECTS: readonly McpToolPolicyEffect[] = ["allow", "deny", "require_approval"];
+
+/** Phase 12.4 — `shadow`: the rule is evaluated and its would-be decision logged, but it never changes a call's outcome. */
+export type McpToolPolicyMode = "enforce" | "shadow";
+export const MCP_TOOL_POLICY_MODES: readonly McpToolPolicyMode[] = ["enforce", "shadow"];
+
+/**
+ * Phase 12.4 — condition operators. Argument operators read the value at
+ * `path` in the call's arguments; label operators read the run's data labels
+ * (`value` is a provenance label or a data class name) and take no path.
+ */
+export type McpPolicyConditionOp =
+  | "equals"
+  | "one_of"
+  | "not_one_of"
+  | "starts_with"
+  | "ends_with"
+  | "matches"
+  | "lt"
+  | "lte"
+  | "gt"
+  | "gte"
+  | "between"
+  | "exists"
+  | "label_present"
+  | "label_absent";
+export const MCP_POLICY_CONDITION_OPS: readonly McpPolicyConditionOp[] = [
+  "equals",
+  "one_of",
+  "not_one_of",
+  "starts_with",
+  "ends_with",
+  "matches",
+  "lt",
+  "lte",
+  "gt",
+  "gte",
+  "between",
+  "exists",
+  "label_present",
+  "label_absent"
+];
+export const MCP_POLICY_LABEL_OPS: readonly McpPolicyConditionOp[] = ["label_present", "label_absent"];
+
+export type McpPolicyScalar = string | number | boolean | null;
+
+/**
+ * Phase 12.4 — one condition on a tool call. `path` addresses an argument:
+ * dot-separated keys (`repo`, `owner.login`), where a key may end with `[n]`
+ * (that element) or `[*]` (any element: the condition holds when any element
+ * satisfies it). `value` by operator: `equals` a scalar; `one_of` /
+ * `not_one_of` a list of scalars; `starts_with` / `ends_with` / `matches` a
+ * string (`matches` is a glob: `*` any run of characters, `?` one
+ * character); `lt` / `lte` / `gt` / `gte` a number; `between` `[min, max]`
+ * inclusive; `exists` optional boolean (default true); label operators a
+ * label name. A path that does not resolve, or a value of the wrong type,
+ * makes the condition false (`exists: false` is true then).
+ */
+export interface McpPolicyCondition {
+  path?: string;
+  op: McpPolicyConditionOp;
+  value?: McpPolicyScalar | McpPolicyScalar[];
+}
+
+/** Phase 12.4 — a rule's conditions: every one must hold (`all`) or at least one (`any`). */
+export type McpToolPolicyConditions = { all: McpPolicyCondition[] } | { any: McpPolicyCondition[] };
+
+/**
  * One tool policy rule. A rule matches a tool call when every scope field
  * matches: project (`projectId` null = every project), role (`roles` empty =
  * every role), server (`serverId` null = any server; otherwise a registry
  * server id, or an adapter id for servers configured inline on a node) and
  * tool name (`toolPattern`, exact or a glob where `*` matches any run of
- * characters).
+ * characters). Phase 12.4 adds workflows (`workflowIds` empty = every
+ * workflow), gateway clients (`clientIds` empty = every caller) and
+ * `conditions` on the call's arguments and data labels.
  */
 export interface McpToolPolicyRule {
   id: string;
   name: string | null;
   description: string | null;
-  effect: "allow" | "deny";
+  effect: McpToolPolicyEffect;
   projectId: string | null;
   roles: McpPolicyRole[];
   serverId: string | null;
@@ -1024,10 +1100,23 @@ export interface McpToolPolicyRule {
    * meaning: they only govern tool calls.
    */
   kind?: McpPolicyKind;
+  /** Phase 12.4 — only runs of these workflows; empty or absent = every workflow (and gateway calls). */
+  workflowIds?: string[];
+  /**
+   * Phase 12.4 — only calls made by these MCP gateway clients (directly, or
+   * by a workflow run a client started); empty or absent = every caller.
+   */
+  clientIds?: string[];
+  /** Phase 12.4 — conditions on the call's arguments and data labels; null or absent = every call. */
+  conditions?: McpToolPolicyConditions | null;
+  /** Phase 12.4 — absent means `enforce`. */
+  mode?: McpToolPolicyMode;
   enabled: boolean;
   createdBy?: string | null;
   createdAt?: string;
   updatedAt?: string;
+  /** Phase 12.4 — stable hash of what the rule governs and does (API responses only); see `hashMcpToolPolicyRule`. */
+  hash?: string;
 }
 
 /**
@@ -1079,12 +1168,50 @@ export interface McpHiddenTool {
   ruleName?: string;
 }
 
+/**
+ * Phase 12.4 — what the tool policy decided for one call, as recorded on the
+ * run trace and on the call's telemetry row (`policy_decision_json`). Only
+ * written when some rule matched. `effect` is the enforced outcome; `shadow`
+ * is what the outcome would have been with the matching shadow rules
+ * enforced too.
+ */
+export interface McpToolPolicyDecisionRecord {
+  effect: McpToolPolicyEffect;
+  decidedBy: "default" | "rule";
+  ruleId?: string;
+  ruleName?: string;
+  ruleHash?: string;
+  /** For `require_approval`: whether the call waited for a person, or ran on an approval. */
+  approval?: "pending" | "approved";
+  /** Every matching rule, enforced and shadow, in evaluation order. */
+  matched: Array<{ ruleId: string; mode: McpToolPolicyMode; effect: McpToolPolicyEffect }>;
+  shadow?: {
+    effect: McpToolPolicyEffect;
+    ruleId?: string;
+    ruleName?: string;
+    ruleHash?: string;
+    /** True when the shadow rules would have changed the outcome. */
+    changed: boolean;
+  };
+}
+
+/** Phase 12.4 — one call's decision on the `_toolPolicy` trace. */
+export interface McpToolPolicyCallTrace extends McpToolPolicyDecisionRecord {
+  tool: string;
+  server: string;
+  registryServerId?: string;
+  /** The agent's tool call id, to match the decision with the call in `steps`. */
+  toolCallId?: string;
+}
+
 /** Policy decisions attached to agent / supervisor node outputs as `_toolPolicy`. */
 export interface McpToolPolicyTrace {
   subject: McpToolPolicySubject;
   projectId?: string;
   noWriteTools: boolean;
   hidden: McpHiddenTool[];
+  /** Phase 12.4 — decisions for calls some rule matched (shadow rules included), in call order. */
+  decisions?: McpToolPolicyCallTrace[];
 }
 
 export interface AgentRunState {

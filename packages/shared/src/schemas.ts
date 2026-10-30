@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { WORKFLOW_SCHEMA_VERSION } from "./types";
 import { writeToolApprovalSettingsSchema } from "./approval-gate";
+import { MCP_POLICY_PATH_MAX_LENGTH, parseMcpPolicyPath } from "./mcp-tool-policy";
 
 export const secretReferenceSchema = z.object({
   secretId: z.string().min(1)
@@ -288,12 +289,117 @@ export const mcpToolHintConditionSchema = z.enum([
   "not_open_world"
 ]);
 
-export const mcpToolPolicyRuleInputSchema = z.object({
+// Phase 12.4 — rule conditions, effects, modes and the workflow / client principals.
+export const MCP_POLICY_MAX_CONDITIONS = 20;
+export const MCP_POLICY_MAX_LIST_VALUES = 100;
+export const MCP_POLICY_MAX_VALUE_LENGTH = 500;
+export const MCP_POLICY_MAX_PRINCIPALS = 100;
+
+export const mcpToolPolicyEffectSchema = z.enum(["allow", "deny", "require_approval"]);
+export const mcpToolPolicyModeSchema = z.enum(["enforce", "shadow"]);
+export const mcpPolicyConditionOpSchema = z.enum([
+  "equals",
+  "one_of",
+  "not_one_of",
+  "starts_with",
+  "ends_with",
+  "matches",
+  "lt",
+  "lte",
+  "gt",
+  "gte",
+  "between",
+  "exists",
+  "label_present",
+  "label_absent"
+]);
+
+const policyScalarSchema = z.union([
+  z.string().max(MCP_POLICY_MAX_VALUE_LENGTH, `Values are at most ${MCP_POLICY_MAX_VALUE_LENGTH} characters`),
+  z.number().finite(),
+  z.boolean(),
+  z.null()
+]);
+
+export const mcpPolicyConditionSchema = z
+  .object({
+    path: z.string().trim().max(MCP_POLICY_PATH_MAX_LENGTH).optional(),
+    op: mcpPolicyConditionOpSchema,
+    value: z.union([policyScalarSchema, z.array(policyScalarSchema).max(MCP_POLICY_MAX_LIST_VALUES)]).optional()
+  })
+  .superRefine((condition, ctx) => {
+    const issue = (path: "path" | "value", message: string) => ctx.addIssue({ code: z.ZodIssueCode.custom, path: [path], message });
+    const { op, value } = condition;
+    const labelOp = op === "label_present" || op === "label_absent";
+    if (labelOp) {
+      if (condition.path) issue("path", "Label conditions take no argument path");
+      if (typeof value !== "string" || !/^[A-Za-z0-9_.:-]{1,64}$/.test(value)) {
+        issue("value", "Name a data label: a provenance label (trusted, user, untrusted_external, sensitive) or a data class");
+      }
+      return;
+    }
+    if (!condition.path) {
+      issue("path", "An argument path is required, for example repo or items[*].id");
+    } else if (!parseMcpPolicyPath(condition.path)) {
+      issue("path", "Use dot-separated keys, each optionally followed by [n] or [*], for example owner.login or items[*].id");
+    }
+    const isList = Array.isArray(value);
+    switch (op) {
+      case "equals":
+        if (value === undefined || isList) issue("value", "Equals compares with one value");
+        break;
+      case "one_of":
+      case "not_one_of":
+        if (!isList || value.length === 0) issue("value", "List at least one value");
+        break;
+      case "starts_with":
+      case "ends_with":
+      case "matches":
+        if (typeof value !== "string" || value.length === 0) issue("value", "Give a non-empty text value");
+        break;
+      case "lt":
+      case "lte":
+      case "gt":
+      case "gte":
+        if (typeof value !== "number") issue("value", "Give a number");
+        break;
+      case "between":
+        if (!isList || value.length !== 2 || typeof value[0] !== "number" || typeof value[1] !== "number") {
+          issue("value", "Give two numbers: [min, max]");
+        } else if ((value[0] as number) > (value[1] as number)) {
+          issue("value", "The minimum must not be greater than the maximum");
+        }
+        break;
+      case "exists":
+        if (value !== undefined && typeof value !== "boolean") issue("value", "Exists takes true (the default) or false");
+        break;
+    }
+  });
+
+const conditionListSchema = z
+  .array(mcpPolicyConditionSchema)
+  .min(1, "Add at least one condition, or leave conditions out")
+  .max(MCP_POLICY_MAX_CONDITIONS, `A rule has at most ${MCP_POLICY_MAX_CONDITIONS} conditions`);
+
+export const mcpToolPolicyConditionsSchema = z.union([
+  z.object({ all: conditionListSchema }).strict(),
+  z.object({ any: conditionListSchema }).strict()
+]);
+
+const policyPrincipalIdsSchema = z
+  .array(z.string().trim().min(1).max(200))
+  .max(MCP_POLICY_MAX_PRINCIPALS, `At most ${MCP_POLICY_MAX_PRINCIPALS} entries`);
+
+const mcpToolPolicyRuleFieldsSchema = z.object({
   name: z.string().trim().max(120).nullable().optional(),
   description: z.string().max(2000).nullable().optional(),
-  effect: z.enum(["allow", "deny"]),
+  effect: mcpToolPolicyEffectSchema,
   projectId: z.string().trim().min(1).nullable().optional(),
   roles: z.array(mcpPolicyRoleSchema).max(4).optional(),
+  /** Phase 12.4 — only runs of these workflows; empty = every workflow. */
+  workflowIds: policyPrincipalIdsSchema.optional(),
+  /** Phase 12.4 — only calls made by these MCP gateway clients; empty = every caller. */
+  clientIds: policyPrincipalIdsSchema.optional(),
   serverId: z.string().trim().min(1).nullable().optional(),
   /** Defaults to "*" (every tool) when a rule is created without one. */
   toolPattern: mcpToolPatternSchema.optional(),
@@ -301,10 +407,39 @@ export const mcpToolPolicyRuleInputSchema = z.object({
   annotationHint: mcpToolHintConditionSchema.nullable().optional(),
   /** Phase 10.5 — what the rule governs; defaults to `tool`. */
   kind: mcpPolicyKindSchema.optional(),
+  /** Phase 12.4 — conditions on the call's arguments and data labels; null = every call. */
+  conditions: mcpToolPolicyConditionsSchema.nullable().optional(),
+  /** Phase 12.4 — defaults to `enforce`; `shadow` only logs what the rule would decide. */
+  mode: mcpToolPolicyModeSchema.optional(),
   enabled: z.boolean().optional()
 });
 
-export const mcpToolPolicyRuleUpdateSchema = mcpToolPolicyRuleInputSchema
+/**
+ * Phase 12.4 — checks that need several fields of a whole rule (a new one, or
+ * an existing one with an update applied): approval and conditions apply to
+ * tool calls only.
+ */
+export function mcpToolPolicyRuleIssues(rule: {
+  effect?: string;
+  kind?: string | null;
+  conditions?: unknown;
+}): Array<{ path: string[]; message: string }> {
+  const issues: Array<{ path: string[]; message: string }> = [];
+  const kind = rule.kind ?? "tool";
+  if (kind !== "tool" && rule.effect === "require_approval") {
+    issues.push({ path: ["effect"], message: "Require approval applies to tool calls only" });
+  }
+  if (kind !== "tool" && rule.conditions) {
+    issues.push({ path: ["conditions"], message: "Conditions apply to tool calls only" });
+  }
+  return issues;
+}
+
+export const mcpToolPolicyRuleInputSchema = mcpToolPolicyRuleFieldsSchema.superRefine((rule, ctx) => {
+  for (const issue of mcpToolPolicyRuleIssues(rule)) ctx.addIssue({ code: z.ZodIssueCode.custom, ...issue });
+});
+
+export const mcpToolPolicyRuleUpdateSchema = mcpToolPolicyRuleFieldsSchema
   .partial()
   .refine((value) => Object.keys(value).length > 0, { message: "Empty update payload" });
 
@@ -315,7 +450,13 @@ export const mcpToolPolicyEvaluateSchema = z.object({
   /** The tool name, resource URI, prompt name or model name, depending on `kind`. */
   toolName: z.string().trim().min(1).max(2000),
   kind: mcpPolicyKindSchema.optional(),
-  noWriteTools: z.boolean().optional()
+  noWriteTools: z.boolean().optional(),
+  /** Phase 12.4 — the call's arguments; absent evaluates the tool as discovery does (conditions cannot decide). */
+  arguments: z.record(z.string(), z.unknown()).optional(),
+  /** Phase 12.4 — the run's data labels: provenance labels and data class names. */
+  labels: z.array(z.string().trim().min(1).max(64)).max(100).optional(),
+  workflowId: z.string().trim().min(1).max(200).nullable().optional(),
+  clientId: z.string().trim().min(1).max(200).nullable().optional()
 });
 
 // Phase 10.5 — resources, prompts, elicitation and sampling.
