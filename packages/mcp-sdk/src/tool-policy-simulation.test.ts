@@ -605,5 +605,6 @@ describe("agreement with the evaluator on real arguments", () => {
     expect(seen.adjusted).toBeGreaterThan(500);
     expect(seen.hashedLocation).toBeGreaterThan(20);
     expect(undetermined).toBeGreaterThan(200);
-  });
+    // 10,000 trials take a few seconds locally and longer on a shared CI runner.
+  }, 60_000);
 });
