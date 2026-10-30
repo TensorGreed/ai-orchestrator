@@ -20,7 +20,22 @@ export interface AgentToolRuntime {
    * model sees instead of the generic "does not exist" message.
    */
   describeUnavailableTool?: (toolName: string) => string | undefined;
+  /**
+   * Phase 12.4 — the caller's check of an external tool call, run before the
+   * guard's `tool_arguments` hook (the MCP tool policy decides first, then
+   * the guard). `block`: the call becomes a tool error with `message` and
+   * the loop goes on; `pause`: the agent stops for a person's approval, like
+   * a guard pause on the `tool_arguments` channel.
+   */
+  checkToolCall?: (
+    toolName: string,
+    args: Record<string, unknown>,
+    call: { toolCallId: string; iteration: number; labels?: DataLabels }
+  ) => AgentToolCallCheck | Promise<AgentToolCallCheck>;
 }
+
+/** Phase 12.4 — what `checkToolCall` decided. */
+export type AgentToolCallCheck = { outcome: "allow" } | { outcome: "block"; message: string } | { outcome: "pause"; message: string };
 
 /** What the loop reports while it runs: model calls, retries, steps and tool calls. */
 export type AgentRuntimeEvent =
