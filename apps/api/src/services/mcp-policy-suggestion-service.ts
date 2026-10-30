@@ -28,7 +28,11 @@
  *
  * Once a scope's suggestion is accepted, a later proposal that only adds tools becomes an "Update accepted rules"
  * suggestion: the allows for the new tools, added in shadow next to the accepted set. Those allows carve the scope's
- * own accepted deny on purpose, so that deny is left out of the tighten-only check; every other deny still counts.
+ * own accepted deny on purpose, so that deny is left out of the tighten-only check while it still hashes as it did when
+ * accepted; every other deny, and that deny once edited, still counts.
+ *
+ * Summary format 2 marks no normalised value, so a kept v2 string with characters outside printable ASCII proposes no
+ * `one_of` constraint ("normalised").
  */
 import { createHash, randomUUID } from "node:crypto";
 import {
@@ -157,6 +161,34 @@ export function suggestionScopeKey(suggestion: Pick<McpPolicySuggestion, "scopeK
   return `${suggestion.scopeKind}\u0000${suggestion.scopeId}\u0000${suggestion.serverId}`;
 }
 
+/** Each created rule's canonical hash, recorded in the evidence when a suggestion is accepted. */
+export function acceptedRuleHashes(rules: readonly McpToolPolicyRule[]): Record<string, string> {
+  return Object.fromEntries(rules.map((rule) => [rule.id, hashMcpToolPolicyRule(rule)]));
+}
+
+/**
+ * The scope's own accepted deny and require_approval rules its allows carve on purpose, from the scope's accepted
+ * suggestions: each only while it still hashes as it did when accepted. A deny edited since (say, widened to every
+ * workflow) is no longer the scope's own, so the tighten-only checks read it like any other rule.
+ */
+export function scopeOwnDenyIds(
+  family: ReadonlyArray<Pick<McpPolicySuggestion, "acceptedRuleIds" | "evidence">>,
+  currentById: ReadonlyMap<string, McpToolPolicyRule>
+): Set<string> {
+  const own = new Set<string>();
+  for (const suggestion of family) {
+    const recorded = suggestion.evidence.acceptedRuleHashes ?? {};
+    for (const id of suggestion.acceptedRuleIds) {
+      const rule = currentById.get(id);
+      if (rule && rule.effect !== "allow" && recorded[id] !== undefined && recorded[id] === hashMcpToolPolicyRule(rule)) own.add(id);
+    }
+  }
+  return own;
+}
+
+/** True for text of printable ASCII only: no character NFKC could fold. */
+const PLAIN_ASCII = /^[\x20-\x7E]*$/;
+
 /** An accepted suggestion counts only while every rule it created still exists. */
 export function acceptedRulesInPlace(suggestion: Pick<McpPolicySuggestion, "status" | "acceptedRuleIds">, ruleIds: ReadonlySet<string>): boolean {
   return suggestion.status === "accepted" && suggestion.acceptedRuleIds.length > 0 && suggestion.acceptedRuleIds.every((id) => ruleIds.has(id));
@@ -180,6 +212,8 @@ export function constraintsFromSummaries(calls: readonly McpToolCallRecord[]): T
   const skipped: Array<{ path: string; reason: McpPolicySuggestionSkipReason }> = [];
   const conditions: McpPolicyCondition[] = [];
   const summaries = calls.map((call) => call.argsSummary ?? null);
+  // Summary format 2 marks no adjusted value: a kept token with characters NFKC could fold may not be the real value.
+  const unmarkedV2 = summaries.map((summary) => summary?.v === 2);
   if (summaries.length === 0 || summaries.some((summary) => summary === null || summary.truncated)) {
     return { conditions, evidence: { constraints, skipped: [{ path: "(arguments)", reason: "not_always_present" }] } };
   }
@@ -207,7 +241,10 @@ export function constraintsFromSummaries(calls: readonly McpToolCallRecord[]): T
       skip(path, "hashed");
       continue;
     }
-    if (type === "string" && present.some((field) => field.adj)) {
+    if (
+      type === "string" &&
+      present.some((field, index) => field.adj || (unmarkedV2[index] && (field.values ?? []).some((value) => typeof value === "string" && !PLAIN_ASCII.test(value))))
+    ) {
       // The kept text is a normalised form of the value: a one_of on it might not match the real value.
       skip(path, "normalised");
       continue;
@@ -353,9 +390,9 @@ export class McpPolicySuggestionService {
     const currentHashes = new Set(current.map((rule) => hashMcpToolPolicyRule(rule)));
     const currentById = new Map(current.map((rule) => [rule.id, rule]));
     const currentIds = new Set(currentById.keys());
-    // Accepted suggestions whose rules are all still in place, by scope and server.
+    // Accepted suggestions whose rules are all still in place, by scope and server, however old.
     const families = new Map<string, McpPolicySuggestion[]>();
-    for (const suggestion of await this.store.listMcpPolicySuggestions({ status: "accepted", limit: 10_000 })) {
+    for (const suggestion of await this.store.listAcceptedMcpPolicySuggestionsForRules([...currentIds])) {
       if (!acceptedRulesInPlace(suggestion, currentIds)) continue;
       const key = suggestionScopeKey(suggestion);
       families.set(key, [...(families.get(key) ?? []), suggestion]);
@@ -466,7 +503,7 @@ export class McpPolicySuggestionService {
           }
           rules = added.map((proposal) => proposal.rule);
           tools = added.map((proposal) => proposal.evidence);
-          ownDenyIds = new Set(familyRules.filter((rule) => rule.effect !== "allow").map((rule) => rule.id));
+          ownDenyIds = scopeOwnDenyIds(family, currentById);
           updates = {
             suggestionIds: family.map((suggestion) => suggestion.id),
             ruleIds: familyRules.map((rule) => rule.id),

@@ -112,7 +112,7 @@ async function setup() {
       ...overrides
     });
   };
-  const call = (method: "GET" | "POST" | "DELETE", url: string, cookie: string, payload?: unknown) =>
+  const call = (method: "GET" | "POST" | "PUT" | "DELETE", url: string, cookie: string, payload?: unknown) =>
     context.app.inject({ method, url, headers: { cookie }, ...(payload !== undefined ? { payload: payload as object } : {}) });
   /** What the enforced rules decide now for a builder in the workflow calling `toolName` on the server. */
   const decide = async (toolName: string) =>
@@ -336,6 +336,139 @@ describe("MCP policy simulation and suggestions API", () => {
     // The update's allows can go first (they carve their own scope's deny, on purpose), then the suggestion.
     expect((await call("POST", `/api/mcp/policies/suggestions/mps_update/enforce`, admin, {})).statusCode).toBe(200);
     expect((await call("POST", `/api/mcp/policies/suggestions/${suggestion.id}/enforce`, admin, {})).statusCode).toBe(200);
+  });
+
+  it("finds an old suggestion's family past the list cap: its lone deny is refused, and it is listed for enforcing", async () => {
+    const { context, admin, call, generateAndAccept, audits } = await setup();
+    const { suggestion, rules } = await generateAndAccept();
+    // More accepted suggestions than the newest-first list returns (500), all newer than the first one.
+    for (let index = 0; index < 501; index += 1) {
+      const at = new Date(Date.now() + (index + 1) * 1000).toISOString();
+      const stored = await context.store.upsertOpenMcpPolicySuggestion({
+        id: `mps_bulk_${index}`,
+        scopeKind: "workflow",
+        scopeId: `wf_bulk_${index}`,
+        scopeName: null,
+        serverId: suggestion.serverId,
+        serverName: null,
+        fingerprint: crypto.createHash("sha256").update(String(index)).digest("hex"),
+        rules: [],
+        evidence: { calls: 20, scopeCalls: 20, roles: ["builder"], tools: [], capped: false },
+        windowDays: 30,
+        windowStart: at,
+        windowEnd: at,
+        callCount: 20,
+        createdBy: null,
+        now: at
+      });
+      await context.store.transitionMcpPolicySuggestion(stored.suggestion.id, { from: "open", to: "accepted", decidedBy: "a", decidedAt: at, acceptedRuleIds: [`mtp_bulk_${index}`] });
+    }
+    expect((await context.store.listMcpPolicySuggestions({ status: "accepted", limit: 10_000 })).map((entry) => entry.id)).not.toContain(suggestion.id);
+
+    const deny = rules.find((rule) => rule.effect === "deny")!;
+    const alone = await call("POST", `/api/mcp/policies/${deny.id}/enforce`, admin, {});
+    expect(alone.statusCode).toBe(409);
+    expect(alone.json<{ error: string }>().error).toMatch(/still in shadow/);
+    expect(await audits("mcp_policy.enforced")).toEqual([]);
+
+    // The UI groups its rules and offers the suggestion's own Enforce: shadow hits and the in-shadow list both hold it.
+    const hits = (await call("GET", "/api/mcp/policies/shadow-hits?days=7", admin)).json<{ shadowHits: { groups: Array<{ suggestionId: string; ruleIds: string[] }> } }>();
+    expect(hits.shadowHits.groups).toEqual([expect.objectContaining({ suggestionId: suggestion.id, ruleIds: expect.arrayContaining(rules.map((rule) => rule.id)) })]);
+    const inShadow = await call("GET", "/api/mcp/policies/suggestions?status=accepted&inShadow=true", admin);
+    expect(inShadow.json<{ suggestions: McpPolicySuggestion[] }>().suggestions.map((entry) => entry.id)).toEqual([suggestion.id]);
+    expect((await call("GET", "/api/mcp/policies/suggestions?status=open&inShadow=true", admin)).statusCode).toBe(400);
+  });
+
+  it("keeps a suggestion's family while any of its rules exists: deleting one allow does not free its deny", async () => {
+    const { admin, call, generateAndAccept, audits } = await setup();
+    const { rules } = await generateAndAccept();
+    const echoAllow = rules.find((rule) => rule.toolPattern === "echo")!;
+    expect((await call("DELETE", `/api/mcp/policies/${echoAllow.id}`, admin)).statusCode).toBeLessThan(300);
+    const deny = rules.find((rule) => rule.effect === "deny")!;
+    const alone = await call("POST", `/api/mcp/policies/${deny.id}/enforce`, admin, {});
+    expect(alone.statusCode).toBe(409);
+    expect(alone.json<{ error: string }>().error).toMatch(/still in shadow: .*calculator/);
+    expect(await audits("mcp_policy.enforced")).toEqual([]);
+  });
+
+  it("re-checks at the write: a deny enforced while the shadow hits were read refuses the enforce", async () => {
+    const { context, admin, call, generateAndAccept, audits } = await setup();
+    const { suggestion } = await generateAndAccept();
+    // Another admin enforces a deny on echo while this enforce reads the shadow hits.
+    const scan = context.store.scanMcpToolCalls.bind(context.store);
+    let raced = false;
+    context.store.scanMcpToolCalls = async (filter) => {
+      if (!raced) {
+        raced = true;
+        await call("POST", "/api/mcp/policies", admin, { name: "Incident: no echo", effect: "deny", toolPattern: "echo" });
+      }
+      return scan(filter);
+    };
+    const enforced = await call("POST", `/api/mcp/policies/suggestions/${suggestion.id}/enforce`, admin, {});
+    expect(raced).toBe(true);
+    expect(enforced.statusCode).toBe(409);
+    expect(enforced.json<{ error: string }>().error).toMatch(/Incident: no echo/);
+    expect((await context.store.listMcpToolPolicies()).filter((rule) => rule.name !== "Incident: no echo").map((rule) => rule.mode)).toEqual(["shadow", "shadow", "shadow"]);
+    expect(await audits("mcp_policy.enforced")).toEqual([]);
+  });
+
+  it("answers 409 when a suggestion's rules were enforced meanwhile", async () => {
+    const { context, admin, call, generateAndAccept, audits } = await setup();
+    const { suggestion, rules } = await generateAndAccept();
+    const scan = context.store.scanMcpToolCalls.bind(context.store);
+    let raced = false;
+    context.store.scanMcpToolCalls = async (filter) => {
+      if (!raced) {
+        raced = true;
+        await context.store.enforceShadowMcpToolPolicies(
+          rules.map((rule) => rule.id),
+          new Date().toISOString()
+        );
+      }
+      return scan(filter);
+    };
+    const enforced = await call("POST", `/api/mcp/policies/suggestions/${suggestion.id}/enforce`, admin, {});
+    expect(raced).toBe(true);
+    expect(enforced.statusCode).toBe(409);
+    expect(enforced.json<{ error: string }>().error).toMatch(/enforced meanwhile/);
+    expect(await audits("mcp_policy.enforced")).toEqual([]);
+  });
+
+  it("stops leaving the scope's own deny out once that deny was edited", async () => {
+    const { context, admin, call, generateAndAccept } = await setup();
+    const { suggestion, rules } = await generateAndAccept();
+    const deny = rules.find((rule) => rule.effect === "deny")!;
+    const stored = await context.store.getMcpPolicySuggestion(suggestion.id);
+    expect(stored?.evidence.acceptedRuleHashes?.[deny.id]).toMatch(/^[0-9a-f]{64}$/);
+    expect((await call("POST", `/api/mcp/policies/suggestions/${suggestion.id}/enforce`, admin, {})).statusCode).toBe(200);
+    // An update of the accepted rules adds an allow for add_label, in shadow.
+    const extra = await context.store.createMcpToolPolicy({ ...rules[1]!, id: "mtp_extra", name: "Least privilege: add_label", toolPattern: "add_label", mode: "shadow" });
+    const update = await context.store.upsertOpenMcpPolicySuggestion({
+      id: "mps_update",
+      scopeKind: "workflow",
+      scopeId: "wf_notes",
+      scopeName: "Release notes",
+      serverId: suggestion.serverId,
+      serverName: null,
+      fingerprint: "e".repeat(64),
+      rules: [],
+      evidence: { calls: 4, scopeCalls: 4, roles: ["builder"], tools: [], capped: false, updates: { suggestionIds: [suggestion.id], ruleIds: rules.map((rule) => rule.id), addedTools: ["add_label"] } },
+      windowDays: 30,
+      windowStart: new Date(Date.now() - 86_400_000).toISOString(),
+      windowEnd: new Date().toISOString(),
+      callCount: 4,
+      createdBy: null,
+      now: new Date().toISOString()
+    });
+    await context.store.transitionMcpPolicySuggestion(update.suggestion.id, { from: "open", to: "accepted", decidedBy: "a", decidedAt: new Date().toISOString(), acceptedRuleIds: [extra.id] });
+    // The accepted deny is widened to every workflow on the server: the update's allow would now carve that.
+    expect((await call("PUT", `/api/mcp/policies/${deny.id}`, admin, { workflowIds: [] })).statusCode).toBe(200);
+    const refused = await call("POST", `/api/mcp/policies/${extra.id}/enforce`, admin, {});
+    expect(refused.statusCode).toBe(409);
+    expect(refused.json<{ error: string }>().error).toMatch(/carve an exception/);
+    // Put back as accepted, it is the scope's own deny again.
+    expect((await call("PUT", `/api/mcp/policies/${deny.id}`, admin, { workflowIds: ["wf_notes"] })).statusCode).toBe(200);
+    expect((await call("POST", `/api/mcp/policies/${extra.id}/enforce`, admin, {})).statusCode).toBe(200);
   });
 
   it("enforces a rule once when two admins enforce it at once", async () => {

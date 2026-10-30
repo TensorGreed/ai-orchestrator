@@ -320,7 +320,8 @@ export function PolicySuggestions({
 
   const load = useCallback(async () => {
     try {
-      const [openResult, acceptedResult] = await Promise.all([fetchMcpPolicySuggestions("open"), fetchMcpPolicySuggestions("accepted")]);
+      // Accepted suggestions still in shadow, however old: the newest-first list is capped.
+      const [openResult, acceptedResult] = await Promise.all([fetchMcpPolicySuggestions("open"), fetchMcpPolicySuggestions("accepted", { inShadow: true })]);
       setOpen(openResult.suggestions);
       setAccepted(acceptedResult.suggestions);
     } catch (err) {

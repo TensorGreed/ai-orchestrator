@@ -738,6 +738,12 @@ export class PostgresStore implements Store {
   async listMcpPolicySuggestions(...args: Parameters<Store["listMcpPolicySuggestions"]>): ReturnType<Store["listMcpPolicySuggestions"]> {
     return mcp.listMcpPolicySuggestions(this.ctx, ...args);
   }
+
+  async listAcceptedMcpPolicySuggestionsForRules(
+    ...args: Parameters<Store["listAcceptedMcpPolicySuggestionsForRules"]>
+  ): ReturnType<Store["listAcceptedMcpPolicySuggestionsForRules"]> {
+    return mcp.listAcceptedMcpPolicySuggestionsForRules(this.ctx, ...args);
+  }
   async getMcpPolicySuggestion(...args: Parameters<Store["getMcpPolicySuggestion"]>): ReturnType<Store["getMcpPolicySuggestion"]> {
     return mcp.getMcpPolicySuggestion(this.ctx, ...args);
   }

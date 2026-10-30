@@ -195,4 +195,68 @@ describeStoreContract("store contract: MCP policy suggestions and tool-call scan
     expect((await store.listMcpToolPolicies()).map((rule) => rule.mode)).toEqual(["enforce", "enforce", "enforce"]);
     expect(await store.enforceShadowMcpToolPolicies([], at(3))).toEqual([]);
   });
+
+  it("runs the enforce guard on the rules and families as they are at the write, and writes nothing when it refuses", async () => {
+    const store = ctx.store();
+    const base = {
+      name: null,
+      description: null,
+      projectId: null,
+      roles: [],
+      serverId: null,
+      annotationHint: null,
+      kind: "tool" as const,
+      enabled: true,
+      conditions: null,
+      workflowIds: [],
+      clientIds: []
+    };
+    await store.createMcpToolPolicy({ ...base, id: "r_deny", effect: "deny", toolPattern: "*", mode: "shadow" });
+    await store.createMcpToolPolicy({ ...base, id: "r_allow", effect: "allow", toolPattern: "a", mode: "shadow" });
+    await store.upsertOpenMcpPolicySuggestion(suggestion());
+    await store.transitionMcpPolicySuggestion("mps_1", { from: "open", to: "accepted", decidedBy: "a", decidedAt: at(1), acceptedRuleIds: ["r_deny", "r_allow"] });
+    const seen: Array<{ rules: string[]; accepted: string[] }> = [];
+    await expect(
+      store.enforceShadowMcpToolPolicies(["r_deny"], at(2), {
+        guard: (state) => {
+          seen.push({ rules: state.rules.map((rule) => rule.id), accepted: state.accepted.map((entry) => entry.id) });
+          return "refused for the test";
+        }
+      })
+    ).rejects.toMatchObject({ name: "McpPolicyEnforceRefusedError", statusCode: 409, message: "refused for the test" });
+    expect(seen).toEqual([{ rules: ["r_deny", "r_allow"], accepted: ["mps_1"] }]);
+    expect((await store.listMcpToolPolicies()).map((rule) => rule.mode)).toEqual(["shadow", "shadow"]);
+    const enforced = await store.enforceShadowMcpToolPolicies(["r_deny", "r_allow"], at(3), { guard: () => null });
+    expect(enforced.map((rule) => rule.mode)).toEqual(["enforce", "enforce"]);
+  });
+
+  it("finds accepted suggestions by rule id, or a rule's whole scope, with no cap", async () => {
+    const store = ctx.store();
+    const accept = async (id: string, scopeId: string, minutes: number, ruleIds: string[]) => {
+      await store.upsertOpenMcpPolicySuggestion(suggestion({ id, scopeId, now: at(minutes) }));
+      await store.transitionMcpPolicySuggestion(id, { from: "open", to: "accepted", decidedBy: "a", decidedAt: at(minutes), acceptedRuleIds: ruleIds });
+    };
+    await accept("mps_old", "wf_1", 1, ["r_deny", "r_allow"]);
+    await accept("mps_update", "wf_1", 2, ["r_extra"]);
+    await accept("mps_other", "wf_2", 3, ["r_other"]);
+    // More accepted suggestions than one newest-first page holds.
+    for (let index = 0; index < 501; index += 1) await accept(`mps_bulk_${String(index).padStart(3, "0")}`, `wf_bulk_${index}`, 10 + index, [`r_bulk_${index}`]);
+    await store.upsertOpenMcpPolicySuggestion(suggestion({ id: "mps_open", scopeId: "wf_1", now: at(900) }));
+
+    expect((await store.listAcceptedMcpPolicySuggestionsForRules(["r_allow"])).map((entry) => entry.id)).toEqual(["mps_old"]);
+    expect((await store.listAcceptedMcpPolicySuggestionsForRules(["r_allow"], { sameScope: true })).map((entry) => entry.id)).toEqual(["mps_old", "mps_update"]);
+    expect((await store.listAcceptedMcpPolicySuggestionsForRules(["r_extra", "r_other"])).map((entry) => entry.id)).toEqual(["mps_update", "mps_other"]);
+    expect(await store.listAcceptedMcpPolicySuggestionsForRules(["r_none"])).toEqual([]);
+    expect(await store.listAcceptedMcpPolicySuggestionsForRules([])).toEqual([]);
+    // Evidence given on a transition replaces the stored evidence.
+    const recorded = await store.transitionMcpPolicySuggestion("mps_old", {
+      from: "accepted",
+      to: "accepted",
+      decidedBy: "a",
+      decidedAt: at(1),
+      evidence: { ...evidence, acceptedRuleHashes: { r_deny: "f".repeat(64) } }
+    });
+    expect(recorded?.evidence.acceptedRuleHashes).toEqual({ r_deny: "f".repeat(64) });
+    expect(recorded?.acceptedRuleIds).toEqual(["r_deny", "r_allow"]);
+  });
 });

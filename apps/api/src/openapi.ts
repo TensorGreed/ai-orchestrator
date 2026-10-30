@@ -2269,9 +2269,13 @@ export const openApiSpec = {
     "/api/mcp/policies/suggestions": {
       get: {
         tags: ["MCP"],
-        summary: "Least-privilege rule suggestions (admin); status open (default), accepted, dismissed or all",
-        parameters: [{ name: "status", in: "query", required: false, schema: { type: "string", enum: ["open", "accepted", "dismissed", "all"] } }],
-        responses: { "200": { description: "Suggestions" } }
+        summary:
+          "Least-privilege rule suggestions (admin), newest first and capped; status open (default), accepted, dismissed or all. With status=accepted and inShadow=true: every accepted suggestion with a rule still in shadow, however old (no cap).",
+        parameters: [
+          { name: "status", in: "query", required: false, schema: { type: "string", enum: ["open", "accepted", "dismissed", "all"] } },
+          { name: "inShadow", in: "query", required: false, schema: { type: "string", enum: ["true", "false"] } }
+        ],
+        responses: { "200": { description: "Suggestions" }, "400": { description: "inShadow=true without status=accepted" } }
       }
     },
     "/api/mcp/policies/suggestions/generate": {
@@ -2319,7 +2323,7 @@ export const openApiSpec = {
         responses: {
           "200": { description: "Enforced rules" },
           "404": { description: "Not found" },
-          "409": { description: "Not accepted, nothing in shadow, an update of the scope's rules still in shadow, or an allow would carve a rule enforced now" }
+          "409": { description: "Not accepted, nothing in shadow, an update of the scope's rules still in shadow, an allow would carve a rule enforced now, or its rules were enforced meanwhile" }
         }
       }
     },

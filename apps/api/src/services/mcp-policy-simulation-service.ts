@@ -44,11 +44,23 @@ export const MCP_POLICY_SCAN_PAGE = 1_000;
 /** Most workflow / client groups listed in a simulation result. */
 export const MCP_POLICY_SIMULATION_MAX_GROUPS = 100;
 /**
- * Most evaluation work one simulation may do: per call, the readings tried (2^undecided rules) times the rules in
- * the call's scope, summed. 50,000 calls with a few rules each use well under a tenth of it; a draft built to make
- * every call try 256 readings of hundreds of rules stops early instead of holding the event loop.
+ * Most evaluation work one simulation may do: per call and per reading tried (2^undecided rules), the rules in the
+ * call's scope plus the decision work of both outcomes (matched deny and require_approval rules times matched allow
+ * and require_approval rules, `decisionWork`), summed. About 2 to 3 s of CPU. 50,000 calls each matching 20 denies
+ * and 20 allows use under half of it; a draft built to make every call try 256 readings of hundreds of rules stops
+ * after a few calls (`cappedReason: "work_budget"`).
  */
-export const MCP_POLICY_SIMULATION_WORK_BUDGET = 20_000_000;
+export const MCP_POLICY_SIMULATION_WORK_BUDGET = 100_000_000;
+/**
+ * Wall-clock limit of one simulation's scan, whatever the work count says (a slow host, a cost the count misses):
+ * past it the simulation stops with `cappedReason: "work_budget"`.
+ */
+export const MCP_POLICY_SIMULATION_DEADLINE_MS = 5_000;
+/**
+ * A scan hands the event loop back (setImmediate) once it has run this long, so other requests are served while a
+ * simulation, a shadow-hit count or a suggestion run reads its calls.
+ */
+export const MCP_POLICY_SCAN_SLICE_MS = 20;
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -116,6 +128,9 @@ export function annotationsAtCall(
 /** A visitor returns false to stop the scan. */
 type ScanVisitor = (call: McpToolCallRecord) => boolean | void;
 
+/** Hands the event loop back: timers, I/O and other requests run before the scan goes on. */
+const yieldToEventLoop = () => new Promise<void>((resolve) => setImmediate(resolve));
+
 function laterThan(a: string | null | undefined, b: string): boolean {
   if (!a) return false;
   const left = Date.parse(a);
@@ -133,14 +148,28 @@ export class McpPolicySimulationService {
   private readonly pageSize: number;
 
   private readonly workBudget: number;
+  private readonly deadlineMs: number;
+  /** Monotonic milliseconds, for the scan's time slices and the simulation deadline. */
+  private readonly clock: () => number;
 
-  constructor(options: { store: Store; hashKey: Uint8Array; now?: () => Date; scanCap?: number; pageSize?: number; workBudget?: number }) {
+  constructor(options: {
+    store: Store;
+    hashKey: Uint8Array;
+    now?: () => Date;
+    scanCap?: number;
+    pageSize?: number;
+    workBudget?: number;
+    deadlineMs?: number;
+    clock?: () => number;
+  }) {
     this.store = options.store;
     this.hashKey = options.hashKey;
     this.now = options.now ?? (() => new Date());
     this.scanCap = options.scanCap ?? MCP_POLICY_SCAN_CAP;
     this.pageSize = options.pageSize ?? MCP_POLICY_SCAN_PAGE;
     this.workBudget = options.workBudget ?? MCP_POLICY_SIMULATION_WORK_BUDGET;
+    this.deadlineMs = options.deadlineMs ?? MCP_POLICY_SIMULATION_DEADLINE_MS;
+    this.clock = options.clock ?? (() => performance.now());
   }
 
   /** The most calls one scan reads. */
@@ -148,15 +177,30 @@ export class McpPolicySimulationService {
     return this.scanCap;
   }
 
-  /** Reads the window newest first, page by page, until it ends, the cap is reached or the visitor returns false. */
-  async scan(filter: Omit<Parameters<Store["scanMcpToolCalls"]>[0], "before" | "limit">, visit: ScanVisitor): Promise<ScanOutcome> {
+  /**
+   * Reads the window newest first, page by page, until it ends, the cap is reached, the visitor returns false or
+   * `deadline` (on the service clock) passes; the last two stop it (`stopped`). It hands the event loop back every
+   * time slice, so a long scan never holds it.
+   */
+  async scan(
+    filter: Omit<Parameters<Store["scanMcpToolCalls"]>[0], "before" | "limit">,
+    visit: ScanVisitor,
+    options: { deadline?: number } = {}
+  ): Promise<ScanOutcome> {
     let before: { startedAt: string; id: string } | null = null;
     let scanned = 0;
     let oldest: string | null = null;
+    let sliceStart = this.clock();
     for (;;) {
       const page = await this.store.scanMcpToolCalls({ ...filter, before, limit: this.pageSize });
       for (const call of page) {
         if (scanned >= this.scanCap) return { scanned, capped: true, stopped: false, oldestScannedAt: oldest };
+        const elapsed = this.clock();
+        if (options.deadline !== undefined && elapsed >= options.deadline) return { scanned, capped: true, stopped: true, oldestScannedAt: oldest };
+        if (elapsed - sliceStart >= MCP_POLICY_SCAN_SLICE_MS) {
+          await yieldToEventLoop();
+          sliceStart = this.clock();
+        }
         scanned += 1;
         oldest = call.startedAt;
         if (visit(call) === false) return { scanned, capped: true, stopped: true, oldestScannedAt: oldest };
@@ -256,6 +300,7 @@ export class McpPolicySimulationService {
     const pending: Array<{ bucket: McpPolicySimulationBucketName; example: Omit<McpPolicySimulationExample, "workflowName" | "clientName" | "serverName"> }> = [];
     const collected = emptyMcpPolicySimulationCounts();
     let work = 0;
+    const deadline = this.clock() + this.deadlineMs;
     const outcome = await this.scan(
       {
         since: since.toISOString(),
@@ -348,7 +393,8 @@ export class McpPolicySimulationService {
             }
           });
         }
-      }
+      },
+      { deadline }
     );
 
     const names = await this.names();
@@ -415,7 +461,8 @@ export class McpPolicySimulationService {
     for (const rule of rules) {
       if (isShadow(rule)) hits.set(rule.id, { ruleId: rule.id, matched: 0, wouldChange: 0, lastMatchedAt: null, lastWouldChangeAt: null });
     }
-    const accepted = hits.size > 0 ? await this.store.listMcpPolicySuggestions({ status: "accepted" }) : [];
+    // Every accepted suggestion holding a shadow rule, however old (no list cap).
+    const accepted = hits.size > 0 ? await this.store.listAcceptedMcpPolicySuggestionsForRules([...hits.keys()]) : [];
     const groups: Array<McpPolicyShadowHitGroup & { members: Set<string> }> = [];
     for (const suggestion of accepted) {
       const ruleIds = suggestion.acceptedRuleIds.filter((id) => hits.has(id));

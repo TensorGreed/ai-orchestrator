@@ -3027,9 +3027,14 @@ export async function fetchMcpPolicyShadowHits(days = 7) {
   return apiRequest<{ shadowHits: McpPolicyShadowHits }>(`/api/mcp/policies/shadow-hits?days=${encodeURIComponent(String(days))}`);
 }
 
-/** Phase 12.4 — least-privilege suggestions (admin). */
-export async function fetchMcpPolicySuggestions(status: "open" | "accepted" | "dismissed" | "all" = "open") {
-  return apiRequest<{ suggestions: McpPolicySuggestion[] }>(`/api/mcp/policies/suggestions?status=${encodeURIComponent(status)}`);
+/**
+ * Phase 12.4 — least-privilege suggestions (admin), newest first and capped. `inShadow` (accepted only) lists every
+ * accepted suggestion with a rule still in shadow instead, however old.
+ */
+export async function fetchMcpPolicySuggestions(status: "open" | "accepted" | "dismissed" | "all" = "open", options: { inShadow?: boolean } = {}) {
+  return apiRequest<{ suggestions: McpPolicySuggestion[] }>(
+    `/api/mcp/policies/suggestions?status=${encodeURIComponent(status)}${options.inShadow ? "&inShadow=true" : ""}`
+  );
 }
 
 export async function generateMcpPolicySuggestions(payload: { minCalls?: number } = {}) {

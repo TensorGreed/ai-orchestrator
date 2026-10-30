@@ -268,6 +268,12 @@ export interface McpToolCallScanFilter {
   withPolicyDecision?: boolean;
 }
 
+/**
+ * Phase 12.4 — why shadow rules cannot be enforced now, or null, from the rules and their accepted suggestion families
+ * as they are at the write. Synchronous: nothing may run between this check and the write.
+ */
+export type McpPolicyEnforceGuard = (state: { rules: McpToolPolicyRule[]; accepted: McpPolicySuggestion[] }) => string | null;
+
 /** Phase 12.4 — what `upsertOpenMcpPolicySuggestion` writes. */
 export interface McpPolicySuggestionWrite {
   id: string;
@@ -522,14 +528,27 @@ export interface Store {
   listDecidedMcpPolicySuggestions(filter: { scopeKind: "workflow" | "client"; scopeId: string; serverId: string; fingerprint: string }): Promise<McpPolicySuggestion[]>;
   /** Phase 12.4 — newest first; `status` absent lists every status. */
   listMcpPolicySuggestions(filter?: { status?: McpPolicySuggestionStatus; limit?: number }): Promise<McpPolicySuggestion[]>;
+  /**
+   * Phase 12.4 — accepted suggestions holding any of `ruleIds` in their accepted rule ids, with no cap, oldest first.
+   * With `sameScope`, every accepted suggestion of those suggestions' scopes (workflow or client, and server): a
+   * rule's family, whatever its age.
+   */
+  listAcceptedMcpPolicySuggestionsForRules(ruleIds: readonly string[], options?: { sameScope?: boolean }): Promise<McpPolicySuggestion[]>;
   getMcpPolicySuggestion(id: string): Promise<McpPolicySuggestion | null>;
   /**
    * Phase 12.4 — move a suggestion from `from` to `to` in one conditional update; null when it was not in `from`
-   * (someone else decided it first). `acceptedRuleIds` replaces the stored list when given.
+   * (someone else decided it first). `acceptedRuleIds` and `evidence` replace the stored values when given.
    */
   transitionMcpPolicySuggestion(
     id: string,
-    input: { from: McpPolicySuggestionStatus; to: McpPolicySuggestionStatus; decidedBy: string | null; decidedAt: string | null; acceptedRuleIds?: string[] }
+    input: {
+      from: McpPolicySuggestionStatus;
+      to: McpPolicySuggestionStatus;
+      decidedBy: string | null;
+      decidedAt: string | null;
+      acceptedRuleIds?: string[];
+      evidence?: McpPolicySuggestionEvidence;
+    }
   ): Promise<McpPolicySuggestion | null>;
   getMcpOAuthConnection(serverId: string): Promise<McpOAuthConnectionRecord | null>;
   upsertMcpOAuthConnection(record: Omit<McpOAuthConnectionRecord, "updatedAt">): Promise<McpOAuthConnectionRecord>;
@@ -557,9 +576,12 @@ export interface Store {
   /**
    * Phase 12.4 — switch these rules from shadow to enforce in one transaction, each only while it is still in shadow
    * (`WHERE mode = 'shadow'`). Returns the rules that changed, in the order given; two admins enforcing at once
-   * change each rule once.
+   * change each rule once. `guard` runs inside the same transaction, on the rules and the rules' accepted suggestion
+   * families (`listAcceptedMcpPolicySuggestionsForRules(ids, { sameScope: true })`) as they are at the write; a reason
+   * it returns refuses the write with McpPolicyEnforceRefusedError. On Postgres the transaction first locks
+   * `mcp_tool_policies` against writes, so no rule changes between the guard and the update.
    */
-  enforceShadowMcpToolPolicies(ids: readonly string[], now: string): Promise<McpToolPolicyRule[]>;
+  enforceShadowMcpToolPolicies(ids: readonly string[], now: string, options?: { guard?: McpPolicyEnforceGuard }): Promise<McpToolPolicyRule[]>;
   deleteMcpToolPolicy(id: string): Promise<boolean>;
   /**
    * Phase 12.4 — a gateway call a require_approval rule held back. Expired pending requests are marked expired

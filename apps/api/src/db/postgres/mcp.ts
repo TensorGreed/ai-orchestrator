@@ -31,6 +31,7 @@ import {
   type McpServerCapabilities,
   type McpToolClassificationOverride,
   type McpToolHintCondition,
+  type McpPolicySuggestion,
   type McpToolPolicyRule,
   type McpToolset,
   type McpToolsetMember,
@@ -67,6 +68,7 @@ import { mcpGatewayApprovalRetentionCutoff, type McpGatewayApprovalCreateResult,
 import { parseJsonSafe, toNum, toStr } from "./helpers.js";
 import type { PgContext } from "./context.js";
 import { clampLimit, LIMIT_MAX } from "../store-limits.js";
+import { McpPolicyEnforceRefusedError } from "../store-errors.js";
 
 type Row = Record<string, unknown>;
 type Queryable = Pick<PoolClient, "query">;
@@ -779,6 +781,39 @@ export async function listMcpPolicySuggestions(
   return result.map(mapMcpPolicySuggestion);
 }
 
+async function listAcceptedMcpPolicySuggestionsForRulesOn(
+  db: Queryable,
+  ruleIds: readonly string[],
+  options: { sameScope?: boolean }
+): Promise<McpPolicySuggestion[]> {
+  const ids = [...new Set(ruleIds)];
+  if (ids.length === 0) return [];
+  // `holding` is an accepted suggestion with one of the rule ids; with sameScope, it only names the scope.
+  const match = options.sameScope
+    ? `holding.scope_kind = s.scope_kind AND holding.scope_id = s.scope_id AND holding.server_id = s.server_id`
+    : `holding.id = s.id`;
+  const result = await rows(
+    db,
+    `SELECT s.* FROM mcp_policy_suggestions s
+      WHERE s.status = 'accepted'
+        AND EXISTS (
+          SELECT 1 FROM mcp_policy_suggestions holding
+           CROSS JOIN LATERAL jsonb_array_elements_text(holding.accepted_rule_ids_json::jsonb) AS accepted(rule_id)
+           WHERE holding.status = 'accepted' AND ${match} AND accepted.rule_id = ANY($1::text[])
+        )
+      ORDER BY s.created_at ASC, s.id COLLATE "C" ASC`,
+    [ids]
+  );
+  return result.map(mapMcpPolicySuggestion);
+}
+
+export async function listAcceptedMcpPolicySuggestionsForRules(
+  ctx: PgContext,
+  ...[ruleIds, options = {}]: Parameters<Store["listAcceptedMcpPolicySuggestionsForRules"]>
+): ReturnType<Store["listAcceptedMcpPolicySuggestionsForRules"]> {
+  return listAcceptedMcpPolicySuggestionsForRulesOn(ctx.pool, ruleIds, options);
+}
+
 export async function getMcpPolicySuggestion(ctx: PgContext, ...[id]: Parameters<Store["getMcpPolicySuggestion"]>): ReturnType<Store["getMcpPolicySuggestion"]> {
   const row = await one(ctx.pool, `SELECT * FROM mcp_policy_suggestions WHERE id = $1`, [id]);
   return row ? mapMcpPolicySuggestion(row) : null;
@@ -792,7 +827,8 @@ export async function transitionMcpPolicySuggestion(
     ctx.pool,
     `UPDATE mcp_policy_suggestions
         SET status = $1, decided_by = $2, decided_at = $3, updated_at = $4,
-            accepted_rule_ids_json = COALESCE($5, accepted_rule_ids_json)
+            accepted_rule_ids_json = COALESCE($5, accepted_rule_ids_json),
+            evidence_json = COALESCE($8, evidence_json)
       WHERE id = $6 AND status = $7
       RETURNING *`,
     [
@@ -802,7 +838,8 @@ export async function transitionMcpPolicySuggestion(
       input.decidedAt ?? new Date().toISOString(),
       input.acceptedRuleIds === undefined ? null : JSON.stringify(input.acceptedRuleIds),
       id,
-      input.from
+      input.from,
+      input.evidence === undefined ? null : JSON.stringify(input.evidence)
     ]
   );
   return row ? mapMcpPolicySuggestion(row) : null;
@@ -1147,16 +1184,29 @@ export async function updateMcpToolPolicy(ctx: PgContext, ...[id, patch]: Parame
 
 export async function enforceShadowMcpToolPolicies(
   ctx: PgContext,
-  ...[ids, now]: Parameters<Store["enforceShadowMcpToolPolicies"]>
+  ...[ids, now, options = {}]: Parameters<Store["enforceShadowMcpToolPolicies"]>
 ): ReturnType<Store["enforceShadowMcpToolPolicies"]> {
   const unique = [...new Set(ids)];
   if (unique.length === 0) return [];
-  // One statement: every rule still in shadow switches together, or none does.
-  const rows = await ctx.query<Row>(
-    `UPDATE mcp_tool_policies SET mode = 'enforce', updated_at = $1 WHERE id = ANY($2::text[]) AND mode = 'shadow' RETURNING *`,
-    [now, unique]
-  );
-  const byId = new Map(rows.map((row) => [toStr(row.id), mapMcpToolPolicy(row)]));
+  const updated = await ctx.withTransaction(async (client) => {
+    if (options.guard) {
+      // No rule may be created, changed or deleted between the guard and the update: SHARE ROW EXCLUSIVE blocks
+      // every other write to the table (and a second enforce) until this transaction ends, and leaves reads alone.
+      await client.query(`LOCK TABLE mcp_tool_policies IN SHARE ROW EXCLUSIVE MODE`);
+      const current = await rows(client, `SELECT * FROM mcp_tool_policies ORDER BY created_at ASC, ${INSERTION_ASC}`);
+      const refusal = options.guard({
+        rules: current.map(mapMcpToolPolicy),
+        accepted: await listAcceptedMcpPolicySuggestionsForRulesOn(client, unique, { sameScope: true })
+      });
+      if (refusal !== null) throw new McpPolicyEnforceRefusedError(refusal);
+    }
+    // One statement: every rule still in shadow switches together, or none does.
+    return rows(client, `UPDATE mcp_tool_policies SET mode = 'enforce', updated_at = $1 WHERE id = ANY($2::text[]) AND mode = 'shadow' RETURNING *`, [
+      now,
+      unique
+    ]);
+  });
+  const byId = new Map(updated.map((row) => [toStr(row.id), mapMcpToolPolicy(row)]));
   return unique.flatMap((id) => {
     const rule = byId.get(id);
     return rule ? [rule] : [];

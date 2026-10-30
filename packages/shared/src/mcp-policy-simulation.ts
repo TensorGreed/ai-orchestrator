@@ -138,7 +138,7 @@ export interface McpPolicySimulationResult {
   /**
    * True when the scan stopped before the start of the window; `oldestScannedAt` says how far it got and
    * `cappedReason` why: `scan_cap` (it read `scanCap` calls) or `work_budget` (the rules and calls needed more
-   * evaluation work than one simulation may do).
+   * evaluation work, or more time, than one simulation may take).
    */
   capped: boolean;
   cappedReason?: "scan_cap" | "work_budget";
@@ -187,7 +187,9 @@ export const mcpPolicySuggestionAcceptSchema = z
 
 export const mcpPolicySuggestionListQuerySchema = z
   .object({
-    status: z.enum(["open", "accepted", "dismissed", "all"]).optional()
+    status: z.enum(["open", "accepted", "dismissed", "all"]).optional(),
+    /** With `status=accepted`: every accepted suggestion with a rule still in shadow, however old (no list cap). */
+    inShadow: z.enum(["true", "false"]).optional()
   })
   .strict();
 
@@ -252,6 +254,11 @@ export interface McpPolicySuggestionEvidence {
   updates?: McpPolicySuggestionUpdate;
   /** Servers configured inline share their adapter id, so these rules cover every inline server of that adapter. */
   inlineAdapter?: boolean;
+  /**
+   * Set when accepted: each created rule's canonical hash (rule id to hash). The scope's own deny is left out of the
+   * tighten-only checks only while it still hashes the same, so a deny edited into something else counts again.
+   */
+  acceptedRuleHashes?: Record<string, string>;
 }
 
 export interface McpPolicySuggestion {

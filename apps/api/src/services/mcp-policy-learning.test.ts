@@ -8,7 +8,7 @@ import { toolArgumentHashKeyId } from "@ai-orchestrator/mcp-sdk";
 import { createTestStore, type TestStore } from "../test-support/test-store.js";
 import type { McpToolCallWrite } from "../db/database.js";
 import { McpPolicySimulationService, annotationsAtCall } from "./mcp-policy-simulation-service.js";
-import { McpPolicySuggestionError, McpPolicySuggestionService, callReachedServer, constraintsFromSummaries } from "./mcp-policy-suggestion-service.js";
+import { McpPolicySuggestionError, McpPolicySuggestionService, acceptedRuleHashes, callReachedServer, constraintsFromSummaries } from "./mcp-policy-suggestion-service.js";
 
 const NOW = new Date("2026-10-30T12:00:00.000Z");
 const HOUR = 60 * 60 * 1000;
@@ -152,6 +152,49 @@ describe("policy simulation", () => {
     expect((await simulation().simulate({ windowDays: 7, addRule: denyDocs })).cappedReason).toBeUndefined();
   });
 
+  /** Rules built to be costly: 8 the summary cannot decide (256 readings each call), and `size` denies and allows that all match. */
+  async function costlyRules(size: number) {
+    for (let index = 0; index < 8; index += 1) {
+      await test.store.createMcpToolPolicy(rule({ id: `u${index}`, effect: "deny", conditions: { all: [{ path: "title", op: "starts_with", value: `x${index}` }] } }));
+    }
+    for (let index = 0; index < size; index += 1) {
+      await test.store.createMcpToolPolicy(rule({ id: `d${index}`, effect: "deny", roles: ["builder", "operator"], description: `d${index}` }));
+      await test.store.createMcpToolPolicy(rule({ id: `a${index}`, effect: "allow", description: `a${index}` }));
+    }
+    for (let index = 0; index < 40; index += 1) await record({ argsSummary: summary({ title: { type: "string", hashes: ["0".repeat(16)], len: "33-128" } }) });
+  }
+
+  it("charges the decision work: a costly rule set stops at the work budget, and other work runs meanwhile", async () => {
+    await costlyRules(96);
+    let ticks = 0;
+    const timer = setInterval(() => (ticks += 1), 5);
+    const started = performance.now();
+    let ticksWhileRunning = 0;
+    const result = await new McpPolicySimulationService({ store: test.store, hashKey, now: () => NOW, deadlineMs: 60_000 })
+      .simulate({ windowDays: 7, addRule: denyDocs })
+      .finally(() => {
+        ticksWhileRunning = ticks;
+        clearInterval(timer);
+      });
+    expect(result).toMatchObject({ capped: true, cappedReason: "work_budget" });
+    expect(result.scanned).toBeLessThan(40);
+    expect(performance.now() - started).toBeLessThan(10_000);
+    // The scan handed the event loop back: timers fired while it ran.
+    expect(ticksWhileRunning).toBeGreaterThan(0);
+  });
+
+  it("stops at its wall-clock deadline whatever the work count says", async () => {
+    await costlyRules(48);
+    const started = performance.now();
+    const result = await new McpPolicySimulationService({ store: test.store, hashKey, now: () => NOW, workBudget: Number.MAX_SAFE_INTEGER, deadlineMs: 100 }).simulate({
+      windowDays: 7,
+      addRule: denyDocs
+    });
+    expect(result).toMatchObject({ capped: true, cappedReason: "work_budget" });
+    expect(result.scanned).toBeLessThan(40);
+    expect(performance.now() - started).toBeLessThan(3_000);
+  });
+
   it("does not read annotations from a snapshot taken, or a mark set, after the call", () => {
     const snapshot = { capturedAt: ago(5), annotations: { readOnlyHint: true } };
     expect(annotationsAtCall(snapshot, null, ago(1))).toEqual({ annotations: { readOnlyHint: true }, manualReadOnly: null });
@@ -272,6 +315,22 @@ describe("constraints from summaries", () => {
     });
   });
 
+  it("proposes no one_of from format 2 text outside plain ASCII (it may be a normalised form)", () => {
+    const v2 = (fields: Array<ToolArgumentSummary["fields"]>) => fields.map((entry) => ({ argsSummary: { v: 2, fields: entry } }) as never);
+    const { conditions, evidence } = constraintsFromSummaries(
+      v2([
+        { repo: { type: "string", values: ["ｄocs"] }, env: { type: "string", values: ["prod"] } },
+        { repo: { type: "string", values: ["ｄocs"] }, env: { type: "string", values: ["prod"] } }
+      ])
+    );
+    expect(conditions).toEqual([{ path: "env", op: "one_of", value: ["prod"] }]);
+    expect(evidence.skipped).toEqual([{ path: "repo", reason: "normalised" }]);
+    // Format 3 marks what it normalised: an unmarked token is the real value.
+    expect(constraintsFromSummaries(calls([{ repo: { type: "string", values: ["ｄocs"] } }, { repo: { type: "string", values: ["ｄocs"] } }])).conditions).toEqual([
+      { path: "repo", op: "one_of", value: ["ｄocs"] }
+    ]);
+  });
+
   it("proposes nothing when a summary was truncated or missing", () => {
     expect(constraintsFromSummaries([{ argsSummary: { v: 2, fields: {}, truncated: true } } as never]).conditions).toEqual([]);
     expect(constraintsFromSummaries([{ argsSummary: null } as never]).conditions).toEqual([]);
@@ -371,15 +430,25 @@ describe("least-privilege suggestions", () => {
   });
 
   /** Accepts a suggestion the way the API does: its rules in shadow, their ids on the row. */
+  /** Accepts as the API does: the rules in shadow, their hashes in the evidence. */
   async function acceptAll(suggestionId: string) {
     const suggestion = (await test.store.getMcpPolicySuggestion(suggestionId))!;
-    const ids: string[] = [];
+    const created: McpToolPolicyRule[] = [];
     for (const [index, entry] of suggestion.rules.entries()) {
       const id = `mtp_${suggestionId}_${index}`;
-      await test.store.createMcpToolPolicy(rule({ ...entry, id, mode: "shadow", annotationHint: null, enabled: true, workflowIds: entry.workflowIds ?? [], clientIds: entry.clientIds ?? [] }));
-      ids.push(id);
+      created.push(
+        await test.store.createMcpToolPolicy(rule({ ...entry, id, mode: "shadow", annotationHint: null, enabled: true, workflowIds: entry.workflowIds ?? [], clientIds: entry.clientIds ?? [] }))
+      );
     }
-    await test.store.transitionMcpPolicySuggestion(suggestionId, { from: "open", to: "accepted", decidedBy: "admin", decidedAt: NOW.toISOString(), acceptedRuleIds: ids });
+    const ids = created.map((entry) => entry.id);
+    await test.store.transitionMcpPolicySuggestion(suggestionId, {
+      from: "open",
+      to: "accepted",
+      decidedBy: "admin",
+      decidedAt: NOW.toISOString(),
+      acceptedRuleIds: ids,
+      evidence: { ...suggestion.evidence, acceptedRuleHashes: acceptedRuleHashes(created) }
+    });
     return ids;
   }
 
@@ -404,6 +473,12 @@ describe("least-privilege suggestions", () => {
     const [update] = result.suggestions;
     expect(update!.rules.map((entry) => [entry.effect, entry.toolPattern])).toEqual([["allow", "add_label"]]);
     expect(update!.evidence.updates).toEqual({ suggestionIds: [first!.id], ruleIds: ids, addedTools: ["add_label"] });
+
+    // The scope's own deny counts again once it was edited (here: widened to every workflow on the server).
+    const ownDeny = ids.find((id) => id.endsWith("_0"))!;
+    await test.store.updateMcpToolPolicy(ownDeny, { workflowIds: [] });
+    expect((await service().generate({ createdBy: null })).skipped).toEqual([expect.objectContaining({ reason: "would_loosen" })]);
+    await test.store.updateMcpToolPolicy(ownDeny, { workflowIds: ["wf_notes"] });
 
     // Another deny that the new allow would carve still counts.
     await test.store.createMcpToolPolicy(rule({ id: "mtp_no_labels", effect: "deny", toolPattern: "add_label" }));

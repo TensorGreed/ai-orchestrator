@@ -11,6 +11,7 @@ import type {
   Folder,
   McpPolicyRole,
   McpPolicySuggestion,
+  McpPolicySuggestionEvidence,
   McpPolicySuggestionStatus,
   McpClient,
   McpCassette,
@@ -80,7 +81,7 @@ import {
 import { isEmptyDataLabels, labelsForUntrackedSave, mergeDataLabels, parseStoredDataLabels, releaseGateRestrictsToAdmins, type DataLabels } from "@ai-orchestrator/shared";
 import type { McpToolPolicySubject, ToolArgumentSummary } from "@ai-orchestrator/shared";
 import { queuedRunTimeoutMs, STUCK_JOB_MARGIN_MS } from "./queue-timeouts.js";
-import { AuditExportCursorMovedError, isForeignKeyViolation, ProjectNotEmptyError, StoreReferenceMissingError, ReleaseGateEnforcedError } from "./store-errors.js";
+import { AuditExportCursorMovedError, isForeignKeyViolation, McpPolicyEnforceRefusedError, ProjectNotEmptyError, StoreReferenceMissingError, ReleaseGateEnforcedError } from "./store-errors.js";
 import { clampLimit, LIMIT_MAX } from "./store-limits.js";
 import { mcpGatewayApprovalRetentionCutoff } from "./store.js";
 import {
@@ -108,6 +109,7 @@ import type {
   McpGatewayApprovalCallKey,
   McpGatewayApprovalCreate,
   McpGatewayApprovalCreateResult,
+  McpPolicyEnforceGuard,
   McpPolicySuggestionWrite,
   McpToolCallScanFilter,
   McpToolPolicyPatch,
@@ -12050,6 +12052,30 @@ export class SqliteStore implements Store {
     return rows.map(mapMcpPolicySuggestion);
   }
 
+  async listAcceptedMcpPolicySuggestionsForRules(ruleIds: readonly string[], options: { sameScope?: boolean } = {}): Promise<McpPolicySuggestion[]> {
+    return this.listAcceptedMcpPolicySuggestionsForRulesSync(ruleIds, options);
+  }
+
+  private listAcceptedMcpPolicySuggestionsForRulesSync(ruleIds: readonly string[], options: { sameScope?: boolean }): McpPolicySuggestion[] {
+    const ids = [...new Set(ruleIds)];
+    if (ids.length === 0) return [];
+    // `holding` is an accepted suggestion with one of the rule ids; with sameScope, it only names the scope.
+    const match = options.sameScope
+      ? `holding.scope_kind = s.scope_kind AND holding.scope_id = s.scope_id AND holding.server_id = s.server_id`
+      : `holding.id = s.id`;
+    return this.queryAll<Record<string, unknown>>(
+      `SELECT s.* FROM mcp_policy_suggestions s
+        WHERE s.status = 'accepted'
+          AND EXISTS (
+            SELECT 1 FROM mcp_policy_suggestions holding, json_each(holding.accepted_rule_ids_json) AS accepted
+             WHERE holding.status = 'accepted' AND ${match}
+               AND accepted.value IN (SELECT value FROM json_each(?))
+          )
+        ORDER BY s.created_at ASC, s.id ASC`,
+      [JSON.stringify(ids)]
+    ).map(mapMcpPolicySuggestion);
+  }
+
   async getMcpPolicySuggestion(id: string): Promise<McpPolicySuggestion | null> {
     const row = this.queryOne<Record<string, unknown>>(`SELECT * FROM mcp_policy_suggestions WHERE id = ?`, [id]);
     return row ? mapMcpPolicySuggestion(row) : null;
@@ -12057,18 +12083,27 @@ export class SqliteStore implements Store {
 
   async transitionMcpPolicySuggestion(
     id: string,
-    input: { from: McpPolicySuggestionStatus; to: McpPolicySuggestionStatus; decidedBy: string | null; decidedAt: string | null; acceptedRuleIds?: string[] }
+    input: {
+      from: McpPolicySuggestionStatus;
+      to: McpPolicySuggestionStatus;
+      decidedBy: string | null;
+      decidedAt: string | null;
+      acceptedRuleIds?: string[];
+      evidence?: McpPolicySuggestionEvidence;
+    }
   ): Promise<McpPolicySuggestion | null> {
     return this.db.transaction(() => {
       const accepted = input.acceptedRuleIds === undefined ? null : JSON.stringify(input.acceptedRuleIds);
+      const evidence = input.evidence === undefined ? null : JSON.stringify(input.evidence);
       const result = this.db
         .prepare(
           `UPDATE mcp_policy_suggestions
               SET status = ?, decided_by = ?, decided_at = ?, updated_at = ?,
-                  accepted_rule_ids_json = COALESCE(?, accepted_rule_ids_json)
+                  accepted_rule_ids_json = COALESCE(?, accepted_rule_ids_json),
+                  evidence_json = COALESCE(?, evidence_json)
             WHERE id = ? AND status = ?`
         )
-        .run(input.to, input.decidedBy, input.decidedAt, input.decidedAt ?? new Date().toISOString(), accepted, id, input.from);
+        .run(input.to, input.decidedBy, input.decidedAt, input.decidedAt ?? new Date().toISOString(), accepted, evidence, id, input.from);
       if (result.changes === 0) return null;
       const row = this.queryOne<Record<string, unknown>>(`SELECT * FROM mcp_policy_suggestions WHERE id = ?`, [id]);
       return row ? mapMcpPolicySuggestion(row) : null;
@@ -12416,8 +12451,16 @@ export class SqliteStore implements Store {
     return this.getMcpToolPolicySync(id);
   }
 
-  async enforceShadowMcpToolPolicies(ids: readonly string[], now: string): Promise<McpToolPolicyRule[]> {
+  async enforceShadowMcpToolPolicies(ids: readonly string[], now: string, options: { guard?: McpPolicyEnforceGuard } = {}): Promise<McpToolPolicyRule[]> {
     return this.db.transaction(() => {
+      if (options.guard) {
+        // The guard reads the rules as they are now, in this transaction: nothing can change them before the update.
+        const refusal = options.guard({
+          rules: this.queryAll<McpToolPolicyRow>(`SELECT * FROM mcp_tool_policies ORDER BY created_at ASC, rowid ASC`).map(mapMcpToolPolicy),
+          accepted: this.listAcceptedMcpPolicySuggestionsForRulesSync(ids, { sameScope: true })
+        });
+        if (refusal !== null) throw new McpPolicyEnforceRefusedError(refusal);
+      }
       const changed: McpToolPolicyRule[] = [];
       for (const id of new Set(ids)) {
         const result = this.db.prepare(`UPDATE mcp_tool_policies SET mode = 'enforce', updated_at = ? WHERE id = ? AND mode = 'shadow'`).run(now, id);

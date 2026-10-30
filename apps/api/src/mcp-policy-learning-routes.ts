@@ -4,7 +4,9 @@
  *   POST /api/mcp/policies/simulate                    what a draft rule set (or one added rule) would have done to
  *                                                      the calls of the last 7 or 30 days; nothing is written
  *   GET  /api/mcp/policies/shadow-hits?days=7          per shadow rule: calls it matched and would have changed
- *   GET  /api/mcp/policies/suggestions?status=open     stored suggestions
+ *   GET  /api/mcp/policies/suggestions?status=open     stored suggestions (newest first, capped); with
+ *                                                      `status=accepted&inShadow=true`, every accepted suggestion with
+ *                                                      a rule still in shadow, however old (no cap)
  *   POST /api/mcp/policies/suggestions/generate        "Suggest rules": build or refresh suggestions now (rate-limited)
  *   POST /api/mcp/policies/suggestions/:id/accept      add the suggested rules in SHADOW mode; the body names the
  *                                                      fingerprint the admin reviewed (409 when it was regenerated)
@@ -16,9 +18,13 @@
  *   - a deny or require_approval rule from an accepted suggestion cannot go alone while an allow of the same scope's
  *     accepted rules is still in shadow (it would block the tools those allows carve out): enforce the suggestion;
  *   - tighten-only, again: an allow that would carve an exception out of a deny or require_approval rule enforced
- *     now (other than its own scope's accepted deny) is refused, even if that rule was added after the suggestion.
- * Each rule switches only while it is still in shadow, in one transaction, so two admins enforcing at once change
- * and audit it once.
+ *     now is refused, even if that rule was added after the suggestion. Only its own scope's accepted deny is left
+ *     out, and only while that deny still hashes as it did when accepted (an edited deny counts again).
+ * A scope's family is every accepted suggestion of that workflow or client on that server, found by rule id with no
+ * cap; a suggestion counts while any of its rules exists. Both guards run before the shadow-hit scan and again inside
+ * the write's transaction, on the rules as they are then, so a rule changed meanwhile is never enforced on a stale
+ * check. Each rule switches only while it is still in shadow, so two admins enforcing at once change and audit it
+ * once; when nothing is left to switch the answer is 409 "enforced meanwhile".
  *
  * Admin only. Responses carry argument SUMMARIES only, never raw arguments and never the summary hash key.
  * Simulating, accepting, dismissing and enforcing are audited as `mcp_policy.simulated` (rule hashes and filters
@@ -37,13 +43,15 @@ import {
   type McpToolPolicyRule
 } from "@ai-orchestrator/shared";
 import type { Store } from "./db/store.js";
+import { McpPolicyEnforceRefusedError } from "./db/store-errors.js";
 import type { SafeUser, UserRole } from "./services/auth-service.js";
 import { McpPolicySimulationError, type McpPolicySimulationService } from "./services/mcp-policy-simulation-service.js";
 import { hashMcpToolPolicyRule } from "@ai-orchestrator/mcp-sdk";
 import {
   McpPolicySuggestionError,
-  acceptedRulesInPlace,
+  acceptedRuleHashes,
   loosenedRule,
+  scopeOwnDenyIds,
   suggestionScopeKey,
   type McpPolicySuggestionService
 } from "./services/mcp-policy-suggestion-service.js";
@@ -151,6 +159,13 @@ export function registerMcpPolicyLearningRoutes(deps: McpPolicyLearningRoutesDep
     const parsed = mcpPolicySuggestionListQuerySchema.safeParse(request.query ?? {});
     if (!parsed.success) return fail(reply, 400, "Invalid suggestions query", parsed.error.issues);
     const status = parsed.data.status ?? "open";
+    if (parsed.data.inShadow === "true") {
+      if (status !== "accepted") return fail(reply, 400, "inShadow=true lists accepted suggestions only: add status=accepted");
+      const shadowIds = (await store.listMcpToolPolicies()).filter((rule) => policyModeOf(rule) === "shadow").map((rule) => rule.id);
+      const suggestionsInShadow = await store.listAcceptedMcpPolicySuggestionsForRules(shadowIds);
+      // Newest first, like the capped list.
+      return { suggestions: suggestionsInShadow.reverse() };
+    }
     return { suggestions: await store.listMcpPolicySuggestions(status === "all" ? {} : { status }) };
   });
 
@@ -191,15 +206,14 @@ export function registerMcpPolicyLearningRoutes(deps: McpPolicyLearningRoutesDep
       return fail(reply, 409, "This suggestion was regenerated after you reviewed it. Review it again before accepting.");
     }
     // The rules may have changed since the suggestion was made: it must still only tighten. An update's allows carve
-    // the scope's own accepted deny on purpose; that deny is left out of the check.
+    // the scope's own accepted deny on purpose; that deny is left out of the check while it is the deny accepted.
     const current = await store.listMcpToolPolicies();
     const currentById = new Map(current.map((rule) => [rule.id, rule]));
-    const ownDenyIds = new Set(
-      (suggestion.evidence.updates?.ruleIds ?? []).filter((id) => {
-        const rule = currentById.get(id);
-        return rule !== undefined && rule.effect !== "allow";
-      })
+    const updatedIds = suggestion.evidence.updates?.ruleIds ?? [];
+    const family = (await store.listAcceptedMcpPolicySuggestionsForRules(updatedIds, { sameScope: true })).filter(
+      (entry) => suggestionScopeKey(entry) === suggestionScopeKey(suggestion)
     );
+    const ownDenyIds = new Set([...scopeOwnDenyIds(family, currentById)].filter((id) => updatedIds.includes(id)));
     const carved = loosenedRule(suggestion.rules, current, { ignoreIds: ownDenyIds });
     if (carved) {
       return fail(reply, 409, `Accepting would carve an exception out of rule ${ruleLabel(carved)}. Generate suggestions again.`);
@@ -248,7 +262,8 @@ export function registerMcpPolicyLearningRoutes(deps: McpPolicyLearningRoutesDep
         to: "accepted",
         decidedBy: user.email,
         decidedAt,
-        acceptedRuleIds: created.map((rule) => rule.id)
+        acceptedRuleIds: created.map((rule) => rule.id),
+        evidence: { ...suggestion.evidence, acceptedRuleHashes: acceptedRuleHashes(created) }
       })) ?? claimed;
     for (const rule of created) {
       await deps.recordPolicyAudit(user, "mcp_policy.created", "create", rule.id, { ...deps.policyAuditMetadata(rule), suggestionId: suggestion.id }, rule.projectId);
@@ -278,52 +293,32 @@ export function registerMcpPolicyLearningRoutes(deps: McpPolicyLearningRoutesDep
   });
 
   /**
-   * The accepted rules of a scope (one workflow or client on one server) still in place: every accepted suggestion
-   * of that scope whose rules all exist, by the suggestions that hold `ruleIds`.
+   * Switches shadow rules to enforce, allows first, auditing each rule that changed. The guards run on the rules
+   * before the shadow-hit scan (a refusal costs nothing) and again inside the write's transaction, on the rules as
+   * they are then. A refusal returns its reason and changes nothing.
    */
-  const scopeFamily = async (ruleIds: readonly string[], current: Map<string, McpToolPolicyRule>) => {
-    const accepted = (await store.listMcpPolicySuggestions({ status: "accepted", limit: 10_000 })).filter((suggestion) =>
-      acceptedRulesInPlace(suggestion, new Set(current.keys()))
-    );
-    const keys = new Set(accepted.filter((suggestion) => suggestion.acceptedRuleIds.some((id) => ruleIds.includes(id))).map(suggestionScopeKey));
-    const members = new Set(accepted.filter((suggestion) => keys.has(suggestionScopeKey(suggestion))).flatMap((suggestion) => suggestion.acceptedRuleIds));
-    return [...members].map((id) => current.get(id)!).filter(Boolean);
-  };
-
-  /**
-   * Why these shadow rules cannot be enforced together now, or null. Rules: their scope's shadow allows must go with
-   * (or before) a deny or require_approval rule, and no allow may carve an exception out of a rule enforced now.
-   */
-  const enforceRefusal = async (rules: McpToolPolicyRule[], current: McpToolPolicyRule[]): Promise<string | null> => {
-    const currentById = new Map(current.map((rule) => [rule.id, rule]));
-    const ids = rules.map((rule) => rule.id);
-    const family = await scopeFamily(ids, currentById);
-    if (rules.some((rule) => rule.effect !== "allow")) {
-      const left = family.filter((rule) => rule.effect === "allow" && policyModeOf(rule) === "shadow" && !ids.includes(rule.id));
-      if (left.length > 0) {
-        return `Enforcing this would block tools the scope's accepted allow rules carve out, while they are still in shadow: ${left
-          .slice(0, 5)
-          .map(ruleLabel)
-          .join(", ")}${left.length > 5 ? ` and ${left.length - 5} more` : ""}. Enforce the suggestion instead, or those allows first.`;
-      }
+  const enforce = async (
+    user: SafeUser,
+    rules: McpToolPolicyRule[],
+    current: McpToolPolicyRule[],
+    suggestionId: string | null
+  ): Promise<{ refusal: string } | { enforced: McpToolPolicyRule[] }> => {
+    const ids = [...rules].sort((a, b) => (a.effect === "allow" ? 0 : 1) - (b.effect === "allow" ? 0 : 1)).map((rule) => rule.id);
+    const refusal = enforceRefusal(ids, current, await store.listAcceptedMcpPolicySuggestionsForRules(ids, { sameScope: true }));
+    if (refusal) return { refusal };
+    const hits = await simulation.shadowHits(MCP_POLICY_ENFORCE_QUIET_DAYS);
+    let enforced: McpToolPolicyRule[];
+    try {
+      enforced = await store.enforceShadowMcpToolPolicies(ids, now().toISOString(), {
+        guard: (state) => enforceRefusal(ids, state.rules, state.accepted)
+      });
+    } catch (error) {
+      if (error instanceof McpPolicyEnforceRefusedError) return { refusal: error.message };
+      throw error;
     }
-    const ownDenyIds = new Set(family.filter((rule) => rule.effect !== "allow").map((rule) => rule.id));
-    const carved = loosenedRule(rules, current, { enforcedOnly: true, ignoreIds: ownDenyIds });
-    if (carved) return `Enforcing would carve an exception out of rule ${ruleLabel(carved)}, which is enforced now. Nothing was changed.`;
-    return null;
-  };
-
-  /** Switches shadow rules to enforce in one transaction, allows first, auditing each rule that changed. */
-  const enforce = async (user: SafeUser, rules: McpToolPolicyRule[], suggestionId: string | null) => {
-    const ordered = [...rules].sort((a, b) => (a.effect === "allow" ? 0 : 1) - (b.effect === "allow" ? 0 : 1));
-    const hits = ordered.length > 0 ? await simulation.shadowHits(MCP_POLICY_ENFORCE_QUIET_DAYS) : null;
-    const enforced = await store.enforceShadowMcpToolPolicies(
-      ordered.map((rule) => rule.id),
-      now().toISOString()
-    );
-    const group = suggestionId ? hits?.groups.find((row) => row.suggestionId === suggestionId) : undefined;
+    const group = suggestionId ? hits.groups.find((row) => row.suggestionId === suggestionId) : undefined;
     for (const updated of enforced) {
-      const evidence = hits?.rules.find((row) => row.ruleId === updated.id);
+      const evidence = hits.rules.find((row) => row.ruleId === updated.id);
       await deps.recordPolicyAudit(
         user,
         "mcp_policy.enforced",
@@ -337,12 +332,12 @@ export function registerMcpPolicyLearningRoutes(deps: McpPolicyLearningRoutesDep
           shadowMatched: evidence?.matched ?? 0,
           shadowWouldChangeAlone: evidence?.wouldChange ?? 0,
           ...(group ? { suggestionShadowWouldChange: group.wouldChange } : {}),
-          ...(hits?.capped ? { shadowScanCapped: true } : {})
+          ...(hits.capped ? { shadowScanCapped: true } : {})
         },
         updated.projectId
       );
     }
-    return enforced;
+    return { enforced };
   };
 
   app.post<{ Params: { id: string } }>("/api/mcp/policies/suggestions/:id/enforce", async (request, reply) => {
@@ -355,10 +350,10 @@ export function registerMcpPolicyLearningRoutes(deps: McpPolicyLearningRoutesDep
     const currentById = new Map(current.map((rule) => [rule.id, rule]));
     const rules = suggestion.acceptedRuleIds.map((id) => currentById.get(id)).filter((rule): rule is McpToolPolicyRule => rule !== undefined && policyModeOf(rule) === "shadow");
     if (rules.length === 0) return fail(reply, 409, "None of this suggestion's rules is still in shadow");
-    const refusal = await enforceRefusal(rules, current);
-    if (refusal) return fail(reply, 409, refusal);
-    const enforced = await enforce(user, rules, suggestion.id);
-    return { suggestion, rules: enforced.map(deps.policyRuleResponse) };
+    const result = await enforce(user, rules, current, suggestion.id);
+    if ("refusal" in result) return fail(reply, 409, result.refusal);
+    if (result.enforced.length === 0) return fail(reply, 409, "This suggestion's rules were enforced meanwhile");
+    return { suggestion, rules: result.enforced.map(deps.policyRuleResponse) };
   });
 
   app.post<{ Params: { id: string } }>("/api/mcp/policies/:id/enforce", async (request, reply) => {
@@ -368,9 +363,9 @@ export function registerMcpPolicyLearningRoutes(deps: McpPolicyLearningRoutesDep
     const rule = current.find((entry) => entry.id === request.params.id);
     if (!rule) return fail(reply, 404, "MCP tool policy rule not found");
     if (policyModeOf(rule) !== "shadow") return fail(reply, 409, "This rule is already enforced");
-    const refusal = await enforceRefusal([rule], current);
-    if (refusal) return fail(reply, 409, refusal);
-    const [enforced] = await enforce(user, [rule], null);
+    const result = await enforce(user, [rule], current, null);
+    if ("refusal" in result) return fail(reply, 409, result.refusal);
+    const [enforced] = result.enforced;
     if (!enforced) return fail(reply, 409, "This rule was enforced meanwhile");
     return { rule: deps.policyRuleResponse(enforced) };
   });
@@ -378,4 +373,53 @@ export function registerMcpPolicyLearningRoutes(deps: McpPolicyLearningRoutesDep
 
 function policyModeOf(rule: McpToolPolicyRule): "enforce" | "shadow" {
   return rule.mode === "shadow" ? "shadow" : "enforce";
+}
+
+/**
+ * The accepted rules of the scopes (one workflow or client on one server) the rules `ruleIds` belong to, as they are
+ * in `current`: every accepted suggestion of such a scope counts while any of its rules exists. `accepted` holds the
+ * accepted suggestions of those scopes (`listAcceptedMcpPolicySuggestionsForRules(ruleIds, { sameScope: true })`).
+ */
+export function scopeFamily(
+  ruleIds: readonly string[],
+  currentById: ReadonlyMap<string, McpToolPolicyRule>,
+  accepted: readonly McpPolicySuggestion[]
+): { suggestions: McpPolicySuggestion[]; rules: McpToolPolicyRule[] } {
+  const keys = new Set(accepted.filter((suggestion) => suggestion.acceptedRuleIds.some((id) => ruleIds.includes(id))).map(suggestionScopeKey));
+  const suggestions = accepted.filter((suggestion) => suggestion.status === "accepted" && keys.has(suggestionScopeKey(suggestion)));
+  const members = new Set(suggestions.flatMap((suggestion) => suggestion.acceptedRuleIds));
+  return { suggestions, rules: [...members].flatMap((id) => (currentById.has(id) ? [currentById.get(id)!] : [])) };
+}
+
+/**
+ * Why the shadow rules among `ruleIds` cannot be enforced together now, or null. Synchronous, so it can run inside the
+ * write's transaction. Rules: their scope's shadow allows must go with (or before) a deny or require_approval rule,
+ * and no allow may carve an exception out of a rule enforced now, other than its own scope's accepted deny while that
+ * deny is unchanged since it was accepted.
+ */
+export function enforceRefusal(
+  ruleIds: readonly string[],
+  current: readonly McpToolPolicyRule[],
+  accepted: readonly McpPolicySuggestion[]
+): string | null {
+  const currentById = new Map(current.map((rule) => [rule.id, rule]));
+  const rules = ruleIds.flatMap((id) => {
+    const rule = currentById.get(id);
+    return rule && policyModeOf(rule) === "shadow" ? [rule] : [];
+  });
+  if (rules.length === 0) return null;
+  const ids = rules.map((rule) => rule.id);
+  const family = scopeFamily(ids, currentById, accepted);
+  if (rules.some((rule) => rule.effect !== "allow")) {
+    const left = family.rules.filter((rule) => rule.effect === "allow" && policyModeOf(rule) === "shadow" && !ids.includes(rule.id));
+    if (left.length > 0) {
+      return `Enforcing this would block tools the scope's accepted allow rules carve out, while they are still in shadow: ${left
+        .slice(0, 5)
+        .map(ruleLabel)
+        .join(", ")}${left.length > 5 ? ` and ${left.length - 5} more` : ""}. Enforce the suggestion instead, or those allows first.`;
+    }
+  }
+  const carved = loosenedRule(rules, current, { enforcedOnly: true, ignoreIds: scopeOwnDenyIds(family.suggestions, currentById) });
+  if (carved) return `Enforcing would carve an exception out of rule ${ruleLabel(carved)}, which is enforced now. Nothing was changed.`;
+  return null;
 }

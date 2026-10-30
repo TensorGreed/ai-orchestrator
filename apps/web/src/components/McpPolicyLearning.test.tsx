@@ -251,7 +251,7 @@ describe("least-privilege suggestions", () => {
     expect(api.decideMcpPolicySuggestion).toHaveBeenCalledWith("mps_1", "dismiss", suggestion().fingerprint);
   });
 
-  it("shows shadow hits and enforces an accepted suggestion as a whole, asking first when it is not quiet", async () => {
+  it("shows shadow hits and enforces an accepted suggestion as a whole, however old, asking first when it is not quiet", async () => {
     const user = userEvent.setup();
     const shadowRules = [
       rule({ id: "mtp_deny", name: "Least privilege deny", toolPattern: "*", mode: "shadow" }),
@@ -274,7 +274,10 @@ describe("least-privilege suggestions", () => {
       }
     });
     const accepted = suggestion({ status: "accepted", acceptedRuleIds: ["mtp_deny", "mtp_allow"], decidedAt: new Date(Date.now() - 2 * DAY).toISOString() });
-    vi.mocked(api.fetchMcpPolicySuggestions).mockImplementation(async (status) => ({ suggestions: status === "accepted" ? [accepted] : [] }));
+    // Accepted suggestions in shadow come from the uncapped lookup: an old one is past the newest-first list's cap.
+    vi.mocked(api.fetchMcpPolicySuggestions).mockImplementation(async (status, options) => ({
+      suggestions: status === "accepted" && options?.inShadow ? [accepted] : []
+    }));
     vi.mocked(api.decideMcpPolicySuggestion).mockResolvedValue({ suggestion: accepted, rules: [] });
     vi.mocked(api.enforceMcpToolPolicy).mockResolvedValue({ rule: { ...shadowRules[2]!, mode: "enforce" } });
     const confirmSpy = vi.spyOn(window, "confirm").mockReturnValueOnce(false).mockReturnValue(true);
