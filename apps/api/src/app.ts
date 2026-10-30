@@ -12327,12 +12327,24 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       ...(workflowIds !== undefined ? { workflowIds: [...new Set(workflowIds ?? [])] } : {}),
       ...(clientIds !== undefined ? { clientIds: [...new Set(clientIds ?? [])] } : {})
     }))!;
+    // Phase 12.4 — emptying a principal list (or clearing the project) makes the rule apply to everyone: say so.
+    const widened = [
+      ...(existing.projectId && rule.projectId === null ? ["projectId"] : []),
+      ...(existing.roles.length > 0 && rule.roles.length === 0 ? ["roles"] : []),
+      ...((existing.workflowIds?.length ?? 0) > 0 && (rule.workflowIds?.length ?? 0) === 0 ? ["workflowIds"] : []),
+      ...((existing.clientIds?.length ?? 0) > 0 && (rule.clientIds?.length ?? 0) === 0 ? ["clientIds"] : [])
+    ];
     await recordPolicyAudit(
       user,
       "mcp_policy.updated",
       "update",
       rule.id,
-      { ...policyAuditMetadata(rule), fields: Object.keys(parsed.data), previousHash: hashMcpToolPolicyRule(existing) },
+      {
+        ...policyAuditMetadata(rule),
+        fields: Object.keys(parsed.data),
+        previousHash: hashMcpToolPolicyRule(existing),
+        ...(widened.length > 0 ? { scopeWidened: true, widenedFields: widened } : {})
+      },
       rule.projectId
     );
     return { rule: policyRuleResponse(rule) };

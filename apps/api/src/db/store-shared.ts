@@ -55,19 +55,35 @@ function stringList(value: unknown): string[] {
   return Array.isArray(parsed) ? parsed.filter((entry): entry is string => typeof entry === "string" && entry.length > 0) : [];
 }
 
+/** Rules already reported as having invalid conditions, so a busy evaluator logs each one once per process. */
+const reportedInvalidRules = new Set<string>();
+
 /**
  * Phase 12.4 — the v47 rule columns of an `mcp_tool_policies` row (both stores). Stored conditions that no longer
- * validate are dropped rather than guessed at: the rule then has none, which the API never writes.
+ * validate (caps tightened later, a manual or restored edit) are not guessed at: the rule is marked `invalid` and
+ * fails closed in the evaluator (an allow never matches, a deny or require_approval covers its whole scope), and the
+ * API and UI show it as needing a fix.
  */
 export function mapMcpToolPolicyExtras(row: {
+  id?: unknown;
   conditions_json?: unknown;
   mode?: unknown;
   workflow_ids_json?: unknown;
   client_ids_json?: unknown;
-}): Pick<McpToolPolicyRule, "conditions" | "mode" | "workflowIds" | "clientIds"> {
-  const conditions = mcpToolPolicyConditionsSchema.safeParse(parseJson(row.conditions_json));
+}): Pick<McpToolPolicyRule, "conditions" | "mode" | "workflowIds" | "clientIds" | "invalid"> {
+  const stored = parseJson(row.conditions_json);
+  const conditions = stored === null ? null : mcpToolPolicyConditionsSchema.safeParse(stored);
+  const invalid = conditions !== null && !conditions.success;
+  if (invalid) {
+    const id = String(row.id ?? "");
+    if (!reportedInvalidRules.has(id)) {
+      reportedInvalidRules.add(id);
+      console.warn(`MCP tool policy rule ${id || "(unknown)"} has stored conditions that no longer validate; it fails closed until fixed.`);
+    }
+  }
   return {
-    conditions: conditions.success ? conditions.data : null,
+    conditions: conditions?.success ? conditions.data : null,
+    ...(invalid ? { invalid: true } : {}),
     mode: row.mode === "shadow" ? "shadow" : "enforce",
     workflowIds: stringList(row.workflow_ids_json),
     clientIds: stringList(row.client_ids_json)

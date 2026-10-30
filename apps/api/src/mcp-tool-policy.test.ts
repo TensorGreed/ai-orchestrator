@@ -16,7 +16,8 @@ import { SqliteStore } from "./db/database.js";
 import type { Store } from "./db/store.js";
 import { openTestStore } from "./test-support/test-store.js";
 import { AuthService } from "./services/auth-service.js";
-import { resolveMcpToolPolicySubject } from "./services/mcp-tool-policy.js";
+import { evaluateToolForContext, resolveMcpToolPolicySubject } from "./services/mcp-tool-policy.js";
+import { mapMcpToolPolicyExtras } from "./db/store-shared.js";
 import { SecretService } from "./services/secret-service.js";
 
 interface TestContext {
@@ -350,6 +351,22 @@ describe("MCP tool policy routes", () => {
     expect(audit[0]!.metadata).toMatchObject({ hash: narrowed.hash, previousHash: rule.hash, mode: "enforce" });
   });
 
+  it("audits an update that widens a rule's scope by emptying a principal list", async () => {
+    const context = await createTestContext();
+    const admin = await login(context, "admin");
+    const serverId = await registerMockServer(context, admin.cookie);
+    const rule = await createRule(context, admin.cookie, { effect: "allow", serverId, roles: ["builder"], toolPattern: "calculator" });
+    const put = (payload: Record<string, unknown>) =>
+      context.app.inject({ method: "PUT", url: `/api/mcp/policies/${rule.id}`, headers: { cookie: admin.cookie }, payload });
+    expect((await put({ name: "Renamed" })).statusCode).toBe(200);
+    expect((await put({ roles: [] })).statusCode).toBe(200);
+    const audit = (await context.store.listAuditLogs({ eventType: "mcp_policy.updated", pageSize: 10 })).items;
+    const widened = audit.find((entry) => (entry.metadata as { fields?: string[] }).fields?.includes("roles"));
+    expect(widened?.metadata).toMatchObject({ scopeWidened: true, widenedFields: ["roles"] });
+    const renamed = audit.find((entry) => (entry.metadata as { fields?: string[] }).fields?.includes("name"));
+    expect(renamed?.metadata).not.toHaveProperty("scopeWidened");
+  });
+
   it("dry-runs a call with arguments: the matched rule and why, approvals and shadow rules", async () => {
     const context = await createTestContext();
     const admin = await login(context, "admin");
@@ -430,6 +447,29 @@ describe("MCP tool policy routes", () => {
     expect(discoveredTools.find((tool) => tool.name === "lookup_kb")!.access.allowed).toBe(false);
     expect(discoveredTools.find((tool) => tool.name === "calculator")!.access.allowed).toBe(false);
     expect(discoveredTools.find((tool) => tool.name === "get_current_time")!.annotations).toEqual({ readOnlyHint: true });
+  });
+});
+
+describe("stored rule conditions that no longer validate", () => {
+  it("mark the rule invalid instead of dropping its conditions", () => {
+    const tooMany = { all: Array.from({ length: 21 }, () => ({ path: "a", op: "exists" })) };
+    const invalid = mapMcpToolPolicyExtras({ id: "mtp_bad", conditions_json: JSON.stringify(tooMany) });
+    expect(invalid).toMatchObject({ conditions: null, invalid: true });
+    const valid = mapMcpToolPolicyExtras({ id: "mtp_ok", conditions_json: JSON.stringify({ all: [{ path: "a", op: "exists" }] }) });
+    expect(valid.invalid).toBeUndefined();
+    expect(valid.conditions).toEqual({ all: [{ path: "a", op: "exists" }] });
+    expect(mapMcpToolPolicyExtras({ id: "mtp_none", conditions_json: null })).toMatchObject({ conditions: null });
+    expect(mapMcpToolPolicyExtras({ id: "mtp_none", conditions_json: null }).invalid).toBeUndefined();
+  });
+
+  it("fail closed when evaluated: an allow never matches, a deny covers its whole scope", () => {
+    const base = { name: null, description: null, projectId: null, roles: [], serverId: null, toolPattern: "calculator", enabled: true };
+    const deny: McpToolPolicyRule = { ...base, id: "deny-all", effect: "deny", toolPattern: "*" };
+    const invalidAllow: McpToolPolicyRule = { ...base, id: "bad-allow", effect: "allow", conditions: null, invalid: true };
+    const context = { rules: [deny, invalidAllow], classifications: [], role: "builder" as const, projectId: null, adapterId: "mock-mcp" };
+    expect(evaluateToolForContext(context, { name: "calculator" }, "tool", { arguments: {} }).allowed).toBe(false);
+    const invalidDeny: McpToolPolicyRule = { ...base, id: "bad-deny", effect: "deny", conditions: null, invalid: true };
+    expect(evaluateToolForContext({ ...context, rules: [invalidDeny] }, { name: "calculator" }, "tool", { arguments: { anything: 1 } }).allowed).toBe(false);
   });
 });
 

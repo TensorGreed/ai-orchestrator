@@ -2186,7 +2186,7 @@ export const openApiSpec = {
                     type: "object",
                     nullable: true,
                     description:
-                      "Tool calls only. { all: [...] } or { any: [...] } of { path, op, value } (at most 20). Paths are dot keys with [n] or [*]; ops equals, one_of, not_one_of, starts_with, ends_with, matches (glob), lt, lte, gt, gte, between, exists, label_present, label_absent (value = a provenance label or data class, no path). An unknown path or a value of the wrong type does not match."
+                      "Tool calls only. { all: [...] } or { any: [...] } of { path, op, value, ignoreCase? } (at most 20). Paths are dot keys with [n] or [*]; a path ending on an array reads its elements. Ops equals, one_of, not_one_of, starts_with, ends_with, matches (glob, at most 16 *), lt, lte, gt, gte, between, exists, label_present, label_absent (value = a provenance label or data class, no path); ignoreCase applies to the text ops. Evaluation fails closed: for deny and require_approval any value matching is enough, a missing argument satisfies not_one_of / label_absent and an unreadable value ('lots' for gt) matches; for allow every value must match and none of those do. Scalars compare as trimmed text and number ops read numeric strings."
                   },
                   workflowIds: { type: "array", items: { type: "string" }, description: "Only runs of these workflows; empty = any" },
                   clientIds: { type: "array", items: { type: "string" }, description: "Only these MCP gateway clients (directly or through a run they started); empty = any" },
@@ -2207,7 +2207,10 @@ export const openApiSpec = {
           }
         },
         responses: {
-          "201": { description: "Rule created, with its stable `hash` (what the rule matches; not its name or mode)" },
+          "201": {
+            description:
+              "Rule created, with its stable `hash` (what the rule matches; not its name or mode). Listed rules whose stored conditions no longer validate carry `invalid: true` and fail closed (an allow never matches, a deny or require_approval covers its whole scope) until fixed."
+          },
           "400": { description: "Invalid rule (field-level details), project, server, workflow or client" }
         }
       }
@@ -2773,7 +2776,8 @@ export const openApiSpec = {
     "/api/mcp/gateway/approvals": {
       get: {
         tags: ["MCP"],
-        summary: "Gateway calls a require_approval tool policy rule held back, newest first (admin)",
+        summary:
+          "Gateway calls a require_approval tool policy rule held back, newest first (admin). A client has at most 20 pending requests; past that its calls get JSON-RPC -32029. Decided requests are deleted 30 days after they were made.",
         parameters: [
           { name: "status", in: "query", required: false, schema: { type: "string", enum: ["pending", "approved", "rejected", "expired", "used"] } },
           { name: "limit", in: "query", required: false, schema: { type: "integer", minimum: 1, maximum: 500 } }
@@ -2794,7 +2798,8 @@ export const openApiSpec = {
     "/api/mcp/gateway/approvals/{id}/reject": {
       post: {
         tags: ["MCP"],
-        summary: "Reject a pending gateway call (admin)",
+        summary:
+          "Reject a pending gateway call (admin). Identical retries (same client, tool, arguments) are refused at once with JSON-RPC error -32031 until MCP_GATEWAY_APPROVAL_WINDOW_MS after the decision (the request's new expiresAt), and open no new request",
         parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
         requestBody: { required: false, content: { "application/json": { schema: { type: "object", properties: { reason: { type: "string" } } } } } },
         responses: { "200": { description: "The decided request" }, "404": { description: "Not found" }, "409": { description: "Already decided or expired" } }
