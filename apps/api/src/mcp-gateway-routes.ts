@@ -966,10 +966,11 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
         tool.kind === "workflow"
           ? await callWorkflowTool({ session, auth, toolset, tool, args, executionId, progress })
           : await callServerTool({ session, auth, toolset, tool, args, signal: controller.signal, progress, ...(policyDecision ? { policyDecision } : {}) });
+      // Phase 12.4 — refused before reaching the server (even when the client cancelled meanwhile): the approval it
+      // used is still good for a retry.
+      if (isRetryLater(result) && usedApprovalId) await store.restoreMcpGatewayApproval(usedApprovalId);
       if (controller.signal.aborted) return SUPPRESSED;
       if (isRetryLater(result)) {
-        // Phase 12.4 — the call never reached the server, so the approval it used is still good for a retry.
-        if (usedApprovalId) await store.restoreMcpGatewayApproval(usedApprovalId);
         // Phase 10.7 — refused before reaching the server: a JSON-RPC error with a retry hint.
         return rpcError(request.id, JSON_RPC_ERRORS.retryLater, result.message, {
           reason: result.reason,

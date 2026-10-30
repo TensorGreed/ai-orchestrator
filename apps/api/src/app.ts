@@ -12310,6 +12310,14 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       reply.code(400);
       return { error: "Invalid MCP tool policy rule", details: parsed.error.issues };
     }
+    // Phase 12.4 — an allow whose stored conditions are invalid allows nothing; clearing them would make it allow every
+    // call in its scope. That takes new conditions, or deleting the rule and adding an unconditional one.
+    if (existing.invalid && parsed.data.conditions === null && (parsed.data.effect ?? existing.effect) === "allow") {
+      reply.code(400);
+      return {
+        error: "This allow rule's stored conditions are invalid. Enter new conditions, or delete the rule and add one without conditions."
+      };
+    }
     // Phase 12.4 — the rule as it would be after the update must still be valid (e.g. no conditions on a sampling rule).
     const mergedIssues = mcpToolPolicyRuleIssues({ ...existing, ...parsed.data });
     if (mergedIssues.length > 0) {

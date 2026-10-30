@@ -55,14 +55,31 @@ function stringList(value: unknown): string[] {
   return Array.isArray(parsed) ? parsed.filter((entry): entry is string => typeof entry === "string" && entry.length > 0) : [];
 }
 
+const UNREADABLE = Symbol("unreadable");
+
+/**
+ * A rule's stored conditions: `null` only for SQL NULL, an empty string or the JSON literal `null` (no conditions);
+ * `UNREADABLE` for anything else that does not parse as JSON (or is not text), so it fails closed like conditions that
+ * no longer validate instead of reading as "none".
+ */
+function storedConditions(value: unknown): unknown {
+  if (value === null || value === undefined || value === "") return null;
+  if (typeof value !== "string") return UNREADABLE;
+  try {
+    return JSON.parse(value) as unknown;
+  } catch {
+    return UNREADABLE;
+  }
+}
+
 /** Rules already reported as having invalid conditions, so a busy evaluator logs each one once per process. */
 const reportedInvalidRules = new Set<string>();
 
 /**
  * Phase 12.4 — the v47 rule columns of an `mcp_tool_policies` row (both stores). Stored conditions that no longer
- * validate (caps tightened later, a manual or restored edit) are not guessed at: the rule is marked `invalid` and
- * fails closed in the evaluator (an allow never matches, a deny or require_approval covers its whole scope), and the
- * API and UI show it as needing a fix.
+ * parse or validate (caps tightened later, a manual or restored edit) are not guessed at: the rule is marked `invalid`
+ * and fails closed in the evaluator (an allow never matches, a deny or require_approval covers its whole scope), and
+ * the API and UI show it as needing a fix.
  */
 export function mapMcpToolPolicyExtras(row: {
   id?: unknown;
@@ -71,14 +88,16 @@ export function mapMcpToolPolicyExtras(row: {
   workflow_ids_json?: unknown;
   client_ids_json?: unknown;
 }): Pick<McpToolPolicyRule, "conditions" | "mode" | "workflowIds" | "clientIds" | "invalid"> {
-  const stored = parseJson(row.conditions_json);
-  const conditions = stored === null ? null : mcpToolPolicyConditionsSchema.safeParse(stored);
-  const invalid = conditions !== null && !conditions.success;
+  const stored = storedConditions(row.conditions_json);
+  const conditions = stored === null || stored === UNREADABLE ? null : mcpToolPolicyConditionsSchema.safeParse(stored);
+  const invalid = stored === UNREADABLE || (conditions !== null && !conditions.success);
   if (invalid) {
     const id = String(row.id ?? "");
     if (!reportedInvalidRules.has(id)) {
       reportedInvalidRules.add(id);
-      console.warn(`MCP tool policy rule ${id || "(unknown)"} has stored conditions that no longer validate; it fails closed until fixed.`);
+      console.warn(
+        `MCP tool policy rule ${id || "(unknown)"} has stored conditions that no longer parse or validate; it fails closed until fixed.`
+      );
     }
   }
   return {
