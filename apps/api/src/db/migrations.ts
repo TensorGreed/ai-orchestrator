@@ -2261,7 +2261,9 @@ export const MIGRATIONS: Migration[] = [
     // it made; written only when an admin clicks "Suggest rules". At most one open suggestion per scope and server;
     // accepting creates the rules in shadow mode, dismissing keeps the row so the same proposal (fingerprint) is not
     // offered again. idx_mcp_tool_calls_started: simulation, suggestions and shadow hits read a time window of tool
-    // calls page by page, newest first.
+    // calls page by page, newest first, with (started_at, id) as the keyset. Building it locks writes to
+    // mcp_tool_calls for the length of the build, like earlier index migrations: on a large table, run the upgrade in
+    // a quiet window.
     up: `
       CREATE TABLE IF NOT EXISTS mcp_policy_suggestions (
         id TEXT PRIMARY KEY,
@@ -2288,7 +2290,7 @@ export const MIGRATIONS: Migration[] = [
       CREATE UNIQUE INDEX IF NOT EXISTS ${POLICY_SUGGESTION_ONE_OPEN_INDEX}
         ON mcp_policy_suggestions (scope_kind, scope_id, server_id) WHERE status = 'open';
       CREATE INDEX IF NOT EXISTS idx_mcp_policy_suggestions_status ON mcp_policy_suggestions (status, created_at);
-      CREATE INDEX IF NOT EXISTS idx_mcp_tool_calls_started ON mcp_tool_calls (started_at);
+      CREATE INDEX IF NOT EXISTS idx_mcp_tool_calls_started ON mcp_tool_calls (started_at, id COLLATE "C");
     `,
     down: `
       DROP INDEX IF EXISTS idx_mcp_tool_calls_started;

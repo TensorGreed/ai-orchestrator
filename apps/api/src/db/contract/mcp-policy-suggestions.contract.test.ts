@@ -160,5 +160,39 @@ describeStoreContract("store contract: MCP policy suggestions and tool-call scan
     expect(await scan({ until: at(2) })).toEqual(["mtc_a"]);
     const row = (await store.scanMcpToolCalls({ ...base, sources: [...base.sources], limit: 1 }))[0]!;
     expect(row.policyDecision).toMatchObject({ matched: [{ ruleId: "r", mode: "shadow" }] });
+    // The scan reads only what simulation needs: timings, tokens and costs come back empty.
+    const scanned = (await scan({ toolName: "delete_repo" }))[0];
+    expect(scanned).toBe("mtc_d");
+    const [full] = await store.scanMcpToolCalls({ ...base, sources: [...base.sources], limit: 100, toolName: "delete_repo" });
+    expect(full).toMatchObject({ id: "mtc_d", workflowId: "wf_1", ok: true, durationMs: null, turnInputTokens: null, estimatedCostUsd: null, samplingRequests: null });
+  });
+
+  it("switches shadow rules to enforce once, in one call", async () => {
+    const store = ctx.store();
+    const base = {
+      name: null,
+      description: null,
+      projectId: null,
+      roles: [],
+      serverId: null,
+      annotationHint: null,
+      kind: "tool" as const,
+      enabled: true,
+      conditions: null,
+      workflowIds: [],
+      clientIds: []
+    };
+    await store.createMcpToolPolicy({ ...base, id: "r_allow", effect: "allow", toolPattern: "a", mode: "shadow" });
+    await store.createMcpToolPolicy({ ...base, id: "r_deny", effect: "deny", toolPattern: "*", mode: "shadow" });
+    await store.createMcpToolPolicy({ ...base, id: "r_live", effect: "deny", toolPattern: "b", mode: "enforce" });
+    const first = await store.enforceShadowMcpToolPolicies(["r_allow", "r_deny", "r_live", "r_missing"], at(1));
+    expect(first.map((rule) => [rule.id, rule.mode])).toEqual([
+      ["r_allow", "enforce"],
+      ["r_deny", "enforce"]
+    ]);
+    // A second admin enforcing the same rules changes nothing.
+    expect(await store.enforceShadowMcpToolPolicies(["r_allow", "r_deny"], at(2))).toEqual([]);
+    expect((await store.listMcpToolPolicies()).map((rule) => rule.mode)).toEqual(["enforce", "enforce", "enforce"]);
+    expect(await store.enforceShadowMcpToolPolicies([], at(3))).toEqual([]);
   });
 });

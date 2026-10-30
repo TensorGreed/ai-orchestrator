@@ -554,6 +554,12 @@ export interface Store {
   getMcpToolPolicy(id: string): Promise<McpToolPolicyRule | null>;
   createMcpToolPolicy(input: Omit<McpToolPolicyRule, "createdAt" | "updatedAt">): Promise<McpToolPolicyRule>;
   updateMcpToolPolicy(id: string, patch: McpToolPolicyPatch): Promise<McpToolPolicyRule | null>;
+  /**
+   * Phase 12.4 — switch these rules from shadow to enforce in one transaction, each only while it is still in shadow
+   * (`WHERE mode = 'shadow'`). Returns the rules that changed, in the order given; two admins enforcing at once
+   * change each rule once.
+   */
+  enforceShadowMcpToolPolicies(ids: readonly string[], now: string): Promise<McpToolPolicyRule[]>;
   deleteMcpToolPolicy(id: string): Promise<boolean>;
   /**
    * Phase 12.4 — a gateway call a require_approval rule held back. Expired pending requests are marked expired

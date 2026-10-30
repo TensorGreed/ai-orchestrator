@@ -42,6 +42,7 @@ import {
   mapMcpPolicySuggestion,
   mapMcpToolCallContext,
   mcpToolCallScanWhere,
+  MCP_TOOL_CALL_SCAN_COLUMNS,
   mcpToolCallContextValues,
   mapMcpToolPolicyExtras,
   normalizeMcpSamplingSettings,
@@ -692,7 +693,10 @@ export async function listMcpToolCalls(ctx: PgContext, ...[filter]: Parameters<S
 export async function scanMcpToolCalls(ctx: PgContext, ...[filter]: Parameters<Store["scanMcpToolCalls"]>): ReturnType<Store["scanMcpToolCalls"]> {
   const { where, params } = mcpToolCallScanWhere(filter, (index) => `$${index}`, `id COLLATE "C"`);
   const limit = clampLimit(filter.limit, { fallback: 1000, max: LIMIT_MAX.mcpToolCallScan });
-  const result = await ctx.query<Row>(`SELECT * FROM mcp_tool_calls WHERE ${where} ORDER BY started_at DESC, id COLLATE "C" DESC LIMIT ${limit}`, params);
+  const result = await ctx.query<Row>(
+    `SELECT ${MCP_TOOL_CALL_SCAN_COLUMNS} FROM mcp_tool_calls WHERE ${where} ORDER BY started_at DESC, id COLLATE "C" DESC LIMIT ${limit}`,
+    params
+  );
   return result.map(mapMcpToolCall);
 }
 
@@ -1139,6 +1143,24 @@ export async function updateMcpToolPolicy(ctx: PgContext, ...[id, patch]: Parame
     return row ? mapMcpToolPolicy(row) : null;
   }
   return getMcpToolPolicyOn(ctx.pool, id);
+}
+
+export async function enforceShadowMcpToolPolicies(
+  ctx: PgContext,
+  ...[ids, now]: Parameters<Store["enforceShadowMcpToolPolicies"]>
+): ReturnType<Store["enforceShadowMcpToolPolicies"]> {
+  const unique = [...new Set(ids)];
+  if (unique.length === 0) return [];
+  // One statement: every rule still in shadow switches together, or none does.
+  const rows = await ctx.query<Row>(
+    `UPDATE mcp_tool_policies SET mode = 'enforce', updated_at = $1 WHERE id = ANY($2::text[]) AND mode = 'shadow' RETURNING *`,
+    [now, unique]
+  );
+  const byId = new Map(rows.map((row) => [toStr(row.id), mapMcpToolPolicy(row)]));
+  return unique.flatMap((id) => {
+    const rule = byId.get(id);
+    return rule ? [rule] : [];
+  });
 }
 
 export async function deleteMcpToolPolicy(ctx: PgContext, ...[id]: Parameters<Store["deleteMcpToolPolicy"]>): ReturnType<Store["deleteMcpToolPolicy"]> {

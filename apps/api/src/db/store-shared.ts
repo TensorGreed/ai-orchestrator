@@ -188,6 +188,39 @@ export function mcpToolCallContextValues(call: McpToolCallWrite): [string | null
 }
 
 /**
+ * Phase 12.4 — the columns a tool-call window scan reads (both stores). Timings, tokens and costs are not needed by
+ * simulation, suggestions or shadow hits, so they read as NULL and are not loaded.
+ */
+export const MCP_TOOL_CALL_SCAN_COLUMNS = [
+  "id",
+  "execution_id",
+  "workflow_id",
+  "node_id",
+  "registry_server_id",
+  "adapter_id",
+  "tool_name",
+  "started_at",
+  "NULL AS duration_ms",
+  "ok",
+  "error",
+  "NULL AS turn_input_tokens",
+  "NULL AS turn_output_tokens",
+  "NULL AS estimated_cost_usd",
+  "NULL AS sampling_requests",
+  "NULL AS sampling_input_tokens",
+  "NULL AS sampling_output_tokens",
+  "source",
+  "client_id",
+  "rejection",
+  "policy_decision_json",
+  "args_summary_json",
+  "subject_role",
+  "subject_source",
+  "project_id",
+  "created_at"
+].join(", ");
+
+/**
  * Phase 12.4 — the WHERE clause and parameters of a tool-call scan page (both stores), with `placeholder(n)` writing
  * the n-th parameter (`?` on SQLite, `$n` on Postgres) and `idOrder` the id column as the store orders it.
  */

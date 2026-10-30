@@ -57,6 +57,7 @@ import {
   mapMcpPolicySuggestion,
   mapMcpToolCallContext,
   mcpToolCallScanWhere,
+  MCP_TOOL_CALL_SCAN_COLUMNS,
   mcpToolCallContextValues,
   mapMcpToolPolicyExtras,
   normalizeMcpSamplingSettings,
@@ -3943,7 +3944,7 @@ export class SqliteStore implements Store {
       `CREATE UNIQUE INDEX IF NOT EXISTS ${POLICY_SUGGESTION_ONE_OPEN_INDEX} ON mcp_policy_suggestions (scope_kind, scope_id, server_id) WHERE status = 'open'`
     );
     this.exec(`CREATE INDEX IF NOT EXISTS idx_mcp_policy_suggestions_status ON mcp_policy_suggestions (status, created_at)`);
-    this.exec(`CREATE INDEX IF NOT EXISTS idx_mcp_tool_calls_started ON mcp_tool_calls (started_at)`);
+    this.exec(`CREATE INDEX IF NOT EXISTS idx_mcp_tool_calls_started ON mcp_tool_calls (started_at, id)`);
 
     this.exec(`CREATE INDEX IF NOT EXISTS idx_workflows_project_id ON workflows(project_id)`);
     this.exec(`CREATE INDEX IF NOT EXISTS idx_workflows_folder_id ON workflows(folder_id)`);
@@ -11978,9 +11979,10 @@ export class SqliteStore implements Store {
   async scanMcpToolCalls(filter: McpToolCallScanFilter): Promise<McpToolCallRecord[]> {
     const { where, params } = mcpToolCallScanWhere(filter, () => "?", "id");
     const limit = clampLimit(filter.limit, { fallback: 1000, max: LIMIT_MAX.mcpToolCallScan });
-    return this.queryAll<McpToolCallRow>(`SELECT * FROM mcp_tool_calls WHERE ${where} ORDER BY started_at DESC, id DESC LIMIT ${limit}`, params as BindParams).map(
-      mapMcpToolCall
-    );
+    return this.queryAll<McpToolCallRow>(
+      `SELECT ${MCP_TOOL_CALL_SCAN_COLUMNS} FROM mcp_tool_calls WHERE ${where} ORDER BY started_at DESC, id DESC LIMIT ${limit}`,
+      params as BindParams
+    ).map(mapMcpToolCall);
   }
 
   async upsertOpenMcpPolicySuggestion(
@@ -12412,6 +12414,19 @@ export class SqliteStore implements Store {
       this.exec(`UPDATE mcp_tool_policies SET ${fields.join(", ")} WHERE id = ?`, params);
     }
     return this.getMcpToolPolicySync(id);
+  }
+
+  async enforceShadowMcpToolPolicies(ids: readonly string[], now: string): Promise<McpToolPolicyRule[]> {
+    return this.db.transaction(() => {
+      const changed: McpToolPolicyRule[] = [];
+      for (const id of new Set(ids)) {
+        const result = this.db.prepare(`UPDATE mcp_tool_policies SET mode = 'enforce', updated_at = ? WHERE id = ? AND mode = 'shadow'`).run(now, id);
+        if (result.changes === 0) continue;
+        const rule = this.getMcpToolPolicySync(id);
+        if (rule) changed.push(rule);
+      }
+      return changed;
+    })();
   }
 
   async deleteMcpToolPolicy(id: string): Promise<boolean> {
