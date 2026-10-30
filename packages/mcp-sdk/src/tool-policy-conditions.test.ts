@@ -7,11 +7,14 @@ import type { McpPolicyCondition, McpToolPolicyRule } from "@ai-orchestrator/sha
 import {
   describePolicyConditions,
   evaluateMcpToolAccess,
+  createPolicyEvaluationBudget,
   evaluateMcpToolPolicy,
   evaluatePolicyCondition,
   hashMcpToolPolicyRule,
   isStrictlyNarrower,
+  MAX_GLOB_STEPS_PER_EVALUATION,
   MAX_GLOB_TEXT_LENGTH,
+  MAX_RESOLVED_VALUES,
   matchesToolPattern,
   matchesValueGlob,
   policyDecisionRecord,
@@ -92,7 +95,9 @@ describe("evaluatePolicyCondition", () => {
     expect(holds({ path: "draft", op: "equals", value: false })).toBe(true);
     expect(holds({ path: "draft", op: "equals", value: false }, { draft: "false" })).toBe(true);
     expect(holds({ path: "nothing", op: "equals", value: null })).toBe(true);
-    expect(holds({ path: "owner", op: "equals", value: "octo" })).toBe(false);
+    // An object is a value equals cannot read: a match for deny and approval, never for allow.
+    expect(holds({ path: "owner", op: "equals", value: "octo" })).toBe(true);
+    expect(allowHolds({ path: "owner", op: "equals", value: "octo" })).toBe(false);
   });
 
   it("compares text with case only when ignoreCase is off", () => {
@@ -118,6 +123,11 @@ describe("evaluatePolicyCondition", () => {
     expect(holds({ path: "missing", op: "gt", value: 1 })).toBe(false);
     expect(allowHolds({ path: "missing", op: "not_one_of", value: ["x"] })).toBe(false);
     expect(allowHolds({ path: "empty", op: "not_one_of", value: ["x"] }, { empty: [] })).toBe(false);
+    // null reads like a missing argument.
+    expect(holds({ path: "nothing", op: "not_one_of", value: ["x"] })).toBe(true);
+    expect(allowHolds({ path: "nothing", op: "not_one_of", value: ["x"] })).toBe(false);
+    expect(holds({ path: "nothing", op: "not_one_of", value: [null] })).toBe(false);
+    expect(holds({ path: "nothing", op: "one_of", value: ["x"] })).toBe(false);
   });
 
   it("a value the operator cannot read matches for deny and approval, never for allow", () => {
@@ -134,7 +144,8 @@ describe("evaluatePolicyCondition", () => {
     expect(holds({ path: "repo", op: "ends_with", value: "/api" })).toBe(true);
     expect(holds({ path: "repo", op: "starts_with", value: "other/" })).toBe(false);
     expect(holds({ path: "count", op: "starts_with", value: "5" })).toBe(true);
-    expect(holds({ path: "owner", op: "starts_with", value: "o" })).toBe(false);
+    expect(holds({ path: "owner", op: "starts_with", value: "o" })).toBe(true);
+    expect(allowHolds({ path: "owner", op: "starts_with", value: "o" })).toBe(false);
     expect(holds({ path: "repo", op: "matches", value: "acme/*" })).toBe(true);
     expect(holds({ path: "repo", op: "matches", value: "acme/ap?" })).toBe(true);
     expect(holds({ path: "repo", op: "matches", value: "acme.api" })).toBe(false);
@@ -185,6 +196,45 @@ describe("evaluatePolicyCondition", () => {
     expect(allowHolds({ path: "labels", op: "one_of", value: ["p1", "bug"] })).toBe(true);
   });
 
+  it("objects and nested lists are values no operator can read: deny matches, allow does not", () => {
+    // The review's probes (N-L2).
+    expect(holds({ path: "env", op: "one_of", value: ["prod"] }, { env: { v: "prod" } })).toBe(true);
+    expect(holds({ path: "env", op: "one_of", value: ["prod"] }, { env: [["prod"]] })).toBe(true);
+    expect(holds({ path: "repo", op: "starts_with", value: "evil/" }, { repo: [["evil/x"]] })).toBe(true);
+    expect(holds({ path: "repo", op: "matches", value: "evil/*" }, { repo: { name: "evil/x" } })).toBe(true);
+    expect(allowHolds({ path: "repo", op: "starts_with", value: "myorg/" }, { repo: [["myorg/x"]] })).toBe(false);
+    // null still reads as missing.
+    expect(holds({ path: "env", op: "one_of", value: ["prod"] }, { env: null })).toBe(false);
+  });
+
+  it("an allow needs every [*] element to have the rest of the path (N-L3)", () => {
+    const files = { files: [{ path: "/safe/a" }, { other: "/etc/passwd" }] };
+    expect(allowHolds({ path: "files[*].path", op: "starts_with", value: "/safe/" }, files)).toBe(false);
+    expect(allowHolds({ path: "files[*].path", op: "starts_with", value: "/safe/" }, { files: [{ path: "/safe/a" }, { path: "/safe/b" }] })).toBe(true);
+    expect(allowHolds({ path: "files[*].path", op: "exists" }, files)).toBe(false);
+    expect(allowHolds({ path: "groups[*][*]", op: "one_of", value: ["a"] }, { groups: [["a"], "a"] })).toBe(false);
+    // For deny and approval the element without the key is simply missing.
+    expect(holds({ path: "files[*].path", op: "starts_with", value: "/etc/" }, files)).toBe(false);
+    expect(holds({ path: "files[*].path", op: "starts_with", value: "/safe/" }, files)).toBe(true);
+  });
+
+  it("values past the cap make the reading incomplete: deny matches, allow does not (N-H1)", () => {
+    const padded = { repos: [...Array.from({ length: MAX_RESOLVED_VALUES }, (_, index) => `myorg/r${index}`), "evil/b"] };
+    for (const path of ["repos[*]", "repos"]) {
+      expect(holds({ path, op: "starts_with", value: "evil/" }, padded), path).toBe(true);
+      expect(holds({ path, op: "one_of", value: ["nothing-here"] }, padded), path).toBe(true);
+      expect(allowHolds({ path, op: "starts_with", value: "myorg/" }, padded), path).toBe(false);
+    }
+    // Through nested [*] steps too.
+    const nested = { orgs: [{ repos: padded.repos.slice(0, 600) }, { repos: padded.repos.slice(600) }] };
+    expect(holds({ path: "orgs[*].repos[*]", op: "starts_with", value: "evil/" }, nested)).toBe(true);
+    expect(allowHolds({ path: "orgs[*].repos[*]", op: "starts_with", value: "myorg/" }, nested)).toBe(false);
+    // Exactly at the cap nothing is cut.
+    const full = { repos: Array.from({ length: MAX_RESOLVED_VALUES }, (_, index) => `myorg/r${index}`) };
+    expect(allowHolds({ path: "repos[*]", op: "starts_with", value: "myorg/" }, full)).toBe(true);
+    expect(holds({ path: "repos[*]", op: "starts_with", value: "evil/" }, full)).toBe(false);
+  });
+
   it("label conditions read provenance and data classes; untracked labels count as absent for deny only", () => {
     const labels = { provenance: ["untrusted_external"], dataClasses: ["email"] };
     expect(holds({ op: "label_present", value: "email" }, args, labels)).toBe(true);
@@ -196,8 +246,11 @@ describe("evaluatePolicyCondition", () => {
     expect(allowHolds({ op: "label_absent", value: "email" }, args, null)).toBe(false);
   });
 
-  it("is total on malformed conditions", () => {
-    expect(holds({ op: "equals", value: 1 })).toBe(false);
+  it("is total on malformed conditions; a path it cannot read fails closed", () => {
+    expect(holds({ op: "equals", value: 1 })).toBe(true);
+    expect(allowHolds({ op: "equals", value: 1 })).toBe(false);
+    expect(holds({ path: "items..id", op: "equals", value: 1 })).toBe(true);
+    expect(allowHolds({ path: "items..id", op: "equals", value: 1 })).toBe(false);
     expect(holds({ path: "repo", op: "one_of", value: "acme/api" })).toBe(false);
     expect(holds({ path: "missing", op: "not_one_of", value: "acme/api" })).toBe(false);
     expect(holds({ path: "count", op: "between", value: [1] })).toBe(false);
@@ -222,6 +275,25 @@ describe("matchesValueGlob", () => {
     expect(matchesValueGlob(`${"*a".repeat(10)}*b`, "a".repeat(60_000))).toBe(false);
     expect(matchesToolPattern(`${"*a".repeat(10)}*b`, "a".repeat(100_000))).toBe(false);
     expect(performance.now() - started).toBeLessThan(250);
+  });
+
+  it("spends one budget per evaluation and fails closed once it is gone (N-M2)", () => {
+    const pattern = `*${"a".repeat(498)}b`;
+    const values = Array.from({ length: 150 }, () => "a".repeat(64 * 1024));
+    const started = performance.now();
+    expect(holds({ path: "body[*]", op: "matches", value: pattern }, { body: values })).toBe(true);
+    expect(allowHolds({ path: "body[*]", op: "matches", value: pattern }, { body: values })).toBe(false);
+    const budget = createPolicyEvaluationBudget();
+    expect(evaluatePolicyCondition({ path: "body", op: "matches", value: pattern }, { body: values[0] }, undefined, "any", budget)).toBe(true);
+    expect(budget.globSteps).toBe(0);
+    // Spent: even a cheap match now reads as unreadable for the rest of the call.
+    expect(evaluatePolicyCondition({ path: "repo", op: "matches", value: "nope*" }, args, undefined, "any", budget)).toBe(true);
+    expect(evaluatePolicyCondition({ path: "repo", op: "matches", value: "acme/*" }, args, undefined, "every", budget)).toBe(false);
+    expect(performance.now() - started).toBeLessThan(2000);
+    // A fresh budget is far from spent by ordinary values.
+    const fresh = createPolicyEvaluationBudget();
+    expect(evaluatePolicyCondition({ path: "repo", op: "matches", value: "acme/*" }, args, undefined, "every", fresh)).toBe(true);
+    expect(fresh.globSteps).toBeGreaterThan(MAX_GLOB_STEPS_PER_EVALUATION - 100);
   });
 
   it("does not run a glob on text over the cap: deny matches, allow does not", () => {
@@ -317,6 +389,28 @@ describe("evaluateMcpToolPolicy with conditions", () => {
     expect(evaluateMcpToolPolicy([denyPush, allowMyorg], call(["myorg/a", "evil/b"]))).toMatchObject({ allowed: false, rule: denyPush });
     expect(evaluateMcpToolPolicy([denyPush, allowMyorg], call(["myorg/a", "myorg/b"]))).toMatchObject({ allowed: true, rule: allowMyorg });
     expect(evaluateMcpToolPolicy([denyPush, allowMyorg], call([])).allowed).toBe(false);
+  });
+
+  it("padding a list past the cap neither escapes a deny nor widens an allow (N-H1)", () => {
+    const denyPush = rule({ id: "deny", effect: "deny", toolPattern: "push" });
+    const allowMyorg = rule({ id: "myorg", effect: "allow", toolPattern: "push", conditions: { all: [{ path: "repos[*]", op: "starts_with", value: "myorg/" }] } });
+    const denyEvil = rule({ id: "evil", effect: "deny", toolPattern: "push", conditions: { all: [{ path: "repos[*]", op: "starts_with", value: "evil/" }] } });
+    const padded = [...Array.from({ length: 1000 }, (_, index) => `myorg/r${index}`), "evil/b"];
+    const call = request({ toolName: "push", arguments: { repos: padded } });
+    expect(evaluateMcpToolPolicy([denyPush, allowMyorg], call)).toMatchObject({ allowed: false, rule: denyPush });
+    expect(evaluateMcpToolPolicy([denyEvil], call)).toMatchObject({ allowed: false, rule: denyEvil });
+  });
+
+  it("one glob budget covers every rule of a call: long values cannot stall it (N-M2)", () => {
+    const pattern = `*${"a".repeat(498)}b`;
+    const body = Array.from({ length: 150 }, () => "a".repeat(64 * 1024));
+    const denyBody = rule({ id: "deny-body", effect: "deny", conditions: { all: [{ path: "body", op: "matches", value: pattern }] } });
+    const denyAll = rule({ id: "deny-all", effect: "deny" });
+    const allowBody = rule({ id: "allow-body", effect: "allow", conditions: { all: [{ path: "body", op: "matches", value: pattern }] } });
+    const started = performance.now();
+    expect(evaluateMcpToolPolicy([denyBody], request({ arguments: { body } }))).toMatchObject({ allowed: false, rule: denyBody });
+    expect(evaluateMcpToolPolicy([denyAll, allowBody], request({ arguments: { body } }))).toMatchObject({ allowed: false, rule: denyAll });
+    expect(performance.now() - started).toBeLessThan(2000);
   });
 
   it("deny rules catch the sloppy arguments of the review", () => {

@@ -1063,7 +1063,10 @@ export type McpPolicyScalar = string | number | boolean | null;
  * value does (and there is at least one). Scalars compare as trimmed text
  * (`5000` equals `"5000"`), number operators read numeric strings, and a
  * missing argument satisfies only the negated operators (`not_one_of`,
- * `label_absent`), and only for deny and require_approval rules.
+ * `label_absent`), and only for deny and require_approval rules. A value the
+ * operator cannot read (an object, text for a number operator) and a reading
+ * cut short by a cap (over 1,000 values, the glob budget) match a deny or
+ * require_approval rule and never an allow.
  */
 export interface McpPolicyCondition {
   path?: string;

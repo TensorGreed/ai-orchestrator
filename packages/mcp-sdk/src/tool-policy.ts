@@ -182,18 +182,41 @@ export interface McpToolPolicyDecision {
 }
 
 /**
- * Glob match without regular expressions: `*` matches any run of characters
- * (including none) and, when `questionMark` is set, `?` exactly one;
- * everything else is literal. The classic two-pointer walk that only ever
- * backtracks to the last `*`, so the worst case is O(text × pattern) with no
- * catastrophic backtracking whatever the input.
+ * Glob comparison steps one tool-call evaluation may spend in total, across
+ * every `matches` condition of every rule (about 0.1 s of work in the worst
+ * case). Each value is linear to match, but many long values against a long
+ * self-overlapping pattern add up; once the budget is spent, every further
+ * `matches` reads as a value the operator cannot read, so it fails closed:
+ * a match for deny and require_approval, never for allow.
  */
-export function matchesGlob(pattern: string, text: string, questionMark = false): boolean {
+export const MAX_GLOB_STEPS_PER_EVALUATION = 20_000_000;
+
+/** Phase 12.4 — work left for one tool-call evaluation (see `MAX_GLOB_STEPS_PER_EVALUATION`). */
+export interface PolicyEvaluationBudget {
+  globSteps: number;
+}
+
+export function createPolicyEvaluationBudget(): PolicyEvaluationBudget {
+  return { globSteps: MAX_GLOB_STEPS_PER_EVALUATION };
+}
+
+/**
+ * The two-pointer walk behind `matchesGlob`. Charges one step per character
+ * comparison to `budget` when given; `undefined` when the budget ran out
+ * before an answer.
+ */
+function globWalk(pattern: string, text: string, questionMark: boolean, budget?: PolicyEvaluationBudget): boolean | undefined {
+  if (budget && budget.globSteps <= 0) return undefined;
   let p = 0;
   let t = 0;
   let star = -1;
   let resume = 0;
+  let steps = 0;
   while (t < text.length) {
+    if (budget && ++steps >= budget.globSteps) {
+      budget.globSteps = 0;
+      return undefined;
+    }
     const char = pattern[p];
     if (p < pattern.length && char !== "*" && (char === text[t] || (questionMark && char === "?"))) {
       p += 1;
@@ -207,11 +230,24 @@ export function matchesGlob(pattern: string, text: string, questionMark = false)
       resume += 1;
       t = resume;
     } else {
+      if (budget) budget.globSteps -= steps;
       return false;
     }
   }
+  if (budget) budget.globSteps -= steps;
   while (p < pattern.length && pattern[p] === "*") p += 1;
   return p === pattern.length;
+}
+
+/**
+ * Glob match without regular expressions: `*` matches any run of characters
+ * (including none) and, when `questionMark` is set, `?` exactly one;
+ * everything else is literal. The classic two-pointer walk that only ever
+ * backtracks to the last `*`, so the worst case is O(text × pattern) with no
+ * catastrophic backtracking whatever the input.
+ */
+export function matchesGlob(pattern: string, text: string, questionMark = false): boolean {
+  return globWalk(pattern, text, questionMark) === true;
 }
 
 export function isToolGlob(pattern: string): boolean {
@@ -271,15 +307,20 @@ export function ruleScopeMatches(rule: McpToolPolicyRule, request: McpToolPolicy
 /**
  * Whether the rule matches the call: scope, then conditions. `undecided`
  * when the scope matches but the rule has conditions and the request carries
- * no arguments (discovery).
+ * no arguments (discovery). `budget` is the call's evaluation budget, shared
+ * by every rule evaluated for it; a fresh one when absent.
  */
-export function ruleMatchState(rule: McpToolPolicyRule, request: McpToolPolicyRequest): "match" | "no_match" | "undecided" {
+export function ruleMatchState(
+  rule: McpToolPolicyRule,
+  request: McpToolPolicyRequest,
+  budget: PolicyEvaluationBudget = createPolicyEvaluationBudget()
+): "match" | "no_match" | "undecided" {
   if (!ruleScopeMatches(rule, request)) return "no_match";
   // Stored conditions that no longer validate fail closed: an allow never matches, anything else covers its whole scope.
   if (rule.invalid) return rule.effect === "allow" ? "no_match" : "match";
   if (!policyRuleHasConditions(rule)) return "match";
   if (request.arguments === undefined) return "undecided";
-  return matchesPolicyConditions(rule.conditions, request.arguments, request.dataLabels, rule.effect) ? "match" : "no_match";
+  return matchesPolicyConditions(rule.conditions, request.arguments, request.dataLabels, rule.effect, budget) ? "match" : "no_match";
 }
 
 export function ruleMatches(rule: McpToolPolicyRule, request: McpToolPolicyRequest): boolean {
@@ -290,8 +331,13 @@ export function ruleMatches(rule: McpToolPolicyRule, request: McpToolPolicyReque
 // Phase 12.4 — conditions
 // ---------------------------------------------------------------------------
 
-/** At most this many values are read through `[*]` steps for one condition. */
-const MAX_RESOLVED_VALUES = 1000;
+/**
+ * At most this many values are read for one condition (through `[*]` steps
+ * and a path that ends on an array). A value set cut by this cap is
+ * incomplete and fails closed: a match for deny and require_approval, never
+ * for allow.
+ */
+export const MAX_RESOLVED_VALUES = 1000;
 
 const pathCache = new Map<string, McpPolicyPathStep[] | null>();
 
@@ -307,27 +353,61 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-/** Every value at `path` in `root`; empty when the path does not resolve. */
-export function resolvePolicyPath(root: unknown, path: string): unknown[] {
+/**
+ * The values at a path, and how far they can be trusted:
+ * `incomplete` when the path cannot be read (bad syntax, over the length or
+ * step cap) or a cap cut the values; `partial` when some element reached
+ * through `[*]` lacks the rest of the path.
+ */
+interface ResolvedValues {
+  values: unknown[];
+  incomplete: boolean;
+  partial: boolean;
+}
+
+function resolveValues(root: unknown, path: string, readEndArrays: boolean): ResolvedValues {
   const steps = pathSteps(path);
-  if (!steps) return [];
+  if (!steps) return { values: [], incomplete: true, partial: false };
   let current: unknown[] = [root];
+  let afterWildcard = false;
+  let incomplete = false;
+  let partial = false;
+  const take = (into: unknown[], list: unknown[]) => {
+    const room = MAX_RESOLVED_VALUES - into.length;
+    if (list.length > room) incomplete = true;
+    into.push(...list.slice(0, Math.max(0, room)));
+  };
   for (const step of steps) {
     const next: unknown[] = [];
     for (const value of current) {
+      const before = next.length;
       if ("key" in step) {
-        if (isPlainObject(value) && Object.prototype.hasOwnProperty.call(value, step.key)) next.push(value[step.key]);
+        if (isPlainObject(value) && Object.prototype.hasOwnProperty.call(value, step.key) && value[step.key] !== undefined) next.push(value[step.key]);
       } else if ("index" in step) {
         if (Array.isArray(value) && step.index < value.length) next.push(value[step.index]);
       } else if (Array.isArray(value)) {
-        next.push(...value.slice(0, MAX_RESOLVED_VALUES));
+        take(next, value);
       }
-      if (next.length >= MAX_RESOLVED_VALUES) break;
+      if (next.length === before && afterWildcard) partial = true;
+      if (incomplete) break;
     }
-    current = next.slice(0, MAX_RESOLVED_VALUES);
-    if (current.length === 0) return [];
+    if ("any" in step) afterWildcard = true;
+    current = next;
+    if (incomplete || current.length === 0) break;
   }
-  return current.filter((value) => value !== undefined);
+  if (!readEndArrays || incomplete) return { values: current, incomplete, partial };
+  const values: unknown[] = [];
+  for (const value of current) {
+    if (Array.isArray(value)) take(values, value);
+    else take(values, [value]);
+    if (incomplete) break;
+  }
+  return { values, incomplete, partial };
+}
+
+/** Every value at `path` in `root` (at most `MAX_RESOLVED_VALUES`); empty when the path does not resolve. */
+export function resolvePolicyPath(root: unknown, path: string): unknown[] {
+  return resolveValues(root, path, false).values;
 }
 
 function isScalar(value: unknown): value is McpPolicyScalar {
@@ -394,12 +474,14 @@ export function matchesValueGlob(pattern: string, value: string): boolean {
 /**
  * One value against one argument operator. `true` / `false` when the value
  * can be read; `"unreadable"` when it is of a type the operator cannot read
- * (an object, or a non-numeric value for a number operator), which the
- * quantifier then resolves fail-closed.
+ * (an object or a nested list for any operator, a non-numeric value for a
+ * number operator), longer than `MAX_GLOB_TEXT_LENGTH` for `matches`, or the
+ * call's glob budget is spent. The quantifier resolves it fail-closed.
  */
-function valueSatisfies(condition: McpPolicyCondition, value: unknown): boolean | "unreadable" {
+function valueSatisfies(condition: McpPolicyCondition, value: unknown, budget: PolicyEvaluationBudget): boolean | "unreadable" {
   const expected = condition.value;
   const ignoreCase = condition.ignoreCase === true;
+  if (value !== null && !isScalar(value)) return "unreadable";
   switch (condition.op) {
     case "equals":
       if (Array.isArray(expected) || expected === undefined) return false;
@@ -409,7 +491,8 @@ function valueSatisfies(condition: McpPolicyCondition, value: unknown): boolean 
       return expected.some((entry) => sameScalar(entry, value, ignoreCase));
     case "not_one_of":
       if (!Array.isArray(expected)) return false;
-      if (!isScalar(value)) return "unreadable";
+      // null reads like a missing argument: it "is not one of" the list for deny and approval, never for an allow.
+      if (value === null) return expected.includes(null) ? false : "unreadable";
       return !expected.some((entry) => sameScalar(entry, value, ignoreCase));
     case "starts_with":
     case "ends_with":
@@ -421,7 +504,7 @@ function valueSatisfies(condition: McpPolicyCondition, value: unknown): boolean 
       if (condition.op === "starts_with") return text.startsWith(wanted);
       if (condition.op === "ends_with") return text.endsWith(wanted);
       if (text.length > MAX_GLOB_TEXT_LENGTH) return "unreadable";
-      return matchesValueGlob(wanted, text);
+      return globWalk(wanted, text, true, budget) ?? "unreadable";
     }
     case "lt":
     case "lte":
@@ -451,32 +534,26 @@ function valueSatisfies(condition: McpPolicyCondition, value: unknown): boolean 
 
 const NEGATED_OPS = new Set<McpPolicyCondition["op"]>(["not_one_of", "label_absent"]);
 
-/** The values an operator reads at `path`: arrays at the end of the path are read element by element. */
-function operandValues(args: Record<string, unknown>, path: string): unknown[] {
-  const values: unknown[] = [];
-  for (const value of resolvePolicyPath(args, path)) {
-    if (Array.isArray(value)) values.push(...value.slice(0, MAX_RESOLVED_VALUES - values.length));
-    else values.push(value);
-    if (values.length >= MAX_RESOLVED_VALUES) break;
-  }
-  return values;
-}
-
 /**
  * One condition against a call. Pure and total. Fails closed for the rule's
- * effect (see `PolicyConditionQuantifier`): under `any` (deny,
- * require_approval, the default) a missing argument, an empty array or
- * labels the run does not track satisfy only the negated operators, and a
- * value of a type the operator cannot read (`"5000x"` for `gt`, an object
- * for `not_one_of`) satisfies it; under `every` (allow) none of those do.
+ * effect (see `PolicyConditionQuantifier`):
+ * - under `any` (deny, require_approval, the default) a missing argument, an
+ *   empty array or labels the run does not track satisfy only the negated
+ *   operators; a value the operator cannot read (`"5000x"` for `gt`, an
+ *   object or a nested list for any operator) satisfies it; and so does an
+ *   incomplete reading: a path that cannot be read, more than
+ *   `MAX_RESOLVED_VALUES` values, or a spent glob budget;
+ * - under `every` (allow) none of those do, and neither does a `[*]` element
+ *   that lacks the rest of the path.
  * `exists` reads the path as given: true when some value is not null,
- * `exists: false` when none is. A malformed condition is false.
+ * `exists: false` when none is. An operator with a malformed value is false.
  */
 export function evaluatePolicyCondition(
   condition: McpPolicyCondition,
   args: Record<string, unknown>,
   labels?: McpToolPolicyRequest["dataLabels"],
-  quantifier: PolicyConditionQuantifier = "any"
+  quantifier: PolicyConditionQuantifier = "any",
+  budget: PolicyEvaluationBudget = createPolicyEvaluationBudget()
 ): boolean {
   if (condition.op === "label_present" || condition.op === "label_absent") {
     if (typeof condition.value !== "string") return false;
@@ -484,15 +561,18 @@ export function evaluatePolicyCondition(
     const present = labels.provenance.includes(condition.value) || labels.dataClasses.includes(condition.value);
     return condition.op === "label_present" ? present : !present;
   }
-  if (typeof condition.path !== "string") return false;
+  if (typeof condition.path !== "string") return quantifier === "any";
+  const resolved = resolveValues(args, condition.path, condition.op !== "exists");
+  if (resolved.incomplete) return quantifier === "any";
+  if (quantifier === "every" && resolved.partial) return false;
+  const { values } = resolved;
   if (condition.op === "exists") {
-    const exists = resolvePolicyPath(args, condition.path).some((value) => value !== null);
+    const exists = values.some((value) => value !== null);
     return condition.value === false ? !exists : exists;
   }
-  const values = operandValues(args, condition.path);
   if (values.length === 0) return quantifier === "any" && NEGATED_OPS.has(condition.op) && Array.isArray(condition.value);
-  if (quantifier === "every") return values.every((value) => valueSatisfies(condition, value) === true);
-  return values.some((value) => valueSatisfies(condition, value) !== false);
+  if (quantifier === "every") return values.every((value) => valueSatisfies(condition, value, budget) === true);
+  return values.some((value) => valueSatisfies(condition, value, budget) !== false);
 }
 
 /**
@@ -504,14 +584,15 @@ export function matchesPolicyConditions(
   conditions: McpToolPolicyRule["conditions"],
   args: Record<string, unknown>,
   labels?: McpToolPolicyRequest["dataLabels"],
-  effect?: McpToolPolicyEffect
+  effect?: McpToolPolicyEffect,
+  budget: PolicyEvaluationBudget = createPolicyEvaluationBudget()
 ): boolean {
   const { combine, items } = conditionList(conditions);
   if (items.length === 0) return true;
   const quantifier = conditionQuantifier(effect);
   return combine === "any"
-    ? items.some((condition) => evaluatePolicyCondition(condition, args, labels, quantifier))
-    : items.every((condition) => evaluatePolicyCondition(condition, args, labels, quantifier));
+    ? items.some((condition) => evaluatePolicyCondition(condition, args, labels, quantifier, budget))
+    : items.every((condition) => evaluatePolicyCondition(condition, args, labels, quantifier, budget));
 }
 
 /** Phase 12.4 — sha256 of the rule's canonical form (see `canonicalMcpToolPolicyRule`). */
@@ -646,8 +727,9 @@ export function evaluateMcpToolPolicy(
 ): McpToolPolicyDecision {
   const matchedAll: McpToolPolicyRule[] = [];
   const undecided: McpToolPolicyRule[] = [];
+  const budget = createPolicyEvaluationBudget();
   for (const rule of rules) {
-    const state = ruleMatchState(rule, request);
+    const state = ruleMatchState(rule, request, budget);
     if (state === "match") matchedAll.push(rule);
     else if (state === "undecided") undecided.push(rule);
   }
