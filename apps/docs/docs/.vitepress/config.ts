@@ -102,6 +102,7 @@ export default defineConfig({
           { text: "Importing from another builder", link: "/product/importing-from-another-builder" },
           { text: "MCP server registry", link: "/product/mcp-server-registry" },
           { text: "MCP control plane", link: "/product/mcp-control-plane" },
+          { text: "MCP tool-call telemetry", link: "/product/mcp-tool-call-telemetry" },
           { text: "MCP tool policy", link: "/product/mcp-tool-policy" },
           { text: "MCP gateway", link: "/product/mcp-gateway" },
           { text: "MCP onboarding and catalog", link: "/product/mcp-onboarding" },
