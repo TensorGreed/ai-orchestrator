@@ -136,7 +136,7 @@ export const TOOL_ARGUMENT_SENSITIVE_STEMS: readonly string[] = [
  * anywhere, `tax` in `syntax`).
  */
 export const TOOL_ARGUMENT_SENSITIVE_SEGMENTS: readonly string[] = [
-  "pw", "pwd", "sid", "sig", "tax", "tel", "dob", "to", "cc", "bcc", "from", "q"
+  "pw", "pwd", "sid", "sig", "tax", "tel", "dob", "to", "cc", "bcc", "from", "q", "uid", "rcpt", "nm", "mrn"
 ];
 
 /**

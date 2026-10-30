@@ -195,6 +195,41 @@ describe("summarizeToolArguments: sensitive paths", () => {
     expect(summary.fields.rename?.values).toBeUndefined();
   });
 
+  it("treats uid, rcpt, nm and mrn as whole-word sensitive stems (round 3)", () => {
+    for (const key of ["uid", "rcpt", "nm", "mrn", "owner_uid", "rcptTo", "patient_mrn", "first_nm"]) {
+      expect(isSensitiveToolArgumentKey(key), key).toBe(true);
+    }
+    for (const key of ["unit", "format", "enum", "mrnless"]) {
+      expect(isSensitiveToolArgumentKey(key), key).toBe(false);
+    }
+    const summary = summarize({ uid: "alice", rcpt: "bob", nm: "carol", mrn: "dave" });
+    for (const field of Object.values(summary.fields)) {
+      expect(field.values).toBeUndefined();
+      expect(field.prefixes).toBeUndefined();
+    }
+    expect(allText(summary)).not.toMatch(/alice|bob|carol|dave/);
+  });
+
+  it("exempts namespace keys from substring matching only; their values still go through the checks (round 3)", () => {
+    const summary = summarize({
+      namespace: "john.smith1",
+      pod_namespace: "ab12cd34ef56gh78",
+      other_namespace: "Alice Smith",
+      third_namespace: "jane@example.com",
+      fourth_namespace: "a1b2c3d4e5f6a7b8c9d0",
+      fifth_namespace: "kube-system"
+    });
+    expect(summary.fields.namespace?.values).toBeUndefined();
+    expect(summary.fields.pod_namespace?.values).toBeUndefined();
+    expect(summary.fields.other_namespace?.values).toBeUndefined();
+    expect(summary.fields.third_namespace?.values).toBeUndefined();
+    expect(summary.fields.fourth_namespace?.values).toBeUndefined();
+    expect(summary.fields.fifth_namespace?.values).toEqual(["kube-system"]);
+    expect(allText(summary)).not.toMatch(/john|smith|alice|jane/i);
+    // A whole-word sensitive segment next to namespace still wins.
+    expect(isSensitiveToolArgumentKey("user_namespace")).toBe(true);
+  });
+
   it("hashes codes, written as numbers or strings, with their magnitude (M-B)", () => {
     const summary = summarize({
       security_code: 123,
