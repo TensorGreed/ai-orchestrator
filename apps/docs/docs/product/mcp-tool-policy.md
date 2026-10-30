@@ -110,13 +110,18 @@ A sloppy or unusual argument may cause an extra deny or approval, never an escap
 | | Deny and require approval | Allow (exceptions) |
 |---|---|---|
 | Several values (`[*]`, or a path that ends on a list) | match when **any** value matches | match only when **every** value matches, and there is at least one |
-| Missing argument, or an empty list | matches `not_one_of` and `label_absent` only | never matches |
-| A value the operator cannot read (`"lots"` for `gt`, an object for `not_one_of`) | matches | never matches |
+| Missing argument, or `null` | matches `not_one_of` and `exists: false`; no other operator | matches `exists: false` only |
+| An empty list | matches `not_one_of` only | never matches |
+| A value the operator cannot read: an object or a nested list for any operator, text that is not a number (`"lots"`) for a number operator, text over 64 KiB for `matches` | matches | never matches |
+| An element reached through `[*]` that lacks the rest of the path (`files[*].path` on `{"other": 1}`) | that element is skipped, like a missing argument | never matches |
+| A reading cut short: more than 1,000 values at the path, a path that cannot be read, or the call's glob budget spent | matches | never matches |
 | Run tracks no data labels | matches `label_absent` only | never matches |
 
-For example, *deny `env` not one of `dev`* blocks a call that leaves `env` out, since the server may default to production: a missing argument "is not one of dev". *Deny `push`* with the exception *allow `push` where `repos[*]` starts with `myorg/`* still blocks `{"repos": ["myorg/a", "evil/b"]}`, because the exception needs every repository to match.
+For example, *deny `env` not one of `dev`* blocks a call that leaves `env` out, since the server may default to production: a missing argument "is not one of dev". A missing argument does **not** match the other operators: *deny `repo` starts with `evil/`* lets a call without `repo` through, and *deny `amount` greater than 100* lets a call without `amount` through, so optional arguments do not block every call. Add a second rule with `exists: false`, or use an allow-list, when a missing argument must not pass. *Deny `push`* with the exception *allow `push` where `repos[*]` starts with `myorg/`* still blocks `{"repos": ["myorg/a", "evil/b"]}`, because the exception needs every repository to match.
 
-Prefer allow-lists to deny-lists: deny broadly, then carve out exceptions with an allow rule that uses `one_of`. A deny-list has to foresee every spelling of the bad value; an allow-list only has to name the good ones.
+Padding a list does not help a caller either: *deny `repos[*]` starts with `evil/`* still blocks 1,000 harmless repositories followed by `evil/b`, because a reading past 1,000 values is cut short and matches. Glob matching (`matches`) has a budget of 20 million comparison steps per call, across all rules; long values against a long pattern use it up, and the rest of the call's `matches` conditions then read as cut short.
+
+Prefer allow-lists to deny-lists: deny broadly, then carve out exceptions with an allow rule that uses `one_of`. A deny-list has to foresee every spelling of the bad value; an allow-list only has to name the good ones. Values are compared as they are, after trimming spaces: lookalike characters (Cyrillic `р` for `p`, fullwidth `ＰＲＯＤ`) and invisible ones (a zero-width space) make a different value, so they slip past a deny-list but never into an allow-list.
 
 **Labels** come from [data labels](./data-labels-and-destinations.md) on the run: the provenance labels and data classes the values flowing into the call carry.
 
@@ -124,7 +129,7 @@ In the rule form, add conditions row by row (argument path, operator, value). Va
 
 ### Rules with invalid conditions
 
-If a rule's stored conditions no longer validate (limits tightened in an upgrade, or a hand-edited or restored database), the rule is listed with **Invalid conditions — fix or delete** and the API returns it with `invalid: true`. Until it is fixed it fails closed: an allow rule never matches, and a deny or require-approval rule applies to every call in its scope. The API logs a warning once per rule.
+If a rule's stored conditions no longer parse or validate (limits tightened in an upgrade, or a hand-edited or restored database), the rule is listed with **Invalid conditions — fix or delete** and the API returns it with `invalid: true`. Until it is fixed it fails closed: an allow rule never matches, and a deny or require-approval rule applies to every call in its scope. The API logs a warning once per rule. Saving another change (a new name, shadow mode) leaves the stored conditions as they are, still failing closed; the API refuses to clear the conditions of an invalid allow rule, since that would allow every call in its scope. Enter new conditions, or delete the rule.
 
 ### Discovery and conditions
 
