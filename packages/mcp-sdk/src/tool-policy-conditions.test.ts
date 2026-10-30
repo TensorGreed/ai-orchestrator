@@ -11,6 +11,8 @@ import {
   evaluatePolicyCondition,
   hashMcpToolPolicyRule,
   isStrictlyNarrower,
+  MAX_GLOB_TEXT_LENGTH,
+  matchesToolPattern,
   matchesValueGlob,
   policyDecisionRecord,
   policyNeedsArguments,
@@ -74,37 +76,71 @@ describe("resolvePolicyPath", () => {
   });
 });
 
+/** An allow rule's reading of the same condition (every value must satisfy it). */
+const allowHolds = (condition: McpPolicyCondition, input: Record<string, unknown> = args, labels?: McpToolPolicyRequest["dataLabels"]) =>
+  evaluatePolicyCondition(condition, input, labels, "every");
+
 describe("evaluatePolicyCondition", () => {
-  it("equals compares scalars strictly", () => {
+  it("equals compares scalars as trimmed text and numbers by value", () => {
     expect(holds({ path: "repo", op: "equals", value: "acme/api" })).toBe(true);
     expect(holds({ path: "count", op: "equals", value: 5 })).toBe(true);
-    expect(holds({ path: "count", op: "equals", value: "5" })).toBe(false);
+    expect(holds({ path: "count", op: "equals", value: "5" })).toBe(true);
+    expect(holds({ path: "n", op: "equals", value: 5000 }, { n: "5000.0" })).toBe(true);
+    expect(holds({ path: "zip", op: "equals", value: "007" }, { zip: "007" })).toBe(true);
+    expect(holds({ path: "zip", op: "equals", value: "007" }, { zip: "7" })).toBe(false);
+    expect(holds({ path: "env", op: "equals", value: "prod" }, { env: " prod " })).toBe(true);
     expect(holds({ path: "draft", op: "equals", value: false })).toBe(true);
+    expect(holds({ path: "draft", op: "equals", value: false }, { draft: "false" })).toBe(true);
     expect(holds({ path: "nothing", op: "equals", value: null })).toBe(true);
     expect(holds({ path: "owner", op: "equals", value: "octo" })).toBe(false);
   });
 
-  it("one_of and not_one_of need a scalar at the path", () => {
+  it("compares text with case only when ignoreCase is off", () => {
+    expect(holds({ path: "env", op: "one_of", value: ["prod"] }, { env: "PROD" })).toBe(false);
+    expect(holds({ path: "env", op: "one_of", value: ["prod"], ignoreCase: true }, { env: "PROD" })).toBe(true);
+    expect(holds({ path: "repo", op: "starts_with", value: "ACME/", ignoreCase: true })).toBe(true);
+    expect(holds({ path: "repo", op: "matches", value: "*/API", ignoreCase: true })).toBe(true);
+    expect(holds({ path: "env", op: "not_one_of", value: ["dev"], ignoreCase: true }, { env: "DEV" })).toBe(false);
+  });
+
+  it("one_of and not_one_of", () => {
     expect(holds({ path: "repo", op: "one_of", value: ["acme/web", "acme/api"] })).toBe(true);
     expect(holds({ path: "repo", op: "one_of", value: ["acme/web"] })).toBe(false);
     expect(holds({ path: "repo", op: "not_one_of", value: ["acme/web"] })).toBe(true);
     expect(holds({ path: "repo", op: "not_one_of", value: ["acme/api"] })).toBe(false);
-    // Unknown path and wrong type: false for both.
-    expect(holds({ path: "missing", op: "not_one_of", value: ["x"] })).toBe(false);
-    expect(holds({ path: "owner", op: "not_one_of", value: ["x"] })).toBe(false);
   });
 
-  it("starts_with, ends_with and matches read strings only", () => {
+  it("a missing argument satisfies only the negated operators, and only for deny and approval", () => {
+    // "missing is not one of dev": deny env not_one_of [dev] fires when env is left out.
+    expect(holds({ path: "missing", op: "not_one_of", value: ["x"] })).toBe(true);
+    expect(holds({ path: "empty", op: "not_one_of", value: ["x"] }, { empty: [] })).toBe(true);
+    expect(holds({ path: "missing", op: "one_of", value: ["x"] })).toBe(false);
+    expect(holds({ path: "missing", op: "gt", value: 1 })).toBe(false);
+    expect(allowHolds({ path: "missing", op: "not_one_of", value: ["x"] })).toBe(false);
+    expect(allowHolds({ path: "empty", op: "not_one_of", value: ["x"] }, { empty: [] })).toBe(false);
+  });
+
+  it("a value the operator cannot read matches for deny and approval, never for allow", () => {
+    expect(holds({ path: "owner", op: "not_one_of", value: ["x"] })).toBe(true);
+    expect(allowHolds({ path: "owner", op: "not_one_of", value: ["x"] })).toBe(false);
+    expect(holds({ path: "repo", op: "gt", value: 0 })).toBe(true);
+    expect(allowHolds({ path: "repo", op: "gt", value: 0 })).toBe(false);
+    expect(holds({ path: "nothing", op: "gt", value: 0 })).toBe(false);
+  });
+
+  it("starts_with, ends_with and matches read scalars as trimmed text", () => {
     expect(holds({ path: "repo", op: "starts_with", value: "acme/" })).toBe(true);
+    expect(holds({ path: "repo", op: "starts_with", value: "acme/" }, { repo: "  acme/x" })).toBe(true);
     expect(holds({ path: "repo", op: "ends_with", value: "/api" })).toBe(true);
     expect(holds({ path: "repo", op: "starts_with", value: "other/" })).toBe(false);
-    expect(holds({ path: "count", op: "starts_with", value: "5" })).toBe(false);
+    expect(holds({ path: "count", op: "starts_with", value: "5" })).toBe(true);
+    expect(holds({ path: "owner", op: "starts_with", value: "o" })).toBe(false);
     expect(holds({ path: "repo", op: "matches", value: "acme/*" })).toBe(true);
     expect(holds({ path: "repo", op: "matches", value: "acme/ap?" })).toBe(true);
     expect(holds({ path: "repo", op: "matches", value: "acme.api" })).toBe(false);
   });
 
-  it("number operators read finite numbers only", () => {
+  it("number operators read numbers and numeric strings", () => {
     expect(holds({ path: "count", op: "lt", value: 6 })).toBe(true);
     expect(holds({ path: "count", op: "lt", value: 5 })).toBe(false);
     expect(holds({ path: "count", op: "lte", value: 5 })).toBe(true);
@@ -112,7 +148,10 @@ describe("evaluatePolicyCondition", () => {
     expect(holds({ path: "count", op: "gte", value: 6 })).toBe(false);
     expect(holds({ path: "count", op: "between", value: [5, 10] })).toBe(true);
     expect(holds({ path: "count", op: "between", value: [6, 10] })).toBe(false);
-    expect(holds({ path: "repo", op: "gt", value: 0 })).toBe(false);
+    expect(holds({ path: "amount", op: "gt", value: 100 }, { amount: "5000" })).toBe(true);
+    expect(holds({ path: "amount", op: "gt", value: 100 }, { amount: " 1e4 " })).toBe(true);
+    expect(holds({ path: "amount", op: "gt", value: 100 }, { amount: "50" })).toBe(false);
+    expect(allowHolds({ path: "amount", op: "lte", value: 100 }, { amount: "50" })).toBe(true);
     expect(holds({ path: "count", op: "gt", value: "1" as unknown as number })).toBe(false);
   });
 
@@ -124,25 +163,43 @@ describe("evaluatePolicyCondition", () => {
     expect(holds({ path: "repo", op: "exists", value: false })).toBe(false);
   });
 
-  it("[*] holds when any element satisfies the condition", () => {
+  it("several values: any of them for deny and approval, every one (and at least one) for allow", () => {
     expect(holds({ path: "items[*].qty", op: "gt", value: 30 })).toBe(true);
     expect(holds({ path: "items[*].qty", op: "gt", value: 50 })).toBe(false);
+    expect(allowHolds({ path: "items[*].qty", op: "gt", value: 30 })).toBe(false);
+    expect(allowHolds({ path: "items[*].qty", op: "gt", value: 1 })).toBe(true);
     expect(holds({ path: "labels[*]", op: "one_of", value: ["p1"] })).toBe(true);
+    const mixed = { repos: ["myorg/a", "evil/b"] };
+    expect(holds({ path: "repos[*]", op: "starts_with", value: "evil/" }, mixed)).toBe(true);
+    expect(allowHolds({ path: "repos[*]", op: "starts_with", value: "myorg/" }, mixed)).toBe(false);
+    expect(allowHolds({ path: "repos[*]", op: "starts_with", value: "myorg/" }, { repos: ["myorg/a", "myorg/b"] })).toBe(true);
+    expect(allowHolds({ path: "repos[*]", op: "starts_with", value: "myorg/" }, { repos: [] })).toBe(false);
   });
 
-  it("label conditions read provenance and data classes, and are false without labels", () => {
+  it("a path that ends on an array reads its elements", () => {
+    expect(holds({ path: "env", op: "one_of", value: ["prod"] }, { env: ["prod"] })).toBe(true);
+    expect(holds({ path: "amount", op: "gt", value: 100 }, { amount: [5000] })).toBe(true);
+    expect(holds({ path: "env", op: "not_one_of", value: ["dev"] }, { env: ["prod"] })).toBe(true);
+    expect(holds({ path: "labels", op: "one_of", value: ["p1"] })).toBe(true);
+    expect(allowHolds({ path: "labels", op: "one_of", value: ["p1"] })).toBe(false);
+    expect(allowHolds({ path: "labels", op: "one_of", value: ["p1", "bug"] })).toBe(true);
+  });
+
+  it("label conditions read provenance and data classes; untracked labels count as absent for deny only", () => {
     const labels = { provenance: ["untrusted_external"], dataClasses: ["email"] };
     expect(holds({ op: "label_present", value: "email" }, args, labels)).toBe(true);
     expect(holds({ op: "label_present", value: "untrusted_external" }, args, labels)).toBe(true);
     expect(holds({ op: "label_absent", value: "card_number" }, args, labels)).toBe(true);
     expect(holds({ op: "label_absent", value: "email" }, args, labels)).toBe(false);
     expect(holds({ op: "label_present", value: "email" }, args, undefined)).toBe(false);
-    expect(holds({ op: "label_absent", value: "email" }, args, null)).toBe(false);
+    expect(holds({ op: "label_absent", value: "email" }, args, null)).toBe(true);
+    expect(allowHolds({ op: "label_absent", value: "email" }, args, null)).toBe(false);
   });
 
   it("is total on malformed conditions", () => {
     expect(holds({ op: "equals", value: 1 })).toBe(false);
     expect(holds({ path: "repo", op: "one_of", value: "acme/api" })).toBe(false);
+    expect(holds({ path: "missing", op: "not_one_of", value: "acme/api" })).toBe(false);
     expect(holds({ path: "count", op: "between", value: [1] })).toBe(false);
     expect(holds({ path: "repo", op: "nope" as McpPolicyCondition["op"], value: 1 })).toBe(false);
   });
@@ -153,6 +210,24 @@ describe("matchesValueGlob", () => {
     expect(matchesValueGlob("a.b(c)", "a.b(c)")).toBe(true);
     expect(matchesValueGlob("a.b", "axb")).toBe(false);
     expect(matchesValueGlob("*", "multi\nline")).toBe(true);
+    expect(matchesValueGlob("a*b?d", "aXXbcd")).toBe(true);
+    expect(matchesValueGlob("a*b?d", "aXXbd")).toBe(false);
+    expect(matchesValueGlob("**", "")).toBe(true);
+  });
+
+  it("runs in linear-ish time on pathological patterns", () => {
+    const started = performance.now();
+    expect(matchesValueGlob("*a*a*b", "a".repeat(3000))).toBe(false);
+    expect(matchesValueGlob("*a*a*a*b", "a".repeat(1000))).toBe(false);
+    expect(matchesValueGlob(`${"*a".repeat(10)}*b`, "a".repeat(60_000))).toBe(false);
+    expect(matchesToolPattern(`${"*a".repeat(10)}*b`, "a".repeat(100_000))).toBe(false);
+    expect(performance.now() - started).toBeLessThan(250);
+  });
+
+  it("does not run a glob on text over the cap: deny matches, allow does not", () => {
+    const huge = { body: "x".repeat(MAX_GLOB_TEXT_LENGTH + 1) };
+    expect(holds({ path: "body", op: "matches", value: "*secret*" }, huge)).toBe(true);
+    expect(allowHolds({ path: "body", op: "matches", value: "*" }, huge)).toBe(false);
   });
 });
 
@@ -233,6 +308,41 @@ describe("evaluateMcpToolPolicy with conditions", () => {
     expect(evaluateMcpToolPolicy([denyAll, allowSandbox], request({ arguments: { repo: "acme/sandbox" } })).allowed).toBe(true);
     // An unconditional deny still hides the tool.
     expect(evaluateMcpToolPolicy([denyAll], discovery).allowed).toBe(false);
+  });
+
+  it("an allow carve-out on [*] needs every element: a mixed array stays denied", () => {
+    const denyPush = rule({ id: "deny", effect: "deny", toolPattern: "push" });
+    const allowMyorg = rule({ id: "myorg", effect: "allow", toolPattern: "push", conditions: { all: [{ path: "repos[*]", op: "starts_with", value: "myorg/" }] } });
+    const call = (repos: string[]) => request({ toolName: "push", arguments: { repos } });
+    expect(evaluateMcpToolPolicy([denyPush, allowMyorg], call(["myorg/a", "evil/b"]))).toMatchObject({ allowed: false, rule: denyPush });
+    expect(evaluateMcpToolPolicy([denyPush, allowMyorg], call(["myorg/a", "myorg/b"]))).toMatchObject({ allowed: true, rule: allowMyorg });
+    expect(evaluateMcpToolPolicy([denyPush, allowMyorg], call([])).allowed).toBe(false);
+  });
+
+  it("deny rules catch the sloppy arguments of the review", () => {
+    const amount = rule({ id: "amount", effect: "deny", conditions: { all: [{ path: "amount", op: "gt", value: 100 }] } });
+    for (const value of ["5000", [5000], "lots"]) {
+      expect(evaluateMcpToolPolicy([amount], request({ arguments: { amount: value } })).allowed, JSON.stringify(value)).toBe(false);
+    }
+    const prod = rule({ id: "prod", effect: "deny", conditions: { all: [{ path: "env", op: "one_of", value: ["prod"], ignoreCase: true }] } });
+    for (const value of ["PROD", ["prod"], "prod "]) {
+      expect(evaluateMcpToolPolicy([prod], request({ arguments: { env: value } })).allowed, JSON.stringify(value)).toBe(false);
+    }
+    const notDev = rule({ id: "notdev", effect: "deny", conditions: { all: [{ path: "env", op: "not_one_of", value: ["dev"] }] } });
+    expect(evaluateMcpToolPolicy([notDev], request({ arguments: {} })).allowed).toBe(false);
+    expect(evaluateMcpToolPolicy([notDev], request({ arguments: { env: ["prod"] } })).allowed).toBe(false);
+    expect(evaluateMcpToolPolicy([notDev], request({ arguments: { env: "dev" } })).allowed).toBe(true);
+  });
+
+  it("a rule with invalid stored conditions fails closed", () => {
+    const badAllow = rule({ id: "bad-allow", effect: "allow", toolPattern: "create_issue", conditions: null, invalid: true });
+    const deny = rule({ id: "deny", effect: "deny" });
+    expect(evaluateMcpToolPolicy([deny, badAllow], request()).allowed).toBe(false);
+    expect(evaluateMcpToolPolicy([deny, badAllow], request({ arguments: undefined })).allowed).toBe(false);
+    const badDeny = rule({ id: "bad-deny", effect: "deny", conditions: null, invalid: true });
+    expect(evaluateMcpToolPolicy([badDeny], request({ arguments: { repo: "anything" } }))).toMatchObject({ allowed: false, rule: badDeny });
+    const badApproval = rule({ id: "bad-ask", effect: "require_approval", conditions: null, invalid: true });
+    expect(evaluateMcpToolPolicy([badApproval], request()).effect).toBe("require_approval");
   });
 
   it("shadow rules never change the outcome but report it", () => {

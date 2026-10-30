@@ -41,10 +41,12 @@ import {
  *   - Scope also covers workflows (`workflowIds`) and gateway clients
  *     (`clientIds`); an empty list matches every workflow / caller.
  *   - A rule with `conditions` matches a call only when they hold for the
- *     call's arguments and data labels (`all` or `any` of them). An argument
- *     path that does not resolve, or a value of the wrong type, makes that
- *     condition false; label conditions are false when the run does not
- *     track labels.
+ *     call's arguments and data labels (`all` or `any` of them). Conditions
+ *     fail closed for the rule's effect (see `evaluatePolicyCondition`): an
+ *     odd argument may make a deny or require_approval match, never an allow.
+ *   - A rule whose stored conditions no longer validate (`invalid`) also
+ *     fails closed: an allow never matches, a deny or require_approval covers
+ *     its whole scope.
  *   - Effects: deny > require_approval > allow. A deny is set aside by a
  *     strictly narrower allow or require_approval rule (the call is then
  *     allowed, or needs approval); a require_approval is set aside by a
@@ -179,18 +181,37 @@ export interface McpToolPolicyDecision {
   };
 }
 
-const globCache = new Map<string, RegExp>();
-
-function globToRegExp(pattern: string): RegExp {
-  const cached = globCache.get(pattern);
-  if (cached) return cached;
-  const source = pattern
-    .split("*")
-    .map((part) => part.replace(/[.+?^${}()|[\]\\]/g, "\\$&"))
-    .join(".*");
-  const regex = new RegExp(`^${source}$`);
-  globCache.set(pattern, regex);
-  return regex;
+/**
+ * Glob match without regular expressions: `*` matches any run of characters
+ * (including none) and, when `questionMark` is set, `?` exactly one;
+ * everything else is literal. The classic two-pointer walk that only ever
+ * backtracks to the last `*`, so the worst case is O(text × pattern) with no
+ * catastrophic backtracking whatever the input.
+ */
+export function matchesGlob(pattern: string, text: string, questionMark = false): boolean {
+  let p = 0;
+  let t = 0;
+  let star = -1;
+  let resume = 0;
+  while (t < text.length) {
+    const char = pattern[p];
+    if (p < pattern.length && char !== "*" && (char === text[t] || (questionMark && char === "?"))) {
+      p += 1;
+      t += 1;
+    } else if (p < pattern.length && char === "*") {
+      star = p;
+      resume = t;
+      p += 1;
+    } else if (star !== -1) {
+      p = star + 1;
+      resume += 1;
+      t = resume;
+    } else {
+      return false;
+    }
+  }
+  while (p < pattern.length && pattern[p] === "*") p += 1;
+  return p === pattern.length;
 }
 
 export function isToolGlob(pattern: string): boolean {
@@ -202,7 +223,7 @@ export function matchesToolPattern(pattern: string, toolName: string): boolean {
   const trimmed = pattern.trim();
   if (!trimmed || trimmed === "*") return true;
   if (!isToolGlob(trimmed)) return trimmed === toolName;
-  return globToRegExp(trimmed).test(toolName);
+  return matchesGlob(trimmed, toolName);
 }
 
 /**
@@ -254,9 +275,11 @@ export function ruleScopeMatches(rule: McpToolPolicyRule, request: McpToolPolicy
  */
 export function ruleMatchState(rule: McpToolPolicyRule, request: McpToolPolicyRequest): "match" | "no_match" | "undecided" {
   if (!ruleScopeMatches(rule, request)) return "no_match";
+  // Stored conditions that no longer validate fail closed: an allow never matches, anything else covers its whole scope.
+  if (rule.invalid) return rule.effect === "allow" ? "no_match" : "match";
   if (!policyRuleHasConditions(rule)) return "match";
   if (request.arguments === undefined) return "undecided";
-  return matchesPolicyConditions(rule.conditions, request.arguments, request.dataLabels) ? "match" : "no_match";
+  return matchesPolicyConditions(rule.conditions, request.arguments, request.dataLabels, rule.effect) ? "match" : "no_match";
 }
 
 export function ruleMatches(rule: McpToolPolicyRule, request: McpToolPolicyRequest): boolean {
@@ -311,105 +334,184 @@ function isScalar(value: unknown): value is McpPolicyScalar {
   return value === null || typeof value === "string" || typeof value === "boolean" || (typeof value === "number" && Number.isFinite(value));
 }
 
-function sameScalar(left: McpPolicyScalar, right: unknown): boolean {
-  return isScalar(right) && left === right;
+/**
+ * How a condition reads several values (a `[*]` step, or a path that ends on
+ * an array), chosen by the rule's effect so that every reading fails closed:
+ * `any` (deny, require_approval) holds when one value satisfies the condition
+ * and treats a missing argument as satisfying the negated operators;
+ * `every` (allow) holds only when every value does, there is at least one, and
+ * no value is of a type the operator cannot read.
+ */
+export type PolicyConditionQuantifier = "any" | "every";
+
+export function conditionQuantifier(effect: McpToolPolicyEffect | undefined): PolicyConditionQuantifier {
+  return effect === "allow" ? "every" : "any";
 }
 
-const valueGlobCache = new Map<string, RegExp>();
+/** Longest text a `matches` glob is run against; a longer value matches for deny and approval, never for allow. */
+export const MAX_GLOB_TEXT_LENGTH = 64 * 1024;
+
+const NUMERIC_TEXT = /^\s*-?\d+(\.\d+)?(e[+-]?\d+)?\s*$/i;
+
+/** A finite number, or a string that holds one (trimmed). */
+function numberValue(value: unknown): number | undefined {
+  if (typeof value === "number") return Number.isFinite(value) ? value : undefined;
+  if (typeof value === "string" && NUMERIC_TEXT.test(value)) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : undefined;
+  }
+  return undefined;
+}
+
+/** A non-null scalar as trimmed text, folded when `ignoreCase`; undefined for null, objects and arrays. */
+function scalarText(value: unknown, ignoreCase: boolean): string | undefined {
+  let text: string | undefined;
+  if (typeof value === "string") text = value.trim();
+  else if (typeof value === "boolean") text = String(value);
+  else if (typeof value === "number" && Number.isFinite(value)) text = String(value);
+  if (text === undefined) return undefined;
+  return ignoreCase ? text.toLowerCase() : text;
+}
+
+/** Scalar equality: identical, numerically equal when either side is a number, otherwise equal as trimmed text. */
+function sameScalar(expected: McpPolicyScalar, value: unknown, ignoreCase: boolean): boolean {
+  if (expected === value) return true;
+  if (expected === null || value === null || !isScalar(value)) return false;
+  if (typeof expected === "number" || typeof value === "number") {
+    const left = numberValue(expected);
+    const right = numberValue(value);
+    if (left !== undefined && right !== undefined) return left === right;
+  }
+  const left = scalarText(expected, ignoreCase);
+  return left !== undefined && left === scalarText(value, ignoreCase);
+}
 
 /** Glob for argument values: `*` any run of characters, `?` one character; everything else literal. */
 export function matchesValueGlob(pattern: string, value: string): boolean {
-  let regex = valueGlobCache.get(pattern);
-  if (!regex) {
-    const source = [...pattern]
-      .map((char) => (char === "*" ? ".*" : char === "?" ? "." : char.replace(/[.+?^${}()|[\]\\]/g, "\\$&")))
-      .join("");
-    regex = new RegExp(`^${source}$`, "s");
-    if (valueGlobCache.size > 2000) valueGlobCache.clear();
-    valueGlobCache.set(pattern, regex);
-  }
-  return regex.test(value);
+  return matchesGlob(pattern, value, true);
 }
 
-function numberValue(value: unknown): number | undefined {
-  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
-}
-
-/** One value against one argument operator; false for a value of the wrong type. */
-function valueSatisfies(condition: McpPolicyCondition, value: unknown): boolean {
+/**
+ * One value against one argument operator. `true` / `false` when the value
+ * can be read; `"unreadable"` when it is of a type the operator cannot read
+ * (an object, or a non-numeric value for a number operator), which the
+ * quantifier then resolves fail-closed.
+ */
+function valueSatisfies(condition: McpPolicyCondition, value: unknown): boolean | "unreadable" {
   const expected = condition.value;
+  const ignoreCase = condition.ignoreCase === true;
   switch (condition.op) {
     case "equals":
-      return !Array.isArray(expected) && expected !== undefined && sameScalar(expected, value);
+      if (Array.isArray(expected) || expected === undefined) return false;
+      return sameScalar(expected, value, ignoreCase);
     case "one_of":
-      return Array.isArray(expected) && isScalar(value) && expected.some((entry) => entry === value);
+      if (!Array.isArray(expected)) return false;
+      return expected.some((entry) => sameScalar(entry, value, ignoreCase));
     case "not_one_of":
-      return Array.isArray(expected) && isScalar(value) && !expected.some((entry) => entry === value);
+      if (!Array.isArray(expected)) return false;
+      if (!isScalar(value)) return "unreadable";
+      return !expected.some((entry) => sameScalar(entry, value, ignoreCase));
     case "starts_with":
-      return typeof expected === "string" && typeof value === "string" && value.startsWith(expected);
     case "ends_with":
-      return typeof expected === "string" && typeof value === "string" && value.endsWith(expected);
-    case "matches":
-      return typeof expected === "string" && typeof value === "string" && matchesValueGlob(expected, value);
+    case "matches": {
+      if (typeof expected !== "string") return false;
+      const text = scalarText(value, ignoreCase);
+      if (text === undefined) return false;
+      const wanted = ignoreCase ? expected.toLowerCase() : expected;
+      if (condition.op === "starts_with") return text.startsWith(wanted);
+      if (condition.op === "ends_with") return text.endsWith(wanted);
+      if (text.length > MAX_GLOB_TEXT_LENGTH) return "unreadable";
+      return matchesValueGlob(wanted, text);
+    }
     case "lt":
     case "lte":
     case "gt":
     case "gte": {
+      const limit = typeof expected === "number" && Number.isFinite(expected) ? expected : undefined;
+      if (limit === undefined) return false;
       const actual = numberValue(value);
-      const limit = numberValue(expected);
-      if (actual === undefined || limit === undefined) return false;
+      if (actual === undefined) return value === null ? false : "unreadable";
       if (condition.op === "lt") return actual < limit;
       if (condition.op === "lte") return actual <= limit;
       if (condition.op === "gt") return actual > limit;
       return actual >= limit;
     }
     case "between": {
+      if (!Array.isArray(expected) || expected.length !== 2) return false;
+      const [min, max] = expected;
+      if (typeof min !== "number" || typeof max !== "number" || !Number.isFinite(min) || !Number.isFinite(max)) return false;
       const actual = numberValue(value);
-      if (actual === undefined || !Array.isArray(expected) || expected.length !== 2) return false;
-      const min = numberValue(expected[0]);
-      const max = numberValue(expected[1]);
-      return min !== undefined && max !== undefined && actual >= min && actual <= max;
+      if (actual === undefined) return value === null ? false : "unreadable";
+      return actual >= min && actual <= max;
     }
     default:
       return false;
   }
 }
 
+const NEGATED_OPS = new Set<McpPolicyCondition["op"]>(["not_one_of", "label_absent"]);
+
+/** The values an operator reads at `path`: arrays at the end of the path are read element by element. */
+function operandValues(args: Record<string, unknown>, path: string): unknown[] {
+  const values: unknown[] = [];
+  for (const value of resolvePolicyPath(args, path)) {
+    if (Array.isArray(value)) values.push(...value.slice(0, MAX_RESOLVED_VALUES - values.length));
+    else values.push(value);
+    if (values.length >= MAX_RESOLVED_VALUES) break;
+  }
+  return values;
+}
+
 /**
- * One condition against a call. Pure and total: malformed conditions, paths
- * that do not resolve and values of the wrong type all make it false (except
- * `exists: false`, which holds exactly when the path has no value).
+ * One condition against a call. Pure and total. Fails closed for the rule's
+ * effect (see `PolicyConditionQuantifier`): under `any` (deny,
+ * require_approval, the default) a missing argument, an empty array or
+ * labels the run does not track satisfy only the negated operators, and a
+ * value of a type the operator cannot read (`"5000x"` for `gt`, an object
+ * for `not_one_of`) satisfies it; under `every` (allow) none of those do.
+ * `exists` reads the path as given: true when some value is not null,
+ * `exists: false` when none is. A malformed condition is false.
  */
 export function evaluatePolicyCondition(
   condition: McpPolicyCondition,
   args: Record<string, unknown>,
-  labels?: McpToolPolicyRequest["dataLabels"]
+  labels?: McpToolPolicyRequest["dataLabels"],
+  quantifier: PolicyConditionQuantifier = "any"
 ): boolean {
   if (condition.op === "label_present" || condition.op === "label_absent") {
-    if (!labels || typeof condition.value !== "string") return false;
+    if (typeof condition.value !== "string") return false;
+    if (!labels) return condition.op === "label_absent" && quantifier === "any";
     const present = labels.provenance.includes(condition.value) || labels.dataClasses.includes(condition.value);
     return condition.op === "label_present" ? present : !present;
   }
   if (typeof condition.path !== "string") return false;
-  const values = resolvePolicyPath(args, condition.path);
   if (condition.op === "exists") {
-    const exists = values.some((value) => value !== null);
+    const exists = resolvePolicyPath(args, condition.path).some((value) => value !== null);
     return condition.value === false ? !exists : exists;
   }
-  return values.some((value) => valueSatisfies(condition, value));
+  const values = operandValues(args, condition.path);
+  if (values.length === 0) return quantifier === "any" && NEGATED_OPS.has(condition.op) && Array.isArray(condition.value);
+  if (quantifier === "every") return values.every((value) => valueSatisfies(condition, value) === true);
+  return values.some((value) => valueSatisfies(condition, value) !== false);
 }
 
-/** True when the conditions hold (`all`: every one, `any`: at least one); a rule without conditions always holds. */
+/**
+ * True when the conditions hold (`all`: every one, `any`: at least one); a
+ * rule without conditions always holds. `effect` is the rule's: an allow
+ * reads several values with `every`, anything else with `any`.
+ */
 export function matchesPolicyConditions(
   conditions: McpToolPolicyRule["conditions"],
   args: Record<string, unknown>,
-  labels?: McpToolPolicyRequest["dataLabels"]
+  labels?: McpToolPolicyRequest["dataLabels"],
+  effect?: McpToolPolicyEffect
 ): boolean {
   const { combine, items } = conditionList(conditions);
   if (items.length === 0) return true;
+  const quantifier = conditionQuantifier(effect);
   return combine === "any"
-    ? items.some((condition) => evaluatePolicyCondition(condition, args, labels))
-    : items.every((condition) => evaluatePolicyCondition(condition, args, labels));
+    ? items.some((condition) => evaluatePolicyCondition(condition, args, labels, quantifier))
+    : items.every((condition) => evaluatePolicyCondition(condition, args, labels, quantifier));
 }
 
 /** Phase 12.4 — sha256 of the rule's canonical form (see `canonicalMcpToolPolicyRule`). */
@@ -691,7 +793,8 @@ export function describePolicyCondition(condition: McpPolicyCondition): string {
   if (condition.op === "between" && Array.isArray(condition.value)) {
     return `${condition.path ?? "?"} is between ${describeValue(condition.value[0])} and ${describeValue(condition.value[1])}`;
   }
-  return `${condition.path ?? "?"} ${CONDITION_WORDS[condition.op]} ${describeValue(condition.value)}`;
+  const text = `${condition.path ?? "?"} ${CONDITION_WORDS[condition.op]} ${describeValue(condition.value)}`;
+  return condition.ignoreCase ? `${text} (ignoring case)` : text;
 }
 
 /** Phase 12.4 — a rule's conditions in words; empty when it has none. */
