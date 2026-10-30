@@ -89,5 +89,5 @@ A run is evaluated with one role, its **subject**: the signed-in user for manual
 ## Next steps
 
 - Reference: [MCP tool policy](../product/mcp-tool-policy.md), [MCP control plane](../product/mcp-control-plane.md), [MCP server registry](../product/mcp-server-registry.md)
-- Guides: [Run a self-hosted MCP gateway](./self-hosted-mcp-gateway.md), [Human approval for agent tool calls](./human-approval-for-agent-tool-calls.md)
+- Guides: [Least privilege from real runs](./least-privilege-from-real-runs.md), [Run a self-hosted MCP gateway](./self-hosted-mcp-gateway.md), [Human approval for agent tool calls](./human-approval-for-agent-tool-calls.md)
 - See the **MCP → Tools** page with its policy column in the [live demo](https://lsquarem.com/demo/){target="_self"}
