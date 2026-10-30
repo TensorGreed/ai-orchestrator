@@ -56,6 +56,16 @@
   function revoke() {
     // Stop collecting; if gtag.js was loaded earlier in this page view, tell it so.
     if (loaded) gtag("consent", "update", { analytics_storage: "denied" });
+    // Remove Google Analytics cookies left by an earlier Accept (_ga, _ga_<id>), on this host and the parent domain.
+    var host = location.hostname;
+    var domains = ["", host, "." + host.split(".").slice(-2).join(".")];
+    document.cookie.split(";").forEach(function (part) {
+      var name = part.split("=")[0].trim();
+      if (name !== "_ga" && name.indexOf("_ga_") !== 0) return;
+      domains.forEach(function (d) {
+        document.cookie = name + "=; Max-Age=0; path=/" + (d ? "; domain=" + d : "");
+      });
+    });
   }
 
   function injectStyle() {
@@ -69,8 +79,6 @@
       ".site-consent-actions{display:flex;gap:8px}" +
       ".site-consent button{font:inherit;font-weight:600;min-height:38px;padding:7px 16px;border-radius:8px;cursor:pointer;border:1px solid var(--line-strong,var(--vp-c-divider,#c4cbd9));background:transparent;color:var(--fg,var(--vp-c-text-1,#0d1220))}" +
       ".site-consent button:hover{background:var(--accent-soft,var(--vp-c-default-soft,rgba(10,126,164,.1)))}" +
-      ".site-consent button.site-consent-accept{background:var(--accent-strong,var(--vp-c-brand-3,#086a8a));border-color:var(--accent-strong,var(--vp-c-brand-3,#086a8a));color:var(--fg-on-accent,#fff)}" +
-      ".site-consent button.site-consent-accept:hover{filter:brightness(1.1)}" +
       ".site-consent button:focus-visible{outline:2px solid var(--accent,var(--vp-c-brand-1,#0a7ea4));outline-offset:2px}" +
       ".site-privacy-note{margin:0;padding:16px 24px 24px;text-align:center;font-size:13px;line-height:1.5;color:var(--vp-c-text-2,#4a5468)}" +
       ".site-privacy-note a,.site-privacy-note button{color:inherit;text-decoration:underline}" +
@@ -111,10 +119,11 @@
     document.body.appendChild(bar);
   }
 
-  function show() {
+  // `focus` only when the visitor reopened the bar; on page load it must not take keyboard focus.
+  function show(focus) {
     if (!bar) build();
     bar.hidden = false;
-    var target = bar.querySelector(".site-consent-accept");
+    var target = focus && bar.querySelector(".site-consent-decline");
     if (target) target.focus({ preventScroll: true });
   }
 
@@ -127,7 +136,7 @@
     var el = e.target && e.target.closest ? e.target.closest("[data-cookie-settings]") : null;
     if (!el) return;
     e.preventDefault();
-    show();
+    show(true);
   });
 
   var saved = read();
