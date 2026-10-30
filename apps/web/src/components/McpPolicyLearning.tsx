@@ -10,7 +10,7 @@
  */
 import { useCallback, useEffect, useState } from "react";
 import type {
-  McpPolicyShadowHitRow,
+  McpPolicyShadowHits,
   McpPolicySimulationBucketName,
   McpPolicySimulationRequest,
   McpPolicySimulationResult,
@@ -78,6 +78,7 @@ export function summaryLines(summary: ToolArgumentSummary | null): string[] {
     if (field.items !== undefined) parts.push(`${field.items} items`);
     if (field.keys !== undefined) parts.push(`${field.keys} keys`);
     if (field.more) parts.push("too many values to keep");
+    if (field.adj) parts.push("kept in a normalised form");
     if (parts.length === 0) parts.push(field.type);
     return `${path}: ${parts.join("; ")}`;
   });
@@ -103,8 +104,9 @@ export function SimulationReport({ result, ruleNames }: { result: McpPolicySimul
         {result.capped && (
           <strong>
             {" "}
-            Stopped at {result.scanCap.toLocaleString()} calls: only calls since {result.oldestScannedAt ? when(result.oldestScannedAt) : "the newest"} were
-            read.
+            {result.cappedReason === "work_budget"
+              ? `Stopped early: these rules need more evaluation work than one simulation may do. Only calls since ${result.oldestScannedAt ? when(result.oldestScannedAt) : "the newest"} were read; narrow it with fewer rules or a filter.`
+              : `Stopped at ${result.scanCap.toLocaleString()} calls: only calls since ${result.oldestScannedAt ? when(result.oldestScannedAt) : "the newest"} were read.`}
           </strong>
         )}
       </p>
@@ -286,6 +288,9 @@ function scopeLabel(suggestion: Pick<McpPolicySuggestion, "scopeKind" | "scopeNa
 }
 
 function generationText(result: McpPolicySuggestionGenerateResult): string {
+  if (result.notGenerated === "scan_capped") {
+    return `Nothing suggested: the last ${result.windowDays} days hold more than ${result.scanned.toLocaleString()} calls, more than one scan reads, and rules are never suggested from part of the calls (a tool used earlier would be denied).`;
+  }
   const parts = [`Read ${result.scanned.toLocaleString()} calls from the last ${result.windowDays} days`];
   if (result.capped) parts.push("stopped at the scan cap, so the oldest calls were not read");
   parts.push(`${result.created} new, ${result.updated} changed, ${result.unchanged} unchanged`);
@@ -303,7 +308,7 @@ export function PolicySuggestions({
   onRulesChanged
 }: {
   rules: McpToolPolicyRule[];
-  shadowHits: Map<string, McpPolicyShadowHitRow>;
+  shadowHits: McpPolicyShadowHits | null;
   onRulesChanged: () => void;
 }) {
   const [open, setOpen] = useState<McpPolicySuggestion[]>([]);
@@ -362,7 +367,7 @@ export function PolicySuggestions({
         const quiet = enforceReadiness(suggestion, shadowHits);
         if (!quiet.ready && !window.confirm(`${quiet.text} Enforce these rules anyway?`)) return;
       }
-      await decideMcpPolicySuggestion(suggestion.id, action);
+      await decideMcpPolicySuggestion(suggestion.id, action, suggestion.fingerprint);
       await load();
       if (action !== "dismiss") onRulesChanged();
     });
@@ -396,12 +401,20 @@ export function PolicySuggestions({
           <li key={suggestion.id} className="mcp-suggestion" aria-label={`Suggestion for ${scopeLabel(suggestion)}`}>
             <div className="mcp-rule-head">
               <span className="mcp-rule-name">
+                {suggestion.evidence.updates ? "Update accepted rules: " : ""}
                 {scopeLabel(suggestion)} on {suggestion.serverName ?? suggestion.serverId}
               </span>
               <span className="mcp-flag mcp-flag-neutral">
                 {suggestion.callCount} calls, {suggestion.windowDays} days
               </span>
             </div>
+            {suggestion.evidence.updates && (
+              <p className="kb-subtle">
+                It started using {suggestion.evidence.updates.addedTools.map((tool) => `'${tool}'`).join(", ")} after its suggested rules were accepted. Accepting
+                adds {suggestion.evidence.updates.addedTools.length === 1 ? "an allow" : "allows"} in shadow next to them, so the accepted deny does not block{" "}
+                {suggestion.evidence.updates.addedTools.length === 1 ? "it" : "them"}.
+              </p>
+            )}
             <ul className="mcp-suggestion-rules" aria-label="Suggested rules">
               {suggestion.rules.map((rule, index) => (
                 <li key={index}>
@@ -420,7 +433,11 @@ export function PolicySuggestions({
               <p className="kb-subtle">
                 Built from {suggestion.evidence.calls} calls that reached the server (of {suggestion.evidence.scopeCalls} recorded), by{" "}
                 {suggestion.evidence.roles.join(", ") || "no role"}.
+                {suggestion.evidence.unknownRoleCalls ? ` ${suggestion.evidence.unknownRoleCalls} of them had no recorded role.` : ""}
                 {suggestion.evidence.capped ? " The scan stopped at its cap; older calls were not read." : ""}
+                {suggestion.evidence.inlineAdapter
+                  ? ` The server is configured inline on nodes, so these rules apply to every inline server of the '${suggestion.serverId}' adapter, with their tools taken together.`
+                  : ""}
               </p>
               <ul>
                 {suggestion.evidence.tools.map((tool) => (
@@ -472,7 +489,7 @@ export function PolicySuggestions({
                   onClick={() => void decide(suggestion, "enforce")}
                   disabled={busy !== null}
                 >
-                  {readiness.ready ? "Enforce" : "Enforce now"}
+                  {readiness.ready ? "Enforce suggestion" : "Enforce suggestion now"}
                 </button>
               </div>
             </li>
@@ -483,16 +500,26 @@ export function PolicySuggestions({
   );
 }
 
-/** Ready once the accepted rules changed no outcome over the last 7 days and were in shadow that long. */
+/**
+ * Ready once the accepted rules, enforced together, would have changed no outcome over the last 7 days, and were in
+ * shadow that long. Never ready on partial evidence (the hit scan stopped at its cap).
+ */
 export function enforceReadiness(
-  suggestion: Pick<McpPolicySuggestion, "acceptedRuleIds" | "decidedAt">,
-  shadowHits: Map<string, McpPolicyShadowHitRow>
+  suggestion: Pick<McpPolicySuggestion, "id" | "decidedAt">,
+  shadowHits: McpPolicyShadowHits | null
 ): { ready: boolean; text: string } {
-  const rows = suggestion.acceptedRuleIds.map((id) => shadowHits.get(id)).filter((row): row is McpPolicyShadowHitRow => Boolean(row));
-  const wouldChange = rows.reduce((sum, row) => sum + row.wouldChange, 0);
-  const matched = rows.reduce((sum, row) => sum + row.matched, 0);
+  const group = shadowHits?.groups.find((entry) => entry.suggestionId === suggestion.id);
+  const wouldChange = group?.wouldChange ?? 0;
+  const matched = group?.matched ?? 0;
   const since = suggestion.decidedAt ? Date.parse(suggestion.decidedAt) : Number.NaN;
   const days = Number.isNaN(since) ? 0 : Math.floor((Date.now() - since) / DAY_MS);
+  if (!shadowHits) return { ready: false, text: "Shadow hits are not loaded yet." };
+  if (shadowHits.capped) {
+    return {
+      ready: false,
+      text: `Not ready (scan capped): the last ${ENFORCE_QUIET_DAYS} days hold more decided calls than one scan reads, so these counts are partial (${matched} calls matched, ${wouldChange} would change).`
+    };
+  }
   if (wouldChange > 0) {
     return { ready: false, text: `In the last ${ENFORCE_QUIET_DAYS} days these rules would have changed ${wouldChange} of the ${matched} calls they matched.` };
   }

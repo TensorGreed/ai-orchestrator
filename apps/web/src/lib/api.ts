@@ -3039,10 +3039,11 @@ export async function generateMcpPolicySuggestions(payload: { minCalls?: number 
   });
 }
 
-export async function decideMcpPolicySuggestion(id: string, action: "accept" | "dismiss" | "enforce") {
+/** Accept names the fingerprint of the proposal the admin reviewed; the API refuses one regenerated since. */
+export async function decideMcpPolicySuggestion(id: string, action: "accept" | "dismiss" | "enforce", fingerprint?: string) {
   return apiRequest<{ suggestion: McpPolicySuggestion; rules?: McpToolPolicyRule[] }>(
     `/api/mcp/policies/suggestions/${encodeURIComponent(id)}/${action}`,
-    { method: "POST", body: JSON.stringify({}) }
+    { method: "POST", body: JSON.stringify(action === "accept" ? { fingerprint } : {}) }
   );
 }
 

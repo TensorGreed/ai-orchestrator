@@ -153,9 +153,11 @@ test("suggests least-privilege rules from a client's calls, previews, accepts in
     const shadowRules = rules.getByRole("listitem").filter({ hasText: clientName });
     await expect(shadowRules).toHaveCount(3);
     await expect(shadowRules.getByText("Shadow", { exact: true })).toHaveCount(3);
+    // The suggestion's rules are enforced together: none has an Enforce of its own.
+    await expect(shadowRules.getByRole("button", { name: "Enforce", exact: true })).toHaveCount(0);
 
     page.once("dialog", (dialog) => void dialog.accept());
-    await accepted.getByRole("button", { name: /Enforce/ }).click();
+    await accepted.getByRole("button", { name: /Enforce suggestion/ }).click();
     await expect(accepted).toHaveCount(0);
     await expect(shadowRules.getByText("Shadow", { exact: true })).toHaveCount(0);
   } finally {

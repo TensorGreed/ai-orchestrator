@@ -12,7 +12,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type {
   McpGatewayApproval,
-  McpPolicyShadowHitRow,
+  McpPolicyShadowHits,
   McpPolicyKind,
   McpPolicyRole,
   McpToolHintCondition,
@@ -218,7 +218,10 @@ export function McpPoliciesView({
   const [editing, setEditing] = useState<McpToolPolicyRule | "new" | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [principals, setPrincipals] = useState<PrincipalLookups>({ workflows: [], clients: [] });
-  const [shadowHits, setShadowHits] = useState<Map<string, McpPolicyShadowHitRow>>(new Map());
+  const [shadowHits, setShadowHits] = useState<McpPolicyShadowHits | null>(null);
+  const hitsByRule = useMemo(() => new Map((shadowHits?.rules ?? []).map((row) => [row.ruleId, row])), [shadowHits]);
+  // Shadow rules of an accepted suggestion are enforced together, from the suggestion.
+  const suggestionRuleIds = useMemo(() => new Set((shadowHits?.groups ?? []).flatMap((group) => group.ruleIds)), [shadowHits]);
 
   const lookups = useMemo<ScopeLookups>(() => ({ servers, adapters, projects }), [servers, adapters, projects]);
 
@@ -231,7 +234,7 @@ export function McpPoliciesView({
       // Shadow hits label shadow rules for admins; the rules still show without them.
       if (isAdmin && result.rules.some((rule) => rule.mode === "shadow")) {
         fetchMcpPolicyShadowHits(ENFORCE_QUIET_DAYS)
-          .then(({ shadowHits: hits }) => setShadowHits(new Map(hits.rules.map((row) => [row.ruleId, row]))))
+          .then(({ shadowHits: hits }) => setShadowHits(hits))
           .catch(() => undefined);
       }
     } catch (err) {
@@ -279,8 +282,9 @@ export function McpPoliciesView({
   };
 
   const enforce = async (rule: McpToolPolicyRule) => {
-    const hits = shadowHits.get(rule.id);
-    const warning = hits && hits.wouldChange > 0 ? ` In the last ${ENFORCE_QUIET_DAYS} days it would have changed ${hits.wouldChange} calls.` : "";
+    const hits = hitsByRule.get(rule.id);
+    const warning =
+      hits && hits.wouldChange > 0 ? ` Enforced on its own, it would have changed ${hits.wouldChange} calls in the last ${ENFORCE_QUIET_DAYS} days.` : "";
     if (!window.confirm(`Enforce the ${rule.effect} rule "${rule.name ?? rule.toolPattern}"?${warning} Runs pick up the change on their next node.`)) return;
     setBusyId(rule.id);
     setError(null);
@@ -423,10 +427,12 @@ export function McpPoliciesView({
                     <code>{describeConditions(rule.conditions)}</code>
                   </p>
                 )}
-                {isAdmin && rule.mode === "shadow" && shadowHits.has(rule.id) && (
+                {isAdmin && rule.mode === "shadow" && hitsByRule.has(rule.id) && (
                   <p className="kb-subtle mcp-rule-shadow-hits" aria-label={`Shadow hits for ${rule.name ?? rule.id}`}>
-                    Last {ENFORCE_QUIET_DAYS} days: matched {shadowHits.get(rule.id)!.matched} calls, would have changed{" "}
-                    {shadowHits.get(rule.id)!.wouldChange}.
+                    Last {ENFORCE_QUIET_DAYS} days: matched {hitsByRule.get(rule.id)!.matched} calls; if you enforce just this rule,{" "}
+                    {hitsByRule.get(rule.id)!.wouldChange} would change.
+                    {shadowHits?.capped ? " (Partial: the scan stopped at its cap.)" : ""}
+                    {suggestionRuleIds.has(rule.id) ? " Part of an accepted suggestion: enforce it with the suggestion below." : ""}
                   </p>
                 )}
                 {isAdmin && (
@@ -444,7 +450,7 @@ export function McpPoliciesView({
                     <button type="button" className="pg-btn ghost" onClick={() => setEditing(rule)} disabled={busyId === rule.id}>
                       Edit
                     </button>
-                    {rule.mode === "shadow" && (
+                    {rule.mode === "shadow" && !suggestionRuleIds.has(rule.id) && (
                       <button type="button" className="pg-btn ghost" onClick={() => void enforce(rule)} disabled={busyId === rule.id}>
                         Enforce
                       </button>

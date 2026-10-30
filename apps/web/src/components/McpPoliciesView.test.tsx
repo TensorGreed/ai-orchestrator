@@ -137,7 +137,7 @@ describe("MCP tool policy UI", () => {
     });
     vi.mocked(api.fetchMcpGatewayApprovals).mockResolvedValue({ approvals: [], approvalWindowMs: 900000 });
     vi.mocked(api.fetchMcpPolicySuggestions).mockResolvedValue({ suggestions: [] });
-    vi.mocked(api.fetchMcpPolicyShadowHits).mockResolvedValue({ shadowHits: { days: 7, since: "", scanned: 0, capped: false, rules: [] } });
+    vi.mocked(api.fetchMcpPolicyShadowHits).mockResolvedValue({ shadowHits: { days: 7, since: "", scanned: 0, capped: false, rules: [], groups: [] } });
   });
 
   it("shows read-only classification with its source, blocked marks, and lets admins override", async () => {

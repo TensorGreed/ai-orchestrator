@@ -155,7 +155,7 @@ beforeEach(() => {
   vi.mocked(api.fetchMcpGatewayApprovals).mockResolvedValue({ approvals: [], approvalWindowMs: 900000 });
   vi.mocked(api.fetchMcpToolPolicies).mockResolvedValue({ rules: [rule()], roles: ["admin", "builder", "operator", "viewer"] });
   vi.mocked(api.fetchMcpPolicySuggestions).mockResolvedValue({ suggestions: [] });
-  vi.mocked(api.fetchMcpPolicyShadowHits).mockResolvedValue({ shadowHits: { days: 7, since: "", scanned: 0, capped: false, rules: [] } });
+  vi.mocked(api.fetchMcpPolicyShadowHits).mockResolvedValue({ shadowHits: { days: 7, since: "", scanned: 0, capped: false, rules: [], groups: [] } });
 });
 
 describe("policy simulation in the rule editor", () => {
@@ -244,16 +244,20 @@ describe("least-privilege suggestions", () => {
     expect(await within(item).findByLabelText("Simulation result")).toBeInTheDocument();
 
     await user.click(within(item).getByRole("button", { name: "Accept in shadow mode" }));
-    expect(api.decideMcpPolicySuggestion).toHaveBeenCalledWith("mps_1", "accept");
+    expect(api.decideMcpPolicySuggestion).toHaveBeenCalledWith("mps_1", "accept", suggestion().fingerprint);
     await waitFor(() => expect(api.fetchMcpToolPolicies).toHaveBeenCalledTimes(2));
 
     await user.click(within(item).getByRole("button", { name: "Dismiss" }));
-    expect(api.decideMcpPolicySuggestion).toHaveBeenCalledWith("mps_1", "dismiss");
+    expect(api.decideMcpPolicySuggestion).toHaveBeenCalledWith("mps_1", "dismiss", suggestion().fingerprint);
   });
 
-  it("shows shadow hits and enforces an accepted suggestion once it is quiet, asking first when it is not", async () => {
+  it("shows shadow hits and enforces an accepted suggestion as a whole, asking first when it is not quiet", async () => {
     const user = userEvent.setup();
-    const shadowRules = [rule({ id: "mtp_deny", name: "Least privilege deny", toolPattern: "*", mode: "shadow" }), rule({ id: "mtp_allow", effect: "allow", toolPattern: "create_issue", mode: "shadow" })];
+    const shadowRules = [
+      rule({ id: "mtp_deny", name: "Least privilege deny", toolPattern: "*", mode: "shadow" }),
+      rule({ id: "mtp_allow", effect: "allow", toolPattern: "create_issue", mode: "shadow" }),
+      rule({ id: "mtp_lone", name: "Lone shadow", toolPattern: "drop_*", mode: "shadow" })
+    ];
     vi.mocked(api.fetchMcpToolPolicies).mockResolvedValue({ rules: shadowRules, roles: ["admin", "builder", "operator", "viewer"] });
     vi.mocked(api.fetchMcpPolicyShadowHits).mockResolvedValue({
       shadowHits: {
@@ -262,30 +266,59 @@ describe("least-privilege suggestions", () => {
         scanned: 10,
         capped: false,
         rules: [
-          { ruleId: "mtp_deny", matched: 4, wouldChange: 1, lastMatchedAt: null, lastWouldChangeAt: null },
-          { ruleId: "mtp_allow", matched: 6, wouldChange: 0, lastMatchedAt: null, lastWouldChangeAt: null }
-        ]
+          { ruleId: "mtp_deny", matched: 10, wouldChange: 10, lastMatchedAt: null, lastWouldChangeAt: null },
+          { ruleId: "mtp_allow", matched: 6, wouldChange: 0, lastMatchedAt: null, lastWouldChangeAt: null },
+          { ruleId: "mtp_lone", matched: 0, wouldChange: 0, lastMatchedAt: null, lastWouldChangeAt: null }
+        ],
+        groups: [{ suggestionId: "mps_1", ruleIds: ["mtp_deny", "mtp_allow"], matched: 10, wouldChange: 1, lastWouldChangeAt: null }]
       }
     });
     const accepted = suggestion({ status: "accepted", acceptedRuleIds: ["mtp_deny", "mtp_allow"], decidedAt: new Date(Date.now() - 2 * DAY).toISOString() });
     vi.mocked(api.fetchMcpPolicySuggestions).mockImplementation(async (status) => ({ suggestions: status === "accepted" ? [accepted] : [] }));
     vi.mocked(api.decideMcpPolicySuggestion).mockResolvedValue({ suggestion: accepted, rules: [] });
-    vi.mocked(api.enforceMcpToolPolicy).mockResolvedValue({ rule: { ...shadowRules[1]!, mode: "enforce" } });
+    vi.mocked(api.enforceMcpToolPolicy).mockResolvedValue({ rule: { ...shadowRules[2]!, mode: "enforce" } });
     const confirmSpy = vi.spyOn(window, "confirm").mockReturnValueOnce(false).mockReturnValue(true);
     renderView();
 
-    expect(await screen.findByLabelText("Shadow hits for Least privilege deny")).toHaveTextContent("matched 4 calls, would have changed 1");
+    // A lone deny would block every call it matched; the suggestion as a whole changes one.
+    expect(await screen.findByLabelText("Shadow hits for Least privilege deny")).toHaveTextContent(
+      "matched 10 calls; if you enforce just this rule, 10 would change. Part of an accepted suggestion"
+    );
     const item = await screen.findByRole("listitem", { name: "Accepted suggestion for Workflow Release bot" });
     expect(within(item).getByText(/would have changed 1 of the 10 calls/)).toBeInTheDocument();
-    await user.click(within(item).getByRole("button", { name: "Enforce now" }));
+    await user.click(within(item).getByRole("button", { name: "Enforce suggestion now" }));
     expect(api.decideMcpPolicySuggestion).not.toHaveBeenCalled();
-    await user.click(within(item).getByRole("button", { name: "Enforce now" }));
-    expect(api.decideMcpPolicySuggestion).toHaveBeenCalledWith("mps_1", "enforce");
+    await user.click(within(item).getByRole("button", { name: "Enforce suggestion now" }));
+    expect(api.decideMcpPolicySuggestion).toHaveBeenCalledWith("mps_1", "enforce", accepted.fingerprint);
 
+    // The suggestion's rules have no Enforce of their own; a lone shadow rule keeps one.
     const list = screen.getByRole("list", { name: "Tool policy rules" });
-    await user.click(within(list).getAllByRole("button", { name: "Enforce" })[1]!);
-    expect(api.enforceMcpToolPolicy).toHaveBeenCalledWith("mtp_allow");
+    const enforceButtons = within(list).getAllByRole("button", { name: "Enforce" });
+    expect(enforceButtons).toHaveLength(1);
+    await user.click(enforceButtons[0]!);
+    expect(api.enforceMcpToolPolicy).toHaveBeenCalledWith("mtp_lone");
     confirmSpy.mockRestore();
+  });
+
+  it("says when nothing was suggested from a capped scan, and labels an update of accepted rules", async () => {
+    const user = userEvent.setup();
+    const update = suggestion({
+      id: "mps_2",
+      evidence: { ...suggestion().evidence, updates: { suggestionIds: ["mps_1"], ruleIds: ["r1", "r2"], addedTools: ["add_label"] }, unknownRoleCalls: 2, inlineAdapter: true }
+    });
+    vi.mocked(api.fetchMcpPolicySuggestions).mockImplementation(async (status) => ({ suggestions: status === "open" ? [update] : [] }));
+    vi.mocked(api.generateMcpPolicySuggestions).mockResolvedValue({
+      result: { windowDays: 30, since: "", until: "", minCalls: 20, scanned: 50000, capped: true, notGenerated: "scan_capped", created: 0, updated: 0, unchanged: 0, skipped: [], suggestions: [] }
+    });
+    renderView();
+    const panel = await screen.findByRole("region", { name: "Rule suggestions" });
+    const item = await within(panel).findByRole("listitem", { name: "Suggestion for Workflow Release bot" });
+    expect(within(item).getByText(/Update accepted rules:/)).toBeInTheDocument();
+    expect(within(item).getByText(/started using 'add_label' after its suggested rules were accepted/)).toBeInTheDocument();
+    expect(within(item).getByText(/2 of them had no recorded role/)).toBeInTheDocument();
+    expect(within(item).getByText(/every inline server of the/)).toBeInTheDocument();
+    await user.click(within(panel).getByRole("button", { name: "Suggest rules" }));
+    expect(await within(panel).findByText(/Nothing suggested: .*never suggested from part of the calls/)).toBeInTheDocument();
   });
 
   it("is not shown to builders", async () => {
@@ -298,10 +331,20 @@ describe("least-privilege suggestions", () => {
 });
 
 describe("helpers", () => {
-  it("reads readiness from shadow hits and time in shadow", () => {
-    const hits = new Map([["r", { ruleId: "r", matched: 5, wouldChange: 0, lastMatchedAt: null, lastWouldChangeAt: null }]]);
-    expect(enforceReadiness({ acceptedRuleIds: ["r"], decidedAt: new Date(Date.now() - 8 * DAY).toISOString() }, hits).ready).toBe(true);
-    expect(enforceReadiness({ acceptedRuleIds: ["r"], decidedAt: new Date(Date.now() - 1 * DAY).toISOString() }, hits)).toMatchObject({ ready: false });
+  it("reads readiness from the suggestion's shadow hits, time in shadow, and never from a capped scan", () => {
+    const hits = {
+      days: 7,
+      since: "",
+      scanned: 5,
+      capped: false,
+      rules: [{ ruleId: "r", matched: 5, wouldChange: 5, lastMatchedAt: null, lastWouldChangeAt: null }],
+      groups: [{ suggestionId: "s", ruleIds: ["r"], matched: 5, wouldChange: 0, lastWouldChangeAt: null }]
+    };
+    const old = new Date(Date.now() - 8 * DAY).toISOString();
+    expect(enforceReadiness({ id: "s", decidedAt: old }, hits).ready).toBe(true);
+    expect(enforceReadiness({ id: "s", decidedAt: new Date(Date.now() - 1 * DAY).toISOString() }, hits)).toMatchObject({ ready: false });
+    expect(enforceReadiness({ id: "s", decidedAt: old }, { ...hits, capped: true })).toMatchObject({ ready: false, text: expect.stringMatching(/^Not ready \(scan capped\)/) });
+    expect(enforceReadiness({ id: "s", decidedAt: old }, null).ready).toBe(false);
   });
 
   it("describes summaries without raw arguments", () => {
@@ -311,5 +354,6 @@ describe("helpers", () => {
       "x: too many values to keep",
       "(summary truncated)"
     ]);
+    expect(summaryLines({ v: 3, fields: { branch: { type: "string", values: ["main"], adj: true } } })).toEqual(['branch: "main"; kept in a normalised form']);
   });
 });
