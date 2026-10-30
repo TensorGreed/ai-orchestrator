@@ -1061,11 +1061,12 @@ export type McpPolicyScalar = string | number | boolean | null;
  * when the path reads several values, a deny or require_approval rule's
  * condition holds if ANY value satisfies it, an allow rule's only if EVERY
  * value does (and there is at least one). Scalars compare as trimmed text
- * (`5000` equals `"5000"`), number operators read numeric strings, and a
- * missing argument satisfies only the negated operators (`not_one_of`,
- * `label_absent`), and only for deny and require_approval rules. A value the
- * operator cannot read (an object, text for a number operator) and a reading
- * cut short by a cap (over 1,000 values, the glob budget) match a deny or
+ * (`5000` equals `"5000"`) and number operators read numeric strings. A
+ * missing argument satisfies `exists: false` for every rule, and the negated
+ * operators (`not_one_of`, `label_absent`) only for deny and require_approval
+ * rules; no other operator. A value the operator cannot read (an object, text
+ * for a number operator) and a reading cut short by a cap (over 1,000 values,
+ * past the call's 1 MB of argument text, the glob budget) match a deny or
  * require_approval rule and never an allow.
  */
 export interface McpPolicyCondition {
