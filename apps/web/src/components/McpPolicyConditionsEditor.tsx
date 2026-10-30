@@ -1,12 +1,20 @@
 /**
  * Phase 12.4 — the condition builder of a tool policy rule: rows of
  * "argument path, operator, value" (or a data label), combined with all / any.
- * Values are typed the way the evaluator compares them: numbers for the
- * comparisons, lists for one of, text otherwise; `equals` reads 42, true and
- * false as numbers and booleans unless quoted ("42").
+ * Number comparisons take numbers; every other value is kept as the text
+ * typed (007 stays "007"): the evaluator compares scalars as trimmed text and
+ * numbers by value, so the text 5000 still equals an argument 5000. Only
+ * `null` (unquoted) means null.
  */
 
-import type { McpPolicyCondition, McpPolicyConditionOp, McpPolicyScalar, McpToolPolicyConditions } from "@ai-orchestrator/shared";
+import {
+  MCP_POLICY_TEXT_OPS,
+  type McpPolicyCondition,
+  type McpPolicyConditionOp,
+  type McpPolicyScalar,
+  type McpToolPolicyConditions,
+  type McpToolPolicyEffect
+} from "@ai-orchestrator/shared";
 
 export interface ConditionDraft {
   key: number;
@@ -15,6 +23,10 @@ export interface ConditionDraft {
   value: string;
   /** Upper bound of `between`. */
   value2: string;
+  /** Text operators: compare without case. */
+  ignoreCase: boolean;
+  /** The stored value and the text it was shown as, so saving an untouched row keeps its exact value. */
+  stored?: { text: string; value: McpPolicyCondition["value"] };
 }
 
 export interface ConditionsDraft {
@@ -46,15 +58,12 @@ const LIST_OPS: readonly McpPolicyConditionOp[] = ["one_of", "not_one_of"];
 let nextKey = 1;
 
 export function emptyConditionRow(): ConditionDraft {
-  return { key: nextKey++, op: "equals", path: "", value: "", value2: "" };
+  return { key: nextKey++, op: "equals", path: "", value: "", value2: "", ignoreCase: false };
 }
 
-/** `equals` and list values: 42, -1.5, true and false are typed; quote them ("42") to compare as text. */
+/** `equals` and list values are text (007 stays "007"); `null` means null, and a quoted value ("null") is that text. */
 export function parseScalar(text: string): McpPolicyScalar {
   const trimmed = text.trim();
-  if (/^-?\d+(\.\d+)?$/.test(trimmed)) return Number(trimmed);
-  if (trimmed === "true") return true;
-  if (trimmed === "false") return false;
   if (trimmed === "null") return null;
   if (/^".*"$/.test(trimmed)) {
     try {
@@ -75,16 +84,30 @@ export function scalarText(value: unknown): string {
 }
 
 function conditionToDraft(condition: McpPolicyCondition): ConditionDraft {
-  const base = { key: nextKey++, op: condition.op, path: condition.path ?? "", value: "", value2: "" };
+  const base = { key: nextKey++, op: condition.op, path: condition.path ?? "", value: "", value2: "", ignoreCase: condition.ignoreCase === true };
   if (condition.op === "exists") return { ...base, value: condition.value === false ? "absent" : "present" };
   if (condition.op === "between" && Array.isArray(condition.value)) {
     return { ...base, value: scalarText(condition.value[0]), value2: scalarText(condition.value[1]) };
   }
-  if (Array.isArray(condition.value)) return { ...base, value: condition.value.map(scalarText).join(", ") };
+  if (Array.isArray(condition.value)) {
+    const text = condition.value.map(scalarText).join(", ");
+    return { ...base, value: text, stored: { text, value: condition.value } };
+  }
   if (condition.op === "starts_with" || condition.op === "ends_with" || condition.op === "matches" || LABEL_OPS.includes(condition.op)) {
     return { ...base, value: String(condition.value ?? "") };
   }
-  return { ...base, value: scalarText(condition.value) };
+  const text = scalarText(condition.value);
+  return { ...base, value: text, stored: { text, value: condition.value } };
+}
+
+/** The row's value as stored when the row still shows it unchanged (a rule saved before keeps its typed values). */
+function unchangedValue(row: ConditionDraft): McpPolicyCondition["value"] | undefined {
+  return row.stored && row.stored.text === row.value ? row.stored.value : undefined;
+}
+
+/** `ignoreCase: true` for a text operator with the box ticked; nothing otherwise. */
+function caseFlag(row: ConditionDraft): Pick<McpPolicyCondition, "ignoreCase"> {
+  return row.ignoreCase && MCP_POLICY_TEXT_OPS.includes(row.op) ? { ignoreCase: true } : {};
 }
 
 export function conditionsToDraft(conditions: McpToolPolicyConditions | null | undefined): ConditionsDraft {
@@ -118,21 +141,25 @@ export function draftToConditions(draft: ConditionsDraft): { conditions: McpTool
       continue;
     }
     if (LIST_OPS.includes(row.op)) {
-      const values = row.value
-        .split(",")
-        .map((entry) => entry.trim())
-        .filter(Boolean)
-        .map(parseScalar);
+      const kept = unchangedValue(row);
+      const values = Array.isArray(kept)
+        ? kept
+        : row.value
+            .split(",")
+            .map((entry) => entry.trim())
+            .filter(Boolean)
+            .map(parseScalar);
       if (values.length === 0) return { error: `${where}: enter one or more values, separated by commas.` };
-      list.push({ path, op: row.op, value: values });
+      list.push({ path, op: row.op, value: values, ...caseFlag(row) });
       continue;
     }
     if (row.op === "equals") {
-      list.push({ path, op: "equals", value: parseScalar(row.value) });
+      const kept = unchangedValue(row);
+      list.push({ path, op: "equals", value: kept !== undefined && !Array.isArray(kept) ? kept : parseScalar(row.value), ...caseFlag(row) });
       continue;
     }
     if (!row.value) return { error: `${where}: enter the text to compare with.` };
-    list.push({ path, op: row.op, value: row.value });
+    list.push({ path, op: row.op, value: row.value, ...caseFlag(row) });
   }
   return { conditions: draft.combine === "any" ? { any: list } : { all: list } };
 }
@@ -147,14 +174,24 @@ function valuePlaceholder(op: McpPolicyConditionOp): string {
   return "main";
 }
 
+/** How several values (a list argument, or [*]) and a missing argument read for a rule with this effect. */
+export function conditionsHint(effect: McpToolPolicyEffect | undefined): string {
+  return effect === "allow"
+    ? "Paths are argument names with dots for nesting and [*] for list items. This rule allows a call only when every list item matches; a missing argument or a value of another type never matches."
+    : "Paths are argument names with dots for nesting and [*] for list items. This rule applies when any list item matches; a missing argument counts as “is not one of” and a value of another type (text for a number) counts as a match. Safest: deny broadly, then allow exceptions with “is one of”.";
+}
+
 export function McpPolicyConditionsEditor({
   draft,
   onChange,
-  disabled
+  disabled,
+  effect
 }: {
   draft: ConditionsDraft;
   onChange: (draft: ConditionsDraft) => void;
   disabled?: boolean;
+  /** The rule's effect, which decides how lists and missing arguments read (see `conditionsHint`). */
+  effect?: McpToolPolicyEffect;
 }) {
   const update = (key: number, patch: Partial<ConditionDraft>) =>
     onChange({ ...draft, rows: draft.rows.map((row) => (row.key === key ? { ...row, ...patch } : row)) });
@@ -235,6 +272,17 @@ export function McpPolicyConditionsEditor({
                       placeholder="to"
                     />
                   )}
+                  {MCP_POLICY_TEXT_OPS.includes(row.op) && (
+                    <label className="mcp-check mcp-condition-case">
+                      <input
+                        type="checkbox"
+                        aria-label={`Condition ${index + 1} ignore case`}
+                        checked={row.ignoreCase}
+                        onChange={(event) => update(row.key, { ignoreCase: event.target.checked })}
+                      />
+                      Ignore case
+                    </label>
+                  )}
                   <button type="button" className="pg-btn ghost" onClick={() => remove(row.key)} aria-label={`Remove condition ${index + 1}`}>
                     Remove
                   </button>
@@ -248,10 +296,7 @@ export function McpPolicyConditionsEditor({
         <button type="button" className="pg-btn ghost" onClick={() => onChange({ ...draft, rows: [...draft.rows, emptyConditionRow()] })}>
           + Add condition
         </button>
-        <small className="kb-subtle">
-          Paths are argument names with dots for nesting and [*] for any list item. A missing argument or a value of another type
-          does not match.
-        </small>
+        <small className="kb-subtle">{conditionsHint(effect)}</small>
       </div>
     </fieldset>
   );
@@ -285,7 +330,7 @@ export function describeConditions(conditions: McpToolPolicyConditions | null | 
     if (condition.op === "exists") return `${condition.path} ${condition.value === false ? "is absent" : "is present"}`;
     if (condition.op === "between" && Array.isArray(condition.value)) return `${condition.path} is between ${condition.value[0]} and ${condition.value[1]}`;
     const value = Array.isArray(condition.value) ? condition.value.map((entry) => JSON.stringify(entry)).join(", ") : JSON.stringify(condition.value);
-    return `${condition.path} ${OP_WORDS[condition.op]} ${value}`;
+    return `${condition.path} ${OP_WORDS[condition.op]} ${value}${condition.ignoreCase ? " (ignoring case)" : ""}`;
   });
   return words.join(combine === "any" ? " or " : " and ");
 }

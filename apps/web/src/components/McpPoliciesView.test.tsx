@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import type { McpToolPolicyRule } from "@ai-orchestrator/shared";
 import { beforeEach, vi } from "vitest";
 import * as api from "../lib/api";
+import { conditionsToDraft, draftToConditions, parseScalar, scalarText } from "./McpPolicyConditionsEditor";
 import { McpServersPage } from "./McpServersPage";
 
 vi.mock("../lib/api", async () => {
@@ -491,5 +492,92 @@ describe("MCP tool policy UI", () => {
     await screen.findByText("Viewers: no calculator");
     expect(screen.queryByText("Gateway approvals")).not.toBeInTheDocument();
     expect(api.fetchMcpGatewayApprovals).not.toHaveBeenCalled();
+  });
+
+  it("compares text with or without case, keeps typed text as text, and shows how lists and missing arguments read", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.fetchMcpToolPolicies).mockResolvedValue({ rules: [], roles: ["admin", "builder", "operator", "viewer"] });
+    vi.mocked(api.createMcpToolPolicy).mockImplementation(async (payload) => ({
+      rule: makeRule({ id: "rule_5", name: payload.name ?? null, effect: payload.effect, conditions: payload.conditions ?? null })
+    }));
+    render(<McpServersPage view="policies" isAdmin activeProjectId="default" />);
+    await user.click(await screen.findByRole("button", { name: "+ Add rule" }));
+    const form = screen.getByRole("form", { name: "Add tool policy rule" });
+    await user.type(within(form).getByLabelText("Name"), "No prod");
+    await user.click(within(form).getByRole("button", { name: "+ Add condition" }));
+    expect(within(form).getByText(/applies when any list item matches; a missing argument counts as “is not one of”/)).toBeInTheDocument();
+    await user.type(within(form).getByLabelText("Condition 1 argument path"), "env");
+    await user.selectOptions(within(form).getByLabelText("Condition 1 operator"), "one_of");
+    await user.type(within(form).getByLabelText("Condition 1 value"), "prod, 007");
+    await user.click(within(form).getByLabelText("Condition 1 ignore case"));
+    await user.selectOptions(within(form).getByLabelText("Effect"), "allow");
+    expect(within(form).getByText(/allows a call only when every list item matches/)).toBeInTheDocument();
+    await user.selectOptions(within(form).getByLabelText("Effect"), "deny");
+    await user.click(within(form).getByRole("button", { name: "Add rule" }));
+    expect(api.createMcpToolPolicy).toHaveBeenCalledWith(
+      expect.objectContaining({ conditions: { all: [{ path: "env", op: "one_of", value: ["prod", "007"], ignoreCase: true }] } })
+    );
+    const list = await screen.findByRole("list", { name: "Tool policy rules" });
+    expect(await within(list).findByText('env is one of "prod", "007" (ignoring case)')).toBeInTheDocument();
+  });
+
+  it("marks a rule whose stored conditions no longer validate", async () => {
+    vi.mocked(api.fetchMcpToolPolicies).mockResolvedValue({
+      rules: [makeRule({ id: "rule_bad", name: "Old carve-out", effect: "allow", conditions: null, invalid: true })],
+      roles: ["admin", "builder", "operator", "viewer"]
+    });
+    render(<McpServersPage view="policies" isAdmin activeProjectId="default" />);
+    const list = await screen.findByRole("list", { name: "Tool policy rules" });
+    expect(await within(list).findByText("Invalid conditions")).toBeInTheDocument();
+    expect(within(list).getByRole("alert")).toHaveTextContent("Invalid conditions — fix or delete. Until then this rule fails closed: it allows nothing.");
+  });
+
+  it("shows until when a rejected gateway call is refused", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.fetchMcpToolPolicies).mockResolvedValue({ rules: [], roles: ["admin", "builder", "operator", "viewer"] });
+    const rejected = {
+      id: "mga_r",
+      clientId: "mcpc_1",
+      clientName: "IDE agent",
+      toolsetId: "mts_1",
+      projectId: "default",
+      serverId: "mcp_1",
+      serverName: "Demo tools",
+      toolName: "calculator",
+      gatewayToolName: "demo_tools__calculator",
+      argsHash: "h",
+      argsPreview: "{}",
+      ruleId: "rule_9",
+      ruleName: "Big sums",
+      message: "needs approval",
+      status: "rejected" as const,
+      requestedAt: "2026-10-30T10:00:00.000Z",
+      expiresAt: "2026-10-30T10:16:00.000Z",
+      decidedBy: "admin@example.com",
+      decidedAt: "2026-10-30T10:01:00.000Z",
+      decisionReason: "Not today",
+      usedAt: null
+    };
+    vi.mocked(api.fetchMcpGatewayApprovals).mockResolvedValue({ approvals: [rejected], approvalWindowMs: 900000 });
+    render(<McpServersPage view="policies" isAdmin activeProjectId="default" />);
+    await user.click(await screen.findByLabelText("Show decided"));
+    const list = await screen.findByRole("list", { name: "Gateway approval requests" });
+    expect(within(list).getByText("Identical calls refused until")).toBeInTheDocument();
+    expect(within(list).getByText(new Date(rejected.expiresAt).toLocaleString())).toBeInTheDocument();
+    expect(within(list).getByText("Not today")).toBeInTheDocument();
+  });
+});
+
+describe("condition drafts", () => {
+  it("keep an untouched stored value exactly and read edited values as text", () => {
+    const draft = conditionsToDraft({ all: [{ path: "count", op: "equals", value: 42 }, { path: "env", op: "one_of", value: [true, "prod"] }] });
+    expect(draftToConditions(draft)).toEqual({ conditions: { all: [{ path: "count", op: "equals", value: 42 }, { path: "env", op: "one_of", value: [true, "prod"] }] } });
+    const edited = { ...draft, rows: draft.rows.map((row, index) => (index === 0 ? { ...row, value: "043" } : row)) };
+    expect(draftToConditions(edited)).toEqual({ conditions: { all: [{ path: "count", op: "equals", value: "043" }, { path: "env", op: "one_of", value: [true, "prod"] }] } });
+    expect(parseScalar("007")).toBe("007");
+    expect(parseScalar("null")).toBeNull();
+    expect(parseScalar('"null"')).toBe("null");
+    expect(scalarText("null")).toBe('"null"');
+    expect(scalarText("007")).toBe("007");
   });
 });

@@ -228,6 +228,8 @@ export function ApprovalCard({ view, focused, onDecided, onOpenRun }: ApprovalCa
   const toolName = view.kind === "agent_tool" && typeof details.toolName === "string" ? details.toolName : null;
   const toolArgs = view.kind === "agent_tool" && typeof details.arguments === "string" ? details.arguments : null;
   const toolServer = view.kind === "agent_tool" && typeof details.server === "string" ? details.server : null;
+  // Phase 12.4 — the tool policy rule that asked, with the conditions the call matched.
+  const policyReason = view.kind === "agent_tool" && typeof details.policyReason === "string" ? details.policyReason : null;
   const idBase = `approval-${view.requestId}`;
 
   useEffect(() => {
@@ -362,6 +364,11 @@ export function ApprovalCard({ view, focused, onDecided, onOpenRun }: ApprovalCa
             {toolServer ? <span className="approval-tool-server">on {toolServer}</span> : null}
           </div>
           {toolArgs && <pre className="approval-tool-args">{toolArgs}</pre>}
+          {policyReason && (
+            <p className="approval-tool-policy">
+              <span>Tool policy</span> {policyReason}
+            </p>
+          )}
         </div>
       )}
 

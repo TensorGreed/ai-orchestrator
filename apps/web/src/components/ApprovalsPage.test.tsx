@@ -68,7 +68,12 @@ describe("ApprovalsPage", () => {
           kind: "agent_tool",
           message: "Agent wants to call delete_ticket",
           editableFields: [],
-          details: { toolName: "delete_ticket", server: "Helpdesk", arguments: '{"id":42}' },
+          details: {
+            toolName: "delete_ticket",
+            server: "Helpdesk",
+            arguments: '{"id":42}',
+            policyReason: "MCP tool 'delete_ticket' needs approval by policy 'Deletes' (mtp_1); the call matches: id > 10."
+          },
           path: [{ workflowId: "wf-parent", workflowName: "Parent flow", nodeId: "call_child" }],
           canDecide: false,
           cannotDecideReason: "You started this run; someone else must approve it."
@@ -83,6 +88,7 @@ describe("ApprovalsPage", () => {
     expect(onCount).toHaveBeenCalledWith(1);
     expect(screen.getByText("delete_ticket")).toBeInTheDocument();
     expect(screen.getByText('{"id":42}')).toBeInTheDocument();
+    expect(screen.getByText(/the call matches: id > 10/)).toBeInTheDocument();
     expect(screen.getByText(/Parent flow/)).toBeInTheDocument();
     expect(screen.getByText("You started this run; someone else must approve it.")).toBeInTheDocument();
 

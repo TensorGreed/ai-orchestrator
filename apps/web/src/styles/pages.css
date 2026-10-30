@@ -3560,6 +3560,22 @@ button.tag-chip:hover {
   min-width: 0;
 }
 
+.mcp-condition-row .mcp-condition-case {
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 4px;
+  font-size: var(--fs-xs);
+  white-space: nowrap;
+}
+
+.mcp-condition-row .mcp-condition-case input {
+  flex: 0 0 auto;
+}
+
+.mcp-rule-invalid {
+  margin: 6px 0 0;
+}
+
 .mcp-conditions-actions {
   display: flex;
   align-items: center;

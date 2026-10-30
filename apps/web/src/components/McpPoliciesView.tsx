@@ -340,7 +340,14 @@ export function McpPoliciesView({
                   <span className="mcp-rule-name">{rule.name ?? "Unnamed rule"}</span>
                   {rule.mode === "shadow" && <ShadowBadge />}
                   {!rule.enabled && <span className="mcp-flag mcp-flag-neutral">disabled</span>}
+                  {rule.invalid && <span className="mcp-flag">Invalid conditions</span>}
                 </div>
+                {rule.invalid && (
+                  <p className="settings-error mcp-rule-invalid" role="alert">
+                    Invalid conditions — fix or delete. Until then this rule fails closed:{" "}
+                    {rule.effect === "allow" ? "it allows nothing." : "it applies to every call in its scope."}
+                  </p>
+                )}
                 {rule.description && <p className="kb-subtle mcp-rule-desc">{rule.description}</p>}
                 <dl className="mcp-rule-scope">
                   <div>
@@ -543,7 +550,7 @@ function McpPolicyForm({
           />
         </label>
       </div>
-      {kind === "tool" && <McpPolicyConditionsEditor draft={conditions} onChange={setConditions} />}
+      {kind === "tool" && <McpPolicyConditionsEditor draft={conditions} onChange={setConditions} effect={effect} />}
       <div className="kb-form-row">
         <label className="mcp-check">
           <input
@@ -1020,6 +1027,7 @@ function GatewayApprovals() {
       <p className="kb-subtle">
         Gateway calls a Needs approval rule held back. The client was told the call is pending; once you approve, the same client
         can retry the same call with the same arguments once{minutes ? ` within ${minutes} minute${minutes === 1 ? "" : "s"}` : ""}.
+        Once you reject, the same call is refused at once for as long. A client has at most 20 requests waiting.
       </p>
       {error && <div className="settings-error">{error}</div>}
       {loading && approvals.length === 0 ? (
@@ -1062,6 +1070,18 @@ function GatewayApprovals() {
                   <dt>{approval.status === "pending" ? "Expires" : "Decided by"}</dt>
                   <dd>{approval.status === "pending" ? new Date(approval.expiresAt).toLocaleString() : approval.decidedBy ?? "—"}</dd>
                 </div>
+                {approval.status === "rejected" && (
+                  <div>
+                    <dt>Identical calls refused until</dt>
+                    <dd>{new Date(approval.expiresAt).toLocaleString()}</dd>
+                  </div>
+                )}
+                {approval.decisionReason && (
+                  <div>
+                    <dt>Reason</dt>
+                    <dd>{approval.decisionReason}</dd>
+                  </div>
+                )}
               </dl>
               {approval.status === "pending" && (
                 <div className="mcp-rule-actions">
