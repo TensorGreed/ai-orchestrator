@@ -8,8 +8,9 @@
  *     value is found as well;
  *   - the summary hash key: HKDF-SHA-256 of the master key with its own info
  *     label (`l2m/tool-argument-summary/v1`), the same mechanism as the
- *     capture surrogate key. Without a 32-byte master key a random key is used
- *     for the life of the process, so hashes then only compare within it.
+ *     capture surrogate key. The API does not start without a valid master
+ *     key (SecretService refuses), so a running server always derives the key
+ *     from it.
  *
  * Returns null when summaries are switched off (MCP_TOOL_ARGUMENT_SUMMARIES=false)
  * and when the arguments cannot be summarised; a summary never fails a call
@@ -41,12 +42,20 @@ export function deriveToolArgumentHashKey(masterKey: Uint8Array): Uint8Array {
 
 let processHashKey: Uint8Array | undefined;
 
-/** The deployment's hash key from SECRET_MASTER_KEY_BASE64, or one random key per process without a valid master key. */
+/**
+ * The deployment's hash key from SECRET_MASTER_KEY_BASE64. A master key that
+ * is set but does not decode to 32 bytes is refused, as SecretService refuses
+ * it. With no master key at all, one random key per process is used: the API
+ * server never gets here (it does not boot without the master key), so this
+ * only serves `createApp` built without one, as in tests and library use, and
+ * its hashes compare only within that process.
+ */
 export function toolArgumentHashKey(masterKeyBase64: string | undefined): Uint8Array {
-  const masterKey = Buffer.from(masterKeyBase64 ?? "", "base64");
-  if (masterKey.length === 32) return deriveToolArgumentHashKey(masterKey);
-  processHashKey ??= new Uint8Array(randomBytes(32));
-  return processHashKey;
+  if (masterKeyBase64 === undefined || masterKeyBase64 === "") {
+    processHashKey ??= new Uint8Array(randomBytes(32));
+    return processHashKey;
+  }
+  return deriveToolArgumentHashKey(Buffer.from(masterKeyBase64, "base64"));
 }
 
 /**

@@ -88,12 +88,24 @@ describe("tool argument summaries with the capture detectors", () => {
       [{ "550e8400-e29b-41d4-a716-446655440000": 1, "9fceb02d0ae598e95dc970b74767f19372d61af8": 2, "5551234567": 3, "123-45-6789": 4 }, ["550e8400", "9fceb02d", "5551234567", "6789"]],
       [{ a: "https://alice-smith.github.io/x", b: "http://10.1.2.3/x" }, ["alice", "10.1"]],
       [{ a: "deadbeefcafebabe", b: "aGVsbG8gd29ybGQ", c: "sk-abc123", d: "correcthorsebatterystaple", e: "03/1985" }, ["deadbeef", "aGVs", "abc123", "horse", "1985"]],
-      [{ lat: 51.501364, lon: -0.14189 }, ["501364", "14189"]]
+      [{ lat: 51.501364, lon: -0.14189 }, ["501364", "14189"]],
+      // Re-review M-A: people's words inside joined or all-lower-case keys.
+      [{ firstname: "alice", lastname: "smith", surname: "smith", fullname: "alice-smith", nickname: "bob", displayname: "bob", userid: "jsmith", emailaddress: "xq" }, ["alice", "smith", "\"bob\"", "jsmith", "\"xq\""]],
+      // Re-review M-B: codes written as numbers or strings.
+      [{ security_code: 123, verification_code: 482913, code: 482913, postal_code: 90210, verificationCode: "abc123" }, [":123", "482913", "90210", "abc123"]],
+      // Re-review M-C: random ids and digests as object keys.
+      [{ a1b2c3d4e5f6g7h8: 1, Ab1Cd2Ef3Gh4Ij5Kl6Mn7Op8Qr9St0Uv: 2, a3f2b9c1e7d4f8a2b6c3e9d1f7a4b8c2: 3 }, ["a1b2", "Ab1Cd2", "a3f2b9"]],
+      // Re-review L-A: first.last with trailing digits or a one-letter tail.
+      [{ tag: "john.smith1", x: "john.s" }, ["john"]]
     ];
     for (const [args, needles] of probes) {
       const text = JSON.stringify(summarize(args));
       for (const needle of needles) expect(text, needle).not.toContain(needle);
     }
+    // The token-budget exception keeps numbers only, and only without a sensitive ancestor.
+    const budget = summarize({ max_tokens: 1024, token: 1024, auth: { max_tokens: 1 }, strings: { max_tokens: "1024" } })!;
+    expect(budget.fields.max_tokens?.values).toEqual([1024]);
+    for (const path of ["token", "auth.max_tokens", "strings.max_tokens"]) expect(budget.fields[path]?.values, path).toBeUndefined();
     // A schema enum does not reopen a credential key.
     expect(summarize({ password: "hunter2" }, { properties: { password: { enum: ["hunter2"] } } })?.fields.password?.values).toBeUndefined();
   });
@@ -152,11 +164,11 @@ describe("the summary hash key", () => {
     expect(toolArgumentHashKey(Buffer.from(masterKey).toString("base64"))).toEqual(hashKey);
   });
 
-  it("falls back to one random key per process without a valid master key", () => {
+  it("falls back to one random key per process without a master key, and refuses an invalid one", () => {
     const fallback = toolArgumentHashKey(undefined);
     expect(fallback).toHaveLength(32);
     expect(toolArgumentHashKey("")).toBe(fallback);
-    expect(toolArgumentHashKey(Buffer.from("short").toString("base64"))).toBe(fallback);
+    expect(() => toolArgumentHashKey(Buffer.from("short").toString("base64"))).toThrow(/32-byte master key/);
     expect(Buffer.from(fallback).equals(Buffer.from(hashKey))).toBe(false);
   });
 
