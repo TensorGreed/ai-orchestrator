@@ -71,6 +71,16 @@ export interface McpToolMarkingContext {
   /** Registry server name used in block messages. */
   serverLabel?: string;
   noWriteTools?: boolean;
+  /** Phase 12.4 — the workflow whose run makes the call, for rules scoped to workflows. */
+  workflowId?: string | null;
+  /** Phase 12.4 — the MCP gateway client making the call, for rules scoped to clients. */
+  clientId?: string | null;
+}
+
+/** Phase 12.4 — the call being made; without it, rules with conditions cannot decide (discovery). */
+export interface McpToolCallContext {
+  arguments: Record<string, unknown>;
+  dataLabels?: { provenance: readonly string[]; dataClasses: readonly string[] } | null;
 }
 
 function toAccessMark(decision: McpToolAccessDecision): McpToolAccessMark {
@@ -100,7 +110,8 @@ export function evaluateToolForContext(
   context: McpToolMarkingContext,
   tool: { name: string; annotations?: McpToolAnnotations },
   /** Phase 10.5 — what `tool.name` is: a tool (default), a resource URI, a prompt name or a sampling model. */
-  kind: McpPolicyKind = "tool"
+  kind: McpPolicyKind = "tool",
+  call?: McpToolCallContext
 ): McpToolAccessDecision {
   return evaluateMcpToolAccess({
     rules: context.rules,
@@ -113,6 +124,9 @@ export function evaluateToolForContext(
     annotations: tool.annotations,
     manualReadOnly: manualReadOnlyFor(context.classifications, context.registryServerId, tool.name),
     noWriteTools: context.noWriteTools,
+    workflowId: context.workflowId ?? null,
+    clientId: context.clientId ?? null,
+    ...(call ? { arguments: call.arguments, dataLabels: call.dataLabels ?? null } : {}),
     ...(context.serverLabel ? { serverLabel: context.serverLabel } : {})
   });
 }
