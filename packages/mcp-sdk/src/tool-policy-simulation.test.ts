@@ -10,6 +10,7 @@ import type { McpPolicyCondition, McpToolPolicyEffect, McpToolPolicyRule, ToolAr
 import { evaluateMcpToolPolicy, MAX_RESOLVED_VALUES } from "./tool-policy";
 import { hashToolArgumentValue, summarizeToolArguments, toolArgumentHashKeyId, type ToolArgumentDetector } from "./tool-argument-summary";
 import {
+  decisionWork,
   evaluateConditionOnSummary,
   evaluateRuleOnSummary,
   MAX_UNDECIDED_RULES_PER_CALL,
@@ -402,6 +403,21 @@ describe("current vs draft", () => {
     expect(result.bucket).toBe("undetermined");
     expect(result.draft.effect).toBeNull();
     expect(result.reason).toMatch(/kept only as a hash/);
+  });
+
+  it("charges each reading for its decision work: matched denies times matched allows, current and draft", () => {
+    // 8 rules the summary cannot decide (256 readings), and 40 denies and 40 allows that all match.
+    const undecided = Array.from({ length: 8 }, (_, index) =>
+      rule({ id: `u${index}`, effect: "deny", conditions: { all: [{ path: "title", op: "starts_with", value: `x${index}` }] } })
+    );
+    const denies = Array.from({ length: 40 }, (_, index) => rule({ id: `d${index}`, effect: "deny", roles: ["builder", "operator"], description: `d${index}` }));
+    const allows = Array.from({ length: 40 }, (_, index) => rule({ id: `a${index}`, effect: "allow", description: `a${index}` }));
+    const rules = [...undecided, ...denies, ...allows];
+    const result = simulatePolicyTransition(rules, rules, call(summary), context);
+    // Every reading compares at least the 40 matched denies with the 40 matched allows, on both sides.
+    expect(result.work).toBeGreaterThanOrEqual(256 * 2 * 40 * 40);
+    expect(decisionWork([...denies, ...allows])).toBe(80 + 40 * 40);
+    expect(decisionWork([rule({ id: "r", effect: "require_approval" }), ...denies.slice(0, 2), ...allows.slice(0, 3)])).toBe(6 + 3 * 4);
   });
 
   it("is determined when every reading lands in the same bucket", () => {

@@ -805,8 +805,9 @@ export interface SimulatedTransition {
   /** Each enforced draft rule's match state, by its index in the draft list. */
   draftStates: SimulatedRuleState[];
   /**
-   * The work this call cost: readings tried times the rules in scope (at
-   * least 1). A caller bounds a whole simulation with it.
+   * The work this call cost: per reading tried, the rules in scope (at least
+   * 1) plus the decision work of the current and the draft outcome (see
+   * `decisionWork`). A caller bounds a whole simulation with it.
    */
   work: number;
 }
@@ -825,6 +826,22 @@ function identityOf(rule: McpToolPolicyRule): string {
     identityCache.set(rule, identity);
   }
   return identity;
+}
+
+/**
+ * The work of deciding an outcome over these matched rules: each deny and
+ * require_approval rule is compared with each allow and require_approval
+ * rule (`isStrictlyNarrower`), so the cost grows with their product, not with
+ * the number of rules.
+ */
+export function decisionWork(matched: readonly McpToolPolicyRule[]): number {
+  let strict = 0;
+  let carving = 0;
+  for (const rule of matched) {
+    if (rule.effect !== "allow") strict += 1;
+    if (rule.effect !== "deny") carving += 1;
+  }
+  return matched.length + strict * carving;
 }
 
 function enforcedOnly(rules: readonly McpToolPolicyRule[]): McpToolPolicyRule[] {
@@ -882,6 +899,7 @@ export function simulatePolicyTransition(
   const currentDeciders = new Set<string | undefined>();
   const draftDeciders = new Set<string | undefined>();
   const combinations = 1 << undecided.length;
+  let work = 0;
   for (let mask = 0; mask < combinations; mask += 1) {
     const assumed = (identity: string) => (mask >> undecided.indexOf(identity)) & 1;
     const matched = (rules: McpToolPolicyRule[], ruleStates: SimulatedRuleState[]) =>
@@ -889,8 +907,11 @@ export function simulatePolicyTransition(
         const state = ruleStates[index]!.state;
         return state === "match" || (state === "unknown" && assumed(identityOf(rule)) === 1);
       });
-    const currentOutcome = decidePolicyOutcome(matched(currentRules, currentStates));
-    const draftOutcome = decidePolicyOutcome(matched(draftRules, draftStates));
+    const currentMatched = matched(currentRules, currentStates);
+    const draftMatched = matched(draftRules, draftStates);
+    work += scopedRules + decisionWork(currentMatched) + decisionWork(draftMatched);
+    const currentOutcome = decidePolicyOutcome(currentMatched);
+    const draftOutcome = decidePolicyOutcome(draftMatched);
     outcomes.add(simulationBucket(currentOutcome.effect, draftOutcome.effect));
     currentEffects.add(currentOutcome.effect);
     draftEffects.add(draftOutcome.effect);
@@ -910,7 +931,7 @@ export function simulatePolicyTransition(
     draft: outcome(draftEffects, draftDeciders),
     ...(bucket === undefined ? { reason: firstReason() ?? "the summary cannot decide the outcome" } : {}),
     draftStates: draftStateList,
-    work: combinations * scopedRules
+    work
   };
 }
 
