@@ -31,6 +31,7 @@ import {
   type McpServerCapabilities,
   type McpToolClassificationOverride,
   type McpToolHintCondition,
+  type McpPolicySuggestion,
   type McpToolPolicyRule,
   type McpToolset,
   type McpToolsetMember,
@@ -39,7 +40,10 @@ import {
 import type { PoolClient } from "pg";
 import {
   mapMcpGatewayApproval,
+  mapMcpPolicySuggestion,
   mapMcpToolCallContext,
+  mcpToolCallScanWhere,
+  MCP_TOOL_CALL_SCAN_COLUMNS,
   mcpToolCallContextValues,
   mapMcpToolPolicyExtras,
   normalizeMcpSamplingSettings,
@@ -64,6 +68,7 @@ import { mcpGatewayApprovalRetentionCutoff, type McpGatewayApprovalCreateResult,
 import { parseJsonSafe, toNum, toStr } from "./helpers.js";
 import type { PgContext } from "./context.js";
 import { clampLimit, LIMIT_MAX } from "../store-limits.js";
+import { McpPolicyEnforceRefusedError } from "../store-errors.js";
 
 type Row = Record<string, unknown>;
 type Queryable = Pick<PoolClient, "query">;
@@ -686,6 +691,160 @@ export async function listMcpToolCalls(ctx: PgContext, ...[filter]: Parameters<S
   return result.map(mapMcpToolCall);
 }
 
+/** Phase 12.4 — one page of a tool-call window scan, newest first (SQLite parity: id compared by code point). */
+export async function scanMcpToolCalls(ctx: PgContext, ...[filter]: Parameters<Store["scanMcpToolCalls"]>): ReturnType<Store["scanMcpToolCalls"]> {
+  const { where, params } = mcpToolCallScanWhere(filter, (index) => `$${index}`, `id COLLATE "C"`);
+  const limit = clampLimit(filter.limit, { fallback: 1000, max: LIMIT_MAX.mcpToolCallScan });
+  const result = await ctx.query<Row>(
+    `SELECT ${MCP_TOOL_CALL_SCAN_COLUMNS} FROM mcp_tool_calls WHERE ${where} ORDER BY started_at DESC, id COLLATE "C" DESC LIMIT ${limit}`,
+    params
+  );
+  return result.map(mapMcpToolCall);
+}
+
+const SUGGESTION_UPDATE_COLUMNS = [
+  "scope_name",
+  "server_name",
+  "fingerprint",
+  "rules_json",
+  "evidence_json",
+  "window_days",
+  "window_start",
+  "window_end",
+  "call_count",
+  "updated_at"
+] as const;
+
+export async function upsertOpenMcpPolicySuggestion(
+  ctx: PgContext,
+  ...[input]: Parameters<Store["upsertOpenMcpPolicySuggestion"]>
+): ReturnType<Store["upsertOpenMcpPolicySuggestion"]> {
+  // One statement: the CTE reads the open row as it was before, ON CONFLICT on the partial unique index refreshes it.
+  const row = await one(
+    ctx.pool,
+    `WITH previous AS (
+       SELECT fingerprint FROM mcp_policy_suggestions
+        WHERE scope_kind = $1 AND scope_id = $2 AND server_id = $3 AND status = 'open'
+     )
+     INSERT INTO mcp_policy_suggestions (
+       scope_kind, scope_id, server_id, id, status, created_by, created_at, ${SUGGESTION_UPDATE_COLUMNS.join(", ")}
+     ) VALUES ($1, $2, $3, $4, 'open', $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+     ON CONFLICT (scope_kind, scope_id, server_id) WHERE status = 'open'
+     DO UPDATE SET ${SUGGESTION_UPDATE_COLUMNS.map((column) => `${column} = EXCLUDED.${column}`).join(", ")}
+     RETURNING *, (SELECT fingerprint FROM previous) AS previous_fingerprint`,
+    [
+      input.scopeKind,
+      input.scopeId,
+      input.serverId,
+      input.id,
+      input.createdBy,
+      input.now,
+      input.scopeName,
+      input.serverName,
+      input.fingerprint,
+      JSON.stringify(input.rules),
+      JSON.stringify(input.evidence),
+      input.windowDays,
+      input.windowStart,
+      input.windowEnd,
+      input.callCount,
+      input.now
+    ]
+  );
+  if (!row) throw new Error("Policy suggestion could not be stored");
+  const previous = row.previous_fingerprint;
+  const outcome = previous === null || previous === undefined ? "created" : previous === input.fingerprint ? "unchanged" : "updated";
+  return { suggestion: mapMcpPolicySuggestion(row), outcome };
+}
+
+export async function listDecidedMcpPolicySuggestions(
+  ctx: PgContext,
+  ...[filter]: Parameters<Store["listDecidedMcpPolicySuggestions"]>
+): ReturnType<Store["listDecidedMcpPolicySuggestions"]> {
+  const result = await ctx.query<Row>(
+    `SELECT * FROM mcp_policy_suggestions
+      WHERE scope_kind = $1 AND scope_id = $2 AND server_id = $3 AND fingerprint = $4 AND status <> 'open'
+      ORDER BY created_at DESC, id COLLATE "C" DESC`,
+    [filter.scopeKind, filter.scopeId, filter.serverId, filter.fingerprint]
+  );
+  return result.map(mapMcpPolicySuggestion);
+}
+
+export async function listMcpPolicySuggestions(
+  ctx: PgContext,
+  ...[filter = {}]: Parameters<Store["listMcpPolicySuggestions"]>
+): ReturnType<Store["listMcpPolicySuggestions"]> {
+  const limit = clampLimit(filter.limit, { fallback: 200, max: LIMIT_MAX.mcpPolicySuggestions });
+  const result = filter.status
+    ? await ctx.query<Row>(`SELECT * FROM mcp_policy_suggestions WHERE status = $1 ORDER BY created_at DESC, id COLLATE "C" DESC LIMIT ${limit}`, [filter.status])
+    : await ctx.query<Row>(`SELECT * FROM mcp_policy_suggestions ORDER BY created_at DESC, id COLLATE "C" DESC LIMIT ${limit}`, []);
+  return result.map(mapMcpPolicySuggestion);
+}
+
+async function listAcceptedMcpPolicySuggestionsForRulesOn(
+  db: Queryable,
+  ruleIds: readonly string[],
+  options: { sameScope?: boolean }
+): Promise<McpPolicySuggestion[]> {
+  const ids = [...new Set(ruleIds)];
+  if (ids.length === 0) return [];
+  // `holding` is an accepted suggestion with one of the rule ids; with sameScope, it only names the scope.
+  const match = options.sameScope
+    ? `holding.scope_kind = s.scope_kind AND holding.scope_id = s.scope_id AND holding.server_id = s.server_id`
+    : `holding.id = s.id`;
+  const result = await rows(
+    db,
+    `SELECT s.* FROM mcp_policy_suggestions s
+      WHERE s.status = 'accepted'
+        AND EXISTS (
+          SELECT 1 FROM mcp_policy_suggestions holding
+           CROSS JOIN LATERAL jsonb_array_elements_text(holding.accepted_rule_ids_json::jsonb) AS accepted(rule_id)
+           WHERE holding.status = 'accepted' AND ${match} AND accepted.rule_id = ANY($1::text[])
+        )
+      ORDER BY s.created_at ASC, s.id COLLATE "C" ASC`,
+    [ids]
+  );
+  return result.map(mapMcpPolicySuggestion);
+}
+
+export async function listAcceptedMcpPolicySuggestionsForRules(
+  ctx: PgContext,
+  ...[ruleIds, options = {}]: Parameters<Store["listAcceptedMcpPolicySuggestionsForRules"]>
+): ReturnType<Store["listAcceptedMcpPolicySuggestionsForRules"]> {
+  return listAcceptedMcpPolicySuggestionsForRulesOn(ctx.pool, ruleIds, options);
+}
+
+export async function getMcpPolicySuggestion(ctx: PgContext, ...[id]: Parameters<Store["getMcpPolicySuggestion"]>): ReturnType<Store["getMcpPolicySuggestion"]> {
+  const row = await one(ctx.pool, `SELECT * FROM mcp_policy_suggestions WHERE id = $1`, [id]);
+  return row ? mapMcpPolicySuggestion(row) : null;
+}
+
+export async function transitionMcpPolicySuggestion(
+  ctx: PgContext,
+  ...[id, input]: Parameters<Store["transitionMcpPolicySuggestion"]>
+): ReturnType<Store["transitionMcpPolicySuggestion"]> {
+  const row = await one(
+    ctx.pool,
+    `UPDATE mcp_policy_suggestions
+        SET status = $1, decided_by = $2, decided_at = $3, updated_at = $4,
+            accepted_rule_ids_json = COALESCE($5, accepted_rule_ids_json),
+            evidence_json = COALESCE($8, evidence_json)
+      WHERE id = $6 AND status = $7
+      RETURNING *`,
+    [
+      input.to,
+      input.decidedBy,
+      tsOrNull(input.decidedAt),
+      input.decidedAt ?? new Date().toISOString(),
+      input.acceptedRuleIds === undefined ? null : JSON.stringify(input.acceptedRuleIds),
+      id,
+      input.from,
+      input.evidence === undefined ? null : JSON.stringify(input.evidence)
+    ]
+  );
+  return row ? mapMcpPolicySuggestion(row) : null;
+}
+
 export async function listMcpToolCallsForExecution(ctx: PgContext, ...[executionId]: Parameters<Store["listMcpToolCallsForExecution"]>): ReturnType<Store["listMcpToolCallsForExecution"]> {
   const result = await ctx.query<Row>(
     `SELECT * FROM mcp_tool_calls WHERE execution_id = $1 ORDER BY started_at, id COLLATE "C"`,
@@ -1021,6 +1180,37 @@ export async function updateMcpToolPolicy(ctx: PgContext, ...[id, patch]: Parame
     return row ? mapMcpToolPolicy(row) : null;
   }
   return getMcpToolPolicyOn(ctx.pool, id);
+}
+
+export async function enforceShadowMcpToolPolicies(
+  ctx: PgContext,
+  ...[ids, now, options = {}]: Parameters<Store["enforceShadowMcpToolPolicies"]>
+): ReturnType<Store["enforceShadowMcpToolPolicies"]> {
+  const unique = [...new Set(ids)];
+  if (unique.length === 0) return [];
+  const updated = await ctx.withTransaction(async (client) => {
+    if (options.guard) {
+      // No rule may be created, changed or deleted between the guard and the update: SHARE ROW EXCLUSIVE blocks
+      // every other write to the table (and a second enforce) until this transaction ends, and leaves reads alone.
+      await client.query(`LOCK TABLE mcp_tool_policies IN SHARE ROW EXCLUSIVE MODE`);
+      const current = await rows(client, `SELECT * FROM mcp_tool_policies ORDER BY created_at ASC, ${INSERTION_ASC}`);
+      const refusal = options.guard({
+        rules: current.map(mapMcpToolPolicy),
+        accepted: await listAcceptedMcpPolicySuggestionsForRulesOn(client, unique, { sameScope: true })
+      });
+      if (refusal !== null) throw new McpPolicyEnforceRefusedError(refusal);
+    }
+    // One statement: every rule still in shadow switches together, or none does.
+    return rows(client, `UPDATE mcp_tool_policies SET mode = 'enforce', updated_at = $1 WHERE id = ANY($2::text[]) AND mode = 'shadow' RETURNING *`, [
+      now,
+      unique
+    ]);
+  });
+  const byId = new Map(updated.map((row) => [toStr(row.id), mapMcpToolPolicy(row)]));
+  return unique.flatMap((id) => {
+    const rule = byId.get(id);
+    return rule ? [rule] : [];
+  });
 }
 
 export async function deleteMcpToolPolicy(ctx: PgContext, ...[id]: Parameters<Store["deleteMcpToolPolicy"]>): ReturnType<Store["deleteMcpToolPolicy"]> {

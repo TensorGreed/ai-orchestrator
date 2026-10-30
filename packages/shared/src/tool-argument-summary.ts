@@ -14,8 +14,22 @@ import { z } from "zod";
  * outside any sensitive path; every other scalar is kept as its shape plus a
  * keyed hash (HMAC-SHA-256 under a key derived from the master key), so equal
  * values can be counted and compared without being stored.
+ *
+ * Format 3 adds two marks for policy simulation, and is otherwise format 2:
+ *   - `adj` on a field: some value there is kept or hashed in a form that
+ *     differs from what the policy evaluator reads at call time (surrounding
+ *     whitespace, a Unicode compatibility form changed by NFKC, a number
+ *     rounded to four decimals or, under a location key, to one);
+ *   - `kid` on the summary: an id of the hash key the hashes were made with
+ *     (the first 8 hex characters of an HMAC of a fixed label under that key,
+ *     never the key), so hashes made under an earlier master key are known.
+ * Format 2 summaries stay readable; they carry neither mark.
  */
-export const TOOL_ARGUMENT_SUMMARY_VERSION = 2;
+export const TOOL_ARGUMENT_SUMMARY_VERSION = 3;
+
+/** The summary formats a stored summary may have. */
+export const TOOL_ARGUMENT_SUMMARY_VERSIONS = [2, 3] as const;
+export type ToolArgumentSummaryVersion = (typeof TOOL_ARGUMENT_SUMMARY_VERSIONS)[number];
 
 export type ToolArgumentValueType = "string" | "number" | "boolean" | "null" | "object" | "array";
 
@@ -50,10 +64,14 @@ export interface ToolArgumentFieldSummary {
   keys?: number;
   /** More distinct values, hashes or prefixes than kept; that list is dropped then. */
   more?: true;
+  /** Format 3: some value's kept or hashed form differs from the text or number the evaluator reads. */
+  adj?: true;
 }
 
 export interface ToolArgumentSummary {
-  v: typeof TOOL_ARGUMENT_SUMMARY_VERSION;
+  v: ToolArgumentSummaryVersion;
+  /** Format 3: the hash key id (8 hex characters); hashes compare only under the same key. */
+  kid?: string;
   fields: Record<string, ToolArgumentFieldSummary>;
   /** A size, depth or scan cap was reached; some values were summarised less precisely or skipped. */
   truncated?: true;
@@ -76,13 +94,15 @@ export const toolArgumentFieldSummarySchema = z
     len: z.enum(TOOL_ARGUMENT_LENGTH_BUCKETS).optional(),
     items: z.number().int().nonnegative().optional(),
     keys: z.number().int().nonnegative().optional(),
-    more: z.literal(true).optional()
+    more: z.literal(true).optional(),
+    adj: z.literal(true).optional()
   })
   .strict();
 
 export const toolArgumentSummarySchema = z
   .object({
-    v: z.literal(TOOL_ARGUMENT_SUMMARY_VERSION),
+    v: z.union([z.literal(2), z.literal(3)]),
+    kid: z.string().regex(/^[0-9a-f]{8}$/).optional(),
     fields: z.record(z.string(), toolArgumentFieldSummarySchema),
     truncated: z.literal(true).optional()
   })

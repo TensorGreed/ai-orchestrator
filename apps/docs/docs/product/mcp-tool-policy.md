@@ -300,7 +300,7 @@ Traces never contain secret values.
 | Create, update, delete rules; override a tool's classification | admin |
 | List, approve and reject gateway approval requests | admin |
 
-Changes are written to the audit log with resource type `mcp_policy` and events `mcp_policy.created`, `mcp_policy.updated`, `mcp_policy.deleted`, `mcp_policy.classification_set` and `mcp_policy.classification_cleared`. Their metadata includes the rule's mode, conditions, workflows, clients and hash; updates also carry the previous hash. Gateway approvals add `mcp_gateway.approval_requested`, `mcp_gateway.approval_decided` and `mcp_gateway.approval_used`, and argument denials are `mcp_gateway.tool_denied` with the decision.
+Changes are written to the audit log with resource type `mcp_policy` and events `mcp_policy.created`, `mcp_policy.updated`, `mcp_policy.deleted`, `mcp_policy.classification_set` and `mcp_policy.classification_cleared`; suggestions add `mcp_policy.suggestion_accepted`, `mcp_policy.suggestion_dismissed` and `mcp_policy.enforced` (see [Least privilege from real runs](../guides/least-privilege-from-real-runs.md)). Their metadata includes the rule's mode, conditions, workflows, clients and hash; updates also carry the previous hash. Gateway approvals add `mcp_gateway.approval_requested`, `mcp_gateway.approval_decided` and `mcp_gateway.approval_used`, and argument denials are `mcp_gateway.tool_denied` with the decision.
 
 ## Endpoints
 
@@ -309,6 +309,7 @@ Changes are written to the audit log with resource type `mcp_policy` and events 
 - `PUT /api/mcp/policies/:id`: update any field of a rule; the rule as updated must still be valid (admin)
 - `DELETE /api/mcp/policies/:id`: delete a rule (admin)
 - `POST /api/mcp/policies/evaluate`: dry-run `{ projectId, role, serverId, toolName, kind?, noWriteTools?, arguments?, labels?, workflowId?, clientId? }`; `toolName` is the URI, prompt or model name for the other kinds. Returns the decision and `effect`, the deciding rule, the matching rules with `why` (each rule's conditions in words), `undecided` rules (conditions without arguments), the `approval` when one is needed, the `shadow` outcome, the denies a narrower rule set aside, and the tool's classification (builder)
+- `POST /api/mcp/policies/simulate`, `GET /api/mcp/policies/shadow-hits`, `GET /api/mcp/policies/suggestions`, `POST /api/mcp/policies/suggestions/generate`, `POST /api/mcp/policies/suggestions/:id/accept|dismiss|enforce` and `POST /api/mcp/policies/:id/enforce`: simulate drafts on recorded calls, count shadow hits and review least-privilege suggestions (admin); see [Least privilege from real runs](../guides/least-privilege-from-real-runs.md)
 - `GET /api/mcp/gateway/approvals?status=`: gateway calls held for approval, newest first, with the approval window (admin)
 - `POST /api/mcp/gateway/approvals/:id/approve` and `/reject`: decide a pending request, optionally `{ reason }`; 409 when it was already decided or expired (admin)
 - `PUT /api/mcp/servers/:id/tools/:toolName/classification`: `{ readOnly: true | false | null }`. `null` clears the override (admin)

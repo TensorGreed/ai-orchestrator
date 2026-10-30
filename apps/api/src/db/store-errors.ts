@@ -98,3 +98,16 @@ export class AuditExportCursorMovedError extends Error {
     this.name = "AuditExportCursorMovedError";
   }
 }
+
+/**
+ * Phase 12.4 — enforcing shadow MCP tool rules was refused by the guard the caller passed, re-run on the rules as they
+ * are at the write (inside the write's transaction). Nothing was changed. The message says why; the API answers 409.
+ */
+export class McpPolicyEnforceRefusedError extends Error {
+  readonly statusCode = 409;
+
+  constructor(message: string) {
+    super(message);
+    this.name = "McpPolicyEnforceRefusedError";
+  }
+}

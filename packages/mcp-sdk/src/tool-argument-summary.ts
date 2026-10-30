@@ -11,7 +11,7 @@ import { CREDENTIAL_NAME_PATTERN } from "./client-features";
 
 /**
  * Phase 12.4 — a safe summary of a tool call's arguments for telemetry
- * (summary format 2).
+ * (summary format 3: format 2 plus the `adj` and `kid` marks below).
  *
  * Pure and deterministic for a given hash key: the same arguments (in any key
  * order) and schema give the same summary. It is an ALLOW-LIST: a raw value is
@@ -51,6 +51,15 @@ import { CREDENTIAL_NAME_PATTERN } from "./client-features";
  * hash: HMAC-SHA-256 of the NFKC-normalised text (or the number's or
  * boolean's canonical text) under `hashKey`, truncated to 16 bytes, base64url.
  * The key is never stored; the caller derives it from the master key.
+ *
+ * Format 3 marks, for policy simulation:
+ *   - `adj: true` on a field when a kept or hashed value there differs from
+ *     what the policy evaluator reads at call time: a string with surrounding
+ *     whitespace (the evaluator trims), a string NFKC changed (kept tokens and
+ *     hashes use the NFKC form), or a number whose kept or hashed form was
+ *     rounded (four decimals, one under a location key);
+ *   - `kid` on the summary: `toolArgumentHashKeyId(hashKey)`, so a simulator
+ *     can tell hashes made under another key (a rotated master key).
  *
  * Object keys are kept in the path only when they are a plain name (an ASCII
  * letter then letters, digits, `_` or `-`, at most 32 characters, no run of
@@ -235,6 +244,14 @@ function isLocationKey(key: string): boolean {
 }
 
 /**
+ * True for a location key (`lat`, `lng`, `geo`, ...): numbers under it, or
+ * under any key below it, are kept rounded to one decimal.
+ */
+export function isToolArgumentLocationKey(key: string): boolean {
+  return isLocationKey(key);
+}
+
+/**
  * Ids, hashes, keys and passphrases, on lower-case text. Random-looking when
  * it starts with a known secret prefix, or any part between `_`, `-` or `.`:
  *   - is longer than 16 characters;
@@ -308,6 +325,18 @@ export function hashToolArgumentValue(value: string | number | boolean, hashKey:
   if (hashKey.length < 16) throw new Error("The tool argument hash key must be at least 16 bytes.");
   const text = typeof value === "string" ? value.normalize("NFKC") : String(Object.is(value, -0) ? 0 : value);
   return createHmac("sha256", hashKey).update(text, "utf8").digest().subarray(0, 16).toString("base64url");
+}
+
+/** Label HMAC'd under the hash key for its id; distinct from any argument text a summary hashes in practice. */
+const HASH_KEY_ID_LABEL = "l2m/tool-argument-summary/kid";
+
+/**
+ * The id of a summary hash key: the first 8 hex characters of
+ * HMAC-SHA-256(hashKey, "l2m/tool-argument-summary/kid"). Never the key.
+ */
+export function toolArgumentHashKeyId(hashKey: Uint8Array): string {
+  if (hashKey.length < 16) throw new Error("The tool argument hash key must be at least 16 bytes.");
+  return createHmac("sha256", hashKey).update(HASH_KEY_ID_LABEL, "utf8").digest("hex").slice(0, 8);
 }
 
 /** The length bucket for a string of `length` characters. */
@@ -418,6 +447,8 @@ interface FieldAccumulator {
   mag: number | null;
   hashes: Set<string>;
   hashesOverflow: boolean;
+  /** A kept or hashed value differs from what the evaluator reads (format 3 `adj`). */
+  adjusted: boolean;
   prefixes: Set<string>;
   prefixesOverflow: boolean;
   classes: Set<string>;
@@ -556,6 +587,7 @@ export function summarizeToolArguments(args: unknown, options: SummarizeToolArgu
       mag: null,
       hashes: new Set(),
       hashesOverflow: false,
+      adjusted: false,
       prefixes: new Set(),
       prefixesOverflow: false,
       classes: new Set(),
@@ -623,6 +655,7 @@ export function summarizeToolArguments(args: unknown, options: SummarizeToolArgu
           return;
         }
         if (isSafeToolArgumentToken(normalized)) {
+          if (normalized !== text) field.adjusted = true;
           keep(field, normalized);
           return;
         }
@@ -637,13 +670,18 @@ export function summarizeToolArguments(args: unknown, options: SummarizeToolArgu
       }
     }
     addLength(field, text.length);
-    if (text.length <= LIMITS.maxHashedLength) addHash(field, text);
+    if (text.length <= LIMITS.maxHashedLength) {
+      // The evaluator compares trimmed text; the hash covers the NFKC form of the untrimmed text.
+      if (text.trim() !== text || normalized !== text) field.adjusted = true;
+      addHash(field, text);
+    }
   };
 
   const summarizeNumber = (field: FieldAccumulator, value: number, context: PathContext) => {
     if (!Number.isFinite(value)) return;
     let number = Object.is(value, -0) ? 0 : value;
     if (context.location) number = Math.round(number * 10) / 10;
+    if (number !== value) field.adjusted = true;
     const magnitude = Math.abs(number);
     if ((context.sensitive && !context.tokenCount) || magnitude >= 1e6) {
       // Seven or more integer digits may be a card, account, phone or national number written as a JSON number.
@@ -657,6 +695,7 @@ export function summarizeToolArguments(args: unknown, options: SummarizeToolArgu
     }
     const kept = Math.round(number * 1e4) / 1e4;
     const normalized = Object.is(kept, -0) ? 0 : kept;
+    if (normalized !== value) field.adjusted = true;
     keep(field, normalized);
     field.min = field.min === null ? normalized : Math.min(field.min, normalized);
     field.max = field.max === null ? normalized : Math.max(field.max, normalized);
@@ -776,6 +815,7 @@ export function summarizeToolArguments(args: unknown, options: SummarizeToolArgu
     .map(([path, field]) => [path, finishField(field)]);
   return {
     v: TOOL_ARGUMENT_SUMMARY_VERSION,
+    kid: toolArgumentHashKeyId(options.hashKey),
     fields: Object.fromEntries(entries),
     ...(truncated ? { truncated: true as const } : {})
   };
@@ -794,6 +834,7 @@ function finishField(field: FieldAccumulator): ToolArgumentFieldSummary {
   if (field.hashes.size > 0) summary.hashes = [...field.hashes].sort(compareText);
   if (field.prefixes.size > 0) summary.prefixes = [...field.prefixes].sort(compareText);
   if (field.valuesOverflow || field.hashesOverflow || field.prefixesOverflow) summary.more = true;
+  if (field.adjusted) summary.adj = true;
   if (field.classes.size > 0) summary.classes = [...field.classes].sort(compareText);
   if (field.lenIndex >= 0) summary.len = TOOL_ARGUMENT_LENGTH_BUCKETS[field.lenIndex];
   if (field.items >= 0) summary.items = field.items;

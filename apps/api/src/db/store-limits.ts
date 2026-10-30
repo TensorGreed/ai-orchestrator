@@ -15,5 +15,8 @@ export const LIMIT_MAX = {
   mcpToolSnapshots: 1000,
   usageRollup: 500,
   usageEvents: 500,
-  budgetAlerts: 500
+  budgetAlerts: 500,
+  /** Phase 12.4 — one page of a tool-call scan (simulation, suggestions, shadow hits). */
+  mcpToolCallScan: 5000,
+  mcpPolicySuggestions: 500
 } as const;

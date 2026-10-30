@@ -726,6 +726,30 @@ export class PostgresStore implements Store {
   async listMcpToolCalls(...args: Parameters<Store["listMcpToolCalls"]>): ReturnType<Store["listMcpToolCalls"]> {
     return mcp.listMcpToolCalls(this.ctx, ...args);
   }
+  async scanMcpToolCalls(...args: Parameters<Store["scanMcpToolCalls"]>): ReturnType<Store["scanMcpToolCalls"]> {
+    return mcp.scanMcpToolCalls(this.ctx, ...args);
+  }
+  async upsertOpenMcpPolicySuggestion(...args: Parameters<Store["upsertOpenMcpPolicySuggestion"]>): ReturnType<Store["upsertOpenMcpPolicySuggestion"]> {
+    return mcp.upsertOpenMcpPolicySuggestion(this.ctx, ...args);
+  }
+  async listDecidedMcpPolicySuggestions(...args: Parameters<Store["listDecidedMcpPolicySuggestions"]>): ReturnType<Store["listDecidedMcpPolicySuggestions"]> {
+    return mcp.listDecidedMcpPolicySuggestions(this.ctx, ...args);
+  }
+  async listMcpPolicySuggestions(...args: Parameters<Store["listMcpPolicySuggestions"]>): ReturnType<Store["listMcpPolicySuggestions"]> {
+    return mcp.listMcpPolicySuggestions(this.ctx, ...args);
+  }
+
+  async listAcceptedMcpPolicySuggestionsForRules(
+    ...args: Parameters<Store["listAcceptedMcpPolicySuggestionsForRules"]>
+  ): ReturnType<Store["listAcceptedMcpPolicySuggestionsForRules"]> {
+    return mcp.listAcceptedMcpPolicySuggestionsForRules(this.ctx, ...args);
+  }
+  async getMcpPolicySuggestion(...args: Parameters<Store["getMcpPolicySuggestion"]>): ReturnType<Store["getMcpPolicySuggestion"]> {
+    return mcp.getMcpPolicySuggestion(this.ctx, ...args);
+  }
+  async transitionMcpPolicySuggestion(...args: Parameters<Store["transitionMcpPolicySuggestion"]>): ReturnType<Store["transitionMcpPolicySuggestion"]> {
+    return mcp.transitionMcpPolicySuggestion(this.ctx, ...args);
+  }
   async getMcpOAuthConnection(...args: Parameters<Store["getMcpOAuthConnection"]>): ReturnType<Store["getMcpOAuthConnection"]> {
     return mcp.getMcpOAuthConnection(this.ctx, ...args);
   }
@@ -783,6 +807,10 @@ export class PostgresStore implements Store {
   async updateMcpToolPolicy(...args: Parameters<Store["updateMcpToolPolicy"]>): ReturnType<Store["updateMcpToolPolicy"]> {
     return mcp.updateMcpToolPolicy(this.ctx, ...args);
   }
+  async enforceShadowMcpToolPolicies(...args: Parameters<Store["enforceShadowMcpToolPolicies"]>): ReturnType<Store["enforceShadowMcpToolPolicies"]> {
+    return mcp.enforceShadowMcpToolPolicies(this.ctx, ...args);
+  }
+
   async deleteMcpToolPolicy(...args: Parameters<Store["deleteMcpToolPolicy"]>): ReturnType<Store["deleteMcpToolPolicy"]> {
     return mcp.deleteMcpToolPolicy(this.ctx, ...args);
   }

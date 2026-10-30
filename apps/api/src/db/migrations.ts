@@ -35,6 +35,8 @@ export const QUEUE_ACTIVE_EXECUTION_INDEX = "idx_execution_queue_active_executio
 export const QUEUE_FINISHED_INDEX = "idx_execution_queue_finished";
 /** v47: at most one pending gateway approval request per identical call (both stores). */
 export const GATEWAY_APPROVAL_ONE_PENDING_INDEX = "idx_mcp_gateway_approvals_one_pending";
+/** v49: at most one open policy suggestion per workflow or gateway client and server (both stores). */
+export const POLICY_SUGGESTION_ONE_OPEN_INDEX = "idx_mcp_policy_suggestions_one_open";
 
 export const INSERTION_SEQ_TABLES: ReadonlyArray<{ table: string; backfillOrder: string }> = [
   { table: "audit_logs", backfillOrder: `created_at, id COLLATE "C"` },
@@ -2250,6 +2252,49 @@ export const MIGRATIONS: Migration[] = [
       ALTER TABLE mcp_tool_calls DROP COLUMN IF EXISTS subject_source;
       ALTER TABLE mcp_tool_calls DROP COLUMN IF EXISTS subject_role;
       ALTER TABLE mcp_tool_calls DROP COLUMN IF EXISTS args_summary_json;
+    `
+  },
+  {
+    version: 49,
+    description: "Phase 12.4 — policies learned from real runs: suggested least-privilege rules, and a started_at index for window scans",
+    // mcp_policy_suggestions: rules proposed for one workflow or gateway client (scope) on one server, from the calls
+    // it made; written only when an admin clicks "Suggest rules". At most one open suggestion per scope and server;
+    // accepting creates the rules in shadow mode, dismissing keeps the row so the same proposal (fingerprint) is not
+    // offered again. idx_mcp_tool_calls_started: simulation, suggestions and shadow hits read a time window of tool
+    // calls page by page, newest first, with (started_at, id) as the keyset. Building it locks writes to
+    // mcp_tool_calls for the length of the build, like earlier index migrations: on a large table, run the upgrade in
+    // a quiet window.
+    up: `
+      CREATE TABLE IF NOT EXISTS mcp_policy_suggestions (
+        id TEXT PRIMARY KEY,
+        scope_kind TEXT NOT NULL,
+        scope_id TEXT NOT NULL,
+        scope_name TEXT,
+        server_id TEXT NOT NULL,
+        server_name TEXT,
+        status TEXT NOT NULL,
+        fingerprint TEXT NOT NULL,
+        rules_json TEXT NOT NULL,
+        evidence_json TEXT NOT NULL,
+        window_days INTEGER NOT NULL,
+        window_start TIMESTAMPTZ NOT NULL,
+        window_end TIMESTAMPTZ NOT NULL,
+        call_count INTEGER NOT NULL,
+        accepted_rule_ids_json TEXT NOT NULL DEFAULT '[]',
+        created_by TEXT,
+        created_at TIMESTAMPTZ NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL,
+        decided_by TEXT,
+        decided_at TIMESTAMPTZ
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS ${POLICY_SUGGESTION_ONE_OPEN_INDEX}
+        ON mcp_policy_suggestions (scope_kind, scope_id, server_id) WHERE status = 'open';
+      CREATE INDEX IF NOT EXISTS idx_mcp_policy_suggestions_status ON mcp_policy_suggestions (status, created_at);
+      CREATE INDEX IF NOT EXISTS idx_mcp_tool_calls_started ON mcp_tool_calls (started_at, id COLLATE "C");
+    `,
+    down: `
+      DROP INDEX IF EXISTS idx_mcp_tool_calls_started;
+      DROP TABLE IF EXISTS mcp_policy_suggestions;
     `
   }
 ];

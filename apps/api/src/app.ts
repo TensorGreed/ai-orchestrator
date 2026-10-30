@@ -183,6 +183,9 @@ import { registerMcpControlPlaneRoutes } from "./mcp-control-plane-routes.js";
 import { registerMcpTestingRoutes } from "./mcp-testing-routes.js";
 import { registerGuardRoutes } from "./guard-routes.js";
 import { registerGuardSimulationRoutes } from "./guard-simulation-routes.js";
+import { registerMcpPolicyLearningRoutes } from "./mcp-policy-learning-routes.js";
+import { McpPolicySimulationService } from "./services/mcp-policy-simulation-service.js";
+import { McpPolicySuggestionService } from "./services/mcp-policy-suggestion-service.js";
 import { GuardSimulationService } from "./services/guard-simulation-service.js";
 import { registerAuditBundleRoutes } from "./audit-bundle-routes.js";
 import { registerReplayRoutes } from "./replay-routes.js";
@@ -11921,7 +11924,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
   const recordPolicyAudit = async (
     user: SafeUser,
     eventType: string,
-    action: "create" | "update" | "delete",
+    action: "create" | "update" | "delete" | "read",
     resourceId: string,
     metadata: Record<string, unknown>,
     projectId: string | null = null
@@ -12377,6 +12380,20 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     await store.deleteMcpToolPolicy(existing.id);
     await recordPolicyAudit(user, "mcp_policy.deleted", "delete", existing.id, policyAuditMetadata(existing), existing.projectId);
     return { ok: true };
+  });
+
+  // Phase 12.4 — simulate draft rules on recorded calls, shadow hits, least-privilege suggestions (admin only).
+  const mcpPolicySimulationService = new McpPolicySimulationService({ store, hashKey: toolArgumentHashKey(config.SECRET_MASTER_KEY_BASE64) });
+  registerMcpPolicyLearningRoutes({
+    app,
+    store,
+    simulation: mcpPolicySimulationService,
+    suggestions: new McpPolicySuggestionService({ store, simulation: mcpPolicySimulationService }),
+    requireRole: (request, reply, roles) => requireRole(request, reply, roles),
+    validatePolicyScope,
+    recordPolicyAudit,
+    policyAuditMetadata,
+    policyRuleResponse
   });
 
   app.post<{ Body: unknown }>("/api/mcp/policies/evaluate", async (request, reply) => {

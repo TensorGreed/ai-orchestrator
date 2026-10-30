@@ -1,4 +1,9 @@
 import type {
+  McpPolicyShadowHits,
+  McpPolicySimulationRequest,
+  McpPolicySimulationResult,
+  McpPolicySuggestion,
+  McpPolicySuggestionGenerateResult,
   DataDestinationInput,
   DataDestinationRow,
   DestinationRulesStatus,
@@ -3006,6 +3011,51 @@ export async function evaluateMcpToolPolicy(payload: {
   return apiRequest<McpToolPolicyEvaluation>("/api/mcp/policies/evaluate", {
     method: "POST",
     body: JSON.stringify(payload)
+  });
+}
+
+/** Phase 12.4 — what a draft rule set (or one added rule) would have done to recorded calls (admin; nothing is written). */
+export async function simulateMcpToolPolicies(payload: McpPolicySimulationRequest) {
+  return apiRequest<{ simulation: McpPolicySimulationResult }>("/api/mcp/policies/simulate", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+/** Phase 12.4 — per shadow rule: calls it matched and would have changed, over the last `days` days (admin). */
+export async function fetchMcpPolicyShadowHits(days = 7) {
+  return apiRequest<{ shadowHits: McpPolicyShadowHits }>(`/api/mcp/policies/shadow-hits?days=${encodeURIComponent(String(days))}`);
+}
+
+/**
+ * Phase 12.4 — least-privilege suggestions (admin), newest first and capped. `inShadow` (accepted only) lists every
+ * accepted suggestion with a rule still in shadow instead, however old.
+ */
+export async function fetchMcpPolicySuggestions(status: "open" | "accepted" | "dismissed" | "all" = "open", options: { inShadow?: boolean } = {}) {
+  return apiRequest<{ suggestions: McpPolicySuggestion[] }>(
+    `/api/mcp/policies/suggestions?status=${encodeURIComponent(status)}${options.inShadow ? "&inShadow=true" : ""}`
+  );
+}
+
+export async function generateMcpPolicySuggestions(payload: { minCalls?: number } = {}) {
+  return apiRequest<{ result: McpPolicySuggestionGenerateResult }>("/api/mcp/policies/suggestions/generate", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+/** Accept names the fingerprint of the proposal the admin reviewed; the API refuses one regenerated since. */
+export async function decideMcpPolicySuggestion(id: string, action: "accept" | "dismiss" | "enforce", fingerprint?: string) {
+  return apiRequest<{ suggestion: McpPolicySuggestion; rules?: McpToolPolicyRule[] }>(
+    `/api/mcp/policies/suggestions/${encodeURIComponent(id)}/${action}`,
+    { method: "POST", body: JSON.stringify(action === "accept" ? { fingerprint } : {}) }
+  );
+}
+
+export async function enforceMcpToolPolicy(id: string) {
+  return apiRequest<{ rule: McpToolPolicyRule }>(`/api/mcp/policies/${encodeURIComponent(id)}/enforce`, {
+    method: "POST",
+    body: JSON.stringify({})
   });
 }
 

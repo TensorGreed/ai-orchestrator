@@ -137,6 +137,7 @@ export const EXPORTED_TABLES = [
   "mcp_elicitations",
   "mcp_tool_calls",
   "mcp_gateway_approvals",
+  "mcp_policy_suggestions",
   "mcp_cassettes",
   // Guard
   "guard_profiles",
