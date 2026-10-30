@@ -532,7 +532,7 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
       result = toolError(errorText);
       // Phase 12.4 — cancelled while the call still waited for a rate limit or a concurrency slot: the call carries on
       // without the client. If the limiter then refuses it, it never reached the server, so the approval is given back.
-      if (signal.aborted && approvalId && invocation) {
+      if (signal.aborted && approvalId && invocation !== undefined) {
         invocation.then(
           async (late) => {
             if (!late.ok && isRuntimeRefusal(late.errorKind)) await store.restoreMcpGatewayApproval(approvalId);
