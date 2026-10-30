@@ -46,11 +46,17 @@ const principalIdSchema = z.string().trim().min(1).max(200);
 export const mcpPolicyDraftRuleSchema = mcpToolPolicyRuleInputSchema.and(z.object({ id: principalIdSchema.optional() }));
 export type McpPolicyDraftRule = z.infer<typeof mcpPolicyDraftRuleSchema>;
 
+/** A current rule kept as stored, by id (an invalid stored rule can only be kept this way). */
+export const mcpPolicyKeptRuleSchema = z.object({ keep: principalIdSchema }).strict();
+
 export const mcpPolicySimulationRequestSchema = z
   .object({
     windowDays: z.union([z.literal(7), z.literal(30)]).default(7),
-    /** The whole draft rule set (the current rules with edits, additions or removals), in evaluation order. */
-    rules: z.array(mcpPolicyDraftRuleSchema).max(MCP_POLICY_SIMULATION_MAX_RULES).optional(),
+    /**
+     * The whole draft rule set (the current rules with edits, additions or removals), in evaluation order: each entry a
+     * draft rule, or `{ keep: id }` for a current rule unchanged.
+     */
+    rules: z.array(z.union([mcpPolicyKeptRuleSchema, mcpPolicyDraftRuleSchema])).max(MCP_POLICY_SIMULATION_MAX_RULES).optional(),
     /** One draft rule added after the current rules; it is simulated as enforced whatever its mode. */
     addRule: mcpPolicyDraftRuleSchema.optional(),
     filters: z

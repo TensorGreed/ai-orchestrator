@@ -19,6 +19,12 @@ describe("policy simulation request", () => {
     expect(mcpPolicySimulationRequestSchema.safeParse({ addRule: rule, rules: [] }).success).toBe(false);
   });
 
+  it("keeps a current rule by id", () => {
+    const parsed = mcpPolicySimulationRequestSchema.parse({ rules: [{ keep: "mtp_1" }, rule] });
+    expect(parsed.rules?.[0]).toEqual({ keep: "mtp_1" });
+    expect(mcpPolicySimulationRequestSchema.safeParse({ rules: [{ keep: "" }] }).success).toBe(false);
+  });
+
   it("keeps a draft rule's id and defaults the window to 7 days", () => {
     const parsed = mcpPolicySimulationRequestSchema.parse({ rules: [{ ...rule, id: "mtp_1" }] });
     expect(parsed.windowDays).toBe(7);
