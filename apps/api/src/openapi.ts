@@ -2233,7 +2233,7 @@ export const openApiSpec = {
       post: {
         tags: ["MCP"],
         summary:
-          "Simulate a draft rule set (rules, each a rule or { keep: id }) or one added rule (addRule, simulated as enforced) on the workflow and gateway calls of the last 7 or 30 days (admin). Each call is bucketed from its recorded principals and argument summary: newly denied, newly needs approval, no longer denied, no longer needs approval, unchanged, undetermined (the summary cannot decide it) or not summarised. Counts per rule and per workflow or client, up to 20 example calls per bucket (summary only). Reads at most 50,000 calls; capped says when it stopped early. Nothing is written.",
+          "Simulate a draft rule set (rules, each a rule or { keep: id }) or one added rule (addRule, simulated as enforced) on the workflow and gateway calls of the last 7 or 30 days (admin). Each call is bucketed from its recorded principals and argument summary: newly denied, newly needs approval, no longer denied, no longer needs approval, unchanged, undetermined (the summary cannot decide it) or not summarised. Counts per rule and per workflow or client, up to 20 example calls per bucket (summary only). Reads at most 50,000 calls and bounds its evaluation work; capped and cappedReason (scan_cap or work_budget) say when it stopped early. Nothing is written; the request is audited as mcp_policy.simulated by rule hash and filters.",
         requestBody: {
           required: true,
           content: {
@@ -2260,7 +2260,8 @@ export const openApiSpec = {
     "/api/mcp/policies/shadow-hits": {
       get: {
         tags: ["MCP"],
-        summary: "Per shadow rule: calls it matched and calls whose outcome it would have changed, from recorded decisions (admin)",
+        summary:
+          "From recorded decisions (admin): per shadow rule, calls it matched and calls whose outcome would have changed had that rule alone been enforced next to the rules enforced now; per accepted suggestion, the same with all of its shadow rules together. capped says the counts are partial.",
         parameters: [{ name: "days", in: "query", required: false, schema: { type: "integer", minimum: 1, maximum: 30 } }],
         responses: { "200": { description: "Shadow hits" } }
       }
@@ -2277,7 +2278,7 @@ export const openApiSpec = {
       post: {
         tags: ["MCP"],
         summary:
-          "Build or refresh suggestions from the last 30 days of calls (admin): per workflow and gateway client with at least minCalls (default 20) non-admin calls that reached the server, an allow per used tool (with one_of and maximum constraints where summaries support them) and a deny for the scope's other tools on that server. Tighten only. Rate-limited.",
+          "Build or refresh suggestions from the last 30 days of calls (admin): per workflow and gateway client with at least minCalls (default 20) non-admin calls that reached the server, an allow per used tool (with one_of and maximum constraints where summaries support them) and a deny for the scope's other tools on that server. Calls whose role was not recorded count. After an accepted suggestion, only new tools are offered, as an update. Tighten only. Nothing is generated when the scan is capped (notGenerated: scan_capped). Rate-limited.",
         requestBody: {
           required: false,
           content: { "application/json": { schema: { type: "object", properties: { minCalls: { type: "integer", minimum: 5, maximum: 100000 } } } } }
@@ -2288,9 +2289,18 @@ export const openApiSpec = {
     "/api/mcp/policies/suggestions/{id}/accept": {
       post: {
         tags: ["MCP"],
-        summary: "Accept a suggestion: its rules are added in shadow mode (admin)",
+        summary: "Accept a suggestion: its rules are added in shadow mode (admin). The body names the fingerprint of the proposal reviewed.",
         parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
-        responses: { "200": { description: "Accepted, with the created rules" }, "404": { description: "Not found" }, "409": { description: "Already decided, or it would no longer only tighten" } }
+        requestBody: {
+          required: true,
+          content: { "application/json": { schema: { type: "object", required: ["fingerprint"], properties: { fingerprint: { type: "string", pattern: "^[0-9a-f]{64}$" } } } } }
+        },
+        responses: {
+          "200": { description: "Accepted, with the created rules" },
+          "400": { description: "No fingerprint" },
+          "404": { description: "Not found" },
+          "409": { description: "Already decided, regenerated since it was reviewed, or it would no longer only tighten" }
+        }
       }
     },
     "/api/mcp/policies/suggestions/{id}/dismiss": {
@@ -2304,9 +2314,13 @@ export const openApiSpec = {
     "/api/mcp/policies/suggestions/{id}/enforce": {
       post: {
         tags: ["MCP"],
-        summary: "Enforce an accepted suggestion's rules that are still in shadow mode (admin)",
+        summary: "Enforce an accepted suggestion's rules that are still in shadow mode, together, allows first (admin)",
         parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
-        responses: { "200": { description: "Enforced rules" }, "404": { description: "Not found" }, "409": { description: "Not accepted" } }
+        responses: {
+          "200": { description: "Enforced rules" },
+          "404": { description: "Not found" },
+          "409": { description: "Not accepted, nothing in shadow, an update of the scope's rules still in shadow, or an allow would carve a rule enforced now" }
+        }
       }
     },
     "/api/mcp/policies/{id}/enforce": {
@@ -2314,7 +2328,14 @@ export const openApiSpec = {
         tags: ["MCP"],
         summary: "Switch a shadow rule to enforce (admin)",
         parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
-        responses: { "200": { description: "Enforced rule" }, "404": { description: "Not found" }, "409": { description: "Already enforced" } }
+        responses: {
+          "200": { description: "Enforced rule" },
+          "404": { description: "Not found" },
+          "409": {
+            description:
+              "Already enforced; a deny or require_approval rule from an accepted suggestion while its scope's allows are still in shadow; or an allow that would carve a rule enforced now"
+          }
+        }
       }
     },
     "/api/mcp/policies/evaluate": {

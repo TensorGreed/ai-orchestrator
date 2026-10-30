@@ -11924,7 +11924,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
   const recordPolicyAudit = async (
     user: SafeUser,
     eventType: string,
-    action: "create" | "update" | "delete",
+    action: "create" | "update" | "delete" | "read",
     resourceId: string,
     metadata: Record<string, unknown>,
     projectId: string | null = null
