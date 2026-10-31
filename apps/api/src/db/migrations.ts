@@ -2299,12 +2299,14 @@ export const MIGRATIONS: Migration[] = [
   },
   {
     version: 50,
-    description: "Phase 12.2 — provenance policies: per-tool open-world overrides, and the labels each tool call was decided with",
+    description: "Phase 12.2 — provenance policies: per-tool open-world overrides, the labels each tool call was decided with, and additive rules",
     // mcp_tool_open_world_overrides: an admin's per-tool answer to "does this tool reach the open world?", which wins
     // over the server's destination tier and the tool's openWorldHint (rules with an open_world / not_open_world
     // hint read it); empty unless an admin sets one. mcp_tool_calls.labels_json: the provenance labels a workflow
     // call's policy decision read (label names only, never values; data class names only on runs that tracked
     // labels), so simulation can evaluate label conditions; null on gateway calls and on rows written before.
+    // mcp_tool_policies.additive: 1 on the rules safety presets and the workflow's untrusted-write switch create;
+    // such a rule never carves an exception out of another rule (it only adds approvals or denies).
     up: `
       CREATE TABLE IF NOT EXISTS mcp_tool_open_world_overrides (
         server_id TEXT NOT NULL,
@@ -2315,8 +2317,10 @@ export const MIGRATIONS: Migration[] = [
         PRIMARY KEY (server_id, tool_name)
       );
       ALTER TABLE mcp_tool_calls ADD COLUMN IF NOT EXISTS labels_json TEXT;
+      ALTER TABLE mcp_tool_policies ADD COLUMN IF NOT EXISTS additive INTEGER NOT NULL DEFAULT 0;
     `,
     down: `
+      ALTER TABLE mcp_tool_policies DROP COLUMN IF EXISTS additive;
       ALTER TABLE mcp_tool_calls DROP COLUMN IF EXISTS labels_json;
       DROP TABLE IF EXISTS mcp_tool_open_world_overrides;
     `

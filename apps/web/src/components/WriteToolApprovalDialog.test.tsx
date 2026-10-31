@@ -70,6 +70,8 @@ describe("WriteToolApprovalDialog", () => {
     await userEvent.click(box);
     expect(api.setUntrustedWriteSwitch).toHaveBeenCalledWith("wf-1", true);
     await waitFor(() => expect(box).toBeChecked());
+    // It does not replace the gate above, and its approvals go to admins, not the approvers set above.
+    expect(screen.getByText(/Independent of the setting above/)).toHaveTextContent("The approvers above do not apply.");
     // Not a workflow setting: the workflow itself is unchanged.
     expect(onChange).not.toHaveBeenCalled();
   });

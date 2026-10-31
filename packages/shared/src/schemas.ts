@@ -465,7 +465,12 @@ export const mcpToolPolicyEvaluateSchema = z.object({
   /** Phase 12.4 — the run's data labels: provenance labels and data class names. */
   labels: z.array(z.string().trim().min(1).max(64)).max(100).optional(),
   workflowId: z.string().trim().min(1).max(200).nullable().optional(),
-  clientId: z.string().trim().min(1).max(200).nullable().optional()
+  clientId: z.string().trim().min(1).max(200).nullable().optional(),
+  /**
+   * Phase 12.2 — an inline server's connection settings (`serverId` is an adapter id), as a node would configure
+   * them. Only the endpoint's host is read, for the server's destination tier (open world); never echoed.
+   */
+  connection: z.record(z.string(), z.unknown()).optional()
 });
 
 // Phase 10.5 — resources, prompts, elicitation and sampling.

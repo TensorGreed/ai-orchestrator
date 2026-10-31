@@ -199,12 +199,24 @@ describe("MCP tool policy UI", () => {
     expect(screen.getByText("set by an admin")).toBeInTheDocument();
   });
 
+  it("marks additive rules (presets, the workflow switch) for admins", async () => {
+    vi.mocked(api.fetchMcpToolPolicies).mockResolvedValue({
+      rules: [makeRule({ id: "mtp_wf_untrusted_writes_wf-1", name: "This workflow: approve writes", effect: "require_approval", additive: true }), makeRule({ id: "plain", name: "Plain rule" })],
+      roles: ["admin", "builder", "operator", "viewer"]
+    });
+    render(<McpServersPage view="policies" isAdmin activeProjectId="default" />);
+    expect(await screen.findByText("This workflow: approve writes")).toBeInTheDocument();
+    expect(screen.getAllByText("Additive")).toHaveLength(1);
+    expect(screen.getByText("Additive")).toHaveAttribute("title", expect.stringContaining("never sets another rule aside"));
+  });
+
   it("explains what label conditions do", () => {
     const rows = (value: string) => conditionsToDraft({ all: [{ op: "label_present", value }] });
     expect(labelConditionNotes(conditionsToDraft(null))).toEqual([]);
     expect(labelConditionNotes(rows("untrusted_external"))).toHaveLength(1);
     expect(labelConditionNotes(rows("untrusted_external"))[0]).toMatch(/gateway/);
-    expect(labelConditionNotes(rows("sensitive"))[1]).toMatch(/label tracking/);
+    expect(labelConditionNotes(rows("sensitive"))[1]).toMatch(/label tracking for runs of the workflows this rule covers/);
+    expect(labelConditionNotes(rows("sensitive"))[1]).toMatch(/destination checks/);
     expect(labelConditionNotes(rows("email"))).toHaveLength(2);
   });
 

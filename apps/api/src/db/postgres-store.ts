@@ -807,6 +807,9 @@ export class PostgresStore implements Store {
   async updateMcpToolPolicy(...args: Parameters<Store["updateMcpToolPolicy"]>): ReturnType<Store["updateMcpToolPolicy"]> {
     return mcp.updateMcpToolPolicy(this.ctx, ...args);
   }
+  async createEnforcedMcpToolPolicy(...args: Parameters<Store["createEnforcedMcpToolPolicy"]>): ReturnType<Store["createEnforcedMcpToolPolicy"]> {
+    return mcp.createEnforcedMcpToolPolicy(this.ctx, ...args);
+  }
   async enforceShadowMcpToolPolicies(...args: Parameters<Store["enforceShadowMcpToolPolicies"]>): ReturnType<Store["enforceShadowMcpToolPolicies"]> {
     return mcp.enforceShadowMcpToolPolicies(this.ctx, ...args);
   }

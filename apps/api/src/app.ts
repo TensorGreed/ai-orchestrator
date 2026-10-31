@@ -22,6 +22,7 @@ import {
   detectContainerRuntime,
   hashMcpToolPolicyRule,
   invokeDirectMCPTool,
+  policyReadsOpenWorld,
   sweepSandboxContainers,
   validateSandboxMounts,
   withDelegatedUser,
@@ -184,7 +185,7 @@ import { registerMcpTestingRoutes } from "./mcp-testing-routes.js";
 import { registerGuardRoutes } from "./guard-routes.js";
 import { registerGuardSimulationRoutes } from "./guard-simulation-routes.js";
 import { registerMcpPolicyLearningRoutes } from "./mcp-policy-learning-routes.js";
-import { loadMcpOpenWorldContext, resolveOpenWorldFor, rulesReadOpenWorld } from "./services/mcp-open-world.js";
+import { loadMcpOpenWorldContext, resolveOpenWorldFor } from "./services/mcp-open-world.js";
 import { registerMcpSafetyPresetRoutes } from "./mcp-safety-preset-routes.js";
 import { McpPolicySimulationService } from "./services/mcp-policy-simulation-service.js";
 import { McpPolicySuggestionService } from "./services/mcp-policy-suggestion-service.js";
@@ -1693,7 +1694,7 @@ export async function createApp(
       rules,
       classifications: await store.listMcpToolClassifications(),
       // Phase 12.2 — overrides and destination rows only when a rule reads the open-world hint.
-      ...(rulesReadOpenWorld(rules) ? await loadMcpOpenWorldContext(store).then((context) => ({ openWorldOverrides: [...context.overrides], destinations: [...context.destinations] })) : {})
+      ...(policyReadsOpenWorld(rules) ? await loadMcpOpenWorldContext(store).then((context) => ({ openWorldOverrides: [...context.overrides], destinations: [...context.destinations] })) : {})
     };
   };
   const resolveToolPolicySubject = async (workflowId: string, actor?: SafeUser | null): Promise<McpToolPolicySubject> =>
@@ -11965,6 +11966,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     conditions: rule.conditions ?? null,
     workflowIds: rule.workflowIds ?? [],
     clientIds: rule.clientIds ?? [],
+    ...(rule.additive ? { additive: true } : {}),
     hash: hashMcpToolPolicyRule(rule)
   });
 
@@ -12438,12 +12440,18 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     }
     const classifications = registered ? await store.listMcpToolClassifications(registered.id) : [];
     const evaluateRules = await store.listMcpToolPolicies();
-    // Phase 12.2 — a registry tool's open-world value, as a run would resolve it.
-    const openWorldContext = registered ? { ...(await loadMcpOpenWorldContext(store, registered.id)), connection: registered.connection } : undefined;
+    // Phase 12.2 — the tool's open-world value, as a run would resolve it: a registry server's own connection, or the
+    // inline connection sent (none: the destination is unknown, so the tool counts as open world).
+    const openWorldContext = registered
+      ? { ...(await loadMcpOpenWorldContext(store, registered.id)), connection: registered.connection }
+      : { overrides: [], destinations: await store.listDataDestinations(), connection: parsed.data.connection };
+    const openWorldServer = registered
+      ? { adapterId: registered.adapterId, registryServerId: registered.id, connection: registered.connection }
+      : { adapterId: serverId, connection: parsed.data.connection };
     const decision = evaluateToolForContext(
       {
         rules: evaluateRules,
-        ...(openWorldContext ? { openWorld: openWorldContext } : {}),
+        openWorld: openWorldContext,
         classifications,
         role: role as McpPolicyRole,
         projectId,
@@ -12493,9 +12501,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       overriddenDenies: decision.policy.overriddenDenies.map((entry) => ({ denyId: entry.deny.id, byId: entry.by.id })),
       classification: decision.classification,
       manualReadOnly: manualReadOnlyFor(classifications, registered?.id, toolName),
-      ...(openWorldContext && registered && (parsed.data.kind ?? "tool") === "tool"
-        ? { openWorld: resolveOpenWorldFor(openWorldContext, { adapterId: registered.adapterId, registryServerId: registered.id, connection: registered.connection }, toolName, annotations) }
-        : {}),
+      ...((parsed.data.kind ?? "tool") === "tool" ? { openWorld: resolveOpenWorldFor(openWorldContext, openWorldServer, toolName, annotations) } : {}),
       server: registered
         ? { kind: "registry" as const, id: registered.id, name: registered.name, adapterId: registered.adapterId }
         : { kind: "inline" as const, adapterId: serverId },

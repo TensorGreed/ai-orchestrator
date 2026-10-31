@@ -147,6 +147,9 @@ describe("canonicalMcpToolPolicyRule", () => {
     const base = canonicalMcpToolPolicyRule(rule());
     expect(canonicalMcpToolPolicyRule(rule({ effect: "allow" }))).not.toBe(base);
     expect(canonicalMcpToolPolicyRule(rule({ workflowIds: ["wf"] }))).not.toBe(base);
+    // Phase 12.2 — an additive rule decides differently; a rule without the flag keeps its old hash.
+    expect(canonicalMcpToolPolicyRule(rule({ additive: true }))).not.toBe(base);
+    expect(canonicalMcpToolPolicyRule(rule({ additive: false }))).toBe(base);
     expect(canonicalMcpToolPolicyRule(rule({ conditions: { all: [{ path: "a", op: "exists" }] } }))).not.toBe(base);
     const all = rule({ conditions: { all: [{ path: "a", op: "exists" }, { path: "b", op: "exists" }] } });
     const any = rule({ conditions: { any: [{ path: "a", op: "exists" }, { path: "b", op: "exists" }] } });

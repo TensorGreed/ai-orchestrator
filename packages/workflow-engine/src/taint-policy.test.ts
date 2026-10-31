@@ -226,6 +226,86 @@ describe("open world: the server's destination tier, with the hint as fallback",
   });
 });
 
+describe("open world of two inline servers on one adapter", () => {
+  /** Lists `read_a` at the internal endpoint and `post_note` anywhere else; both declare openWorldHint:false. */
+  function byEndpointAdapter(invoked: string[]): MCPServerAdapter {
+    return {
+      definition: { id: "notes-mcp", label: "Notes", description: "Test notes server", configSchema: {}, authSchema: {} },
+      async discoverTools(config: { connection?: Record<string, unknown> }) {
+        const internal = String(config.connection?.endpoint ?? "").includes("127.0.0.1");
+        return [
+          {
+            serverId: "notes-mcp",
+            serverLabel: "Notes",
+            name: internal ? "read_a" : "post_note",
+            description: "Notes",
+            inputSchema: { type: "object" },
+            annotations: { openWorldHint: false }
+          }
+        ];
+      },
+      async invokeTool(_config: unknown, toolName: string) {
+        invoked.push(toolName);
+        return { ok: true, output: { done: true } };
+      }
+    } as unknown as MCPServerAdapter;
+  }
+
+  it("resolves each tool with its own server's connection", async () => {
+    const invoked: string[] = [];
+    const providerRegistry = new ProviderRegistry();
+    providerRegistry.register(new ToolThenAnswerProvider("notes-mcp__post_note"));
+    const mcpRegistry = createDefaultMCPRegistry();
+    mcpRegistry.register(byEndpointAdapter(invoked));
+    const approveOpenWorld: McpToolPolicyRule = {
+      id: "approve-open-world",
+      name: "Open-world tools need approval",
+      description: null,
+      effect: "require_approval",
+      projectId: null,
+      roles: [],
+      serverId: null,
+      toolPattern: "*",
+      annotationHint: "open_world",
+      enabled: true
+    };
+    const wf = workflow(
+      "wf-two-inline",
+      [
+        node("in", "webhook_input"),
+        node("agent", "agent_orchestrator", { maxIterations: 4, toolCallingEnabled: true, userPromptTemplate: "{{user_prompt}}" }),
+        node("model", "llm_call", { provider: { providerId: "scripted", model: "m" } }),
+        // A: internal (local), listed first. B: a public host no row classifies.
+        node("toolA", "mcp_tool", { serverId: "notes-mcp", toolName: "read_a", connection: { endpoint: "http://127.0.0.1:9000/mcp" } }),
+        node("toolB", "mcp_tool", { serverId: "notes-mcp", toolName: "post_note", connection: { endpoint: "https://notes.example.com/mcp" } }),
+        node("out", "output")
+      ],
+      [
+        { source: "in", target: "agent" },
+        { source: "agent", target: "out" },
+        { source: "agent", sourceHandle: "chat_model", target: "model" },
+        { source: "agent", sourceHandle: "tool", target: "toolA" },
+        { source: "agent", sourceHandle: "tool", target: "toolB" }
+      ]
+    );
+    const result = await executeWorkflow(
+      { workflow: wf, webhookPayload: { user_prompt: "Post a note" } },
+      {
+        providerRegistry,
+        connectorRegistry: createDefaultConnectorRegistry(),
+        mcpRegistry,
+        agentRuntime: new DefaultAgentRuntime(),
+        resolveSecret: async () => undefined,
+        persistPausedExecution: async () => undefined,
+        loadMcpToolPolicy: () => ({ rules: [approveOpenWorld], classifications: [] })
+      }
+    );
+    // B's public host makes post_note open world, so it waits for approval (A's local host would not have).
+    expect(result.status).toBe("waiting_approval");
+    expect(invoked).toEqual([]);
+  });
+});
+
 describe("automatic label tracking", () => {
   it("tracks labels when a rule has a data class condition, and records the classes found", async () => {
     const watch: McpToolPolicyRule = {
@@ -252,6 +332,28 @@ describe("automatic label tracking", () => {
     expect(decision).toMatchObject({ shadow: { effect: "deny", changed: true } });
     // The recorded labels hold class names, never the address.
     expect(JSON.stringify(agentOutput(result)?._toolPolicy)).not.toContain("alice@example.com");
+  });
+
+  it("does not track labels for a rule scoped to other workflows", async () => {
+    const elsewhere: McpToolPolicyRule = {
+      id: "watch-email-elsewhere",
+      name: null,
+      description: null,
+      effect: "deny",
+      projectId: null,
+      roles: [],
+      serverId: null,
+      toolPattern: "*",
+      enabled: true,
+      mode: "shadow",
+      workflowIds: ["wf-other"],
+      conditions: { all: [{ op: "label_present", value: "email" }] }
+    };
+    const result = await executeWorkflow(
+      { workflow: agentWorkflow(), webhookPayload: { user_prompt: "Push for alice@example.com" }, inputLabels: labels(["user"]) },
+      deps({ rules: [elsewhere] })
+    );
+    expect(agentOutput(result)?._toolPolicy?.callLabels?.[0]?.labels).toEqual({ provenance: ["user"], tracked: false });
   });
 
   it("does not track labels for provenance-only rules", async () => {

@@ -10,7 +10,7 @@
  * rule's message. Names are made unique in member order.
  */
 
-import { assignServerSlugs, dedupeToolNames, gatewayToolName, matchesToolPattern } from "@ai-orchestrator/mcp-sdk";
+import { assignServerSlugs, dedupeToolNames, gatewayToolName, matchesToolPattern, policyReadsOpenWorld } from "@ai-orchestrator/mcp-sdk";
 import type {
   McpGatewayHiddenToolView,
   McpGatewayToolView,
@@ -25,7 +25,7 @@ import type {
 } from "@ai-orchestrator/shared";
 import type { McpServerRecord, McpToolSnapshotRecord } from "../db/database.js";
 import { evaluateToolForContext } from "./mcp-tool-policy.js";
-import { loadMcpOpenWorldContext, rulesReadOpenWorld, type McpOpenWorldContext } from "./mcp-open-world.js";
+import { loadMcpOpenWorldContext, type McpOpenWorldContext } from "./mcp-open-world.js";
 
 export interface GatewayWorkflowTool {
   kind: "workflow";
@@ -157,7 +157,7 @@ export async function buildGatewayCatalog(input: {
     }
     const classifications = await store.listMcpToolClassifications(server.id);
     // Phase 12.2 — open-world resolution, only when a rule reads the open-world hint (read once per catalog).
-    if (rulesReadOpenWorld(rules) && !openWorldLoaded) openWorldLoaded = await loadMcpOpenWorldContext(store);
+    if (policyReadsOpenWorld(rules) && !openWorldLoaded) openWorldLoaded = await loadMcpOpenWorldContext(store);
     const openWorld = openWorldLoaded ? { ...openWorldLoaded, connection: server.connection } : undefined;
     const slug = slugs.get(server.id) ?? "server";
     const tools = snapshot.tools.filter((tool) => matchesToolPattern(member.toolGlob ?? "*", tool.name));

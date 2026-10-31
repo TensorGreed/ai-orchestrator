@@ -150,5 +150,10 @@ export interface ResolvedMCPTool {
   annotations?: McpToolAnnotations;
   /** Phase 10.5 — the tool's outputSchema, when declared. */
   outputSchema?: Record<string, unknown>;
+  /**
+   * Phase 12.2 — the connection settings of the server this tool came from (two inline servers on one adapter have
+   * different ones), read only for the host of its endpoint by open-world resolution. Never recorded.
+   */
+  connection?: unknown;
   definition: ToolDefinition;
 }

@@ -48,8 +48,8 @@ import type { AuditEventInput } from "./services/audit-service.js";
 import type { RunAccess } from "./run-access.js";
 import type { SafeUser, UserRole } from "./services/auth-service.js";
 import { evaluateToolForContext } from "./services/mcp-tool-policy.js";
-import { openWorldMarking, rulesReadOpenWorld } from "./services/mcp-open-world.js";
-import { withDelegatedUser } from "@ai-orchestrator/mcp-sdk";
+import { openWorldMarking } from "./services/mcp-open-world.js";
+import { policyReadsOpenWorld, withDelegatedUser } from "@ai-orchestrator/mcp-sdk";
 import type { MCPToolResult, McpRuntimeRejection } from "@ai-orchestrator/shared";
 import {
   buildGatewayCatalog,
@@ -735,7 +735,7 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     const rules = await store.listMcpToolPolicies();
     if (rules.length === 0) return { outcome: "call" };
     // Phase 12.2 — open world, only when a rule reads the open-world hint.
-    const openWorld = rulesReadOpenWorld(rules) ? await openWorldMarking(store, rules, await store.getMcpServer(tool.serverId)) : undefined;
+    const openWorld = policyReadsOpenWorld(rules) ? await openWorldMarking(store, rules, await store.getMcpServer(tool.serverId)) : undefined;
     const decision = evaluateToolForContext(
       {
         rules,

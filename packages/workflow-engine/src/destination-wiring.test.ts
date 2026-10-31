@@ -13,6 +13,7 @@ import {
 } from "@ai-orchestrator/guard-sdk";
 import { createDefaultMCPRegistry, type MCPServerAdapter } from "@ai-orchestrator/mcp-sdk";
 import { ProviderRegistry, type LLMProviderAdapter, type ProviderCallRequest } from "@ai-orchestrator/provider-sdk";
+import { mcpSafetyPresetRule } from "@ai-orchestrator/shared";
 import type { DataDestinationRow, DataLabels, Workflow, WorkflowEdge, WorkflowExecutionResult, WorkflowExecutionState, WorkflowNode } from "@ai-orchestrator/shared";
 import { IN_PROCESS_CODE_SANDBOX } from "./code-sandbox";
 import { executeWorkflow, resumeWorkflowExecution, type WorkflowExecutionDependencies } from "./executor";
@@ -197,6 +198,26 @@ describe("zero config", () => {
     expect(result.status).toBe("success");
     expect(harness.calls.resolveRun).toBe(0);
     expect(harness.calls.rows).toBe(0);
+  });
+
+  it("an MCP tool rule that needs label tracking leaves a workflow without MCP nodes alone: same egress outcome, no tracking", async () => {
+    // Phase 12.2 — the shadow "sensitive data ⇒ no open-world tools" preset turns tracking on only for runs it can
+    // apply to; tracking resolves the guard stack and would feed the run's classes to this HTTP node's destination check.
+    const harness = guardDeps(["block"], { mayUseLabels: () => false, rows: PUBLIC_LOCALHOST });
+    let policyLoads = 0;
+    const withPreset: WorkflowExecutionDependencies = {
+      ...deps({ guard: harness.guard }),
+      loadMcpToolPolicy: () => {
+        policyLoads += 1;
+        return { rules: [mcpSafetyPresetRule("sensitive_no_open_world")], classifications: [] };
+      }
+    };
+    const before = received.length;
+    const result = await executeWorkflow({ workflow: httpWorkflow(`${base}/plain`), executionId: "z2b", webhookPayload: { user_prompt: `card ${CARD}` } }, withPreset);
+    expect(result.status).toBe("success");
+    expect(received.length).toBe(before + 1);
+    expect(harness.calls.resolveRun).toBe(0);
+    expect(policyLoads).toBe(0);
   });
 
   it("a failing mayUseLabels check fails open to the full path: the run starts and the outbound check still blocks", async () => {

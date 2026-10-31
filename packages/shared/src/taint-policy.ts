@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { conditionList } from "./mcp-tool-policy";
 import { dataClassNameSchema, PROVENANCE_LABELS, type DataLabels, type ProvenanceLabel } from "./data-labels";
-import type { McpToolPolicyConditions, McpToolPolicyRule } from "./types";
+import type { McpToolPolicyConditions, McpToolPolicyRule, Workflow } from "./types";
 
 /**
  * Phase 12.2 — provenance (taint) policies over the MCP tool rules.
@@ -37,12 +37,38 @@ export function ruleLabelValues(conditions: McpToolPolicyConditions | null | und
     .flatMap((condition) => (typeof condition.value === "string" ? [condition.value] : []));
 }
 
+/** Node types that call MCP tools (an agent or supervisor through its tool ports, or the MCP Tool node itself). */
+export const MCP_TOOL_CALLING_NODE_TYPES: readonly string[] = ["agent_orchestrator", "supervisor_node", "mcp_tool"];
+
+/** Node types that run another workflow, which may call MCP tools: counted as calling them, conservatively. */
+export const SUB_WORKFLOW_NODE_TYPES: readonly string[] = ["execute_workflow"];
+
+/** True when an enabled node of the workflow may call an MCP tool, itself or through a sub-workflow. */
+export function workflowMayCallMcpTools(workflow: Pick<Workflow, "nodes">): boolean {
+  return workflow.nodes.some(
+    (node) => node.disabled !== true && (MCP_TOOL_CALLING_NODE_TYPES.includes(node.type) || SUB_WORKFLOW_NODE_TYPES.includes(node.type))
+  );
+}
+
 /**
- * Phase 12.2 — true when an enabled tool rule (enforced or shadow) has a label condition that only a tracking run can
- * feed (`sensitive` or a data class). Runs then track labels automatically, so the condition is not a silent no-op.
+ * Phase 12.2 — true when a run of `workflow` must track labels for its MCP tool rules: the workflow may call an MCP
+ * tool (`workflowMayCallMcpTools`), and an enabled tool rule (enforced or shadow) that covers it (`workflowIds` empty
+ * or naming it) has a label condition only a tracking run can feed (`sensitive` or a data class). Such runs then
+ * track labels automatically, so the condition is not a silent no-op. Tracking is not free of side effects: it also
+ * feeds the run's data classes to destination checks, so it is kept to the runs the rule can apply to.
  */
-export function policyRulesNeedLabelTracking(rules: ReadonlyArray<Pick<McpToolPolicyRule, "enabled" | "conditions">>): boolean {
-  return rules.some((rule) => rule.enabled && ruleLabelValues(rule.conditions).some(labelValueNeedsTracking));
+export function policyRulesNeedLabelTracking(
+  rules: ReadonlyArray<Pick<McpToolPolicyRule, "enabled" | "conditions" | "kind" | "workflowIds">>,
+  workflow: Pick<Workflow, "id" | "nodes">
+): boolean {
+  if (!workflowMayCallMcpTools(workflow)) return false;
+  return rules.some(
+    (rule) =>
+      rule.enabled &&
+      (rule.kind ?? "tool") === "tool" &&
+      (!rule.workflowIds?.length || rule.workflowIds.includes(workflow.id)) &&
+      ruleLabelValues(rule.conditions).some(labelValueNeedsTracking)
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -179,7 +205,8 @@ export const MCP_SAFETY_PRESETS: readonly McpSafetyPreset[] = Object.freeze([
   {
     id: "sensitive_no_open_world",
     title: "Sensitive data ⇒ no open-world tools",
-    summary: "While the context holds sensitive data, tools whose server is a vendor or public destination (or unclassified) are denied. Runs then track data labels automatically.",
+    summary:
+      "While the context holds sensitive data, tools whose server is a vendor or public destination (or unclassified) are denied. Runs of workflows with an agent or MCP Tool node then track data labels automatically; the data classes found also feed destination checks.",
     rule: SENSITIVE_OPEN_WORLD_RULE
   }
 ]);
@@ -206,6 +233,7 @@ export function mcpSafetyPresetRule(id: McpSafetyPresetId): McpToolPolicyRule {
     workflowIds: [],
     clientIds: [],
     mode: "shadow",
+    additive: true,
     enabled: true
   };
 }
@@ -234,6 +262,7 @@ export function untrustedWriteSwitchRule(workflowId: string): McpToolPolicyRule 
     workflowIds: [workflowId],
     clientIds: [],
     mode: "enforce",
+    additive: true,
     enabled: true
   };
 }

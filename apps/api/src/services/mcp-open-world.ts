@@ -1,4 +1,4 @@
-import { resolveToolOpenWorld, serverOpenWorldDestination } from "@ai-orchestrator/mcp-sdk";
+import { policyReadsOpenWorld, resolveToolOpenWorld, serverOpenWorldDestination } from "@ai-orchestrator/mcp-sdk";
 import type { DataDestinationRow, McpOpenWorldResolution, McpToolAnnotations, McpToolOpenWorldOverride, McpToolPolicyRule } from "@ai-orchestrator/shared";
 import type { Store } from "../db/store.js";
 
@@ -9,11 +9,6 @@ import type { Store } from "../db/store.js";
 export interface McpOpenWorldContext {
   overrides: readonly McpToolOpenWorldOverride[];
   destinations: readonly DataDestinationRow[];
-}
-
-/** True when an enabled rule reads the open-world hint, so a tool's open-world value must be resolved. */
-export function rulesReadOpenWorld(rules: readonly McpToolPolicyRule[]): boolean {
-  return rules.some((rule) => rule.enabled && (rule.annotationHint === "open_world" || rule.annotationHint === "not_open_world"));
 }
 
 export async function loadMcpOpenWorldContext(store: Pick<Store, "listMcpToolOpenWorldOverrides" | "listDataDestinations">, registryServerId?: string): Promise<McpOpenWorldContext> {
@@ -53,6 +48,6 @@ export async function openWorldMarking(
   server: { connection?: unknown } | null | undefined,
   loaded?: McpOpenWorldContext
 ): Promise<(McpOpenWorldContext & { connection?: unknown }) | undefined> {
-  if (!rulesReadOpenWorld(rules)) return undefined;
+  if (!policyReadsOpenWorld(rules)) return undefined;
   return { ...(loaded ?? (await loadMcpOpenWorldContext(store))), connection: server?.connection };
 }

@@ -1,4 +1,4 @@
-import { evaluateMcpToolAccess, type McpToolAccessDecision } from "@ai-orchestrator/mcp-sdk";
+import { evaluateMcpToolAccess, openWorldRequestFields, policyReadsOpenWorld, type McpToolAccessDecision } from "@ai-orchestrator/mcp-sdk";
 import {
   MCP_POLICY_ROLES,
   type McpPolicyKind,
@@ -10,7 +10,7 @@ import {
   type McpToolPolicyRule,
   type McpToolPolicySubject
 } from "@ai-orchestrator/shared";
-import { openWorldOverrideFor, resolveOpenWorldFor, rulesReadOpenWorld, type McpOpenWorldContext } from "./mcp-open-world.js";
+import { openWorldOverrideFor, resolveOpenWorldFor, type McpOpenWorldContext } from "./mcp-open-world.js";
 
 /**
  * Phase 10.2 — API-side helpers for the MCP tool policy: marking discovered
@@ -134,15 +134,15 @@ export function evaluateToolForContext(
     kind,
     annotations: tool.annotations,
     manualReadOnly: manualReadOnlyFor(context.classifications, context.registryServerId, tool.name),
-    ...(context.openWorld && kind === "tool" && rulesReadOpenWorld(context.rules)
-      ? {
-          openWorld: resolveOpenWorldFor(
+    ...(context.openWorld && kind === "tool" && policyReadsOpenWorld(context.rules)
+      ? openWorldRequestFields(
+          resolveOpenWorldFor(
             context.openWorld,
             { adapterId: context.adapterId, registryServerId: context.registryServerId ?? null, connection: context.openWorld.connection },
             tool.name,
             tool.annotations
-          ).openWorld
-        }
+          )
+        )
       : {}),
     noWriteTools: context.noWriteTools,
     workflowId: context.workflowId ?? null,

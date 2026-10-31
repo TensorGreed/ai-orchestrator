@@ -3010,6 +3010,8 @@ export async function evaluateMcpToolPolicy(payload: {
   labels?: string[];
   workflowId?: string | null;
   clientId?: string | null;
+  /** Phase 12.2 — an inline server's connection settings, read only for its endpoint host (open world). */
+  connection?: Record<string, unknown>;
 }) {
   return apiRequest<McpToolPolicyEvaluation>("/api/mcp/policies/evaluate", {
     method: "POST",

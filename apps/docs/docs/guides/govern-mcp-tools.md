@@ -75,9 +75,11 @@ You don't need to write those rules by hand. All of these are optional, and with
   - **Untrusted content ⇒ write tools need approval**: the same rule as the switch, for every workflow.
   - **Sensitive data ⇒ no open-world tools**: a deny on open-world tools while the context holds `sensitive` data.
 
-  A preset is added in **shadow mode**, so at first it only records what it would have done. Check its shadow hits, or simulate it on recorded calls, then **Enforce** it from the rule list. Enforcing goes through the usual checks: it is refused if it would set aside a deny that is enforced now.
+  A preset is added in **shadow mode**, so at first it only records what it would have done. Check its shadow hits, or simulate it on recorded calls, then **Enforce** it from the rule list with the usual checks.
 
-A rule with a `sensitive` or data class condition turns on label tracking for every run while it is enabled. Node outputs are then scanned for data classes, so the condition can match. Rules on `untrusted_external`, `user` or `trusted` need no scan.
+The switch's rule and the presets' rules are **additive** (the rule list marks them). They only add an approval or a deny. They never set another rule aside, so a deny you add later still wins over them: a write under `deny not_read_only` stays denied, untrusted content or not. The flag is stored with the rule and the rule editor cannot change it.
+
+A rule with a `sensitive` or data class condition turns on label tracking while it is enabled, for runs of the workflows it covers (all of them, or its listed workflows) that have an agent, MCP Tool or Execute Workflow node. Node outputs are then scanned for data classes, so the condition can match. The classes found also feed destination checks, the same as when a guard profile tracks labels. Rules on `untrusted_external`, `user` or `trusted` need no scan.
 
 ### Which tools are open world
 
@@ -90,14 +92,16 @@ A tool is **open world** when what it is given can leave your control. A tool's 
 | Unclassified (no destination row matches its host, or it has no endpoint) | yes: it fails closed |
 | Local or private (a `localhost` or private-network host, a stdio process, or a destination row you added) | the tool's `openWorldHint` decides; a missing hint means yes |
 
-The server's **Tools** table shows each tool's value and where it came from. To mark an internal server as private, add a [data destination](../product/data-labels-and-destinations.md) for its host. If some enabled rule already uses `open_world` or `not_open_world`, this tightens it: a tool that says `openWorldHint: false` on a public or unclassified server now counts as open world.
+The server's **Tools** table shows each tool's value and where it came from. To mark an internal server as private, add a [data destination](../product/data-labels-and-destinations.md) for its host.
+
+Without an admin's override, this reading can only tighten existing rules. A deny or approval rule applies when either the tool's own hint or the server's tier says it matches. An allow rule applies only when both say so. A `deny open_world` rule therefore now also covers a tool that says `openWorldHint: false` on a public or unclassified server. A `deny not_open_world` rule still covers it too. An `allow open_world` exception does not start covering it. An override decides alone, either way.
 
 ### Seeing the labels
 
 Each tool call records the label names it was decided with on the run trace and on its telemetry row. Data class names are recorded only for runs that tracked labels. No values are ever recorded. The simulator uses these recorded labels:
 
 - `untrusted_external`, `user` and `trusted` conditions are decided for every recorded call.
-- `sensitive` and class conditions are decided only for runs that tracked labels.
+- `sensitive` and class conditions are decided for runs that tracked labels, and wherever the label was recorded as present. Only its absence on an untracked run stays undetermined.
 - Calls recorded before labels were kept stay **undetermined**.
 
 Gateway calls carry no labels, so label conditions never match them.

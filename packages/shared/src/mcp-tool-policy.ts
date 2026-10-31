@@ -67,7 +67,7 @@ function canonicalCondition(condition: McpPolicyCondition): Record<string, unkno
 /**
  * The canonical text of what a rule governs and does: effect, kind, scope
  * (project, roles, workflows, clients, server, tool pattern, annotation
- * hint) and conditions. Name, description, mode, enabled and timestamps are
+ * hint), conditions and (Phase 12.2) the additive flag. Name, description, mode, enabled and timestamps are
  * left out, so a rule keeps its hash when it is renamed, switched between
  * shadow and enforce, or turned off. Lists are sorted and de-duplicated
  * (roles, workflows, clients, `one_of` values and the conditions
@@ -89,6 +89,8 @@ export function canonicalMcpToolPolicyRule(rule: McpToolPolicyRule): string {
     serverId: rule.serverId ?? null,
     toolPattern: rule.toolPattern.trim() || "*",
     annotationHint: rule.annotationHint ?? null,
+    // Phase 12.2 — an additive rule decides differently (it never carves); only present when set, so older hashes hold.
+    ...(rule.additive === true ? { additive: true } : {}),
     conditions:
       conditions.length === 0
         ? null

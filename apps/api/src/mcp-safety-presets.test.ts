@@ -12,6 +12,7 @@ import type { FastifyInstance } from "fastify";
 import {
   mcpSafetyPresetRule,
   mcpSafetyPresetRuleId,
+  untrustedWriteSwitchRule,
   untrustedWriteSwitchRuleId,
   type McpPolicySimulationResult,
   type McpToolPolicyRule,
@@ -19,7 +20,8 @@ import {
 } from "@ai-orchestrator/shared";
 import { createApp } from "./app.js";
 import { parseConfig, type AppConfig } from "./config.js";
-import type { Store } from "./db/store.js";
+import type { McpPolicyEnforceGuard, Store } from "./db/store.js";
+import { McpPolicyEnforceRefusedError } from "./db/store-errors.js";
 import { openTestStore } from "./test-support/test-store.js";
 import { AuthService } from "./services/auth-service.js";
 import { SecretService } from "./services/secret-service.js";
@@ -34,9 +36,10 @@ interface TestContext {
 
 const contexts: TestContext[] = [];
 
-async function createTestContext(): Promise<TestContext> {
+async function createTestContext(options: { wrapStore?: (store: Store) => Store } = {}): Promise<TestContext> {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-taint-"));
-  const store = await openTestStore(path.join(tempDir, "orchestrator.db"));
+  const opened = await openTestStore(path.join(tempDir, "orchestrator.db"));
+  const store = options.wrapStore ? options.wrapStore(opened) : opened;
   await store.ensureDefaultProject();
   const config = parseConfig({
     LOG_LEVEL: "warn",
@@ -165,17 +168,40 @@ describe("safety presets", () => {
     expect(enforced.json<{ rule: McpToolPolicyRule }>().rule.mode).toBe("enforce");
   });
 
-  it("refuses to enforce a preset that would set aside a deny enforced now", async () => {
+  it("adds an additive rule: a deny enforced after the preset still denies a write with untrusted content", async () => {
     const context = await createTestContext();
     const call = caller(context);
     const admin = await login(context, "admin");
+    const serverId = await registerMockServer(context, admin);
+    expect((await call(admin, "POST", "/api/mcp/policies/presets/untrusted_write_approval")).statusCode).toBe(201);
+    const presetId = mcpSafetyPresetRuleId("untrusted_write_approval");
+    const stored = await context.store.getMcpToolPolicy(presetId);
+    expect(stored?.additive).toBe(true);
+    // Enforcing it no longer counts as carving anything: it never sets a rule aside.
+    expect((await call(admin, "POST", `/api/mcp/policies/${presetId}/enforce`)).statusCode).toBe(200);
+    const evaluate = () =>
+      call(admin, "POST", "/api/mcp/policies/evaluate", {
+        role: "builder",
+        serverId,
+        toolName: "calculator",
+        projectId: "default",
+        arguments: { expression: "1+1" },
+        labels: ["untrusted_external"]
+      });
+    expect((await evaluate()).json()).toMatchObject({ effect: "require_approval" });
+
     const deny = await call(admin, "POST", "/api/mcp/policies", { name: "No write tools", effect: "deny", annotationHint: "not_read_only" });
     expect(deny.statusCode).toBe(201);
-    expect((await call(admin, "POST", "/api/mcp/policies/presets/untrusted_write_approval")).statusCode).toBe(201);
-    const refused = await call(admin, "POST", `/api/mcp/policies/${mcpSafetyPresetRuleId("untrusted_write_approval")}/enforce`);
-    expect(refused.statusCode).toBe(409);
-    expect(refused.json<{ error: string }>().error).toContain("No write tools");
-    expect((await context.store.getMcpToolPolicy(mcpSafetyPresetRuleId("untrusted_write_approval")))?.mode).toBe("shadow");
+    expect((await evaluate()).json()).toMatchObject({ allowed: false, effect: "deny", ruleName: "No write tools" });
+
+    // Admins see the flag; the rule editor cannot change it.
+    const listed = (await call(admin, "GET", "/api/mcp/policies")).json<{ rules: McpToolPolicyRule[] }>().rules;
+    expect(listed.find((rule) => rule.id === presetId)?.additive).toBe(true);
+    expect(listed.find((rule) => rule.id !== presetId)?.additive).toBeUndefined();
+    const edited = await call(admin, "PUT", `/api/mcp/policies/${presetId}`, { additive: false, name: "Renamed" });
+    expect(edited.statusCode).toBe(200);
+    expect((await context.store.getMcpToolPolicy(presetId))?.additive).toBe(true);
+    expect((await evaluate()).json()).toMatchObject({ effect: "deny" });
   });
 });
 
@@ -214,17 +240,82 @@ describe("the workflow's untrusted-write switch", () => {
     expect(audits[0]?.metadata).toMatchObject({ source: "workflow_switch", workflowId: "wf-switch" });
   });
 
-  it("is refused when the rule would set aside a deny enforced now, and leaves no rule behind", async () => {
+  it("never weakens a deny an admin enforces later: a write with untrusted content is still denied", async () => {
     const context = await createTestContext();
     const call = caller(context);
     const admin = await login(context, "admin");
+    const builder = await login(context, "builder");
     const serverId = await registerMockServer(context, admin);
-    expect((await call(admin, "POST", "/api/workflows", calculatorWorkflow("wf-strict", serverId))).statusCode).toBe(200);
-    expect((await call(admin, "POST", "/api/mcp/policies", { name: "No writes anywhere", effect: "deny", annotationHint: "not_read_only" })).statusCode).toBe(201);
-    const refused = await call(admin, "PUT", "/api/workflows/wf-strict/untrusted-write-approval", { enabled: true });
+    expect((await call(builder, "POST", "/api/workflows", calculatorWorkflow("wf-strict", serverId))).statusCode).toBe(200);
+    const on = await call(builder, "PUT", "/api/workflows/wf-strict/untrusted-write-approval", { enabled: true });
+    expect(on.statusCode, on.body).toBe(200);
+    expect((await context.store.getMcpToolPolicy(untrustedWriteSwitchRuleId("wf-strict")))?.additive).toBe(true);
+
+    // Later, an admin enforces a deny on every write tool.
+    const deny = await call(admin, "POST", "/api/mcp/policies", { name: "No writes anywhere", effect: "deny", annotationHint: "not_read_only", mode: "shadow" });
+    expect(deny.statusCode).toBe(201);
+    expect((await call(admin, "POST", `/api/mcp/policies/${deny.json<{ rule: McpToolPolicyRule }>().rule.id}/enforce`)).statusCode).toBe(200);
+
+    const evaluate = await call(admin, "POST", "/api/mcp/policies/evaluate", {
+      role: "builder",
+      serverId,
+      toolName: "calculator",
+      projectId: "default",
+      workflowId: "wf-strict",
+      arguments: { expression: "1+1" },
+      labels: ["untrusted_external"]
+    });
+    expect(evaluate.json()).toMatchObject({ allowed: false, effect: "deny", ruleName: "No writes anywhere" });
+    // A real run from a public webhook (untrusted) is denied, not held for approval.
+    const hooked = await context.app.inject({ method: "POST", url: "/webhook/calc-wf-strict", payload: { note: "hello" } });
+    expect(hooked.body).toContain("No writes anywhere");
+    expect(hooked.body).not.toMatch(/waiting_approval/);
+
+    // Turning it on with the deny already enforced works too, and the deny still wins.
+    expect((await call(builder, "POST", "/api/workflows", calculatorWorkflow("wf-strict-2", serverId))).statusCode).toBe(200);
+    expect((await call(builder, "PUT", "/api/workflows/wf-strict-2/untrusted-write-approval", { enabled: true })).statusCode).toBe(200);
+  });
+
+  it("creates and enforces in one transaction: a refusal writes nothing, is audited and answers 409", async () => {
+    const context = await createTestContext({
+      wrapStore: (store) =>
+        new Proxy(store, {
+          get(target, property, receiver) {
+            if (property === "createEnforcedMcpToolPolicy") {
+              return async (input: McpToolPolicyRule, options: { guard: McpPolicyEnforceGuard }) =>
+                await target.createEnforcedMcpToolPolicy(input, { guard: (state) => options.guard(state) ?? "Refused for the test." });
+            }
+            const value = Reflect.get(target, property, receiver);
+            return typeof value === "function" ? value.bind(target) : value;
+          }
+        })
+    });
+    const call = caller(context);
+    const admin = await login(context, "admin");
+    const serverId = await registerMockServer(context, admin);
+    expect((await call(admin, "POST", "/api/workflows", calculatorWorkflow("wf-refused", serverId))).statusCode).toBe(200);
+    const refused = await call(admin, "PUT", "/api/workflows/wf-refused/untrusted-write-approval", { enabled: true });
     expect(refused.statusCode).toBe(409);
-    expect(refused.json<{ error: string }>().error).toContain("No writes anywhere");
-    expect(await context.store.getMcpToolPolicy(untrustedWriteSwitchRuleId("wf-strict"))).toBeNull();
+    expect(refused.json<{ error: string }>().error).toContain("Refused for the test.");
+    expect(await context.store.getMcpToolPolicy(untrustedWriteSwitchRuleId("wf-refused"))).toBeNull();
+    const audit = (await context.store.listAuditLogs({ eventType: "mcp_policy.create_refused", pageSize: 5 })).items;
+    expect(audit[0]?.metadata).toMatchObject({ source: "workflow_switch", workflowId: "wf-refused", reason: "Refused for the test." });
+  });
+
+  it("never shows the rule in shadow: the guard sees it in shadow inside the transaction only", async () => {
+    const context = await createTestContext();
+    const seen: Array<string | undefined> = [];
+    const draft = { ...untrustedWriteSwitchRule("wf-tx"), createdBy: null };
+    const rule = await context.store.createEnforcedMcpToolPolicy(draft, {
+      guard: (state) => {
+        seen.push(state.rules.find((entry) => entry.id === draft.id)?.mode);
+        return null;
+      }
+    });
+    expect(seen).toEqual(["shadow"]);
+    expect(rule).toMatchObject({ id: draft.id, mode: "enforce", additive: true });
+    await expect(context.store.createEnforcedMcpToolPolicy({ ...draft, id: "other" }, { guard: () => "no" })).rejects.toBeInstanceOf(McpPolicyEnforceRefusedError);
+    expect(await context.store.getMcpToolPolicy("other")).toBeNull();
   });
 
   it("only lets an admin turn off a rule an admin has changed", async () => {
@@ -272,6 +363,14 @@ describe("open-world overrides", () => {
     const evaluate = (toolName: string) => call(builder, "POST", "/api/mcp/policies/evaluate", { role: "builder", serverId, toolName, projectId: "default" });
     expect((await evaluate("calculator")).json()).toMatchObject({ allowed: true, openWorld: { openWorld: false, source: "manual" } });
     expect((await evaluate("get_current_time")).json()).toMatchObject({ allowed: false });
+
+    // An inline server: the connection sent decides its destination; without one it is unknown, so open world.
+    const inline = (connection?: Record<string, unknown>) =>
+      call(builder, "POST", "/api/mcp/policies/evaluate", { role: "builder", serverId: "http_mcp", toolName: "post_note", projectId: "default", ...(connection ? { connection } : {}) });
+    expect((await inline()).json()).toMatchObject({ openWorld: { openWorld: true, source: "unknown" } });
+    expect((await inline({ endpoint: "https://notes.example.com/mcp" })).json()).toMatchObject({ openWorld: { openWorld: true, source: "unknown" } });
+    expect((await inline({ endpoint: "http://127.0.0.1:9000/mcp" })).json()).toMatchObject({ openWorld: { source: "annotation" } });
+    expect(JSON.stringify((await inline({ endpoint: "http://127.0.0.1:9000/mcp", headers: { authorization: "Bearer s3cr3t" } })).json())).not.toContain("s3cr3t");
 
     expect((await call(admin, "PUT", url, { openWorld: null })).json()).toMatchObject({ override: null, manualOpenWorld: null });
     expect((await evaluate("calculator")).json()).toMatchObject({ allowed: false });

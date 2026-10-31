@@ -1136,35 +1136,58 @@ export async function getMcpToolPolicy(ctx: PgContext, ...[id]: Parameters<Store
   return getMcpToolPolicyOn(ctx.pool, id);
 }
 
-export async function createMcpToolPolicy(ctx: PgContext, ...[input]: Parameters<Store["createMcpToolPolicy"]>): ReturnType<Store["createMcpToolPolicy"]> {
-  const now = new Date().toISOString();
-  const row = await ctx.queryOne<Row>(
-    `INSERT INTO mcp_tool_policies (
+const insertMcpToolPolicySql = `INSERT INTO mcp_tool_policies (
        id, name, description, effect, project_id, roles_json, server_id, tool_pattern, annotation_hint, kind, enabled,
-       conditions_json, mode, workflow_ids_json, client_ids_json, created_by, created_at, updated_at
-     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $17)
-     RETURNING *`,
-    [
-      input.id,
-      input.name,
-      input.description,
-      input.effect,
-      input.projectId,
-      JSON.stringify(input.roles),
-      input.serverId,
-      input.toolPattern,
-      input.annotationHint ?? null,
-      input.kind ?? "tool",
-      input.enabled ? 1 : 0,
-      input.conditions ? JSON.stringify(input.conditions) : null,
-      input.mode ?? "enforce",
-      JSON.stringify(input.workflowIds ?? []),
-      JSON.stringify(input.clientIds ?? []),
-      input.createdBy ?? null,
-      now
-    ]
-  );
+       conditions_json, mode, workflow_ids_json, client_ids_json, additive, created_by, created_at, updated_at
+     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $18)
+     RETURNING *`;
+
+function insertMcpToolPolicyParams(input: Parameters<Store["createMcpToolPolicy"]>[0], now: string): Array<string | number | null> {
+  return [
+    input.id,
+    input.name,
+    input.description,
+    input.effect,
+    input.projectId,
+    JSON.stringify(input.roles),
+    input.serverId,
+    input.toolPattern,
+    input.annotationHint ?? null,
+    input.kind ?? "tool",
+    input.enabled ? 1 : 0,
+    input.conditions ? JSON.stringify(input.conditions) : null,
+    input.mode ?? "enforce",
+    JSON.stringify(input.workflowIds ?? []),
+    JSON.stringify(input.clientIds ?? []),
+    input.additive === true ? 1 : 0,
+    input.createdBy ?? null,
+    now
+  ];
+}
+
+export async function createMcpToolPolicy(ctx: PgContext, ...[input]: Parameters<Store["createMcpToolPolicy"]>): ReturnType<Store["createMcpToolPolicy"]> {
+  const row = await ctx.queryOne<Row>(insertMcpToolPolicySql, insertMcpToolPolicyParams(input, new Date().toISOString()));
   return mapMcpToolPolicy(row!);
+}
+
+export async function createEnforcedMcpToolPolicy(
+  ctx: PgContext,
+  ...[input, options]: Parameters<Store["createEnforcedMcpToolPolicy"]>
+): ReturnType<Store["createEnforcedMcpToolPolicy"]> {
+  const row = await ctx.withTransaction(async (client) => {
+    // As in enforceShadowMcpToolPolicies: no other write to the table between the guard and the commit.
+    await client.query(`LOCK TABLE mcp_tool_policies IN SHARE ROW EXCLUSIVE MODE`);
+    await client.query(insertMcpToolPolicySql, insertMcpToolPolicyParams({ ...input, mode: "shadow" }, new Date().toISOString()));
+    const current = await rows(client, `SELECT * FROM mcp_tool_policies ORDER BY created_at ASC, ${INSERTION_ASC}`);
+    const refusal = options.guard({
+      rules: current.map(mapMcpToolPolicy),
+      accepted: await listAcceptedMcpPolicySuggestionsForRulesOn(client, [input.id], { sameScope: true })
+    });
+    // Throwing rolls the insert back.
+    if (refusal !== null) throw new McpPolicyEnforceRefusedError(refusal);
+    return one(client, `UPDATE mcp_tool_policies SET mode = 'enforce' WHERE id = $1 RETURNING *`, [input.id]);
+  });
+  return row ? mapMcpToolPolicy(row) : null;
 }
 
 export async function updateMcpToolPolicy(ctx: PgContext, ...[id, patch]: Parameters<Store["updateMcpToolPolicy"]>): ReturnType<Store["updateMcpToolPolicy"]> {

@@ -227,7 +227,7 @@ function UntrustedWriteSwitch({ workflowId }: { workflowId: string }) {
       <div className="cfg-help">
         {unsaved
           ? "Save the workflow first: this switch is a tool policy rule for this workflow."
-          : "Instead of every write, only a call to a write tool made while the agent's context holds outside content (a public webhook, a web page, a tool result) waits for an admin's approval. Saved at once, as a tool policy rule."}
+          : "Independent of the setting above: while the agent's context holds outside content (a public webhook, a web page, a tool result), calls to write tools wait for an admin's approval. The approvers above do not apply. Saved at once, as a tool policy rule."}
       </div>
       {state?.enabled && state.mode === "shadow" && <div className="cfg-help">The rule is in shadow mode: it only records what it would do.</div>}
       {state?.enabled && state.ruleEnabled === false && <div className="cfg-help">An admin has disabled the rule.</div>}

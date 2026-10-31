@@ -583,6 +583,13 @@ export interface Store {
    * `mcp_tool_policies` against writes, so no rule changes between the guard and the update.
    */
   enforceShadowMcpToolPolicies(ids: readonly string[], now: string, options?: { guard?: McpPolicyEnforceGuard }): Promise<McpToolPolicyRule[]>;
+  /**
+   * Phase 12.2 — create a rule and enforce it in one transaction: it is inserted in shadow, `guard` reads the rules
+   * (the new one among them, in shadow) and their accepted suggestion families as `enforceShadowMcpToolPolicies`
+   * passes them, and the rule then switches to enforce. A refusal throws McpPolicyEnforceRefusedError and nothing is
+   * written, so no other request ever sees the rule in shadow. On Postgres the table is locked against writes first.
+   */
+  createEnforcedMcpToolPolicy(input: Omit<McpToolPolicyRule, "createdAt" | "updatedAt">, options: { guard: McpPolicyEnforceGuard }): Promise<McpToolPolicyRule | null>;
   deleteMcpToolPolicy(id: string): Promise<boolean>;
   /**
    * Phase 12.4 — a gateway call a require_approval rule held back. Expired pending requests are marked expired

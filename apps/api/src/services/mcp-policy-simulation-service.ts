@@ -30,10 +30,10 @@ import {
   type McpToolClassificationOverride,
   type McpToolPolicyRule
 } from "@ai-orchestrator/shared";
-import { decidePolicyOutcome, policyRuleMode, simulatePolicyTransition, type PolicySimulationCall } from "@ai-orchestrator/mcp-sdk";
+import { decidePolicyOutcome, policyReadsOpenWorld, policyRuleMode, simulatePolicyTransition, type PolicySimulationCall } from "@ai-orchestrator/mcp-sdk";
 import type { McpToolCallRecord } from "../db/database.js";
 import type { Store } from "../db/store.js";
-import { loadMcpOpenWorldContext, resolveOpenWorldFor, rulesReadOpenWorld } from "./mcp-open-world.js";
+import { loadMcpOpenWorldContext, resolveOpenWorldFor } from "./mcp-open-world.js";
 
 /** The gateway's own telemetry rows for workflow tools use this adapter id (mcp-gateway-routes.ts). */
 export const GATEWAY_WORKFLOW_TOOL_ADAPTER_ID = "workflow";
@@ -141,7 +141,9 @@ function laterThan(a: string | null | undefined, b: string): boolean {
   return Number.isFinite(left) && Number.isFinite(right) && left > right;
 }
 
-type ToolAnnotationLookup = (call: McpToolCallRecord) => { annotations?: McpToolAnnotations | null; manualReadOnly?: boolean | null; openWorld?: boolean | null };
+type ToolAnnotationLookup = (
+  call: McpToolCallRecord
+) => Pick<PolicySimulationCall, "openWorld" | "openWorldManual"> & { annotations?: McpToolAnnotations | null; manualReadOnly?: boolean | null };
 
 export class McpPolicySimulationService {
   private readonly store: Store;
@@ -256,8 +258,9 @@ export class McpPolicySimulationService {
         snapshot ? { capturedAt: snapshot.createdAt, tools: new Map(snapshot.tools.map((tool) => [tool.name, tool.annotations ?? null])) } : null
       );
     }
-    // Phase 12.2 — open world from today's destination rows and overrides; unknown when the override is newer than the call.
-    const openWorld = rulesReadOpenWorld(rules) ? await loadMcpOpenWorldContext(this.store) : null;
+    // Phase 12.2 — open world from today's destination rows and overrides. An override newer than the call makes only
+    // open-world hints unknown; the annotations still decide every other hint.
+    const openWorld = policyReadsOpenWorld(rules) ? await loadMcpOpenWorldContext(this.store) : null;
     return (call) => {
       if (!call.registryServerId) return {};
       const snapshot = snapshots.get(call.registryServerId);
@@ -267,9 +270,9 @@ export class McpPolicySimulationService {
       const server = servers.get(call.registryServerId);
       if (!openWorld || read.annotations === undefined || !server) return read;
       const override = openWorld.overrides.find((entry) => entry.registryServerId === call.registryServerId && entry.toolName === call.toolName);
-      if (override && laterThan(override.setAt, call.startedAt)) return {};
+      if (override && laterThan(override.setAt, call.startedAt)) return { ...read, openWorld: "unknown" };
       const resolved = resolveOpenWorldFor(openWorld, { adapterId: server.adapterId, registryServerId: server.id, connection: server.connection }, call.toolName, read.annotations);
-      return { ...read, openWorld: resolved.openWorld };
+      return { ...read, openWorld: resolved.openWorld, ...(resolved.source === "manual" ? { openWorldManual: true } : {}) };
     };
   }
 

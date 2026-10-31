@@ -94,7 +94,8 @@ export function mapMcpToolPolicyExtras(row: {
   mode?: unknown;
   workflow_ids_json?: unknown;
   client_ids_json?: unknown;
-}): Pick<McpToolPolicyRule, "conditions" | "mode" | "workflowIds" | "clientIds" | "invalid"> {
+  additive?: unknown;
+}): Pick<McpToolPolicyRule, "conditions" | "mode" | "workflowIds" | "clientIds" | "invalid" | "additive"> {
   const stored = storedConditions(row.conditions_json);
   const conditions = stored === null || stored === UNREADABLE ? null : mcpToolPolicyConditionsSchema.safeParse(stored);
   const invalid = stored === UNREADABLE || (conditions !== null && !conditions.success);
@@ -112,7 +113,9 @@ export function mapMcpToolPolicyExtras(row: {
     ...(invalid ? { invalid: true } : {}),
     mode: row.mode === "shadow" ? "shadow" : "enforce",
     workflowIds: stringList(row.workflow_ids_json),
-    clientIds: stringList(row.client_ids_json)
+    clientIds: stringList(row.client_ids_json),
+    // Phase 12.2 (v50) — present only when set, so other rules read as before.
+    ...(Number(row.additive) === 1 ? { additive: true } : {})
   };
 }
 

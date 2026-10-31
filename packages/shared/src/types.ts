@@ -1128,6 +1128,12 @@ export interface McpToolPolicyRule {
   conditions?: McpToolPolicyConditions | null;
   /** Phase 12.4 — absent means `enforce`. */
   mode?: McpToolPolicyMode;
+  /**
+   * Phase 12.2 — set on the rules safety presets and the workflow's untrusted-write switch create: the rule only
+   * adds (an approval, a deny), it never carves an exception out of another rule, so no deny added later can be set
+   * aside by it. Stored with the rule; the generic rule editor cannot change it.
+   */
+  additive?: boolean;
   enabled: boolean;
   createdBy?: string | null;
   createdAt?: string;

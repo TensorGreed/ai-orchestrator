@@ -474,14 +474,14 @@ export const openApiSpec = {
       put: {
         tags: ["Workflows"],
         summary:
-          "Turn the switch on or off (builder with workflow write access). On adds an enforced tool rule for this workflow (a write tool waits for an approval while the context holds untrusted content), refused with 409 when it would set aside a deny enforced now. Only an admin can turn off a rule an admin has changed.",
+          "Turn the switch on or off (builder with workflow write access). On adds an enforced, additive tool rule for this workflow (a write tool waits for an approval while the context holds untrusted content; it never sets another rule aside), created and enforced in one transaction behind the tighten-only check: a refusal writes nothing, is audited as mcp_policy.create_refused and answers 409. Only an admin can turn off a rule an admin has changed.",
         parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
         requestBody: { required: true, content: { "application/json": { schema: { type: "object", required: ["enabled"], properties: { enabled: { type: "boolean" } } } } } },
         responses: {
           "200": { description: "{ switch }" },
           "403": { description: "No write access, or the rule was changed by an admin" },
           "404": { description: "Workflow not found" },
-          "409": { description: "The rule would loosen an enforced rule" }
+          "409": { description: "The tighten-only check refused the rule, or it changed meanwhile" }
         }
       }
     },
@@ -2415,7 +2415,11 @@ export const openApiSpec = {
                   arguments: { type: "object", description: "The call's arguments; without them, rules with conditions are reported as undecided" },
                   labels: { type: "array", items: { type: "string" }, description: "Data labels (provenance labels and data classes) the run carries" },
                   workflowId: { type: "string", nullable: true },
-                  clientId: { type: "string", nullable: true }
+                  clientId: { type: "string", nullable: true },
+                  connection: {
+                    type: "object",
+                    description: "An inline server's connection settings (serverId is an adapter id); only the endpoint host is read, for open world. Without it an inline network server's destination is unknown (open world)."
+                  }
                 }
               }
             }

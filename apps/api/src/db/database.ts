@@ -933,6 +933,7 @@ interface McpToolPolicyRow {
   mode?: string | null;
   workflow_ids_json?: string | null;
   client_ids_json?: string | null;
+  additive?: number | null;
   enabled: number;
   created_by: string | null;
   created_at: string;
@@ -3977,6 +3978,7 @@ export class SqliteStore implements Store {
       )
     `);
     this.ensureColumn("mcp_tool_calls", "labels_json", "TEXT");
+    this.ensureColumn("mcp_tool_policies", "additive", "INTEGER NOT NULL", "0");
 
     this.exec(`CREATE INDEX IF NOT EXISTS idx_workflows_project_id ON workflows(project_id)`);
     this.exec(`CREATE INDEX IF NOT EXISTS idx_workflows_folder_id ON workflows(folder_id)`);
@@ -12427,12 +12429,30 @@ export class SqliteStore implements Store {
   }
 
   async createMcpToolPolicy(input: Omit<McpToolPolicyRule, "createdAt" | "updatedAt">): Promise<McpToolPolicyRule> {
+    return this.insertMcpToolPolicySync(input);
+  }
+
+  async createEnforcedMcpToolPolicy(input: Omit<McpToolPolicyRule, "createdAt" | "updatedAt">, options: { guard: McpPolicyEnforceGuard }): Promise<McpToolPolicyRule | null> {
+    return this.db.transaction(() => {
+      this.insertMcpToolPolicySync({ ...input, mode: "shadow" });
+      const refusal = options.guard({
+        rules: this.queryAll<McpToolPolicyRow>(`SELECT * FROM mcp_tool_policies ORDER BY created_at ASC, rowid ASC`).map(mapMcpToolPolicy),
+        accepted: this.listAcceptedMcpPolicySuggestionsForRulesSync([input.id], { sameScope: true })
+      });
+      // Throwing rolls the insert back.
+      if (refusal !== null) throw new McpPolicyEnforceRefusedError(refusal);
+      this.db.prepare(`UPDATE mcp_tool_policies SET mode = 'enforce' WHERE id = ?`).run(input.id);
+      return this.getMcpToolPolicySync(input.id);
+    })();
+  }
+
+  private insertMcpToolPolicySync(input: Omit<McpToolPolicyRule, "createdAt" | "updatedAt">): McpToolPolicyRule {
     const now = new Date().toISOString();
     this.exec(
       `INSERT INTO mcp_tool_policies (
          id, name, description, effect, project_id, roles_json, server_id, tool_pattern, annotation_hint, kind, enabled,
-         conditions_json, mode, workflow_ids_json, client_ids_json, created_by, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         conditions_json, mode, workflow_ids_json, client_ids_json, additive, created_by, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         input.id,
         input.name,
@@ -12449,6 +12469,7 @@ export class SqliteStore implements Store {
         input.mode ?? "enforce",
         JSON.stringify(input.workflowIds ?? []),
         JSON.stringify(input.clientIds ?? []),
+        input.additive === true ? 1 : 0,
         input.createdBy ?? null,
         now,
         now

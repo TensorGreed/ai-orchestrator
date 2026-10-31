@@ -42,6 +42,8 @@ test("adds a safety preset in shadow and enforces it", async ({ page }) => {
     const rules = page.getByRole("list", { name: "Tool policy rules" });
     const rule = rules.getByRole("listitem").filter({ hasText: "Untrusted content: write tools need approval" });
     await expect(rule).toBeVisible();
+    // A preset's rule is additive: it never sets another rule aside.
+    await expect(rule.getByText("Additive", { exact: true })).toBeVisible();
     await card.scrollIntoViewIfNeeded();
     await shot(page, "01-safety-presets");
 
@@ -86,6 +88,7 @@ test("turns on a workflow's untrusted-write switch from the editor", async ({ pa
     await expect(box).toBeEnabled();
     await box.click();
     await expect(box).toBeChecked();
+    await expect(dialog.getByText(/Independent of the setting above/)).toBeVisible();
     await shot(page, "02-untrusted-write-switch");
     const state = await (await page.request.get(`/api/workflows/${workflowId}/untrusted-write-approval`)).json();
     expect(state.switch).toMatchObject({ enabled: true, mode: "enforce" });

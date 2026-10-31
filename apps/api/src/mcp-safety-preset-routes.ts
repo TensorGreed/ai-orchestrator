@@ -11,10 +11,11 @@
  * A preset's rule is an ordinary tool rule with a fixed id (`mtp_preset_<preset>`): it logs what it would have done
  * and changes nothing until an admin enforces it with POST /api/mcp/policies/:id/enforce, which runs the usual
  * tighten-only checks. The switch's rule (`mtp_wf_untrusted_writes_<workflow>`) is enforced at once, but only through
- * the same in-transaction tighten-only guard: it is created in shadow, then switched to enforce by
- * `enforceShadowMcpToolPolicies`; when the guard refuses (the rule would set aside a deny enforced now), it is removed
- * again and the answer is 409. Turning the switch off deletes the rule; once an admin has changed the rule, only an
- * admin can. Every change is audited like any rule change.
+ * the same tighten-only guard: `createEnforcedMcpToolPolicy` creates and enforces it in one transaction with the guard
+ * inside; a refusal writes nothing, is audited as `mcp_policy.create_refused` and answers 409. Both kinds of rule are
+ * additive: they only add approvals or denies and never set another rule aside, so a deny an admin adds later still
+ * wins. Turning the switch off deletes the rule; once an admin has changed the rule, only an admin can. Every change
+ * is audited like any rule change.
  */
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import {
@@ -52,7 +53,6 @@ export interface McpSafetyPresetRoutesDeps {
   ) => Promise<void>;
   policyAuditMetadata: (rule: McpToolPolicyRule) => Record<string, unknown>;
   policyRuleResponse: (rule: McpToolPolicyRule) => McpToolPolicyRule & { hash: string };
-  now?: () => Date;
 }
 
 /** True when a rule's create failed because a rule with that id exists (a concurrent add). */
@@ -74,7 +74,6 @@ function switchState(workflowId: string, rule: McpToolPolicyRule | null): Untrus
 
 export function registerMcpSafetyPresetRoutes(deps: McpSafetyPresetRoutesDeps): void {
   const { app, store, requireRole } = deps;
-  const now = deps.now ?? (() => new Date());
   const fail = (reply: FastifyReply, status: number, error: string, details?: unknown) => {
     reply.code(status);
     return details === undefined ? { error } : { error, details };
@@ -172,29 +171,31 @@ export function registerMcpSafetyPresetRoutes(deps: McpSafetyPresetRoutesDeps): 
 
     if (existing) return { switch: switchState(workflow.id, existing) };
     const draft = untrustedWriteSwitchRule(workflow.id);
-    // Created in shadow, then enforced through the tighten-only guard inside the write's transaction.
-    let created: McpToolPolicyRule;
+    // Created and enforced in one transaction, with the tighten-only guard inside it: no other request ever sees the
+    // rule in shadow, and a refusal leaves nothing behind.
+    let rule: McpToolPolicyRule | null;
     try {
-      created = await store.createMcpToolPolicy({ ...draft, mode: "shadow", createdBy: user.email });
+      rule = await store.createEnforcedMcpToolPolicy(
+        { ...draft, createdBy: user.email },
+        { guard: (state) => enforceRefusal([ruleId], state.rules, state.accepted) }
+      );
     } catch (error) {
-      if (await existsNow(store, ruleId)) {
-        return { switch: switchState(workflow.id, await store.getMcpToolPolicy(ruleId)) };
-      }
-      throw error;
-    }
-    let enforced: McpToolPolicyRule[];
-    try {
-      enforced = await store.enforceShadowMcpToolPolicies([ruleId], now().toISOString(), {
-        guard: (state) => enforceRefusal([ruleId], state.rules, state.accepted)
-      });
-    } catch (error) {
-      await store.deleteMcpToolPolicy(ruleId).catch(() => undefined);
       if (error instanceof McpPolicyEnforceRefusedError) {
+        await deps.recordPolicyAudit(
+          user,
+          "mcp_policy.create_refused",
+          "create",
+          ruleId,
+          { ...deps.policyAuditMetadata(draft), source: "workflow_switch", workflowId: workflow.id, reason: error.message },
+          draft.projectId
+        );
         return fail(reply, 409, `This workflow's rule cannot be turned on: ${error.message}`);
       }
+      // A concurrent request turned the switch on first.
+      if (await existsNow(store, ruleId)) return { switch: switchState(workflow.id, await store.getMcpToolPolicy(ruleId)) };
       throw error;
     }
-    const rule = enforced[0] ?? (await store.getMcpToolPolicy(ruleId)) ?? created;
+    if (!rule) return fail(reply, 409, "This workflow's rule changed meanwhile. Reload and try again.");
     await deps.recordPolicyAudit(
       user,
       "mcp_policy.created",

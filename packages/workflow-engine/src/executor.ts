@@ -10,6 +10,8 @@ import {
   policyNeedsAnnotations,
   policyNeedsArguments,
   resolveMCPTools,
+  openWorldRequestFields,
+  policyReadsOpenWorld,
   resolveToolOpenWorld,
   serverOpenWorldDestination,
   type McpToolAccessCall,
@@ -38,6 +40,7 @@ import {
   withoutDataClasses,
   canonicalPolicyJson,
   policyRulesNeedLabelTracking,
+  workflowMayCallMcpTools,
   recordedCallLabels,
   type DataDestinationRow,
   type DestinationRef,
@@ -347,12 +350,6 @@ export interface McpToolPolicySnapshot {
    */
   destinations?: DataDestinationRow[];
 }
-
-/** Phase 12.2 — true when an enabled rule reads the open-world hint, so a tool's open-world value must be resolved. */
-function policyReadsOpenWorld(rules: readonly McpToolPolicyRule[]): boolean {
-  return rules.some((rule) => rule.enabled && (rule.annotationHint === "open_world" || rule.annotationHint === "not_open_world"));
-}
-
 
 export interface AgentSessionArtifactRecord {
   namespace: string;
@@ -1169,13 +1166,15 @@ async function buildRunToolPolicy(
     openWorldOverrides.set(`${entry.registryServerId}::${entry.toolName}`, entry.openWorld);
   }
   const destinationRows = snapshot.destinations ?? [];
-  const openWorldOf = (tool: McpToolAccessSubjectTool): boolean | undefined => {
-    if (!readsOpenWorld || (tool.kind ?? "tool") !== "tool") return undefined;
-    return resolveToolOpenWorld({
-      override: tool.registryServerId ? openWorldOverrides.get(`${tool.registryServerId}::${tool.toolName}`) : undefined,
-      destination: serverOpenWorldDestination(tool, destinationRows),
-      annotations: tool.annotations
-    }).openWorld;
+  const openWorldOf = (tool: McpToolAccessSubjectTool) => {
+    if (!readsOpenWorld || (tool.kind ?? "tool") !== "tool") return {};
+    return openWorldRequestFields(
+      resolveToolOpenWorld({
+        override: tool.registryServerId ? openWorldOverrides.get(`${tool.registryServerId}::${tool.toolName}`) : undefined,
+        destination: serverOpenWorldDestination(tool, destinationRows),
+        annotations: tool.annotations
+      })
+    );
   };
   const trace: McpToolPolicyTrace = {
     subject,
@@ -1199,7 +1198,7 @@ async function buildRunToolPolicy(
       annotations: tool.annotations,
       // Inline servers have no registry entry, so only annotations classify them.
       manualReadOnly: tool.registryServerId ? overrides.get(`${tool.registryServerId}::${tool.toolName}`) : undefined,
-      openWorld: openWorldOf(tool),
+      ...openWorldOf(tool),
       noWriteTools,
       ...(tool.serverLabel ? { serverLabel: tool.serverLabel } : {})
     });
@@ -5995,9 +5994,8 @@ async function executeNodeHandler(
           args: Record<string, unknown>,
           labels: DataLabels | undefined
         ): ToolCallPlan => {
-          const connection = serverConfigs.find(
-            (entry) => entry.serverId === resolvedEntry.serverId && (entry.registryServerId ?? "") === (resolvedEntry.registryServerId ?? "")
-          )?.connection;
+          // Phase 12.2 — the tool's own server's connection (two inline servers may share an adapter id).
+          const connection = resolvedEntry.connection;
           const policyTool: McpToolAccessSubjectTool = {
             adapterId: resolvedEntry.serverId,
             ...(resolvedEntry.registryServerId ? { registryServerId: resolvedEntry.registryServerId } : {}),
@@ -7450,11 +7448,15 @@ async function labelTrackingFor(
   };
 }
 
-/** Phase 12.2 — true when the run's MCP tool rules need it to track labels; false when no rules load. */
-async function toolRulesNeedLabelTracking(dependencies: WorkflowExecutionDependencies): Promise<boolean> {
-  if (!dependencies.loadMcpToolPolicy) return false;
+/**
+ * Phase 12.2 — true when the run's MCP tool rules need it to track labels (see `policyRulesNeedLabelTracking`: only
+ * rules covering this workflow, and only when it may call an MCP tool); false when no rules load. A workflow that
+ * calls no MCP tool never loads the rules for it.
+ */
+async function toolRulesNeedLabelTracking(workflow: Workflow, dependencies: WorkflowExecutionDependencies): Promise<boolean> {
+  if (!dependencies.loadMcpToolPolicy || !workflowMayCallMcpTools(workflow)) return false;
   try {
-    return policyRulesNeedLabelTracking((await dependencies.loadMcpToolPolicy()).rules);
+    return policyRulesNeedLabelTracking((await dependencies.loadMcpToolPolicy()).rules, workflow);
   } catch {
     // The tool policy fails where it is used (an agent or MCP Tool node), exactly as before.
     return false;
@@ -7462,7 +7464,7 @@ async function toolRulesNeedLabelTracking(dependencies: WorkflowExecutionDepende
 }
 
 async function initRunLabels(request: ExecuteWorkflowRequest, workflow: Workflow, dependencies: WorkflowExecutionDependencies): Promise<RunLabelState> {
-  const tracking = await labelTrackingFor(workflow, dependencies.guard, await toolRulesNeedLabelTracking(dependencies));
+  const tracking = await labelTrackingFor(workflow, dependencies.guard, await toolRulesNeedLabelTracking(workflow, dependencies));
   const scan = tracking.tracked ? createLabelScanner(tracking.dictionaries, dependencies.guard ? issuedSurrogatesOf(dependencies.guard) : undefined) : undefined;
   if (request.resumeState) {
     // A run that tracked labels when it paused carries on with them (and keeps tracking).

@@ -132,7 +132,8 @@ export interface LoosenedRuleOptions {
 /**
  * The existing deny / require_approval rule an allow would carve an exception out of, if any; or (Phase 12.2) the
  * existing deny a require_approval rule would carve into "allowed once approved" (a strictly narrower require_approval
- * sets a deny aside). `rules` are suggested rules (read as enforced) or stored rules about to be enforced.
+ * sets a deny aside). `rules` are suggested rules (read as enforced) or stored rules about to be enforced. An additive
+ * rule carves nothing, so it never loosens.
  */
 export function loosenedRule(
   rules: ReadonlyArray<McpPolicySuggestedRule | McpToolPolicyRule>,
@@ -148,7 +149,8 @@ export function loosenedRule(
       (!options.enforcedOnly || (rule.enabled && policyRuleMode(rule) === "enforce"))
   );
   for (const [index, rule] of rules.entries()) {
-    if (rule.effect === "deny") continue;
+    // Phase 12.2 — an additive rule (a preset's, the workflow switch's) never sets another rule aside.
+    if (rule.effect === "deny" || ("additive" in rule && rule.additive === true)) continue;
     const candidate: McpToolPolicyRule =
       "id" in rule && typeof rule.id === "string" ? { ...rule, enabled: true, mode: "enforce" } : asPolicyRule(rule as McpPolicySuggestedRule, `suggested_${index}`);
     const carved = strict.find((existing) => (rule.effect === "allow" || existing.effect === "deny") && isStrictlyNarrower(candidate, existing));

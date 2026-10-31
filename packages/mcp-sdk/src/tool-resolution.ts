@@ -142,6 +142,7 @@ export async function resolveMCPTools(
         ...(serverConfig.registryServerId ? { registryServerId: serverConfig.registryServerId } : {}),
         ...(tool.annotations ? { annotations: tool.annotations } : {}),
         ...(tool.outputSchema ? { outputSchema: tool.outputSchema } : {}),
+        ...(serverConfig.connection ? { connection: serverConfig.connection } : {}),
         definition: {
           name: exposedName,
           description: `[${serverConfig.serverId}] ${tool.description}`,
