@@ -47,7 +47,7 @@
 .wf-node-label-badge {
   position: absolute;
   top: -9px;
-  right: 10px;
+  left: 14px;
   padding: 0 6px;
   border-radius: var(--r-pill);
   border: 1px solid var(--warn);
