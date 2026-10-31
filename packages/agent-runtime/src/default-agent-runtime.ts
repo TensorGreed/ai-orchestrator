@@ -856,9 +856,20 @@ export class DefaultAgentRuntime implements AgentRuntimeAdapter {
     if (memoryEnabled && request.sessionId) {
       const loaded = await context.memoryStore!.loadMessages(memoryNamespace, request.sessionId);
       memoryMessages = repairToolCallPairs(normalizeStoredMessages(loaded, memoryMaxMessages, toolOutputLimits.messageMaxChars));
-      // Phase 16 — memory written by earlier runs brings its labels (older rows have none); read only on tracked runs.
-      if (labelTracking?.persist && memoryMessages.length > 0 && context.memoryStore!.loadLabels) {
-        memoryLabels = (await context.memoryStore!.loadLabels(memoryNamespace, request.sessionId)) ?? undefined;
+      // Phase 16 — memory written by earlier runs brings its labels (older rows have none); read only on tracked runs,
+      // or (12.2) when spotlighting may mark untrusted memory.
+      const spotlightMemory = context.guard?.spotlightUntrusted;
+      if ((labelTracking?.persist || spotlightMemory) && memoryMessages.length > 0 && context.memoryStore!.loadLabels) {
+        const stored = (await context.memoryStore!.loadLabels(memoryNamespace, request.sessionId)) ?? undefined;
+        if (labelTracking?.persist) memoryLabels = stored;
+        // 12.2 — memory that holds untrusted content: the user turns and tool results it replays are marked.
+        if (spotlightMemory && stored?.provenance.includes("untrusted_external")) {
+          memoryMessages = memoryMessages.map((message) =>
+            (message.role === "user" || message.role === "tool") && typeof message.content === "string" && message.content.length > 0
+              ? { ...message, content: spotlightMemory(message.content) }
+              : message
+          );
+        }
       }
     }
 

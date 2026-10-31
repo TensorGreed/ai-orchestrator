@@ -229,3 +229,20 @@ describe("ignored values (the run's secret values)", () => {
     expect(dropInsideValues(scanDlp(around, {}), ["1111"], around).map((match) => match.dataClass)).toContain("card_number");
   });
 });
+
+describe("12.2 — data classes count as sensitive for destination rules", () => {
+  const sensitiveOut = { when: { provenance: ["sensitive"] }, allow: { maxTier: "private" }, action: "block" };
+
+  it("fires a sensitive rule on found or labelled classes, and on a declared sensitive label", () => {
+    const profile = profileWith([sensitiveOut]);
+    expect(evaluateDestinationRules(profile, { labels: labels(), foundClasses: ["email"], destination: dest() }).fired).toHaveLength(1);
+    expect(evaluateDestinationRules(profile, { labels: labels({ dataClasses: ["iban"] }), foundClasses: [], destination: dest() }).fired).toHaveLength(1);
+    expect(evaluateDestinationRules(profile, { labels: labels({ provenance: ["sensitive"] }), foundClasses: [], destination: dest() }).fired).toHaveLength(1);
+    expect(evaluateDestinationRules(profile, { labels: labels({ provenance: ["user"] }), foundClasses: [], destination: dest() }).fired).toEqual([]);
+  });
+
+  it("classes the destination may hold do not make the data sensitive", () => {
+    const profile = profileWith([sensitiveOut]);
+    expect(evaluateDestinationRules(profile, { labels: labels(), foundClasses: ["email"], destination: dest({ holdsDataClasses: ["email"] }) }).fired).toEqual([]);
+  });
+});

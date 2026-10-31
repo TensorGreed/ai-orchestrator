@@ -32,8 +32,10 @@ import {
   NODE_ACTIVITY_PREVIEW_CHARS,
   azureStorageSecretAddressConfig,
   connectorAddressInSecret,
+  declaresSensitiveOutput,
   destinationHostOfSetting,
   inputProvenance,
+  withImpliedSensitive,
   mcpServerDestinationRef,
   networkDestinationRef,
   nodeContentSource,
@@ -48,6 +50,7 @@ import {
 } from "@ai-orchestrator/shared";
 import type {
   DataLabels,
+  LabelEndorsement,
   ApprovalDecisionValue,
   ApprovalHandoffState,
   ChatMessage,
@@ -120,7 +123,7 @@ import {
   type EgressUrlJudge,
   type OutboundGuardConfig
 } from "./outbound-url-guard";
-import { bindCheckedRenderings, renderTemplate, tryParseJson } from "./template";
+import { bindCheckedRenderings, renderTemplate, tryParseJson, type TemplatePiece } from "./template";
 import {
   createMcpElicitationHandler,
   createMcpSamplingHandler,
@@ -227,6 +230,11 @@ export interface WorkflowExecutionDependencies {
    */
   scopeSubWorkflow?: (workflow: Workflow) => Partial<WorkflowExecutionDependencies>;
   resolveSecret: (secretRef?: SecretReference) => Promise<string | undefined>;
+  /**
+   * 12.2 — secrets flagged "sensitive output": a node whose config references one of them produces sensitive output
+   * (its labels gain `sensitive` on every run, without a scan). Absent or empty: no config is walked.
+   */
+  sensitiveSecretIds?: ReadonlySet<string>;
   /**
    * Phase 10.1 — resolves an MCP server registry entry to the adapter,
    * connection and secretRef to use. Throws when the entry is missing or
@@ -407,6 +415,12 @@ export interface ExecuteWorkflowRequest {
    * node's input labels. Absent: the trigger type decides.
    */
   inputLabels?: DataLabels;
+  /**
+   * 12.2 — the server derived `inputLabels` from the trigger (verified webhook auth, an admin's trust setting):
+   * input nodes record their labels on their results even when the run does not track labels, so a replay of
+   * the run keeps them.
+   */
+  recordInputLabels?: boolean;
   resumeState?: WorkflowExecutionState;
   approvalDecision?: ApprovalDecisionInput;
   executionTimeoutMs?: number;
@@ -1134,7 +1148,58 @@ type ToolCallPlan =
 
 /** Phase 12.4 — the subset of a run's data labels a policy condition reads. */
 function policyLabels(labels: DataLabels | null | undefined): McpToolAccessCall["dataLabels"] {
-  return labels ? { provenance: labels.provenance, dataClasses: labels.dataClasses } : undefined;
+  if (!labels) return undefined;
+  // 12.2 — data classes found in the content count as sensitive for label conditions too.
+  const implied = withImpliedSensitive(labels);
+  return { provenance: implied.provenance, dataClasses: implied.dataClasses };
+}
+
+/** 12.2 — the secret ids a node config references (`{ secretId }` objects anywhere in it, a bounded walk). */
+function referencesSecretIn(config: unknown, secretIds: ReadonlySet<string>): boolean {
+  const seen = new Set<unknown>();
+  const visit = (value: unknown, depth: number): boolean => {
+    if (!value || typeof value !== "object" || depth > 8 || seen.has(value)) return false;
+    seen.add(value);
+    if (Array.isArray(value)) return value.some((item) => visit(item, depth + 1));
+    const record = value as Record<string, unknown>;
+    if (typeof record.secretId === "string" && secretIds.has(record.secretId)) return true;
+    return Object.values(record).some((item) => visit(item, depth + 1));
+  };
+  return visit(config, 0);
+}
+
+/**
+ * 12.2 — the node declares sensitive output: its own "Sensitive output" flag, or a secret flagged so in its
+ * config. Free when nothing is flagged: one property read, and the config is walked only when a secret is.
+ */
+function declaresSensitive(node: Pick<WorkflowNode, "config">, dependencies: Pick<WorkflowExecutionDependencies, "sensitiveSecretIds">): boolean {
+  if (declaresSensitiveOutput(node.config)) return true;
+  const secretIds = dependencies.sensitiveSecretIds;
+  return Boolean(secretIds && secretIds.size > 0 && referencesSecretIn(node.config, secretIds));
+}
+
+const SENSITIVE_LABELS: DataLabels = { provenance: ["sensitive"], dataClasses: [], source: "propagated" };
+
+/**
+ * 12.2 — the user prompt with each `{{ }}` piece whose labels say `untrusted_external` marked by `mark`; the
+ * template's literal text stays as written. Returns `rendered` unchanged when no piece is untrusted (or the pieces
+ * do not add up to it, e.g. a guard already rewrote the prompt).
+ */
+function spotlightPromptPieces(
+  pieces: readonly TemplatePiece[],
+  rendered: string,
+  labelsFor: (piece: Extract<TemplatePiece, { body: string }>) => DataLabels,
+  mark: (text: string) => string
+): string {
+  if (pieces.length === 0 || pieces.map((piece) => piece.text).join("") !== rendered) return rendered;
+  let marked = false;
+  const out = pieces.map((piece) => {
+    if (piece.body === undefined || piece.text.length === 0) return piece.text;
+    if (!labelsFor(piece).provenance.includes("untrusted_external")) return piece.text;
+    marked = true;
+    return mark(piece.text);
+  });
+  return marked ? out.join("") : rendered;
 }
 
 /**
@@ -5718,9 +5783,12 @@ async function executeNodeHandler(
       const sessionTemplate = typeof config.sessionIdTemplate === "string" ? config.sessionIdTemplate : "{{session_id}}";
       let systemPrompt = renderTemplate(systemTemplate, templateData);
       // Phase 16 — the user prompt's reads are kept apart: a guard rewrite of the prompt declassifies them alone.
+      // 12.2 — its pieces are kept too, so spotlighting can mark the untrusted ones.
+      const userPromptPieces: TemplatePiece[] = [];
       let userPrompt = context.labelScope
-        ? context.labelScope.segment(AGENT_USER_PROMPT_SEGMENT, () => renderTemplate(userTemplate, templateData))
+        ? context.labelScope.segment(AGENT_USER_PROMPT_SEGMENT, () => renderTemplate(userTemplate, templateData, { pieces: userPromptPieces }))
         : renderTemplate(userTemplate, templateData);
+      let userPromptFromServer = false;
       // Phase 10.5 — a registry server prompt can replace the system or user prompt; it is fetched below.
       const serverPromptBinding = readServerPromptBinding(config.serverPrompt);
 
@@ -5762,6 +5830,8 @@ async function executeNodeHandler(
 
       const attachedToolServerConfigs: MCPServerConfig[] = [];
       const attachedToolNodes = getAttachedNodes("tool").filter((entry) => entry.type === "mcp_tool");
+      // 12.2 — tools of attached MCP Tool nodes that declare sensitive output: their results are sensitive.
+      const sensitiveToolSources: Array<{ serverId: string; registryServerId?: string; tools?: ReadonlySet<string> }> = [];
       for (const attached of attachedToolNodes) {
         const attachedConfig = toRecord(attached.config);
         const serverId = String(attachedConfig.serverId ?? "").trim();
@@ -5792,6 +5862,9 @@ async function executeNodeHandler(
           secretRef: attachedConfig.secretRef as SecretReference | undefined,
           allowedTools: allowedTools.size ? [...allowedTools] : undefined
         });
+        if (declaresSensitive(attached, dependencies)) {
+          sensitiveToolSources.push({ serverId, ...(registryServerId ? { registryServerId } : {}), ...(allowedTools.size ? { tools: allowedTools } : {}) });
+        }
       }
 
       const resolvedAttachedConfigs = await Promise.all(
@@ -5843,8 +5916,10 @@ async function executeNodeHandler(
             ...(toolPolicy ? { evaluatePolicy: toolPolicy.evaluate } : {}),
             checkArguments: serverPromptArgumentCheck(node, context, dependencies, serverPromptServerConfig, serverPromptBinding.name)
           });
-          if (resolvedPrompt.target === "user") userPrompt = resolvedPrompt.text;
-          else systemPrompt = resolvedPrompt.text;
+          if (resolvedPrompt.target === "user") {
+            userPrompt = resolvedPrompt.text;
+            userPromptFromServer = true;
+          } else systemPrompt = resolvedPrompt.text;
           // Phase 16 — a prompt an MCP server wrote is outside content.
           context.labelScope?.add(labelsOf(["untrusted_external"]));
           serverPromptUsed = serverPromptTrace(resolvedPrompt);
@@ -6085,6 +6160,14 @@ async function executeNodeHandler(
         const workerResultLabels = new Map<string, DataLabels>();
         const workerResultKey = (toolName: string, toolCallId: string | undefined) => `${toolName}\u0000${toolCallId ?? ""}`;
         const labelScope = context.labelScope;
+        // 12.2 — under a profile's spotlighting, untrusted-labelled parts of the user prompt are marked like tool
+        // results (a prompt an MCP server wrote is untrusted as a whole). The author's own template text is not.
+        const spotlightUntrusted = guardSession?.hooks.spotlightUntrusted;
+        if (spotlightUntrusted && labelScope) {
+          userPrompt = userPromptFromServer
+            ? spotlightUntrusted(userPrompt)
+            : spotlightPromptPieces(userPromptPieces, userPrompt, (piece) => labelScope.labelsOfTemplateRead(piece.body, piece.simplePath), spotlightUntrusted);
+        }
         const modelRunStarted = Date.now();
         const modelRunStartedAt = nowIso();
         let agentState: Awaited<ReturnType<typeof dependencies.agentRuntime.run>>;
@@ -6110,8 +6193,21 @@ async function executeNodeHandler(
               ...workerTools.map(wt => ({ name: wt.name, description: wt.description, inputSchema: wt.inputSchema }))
             ],
             describeUnavailableTool: (toolName) => resolvedTools.describeBlocked(toolName),
-            // Phase 16 — a worker's result carries the worker's labels; any other tool's result is external.
-            resultLabels: (toolName, toolCallId) => workerResultLabels.get(workerResultKey(toolName, toolCallId)),
+            // Phase 16 — a worker's result carries the worker's labels; any other tool's result is external
+            // (12.2: and sensitive when its MCP Tool node declares sensitive output).
+            resultLabels: (toolName, toolCallId) => {
+              const worker = workerResultLabels.get(workerResultKey(toolName, toolCallId));
+              if (worker || sensitiveToolSources.length === 0) return worker;
+              const entry = resolvedTools.resolved.find((candidate) => candidate.exposedName === toolName);
+              const sensitive =
+                entry &&
+                sensitiveToolSources.some(
+                  (source) =>
+                    (source.registryServerId ? source.registryServerId === entry.registryServerId : source.serverId === entry.serverId) &&
+                    (!source.tools || source.tools.has(entry.originalName))
+                );
+              return sensitive ? labelsOf(["untrusted_external", "sensitive"]) : undefined;
+            },
             invokeTool: async (toolName, args, invocation) => {
                const matchingWorker = workerTools.find(wt => wt.name === toolName);
                if (matchingWorker) {
@@ -7463,13 +7559,18 @@ async function toolRulesNeedLabelTracking(workflow: Workflow, dependencies: Work
   }
 }
 
-async function initRunLabels(request: ExecuteWorkflowRequest, workflow: Workflow, dependencies: WorkflowExecutionDependencies): Promise<RunLabelState> {
+async function initRunLabels(
+  request: ExecuteWorkflowRequest,
+  workflow: Workflow,
+  dependencies: WorkflowExecutionDependencies,
+  readersOf: (nodeId: string) => ReadonlySet<string>
+): Promise<RunLabelState> {
   const tracking = await labelTrackingFor(workflow, dependencies.guard, await toolRulesNeedLabelTracking(workflow, dependencies));
   const scan = tracking.tracked ? createLabelScanner(tracking.dictionaries, dependencies.guard ? issuedSurrogatesOf(dependencies.guard) : undefined) : undefined;
   if (request.resumeState) {
     // A run that tracked labels when it paused carries on with them (and keeps tracking).
     const restoredScan = scan ?? (request.resumeState.dataLabels?.tracked ? createLabelScanner([]) : undefined);
-    const restored = RunLabelState.fromState(request.resumeState.dataLabels, restoredScan, tracking.tracked);
+    const restored = RunLabelState.fromState(request.resumeState.dataLabels, restoredScan, tracking.tracked, readersOf);
     if (restored) return restored;
     // Paused without labels (it did not track them then): where its input and finished nodes came from is not known,
     // so they count as outside content. The resume request's own origin (who answered) is not the run's input.
@@ -7480,6 +7581,7 @@ async function initRunLabels(request: ExecuteWorkflowRequest, workflow: Workflow
   }
   return new RunLabelState({
     input: request.inputLabels ?? labelsOf([inputProvenance(request.triggerType, undefined)]),
+    ...(request.recordInputLabels && request.inputLabels ? { recordInput: true } : {}),
     tracked: tracking.tracked,
     ...(scan ? { scan } : {})
   });
@@ -7695,7 +7797,7 @@ async function executeWorkflowRun(
   }
   // Phase 16 — labels beside the outputs. Outputs seeded by the editor and pinned data were given by a user,
   // and keep the origin of the node type that usually produces them (a pinned HTTP result was fetched from outside).
-  const labelState = await initRunLabels(request, workflow, dependencies);
+  const labelState = await initRunLabels(request, workflow, dependencies, (nodeId) => descendantCache.getDescendants(nodeId));
   const workflowNodeTypes = new Map(workflow.nodes.map((entry) => [entry.id, entry.type]));
   const givenLabels = (nodeId: string): DataLabels => {
     const source = nodeContentSource(workflowNodeTypes.get(nodeId) ?? "");
@@ -7704,6 +7806,24 @@ async function executeWorkflowRun(
   if (!request.resumeState) {
     for (const nodeId of nodeOutputs.keys()) labelState.set(nodeId, givenLabels(nodeId));
   }
+  /**
+   * 12.2 — a person approved at `nodeId`. An approval node (Human Approval, Approval Gate, an approved guard review
+   * that routes) endorses its own output and the inputs it showed the approver, for the nodes downstream of it. An
+   * approved tool call is recorded only: its result is new outside content. Never called for a rejection, a timeout,
+   * a replay (no person approved anything) or any automated check.
+   */
+  const endorseApproval = (nodeId: string, kind: LabelEndorsement["kind"], approvedBy: string | undefined, approvedAt: string, toolName?: string) => {
+    const covers = kind !== "tool_call";
+    const nodeIds = covers ? [nodeId, ...(graphIndexes.incomingExecution.get(nodeId) ?? []).filter((parentId) => labelState.has(parentId))] : [];
+    labelState.endorse(
+      nodeId,
+      { kind, approvedBy: approvedBy ?? null, approvedAt, nodeIds, ...(toolName ? { toolName } : {}) },
+      covers ? descendantCache.getDescendants(nodeId) : new Set(),
+      workflowNodeTypes
+    );
+  };
+  /** 12.2 — an approved tool call's endorsement, recorded on the node's result once it runs again. */
+  let pendingToolEndorsement: { nodeId: string; approvedBy?: string; approvedAt: string; toolName?: string } | undefined;
   const nodeResults: NodeExecutionResult[] = request.resumeState ? [...request.resumeState.nodeResults] : [];
   const attachmentOnlyResultIndexByNodeId = new Map<string, number>();
   const attachmentCompletionEventEmitted = new Set<string>();
@@ -7947,6 +8067,7 @@ async function executeWorkflowRun(
       // Phase 16 — the paused node's labels were saved with the run; the decision comes from a person; the routed
       // output is scanned like any output.
       labelState.set(waitingNode.id, labelState.finalize(unionLabels([labelState.get(waitingNode.id), labelsOf(["user"])]), routed));
+      if (approved) endorseApproval(waitingNode.id, "human_approval", request.approvalDecision.actedBy, decidedAt);
       nodeResults.push({
         nodeId: waitingNode.id,
         status: "success",
@@ -7962,6 +8083,16 @@ async function executeWorkflowRun(
     } else if (handoff?.kind === "rerun") {
       if (approved) {
         approvedHandoffKeys.add(handoff.approvalKey);
+        if (handoff.source === "agent_tool_gate") {
+          const waitingResult = request.resumeState.nodeResults.find((entry) => entry.nodeId === waitingNode.id && entry.status === "waiting_approval");
+          const toolName = toRecord(waitingResult?.output).toolName;
+          pendingToolEndorsement = {
+            nodeId: waitingNode.id,
+            approvedBy: request.approvalDecision.actedBy,
+            approvedAt: decidedAt,
+            ...(typeof toolName === "string" && toolName ? { toolName } : {})
+          };
+        }
         handledByHandoff = true;
       } else {
         // The rejected node is not run again.
@@ -7975,6 +8106,7 @@ async function executeWorkflowRun(
       nodeOutputs.set(waitingNode.id, decisionPayload);
       // Phase 16 — the decision comes from a person.
       labelState.set(waitingNode.id, unionLabels([labelState.get(waitingNode.id), labelsOf(["user"])]));
+      endorseApproval(waitingNode.id, "human_approval", request.approvalDecision.actedBy, decidedAt);
       nodeResults.push({
         nodeId: waitingNode.id,
         status: "success",
@@ -8163,8 +8295,9 @@ async function executeWorkflowRun(
       ...(pause.handoff ? { approvalHandoff: pause.handoff } : {}),
       ...(approvedHandoffKeys.size > 0 ? { approvedHandoffKeys: [...approvedHandoffKeys] } : {}),
       ...(writeToolCalls.toState() ? { approvedToolResults: writeToolCalls.toState() } : {}),
-      // Phase 16 — stored only on runs that track labels: otherwise no check reads them, and nothing new is stored.
-      ...(labelState.tracked ? { dataLabels: labelState.toState() } : {})
+      // Phase 16 — stored only on runs that track labels, or (12.2) that carry declared labels or an endorsement:
+      // otherwise nothing new is stored.
+      ...(labelState.persists ? { dataLabels: labelState.toState() } : {})
     };
 
     if (dependencies.persistPausedExecution) {
@@ -8428,10 +8561,16 @@ async function executeWorkflowRun(
     const labelScope = labelState.scope({
       nodeId: node.id,
       nodeType: node.type,
-      parents: Object.keys(parentOutputs).map((parentId) => labelState.get(parentId)),
+      parents: Object.keys(parentOutputs).map((parentId) => labelState.getFor(node.id, parentId)),
       merged,
       globals
     });
+    // 12.2 — a declared sensitive output is sensitive on every run; its labels go on its result.
+    const nodeSensitive = declaresSensitive(node, dependencies);
+    if (nodeSensitive) {
+      labelScope.add(SENSITIVE_LABELS);
+      labelState.record(node.id);
+    }
     let nodeInput: unknown = captureNodeInputSnapshot(globals, merged, parentOutputs);
     await dependencies.onNodeStart?.({
       nodeId: node.id,
@@ -8445,7 +8584,7 @@ async function executeWorkflowRun(
         const output = pinnedData[node.id];
         nodeOutputs.set(node.id, output);
         // Phase 16 — pinned data was given by a user (plus the node type's own origin).
-        labelState.set(node.id, labelState.finalize(givenLabels(node.id), output));
+        labelState.set(node.id, labelState.finalize(unionLabels([givenLabels(node.id), nodeSensitive ? SENSITIVE_LABELS : undefined]), output));
         const completedAt = nowIso();
         const durationMs = Date.now() - started;
         nodeResults.push({
@@ -8555,10 +8694,14 @@ async function executeWorkflowRun(
             const childLabelScope = labelState.scope({
               nodeId: childNode.id,
               nodeType: childNode.type,
-              parents: Object.keys(childParentOutputs).map((parentId) => (parentId === node.id ? itemLabels : labelState.get(parentId))),
+              parents: Object.keys(childParentOutputs).map((parentId) => (parentId === node.id ? itemLabels : labelState.getFor(childNode.id, parentId))),
               merged: childMerged,
               globals: iterationGlobals
             });
+            if (declaresSensitive(childNode, dependencies)) {
+              childLabelScope.add(SENSITIVE_LABELS);
+              labelState.record(childNode.id);
+            }
             const childInput = captureNodeInputSnapshot(iterationGlobals, childMerged, childParentOutputs);
             await dependencies.onNodeStart?.({
               nodeId: childNode.id,
@@ -8735,6 +8878,13 @@ async function executeWorkflowRun(
 
       nodeOutputs.set(node.id, output);
       labelState.set(node.id, labelScope.finish(output));
+      if (resumeDecision?.decision === "approve" && resumeDecision.handoff.kind === "gate") {
+        endorseApproval(node.id, "approval_gate", resumeDecision.actedBy, resumeDecision.decidedAt);
+      }
+      if (pendingToolEndorsement?.nodeId === node.id) {
+        endorseApproval(node.id, "tool_call", pendingToolEndorsement.approvedBy, pendingToolEndorsement.approvedAt, pendingToolEndorsement.toolName);
+      }
+      pendingToolEndorsement = undefined;
 
       nodeResults.push({
         nodeId: node.id,

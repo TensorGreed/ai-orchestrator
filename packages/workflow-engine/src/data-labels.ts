@@ -2,13 +2,16 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { dropIssuedSurrogates, scanDlp, type GuardDictionary } from "@ai-orchestrator/guard-sdk";
 import {
   emptyDataLabels,
+  endorseLabels,
   isEmptyDataLabels,
+  labelEndorsementSchema,
   unionDataLabels,
   nodeContentSource,
   orderedProvenance,
   parseStoredDataLabels,
   withoutDataClasses,
   type DataLabels,
+  type LabelEndorsement,
   type NodeLabelMap,
   type ProvenanceLabel,
   type WorkflowExecutionState
@@ -368,10 +371,27 @@ const NON_INPUT_GLOBALS = new Set(["vars", "execution_id", "execution_custom_dat
 export interface RunLabelOptions {
   /** Labels of the run's input (the trigger's provenance, or an Execute Workflow node's input labels). */
   input: DataLabels;
+  /**
+   * 12.2 — record input nodes' labels on their results even when the run does not track labels: the server
+   * derived the input's trust from the trigger (verified auth, an admin's setting), and a replay must keep it.
+   */
+  recordInput?: boolean;
   /** Store labels and scan outputs for data classes (a guard profile asked for propagated labels). */
   tracked: boolean;
   /** Finds data classes in an output; used only when tracked. */
   scan?: (value: unknown) => string[];
+}
+
+/** 12.2 — a human approval that endorsed content: what it covers, and which nodes read it endorsed. */
+interface ActiveEndorsement {
+  /** The approving node. */
+  nodeId: string;
+  endorsement: LabelEndorsement;
+  covered: ReadonlySet<string>;
+  /** Nodes downstream of the approving node: only they read the covered outputs endorsed. */
+  readers: ReadonlySet<string>;
+  /** The approver saw the trigger's input (an input node was covered): readers' reads of the run input are endorsed too. */
+  coversInput: boolean;
 }
 
 export class RunLabelState {
@@ -379,22 +399,47 @@ export class RunLabelState {
   readonly tracked: boolean;
   private readonly scan?: (value: unknown) => string[];
   private readonly nodes = new Map<string, DataLabels>();
+  /** 12.2 — nodes whose labels go on their results although the run does not track labels. */
+  private readonly recorded = new Set<string>();
+  private readonly recordInput: boolean;
+  private readonly endorsements: ActiveEndorsement[] = [];
   /** The node whose output is the run's output, once known. */
   outputNodeId?: string;
 
   constructor(options: RunLabelOptions) {
     this.input = options.input;
     this.tracked = options.tracked;
+    this.recordInput = options.recordInput === true;
     this.scan = options.tracked ? options.scan : undefined;
   }
 
-  /** A paused run's labels; it tracks when it did at the pause or does now (`trackedNow`). */
-  static fromState(state: WorkflowExecutionState["dataLabels"], scan?: (value: unknown) => string[], trackedNow = false): RunLabelState | undefined {
+  /**
+   * A paused run's labels; it tracks when it did at the pause or does now (`trackedNow`). `readersOf` gives the
+   * nodes downstream of an approving node, so its endorsement applies again after the resume.
+   */
+  static fromState(
+    state: WorkflowExecutionState["dataLabels"],
+    scan?: (value: unknown) => string[],
+    trackedNow = false,
+    readersOf: (nodeId: string) => ReadonlySet<string> = () => new Set()
+  ): RunLabelState | undefined {
     if (!state) return undefined;
     const run = new RunLabelState({ input: parseStoredDataLabels(state.input) ?? emptyDataLabels(), tracked: state.tracked === true || trackedNow, scan });
     for (const [nodeId, labels] of Object.entries(state.nodes ?? {})) {
       const parsed = parseStoredDataLabels(labels);
       run.nodes.set(nodeId, parsed ?? emptyDataLabels());
+    }
+    for (const nodeId of state.recorded ?? []) if (typeof nodeId === "string") run.recorded.add(nodeId);
+    for (const stored of state.endorsements ?? []) {
+      const parsed = labelEndorsementSchema.safeParse(stored?.endorsement);
+      if (!parsed.success || typeof stored.nodeId !== "string") continue;
+      run.endorsements.push({
+        nodeId: stored.nodeId,
+        endorsement: parsed.data,
+        covered: new Set(parsed.data.nodeIds),
+        readers: readersOf(stored.nodeId),
+        coversInput: stored.coversInput === true
+      });
     }
     const outputNodeId = (state as { outputNodeId?: unknown }).outputNodeId;
     if (typeof outputNodeId === "string") run.outputNodeId = outputNodeId;
@@ -404,7 +449,25 @@ export class RunLabelState {
   toState(): NonNullable<WorkflowExecutionState["dataLabels"]> & { outputNodeId?: string } {
     const nodes: NodeLabelMap = {};
     for (const [nodeId, labels] of this.nodes) if (!isEmptyDataLabels(labels)) nodes[nodeId] = labels;
-    return { input: this.input, nodes, tracked: this.tracked, ...(this.outputNodeId ? { outputNodeId: this.outputNodeId } : {}) };
+    return {
+      input: this.input,
+      nodes,
+      tracked: this.tracked,
+      ...(this.recorded.size > 0 ? { recorded: [...this.recorded] } : {}),
+      ...(this.endorsements.length > 0
+        ? { endorsements: this.endorsements.map((entry) => ({ nodeId: entry.nodeId, endorsement: entry.endorsement, ...(entry.coversInput ? { coversInput: true } : {}) })) }
+        : {}),
+      ...(this.outputNodeId ? { outputNodeId: this.outputNodeId } : {})
+    };
+  }
+
+  /**
+   * 12.2 — a paused run keeps its labels when it tracks them, or when it carries something a later check needs and
+   * the resume could not rebuild: a declared sensitive output, a trigger trust, an endorsement. Otherwise nothing new
+   * is stored (a resume then counts the run's content as outside content, as before).
+   */
+  get persists(): boolean {
+    return this.tracked || this.recordInput || this.recorded.size > 0 || this.endorsements.length > 0;
   }
 
   has(nodeId: string): boolean {
@@ -413,6 +476,43 @@ export class RunLabelState {
 
   get(nodeId: string): DataLabels | undefined {
     return this.nodes.get(nodeId);
+  }
+
+  /** 12.2 — a node's labels as `reader` reads them: endorsed when an approval upstream of the reader covered that node. */
+  getFor(reader: string, nodeId: string): DataLabels | undefined {
+    const labels = this.nodes.get(nodeId);
+    if (!labels || this.endorsements.length === 0) return labels;
+    return this.endorsements.some((entry) => entry.covered.has(nodeId) && entry.readers.has(reader)) ? endorseLabels(labels) : labels;
+  }
+
+  /** 12.2 — the run input's labels as `reader` reads them (endorsed when an approval upstream of it showed the trigger's input). */
+  inputFor(reader: string): DataLabels {
+    if (this.endorsements.length === 0) return this.input;
+    return this.endorsements.some((entry) => entry.coversInput && entry.readers.has(reader)) ? endorseLabels(this.input) : this.input;
+  }
+
+  /**
+   * 12.2 — a person approved at `nodeId`: the approving node's own output is endorsed (when covered), and nodes
+   * downstream of it (`readers`) read the covered nodes' outputs endorsed. Covered nodes keep their own labels for
+   * every other reader. An endorsement that covers nothing (an approved tool call) is only recorded.
+   */
+  endorse(nodeId: string, endorsement: LabelEndorsement, readers: ReadonlySet<string>, nodeTypes: ReadonlyMap<string, string>): void {
+    const covered = new Set(endorsement.nodeIds);
+    const own = this.nodes.get(nodeId);
+    if (own && covered.has(nodeId)) this.nodes.set(nodeId, endorseLabels(own));
+    const coversInput = [...covered].some((id) => nodeContentSource(nodeTypes.get(id) ?? "") === "input");
+    this.endorsements.push({ nodeId, endorsement, covered, readers, coversInput });
+    this.recorded.add(nodeId);
+  }
+
+  /** 12.2 — this node's labels go on its result even when the run does not track labels. */
+  record(nodeId: string): void {
+    this.recorded.add(nodeId);
+  }
+
+  /** 12.2 — input nodes' labels are recorded on their results (see `recordInput`). */
+  get recordsInput(): boolean {
+    return this.recordInput;
   }
 
   set(nodeId: string, labels: DataLabels): void {
@@ -424,11 +524,17 @@ export class RunLabelState {
     return unionLabels([this.input, ...this.nodes.values()]);
   }
 
-  /** The field a node result carries: its labels, only on a tracked run and only when not empty. */
-  resultField(nodeId: string): { labels?: DataLabels } {
-    if (!this.tracked) return {};
+  /**
+   * The field a node result carries: its labels, on a tracked run (or for a node recorded on any run, 12.2) and only
+   * when not empty, plus the endorsement it recorded.
+   */
+  resultField(nodeId: string): { labels?: DataLabels; endorsement?: LabelEndorsement } {
+    let endorsement: LabelEndorsement | undefined;
+    for (const entry of this.endorsements) if (entry.nodeId === nodeId) endorsement = entry.endorsement;
+    const endorsed = endorsement ? { endorsement } : {};
+    if (!this.tracked && !this.recorded.has(nodeId)) return endorsed;
     const labels = this.nodes.get(nodeId);
-    return labels && !isEmptyDataLabels(labels) ? { labels } : {};
+    return labels && !isEmptyDataLabels(labels) ? { labels, ...endorsed } : endorsed;
   }
 
   /** The run's data-class scanner, on tracked runs only (others never scan). */
@@ -491,7 +597,8 @@ export class NodeLabelScope {
     this.globals = input.globals ?? {};
     this.target = this.reads;
     const source = nodeContentSource(input.nodeType);
-    const own = source === "input" || input.parents.length === 0 ? run.input : undefined;
+    if (source === "input" && run.recordsInput) run.record(input.nodeId);
+    const own = source === "input" || input.parents.length === 0 ? run.inputFor(input.nodeId) : undefined;
     this.base = unionLabels([own, source === "external" ? labelsOf(["untrusted_external"]) : undefined, ...input.parents]);
   }
 
@@ -500,8 +607,7 @@ export class NodeLabelScope {
     return new NodeLabelScope(this.run, { nodeId, nodeType, parents: [start], merged: this.merged, ...(globals ? { globals } : { globals: this.globals }) });
   }
 
-  private applyReferences(references: TemplateReferences): void {
-    const reads = this.target;
+  private applyReferences(references: TemplateReferences, reads: Reads = this.target): void {
     for (const nodeId of references.nodes) if (this.run.has(nodeId)) reads.nodes.add(nodeId);
     if (references.all) reads.all = true;
     if (reads.input) return;
@@ -574,10 +680,22 @@ export class NodeLabelScope {
 
   private labelsOfReads(reads: Reads): Array<DataLabels | undefined> {
     return [
-      ...[...reads.nodes].map((nodeId) => this.run.get(nodeId)),
+      ...[...reads.nodes].map((nodeId) => this.run.getFor(this.nodeId, nodeId)),
       reads.all ? this.run.everything() : undefined,
-      reads.input ? this.run.input : undefined
+      reads.input ? this.run.inputFor(this.nodeId) : undefined
     ];
+  }
+
+  /**
+   * 12.2 — the labels of what one `{{ }}` body reads, without recording the read (it was recorded when it rendered):
+   * the nodes it names, the run input, and the parents' data when it reads a parent's field.
+   */
+  labelsOfTemplateRead(body: string, simplePath: boolean): DataLabels {
+    const references = simplePath ? referencesInPath(body) : referencesInExpression(body);
+    const reads = new Reads();
+    this.applyReferences(references, reads);
+    const parentField = references.heads.some((head) => Object.prototype.hasOwnProperty.call(this.merged, head));
+    return unionLabels([...this.labelsOfReads(reads), parentField ? this.base : undefined]);
   }
 
   /** The labels of what was read inside one segment (nothing else). */

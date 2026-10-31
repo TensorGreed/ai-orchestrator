@@ -129,6 +129,11 @@ export interface AgentGuardHooks {
   checkModelCall?(input: { content: string[]; dataLabels?: DataLabels; iteration: number }): Promise<AgentGuardDecision>;
   /** Mark a serialized untrusted tool result before the model sees it. */
   spotlight?(text: string, context: { toolName: string; iteration: number }): string;
+  /**
+   * 12.2 — mark untrusted text outside tool results (an untrusted-labelled part of the user prompt, memory written
+   * from untrusted content) the same way. Present only when a profile turns spotlighting on.
+   */
+  spotlightUntrusted?(text: string): string;
 }
 
 /**
