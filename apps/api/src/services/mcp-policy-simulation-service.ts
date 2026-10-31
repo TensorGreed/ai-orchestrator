@@ -47,8 +47,10 @@ export const MCP_POLICY_SIMULATION_MAX_GROUPS = 100;
  * Most evaluation work one simulation may do: per call and per reading tried (2^undecided rules), the rules in the
  * call's scope plus the decision work of both outcomes (matched deny and require_approval rules times matched allow
  * and require_approval rules, `decisionWork`), summed. About 2 to 3 s of CPU. 50,000 calls each matching 20 denies
- * and 20 allows use under half of it; a draft built to make every call try 256 readings of hundreds of rules stops
- * after a few calls (`cappedReason: "work_budget"`).
+ * and 20 allows use under half of it; a draft built to make every call try 256 readings of dozens of rules stops
+ * after a few calls (`cappedReason: "work_budget"`). Each call is also bounded before it is evaluated: one whose
+ * worst case is over `MAX_SIMULATION_WORK_PER_CALL` (about 50 ms) is counted as undetermined, and one whose worst
+ * case is over what is left of this budget stops the simulation.
  */
 export const MCP_POLICY_SIMULATION_WORK_BUDGET = 100_000_000;
 /**
@@ -338,7 +340,10 @@ export class McpPolicySimulationService {
             labels: gateway ? "none" : "unknown",
             summary: call.argsSummary
           };
-          const transition = simulatePolicyTransition(current, draft, recorded, context);
+          // A call whose worst case is over the per-call ceiling comes back undetermined; one over what is left of
+          // the budget is not evaluated and ends the scan, like a budget already spent.
+          const transition = simulatePolicyTransition(current, draft, recorded, context, { maxWork: this.workBudget - work });
+          if (transition.notEvaluated === "over_budget") return false;
           work += transition.work;
           bucket = transition.bucket;
           currentEffect = transition.current.effect;

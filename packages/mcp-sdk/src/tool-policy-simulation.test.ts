@@ -13,6 +13,7 @@ import {
   decisionWork,
   evaluateConditionOnSummary,
   evaluateRuleOnSummary,
+  MAX_SIMULATION_WORK_PER_CALL,
   MAX_UNDECIDED_RULES_PER_CALL,
   simulatePolicyTransition,
   simulationBucket,
@@ -418,6 +419,42 @@ describe("current vs draft", () => {
     expect(result.work).toBeGreaterThanOrEqual(256 * 2 * 40 * 40);
     expect(decisionWork([...denies, ...allows])).toBe(80 + 40 * 40);
     expect(decisionWork([rule({ id: "r", effect: "require_approval" }), ...denies.slice(0, 2), ...allows.slice(0, 3)])).toBe(6 + 3 * 4);
+  });
+
+  /** 8 rules the summary cannot decide (256 readings), and `size` denies and allows that all match. */
+  const costly = (size: number) => [
+    ...Array.from({ length: 8 }, (_, index) =>
+      rule({ id: `u${index}`, effect: "deny", conditions: { all: [{ path: "title", op: "starts_with", value: `x${index}` }] } })
+    ),
+    ...Array.from({ length: size }, (_, index) => rule({ id: `d${index}`, effect: "deny", roles: ["builder", "operator"], description: `d${index}` })),
+    ...Array.from({ length: size }, (_, index) => rule({ id: `a${index}`, effect: "allow", description: `a${index}` }))
+  ];
+
+  it("does not evaluate a call whose worst case is over the per-call ceiling, and never decides it", () => {
+    const current = costly(300);
+    const draft = [...current, rule({ id: "extra", effect: "deny" })];
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const started = performance.now();
+      const result = simulatePolicyTransition(current, draft, call(summary), context);
+      expect(performance.now() - started).toBeLessThan(100);
+      expect(result).toMatchObject({ bucket: "undetermined", notEvaluated: "too_costly", current: { effect: null }, draft: { effect: null } });
+      expect(result.reason).toMatch(/too many rules match this call/);
+      expect(result.work).toBeLessThan(MAX_SIMULATION_WORK_PER_CALL);
+      // The per-rule states are still read, for the rule rows.
+      expect(result.draftStates.filter((state) => state.state === "unknown")).toHaveLength(8);
+    }
+  });
+
+  it("does not evaluate a call whose worst case is over the caller's remaining work", () => {
+    const rules = costly(20);
+    const full = simulatePolicyTransition(rules, rules, call(summary), context);
+    expect(full.notEvaluated).toBeUndefined();
+    expect(full.bucket).toBe("unchanged");
+    // The worst case bounds the work actually charged.
+    const over = simulatePolicyTransition(rules, rules, call(summary), context, { maxWork: full.work - 1 });
+    expect(over).toMatchObject({ bucket: "undetermined", notEvaluated: "over_budget", current: { effect: null }, draft: { effect: null } });
+    // Enough left: the same answer as without a limit.
+    expect(simulatePolicyTransition(rules, rules, call(summary), context, { maxWork: MAX_SIMULATION_WORK_PER_CALL })).toEqual(full);
   });
 
   it("is determined when every reading lands in the same bucket", () => {

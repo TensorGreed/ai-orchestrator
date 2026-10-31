@@ -790,6 +790,20 @@ export function simulationBucket(current: McpToolPolicyEffect, draft: McpToolPol
 /** Most rules whose match the summary cannot decide that are tried in every combination (2^8 readings). */
 export const MAX_UNDECIDED_RULES_PER_CALL = 8;
 
+/**
+ * Most work one call may cost (the units of `SimulatedTransition.work`), about 50 ms of CPU on a typical machine.
+ * A call whose worst case is over it is not evaluated: it is undetermined (`notEvaluated: "too_costly"`).
+ */
+export const MAX_SIMULATION_WORK_PER_CALL = 2_000_000;
+
+export interface SimulatePolicyTransitionOptions {
+  /**
+   * The work the caller can still afford. A call whose worst case is over it (and within the per-call ceiling) is
+   * not evaluated (`notEvaluated: "over_budget"`), so the caller can stop before spending it.
+   */
+  maxWork?: number;
+}
+
 export interface SimulatedOutcome {
   effect: McpToolPolicyEffect | null;
   /** The deciding rule, when the same in every reading. */
@@ -802,6 +816,12 @@ export interface SimulatedTransition {
   draft: SimulatedOutcome;
   /** Why the bucket is undetermined. */
   reason?: string;
+  /**
+   * Set when the call was not evaluated because its worst-case work was too high: over the per-call ceiling
+   * (`too_costly`, the bucket is undetermined) or over the caller's `maxWork` (`over_budget`). Such a call is never
+   * reported as allowed or denied.
+   */
+  notEvaluated?: "too_costly" | "over_budget";
   /** Each enforced draft rule's match state, by its index in the draft list. */
   draftStates: SimulatedRuleState[];
   /**
@@ -859,7 +879,8 @@ export function simulatePolicyTransition(
   current: readonly McpToolPolicyRule[],
   draft: readonly McpToolPolicyRule[],
   call: PolicySimulationCall,
-  context: PolicySimulationContext
+  context: PolicySimulationContext,
+  options: SimulatePolicyTransitionOptions = {}
 ): SimulatedTransition {
   const currentRules = enforcedOnly(current);
   const draftRules = enforcedOnly(draft);
@@ -899,6 +920,26 @@ export function simulatePolicyTransition(
   const currentDeciders = new Set<string | undefined>();
   const draftDeciders = new Set<string | undefined>();
   const combinations = 1 << undecided.length;
+  // Worst case before any reading is tried: every rule that may match does match in every reading. Decision work
+  // only grows with the matched set, so this bounds the work the readings below would charge.
+  const mayMatch = (rules: McpToolPolicyRule[], ruleStates: SimulatedRuleState[]) => rules.filter((_, index) => ruleStates[index]!.state !== "no_match");
+  const worstCase = combinations * (scopedRules + decisionWork(mayMatch(currentRules, currentStates)) + decisionWork(mayMatch(draftRules, draftStates)));
+  const notEvaluated =
+    worstCase > MAX_SIMULATION_WORK_PER_CALL ? ("too_costly" as const) : options.maxWork !== undefined && worstCase > options.maxWork ? ("over_budget" as const) : undefined;
+  if (notEvaluated) {
+    return {
+      bucket: "undetermined",
+      current: { effect: null },
+      draft: { effect: null },
+      reason:
+        notEvaluated === "too_costly"
+          ? `too many rules match this call to evaluate it (${relevant.length} rules in scope, ${combinations} readings of the summary)`
+          : "the simulation's work budget ran out before this call",
+      notEvaluated,
+      draftStates: draftStateList,
+      work: scopedRules
+    };
+  }
   let work = 0;
   for (let mask = 0; mask < combinations; mask += 1) {
     const assumed = (identity: string) => (mask >> undecided.indexOf(identity)) & 1;
