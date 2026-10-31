@@ -5736,3 +5736,8 @@ img.mcp-pg-block {
     flex-direction: column;
   }
 }
+
+.untrusted-write-switch {
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+}

@@ -1251,7 +1251,7 @@ function ClassificationCell({
           disabled={busy}
           onChange={(event) => void changeOpenWorld(event.target.value)}
         >
-          <option value="auto">Auto (destination)</option>
+          <option value="auto">Auto (server, then hint)</option>
           <option value="open">Mark open world</option>
           <option value="closed">Mark not open world</option>
         </select>
