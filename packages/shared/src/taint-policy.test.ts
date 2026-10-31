@@ -31,7 +31,15 @@ describe("recorded call labels", () => {
       { provenance: ["user", "alice@example.com" as never], dataClasses: ["email", "4111 1111 1111 1111", "x".repeat(65)] },
       true
     );
-    expect(recorded).toEqual({ provenance: ["user"], dataClasses: ["email"], tracked: true });
+    // The detected classes make it sensitive, as live evaluation reads them.
+    expect(recorded).toEqual({ provenance: ["user", "sensitive"], dataClasses: ["email"], tracked: true });
+  });
+
+  it("records the sensitive label detected data classes imply, as the decision read them", () => {
+    expect(recordedCallLabels({ provenance: ["user"], dataClasses: ["iban"] }, true)).toEqual({ provenance: ["user", "sensitive"], dataClasses: ["iban"], tracked: true });
+    expect(recordedCallLabels({ provenance: ["user"], dataClasses: [] }, true)).toEqual({ provenance: ["user"], dataClasses: [], tracked: true });
+    // A declared sensitive source is recorded on an untracked run too.
+    expect(recordedCallLabels({ provenance: ["user", "sensitive"], dataClasses: [] }, false)).toEqual({ provenance: ["user", "sensitive"], tracked: false });
   });
 
   it("parses stored labels and refuses malformed ones", () => {

@@ -28,11 +28,36 @@ function expressionContextFor(values: Record<string, unknown>): ExpressionContex
   };
 }
 
-export function renderTemplateAdvanced(template: string, values: Record<string, unknown>): { rendered: string; unresolvedKeys: string[] } {
+/**
+ * 12.2 — one piece of a rendered template: literal text the author wrote, or what one `{{ }}` rendered to (with
+ * its body, so the caller can tell which data it came from).
+ */
+export type TemplatePiece = { text: string; body?: undefined } | { text: string; body: string; simplePath: boolean };
+
+export function renderTemplateAdvanced(
+  template: string,
+  values: Record<string, unknown>,
+  options: { pieces?: TemplatePiece[] } = {}
+): { rendered: string; unresolvedKeys: string[] } {
   const render = (evaluate: ((expression: string) => unknown) | null) => {
     const unresolvedKeys: string[] = [];
+    const pieces = options.pieces;
+    if (pieces) pieces.length = 0;
+    let last = 0;
     // Match either a simple dotted-path token (back-compat) or any {{ ... }} body.
-    const rendered = template.replace(TEMPLATE_BODY, (_match, body: string) => {
+    const rendered = template.replace(TEMPLATE_BODY, (match, body: string, offset: number) => {
+      if (!pieces) return renderBody(body);
+      if (offset > last) pieces.push({ text: template.slice(last, offset) });
+      last = offset + match.length;
+      const text = renderBody(body);
+      const trimmed = body.trim();
+      pieces.push({ text, body: trimmed, simplePath: SIMPLE_PATH.test(trimmed) });
+      return text;
+    });
+    if (pieces && last < template.length) pieces.push({ text: template.slice(last) });
+    return { rendered, unresolvedKeys };
+
+    function renderBody(body: string): string {
       const trimmed = body.trim();
       // Simple a.b.c path — preserve original behavior + unresolved tracking.
       if (SIMPLE_PATH.test(trimmed)) {
@@ -63,8 +88,7 @@ export function renderTemplateAdvanced(template: string, values: Record<string, 
         }
       }
       return "";
-    });
-    return { rendered, unresolvedKeys };
+    }
   };
   // Only open a sandbox session when the template has an expression; all of them share it.
   const hasExpression = [...template.matchAll(TEMPLATE_BODY)].some((match) => {
@@ -76,8 +100,8 @@ export function renderTemplateAdvanced(template: string, values: Record<string, 
   return withExpressionEvaluator(expressionContextFor(values), render);
 }
 
-export function renderTemplate(template: string, values: Record<string, unknown>): string {
-  return renderTemplateAdvanced(template, values).rendered;
+export function renderTemplate(template: string, values: Record<string, unknown>, options: { pieces?: TemplatePiece[] } = {}): string {
+  return renderTemplateAdvanced(template, values, options).rendered;
 }
 
 function resolvePath(values: Record<string, unknown>, path: string): unknown {

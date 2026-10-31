@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { conditionList } from "./mcp-tool-policy";
-import { dataClassNameSchema, PROVENANCE_LABELS, type DataLabels, type ProvenanceLabel } from "./data-labels";
+import { dataClassNameSchema, PROVENANCE_LABELS, withImpliedSensitive, type DataLabels, type ProvenanceLabel } from "./data-labels";
 import type { McpToolPolicyConditions, McpToolPolicyRule, Workflow } from "./types";
 
 /**
@@ -100,7 +100,8 @@ export const mcpToolCallLabelsSchema = z.object({
  */
 export function recordedCallLabels(labels: Pick<DataLabels, "provenance" | "dataClasses"> | null | undefined, tracked: boolean): McpToolCallLabels | undefined {
   if (!labels) return undefined;
-  const provenance = PROVENANCE_LABELS.filter((label) => labels.provenance.includes(label));
+  // The decision read detected data classes as `sensitive` too (`withImpliedSensitive`), so the record says so.
+  const provenance = PROVENANCE_LABELS.filter((label) => withImpliedSensitive(labels).provenance.includes(label));
   if (!tracked) return { provenance, tracked: false };
   const dataClasses = [...new Set(labels.dataClasses)]
     .filter((name) => dataClassNameSchema.safeParse(name).success)

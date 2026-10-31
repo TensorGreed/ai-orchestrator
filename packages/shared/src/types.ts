@@ -6,7 +6,7 @@ import type {
   McpRuntimeRejection,
   McpSandboxSettings
 } from "./mcp-runtime-safety";
-import type { DataLabels, NodeLabelMap } from "./data-labels";
+import type { DataLabels, LabelEndorsement, NodeLabelMap } from "./data-labels";
 import type { McpToolCallLabels } from "./taint-policy";
 
 export const WORKFLOW_SCHEMA_VERSION = "1.0.0";
@@ -350,9 +350,19 @@ export interface NodeExecutionResult {
   /**
    * Phase 16 — where the node's output came from and the data classes it
    * holds (source `propagated`). Only on runs whose guard profiles track
-   * labels, and only when not empty.
+   * labels, and only when not empty. 12.2 — also on other runs for the
+   * nodes whose labels a later check or replay needs: an input node whose
+   * trust the server derived from the trigger, a node with a declared
+   * sensitive output, an approval that endorsed content.
    */
   labels?: DataLabels;
+  /** 12.2 — the human approval this node recorded, which endorsed the content it covers (who, when, which nodes). */
+  endorsement?: LabelEndorsement;
+  /**
+   * 12.2 — on an input node's result that carries its labels: the node's type when it ran, so a retry or replay
+   * reads those labels as the input's even after the node was retyped or deleted.
+   */
+  nodeType?: string;
 }
 
 /** Most activity entries kept per node; older ones are dropped. */
@@ -515,7 +525,17 @@ export interface WorkflowExecutionState {
    * labels, every completed node's labels, and whether labels are tracked
    * (stored and scanned). A resumed run carries on with them.
    */
-  dataLabels?: { input: DataLabels; nodes: NodeLabelMap; tracked: boolean };
+  dataLabels?: {
+    input: DataLabels;
+    nodes: NodeLabelMap;
+    tracked: boolean;
+    /** 12.2 — nodes whose labels go on their results even when the run does not track labels. */
+    recorded?: string[];
+    /** 12.2 — human approvals that endorsed content so far; `nodeId` is the approving node (its descendants read the covered nodes endorsed). */
+    endorsements?: Array<{ nodeId: string; endorsement: LabelEndorsement; coversInput?: boolean }>;
+    /** 12.2 — what the pending approval request showed the approver (the nodes its text read; the run input when it read it). */
+    shown?: { nodeIds: string[]; input?: boolean };
+  };
 }
 
 /**
@@ -914,7 +934,13 @@ export interface AgentToolOutputLimits {
 export interface AgentRunRequest {
   provider: LLMProviderConfig;
   systemPrompt: string;
+  /** The user prompt as written; this is what session memory keeps. */
   userPrompt: string;
+  /**
+   * 12.2 — the user prompt as the model sees it, when spotlighting marked untrusted parts of it. Only the model call
+   * gets it; memory keeps `userPrompt`, so the marks never nest across turns.
+   */
+  modelUserPrompt?: string;
   tools: MCPToolDefinition[];
   maxIterations: number;
   toolCallingEnabled: boolean;

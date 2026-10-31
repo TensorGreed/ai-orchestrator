@@ -2,6 +2,7 @@ import { z } from "zod";
 import { MCP_POLICY_TEXT_OPS, WORKFLOW_SCHEMA_VERSION } from "./types";
 import { writeToolApprovalSettingsSchema } from "./approval-gate";
 import { MCP_POLICY_PATH_MAX_LENGTH, parseMcpPolicyPath } from "./mcp-tool-policy";
+import { SENSITIVE_OUTPUT_CONFIG_KEY, storedTriggerTrustBinding, TRIGGER_TRUST_BINDING_KEY, TRIGGER_TRUST_CONFIG_KEY, TRIGGER_TRUST_LEVELS } from "./data-labels";
 
 export const secretReferenceSchema = z.object({
   secretId: z.string().min(1)
@@ -162,7 +163,25 @@ export const workflowNodeSchema = z.object({
   ]),
   name: z.string().min(1),
   position: z.object({ x: z.number(), y: z.number() }),
-  config: z.record(z.string(), z.unknown()),
+  /**
+   * Free-form per node type. 12.2 — two optional keys any node may carry are checked here: `sensitiveOutput`
+   * (boolean: the node's output is sensitive on every run) and `inputTrust` (a trigger's input trust, `user` or
+   * `untrusted_external`; only an admin may change it, which the API enforces), with `inputTrustFor`, the trigger
+   * it was set for (the API writes it).
+   */
+  config: z.record(z.string(), z.unknown()).superRefine((config, ctx) => {
+    const sensitive = config[SENSITIVE_OUTPUT_CONFIG_KEY];
+    if (sensitive !== undefined && typeof sensitive !== "boolean") {
+      ctx.addIssue({ code: "custom", path: [SENSITIVE_OUTPUT_CONFIG_KEY], message: `${SENSITIVE_OUTPUT_CONFIG_KEY} must be true or false` });
+    }
+    const trust = config[TRIGGER_TRUST_CONFIG_KEY];
+    if (trust !== undefined && !(TRIGGER_TRUST_LEVELS as readonly unknown[]).includes(trust)) {
+      ctx.addIssue({ code: "custom", path: [TRIGGER_TRUST_CONFIG_KEY], message: `${TRIGGER_TRUST_CONFIG_KEY} must be one of ${TRIGGER_TRUST_LEVELS.join(", ")}` });
+    }
+    if (config[TRIGGER_TRUST_BINDING_KEY] !== undefined && !storedTriggerTrustBinding(config)) {
+      ctx.addIssue({ code: "custom", path: [TRIGGER_TRUST_BINDING_KEY], message: `${TRIGGER_TRUST_BINDING_KEY} must name the trigger's nodeType, authMode, secretId and path` });
+    }
+  }),
   disabled: z.boolean().optional(),
   color: z.string().optional()
 });

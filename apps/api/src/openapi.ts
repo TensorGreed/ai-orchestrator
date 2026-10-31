@@ -895,13 +895,23 @@ export const openApiSpec = {
                   value: { type: "string", description: "Required for local secrets" },
                   projectId: { type: "string" },
                   externalProviderId: { type: "string" },
-                  externalKey: { type: "string" }
+                  externalKey: { type: "string" },
+                  sensitiveOutput: { type: "boolean", description: "Nodes that use this secret produce sensitive output" }
                 }
               }
             }
           }
         },
         responses: { "200": { description: "Secret created (returns id, never the value)" } }
+      }
+    },
+    "/api/secrets/{id}/sensitive-output": {
+      put: {
+        tags: ["Secrets"],
+        summary: "Flag a secret \"sensitive output\" or clear the flag (clearing: admins only)",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        requestBody: { required: true, content: { "application/json": { schema: { type: "object", required: ["sensitiveOutput"], properties: { sensitiveOutput: { type: "boolean" } } } } } },
+        responses: { "200": { description: "The flag as stored" }, "403": { description: "Not allowed" }, "404": { description: "Not found" } }
       }
     },
     "/api/secrets/{id}": {

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
-import { DataLabelChips, describeDataLabels } from "./DataLabelChips";
+import { DataLabelChips, EndorsementNote, describeDataLabels } from "./DataLabelChips";
 
 describe("data label chips", () => {
   it("says where the data came from and what it contains, in plain words", () => {
@@ -24,5 +24,16 @@ describe("data label chips", () => {
     expect(html).toContain("from outside");
     expect(html).toContain("contains email");
     expect(html).toContain('aria-label="Data labels: from outside · contains email"');
+  });
+
+  it("shows an approval that cleared outside content, and nothing without one", () => {
+    expect(renderToStaticMarkup(<EndorsementNote endorsement={undefined} />)).toBe("");
+    const html = renderToStaticMarkup(<EndorsementNote endorsement={{ kind: "human_approval", approvedBy: "maria@example.org", approvedAt: "2026-10-31T10:04:00.000Z", nodeIds: ["ask"] }} />);
+    expect(html).toContain(">cleared<");
+    expect(html).toContain("maria@example.org");
+    // 12.2 — an approval that showed no step's data reads "approved": it cleared nothing.
+    const bland = renderToStaticMarkup(<EndorsementNote endorsement={{ kind: "human_approval", approvedBy: "maria@example.org", approvedAt: "2026-10-31T10:04:00.000Z", nodeIds: [] }} />);
+    expect(bland).toContain(">approved<");
+    expect(bland).toContain("nothing was cleared");
   });
 });

@@ -194,10 +194,11 @@ import { registerAuditBundleRoutes } from "./audit-bundle-routes.js";
 import { registerReplayRoutes } from "./replay-routes.js";
 import { registerReplayCaptureRoutes } from "./replay-capture-routes.js";
 import { deriveCaptureSurrogateKey, ReplayCaptureService, type CaptureTicket } from "./services/replay-capture-service.js";
+import { bindTriggerTrust, triggerTrustDenial, withoutTriggerTrust, withStoredTriggerTrust } from "./services/trigger-trust.js";
 import { inputProvenance, type CaptureInputOrigin } from "./services/capture-masking.js";
 import { registerEvalRoutes } from "./eval-routes.js";
 import { registerGoldenSetFileRoutes } from "./golden-set-file-routes.js";
-import { isEntryNodeType, parseStoredDataLabels, recordedInputLabels, type DataLabels } from "@ai-orchestrator/shared";
+import { effectiveTriggerTrust, isEntryNodeType, parseStoredDataLabels, recordedInputLabels, triggerInputProvenance, type DataLabels } from "@ai-orchestrator/shared";
 import { GOLDEN_SET_FILE_DEFAULT_MAX_BYTES, GUARD_SIMULATION_MAX_CASES_DEFAULT, GUARD_SIMULATION_RETENTION_DAYS } from "@ai-orchestrator/shared";
 import { registerApprovalRoutes } from "./approval-routes.js";
 import { registerExecutionRoutes } from "./execution-routes.js";
@@ -345,7 +346,9 @@ const secretCreateSchema = z
     value: z.string().min(1).optional(),
     projectId: z.string().min(1).max(120).optional(),
     externalProviderId: z.string().min(1).max(120).optional(),
-    externalKey: z.string().min(1).max(512).optional()
+    externalKey: z.string().min(1).max(512).optional(),
+    /** 12.2 — nodes that use this secret produce sensitive output. */
+    sensitiveOutput: z.boolean().optional()
   })
   .superRefine((data, ctx) => {
     if (data.externalProviderId || data.externalKey) {
@@ -559,6 +562,8 @@ const DEFAULT_WEBHOOK_TIMESTAMP_HEADER = "x-webhook-timestamp";
 const DEFAULT_IDEMPOTENCY_HEADER = "idempotency-key";
 const DEFAULT_REPLAY_TOLERANCE_SECONDS = 300;
 const DEFAULT_IDEMPOTENCY_TTL_SECONDS = 24 * 60 * 60;
+/** 12.2 — how long the list of secrets flagged "sensitive output" is reused before it is read again. */
+const SENSITIVE_SECRET_CACHE_MS = 5_000;
 
 function normalizeHeaderName(value: unknown, fallback: string): string {
   const input = typeof value === "string" ? value.trim() : "";
@@ -1183,11 +1188,13 @@ async function verifyWebhookRequestAuth(input: {
   endpointKey: string;
   store: Store;
   secretService: SecretService;
-}): Promise<{ ok: true } | { ok: false; statusCode: 401 | 403; message: string }> {
+}): Promise<{ ok: true; verified: boolean } | { ok: false; statusCode: 401 | 403; message: string }> {
   const { security } = input;
 
+  // 12.2 — `verified`: the server checked the caller against the trigger's secret (a bearer token or an HMAC
+  // signature), so the run's input counts as the user's. Without auth nothing about the caller is known.
   if (security.authMode === "none") {
-    return { ok: true };
+    return { ok: true, verified: false };
   }
 
   const secret = await input.secretService.resolveSecret(security.secretRef);
@@ -1224,7 +1231,7 @@ async function verifyWebhookRequestAuth(input: {
       };
     }
 
-    return { ok: true };
+    return { ok: true, verified: true };
   }
 
   const signatureHeaderValue = getHeaderValue(headers, security.signatureHeaderName);
@@ -1287,7 +1294,7 @@ async function verifyWebhookRequestAuth(input: {
     };
   }
 
-  return { ok: true };
+  return { ok: true, verified: true };
 }
 
 const TOOL_RESULTS_PURPOSE = "approval_tool_results";
@@ -2114,6 +2121,7 @@ export async function createApp(
         })
       : undefined;
     const projectVars = await variablesService.resolveForProject(input.workflow.projectId ?? "default");
+    const runSensitiveSecretIds = await sensitiveSecrets.ids();
     const mergedWorkflow: Workflow = {
       ...input.workflow,
       variables: { ...projectVars, ...(input.workflow.variables ?? {}) }
@@ -2166,7 +2174,9 @@ export async function createApp(
             provenance: [inputProvenance(input.triggerType, input.captureInputOrigin ?? (input.policyActor ? "user" : undefined))],
             dataClasses: [],
             source: "propagated"
-          }
+          },
+          // 12.2 — the trigger's verified auth or an admin's trust setting decided them: the trigger's result keeps them.
+          ...(input.recordInputLabels && input.inputLabels ? { recordInputLabels: true } : {})
         },
         {
           // Phase 15.3 — a recorded run records its model calls; a model replay answers them from the tape.
@@ -2200,6 +2210,8 @@ export async function createApp(
             ...(input.guardSimulation?.destinationRows ? { destinationRows: input.guardSimulation.destinationRows } : {})
           }),
           replayNodeHook: input.replay?.hook,
+          // 12.2 — secrets flagged "sensitive output" (none: no node config is walked).
+          ...(runSensitiveSecretIds.size > 0 ? { sensitiveSecretIds: runSensitiveSecretIds } : {}),
           loadMcpToolPolicy,
           // Phase 10.5 — resources, elicitation and list_changed notifications.
           mcpResourceMaxBytes: config.MCP_RESOURCE_MAX_BYTES,
@@ -2461,7 +2473,11 @@ export async function createApp(
     const types = new Map(workflow.nodes.map((node) => [node.id, node.type]));
     const results = Array.isArray(source.nodeResults) ? (source.nodeResults as Array<Record<string, unknown>>) : [];
     return recordedInputLabels({
-      nodes: results.map((result) => ({ nodeType: types.get(String(result?.nodeId ?? "")) ?? "", labels: parseStoredDataLabels(result?.labels) })),
+      // 12.2 — the type the node had when it ran (recorded with its labels), else its type now.
+      nodes: results.map((result) => ({
+        nodeType: typeof result?.nodeType === "string" && result.nodeType ? result.nodeType : (types.get(String(result?.nodeId ?? "")) ?? ""),
+        labels: parseStoredDataLabels(result?.labels)
+      })),
       sourceTriggerType: source.triggerType
     });
   };
@@ -3716,6 +3732,29 @@ export async function createApp(
   // Saving a workflow needs write access to the one it replaces (same id) and
   // to the project it lands in (its own projectId, else the replaced one's),
   // and a placement that exists (400 otherwise).
+  /**
+   * 12.2 — the ids of secrets flagged "sensitive output", read at most every few seconds (a flag set on another
+   * instance applies within that time; one set here applies at once). A read that fails keeps the last set.
+   */
+  const sensitiveSecrets = (() => {
+    let cached: ReadonlySet<string> = new Set();
+    let readAt = 0;
+    return {
+      ids: async (): Promise<ReadonlySet<string>> => {
+        if (Date.now() - readAt < SENSITIVE_SECRET_CACHE_MS) return cached;
+        try {
+          cached = new Set(await store.listSensitiveOutputSecretIds());
+          readAt = Date.now();
+        } catch (error) {
+          app.log.warn({ error: secretService.redact(error instanceof Error ? error.message : String(error)) }, "Could not read the sensitive output secrets; using the last list");
+        }
+        return cached;
+      },
+      invalidate: () => {
+        readAt = 0;
+      }
+    };
+  })();
   const workflowSaveDenial = async (
     user: SafeUser,
     workflow: { id: string; projectId?: string | null; folderId?: string | null; nodes?: Workflow["nodes"] }
@@ -3724,6 +3763,13 @@ export async function createApp(
     if (existing) {
       const access = await runAccess.workflow(user, existing.id, "workflow:write");
       if (!access.ok) return access;
+    }
+    // 12.2 — a trigger's input trust is an admin's setting: no other role sets, changes or removes it. An admin's
+    // save binds each setting it makes to the trigger as saved (the workflow is saved as bound here).
+    if (Array.isArray(workflow.nodes)) {
+      const trustDenial = triggerTrustDenial(user.role, existing, workflow);
+      if (trustDenial) return trustDenial;
+      if (user.role === "admin") workflow.nodes = bindTriggerTrust(existing, workflow.nodes);
     }
     const target = await runAccess.project(user, workflow.projectId ?? existing?.projectId, "workflow:write");
     if (!target.ok) return target;
@@ -8943,6 +8989,8 @@ export async function createApp(
     duplicatedWorkflow.workflowVersion = 1;
     // Phase 15.4 — a copy never answers on its source's trigger paths: taken ones get a -copy suffix.
     duplicatedWorkflow.nodes = withUniqueTriggerPaths(duplicatedWorkflow, await releaseService.usedRoutingKeys()).nodes;
+    // 12.2 — a builder's copy starts with its triggers' default trust (only an admin sets one).
+    if (user.role !== "admin") duplicatedWorkflow.nodes = withoutTriggerTrust(duplicatedWorkflow).nodes;
     const duplicateDenial = await workflowSaveDenial(user, duplicatedWorkflow);
     if (duplicateDenial) return denyRunAccess(reply, duplicateDenial);
 
@@ -9063,10 +9111,12 @@ export async function createApp(
         };
       }
 
-      const saveDenial = await workflowSaveDenial(user, workflow);
+      // 12.2 — an export carries its source's trust settings; imported by a non-admin, the stored ones stay instead.
+      const importedWorkflow = user.role === "admin" ? workflow : withStoredTriggerTrust(await store.getWorkflow(workflow.id), workflow);
+      const saveDenial = await workflowSaveDenial(user, importedWorkflow);
       if (saveDenial) return denyRunAccess(reply, saveDenial);
 
-      const savedWorkflow = await store.upsertWorkflow(workflow, { createdBy: user.id });
+      const savedWorkflow = await store.upsertWorkflow(importedWorkflow, { createdBy: user.id });
       await workflowChanged(savedWorkflow.id);
       return savedWorkflow;
     } catch (error) {
@@ -11109,6 +11159,16 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
 
         const executionId = crypto.randomUUID();
         const triggerType = isTestRoute ? "webhook_test" : "webhook";
+        // 12.2 — the input's provenance: an admin's trust setting on the trigger, else `user` when the auth above
+        // verified the caller, else outside content. Recorded on the trigger's result so replays keep it.
+        // A `user` setting whose trigger changed since an admin made it (type, auth mode, secret, path) is ignored; an
+        // `untrusted_external` one applies whatever changed (a reset only tightens).
+        const triggerNode = match.workflow.nodes.find((entry) => entry.id === match.endpoint.nodeId);
+        const triggerTrust = triggerNode ? effectiveTriggerTrust(triggerNode) : undefined;
+        const webhookInputLabels: DataLabels | undefined =
+          triggerTrust || authResult.verified
+            ? { provenance: [triggerInputProvenance({ verified: authResult.verified, ...(triggerTrust ? { trust: triggerTrust } : {}) })], dataClasses: [], source: "propagated" }
+            : undefined;
         const result = await runDispatcher.run(
           {
             v: DISPATCH_SPEC_VERSION,
@@ -11129,7 +11189,8 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
               executionId,
               triggerType,
               triggeredBy: "webhook",
-              channel: isTestRoute ? "draft" : "production"
+              channel: isTestRoute ? "draft" : "production",
+              ...(webhookInputLabels ? { inputLabels: webhookInputLabels, recordInputLabels: true } : {})
             },
             progress: { requestInput: parsedInput.body },
             history: { requestInput: parsedInput.body }
@@ -11264,6 +11325,10 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         projectId: parsed.data.projectId
       });
     }
+    if (parsed.data.sensitiveOutput === true) {
+      await store.setSecretSensitiveOutput(secretRef.secretId, true);
+      sensitiveSecrets.invalidate();
+    }
     await audit(request, user, {
       category: "secret",
       eventType: source === "external" ? "secret.create.external" : "secret.create",
@@ -11292,9 +11357,51 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       provider: parsed.data.provider,
       projectId: parsed.data.projectId ?? "default",
       source,
+      sensitiveOutput: parsed.data.sensitiveOutput === true,
       // Non-blocking: the secret is saved; the warning never carries the value.
       warnings
     };
+  });
+
+  /**
+   * 12.2 — flag a secret "sensitive output" (nodes that use it produce sensitive output on every run) or clear the
+   * flag. Anyone who may change the secret may flag it; clearing a flag lowers what policies see, so only an admin
+   * may do that.
+   */
+  app.put<{ Params: { id: string }; Body: unknown }>("/api/secrets/:id/sensitive-output", async (request, reply) => {
+    const user = await requireRole(request, reply, ["builder"]);
+    if (!user) return;
+    const parsed = z.object({ sensitiveOutput: z.boolean() }).strict().safeParse(request.body ?? {});
+    if (!parsed.success) {
+      reply.code(400);
+      return { error: "Invalid payload: send { sensitiveOutput: true | false }", details: parsed.error.issues };
+    }
+    const row = await store.getSecret(request.params.id);
+    if (!row || isInternalSecretProvider(row.provider)) {
+      reply.code(404);
+      return { error: "Secret not found" };
+    }
+    const denial = await secretManageDenial(user, row, "secret:write");
+    if (denial) return denyRunAccess(reply, denial);
+    const current = (await store.listSensitiveOutputSecretIds()).includes(row.id);
+    if (current && !parsed.data.sensitiveOutput && user.role !== "admin") {
+      reply.code(403);
+      return { error: "Only an admin can clear a secret's sensitive output flag." };
+    }
+    if (current !== parsed.data.sensitiveOutput) {
+      await store.setSecretSensitiveOutput(row.id, parsed.data.sensitiveOutput);
+      sensitiveSecrets.invalidate();
+      await audit(request, user, {
+        category: "secret",
+        eventType: "secret.sensitive_output",
+        action: "update",
+        resourceType: "secret",
+        resourceId: row.id,
+        projectId: row.projectId,
+        metadata: { name: row.name, sensitiveOutput: parsed.data.sensitiveOutput }
+      });
+    }
+    return { id: row.id, sensitiveOutput: parsed.data.sensitiveOutput };
   });
 
   app.delete<{ Params: { id: string } }>("/api/secrets/:id", async (request, reply) => {
@@ -11308,7 +11415,14 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     }
     const deleteDenial = await secretManageDenial(user, row, "secret:write");
     if (deleteDenial) return denyRunAccess(reply, deleteDenial);
+    // 12.2 — deleting a flagged secret (and creating it again unflagged) would clear its flag: an admin's call, as
+    // clearing it is.
+    if (user.role !== "admin" && (await store.listSensitiveOutputSecretIds()).includes(row.id)) {
+      reply.code(403);
+      return { error: "Only an admin can delete a secret flagged sensitive output." };
+    }
     await secretService.deleteSecret(request.params.id);
+    sensitiveSecrets.invalidate();
     await audit(request, user, {
       category: "secret",
       eventType: "secret.delete",
@@ -13543,6 +13657,8 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     delete imported.pinnedData;
     // Phase 15.4 — like a duplicate, a workflow made from a template gets trigger paths nobody uses.
     imported.nodes = withUniqueTriggerPaths(imported, await releaseService.usedRoutingKeys()).nodes;
+    // 12.2 — and, made by a builder, its triggers' default trust.
+    if (user.role !== "admin") imported.nodes = withoutTriggerTrust(imported).nodes;
     const saveDenial = await workflowSaveDenial(user, imported);
     if (saveDenial) return denyRunAccess(reply, saveDenial);
     await store.upsertWorkflow(imported, { createdBy: user.id });
@@ -13599,6 +13715,8 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       imported.name = `${imported.name} (imported)`;
       // Phase 15.4 — a shared copy gets trigger paths nobody uses, like a duplicate.
       imported.nodes = withUniqueTriggerPaths(imported, await releaseService.usedRoutingKeys()).nodes;
+      // 12.2 — a share link carries no trust setting (whoever made the link chose it): an admin sets it again.
+      imported.nodes = withoutTriggerTrust(imported).nodes;
       const saveDenial = await workflowSaveDenial(user, imported);
       if (saveDenial) return denyRunAccess(reply, saveDenial);
       await store.upsertWorkflow(imported, { createdBy: user.id });

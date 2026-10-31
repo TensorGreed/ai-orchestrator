@@ -141,3 +141,151 @@ export function inputProvenance(triggerType: string | null | undefined, origin: 
   if (triggerType && USER_INPUT_TRIGGERS.has(triggerType)) return "user";
   return "untrusted_external";
 }
+
+// ---------------------------------------------------------------------------
+// 12.2 — provenance sources: trigger trust, declared sensitive output, endorsement
+// ---------------------------------------------------------------------------
+
+/**
+ * What an admin may declare about a trigger's input (`inputTrust` in the
+ * trigger node's config). Never `trusted`: only the server's own scheduler
+ * starts runs whose input is trusted.
+ */
+export const TRIGGER_TRUST_LEVELS = ["user", "untrusted_external"] as const;
+export type TriggerTrust = (typeof TRIGGER_TRUST_LEVELS)[number];
+export const triggerTrustSchema = z.enum(TRIGGER_TRUST_LEVELS);
+
+/** The trigger node config key an admin sets. */
+export const TRIGGER_TRUST_CONFIG_KEY = "inputTrust";
+/**
+ * The node config key that binds an admin's trust setting to the trigger it was made for: the trigger's node type,
+ * auth mode, secret and path when the admin set it. The API writes it on an admin's save; a trust whose binding no
+ * longer matches the trigger is ignored (the trigger falls back to its default trust).
+ */
+export const TRIGGER_TRUST_BINDING_KEY = "inputTrustFor";
+
+/** What an admin's trust setting was made for. */
+export interface TriggerTrustBinding {
+  nodeType: string;
+  authMode: string;
+  secretId: string | null;
+  path: string;
+}
+
+/** The binding a trust setting on this trigger node would have now. */
+export function triggerTrustBindingOf(node: { type: string; config?: unknown }): TriggerTrustBinding {
+  const config = node.config && typeof node.config === "object" && !Array.isArray(node.config) ? (node.config as Record<string, unknown>) : {};
+  const secretRef = config.secretRef && typeof config.secretRef === "object" ? (config.secretRef as Record<string, unknown>) : {};
+  return {
+    nodeType: node.type,
+    authMode: typeof config.authMode === "string" && config.authMode.trim() ? config.authMode.trim() : "none",
+    secretId: typeof secretRef.secretId === "string" && secretRef.secretId.trim() ? secretRef.secretId.trim() : null,
+    path: typeof config.path === "string" ? config.path.trim().replace(/^\/+|\/+$/g, "").toLowerCase() : ""
+  };
+}
+
+/** The binding stored next to a trust setting; undefined when absent or malformed. */
+export function storedTriggerTrustBinding(config: unknown): TriggerTrustBinding | undefined {
+  if (!config || typeof config !== "object" || Array.isArray(config)) return undefined;
+  const raw = (config as Record<string, unknown>)[TRIGGER_TRUST_BINDING_KEY];
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  const value = raw as Record<string, unknown>;
+  if (typeof value.nodeType !== "string" || typeof value.authMode !== "string" || typeof value.path !== "string") return undefined;
+  if (value.secretId !== null && typeof value.secretId !== "string") return undefined;
+  return { nodeType: value.nodeType, authMode: value.authMode, secretId: value.secretId as string | null, path: value.path };
+}
+
+function sameBinding(a: TriggerTrustBinding, b: TriggerTrustBinding): boolean {
+  return a.nodeType === b.nodeType && a.authMode === b.authMode && a.secretId === b.secretId && a.path === b.path;
+}
+
+/**
+ * The state of a trigger's trust setting: `none` (no setting), `active` (it matches its trigger), or `reset` (the
+ * trigger's type, auth mode, secret or path changed since an admin set it, or it was never bound). A reset `user`
+ * is ignored; a reset `untrusted_external` still applies (see `effectiveTriggerTrust`).
+ */
+export function triggerTrustState(node: { type: string; config?: unknown }): "none" | "active" | "reset" {
+  if (!triggerTrustOf(node.config)) return "none";
+  const stored = storedTriggerTrustBinding(node.config);
+  return stored && sameBinding(stored, triggerTrustBindingOf(node)) ? "active" : "reset";
+}
+
+/**
+ * The trust setting that applies to a trigger node. The reset only ever tightens: an admin's `user` applies while it
+ * still matches the trigger it was set for, and an admin's `untrusted_external` applies whatever changed since.
+ */
+export function effectiveTriggerTrust(node: { type: string; config?: unknown }): TriggerTrust | undefined {
+  const trust = triggerTrustOf(node.config);
+  if (trust === "untrusted_external") return trust;
+  return trust && triggerTrustState(node) === "active" ? trust : undefined;
+}
+
+/** The node config key that declares a node's output sensitive. */
+export const SENSITIVE_OUTPUT_CONFIG_KEY = "sensitiveOutput";
+
+/** The admin's trust setting in a trigger node's config; anything else (absent, invalid) is none. */
+export function triggerTrustOf(config: unknown): TriggerTrust | undefined {
+  if (!config || typeof config !== "object" || Array.isArray(config)) return undefined;
+  const parsed = triggerTrustSchema.safeParse((config as Record<string, unknown>)[TRIGGER_TRUST_CONFIG_KEY]);
+  return parsed.success ? parsed.data : undefined;
+}
+
+/**
+ * The provenance of a webhook run's input: the admin's setting when there is
+ * one, else `user` when the server verified the caller (a bearer token or an
+ * HMAC signature against the trigger's secret), else `untrusted_external`.
+ * Nothing in the request itself (a header, a body field) can choose it.
+ */
+export function triggerInputProvenance(input: { verified: boolean; trust?: TriggerTrust }): ProvenanceLabel {
+  return input.trust ?? (input.verified ? "user" : "untrusted_external");
+}
+
+/** True when a node's config declares its output sensitive ("Sensitive output"). */
+export function declaresSensitiveOutput(config: unknown): boolean {
+  return Boolean(config && typeof config === "object" && !Array.isArray(config) && (config as Record<string, unknown>)[SENSITIVE_OUTPUT_CONFIG_KEY] === true);
+}
+
+/**
+ * Endorse: a person approved this content, so outside content in it now
+ * counts as the user's. Only `untrusted_external` changes (to `user`);
+ * `sensitive`, `trusted` and the data classes stay. Only a human approval
+ * endorses: never a guard scan or any other automated check.
+ */
+export function endorseLabels(labels: DataLabels): DataLabels {
+  if (!labels.provenance.includes("untrusted_external")) return labels;
+  const provenance = new Set<ProvenanceLabel>(labels.provenance.filter((label) => label !== "untrusted_external"));
+  provenance.add("user");
+  return { ...labels, provenance: PROVENANCE_LABELS.filter((label) => provenance.has(label)) };
+}
+
+export const LABEL_ENDORSEMENT_KINDS = ["human_approval", "approval_gate", "tool_call"] as const;
+export type LabelEndorsementKind = (typeof LABEL_ENDORSEMENT_KINDS)[number];
+
+/**
+ * A human approval that endorsed content, as the run's trace records it on
+ * the approving node's result: who approved, when, and which nodes' outputs
+ * it covers (the approving node and the inputs it showed the approver).
+ * Nodes downstream of the approval read those outputs endorsed; any other
+ * reader, and any source that joins later, keeps its labels.
+ */
+export const labelEndorsementSchema = z.object({
+  kind: z.enum(LABEL_ENDORSEMENT_KINDS),
+  approvedBy: z.string().nullable(),
+  approvedAt: z.string(),
+  nodeIds: z.array(z.string()).max(500),
+  /** The approved tool call's tool, for `tool_call`. */
+  toolName: z.string().optional()
+});
+export type LabelEndorsement = z.output<typeof labelEndorsementSchema>;
+
+/**
+ * 12.2 — data classes found in content make it `sensitive` too (detected classes exist on tracked runs only). Live
+ * policy evaluation, the labels a tool call records and the policy simulator all read labels through this, so a
+ * `label_present: sensitive` rule decides the same way in each.
+ */
+export function withImpliedSensitive<T extends Pick<DataLabels, "provenance" | "dataClasses">>(labels: T): T {
+  if (labels.dataClasses.length === 0 || labels.provenance.includes("sensitive")) return labels;
+  const provenance = new Set<ProvenanceLabel>(labels.provenance);
+  provenance.add("sensitive");
+  return { ...labels, provenance: PROVENANCE_LABELS.filter((label) => provenance.has(label)) };
+}

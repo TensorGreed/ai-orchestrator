@@ -377,8 +377,10 @@ describe("propagation through templates and the DAG", () => {
     expect(paused[0]!.dataLabels?.nodes.greet).toEqual(L(["untrusted_external"], ["email"]));
     const resumed = await resumeWorkflowExecution({ executionId: "t10", state: paused[0]!, decision: "approve", actedBy: "admin" }, deps({ guard }));
     expect(resumed.status).toBe("success");
+    // 12.2 — "ok?" showed the approver nothing: the approval is recorded but endorses nothing.
     expect(labelsOf(resumed, "ask")).toEqual(L(["user", "untrusted_external"], ["email"]));
     expect(labelsOf(resumed, "after")).toEqual(L(["user", "untrusted_external"], ["email"]));
+    expect(resultOf(resumed, "ask")?.endorsement).toMatchObject({ kind: "human_approval", approvedBy: "admin", nodeIds: [] });
   });
 });
 
@@ -688,24 +690,29 @@ describe("resume, pinned data and approvals (round 1 fixes)", () => {
     expect(paused[0]!.dataLabels).toBeUndefined();
     const resumed = await resumeWorkflowExecution({ executionId: "p2", state: paused[0]!, decision: "approve", actedBy: "admin" }, deps({ guard: viaPause.guard, workflows: [child] }));
     expect(resumed.status).toBe("success");
-    // The tracked child still sees the webhook content as outside content.
+    // The tracked child still sees the webhook content as outside content (12.2: the approval's message showed none of it).
     expect(viaPause.spy.seen.at(-1)?.labels).toContain("untrusted_external");
   });
 
   it("a paused run resumed with tracking on labels the restored input and nodes untrusted_external", async () => {
     const paused: WorkflowExecutionState[] = [];
-    const wf = simpleWorkflow([node("ask", "human_approval", { approvalMessage: "ok?", timeoutMinutes: 30 }), set("after", { copy: "{{results.greet.text}}" })], [
-      { source: "greet", target: "ask" },
-      { source: "ask", target: "after" }
-    ]);
+    // greet → side → ask → after: the approval showed side (its input), not greet, which `after` also reads.
+    const wf = simpleWorkflow(
+      [set("side", { note: "{{results.greet.text}}" }), node("ask", "human_approval", { approvalMessage: "ok?", timeoutMinutes: 30 }), set("after", { copy: "{{results.greet.text}}" })],
+      [
+        { source: "greet", target: "side" },
+        { source: "side", target: "ask" },
+        { source: "ask", target: "after" }
+      ]
+    );
     const untracked = guardDeps(["default"]);
     await executeWorkflow({ workflow: wf, executionId: "p3", inputLabels: L(["user"]) as DataLabels, webhookPayload: { user_prompt: "x" } }, deps({ guard: untracked.guard, paused }));
     expect(paused[0]!.dataLabels).toBeUndefined();
     const tracked = guardDeps(["tracking"]);
     const resumed = await resumeWorkflowExecution({ executionId: "p3", state: paused[0]!, decision: "approve", actedBy: "admin" }, deps({ guard: tracked.guard }));
     expect(resumed.status).toBe("success");
+    // The restored greet counts as outside content; the approval does not endorse it (it did not show it).
     expect(labelsOf(resumed, "after")?.provenance).toEqual(["user", "untrusted_external"]);
-    expect(labelsOf(resumed, "after")?.provenance).toContain("untrusted_external");
   });
 
   it("pinned data keeps the origin of the node type that usually produces it", async () => {
@@ -738,6 +745,7 @@ describe("resume, pinned data and approvals (round 1 fixes)", () => {
     expect(first.status).toBe("waiting_approval");
     expect(paused[0]!.approvalHandoff?.kind).toBe("route");
     const resumed = await resumeWorkflowExecution({ executionId: "p5", state: paused[0]!, decision: "approve", actedBy: "admin" }, deps({ guard }));
+    // 12.2 — the review request shows the verdict and findings, not the content: approving it endorses nothing.
     expect(labelsOf(resumed, "gate")?.provenance).toEqual(["user", "untrusted_external"]);
   });
 });
