@@ -165,12 +165,12 @@ describe("policy simulation", () => {
   }
 
   it("charges the decision work: a costly rule set stops at the work budget, and other work runs meanwhile", async () => {
-    await costlyRules(96);
+    await costlyRules(48);
     let ticks = 0;
     const timer = setInterval(() => (ticks += 1), 5);
     const started = performance.now();
     let ticksWhileRunning = 0;
-    const result = await new McpPolicySimulationService({ store: test.store, hashKey, now: () => NOW, deadlineMs: 60_000 })
+    const result = await new McpPolicySimulationService({ store: test.store, hashKey, now: () => NOW, workBudget: 10_000_000, deadlineMs: 60_000 })
       .simulate({ windowDays: 7, addRule: denyDocs })
       .finally(() => {
         ticksWhileRunning = ticks;
@@ -181,6 +181,44 @@ describe("policy simulation", () => {
     expect(performance.now() - started).toBeLessThan(10_000);
     // The scan handed the event loop back: timers fired while it ran.
     expect(ticksWhileRunning).toBeGreaterThan(0);
+  });
+
+  it("stops before a call whose worst case is over what is left of the work budget, without counting it", async () => {
+    await costlyRules(48);
+    const unbounded = await new McpPolicySimulationService({ store: test.store, hashKey, now: () => NOW, workBudget: Number.MAX_SAFE_INTEGER, deadlineMs: 60_000, scanCap: 1 }).simulate({
+      windowDays: 7,
+      addRule: denyDocs
+    });
+    // Under the per-call ceiling: evaluated and decided.
+    expect(unbounded.counts.unchanged).toBe(1);
+    // A budget below one call's worst case: the first call is read but not evaluated, and the scan stops there.
+    const result = await new McpPolicySimulationService({ store: test.store, hashKey, now: () => NOW, workBudget: 100_000, deadlineMs: 60_000 }).simulate({ windowDays: 7, addRule: denyDocs });
+    expect(result).toMatchObject({ capped: true, cappedReason: "work_budget", scanned: 1 });
+    expect(Object.values(result.counts).reduce((sum, count) => sum + count, 0)).toBe(0);
+  });
+
+  it("counts a call too costly to evaluate as undetermined, never as decided, and holds the loop briefly", async () => {
+    // 608 rules that all match each call (8 the summary cannot decide, 300 denies, 300 allows): about 1 s per call
+    // if evaluated.
+    await costlyRules(300);
+    const service = new McpPolicySimulationService({ store: test.store, hashKey, now: () => NOW, deadlineMs: 60_000 });
+    let longest = 0;
+    let last = performance.now();
+    const timer = setInterval(() => {
+      const now = performance.now();
+      longest = Math.max(longest, now - last);
+      last = now;
+    }, 1);
+    const started = performance.now();
+    const result = await service.simulate({ windowDays: 7, addRule: denyDocs }).finally(() => clearInterval(timer));
+    expect(result.capped).toBe(false);
+    expect(result.scanned).toBe(40);
+    expect(result.counts).toMatchObject({ undetermined: 40, unchanged: 0, newly_denied: 0, no_longer_denied: 0, newly_needs_approval: 0, no_longer_needs_approval: 0 });
+    expect(result.examples.undetermined[0]!.reason).toMatch(/too many rules match this call/);
+    expect(result.examples.undetermined[0]).toMatchObject({ currentEffect: null, draftEffect: null });
+    expect(performance.now() - started).toBeLessThan(5_000);
+    // No single call held the event loop anywhere near the second an evaluation would take.
+    expect(longest).toBeLessThan(250);
   });
 
   it("stops at its wall-clock deadline whatever the work count says", async () => {
