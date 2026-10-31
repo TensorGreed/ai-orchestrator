@@ -186,7 +186,7 @@ test.describe("provenance sources", () => {
           workflowVersion: 1,
           nodes: [
             { id: "hook", type: "webhook_input", name: "Hook", position: { x: 80, y: 180 }, config: { path: hookPath, method: "POST" } },
-            { id: "review", type: "human_approval", name: "Review", position: { x: 380, y: 180 }, config: { approvalMessage: "Check the partner's text: {{results.hook.user_prompt}}", timeoutMinutes: 30 } },
+            { id: "review", type: "human_approval", name: "Review", position: { x: 380, y: 180 }, config: { approvalMessage: "Check the partner's request in full: {{results.hook}}", timeoutMinutes: 30 } },
             { id: "out", type: "output", name: "Output", position: { x: 680, y: 180 }, config: { responseTemplate: "ok", outputKey: "result" } }
           ],
           edges: [
