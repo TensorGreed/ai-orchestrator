@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import type { McpToolPolicyRule } from "@ai-orchestrator/shared";
 import { beforeEach, vi } from "vitest";
 import * as api from "../lib/api";
-import { conditionsToDraft, draftToConditions, parseScalar, scalarText } from "./McpPolicyConditionsEditor";
+import { conditionsToDraft, draftToConditions, labelConditionNotes, parseScalar, scalarText } from "./McpPolicyConditionsEditor";
 import { McpServersPage } from "./McpServersPage";
 
 vi.mock("../lib/api", async () => {
@@ -32,7 +32,10 @@ vi.mock("../lib/api", async () => {
     fetchMcpPolicySuggestions: vi.fn(),
     generateMcpPolicySuggestions: vi.fn(),
     decideMcpPolicySuggestion: vi.fn(),
-    enforceMcpToolPolicy: vi.fn()
+    enforceMcpToolPolicy: vi.fn(),
+    fetchMcpSafetyPresets: vi.fn(),
+    addMcpSafetyPreset: vi.fn(),
+    setMcpToolOpenWorld: vi.fn()
   };
 });
 
@@ -138,6 +141,83 @@ describe("MCP tool policy UI", () => {
     vi.mocked(api.fetchMcpGatewayApprovals).mockResolvedValue({ approvals: [], approvalWindowMs: 900000 });
     vi.mocked(api.fetchMcpPolicySuggestions).mockResolvedValue({ suggestions: [] });
     vi.mocked(api.fetchMcpPolicyShadowHits).mockResolvedValue({ shadowHits: { days: 7, since: "", scanned: 0, capped: false, rules: [], groups: [] } });
+    vi.mocked(api.fetchMcpSafetyPresets).mockResolvedValue({ presets: [] });
+  });
+
+  it("adds a safety preset in shadow and shows its state", async () => {
+    const user = userEvent.setup();
+    const preset = (added: boolean): api.McpSafetyPresetState => ({
+      id: "untrusted_write_approval",
+      title: "Untrusted content ⇒ write tools need approval",
+      summary: "Write tools wait for an approval after outside content.",
+      ruleId: "mtp_preset_untrusted_write_approval",
+      added,
+      ...(added ? { mode: "shadow" as const, enabled: true, customised: false } : {})
+    });
+    vi.mocked(api.fetchMcpSafetyPresets).mockResolvedValueOnce({ presets: [preset(false)] }).mockResolvedValue({ presets: [preset(true)] });
+    vi.mocked(api.addMcpSafetyPreset).mockResolvedValue({
+      rule: makeRule({ id: "mtp_preset_untrusted_write_approval", name: "Untrusted content: write tools need approval", effect: "require_approval", mode: "shadow" })
+    });
+    render(<McpServersPage view="policies" isAdmin activeProjectId="default" />);
+    const card = await screen.findByTestId("mcp-preset-untrusted_write_approval");
+    await user.click(within(card).getByRole("button", { name: "Add in shadow" }));
+    expect(api.addMcpSafetyPreset).toHaveBeenCalledWith("untrusted_write_approval");
+    await waitFor(() => expect(within(card).getByText("shadow")).toBeInTheDocument());
+    expect(await screen.findByText("Untrusted content: write tools need approval")).toBeInTheDocument();
+  });
+
+  it("shows presets to builders without the add button", async () => {
+    vi.mocked(api.fetchMcpSafetyPresets).mockResolvedValue({
+      presets: [{ id: "sensitive_no_open_world", title: "Sensitive data ⇒ no open-world tools", summary: "s", ruleId: "r", added: false }]
+    });
+    render(<McpServersPage view="policies" isAdmin={false} />);
+    const card = await screen.findByTestId("mcp-preset-sensitive_no_open_world");
+    expect(within(card).getByText("Not added")).toBeInTheDocument();
+    expect(within(card).queryByRole("button")).not.toBeInTheDocument();
+  });
+
+  it("shows whether a tool is open world and why, and lets admins override it", async () => {
+    const user = userEvent.setup();
+    const tools = await api.fetchMcpServerTools("mcp_1", "default");
+    vi.mocked(api.fetchMcpServerTools).mockResolvedValue({
+      ...tools,
+      tools: tools.tools.map((tool) => (tool.name === "calculator" ? { ...tool, openWorld: { openWorld: true, source: "unknown" as const }, manualOpenWorld: null } : tool))
+    });
+    vi.mocked(api.setMcpToolOpenWorld).mockResolvedValue({
+      serverId: "mcp_1",
+      toolName: "calculator",
+      override: { openWorld: false },
+      manualOpenWorld: false,
+      openWorld: { openWorld: false, source: "manual" }
+    });
+    render(<McpServersPage isAdmin activeProjectId="default" />);
+    expect(await screen.findByText("unclassified server")).toBeInTheDocument();
+    expect(screen.getByText("Open world")).toBeInTheDocument();
+    await user.selectOptions(screen.getByLabelText("Open world for calculator"), "closed");
+    expect(api.setMcpToolOpenWorld).toHaveBeenCalledWith("mcp_1", "calculator", false);
+    await waitFor(() => expect(screen.getByText("Not open world")).toBeInTheDocument());
+    expect(screen.getByText("set by an admin")).toBeInTheDocument();
+  });
+
+  it("marks additive rules (presets, the workflow switch) for admins", async () => {
+    vi.mocked(api.fetchMcpToolPolicies).mockResolvedValue({
+      rules: [makeRule({ id: "mtp_wf_untrusted_writes_wf-1", name: "This workflow: approve writes", effect: "require_approval", additive: true }), makeRule({ id: "plain", name: "Plain rule" })],
+      roles: ["admin", "builder", "operator", "viewer"]
+    });
+    render(<McpServersPage view="policies" isAdmin activeProjectId="default" />);
+    expect(await screen.findByText("This workflow: approve writes")).toBeInTheDocument();
+    expect(screen.getAllByText("Additive")).toHaveLength(1);
+    expect(screen.getByText("Additive")).toHaveAttribute("title", expect.stringContaining("never sets another rule aside"));
+  });
+
+  it("explains what label conditions do", () => {
+    const rows = (value: string) => conditionsToDraft({ all: [{ op: "label_present", value }] });
+    expect(labelConditionNotes(conditionsToDraft(null))).toEqual([]);
+    expect(labelConditionNotes(rows("untrusted_external"))).toHaveLength(1);
+    expect(labelConditionNotes(rows("untrusted_external"))[0]).toMatch(/gateway/);
+    expect(labelConditionNotes(rows("sensitive"))[1]).toMatch(/label tracking for runs of the workflows this rule covers/);
+    expect(labelConditionNotes(rows("sensitive"))[1]).toMatch(/destination checks/);
+    expect(labelConditionNotes(rows("email"))).toHaveLength(2);
   });
 
   it("shows read-only classification with its source, blocked marks, and lets admins override", async () => {

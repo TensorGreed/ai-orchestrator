@@ -1,5 +1,9 @@
 import { createHash } from "node:crypto";
 import {
+  MCP_ADAPTERS_WITHOUT_NETWORK,
+  mcpServerDestinationRef,
+  resolveDestination,
+  type DataDestinationRow,
   canonicalMcpToolPolicyRule,
   conditionList,
   parseMcpPolicyPath,
@@ -15,7 +19,10 @@ import {
   type McpToolPolicyDecisionRecord,
   type McpToolPolicyEffect,
   type McpToolPolicyMode,
-  type McpToolPolicyRule
+  type McpToolPolicyRule,
+  type DestinationTier,
+  type McpOpenWorldResolution,
+  type McpToolCallLabels
 } from "@ai-orchestrator/shared";
 
 /**
@@ -92,6 +99,14 @@ export interface McpToolPolicyRequest {
   arguments?: Record<string, unknown>;
   /** Phase 12.4 — the run's data labels at the call; absent when the run does not track labels. */
   dataLabels?: { provenance: readonly string[]; dataClasses: readonly string[] } | null;
+  /**
+   * Phase 12.2 — the tool's resolved open-world value (see `resolveToolOpenWorld`): it decides `open_world` /
+   * `not_open_world` hints. Absent: the annotation alone decides, as before. Unless it is an admin's override
+   * (`openWorldManual`), it can only tighten: see `ruleHintMatches`.
+   */
+  openWorld?: boolean | null;
+  /** Phase 12.2 — `openWorld` is an admin's per-tool override, which decides alone. */
+  openWorldManual?: boolean;
 }
 
 /**
@@ -114,7 +129,9 @@ export interface EffectiveToolHints {
 
 export function effectiveToolHints(
   annotations?: McpToolAnnotations | null,
-  manualReadOnly?: boolean | null
+  manualReadOnly?: boolean | null,
+  /** Phase 12.2 — the resolved open-world value (`resolveToolOpenWorld`); replaces `openWorldHint` when given. */
+  openWorld?: boolean | null
 ): EffectiveToolHints {
   const readOnly =
     typeof manualReadOnly === "boolean" ? manualReadOnly : annotations?.readOnlyHint === true && annotations?.destructiveHint !== true;
@@ -122,8 +139,118 @@ export function effectiveToolHints(
     readOnly,
     destructive: readOnly ? false : annotations?.destructiveHint !== false,
     idempotent: readOnly ? true : annotations?.idempotentHint === true,
-    openWorld: annotations?.openWorldHint !== false
+    openWorld: typeof openWorld === "boolean" ? openWorld : annotations?.openWorldHint !== false
   };
+}
+
+/**
+ * Phase 12.2 — where the tool's server sends what it is given, as `resolveToolOpenWorld` reads it: the resolved
+ * destination of the server (tier, and whether a row or a built-in classified it), `"none"` for an adapter with no
+ * network (the mock server), or null when it is not known.
+ */
+export type ToolOpenWorldDestination = { tier: DestinationTier; matchedBy: "row" | "builtin" | "unmatched" } | "none" | null;
+
+/**
+ * Phase 12.2 — the destination of an MCP server as `resolveToolOpenWorld` reads it, from the host of its endpoint
+ * and the admin's destination rows (with the built-in ones): `"none"` for an adapter with no network.
+ */
+export function serverOpenWorldDestination(
+  server: { adapterId: string; registryServerId?: string | null; connection?: unknown },
+  rows: readonly DataDestinationRow[]
+): ToolOpenWorldDestination {
+  if (MCP_ADAPTERS_WITHOUT_NETWORK.has(server.adapterId)) return "none";
+  const ref = mcpServerDestinationRef({
+    adapterId: server.adapterId,
+    ...(server.registryServerId ? { registryServerId: server.registryServerId } : {}),
+    connection: server.connection
+  });
+  if (!ref) return "none";
+  const resolved = resolveDestination(ref, rows);
+  return { tier: resolved.tier, matchedBy: resolved.matchedBy };
+}
+
+/**
+ * Phase 12.2 — whether a tool counts as open world (it can send what it is given outside the organisation), in
+ * order:
+ *   1. an admin's per-tool override, either way;
+ *   2. the server's destination: a vendor or public tier is open world;
+ *   3. a local or private server (or one with no network): the tool's own `openWorldHint` decides, with the MCP
+ *      default (a missing hint is open world), since a local server can still reach out (a fetch or browser tool);
+ *   4. a destination that is not known or that no row or built-in classifies: open world. It fails closed.
+ * Only an admin override can make a tool on an unknown or vendor/public server closed-world.
+ */
+export function resolveToolOpenWorld(input: {
+  override?: boolean | null;
+  destination: ToolOpenWorldDestination | undefined;
+  annotations?: McpToolAnnotations | null;
+}): McpOpenWorldResolution {
+  if (typeof input.override === "boolean") return { openWorld: input.override, source: "manual" };
+  const destination = input.destination;
+  if (destination !== "none") {
+    if (!destination || destination.matchedBy === "unmatched") return { openWorld: true, source: "unknown" };
+    if (destination.tier === "vendor" || destination.tier === "public") return { openWorld: true, source: "destination" };
+  }
+  return { openWorld: input.annotations?.openWorldHint !== false, source: "annotation" };
+}
+
+/**
+ * Phase 12.2 — the request fields for a resolved open-world value: `openWorld`, and `openWorldManual` when an admin's
+ * override decided it. Empty when nothing was resolved, so the annotation alone decides.
+ */
+export function openWorldRequestFields(
+  resolution: McpOpenWorldResolution | null | undefined
+): Pick<McpToolPolicyRequest, "openWorld" | "openWorldManual"> {
+  if (!resolution) return {};
+  return { openWorld: resolution.openWorld, ...(resolution.source === "manual" ? { openWorldManual: true } : {}) };
+}
+
+/** Phase 12.2 — true when an enabled rule reads the open-world hint, so a tool's open-world value must be resolved. */
+export function policyReadsOpenWorld(rules: ReadonlyArray<Pick<McpToolPolicyRule, "enabled" | "annotationHint">>): boolean {
+  return rules.some((rule) => rule.enabled && isOpenWorldHint(rule.annotationHint));
+}
+
+/** Phase 12.2 — `open_world` or `not_open_world`. */
+export function isOpenWorldHint(condition: McpToolHintCondition | null | undefined): boolean {
+  return condition === "open_world" || condition === "not_open_world";
+}
+
+/**
+ * Whether a rule's annotation hint holds for a tool. Phase 12.2 — for an open-world hint without an admin override,
+ * the resolved value (destination tier) may only tighten what the annotation alone decided: a deny or
+ * require_approval rule matches when the annotation-only reading OR the resolved one matches; an allow rule (a
+ * carve-out) only when BOTH do. So a `not_open_world` deny keeps matching a tool that declares `openWorldHint:false`
+ * on an unclassified server, and an `open_world` allow does not start carving out tools it never matched. An admin's
+ * override decides alone.
+ */
+export function ruleHintMatches(
+  rule: Pick<McpToolPolicyRule, "annotationHint" | "effect">,
+  input: {
+    annotations?: McpToolAnnotations | null;
+    manualReadOnly?: boolean | null;
+    openWorld?: boolean | null;
+    openWorldManual?: boolean;
+  }
+): boolean {
+  const hint = rule.annotationHint;
+  if (!hint) return true;
+  const resolved = matchesHintCondition(hint, effectiveToolHints(input.annotations, input.manualReadOnly, input.openWorld));
+  if (!isOpenWorldHint(hint) || typeof input.openWorld !== "boolean" || input.openWorldManual === true) return resolved;
+  const annotationOnly = matchesHintCondition(hint, effectiveToolHints(input.annotations, input.manualReadOnly));
+  return rule.effect === "allow" ? resolved && annotationOnly : resolved || annotationOnly;
+}
+
+/**
+ * Phase 12.2 — whether a matched require_approval rule may also set a broader deny aside. Matching uses the
+ * EITHER reading (`ruleHintMatches`), so an approval can always ADD a gate; but setting a deny aside works like an
+ * allow, so as a carve-out an approval with an open-world hint counts only when BOTH readings match (or an admin's
+ * override decides). Rules of any other kind or hint are unaffected.
+ */
+export function approvalMayCarve(
+  rule: Pick<McpToolPolicyRule, "annotationHint" | "effect">,
+  input: Parameters<typeof ruleHintMatches>[1]
+): boolean {
+  if (rule.effect !== "require_approval" || !isOpenWorldHint(rule.annotationHint)) return true;
+  return ruleHintMatches({ annotationHint: rule.annotationHint, effect: "allow" }, input);
 }
 
 const HINT_KEYS: Record<string, keyof EffectiveToolHints> = {
@@ -322,10 +449,7 @@ export function ruleScopeMatches(rule: McpToolPolicyRule, request: McpToolPolicy
   if (rule.clientIds?.length && !(request.clientId && rule.clientIds.includes(request.clientId))) return false;
   if (!matchesPolicyServer(rule.serverId, request)) return false;
   if (!matchesToolPattern(rule.toolPattern, request.toolName)) return false;
-  if (rule.annotationHint) {
-    return matchesHintCondition(rule.annotationHint, effectiveToolHints(request.annotations, request.manualReadOnly));
-  }
-  return true;
+  return ruleHintMatches(rule, request);
 }
 
 /**
@@ -848,17 +972,29 @@ interface PolicyOutcome {
   overriddenApprovals: NonNullable<McpToolPolicyDecision["overriddenApprovals"]>;
 }
 
-/** Precedence over the rules that matched: deny > require_approval > allow, with strictly narrower carve-outs. */
-function decideOutcome(matched: readonly McpToolPolicyRule[], possibleCarveOuts: readonly McpToolPolicyRule[]): PolicyOutcome {
-  const allows = [...matched.filter((rule) => rule.effect === "allow"), ...possibleCarveOuts.filter((rule) => rule.effect === "allow")];
+/**
+ * Precedence over the rules that matched: deny > require_approval > allow, with strictly narrower carve-outs.
+ * Phase 12.2 — an additive rule (a safety preset's or the workflow switch's) never carves: it can add an approval,
+ * never set a deny (or another approval) aside. Neither does an approval in `nonCarving` (see `approvalMayCarve`).
+ */
+function decideOutcome(
+  matched: readonly McpToolPolicyRule[],
+  possibleCarveOuts: readonly McpToolPolicyRule[],
+  /** Phase 12.2 — matched approvals that may add a gate but not set a deny aside (`approvalMayCarve`). */
+  nonCarving: ReadonlySet<McpToolPolicyRule> = new Set()
+): PolicyOutcome {
+  const allows = [...matched.filter((rule) => rule.effect === "allow"), ...possibleCarveOuts.filter((rule) => rule.effect === "allow")].filter(
+    (rule) => rule.additive !== true
+  );
   const approvals = matched.filter((rule) => rule.effect === "require_approval");
+  const carvingApprovals = approvals.filter((rule) => rule.additive !== true && !nonCarving.has(rule));
   const denies = matched.filter((rule) => rule.effect === "deny");
   const overriddenDenies: PolicyOutcome["overriddenDenies"] = [];
   const overriddenApprovals: PolicyOutcome["overriddenApprovals"] = [];
   let blocking: McpToolPolicyRule | undefined;
   const carvedToApproval: McpToolPolicyRule[] = [];
   for (const deny of denies) {
-    const carve = allows.find((allow) => isStrictlyNarrower(allow, deny)) ?? approvals.find((approval) => isStrictlyNarrower(approval, deny));
+    const carve = allows.find((allow) => isStrictlyNarrower(allow, deny)) ?? carvingApprovals.find((approval) => isStrictlyNarrower(approval, deny));
     if (carve) {
       overriddenDenies.push({ deny, by: carve });
       if (carve.effect === "require_approval") carvedToApproval.push(carve);
@@ -889,8 +1025,12 @@ function decideOutcome(matched: readonly McpToolPolicyRule[], possibleCarveOuts:
  * rules already known to match the call. The caller passes the enforced
  * rules only; the result is the enforced outcome and the rule deciding it.
  */
-export function decidePolicyOutcome(matched: readonly McpToolPolicyRule[]): { effect: McpToolPolicyEffect; rule?: McpToolPolicyRule } {
-  const outcome = decideOutcome(matched, []);
+export function decidePolicyOutcome(
+  matched: readonly McpToolPolicyRule[],
+  /** Phase 12.2 — matched approvals that may not set a deny aside for this call (`approvalMayCarve`). */
+  nonCarving?: ReadonlySet<McpToolPolicyRule>
+): { effect: McpToolPolicyEffect; rule?: McpToolPolicyRule } {
+  const outcome = decideOutcome(matched, [], nonCarving);
   return { effect: outcome.effect, ...(outcome.rule && matched.length > 0 ? { rule: outcome.rule } : {}) };
 }
 
@@ -911,7 +1051,8 @@ export function evaluateMcpToolPolicy(
   // Discovery: an undecided allow may carve an exception for some calls, so it keeps a tool visible.
   const carveOuts = (shadowToo: boolean) => undecided.filter((rule) => shadowToo || policyRuleMode(rule) === "enforce");
   const matchedRules = matchedAll.filter((rule) => policyRuleMode(rule) === "enforce");
-  const enforced = decideOutcome(matchedRules, carveOuts(false));
+  const nonCarving = new Set(matchedAll.filter((rule) => !approvalMayCarve(rule, request)));
+  const enforced = decideOutcome(matchedRules, carveOuts(false), nonCarving);
   const decision: McpToolPolicyDecision = {
     allowed: enforced.effect !== "deny",
     effect: enforced.effect,
@@ -924,7 +1065,7 @@ export function evaluateMcpToolPolicy(
   };
   const shadowMatched = matchedAll.filter((rule) => policyRuleMode(rule) === "shadow");
   if (shadowMatched.length > 0) {
-    const withShadow = decideOutcome(matchedAll, carveOuts(true));
+    const withShadow = decideOutcome(matchedAll, carveOuts(true), nonCarving);
     decision.shadow = {
       effect: withShadow.effect,
       ...(withShadow.rule ? { rule: withShadow.rule } : {}),
@@ -941,11 +1082,14 @@ export function evaluateMcpToolPolicy(
  */
 export function policyDecisionRecord(
   decision: McpToolPolicyDecision,
-  approval?: McpToolPolicyDecisionRecord["approval"]
+  approval?: McpToolPolicyDecisionRecord["approval"],
+  /** Phase 12.2 — the labels the call was decided with (`recordedCallLabels`); recorded as given. */
+  labels?: McpToolCallLabels
 ): McpToolPolicyDecisionRecord | undefined {
   const shadowRules = decision.shadow?.matchedRules ?? [];
   if (decision.matchedRules.length === 0 && shadowRules.length === 0) return undefined;
   return {
+    ...(labels ? { labels } : {}),
     effect: decision.effect,
     decidedBy: decision.decidedBy,
     ...(decision.rule ? { ruleId: decision.rule.id, ruleHash: hashMcpToolPolicyRule(decision.rule) } : {}),

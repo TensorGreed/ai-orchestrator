@@ -25,11 +25,15 @@
  * and subject source the run's tool policy used (`_toolPolicy.subject` on
  * agent outputs; a direct MCP Tool node without its own uses the run's) and
  * the workflow's project.
+ *
+ * Phase 12.2 — each workflow row also keeps the labels the call's policy decision read (`_toolPolicy.callLabels`:
+ * provenance label names, data class names only on runs that tracked labels; never a value), whatever the summary
+ * setting, so policy simulation can evaluate label conditions.
  */
 
 import { randomUUID } from "node:crypto";
 import { parseMcpRuntimeRejection } from "@ai-orchestrator/mcp-sdk";
-import type { McpToolPolicyDecisionRecord, McpToolPolicySubject } from "@ai-orchestrator/shared";
+import { parseRecordedCallLabels, type McpToolCallLabels, type McpToolPolicyDecisionRecord, type McpToolPolicySubject } from "@ai-orchestrator/shared";
 import type { McpToolCallRecord, McpToolCallWrite } from "../db/database.js";
 import { percentile } from "./mcp-probe-service.js";
 import type { ToolArgumentSummarizer } from "./tool-argument-summary.js";
@@ -164,6 +168,26 @@ function policyColumn(decision: McpToolPolicyDecisionRecord | undefined): { poli
   return decision ? { policyDecision: decision } : {};
 }
 
+/** Phase 12.2 — the labels each call was decided with (`_toolPolicy.callLabels`), by the agent's tool call id. */
+function readCallLabels(output: Record<string, unknown>): { byCallId: Map<string, McpToolCallLabels>; all: McpToolCallLabels[] } {
+  const byCallId = new Map<string, McpToolCallLabels>();
+  const all: McpToolCallLabels[] = [];
+  const raw = asRecord(output._toolPolicy)?.callLabels;
+  for (const value of Array.isArray(raw) ? raw : []) {
+    const entry = asRecord(value);
+    // Re-validated: only label names that parse are written.
+    const labels = parseRecordedCallLabels(entry?.labels);
+    if (!entry || !labels) continue;
+    all.push(labels);
+    if (typeof entry.toolCallId === "string") byCallId.set(entry.toolCallId, labels);
+  }
+  return { byCallId, all };
+}
+
+function labelsColumn(labels: McpToolCallLabels | undefined): { labels?: McpToolCallLabels } {
+  return labels ? { labels } : {};
+}
+
 /** The tool policy subject an agent (or direct MCP Tool) node output records under `_toolPolicy`. */
 function readPolicySubject(output: Record<string, unknown> | null): McpToolPolicySubject | undefined {
   const subject = asRecord(asRecord(output?._toolPolicy)?.subject);
@@ -230,6 +254,7 @@ export function extractMcpToolCalls(input: ExtractMcpToolCallsInput): McpToolCal
     const attribution = readAttributionMap(output);
     const samplingShares = readSamplingShares(output);
     const policyDecisions = readPolicyDecisions(output).byCallId;
+    const callLabels = readCallLabels(output).byCallId;
     const callsByTool = new Map<string, number>();
     const telemetry = asRecord(output._telemetry);
     const providerId = asString(telemetry?.providerId);
@@ -289,6 +314,7 @@ export function extractMcpToolCalls(input: ExtractMcpToolCallsInput): McpToolCal
             ...samplingColumns(samplingShares.get(`${target.toolName}\u0000${callNumber}`)),
             ...(rejection ? { rejection } : {}),
             ...policyColumn(policyDecisions.get(asString(result.toolCallId) ?? "")),
+            ...labelsColumn(callLabels.get(asString(result.toolCallId) ?? "")),
             ...callContext(args, args !== undefined, subject)
           });
         }
@@ -358,6 +384,7 @@ export function extractMcpToolCalls(input: ExtractMcpToolCallsInput): McpToolCal
         ...(rejection ? { rejection } : {}),
         // A direct node makes one call: its decision is the last one recorded.
         ...policyColumn(output ? readPolicyDecisions(output).all.at(-1) : undefined),
+        ...labelsColumn(output ? readCallLabels(output).all.at(-1) ?? parseRecordedCallLabels(output._toolCallLabels) ?? undefined : undefined),
         ...callContext(request?.tool_args, hasArgs, readPolicySubject(output) ?? runSubject)
       });
       continue;

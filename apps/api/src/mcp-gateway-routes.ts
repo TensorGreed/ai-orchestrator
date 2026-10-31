@@ -48,7 +48,8 @@ import type { AuditEventInput } from "./services/audit-service.js";
 import type { RunAccess } from "./run-access.js";
 import type { SafeUser, UserRole } from "./services/auth-service.js";
 import { evaluateToolForContext } from "./services/mcp-tool-policy.js";
-import { withDelegatedUser } from "@ai-orchestrator/mcp-sdk";
+import { openWorldMarking } from "./services/mcp-open-world.js";
+import { policyReadsOpenWorld, withDelegatedUser } from "@ai-orchestrator/mcp-sdk";
 import type { MCPToolResult, McpRuntimeRejection } from "@ai-orchestrator/shared";
 import {
   buildGatewayCatalog,
@@ -407,7 +408,9 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     listMcpServers: async () => await store.listMcpServers(),
     getMcpToolSnapshot: async (id: string) => await store.getMcpToolSnapshot(id),
     listMcpToolPolicies: async () => await store.listMcpToolPolicies(),
-    listMcpToolClassifications: async (registryServerId?: string) => await store.listMcpToolClassifications(registryServerId)
+    listMcpToolClassifications: async (registryServerId?: string) => await store.listMcpToolClassifications(registryServerId),
+    listMcpToolOpenWorldOverrides: async (registryServerId?: string) => await store.listMcpToolOpenWorldOverrides(registryServerId),
+    listDataDestinations: async () => await store.listDataDestinations()
   };
   const catalogFor = async (toolset: McpToolset, role: McpPolicyRole, clientId?: string): Promise<GatewayCatalog> =>
     await buildGatewayCatalog({ toolset, role, store: catalogStore, ...(clientId ? { clientId } : {}) });
@@ -731,6 +734,8 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
   ): Promise<GatewayPolicyGate> => {
     const rules = await store.listMcpToolPolicies();
     if (rules.length === 0) return { outcome: "call" };
+    // Phase 12.2 — open world, only when a rule reads the open-world hint.
+    const openWorld = policyReadsOpenWorld(rules) ? await openWorldMarking(store, rules, await store.getMcpServer(tool.serverId)) : undefined;
     const decision = evaluateToolForContext(
       {
         rules,
@@ -740,7 +745,8 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
         adapterId: tool.adapterId,
         registryServerId: tool.serverId,
         serverLabel: tool.serverName,
-        clientId: auth.client.id
+        clientId: auth.client.id,
+        ...(openWorld ? { openWorld } : {})
       },
       { name: tool.toolName, ...(tool.annotations ? { annotations: tool.annotations } : {}) },
       "tool",

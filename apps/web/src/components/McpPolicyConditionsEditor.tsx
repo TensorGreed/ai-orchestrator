@@ -9,6 +9,7 @@
 
 import {
   MCP_POLICY_TEXT_OPS,
+  labelValueNeedsTracking,
   type McpPolicyCondition,
   type McpPolicyConditionOp,
   type McpPolicyScalar,
@@ -181,6 +182,23 @@ export function conditionsHint(effect: McpToolPolicyEffect | undefined): string 
     : "Paths are argument names with dots for nesting and [*] for list items. This rule applies when any list item matches; a missing argument counts as “is not one of” (and matches no other operator), and a value of another type (text for a number, an object) counts as a match. Safest: deny broadly, then allow exceptions with “is one of”.";
 }
 
+/**
+ * Phase 12.2 — what a rule's label conditions mean in practice: gateway calls carry no labels, and a `sensitive` or
+ * data class condition makes the runs the rule covers track labels (scan node outputs for data classes). Empty with no
+ * label rows.
+ */
+export function labelConditionNotes(draft: ConditionsDraft): string[] {
+  const values = draft.rows.filter((row) => LABEL_OPS.includes(row.op)).map((row) => row.value.trim());
+  if (values.length === 0) return [];
+  const notes = ["Data labels exist only in workflow runs: calls through the MCP gateway carry none, so label conditions never match them."];
+  if (values.some((value) => value && labelValueNeedsTracking(value))) {
+    notes.push(
+      "A “sensitive” or data class condition turns on label tracking for runs of the workflows this rule covers (those with an agent, MCP Tool or Execute Workflow node) while it is enabled: node outputs are scanned for data classes, which takes some time on large outputs, and the classes found also feed destination checks."
+    );
+  }
+  return notes;
+}
+
 export function McpPolicyConditionsEditor({
   draft,
   onChange,
@@ -298,6 +316,11 @@ export function McpPolicyConditionsEditor({
         </button>
         <small className="kb-subtle">{conditionsHint(effect)}</small>
       </div>
+      {labelConditionNotes(draft).map((note) => (
+        <p key={note} className="kb-subtle mcp-condition-note">
+          {note}
+        </p>
+      ))}
     </fieldset>
   );
 }

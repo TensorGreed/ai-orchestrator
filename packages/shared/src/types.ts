@@ -7,6 +7,7 @@ import type {
   McpSandboxSettings
 } from "./mcp-runtime-safety";
 import type { DataLabels, NodeLabelMap } from "./data-labels";
+import type { McpToolCallLabels } from "./taint-policy";
 
 export const WORKFLOW_SCHEMA_VERSION = "1.0.0";
 export const MAX_SUB_WORKFLOW_DEPTH = 10;
@@ -1127,6 +1128,12 @@ export interface McpToolPolicyRule {
   conditions?: McpToolPolicyConditions | null;
   /** Phase 12.4 — absent means `enforce`. */
   mode?: McpToolPolicyMode;
+  /**
+   * Phase 12.2 — set on the rules safety presets and the workflow's untrusted-write switch create: the rule only
+   * adds (an approval, a deny), it never carves an exception out of another rule, so no deny added later can be set
+   * aside by it. Stored with the rule; the generic rule editor cannot change it.
+   */
+  additive?: boolean;
   enabled: boolean;
   createdBy?: string | null;
   createdAt?: string;
@@ -1215,6 +1222,11 @@ export interface McpToolPolicyDecisionRecord {
     /** True when the shadow rules would have changed the outcome. */
     changed: boolean;
   };
+  /**
+   * Phase 12.2 — the labels the call was decided with (label names only; data class names only when the run tracked
+   * labels). Absent on gateway calls and on records written before.
+   */
+  labels?: McpToolCallLabels;
 }
 
 /** Phase 12.4 — one call's decision on the `_toolPolicy` trace. */
@@ -1234,6 +1246,20 @@ export interface McpToolPolicyTrace {
   hidden: McpHiddenTool[];
   /** Phase 12.4 — decisions for calls some rule matched (shadow rules included), in call order. */
   decisions?: McpToolPolicyCallTrace[];
+  /**
+   * Phase 12.2 — the labels of every call the policy decided, matched by a rule or not, in call order; the call's
+   * telemetry row keeps them so simulation can evaluate label conditions.
+   */
+  callLabels?: McpToolPolicyCallLabels[];
+}
+
+/** Phase 12.2 — one call's labels on the `_toolPolicy` trace. */
+export interface McpToolPolicyCallLabels {
+  tool: string;
+  server: string;
+  registryServerId?: string;
+  toolCallId?: string;
+  labels: McpToolCallLabels;
 }
 
 /**

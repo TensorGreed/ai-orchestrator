@@ -1,4 +1,4 @@
-import { evaluateMcpToolAccess, type McpToolAccessDecision } from "@ai-orchestrator/mcp-sdk";
+import { evaluateMcpToolAccess, openWorldRequestFields, policyReadsOpenWorld, type McpToolAccessDecision } from "@ai-orchestrator/mcp-sdk";
 import {
   MCP_POLICY_ROLES,
   type McpPolicyKind,
@@ -6,9 +6,11 @@ import {
   type McpToolAnnotations,
   type McpToolClassification,
   type McpToolClassificationOverride,
+  type McpOpenWorldResolution,
   type McpToolPolicyRule,
   type McpToolPolicySubject
 } from "@ai-orchestrator/shared";
+import { openWorldOverrideFor, resolveOpenWorldFor, type McpOpenWorldContext } from "./mcp-open-world.js";
 
 /**
  * Phase 10.2 — API-side helpers for the MCP tool policy: marking discovered
@@ -59,6 +61,10 @@ export interface MarkedMcpTool {
   /** Manual override for registry tools; null when annotations (or nothing) decide. */
   manualReadOnly: boolean | null;
   access: McpToolAccessMark;
+  /** Phase 12.2 — whether the tool counts as open world and why; present when the context carries `openWorld`. */
+  openWorld?: McpOpenWorldResolution;
+  /** Phase 12.2 — the admin's open-world override; null when the destination and annotations decide. */
+  manualOpenWorld?: boolean | null;
 }
 
 export interface McpToolMarkingContext {
@@ -75,6 +81,11 @@ export interface McpToolMarkingContext {
   workflowId?: string | null;
   /** Phase 12.4 — the MCP gateway client making the call, for rules scoped to clients. */
   clientId?: string | null;
+  /**
+   * Phase 12.2 — what open-world resolution reads (overrides, destination rows) and the server's connection. Absent:
+   * `open_world` hints read the annotation alone, as before.
+   */
+  openWorld?: McpOpenWorldContext & { connection?: unknown };
 }
 
 /** Phase 12.4 — the call being made; without it, rules with conditions cannot decide (discovery). */
@@ -123,6 +134,16 @@ export function evaluateToolForContext(
     kind,
     annotations: tool.annotations,
     manualReadOnly: manualReadOnlyFor(context.classifications, context.registryServerId, tool.name),
+    ...(context.openWorld && kind === "tool" && policyReadsOpenWorld(context.rules)
+      ? openWorldRequestFields(
+          resolveOpenWorldFor(
+            context.openWorld,
+            { adapterId: context.adapterId, registryServerId: context.registryServerId ?? null, connection: context.openWorld.connection },
+            tool.name,
+            tool.annotations
+          )
+        )
+      : {}),
     noWriteTools: context.noWriteTools,
     workflowId: context.workflowId ?? null,
     clientId: context.clientId ?? null,
@@ -138,11 +159,17 @@ export function markMcpTools<T extends { name: string; annotations?: McpToolAnno
 ): Array<T & MarkedMcpTool> {
   return tools.map((tool) => {
     const decision = evaluateToolForContext(context, tool);
+    const openWorld = context.openWorld
+      ? resolveOpenWorldFor(context.openWorld, { adapterId: context.adapterId, registryServerId: context.registryServerId ?? null, connection: context.openWorld.connection }, tool.name, tool.annotations)
+      : undefined;
     return {
       ...tool,
       classification: decision.classification,
       manualReadOnly: manualReadOnlyFor(context.classifications, context.registryServerId, tool.name),
-      access: toAccessMark(decision)
+      access: toAccessMark(decision),
+      ...(openWorld && context.openWorld
+        ? { openWorld, manualOpenWorld: openWorldOverrideFor(context.openWorld.overrides, context.registryServerId, tool.name) }
+        : {})
     };
   });
 }

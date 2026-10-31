@@ -31,6 +31,11 @@ export interface McpToolAccessSubjectTool {
   kind?: McpPolicyKind;
   /** Server name for block messages; falls back to the registry id. */
   serverLabel?: string;
+  /**
+   * Phase 12.2 — the server's connection settings, read only for the host of its endpoint (its destination tier
+   * decides whether the tool is open world). Never recorded.
+   */
+  connection?: unknown;
 }
 
 /** Phase 12.4 — what the call-time check knows about the call beyond the tool. */
@@ -119,7 +124,8 @@ export async function resolveMCPTools(
           ...(serverConfig.registryServerId ? { registryServerId: serverConfig.registryServerId } : {}),
           toolName: tool.name,
           ...(serverConfig.label ? { serverLabel: serverConfig.label } : {}),
-          ...(tool.annotations ? { annotations: tool.annotations } : {})
+          ...(tool.annotations ? { annotations: tool.annotations } : {}),
+          ...(serverConfig.connection ? { connection: serverConfig.connection } : {})
         });
         if (!verdict.allowed) {
           if (!blocked.has(exposedName)) {
@@ -136,6 +142,7 @@ export async function resolveMCPTools(
         ...(serverConfig.registryServerId ? { registryServerId: serverConfig.registryServerId } : {}),
         ...(tool.annotations ? { annotations: tool.annotations } : {}),
         ...(tool.outputSchema ? { outputSchema: tool.outputSchema } : {}),
+        ...(serverConfig.connection ? { connection: serverConfig.connection } : {}),
         definition: {
           name: exposedName,
           description: `[${serverConfig.serverId}] ${tool.description}`,
@@ -175,7 +182,8 @@ export async function resolveMCPTools(
             ...(target.serverConfig.registryServerId ? { registryServerId: target.serverConfig.registryServerId } : {}),
             toolName: target.originalName,
             ...(target.serverConfig.label ? { serverLabel: target.serverConfig.label } : {}),
-            ...(target.annotations ? { annotations: target.annotations } : {})
+            ...(target.annotations ? { annotations: target.annotations } : {}),
+            ...(target.serverConfig.connection ? { connection: target.serverConfig.connection } : {})
           },
           { ...call, arguments: args }
         );

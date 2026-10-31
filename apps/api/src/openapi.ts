@@ -464,6 +464,27 @@ export const openApiSpec = {
         }
       }
     },
+    "/api/workflows/{id}/untrusted-write-approval": {
+      get: {
+        tags: ["Workflows"],
+        summary: "The workflow's \"Approve writes only after untrusted content\" switch (workflow read access)",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "{ switch: { enabled, ruleId, mode?, ruleEnabled?, customised? } }" }, "404": { description: "Workflow not found" } }
+      },
+      put: {
+        tags: ["Workflows"],
+        summary:
+          "Turn the switch on or off (builder with workflow write access). On adds an enforced, additive tool rule for this workflow (a write tool waits for an approval while the context holds untrusted content; it never sets another rule aside), created and enforced in one transaction behind the tighten-only check: a refusal writes nothing, is audited as mcp_policy.create_refused and answers 409. Only an admin can turn off a rule an admin has changed.",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        requestBody: { required: true, content: { "application/json": { schema: { type: "object", required: ["enabled"], properties: { enabled: { type: "boolean" } } } } } },
+        responses: {
+          "200": { description: "{ switch }" },
+          "403": { description: "No write access, or the rule was changed by an admin" },
+          "404": { description: "Workflow not found" },
+          "409": { description: "The tighten-only check refused the rule, or it changed meanwhile" }
+        }
+      }
+    },
     "/api/workflows/{id}/duplicate": {
       post: {
         tags: ["Workflows"],
@@ -2160,6 +2181,38 @@ export const openApiSpec = {
         responses: { "200": { description: "Override and effective classification" }, "404": { description: "MCP server not found" } }
       }
     },
+    "/api/mcp/servers/{id}/tools/{toolName}/open-world": {
+      put: {
+        tags: ["MCP"],
+        summary:
+          "Override whether a tool counts as open world for open_world / not_open_world rules (admin). Without an override, vendor, public and unclassified servers are open world and on local or private servers the tool's openWorldHint decides (missing = open world). openWorld null clears the override. Audited as mcp_policy.open_world_set or mcp_policy.open_world_cleared.",
+        parameters: [
+          { name: "id", in: "path", required: true, schema: { type: "string" } },
+          { name: "toolName", in: "path", required: true, schema: { type: "string" } }
+        ],
+        requestBody: {
+          required: true,
+          content: { "application/json": { schema: { type: "object", required: ["openWorld"], properties: { openWorld: { type: "boolean", nullable: true } } } } }
+        },
+        responses: { "200": { description: "{ override, manualOpenWorld, openWorld: { openWorld, source } }" }, "404": { description: "MCP server not found" } }
+      }
+    },
+    "/api/mcp/policies/presets": {
+      get: {
+        tags: ["MCP"],
+        summary: "Safety presets (builder): ready-made tool rules over provenance labels, each with whether it was added, its mode and whether an admin changed it since",
+        responses: { "200": { description: "{ presets: [{ id, title, summary, rule, ruleId, added, mode?, enabled?, customised? }] }" } }
+      }
+    },
+    "/api/mcp/policies/presets/{presetId}": {
+      post: {
+        tags: ["MCP"],
+        summary:
+          "Add a safety preset's rule (admin): untrusted_write_approval (write tools need approval after untrusted content) or sensitive_no_open_world (no open-world tools while the context holds sensitive data). Created in shadow mode; enforce it with POST /api/mcp/policies/{id}/enforce.",
+        parameters: [{ name: "presetId", in: "path", required: true, schema: { type: "string", enum: ["untrusted_write_approval", "sensitive_no_open_world"] } }],
+        responses: { "201": { description: "{ rule }" }, "404": { description: "Unknown preset" }, "409": { description: "Already added" } }
+      }
+    },
     "/api/mcp/policies": {
       get: {
         tags: ["MCP"],
@@ -2362,7 +2415,11 @@ export const openApiSpec = {
                   arguments: { type: "object", description: "The call's arguments; without them, rules with conditions are reported as undecided" },
                   labels: { type: "array", items: { type: "string" }, description: "Data labels (provenance labels and data classes) the run carries" },
                   workflowId: { type: "string", nullable: true },
-                  clientId: { type: "string", nullable: true }
+                  clientId: { type: "string", nullable: true },
+                  connection: {
+                    type: "object",
+                    description: "An inline server's connection settings (serverId is an adapter id); only the endpoint host is read, for open world. Without it an inline network server's destination is unknown (open world)."
+                  }
                 }
               }
             }

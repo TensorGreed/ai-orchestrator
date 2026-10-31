@@ -8,7 +8,9 @@ import {
   type McpToolPolicyRule,
   type ToolArgumentFieldSummary,
   type ToolArgumentSummary,
-  type ToolArgumentValueType
+  type ToolArgumentValueType,
+  labelValueNeedsTracking,
+  type McpToolCallLabels
 } from "@ai-orchestrator/shared";
 import { hashToolArgumentValue, isToolArgumentLocationKey, toolArgumentHashKeyId } from "./tool-argument-summary";
 import {
@@ -19,16 +21,17 @@ import {
   decidePolicyOutcome,
   describePolicyCondition,
   describePolicyRule,
-  effectiveToolHints,
   evaluatePolicyCondition,
   evaluatePolicyConditionValue,
   hashMcpToolPolicyRule,
-  matchesHintCondition,
+  isOpenWorldHint,
   matchesPolicyServer,
   matchesToolPattern,
   policyRuleHasConditions,
   policyRuleKind,
   policyRuleMode,
+  approvalMayCarve,
+  ruleHintMatches,
   type PolicyConditionQuantifier
 } from "./tool-policy";
 
@@ -62,7 +65,11 @@ import {
  *     equal the literal was hashed (not for a number literal against a value
  *     that may be a string such as "05", not with `ignoreCase` on cased text);
  *   - `exists`: key presence and the types seen at the path;
- *   - label conditions: only for gateway calls, which carry no data labels.
+ *   - label conditions: for gateway calls, which carry no data labels, and (Phase 12.2) for calls whose labels were
+ *     recorded at decision time. A provenance label every run knows (`trusted`, `user`, `untrusted_external`) is
+ *     read from the recorded labels; `sensitive` and data class names when the run tracked labels (an untracked run
+ *     never scanned for them, and such a rule would have made it track), or when the label is recorded as present
+ *     (only its absence needs tracking). Calls recorded without labels stay undetermined.
  * Undetermined: `starts_with`, `ends_with`, `matches` and the number
  * operators against a hashed value; any value only known by its length
  * (strings over 2,048 characters); `[n]` index steps (the summary merges
@@ -104,8 +111,19 @@ export interface PolicySimulationCall {
   annotations?: McpToolAnnotations | null;
   /** The admin's read-only mark for the tool; undefined when not known. */
   manualReadOnly?: boolean | null;
-  /** `none`: the call carried no data labels (gateway); `unknown`: not recorded. */
-  labels: "none" | "unknown";
+  /**
+   * Phase 12.2 — the tool's resolved open-world value (`resolveToolOpenWorld`); undefined: the annotation decides.
+   * Read as the evaluator reads it (`ruleHintMatches`: without an override it only tightens). `unknown`: an admin's
+   * override changed after the call, so open-world hints cannot be decided (other hints still can).
+   */
+  openWorld?: boolean | null | "unknown";
+  /** Phase 12.2 — `openWorld` is an admin's override (it decides alone). */
+  openWorldManual?: boolean;
+  /**
+   * `none`: the call carried no data labels (gateway); `unknown`: not recorded; otherwise (Phase 12.2) the labels the
+   * call was decided with.
+   */
+  labels: "none" | "unknown" | McpToolCallLabels;
   summary: ToolArgumentSummary;
 }
 
@@ -638,7 +656,16 @@ export function evaluateConditionOnSummary(
   const anyQuantifier = quantifier === "any";
   if (condition.op === "label_present" || condition.op === "label_absent") {
     if (call.labels === "none") return { value: evaluatePolicyCondition(condition, {}, null, quantifier) };
-    return { value: "unknown", reason: `${conditionText(condition)}: the run's data labels are not recorded` };
+    if (call.labels === "unknown") return { value: "unknown", reason: `${conditionText(condition)}: the run's data labels are not recorded` };
+    const recorded = { provenance: call.labels.provenance, dataClasses: call.labels.dataClasses ?? [] };
+    // On an untracked run only a label's absence is in doubt (it was never scanned for); one recorded as present
+    // (a `sensitive` source) decides either way.
+    const recordedPresent =
+      typeof condition.value === "string" && ((recorded.provenance as readonly string[]).includes(condition.value) || recorded.dataClasses.includes(condition.value));
+    if (!call.labels.tracked && labelValueNeedsTracking(condition.value) && !recordedPresent) {
+      return { value: "unknown", reason: `${conditionText(condition)}: the run did not track data labels, so it was not scanned for this one` };
+    }
+    return { value: evaluatePolicyCondition(condition, {}, recorded, quantifier) };
   }
   if (typeof condition.path !== "string") return { value: anyQuantifier };
   const reading = readSummaryPath(call.summary, condition.path, condition.op !== "exists", context);
@@ -711,6 +738,19 @@ export function evaluateConditionOnSummary(
 // One rule against a call
 // ---------------------------------------------------------------------------
 
+/**
+ * What `ruleHintMatches` / `approvalMayCarve` read for a recorded call. An open-world value an admin's newer override
+ * made unknown reads as absent: the annotation alone (scopeState already marks open-world hints undetermined then).
+ */
+function simulatedHintInput(call: PolicySimulationCall): Parameters<typeof ruleHintMatches>[1] {
+  return {
+    annotations: call.annotations,
+    manualReadOnly: call.manualReadOnly ?? null,
+    openWorld: call.openWorld === "unknown" ? null : call.openWorld,
+    ...(call.openWorldManual ? { openWorldManual: true } : {})
+  };
+}
+
 function scopeState(rule: McpToolPolicyRule, call: PolicySimulationCall): SimulatedRuleState {
   if (!rule.enabled) return { state: "no_match" };
   if (policyRuleKind(rule) !== "tool") return { state: "no_match" };
@@ -731,7 +771,11 @@ function scopeState(rule: McpToolPolicyRule, call: PolicySimulationCall): Simula
   }
   if (rule.annotationHint) {
     if (call.annotations === undefined) unknowns.push("the tool's annotations are not known");
-    else if (!matchesHintCondition(rule.annotationHint, effectiveToolHints(call.annotations, call.manualReadOnly ?? null))) return { state: "no_match" };
+    else if (call.openWorld === "unknown" && isOpenWorldHint(rule.annotationHint)) {
+      unknowns.push("an admin changed the tool's open-world override after the call");
+    } else if (!ruleHintMatches(rule, simulatedHintInput(call))) {
+      return { state: "no_match" };
+    }
   }
   return unknowns.length > 0 ? { state: "unknown", reason: unknowns[0] } : { state: "match" };
 }
@@ -940,6 +984,8 @@ export function simulatePolicyTransition(
       work: scopedRules
     };
   }
+  // Phase 12.2 — approvals that may add a gate for this call but not set a deny aside (`approvalMayCarve`).
+  const nonCarving = new Set(relevant.filter((rule) => !approvalMayCarve(rule, simulatedHintInput(call))));
   let work = 0;
   for (let mask = 0; mask < combinations; mask += 1) {
     const assumed = (identity: string) => (mask >> undecided.indexOf(identity)) & 1;
@@ -951,8 +997,8 @@ export function simulatePolicyTransition(
     const currentMatched = matched(currentRules, currentStates);
     const draftMatched = matched(draftRules, draftStates);
     work += scopedRules + decisionWork(currentMatched) + decisionWork(draftMatched);
-    const currentOutcome = decidePolicyOutcome(currentMatched);
-    const draftOutcome = decidePolicyOutcome(draftMatched);
+    const currentOutcome = decidePolicyOutcome(currentMatched, nonCarving);
+    const draftOutcome = decidePolicyOutcome(draftMatched, nonCarving);
     outcomes.add(simulationBucket(currentOutcome.effect, draftOutcome.effect));
     currentEffects.add(currentOutcome.effect);
     draftEffects.add(draftOutcome.effect);

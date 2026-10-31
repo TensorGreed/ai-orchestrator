@@ -51,6 +51,7 @@ import {
   type ConditionsDraft
 } from "./McpPolicyConditionsEditor";
 import { ENFORCE_QUIET_DAYS, PolicySimulatePanel, PolicySuggestions } from "./McpPolicyLearning";
+import { McpSafetyPresets } from "./McpSafetyPresets";
 
 const ROLES: McpPolicyRole[] = ["admin", "builder", "operator", "viewer"];
 
@@ -373,6 +374,14 @@ export function McpPoliciesView({
                   <EffectBadge effect={rule.effect} />
                   <span className="mcp-rule-name">{rule.name ?? "Unnamed rule"}</span>
                   {rule.mode === "shadow" && <ShadowBadge />}
+                  {rule.additive && (
+                    <span
+                      className="mcp-flag mcp-flag-neutral"
+                      title="Additive: set by a safety preset or a workflow's switch. It only adds approvals or denies and never sets another rule aside. The rule editor cannot change this."
+                    >
+                      Additive
+                    </span>
+                  )}
                   {!rule.enabled && <span className="mcp-flag mcp-flag-neutral">disabled</span>}
                   {rule.invalid && <span className="mcp-flag">Invalid conditions</span>}
                 </div>
@@ -470,6 +479,11 @@ export function McpPoliciesView({
           </ul>
         )}
       </section>
+
+      <McpSafetyPresets
+        isAdmin={isAdmin}
+        onAdded={(rule) => setRules((current) => (current.some((entry) => entry.id === rule.id) ? current : [...current, rule]))}
+      />
 
       {isAdmin && <PolicySuggestions rules={rules} shadowHits={shadowHits} onRulesChanged={() => void refresh()} />}
 

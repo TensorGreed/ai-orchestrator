@@ -39,6 +39,7 @@ import type {
   McpSandboxStatus,
   McpServerCatalog,
   McpToolClassificationOverride,
+  McpToolOpenWorldOverride,
   McpToolPolicyRule,
   McpGatewayApproval,
   McpToolset,
@@ -582,6 +583,13 @@ export interface Store {
    * `mcp_tool_policies` against writes, so no rule changes between the guard and the update.
    */
   enforceShadowMcpToolPolicies(ids: readonly string[], now: string, options?: { guard?: McpPolicyEnforceGuard }): Promise<McpToolPolicyRule[]>;
+  /**
+   * Phase 12.2 — create a rule and enforce it in one transaction: it is inserted in shadow, `guard` reads the rules
+   * (the new one among them, in shadow) and their accepted suggestion families as `enforceShadowMcpToolPolicies`
+   * passes them, and the rule then switches to enforce. A refusal throws McpPolicyEnforceRefusedError and nothing is
+   * written, so no other request ever sees the rule in shadow. On Postgres the table is locked against writes first.
+   */
+  createEnforcedMcpToolPolicy(input: Omit<McpToolPolicyRule, "createdAt" | "updatedAt">, options: { guard: McpPolicyEnforceGuard }): Promise<McpToolPolicyRule | null>;
   deleteMcpToolPolicy(id: string): Promise<boolean>;
   /**
    * Phase 12.4 — a gateway call a require_approval rule held back. Expired pending requests are marked expired
@@ -631,6 +639,10 @@ export interface Store {
     readOnly: boolean | null;
     setBy: string | null;
   }): Promise<McpToolClassificationOverride | null>;
+  /** Phase 12.2 — admin open-world overrides; all of them, or one registry server's. */
+  listMcpToolOpenWorldOverrides(registryServerId?: string): Promise<McpToolOpenWorldOverride[]>;
+  /** Phase 12.2 — `openWorld: null` removes the override, so the destination and annotations decide again. */
+  setMcpToolOpenWorld(input: { registryServerId: string; toolName: string; openWorld: boolean | null; setBy: string | null }): Promise<McpToolOpenWorldOverride | null>;
   listMcpToolsets(): Promise<McpToolset[]>;
   getMcpToolset(id: string): Promise<McpToolset | null>;
   getMcpToolsetBySlug(slug: string): Promise<McpToolset | null>;

@@ -34,6 +34,7 @@ import {
   type McpServerInput,
   type McpServerProbe,
   type McpServerUsage,
+  type McpOpenWorldSource,
   type McpSnapshotTool,
   type McpTelemetryResponse,
   type McpTelemetryWindow,
@@ -42,6 +43,7 @@ import {
   type SecretListItem,
   acceptMcpServerChange,
   setMcpToolClassification,
+  setMcpToolOpenWorld,
   createMcpServer,
   deleteMcpServer,
   fetchMcpPresets,
@@ -1138,6 +1140,20 @@ function ErrorsCell({ stats }: { stats: McpToolTelemetry }) {
   );
 }
 
+const OPEN_WORLD_SOURCE_LABELS: Record<McpOpenWorldSource, string> = {
+  manual: "set by an admin",
+  destination: "vendor or public server",
+  annotation: "tool's hint",
+  unknown: "unclassified server"
+};
+
+const OPEN_WORLD_SOURCE_TITLES: Record<McpOpenWorldSource, string> = {
+  manual: "An admin set this for the tool.",
+  destination: "The server is a vendor or public destination, so whatever the tool is given can leave.",
+  annotation: "The server is local or private, so the tool's openWorldHint decides (missing means open world).",
+  unknown: "The server's destination is not classified, so the tool counts as open world. Add a data destination to classify it."
+};
+
 /**
  * Snapshot tools with their call telemetry, busiest first. Tools that were
  * called in the window but are no longer in the snapshot are listed too.
@@ -1151,7 +1167,7 @@ function ClassificationCell({
   serverId: string;
   tool: McpSnapshotTool;
   isAdmin: boolean;
-  onChanged: (patch: Pick<McpSnapshotTool, "classification" | "manualReadOnly">) => void;
+  onChanged: (patch: Partial<Pick<McpSnapshotTool, "classification" | "manualReadOnly" | "openWorld" | "manualOpenWorld">>) => void;
 }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -1177,6 +1193,21 @@ function ClassificationCell({
     }
   };
 
+  const changeOpenWorld = async (value: string) => {
+    setBusy(true);
+    setError(null);
+    try {
+      const openWorld = value === "auto" ? null : value === "open";
+      const result = await setMcpToolOpenWorld(serverId, tool.name, openWorld);
+      onChanged({ openWorld: result.openWorld, manualOpenWorld: result.manualOpenWorld });
+    } catch (err) {
+      setError(formatError(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const openWorld = tool.openWorld;
+
   return (
     <div className="mcp-access">
       {classification && (
@@ -1201,6 +1232,28 @@ function ClassificationCell({
           <option value="auto">Auto (annotation)</option>
           <option value="read">Mark read-only</option>
           <option value="write">Mark write</option>
+        </select>
+      )}
+      {openWorld && (
+        <span
+          className={openWorld.openWorld ? "mcp-class is-write" : "mcp-class is-read"}
+          title={OPEN_WORLD_SOURCE_TITLES[openWorld.source]}
+        >
+          {openWorld.openWorld ? "Open world" : "Not open world"}
+          <span className="mcp-class-source">{OPEN_WORLD_SOURCE_LABELS[openWorld.source]}</span>
+        </span>
+      )}
+      {isAdmin && openWorld && (
+        <select
+          className="mcp-class-select"
+          aria-label={`Open world for ${tool.name}`}
+          value={tool.manualOpenWorld === true ? "open" : tool.manualOpenWorld === false ? "closed" : "auto"}
+          disabled={busy}
+          onChange={(event) => void changeOpenWorld(event.target.value)}
+        >
+          <option value="auto">Auto (server, then hint)</option>
+          <option value="open">Mark open world</option>
+          <option value="closed">Mark not open world</option>
         </select>
       )}
       {error && <span className="mcp-blocked">{error}</span>}

@@ -23,6 +23,8 @@ import {
   type McpCheckReport,
   type McpCheckServerResult,
   type McpToolClassificationOverride,
+  type McpToolOpenWorldOverride,
+  type DataDestinationRow,
   type McpToolPolicyRule,
   type McpToolPolicySubject,
   type SecretReference,
@@ -51,7 +53,13 @@ export interface McpTestingDeps {
   mcpRegistry: MCPRegistry;
   resolveSecret: (secretRef?: SecretReference) => Promise<string | undefined>;
   probeTimeoutMs: number;
-  loadMcpToolPolicy: () => Promise<{ rules: McpToolPolicyRule[]; classifications: McpToolClassificationOverride[] }>;
+  loadMcpToolPolicy: () => Promise<{
+    rules: McpToolPolicyRule[];
+    classifications: McpToolClassificationOverride[];
+    /** Phase 12.2 — loaded only when a rule reads the open-world hint. */
+    openWorldOverrides?: McpToolOpenWorldOverride[];
+    destinations?: DataDestinationRow[];
+  }>;
   resolveToolPolicySubject: (workflowId: string) => Promise<McpToolPolicySubject>;
   requireRole: (request: FastifyRequest, reply: FastifyReply, roles: UserRole[]) => Promise<SafeUser | null>;
   /** Project scope: cassettes follow the workflow they were recorded for. */
@@ -301,7 +309,10 @@ export function registerMcpTestingRoutes(deps: McpTestingDeps): void {
               adapterId: server.adapterId,
               registryServerId: server.id,
               serverLabel: server.name,
-              noWriteTools: Boolean(workflow.settings?.noWriteTools)
+              noWriteTools: Boolean(workflow.settings?.noWriteTools),
+              ...(policy.openWorldOverrides && policy.destinations
+                ? { openWorld: { overrides: policy.openWorldOverrides, destinations: policy.destinations, connection: server.connection } }
+                : {})
             },
             { name: toolName, ...(annotationsByTool.get(toolName) ? { annotations: annotationsByTool.get(toolName) } : {}) }
           );

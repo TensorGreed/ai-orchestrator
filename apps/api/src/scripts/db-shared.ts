@@ -128,6 +128,7 @@ export const EXPORTED_TABLES = [
   "mcp_server_probes",
   "mcp_tool_snapshots",
   "mcp_tool_classifications",
+  "mcp_tool_open_world_overrides",
   "mcp_tool_policies",
   "mcp_toolsets",
   "mcp_toolset_members",

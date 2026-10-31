@@ -807,6 +807,9 @@ export class PostgresStore implements Store {
   async updateMcpToolPolicy(...args: Parameters<Store["updateMcpToolPolicy"]>): ReturnType<Store["updateMcpToolPolicy"]> {
     return mcp.updateMcpToolPolicy(this.ctx, ...args);
   }
+  async createEnforcedMcpToolPolicy(...args: Parameters<Store["createEnforcedMcpToolPolicy"]>): ReturnType<Store["createEnforcedMcpToolPolicy"]> {
+    return mcp.createEnforcedMcpToolPolicy(this.ctx, ...args);
+  }
   async enforceShadowMcpToolPolicies(...args: Parameters<Store["enforceShadowMcpToolPolicies"]>): ReturnType<Store["enforceShadowMcpToolPolicies"]> {
     return mcp.enforceShadowMcpToolPolicies(this.ctx, ...args);
   }
@@ -840,6 +843,12 @@ export class PostgresStore implements Store {
   }
   async listMcpToolClassifications(...args: Parameters<Store["listMcpToolClassifications"]>): ReturnType<Store["listMcpToolClassifications"]> {
     return mcp.listMcpToolClassifications(this.ctx, ...args);
+  }
+  async listMcpToolOpenWorldOverrides(...args: Parameters<Store["listMcpToolOpenWorldOverrides"]>): ReturnType<Store["listMcpToolOpenWorldOverrides"]> {
+    return mcp.listMcpToolOpenWorldOverrides(this.ctx, ...args);
+  }
+  async setMcpToolOpenWorld(...args: Parameters<Store["setMcpToolOpenWorld"]>): ReturnType<Store["setMcpToolOpenWorld"]> {
+    return mcp.setMcpToolOpenWorld(this.ctx, ...args);
   }
   async setMcpToolClassification(...args: Parameters<Store["setMcpToolClassification"]>): ReturnType<Store["setMcpToolClassification"]> {
     return mcp.setMcpToolClassification(this.ctx, ...args);
