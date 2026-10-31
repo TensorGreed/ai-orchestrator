@@ -226,6 +226,7 @@ The hints are the MCP tool annotations from `tools/list`, read as the MCP specif
 
 - An admin's **Mark read-only** or **Mark write** override replaces `readOnlyHint`.
 - A read-only tool is never destructive, whatever `destructiveHint` says.
+- For `open_world` / `not_open_world`, the server's destination tier comes first. An admin's per-tool override wins. Vendor, public and unclassified servers are open world whatever `openWorldHint` says. On local and private servers the hint decides. See [Untrusted content and write tools](../guides/govern-mcp-tools.md#untrusted-content-and-write-tools).
 
 For registered servers the hints come from the server's current snapshot. Agents see them when they discover tools. A direct MCP Tool node lists the server's tools before the call when any enabled rule has a condition; if the hints cannot be read, the defaults above apply. A blocked call's message names the condition, for example `... is blocked by policy 'No destructive tools for operators' (mtp_…) for role operator (rule applies to destructive tools).`
 
@@ -313,7 +314,10 @@ Changes are written to the audit log with resource type `mcp_policy` and events 
 - `GET /api/mcp/gateway/approvals?status=`: gateway calls held for approval, newest first, with the approval window (admin)
 - `POST /api/mcp/gateway/approvals/:id/approve` and `/reject`: decide a pending request, optionally `{ reason }`; 409 when it was already decided or expired (admin)
 - `PUT /api/mcp/servers/:id/tools/:toolName/classification`: `{ readOnly: true | false | null }`. `null` clears the override (admin)
+- `PUT /api/mcp/servers/:id/tools/:toolName/open-world`: `{ openWorld: true | false | null }`. Returns the resolved value and its source (`manual`, `destination`, `annotation` or `unknown`) (admin)
+- `GET /api/mcp/policies/presets` (builder) and `POST /api/mcp/policies/presets/:presetId` (admin): list the safety presets, or add one in shadow mode (409 if already added)
+- `GET` and `PUT /api/workflows/:id/untrusted-write-approval`: read or set `{ enabled }` for the workflow's "Approve writes only after untrusted content" switch (workflow read / write access; 409 when it would loosen an enforced rule)
 
 ## Storage
 
-Rules are kept in `mcp_tool_policies` and overrides in `mcp_tool_classifications`. SQLite creates both at startup. On Postgres, migration v22 creates them and adds `workflows.created_by`; migration v24 adds the `annotation_hint` column; migration v25 adds `kind`. Migration v47 (both stores) adds `conditions_json`, `mode` (default `enforce`, so existing rules keep their meaning), `workflow_ids_json` and `client_ids_json`, the `policy_decision_json` column on `mcp_tool_calls`, and the `mcp_gateway_approvals` table, which follows the execution-history retention.
+Rules are kept in `mcp_tool_policies` and overrides in `mcp_tool_classifications`. SQLite creates both at startup. On Postgres, migration v22 creates them and adds `workflows.created_by`; migration v24 adds the `annotation_hint` column; migration v25 adds `kind`. Migration v47 (both stores) adds `conditions_json`, `mode` (default `enforce`, so existing rules keep their meaning), `workflow_ids_json` and `client_ids_json`, the `policy_decision_json` column on `mcp_tool_calls`, and the `mcp_gateway_approvals` table, which follows the execution-history retention. Migration v50 adds the `mcp_tool_open_world_overrides` table and the `labels_json` column on `mcp_tool_calls` (the label names each call was decided with).

@@ -1,6 +1,6 @@
 ---
 title: "Govern MCP tools: allow and deny rules, write tools, telemetry"
-description: "A step-by-step guide to MCP tool governance in L2M: classify read-only and write tools, write allow and deny rules, block write tools, and watch every call."
+description: "A step-by-step guide to MCP tool governance in L2M: classify tools, write allow and deny rules, gate write tools after untrusted content, watch calls."
 ---
 
 # Govern MCP tools
@@ -63,6 +63,44 @@ Two switches act on write tools without writing rules:
 
 - **No write tools** (editor **⋯** menu): every write tool is blocked for agents and MCP Tool nodes in that workflow. Use it for workflows that should only read, such as a support bot that looks things up.
 - **Ask before write tools…** (same menu): agents pause for a person's approval before each write-tool call, in the Approvals inbox. [Human approval for agent tool calls](./human-approval-for-agent-tool-calls.md) covers it.
+
+## Untrusted content and write tools
+
+The riskiest moment for an agent is just after it has read something from outside: a public webhook body, a web page, a tool result. Text planted there can try to steer the next tool call (prompt injection). L2M labels every run's data with where it came from (its **provenance**: `trusted` for schedules, `user` for a signed-in person's runs, `untrusted_external` for webhooks and other outside triggers), and tool rules can test those labels. See [Data labels and destinations](../product/data-labels-and-destinations.md).
+
+You don't need to write those rules by hand. All of these are optional, and with none of them on every workflow runs as before.
+
+- **Approve writes only after untrusted content** (editor **⋯** → **Ask before write tools…**). This is the light version of the write-tool gate. A call to a write tool waits for an admin's approval only while the agent's context holds `untrusted_external` content. Calls before that, and calls to read-only tools, run straight away. The switch is saved at once as a tool rule for this workflow alone (`require_approval`, `not_read_only`, `label_present untrusted_external`). Builders can turn it on or off; once an admin has edited that rule, only an admin can turn it off. Save the workflow before you use it.
+- **Safety presets** (**MCP → Policies → Safety presets**, admin). These are two ready-made global rules:
+  - **Untrusted content ⇒ write tools need approval**: the same rule as the switch, for every workflow.
+  - **Sensitive data ⇒ no open-world tools**: a deny on open-world tools while the context holds `sensitive` data.
+
+  A preset is added in **shadow mode**, so at first it only records what it would have done. Check its shadow hits, or simulate it on recorded calls, then **Enforce** it from the rule list. Enforcing goes through the usual checks: it is refused if it would set aside a deny that is enforced now.
+
+A rule with a `sensitive` or data class condition turns on label tracking for every run while it is enabled. Node outputs are then scanned for data classes, so the condition can match. Rules on `untrusted_external`, `user` or `trusted` need no scan.
+
+### Which tools are open world
+
+A tool is **open world** when what it is given can leave your control. A tool's own `openWorldHint` is a claim by the server, so L2M checks the server's destination tier first:
+
+| Server | Open world? |
+|---|---|
+| An admin's override on the tool (**Tools** table → **Mark open world** / **Mark not open world**) | as set |
+| A vendor or public destination | yes, whatever the hint says |
+| Unclassified (no destination row matches its host, or it has no endpoint) | yes: it fails closed |
+| Local or private (a `localhost` or private-network host, a stdio process, or a destination row you added) | the tool's `openWorldHint` decides; a missing hint means yes |
+
+The server's **Tools** table shows each tool's value and where it came from. To mark an internal server as private, add a [data destination](../product/data-labels-and-destinations.md) for its host. If some enabled rule already uses `open_world` or `not_open_world`, this tightens it: a tool that says `openWorldHint: false` on a public or unclassified server now counts as open world.
+
+### Seeing the labels
+
+Each tool call records the label names it was decided with on the run trace and on its telemetry row. Data class names are recorded only for runs that tracked labels. No values are ever recorded. The simulator uses these recorded labels:
+
+- `untrusted_external`, `user` and `trusted` conditions are decided for every recorded call.
+- `sensitive` and class conditions are decided only for runs that tracked labels.
+- Calls recorded before labels were kept stay **undetermined**.
+
+Gateway calls carry no labels, so label conditions never match them.
 
 ## 5. Check enforcement and watch calls
 
