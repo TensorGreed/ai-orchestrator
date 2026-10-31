@@ -4144,7 +4144,8 @@ export function NodeInspector({
   /** 12.2 — what the trigger's input counts as. Admin-only; everyone sees what applies. */
   const renderTriggerTrustField = (authMode: string) => {
     const trust = readTriggerTrust(config);
-    // A setting whose trigger changed since an admin set it is ignored. Without a binding (an admin just changed or
+    // A setting whose trigger changed since an admin set it: a `user` one is ignored, an `untrusted_external` one still
+    // applies (a reset only tightens). Without a binding (an admin just changed or
     // re-applied it) the admin's save binds it to the trigger as saved.
     const reset = config.inputTrustFor !== undefined && triggerTrustState({ type: node.data.nodeType, config }) === "reset";
     return (
@@ -4173,7 +4174,7 @@ export function NodeInspector({
                 Apply to this trigger
               </button>
             ) : (
-              <p>Ask an admin to set it again.</p>
+              <p>{trust === "untrusted_external" ? "Ask an admin to confirm it." : "Ask an admin to set it again."}</p>
             )}
           </div>
         ) : null}

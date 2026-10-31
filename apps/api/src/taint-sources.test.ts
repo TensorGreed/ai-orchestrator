@@ -302,11 +302,12 @@ describe("the trigger trust setting is admin-only", () => {
     expect(triggerTrustState(adminCopy.json<Workflow>().nodes[0]!)).toBe("active");
   });
 
-  it("compares by node: a new trigger node with a setting is a change, a removed node is not", () => {
+  it("compares by node: a new trigger node with a setting is a change, and so is removing a node that had one", () => {
     const before = { nodes: [{ id: "a", config: { inputTrust: "user" } }, { id: "b", config: {} }] };
     expect(triggerTrustChanges(before, before)).toEqual([]);
-    expect(triggerTrustChanges(before, { nodes: [{ id: "b", config: {} }] })).toEqual([]);
-    expect(triggerTrustChanges(before, { nodes: [{ id: "c", config: { inputTrust: "user" } }] })).toEqual(["c"]);
+    expect(triggerTrustChanges(before, { nodes: [{ id: "b", config: {} }] })).toEqual(["a"]);
+    expect(triggerTrustChanges(before, { nodes: [{ id: "a", config: { inputTrust: "user" } }] })).toEqual([]);
+    expect(triggerTrustChanges(before, { nodes: [{ id: "c", config: { inputTrust: "user" } }] })).toEqual(["c", "a"]);
     expect(triggerTrustChanges(before, { nodes: [{ id: "a", config: { inputTrust: "untrusted_external" } }] })).toEqual(["a"]);
     expect(triggerTrustChanges(null, { nodes: [{ id: "a", config: { inputTrust: "user" } }] })).toEqual(["a"]);
     const stripped = withoutTriggerTrust({ nodes: [{ id: "a", type: "webhook_input", name: "A", position: { x: 0, y: 0 }, config: { inputTrust: "user", path: "p" } }] } as Pick<Workflow, "nodes">);
@@ -350,6 +351,21 @@ describe("a trust setting is bound to the trigger an admin set it for", () => {
       expect(effectiveTriggerTrust({ ...node, config: { ...node.config, ...patch } })).toBe("untrusted_external");
     }
     expect(effectiveTriggerTrust({ ...node, type: "chat_trigger" as typeof node.type })).toBe("untrusted_external");
+    // Deleting the trigger and adding it again under another id would drop the setting: refused for a builder.
+    const current = (await context.store.getWorkflow("wf-tight"))!;
+    const readded = {
+      ...current,
+      nodes: current.nodes.map((entry) => {
+        if (entry.id !== "hook") return entry;
+        const { inputTrust: _trust, inputTrustFor: _binding, ...config } = entry.config;
+        return { ...entry, id: "hook-again", config };
+      }),
+      edges: current.edges.map((edge) => (edge.source === "hook" ? { ...edge, source: "hook-again" } : edge))
+    };
+    const dropped = await call(context, "PUT", "/api/workflows/wf-tight", builder, readded);
+    expect(dropped.statusCode, dropped.body).toBe(403);
+    expect(dropped.json<{ error: string }>().error).toContain("'hook'");
+    expect((await call(context, "PUT", "/api/workflows/wf-tight", admin, readded)).statusCode).toBe(200);
   });
 
   it("a builder who opens the webhook keeps the save, but the admin's user trust no longer applies; an admin's save binds it again", async () => {

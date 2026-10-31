@@ -15,8 +15,9 @@ import {
  * or remove one an admin set; the save is refused instead (copies a builder makes drop it, see `withoutTriggerTrust`).
  *
  * The setting is bound to the trigger it was made for (`inputTrustFor`: node type, auth mode, secret, path), which
- * only an admin's save writes. A builder may still change the trigger; the setting then no longer matches and is
- * ignored at run time until an admin sets it again.
+ * only an admin's save writes. A builder may still change the trigger; a `user` setting then no longer matches and
+ * is ignored at run time until an admin sets it again, while an `untrusted_external` one still applies (a reset only
+ * tightens). Removing a node that carries a setting is a change too: a builder cannot drop it with the node.
  */
 
 type NodesOf = { nodes?: ReadonlyArray<{ id: string; type?: string; config?: unknown }> | null };
@@ -30,15 +31,23 @@ function trustPart(config: unknown): string {
   return JSON.stringify([trust ?? null, binding ?? null]);
 }
 
-/** The nodes of `next` whose trust setting or its binding differs from the same node in `previous` (none stored: any setting differs). */
+/**
+ * The nodes whose trust setting or its binding differs between `previous` and `next` (none stored: any setting
+ * differs), and the nodes of `previous` with a setting that `next` no longer has.
+ */
 export function triggerTrustChanges(previous: NodesOf | null | undefined, next: NodesOf): string[] {
   const before = new Map<string, string>();
   for (const node of previous?.nodes ?? []) before.set(node.id, trustPart(node.config));
   const unset = trustPart(undefined);
   const changed: string[] = [];
+  const nextIds = new Set<string>();
   for (const node of next.nodes ?? []) {
+    nextIds.add(node.id);
     if (trustPart(node.config) !== (before.get(node.id) ?? unset)) changed.push(node.id);
   }
+  // A node with a setting that the next version no longer has: deleting it (and adding the trigger again under
+  // another id) would drop the admin's setting.
+  for (const [nodeId, part] of before) if (!nextIds.has(nodeId) && part !== unset) changed.push(nodeId);
   return changed;
 }
 

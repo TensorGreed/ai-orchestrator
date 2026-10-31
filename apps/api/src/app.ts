@@ -11161,7 +11161,8 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         const triggerType = isTestRoute ? "webhook_test" : "webhook";
         // 12.2 — the input's provenance: an admin's trust setting on the trigger, else `user` when the auth above
         // verified the caller, else outside content. Recorded on the trigger's result so replays keep it.
-        // A setting whose trigger changed since an admin made it (type, auth mode, secret, path) is ignored.
+        // A `user` setting whose trigger changed since an admin made it (type, auth mode, secret, path) is ignored; an
+        // `untrusted_external` one applies whatever changed (a reset only tightens).
         const triggerNode = match.workflow.nodes.find((entry) => entry.id === match.endpoint.nodeId);
         const triggerTrust = triggerNode ? effectiveTriggerTrust(triggerNode) : undefined;
         const webhookInputLabels: DataLabels | undefined =

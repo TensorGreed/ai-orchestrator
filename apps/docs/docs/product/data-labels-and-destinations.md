@@ -52,7 +52,8 @@ On the run view each node shows them in plain words, for example
   `untrusted_external`. Nothing in the request can choose its label. An
   admin can set **Input counts as** on the Webhook node to fix it either way
   (for example, outside content even from a verified partner). Builders see
-  the setting but cannot set, change or remove it, and a builder's copy of a
+  the setting but cannot set, change or remove it (nor delete the node that
+  carries it), and a builder's copy of a
   workflow drops it; so do a share link's import and a git pull, whoever runs
   them (an admin sets it again). A builder's import of an export keeps the
   stored workflow's setting. The setting is bound to the trigger it was set
@@ -128,8 +129,8 @@ carries the input's labels.
   it clears only what the approver was shown in full. When a person approves
   a Human Approval or Approval Gate step, a step its message or editable
   fields read counts as `user` instead of `untrusted_external` for the steps
-  after it only when every text value of that step's output appears in what
-  the approver saw (for example a message that shows the webhook's whole
+  after it only when every key and every value of that step's output (text,
+  numbers, yes/no) appears in what the approver saw (for example a message that shows the webhook's whole
   body). Showing one field, a length or a yes/no of it clears nothing. The
   run input counts as theirs only when all of it was shown, and the approval
   step's own output only when all of its parents were. A bland "Continue?"
