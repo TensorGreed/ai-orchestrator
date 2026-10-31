@@ -141,3 +141,84 @@ export function inputProvenance(triggerType: string | null | undefined, origin: 
   if (triggerType && USER_INPUT_TRIGGERS.has(triggerType)) return "user";
   return "untrusted_external";
 }
+
+// ---------------------------------------------------------------------------
+// 12.2 — provenance sources: trigger trust, declared sensitive output, endorsement
+// ---------------------------------------------------------------------------
+
+/**
+ * What an admin may declare about a trigger's input (`inputTrust` in the
+ * trigger node's config). Never `trusted`: only the server's own scheduler
+ * starts runs whose input is trusted.
+ */
+export const TRIGGER_TRUST_LEVELS = ["user", "untrusted_external"] as const;
+export type TriggerTrust = (typeof TRIGGER_TRUST_LEVELS)[number];
+export const triggerTrustSchema = z.enum(TRIGGER_TRUST_LEVELS);
+
+/** The trigger node config key an admin sets. */
+export const TRIGGER_TRUST_CONFIG_KEY = "inputTrust";
+/** The node config key that declares a node's output sensitive. */
+export const SENSITIVE_OUTPUT_CONFIG_KEY = "sensitiveOutput";
+
+/** The admin's trust setting in a trigger node's config; anything else (absent, invalid) is none. */
+export function triggerTrustOf(config: unknown): TriggerTrust | undefined {
+  if (!config || typeof config !== "object" || Array.isArray(config)) return undefined;
+  const parsed = triggerTrustSchema.safeParse((config as Record<string, unknown>)[TRIGGER_TRUST_CONFIG_KEY]);
+  return parsed.success ? parsed.data : undefined;
+}
+
+/**
+ * The provenance of a webhook run's input: the admin's setting when there is
+ * one, else `user` when the server verified the caller (a bearer token or an
+ * HMAC signature against the trigger's secret), else `untrusted_external`.
+ * Nothing in the request itself (a header, a body field) can choose it.
+ */
+export function triggerInputProvenance(input: { verified: boolean; trust?: TriggerTrust }): ProvenanceLabel {
+  return input.trust ?? (input.verified ? "user" : "untrusted_external");
+}
+
+/** True when a node's config declares its output sensitive ("Sensitive output"). */
+export function declaresSensitiveOutput(config: unknown): boolean {
+  return Boolean(config && typeof config === "object" && !Array.isArray(config) && (config as Record<string, unknown>)[SENSITIVE_OUTPUT_CONFIG_KEY] === true);
+}
+
+/**
+ * Endorse: a person approved this content, so outside content in it now
+ * counts as the user's. Only `untrusted_external` changes (to `user`);
+ * `sensitive`, `trusted` and the data classes stay. Only a human approval
+ * endorses: never a guard scan or any other automated check.
+ */
+export function endorseLabels(labels: DataLabels): DataLabels {
+  if (!labels.provenance.includes("untrusted_external")) return labels;
+  const provenance = new Set<ProvenanceLabel>(labels.provenance.filter((label) => label !== "untrusted_external"));
+  provenance.add("user");
+  return { ...labels, provenance: PROVENANCE_LABELS.filter((label) => provenance.has(label)) };
+}
+
+export const LABEL_ENDORSEMENT_KINDS = ["human_approval", "approval_gate", "tool_call"] as const;
+export type LabelEndorsementKind = (typeof LABEL_ENDORSEMENT_KINDS)[number];
+
+/**
+ * A human approval that endorsed content, as the run's trace records it on
+ * the approving node's result: who approved, when, and which nodes' outputs
+ * it covers (the approving node and the inputs it showed the approver).
+ * Nodes downstream of the approval read those outputs endorsed; any other
+ * reader, and any source that joins later, keeps its labels.
+ */
+export const labelEndorsementSchema = z.object({
+  kind: z.enum(LABEL_ENDORSEMENT_KINDS),
+  approvedBy: z.string().nullable(),
+  approvedAt: z.string(),
+  nodeIds: z.array(z.string()).max(500),
+  /** The approved tool call's tool, for `tool_call`. */
+  toolName: z.string().optional()
+});
+export type LabelEndorsement = z.output<typeof labelEndorsementSchema>;
+
+/** 12.2 — data classes found in content make it `sensitive` too (detected classes exist on tracked runs only). */
+export function withImpliedSensitive(labels: DataLabels): DataLabels {
+  if (labels.dataClasses.length === 0 || labels.provenance.includes("sensitive")) return labels;
+  const provenance = new Set<ProvenanceLabel>(labels.provenance);
+  provenance.add("sensitive");
+  return { ...labels, provenance: PROVENANCE_LABELS.filter((label) => provenance.has(label)) };
+}

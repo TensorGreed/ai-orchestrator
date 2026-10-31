@@ -729,6 +729,7 @@ Injects webhook payload into workflow context.
 | `responseCode` | `number` | no | — |
 | `responseHeaders` | `object` | no | — |
 | `responseBody` | `string` | no | — |
+| `inputTrust` | `string` | no | `user` \| `untrusted_external` |
 
 **Example config**
 
