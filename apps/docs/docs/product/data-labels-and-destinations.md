@@ -57,9 +57,11 @@ On the run view each node shows them in plain words, for example
   them (an admin sets it again). A builder's import of an export keeps the
   stored workflow's setting. The setting is bound to the trigger it was set
   for: its node type, auth mode, secret and path when the admin saved it. If
-  any of them changes later, the setting no longer applies, the trigger falls
-  back to its default, and the Webhook node shows **Trust setting reset:
-  trigger changed** until an admin applies it to the trigger again. A builder
+  any of them changes later, an **A user's input** setting no longer applies:
+  the trigger falls back to its default, and the Webhook node shows **Trust
+  setting reset: trigger changed** until an admin applies it to the trigger
+  again. An **Outside content** setting still applies (a reset only ever
+  tightens), and the node asks an admin to confirm it. A builder
   cannot roll a release back to a version whose trust setting differs from
   what production runs now; an admin can. The trigger's labels are recorded
   on its result, even when the run does not track labels, so replays and
@@ -123,12 +125,14 @@ carries the input's labels.
   the labels of the child's final output.
 - **Approvals**: a paused run keeps its labels, and a person's decision adds
   `user`. An approval is also the only way outside content is cleared, and
-  it clears only what the approver was shown. When a person approves a Human
-  Approval or Approval Gate step, the steps its message, details and editable
-  fields read (for example a message that shows the webhook's body) count as `user` instead
-  of `untrusted_external` for the steps after it. The run input counts as
-  theirs only when the request read it, and the approval step's own output
-  only when the request showed all of its parents. A bland "Continue?"
+  it clears only what the approver was shown in full. When a person approves
+  a Human Approval or Approval Gate step, a step its message or editable
+  fields read counts as `user` instead of `untrusted_external` for the steps
+  after it only when every text value of that step's output appears in what
+  the approver saw (for example a message that shows the webhook's whole
+  body). Showing one field, a length or a yes/no of it clears nothing. The
+  run input counts as theirs only when all of it was shown, and the approval
+  step's own output only when all of its parents were. A bland "Continue?"
   clears nothing. Data classes stay. Outside content that joins later (a
   fetch after the approval, or a branch the approver never saw) keeps its
   label. The step's trace records who approved and when, shown as

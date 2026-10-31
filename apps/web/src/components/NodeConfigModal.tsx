@@ -21,9 +21,9 @@ import { McpAnnotationChips, McpOutputSchema } from "./McpToolMeta";
 import { SecretSaveWarnings } from "./SecretSaveWarnings";
 import {
   TRIGGER_TRUST_OPTIONS,
-  TRIGGER_TRUST_RESET_TEXT,
   describeTriggerTrust,
   readTriggerTrust,
+  triggerTrustResetText,
   withSensitiveOutput,
   withTriggerTrust,
   withTriggerTrustReapplied
@@ -4167,7 +4167,7 @@ export function NodeInspector({
         </select>
         {reset ? (
           <div className="cfg-tip trigger-trust-reset" role="status" data-testid="trigger-trust-reset">
-            <p>{TRIGGER_TRUST_RESET_TEXT}</p>
+            <p>{triggerTrustResetText(trust)}</p>
             {canSetTriggerTrust ? (
               <button type="button" className="insp-btn" onClick={() => setConfig((current) => withTriggerTrustReapplied(current))}>
                 Apply to this trigger
@@ -4178,7 +4178,7 @@ export function NodeInspector({
           </div>
         ) : null}
         <p className="cfg-tip">
-          {reset ? describeTriggerTrust(authMode, "") : describeTriggerTrust(authMode, trust)}
+          {reset && trust === "user" ? describeTriggerTrust(authMode, "") : describeTriggerTrust(authMode, trust)}
           {!canSetTriggerTrust ? " Only an admin can change this." : ""}
         </p>
       </div>

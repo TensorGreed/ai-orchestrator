@@ -46,9 +46,15 @@ export function withTriggerTrustReapplied(config: Record<string, unknown>): Reco
   return next;
 }
 
-/** The notice for a trust setting that no longer applies because its trigger changed. */
-export const TRIGGER_TRUST_RESET_TEXT =
-  "Trust setting reset: trigger changed. Its auth mode, secret or path is not what an admin set the trust for, so the input counts as the auth mode says.";
+/**
+ * The notice for a trust setting whose trigger changed since an admin set it. A reset only tightens: "A user's
+ * input" no longer applies, "Outside content" still does.
+ */
+export function triggerTrustResetText(trust: TriggerTrustChoice): string {
+  return trust === "untrusted_external"
+    ? "Trigger changed since an admin set this. Its auth mode, secret or path is not what the setting was made for; it still applies (outside content), and an admin should confirm it."
+    : "Trust setting reset: trigger changed. Its auth mode, secret or path is not what an admin set the trust for, so the input counts as the auth mode says.";
+}
 
 /** The config with the "sensitive output" flag set or removed (never stored as false). */
 export function withSensitiveOutput(config: Record<string, unknown>, sensitive: boolean): Record<string, unknown> {

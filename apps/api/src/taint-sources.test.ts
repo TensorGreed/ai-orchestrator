@@ -17,7 +17,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
-import { triggerTrustState, type DataLabels, type Workflow } from "@ai-orchestrator/shared";
+import { effectiveTriggerTrust, triggerTrustState, type DataLabels, type Workflow } from "@ai-orchestrator/shared";
 import { createApp } from "./app.js";
 import { parseConfig, type AppConfig } from "./config.js";
 import type { Store } from "./db/store.js";
@@ -328,6 +328,28 @@ describe("a trust setting is bound to the trigger an admin set it for", () => {
     expect(triggerTrustState(changed({ responseCode: 202, path: "/HOOK-wf-bind/" }))).toBe("active");
     // Never bound (set outside an admin's save): ignored.
     expect(triggerTrustState(hookWorkflow("wf-unbound", { inputTrust: "user" }).nodes[0]!)).toBe("reset");
+  });
+
+  it("a reset only tightens: an admin's untrusted_external on a verified webhook stays after a builder moves its path", async () => {
+    const context = await createTestContext();
+    const builder = await login(context, "builder");
+    const admin = await login(context, "admin");
+    const secretId = await createSecret(context, admin, "hook-token-tight1");
+    const draft = hookWorkflow("wf-tight", { authMode: "bearer_token", authHeaderName: "authorization", secretRef: { secretId }, inputTrust: "untrusted_external" });
+    expect((await call(context, "POST", "/api/workflows", admin, draft)).statusCode).toBe(200);
+    const stored = (await context.store.getWorkflow("wf-tight"))!;
+    const moved = { ...stored, nodes: stored.nodes.map((entry) => (entry.id === "hook" ? { ...entry, config: { ...entry.config, path: "hook-wf-tight-moved" } } : entry)) };
+    expect((await call(context, "PUT", "/api/workflows/wf-tight", builder, moved)).statusCode).toBe(200);
+    expect(triggerTrustState((await context.store.getWorkflow("wf-tight"))!.nodes[0]!)).toBe("reset");
+    const ok = await context.app.inject({ method: "POST", url: "/webhook/hook-wf-tight-moved", headers: { authorization: "Bearer hook-token-tight1" }, payload: { user_prompt: "relay" } });
+    expect(ok.statusCode, ok.body).toBeLessThan(300);
+    expect(labelsOn((await latestRun(context, "wf-tight")).nodes, "hook")).toEqual(L(["untrusted_external"]));
+    // Each binding field changed: untrusted_external still applies.
+    const node = (await context.store.getWorkflow("wf-tight"))!.nodes[0]!;
+    for (const patch of [{ authMode: "none" }, { secretRef: { secretId: "other" } }, { path: "x" }]) {
+      expect(effectiveTriggerTrust({ ...node, config: { ...node.config, ...patch } })).toBe("untrusted_external");
+    }
+    expect(effectiveTriggerTrust({ ...node, type: "chat_trigger" as typeof node.type })).toBe("untrusted_external");
   });
 
   it("a builder who opens the webhook keeps the save, but the admin's user trust no longer applies; an admin's save binds it again", async () => {

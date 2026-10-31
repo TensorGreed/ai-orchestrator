@@ -200,8 +200,9 @@ function sameBinding(a: TriggerTrustBinding, b: TriggerTrustBinding): boolean {
 }
 
 /**
- * The state of a trigger's trust setting: `none` (no setting), `active` (it applies), or `reset` (the trigger's type,
- * auth mode, secret or path changed since an admin set it, or it was never bound: it is ignored).
+ * The state of a trigger's trust setting: `none` (no setting), `active` (it matches its trigger), or `reset` (the
+ * trigger's type, auth mode, secret or path changed since an admin set it, or it was never bound). A reset `user`
+ * is ignored; a reset `untrusted_external` still applies (see `effectiveTriggerTrust`).
  */
 export function triggerTrustState(node: { type: string; config?: unknown }): "none" | "active" | "reset" {
   if (!triggerTrustOf(node.config)) return "none";
@@ -209,9 +210,14 @@ export function triggerTrustState(node: { type: string; config?: unknown }): "no
   return stored && sameBinding(stored, triggerTrustBindingOf(node)) ? "active" : "reset";
 }
 
-/** The trust setting that applies to a trigger node: the admin's, while it still matches the trigger it was set for. */
+/**
+ * The trust setting that applies to a trigger node. The reset only ever tightens: an admin's `user` applies while it
+ * still matches the trigger it was set for, and an admin's `untrusted_external` applies whatever changed since.
+ */
 export function effectiveTriggerTrust(node: { type: string; config?: unknown }): TriggerTrust | undefined {
-  return triggerTrustState(node) === "active" ? triggerTrustOf(node.config) : undefined;
+  const trust = triggerTrustOf(node.config);
+  if (trust === "untrusted_external") return trust;
+  return trust && triggerTrustState(node) === "active" ? trust : undefined;
 }
 
 /** The node config key that declares a node's output sensitive. */

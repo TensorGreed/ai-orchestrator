@@ -5,6 +5,7 @@ import {
   describeTriggerTrust,
   readEndorsement,
   readTriggerTrust,
+  triggerTrustResetText,
   withSensitiveOutput,
   withTriggerTrust,
   withTriggerTrustReapplied
@@ -26,6 +27,9 @@ describe("trigger trust", () => {
     expect(withTriggerTrust({ path: "p", inputTrust: "user", inputTrustFor: binding }, "untrusted_external")).toEqual({ path: "p", inputTrust: "untrusted_external" });
     expect(withTriggerTrust({ path: "p", inputTrust: "user", inputTrustFor: binding }, "")).toEqual({ path: "p" });
     expect(withTriggerTrustReapplied({ path: "p", inputTrust: "user", inputTrustFor: binding })).toEqual({ path: "p", inputTrust: "user" });
+    // A reset only tightens: outside content still applies.
+    expect(triggerTrustResetText("user")).toContain("Trust setting reset: trigger changed");
+    expect(triggerTrustResetText("untrusted_external")).toContain("it still applies");
   });
 
   it("says what the input counts as for the auth mode", () => {
