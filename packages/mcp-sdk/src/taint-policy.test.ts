@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 import { mcpSafetyPresetRule, type McpToolPolicyRule, type ToolArgumentSummary } from "@ai-orchestrator/shared";
 import { untrustedWriteSwitchRule } from "@ai-orchestrator/shared";
 import {
+  approvalMayCarve,
   decidePolicyOutcome,
   effectiveToolHints,
   evaluateMcpToolPolicy,
@@ -97,6 +98,23 @@ describe("the resolved value in rule matching", () => {
     expect(evaluateMcpToolPolicy([denyServer, allowOpen], { ...base, annotations: {}, openWorld: true }).effect).toBe("allow");
     // With an override, the allow reads the override.
     expect(evaluateMcpToolPolicy([denyServer, allowOpen], { ...base, annotations: { openWorldHint: false }, openWorld: true, openWorldManual: true }).effect).toBe("allow");
+  });
+
+  it("does not let an open_world approval carve a deny for a tool only the resolution made open world", () => {
+    const denyServer: McpToolPolicyRule = { ...rule, id: "server", annotationHint: null, serverId: "http_mcp" };
+    const approveOpen: McpToolPolicyRule = { ...rule, id: "approve", effect: "require_approval", serverId: "http_mcp", annotationHint: "open_world" };
+    // The reviewer's probe: unclassified server, openWorldHint:false. Deny before the branch, deny now.
+    expect(evaluateMcpToolPolicy([denyServer, approveOpen], { ...base, annotations: { openWorldHint: false } }).effect).toBe("deny");
+    expect(evaluateMcpToolPolicy([denyServer, approveOpen], request).effect).toBe("deny");
+    // Alone, the approval still adds its gate on the EITHER reading.
+    expect(evaluateMcpToolPolicy([approveOpen], request).effect).toBe("require_approval");
+    // When both readings agree, it still carves the deny into an approval; an override decides alone.
+    expect(evaluateMcpToolPolicy([denyServer, approveOpen], { ...base, annotations: {}, openWorld: true }).effect).toBe("require_approval");
+    expect(evaluateMcpToolPolicy([denyServer, approveOpen], { ...base, annotations: { openWorldHint: false }, openWorld: true, openWorldManual: true }).effect).toBe(
+      "require_approval"
+    );
+    expect(approvalMayCarve(approveOpen, request)).toBe(false);
+    expect(approvalMayCarve({ ...approveOpen, annotationHint: "not_read_only" }, request)).toBe(true);
   });
 
   it("reads the hint per rule effect", () => {
@@ -242,6 +260,17 @@ describe("simulation over recorded labels", () => {
     expect(evaluateRuleOnSummary(allowOpen, resolvedOpen, context)).toEqual({ state: "no_match" });
     expect(evaluateRuleOnSummary(denyInternal, { ...resolvedOpen, openWorldManual: true }, context)).toEqual({ state: "no_match" });
     expect(evaluateRuleOnSummary(allowOpen, { ...resolvedOpen, openWorldManual: true }, context)).toEqual({ state: "match" });
+  });
+
+  it("lets an open_world approval carve a deny only when both readings match", () => {
+    const denyServer: McpToolPolicyRule = { ...untrusted, id: "deny-server", effect: "deny", annotationHint: null, conditions: null, serverId: "http_mcp", additive: false };
+    const approveOpen: McpToolPolicyRule = { ...denyServer, id: "approve-open", effect: "require_approval", annotationHint: "open_world" };
+    const shadowDeny: McpToolPolicyRule = { ...denyServer, mode: "shadow" };
+    const resolvedOnly = { ...call("unknown"), annotations: { openWorldHint: false }, openWorld: true };
+    const enforcing = (recorded: PolicySimulationCall) =>
+      simulatePolicyTransition([approveOpen, shadowDeny], [approveOpen, { ...shadowDeny, mode: "enforce" }], recorded, context).draft.effect;
+    expect(enforcing(resolvedOnly)).toBe("deny");
+    expect(enforcing({ ...call("unknown"), annotations: {}, openWorld: true })).toBe("require_approval");
   });
 
   it("leaves only open-world hints unknown when the override changed after the call", () => {

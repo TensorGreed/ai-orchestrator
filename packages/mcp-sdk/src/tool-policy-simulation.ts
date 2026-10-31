@@ -30,6 +30,7 @@ import {
   policyRuleHasConditions,
   policyRuleKind,
   policyRuleMode,
+  approvalMayCarve,
   ruleHintMatches,
   type PolicyConditionQuantifier
 } from "./tool-policy";
@@ -737,6 +738,19 @@ export function evaluateConditionOnSummary(
 // One rule against a call
 // ---------------------------------------------------------------------------
 
+/**
+ * What `ruleHintMatches` / `approvalMayCarve` read for a recorded call. An open-world value an admin's newer override
+ * made unknown reads as absent: the annotation alone (scopeState already marks open-world hints undetermined then).
+ */
+function simulatedHintInput(call: PolicySimulationCall): Parameters<typeof ruleHintMatches>[1] {
+  return {
+    annotations: call.annotations,
+    manualReadOnly: call.manualReadOnly ?? null,
+    openWorld: call.openWorld === "unknown" ? null : call.openWorld,
+    ...(call.openWorldManual ? { openWorldManual: true } : {})
+  };
+}
+
 function scopeState(rule: McpToolPolicyRule, call: PolicySimulationCall): SimulatedRuleState {
   if (!rule.enabled) return { state: "no_match" };
   if (policyRuleKind(rule) !== "tool") return { state: "no_match" };
@@ -759,15 +773,7 @@ function scopeState(rule: McpToolPolicyRule, call: PolicySimulationCall): Simula
     if (call.annotations === undefined) unknowns.push("the tool's annotations are not known");
     else if (call.openWorld === "unknown" && isOpenWorldHint(rule.annotationHint)) {
       unknowns.push("an admin changed the tool's open-world override after the call");
-    } else if (
-      !ruleHintMatches(rule, {
-        annotations: call.annotations,
-        manualReadOnly: call.manualReadOnly ?? null,
-        // Only open-world hints read it, and those are handled above when it is unknown.
-        openWorld: call.openWorld === "unknown" ? null : call.openWorld,
-        ...(call.openWorldManual ? { openWorldManual: true } : {})
-      })
-    ) {
+    } else if (!ruleHintMatches(rule, simulatedHintInput(call))) {
       return { state: "no_match" };
     }
   }
@@ -978,6 +984,8 @@ export function simulatePolicyTransition(
       work: scopedRules
     };
   }
+  // Phase 12.2 — approvals that may add a gate for this call but not set a deny aside (`approvalMayCarve`).
+  const nonCarving = new Set(relevant.filter((rule) => !approvalMayCarve(rule, simulatedHintInput(call))));
   let work = 0;
   for (let mask = 0; mask < combinations; mask += 1) {
     const assumed = (identity: string) => (mask >> undecided.indexOf(identity)) & 1;
@@ -989,8 +997,8 @@ export function simulatePolicyTransition(
     const currentMatched = matched(currentRules, currentStates);
     const draftMatched = matched(draftRules, draftStates);
     work += scopedRules + decisionWork(currentMatched) + decisionWork(draftMatched);
-    const currentOutcome = decidePolicyOutcome(currentMatched);
-    const draftOutcome = decidePolicyOutcome(draftMatched);
+    const currentOutcome = decidePolicyOutcome(currentMatched, nonCarving);
+    const draftOutcome = decidePolicyOutcome(draftMatched, nonCarving);
     outcomes.add(simulationBucket(currentOutcome.effect, draftOutcome.effect));
     currentEffects.add(currentOutcome.effect);
     draftEffects.add(draftOutcome.effect);

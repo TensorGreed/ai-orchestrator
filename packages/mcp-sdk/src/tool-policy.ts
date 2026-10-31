@@ -239,6 +239,20 @@ export function ruleHintMatches(
   return rule.effect === "allow" ? resolved && annotationOnly : resolved || annotationOnly;
 }
 
+/**
+ * Phase 12.2 — whether a matched require_approval rule may also set a broader deny aside. Matching uses the
+ * EITHER reading (`ruleHintMatches`), so an approval can always ADD a gate; but setting a deny aside works like an
+ * allow, so as a carve-out an approval with an open-world hint counts only when BOTH readings match (or an admin's
+ * override decides). Rules of any other kind or hint are unaffected.
+ */
+export function approvalMayCarve(
+  rule: Pick<McpToolPolicyRule, "annotationHint" | "effect">,
+  input: Parameters<typeof ruleHintMatches>[1]
+): boolean {
+  if (rule.effect !== "require_approval" || !isOpenWorldHint(rule.annotationHint)) return true;
+  return ruleHintMatches({ annotationHint: rule.annotationHint, effect: "allow" }, input);
+}
+
 const HINT_KEYS: Record<string, keyof EffectiveToolHints> = {
   destructive: "destructive",
   read_only: "readOnly",
@@ -961,14 +975,19 @@ interface PolicyOutcome {
 /**
  * Precedence over the rules that matched: deny > require_approval > allow, with strictly narrower carve-outs.
  * Phase 12.2 — an additive rule (a safety preset's or the workflow switch's) never carves: it can add an approval,
- * never set a deny (or another approval) aside.
+ * never set a deny (or another approval) aside. Neither does an approval in `nonCarving` (see `approvalMayCarve`).
  */
-function decideOutcome(matched: readonly McpToolPolicyRule[], possibleCarveOuts: readonly McpToolPolicyRule[]): PolicyOutcome {
+function decideOutcome(
+  matched: readonly McpToolPolicyRule[],
+  possibleCarveOuts: readonly McpToolPolicyRule[],
+  /** Phase 12.2 — matched approvals that may add a gate but not set a deny aside (`approvalMayCarve`). */
+  nonCarving: ReadonlySet<McpToolPolicyRule> = new Set()
+): PolicyOutcome {
   const allows = [...matched.filter((rule) => rule.effect === "allow"), ...possibleCarveOuts.filter((rule) => rule.effect === "allow")].filter(
     (rule) => rule.additive !== true
   );
   const approvals = matched.filter((rule) => rule.effect === "require_approval");
-  const carvingApprovals = approvals.filter((rule) => rule.additive !== true);
+  const carvingApprovals = approvals.filter((rule) => rule.additive !== true && !nonCarving.has(rule));
   const denies = matched.filter((rule) => rule.effect === "deny");
   const overriddenDenies: PolicyOutcome["overriddenDenies"] = [];
   const overriddenApprovals: PolicyOutcome["overriddenApprovals"] = [];
@@ -1006,8 +1025,12 @@ function decideOutcome(matched: readonly McpToolPolicyRule[], possibleCarveOuts:
  * rules already known to match the call. The caller passes the enforced
  * rules only; the result is the enforced outcome and the rule deciding it.
  */
-export function decidePolicyOutcome(matched: readonly McpToolPolicyRule[]): { effect: McpToolPolicyEffect; rule?: McpToolPolicyRule } {
-  const outcome = decideOutcome(matched, []);
+export function decidePolicyOutcome(
+  matched: readonly McpToolPolicyRule[],
+  /** Phase 12.2 — matched approvals that may not set a deny aside for this call (`approvalMayCarve`). */
+  nonCarving?: ReadonlySet<McpToolPolicyRule>
+): { effect: McpToolPolicyEffect; rule?: McpToolPolicyRule } {
+  const outcome = decideOutcome(matched, [], nonCarving);
   return { effect: outcome.effect, ...(outcome.rule && matched.length > 0 ? { rule: outcome.rule } : {}) };
 }
 
@@ -1028,7 +1051,8 @@ export function evaluateMcpToolPolicy(
   // Discovery: an undecided allow may carve an exception for some calls, so it keeps a tool visible.
   const carveOuts = (shadowToo: boolean) => undecided.filter((rule) => shadowToo || policyRuleMode(rule) === "enforce");
   const matchedRules = matchedAll.filter((rule) => policyRuleMode(rule) === "enforce");
-  const enforced = decideOutcome(matchedRules, carveOuts(false));
+  const nonCarving = new Set(matchedAll.filter((rule) => !approvalMayCarve(rule, request)));
+  const enforced = decideOutcome(matchedRules, carveOuts(false), nonCarving);
   const decision: McpToolPolicyDecision = {
     allowed: enforced.effect !== "deny",
     effect: enforced.effect,
@@ -1041,7 +1065,7 @@ export function evaluateMcpToolPolicy(
   };
   const shadowMatched = matchedAll.filter((rule) => policyRuleMode(rule) === "shadow");
   if (shadowMatched.length > 0) {
-    const withShadow = decideOutcome(matchedAll, carveOuts(true));
+    const withShadow = decideOutcome(matchedAll, carveOuts(true), nonCarving);
     decision.shadow = {
       effect: withShadow.effect,
       ...(withShadow.rule ? { rule: withShadow.rule } : {}),
