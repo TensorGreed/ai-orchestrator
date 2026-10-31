@@ -2915,6 +2915,9 @@ export interface McpToolPolicyMarks {
   classification: McpToolClassification;
   manualReadOnly: boolean | null;
   access: McpToolAccess;
+  /** Phase 12.2 — whether the tool counts as open world, and why; absent from older servers. */
+  openWorld?: McpOpenWorldResolution;
+  manualOpenWorld?: boolean | null;
 }
 
 export interface McpToolPolicyRuleInput {
@@ -3081,6 +3084,69 @@ export async function setMcpToolClassification(serverId: string, toolName: strin
   }>(`/api/mcp/servers/${encodeURIComponent(serverId)}/tools/${encodeURIComponent(toolName)}/classification`, {
     method: "PUT",
     body: JSON.stringify({ readOnly })
+  });
+}
+
+/** Phase 12.2 — where a tool's open-world value came from (see the docs: untrusted content and write tools). */
+export type McpOpenWorldSource = "manual" | "destination" | "annotation" | "unknown";
+
+export interface McpOpenWorldResolution {
+  openWorld: boolean;
+  source: McpOpenWorldSource;
+}
+
+/** Phase 12.2 — set (true / false) or clear (null) an admin's open-world override for one tool. */
+export async function setMcpToolOpenWorld(serverId: string, toolName: string, openWorld: boolean | null) {
+  return apiRequest<{
+    serverId: string;
+    toolName: string;
+    override: { openWorld: boolean; setBy?: string | null; setAt?: string } | null;
+    manualOpenWorld: boolean | null;
+    openWorld: McpOpenWorldResolution;
+  }>(`/api/mcp/servers/${encodeURIComponent(serverId)}/tools/${encodeURIComponent(toolName)}/open-world`, {
+    method: "PUT",
+    body: JSON.stringify({ openWorld })
+  });
+}
+
+export type McpSafetyPresetId = "untrusted_write_approval" | "sensitive_no_open_world";
+
+export interface McpSafetyPresetState {
+  id: McpSafetyPresetId;
+  title: string;
+  summary: string;
+  ruleId: string;
+  added: boolean;
+  mode?: McpToolPolicyMode;
+  enabled?: boolean;
+  customised?: boolean;
+}
+
+export async function fetchMcpSafetyPresets() {
+  return apiRequest<{ presets: McpSafetyPresetState[] }>("/api/mcp/policies/presets");
+}
+
+export async function addMcpSafetyPreset(id: McpSafetyPresetId) {
+  return apiRequest<{ rule: McpToolPolicyRule }>(`/api/mcp/policies/presets/${encodeURIComponent(id)}`, { method: "POST", body: JSON.stringify({}) });
+}
+
+/** Phase 12.2 — the workflow's "Approve writes only after untrusted content" switch. */
+export interface UntrustedWriteSwitchState {
+  enabled: boolean;
+  ruleId: string;
+  mode?: McpToolPolicyMode;
+  ruleEnabled?: boolean;
+  customised?: boolean;
+}
+
+export async function fetchUntrustedWriteSwitch(workflowId: string) {
+  return apiRequest<{ switch: UntrustedWriteSwitchState }>(`/api/workflows/${encodeURIComponent(workflowId)}/untrusted-write-approval`);
+}
+
+export async function setUntrustedWriteSwitch(workflowId: string, enabled: boolean) {
+  return apiRequest<{ switch: UntrustedWriteSwitchState }>(`/api/workflows/${encodeURIComponent(workflowId)}/untrusted-write-approval`, {
+    method: "PUT",
+    body: JSON.stringify({ enabled })
   });
 }
 

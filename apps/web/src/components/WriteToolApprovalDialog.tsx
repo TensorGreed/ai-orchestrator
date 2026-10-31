@@ -5,11 +5,16 @@
  * may approve it, and how long a request waits. When nobody but the
  * signed-in user could approve, the dialog says so: with self-approval off
  * their own runs would wait until the timeout rejects them.
+ *
+ * Phase 12.2 — the "Approve writes only after untrusted content" switch: a
+ * tool rule scoped to this workflow (write tools wait for an admin's approval
+ * only while the context holds untrusted outside content). It is saved on the
+ * server at once, not with the workflow.
  */
 
 import { useEffect, useState } from "react";
 import { APPROVAL_DEFAULT_TIMEOUT_MINUTES, APPROVAL_MAX_TIMEOUT_MINUTES, APPROVER_ROLE_VALUES, type WriteToolApprovalSettings } from "@ai-orchestrator/shared";
-import { checkApprovalEligibility } from "../lib/api";
+import { ApiError, checkApprovalEligibility, fetchUntrustedWriteSwitch, setUntrustedWriteSwitch, type UntrustedWriteSwitchState } from "../lib/api";
 
 interface WriteToolApprovalDialogProps {
   workflowId: string;
@@ -150,6 +155,8 @@ export function WriteToolApprovalDialog({ workflowId, projectId, settings, onCha
             <div className="cfg-help">An undecided call is rejected after this long.</div>
           </div>
 
+          <UntrustedWriteSwitch workflowId={workflowId} />
+
           {nobody && (
             <div className="write-gate-warning" role="alert">
               {eligibility.requesterCanApprove
@@ -159,6 +166,77 @@ export function WriteToolApprovalDialog({ workflowId, projectId, settings, onCha
           )}
         </div>
       </div>
+    </div>
+  );
+}
+
+function switchError(err: unknown): string {
+  return err instanceof Error ? err.message : "Unexpected error";
+}
+
+function UntrustedWriteSwitch({ workflowId }: { workflowId: string }) {
+  const [state, setState] = useState<UntrustedWriteSwitchState | null>(null);
+  const [unsaved, setUnsaved] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let canceled = false;
+    setUnsaved(false);
+    setState(null);
+    const load = async () => {
+      try {
+        const result = await fetchUntrustedWriteSwitch(workflowId);
+        if (!canceled && result) setState(result.switch);
+      } catch (err) {
+        if (canceled) return;
+        if (err instanceof ApiError && err.status === 404) setUnsaved(true);
+        else setError(switchError(err));
+      }
+    };
+    void load();
+    return () => {
+      canceled = true;
+    };
+  }, [workflowId]);
+
+  const toggle = async (enabled: boolean) => {
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await setUntrustedWriteSwitch(workflowId, enabled);
+      setState(result.switch);
+    } catch (err) {
+      setError(switchError(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="cfg-field untrusted-write-switch">
+      <label className="guard-check">
+        <input
+          type="checkbox"
+          disabled={busy || unsaved || !state}
+          checked={state?.enabled === true}
+          onChange={(event) => void toggle(event.target.checked)}
+        />
+        <span>Approve writes only after untrusted content</span>
+      </label>
+      <div className="cfg-help">
+        {unsaved
+          ? "Save the workflow first: this switch is a tool policy rule for this workflow."
+          : "Instead of every write, only a call to a write tool made while the agent's context holds outside content (a public webhook, a web page, a tool result) waits for an admin's approval. Saved at once, as a tool policy rule."}
+      </div>
+      {state?.enabled && state.mode === "shadow" && <div className="cfg-help">The rule is in shadow mode: it only records what it would do.</div>}
+      {state?.enabled && state.ruleEnabled === false && <div className="cfg-help">An admin has disabled the rule.</div>}
+      {state?.customised && <div className="cfg-help">An admin has changed the rule; only an admin can turn it off.</div>}
+      {error && (
+        <div className="write-gate-warning" role="status">
+          {error}
+        </div>
+      )}
     </div>
   );
 }

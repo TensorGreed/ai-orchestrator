@@ -5703,3 +5703,36 @@ img.mcp-pg-block {
     grid-template-columns: minmax(0, 1fr);
   }
 }
+
+/* Phase 12.2 — safety presets */
+.mcp-preset-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.mcp-preset {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.mcp-preset p {
+  margin: 4px 0 0;
+}
+
+.mcp-preset-state {
+  flex-shrink: 0;
+}
+
+@media (max-width: 640px) {
+  .mcp-preset {
+    flex-direction: column;
+  }
+}

@@ -51,6 +51,7 @@ import {
   type ConditionsDraft
 } from "./McpPolicyConditionsEditor";
 import { ENFORCE_QUIET_DAYS, PolicySimulatePanel, PolicySuggestions } from "./McpPolicyLearning";
+import { McpSafetyPresets } from "./McpSafetyPresets";
 
 const ROLES: McpPolicyRole[] = ["admin", "builder", "operator", "viewer"];
 
@@ -470,6 +471,11 @@ export function McpPoliciesView({
           </ul>
         )}
       </section>
+
+      <McpSafetyPresets
+        isAdmin={isAdmin}
+        onAdded={(rule) => setRules((current) => (current.some((entry) => entry.id === rule.id) ? current : [...current, rule]))}
+      />
 
       {isAdmin && <PolicySuggestions rules={rules} shadowHits={shadowHits} onRulesChanged={() => void refresh()} />}
 
