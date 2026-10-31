@@ -191,6 +191,7 @@ import {
   createLabelScanner,
   currentLabelScope,
   labelsOf,
+  NON_INPUT_GLOBALS,
   runInLabelScope,
   RunLabelState,
   unionLabels,
@@ -1226,26 +1227,40 @@ function spotlightPromptPieces(
 }
 
 /**
- * 12.2 — what the rendered `{{ }}` pieces of an approval request (its message, details, editable fields) read, as
- * the sources the approver was shown: the nodes they name, the parents holding a field they read from the merged
- * item, and the run input.
+ * 12.2 — what an approval request showed the approver. Candidates are what its `{{ }}` pieces read (the nodes they
+ * name, the parents holding a field they read from the merged item, the run input); a candidate counts as shown
+ * only when its full value appears in the text the request actually showed (`shownText`: the rendered message and
+ * field values), by `whollyShownIn`. Reading part of a node (one field, a length, a condition, its keys) shows
+ * nothing: labels are per node, so clearing one needs all of it shown.
  */
-function approvalShownBy(pieces: readonly TemplatePiece[], scope: NodeLabelScope | undefined, parentOutputs: Record<string, unknown>): ApprovalShown {
-  const nodeIds = new Set<string>();
-  let input = false;
-  if (!scope) return { nodeIds: [], input };
+function approvalShownBy(
+  pieces: readonly TemplatePiece[],
+  scope: NodeLabelScope | undefined,
+  input: {
+    parentOutputs: Record<string, unknown>;
+    shownText: string;
+    outputOf: (nodeId: string) => unknown;
+    globals: Record<string, unknown>;
+  }
+): ApprovalShown {
+  const candidates = new Set<string>();
+  let readsInput = false;
+  if (!scope) return { nodeIds: [], input: false };
   for (const piece of pieces) {
     if (piece.body === undefined) continue;
     const sources = scope.sourcesOfTemplateRead(piece.body, piece.simplePath);
-    for (const nodeId of sources.nodeIds) nodeIds.add(nodeId);
-    if (sources.input) input = true;
+    for (const nodeId of sources.nodeIds) candidates.add(nodeId);
+    if (sources.input) readsInput = true;
     for (const field of sources.parentFields) {
-      for (const [parentId, output] of Object.entries(parentOutputs)) {
-        if (Object.prototype.hasOwnProperty.call(toRecord(output), field)) nodeIds.add(parentId);
+      for (const [parentId, output] of Object.entries(input.parentOutputs)) {
+        if (Object.prototype.hasOwnProperty.call(toRecord(output), field)) candidates.add(parentId);
       }
     }
   }
-  return { nodeIds: [...nodeIds], input };
+  const plain = (leaf: string) => leaf;
+  const nodeIds = [...candidates].filter((nodeId) => whollyShownIn(input.shownText, input.outputOf(nodeId), plain));
+  const runInput = Object.fromEntries(Object.entries(input.globals).filter(([key]) => !NON_INPUT_GLOBALS.has(key)));
+  return { nodeIds, input: readsInput && whollyShownIn(input.shownText, runInput, plain) };
 }
 
 /** Renders approval-request templates, collecting their pieces for `approvalShownBy`. */
@@ -1282,17 +1297,27 @@ function stringLeaves(value: unknown, out: string[] = [], depth = 0): string[] |
 }
 
 /**
- * 12.2 — the nodes whose text the approver saw in full in an approved tool call's arguments (`shownText`, the JSON
- * preview the request showed): every string value of the node's output appears in it. A node shown only in part is
- * not a source of what was approved.
+ * 12.2 — the approver saw `value` in full in `shownText`: every string value in it appears there (as `encode` writes
+ * it), or, for a value with no string in it, its JSON does. A value shown only in part, or too big to check, is not.
+ */
+function whollyShownIn(shownText: string, value: unknown, encode: (leaf: string) => string): boolean {
+  if (value === undefined) return false;
+  const leaves = stringLeaves(value);
+  if (!leaves) return false;
+  if (leaves.length > 0) return leaves.every((leaf) => shownText.includes(encode(leaf)));
+  const json = JSON.stringify(value);
+  return typeof json === "string" && shownText.includes(encode(json));
+}
+
+/**
+ * 12.2 — the nodes whose value the approver saw in full in an approved tool call's arguments (`shownText`, the JSON
+ * preview the request showed). A node shown only in part is not a source of what was approved.
  */
 function nodesWhollyShownIn(shownText: string, outputs: Iterable<[string, unknown]>, skip: string): string[] {
+  const jsonEscaped = (leaf: string) => JSON.stringify(leaf).slice(1, -1);
   const shown: string[] = [];
   for (const [nodeId, output] of outputs) {
-    if (nodeId === skip) continue;
-    const leaves = stringLeaves(output);
-    if (!leaves || leaves.length === 0) continue;
-    if (leaves.every((leaf) => shownText.includes(JSON.stringify(leaf).slice(1, -1)))) shown.push(nodeId);
+    if (nodeId !== skip && whollyShownIn(shownText, output, jsonEscaped)) shown.push(nodeId);
   }
   return shown;
 }
@@ -6998,7 +7023,19 @@ async function executeNodeHandler(
       // 12.2 — what the request shows (message, editable field values) is what an approval endorses.
       const gateRenderer = collectingRenderer(templateData);
       const gatePause = approvalGatePause(config, gateRenderer.render);
-      gatePause.shown = approvalShownBy(gateRenderer.pieces, context.labelScope, context.parentOutputs);
+      // Shown: the rendered message and the field values as the approver gets them (after parsing and truncation).
+      const gateHandoff = gatePause.request.handoff;
+      const gateFields = gateHandoff?.kind === "gate" ? (gateHandoff.request?.editableFields ?? []) : [];
+      const gateShownText = [
+        gatePause.request.message,
+        ...gateFields.map((field) => (field.value === undefined ? "" : typeof field.value === "string" ? field.value : JSON.stringify(field.value)))
+      ].join("\n");
+      gatePause.shown = approvalShownBy(gateRenderer.pieces, context.labelScope, {
+        parentOutputs: context.parentOutputs,
+        shownText: gateShownText,
+        outputOf: (nodeId) => context.nodeOutputs?.get(nodeId),
+        globals: context.globals
+      });
       throw gatePause;
     }
 
@@ -8969,10 +9006,16 @@ async function executeWorkflowRun(
           typeof nodeConfig.timeoutMinutes === "number" && Number.isFinite(nodeConfig.timeoutMinutes) && nodeConfig.timeoutMinutes > 0
             ? Math.floor(nodeConfig.timeoutMinutes)
             : 60;
-        const messageRenderer = collectingRenderer({ ...globals, ...merged, parent_outputs: parentOutputs });
+        // `results.<nodeId>` addresses any completed node, as in other templates (12.2: so a message can show it).
+        const messageRenderer = collectingRenderer({ ...globals, ...merged, parent_outputs: parentOutputs, results: serializeNodeOutputs(nodeOutputs) });
         const approvalMessage = messageRenderer.render(approvalMessageTemplate);
         // 12.2 — an approval endorses only what its message showed.
-        const shown = approvalShownBy(messageRenderer.pieces, labelScope, parentOutputs);
+        const shown = approvalShownBy(messageRenderer.pieces, labelScope, {
+          parentOutputs,
+          shownText: approvalMessage,
+          outputOf: (nodeId) => nodeOutputs.get(nodeId),
+          globals
+        });
 
         return await pauseForApproval({ node, index, nodeInput, startedAtNode, started, approvalMessage, timeoutMinutes, labelScope, shown });
       }

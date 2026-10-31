@@ -366,7 +366,8 @@ export function createLabelScanner(dictionaries: readonly GuardDictionary[], iss
 // ---------------------------------------------------------------------------
 
 /** Globals that are not run input: workflow variables and the run's own bookkeeping. */
-const NON_INPUT_GLOBALS = new Set(["vars", "execution_id", "execution_custom_data", "trigger_type", "scheduled_at", "_loop_index"]);
+/** Run globals that are not the run's input (12.2: exported so an approval can tell what the input holds). */
+export const NON_INPUT_GLOBALS: ReadonlySet<string> = new Set(["vars", "execution_id", "execution_custom_data", "trigger_type", "scheduled_at", "_loop_index"]);
 
 export interface RunLabelOptions {
   /** Labels of the run's input (the trigger's provenance, or an Execute Workflow node's input labels). */
