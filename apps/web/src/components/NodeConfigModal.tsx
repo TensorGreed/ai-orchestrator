@@ -19,6 +19,7 @@ import { GuardNodeFields, GuardProtectionFields } from "./GuardNodeConfigFields"
 import { ApprovalGateNodeFields } from "./ApprovalGateNodeFields";
 import { McpAnnotationChips, McpOutputSchema } from "./McpToolMeta";
 import { SecretSaveWarnings } from "./SecretSaveWarnings";
+import { TRIGGER_TRUST_OPTIONS, describeTriggerTrust, readTriggerTrust, withSensitiveOutput, withTriggerTrust } from "../lib/taint-sources";
 import {
   createSecret,
   discoverMcpTools,
@@ -120,6 +121,8 @@ export interface NodeInspectorProps {
   onExecuteStep: () => void;
   onPinNodeOutput?: (nodeId: string) => Promise<void> | void;
   onUnpinNodeOutput?: (nodeId: string) => Promise<void> | void;
+  /** 12.2 — admins may set a trigger's input trust; others see it read-only (the API refuses their changes). */
+  canSetTriggerTrust?: boolean;
 }
 
 type NodeConfigModalProps = NodeInspectorProps;
@@ -1156,7 +1159,8 @@ export function NodeInspector({
   onExecuteStep,
   onPinNodeOutput,
   onUnpinNodeOutput,
-  controlRef
+  controlRef,
+  canSetTriggerTrust = false
 }: NodeConfigModalProps) {
   const [label, setLabel] = useState(node.data.label);
   const [config, setConfig] = useState<Record<string, unknown>>(asRecord(node.data.config));
@@ -4129,6 +4133,35 @@ export function NodeInspector({
     );
   };
 
+  /** 12.2 — what the trigger's input counts as. Admin-only; everyone sees what applies. */
+  const renderTriggerTrustField = (authMode: string) => {
+    const trust = readTriggerTrust(config);
+    return (
+      <div className="cfg-field" data-testid="trigger-trust-field">
+        <FieldLabel
+          label="Input counts as"
+          help="Where the run's input came from, for guard policies. Only verified callers count as a user's by default. Only an admin can change this."
+        />
+        <select
+          aria-label="Input counts as"
+          value={trust}
+          disabled={!canSetTriggerTrust}
+          onChange={(event) => setConfig((current) => withTriggerTrust(current, event.target.value as typeof trust))}
+        >
+          {TRIGGER_TRUST_OPTIONS.map((option) => (
+            <option key={option.value} value={option.value}>
+              {option.label}
+            </option>
+          ))}
+        </select>
+        <p className="cfg-tip">
+          {describeTriggerTrust(authMode, trust)}
+          {!canSetTriggerTrust ? " Only an admin can change this." : ""}
+        </p>
+      </div>
+    );
+  };
+
   const renderWebhookParameters = () => {
     const pathValue = toStringValue(config.path, node.id);
     const normalizedPath = pathValue.trim().replace(/^\/+/, "").replace(/\/+$/, "") || node.id;
@@ -4195,6 +4228,7 @@ export function NodeInspector({
             { value: "hmac_sha256", label: "HMAC SHA256" }
           ]}
         />
+        {renderTriggerTrustField(authMode)}
 
         {authMode === "bearer_token" && (
           <>
@@ -9079,6 +9113,15 @@ export function NodeInspector({
                 { value: "branch", label: "Execute Fallback Branch" }
               ]}
             />
+        </div>
+        <div style={{ marginTop: 14 }} data-testid="sensitive-output-field">
+          <h3>Data labels</h3>
+          <ToggleField
+            label="Sensitive output"
+            checked={config.sensitiveOutput === true}
+            onChange={(next) => setConfig((current) => withSensitiveOutput(current, next))}
+            help="Mark this node's output sensitive on every run (HR records, payroll, customer data). Guard policies can then keep it from leaving, without scanning the content."
+          />
         </div>
       </>
     );

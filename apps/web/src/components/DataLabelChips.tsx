@@ -1,4 +1,5 @@
 import type { DataLabels, ProvenanceLabel } from "@ai-orchestrator/shared";
+import { describeEndorsement } from "../lib/taint-sources";
 
 /**
  * Phase 16 — where a node's data came from and what it contains, in plain
@@ -49,6 +50,17 @@ export function DataLabelChips({ labels }: { labels: unknown }) {
           {word}
         </span>
       ))}
+    </span>
+  );
+}
+
+/** 12.2 — who approved the content at this node and when; nothing when no approval cleared anything here. */
+export function EndorsementNote({ endorsement }: { endorsement: unknown }) {
+  const text = describeEndorsement(endorsement);
+  if (!text) return null;
+  return (
+    <span className="data-label-chip is-cleared" title={text} aria-label={text}>
+      {text.startsWith("Tool call") ? "approved" : "cleared"}
     </span>
   );
 }

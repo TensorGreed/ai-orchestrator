@@ -31,6 +31,7 @@ import {
   createFolder,
   createProject,
   createSecret,
+  setSecretSensitiveOutput,
   deleteWorkflowPin,
   deleteFolder,
   deleteProject,
@@ -152,6 +153,7 @@ import { WorkflowCardMenu } from "./components/WorkflowCardMenu";
 import { WorkflowCanvasArea, type ImportPanelBinding } from "./components/WorkflowCanvasArea";
 import { ExternalImportDialog, type ExternalImportSource } from "./components/ExternalImportDialog";
 import { SecretSaveWarnings } from "./components/SecretSaveWarnings";
+import { canvasLabelBadge, type CanvasLabelBadge } from "./lib/taint-sources";
 import {
   forgetImportReport,
   inspectImportText,
@@ -1134,6 +1136,7 @@ function StudioApp() {
   const [busy, setBusy] = useState(false);
   const [runningExecutionId, setRunningExecutionId] = useState<string | null>(null);
   const [secretBusy, setSecretBusy] = useState(false);
+  const [secretSensitiveOutput, setSecretSensitiveOutputFlag] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [secretMessage, setSecretMessage] = useState<string | null>(null);
   const [secretWarnings, setSecretWarnings] = useState<string[]>([]);
@@ -1361,6 +1364,16 @@ function StudioApp() {
   // each node's output._telemetry blob. Surfaced as pills on the canvas
   // card. Visible regardless of debug mode — token cost matters in prod
   // too, not just when debugging.
+  // 12.2 — the last run's label badges (debug view only, like the other run overlays).
+  const labelBadgeByNodeId = useMemo(() => {
+    const map = new Map<string, CanvasLabelBadge>();
+    if (!isDebugMode || !executionResult) return map;
+    for (const nodeResult of executionResult.nodeResults) {
+      const badge = canvasLabelBadge(nodeResult.labels, nodeResult.endorsement);
+      if (badge) map.set(nodeResult.nodeId, badge);
+    }
+    return map;
+  }, [executionResult, isDebugMode]);
   const telemetryByNodeId = useMemo(() => {
     const map = new Map<string, NonNullable<EditorNodeData["telemetry"]>>();
     if (!executionResult) return map;
@@ -1772,7 +1785,9 @@ function StudioApp() {
         const telemetry = telemetryByNodeId.get(node.id);
         const liveStartedAtMs = liveStartedAtByNodeId.get(node.id);
         const pinned = pinnedNodeIds.has(node.id);
+        const labelBadge = labelBadgeByNodeId.get(node.id);
         if (
+          node.data.labelBadge === labelBadge &&
           node.data.executionStatus === executionStatus &&
           node.data.liveStartedAtMs === liveStartedAtMs &&
           node.data.executionPreview === executionPreview &&
@@ -1790,13 +1805,14 @@ function StudioApp() {
             executionPreview,
             telemetry,
             liveStartedAtMs,
-            pinned
+            pinned,
+            labelBadge
           }
         };
       });
       return changed ? nextNodes : currentNodes;
     });
-  }, [executionPreviewByNodeId, executionStatuses, liveStartedAtByNodeId, pinnedNodeIds, setNodes, telemetryByNodeId]);
+  }, [executionPreviewByNodeId, executionStatuses, labelBadgeByNodeId, liveStartedAtByNodeId, pinnedNodeIds, setNodes, telemetryByNodeId]);
 
   useEffect(() => {
     setEdges((currentEdges) => currentEdges.map((edge) => decorateEdge(edge, nodes as EditorNode[])));
@@ -4409,6 +4425,22 @@ function StudioApp() {
     [createNodeFromDefinition, definitions, importFromFile, reactFlowInstance]
   );
 
+  const handleToggleSecretSensitive = useCallback(
+    async (secretId: string, sensitiveOutput: boolean) => {
+      setSecretBusy(true);
+      try {
+        await setSecretSensitiveOutput(secretId, sensitiveOutput);
+        await refreshSecrets();
+        setSecretMessage(sensitiveOutput ? "Secret marked sensitive output." : "Sensitive output flag cleared.");
+      } catch (toggleError) {
+        handleApiError(toggleError, "Failed to change the sensitive output flag");
+      } finally {
+        setSecretBusy(false);
+      }
+    },
+    [handleApiError, refreshSecrets]
+  );
+
   const handleCreateSecret = useCallback(async () => {
     if (!secretName.trim()) {
       setError("Secret name is required.");
@@ -4439,9 +4471,11 @@ function StudioApp() {
         name: secretName.trim(),
         provider: secretPayload.provider,
         value: secretPayload.value,
-        ...(activeProjectId ? { projectId: activeProjectId } : {})
+        ...(activeProjectId ? { projectId: activeProjectId } : {}),
+        ...(secretSensitiveOutput ? { sensitiveOutput: true } : {})
       });
       setSecretWarnings(created.warnings ?? []);
+      setSecretSensitiveOutputFlag(false);
       await refreshSecrets();
       setSecretGenericValue("");
       setSecretConnectionString("");
@@ -4457,6 +4491,7 @@ function StudioApp() {
     activeProjectId,
     handleApiError,
     refreshSecrets,
+    secretSensitiveOutput,
     secretConnectionString,
     secretCustomProvider,
     secretGenericValue,
@@ -5597,6 +5632,17 @@ function StudioApp() {
                       />
                     </>
                   )}
+                  <label className="secret-sensitive-toggle">
+                    <input
+                      type="checkbox"
+                      checked={secretSensitiveOutput}
+                      onChange={(event) => setSecretSensitiveOutputFlag(event.target.checked)}
+                    />
+                    <span>
+                      Sensitive output
+                      <small className="kb-subtle"> Nodes that use this secret produce sensitive data (for guard policies). Only an admin can clear it later.</small>
+                    </span>
+                  </label>
                   <div className="page-actions">
                     <button className="pg-btn primary" onClick={handleCreateSecret} disabled={secretBusy || busy}>
                       {secretBusy ? "Creating…" : "Create secret"}
@@ -5617,9 +5663,24 @@ function StudioApp() {
                         <div className="secret-item-copy">
                           <strong>{secret.name}</strong>
                           <span className="pg-pill">{secret.provider}</span>
+                          {secret.sensitiveOutput && (
+                            <span className="data-label-chip is-sensitive" title="Nodes that use this secret produce sensitive output">
+                              sensitive output
+                            </span>
+                          )}
                           <code className="mono-cell">{secret.id}</code>
                         </div>
                         <div className="secret-item-actions">
+                          {(!secret.sensitiveOutput || authUser?.role === "admin") && (
+                            <button
+                              type="button"
+                              className="pg-btn small ghost"
+                              disabled={secretBusy}
+                              onClick={() => void handleToggleSecretSensitive(secret.id, !secret.sensitiveOutput)}
+                            >
+                              {secret.sensitiveOutput ? "Clear sensitive" : "Mark sensitive"}
+                            </button>
+                          )}
                           <button type="button" className="pg-btn small" onClick={() => void copySecretId(secret.id)}>
                             Copy id
                           </button>
@@ -5717,6 +5778,7 @@ function StudioApp() {
           }}
           onPinNodeOutput={handlePinNodeOutput}
           onUnpinNodeOutput={handleUnpinNodeOutput}
+          canSetTriggerTrust={authUser?.role === "admin"}
         />
       )}
       <KeyboardShortcutsPanel open={showShortcutsPanel} onClose={() => setShowShortcutsPanel(false)} />

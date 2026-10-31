@@ -86,6 +86,16 @@ function Badges({ data }: { data: EditorNodeData }) {
           PIN
         </span>
       )}
+      {data.labelBadge && (
+        <span
+          className={`wf-node-label-badge is-${data.labelBadge.tone}${data.labelBadge.cleared ? " is-cleared" : ""}`}
+          title={data.labelBadge.title}
+          aria-label={`Data labels: ${data.labelBadge.title}`}
+          data-testid="node-label-badge"
+        >
+          {data.labelBadge.cleared && data.labelBadge.text !== "cleared" ? `✓ ${data.labelBadge.text}` : data.labelBadge.text}
+        </span>
+      )}
     </>
   );
 }
