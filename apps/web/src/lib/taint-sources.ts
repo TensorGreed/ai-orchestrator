@@ -27,13 +27,28 @@ export function describeTriggerTrust(authMode: string, trust: TriggerTrustChoice
     : "With no auth, input counts as outside content. Use a bearer token or HMAC signature to have it count as a user's.";
 }
 
-/** The config with the trust setting changed; "" removes it, so a workflow without one stays as it was. */
+/**
+ * The config with the trust setting changed; "" removes it, so a workflow without one stays as it was. Its binding
+ * to the trigger (`inputTrustFor`) goes too: the admin's save binds the new setting to the trigger as saved.
+ */
 export function withTriggerTrust(config: Record<string, unknown>, trust: TriggerTrustChoice): Record<string, unknown> {
   const next = { ...config };
   if (trust) next.inputTrust = trust;
   else delete next.inputTrust;
+  delete next.inputTrustFor;
   return next;
 }
+
+/** The config with the trust setting kept and its binding removed: an admin's save binds it to the trigger as it is now. */
+export function withTriggerTrustReapplied(config: Record<string, unknown>): Record<string, unknown> {
+  const next = { ...config };
+  delete next.inputTrustFor;
+  return next;
+}
+
+/** The notice for a trust setting that no longer applies because its trigger changed. */
+export const TRIGGER_TRUST_RESET_TEXT =
+  "Trust setting reset: trigger changed. Its auth mode, secret or path is not what an admin set the trust for, so the input counts as the auth mode says.";
 
 /** The config with the "sensitive output" flag set or removed (never stored as false). */
 export function withSensitiveOutput(config: Record<string, unknown>, sensitive: boolean): Record<string, unknown> {
@@ -70,17 +85,24 @@ function readProvenance(value: unknown): ProvenanceLabel[] {
 export function canvasLabelBadge(labels: unknown, endorsement?: unknown): CanvasLabelBadge | null {
   const provenance = readProvenance(labels);
   const words = (["untrusted_external", "sensitive"] as const).filter((label) => provenance.includes(label)).map((label) => BADGE_WORDS[label]!);
-  const cleared = describeEndorsement(endorsement);
+  const described = describeEndorsement(endorsement);
+  // "cleared" only where the approval covered some step's data.
+  const cleared = endorsementClears(endorsement) ? described : null;
   if (words.length === 0 && !cleared) return null;
   const text = words.length > 0 ? words.join(" · ") : "cleared";
   const title = [
     provenance.includes("untrusted_external") ? "This node's data includes outside content." : null,
     provenance.includes("sensitive") ? "This node's data is sensitive." : null,
-    cleared
+    described
   ]
     .filter(Boolean)
     .join(" ");
   return { text, title, tone: provenance.includes("untrusted_external") || !provenance.includes("sensitive") ? "external" : "sensitive", cleared: Boolean(cleared) };
+}
+
+/** True when an endorsement covered some step's data (an approval that showed none clears nothing). */
+export function endorsementClears(value: unknown): boolean {
+  return (readEndorsement(value)?.nodeIds.length ?? 0) > 0;
 }
 
 export function readEndorsement(value: unknown): LabelEndorsement | null {
@@ -104,14 +126,20 @@ function formatWhen(iso: string): string {
 }
 
 /**
- * "Cleared by maria@example.org at 2026-10-31 10:04 UTC (Human Approval)": who approved the content here and when.
- * An approved tool call clears nothing (its result is new outside content), so it reads as "Approved".
+ * "Outside content cleared by maria@example.org at 2026-10-31 10:04 UTC (Human Approval)": who approved the content
+ * here and when. An approval that showed no step's data clears nothing and reads "Approved by"; an approved tool
+ * call's result is new outside content.
  */
 export function describeEndorsement(value: unknown): string | null {
   const endorsement = readEndorsement(value);
   if (!endorsement) return null;
   const who = endorsement.approvedBy ?? "an approver";
   const when = formatWhen(endorsement.approvedAt);
-  if (endorsement.kind === "tool_call") return `Tool call${endorsement.toolName ? ` ${endorsement.toolName}` : ""} approved by ${who} at ${when}; its result is still outside content.`;
-  return `Outside content cleared by ${who} at ${when} (${endorsement.kind === "approval_gate" ? "Approval Gate" : "Human Approval"}).`;
+  if (endorsement.kind === "tool_call") {
+    const shown = endorsement.nodeIds.length > 0 ? " the steps its arguments showed in full are cleared;" : "";
+    return `Tool call${endorsement.toolName ? ` ${endorsement.toolName}` : ""} approved by ${who} at ${when};${shown} its result is still outside content.`;
+  }
+  const kind = endorsement.kind === "approval_gate" ? "Approval Gate" : "Human Approval";
+  if (endorsement.nodeIds.length === 0) return `Approved by ${who} at ${when} (${kind}); it showed no step's data, so nothing was cleared.`;
+  return `Outside content cleared by ${who} at ${when} (${kind}).`;
 }

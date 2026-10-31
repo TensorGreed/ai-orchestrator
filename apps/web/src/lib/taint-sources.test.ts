@@ -6,7 +6,8 @@ import {
   readEndorsement,
   readTriggerTrust,
   withSensitiveOutput,
-  withTriggerTrust
+  withTriggerTrust,
+  withTriggerTrustReapplied
 } from "./taint-sources";
 
 const approval = { kind: "human_approval", approvedBy: "maria@example.org", approvedAt: "2026-10-31T10:04:12.000Z", nodeIds: ["ask", "fetch"] };
@@ -18,6 +19,13 @@ describe("trigger trust", () => {
     expect(readTriggerTrust({})).toBe("");
     expect(withTriggerTrust({ path: "p" }, "untrusted_external")).toEqual({ path: "p", inputTrust: "untrusted_external" });
     expect(withTriggerTrust({ path: "p", inputTrust: "user" }, "")).toEqual({ path: "p" });
+  });
+
+  it("a changed setting drops its binding (the admin's save binds it again); re-applying keeps the setting", () => {
+    const binding = { nodeType: "webhook_input", authMode: "none", secretId: null, path: "p" };
+    expect(withTriggerTrust({ path: "p", inputTrust: "user", inputTrustFor: binding }, "untrusted_external")).toEqual({ path: "p", inputTrust: "untrusted_external" });
+    expect(withTriggerTrust({ path: "p", inputTrust: "user", inputTrustFor: binding }, "")).toEqual({ path: "p" });
+    expect(withTriggerTrustReapplied({ path: "p", inputTrust: "user", inputTrustFor: binding })).toEqual({ path: "p", inputTrust: "user" });
   });
 
   it("says what the input counts as for the auth mode", () => {
@@ -48,6 +56,8 @@ describe("canvas label badge", () => {
     const badge = canvasLabelBadge({ provenance: ["user"], dataClasses: [] }, approval)!;
     expect(badge).toMatchObject({ text: "cleared", cleared: true });
     expect(badge.title).toContain("maria@example.org");
+     // An approval that showed nothing clears nothing: no badge.
+    expect(canvasLabelBadge({ provenance: ["user"], dataClasses: [] }, { ...approval, nodeIds: [] })).toBeNull();
   });
 });
 
@@ -56,6 +66,8 @@ describe("endorsements", () => {
     expect(describeEndorsement(approval)).toBe("Outside content cleared by maria@example.org at 2026-10-31 10:04 UTC (Human Approval).");
     expect(describeEndorsement({ ...approval, kind: "approval_gate", approvedBy: null })).toBe("Outside content cleared by an approver at 2026-10-31 10:04 UTC (Approval Gate).");
     expect(describeEndorsement({ ...approval, kind: "tool_call", toolName: "send_email" })).toContain("its result is still outside content");
+    // An approval that showed no step's data clears nothing.
+    expect(describeEndorsement({ ...approval, nodeIds: [] })).toBe("Approved by maria@example.org at 2026-10-31 10:04 UTC (Human Approval); it showed no step's data, so nothing was cleared.");
   });
 
   it("ignore anything that is not an endorsement", () => {

@@ -8,7 +8,7 @@ import type {
   McpToolPolicyTrace,
   WorkflowExecutionResult
 } from "@ai-orchestrator/shared";
-import { getNodeDefinition } from "@ai-orchestrator/shared";
+import { getNodeDefinition, triggerTrustState } from "@ai-orchestrator/shared";
 import { buildToolPolicyTraceView, readToolPolicyTrace } from "../lib/tool-policy-trace";
 import type { LiveNodeResult } from "../lib/run-trace";
 import { LiveElapsed } from "./WorkflowCanvasNode";
@@ -19,7 +19,15 @@ import { GuardNodeFields, GuardProtectionFields } from "./GuardNodeConfigFields"
 import { ApprovalGateNodeFields } from "./ApprovalGateNodeFields";
 import { McpAnnotationChips, McpOutputSchema } from "./McpToolMeta";
 import { SecretSaveWarnings } from "./SecretSaveWarnings";
-import { TRIGGER_TRUST_OPTIONS, describeTriggerTrust, readTriggerTrust, withSensitiveOutput, withTriggerTrust } from "../lib/taint-sources";
+import {
+  TRIGGER_TRUST_OPTIONS,
+  TRIGGER_TRUST_RESET_TEXT,
+  describeTriggerTrust,
+  readTriggerTrust,
+  withSensitiveOutput,
+  withTriggerTrust,
+  withTriggerTrustReapplied
+} from "../lib/taint-sources";
 import {
   createSecret,
   discoverMcpTools,
@@ -4136,6 +4144,9 @@ export function NodeInspector({
   /** 12.2 — what the trigger's input counts as. Admin-only; everyone sees what applies. */
   const renderTriggerTrustField = (authMode: string) => {
     const trust = readTriggerTrust(config);
+    // A setting whose trigger changed since an admin set it is ignored. Without a binding (an admin just changed or
+    // re-applied it) the admin's save binds it to the trigger as saved.
+    const reset = config.inputTrustFor !== undefined && triggerTrustState({ type: node.data.nodeType, config }) === "reset";
     return (
       <div className="cfg-field" data-testid="trigger-trust-field">
         <FieldLabel
@@ -4154,8 +4165,20 @@ export function NodeInspector({
             </option>
           ))}
         </select>
+        {reset ? (
+          <div className="cfg-tip trigger-trust-reset" role="status" data-testid="trigger-trust-reset">
+            <p>{TRIGGER_TRUST_RESET_TEXT}</p>
+            {canSetTriggerTrust ? (
+              <button type="button" className="btn-secondary" onClick={() => setConfig((current) => withTriggerTrustReapplied(current))}>
+                Apply to this trigger
+              </button>
+            ) : (
+              <p>Ask an admin to set it again.</p>
+            )}
+          </div>
+        ) : null}
         <p className="cfg-tip">
-          {describeTriggerTrust(authMode, trust)}
+          {reset ? describeTriggerTrust(authMode, "") : describeTriggerTrust(authMode, trust)}
           {!canSetTriggerTrust ? " Only an admin can change this." : ""}
         </p>
       </div>

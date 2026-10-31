@@ -31,5 +31,9 @@ describe("data label chips", () => {
     const html = renderToStaticMarkup(<EndorsementNote endorsement={{ kind: "human_approval", approvedBy: "maria@example.org", approvedAt: "2026-10-31T10:04:00.000Z", nodeIds: ["ask"] }} />);
     expect(html).toContain(">cleared<");
     expect(html).toContain("maria@example.org");
+    // 12.2 — an approval that showed no step's data reads "approved": it cleared nothing.
+    const bland = renderToStaticMarkup(<EndorsementNote endorsement={{ kind: "human_approval", approvedBy: "maria@example.org", approvedAt: "2026-10-31T10:04:00.000Z", nodeIds: [] }} />);
+    expect(bland).toContain(">approved<");
+    expect(bland).toContain("nothing was cleared");
   });
 });

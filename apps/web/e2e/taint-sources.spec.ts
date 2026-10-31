@@ -102,6 +102,55 @@ test.describe("provenance sources", () => {
     }
   });
 
+  test("a trust setting whose trigger changed shows as reset; an admin applies it to the trigger again", async ({ page }) => {
+    await openStudio(page);
+    const stamp = Date.now();
+    const workflowId = `wf-e2e-reset-${stamp}`;
+    const workflow = (authMode: string, binding?: unknown) => ({
+      id: workflowId,
+      name: `E2E Reset ${stamp}`,
+      schemaVersion: "1.0.0",
+      workflowVersion: 1,
+      nodes: [
+        {
+          id: "hook",
+          type: "webhook_input",
+          name: "Partner hook",
+          position: { x: 80, y: 180 },
+          config: { path: `e2e-reset-${stamp}`, method: "POST", authMode, inputTrust: "user", ...(binding ? { inputTrustFor: binding } : {}) }
+        },
+        { id: "out", type: "output", name: "Output", position: { x: 380, y: 180 }, config: { responseTemplate: "ok", outputKey: "result" } }
+      ],
+      edges: [{ id: "e1", source: "hook", target: "out" }]
+    });
+    type Saved = { nodes: Array<{ id: string; config: Record<string, unknown> }> };
+    const hookConfig = async () => ((await (await page.request.get(`/api/workflows/${workflowId}`)).json()) as Saved).nodes.find((node) => node.id === "hook")!.config;
+    try {
+      // An admin sets the trust (the save binds it), then the trigger changes with that binding kept.
+      expect((await page.request.post("/api/workflows", { data: workflow("bearer_token") })).ok()).toBeTruthy();
+      const binding = (await hookConfig()).inputTrustFor;
+      expect(binding).toMatchObject({ authMode: "bearer_token" });
+      expect((await page.request.put(`/api/workflows/${workflowId}`, { data: workflow("none", binding) })).ok()).toBeTruthy();
+
+      await page.reload();
+      await page.getByLabel("Workflow", { exact: true }).selectOption(workflowId);
+      await sidebarItem(page, "Editor").click();
+      await page.locator(".react-flow__node").filter({ hasText: "Partner hook" }).first().dblclick();
+      const inspector = page.getByRole("dialog", { name: /^Inspect / });
+      const reset = inspector.getByTestId("trigger-trust-reset");
+      await expect(reset).toContainText("Trust setting reset: trigger changed");
+      await reset.scrollIntoViewIfNeeded();
+      await page.screenshot({ path: path.join(SHOT_DIR, "06-trigger-trust-reset.png") });
+      await reset.getByRole("button", { name: "Apply to this trigger" }).click();
+      await expect(inspector.getByTestId("trigger-trust-reset")).toHaveCount(0);
+      await inspector.getByRole("button", { name: "Save changes" }).click();
+      await page.getByRole("banner").getByRole("button", { name: "Save", exact: true }).click();
+      await expect.poll(async () => ((await hookConfig()).inputTrustFor as { authMode?: string } | undefined)?.authMode, { timeout: 30_000 }).toBe("none");
+    } finally {
+      await page.request.delete(`/api/workflows/${workflowId}`);
+    }
+  });
+
   test("flags a secret sensitive output on the Secrets page", async ({ page }) => {
     await openStudio(page);
     const name = `E2E payroll db ${Date.now()}`;
@@ -136,7 +185,7 @@ test.describe("provenance sources", () => {
           workflowVersion: 1,
           nodes: [
             { id: "hook", type: "webhook_input", name: "Hook", position: { x: 80, y: 180 }, config: { path: hookPath, method: "POST" } },
-            { id: "review", type: "human_approval", name: "Review", position: { x: 380, y: 180 }, config: { approvalMessage: "Check the partner's text", timeoutMinutes: 30 } },
+            { id: "review", type: "human_approval", name: "Review", position: { x: 380, y: 180 }, config: { approvalMessage: "Check the partner's text: {{results.hook.user_prompt}}", timeoutMinutes: 30 } },
             { id: "out", type: "output", name: "Output", position: { x: 680, y: 180 }, config: { responseTemplate: "ok", outputKey: "result" } }
           ],
           edges: [
