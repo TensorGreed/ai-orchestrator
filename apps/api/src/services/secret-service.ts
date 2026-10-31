@@ -310,7 +310,8 @@ export class SecretService {
       projectId: row.projectId,
       source: row.source,
       externalProviderId: row.externalProviderId,
-      externalKey: row.externalKey
+      externalKey: row.externalKey,
+      sensitiveOutput: row.sensitiveOutput
     }));
   }
 

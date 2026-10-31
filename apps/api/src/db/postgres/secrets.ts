@@ -19,6 +19,7 @@ interface SecretDbRow {
   source: string | null;
   external_provider_id: string | null;
   external_key: string | null;
+  sensitive_output?: number | string | null;
 }
 
 const nullableStr = (value: unknown): string | null => (value ? toStr(value) : null);
@@ -47,7 +48,7 @@ export async function listSecrets(
   }
   const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
   const rows = await ctx.query<SecretDbRow>(
-    `SELECT id, name, provider, created_at, project_id, source, external_provider_id, external_key
+    `SELECT id, name, provider, created_at, project_id, source, external_provider_id, external_key, sensitive_output
        FROM secrets ${where} ORDER BY created_at DESC`,
     params
   );
@@ -59,8 +60,19 @@ export async function listSecrets(
     projectId: row.project_id ? toStr(row.project_id) : DEFAULT_PROJECT_ID,
     source: row.source === "external" ? ("external" as const) : ("local" as const),
     externalProviderId: nullableStr(row.external_provider_id),
-    externalKey: nullableStr(row.external_key)
+    externalKey: nullableStr(row.external_key),
+    sensitiveOutput: toNum(row.sensitive_output ?? 0) === 1
   }));
+}
+
+export async function setSecretSensitiveOutput(ctx: PgContext, id: string, sensitiveOutput: boolean): ReturnType<Store["setSecretSensitiveOutput"]> {
+  const updated = await ctx.query<{ id: string }>(`UPDATE secrets SET sensitive_output = $1 WHERE id = $2 RETURNING id`, [sensitiveOutput ? 1 : 0, id]);
+  return updated.length > 0;
+}
+
+export async function listSensitiveOutputSecretIds(ctx: PgContext): ReturnType<Store["listSensitiveOutputSecretIds"]> {
+  const rows = await ctx.query<{ id: string }>(`SELECT id FROM secrets WHERE sensitive_output = 1 ORDER BY id COLLATE "C"`);
+  return rows.map((row) => toStr(row.id));
 }
 
 export async function getSecret(ctx: PgContext, id: string): ReturnType<Store["getSecret"]> {
