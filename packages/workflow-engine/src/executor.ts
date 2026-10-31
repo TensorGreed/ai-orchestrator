@@ -1226,6 +1226,9 @@ function spotlightPromptPieces(
   return marked ? out.join("") : rendered;
 }
 
+/** 12.2 — the run input's own top-level names (the engine sets them; the caller's content is inside). */
+const RUN_INPUT_CONTAINER_KEYS: ReadonlySet<string> = new Set(["webhook", "system_prompt", "user_prompt", "session_id", "images"]);
+
 /**
  * 12.2 — what an approval request showed the approver. Candidates are what its `{{ }}` pieces read (the nodes they
  * name, the parents holding a field they read from the merged item, the run input); a candidate counts as shown
@@ -1260,7 +1263,7 @@ function approvalShownBy(
   const plain = (leaf: string) => leaf;
   const nodeIds = [...candidates].filter((nodeId) => whollyShownIn(input.shownText, input.outputOf(nodeId), plain));
   const runInput = Object.fromEntries(Object.entries(input.globals).filter(([key]) => !NON_INPUT_GLOBALS.has(key)));
-  return { nodeIds, input: readsInput && whollyShownIn(input.shownText, runInput, plain) };
+  return { nodeIds, input: readsInput && whollyShownIn(input.shownText, runInput, plain, RUN_INPUT_CONTAINER_KEYS) };
 }
 
 /** Renders approval-request templates, collecting their pieces for `approvalShownBy`. */
@@ -1279,32 +1282,62 @@ function collectingRenderer(values: Record<string, unknown>): { render: (templat
 
 const MAX_SHOWN_LEAVES = 200;
 
-/** The string values in `value` (up to `MAX_SHOWN_LEAVES`); undefined when it holds more. */
-function stringLeaves(value: unknown, out: string[] = [], depth = 0): string[] | undefined {
+/** One piece of a value an approver must have seen: a string value or object key, or a number, boolean or null. */
+type ShownLeaf = { text: string; scalar: boolean };
+
+/**
+ * The parts of `value` that must all appear for it to count as shown: every object key, every non-empty string,
+ * and every number, boolean and null (up to `MAX_SHOWN_LEAVES`); undefined when it holds more or nests too deep.
+ * `skipKeys` names top-level keys that are the engine's own (the run input's container names), not content.
+ */
+function shownLeaves(value: unknown, skipKeys?: ReadonlySet<string>, out: ShownLeaf[] = [], depth = 0): ShownLeaf[] | undefined {
   if (out.length > MAX_SHOWN_LEAVES || depth > 20) return undefined;
   if (typeof value === "string") {
-    if (value.length > 0) out.push(value);
+    if (value.length > 0) out.push({ text: value, scalar: false });
+    return out;
+  }
+  if (typeof value === "number" || typeof value === "boolean" || value === null) {
+    out.push({ text: String(value), scalar: true });
     return out;
   }
   if (Array.isArray(value)) {
-    for (const entry of value) if (!stringLeaves(entry, out, depth + 1)) return undefined;
+    for (const entry of value) if (!shownLeaves(entry, undefined, out, depth + 1)) return undefined;
     return out;
   }
   if (value && typeof value === "object") {
-    for (const entry of Object.values(value as Record<string, unknown>)) if (!stringLeaves(entry, out, depth + 1)) return undefined;
+    for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+      if (entry === undefined) continue;
+      if (!(depth === 0 && skipKeys?.has(key)) && key.length > 0) out.push({ text: key, scalar: false });
+      if (!shownLeaves(entry, undefined, out, depth + 1)) return undefined;
+    }
   }
-  return out;
+  return out.length > MAX_SHOWN_LEAVES ? undefined : out;
+}
+
+/** `needle` appears in `text`; a number, boolean or null only as a whole token (not touching a letter or digit). */
+function appearsIn(text: string, needle: string, token: boolean): boolean {
+  if (!token) return text.includes(needle);
+  let from = 0;
+  for (;;) {
+    const at = text.indexOf(needle, from);
+    if (at < 0) return false;
+    const before = text[at - 1];
+    const after = text[at + needle.length];
+    if (!(before && /[\p{L}\p{N}]/u.test(before)) && !(after && /[\p{L}\p{N}]/u.test(after))) return true;
+    from = at + 1;
+  }
 }
 
 /**
- * 12.2 — the approver saw `value` in full in `shownText`: every string value in it appears there (as `encode` writes
- * it), or, for a value with no string in it, its JSON does. A value shown only in part, or too big to check, is not.
+ * 12.2 — the approver saw `value` in full in `shownText`: every key, string, number, boolean and null in it appears
+ * there (as `encode` writes it), or, for a value with none (an empty object or list), its JSON does. A value shown
+ * only in part, or too big to check, is not.
  */
-function whollyShownIn(shownText: string, value: unknown, encode: (leaf: string) => string): boolean {
+function whollyShownIn(shownText: string, value: unknown, encode: (leaf: string) => string, skipKeys?: ReadonlySet<string>): boolean {
   if (value === undefined) return false;
-  const leaves = stringLeaves(value);
+  const leaves = shownLeaves(value, skipKeys);
   if (!leaves) return false;
-  if (leaves.length > 0) return leaves.every((leaf) => shownText.includes(encode(leaf)));
+  if (leaves.length > 0) return leaves.every((leaf) => appearsIn(shownText, leaf.scalar ? leaf.text : encode(leaf.text), leaf.scalar));
   const json = JSON.stringify(value);
   return typeof json === "string" && shownText.includes(encode(json));
 }
