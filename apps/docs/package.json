@@ -13,8 +13,8 @@
     "@ai-orchestrator/shared": "workspace:*"
   },
   "devDependencies": {
-    "tsx": "^4.20.5",
+    "tsx": "^4.23.15",
     "vitepress": "^1.6.4",
-    "vue": "^3.5.18"
+    "vue": "^3.5.44"
   }
 }

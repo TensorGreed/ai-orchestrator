@@ -197,7 +197,7 @@
     "publish:openvsx": "ovsx publish vscode-l2m-agent.vsix"
   },
   "devDependencies": {
-    "@types/vscode": "^1.93.0",
+    "@types/vscode": "^1.140.0",
     "@vscode/vsce": "^3.2.1",
     "ovsx": "^0.10.1"
   }
