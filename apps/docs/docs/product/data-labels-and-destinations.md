@@ -53,18 +53,37 @@ On the run view each node shows them in plain words, for example
   admin can set **Input counts as** on the Webhook node to fix it either way
   (for example, outside content even from a verified partner). Builders see
   the setting but cannot set, change or remove it, and a builder's copy of a
-  workflow drops it. The trigger's labels are recorded on its result, even
-  when the run does not track labels, so replays and retries keep them; a
-  retry adds the retrying person's `user` to them.
+  workflow drops it; so do a share link's import and a git pull, whoever runs
+  them (an admin sets it again). A builder's import of an export keeps the
+  stored workflow's setting. The setting is bound to the trigger it was set
+  for: its node type, auth mode, secret and path when the admin saved it. If
+  any of them changes later, the setting no longer applies, the trigger falls
+  back to its default, and the Webhook node shows **Trust setting reset:
+  trigger changed** until an admin applies it to the trigger again. A builder
+  cannot roll a release back to a version whose trust setting differs from
+  what production runs now; an admin can. The trigger's labels are recorded
+  on its result, even when the run does not track labels, so replays and
+  retries keep them; a retry adds the retrying person's `user` to them. A
+  retry or MCP replay of a run whose trigger labels can no longer be found
+  counts its input as `untrusted_external`.
 - **Sensitive output.** A node with **Sensitive output** switched on (in its
   settings), and any node whose settings use a secret flagged
   **Sensitive output** on the Secrets page, is `sensitive` on every run,
   without a profile and without scanning. An attached MCP tool flagged this
-  way makes the results of that tool sensitive. Anyone who may change a
-  secret can flag it; only an admin can clear the flag. With no flag set,
-  nothing is looked up. For destination rules and `label_present` tool
-  conditions, content with a data class the destination is not approved for
-  also counts as `sensitive`.
+  way makes the results of that tool sensitive, and so does an MCP Tool node
+  on a registered server whose secret is flagged. Anyone who may change a
+  secret can flag it; only an admin can clear the flag or delete a flagged
+  secret. With no flag set, nothing is looked up. A node's own **Sensitive
+  output** switch is its author's declaration: whoever edits the workflow can
+  turn it off. To have a policy rely on it, an admin flags the secret (or
+  the connector's secret) instead.
+- **Data classes count as sensitive at checks.** For `label_present
+  sensitive` tool conditions, any data class found counts as `sensitive`.
+  Destination rules count only the classes the destination is not approved
+  for. Neither is stored as the content's provenance, and the reason shown
+  for such a match is the labels, even when the class was found in this
+  call. A `provenance: ["sensitive"]` destination rule in an existing profile
+  can therefore start to match content with a detected class.
 - **Nodes that fetch.** HTTP Request, Web Browse, MCP tools, connectors and
   RAG add `untrusted_external` to what they output. Pinned data on such a
   node is labelled both `user` and `untrusted_external`.
@@ -103,16 +122,23 @@ carries the input's labels.
   Execute Workflow node's input, and the Execute Workflow node's output takes
   the labels of the child's final output.
 - **Approvals**: a paused run keeps its labels, and a person's decision adds
-  `user`. An approval is also the only way outside content is cleared: when a
-  person approves a Human Approval or Approval Gate step, the content they
-  saw (the step's input from the parents that ran, and its own output)
-  counts as `user` instead of `untrusted_external` for the steps after it.
-  Data classes stay. Outside content that joins later (a fetch after the
-  approval, or a branch the approver never saw) keeps its label. The step's
-  trace records who approved and when, shown as **cleared** in the run view
-  and on the canvas. A rejection, a timeout, a guard scan or a replay never
-  clears anything. Approving an agent's tool call is recorded too, but its
-  result is new outside content and stays `untrusted_external`.
+  `user`. An approval is also the only way outside content is cleared, and
+  it clears only what the approver was shown. When a person approves a Human
+  Approval or Approval Gate step, the steps its message, details and editable
+  fields read (for example a message that shows the webhook's body) count as `user` instead
+  of `untrusted_external` for the steps after it. The run input counts as
+  theirs only when the request read it, and the approval step's own output
+  only when the request showed all of its parents. A bland "Continue?"
+  clears nothing. Data classes stay. Outside content that joins later (a
+  fetch after the approval, or a branch the approver never saw) keeps its
+  label. The step's trace records who approved and when, shown as
+  **cleared** in the run view and on the canvas (**approved** when it
+  cleared nothing). A rejection, a timeout, a guard scan or a replay never
+  clears anything. Approving a guard's review clears nothing either: the
+  request shows the verdict, not the content. Approving an agent's tool call
+  clears only the steps whose text its arguments showed in full, never the
+  agent's own context; the tool's result is new outside content and stays
+  `untrusted_external`.
 - **Agents** collect the labels of everything in the model's context: the
   prompt, memory, and each tool result, including the data classes found in
   each result. A supervisor's worker starts with the supervisor's labels, and
