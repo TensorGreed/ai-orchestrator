@@ -358,6 +358,11 @@ export interface NodeExecutionResult {
   labels?: DataLabels;
   /** 12.2 — the human approval this node recorded, which endorsed the content it covers (who, when, which nodes). */
   endorsement?: LabelEndorsement;
+  /**
+   * 12.2 — on an input node's result that carries its labels: the node's type when it ran, so a retry or replay
+   * reads those labels as the input's even after the node was retyped or deleted.
+   */
+  nodeType?: string;
 }
 
 /** Most activity entries kept per node; older ones are dropped. */

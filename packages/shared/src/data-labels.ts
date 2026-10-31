@@ -157,6 +157,63 @@ export const triggerTrustSchema = z.enum(TRIGGER_TRUST_LEVELS);
 
 /** The trigger node config key an admin sets. */
 export const TRIGGER_TRUST_CONFIG_KEY = "inputTrust";
+/**
+ * The node config key that binds an admin's trust setting to the trigger it was made for: the trigger's node type,
+ * auth mode, secret and path when the admin set it. The API writes it on an admin's save; a trust whose binding no
+ * longer matches the trigger is ignored (the trigger falls back to its default trust).
+ */
+export const TRIGGER_TRUST_BINDING_KEY = "inputTrustFor";
+
+/** What an admin's trust setting was made for. */
+export interface TriggerTrustBinding {
+  nodeType: string;
+  authMode: string;
+  secretId: string | null;
+  path: string;
+}
+
+/** The binding a trust setting on this trigger node would have now. */
+export function triggerTrustBindingOf(node: { type: string; config?: unknown }): TriggerTrustBinding {
+  const config = node.config && typeof node.config === "object" && !Array.isArray(node.config) ? (node.config as Record<string, unknown>) : {};
+  const secretRef = config.secretRef && typeof config.secretRef === "object" ? (config.secretRef as Record<string, unknown>) : {};
+  return {
+    nodeType: node.type,
+    authMode: typeof config.authMode === "string" && config.authMode.trim() ? config.authMode.trim() : "none",
+    secretId: typeof secretRef.secretId === "string" && secretRef.secretId.trim() ? secretRef.secretId.trim() : null,
+    path: typeof config.path === "string" ? config.path.trim().replace(/^\/+|\/+$/g, "").toLowerCase() : ""
+  };
+}
+
+/** The binding stored next to a trust setting; undefined when absent or malformed. */
+export function storedTriggerTrustBinding(config: unknown): TriggerTrustBinding | undefined {
+  if (!config || typeof config !== "object" || Array.isArray(config)) return undefined;
+  const raw = (config as Record<string, unknown>)[TRIGGER_TRUST_BINDING_KEY];
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  const value = raw as Record<string, unknown>;
+  if (typeof value.nodeType !== "string" || typeof value.authMode !== "string" || typeof value.path !== "string") return undefined;
+  if (value.secretId !== null && typeof value.secretId !== "string") return undefined;
+  return { nodeType: value.nodeType, authMode: value.authMode, secretId: value.secretId as string | null, path: value.path };
+}
+
+function sameBinding(a: TriggerTrustBinding, b: TriggerTrustBinding): boolean {
+  return a.nodeType === b.nodeType && a.authMode === b.authMode && a.secretId === b.secretId && a.path === b.path;
+}
+
+/**
+ * The state of a trigger's trust setting: `none` (no setting), `active` (it applies), or `reset` (the trigger's type,
+ * auth mode, secret or path changed since an admin set it, or it was never bound: it is ignored).
+ */
+export function triggerTrustState(node: { type: string; config?: unknown }): "none" | "active" | "reset" {
+  if (!triggerTrustOf(node.config)) return "none";
+  const stored = storedTriggerTrustBinding(node.config);
+  return stored && sameBinding(stored, triggerTrustBindingOf(node)) ? "active" : "reset";
+}
+
+/** The trust setting that applies to a trigger node: the admin's, while it still matches the trigger it was set for. */
+export function effectiveTriggerTrust(node: { type: string; config?: unknown }): TriggerTrust | undefined {
+  return triggerTrustState(node) === "active" ? triggerTrustOf(node.config) : undefined;
+}
+
 /** The node config key that declares a node's output sensitive. */
 export const SENSITIVE_OUTPUT_CONFIG_KEY = "sensitiveOutput";
 

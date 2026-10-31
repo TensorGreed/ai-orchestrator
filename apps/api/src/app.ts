@@ -194,11 +194,11 @@ import { registerAuditBundleRoutes } from "./audit-bundle-routes.js";
 import { registerReplayRoutes } from "./replay-routes.js";
 import { registerReplayCaptureRoutes } from "./replay-capture-routes.js";
 import { deriveCaptureSurrogateKey, ReplayCaptureService, type CaptureTicket } from "./services/replay-capture-service.js";
-import { triggerTrustDenial, withoutTriggerTrust } from "./services/trigger-trust.js";
+import { bindTriggerTrust, triggerTrustDenial, withoutTriggerTrust, withStoredTriggerTrust } from "./services/trigger-trust.js";
 import { inputProvenance, type CaptureInputOrigin } from "./services/capture-masking.js";
 import { registerEvalRoutes } from "./eval-routes.js";
 import { registerGoldenSetFileRoutes } from "./golden-set-file-routes.js";
-import { isEntryNodeType, parseStoredDataLabels, recordedInputLabels, triggerInputProvenance, triggerTrustOf, type DataLabels } from "@ai-orchestrator/shared";
+import { effectiveTriggerTrust, isEntryNodeType, parseStoredDataLabels, recordedInputLabels, triggerInputProvenance, type DataLabels } from "@ai-orchestrator/shared";
 import { GOLDEN_SET_FILE_DEFAULT_MAX_BYTES, GUARD_SIMULATION_MAX_CASES_DEFAULT, GUARD_SIMULATION_RETENTION_DAYS } from "@ai-orchestrator/shared";
 import { registerApprovalRoutes } from "./approval-routes.js";
 import { registerExecutionRoutes } from "./execution-routes.js";
@@ -2473,7 +2473,11 @@ export async function createApp(
     const types = new Map(workflow.nodes.map((node) => [node.id, node.type]));
     const results = Array.isArray(source.nodeResults) ? (source.nodeResults as Array<Record<string, unknown>>) : [];
     return recordedInputLabels({
-      nodes: results.map((result) => ({ nodeType: types.get(String(result?.nodeId ?? "")) ?? "", labels: parseStoredDataLabels(result?.labels) })),
+      // 12.2 — the type the node had when it ran (recorded with its labels), else its type now.
+      nodes: results.map((result) => ({
+        nodeType: typeof result?.nodeType === "string" && result.nodeType ? result.nodeType : (types.get(String(result?.nodeId ?? "")) ?? ""),
+        labels: parseStoredDataLabels(result?.labels)
+      })),
       sourceTriggerType: source.triggerType
     });
   };
@@ -3760,10 +3764,12 @@ export async function createApp(
       const access = await runAccess.workflow(user, existing.id, "workflow:write");
       if (!access.ok) return access;
     }
-    // 12.2 — a trigger's input trust is an admin's setting: no other role sets, changes or removes it.
+    // 12.2 — a trigger's input trust is an admin's setting: no other role sets, changes or removes it. An admin's
+    // save binds each setting it makes to the trigger as saved (the workflow is saved as bound here).
     if (Array.isArray(workflow.nodes)) {
       const trustDenial = triggerTrustDenial(user.role, existing, workflow);
       if (trustDenial) return trustDenial;
+      if (user.role === "admin") workflow.nodes = bindTriggerTrust(existing, workflow.nodes);
     }
     const target = await runAccess.project(user, workflow.projectId ?? existing?.projectId, "workflow:write");
     if (!target.ok) return target;
@@ -9105,10 +9111,12 @@ export async function createApp(
         };
       }
 
-      const saveDenial = await workflowSaveDenial(user, workflow);
+      // 12.2 — an export carries its source's trust settings; imported by a non-admin, the stored ones stay instead.
+      const importedWorkflow = user.role === "admin" ? workflow : withStoredTriggerTrust(await store.getWorkflow(workflow.id), workflow);
+      const saveDenial = await workflowSaveDenial(user, importedWorkflow);
       if (saveDenial) return denyRunAccess(reply, saveDenial);
 
-      const savedWorkflow = await store.upsertWorkflow(workflow, { createdBy: user.id });
+      const savedWorkflow = await store.upsertWorkflow(importedWorkflow, { createdBy: user.id });
       await workflowChanged(savedWorkflow.id);
       return savedWorkflow;
     } catch (error) {
@@ -11153,7 +11161,9 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         const triggerType = isTestRoute ? "webhook_test" : "webhook";
         // 12.2 — the input's provenance: an admin's trust setting on the trigger, else `user` when the auth above
         // verified the caller, else outside content. Recorded on the trigger's result so replays keep it.
-        const triggerTrust = triggerTrustOf(match.endpoint.config);
+        // A setting whose trigger changed since an admin made it (type, auth mode, secret, path) is ignored.
+        const triggerNode = match.workflow.nodes.find((entry) => entry.id === match.endpoint.nodeId);
+        const triggerTrust = triggerNode ? effectiveTriggerTrust(triggerNode) : undefined;
         const webhookInputLabels: DataLabels | undefined =
           triggerTrust || authResult.verified
             ? { provenance: [triggerInputProvenance({ verified: authResult.verified, ...(triggerTrust ? { trust: triggerTrust } : {}) })], dataClasses: [], source: "propagated" }
@@ -11404,6 +11414,12 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     }
     const deleteDenial = await secretManageDenial(user, row, "secret:write");
     if (deleteDenial) return denyRunAccess(reply, deleteDenial);
+    // 12.2 — deleting a flagged secret (and creating it again unflagged) would clear its flag: an admin's call, as
+    // clearing it is.
+    if (user.role !== "admin" && (await store.listSensitiveOutputSecretIds()).includes(row.id)) {
+      reply.code(403);
+      return { error: "Only an admin can delete a secret flagged sensitive output." };
+    }
     await secretService.deleteSecret(request.params.id);
     sensitiveSecrets.invalidate();
     await audit(request, user, {
@@ -13698,6 +13714,8 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       imported.name = `${imported.name} (imported)`;
       // Phase 15.4 — a shared copy gets trigger paths nobody uses, like a duplicate.
       imported.nodes = withUniqueTriggerPaths(imported, await releaseService.usedRoutingKeys()).nodes;
+      // 12.2 — a share link carries no trust setting (whoever made the link chose it): an admin sets it again.
+      imported.nodes = withoutTriggerTrust(imported).nodes;
       const saveDenial = await workflowSaveDenial(user, imported);
       if (saveDenial) return denyRunAccess(reply, saveDenial);
       await store.upsertWorkflow(imported, { createdBy: user.id });

@@ -407,6 +407,8 @@ export class RunLabelState {
   private readonly nodes = new Map<string, DataLabels>();
   /** 12.2 — nodes whose labels go on their results although the run does not track labels. */
   private readonly recorded = new Set<string>();
+  /** 12.2 — input nodes whose labels are recorded, with their type (it goes on their results). */
+  private readonly inputTypes = new Map<string, string>();
   private readonly recordInput: boolean;
   private readonly endorsements: ActiveEndorsement[] = [];
   /** 12.2 — what the pending approval request showed, kept from the pause to the decision. */
@@ -542,6 +544,12 @@ export class RunLabelState {
     this.recorded.add(nodeId);
   }
 
+  /** 12.2 — an input node's labels go on its result, with its type, so a retry or replay can match them later. */
+  recordInputNode(nodeId: string, nodeType: string): void {
+    this.recorded.add(nodeId);
+    this.inputTypes.set(nodeId, nodeType);
+  }
+
   /** 12.2 — input nodes' labels are recorded on their results (see `recordInput`). */
   get recordsInput(): boolean {
     return this.recordInput;
@@ -560,13 +568,15 @@ export class RunLabelState {
    * The field a node result carries: its labels, on a tracked run (or for a node recorded on any run, 12.2) and only
    * when not empty, plus the endorsement it recorded.
    */
-  resultField(nodeId: string): { labels?: DataLabels; endorsement?: LabelEndorsement } {
+  resultField(nodeId: string): { labels?: DataLabels; endorsement?: LabelEndorsement; nodeType?: string } {
     let endorsement: LabelEndorsement | undefined;
     for (const entry of this.endorsements) if (entry.nodeId === nodeId) endorsement = entry.endorsement;
     const endorsed = endorsement ? { endorsement } : {};
     if (!this.tracked && !this.recorded.has(nodeId)) return endorsed;
     const labels = this.nodes.get(nodeId);
-    return labels && !isEmptyDataLabels(labels) ? { labels, ...endorsed } : endorsed;
+    if (!labels || isEmptyDataLabels(labels)) return endorsed;
+    const nodeType = this.inputTypes.get(nodeId);
+    return { labels, ...endorsed, ...(nodeType ? { nodeType } : {}) };
   }
 
   /** The run's data-class scanner, on tracked runs only (others never scan). */
@@ -629,7 +639,7 @@ export class NodeLabelScope {
     this.globals = input.globals ?? {};
     this.target = this.reads;
     const source = nodeContentSource(input.nodeType);
-    if (source === "input" && run.recordsInput) run.record(input.nodeId);
+    if (source === "input" && run.recordsInput) run.recordInputNode(input.nodeId, input.nodeType);
     const own = source === "input" || input.parents.length === 0 ? run.inputFor(input.nodeId) : undefined;
     this.base = unionLabels([own, source === "external" ? labelsOf(["untrusted_external"]) : undefined, ...input.parents]);
   }

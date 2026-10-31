@@ -128,6 +128,7 @@ import type { RunAccessResult } from "../run-access.js";
 import type { Store } from "../db/store.js";
 import { ReleaseGateEnforcedError } from "../db/store-errors.js";
 import { mapAsync } from "../async-array.js";
+import { triggerTrustChanges } from "./trigger-trust.js";
 
 /** The gate's sets as they are now (see `ReleaseService.gateSets`). */
 interface GateSets {
@@ -1532,6 +1533,19 @@ export class ReleaseService {
     const { workflow, workflowHash } = await this.versionCandidate(workflowId, input.version);
     if (!(await this.store.listReleasedVersionHashes(workflowId, input.version)).includes(workflowHash)) {
       throw new ReleaseError(`Version ${input.version} no longer has the hash it was released with (the workflow moved project or was created again), so it cannot be rolled back to; publish it through the gate instead`, 409);
+    }
+    // 12.2 — a trigger's input trust is an admin's setting: a rollback that would bring back another one (to what
+    // production runs now, or the draft when nothing is published) is an admin's call too.
+    if (user.role !== "admin") {
+      const current = previous !== null && previous !== undefined ? (await this.versionCandidate(workflowId, previous)).workflow : await this.store.getWorkflow(workflowId);
+      const changed = triggerTrustChanges(current, workflow);
+      if (changed.length > 0) {
+        await this.refuse(user, workflowId, "release.rollback.refused", "rollback", { version: input.version, reason: "trigger_trust" });
+        throw new ReleaseError(
+          `Version ${input.version} has another input trust on trigger ${changed.map((id) => `'${id}'`).join(", ")}: only an admin can roll back to it`,
+          403
+        );
+      }
     }
     const conflicts = await this.conflictReasons(user, workflowId, workflow);
     if (conflicts.length > 0) throw new ReleaseError(conflicts.join(" "), 409);

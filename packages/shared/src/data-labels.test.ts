@@ -32,6 +32,13 @@ describe("recorded input labels (Phase 16, Q7)", () => {
     expect(recordedInputLabels({ sourceTriggerType: null })).toEqual(L(["untrusted_external"]));
   });
 
+  it("12.2 — a retry or MCP replay without input-node labels counts as outside content (its source run's origin is unknown)", () => {
+    expect(recordedInputLabels({ sourceTriggerType: "manual_retry" })).toEqual(L(["untrusted_external"]));
+    expect(recordedInputLabels({ sourceTriggerType: "mcp_replay" })).toEqual(L(["untrusted_external"]));
+    // With its recorded labels it keeps them.
+    expect(recordedInputLabels({ nodes: [{ nodeType: "webhook_input", labels: L(["user"]) }], sourceTriggerType: "manual_retry" })).toEqual(L(["user"]));
+  });
+
   it("labels read from a file never carry trusted", () => {
     expect(recordedInputLabels({ nodes: [{ nodeType: "webhook_input", labels: L(["trusted", "user"], [], "file") }], sourceTriggerType: "schedule" })).toEqual(L(["user"]));
     expect(recordedInputLabels({ nodes: [{ nodeType: "schedule_trigger", labels: L(["trusted"], [], "scan") }], sourceTriggerType: "schedule" })).toEqual(L(["trusted"]));

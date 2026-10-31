@@ -11,12 +11,13 @@
  *   use them sensitive on every run; clearing a flag is admin-only.
  */
 import crypto from "node:crypto";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
-import type { DataLabels, Workflow } from "@ai-orchestrator/shared";
+import { triggerTrustState, type DataLabels, type Workflow } from "@ai-orchestrator/shared";
 import { createApp } from "./app.js";
 import { parseConfig, type AppConfig } from "./config.js";
 import type { Store } from "./db/store.js";
@@ -26,7 +27,9 @@ import { openTestStore } from "./test-support/test-store.js";
 import { testSql } from "./test-support/test-sql.js";
 import { AuthService } from "./services/auth-service.js";
 import { SecretService } from "./services/secret-service.js";
-import { triggerTrustChanges, withoutTriggerTrust } from "./services/trigger-trust.js";
+import { bindTriggerTrust, triggerTrustChanges, withoutTriggerTrust } from "./services/trigger-trust.js";
+import { WorkflowVersionService } from "./services/workflow-version-service.js";
+import { callAs, closeReleaseTestContext, createReleaseTestContext, hookWorkflow as releaseHookWorkflow, loginAs, type ReleaseTestContext } from "./test-support/release.test-helper.js";
 
 interface TestContext {
   app: FastifyInstance;
@@ -83,7 +86,7 @@ async function login(context: TestContext, role: "admin" | "builder"): Promise<s
   return cookie.split(";")[0]!;
 }
 
-const call = (context: TestContext, method: "GET" | "POST" | "PUT", url: string, cookie: string, payload?: unknown) =>
+const call = (context: TestContext, method: "GET" | "POST" | "PUT" | "DELETE", url: string, cookie: string, payload?: unknown) =>
   context.app.inject({ method, url, headers: { cookie }, ...(payload !== undefined ? { payload: payload as object } : {}) });
 
 const L = (provenance: DataLabels["provenance"], dataClasses: string[] = []): DataLabels => ({ provenance, dataClasses, source: "propagated" });
@@ -108,7 +111,10 @@ function hookWorkflow(id: string, hookConfig: Record<string, unknown> = {}, note
   } as Workflow;
 }
 
-type StoredResult = { nodeId: string; labels?: DataLabels };
+/** The workflow as an admin's save stores it: each trust setting bound to its trigger. */
+const bound = (workflow: Workflow): Workflow => ({ ...workflow, nodes: bindTriggerTrust(null, workflow.nodes) });
+
+type StoredResult = { nodeId: string; labels?: DataLabels; nodeType?: string };
 
 async function latestRun(context: TestContext, workflowId: string): Promise<{ id: string; nodes: StoredResult[] }> {
   const listed = (await context.store.listExecutionHistory({ workflowId } as never)) as unknown as { items: Array<{ id: string }> };
@@ -195,8 +201,8 @@ describe("webhook input provenance", () => {
     const context = await createTestContext();
     const builder = await login(context, "builder");
     const secretId = await createSecret(context, builder, "hook-token-abcdef");
-    await context.store.upsertWorkflow(hookWorkflow("wf-down", { authMode: "bearer_token", authHeaderName: "authorization", secretRef: { secretId }, inputTrust: "untrusted_external" }));
-    await context.store.upsertWorkflow(hookWorkflow("wf-up", { inputTrust: "user" }));
+    await context.store.upsertWorkflow(bound(hookWorkflow("wf-down", { authMode: "bearer_token", authHeaderName: "authorization", secretRef: { secretId }, inputTrust: "untrusted_external" })));
+    await context.store.upsertWorkflow(bound(hookWorkflow("wf-up", { inputTrust: "user" })));
     await context.app.inject({ method: "POST", url: "/webhook/hook-wf-down", headers: { authorization: "Bearer hook-token-abcdef" }, payload: { user_prompt: "a" } });
     await context.app.inject({ method: "POST", url: "/webhook/hook-wf-up", payload: { user_prompt: "b" } });
     expect(labelsOn((await latestRun(context, "wf-down")).nodes, "hook")).toEqual(L(["untrusted_external"]));
@@ -234,6 +240,18 @@ describe("replays and retries keep the recorded input labels", () => {
     const retryRun = await latestRun(context, "wf-retry");
     expect(retryRun.id).not.toBe(failed.id);
     expect(labelsOn(retryRun.nodes, "hook")?.provenance).toEqual(["user", "untrusted_external"]);
+    expect(retryRun.nodes.find((entry) => entry.nodeId === "hook")?.nodeType).toBe("webhook_input");
+
+    // The trigger node is replaced (another id) before a retry of the retry: the recorded labels still count.
+    const renamed = (await context.store.getWorkflow("wf-retry"))!;
+    renamed.nodes = renamed.nodes.map((entry) => (entry.id === "hook" ? { ...entry, id: "hook2" } : entry));
+    renamed.edges = renamed.edges.map((edge) => (edge.source === "hook" ? { ...edge, source: "hook2" } : edge));
+    await context.store.upsertWorkflow(renamed);
+    const again = await call(context, "POST", `/api/executions/${retryRun.id}/retry`, admin, {});
+    expect(again.statusCode, again.body).toBeLessThan(500);
+    const againRun = await latestRun(context, "wf-retry");
+    expect(againRun.id).not.toBe(retryRun.id);
+    expect(labelsOn(againRun.nodes, "hook2")?.provenance).toEqual(["user", "untrusted_external"]);
   });
 });
 
@@ -253,17 +271,26 @@ describe("the trigger trust setting is admin-only", () => {
 
     const set = await call(context, "PUT", "/api/workflows/wf-trust", admin, hookWorkflow("wf-trust", { inputTrust: "user" }));
     expect(set.statusCode, set.body).toBe(200);
-    // The builder edits something else and sends the admin's value back unchanged: fine.
-    const rename = await call(context, "PUT", "/api/workflows/wf-trust", builder, { ...hookWorkflow("wf-trust", { inputTrust: "user" }), name: "Renamed" });
+    // The admin's save bound the setting to the trigger as saved.
+    const stored = (await context.store.getWorkflow("wf-trust"))!;
+    expect(stored.nodes[0]!.config.inputTrustFor).toEqual({ nodeType: "webhook_input", authMode: "none", secretId: null, path: "hook-wf-trust" });
+    // The builder edits something else and sends the admin's setting back unchanged: fine.
+    const rename = await call(context, "PUT", "/api/workflows/wf-trust", builder, { ...stored, name: "Renamed" });
     expect(rename.statusCode, rename.body).toBe(200);
+    // Sending the setting without its binding, or another binding, is a change too.
+    expect((await call(context, "PUT", "/api/workflows/wf-trust", builder, hookWorkflow("wf-trust", { inputTrust: "user" }))).statusCode).toBe(403);
     // Removing it, or a value the schema refuses, is refused too.
     expect((await call(context, "PUT", "/api/workflows/wf-trust", builder, hookWorkflow("wf-trust"))).statusCode).toBe(403);
     expect((await call(context, "PUT", "/api/workflows/wf-trust", builder, hookWorkflow("wf-trust", { inputTrust: "trusted" }))).statusCode).toBe(400);
     expect((await context.store.getWorkflow("wf-trust"))!.nodes[0]!.config.inputTrust).toBe("user");
 
-    // Imports are saves too.
-    const imported = await call(context, "POST", "/api/workflows/import", builder, { workflow: hookWorkflow("wf-imported", { inputTrust: "user" }) });
-    expect(imported.statusCode).toBe(403);
+    // A builder's import keeps the stored workflow's settings, whatever the file says (none for a new workflow).
+    const imported = await call(context, "POST", "/api/workflows/import", builder, { workflow: bound(hookWorkflow("wf-imported", { inputTrust: "user" })) });
+    expect(imported.statusCode, imported.body).toBe(200);
+    expect((await context.store.getWorkflow("wf-imported"))!.nodes[0]!.config.inputTrust).toBeUndefined();
+    const over = await call(context, "POST", "/api/workflows/import", builder, { workflow: { ...hookWorkflow("wf-trust", { inputTrust: "untrusted_external" }), name: "Imported over" } });
+    expect(over.statusCode, over.body).toBe(200);
+    expect((await context.store.getWorkflow("wf-trust"))!.nodes[0]!.config.inputTrust).toBe("user");
 
     // A builder's copy starts with the default trust.
     const copy = await call(context, "POST", "/api/workflows/wf-trust/duplicate", builder, { name: "Copy" });
@@ -271,6 +298,8 @@ describe("the trigger trust setting is admin-only", () => {
     expect(copy.json<Workflow>().nodes[0]!.config.inputTrust).toBeUndefined();
     const adminCopy = await call(context, "POST", "/api/workflows/wf-trust/duplicate", admin, { name: "Admin copy" });
     expect(adminCopy.json<Workflow>().nodes[0]!.config.inputTrust).toBe("user");
+    // Its trigger got a path of its own; the copy's setting is bound to that path, so it still applies.
+    expect(triggerTrustState(adminCopy.json<Workflow>().nodes[0]!)).toBe("active");
   });
 
   it("compares by node: a new trigger node with a setting is a change, a removed node is not", () => {
@@ -282,6 +311,122 @@ describe("the trigger trust setting is admin-only", () => {
     expect(triggerTrustChanges(null, { nodes: [{ id: "a", config: { inputTrust: "user" } }] })).toEqual(["a"]);
     const stripped = withoutTriggerTrust({ nodes: [{ id: "a", type: "webhook_input", name: "A", position: { x: 0, y: 0 }, config: { inputTrust: "user", path: "p" } }] } as Pick<Workflow, "nodes">);
     expect(stripped.nodes[0]!.config).toEqual({ path: "p" });
+  });
+});
+
+describe("a trust setting is bound to the trigger an admin set it for", () => {
+  it("is ignored once the trigger's type, auth mode, secret or path changes", () => {
+    const node = bound(hookWorkflow("wf-bind", { authMode: "bearer_token", secretRef: { secretId: "s1" }, inputTrust: "user" })).nodes[0]!;
+    expect(triggerTrustState(node)).toBe("active");
+    const changed = (patch: Record<string, unknown>, type = node.type) => ({ ...node, type, config: { ...node.config, ...patch } });
+    expect(triggerTrustState(changed({ authMode: "none" }))).toBe("reset");
+    expect(triggerTrustState(changed({ secretRef: { secretId: "s2" } }))).toBe("reset");
+    expect(triggerTrustState(changed({ secretRef: undefined }))).toBe("reset");
+    expect(triggerTrustState(changed({ path: "elsewhere" }))).toBe("reset");
+    expect(triggerTrustState(changed({}, "chat_trigger" as typeof node.type))).toBe("reset");
+    // Other edits keep it, and so does a path written another way.
+    expect(triggerTrustState(changed({ responseCode: 202, path: "/HOOK-wf-bind/" }))).toBe("active");
+    // Never bound (set outside an admin's save): ignored.
+    expect(triggerTrustState(hookWorkflow("wf-unbound", { inputTrust: "user" }).nodes[0]!)).toBe("reset");
+  });
+
+  it("a builder who opens the webhook keeps the save, but the admin's user trust no longer applies; an admin's save binds it again", async () => {
+    const context = await createTestContext();
+    const builder = await login(context, "builder");
+    const admin = await login(context, "admin");
+    const secretId = await createSecret(context, admin, "hook-token-bound1");
+    const draft = hookWorkflow("wf-bound", { authMode: "bearer_token", authHeaderName: "authorization", secretRef: { secretId }, inputTrust: "user" });
+    expect((await call(context, "POST", "/api/workflows", admin, draft)).statusCode).toBe(200);
+    const stored = (await context.store.getWorkflow("wf-bound"))!;
+
+    // The builder makes the webhook public, sending the admin's setting back as stored.
+    const opened = { ...stored, nodes: stored.nodes.map((entry) => (entry.id === "hook" ? { ...entry, config: { ...entry.config, authMode: "none" } } : entry)) };
+    const save = await call(context, "PUT", "/api/workflows/wf-bound", builder, opened);
+    expect(save.statusCode, save.body).toBe(200);
+    expect(triggerTrustState((await context.store.getWorkflow("wf-bound"))!.nodes[0]!)).toBe("reset");
+    await context.app.inject({ method: "POST", url: "/webhook/hook-wf-bound", payload: { user_prompt: "anonymous" } });
+    // Falls back to the default: an open webhook's input is outside content (nothing recorded on an untracked run).
+    expect(labelsOn((await latestRun(context, "wf-bound")).nodes, "hook")).toBeUndefined();
+
+    // Moving the trigger to another path does the same.
+    const moved = { ...stored, nodes: stored.nodes.map((entry) => (entry.id === "hook" ? { ...entry, config: { ...entry.config, authMode: "none", path: "hook-wf-moved" } } : entry)) };
+    expect((await call(context, "PUT", "/api/workflows/wf-bound", builder, moved)).statusCode).toBe(200);
+    await context.app.inject({ method: "POST", url: "/webhook/hook-wf-moved", payload: { user_prompt: "anonymous" } });
+    expect(labelsOn((await latestRun(context, "wf-bound")).nodes, "hook")).toBeUndefined();
+
+    // An admin who saves it unchanged leaves it reset; one who confirms it (the binding removed) binds it again.
+    const current = (await context.store.getWorkflow("wf-bound"))!;
+    expect((await call(context, "PUT", "/api/workflows/wf-bound", admin, current)).statusCode).toBe(200);
+    expect(triggerTrustState((await context.store.getWorkflow("wf-bound"))!.nodes[0]!)).toBe("reset");
+    const confirmed = {
+      ...current,
+      nodes: current.nodes.map((entry) => {
+        if (entry.id !== "hook") return entry;
+        const { inputTrustFor: _binding, ...config } = entry.config;
+        return { ...entry, config };
+      })
+    };
+    expect((await call(context, "PUT", "/api/workflows/wf-bound", admin, confirmed)).statusCode).toBe(200);
+    expect(triggerTrustState((await context.store.getWorkflow("wf-bound"))!.nodes[0]!)).toBe("active");
+    await context.app.inject({ method: "POST", url: "/webhook/hook-wf-moved", payload: { user_prompt: "anonymous" } });
+    expect(labelsOn((await latestRun(context, "wf-bound")).nodes, "hook")).toEqual(L(["user"]));
+  });
+});
+
+describe("trust that comes with a copy from elsewhere is dropped", () => {
+  it("a share link's import drops it, for an admin too", async () => {
+    const context = await createTestContext();
+    const admin = await login(context, "admin");
+    expect((await call(context, "POST", "/api/workflows", admin, hookWorkflow("wf-share", { inputTrust: "user" }))).statusCode).toBe(200);
+    const link = (await call(context, "GET", "/api/workflows/wf-share/share-link", admin)).json<{ shareUrl: string }>().shareUrl;
+    const imported = await call(context, "GET", link, admin);
+    expect(imported.statusCode, imported.body).toBe(200);
+    const copy = (await context.store.getWorkflow(imported.json<{ workflowId: string }>().workflowId))!;
+    expect(copy.nodes[0]!.config.inputTrust).toBeUndefined();
+    expect(copy.nodes[0]!.config.inputTrustFor).toBeUndefined();
+  });
+
+  it("a git pull drops it: the repository does not decide a trigger's trust", async () => {
+    const context = await createTestContext();
+    const admin = await login(context, "admin");
+    const bareRepo = path.join(context.tempDir, "remote.git");
+    fs.mkdirSync(bareRepo);
+    const init = spawnSync("git", ["init", "--bare", "-b", "main", bareRepo], { encoding: "utf8" });
+    expect(init.status, init.stderr).toBe(0);
+    expect((await call(context, "POST", "/api/workflows", admin, hookWorkflow("wf-git", { inputTrust: "user" }))).statusCode).toBe(200);
+    expect((await call(context, "PUT", "/api/git", admin, { repoUrl: bareRepo, defaultBranch: "main" })).statusCode).toBe(200);
+    const push = await call(context, "POST", "/api/git/push", admin, { branch: "main" });
+    expect(push.json<{ ok: boolean }>().ok, push.body).toBe(true);
+    const pull = await call(context, "POST", "/api/git/pull", admin, { branch: "main" });
+    expect(pull.json<{ ok: boolean; workflowsImported?: number }>(), pull.body).toMatchObject({ ok: true, workflowsImported: 1 });
+    expect((await context.store.getWorkflow("wf-git"))!.nodes[0]!.config.inputTrust).toBeUndefined();
+  });
+});
+
+describe("a release rollback that brings back another trust setting is an admin's", () => {
+  const releaseContexts: ReleaseTestContext[] = [];
+  afterEach(async () => {
+    while (releaseContexts.length > 0) await closeReleaseTestContext(releaseContexts.pop()!);
+  });
+
+  it("a builder's rollback to a version with another trust is refused (403); an admin's goes through", async () => {
+    const ctx = await createReleaseTestContext();
+    releaseContexts.push(ctx);
+    const builder = await loginAs(ctx, "builder");
+    const admin = await loginAs(ctx, "admin");
+    const versions = new WorkflowVersionService(ctx.store);
+    const save = async (workflow: Workflow) => (await versions.snapshot({ workflow: await ctx.store.upsertWorkflow(workflow), changeNote: "test" })).version;
+    const trusted = releaseHookWorkflow("wf-roll", "one");
+    trusted.nodes[0] = { ...trusted.nodes[0]!, config: { ...trusted.nodes[0]!.config, inputTrust: "user" } };
+    const v1 = await save(bound(trusted));
+    const v2 = await save(releaseHookWorkflow("wf-roll", "two"));
+    expect((await callAs(ctx, "POST", "/api/workflows/wf-roll/publish", admin.cookie, { version: v1 })).statusCode).toBe(200);
+    expect((await callAs(ctx, "POST", "/api/workflows/wf-roll/publish", builder.cookie, { version: v2 })).statusCode).toBe(200);
+    const refused = await callAs(ctx, "POST", "/api/workflows/wf-roll/rollback", builder.cookie, { version: v1, reason: "Back" });
+    expect(refused.statusCode, refused.body).toBe(403);
+    expect(refused.json<{ error: string }>().error).toContain("only an admin");
+    const back = await callAs(ctx, "POST", "/api/workflows/wf-roll/rollback", admin.cookie, { version: v1, reason: "Back" });
+    expect(back.statusCode, back.body).toBe(200);
   });
 });
 
@@ -314,6 +459,11 @@ describe("secrets flagged sensitive output", () => {
     // A secret created flagged.
     const flaggedAtCreate = await createSecret(context, builder, "payroll-token-22", { sensitiveOutput: true });
     expect(await context.store.listSensitiveOutputSecretIds()).toEqual([flaggedAtCreate]);
+    // Deleting a flagged secret (to create it again unflagged) is an admin's call, as clearing is; an unflagged one is not.
+    const denied = await call(context, "DELETE", `/api/secrets/${flaggedAtCreate}`, builder);
+    expect(denied.statusCode, denied.body).toBe(403);
+    expect((await call(context, "DELETE", `/api/secrets/${secretId}`, builder)).statusCode).toBe(200);
+    expect((await call(context, "DELETE", `/api/secrets/${flaggedAtCreate}`, admin)).statusCode).toBe(200);
   });
 
   it("a node flagged sensitive output is sensitive without any profile", async () => {

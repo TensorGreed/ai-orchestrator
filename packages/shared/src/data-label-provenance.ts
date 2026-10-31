@@ -46,6 +46,8 @@ export function orderedProvenance(labels: Iterable<ProvenanceLabel>): Provenance
 
 /** Triggers a signed-in user or an API key starts (the editor, retries, replays of such runs, evals). */
 const USER_STARTED_TRIGGERS = new Set(["manual", "manual_stream", "manual_retry", "mcp_replay", "eval"]);
+/** 12.2 — triggers whose runs carry a source run's input: their own recorded labels say where it came from. */
+const UNKNOWN_WITHOUT_LABELS_TRIGGERS = new Set(["manual_retry", "mcp_replay"]);
 
 /**
  * Phase 16 (Q7) — the input labels of a run that replays a recorded one (a
@@ -75,7 +77,10 @@ export function recordedInputLabels(recording: {
   }
   if (provenance.size === 0) {
     const trigger = recording.sourceTriggerType ?? null;
-    provenance.add(trigger && USER_STARTED_TRIGGERS.has(trigger) ? "user" : inputProvenance(trigger, undefined));
+    // 12.2 — a retry or an MCP replay records its input node's labels (they carry the run it came from); without
+    // them (the node was deleted or retyped since) where that input came from is not known: outside content.
+    if (trigger && UNKNOWN_WITHOUT_LABELS_TRIGGERS.has(trigger)) provenance.add("untrusted_external");
+    else provenance.add(trigger && USER_STARTED_TRIGGERS.has(trigger) ? "user" : inputProvenance(trigger, undefined));
   }
   if (recording.imported) provenance.add("untrusted_external");
   return { provenance: orderedProvenance(provenance), dataClasses: [], source: "propagated" };

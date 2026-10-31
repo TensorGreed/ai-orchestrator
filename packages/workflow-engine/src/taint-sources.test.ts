@@ -161,6 +161,8 @@ describe("trigger trust", () => {
     const result = await executeWorkflow({ workflow: wf, inputLabels: L(["user"]), recordInputLabels: true, triggerType: "webhook", webhookPayload: { user_prompt: "x" } }, deps());
     expect(result.status).toBe("success");
     expect(labelsOf(result, "in")).toEqual(L(["user"]));
+    // With its type, so a retry matches it even after the node changes.
+    expect(resultOf(result, "in")?.nodeType).toBe("webhook_input");
     // Only the input node: nothing else gains a field.
     expect(labelsOf(result, "greet")).toBeUndefined();
   });
@@ -194,6 +196,21 @@ describe("declared sensitive output", () => {
     expect(labelsOf(flagged, "other")).toBeUndefined();
     const none = await executeWorkflow({ workflow: wf, inputLabels: L(["user"]) }, deps({ sensitiveSecretIds: new Set() }));
     expect(none.nodeResults.some((entry) => entry.labels)).toBe(false);
+  });
+
+  it("an MCP Tool node on a registered server whose secret is flagged is sensitive (the secret sits on the registry entry)", async () => {
+    const wf = workflow([node("in", "manual_trigger"), node("tool", "mcp_tool", { registryServerId: "repo-reg", toolName: "push", argsTemplate: '{"repo":"x"}' })], [
+      { source: "in", target: "tool" }
+    ]);
+    const withRegistry = (secretId: string): WorkflowExecutionDependencies => ({
+      ...deps({ sensitiveSecretIds: new Set(["sec-repo"]) }),
+      resolveRegisteredMcpServer: () => ({ serverId: "repo-mcp", connection: {}, secretRef: { secretId } })
+    });
+    const flagged = await executeWorkflow({ workflow: wf, inputLabels: L(["user"]) }, withRegistry("sec-repo"));
+    expect(flagged.status).toBe("success");
+    expect(labelsOf(flagged, "tool")?.provenance).toContain("sensitive");
+    const plain = await executeWorkflow({ workflow: wf, inputLabels: L(["user"]) }, withRegistry("sec-other"));
+    expect(labelsOf(plain, "tool")).toBeUndefined();
   });
 
   it("a sensitive source feeds tool rules: deny with label_present sensitive stops the MCP Tool node after it", async () => {

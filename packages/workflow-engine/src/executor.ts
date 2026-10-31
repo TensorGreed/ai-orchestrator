@@ -1179,6 +1179,28 @@ function declaresSensitive(node: Pick<WorkflowNode, "config">, dependencies: Pic
   return Boolean(secretIds && secretIds.size > 0 && referencesSecretIn(node.config, secretIds));
 }
 
+/**
+ * 12.2 — `declaresSensitive`, and for an MCP Tool node that uses a registered server, a flagged secret on the
+ * registry entry (its secret is held there, not in the node's config). Free when nothing is flagged.
+ */
+async function declaresSensitiveSource(
+  node: Pick<WorkflowNode, "type" | "config">,
+  dependencies: Pick<WorkflowExecutionDependencies, "sensitiveSecretIds" | "resolveRegisteredMcpServer">
+): Promise<boolean> {
+  if (declaresSensitive(node, dependencies)) return true;
+  const secretIds = dependencies.sensitiveSecretIds;
+  if (!secretIds || secretIds.size === 0 || node.type !== "mcp_tool" || !dependencies.resolveRegisteredMcpServer) return false;
+  const registryServerId = readRegistryServerId(toRecord(node.config));
+  if (!registryServerId) return false;
+  try {
+    const registered = await dependencies.resolveRegisteredMcpServer(registryServerId);
+    return referencesSecretIn({ secretRef: registered.secretRef, connection: registered.connection }, secretIds);
+  } catch {
+    // A server that cannot be resolved fails the node when it runs; nothing to declare here.
+    return false;
+  }
+}
+
 const SENSITIVE_LABELS: DataLabels = { provenance: ["sensitive"], dataClasses: [], source: "propagated" };
 
 /**
@@ -5935,7 +5957,7 @@ async function executeNodeHandler(
           secretRef: attachedConfig.secretRef as SecretReference | undefined,
           allowedTools: allowedTools.size ? [...allowedTools] : undefined
         });
-        if (declaresSensitive(attached, dependencies)) {
+        if (await declaresSensitiveSource(attached, dependencies)) {
           sensitiveToolSources.push({ serverId, ...(registryServerId ? { registryServerId } : {}), ...(allowedTools.size ? { tools: allowedTools } : {}) });
         }
       }
@@ -8673,7 +8695,7 @@ async function executeWorkflowRun(
       globals
     });
     // 12.2 — a declared sensitive output is sensitive on every run; its labels go on its result.
-    const nodeSensitive = declaresSensitive(node, dependencies);
+    const nodeSensitive = await declaresSensitiveSource(node, dependencies);
     if (nodeSensitive) {
       labelScope.add(SENSITIVE_LABELS);
       labelState.record(node.id);
@@ -8805,7 +8827,7 @@ async function executeWorkflowRun(
               merged: childMerged,
               globals: iterationGlobals
             });
-            if (declaresSensitive(childNode, dependencies)) {
+            if (await declaresSensitiveSource(childNode, dependencies)) {
               childLabelScope.add(SENSITIVE_LABELS);
               labelState.record(childNode.id);
             }
