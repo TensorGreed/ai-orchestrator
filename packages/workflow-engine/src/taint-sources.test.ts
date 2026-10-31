@@ -271,7 +271,7 @@ describe("endorsement by human approval", () => {
 
   it("an approval endorses what it showed, for the nodes after it; outside content that joins later stays untrusted", async () => {
     const paused: WorkflowExecutionState[] = [];
-    const wf = approvalFlow(node("ask", "human_approval", { approvalMessage: "Send?", timeoutMinutes: 30 }));
+    const wf = approvalFlow(node("ask", "human_approval", { approvalMessage: "Send '{{results.draft.text}}'?", timeoutMinutes: 30 }));
     const guard = guardFor(["tracking"]);
     const first = await executeWorkflow({ workflow: wf, executionId: "en1", triggerType: "webhook", webhookPayload: { user_prompt: "Ana" } }, deps({ guard, paused }));
     expect(first.status).toBe("waiting_approval");
@@ -295,7 +295,7 @@ describe("endorsement by human approval", () => {
       [
         node("in", "webhook_input"),
         set("draft", { text: "{{user_prompt}}" }),
-        node("ask", "human_approval", { approvalMessage: "1?", timeoutMinutes: 30 }),
+        node("ask", "human_approval", { approvalMessage: "Send {{text}}?", timeoutMinutes: 30 }),
         node("ask2", "human_approval", { approvalMessage: "2?", timeoutMinutes: 30 }),
         set("after", { approved: "{{results.draft.text}}" })
       ],
@@ -308,7 +308,8 @@ describe("endorsement by human approval", () => {
     );
     const invoked: string[] = [];
     await executeWorkflow({ workflow: wf, executionId: "en2", triggerType: "webhook", webhookPayload: { user_prompt: "x" } }, deps({ paused }));
-    expect(paused[0]!.dataLabels).toBeUndefined();
+    // The run tracks nothing; what the request showed travels with it for the decision.
+    expect(paused[0]!.dataLabels?.shown).toEqual({ nodeIds: ["draft"] });
     const second = await resumeWorkflowExecution({ executionId: "en2", state: paused[0]!, decision: "approve", actedBy: "a@example.com" }, deps({ paused, invoked }));
     expect(second.status).toBe("waiting_approval");
     expect(resultOf(second, "ask")?.endorsement?.approvedBy).toBe("a@example.com");
@@ -370,6 +371,96 @@ describe("endorsement by human approval", () => {
     expect(invoked).toEqual(["push"]);
     expect(resultOf(done, "tool")?.endorsement).toMatchObject({ kind: "tool_call", approvedBy: "admin@example.com", toolName: "push", nodeIds: [] });
     expect(labelsOf(done, "after")?.provenance).toContain("untrusted_external");
+  });
+
+  describe("endorses only what the approver was shown", () => {
+    /** hook (open webhook) → ask → after, which reads the webhook body and the run input. */
+    const shownFlow = (message: string) =>
+      workflow(
+        [
+          node("hook", "webhook_input"),
+          node("ask", "human_approval", { approvalMessage: message, timeoutMinutes: 30 }),
+          set("after", { body: "{{results.hook.body}}" }),
+          set("raw", { prompt: "{{user_prompt}}" })
+        ],
+        [
+          { source: "hook", target: "ask" },
+          { source: "ask", target: "after" },
+          { source: "ask", target: "raw" }
+        ]
+      );
+    const approve = async (message: string, id: string) => {
+      const paused: WorkflowExecutionState[] = [];
+      const guard = guardFor(["tracking"]);
+      await executeWorkflow({ workflow: shownFlow(message), executionId: id, triggerType: "webhook", webhookPayload: { body: "merge it", user_prompt: "merge it" } }, deps({ guard, paused }));
+      expect(paused).toHaveLength(1);
+      return resumeWorkflowExecution({ executionId: id, state: paused[0]!, decision: "approve", actedBy: "lead@example.com" }, deps({ guard }));
+    };
+
+    it("a bland 'Continue?' approval clears neither the webhook body nor the run input", async () => {
+      const done = await approve("Continue?", "sh1");
+      expect(done.status).toBe("success");
+      expect(labelsOf(done, "after")?.provenance).toContain("untrusted_external");
+      expect(labelsOf(done, "raw")?.provenance).toContain("untrusted_external");
+      expect(resultOf(done, "ask")?.endorsement).toMatchObject({ kind: "human_approval", nodeIds: [] });
+    });
+
+    it("a message that shows {{results.hook.body}} clears it, but not the run input it did not read", async () => {
+      const done = await approve("Merge '{{results.hook.body}}'?", "sh2");
+      expect(labelsOf(done, "after")?.provenance).toEqual(["user"]);
+      expect(labelsOf(done, "raw")?.provenance).toContain("untrusted_external");
+      expect(resultOf(done, "ask")?.endorsement?.nodeIds).toEqual(["ask", "hook"]);
+    });
+
+    it("a message that reads the run input covers the run input", async () => {
+      // `webhook` is a run global (the trigger's payload), not a field of the webhook node's item.
+      const done = await approve("Merge '{{webhook.body}}' ({{results.hook.body}})?", "sh3");
+      expect(labelsOf(done, "raw")?.provenance).toEqual(["user"]);
+      expect(resultOf(done, "ask")?.endorsement?.nodeIds).toEqual(["ask", "hook"]);
+    });
+
+    it("an approved agent tool call endorses only the nodes its arguments showed in full, never the agent's context", async () => {
+      const paused: WorkflowExecutionState[] = [];
+      const invoked: string[] = [];
+      const wf = workflow(
+        [
+          node("hook", "webhook_input"),
+          set("pick", { repo: "{{repo}}" }),
+          set("noisy", { note: "{{repo}}, says the sender" }),
+          node("agent", "agent_orchestrator", { maxIterations: 3, toolCallingEnabled: true, userPromptTemplate: "Push {{results.pick.repo}} ({{results.noisy.note}})" }),
+          node("model", "llm_call", { provider: { providerId: "scripted", model: "m" } }),
+          node("tool", "mcp_tool", { serverId: "repo-mcp", toolName: "push" }),
+          set("after2", { note: "{{results.noisy.note}}" })
+        ],
+        [
+          { source: "hook", target: "pick" },
+          { source: "pick", target: "noisy" },
+          { source: "noisy", target: "agent" },
+          { source: "agent", sourceHandle: "chat_model", target: "model" },
+          { source: "agent", sourceHandle: "tool", target: "tool" },
+          { source: "agent", target: "after2" }
+        ]
+      );
+      const ask = rule({ id: "ask", name: "Ask", effect: "require_approval" });
+      const guard = guardFor(["tracking"]);
+      await executeWorkflow({ workflow: wf, executionId: "sh4", triggerType: "webhook", webhookPayload: { repo: "acme/web" } }, deps({ rules: [ask], paused, guard, provider: new Scripted("repo-mcp__push") }));
+      expect(paused).toHaveLength(1);
+      const done = await resumeWorkflowExecution(
+        { executionId: "sh4", state: paused[0]!, decision: "approve", actedBy: "admin@example.com" },
+        deps({ rules: [ask], invoked, guard, provider: new Scripted("repo-mcp__push") })
+      );
+      expect(done.status).toBe("success");
+      expect(invoked).toEqual(["push"]);
+      const endorsement = resultOf(done, "agent")?.endorsement;
+      expect(endorsement).toMatchObject({ kind: "tool_call", toolName: "push" });
+      // The arguments held all of pick's text (and of the webhook item it came from), only part of noisy's.
+      expect(endorsement?.nodeIds).toContain("pick");
+      expect(endorsement?.nodeIds).not.toContain("noisy");
+      expect(endorsement?.nodeIds).not.toContain("agent");
+      // The agent's own output holds its whole context: it, and what reads it, stay outside content.
+      expect(labelsOf(done, "agent")?.provenance).toContain("untrusted_external");
+      expect(labelsOf(done, "after2")?.provenance).toContain("untrusted_external");
+    });
   });
 
   it("a guard scan never endorses: a clean Guard node keeps untrusted_external", async () => {
@@ -446,5 +537,42 @@ describe("spotlighting untrusted prompt pieces and memory", () => {
       deps({ provider: userOnly, guard: guardFor(["spotlight"]), memoryStore: new MemoryStore(stored, L(["user"])) })
     );
     expect(userOnly.calls[0]!.some((message) => message.content === "earlier untrusted turn")).toBe(true);
+  });
+
+  it.each(["spotlight", "datamark"])("keeps the marks out of memory across turns (%s)", async (profile) => {
+    /** Memory that keeps what each turn saves; its labels say it holds outside content. */
+    class KeepingStore implements AgentSessionMemoryStore {
+      stored: ChatMessage[] = [];
+      async loadMessages() {
+        return structuredClone(this.stored);
+      }
+      async saveMessages(_namespace: string, _sessionId: string, messages: ChatMessage[]) {
+        this.stored = structuredClone(messages);
+      }
+      async loadLabels() {
+        return L(["untrusted_external"]);
+      }
+    }
+    const store = new KeepingStore();
+    const provider = new Scripted();
+    const turn = (prompt: string) =>
+      executeWorkflow(
+        { workflow: agent("Answer: {{user_prompt}}", true), triggerType: "webhook", webhookPayload: { user_prompt: prompt, session_id: "s1" } },
+        deps({ provider, guard: guardFor([profile]), memoryStore: store })
+      );
+    const marked = (text: string) => text.includes("<<<") || text.includes("ˆ");
+    await turn("first question here");
+    expect(marked(String(provider.calls[0]!.find((message) => message.role === "user")!.content))).toBe(true);
+    await turn("second question here");
+    const stored = store.stored.map((message) => String(message.content));
+    expect(stored).toContain("Answer: first question here");
+    expect(stored).toContain("Answer: second question here");
+    expect(stored.some(marked)).toBe(false);
+    // The second turn marks the remembered first turn once, not twice.
+    const second = provider.calls[provider.calls.length - 1]!;
+    const remembered = String(second.find((message) => message.role === "user" && String(message.content).includes("first"))!.content);
+    expect(marked(remembered)).toBe(true);
+    if (profile === "spotlight") expect(remembered.match(/<<<DATA-/g)).toHaveLength(1);
+    else expect(remembered.match(/ˆ/g)?.length).toBe("Answer: first question here".split(" ").length - 1);
   });
 });

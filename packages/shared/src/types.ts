@@ -528,6 +528,8 @@ export interface WorkflowExecutionState {
     recorded?: string[];
     /** 12.2 — human approvals that endorsed content so far; `nodeId` is the approving node (its descendants read the covered nodes endorsed). */
     endorsements?: Array<{ nodeId: string; endorsement: LabelEndorsement; coversInput?: boolean }>;
+    /** 12.2 — what the pending approval request showed the approver (the nodes its text read; the run input when it read it). */
+    shown?: { nodeIds: string[]; input?: boolean };
   };
 }
 
@@ -927,7 +929,13 @@ export interface AgentToolOutputLimits {
 export interface AgentRunRequest {
   provider: LLMProviderConfig;
   systemPrompt: string;
+  /** The user prompt as written; this is what session memory keeps. */
   userPrompt: string;
+  /**
+   * 12.2 — the user prompt as the model sees it, when spotlighting marked untrusted parts of it. Only the model call
+   * gets it; memory keeps `userPrompt`, so the marks never nest across turns.
+   */
+  modelUserPrompt?: string;
   tools: MCPToolDefinition[];
   maxIterations: number;
   toolCallingEnabled: boolean;

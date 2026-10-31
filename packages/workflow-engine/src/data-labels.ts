@@ -390,8 +390,14 @@ interface ActiveEndorsement {
   covered: ReadonlySet<string>;
   /** Nodes downstream of the approving node: only they read the covered outputs endorsed. */
   readers: ReadonlySet<string>;
-  /** The approver saw the trigger's input (an input node was covered): readers' reads of the run input are endorsed too. */
+  /** The approval request read the run input: readers' reads of the run input are endorsed too. */
   coversInput: boolean;
+}
+
+/** 12.2 — what an approval request showed the approver: the nodes its text read, and whether it read the run input. */
+export interface ApprovalShown {
+  nodeIds: string[];
+  input: boolean;
 }
 
 export class RunLabelState {
@@ -403,6 +409,8 @@ export class RunLabelState {
   private readonly recorded = new Set<string>();
   private readonly recordInput: boolean;
   private readonly endorsements: ActiveEndorsement[] = [];
+  /** 12.2 — what the pending approval request showed, kept from the pause to the decision. */
+  private shown?: ApprovalShown;
   /** The node whose output is the run's output, once known. */
   outputNodeId?: string;
 
@@ -441,6 +449,10 @@ export class RunLabelState {
         coversInput: stored.coversInput === true
       });
     }
+    const shown = state.shown;
+    if (shown && Array.isArray(shown.nodeIds)) {
+      run.shown = { nodeIds: shown.nodeIds.filter((id): id is string => typeof id === "string"), input: shown.input === true };
+    }
     const outputNodeId = (state as { outputNodeId?: unknown }).outputNodeId;
     if (typeof outputNodeId === "string") run.outputNodeId = outputNodeId;
     return run;
@@ -457,17 +469,37 @@ export class RunLabelState {
       ...(this.endorsements.length > 0
         ? { endorsements: this.endorsements.map((entry) => ({ nodeId: entry.nodeId, endorsement: entry.endorsement, ...(entry.coversInput ? { coversInput: true } : {}) })) }
         : {}),
+      ...(this.shown ? { shown: { nodeIds: [...this.shown.nodeIds], ...(this.shown.input ? { input: true } : {}) } } : {}),
       ...(this.outputNodeId ? { outputNodeId: this.outputNodeId } : {})
     };
   }
 
+  /** 12.2 — the approval request the run pauses for showed this (replaces what an earlier request showed). */
+  setShown(shown: ApprovalShown | undefined): void {
+    this.shown = shown;
+  }
+
+  /** 12.2 — what the pending approval request showed, once: the decision consumes it. Nothing recorded: nothing shown. */
+  takeShown(): ApprovalShown {
+    const shown = this.shown ?? { nodeIds: [], input: false };
+    this.shown = undefined;
+    return shown;
+  }
+
   /**
    * 12.2 — a paused run keeps its labels when it tracks them, or when it carries something a later check needs and
-   * the resume could not rebuild: a declared sensitive output, a trigger trust, an endorsement. Otherwise nothing new
+   * the resume could not rebuild: a declared sensitive output, a trigger trust, an endorsement, what a pending
+   * approval request showed. Otherwise nothing new
    * is stored (a resume then counts the run's content as outside content, as before).
    */
   get persists(): boolean {
-    return this.tracked || this.recordInput || this.recorded.size > 0 || this.endorsements.length > 0;
+    const showsSomething = this.shown !== undefined && (this.shown.nodeIds.length > 0 || this.shown.input);
+    return this.tracked || this.recordInput || this.recorded.size > 0 || this.endorsements.length > 0 || showsSomething;
+  }
+
+  /** The nodes that have labels so far. */
+  nodeIds(): IterableIterator<string> {
+    return this.nodes.keys();
   }
 
   has(nodeId: string): boolean {
@@ -493,14 +525,14 @@ export class RunLabelState {
 
   /**
    * 12.2 — a person approved at `nodeId`: the approving node's own output is endorsed (when covered), and nodes
-   * downstream of it (`readers`) read the covered nodes' outputs endorsed. Covered nodes keep their own labels for
-   * every other reader. An endorsement that covers nothing (an approved tool call) is only recorded.
+   * downstream of it (`readers`) read the covered nodes' outputs endorsed, and the run input when `coversInput`
+   * (the request read it). Covered nodes keep their own labels for every other reader. An endorsement that covers
+   * nothing is only recorded.
    */
-  endorse(nodeId: string, endorsement: LabelEndorsement, readers: ReadonlySet<string>, nodeTypes: ReadonlyMap<string, string>): void {
+  endorse(nodeId: string, endorsement: LabelEndorsement, readers: ReadonlySet<string>, coversInput: boolean): void {
     const covered = new Set(endorsement.nodeIds);
     const own = this.nodes.get(nodeId);
     if (own && covered.has(nodeId)) this.nodes.set(nodeId, endorseLabels(own));
-    const coversInput = [...covered].some((id) => nodeContentSource(nodeTypes.get(id) ?? "") === "input");
     this.endorsements.push({ nodeId, endorsement, covered, readers, coversInput });
     this.recorded.add(nodeId);
   }
@@ -696,6 +728,19 @@ export class NodeLabelScope {
     this.applyReferences(references, reads);
     const parentField = references.heads.some((head) => Object.prototype.hasOwnProperty.call(this.merged, head));
     return unionLabels([...this.labelsOfReads(reads), parentField ? this.base : undefined]);
+  }
+
+  /**
+   * 12.2 — what one `{{ }}` body reads, as sources: the nodes it names, whether it reads the run input, and the
+   * names it reads from the parents' merged item (the caller maps them to the parents that hold them).
+   */
+  sourcesOfTemplateRead(body: string, simplePath: boolean): { nodeIds: string[]; input: boolean; parentFields: string[] } {
+    const references = simplePath ? referencesInPath(body) : referencesInExpression(body);
+    const reads = new Reads();
+    this.applyReferences(references, reads);
+    if (reads.all) return { nodeIds: [...this.run.nodeIds()], input: true, parentFields: [] };
+    const parentFields = references.heads.filter((head) => Object.prototype.hasOwnProperty.call(this.merged, head));
+    return { nodeIds: [...reads.nodes], input: reads.input, parentFields };
   }
 
   /** The labels of what was read inside one segment (nothing else). */

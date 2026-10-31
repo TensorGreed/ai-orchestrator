@@ -377,11 +377,10 @@ describe("propagation through templates and the DAG", () => {
     expect(paused[0]!.dataLabels?.nodes.greet).toEqual(L(["untrusted_external"], ["email"]));
     const resumed = await resumeWorkflowExecution({ executionId: "t10", state: paused[0]!, decision: "approve", actedBy: "admin" }, deps({ guard }));
     expect(resumed.status).toBe("success");
-    // 12.2 — the approval endorses what it showed the approver (greet, its input) for the nodes after it; the data
-    // classes stay.
-    expect(labelsOf(resumed, "ask")).toEqual(L(["user"], ["email"]));
-    expect(labelsOf(resumed, "after")).toEqual(L(["user"], ["email"]));
-    expect(resultOf(resumed, "ask")?.endorsement).toMatchObject({ kind: "human_approval", approvedBy: "admin", nodeIds: ["ask", "greet"] });
+    // 12.2 — "ok?" showed the approver nothing: the approval is recorded but endorses nothing.
+    expect(labelsOf(resumed, "ask")).toEqual(L(["user", "untrusted_external"], ["email"]));
+    expect(labelsOf(resumed, "after")).toEqual(L(["user", "untrusted_external"], ["email"]));
+    expect(resultOf(resumed, "ask")?.endorsement).toMatchObject({ kind: "human_approval", approvedBy: "admin", nodeIds: [] });
   });
 });
 
@@ -691,9 +690,8 @@ describe("resume, pinned data and approvals (round 1 fixes)", () => {
     expect(paused[0]!.dataLabels).toBeUndefined();
     const resumed = await resumeWorkflowExecution({ executionId: "p2", state: paused[0]!, decision: "approve", actedBy: "admin" }, deps({ guard: viaPause.guard, workflows: [child] }));
     expect(resumed.status).toBe("success");
-    // 12.2 — the approval showed the approver the webhook input (its parent is the trigger), so the call after it
-    // reads that input endorsed: the child sees it as the user's, never as trusted.
-    expect(viaPause.spy.seen.at(-1)?.labels).toEqual(["user"]);
+    // The tracked child still sees the webhook content as outside content (12.2: the approval's message showed none of it).
+    expect(viaPause.spy.seen.at(-1)?.labels).toContain("untrusted_external");
   });
 
   it("a paused run resumed with tracking on labels the restored input and nodes untrusted_external", async () => {
@@ -747,9 +745,8 @@ describe("resume, pinned data and approvals (round 1 fixes)", () => {
     expect(first.status).toBe("waiting_approval");
     expect(paused[0]!.approvalHandoff?.kind).toBe("route");
     const resumed = await resumeWorkflowExecution({ executionId: "p5", state: paused[0]!, decision: "approve", actedBy: "admin" }, deps({ guard }));
-    // 12.2 — a person approved the reviewed content: it is endorsed (the guard's scan alone never would), classes stay.
-    expect(labelsOf(resumed, "gate")?.provenance).toEqual(["user"]);
-    expect(labelsOf(resumed, "gate")?.dataClasses).toContain("email");
+    // 12.2 — the review request shows the verdict and findings, not the content: approving it endorses nothing.
+    expect(labelsOf(resumed, "gate")?.provenance).toEqual(["user", "untrusted_external"]);
   });
 });
 

@@ -194,6 +194,7 @@ import {
   runInLabelScope,
   RunLabelState,
   unionLabels,
+  type ApprovalShown,
   type NodeLabelScope
 } from "./data-labels";
 
@@ -1200,6 +1201,78 @@ function spotlightPromptPieces(
     return mark(piece.text);
   });
   return marked ? out.join("") : rendered;
+}
+
+/**
+ * 12.2 — what the rendered `{{ }}` pieces of an approval request (its message, details, editable fields) read, as
+ * the sources the approver was shown: the nodes they name, the parents holding a field they read from the merged
+ * item, and the run input.
+ */
+function approvalShownBy(pieces: readonly TemplatePiece[], scope: NodeLabelScope | undefined, parentOutputs: Record<string, unknown>): ApprovalShown {
+  const nodeIds = new Set<string>();
+  let input = false;
+  if (!scope) return { nodeIds: [], input };
+  for (const piece of pieces) {
+    if (piece.body === undefined) continue;
+    const sources = scope.sourcesOfTemplateRead(piece.body, piece.simplePath);
+    for (const nodeId of sources.nodeIds) nodeIds.add(nodeId);
+    if (sources.input) input = true;
+    for (const field of sources.parentFields) {
+      for (const [parentId, output] of Object.entries(parentOutputs)) {
+        if (Object.prototype.hasOwnProperty.call(toRecord(output), field)) nodeIds.add(parentId);
+      }
+    }
+  }
+  return { nodeIds: [...nodeIds], input };
+}
+
+/** Renders approval-request templates, collecting their pieces for `approvalShownBy`. */
+function collectingRenderer(values: Record<string, unknown>): { render: (template: string) => string; pieces: TemplatePiece[] } {
+  const pieces: TemplatePiece[] = [];
+  return {
+    pieces,
+    render: (template) => {
+      const own: TemplatePiece[] = [];
+      const rendered = renderTemplate(template, values, { pieces: own });
+      pieces.push(...own);
+      return rendered;
+    }
+  };
+}
+
+const MAX_SHOWN_LEAVES = 200;
+
+/** The string values in `value` (up to `MAX_SHOWN_LEAVES`); undefined when it holds more. */
+function stringLeaves(value: unknown, out: string[] = [], depth = 0): string[] | undefined {
+  if (out.length > MAX_SHOWN_LEAVES || depth > 20) return undefined;
+  if (typeof value === "string") {
+    if (value.length > 0) out.push(value);
+    return out;
+  }
+  if (Array.isArray(value)) {
+    for (const entry of value) if (!stringLeaves(entry, out, depth + 1)) return undefined;
+    return out;
+  }
+  if (value && typeof value === "object") {
+    for (const entry of Object.values(value as Record<string, unknown>)) if (!stringLeaves(entry, out, depth + 1)) return undefined;
+  }
+  return out;
+}
+
+/**
+ * 12.2 — the nodes whose text the approver saw in full in an approved tool call's arguments (`shownText`, the JSON
+ * preview the request showed): every string value of the node's output appears in it. A node shown only in part is
+ * not a source of what was approved.
+ */
+function nodesWhollyShownIn(shownText: string, outputs: Iterable<[string, unknown]>, skip: string): string[] {
+  const shown: string[] = [];
+  for (const [nodeId, output] of outputs) {
+    if (nodeId === skip) continue;
+    const leaves = stringLeaves(output);
+    if (!leaves || leaves.length === 0) continue;
+    if (leaves.every((leaf) => shownText.includes(JSON.stringify(leaf).slice(1, -1)))) shown.push(nodeId);
+  }
+  return shown;
 }
 
 /**
@@ -6162,11 +6235,14 @@ async function executeNodeHandler(
         const labelScope = context.labelScope;
         // 12.2 — under a profile's spotlighting, untrusted-labelled parts of the user prompt are marked like tool
         // results (a prompt an MCP server wrote is untrusted as a whole). The author's own template text is not.
+        // Only the model call gets the marked copy: memory keeps the prompt as written.
         const spotlightUntrusted = guardSession?.hooks.spotlightUntrusted;
+        let modelUserPrompt: string | undefined;
         if (spotlightUntrusted && labelScope) {
-          userPrompt = userPromptFromServer
+          const marked = userPromptFromServer
             ? spotlightUntrusted(userPrompt)
             : spotlightPromptPieces(userPromptPieces, userPrompt, (piece) => labelScope.labelsOfTemplateRead(piece.body, piece.simplePath), spotlightUntrusted);
+          if (marked !== userPrompt) modelUserPrompt = marked;
         }
         const modelRunStarted = Date.now();
         const modelRunStartedAt = nowIso();
@@ -6177,6 +6253,7 @@ async function executeNodeHandler(
             provider,
             systemPrompt,
             userPrompt,
+            ...(modelUserPrompt !== undefined ? { modelUserPrompt } : {}),
             maxIterations,
             toolCallingEnabled,
             agentType: typeof config.agentType === "string" ? config.agentType as "tools" | "react" | "plan-and-execute" | "sql" : "tools",
@@ -6896,7 +6973,11 @@ async function executeNodeHandler(
           timeoutMinutes: typeof config.timeoutMinutes === "number" ? config.timeoutMinutes : undefined
         });
       }
-      throw approvalGatePause(config, (template) => renderTemplate(template, templateData));
+      // 12.2 — what the request shows (message, editable field values) is what an approval endorses.
+      const gateRenderer = collectingRenderer(templateData);
+      const gatePause = approvalGatePause(config, gateRenderer.render);
+      gatePause.shown = approvalShownBy(gateRenderer.pieces, context.labelScope, context.parentOutputs);
+      throw gatePause;
     }
 
     case "pdf_output": {
@@ -7812,18 +7893,31 @@ async function executeWorkflowRun(
    * approved tool call is recorded only: its result is new outside content. Never called for a rejection, a timeout,
    * a replay (no person approved anything) or any automated check.
    */
-  const endorseApproval = (nodeId: string, kind: LabelEndorsement["kind"], approvedBy: string | undefined, approvedAt: string, toolName?: string) => {
-    const covers = kind !== "tool_call";
-    const nodeIds = covers ? [nodeId, ...(graphIndexes.incomingExecution.get(nodeId) ?? []).filter((parentId) => labelState.has(parentId))] : [];
+  const endorseApproval = (
+    nodeId: string,
+    kind: LabelEndorsement["kind"],
+    approvedBy: string | undefined,
+    approvedAt: string,
+    shown: ApprovalShown,
+    toolName?: string
+  ) => {
+    const shownIds = new Set(shown.nodeIds.filter((id) => id !== nodeId && labelState.has(id)));
+    // The approving node's own output carries its parents' content: endorsed only when the request showed all of
+    // it. An agent's own output (an approved tool call) holds its whole context and is never endorsed.
+    const parents = (graphIndexes.incomingExecution.get(nodeId) ?? []).filter((parentId) => labelState.has(parentId));
+    const ownShown = kind !== "tool_call" && (parents.length > 0 ? parents.every((parentId) => shownIds.has(parentId)) : shown.input);
+    const nodeIds = [...(ownShown ? [nodeId] : []), ...shownIds];
+    // An approved tool call is endorsed before its node runs again: that re-run reads the shown sources endorsed too.
+    const descendants = descendantCache.getDescendants(nodeId);
     labelState.endorse(
       nodeId,
       { kind, approvedBy: approvedBy ?? null, approvedAt, nodeIds, ...(toolName ? { toolName } : {}) },
-      covers ? descendantCache.getDescendants(nodeId) : new Set(),
-      workflowNodeTypes
+      kind === "tool_call" ? new Set([nodeId, ...descendants]) : descendants,
+      kind !== "tool_call" && shown.input
     );
   };
-  /** 12.2 — an approved tool call's endorsement, recorded on the node's result once it runs again. */
-  let pendingToolEndorsement: { nodeId: string; approvedBy?: string; approvedAt: string; toolName?: string } | undefined;
+  /** 12.2 — what the request the run paused for showed; a resume reads it once. */
+  const shownAtPause = request.resumeState ? labelState.takeShown() : { nodeIds: [], input: false };
   const nodeResults: NodeExecutionResult[] = request.resumeState ? [...request.resumeState.nodeResults] : [];
   const attachmentOnlyResultIndexByNodeId = new Map<string, number>();
   const attachmentCompletionEventEmitted = new Set<string>();
@@ -8067,7 +8161,7 @@ async function executeWorkflowRun(
       // Phase 16 — the paused node's labels were saved with the run; the decision comes from a person; the routed
       // output is scanned like any output.
       labelState.set(waitingNode.id, labelState.finalize(unionLabels([labelState.get(waitingNode.id), labelsOf(["user"])]), routed));
-      if (approved) endorseApproval(waitingNode.id, "human_approval", request.approvalDecision.actedBy, decidedAt);
+      if (approved) endorseApproval(waitingNode.id, "human_approval", request.approvalDecision.actedBy, decidedAt, shownAtPause);
       nodeResults.push({
         nodeId: waitingNode.id,
         status: "success",
@@ -8086,12 +8180,15 @@ async function executeWorkflowRun(
         if (handoff.source === "agent_tool_gate") {
           const waitingResult = request.resumeState.nodeResults.find((entry) => entry.nodeId === waitingNode.id && entry.status === "waiting_approval");
           const toolName = toRecord(waitingResult?.output).toolName;
-          pendingToolEndorsement = {
-            nodeId: waitingNode.id,
-            approvedBy: request.approvalDecision.actedBy,
-            approvedAt: decidedAt,
-            ...(typeof toolName === "string" && toolName ? { toolName } : {})
-          };
+          // 12.2 — recorded on the node's result once it runs again.
+          endorseApproval(
+            waitingNode.id,
+            "tool_call",
+            request.approvalDecision.actedBy,
+            decidedAt,
+            shownAtPause,
+            typeof toolName === "string" && toolName ? toolName : undefined
+          );
         }
         handledByHandoff = true;
       } else {
@@ -8106,7 +8203,7 @@ async function executeWorkflowRun(
       nodeOutputs.set(waitingNode.id, decisionPayload);
       // Phase 16 — the decision comes from a person.
       labelState.set(waitingNode.id, unionLabels([labelState.get(waitingNode.id), labelsOf(["user"])]));
-      endorseApproval(waitingNode.id, "human_approval", request.approvalDecision.actedBy, decidedAt);
+      endorseApproval(waitingNode.id, "human_approval", request.approvalDecision.actedBy, decidedAt, shownAtPause);
       nodeResults.push({
         nodeId: waitingNode.id,
         status: "success",
@@ -8246,9 +8343,19 @@ async function executeWorkflowRun(
     handoff?: WorkflowExecutionState["approvalHandoff"];
     details?: Record<string, unknown>;
     labelScope?: NodeLabelScope;
+    /** 12.2 — what the request showed the approver (an approval endorses only that). */
+    shown?: ApprovalShown;
   }): Promise<WorkflowExecutionResult> => {
     // Phase 16 — the paused node's labels so far travel with the run, for the output it routes or decides on resume.
     if (pause.labelScope) labelState.set(pause.node.id, pause.labelScope.pendingLabels());
+    // 12.2 — an approved tool call shows its arguments: the nodes whose text they hold in full are what it approves.
+    const shownArguments = pause.handoff?.source === "agent_tool_gate" ? pause.details?.arguments : undefined;
+    labelState.setShown(
+      pause.shown ??
+        (typeof shownArguments === "string"
+          ? { nodeIds: nodesWhollyShownIn(shownArguments, nodeOutputs.entries(), pause.node.id), input: false }
+          : undefined)
+    );
     const waitingOutput = {
       message: pause.approvalMessage,
       timeoutMinutes: pause.timeoutMinutes,
@@ -8840,13 +8947,12 @@ async function executeWorkflowRun(
           typeof nodeConfig.timeoutMinutes === "number" && Number.isFinite(nodeConfig.timeoutMinutes) && nodeConfig.timeoutMinutes > 0
             ? Math.floor(nodeConfig.timeoutMinutes)
             : 60;
-        const approvalMessage = renderTemplate(approvalMessageTemplate, {
-          ...globals,
-          ...merged,
-          parent_outputs: parentOutputs
-        });
+        const messageRenderer = collectingRenderer({ ...globals, ...merged, parent_outputs: parentOutputs });
+        const approvalMessage = messageRenderer.render(approvalMessageTemplate);
+        // 12.2 — an approval endorses only what its message showed.
+        const shown = approvalShownBy(messageRenderer.pieces, labelScope, parentOutputs);
 
-        return await pauseForApproval({ node, index, nodeInput, startedAtNode, started, approvalMessage, timeoutMinutes, labelScope });
+        return await pauseForApproval({ node, index, nodeInput, startedAtNode, started, approvalMessage, timeoutMinutes, labelScope, shown });
       }
 
       // Phase 11.2 — the decision belongs to the node the run paused at, once.
@@ -8879,12 +8985,8 @@ async function executeWorkflowRun(
       nodeOutputs.set(node.id, output);
       labelState.set(node.id, labelScope.finish(output));
       if (resumeDecision?.decision === "approve" && resumeDecision.handoff.kind === "gate") {
-        endorseApproval(node.id, "approval_gate", resumeDecision.actedBy, resumeDecision.decidedAt);
+        endorseApproval(node.id, "approval_gate", resumeDecision.actedBy, resumeDecision.decidedAt, shownAtPause);
       }
-      if (pendingToolEndorsement?.nodeId === node.id) {
-        endorseApproval(node.id, "tool_call", pendingToolEndorsement.approvedBy, pendingToolEndorsement.approvedAt, pendingToolEndorsement.toolName);
-      }
-      pendingToolEndorsement = undefined;
 
       nodeResults.push({
         nodeId: node.id,
@@ -8926,7 +9028,8 @@ async function executeWorkflowRun(
           timeoutMinutes: error.request.timeoutMinutes,
           handoff: error.request.handoff,
           ...(error.request.details ? { details: error.request.details } : {}),
-          labelScope
+          labelScope,
+          ...(error.shown ? { shown: error.shown } : {})
         });
       }
       // The execution timeout fires while a node runs: that node failed, it was not canceled.
