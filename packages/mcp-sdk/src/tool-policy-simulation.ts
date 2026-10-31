@@ -10,6 +10,7 @@ import {
   type ToolArgumentSummary,
   type ToolArgumentValueType,
   labelValueNeedsTracking,
+  withImpliedSensitive,
   type McpToolCallLabels
 } from "@ai-orchestrator/shared";
 import { hashToolArgumentValue, isToolArgumentLocationKey, toolArgumentHashKeyId } from "./tool-argument-summary";
@@ -657,7 +658,8 @@ export function evaluateConditionOnSummary(
   if (condition.op === "label_present" || condition.op === "label_absent") {
     if (call.labels === "none") return { value: evaluatePolicyCondition(condition, {}, null, quantifier) };
     if (call.labels === "unknown") return { value: "unknown", reason: `${conditionText(condition)}: the run's data labels are not recorded` };
-    const recorded = { provenance: call.labels.provenance, dataClasses: call.labels.dataClasses ?? [] };
+    // Recorded classes imply `sensitive`, as they did when the call was decided (rows recorded before this did not say so).
+    const recorded = withImpliedSensitive({ provenance: call.labels.provenance, dataClasses: call.labels.dataClasses ?? [] });
     // On an untracked run only a label's absence is in doubt (it was never scanned for); one recorded as present
     // (a `sensitive` source) decides either way.
     const recordedPresent =

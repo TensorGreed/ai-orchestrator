@@ -327,7 +327,8 @@ describe("automatic label tracking", () => {
     );
     expect(result.status).toBe("success");
     const decision = agentOutput(result)?._toolPolicy?.decisions?.[0];
-    expect(decision?.labels).toMatchObject({ tracked: true, provenance: ["user"] });
+    // The email found makes the content sensitive too (`withImpliedSensitive`), as the decision read it.
+    expect(decision?.labels).toMatchObject({ tracked: true, provenance: ["user", "sensitive"] });
     expect(decision?.labels?.dataClasses).toContain("email");
     expect(decision).toMatchObject({ shadow: { effect: "deny", changed: true } });
     // The recorded labels hold class names, never the address.
@@ -362,5 +363,66 @@ describe("automatic label tracking", () => {
       deps({ rules: [mcpSafetyPresetRule("untrusted_write_approval")] })
     );
     expect(agentOutput(result)?._toolPolicy?.callLabels?.[0]?.labels).toEqual({ provenance: ["user"], tracked: false });
+  });
+});
+
+describe("declared sensitive sources and implied sensitive", () => {
+  const watchSensitive: McpToolPolicyRule = {
+    id: "watch-sensitive",
+    name: null,
+    description: null,
+    effect: "deny",
+    projectId: null,
+    roles: [],
+    serverId: null,
+    toolPattern: "*",
+    enabled: true,
+    mode: "shadow",
+    conditions: { all: [{ op: "label_present", value: "sensitive" }] }
+  };
+  const flaggedWorkflow = (): Workflow => {
+    const base = agentWorkflow();
+    return { ...base, nodes: base.nodes.map((entry) => (entry.id === "in" ? { ...entry, config: { ...entry.config, sensitiveOutput: true } } : entry)) };
+  };
+
+  it("lets a sensitive rule see a declared sensitive source on the run it makes tracked", async () => {
+    const result = await executeWorkflow(
+      { workflow: flaggedWorkflow(), webhookPayload: { user_prompt: "Push the release" }, inputLabels: labels(["user"]) },
+      deps({ rules: [watchSensitive] })
+    );
+    expect(result.status).toBe("success");
+    const decision = agentOutput(result)?._toolPolicy?.decisions?.[0];
+    expect(decision?.labels).toMatchObject({ tracked: true, provenance: ["user", "sensitive"] });
+    expect(decision).toMatchObject({ shadow: { effect: "deny", changed: true } });
+  });
+
+  it("enforces a sensitive deny on a declared source", async () => {
+    const invoked: string[] = [];
+    const result = await executeWorkflow(
+      { workflow: flaggedWorkflow(), webhookPayload: { user_prompt: "Push the release" }, inputLabels: labels(["user"]) },
+      deps({ rules: [enforced(watchSensitive)], invoked })
+    );
+    expect(invoked).toEqual([]);
+    // The denied call keeps the labels it was decided with, on the decision and for telemetry.
+    const policy = agentOutput(result)?._toolPolicy;
+    expect(policy?.decisions?.[0]).toMatchObject({ effect: "deny", labels: { provenance: ["user", "sensitive"], tracked: true } });
+    expect(policy?.callLabels?.[0]?.labels.provenance).toContain("sensitive");
+  });
+
+  it("records a declared sensitive source on an untracked run, so simulation can decide it", async () => {
+    const result = await executeWorkflow(
+      { workflow: flaggedWorkflow(), webhookPayload: { user_prompt: "Push the release" }, inputLabels: labels(["user"]) },
+      deps({ rules: [mcpSafetyPresetRule("untrusted_write_approval")] })
+    );
+    expect(agentOutput(result)?._toolPolicy?.callLabels?.[0]?.labels).toEqual({ provenance: ["user", "sensitive"], tracked: false });
+  });
+
+  it("records nothing sensitive when no source is declared and nothing was found", async () => {
+    const result = await executeWorkflow(
+      { workflow: agentWorkflow(), webhookPayload: { user_prompt: "Push the release" }, inputLabels: labels(["user"]) },
+      deps({ rules: [watchSensitive] })
+    );
+    expect(agentOutput(result)?._toolPolicy?.decisions?.[0]).toBeUndefined();
+    expect(agentOutput(result)?._toolPolicy?.callLabels?.[0]?.labels).toEqual({ provenance: ["user"], dataClasses: [], tracked: true });
   });
 });

@@ -278,8 +278,12 @@ export const labelEndorsementSchema = z.object({
 });
 export type LabelEndorsement = z.output<typeof labelEndorsementSchema>;
 
-/** 12.2 — data classes found in content make it `sensitive` too (detected classes exist on tracked runs only). */
-export function withImpliedSensitive(labels: DataLabels): DataLabels {
+/**
+ * 12.2 — data classes found in content make it `sensitive` too (detected classes exist on tracked runs only). Live
+ * policy evaluation, the labels a tool call records and the policy simulator all read labels through this, so a
+ * `label_present: sensitive` rule decides the same way in each.
+ */
+export function withImpliedSensitive<T extends Pick<DataLabels, "provenance" | "dataClasses">>(labels: T): T {
   if (labels.dataClasses.length === 0 || labels.provenance.includes("sensitive")) return labels;
   const provenance = new Set<ProvenanceLabel>(labels.provenance);
   provenance.add("sensitive");

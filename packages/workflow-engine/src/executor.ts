@@ -6463,14 +6463,16 @@ async function executeNodeHandler(
               const resolvedEntry = resolvedTools.resolved.find((entry) => entry.exposedName === toolName);
               if (!resolvedEntry) return { outcome: "allow" };
               const plan = planToolCall(resolvedEntry, args, call.labels);
+              // 12.2 — a call stopped here records the labels it was decided with too, so simulation can read them.
+              const checkExtra = { toolCallId: call.toolCallId, labels: call.labels, tracked: labelScope?.run.tracked === true };
               if (plan.kind === "deny") {
-                if (plan.decision && plan.policyTool) toolPolicy?.record(plan.policyTool, plan.decision, { toolCallId: call.toolCallId });
+                if (plan.decision && plan.policyTool) toolPolicy?.record(plan.policyTool, plan.decision, checkExtra);
                 return { outcome: "block", message: plan.message };
               }
               // Only a policy rule's approval is asked before the guard; the write-tool gate alone keeps its place
               // after the guard, so a call the guard blocks or rewrites is never put to a person first.
               if (plan.kind === "approval" && plan.policyKey && !writeToolSession?.ready(plan.policyKey)) {
-                if (plan.decision && plan.policyTool) toolPolicy?.record(plan.policyTool, plan.decision, { toolCallId: call.toolCallId, approval: "pending" });
+                if (plan.decision && plan.policyTool) toolPolicy?.record(plan.policyTool, plan.decision, { ...checkExtra, approval: "pending" });
                 toolGatePendingApproval = plan.pause;
                 return { outcome: "pause", message: plan.pause.message };
               }

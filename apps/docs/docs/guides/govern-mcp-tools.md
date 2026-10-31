@@ -102,6 +102,7 @@ Each tool call records the label names it was decided with on the run trace and 
 
 - `untrusted_external`, `user` and `trusted` conditions are decided for every recorded call.
 - `sensitive` and class conditions are decided for runs that tracked labels, and wherever the label was recorded as present. Only its absence on an untracked run stays undetermined.
+- A data class found in the content counts as `sensitive`, in the live decision, in the recorded labels and in the simulator alike. So does a declared source (a node's **Sensitive output** switch, or a secret flagged "sensitive output"), on every run, tracked or not.
 - Calls recorded before labels were kept stay **undetermined**.
 
 Gateway calls carry no labels, so label conditions never match them.
