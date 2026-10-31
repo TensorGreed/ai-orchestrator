@@ -106,7 +106,7 @@ test.describe("provenance sources", () => {
     await openStudio(page);
     const stamp = Date.now();
     const workflowId = `wf-e2e-reset-${stamp}`;
-    const workflow = (authMode: string, binding?: unknown) => ({
+    const workflow = (hookPath: string, binding?: unknown) => ({
       id: workflowId,
       name: `E2E Reset ${stamp}`,
       schemaVersion: "1.0.0",
@@ -117,7 +117,7 @@ test.describe("provenance sources", () => {
           type: "webhook_input",
           name: "Partner hook",
           position: { x: 80, y: 180 },
-          config: { path: `e2e-reset-${stamp}`, method: "POST", authMode, inputTrust: "user", ...(binding ? { inputTrustFor: binding } : {}) }
+          config: { path: hookPath, method: "POST", authMode: "none", inputTrust: "user", ...(binding ? { inputTrustFor: binding } : {}) }
         },
         { id: "out", type: "output", name: "Output", position: { x: 380, y: 180 }, config: { responseTemplate: "ok", outputKey: "result" } }
       ],
@@ -126,11 +126,12 @@ test.describe("provenance sources", () => {
     type Saved = { nodes: Array<{ id: string; config: Record<string, unknown> }> };
     const hookConfig = async () => ((await (await page.request.get(`/api/workflows/${workflowId}`)).json()) as Saved).nodes.find((node) => node.id === "hook")!.config;
     try {
-      // An admin sets the trust (the save binds it), then the trigger changes with that binding kept.
-      expect((await page.request.post("/api/workflows", { data: workflow("bearer_token") })).ok()).toBeTruthy();
+      // An admin sets the trust (the save binds it), then the trigger moves to another path with that binding kept.
+      const created = await page.request.post("/api/workflows", { data: workflow(`e2e-reset-${stamp}`) });
+      expect(created.ok(), await created.text()).toBeTruthy();
       const binding = (await hookConfig()).inputTrustFor;
-      expect(binding).toMatchObject({ authMode: "bearer_token" });
-      expect((await page.request.put(`/api/workflows/${workflowId}`, { data: workflow("none", binding) })).ok()).toBeTruthy();
+      expect(binding).toMatchObject({ path: `e2e-reset-${stamp}` });
+      expect((await page.request.put(`/api/workflows/${workflowId}`, { data: workflow(`e2e-moved-${stamp}`, binding) })).ok()).toBeTruthy();
 
       await page.reload();
       await page.getByLabel("Workflow", { exact: true }).selectOption(workflowId);
@@ -145,7 +146,7 @@ test.describe("provenance sources", () => {
       await expect(inspector.getByTestId("trigger-trust-reset")).toHaveCount(0);
       await inspector.getByRole("button", { name: "Save changes" }).click();
       await page.getByRole("banner").getByRole("button", { name: "Save", exact: true }).click();
-      await expect.poll(async () => ((await hookConfig()).inputTrustFor as { authMode?: string } | undefined)?.authMode, { timeout: 30_000 }).toBe("none");
+      await expect.poll(async () => ((await hookConfig()).inputTrustFor as { path?: string } | undefined)?.path, { timeout: 30_000 }).toBe(`e2e-moved-${stamp}`);
     } finally {
       await page.request.delete(`/api/workflows/${workflowId}`);
     }

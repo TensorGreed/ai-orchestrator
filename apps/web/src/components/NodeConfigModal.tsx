@@ -4169,7 +4169,7 @@ export function NodeInspector({
           <div className="cfg-tip trigger-trust-reset" role="status" data-testid="trigger-trust-reset">
             <p>{TRIGGER_TRUST_RESET_TEXT}</p>
             {canSetTriggerTrust ? (
-              <button type="button" className="btn-secondary" onClick={() => setConfig((current) => withTriggerTrustReapplied(current))}>
+              <button type="button" className="insp-btn" onClick={() => setConfig((current) => withTriggerTrustReapplied(current))}>
                 Apply to this trigger
               </button>
             ) : (
