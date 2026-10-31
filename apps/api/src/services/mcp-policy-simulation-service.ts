@@ -33,6 +33,7 @@ import {
 import { decidePolicyOutcome, policyRuleMode, simulatePolicyTransition, type PolicySimulationCall } from "@ai-orchestrator/mcp-sdk";
 import type { McpToolCallRecord } from "../db/database.js";
 import type { Store } from "../db/store.js";
+import { loadMcpOpenWorldContext, resolveOpenWorldFor, rulesReadOpenWorld } from "./mcp-open-world.js";
 
 /** The gateway's own telemetry rows for workflow tools use this adapter id (mcp-gateway-routes.ts). */
 export const GATEWAY_WORKFLOW_TOOL_ADAPTER_ID = "workflow";
@@ -140,7 +141,7 @@ function laterThan(a: string | null | undefined, b: string): boolean {
   return Number.isFinite(left) && Number.isFinite(right) && left > right;
 }
 
-type ToolAnnotationLookup = (call: McpToolCallRecord) => { annotations?: McpToolAnnotations | null; manualReadOnly?: boolean | null };
+type ToolAnnotationLookup = (call: McpToolCallRecord) => { annotations?: McpToolAnnotations | null; manualReadOnly?: boolean | null; openWorld?: boolean | null };
 
 export class McpPolicySimulationService {
   private readonly store: Store;
@@ -255,12 +256,20 @@ export class McpPolicySimulationService {
         snapshot ? { capturedAt: snapshot.createdAt, tools: new Map(snapshot.tools.map((tool) => [tool.name, tool.annotations ?? null])) } : null
       );
     }
+    // Phase 12.2 — open world from today's destination rows and overrides; unknown when the override is newer than the call.
+    const openWorld = rulesReadOpenWorld(rules) ? await loadMcpOpenWorldContext(this.store) : null;
     return (call) => {
       if (!call.registryServerId) return {};
       const snapshot = snapshots.get(call.registryServerId);
       if (!snapshot || !snapshot.tools.has(call.toolName)) return {};
       const mark = classifications.find((entry) => entry.registryServerId === call.registryServerId && entry.toolName === call.toolName);
-      return annotationsAtCall({ capturedAt: snapshot.capturedAt, annotations: snapshot.tools.get(call.toolName) ?? null }, mark ?? null, call.startedAt);
+      const read = annotationsAtCall({ capturedAt: snapshot.capturedAt, annotations: snapshot.tools.get(call.toolName) ?? null }, mark ?? null, call.startedAt);
+      const server = servers.get(call.registryServerId);
+      if (!openWorld || read.annotations === undefined || !server) return read;
+      const override = openWorld.overrides.find((entry) => entry.registryServerId === call.registryServerId && entry.toolName === call.toolName);
+      if (override && laterThan(override.setAt, call.startedAt)) return {};
+      const resolved = resolveOpenWorldFor(openWorld, { adapterId: server.adapterId, registryServerId: server.id, connection: server.connection }, call.toolName, read.annotations);
+      return { ...read, openWorld: resolved.openWorld };
     };
   }
 
@@ -337,7 +346,8 @@ export class McpPolicySimulationService {
             registryServerId: call.registryServerId,
             toolName: call.toolName,
             ...(lookup ? lookup(call) : {}),
-            labels: gateway ? "none" : "unknown",
+            // Phase 12.2 — the labels the call was decided with, when recorded; older rows stay undetermined.
+            labels: gateway ? "none" : call.labels ?? "unknown",
             summary: call.argsSummary
           };
           // A call whose worst case is over the per-call ceiling comes back undetermined; one over what is left of

@@ -34,6 +34,7 @@ import {
 } from "./services/mcp-config-import.js";
 import { toolError, toolSuccess } from "./services/mcp-gateway-protocol.js";
 import { evaluateToolForContext } from "./services/mcp-tool-policy.js";
+import { openWorldMarking } from "./services/mcp-open-world.js";
 import type { ToolArgumentSummarizer } from "./services/tool-argument-summary.js";
 import type { Store } from "./db/store.js";
 import { mapAsync } from "./async-array.js";
@@ -374,15 +375,18 @@ export function registerMcpOnboardingRoutes(deps: McpOnboardingDeps): void {
       return { error: `Tool '${toolName}' is not in the server's current snapshot. Probe the server to refresh it.` };
     }
 
+    const rules = await store.listMcpToolPolicies();
+    const openWorld = await openWorldMarking(store, rules, server);
     const decision = evaluateToolForContext(
       {
-        rules: await store.listMcpToolPolicies(),
+        rules,
         classifications: await store.listMcpToolClassifications(server.id),
         role: user.role as McpPolicyRole,
         projectId,
         adapterId: server.adapterId,
         registryServerId: server.id,
-        serverLabel: server.name
+        serverLabel: server.name,
+        ...(openWorld ? { openWorld } : {})
       },
       { name: tool.name, ...(tool.annotations ? { annotations: tool.annotations } : {}) }
     );

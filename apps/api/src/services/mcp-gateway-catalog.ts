@@ -17,12 +17,15 @@ import type {
   McpPolicyRole,
   McpToolAnnotations,
   McpToolClassificationOverride,
+  McpToolOpenWorldOverride,
+  DataDestinationRow,
   McpToolPolicyRule,
   McpToolset,
   Workflow
 } from "@ai-orchestrator/shared";
 import type { McpServerRecord, McpToolSnapshotRecord } from "../db/database.js";
 import { evaluateToolForContext } from "./mcp-tool-policy.js";
+import { loadMcpOpenWorldContext, rulesReadOpenWorld, type McpOpenWorldContext } from "./mcp-open-world.js";
 
 export interface GatewayWorkflowTool {
   kind: "workflow";
@@ -66,6 +69,8 @@ export interface GatewayCatalogStore {
   getMcpToolSnapshot(id: string): Promise<McpToolSnapshotRecord | null>;
   listMcpToolPolicies(): Promise<McpToolPolicyRule[]>;
   listMcpToolClassifications(registryServerId?: string): Promise<McpToolClassificationOverride[]>;
+  listMcpToolOpenWorldOverrides(registryServerId?: string): Promise<McpToolOpenWorldOverride[]>;
+  listDataDestinations(): Promise<DataDestinationRow[]>;
 }
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -101,6 +106,7 @@ export async function buildGatewayCatalog(input: {
   const serverById = new Map(servers.map((server) => [server.id, server]));
   const slugs = registryServerSlugs(servers);
   const rules = await store.listMcpToolPolicies();
+  let openWorldLoaded: McpOpenWorldContext | undefined;
   const warnings: string[] = [];
   const candidates: Candidate[] = [];
 
@@ -150,6 +156,9 @@ export async function buildGatewayCatalog(input: {
       warnings.push(`MCP server '${server.name}' has an unaccepted breaking change; calls to its tools fail until it is accepted.`);
     }
     const classifications = await store.listMcpToolClassifications(server.id);
+    // Phase 12.2 — open-world resolution, only when a rule reads the open-world hint (read once per catalog).
+    if (rulesReadOpenWorld(rules) && !openWorldLoaded) openWorldLoaded = await loadMcpOpenWorldContext(store);
+    const openWorld = openWorldLoaded ? { ...openWorldLoaded, connection: server.connection } : undefined;
     const slug = slugs.get(server.id) ?? "server";
     const tools = snapshot.tools.filter((tool) => matchesToolPattern(member.toolGlob ?? "*", tool.name));
     if (tools.length === 0) {
@@ -165,7 +174,8 @@ export async function buildGatewayCatalog(input: {
           adapterId: server.adapterId,
           registryServerId: server.id,
           serverLabel: server.name,
-          clientId: input.clientId ?? null
+          clientId: input.clientId ?? null,
+          ...(openWorld ? { openWorld } : {})
         },
         { name: tool.name, ...(tool.annotations ? { annotations: tool.annotations } : {}) }
       );

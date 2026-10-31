@@ -23,6 +23,7 @@ import type { SafeUser, UserRole } from "./services/auth-service.js";
 import type { McpOAuthService } from "./services/mcp-oauth-service.js";
 import { deriveStatus } from "./services/mcp-probe-service.js";
 import { markMcpTools } from "./services/mcp-tool-policy.js";
+import { loadMcpOpenWorldContext, type McpOpenWorldContext } from "./services/mcp-open-world.js";
 import {
   MCP_TELEMETRY_WINDOWS,
   parseMcpTelemetryWindow,
@@ -427,6 +428,7 @@ export function registerMcpControlPlaneRoutes(deps: McpControlPlaneDeps): void {
 
     const tools: unknown[] = [];
     const serverViews: unknown[] = [];
+    let openWorldContext: McpOpenWorldContext | undefined;
     for (const server of servers) {
       const projectId = server.projectId ?? requestedProject ?? "default";
       const snapshot = server.currentSnapshotId ? await store.getMcpToolSnapshot(server.currentSnapshotId) : null;
@@ -437,7 +439,9 @@ export function registerMcpControlPlaneRoutes(deps: McpControlPlaneDeps): void {
         projectId,
         adapterId: server.adapterId,
         registryServerId: server.id,
-        serverLabel: server.name
+        serverLabel: server.name,
+        // Phase 12.2 — open world per tool (overrides and destination rows read once for the catalog).
+        openWorld: { ...(openWorldContext ??= await loadMcpOpenWorldContext(store)), connection: server.connection }
       });
       const calls = detail ? await store.listMcpToolCalls({ registryServerId: server.id, since }) : [];
       const telemetry = detail ? new Map(rollupMcpToolCalls(calls).tools.map((entry) => [entry.toolName, entry])) : null;
@@ -493,6 +497,7 @@ export function registerMcpControlPlaneRoutes(deps: McpControlPlaneDeps): void {
           classification: tool.classification,
           manualReadOnly: tool.manualReadOnly,
           access: tool.access,
+          ...(tool.openWorld ? { openWorld: tool.openWorld, manualOpenWorld: tool.manualOpenWorld ?? null } : {}),
           ...(telemetry ? { telemetry: telemetry.get(tool.name) ?? null, recentCalls: recentByTool.get(tool.name) ?? [] } : {}),
           ...(detail
             ? {
