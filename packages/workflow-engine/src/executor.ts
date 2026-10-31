@@ -10,6 +10,8 @@ import {
   policyNeedsAnnotations,
   policyNeedsArguments,
   resolveMCPTools,
+  resolveToolOpenWorld,
+  serverOpenWorldDestination,
   type McpToolAccessCall,
   type McpToolAccessCheck,
   type McpToolAccessDecision,
@@ -35,7 +37,11 @@ import {
   nodeContentSource,
   withoutDataClasses,
   canonicalPolicyJson,
-  type DestinationRef
+  policyRulesNeedLabelTracking,
+  recordedCallLabels,
+  type DataDestinationRow,
+  type DestinationRef,
+  type McpToolOpenWorldOverride
 } from "@ai-orchestrator/shared";
 import type {
   DataLabels,
@@ -333,7 +339,20 @@ export interface WorkflowExecutionDependencies {
 export interface McpToolPolicySnapshot {
   rules: McpToolPolicyRule[];
   classifications: McpToolClassificationOverride[];
+  /** Phase 12.2 — admin open-world overrides of registry tools; absent = none. */
+  openWorldOverrides?: McpToolOpenWorldOverride[];
+  /**
+   * Phase 12.2 — the admin's destination rows, for the tier of a tool's server (with the built-in rows). Absent: the
+   * built-in rows alone classify servers.
+   */
+  destinations?: DataDestinationRow[];
 }
+
+/** Phase 12.2 — true when an enabled rule reads the open-world hint, so a tool's open-world value must be resolved. */
+function policyReadsOpenWorld(rules: readonly McpToolPolicyRule[]): boolean {
+  return rules.some((rule) => rule.enabled && (rule.annotationHint === "open_world" || rule.annotationHint === "not_open_world"));
+}
+
 
 export interface AgentSessionArtifactRecord {
   namespace: string;
@@ -1093,7 +1112,8 @@ interface RunToolPolicy {
   record: (
     tool: McpToolAccessSubjectTool,
     decision: McpToolAccessDecision,
-    extra?: { toolCallId?: string; approval?: "pending" | "approved" }
+    /** Phase 12.2 — `labels`: what the call was decided with; `tracked`: the run tracks labels (data classes are kept). */
+    extra?: { toolCallId?: string; approval?: "pending" | "approved"; labels?: DataLabels | null; tracked?: boolean }
   ) => McpToolPolicyDecisionRecord | undefined;
 }
 
@@ -1142,6 +1162,21 @@ async function buildRunToolPolicy(
   for (const entry of snapshot.classifications) {
     overrides.set(`${entry.registryServerId}::${entry.toolName}`, entry.readOnly);
   }
+  // Phase 12.2 — open world is resolved only when some rule reads it, and only for tool calls.
+  const readsOpenWorld = policyReadsOpenWorld(snapshot.rules);
+  const openWorldOverrides = new Map<string, boolean>();
+  for (const entry of snapshot.openWorldOverrides ?? []) {
+    openWorldOverrides.set(`${entry.registryServerId}::${entry.toolName}`, entry.openWorld);
+  }
+  const destinationRows = snapshot.destinations ?? [];
+  const openWorldOf = (tool: McpToolAccessSubjectTool): boolean | undefined => {
+    if (!readsOpenWorld || (tool.kind ?? "tool") !== "tool") return undefined;
+    return resolveToolOpenWorld({
+      override: tool.registryServerId ? openWorldOverrides.get(`${tool.registryServerId}::${tool.toolName}`) : undefined,
+      destination: serverOpenWorldDestination(tool, destinationRows),
+      annotations: tool.annotations
+    }).openWorld;
+  };
   const trace: McpToolPolicyTrace = {
     subject,
     ...(projectId ? { projectId } : {}),
@@ -1164,6 +1199,7 @@ async function buildRunToolPolicy(
       annotations: tool.annotations,
       // Inline servers have no registry entry, so only annotations classify them.
       manualReadOnly: tool.registryServerId ? overrides.get(`${tool.registryServerId}::${tool.toolName}`) : undefined,
+      openWorld: openWorldOf(tool),
       noWriteTools,
       ...(tool.serverLabel ? { serverLabel: tool.serverLabel } : {})
     });
@@ -1186,7 +1222,21 @@ async function buildRunToolPolicy(
     };
   };
   const record: RunToolPolicy["record"] = (tool, decision, extra = {}) => {
-    const entry = policyDecisionRecord(decision.policy, extra.approval);
+    // Phase 12.2 — the labels the call was decided with, for every call (simulation reads them from telemetry).
+    const labels = recordedCallLabels(extra.labels, extra.tracked === true);
+    if (labels) {
+      trace.callLabels = [
+        ...(trace.callLabels ?? []),
+        {
+          tool: tool.toolName,
+          server: tool.adapterId,
+          ...(tool.registryServerId ? { registryServerId: tool.registryServerId } : {}),
+          ...(extra.toolCallId ? { toolCallId: extra.toolCallId } : {}),
+          labels
+        }
+      ];
+    }
+    const entry = policyDecisionRecord(decision.policy, extra.approval, labels);
     if (!entry) return undefined;
     trace.decisions = [
       ...(trace.decisions ?? []),
@@ -1296,6 +1346,7 @@ async function directMcpPolicyPreCheck(
     adapterId: serverConfig.serverId,
     ...(serverConfig.registryServerId ? { registryServerId: serverConfig.registryServerId } : {}),
     ...(serverConfig.label ? { serverLabel: serverConfig.label } : {}),
+    ...(serverConfig.connection ? { connection: serverConfig.connection } : {}),
     toolName
   };
   const decision = toolPolicy.evaluate(policyTool, { arguments: toRecord(args), dataLabels: policyLabels(context.labelScope?.inputLabels()) });
@@ -5523,6 +5574,7 @@ async function executeNodeHandler(
             adapterId: serverConfig.serverId,
             ...(serverConfig.registryServerId ? { registryServerId: serverConfig.registryServerId } : {}),
             ...(serverConfig.label ? { serverLabel: serverConfig.label } : {}),
+            ...(serverConfig.connection ? { connection: serverConfig.connection } : {}),
             toolName
           };
           // Phase 10.5 — rules with an annotation condition need the tool's hints up front.
@@ -5534,9 +5586,12 @@ async function executeNodeHandler(
           }
           // Phase 12.4 — the call's arguments and the node's input labels decide argument-aware rules.
           assertPolicyReadableArguments(node, toolPolicy, renderedArgs);
+          const callLabels = context.labelScope?.inputLabels();
+          // Phase 12.2 — what the decision is recorded with: the labels it read (names only).
+          const recordLabels = { labels: callLabels, tracked: context.labelScope?.run.tracked === true };
           const policyCall: McpToolAccessCall = {
             arguments: toRecord(args),
-            dataLabels: policyLabels(context.labelScope?.inputLabels())
+            dataLabels: policyLabels(callLabels)
           };
           let decision = toolPolicy.evaluate(policyTool, policyCall);
           if (
@@ -5551,7 +5606,7 @@ async function executeNodeHandler(
             }
           }
           if (!decision.allowed) {
-            toolPolicy.record(policyTool, decision);
+            toolPolicy.record(policyTool, decision, recordLabels);
             throw mcpToolBlockedError(decision.message ?? `MCP tool '${toolName}' is blocked.`, {
               tool: toolName,
               server: serverConfig.serverId,
@@ -5566,12 +5621,12 @@ async function executeNodeHandler(
             const pause = directMcpApprovalPause(node, context, serverConfig, toolName, args, decision.approval);
             const approvalKey = pause.handoff.kind === "rerun" ? pause.handoff.approvalKey : undefined;
             if (!approvalKey || !context.writeToolCalls?.session().takeApproval(approvalKey)) {
-              toolPolicy.record(policyTool, decision, { approval: "pending" });
+              toolPolicy.record(policyTool, decision, { ...recordLabels, approval: "pending" });
               throw new ApprovalHandoffSignal(pause);
             }
-            directPolicyDecision = toolPolicy.record(policyTool, decision, { approval: "approved" });
+            directPolicyDecision = toolPolicy.record(policyTool, decision, { ...recordLabels, approval: "approved" });
           } else {
-            directPolicyDecision = toolPolicy.record(policyTool, decision);
+            directPolicyDecision = toolPolicy.record(policyTool, decision, recordLabels);
           }
         }
         directMcp.samplingHandler.beginCall(toolName);
@@ -5603,6 +5658,8 @@ async function executeNodeHandler(
         ...mcpTraceFields(directMcp),
         // Phase 12.4 — what the tool policy decided for this call, when a rule (enforced or shadow) matched.
         ...(toolPolicy && directPolicyDecision ? { _toolPolicy: toolPolicy.trace } : {}),
+        // Phase 12.2 — the labels the decision read (names only), for the call's telemetry row when no rule matched.
+        ...(toolPolicy && !directPolicyDecision && toolPolicy.trace.callLabels?.length ? { _toolCallLabels: toolPolicy.trace.callLabels.at(-1)!.labels } : {}),
         // Phase 10.5 — sampling requests the tool made count in the run's usage like any model call.
         ...(directMcp.samplingHandler.requestCount() > 0 && samplingModel && samplingProvider
           ? {
@@ -5938,11 +5995,15 @@ async function executeNodeHandler(
           args: Record<string, unknown>,
           labels: DataLabels | undefined
         ): ToolCallPlan => {
+          const connection = serverConfigs.find(
+            (entry) => entry.serverId === resolvedEntry.serverId && (entry.registryServerId ?? "") === (resolvedEntry.registryServerId ?? "")
+          )?.connection;
           const policyTool: McpToolAccessSubjectTool = {
             adapterId: resolvedEntry.serverId,
             ...(resolvedEntry.registryServerId ? { registryServerId: resolvedEntry.registryServerId } : {}),
             toolName: resolvedEntry.originalName,
-            ...(resolvedEntry.annotations ? { annotations: resolvedEntry.annotations } : {})
+            ...(resolvedEntry.annotations ? { annotations: resolvedEntry.annotations } : {}),
+            ...(connection ? { connection } : {})
           };
           const decision = toolPolicy?.evaluate(policyTool, { arguments: args, dataLabels: policyLabels(labels) });
           if (decision && !decision.allowed) {
@@ -6100,8 +6161,10 @@ async function executeNodeHandler(
                  ? (checked && checked.argsKey === argsKey ? checked.plan : planToolCall(resolvedEntry, args, invocation?.labels))
                  : ({ kind: "allow" } as ToolCallPlan);
                const toolCallId = invocation?.toolCallId ?? checked?.toolCallId;
+               // Phase 12.2 — the labels the call is decided with, recorded with the decision (names only).
+               const recordExtra = { ...(toolCallId ? { toolCallId } : {}), labels: invocation?.labels, tracked: labelScope?.run.tracked === true };
                if (plan.kind === "deny") {
-                 if (plan.decision && plan.policyTool) toolPolicy?.record(plan.policyTool, plan.decision, toolCallId ? { toolCallId } : {});
+                 if (plan.decision && plan.policyTool) toolPolicy?.record(plan.policyTool, plan.decision, recordExtra);
                  throw new McpToolPolicyError(plan.message, plan.hidden);
                }
                // Phase 11.2 — the workflow's write-tool gate (after the guard, as before 12.4), and (12.4) a
@@ -6111,7 +6174,7 @@ async function executeNodeHandler(
                const candidates = approvalCandidates(plan, checked);
                if (candidates.length > 0) {
                  const approvalTrace = (approval: "pending" | "approved") => {
-                   if (plan.decision && plan.policyTool) toolPolicy?.record(plan.policyTool, plan.decision, { ...(toolCallId ? { toolCallId } : {}), approval });
+                   if (plan.decision && plan.policyTool) toolPolicy?.record(plan.policyTool, plan.decision, { ...recordExtra, approval });
                  };
                  // An approved call already ran in an earlier re-run: answer from its result.
                  for (const key of candidates) {
@@ -6130,7 +6193,7 @@ async function executeNodeHandler(
                  }
                  approvalTrace("approved");
                } else if (plan.decision && plan.policyTool) {
-                 toolPolicy?.record(plan.policyTool, plan.decision, toolCallId ? { toolCallId } : {});
+                 toolPolicy?.record(plan.policyTool, plan.decision, recordExtra);
                }
                // Phase 10.5 — each tool call gets a fresh sampling budget.
                const originalName = resolvedEntry?.originalName ?? toolName;
@@ -7340,11 +7403,22 @@ function overrideDictionaries(node: WorkflowNode): GuardDictionary[] {
  * in (`mayUseLabels`), nothing is resolved at all: zero-config runs pay one
  * cheap check.
  */
-async function labelTrackingFor(workflow: Workflow, guard: GuardRuntimeDependencies | undefined): Promise<{ tracked: boolean; dictionaries: GuardDictionary[] }> {
-  if (!guard) return { tracked: false, dictionaries: [] };
+/**
+ * Whether the run tracks labels (stores them and scans outputs for data classes), and the dictionaries it scans
+ * with. A guard profile or Guard node that uses labels turns it on; so does (Phase 12.2) an enabled MCP tool rule,
+ * enforced or shadow, with a `sensitive` or data class condition (`toolRulesNeedTracking`), which would otherwise
+ * never match on an untracked run. The guard profiles' dictionaries are then scanned too, so a dictionary class a
+ * rule names can be found.
+ */
+async function labelTrackingFor(
+  workflow: Workflow,
+  guard: GuardRuntimeDependencies | undefined,
+  toolRulesNeedTracking = false
+): Promise<{ tracked: boolean; dictionaries: GuardDictionary[] }> {
+  if (!guard) return { tracked: toolRulesNeedTracking, dictionaries: [] };
   const guardNodes = workflow.nodes.filter((node) => node.type === "guard" && node.disabled !== true);
   const overriding = guardNodes.filter(overrideUsesLabels);
-  if (overriding.length === 0 && !await guardMayUseLabels(guard)) return { tracked: false, dictionaries: [] };
+  if (!toolRulesNeedTracking && overriding.length === 0 && !await guardMayUseLabels(guard)) return { tracked: false, dictionaries: [] };
   const profiles: Array<{ labels?: "fixed" | "propagated"; dictionaries: GuardDictionary[] }> = [];
   try {
     const resolution = await resolveGuardRun(guard);
@@ -7368,15 +7442,27 @@ async function labelTrackingFor(workflow: Workflow, guard: GuardRuntimeDependenc
     }
   }
   const opted = profiles.filter((profile) => profileUsesLabels(profile));
-  const tracked = opted.length > 0 || overriding.length > 0;
+  const tracked = opted.length > 0 || overriding.length > 0 || toolRulesNeedTracking;
+  const scanned = toolRulesNeedTracking ? profiles : opted;
   return {
     tracked,
-    dictionaries: tracked ? [...opted.flatMap((profile) => profile.dictionaries ?? []), ...nodeDictionaries] : []
+    dictionaries: tracked ? [...scanned.flatMap((profile) => profile.dictionaries ?? []), ...nodeDictionaries] : []
   };
 }
 
+/** Phase 12.2 — true when the run's MCP tool rules need it to track labels; false when no rules load. */
+async function toolRulesNeedLabelTracking(dependencies: WorkflowExecutionDependencies): Promise<boolean> {
+  if (!dependencies.loadMcpToolPolicy) return false;
+  try {
+    return policyRulesNeedLabelTracking((await dependencies.loadMcpToolPolicy()).rules);
+  } catch {
+    // The tool policy fails where it is used (an agent or MCP Tool node), exactly as before.
+    return false;
+  }
+}
+
 async function initRunLabels(request: ExecuteWorkflowRequest, workflow: Workflow, dependencies: WorkflowExecutionDependencies): Promise<RunLabelState> {
-  const tracking = await labelTrackingFor(workflow, dependencies.guard);
+  const tracking = await labelTrackingFor(workflow, dependencies.guard, await toolRulesNeedLabelTracking(dependencies));
   const scan = tracking.tracked ? createLabelScanner(tracking.dictionaries, dependencies.guard ? issuedSurrogatesOf(dependencies.guard) : undefined) : undefined;
   if (request.resumeState) {
     // A run that tracked labels when it paused carries on with them (and keeps tracking).
