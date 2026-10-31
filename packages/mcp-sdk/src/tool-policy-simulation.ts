@@ -8,7 +8,9 @@ import {
   type McpToolPolicyRule,
   type ToolArgumentFieldSummary,
   type ToolArgumentSummary,
-  type ToolArgumentValueType
+  type ToolArgumentValueType,
+  labelValueNeedsTracking,
+  type McpToolCallLabels
 } from "@ai-orchestrator/shared";
 import { hashToolArgumentValue, isToolArgumentLocationKey, toolArgumentHashKeyId } from "./tool-argument-summary";
 import {
@@ -62,7 +64,11 @@ import {
  *     equal the literal was hashed (not for a number literal against a value
  *     that may be a string such as "05", not with `ignoreCase` on cased text);
  *   - `exists`: key presence and the types seen at the path;
- *   - label conditions: only for gateway calls, which carry no data labels.
+ *   - label conditions: for gateway calls, which carry no data labels, and (Phase 12.2) for calls whose labels were
+ *     recorded at decision time. A provenance label every run knows (`trusted`, `user`, `untrusted_external`) is
+ *     read from the recorded labels; `sensitive` and data class names only when the run tracked labels (an
+ *     untracked run never scanned for them, and such a rule would have made it track). Calls recorded without
+ *     labels stay undetermined.
  * Undetermined: `starts_with`, `ends_with`, `matches` and the number
  * operators against a hashed value; any value only known by its length
  * (strings over 2,048 characters); `[n]` index steps (the summary merges
@@ -104,8 +110,13 @@ export interface PolicySimulationCall {
   annotations?: McpToolAnnotations | null;
   /** The admin's read-only mark for the tool; undefined when not known. */
   manualReadOnly?: boolean | null;
-  /** `none`: the call carried no data labels (gateway); `unknown`: not recorded. */
-  labels: "none" | "unknown";
+  /** Phase 12.2 — the tool's resolved open-world value (`resolveToolOpenWorld`); undefined: the annotation decides. */
+  openWorld?: boolean | null;
+  /**
+   * `none`: the call carried no data labels (gateway); `unknown`: not recorded; otherwise (Phase 12.2) the labels the
+   * call was decided with.
+   */
+  labels: "none" | "unknown" | McpToolCallLabels;
   summary: ToolArgumentSummary;
 }
 
@@ -638,7 +649,12 @@ export function evaluateConditionOnSummary(
   const anyQuantifier = quantifier === "any";
   if (condition.op === "label_present" || condition.op === "label_absent") {
     if (call.labels === "none") return { value: evaluatePolicyCondition(condition, {}, null, quantifier) };
-    return { value: "unknown", reason: `${conditionText(condition)}: the run's data labels are not recorded` };
+    if (call.labels === "unknown") return { value: "unknown", reason: `${conditionText(condition)}: the run's data labels are not recorded` };
+    if (!call.labels.tracked && labelValueNeedsTracking(condition.value)) {
+      return { value: "unknown", reason: `${conditionText(condition)}: the run did not track data labels, so it was not scanned for this one` };
+    }
+    const recorded = { provenance: call.labels.provenance, dataClasses: call.labels.dataClasses ?? [] };
+    return { value: evaluatePolicyCondition(condition, {}, recorded, quantifier) };
   }
   if (typeof condition.path !== "string") return { value: anyQuantifier };
   const reading = readSummaryPath(call.summary, condition.path, condition.op !== "exists", context);
@@ -731,7 +747,7 @@ function scopeState(rule: McpToolPolicyRule, call: PolicySimulationCall): Simula
   }
   if (rule.annotationHint) {
     if (call.annotations === undefined) unknowns.push("the tool's annotations are not known");
-    else if (!matchesHintCondition(rule.annotationHint, effectiveToolHints(call.annotations, call.manualReadOnly ?? null))) return { state: "no_match" };
+    else if (!matchesHintCondition(rule.annotationHint, effectiveToolHints(call.annotations, call.manualReadOnly ?? null, call.openWorld))) return { state: "no_match" };
   }
   return unknowns.length > 0 ? { state: "unknown", reason: unknowns[0] } : { state: "match" };
 }

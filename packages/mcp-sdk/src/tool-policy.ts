@@ -1,5 +1,9 @@
 import { createHash } from "node:crypto";
 import {
+  MCP_ADAPTERS_WITHOUT_NETWORK,
+  mcpServerDestinationRef,
+  resolveDestination,
+  type DataDestinationRow,
   canonicalMcpToolPolicyRule,
   conditionList,
   parseMcpPolicyPath,
@@ -15,7 +19,10 @@ import {
   type McpToolPolicyDecisionRecord,
   type McpToolPolicyEffect,
   type McpToolPolicyMode,
-  type McpToolPolicyRule
+  type McpToolPolicyRule,
+  type DestinationTier,
+  type McpOpenWorldResolution,
+  type McpToolCallLabels
 } from "@ai-orchestrator/shared";
 
 /**
@@ -92,6 +99,11 @@ export interface McpToolPolicyRequest {
   arguments?: Record<string, unknown>;
   /** Phase 12.4 — the run's data labels at the call; absent when the run does not track labels. */
   dataLabels?: { provenance: readonly string[]; dataClasses: readonly string[] } | null;
+  /**
+   * Phase 12.2 — the tool's resolved open-world value (see `resolveToolOpenWorld`): it decides `open_world` /
+   * `not_open_world` hints. Absent: the annotation alone decides, as before.
+   */
+  openWorld?: boolean | null;
 }
 
 /**
@@ -114,7 +126,9 @@ export interface EffectiveToolHints {
 
 export function effectiveToolHints(
   annotations?: McpToolAnnotations | null,
-  manualReadOnly?: boolean | null
+  manualReadOnly?: boolean | null,
+  /** Phase 12.2 — the resolved open-world value (`resolveToolOpenWorld`); replaces `openWorldHint` when given. */
+  openWorld?: boolean | null
 ): EffectiveToolHints {
   const readOnly =
     typeof manualReadOnly === "boolean" ? manualReadOnly : annotations?.readOnlyHint === true && annotations?.destructiveHint !== true;
@@ -122,8 +136,58 @@ export function effectiveToolHints(
     readOnly,
     destructive: readOnly ? false : annotations?.destructiveHint !== false,
     idempotent: readOnly ? true : annotations?.idempotentHint === true,
-    openWorld: annotations?.openWorldHint !== false
+    openWorld: typeof openWorld === "boolean" ? openWorld : annotations?.openWorldHint !== false
   };
+}
+
+/**
+ * Phase 12.2 — where the tool's server sends what it is given, as `resolveToolOpenWorld` reads it: the resolved
+ * destination of the server (tier, and whether a row or a built-in classified it), `"none"` for an adapter with no
+ * network (the mock server), or null when it is not known.
+ */
+export type ToolOpenWorldDestination = { tier: DestinationTier; matchedBy: "row" | "builtin" | "unmatched" } | "none" | null;
+
+/**
+ * Phase 12.2 — the destination of an MCP server as `resolveToolOpenWorld` reads it, from the host of its endpoint
+ * and the admin's destination rows (with the built-in ones): `"none"` for an adapter with no network.
+ */
+export function serverOpenWorldDestination(
+  server: { adapterId: string; registryServerId?: string | null; connection?: unknown },
+  rows: readonly DataDestinationRow[]
+): ToolOpenWorldDestination {
+  if (MCP_ADAPTERS_WITHOUT_NETWORK.has(server.adapterId)) return "none";
+  const ref = mcpServerDestinationRef({
+    adapterId: server.adapterId,
+    ...(server.registryServerId ? { registryServerId: server.registryServerId } : {}),
+    connection: server.connection
+  });
+  if (!ref) return "none";
+  const resolved = resolveDestination(ref, rows);
+  return { tier: resolved.tier, matchedBy: resolved.matchedBy };
+}
+
+/**
+ * Phase 12.2 — whether a tool counts as open world (it can send what it is given outside the organisation), in
+ * order:
+ *   1. an admin's per-tool override, either way;
+ *   2. the server's destination: a vendor or public tier is open world;
+ *   3. a local or private server (or one with no network): the tool's own `openWorldHint` decides, with the MCP
+ *      default (a missing hint is open world), since a local server can still reach out (a fetch or browser tool);
+ *   4. a destination that is not known or that no row or built-in classifies: open world. It fails closed.
+ * Only an admin override can make a tool on an unknown or vendor/public server closed-world.
+ */
+export function resolveToolOpenWorld(input: {
+  override?: boolean | null;
+  destination: ToolOpenWorldDestination | undefined;
+  annotations?: McpToolAnnotations | null;
+}): McpOpenWorldResolution {
+  if (typeof input.override === "boolean") return { openWorld: input.override, source: "manual" };
+  const destination = input.destination;
+  if (destination !== "none") {
+    if (!destination || destination.matchedBy === "unmatched") return { openWorld: true, source: "unknown" };
+    if (destination.tier === "vendor" || destination.tier === "public") return { openWorld: true, source: "destination" };
+  }
+  return { openWorld: input.annotations?.openWorldHint !== false, source: "annotation" };
 }
 
 const HINT_KEYS: Record<string, keyof EffectiveToolHints> = {
@@ -323,7 +387,7 @@ export function ruleScopeMatches(rule: McpToolPolicyRule, request: McpToolPolicy
   if (!matchesPolicyServer(rule.serverId, request)) return false;
   if (!matchesToolPattern(rule.toolPattern, request.toolName)) return false;
   if (rule.annotationHint) {
-    return matchesHintCondition(rule.annotationHint, effectiveToolHints(request.annotations, request.manualReadOnly));
+    return matchesHintCondition(rule.annotationHint, effectiveToolHints(request.annotations, request.manualReadOnly, request.openWorld));
   }
   return true;
 }
@@ -941,11 +1005,14 @@ export function evaluateMcpToolPolicy(
  */
 export function policyDecisionRecord(
   decision: McpToolPolicyDecision,
-  approval?: McpToolPolicyDecisionRecord["approval"]
+  approval?: McpToolPolicyDecisionRecord["approval"],
+  /** Phase 12.2 — the labels the call was decided with (`recordedCallLabels`); recorded as given. */
+  labels?: McpToolCallLabels
 ): McpToolPolicyDecisionRecord | undefined {
   const shadowRules = decision.shadow?.matchedRules ?? [];
   if (decision.matchedRules.length === 0 && shadowRules.length === 0) return undefined;
   return {
+    ...(labels ? { labels } : {}),
     effect: decision.effect,
     decidedBy: decision.decidedBy,
     ...(decision.rule ? { ruleId: decision.rule.id, ruleHash: hashMcpToolPolicyRule(decision.rule) } : {}),
