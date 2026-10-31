@@ -841,6 +841,12 @@ export class PostgresStore implements Store {
   async listMcpToolClassifications(...args: Parameters<Store["listMcpToolClassifications"]>): ReturnType<Store["listMcpToolClassifications"]> {
     return mcp.listMcpToolClassifications(this.ctx, ...args);
   }
+  async listMcpToolOpenWorldOverrides(...args: Parameters<Store["listMcpToolOpenWorldOverrides"]>): ReturnType<Store["listMcpToolOpenWorldOverrides"]> {
+    return mcp.listMcpToolOpenWorldOverrides(this.ctx, ...args);
+  }
+  async setMcpToolOpenWorld(...args: Parameters<Store["setMcpToolOpenWorld"]>): ReturnType<Store["setMcpToolOpenWorld"]> {
+    return mcp.setMcpToolOpenWorld(this.ctx, ...args);
+  }
   async setMcpToolClassification(...args: Parameters<Store["setMcpToolClassification"]>): ReturnType<Store["setMcpToolClassification"]> {
     return mcp.setMcpToolClassification(this.ctx, ...args);
   }

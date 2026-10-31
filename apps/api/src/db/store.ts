@@ -39,6 +39,7 @@ import type {
   McpSandboxStatus,
   McpServerCatalog,
   McpToolClassificationOverride,
+  McpToolOpenWorldOverride,
   McpToolPolicyRule,
   McpGatewayApproval,
   McpToolset,
@@ -631,6 +632,10 @@ export interface Store {
     readOnly: boolean | null;
     setBy: string | null;
   }): Promise<McpToolClassificationOverride | null>;
+  /** Phase 12.2 — admin open-world overrides; all of them, or one registry server's. */
+  listMcpToolOpenWorldOverrides(registryServerId?: string): Promise<McpToolOpenWorldOverride[]>;
+  /** Phase 12.2 — `openWorld: null` removes the override, so the destination and annotations decide again. */
+  setMcpToolOpenWorld(input: { registryServerId: string; toolName: string; openWorld: boolean | null; setBy: string | null }): Promise<McpToolOpenWorldOverride | null>;
   listMcpToolsets(): Promise<McpToolset[]>;
   getMcpToolset(id: string): Promise<McpToolset | null>;
   getMcpToolsetBySlug(slug: string): Promise<McpToolset | null>;

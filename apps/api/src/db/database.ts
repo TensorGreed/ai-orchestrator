@@ -79,7 +79,8 @@ import {
   type McpSandboxStatus
 } from "@ai-orchestrator/shared";
 import { isEmptyDataLabels, labelsForUntrackedSave, mergeDataLabels, parseStoredDataLabels, releaseGateRestrictsToAdmins, type DataLabels } from "@ai-orchestrator/shared";
-import type { McpToolPolicySubject, ToolArgumentSummary } from "@ai-orchestrator/shared";
+import type { McpToolCallLabels, McpToolOpenWorldOverride, McpToolPolicySubject, ToolArgumentSummary } from "@ai-orchestrator/shared";
+import { parseRecordedCallLabels } from "@ai-orchestrator/shared";
 import { queuedRunTimeoutMs, STUCK_JOB_MARGIN_MS } from "./queue-timeouts.js";
 import { AuditExportCursorMovedError, isForeignKeyViolation, McpPolicyEnforceRefusedError, ProjectNotEmptyError, StoreReferenceMissingError, ReleaseGateEnforcedError } from "./store-errors.js";
 import { clampLimit, LIMIT_MAX } from "./store-limits.js";
@@ -762,6 +763,11 @@ export interface McpToolCallRecord {
   subjectRole?: McpPolicyRole | null;
   subjectSource?: McpToolPolicySubject["source"] | null;
   projectId?: string | null;
+  /**
+   * Phase 12.2 — the labels the call's policy decision read (label names only; data class names only when the run
+   * tracked labels). Null on gateway calls, runs without a tool policy and rows written before.
+   */
+  labels?: McpToolCallLabels | null;
   createdAt: string;
 }
 
@@ -907,6 +913,7 @@ interface McpToolCallRow {
   subject_role?: string | null;
   subject_source?: string | null;
   project_id?: string | null;
+  labels_json?: string | null;
   created_at: string;
 }
 
@@ -1076,6 +1083,16 @@ function mapMcpToolClassification(row: McpToolClassificationRow): McpToolClassif
   };
 }
 
+function mapMcpToolOpenWorldOverride(row: Record<string, unknown>): McpToolOpenWorldOverride {
+  return {
+    registryServerId: toString(row.server_id),
+    toolName: toString(row.tool_name),
+    openWorld: toNumber(row.open_world) === 1,
+    setBy: row.set_by ? toString(row.set_by) : null,
+    setAt: toString(row.set_at)
+  };
+}
+
 function mapMcpToolCall(row: McpToolCallRow): McpToolCallRecord {
   return {
     id: toString(row.id),
@@ -1103,6 +1120,7 @@ function mapMcpToolCall(row: McpToolCallRow): McpToolCallRecord {
       row.rejection === "rate_limited" || row.rejection === "concurrency_limited" || row.rejection === "circuit_open" ? row.rejection : null,
     ...mapMcpToolCallContext(row),
     policyDecision: parseMcpPolicyDecision(row.policy_decision_json),
+    labels: parseRecordedCallLabels(row.labels_json),
     createdAt: toString(row.created_at)
   };
 }
@@ -3947,6 +3965,18 @@ export class SqliteStore implements Store {
     );
     this.exec(`CREATE INDEX IF NOT EXISTS idx_mcp_policy_suggestions_status ON mcp_policy_suggestions (status, created_at)`);
     this.exec(`CREATE INDEX IF NOT EXISTS idx_mcp_tool_calls_started ON mcp_tool_calls (started_at, id)`);
+    // Phase 12.2 — provenance policies (v50): per-tool open-world overrides, and the labels each call was decided with.
+    this.exec(`
+      CREATE TABLE IF NOT EXISTS mcp_tool_open_world_overrides (
+        server_id TEXT NOT NULL,
+        tool_name TEXT NOT NULL,
+        open_world INTEGER NOT NULL,
+        set_by TEXT,
+        set_at TEXT NOT NULL,
+        PRIMARY KEY (server_id, tool_name)
+      )
+    `);
+    this.ensureColumn("mcp_tool_calls", "labels_json", "TEXT");
 
     this.exec(`CREATE INDEX IF NOT EXISTS idx_workflows_project_id ON workflows(project_id)`);
     this.exec(`CREATE INDEX IF NOT EXISTS idx_workflows_folder_id ON workflows(folder_id)`);
@@ -11719,6 +11749,7 @@ export class SqliteStore implements Store {
       this.exec(`DELETE FROM mcp_tool_snapshots WHERE server_id = ?`, [id]);
       this.exec(`DELETE FROM mcp_tool_calls WHERE registry_server_id = ?`, [id]);
       this.exec(`DELETE FROM mcp_tool_classifications WHERE server_id = ?`, [id]);
+      this.exec(`DELETE FROM mcp_tool_open_world_overrides WHERE server_id = ?`, [id]);
       this.exec(`DELETE FROM mcp_toolset_members WHERE kind = 'server' AND server_id = ?`, [id]);
       this.exec(`DELETE FROM mcp_oauth_connections WHERE server_id = ?`, [id]);
       this.exec(`DELETE FROM mcp_user_oauth_connections WHERE server_id = ?`, [id]);
@@ -11904,8 +11935,8 @@ export class SqliteStore implements Store {
          id, execution_id, workflow_id, node_id, registry_server_id, adapter_id, tool_name,
          started_at, duration_ms, ok, error, turn_input_tokens, turn_output_tokens,
          estimated_cost_usd, sampling_requests, sampling_input_tokens, sampling_output_tokens,
-         source, client_id, rejection, policy_decision_json, args_summary_json, subject_role, subject_source, project_id, created_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         source, client_id, rejection, policy_decision_json, args_summary_json, subject_role, subject_source, project_id, labels_json, created_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         call.id,
         call.executionId,
@@ -11929,6 +11960,7 @@ export class SqliteStore implements Store {
         call.rejection ?? null,
         call.policyDecision ? JSON.stringify(call.policyDecision) : null,
         ...mcpToolCallContextValues(call),
+        call.labels ? JSON.stringify(call.labels) : null,
         new Date().toISOString()
       ]
     );
@@ -12650,6 +12682,33 @@ export class SqliteStore implements Store {
       setBy: input.setBy,
       setAt: now
     };
+  }
+
+  /** Phase 12.2 — admin open-world overrides; all of them, or one registry server's. */
+  async listMcpToolOpenWorldOverrides(registryServerId?: string): Promise<McpToolOpenWorldOverride[]> {
+    const rows = registryServerId
+      ? this.queryAll<Record<string, unknown>>(`SELECT * FROM mcp_tool_open_world_overrides WHERE server_id = ? ORDER BY tool_name`, [registryServerId])
+      : this.queryAll<Record<string, unknown>>(`SELECT * FROM mcp_tool_open_world_overrides ORDER BY server_id, tool_name`);
+    return rows.map(mapMcpToolOpenWorldOverride);
+  }
+
+  /** Phase 12.2 — `openWorld: null` removes the override, so the destination and annotations decide again. */
+  async setMcpToolOpenWorld(input: { registryServerId: string; toolName: string; openWorld: boolean | null; setBy: string | null }): Promise<McpToolOpenWorldOverride | null> {
+    if (input.openWorld === null) {
+      this.exec(`DELETE FROM mcp_tool_open_world_overrides WHERE server_id = ? AND tool_name = ?`, [input.registryServerId, input.toolName]);
+      return null;
+    }
+    const now = new Date().toISOString();
+    this.exec(
+      `INSERT INTO mcp_tool_open_world_overrides (server_id, tool_name, open_world, set_by, set_at)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(server_id, tool_name) DO UPDATE SET
+         open_world = excluded.open_world,
+         set_by = excluded.set_by,
+         set_at = excluded.set_at`,
+      [input.registryServerId, input.toolName, input.openWorld ? 1 : 0, input.setBy, now]
+    );
+    return { registryServerId: input.registryServerId, toolName: input.toolName, openWorld: input.openWorld, setBy: input.setBy, setAt: now };
   }
 
   // ---------------------------------------------------------------------------

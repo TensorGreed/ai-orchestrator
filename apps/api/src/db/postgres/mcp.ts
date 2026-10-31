@@ -11,6 +11,7 @@
  *   members and gateway clients. `seq` never changes on UPDATE or VACUUM, unlike `xmin` / `ctid`.
  */
 import { randomUUID } from "node:crypto";
+import { parseRecordedCallLabels } from "@ai-orchestrator/shared";
 import {
   MCP_POLICY_KINDS,
   MCP_POLICY_ROLES,
@@ -30,6 +31,7 @@ import {
   type McpSandboxStatus,
   type McpServerCapabilities,
   type McpToolClassificationOverride,
+  type McpToolOpenWorldOverride,
   type McpToolHintCondition,
   type McpPolicySuggestion,
   type McpToolPolicyRule,
@@ -219,6 +221,7 @@ function mapMcpToolCall(row: Row): McpToolCallRecord {
       row.rejection === "rate_limited" || row.rejection === "concurrency_limited" || row.rejection === "circuit_open" ? row.rejection : null,
     ...mapMcpToolCallContext(row),
     policyDecision: parseMcpPolicyDecision(row.policy_decision_json),
+    labels: parseRecordedCallLabels(row.labels_json),
     createdAt: toStr(row.created_at)
   };
 }
@@ -330,6 +333,16 @@ function mapMcpToolPolicy(row: Row): McpToolPolicyRule {
     createdBy: row.created_by ? toStr(row.created_by) : null,
     createdAt: toStr(row.created_at),
     updatedAt: toStr(row.updated_at)
+  };
+}
+
+function mapMcpToolOpenWorldOverride(row: Row): McpToolOpenWorldOverride {
+  return {
+    registryServerId: toStr(row.server_id),
+    toolName: toStr(row.tool_name),
+    openWorld: toNum(row.open_world) === 1,
+    setBy: row.set_by ? toStr(row.set_by) : null,
+    setAt: toStr(row.set_at)
   };
 }
 
@@ -475,6 +488,7 @@ export async function deleteMcpServer(ctx: PgContext, ...[id]: Parameters<Store[
     await client.query(`DELETE FROM mcp_tool_snapshots WHERE server_id = $1`, [id]);
     await client.query(`DELETE FROM mcp_tool_calls WHERE registry_server_id = $1`, [id]);
     await client.query(`DELETE FROM mcp_tool_classifications WHERE server_id = $1`, [id]);
+    await client.query(`DELETE FROM mcp_tool_open_world_overrides WHERE server_id = $1`, [id]);
     await client.query(`DELETE FROM mcp_toolset_members WHERE kind = 'server' AND server_id = $1`, [id]);
     await client.query(`DELETE FROM mcp_oauth_connections WHERE server_id = $1`, [id]);
     await client.query(`DELETE FROM mcp_user_oauth_connections WHERE server_id = $1`, [id]);
@@ -607,8 +621,8 @@ async function insertMcpToolCallRow(db: Queryable, call: McpToolCallWrite): Prom
        id, execution_id, workflow_id, node_id, registry_server_id, adapter_id, tool_name,
        started_at, duration_ms, ok, error, turn_input_tokens, turn_output_tokens,
        estimated_cost_usd, sampling_requests, sampling_input_tokens, sampling_output_tokens,
-       source, client_id, rejection, policy_decision_json, args_summary_json, subject_role, subject_source, project_id, created_at
-     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26)`,
+       source, client_id, rejection, policy_decision_json, args_summary_json, subject_role, subject_source, project_id, labels_json, created_at
+     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27)`,
     [
       call.id,
       call.executionId,
@@ -632,6 +646,7 @@ async function insertMcpToolCallRow(db: Queryable, call: McpToolCallWrite): Prom
       call.rejection ?? null,
       call.policyDecision ? JSON.stringify(call.policyDecision) : null,
       ...mcpToolCallContextValues(call),
+      call.labels ? JSON.stringify(call.labels) : null,
       new Date().toISOString()
     ]
   );
@@ -1388,6 +1403,31 @@ export async function setMcpToolClassification(ctx: PgContext, ...[input]: Param
     [input.registryServerId, input.toolName, input.readOnly ? 1 : 0, input.setBy, now]
   );
   return { registryServerId: input.registryServerId, toolName: input.toolName, readOnly: input.readOnly, setBy: input.setBy, setAt: now };
+}
+
+export async function listMcpToolOpenWorldOverrides(ctx: PgContext, ...[registryServerId]: Parameters<Store["listMcpToolOpenWorldOverrides"]>): ReturnType<Store["listMcpToolOpenWorldOverrides"]> {
+  const result = registryServerId
+    ? await ctx.query<Row>(`SELECT * FROM mcp_tool_open_world_overrides WHERE server_id = $1 ORDER BY tool_name COLLATE "C"`, [registryServerId])
+    : await ctx.query<Row>(`SELECT * FROM mcp_tool_open_world_overrides ORDER BY server_id COLLATE "C", tool_name COLLATE "C"`);
+  return result.map(mapMcpToolOpenWorldOverride);
+}
+
+export async function setMcpToolOpenWorld(ctx: PgContext, ...[input]: Parameters<Store["setMcpToolOpenWorld"]>): ReturnType<Store["setMcpToolOpenWorld"]> {
+  if (input.openWorld === null) {
+    await ctx.execute(`DELETE FROM mcp_tool_open_world_overrides WHERE server_id = $1 AND tool_name = $2`, [input.registryServerId, input.toolName]);
+    return null;
+  }
+  const now = new Date().toISOString();
+  await ctx.execute(
+    `INSERT INTO mcp_tool_open_world_overrides (server_id, tool_name, open_world, set_by, set_at)
+     VALUES ($1, $2, $3, $4, $5)
+     ON CONFLICT (server_id, tool_name) DO UPDATE SET
+       open_world = excluded.open_world,
+       set_by = excluded.set_by,
+       set_at = excluded.set_at`,
+    [input.registryServerId, input.toolName, input.openWorld ? 1 : 0, input.setBy, now]
+  );
+  return { registryServerId: input.registryServerId, toolName: input.toolName, openWorld: input.openWorld, setBy: input.setBy, setAt: now };
 }
 
 // ---------------------------------------------------------------------------

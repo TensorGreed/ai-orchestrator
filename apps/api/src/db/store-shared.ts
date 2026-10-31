@@ -217,6 +217,7 @@ export const MCP_TOOL_CALL_SCAN_COLUMNS = [
   "subject_role",
   "subject_source",
   "project_id",
+  "labels_json",
   "created_at"
 ].join(", ");
 
