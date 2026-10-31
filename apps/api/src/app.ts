@@ -184,6 +184,8 @@ import { registerMcpTestingRoutes } from "./mcp-testing-routes.js";
 import { registerGuardRoutes } from "./guard-routes.js";
 import { registerGuardSimulationRoutes } from "./guard-simulation-routes.js";
 import { registerMcpPolicyLearningRoutes } from "./mcp-policy-learning-routes.js";
+import { loadMcpOpenWorldContext, resolveOpenWorldFor, rulesReadOpenWorld } from "./services/mcp-open-world.js";
+import { registerMcpSafetyPresetRoutes } from "./mcp-safety-preset-routes.js";
 import { McpPolicySimulationService } from "./services/mcp-policy-simulation-service.js";
 import { McpPolicySuggestionService } from "./services/mcp-policy-suggestion-service.js";
 import { GuardSimulationService } from "./services/guard-simulation-service.js";
@@ -1685,10 +1687,15 @@ export async function createApp(
   };
   // Phase 10.2 — MCP tool policy. Rules and overrides are read when an agent
   // or MCP Tool node starts, so an admin's change applies to the next node.
-  const loadMcpToolPolicy = async () => ({
-    rules: await store.listMcpToolPolicies(),
-    classifications: await store.listMcpToolClassifications()
-  });
+  const loadMcpToolPolicy = async () => {
+    const rules = await store.listMcpToolPolicies();
+    return {
+      rules,
+      classifications: await store.listMcpToolClassifications(),
+      // Phase 12.2 — overrides and destination rows only when a rule reads the open-world hint.
+      ...(rulesReadOpenWorld(rules) ? await loadMcpOpenWorldContext(store).then((context) => ({ openWorldOverrides: [...context.overrides], destinations: [...context.destinations] })) : {})
+    };
+  };
   const resolveToolPolicySubject = async (workflowId: string, actor?: SafeUser | null): Promise<McpToolPolicySubject> =>
     await resolveMcpToolPolicySubject(store, workflowId, actor);
   const activeExecutions = new Map<
@@ -11506,7 +11513,9 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         projectId,
         adapterId: server.adapterId,
         registryServerId: server.id,
-        serverLabel: server.name
+        serverLabel: server.name,
+        // Phase 12.2 — every tool's open-world value and its source, for the server's Tools table.
+        openWorld: { ...(await loadMcpOpenWorldContext(store, server.id)), connection: server.connection }
       })
     };
   });
@@ -12395,6 +12404,16 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     policyAuditMetadata,
     policyRuleResponse
   });
+  // Phase 12.2 — safety presets, the per-workflow untrusted-write switch and per-tool open-world overrides.
+  registerMcpSafetyPresetRoutes({
+    app,
+    store,
+    requireRole: (request, reply, roles) => requireRole(request, reply, roles),
+    canAccessWorkflow: async (user, workflow, permission) => await rbacService.canAccessWorkflow(user, workflow, permission),
+    recordPolicyAudit,
+    policyAuditMetadata,
+    policyRuleResponse
+  });
 
   app.post<{ Body: unknown }>("/api/mcp/policies/evaluate", async (request, reply) => {
     const user = await requireRole(request, reply, ["builder"]);
@@ -12418,9 +12437,13 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         ?.tools.find((tool) => tool.name === toolName)?.annotations;
     }
     const classifications = registered ? await store.listMcpToolClassifications(registered.id) : [];
+    const evaluateRules = await store.listMcpToolPolicies();
+    // Phase 12.2 — a registry tool's open-world value, as a run would resolve it.
+    const openWorldContext = registered ? { ...(await loadMcpOpenWorldContext(store, registered.id)), connection: registered.connection } : undefined;
     const decision = evaluateToolForContext(
       {
-        rules: await store.listMcpToolPolicies(),
+        rules: evaluateRules,
+        ...(openWorldContext ? { openWorld: openWorldContext } : {}),
         classifications,
         role: role as McpPolicyRole,
         projectId,
@@ -12470,6 +12493,9 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       overriddenDenies: decision.policy.overriddenDenies.map((entry) => ({ denyId: entry.deny.id, byId: entry.by.id })),
       classification: decision.classification,
       manualReadOnly: manualReadOnlyFor(classifications, registered?.id, toolName),
+      ...(openWorldContext && registered && (parsed.data.kind ?? "tool") === "tool"
+        ? { openWorld: resolveOpenWorldFor(openWorldContext, { adapterId: registered.adapterId, registryServerId: registered.id, connection: registered.connection }, toolName, annotations) }
+        : {}),
       server: registered
         ? { kind: "registry" as const, id: registered.id, name: registered.name, adapterId: registered.adapterId }
         : { kind: "inline" as const, adapterId: serverId },
