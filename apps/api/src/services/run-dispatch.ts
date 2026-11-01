@@ -388,10 +388,19 @@ export { QueueFullError };
  */
 export const QUEUE_RESULT_OUTPUT_LABELS_KEY = "outputLabels";
 
+/** The most data classes a stored label set carries (the limit of `dataLabelsSchema`). */
+const MAX_STORED_DATA_CLASSES = 100;
+
 /** 12.2 — the result a worker stores: the run's result, plus its output labels when the engine computed them. */
 export function resultForQueue(result: WorkflowExecutionResult): WorkflowExecutionResult {
   const labels = outputLabelsOf(result);
-  return labels ? ({ ...result, [QUEUE_RESULT_OUTPUT_LABELS_KEY]: labels } as WorkflowExecutionResult) : result;
+  if (!labels) return result;
+  // The stored labels must validate (`dataLabelsSchema` allows 100 classes): keep the first 100, sorted. Any class
+  // left still implies `sensitive`, which is in the provenance already.
+  const stored = labels.dataClasses.length > MAX_STORED_DATA_CLASSES
+    ? { ...labels, dataClasses: [...labels.dataClasses].sort().slice(0, MAX_STORED_DATA_CLASSES) }
+    : labels;
+  return { ...result, [QUEUE_RESULT_OUTPUT_LABELS_KEY]: stored } as WorkflowExecutionResult;
 }
 
 /** 12.2 — a stored result as the caller gets it: the labels are taken off it and read back with `outputLabelsOf`. */

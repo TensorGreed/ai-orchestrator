@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import type { WorkflowExecutionResult } from "@ai-orchestrator/shared";
+import { describe, expect, it, vi } from "vitest";
+import type { DataLabels, WorkflowExecutionResult } from "@ai-orchestrator/shared";
 import { adoptOutputLabels, outputLabelsOf } from "@ai-orchestrator/workflow-engine";
 import type { ClusterInstanceRecord } from "../db/store.js";
 import {
@@ -23,6 +23,13 @@ import {
 } from "./run-dispatch.js";
 import { QueueFullError } from "./queue-service.js";
 import type { RunRelayEnd } from "./run-event-relay.js";
+
+// The engine does not cap data classes, but it only adopts labels that validate: a test sets what a run produced.
+const produced = vi.hoisted(() => ({ labels: undefined as unknown }));
+vi.mock("@ai-orchestrator/workflow-engine", async (importOriginal) => {
+  const engine = await importOriginal<typeof import("@ai-orchestrator/workflow-engine")>();
+  return { ...engine, outputLabelsOf: (result: Parameters<typeof engine.outputLabelsOf>[0]) => (produced.labels as DataLabels | undefined) ?? engine.outputLabelsOf(result) };
+});
 
 const instance = (overrides: Partial<ClusterInstanceRecord>): ClusterInstanceRecord => ({
   id: "w1",
@@ -205,6 +212,17 @@ describe("RunDispatcher", () => {
     expect(outputLabelsOf(garbled)).toBeUndefined();
     // A run without labels is stored as it is.
     expect(resultForQueue(result)).toBe(result);
+  });
+
+  it("stores at most 100 data classes so the labels validate, and keeps sensitive", async () => {
+    const classes = Array.from({ length: 150 }, (_, index) => `class_${String(149 - index).padStart(3, "0")}`);
+    produced.labels = { provenance: ["untrusted_external", "sensitive"], dataClasses: classes, source: "propagated" };
+    const stored = JSON.parse(JSON.stringify(resultForQueue({ ...result }))) as Record<string, { dataClasses: string[] }>;
+    produced.labels = undefined;
+    expect(stored[QUEUE_RESULT_OUTPUT_LABELS_KEY]!.dataClasses).toEqual([...classes].sort().slice(0, 100));
+    const answered = resultFromQueue(stored);
+    expect(outputLabelsOf(answered)).toMatchObject({ provenance: ["untrusted_external", "sensitive"] });
+    expect(outputLabelsOf(answered)?.dataClasses).toHaveLength(100);
   });
 
   it("maps a dead job, a timeout and a client that went away to their errors", async () => {
