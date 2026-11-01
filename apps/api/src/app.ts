@@ -89,6 +89,7 @@ import {
   chunkDocuments,
   convertExternalWorkflow,
   ExternalWorkflowImportError,
+  outputLabelsOf,
   type ChunkOptions,
   type EmbeddingAdapter,
   type KnowledgeBaseStore,
@@ -198,7 +199,7 @@ import { bindTriggerTrust, triggerTrustDenial, withoutTriggerTrust, withStoredTr
 import { inputProvenance, type CaptureInputOrigin } from "./services/capture-masking.js";
 import { registerEvalRoutes } from "./eval-routes.js";
 import { registerGoldenSetFileRoutes } from "./golden-set-file-routes.js";
-import { effectiveTriggerTrust, isEntryNodeType, parseStoredDataLabels, recordedInputLabels, triggerInputProvenance, type DataLabels } from "@ai-orchestrator/shared";
+import { effectiveTriggerTrust, isEntryNodeType, parseStoredDataLabels, recordedInputLabels, triggerInputProvenance, unionDataLabels, type DataLabels } from "@ai-orchestrator/shared";
 import { GOLDEN_SET_FILE_DEFAULT_MAX_BYTES, GUARD_SIMULATION_MAX_CASES_DEFAULT, GUARD_SIMULATION_RETENTION_DAYS } from "@ai-orchestrator/shared";
 import { registerApprovalRoutes } from "./approval-routes.js";
 import { registerExecutionRoutes } from "./execution-routes.js";
@@ -10730,10 +10731,19 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       await auditService.record(event);
       await logStreamingService.dispatchAudit(event);
     },
+    sensitiveSecretIds: async () => await sensitiveSecrets.ids(),
     runWorkflowTool: async (input) => {
       const triggerType = "mcp_gateway";
       const triggeredBy = `mcp-client:${input.client.name}`;
       const requestInput = { tool: input.toolName, arguments: input.args, clientId: input.client.id };
+      // 12.2 — a session that tracks outside content: the run's input is a gateway run's as always, plus what the
+      // session has collected. Without it the run starts exactly as before.
+      const inputLabels = input.sessionLabels
+        ? unionDataLabels([
+            { provenance: [inputProvenance(triggerType, undefined)], dataClasses: [], source: "propagated" },
+            { provenance: input.sessionLabels.provenance, dataClasses: input.sessionLabels.dataClasses, source: "propagated" }
+          ])
+        : undefined;
       const result = await runDispatcher.run(
         {
           v: DISPATCH_SPEC_VERSION,
@@ -10749,7 +10759,8 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
             executionId: input.executionId,
             triggerType,
             triggeredBy,
-            policySubject: input.subject
+            policySubject: input.subject,
+            ...(inputLabels ? { inputLabels } : {})
           },
           progress: { requestInput },
           history: { requestInput }
@@ -10758,7 +10769,8 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
           onNodeComplete: (event) => input.onNodeComplete({ nodeId: event.nodeId, status: event.status })
         } }
       );
-      return { status: result.status, output: result.output, error: result.error };
+      const labels = outputLabelsOf(result);
+      return { status: result.status, output: result.output, error: result.error, ...(labels ? { labels: { provenance: labels.provenance, dataClasses: labels.dataClasses } } : {}) };
     },
     cancelExecution: (executionId, reason) => {
       const local = activeExecutions.get(executionId);

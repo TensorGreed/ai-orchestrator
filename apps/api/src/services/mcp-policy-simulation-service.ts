@@ -349,8 +349,9 @@ export class McpPolicySimulationService {
             registryServerId: call.registryServerId,
             toolName: call.toolName,
             ...(lookup ? lookup(call) : {}),
-            // Phase 12.2 — the labels the call was decided with, when recorded; older rows stay undetermined.
-            labels: gateway ? "none" : call.labels ?? "unknown",
+            // Phase 12.2 — the labels the call was decided with, when recorded (gateway calls only on a toolset that
+            // tracks outside content per session); other rows stay undetermined.
+            labels: call.labels ?? "unknown",
             summary: call.argsSummary
           };
           // A call whose worst case is over the per-call ceiling comes back undetermined; one over what is left of
