@@ -45,7 +45,7 @@ import {
   type Workflow
 } from "@ai-orchestrator/shared";
 import type { ProviderRegistry } from "@ai-orchestrator/provider-sdk";
-import { createMcpSamplingHandler } from "@ai-orchestrator/workflow-engine";
+import { createMcpSamplingHandler, referencesSecretIn } from "@ai-orchestrator/workflow-engine";
 import type { z } from "zod";
 import { DEFAULT_MCP_GATEWAY_APPROVAL_WINDOW_MS, toolArgumentSummariesEnabled, type AppConfig } from "./config.js";
 import type { AuditEventInput } from "./services/audit-service.js";
@@ -174,33 +174,27 @@ export interface GatewayWorkflowRunOutcome {
   status: string;
   output?: unknown;
   error?: string;
-  /** 12.2 — the labels of the run's output, when the engine computed them (a run on this instance). */
+  /**
+   * 12.2 — the labels of the run's output, when known: the engine's (on this instance, or stored with a queue
+   * worker's result), else `sensitive` when the workflow declares a sensitive source (tracking toolsets only).
+   */
   labels?: Pick<DataLabels, "provenance" | "dataClasses">;
 }
 
 /** 12.2 — what a server tool's result carries: outside content, as in runs (and `sensitive` from a flagged secret). */
 const SERVER_RESULT_LABELS: Pick<DataLabels, "provenance" | "dataClasses"> = { provenance: ["untrusted_external"], dataClasses: [] };
 
-/** 12.2 — the labels a tool rule's conditions read for a call: data classes count as `sensitive` too, as in runs. */
-function policyCallLabels(labels: DataLabels | undefined): { provenance: string[]; dataClasses: string[] } | undefined {
+/**
+ * 12.2 — the labels a tool rule's conditions read for a call: data classes count as `sensitive` too, as in runs.
+ * Nothing scans gateway results, so a `sensitive` or data class the session does not hold is not tracked rather than
+ * absent (`classesTracked: false`): it never lets an allow carve out, and a deny or approval on its absence still holds.
+ */
+function policyCallLabels(labels: DataLabels | undefined): { provenance: string[]; dataClasses: string[]; classesTracked: false } | undefined {
   if (!labels) return undefined;
   const implied = withImpliedSensitive(labels);
-  return { provenance: [...implied.provenance], dataClasses: [...implied.dataClasses] };
+  return { provenance: [...implied.provenance], dataClasses: [...implied.dataClasses], classesTracked: false };
 }
 
-/** 12.2 — the secret ids referenced anywhere in a server's secret and connection settings (a bounded walk). */
-function referencesSecret(value: unknown, secretIds: ReadonlySet<string>): boolean {
-  const seen = new Set<unknown>();
-  const visit = (entry: unknown, depth: number): boolean => {
-    if (!entry || typeof entry !== "object" || depth > 8 || seen.has(entry)) return false;
-    seen.add(entry);
-    if (Array.isArray(entry)) return entry.some((item) => visit(item, depth + 1));
-    const record = entry as Record<string, unknown>;
-    if (typeof record.secretId === "string" && secretIds.has(record.secretId)) return true;
-    return Object.values(record).some((item) => visit(item, depth + 1));
-  };
-  return visit(value, 0);
-}
 
 export interface McpGatewayDeps {
   app: FastifyInstance;
@@ -233,6 +227,8 @@ export interface McpGatewayDeps {
     client: McpClient;
     /** 12.2 — what the client's session has collected (tracking toolsets only); the run's input carries it too. */
     sessionLabels?: Pick<DataLabels, "provenance" | "dataClasses">;
+    /** 12.2 — the toolset tracks outside content per session: the outcome's labels are wanted, with a fallback. */
+    tracksLabels?: boolean;
     onNodeComplete: (event: { nodeId: string; status: string }) => void;
   }) => Promise<GatewayWorkflowRunOutcome>;
   /** Abort a running workflow execution. */
@@ -543,7 +539,7 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
   const serverResultLabels = async (serverConfig: MCPServerConfig | null): Promise<Pick<DataLabels, "provenance" | "dataClasses">> => {
     if (!serverConfig || !deps.sensitiveSecretIds) return SERVER_RESULT_LABELS;
     const flagged = await deps.sensitiveSecretIds();
-    if (flagged.size === 0 || !referencesSecret({ secretRef: serverConfig.secretRef, connection: serverConfig.connection }, flagged)) return SERVER_RESULT_LABELS;
+    if (flagged.size === 0 || !referencesSecretIn({ secretRef: serverConfig.secretRef, connection: serverConfig.connection }, flagged)) return SERVER_RESULT_LABELS;
     return { provenance: ["untrusted_external", "sensitive"], dataClasses: [] };
   };
 
@@ -704,7 +700,10 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     // 12.2 — the server was asked: what it answered (a result or an error text) goes back to the client, so it counts
     // as outside content (fail closed, also when the client cancelled). A call the runtime guard refused never
     // reached the server and carries nothing.
-    if (invocation !== undefined && !refused) {
+    if (invocation !== undefined && !refused && !toolset.trackSessionLabels) {
+      // Not tracked: only note that a result came back (turning tracking on later counts it), with no lookup.
+      raiseSessionLabels(session.labels, SERVER_RESULT_LABELS, false);
+    } else if (invocation !== undefined && !refused) {
       let labels = SERVER_RESULT_LABELS;
       try {
         labels = await serverResultLabels(resolvedServer);
@@ -756,6 +755,7 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
           subject: auth.subject,
           client: auth.client,
           ...(sessionLabels && (sessionLabels.provenance.length > 0 || sessionLabels.dataClasses.length > 0) ? { sessionLabels } : {}),
+          ...(callLabels ? { tracksLabels: true } : {}),
           onNodeComplete: (event) => {
             done = Math.min(total, done + 1);
             const node = workflow.nodes.find((entry) => entry.id === event.nodeId);
@@ -1031,7 +1031,15 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
         eventType: "mcp_gateway.approval_requested",
         action: "execute",
         outcome: "denied",
-        metadata: { ...callMetadata, approvalRequestId: approval.id, argsHash, ruleId: decision.approval.ruleId, ruleName: decision.approval.ruleName ?? null }
+        metadata: {
+          ...callMetadata,
+          approvalRequestId: approval.id,
+          argsHash,
+          ruleId: decision.approval.ruleId,
+          ruleName: decision.approval.ruleName ?? null,
+          // 12.2 — what the session had collected when the call was held (tracking toolsets only).
+          ...(labelRecord ? { labels: labelRecord } : {})
+        }
       });
     }
     return {

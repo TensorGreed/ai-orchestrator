@@ -44,6 +44,7 @@ import {
   policyRulesNeedLabelTracking,
   workflowMayCallMcpTools,
   recordedCallLabels,
+  parseStoredDataLabels,
   type DataDestinationRow,
   type DestinationRef,
   type McpToolOpenWorldOverride
@@ -1156,8 +1157,11 @@ function policyLabels(labels: DataLabels | null | undefined): McpToolAccessCall[
   return { provenance: implied.provenance, dataClasses: implied.dataClasses };
 }
 
-/** 12.2 — the secret ids a node config references (`{ secretId }` objects anywhere in it, a bounded walk). */
-function referencesSecretIn(config: unknown, secretIds: ReadonlySet<string>): boolean {
+/**
+ * 12.2 — the secret ids a node config references (`{ secretId }` objects anywhere in it, a bounded walk). The MCP
+ * gateway reads a registered server's secret and connection settings with it too.
+ */
+export function referencesSecretIn(config: unknown, secretIds: ReadonlySet<string>): boolean {
   const seen = new Set<unknown>();
   const visit = (value: unknown, depth: number): boolean => {
     if (!value || typeof value !== "object" || depth > 8 || seen.has(value)) return false;
@@ -1200,6 +1204,22 @@ async function declaresSensitiveSource(
     // A server that cannot be resolved fails the node when it runs; nothing to declare here.
     return false;
   }
+}
+
+/**
+ * 12.2 — some node of the workflow declares a sensitive source (its "Sensitive output" flag, a flagged secret in its
+ * config, or an MCP Tool node's registered server with a flagged secret). The MCP gateway falls back on it when a run
+ * on another instance returned no output labels. Sub-workflows are not walked. Free when nothing is flagged and no
+ * node carries the flag.
+ */
+export async function workflowDeclaresSensitiveSource(
+  nodes: ReadonlyArray<Pick<WorkflowNode, "type" | "config">>,
+  dependencies: Pick<WorkflowExecutionDependencies, "sensitiveSecretIds" | "resolveRegisteredMcpServer">
+): Promise<boolean> {
+  for (const node of nodes) {
+    if (await declaresSensitiveSource(node, dependencies)) return true;
+  }
+  return false;
 }
 
 const SENSITIVE_LABELS: DataLabels = { provenance: ["sensitive"], dataClasses: [], source: "propagated" };
@@ -7649,6 +7669,15 @@ const runOutputLabels = new WeakMap<WorkflowExecutionResult, DataLabels>();
 /** The labels of a finished run's output (its output node, else its last node), when the engine computed them. */
 export function outputLabelsOf(result: WorkflowExecutionResult): DataLabels | undefined {
   return runOutputLabels.get(result);
+}
+
+/**
+ * 12.2 — the output labels of a run that finished elsewhere (a queue worker stored them beside its result): `result`
+ * reads as one of this process's runs to `outputLabelsOf`. Labels that do not validate are ignored.
+ */
+export function adoptOutputLabels(result: WorkflowExecutionResult, labels: unknown): void {
+  const parsed = parseStoredDataLabels(labels);
+  if (parsed) runOutputLabels.set(result, parsed);
 }
 
 /** Phase 16 — a Guard node's inline profile override asks for propagated labels. */

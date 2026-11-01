@@ -7,7 +7,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { FastifyInstance } from "fastify";
 import {
   SENSITIVE_OUTPUT_CONFIG_KEY,
@@ -20,6 +20,7 @@ import {
   type McpToolset,
   type Workflow
 } from "@ai-orchestrator/shared";
+import { MockMCPServerAdapter } from "@ai-orchestrator/mcp-sdk";
 import { createApp } from "./app.js";
 import { parseConfig, type AppConfig } from "./config.js";
 import type { Store } from "./db/store.js";
@@ -30,6 +31,13 @@ import { testSql } from "./test-support/test-sql.js";
 import { JSON_RPC_ERRORS } from "./services/mcp-gateway-protocol.js";
 import { AuthService } from "./services/auth-service.js";
 import { SecretService } from "./services/secret-service.js";
+
+// 12.2 (M2) — a run on a queue worker that sends no output labels: the gateway falls back. Tests switch it on.
+const engineLabels = vi.hoisted(() => ({ drop: false }));
+vi.mock("@ai-orchestrator/workflow-engine", async (importOriginal) => {
+  const engine = await importOriginal<typeof import("@ai-orchestrator/workflow-engine")>();
+  return { ...engine, outputLabelsOf: (result: Parameters<typeof engine.outputLabelsOf>[0]) => (engineLabels.drop ? undefined : engine.outputLabelsOf(result)) };
+});
 
 interface TestContext {
   app: FastifyInstance;
@@ -64,6 +72,7 @@ async function createTestContext(): Promise<TestContext> {
 }
 
 afterEach(async () => {
+  engineLabels.drop = false;
   while (contexts.length > 0) {
     const context = contexts.pop()!;
     await context.app.close();
@@ -76,7 +85,7 @@ afterEach(async () => {
   }
 });
 
-type Role = "admin" | "builder";
+type Role = "admin" | "builder" | "operator" | "viewer";
 
 async function login(context: TestContext, role: Role): Promise<string> {
   const email = `${role}@example.com`;
@@ -470,5 +479,185 @@ describe("gateway calls with the setting on", () => {
     const { id: _id, mode: _mode, ...untrusted } = mcpSafetyPresetRule("untrusted_write_approval");
     // The tracked write after outside content would need approval; the untracked one is undetermined.
     expect((await simulate(untrusted)).counts).toMatchObject({ newly_needs_approval: 1, undetermined: 1 });
+  });
+});
+
+/** The gateway name of a tool in the fixture's toolset (server tools by their upstream name). */
+async function gatewayToolName(fixture: Pick<Fixture, "context" | "toolset" | "token">, sessionId: string, tool: string): Promise<string> {
+  const listed = await rpc(fixture.context, fixture.toolset.slug, fixture.token, { jsonrpc: "2.0", id: (requestId += 1), method: "tools/list" }, { "mcp-session-id": sessionId });
+  const name = listed
+    .json<{ result: { tools: Array<{ name: string }> } }>()
+    .result.tools.map((entry) => entry.name)
+    .find((entry) => entry === tool || entry.endsWith(`__${tool}`));
+  if (!name) throw new Error(`No tool ${tool}`);
+  return name;
+}
+
+async function createRule(fixture: Fixture, rule: Record<string, unknown>): Promise<string> {
+  const response = await caller(fixture.context)(fixture.admin, "POST", "/api/mcp/policies", rule);
+  expect(response.statusCode, response.body).toBe(201);
+  return response.json<{ rule: { id: string } }>().rule.id;
+}
+
+async function sessionView(fixture: Fixture, sessionId: string): Promise<McpGatewaySessionView | undefined> {
+  const listed = await caller(fixture.context)(fixture.admin, "GET", `/api/mcp/clients/${fixture.client.id}/sessions`);
+  return listed.json<{ sessions: McpGatewaySessionView[] }>().sessions.find((entry) => entry.idPrefix === sessionId.slice(0, 8));
+}
+
+describe("gateway calls never treat sensitive or data classes as checked", () => {
+  it("keeps a deny when an allow carves out on the absence of sensitive, and the simulator agrees", async () => {
+    const fixture = await setup({ track: true });
+    const call = caller(fixture.context);
+    const sessionId = await openSession(fixture);
+    expect((await callTool(fixture, sessionId, "get_current_time")).outcome).toBe("ok");
+    expect((await callTool(fixture, sessionId, "calculator", { expression: "1+1" })).outcome).toBe("ok");
+
+    const deny = { name: "No calculator", effect: "deny", serverId: fixture.serverId, toolPattern: "calculator" };
+    const carveOut = {
+      name: "Calculator unless sensitive",
+      effect: "allow",
+      serverId: fixture.serverId,
+      toolPattern: "calculator",
+      conditions: { all: [{ op: "label_absent", value: "sensitive" }] }
+    };
+    await createRule(fixture, deny);
+    // The simulator reads the recorded gateway row as the gateway decides: the carve-out changes nothing.
+    const simulated = await call(fixture.admin, "POST", "/api/mcp/policies/simulate", { windowDays: 7, addRule: carveOut });
+    expect(simulated.statusCode, simulated.body).toBe(200);
+    expect(simulated.json<{ simulation: McpPolicySimulationResult }>().simulation.counts).toMatchObject({ no_longer_denied: 0, undetermined: 0, unchanged: 2 });
+
+    // Live: the session read a server whose secret is not flagged; sensitive was never checked, so the deny holds.
+    await createRule(fixture, carveOut);
+    const name = await gatewayToolName(fixture, sessionId, "calculator");
+    const denied = await rpc(fixture.context, fixture.toolset.slug, fixture.token, { jsonrpc: "2.0", id: (requestId += 1), method: "tools/call", params: { name, arguments: { expression: "2+2" } } }, { "mcp-session-id": sessionId });
+    expect(JSON.stringify(denied.json())).toMatch(/blocked by policy|not allowed|denied/i);
+    expect(await auditEvents(fixture.context.store, "mcp_gateway.tool_denied")).toHaveLength(1);
+  });
+});
+
+describe("what raises a session's mark", () => {
+  it("raises after a server call that errored, and the held call's approval request carries the labels", async () => {
+    const fixture = await setup({ track: true, presets: ["untrusted_write_approval"] });
+    const sessionId = await openSession(fixture);
+    expect((await callTool(fixture, sessionId, "calculator", { expression: "abc" })).outcome).toBe("tool_error");
+    expect((await callTool(fixture, sessionId, "calculator", { expression: "1+1" })).outcome).toBe("approval_pending");
+    const [requested] = await auditEvents(fixture.context.store, "mcp_gateway.approval_requested");
+    expect((requested!.metadata as { labels?: unknown }).labels).toEqual({ provenance: ["user", "untrusted_external"], tracked: false });
+  });
+
+  it("raises after a server call the client cancelled", async () => {
+    const fixture = await setup({ track: true, presets: ["untrusted_write_approval"] });
+    const sessionId = await openSession(fixture);
+    const name = await gatewayToolName(fixture, sessionId, "calculator");
+    const hang = vi.spyOn(MockMCPServerAdapter.prototype, "invokeTool").mockImplementationOnce(() => new Promise(() => undefined));
+    const pending = rpc(fixture.context, fixture.toolset.slug, fixture.token, { jsonrpc: "2.0", id: 777, method: "tools/call", params: { name, arguments: { expression: "1+1" } } }, { "mcp-session-id": sessionId });
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    await rpc(fixture.context, fixture.toolset.slug, fixture.token, { jsonrpc: "2.0", method: "notifications/cancelled", params: { requestId: 777, reason: "test" } }, { "mcp-session-id": sessionId });
+    await pending;
+    hang.mockRestore();
+    expect((await sessionView(fixture, sessionId))?.labels?.provenance).toEqual(["untrusted_external"]);
+    expect((await callTool(fixture, sessionId, "calculator", { expression: "1+1" })).outcome).toBe("approval_pending");
+  });
+
+  it("does not raise after a call that was denied, held for approval or rate limited", async () => {
+    const fixture = await setup({ track: true, presets: ["untrusted_write_approval"] });
+    const call = caller(fixture.context);
+    await createRule(fixture, { effect: "deny", serverId: fixture.serverId, toolPattern: "calculator", conditions: { all: [{ path: "expression", op: "starts_with", value: "9" }] } });
+    await createRule(fixture, { effect: "require_approval", serverId: fixture.serverId, toolPattern: "calculator", conditions: { all: [{ path: "expression", op: "starts_with", value: "1000" }] } });
+    const sessionId = await openSession(fixture);
+    expect((await callTool(fixture, sessionId, "calculator", { expression: "9*9" })).outcome).toBe("tool_error");
+    expect((await callTool(fixture, sessionId, "calculator", { expression: "1000*3" })).outcome).toBe("approval_pending");
+    expect((await sessionView(fixture, sessionId))?.labels).toEqual({ provenance: [], dataClasses: [] });
+
+    // Another session spends the server's one call a minute; this session's call is then refused before the server.
+    expect((await call(fixture.admin, "PUT", `/api/mcp/servers/${fixture.serverId}`, { limits: { requestsPerMinute: 1, maxQueueWaitMs: 0 } })).statusCode).toBe(200);
+    const other = await openSession(fixture);
+    expect((await callTool(fixture, other, "get_current_time")).outcome).toBe("ok");
+    const limited = await callTool(fixture, sessionId, "get_current_time");
+    expect((limited.body.error as { code?: number } | undefined)?.code).toBe(-32029);
+    expect((await sessionView(fixture, sessionId))?.labels).toEqual({ provenance: [], dataClasses: [] });
+    expect((await sessionView(fixture, other))?.labels?.provenance).toEqual(["untrusted_external"]);
+    expect(await auditEvents(fixture.context.store, "mcp_gateway.session_labels_raised")).toHaveLength(1);
+  });
+
+  it("adds sensitive after a call to a server whose secret is flagged sensitive output", async () => {
+    const fixture = await setup({ track: true, presets: ["sensitive_no_open_world"] });
+    const call = caller(fixture.context);
+    const secret = await call(fixture.admin, "POST", "/api/secrets", { name: "CRM token", provider: "custom", value: "crm-token-value", sensitiveOutput: true });
+    expect(secret.statusCode, secret.body).toBe(200);
+    const secretId = secret.json<{ id: string }>().id;
+    expect((await call(fixture.admin, "PUT", `/api/mcp/servers/${fixture.serverId}`, { secretRef: { secretId } })).statusCode).toBe(200);
+    const sessionId = await openSession(fixture);
+    expect((await callTool(fixture, sessionId, "get_current_time")).outcome).toBe("ok");
+    expect((await sessionView(fixture, sessionId))?.labels?.provenance).toEqual(["untrusted_external", "sensitive"]);
+    expect((await callTool(fixture, sessionId, "calculator", { expression: "1+1" })).outcome).toBe("tool_error");
+  });
+});
+
+describe("the toolset setting off", () => {
+  it("does not look up flagged secrets after a server call", async () => {
+    const fixture = await setup({ track: false });
+    const call = caller(fixture.context);
+    // A flagged secret clears the app's short cache, so a lookup would read the store.
+    expect((await call(fixture.admin, "POST", "/api/secrets", { name: "Flagged", provider: "custom", value: "flagged-value", sensitiveOutput: true })).statusCode).toBe(200);
+    const lookup = vi.spyOn(fixture.context.store, "listSensitiveOutputSecretIds");
+    const sessionId = await openSession(fixture);
+    expect((await callTool(fixture, sessionId, "get_current_time")).outcome).toBe("ok");
+    expect((await callTool(fixture, sessionId, "calculator", { expression: "1+1" })).outcome).toBe("ok");
+    expect(lookup).not.toHaveBeenCalled();
+    lookup.mockRestore();
+  });
+});
+
+describe("the sessions endpoint", () => {
+  it("refuses viewers and operators, and answers 404 for an unknown client", async () => {
+    const fixture = await setup({ track: true });
+    const call = caller(fixture.context);
+    const url = `/api/mcp/clients/${fixture.client.id}/sessions`;
+    expect((await call(await login(fixture.context, "viewer"), "GET", url)).statusCode).toBe(403);
+    expect((await call(await login(fixture.context, "operator"), "GET", url)).statusCode).toBe(403);
+    expect((await call(await login(fixture.context, "builder"), "GET", url)).statusCode).toBe(200);
+    expect((await call(fixture.admin, "GET", "/api/mcp/clients/mcl_missing/sessions")).statusCode).toBe(404);
+  });
+});
+
+describe("a gateway workflow tool's run", () => {
+  it("records the session's labels on its trigger, so a retry from history keeps sensitive", async () => {
+    const fixture = await setup({ track: true });
+    const call = caller(fixture.context);
+    const denyId = await createRule(fixture, { effect: "deny", serverId: fixture.serverId, toolPattern: "calculator" });
+    const sessionId = await openSession(fixture);
+    expect((await callTool(fixture, sessionId, "secret_lookup", { text: "hello" })).outcome).toBe("ok");
+    // The run fails: its calculator call is denied.
+    expect((await callTool(fixture, sessionId, "calc_workflow")).outcome).toBe("tool_error");
+    const failed = (await fixture.context.store.listExecutionHistory({ workflowId: "wf-calc", pageSize: 10 })).items;
+    expect(failed.map((run) => run.status)).toEqual(["error"]);
+    const history = await fixture.context.store.getExecutionHistory(failed[0]!.id);
+    const trigger = (history!.nodeResults as Array<{ nodeId: string; labels?: { provenance: string[] } }>).find((result) => result.nodeId === "trigger");
+    expect(trigger?.labels?.provenance).toContain("sensitive");
+
+    // Now only the sensitive preset applies: the retry starts from the recorded labels, so it is denied again.
+    expect((await call(fixture.admin, "DELETE", `/api/mcp/policies/${denyId}`)).statusCode).toBeLessThan(300);
+    expect((await call(fixture.admin, "POST", "/api/mcp/policies/presets/sensitive_no_open_world")).statusCode).toBe(201);
+    expect((await call(fixture.admin, "POST", `/api/mcp/policies/${mcpSafetyPresetRuleId("sensitive_no_open_world")}/enforce`)).statusCode).toBe(200);
+    const retried = await call(fixture.admin, "POST", `/api/executions/${failed[0]!.id}/retry`, {});
+    expect(retried.json<{ status: string }>().status, retried.body).toBe("error");
+    expect(retried.body).toMatch(/policy|blocked|denied/i);
+  });
+});
+
+describe("a workflow tool's run that returned no output labels (a queue worker that did not send them)", () => {
+  it("counts as outside content, and sensitive when the workflow declares a sensitive source", async () => {
+    const fixture = await setup({ track: true, presets: ["sensitive_no_open_world"] });
+    engineLabels.drop = true;
+    const plain = await openSession(fixture);
+    expect((await callTool(fixture, plain, "plain_lookup", { text: "hello" })).outcome).toBe("ok");
+    expect((await sessionView(fixture, plain))?.labels?.provenance).toEqual(["untrusted_external"]);
+    expect((await callTool(fixture, plain, "calculator", { expression: "1+1" })).outcome).toBe("ok");
+
+    const secret = await openSession(fixture);
+    expect((await callTool(fixture, secret, "secret_lookup", { text: "hello" })).outcome).toBe("ok");
+    expect((await sessionView(fixture, secret))?.labels?.provenance).toEqual(["untrusted_external", "sensitive"]);
+    expect((await callTool(fixture, secret, "calculator", { expression: "1+1" })).outcome).toBe("tool_error");
   });
 });

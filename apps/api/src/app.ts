@@ -90,6 +90,7 @@ import {
   convertExternalWorkflow,
   ExternalWorkflowImportError,
   outputLabelsOf,
+  workflowDeclaresSensitiveSource,
   type ChunkOptions,
   type EmbeddingAdapter,
   type KnowledgeBaseStore,
@@ -233,6 +234,7 @@ import {
   DispatchTimeoutError,
   QUEUE_DISPATCH_CAPABILITY,
   readDispatchedRunSpec,
+  resultForQueue,
   RunDispatcher,
   triggerQueueItemId,
   type DispatchedRunSpec
@@ -3176,7 +3178,8 @@ export async function createApp(
         unsubscribeElicitations();
       }
     }
-    const stored = await store.saveQueueItemResult({ id: context.queueItemId, claimToken: context.claimToken, result });
+    // 12.2 — the run's output labels go with it (a gateway session on the requesting instance reads them).
+    const stored = await store.saveQueueItemResult({ id: context.queueItemId, claimToken: context.claimToken, result: resultForQueue(result) });
     if (!stored) {
       app.log.warn({ executionId, queueItemId: context.queueItemId }, "A dispatched run's result was not stored: its claim no longer holds the job");
     }
@@ -10760,7 +10763,8 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
             triggerType,
             triggeredBy,
             policySubject: input.subject,
-            ...(inputLabels ? { inputLabels } : {})
+            // Recorded on the trigger's result, so a retry or replay of this run starts from them too.
+            ...(inputLabels ? { inputLabels, recordInputLabels: true } : {})
           },
           progress: { requestInput },
           history: { requestInput }
@@ -10770,7 +10774,20 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         } }
       );
       const labels = outputLabelsOf(result);
-      return { status: result.status, output: result.output, error: result.error, ...(labels ? { labels: { provenance: labels.provenance, dataClasses: labels.dataClasses } } : {}) };
+      if (labels) return { status: result.status, output: result.output, error: result.error, labels: { provenance: labels.provenance, dataClasses: labels.dataClasses } };
+      if (!input.tracksLabels) return { status: result.status, output: result.output, error: result.error };
+      // 12.2 — no output labels came back (a worker that did not send them): the result is outside content, and
+      // sensitive too when the workflow declares a sensitive source.
+      const declared = await workflowDeclaresSensitiveSource(input.workflow.nodes, {
+        sensitiveSecretIds: await sensitiveSecrets.ids(),
+        resolveRegisteredMcpServer: async (registryServerId) => await resolveRegisteredMcpServer(registryServerId)
+      });
+      return {
+        status: result.status,
+        output: result.output,
+        error: result.error,
+        ...(declared ? { labels: { provenance: ["untrusted_external", "sensitive"], dataClasses: [] } } : {})
+      };
     },
     cancelExecution: (executionId, reason) => {
       const local = activeExecutions.get(executionId);

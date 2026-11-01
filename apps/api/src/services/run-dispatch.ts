@@ -13,6 +13,7 @@
  */
 import { createHash } from "node:crypto";
 import type { McpCassetteSource, McpReplayMode, Workflow, WorkflowExecutionResult } from "@ai-orchestrator/shared";
+import { adoptOutputLabels, outputLabelsOf } from "@ai-orchestrator/workflow-engine";
 import type { ClusterInstanceRecord } from "../db/store.js";
 import type { RunWorkflowExecutionInput, WorkflowExecutionEventHooks } from "../run-types.js";
 import type { SafeUser } from "./auth-service.js";
@@ -342,7 +343,7 @@ export class RunDispatcher {
       const end = await Promise.race(ending);
       if (end.kind === "result") {
         await this.deps.releaseResult?.(spec);
-        return end.result as WorkflowExecutionResult;
+        return resultFromQueue(end.result);
       }
       if (end.kind === "failed") throw new DispatchFailedError(spec.run.executionId, end.error);
       if (end.kind === "timeout") throw new DispatchTimeoutError(spec.run.executionId, timeoutMs);
@@ -380,3 +381,24 @@ export class RunDispatcher {
 }
 
 export { QueueFullError };
+
+/**
+ * 12.2 — where a queue worker keeps a run's output labels beside the result it stores. Optional: a worker that does
+ * not write it (an older one) leaves them unknown, and the caller falls back as for any run without them.
+ */
+export const QUEUE_RESULT_OUTPUT_LABELS_KEY = "outputLabels";
+
+/** 12.2 — the result a worker stores: the run's result, plus its output labels when the engine computed them. */
+export function resultForQueue(result: WorkflowExecutionResult): WorkflowExecutionResult {
+  const labels = outputLabelsOf(result);
+  return labels ? ({ ...result, [QUEUE_RESULT_OUTPUT_LABELS_KEY]: labels } as WorkflowExecutionResult) : result;
+}
+
+/** 12.2 — a stored result as the caller gets it: the labels are taken off it and read back with `outputLabelsOf`. */
+export function resultFromQueue(stored: unknown): WorkflowExecutionResult {
+  if (!stored || typeof stored !== "object" || !(QUEUE_RESULT_OUTPUT_LABELS_KEY in stored)) return stored as WorkflowExecutionResult;
+  const { [QUEUE_RESULT_OUTPUT_LABELS_KEY]: labels, ...rest } = stored as Record<string, unknown>;
+  const result = rest as unknown as WorkflowExecutionResult;
+  adoptOutputLabels(result, labels);
+  return result;
+}
