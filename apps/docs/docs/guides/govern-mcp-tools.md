@@ -107,7 +107,14 @@ Each tool call records the label names it was decided with on the run trace and 
 
 ### Gateway calls
 
-A call through the [MCP gateway](./self-hosted-mcp-gateway.md) carries labels only when its toolset has **Track outside content per session** on. Then, after a call returns outside content (any server tool, or a workflow whose output came from outside), the client's later calls in the same session carry `untrusted_external`. A workflow whose output is sensitive adds `sensitive` too. So with the first preset enforced, a client that has read outside content needs approval for its next write tool call. On toolsets without the switch, label conditions never match gateway calls, and the simulator leaves those calls undetermined. Details are in [Outside content per session](../product/mcp-gateway.md#outside-content-per-session).
+A call through the [MCP gateway](./self-hosted-mcp-gateway.md) carries labels only when its toolset has **Track outside content per session** on. Then, after a call returns outside content (any server tool, or a workflow whose output came from outside), the client's later calls in the same session carry `untrusted_external`. So with the first preset enforced, a client that has read outside content needs approval for its next write tool call.
+
+- `sensitive` comes only from a server whose secret is flagged **Sensitive output**, or from a workflow tool's run. Data class names come only from workflow tool runs that tracked them. Server tool results are never scanned.
+- So on gateway calls a `sensitive` or class the session does not hold is *not checked*: a "data lacks label" condition on it never lets an allow rule through, and still matches a deny or approval rule.
+- On toolsets without the switch, gateway calls carry no labels: a "data has label" condition never matches them, and a "data lacks label" condition on a deny or approval rule matches every one. The simulator leaves those calls undetermined.
+- A client can end its session and start a clean one at any time. Use roles and rules that do not depend on labels against a client that sets out to avoid the mark.
+
+Details are in [Outside content per session](../product/mcp-gateway.md#outside-content-per-session).
 
 ## 5. Check enforcement and watch calls
 
