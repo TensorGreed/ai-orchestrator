@@ -438,24 +438,36 @@ function TokenReveal({
 export function ClientSessions({ clientId }: { clientId: string }) {
   const [sessions, setSessions] = useState<McpGatewaySessionView[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  // Bumped by "Refresh": a session's labels change while its client works.
+  const [reloads, setReloads] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
     setError(null);
+    setLoading(true);
     fetchMcpClientSessions(clientId)
       .then((result) => {
         if (!cancelled) setSessions(result.sessions);
       })
       .catch((err) => {
         if (!cancelled) setError(formatError(err));
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
       });
     return () => {
       cancelled = true;
     };
-  }, [clientId]);
+  }, [clientId, reloads]);
 
   return (
     <div className="mcp-client-usage" aria-label="Client sessions">
+      <div className="mcp-rule-actions">
+        <button type="button" className="pg-btn ghost" aria-busy={loading} disabled={loading} onClick={() => setReloads((count) => count + 1)}>
+          Refresh
+        </button>
+      </div>
       {error && <div className="settings-error">{error}</div>}
       {sessions === null && !error && <p className="kb-subtle">Loading…</p>}
       {sessions !== null && sessions.length === 0 && <p className="kb-subtle">No open sessions on this server.</p>}

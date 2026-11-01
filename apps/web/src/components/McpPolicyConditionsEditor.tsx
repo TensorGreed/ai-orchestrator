@@ -191,9 +191,12 @@ export function labelConditionNotes(draft: ConditionsDraft): string[] {
   const values = draft.rows.filter((row) => LABEL_OPS.includes(row.op)).map((row) => row.value.trim());
   if (values.length === 0) return [];
   const notes = [
-    "Calls through the MCP gateway carry data labels only on toolsets with “Track outside content per session” on; on other toolsets their labels are unknown, so label conditions never match them."
+    "Calls through the MCP gateway carry labels only on toolsets with “Track outside content per session” on. On other toolsets they carry none: “has label” conditions never match them, and “lacks label” conditions on a deny or approval rule match every one of them (fail closed)."
   ];
   if (values.some((value) => value && labelValueNeedsTracking(value))) {
+    notes.push(
+      "On tracking toolsets a gateway session carries “untrusted_external” after any tool result, “sensitive” only from a server whose secret is flagged Sensitive output or from a workflow tool's run, and data class names only from workflow tool runs that tracked them. Server tool results are never scanned, so a “sensitive” or class the session does not hold counts as not checked: its absence never lets an allow rule through, and still matches a deny or approval rule."
+    );
     notes.push(
       "A “sensitive” or data class condition turns on label tracking for runs of the workflows this rule covers (those with an agent, MCP Tool or Execute Workflow node) while it is enabled: node outputs are scanned for data classes, which takes some time on large outputs, and the classes found also feed destination checks."
     );

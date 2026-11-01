@@ -304,6 +304,29 @@ describe("MCP gateway views", () => {
     expect(within(rows[1]!).getByText("nothing from outside yet")).toBeInTheDocument();
     expect(within(rows[2]!).getByText("outside content not tracked")).toBeInTheDocument();
     expect(within(rows[2]!).queryByLabelText(/Data labels/)).not.toBeInTheDocument();
+
+    // Refresh reads the sessions again: the second session has read outside content meanwhile.
+    vi.mocked(api.fetchMcpClientSessions).mockResolvedValueOnce({
+      clientId: "mcc_1",
+      sessions: [
+        {
+          idPrefix: "e5f6a7b8",
+          clientId: "mcc_1",
+          toolsetId: "mts_1",
+          toolsetName: "Support tools",
+          clientInfo: {},
+          createdAt: "2026-10-20T10:00:00.000Z",
+          lastSeenAt: "2026-10-20T10:06:00.000Z",
+          tracked: true,
+          labels: { provenance: ["untrusted_external"], dataClasses: [] },
+          raisedAt: "2026-10-20T10:06:00.000Z"
+        }
+      ]
+    });
+    await user.click(within(list).getByRole("button", { name: "Refresh" }));
+    await waitFor(() => expect(api.fetchMcpClientSessions).toHaveBeenCalledTimes(2));
+    expect(await within(list).findByLabelText("Data labels: from outside")).toBeInTheDocument();
+    expect(within(within(list).getByRole("list", { name: "Open sessions" })).getAllByRole("listitem")).toHaveLength(1);
   });
 
   it("hides toolset admin actions from builders", async () => {

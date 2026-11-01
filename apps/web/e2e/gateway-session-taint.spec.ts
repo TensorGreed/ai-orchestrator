@@ -147,7 +147,7 @@ test("explains in the rule editor that gateway labels need the toolset switch", 
   await form.getByRole("button", { name: "+ Add condition" }).click();
   const op = form.getByLabel("Condition 1 operator");
   await op.selectOption("label_present");
-  await expect(form.getByText(/carry data labels only on toolsets with “Track outside content per session” on/)).toBeVisible();
+  await expect(form.getByText(/carry labels only on toolsets with “Track outside content per session” on/)).toBeVisible();
   await shot("03-rule-editor-note");
   await form.getByRole("button", { name: "Cancel" }).click();
 });
