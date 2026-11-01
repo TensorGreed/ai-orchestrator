@@ -54,7 +54,9 @@ export default defineConfig({
           BOOTSTRAP_ADMIN_EMAIL: adminEmail,
           BOOTSTRAP_ADMIN_PASSWORD: adminPassword,
           SECRET_MASTER_KEY_BASE64: "9FdQxNjmCb9J3LArvgV9mrn1x5XieXf0WqN7h6q2TSA=",
-          WORKER_MODE: "all"
+          WORKER_MODE: "all",
+          // Every spec signs in through the API, and the suite signs in more than the default 10 times a minute.
+          RATE_LIMIT_AUTH_MAX: "1000"
         }
       }
 });
