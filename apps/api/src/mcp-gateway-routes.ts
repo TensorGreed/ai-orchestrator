@@ -725,13 +725,13 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     args: Record<string, unknown>;
     executionId: string;
     progress: (progress: number, total: number | undefined, message: string) => void;
-    /** 12.2 — the labels the call was checked with (tracking toolsets only). */
     callLabels?: DataLabels;
   }): Promise<McpCallToolResult> => {
     const { session, auth, toolset, tool, args, executionId, callLabels } = input;
-    let ran = false;
     const startedAt = new Date();
     const workflow = await productionWorkflow(tool.workflowId);
+    // 12.2 — `callLabels`: the labels the call was checked with (tracking toolsets only); `ran`: the run started.
+    let ran = false;
     let outcome: GatewayWorkflowRunOutcome;
     if (!workflow) {
       const refusal = (await deps.productionRefusal?.(tool.workflowId)) ?? null;
