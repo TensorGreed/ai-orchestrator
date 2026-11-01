@@ -374,6 +374,7 @@ function mapMcpToolset(row: Row, members: McpToolsetMember[]): McpToolset {
     description: row.description ? toStr(row.description) : null,
     projectId: row.project_id ? toStr(row.project_id) : null,
     enabled: toNum(row.enabled) === 1,
+    trackSessionLabels: toNum(row.track_session_labels ?? 0) === 1,
     members,
     createdBy: row.created_by ? toStr(row.created_by) : null,
     createdAt: toStr(row.created_at),
@@ -1519,9 +1520,9 @@ export async function createMcpToolset(ctx: PgContext, ...[input]: Parameters<St
   const now = new Date().toISOString();
   return ctx.withTransaction(async (client) => {
     await client.query(
-      `INSERT INTO mcp_toolsets (id, slug, name, description, project_id, enabled, created_by, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-      [input.id, input.slug, input.name, input.description, input.projectId, input.enabled ? 1 : 0, input.createdBy, now, now]
+      `INSERT INTO mcp_toolsets (id, slug, name, description, project_id, enabled, track_session_labels, created_by, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+      [input.id, input.slug, input.name, input.description, input.projectId, input.enabled ? 1 : 0, input.trackSessionLabels ? 1 : 0, input.createdBy, now, now]
     );
     await writeMcpToolsetMembers(client, input.id, input.members);
     return (await getMcpToolsetOn(client, input.id))!;
@@ -1539,6 +1540,7 @@ export async function updateMcpToolset(ctx: PgContext, ...[id, patch]: Parameter
     if (patch.description !== undefined) { fields.push("description = ?"); params.push(patch.description); }
     if (patch.projectId !== undefined) { fields.push("project_id = ?"); params.push(patch.projectId); }
     if (patch.enabled !== undefined) { fields.push("enabled = ?"); params.push(patch.enabled ? 1 : 0); }
+    if (patch.trackSessionLabels !== undefined) { fields.push("track_session_labels = ?"); params.push(patch.trackSessionLabels ? 1 : 0); }
     fields.push("updated_at = ?");
     params.push(new Date().toISOString());
     params.push(id);

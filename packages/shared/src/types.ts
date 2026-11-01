@@ -6,7 +6,7 @@ import type {
   McpRuntimeRejection,
   McpSandboxSettings
 } from "./mcp-runtime-safety";
-import type { DataLabels, LabelEndorsement, NodeLabelMap } from "./data-labels";
+import type { DataLabels, LabelEndorsement, NodeLabelMap, ProvenanceLabel } from "./data-labels";
 import type { McpToolCallLabels } from "./taint-policy";
 
 export const WORKFLOW_SCHEMA_VERSION = "1.0.0";
@@ -1819,10 +1819,42 @@ export interface McpToolset {
   /** Project the gateway evaluates tool policy in; null = no project. */
   projectId: string | null;
   enabled: boolean;
+  /**
+   * 12.2 — "Track outside content per session": each client session keeps the labels of what its calls returned
+   * (a high-water mark that never goes down), and later calls in the session are checked with them. Off by default:
+   * calls are then checked without labels, as before.
+   */
+  trackSessionLabels: boolean;
   members: McpToolsetMember[];
   createdBy: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+/**
+ * 12.2 — the labels a gateway client session has collected, on a toolset that tracks them: the provenance labels
+ * (never `trusted`) and the data class names its calls' results carried.
+ */
+export interface McpGatewaySessionLabels {
+  provenance: ProvenanceLabel[];
+  dataClasses: string[];
+}
+
+/** 12.2 — one open gateway session as the admin API shows it (the session id only by its first characters). */
+export interface McpGatewaySessionView {
+  idPrefix: string;
+  clientId: string;
+  toolsetId: string;
+  toolsetName: string | null;
+  clientInfo: { name?: string; version?: string };
+  createdAt: string;
+  lastSeenAt: string;
+  /** Whether the session's toolset tracks outside content now. */
+  tracked: boolean;
+  /** What the session has collected; null when its toolset does not track. */
+  labels: McpGatewaySessionLabels | null;
+  /** When the session first carried outside content or sensitive data; null when it has not. */
+  raisedAt: string | null;
 }
 
 /** A client credential for the MCP gateway. The token itself is never stored or returned again. */

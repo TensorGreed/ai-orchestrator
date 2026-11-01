@@ -653,6 +653,8 @@ export interface Store {
     description: string | null;
     projectId: string | null;
     enabled: boolean;
+    /** 12.2 — "Track outside content per session"; absent means off. */
+    trackSessionLabels?: boolean;
     createdBy: string | null;
     members: McpToolsetMemberSpec[];
   }): Promise<McpToolset>;
@@ -662,6 +664,7 @@ export interface Store {
       description?: string | null;
       projectId?: string | null;
       enabled?: boolean;
+      trackSessionLabels?: boolean;
       members?: Array<McpToolsetMemberSpec & { id?: string }>;
     }): Promise<McpToolset | null>;
   /** Deletes the toolset and its members, and drops it from every client's scope. */

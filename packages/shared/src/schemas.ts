@@ -582,6 +582,8 @@ export const mcpToolsetInputSchema = z.object({
   description: z.string().max(2000).nullable().optional(),
   projectId: z.string().trim().min(1).nullable().optional(),
   enabled: z.boolean().optional(),
+  /** 12.2 — "Track outside content per session"; absent on create means off. */
+  trackSessionLabels: z.boolean().optional(),
   members: z.array(mcpToolsetMemberInputSchema).max(200).optional()
 });
 
