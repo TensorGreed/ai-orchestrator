@@ -271,6 +271,9 @@ function ToolsetDetail({
             <span>
               Open sessions <strong>{toolset.activeSessions}</strong>
             </span>
+            <span data-testid="toolset-session-tracking">
+              Outside content <strong>{toolset.trackSessionLabels ? "tracked per session" : "not tracked"}</strong>
+            </span>
           </div>
         </div>
         {isAdmin && (
@@ -450,6 +453,7 @@ function McpToolsetForm({
   const [description, setDescription] = useState(initial?.description ?? "");
   const [projectId, setProjectId] = useState(initial ? initial.projectId ?? "" : defaultProjectId ?? "");
   const [enabled, setEnabled] = useState(initial?.enabled ?? true);
+  const [trackSessionLabels, setTrackSessionLabels] = useState(initial?.trackSessionLabels ?? false);
   const [workflowIds, setWorkflowIds] = useState<string[]>(
     initial?.members.flatMap((member) => (member.kind === "workflow" ? [member.workflowId] : [])) ?? []
   );
@@ -497,6 +501,7 @@ function McpToolsetForm({
       description: description.trim() || null,
       projectId: projectId || null,
       enabled,
+      trackSessionLabels,
       members
     };
     setBusy(true);
@@ -624,6 +629,19 @@ function McpToolsetForm({
         <input type="checkbox" checked={enabled} onChange={(event) => setEnabled(event.target.checked)} />
         Enabled
       </label>
+      <label className="mcp-check">
+        <input
+          type="checkbox"
+          checked={trackSessionLabels}
+          onChange={(event) => setTrackSessionLabels(event.target.checked)}
+          aria-describedby="toolset-track-hint"
+        />
+        Track outside content per session
+      </label>
+      <small id="toolset-track-hint" className="kb-subtle">
+        After a client&apos;s call returns outside content (any server tool, or a workflow whose output came from outside),
+        its later calls in the same session are checked as carrying it, so rules on data labels apply to them.
+      </small>
       <div className="kb-form-row mcp-form-actions">
         <button type="submit" className="pg-btn primary" disabled={busy}>
           {busy ? "Saving…" : initial ? "Save toolset" : "Create toolset"}

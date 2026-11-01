@@ -100,6 +100,7 @@ import type {
   ImportReport,
   LLMProviderConfig,
   McpClient,
+  McpGatewaySessionView,
   McpGatewayHiddenToolView,
   McpGatewayToolView,
   McpPolicyRole,
@@ -3384,6 +3385,8 @@ export interface McpToolsetInput {
   description?: string | null;
   projectId?: string | null;
   enabled?: boolean;
+  /** 12.2 — "Track outside content per session". */
+  trackSessionLabels?: boolean;
   members?: McpToolsetMemberSpec[];
 }
 
@@ -3470,6 +3473,11 @@ export async function revokeMcpClient(id: string) {
   return apiRequest<{ client: McpClientView }>(`/api/mcp/clients/${encodeURIComponent(id)}/revoke`, {
     method: "POST"
   });
+}
+
+/** 12.2 — a client's open sessions on the instance that answers, with the labels each has collected. */
+export async function fetchMcpClientSessions(id: string) {
+  return apiRequest<{ clientId: string; sessions: McpGatewaySessionView[] }>(`/api/mcp/clients/${encodeURIComponent(id)}/sessions`);
 }
 
 export async function fetchMcpClientUsage(id: string, window: McpTelemetryWindow = "7d") {

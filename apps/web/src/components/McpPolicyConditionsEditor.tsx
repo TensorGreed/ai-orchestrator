@@ -183,14 +183,16 @@ export function conditionsHint(effect: McpToolPolicyEffect | undefined): string 
 }
 
 /**
- * Phase 12.2 — what a rule's label conditions mean in practice: gateway calls carry no labels, and a `sensitive` or
- * data class condition makes the runs the rule covers track labels (scan node outputs for data classes). Empty with no
- * label rows.
+ * Phase 12.2 — what a rule's label conditions mean in practice: gateway calls carry labels only on toolsets that track
+ * outside content per session, and a `sensitive` or data class condition makes the runs the rule covers track labels
+ * (scan node outputs for data classes). Empty with no label rows.
  */
 export function labelConditionNotes(draft: ConditionsDraft): string[] {
   const values = draft.rows.filter((row) => LABEL_OPS.includes(row.op)).map((row) => row.value.trim());
   if (values.length === 0) return [];
-  const notes = ["Data labels exist only in workflow runs: calls through the MCP gateway carry none, so label conditions never match them."];
+  const notes = [
+    "Calls through the MCP gateway carry data labels only on toolsets with “Track outside content per session” on; on other toolsets their labels are unknown, so label conditions never match them."
+  ];
   if (values.some((value) => value && labelValueNeedsTracking(value))) {
     notes.push(
       "A “sensitive” or data class condition turns on label tracking for runs of the workflows this rule covers (those with an agent, MCP Tool or Execute Workflow node) while it is enabled: node outputs are scanned for data classes, which takes some time on large outputs, and the classes found also feed destination checks."

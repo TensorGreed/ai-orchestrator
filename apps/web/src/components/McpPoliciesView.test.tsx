@@ -214,7 +214,8 @@ describe("MCP tool policy UI", () => {
     const rows = (value: string) => conditionsToDraft({ all: [{ op: "label_present", value }] });
     expect(labelConditionNotes(conditionsToDraft(null))).toEqual([]);
     expect(labelConditionNotes(rows("untrusted_external"))).toHaveLength(1);
-    expect(labelConditionNotes(rows("untrusted_external"))[0]).toMatch(/gateway/);
+    expect(labelConditionNotes(rows("untrusted_external"))[0]).toMatch(/gateway carry data labels only on toolsets with “Track outside content per session” on/);
+    expect(labelConditionNotes(rows("untrusted_external"))[0]).toMatch(/their labels are unknown/);
     expect(labelConditionNotes(rows("sensitive"))[1]).toMatch(/label tracking for runs of the workflows this rule covers/);
     expect(labelConditionNotes(rows("sensitive"))[1]).toMatch(/destination checks/);
     expect(labelConditionNotes(rows("email"))).toHaveLength(2);

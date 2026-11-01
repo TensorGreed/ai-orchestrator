@@ -24,7 +24,8 @@ vi.mock("../lib/api", async () => {
     fetchMcpClients: vi.fn(),
     createMcpClient: vi.fn(),
     revokeMcpClient: vi.fn(),
-    fetchMcpClientUsage: vi.fn()
+    fetchMcpClientUsage: vi.fn(),
+    fetchMcpClientSessions: vi.fn()
   };
 });
 
@@ -61,6 +62,7 @@ const toolset: api.McpToolsetView = {
   description: null,
   projectId: null,
   enabled: true,
+  trackSessionLabels: false,
   createdBy: "admin@example.com",
   createdAt: "2026-10-20T10:00:00.000Z",
   updatedAt: "2026-10-20T10:00:00.000Z",
@@ -222,6 +224,7 @@ describe("MCP gateway views", () => {
         description: null,
         projectId: null,
         enabled: true,
+        trackSessionLabels: false,
         members: [
           { kind: "workflow", workflowId: "wf_1" },
           { kind: "server", serverId: "mcp_1", toolGlob: "lookup_*" }
@@ -229,6 +232,78 @@ describe("MCP gateway views", () => {
       })
     );
     expect(await screen.findByTestId("toolset-endpoint")).toBeInTheDocument();
+  });
+
+  it("shows and edits the per-session outside-content switch, off by default", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.updateMcpToolset).mockResolvedValue({ toolset: { ...toolset, trackSessionLabels: true } });
+    render(<McpServersPage view="toolsets" isAdmin activeProjectId={null} />);
+    expect(await screen.findByTestId("toolset-session-tracking")).toHaveTextContent("Outside content not tracked");
+    await user.click(screen.getByRole("button", { name: "Edit" }));
+    const form = screen.getByRole("form", { name: "Edit toolset" });
+    const toggle = within(form).getByRole("checkbox", { name: "Track outside content per session" });
+    expect(toggle).not.toBeChecked();
+    expect(toggle).toHaveAccessibleDescription(/later calls in the same session are checked as carrying it/);
+    await user.click(toggle);
+    await user.click(within(form).getByRole("button", { name: "Save toolset" }));
+    await waitFor(() => expect(api.updateMcpToolset).toHaveBeenCalledWith("mts_1", expect.objectContaining({ trackSessionLabels: true })));
+    expect(await screen.findByTestId("toolset-session-tracking")).toHaveTextContent("Outside content tracked per session");
+  });
+
+  it("shows each open session's labels as chips, and says when a toolset does not track", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.fetchMcpClientSessions).mockResolvedValue({
+      clientId: "mcc_1",
+      sessions: [
+        {
+          idPrefix: "a1b2c3d4",
+          clientId: "mcc_1",
+          toolsetId: "mts_1",
+          toolsetName: "Support tools",
+          clientInfo: { name: "Cursor", version: "1.2" },
+          createdAt: "2026-10-20T10:00:00.000Z",
+          lastSeenAt: "2026-10-20T10:05:00.000Z",
+          tracked: true,
+          labels: { provenance: ["untrusted_external", "sensitive"], dataClasses: ["email"] },
+          raisedAt: "2026-10-20T10:01:00.000Z"
+        },
+        {
+          idPrefix: "e5f6a7b8",
+          clientId: "mcc_1",
+          toolsetId: "mts_1",
+          toolsetName: "Support tools",
+          clientInfo: {},
+          createdAt: "2026-10-20T10:00:00.000Z",
+          lastSeenAt: "2026-10-20T10:05:00.000Z",
+          tracked: true,
+          labels: { provenance: [], dataClasses: [] },
+          raisedAt: null
+        },
+        {
+          idPrefix: "c9d0e1f2",
+          clientId: "mcc_1",
+          toolsetId: "mts_2",
+          toolsetName: "Other tools",
+          clientInfo: {},
+          createdAt: "2026-10-20T10:00:00.000Z",
+          lastSeenAt: "2026-10-20T10:05:00.000Z",
+          tracked: false,
+          labels: null,
+          raisedAt: null
+        }
+      ]
+    });
+    render(<McpServersPage view="clients" isAdmin={false} activeProjectId={null} />);
+    const list = await screen.findByRole("list", { name: "MCP clients" });
+    await user.click(within(list).getByRole("button", { name: "Sessions" }));
+    const sessions = await within(list).findByRole("list", { name: "Open sessions" });
+    expect(api.fetchMcpClientSessions).toHaveBeenCalledWith("mcc_1");
+    const rows = within(sessions).getAllByRole("listitem");
+    expect(within(rows[0]!).getByLabelText("Data labels: from outside · sensitive · contains email")).toBeInTheDocument();
+    expect(within(rows[0]!).getByText("from outside")).toHaveClass("is-external");
+    expect(within(rows[1]!).getByText("nothing from outside yet")).toBeInTheDocument();
+    expect(within(rows[2]!).getByText("outside content not tracked")).toBeInTheDocument();
+    expect(within(rows[2]!).queryByLabelText(/Data labels/)).not.toBeInTheDocument();
   });
 
   it("hides toolset admin actions from builders", async () => {
