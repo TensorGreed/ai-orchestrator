@@ -105,7 +105,9 @@ Each tool call records the label names it was decided with on the run trace and 
 - A data class found in the content counts as `sensitive`, in the live decision, in the recorded labels and in the simulator alike. So does a declared source (a node's **Sensitive output** switch, or a secret flagged "sensitive output"), on every run, tracked or not.
 - Calls recorded before labels were kept stay **undetermined**.
 
-Gateway calls carry no labels, so label conditions never match them.
+### Gateway calls
+
+A call through the [MCP gateway](./self-hosted-mcp-gateway.md) carries labels only when its toolset has **Track outside content per session** on. Then, after a call returns outside content (any server tool, or a workflow whose output came from outside), the client's later calls in the same session carry `untrusted_external`. A workflow whose output is sensitive adds `sensitive` too. So with the first preset enforced, a client that has read outside content needs approval for its next write tool call. On toolsets without the switch, label conditions never match gateway calls, and the simulator leaves those calls undetermined. Details are in [Outside content per session](../product/mcp-gateway.md#outside-content-per-session).
 
 ## 5. Check enforcement and watch calls
 

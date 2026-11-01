@@ -28,6 +28,7 @@ Toolsets live under **MCP → Toolsets** in the sidebar. Admins create and edit 
 | Description | Optional. |
 | Policy project | The project whose tool policy rules apply to gateway tools. Empty means only global rules apply. |
 | Enabled | A disabled toolset answers 404, and its open sessions are closed. |
+| Track outside content per session | Off by default. When on, each client session remembers what its calls returned, and later calls in the session are checked with those labels (see below). |
 | Members | Workflows with an Expose as MCP Tool trigger, and registered servers with an optional tool glob. |
 
 ### Tool names
@@ -97,6 +98,21 @@ Workflow tools run as the workflow does for any trigger: the run is recorded in 
 
 stdio servers started for gateway calls belong to the client session that started them and are stopped when the session ends, idles out, or its client or toolset is revoked, disabled or deleted.
 
+### Outside content per session
+
+A gateway call has no workflow run around it, so on its own it carries no [data labels](./data-labels-and-destinations.md) and tool rules with label conditions never match it. Turn on **Track outside content per session** on a toolset to change that for its clients.
+
+With it on, each client session keeps a set of labels that starts empty (the client's own request counts as `user`) and only grows:
+
+- After a call to a server tool, later calls in the session carry `untrusted_external`. Every server tool's result counts as outside content, as it does in runs. A server whose secret is flagged **Sensitive output** adds `sensitive` too.
+- After a call to a workflow tool, later calls carry the labels of the run's output: `untrusted_external` when it came from outside, and `sensitive` and data class names when the run recorded them.
+- A failed call whose error text went back to the client counts as outside content. A call that a rule denied, that waits for approval, or that the rate limit refused before it reached the server adds nothing.
+- Nothing the client sends (arguments, `_meta`, headers) is read as a label.
+
+The labels never go down during a session; only ending the session clears them. They are then passed to the [tool rules](./mcp-tool-policy.md) like a run's labels, so the safety presets, shadow mode and simulation work the same for gateway calls. A workflow tool's run also starts with them. The first time a session carries outside content or sensitive data is audited once as `mcp_gateway.session_labels_raised`. Each client's **Sessions** panel shows each open session's labels. Each call's labels are recorded on its telemetry row, and calls on toolsets that do not track stay undetermined in the simulator.
+
+If you turn tracking on while sessions are open, a session that already made calls is treated as having seen outside content. The labels live with the session in the memory of the instance that opened it, and end with it.
+
 ## Telemetry and audit
 
 Every `tools/call` writes a row to `mcp_tool_calls` with `source = gateway` and the client id, so the server page's Tools table and the client's Usage panel include it. Workflow tool calls are recorded under the adapter id `workflow` with the run's execution id.
@@ -111,6 +127,8 @@ Audit events:
 | `mcp_gateway.approval_requested` / `approval_decided` / `approval_used` | A require-approval rule held a call back, an admin approved or rejected it, the approved retry went through. |
 | `mcp_gateway.approval_refused_rejected` / `approval_capped` | The first identical retry after a rejection was refused; a client with too many requests waiting was refused a new one (once per client per approval window). |
 | `mcp_toolset.created` / `updated` / `deleted` / `member_added` / `member_removed` | Toolset changes. |
+| `mcp_toolset.session_tracking_changed` | **Track outside content per session** was turned on or off. |
+| `mcp_gateway.session_labels_raised` | A session on a tracking toolset carried outside content or sensitive data for the first time (once per session, with the client and the tool). |
 | `mcp_client.created` / `revoked` | Client changes. Metadata carries the token prefix, never the token. |
 
 `MCP_GATEWAY_AUDIT_READ_ONLY_CALLS` is `first_per_session` by default: the first call to each read-only tool in a session is audited, later ones only in telemetry. Set `all` to audit every call or `none` to rely on telemetry for read-only tools.
