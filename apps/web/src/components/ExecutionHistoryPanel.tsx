@@ -3,7 +3,7 @@ import { fetchMcpElicitations, type ExecutionHistoryDetail, type ExecutionHistor
 import type { McpElicitationView, WorkflowListItem } from "@ai-orchestrator/shared";
 import { McpCassetteViewer } from "./McpCassetteViewer";
 import { McpElicitationForm } from "./McpElicitationForm";
-import { DataLabelChips } from "./DataLabelChips";
+import { DataLabelChips, EndorsementNote } from "./DataLabelChips";
 import { GuardTracePanel } from "./GuardTracePanel";
 import { AuditBundlePanel } from "./AuditBundlePanel";
 import { GoldenRunViewer, GoldenStarIcon, SaveGoldenRunDialog } from "./GoldenRunPanel";
@@ -532,6 +532,7 @@ export function ExecutionHistoryPanel({
                                       <span className="mono-cell num">{formatDuration(durationMs)}</span>
                                       <span className="execution-trace-extra">
                                         <DataLabelChips labels={trace?.labels} />
+                                        <EndorsementNote endorsement={trace?.endorsement} />
                                         {onReplayFromNode && (
                                           <button
                                             type="button"

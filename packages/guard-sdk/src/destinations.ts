@@ -99,6 +99,8 @@ export function evaluateDestinationRules(profile: GuardProfile, input: Destinati
   const classes = new Set([...input.foundClasses, ...input.labels.dataClasses]);
   const provenance = new Set(input.labels.provenance);
   const held = new Set(input.destination.holdsDataClasses);
+  // 12.2 — data classes in the content make it sensitive too; classes this destination may hold do not count.
+  if ([...classes].some((dataClass) => !held.has(dataClass))) provenance.add("sensitive");
   const where = describeDestination(input.destination);
 
   rules.forEach((rule, ruleIndex) => {

@@ -290,4 +290,13 @@ describe("simulation over recorded labels", () => {
     // Its absence still needs tracking.
     expect(evaluateRuleOnSummary(absent, call({ provenance: ["user"], tracked: false }), context).state).toBe("unknown");
   });
+
+  it("reads recorded data classes as sensitive, as the live evaluation did", () => {
+    const absent: McpToolPolicyRule = { ...sensitive, id: "s-absent", conditions: { all: [{ op: "label_absent", value: "sensitive" }] } };
+    // A row recorded before classes implied sensitive in the record: the classes alone decide it.
+    const classesOnly = call({ provenance: ["user"], dataClasses: ["iban"], tracked: true });
+    expect(evaluateRuleOnSummary(sensitive, classesOnly, context)).toEqual({ state: "match" });
+    expect(evaluateRuleOnSummary(absent, classesOnly, context)).toEqual({ state: "no_match" });
+    expect(evaluateRuleOnSummary(absent, call({ provenance: ["user"], dataClasses: [], tracked: true }), context)).toEqual({ state: "match" });
+  });
 });

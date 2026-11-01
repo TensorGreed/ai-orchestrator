@@ -1,7 +1,17 @@
 import { describe, expect, it } from "vitest";
 import { recordedInputLabels } from "./data-label-provenance";
 import { modelMemorySeedSchema } from "./model-tape";
-import { unionDataLabels, type DataLabels } from "./data-labels";
+import {
+  declaresSensitiveOutput,
+  endorseLabels,
+  TRIGGER_TRUST_LEVELS,
+  triggerInputProvenance,
+  triggerTrustOf,
+  unionDataLabels,
+  withImpliedSensitive,
+  type DataLabels
+} from "./data-labels";
+import { workflowNodeSchema } from "./schemas";
 
 const L = (provenance: DataLabels["provenance"], dataClasses: string[] = [], source: DataLabels["source"] = "propagated"): DataLabels => ({ provenance, dataClasses, source });
 
@@ -20,6 +30,13 @@ describe("recorded input labels (Phase 16, Q7)", () => {
     // A caller-chosen trigger name earns nothing: never trusted without the server's own scheduler.
     expect(recordedInputLabels({ sourceTriggerType: "cron" })).toEqual(L(["untrusted_external"]));
     expect(recordedInputLabels({ sourceTriggerType: null })).toEqual(L(["untrusted_external"]));
+  });
+
+  it("12.2 — a retry or MCP replay without input-node labels counts as outside content (its source run's origin is unknown)", () => {
+    expect(recordedInputLabels({ sourceTriggerType: "manual_retry" })).toEqual(L(["untrusted_external"]));
+    expect(recordedInputLabels({ sourceTriggerType: "mcp_replay" })).toEqual(L(["untrusted_external"]));
+    // With its recorded labels it keeps them.
+    expect(recordedInputLabels({ nodes: [{ nodeType: "webhook_input", labels: L(["user"]) }], sourceTriggerType: "manual_retry" })).toEqual(L(["user"]));
   });
 
   it("labels read from a file never carry trusted", () => {
@@ -43,5 +60,45 @@ describe("label helpers", () => {
   it("a memory seed keeps the labels its memory had", () => {
     const parsed = modelMemorySeedSchema.parse({ sessions: [{ namespace: "n", sessionId: "s", messages: [], labels: L(["user"], ["iban"]) }], truncated: false });
     expect(parsed.sessions[0]!.labels).toEqual(L(["user"], ["iban"]));
+  });
+});
+
+describe("12.2 provenance sources", () => {
+  it("a webhook's input is the user's only when the server verified the caller, unless an admin set its trust", () => {
+    expect(triggerInputProvenance({ verified: false })).toBe("untrusted_external");
+    expect(triggerInputProvenance({ verified: true })).toBe("user");
+    expect(triggerInputProvenance({ verified: true, trust: "untrusted_external" })).toBe("untrusted_external");
+    expect(triggerInputProvenance({ verified: false, trust: "user" })).toBe("user");
+  });
+
+  it("reads only valid trust settings and never offers trusted", () => {
+    expect(triggerTrustOf({ inputTrust: "user" })).toBe("user");
+    expect(triggerTrustOf({ inputTrust: "trusted" })).toBeUndefined();
+    expect(triggerTrustOf({})).toBeUndefined();
+    expect(triggerTrustOf(null)).toBeUndefined();
+    expect(TRIGGER_TRUST_LEVELS).not.toContain("trusted");
+  });
+
+  it("the node schema accepts the optional keys and refuses bad values", () => {
+    const base = { id: "w", type: "webhook_input", name: "W", position: { x: 0, y: 0 } };
+    expect(workflowNodeSchema.safeParse({ ...base, config: {} }).success).toBe(true);
+    expect(workflowNodeSchema.safeParse({ ...base, config: { inputTrust: "user", sensitiveOutput: true } }).success).toBe(true);
+    expect(workflowNodeSchema.safeParse({ ...base, config: { inputTrust: "trusted" } }).success).toBe(false);
+    expect(workflowNodeSchema.safeParse({ ...base, config: { sensitiveOutput: "yes" } }).success).toBe(false);
+  });
+
+  it("endorsing turns untrusted_external into user and keeps everything else", () => {
+    const labels: DataLabels = { provenance: ["untrusted_external", "sensitive"], dataClasses: ["email"], source: "propagated" };
+    expect(endorseLabels(labels)).toEqual({ provenance: ["user", "sensitive"], dataClasses: ["email"], source: "propagated" });
+    const trusted: DataLabels = { provenance: ["trusted"], dataClasses: [], source: "propagated" };
+    expect(endorseLabels(trusted)).toBe(trusted);
+  });
+
+  it("data classes imply sensitive; a declared flag reads only true", () => {
+    expect(withImpliedSensitive({ provenance: ["user"], dataClasses: ["iban"], source: "propagated" }).provenance).toEqual(["user", "sensitive"]);
+    expect(withImpliedSensitive({ provenance: ["user"], dataClasses: [], source: "propagated" }).provenance).toEqual(["user"]);
+    expect(declaresSensitiveOutput({ sensitiveOutput: true })).toBe(true);
+    expect(declaresSensitiveOutput({ sensitiveOutput: "true" })).toBe(false);
+    expect(declaresSensitiveOutput(undefined)).toBe(false);
   });
 });

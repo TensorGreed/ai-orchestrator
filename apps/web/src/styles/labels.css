@@ -36,3 +36,54 @@
 .guard-label-tracking .kb-subtle {
   margin: 0 0 0 22px;
 }
+
+/* 12.2 — an approval cleared outside content here (who and when in the tooltip). */
+.data-label-chip.is-cleared {
+  border-color: var(--ok);
+  color: var(--ok);
+}
+
+/* 12.2 — the last run's label badge on a canvas node: outside content, sensitive, or cleared by an approval. */
+.wf-node-label-badge {
+  position: absolute;
+  top: -9px;
+  left: 14px;
+  padding: 0 6px;
+  border-radius: var(--r-pill);
+  border: 1px solid var(--warn);
+  background: var(--warn-soft);
+  color: var(--warn);
+  font: 600 10px/16px var(--font-body);
+  white-space: nowrap;
+  z-index: 4;
+  pointer-events: auto;
+}
+
+.wf-node-label-badge.is-sensitive {
+  border-color: var(--err);
+  background: var(--err-soft);
+  color: var(--err);
+}
+
+.wf-node-label-badge.is-cleared {
+  border-color: var(--ok);
+  background: var(--ok-soft);
+  color: var(--ok);
+}
+
+.data-label-chip.is-sensitive {
+  border-color: var(--err);
+  color: var(--err);
+}
+
+/* 12.2 — the Secrets page's "Sensitive output" checkbox. */
+.secret-sensitive-toggle {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  margin-top: 10px;
+}
+
+.secret-sensitive-toggle small {
+  display: block;
+}

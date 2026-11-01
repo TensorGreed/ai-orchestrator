@@ -42,13 +42,30 @@ describeStoreContract("store contract: secrets", (ctx) => {
     const listed = await store.listSecrets();
     expect(listed.map((s) => s.id)).toEqual(["s2", "s1"]);
     expect(listed[0]).not.toHaveProperty("ciphertext");
-    expect(listed[1]).toEqual({ id: "s1", name: "Secret s1", provider: "openai", created_at: s1?.created_at, projectId: DEFAULT_PROJECT_ID, source: "local", externalProviderId: null, externalKey: null });
+    expect(listed[1]).toEqual({ id: "s1", name: "Secret s1", provider: "openai", created_at: s1?.created_at, projectId: DEFAULT_PROJECT_ID, source: "local", externalProviderId: null, externalKey: null, sensitiveOutput: false });
     expect((await store.listSecrets({ projectId: DEFAULT_PROJECT_ID })).map((s) => s.id)).toEqual(["s1"]);
     expect((await store.listSecrets({ projectId: "p1" })).map((s) => s.id)).toEqual(["s2"]);
 
     await secret(store, "s2", { name: "Renamed", ciphertext: "ct-new" });
     expect(await store.getSecret("s2")).toMatchObject({ name: "Renamed", ciphertext: "ct-new", projectId: DEFAULT_PROJECT_ID, source: "local", externalProviderId: null });
     expect(await store.countSecretsUsingExternalProvider("prov")).toBe(0);
+  });
+
+  it("12.2 sensitive output flag: set and cleared by id, listed, kept when the secret is saved again", async () => {
+    const store = ctx.store();
+    await secret(store, "s1");
+    await secret(store, "s2");
+    expect(await store.listSensitiveOutputSecretIds()).toEqual([]);
+    expect(await store.setSecretSensitiveOutput("s2", true)).toBe(true);
+    expect(await store.setSecretSensitiveOutput("missing", true)).toBe(false);
+    expect(await store.listSensitiveOutputSecretIds()).toEqual(["s2"]);
+    expect((await store.listSecrets()).find((entry) => entry.id === "s2")?.sensitiveOutput).toBe(true);
+    // A rotation (saving the secret again) keeps the flag.
+    await secret(store, "s2", { ciphertext: "ct-rotated" });
+    expect(await store.listSensitiveOutputSecretIds()).toEqual(["s2"]);
+    expect(await store.setSecretSensitiveOutput("s2", false)).toBe(true);
+    expect(await store.listSensitiveOutputSecretIds()).toEqual([]);
+    expect(await store.deleteSecret("s1")).toBe(true);
   });
 
   it("deleteSecret removes the secret with its shares and cache entry, once", async () => {

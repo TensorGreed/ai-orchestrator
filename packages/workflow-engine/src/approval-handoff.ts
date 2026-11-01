@@ -29,6 +29,8 @@ export interface ApprovalHandoffRequest {
 
 export class ApprovalHandoffSignal extends Error {
   readonly request: ApprovalHandoffRequest;
+  /** 12.2 — what the request showed the approver: the nodes its templates read, and the run input when they read it. */
+  shown?: { nodeIds: string[]; input: boolean };
   constructor(request: ApprovalHandoffRequest) {
     super(request.message);
     this.name = "ApprovalHandoffSignal";

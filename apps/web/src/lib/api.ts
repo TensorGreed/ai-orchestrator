@@ -843,6 +843,8 @@ export interface SecretListItem {
   source?: "local" | "external";
   externalProviderId?: string | null;
   externalKey?: string | null;
+  /** 12.2 — nodes that use this secret produce sensitive output. */
+  sensitiveOutput?: boolean;
 }
 
 export async function fetchSecrets(options: { projectId?: string } = {}) {
@@ -855,17 +857,27 @@ export async function createSecret(payload: {
   provider: string;
   value: string;
   projectId?: string;
+  sensitiveOutput?: boolean;
 }) {
   return apiRequest<{
     id: string;
     name: string;
     provider: string;
     projectId: string;
+    sensitiveOutput?: boolean;
     /** Non-blocking notes about the saved value; they never contain it. */
     warnings?: string[];
   }>("/api/secrets", {
     method: "POST",
     body: JSON.stringify(payload)
+  });
+}
+
+/** 12.2 — flag a secret "sensitive output" or clear the flag (clearing is admin-only). */
+export async function setSecretSensitiveOutput(secretId: string, sensitiveOutput: boolean) {
+  return apiRequest<{ id: string; sensitiveOutput: boolean }>(`/api/secrets/${encodeURIComponent(secretId)}/sensitive-output`, {
+    method: "PUT",
+    body: JSON.stringify({ sensitiveOutput })
   });
 }
 

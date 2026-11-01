@@ -53,7 +53,7 @@ A Guard node attached to a port does not run as a workflow step and cannot have 
 
 **Workers.** A Supervisor's workers are agents too. Each worker runs with its own guard port or, without one, the automatic profiles. A worker's answer is a tool result for the Supervisor, so the Supervisor's own `tool_result` check sees it. When a worker pauses for approval, the Supervisor pauses with it.
 
-**Spotlighting and canaries.** A profile with `spotlighting` (`delimiters` or `datamark`) wraps every tool result before the model sees it and adds the matching instructions to the start of the system prompt (with `hardenSystemPrompt`, also the prompt-hardening paragraph). A profile with `canaries: { enabled: true }` plants a random canary line in the system prompt and checks tool arguments and the final answer for it.
+**Spotlighting and canaries.** A profile with `spotlighting` (`delimiters` or `datamark`) wraps every tool result before the model sees it, and the parts of an agent's prompt that come from outside content (template values read from untrusted steps, or a server prompt) and memory holding outside content, and adds the matching instructions to the start of the system prompt (with `hardenSystemPrompt`, also the prompt-hardening paragraph). Only the model call gets the marked text: memory keeps the prompt and the conversation as written, so marks never pile up across turns. A profile with `canaries: { enabled: true }` plants a random canary line in the system prompt and checks tool arguments and the final answer for it.
 
 ### Automatic profiles
 

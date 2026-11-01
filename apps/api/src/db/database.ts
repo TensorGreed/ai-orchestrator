@@ -3523,6 +3523,8 @@ export class SqliteStore implements Store {
     this.ensureColumn("secrets", "source", "TEXT", "'local'");
     this.ensureColumn("secrets", "external_provider_id", "TEXT");
     this.ensureColumn("secrets", "external_key", "TEXT");
+    // 12.2 (v51) — "sensitive output": nodes that use the secret produce sensitive output.
+    this.ensureColumn("secrets", "sensitive_output", "INTEGER NOT NULL", "0");
     this.ensureColumn("execution_history", "custom_data_json", "TEXT");
     // Phase 11.2 — columns added to approval_requests after it first shipped on this branch.
     this.ensureColumn("approval_requests", "asking_workflow_id", "TEXT");
@@ -4344,6 +4346,7 @@ export class SqliteStore implements Store {
       source: "local" | "external";
       externalProviderId: string | null;
       externalKey: string | null;
+      sensitiveOutput: boolean;
     }
   >> {
     const clauses: string[] = [];
@@ -4353,9 +4356,9 @@ export class SqliteStore implements Store {
       params.push(DEFAULT_PROJECT_ID, options.projectId);
     }
     const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
-    const rows = this.queryAll<SecretRow>(
+    const rows = this.queryAll<SecretRow & { sensitive_output?: unknown }>(
       `SELECT id, name, provider, iv, auth_tag, ciphertext, created_at, project_id,
-              source, external_provider_id, external_key
+              source, external_provider_id, external_key, sensitive_output
        FROM secrets ${where}
        ORDER BY created_at DESC`,
       params
@@ -4369,8 +4372,21 @@ export class SqliteStore implements Store {
       projectId: row.project_id ? toString(row.project_id) : DEFAULT_PROJECT_ID,
       source: row.source === "external" ? "external" : "local",
       externalProviderId: row.external_provider_id ? toString(row.external_provider_id) : null,
-      externalKey: row.external_key ? toString(row.external_key) : null
+      externalKey: row.external_key ? toString(row.external_key) : null,
+      sensitiveOutput: Number(row.sensitive_output ?? 0) === 1
     }));
+  }
+
+  async setSecretSensitiveOutput(id: string, sensitiveOutput: boolean): Promise<boolean> {
+    const existing = this.queryOne<{ id: string }>(`SELECT id FROM secrets WHERE id = ?`, [id]);
+    if (!existing) return false;
+    this.exec(`UPDATE secrets SET sensitive_output = ? WHERE id = ?`, [sensitiveOutput ? 1 : 0, id]);
+    this.persist();
+    return true;
+  }
+
+  async listSensitiveOutputSecretIds(): Promise<string[]> {
+    return this.queryAll<{ id: string }>(`SELECT id FROM secrets WHERE sensitive_output = 1 ORDER BY id`).map((row) => toString(row.id));
   }
 
   async getSecret(id: string): Promise<(SecretRow & {

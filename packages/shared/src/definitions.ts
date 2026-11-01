@@ -46,7 +46,8 @@ const baseNodeDefinitions: NodeDefinition[] = [
         responseMode: { type: "string", enum: ["onReceived", "lastNode", "responseNode"] },
         responseCode: { type: "number" },
         responseHeaders: { type: "object" },
-        responseBody: { type: "string" }
+        responseBody: { type: "string" },
+        inputTrust: { type: "string", enum: ["user", "untrusted_external"] }
       }
     },
     sampleConfig: {

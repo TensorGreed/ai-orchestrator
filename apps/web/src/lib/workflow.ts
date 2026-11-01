@@ -1,6 +1,7 @@
 import { WORKFLOW_SCHEMA_VERSION, type Workflow, type WorkflowEdge, type WorkflowNode, type WorkflowNodeType } from "@ai-orchestrator/shared";
 import type { Edge, Node } from "reactflow";
 import type { McpCanvasMarker, McpNavTarget } from "./mcp-control-plane";
+import type { CanvasLabelBadge } from "./taint-sources";
 import {
   computeAttachmentSlots,
   findHubOf,
@@ -54,6 +55,8 @@ export interface EditorNodeData {
   liveStartedAtMs?: number;
   pinned?: boolean;
   disabled?: boolean;
+  /** 12.2 — render-time only: the last run's label badge (outside, sensitive, cleared); none for unlabelled runs. */
+  labelBadge?: CanvasLabelBadge;
   color?: NodeColorKey;
   onOpenAgentAttachmentDrawer?: (sourceHandle: "chat_model" | "memory" | "tool" | "worker" | "guard" | "protection") => void;
   /**

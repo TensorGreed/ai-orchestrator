@@ -131,4 +131,10 @@ export interface RunWorkflowExecutionInput {
    * started it. Absent: decided from the trigger and who started the run.
    */
   inputLabels?: DataLabels;
+  /**
+   * 12.2 — set with `inputLabels` by a route that derived them from the trigger itself (a webhook's verified auth or
+   * an admin's trust setting): the trigger node records them on its result even when the run does not track labels,
+   * so replays of the run keep them.
+   */
+  recordInputLabels?: boolean;
 }

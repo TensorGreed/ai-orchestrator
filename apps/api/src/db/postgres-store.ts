@@ -311,6 +311,14 @@ export class PostgresStore implements Store {
   async listSecrets(...args: Parameters<Store["listSecrets"]>): ReturnType<Store["listSecrets"]> {
     return secrets.listSecrets(this.ctx, ...args);
   }
+
+  async setSecretSensitiveOutput(...args: Parameters<Store["setSecretSensitiveOutput"]>): ReturnType<Store["setSecretSensitiveOutput"]> {
+    return secrets.setSecretSensitiveOutput(this.ctx, ...args);
+  }
+
+  async listSensitiveOutputSecretIds(): ReturnType<Store["listSensitiveOutputSecretIds"]> {
+    return secrets.listSensitiveOutputSecretIds(this.ctx);
+  }
   async getSecret(...args: Parameters<Store["getSecret"]>): ReturnType<Store["getSecret"]> {
     return secrets.getSecret(this.ctx, ...args);
   }

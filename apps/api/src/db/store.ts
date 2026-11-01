@@ -1437,8 +1437,14 @@ export interface Store {
       source: "local" | "external";
       externalProviderId: string | null;
       externalKey: string | null;
+      /** 12.2 — nodes that use this secret produce sensitive output. */
+      sensitiveOutput: boolean;
     }
   >>;
+  /** 12.2 — flags (or unflags) a secret "sensitive output"; false when there is no such secret. */
+  setSecretSensitiveOutput(id: string, sensitiveOutput: boolean): Promise<boolean>;
+  /** 12.2 — every secret flagged "sensitive output", by id. */
+  listSensitiveOutputSecretIds(): Promise<string[]>;
   getSecret(id: string): Promise<(SecretRow & {
     projectId: string;
     source: "local" | "external";

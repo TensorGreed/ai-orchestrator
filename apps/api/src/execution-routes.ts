@@ -16,6 +16,7 @@ import crypto from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import {
+  unionDataLabels,
   workflowExecuteRequestSchema,
   type DataLabels,
   type McpReplayMode,
@@ -574,6 +575,11 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
         config.WORKFLOW_EXECUTION_TIMEOUT_MS
       ),
       customData: executionPayload.customData,
+      // 12.2 — a retry re-sends the failed run's input: it keeps where that input came from (a retry never raises
+      // an unauthenticated webhook's payload to the user's), plus `user` for what the retrying user adds. Recorded on
+      // the trigger's result, so a retry of this retry keeps it too.
+      inputLabels: unionDataLabels([historyInputLabels(sourceExecution, workflow), { provenance: ["user"], dataClasses: [], source: "propagated" }]),
+      recordInputLabels: true,
       executionId,
       triggerType: "manual_retry",
       triggeredBy: user.email
@@ -643,8 +649,10 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
       // Phase 15.4: not production traffic, so the draft (or the candidate given) runs.
       channel: "draft",
       ...replayRunInputFor(source.triggerType, storedInput),
-      // Phase 16 — the source run's input origin, not the user replaying it.
+      // Phase 16 — the source run's input origin, not the user replaying it (12.2: recorded on this run's trigger
+      // result too, so a replay of this replay keeps it).
       inputLabels: historyInputLabels(source, workflow),
+      recordInputLabels: true,
       policyActor: user,
       workflow,
       customData,

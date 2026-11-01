@@ -852,13 +852,45 @@ export class DefaultAgentRuntime implements AgentRuntimeAdapter {
     const clarifyTool = createClarifyTool();
     const clarifyHint = `\n\nIf you cannot complete the task without information only the user can provide, call the \`${CLARIFY_TOOL_NAME}\` tool with a focused question. Your run pauses and resumes when they reply. Don't use this for confirmation when the request is already clear.`;
 
+    // 12.2 — a message the model sees marked (spotlighted) maps to the text it was marked from. Memory saves that
+    // text, so marks never reach storage and never nest when the next turn marks the same message again.
+    // Guard checks judge the unmarked text; a rewrite is marked again the same way.
+    const unmarkedContent = new WeakMap<ChatMessage, { raw: string; mark: (raw: string) => string }>();
+    const markedCopy = (message: ChatMessage, raw: string, mark: (raw: string) => string): ChatMessage => {
+      const marked = mark(raw);
+      const copy = { ...message, content: marked };
+      if (marked !== raw) unmarkedContent.set(copy, { raw, mark });
+      return copy;
+    };
+    const unmarked = (message: ChatMessage): ChatMessage => {
+      const entry = unmarkedContent.get(message);
+      return entry === undefined ? message : { ...message, content: entry.raw };
+    };
+    const contentToJudge = (message: ChatMessage): string => unmarkedContent.get(message)?.raw ?? message.content;
+    /** The message with new unmarked content, marked again when it was marked. */
+    const withContent = (message: ChatMessage, raw: string): ChatMessage => {
+      const entry = unmarkedContent.get(message);
+      return entry ? markedCopy(message, raw, entry.mark) : { ...message, content: raw };
+    };
+
     let memoryMessages: ChatMessage[] = [];
     if (memoryEnabled && request.sessionId) {
       const loaded = await context.memoryStore!.loadMessages(memoryNamespace, request.sessionId);
       memoryMessages = repairToolCallPairs(normalizeStoredMessages(loaded, memoryMaxMessages, toolOutputLimits.messageMaxChars));
-      // Phase 16 — memory written by earlier runs brings its labels (older rows have none); read only on tracked runs.
-      if (labelTracking?.persist && memoryMessages.length > 0 && context.memoryStore!.loadLabels) {
-        memoryLabels = (await context.memoryStore!.loadLabels(memoryNamespace, request.sessionId)) ?? undefined;
+      // Phase 16 — memory written by earlier runs brings its labels (older rows have none); read only on tracked runs,
+      // or (12.2) when spotlighting may mark untrusted memory.
+      const spotlightMemory = context.guard?.spotlightUntrusted;
+      if ((labelTracking?.persist || spotlightMemory) && memoryMessages.length > 0 && context.memoryStore!.loadLabels) {
+        const stored = (await context.memoryStore!.loadLabels(memoryNamespace, request.sessionId)) ?? undefined;
+        if (labelTracking?.persist) memoryLabels = stored;
+        // 12.2 — memory that holds untrusted content: the user turns and tool results it replays are marked.
+        if (spotlightMemory && stored?.provenance.includes("untrusted_external")) {
+          memoryMessages = memoryMessages.map((message) =>
+            (message.role === "user" || message.role === "tool") && typeof message.content === "string" && message.content.length > 0
+              ? markedCopy(message, message.content, spotlightMemory)
+              : message
+          );
+        }
       }
     }
 
@@ -873,14 +905,22 @@ export class DefaultAgentRuntime implements AgentRuntimeAdapter {
     const clarifyResumeToolCallId = findUnansweredClarifyToolCallId(memoryMessages);
     const resumingFromClarification = clarifyResumeToolCallId !== null && request.userPrompt.trim().length > 0;
     if (resumingFromClarification) {
+      const reply: ChatMessage = {
+        role: "tool",
+        toolCallId: clarifyResumeToolCallId,
+        name: CLARIFY_TOOL_NAME,
+        content: serializeToolMessage(true, { user_reply: request.userPrompt }, toolOutputLimits)
+      };
+      const modelReply = request.modelUserPrompt;
       memoryMessages = [
         ...memoryMessages,
-        {
-          role: "tool",
-          toolCallId: clarifyResumeToolCallId,
-          name: CLARIFY_TOOL_NAME,
-          content: serializeToolMessage(true, { user_reply: request.userPrompt }, toolOutputLimits)
-        }
+        modelReply !== undefined && modelReply !== request.userPrompt
+          ? markedCopy(reply, reply.content, (raw) =>
+              raw === reply.content
+                ? serializeToolMessage(true, { user_reply: modelReply }, toolOutputLimits)
+                : context.guard?.spotlightUntrusted?.(raw) ?? raw
+            )
+          : reply
       ];
     }
 
@@ -970,11 +1010,15 @@ ${effectiveSystemPrompt}`;
       // IS the continuation — don't double up with a fresh user message.
       ...(resumingFromClarification
         ? []
-        : [{
-            role: "user" as const,
-            content: normalizeMessageContent(request.userPrompt, MAX_MESSAGE_CHARS),
-            images: request.images
-          }])
+        : [
+            markedCopy({ role: "user", content: "", images: request.images }, normalizeMessageContent(request.userPrompt, MAX_MESSAGE_CHARS), (raw) =>
+              request.modelUserPrompt === undefined
+                ? raw
+                : raw === normalizeMessageContent(request.userPrompt, MAX_MESSAGE_CHARS)
+                  ? normalizeMessageContent(request.modelUserPrompt, MAX_MESSAGE_CHARS)
+                  : context.guard?.spotlightUntrusted?.(raw) ?? raw
+            )
+          ])
     ];
     const externalToolDefinitions = tools.tools;
     const internalTools: RuntimeInternalTool[] = [...sessionCacheTools, clarifyTool];
@@ -1006,7 +1050,8 @@ ${effectiveSystemPrompt}`;
         const index = pendingPromptChecks.shift()!;
         const message = messages[index];
         if (!message) continue;
-        const text = message.role === "tool" ? request.userPrompt : message.content;
+        // The check judges the text as written, not the copy marked for the model.
+        const text = message.role === "tool" ? request.userPrompt : contentToJudge(message);
         const decision = await guard.check({
           channel: "prompt",
           content: text,
@@ -1019,10 +1064,11 @@ ${effectiveSystemPrompt}`;
         if (decision.outcome === "rewrite") {
           if (promptLabels && decision.declassified) promptLabels = withoutDataClasses(promptLabels, decision.declassified);
           const rewritten = typeof decision.content === "string" ? decision.content : JSON.stringify(decision.content);
-          messages[index] =
-            message.role === "tool"
-              ? { ...message, content: serializeToolMessage(true, { user_reply: rewritten }, toolOutputLimits) }
-              : { ...message, content: normalizeMessageContent(rewritten, MAX_MESSAGE_CHARS) };
+          // 12.2 — a marked prompt stays marked after a rewrite: the rewritten text is marked as a whole.
+          messages[index] = withContent(
+            message,
+            message.role === "tool" ? serializeToolMessage(true, { user_reply: rewritten }, toolOutputLimits) : normalizeMessageContent(rewritten, MAX_MESSAGE_CHARS)
+          );
         }
       }
     };
@@ -1043,7 +1089,7 @@ ${effectiveSystemPrompt}`;
       modelCheckedUpTo = messages.length;
       if (indexes.length === 0) return;
       const decision = await guard.checkModelCall({
-        content: indexes.map((index) => messages[index]!.content),
+        content: indexes.map((index) => contentToJudge(messages[index]!)),
         ...(labelTracking ? { dataLabels: accumulatedLabels() } : {}),
         iteration
       });
@@ -1056,7 +1102,7 @@ ${effectiveSystemPrompt}`;
         }
         indexes.forEach((index, position) => {
           const value = rewritten[position];
-          messages[index] = { ...messages[index]!, content: typeof value === "string" ? value : JSON.stringify(value) };
+          messages[index] = withContent(messages[index]!, typeof value === "string" ? value : JSON.stringify(value));
         });
       }
     };
@@ -1083,6 +1129,7 @@ ${effectiveSystemPrompt}`;
       // message would still see the orphaned tool call and treat the
       // prompt as a re-resume.
       const persistable = messages
+        .map(unmarked)
         .filter((message, index) => !(index === 0 && message.role === "system"))
         .filter((message) => {
           if (message.role !== "tool") return true;
@@ -1593,12 +1640,9 @@ ${effectiveSystemPrompt}`;
               }
 
               const serializedResult = serializeToolMessage(true, output, toolOutputLimits);
-              messages.push({
-                role: "tool",
-                content: guard?.spotlight && !internalTool ? guard.spotlight(serializedResult, { toolName: call.name, iteration }) : serializedResult,
-                toolCallId: call.id,
-                name: call.name
-              });
+              const resultMessage: ChatMessage = { role: "tool", content: serializedResult, toolCallId: call.id, name: call.name };
+              const spotlightResult = guard?.spotlight && !internalTool ? guard.spotlight.bind(guard) : undefined;
+              messages.push(spotlightResult ? markedCopy(resultMessage, serializedResult, (raw) => spotlightResult(raw, { toolName: call.name, iteration })) : resultMessage);
             } catch (error) {
               if (isAgentGuardInterrupt(error)) {
                 throw error;
@@ -1664,12 +1708,9 @@ ${effectiveSystemPrompt}`;
               }
 
               const serializedError = serializeToolMessage(false, toolError.error, toolOutputLimits);
-              messages.push({
-                role: "tool",
-                content: guard?.spotlight && guardedTool ? guard.spotlight(serializedError, { toolName: call.name, iteration }) : serializedError,
-                toolCallId: call.id,
-                name: call.name
-              });
+              const errorMessage: ChatMessage = { role: "tool", content: serializedError, toolCallId: call.id, name: call.name };
+              const spotlightError = guard?.spotlight && guardedTool ? guard.spotlight.bind(guard) : undefined;
+              messages.push(spotlightError ? markedCopy(errorMessage, serializedError, (raw) => spotlightError(raw, { toolName: call.name, iteration })) : errorMessage);
             } finally {
               // Phase 10.1 — stamp timing on whatever result this call produced.
               const callDurationMs = Math.max(0, Date.now() - callStartedMs);

@@ -2324,6 +2324,18 @@ export const MIGRATIONS: Migration[] = [
       ALTER TABLE mcp_tool_calls DROP COLUMN IF EXISTS labels_json;
       DROP TABLE IF EXISTS mcp_tool_open_world_overrides;
     `
+  },
+  {
+    version: 51,
+    description: "12.2 — secrets flagged \"sensitive output\": nodes that use one produce sensitive output",
+    // A flag on the secret's metadata (never its value): a node whose config references the secret gets the
+    // `sensitive` label on every run, without a scan. Existing secrets stay unflagged.
+    up: `
+      ALTER TABLE secrets ADD COLUMN IF NOT EXISTS sensitive_output INTEGER NOT NULL DEFAULT 0;
+    `,
+    down: `
+      ALTER TABLE secrets DROP COLUMN IF EXISTS sensitive_output;
+    `
   }
 ];
 

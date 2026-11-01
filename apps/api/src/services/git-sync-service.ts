@@ -5,6 +5,7 @@ import type { GitSyncConfig, GitSyncStatus, Workflow } from "@ai-orchestrator/sh
 import type { SecretService } from "./secret-service";
 import type { VariablesService } from "./variables-service";
 import type { Store } from "../db/store.js";
+import { withoutTriggerTrust } from "./trigger-trust.js";
 
 export interface GitSyncServiceOptions {
   workdirRoot: string;
@@ -461,7 +462,9 @@ export class GitSyncService {
         continue;
       }
       if (!parsed || typeof parsed !== "object" || !parsed.id || !Array.isArray(parsed.nodes)) continue;
-      const resolved = await this.resolveCredentials(parsed);
+      // 12.2 — a trigger's input trust is an admin's setting, not the repository's: a pulled workflow has none (an
+      // admin sets it again).
+      const resolved = withoutTriggerTrust(await this.resolveCredentials(parsed));
       const reason = (await canImport?.(resolved)) ?? null;
       if (reason) {
         refused.push({ workflowId: resolved.id, file, reason });
