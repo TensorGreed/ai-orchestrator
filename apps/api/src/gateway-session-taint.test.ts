@@ -159,6 +159,28 @@ function calculatorWorkflowTool(id: string, serverId: string): Workflow {
   };
 }
 
+/** A workflow tool that calls the sensitive workflow `childId` as a sub-workflow, then fails on a tool that does not exist. */
+function failingParentTool(id: string, childId: string, serverId: string): Workflow {
+  return {
+    id,
+    name: "Failing parent",
+    schemaVersion: "1.0.0",
+    workflowVersion: 1,
+    projectId: "default",
+    nodes: [
+      { id: "trigger", type: "mcp_server_trigger", name: "Trigger", position: { x: 0, y: 0 }, config: { path: `${id}-path`, toolName: "failing_parent", inputSchema: { type: "object" }, authMode: "public" } },
+      { id: "child", type: "execute_workflow", name: "Child", position: { x: 200, y: 0 }, config: { workflowId: childId, mode: "sync" } },
+      { id: "boom", type: "mcp_tool", name: "Boom", position: { x: 400, y: 0 }, config: { registryServerId: serverId, toolName: "no_such_tool", argsTemplate: "{}", retry: { enabled: false } } },
+      { id: "out", type: "output", name: "Out", position: { x: 600, y: 0 }, config: {} }
+    ],
+    edges: [
+      { id: "e1", source: "trigger", target: "child" },
+      { id: "e2", source: "child", target: "boom" },
+      { id: "e3", source: "boom", target: "out" }
+    ]
+  };
+}
+
 interface Fixture {
   context: TestContext;
   admin: string;
@@ -178,6 +200,7 @@ async function setup(options: { track: boolean; presets?: McpSafetyPresetId[] })
   await context.store.upsertWorkflow(workflowTool("wf-plain", "plain_lookup", false));
   await context.store.upsertWorkflow(workflowTool("wf-secret", "secret_lookup", true));
   await context.store.upsertWorkflow(calculatorWorkflowTool("wf-calc", serverId));
+  await context.store.upsertWorkflow(failingParentTool("wf-failing", "wf-secret", serverId));
   const toolsetResponse = await call(admin, "POST", "/api/mcp/toolsets", {
     name: "Agent tools",
     projectId: "default",
@@ -186,7 +209,8 @@ async function setup(options: { track: boolean; presets?: McpSafetyPresetId[] })
       { kind: "server", serverId },
       { kind: "workflow", workflowId: "wf-plain" },
       { kind: "workflow", workflowId: "wf-secret" },
-      { kind: "workflow", workflowId: "wf-calc" }
+      { kind: "workflow", workflowId: "wf-calc" },
+      { kind: "workflow", workflowId: "wf-failing" }
     ]
   });
   expect(toolsetResponse.statusCode, toolsetResponse.body).toBe(201);
@@ -659,5 +683,14 @@ describe("a workflow tool's run that returned no output labels (a queue worker t
     expect((await callTool(fixture, secret, "secret_lookup", { text: "hello" })).outcome).toBe("ok");
     expect((await sessionView(fixture, secret))?.labels?.provenance).toEqual(["untrusted_external", "sensitive"]);
     expect((await callTool(fixture, secret, "calculator", { expression: "1+1" })).outcome).toBe("tool_error");
+  });
+
+  it("walks a sub-workflow the workflow calls: a failed run of a tool that called a sensitive child gives sensitive", async () => {
+    const fixture = await setup({ track: true, presets: ["sensitive_no_open_world"] });
+    engineLabels.drop = true;
+    const session = await openSession(fixture);
+    expect((await callTool(fixture, session, "failing_parent")).outcome).toBe("tool_error");
+    expect((await sessionView(fixture, session))?.labels?.provenance).toEqual(["untrusted_external", "sensitive"]);
+    expect((await callTool(fixture, session, "calculator", { expression: "1+1" })).outcome).toBe("tool_error");
   });
 });

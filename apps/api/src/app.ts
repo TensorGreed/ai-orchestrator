@@ -10780,7 +10780,9 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       // sensitive too when the workflow declares a sensitive source.
       const declared = await workflowDeclaresSensitiveSource(input.workflow.nodes, {
         sensitiveSecretIds: await sensitiveSecrets.ids(),
-        resolveRegisteredMcpServer: async (registryServerId) => await resolveRegisteredMcpServer(registryServerId)
+        resolveRegisteredMcpServer: async (registryServerId) => await resolveRegisteredMcpServer(registryServerId),
+        // The production versions, as the run itself resolves its sub-workflows.
+        loadWorkflow: runScope.dependenciesFor(input.workflow, { channel: "production" }).loadWorkflow
       });
       return {
         status: result.status,

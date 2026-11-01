@@ -105,7 +105,7 @@ A gateway call has no workflow run around it, so on its own it carries no [data 
 With it on, each client session keeps a set of labels that starts empty (the client's own request counts as `user`) and only grows:
 
 - After a call to a server tool, later calls in the session carry `untrusted_external`. Every server tool's result counts as outside content, as it does in runs. A server whose secret is flagged **Sensitive output** adds `sensitive` too.
-- After a call to a workflow tool, later calls carry the labels of the run's output: `untrusted_external` when it came from outside, `sensitive` from the workflow's declared sources, and data class names only when the run tracked them. If the run's labels did not come back (a run on a queue worker that does not send them), the result counts as outside content, and as `sensitive` when one of the workflow's nodes declares a sensitive source.
+- After a call to a workflow tool, later calls carry the labels of the run's output: `untrusted_external` when it came from outside, `sensitive` from the workflow's declared sources, and data class names only when the run tracked them. If the run's labels did not come back (a run on a queue worker that does not send them), the result counts as outside content, and as `sensitive` when one of the workflow's nodes, or a node of a sub-workflow it calls, declares a sensitive source. A sub-workflow that cannot be loaded, or one nested more than 10 levels deep, counts as sensitive.
 - A failed or cancelled call whose server was reached counts as outside content. A call that a rule denied, that waits for approval, or that the rate limit refused before it reached the server adds nothing.
 - Nothing the client sends (arguments, `_meta`, headers) is read as a label.
 

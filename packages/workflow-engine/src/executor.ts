@@ -1207,17 +1207,37 @@ async function declaresSensitiveSource(
 }
 
 /**
- * 12.2 — some node of the workflow declares a sensitive source (its "Sensitive output" flag, a flagged secret in its
- * config, or an MCP Tool node's registered server with a flagged secret). The MCP gateway falls back on it when a run
- * on another instance returned no output labels. Sub-workflows are not walked. Free when nothing is flagged and no
- * node carries the flag.
+ * 12.2 — some node of the workflow, or of a sub-workflow it calls, declares a sensitive source (its "Sensitive output"
+ * flag, a flagged secret in its config, or an MCP Tool node's registered server with a flagged secret). The MCP
+ * gateway falls back on it when a run on another instance returned no output labels. Sub-workflows are loaded with
+ * the run's own `loadWorkflow` and walked to the engine's sub-workflow depth; a workflow already visited is not
+ * walked again (a cycle). Fails closed: a sub-workflow that cannot be loaded, an Execute Workflow node with no
+ * loader to follow, or the depth cap all count as sensitive. Free when nothing is flagged and no node carries the flag
+ * and no node calls a sub-workflow.
  */
 export async function workflowDeclaresSensitiveSource(
   nodes: ReadonlyArray<Pick<WorkflowNode, "type" | "config">>,
-  dependencies: Pick<WorkflowExecutionDependencies, "sensitiveSecretIds" | "resolveRegisteredMcpServer">
+  dependencies: Pick<WorkflowExecutionDependencies, "sensitiveSecretIds" | "resolveRegisteredMcpServer" | "loadWorkflow">,
+  visited: Set<string> = new Set(),
+  depth = 0
 ): Promise<boolean> {
   for (const node of nodes) {
     if (await declaresSensitiveSource(node, dependencies)) return true;
+  }
+  for (const node of nodes) {
+    if (node.type !== "execute_workflow") continue;
+    const workflowId = typeof toRecord(node.config).workflowId === "string" ? String(toRecord(node.config).workflowId).trim() : "";
+    if (!workflowId || visited.has(workflowId)) continue;
+    if (depth >= MAX_SUB_WORKFLOW_DEPTH || !dependencies.loadWorkflow) return true;
+    visited.add(workflowId);
+    let child: Workflow | undefined;
+    try {
+      child = await dependencies.loadWorkflow(workflowId);
+    } catch {
+      return true;
+    }
+    if (!child) return true;
+    if (await workflowDeclaresSensitiveSource(child.nodes, dependencies, visited, depth + 1)) return true;
   }
   return false;
 }
