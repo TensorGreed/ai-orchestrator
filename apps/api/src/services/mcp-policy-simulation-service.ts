@@ -352,6 +352,8 @@ export class McpPolicySimulationService {
             // Phase 12.2 — the labels the call was decided with, when recorded (gateway calls only on a toolset that
             // tracks outside content per session); other rows stay undetermined.
             labels: call.labels ?? "unknown",
+            // Nothing scans a gateway call's results: its untracked labels read as the live evaluator read them.
+            ...(gateway ? { labelsNeverScanned: true } : {}),
             summary: call.argsSummary
           };
           // A call whose worst case is over the per-call ceiling comes back undetermined; one over what is left of

@@ -125,6 +125,12 @@ export interface PolicySimulationCall {
    * toolsets that do not track); otherwise (Phase 12.2) the labels the call was decided with.
    */
   labels: "none" | "unknown" | McpToolCallLabels;
+  /**
+   * Phase 12.2 — a gateway call: nothing ever scans its results, so the evaluator decided `sensitive` and data class
+   * names it did not list as not tracked (`classesTracked: false`), not as absent. Its recorded untracked labels are
+   * read the same way here, instead of as undetermined.
+   */
+  labelsNeverScanned?: boolean;
   summary: ToolArgumentSummary;
 }
 
@@ -649,7 +655,7 @@ function conditionText(condition: McpPolicyCondition): string {
  */
 export function evaluateConditionOnSummary(
   condition: McpPolicyCondition,
-  call: Pick<PolicySimulationCall, "summary" | "labels">,
+  call: Pick<PolicySimulationCall, "summary" | "labels" | "labelsNeverScanned">,
   quantifier: PolicyConditionQuantifier,
   context: PolicySimulationContext,
   budget: SimulationBudgetCheck = { textSafe: true, globSafe: true }
@@ -664,6 +670,9 @@ export function evaluateConditionOnSummary(
     // (a `sensitive` source) decides either way.
     const recordedPresent =
       typeof condition.value === "string" && ((recorded.provenance as readonly string[]).includes(condition.value) || recorded.dataClasses.includes(condition.value));
+    if (!call.labels.tracked && call.labelsNeverScanned) {
+      return { value: evaluatePolicyCondition(condition, {}, { ...recorded, classesTracked: false }, quantifier) };
+    }
     if (!call.labels.tracked && labelValueNeedsTracking(condition.value) && !recordedPresent) {
       return { value: "unknown", reason: `${conditionText(condition)}: the run did not track data labels, so it was not scanned for this one` };
     }

@@ -300,3 +300,91 @@ describe("simulation over recorded labels", () => {
     expect(evaluateRuleOnSummary(absent, call({ provenance: ["user"], dataClasses: [], tracked: true }), context)).toEqual({ state: "match" });
   });
 });
+
+describe("gateway calls: data classes and sensitive are not tracked", () => {
+  const summary: ToolArgumentSummary = { v: 3, kid: "k", fields: {} } as unknown as ToolArgumentSummary;
+  const context = { hashKey: new Uint8Array(32) };
+  const base = { ...mcpSafetyPresetRule("sensitive_no_open_world"), mode: "enforce" as const, additive: false, annotationHint: null, serverId: null };
+  const deny: McpToolPolicyRule = { ...base, id: "deny-email", effect: "deny", toolPattern: "send_email", conditions: null };
+  const carveOut: McpToolPolicyRule = { ...base, id: "allow-clean", effect: "allow", toolPattern: "send_email", conditions: { all: [{ op: "label_absent", value: "sensitive" }] } };
+  const gatewayLabels = (provenance: string[]) => ({ provenance, dataClasses: [], classesTracked: false });
+  const request = (provenance: string[] | null) => ({
+    role: "builder" as const,
+    adapterId: "http_mcp",
+    toolName: "send_email",
+    clientId: "mcl_1",
+    arguments: {},
+    ...(provenance ? { dataLabels: gatewayLabels(provenance) } : {})
+  });
+
+  it("never lets the absence of sensitive carve an allow out of a deny", () => {
+    // The reviewer's case: a session that read a server (outside content, no flagged secret) calls send_email.
+    expect(evaluateMcpToolPolicy([deny, carveOut], request(["user", "untrusted_external"])).effect).toBe("deny");
+    expect(evaluateMcpToolPolicy([deny, carveOut], request(["user"])).effect).toBe("deny");
+    // Untracked toolsets carry no labels at all: denied too, as before.
+    expect(evaluateMcpToolPolicy([deny, carveOut], request(null)).effect).toBe("deny");
+    // The same labels on a run that tracked: the carve-out applies.
+    expect(evaluateMcpToolPolicy([deny, carveOut], { ...request(null), dataLabels: { provenance: ["user", "untrusted_external"], dataClasses: [] } }).effect).toBe("allow");
+  });
+
+  it("keeps deny and approval rules on an absence matching (fail closed), and counts a present sensitive", () => {
+    const denyNoEmail: McpToolPolicyRule = { ...deny, id: "deny-no-class", conditions: { all: [{ op: "label_absent", value: "email" }] } };
+    const denyEmail: McpToolPolicyRule = { ...deny, id: "deny-class", conditions: { all: [{ op: "label_present", value: "email" }] } };
+    const denySensitive: McpToolPolicyRule = { ...deny, id: "deny-sensitive", conditions: { all: [{ op: "label_present", value: "sensitive" }] } };
+    expect(evaluateMcpToolPolicy([denyNoEmail], request(["user"])).effect).toBe("deny");
+    expect(evaluateMcpToolPolicy([denyEmail], request(["user", "untrusted_external"])).effect).toBe("allow");
+    expect(evaluateMcpToolPolicy([denySensitive], request(["user", "untrusted_external", "sensitive"])).effect).toBe("deny");
+    expect(evaluateMcpToolPolicy([deny, carveOut], request(["user", "sensitive"])).effect).toBe("deny");
+    // Provenance labels are decided as listed.
+    const allowNoOutside: McpToolPolicyRule = { ...carveOut, id: "allow-no-outside", conditions: { all: [{ op: "label_absent", value: "untrusted_external" }] } };
+    expect(evaluateMcpToolPolicy([deny, allowNoOutside], request(["user"])).effect).toBe("allow");
+    expect(evaluateMcpToolPolicy([deny, allowNoOutside], request(["user", "untrusted_external"])).effect).toBe("deny");
+  });
+
+  it("is read the same way by the simulator for gateway rows, and stays undetermined for run rows", () => {
+    const conditions = [
+      { op: "label_absent" as const, value: "sensitive" },
+      { op: "label_present" as const, value: "sensitive" },
+      { op: "label_absent" as const, value: "email" },
+      { op: "label_present" as const, value: "email" },
+      { op: "label_absent" as const, value: "untrusted_external" },
+      { op: "label_present" as const, value: "untrusted_external" }
+    ];
+    const provenances: Array<Array<"user" | "untrusted_external" | "sensitive">> = [["user"], ["user", "untrusted_external"], ["user", "untrusted_external", "sensitive"]];
+    for (const effect of ["deny", "require_approval", "allow"] as const) {
+      for (const condition of conditions) {
+        for (const provenance of provenances) {
+          const rule: McpToolPolicyRule = { ...deny, id: "r", effect, conditions: { all: [condition] } };
+          const live = evaluateMcpToolPolicy([rule], request(provenance)).matchedRules.some((matched) => matched.id === "r");
+          const recorded: PolicySimulationCall = {
+            role: "builder",
+            projectId: null,
+            workflowId: null,
+            clientId: "mcl_1",
+            adapterId: "http_mcp",
+            toolName: "send_email",
+            labels: { provenance, tracked: false },
+            labelsNeverScanned: true,
+            summary
+          };
+          expect(evaluateRuleOnSummary(rule, recorded, context).state, `${effect} ${condition.op} ${condition.value} ${provenance.join(",")}`).toBe(live ? "match" : "no_match");
+        }
+      }
+    }
+    // The carve-out over a gateway row that read a server: unchanged (still denied), not undetermined.
+    const gatewayRow: PolicySimulationCall = {
+      role: "builder",
+      projectId: null,
+      workflowId: null,
+      clientId: "mcl_1",
+      adapterId: "http_mcp",
+      toolName: "send_email",
+      labels: { provenance: ["user", "untrusted_external"], tracked: false },
+      labelsNeverScanned: true,
+      summary
+    };
+    expect(simulatePolicyTransition([deny], [deny, carveOut], gatewayRow, context).draft.effect).toBe("deny");
+    const runRow = { ...gatewayRow, workflowId: "wf", clientId: null, labelsNeverScanned: undefined };
+    expect(evaluateRuleOnSummary(carveOut, runRow, context).state).toBe("unknown");
+  });
+});
