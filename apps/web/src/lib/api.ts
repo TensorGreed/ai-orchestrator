@@ -135,6 +135,7 @@ import type {
   WorkflowListItem,
   WorkflowValidationResult
 } from "@ai-orchestrator/shared";
+import type { ModelAllowlistDecision, ModelAllowlistEntry, ModelAllowlistEntryCreate } from "@ai-orchestrator/shared";
 import { apiFetch, openEventSource } from "./transport";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "";
@@ -969,6 +970,8 @@ export async function testProvider(payload: {
   provider: LLMProviderConfig;
   prompt?: string;
   systemPrompt?: string;
+  /** 12.6 — the workflow's project, so its model allowlist applies to the test. */
+  projectId?: string;
 }): Promise<{
   ok: boolean;
   message: string;
@@ -4328,6 +4331,34 @@ export async function discardReplayCaptures(ids: string[]) {
 }
 
 // Phase 16 — data destinations (deployment-wide; admins change them).
+// 12.6 — model allowlists (Security → Models).
+export interface ModelAllowlistListResponse {
+  entries: ModelAllowlistEntry[];
+  providers: Array<{ id: string; name: string }>;
+  canEdit: boolean;
+}
+
+export async function fetchModelAllowlist() {
+  return apiRequest<ModelAllowlistListResponse>("/api/model-allowlist");
+}
+
+export async function addModelAllowlistEntry(payload: ModelAllowlistEntryCreate) {
+  return apiRequest<{ entry: ModelAllowlistEntry }>("/api/model-allowlist", { method: "POST", body: JSON.stringify(payload) });
+}
+
+export async function removeModelAllowlistEntry(id: string) {
+  return apiRequest<{ ok: true; entry: ModelAllowlistEntry }>(`/api/model-allowlist/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
+export type ModelAllowlistCheck = ModelAllowlistDecision & { providerId: string; model: string; projectId: string | null };
+
+/** Is this model allowed for the project? (Azure OpenAI: pass the deployment name as the model.) */
+export async function checkModelAllowlist(input: { providerId: string; model: string; projectId?: string | null }) {
+  const query = new URLSearchParams({ providerId: input.providerId, model: input.model });
+  if (input.projectId) query.set("projectId", input.projectId);
+  return apiRequest<ModelAllowlistCheck>(`/api/model-allowlist/check?${query.toString()}`);
+}
+
 export async function fetchDataDestinations() {
   return apiRequest<{ destinations: DataDestinationRow[]; builtIns: DataDestinationRow[]; canEdit: boolean }>("/api/data-destinations");
 }
