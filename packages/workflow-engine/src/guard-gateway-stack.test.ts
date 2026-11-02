@@ -37,6 +37,18 @@ describe("gateway profiles on Guard nodes and ports", () => {
     expect(ids((await resolveGuardNodeProfiles(deps(resolution, [own]), { profileId: "team" }, [])).profiles)).toEqual(["org-floor", "team", "gw-toolset"]);
   });
 
+  it("leave a profile the run's own binding also applies in the node's effective choice, once", async () => {
+    // The workflow's own binding and the toolset's are the same profile: the effective node runs it as its own, as a
+    // run of another trigger does, rather than falling back to the built-in profile.
+    const resolution: GuardRunResolution = { source: "workflow", stack: [gateway], chain: [], gateway: [gateway], ownStack: [gateway] };
+    const effective = await resolveGuardNodeProfiles(deps(resolution), { profileId: "effective" }, []);
+    expect(ids(effective.profiles)).toEqual(["gw-toolset"]);
+    // A node naming another profile still gets the gateway's after its own.
+    const team = resolved("team");
+    const named = await resolveGuardNodeProfiles(deps(resolution, [team]), { profileId: "team" }, []);
+    expect(ids(named.profiles)).toEqual(["team", "gw-toolset"]);
+  });
+
   it("come before the deployment's destination rules on a guard port, once each", async () => {
     const deployment = resolved("destinations");
     const resolution: GuardRunResolution = { source: "none", stack: [gateway, deployment], chain: [], gateway: [gateway], deployment };

@@ -722,6 +722,7 @@ export function roundTripReads(): NamedRead[] {
     { name: "getGuardProfileVersion", read: (s) => s.getGuardProfileVersion("gp-strict", 1) },
     { name: "anyGuardProfileUsesLabels", read: (s) => s.anyGuardProfileUsesLabels() },
     { name: "getGuardBinding", read: (s) => s.getGuardBinding("project", "proj-ops") },
+    { name: "getGatewayGuardBindings", read: (s) => s.getGatewayGuardBindings("ts-none", "cl-none") },
     { name: "listGuardBindingsForProfile", read: (s) => s.listGuardBindingsForProfile("gp-strict") },
     { name: "listGuardEvents", read: (s) => s.listGuardEvents() },
     { name: "listGuardEventsForExecution", read: (s) => s.listGuardEventsForExecution("exec-1") },

@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { Workflow, WorkflowNode, WorkflowNodeType } from "./types";
 import type { DataLabels } from "./data-labels";
+import type { GatewayGuardStack } from "./guard";
 
 /**
  * Phase 15.1 — golden runs and replay: the shared contract.
@@ -381,6 +382,12 @@ export interface ReplayRecordingCapabilities {
   sourceWorkflowId?: string | null;
   /** Phase 15.6 — set on a run captured from production traffic: how it was sampled and masked. */
   capture?: ReplayCaptureInfo;
+  /**
+   * 12.6 — the MCP gateway Guard stack (toolset and client profiles, pinned) the source run carried, when an MCP
+   * gateway call started it. Every replay of the golden run applies it again, after the run's own profiles (and after
+   * a candidate profile). Never set on an imported run.
+   */
+  gatewayGuard?: GatewayGuardStack;
 }
 
 /** Phase 15.6 — how a captured run was taken and masked. Counts and class names only, never values. */

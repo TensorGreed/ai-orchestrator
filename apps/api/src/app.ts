@@ -201,7 +201,7 @@ import { inputProvenance, type CaptureInputOrigin } from "./services/capture-mas
 import { registerEvalRoutes } from "./eval-routes.js";
 import { registerGoldenSetFileRoutes } from "./golden-set-file-routes.js";
 import { effectiveTriggerTrust, isEntryNodeType, parseStoredDataLabels, recordedInputLabels, triggerInputProvenance, unionDataLabels, type DataLabels } from "@ai-orchestrator/shared";
-import { GATEWAY_GUARD_CUSTOM_DATA_KEY, GOLDEN_SET_FILE_DEFAULT_MAX_BYTES, GUARD_SIMULATION_MAX_CASES_DEFAULT, GUARD_SIMULATION_RETENTION_DAYS } from "@ai-orchestrator/shared";
+import { GATEWAY_GUARD_CUSTOM_DATA_KEY, parseGatewayGuardStack, GOLDEN_SET_FILE_DEFAULT_MAX_BYTES, GUARD_SIMULATION_MAX_CASES_DEFAULT, GUARD_SIMULATION_RETENTION_DAYS } from "@ai-orchestrator/shared";
 import { registerApprovalRoutes } from "./approval-routes.js";
 import { registerExecutionRoutes } from "./execution-routes.js";
 import { asRecord, isExecutionTimeoutAbort, normalizeExecutionTimeoutMs, normalizeSessionId, retryAfterSeconds } from "./run-helpers.js";
@@ -2261,7 +2261,12 @@ export async function createApp(
               triggeredBy: paused.triggeredBy,
               startedAt: paused.startedAt,
               // Approved tool results answer a re-run, so they are stored encrypted, not redacted.
-              state: sealToolResults(secretService, channel === "production" ? { ...paused.state, releaseChannel: "production", releaseVersion } : paused.state)
+              // 12.6 — a gateway-triggered run keeps its toolset/client Guard stack across the pause.
+              state: sealToolResults(secretService, {
+                ...paused.state,
+                ...(channel === "production" ? { releaseChannel: "production" as const, releaseVersion } : {}),
+                ...(input.gatewayGuard ? { gatewayGuard: input.gatewayGuard } : {})
+              })
             }, queueFence ? { fence: queueFence } : {});
             if (!pausedHere) {
               // A zombie worker: the run is another worker's now, so it leaves no pause and asks nobody to approve.
@@ -4726,8 +4731,14 @@ export async function createApp(
                 }
               : undefined, effectFreeNodeId)
           : undefined;
+        // 12.6 — a run an MCP gateway call started resumes under the same toolset/client Guard stack (pinned versions),
+        // and its history keeps the record, so a retry or replay of it applies the stack again.
+        const resumeHistory = await store.getExecutionHistory(job.executionId);
+        const gatewayGuard =
+          parseGatewayGuardStack(state.gatewayGuard) ?? parseGatewayGuardStack(asRecord(resumeHistory?.customData)[GATEWAY_GUARD_CUSTOM_DATA_KEY]);
         const result = await runWorkflowExecution({
           ...(hooks ? { hooks } : {}),
+          ...(gatewayGuard ? { gatewayGuard } : {}),
           policyActor: actor,
           workflow: resumeWorkflow,
           executionId: job.executionId,
@@ -4749,6 +4760,7 @@ export async function createApp(
           result,
           triggerType: "approval_resume",
           triggeredBy: actedBy,
+          ...(gatewayGuard ? { customData: { ...(result.customData ?? {}), [GATEWAY_GUARD_CUSTOM_DATA_KEY]: gatewayGuard } } : {}),
           requestInput: {
             decision: decided,
             approvalId: job.executionId,
@@ -12860,6 +12872,8 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         ...(replay.modelPlan ? { providerRegistry: replay.modelPlan.registry } : {}),
         ...(replay.guardProfileOverride ? { guardProfileOverride: replay.guardProfileOverride } : {}),
         ...(replay.guardSimulation ? { guardSimulation: replay.guardSimulation } : {}),
+        // 12.6 — a golden run an MCP gateway call started: its toolset/client Guard stack, as in production.
+        ...(replay.gatewayGuard ? { gatewayGuard: replay.gatewayGuard } : {}),
         policyActor: actor,
         workflow: replay.workflow,
         customData: replay.customData,

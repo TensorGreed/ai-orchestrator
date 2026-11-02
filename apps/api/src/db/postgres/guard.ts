@@ -277,6 +277,17 @@ export async function getGuardBinding(ctx: PgContext, scope: GuardBindingScope, 
   return row ? mapGuardBindingRow(row) : null;
 }
 
+export async function getGatewayGuardBindings(
+  ctx: PgContext,
+  toolsetId: string,
+  clientId: string
+): Promise<{ toolset: GuardBindingRecord | null; client: GuardBindingRecord | null }> {
+  const rows = (
+    await ctx.query<Row>(`SELECT * FROM guard_bindings WHERE (scope = 'toolset' AND scope_id = $1) OR (scope = 'mcp_client' AND scope_id = $2)`, [toolsetId, clientId])
+  ).map(mapGuardBindingRow);
+  return { toolset: rows.find((row) => row.scope === "toolset") ?? null, client: rows.find((row) => row.scope === "mcp_client") ?? null };
+}
+
 export async function listGuardBindingsForProfile(ctx: PgContext, profileId: string): Promise<GuardBindingRecord[]> {
   const rows = await ctx.query<Row>(`SELECT * FROM guard_bindings WHERE profile_id = $1 ORDER BY scope COLLATE "C", scope_id COLLATE "C"`, [profileId]);
   return rows.map(mapGuardBindingRow);

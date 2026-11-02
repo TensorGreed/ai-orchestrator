@@ -81,7 +81,7 @@ import {
 } from "@ai-orchestrator/shared";
 import { isEmptyDataLabels, labelsForUntrackedSave, mergeDataLabels, parseStoredDataLabels, releaseGateRestrictsToAdmins, type DataLabels } from "@ai-orchestrator/shared";
 import type { McpToolCallLabels, McpToolOpenWorldOverride, McpToolPolicySubject, ToolArgumentSummary } from "@ai-orchestrator/shared";
-import { parseRecordedCallLabels } from "@ai-orchestrator/shared";
+import { gatewayGuardField, parseRecordedCallLabels } from "@ai-orchestrator/shared";
 import { queuedRunTimeoutMs, STUCK_JOB_MARGIN_MS } from "./queue-timeouts.js";
 import { AuditExportCursorMovedError, isForeignKeyViolation, McpPolicyEnforceRefusedError, ProjectNotEmptyError, StoreReferenceMissingError, ReleaseGateEnforcedError } from "./store-errors.js";
 import { clampLimit, LIMIT_MAX } from "./store-limits.js";
@@ -1555,7 +1555,8 @@ function mapReplayRecordingSummary(row: Record<string, unknown>): ReplayRecordin
             sourceWorkflowId: typeof capabilities.sourceWorkflowId === "string" ? capabilities.sourceWorkflowId : null
           }
         : {}),
-      ...(capabilities?.capture && typeof capabilities.capture === "object" ? { capture: mapReplayCaptureInfo(capabilities.capture) } : {})
+      ...(capabilities?.capture && typeof capabilities.capture === "object" ? { capture: mapReplayCaptureInfo(capabilities.capture) } : {}),
+      ...gatewayGuardField(capabilities?.gatewayGuard)
     },
     bytes: toNumber(row.bytes),
     truncated: toNumber(row.truncated) === 1,
@@ -13302,6 +13303,14 @@ export class SqliteStore implements Store {
   private getGuardBindingSync(scope: GuardBindingScope, scopeId: string): GuardBindingRecord | null {
     const row = this.queryOne<GuardBindingRow>(`SELECT * FROM guard_bindings WHERE scope = ? AND scope_id = ?`, [scope, scopeId]);
     return row ? mapGuardBindingRow(row) : null;
+  }
+
+  async getGatewayGuardBindings(toolsetId: string, clientId: string): Promise<{ toolset: GuardBindingRecord | null; client: GuardBindingRecord | null }> {
+    const rows = this.queryAll<GuardBindingRow>(
+      `SELECT * FROM guard_bindings WHERE (scope = 'toolset' AND scope_id = ?) OR (scope = 'mcp_client' AND scope_id = ?)`,
+      [toolsetId, clientId]
+    ).map(mapGuardBindingRow);
+    return { toolset: rows.find((row) => row.scope === "toolset") ?? null, client: rows.find((row) => row.scope === "mcp_client") ?? null };
   }
 
   async listGuardBindingsForProfile(profileId: string): Promise<GuardBindingRecord[]> {

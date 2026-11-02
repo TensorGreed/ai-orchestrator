@@ -1,14 +1,14 @@
 /**
- * 12.6 — Guard on MCP gateway server tool calls.
+ * 12.6 — Guard on MCP gateway tool calls.
  *
  * A toolset's or client's Guard binding turns these checks on (`GuardService.resolveGateway`); with neither, the
- * gateway runs no Guard, exactly as before. Two checkpoints per server tool call:
- *   - `tool_arguments` before the call goes to the server (the client's arguments, never seen by the server when
- *     blocked);
- *   - `tool_result` on what the server answered (a result or its error text), after the gateway has scrubbed the
- *     secret values it injected, so Guard never sees or records them.
- * Verdicts go to `guard_events` under the call's synthetic `mcpgw_*` execution id, with the tool name as node id
- * and placement `gateway`. Shadow profiles only record. The latency budget and fail-closed setting are each
+ * gateway runs no Guard, exactly as before. Two checkpoints per tool call, server and workflow tools alike:
+ *   - `tool_arguments` before the call goes to the server or starts the workflow run (the client's arguments, never
+ *     seen by the server or the run when blocked; for a call held for approval, before the approval is asked for);
+ *   - `tool_result` on what came back (a result or its error text). A server's answer is checked after the gateway
+ *     has scrubbed the secret values it injected, so Guard never sees or records them.
+ * Verdicts go to `guard_events` under the call's synthetic `mcpgw_*` execution id (a workflow tool's run keeps its
+ * own id and events; the gateway's events name its workflow), with the tool name as node id and placement `gateway`. Shadow profiles only record. The latency budget and fail-closed setting are each
  * profile's own, as in runs.
  */
 
@@ -101,7 +101,7 @@ export async function checkGatewayCall(input: {
       guard: deps,
       resolveSecret: input.resolveSecret,
       executionId: input.context.executionId,
-      workflowId: "",
+      workflowId: input.context.workflowId ?? "",
       nodeId: input.toolName,
       placement: "gateway",
       subject: input.subject,

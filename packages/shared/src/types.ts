@@ -8,6 +8,7 @@ import type {
 } from "./mcp-runtime-safety";
 import type { DataLabels, LabelEndorsement, NodeLabelMap, ProvenanceLabel } from "./data-labels";
 import type { McpToolCallLabels } from "./taint-policy";
+import type { GatewayGuardStack } from "./guard";
 
 export const WORKFLOW_SCHEMA_VERSION = "1.0.0";
 export const MAX_SUB_WORKFLOW_DEPTH = 10;
@@ -520,6 +521,11 @@ export interface WorkflowExecutionState {
   releaseChannel?: "production" | "draft";
   /** Phase 15.4 — the published version a production run started on (null: none was published), for its history. */
   releaseVersion?: number | null;
+  /**
+   * 12.6 — the MCP gateway Guard stack (toolset and client profiles, pinned) of a run a gateway call started. A
+   * resumed run applies it again. Written and read only by the API; absent for every other run.
+   */
+  gatewayGuard?: GatewayGuardStack;
   /**
    * Phase 16 — the run's data labels, beside `nodeOutputs`: the input's
    * labels, every completed node's labels, and whether labels are tracked

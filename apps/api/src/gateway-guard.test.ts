@@ -685,3 +685,358 @@ describe("tool rules scoped to gateway toolsets", () => {
     expect((audit[0]!.metadata as { toolsetIds?: string[] }).toolsetIds).toEqual([fixture.toolset.id]);
   });
 });
+
+/** Blocks emails in a Guard node's prompt only: the gateway's own checks (arguments, result) find nothing to do. */
+function promptEmailProfile(id: string): Record<string, unknown> {
+  return {
+    id,
+    name: `Mail ${id}`,
+    version: "1",
+    channels: { prompt: { detectors: [{ id: "dlp.patterns", threshold: 0.5 }], actions: { email: { action: "block" } }, defaultAction: { action: "allow" } } }
+  };
+}
+
+/** Holds an IBAN in a Guard node's prompt for an approval. */
+function holdIbanProfile(id: string): Record<string, unknown> {
+  return {
+    id,
+    name: `Hold ${id}`,
+    version: "1",
+    channels: { prompt: { detectors: [{ id: "dlp.patterns", threshold: 0.5 }], actions: { iban: { action: "require_approval" } }, defaultAction: { action: "allow" } } }
+  };
+}
+
+const IBAN = "GB82WEST12345698765432";
+
+/**
+ * A workflow tool that pauses twice before its last Guard node: an Approval Gate, then a Guard node that holds an
+ * IBAN in `text` for an approval. The last Guard node (effective profile) reads `note`; its blocked branch fails.
+ */
+function pausingWorkflowTool(id: string, serverId: string): Workflow {
+  return {
+    id,
+    name: "Paused lookup",
+    schemaVersion: "1.0.0",
+    workflowVersion: 1,
+    projectId: "default",
+    nodes: [
+      {
+        id: "trigger",
+        type: "mcp_server_trigger",
+        name: "Trigger",
+        position: { x: 0, y: 0 },
+        config: {
+          path: `${id}-path`,
+          toolName: "paused_lookup",
+          inputSchema: { type: "object", properties: { text: { type: "string" }, note: { type: "string" } } },
+          authMode: "public"
+        }
+      },
+      { id: "gate", type: "human_approval", name: "Gate", position: { x: 150, y: 0 }, config: { approvalMessage: "ok?", timeoutMinutes: 60 } },
+      { id: "hold", type: "guard", name: "Hold", position: { x: 300, y: 0 }, config: { profileId: "gw-hold", inputField: "text", approvalMessage: "IBAN?" } },
+      { id: "check", type: "guard", name: "Check", position: { x: 450, y: 0 }, config: { inputField: "note" } },
+      { id: "pass", type: "output", name: "Pass", position: { x: 600, y: 0 }, config: { outputKey: "result", responseTemplate: "passed" } },
+      { id: "held", type: "output", name: "Held", position: { x: 450, y: 200 }, config: { responseTemplate: "held" } },
+      {
+        id: "fail",
+        type: "mcp_tool",
+        name: "Fail",
+        position: { x: 600, y: 200 },
+        config: { registryServerId: serverId, toolName: "no_such_tool", argsTemplate: "{}", retry: { enabled: false } }
+      }
+    ],
+    edges: [
+      { id: "e1", source: "trigger", target: "gate" },
+      { id: "e2", source: "gate", sourceHandle: "approve", target: "hold" },
+      { id: "e3", source: "hold", sourceHandle: "pass", target: "check" },
+      { id: "e4", source: "hold", sourceHandle: "blocked", target: "held" },
+      { id: "e5", source: "check", sourceHandle: "pass", target: "pass" },
+      { id: "e6", source: "check", sourceHandle: "blocked", target: "fail" }
+    ]
+  } as Workflow;
+}
+
+/** A workflow tool with no Guard node and no agent: it answers with a fixed text (`answer`). */
+function plainWorkflowTool(id: string, answer: string): Workflow {
+  return {
+    id,
+    name: "Plain lookup",
+    schemaVersion: "1.0.0",
+    workflowVersion: 1,
+    projectId: "default",
+    nodes: [
+      {
+        id: "trigger",
+        type: "mcp_server_trigger",
+        name: "Trigger",
+        position: { x: 0, y: 0 },
+        config: { path: `${id}-path`, toolName: `plain_${id.replace(/[^a-z]/g, "")}`, inputSchema: { type: "object", properties: { text: { type: "string" } } }, authMode: "public" }
+      },
+      { id: "out", type: "output", name: "Out", position: { x: 200, y: 0 }, config: { outputKey: "result", responseTemplate: answer } }
+    ],
+    edges: [{ id: "e1", source: "trigger", target: "out" }]
+  } as Workflow;
+}
+
+async function addToolsetMember(fixture: Fixture, workflowId: string) {
+  const call = caller(fixture.context);
+  const current = (await call(fixture.admin, "GET", `/api/mcp/toolsets/${fixture.toolset.id}`)).json<{ toolset: McpToolset }>().toolset;
+  const members = [...(current.members ?? []).map((member) => (member.kind === "server" ? { kind: "server", serverId: member.serverId } : { kind: "workflow", workflowId: member.workflowId })), { kind: "workflow", workflowId }];
+  const updated = await call(fixture.admin, "PUT", `/api/mcp/toolsets/${fixture.toolset.id}`, { members });
+  expect(updated.statusCode, updated.body).toBe(200);
+}
+
+async function createProfile(fixture: Fixture, document: Record<string, unknown>) {
+  const response = await caller(fixture.context)(fixture.admin, "POST", "/api/guard/profiles", { document });
+  expect(response.statusCode, response.body).toBe(201);
+}
+
+interface RunView {
+  status: string;
+  executionId?: string;
+  error?: string;
+  nodeResults?: Array<{ nodeId: string; status: string; error?: string }>;
+}
+
+describe("a gateway-triggered run that pauses for an approval", () => {
+  it("resumes under the toolset's Guard stack after an Approval Gate and a Guard approval, and keeps its record", async () => {
+    const fixture = await setup();
+    const call = caller(fixture.context);
+    await createProfile(fixture, promptEmailProfile("gw-mail"));
+    await createProfile(fixture, holdIbanProfile("gw-hold"));
+    await fixture.context.store.upsertWorkflow(pausingWorkflowTool("wf-paused", fixture.serverId));
+    await addToolsetMember(fixture, "wf-paused");
+    await bind(fixture, "toolsets", fixture.toolset.id, "gw-mail");
+    const tool = toolCaller(fixture);
+
+    const waiting = await tool("paused_lookup", { text: `pay ${IBAN}`, note: `mail ${EMAIL}` });
+    expect(waiting.outcome).toBe("tool_error");
+    expect(waiting.text).toContain("waiting for an approval");
+    const [run] = (await fixture.context.store.listExecutionHistory({ workflowId: "wf-paused", pageSize: 5 })).items;
+    expect(run!.status).toBe("waiting_approval");
+    const expected = { toolsetId: fixture.toolset.id, clientId: fixture.client.id, profiles: [{ profileId: "gw-mail", version: 1, level: "toolset" }] };
+    expect(recordedStack(await fixture.context.store.getExecutionHistory(run!.id))).toEqual(expected);
+
+    // The binding is gone by the time anyone approves: the run keeps the stack it started with.
+    await bind(fixture, "toolsets", fixture.toolset.id, null);
+    const afterGate = await call(fixture.admin, "POST", `/api/approvals/${run!.id}/approve`, {});
+    expect(afterGate.statusCode, afterGate.body).toBe(200);
+    // The Hold Guard node asks for an approval (its own profile and the toolset's ran).
+    expect(afterGate.json<RunView>().status).toBe("waiting_approval");
+    const holdEvents = (await fixture.context.store.listGuardEventsForExecution(run!.id)).filter((event) => event.nodeId === "hold");
+    expect(new Set(holdEvents.map((event) => event.profileId))).toEqual(new Set(["gw-hold", "gw-mail"]));
+
+    // The resumed run ends in an error (its blocked branch fails), which the approve call reports as such.
+    const final = (await call(fixture.admin, "POST", `/api/approvals/${run!.id}/approve`, {})).json<RunView>();
+    // The Check Guard node, two pauses later, still blocks the email with the toolset's profile.
+    expect(final.status).toBe("error");
+    expect(final.nodeResults?.find((entry) => entry.nodeId === "pass")?.status).toBe("skipped");
+    const checkBlocks = (await fixture.context.store.listGuardEventsForExecution(run!.id)).filter((event) => event.nodeId === "check" && event.effectiveAction === "block");
+    expect(checkBlocks.map((event) => event.profileId)).toEqual(["gw-mail"]);
+    // The resumed run's history still carries the stack, so a retry of it applies it again.
+    const history = await fixture.context.store.getExecutionHistory(run!.id);
+    expect(history!.status).toBe("error");
+    expect(recordedStack(history)).toEqual(expected);
+    const retried = await call(fixture.admin, "POST", `/api/executions/${run!.id}/retry`, { usePinnedData: false });
+    const retryId = retried.json<{ executionId: string }>().executionId;
+    expect(recordedStack(await fixture.context.store.getExecutionHistory(retryId))).toEqual(expected);
+  });
+});
+
+describe("replays of a gateway-triggered run", () => {
+  /** A blocked gateway run of the screened workflow tool on a toolset bound to gw-strict, then the binding removed. */
+  async function blockedGatewayRun(fixture: Fixture) {
+    await bind(fixture, "toolsets", fixture.toolset.id, "gw-strict");
+    expect((await toolCaller(fixture)("screened_lookup", { text: `mail ${EMAIL}` })).outcome).toBe("tool_error");
+    const [run] = (await fixture.context.store.listExecutionHistory({ workflowId: "wf-screened", pageSize: 5 })).items;
+    expect(run!.status).toBe("error");
+    await bind(fixture, "toolsets", fixture.toolset.id, null);
+    return run!.id;
+  }
+
+  it("an MCP cassette replay applies the recorded stack again", async () => {
+    const fixture = await setup();
+    const call = caller(fixture.context);
+    const source = await blockedGatewayRun(fixture);
+    // A cassette of the same workflow (the gateway run did not record one).
+    const recorded = (await call(fixture.admin, "POST", "/api/workflows/wf-screened/execute", { text: "hello", record: true })).json<RunView & { mcpCassette?: { id: string } }>();
+    expect(recorded.mcpCassette?.id).toBeTruthy();
+    const replay = await call(fixture.admin, "POST", `/api/executions/${source}/replay`, { cassetteId: recorded.mcpCassette!.id });
+    expect(replay.statusCode, replay.body).toBe(200);
+    const replayId = replay.json<{ executionId: string }>().executionId;
+    const blocks = (await fixture.context.store.listGuardEventsForExecution(replayId)).filter((event) => event.effectiveAction === "block");
+    expect(blocks.map((event) => [event.nodeId, event.profileId])).toEqual([["guard", "gw-strict"]]);
+    expect(recordedStack(await fixture.context.store.getExecutionHistory(replayId))).toEqual(recordedStack(await fixture.context.store.getExecutionHistory(source)));
+  });
+
+  it("a golden run saved from it applies the recorded stack in every replay, and fails closed once a version is gone", async () => {
+    const fixture = await setup();
+    const call = caller(fixture.context);
+    const source = await blockedGatewayRun(fixture);
+    const saved = await call(fixture.admin, "POST", "/api/replay/recordings", { executionId: source, name: "Gateway run" });
+    expect(saved.statusCode, saved.body).toBe(201);
+    const recordingId = saved.json<{ recording: { id: string } }>().recording.id;
+    expect((await fixture.context.store.getReplayRecording(recordingId))!.capabilities.gatewayGuard).toEqual(recordedStack(await fixture.context.store.getExecutionHistory(source)));
+
+    const replayed = await call(fixture.admin, "POST", `/api/replay/recordings/${recordingId}/replay`, { draft: true });
+    expect(replayed.statusCode, replayed.body).toBe(200);
+    const replayId = replayed.json<{ executionId: string }>().executionId;
+    // The golden run's input was scrubbed when it was saved (the email is gone), so the profile finds nothing: it ran.
+    const replayProfiles = new Set((await fixture.context.store.listGuardEventsForExecution(replayId)).filter((event) => event.nodeId === "guard").map((event) => event.profileId));
+    expect(replayProfiles.has("gw-strict")).toBe(true);
+
+    // The pinned profile is deleted: the replay cannot check the run as production did, so it fails rather than pass.
+    expect((await call(fixture.admin, "DELETE", "/api/guard/profiles/gw-strict")).statusCode).toBeLessThan(300);
+    const again = await call(fixture.admin, "POST", `/api/replay/recordings/${recordingId}/replay`, { draft: true });
+    expect(again.statusCode, again.body).toBe(200);
+    const againRun = await fixture.context.store.getExecutionHistory(again.json<{ executionId: string }>().executionId);
+    expect(againRun!.status).toBe("error");
+    expect(JSON.stringify(againRun)).toContain("no longer exists");
+  });
+
+  it("a retry fails closed when a pinned profile version no longer exists", async () => {
+    const fixture = await setup();
+    const call = caller(fixture.context);
+    const source = await blockedGatewayRun(fixture);
+    expect((await call(fixture.admin, "DELETE", "/api/guard/profiles/gw-strict")).statusCode).toBeLessThan(300);
+    // The retried run fails (the retry call answers 400 for a failed run).
+    const retried = await call(fixture.admin, "POST", `/api/executions/${source}/retry`, { usePinnedData: false });
+    const retryRun = await fixture.context.store.getExecutionHistory(retried.json<{ executionId: string }>().executionId);
+    expect(retryRun!.status).toBe("error");
+    expect(JSON.stringify(retryRun)).toContain("which the MCP gateway applied to this run, no longer exists");
+    // Nothing passed the Guard node unchecked.
+    const passed = (retryRun!.nodeResults as Array<{ nodeId: string; status: string }> | null | undefined)?.find((entry) => entry.nodeId === "pass");
+    expect(passed?.status ?? "skipped").not.toBe("success");
+  });
+});
+
+describe("a client binding on a workflow tool", () => {
+  it("reaches the run on its own, recorded at the client level", async () => {
+    const fixture = await setup();
+    await bind(fixture, "clients", fixture.client.id, "gw-strict");
+    expect((await toolCaller(fixture, "client")("screened_lookup", { text: `mail ${EMAIL}` })).outcome).toBe("tool_error");
+    // Another client of the same toolset, with no binding, is not checked.
+    expect((await toolCaller(fixture, "peer")("screened_lookup", { text: `mail ${EMAIL}` })).outcome).toBe("ok");
+    const runs = (await fixture.context.store.listExecutionHistory({ workflowId: "wf-screened", pageSize: 5 })).items;
+    const blocked = runs.find((run) => run.status === "error")!;
+    expect(recordedStack(await fixture.context.store.getExecutionHistory(blocked.id))).toEqual({
+      toolsetId: fixture.toolset.id,
+      clientId: fixture.client.id,
+      profiles: [{ profileId: "gw-strict", version: 1, level: "mcp_client" }]
+    });
+    const blocks = (await fixture.context.store.listGuardEventsForExecution(blocked.id)).filter((event) => event.effectiveAction === "block");
+    expect(blocks.map((event) => [event.nodeId, event.profileId])).toEqual([["guard", "gw-strict"]]);
+  });
+});
+
+describe("the gateway's own checks on workflow tools", () => {
+  it("block injected arguments before the run starts and a planted answer after it, with no Guard node in the workflow", async () => {
+    const fixture = await setup();
+    await fixture.context.store.upsertWorkflow(plainWorkflowTool("wf-plain", PLANTED));
+    await fixture.context.store.upsertWorkflow(plainWorkflowTool("wf-contact", `Write to ${EMAIL}`));
+    await addToolsetMember(fixture, "wf-plain");
+    await addToolsetMember(fixture, "wf-contact");
+    const tool = toolCaller(fixture);
+    // Without a binding the workflow answers as before.
+    const before = await tool("plain_wfplain", { text: INJECTION });
+    expect(before.outcome).toBe("ok");
+    expect(before.text).toContain(PLANTED);
+
+    await bind(fixture, "toolsets", fixture.toolset.id, "gw-strict");
+    const runsBefore = (await fixture.context.store.listExecutionHistory({ workflowId: "wf-plain", pageSize: 10 })).items.length;
+    const blockedArgs = await tool("plain_wfplain", { text: INJECTION });
+    expect(blockedArgs.outcome).toBe("tool_error");
+    expect(blockedArgs.text).toBe("Blocked by Guard: indirect injection");
+    // The run never started.
+    expect((await fixture.context.store.listExecutionHistory({ workflowId: "wf-plain", pageSize: 10 })).items.length).toBe(runsBefore);
+
+    const blockedResult = await tool("plain_wfplain", { text: "hello" });
+    expect(blockedResult.outcome).toBe("tool_error");
+    expect(blockedResult.text).toBe("Blocked by Guard: indirect injection");
+    expect(blockedResult.text).not.toContain("evil.example");
+    const redacted = await tool("plain_wfcontact", { text: "hello" });
+    expect(redacted.outcome).toBe("ok");
+    expect(redacted.text).toContain("[REDACTED:email]");
+    expect(redacted.text).not.toContain(EMAIL);
+
+    const events = (await guardEvents(fixture, "&placement=gateway")).filter((event) => event.effectiveAction === "block");
+    expect([...new Set(events.map((event) => `${event.channel} ${event.nodeId}`))].sort()).toEqual([`tool_arguments ${blockedArgs.name}`, `tool_result ${blockedResult.name}`]);
+    expect(events.every((event) => event.executionId.startsWith("mcpgw_") && event.workflowId === "wf-plain")).toBe(true);
+    const audits = await auditEvents(fixture.context.store, "mcp_gateway.guard_blocked");
+    expect(audits.map((event) => (event.metadata as { channel: string; workflowId: string }).channel).sort()).toEqual(["tool_arguments", "tool_result"]);
+    expect(audits.every((event) => (event.metadata as { workflowId?: string }).workflowId === "wf-plain")).toBe(true);
+    // The run that answered keeps its own events apart from the gateway's.
+    const [answered] = (await fixture.context.store.listExecutionHistory({ workflowId: "wf-plain", pageSize: 10 })).items;
+    expect((await fixture.context.store.listGuardEventsForExecution(answered!.id)).filter((event) => event.placement === "gateway")).toEqual([]);
+  });
+});
+
+describe("a Guard-blocked call held for approval", () => {
+  it("is blocked before an approval is asked for, and an approved call that Guard blocks keeps its approval", async () => {
+    const fixture = await setup();
+    const call = caller(fixture.context);
+    const rule = await call(fixture.admin, "POST", "/api/mcp/policies", { effect: "require_approval", serverId: fixture.serverId, toolPattern: "lookup_kb" });
+    expect(rule.statusCode, rule.body).toBe(201);
+    const pending = async () => (await call(fixture.admin, "GET", "/api/mcp/gateway/approvals?status=pending")).json<{ approvals: Array<{ id: string }> }>().approvals;
+
+    // Bound: an injected call is blocked by Guard and no approval is asked for.
+    await bind(fixture, "toolsets", fixture.toolset.id, "gw-strict");
+    const blocked = await toolCaller(fixture)("lookup_kb", { topic: INJECTION });
+    expect(blocked.outcome).toBe("tool_error");
+    expect(blocked.text).toBe("Blocked by Guard: indirect injection");
+    expect(await pending()).toEqual([]);
+
+    // Unbound: the same call asks for an approval, and an admin approves it.
+    await bind(fixture, "toolsets", fixture.toolset.id, null);
+    const held = await toolCaller(fixture)("lookup_kb", { topic: INJECTION });
+    expect(held.outcome).toBe("other");
+    const [request] = await pending();
+    expect(request).toBeDefined();
+    expect((await call(fixture.admin, "POST", `/api/mcp/gateway/approvals/${request!.id}/approve`, {})).statusCode).toBe(200);
+
+    // Bound again: Guard blocks the approved call, and the approval is not used up.
+    await bind(fixture, "toolsets", fixture.toolset.id, "gw-strict");
+    const invoke = vi.spyOn(MockMCPServerAdapter.prototype, "invokeTool");
+    expect((await toolCaller(fixture)("lookup_kb", { topic: INJECTION })).text).toBe("Blocked by Guard: indirect injection");
+    expect(invoke).not.toHaveBeenCalled();
+    expect(await auditEvents(fixture.context.store, "mcp_gateway.approval_used")).toEqual([]);
+    await bind(fixture, "toolsets", fixture.toolset.id, null);
+    const used = await toolCaller(fixture)("lookup_kb", { topic: INJECTION });
+    expect(used.outcome).toBe("ok");
+    expect(invoke).toHaveBeenCalledTimes(1);
+    expect((await auditEvents(fixture.context.store, "mcp_gateway.approval_used")).length).toBe(1);
+  });
+});
+
+describe("Guard binding reads on a gateway call", () => {
+  it("take one store read with no binding, and refuse the call when the read fails", async () => {
+    const fixture = await setup();
+    const reads = vi.spyOn(fixture.context.store, "getGatewayGuardBindings");
+    const single = vi.spyOn(fixture.context.store, "getGuardBinding");
+    const tool = toolCaller(fixture);
+    expect((await tool("get_current_time", { tz: "UTC" })).outcome).toBe("ok");
+    expect(reads).toHaveBeenCalledTimes(1);
+    expect(single).not.toHaveBeenCalled();
+
+    reads.mockRejectedValueOnce(new Error("database is locked"));
+    const invoke = vi.spyOn(MockMCPServerAdapter.prototype, "invokeTool");
+    const refused = await tool("get_current_time", { tz: "UTC" });
+    expect(refused.outcome).toBe("tool_error");
+    expect(refused.text).toBe("Guard could not be checked for this call, so it was not sent. Try again.");
+    expect(invoke).not.toHaveBeenCalled();
+  });
+});
+
+describe("a profile both the workflow and the toolset bind", () => {
+  it("stays the Guard node's own choice in a gateway-triggered run; the chain lists both levels", async () => {
+    const fixture = await setup();
+    const call = caller(fixture.context);
+    expect((await call(fixture.admin, "PUT", "/api/guard/bindings/workflows/wf-screened", { mode: "override", profileId: "gw-strict" })).statusCode).toBe(200);
+    await bind(fixture, "toolsets", fixture.toolset.id, "gw-strict");
+    expect((await toolCaller(fixture)("screened_lookup", { text: `mail ${EMAIL}` })).outcome).toBe("tool_error");
+    const [run] = (await fixture.context.store.listExecutionHistory({ workflowId: "wf-screened", pageSize: 5 })).items;
+    // Only the workflow's own profile ran at the node (as for a webhook run), not the built-in profile beside it.
+    const profiles = new Set((await fixture.context.store.listGuardEventsForExecution(run!.id)).map((event) => event.profileId));
+    expect(profiles).toEqual(new Set(["gw-strict"]));
+  });
+});

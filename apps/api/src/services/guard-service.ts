@@ -153,8 +153,13 @@ export interface GuardRunContext {
 
 /** 12.6 — what a gateway server tool call's Guard checks know about the call. */
 export interface GatewayGuardContext {
-  /** The call's synthetic execution id (`mcpgw_*`), shared with its telemetry row. */
+  /**
+   * The call's synthetic execution id (`mcpgw_*`): a server tool call's telemetry row shares it. A workflow tool's
+   * run has its own id; the gateway's checks are kept apart from the run's events.
+   */
   executionId: string;
+  /** A workflow tool's workflow; absent for a server tool (its events have no workflow). */
+  workflowId?: string;
   toolsetId: string;
   clientId: string;
   /** The toolset's project; null when it has none. */
@@ -632,12 +637,16 @@ export class GuardService {
     const last = resolution.stack[resolution.stack.length - 1];
     const tail = deployment && last === deployment ? [deployment] : [];
     const head = tail.length > 0 ? resolution.stack.slice(0, -1) : resolution.stack;
-    const seen = new Set<string>();
-    const stack = [...head, ...gateway, ...tail].filter((entry) => (seen.has(entry.hash) ? false : (seen.add(entry.hash), true)));
+    // A profile the run's own binding also applies stays the run's own: `ownStack` (the stack without the gateway's
+    // additions) is what a Guard node's effective choice reads, and the chain lists the profile at both levels.
+    const seen = new Set(head.map((entry) => entry.hash));
+    const added = gateway.filter((entry) => (seen.has(entry.hash) ? false : (seen.add(entry.hash), true)));
+    const stack = [...head, ...added, ...tail.filter((entry) => !seen.has(entry.hash))];
+    const ownStack = [...head, ...tail];
     const levels: GuardBindingLevel[] = gateway.map((entry) => ({ level: "gateway", mode: "override", profileId: entry.profileId, version: entry.version }));
     const at = resolution.chain.findIndex((level) => level.level === "destinations");
     const chain = at < 0 ? [...resolution.chain, ...levels] : [...resolution.chain.slice(0, at), ...levels, ...resolution.chain.slice(at)];
-    return { ...resolution, stack, chain, gateway };
+    return { ...resolution, stack, chain, gateway, ownStack };
   }
 
   /**
@@ -653,8 +662,12 @@ export class GuardService {
    * calls). `refs`: the profiles a workflow tool's run carries (pinned; the deployment's rules apply to runs anyway).
    */
   async resolveGateway(context: { toolsetId: string; clientId: string; projectId?: string | null }): Promise<{ resolution: GuardRunResolution; refs: GatewayGuardProfileRef[] }> {
-    const toolset = await this.getBinding("toolset", context.toolsetId);
-    const client = await this.getBinding("mcp_client", context.clientId);
+    // One read for both bindings: a deployment with no gateway binding pays one indexed lookup per call, no more.
+    const bindings = await this.store.getGatewayGuardBindings(context.toolsetId, context.clientId);
+    const asBinding = (record: GuardBindingRecord | null) =>
+      record ? { mode: record.mode as GuardBindingMode, profileId: record.profileId } : { mode: "inherit" as GuardBindingMode, profileId: null };
+    const toolset = asBinding(bindings.toolset);
+    const client = asBinding(bindings.client);
     const toolsetProfile = toolset.mode === "override" && toolset.profileId ? await this.loadProfile(toolset.profileId) : undefined;
     const clientProfile = client.mode === "override" && client.profileId ? await this.loadProfile(client.profileId) : undefined;
     const chain: GuardBindingLevel[] = [];
@@ -688,7 +701,7 @@ export class GuardService {
       resolveRun: () => resolution,
       loadProfile: async (profileId) => await this.loadProfile(profileId),
       vault: this.vault,
-      onVerdict: async (event) => await this.recordVerdict(event, { executionId: context.executionId, workflowId: "", projectId: context.projectId }),
+      onVerdict: async (event) => await this.recordVerdict(event, { executionId: context.executionId, workflowId: context.workflowId ?? "", projectId: context.projectId }),
       destinationRows: async () => (await this.options.destinationRows?.()) ?? [],
       ...(this.options.surrogateKey ? { surrogateKey: this.options.surrogateKey } : {}),
       issuedSurrogates: new Set<string>()

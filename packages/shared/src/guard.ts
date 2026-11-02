@@ -163,6 +163,12 @@ export function parseGatewayGuardStack(value: unknown): GatewayGuardStack | null
   return { toolsetId: record.toolsetId, clientId: record.clientId, profiles };
 }
 
+/** 12.6 — `{ gatewayGuard }` for a stored value that is a valid gateway Guard stack, `{}` otherwise (for spreading). */
+export function gatewayGuardField(value: unknown): { gatewayGuard?: GatewayGuardStack } {
+  const gatewayGuard = parseGatewayGuardStack(value);
+  return gatewayGuard ? { gatewayGuard } : {};
+}
+
 /** 12.6 — the custom-data key a workflow tool's run records its gateway Guard stack under. */
 export const GATEWAY_GUARD_CUSTOM_DATA_KEY = "gatewayGuard";
 
