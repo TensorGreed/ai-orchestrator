@@ -144,4 +144,10 @@ export interface RunWorkflowExecutionInput {
    * also record it in the run's history custom data (`gatewayGuard`), so a retry or replay applies it again.
    */
   gatewayGuard?: GatewayGuardStack;
+  /**
+   * 12.6 — a run an MCP gateway call started: the client and the toolset. Its usage is recorded under the client
+   * (usage_events.client_id) and counts toward the toolset's project; its budget check includes the client's and the
+   * toolset project's budgets. Crosses the queue with the spec. Not carried by retries or replays.
+   */
+  gatewayUsage?: { clientId: string; clientName: string; toolsetId: string; toolsetProjectId: string | null };
 }

@@ -17,6 +17,26 @@
  *   - `user`     — applies when execution's triggeredBy matches scope_id
  *                  (best-effort: we match on email or user-id, both can be
  *                  the actor depending on trigger type).
+ *   - `mcp_client` (12.6) — an MCP gateway client: the runs its tool calls
+ *                  start and the sampling its server tool calls use. A
+ *                  toolset's project budget counts that toolset's gateway
+ *                  usage as well (see Store.queryBudgetUsage).
+ *
+ * Where `block` applies (12.6, D8)
+ * --------------------------------
+ *   - every run a trigger starts (RunDispatcher's admission: webhooks,
+ *     schedules, chat, forms, app triggers, queue dispatch, retries, gateway
+ *     workflow tools), through `checkBlock`, and `/api/workflows/:id/execute`
+ *     through `checkExecution` (which also reports approaching limits);
+ *   - every gateway `tools/call`, before the tool policy (`checkBlock` with
+ *     the client and the toolset's project).
+ *   A run or call that starts while usage is under the cap may take it over;
+ *   calls of one gateway batch are checked together, so a batch may overshoot
+ *   by one batch. The next one is refused.
+ *
+ * `checkBlock` reads the budgets from an in-process snapshot (re-read every
+ * `refreshMs` and at once after a local edit), so with no matching `block`
+ * budget it reads nothing from the store.
  *
  * Period boundaries
  * -----------------
@@ -29,15 +49,45 @@
  */
 
 import { randomUUID } from "node:crypto";
+import type { McpClientBudgetUsage } from "@ai-orchestrator/shared";
 import type { BudgetRecord } from "../db/database.js";
 import type { Store } from "../db/store.js";
 
 export interface BudgetCheckContext {
-  workflowId: string;
+  /** Null for a gateway server-tool call (no workflow). */
+  workflowId: string | null;
   projectId: string | null;
   userEmail: string | null;
   userId: string | null;
+  /** 12.6 — the gateway client behind the call or run. */
+  client?: { id: string; name: string } | null;
+  /** 12.6 — the project of the gateway toolset the call came through. */
+  toolsetProjectId?: string | null;
 }
+
+/** 12.6 — a `block` budget that is used up: the run or gateway call is refused (HTTP 402 on HTTP triggers). */
+export class BudgetExceededError extends Error {
+  readonly statusCode = 402;
+  constructor(
+    readonly budget: BudgetRecord,
+    readonly current: number,
+    readonly limit: number,
+    readonly periodStart: string
+  ) {
+    super(`Budget "${budget.name}" exceeded for the current ${budget.period}.`);
+    this.name = "BudgetExceededError";
+  }
+}
+
+/** The budgets could not be read (and no earlier copy exists), or a block budget's usage could not be read. */
+export class BudgetUnavailableError extends Error {
+  constructor(cause: unknown) {
+    super(`Budgets could not be checked: ${cause instanceof Error ? cause.message : String(cause)}`);
+    this.name = "BudgetUnavailableError";
+  }
+}
+
+export const BUDGET_SNAPSHOT_REFRESH_MS = 2_000;
 
 export interface BudgetCheckResult {
   allowed: boolean;
@@ -54,9 +104,142 @@ export interface BudgetRecordContext extends BudgetCheckContext {
 export class BudgetService {
   private readonly store: Store;
   private logger?: { info: (msg: string, fields?: Record<string, unknown>) => void; warn: (msg: string, fields?: Record<string, unknown>) => void };
+  private readonly refreshMs: number;
+  private snapshot: BudgetRecord[] | null = null;
+  private loadedAt = 0;
+  private loading: Promise<BudgetRecord[]> | null = null;
+  private timer: ReturnType<typeof setInterval> | null = null;
 
-  constructor(store: Store) {
+  constructor(store: Store, options: { refreshMs?: number } = {}) {
     this.store = store;
+    this.refreshMs = options.refreshMs ?? BUDGET_SNAPSHOT_REFRESH_MS;
+  }
+
+  // ---------------------------------------------------------------------------
+  // 12.6 — the enabled budgets, kept in memory for the hot paths
+  // ---------------------------------------------------------------------------
+
+  /** Loads the snapshot and re-reads it every `refreshMs` in the background (other instances' edits apply within it). */
+  async start(): Promise<void> {
+    try {
+      await this.refresh();
+    } catch {
+      // Logged by load; a check loads the snapshot itself until one read succeeds.
+    }
+    if (!this.timer && this.refreshMs > 0) {
+      this.timer = setInterval(() => {
+        this.refresh().catch(() => undefined);
+      }, this.refreshMs);
+      this.timer.unref?.();
+    }
+  }
+
+  stop(): void {
+    if (this.timer) clearInterval(this.timer);
+    this.timer = null;
+  }
+
+  /** Re-reads the enabled budgets (after a local edit, at once). A failure keeps the last copy and is rethrown. */
+  async refresh(): Promise<void> {
+    await this.load();
+  }
+
+  private load(): Promise<BudgetRecord[]> {
+    if (this.loading) return this.loading;
+    const loading = (async () => {
+      try {
+        const next = await this.store.listBudgets({ enabledOnly: true });
+        this.snapshot = next;
+        this.loadedAt = Date.now();
+        return next;
+      } catch (error) {
+        this.logger?.warn(this.snapshot ? "Could not re-read the budgets; keeping the last copy" : "Could not read the budgets", {
+          error: error instanceof Error ? error.message : String(error)
+        });
+        throw error;
+      } finally {
+        this.loading = null;
+      }
+    })();
+    this.loading = loading;
+    return loading;
+  }
+
+  /** The enabled budgets; read from the store only when no copy was ever loaded (then a failure throws). */
+  private async enabledBudgets(): Promise<BudgetRecord[]> {
+    if (this.snapshot) {
+      // Not started (no background re-read): re-read here at most every `refreshMs`, keeping the copy on failure.
+      if (!this.timer && this.refreshMs > 0 && Date.now() - this.loadedAt > this.refreshMs) {
+        this.loadedAt = Date.now();
+        return await this.load().catch(() => this.snapshot!);
+      }
+      return this.snapshot;
+    }
+    try {
+      return await this.load();
+    } catch (error) {
+      throw new BudgetUnavailableError(error);
+    }
+  }
+
+  /**
+   * 12.6 — the first matching `block` budget whose cap the current period's usage meets, or null. With no matching
+   * block budget in the snapshot nothing is read from the store. Throws BudgetUnavailableError when the budgets or
+   * a block budget's usage cannot be read.
+   */
+  async checkBlock(ctx: BudgetCheckContext): Promise<BudgetExceededError | null> {
+    const blocking = matchBudgets(await this.enabledBudgets(), ctx).filter((budget) => budget.action === "block");
+    for (const budget of blocking) {
+      const periodStart = currentPeriodStart(budget.period);
+      let current: number;
+      try {
+        current = await this.currentUsage(budget, ctx, periodStart);
+      } catch (error) {
+        throw new BudgetUnavailableError(error);
+      }
+      if (current >= budget.limitValue) return new BudgetExceededError(budget, current, budget.limitValue, periodStart);
+    }
+    return null;
+  }
+
+  /** Throws the BudgetExceededError of `checkBlock`, if any. */
+  async assertNotBlocked(ctx: BudgetCheckContext): Promise<void> {
+    const blocked = await this.checkBlock(ctx);
+    if (blocked) throw blocked;
+  }
+
+  /**
+   * 12.6 — after a gateway server-tool call that used sampling: fires the alerts of the client's, the toolset
+   * project's and the global budgets it crossed (as `recordExecution` does for runs). Nothing is read when no budget
+   * matches.
+   */
+  async recordGatewayUsage(ctx: BudgetCheckContext & { executionId: string }): Promise<void> {
+    await this.alertCrossed(ctx);
+  }
+
+  /** 12.6 — the budgets scoped to one gateway client, with what each counted this period (the client's Governance). */
+  async clientUsage(client: { id: string; name: string }): Promise<McpClientBudgetUsage[]> {
+    const budgets = await this.store.listBudgets({ scopeType: "mcp_client", scopeId: client.id });
+    const ctx: BudgetCheckContext = { workflowId: null, projectId: null, userEmail: null, userId: null, client };
+    const views: McpClientBudgetUsage[] = [];
+    for (const budget of budgets) {
+      if (budget.scopeId !== client.id) continue;
+      const periodStart = currentPeriodStart(budget.period);
+      views.push({
+        budgetId: budget.id,
+        name: budget.name,
+        scopeType: budget.scopeType,
+        scopeId: budget.scopeId,
+        period: budget.period,
+        limitType: budget.limitType,
+        limitValue: budget.limitValue,
+        action: budget.action,
+        enabled: budget.enabled,
+        current: await this.currentUsage(budget, ctx, periodStart),
+        periodStart
+      });
+    }
+    return views;
   }
 
   setLogger(logger: { info: (msg: string, fields?: Record<string, unknown>) => void; warn: (msg: string, fields?: Record<string, unknown>) => void }): void {
@@ -104,7 +287,12 @@ export class BudgetService {
    * getLatestBudgetAlert so we only fire once per (budget, period, severity).
    */
   async recordExecution(ctx: BudgetRecordContext): Promise<void> {
-    const matching = await this.matchingBudgets(ctx);
+    await this.alertCrossed(ctx);
+  }
+
+  /** Fires the alerts of the matching budgets whose warn threshold or cap was crossed; from the snapshot (12.6). */
+  private async alertCrossed(ctx: BudgetCheckContext & { executionId: string }): Promise<void> {
+    const matching = matchBudgets(await this.enabledBudgets(), ctx);
     for (const budget of matching) {
       const periodStart = currentPeriodStart(budget.period);
       const current = await this.currentUsage(budget, ctx, periodStart);
@@ -121,33 +309,24 @@ export class BudgetService {
   // ---------------------------------------------------------------------------
 
   private async matchingBudgets(ctx: BudgetCheckContext): Promise<BudgetRecord[]> {
-    const all = await this.store.listBudgets({ enabledOnly: true });
-    return all.filter((b) => {
-      if (b.scopeType === "global") return true;
-      if (b.scopeType === "project") return ctx.projectId !== null && b.scopeId === ctx.projectId;
-      if (b.scopeType === "workflow") return b.scopeId === ctx.workflowId;
-      if (b.scopeType === "user") {
-        if (!b.scopeId) return false;
-        return b.scopeId === ctx.userEmail || b.scopeId === ctx.userId;
-      }
-      return false;
-    });
+    return matchBudgets(await this.store.listBudgets({ enabledOnly: true }), ctx);
   }
 
   private async currentUsage(budget: BudgetRecord, ctx: BudgetCheckContext, periodStart: string): Promise<number> {
     const periodEnd = currentPeriodEnd(budget.period);
-    const filter: { from: string; to: string; workflowId?: string; userId?: string; userKey?: string; projectId?: string } = {
-      from: periodStart,
-      to: periodEnd
-    };
-    if (budget.scopeType === "project" && ctx.projectId) filter.projectId = ctx.projectId;
-    else if (budget.scopeType === "workflow") filter.workflowId = ctx.workflowId;
+    const filter: Parameters<Store["queryBudgetUsage"]>[0] = { from: periodStart, to: periodEnd };
+    if (budget.scopeType === "project" && budget.scopeId) filter.projectId = budget.scopeId;
+    else if (budget.scopeType === "workflow" && budget.scopeId) filter.workflowId = budget.scopeId;
     else if (budget.scopeType === "user") {
       // Match the configured scope_id against either user_id or user_email
       // — both identify "the user" depending on how the execution was triggered.
-      filter.userKey = budget.scopeId ?? ctx.userId ?? ctx.userEmail ?? undefined;
+      const userKey = budget.scopeId ?? ctx.userId ?? ctx.userEmail;
+      if (userKey) filter.userKey = userKey;
+    } else if (budget.scopeType === "mcp_client" && budget.scopeId) {
+      // The name finds the client's runs recorded before v54 (`user_id = mcp-client:<name>`).
+      filter.client = { id: budget.scopeId, name: ctx.client?.id === budget.scopeId ? ctx.client.name : "" };
     }
-    const totals = await this.store.queryUsageTotals(filter);
+    const totals = await this.store.queryBudgetUsage(filter);
     return budget.limitType === "usd" ? totals.costUsd : totals.totalTokens;
   }
 
@@ -156,7 +335,7 @@ export class BudgetService {
     periodStart: string,
     severity: "warn" | "block",
     usageValue: number,
-    ctx: BudgetRecordContext
+    ctx: BudgetCheckContext & { executionId: string }
   ): Promise<void> {
     const existing = await this.store.getLatestBudgetAlert(budget.id, periodStart, severity);
     if (existing) return; // already fired this period
@@ -170,7 +349,7 @@ export class BudgetService {
       severity,
       usageValue,
       limitValue: budget.limitValue,
-      workflowId: ctx.workflowId,
+      workflowId: ctx.workflowId || null,
       executionId: ctx.executionId,
       message
     });
@@ -199,7 +378,7 @@ export class BudgetService {
     severity: "warn" | "block",
     usageValue: number,
     periodStart: string,
-    ctx: BudgetRecordContext,
+    ctx: BudgetCheckContext & { executionId: string },
     message: string
   ): Promise<void> {
     if (!budget.notifyChannel) return;
@@ -208,7 +387,9 @@ export class BudgetService {
       `*Budget:* ${budget.name} (${budget.scopeType}${budget.scopeId ? `:${budget.scopeId}` : ""})\n` +
       `*Usage:* ${formatUsage(usageValue, budget.limitType)} / ${formatUsage(budget.limitValue, budget.limitType)}\n` +
       `*Period:* ${budget.period} starting ${periodStart}\n` +
-      `*Workflow:* ${ctx.workflowId}\n*Execution:* ${ctx.executionId}`;
+      (ctx.workflowId ? `*Workflow:* ${ctx.workflowId}\n` : "") +
+      (ctx.client ? `*MCP client:* ${ctx.client.name}\n` : "") +
+      `*Execution:* ${ctx.executionId}`;
     try {
       await fetch(budget.notifyChannel, {
         method: "POST",
@@ -222,6 +403,25 @@ export class BudgetService {
       });
     }
   }
+}
+
+/** The enabled budgets that apply to a run or gateway call. */
+function matchBudgets(budgets: BudgetRecord[], ctx: BudgetCheckContext): BudgetRecord[] {
+  return budgets.filter((b) => {
+    if (!b.enabled) return false;
+    if (b.scopeType === "global") return true;
+    if (b.scopeType === "project") {
+      if (!b.scopeId) return false;
+      return b.scopeId === ctx.projectId || b.scopeId === (ctx.toolsetProjectId ?? null);
+    }
+    if (b.scopeType === "workflow") return ctx.workflowId !== null && b.scopeId === ctx.workflowId;
+    if (b.scopeType === "user") {
+      if (!b.scopeId) return false;
+      return b.scopeId === ctx.userEmail || b.scopeId === ctx.userId;
+    }
+    if (b.scopeType === "mcp_client") return Boolean(ctx.client) && b.scopeId === ctx.client!.id;
+    return false;
+  });
 }
 
 function currentPeriodStart(period: "day" | "week" | "month"): string {

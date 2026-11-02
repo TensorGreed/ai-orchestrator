@@ -2953,6 +2953,45 @@ export const openApiSpec = {
         responses: { "201": { description: "Client and its one-time token" }, "400": { description: "Invalid payload or toolset" }, "403": { description: "Role above the creator's" } }
       }
     },
+    "/api/mcp/clients/{id}": {
+      patch: {
+        tags: ["MCP"],
+        summary:
+          "Rename a client or set its rate limit (admin, audited as mcp_client.updated). Nothing else changes. rateLimit null removes the client's own limit (its toolsets' defaults then apply). Calls over the limit get JSON-RPC -32029.",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                properties: {
+                  name: { type: "string" },
+                  rateLimit: {
+                    type: "object",
+                    nullable: true,
+                    properties: {
+                      requestsPerMinute: { type: "integer", minimum: 1, nullable: true },
+                      burst: { type: "integer", minimum: 1, nullable: true, description: "Needs requestsPerMinute; default the per-minute rate" },
+                      maxConcurrent: { type: "integer", minimum: 1, nullable: true }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        responses: { "200": { description: "Updated client" }, "400": { description: "Invalid payload" }, "404": { description: "Not found" } }
+      }
+    },
+    "/api/mcp/clients/{id}/budgets": {
+      get: {
+        tags: ["MCP"],
+        summary: "The budgets scoped to a client (scope mcp_client), with what each counted in its current period (builder)",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "Budgets and their current usage" }, "404": { description: "Not found" } }
+      }
+    },
     "/api/mcp/clients/{id}/revoke": {
       post: {
         tags: ["MCP"],

@@ -26,6 +26,9 @@ import {
   recordedCallLabels,
   withImpliedSensitive,
   mcpClientCreateSchema,
+  mcpClientUpdateSchema,
+  effectiveGatewayRateLimit,
+  normalizeGatewayRateLimit,
   mcpPolicyRoleSchema,
   mcpToolsetInputSchema,
   mcpToolsetMemberInputSchema,
@@ -50,6 +53,9 @@ import {
 import type { ProviderRegistry } from "@ai-orchestrator/provider-sdk";
 import { createMcpSamplingHandler, referencesSecretIn, type GuardRunResolution } from "@ai-orchestrator/workflow-engine";
 import type { GuardService } from "./services/guard-service.js";
+import { BudgetExceededError, type BudgetCheckContext, type BudgetService } from "./services/budget-service.js";
+import { GatewayClientLimiter } from "./services/mcp-gateway-limits.js";
+import { retryAfterSeconds } from "./run-helpers.js";
 import { checkGatewayCall, type GatewayGuardChannel, type GatewayGuardOutcome } from "./services/mcp-gateway-guard.js";
 import type { z } from "zod";
 import { DEFAULT_MCP_GATEWAY_APPROVAL_WINDOW_MS, toolArgumentSummariesEnabled, type AppConfig } from "./config.js";
@@ -244,6 +250,8 @@ export interface McpGatewayDeps {
      * them after its own profiles (tighten-only) and records them, so a retry or replay applies them again.
      */
     gatewayGuard?: { toolsetId: string; clientId: string; profiles: GatewayGuardProfileRef[] };
+    /** 12.6 — the toolset the call came through: the run's usage counts toward the client and the toolset's project. */
+    toolset: McpToolset;
     onNodeComplete: (event: { nodeId: string; status: string }) => void;
   }) => Promise<GatewayWorkflowRunOutcome>;
   /** Abort a running workflow execution. */
@@ -260,6 +268,15 @@ export interface McpGatewayDeps {
   sensitiveSecretIds?: () => Promise<ReadonlySet<string>>;
   /** 12.6 — Guard per toolset and per client. Absent: the gateway runs no Guard (as before 12.6). */
   guard?: GuardService;
+  /**
+   * 12.6 — budgets: a `block` budget of the client, the toolset's project or the deployment that is used up refuses
+   * the call; sampling cost counts toward them. Absent: no budget checks.
+   */
+  budgets?: Pick<BudgetService, "checkBlock" | "recordGatewayUsage" | "clientUsage">;
+  /** 12.6 — the cost of a sampling request (the usage pricing table); null when the model has no price. */
+  priceSampling?: (providerId: string, model: string, inputTokens: number, outputTokens: number) => number | null;
+  /** 12.6 — per-client rate limits; absent: counted in this process (`GatewayClientLimiter` without a shared store). */
+  limiter?: GatewayClientLimiter;
 }
 
 /** 12.6 — the Guard stack a gateway call runs under, when a toolset or client binding applies. */
@@ -379,6 +396,7 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
       }
     },
     onEnded: async (session, reason) => {
+      limitAuditedAt.delete(session.id);
       const client = await store.getMcpClient(session.clientId);
       const toolset = await store.getMcpToolset(session.toolsetId);
       await deps.auditRaw({
@@ -398,6 +416,35 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
   app.addHook("onClose", async () => {
     await sessions.closeAll();
   });
+
+  // 12.6 — per-client rate limits (none unless a client or toolset has one).
+  const limiter = deps.limiter ?? new GatewayClientLimiter();
+  /** 12.6 — when each session's last rate-limit or budget refusal was audited (at most once a minute per session). */
+  const limitAuditedAt = new Map<string, number>();
+  const LIMIT_AUDIT_EVERY_MS = 60_000;
+  const auditLimitRefusal = async (
+    session: GatewaySession,
+    auth: AuthenticatedClient,
+    toolset: McpToolset,
+    eventType: "mcp_gateway.rate_limited" | "mcp_gateway.budget_blocked",
+    metadata: Record<string, unknown>
+  ) => {
+    const now = Date.now();
+    const last = limitAuditedAt.get(session.id);
+    if (last !== undefined && now - last < LIMIT_AUDIT_EVERY_MS) return;
+    limitAuditedAt.set(session.id, now);
+    await deps.auditRaw({
+      category: "system",
+      eventType,
+      action: "execute",
+      outcome: "denied",
+      actor: { type: "api_key", email: auth.client.name },
+      resourceType: "mcp_toolset",
+      resourceId: toolset.id,
+      projectId: toolset.projectId,
+      metadata: { clientId: auth.client.id, sessionId: session.id, ...metadata }
+    });
+  };
 
   // ---------------------------------------------------------------------------
   // Transport helpers
@@ -701,6 +748,28 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
   // tools/call
   // ---------------------------------------------------------------------------
 
+  /** 12.6 — what a call's sampling requests cost: the priced ones summed; null when none of them has a price. */
+  const samplingCost = (trace: McpSamplingTraceEntry[]): number | null => {
+    if (!deps.priceSampling) return null;
+    let total: number | null = null;
+    for (const entry of trace) {
+      if (!entry.ok || !entry.providerId || !entry.model) continue;
+      const cost = deps.priceSampling(entry.providerId, entry.model, entry.inputTokens ?? 0, entry.outputTokens ?? 0);
+      if (cost !== null) total = (total ?? 0) + cost;
+    }
+    return total;
+  };
+
+  /** 12.6 — who a gateway call's budgets are matched against: the client, the toolset's project, the workflow. */
+  const budgetContext = (auth: AuthenticatedClient, toolset: McpToolset, workflowId: string | null): BudgetCheckContext => ({
+    workflowId,
+    projectId: null,
+    userEmail: null,
+    userId: null,
+    client: { id: auth.client.id, name: auth.client.name },
+    toolsetProjectId: toolset.projectId ?? null
+  });
+
   const callServerTool = async (input: {
     session: GatewaySession;
     auth: AuthenticatedClient;
@@ -732,7 +801,7 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     let ok = false;
     let errorText: string | null = null;
     let result: McpCallToolResult;
-    let samplingUsage: { requests: number; inputTokens: number; outputTokens: number } | null = null;
+    let samplingUsage: { requests: number; inputTokens: number; outputTokens: number; costUsd: number | null } | null = null;
     // 12.6 — set when Guard blocked the result (the server was called).
     let guardResultBlocked: Extract<GatewayGuardOutcome, { action: "block" }> | null = null;
     try {
@@ -781,7 +850,8 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
         samplingUsage = {
           requests: samplingTrace.length,
           inputTokens: samplingTrace.reduce((sum, entry) => sum + (entry.inputTokens ?? 0), 0),
-          outputTokens: samplingTrace.reduce((sum, entry) => sum + (entry.outputTokens ?? 0), 0)
+          outputTokens: samplingTrace.reduce((sum, entry) => sum + (entry.outputTokens ?? 0), 0),
+          costUsd: samplingCost(samplingTrace)
         };
       }
       // Every injected value, including each value of a secret bundle (Phase 10.6).
@@ -841,7 +911,8 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
         error: errorText,
         turnInputTokens: null,
         turnOutputTokens: null,
-        estimatedCostUsd: null,
+        // 12.6 — what the sampling requests cost (the usage pricing table); null without sampling or a priced model.
+        estimatedCostUsd: samplingUsage?.costUsd ?? null,
         samplingRequests: samplingUsage?.requests ?? null,
         samplingInputTokens: samplingUsage?.inputTokens ?? null,
         samplingOutputTokens: samplingUsage?.outputTokens ?? null,
@@ -855,6 +926,14 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
       });
     } catch (error) {
       app.log.warn({ err: deps.redact(error instanceof Error ? error.message : String(error)) }, "Failed to record MCP gateway telemetry");
+    }
+    // 12.6 — sampling spend counts toward the client's, the toolset project's and the global budgets: their alerts.
+    if (deps.budgets && samplingUsage && (samplingUsage.inputTokens + samplingUsage.outputTokens > 0 || (samplingUsage.costUsd ?? 0) > 0)) {
+      try {
+        await deps.budgets.recordGatewayUsage({ ...budgetContext(auth, toolset, null), executionId: callExecutionId });
+      } catch (error) {
+        app.log.warn({ err: deps.redact(error instanceof Error ? error.message : String(error)) }, "MCP gateway budget alert evaluation failed");
+      }
     }
     await auditToolCall({
       session,
@@ -940,6 +1019,7 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
           ...(sessionLabels && (sessionLabels.provenance.length > 0 || sessionLabels.dataClasses.length > 0) ? { sessionLabels } : {}),
           ...(callLabels ? { tracksLabels: true } : {}),
           ...(guardStack ? { gatewayGuard: { toolsetId: toolset.id, clientId: auth.client.id, profiles: guardStack.refs } } : {}),
+          toolset,
           onNodeComplete: (event) => {
             done = Math.min(total, done + 1);
             const node = workflow.nodes.find((entry) => entry.id === event.nodeId);
@@ -947,6 +1027,9 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
           }
         });
       } catch (error) {
+        // 12.6 — a block budget of the workflow, its project or its user refused the run before it started: the
+        // client gets the gateway's budget error, as for the budgets checked before the call.
+        if (error instanceof BudgetExceededError) throw error;
         outcome = { status: "error", error: error instanceof Error ? error.message : String(error) };
       }
     }
@@ -1305,7 +1388,65 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
   // Request dispatch
   // ---------------------------------------------------------------------------
 
+  /** 12.6 — the JSON-RPC error for a call a used-up `block` budget refused. */
+  const budgetRefusal = async (
+    session: GatewaySession,
+    auth: AuthenticatedClient,
+    toolset: McpToolset,
+    request: JsonRpcRequest,
+    toolName: string,
+    blocked: BudgetExceededError
+  ): Promise<JsonRpcResponse> => {
+    await auditLimitRefusal(session, auth, toolset, "mcp_gateway.budget_blocked", {
+      tool: toolName,
+      budgetId: blocked.budget.id,
+      scopeType: blocked.budget.scopeType,
+      current: blocked.current,
+      limit: blocked.limit
+    });
+    return rpcError(request.id, JSON_RPC_ERRORS.budgetExceeded, blocked.message, {
+      budgetId: blocked.budget.id,
+      period: blocked.budget.period,
+      periodStart: blocked.periodStart,
+      retryAfterSeconds: retryAfterSeconds(blocked.budget.period)
+    });
+  };
+
+  /**
+   * 12.6 — every `tools/call` (each call of a batch too) first passes the client's rate limit, when it or its toolset
+   * has one; the concurrency slot is held until the call ends. No limit: nothing is counted and nothing is read.
+   */
   const handleToolsCall = async (
+    session: GatewaySession,
+    auth: AuthenticatedClient,
+    toolset: McpToolset,
+    request: JsonRpcRequest,
+    emit: Emit
+  ): Promise<JsonRpcResponse | typeof SUPPRESSED> => {
+    const effective = effectiveGatewayRateLimit(auth.client, toolset);
+    if (!effective) return await handleLimitedToolsCall(session, auth, toolset, request, emit);
+    const admitted = await limiter.acquire(effective.key, effective.limit);
+    if (!admitted.ok) {
+      await auditLimitRefusal(session, auth, toolset, "mcp_gateway.rate_limited", {
+        reason: admitted.reason,
+        limitSource: effective.source,
+        limit: effective.limit,
+        tool: typeof asRecord(request.params).name === "string" ? asRecord(request.params).name : null
+      });
+      return rpcError(request.id, JSON_RPC_ERRORS.retryLater, admitted.message, {
+        reason: admitted.reason,
+        retryAfterMs: admitted.retryAfterMs,
+        retryAfterSeconds: Math.max(1, Math.ceil(admitted.retryAfterMs / 1000))
+      });
+    }
+    try {
+      return await handleLimitedToolsCall(session, auth, toolset, request, emit);
+    } finally {
+      admitted.release();
+    }
+  };
+
+  const handleLimitedToolsCall = async (
     session: GatewaySession,
     auth: AuthenticatedClient,
     toolset: McpToolset,
@@ -1348,6 +1489,22 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
         }
       });
       return rpcResult(request.id, toolError(hidden.message));
+    }
+
+    // 12.6 — a used-up `block` budget of the client, the toolset's project or the deployment (and, for a workflow tool,
+    // the workflow's) refuses the call before the tool policy. Without a matching block budget nothing is read.
+    if (deps.budgets) {
+      let blocked: BudgetExceededError | null;
+      try {
+        blocked = await deps.budgets.checkBlock(budgetContext(auth, toolset, tool.kind === "workflow" ? tool.workflowId : null));
+      } catch (error) {
+        app.log.warn(
+          { err: deps.redact(error instanceof Error ? error.message : String(error)), toolsetId: toolset.id, clientId: auth.client.id, tool: tool.name },
+          "MCP gateway could not check the budgets of a call; the call was refused"
+        );
+        return rpcResult(request.id, toolError("Budgets could not be checked for this call, so it was not sent. Try again."));
+      }
+      if (blocked) return await budgetRefusal(session, auth, toolset, request, tool.name, blocked);
     }
 
     // 12.2 — read from the session only, never from the request (`_meta`, headers or arguments).
@@ -1423,7 +1580,9 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
       }
     });
     try {
-      const result =
+      let result: Awaited<ReturnType<typeof callServerTool>>;
+      try {
+        result =
         tool.kind === "workflow"
           ? await callWorkflowTool({ session, auth, toolset, tool, args: callArgs, executionId, callExecutionId, progress, ...(callLabels ? { callLabels } : {}), ...(guardStack ? { guardStack } : {}) })
           : await callServerTool({
@@ -1440,6 +1599,10 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
               ...(policyDecision ? { policyDecision } : {}),
               ...(usedApprovalId ? { approvalId: usedApprovalId } : {})
             });
+      } catch (error) {
+        if (error instanceof BudgetExceededError) return await budgetRefusal(session, auth, toolset, request, tool.name, error);
+        throw error;
+      }
       // Phase 12.4 — refused before reaching the server (even when the client cancelled meanwhile): the approval it
       // used is still good for a retry. A call cancelled while still queued is handled in callServerTool.
       if (isRetryLater(result) && usedApprovalId) await store.restoreMcpGatewayApproval(usedApprovalId);
@@ -1965,6 +2128,7 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
       projectId: parsed.data.projectId ?? null,
       enabled: parsed.data.enabled ?? true,
       trackSessionLabels: parsed.data.trackSessionLabels ?? false,
+      rateLimit: normalizeGatewayRateLimit(parsed.data.rateLimit),
       createdBy: user.email,
       members
     });
@@ -1998,13 +2162,21 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
       if (!validated) return reply;
       members = validated;
     }
-    const { members: _members, ...fields } = parsed.data;
-    const updated = (await store.updateMcpToolset(existing.id, { ...fields, ...(members ? { members } : {}) }))!;
+    const { members: _members, rateLimit, ...fields } = parsed.data;
+    const updated = (await store.updateMcpToolset(existing.id, {
+      ...fields,
+      ...(rateLimit !== undefined ? { rateLimit: normalizeGatewayRateLimit(rateLimit) } : {}),
+      ...(members ? { members } : {})
+    }))!;
     // A new URL or a disabled toolset ends the sessions bound to the old one.
     if (updated.slug !== existing.slug || !updated.enabled) {
       await sessions.endWhere((session) => session.toolsetId === existing.id, "toolset_removed");
     }
-    await auditToolset(request, user, "mcp_toolset.updated", "update", updated, { fields: Object.keys(parsed.data) });
+    await auditToolset(request, user, "mcp_toolset.updated", "update", updated, {
+      fields: Object.keys(parsed.data),
+      // 12.6 — the default rate limit for its clients, when this update changed it.
+      ...(rateLimit !== undefined ? { rateLimit: updated.rateLimit, previousRateLimit: existing.rateLimit } : {})
+    });
     if (updated.trackSessionLabels !== existing.trackSessionLabels) await auditSessionTracking(request, user, updated);
     return { toolset: await toolsetView(updated) };
   });
@@ -2154,6 +2326,58 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
       });
     }
     return { client: await clientView(revoked) };
+  });
+
+  // 12.6 — an admin renames a client or sets its rate limit (null removes it). Nothing else about it changes.
+  app.patch<{ Params: { id: string } }>("/api/mcp/clients/:id", async (request, reply) => {
+    const user = await deps.requireRole(request, reply, ["admin"]);
+    if (!user) return reply;
+    const existing = await store.getMcpClient(request.params.id);
+    if (!existing) {
+      reply.code(404);
+      return { error: "Client not found" };
+    }
+    const parsed = mcpClientUpdateSchema.safeParse(request.body);
+    if (!parsed.success) {
+      reply.code(400);
+      return { error: "Invalid client payload", details: parsed.error.issues };
+    }
+    const patch = {
+      ...(parsed.data.name !== undefined ? { name: parsed.data.name } : {}),
+      ...(parsed.data.rateLimit !== undefined ? { rateLimit: normalizeGatewayRateLimit(parsed.data.rateLimit) } : {})
+    };
+    const updated = await store.updateMcpClient(existing.id, patch);
+    if (!updated) {
+      reply.code(404);
+      return { error: "Client not found" };
+    }
+    await deps.auditUser(request, user, {
+      category: "system",
+      eventType: "mcp_client.updated",
+      action: "update",
+      outcome: "success",
+      resourceType: "mcp_client",
+      resourceId: existing.id,
+      metadata: {
+        fields: Object.keys(patch),
+        name: updated.name,
+        ...(patch.name !== undefined && patch.name !== existing.name ? { previousName: existing.name } : {}),
+        ...(patch.rateLimit !== undefined ? { rateLimit: updated.rateLimit, previousRateLimit: existing.rateLimit } : {})
+      }
+    });
+    return { client: await clientView(updated) };
+  });
+
+  // 12.6 — the budgets scoped to a client, with what each counted this period (the client's Governance section).
+  app.get<{ Params: { id: string } }>("/api/mcp/clients/:id/budgets", async (request, reply) => {
+    const user = await deps.requireRole(request, reply, ["builder"]);
+    if (!user) return reply;
+    const client = await store.getMcpClient(request.params.id);
+    if (!client) {
+      reply.code(404);
+      return { error: "Client not found" };
+    }
+    return { clientId: client.id, budgets: deps.budgets ? await deps.budgets.clientUsage({ id: client.id, name: client.name }) : [] };
   });
 
   // Phase 12.4 — gateway calls a require_approval rule held back. Admins decide; the client retries the call.

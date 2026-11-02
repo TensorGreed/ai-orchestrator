@@ -69,6 +69,7 @@ import {
   type WorkflowNode,
   WorkflowError
 } from "@ai-orchestrator/shared";
+import { BUDGET_SCOPE_TYPES, isBudgetScopeType, type BudgetScopeType } from "@ai-orchestrator/shared";
 import {
   executeCodeNodeSandbox,
   executeWorkflow,
@@ -177,7 +178,8 @@ import { MetricsService } from "./services/metrics-service";
 import { TracingService, parseKeyValueList, parseTraceparent } from "./services/tracing-service";
 import { OtlpMetricsExporter } from "./services/otlp-metrics-exporter";
 import { UsageService } from "./services/usage-service";
-import { BudgetService } from "./services/budget-service";
+import { BudgetExceededError, BudgetService, BudgetUnavailableError, type BudgetCheckContext } from "./services/budget-service";
+import { GatewayClientLimiter } from "./services/mcp-gateway-limits.js";
 import { AuditExportBusyError, AuditExportService } from "./services/audit-export-service.js";
 import { McpProbeService, McpProbeSkippedError, serverConfigFromRecord } from "./services/mcp-probe-service";
 import { McpElicitationService, toElicitationView } from "./services/mcp-elicitation-service.js";
@@ -237,10 +239,12 @@ import {
   resultForQueue,
   RunDispatcher,
   triggerQueueItemId,
+  type DispatchedRunInput,
   type DispatchedRunSpec
 } from "./services/run-dispatch.js";
 import { LocalRunEvents, openRunRelay, resultFromPersistedRun, RunEventPublisher, type PersistedRun, type RunEventName } from "./services/run-event-relay.js";
 import type { RunWorkflowExecutionInput, WorkflowExecutionEventHooks } from "./run-types.js";
+import type { WorkflowExecutionResult } from "@ai-orchestrator/shared";
 import { createRunAccess, type RunAccessDenial } from "./run-access.js";
 import { ProjectNotEmptyError, ReleaseGateEnforcedError, StoreReferenceMissingError } from "./db/store-errors.js";
 import { createRunScope, type SecretScope } from "./run-scope.js";
@@ -304,6 +308,8 @@ interface Tier1IntegrationSpec {
 
 /** Phase 15.1 — the trigger type of a golden-run replay. */
 const REPLAY_TRIGGER_TYPE = "replay";
+/** 12.6 — triggers a used-up `block` budget does not refuse: replays (golden runs, MCP cassette replays). */
+const BUDGET_EXEMPT_TRIGGER_TYPES: ReadonlySet<string> = new Set([REPLAY_TRIGGER_TYPE, "mcp_replay"]);
 /** Phase 15.6 — how often stale production-capture tickets are given back. */
 const CAPTURE_SWEEP_INTERVAL_MS = 60_000;
 
@@ -2620,6 +2626,8 @@ export async function createApp(
     customData?: Record<string, unknown>;
     /** Phase 15.3 — a model replay's live calls: only they are recorded as usage (tape answers cost nothing). */
     liveModelCalls?: Array<{ providerId: string; model: string; inputTokens: number | null; outputTokens: number | null; cachedInputTokens: number | null }>;
+    /** 12.6 — a gateway call's run: its usage is the client's and counts toward the toolset's project. */
+    gatewayUsage?: RunWorkflowExecutionInput["gatewayUsage"];
   }) => {
     if (input.result.status === "waiting_approval") {
       app.log.info(
@@ -2727,6 +2735,7 @@ export async function createApp(
             : null,
         projectId: input.workflow.projectId ?? null,
         triggerType: input.triggerType ?? null,
+        ...(input.gatewayUsage ? { clientId: input.gatewayUsage.clientId, toolsetId: input.gatewayUsage.toolsetId } : {}),
         status: input.result.status,
         durationMs: toDurationMs(input.result.startedAt, input.result.completedAt) ?? 0,
         nodeResults: nodeOutputs,
@@ -2750,6 +2759,9 @@ export async function createApp(
             typeof input.triggeredBy === "string" && !input.triggeredBy.includes("@")
               ? input.triggeredBy
               : null,
+          ...(input.gatewayUsage
+            ? { client: { id: input.gatewayUsage.clientId, name: input.gatewayUsage.clientName }, toolsetProjectId: input.gatewayUsage.toolsetProjectId }
+            : {}),
           spentUsd: usageResult.costUsd,
           spentTokens: usageResult.totalTokens
         });
@@ -3077,7 +3089,8 @@ export async function createApp(
       triggerType: run.triggerType,
       triggeredBy: run.triggeredBy,
       requestInput: spec.history.requestInput,
-      customData: spec.history.customData
+      customData: spec.history.customData,
+      ...(run.gatewayUsage ? { gatewayUsage: run.gatewayUsage } : {})
     });
     return result;
   };
@@ -3151,7 +3164,8 @@ export async function createApp(
           triggerType: run.triggerType,
           triggeredBy: run.triggeredBy,
           requestInput: spec.history.requestInput,
-          customData: spec.history.customData
+          customData: spec.history.customData,
+          ...(run.gatewayUsage ? { gatewayUsage: run.gatewayUsage } : {})
         });
       } catch (error) {
         publisher.close();
@@ -3219,8 +3233,67 @@ export async function createApp(
     const record = await mcpElicitationService.get(id);
     return record ? toElicitationView(record) : null;
   };
+  /**
+   * 12.6 (D8) — who a run's budgets are matched against: its workflow and project, the user who started it (the
+   * signed-in user, else the trigger's name as usage records it) and, for a gateway call's run, the client and the
+   * toolset's project.
+   */
+  const runBudgetContext = (run: Pick<DispatchedRunInput, "workflow" | "triggeredBy" | "policyActor" | "gatewayUsage">): BudgetCheckContext => {
+    const by = typeof run.triggeredBy === "string" ? run.triggeredBy : null;
+    return {
+      workflowId: run.workflow.id,
+      projectId: run.workflow.projectId ?? null,
+      userEmail: run.policyActor?.email ?? (by && by.includes("@") ? by : null),
+      userId: run.policyActor?.id ?? (by && !by.includes("@") ? by : null),
+      ...(run.gatewayUsage
+        ? { client: { id: run.gatewayUsage.clientId, name: run.gatewayUsage.clientName }, toolsetProjectId: run.gatewayUsage.toolsetProjectId }
+        : {})
+    };
+  };
+  /**
+   * 12.6 (D8) — a used-up `block` budget refuses every run a trigger starts, not only `POST /api/workflows/:id/execute`:
+   * webhooks, schedules, chat, forms, app triggers, queue dispatch, retries and gateway workflow tools. Replays of a
+   * run's MCP calls are debugging and are not refused (their spend is still recorded). With no matching block budget
+   * this reads nothing from the store.
+   */
+  const admitRunBudget = async (run: Pick<DispatchedRunInput, "workflow" | "triggerType" | "triggeredBy" | "policyActor" | "gatewayUsage">): Promise<void> => {
+    if (BUDGET_EXEMPT_TRIGGER_TYPES.has(run.triggerType)) return;
+    await budgetService.assertNotBlocked(runBudgetContext(run));
+  };
+  /** 12.6 — a schedule or an app trigger a budget refused: a failed run with the reason, so it shows in the history. */
+  const recordBudgetRefusedRun = async (spec: DispatchedRunSpec, error: BudgetExceededError): Promise<WorkflowExecutionResult> => {
+    const now = new Date().toISOString();
+    const message = `${error.message} The run did not start.`;
+    await store
+      .saveExecutionHistory({
+        id: spec.run.executionId,
+        workflowId: spec.run.workflow.id,
+        workflowName: spec.run.workflow.name,
+        status: "error",
+        startedAt: now,
+        completedAt: now,
+        durationMs: 0,
+        triggerType: spec.run.triggerType,
+        triggeredBy: spec.run.triggeredBy,
+        inputJson: redactSensitiveInput((spec.progress ?? spec.history).requestInput),
+        customData: (spec.progress ?? spec.history).customData,
+        nodeResultsJson: [],
+        error: message
+      })
+      .catch((writeError: unknown) => {
+        app.log.warn({ executionId: spec.run.executionId, error: writeError instanceof Error ? writeError.message : String(writeError) }, "Could not record a run a budget refused");
+        return false;
+      });
+    app.log.warn(
+      { executionId: spec.run.executionId, workflowId: spec.run.workflow.id, triggerType: spec.run.triggerType, budgetId: error.budget.id },
+      "A budget refused a triggered run"
+    );
+    return { workflowId: spec.run.workflow.id, executionId: spec.run.executionId, status: "error", startedAt: now, completedAt: now, nodeResults: [], error: message };
+  };
   const runDispatcher = new RunDispatcher({
     gate: dispatchGate,
+    admit: async (spec) => await admitRunBudget(spec.run),
+    recordRefused: async (spec, error) => await recordBudgetRefusedRun(spec, error),
     executeLocally: async (spec, passthrough, local) => await executeRunSpec(spec, passthrough, local),
     checkBackpressure: async (pool) => await queueProducer.checkBackpressure(pool),
     recordQueued: async (spec) => {
@@ -4419,6 +4492,11 @@ export async function createApp(
   budgetService.setLogger({
     info: (msg, fields) => app.log.info(fields ?? {}, msg),
     warn: (msg, fields) => app.log.warn(fields ?? {}, msg)
+  });
+  // 12.6 — the enabled budgets in memory (re-read every 2 s), so runs and gateway calls check them without a read.
+  await budgetService.start();
+  app.addHook("onClose", async () => {
+    budgetService.stop();
   });
   const auditExportService = new AuditExportService(store, {
     checkIntervalMs: config.AUDIT_EXPORT_CHECK_INTERVAL_MS,
@@ -5923,6 +6001,15 @@ export async function createApp(
     return { pricing: usageService.getPricing() };
   });
 
+  /** 12.6 — this instance checks runs and gateway calls against the budget snapshot: an edit here applies at once. */
+  const refreshBudgets = async () => {
+    try {
+      await budgetService.refresh();
+    } catch {
+      // Logged by the service; the background re-read picks the edit up.
+    }
+  };
+
   // Phase 8.3 — budgets CRUD (admin-only).
   app.get("/api/budgets", async (request, reply) => {
     const user = await requireRole(request, reply, ["admin"]);
@@ -5941,7 +6028,7 @@ export async function createApp(
     if (!user) return;
     const body = request.body as Partial<{
       name: string;
-      scopeType: "global" | "project" | "workflow" | "user";
+      scopeType: BudgetScopeType;
       scopeId: string | null;
       period: "day" | "week" | "month";
       limitType: "usd" | "tokens";
@@ -5955,9 +6042,9 @@ export async function createApp(
       reply.code(400);
       return { error: "name is required" };
     }
-    if (!body.scopeType || !["global", "project", "workflow", "user"].includes(body.scopeType)) {
+    if (!isBudgetScopeType(body.scopeType)) {
       reply.code(400);
-      return { error: "scopeType must be one of global|project|workflow|user" };
+      return { error: `scopeType must be one of ${BUDGET_SCOPE_TYPES.join("|")}` };
     }
     if (!body.period || !["day", "week", "month"].includes(body.period)) {
       reply.code(400);
@@ -5978,6 +6065,11 @@ export async function createApp(
     if (body.scopeType !== "global" && !body.scopeId) {
       reply.code(400);
       return { error: "scopeId required for non-global budgets" };
+    }
+    // 12.6 — a client budget names an existing gateway client (its id, so a rename keeps it).
+    if (body.scopeType === "mcp_client" && !(await store.getMcpClient(body.scopeId!))) {
+      reply.code(400);
+      return { error: `MCP client '${body.scopeId}' does not exist` };
     }
     const id = `bgt_${crypto.randomUUID()}`;
     await store.createBudget({
@@ -6004,6 +6096,7 @@ export async function createApp(
       resourceId: id,
       metadata: { scopeType: body.scopeType, limitType: body.limitType, limitValue: body.limitValue, action: body.action }
     });
+    await refreshBudgets();
     return { budget: await store.getBudget(id) };
   });
 
@@ -6038,6 +6131,7 @@ export async function createApp(
       resourceId: request.params.id,
       metadata: { ...patch }
     });
+    await refreshBudgets();
     return { budget: await store.getBudget(request.params.id) };
   });
 
@@ -6059,6 +6153,7 @@ export async function createApp(
       resourceType: "budget",
       resourceId: request.params.id
     });
+    await refreshBudgets();
     return { ok: true };
   });
 
@@ -9640,6 +9735,7 @@ export async function createApp(
     productionMissing,
     releaseService,
     budgetService,
+    admitRunBudget: async (run) => await admitRunBudget(run),
     prepareWorkflowExecutionPayload,
     auditRunAction,
     mcpCassetteService,
@@ -10750,6 +10846,13 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     },
     sensitiveSecretIds: async () => await sensitiveSecrets.ids(),
     guard: guardService,
+    // 12.6 — budgets, sampling cost and per-client rate limits (shared across replicas in cluster mode).
+    budgets: budgetService,
+    priceSampling: (providerId, model, inputTokens, outputTokens) => usageService.estimateCostUsd(providerId, model, inputTokens, outputTokens, 0),
+    limiter: new GatewayClientLimiter({
+      shared: clusterMode ? store : null,
+      logger: { warn: (message, fields) => app.log.warn(fields ?? {}, message) }
+    }),
     runWorkflowTool: async (input) => {
       const triggerType = "mcp_gateway";
       const triggeredBy = `mcp-client:${input.client.name}`;
@@ -10781,7 +10884,9 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
             // Recorded on the trigger's result, so a retry or replay of this run starts from them too.
             ...(inputLabels ? { inputLabels, recordInputLabels: true } : {}),
             // 12.6 — the toolset's and client's Guard profiles (only when one has a binding); crosses the queue.
-            ...(input.gatewayGuard ? { gatewayGuard: input.gatewayGuard } : {})
+            ...(input.gatewayGuard ? { gatewayGuard: input.gatewayGuard } : {}),
+            // 12.6 — the run's usage is the client's and counts toward the toolset's project (its budgets too).
+            gatewayUsage: { clientId: input.client.id, clientName: input.client.name, toolsetId: input.toolset.id, toolsetProjectId: input.toolset.projectId ?? null }
           },
           // 12.6 — recorded on the run, so a retry or replay of it applies the same profile versions.
           progress: { requestInput, ...(input.gatewayGuard ? { customData: { [GATEWAY_GUARD_CUSTOM_DATA_KEY]: input.gatewayGuard } } : {}) },
@@ -10849,6 +10954,8 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     }
     const executeAccess = await runAccess.workflow(user, workflow.id, "workflow:execute");
     if (!executeAccess.ok) return denyRunAccess(reply, executeAccess);
+    // 12.6 (D8) — a used-up block budget refuses the run with a 402 before the stream starts.
+    await admitRunBudget({ workflow, triggerType: "webhook_api_stream", triggeredBy: user.email, policyActor: user });
 
     const executionId = crypto.randomUUID();
     let streamClosed = false;
@@ -10922,7 +11029,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
           progress: { requestInput: parsed.data },
           history: { requestInput: parsed.data }
         },
-        { pool: dispatchPoolOf(workflow), closed: clientGone, passthrough: {
+        { pool: dispatchPoolOf(workflow), closed: clientGone, admitted: true, passthrough: {
           onNodeStart: (event) => {
             sendSseEvent("node_start", event);
           },
@@ -11037,6 +11144,9 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
 
         let idempotencyKey: string | undefined;
         let replayingExistingResult = false;
+        // 12.6 (D8) — set when the budgets were checked before the idempotency key was reserved.
+        let budgetAdmitted = false;
+        const triggerType = isTestRoute ? "webhook_test" : "webhook";
         if (security.idempotencyEnabled) {
           await store.clearExpiredWebhookSecurityState();
           idempotencyKey = getHeaderValue(request.headers as Record<string, unknown>, security.idempotencyHeaderName);
@@ -11125,6 +11235,10 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
             }
           }
 
+          // 12.6 — a used-up block budget answers 402 before the key is reserved, so a retry once the budget allows it
+          // is not refused as "already in progress". An earlier result under the key is still answered above.
+          await admitRunBudget({ workflow: match.workflow, triggerType, triggeredBy: "webhook" });
+          budgetAdmitted = true;
           const idempotencyExpiry = new Date(now + DEFAULT_IDEMPOTENCY_TTL_SECONDS * 1000).toISOString();
           try {
             await store.saveWebhookIdempotencyPending({
@@ -11207,7 +11321,6 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         }
 
         const executionId = crypto.randomUUID();
-        const triggerType = isTestRoute ? "webhook_test" : "webhook";
         // 12.2 — the input's provenance: an admin's trust setting on the trigger, else `user` when the auth above
         // verified the caller, else outside content. Recorded on the trigger's result so replays keep it.
         // A `user` setting whose trigger changed since an admin made it (type, auth mode, secret, path) is ignored; an
@@ -11244,7 +11357,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
             progress: { requestInput: parsedInput.body },
             history: { requestInput: parsedInput.body }
           },
-          { pool: dispatchPoolOf(match.workflow) }
+          { pool: dispatchPoolOf(match.workflow), admitted: budgetAdmitted }
         );
 
         const defaultResponsePayload = {
@@ -13396,6 +13509,14 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
           const configured = workflow.settings?.executionPool;
           if (typeof configured === "string" && QUEUE_POOL_PATTERN.test(configured)) pool = configured;
         }
+        // 12.6 (D8) — a used-up block budget refuses the queued run now (402), not on the worker.
+        // The trigger name in the body is the caller's label: it never exempts a run from its budgets.
+        await admitRunBudget({
+          workflow,
+          triggerType: "api_queue",
+          triggeredBy: user.email,
+          policyActor: user
+        });
         let executionId: string;
         try {
           executionId = await queueProducer.enqueue({
@@ -13945,6 +14066,25 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       return;
     }
     if (error instanceof DispatchClientGoneError) {
+      return;
+    }
+    // 12.6 (D8) — a used-up `block` budget refused the run: the answer `/api/workflows/:id/execute` always gave.
+    if (error instanceof BudgetExceededError) {
+      reply.header("retry-after", String(retryAfterSeconds(error.budget.period)));
+      reply.code(402).send({
+        error: "budget_exceeded",
+        message: error.message,
+        budgetId: error.budget.id,
+        currentUsage: error.current,
+        limit: error.limit,
+        periodStart: error.periodStart
+      });
+      return;
+    }
+    if (error instanceof BudgetUnavailableError) {
+      app.log.warn({ err: secretService.redact(error.message) }, "A run was refused because its budgets could not be checked");
+      reply.header("Retry-After", "5");
+      reply.code(503).send({ error: "Budgets could not be checked; try again shortly." });
       return;
     }
 

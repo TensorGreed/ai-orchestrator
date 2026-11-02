@@ -18,6 +18,7 @@ import type { ClusterInstanceRecord } from "../db/store.js";
 import type { RunWorkflowExecutionInput, WorkflowExecutionEventHooks } from "../run-types.js";
 import type { SafeUser } from "./auth-service.js";
 import { QueueFullError } from "./queue-service.js";
+import { BudgetExceededError } from "./budget-service.js";
 import type { RunRelay, RunRelayEnd } from "./run-event-relay.js";
 import type { McpCassetteRunPlan } from "./mcp-cassette-service.js";
 
@@ -283,6 +284,14 @@ export interface RunDispatcherDeps {
   /** Requests that may wait on dispatched runs at once on this instance. */
   maxWaiting: number;
   onQueued?: (spec: DispatchedRunSpec, pool: string) => void;
+  /**
+   * 12.6 (D8) — admits a run before anything else happens (inline or queued): throws BudgetExceededError when a used-up
+   * `block` budget applies (`run` passes it on: HTTP 402 on HTTP triggers, a JSON-RPC error on the gateway). Absent:
+   * every run is admitted.
+   */
+  admit?: (spec: DispatchedRunSpec) => Promise<void>;
+  /** 12.6 — a fired run (a schedule, an app trigger) `admit` refused: it is recorded as a failed run with the reason. */
+  recordRefused?: (spec: DispatchedRunSpec, error: BudgetExceededError) => Promise<WorkflowExecutionResult>;
 }
 
 /**
@@ -314,11 +323,13 @@ export class RunDispatcher {
    * `enforceBackpressure` is false.
    * `closed` (streams only: callers that do nothing more once the client is gone) resolves when the client went away:
    * the relay stops and DispatchClientGoneError is thrown; the run goes on (as an inline run does).
+   * 12.6 — `admitted`: the route checked the budgets already (before its own bookkeeping), so `admit` is not asked again.
    */
   async run(
     spec: DispatchedRunSpec,
-    options: { pool: string; passthrough?: WorkflowExecutionEventHooks; enforceBackpressure?: boolean; closed?: Promise<void>; local?: LocalRunParts }
+    options: { pool: string; passthrough?: WorkflowExecutionEventHooks; enforceBackpressure?: boolean; closed?: Promise<void>; local?: LocalRunParts; admitted?: boolean }
   ): Promise<WorkflowExecutionResult> {
+    if (!options.admitted) await this.deps.admit?.(spec);
     if (!(await this.deps.gate.useQueue(options.pool))) {
       return await this.deps.executeLocally(spec, options.passthrough, options.local);
     }
@@ -364,6 +375,13 @@ export class RunDispatcher {
     spec: DispatchedRunSpec,
     options: { pool: string; queueItemId?: string }
   ): Promise<{ queued: false; result: WorkflowExecutionResult } | { queued: true; deduplicated: boolean }> {
+    try {
+      await this.deps.admit?.(spec);
+    } catch (error) {
+      // 12.6 — nobody waits on a fired run: a budget refusal is recorded as the run's failure, with the reason.
+      if (!(error instanceof BudgetExceededError) || !this.deps.recordRefused) throw error;
+      return { queued: false, result: await this.deps.recordRefused(spec, error) };
+    }
     if (!(await this.deps.gate.useQueue(options.pool))) {
       return { queued: false, result: await this.deps.executeLocally(spec) };
     }
@@ -381,6 +399,7 @@ export class RunDispatcher {
 }
 
 export { QueueFullError };
+export { BudgetExceededError };
 
 /**
  * 12.2 — where a queue worker keeps a run's output labels beside the result it stores. Optional: a worker that does

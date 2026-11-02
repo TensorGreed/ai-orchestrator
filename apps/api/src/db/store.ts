@@ -50,6 +50,7 @@ import type {
   Workflow,
   WorkflowListItem
 } from "@ai-orchestrator/shared";
+import type { BudgetScopeType, McpGatewayRateLimit } from "@ai-orchestrator/shared";
 import type {
   ApprovalReadScope,
   ApprovalRequestInsert,
@@ -656,6 +657,8 @@ export interface Store {
     enabled: boolean;
     /** 12.2 — "Track outside content per session"; absent means off. */
     trackSessionLabels?: boolean;
+    /** 12.6 — the default rate limit for each client of the toolset; absent or null = none. */
+    rateLimit?: McpGatewayRateLimit | null;
     createdBy: string | null;
     members: McpToolsetMemberSpec[];
   }): Promise<McpToolset>;
@@ -666,6 +669,7 @@ export interface Store {
       projectId?: string | null;
       enabled?: boolean;
       trackSessionLabels?: boolean;
+      rateLimit?: McpGatewayRateLimit | null;
       members?: Array<McpToolsetMemberSpec & { id?: string }>;
     }): Promise<McpToolset | null>;
   /** Deletes the toolset and its members, and drops it from every client's scope. */
@@ -688,6 +692,8 @@ export interface Store {
   listMcpClients(): Promise<McpClient[]>;
   revokeMcpClient(id: string): Promise<McpClient | null>;
   touchMcpClient(id: string, at: string): Promise<void>;
+  /** 12.6 — an admin's change of a client's name or rate limit (null removes it); null when the client does not exist. */
+  updateMcpClient(id: string, patch: { name?: string; rateLimit?: McpGatewayRateLimit | null }): Promise<McpClient | null>;
   /** MCP tool-call telemetry rows of one execution, oldest first. */
   listMcpToolCallsForExecution(executionId: string): Promise<McpToolCallRecord[]>;
 
@@ -2405,6 +2411,9 @@ export interface Store {
     userEmail?: string | null;
     projectId?: string | null;
     triggerType?: string | null;
+    /** 12.6 — the gateway client and toolset whose tool call started the run (gateway runs only). */
+    clientId?: string | null;
+    toolsetId?: string | null;
     status: string;
     inputTokens: number;
     outputTokens: number;
@@ -2485,7 +2494,7 @@ export interface Store {
   createBudget(input: {
     id: string;
     name: string;
-    scopeType: "global" | "project" | "workflow" | "user";
+    scopeType: BudgetScopeType;
     scopeId?: string | null;
     period: "day" | "week" | "month";
     limitType: "usd" | "tokens";
@@ -2507,6 +2516,21 @@ export interface Store {
   deleteBudget(id: string): Promise<boolean>;
   getBudget(id: string): Promise<BudgetRecord | null>;
   listBudgets(filter?: { enabledOnly?: boolean; scopeType?: string; scopeId?: string }): Promise<BudgetRecord[]>;
+  /**
+   * 12.6 — what a budget counts in [from, to): run usage (usage_events) plus the sampling cost and tokens of gateway
+   * server-tool calls (mcp_tool_calls, source gateway). Scopes: none = everything; `workflowId` / `userKey` (user_id or
+   * user_email) = those runs only, no gateway sampling; `projectId` = the project's runs, plus gateway runs and
+   * sampling through the project's toolsets; `client` = the client's gateway runs (by client_id, or for rows written
+   * before v54 by `user_id = 'mcp-client:<name>'`) and its sampling.
+   */
+  queryBudgetUsage(input: {
+    from: string;
+    to: string;
+    workflowId?: string;
+    userKey?: string;
+    projectId?: string;
+    client?: { id: string; name: string };
+  }): Promise<{ costUsd: number; totalTokens: number }>;
   /** Records a fired budget alert; false when the store refused it as a duplicate for the same budget, window and
    * severity, or because the budget no longer exists (Postgres, where two instances can pass the debounce check
    * together). SQLite always records it. */

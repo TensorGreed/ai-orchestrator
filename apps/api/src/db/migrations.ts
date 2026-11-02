@@ -2364,6 +2364,28 @@ export const MIGRATIONS: Migration[] = [
       ALTER TABLE mcp_tool_calls DROP COLUMN IF EXISTS toolset_id;
       ALTER TABLE mcp_tool_policies DROP COLUMN IF EXISTS toolset_ids_json;
     `
+  },
+  {
+    version: 54,
+    description: "12.6 — gateway usage per client and toolset, and optional rate limits on gateway clients and toolsets",
+    // usage_events.client_id / toolset_id: the gateway client and toolset whose tool call started the run (null on
+    // every other run and on older rows; older gateway rows name the client in user_id as `mcp-client:<name>`).
+    // rate_limit_json: an optional `{requestsPerMinute, burst, maxConcurrent}` on a client (its own limit) or a toolset
+    // (the default for each of its clients); null = no limit, as before.
+    up: `
+      ALTER TABLE usage_events ADD COLUMN IF NOT EXISTS client_id TEXT;
+      ALTER TABLE usage_events ADD COLUMN IF NOT EXISTS toolset_id TEXT;
+      CREATE INDEX IF NOT EXISTS idx_usage_events_client_created ON usage_events(client_id, created_at DESC);
+      ALTER TABLE mcp_clients ADD COLUMN IF NOT EXISTS rate_limit_json TEXT;
+      ALTER TABLE mcp_toolsets ADD COLUMN IF NOT EXISTS rate_limit_json TEXT;
+    `,
+    down: `
+      ALTER TABLE mcp_toolsets DROP COLUMN IF EXISTS rate_limit_json;
+      ALTER TABLE mcp_clients DROP COLUMN IF EXISTS rate_limit_json;
+      DROP INDEX IF EXISTS idx_usage_events_client_created;
+      ALTER TABLE usage_events DROP COLUMN IF EXISTS toolset_id;
+      ALTER TABLE usage_events DROP COLUMN IF EXISTS client_id;
+    `
   }
 ];
 
