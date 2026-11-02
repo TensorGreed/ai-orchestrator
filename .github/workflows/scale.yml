@@ -40,7 +40,7 @@ jobs:
       SMOKE_DURATION: ${{ inputs.duration || '30s' }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Results folder
         run: echo "RESULTS_DIR=$RUNNER_TEMP/scale-results" >> "$GITHUB_ENV"

@@ -32,7 +32,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       # Corepack must run before setup-node: `cache: "pnpm"` calls pnpm.
       - name: Enable Corepack
