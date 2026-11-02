@@ -14,6 +14,14 @@
 
 import crypto from "node:crypto";
 import type { MCPExecutionContext } from "@ai-orchestrator/mcp-sdk";
+import {
+  MCP_TOOL_CALL_LABELS_MAX_CLASSES,
+  PROVENANCE_LABELS,
+  dataClassNameSchema,
+  type DataLabels,
+  type McpGatewaySessionLabels,
+  type ProvenanceLabel
+} from "@ai-orchestrator/shared";
 import type { McpProtocolVersion } from "./mcp-gateway-protocol.js";
 
 export interface GatewayInFlight {
@@ -37,6 +45,88 @@ export interface GatewaySession {
   inFlight: Map<string, GatewayInFlight>;
   /** Read-only tools already audited in this session (first-per-session sampling). */
   auditedReadOnlyTools: Set<string>;
+  /**
+   * 12.2 — what the session's calls returned, on a toolset that tracks outside content: a high-water mark that only
+   * grows, and ends with the session. Never read from the client's request.
+   */
+  labels: SessionLabelMark;
+}
+
+/** 12.2 — a session's label high-water mark. */
+export interface SessionLabelMark {
+  provenance: Set<ProvenanceLabel>;
+  dataClasses: Set<string>;
+  /** A call returned a result while the toolset did not track: what it carried is unknown. */
+  unobserved: boolean;
+  /** When the mark first held outside content or sensitive data. */
+  raisedAt: number | null;
+  /** The first raise has been audited (once per session). */
+  raiseAudited: boolean;
+}
+
+/** Labels a session never collects: only the server's own scheduler is ever `trusted`. */
+const UNCOLLECTED: ReadonlySet<ProvenanceLabel> = new Set<ProvenanceLabel>(["trusted"]);
+
+export function emptySessionLabelMark(): SessionLabelMark {
+  return { provenance: new Set(), dataClasses: new Set(), unobserved: false, raisedAt: null, raiseAudited: false };
+}
+
+/** The mark counts as raised once it holds outside content or sensitive data (or classes). */
+function markRaised(mark: SessionLabelMark): boolean {
+  return mark.provenance.has("untrusted_external") || mark.provenance.has("sensitive") || mark.dataClasses.size > 0;
+}
+
+/**
+ * 12.2 — add a call result's labels to the session's mark (it never goes down). `tracked`: the toolset tracks now;
+ * when it does not, the result is only noted as unobserved, so turning tracking on later counts it as outside
+ * content. Returns true when this call raised the mark for the first time in the session.
+ */
+export function raiseSessionLabels(
+  mark: SessionLabelMark,
+  labels: Pick<DataLabels, "provenance" | "dataClasses">,
+  tracked: boolean,
+  now: number = Date.now()
+): boolean {
+  if (!tracked) {
+    mark.unobserved = true;
+    return false;
+  }
+  const before = markRaised(mark);
+  for (const label of labels.provenance) {
+    if (PROVENANCE_LABELS.includes(label) && !UNCOLLECTED.has(label)) mark.provenance.add(label);
+  }
+  for (const name of labels.dataClasses) {
+    if (mark.dataClasses.size >= MCP_TOOL_CALL_LABELS_MAX_CLASSES) break;
+    if (dataClassNameSchema.safeParse(name).success) mark.dataClasses.add(name);
+  }
+  if (!before && markRaised(mark)) {
+    mark.raisedAt = now;
+    return true;
+  }
+  return false;
+}
+
+/**
+ * 12.2 — the labels a call in a tracking session is checked with: the client's own request (`user`) plus the mark.
+ * Results that came back while the toolset did not track count as outside content now (fail closed); the second
+ * value is true when that just raised the mark.
+ */
+export function sessionCallLabels(mark: SessionLabelMark, now: number = Date.now()): { labels: DataLabels; raised: boolean } {
+  let raised = false;
+  if (mark.unobserved) {
+    mark.unobserved = false;
+    raised = raiseSessionLabels(mark, { provenance: ["untrusted_external"], dataClasses: [] }, true, now);
+  }
+  const provenance = PROVENANCE_LABELS.filter((label) => label === "user" || mark.provenance.has(label));
+  return { labels: { provenance, dataClasses: [...mark.dataClasses].sort(), source: "propagated" }, raised };
+}
+
+/** 12.2 — the mark as the admin API shows it. */
+export function sessionLabelsView(mark: SessionLabelMark): McpGatewaySessionLabels {
+  return {
+    provenance: PROVENANCE_LABELS.filter((label) => mark.provenance.has(label)),
+    dataClasses: [...mark.dataClasses].sort()
+  };
 }
 
 export type GatewaySessionEndReason = "deleted" | "idle" | "revoked" | "toolset_removed" | "evicted" | "shutdown";
@@ -106,7 +196,8 @@ export class GatewaySessionManager {
       initialized: false,
       mcpContext: this.options.createContext(),
       inFlight: new Map(),
-      auditedReadOnlyTools: new Set()
+      auditedReadOnlyTools: new Set(),
+      labels: emptySessionLabelMark()
     };
     this.sessions.set(session.id, session);
     return session;
@@ -122,6 +213,11 @@ export class GatewaySessionManager {
 
   get(id: string): GatewaySession | undefined {
     return this.sessions.get(id);
+  }
+
+  /** The open sessions a predicate selects, oldest first. */
+  list(predicate: (session: GatewaySession) => boolean): GatewaySession[] {
+    return [...this.sessions.values()].filter(predicate).sort((a, b) => a.createdAt - b.createdAt);
   }
 
   touch(session: GatewaySession): void {

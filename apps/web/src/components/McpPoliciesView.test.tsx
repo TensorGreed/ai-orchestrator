@@ -214,10 +214,15 @@ describe("MCP tool policy UI", () => {
     const rows = (value: string) => conditionsToDraft({ all: [{ op: "label_present", value }] });
     expect(labelConditionNotes(conditionsToDraft(null))).toEqual([]);
     expect(labelConditionNotes(rows("untrusted_external"))).toHaveLength(1);
-    expect(labelConditionNotes(rows("untrusted_external"))[0]).toMatch(/gateway/);
-    expect(labelConditionNotes(rows("sensitive"))[1]).toMatch(/label tracking for runs of the workflows this rule covers/);
-    expect(labelConditionNotes(rows("sensitive"))[1]).toMatch(/destination checks/);
-    expect(labelConditionNotes(rows("email"))).toHaveLength(2);
+    expect(labelConditionNotes(rows("untrusted_external"))[0]).toMatch(/gateway carry labels only on toolsets with “Track outside content per session” on/);
+    expect(labelConditionNotes(rows("untrusted_external"))[0]).toMatch(/“has label” conditions never match them, and “lacks label” conditions on a deny or approval rule match every one of them/);
+    // A sensitive or class condition: what a gateway session carries, and that server results are never scanned.
+    expect(labelConditionNotes(rows("sensitive"))[1]).toMatch(/data class names only from workflow tool runs that tracked them/);
+    expect(labelConditionNotes(rows("sensitive"))[1]).toMatch(/Server tool results are never scanned/);
+    expect(labelConditionNotes(rows("sensitive"))[1]).toMatch(/never lets an allow rule through/);
+    expect(labelConditionNotes(rows("sensitive"))[2]).toMatch(/label tracking for runs of the workflows this rule covers/);
+    expect(labelConditionNotes(rows("sensitive"))[2]).toMatch(/destination checks/);
+    expect(labelConditionNotes(rows("email"))).toHaveLength(3);
   });
 
   it("shows read-only classification with its source, blocked marks, and lets admins override", async () => {

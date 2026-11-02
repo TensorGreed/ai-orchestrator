@@ -66,8 +66,8 @@ import {
  *     equal the literal was hashed (not for a number literal against a value
  *     that may be a string such as "05", not with `ignoreCase` on cased text);
  *   - `exists`: key presence and the types seen at the path;
- *   - label conditions: for gateway calls, which carry no data labels, and (Phase 12.2) for calls whose labels were
- *     recorded at decision time. A provenance label every run knows (`trusted`, `user`, `untrusted_external`) is
+ *   - label conditions: (Phase 12.2) for calls whose labels were recorded at decision time (gateway calls only on a
+ *     toolset that tracks outside content per session). A provenance label every run knows (`trusted`, `user`, `untrusted_external`) is
  *     read from the recorded labels; `sensitive` and data class names when the run tracked labels (an untracked run
  *     never scanned for them, and such a rule would have made it track), or when the label is recorded as present
  *     (only its absence needs tracking). Calls recorded without labels stay undetermined.
@@ -121,10 +121,16 @@ export interface PolicySimulationCall {
   /** Phase 12.2 — `openWorld` is an admin's override (it decides alone). */
   openWorldManual?: boolean;
   /**
-   * `none`: the call carried no data labels (gateway); `unknown`: not recorded; otherwise (Phase 12.2) the labels the
-   * call was decided with.
+   * `none`: the call is known to have carried no data labels; `unknown`: not recorded (older rows, gateway calls on
+   * toolsets that do not track); otherwise (Phase 12.2) the labels the call was decided with.
    */
   labels: "none" | "unknown" | McpToolCallLabels;
+  /**
+   * Phase 12.2 — a gateway call: nothing ever scans its results, so the evaluator decided `sensitive` and data class
+   * names it did not list as not tracked (`classesTracked: false`), not as absent. Its recorded untracked labels are
+   * read the same way here, instead of as undetermined.
+   */
+  labelsNeverScanned?: boolean;
   summary: ToolArgumentSummary;
 }
 
@@ -649,7 +655,7 @@ function conditionText(condition: McpPolicyCondition): string {
  */
 export function evaluateConditionOnSummary(
   condition: McpPolicyCondition,
-  call: Pick<PolicySimulationCall, "summary" | "labels">,
+  call: Pick<PolicySimulationCall, "summary" | "labels" | "labelsNeverScanned">,
   quantifier: PolicyConditionQuantifier,
   context: PolicySimulationContext,
   budget: SimulationBudgetCheck = { textSafe: true, globSafe: true }
@@ -664,6 +670,9 @@ export function evaluateConditionOnSummary(
     // (a `sensitive` source) decides either way.
     const recordedPresent =
       typeof condition.value === "string" && ((recorded.provenance as readonly string[]).includes(condition.value) || recorded.dataClasses.includes(condition.value));
+    if (!call.labels.tracked && call.labelsNeverScanned) {
+      return { value: evaluatePolicyCondition(condition, {}, { ...recorded, classesTracked: false }, quantifier) };
+    }
     if (!call.labels.tracked && labelValueNeedsTracking(condition.value) && !recordedPresent) {
       return { value: "unknown", reason: `${conditionText(condition)}: the run did not track data labels, so it was not scanned for this one` };
     }

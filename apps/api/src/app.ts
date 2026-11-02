@@ -89,6 +89,8 @@ import {
   chunkDocuments,
   convertExternalWorkflow,
   ExternalWorkflowImportError,
+  outputLabelsOf,
+  workflowDeclaresSensitiveSource,
   type ChunkOptions,
   type EmbeddingAdapter,
   type KnowledgeBaseStore,
@@ -198,7 +200,7 @@ import { bindTriggerTrust, triggerTrustDenial, withoutTriggerTrust, withStoredTr
 import { inputProvenance, type CaptureInputOrigin } from "./services/capture-masking.js";
 import { registerEvalRoutes } from "./eval-routes.js";
 import { registerGoldenSetFileRoutes } from "./golden-set-file-routes.js";
-import { effectiveTriggerTrust, isEntryNodeType, parseStoredDataLabels, recordedInputLabels, triggerInputProvenance, type DataLabels } from "@ai-orchestrator/shared";
+import { effectiveTriggerTrust, isEntryNodeType, parseStoredDataLabels, recordedInputLabels, triggerInputProvenance, unionDataLabels, type DataLabels } from "@ai-orchestrator/shared";
 import { GOLDEN_SET_FILE_DEFAULT_MAX_BYTES, GUARD_SIMULATION_MAX_CASES_DEFAULT, GUARD_SIMULATION_RETENTION_DAYS } from "@ai-orchestrator/shared";
 import { registerApprovalRoutes } from "./approval-routes.js";
 import { registerExecutionRoutes } from "./execution-routes.js";
@@ -232,6 +234,7 @@ import {
   DispatchTimeoutError,
   QUEUE_DISPATCH_CAPABILITY,
   readDispatchedRunSpec,
+  resultForQueue,
   RunDispatcher,
   triggerQueueItemId,
   type DispatchedRunSpec
@@ -3175,7 +3178,8 @@ export async function createApp(
         unsubscribeElicitations();
       }
     }
-    const stored = await store.saveQueueItemResult({ id: context.queueItemId, claimToken: context.claimToken, result });
+    // 12.2 — the run's output labels go with it (a gateway session on the requesting instance reads them).
+    const stored = await store.saveQueueItemResult({ id: context.queueItemId, claimToken: context.claimToken, result: resultForQueue(result) });
     if (!stored) {
       app.log.warn({ executionId, queueItemId: context.queueItemId }, "A dispatched run's result was not stored: its claim no longer holds the job");
     }
@@ -10730,10 +10734,19 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       await auditService.record(event);
       await logStreamingService.dispatchAudit(event);
     },
+    sensitiveSecretIds: async () => await sensitiveSecrets.ids(),
     runWorkflowTool: async (input) => {
       const triggerType = "mcp_gateway";
       const triggeredBy = `mcp-client:${input.client.name}`;
       const requestInput = { tool: input.toolName, arguments: input.args, clientId: input.client.id };
+      // 12.2 — a session that tracks outside content: the run's input is a gateway run's as always, plus what the
+      // session has collected. Without it the run starts exactly as before.
+      const inputLabels = input.sessionLabels
+        ? unionDataLabels([
+            { provenance: [inputProvenance(triggerType, undefined)], dataClasses: [], source: "propagated" },
+            { provenance: input.sessionLabels.provenance, dataClasses: input.sessionLabels.dataClasses, source: "propagated" }
+          ])
+        : undefined;
       const result = await runDispatcher.run(
         {
           v: DISPATCH_SPEC_VERSION,
@@ -10749,7 +10762,9 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
             executionId: input.executionId,
             triggerType,
             triggeredBy,
-            policySubject: input.subject
+            policySubject: input.subject,
+            // Recorded on the trigger's result, so a retry or replay of this run starts from them too.
+            ...(inputLabels ? { inputLabels, recordInputLabels: true } : {})
           },
           progress: { requestInput },
           history: { requestInput }
@@ -10758,7 +10773,23 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
           onNodeComplete: (event) => input.onNodeComplete({ nodeId: event.nodeId, status: event.status })
         } }
       );
-      return { status: result.status, output: result.output, error: result.error };
+      const labels = outputLabelsOf(result);
+      if (labels) return { status: result.status, output: result.output, error: result.error, labels: { provenance: labels.provenance, dataClasses: labels.dataClasses } };
+      if (!input.tracksLabels) return { status: result.status, output: result.output, error: result.error };
+      // 12.2 — no output labels came back (a worker that did not send them): the result is outside content, and
+      // sensitive too when the workflow declares a sensitive source.
+      const declared = await workflowDeclaresSensitiveSource(input.workflow.nodes, {
+        sensitiveSecretIds: await sensitiveSecrets.ids(),
+        resolveRegisteredMcpServer: async (registryServerId) => await resolveRegisteredMcpServer(registryServerId),
+        // The production versions, as the run itself resolves its sub-workflows.
+        loadWorkflow: runScope.dependenciesFor(input.workflow, { channel: "production" }).loadWorkflow
+      });
+      return {
+        status: result.status,
+        output: result.output,
+        error: result.error,
+        ...(declared ? { labels: { provenance: ["untrusted_external", "sensitive"], dataClasses: [] } } : {})
+      };
     },
     cancelExecution: (executionId, reason) => {
       const local = activeExecutions.get(executionId);

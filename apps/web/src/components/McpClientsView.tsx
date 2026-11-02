@@ -7,7 +7,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { McpPolicyRole } from "@ai-orchestrator/shared";
+import type { McpGatewaySessionView, McpPolicyRole } from "@ai-orchestrator/shared";
 import {
   ApiError,
   type McpClientView,
@@ -16,12 +16,14 @@ import {
   type McpToolsetView,
   createMcpClient,
   fetchMcpClients,
+  fetchMcpClientSessions,
   fetchMcpClientUsage,
   fetchMcpToolsets,
   revokeMcpClient
 } from "../lib/api";
 import { buildMcpClientSnippets, snippetServerName, toolsetEndpointUrl } from "../lib/mcp-client-snippets";
 import { CopyButton } from "./McpToolsetsView";
+import { DataLabelChips } from "./DataLabelChips";
 
 const ROLES: McpPolicyRole[] = ["viewer", "operator", "builder", "admin"];
 
@@ -78,6 +80,7 @@ export function McpClientsView({ isAdmin }: McpClientsViewProps) {
   const [creating, setCreating] = useState(false);
   const [revealed, setRevealed] = useState<{ client: McpClientView; token: string } | null>(null);
   const [usageFor, setUsageFor] = useState<string | null>(null);
+  const [sessionsFor, setSessionsFor] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
@@ -230,6 +233,14 @@ export function McpClientsView({ isAdmin }: McpClientsViewProps) {
                   >
                     {usageFor === client.id ? "Hide usage" : "Usage"}
                   </button>
+                  <button
+                    type="button"
+                    className="pg-btn ghost"
+                    aria-expanded={sessionsFor === client.id}
+                    onClick={() => setSessionsFor((current) => (current === client.id ? null : client.id))}
+                  >
+                    {sessionsFor === client.id ? "Hide sessions" : "Sessions"}
+                  </button>
                   {isAdmin && client.status === "active" && (
                     <button
                       type="button"
@@ -242,6 +253,7 @@ export function McpClientsView({ isAdmin }: McpClientsViewProps) {
                   )}
                 </div>
                 {usageFor === client.id && <ClientUsage clientId={client.id} />}
+                {sessionsFor === client.id && <ClientSessions clientId={client.id} />}
               </li>
             ))}
           </ul>
@@ -416,6 +428,74 @@ function TokenReveal({
         </div>
       ))}
     </section>
+  );
+}
+
+/**
+ * 12.2 — a client's open sessions and, on toolsets that track outside content per session, the labels each session
+ * has collected (the same chips as the run inspector).
+ */
+export function ClientSessions({ clientId }: { clientId: string }) {
+  const [sessions, setSessions] = useState<McpGatewaySessionView[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  // Bumped by "Refresh": a session's labels change while its client works.
+  const [reloads, setReloads] = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    setError(null);
+    setLoading(true);
+    fetchMcpClientSessions(clientId)
+      .then((result) => {
+        if (!cancelled) setSessions(result.sessions);
+      })
+      .catch((err) => {
+        if (!cancelled) setError(formatError(err));
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [clientId, reloads]);
+
+  return (
+    <div className="mcp-client-usage" aria-label="Client sessions">
+      <div className="mcp-rule-actions">
+        <button type="button" className="pg-btn ghost" aria-busy={loading} disabled={loading} onClick={() => setReloads((count) => count + 1)}>
+          Refresh
+        </button>
+      </div>
+      {error && <div className="settings-error">{error}</div>}
+      {sessions === null && !error && <p className="kb-subtle">Loading…</p>}
+      {sessions !== null && sessions.length === 0 && <p className="kb-subtle">No open sessions on this server.</p>}
+      {sessions !== null && sessions.length > 0 && (
+        <ul className="mcp-members" aria-label="Open sessions">
+          {sessions.map((session) => (
+            <li key={session.idPrefix} className="mcp-member">
+              <code className="mcp-member-glob">{session.idPrefix}…</code>
+              <span className="mcp-rule-name">{session.toolsetName ?? session.toolsetId}</span>
+              {session.clientInfo.name && (
+                <span className="kb-subtle">
+                  {session.clientInfo.name}
+                  {session.clientInfo.version ? ` ${session.clientInfo.version}` : ""}
+                </span>
+              )}
+              <span className="kb-subtle">last call {formatDate(session.lastSeenAt)}</span>
+              {!session.tracked ? (
+                <span className="kb-subtle">outside content not tracked</span>
+              ) : session.labels && (session.labels.provenance.length > 0 || session.labels.dataClasses.length > 0) ? (
+                <DataLabelChips labels={session.labels} />
+              ) : (
+                <span className="kb-subtle">nothing from outside yet</span>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
   );
 }
 

@@ -23,6 +23,8 @@ import {
 } from "@ai-orchestrator/mcp-sdk";
 import {
   canonicalPolicyJson,
+  recordedCallLabels,
+  withImpliedSensitive,
   mcpClientCreateSchema,
   mcpPolicyRoleSchema,
   mcpToolsetInputSchema,
@@ -38,10 +40,12 @@ import {
   type McpToolset,
   type McpToolsetMemberSpec,
   type McpSamplingTraceEntry,
+  type DataLabels,
+  type McpGatewaySessionView,
   type Workflow
 } from "@ai-orchestrator/shared";
 import type { ProviderRegistry } from "@ai-orchestrator/provider-sdk";
-import { createMcpSamplingHandler } from "@ai-orchestrator/workflow-engine";
+import { createMcpSamplingHandler, referencesSecretIn } from "@ai-orchestrator/workflow-engine";
 import type { z } from "zod";
 import { DEFAULT_MCP_GATEWAY_APPROVAL_WINDOW_MS, toolArgumentSummariesEnabled, type AppConfig } from "./config.js";
 import type { AuditEventInput } from "./services/audit-service.js";
@@ -101,6 +105,9 @@ function isRuntimeRefusal(kind: string | undefined): kind is McpRuntimeRejection
 import {
   GatewaySessionLimitError,
   GatewaySessionManager,
+  raiseSessionLabels,
+  sessionCallLabels,
+  sessionLabelsView,
   type GatewaySession
 } from "./services/mcp-gateway-sessions.js";
 import { McpClientService, capRole, resolveMcpClientSubject, roleRank } from "./services/mcp-client-service.js";
@@ -167,7 +174,27 @@ export interface GatewayWorkflowRunOutcome {
   status: string;
   output?: unknown;
   error?: string;
+  /**
+   * 12.2 — the labels of the run's output, when known: the engine's (on this instance, or stored with a queue
+   * worker's result), else `sensitive` when the workflow declares a sensitive source (tracking toolsets only).
+   */
+  labels?: Pick<DataLabels, "provenance" | "dataClasses">;
 }
+
+/** 12.2 — what a server tool's result carries: outside content, as in runs (and `sensitive` from a flagged secret). */
+const SERVER_RESULT_LABELS: Pick<DataLabels, "provenance" | "dataClasses"> = { provenance: ["untrusted_external"], dataClasses: [] };
+
+/**
+ * 12.2 — the labels a tool rule's conditions read for a call: data classes count as `sensitive` too, as in runs.
+ * Nothing scans gateway results, so a `sensitive` or data class the session does not hold is not tracked rather than
+ * absent (`classesTracked: false`): it never lets an allow carve out, and a deny or approval on its absence still holds.
+ */
+function policyCallLabels(labels: DataLabels | undefined): { provenance: string[]; dataClasses: string[]; classesTracked: false } | undefined {
+  if (!labels) return undefined;
+  const implied = withImpliedSensitive(labels);
+  return { provenance: [...implied.provenance], dataClasses: [...implied.dataClasses], classesTracked: false };
+}
+
 
 export interface McpGatewayDeps {
   app: FastifyInstance;
@@ -198,6 +225,10 @@ export interface McpGatewayDeps {
     executionId: string;
     subject: McpToolPolicySubject;
     client: McpClient;
+    /** 12.2 — what the client's session has collected (tracking toolsets only); the run's input carries it too. */
+    sessionLabels?: Pick<DataLabels, "provenance" | "dataClasses">;
+    /** 12.2 — the toolset tracks outside content per session: the outcome's labels are wanted, with a fallback. */
+    tracksLabels?: boolean;
     onNodeComplete: (event: { nodeId: string; status: string }) => void;
   }) => Promise<GatewayWorkflowRunOutcome>;
   /** Abort a running workflow execution. */
@@ -210,6 +241,8 @@ export interface McpGatewayDeps {
   loadProductionWorkflow?: (id: string) => Promise<Workflow | null>;
   /** Phase 15.4 — why production refuses an existing workflow (a deactivated gated one); the tool call reports it. */
   productionRefusal?: (id: string) => Promise<string | null>;
+  /** 12.2 — the ids of secrets flagged "sensitive output": a server that uses one returns sensitive results. */
+  sensitiveSecretIds?: () => Promise<ReadonlySet<string>>;
 }
 
 interface AuthenticatedClient {
@@ -460,6 +493,57 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
   };
 
   // ---------------------------------------------------------------------------
+  // 12.2 — session labels (toolsets that track outside content per session)
+  // ---------------------------------------------------------------------------
+
+  /** Audited once per session: the first time it carries outside content or sensitive data. */
+  const auditFirstRaise = async (session: GatewaySession, auth: AuthenticatedClient, toolset: McpToolset, tool: string | null, reason: "tool_result" | "results_before_tracking") => {
+    if (session.labels.raiseAudited) return;
+    session.labels.raiseAudited = true;
+    await deps.auditRaw({
+      category: "system",
+      eventType: "mcp_gateway.session_labels_raised",
+      action: "update",
+      outcome: "success",
+      actor: { type: "api_key", email: auth.client.name },
+      resourceType: "mcp_toolset",
+      resourceId: toolset.id,
+      projectId: toolset.projectId,
+      metadata: { sessionId: session.id, clientId: auth.client.id, tool, reason, labels: sessionLabelsView(session.labels) }
+    });
+  };
+
+  /**
+   * The labels a call is checked with. Undefined when the toolset does not track: the call is then checked without
+   * labels, exactly as before. Nothing in the client's request is read.
+   */
+  const labelsForCall = async (session: GatewaySession, auth: AuthenticatedClient, toolset: McpToolset): Promise<DataLabels | undefined> => {
+    if (!toolset.trackSessionLabels) return undefined;
+    const { labels, raised } = sessionCallLabels(session.labels);
+    if (raised) await auditFirstRaise(session, auth, toolset, null, "results_before_tracking");
+    return labels;
+  };
+
+  /** A result went back to the client (or may have): its labels join the session's mark, which never goes down. */
+  const noteResult = async (
+    session: GatewaySession,
+    auth: AuthenticatedClient,
+    toolset: McpToolset,
+    tool: string,
+    labels: Pick<DataLabels, "provenance" | "dataClasses">
+  ) => {
+    if (raiseSessionLabels(session.labels, labels, toolset.trackSessionLabels)) await auditFirstRaise(session, auth, toolset, tool, "tool_result");
+  };
+
+  /** A server's results are sensitive when its secret or connection uses a secret flagged "sensitive output". */
+  const serverResultLabels = async (serverConfig: MCPServerConfig | null): Promise<Pick<DataLabels, "provenance" | "dataClasses">> => {
+    if (!serverConfig || !deps.sensitiveSecretIds) return SERVER_RESULT_LABELS;
+    const flagged = await deps.sensitiveSecretIds();
+    if (flagged.size === 0 || !referencesSecretIn({ secretRef: serverConfig.secretRef, connection: serverConfig.connection }, flagged)) return SERVER_RESULT_LABELS;
+    return { provenance: ["untrusted_external", "sensitive"], dataClasses: [] };
+  };
+
+  // ---------------------------------------------------------------------------
   // tools/call
   // ---------------------------------------------------------------------------
 
@@ -475,8 +559,11 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     policyDecision?: McpToolPolicyDecisionRecord;
     /** Phase 12.4 — the gateway approval this call used, given back if the call is cancelled and then refused unsent. */
     approvalId?: string;
+    /** 12.2 — the labels the call was checked with (tracking toolsets only), recorded on its telemetry row. */
+    callLabels?: DataLabels;
   }): Promise<McpCallToolResult | GatewayRetryLater> => {
-    const { session, auth, toolset, tool, args, signal, policyDecision, approvalId } = input;
+    const { session, auth, toolset, tool, args, signal, policyDecision, approvalId, callLabels } = input;
+    let resolvedServer: MCPServerConfig | null = null;
     let refused: GatewayRetryLater | null = null;
     let invocation: Promise<MCPToolResult> | undefined;
     const startedAt = new Date();
@@ -488,6 +575,7 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     try {
       // Phase 10.7 — a delegated server acts with the client's owner's own account.
       const serverConfig = withDelegatedUser(await deps.resolveRegisteredMcpServer(tool.serverId), auth.subject);
+      resolvedServer = serverConfig;
       const adapter = mcpRegistry.get(serverConfig.serverId);
       const cancelled = new Promise<never>((_resolve, reject) => {
         if (signal.aborted) reject(new Error("Cancelled by the client."));
@@ -585,6 +673,7 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
         clientId: auth.client.id,
         ...(refused ? { rejection: refused.reason } : {}),
         ...(policyDecision ? { policyDecision } : {}),
+        ...recordedLabels(callLabels),
         ...callContext(args, tool.inputSchema, auth, toolset)
       });
     } catch (error) {
@@ -608,6 +697,21 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
         ...(policyDecision ? { policy: policyDecision } : {})
       }
     });
+    // 12.2 — the server was asked: what it answered (a result or an error text) goes back to the client, so it counts
+    // as outside content (fail closed, also when the client cancelled). A call the runtime guard refused never
+    // reached the server and carries nothing.
+    if (invocation !== undefined && !refused && !toolset.trackSessionLabels) {
+      // Not tracked: only note that a result came back (turning tracking on later counts it), with no lookup.
+      raiseSessionLabels(session.labels, SERVER_RESULT_LABELS, false);
+    } else if (invocation !== undefined && !refused) {
+      let labels = SERVER_RESULT_LABELS;
+      try {
+        labels = await serverResultLabels(resolvedServer);
+      } catch (error) {
+        app.log.warn({ err: deps.redact(error instanceof Error ? error.message : String(error)) }, "Could not read the sensitive output secrets for a gateway call");
+      }
+      await noteResult(session, auth, toolset, tool.name, labels);
+    }
     if (refused) return refused;
     return result;
   };
@@ -620,10 +724,13 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     args: Record<string, unknown>;
     executionId: string;
     progress: (progress: number, total: number | undefined, message: string) => void;
+    callLabels?: DataLabels;
   }): Promise<McpCallToolResult> => {
-    const { session, auth, toolset, tool, args, executionId } = input;
+    const { session, auth, toolset, tool, args, executionId, callLabels } = input;
     const startedAt = new Date();
     const workflow = await productionWorkflow(tool.workflowId);
+    // 12.2 — `callLabels`: the labels the call was checked with (tracking toolsets only); `ran`: the run started.
+    let ran = false;
     let outcome: GatewayWorkflowRunOutcome;
     if (!workflow) {
       const refusal = (await deps.productionRefusal?.(tool.workflowId)) ?? null;
@@ -632,6 +739,12 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
       const total = workflow.nodes.length;
       let done = 0;
       input.progress(0, total, `Started workflow '${workflow.name}'`);
+      ran = true;
+      // 12.2 — the run's input carries what the session has collected (not the client's own `user` label: the run's
+      // input keeps the provenance a gateway run always has).
+      const sessionLabels = callLabels
+        ? { provenance: callLabels.provenance.filter((label) => label !== "user"), dataClasses: callLabels.dataClasses }
+        : undefined;
       try {
         outcome = await deps.runWorkflowTool({
           workflow,
@@ -641,6 +754,8 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
           executionId,
           subject: auth.subject,
           client: auth.client,
+          ...(sessionLabels && (sessionLabels.provenance.length > 0 || sessionLabels.dataClasses.length > 0) ? { sessionLabels } : {}),
+          ...(callLabels ? { tracksLabels: true } : {}),
           onNodeComplete: (event) => {
             done = Math.min(total, done + 1);
             const node = workflow.nodes.find((entry) => entry.id === event.nodeId);
@@ -686,10 +801,21 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
         estimatedCostUsd: null,
         source: "gateway",
         clientId: auth.client.id,
+        ...recordedLabels(callLabels),
         ...callContext(args, tool.inputSchema, auth, toolset)
       });
     } catch (error) {
       app.log.warn({ err: deps.redact(error instanceof Error ? error.message : String(error)) }, "Failed to record MCP gateway telemetry");
+    }
+    // 12.2 — a run's output (or its error text) goes back to the client with the labels the engine gave it; without
+    // them (a run on another instance, a run that failed) it counts as outside content. A run that paused or was
+    // canceled answers with the gateway's own words only.
+    if (ran && outcome.status !== "waiting_approval" && outcome.status !== "canceled") {
+      const known = outcome.labels;
+      await noteResult(session, auth, toolset, tool.name, {
+        provenance: outcome.status === "success" && known ? known.provenance : ["untrusted_external", ...(known?.provenance ?? [])],
+        dataClasses: known?.dataClasses ?? []
+      });
     }
     await auditToolCall({
       session,
@@ -730,10 +856,13 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     toolset: McpToolset,
     tool: GatewayServerTool,
     args: Record<string, unknown>,
-    requestId: JsonRpcRequest["id"]
+    requestId: JsonRpcRequest["id"],
+    /** 12.2 — the session's labels (tracking toolsets only); undefined: checked without labels, as before. */
+    callLabels?: DataLabels
   ): Promise<GatewayPolicyGate> => {
     const rules = await store.listMcpToolPolicies();
     if (rules.length === 0) return { outcome: "call" };
+    const labelRecord = callLabels ? recordedCallLabels(callLabels, false) : undefined;
     // Phase 12.2 — open world, only when a rule reads the open-world hint.
     const openWorld = policyReadsOpenWorld(rules) ? await openWorldMarking(store, rules, await store.getMcpServer(tool.serverId)) : undefined;
     const decision = evaluateToolForContext(
@@ -750,7 +879,7 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
       },
       { name: tool.toolName, ...(tool.annotations ? { annotations: tool.annotations } : {}) },
       "tool",
-      { arguments: args }
+      { arguments: args, ...(callLabels ? { dataLabels: policyCallLabels(callLabels) } : {}) }
     );
     const auditBase = {
       category: "system" as const,
@@ -768,7 +897,7 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
       sessionId: session.id
     };
     if (!decision.allowed) {
-      const record = policyDecisionRecord(decision.policy);
+      const record = policyDecisionRecord(decision.policy, undefined, labelRecord);
       await deps.auditRaw({
         ...auditBase,
         eventType: "mcp_gateway.tool_denied",
@@ -781,7 +910,7 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
         response: rpcResult(requestId, toolError(decision.message ?? `MCP tool '${tool.toolName}' is blocked by policy.`))
       };
     }
-    if (!decision.approval) return { outcome: "call", ...withRecord(policyDecisionRecord(decision.policy)) };
+    if (!decision.approval) return { outcome: "call", ...withRecord(policyDecisionRecord(decision.policy, undefined, labelRecord)) };
 
     const argsHash = gatewayArgsHash(args);
     const now = new Date();
@@ -832,7 +961,7 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
           outcome: "success",
           metadata: { ...callMetadata, approvalRequestId: usable.id, argsHash, ruleId: decision.approval.ruleId, decidedBy: usable.decidedBy }
         });
-        return { outcome: "call", approvalId: usable.id, ...withRecord(policyDecisionRecord(decision.policy, "approved")) };
+        return { outcome: "call", approvalId: usable.id, ...withRecord(policyDecisionRecord(decision.policy, "approved", labelRecord)) };
       }
       // An identical call used the approval a moment ago: say so rather than open a fresh request at once.
       return {
@@ -902,7 +1031,15 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
         eventType: "mcp_gateway.approval_requested",
         action: "execute",
         outcome: "denied",
-        metadata: { ...callMetadata, approvalRequestId: approval.id, argsHash, ruleId: decision.approval.ruleId, ruleName: decision.approval.ruleName ?? null }
+        metadata: {
+          ...callMetadata,
+          approvalRequestId: approval.id,
+          argsHash,
+          ruleId: decision.approval.ruleId,
+          ruleName: decision.approval.ruleName ?? null,
+          // 12.2 — what the session had collected when the call was held (tracking toolsets only).
+          ...(labelRecord ? { labels: labelRecord } : {})
+        }
       });
     }
     return {
@@ -924,6 +1061,11 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
   };
 
   const withRecord = (record: McpToolPolicyDecisionRecord | undefined) => (record ? { policyDecision: record } : {});
+  /** 12.2 — the labels a call was checked with, for its telemetry row (names only; never a class list: nothing scans). */
+  const recordedLabels = (callLabels: DataLabels | undefined) => {
+    const labels = callLabels ? recordedCallLabels(callLabels, false) : undefined;
+    return labels ? { labels } : {};
+  };
 
   // ---------------------------------------------------------------------------
   // Request dispatch
@@ -974,10 +1116,12 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
       return rpcResult(request.id, toolError(hidden.message));
     }
 
+    // 12.2 — read from the session only, never from the request (`_meta`, headers or arguments).
+    const callLabels = await labelsForCall(session, auth, toolset);
     let policyDecision: McpToolPolicyDecisionRecord | undefined;
     let usedApprovalId: string | undefined;
     if (tool.kind === "server") {
-      const gate = await gatewayPolicyGate(session, auth, toolset, tool, args, request.id);
+      const gate = await gatewayPolicyGate(session, auth, toolset, tool, args, request.id, callLabels);
       if (gate.outcome === "respond") return gate.response;
       policyDecision = gate.policyDecision;
       usedApprovalId = gate.approvalId;
@@ -1013,7 +1157,7 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     try {
       const result =
         tool.kind === "workflow"
-          ? await callWorkflowTool({ session, auth, toolset, tool, args, executionId, progress })
+          ? await callWorkflowTool({ session, auth, toolset, tool, args, executionId, progress, ...(callLabels ? { callLabels } : {}) })
           : await callServerTool({
               session,
               auth,
@@ -1022,6 +1166,7 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
               args,
               signal: controller.signal,
               progress,
+              ...(callLabels ? { callLabels } : {}),
               ...(policyDecision ? { policyDecision } : {}),
               ...(usedApprovalId ? { approvalId: usedApprovalId } : {})
             });
@@ -1434,6 +1579,24 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     });
   };
 
+  /** 12.2 — "Track outside content per session" turned on or off. */
+  const auditSessionTracking = async (request: FastifyRequest, user: SafeUser, toolset: McpToolset) => {
+    await deps.auditUser(request, user, {
+      category: "system",
+      eventType: "mcp_toolset.session_tracking_changed",
+      action: "update",
+      outcome: "success",
+      resourceType: "mcp_toolset",
+      resourceId: toolset.id,
+      projectId: toolset.projectId,
+      metadata: {
+        slug: toolset.slug,
+        trackSessionLabels: toolset.trackSessionLabels,
+        openSessions: sessions.count((session) => session.toolsetId === toolset.id)
+      }
+    });
+  };
+
   const findToolset = async (id: string, reply: FastifyReply): Promise<McpToolset | null> => {
     const toolset = await store.getMcpToolset(id);
     if (!toolset) {
@@ -1531,10 +1694,12 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
       description: parsed.data.description ?? null,
       projectId: parsed.data.projectId ?? null,
       enabled: parsed.data.enabled ?? true,
+      trackSessionLabels: parsed.data.trackSessionLabels ?? false,
       createdBy: user.email,
       members
     });
     await auditToolset(request, user, "mcp_toolset.created", "create", toolset);
+    if (toolset.trackSessionLabels) await auditSessionTracking(request, user, toolset);
     reply.code(201);
     return { toolset: await toolsetView(toolset) };
   });
@@ -1570,6 +1735,7 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
       await sessions.endWhere((session) => session.toolsetId === existing.id, "toolset_removed");
     }
     await auditToolset(request, user, "mcp_toolset.updated", "update", updated, { fields: Object.keys(parsed.data) });
+    if (updated.trackSessionLabels !== existing.trackSessionLabels) await auditSessionTracking(request, user, updated);
     return { toolset: await toolsetView(updated) };
   });
 
@@ -1801,6 +1967,37 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
   app.post<{ Params: { id: string }; Body: unknown }>("/api/mcp/gateway/approvals/:id/reject", async (request, reply) =>
     decideGatewayApproval(request, reply, "rejected")
   );
+
+  // 12.2 — a client's open sessions on this instance, with the labels each has collected on a tracking toolset.
+  app.get<{ Params: { id: string } }>("/api/mcp/clients/:id/sessions", async (request, reply) => {
+    const user = await deps.requireRole(request, reply, ["builder"]);
+    if (!user) return reply;
+    const client = await store.getMcpClient(request.params.id);
+    if (!client) {
+      reply.code(404);
+      return { error: "Client not found" };
+    }
+    const open = sessions.list((session) => session.clientId === client.id);
+    const toolsets = new Map<string, McpToolset | null>();
+    for (const toolsetId of new Set(open.map((session) => session.toolsetId))) toolsets.set(toolsetId, await store.getMcpToolset(toolsetId));
+    const views: McpGatewaySessionView[] = open.map((session) => {
+      const toolset = toolsets.get(session.toolsetId) ?? null;
+      const tracked = toolset?.trackSessionLabels === true;
+      return {
+        idPrefix: session.id.slice(0, 8),
+        clientId: session.clientId,
+        toolsetId: session.toolsetId,
+        toolsetName: toolset?.name ?? null,
+        clientInfo: session.clientInfo,
+        createdAt: new Date(session.createdAt).toISOString(),
+        lastSeenAt: new Date(session.lastSeenAt).toISOString(),
+        tracked,
+        labels: tracked ? sessionLabelsView(session.labels) : null,
+        raisedAt: tracked && session.labels.raisedAt !== null ? new Date(session.labels.raisedAt).toISOString() : null
+      };
+    });
+    return { clientId: client.id, sessions: views };
+  });
 
   app.get<{ Params: { id: string } }>("/api/mcp/clients/:id/usage", async (request, reply) => {
     const user = await deps.requireRole(request, reply, ["builder"]);

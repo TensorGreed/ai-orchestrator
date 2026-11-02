@@ -2838,6 +2838,12 @@ export const openApiSpec = {
                   description: { type: "string", nullable: true },
                   projectId: { type: "string", nullable: true, description: "Project the tool policy is evaluated in" },
                   enabled: { type: "boolean", default: true },
+                  trackSessionLabels: {
+                    type: "boolean",
+                    default: false,
+                    description:
+                      "Track outside content per session: after a call returns outside content (or sensitive data), the session's later calls are checked with those labels. Changes are audited."
+                  },
                   members: {
                     type: "array",
                     items: {
@@ -2875,7 +2881,8 @@ export const openApiSpec = {
       },
       put: {
         tags: ["MCP"],
-        summary: "Update a toolset (admin); members, when sent, replace the list. A new slug or disabling ends its sessions.",
+        summary:
+          "Update a toolset (admin); members, when sent, replace the list. A new slug or disabling ends its sessions. Takes the create fields, including trackSessionLabels.",
         parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
         responses: { "200": { description: "Updated toolset" }, "404": { description: "Not found" }, "409": { description: "Slug taken" } }
       },
@@ -2983,6 +2990,15 @@ export const openApiSpec = {
         parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
         requestBody: { required: false, content: { "application/json": { schema: { type: "object", properties: { reason: { type: "string" } } } } } },
         responses: { "200": { description: "The decided request" }, "404": { description: "Not found" }, "409": { description: "Already decided or expired" } }
+      }
+    },
+    "/api/mcp/clients/{id}/sessions": {
+      get: {
+        tags: ["MCP"],
+        summary:
+          "A client's open gateway sessions on the instance that answers, with the labels each has collected on a toolset that tracks outside content per session (builder)",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "Sessions: id prefix, toolset, client info, times, tracked, labels (null when not tracked), raisedAt" }, "404": { description: "Not found" } }
       }
     },
     "/api/mcp/clients/{id}/usage": {

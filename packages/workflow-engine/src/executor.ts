@@ -44,6 +44,7 @@ import {
   policyRulesNeedLabelTracking,
   workflowMayCallMcpTools,
   recordedCallLabels,
+  parseStoredDataLabels,
   type DataDestinationRow,
   type DestinationRef,
   type McpToolOpenWorldOverride
@@ -1156,8 +1157,11 @@ function policyLabels(labels: DataLabels | null | undefined): McpToolAccessCall[
   return { provenance: implied.provenance, dataClasses: implied.dataClasses };
 }
 
-/** 12.2 — the secret ids a node config references (`{ secretId }` objects anywhere in it, a bounded walk). */
-function referencesSecretIn(config: unknown, secretIds: ReadonlySet<string>): boolean {
+/**
+ * 12.2 — the secret ids a node config references (`{ secretId }` objects anywhere in it, a bounded walk). The MCP
+ * gateway reads a registered server's secret and connection settings with it too.
+ */
+export function referencesSecretIn(config: unknown, secretIds: ReadonlySet<string>): boolean {
   const seen = new Set<unknown>();
   const visit = (value: unknown, depth: number): boolean => {
     if (!value || typeof value !== "object" || depth > 8 || seen.has(value)) return false;
@@ -1200,6 +1204,42 @@ async function declaresSensitiveSource(
     // A server that cannot be resolved fails the node when it runs; nothing to declare here.
     return false;
   }
+}
+
+/**
+ * 12.2 — some node of the workflow, or of a sub-workflow it calls, declares a sensitive source (its "Sensitive output"
+ * flag, a flagged secret in its config, or an MCP Tool node's registered server with a flagged secret). The MCP
+ * gateway falls back on it when a run on another instance returned no output labels. Sub-workflows are loaded with
+ * the run's own `loadWorkflow` and walked to the engine's sub-workflow depth; a workflow already visited is not
+ * walked again (a cycle). Fails closed: a sub-workflow that cannot be loaded, an Execute Workflow node with no
+ * loader to follow, or the depth cap all count as sensitive. Free when nothing is flagged and no node carries the flag
+ * and no node calls a sub-workflow.
+ */
+export async function workflowDeclaresSensitiveSource(
+  nodes: ReadonlyArray<Pick<WorkflowNode, "type" | "config">>,
+  dependencies: Pick<WorkflowExecutionDependencies, "sensitiveSecretIds" | "resolveRegisteredMcpServer" | "loadWorkflow">,
+  visited: Set<string> = new Set(),
+  depth = 0
+): Promise<boolean> {
+  for (const node of nodes) {
+    if (await declaresSensitiveSource(node, dependencies)) return true;
+  }
+  for (const node of nodes) {
+    if (node.type !== "execute_workflow") continue;
+    const workflowId = typeof toRecord(node.config).workflowId === "string" ? String(toRecord(node.config).workflowId).trim() : "";
+    if (!workflowId || visited.has(workflowId)) continue;
+    if (depth >= MAX_SUB_WORKFLOW_DEPTH || !dependencies.loadWorkflow) return true;
+    visited.add(workflowId);
+    let child: Workflow | undefined;
+    try {
+      child = await dependencies.loadWorkflow(workflowId);
+    } catch {
+      return true;
+    }
+    if (!child) return true;
+    if (await workflowDeclaresSensitiveSource(child.nodes, dependencies, visited, depth + 1)) return true;
+  }
+  return false;
 }
 
 const SENSITIVE_LABELS: DataLabels = { provenance: ["sensitive"], dataClasses: [], source: "propagated" };
@@ -7649,6 +7689,15 @@ const runOutputLabels = new WeakMap<WorkflowExecutionResult, DataLabels>();
 /** The labels of a finished run's output (its output node, else its last node), when the engine computed them. */
 export function outputLabelsOf(result: WorkflowExecutionResult): DataLabels | undefined {
   return runOutputLabels.get(result);
+}
+
+/**
+ * 12.2 — the output labels of a run that finished elsewhere (a queue worker stored them beside its result): `result`
+ * reads as one of this process's runs to `outputLabelsOf`. Labels that do not validate are ignored.
+ */
+export function adoptOutputLabels(result: WorkflowExecutionResult, labels: unknown): void {
+  const parsed = parseStoredDataLabels(labels);
+  if (parsed) runOutputLabels.set(result, parsed);
 }
 
 /** Phase 16 — a Guard node's inline profile override asks for propagated labels. */

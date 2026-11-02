@@ -22,7 +22,8 @@ import {
   type McpToolPolicyRule,
   type DestinationTier,
   type McpOpenWorldResolution,
-  type McpToolCallLabels
+  type McpToolCallLabels,
+  labelValueNeedsTracking
 } from "@ai-orchestrator/shared";
 
 /**
@@ -97,8 +98,13 @@ export interface McpToolPolicyRequest {
    * being made yet: rules with conditions are then undecided (see above).
    */
   arguments?: Record<string, unknown>;
-  /** Phase 12.4 — the run's data labels at the call; absent when the run does not track labels. */
-  dataLabels?: { provenance: readonly string[]; dataClasses: readonly string[] } | null;
+  /**
+   * Phase 12.4 — the run's data labels at the call; absent when the run does not track labels. Phase 12.2 —
+   * `classesTracked: false` (gateway calls): nothing scanned for data classes or `sensitive`, so their absence is
+   * undetermined: a `label_absent` on one matches a deny or approval rule (fail closed) and never an allow, and a
+   * `label_present` on one holds only when it is listed. Provenance labels are decided as listed.
+   */
+  dataLabels?: { provenance: readonly string[]; dataClasses: readonly string[]; classesTracked?: boolean } | null;
   /**
    * Phase 12.2 — the tool's resolved open-world value (see `resolveToolOpenWorld`): it decides `open_world` /
    * `not_open_world` hints. Absent: the annotation alone decides, as before. Unless it is an admin's override
@@ -845,6 +851,10 @@ export function evaluatePolicyCondition(
     if (typeof condition.value !== "string") return false;
     if (!labels) return condition.op === "label_absent" && quantifier === "any";
     const present = labels.provenance.includes(condition.value) || labels.dataClasses.includes(condition.value);
+    if (!present && labels.classesTracked === false && labelValueNeedsTracking(condition.value)) {
+      // Not scanned for: the label may be there. Fail closed for the rule's effect.
+      return condition.op === "label_absent" && quantifier === "any";
+    }
     return condition.op === "label_present" ? present : !present;
   }
   if (typeof condition.path !== "string") return quantifier === "any";

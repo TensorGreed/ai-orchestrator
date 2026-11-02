@@ -399,7 +399,7 @@ export async function seedAllDomains(target: Store): Promise<void> {
   await store.setMcpToolClassification({ registryServerId: "mcp-search", toolName: "search_v2", readOnly: true, setBy: "u-admin" });
   await store.setMcpToolClassification({ registryServerId: "mcp-search", toolName: "fetch", readOnly: false, setBy: null });
   await store.createMcpToolset({
-    id: "ts-support", slug: "support", name: "Support tools", description: "Search and the triage workflow", projectId: "proj-ops", enabled: true, createdBy: "u-admin",
+    id: "ts-support", slug: "support", name: "Support tools", description: "Search and the triage workflow", projectId: "proj-ops", enabled: true, trackSessionLabels: true, createdBy: "u-admin",
     members: [{ kind: "server", serverId: "mcp-search", toolGlob: "search*" }, { kind: "workflow", workflowId: "wf-support" }]
   });
   await store.createMcpToolset({ id: "ts-empty", slug: "empty", name: "empty", description: null, projectId: null, enabled: false, createdBy: null, members: [] });

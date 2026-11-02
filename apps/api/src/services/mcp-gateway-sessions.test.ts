@@ -1,6 +1,14 @@
 import { describe, expect, it } from "vitest";
 import type { MCPExecutionContext } from "@ai-orchestrator/mcp-sdk";
-import { GatewaySessionLimitError, GatewaySessionManager, type GatewaySessionEndReason } from "./mcp-gateway-sessions.js";
+import {
+  GatewaySessionLimitError,
+  GatewaySessionManager,
+  emptySessionLabelMark,
+  raiseSessionLabels,
+  sessionCallLabels,
+  sessionLabelsView,
+  type GatewaySessionEndReason
+} from "./mcp-gateway-sessions.js";
 import {
   classifyMessage,
   decodeCursor,
@@ -129,5 +137,46 @@ describe("MCP client policy subject", () => {
     const asBuilder = resolveMcpClientSubject({ getUserById: async () => ({ id: "usr_1", email: "a@example.com", role: "builder" }) }, client);
     expect(await asBuilder).toMatchObject({ role: "builder", source: "client", clientId: "mcc_1", clientName: "IDE" });
     expect((await resolveMcpClientSubject({ getUserById: async () => null }, client)).role).toBe("viewer");
+  });
+});
+
+describe("12.2 — session label marks", () => {
+  it("only grows, never collects trusted or invalid class names, and starts each call with the client's own user label", () => {
+    const mark = emptySessionLabelMark();
+    expect(sessionCallLabels(mark).labels).toEqual({ provenance: ["user"], dataClasses: [], source: "propagated" });
+    expect(raiseSessionLabels(mark, { provenance: ["trusted", "user"], dataClasses: [] }, true, 5)).toBe(false);
+    expect(mark.raisedAt).toBeNull();
+    expect(raiseSessionLabels(mark, { provenance: ["untrusted_external"], dataClasses: ["email", "Not A Class!"] }, true, 7)).toBe(true);
+    expect(mark.raisedAt).toBe(7);
+    // A later, cleaner result never lowers it; only the first raise reports true.
+    expect(raiseSessionLabels(mark, { provenance: ["user"], dataClasses: [] }, true, 9)).toBe(false);
+    expect(raiseSessionLabels(mark, { provenance: ["sensitive"], dataClasses: [] }, true, 9)).toBe(false);
+    expect(sessionLabelsView(mark)).toEqual({ provenance: ["user", "untrusted_external", "sensitive"], dataClasses: ["email"] });
+    expect(sessionCallLabels(mark).labels.provenance).toEqual(["user", "untrusted_external", "sensitive"]);
+  });
+
+  it("counts a result returned while the toolset did not track as outside content once it does", () => {
+    const mark = emptySessionLabelMark();
+    expect(raiseSessionLabels(mark, { provenance: ["user"], dataClasses: [] }, false)).toBe(false);
+    expect(mark.provenance.size).toBe(0);
+    const first = sessionCallLabels(mark, 11);
+    expect(first).toEqual({ labels: { provenance: ["user", "untrusted_external"], dataClasses: [], source: "propagated" }, raised: true });
+    expect(sessionCallLabels(mark).raised).toBe(false);
+  });
+
+  it("keeps a mark per session, and it is gone when the session ends or expires", async () => {
+    const { manager, advance } = makeManager({ idleMs: 60_000 });
+    const a = await manager.create(sessionInput);
+    const b = await manager.create(sessionInput);
+    raiseSessionLabels(a.labels, { provenance: ["untrusted_external"], dataClasses: [] }, true);
+    expect(sessionLabelsView(b.labels).provenance).toEqual([]);
+    expect(manager.list((session) => session.clientId === "c1").map((session) => session.id)).toEqual([a.id, b.id]);
+    advance(61_000);
+    expect(await manager.sweepIdle()).toBe(2);
+    expect(manager.get(a.id)).toBeUndefined();
+    const fresh = await manager.create(sessionInput);
+    expect(sessionLabelsView(fresh.labels)).toEqual({ provenance: [], dataClasses: [] });
+    expect(await manager.end(fresh.id, "deleted")).toBe(true);
+    expect(manager.list(() => true)).toEqual([]);
   });
 });

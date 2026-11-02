@@ -2336,6 +2336,19 @@ export const MIGRATIONS: Migration[] = [
     down: `
       ALTER TABLE secrets DROP COLUMN IF EXISTS sensitive_output;
     `
+  },
+  {
+    version: 52,
+    description: "12.2 — gateway toolsets that track outside content per client session",
+    // 1 when the toolset's client sessions keep a high-water mark of the labels their calls returned, so later calls
+    // are checked with them. The mark itself lives on the in-memory session (sessions are local to the instance that
+    // opened them) and ends with it. Existing toolsets stay off.
+    up: `
+      ALTER TABLE mcp_toolsets ADD COLUMN IF NOT EXISTS track_session_labels INTEGER NOT NULL DEFAULT 0;
+    `,
+    down: `
+      ALTER TABLE mcp_toolsets DROP COLUMN IF EXISTS track_session_labels;
+    `
   }
 ];
 
