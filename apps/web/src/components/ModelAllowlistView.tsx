@@ -2,7 +2,8 @@
  * 12.6 — Security → Models: which providers and models the deployment and
  * each project may call. Empty lists allow every model (the default). A
  * project's list can only narrow the deployment's. Admins add and remove
- * entries; everyone else reads.
+ * entries; builders read the deployment list and their projects' lists;
+ * viewers and operators do not see the lists.
  */
 
 import { useCallback, useEffect, useState } from "react";
@@ -16,6 +17,9 @@ function errorText(err: unknown): string {
 }
 
 type Providers = ModelAllowlistListResponse["providers"];
+
+/** Shown, and confirmed, when an entry starts an empty list: from then on that list refuses every model it does not match. */
+export const FIRST_ENTRY_WARNING = "Only listed models will be allowed; every other model call will be refused.";
 
 function providerName(providers: Providers, id: string): string {
   if (id === MODEL_ALLOWLIST_ANY_PROVIDER) return "Any provider";
@@ -33,6 +37,7 @@ export function ModelAllowlistView({ projects, activeProjectId }: ModelAllowlist
   const [canEdit, setCanEdit] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [forbidden, setForbidden] = useState(false);
   const [projectId, setProjectId] = useState(activeProjectId ?? projects[0]?.id ?? "default");
 
   const reload = useCallback(async () => {
@@ -42,8 +47,10 @@ export function ModelAllowlistView({ projects, activeProjectId }: ModelAllowlist
       setProviders(list.providers);
       setCanEdit(list.canEdit);
       setError(null);
+      setForbidden(false);
     } catch (err) {
-      setError(errorText(err));
+      if (err instanceof ApiError && err.status === 403) setForbidden(true);
+      else setError(errorText(err));
     } finally {
       setLoaded(true);
     }
@@ -54,6 +61,12 @@ export function ModelAllowlistView({ projects, activeProjectId }: ModelAllowlist
   }, [reload]);
 
   const remove = async (entry: ModelAllowlistEntry) => {
+    const sameList = entries.filter((row) => row.scope === entry.scope && row.projectId === entry.projectId);
+    const last = sameList.length === 1;
+    const question = last
+      ? `Remove ${providerName(providers, entry.providerId)} ${entry.modelGlob}? It is the last entry, so this list stops limiting models.`
+      : `Remove ${providerName(providers, entry.providerId)} ${entry.modelGlob}? Models only it allowed will be refused.`;
+    if (!window.confirm(question)) return;
     try {
       await removeModelAllowlistEntry(entry.id);
       await reload();
@@ -62,7 +75,10 @@ export function ModelAllowlistView({ projects, activeProjectId }: ModelAllowlist
     }
   };
 
-  const add = async (scope: ModelAllowlistScope, input: { providerId: string; modelGlob: string; note: string }) => {
+  /** False when the admin cancels starting an empty list. */
+  const add = async (scope: ModelAllowlistScope, input: { providerId: string; modelGlob: string; note: string }): Promise<boolean> => {
+    const listEmpty = scope === "deployment" ? deployment.length === 0 : project.length === 0;
+    if (listEmpty && !window.confirm(`${FIRST_ENTRY_WARNING} Add ${providerName(providers, input.providerId)} ${input.modelGlob}?`)) return false;
     await addModelAllowlistEntry({
       scope,
       ...(scope === "project" ? { projectId } : {}),
@@ -71,6 +87,7 @@ export function ModelAllowlistView({ projects, activeProjectId }: ModelAllowlist
       ...(input.note.trim() ? { note: input.note.trim() } : {})
     });
     await reload();
+    return true;
   };
 
   const deployment = entries.filter((entry) => entry.scope === "deployment");
@@ -78,13 +95,21 @@ export function ModelAllowlistView({ projects, activeProjectId }: ModelAllowlist
   const projectName = projects.find((entry) => entry.id === projectId)?.name ?? projectId;
   const otherProjects = new Set(entries.filter((entry) => entry.scope === "project" && entry.projectId !== projectId).map((entry) => entry.projectId));
 
+  if (forbidden) {
+    return (
+      <div className="guard-models">
+        <p className="kb-subtle">Only builders and admins can see the model allowlists.</p>
+      </div>
+    );
+  }
+
   return (
     <div className="guard-models">
       <p className="page-hint">
         A model call is allowed when it matches the deployment list and the project's list; an empty list allows every model, and a project list can
         only narrow the deployment list, never widen it.
       </p>
-      {!canEdit && loaded && <p className="kb-subtle">Read-only: only an admin changes these lists.</p>}
+      {!canEdit && loaded && <p className="kb-subtle">Read-only: only an admin changes these lists, and you see the lists of your projects.</p>}
       {error && (
         <div className="settings-error" role="alert">
           {error}
@@ -106,7 +131,14 @@ export function ModelAllowlistView({ projects, activeProjectId }: ModelAllowlist
           emptyText="No deployment list: every provider and model is allowed (unless a project list narrows it)."
           onRemove={remove}
         />
-        {canEdit && <EntryForm label="Add a deployment entry" providers={providers} onAdd={(input) => add("deployment", input)} />}
+        {canEdit && (
+          <EntryForm
+            label="Add a deployment entry"
+            providers={providers}
+            {...(deployment.length === 0 ? { hint: FIRST_ENTRY_WARNING } : {})}
+            onAdd={(input) => add("deployment", input)}
+          />
+        )}
       </section>
 
       <section className="kb-section" aria-labelledby="models-project">
@@ -133,7 +165,14 @@ export function ModelAllowlistView({ projects, activeProjectId }: ModelAllowlist
           emptyText={`No list for ${projectName}: its workflows may call whatever the deployment list allows.`}
           onRemove={remove}
         />
-        {canEdit && <EntryForm label={`Add an entry for ${projectName}`} providers={providers} onAdd={(input) => add("project", input)} />}
+        {canEdit && (
+          <EntryForm
+            label={`Add an entry for ${projectName}`}
+            providers={providers}
+            {...(project.length === 0 ? { hint: `In ${projectName}, only listed models will be allowed; every other model call there will be refused.` } : {})}
+            onAdd={(input) => add("project", input)}
+          />
+        )}
       </section>
     </div>
   );
@@ -192,7 +231,7 @@ function EntryTable(props: {
   );
 }
 
-function EntryForm(props: { label: string; providers: Providers; onAdd: (input: { providerId: string; modelGlob: string; note: string }) => Promise<void> }) {
+function EntryForm(props: { label: string; providers: Providers; hint?: string; onAdd: (input: { providerId: string; modelGlob: string; note: string }) => Promise<boolean> }) {
   const [providerId, setProviderId] = useState(MODEL_ALLOWLIST_ANY_PROVIDER);
   const [modelGlob, setModelGlob] = useState("");
   const [note, setNote] = useState("");
@@ -212,9 +251,10 @@ function EntryForm(props: { label: string; providers: Providers; onAdd: (input: 
         }
         setSaving(true);
         try {
-          await props.onAdd({ providerId, modelGlob: modelGlob.trim(), note });
-          setModelGlob("");
-          setNote("");
+          if (await props.onAdd({ providerId, modelGlob: modelGlob.trim(), note })) {
+            setModelGlob("");
+            setNote("");
+          }
           setError(null);
         } catch (err) {
           setError(errorText(err));
@@ -243,6 +283,7 @@ function EntryForm(props: { label: string; providers: Providers; onAdd: (input: 
           <input aria-label="Note" value={note} onChange={(event) => setNote(event.target.value)} placeholder="Why this model is allowed" />
         </label>
       </div>
+      {props.hint && <p className="kb-subtle">{props.hint}</p>}
       {error && (
         <div className="settings-error" role="alert">
           {error}

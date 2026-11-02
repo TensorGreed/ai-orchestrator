@@ -6,7 +6,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import * as api from "../lib/api";
 import type { EditorNodeData } from "../lib/workflow";
 import { GuardSecurityPage } from "./GuardSecurityPage";
-import { ModelAllowlistView } from "./ModelAllowlistView";
+import { FIRST_ENTRY_WARNING, ModelAllowlistView } from "./ModelAllowlistView";
 import { NodeInspector } from "./NodeConfigModal";
 
 vi.mock("../lib/api", async () => {
@@ -43,6 +43,8 @@ beforeEach(() => {
   vi.mocked(api.addModelAllowlistEntry).mockReset();
   vi.mocked(api.removeModelAllowlistEntry).mockReset();
   vi.mocked(api.checkModelAllowlist).mockReset();
+  vi.restoreAllMocks();
+  vi.spyOn(window, "confirm").mockReturnValue(true);
 });
 
 describe("Security → Models", () => {
@@ -75,6 +77,49 @@ describe("Security → Models", () => {
     expect(api.removeModelAllowlistEntry).toHaveBeenCalledWith("mal_1");
   });
 
+  it("warns before the first deployment entry, which refuses every other model, and confirms removal", async () => {
+    const listed = entry({});
+    const other = entry({ id: "mal_2", modelGlob: "gpt-5" });
+    vi.mocked(api.fetchModelAllowlist).mockResolvedValue({ entries: [], providers, canEdit: true });
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    const user = userEvent.setup();
+    const { unmount } = render(<ModelAllowlistView projects={projects} />);
+    const form = await screen.findByRole("form", { name: "Add a deployment entry" });
+    expect(within(form).getByText(FIRST_ENTRY_WARNING)).toBeInTheDocument();
+    expect(FIRST_ENTRY_WARNING).toBe("Only listed models will be allowed; every other model call will be refused.");
+    await user.type(within(form).getByLabelText("Model pattern"), "gpt-4o*");
+    await user.click(within(form).getByRole("button", { name: "Add" }));
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining(FIRST_ENTRY_WARNING));
+    // Cancelled: nothing is added and the pattern stays in the field.
+    expect(api.addModelAllowlistEntry).not.toHaveBeenCalled();
+    expect(within(form).getByLabelText("Model pattern")).toHaveValue("gpt-4o*");
+    unmount();
+
+    // With entries already on the list: no warning, no confirm on add; removing asks first.
+    confirm.mockClear();
+    vi.mocked(api.fetchModelAllowlist).mockResolvedValue({ entries: [listed, other], providers, canEdit: true });
+    vi.mocked(api.addModelAllowlistEntry).mockResolvedValue({ entry: listed });
+    render(<ModelAllowlistView projects={projects} />);
+    const second = await screen.findByRole("form", { name: "Add a deployment entry" });
+    expect(within(second).queryByText(FIRST_ENTRY_WARNING)).toBeNull();
+    await user.type(within(second).getByLabelText("Model pattern"), "o3*");
+    await user.click(within(second).getByRole("button", { name: "Add" }));
+    await waitFor(() => expect(api.addModelAllowlistEntry).toHaveBeenCalled());
+    expect(confirm).not.toHaveBeenCalled();
+    const table = screen.getByRole("table", { name: "Deployment models" });
+    await user.click(within(table).getByRole("button", { name: "Remove OpenAI gpt-4o*" }));
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining("Remove OpenAI gpt-4o*?"));
+    expect(api.removeModelAllowlistEntry).not.toHaveBeenCalled();
+  });
+
+  it("tells a viewer the lists are for builders and admins", async () => {
+    vi.mocked(api.fetchModelAllowlist).mockRejectedValue(new api.ApiError("Forbidden", 403));
+    render(<ModelAllowlistView projects={projects} />);
+    expect(await screen.findByText("Only builders and admins can see the model allowlists.")).toBeInTheDocument();
+    expect(screen.queryByRole("table")).toBeNull();
+    expect(screen.queryByText(/No deployment list/)).toBeNull();
+  });
+
   it("edits the selected project's override, and shows another project's list only when selected", async () => {
     const projectEntry = entry({ id: "mal_p", scope: "project", projectId: "p1", providerId: "*", modelGlob: "small-*" });
     vi.mocked(api.fetchModelAllowlist).mockResolvedValue({ entries: [projectEntry], providers, canEdit: true });
@@ -95,7 +140,7 @@ describe("Security → Models", () => {
   it("is read-only for a builder", async () => {
     vi.mocked(api.fetchModelAllowlist).mockResolvedValue({ entries: [entry({})], providers, canEdit: false });
     render(<ModelAllowlistView projects={projects} />);
-    expect(await screen.findByText("Read-only: only an admin changes these lists.")).toBeInTheDocument();
+    expect(await screen.findByText("Read-only: only an admin changes these lists, and you see the lists of your projects.")).toBeInTheDocument();
     expect(screen.queryByRole("form")).toBeNull();
     expect(screen.queryByRole("button", { name: /Remove/ })).toBeNull();
     expect(screen.getByRole("table", { name: "Deployment models" })).toBeInTheDocument();

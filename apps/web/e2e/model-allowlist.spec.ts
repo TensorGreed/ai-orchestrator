@@ -19,6 +19,8 @@ let page: Page;
 const stamp = Date.now();
 const workflowId = `wf-e2e-models-${stamp}`;
 const pattern = `e2e-allowed-${stamp}-*`;
+/** The confirm dialogs the Models tab showed (each accepted). */
+const dialogs: string[] = [];
 
 function sidebarItem(label: string) {
   return page.locator("aside.app-sidebar").getByRole("navigation", { name: "Workspace" }).getByRole("button", { name: label, exact: true });
@@ -27,6 +29,10 @@ function sidebarItem(label: string) {
 async function signIn(browser: Browser): Promise<void> {
   context = await browser.newContext();
   page = await context.newPage();
+  page.on("dialog", (dialog) => {
+    dialogs.push(dialog.message());
+    void dialog.accept();
+  });
   await expect
     .poll(async () => (await page.request.get(`${API_URL}/health`).catch(() => null))?.ok() ?? false, { timeout: 60_000 })
     .toBeTruthy();
@@ -85,9 +91,12 @@ test("an admin adds a deployment entry and a project override on Security → Mo
   await deploymentForm.getByLabel("Provider").selectOption("echo");
   await deploymentForm.getByLabel("Model pattern").fill(pattern);
   await deploymentForm.getByLabel("Note").fill(`e2e ${stamp}`);
+  await expect(deploymentForm.getByText("Only listed models will be allowed; every other model call will be refused.")).toBeVisible();
   await deploymentForm.getByRole("button", { name: "Add" }).click();
   const deploymentTable = page.getByRole("table", { name: "Deployment models" });
   await expect(deploymentTable.getByText(pattern)).toBeVisible();
+  // The first entry of an empty list is confirmed.
+  expect(dialogs.at(-1)).toContain("Only listed models will be allowed; every other model call will be refused.");
   await page.screenshot({ path: path.join(SHOT_DIR, "01-models-deployment-entry.png") });
 
   await page.getByRole("region", { name: "Project override" }).getByLabel("Project", { exact: true }).selectOption("default");
@@ -131,6 +140,8 @@ test("removing the entries allows every model again", async () => {
   await page.getByRole("region", { name: "Project override" }).getByLabel("Project", { exact: true }).selectOption("default");
   await page.getByRole("table", { name: /^Models for / }).getByRole("button", { name: `Remove Any provider ${pattern}` }).click();
   await expect(page.getByText(/No deployment list: every provider and model is allowed/)).toBeVisible();
+  // Each removal was confirmed.
+  expect(dialogs.filter((message) => message.startsWith("Remove "))).toHaveLength(2);
   const run = await page.request.post(`/api/workflows/${workflowId}/execute`, { data: {} });
   expect(((await run.json()) as { status: string }).status).toBe("success");
 });

@@ -4330,7 +4330,6 @@ export async function discardReplayCaptures(ids: string[]) {
   });
 }
 
-// Phase 16 — data destinations (deployment-wide; admins change them).
 // 12.6 — model allowlists (Security → Models).
 export interface ModelAllowlistListResponse {
   entries: ModelAllowlistEntry[];
@@ -4359,6 +4358,7 @@ export async function checkModelAllowlist(input: { providerId: string; model: st
   return apiRequest<ModelAllowlistCheck>(`/api/model-allowlist/check?${query.toString()}`);
 }
 
+// Phase 16 — data destinations (deployment-wide; admins change them).
 export async function fetchDataDestinations() {
   return apiRequest<{ destinations: DataDestinationRow[]; builtIns: DataDestinationRow[]; canEdit: boolean }>("/api/data-destinations");
 }
