@@ -417,6 +417,10 @@ describe("MCP gateway views", () => {
     expect(gatewayHeldActions({ channels: { tool_result: { actions: { email: { action: "review", shadow: true } } } } })).toBe(false);
     expect(gatewayHeldActions({ destinations: { rules: [{ action: "require_approval", allow: { maxTier: "internal" } }] } })).toBe(true);
     expect(gatewayHeldActions({ channels: { tool_result: { actions: { email: { action: "redact" } }, defaultAction: { action: "block" } } } })).toBe(false);
+    // A profile-level shadow switch on the action counts, unless the rule says otherwise.
+    expect(gatewayHeldActions({ shadow: { review: true }, channels: { tool_result: { actions: { email: { action: "review" } } } } })).toBe(false);
+    expect(gatewayHeldActions({ shadow: { review: true }, channels: { tool_result: { actions: { email: { action: "review", shadow: false } } } } })).toBe(true);
+    expect(gatewayHeldActions({ shadow: { review: true }, channels: { tool_result: { actions: { email: { action: "require_approval" } } } } })).toBe(true);
   });
 
   it("shows builders the toolset's Guard profile read-only", async () => {

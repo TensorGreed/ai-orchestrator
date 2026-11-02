@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { secretReferenceSchema } from "./schemas";
-import { PROVENANCE_LABELS } from "./data-labels";
+import { PROVENANCE_LABELS, GATEWAY_GUARD_CUSTOM_DATA_KEY } from "./data-labels";
 
 /**
  * Phase 12.1 — the workflow contract for L2M Guard: the `guard` DAG node,
@@ -168,9 +168,6 @@ export function gatewayGuardField(value: unknown): { gatewayGuard?: GatewayGuard
   const gatewayGuard = parseGatewayGuardStack(value);
   return gatewayGuard ? { gatewayGuard } : {};
 }
-
-/** 12.6 — the custom-data key a workflow tool's run records its gateway Guard stack under. */
-export const GATEWAY_GUARD_CUSTOM_DATA_KEY = "gatewayGuard";
 
 export const guardProfileCreateSchema = z.object({
   /** Stable id (lowercase letters, digits, dashes and underscores). Taken from the document when omitted. */

@@ -123,6 +123,21 @@ describe("guard profile override", () => {
     await expect(guard.simulationProfile("candidate", { document: { name: "" } })).rejects.toThrow(GuardValidationError);
   });
 
+  it("12.6: a simulation also swaps the profile in a gateway stack a run carries", async () => {
+    const { guard } = await setup();
+    const document = { ...(createDefaultGuardProfile() as unknown as Record<string, unknown>), name: "Looser" };
+    const inline = await guard.simulationProfile("candidate", { document });
+    const gatewayStack = [{ profileId: "candidate", version: 1, level: "toolset" as const }];
+    // Without a substitute the pinned gateway version runs next to the workflow's own profile.
+    const pinned = await guard.resolveRun({ workflowId: "wf", projectId: "default", gatewayStack });
+    expect(pinned.stack.map((entry) => [entry.profileId, entry.version])).toEqual([["bound", 1], ["candidate", 1]]);
+    // With one, the candidate runs in its place: the pinned version is not left beside it.
+    const simulated = await guard.resolveRun({ workflowId: "wf", projectId: "default", gatewayStack, profileSubstitute: inline });
+    expect(simulated.stack.map((entry) => [entry.profileId, entry.version, entry.hash])).toEqual([["bound", 1, pinned.stack[0]!.hash], ["candidate", 0, inline.hash]]);
+    expect(simulated.gateway?.map((entry) => entry.hash)).toEqual([inline.hash]);
+    expect(simulated.chain.filter((level) => level.level === "gateway").map((level) => level.version)).toEqual([0]);
+  });
+
   it("Phase 15.6: a simulated run's verdicts go to its sink and its tokens to its vault, never to the live tables", async () => {
     const { guard, store } = await setup();
     const sink = new GuardSimulationSink();

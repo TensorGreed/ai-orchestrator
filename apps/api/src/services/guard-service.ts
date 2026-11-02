@@ -583,7 +583,10 @@ export class GuardService {
     const { gatewayStack, ...own } = context;
     const resolution = await this.resolveRunOwn(own);
     // 12.6 — a run a gateway call started: the toolset's and client's profiles after the run's own (tighten-only).
-    return gatewayStack && gatewayStack.length > 0 ? GuardService.withGateway(resolution, await this.loadGatewayStack(gatewayStack)) : resolution;
+    if (!gatewayStack || gatewayStack.length === 0) return resolution;
+    const withGateway = GuardService.withGateway(resolution, await this.loadGatewayStack(gatewayStack));
+    // A simulated profile also bound at the gateway replaces those pinned entries, so the candidate is what runs.
+    return context.profileSubstitute ? GuardService.substitute(withGateway, context.profileSubstitute) : withGateway;
   }
 
   private async resolveRunOwn(context: { workflowId: string; projectId?: string | null; profileOverride?: GuardRunContext["profileOverride"]; profileSubstitute?: GuardProfileSubstitute }): Promise<GuardRunResolution> {
@@ -758,7 +761,21 @@ export class GuardService {
     const chain = resolution.chain.map((level) =>
       level.profileId === substitute.profileId && level.version !== undefined ? { ...level, version: substitute.version } : level
     );
-    return { ...resolution, ...(enforced ? { enforced } : {}), ...(deployment ? { deployment } : {}), stack, chain };
+    const dedupe = (entries: ResolvedGuardProfile[]) => {
+      const kept = new Set<string>();
+      return entries.map(swap).filter((entry) => (kept.has(entry.hash) ? false : (kept.add(entry.hash), true)));
+    };
+    const gateway = resolution.gateway ? dedupe(resolution.gateway) : undefined;
+    const ownStack = resolution.ownStack ? dedupe(resolution.ownStack) : undefined;
+    return {
+      ...resolution,
+      ...(enforced ? { enforced } : {}),
+      ...(deployment ? { deployment } : {}),
+      stack,
+      chain,
+      ...(gateway ? { gateway } : {}),
+      ...(ownStack ? { ownStack } : {})
+    };
   }
 
   private static substituteProfile(substitute: GuardProfileSubstitute): ResolvedGuardProfile {

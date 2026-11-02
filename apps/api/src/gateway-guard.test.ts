@@ -1040,3 +1040,77 @@ describe("a profile both the workflow and the toolset bind", () => {
     expect(profiles).toEqual(new Set(["gw-strict"]));
   });
 });
+
+describe("caller-supplied custom data cannot carry a gateway Guard stack", () => {
+  const planted = { toolsetId: "x", clientId: "y", profiles: [{ profileId: "ghost", version: 1, level: "toolset" }] };
+
+  it("is dropped on execute, the webhook API and the queue API, so the run has no gateway stack and a retry does not fail", async () => {
+    const fixture = await setup();
+    const call = caller(fixture.context);
+    // The workflow's own binding blocks this input, so the run fails and can be retried.
+    expect((await call(fixture.admin, "PUT", "/api/guard/bindings/workflows/wf-screened", { mode: "override", profileId: "gw-strict" })).statusCode).toBe(200);
+    const executed = await call(fixture.admin, "POST", "/api/workflows/wf-screened/execute", { input: { text: `mail ${EMAIL}` }, customData: { gatewayGuard: planted, ticket: "T-1" } });
+    const executionId = executed.json<{ executionId: string }>().executionId;
+    const history = (await fixture.context.store.getExecutionHistory(executionId))!;
+    expect(history.status).toBe("error");
+    expect(recordedStack(history)).toBeUndefined();
+    expect(history.customData).toMatchObject({ ticket: "T-1" });
+
+    // A retry (and so a golden capture, which reads the same history) sees no gateway stack to fail closed on.
+    const retried = await call(fixture.admin, "POST", `/api/executions/${executionId}/retry`, { usePinnedData: false });
+    const retry = (await fixture.context.store.getExecutionHistory(retried.json<{ executionId: string }>().executionId))!;
+    expect(JSON.stringify(retry)).not.toContain("no longer exists");
+    expect(recordedStack(retry)).toBeUndefined();
+    const saved = await call(fixture.admin, "POST", "/api/replay/recordings", { executionId, name: "Planted" });
+    expect(saved.statusCode, saved.body).toBe(201);
+    expect((await fixture.context.store.getReplayRecording(saved.json<{ recording: { id: string } }>().recording.id))!.capabilities.gatewayGuard).toBeUndefined();
+
+    const hooked = await call(fixture.admin, "POST", "/api/webhooks/execute", { workflow_id: "wf-screened", user_prompt: "hi", customData: { gatewayGuard: planted } });
+    expect(hooked.statusCode, hooked.body).toBeLessThan(300);
+    const hookedId = hooked.json<{ executionId?: string }>().executionId;
+    if (hookedId) expect(recordedStack(await fixture.context.store.getExecutionHistory(hookedId))).toBeUndefined();
+  });
+});
+
+describe("a workflow tool's answer is scrubbed of secrets before Guard reads it", () => {
+  it("a rewrite built from it does not bring a stored secret back", async () => {
+    const fixture = await setup();
+    const secretValue = "sk-abcdefghijklmnopqrstuvwxyz123456";
+    // The gateway masks key-shaped values in what it returns (`SecretService.redact`).
+    await fixture.context.store.upsertWorkflow(plainWorkflowTool("wf-leaky", `key ${secretValue} mail ${EMAIL}`));
+    await addToolsetMember(fixture, "wf-leaky");
+    await bind(fixture, "toolsets", fixture.toolset.id, "gw-redact");
+    const answer = await toolCaller(fixture)("plain_wfleaky", { text: "hello" });
+    expect(answer.outcome).toBe("ok");
+    expect(answer.text).not.toContain(secretValue);
+    expect(answer.text).toContain("[REDACTED");
+  });
+});
+
+describe("a Guard error while checking arguments", () => {
+  it("answers a short tool error (not a protocol error), fails closed, and does not call the server", async () => {
+    const fixture = await setup();
+    await bind(fixture, "toolsets", fixture.toolset.id, "gw-strict");
+    const tool = toolCaller(fixture);
+    await tool("get_current_time", { tz: "UTC" });
+    const invoke = vi.spyOn(MockMCPServerAdapter.prototype, "invokeTool");
+    const workflowRuns = (await fixture.context.store.listExecutionHistory({ workflowId: "wf-screened", pageSize: 10 })).items.length;
+    const { GuardService } = await import("./services/guard-service.js");
+    const resolve = vi.spyOn(GuardService.prototype, "gatewayRuntime");
+    resolve.mockImplementation(() => {
+      throw new Error("protection key could not be resolved");
+    });
+    try {
+      const server = await tool("get_current_time", { tz: "UTC" });
+      expect(server.outcome).toBe("tool_error");
+      expect(server.text).toBe("Guard could not check this call, so it was not sent.");
+      const workflow = await tool("screened_lookup", { text: "hello" });
+      expect(workflow.outcome).toBe("tool_error");
+      expect(workflow.text).toBe("Guard could not check this call, so it was not sent.");
+    } finally {
+      resolve.mockRestore();
+    }
+    expect(invoke).not.toHaveBeenCalled();
+    expect((await fixture.context.store.listExecutionHistory({ workflowId: "wf-screened", pageSize: 10 })).items.length).toBe(workflowRuns);
+  });
+});

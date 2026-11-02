@@ -40,10 +40,14 @@ const HELD_ACTIONS = new Set(["review", "require_approval"]);
  */
 export function gatewayHeldActions(document: Record<string, unknown> | null | undefined): boolean {
   if (!document) return false;
+  // A rule's own `shadow` wins; otherwise the profile's per-action shadow switch decides (as in the Guard engine).
+  const profileShadow = (document.shadow && typeof document.shadow === "object" ? document.shadow : {}) as Record<string, unknown>;
   const held = (rule: unknown) => {
     if (!rule || typeof rule !== "object") return false;
     const entry = rule as { action?: unknown; shadow?: unknown };
-    return typeof entry.action === "string" && HELD_ACTIONS.has(entry.action) && entry.shadow !== true;
+    if (typeof entry.action !== "string" || !HELD_ACTIONS.has(entry.action)) return false;
+    const shadow = typeof entry.shadow === "boolean" ? entry.shadow : profileShadow[entry.action] === true;
+    return !shadow;
   };
   const channels = (document.channels ?? {}) as Record<string, unknown>;
   for (const name of ["tool_arguments", "tool_result"]) {

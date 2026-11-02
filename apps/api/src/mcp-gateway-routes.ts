@@ -661,6 +661,16 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     return toolError(reason);
   };
 
+  /** A run's output with known secret values masked (the same masking the gateway applies to error text). */
+  const scrubOutput = (output: unknown): unknown => {
+    if (typeof output === "string") return deps.redact(output);
+    if (Array.isArray(output)) return output.map(scrubOutput);
+    if (output && typeof output === "object") {
+      return Object.fromEntries(Object.entries(output as Record<string, unknown>).map(([key, value]) => [key, scrubOutput(value)]));
+    }
+    return output;
+  };
+
   /**
    * 12.6 — Guard on a call's arguments, before anything reaches the server or the workflow run (and, for a server
    * tool held for approval, before an approval is asked for or used). A block answers with a tool error; a rewrite
@@ -950,9 +960,12 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     if (outcome.status === "success") {
       let output: unknown = outcome.output ?? null;
       if (guardStack) {
-        const verdict = await guardCheck(guardStack, "tool_result", guardScope, output);
+        // Guard reads the run's answer only after secret values are scrubbed out of it, as for a server tool's result.
+        const scrubbed = scrubOutput(output);
+        const verdict = await guardCheck(guardStack, "tool_result", guardScope, scrubbed);
         if (verdict.action === "block") guardResultBlocked = verdict;
         else if (verdict.action === "rewrite") output = verdict.content;
+        else output = scrubbed;
       }
       result = guardResultBlocked ? toolError(guardResultBlocked.reason, meta) : toolSuccess(output, meta);
     } else if (outcome.status === "waiting_approval") {
@@ -1355,7 +1368,18 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     const executionId = crypto.randomUUID();
     const callExecutionId = `mcpgw_${crypto.randomUUID()}`;
     const guardArgs = guardStack
-      ? async () => await guardArguments(guardStack, { session, auth, toolset, tool, callExecutionId, ...(callLabels ? { callLabels } : {}) }, args)
+      ? async () => {
+          try {
+            return await guardArguments(guardStack, { session, auth, toolset, tool, callExecutionId, ...(callLabels ? { callLabels } : {}) }, args);
+          } catch (error) {
+            // Still fails closed, but as the tool error a client can read, not a protocol error.
+            app.log.warn(
+              { err: deps.redact(error instanceof Error ? error.message : String(error)), toolsetId: toolset.id, clientId: auth.client.id, tool: tool.name },
+              "MCP gateway Guard could not check the arguments of a call; the call was refused"
+            );
+            return { blocked: toolError("Guard could not check this call, so it was not sent.") };
+          }
+        }
       : undefined;
     let callArgs = args;
     let policyDecision: McpToolPolicyDecisionRecord | undefined;

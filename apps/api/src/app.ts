@@ -201,7 +201,7 @@ import { inputProvenance, type CaptureInputOrigin } from "./services/capture-mas
 import { registerEvalRoutes } from "./eval-routes.js";
 import { registerGoldenSetFileRoutes } from "./golden-set-file-routes.js";
 import { effectiveTriggerTrust, isEntryNodeType, parseStoredDataLabels, recordedInputLabels, triggerInputProvenance, unionDataLabels, type DataLabels } from "@ai-orchestrator/shared";
-import { GATEWAY_GUARD_CUSTOM_DATA_KEY, parseGatewayGuardStack, GOLDEN_SET_FILE_DEFAULT_MAX_BYTES, GUARD_SIMULATION_MAX_CASES_DEFAULT, GUARD_SIMULATION_RETENTION_DAYS } from "@ai-orchestrator/shared";
+import { GATEWAY_GUARD_CUSTOM_DATA_KEY, stripReservedCustomData, parseGatewayGuardStack, GOLDEN_SET_FILE_DEFAULT_MAX_BYTES, GUARD_SIMULATION_MAX_CASES_DEFAULT, GUARD_SIMULATION_RETENTION_DAYS } from "@ai-orchestrator/shared";
 import { registerApprovalRoutes } from "./approval-routes.js";
 import { registerExecutionRoutes } from "./execution-routes.js";
 import { asRecord, isExecutionTimeoutAbort, normalizeExecutionTimeoutMs, normalizeSessionId, retryAfterSeconds } from "./run-helpers.js";
@@ -524,7 +524,7 @@ const expressionPreviewSchema = z.object({
         })
         .optional(),
       executionId: z.string().optional(),
-      customData: z.record(z.string(), z.unknown()).optional()
+      customData: z.record(z.string(), z.unknown()).transform((v) => stripReservedCustomData(v)).optional()
     })
     .optional()
 });
@@ -3436,7 +3436,7 @@ export async function createApp(
       execution_timeout_ms:
         payload.execution_timeout_ms ??
         (typeof replayInput.execution_timeout_ms === "number" ? replayInput.execution_timeout_ms : undefined),
-      customData: payload.customData ?? asRecord(replayInput.customData),
+      customData: stripReservedCustomData(payload.customData ?? asRecord(replayInput.customData)),
       nodeOutputs: {
         ...replayNodeOutputs,
         ...asRecord(payload.nodeOutputs)
@@ -13416,7 +13416,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
             executionTimeoutMs: typeof body.executionTimeoutMs === "number" ? body.executionTimeoutMs : undefined,
             customData: (() => {
               const custom = body.customData && typeof body.customData === "object" && !Array.isArray(body.customData)
-                ? { ...(body.customData as Record<string, unknown>) }
+                ? stripReservedCustomData({ ...(body.customData as Record<string, unknown>) })
                 : undefined;
               // A caller-supplied triggeredBy is kept as data, not as the audit actor.
               if (typeof body.triggeredBy === "string" && body.triggeredBy !== user.email) {

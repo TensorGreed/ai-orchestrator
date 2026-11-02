@@ -2,7 +2,7 @@ import { z } from "zod";
 import { MCP_POLICY_TEXT_OPS, WORKFLOW_SCHEMA_VERSION } from "./types";
 import { writeToolApprovalSettingsSchema } from "./approval-gate";
 import { MCP_POLICY_PATH_MAX_LENGTH, parseMcpPolicyPath } from "./mcp-tool-policy";
-import { SENSITIVE_OUTPUT_CONFIG_KEY, storedTriggerTrustBinding, TRIGGER_TRUST_BINDING_KEY, TRIGGER_TRUST_CONFIG_KEY, TRIGGER_TRUST_LEVELS } from "./data-labels";
+import { stripReservedCustomData, SENSITIVE_OUTPUT_CONFIG_KEY, storedTriggerTrustBinding, TRIGGER_TRUST_BINDING_KEY, TRIGGER_TRUST_CONFIG_KEY, TRIGGER_TRUST_LEVELS } from "./data-labels";
 
 export const secretReferenceSchema = z.object({
   secretId: z.string().min(1)
@@ -260,7 +260,7 @@ export const workflowExecuteRequestSchema = z.object({
   session_id: z.string().optional(),
   executionTimeoutMs: z.number().int().positive().optional(),
   execution_timeout_ms: z.number().int().positive().optional(),
-  customData: z.record(z.string(), z.unknown()).optional(),
+  customData: z.record(z.string(), z.unknown()).transform((v) => stripReservedCustomData(v)).optional(),
   system_prompt: z.string().optional(),
   user_prompt: z.string().optional(),
   variables: z.record(z.string(), z.unknown()).optional(),
@@ -276,7 +276,7 @@ export const agentWebhookPayloadSchema = z.object({
   session_id: z.string().optional(),
   executionTimeoutMs: z.number().int().positive().optional(),
   execution_timeout_ms: z.number().int().positive().optional(),
-  customData: z.record(z.string(), z.unknown()).optional(),
+  customData: z.record(z.string(), z.unknown()).transform((v) => stripReservedCustomData(v)).optional(),
   system_prompt: z.string().optional(),
   user_prompt: z.string().optional(),
   variables: z.record(z.string(), z.unknown()).optional()
