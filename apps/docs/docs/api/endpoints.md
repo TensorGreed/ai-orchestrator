@@ -121,7 +121,7 @@ Clients:
 - `POST /api/mcp/clients` (admin; `{ name, toolsetIds, role, expiresAt? }`; the response carries the token once)
 - `PATCH /api/mcp/clients/:id` (admin; `{ name?, rateLimit? }`, nothing else; `rateLimit: null` removes the client's limit)
 - `POST /api/mcp/clients/:id/revoke` (admin)
-- `GET /api/mcp/clients/:id/budgets` (builder; the client's budgets with what each counted this period)
+- `GET /api/mcp/clients/:id/budgets` (builder; every budget that applies to the client, its own, its toolsets' projects' and the global ones, each labelled by scope, with what it counted this period and whether it refuses the client's calls now)
 - `GET /api/mcp/clients/:id/usage?window=24h|7d|30d` (builder)
 - `GET /api/mcp/clients/:id/sessions` (builder): the client's open sessions on the answering instance, with the labels each collected on a toolset that tracks outside content per session
 

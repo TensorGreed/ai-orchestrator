@@ -149,15 +149,15 @@ Both are optional. With no budget and no rate limit, the gateway answers as befo
 
 [Budgets](./budgets.md) count gateway usage:
 
-- **Per client.** A budget with the scope **MCP client** counts that client's usage: the runs its workflow tool calls start, and the model sampling its server tool calls use (the sampling cost is priced with the model prices and stored on the call's telemetry row). Runs recorded before this release name the client only by name, and still count.
+- **Per client.** A budget with the scope **MCP client** counts that client's usage: the runs its workflow tool calls start, and the model sampling its server tool calls use (the sampling cost is priced with the model prices and stored on the call's telemetry row). Runs recorded before this release name the client only by name: they still count, by the client's current name and from its creation on. Renaming a client drops those older runs from its budgets, and two clients that existed under the same name before this release both count them. A run that waits on an approval stays the client's after the approval.
 - **Per project.** A toolset's gateway usage also counts toward the budget of the toolset's **policy project**, even when its workflows live in other projects.
 - **Global.** A global budget counts every run and all gateway sampling.
 
-Before the tool policy runs, each `tools/call` is checked against the `block` budgets of the client, the toolset's project and the deployment, and for a workflow tool also the workflow's own budgets. When one is used up, the call is refused with JSON-RPC error `-32032` and a message such as `Budget "IDE agents" exceeded for the current month.` Its `data` carries the `budgetId`, the `period`, its start and `retryAfterSeconds` (until the period ends). The server is not called and no run starts. A `warn` budget never refuses a call; it sends its alerts as for runs.
+Before the tool policy runs, each `tools/call` is checked against the `block` budgets of the client, the toolset's project and the deployment, and for a workflow tool also the budgets of the workflow and its project. A workflow tool's run is not checked again when it starts. When one is used up, the call is refused with JSON-RPC error `-32032` and a message such as `Budget "IDE agents" exceeded for the current month.` Its `data` carries the `budgetId`, the `period`, its start and `retryAfterSeconds` (until the period ends). The server is not called and no run starts. A `warn` budget never refuses a call; it sends its alerts as for runs.
 
 A call that starts under the cap may take it over, and calls sent together (one batch, or several sessions at once) are checked before any of them ends, so usage can pass a budget by about one batch. The next call is refused. Budgets are read from a copy each instance refreshes every 2 seconds and right after an edit on that instance, so a budget created on another instance applies within 2 seconds. If the budgets cannot be read at all, calls are refused with a tool error rather than sent unchecked.
 
-A client's **Governance** section lists its budgets with what each counted this period. Budgets themselves are set in **Settings**, **FinOps**.
+A client's **Governance** section lists every budget that applies to it, each labelled by scope (**This client**, **Project …**, **Deployment**), with what it counted this period; a used-up block budget is marked as refusing the client's calls. Budgets themselves are set in **Settings**, **FinOps**.
 
 ### Rate limits
 
@@ -170,7 +170,7 @@ Set a client's own limit in its **Governance** section, or a **Default rate limi
 
 Every `tools/call` counts, including each call of a batch. A call over the limit is refused at once, never queued, with JSON-RPC error `-32029` (retry later). Its `data` has the `reason` (`rate_limited` or `concurrency_limited`) and `retryAfterMs`. Refusals are audited as `mcp_gateway.rate_limited` at most once per session per minute, and write no telemetry row.
 
-In [cluster mode](../operations/cluster.md) the per-minute count is shared by all instances through the database, the same way as the sign-in and webhook rate limits: a client gets its allowance once, not once per instance. The shared count uses fixed windows sized so the burst fits one window, which comes close to the token bucket a single instance uses. If the database cannot be reached, each instance counts on its own until it can. **Calls at once** is counted per instance, because a session's calls run on the instance that holds the session.
+In [cluster mode](../operations/cluster.md) the per-minute count is shared by all instances through the database, the same way as the sign-in and webhook rate limits: a client gets its allowance once, not once per instance. The shared count uses fixed windows: with a burst up to the per-minute rate, a window of `60 s × burst / calls per minute` holding the burst; with a larger burst, one minute holding the per-minute number (so a burst above one minute's calls applies on a single instance only, and a client that used its allowance waits at most a minute). As with any fixed window, up to twice a window's calls can pass around a window boundary. If the database cannot be reached, each instance counts on its own until it can. **Calls at once** is counted per instance, because a session's calls run on the instance that holds the session.
 
 Changing a client's name or rate limit is audited as `mcp_client.updated`; a toolset's default is part of `mcp_toolset.updated`.
 
