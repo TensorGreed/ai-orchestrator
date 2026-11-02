@@ -65,6 +65,7 @@ import {
   parseMcpPolicyDecision,
   SUBJECT_CASSETTE_SOURCES,
   SUBJECT_EXECUTION_TRIGGERS,
+  guardBindingScopeOf,
   toMcpToolPolicyEffect
 } from "./store-shared.js";
 import { GATEWAY_APPROVAL_ONE_PENDING_INDEX, ONE_PENDING_APPROVAL_INDEX, POLICY_SUGGESTION_ONE_OPEN_INDEX, QUEUE_ACTIVE_EXECUTION_INDEX, QUEUE_CLAIM_INDEX, QUEUE_FINISHED_INDEX, QUEUE_RUNNING_HEARTBEAT_INDEX } from "./migrations.js";
@@ -80,7 +81,7 @@ import {
 } from "@ai-orchestrator/shared";
 import { isEmptyDataLabels, labelsForUntrackedSave, mergeDataLabels, parseStoredDataLabels, releaseGateRestrictsToAdmins, type DataLabels } from "@ai-orchestrator/shared";
 import type { McpToolCallLabels, McpToolOpenWorldOverride, McpToolPolicySubject, ToolArgumentSummary } from "@ai-orchestrator/shared";
-import { parseRecordedCallLabels } from "@ai-orchestrator/shared";
+import { gatewayGuardField, parseRecordedCallLabels } from "@ai-orchestrator/shared";
 import { queuedRunTimeoutMs, STUCK_JOB_MARGIN_MS } from "./queue-timeouts.js";
 import { AuditExportCursorMovedError, isForeignKeyViolation, McpPolicyEnforceRefusedError, ProjectNotEmptyError, StoreReferenceMissingError, ReleaseGateEnforcedError } from "./store-errors.js";
 import { clampLimit, LIMIT_MAX } from "./store-limits.js";
@@ -768,6 +769,8 @@ export interface McpToolCallRecord {
    * tracked labels). Null on gateway calls, runs without a tool policy and rows written before.
    */
   labels?: McpToolCallLabels | null;
+  /** 12.6 (v53) — the gateway toolset the call came through; absent on run and playground rows (and older rows). */
+  toolsetId?: string | null;
   createdAt: string;
 }
 
@@ -916,6 +919,7 @@ interface McpToolCallRow {
   subject_source?: string | null;
   project_id?: string | null;
   labels_json?: string | null;
+  toolset_id?: string | null;
   created_at: string;
 }
 
@@ -935,6 +939,7 @@ interface McpToolPolicyRow {
   mode?: string | null;
   workflow_ids_json?: string | null;
   client_ids_json?: string | null;
+  toolset_ids_json?: string | null;
   additive?: number | null;
   enabled: number;
   created_by: string | null;
@@ -1124,6 +1129,7 @@ function mapMcpToolCall(row: McpToolCallRow): McpToolCallRecord {
     ...mapMcpToolCallContext(row),
     policyDecision: parseMcpPolicyDecision(row.policy_decision_json),
     labels: parseRecordedCallLabels(row.labels_json),
+    ...(row.toolset_id ? { toolsetId: toString(row.toolset_id) } : {}),
     createdAt: toString(row.created_at)
   };
 }
@@ -1350,7 +1356,8 @@ function mapMcpToolSnapshot(row: McpToolSnapshotRow): McpToolSnapshotRecord {
 }
 
 // Phase 12.1 — Guard store records.
-export type GuardBindingScope = "project" | "workflow";
+/** 12.6 — `toolset` and `mcp_client`: a gateway toolset's or client's Guard profile (no new table shape). */
+export type GuardBindingScope = "project" | "workflow" | "toolset" | "mcp_client";
 
 export interface GuardProfileRecord {
   id: string;
@@ -1432,6 +1439,8 @@ export interface GuardEventFilters {
   action?: string;
   since?: string;
   onlyFindings?: boolean;
+  /** 12.6 — `gateway`: only MCP gateway server tool calls; `run`: only workflow runs. */
+  placement?: "gateway" | "run";
 }
 
 export interface GuardEventStats {
@@ -1546,7 +1555,8 @@ function mapReplayRecordingSummary(row: Record<string, unknown>): ReplayRecordin
             sourceWorkflowId: typeof capabilities.sourceWorkflowId === "string" ? capabilities.sourceWorkflowId : null
           }
         : {}),
-      ...(capabilities?.capture && typeof capabilities.capture === "object" ? { capture: mapReplayCaptureInfo(capabilities.capture) } : {})
+      ...(capabilities?.capture && typeof capabilities.capture === "object" ? { capture: mapReplayCaptureInfo(capabilities.capture) } : {}),
+      ...gatewayGuardField(capabilities?.gatewayGuard)
     },
     bytes: toNumber(row.bytes),
     truncated: toNumber(row.truncated) === 1,
@@ -1806,7 +1816,7 @@ function mapGuardProfileVersionRow(row: GuardProfileVersionRow): GuardProfileVer
 
 function mapGuardBindingRow(row: GuardBindingRow): GuardBindingRecord {
   return {
-    scope: String(row.scope) === "workflow" ? "workflow" : "project",
+    scope: guardBindingScopeOf(row.scope),
     scopeId: String(row.scope_id),
     mode: String(row.mode),
     profileId: nullableText(row.profile_id),
@@ -3985,6 +3995,9 @@ export class SqliteStore implements Store {
     this.ensureColumn("mcp_tool_policies", "additive", "INTEGER NOT NULL", "0");
     // 12.2 (v52) — toolsets whose client sessions track outside content.
     this.ensureColumn("mcp_toolsets", "track_session_labels", "INTEGER NOT NULL", "0");
+    // 12.6 (v53) — tool rules scoped to gateway toolsets, and the toolset on gateway telemetry rows.
+    this.ensureColumn("mcp_tool_policies", "toolset_ids_json", "TEXT NOT NULL", "'[]'");
+    this.ensureColumn("mcp_tool_calls", "toolset_id", "TEXT");
 
     this.exec(`CREATE INDEX IF NOT EXISTS idx_workflows_project_id ON workflows(project_id)`);
     this.exec(`CREATE INDEX IF NOT EXISTS idx_workflows_folder_id ON workflows(folder_id)`);
@@ -11957,8 +11970,8 @@ export class SqliteStore implements Store {
          id, execution_id, workflow_id, node_id, registry_server_id, adapter_id, tool_name,
          started_at, duration_ms, ok, error, turn_input_tokens, turn_output_tokens,
          estimated_cost_usd, sampling_requests, sampling_input_tokens, sampling_output_tokens,
-         source, client_id, rejection, policy_decision_json, args_summary_json, subject_role, subject_source, project_id, labels_json, created_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         source, client_id, rejection, policy_decision_json, args_summary_json, subject_role, subject_source, project_id, labels_json, toolset_id, created_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         call.id,
         call.executionId,
@@ -11983,6 +11996,7 @@ export class SqliteStore implements Store {
         call.policyDecision ? JSON.stringify(call.policyDecision) : null,
         ...mcpToolCallContextValues(call),
         call.labels ? JSON.stringify(call.labels) : null,
+        call.toolsetId ?? null,
         new Date().toISOString()
       ]
     );
@@ -12471,8 +12485,8 @@ export class SqliteStore implements Store {
     this.exec(
       `INSERT INTO mcp_tool_policies (
          id, name, description, effect, project_id, roles_json, server_id, tool_pattern, annotation_hint, kind, enabled,
-         conditions_json, mode, workflow_ids_json, client_ids_json, additive, created_by, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         conditions_json, mode, workflow_ids_json, client_ids_json, toolset_ids_json, additive, created_by, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         input.id,
         input.name,
@@ -12489,6 +12503,7 @@ export class SqliteStore implements Store {
         input.mode ?? "enforce",
         JSON.stringify(input.workflowIds ?? []),
         JSON.stringify(input.clientIds ?? []),
+        JSON.stringify(input.toolsetIds ?? []),
         input.additive === true ? 1 : 0,
         input.createdBy ?? null,
         now,
@@ -12515,6 +12530,7 @@ export class SqliteStore implements Store {
     if (patch.mode !== undefined) { fields.push("mode = ?"); params.push(patch.mode ?? "enforce"); }
     if (patch.workflowIds !== undefined) { fields.push("workflow_ids_json = ?"); params.push(JSON.stringify(patch.workflowIds ?? [])); }
     if (patch.clientIds !== undefined) { fields.push("client_ids_json = ?"); params.push(JSON.stringify(patch.clientIds ?? [])); }
+    if (patch.toolsetIds !== undefined) { fields.push("toolset_ids_json = ?"); params.push(JSON.stringify(patch.toolsetIds ?? [])); }
     if (fields.length > 0) {
       fields.push("updated_at = ?");
       params.push(new Date().toISOString());
@@ -13289,6 +13305,14 @@ export class SqliteStore implements Store {
     return row ? mapGuardBindingRow(row) : null;
   }
 
+  async getGatewayGuardBindings(toolsetId: string, clientId: string): Promise<{ toolset: GuardBindingRecord | null; client: GuardBindingRecord | null }> {
+    const rows = this.queryAll<GuardBindingRow>(
+      `SELECT * FROM guard_bindings WHERE (scope = 'toolset' AND scope_id = ?) OR (scope = 'mcp_client' AND scope_id = ?)`,
+      [toolsetId, clientId]
+    ).map(mapGuardBindingRow);
+    return { toolset: rows.find((row) => row.scope === "toolset") ?? null, client: rows.find((row) => row.scope === "mcp_client") ?? null };
+  }
+
   async listGuardBindingsForProfile(profileId: string): Promise<GuardBindingRecord[]> {
     return this.queryAll<GuardBindingRow>(`SELECT * FROM guard_bindings WHERE profile_id = ? ORDER BY scope, scope_id`, [profileId]).map(mapGuardBindingRow);
   }
@@ -13367,6 +13391,8 @@ export class SqliteStore implements Store {
     if (filters.action) add("effective_action = ?", filters.action);
     if (filters.since) add("created_at >= ?", filters.since);
     if (filters.onlyFindings) clauses.push("detector_id IS NOT NULL");
+    if (filters.placement === "gateway") clauses.push("placement = 'gateway'");
+    if (filters.placement === "run") clauses.push("placement <> 'gateway'");
     return { where: clauses.length ? `WHERE ${clauses.join(" AND ")}` : "", params };
   }
 

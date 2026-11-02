@@ -94,8 +94,9 @@ export function mapMcpToolPolicyExtras(row: {
   mode?: unknown;
   workflow_ids_json?: unknown;
   client_ids_json?: unknown;
+  toolset_ids_json?: unknown;
   additive?: unknown;
-}): Pick<McpToolPolicyRule, "conditions" | "mode" | "workflowIds" | "clientIds" | "invalid" | "additive"> {
+}): Pick<McpToolPolicyRule, "conditions" | "mode" | "workflowIds" | "clientIds" | "toolsetIds" | "invalid" | "additive"> {
   const stored = storedConditions(row.conditions_json);
   const conditions = stored === null || stored === UNREADABLE ? null : mcpToolPolicyConditionsSchema.safeParse(stored);
   const invalid = stored === UNREADABLE || (conditions !== null && !conditions.success);
@@ -114,6 +115,8 @@ export function mapMcpToolPolicyExtras(row: {
     mode: row.mode === "shadow" ? "shadow" : "enforce",
     workflowIds: stringList(row.workflow_ids_json),
     clientIds: stringList(row.client_ids_json),
+    // 12.6 (v53) — present only when set, so rules without toolsets read as before.
+    ...(stringList(row.toolset_ids_json).length > 0 ? { toolsetIds: stringList(row.toolset_ids_json) } : {}),
     // Phase 12.2 (v50) — present only when set, so other rules read as before.
     ...(Number(row.additive) === 1 ? { additive: true } : {})
   };
@@ -221,6 +224,7 @@ export const MCP_TOOL_CALL_SCAN_COLUMNS = [
   "subject_source",
   "project_id",
   "labels_json",
+  "toolset_id",
   "created_at"
 ].join(", ");
 
@@ -299,4 +303,10 @@ export function mapMcpPolicySuggestion(row: Record<string, unknown>): McpPolicyS
     decidedBy: text(row.decided_by),
     decidedAt: isoOrNull(row.decided_at)
   };
+}
+
+/** 12.6 — a stored binding's scope; anything unknown reads as a project binding, as before. */
+export function guardBindingScopeOf(value: unknown): "project" | "workflow" | "toolset" | "mcp_client" {
+  const scope = String(value);
+  return scope === "workflow" || scope === "toolset" || scope === "mcp_client" ? scope : "project";
 }

@@ -563,4 +563,108 @@ run("queue dispatch across replicas on one Postgres database", () => {
     // Well under the 10 s poll: the wake-up, not the poll, started each job.
     for (const wait of waits) expect(wait).toBeLessThan(1_500);
   }, 60_000);
+
+  it("a workflow tool's run on a Guard-bound gateway toolset carries the toolset's profile to its worker (12.6)", async () => {
+    const { worker, api, admin } = await cluster();
+    await api.store.ensureDefaultProject();
+    const tool = chain("wf-gw-guard", [
+      node("trigger", "mcp_server_trigger", { path: "wf-gw-guard", toolName: "screened", inputSchema: { type: "object", properties: { text: { type: "string" } } }, authMode: "public" }),
+      node("guard", "guard", { inputField: "text" }),
+      node("out", "output", { responseTemplate: "passed" })
+    ]);
+    tool.projectId = "default";
+    tool.nodes.push(node("blocked", "output", { responseTemplate: "blocked" }));
+    tool.edges = [
+      { id: "e1", source: "trigger", target: "guard" },
+      { id: "e2", source: "guard", sourceHandle: "pass", target: "out" },
+      { id: "e3", source: "guard", sourceHandle: "blocked", target: "blocked" }
+    ] as Workflow["edges"];
+    await save(api, admin, tool);
+    const profile = {
+      id: "gw-email",
+      name: "Blocks emails",
+      version: "1",
+      channels: { prompt: { detectors: [{ id: "dlp.patterns", threshold: 0.5 }], actions: { email: { action: "block" } }, defaultAction: { action: "allow" } } }
+    };
+    const inject = (method: "POST" | "PUT", url: string, payload: Record<string, unknown>) => api.app.inject({ method, url, headers: { cookie: admin }, payload });
+    expect((await inject("POST", "/api/guard/profiles", { document: profile })).statusCode).toBe(201);
+    const createdToolset = await inject("POST", "/api/mcp/toolsets", { name: "Queued tools", projectId: "default", members: [{ kind: "workflow", workflowId: "wf-gw-guard" }] });
+    expect(createdToolset.statusCode, createdToolset.body).toBe(201);
+    const toolset = createdToolset.json<{ toolset: { id: string; slug: string } }>().toolset;
+    expect((await inject("PUT", `/api/guard/bindings/toolsets/${toolset.id}`, { mode: "override", profileId: "gw-email" })).statusCode).toBe(200);
+    const { token } = (await inject("POST", "/api/mcp/clients", { name: "Queued agent", toolsetIds: [toolset.id], role: "builder" })).json<{ token: string }>();
+    const rpc = (body: Record<string, unknown>, session?: string) =>
+      api.app.inject({
+        method: "POST",
+        url: `/mcp/${toolset.slug}`,
+        headers: { "content-type": "application/json", accept: "application/json, text/event-stream", authorization: `Bearer ${token}`, ...(session ? { "mcp-session-id": session } : {}) },
+        payload: JSON.stringify(body)
+      });
+    const opened = await rpc({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "queue", version: "1" } } });
+    const session = opened.headers["mcp-session-id"] as string;
+    const called = await rpc({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "screened", arguments: { text: "mail jane.doe@example.com" } } }, session);
+    expect(called.statusCode, called.body).toBe(200);
+    expect(called.body).toContain("blocked");
+    const [run] = (await api.store.listExecutionHistory({ workflowId: "wf-gw-guard", pageSize: 5 })).items;
+    expect(worker.ran).toContain(run!.id);
+    const history = await api.store.getExecutionHistory(run!.id);
+    expect((history!.customData as Record<string, unknown> | undefined)?.gatewayGuard).toMatchObject({ toolsetId: toolset.id, profiles: [{ profileId: "gw-email", version: 1, level: "toolset" }] });
+    const events = await api.store.listGuardEventsForExecution(run!.id);
+    expect(events.some((event) => event.profileId === "gw-email" && event.effectiveAction === "block")).toBe(true);
+  }, 60_000);
+
+  it("a queued gateway run that pauses for an approval resumes on a worker under the toolset's Guard profile (12.6)", async () => {
+    const { worker, api, admin } = await cluster();
+    await api.store.ensureDefaultProject();
+    const tool = chain("wf-gw-paused", [
+      node("trigger", "mcp_server_trigger", { path: "wf-gw-paused", toolName: "paused", inputSchema: { type: "object", properties: { text: { type: "string" } } }, authMode: "public" }),
+      node("gate", "approval_gate", { message: "Go on?", approverRoles: ["admin"], timeoutMinutes: 60 }),
+      node("guard", "guard", { inputField: "text" }),
+      node("out", "output", { responseTemplate: "passed" })
+    ], { 1: { sourceHandle: "approved" }, 2: { sourceHandle: "pass" } });
+    tool.projectId = "default";
+    tool.nodes.push(node("blocked", "output", { responseTemplate: "blocked" }));
+    tool.edges.push({ id: "e-blocked", source: "guard", sourceHandle: "blocked", target: "blocked" } as Workflow["edges"][number]);
+    await save(api, admin, tool);
+    const profile = {
+      id: "gw-email-q",
+      name: "Blocks emails",
+      version: "1",
+      channels: { prompt: { detectors: [{ id: "dlp.patterns", threshold: 0.5 }], actions: { email: { action: "block" } }, defaultAction: { action: "allow" } } }
+    };
+    const inject = (method: "POST" | "PUT", url: string, payload: Record<string, unknown>) => api.app.inject({ method, url, headers: { cookie: admin }, payload });
+    expect((await inject("POST", "/api/guard/profiles", { document: profile })).statusCode).toBe(201);
+    const createdToolset = await inject("POST", "/api/mcp/toolsets", { name: "Paused tools", projectId: "default", members: [{ kind: "workflow", workflowId: "wf-gw-paused" }] });
+    expect(createdToolset.statusCode, createdToolset.body).toBe(201);
+    const toolset = createdToolset.json<{ toolset: { id: string; slug: string } }>().toolset;
+    expect((await inject("PUT", `/api/guard/bindings/toolsets/${toolset.id}`, { mode: "override", profileId: "gw-email-q" })).statusCode).toBe(200);
+    const { token } = (await inject("POST", "/api/mcp/clients", { name: "Paused agent", toolsetIds: [toolset.id], role: "builder" })).json<{ token: string }>();
+    const rpc = (body: Record<string, unknown>, session?: string) =>
+      api.app.inject({
+        method: "POST",
+        url: `/mcp/${toolset.slug}`,
+        headers: { "content-type": "application/json", accept: "application/json, text/event-stream", authorization: `Bearer ${token}`, ...(session ? { "mcp-session-id": session } : {}) },
+        payload: JSON.stringify(body)
+      });
+    const opened = await rpc({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "queue", version: "1" } } });
+    const session = opened.headers["mcp-session-id"] as string;
+    const called = await rpc({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "paused", arguments: { text: "mail jane.doe@example.com" } } }, session);
+    expect(called.statusCode, called.body).toBe(200);
+    expect(called.body).toContain("waiting for an approval");
+    const [run] = (await api.store.listExecutionHistory({ workflowId: "wf-gw-paused", pageSize: 5 })).items;
+    expect(worker.ran).toContain(run!.id);
+    // The binding is gone before the approval: the resume, on the worker, applies the version the run started with.
+    expect((await inject("PUT", `/api/guard/bindings/toolsets/${toolset.id}`, { mode: "inherit" })).statusCode).toBe(200);
+    const approved = await inject("POST", `/api/approvals/${run!.id}/approve`, {});
+    expect(approved.statusCode, approved.body).toBe(202);
+    const finished = await until(async () => {
+      const history = await api.store.getExecutionHistory(run!.id);
+      return history && history.status !== "waiting_approval" && history.status !== "running" ? history : null;
+    }, "the resumed run to finish");
+    expect(worker.ran.filter((id) => id === run!.id)).toHaveLength(2);
+    expect(JSON.stringify(finished.output)).toContain("blocked");
+    expect((finished.customData as Record<string, unknown> | undefined)?.gatewayGuard).toMatchObject({ toolsetId: toolset.id, profiles: [{ profileId: "gw-email-q", version: 1, level: "toolset" }] });
+    const events = await api.store.listGuardEventsForExecution(run!.id);
+    expect(events.some((event) => event.profileId === "gw-email-q" && event.effectiveAction === "block")).toBe(true);
+  }, 60_000);
 });

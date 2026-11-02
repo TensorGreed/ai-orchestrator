@@ -933,6 +933,9 @@ export class PostgresStore implements Store {
   async getGuardBinding(...args: Parameters<Store["getGuardBinding"]>): ReturnType<Store["getGuardBinding"]> {
     return guard.getGuardBinding(this.ctx, ...args);
   }
+  async getGatewayGuardBindings(...args: Parameters<Store["getGatewayGuardBindings"]>): ReturnType<Store["getGatewayGuardBindings"]> {
+    return guard.getGatewayGuardBindings(this.ctx, ...args);
+  }
   async listGuardBindingsForProfile(...args: Parameters<Store["listGuardBindingsForProfile"]>): ReturnType<Store["listGuardBindingsForProfile"]> {
     return guard.listGuardBindingsForProfile(this.ctx, ...args);
   }

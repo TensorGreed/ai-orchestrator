@@ -2952,6 +2952,8 @@ export interface McpToolPolicyRuleInput {
   mode?: McpToolPolicyMode;
   workflowIds?: string[];
   clientIds?: string[];
+  /** 12.6 — gateway toolsets: only server tools called through them. Empty or absent = anywhere. */
+  toolsetIds?: string[];
 }
 
 /** Phase 12.4 — one rule in a dry run, with its conditions in words. */
@@ -3862,6 +3864,8 @@ export interface GuardEventFilter {
   action?: string;
   days?: number;
   findings?: boolean;
+  /** 12.6 — `gateway`: MCP gateway server tool calls only; `run`: workflow runs only. */
+  placement?: "gateway" | "run";
   limit?: number;
   offset?: number;
 }
@@ -3963,6 +3967,48 @@ export async function fetchGuardWorkflowBinding(workflowId: string) {
 
 export async function updateGuardWorkflowBinding(workflowId: string, payload: { mode: "inherit" | "override"; profileId?: string | null }) {
   return apiRequest<GuardWorkflowBindingResponse>(`/api/guard/bindings/workflows/${encodeURIComponent(workflowId)}`, {
+    method: "PUT",
+    body: JSON.stringify(payload)
+  });
+}
+
+// 12.6 — Guard on MCP gateway toolsets and clients (override or inherit; admins change them).
+
+export interface GuardGatewayBindingView extends GuardBindingView {
+  scope: "toolset" | "mcp_client";
+  scopeId: string;
+}
+
+export interface GuardToolsetBindingResponse {
+  binding: GuardGatewayBindingView;
+  effective: GuardResolutionView;
+}
+
+export interface GuardClientBindingResponse {
+  binding: GuardGatewayBindingView;
+  /** What applies on each of the client's toolsets, with the client's own profile. */
+  toolsets: Array<{ toolsetId: string; effective: GuardResolutionView }>;
+}
+
+export type GuardGatewayBindingInput = { mode: "inherit" } | { mode: "override"; profileId: string };
+
+export async function fetchGuardToolsetBinding(toolsetId: string) {
+  return apiRequest<GuardToolsetBindingResponse>(`/api/guard/bindings/toolsets/${encodeURIComponent(toolsetId)}`);
+}
+
+export async function updateGuardToolsetBinding(toolsetId: string, payload: GuardGatewayBindingInput) {
+  return apiRequest<GuardToolsetBindingResponse>(`/api/guard/bindings/toolsets/${encodeURIComponent(toolsetId)}`, {
+    method: "PUT",
+    body: JSON.stringify(payload)
+  });
+}
+
+export async function fetchGuardClientBinding(clientId: string) {
+  return apiRequest<GuardClientBindingResponse>(`/api/guard/bindings/clients/${encodeURIComponent(clientId)}`);
+}
+
+export async function updateGuardClientBinding(clientId: string, payload: GuardGatewayBindingInput) {
+  return apiRequest<GuardClientBindingResponse>(`/api/guard/bindings/clients/${encodeURIComponent(clientId)}`, {
     method: "PUT",
     body: JSON.stringify(payload)
   });

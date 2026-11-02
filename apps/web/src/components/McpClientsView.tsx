@@ -24,6 +24,7 @@ import {
 import { buildMcpClientSnippets, snippetServerName, toolsetEndpointUrl } from "../lib/mcp-client-snippets";
 import { CopyButton } from "./McpToolsetsView";
 import { DataLabelChips } from "./DataLabelChips";
+import { ClientGovernance } from "./McpGatewayGovernance";
 
 const ROLES: McpPolicyRole[] = ["viewer", "operator", "builder", "admin"];
 
@@ -81,6 +82,7 @@ export function McpClientsView({ isAdmin }: McpClientsViewProps) {
   const [revealed, setRevealed] = useState<{ client: McpClientView; token: string } | null>(null);
   const [usageFor, setUsageFor] = useState<string | null>(null);
   const [sessionsFor, setSessionsFor] = useState<string | null>(null);
+  const [governanceFor, setGovernanceFor] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
@@ -241,6 +243,14 @@ export function McpClientsView({ isAdmin }: McpClientsViewProps) {
                   >
                     {sessionsFor === client.id ? "Hide sessions" : "Sessions"}
                   </button>
+                  <button
+                    type="button"
+                    className="pg-btn ghost"
+                    aria-expanded={governanceFor === client.id}
+                    onClick={() => setGovernanceFor((current) => (current === client.id ? null : client.id))}
+                  >
+                    {governanceFor === client.id ? "Hide governance" : "Governance"}
+                  </button>
                   {isAdmin && client.status === "active" && (
                     <button
                       type="button"
@@ -254,6 +264,7 @@ export function McpClientsView({ isAdmin }: McpClientsViewProps) {
                 </div>
                 {usageFor === client.id && <ClientUsage clientId={client.id} />}
                 {sessionsFor === client.id && <ClientSessions clientId={client.id} />}
+                {governanceFor === client.id && <ClientGovernance clientId={client.id} isAdmin={isAdmin} active={client.status === "active"} />}
               </li>
             ))}
           </ul>
@@ -490,6 +501,15 @@ export function ClientSessions({ clientId }: { clientId: string }) {
                 <DataLabelChips labels={session.labels} />
               ) : (
                 <span className="kb-subtle">nothing from outside yet</span>
+              )}
+              {(session.guard?.blocks ?? 0) > 0 && (
+                <span
+                  className="mcp-flag"
+                  data-testid="session-guard-blocks"
+                  title={session.guard?.lastBlock ? `Last: ${session.guard.lastBlock.tool}, ${session.guard.lastBlock.reason}` : undefined}
+                >
+                  Guard blocked {session.guard?.blocks}
+                </span>
               )}
             </li>
           ))}

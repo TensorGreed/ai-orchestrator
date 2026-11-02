@@ -50,6 +50,20 @@ export interface GatewaySession {
    * grows, and ends with the session. Never read from the client's request.
    */
   labels: SessionLabelMark;
+  /** 12.6 — calls Guard blocked in this session (on this instance), and the latest one (short redacted reason only). */
+  guard: SessionGuardBlocks;
+}
+
+/** 12.6 — a session's Guard blocks. */
+export interface SessionGuardBlocks {
+  blocks: number;
+  lastBlock: { tool: string; channel: "tool_arguments" | "tool_result"; reason: string; at: number } | null;
+}
+
+/** 12.6 — count a Guard block on the session. */
+export function noteSessionGuardBlock(session: Pick<GatewaySession, "guard">, block: { tool: string; channel: "tool_arguments" | "tool_result"; reason: string }, now: number = Date.now()): void {
+  session.guard.blocks += 1;
+  session.guard.lastBlock = { ...block, at: now };
 }
 
 /** 12.2 — a session's label high-water mark. */
@@ -197,7 +211,8 @@ export class GatewaySessionManager {
       mcpContext: this.options.createContext(),
       inFlight: new Map(),
       auditedReadOnlyTools: new Set(),
-      labels: emptySessionLabelMark()
+      labels: emptySessionLabelMark(),
+      guard: { blocks: 0, lastBlock: null }
     };
     this.sessions.set(session.id, session);
     return session;

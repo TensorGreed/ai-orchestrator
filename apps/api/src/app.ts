@@ -201,7 +201,7 @@ import { inputProvenance, type CaptureInputOrigin } from "./services/capture-mas
 import { registerEvalRoutes } from "./eval-routes.js";
 import { registerGoldenSetFileRoutes } from "./golden-set-file-routes.js";
 import { effectiveTriggerTrust, isEntryNodeType, parseStoredDataLabels, recordedInputLabels, triggerInputProvenance, unionDataLabels, type DataLabels } from "@ai-orchestrator/shared";
-import { GOLDEN_SET_FILE_DEFAULT_MAX_BYTES, GUARD_SIMULATION_MAX_CASES_DEFAULT, GUARD_SIMULATION_RETENTION_DAYS } from "@ai-orchestrator/shared";
+import { GATEWAY_GUARD_CUSTOM_DATA_KEY, stripReservedCustomData, parseGatewayGuardStack, GOLDEN_SET_FILE_DEFAULT_MAX_BYTES, GUARD_SIMULATION_MAX_CASES_DEFAULT, GUARD_SIMULATION_RETENTION_DAYS } from "@ai-orchestrator/shared";
 import { registerApprovalRoutes } from "./approval-routes.js";
 import { registerExecutionRoutes } from "./execution-routes.js";
 import { asRecord, isExecutionTimeoutAbort, normalizeExecutionTimeoutMs, normalizeSessionId, retryAfterSeconds } from "./run-helpers.js";
@@ -524,7 +524,7 @@ const expressionPreviewSchema = z.object({
         })
         .optional(),
       executionId: z.string().optional(),
-      customData: z.record(z.string(), z.unknown()).optional()
+      customData: z.record(z.string(), z.unknown()).transform((v) => stripReservedCustomData(v)).optional()
     })
     .optional()
 });
@@ -2208,6 +2208,8 @@ export async function createApp(
             workflowId: mergedWorkflow.id,
             projectId: mergedWorkflow.projectId ?? "default",
             ...(input.guardProfileOverride ? { profileOverride: input.guardProfileOverride } : {}),
+            // 12.6 — a gateway-triggered run: the toolset's and client's profiles, after the run's own.
+            ...(input.gatewayGuard ? { gatewayStack: input.gatewayGuard.profiles } : {}),
             ...(input.guardSimulation?.substitute ? { profileSubstitute: input.guardSimulation.substitute } : {}),
             ...(input.guardSimulation ? { simulation: { sink: input.guardSimulation.sink, vault: input.guardSimulation.vault } } : {}),
             ...(input.guardSimulation?.destinationRows ? { destinationRows: input.guardSimulation.destinationRows } : {})
@@ -2259,7 +2261,12 @@ export async function createApp(
               triggeredBy: paused.triggeredBy,
               startedAt: paused.startedAt,
               // Approved tool results answer a re-run, so they are stored encrypted, not redacted.
-              state: sealToolResults(secretService, channel === "production" ? { ...paused.state, releaseChannel: "production", releaseVersion } : paused.state)
+              // 12.6 — a gateway-triggered run keeps its toolset/client Guard stack across the pause.
+              state: sealToolResults(secretService, {
+                ...paused.state,
+                ...(channel === "production" ? { releaseChannel: "production" as const, releaseVersion } : {}),
+                ...(input.gatewayGuard ? { gatewayGuard: input.gatewayGuard } : {})
+              })
             }, queueFence ? { fence: queueFence } : {});
             if (!pausedHere) {
               // A zombie worker: the run is another worker's now, so it leaves no pause and asks nobody to approve.
@@ -3429,7 +3436,7 @@ export async function createApp(
       execution_timeout_ms:
         payload.execution_timeout_ms ??
         (typeof replayInput.execution_timeout_ms === "number" ? replayInput.execution_timeout_ms : undefined),
-      customData: payload.customData ?? asRecord(replayInput.customData),
+      customData: stripReservedCustomData(payload.customData ?? asRecord(replayInput.customData)),
       nodeOutputs: {
         ...replayNodeOutputs,
         ...asRecord(payload.nodeOutputs)
@@ -4724,8 +4731,14 @@ export async function createApp(
                 }
               : undefined, effectFreeNodeId)
           : undefined;
+        // 12.6 — a run an MCP gateway call started resumes under the same toolset/client Guard stack (pinned versions),
+        // and its history keeps the record, so a retry or replay of it applies the stack again.
+        const resumeHistory = await store.getExecutionHistory(job.executionId);
+        const gatewayGuard =
+          parseGatewayGuardStack(state.gatewayGuard) ?? parseGatewayGuardStack(asRecord(resumeHistory?.customData)[GATEWAY_GUARD_CUSTOM_DATA_KEY]);
         const result = await runWorkflowExecution({
           ...(hooks ? { hooks } : {}),
+          ...(gatewayGuard ? { gatewayGuard } : {}),
           policyActor: actor,
           workflow: resumeWorkflow,
           executionId: job.executionId,
@@ -4747,6 +4760,7 @@ export async function createApp(
           result,
           triggerType: "approval_resume",
           triggeredBy: actedBy,
+          ...(gatewayGuard ? { customData: { ...(result.customData ?? {}), [GATEWAY_GUARD_CUSTOM_DATA_KEY]: gatewayGuard } } : {}),
           requestInput: {
             decision: decided,
             approvalId: job.executionId,
@@ -10735,6 +10749,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       await logStreamingService.dispatchAudit(event);
     },
     sensitiveSecretIds: async () => await sensitiveSecrets.ids(),
+    guard: guardService,
     runWorkflowTool: async (input) => {
       const triggerType = "mcp_gateway";
       const triggeredBy = `mcp-client:${input.client.name}`;
@@ -10764,10 +10779,13 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
             triggeredBy,
             policySubject: input.subject,
             // Recorded on the trigger's result, so a retry or replay of this run starts from them too.
-            ...(inputLabels ? { inputLabels, recordInputLabels: true } : {})
+            ...(inputLabels ? { inputLabels, recordInputLabels: true } : {}),
+            // 12.6 — the toolset's and client's Guard profiles (only when one has a binding); crosses the queue.
+            ...(input.gatewayGuard ? { gatewayGuard: input.gatewayGuard } : {})
           },
-          progress: { requestInput },
-          history: { requestInput }
+          // 12.6 — recorded on the run, so a retry or replay of it applies the same profile versions.
+          progress: { requestInput, ...(input.gatewayGuard ? { customData: { [GATEWAY_GUARD_CUSTOM_DATA_KEY]: input.gatewayGuard } } : {}) },
+          history: { requestInput, ...(input.gatewayGuard ? { customData: { [GATEWAY_GUARD_CUSTOM_DATA_KEY]: input.gatewayGuard } } : {}) }
         },
         { pool: dispatchPoolOf(input.workflow), passthrough: {
           onNodeComplete: (event) => input.onNodeComplete({ nodeId: event.nodeId, status: event.status })
@@ -12046,7 +12064,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
 
   /** A rule's server is a registry entry or, for inline servers, an adapter id. */
   const validatePolicyScope = async (
-    input: { projectId?: string | null; serverId?: string | null; workflowIds?: string[] | null; clientIds?: string[] | null },
+    input: { projectId?: string | null; serverId?: string | null; workflowIds?: string[] | null; clientIds?: string[] | null; toolsetIds?: string[] | null },
     reply: FastifyReply
   ): Promise<{ error: string } | null> => {
     if (input.projectId && !await store.getProject(input.projectId)) {
@@ -12068,6 +12086,12 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       if (!await store.getMcpClient(clientId)) {
         reply.code(400);
         return { error: `MCP gateway client '${clientId}' does not exist` };
+      }
+    }
+    for (const toolsetId of input.toolsetIds ?? []) {
+      if (!await store.getMcpToolset(toolsetId)) {
+        reply.code(400);
+        return { error: `MCP gateway toolset '${toolsetId}' does not exist` };
       }
     }
     return null;
@@ -12111,6 +12135,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     conditions: rule.conditions ?? null,
     workflowIds: rule.workflowIds ?? [],
     clientIds: rule.clientIds ?? [],
+    ...((rule.toolsetIds?.length ?? 0) > 0 ? { toolsetIds: rule.toolsetIds } : {}),
     ...(rule.additive ? { additive: true } : {}),
     hash: hashMcpToolPolicyRule(rule)
   });
@@ -12457,6 +12482,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       mode: parsed.data.mode ?? "enforce",
       workflowIds: [...new Set(parsed.data.workflowIds ?? [])],
       clientIds: [...new Set(parsed.data.clientIds ?? [])],
+      toolsetIds: [...new Set(parsed.data.toolsetIds ?? [])],
       createdBy: user.email
     });
     await recordPolicyAudit(user, "mcp_policy.created", "create", rule.id, policyAuditMetadata(rule), rule.projectId);
@@ -12493,21 +12519,23 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     }
     const invalid = await validatePolicyScope(parsed.data, reply);
     if (invalid) return invalid;
-    const { name, description, roles, workflowIds, clientIds, ...rest } = parsed.data;
+    const { name, description, roles, workflowIds, clientIds, toolsetIds, ...rest } = parsed.data;
     const rule = (await store.updateMcpToolPolicy(existing.id, {
       ...rest,
       ...(name !== undefined ? { name: name?.trim() || null } : {}),
       ...(description !== undefined ? { description: description?.trim() || null } : {}),
       ...(roles !== undefined ? { roles: [...new Set(roles)] } : {}),
       ...(workflowIds !== undefined ? { workflowIds: [...new Set(workflowIds ?? [])] } : {}),
-      ...(clientIds !== undefined ? { clientIds: [...new Set(clientIds ?? [])] } : {})
+      ...(clientIds !== undefined ? { clientIds: [...new Set(clientIds ?? [])] } : {}),
+      ...(toolsetIds !== undefined ? { toolsetIds: [...new Set(toolsetIds ?? [])] } : {})
     }))!;
     // Phase 12.4 — emptying a principal list (or clearing the project) makes the rule apply to everyone: say so.
     const widened = [
       ...(existing.projectId && rule.projectId === null ? ["projectId"] : []),
       ...(existing.roles.length > 0 && rule.roles.length === 0 ? ["roles"] : []),
       ...((existing.workflowIds?.length ?? 0) > 0 && (rule.workflowIds?.length ?? 0) === 0 ? ["workflowIds"] : []),
-      ...((existing.clientIds?.length ?? 0) > 0 && (rule.clientIds?.length ?? 0) === 0 ? ["clientIds"] : [])
+      ...((existing.clientIds?.length ?? 0) > 0 && (rule.clientIds?.length ?? 0) === 0 ? ["clientIds"] : []),
+      ...((existing.toolsetIds?.length ?? 0) > 0 && (rule.toolsetIds?.length ?? 0) === 0 ? ["toolsetIds"] : [])
     ];
     await recordPolicyAudit(
       user,
@@ -12844,6 +12872,8 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         ...(replay.modelPlan ? { providerRegistry: replay.modelPlan.registry } : {}),
         ...(replay.guardProfileOverride ? { guardProfileOverride: replay.guardProfileOverride } : {}),
         ...(replay.guardSimulation ? { guardSimulation: replay.guardSimulation } : {}),
+        // 12.6 — a golden run an MCP gateway call started: its toolset/client Guard stack, as in production.
+        ...(replay.gatewayGuard ? { gatewayGuard: replay.gatewayGuard } : {}),
         policyActor: actor,
         workflow: replay.workflow,
         customData: replay.customData,
@@ -13386,7 +13416,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
             executionTimeoutMs: typeof body.executionTimeoutMs === "number" ? body.executionTimeoutMs : undefined,
             customData: (() => {
               const custom = body.customData && typeof body.customData === "object" && !Array.isArray(body.customData)
-                ? { ...(body.customData as Record<string, unknown>) }
+                ? stripReservedCustomData({ ...(body.customData as Record<string, unknown>) })
                 : undefined;
               // A caller-supplied triggeredBy is kept as data, not as the audit actor.
               if (typeof body.triggeredBy === "string" && body.triggeredBy !== user.email) {

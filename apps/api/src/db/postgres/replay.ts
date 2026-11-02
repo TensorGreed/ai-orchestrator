@@ -26,6 +26,7 @@ import type {
   ReplayRecordingSummary,
   RunFacts
 } from "@ai-orchestrator/shared";
+import { gatewayGuardField } from "@ai-orchestrator/shared";
 import type { PoolClient } from "pg";
 import type { ReplayRecordingInsert, ReplayRecordingRecord } from "../database.js";
 import { type ReplayRecordingLimits, type ReplayRecordingRefusal, type Store } from "../store.js";
@@ -280,7 +281,8 @@ function mapReplayRecordingSummary(row: Record<string, unknown>): ReplayRecordin
             sourceWorkflowId: typeof capabilities.sourceWorkflowId === "string" ? capabilities.sourceWorkflowId : null
           }
         : {}),
-      ...(capabilities?.capture && typeof capabilities.capture === "object" ? { capture: mapReplayCaptureInfo(capabilities.capture) } : {})
+      ...(capabilities?.capture && typeof capabilities.capture === "object" ? { capture: mapReplayCaptureInfo(capabilities.capture) } : {}),
+      ...gatewayGuardField(capabilities?.gatewayGuard)
     },
     bytes: toNum(row.bytes),
     truncated: toNum(row.truncated) === 1,

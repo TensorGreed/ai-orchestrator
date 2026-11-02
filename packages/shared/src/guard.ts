@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { secretReferenceSchema } from "./schemas";
-import { PROVENANCE_LABELS } from "./data-labels";
+import { PROVENANCE_LABELS, GATEWAY_GUARD_CUSTOM_DATA_KEY } from "./data-labels";
 
 /**
  * Phase 12.1 — the workflow contract for L2M Guard: the `guard` DAG node,
@@ -115,6 +115,60 @@ export const guardWorkflowBindingInputSchema = z
   .object({ mode: z.enum(["inherit", "override"]), profileId: z.string().min(1).nullish() })
   .superRefine(requireProfileForMode);
 
+/**
+ * 12.6 — a gateway toolset's or MCP client's Guard binding: `inherit` (none) or `override` with a profile. Admin-only;
+ * a toolset or client can never enforce (its toolset's project enforces).
+ */
+export const guardGatewayBindingInputSchema = z
+  .object({ mode: z.enum(["inherit", "override"]), profileId: z.string().min(1).nullish() })
+  .superRefine(requireProfileForMode);
+
+/** 12.6 — the gateway scopes a Guard binding can name. */
+export const GUARD_GATEWAY_BINDING_SCOPES = ["toolset", "mcp_client"] as const;
+export type GuardGatewayBindingScope = (typeof GUARD_GATEWAY_BINDING_SCOPES)[number];
+
+/**
+ * 12.6 — one profile of a gateway Guard stack, pinned to the version that applied (the toolset's project enforced
+ * profile, the toolset's, the client's). A workflow tool's run carries these, tighten-only on top of its own profiles,
+ * and records them, so a retry or replay of that run applies the same versions.
+ */
+export interface GatewayGuardProfileRef {
+  profileId: string;
+  version: number;
+  level: "project" | "toolset" | "mcp_client";
+}
+
+/** 12.6 — the gateway Guard stack a workflow tool's run started with (recorded on the run). */
+export interface GatewayGuardStack {
+  toolsetId: string;
+  clientId: string;
+  profiles: GatewayGuardProfileRef[];
+}
+
+/** 12.6 — reads a recorded gateway Guard stack; null when it is missing or malformed. */
+export function parseGatewayGuardStack(value: unknown): GatewayGuardStack | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  if (typeof record.toolsetId !== "string" || typeof record.clientId !== "string" || !Array.isArray(record.profiles)) return null;
+  const profiles: GatewayGuardProfileRef[] = [];
+  for (const entry of record.profiles.slice(0, 8)) {
+    if (!entry || typeof entry !== "object") return null;
+    const ref = entry as Record<string, unknown>;
+    const level = ref.level;
+    if (typeof ref.profileId !== "string" || !ref.profileId || typeof ref.version !== "number" || !Number.isInteger(ref.version) || ref.version < 1) return null;
+    if (level !== "project" && level !== "toolset" && level !== "mcp_client") return null;
+    profiles.push({ profileId: ref.profileId, version: ref.version, level });
+  }
+  if (profiles.length === 0) return null;
+  return { toolsetId: record.toolsetId, clientId: record.clientId, profiles };
+}
+
+/** 12.6 — `{ gatewayGuard }` for a stored value that is a valid gateway Guard stack, `{}` otherwise (for spreading). */
+export function gatewayGuardField(value: unknown): { gatewayGuard?: GatewayGuardStack } {
+  const gatewayGuard = parseGatewayGuardStack(value);
+  return gatewayGuard ? { gatewayGuard } : {};
+}
+
 export const guardProfileCreateSchema = z.object({
   /** Stable id (lowercase letters, digits, dashes and underscores). Taken from the document when omitted. */
   id: z
@@ -157,7 +211,7 @@ export interface GuardProfileVersionView {
 /** One level of the binding chain, as the UI and run traces show it. */
 export interface GuardBindingLevel {
   /** `candidate` (Phase 15.3): a replay's guard profile override. `destinations` (Phase 16): the deployment's destination rules. */
-  level: "project" | "workflow" | "instance" | "port" | "candidate" | "destinations";
+  level: "project" | "workflow" | "instance" | "port" | "candidate" | "destinations" | "toolset" | "mcp_client" | "gateway";
   mode: GuardBindingMode | "auto" | "off";
   profileId?: string | null;
   version?: number | null;
@@ -173,7 +227,7 @@ export interface GuardProfileRef {
 /** The profiles applied to agent traffic for a workflow run, in evaluation order. */
 export interface GuardResolutionView {
   /** Where the effective profile came from. */
-  source: "enforced" | "workflow" | "project" | "instance" | "candidate" | "none";
+  source: "enforced" | "workflow" | "project" | "instance" | "candidate" | "toolset" | "mcp_client" | "none";
   enforced?: GuardProfileRef | null;
   /** Profiles evaluated in order; the enforced one always first. */
   stack: GuardProfileRef[];
@@ -202,8 +256,11 @@ export interface GuardEventView {
   iteration?: number | null;
   /** Phase 16: `egress` for the outbound checkpoint (HTTP, connectors, senders). */
   channel: GuardProfileChannelValue;
-  /** Where the guard sat: a DAG guard node, an agent hook, or a delegated worker. */
-  placement: "node" | "agent";
+  /**
+   * Where the guard sat: a DAG guard node, an agent hook, or a delegated worker. 12.6 — `gateway`: a server tool called
+   * through the MCP gateway (`executionId` is the call's `mcpgw_*` id, `nodeId` the tool name, no workflow).
+   */
+  placement: "node" | "agent" | "gateway";
   toolName?: string | null;
   detectorId?: string | null;
   category?: string | null;

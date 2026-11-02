@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import { nodeDefinitions } from "./definitions";
 import {
   defaultGuardLabels,
+  guardGatewayBindingInputSchema,
+  parseGatewayGuardStack,
   GUARD_OUTPUT_HANDLES,
   guardNodeConfigSchema,
   guardProfileCreateSchema,
@@ -57,5 +59,24 @@ describe("guard binding and profile schemas", () => {
   it("validates profile ids", () => {
     expect(guardProfileCreateSchema.safeParse({ id: "strict-pii", document: {} }).success).toBe(true);
     expect(guardProfileCreateSchema.safeParse({ id: "Strict PII", document: {} }).success).toBe(false);
+  });
+});
+
+describe("gateway Guard stacks (12.6)", () => {
+  it("binds a toolset or client by override or inherit only", () => {
+    expect(guardGatewayBindingInputSchema.safeParse({ mode: "override", profileId: "strict" }).success).toBe(true);
+    expect(guardGatewayBindingInputSchema.safeParse({ mode: "inherit" }).success).toBe(true);
+    expect(guardGatewayBindingInputSchema.safeParse({ mode: "override" }).success).toBe(false);
+    expect(guardGatewayBindingInputSchema.safeParse({ mode: "enforced", profileId: "strict" }).success).toBe(false);
+  });
+
+  it("reads a recorded stack back, and nothing from a malformed one", () => {
+    const stack = { toolsetId: "mts_1", clientId: "mcc_1", profiles: [{ profileId: "strict", version: 2, level: "toolset" }] };
+    expect(parseGatewayGuardStack(stack)).toEqual(stack);
+    expect(parseGatewayGuardStack(undefined)).toBeNull();
+    expect(parseGatewayGuardStack({ ...stack, profiles: [] })).toBeNull();
+    expect(parseGatewayGuardStack({ ...stack, profiles: [{ profileId: "strict", version: "2", level: "toolset" }] })).toBeNull();
+    expect(parseGatewayGuardStack({ ...stack, profiles: [{ profileId: "strict", version: 2, level: "workflow" }] })).toBeNull();
+    expect(parseGatewayGuardStack({ ...stack, clientId: 3 })).toBeNull();
   });
 });

@@ -48,7 +48,7 @@ import type { ReplayRecordingRecord } from "../db/database.js";
 import type { ReplayRecordingLimits, ReplayRecordingRefusal, Store } from "../db/store.js";
 import { SecretScrubber } from "./audit-scrub.js";
 import { runSteps, runStepsAsync } from "@ai-orchestrator/guard-sdk";
-import { parseStoredDataLabels, type DataLabels, type ProvenanceLabel } from "@ai-orchestrator/shared";
+import { GATEWAY_GUARD_CUSTOM_DATA_KEY, gatewayGuardField, parseStoredDataLabels, type DataLabels, type ProvenanceLabel } from "@ai-orchestrator/shared";
 import { maskCapturedRunSteps, withNodeLabels, type CaptureMaskOptions } from "./capture-masking.js";
 import { sanitizeConfig, sha256Hex, workflowForHash } from "./audit-bundle-service.js";
 import { buildRunFacts, nodeResultRecords, type PriceTurn } from "./run-facts.js";
@@ -557,7 +557,9 @@ export class ReplayRecordingService {
           memory: memorySeed ? "seeded" : "empty",
           workflowSource,
           scrubbed,
-          ...(captureInfo ? { capture: captureInfo } : {})
+          ...(captureInfo ? { capture: captureInfo } : {}),
+          // 12.6 — the gateway Guard stack the run carried, so its replays apply it again.
+          ...gatewayGuardField(asRecord(history.customData)?.[GATEWAY_GUARD_CUSTOM_DATA_KEY])
         },
         bytes,
         truncated,

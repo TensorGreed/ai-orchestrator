@@ -41,11 +41,16 @@ import {
   type McpToolsetMemberSpec,
   type McpSamplingTraceEntry,
   type DataLabels,
+  type DestinationRef,
+  type GatewayGuardProfileRef,
   type McpGatewaySessionView,
-  type Workflow
+  type Workflow,
+  mcpServerDestinationRef
 } from "@ai-orchestrator/shared";
 import type { ProviderRegistry } from "@ai-orchestrator/provider-sdk";
-import { createMcpSamplingHandler, referencesSecretIn } from "@ai-orchestrator/workflow-engine";
+import { createMcpSamplingHandler, referencesSecretIn, type GuardRunResolution } from "@ai-orchestrator/workflow-engine";
+import type { GuardService } from "./services/guard-service.js";
+import { checkGatewayCall, type GatewayGuardChannel, type GatewayGuardOutcome } from "./services/mcp-gateway-guard.js";
 import type { z } from "zod";
 import { DEFAULT_MCP_GATEWAY_APPROVAL_WINDOW_MS, toolArgumentSummariesEnabled, type AppConfig } from "./config.js";
 import type { AuditEventInput } from "./services/audit-service.js";
@@ -61,6 +66,7 @@ import {
   toToolView,
   type GatewayCatalog,
   type GatewayServerTool,
+  type GatewayTool,
   type GatewayWorkflowTool
 } from "./services/mcp-gateway-catalog.js";
 import {
@@ -105,6 +111,7 @@ function isRuntimeRefusal(kind: string | undefined): kind is McpRuntimeRejection
 import {
   GatewaySessionLimitError,
   GatewaySessionManager,
+  noteSessionGuardBlock,
   raiseSessionLabels,
   sessionCallLabels,
   sessionLabelsView,
@@ -145,6 +152,8 @@ export function evaluateGatewaySampling(
     serverLabel?: string;
     clientId: string;
     model: string;
+    /** 12.6 — the toolset the call came through, for sampling rules scoped to toolsets. */
+    toolsetId?: string;
   }
 ): McpToolAccessDecision {
   return evaluateToolForContext(
@@ -156,7 +165,8 @@ export function evaluateGatewaySampling(
       adapterId: input.adapterId,
       registryServerId: input.registryServerId,
       ...(input.serverLabel ? { serverLabel: input.serverLabel } : {}),
-      clientId: input.clientId
+      clientId: input.clientId,
+      ...(input.toolsetId ? { toolsetId: input.toolsetId } : {})
     },
     { name: input.model },
     "sampling"
@@ -229,6 +239,11 @@ export interface McpGatewayDeps {
     sessionLabels?: Pick<DataLabels, "provenance" | "dataClasses">;
     /** 12.2 — the toolset tracks outside content per session: the outcome's labels are wanted, with a fallback. */
     tracksLabels?: boolean;
+    /**
+     * 12.6 — the toolset's and client's Guard profiles (pinned versions) when either has a binding: the run applies
+     * them after its own profiles (tighten-only) and records them, so a retry or replay applies them again.
+     */
+    gatewayGuard?: { toolsetId: string; clientId: string; profiles: GatewayGuardProfileRef[] };
     onNodeComplete: (event: { nodeId: string; status: string }) => void;
   }) => Promise<GatewayWorkflowRunOutcome>;
   /** Abort a running workflow execution. */
@@ -243,6 +258,14 @@ export interface McpGatewayDeps {
   productionRefusal?: (id: string) => Promise<string | null>;
   /** 12.2 — the ids of secrets flagged "sensitive output": a server that uses one returns sensitive results. */
   sensitiveSecretIds?: () => Promise<ReadonlySet<string>>;
+  /** 12.6 — Guard per toolset and per client. Absent: the gateway runs no Guard (as before 12.6). */
+  guard?: GuardService;
+}
+
+/** 12.6 — the Guard stack a gateway call runs under, when a toolset or client binding applies. */
+interface GatewayGuardStackForCall {
+  resolution: GuardRunResolution;
+  refs: GatewayGuardProfileRef[];
 }
 
 interface AuthenticatedClient {
@@ -544,6 +567,137 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
   };
 
   // ---------------------------------------------------------------------------
+  // 12.6 — Guard per toolset and per client
+  // ---------------------------------------------------------------------------
+
+  /**
+   * The Guard stack for one call: undefined when neither the toolset nor the client has a binding, so the call runs
+   * exactly as before (no Guard). One store read when there is no binding. A failed read throws: the caller refuses
+   * the call (fail closed) rather than guess whether a binding applies.
+   */
+  const guardStackFor = async (auth: AuthenticatedClient, toolset: McpToolset): Promise<GatewayGuardStackForCall | undefined> => {
+    if (!deps.guard) return undefined;
+    const { resolution, refs } = await deps.guard.resolveGateway({ toolsetId: toolset.id, clientId: auth.client.id, projectId: toolset.projectId });
+    return refs.length > 0 ? { resolution, refs } : undefined;
+  };
+
+  interface GuardCallScope {
+    session: GatewaySession;
+    auth: AuthenticatedClient;
+    toolset: McpToolset;
+    tool: GatewayTool;
+    /** The call's synthetic `mcpgw_*` id: the gateway's Guard events are recorded under it. */
+    callExecutionId: string;
+    /** A workflow tool's run (absent when Guard blocked its arguments: no run started). */
+    runExecutionId?: string;
+    callLabels?: DataLabels;
+  }
+
+  /** What Guard knows of a tool: a server tool's server and upstream name, or a workflow tool's workflow. */
+  const guardToolOf = (tool: GatewayTool) =>
+    tool.kind === "server"
+      ? { serverId: tool.serverId, toolName: tool.toolName, inputSchema: tool.inputSchema }
+      : { serverId: tool.workflowId, toolName: tool.name, inputSchema: tool.inputSchema };
+
+  const guardCheck = async (
+    stack: GatewayGuardStackForCall,
+    channel: GatewayGuardChannel,
+    scope: GuardCallScope,
+    content: unknown,
+    extra: { destination?: DestinationRef | null } = {}
+  ): Promise<GatewayGuardOutcome> =>
+    await checkGatewayCall({
+      guard: deps.guard!,
+      context: {
+        executionId: scope.callExecutionId,
+        toolsetId: scope.toolset.id,
+        clientId: scope.auth.client.id,
+        projectId: scope.toolset.projectId,
+        ...(scope.tool.kind === "workflow" ? { workflowId: scope.tool.workflowId } : {})
+      },
+      resolution: stack.resolution,
+      channel,
+      toolName: scope.tool.name,
+      tool: guardToolOf(scope.tool),
+      content,
+      subject: scope.auth.subject,
+      resolveSecret: deps.resolveSecret,
+      ...(extra.destination !== undefined ? { destination: extra.destination } : {}),
+      ...(scope.callLabels ? { callLabels: scope.callLabels } : {}),
+      logger: (message, metadata) => app.log.warn({ metadata }, message)
+    });
+
+  /** A Guard block: counted on the session and audited (the reason is short and names categories only). */
+  const guardBlocked = async (
+    verdict: Extract<GatewayGuardOutcome, { action: "block" }>,
+    channel: GatewayGuardChannel,
+    scope: Omit<GuardCallScope, "callLabels">
+  ): Promise<McpCallToolResult> => {
+    const reason = deps.redact(verdict.reason);
+    noteSessionGuardBlock(scope.session, { tool: scope.tool.name, channel, reason });
+    await deps.auditRaw({
+      category: "system",
+      eventType: "mcp_gateway.guard_blocked",
+      action: "execute",
+      outcome: "denied",
+      actor: { type: "api_key", email: scope.auth.client.name },
+      resourceType: "mcp_toolset",
+      resourceId: scope.toolset.id,
+      projectId: scope.toolset.projectId,
+      metadata: {
+        tool: scope.tool.name,
+        ...(scope.tool.kind === "server" ? { serverId: scope.tool.serverId, upstreamTool: scope.tool.toolName } : { workflowId: scope.tool.workflowId }),
+        ...(scope.runExecutionId ? { runExecutionId: scope.runExecutionId } : {}),
+        channel,
+        clientId: scope.auth.client.id,
+        role: scope.auth.subject.role,
+        sessionId: scope.session.id,
+        executionId: scope.callExecutionId,
+        categories: verdict.categories,
+        profiles: verdict.profiles,
+        reason
+      }
+    });
+    return toolError(reason);
+  };
+
+  /** A run's output with known secret values masked (the same masking the gateway applies to error text). */
+  const scrubOutput = (output: unknown): unknown => {
+    if (typeof output === "string") return deps.redact(output);
+    if (Array.isArray(output)) return output.map(scrubOutput);
+    if (output && typeof output === "object") {
+      return Object.fromEntries(Object.entries(output as Record<string, unknown>).map(([key, value]) => [key, scrubOutput(value)]));
+    }
+    return output;
+  };
+
+  /**
+   * 12.6 — Guard on a call's arguments, before anything reaches the server or the workflow run (and, for a server
+   * tool held for approval, before an approval is asked for or used). A block answers with a tool error; a rewrite
+   * sends the rewritten arguments. A server tool's destination rules see where the call goes; a workflow tool's run
+   * sends nothing out itself (its nodes are checked in the run).
+   */
+  const guardArguments = async (
+    stack: GatewayGuardStackForCall,
+    scope: GuardCallScope,
+    args: Record<string, unknown>
+  ): Promise<{ blocked: McpCallToolResult } | { args: Record<string, unknown> }> => {
+    let destination: DestinationRef | null | undefined = null;
+    if (scope.tool.kind === "server") {
+      try {
+        const server = await deps.resolveRegisteredMcpServer(scope.tool.serverId);
+        destination = mcpServerDestinationRef({ serverId: server.serverId, registryServerId: scope.tool.serverId, connection: server.connection });
+      } catch {
+        // The call itself fails on the same lookup and answers with its error.
+        destination = undefined;
+      }
+    }
+    const verdict = await guardCheck(stack, "tool_arguments", scope, args, destination !== undefined ? { destination } : {});
+    if (verdict.action === "block") return { blocked: await guardBlocked(verdict, "tool_arguments", scope) };
+    return { args: verdict.action === "rewrite" ? (verdict.content as Record<string, unknown>) : args };
+  };
+
+  // ---------------------------------------------------------------------------
   // tools/call
   // ---------------------------------------------------------------------------
 
@@ -561,8 +715,15 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     approvalId?: string;
     /** 12.2 — the labels the call was checked with (tracking toolsets only), recorded on its telemetry row. */
     callLabels?: DataLabels;
+    /**
+     * 12.6 — the toolset's and client's Guard stack; absent when neither has a binding (no Guard, as before). The
+     * arguments were checked already (`args` is what Guard let through); the result is checked here.
+     */
+    guardStack?: GatewayGuardStackForCall;
+    /** The call's synthetic execution id: its telemetry row and (12.6) its Guard events share it. */
+    callExecutionId: string;
   }): Promise<McpCallToolResult | GatewayRetryLater> => {
-    const { session, auth, toolset, tool, args, signal, policyDecision, approvalId, callLabels } = input;
+    const { session, auth, toolset, tool, args, signal, policyDecision, approvalId, callLabels, guardStack, callExecutionId } = input;
     let resolvedServer: MCPServerConfig | null = null;
     let refused: GatewayRetryLater | null = null;
     let invocation: Promise<MCPToolResult> | undefined;
@@ -572,6 +733,8 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     let errorText: string | null = null;
     let result: McpCallToolResult;
     let samplingUsage: { requests: number; inputTokens: number; outputTokens: number } | null = null;
+    // 12.6 — set when Guard blocked the result (the server was called).
+    let guardResultBlocked: Extract<GatewayGuardOutcome, { action: "block" }> | null = null;
     try {
       // Phase 10.7 — a delegated server acts with the client's owner's own account.
       const serverConfig = withDelegatedUser(await deps.resolveRegisteredMcpServer(tool.serverId), auth.subject);
@@ -598,6 +761,7 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
                 registryServerId: tool.serverId,
                 serverLabel: tool.serverName,
                 clientId: auth.client.id,
+                toolsetId: toolset.id,
                 model: subject.toolName
               }),
             trace: samplingTrace,
@@ -625,13 +789,25 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
       const scrub = (value: unknown) => injected.reduce<unknown>((current, secret) => scrubValue(current, secret), value);
       if (outcome.ok) {
         ok = true;
-        result = toolSuccess(scrub(outcome.output));
+        // 12.6 — Guard reads the result only after the gateway's own secret values are scrubbed out of it.
+        let output = scrub(outcome.output);
+        if (guardStack) {
+          const verdict = await guardCheck(guardStack, "tool_result", { session, auth, toolset, tool, callExecutionId, callLabels }, output);
+          if (verdict.action === "block") guardResultBlocked = verdict;
+          else if (verdict.action === "rewrite") output = verdict.content;
+        }
+        result = guardResultBlocked ? toolError(guardResultBlocked.reason) : toolSuccess(output);
       } else {
         errorText = truncate(deps.redact(String(scrub(outcome.error ?? `MCP tool '${tool.toolName}' failed.`))));
-        result = toolError(errorText);
         if (isRuntimeRefusal(outcome.errorKind)) {
           refused = { retryLater: true, reason: outcome.errorKind, retryAfterMs: outcome.retryAfterMs ?? 0, message: errorText };
+        } else if (guardStack) {
+          // 12.6 — the server's error text reaches the client like a result: it is checked like one.
+          const verdict = await guardCheck(guardStack, "tool_result", { session, auth, toolset, tool, callExecutionId, callLabels }, errorText);
+          if (verdict.action === "block") guardResultBlocked = verdict;
+          else if (verdict.action === "rewrite") errorText = truncate(deps.redact(typeof verdict.content === "string" ? verdict.content : JSON.stringify(verdict.content)));
         }
+        result = toolError(guardResultBlocked ? guardResultBlocked.reason : errorText);
       }
     } catch (error) {
       errorText = truncate(deps.redact(error instanceof Error ? error.message : String(error)));
@@ -653,7 +829,7 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     try {
       await store.insertMcpToolCall({
         id: `mtc_${crypto.randomUUID()}`,
-        executionId: `mcpgw_${crypto.randomUUID()}`,
+        executionId: callExecutionId,
         workflowId: "",
         nodeId: "",
         registryServerId: tool.serverId,
@@ -671,6 +847,7 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
         samplingOutputTokens: samplingUsage?.outputTokens ?? null,
         source: "gateway",
         clientId: auth.client.id,
+        toolsetId: toolset.id,
         ...(refused ? { rejection: refused.reason } : {}),
         ...(policyDecision ? { policyDecision } : {}),
         ...recordedLabels(callLabels),
@@ -694,9 +871,11 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
         ...(samplingUsage ? { sampling: samplingUsage } : {}),
         ...(refused ? { rejection: refused.reason } : {}),
         ...(errorText ? { error: errorText } : {}),
-        ...(policyDecision ? { policy: policyDecision } : {})
+        ...(policyDecision ? { policy: policyDecision } : {}),
+        ...(guardResultBlocked ? { guard: { blocked: true, channel: "tool_result", executionId: callExecutionId } } : {})
       }
     });
+    if (guardResultBlocked) await guardBlocked(guardResultBlocked, "tool_result", { session, auth, toolset, tool, callExecutionId });
     // 12.2 — the server was asked: what it answered (a result or an error text) goes back to the client, so it counts
     // as outside content (fail closed, also when the client cancelled). A call the runtime guard refused never
     // reached the server and carries nothing.
@@ -725,8 +904,12 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     executionId: string;
     progress: (progress: number, total: number | undefined, message: string) => void;
     callLabels?: DataLabels;
+    /** 12.6 — the Guard stack: it travels with the run and checks its answer (`args` already passed Guard). */
+    guardStack?: GatewayGuardStackForCall;
+    /** 12.6 — the call's `mcpgw_*` id for the gateway's Guard events. */
+    callExecutionId: string;
   }): Promise<McpCallToolResult> => {
-    const { session, auth, toolset, tool, args, executionId, callLabels } = input;
+    const { session, auth, toolset, tool, args, executionId, callLabels, guardStack, callExecutionId } = input;
     const startedAt = new Date();
     const workflow = await productionWorkflow(tool.workflowId);
     // 12.2 — `callLabels`: the labels the call was checked with (tracking toolsets only); `ran`: the run started.
@@ -756,6 +939,7 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
           client: auth.client,
           ...(sessionLabels && (sessionLabels.provenance.length > 0 || sessionLabels.dataClasses.length > 0) ? { sessionLabels } : {}),
           ...(callLabels ? { tracksLabels: true } : {}),
+          ...(guardStack ? { gatewayGuard: { toolsetId: toolset.id, clientId: auth.client.id, profiles: guardStack.refs } } : {}),
           onNodeComplete: (event) => {
             done = Math.min(total, done + 1);
             const node = workflow.nodes.find((entry) => entry.id === event.nodeId);
@@ -769,8 +953,21 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     const meta = { executionId };
     let result: McpCallToolResult;
     let errorText: string | null = null;
+    // 12.6 — the run's answer (its output or error text) reaches the client like a server tool's result: it is
+    // checked like one. A run that paused or was canceled answers with the gateway's own words.
+    let guardResultBlocked: Extract<GatewayGuardOutcome, { action: "block" }> | null = null;
+    const guardScope: GuardCallScope = { session, auth, toolset, tool, callExecutionId, ...(ran ? { runExecutionId: executionId } : {}), ...(callLabels ? { callLabels } : {}) };
     if (outcome.status === "success") {
-      result = toolSuccess(outcome.output ?? null, meta);
+      let output: unknown = outcome.output ?? null;
+      if (guardStack) {
+        // Guard reads the run's answer only after secret values are scrubbed out of it, as for a server tool's result.
+        const scrubbed = scrubOutput(output);
+        const verdict = await guardCheck(guardStack, "tool_result", guardScope, scrubbed);
+        if (verdict.action === "block") guardResultBlocked = verdict;
+        else if (verdict.action === "rewrite") output = verdict.content;
+        else output = scrubbed;
+      }
+      result = guardResultBlocked ? toolError(guardResultBlocked.reason, meta) : toolSuccess(output, meta);
     } else if (outcome.status === "waiting_approval") {
       errorText = `The workflow is waiting for an approval (execution ${executionId}); it did not return a result.`;
       result = toolError(errorText, meta);
@@ -779,8 +976,14 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
       result = toolError(errorText, meta);
     } else {
       errorText = truncate(deps.redact(outcome.error ?? "The workflow run failed."));
-      result = toolError(errorText, meta);
+      if (guardStack) {
+        const verdict = await guardCheck(guardStack, "tool_result", guardScope, errorText);
+        if (verdict.action === "block") guardResultBlocked = verdict;
+        else if (verdict.action === "rewrite") errorText = truncate(deps.redact(typeof verdict.content === "string" ? verdict.content : JSON.stringify(verdict.content)));
+      }
+      result = toolError(guardResultBlocked ? guardResultBlocked.reason : errorText, meta);
     }
+    // Telemetry describes the run: a blocked answer still counts as the run's own outcome.
     const ok = errorText === null;
     const durationMs = Date.now() - startedAt.getTime();
     try {
@@ -801,6 +1004,7 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
         estimatedCostUsd: null,
         source: "gateway",
         clientId: auth.client.id,
+        toolsetId: toolset.id,
         ...recordedLabels(callLabels),
         ...callContext(args, tool.inputSchema, auth, toolset)
       });
@@ -826,8 +1030,15 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
       readOnly: false,
       ok,
       durationMs,
-      details: { workflowId: tool.workflowId, executionId, status: outcome.status, ...(errorText ? { error: errorText } : {}) }
+      details: {
+        workflowId: tool.workflowId,
+        executionId,
+        status: outcome.status,
+        ...(errorText ? { error: errorText } : {}),
+        ...(guardResultBlocked ? { guard: { blocked: true, channel: "tool_result", executionId: callExecutionId } } : {})
+      }
     });
+    if (guardResultBlocked) await guardBlocked(guardResultBlocked, "tool_result", guardScope);
     return result;
   };
 
@@ -836,8 +1047,11 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
   // ---------------------------------------------------------------------------
 
   type GatewayPolicyGate =
-    /** `approvalId`: the approval this call used, put back when the call is refused before it reaches the server. */
-    | { outcome: "call"; policyDecision?: McpToolPolicyDecisionRecord; approvalId?: string }
+    /**
+     * `approvalId`: the approval this call used, put back when the call is refused before it reaches the server.
+     * `callArgs` (12.6): the arguments Guard let through (rewritten, when a profile redacted part of them).
+     */
+    | { outcome: "call"; policyDecision?: McpToolPolicyDecisionRecord; approvalId?: string; callArgs?: Record<string, unknown> }
     | { outcome: "respond"; response: JsonRpcResponse };
 
   /** Phase 12.4 — when each client's "too many pending requests" refusal was last audited (once per approval window). */
@@ -858,10 +1072,25 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     args: Record<string, unknown>,
     requestId: JsonRpcRequest["id"],
     /** 12.2 — the session's labels (tracking toolsets only); undefined: checked without labels, as before. */
-    callLabels?: DataLabels
+    callLabels?: DataLabels,
+    /**
+     * 12.6 — Guard on the arguments (a toolset or client binding applies): run once the tool policy lets the call
+     * through, and for a call held for approval before an approval is asked for or used, so a call Guard blocks
+     * never takes up an admin's approval. Approvals still match the client's own arguments.
+     */
+    guardArgs?: () => Promise<{ blocked: McpCallToolResult } | { args: Record<string, unknown> }>
   ): Promise<GatewayPolicyGate> => {
+    const screen = async (): Promise<{ respond: GatewayPolicyGate } | { callArgs?: Record<string, unknown> }> => {
+      if (!guardArgs) return {};
+      const checked = await guardArgs();
+      return "blocked" in checked ? { respond: { outcome: "respond", response: rpcResult(requestId, checked.blocked) } } : { callArgs: checked.args };
+    };
+    const screened = async (call: Extract<GatewayPolicyGate, { outcome: "call" }>): Promise<GatewayPolicyGate> => {
+      const checked = await screen();
+      return "respond" in checked ? checked.respond : { ...call, ...(checked.callArgs ? { callArgs: checked.callArgs } : {}) };
+    };
     const rules = await store.listMcpToolPolicies();
-    if (rules.length === 0) return { outcome: "call" };
+    if (rules.length === 0) return await screened({ outcome: "call" });
     const labelRecord = callLabels ? recordedCallLabels(callLabels, false) : undefined;
     // Phase 12.2 — open world, only when a rule reads the open-world hint.
     const openWorld = policyReadsOpenWorld(rules) ? await openWorldMarking(store, rules, await store.getMcpServer(tool.serverId)) : undefined;
@@ -875,6 +1104,7 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
         registryServerId: tool.serverId,
         serverLabel: tool.serverName,
         clientId: auth.client.id,
+        toolsetId: toolset.id,
         ...(openWorld ? { openWorld } : {})
       },
       { name: tool.toolName, ...(tool.annotations ? { annotations: tool.annotations } : {}) },
@@ -910,7 +1140,7 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
         response: rpcResult(requestId, toolError(decision.message ?? `MCP tool '${tool.toolName}' is blocked by policy.`))
       };
     }
-    if (!decision.approval) return { outcome: "call", ...withRecord(policyDecisionRecord(decision.policy, undefined, labelRecord)) };
+    if (!decision.approval) return await screened({ outcome: "call", ...withRecord(policyDecisionRecord(decision.policy, undefined, labelRecord)) });
 
     const argsHash = gatewayArgsHash(args);
     const now = new Date();
@@ -951,6 +1181,10 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
       };
     }
 
+    // 12.6 — Guard first: a call it blocks neither uses an approval nor asks for one.
+    const checked = await screen();
+    if ("respond" in checked) return checked.respond;
+    const callArgs = checked.callArgs ? { callArgs: checked.callArgs } : {};
     const usable = await store.findUsableMcpGatewayApproval(callKey, now.toISOString());
     if (usable) {
       if (await store.consumeMcpGatewayApproval(usable.id, now.toISOString())) {
@@ -961,7 +1195,7 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
           outcome: "success",
           metadata: { ...callMetadata, approvalRequestId: usable.id, argsHash, ruleId: decision.approval.ruleId, decidedBy: usable.decidedBy }
         });
-        return { outcome: "call", approvalId: usable.id, ...withRecord(policyDecisionRecord(decision.policy, "approved", labelRecord)) };
+        return { outcome: "call", approvalId: usable.id, ...withRecord(policyDecisionRecord(decision.policy, "approved", labelRecord)), ...callArgs };
       }
       // An identical call used the approval a moment ago: say so rather than open a fresh request at once.
       return {
@@ -1118,13 +1352,48 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
 
     // 12.2 — read from the session only, never from the request (`_meta`, headers or arguments).
     const callLabels = await labelsForCall(session, auth, toolset);
+    // 12.6 — the toolset's and client's Guard profiles. A failed read refuses the call: it may have a binding.
+    let guardStack: GatewayGuardStackForCall | undefined;
+    try {
+      guardStack = await guardStackFor(auth, toolset);
+    } catch (error) {
+      app.log.warn(
+        { err: deps.redact(error instanceof Error ? error.message : String(error)), toolsetId: toolset.id, clientId: auth.client.id, tool: tool.name },
+        "MCP gateway could not read the Guard bindings for a call; the call was refused"
+      );
+      return rpcResult(request.id, toolError("Guard could not be checked for this call, so it was not sent. Try again."));
+    }
+    // A workflow tool's run id, and the call's synthetic id: a server tool call's telemetry row and the gateway's Guard
+    // events share the synthetic one (kept apart from a workflow tool's run, whose replays compare its own events).
+    const executionId = crypto.randomUUID();
+    const callExecutionId = `mcpgw_${crypto.randomUUID()}`;
+    const guardArgs = guardStack
+      ? async () => {
+          try {
+            return await guardArguments(guardStack, { session, auth, toolset, tool, callExecutionId, ...(callLabels ? { callLabels } : {}) }, args);
+          } catch (error) {
+            // Still fails closed, but as the tool error a client can read, not a protocol error.
+            app.log.warn(
+              { err: deps.redact(error instanceof Error ? error.message : String(error)), toolsetId: toolset.id, clientId: auth.client.id, tool: tool.name },
+              "MCP gateway Guard could not check the arguments of a call; the call was refused"
+            );
+            return { blocked: toolError("Guard could not check this call, so it was not sent.") };
+          }
+        }
+      : undefined;
+    let callArgs = args;
     let policyDecision: McpToolPolicyDecisionRecord | undefined;
     let usedApprovalId: string | undefined;
     if (tool.kind === "server") {
-      const gate = await gatewayPolicyGate(session, auth, toolset, tool, args, request.id, callLabels);
+      const gate = await gatewayPolicyGate(session, auth, toolset, tool, args, request.id, callLabels, guardArgs);
       if (gate.outcome === "respond") return gate.response;
       policyDecision = gate.policyDecision;
       usedApprovalId = gate.approvalId;
+      if (gate.callArgs) callArgs = gate.callArgs;
+    } else if (guardArgs) {
+      const checked = await guardArgs();
+      if ("blocked" in checked) return rpcResult(request.id, checked.blocked);
+      callArgs = checked.args;
     }
 
     const meta = asRecord(params._meta);
@@ -1141,7 +1410,6 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
 
     const key = requestKey(request.id);
     const controller = new AbortController();
-    const executionId = crypto.randomUUID();
     session.inFlight.set(key, {
       controller,
       ...(tool.kind === "workflow" ? { executionId } : {}),
@@ -1157,16 +1425,18 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     try {
       const result =
         tool.kind === "workflow"
-          ? await callWorkflowTool({ session, auth, toolset, tool, args, executionId, progress, ...(callLabels ? { callLabels } : {}) })
+          ? await callWorkflowTool({ session, auth, toolset, tool, args: callArgs, executionId, callExecutionId, progress, ...(callLabels ? { callLabels } : {}), ...(guardStack ? { guardStack } : {}) })
           : await callServerTool({
               session,
               auth,
               toolset,
               tool,
-              args,
+              args: callArgs,
+              callExecutionId,
               signal: controller.signal,
               progress,
               ...(callLabels ? { callLabels } : {}),
+              ...(guardStack ? { guardStack } : {}),
               ...(policyDecision ? { policyDecision } : {}),
               ...(usedApprovalId ? { approvalId: usedApprovalId } : {})
             });
@@ -1746,7 +2016,9 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     if (!existing) return reply;
     await store.deleteMcpToolset(existing.id);
     await sessions.endWhere((session) => session.toolsetId === existing.id, "toolset_removed");
-    await auditToolset(request, user, "mcp_toolset.deleted", "delete", existing);
+    // 12.6 — its Guard binding goes with it (resolution ignores a deleted toolset's binding anyway).
+    const clearedGuard = await deps.guard?.clearGatewayBinding("toolset", existing.id, user.id);
+    await auditToolset(request, user, "mcp_toolset.deleted", "delete", existing, clearedGuard ? { guardBindingRemoved: clearedGuard } : {});
     return { ok: true };
   });
 
@@ -1868,6 +2140,8 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     }
     const revoked = (await store.revokeMcpClient(existing.id))!;
     const closed = await sessions.endWhere((session) => session.clientId === existing.id, "revoked");
+    // 12.6 — a revoked client keeps no Guard binding.
+    const clearedGuard = await deps.guard?.clearGatewayBinding("mcp_client", existing.id, user.id);
     if (!existing.revokedAt) {
       await deps.auditUser(request, user, {
         category: "system",
@@ -1876,7 +2150,7 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
         outcome: "success",
         resourceType: "mcp_client",
         resourceId: existing.id,
-        metadata: { name: existing.name, tokenPrefix: existing.tokenPrefix, closedSessions: closed }
+        metadata: { name: existing.name, tokenPrefix: existing.tokenPrefix, closedSessions: closed, ...(clearedGuard ? { guardBindingRemoved: clearedGuard } : {}) }
       });
     }
     return { client: await clientView(revoked) };
@@ -1993,7 +2267,11 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
         lastSeenAt: new Date(session.lastSeenAt).toISOString(),
         tracked,
         labels: tracked ? sessionLabelsView(session.labels) : null,
-        raisedAt: tracked && session.labels.raisedAt !== null ? new Date(session.labels.raisedAt).toISOString() : null
+        raisedAt: tracked && session.labels.raisedAt !== null ? new Date(session.labels.raisedAt).toISOString() : null,
+        guard: {
+          blocks: session.guard.blocks,
+          lastBlock: session.guard.lastBlock ? { ...session.guard.lastBlock, at: new Date(session.guard.lastBlock.at).toISOString() } : null
+        }
       };
     });
     return { clientId: client.id, sessions: views };

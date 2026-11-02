@@ -86,7 +86,7 @@ See [MCP server registry](../product/mcp-server-registry.md).
 See [MCP tool policy](../product/mcp-tool-policy.md).
 
 - `GET /api/mcp/policies` (builder)
-- `POST /api/mcp/policies` (admin; optional `kind` of `tool` | `resource` | `prompt` | `sampling`, see [Rule kinds](../product/mcp-tool-policy.md#rule-kinds); optional `annotationHint`, see [Annotation conditions](../product/mcp-tool-policy.md#annotation-conditions); `effect` may be `require_approval`; optional `conditions`, `mode`, `workflowIds`, `clientIds`, see [Conditions](../product/mcp-tool-policy.md#conditions))
+- `POST /api/mcp/policies` (admin; optional `kind` of `tool` | `resource` | `prompt` | `sampling`, see [Rule kinds](../product/mcp-tool-policy.md#rule-kinds); optional `annotationHint`, see [Annotation conditions](../product/mcp-tool-policy.md#annotation-conditions); `effect` may be `require_approval`; optional `conditions`, `mode`, `workflowIds`, `clientIds`, `toolsetIds` (gateway server-tool calls through those toolsets only), see [Conditions](../product/mcp-tool-policy.md#conditions))
 - `PUT /api/mcp/policies/:id` (admin)
 - `DELETE /api/mcp/policies/:id` (admin)
 - `POST /api/mcp/policies/evaluate` (builder; `{ projectId, role, serverId, toolName, kind?, noWriteTools?, arguments?, labels?, workflowId?, clientId? }`)
@@ -178,13 +178,17 @@ Bindings:
 - `PUT /api/guard/bindings/projects/:projectId` (builder; `{ mode: "inherit" | "override" | "enforced", profileId? }`; setting or changing an enforced binding is admin only, 403 otherwise)
 - `GET /api/guard/bindings/workflows/:workflowId` (workflow read access; `{ binding, project, effective }`)
 - `PUT /api/guard/bindings/workflows/:workflowId` (workflow write access; `{ mode: "inherit" | "override", profileId? }`; `enforced` is 400)
+- `GET /api/guard/bindings/toolsets/:toolsetId` (builder; `{ binding, effective }`, the stack a gateway call to the toolset gets)
+- `PUT /api/guard/bindings/toolsets/:toolsetId` (admin; `{ mode: "inherit" | "override", profileId? }`; `enforced` is 400; the destination rules profile cannot be bound)
+- `GET /api/guard/bindings/clients/:clientId` (builder; `{ binding, toolsets: [{ toolsetId, effective }] }`)
+- `PUT /api/guard/bindings/clients/:clientId` (admin; as for toolsets; 409 for a revoked client)
 - `GET /api/guard/effective?workflowId=` or `?projectId=` (viewer; the profile stack and the binding chain)
 
 Events (masked evidence only):
 
 - `GET /api/executions/:id/guard-events` (viewer)
-- `GET /api/guard/events?projectId=&workflowId=&profileId=&channel=&action=&days=&since=&findings=true&limit=&offset=` (viewer; `{ events, total }`, newest first)
-- `GET /api/guard/stats?projectId=&workflowId=&profileId=&days=` (viewer; counts by verdict, action, category, channel and detector, shadow would-block, budget overruns and per-day counts; 14 days by default)
+- `GET /api/guard/events?projectId=&workflowId=&profileId=&channel=&action=&days=&since=&findings=true&placement=&limit=&offset=` (viewer; `{ events, total }`, newest first; `placement=gateway` for MCP gateway calls only, `run` for runs only)
+- `GET /api/guard/stats?projectId=&workflowId=&profileId=&placement=&days=` (viewer; counts by verdict, action, category, channel and detector, shadow would-block, budget overruns and per-day counts; 14 days by default)
 
 Profile writes and binding changes are audited as `guard.profile.created`, `guard.profile.updated`, `guard.profile.deleted`, `guard.profile.imported` and `guard.binding.updated`.
 

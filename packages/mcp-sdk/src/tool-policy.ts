@@ -47,7 +47,9 @@ import {
  *
  * Phase 12.4 — argument-aware rules:
  *   - Scope also covers workflows (`workflowIds`) and gateway clients
- *     (`clientIds`); an empty list matches every workflow / caller.
+ *     (`clientIds`); an empty list matches every workflow / caller. 12.6:
+ *     and gateway toolsets (`toolsetIds`), which only gateway server-tool
+ *     calls carry.
  *   - A rule with `conditions` matches a call only when they hold for the
  *     call's arguments and data labels (`all` or `any` of them). Conditions
  *     fail closed for the rule's effect (see `evaluatePolicyCondition`): an
@@ -93,6 +95,8 @@ export interface McpToolPolicyRequest {
   workflowId?: string | null;
   /** Phase 12.4 — the MCP gateway client making the call (directly or through a run it started). */
   clientId?: string | null;
+  /** 12.6 — the MCP gateway toolset a server tool call came through; absent for calls a workflow run makes. */
+  toolsetId?: string | null;
   /**
    * Phase 12.4 — the call's arguments. Absent at discovery, when no call is
    * being made yet: rules with conditions are then undecided (see above).
@@ -453,6 +457,8 @@ export function ruleScopeMatches(rule: McpToolPolicyRule, request: McpToolPolicy
   if (rule.roles.length > 0 && !rule.roles.includes(request.role)) return false;
   if (rule.workflowIds?.length && !(request.workflowId && rule.workflowIds.includes(request.workflowId))) return false;
   if (rule.clientIds?.length && !(request.clientId && rule.clientIds.includes(request.clientId))) return false;
+  // 12.6 — only gateway calls carry a toolset, so a rule naming toolsets never matches a run's call.
+  if (rule.toolsetIds?.length && !(request.toolsetId && rule.toolsetIds.includes(request.toolsetId))) return false;
   if (!matchesPolicyServer(rule.serverId, request)) return false;
   if (!matchesToolPattern(rule.toolPattern, request.toolName)) return false;
   return ruleHintMatches(rule, request);
@@ -944,7 +950,7 @@ function canonicalConditions(rule: McpToolPolicyRule): string {
   const cached = canonicalConditionsCache.get(conditions);
   if (cached !== undefined) return cached;
   // Only the conditions part of the canonical rule matters here.
-  const text = canonicalMcpToolPolicyRule({ ...rule, effect: "deny", kind: "tool", projectId: null, roles: [], workflowIds: [], clientIds: [], serverId: null, toolPattern: "*", annotationHint: null });
+  const text = canonicalMcpToolPolicyRule({ ...rule, effect: "deny", kind: "tool", projectId: null, roles: [], workflowIds: [], clientIds: [], toolsetIds: [], serverId: null, toolPattern: "*", annotationHint: null });
   canonicalConditionsCache.set(conditions, text);
   return text;
 }
@@ -962,6 +968,7 @@ function scopeWithin(inner: McpToolPolicyRule, outer: McpToolPolicyRule): boolea
     rolesWithin(inner.roles, outer.roles) &&
     idsWithin(inner.workflowIds, outer.workflowIds) &&
     idsWithin(inner.clientIds, outer.clientIds) &&
+    idsWithin(inner.toolsetIds, outer.toolsetIds) &&
     scalarWithin(inner.serverId, outer.serverId) &&
     patternWithin(inner.toolPattern, outer.toolPattern) &&
     scalarWithin(inner.annotationHint, outer.annotationHint) &&

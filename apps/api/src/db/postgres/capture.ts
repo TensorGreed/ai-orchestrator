@@ -7,6 +7,7 @@
  * the same instant by rowid; here `seq` (v40's identity column on replay_recordings, the stand-in for rowid) does.
  */
 import {
+  gatewayGuardField,
   REPLAY_CAPTURE_API_KEY_FILTER,
   REPLAY_CAPTURE_STATUSES,
   type ReplayCaptureInfo,
@@ -86,7 +87,8 @@ function mapReplayRecordingSummary(row: Record<string, unknown>): ReplayRecordin
             sourceWorkflowId: typeof capabilities.sourceWorkflowId === "string" ? capabilities.sourceWorkflowId : null
           }
         : {}),
-      ...(capabilities?.capture && typeof capabilities.capture === "object" ? { capture: mapReplayCaptureInfo(capabilities.capture) } : {})
+      ...(capabilities?.capture && typeof capabilities.capture === "object" ? { capture: mapReplayCaptureInfo(capabilities.capture) } : {}),
+      ...gatewayGuardField(capabilities?.gatewayGuard)
     },
     bytes: toNum(row.bytes),
     truncated: toNum(row.truncated) === 1,

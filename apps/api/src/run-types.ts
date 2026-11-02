@@ -4,6 +4,7 @@
  */
 import type {
   DataLabels,
+  GatewayGuardStack,
   McpElicitationView,
   McpToolPolicySubject,
   McpToolProgressEvent,
@@ -137,4 +138,10 @@ export interface RunWorkflowExecutionInput {
    * so replays of the run keep them.
    */
   recordInputLabels?: boolean;
+  /**
+   * 12.6 — a run an MCP gateway call started (or a retry or replay of one): the toolset's and client's Guard profiles,
+   * pinned versions, applied after the run's own (tighten-only). Crosses the queue with the spec. Routes that set it
+   * also record it in the run's history custom data (`gatewayGuard`), so a retry or replay applies it again.
+   */
+  gatewayGuard?: GatewayGuardStack;
 }

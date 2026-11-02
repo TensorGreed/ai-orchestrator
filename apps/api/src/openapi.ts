@@ -2253,6 +2253,7 @@ export const openApiSpec = {
                   },
                   workflowIds: { type: "array", items: { type: "string" }, description: "Only runs of these workflows; empty = any" },
                   clientIds: { type: "array", items: { type: "string" }, description: "Only these MCP gateway clients (directly or through a run they started); empty = any" },
+                  toolsetIds: { type: "array", items: { type: "string" }, description: "Only server tool calls made through these MCP gateway toolsets; empty = any. Never matches a call a workflow run makes" },
                   projectId: { type: "string", nullable: true, description: "null = every project" },
                   roles: { type: "array", items: { type: "string", enum: ["admin", "builder", "operator", "viewer"] }, description: "empty = every role" },
                   serverId: { type: "string", nullable: true, description: "Registry server id, or an adapter id for inline servers; null = any server" },

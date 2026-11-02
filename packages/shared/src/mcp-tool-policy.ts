@@ -86,6 +86,8 @@ export function canonicalMcpToolPolicyRule(rule: McpToolPolicyRule): string {
     roles: sorted(rule.roles),
     workflowIds: sorted(rule.workflowIds),
     clientIds: sorted(rule.clientIds),
+    // 12.6 — only present when set, so the hashes of rules without toolsets hold.
+    ...((rule.toolsetIds?.length ?? 0) > 0 ? { toolsetIds: sorted(rule.toolsetIds) } : {}),
     serverId: rule.serverId ?? null,
     toolPattern: rule.toolPattern.trim() || "*",
     annotationHint: rule.annotationHint ?? null,

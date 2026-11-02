@@ -121,6 +121,19 @@ describe("evaluateMcpToolPolicy", () => {
     expect(evaluateMcpToolPolicy([adapterDeny], request()).allowed).toBe(true);
   });
 
+  it("scopes by gateway toolset (12.6): only gateway calls through a named toolset match", () => {
+    const deny = rule({ id: "r", effect: "deny", toolsetIds: ["mts_a"] });
+    expect(evaluateMcpToolPolicy([deny], request({ toolsetId: "mts_a" })).allowed).toBe(false);
+    expect(evaluateMcpToolPolicy([deny], request({ toolsetId: "mts_b" })).allowed).toBe(true);
+    // A call with no toolset (a run's call) never matches.
+    expect(evaluateMcpToolPolicy([deny], request()).allowed).toBe(true);
+    // An empty list scopes nothing.
+    expect(evaluateMcpToolPolicy([rule({ id: "e", effect: "deny", toolsetIds: [] })], request()).allowed).toBe(false);
+    // A rule scoped to a toolset is narrower than the same rule unscoped, so it can carve an allow out of it.
+    expect(isStrictlyNarrower(rule({ id: "n", effect: "allow", toolsetIds: ["mts_a"] }), rule({ id: "w", effect: "deny" }))).toBe(true);
+    expect(isStrictlyNarrower(rule({ id: "w", effect: "deny" }), rule({ id: "n", effect: "allow", toolsetIds: ["mts_a"] }))).toBe(false);
+  });
+
   it("ignores disabled rules", () => {
     const deny = rule({ id: "r", effect: "deny", enabled: false });
     expect(evaluateMcpToolPolicy([deny], request())).toMatchObject({ allowed: true, decidedBy: "default" });

@@ -238,6 +238,7 @@ export type McpToolPolicyPatch = Partial<
     | "mode"
     | "workflowIds"
     | "clientIds"
+    | "toolsetIds"
   >
 >;
 
@@ -753,6 +754,8 @@ export interface Store {
   }, options?: { unlessLatestHash?: boolean }): Promise<GuardProfileVersionRecord>;
   deleteGuardProfile(id: string): Promise<boolean>;
   getGuardBinding(scope: GuardBindingScope, scopeId: string): Promise<GuardBindingRecord | null>;
+  /** 12.6 — a gateway call's toolset and client Guard bindings, in one read (null where there is none). */
+  getGatewayGuardBindings(toolsetId: string, clientId: string): Promise<{ toolset: GuardBindingRecord | null; client: GuardBindingRecord | null }>;
   listGuardBindingsForProfile(profileId: string): Promise<GuardBindingRecord[]>;
   setGuardBinding(input: { scope: GuardBindingScope; scopeId: string; mode: string; profileId: string | null; updatedBy: string | null }): Promise<GuardBindingRecord>;
   insertGuardEvents(rows: GuardEventInsert[]): Promise<void>;

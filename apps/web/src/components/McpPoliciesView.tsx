@@ -36,6 +36,7 @@ import {
   evaluateMcpToolPolicy,
   fetchMcpPolicyShadowHits,
   fetchMcpClients,
+  fetchMcpToolsets,
   fetchMcpGatewayApprovals,
   fetchMcpServerTools,
   fetchMcpToolPolicies,
@@ -166,6 +167,8 @@ export function ShadowBadge() {
 interface PrincipalLookups {
   workflows: Array<Pick<WorkflowListItem, "id" | "name">>;
   clients: Array<Pick<McpClientView, "id" | "name" | "status">>;
+  /** 12.6 — gateway toolsets, for rules scoped to them. */
+  toolsets: Array<{ id: string; name: string }>;
 }
 
 function principalNames(ids: string[] | undefined, known: Array<{ id: string; name: string }>): string {
@@ -218,7 +221,7 @@ export function McpPoliciesView({
   const [error, setError] = useState<string | null>(null);
   const [editing, setEditing] = useState<McpToolPolicyRule | "new" | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
-  const [principals, setPrincipals] = useState<PrincipalLookups>({ workflows: [], clients: [] });
+  const [principals, setPrincipals] = useState<PrincipalLookups>({ workflows: [], clients: [], toolsets: [] });
   const [shadowHits, setShadowHits] = useState<McpPolicyShadowHits | null>(null);
   const hitsByRule = useMemo(() => new Map((shadowHits?.rules ?? []).map((row) => [row.ruleId, row])), [shadowHits]);
   // Shadow rules of an accepted suggestion are enforced together, from the suggestion.
@@ -260,6 +263,9 @@ export function McpPoliciesView({
       .then((result) =>
         setPrincipals((current) => ({ ...current, clients: result.clients.map(({ id, name, status }) => ({ id, name, status })) }))
       )
+      .catch(() => undefined);
+    fetchMcpToolsets()
+      .then((result) => setPrincipals((current) => ({ ...current, toolsets: result.toolsets.map(({ id, name }) => ({ id, name })) })))
       .catch(() => undefined);
   }, [refresh]);
 
@@ -429,6 +435,12 @@ export function McpPoliciesView({
                       <dd>{principalNames(rule.clientIds, principals.clients)}</dd>
                     </div>
                   )}
+                  {(rule.toolsetIds?.length ?? 0) > 0 && (
+                    <div>
+                      <dt>Gateway toolsets</dt>
+                      <dd>{principalNames(rule.toolsetIds, principals.toolsets)}</dd>
+                    </div>
+                  )}
                 </dl>
                 {describeConditions(rule.conditions) && (
                   <p className="mcp-rule-conditions">
@@ -519,6 +531,7 @@ function McpPolicyForm({
   const [conditions, setConditions] = useState<ConditionsDraft>(() => conditionsToDraft(initial?.conditions));
   const [workflowIds, setWorkflowIds] = useState<string[]>(initial?.workflowIds ?? []);
   const [clientIds, setClientIds] = useState<string[]>(initial?.clientIds ?? []);
+  const [toolsetIds, setToolsetIds] = useState<string[]>(initial?.toolsetIds ?? []);
   const [projectId, setProjectId] = useState(initial ? initial.projectId ?? "" : defaultProjectId ?? "");
   const [roles, setRoles] = useState<McpPolicyRole[]>(initial?.roles ?? []);
   const [serverId, setServerId] = useState(initial?.serverId ?? "");
@@ -554,7 +567,8 @@ function McpPolicyForm({
       mode,
       ...(keepInvalidConditions ? {} : { conditions: parsedConditions.conditions }),
       workflowIds,
-      clientIds
+      clientIds,
+      toolsetIds
     };
     return { payload, keepInvalidConditions };
   };
@@ -654,7 +668,7 @@ function McpPolicyForm({
           Shadow mode: record what this rule would decide on each call, without applying it
         </label>
       </div>
-      <details className="mcp-advanced" open={Boolean(initial && (initial.description || initial.annotationHint || (initial.kind ?? "tool") !== "tool" || initial.workflowIds?.length || initial.clientIds?.length))}>
+      <details className="mcp-advanced" open={Boolean(initial && (initial.description || initial.annotationHint || (initial.kind ?? "tool") !== "tool" || initial.workflowIds?.length || initial.clientIds?.length || initial.toolsetIds?.length))}>
         <summary>Advanced</summary>
       <div className="kb-form-row">
         <label>
@@ -750,6 +764,32 @@ function McpPolicyForm({
               ))}
           </select>
           <small className="kb-subtle">Their direct gateway calls and the runs they start. None selected = any caller.</small>
+        </label>
+      </div>
+      <div className="kb-form-row kb-form-row-2">
+        <label>
+          Only for gateway toolsets
+          <select
+            multiple
+            aria-label="Only for gateway toolsets"
+            aria-describedby="mcp-rule-toolsets-hint"
+            value={toolsetIds}
+            onChange={(event) => setToolsetIds(Array.from(event.target.selectedOptions, (option) => option.value))}
+          >
+            {principals.toolsets.map((toolset) => (
+              <option key={toolset.id} value={toolset.id}>
+                {toolset.name}
+              </option>
+            ))}
+            {toolsetIds
+              .filter((id) => !principals.toolsets.some((toolset) => toolset.id === id))
+              .map((id) => (
+                <option key={id} value={id}>
+                  {id}
+                </option>
+              ))}
+          </select>
+          <small id="mcp-rule-toolsets-hint" className="kb-subtle">Server tools called through these toolsets only; never workflow runs. None selected = anywhere.</small>
         </label>
       </div>
       </details>

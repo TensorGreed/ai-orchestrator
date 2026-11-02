@@ -81,6 +81,8 @@ export interface McpToolMarkingContext {
   workflowId?: string | null;
   /** Phase 12.4 — the MCP gateway client making the call, for rules scoped to clients. */
   clientId?: string | null;
+  /** 12.6 — the MCP gateway toolset a server tool call came through, for rules scoped to toolsets. */
+  toolsetId?: string | null;
   /**
    * Phase 12.2 — what open-world resolution reads (overrides, destination rows) and the server's connection. Absent:
    * `open_world` hints read the annotation alone, as before.
@@ -147,6 +149,7 @@ export function evaluateToolForContext(
     noWriteTools: context.noWriteTools,
     workflowId: context.workflowId ?? null,
     clientId: context.clientId ?? null,
+    toolsetId: context.toolsetId ?? null,
     ...(call ? { arguments: call.arguments, dataLabels: call.dataLabels ?? null } : {}),
     ...(context.serverLabel ? { serverLabel: context.serverLabel } : {})
   });

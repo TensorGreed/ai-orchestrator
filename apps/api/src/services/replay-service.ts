@@ -61,6 +61,7 @@ import {
   REPLAY_BLOCKED_LOAD_MARKER,
   REPLAY_INLINE_WORKFLOW_MAX_BYTES,
   ReplayCandidateError,
+  type GatewayGuardStack,
   type ModelMemorySeed,
   type ModelTapeReport,
   type ReplayCandidateOverrides,
@@ -116,6 +117,11 @@ export interface ReplayExecutionInput {
    * tokens go to instead of the live tables.
    */
   guardSimulation?: GuardSimulationRun;
+  /**
+   * 12.6 — the MCP gateway Guard stack the golden run's source carried (pinned versions): applied again after the
+   * run's own profiles and any candidate profile. A version that no longer exists fails the replay's Guard checks.
+   */
+  gatewayGuard?: GatewayGuardStack;
 }
 
 /** A candidate workflow, resolved once. */
@@ -452,7 +458,8 @@ export class ReplayService {
             ...(modelPlan ? { modelPlan } : {}),
             memorySeed: recording.memorySeed,
             ...(overrides?.guardProfile ? { guardProfileOverride: overrides.guardProfile } : {}),
-            ...(options.simulation ? { guardSimulation: options.simulation } : {})
+            ...(options.simulation ? { guardSimulation: options.simulation } : {}),
+            ...(recording.capabilities.gatewayGuard ? { gatewayGuard: recording.capabilities.gatewayGuard } : {})
           },
           actor
         );

@@ -1,8 +1,10 @@
 import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { GuardProfileSummary, GuardResolutionView } from "@ai-orchestrator/shared";
 import * as api from "../lib/api";
 import { McpServersPage } from "./McpServersPage";
+import { gatewayHeldActions } from "./McpGatewayGovernance";
 
 vi.mock("../lib/api", async () => {
   const actual = await vi.importActual<typeof import("../lib/api")>("../lib/api");
@@ -25,7 +27,13 @@ vi.mock("../lib/api", async () => {
     createMcpClient: vi.fn(),
     revokeMcpClient: vi.fn(),
     fetchMcpClientUsage: vi.fn(),
-    fetchMcpClientSessions: vi.fn()
+    fetchMcpClientSessions: vi.fn(),
+    fetchGuardProfiles: vi.fn(),
+    fetchGuardProfile: vi.fn(),
+    fetchGuardToolsetBinding: vi.fn(),
+    updateGuardToolsetBinding: vi.fn(),
+    fetchGuardClientBinding: vi.fn(),
+    updateGuardClientBinding: vi.fn()
   };
 });
 
@@ -164,7 +172,29 @@ function setup() {
         : []
   }));
   vi.mocked(api.fetchMcpClients).mockResolvedValue({ usageWindow: "7d", clients: [activeClient] });
+  vi.mocked(api.fetchGuardProfiles).mockResolvedValue({
+    profiles: [guardProfile("default", "Default guard profile"), guardProfile("strict", "Strict gateway"), guardProfile("destination-rules", "Destination rules")],
+    autoApply: true,
+    builtInId: "default"
+  });
+  vi.mocked(api.fetchGuardProfile).mockImplementation(async (id: string) => ({
+    profile: guardProfile(id, id),
+    latest: { profileId: id, version: 1, hash: "h", createdAt: "2026-10-20T10:00:00.000Z", document: { channels: {} } },
+    bindings: []
+  }));
+  vi.mocked(api.fetchGuardToolsetBinding).mockResolvedValue({ binding: binding("toolset", "mts_1", null), effective: noGuard });
+  vi.mocked(api.fetchGuardClientBinding).mockResolvedValue({ binding: binding("mcp_client", "mcc_1", null), toolsets: [{ toolsetId: "mts_1", effective: noGuard }] });
 }
+
+function guardProfile(id: string, name: string): GuardProfileSummary {
+  return { id, name, builtIn: id === "default", latestVersion: 1, hash: "h", createdAt: "2026-10-20T10:00:00.000Z", updatedAt: "2026-10-20T10:00:00.000Z" } as GuardProfileSummary;
+}
+
+function binding(scope: "toolset" | "mcp_client", scopeId: string, profileId: string | null): api.GuardGatewayBindingView {
+  return { scope, scopeId, mode: profileId ? "override" : "inherit", profileId, updatedAt: null, updatedBy: null };
+}
+
+const noGuard: GuardResolutionView = { source: "none", stack: [], chain: [] };
 
 describe("MCP gateway views", () => {
   const writeText = vi.fn(async () => undefined);
@@ -327,6 +357,158 @@ describe("MCP gateway views", () => {
     await waitFor(() => expect(api.fetchMcpClientSessions).toHaveBeenCalledTimes(2));
     expect(await within(list).findByLabelText("Data labels: from outside")).toBeInTheDocument();
     expect(within(within(list).getByRole("list", { name: "Open sessions" })).getAllByRole("listitem")).toHaveLength(1);
+  });
+
+  it("picks a Guard profile for a toolset (none by default), never the destination rules profile", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.updateGuardToolsetBinding).mockResolvedValue({
+      binding: binding("toolset", "mts_1", "strict"),
+      effective: { source: "toolset", stack: [{ profileId: "strict", version: 1, hash: "h", name: "Strict gateway" }], chain: [] }
+    });
+    render(<McpServersPage view="toolsets" isAdmin activeProjectId={null} />);
+    const picker = await screen.findByLabelText("Guard profile for this toolset");
+    expect(picker).toHaveValue("");
+    expect(picker).toHaveAccessibleDescription(/what clients send to this toolset's tools and what comes back, and the Guard nodes and agents of its workflow tools/);
+    expect(within(picker).queryByRole("option", { name: "Destination rules" })).not.toBeInTheDocument();
+    const section = screen.getByTestId("gateway-guard-toolset");
+    expect(within(section).getByRole("button", { name: "Save" })).toBeDisabled();
+    await user.selectOptions(picker, "strict");
+    await user.click(within(section).getByRole("button", { name: "Save" }));
+    expect(api.updateGuardToolsetBinding).toHaveBeenCalledWith("mts_1", { mode: "override", profileId: "strict" });
+    expect(await within(section).findByText("Saved")).toBeInTheDocument();
+
+    // Back to none.
+    vi.mocked(api.updateGuardToolsetBinding).mockResolvedValue({ binding: binding("toolset", "mts_1", null), effective: noGuard });
+    await user.selectOptions(picker, "");
+    await user.click(within(section).getByRole("button", { name: "Save" }));
+    expect(api.updateGuardToolsetBinding).toHaveBeenLastCalledWith("mts_1", { mode: "inherit" });
+  });
+
+  it("warns when the chosen profile asks for reviews or approvals, which block on the gateway", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.fetchGuardProfile).mockImplementation(async (id: string) => ({
+      profile: guardProfile(id, id),
+      latest: {
+        profileId: id,
+        version: 1,
+        hash: "h",
+        createdAt: "2026-10-20T10:00:00.000Z",
+        document:
+          id === "strict"
+            ? { channels: { tool_result: { detectors: [], actions: { email: { action: "review" } }, defaultAction: { action: "allow" } } } }
+            : { channels: { tool_arguments: { detectors: [], actions: {}, defaultAction: { action: "block" } } } }
+      },
+      bindings: []
+    }));
+    render(<McpServersPage view="toolsets" isAdmin activeProjectId={null} />);
+    const picker = await screen.findByLabelText("Guard profile for this toolset");
+    const section = screen.getByTestId("gateway-guard-toolset");
+    expect(within(section).queryByTestId("gateway-guard-toolset-held")).not.toBeInTheDocument();
+    await user.selectOptions(picker, "strict");
+    expect(await within(section).findByTestId("gateway-guard-toolset-held")).toHaveTextContent("On the gateway these block the call.");
+    await user.selectOptions(picker, "default");
+    await waitFor(() => expect(within(section).queryByTestId("gateway-guard-toolset-held")).not.toBeInTheDocument());
+  });
+
+  it("finds review and approval actions only where the gateway checks calls, and not in shadow", () => {
+    expect(gatewayHeldActions(null)).toBe(false);
+    expect(gatewayHeldActions({ channels: { prompt: { actions: { email: { action: "review" } } } } })).toBe(false);
+    expect(gatewayHeldActions({ channels: { tool_arguments: { actions: {}, defaultAction: { action: "require_approval" } } } })).toBe(true);
+    expect(gatewayHeldActions({ channels: { tool_result: { actions: { email: { action: "review", shadow: true } } } } })).toBe(false);
+    expect(gatewayHeldActions({ destinations: { rules: [{ action: "require_approval", allow: { maxTier: "internal" } }] } })).toBe(true);
+    expect(gatewayHeldActions({ channels: { tool_result: { actions: { email: { action: "redact" } }, defaultAction: { action: "block" } } } })).toBe(false);
+    // A profile-level shadow switch on the action counts, unless the rule says otherwise.
+    expect(gatewayHeldActions({ shadow: { review: true }, channels: { tool_result: { actions: { email: { action: "review" } } } } })).toBe(false);
+    expect(gatewayHeldActions({ shadow: { review: true }, channels: { tool_result: { actions: { email: { action: "review", shadow: false } } } } })).toBe(true);
+    expect(gatewayHeldActions({ shadow: { review: true }, channels: { tool_result: { actions: { email: { action: "require_approval" } } } } })).toBe(true);
+  });
+
+  it("shows builders the toolset's Guard profile read-only", async () => {
+    vi.mocked(api.fetchGuardToolsetBinding).mockResolvedValue({
+      binding: binding("toolset", "mts_1", "strict"),
+      effective: { source: "toolset", stack: [{ profileId: "strict", version: 1, hash: "h", name: "Strict gateway" }], chain: [] }
+    });
+    render(<McpServersPage view="toolsets" isAdmin={false} activeProjectId={null} />);
+    const section = await screen.findByTestId("gateway-guard-toolset");
+    expect(await within(section).findByText("strict")).toBeInTheDocument();
+    expect(within(section).queryByRole("combobox")).not.toBeInTheDocument();
+    expect(within(section).queryByRole("button", { name: "Save" })).not.toBeInTheDocument();
+    expect(api.fetchGuardProfiles).not.toHaveBeenCalled();
+  });
+
+  it("opens a client's Governance section with its Guard profile, and lists what else applies", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.fetchGuardClientBinding).mockResolvedValue({
+      binding: binding("mcp_client", "mcc_1", "strict"),
+      toolsets: [
+        {
+          toolsetId: "mts_1",
+          effective: {
+            source: "mcp_client",
+            stack: [
+              { profileId: "default", version: 1, hash: "a", name: "Default guard profile" },
+              { profileId: "strict", version: 1, hash: "b", name: "Strict gateway" }
+            ],
+            chain: []
+          }
+        }
+      ]
+    });
+    vi.mocked(api.updateGuardClientBinding).mockResolvedValue({ binding: binding("mcp_client", "mcc_1", null), toolsets: [{ toolsetId: "mts_1", effective: noGuard }] });
+    render(<McpServersPage view="clients" isAdmin activeProjectId={null} />);
+    const list = await screen.findByRole("list", { name: "MCP clients" });
+    await user.click(within(list).getByRole("button", { name: "Governance" }));
+    const governance = await within(list).findByRole("region", { name: "Client governance" });
+    const picker = await within(governance).findByLabelText("Guard profile for this client");
+    expect(picker).toHaveValue("strict");
+    expect(picker).toHaveAccessibleDescription(/on top of the toolset's own profile/);
+    expect(within(governance).getByTestId("gateway-guard-client-stack")).toHaveTextContent("Also applied: Default guard profile.");
+    await user.selectOptions(picker, "");
+    await user.click(within(governance).getByRole("button", { name: "Save" }));
+    expect(api.updateGuardClientBinding).toHaveBeenCalledWith("mcc_1", { mode: "inherit" });
+  });
+
+  it("shows a session's Guard blocks", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.fetchMcpClientSessions).mockResolvedValue({
+      clientId: "mcc_1",
+      sessions: [
+        {
+          idPrefix: "a1b2c3d4",
+          clientId: "mcc_1",
+          toolsetId: "mts_1",
+          toolsetName: "Support tools",
+          clientInfo: {},
+          createdAt: "2026-10-20T10:00:00.000Z",
+          lastSeenAt: "2026-10-20T10:05:00.000Z",
+          tracked: false,
+          labels: null,
+          raisedAt: null,
+          guard: { blocks: 2, lastBlock: { tool: "demo_tools__lookup_kb", channel: "tool_arguments", reason: "Blocked by Guard: indirect injection", at: "2026-10-20T10:04:00.000Z" } }
+        },
+        {
+          idPrefix: "e5f6a7b8",
+          clientId: "mcc_1",
+          toolsetId: "mts_1",
+          toolsetName: "Support tools",
+          clientInfo: {},
+          createdAt: "2026-10-20T10:00:00.000Z",
+          lastSeenAt: "2026-10-20T10:05:00.000Z",
+          tracked: false,
+          labels: null,
+          raisedAt: null,
+          guard: { blocks: 0, lastBlock: null }
+        }
+      ]
+    });
+    render(<McpServersPage view="clients" isAdmin={false} activeProjectId={null} />);
+    const list = await screen.findByRole("list", { name: "MCP clients" });
+    await user.click(within(list).getByRole("button", { name: "Sessions" }));
+    const sessions = await within(list).findByRole("list", { name: "Open sessions" });
+    const rows = within(sessions).getAllByRole("listitem");
+    expect(within(rows[0]!).getByTestId("session-guard-blocks")).toHaveTextContent("Guard blocked 2");
+    expect(within(rows[0]!).getByTestId("session-guard-blocks")).toHaveAttribute("title", "Last: demo_tools__lookup_kb, Blocked by Guard: indirect injection");
+    expect(within(rows[1]!).queryByTestId("session-guard-blocks")).not.toBeInTheDocument();
   });
 
   it("hides toolset admin actions from builders", async () => {

@@ -23,6 +23,7 @@ import {
   GUARD_PROFILE_CHANNEL_VALUES,
   destinationRulesEnforcementSchema,
   destinationRulesUpdateSchema,
+  guardGatewayBindingInputSchema,
   guardProfileCreateSchema,
   guardProfileUpdateSchema,
   guardProjectBindingInputSchema,
@@ -76,6 +77,8 @@ function eventFilters(query: Record<string, unknown>): GuardEventFilters & { lim
     ...(action && (GUARD_ACTION_VALUES as readonly string[]).includes(action) ? { action } : {}),
     ...(since && !Number.isNaN(Date.parse(since)) ? { since: new Date(since).toISOString() } : {}),
     ...(query.findings === "true" || query.findings === "1" ? { onlyFindings: true } : {}),
+    // 12.6 — gateway server tool calls, or workflow runs only.
+    ...(query.placement === "gateway" || query.placement === "run" ? { placement: query.placement } : {}),
     ...(Number.isFinite(limit) ? { limit } : {}),
     ...(Number.isFinite(offset) ? { offset } : {})
   };
@@ -530,6 +533,125 @@ export function registerGuardRoutes(deps: GuardRoutesDeps): void {
         metadata: { scope: "workflow", from: { mode: current.mode, profileId: current.profileId }, to: { mode: parsed.data.mode, profileId: parsed.data.profileId ?? null } }
       });
       return await workflowBindingResponse(found.workflow);
+    } catch (error) {
+      return fail(reply, error);
+    }
+  });
+
+  // ---------------------------------------------------------------------------
+  // 12.6 — MCP gateway toolsets and clients. Builders read (the toolset and client pages show them); only admins set
+  // or change one, as with the rest of a toolset or client. Every change is audited.
+  // ---------------------------------------------------------------------------
+
+  const gatewayBindingView = async (scope: "toolset" | "mcp_client", scopeId: string) => ({ scope, scopeId, ...await guard.getBinding(scope, scopeId) });
+
+  const toolsetEffective = async (toolset: { id: string; projectId: string | null }, clientId = "") =>
+    guard.resolutionView((await guard.resolveGateway({ toolsetId: toolset.id, clientId, projectId: toolset.projectId })).resolution);
+
+  const toolsetBindingResponse = async (toolset: { id: string; projectId: string | null }) => ({
+    binding: await gatewayBindingView("toolset", toolset.id),
+    effective: await toolsetEffective(toolset)
+  });
+
+  const clientBindingResponse = async (client: { id: string; toolsetIds: string[] }) => {
+    const toolsets: Array<{ toolsetId: string; effective: ReturnType<typeof guard.resolutionView> }> = [];
+    for (const toolsetId of client.toolsetIds) {
+      const toolset = await store.getMcpToolset(toolsetId);
+      if (toolset) toolsets.push({ toolsetId, effective: await toolsetEffective(toolset, client.id) });
+    }
+    return { binding: await gatewayBindingView("mcp_client", client.id), toolsets };
+  };
+
+  const gatewayBindingInput = (reply: FastifyReply, body: unknown) => {
+    const record = body && typeof body === "object" ? (body as Record<string, unknown>) : {};
+    if (record.mode === "enforced") {
+      reply.code(400);
+      return { error: { error: "Invalid binding", issues: [{ path: "mode", message: "Only a project can enforce a profile; a toolset or client overrides" }] } };
+    }
+    const parsed = guardGatewayBindingInputSchema.safeParse(body);
+    if (!parsed.success) {
+      reply.code(400);
+      return { error: { error: "Invalid binding", issues: zodIssues(parsed.error.issues) } };
+    }
+    return { input: parsed.data };
+  };
+
+  app.get<{ Params: { toolsetId: string } }>("/api/guard/bindings/toolsets/:toolsetId", async (request, reply) => {
+    const user = await requireRole(request, reply, ["builder"]);
+    if (!user) return;
+    const toolset = await store.getMcpToolset(request.params.toolsetId);
+    if (!toolset) {
+      reply.code(404);
+      return { error: "Toolset not found" };
+    }
+    return await toolsetBindingResponse(toolset);
+  });
+
+  app.put<{ Params: { toolsetId: string }; Body: unknown }>("/api/guard/bindings/toolsets/:toolsetId", async (request, reply) => {
+    const user = await requireRole(request, reply, ["admin"]);
+    if (!user) return;
+    const toolset = await store.getMcpToolset(request.params.toolsetId);
+    if (!toolset) {
+      reply.code(404);
+      return { error: "Toolset not found" };
+    }
+    const parsed = gatewayBindingInput(reply, request.body);
+    if ("error" in parsed) return parsed.error;
+    try {
+      const current = await guard.getBinding("toolset", toolset.id);
+      await guard.setBinding("toolset", toolset.id, parsed.input, user.id);
+      await deps.audit(request, user, {
+        eventType: "guard.binding.updated",
+        category: "system",
+        action: "update",
+        resourceType: "mcp_toolset",
+        resourceId: toolset.id,
+        projectId: toolset.projectId,
+        metadata: { scope: "toolset", from: { mode: current.mode, profileId: current.profileId }, to: { mode: parsed.input.mode, profileId: parsed.input.profileId ?? null } }
+      });
+      return await toolsetBindingResponse(toolset);
+    } catch (error) {
+      return fail(reply, error);
+    }
+  });
+
+  app.get<{ Params: { clientId: string } }>("/api/guard/bindings/clients/:clientId", async (request, reply) => {
+    const user = await requireRole(request, reply, ["builder"]);
+    if (!user) return;
+    const client = await store.getMcpClient(request.params.clientId);
+    if (!client) {
+      reply.code(404);
+      return { error: "Client not found" };
+    }
+    return await clientBindingResponse(client);
+  });
+
+  app.put<{ Params: { clientId: string }; Body: unknown }>("/api/guard/bindings/clients/:clientId", async (request, reply) => {
+    const user = await requireRole(request, reply, ["admin"]);
+    if (!user) return;
+    const client = await store.getMcpClient(request.params.clientId);
+    if (!client) {
+      reply.code(404);
+      return { error: "Client not found" };
+    }
+    if (client.revokedAt) {
+      reply.code(409);
+      return { error: "This client is revoked; it can no longer call the gateway" };
+    }
+    const parsed = gatewayBindingInput(reply, request.body);
+    if ("error" in parsed) return parsed.error;
+    try {
+      const current = await guard.getBinding("mcp_client", client.id);
+      await guard.setBinding("mcp_client", client.id, parsed.input, user.id);
+      await deps.audit(request, user, {
+        eventType: "guard.binding.updated",
+        category: "system",
+        action: "update",
+        resourceType: "mcp_client",
+        resourceId: client.id,
+        metadata: { scope: "mcp_client", from: { mode: current.mode, profileId: current.profileId }, to: { mode: parsed.input.mode, profileId: parsed.input.profileId ?? null } }
+      });
+      return await clientBindingResponse(client);
     } catch (error) {
       return fail(reply, error);
     }

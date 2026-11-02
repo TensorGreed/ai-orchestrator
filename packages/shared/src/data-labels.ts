@@ -289,3 +289,13 @@ export function withImpliedSensitive<T extends Pick<DataLabels, "provenance" | "
   provenance.add("sensitive");
   return { ...labels, provenance: PROVENANCE_LABELS.filter((label) => provenance.has(label)) };
 }
+
+/** 12.6 — the custom-data key a workflow tool's run records its gateway Guard stack under. Only the gateway sets it. */
+export const GATEWAY_GUARD_CUSTOM_DATA_KEY = "gatewayGuard";
+
+/** 12.6 — caller-supplied custom data without the reserved gateway Guard key, so a caller cannot plant a stack. */
+export function stripReservedCustomData<T extends Record<string, unknown> | undefined | null>(value: T): T {
+  if (!value || typeof value !== "object" || !(GATEWAY_GUARD_CUSTOM_DATA_KEY in value)) return value;
+  const { [GATEWAY_GUARD_CUSTOM_DATA_KEY]: _reserved, ...rest } = value as Record<string, unknown>;
+  return rest as T;
+}

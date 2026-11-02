@@ -79,7 +79,7 @@ export interface ResolvedGuardProfile extends GuardProfileRef {
 /** Profiles that apply to a run's agent traffic, resolved by the API from project and workflow bindings. */
 export interface GuardRunResolution {
   /** `candidate` (Phase 15.3): a replay ran a candidate guard profile in place of the bindings. */
-  source: "enforced" | "workflow" | "project" | "instance" | "candidate" | "none";
+  source: "enforced" | "workflow" | "project" | "instance" | "candidate" | "toolset" | "mcp_client" | "none";
   /** The project's enforced profile; always evaluated first and never replaced. */
   enforced?: ResolvedGuardProfile;
   /** Evaluated in order for agents without a guard port (enforced first when set). Empty = no automatic guard. */
@@ -91,13 +91,24 @@ export interface GuardRunResolution {
    * it after the port's profiles, so destination rules apply there too.
    */
   deployment?: ResolvedGuardProfile;
+  /**
+   * 12.6 — the MCP gateway toolset's and client's profiles a gateway-triggered run carries (also in `stack`, before
+   * the deployment's). Tighten-only: an agent's guard port adds them after its own profiles, as with `deployment`.
+   */
+  gateway?: ResolvedGuardProfile[];
+  /**
+   * 12.6 — with `gateway`: the run's own stack, without what the gateway added. A profile both the run's own binding
+   * and the gateway apply stays in it, so a Guard node's effective choice is the same as in a run of another trigger.
+   */
+  ownStack?: ResolvedGuardProfile[];
 }
 
 export interface GuardVerdictEvent {
   executionId: string;
   workflowId: string;
   nodeId: string;
-  placement: "node" | "agent";
+  /** 12.6 — `gateway`: a check the MCP gateway made on a tool call (no run; the call's synthetic `mcpgw_*` id). */
+  placement: "node" | "agent" | "gateway";
   iteration?: number;
   channel: GuardChannel;
   toolName?: string;
@@ -164,7 +175,7 @@ export interface GuardEvalScope {
   executionId: string;
   workflowId: string;
   nodeId: string;
-  placement: "node" | "agent";
+  placement: "node" | "agent" | "gateway";
   subject?: McpToolPolicySubject;
   logger?: (message: string, metadata?: unknown) => void;
 }
@@ -342,8 +353,12 @@ export async function resolveGuardNodeProfiles(
   const resolution = await resolveGuardRun(guard);
   const enforced = resolution.enforced;
   let own: ResolvedGuardProfile[];
+  // 12.6 — a gateway-triggered run's profiles are in the stack too; the node's own choice is made without them.
+  const gatewayHashes = new Set((resolution.gateway ?? []).map((entry) => entry.hash));
+  const ownStack =
+    gatewayHashes.size === 0 ? resolution.stack : resolution.ownStack ?? resolution.stack.filter((entry) => !gatewayHashes.has(entry.hash));
   if (config.profileId === GUARD_EFFECTIVE_PROFILE_REF) {
-    own = resolution.stack.length > 0 ? resolution.stack.filter((entry) => entry.hash !== enforced?.hash) : enforced ? [] : [await loadProfileOrThrow(guard, GUARD_BUILTIN_PROFILE_ID)];
+    own = ownStack.length > 0 ? ownStack.filter((entry) => entry.hash !== enforced?.hash) : enforced ? [] : [await loadProfileOrThrow(guard, GUARD_BUILTIN_PROFILE_ID)];
   } else {
     own = [await loadProfileOrThrow(guard, config.profileId)];
   }
@@ -359,6 +374,8 @@ export async function resolveGuardNodeProfiles(
     return profile === entry.profile ? entry : withProfile(entry, profile);
   });
   const profiles = enforced ? [enforced, ...own] : own;
+  // 12.6 — a gateway-triggered run's toolset and client profiles apply after the node's or port's own (tighten-only).
+  if (resolution.gateway) profiles.push(...resolution.gateway);
   // Phase 16 — an agent's guard port still gets the deployment's destination rules, after its own profiles.
   if (options.withDeployment && resolution.deployment) profiles.push(resolution.deployment);
   return { profiles: dedupeByHash(profiles), resolution };

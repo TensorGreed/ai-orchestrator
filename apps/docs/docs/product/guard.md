@@ -94,6 +94,8 @@ Precedence, for each agent:
 
 Profiles in the stack are deduplicated by hash. All of them run, and the most severe action wins, so an override can add checks to an enforced profile but never loosen it. A guard node with **Effective profile** resolves the same way; a guard node with a named profile runs the enforced profile first and then its own.
 
+An enforced project profile covers the project's runs. It reaches calls through the [MCP gateway](./mcp-gateway.md#guard-on-the-gateway) only once the toolset or the client calling it has a Guard profile of its own; until then, gateway calls to the project's toolsets are not checked by Guard.
+
 Changing a project binding needs write access to that project, and reading it (or `GET /api/guard/effective?projectId=`) needs read access, so a project membership with fewer rights than the global role applies here too.
 
 `GET /api/guard/effective?workflowId=` returns the stack and the chain of levels it came from. The guard node's config panel and the bindings panel show it too.
@@ -122,7 +124,7 @@ If a finding should be protected but no provider covers its class, the key is mi
 
 Every check writes rows to `guard_events`: one per applied action, or one row for a clean verdict. A row holds:
 
-- the run, workflow, project and node, the placement (`node` or `agent`), the agent step and the tool name;
+- the run, workflow, project and node, the placement (`node`, `agent`, or `gateway` for an [MCP gateway call](./mcp-gateway.md#guard-on-the-gateway)), the agent step and the tool name;
 - the channel, detector, category, data class and score;
 - the requested action, the action that applied, the verdict's overall action, and whether the rule was in shadow mode;
 - masked evidence (for example `j•••@e••••••.com`) and the detector's message;
@@ -134,7 +136,7 @@ Rows never hold the content that was checked, the raw matched value, protection 
 
 - **Trace.** On the Runs page, an expanded run shows a **Guard** panel: per guard node and per agent step, the channel, tool, action, a shadow badge when shadow rules would have done more, masked evidence, the slowest detectors and the profiles with their versions and source.
 - **Run tape.** Steps where a guard blocked, held for review, waited for approval or rewrote content carry a marker.
-- **Security page.** Verdict totals, verdicts per day by outcome, counts by action, category and channel, the detectors that fire most, what shadow rules would have blocked, and the latest events with links to their runs. Filter by project, workflow, profile and window.
+- **Security page.** Verdict totals, verdicts per day by outcome, counts by action, category and channel, the detectors that fire most, what shadow rules would have blocked, and the latest events with links to their runs. Filter by project, workflow, profile, source (workflow runs or MCP gateway calls) and window.
 - **Canvas.** Guard cards show their `pass`, `blocked` and `review` outputs and an empty protection slot; agents show a guard slot. The canvas key lists the guard and protection port colours.
 
 ## Limits and deployment notes

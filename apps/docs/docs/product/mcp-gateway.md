@@ -117,9 +117,33 @@ The labels are passed to the [tool rules](./mcp-tool-policy.md) like a run's lab
 
 If you turn tracking on while sessions are open, a session that already made calls is treated as having seen outside content. The labels live with the session in the memory of the instance that opened it, and end with it.
 
+### Guard on the gateway
+
+[Guard](./guard.md) can check gateway calls too. It is off until you pick a profile: with no profile on a toolset or client, the gateway works exactly as before.
+
+- **Toolset.** In a toolset's detail, under **Guard**, an admin picks a profile. It checks every client's calls to that toolset's tools.
+- **Client.** In the **Clients** view, a client's **Governance** section has its own **Guard** picker. It checks that client's calls on all its toolsets, on top of the toolset's profile.
+- **Stacking.** When either is set, the profiles run in this order: the toolset project's enforced profile, the toolset's profile, the client's profile, then the deployment's [destination rules](./data-labels-and-destinations.md). All of them run and the strictest action wins, so a client's profile can add checks but never loosen the toolset's. The instance default profile (`GUARD_AUTO_APPLY`) does not apply to gateway calls.
+- **The project's enforced profile** joins only once the toolset or the client has a profile. On its own it does not reach gateway calls, so turning it on changes nothing for a gateway with no profile set.
+
+Each tool call, server or workflow tool, is checked twice:
+
+1. **Arguments**, before the server or the workflow sees them (the `tool_arguments` channel). A block stops the call there: the server is not called and the workflow does not run. For a server tool that a [tool rule](./mcp-tool-policy.md) holds for approval, the arguments are checked before the approval is asked for or used, so a call Guard blocks never takes up an approval.
+2. **Result**, on what comes back (the `tool_result` channel): the server's result after the gateway removes any secret the server echoed back, or the workflow run's output or error. Redactions and masks apply to what the client gets.
+
+A blocked call answers with a tool error such as `Blocked by Guard: prompt injection`. The reason names the kind of finding, never the content. A profile action that would wait for a review or an approval also blocks, because nobody can approve a gateway call while the client waits; the picker warns when the chosen profile has such actions. A profile in shadow mode only records what it would have done. Each profile's latency budget and fail-closed setting apply as they do in runs. If the gateway cannot read the toolset's and client's profile choices (a database error), it refuses the call with a short tool error rather than send it unchecked.
+
+Every check is recorded in Guard's events with the placement `gateway`, the tool's gateway name as the node and an execution id that starts with `mcpgw_`. For a server tool that the server answered, this is the same id as the call's telemetry row. A call blocked on its arguments writes no telemetry row (as a call a tool rule denies): it shows only in Guard's events and as `mcp_gateway.guard_blocked` in the audit log. On the **Security** page, set **Source** to **MCP gateway calls** to see only these; they have no run to open. Events of server tool calls have no workflow, so only admins see them; events of workflow tool calls name the workflow. A client's **Sessions** panel shows how many calls Guard blocked in each open session.
+
+**Inside a workflow tool's run.** The run also applies the toolset's and client's profiles, after the workflow's own (they only add checks), wherever it uses Guard: its Guard nodes and agents. A workflow with neither is still checked on its arguments and result at the gateway, but nothing in between. The run records which profile versions it got, so a resumed run (after an approval), a retry, a replay and a golden run saved from it apply the same versions, also when queue workers run it. If one of those versions has since been deleted, the run fails its Guard checks rather than run without it. Runs started any other way are not affected.
+
+**Not checked.** When a server asks the gateway's model for a completion during a call (MCP sampling), Guard does not check that prompt or the model's answer, as in runs. Sampling is off unless a [tool rule](./mcp-tool-policy.md) allows it.
+
+Changing a toolset's or client's profile is audited as `guard.binding.updated`. Deleting a toolset or revoking a client removes its profile choice.
+
 ## Telemetry and audit
 
-Every `tools/call` writes a row to `mcp_tool_calls` with `source = gateway` and the client id, so the server page's Tools table and the client's Usage panel include it. Workflow tool calls are recorded under the adapter id `workflow` with the run's execution id.
+Every `tools/call` writes a row to `mcp_tool_calls` with `source = gateway`, the client id and the toolset id, so the server page's Tools table and the client's Usage panel include it. Workflow tool calls are recorded under the adapter id `workflow` with the run's execution id.
 
 Audit events:
 
@@ -132,6 +156,7 @@ Audit events:
 | `mcp_gateway.approval_refused_rejected` / `approval_capped` | The first identical retry after a rejection was refused; a client with too many requests waiting was refused a new one (once per client per approval window). |
 | `mcp_toolset.created` / `updated` / `deleted` / `member_added` / `member_removed` | Toolset changes. |
 | `mcp_toolset.session_tracking_changed` | **Track outside content per session** was turned on or off. |
+| `mcp_gateway.guard_blocked` | Guard blocked a server tool call's arguments or result (with the client, the tool, the channel, the finding kinds and the profiles; never the content). |
 | `mcp_gateway.session_labels_raised` | A session on a tracking toolset carried outside content or sensitive data for the first time (once per session, with the client and the tool). |
 | `mcp_client.created` / `revoked` | Client changes. Metadata carries the token prefix, never the token. |
 
