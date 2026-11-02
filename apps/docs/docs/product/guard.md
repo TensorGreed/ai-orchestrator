@@ -94,6 +94,8 @@ Precedence, for each agent:
 
 Profiles in the stack are deduplicated by hash. All of them run, and the most severe action wins, so an override can add checks to an enforced profile but never loosen it. A guard node with **Effective profile** resolves the same way; a guard node with a named profile runs the enforced profile first and then its own.
 
+An enforced project profile covers the project's runs. It reaches calls through the [MCP gateway](./mcp-gateway.md#guard-on-the-gateway) only once the toolset or the client calling it has a Guard profile of its own; until then, gateway calls to the project's toolsets are not checked by Guard.
+
 Changing a project binding needs write access to that project, and reading it (or `GET /api/guard/effective?projectId=`) needs read access, so a project membership with fewer rights than the global role applies here too.
 
 `GET /api/guard/effective?workflowId=` returns the stack and the chain of levels it came from. The guard node's config panel and the bindings panel show it too.
