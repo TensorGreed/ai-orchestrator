@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import {
   MODEL_TAPE_FORMAT,
   MODEL_TAPE_VERSION,
+  effectiveModelName,
   type LLMCallResponse,
   type ModelTape,
   type ModelTapeCallSite,
@@ -340,6 +341,8 @@ export class ModelTapePlayer {
   private readonly liveCalls: NonNullable<ModelTapeReport["liveCalls"]> = [];
   private readonly unmatched: ModelTapeReport["unmatched"] = [];
   private readonly unmatchedKeys = new Set<string>();
+  private readonly answered: Array<{ nodeId: string | null; providerId: string; model: string }> = [];
+  private readonly answeredKeys = new Set<string>();
 
   constructor(
     readonly tape: ModelTape,
@@ -375,6 +378,7 @@ export class ModelTapePlayer {
       this.reused += 1;
     }
     if (entry) {
+      this.noteAnswered(call.site.nodeId, call.providerId, effectiveModelName(request.provider));
       if (entry.error !== undefined) throw new Error(entry.error);
       const response = structuredClone(entry.response ?? { content: "", toolCalls: [] }) as LLMCallResponse;
       return { response: { ...response, content: typeof response.content === "string" ? response.content : "", toolCalls: Array.isArray(response.toolCalls) ? response.toolCalls : [] }, streamed: entry.streamed === true };
@@ -401,6 +405,21 @@ export class ModelTapePlayer {
       this.unmatched.push({ ...call.site, providerId: call.providerId, model: call.model, reason });
     }
     throw new ModelTapeMissError(`Model tape replay (${this.mode}): ${reason}`);
+  }
+
+  private noteAnswered(nodeId: string | null, providerId: string, model: string): void {
+    const key = JSON.stringify([nodeId, providerId, model]);
+    if (this.answeredKeys.has(key)) return;
+    this.answeredKeys.add(key);
+    this.answered.push({ nodeId, providerId, model });
+  }
+
+  /**
+   * 12.6 — the calls the tape answered (no request reached a provider), one per node, provider and model; the model
+   * is the name the provider would be sent (an Azure deployment name). Live calls of a lenient replay are not listed.
+   */
+  answeredFromTape(): Array<{ nodeId: string | null; providerId: string; model: string }> {
+    return this.answered.map((entry) => ({ ...entry }));
   }
 
   private describeMiss(call: ScrubbedCall, exhausted: number): string {
