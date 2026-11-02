@@ -106,7 +106,10 @@ import {
   type EmbeddingRegistry,
   type VectorStoreRegistry,
   type KnowledgeBaseStore,
-  type RagFetch
+  type RagFetch,
+  type EmbeddingAdapter,
+  type EmbeddingModelTarget,
+  gatedEmbeddingAdapter
 } from "./rag-adapters";
 import {
   extractCitationsFromText,
@@ -217,6 +220,11 @@ export interface WorkflowExecutionDependencies {
    * writes through this store.
    */
   knowledgeBaseStore?: KnowledgeBaseStore;
+  /**
+   * 12.6 — the model allowlist's check for embedding calls (RAG nodes, the Azure OpenAI embeddings node): throws to
+   * refuse an embedder's vendor and model before any text is sent. Absent: embedders are not checked.
+   */
+  checkEmbeddingModel?: (target: EmbeddingModelTarget, context: { nodeId: string }) => Promise<void>;
   agentRuntime: AgentRuntimeAdapter;
   memoryStore?: AgentSessionMemoryStore;
   toolDataStore?: AgentSessionToolDataStore;
@@ -3496,6 +3504,12 @@ function toJsonSafeValue(value: unknown): unknown {
   }
 }
 
+/** 12.6 — `embedder` with the run's model allowlist check in front of every embedding call (when the run has one). */
+function checkedEmbedder(embedder: EmbeddingAdapter, dependencies: WorkflowExecutionDependencies, nodeId: string): EmbeddingAdapter {
+  const check = dependencies.checkEmbeddingModel;
+  return check ? gatedEmbeddingAdapter(embedder, async (target) => await check(target, { nodeId })) : embedder;
+}
+
 /** The outbound guard's pinned fetch, for RAG endpoints that come from a node's own config. */
 function guardedRagFetch(dependencies: { outboundGuard?: OutboundGuardConfig; outboundDnsResolver?: (hostname: string) => Promise<string[]> }): RagFetch {
   return (url, init) =>
@@ -5000,17 +5014,21 @@ async function executeNodeHandler(
         throw new Error("Embeddings Azure OpenAI requires secretRef credential.");
       }
 
-      const embedder = new AzureOpenAIEmbeddingAdapter({
-        endpoint,
-        // The endpoint is node config, so it goes through the outbound guard (pinned).
-        fetcher: guardedRagFetch(dependencies),
-        deployment,
-        apiVersion:
-          typeof config.apiVersion === "string" && config.apiVersion.trim()
-            ? config.apiVersion.trim()
-            : "2024-10-21",
-        apiKey
-      });
+      const embedder = checkedEmbedder(
+        new AzureOpenAIEmbeddingAdapter({
+          endpoint,
+          // The endpoint is node config, so it goes through the outbound guard (pinned).
+          fetcher: guardedRagFetch(dependencies),
+          deployment,
+          apiVersion:
+            typeof config.apiVersion === "string" && config.apiVersion.trim()
+              ? config.apiVersion.trim()
+              : "2024-10-21",
+          apiKey
+        }),
+        dependencies,
+        node.id
+      );
       const vector = await embedder.embed(inputText);
       return {
         [outputKey]: vector,
@@ -5086,6 +5104,8 @@ async function executeNodeHandler(
         }
         else throw new Error(`Unknown embedder ID: ${embedderId}`);
       }
+      // 12.6 — the model allowlist applies to the embedder's vendor and model.
+      embedder = checkedEmbedder(embedder, dependencies, node.id);
 
       let store = dependencies.vectorStoreRegistry?.get(vectorStoreId);
       if (!store) {
