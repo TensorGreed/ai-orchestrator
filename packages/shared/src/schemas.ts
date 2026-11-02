@@ -2,6 +2,7 @@ import { z } from "zod";
 import { MCP_POLICY_TEXT_OPS, WORKFLOW_SCHEMA_VERSION } from "./types";
 import { writeToolApprovalSettingsSchema } from "./approval-gate";
 import { MCP_POLICY_PATH_MAX_LENGTH, parseMcpPolicyPath } from "./mcp-tool-policy";
+import { mcpGatewayRateLimitSchema } from "./gateway-limits";
 import { stripReservedCustomData, SENSITIVE_OUTPUT_CONFIG_KEY, storedTriggerTrustBinding, TRIGGER_TRUST_BINDING_KEY, TRIGGER_TRUST_CONFIG_KEY, TRIGGER_TRUST_LEVELS } from "./data-labels";
 
 export const secretReferenceSchema = z.object({
@@ -586,6 +587,8 @@ export const mcpToolsetInputSchema = z.object({
   enabled: z.boolean().optional(),
   /** 12.2 — "Track outside content per session"; absent on create means off. */
   trackSessionLabels: z.boolean().optional(),
+  /** 12.6 — the default rate limit for each client of the toolset; null removes it. Absent on create means none. */
+  rateLimit: mcpGatewayRateLimitSchema.nullable().optional(),
   members: z.array(mcpToolsetMemberInputSchema).max(200).optional()
 });
 

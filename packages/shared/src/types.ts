@@ -1,3 +1,4 @@
+import type { McpGatewayRateLimit } from "./gateway-limits";
 import type {
   McpCredentialMode,
   McpDelegatedFallback,
@@ -1836,6 +1837,10 @@ export interface McpToolset {
    * calls are then checked without labels, as before.
    */
   trackSessionLabels: boolean;
+  /**
+   * 12.6 — the default rate limit for each client of this toolset (a client's own limit replaces it); null = none.
+   */
+  rateLimit: McpGatewayRateLimit | null;
   members: McpToolsetMember[];
   createdBy: string | null;
   createdAt: string;
@@ -1885,6 +1890,8 @@ export interface McpClient {
   lastUsedAt: string | null;
   revokedAt: string | null;
   createdAt: string;
+  /** 12.6 — the client's own rate limit (replaces its toolsets' defaults); null = none. */
+  rateLimit: McpGatewayRateLimit | null;
 }
 
 /** One tool a toolset exposes, as an MCP client would list it. */
