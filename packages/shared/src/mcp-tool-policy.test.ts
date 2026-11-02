@@ -166,3 +166,15 @@ describe("canonicalMcpToolPolicyRule", () => {
     );
   });
 });
+
+describe("toolsetIds (12.6)", () => {
+  it("validates like the other principal lists and changes the canonical form only when set", () => {
+    expect(mcpToolPolicyRuleInputSchema.parse({ effect: "deny", toolsetIds: ["mts_1"] }).toolsetIds).toEqual(["mts_1"]);
+    expect(mcpToolPolicyRuleInputSchema.safeParse({ effect: "deny", toolsetIds: Array.from({ length: 101 }, (_, i) => `t${i}`) }).success).toBe(false);
+    expect(mcpToolPolicyRuleUpdateSchema.parse({ toolsetIds: [] }).toolsetIds).toEqual([]);
+    // A rule without toolsets keeps the hash it had before v53.
+    expect(canonicalMcpToolPolicyRule(rule({ toolsetIds: [] }))).toBe(canonicalMcpToolPolicyRule(rule()));
+    expect(canonicalMcpToolPolicyRule(rule({ toolsetIds: ["b", "a"] }))).toBe(canonicalMcpToolPolicyRule(rule({ toolsetIds: ["a", "b"] })));
+    expect(canonicalMcpToolPolicyRule(rule({ toolsetIds: ["a"] }))).not.toBe(canonicalMcpToolPolicyRule(rule()));
+  });
+});

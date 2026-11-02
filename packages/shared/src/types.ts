@@ -1150,6 +1150,11 @@ export interface McpToolPolicyRule {
    * by a workflow run a client started); empty or absent = every caller.
    */
   clientIds?: string[];
+  /**
+   * 12.6 — only calls made through these MCP gateway toolsets (server tools called at `/mcp/<toolset>`); empty or
+   * absent = every call. A rule with toolsets never matches a call a workflow run makes.
+   */
+  toolsetIds?: string[];
   /** Phase 12.4 — conditions on the call's arguments and data labels; null or absent = every call. */
   conditions?: McpToolPolicyConditions | null;
   /** Phase 12.4 — absent means `enforce`. */
@@ -1855,6 +1860,8 @@ export interface McpGatewaySessionView {
   labels: McpGatewaySessionLabels | null;
   /** When the session first carried outside content or sensitive data; null when it has not. */
   raisedAt: string | null;
+  /** 12.6 — the session's calls Guard blocked on the gateway (this instance), and the latest one; reasons are short and redacted. */
+  guard: { blocks: number; lastBlock: { tool: string; channel: "tool_arguments" | "tool_result"; reason: string; at: string } | null };
 }
 
 /** A client credential for the MCP gateway. The token itself is never stored or returned again. */

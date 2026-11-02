@@ -356,6 +356,18 @@ describe("rules against a recorded call", () => {
     );
   });
 
+  it("matches a toolset-scoped rule only to gateway rows through that toolset (12.6)", () => {
+    const scoped = rule({ id: "t", effect: "deny", toolsetIds: ["mts_a"] });
+    const gateway = { workflowId: null, clientId: "mcpc_1" };
+    expect(evaluateRuleOnSummary(scoped, call(summary, { ...gateway, toolsetId: "mts_a" }), context).state).toBe("match");
+    expect(evaluateRuleOnSummary(scoped, call(summary, { ...gateway, toolsetId: "mts_b" }), context).state).toBe("no_match");
+    // A gateway row written before the toolset was recorded.
+    expect(evaluateRuleOnSummary(scoped, call(summary, { ...gateway, toolsetId: undefined }), context).state).toBe("unknown");
+    // A run's call never came through a toolset, recorded or not.
+    expect(evaluateRuleOnSummary(scoped, call(summary, { toolsetId: null }), context).state).toBe("no_match");
+    expect(evaluateRuleOnSummary(scoped, call(summary), context).state).toBe("no_match");
+  });
+
   it("fails closed on an invalid stored rule", () => {
     expect(evaluateRuleOnSummary(rule({ id: "i", effect: "allow", invalid: true }), call(summary), context).state).toBe("no_match");
     expect(evaluateRuleOnSummary(rule({ id: "i", effect: "deny", invalid: true }), call(summary), context).state).toBe("match");

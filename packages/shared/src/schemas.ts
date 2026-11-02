@@ -428,6 +428,8 @@ const mcpToolPolicyRuleFieldsSchema = z.object({
   workflowIds: policyPrincipalIdsSchema.optional(),
   /** Phase 12.4 — only calls made by these MCP gateway clients; empty = every caller. */
   clientIds: policyPrincipalIdsSchema.optional(),
+  /** 12.6 — only calls made through these MCP gateway toolsets; empty = every call. */
+  toolsetIds: policyPrincipalIdsSchema.optional(),
   serverId: z.string().trim().min(1).nullable().optional(),
   /** Defaults to "*" (every tool) when a rule is created without one. */
   toolPattern: mcpToolPatternSchema.optional(),

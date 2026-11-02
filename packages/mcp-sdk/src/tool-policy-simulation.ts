@@ -105,6 +105,11 @@ export interface PolicySimulationCall {
   workflowId: string | null;
   /** The gateway client; null when there was none, undefined when not recorded (a run a client started). */
   clientId: string | null | undefined;
+  /**
+   * 12.6 — the gateway toolset the call came through; null when there was none (a run's call), undefined when not
+   * recorded (gateway rows written before v53).
+   */
+  toolsetId?: string | null;
   adapterId: string;
   registryServerId?: string | null;
   toolName: string;
@@ -779,6 +784,13 @@ function scopeState(rule: McpToolPolicyRule, call: PolicySimulationCall): Simula
   if (rule.clientIds?.length) {
     if (call.clientId === undefined) unknowns.push("the gateway client that started the run is not recorded");
     else if (!(call.clientId && rule.clientIds.includes(call.clientId))) return { state: "no_match" };
+  }
+  // 12.6 — a rule naming toolsets matches gateway calls through them only; older gateway rows did not record one.
+  if (rule.toolsetIds?.length) {
+    // A run's call (it names its workflow) never came through a toolset.
+    if (call.toolsetId === undefined && call.workflowId) return { state: "no_match" };
+    if (call.toolsetId === undefined) unknowns.push("the gateway toolset of the call is not recorded");
+    else if (!(call.toolsetId && rule.toolsetIds.includes(call.toolsetId))) return { state: "no_match" };
   }
   if (rule.annotationHint) {
     if (call.annotations === undefined) unknowns.push("the tool's annotations are not known");
