@@ -2987,7 +2987,8 @@ export const openApiSpec = {
     "/api/mcp/clients/{id}/budgets": {
       get: {
         tags: ["MCP"],
-        summary: "The budgets scoped to a client (scope mcp_client), with what each counted in its current period (builder)",
+        summary:
+          "Every budget that applies to a client: its own (mcp_client), its toolsets' projects' and the global ones, each with scopeLabel, what it counted in its current period, and refusing (a used-up block budget refusing the client's calls now) (builder)",
         parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
         responses: { "200": { description: "Budgets and their current usage" }, "404": { description: "Not found" } }
       }

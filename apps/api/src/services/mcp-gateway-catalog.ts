@@ -34,6 +34,8 @@ export interface GatewayWorkflowTool {
   inputSchema: Record<string, unknown>;
   workflowId: string;
   workflowName: string;
+  /** 12.6 — the workflow's project (its project budgets apply to the call). */
+  projectId: string | null;
   nodeId: string;
 }
 
@@ -136,6 +138,7 @@ export async function buildGatewayCatalog(input: {
           inputSchema: normalizeInputSchema(config.inputSchema),
           workflowId: workflow.id,
           workflowName: workflow.name,
+          projectId: workflow.projectId ?? null,
           nodeId: node.id
         });
       }

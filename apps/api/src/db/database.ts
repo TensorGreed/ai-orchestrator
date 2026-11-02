@@ -5269,6 +5269,47 @@ export class SqliteStore implements Store {
     return this.writeExecutionHistory(input, options);
   }
 
+  /** 12.6 (D13) — see Store.recordBudgetRefusedRun: one row per trigger per budget period, its counter bumped. */
+  async recordBudgetRefusedRun(input: Parameters<Store["recordBudgetRefusedRun"]>[0]): Promise<{ created: boolean; refusedFires: number }> {
+    const outcome = this.db.transaction(() => {
+      const existing = this.db.prepare("SELECT output_json FROM execution_history WHERE id = ?").get(input.id) as { output_json: string | null } | undefined;
+      if (existing) {
+        let previous: Record<string, unknown> = {};
+        try {
+          const parsed = existing.output_json ? JSON.parse(existing.output_json) : null;
+          if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) previous = parsed as Record<string, unknown>;
+        } catch {
+          previous = {};
+        }
+        const before = Number(previous.refusedFires);
+        const refusedFires = (Number.isFinite(before) ? before : 1) + 1;
+        this.db
+          .prepare("UPDATE execution_history SET output_json = ? WHERE id = ?")
+          .run(JSON.stringify({ ...previous, refusedFires, lastRefusedAt: input.at }), input.id);
+        return { created: false, refusedFires };
+      }
+      this.writeExecutionHistory({
+        id: input.id,
+        workflowId: input.workflowId,
+        ...(input.workflowName !== undefined ? { workflowName: input.workflowName } : {}),
+        status: "error",
+        startedAt: input.at,
+        completedAt: input.at,
+        durationMs: 0,
+        triggerType: input.triggerType,
+        ...(input.triggeredBy !== undefined ? { triggeredBy: input.triggeredBy } : {}),
+        ...(input.inputJson !== undefined ? { inputJson: input.inputJson } : {}),
+        outputJson: { budgetId: input.budgetId, periodStart: input.periodStart, refusedFires: 1, lastRefusedAt: input.at },
+        nodeResultsJson: [],
+        ...(input.customData !== undefined ? { customData: input.customData } : {}),
+        error: input.error
+      });
+      return { created: true, refusedFires: 1 };
+    })();
+    this.persist();
+    return outcome;
+  }
+
   private writeExecutionHistory(
     input: Parameters<Store["saveExecutionHistory"]>[0],
     options?: { unlessFinished?: boolean; unlessCanceled?: boolean; unlessInterruptedWith?: string }
@@ -10600,11 +10641,14 @@ export class SqliteStore implements Store {
       callFilters.push("toolset_id IN (SELECT id FROM mcp_toolsets WHERE project_id = ?)");
       callParams.push(input.projectId);
     }
-    if (input.client) {
-      runFilters.push("(client_id = ? OR (client_id IS NULL AND user_id = ?))");
-      runParams.push(input.client.id, `mcp-client:${input.client.name}`);
+    if (input.clientId) {
+      // Pre-v54 rows by the client's current name, from its creation on (see Store.queryBudgetUsage).
+      runFilters.push(`(client_id = ? OR (client_id IS NULL AND EXISTS (
+        SELECT 1 FROM mcp_clients c WHERE c.id = ? AND usage_events.user_id = 'mcp-client:' || c.name AND usage_events.created_at >= c.created_at
+      )))`);
+      runParams.push(input.clientId, input.clientId);
       callFilters.push("client_id = ?");
-      callParams.push(input.client.id);
+      callParams.push(input.clientId);
     }
     const runs = this.queryOne<{ cost: number | null; tt: number | null }>(
       `SELECT SUM(cost_usd) AS cost, SUM(total_tokens) AS tt FROM usage_events WHERE ${runFilters.join(" AND ")}`,

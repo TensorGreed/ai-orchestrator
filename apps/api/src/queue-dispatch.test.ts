@@ -667,4 +667,100 @@ run("queue dispatch across replicas on one Postgres database", () => {
     const events = await api.store.listGuardEventsForExecution(run!.id);
     expect(events.some((event) => event.profileId === "gw-email-q" && event.effectiveAction === "block")).toBe(true);
   }, 60_000);
+
+  it("a queued gateway run resumed on a worker after an approval is charged to the client and the toolset's project (12.6 M1)", async () => {
+    const { worker, api, admin } = await cluster();
+    await api.store.ensureDefaultProject();
+    const tool = chain("wf-gw-charged", [
+      node("trigger", "mcp_server_trigger", { path: "wf-gw-charged", toolName: "charged", inputSchema: { type: "object", properties: { text: { type: "string" } } }, authMode: "public" }),
+      node("gate", "approval_gate", { message: "Go on?", approverRoles: ["admin"], timeoutMinutes: 60 }),
+      node("model", "llm_call", { provider: { providerId: "echo", model: "echo-1" }, userPromptTemplate: "Say {{text}}" }),
+      node("out", "output", {})
+    ], { 1: { sourceHandle: "approved" } });
+    tool.projectId = "default";
+    await save(api, admin, tool);
+    const inject = (method: "POST", url: string, payload: Record<string, unknown>) => api.app.inject({ method, url, headers: { cookie: admin }, payload });
+    const createdToolset = await inject("POST", "/api/mcp/toolsets", { name: "Charged tools", projectId: "default", members: [{ kind: "workflow", workflowId: "wf-gw-charged" }] });
+    expect(createdToolset.statusCode, createdToolset.body).toBe(201);
+    const toolset = createdToolset.json<{ toolset: { id: string; slug: string } }>().toolset;
+    const created = (await inject("POST", "/api/mcp/clients", { name: "Charged agent", toolsetIds: [toolset.id], role: "builder" })).json<{ token: string; client: { id: string } }>();
+    const rpc = (body: Record<string, unknown>, session?: string) =>
+      api.app.inject({
+        method: "POST",
+        url: `/mcp/${toolset.slug}`,
+        headers: { "content-type": "application/json", accept: "application/json, text/event-stream", authorization: `Bearer ${created.token}`, ...(session ? { "mcp-session-id": session } : {}) },
+        payload: JSON.stringify(body)
+      });
+    const opened = await rpc({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "queue", version: "1" } } });
+    const session = opened.headers["mcp-session-id"] as string;
+    const called = await rpc({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "charged", arguments: { text: "hello" } } }, session);
+    expect(called.body).toContain("waiting for an approval");
+    const [paused] = (await api.store.listExecutionHistory({ workflowId: "wf-gw-charged", pageSize: 5 })).items;
+    expect(worker.ran).toContain(paused!.id);
+    const approved = await inject("POST", `/api/approvals/${paused!.id}/approve`, {});
+    expect(approved.statusCode, approved.body).toBe(202);
+    await until(async () => (await api.store.getExecutionHistory(paused!.id))?.status === "success", "the resumed run to finish");
+    expect(worker.ran.filter((id) => id === paused!.id)).toHaveLength(2);
+    const rows = await until(
+      async () => {
+        const found = await sql<{ client_id: string | null; toolset_id: string | null; user_id: string | null; user_email: string | null; total_tokens: string }>(
+          `SELECT client_id, toolset_id, user_id, user_email, total_tokens FROM usage_events WHERE execution_id = $1 AND trigger_type = 'approval_resume'`,
+          [paused!.id]
+        );
+        return found.length > 0 ? found : null;
+      },
+      "the resumed run's usage"
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ client_id: created.client.id, toolset_id: toolset.id, user_id: "mcp-client:Charged agent", user_email: null });
+    expect(Number(rows[0]!.total_tokens)).toBeGreaterThan(0);
+    const window = { from: new Date(Date.now() - 60_000).toISOString(), to: new Date(Date.now() + 60_000).toISOString() };
+    expect((await api.store.queryBudgetUsage({ ...window, clientId: created.client.id })).totalTokens).toBeGreaterThanOrEqual(Number(rows[0]!.total_tokens));
+  }, 60_000);
+
+  it("two leaders firing one schedule second under a used-up budget record one refused run (12.6 D13, L9)", async () => {
+    await database();
+    const a = await addReplica("worker-a", "worker", { env: { EXECUTION_DISPATCH: "queue" }, background: true });
+    const b = await addReplica("worker-b", "worker", { env: { EXECUTION_DISPATCH: "queue" }, background: true });
+    const admin = await cookieFor(a, "admin", "admin");
+    const builder = await cookieFor(a, "builder");
+    await dispatching(a, admin);
+    await dispatching(b, admin);
+    await save(a, builder, chain("wf-capped", [node("cron", "schedule_trigger", { cronExpression: "* * * * *", timezone: "UTC" }), node("out", "output", { responseTemplate: "tick" })]));
+    await save(a, builder, chain("wf-probe", [node("hook", "webhook_input", { path: "probe-capped", method: "POST" }), node("out", "output", { responseTemplate: "probe" })]));
+    const created = await a.app.inject({ method: "POST", url: "/api/budgets", headers: { cookie: admin }, payload: { name: "Deployment cap", scopeType: "global", period: "month", limitType: "tokens", limitValue: 10, action: "block" } });
+    expect(created.statusCode, created.body).toBe(200);
+    await a.store.writeUsageEvent({
+      id: "usage-capped",
+      executionId: "exec-capped",
+      workflowId: "wf-elsewhere",
+      workflowName: "Elsewhere",
+      userId: null,
+      userEmail: null,
+      projectId: "default",
+      triggerType: "manual",
+      status: "success",
+      inputTokens: 50,
+      outputTokens: 0,
+      cachedInputTokens: 0,
+      totalTokens: 50,
+      costUsd: 0,
+      llmCallCount: 1,
+      durationMs: 1,
+      providers: []
+    });
+    // Both replicas hold the budget (b re-reads its copy in the background).
+    for (const replica of [a, b]) {
+      await until(async () => (await replica.app.inject({ method: "POST", url: "/webhook/probe-capped", payload: {} })).statusCode === 402, `${replica.name} to see the budget`);
+    }
+    const scheduledFor = new Date(Math.floor(Date.now() / 60_000) * 60_000).toISOString();
+    const fire = (replica: Replica, offsetMs: number) =>
+      replica.schedule!({ workflowId: "wf-capped", workflowName: "wf-capped", scheduleNodeId: "cron", cronExpression: "* * * * *", timezone: "UTC", firedAt: new Date(Date.parse(scheduledFor) + offsetMs).toISOString(), scheduledFor });
+    await Promise.all([fire(a, 120), fire(b, 870)]);
+    const refused = await sql<{ id: string; status: string; output_json: string; error: string }>(`SELECT id, status, output_json, error FROM execution_history WHERE workflow_id = 'wf-capped'`);
+    expect(refused).toHaveLength(1);
+    expect(refused[0]).toMatchObject({ status: "error", error: 'Budget "Deployment cap" exceeded for the current month. The run did not start.' });
+    expect(JSON.parse(refused[0]!.output_json)).toMatchObject({ refusedFires: 2 });
+    expect(await sql(`SELECT id FROM execution_queue WHERE workflow_id = 'wf-capped'`)).toHaveLength(0);
+  }, 60_000);
 });

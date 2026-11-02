@@ -25,18 +25,27 @@
  * Where `block` applies (12.6, D8)
  * --------------------------------
  *   - every run a trigger starts (RunDispatcher's admission: webhooks,
- *     schedules, chat, forms, app triggers, queue dispatch, retries, gateway
- *     workflow tools), through `checkBlock`, and `/api/workflows/:id/execute`
- *     through `checkExecution` (which also reports approaching limits);
+ *     schedules, chat, forms, app triggers, queue dispatch, retries, MCP
+ *     replays), through `checkBlock`, and `/api/workflows/:id/execute`
+ *     through `checkExecution` (which also reports approaching limits). A
+ *     refused schedule or app trigger is one failed run per trigger, budget
+ *     and period (D13);
  *   - every gateway `tools/call`, before the tool policy (`checkBlock` with
- *     the client and the toolset's project).
+ *     the client and the toolset's project, and for a workflow tool its
+ *     workflow and project: its run is not checked again).
  *   A run or call that starts while usage is under the cap may take it over;
  *   calls of one gateway batch are checked together, so a batch may overshoot
  *   by one batch. The next one is refused.
  *
  * `checkBlock` reads the budgets from an in-process snapshot (re-read every
  * `refreshMs` and at once after a local edit), so with no matching `block`
- * budget it reads nothing from the store.
+ * budget it reads nothing from the store. A check never waits on a re-read
+ * once a copy exists; a read is given up after `readTimeoutMs`, a failing one
+ * keeps the last copy and warns at most every `warnEveryMs`, and a refresh
+ * after an edit is a new read whose result an older read cannot replace.
+ *
+ * Replays (12.6, D12): ReplayService asks the run admission for a replay that
+ * may call models or tools live; a tape-only replay is not checked.
  *
  * Period boundaries
  * -----------------
@@ -68,6 +77,8 @@ export interface BudgetCheckContext {
 /** 12.6 — a `block` budget that is used up: the run or gateway call is refused (HTTP 402 on HTTP triggers). */
 export class BudgetExceededError extends Error {
   readonly statusCode = 402;
+  /** The run it refused, when a trigger's run was refused (the HTTP answer logs and audits it once per period). */
+  run?: { workflowId: string; projectId: string | null; triggerType: string };
   constructor(
     readonly budget: BudgetRecord,
     readonly current: number,
@@ -88,6 +99,10 @@ export class BudgetUnavailableError extends Error {
 }
 
 export const BUDGET_SNAPSHOT_REFRESH_MS = 2_000;
+/** A budget read that takes longer is given up (the last copy stays); a hung store never holds checks up. */
+export const BUDGET_SNAPSHOT_READ_TIMEOUT_MS = 5_000;
+/** While the budgets cannot be re-read, the warning is logged at most this often. */
+export const BUDGET_SNAPSHOT_WARN_EVERY_MS = 60_000;
 
 export interface BudgetCheckResult {
   allowed: boolean;
@@ -105,14 +120,23 @@ export class BudgetService {
   private readonly store: Store;
   private logger?: { info: (msg: string, fields?: Record<string, unknown>) => void; warn: (msg: string, fields?: Record<string, unknown>) => void };
   private readonly refreshMs: number;
+  private readonly readTimeoutMs: number;
+  private readonly warnEveryMs: number;
   private snapshot: BudgetRecord[] | null = null;
-  private loadedAt = 0;
-  private loading: Promise<BudgetRecord[]> | null = null;
+  /** When the last read was started (a check on a service with no timer re-reads at most every `refreshMs`). */
+  private attemptedAt = 0;
+  /** Reads are numbered; a read's result is applied only when no later read has been applied (see `load`). */
+  private readSeq = 0;
+  private appliedSeq = 0;
+  private inflight: { seq: number; promise: Promise<BudgetRecord[]> } | null = null;
+  private lastWarnAt: number | null = null;
   private timer: ReturnType<typeof setInterval> | null = null;
 
-  constructor(store: Store, options: { refreshMs?: number } = {}) {
+  constructor(store: Store, options: { refreshMs?: number; readTimeoutMs?: number; warnEveryMs?: number } = {}) {
     this.store = store;
     this.refreshMs = options.refreshMs ?? BUDGET_SNAPSHOT_REFRESH_MS;
+    this.readTimeoutMs = options.readTimeoutMs ?? BUDGET_SNAPSHOT_READ_TIMEOUT_MS;
+    this.warnEveryMs = options.warnEveryMs ?? BUDGET_SNAPSHOT_WARN_EVERY_MS;
   }
 
   // ---------------------------------------------------------------------------
@@ -128,7 +152,8 @@ export class BudgetService {
     }
     if (!this.timer && this.refreshMs > 0) {
       this.timer = setInterval(() => {
-        this.refresh().catch(() => undefined);
+        // A read still running is not doubled up; the next tick tries again.
+        this.load(false).catch(() => undefined);
       }, this.refreshMs);
       this.timer.unref?.();
     }
@@ -139,44 +164,75 @@ export class BudgetService {
     this.timer = null;
   }
 
-  /** Re-reads the enabled budgets (after a local edit, at once). A failure keeps the last copy and is rethrown. */
+  /**
+   * Re-reads the enabled budgets (after a local edit, at once). Always a new read: one that started before this call
+   * may miss the edit, so its result is not used once this one is applied. A failure keeps the last copy and is
+   * rethrown.
+   */
   async refresh(): Promise<void> {
-    await this.load();
+    await this.load(true);
   }
 
-  private load(): Promise<BudgetRecord[]> {
-    if (this.loading) return this.loading;
-    const loading = (async () => {
+  /**
+   * One read of the enabled budgets. `fresh` starts a new read even when one is running; otherwise the running one is
+   * shared. A read applies its result only if no later-started read has applied one already, so a slow read that
+   * began before an edit never replaces the copy a later refresh() made. A read that takes longer than
+   * `readTimeoutMs` fails (the last copy stays). Failures are logged at most every `warnEveryMs`.
+   */
+  private load(fresh: boolean): Promise<BudgetRecord[]> {
+    if (this.inflight && !fresh) return this.inflight.promise;
+    const seq = (this.readSeq += 1);
+    this.attemptedAt = Date.now();
+    const promise = (async () => {
+      let timeout: ReturnType<typeof setTimeout> | undefined;
       try {
-        const next = await this.store.listBudgets({ enabledOnly: true });
-        this.snapshot = next;
-        this.loadedAt = Date.now();
-        return next;
+        const next = await Promise.race([
+          this.store.listBudgets({ enabledOnly: true }),
+          new Promise<never>((_resolve, reject) => {
+            timeout = setTimeout(() => reject(new Error(`the budget read took longer than ${this.readTimeoutMs} ms`)), this.readTimeoutMs);
+            timeout.unref?.();
+          })
+        ]);
+        if (seq > this.appliedSeq) {
+          this.snapshot = next;
+          this.appliedSeq = seq;
+        }
+        if (this.lastWarnAt !== null) {
+          this.lastWarnAt = null;
+          this.logger?.info("The budgets can be read again");
+        }
+        return this.snapshot ?? next;
       } catch (error) {
-        this.logger?.warn(this.snapshot ? "Could not re-read the budgets; keeping the last copy" : "Could not read the budgets", {
-          error: error instanceof Error ? error.message : String(error)
-        });
+        const now = Date.now();
+        if (this.lastWarnAt === null || now - this.lastWarnAt >= this.warnEveryMs) {
+          this.lastWarnAt = now;
+          this.logger?.warn(this.snapshot ? "Could not re-read the budgets; keeping the last copy" : "Could not read the budgets", {
+            error: error instanceof Error ? error.message : String(error)
+          });
+        }
         throw error;
       } finally {
-        this.loading = null;
+        if (timeout) clearTimeout(timeout);
+        if (this.inflight?.seq === seq) this.inflight = null;
       }
     })();
-    this.loading = loading;
-    return loading;
+    this.inflight = { seq, promise };
+    return promise;
   }
 
-  /** The enabled budgets; read from the store only when no copy was ever loaded (then a failure throws). */
+  /**
+   * The enabled budgets. With a copy, the copy (never waiting on a read: a service with no timer starts a background
+   * re-read at most every `refreshMs`). Without one, the read itself; a failure throws BudgetUnavailableError.
+   */
   private async enabledBudgets(): Promise<BudgetRecord[]> {
     if (this.snapshot) {
-      // Not started (no background re-read): re-read here at most every `refreshMs`, keeping the copy on failure.
-      if (!this.timer && this.refreshMs > 0 && Date.now() - this.loadedAt > this.refreshMs) {
-        this.loadedAt = Date.now();
-        return await this.load().catch(() => this.snapshot!);
+      if (!this.timer && this.refreshMs > 0 && !this.inflight && Date.now() - this.attemptedAt > this.refreshMs) {
+        this.load(false).catch(() => undefined);
       }
       return this.snapshot;
     }
     try {
-      return await this.load();
+      return await this.load(false);
     } catch (error) {
       throw new BudgetUnavailableError(error);
     }
@@ -217,14 +273,36 @@ export class BudgetService {
     await this.alertCrossed(ctx);
   }
 
-  /** 12.6 — the budgets scoped to one gateway client, with what each counted this period (the client's Governance). */
-  async clientUsage(client: { id: string; name: string }): Promise<McpClientBudgetUsage[]> {
-    const budgets = await this.store.listBudgets({ scopeType: "mcp_client", scopeId: client.id });
-    const ctx: BudgetCheckContext = { workflowId: null, projectId: null, userEmail: null, userId: null, client };
+  /**
+   * 12.6 — every budget that applies to a gateway client's calls, with what each counted this period (the client's
+   * Governance): its own (`mcp_client`), those of its toolsets' projects, and the deployment's (`global`). Each is
+   * labelled by scope; `refusing` marks an enabled block budget whose cap is met (it refuses the client's calls now).
+   * The client's own come first, then the projects', then the deployment's. A read for the admin view, not the hot path.
+   */
+  async clientUsage(client: { id: string; name: string; toolsetIds?: readonly string[] }): Promise<McpClientBudgetUsage[]> {
+    const budgets = await this.store.listBudgets({});
+    const projectIds: string[] = [];
+    for (const toolsetId of client.toolsetIds ?? []) {
+      const projectId = (await this.store.getMcpToolset(toolsetId))?.projectId ?? null;
+      if (projectId && !projectIds.includes(projectId)) projectIds.push(projectId);
+    }
+    const projectNames = new Map<string, string>();
+    for (const projectId of projectIds) projectNames.set(projectId, (await this.store.getProject(projectId))?.name ?? projectId);
+    const rank = (budget: BudgetRecord): number => {
+      if (budget.scopeType === "mcp_client" && budget.scopeId === client.id) return 0;
+      if (budget.scopeType === "project" && budget.scopeId && projectNames.has(budget.scopeId)) return 1;
+      if (budget.scopeType === "global") return 2;
+      return -1;
+    };
+    const applying = budgets
+      .map((budget) => ({ budget, order: rank(budget) }))
+      .filter((entry) => entry.order >= 0)
+      .sort((a, b) => a.order - b.order);
+    const ctx: BudgetCheckContext = { workflowId: null, projectId: null, userEmail: null, userId: null, client: { id: client.id, name: client.name } };
     const views: McpClientBudgetUsage[] = [];
-    for (const budget of budgets) {
-      if (budget.scopeId !== client.id) continue;
+    for (const { budget, order } of applying) {
       const periodStart = currentPeriodStart(budget.period);
+      const current = await this.currentUsage(budget, ctx, periodStart);
       views.push({
         budgetId: budget.id,
         name: budget.name,
@@ -235,8 +313,10 @@ export class BudgetService {
         limitValue: budget.limitValue,
         action: budget.action,
         enabled: budget.enabled,
-        current: await this.currentUsage(budget, ctx, periodStart),
-        periodStart
+        current,
+        periodStart,
+        scopeLabel: order === 0 ? "This client" : order === 1 ? `Project ${projectNames.get(budget.scopeId!)}` : "Deployment",
+        refusing: budget.enabled && budget.action === "block" && current >= budget.limitValue
       });
     }
     return views;
@@ -323,8 +403,8 @@ export class BudgetService {
       const userKey = budget.scopeId ?? ctx.userId ?? ctx.userEmail;
       if (userKey) filter.userKey = userKey;
     } else if (budget.scopeType === "mcp_client" && budget.scopeId) {
-      // The name finds the client's runs recorded before v54 (`user_id = mcp-client:<name>`).
-      filter.client = { id: budget.scopeId, name: ctx.client?.id === budget.scopeId ? ctx.client.name : "" };
+      // The store also finds the client's runs recorded before v54 (`user_id = mcp-client:<its name>`).
+      filter.clientId = budget.scopeId;
     }
     const totals = await this.store.queryBudgetUsage(filter);
     return budget.limitType === "usd" ? totals.costUsd : totals.totalTokens;

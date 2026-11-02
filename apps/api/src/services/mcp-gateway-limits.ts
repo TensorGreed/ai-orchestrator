@@ -11,8 +11,11 @@
  *     `requestsPerMinute`);
  *   - cluster mode (Postgres with HA_ENABLED): the rate is counted in the database, in the buckets the auth and
  *     webhook rate limits share (`Store.hitRateLimitBucket`), so it holds across replicas. A bucket is a fixed window
- *     of `60 s × burst / requestsPerMinute` holding `burst` calls, which gives the same sustained rate. When the
- *     database cannot be reached the call is counted in this instance's memory instead (logged).
+ *     (`sharedWindow`): with a burst up to the per-minute rate, `60 s × burst / requestsPerMinute` holding `burst`
+ *     calls (the same sustained rate); with a larger burst, 60 s holding `requestsPerMinute` calls, so a client that
+ *     used its allowance waits at most a minute (a burst above one minute's rate is a single-instance allowance). As
+ *     with any fixed window, up to twice the window's calls can pass around a window boundary. When the database
+ *     cannot be reached the call is counted in this instance's memory instead (logged).
  *   - concurrency is always per instance: a call runs on the instance that holds its session.
  *
  * Nothing is counted for a client with no limit.
@@ -54,9 +57,14 @@ function seconds(ms: number): number {
   return Math.max(1, Math.ceil(ms / 1000));
 }
 
-/** The fixed window a shared bucket counts in, so `capacity` calls per window is `ratePerMinute` sustained. */
-export function sharedWindowMs(ratePerMinute: number, capacity: number): number {
-  return Math.max(1, Math.ceil((60_000 * capacity) / ratePerMinute));
+/**
+ * The fixed window a shared bucket counts in and the calls it holds, so the sustained rate is `ratePerMinute`. The
+ * window is at most a minute: a burst larger than the per-minute rate is capped at it, so the lockout after a used-up
+ * window is never longer than 60 s.
+ */
+export function sharedWindow(ratePerMinute: number, burst: number): { windowMs: number; capacity: number } {
+  if (burst <= ratePerMinute) return { windowMs: Math.max(1, Math.ceil((60_000 * burst) / ratePerMinute)), capacity: burst };
+  return { windowMs: 60_000, capacity: ratePerMinute };
 }
 
 export class GatewayClientLimiter {
@@ -129,11 +137,11 @@ export class GatewayClientLimiter {
   private async takeRate(key: string, ratePerMinute: number, capacity: number): Promise<GatewayLimitRefusal | null> {
     const shared = this.options.shared;
     if (shared) {
-      const windowMs = sharedWindowMs(ratePerMinute, capacity);
+      const window = sharedWindow(ratePerMinute, capacity);
       try {
         // The limit is part of the bucket name: a changed limit starts counting afresh.
-        const hit = await shared.hitRateLimitBucket({ key: `rl:mcp-gateway:${key}:${ratePerMinute}:${capacity}`, windowMs });
-        return hit.count > capacity ? this.rateRefusal(ratePerMinute, Math.max(1, hit.ttlMs)) : null;
+        const hit = await shared.hitRateLimitBucket({ key: `rl:mcp-gateway:${key}:${ratePerMinute}:${capacity}`, windowMs: window.windowMs });
+        return hit.count > window.capacity ? this.rateRefusal(ratePerMinute, Math.max(1, hit.ttlMs)) : null;
       } catch (error) {
         const now = this.now();
         if (now - this.lastWarnAt >= (this.options.warnEveryMs ?? 60_000)) {

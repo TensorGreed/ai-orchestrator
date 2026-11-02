@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { GatewayClientLimiter, sharedWindowMs } from "./mcp-gateway-limits.js";
+import { GatewayClientLimiter, sharedWindow } from "./mcp-gateway-limits.js";
 
 const limit = (requestsPerMinute: number | null, burst: number | null = null, maxConcurrent: number | null = null) => ({ requestsPerMinute, burst, maxConcurrent });
 
@@ -67,9 +67,26 @@ describe("GatewayClientLimiter", () => {
     expect(hit).not.toHaveBeenCalled();
   });
 
-  it("sizes the shared window so the capacity per window is the per-minute rate", () => {
-    expect(sharedWindowMs(60, 60)).toBe(60_000);
-    expect(sharedWindowMs(60, 10)).toBe(10_000);
-    expect(sharedWindowMs(100_000, 1)).toBe(1);
+  it("sizes the shared window so the capacity per window is the per-minute rate, and never longer than a minute", () => {
+    expect(sharedWindow(60, 60)).toEqual({ windowMs: 60_000, capacity: 60 });
+    expect(sharedWindow(60, 10)).toEqual({ windowMs: 10_000, capacity: 10 });
+    expect(sharedWindow(100_000, 1)).toEqual({ windowMs: 1, capacity: 1 });
+    // A burst above the per-minute rate: a one-minute window of the per-minute rate (no ten-minute lockout).
+    expect(sharedWindow(60, 600)).toEqual({ windowMs: 60_000, capacity: 60 });
+  });
+
+  it("in cluster mode a burst above the per-minute rate allows one minute's calls and a retry within the minute", async () => {
+    const counts = new Map<string, number>();
+    const windows: number[] = [];
+    const hit = vi.fn(async ({ key, windowMs }: { key: string; windowMs: number }) => {
+      windows.push(windowMs);
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+      return { count: counts.get(key)!, ttlMs: 42_000 };
+    });
+    const limiter = new GatewayClientLimiter({ shared: { hitRateLimitBucket: hit }, now: () => 0 });
+    for (let index = 0; index < 3; index += 1) expect((await limiter.acquire("client:c1", limit(3, 30))).ok).toBe(true);
+    const refused = await limiter.acquire("client:c1", limit(3, 30));
+    expect(refused).toMatchObject({ ok: false, reason: "rate_limited", retryAfterMs: 42_000 });
+    expect(new Set(windows)).toEqual(new Set([60_000]));
   });
 });

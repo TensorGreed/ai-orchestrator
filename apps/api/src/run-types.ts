@@ -5,6 +5,7 @@
 import type {
   DataLabels,
   GatewayGuardStack,
+  GatewayRunUsage,
   McpElicitationView,
   McpToolPolicySubject,
   McpToolProgressEvent,
@@ -149,5 +150,5 @@ export interface RunWorkflowExecutionInput {
    * (usage_events.client_id) and counts toward the toolset's project; its budget check includes the client's and the
    * toolset project's budgets. Crosses the queue with the spec. Not carried by retries or replays.
    */
-  gatewayUsage?: { clientId: string; clientName: string; toolsetId: string; toolsetProjectId: string | null };
+  gatewayUsage?: GatewayRunUsage;
 }

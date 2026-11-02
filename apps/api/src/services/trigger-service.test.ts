@@ -106,3 +106,48 @@ describe("stop() and a concurrent initialize()", () => {
     expect(triggers.isRunning()).toBe(false);
   });
 });
+
+describe("a fire a budget refused is not counted as delivered (12.6, D13)", () => {
+  it("file_trigger keeps the changes of a refused fire for the next poll", async () => {
+    const fs = await import("node:fs");
+    const os = await import("node:os");
+    const path = await import("node:path");
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-file-refused-"));
+    try {
+      fs.writeFileSync(path.join(dir, "old.txt"), "old");
+      const states = new Map<string, unknown>();
+      const store = {
+        getTriggerState: async (workflowId: string, nodeId: string) => states.get(`${workflowId}:${nodeId}`),
+        saveTriggerState: async (input: { workflowId: string; nodeId: string; state: unknown }) => {
+          states.set(`${input.workflowId}:${input.nodeId}`, input.state);
+        }
+      } as unknown as Store;
+      const triggers = new TriggerService(store, () => undefined);
+      const fired: Array<Array<{ path: string; event: string }>> = [];
+      const answers: Array<"refused" | "delivered"> = ["refused", "delivered"];
+      triggers.setExecutionHandler(async (input) => {
+        fired.push(input.input.file_events as Array<{ path: string; event: string }>);
+        return answers.shift() ?? "delivered";
+      });
+      const n = node("file_trigger", { watchPath: dir, pollIntervalSeconds: 3600, events: ["created"] });
+      const start = () => (triggers as unknown as Record<string, (wf: Workflow, n: WorkflowNode) => () => void>).startFileTrigger!.call(triggers, workflow(n), n);
+      // Baseline: the existing file is known.
+      stops.push(start());
+      await waitFor(() => states.size > 0);
+      fs.writeFileSync(path.join(dir, "new.txt"), "new");
+      stops.push(start());
+      await waitFor(() => fired.length === 1);
+      // Refused: the next poll fires the same change again.
+      stops.push(start());
+      await waitFor(() => fired.length === 2);
+      expect(fired.map((events) => events.map((event) => path.basename(event.path)))).toEqual([["new.txt"], ["new.txt"]]);
+      // Delivered: nothing more to fire.
+      await waitFor(async () => Object.keys((states.values().next().value ?? {}) as object).some((key) => key.endsWith("new.txt")));
+      stops.push(start());
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(fired).toHaveLength(2);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

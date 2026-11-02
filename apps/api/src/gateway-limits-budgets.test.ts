@@ -18,6 +18,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { FastifyInstance } from "fastify";
 import type { McpClient, McpClientBudgetUsage, McpToolset, Workflow } from "@ai-orchestrator/shared";
 import { MockMCPServerAdapter } from "@ai-orchestrator/mcp-sdk";
+import { DEFAULT_OUTBOUND_GUARD } from "@ai-orchestrator/workflow-engine";
 import { createApp } from "./app.js";
 import { parseConfig, type AppConfig } from "./config.js";
 import type { Store } from "./db/store.js";
@@ -28,6 +29,8 @@ import { testSql } from "./test-support/test-sql.js";
 import { AuthService } from "./services/auth-service.js";
 import { SecretService } from "./services/secret-service.js";
 import { SchedulerService, type SchedulerExecutionInput } from "./services/scheduler-service.js";
+import { QueueService } from "./services/queue-service.js";
+import { TriggerService } from "./services/trigger-service.js";
 
 interface TestContext {
   app: FastifyInstance;
@@ -44,7 +47,16 @@ const contexts: TestContext[] = [];
 /** Echo answers sampling and LLM nodes; this price makes one token cost one dollar. */
 const PRICING = JSON.stringify({ echo: { "echo-1": { inputUsdPer1M: 1_000_000, outputUsdPer1M: 1_000_000 } } });
 
-async function createTestContext(env: Record<string, string> = {}): Promise<TestContext> {
+interface ContextOptions {
+  /** A queue service (the `/enqueue` route needs one on SQLite). */
+  queue?: boolean;
+  /** Makes the app/polling trigger service the app wires its handler into. */
+  triggerService?: (store: Store) => TriggerService;
+  /** Runs before the app is built (spies the app must see from its start). */
+  beforeApp?: (store: Store) => void;
+}
+
+async function createTestContext(env: Record<string, string> = {}, options: ContextOptions = {}): Promise<TestContext> {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-gw-limits-"));
   const store = await openTestStore(path.join(tempDir, "orchestrator.db"));
   await store.ensureDefaultProject();
@@ -68,7 +80,9 @@ async function createTestContext(env: Record<string, string> = {}): Promise<Test
     context.schedule = handler;
     set(handler);
   };
-  context.app = await createApp(config, store, secretService, authService, scheduler);
+  options.beforeApp?.(store);
+  const queue = options.queue ? new QueueService(store, { pollIntervalMs: 3_600_000 }) : undefined;
+  context.app = await createApp(config, store, secretService, authService, scheduler, queue, options.triggerService?.(store));
   await context.app.ready();
   contexts.push(context);
   return context;
@@ -192,8 +206,8 @@ interface Fixture {
   peerToken: string;
 }
 
-async function setup(env: Record<string, string> = {}, toolsetProjectId = "default"): Promise<Fixture> {
-  const context = await createTestContext(env);
+async function setup(env: Record<string, string> = {}, toolsetProjectId = "default", options: ContextOptions = {}): Promise<Fixture> {
+  const context = await createTestContext(env, options);
   const call = caller(context);
   const admin = await login(context, "admin");
   const created = await call(admin, "POST", "/api/mcp/servers", {
@@ -290,6 +304,15 @@ async function createBudget(fixture: Fixture, body: Record<string, unknown>): Pr
   const response = await caller(fixture.context)(fixture.admin, "POST", "/api/budgets", { period: "month", warnThresholdPct: 0.8, ...body });
   expect(response.statusCode, response.body).toBe(200);
   return response.json<{ budget: { id: string } }>().budget.id;
+}
+
+/** Deletes every budget through the route (the instance's budget copy is refreshed at once). */
+async function deleteBudgets(fixture: Fixture): Promise<void> {
+  const call = caller(fixture.context);
+  const listed = await call(fixture.admin, "GET", "/api/budgets");
+  for (const budget of listed.json<{ budgets: Array<{ id: string }> }>().budgets) {
+    expect((await call(fixture.admin, "DELETE", `/api/budgets/${budget.id}`)).statusCode).toBe(200);
+  }
 }
 
 /** A run's usage as usage_events records it. */
@@ -426,7 +449,7 @@ describe("migration v54", () => {
     expect(rows).toEqual([{ client_id: "cl-a", toolset_id: "ts-a" }]);
     const window = { from: new Date(Date.now() - 60_000).toISOString(), to: new Date(Date.now() + 60_000).toISOString() };
     expect(await store.queryBudgetUsage(window)).toEqual({ costUsd: 7.5, totalTokens: 75 });
-    expect(await store.queryBudgetUsage({ ...window, client: { id: "cl-a", name: "Agent A2" } })).toEqual({ costUsd: 3.5, totalTokens: 35 });
+    expect(await store.queryBudgetUsage({ ...window, clientId: "cl-a" })).toEqual({ costUsd: 3.5, totalTokens: 35 });
     // The project's own run plus the run and sampling through its toolset.
     expect(await store.queryBudgetUsage({ ...window, projectId: "proj-gw" })).toEqual({ costUsd: 5.5, totalTokens: 55 });
     // Workflow and user scopes count runs only.
@@ -626,16 +649,28 @@ describe("a block budget refuses runs from every trigger", () => {
     expect((await runs(store)).length).toBe(runsBefore);
   });
 
-  it("records a schedule a block budget refused as a failed run with the reason", async () => {
+  it("records one failed run per schedule and budget period; later refused fires only count on it (D13)", async () => {
     const fixture = await overGlobalBudget();
     const { store } = fixture.context;
     await store.upsertWorkflow(triggerWorkflow("wf-cron", "schedule_trigger"));
-    await fixture.context.schedule!({ workflowId: "wf-cron", workflowName: "cron", scheduleNodeId: "start", cronExpression: "0 0 1 1 *", timezone: "UTC", firedAt: new Date().toISOString(), scheduledFor: new Date().toISOString() });
+    // A minutely schedule under a used-up budget: five fires, one run.
+    for (let minute = 0; minute < 5; minute += 1) {
+      const at = new Date(Date.now() + minute * 60_000).toISOString();
+      await fixture.context.schedule!({ workflowId: "wf-cron", workflowName: "cron", scheduleNodeId: "start", cronExpression: "* * * * *", timezone: "UTC", firedAt: at, scheduledFor: at });
+    }
     const cron = (await runs(store)).filter((run) => run.workflowId === "wf-cron");
     expect(cron).toHaveLength(1);
     expect(cron[0]).toMatchObject({ status: "error", triggerType: "cron" });
     const detail = await store.getExecutionHistory(cron[0]!.id);
     expect(detail?.error).toBe('Budget "Deployment cap" exceeded for the current month. The run did not start.');
+    expect(detail?.output).toMatchObject({ refusedFires: 5, periodStart: expect.any(String), budgetId: expect.any(String) });
+    // Another budget refusing it is another record (its own period and reason).
+    await deleteBudgets(fixture);
+    await createBudget(fixture, { name: "Cron cap", scopeType: "workflow", scopeId: "wf-cron", limitType: "tokens", limitValue: 1, action: "block" });
+    await seedRunUsage(store, { tokens: 5, workflowId: "wf-cron" });
+    const at = new Date().toISOString();
+    await fixture.context.schedule!({ workflowId: "wf-cron", workflowName: "cron", scheduleNodeId: "start", cronExpression: "* * * * *", timezone: "UTC", firedAt: at, scheduledFor: at });
+    expect((await runs(store)).filter((run) => run.workflowId === "wf-cron")).toHaveLength(2);
   });
 
   it("refuses a gateway workflow tool whose own workflow budget is used up, as a JSON-RPC error", async () => {
@@ -649,7 +684,7 @@ describe("a block budget refuses runs from every trigger", () => {
     expect((await call("ask", { text: "x" })).outcome).toBe("ok");
   });
 
-  it("does not refuse a replay of a run's MCP calls, nor runs a warn or another workflow's budget covers", async () => {
+  it("does not refuse runs a warn or another workflow's budget covers; refuses an MCP replay, whose model calls are live (D12)", async () => {
     const fixture = await setup();
     const { store } = fixture.context;
     await store.upsertWorkflow(triggerWorkflow("wf-hook", "webhook_input"));
@@ -663,7 +698,8 @@ describe("a block budget refuses runs from every trigger", () => {
     await createBudget(fixture, { name: "Deployment cap", scopeType: "global", limitType: "tokens", limitValue: 10, action: "block" });
     expect((await fixture.context.app.inject({ method: "POST", url: "/webhook/hook-wf-hook", payload: {} })).statusCode).toBe(402);
     const replay = await caller(fixture.context)(fixture.admin, "POST", `/api/executions/${sourceId}/replay`, {});
-    expect(replay.statusCode, replay.body).toBe(200);
+    expect(replay.statusCode, replay.body).toBe(402);
+    expect(replay.json()).toMatchObject({ error: "budget_exceeded" });
   });
 
   it("refuses a gateway call under a used-up global block budget", async () => {
@@ -808,5 +844,442 @@ describe("the client update route", () => {
     const response = await caller(fixture.context)(fixture.admin, "POST", "/api/budgets", { name: "x", scopeType: "mcp_client", scopeId: "nope", period: "day", limitType: "usd", limitValue: 1, action: "block" });
     expect(response.statusCode).toBe(400);
     expect((await caller(fixture.context)(fixture.admin, "POST", "/api/budgets", { name: "x", scopeType: "toolset", scopeId: "t", period: "day", limitType: "usd", limitValue: 1, action: "block" })).statusCode).toBe(400);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Review fixes (M1-M5, L1-L9)
+// ---------------------------------------------------------------------------
+
+/** Polls until `check` returns a value (no fixed sleeps). */
+async function until<T>(check: () => Promise<T | null | undefined | false>, what: string, timeoutMs = 10_000): Promise<T> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const value = await check();
+    if (value) return value;
+    if (Date.now() > deadline) throw new Error(`Timed out waiting for ${what}`);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+}
+
+/** A toolset of its own with one workflow tool and one client; calls the tool in one session. */
+async function ownToolset(fixture: Fixture, workflow: Workflow, clientName = "Approval agent") {
+  const call = caller(fixture.context);
+  await fixture.context.store.upsertWorkflow(workflow);
+  const made = await call(fixture.admin, "POST", "/api/mcp/toolsets", { name: `Tools ${workflow.id}`, projectId: "default", members: [{ kind: "workflow", workflowId: workflow.id }] });
+  expect(made.statusCode, made.body).toBe(201);
+  const toolset = made.json<{ toolset: McpToolset }>().toolset;
+  const created = await call(fixture.admin, "POST", "/api/mcp/clients", { name: clientName, toolsetIds: [toolset.id], role: "builder" });
+  expect(created.statusCode, created.body).toBe(201);
+  const { client, token } = created.json<{ client: McpClient; token: string }>();
+  const session = await openSession(fixture.context, toolset.slug, token);
+  return {
+    toolset,
+    client,
+    token,
+    session,
+    callTool: async (tool: string, args: Record<string, unknown> = {}) =>
+      await callNamed(fixture.context, toolset.slug, token, session, await toolName(fixture.context, toolset.slug, token, session, tool), args)
+  };
+}
+
+/** A workflow tool that waits for an admin's approval, then asks the echo model (the resumed part spends tokens). */
+function approvalTool(id: string): Workflow {
+  return {
+    id,
+    name: "Approve then ask",
+    schemaVersion: "1.0.0",
+    workflowVersion: 1,
+    projectId: "default",
+    nodes: [
+      {
+        id: "trigger",
+        type: "mcp_server_trigger",
+        name: "Trigger",
+        position: { x: 0, y: 0 },
+        config: { path: `${id}-path`, toolName: "approved_ask", inputSchema: { type: "object", properties: { text: { type: "string" } } }, authMode: "public" }
+      },
+      { id: "gate", type: "approval_gate", name: "Gate", position: { x: 200, y: 0 }, config: { message: "Go on?", approverRoles: ["admin"], timeoutMinutes: 60 } },
+      { id: "model", type: "llm_call", name: "Model", position: { x: 400, y: 0 }, config: { provider: { providerId: "echo", model: "echo-1" }, userPromptTemplate: "Say {{text}} after the approval" } },
+      { id: "out", type: "output", name: "Out", position: { x: 600, y: 0 }, config: {} }
+    ],
+    edges: [
+      { id: "e1", source: "trigger", target: "gate" },
+      { id: "e2", source: "gate", sourceHandle: "approved", target: "model" },
+      { id: "e3", source: "model", target: "out" }
+    ]
+  } as Workflow;
+}
+
+describe("review M1: a gateway run that waits on an approval stays the client's", () => {
+  it("charges the resumed part to the client and the toolset's project, not to the approver, and keeps it across the pause", async () => {
+    const fixture = await setup();
+    const { store } = fixture.context;
+    const own = await ownToolset(fixture, approvalTool("wf-approve-ask"));
+    const budgetId = await createBudget(fixture, { name: "Approval agent cap", scopeType: "mcp_client", scopeId: own.client.id, limitType: "tokens", limitValue: 1_000_000, action: "warn" });
+    const paused = await own.callTool("approved_ask", { text: "hello" });
+    expect(paused.text).toContain("waiting for an approval");
+    const [run] = (await store.listExecutionHistory({ workflowId: "wf-approve-ask", pageSize: 5 })).items;
+    // The paused state and the run's custom data carry the client and toolset.
+    const state = await store.getWorkflowExecutionState(run!.id);
+    expect((state!.state as { gatewayUsage?: unknown }).gatewayUsage).toEqual({ clientId: own.client.id, clientName: own.client.name, toolsetId: own.toolset.id, toolsetProjectId: "default" });
+    const before = (await clientBudgets(fixture, fixture.admin, own.client.id)).find((entry) => entry.budgetId === budgetId)!.current;
+    const approved = await caller(fixture.context)(fixture.admin, "POST", `/api/approvals/${run!.id}/approve`, {});
+    expect(approved.statusCode, approved.body).toBe(200);
+    const finished = await store.getExecutionHistory(run!.id);
+    expect(finished?.status).toBe("success");
+    expect(finished?.triggeredBy).toBe("admin@example.com");
+    const rows = await testSql(store).all<{ client_id: string | null; toolset_id: string | null; user_id: string | null; user_email: string | null; total_tokens: number | string }>(
+      "SELECT client_id, toolset_id, user_id, user_email, total_tokens FROM usage_events WHERE execution_id = ? AND trigger_type = ?",
+      run!.id,
+      "approval_resume"
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ client_id: own.client.id, toolset_id: own.toolset.id, user_id: `mcp-client:${own.client.name}`, user_email: null });
+    const spent = Number(rows[0]!.total_tokens);
+    expect(spent).toBeGreaterThan(0);
+    const after = (await clientBudgets(fixture, fixture.admin, own.client.id)).find((entry) => entry.budgetId === budgetId)!.current;
+    expect(after - before).toBe(spent);
+    // The approver's own usage is untouched.
+    expect(await store.queryBudgetUsage({ from: new Date(Date.now() - 60_000).toISOString(), to: new Date(Date.now() + 60_000).toISOString(), userKey: "admin@example.com" })).toEqual({ costUsd: 0, totalTokens: 0 });
+    expect((finished!.customData as Record<string, unknown>).gatewayUsage).toMatchObject({ clientId: own.client.id });
+  });
+
+  it("a caller cannot charge its run to a gateway client through custom data", async () => {
+    const fixture = await setup();
+    const { store } = fixture.context;
+    await store.upsertWorkflow(triggerWorkflow("wf-plain", "webhook_input"));
+    const planted = { clientId: fixture.client.id, clientName: fixture.client.name, toolsetId: fixture.toolset.id, toolsetProjectId: "default" };
+    const response = await caller(fixture.context)(fixture.admin, "POST", "/api/workflows/wf-plain/execute", { input: {}, customData: { gatewayUsage: planted, note: "kept" } });
+    expect(response.statusCode, response.body).toBe(200);
+    const executionId = response.json<{ executionId: string }>().executionId;
+    const history = await store.getExecutionHistory(executionId);
+    expect(history?.customData).toEqual({ note: "kept" });
+    const row = await testSql(store).get<{ client_id: string | null }>("SELECT client_id FROM usage_events WHERE execution_id = ?", executionId);
+    expect(row?.client_id ?? null).toBeNull();
+  });
+});
+
+describe("review M2 / D13: refused app triggers", () => {
+  function rssWorkflow(id: string): Workflow {
+    return {
+      id,
+      name: "Feed",
+      schemaVersion: "1.0.0",
+      workflowVersion: 1,
+      projectId: "default",
+      nodes: [
+        { id: "feed", type: "rss_trigger", name: "Feed", position: { x: 0, y: 0 }, config: { feedUrl: "https://feeds.example.com/rss", pollIntervalSeconds: 3600 } },
+        { id: "out", type: "output", name: "Out", position: { x: 200, y: 0 }, config: { outputKey: "result", responseTemplate: "ran" } }
+      ],
+      edges: [{ id: "e1", source: "feed", target: "out" }]
+    } as Workflow;
+  }
+
+  it("keeps an RSS item a budget refused unseen, records one failed run, and delivers it once the budget allows", async () => {
+    const feed = `<rss><channel><item><guid>item-1</guid><title>One</title><link>https://feeds.example.com/1</link></item><item><guid>item-0</guid><title>Zero</title></item></channel></rss>`;
+    const fetchImpl = vi.fn(async () => new Response(feed, { status: 200, headers: { "content-type": "application/rss+xml" } })) as unknown as typeof fetch;
+    let triggers: TriggerService | undefined;
+    const fixture = await setup({}, "default", {
+      triggerService: (store) => (triggers = new TriggerService(store, () => undefined, fetchImpl))
+    });
+    const { store } = fixture.context;
+    triggers!.setOutboundGuard(DEFAULT_OUTBOUND_GUARD, async () => ["93.184.216.34"]);
+    const workflow = rssWorkflow("wf-feed");
+    await store.upsertWorkflow(workflow);
+    // The feed was polled before: item-0 is known, item-1 is new.
+    await store.saveTriggerState({ workflowId: workflow.id, nodeId: "feed", triggerType: "rss_trigger", state: { seen: ["item-0"] } });
+    await createBudget(fixture, { name: "Deployment cap", scopeType: "global", limitType: "tokens", limitValue: 10, action: "block" });
+    await seedRunUsage(store, { tokens: 50 });
+    const start = () => (triggers as unknown as { startRssTrigger: (wf: Workflow, node: Workflow["nodes"][number]) => () => void }).startRssTrigger(workflow, workflow.nodes[0]!);
+    const feedRuns = async () => (await runs(store)).filter((entry) => entry.workflowId === workflow.id);
+
+    const firstPoll = start();
+    const refused = await until(async () => (await feedRuns()).find((entry) => entry.status === "error"), "the refused run");
+    expect(refused.triggerType).toBe("rss");
+    expect((await store.getExecutionHistory(refused.id))?.error).toBe('Budget "Deployment cap" exceeded for the current month. The run did not start.');
+    await until(async () => {
+      const seen = ((await store.getTriggerState(workflow.id, "feed")) as { seen?: string[] } | null)?.seen ?? [];
+      return seen.includes("item-0") && !seen.includes("item-1");
+    }, "the refused item to stay unseen");
+    firstPoll();
+    // A second poll under the same budget: still one failed run, its counter bumped.
+    const secondPoll = start();
+    await until(async () => ((await store.getExecutionHistory(refused.id))?.output as { refusedFires?: number } | undefined)?.refusedFires === 2, "the second refusal to be counted");
+    secondPoll();
+    expect(await feedRuns()).toHaveLength(1);
+
+    await deleteBudgets(fixture);
+    const thirdPoll = start();
+    const delivered = await until(async () => (await feedRuns()).find((entry) => entry.status === "success"), "the item to be delivered");
+    thirdPoll();
+    expect(JSON.stringify((await store.getExecutionHistory(delivered.id))?.input)).toContain("item-1");
+    const seen = ((await store.getTriggerState(workflow.id, "feed")) as { seen?: string[] }).seen;
+    expect(seen).toEqual(expect.arrayContaining(["item-0", "item-1"]));
+  });
+});
+
+describe("review M3: the client's Governance lists every budget that applies", () => {
+  it("returns the client's own, its toolsets' project and the deployment's budgets, labelled, and marks the refusing one", async () => {
+    const fixture = await setup();
+    const builder = await login(fixture.context, "builder");
+    const own = await createBudget(fixture, { name: "IDE cap", scopeType: "mcp_client", scopeId: fixture.client.id, limitType: "tokens", limitValue: 1_000, action: "block" });
+    const project = await createBudget(fixture, { name: "Team cap", scopeType: "project", scopeId: "default", limitType: "tokens", limitValue: 1_000, action: "warn" });
+    const global = await createBudget(fixture, { name: "Deployment cap", scopeType: "global", limitType: "tokens", limitValue: 10, action: "block" });
+    // Not this client's: another client's budget and another project's.
+    await createBudget(fixture, { name: "Peer cap", scopeType: "mcp_client", scopeId: fixture.peer.id, limitType: "tokens", limitValue: 1, action: "block" });
+    await createBudget(fixture, { name: "Elsewhere", scopeType: "project", scopeId: "proj-none", limitType: "tokens", limitValue: 1, action: "block" });
+    await seedRunUsage(fixture.context.store, { tokens: 50, projectId: "elsewhere-project" });
+    const projectName = (await fixture.context.store.getProject("default"))!.name;
+    const listed = await clientBudgets(fixture, builder, fixture.client.id);
+    expect(listed.map((entry) => [entry.budgetId, entry.scopeLabel, entry.refusing])).toEqual([
+      [own, "This client", false],
+      [project, `Project ${projectName}`, false],
+      [global, "Deployment", true]
+    ]);
+    // The refusing one is what the client's calls get.
+    expect((await toolCaller(fixture)("calculator", { expression: "1+1" })).error).toMatchObject({ code: -32032, data: { budgetId: global } });
+  });
+});
+
+describe("review M4 / D12: replays with live calls are budget-checked", () => {
+  function askHook(id: string): Workflow {
+    return {
+      id,
+      name: "Ask hook",
+      schemaVersion: "1.0.0",
+      workflowVersion: 1,
+      projectId: "default",
+      nodes: [
+        { id: "hook", type: "webhook_input", name: "Hook", position: { x: 0, y: 0 }, config: { path: `hook-${id}`, method: "POST" } },
+        { id: "model", type: "llm_call", name: "Model", position: { x: 200, y: 0 }, config: { provider: { providerId: "echo", model: "echo-1" }, userPromptTemplate: "Say hi" } },
+        { id: "out", type: "output", name: "Out", position: { x: 400, y: 0 }, config: {} }
+      ],
+      edges: [
+        { id: "e1", source: "hook", target: "model" },
+        { id: "e2", source: "model", target: "out" }
+      ]
+    } as Workflow;
+  }
+
+  async function job(fixture: Fixture, body: Record<string, unknown>) {
+    const call = caller(fixture.context);
+    const started = await call(fixture.admin, "POST", "/api/replay/runs", body);
+    expect(started.statusCode, started.body).toBe(202);
+    const runId = started.json<{ run: { id: string } }>().run.id;
+    return await until(async () => {
+      const view = (await call(fixture.admin, "GET", `/api/replay/runs/${runId}`)).json<{ run: { status: string; summary: { total: number; pass: number }; results: Array<{ id: string; status: string }> } }>().run;
+      return ["queued", "running"].includes(view.status) ? null : view;
+    }, "the replay job", 30_000);
+  }
+
+  it("refuses a golden-run replay with live models (402) and a live job case, and lets a tape-only job run", async () => {
+    const fixture = await setup();
+    const call = caller(fixture.context);
+    await fixture.context.store.upsertWorkflow(askHook("wf-golden-ask"));
+    const recorded = await call(fixture.admin, "POST", "/api/workflows/wf-golden-ask/execute", { input: {}, record: true });
+    expect(recorded.statusCode, recorded.body).toBe(200);
+    const saved = await call(fixture.admin, "POST", "/api/replay/recordings", { executionId: recorded.json<{ executionId: string }>().executionId, name: "Golden" });
+    expect(saved.statusCode, saved.body).toBe(201);
+    const recordingId = saved.json<{ recording: { id: string } }>().recording.id;
+    const set = (await call(fixture.admin, "POST", "/api/eval/datasets", { name: "Suite", workflowId: "wf-golden-ask" })).json<{ dataset: { id: string } }>().dataset.id;
+    expect((await call(fixture.admin, "POST", `/api/eval/datasets/${set}/recordings`, { recordingId })).statusCode).toBe(201);
+    // Under the cap everything runs.
+    expect((await call(fixture.admin, "POST", `/api/replay/recordings/${recordingId}/replay`, {})).statusCode).toBe(200);
+    const budgetId = await createBudget(fixture, { name: "Deployment cap", scopeType: "global", limitType: "tokens", limitValue: 10, action: "block" });
+    await seedRunUsage(fixture.context.store, { tokens: 50 });
+
+    const live = await call(fixture.admin, "POST", `/api/replay/recordings/${recordingId}/replay`, {});
+    expect(live.statusCode, live.body).toBe(402);
+    expect(live.json()).toMatchObject({ error: "budget_exceeded", budgetId });
+    const liveJob = await job(fixture, { datasetIds: [set], models: "live" });
+    expect(liveJob.summary.pass).toBe(0);
+    // Model calls from the golden run's tape, MCP strict: no live call, so not refused.
+    const tapeJob = await job(fixture, { datasetIds: [set], models: "replay" });
+    expect(tapeJob.summary).toMatchObject({ total: 1, pass: 1 });
+  }, 60_000);
+});
+
+describe("review M5: paths the first round left untested", () => {
+  async function overGlobal(fixture: Fixture) {
+    const budgetId = await createBudget(fixture, { name: "Deployment cap", scopeType: "global", limitType: "tokens", limitValue: 10, action: "block" });
+    await seedRunUsage(fixture.context.store, { tokens: 50 });
+    return budgetId;
+  }
+
+  it("refuses POST /enqueue under a used-up budget, also when the body names an exempt trigger type", async () => {
+    const fixture = await setup({}, "default", { queue: true });
+    const { store } = fixture.context;
+    await store.upsertWorkflow(triggerWorkflow("wf-queued", "webhook_input"));
+    await overGlobal(fixture);
+    for (const body of [{}, { triggerType: "replay" }, { triggerType: "eval" }]) {
+      const response = await caller(fixture.context)(fixture.admin, "POST", "/api/workflows/wf-queued/enqueue", body);
+      expect(response.statusCode, response.body).toBe(402);
+      expect(response.json()).toMatchObject({ error: "budget_exceeded" });
+    }
+    expect((await runs(store)).filter((entry) => entry.workflowId === "wf-queued")).toHaveLength(0);
+    await deleteBudgets(fixture);
+    expect((await caller(fixture.context)(fixture.admin, "POST", "/api/workflows/wf-queued/enqueue", { triggerType: "replay" })).statusCode).toBeLessThan(300);
+  });
+
+  it("does not use up a webhook's idempotency key on a refusal, and audits the refusal once per period (L7)", async () => {
+    const fixture = await setup();
+    const { store, app } = fixture.context;
+    const workflow = triggerWorkflow("wf-idem", "webhook_input");
+    workflow.nodes[0]!.config = { path: "hook-idem", method: "POST", authMode: "none", idempotencyEnabled: true, idempotencyHeaderName: "idempotency-key" };
+    await store.upsertWorkflow(workflow);
+    const budgetId = await overGlobal(fixture);
+    const send = () => app.inject({ method: "POST", url: "/webhook/hook-idem", headers: { "idempotency-key": "key-1" }, payload: { a: 1 } });
+    expect((await send()).statusCode).toBe(402);
+    expect((await send()).statusCode).toBe(402);
+    const audits = await until(async () => {
+      const found = await auditEvents(store, "budget.run_refused");
+      return found.length > 0 ? found : null;
+    }, "the refusal audit");
+    expect(audits).toHaveLength(1);
+    expect(audits[0]).toMatchObject({ resourceType: "workflow", resourceId: "wf-idem", outcome: "denied" });
+    expect(audits[0]!.metadata).toMatchObject({ triggerType: "webhook", budgetId });
+    await deleteBudgets(fixture);
+    const accepted = await send();
+    expect(accepted.statusCode, accepted.body).toBe(200);
+    // And the key now holds that result.
+    expect((await send()).statusCode).toBe(200);
+    expect((await runs(store)).filter((entry) => entry.workflowId === "wf-idem")).toHaveLength(1);
+  });
+
+  it("answers 503 to a trigger and a tool error to a gateway call when the budgets were never readable, without the store's text", async () => {
+    const fixture = await setup({}, "default", {
+      beforeApp: (store) => {
+        vi.spyOn(store, "listBudgets").mockRejectedValue(new Error("connection refused at 10.0.0.9"));
+      }
+    });
+    await fixture.context.store.upsertWorkflow(triggerWorkflow("wf-down", "webhook_input"));
+    const refused = await fixture.context.app.inject({ method: "POST", url: "/webhook/hook-wf-down", payload: {} });
+    expect(refused.statusCode).toBe(503);
+    expect(refused.headers["retry-after"]).toBe("5");
+    expect(refused.json()).toEqual({ error: "Budgets could not be checked; try again shortly." });
+    for (const tool of ["calculator", "lookup"]) {
+      const answer = await toolCaller(fixture)(tool, tool === "calculator" ? { expression: "1+1" } : {});
+      expect(answer).toMatchObject({ outcome: "tool_error", text: "Budgets could not be checked for this call, so it was not sent. Try again." });
+    }
+    expect((await runs(fixture.context.store)).filter((entry) => entry.workflowId === "wf-down")).toHaveLength(0);
+  });
+
+  describe("a call's concurrency slot is given back", () => {
+    async function oneAtOnce(fixture: Fixture) {
+      const response = await caller(fixture.context)(fixture.admin, "PATCH", `/api/mcp/clients/${fixture.client.id}`, { rateLimit: { maxConcurrent: 1 } });
+      expect(response.statusCode, response.body).toBe(200);
+    }
+
+    /** Holds every calculator call until released; `entered` resolves when one is inside the server. */
+    function holdCalculator() {
+      let release: () => void = () => undefined;
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let entered: () => void = () => undefined;
+      const inside = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      const original = MockMCPServerAdapter.prototype.invokeTool;
+      vi.spyOn(MockMCPServerAdapter.prototype, "invokeTool").mockImplementation(async function (this: MockMCPServerAdapter, ...args: Parameters<MockMCPServerAdapter["invokeTool"]>) {
+        if (args[0] === "calculator") {
+          entered();
+          await held;
+        }
+        return await original.apply(this, args);
+      });
+      return { release, inside };
+    }
+
+    it("when the call fails", async () => {
+      const fixture = await setup();
+      await oneAtOnce(fixture);
+      const spy = vi.spyOn(MockMCPServerAdapter.prototype, "invokeTool").mockRejectedValueOnce(new Error("server crashed"));
+      const call = toolCaller(fixture);
+      expect((await call("calculator", { expression: "1+1" })).outcome).toBe("tool_error");
+      spy.mockRestore();
+      expect((await call("calculator", { expression: "1+1" })).outcome).toBe("ok");
+    });
+
+    it("when the client cancels the call", async () => {
+      const fixture = await setup();
+      await oneAtOnce(fixture);
+      const { release, inside } = holdCalculator();
+      const { context, toolset, token } = fixture;
+      const session = await openSession(context, toolset.slug, token);
+      const name = await toolName(context, toolset.slug, token, session, "calculator");
+      const pending = rpc(context, toolset.slug, token, { jsonrpc: "2.0", id: "slow-1", method: "tools/call", params: { name, arguments: { expression: "1+1" } } }, { "mcp-session-id": session });
+      await inside;
+      expect((await callNamed(context, toolset.slug, token, session, name, { expression: "2+2" })).error?.data?.reason).toBe("concurrency_limited");
+      await rpc(context, toolset.slug, token, { jsonrpc: "2.0", method: "notifications/cancelled", params: { requestId: "slow-1", reason: "user stopped" } }, { "mcp-session-id": session });
+      await pending;
+      // The cancelled call no longer holds the slot, though the server has not answered it.
+      const lookup = await callNamed(context, toolset.slug, token, session, await toolName(context, toolset.slug, token, session, "lookup"));
+      expect(lookup.outcome).toBe("ok");
+      release();
+    });
+
+    it("when the session ends mid-call", async () => {
+      const fixture = await setup();
+      await oneAtOnce(fixture);
+      const { release, inside } = holdCalculator();
+      const { context, toolset, token } = fixture;
+      const session = await openSession(context, toolset.slug, token);
+      const name = await toolName(context, toolset.slug, token, session, "calculator");
+      const pending = rpc(context, toolset.slug, token, { jsonrpc: "2.0", id: "slow-2", method: "tools/call", params: { name, arguments: { expression: "1+1" } } }, { "mcp-session-id": session });
+      await inside;
+      const ended = await context.app.inject({ method: "DELETE", url: `/mcp/${toolset.slug}`, headers: { authorization: `Bearer ${token}`, "mcp-session-id": session } });
+      expect(ended.statusCode).toBeLessThan(300);
+      await pending;
+      const next = await openSession(context, toolset.slug, token);
+      const lookup = await callNamed(context, toolset.slug, token, next, await toolName(context, toolset.slug, token, next, "lookup"));
+      expect(lookup.outcome).toBe("ok");
+      release();
+    });
+  });
+
+  it("counts a client's pre-v54 runs by its current name from its creation on: a rename drops them, a later client of that name does not inherit them (L3)", async () => {
+    const fixture = await setup();
+    const call = caller(fixture.context);
+    const { store } = fixture.context;
+    const own = await createBudget(fixture, { name: "IDE cap", scopeType: "mcp_client", scopeId: fixture.client.id, limitType: "tokens", limitValue: 1_000, action: "warn" });
+    await seedRunUsage(store, { tokens: 80, userId: `mcp-client:${fixture.client.name}` });
+    await testSql(store).run("UPDATE usage_events SET created_at = ? WHERE user_id = ?", fixture.client.createdAt, `mcp-client:${fixture.client.name}`);
+    const current = async (clientId: string, budgetId: string) => (await clientBudgets(fixture, fixture.admin, clientId)).find((entry) => entry.budgetId === budgetId)!.current;
+    expect(await current(fixture.client.id, own)).toBe(80);
+    const oldName = fixture.client.name;
+    expect((await call(fixture.admin, "PATCH", `/api/mcp/clients/${fixture.client.id}`, { name: "IDE agent (renamed)" })).statusCode).toBe(200);
+    expect(await current(fixture.client.id, own)).toBe(0);
+    // A client made later under the old name: the older rows are not its.
+    const later = await call(fixture.admin, "POST", "/api/mcp/clients", { name: oldName, toolsetIds: [fixture.toolset.id], role: "builder" });
+    expect(later.statusCode, later.body).toBe(201);
+    const laterClient = later.json<{ client: McpClient }>().client;
+    const laterBudget = await createBudget(fixture, { name: "Later cap", scopeType: "mcp_client", scopeId: laterClient.id, limitType: "tokens", limitValue: 1_000, action: "warn" });
+    expect(await current(laterClient.id, laterBudget)).toBe(0);
+  });
+});
+
+describe("review L4: a gateway workflow tool's budgets are checked once, at the gateway", () => {
+  it("refuses a workflow tool under its workflow project's used-up budget before the call, and reads a matching budget once per call", async () => {
+    const fixture = await setup();
+    const call = caller(fixture.context);
+    const { store } = fixture.context;
+    expect((await call(fixture.admin, "POST", "/api/projects", { id: "proj-wf", name: "Workflows" })).statusCode).toBeLessThan(300);
+    await store.upsertWorkflow(lookupTool("wf-lookup", "proj-wf"));
+    // A matching block budget with room left: one usage read at the gateway, one for the run's alerts.
+    await createBudget(fixture, { name: "Roomy", scopeType: "global", limitType: "tokens", limitValue: 1_000_000, action: "block" });
+    const usage = vi.spyOn(store, "queryBudgetUsage");
+    const tools = toolCaller(fixture);
+    expect((await tools("lookup")).outcome).toBe("ok");
+    expect(usage).toHaveBeenCalledTimes(2);
+    usage.mockClear();
+    await createBudget(fixture, { name: "Workflow project", scopeType: "project", scopeId: "proj-wf", limitType: "tokens", limitValue: 10, action: "block" });
+    await seedRunUsage(store, { tokens: 50, projectId: "proj-wf" });
+    const runsBefore = (await runs(store)).length;
+    expect((await tools("lookup")).error).toMatchObject({ code: -32032, message: 'Budget "Workflow project" exceeded for the current month.' });
+    expect((await runs(store)).length).toBe(runsBefore);
+    // The toolset's server tools are not in that project.
+    expect((await tools("calculator", { expression: "1+1" })).outcome).toBe("ok");
   });
 });

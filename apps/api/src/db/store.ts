@@ -1711,6 +1711,26 @@ export interface Store {
      */
     unlessInterruptedWith?: string;
   }): Promise<boolean>;
+  /**
+   * 12.6 (D13) — a fired run (a schedule, an app trigger) a used-up budget refused, kept as one failed run per trigger
+   * per budget period: `id` is derived from them. The first refusal writes the run (`status = error`, the reason in
+   * `error`, `output_json = { budgetId, periodStart, refusedFires: 1, lastRefusedAt }`); each later one only adds one
+   * to `refusedFires` and sets `lastRefusedAt`, in one statement (two replicas firing at once count both, once).
+   * `created` is true only for the write that made the row.
+   */
+  recordBudgetRefusedRun(input: {
+    id: string;
+    workflowId: string;
+    workflowName?: string;
+    triggerType: string;
+    triggeredBy?: string;
+    inputJson?: unknown;
+    customData?: unknown;
+    error: string;
+    budgetId: string;
+    periodStart: string;
+    at: string;
+  }): Promise<{ created: boolean; refusedFires: number }>;
   listExecutionHistory(input: {
     page?: number;
     pageSize?: number;
@@ -2520,8 +2540,10 @@ export interface Store {
    * 12.6 — what a budget counts in [from, to): run usage (usage_events) plus the sampling cost and tokens of gateway
    * server-tool calls (mcp_tool_calls, source gateway). Scopes: none = everything; `workflowId` / `userKey` (user_id or
    * user_email) = those runs only, no gateway sampling; `projectId` = the project's runs, plus gateway runs and
-   * sampling through the project's toolsets; `client` = the client's gateway runs (by client_id, or for rows written
-   * before v54 by `user_id = 'mcp-client:<name>'`) and its sampling.
+   * sampling through the project's toolsets; `clientId` = the client's gateway runs and its sampling. Runs are matched
+   * by client_id; rows written before v54 (no client_id) by `user_id = 'mcp-client:<the client's current name>'`,
+   * only from the client's creation on, so a client made later under an old name does not inherit them. A rename
+   * drops the client's pre-v54 rows; two clients that existed together under one name before v54 both count them.
    */
   queryBudgetUsage(input: {
     from: string;
@@ -2529,7 +2551,7 @@ export interface Store {
     workflowId?: string;
     userKey?: string;
     projectId?: string;
-    client?: { id: string; name: string };
+    clientId?: string;
   }): Promise<{ costUsd: number; totalTokens: number }>;
   /** Records a fired budget alert; false when the store refused it as a duplicate for the same budget, window and
    * severity, or because the budget no longer exists (Postgres, where two instances can pass the debounce check

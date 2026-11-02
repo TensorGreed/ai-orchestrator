@@ -53,7 +53,7 @@ import {
 import type { ProviderRegistry } from "@ai-orchestrator/provider-sdk";
 import { createMcpSamplingHandler, referencesSecretIn, type GuardRunResolution } from "@ai-orchestrator/workflow-engine";
 import type { GuardService } from "./services/guard-service.js";
-import { BudgetExceededError, type BudgetCheckContext, type BudgetService } from "./services/budget-service.js";
+import type { BudgetCheckContext, BudgetExceededError, BudgetService } from "./services/budget-service.js";
 import { GatewayClientLimiter } from "./services/mcp-gateway-limits.js";
 import { retryAfterSeconds } from "./run-helpers.js";
 import { checkGatewayCall, type GatewayGuardChannel, type GatewayGuardOutcome } from "./services/mcp-gateway-guard.js";
@@ -760,12 +760,16 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     return total;
   };
 
-  /** 12.6 — who a gateway call's budgets are matched against: the client, the toolset's project, the workflow. */
-  const budgetContext = (auth: AuthenticatedClient, toolset: McpToolset, workflowId: string | null): BudgetCheckContext => ({
-    workflowId,
-    projectId: null,
+  /**
+   * 12.6 — who a gateway call's budgets are matched against: the client and the toolset's project and, for a workflow
+   * tool, the workflow, its project and the name its run is recorded under (as the run's own admission would match).
+   * A workflow tool's run is not checked again when it starts (one check per call).
+   */
+  const budgetContext = (auth: AuthenticatedClient, toolset: McpToolset, workflow: { workflowId: string; projectId: string | null } | null): BudgetCheckContext => ({
+    workflowId: workflow?.workflowId ?? null,
+    projectId: workflow?.projectId ?? null,
     userEmail: null,
-    userId: null,
+    userId: workflow ? `mcp-client:${auth.client.name}` : null,
     client: { id: auth.client.id, name: auth.client.name },
     toolsetProjectId: toolset.projectId ?? null
   });
@@ -1027,9 +1031,6 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
           }
         });
       } catch (error) {
-        // 12.6 — a block budget of the workflow, its project or its user refused the run before it started: the
-        // client gets the gateway's budget error, as for the budgets checked before the call.
-        if (error instanceof BudgetExceededError) throw error;
         outcome = { status: "error", error: error instanceof Error ? error.message : String(error) };
       }
     }
@@ -1496,7 +1497,7 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     if (deps.budgets) {
       let blocked: BudgetExceededError | null;
       try {
-        blocked = await deps.budgets.checkBlock(budgetContext(auth, toolset, tool.kind === "workflow" ? tool.workflowId : null));
+        blocked = await deps.budgets.checkBlock(budgetContext(auth, toolset, tool.kind === "workflow" ? { workflowId: tool.workflowId, projectId: tool.projectId } : null));
       } catch (error) {
         app.log.warn(
           { err: deps.redact(error instanceof Error ? error.message : String(error)), toolsetId: toolset.id, clientId: auth.client.id, tool: tool.name },
@@ -1580,9 +1581,7 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
       }
     });
     try {
-      let result: Awaited<ReturnType<typeof callServerTool>>;
-      try {
-        result =
+      const result =
         tool.kind === "workflow"
           ? await callWorkflowTool({ session, auth, toolset, tool, args: callArgs, executionId, callExecutionId, progress, ...(callLabels ? { callLabels } : {}), ...(guardStack ? { guardStack } : {}) })
           : await callServerTool({
@@ -1599,10 +1598,6 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
               ...(policyDecision ? { policyDecision } : {}),
               ...(usedApprovalId ? { approvalId: usedApprovalId } : {})
             });
-      } catch (error) {
-        if (error instanceof BudgetExceededError) return await budgetRefusal(session, auth, toolset, request, tool.name, error);
-        throw error;
-      }
       // Phase 12.4 — refused before reaching the server (even when the client cancelled meanwhile): the approval it
       // used is still good for a retry. A call cancelled while still queued is handled in callServerTool.
       if (isRetryLater(result) && usedApprovalId) await store.restoreMcpGatewayApproval(usedApprovalId);
@@ -2368,7 +2363,8 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     return { client: await clientView(updated) };
   });
 
-  // 12.6 — the budgets scoped to a client, with what each counted this period (the client's Governance section).
+  // 12.6 — every budget that applies to a client (its own, its toolsets' projects', the deployment's), with what each
+  // counted this period and whether it refuses the client's calls now (the client's Governance section).
   app.get<{ Params: { id: string } }>("/api/mcp/clients/:id/budgets", async (request, reply) => {
     const user = await deps.requireRole(request, reply, ["builder"]);
     if (!user) return reply;
@@ -2377,7 +2373,7 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
       reply.code(404);
       return { error: "Client not found" };
     }
-    return { clientId: client.id, budgets: deps.budgets ? await deps.budgets.clientUsage({ id: client.id, name: client.name }) : [] };
+    return { clientId: client.id, budgets: deps.budgets ? await deps.budgets.clientUsage({ id: client.id, name: client.name, toolsetIds: client.toolsetIds }) : [] };
   });
 
   // Phase 12.4 — gateway calls a require_approval rule held back. Admins decide; the client retries the call.

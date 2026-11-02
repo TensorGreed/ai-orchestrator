@@ -17,6 +17,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import {
   GATEWAY_GUARD_CUSTOM_DATA_KEY,
+  GATEWAY_USAGE_CUSTOM_DATA_KEY,
   parseGatewayGuardStack,
   unionDataLabels,
   workflowExecuteRequestSchema,
@@ -656,8 +657,10 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
     const executionId = crypto.randomUUID();
     await auditRunAction(request, user, "execution.replayed", { executionId, workflowId: workflow.id, projectId: workflow.projectId }, { sourceExecutionId: source.id, cassetteId: cassette.id, mode });
     const storedInput = asRecord(source.input);
+    // 12.6 — a replay is not the gateway client's run: its usage is the replaying user's.
+    const { [GATEWAY_USAGE_CUSTOM_DATA_KEY]: _sourceUsage, ...sourceCustomData } = asRecord(source.customData);
     const customData = {
-      ...asRecord(source.customData),
+      ...sourceCustomData,
       mcpReplay: { sourceExecutionId: source.id, cassetteId: cassette.id, mode }
     };
     const sourceGatewayGuard = parseGatewayGuardStack(asRecord(source.customData)[GATEWAY_GUARD_CUSTOM_DATA_KEY]);

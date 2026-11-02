@@ -290,7 +290,10 @@ export interface RunDispatcherDeps {
    * every run is admitted.
    */
   admit?: (spec: DispatchedRunSpec) => Promise<void>;
-  /** 12.6 — a fired run (a schedule, an app trigger) `admit` refused: it is recorded as a failed run with the reason. */
+  /**
+   * 12.6 (D13) — a fired run (a schedule, an app trigger) `admit` refused: recorded as one failed run with the reason
+   * per trigger and budget period (later refusals only count on it).
+   */
   recordRefused?: (spec: DispatchedRunSpec, error: BudgetExceededError) => Promise<WorkflowExecutionResult>;
 }
 
@@ -374,13 +377,14 @@ export class RunDispatcher {
   async fire(
     spec: DispatchedRunSpec,
     options: { pool: string; queueItemId?: string }
-  ): Promise<{ queued: false; result: WorkflowExecutionResult } | { queued: true; deduplicated: boolean }> {
+  ): Promise<{ queued: false; result: WorkflowExecutionResult; refused?: BudgetExceededError } | { queued: true; deduplicated: boolean }> {
     try {
       await this.deps.admit?.(spec);
     } catch (error) {
-      // 12.6 — nobody waits on a fired run: a budget refusal is recorded as the run's failure, with the reason.
+      // 12.6 — nobody waits on a fired run: a budget refusal is recorded as a failed run with the reason. `refused`
+      // tells a polling trigger not to count what it fired as delivered.
       if (!(error instanceof BudgetExceededError) || !this.deps.recordRefused) throw error;
-      return { queued: false, result: await this.deps.recordRefused(spec, error) };
+      return { queued: false, result: await this.deps.recordRefused(spec, error), refused: error };
     }
     if (!(await this.deps.gate.useQueue(options.pool))) {
       return { queued: false, result: await this.deps.executeLocally(spec) };

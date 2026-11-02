@@ -433,6 +433,10 @@ export class PostgresStore implements Store {
   async saveExecutionHistory(...args: Parameters<Store["saveExecutionHistory"]>): ReturnType<Store["saveExecutionHistory"]> {
     return executions.saveExecutionHistory(this.ctx, ...args);
   }
+
+  async recordBudgetRefusedRun(...args: Parameters<Store["recordBudgetRefusedRun"]>): ReturnType<Store["recordBudgetRefusedRun"]> {
+    return executions.recordBudgetRefusedRun(this.ctx, ...args);
+  }
   async listExecutionHistory(...args: Parameters<Store["listExecutionHistory"]>): ReturnType<Store["listExecutionHistory"]> {
     return executions.listExecutionHistory(this.ctx, ...args);
   }

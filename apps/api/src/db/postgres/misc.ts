@@ -496,10 +496,13 @@ export async function queryBudgetUsage(ctx: PgContext, input: Parameters<Store["
     callParams.push(input.projectId);
     callFilters.push(`toolset_id IN (SELECT id FROM mcp_toolsets WHERE project_id = $${callParams.length})`);
   }
-  if (input.client) {
-    runParams.push(input.client.id, `mcp-client:${input.client.name}`);
-    runFilters.push(`(client_id = $${runParams.length - 1} OR (client_id IS NULL AND user_id = $${runParams.length}))`);
-    callParams.push(input.client.id);
+  if (input.clientId) {
+    // Pre-v54 rows by the client's current name, from its creation on (see Store.queryBudgetUsage).
+    runParams.push(input.clientId);
+    runFilters.push(`(client_id = $${runParams.length} OR (client_id IS NULL AND EXISTS (
+      SELECT 1 FROM mcp_clients c WHERE c.id = $${runParams.length} AND usage_events.user_id = 'mcp-client:' || c.name AND usage_events.created_at >= c.created_at
+    )))`);
+    callParams.push(input.clientId);
     callFilters.push(`client_id = $${callParams.length}`);
   }
   const runs = await ctx.queryOne<{ cost: unknown; tt: unknown }>(

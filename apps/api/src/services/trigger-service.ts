@@ -32,7 +32,12 @@ export interface TriggerExecutionInput {
   input: Record<string, unknown>;
 }
 
-type TriggerExecutionHandler = (input: TriggerExecutionInput) => Promise<void>;
+/**
+ * What the handler did with a fire. `refused` (12.6, D13): a used-up budget refused the run, so a polling trigger does
+ * not count the items as delivered (they fire again on a later poll, once the budget allows the run).
+ */
+export type TriggerDelivery = "delivered" | "refused";
+type TriggerExecutionHandler = (input: TriggerExecutionInput) => Promise<TriggerDelivery | void>;
 type SecretResolver = (secretRef?: { secretId: string }) => Promise<string | undefined>;
 type DnsResolver = (hostname: string) => Promise<string[]>;
 type Logger = (level: "info" | "warn" | "error", message: string, metadata?: unknown) => void;
@@ -444,7 +449,7 @@ export class TriggerService {
         if (prevMap.size === 0) return;
         if (matches.length === 0) return;
 
-        await this.fire({
+        const delivery = await this.fire({
           workflow,
           node,
           triggerType: "file",
@@ -453,6 +458,10 @@ export class TriggerService {
             file_events: matches
           }
         });
+        // 12.6 (D13) — refused by a budget: the earlier snapshot again, so these changes fire on a later poll.
+        if (delivery === "refused") {
+          await this.store.saveTriggerState({ workflowId: workflow.id, nodeId: node.id, triggerType: "file_trigger", state: prev });
+        }
       } catch (err) {
         this.logger("error", "file_trigger tick failed", {
           workflowId: workflow.id,
@@ -506,7 +515,7 @@ export class TriggerService {
         if (seen.size === 0) return; // baseline run
         if (fresh.length === 0) return;
 
-        await this.fire({
+        const delivery = await this.fire({
           workflow,
           node,
           triggerType: "rss",
@@ -515,6 +524,16 @@ export class TriggerService {
             rss_items: fresh
           }
         });
+        // 12.6 (D13) — refused by a budget: these items are not seen yet, so they fire on a later poll.
+        if (delivery === "refused") {
+          const refused = new Set(fresh.map((item) => item.id));
+          await this.store.saveTriggerState({
+            workflowId: workflow.id,
+            nodeId: node.id,
+            triggerType: "rss_trigger",
+            state: { seen: mergedSeen.filter((id) => !refused.has(id)) }
+          });
+        }
       } catch (err) {
         this.logger("error", "rss_trigger tick failed", {
           workflowId: workflow.id,
@@ -648,22 +667,23 @@ export class TriggerService {
     };
   }
 
-  private async fire(input: TriggerExecutionInput): Promise<void> {
+  private async fire(input: TriggerExecutionInput): Promise<TriggerDelivery> {
     if (!this.executeHandler) {
       this.logger("warn", "Trigger fired before execution handler was configured", {
         workflowId: input.workflow.id,
         nodeId: input.node.id
       });
-      return;
+      return "delivered";
     }
     try {
-      await this.executeHandler(input);
+      return (await this.executeHandler(input)) ?? "delivered";
     } catch (err) {
       this.logger("error", "Trigger execution handler threw", {
         workflowId: input.workflow.id,
         nodeId: input.node.id,
         error: err instanceof Error ? err.message : String(err)
       });
+      return "delivered";
     }
   }
 }
