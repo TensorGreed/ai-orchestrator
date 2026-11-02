@@ -119,7 +119,7 @@ test("picks a Guard profile in the toolset's detail", async () => {
   const section = page.getByTestId("gateway-guard-toolset");
   const picker = section.getByLabel("Guard profile for this toolset");
   await expect(picker).toHaveValue("");
-  await expect(section.getByText(/what clients send to this toolset's server tools/)).toBeVisible();
+  await expect(section.getByText(/what clients send to this toolset's tools/)).toBeVisible();
   await picker.selectOption(profileId);
   await section.getByRole("button", { name: "Save" }).click();
   await expect(section.getByText("Saved")).toBeVisible();
