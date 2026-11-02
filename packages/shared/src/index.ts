@@ -28,3 +28,4 @@ export * from "./tool-argument-summary";
 export * from "./mcp-policy-simulation";
 export * from "./taint-policy";
 export * from "./gateway-limits";
+export * from "./model-allowlist";

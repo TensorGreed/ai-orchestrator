@@ -574,7 +574,9 @@ export type ReplayHealthKind =
   | "live_read"
   | "mcp_live_read"
   | "baseline_error"
-  | "budget";
+  | "budget"
+  // 12.6 — a recorded model call the model allowlist refuses now (reported; the recorded answer is used).
+  | "model_not_allowed";
 
 export interface ReplayHealthWarning {
   kind: ReplayHealthKind;

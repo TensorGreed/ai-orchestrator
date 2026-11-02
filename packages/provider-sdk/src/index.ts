@@ -11,6 +11,7 @@ export * from "./types";
 export * from "./registry";
 export * from "./resilient-fetch";
 export * from "./model-tape";
+export * from "./gated-registry";
 export * from "./default-base-urls";
 export * from "./providers/echo";
 export * from "./providers/openai-compatible";

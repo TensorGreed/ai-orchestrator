@@ -145,7 +145,7 @@ import { executePhase35TriggerNode, PHASE35_TRIGGER_NODE_TYPES } from "./connect
 import { NO_CODE_SANDBOX_PLAN, codeNodesDisabledError, runJavaScriptCode, runPythonCode, type CodeSandboxPlan } from "./code-sandbox";
 import { runWithSandboxOwner } from "./quickjs-sandbox";
 import { sortWorkflowNodes, validateWorkflowGraph, computeDepthLevels } from "./validation";
-import { ErrorCategory, WorkflowError, remediationForCategory } from "@ai-orchestrator/shared";
+import { ErrorCategory, MODEL_NOT_ALLOWED_CODE, WorkflowError, remediationForCategory } from "@ai-orchestrator/shared";
 import { AgentGuardInterrupt, isAgentGuardInterrupt } from "@ai-orchestrator/agent-runtime";
 import { ApprovalHandoffSignal, approvedHandoffKeysFromState, isApprovalHandoffSignal, withoutReservedKeys, type ApprovalHandoffRequest } from "./approval-handoff";
 import { executeGuardNodeStep } from "./guard-node";
@@ -901,7 +901,7 @@ const CHAT_MODEL_NODE_TYPES = new Set([
   "google_gemini_chat_model"
 ]);
 
-function isChatModelNodeType(type: string): boolean {
+export function isChatModelNodeType(type: string): boolean {
   return CHAT_MODEL_NODE_TYPES.has(type);
 }
 
@@ -981,7 +981,7 @@ export function assertChatModelCredentials(
   );
 }
 
-function buildProviderFromModelNode(node: WorkflowNode): LLMProviderConfig | undefined {
+export function buildProviderFromModelNode(node: WorkflowNode): LLMProviderConfig | undefined {
   const nodeConfig = toRecord(node.config);
   if (node.type === "llm_call") {
     return normalizeProvider(nodeConfig.provider);
@@ -7508,6 +7508,10 @@ async function executeNodeWithRetry(
       }
       // A URL the outbound guard refuses is refused again on every attempt.
       if (error instanceof OutboundUrlBlockedError) {
+        throw error;
+      }
+      // 12.6 — a model the allowlist refuses is refused again on every attempt.
+      if (error instanceof Error && (error as Error & { code?: unknown }).code === MODEL_NOT_ALLOWED_CODE) {
         throw error;
       }
       if (error instanceof WorkflowError) {
