@@ -29,7 +29,7 @@ export type ModelAllowlistScope = (typeof MODEL_ALLOWLIST_SCOPES)[number];
 
 /** The `providerId` that matches every provider. */
 export const MODEL_ALLOWLIST_ANY_PROVIDER = "*";
-/** At most this many entries per scope (deployment, or one project): the list is read on every model call. */
+/** At most this many entries per scope (deployment, or one project): the list is checked on every model call. */
 export const MODEL_ALLOWLIST_MAX_ENTRIES_PER_SCOPE = 200;
 /** The error code a refused model call carries (`ModelNotAllowedError.code`). */
 export const MODEL_NOT_ALLOWED_CODE = "MODEL_NOT_ALLOWED";
@@ -53,14 +53,18 @@ const providerIdSchema = z
   .trim()
   .min(1, "Choose a provider")
   .max(100)
-  .regex(/^(\*|[A-Za-z0-9][A-Za-z0-9_.:-]*)$/, "A provider id, or * for any provider");
+  .regex(/^(\*|[A-Za-z0-9][A-Za-z0-9_.:-]*)$/, "A provider id, or * for any provider")
+  // Registry ids are lower case; `OpenAI` is stored (and matched) as `openai`.
+  .transform((value) => value.toLowerCase());
 
 const modelGlobSchema = z
   .string()
   .trim()
   .min(1, "Enter a model name or pattern (for example gpt-4o* or *)")
   .max(200)
-  .refine((value) => !/[\u0000-\u001f]/.test(value), "No control characters");
+  .refine((value) => !/[\u0000-\u001f]/.test(value), "No control characters")
+  // Matching ignores case, so the stored pattern is lower case and the unique index catches `GPT-4o*` vs `gpt-4o*`.
+  .transform((value) => value.toLowerCase());
 
 export const modelAllowlistEntryCreateSchema = z
   .object({
@@ -115,7 +119,8 @@ export function modelGlobMatches(glob: string, model: string): boolean {
 }
 
 export function modelAllowlistEntryMatches(entry: Pick<ModelAllowlistEntry, "providerId" | "modelGlob">, providerId: string, model: string): boolean {
-  return (entry.providerId === MODEL_ALLOWLIST_ANY_PROVIDER || entry.providerId === providerId) && modelGlobMatches(entry.modelGlob, model);
+  const entryProvider = entry.providerId.trim().toLowerCase();
+  return (entryProvider === MODEL_ALLOWLIST_ANY_PROVIDER || entryProvider === providerId.trim().toLowerCase()) && modelGlobMatches(entry.modelGlob, model);
 }
 
 /**

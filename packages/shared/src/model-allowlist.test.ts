@@ -96,6 +96,18 @@ describe("modelAllowlistEntryCreateSchema", () => {
   });
 });
 
+describe("provider id and pattern case", () => {
+  it("stores both lower case and matches a provider id whatever its case", () => {
+    const parsed = modelAllowlistEntryCreateSchema.parse({ scope: "deployment", providerId: "OpenAI", modelGlob: "GPT-4o*" });
+    expect(parsed).toMatchObject({ providerId: "openai", modelGlob: "gpt-4o*" });
+    // An entry written with an upper-case id (an older client, a direct store write) still matches.
+    const entries = [entry("deployment", "OpenAI", "gpt-4o*")];
+    expect(evaluateModelAllowlist(entries, { providerId: "openai", model: "gpt-4o-mini" }).allowed).toBe(true);
+    expect(evaluateModelAllowlist(entries, { providerId: "OPENAI", model: "gpt-4o-mini" }).allowed).toBe(true);
+    expect(evaluateModelAllowlist(entries, { providerId: "anthropic", model: "gpt-4o-mini" }).allowed).toBe(false);
+  });
+});
+
 describe("the model_not_allowed error category", () => {
   it("has its own remediation", () => {
     expect(remediationForCategory(ErrorCategory.MODEL_NOT_ALLOWED)).toContain("Security → Models");
