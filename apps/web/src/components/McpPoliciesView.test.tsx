@@ -25,6 +25,7 @@ vi.mock("../lib/api", async () => {
     setMcpToolClassification: vi.fn(),
     fetchWorkflows: vi.fn(),
     fetchMcpClients: vi.fn(),
+    fetchMcpToolsets: vi.fn(),
     fetchMcpGatewayApprovals: vi.fn(),
     decideMcpGatewayApproval: vi.fn(),
     simulateMcpToolPolicies: vi.fn(),
@@ -138,6 +139,7 @@ describe("MCP tool policy UI", () => {
       usageWindow: "7d",
       clients: [{ id: "mcpc_1", name: "IDE agent", status: "active" } as api.McpClientView]
     });
+    vi.mocked(api.fetchMcpToolsets).mockResolvedValue({ toolsets: [{ id: "mts_1", name: "Support tools" } as api.McpToolsetView], gatewayBaseUrl: null, protocolVersions: [] });
     vi.mocked(api.fetchMcpGatewayApprovals).mockResolvedValue({ approvals: [], approvalWindowMs: 900000 });
     vi.mocked(api.fetchMcpPolicySuggestions).mockResolvedValue({ suggestions: [] });
     vi.mocked(api.fetchMcpPolicyShadowHits).mockResolvedValue({ shadowHits: { days: 7, since: "", scanned: 0, capped: false, rules: [], groups: [] } });
@@ -310,7 +312,8 @@ describe("MCP tool policy UI", () => {
       mode: "enforce",
       conditions: null,
       workflowIds: [],
-      clientIds: []
+      clientIds: [],
+      toolsetIds: []
     });
     expect(await within(list).findByText("Builders: no deletes")).toBeInTheDocument();
     expect(within(list).getByText("mock-mcp (inline)")).toBeInTheDocument();
@@ -423,7 +426,8 @@ describe("MCP tool policy UI", () => {
         roles: [],
         mode: payload.mode,
         conditions: payload.conditions ?? null,
-        clientIds: payload.clientIds ?? []
+        clientIds: payload.clientIds ?? [],
+        ...(payload.toolsetIds?.length ? { toolsetIds: payload.toolsetIds } : {})
       })
     }));
 
@@ -457,6 +461,9 @@ describe("MCP tool policy UI", () => {
     await user.click(within(form).getByLabelText("Shadow mode"));
     await user.click(within(form).getByText("Advanced"));
     await user.selectOptions(within(form).getByLabelText("Only for gateway clients"), "mcpc_1");
+    // 12.6 — and to a gateway toolset.
+    expect(within(form).getByLabelText("Only for gateway toolsets")).toHaveAccessibleDescription(/never workflow runs/);
+    await user.selectOptions(within(form).getByLabelText("Only for gateway toolsets"), "mts_1");
     await user.click(within(form).getByRole("button", { name: "Add rule" }));
 
     expect(api.createMcpToolPolicy).toHaveBeenCalledWith(
@@ -465,7 +472,8 @@ describe("MCP tool policy UI", () => {
         mode: "shadow",
         conditions: { any: [{ path: "repo", op: "one_of", value: ["acme/prod", "acme/infra"] }, { op: "label_present", value: "pii" }] },
         workflowIds: [],
-        clientIds: ["mcpc_1"]
+        clientIds: ["mcpc_1"],
+        toolsetIds: ["mts_1"]
       })
     );
     const list = await screen.findByRole("list", { name: "Tool policy rules" });
@@ -473,6 +481,7 @@ describe("MCP tool policy UI", () => {
     expect(within(list).getByText("Shadow")).toBeInTheDocument();
     expect(within(list).getByText('repo is one of "acme/prod", "acme/infra" or data has label pii')).toBeInTheDocument();
     expect(within(list).getByText("IDE agent")).toBeInTheDocument();
+    expect(within(list).getByText("Support tools")).toBeInTheDocument();
   });
 
   it("tests a call with arguments and shows the matched rule, why, and what shadow rules would do", async () => {

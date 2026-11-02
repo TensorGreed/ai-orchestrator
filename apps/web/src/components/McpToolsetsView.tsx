@@ -25,6 +25,7 @@ import {
   updateMcpToolset
 } from "../lib/api";
 import { toolsetEndpointUrl } from "../lib/mcp-client-snippets";
+import { GatewayGuardPicker } from "./McpGatewayGovernance";
 
 const ROLES: McpPolicyRole[] = ["admin", "builder", "operator", "viewer"];
 
@@ -303,6 +304,11 @@ function ToolsetDetail({
           Streamable HTTP transport. Clients send <code>Authorization: Bearer &lt;client token&gt;</code>; create a token on
           the Clients tab.
         </p>
+      </section>
+
+      <section className="kb-section" aria-label="Toolset Guard">
+        <h4>Guard</h4>
+        <GatewayGuardPicker scope="toolset" id={toolset.id} isAdmin={isAdmin} />
       </section>
 
       <section className="kb-section">

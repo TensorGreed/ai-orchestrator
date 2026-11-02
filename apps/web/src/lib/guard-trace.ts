@@ -55,7 +55,7 @@ export interface GuardTraceFinding {
 export interface GuardTraceVerdict {
   key: string;
   nodeId: string;
-  placement: "node" | "agent";
+  placement: "node" | "agent" | "gateway";
   iteration?: number;
   channel: string;
   toolName?: string;
@@ -85,7 +85,7 @@ export interface GuardTraceProfile {
 
 export interface GuardTraceNode {
   nodeId: string;
-  placement: "node" | "agent";
+  placement: "node" | "agent" | "gateway";
   /** Where the profiles came from: port, enforced, workflow, project, instance or a guard node's own choice. */
   source?: string;
   profiles: GuardTraceProfile[];
@@ -173,7 +173,7 @@ export function mergeTimings(timings: GuardTraceVerdict["timings"]): GuardTraceV
 function verdictFromSummaries(input: {
   key: string;
   nodeId: string;
-  placement: "node" | "agent";
+  placement: "node" | "agent" | "gateway";
   iteration?: number;
   channel: string;
   toolName?: string;

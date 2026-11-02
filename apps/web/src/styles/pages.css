@@ -3986,6 +3986,33 @@ button.tag-chip:hover {
   border-top: 1px solid var(--line);
 }
 
+/* 12.6 — Guard on gateway toolsets and clients, and the client's Governance section. */
+.mcp-gw-guard {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.mcp-gw-guard-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+.mcp-gw-guard-row label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.mcp-governance-row h5 {
+  margin: 0 0 6px;
+  font-size: 0.85rem;
+}
+
 .mcp-client-usage > .finops-range {
   align-self: flex-start;
 }

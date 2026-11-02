@@ -75,6 +75,8 @@ function GuardOverview({ projects, workflows, onOpenRun }: { projects: Project[]
   const [projectId, setProjectId] = useState("");
   const [workflowId, setWorkflowId] = useState("");
   const [profileId, setProfileId] = useState("");
+  // 12.6 — "gateway": MCP gateway server tool calls; "run": workflow runs.
+  const [placement, setPlacement] = useState<"" | "gateway" | "run">("");
   const [profiles, setProfiles] = useState<GuardProfileSummary[]>([]);
   const [stats, setStats] = useState<GuardStats | null>(null);
   const [events, setEvents] = useState<Array<GuardEventView & { workflowName?: string }>>([]);
@@ -90,8 +92,14 @@ function GuardOverview({ projects, workflows, onOpenRun }: { projects: Project[]
   }, []);
 
   const filter = useMemo(
-    () => ({ days, ...(projectId ? { projectId } : {}), ...(workflowId ? { workflowId } : {}), ...(profileId ? { profileId } : {}) }),
-    [days, profileId, projectId, workflowId]
+    () => ({
+      days,
+      ...(projectId ? { projectId } : {}),
+      ...(workflowId ? { workflowId } : {}),
+      ...(profileId ? { profileId } : {}),
+      ...(placement ? { placement } : {})
+    }),
+    [days, placement, profileId, projectId, workflowId]
   );
 
   const refresh = useCallback(async () => {
@@ -153,6 +161,14 @@ function GuardOverview({ projects, workflows, onOpenRun }: { projects: Project[]
                 {profile.name}
               </option>
             ))}
+          </select>
+        </label>
+        <label>
+          <span>Source</span>
+          <select value={placement} onChange={(event) => setPlacement(event.target.value as "" | "gateway" | "run")}>
+            <option value="">Runs and gateway</option>
+            <option value="run">Workflow runs</option>
+            <option value="gateway">MCP gateway calls</option>
           </select>
         </label>
         <div className="finops-range" role="group" aria-label="Window">
@@ -241,7 +257,7 @@ function GuardOverview({ projects, workflows, onOpenRun }: { projects: Project[]
                   <tr key={event.id}>
                     <td className="muted-cell">{formatWhen(event.createdAt)}</td>
                     <td>
-                      <span>{event.workflowName ?? event.workflowId ?? "—"}</span>
+                      <span>{event.placement === "gateway" ? "MCP gateway" : event.workflowName ?? event.workflowId ?? "—"}</span>
                       <span className="mono-cell guard-cell-sub">
                         {event.nodeId}
                         {typeof event.iteration === "number" ? ` · step ${event.iteration}` : ""}
@@ -270,7 +286,7 @@ function GuardOverview({ projects, workflows, onOpenRun }: { projects: Project[]
                     </td>
                     <td>{event.evidence[0]?.evidence ? <code className="guard-evidence">{event.evidence[0].evidence}</code> : <span className="kb-subtle">—</span>}</td>
                     <td>
-                      {onOpenRun ? (
+                      {onOpenRun && event.placement !== "gateway" ? (
                         <button type="button" className="mcp-ov-link mono-cell" onClick={() => onOpenRun(event.executionId)}>
                           {event.executionId.slice(0, 8)}
                         </button>
