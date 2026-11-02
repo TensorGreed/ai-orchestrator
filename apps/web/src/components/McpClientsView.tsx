@@ -264,7 +264,15 @@ export function McpClientsView({ isAdmin }: McpClientsViewProps) {
                 </div>
                 {usageFor === client.id && <ClientUsage clientId={client.id} />}
                 {sessionsFor === client.id && <ClientSessions clientId={client.id} />}
-                {governanceFor === client.id && <ClientGovernance clientId={client.id} isAdmin={isAdmin} active={client.status === "active"} />}
+                {governanceFor === client.id && (
+                  <ClientGovernance
+                    clientId={client.id}
+                    isAdmin={isAdmin}
+                    active={client.status === "active"}
+                    rateLimit={client.rateLimit}
+                    onClientChange={(updated) => setClients((current) => current.map((entry) => (entry.id === updated.id ? { ...entry, ...updated } : entry)))}
+                  />
+                )}
               </li>
             ))}
           </ul>

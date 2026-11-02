@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { GuardProfileSummary, GuardResolutionView } from "@ai-orchestrator/shared";
 import * as api from "../lib/api";
 import { McpServersPage } from "./McpServersPage";
-import { gatewayHeldActions } from "./McpGatewayGovernance";
+import { describeRateLimit, gatewayHeldActions, parseRateLimitDraft } from "./McpGatewayGovernance";
 
 vi.mock("../lib/api", async () => {
   const actual = await vi.importActual<typeof import("../lib/api")>("../lib/api");
@@ -33,7 +33,9 @@ vi.mock("../lib/api", async () => {
     fetchGuardToolsetBinding: vi.fn(),
     updateGuardToolsetBinding: vi.fn(),
     fetchGuardClientBinding: vi.fn(),
-    updateGuardClientBinding: vi.fn()
+    updateGuardClientBinding: vi.fn(),
+    updateMcpClient: vi.fn(),
+    fetchMcpClientBudgets: vi.fn()
   };
 });
 
@@ -71,6 +73,7 @@ const toolset: api.McpToolsetView = {
   projectId: null,
   enabled: true,
   trackSessionLabels: false,
+  rateLimit: null,
   createdBy: "admin@example.com",
   createdAt: "2026-10-20T10:00:00.000Z",
   updatedAt: "2026-10-20T10:00:00.000Z",
@@ -97,6 +100,7 @@ const activeClient: api.McpClientView = {
   status: "active",
   effectiveRole: "builder",
   activeSessions: 1,
+  rateLimit: null,
   usage: { calls: 3, errors: 1, lastCalledAt: "2026-10-20T11:00:00.000Z" }
 };
 
@@ -184,6 +188,7 @@ function setup() {
   }));
   vi.mocked(api.fetchGuardToolsetBinding).mockResolvedValue({ binding: binding("toolset", "mts_1", null), effective: noGuard });
   vi.mocked(api.fetchGuardClientBinding).mockResolvedValue({ binding: binding("mcp_client", "mcc_1", null), toolsets: [{ toolsetId: "mts_1", effective: noGuard }] });
+  vi.mocked(api.fetchMcpClientBudgets).mockResolvedValue({ clientId: "mcc_1", budgets: [] });
 }
 
 function guardProfile(id: string, name: string): GuardProfileSummary {
@@ -464,7 +469,7 @@ describe("MCP gateway views", () => {
     expect(picker).toHaveAccessibleDescription(/on top of the toolset's own profile/);
     expect(within(governance).getByTestId("gateway-guard-client-stack")).toHaveTextContent("Also applied: Default guard profile.");
     await user.selectOptions(picker, "");
-    await user.click(within(governance).getByRole("button", { name: "Save" }));
+    await user.click(within(within(governance).getByTestId("gateway-guard-client")).getByRole("button", { name: "Save" }));
     expect(api.updateGuardClientBinding).toHaveBeenCalledWith("mcc_1", { mode: "inherit" });
   });
 
@@ -587,5 +592,78 @@ describe("MCP gateway views", () => {
     await waitFor(() => expect(api.revokeMcpClient).toHaveBeenCalledWith("mcc_1"));
     expect((await within(list).findAllByText("Revoked"))[0]).toHaveClass("mcp-status-down");
     expect(within(list).queryByRole("button", { name: "Revoke" })).not.toBeInTheDocument();
+  });
+
+  it("sets a client's rate limit in its Governance section and shows its budgets with this period's usage", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.fetchMcpClientBudgets).mockResolvedValue({
+      clientId: "mcc_1",
+      budgets: [
+        { budgetId: "b1", name: "IDE spend", scopeType: "mcp_client", scopeId: "mcc_1", period: "month", limitType: "usd", limitValue: 20, action: "block", enabled: true, current: 5, periodStart: "2026-11-01T00:00:00.000Z" }
+      ]
+    });
+    vi.mocked(api.updateMcpClient).mockResolvedValue({ client: { ...activeClient, rateLimit: { requestsPerMinute: 60, burst: 10, maxConcurrent: null } } });
+    render(<McpServersPage view="clients" isAdmin activeProjectId={null} />);
+    const list = await screen.findByRole("list", { name: "MCP clients" });
+    await user.click(within(list).getByRole("button", { name: "Governance" }));
+    const governance = await within(list).findByRole("region", { name: "Client governance" });
+    const budgets = within(governance).getByTestId("gateway-client-budgets");
+    expect(await within(budgets).findByText("IDE spend")).toBeInTheDocument();
+    expect(budgets).toHaveTextContent("$5.00 of $20.00 this month (25%) · blocks calls when used up");
+    const limits = within(governance).getByTestId("gateway-rate-limit-client");
+    const rpm = within(limits).getByLabelText("Calls per minute");
+    expect(rpm).toHaveValue(null);
+    expect(rpm).toHaveAccessibleDescription(/every toolset/);
+    const save = within(limits).getByRole("button", { name: "Save" });
+    expect(save).toBeDisabled();
+    // A burst alone is refused before anything is sent.
+    await user.type(within(limits).getByLabelText("Burst"), "10");
+    await user.click(save);
+    expect(await within(limits).findByText("Burst needs calls per minute.")).toBeInTheDocument();
+    expect(api.updateMcpClient).not.toHaveBeenCalled();
+    await user.type(rpm, "60");
+    await user.click(save);
+    expect(api.updateMcpClient).toHaveBeenCalledWith("mcc_1", { rateLimit: { requestsPerMinute: 60, burst: 10, maxConcurrent: null } });
+    expect(await within(limits).findByText("Saved")).toBeInTheDocument();
+    expect(rpm).toHaveValue(60);
+  });
+
+  it("shows builders a client's rate limit and budgets read-only", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.fetchMcpClients).mockResolvedValue({ usageWindow: "7d", clients: [{ ...activeClient, rateLimit: { requestsPerMinute: 30, burst: null, maxConcurrent: 2 } }] });
+    render(<McpServersPage view="clients" isAdmin={false} activeProjectId={null} />);
+    const list = await screen.findByRole("list", { name: "MCP clients" });
+    await user.click(within(list).getByRole("button", { name: "Governance" }));
+    const governance = await within(list).findByRole("region", { name: "Client governance" });
+    const limits = within(governance).getByTestId("gateway-rate-limit-client");
+    expect(limits).toHaveTextContent("Rate limit: 30 calls per minute, 2 at once");
+    expect(within(limits).queryByRole("spinbutton")).not.toBeInTheDocument();
+    expect(await within(governance).findByText("No budget for this client.")).toBeInTheDocument();
+  });
+
+  it("sets and clears a toolset's default rate limit", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.updateMcpToolset).mockResolvedValueOnce({ toolset: { ...toolset, rateLimit: { requestsPerMinute: null, burst: null, maxConcurrent: 3 } } });
+    render(<McpServersPage view="toolsets" isAdmin activeProjectId={null} />);
+    const limits = await screen.findByTestId("gateway-rate-limit-toolset");
+    const atOnce = within(limits).getByLabelText("Calls at once");
+    expect(atOnce).toHaveAccessibleDescription(/unless the client has its own limit/);
+    await user.type(atOnce, "3");
+    await user.click(within(limits).getByRole("button", { name: "Save" }));
+    expect(api.updateMcpToolset).toHaveBeenCalledWith("mts_1", { rateLimit: { requestsPerMinute: null, burst: null, maxConcurrent: 3 } });
+    await waitFor(() => expect(atOnce).toHaveValue(3));
+    vi.mocked(api.updateMcpToolset).mockResolvedValueOnce({ toolset: { ...toolset, rateLimit: null } });
+    await user.clear(atOnce);
+    await user.click(within(limits).getByRole("button", { name: "Save" }));
+    expect(api.updateMcpToolset).toHaveBeenLastCalledWith("mts_1", { rateLimit: null });
+  });
+
+  it("describes and parses rate limits", () => {
+    expect(describeRateLimit(null)).toBe("No limit");
+    expect(describeRateLimit({ requestsPerMinute: 60, burst: 10, maxConcurrent: 2 })).toBe("60 calls per minute (burst 10), 2 at once");
+    expect(parseRateLimitDraft({ requestsPerMinute: "", burst: "", maxConcurrent: "" })).toEqual({ limit: null });
+    expect(parseRateLimitDraft({ requestsPerMinute: "0", burst: "", maxConcurrent: "" })).toEqual({ error: "Calls per minute must be a whole number from 1 to 100000." });
+    expect(parseRateLimitDraft({ requestsPerMinute: "1.5", burst: "", maxConcurrent: "" })).toHaveProperty("error");
+    expect(parseRateLimitDraft({ requestsPerMinute: " 5 ", burst: "", maxConcurrent: "4" })).toEqual({ limit: { requestsPerMinute: 5, burst: null, maxConcurrent: 4 } });
   });
 });

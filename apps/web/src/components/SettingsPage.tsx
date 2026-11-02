@@ -114,6 +114,8 @@ import {
   type BudgetPeriod,
   type BudgetLimitType,
   type BudgetAction,
+  fetchMcpClients,
+  type McpClientView,
   verifyAuditChain,
   fetchAuditExportDestinations,
   createAuditExportDestination,
@@ -4484,13 +4486,21 @@ function FinOpsTab() {
   );
 }
 
-function BudgetsPanel() {
+export function BudgetsPanel() {
   const [budgets, setBudgets] = useState<Budget[]>([]);
   const [alerts, setAlerts] = useState<BudgetAlert[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [showCreate, setShowCreate] = useState(false);
   const [busy, setBusy] = useState(false);
+  // 12.6 — MCP gateway clients, for the client scope's picker and names.
+  const [clients, setClients] = useState<McpClientView[]>([]);
+
+  useEffect(() => {
+    fetchMcpClients()
+      .then((result) => setClients(result.clients))
+      .catch(() => setClients([]));
+  }, []);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -4549,12 +4559,12 @@ function BudgetsPanel() {
         </button>
       </div>
       <p className="finops-subtle">
-        Spend caps with <strong>warn</strong> (alert when crossed) or <strong>block</strong> (reject pre-execution with HTTP 402) actions. Block enforcement is on the manual <code>/api/workflows/:id/execute</code> endpoint; webhook + scheduled triggers still get post-execution alerts.
+        Spend caps with <strong>warn</strong> (alert when crossed) or <strong>block</strong> actions. A used-up block budget stops new runs from every trigger (HTTP 402 on webhooks, chat, forms and the API; a failed run for schedules) and refuses MCP gateway calls.
       </p>
 
       {error && <div className="finops-error">{error}</div>}
 
-      {showCreate && <CreateBudgetForm onCreated={async () => { setShowCreate(false); await refresh(); }} onError={setError} />}
+      {showCreate && <CreateBudgetForm clients={clients} onCreated={async () => { setShowCreate(false); await refresh(); }} onError={setError} />}
 
       {loading ? (
         <p className="finops-subtle">Loading…</p>
@@ -4577,7 +4587,7 @@ function BudgetsPanel() {
             {budgets.map((b) => (
               <tr key={b.id}>
                 <td>{b.name}</td>
-                <td>{b.scopeType}{b.scopeId ? `:${b.scopeId}` : ""}</td>
+                <td>{budgetScopeLabel(b, clients)}</td>
                 <td>{b.period}</td>
                 <td>{b.limitType === "usd" ? `$${b.limitValue}` : `${b.limitValue.toLocaleString()} tok`}</td>
                 <td><span className={`finops-action-badge finops-action-${b.action}`}>{b.action}</span></td>
@@ -4629,7 +4639,24 @@ function BudgetsPanel() {
   );
 }
 
-function CreateBudgetForm({ onCreated, onError }: { onCreated: () => Promise<void>; onError: (msg: string) => void }) {
+/** A budget's scope in words; a gateway client's budget shows the client's name. */
+export function budgetScopeLabel(budget: Pick<Budget, "scopeType" | "scopeId">, clients: Array<Pick<McpClientView, "id" | "name">>): string {
+  if (budget.scopeType === "mcp_client") {
+    const client = clients.find((entry) => entry.id === budget.scopeId);
+    return `MCP client: ${client?.name ?? budget.scopeId ?? "unknown"}`;
+  }
+  return `${budget.scopeType}${budget.scopeId ? `:${budget.scopeId}` : ""}`;
+}
+
+function CreateBudgetForm({
+  clients,
+  onCreated,
+  onError
+}: {
+  clients: McpClientView[];
+  onCreated: () => Promise<void>;
+  onError: (msg: string) => void;
+}) {
   const [name, setName] = useState("");
   const [scopeType, setScopeType] = useState<BudgetScopeType>("global");
   const [scopeId, setScopeId] = useState("");
@@ -4672,14 +4699,33 @@ function CreateBudgetForm({ onCreated, onError }: { onCreated: () => Promise<voi
       </div>
       <div className="finops-form-row finops-form-row-3">
         <label>Scope
-          <select value={scopeType} onChange={(e) => setScopeType(e.target.value as BudgetScopeType)}>
+          <select
+            value={scopeType}
+            onChange={(e) => {
+              setScopeType(e.target.value as BudgetScopeType);
+              setScopeId("");
+            }}
+          >
             <option value="global">global</option>
             <option value="project">project</option>
             <option value="workflow">workflow</option>
             <option value="user">user</option>
+            <option value="mcp_client">MCP client</option>
           </select>
         </label>
-        {scopeType !== "global" && (
+        {scopeType === "mcp_client" && (
+          <label>Client
+            <select value={scopeId} onChange={(e) => setScopeId(e.target.value)} required>
+              <option value="">Choose a client</option>
+              {clients
+                .filter((client) => client.status === "active" || client.id === scopeId)
+                .map((client) => (
+                  <option key={client.id} value={client.id}>{client.name}</option>
+                ))}
+            </select>
+          </label>
+        )}
+        {scopeType !== "global" && scopeType !== "mcp_client" && (
           <label>Scope ID
             <input type="text" value={scopeId} onChange={(e) => setScopeId(e.target.value)} placeholder={scopeType === "user" ? "email or user_id" : `${scopeType}_id`} required />
           </label>

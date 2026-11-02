@@ -25,7 +25,7 @@ import {
   updateMcpToolset
 } from "../lib/api";
 import { toolsetEndpointUrl } from "../lib/mcp-client-snippets";
-import { GatewayGuardPicker } from "./McpGatewayGovernance";
+import { GatewayGuardPicker, GatewayRateLimitEditor } from "./McpGatewayGovernance";
 
 const ROLES: McpPolicyRole[] = ["admin", "builder", "operator", "viewer"];
 
@@ -221,6 +221,7 @@ export function McpToolsetsView({ isAdmin, servers, activeProjectId }: McpToolse
               onEdit={() => setEditing(selected)}
               onToggle={() => void toggleEnabled(selected)}
               onDelete={() => void remove(selected)}
+              onSaved={replaceToolset}
             />
           ) : (
             <p className="kb-subtle">{loading ? "Loading…" : "Select a toolset to see its endpoint and tools."}</p>
@@ -239,7 +240,8 @@ function ToolsetDetail({
   busy,
   onEdit,
   onToggle,
-  onDelete
+  onDelete,
+  onSaved
 }: {
   toolset: McpToolsetView;
   endpointUrl: string;
@@ -249,6 +251,7 @@ function ToolsetDetail({
   onEdit: () => void;
   onToggle: () => void;
   onDelete: () => void;
+  onSaved: (toolset: McpToolsetView) => void;
 }) {
   const projectName = toolset.projectId
     ? projects.find((project) => project.id === toolset.projectId)?.name ?? toolset.projectId
@@ -309,6 +312,21 @@ function ToolsetDetail({
       <section className="kb-section" aria-label="Toolset Guard">
         <h4>Guard</h4>
         <GatewayGuardPicker scope="toolset" id={toolset.id} isAdmin={isAdmin} />
+      </section>
+
+      <section className="kb-section" aria-label="Toolset rate limit">
+        <h4>Default rate limit</h4>
+        <GatewayRateLimitEditor
+          scope="toolset"
+          id={toolset.id}
+          value={toolset.rateLimit}
+          isAdmin={isAdmin}
+          onSave={async (limit) => {
+            const result = await updateMcpToolset(toolset.id, { rateLimit: limit });
+            onSaved(result.toolset);
+            return result.toolset.rateLimit;
+          }}
+        />
       </section>
 
       <section className="kb-section">
