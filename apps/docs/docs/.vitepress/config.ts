@@ -177,7 +177,8 @@ export default defineConfig({
           { text: "Secure Webhooks", link: "/security/secure-webhooks" },
           { text: "Audit Bundles", link: "/security/audit-bundles" },
           { text: "Code Execution", link: "/security/code-execution" },
-          { text: "Outbound URL Guard", link: "/security/outbound-url-guard" }
+          { text: "Outbound URL Guard", link: "/security/outbound-url-guard" },
+          { text: "Model Allowlists", link: "/security/model-allowlists" }
         ]
       },
       {
