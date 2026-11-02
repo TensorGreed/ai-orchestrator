@@ -6,8 +6,10 @@ import {
   mcpClientUpdateSchema,
   mcpGatewayRateLimitSchema,
   normalizeGatewayRateLimit,
+  parseGatewayRunUsage,
   parseStoredGatewayRateLimit
 } from "./gateway-limits";
+import { GATEWAY_GUARD_CUSTOM_DATA_KEY, GATEWAY_USAGE_CUSTOM_DATA_KEY, stripReservedCustomData } from "./data-labels";
 import { mcpToolsetInputSchema, mcpToolsetUpdateSchema } from "./schemas";
 
 describe("gateway rate limits", () => {
@@ -66,5 +68,26 @@ describe("budget scopes", () => {
     expect(BUDGET_SCOPE_TYPES).toEqual(["global", "project", "workflow", "user", "mcp_client"]);
     expect(isBudgetScopeType("mcp_client")).toBe(true);
     expect(isBudgetScopeType("toolset")).toBe(false);
+  });
+});
+
+describe("a gateway run's usage record (12.6)", () => {
+  it("reads a recorded client and toolset, and nothing malformed", () => {
+    const usage = { clientId: "mcc_1", clientName: "IDE agent", toolsetId: "mts_1", toolsetProjectId: "default" };
+    expect(parseGatewayRunUsage(usage)).toEqual(usage);
+    expect(parseGatewayRunUsage({ ...usage, toolsetProjectId: null })).toEqual({ ...usage, toolsetProjectId: null });
+    expect(parseGatewayRunUsage({ ...usage, toolsetProjectId: undefined })).toEqual({ ...usage, toolsetProjectId: null });
+    for (const bad of [null, "x", [], { ...usage, clientId: "" }, { ...usage, clientName: 3 }, { ...usage, toolsetProjectId: 7 }, { clientId: "a" }]) {
+      expect(parseGatewayRunUsage(bad)).toBeNull();
+    }
+  });
+
+  it("is a reserved custom data key a caller cannot set", () => {
+    expect(GATEWAY_USAGE_CUSTOM_DATA_KEY).toBe("gatewayUsage");
+    const planted = { [GATEWAY_USAGE_CUSTOM_DATA_KEY]: { clientId: "x" }, [GATEWAY_GUARD_CUSTOM_DATA_KEY]: { toolsetId: "t" }, note: "kept" };
+    expect(stripReservedCustomData(planted)).toEqual({ note: "kept" });
+    expect(stripReservedCustomData({ [GATEWAY_USAGE_CUSTOM_DATA_KEY]: 1 })).toEqual({});
+    const untouched = { note: "kept" };
+    expect(stripReservedCustomData(untouched)).toBe(untouched);
   });
 });

@@ -83,6 +83,31 @@ export function effectiveGatewayRateLimit(
   return null;
 }
 
+/**
+ * 12.6 — a run a gateway workflow tool started: the client and toolset its usage is charged to. Recorded on the run
+ * (custom data key `gatewayUsage`, and the paused state), so the part after an approval is charged to them too.
+ */
+export interface GatewayRunUsage {
+  clientId: string;
+  clientName: string;
+  toolsetId: string;
+  toolsetProjectId: string | null;
+}
+
+/** Reads a recorded GatewayRunUsage; anything malformed counts as none. */
+export function parseGatewayRunUsage(value: unknown): GatewayRunUsage | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  const text = (field: unknown) => (typeof field === "string" && field.length > 0 && field.length <= 512 ? field : null);
+  const clientId = text(record.clientId);
+  const clientName = text(record.clientName);
+  const toolsetId = text(record.toolsetId);
+  if (!clientId || !clientName || !toolsetId) return null;
+  const project = record.toolsetProjectId;
+  if (project !== null && project !== undefined && !text(project)) return null;
+  return { clientId, clientName, toolsetId, toolsetProjectId: text(project) };
+}
+
 /** An admin's change to a gateway client: its name and its rate limit (null removes it). Nothing else changes. */
 export const mcpClientUpdateSchema = z
   .object({
@@ -121,4 +146,11 @@ export interface McpClientBudgetUsage {
   /** What the budget counted from `periodStart` until now (USD or tokens, as `limitType`). */
   current: number;
   periodStart: string;
+  /**
+   * Why it applies to the client, for display: "Deployment" (global), "Project <name>" (a toolset's project), or
+   * "This client" (its own budget).
+   */
+  scopeLabel: string;
+  /** A `block` budget whose cap is met: it refuses the client's calls now. */
+  refusing: boolean;
 }

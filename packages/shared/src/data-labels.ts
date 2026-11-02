@@ -293,9 +293,22 @@ export function withImpliedSensitive<T extends Pick<DataLabels, "provenance" | "
 /** 12.6 — the custom-data key a workflow tool's run records its gateway Guard stack under. Only the gateway sets it. */
 export const GATEWAY_GUARD_CUSTOM_DATA_KEY = "gatewayGuard";
 
-/** 12.6 — caller-supplied custom data without the reserved gateway Guard key, so a caller cannot plant a stack. */
+/**
+ * 12.6 — the custom-data key a workflow tool's run records its gateway client and toolset under (usage attribution
+ * across an approval pause). Only the gateway sets it.
+ */
+export const GATEWAY_USAGE_CUSTOM_DATA_KEY = "gatewayUsage";
+
+/** 12.6 — the custom-data keys only the gateway writes. */
+export const RESERVED_CUSTOM_DATA_KEYS: readonly string[] = [GATEWAY_GUARD_CUSTOM_DATA_KEY, GATEWAY_USAGE_CUSTOM_DATA_KEY];
+
+/**
+ * 12.6 — caller-supplied custom data without the reserved gateway keys, so a caller cannot plant a Guard stack or
+ * charge its run to a gateway client.
+ */
 export function stripReservedCustomData<T extends Record<string, unknown> | undefined | null>(value: T): T {
-  if (!value || typeof value !== "object" || !(GATEWAY_GUARD_CUSTOM_DATA_KEY in value)) return value;
-  const { [GATEWAY_GUARD_CUSTOM_DATA_KEY]: _reserved, ...rest } = value as Record<string, unknown>;
+  if (!value || typeof value !== "object" || !RESERVED_CUSTOM_DATA_KEYS.some((key) => key in value)) return value;
+  const rest: Record<string, unknown> = { ...(value as Record<string, unknown>) };
+  for (const key of RESERVED_CUSTOM_DATA_KEYS) delete rest[key];
   return rest as T;
 }
