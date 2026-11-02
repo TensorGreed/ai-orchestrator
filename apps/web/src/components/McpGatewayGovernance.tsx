@@ -234,8 +234,8 @@ const RATE_LIMIT_FIELDS: Array<{ field: RateLimitField; label: string }> = [
 ];
 
 const RATE_LIMIT_HELP: Record<Scope, string> = {
-  client: "Caps this client's tool calls on every toolset. Leave a field empty for no limit there.",
-  toolset: "Caps each client's calls to this toolset, unless the client has its own limit. Leave a field empty for no limit there."
+  client: "Caps this client's tool calls on every toolset and replaces the toolset default entirely. Leave a field empty for no limit there.",
+  toolset: "Caps each client's calls to this toolset. A client's own limit replaces this default entirely. Leave a field empty for no limit there."
 };
 
 /** Words for a rate limit: "60 calls per minute (burst 10), 2 at once", or "No limit". */
@@ -369,7 +369,11 @@ function formatBudgetAmount(value: number, limitType: McpClientBudgetUsage["limi
   return `${tokens.toLocaleString()} ${tokens === 1 ? "token" : "tokens"}`;
 }
 
-/** The client's budgets and what each counted this period (budgets are set in Settings, FinOps). */
+/**
+ * Every budget that applies to the client (its own, its toolsets' projects', the deployment's), each labelled by scope,
+ * with what it counted this period; one that refuses the client's calls now says so. Budgets are set in Settings,
+ * FinOps.
+ */
 export function ClientBudgets({ clientId }: { clientId: string }) {
   const [budgets, setBudgets] = useState<McpClientBudgetUsage[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -394,19 +398,27 @@ export function ClientBudgets({ clientId }: { clientId: string }) {
     <div className="mcp-gw-budgets" data-testid="gateway-client-budgets">
       {error && <div className="settings-error">{error}</div>}
       {budgets === null && !error && <p className="kb-subtle">Loading…</p>}
-      {budgets && budgets.length === 0 && <p className="kb-subtle">No budget for this client.</p>}
+      {budgets && budgets.length === 0 && <p className="kb-subtle">No budget applies to this client.</p>}
       {budgets && budgets.length > 0 && (
         <ul className="mcp-gw-budget-list">
           {budgets.map((budget) => {
             const pct = budget.limitValue > 0 ? Math.min(100, Math.round((budget.current / budget.limitValue) * 100)) : 0;
             return (
-              <li key={budget.budgetId}>
+              <li key={budget.budgetId} data-refusing={budget.refusing ? "true" : undefined}>
+                <span className="kb-subtle">{budget.scopeLabel}</span>
+                {" · "}
                 <strong>{budget.name}</strong>
                 {": "}
                 {formatBudgetAmount(budget.current, budget.limitType)} of {formatBudgetAmount(budget.limitValue, budget.limitType)} this {budget.period} ({pct}%)
                 {" · "}
                 {budget.action === "block" ? "blocks calls when used up" : "warns only"}
                 {!budget.enabled && " · off"}
+                {budget.refusing && (
+                  <>
+                    {" · "}
+                    <strong className="mcp-gw-budget-refusing">Used up: refusing this client's calls</strong>
+                  </>
+                )}
               </li>
             );
           })}

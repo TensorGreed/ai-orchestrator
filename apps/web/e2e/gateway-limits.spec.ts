@@ -116,7 +116,7 @@ test("sets a toolset's default rate limit in its detail", async () => {
   await sidebarItem("Toolsets").click();
   await page.getByRole("button", { name: made.toolsetName! }).click();
   const section = page.getByTestId("gateway-rate-limit-toolset");
-  await expect(section.getByText(/unless the client has its own limit/)).toBeVisible();
+  await expect(section.getByText(/A client.s own limit replaces this default entirely/)).toBeVisible();
   await section.getByLabel("Calls at once").fill("4");
   await section.getByRole("button", { name: "Save" }).click();
   await expect(section.getByText("Saved")).toBeVisible();
@@ -136,7 +136,7 @@ test("sets the client's own rate limit in Governance, and refuses its calls over
   await limits.getByLabel("Calls per minute").fill("2");
   await limits.getByRole("button", { name: "Save" }).click();
   await expect(limits.getByText("Saved")).toBeVisible();
-  await expect(governance.getByText("No budget for this client.")).toBeVisible();
+  await expect(governance.getByText("No budget applies to this client.")).toBeVisible();
   await governance.scrollIntoViewIfNeeded();
   await shot("02-client-governance-rate-limit");
 
@@ -191,6 +191,8 @@ test("creates a budget for the client in Settings, shows its usage in Governance
   await expect(box).toContainText("this month");
   await expect(box).toContainText("blocks calls when used up");
   await expect(box).toContainText("(100%)");
+  await expect(box).toContainText("This client");
+  await expect(box).toContainText("refusing this client's calls");
   await box.scrollIntoViewIfNeeded();
   await shot("05-client-governance-budget");
 });

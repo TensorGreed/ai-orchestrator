@@ -594,12 +594,14 @@ describe("MCP gateway views", () => {
     expect(within(list).queryByRole("button", { name: "Revoke" })).not.toBeInTheDocument();
   });
 
-  it("sets a client's rate limit in its Governance section and shows its budgets with this period's usage", async () => {
+  it("sets a client's rate limit in its Governance section and shows every budget that applies, labelled by scope", async () => {
     const user = userEvent.setup();
     vi.mocked(api.fetchMcpClientBudgets).mockResolvedValue({
       clientId: "mcc_1",
       budgets: [
-        { budgetId: "b1", name: "IDE spend", scopeType: "mcp_client", scopeId: "mcc_1", period: "month", limitType: "usd", limitValue: 20, action: "block", enabled: true, current: 5, periodStart: "2026-11-01T00:00:00.000Z" }
+        { budgetId: "b1", name: "IDE spend", scopeType: "mcp_client", scopeId: "mcc_1", period: "month", limitType: "usd", limitValue: 20, action: "block", enabled: true, current: 5, periodStart: "2026-11-01T00:00:00.000Z", scopeLabel: "This client", refusing: false },
+        { budgetId: "b2", name: "Team cap", scopeType: "project", scopeId: "proj_1", period: "week", limitType: "tokens", limitValue: 1000, action: "warn", enabled: true, current: 100, periodStart: "2026-10-27T00:00:00.000Z", scopeLabel: "Project Team", refusing: false },
+        { budgetId: "b3", name: "Deployment cap", scopeType: "global", scopeId: null, period: "month", limitType: "usd", limitValue: 100, action: "block", enabled: true, current: 120, periodStart: "2026-11-01T00:00:00.000Z", scopeLabel: "Deployment", refusing: true }
       ]
     });
     vi.mocked(api.updateMcpClient).mockResolvedValue({ client: { ...activeClient, rateLimit: { requestsPerMinute: 60, burst: 10, maxConcurrent: null } } });
@@ -609,11 +611,18 @@ describe("MCP gateway views", () => {
     const governance = await within(list).findByRole("region", { name: "Client governance" });
     const budgets = within(governance).getByTestId("gateway-client-budgets");
     expect(await within(budgets).findByText("IDE spend")).toBeInTheDocument();
-    expect(budgets).toHaveTextContent("$5.00 of $20.00 this month (25%) · blocks calls when used up");
+    const lines = within(budgets).getAllByRole("listitem");
+    expect(lines.map((line) => line.textContent)).toEqual([
+      "This client · IDE spend: $5.00 of $20.00 this month (25%) · blocks calls when used up",
+      "Project Team · Team cap: 100 tokens of 1,000 tokens this week (10%) · warns only",
+      "Deployment · Deployment cap: $120.00 of $100.00 this month (100%) · blocks calls when used up · Used up: refusing this client's calls"
+    ]);
+    // The one refusing the client's calls now is marked.
+    expect(lines.map((line) => line.dataset.refusing ?? null)).toEqual([null, null, "true"]);
     const limits = within(governance).getByTestId("gateway-rate-limit-client");
     const rpm = within(limits).getByLabelText("Calls per minute");
     expect(rpm).toHaveValue(null);
-    expect(rpm).toHaveAccessibleDescription(/every toolset/);
+    expect(rpm).toHaveAccessibleDescription(/every toolset and replaces the toolset default entirely/);
     const save = within(limits).getByRole("button", { name: "Save" });
     expect(save).toBeDisabled();
     // A burst alone is refused before anything is sent.
@@ -638,7 +647,7 @@ describe("MCP gateway views", () => {
     const limits = within(governance).getByTestId("gateway-rate-limit-client");
     expect(limits).toHaveTextContent("Rate limit: 30 calls per minute, 2 at once");
     expect(within(limits).queryByRole("spinbutton")).not.toBeInTheDocument();
-    expect(await within(governance).findByText("No budget for this client.")).toBeInTheDocument();
+    expect(await within(governance).findByText("No budget applies to this client.")).toBeInTheDocument();
   });
 
   it("sets and clears a toolset's default rate limit", async () => {
@@ -647,7 +656,7 @@ describe("MCP gateway views", () => {
     render(<McpServersPage view="toolsets" isAdmin activeProjectId={null} />);
     const limits = await screen.findByTestId("gateway-rate-limit-toolset");
     const atOnce = within(limits).getByLabelText("Calls at once");
-    expect(atOnce).toHaveAccessibleDescription(/unless the client has its own limit/);
+    expect(atOnce).toHaveAccessibleDescription(/A client.s own limit replaces this default entirely/);
     await user.type(atOnce, "3");
     await user.click(within(limits).getByRole("button", { name: "Save" }));
     expect(api.updateMcpToolset).toHaveBeenCalledWith("mts_1", { rateLimit: { requestsPerMinute: null, burst: null, maxConcurrent: 3 } });

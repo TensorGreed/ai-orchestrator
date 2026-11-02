@@ -4012,6 +4012,10 @@ button.tag-chip:hover {
   color: var(--warn);
 }
 
+.mcp-gw-budget-refusing {
+  color: var(--err);
+}
+
 .mcp-governance-row h5 {
   margin: 0 0 6px;
   font-size: 0.85rem;
