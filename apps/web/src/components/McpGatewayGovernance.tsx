@@ -364,10 +364,12 @@ export function GatewayRateLimitEditor({
 }
 
 function formatBudgetAmount(value: number, limitType: McpClientBudgetUsage["limitType"]): string {
-  return limitType === "usd" ? `$${value.toFixed(2)}` : `${Math.round(value).toLocaleString()} tokens`;
+  if (limitType === "usd") return `$${value.toFixed(2)}`;
+  const tokens = Math.round(value);
+  return `${tokens.toLocaleString()} ${tokens === 1 ? "token" : "tokens"}`;
 }
 
-/** The client's budgets and what each counted this period (budgets are set in Settings → Budgets). */
+/** The client's budgets and what each counted this period (budgets are set in Settings, FinOps). */
 export function ClientBudgets({ clientId }: { clientId: string }) {
   const [budgets, setBudgets] = useState<McpClientBudgetUsage[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -410,7 +412,7 @@ export function ClientBudgets({ clientId }: { clientId: string }) {
           })}
         </ul>
       )}
-      <small className="kb-subtle">Spend of the runs and model sampling this client's calls use. Set budgets in Settings, Budgets.</small>
+      <small className="kb-subtle">Spend of the runs and model sampling this client's calls use. Set budgets in Settings, FinOps.</small>
     </div>
   );
 }
