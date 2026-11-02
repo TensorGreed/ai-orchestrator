@@ -6,7 +6,7 @@ description: "MCP tool policy rules in L2M: allow, deny or require approval by r
 
 Tool policy decides which MCP tools agents and MCP Tool nodes may use. It has three parts:
 
-- **Rules.** Admins write allow, deny and require-approval rules scoped by project, role, server and tool name, and optionally by the call's arguments, the run's data labels, the workflow or the gateway client. A rule can run in shadow mode first.
+- **Rules.** Admins write allow, deny and require-approval rules scoped by project, role, server and tool name, and optionally by the call's arguments, the run's data labels, the workflow, the gateway client or the gateway toolset. A rule can run in shadow mode first.
 - **Read-only classification.** Every tool is either read-only or a write tool, taken from an admin override or from the server's own annotations.
 - **No write tools.** A per-workflow switch that blocks every write tool in that workflow.
 
@@ -53,7 +53,7 @@ The same evaluation order applies within a kind: no rule means allowed, deny win
 
 For one tool call:
 
-1. Collect the enabled, enforced rules whose scope matches the call. Project, role, server, tool pattern, annotation condition, workflows, clients and conditions must all match.
+1. Collect the enabled, enforced rules whose scope matches the call. Project, role, server, tool pattern, annotation condition, workflows, clients, toolsets and conditions must all match.
 2. If no rule matches, the call is **allowed**. This is the default.
 3. A matching deny rule is set aside when a matching allow or require-approval rule is **strictly narrower** than it. That is how a rule carves an exception out of a broader deny.
 4. If any matching deny rule is left, the call is **denied**. The first such rule is reported, with rules taken oldest first.
@@ -69,8 +69,12 @@ A rule is **strictly narrower** than another when it is inside the other in ever
 - **Server:** a specific server is inside "any server", and inside the same server.
 - **Tool pattern:** containment is checked conservatively. Anything is inside `*`, and an exact name is inside a glob that matches it. Two different globs are never treated as nested.
 - **Annotation condition:** a rule with a condition is inside a rule without one, and inside a rule with the same condition. Two different conditions are never treated as nested.
-- **Workflows and clients:** a non-empty list is inside an empty one (any), and inside a list that contains it.
+- **Workflows, clients and toolsets:** a non-empty list is inside an empty one (any), and inside a list that contains it.
 - **Conditions:** a rule with conditions is inside a rule without any, and inside a rule with the same conditions (compared after sorting, so order does not matter). Two different sets of conditions are never treated as nested.
+
+### Rules for gateway toolsets
+
+A rule can name [gateway toolsets](./mcp-gateway.md#toolsets) (**Only for gateway toolsets** under **Advanced**). Such a rule matches only server tools that a client calls through one of those toolsets. It never matches a tool call inside a workflow run, not even a run that a gateway client started. Use it to allow or deny a server's tools on one toolset without touching others. The simulator reads the toolset from each gateway call's telemetry row; gateway calls recorded before toolsets were stored count as undetermined.
 
 ### Examples
 
@@ -306,7 +310,7 @@ Changes are written to the audit log with resource type `mcp_policy` and events 
 ## Endpoints
 
 - `GET /api/mcp/policies`: rules in evaluation order, plus the roles a rule can target (builder)
-- `POST /api/mcp/policies`: create a rule; `kind` is `tool` (default), `resource`, `prompt` or `sampling`; `annotationHint` is one of the conditions above, or `null`, and only applies to tool rules; `conditions` is `{ "all": [...] }` or `{ "any": [...] }` of `{ path, op, value }`; `mode` is `enforce` or `shadow`; `workflowIds` and `clientIds` are lists of ids. Invalid input returns 400 with field-level `details` (for example `conditions.all.0.value`) (admin)
+- `POST /api/mcp/policies`: create a rule; `kind` is `tool` (default), `resource`, `prompt` or `sampling`; `annotationHint` is one of the conditions above, or `null`, and only applies to tool rules; `conditions` is `{ "all": [...] }` or `{ "any": [...] }` of `{ path, op, value }`; `mode` is `enforce` or `shadow`; `workflowIds`, `clientIds` and `toolsetIds` are lists of ids (a toolset id must exist). Invalid input returns 400 with field-level `details` (for example `conditions.all.0.value`) (admin)
 - `PUT /api/mcp/policies/:id`: update any field of a rule; the rule as updated must still be valid (admin)
 - `DELETE /api/mcp/policies/:id`: delete a rule (admin)
 - `POST /api/mcp/policies/evaluate`: dry-run `{ projectId, role, serverId, toolName, kind?, noWriteTools?, arguments?, labels?, workflowId?, clientId?, connection? }` (`connection`: an inline server's settings, read only for its endpoint host, which decides open world; without it an inline network server counts as unknown, so open world); `toolName` is the URI, prompt or model name for the other kinds. Returns the decision and `effect`, the deciding rule, the matching rules with `why` (each rule's conditions in words), `undecided` rules (conditions without arguments), the `approval` when one is needed, the `shadow` outcome, the denies a narrower rule set aside, and the tool's classification (builder)

@@ -122,7 +122,7 @@ If a finding should be protected but no provider covers its class, the key is mi
 
 Every check writes rows to `guard_events`: one per applied action, or one row for a clean verdict. A row holds:
 
-- the run, workflow, project and node, the placement (`node` or `agent`), the agent step and the tool name;
+- the run, workflow, project and node, the placement (`node`, `agent`, or `gateway` for an [MCP gateway call](./mcp-gateway.md#guard-on-the-gateway)), the agent step and the tool name;
 - the channel, detector, category, data class and score;
 - the requested action, the action that applied, the verdict's overall action, and whether the rule was in shadow mode;
 - masked evidence (for example `j•••@e••••••.com`) and the detector's message;
@@ -134,7 +134,7 @@ Rows never hold the content that was checked, the raw matched value, protection 
 
 - **Trace.** On the Runs page, an expanded run shows a **Guard** panel: per guard node and per agent step, the channel, tool, action, a shadow badge when shadow rules would have done more, masked evidence, the slowest detectors and the profiles with their versions and source.
 - **Run tape.** Steps where a guard blocked, held for review, waited for approval or rewrote content carry a marker.
-- **Security page.** Verdict totals, verdicts per day by outcome, counts by action, category and channel, the detectors that fire most, what shadow rules would have blocked, and the latest events with links to their runs. Filter by project, workflow, profile and window.
+- **Security page.** Verdict totals, verdicts per day by outcome, counts by action, category and channel, the detectors that fire most, what shadow rules would have blocked, and the latest events with links to their runs. Filter by project, workflow, profile, source (workflow runs or MCP gateway calls) and window.
 - **Canvas.** Guard cards show their `pass`, `blocked` and `review` outputs and an empty protection slot; agents show a guard slot. The canvas key lists the guard and protection port colours.
 
 ## Limits and deployment notes
