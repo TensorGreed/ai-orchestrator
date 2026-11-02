@@ -77,6 +77,7 @@ import {
 } from "@ai-orchestrator/shared";
 import { buildReplayPlan, importWorkflowFromJson, validateWorkflowGraph, type ReplayPlan } from "@ai-orchestrator/workflow-engine";
 import type { ProviderRegistry } from "@ai-orchestrator/provider-sdk";
+import type { ModelAllowlistFinding } from "./model-allowlist-service.js";
 import type { ReplayRecordingRecord } from "../db/database.js";
 import { sha256Hex, workflowForHash } from "./audit-bundle-service.js";
 import type { McpCassetteRunPlan, McpCassetteService, ModelReplayPlan, OfflineReplayOptions } from "./mcp-cassette-service.js";
@@ -166,6 +167,8 @@ export interface ReplayExecutionResult {
   completedAt?: string;
   nodeResults: unknown;
   mcpReplay?: McpReplayReport;
+  /** 12.6 — model calls answered from the tape that the model allowlist refuses now. */
+  modelAllowlist?: ModelAllowlistFinding[];
 }
 
 export interface ReplayServiceOptions {
@@ -195,6 +198,17 @@ export interface ReplayServiceOptions {
     override: { profileId: string; version?: number },
     context: { workflowId: string; projectId: string | null; actor: SafeUser | null }
   ) => Promise<{ ok: true; profile: { profileId: string; version: number; hash: string } } | { ok: false; problem: string; forbidden?: boolean }>;
+}
+
+/** One finding per node, provider and model. */
+function dedupeFindings(findings: ModelAllowlistFinding[]): ModelAllowlistFinding[] {
+  const seen = new Set<string>();
+  return findings.filter((finding) => {
+    const key = JSON.stringify([finding.nodeId, finding.providerId, finding.model]);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 function durationOf(result: ReplayExecutionResult): number | null {
@@ -502,6 +516,15 @@ export class ReplayService {
     const health = [...preflight, ...(preflight.some((warning) => warning.blocking) ? [] : this.health(recording, plan, result))];
     if (executeError) health.push({ kind: "replay_error", nodeId: null, message: `The replay could not run: ${executeError}`, blocking: true });
     if (modelPlan) health.push(...this.modelHealth(modelPlan.player.report(), recording.modelTape?.truncated === true));
+    // 12.6 — reported, not enforced: the recording is what happened; a new run of this model would be refused.
+    for (const finding of dedupeFindings(result.modelAllowlist ?? [])) {
+      health.push({
+        kind: "model_not_allowed",
+        nodeId: finding.nodeId,
+        message: `${finding.message} The replay used the recorded answer; a live run would fail at this node.`,
+        blocking: false
+      });
+    }
     for (const nodeId of liveReadNodes) {
       if (plan.decisions.some((decision) => decision.nodeId === nodeId && decision.action === "live")) {
         health.push({ kind: "live_read", nodeId, message: `Node ${nodeId} read live data instead of the recorded answer; differences can come from data that changed since the golden run.`, blocking: false });

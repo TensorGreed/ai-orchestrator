@@ -29,7 +29,7 @@ import {
   type MCPExecutionContext,
   type McpSandboxPolicy
 } from "@ai-orchestrator/mcp-sdk";
-import { createDefaultProviderRegistry, type ProviderRegistry } from "@ai-orchestrator/provider-sdk";
+import { createDefaultProviderRegistry, isModelNotAllowedError, type ProviderRegistry } from "@ai-orchestrator/provider-sdk";
 import {
   agentWebhookPayloadSchema,
   MCP_POLICY_ROLES,
@@ -211,6 +211,8 @@ import { registerReleaseRoutes } from "./release-routes.js";
 import { registerGateAdmissionRoutes } from "./gate-admission-routes.js";
 import { registerDataDestinationRoutes } from "./data-destination-routes.js";
 import { DataDestinationService } from "./services/data-destination-service.js";
+import { ModelAllowlistService, type ModelAllowlistFinding } from "./services/model-allowlist-service.js";
+import { registerModelAllowlistRoutes } from "./model-allowlist-routes.js";
 import { DEACTIVATED_MESSAGE, ReleaseService, withUniqueTriggerPaths } from "./services/release-service.js";
 import { GateAdmissionService } from "./services/gate-admission-service.js";
 import { STUCK_JOB_MARGIN_MS } from "./db/queue-timeouts.js";
@@ -256,7 +258,8 @@ import {
   expressionSandboxLimits,
   nodeDnsResolver,
   type CodeSandboxPlan,
-  type OutboundGuardConfig
+  type OutboundGuardConfig,
+  type WorkflowExecutionDependencies
 } from "@ai-orchestrator/workflow-engine";
 import {
   McpCassetteService,
@@ -502,7 +505,9 @@ const providerTestSchema = z.object({
     extra: z.record(z.string(), z.unknown()).optional()
   }),
   prompt: z.string().optional(),
-  systemPrompt: z.string().optional()
+  systemPrompt: z.string().optional(),
+  /** 12.6 — the project whose model allowlist applies (the editor's workflow); without it, the deployment list alone. */
+  projectId: z.string().trim().min(1).max(200).optional()
 });
 
 const pinDataSchema = z
@@ -1457,7 +1462,46 @@ export async function createApp(
     requestIdLogLabel: "reqId",
     genReqId: () => nanoid()
   });
-  const providerRegistry = createDefaultProviderRegistry();
+  // 12.6 — model allowlists. Every model call goes through this seam: `providerRegistry` applies the deployment's
+  // list, and each run, gateway sampling call, provider test and eval judge call gets a view for its project.
+  // With no entries every model is allowed, as before.
+  const modelAllowlistService = new ModelAllowlistService(store, {
+    auditRaw: async (event) => {
+      await auditService.record(event);
+      await logStreamingService.dispatchAudit(event);
+    },
+    logger: (message, metadata) => app.log.warn(metadata ?? {}, message)
+  });
+  const baseProviderRegistry = createDefaultProviderRegistry();
+  const providerRegistry = modelAllowlistService.registry(baseProviderRegistry, { projectId: null, source: "deployment" });
+  /** A run's model calls checked for its workflow's project; sub-workflows get their own project's view. */
+  const modelScopedRun = (
+    workflow: Workflow,
+    inner: ProviderRegistry,
+    run: { executionId?: string; mode?: "enforce" | "report"; onReport?: (finding: ModelAllowlistFinding) => void }
+  ): ProviderRegistry =>
+    modelAllowlistService.registry(inner, {
+      projectId: workflow.projectId ?? DEFAULT_PROJECT_ID,
+      source: "run",
+      ...(run.mode ? { mode: run.mode } : {}),
+      ...(run.executionId ? { runKey: run.executionId, executionId: run.executionId } : {}),
+      workflowId: workflow.id,
+      ...(run.onReport ? { onReport: run.onReport } : {})
+    });
+  const modelScopedSubWorkflows =
+    (
+      scopeChild: NonNullable<WorkflowExecutionDependencies["scopeSubWorkflow"]>,
+      inner: ProviderRegistry,
+      run: Parameters<typeof modelScopedRun>[2]
+    ): NonNullable<WorkflowExecutionDependencies["scopeSubWorkflow"]> =>
+    (child) => {
+      const scopedChild = scopeChild(child);
+      return {
+        ...scopedChild,
+        providerRegistry: modelScopedRun(child, inner, run),
+        ...(scopedChild.scopeSubWorkflow ? { scopeSubWorkflow: modelScopedSubWorkflows(scopedChild.scopeSubWorkflow, inner, run) } : {})
+      };
+    };
   // Phase 12.1 — guard profiles, bindings, events and the token vault.
   // Phase 16 — runtime surrogates use the capture surrogate key (HKDF of the master key), so a data-subject lookup finds both.
   const runtimeMasterKey = Buffer.from(config.SECRET_MASTER_KEY_BASE64 ?? "", "base64");
@@ -2140,6 +2184,11 @@ export async function createApp(
       variables: { ...projectVars, ...(input.workflow.variables ?? {}) }
     };
     const executionTimeoutMs = normalizeExecutionTimeoutMs(input.executionTimeoutMs, undefined, config.WORKFLOW_EXECUTION_TIMEOUT_MS);
+    const runModelRegistry = input.providerRegistry ?? runPlan?.providerRegistry ?? baseProviderRegistry;
+    const runModelScope = {
+      ...(input.executionId ? { executionId: input.executionId } : {}),
+      ...(input.replay && input.providerRegistry ? { mode: "report" as const, ...(input.onModelAllowlistReport ? { onReport: input.onModelAllowlistReport } : {}) } : {})
+    };
     const scoped = runScope.dependenciesFor(mergedWorkflow, {
       actor: input.policyActor,
       resolveRegisteredMcpServer: runPlan?.resolveRegisteredMcpServer,
@@ -2193,7 +2242,9 @@ export async function createApp(
         },
         {
           // Phase 15.3 — a recorded run records its model calls; a model replay answers them from the tape.
-          providerRegistry: input.providerRegistry ?? runPlan?.providerRegistry ?? providerRegistry,
+          // 12.6 — checked against the model allowlist of the workflow's project; a replay answering from a tape
+          // reports what the allowlist would refuse instead of refusing (its live calls are still checked).
+          providerRegistry: modelScopedRun(mergedWorkflow, runModelRegistry, runModelScope),
           connectorRegistry,
           mcpRegistry: runPlan?.registry ?? mcpRegistry,
           agentRuntime,
@@ -2208,7 +2259,7 @@ export async function createApp(
           sessionArtifactStore: input.replay?.sandbox.sessionArtifactStore ?? scoped.sessionArtifactStore,
           // A replay never starts a sub-workflow (Execute Workflow nodes are stubbed).
           loadWorkflow: input.replay ? undefined : scoped.loadWorkflow,
-          scopeSubWorkflow: input.replay ? undefined : scoped.scopeSubWorkflow,
+          scopeSubWorkflow: input.replay ? undefined : modelScopedSubWorkflows(scoped.scopeSubWorkflow, runModelRegistry, runModelScope),
           // Phase 9.1 — built-in persistent vector store, limited to the
           // workflow's project and the shared knowledge bases.
           knowledgeBaseStore: replayKnowledgeBaseStore(input.replay?.sandbox, scoped.knowledgeBaseStore),
@@ -2356,11 +2407,13 @@ export async function createApp(
                   executionTimeoutMs: config.WORKFLOW_EXECUTION_TIMEOUT_MS
                 },
                 {
-                  providerRegistry,
                   connectorRegistry,
                   mcpRegistry,
                   agentRuntime,
                   ...errorScoped,
+                  // 12.6 — the error handler's model calls are checked for its own project.
+                  providerRegistry: modelScopedRun(errorWf, baseProviderRegistry, {}),
+                  scopeSubWorkflow: modelScopedSubWorkflows(errorScoped.scopeSubWorkflow, baseProviderRegistry, {}),
                   // The error handler is guarded under its own bindings, like any other run.
                   guard: guardService.runtimeFor({ workflowId: errorWf.id, projectId: errorWf.projectId ?? "default" }),
                   loadMcpToolPolicy,
@@ -4028,7 +4081,10 @@ export async function createApp(
       throw new Error("the judge has no secretRef: give the scorer one, or the operator can set EVAL_JUDGE_ALLOW_ENV_CREDENTIALS=true to use this server's provider keys");
     }
     const providerId = judgeInput.providerId ?? config.EVAL_JUDGE_PROVIDER_ID;
-    const adapter = providerRegistry.tryGet(providerId);
+    // 12.6 — a judge's model is checked against the workflow's project allowlist like the run's own calls.
+    const adapter = modelAllowlistService
+      .registry(baseProviderRegistry, { projectId, source: "eval_judge", ...(context?.workflowId ? { workflowId: context.workflowId } : {}) })
+      .tryGet(providerId);
     if (!adapter) {
       throw new Error(`eval judge provider "${providerId}" is not registered`);
     }
@@ -9484,7 +9540,10 @@ export async function createApp(
     if (!access.ok) return denyRunAccess(reply, access);
     const workflow = access.workflow;
 
-    return validateWorkflowGraph(workflow);
+    const validation = validateWorkflowGraph(workflow);
+    // 12.6 — a model the allowlist refuses is a warning: the workflow saves and validates, its runs fail at that node.
+    const modelWarnings = await modelAllowlistService.warningsFor(workflow);
+    return modelWarnings.length > 0 ? { ...validation, issues: [...validation.issues, ...modelWarnings] } : validation;
   });
 
   // ---------------------------------------------------------------------------
@@ -9949,7 +10008,10 @@ export async function createApp(
     const systemPrompt = parsed.data.systemPrompt?.trim() || "You are a connection test assistant. Keep responses short.";
 
     try {
-      const providerAdapter = providerRegistry.get(testProvider.providerId);
+      // 12.6 — a test is a model call: the allowlist applies (the project's too, when the editor names it).
+      const providerAdapter = modelAllowlistService
+        .registry(baseProviderRegistry, { projectId: parsed.data.projectId ?? null, source: "provider_test" })
+        .get(testProvider.providerId);
       const resolveCtx = { resolveSecret: resolveSecretForUser(user) };
 
       if (providerAdapter.testConnection) {
@@ -9999,6 +10061,10 @@ export async function createApp(
         preview: response.content.trim().slice(0, 240)
       };
     } catch (error) {
+      if (isModelNotAllowedError(error)) {
+        reply.code(403);
+        return { ok: false, code: error.code, message: error.message, providerId: testProvider.providerId, model: testProvider.model };
+      }
       reply.code(400);
       return {
         ok: false,
@@ -10945,6 +11011,15 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     productionRefusal: async (id) => await releaseService.productionRefusal(id),
     mcpRegistry,
     providerRegistry,
+    // 12.6 — gateway sampling uses the model allowlist of the toolset's project.
+    samplingRegistryFor: (scope) =>
+      modelAllowlistService.registry(baseProviderRegistry, {
+        projectId: scope.projectId,
+        source: "gateway_sampling",
+        runKey: `mcpgw:${scope.sessionId}`,
+        clientId: scope.clientId,
+        toolsetId: scope.toolsetId
+      }),
     resolveSecret: (secretRef) => secretService.resolveSecret(secretRef),
     redact: (value) => String(secretService.redact(value)),
     resolveRegisteredMcpServer,
@@ -13086,6 +13161,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       await guardService.resolveProfileOverride(override, { workflowId: context.workflowId, projectId: context.projectId, isAdmin: context.actor?.role === "admin" }),
     execute: async (replay, actor) => {
       const storedInput = asRecord(replay.recording.input);
+      const modelAllowlistFindings: ModelAllowlistFinding[] = [];
       const executed = await runWorkflowExecution({
         // Phase 15.4: not production traffic, so the draft (or the candidate given) runs.
         channel: "draft",
@@ -13102,7 +13178,9 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         mcpPlan: replay.mcpPlan,
         replay: { hook: replay.plan.hook, sandbox: createReplaySandbox(replay.memorySeed) },
         // Phase 15.3 — model calls from the golden run's tape, and the candidate's guard profile.
-        ...(replay.modelPlan ? { providerRegistry: replay.modelPlan.registry } : {}),
+        ...(replay.modelPlan
+          ? { providerRegistry: replay.modelPlan.registry, onModelAllowlistReport: (finding: ModelAllowlistFinding) => void modelAllowlistFindings.push(finding) }
+          : {}),
         ...(replay.guardProfileOverride ? { guardProfileOverride: replay.guardProfileOverride } : {}),
         ...(replay.guardSimulation ? { guardSimulation: replay.guardSimulation } : {}),
         // 12.6 — a golden run an MCP gateway call started: its toolset/client Guard stack, as in production.
@@ -13133,7 +13211,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         customData: replay.customData,
         ...(replay.modelPlan ? { liveModelCalls: replay.modelPlan.player.report().liveCalls ?? [] } : {})
       });
-      return result;
+      return modelAllowlistFindings.length > 0 ? { ...result, modelAllowlist: modelAllowlistFindings } : result;
     }
   });
   // Phase 15.6 — production capture.
@@ -13262,6 +13340,15 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     runAccess,
     canAccessWorkflow: async (user, workflow, permission) => await rbacService.canAccessWorkflow(user, workflow, permission),
     canInProject: async (user, projectId, permission) => await rbacService.can(user, projectId, permission),
+    audit: async (request, user, event) => await audit(request, user, event)
+  });
+
+  // 12.6 — model allowlists (Security → Models).
+  registerModelAllowlistRoutes({
+    app,
+    service: modelAllowlistService,
+    listProviders: () => providerRegistry.listDefinitions(),
+    requireRole: (request, reply, roles) => requireRole(request, reply, roles),
     audit: async (request, user, event) => await audit(request, user, event)
   });
 

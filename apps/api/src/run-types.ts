@@ -15,6 +15,7 @@ import type {
   WorkflowExecutionState
 } from "@ai-orchestrator/shared";
 import type { ProviderRegistry } from "@ai-orchestrator/provider-sdk";
+import type { ModelAllowlistFinding } from "./services/model-allowlist-service.js";
 import type { ReplayNodeHook } from "@ai-orchestrator/workflow-engine";
 import type { SafeUser } from "./services/auth-service.js";
 import type { CaptureSource } from "./services/replay-capture-service.js";
@@ -100,6 +101,11 @@ export interface RunWorkflowExecutionInput {
   replay?: { hook: ReplayNodeHook; sandbox: ReplaySandbox };
   /** Phase 15.3 — model calls answered from a golden run's model tape (a replay with `models: "replay"`). */
   providerRegistry?: ProviderRegistry;
+  /**
+   * 12.6 — a replay answering from a model tape: what the model allowlist would refuse is reported here instead of
+   * refused (the recorded answer is used).
+   */
+  onModelAllowlistReport?: (finding: ModelAllowlistFinding) => void;
   /** Phase 15.3 — a replay candidate's guard profile, evaluated in place of the bindings. */
   guardProfileOverride?: { profileId: string; version?: number };
   /** Phase 15.6 — a guard policy simulation's execution: the profile it swaps in, and where its verdicts and tokens go. */
