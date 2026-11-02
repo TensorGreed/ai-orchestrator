@@ -350,7 +350,8 @@ describe("production entry points load the published version", () => {
     const gateway = read("mcp-gateway-routes.ts");
     const start = gateway.indexOf("const callWorkflowTool");
     expect(start).toBeGreaterThan(-1);
-    const runGateway = gateway.slice(start, start + 600);
+    // The tool call loads the workflow first thing, right after reading its input.
+    const runGateway = gateway.slice(start, start + 900);
     expect(runGateway).toContain("productionWorkflow(tool.workflowId)");
     expect(gateway).toMatch(/const catalogStore = \{\s*getWorkflow: productionWorkflow,/);
   });
