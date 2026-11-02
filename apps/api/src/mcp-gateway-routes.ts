@@ -894,12 +894,9 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     executionId: string;
     progress: (progress: number, total: number | undefined, message: string) => void;
     callLabels?: DataLabels;
-    /**
-     * 12.6 — the toolset's and client's Guard stack: its pinned profiles travel with the run, and the gateway checks
-     * the run's answer with it (the arguments were checked already; `args` is what Guard let through).
-     */
+    /** 12.6 — the Guard stack: it travels with the run and checks its answer (`args` already passed Guard). */
     guardStack?: GatewayGuardStackForCall;
-    /** 12.6 — the call's synthetic id, under which the gateway records its Guard events (not the run's). */
+    /** 12.6 — the call's `mcpgw_*` id for the gateway's Guard events. */
     callExecutionId: string;
   }): Promise<McpCallToolResult> => {
     const { session, auth, toolset, tool, args, executionId, callLabels, guardStack, callExecutionId } = input;
