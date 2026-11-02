@@ -148,6 +148,7 @@ export const EXPORTED_TABLES = [
   "guard_simulations",
   "guard_token_vault",
   "data_destinations",
+  "model_allowlist_entries",
   // Knowledge bases (SQLite's full-text index is rebuilt from the chunks by its triggers; Postgres computes its own)
   "knowledge_bases",
   "knowledge_base_chunks",
