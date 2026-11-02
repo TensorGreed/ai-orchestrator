@@ -6873,6 +6873,8 @@ export class SqliteStore implements Store {
     // Variables are project configuration; they must not revive with a re-created id.
     this.exec(`DELETE FROM variables WHERE project_id = ?`, [id]);
     this.exec(`DELETE FROM guard_bindings WHERE scope = 'project' AND scope_id = ?`, [id]);
+    // 12.6 — a re-created project with the same id starts with no model allowlist.
+    this.exec(`DELETE FROM model_allowlist_entries WHERE scope = 'project' AND project_id = ?`, [id]);
     // Memberships, roles and shares of a deleted project must not come back
     // to life if a project with the same id is created later.
     this.exec(`DELETE FROM user_project_roles WHERE project_id = ?`, [id]);

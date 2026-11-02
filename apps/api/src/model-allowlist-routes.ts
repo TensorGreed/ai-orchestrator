@@ -6,8 +6,9 @@
  *   DELETE /api/model-allowlist/:id       remove an entry (admin), audited `model_allowlist.entry_removed`
  *   GET    /api/model-allowlist/check     is `providerId` + `model` allowed in `projectId`? (the builder's warning)
  *
- * Reads are open to every signed-in role (the Security page shows them read-only to non-admins); only admins change
- * the lists.
+ * Reads (the list and the check) need builder or above. A non-admin sees the deployment list and the lists of the
+ * projects they can read, without notes or who added an entry, and checks only those projects. Only admins change the
+ * lists.
  */
 
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
@@ -23,6 +24,8 @@ export interface ModelAllowlistRoutesDeps {
   listProviders: () => ProviderDefinition[];
   requireRole: (request: FastifyRequest, reply: FastifyReply, roles: UserRole[]) => Promise<SafeUser | null>;
   audit: (request: FastifyRequest, user: SafeUser, event: Omit<AuditEventInput, "actor">) => void | Promise<void>;
+  /** Can `user` read project `projectId` (any role in it)? Admins can read every project. */
+  canReadProject: (user: SafeUser, projectId: string) => Promise<boolean>;
 }
 
 const checkQuerySchema = z.object({
@@ -33,19 +36,43 @@ const checkQuerySchema = z.object({
   projectId: z.string().trim().min(1).max(200).optional()
 });
 
+/** Embedding vendors that are not chat providers (RAG and knowledge-base embedders); openai, azure_openai and gemini are. */
+const EMBEDDING_ONLY_PROVIDERS = [
+  { id: "cohere", name: "Cohere (embeddings)" },
+  { id: "mistral", name: "Mistral (embeddings)" },
+  { id: "huggingface", name: "Hugging Face (embeddings)" }
+];
+
+function providerChoices(definitions: ProviderDefinition[]): Array<{ id: string; name: string }> {
+  const choices = [
+    { id: MODEL_ALLOWLIST_ANY_PROVIDER, name: "Any provider" },
+    ...definitions.map((definition) => ({ id: definition.id, name: definition.label || definition.id }))
+  ];
+  for (const extra of EMBEDDING_ONLY_PROVIDERS) if (!choices.some((choice) => choice.id === extra.id)) choices.push(extra);
+  return choices;
+}
+
 export function registerModelAllowlistRoutes(deps: ModelAllowlistRoutesDeps): void {
   const { app, service, requireRole } = deps;
 
   app.get("/api/model-allowlist", async (request, reply) => {
-    const user = await requireRole(request, reply, ["viewer"]);
+    const user = await requireRole(request, reply, ["builder"]);
     if (!user) return;
+    const isAdmin = user.role === "admin";
+    const all = await service.list();
+    const readable = new Map<string, boolean>();
+    const entries = [];
+    for (const entry of all) {
+      if (!isAdmin && entry.scope === "project" && entry.projectId) {
+        if (!readable.has(entry.projectId)) readable.set(entry.projectId, await deps.canReadProject(user, entry.projectId));
+        if (!readable.get(entry.projectId)) continue;
+      }
+      entries.push(isAdmin ? entry : { ...entry, note: null, createdBy: null });
+    }
     return {
-      entries: await service.list(),
-      providers: [
-        { id: MODEL_ALLOWLIST_ANY_PROVIDER, name: "Any provider" },
-        ...deps.listProviders().map((definition) => ({ id: definition.id, name: definition.label || definition.id }))
-      ],
-      canEdit: user.role === "admin"
+      entries,
+      providers: providerChoices(deps.listProviders()),
+      canEdit: isAdmin
     };
   });
 
@@ -100,7 +127,7 @@ export function registerModelAllowlistRoutes(deps: ModelAllowlistRoutesDeps): vo
   });
 
   app.get<{ Querystring: Record<string, unknown> }>("/api/model-allowlist/check", async (request, reply) => {
-    const user = await requireRole(request, reply, ["viewer"]);
+    const user = await requireRole(request, reply, ["builder"]);
     if (!user) return;
     const parsed = checkQuerySchema.safeParse(request.query ?? {});
     if (!parsed.success) {
@@ -108,6 +135,10 @@ export function registerModelAllowlistRoutes(deps: ModelAllowlistRoutesDeps): vo
       return { error: "Invalid check", details: parsed.error.issues };
     }
     const { providerId, projectId } = parsed.data;
+    if (projectId && user.role !== "admin" && !(await deps.canReadProject(user, projectId))) {
+      reply.code(403);
+      return { error: "You have no access to this project" };
+    }
     const model = effectiveModelName({
       providerId,
       model: parsed.data.model,

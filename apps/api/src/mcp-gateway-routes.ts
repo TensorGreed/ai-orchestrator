@@ -221,7 +221,7 @@ export interface McpGatewayDeps {
   providerRegistry?: ProviderRegistry;
   /**
    * 12.6 — the registry a sampling request of this call uses: `providerRegistry` checked against the model allowlist
-   * of the toolset's project (null: the deployment list alone). Without it, `providerRegistry` as given.
+   * of the toolset's project (null: app.ts applies the default project's list). Without it, `providerRegistry` as given.
    */
   samplingRegistryFor?: (scope: { projectId: string | null; toolsetId: string; clientId: string; sessionId: string }) => ProviderRegistry;
   resolveSecret: MCPExecutionContext["resolveSecret"];

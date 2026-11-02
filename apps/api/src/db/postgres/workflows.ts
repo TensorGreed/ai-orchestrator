@@ -302,6 +302,8 @@ export async function deleteProject(ctx: PgContext, id: string): Promise<boolean
     await client.query(`DELETE FROM folders WHERE project_id = $1`, [id]);
     await client.query(`DELETE FROM variables WHERE project_id = $1`, [id]);
     await client.query(`DELETE FROM guard_bindings WHERE scope = 'project' AND scope_id = $1`, [id]);
+    // 12.6 — a re-created project with the same id starts with no model allowlist.
+    await client.query(`DELETE FROM model_allowlist_entries WHERE scope = 'project' AND project_id = $1`, [id]);
     // Memberships, roles and shares must not revive with a re-created id.
     for (const table of ["user_project_roles", "custom_roles", "workflow_shares", "secret_shares"]) {
       await client.query(`DELETE FROM ${table} WHERE project_id = $1`, [id]);

@@ -50,7 +50,6 @@ export type DispatchedRunInput = Omit<
   | "mcpPlan"
   | "replay"
   | "providerRegistry"
-  | "onModelAllowlistReport"
   | "guardProfileOverride"
   | "guardSimulation"
   | "resumeState"
