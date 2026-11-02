@@ -43,6 +43,7 @@ import {
   destinationRulesMode,
   type DataDestinationRow,
   type DestinationRuleView,
+  type GatewayGuardProfileRef,
   type DestinationRulesStatus,
   type GuardBindingLevel,
   type GuardBindingMode,
@@ -60,6 +61,7 @@ import type {
 } from "@ai-orchestrator/workflow-engine";
 import type {
   GuardBindingRecord,
+  GuardBindingScope,
   GuardEventFilters,
   GuardEventInsert,
   GuardEventRecord,
@@ -68,7 +70,7 @@ import type {
 } from "../db/database.js";
 import type { SecretService } from "./secret-service.js";
 import type { Store } from "../db/store.js";
-import { mapAsync } from "../async-array.js";
+import { filterAsync, mapAsync } from "../async-array.js";
 
 export interface GuardFieldIssue {
   path: string;
@@ -141,6 +143,22 @@ export interface GuardRunContext {
   issuedSurrogates?: Set<string>;
   /** Phase 16 — a destination preview's unsaved rows, used in place of the stored rows. Never set on production traffic. */
   destinationRows?: DataDestinationRow[];
+  /**
+   * 12.6 — a run an MCP gateway call started: the toolset's and client's profiles (pinned versions) that applied to
+   * the call. They are added after the run's own profiles, so they only tighten. A version that no longer exists
+   * fails the run's Guard resolution rather than running without it.
+   */
+  gatewayStack?: GatewayGuardProfileRef[];
+}
+
+/** 12.6 — what a gateway server tool call's Guard checks know about the call. */
+export interface GatewayGuardContext {
+  /** The call's synthetic execution id (`mcpgw_*`), shared with its telemetry row. */
+  executionId: string;
+  toolsetId: string;
+  clientId: string;
+  /** The toolset's project; null when it has none. */
+  projectId: string | null;
 }
 
 /**
@@ -341,7 +359,10 @@ export class GuardService {
   async deleteProfile(id: string): Promise<void> {
     const record = await this.requireProfile(id);
     if (record.builtIn) throw new GuardConflictError("The built-in profile cannot be deleted");
-    const bindings = (await this.store.listGuardBindingsForProfile(id)).filter((binding) => binding.mode !== "inherit");
+    const bindings = await filterAsync(
+      (await this.store.listGuardBindingsForProfile(id)).filter((binding) => binding.mode !== "inherit"),
+      async (binding) => await this.bindingInForce(binding)
+    );
     if (bindings.length > 0) {
       const where = bindings.map((binding) => `${binding.scope} '${binding.scopeId}'`).join(", ");
       throw new GuardConflictError(`The profile is bound to ${where}; change those bindings first`);
@@ -385,22 +406,47 @@ export class GuardService {
   // Bindings and resolution
   // -------------------------------------------------------------------------
 
-  async getBinding(scope: "project" | "workflow", scopeId: string): Promise<{ mode: GuardBindingMode; profileId: string | null; updatedAt: string | null; updatedBy: string | null }> {
+  async getBinding(scope: GuardBindingScope, scopeId: string): Promise<{ mode: GuardBindingMode; profileId: string | null; updatedAt: string | null; updatedBy: string | null }> {
     const record = await this.store.getGuardBinding(scope, scopeId);
     return record
       ? { mode: record.mode as GuardBindingMode, profileId: record.profileId, updatedAt: record.updatedAt, updatedBy: record.updatedBy }
       : { mode: "inherit", profileId: null, updatedAt: null, updatedBy: null };
   }
 
-  async setBinding(scope: "project" | "workflow", scopeId: string, input: { mode: GuardBindingMode; profileId?: string | null }, actorId: string | null): Promise<GuardBindingRecord> {
-    if (scope === "workflow" && input.mode === "enforced") {
+  async setBinding(scope: GuardBindingScope, scopeId: string, input: { mode: GuardBindingMode; profileId?: string | null }, actorId: string | null): Promise<GuardBindingRecord> {
+    if (scope !== "project" && input.mode === "enforced") {
       throw new GuardValidationError("Invalid binding", [{ path: "mode", message: "Only a project can enforce a profile" }]);
+    }
+    // 12.6 — the deployment's destination rules already apply wherever a gateway profile applies; never bound by name.
+    if ((scope === "toolset" || scope === "mcp_client") && input.profileId === GUARD_DESTINATION_RULES_PROFILE_ID) {
+      throw new GuardValidationError("Invalid binding", [{ path: "profileId", message: "The deployment's destination rules apply on their own; pick another profile" }]);
     }
     const profileId = input.mode === "inherit" ? null : input.profileId ?? null;
     if (profileId && !await this.store.getGuardProfile(profileId)) {
       throw new GuardValidationError("Invalid binding", [{ path: "profileId", message: `Guard profile '${profileId}' does not exist` }]);
     }
     return await this.store.setGuardBinding({ scope, scopeId, mode: input.mode, profileId, updatedBy: actorId });
+  }
+
+  /**
+   * 12.6 — a deleted toolset or a revoked client no longer has a Guard binding: an override is set back to inherit.
+   * Returns the binding it replaced, or null when there was none.
+   */
+  async clearGatewayBinding(scope: "toolset" | "mcp_client", scopeId: string, actorId: string | null): Promise<{ mode: GuardBindingMode; profileId: string | null } | null> {
+    const current = await this.store.getGuardBinding(scope, scopeId);
+    if (!current || current.mode === "inherit") return null;
+    await this.store.setGuardBinding({ scope, scopeId, mode: "inherit", profileId: null, updatedBy: actorId });
+    return { mode: current.mode as GuardBindingMode, profileId: current.profileId };
+  }
+
+  /** 12.6 — a gateway binding of a deleted toolset or a revoked client applies to nothing (and blocks no profile delete). */
+  private async bindingInForce(binding: GuardBindingRecord): Promise<boolean> {
+    if (binding.scope === "toolset") return Boolean(await this.store.getMcpToolset(binding.scopeId));
+    if (binding.scope === "mcp_client") {
+      const client = await this.store.getMcpClient(binding.scopeId);
+      return Boolean(client && !client.revokedAt);
+    }
+    return true;
   }
 
   async loadProfile(profileId: string, version?: number): Promise<ResolvedGuardProfile | undefined> {
@@ -522,7 +568,20 @@ export class GuardService {
     return { ok: true, profile: { profileId: resolved.profileId, version: resolved.version, hash: resolved.hash } };
   }
 
-  async resolveRun(context: { workflowId: string; projectId?: string | null; profileOverride?: GuardRunContext["profileOverride"]; profileSubstitute?: GuardProfileSubstitute }): Promise<GuardRunResolution> {
+  async resolveRun(context: {
+    workflowId: string;
+    projectId?: string | null;
+    profileOverride?: GuardRunContext["profileOverride"];
+    profileSubstitute?: GuardProfileSubstitute;
+    gatewayStack?: GatewayGuardProfileRef[];
+  }): Promise<GuardRunResolution> {
+    const { gatewayStack, ...own } = context;
+    const resolution = await this.resolveRunOwn(own);
+    // 12.6 — a run a gateway call started: the toolset's and client's profiles after the run's own (tighten-only).
+    return gatewayStack && gatewayStack.length > 0 ? GuardService.withGateway(resolution, await this.loadGatewayStack(gatewayStack)) : resolution;
+  }
+
+  private async resolveRunOwn(context: { workflowId: string; projectId?: string | null; profileOverride?: GuardRunContext["profileOverride"]; profileSubstitute?: GuardProfileSubstitute }): Promise<GuardRunResolution> {
     if (context.profileSubstitute) {
       const { profileSubstitute, ...rest } = context;
       return GuardService.substitute(await this.resolveRun(rest), profileSubstitute);
@@ -550,6 +609,90 @@ export class GuardService {
     }
     const source: GuardRunResolution["source"] = enforced ? "enforced" : workflowOverride ? "workflow" : projectOverride ? "project" : instance ? "instance" : "none";
     return GuardService.withDeployment({ source, ...(enforced ? { enforced } : {}), stack, chain }, await this.deploymentProfile());
+  }
+
+  /** 12.6 — the pinned versions a gateway-triggered run carries; a missing one fails closed. */
+  private async loadGatewayStack(refs: readonly GatewayGuardProfileRef[]): Promise<ResolvedGuardProfile[]> {
+    const loaded: ResolvedGuardProfile[] = [];
+    for (const ref of refs) {
+      const profile = await this.loadProfile(ref.profileId, ref.version);
+      if (!profile) {
+        throw new GuardNotFoundError(
+          `Guard profile '${ref.profileId}' version ${ref.version}, which the MCP gateway applied to this run, no longer exists; the run cannot be checked without it.`
+        );
+      }
+      loaded.push(profile);
+    }
+    return loaded;
+  }
+
+  /** 12.6 — adds a gateway stack after a resolution's own profiles and before the deployment's destination rules. */
+  private static withGateway(resolution: GuardRunResolution, gateway: ResolvedGuardProfile[]): GuardRunResolution {
+    const deployment = resolution.deployment;
+    const last = resolution.stack[resolution.stack.length - 1];
+    const tail = deployment && last === deployment ? [deployment] : [];
+    const head = tail.length > 0 ? resolution.stack.slice(0, -1) : resolution.stack;
+    const seen = new Set<string>();
+    const stack = [...head, ...gateway, ...tail].filter((entry) => (seen.has(entry.hash) ? false : (seen.add(entry.hash), true)));
+    const levels: GuardBindingLevel[] = gateway.map((entry) => ({ level: "gateway", mode: "override", profileId: entry.profileId, version: entry.version }));
+    const at = resolution.chain.findIndex((level) => level.level === "destinations");
+    const chain = at < 0 ? [...resolution.chain, ...levels] : [...resolution.chain.slice(0, at), ...levels, ...resolution.chain.slice(at)];
+    return { ...resolution, stack, chain, gateway };
+  }
+
+  /**
+   * 12.6 — the Guard stack of a call through the MCP gateway, for a toolset and the client calling it:
+   *   1. the toolset's project's enforced profile, first;
+   *   2. the toolset's profile, then the client's (each `override`, admin-set);
+   *   3. the built-in default when GUARD_AUTO_APPLY is on and nothing above applies (as in runs);
+   *   4. the deployment's destination rules, last.
+   * Stacked like a run's: the most severe action wins, so each later profile only tightens.
+   *
+   * Only a toolset or client binding turns this on: with neither, `refs` is empty and the gateway runs no Guard at
+   * all, exactly as before (a project's enforced profile or GUARD_AUTO_APPLY alone never start checking gateway
+   * calls). `refs`: the profiles a workflow tool's run carries (pinned; the deployment's rules apply to runs anyway).
+   */
+  async resolveGateway(context: { toolsetId: string; clientId: string; projectId?: string | null }): Promise<{ resolution: GuardRunResolution; refs: GatewayGuardProfileRef[] }> {
+    const toolset = await this.getBinding("toolset", context.toolsetId);
+    const client = await this.getBinding("mcp_client", context.clientId);
+    const toolsetProfile = toolset.mode === "override" && toolset.profileId ? await this.loadProfile(toolset.profileId) : undefined;
+    const clientProfile = client.mode === "override" && client.profileId ? await this.loadProfile(client.profileId) : undefined;
+    const chain: GuardBindingLevel[] = [];
+    const level = (entry: GuardBindingLevel, resolved?: ResolvedGuardProfile) => chain.push({ ...entry, ...(resolved ? { version: resolved.version } : {}) });
+    if (!toolsetProfile && !clientProfile) {
+      level({ level: "toolset", mode: toolset.mode, profileId: toolset.profileId });
+      level({ level: "mcp_client", mode: client.mode, profileId: client.profileId });
+      return { resolution: { source: "none", stack: [], chain }, refs: [] };
+    }
+    // A toolset without a project has no project floor (its tool rules see no project either).
+    const project = context.projectId ? await this.getBinding("project", context.projectId) : null;
+    const enforced = project?.mode === "enforced" && project.profileId ? await this.loadProfile(project.profileId) : undefined;
+    if (project) level({ level: "project", mode: project.mode === "enforced" ? "enforced" : "inherit", profileId: project.mode === "enforced" ? project.profileId : null }, enforced);
+    level({ level: "toolset", mode: toolset.mode, profileId: toolset.profileId }, toolsetProfile);
+    level({ level: "mcp_client", mode: client.mode, profileId: client.profileId }, clientProfile);
+    level({ level: "instance", mode: this.options.autoApply ? "auto" : "off", profileId: this.options.autoApply ? GUARD_BUILTIN_PROFILE_ID : null });
+    const stack: ResolvedGuardProfile[] = [];
+    const refs: GatewayGuardProfileRef[] = [];
+    for (const [entry, at] of [[enforced, "project"], [toolsetProfile, "toolset"], [clientProfile, "mcp_client"]] as const) {
+      if (!entry || stack.some((existing) => existing.hash === entry.hash)) continue;
+      stack.push(entry);
+      refs.push({ profileId: entry.profileId, version: entry.version, level: at });
+    }
+    const source: GuardRunResolution["source"] = enforced ? "enforced" : toolsetProfile ? "toolset" : "mcp_client";
+    return { resolution: GuardService.withDeployment({ source, ...(enforced ? { enforced } : {}), stack, chain }, await this.deploymentProfile()), refs };
+  }
+
+  /** 12.6 — the engine's Guard dependencies for one gateway server tool call, for a resolution from `resolveGateway`. */
+  gatewayRuntime(context: GatewayGuardContext, resolution: GuardRunResolution): GuardRuntimeDependencies {
+    return {
+      resolveRun: () => resolution,
+      loadProfile: async (profileId) => await this.loadProfile(profileId),
+      vault: this.vault,
+      onVerdict: async (event) => await this.recordVerdict(event, { executionId: context.executionId, workflowId: "", projectId: context.projectId }),
+      destinationRows: async () => (await this.options.destinationRows?.()) ?? [],
+      ...(this.options.surrogateKey ? { surrogateKey: this.options.surrogateKey } : {}),
+      issuedSurrogates: new Set<string>()
+    };
   }
 
   /**
@@ -763,7 +906,8 @@ export class GuardService {
     const base = {
       verdictId,
       executionId: event.executionId || context.executionId || "",
-      workflowId: event.workflowId || context.workflowId,
+      // 12.6 — a gateway server tool call has no workflow.
+      workflowId: event.workflowId || context.workflowId || null,
       projectId: context.projectId ?? null,
       nodeId: event.nodeId,
       placement: event.placement,
@@ -888,7 +1032,7 @@ function toEventView(record: GuardEventRecord): GuardEventView {
     nodeId: record.nodeId,
     iteration: record.iteration,
     channel: record.channel as GuardEventView["channel"],
-    placement: record.placement === "agent" ? "agent" : "node",
+    placement: record.placement === "agent" ? "agent" : record.placement === "gateway" ? "gateway" : "node",
     toolName: record.toolName,
     detectorId: record.detectorId,
     category: record.category,

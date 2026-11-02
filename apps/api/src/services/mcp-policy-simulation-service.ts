@@ -94,7 +94,8 @@ export function draftToPolicyRule(draft: McpPolicyDraftRule, id: string): McpToo
     conditions: draft.conditions ?? null,
     mode: draft.mode ?? "enforce",
     workflowIds: [...new Set(draft.workflowIds ?? [])],
-    clientIds: [...new Set(draft.clientIds ?? [])]
+    clientIds: [...new Set(draft.clientIds ?? [])],
+    ...((draft.toolsetIds?.length ?? 0) > 0 ? { toolsetIds: [...new Set(draft.toolsetIds)] } : {})
   };
 }
 
@@ -345,6 +346,8 @@ export class McpPolicySimulationService {
             workflowId: gateway ? null : call.workflowId || null,
             // A run a gateway client started evaluated its rules with the client, which the run's rows do not record.
             clientId: gateway ? call.clientId : call.subjectSource === "client" ? undefined : null,
+            // 12.6 — the toolset of a gateway call (not recorded before v53); a run's call came through none.
+            toolsetId: gateway ? call.toolsetId ?? undefined : null,
             adapterId: call.adapterId,
             registryServerId: call.registryServerId,
             toolName: call.toolName,

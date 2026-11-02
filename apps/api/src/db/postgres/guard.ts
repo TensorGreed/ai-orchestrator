@@ -16,7 +16,7 @@ import type {
   GuardProfileVersionRecord,
   GuardVaultRow
 } from "../database.js";
-import { SUBJECT_EXECUTION_TRIGGERS } from "../store-shared.js";
+import { SUBJECT_EXECUTION_TRIGGERS, guardBindingScopeOf } from "../store-shared.js";
 import { type Store } from "../store.js";
 import { storedJsonb, toNum, toStr } from "./helpers.js";
 import type { PgContext } from "./context.js";
@@ -70,7 +70,7 @@ function mapGuardProfileVersionRow(row: Row): GuardProfileVersionRecord {
 
 function mapGuardBindingRow(row: Row): GuardBindingRecord {
   return {
-    scope: String(row.scope) === "workflow" ? "workflow" : "project",
+    scope: guardBindingScopeOf(row.scope),
     scopeId: String(row.scope_id),
     mode: String(row.mode),
     profileId: nullableText(row.profile_id),
@@ -374,6 +374,8 @@ function guardEventWhere(filters: GuardEventFilters): { where: string; params: u
   if (filters.action) add("effective_action = ?", filters.action);
   if (filters.since) add("created_at >= ?", filters.since);
   if (filters.onlyFindings) clauses.push("detector_id IS NOT NULL");
+  if (filters.placement === "gateway") clauses.push("placement = 'gateway'");
+  if (filters.placement === "run") clauses.push("placement <> 'gateway'");
   return { where: clauses.length ? `WHERE ${clauses.join(" AND ")}` : "", params };
 }
 

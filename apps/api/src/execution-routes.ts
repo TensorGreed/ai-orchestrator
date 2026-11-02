@@ -16,6 +16,8 @@ import crypto from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import {
+  GATEWAY_GUARD_CUSTOM_DATA_KEY,
+  parseGatewayGuardStack,
   unionDataLabels,
   workflowExecuteRequestSchema,
   type DataLabels,
@@ -551,6 +553,10 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
 
     const executionPayload = prepared.payload;
     const executionId = crypto.randomUUID();
+    // 12.6 — a retry of a gateway-triggered run applies the Guard profile versions that run applied (recorded on it),
+    // and records them again, so a retry of the retry keeps them.
+    const gatewayGuard = parseGatewayGuardStack(asRecord(sourceExecution.customData)[GATEWAY_GUARD_CUSTOM_DATA_KEY]);
+    const retryHistoryCustomData = gatewayGuard ? { ...(executionPayload.customData ?? {}), [GATEWAY_GUARD_CUSTOM_DATA_KEY]: gatewayGuard } : executionPayload.customData;
     await auditRunAction(request, user, "execution.retried", { executionId, workflowId: workflow.id, projectId: workflow.projectId }, { sourceExecutionId: sourceExecution.id });
     const result = await runDispatcher.run({
       v: DISPATCH_SPEC_VERSION,
@@ -580,12 +586,13 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
       // the trigger's result, so a retry of this retry keeps it too.
       inputLabels: unionDataLabels([historyInputLabels(sourceExecution, workflow), { provenance: ["user"], dataClasses: [], source: "propagated" }]),
       recordInputLabels: true,
+      ...(gatewayGuard ? { gatewayGuard } : {}),
       executionId,
       triggerType: "manual_retry",
       triggeredBy: user.email
       },
-      progress: { requestInput: prepared.requestInput, customData: executionPayload.customData },
-      history: { requestInput: prepared.requestInput, customData: executionPayload.customData }
+      progress: { requestInput: prepared.requestInput, customData: retryHistoryCustomData },
+      history: { requestInput: prepared.requestInput, customData: retryHistoryCustomData }
     }, { pool: dispatchPoolOf(workflow) });
 
     if (result.status === "error") {
@@ -643,6 +650,7 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
       ...asRecord(source.customData),
       mcpReplay: { sourceExecutionId: source.id, cassetteId: cassette.id, mode }
     };
+    const sourceGatewayGuard = parseGatewayGuardStack(asRecord(source.customData)[GATEWAY_GUARD_CUSTOM_DATA_KEY]);
     const result = await runDispatcher.run({
       v: DISPATCH_SPEC_VERSION,
       run: {
@@ -653,6 +661,8 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
       // result too, so a replay of this replay keeps it).
       inputLabels: historyInputLabels(source, workflow),
       recordInputLabels: true,
+      // 12.6 — the Guard profile versions a gateway-triggered source run applied (its custom data carries them on).
+      ...(sourceGatewayGuard ? { gatewayGuard: sourceGatewayGuard } : {}),
       policyActor: user,
       workflow,
       customData,

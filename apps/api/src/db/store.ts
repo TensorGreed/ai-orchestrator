@@ -238,6 +238,7 @@ export type McpToolPolicyPatch = Partial<
     | "mode"
     | "workflowIds"
     | "clientIds"
+    | "toolsetIds"
   >
 >;
 

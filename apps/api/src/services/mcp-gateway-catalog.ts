@@ -175,6 +175,8 @@ export async function buildGatewayCatalog(input: {
           registryServerId: server.id,
           serverLabel: server.name,
           clientId: input.clientId ?? null,
+          // 12.6 — server tools are called through this toolset, for rules scoped to toolsets.
+          toolsetId: toolset.id,
           ...(openWorld ? { openWorld } : {})
         },
         { name: tool.name, ...(tool.annotations ? { annotations: tool.annotations } : {}) }

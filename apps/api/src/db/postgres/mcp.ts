@@ -222,6 +222,7 @@ function mapMcpToolCall(row: Row): McpToolCallRecord {
     ...mapMcpToolCallContext(row),
     policyDecision: parseMcpPolicyDecision(row.policy_decision_json),
     labels: parseRecordedCallLabels(row.labels_json),
+    ...(row.toolset_id ? { toolsetId: toStr(row.toolset_id) } : {}),
     createdAt: toStr(row.created_at)
   };
 }
@@ -622,8 +623,8 @@ async function insertMcpToolCallRow(db: Queryable, call: McpToolCallWrite): Prom
        id, execution_id, workflow_id, node_id, registry_server_id, adapter_id, tool_name,
        started_at, duration_ms, ok, error, turn_input_tokens, turn_output_tokens,
        estimated_cost_usd, sampling_requests, sampling_input_tokens, sampling_output_tokens,
-       source, client_id, rejection, policy_decision_json, args_summary_json, subject_role, subject_source, project_id, labels_json, created_at
-     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27)`,
+       source, client_id, rejection, policy_decision_json, args_summary_json, subject_role, subject_source, project_id, labels_json, toolset_id, created_at
+     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28)`,
     [
       call.id,
       call.executionId,
@@ -648,6 +649,7 @@ async function insertMcpToolCallRow(db: Queryable, call: McpToolCallWrite): Prom
       call.policyDecision ? JSON.stringify(call.policyDecision) : null,
       ...mcpToolCallContextValues(call),
       call.labels ? JSON.stringify(call.labels) : null,
+      call.toolsetId ?? null,
       new Date().toISOString()
     ]
   );
@@ -1139,8 +1141,8 @@ export async function getMcpToolPolicy(ctx: PgContext, ...[id]: Parameters<Store
 
 const insertMcpToolPolicySql = `INSERT INTO mcp_tool_policies (
        id, name, description, effect, project_id, roles_json, server_id, tool_pattern, annotation_hint, kind, enabled,
-       conditions_json, mode, workflow_ids_json, client_ids_json, additive, created_by, created_at, updated_at
-     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $18)
+       conditions_json, mode, workflow_ids_json, client_ids_json, toolset_ids_json, additive, created_by, created_at, updated_at
+     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $19)
      RETURNING *`;
 
 function insertMcpToolPolicyParams(input: Parameters<Store["createMcpToolPolicy"]>[0], now: string): Array<string | number | null> {
@@ -1160,6 +1162,7 @@ function insertMcpToolPolicyParams(input: Parameters<Store["createMcpToolPolicy"
     input.mode ?? "enforce",
     JSON.stringify(input.workflowIds ?? []),
     JSON.stringify(input.clientIds ?? []),
+    JSON.stringify(input.toolsetIds ?? []),
     input.additive === true ? 1 : 0,
     input.createdBy ?? null,
     now
@@ -1208,6 +1211,7 @@ export async function updateMcpToolPolicy(ctx: PgContext, ...[id, patch]: Parame
   if (patch.mode !== undefined) { fields.push("mode = ?"); params.push(patch.mode ?? "enforce"); }
   if (patch.workflowIds !== undefined) { fields.push("workflow_ids_json = ?"); params.push(JSON.stringify(patch.workflowIds ?? [])); }
   if (patch.clientIds !== undefined) { fields.push("client_ids_json = ?"); params.push(JSON.stringify(patch.clientIds ?? [])); }
+  if (patch.toolsetIds !== undefined) { fields.push("toolset_ids_json = ?"); params.push(JSON.stringify(patch.toolsetIds ?? [])); }
   if (fields.length > 0) {
     fields.push("updated_at = ?");
     params.push(new Date().toISOString());

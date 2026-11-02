@@ -2349,6 +2349,21 @@ export const MIGRATIONS: Migration[] = [
     down: `
       ALTER TABLE mcp_toolsets DROP COLUMN IF EXISTS track_session_labels;
     `
+  },
+  {
+    version: 53,
+    description: "12.6 — tool rules scoped to gateway toolsets, and the toolset on gateway telemetry rows",
+    // `toolset_ids_json`: a rule only matches calls made through these toolsets (empty = every call, as before).
+    // `toolset_id`: the toolset a gateway call came through (null on run and playground rows, and on older rows).
+    // Guard bindings for toolsets and clients reuse guard_bindings (scope 'toolset' / 'mcp_client'): no shape change.
+    up: `
+      ALTER TABLE mcp_tool_policies ADD COLUMN IF NOT EXISTS toolset_ids_json TEXT NOT NULL DEFAULT '[]';
+      ALTER TABLE mcp_tool_calls ADD COLUMN IF NOT EXISTS toolset_id TEXT;
+    `,
+    down: `
+      ALTER TABLE mcp_tool_calls DROP COLUMN IF EXISTS toolset_id;
+      ALTER TABLE mcp_tool_policies DROP COLUMN IF EXISTS toolset_ids_json;
+    `
   }
 ];
 
