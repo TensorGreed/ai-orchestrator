@@ -1,5 +1,5 @@
 ---
-description: "Limit which LLM providers and models L2M may call, for the whole deployment or one project, with builder warnings, audited refusals and replay reports."
+description: "Limit which LLM and embedding models L2M may call, for the whole deployment or one project, with builder warnings, audited refusals and replay reports."
 ---
 
 # Model allowlists
@@ -8,8 +8,9 @@ An admin can limit which models L2M calls. A list is made of entries, each a
 **provider** and a **model pattern**, and there are two kinds of list:
 
 - the **deployment** list, which applies to every workflow and every gateway call;
-- a **project** list, which applies to that project's workflows and to gateway
-  toolsets that belong to that project.
+- a **project** list, which applies to that project's workflows, knowledge
+  bases and gateway toolsets. Workflows, knowledge bases and toolsets with no
+  project use the **Default** project's list.
 
 Both are optional. With no entries anywhere, every model is allowed, exactly as
 before, and nothing needs to be configured for a simple workflow.
@@ -36,7 +37,13 @@ that project call Anthropic: the deployment list still refuses the call.
 - **Provider** is the provider id the call goes to: `openai`, `anthropic`,
   `azure_openai`, `openai_compatible`, `ollama`, `gemini`, `echo` (the built-in
   demo provider), or a community provider's id. **Any provider** (`*`) matches
-  them all.
+  them all. Provider ids and patterns are stored in lower case (`OpenAI` is
+  saved as `openai`).
+- **Embedding** calls use the embedder's vendor as the provider: `openai`
+  (OpenAI embedder), `azure_openai` (Azure OpenAI embedder and the Azure OpenAI
+  embeddings node; the model name is the deployment name), `gemini` (Google
+  embedder), `mistral`, `cohere` and `huggingface`. The local token embedder
+  sends nothing anywhere and is not checked.
 - **Model pattern** is matched against the model name the provider is sent,
   ignoring case. `*` matches any text (also none) and `?` one character; every
   other character is literal, so `gpt-4o*` matches `gpt-4o` and `gpt-4o-mini`
@@ -50,17 +57,24 @@ that project call Anthropic: the deployment list still refuses the call.
 
 ## What is covered
 
-Every model call goes through the same check before any request leaves the
-server:
+Every model call, chat and embedding alike, goes through the same check before
+any request leaves the server:
 
 - LLM Call nodes and the provider chat model nodes;
 - the chat model attached to an Agent or Supervisor, and the chat models of a
   Supervisor's workers;
 - MCP sampling requests a server makes during a run, and on the
   [MCP gateway](../product/mcp-gateway.md), where the toolset's project decides
-  which project list applies (a toolset with no project uses the deployment
-  list alone);
-- **Test connection** in the node editor (with the workflow's project);
+  which project list applies (a toolset with no project uses the Default
+  project's list);
+- embeddings: the embedder of a RAG Retrieve node and the Azure OpenAI
+  embeddings node (the workflow's project), and knowledge-base ingest, upload
+  and search (the knowledge base's project; a shared knowledge base uses the
+  Default project's list);
+- **Test connection** in the node editor: the workflow's project, else the
+  project of the secret the test uses, else the Default project. The secret's
+  project's list always applies as well, so naming another project cannot get
+  around it;
 - LLM judges of evaluations (with the workflow's project).
 
 A sub-workflow is checked against its own project's list, and an error workflow
@@ -79,13 +93,18 @@ allowlist applies on top of them.
   that delegation's tool error.
 - On the MCP gateway, the sampling request fails, so the tool call answers with
   a tool error that carries the same sentence.
-- The provider test answers `403` with `code: "MODEL_NOT_ALLOWED"`.
+- The provider test answers `403` with `code: "MODEL_NOT_ALLOWED"` and
+  `refusedBy` (`deployment` or `project`); knowledge-base ingest, upload and
+  search answer `403` with the same code, before any text is embedded.
 
 Each refusal is written to the audit log as `model_allowlist.call_denied`, with
-the provider, model, which list refused it, where the call came from (`run`,
-`gateway_sampling`, `provider_test` or `eval_judge`) and the node, run, client
-or toolset. A run (or a gateway session) records one event per node, provider
-and model, however often it retries.
+the provider, model, `operation` (`generate`, `stream`, `test` or `embed`),
+which list refused it, where the call came from (`run`, `gateway_sampling`,
+`provider_test`, `eval_judge` or `knowledge_base`; `deployment` for a call made
+with none of these behind it) and the node, run, client, toolset or knowledge
+base. A run (or a gateway session) records one event per node, provider and
+model, however often it retries; an error workflow records one per failed run
+it handles, with the failed run's id as `sourceExecutionId`.
 
 ## Builder warnings
 
@@ -102,28 +121,37 @@ is not checked in the editor; the run still checks it.
 ## Replays
 
 A replay that answers model calls from a golden run's model tape does not call
-the model, so the allowlist does not refuse it. The check still runs and the
-replay reports a `model_not_allowed` health warning for each recorded call the
-allowlist would refuse now; it does not make the replay inconclusive. Model
-calls a replay makes live (live models, or a lenient replay's tape misses) are
-new calls and are refused like any other.
+the model, so the allowlist does not refuse those answers. After the replay, the
+calls the tape answered are checked against today's lists, and the replay
+reports a `model_not_allowed` health warning for each one the allowlist would
+refuse now; it does not make the replay inconclusive. Model calls a replay makes
+live (live models, or a lenient replay's tape misses) are new calls and are
+refused like any other run's, with the replayed workflow's project list.
 
 ## Managing the lists
 
 Open **Security → Models**. The deployment list is at the top; under it,
 choose a project to see and edit its override. Only admins add and remove
-entries; builders, operators and viewers see the lists read-only. Each list
-holds at most 200 entries. Every change is audited as
-`model_allowlist.entry_added` or `model_allowlist.entry_removed`.
+entries. Adding the first entry to an empty list asks for confirmation, because
+from then on that list refuses every model it does not match; removing an entry
+asks too. Builders see the deployment list and the lists of the projects they
+can read, read-only and without notes or who added an entry; operators and
+viewers do not see the lists. Each list holds at most 200 entries. Every change
+is audited as `model_allowlist.entry_added` or `model_allowlist.entry_removed`.
+Deleting a project deletes its list.
 
 The lists are stored in the database (`model_allowlist_entries`, SQLite and
-Postgres), so a change applies to the next model call on every instance.
+Postgres). Each API instance keeps a copy in memory, so a model call does not
+read the database: a change applies at once on the instance where it was made
+and within a few seconds (about 2) on every other instance. If the database
+cannot be read for a moment, the last copy keeps applying; only an instance
+that never managed to read the lists refuses model calls until it can.
 
 ### API
 
 | Method | Path | Role | |
 |---|---|---|---|
-| `GET` | `/api/model-allowlist` | any signed-in user | entries, providers to choose from, `canEdit` |
+| `GET` | `/api/model-allowlist` | builder | entries (a builder: the deployment's and their projects'), providers to choose from, `canEdit` |
 | `POST` | `/api/model-allowlist` | admin | `{ scope: "deployment" \| "project", projectId?, providerId, modelGlob, note? }` |
 | `DELETE` | `/api/model-allowlist/:id` | admin | removes one entry |
-| `GET` | `/api/model-allowlist/check?providerId=&model=&projectId=` | any signed-in user | `{ allowed, reason, message? }` for that model in that project |
+| `GET` | `/api/model-allowlist/check?providerId=&model=&projectId=` | builder (with access to the project) | `{ allowed, reason, message? }` for that model in that project |
