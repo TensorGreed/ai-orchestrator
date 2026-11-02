@@ -450,7 +450,7 @@ describeStoreContract("store contract: MCP", (ctx) => {
     });
     expect(created).toEqual({
       id: "c1", name: "First", tokenPrefix: "pre1", toolsetIds: ["ts1"], role: "operator", createdBy: "u1", createdByEmail: "u1@example.com",
-      expiresAt: iso(86_400_000), lastUsedAt: null, revokedAt: null, createdAt: created.createdAt
+      expiresAt: iso(86_400_000), lastUsedAt: null, revokedAt: null, createdAt: created.createdAt, rateLimit: null
     });
     expect(created.createdAt).toMatch(ISO);
     expect("tokenHash" in created).toBe(false);
