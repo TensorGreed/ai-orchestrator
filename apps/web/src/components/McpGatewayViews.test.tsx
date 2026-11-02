@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { GuardProfileSummary, GuardResolutionView } from "@ai-orchestrator/shared";
 import * as api from "../lib/api";
 import { McpServersPage } from "./McpServersPage";
+import { gatewayHeldActions } from "./McpGatewayGovernance";
 
 vi.mock("../lib/api", async () => {
   const actual = await vi.importActual<typeof import("../lib/api")>("../lib/api");
@@ -28,6 +29,7 @@ vi.mock("../lib/api", async () => {
     fetchMcpClientUsage: vi.fn(),
     fetchMcpClientSessions: vi.fn(),
     fetchGuardProfiles: vi.fn(),
+    fetchGuardProfile: vi.fn(),
     fetchGuardToolsetBinding: vi.fn(),
     updateGuardToolsetBinding: vi.fn(),
     fetchGuardClientBinding: vi.fn(),
@@ -175,6 +177,11 @@ function setup() {
     autoApply: true,
     builtInId: "default"
   });
+  vi.mocked(api.fetchGuardProfile).mockImplementation(async (id: string) => ({
+    profile: guardProfile(id, id),
+    latest: { profileId: id, version: 1, hash: "h", createdAt: "2026-10-20T10:00:00.000Z", document: { channels: {} } },
+    bindings: []
+  }));
   vi.mocked(api.fetchGuardToolsetBinding).mockResolvedValue({ binding: binding("toolset", "mts_1", null), effective: noGuard });
   vi.mocked(api.fetchGuardClientBinding).mockResolvedValue({ binding: binding("mcp_client", "mcc_1", null), toolsets: [{ toolsetId: "mts_1", effective: noGuard }] });
 }
@@ -361,7 +368,7 @@ describe("MCP gateway views", () => {
     render(<McpServersPage view="toolsets" isAdmin activeProjectId={null} />);
     const picker = await screen.findByLabelText("Guard profile for this toolset");
     expect(picker).toHaveValue("");
-    expect(picker).toHaveAccessibleDescription(/what clients send to this toolset's server tools and what comes back/);
+    expect(picker).toHaveAccessibleDescription(/what clients send to this toolset's tools and what comes back, and the Guard nodes and agents of its workflow tools/);
     expect(within(picker).queryByRole("option", { name: "Destination rules" })).not.toBeInTheDocument();
     const section = screen.getByTestId("gateway-guard-toolset");
     expect(within(section).getByRole("button", { name: "Save" })).toBeDisabled();
@@ -375,6 +382,41 @@ describe("MCP gateway views", () => {
     await user.selectOptions(picker, "");
     await user.click(within(section).getByRole("button", { name: "Save" }));
     expect(api.updateGuardToolsetBinding).toHaveBeenLastCalledWith("mts_1", { mode: "inherit" });
+  });
+
+  it("warns when the chosen profile asks for reviews or approvals, which block on the gateway", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.fetchGuardProfile).mockImplementation(async (id: string) => ({
+      profile: guardProfile(id, id),
+      latest: {
+        profileId: id,
+        version: 1,
+        hash: "h",
+        createdAt: "2026-10-20T10:00:00.000Z",
+        document:
+          id === "strict"
+            ? { channels: { tool_result: { detectors: [], actions: { email: { action: "review" } }, defaultAction: { action: "allow" } } } }
+            : { channels: { tool_arguments: { detectors: [], actions: {}, defaultAction: { action: "block" } } } }
+      },
+      bindings: []
+    }));
+    render(<McpServersPage view="toolsets" isAdmin activeProjectId={null} />);
+    const picker = await screen.findByLabelText("Guard profile for this toolset");
+    const section = screen.getByTestId("gateway-guard-toolset");
+    expect(within(section).queryByTestId("gateway-guard-toolset-held")).not.toBeInTheDocument();
+    await user.selectOptions(picker, "strict");
+    expect(await within(section).findByTestId("gateway-guard-toolset-held")).toHaveTextContent("On the gateway these block the call.");
+    await user.selectOptions(picker, "default");
+    await waitFor(() => expect(within(section).queryByTestId("gateway-guard-toolset-held")).not.toBeInTheDocument());
+  });
+
+  it("finds review and approval actions only where the gateway checks calls, and not in shadow", () => {
+    expect(gatewayHeldActions(null)).toBe(false);
+    expect(gatewayHeldActions({ channels: { prompt: { actions: { email: { action: "review" } } } } })).toBe(false);
+    expect(gatewayHeldActions({ channels: { tool_arguments: { actions: {}, defaultAction: { action: "require_approval" } } } })).toBe(true);
+    expect(gatewayHeldActions({ channels: { tool_result: { actions: { email: { action: "review", shadow: true } } } } })).toBe(false);
+    expect(gatewayHeldActions({ destinations: { rules: [{ action: "require_approval", allow: { maxTier: "internal" } }] } })).toBe(true);
+    expect(gatewayHeldActions({ channels: { tool_result: { actions: { email: { action: "redact" } }, defaultAction: { action: "block" } } } })).toBe(false);
   });
 
   it("shows builders the toolset's Guard profile read-only", async () => {

@@ -4008,6 +4008,10 @@ button.tag-chip:hover {
   max-width: 100%;
 }
 
+.mcp-gw-guard-warning {
+  color: var(--warn);
+}
+
 .mcp-governance-row h5 {
   margin: 0 0 6px;
   font-size: 0.85rem;
