@@ -94,12 +94,12 @@ function deps(input: {
   };
 }
 
-function agentWorkflow(toolConnection: Record<string, unknown>, withRepo = false): Workflow {
+function agentWorkflow(toolConnection: Record<string, unknown>, withRepo = false, agentConfig: Record<string, unknown> = {}): Workflow {
   return workflow(
     "wf-built-in",
     [
       node("in", "webhook_input"),
-      node("agent", "agent_orchestrator", { maxIterations: 5, toolCallingEnabled: true, userPromptTemplate: "{{user_prompt}}" }),
+      node("agent", "agent_orchestrator", { maxIterations: 5, toolCallingEnabled: true, userPromptTemplate: "{{user_prompt}}", ...agentConfig }),
       node("model", "llm_call", { provider: { providerId: "scripted", model: "m" } }),
       node("search", "mcp_tool", { serverId: BUILT_IN_TOOLS_ADAPTER_ID, toolName: "__all__", connection: toolConnection }),
       ...(withRepo ? [node("repo", "mcp_tool", { serverId: "repo-mcp", toolName: "push" })] : []),
@@ -115,7 +115,7 @@ function agentWorkflow(toolConnection: Record<string, unknown>, withRepo = false
   );
 }
 
-type AgentOutput = { steps?: Array<{ toolResults: Array<{ toolName: string; output: unknown; error?: string }> }>; _mcpTools?: Record<string, unknown> };
+type AgentOutput = { steps?: Array<{ toolResults: Array<{ toolName: string; output: unknown; error?: string; thought?: string }> }>; _mcpTools?: Record<string, unknown> };
 const agentOutput = (result: Awaited<ReturnType<typeof executeWorkflow>>) =>
   result.nodeResults.filter((entry) => entry.nodeId === "agent").at(-1)?.output as AgentOutput | undefined;
 
@@ -187,5 +187,33 @@ describe("built-in tools on an agent", () => {
     );
     expect(result.status).toBe("success");
     expect(invoked).toEqual(["push"]);
+  });
+
+  it("traces the agent's Think calls as thoughts beside the tool calls, never as an MCP tool", async () => {
+    const fetched: string[] = [];
+    const activity: Array<{ nodeId: string; kind: string; text?: string }> = [];
+    const dependencies = deps({
+      calls: [
+        { name: "think", arguments: { thought: "Search first, then answer." } },
+        { name: "l2m-tools__wikipedia_search", arguments: { query: "rust" } }
+      ],
+      fetched
+    });
+    const result = await executeWorkflow(
+      { workflow: agentWorkflow({ provider: "wikipedia" }, false, { thinkTool: true }), webhookPayload: { user_prompt: "What is Rust?" } },
+      {
+        ...dependencies,
+        onNodeActivity: (event) => {
+          activity.push(event as unknown as { nodeId: string; kind: string; text?: string });
+        }
+      }
+    );
+    expect(result.status).toBe("success");
+    const output = agentOutput(result);
+    expect(output?.steps?.[0]?.toolResults[0]).toMatchObject({ toolName: "think", thought: "Search first, then answer." });
+    expect(output?.steps?.[1]?.toolResults[0]).toMatchObject({ toolName: "l2m-tools__wikipedia_search" });
+    expect(Object.keys(output?._mcpTools ?? {})).not.toContain("think");
+    expect(activity.filter((entry) => entry.kind === "thought")).toEqual([expect.objectContaining({ nodeId: "agent", text: "Search first, then answer." })]);
+    expect(fetched).toHaveLength(1);
   });
 });

@@ -47,6 +47,11 @@ describe("describeActivity", () => {
     expect(describeActivity(ev(1, { kind: "tool_call", phase: "end", toolName: "search_docs", outcome: "blocked" }))).toBe("search_docs blocked by content rules");
   });
 
+  it("describes the agent's Think notes as thoughts (6.4)", () => {
+    expect(describeActivity(ev(1, { kind: "thought", iteration: 1, text: "Search first,\n then answer." }))).toBe("Thought: Search first, then answer.");
+    expect(describeActivity(ev(1, { kind: "thought", text: "" }))).toBe("Thought");
+  });
+
   it("prefixes worker entries", () => {
     expect(describeActivity(ev(1, { kind: "tool_call", phase: "start", toolName: "t" }, { workerNodeId: "w1" }))).toBe("Worker w1: Calling t");
   });

@@ -50,7 +50,7 @@ describe("agent runtime activity events", () => {
     const state = await promise;
     expect(state.stopReason).toBe("final_answer");
     const summary = events.map((e) =>
-      e.kind === "retry" ? `retry:${e.scope}:${e.attempt}/${e.maxAttempts}` : `${e.kind}:${e.phase}${"outcome" in e && e.outcome ? `:${e.outcome}` : ""}`
+      e.kind === "retry" ? `retry:${e.scope}:${e.attempt}/${e.maxAttempts}` : `${e.kind}:${"phase" in e ? e.phase : ""}${"outcome" in e && e.outcome ? `:${e.outcome}` : ""}`
     );
     expect(summary).toEqual([
       "agent_step:start",

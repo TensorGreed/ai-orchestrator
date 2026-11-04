@@ -6402,7 +6402,9 @@ async function executeNodeHandler(
             sessionId,
             memory,
             bypassToolFiltering: attachedToolServerConfigs.length > 0,
-            images: images.length > 0 ? images : undefined
+            images: images.length > 0 ? images : undefined,
+            // Phase 6.4 — the agent's Think toggle (off unless set).
+            ...(config.thinkTool === true ? { thinkTool: true } : {})
           },
           {
             tools: [

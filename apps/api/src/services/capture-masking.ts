@@ -20,7 +20,7 @@
  * collected value the capture is dropped (`dropped_identifier_value`).
  *
  * In a model-tape request, only a tool whose name the runtime builds itself
- * is held back as written: `agent_clarify`, `session_cache_*`
+ * is held back as written: `agent_clarify`, `session_cache_*`, `think`
  * (`RUNTIME_INTERNAL_TOOL_NAMES`) and the delegate tool of a worker attached
  * in the captured workflow. Replay rebuilds those the same way, so their
  * definition and the names of calls to them stay as written; every string

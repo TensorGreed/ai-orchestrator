@@ -78,8 +78,17 @@ const CLARIFY_TOOL_NAME = "agent_clarify";
 const SESSION_CACHE_LIST_TOOL_NAME = "session_cache_list";
 const SESSION_CACHE_GET_TOOL_NAME = "session_cache_get";
 
+/** Phase 6.4 — the Think tool: a place to reason between tool calls. */
+export const THINK_TOOL_NAME = "think";
+const THINK_MAX_CHARS = 4_000;
+
 /** The names of the tools the agent runtime adds by itself (never from an MCP server or the workflow). */
-export const RUNTIME_INTERNAL_TOOL_NAMES: readonly string[] = Object.freeze([CLARIFY_TOOL_NAME, SESSION_CACHE_LIST_TOOL_NAME, SESSION_CACHE_GET_TOOL_NAME]);
+export const RUNTIME_INTERNAL_TOOL_NAMES: readonly string[] = Object.freeze([
+  CLARIFY_TOOL_NAME,
+  SESSION_CACHE_LIST_TOOL_NAME,
+  SESSION_CACHE_GET_TOOL_NAME,
+  THINK_TOOL_NAME
+]);
 const SESSION_CACHE_DEFAULT_LIST_LIMIT = 10;
 const SESSION_CACHE_MAX_LIST_LIMIT = 50;
 const SESSION_CACHE_SUMMARY_LIMITS: NormalizedToolOutputLimits = {
@@ -396,6 +405,30 @@ function createClarifyTool(): RuntimeInternalTool {
     // appended, so this body is unreachable in practice. We return a
     // sentinel anyway so a mis-routed call still yields something readable.
     invoke: async () => ({ __agent_clarify: true })
+  };
+}
+
+/**
+ * Phase 6.4 — the Think tool. Calling it changes nothing outside the run: the
+ * note stays in the model's context and the trace. Like clarify it is
+ * special-cased in the loop by name; `invoke` only answers a mis-routed call.
+ * It skips tool policy, Guard and labels (the note is model output already
+ * in context, and the final answer is guarded), the session tool cache and
+ * MCP telemetry.
+ */
+function createThinkTool(): RuntimeInternalTool {
+  return {
+    definition: {
+      name: THINK_TOOL_NAME,
+      description:
+        "Use this to think something through before you act: plan the next steps, check a tool result against the request, or work out which tool to call. It does not fetch anything or change anything; it only records your thought.",
+      inputSchema: {
+        type: "object",
+        properties: { thought: { type: "string", description: "Your thought." } },
+        required: ["thought"]
+      }
+    },
+    invoke: async () => ({ recorded: true })
   };
 }
 
@@ -850,6 +883,10 @@ export class DefaultAgentRuntime implements AgentRuntimeAdapter {
     // Phase: agent_clarify. The clarify tool is always available so the
     // agent can pause and ask the user when context is genuinely missing.
     const clarifyTool = createClarifyTool();
+    const thinkHint =
+      request.thinkTool === true && request.toolCallingEnabled
+        ? `\n\nA \`${THINK_TOOL_NAME}\` tool is available: use it to plan and to check tool results before you act on them. It changes nothing.`
+        : "";
     const clarifyHint = `\n\nIf you cannot complete the task without information only the user can provide, call the \`${CLARIFY_TOOL_NAME}\` tool with a focused question. Your run pauses and resumes when they reply. Don't use this for confirmation when the request is already clear.`;
 
     // 12.2 — a message the model sees marked (spotlighted) maps to the text it was marked from. Memory saves that
@@ -1001,7 +1038,7 @@ ${effectiveSystemPrompt}`;
       {
         role: "system",
         content: normalizeMessageContent(
-          `${guardSystemText ? `${guardSystemText}\n\n` : ""}${effectiveSystemPrompt}${sessionCacheHint}${clarifyHint}`,
+          `${guardSystemText ? `${guardSystemText}\n\n` : ""}${effectiveSystemPrompt}${sessionCacheHint}${clarifyHint}${thinkHint}`,
           MAX_SYSTEM_MESSAGE_CHARS
         )
       },
@@ -1021,7 +1058,7 @@ ${effectiveSystemPrompt}`;
           ])
     ];
     const externalToolDefinitions = tools.tools;
-    const internalTools: RuntimeInternalTool[] = [...sessionCacheTools, clarifyTool];
+    const internalTools: RuntimeInternalTool[] = [...sessionCacheTools, clarifyTool, ...(request.thinkTool === true ? [createThinkTool()] : [])];
     const internalToolDefinitions = internalTools.map((tool) => tool.definition);
     const allToolDefinitions = [...externalToolDefinitions, ...internalToolDefinitions];
     const toolDefinitionByName = new Map<string, ToolDefinition>(allToolDefinitions.map((tool) => [tool.name, tool]));
@@ -1470,6 +1507,23 @@ ${effectiveSystemPrompt}`;
                   disabledTools.add(call.name);
                 }
                 failedToolCount += 1;
+                continue;
+              }
+
+              // Phase 6.4 — a Think call is a note, not a tool call: a "thought" entry in the trace, and a short
+              // acknowledgement for the model (every tool call needs a result message).
+              if (call.name === THINK_TOOL_NAME && internalTool) {
+                const thought = typeof call.arguments?.thought === "string" ? call.arguments.thought.trim() : "";
+                toolReported = true;
+                emit({ kind: "thought", iteration, toolCallId: call.id, text: previewText(thought, NODE_ACTIVITY_PREVIEW_CHARS) });
+                const recorded = { recorded: true };
+                toolResults.push({
+                  toolCallId: call.id,
+                  toolName: call.name,
+                  output: recorded,
+                  thought: thought.length > THINK_MAX_CHARS ? `${thought.slice(0, THINK_MAX_CHARS)}…` : thought
+                });
+                messages.push({ role: "tool", content: serializeToolMessage(true, recorded, toolOutputLimits), toolCallId: call.id, name: call.name });
                 continue;
               }
 

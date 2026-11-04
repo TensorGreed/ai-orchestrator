@@ -2845,6 +2845,18 @@ export function NodeInspector({
               </>
             }
           />
+          <ToggleField
+            label="Think Tool"
+            checked={toBooleanValue(config.thinkTool, false)}
+            onChange={(next) => setConfig((current) => ({ ...current, thinkTool: next }))}
+            help={
+              <>
+                Gives the agent a <code>think</code> tool: a scratchpad step to plan
+                and to check tool results before acting. It fetches and changes
+                nothing; each note shows in the run trace as a thought. Off by default.
+              </>
+            }
+          />
         </div>
 
         <div className="cfg-group">

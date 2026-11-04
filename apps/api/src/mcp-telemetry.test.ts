@@ -508,6 +508,36 @@ describe("MCP tool telemetry: extraction", () => {
     expect([0, 1, 2].map((index) => splitEvenly(100, 3, index))).toEqual([34, 33, 33]);
   });
 
+  it("writes no row for the agent's Think calls (6.4)", () => {
+    const rows = extractMcpToolCalls({
+      executionId: "e-think",
+      workflow,
+      priceTurn,
+      nodeResults: [
+        {
+          nodeId: "agent",
+          status: "success",
+          startedAt: "2026-10-01T00:00:00.000Z",
+          output: {
+            _telemetry: { providerId: "openai", model: "gpt-4o" },
+            _mcpTools: { "mock-mcp__calculator": { adapterId: "mock-mcp", toolName: "calculator" } },
+            steps: [
+              {
+                iteration: 1,
+                requestedTools: [{ id: "t" }, { id: "a" }],
+                toolResults: [
+                  { toolCallId: "t", toolName: "think", output: { recorded: true }, thought: "Plan first." },
+                  { toolCallId: "a", toolName: "mock-mcp__calculator", output: 2 }
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    });
+    expect(rows.map((row) => row.toolName)).toEqual(["calculator"]);
+  });
+
   it("leaves cost null for an unpriced model and tokens null when the turn reported none", () => {
     const unpriced = extractMcpToolCalls({
       executionId: "e2",

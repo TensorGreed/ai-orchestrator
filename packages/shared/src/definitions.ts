@@ -540,6 +540,8 @@ const baseNodeDefinitions: NodeDefinition[] = [
         sessionIdTemplate: { type: "string" },
         maxIterations: { type: "number" },
         toolCallingEnabled: { type: "boolean" },
+        /** Phase 6.4 — offer the agent the internal Think tool (off by default). */
+        thinkTool: { type: "boolean" },
         toolMessageMaxChars: { type: "number" },
         toolPayloadMaxDepth: { type: "number" },
         toolPayloadMaxObjectKeys: { type: "number" },
@@ -584,6 +586,8 @@ const baseNodeDefinitions: NodeDefinition[] = [
         userPromptTemplate: { type: "string" },
         sessionIdTemplate: { type: "string" },
         maxIterations: { type: "number" },
+        /** Phase 6.4 — offer the supervisor the internal Think tool (off by default). */
+        thinkTool: { type: "boolean" },
         toolMessageMaxChars: { type: "number" },
         toolPayloadMaxDepth: { type: "number" },
         toolPayloadMaxObjectKeys: { type: "number" },
