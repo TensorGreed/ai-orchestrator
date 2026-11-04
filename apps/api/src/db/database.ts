@@ -57,6 +57,7 @@ import { parseStoredGatewayRateLimit, type BudgetScopeType, type McpGatewayRateL
 import { DESTINATION_KINDS, DESTINATION_TIERS, type DataDestinationRow, DEFAULT_PROJECT_ID, GUARD_SIMULATION_JOB_DATASET_PREFIX, MCP_POLICY_KINDS, MCP_POLICY_ROLES, MCP_TOOL_HINT_CONDITIONS, REPLAY_CAPTURE_API_KEY_FILTER, REPLAY_CAPTURE_STATUSES } from "@ai-orchestrator/shared";
 import {
   mapMcpGatewayApproval,
+  mergeRecordedCallLabels,
   mapMcpPolicySuggestion,
   mapMcpToolCallContext,
   mcpToolCallScanWhere,
@@ -4024,6 +4025,9 @@ export class SqliteStore implements Store {
       );
       CREATE UNIQUE INDEX IF NOT EXISTS idx_model_allowlist_entries_match ON model_allowlist_entries(scope, project_id, provider_id, model_glob);
     `);
+
+    // 12.2 (v56) — the session labels that drove a held gateway call (null on older requests).
+    this.ensureColumn("mcp_gateway_approvals", "labels_json", "TEXT");
 
     this.exec(`CREATE INDEX IF NOT EXISTS idx_workflows_project_id ON workflows(project_id)`);
     this.exec(`CREATE INDEX IF NOT EXISTS idx_workflows_folder_id ON workflows(folder_id)`);
@@ -12694,7 +12698,11 @@ export class SqliteStore implements Store {
         `SELECT * FROM mcp_gateway_approvals WHERE client_id = ? AND server_id = ? AND tool_name = ? AND args_hash = ? AND status = 'pending'`,
         [input.clientId, input.serverId, input.toolName, input.argsHash]
       );
-      if (existing) return { approval: mapMcpGatewayApproval(existing), created: false };
+      if (existing) {
+        const merged = mergeRecordedCallLabels(existing.labels_json, input.labels);
+        if (merged) this.exec(`UPDATE mcp_gateway_approvals SET labels_json = ? WHERE id = ?`, [JSON.stringify(merged), String(existing.id)]);
+        return { approval: this.getMcpGatewayApprovalSync(String(existing.id))!, created: false };
+      }
       if (options.maxPendingPerClient !== undefined) {
         const pending = this.queryOne<{ count: number }>(
           `SELECT COUNT(*) AS count FROM mcp_gateway_approvals WHERE client_id = ? AND status = 'pending'`,
@@ -12705,8 +12713,8 @@ export class SqliteStore implements Store {
       this.exec(
         `INSERT INTO mcp_gateway_approvals (
            id, client_id, client_name, toolset_id, project_id, server_id, server_name, tool_name, gateway_tool_name,
-           args_hash, args_preview, rule_id, rule_name, message, status, requested_at, expires_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
+           args_hash, args_preview, rule_id, rule_name, message, status, requested_at, expires_at, labels_json
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)`,
         [
           input.id,
           input.clientId,
@@ -12723,7 +12731,8 @@ export class SqliteStore implements Store {
           input.ruleName,
           input.message,
           input.requestedAt,
-          input.expiresAt
+          input.expiresAt,
+          input.labels ? JSON.stringify(input.labels) : null
         ]
       );
       return { approval: this.getMcpGatewayApprovalSync(input.id)!, created: true };

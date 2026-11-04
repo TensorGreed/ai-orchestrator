@@ -6,6 +6,7 @@ import {
   DEFAULT_MCP_SAMPLING_SETTINGS,
   MCP_TOOL_POLICY_EFFECTS,
   mcpToolPolicyConditionsSchema,
+  parseRecordedCallLabels,
   parseToolArgumentSummary,
   MCP_POLICY_SUGGESTION_STATUSES,
   type McpGatewayApproval,
@@ -167,8 +168,23 @@ export function mapMcpGatewayApproval(row: Record<string, unknown>): McpGatewayA
     decidedBy: text(row.decided_by),
     decidedAt: isoOrNull(row.decided_at),
     decisionReason: text(row.decision_reason),
-    usedAt: isoOrNull(row.used_at)
+    usedAt: isoOrNull(row.used_at),
+    labels: parseRecordedCallLabels(row.labels_json)
   };
+}
+
+/**
+ * 12.2 — a repeated held call joins its pending request: the labels of the first request and of the repeat, as a
+ * union. A session's labels only ever grow, so the row never shows less than the session had seen. Null when neither has any.
+ */
+export function mergeRecordedCallLabels(stored: unknown, incoming: unknown): McpGatewayApproval["labels"] {
+  const before = parseRecordedCallLabels(stored);
+  const after = parseRecordedCallLabels(incoming);
+  if (!before && !after) return null;
+  const provenance = [...new Set([...(before?.provenance ?? []), ...(after?.provenance ?? [])])];
+  const dataClasses = [...new Set([...(before?.dataClasses ?? []), ...(after?.dataClasses ?? [])])];
+  // The parser's shape: data classes belong to tracked labels only.
+  return before?.tracked || after?.tracked ? { provenance, dataClasses, tracked: true } : { provenance, tracked: false };
 }
 
 /** Phase 12.4 — the argument summary and subject columns of an mcp_tool_calls row (shared with the Postgres store). */

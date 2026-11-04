@@ -2467,7 +2467,15 @@ export async function deleteTemplate(id: string) {
 }
 
 export async function getWorkflowShareLink(workflowId: string) {
-  return apiRequest<{ shareUrl: string }>(`/api/workflows/${workflowId}/share-link`);
+  return apiRequest<{ shareUrl: string; data: string }>(`/api/workflows/${workflowId}/share-link`);
+}
+
+/** Imports a workflow from a share link's `data` (a POST: opening a share link never imports anything). */
+export async function importSharedWorkflow(data: string) {
+  return apiRequest<{ workflowId: string; name: string }>("/api/workflows/import-shared", {
+    method: "POST",
+    body: JSON.stringify({ data })
+  });
 }
 
 // ---------------------------------------------------------------------------

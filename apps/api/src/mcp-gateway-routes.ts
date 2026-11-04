@@ -1317,7 +1317,9 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
         ruleName: decision.approval.ruleName ?? null,
         message: decision.approval.message,
         requestedAt: now.toISOString(),
-        expiresAt: new Date(now.getTime() + GATEWAY_APPROVAL_PENDING_MS).toISOString()
+        expiresAt: new Date(now.getTime() + GATEWAY_APPROVAL_PENDING_MS).toISOString(),
+        // 12.2 — the session mark that drove the hold, as the approval_requested audit event records it.
+        labels: labelRecord ?? null
       },
       now.toISOString(),
       { maxPendingPerClient: GATEWAY_APPROVAL_MAX_PENDING_PER_CLIENT }

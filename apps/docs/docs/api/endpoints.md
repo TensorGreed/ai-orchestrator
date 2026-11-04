@@ -25,6 +25,7 @@ description: "Every L2M HTTP API endpoint by area: auth and SSO, workflows, runs
 - `DELETE /api/workflows/:id` (while the workflow's release gate is on and enforced, only an admin: others get `403`, audited as `release.workflow_delete.refused`)
 - `POST /api/workflows/:id/duplicate`
 - `POST /api/workflows/import`
+- `GET /api/workflows/:id/share-link` (admin, builder) returns `{ shareUrl, data }`; `POST /api/workflows/import-shared` with `{ data }` (or POST the `shareUrl` as it is) imports the copy. Opening a share link (a GET) imports nothing: it answers 405 with a hint
 - `POST /api/workflows/import/external` — convert an export from another builder; see [Importing from another builder](../product/importing-from-another-builder.md)
 - `GET /api/workflows/:id/export`
 - `POST /api/workflows/:id/validate`
@@ -90,7 +91,7 @@ See [MCP tool policy](../product/mcp-tool-policy.md).
 - `PUT /api/mcp/policies/:id` (admin)
 - `DELETE /api/mcp/policies/:id` (admin)
 - `POST /api/mcp/policies/evaluate` (builder; `{ projectId, role, serverId, toolName, kind?, noWriteTools?, arguments?, labels?, workflowId?, clientId? }`)
-- `GET /api/mcp/gateway/approvals?status=` (admin; gateway calls held for approval)
+- `GET /api/mcp/gateway/approvals?status=` (admin; gateway calls held for approval, each with the session `labels` that drove the hold, or null)
 - `POST /api/mcp/gateway/approvals/:id/approve` and `/reject` (admin; optional `{ reason }`)
 
 ## MCP gateway

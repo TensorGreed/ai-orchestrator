@@ -14,6 +14,7 @@ import {
   mcpSafetyPresetRule,
   mcpSafetyPresetRuleId,
   type McpClient,
+  type McpGatewayApproval,
   type McpGatewaySessionView,
   type McpPolicySimulationResult,
   type McpSafetyPresetId,
@@ -567,6 +568,11 @@ describe("what raises a session's mark", () => {
     expect((await callTool(fixture, sessionId, "calculator", { expression: "1+1" })).outcome).toBe("approval_pending");
     const [requested] = await auditEvents(fixture.context.store, "mcp_gateway.approval_requested");
     expect((requested!.metadata as { labels?: unknown }).labels).toEqual({ provenance: ["user", "untrusted_external"], tracked: false });
+    // The request row keeps them too (v56), and the admin list returns them.
+    const listed = await caller(fixture.context)(fixture.admin, "GET", "/api/mcp/gateway/approvals");
+    expect(listed.statusCode).toBe(200);
+    const [approval] = listed.json<{ approvals: McpGatewayApproval[] }>().approvals;
+    expect(approval).toMatchObject({ id: (requested!.metadata as { approvalRequestId: string }).approvalRequestId, labels: { provenance: ["user", "untrusted_external"], tracked: false } });
   });
 
   it("raises after a server call the client cancelled", async () => {
