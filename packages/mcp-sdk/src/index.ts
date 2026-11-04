@@ -35,6 +35,7 @@ export * from "./adapters/http-mcp";
 export * from "./adapters/stdio-mcp";
 export * from "./adapters/built-in-tools";
 export * from "./adapters/workflow-tool";
+export { isL2mOwnToolAdapter } from "./adapters/own-adapters";
 
 export interface DefaultMCPRegistryOptions {
   oauth?: McpOAuthTokenProvider;

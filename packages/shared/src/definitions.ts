@@ -805,14 +805,13 @@ const baseNodeDefinitions: NodeDefinition[] = [
         toolName: { type: "string" },
         /** Overrides the derived description the model reads. */
         toolDescription: { type: "string" },
-        /** The workflow only reads: the write-tool gate skips it. Off unless set. */
-        readOnly: { type: "boolean" }
+        /** Longest one call may run, in milliseconds. Unset: the run's own timeout bounds it. */
+        timeoutMs: { type: "number" }
       },
       required: ["workflowId"]
     },
     sampleConfig: {
-      workflowId: "",
-      readOnly: false
+      workflowId: ""
     }
   },
   {
@@ -1622,7 +1621,9 @@ const baseNodeDefinitions: NodeDefinition[] = [
       type: "object",
       properties: {
         description: { type: "string" },
-        inputSchema: { type: "object" }
+        inputSchema: { type: "object" },
+        /** Phase 6.4 — this workflow changes nothing outside its run: as an agent's Workflow Tool, the caller's write-tool gate skips it. Off unless set. */
+        readOnly: { type: "boolean" }
       }
     },
     sampleConfig: {
@@ -2690,7 +2691,9 @@ const baseNodeDefinitions: NodeDefinition[] = [
         toolDescription: { type: "string" },
         inputSchema: { type: "object" },
         authMode: { type: "string", enum: ["public", "bearer"] },
-        secretRef: { type: "object" }
+        secretRef: { type: "object" },
+        /** Phase 6.4 — this workflow changes nothing outside its run: as an agent's Workflow Tool, the caller's write-tool gate skips it. Off unless set. */
+        readOnly: { type: "boolean" }
       },
       required: ["path", "toolName"]
     },

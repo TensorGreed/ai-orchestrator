@@ -11,6 +11,7 @@ import {
   type McpToolErrorKind
 } from "@ai-orchestrator/shared";
 import type { MCPExecutionContext, MCPServerAdapter } from "../types";
+import { markL2mOwnToolAdapter } from "./own-adapters";
 
 /**
  * Phase 6.4 — the built-in `l2m-tools` adapter: Wikipedia, SearXNG, SerpAPI
@@ -189,11 +190,46 @@ function asArray(value: unknown): unknown[] {
   return Array.isArray(value) ? value : [];
 }
 
-/** Replaces every occurrence of the secret (raw and URL-encoded) in a message. */
+/**
+ * The body as text, read as it streams: past `maxBytes` the read stops and the
+ * rest is cancelled, so a body with no (or a false) content-length cannot
+ * fill memory.
+ */
+async function readCapped(response: Response, maxBytes: number): Promise<string> {
+  const tooLarge = () => new Error(`the response is larger than ${maxBytes} bytes.`);
+  if (!response.body) {
+    const buffer = await response.arrayBuffer();
+    if (buffer.byteLength > maxBytes) throw tooLarge();
+    return new TextDecoder().decode(buffer);
+  }
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > maxBytes) {
+      await reader.cancel().catch(() => undefined);
+      throw tooLarge();
+    }
+    chunks.push(value);
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder().decode(bytes);
+}
+
+/** Replaces every occurrence of the secret (raw, URL-encoded, and as a query string encodes it) in a message. */
 function scrub(message: string, secret: string | undefined): string {
   if (!secret) return message;
   let out = message;
-  for (const variant of new Set([secret, encodeURIComponent(secret)])) {
+  const queryEncoded = new URLSearchParams({ k: secret }).toString().slice("k=".length);
+  for (const variant of new Set([secret, encodeURIComponent(secret), queryEncoded])) {
     if (variant) out = out.split(variant).join("[REDACTED]");
   }
   return out;
@@ -236,6 +272,7 @@ export class BuiltInToolsMCPServerAdapter implements MCPServerAdapter {
     this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.maxResponseBytes = options.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES;
     this.userAgent = options.userAgent ?? DEFAULT_USER_AGENT;
+    markL2mOwnToolAdapter(this.definition);
   }
 
   async discoverTools(config: MCPServerConfig): Promise<MCPToolDefinition[]> {
@@ -304,9 +341,7 @@ export class BuiltInToolsMCPServerAdapter implements MCPServerAdapter {
       await response.body?.cancel().catch(() => undefined);
       throw new Error(`the response is larger than ${this.maxResponseBytes} bytes.`);
     }
-    const buffer = await response.arrayBuffer();
-    if (buffer.byteLength > this.maxResponseBytes) throw new Error(`the response is larger than ${this.maxResponseBytes} bytes.`);
-    return { status: response.status, text: new TextDecoder().decode(buffer) };
+    return { status: response.status, text: await readCapped(response, this.maxResponseBytes) };
   }
 
   private async requestJson(url: URL, context: MCPExecutionContext, headers?: Record<string, string>): Promise<Record<string, unknown>> {

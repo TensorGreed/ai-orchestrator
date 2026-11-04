@@ -1733,6 +1733,8 @@ ${effectiveSystemPrompt}`;
                 else if (decision.outcome === "rewrite") guardedError = typeof decision.content === "string" ? decision.content : JSON.stringify(decision.content);
               }
               const toolError = createToolErrorResult(call, guardedError);
+              // Phase 6.4 — a failed call keeps the labels its tool gives the failure (a workflow tool: its child's).
+              if (resultLabels) resultLabels = tools.resultLabels?.(call.name, call.id) ?? resultLabels;
               // An external tool's error text reaches the model like a result (and is scanned like one).
               if (resultLabels) resultLabels = withScanned(resultLabels, guardedError);
               if (resultLabels) seenLabels.push(resultLabels);

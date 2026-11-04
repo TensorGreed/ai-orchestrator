@@ -142,6 +142,8 @@ export interface WorkflowToolDescriptor {
   inputSchema: Record<string, unknown>;
   /** Where the schema came from. */
   source: "mcp_server_trigger" | "sub_workflow_trigger" | "default";
+  /** The workflow's own trigger declares it read-only (`readOnly` on that trigger); a caller cannot. */
+  readOnly: boolean;
 }
 
 const TOOL_NAME_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
@@ -174,7 +176,8 @@ export const DEFAULT_WORKFLOW_TOOL_SCHEMA: Readonly<Record<string, unknown>> = O
  * The tool a workflow becomes: its "Expose as MCP Tool" trigger's name,
  * description and input schema when it has one, else its Sub-Workflow
  * Trigger's description and input schema, else one free-text `input`. The
- * node's own name and description override the derived ones.
+ * node's own name and description override the derived ones. Read-only comes
+ * only from that trigger: the workflow's own editors declare it.
  */
 export function deriveWorkflowToolDescriptor(
   workflow: { id: string; name?: string; nodes?: ReadonlyArray<{ type: string; config?: unknown; disabled?: boolean }> },
@@ -188,19 +191,22 @@ export function deriveWorkflowToolDescriptor(
   let description = `Runs the workflow '${label}' and returns its output.`;
   let inputSchema: Record<string, unknown> = { ...DEFAULT_WORKFLOW_TOOL_SCHEMA };
   let source: WorkflowToolDescriptor["source"] = "default";
+  let readOnly = false;
   if (mcpTrigger) {
     const config = plain(mcpTrigger.config);
     if (typeof config.toolName === "string" && config.toolName.trim()) toolName = toWorkflowToolName(config.toolName, toolName);
     if (typeof config.toolDescription === "string" && config.toolDescription.trim()) description = config.toolDescription.trim();
     inputSchema = objectSchema(config.inputSchema) ?? inputSchema;
     source = "mcp_server_trigger";
+    readOnly = config.readOnly === true;
   } else if (subTrigger) {
     const config = plain(subTrigger.config);
     if (typeof config.description === "string" && config.description.trim()) description = config.description.trim();
     inputSchema = objectSchema(config.inputSchema) ?? inputSchema;
     source = "sub_workflow_trigger";
+    readOnly = config.readOnly === true;
   }
   if (typeof overrides.toolName === "string" && overrides.toolName.trim()) toolName = toWorkflowToolName(overrides.toolName, toolName);
   if (typeof overrides.toolDescription === "string" && overrides.toolDescription.trim()) description = overrides.toolDescription.trim();
-  return { toolName, description, inputSchema, source };
+  return { toolName, description, inputSchema, source, readOnly };
 }

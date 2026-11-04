@@ -9,6 +9,7 @@ import {
   type WorkflowValidationIssue,
   type WorkflowValidationResult
 } from "@ai-orchestrator/shared";
+import { duplicateAgentToolNameIssues } from "./agent-tool-names";
 import { isAgentAttachmentEdge, isExecutionEdge } from "./graph";
 
 interface GraphMetadata {
@@ -1226,6 +1227,7 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
 
   issues.push(...validateGuardPlacement(workflow));
   issues.push(...validateApprovalGateAttachments(workflow));
+  issues.push(...duplicateAgentToolNameIssues(workflow));
   return issues;
 }
 

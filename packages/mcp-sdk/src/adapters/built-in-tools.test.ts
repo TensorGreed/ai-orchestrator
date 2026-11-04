@@ -145,6 +145,21 @@ describe("built-in tools adapter", () => {
     expect(result.error).not.toContain(WOLFRAM_APPID);
   });
 
+  it("scrubs a key with characters a query string encodes its own way", async () => {
+    const oddKey = "WOLF key+(!)~'*";
+    const adapter = new BuiltInToolsMCPServerAdapter({
+      fetch: async (url) => {
+        throw new TypeError(`fetch failed for ${url}`);
+      }
+    });
+    const result = await adapter.invokeTool("wolfram_alpha", { input: "2+2" }, config("wolfram", { secretRef: { secretId: "w" } }), contextWith({ w: oddKey }));
+    expect(result).toMatchObject({ ok: false, errorKind: "transport" });
+    const queryEncoded = new URLSearchParams({ k: oddKey }).toString().slice(2);
+    expect(queryEncoded).not.toBe(encodeURIComponent(oddKey));
+    expect(result.error).not.toContain(queryEncoded);
+    expect(result.error).toContain("[REDACTED]");
+  });
+
   it("asks the Wolfram Alpha LLM API with the AppID and reports a query it cannot interpret", async () => {
     let status = 200;
     const { calls, fetchImpl } = mockFetch(() => ({ status, body: status === 200 ? "Result: 4" : "Wolfram|Alpha did not understand your input", text: true }));
@@ -166,6 +181,33 @@ describe("built-in tools adapter", () => {
     const adapter = new BuiltInToolsMCPServerAdapter({ fetch: fetchImpl, maxResponseBytes: 1_000 });
     const result = await adapter.invokeTool("searxng_search", { query: "x" }, config("searxng", { connection: { endpoint: "https://s.example.org" } }), contextWith());
     expect(result).toMatchObject({ ok: false, error: expect.stringMatching(/larger than/) });
+  });
+
+  it("stops reading a streamed answer with no content-length once it passes the cap", async () => {
+    let pulled = 0;
+    let cancelled = false;
+    const chunk = new TextEncoder().encode("x".repeat(512));
+    const adapter = new BuiltInToolsMCPServerAdapter({
+      maxResponseBytes: 2_000,
+      fetch: async () =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            pull(controller) {
+              pulled += 1;
+              // An endless chunked body: only the cap ends the read.
+              controller.enqueue(chunk);
+            },
+            cancel() {
+              cancelled = true;
+            }
+          }),
+          { status: 200, headers: { "content-type": "application/json" } }
+        )
+    });
+    const result = await adapter.invokeTool("searxng_search", { query: "x" }, config("searxng", { connection: { endpoint: "https://s.example.org" } }), contextWith());
+    expect(result).toMatchObject({ ok: false, error: expect.stringMatching(/larger than 2000 bytes/) });
+    expect(cancelled).toBe(true);
+    expect(pulled).toBeLessThan(10);
   });
 
   it("never records the key in a cassette or an argument summary", async () => {

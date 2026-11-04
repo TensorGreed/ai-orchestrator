@@ -19,7 +19,7 @@ import {
   type WorkflowExecutionState,
   type WorkflowNode
 } from "@ai-orchestrator/shared";
-import { executeWorkflow, resumeWorkflowExecution, type WorkflowExecutionDependencies } from "./executor";
+import { executeWorkflow, outputLabelsOf, resumeWorkflowExecution, type WorkflowExecutionDependencies } from "./executor";
 import { validateWorkflowGraph } from "./validation";
 
 function node(id: string, type: string, config: Record<string, unknown> = {}, name = id): WorkflowNode {
@@ -92,6 +92,16 @@ function lookupChild(id = "wf-lookup", extraNodes: WorkflowNode[] = [], extraEdg
     [{ source: "start", target: "llm" }, { source: "llm", target: "out" }, ...extraEdges],
     { name: "Order lookup" }
   );
+}
+
+/** The child's own editors declare it read-only, on its entry trigger. */
+function declaredReadOnly(child: Workflow): Workflow {
+  return {
+    ...child,
+    nodes: child.nodes.map((entry) =>
+      entry.type === "sub_workflow_trigger" || entry.type === "mcp_server_trigger" ? { ...entry, config: { ...entry.config, readOnly: true } } : entry
+    )
+  };
 }
 
 function parentWorkflow(toolConfig: Record<string, unknown>, options: { withRepo?: boolean; settings?: Workflow["settings"]; id?: string } = {}): Workflow {
@@ -288,7 +298,7 @@ describe("Workflow Tool", () => {
     expect(h.child.calls).toBe(0);
   });
 
-  it("asks the write-tool gate before a call, unless the node marks the workflow read-only", async () => {
+  it("asks the write-tool gate before a call, unless the child's own trigger declares it read-only", async () => {
     const settings: Workflow["settings"] = { writeToolApproval: { enabled: true } };
     const gated = harness({ calls: [callLookup], workflows: [lookupChild()] });
     const first = await executeWorkflow(
@@ -301,13 +311,19 @@ describe("Workflow Tool", () => {
     expect(approved.status).toBe("success");
     expect(gated.child.calls).toBe(1);
 
-    const readOnly = harness({ calls: [callLookup], workflows: [lookupChild()] });
-    const direct = await executeWorkflow(
-      { workflow: parentWorkflow({ workflowId: "wf-lookup", readOnly: true }, { settings }), webhookPayload: { user_prompt: "x" } },
-      readOnly.dependencies
-    );
+    const readOnly = harness({ calls: [callLookup], workflows: [declaredReadOnly(lookupChild())] });
+    const direct = await executeWorkflow({ workflow: parentWorkflow({ workflowId: "wf-lookup" }, { settings }), webhookPayload: { user_prompt: "x" } }, readOnly.dependencies);
     expect(direct.status).toBe("success");
     expect(readOnly.child.calls).toBe(1);
+
+    // The caller cannot claim it: a read-only flag on the parent's node changes nothing.
+    const claimed = harness({ calls: [callLookup], workflows: [lookupChild()] });
+    const asked = await executeWorkflow(
+      { workflow: parentWorkflow({ workflowId: "wf-lookup", readOnly: true }, { settings }), webhookPayload: { user_prompt: "x" } },
+      claimed.dependencies
+    );
+    expect(asked.status).toBe("waiting_approval");
+    expect(claimed.child.calls).toBe(0);
   });
 
   it("turns a child that stops for an approval into a tool error the agent can act on", async () => {
@@ -376,10 +392,10 @@ describe("Workflow Tool", () => {
     );
     expect(gated.status).toBe("waiting_approval");
     expect(JSON.stringify(gated.output)).toContain("workflow:wf-writer");
-    // Marked read-only, the call goes through, and the untrusted label reaches the child: its own write needs approval there.
-    const inbound = harness({ calls: writerCalls, workflows: [childWrites], rules: [rule] });
+    // Declared read-only by the child, the call goes through, and the untrusted label reaches the child: its own write needs approval there.
+    const inbound = harness({ calls: writerCalls, workflows: [declaredReadOnly(childWrites)], rules: [rule] });
     const result = await executeWorkflow(
-      { workflow: parentWorkflow({ workflowId: "wf-writer", readOnly: true }), webhookPayload: { user_prompt: "x" }, inputLabels: untrusted },
+      { workflow: parentWorkflow({ workflowId: "wf-writer" }), webhookPayload: { user_prompt: "x" }, inputLabels: untrusted },
       inbound.dependencies
     );
     expect(result.status).toBe("success");
@@ -404,6 +420,151 @@ describe("Workflow Tool", () => {
     expect(replayed.status).toBe("success");
     expect(replay.child.calls).toBe(0);
     expect(toolResults(replayed)[0]!.output).toEqual(toolResults(recorded)[0]!.output);
+  });
+
+  it("fails closed on two workflow tools with one name: the checks never judge A while the call runs B", async () => {
+    // A is declared read-only by its child; B is not, and an admin rule asks for approval on B.
+    const childA = declaredReadOnly(lookupChild("wf-a"));
+    // B takes its name from its workflow ("Lookup"), so only the run can see the clash with A's own name.
+    const childB = { ...lookupChild("wf-b"), name: "Lookup" };
+    const rule = {
+      id: "approve-b",
+      name: "Approve B",
+      enabled: true,
+      effect: "require_approval",
+      serverId: "workflow:wf-b",
+      toolPattern: "*",
+      roles: [],
+      projectId: null,
+      mode: "enforce",
+      createdAt: "2026-11-04T00:00:00.000Z",
+      updatedAt: "2026-11-04T00:00:00.000Z"
+    } as unknown as McpToolPolicyRule;
+    const both = workflow(
+      "wf-parent",
+      [
+        node("in", "webhook_input"),
+        node("agent", "agent_orchestrator", { maxIterations: 5, toolCallingEnabled: true, userPromptTemplate: "{{user_prompt}}" }, "Agent"),
+        node("model", "llm_call", { provider: { providerId: "scripted", model: "m" } }),
+        node("ta", "workflow_tool", { workflowId: "wf-a", toolName: "lookup" }, "Tool A"),
+        node("tb", "workflow_tool", { workflowId: "wf-b" }, "Tool B"),
+        node("out", "output")
+      ],
+      [
+        { source: "in", target: "agent" },
+        { source: "agent", target: "out" },
+        { source: "agent", sourceHandle: "chat_model", target: "model" },
+        { source: "agent", sourceHandle: "tool", target: "ta" },
+        { source: "agent", sourceHandle: "tool", target: "tb" }
+      ],
+      { settings: { writeToolApproval: { enabled: true } } }
+    );
+    const h = harness({ calls: [{ name: "l2m-workflow__lookup", arguments: { order_id: "A-1" } }], workflows: [childA, childB], rules: [rule] });
+    const result = await executeWorkflow({ workflow: both, webhookPayload: { user_prompt: "x" } }, h.dependencies);
+    expect(result.status).toBe("error");
+    expect(result.error).toMatch(/same name: 'l2m-workflow__lookup' \(Order lookup, Lookup\)/);
+    expect(h.provider.requests).toEqual([]);
+    expect(h.child.calls).toBe(0);
+    expect(validateWorkflowGraph(both).issues.map((issue) => issue.code)).not.toContain("duplicate_agent_tool_name");
+    // Two names a workflow shows on its own: validation says so before the run (and the run refuses it).
+    const named = { ...both, nodes: both.nodes.map((entry) => (entry.id === "tb" ? { ...entry, config: { workflowId: "wf-b", toolName: "Lookup" } } : entry)) };
+    const issues = validateWorkflowGraph(named).issues.filter((issue) => issue.code === "duplicate_agent_tool_name");
+    expect(issues).toEqual([expect.objectContaining({ nodeId: "agent", message: expect.stringContaining("Tool A, Tool B") })]);
+    // Two tools on one workflow with no name of their own collide too; distinct names do not.
+    const sameChild = { ...both, nodes: both.nodes.map((entry) => (entry.type === "workflow_tool" ? { ...entry, config: { workflowId: "wf-a" } } : entry)) };
+    expect(validateWorkflowGraph(sameChild).issues.map((issue) => issue.code)).toContain("duplicate_agent_tool_name");
+    const distinct = { ...both, nodes: both.nodes.map((entry) => (entry.id === "tb" ? { ...entry, config: { workflowId: "wf-b", toolName: "write" } } : entry)) };
+    expect(validateWorkflowGraph(distinct).issues.map((issue) => issue.code)).not.toContain("duplicate_agent_tool_name");
+  });
+
+  it("carries the parent's write-tool gate and its no-write-tools switch into the child, even when the child is declared read-only", async () => {
+    const childWrites = declaredReadOnly(
+      workflow(
+        "wf-writer",
+        [
+          node("start", "sub_workflow_trigger"),
+          node("agent", "agent_orchestrator", { maxIterations: 3, toolCallingEnabled: true, userPromptTemplate: "{{user_prompt}}" }),
+          node("model", "llm_call", { provider: { providerId: "scripted", model: "m" } }),
+          node("repo", "mcp_tool", { serverId: "repo-mcp", toolName: "push" }),
+          node("out", "output")
+        ],
+        [
+          { source: "start", target: "agent" },
+          { source: "agent", target: "out" },
+          { source: "agent", sourceHandle: "chat_model", target: "model" },
+          { source: "agent", sourceHandle: "tool", target: "repo" }
+        ],
+        { name: "Writer" }
+      )
+    );
+    const writerCalls = [{ name: "l2m-workflow__writer", arguments: { input: "push it" } }, { name: "repo-mcp__push", arguments: {} }];
+
+    // Without parent controls the child's write goes through (its own gate is off).
+    const open = harness({ calls: writerCalls, workflows: [childWrites] });
+    expect((await executeWorkflow({ workflow: parentWorkflow({ workflowId: "wf-writer" }), webhookPayload: { user_prompt: "x" } }, open.dependencies)).status).toBe("success");
+    expect(open.invoked).toEqual(["push"]);
+
+    // Parent gate on: the read-only call itself skips it, but the child's write needs approval, which the call reports.
+    const gated = harness({ calls: writerCalls, workflows: [childWrites] });
+    const withGate = await executeWorkflow(
+      { workflow: parentWorkflow({ workflowId: "wf-writer" }, { settings: { writeToolApproval: { enabled: true } } }), webhookPayload: { user_prompt: "x" } },
+      gated.dependencies
+    );
+    expect(withGate.status).toBe("success");
+    expect(toolResults(withGate)[0]!.error).toMatch(/stopped to wait for an approval/);
+    expect(gated.invoked).toEqual([]);
+
+    // Parent "no write tools": the child never gets its write tool.
+    const noWrites = harness({ calls: writerCalls, workflows: [childWrites] });
+    const refused = await executeWorkflow(
+      { workflow: parentWorkflow({ workflowId: "wf-writer" }, { settings: { noWriteTools: true } }), webhookPayload: { user_prompt: "x" } },
+      noWrites.dependencies
+    );
+    expect(refused.status).toBe("success");
+    expect(noWrites.invoked).toEqual([]);
+  });
+
+  it("stops a call at the node's timeout, and keeps the child's labels on its error", async () => {
+    class SlowModel implements LLMProviderAdapter {
+      readonly definition = { id: "slow-model", label: "Slow", supportsTools: false, configSchema: {} };
+      async generate() {
+        // Ignores the abort: only the tool's own limit returns the call early.
+        await new Promise<void>((resolve) => setTimeout(resolve, 1_500));
+        return { content: "late", toolCalls: [] };
+      }
+    }
+    const slowChild = workflow(
+      "wf-slow",
+      [node("start", "sub_workflow_trigger"), node("llm", "llm_call", { provider: { providerId: "slow-model", model: "s" } }), node("out", "output")],
+      [{ source: "start", target: "llm" }, { source: "llm", target: "out" }],
+      { name: "Slow" }
+    );
+    const h = harness({ calls: [{ name: "l2m-workflow__slow", arguments: { input: "go" } }], workflows: [slowChild] });
+    h.dependencies.providerRegistry.register(new SlowModel());
+    const started = Date.now();
+    const result = await executeWorkflow({ workflow: parentWorkflow({ workflowId: "wf-slow", timeoutMs: 100 }), webhookPayload: { user_prompt: "x" } }, h.dependencies);
+    expect(Date.now() - started).toBeLessThan(1_400);
+    expect(result.status).toBe("success");
+    expect(toolResults(result)[0]!.error).toMatch(/within this tool's 100 ms limit/);
+
+    // A child that fails after reading a sensitive source: the error keeps the child's labels, not the default external ones.
+    const failing = workflow(
+      "wf-fail",
+      [
+        node("start", "sub_workflow_trigger"),
+        node("vault", "mcp_tool", { serverId: "mock-mcp", toolName: "get_current_time", argsTemplate: "{}", sensitiveOutput: true }),
+        node("boom", "llm_call", { provider: { providerId: "missing-model", model: "x" } }),
+        node("out", "output")
+      ],
+      [{ source: "start", target: "vault" }, { source: "vault", target: "boom" }, { source: "boom", target: "out" }],
+      { name: "Fails" }
+    );
+    const f = harness({ calls: [{ name: "l2m-workflow__fails", arguments: { input: "go" } }], workflows: [failing] });
+    const user: DataLabels = { provenance: ["user"], dataClasses: [], source: "propagated" };
+    const failed = await executeWorkflow({ workflow: parentWorkflow({ workflowId: "wf-fail" }), webhookPayload: { user_prompt: "x" }, inputLabels: user }, f.dependencies);
+    expect(failed.status).toBe("success");
+    expect(toolResults(failed)[0]!.error).toBeTruthy();
+    expect(outputLabelsOf(failed)?.provenance).toContain("sensitive");
   });
 
   it("is valid only on a tool port, and never on the workflow it belongs to", () => {

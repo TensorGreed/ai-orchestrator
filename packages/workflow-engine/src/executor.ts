@@ -9,6 +9,8 @@ import {
   policyDecisionRecord,
   policyNeedsAnnotations,
   policyNeedsArguments,
+  assertUniqueToolNames,
+  isL2mOwnToolAdapter,
   resolveMCPTools,
   openWorldRequestFields,
   policyReadsOpenWorld,
@@ -121,6 +123,7 @@ import {
   DEFAULT_CITATION_INSTRUCTIONS
 } from "./citations";
 import { renderChart } from "./chart";
+import { workerDelegateToolName } from "./agent-tool-names";
 import { browseUrl, type WebBrowseOptions } from "./web-browse";
 import {
   DEFAULT_OUTBOUND_GUARD,
@@ -154,7 +157,7 @@ import { NO_CODE_SANDBOX_PLAN, codeNodesDisabledError, runJavaScriptCode, runPyt
 import { runWithSandboxOwner } from "./quickjs-sandbox";
 import { sortWorkflowNodes, validateWorkflowGraph, computeDepthLevels } from "./validation";
 import { ErrorCategory, MODEL_NOT_ALLOWED_CODE, WorkflowError, remediationForCategory } from "@ai-orchestrator/shared";
-import { AgentGuardInterrupt, isAgentGuardInterrupt } from "@ai-orchestrator/agent-runtime";
+import { AgentGuardInterrupt, RUNTIME_INTERNAL_TOOL_NAMES, isAgentGuardInterrupt } from "@ai-orchestrator/agent-runtime";
 import { ApprovalHandoffSignal, approvedHandoffKeysFromState, isApprovalHandoffSignal, withoutReservedKeys, type ApprovalHandoffRequest } from "./approval-handoff";
 import { executeGuardNodeStep } from "./guard-node";
 import {
@@ -248,7 +251,8 @@ async function workflowToolServerConfig(
       toolName: descriptor.toolName,
       description: descriptor.description,
       inputSchema: descriptor.inputSchema,
-      readOnly: attachedConfig.readOnly === true
+      // Only the child's own trigger makes it read-only; without the child (a replay) it is not.
+      readOnly: descriptor.readOnly
     }
     // No allowedTools: the adapter lists exactly this one tool, and a replay (which cannot derive the name) lists the recorded one.
   };
@@ -258,17 +262,40 @@ async function workflowToolServerConfig(
  * Phase 6.4 — the classification the write-tool gate reads. The gate trusts
  * only an admin's read-only setting, except for tools whose behaviour L2M
  * knows: the built-in tools only read, and a workflow tool is read-only when
- * its node says so (the workflow's author decides, as with the gate itself).
- * An admin's own setting still wins.
+ * the child workflow's own trigger declares it. An admin's own setting still
+ * wins. The exception holds only for L2M's own adapter instances in the
+ * registry, never for another adapter registered under one of their ids.
  */
 function writeGateClassification(
   entry: { serverId: string; connection?: unknown },
-  classification: ReturnType<typeof classifyMcpTool>
+  classification: ReturnType<typeof classifyMcpTool>,
+  registry: MCPRegistry
 ): ReturnType<typeof classifyMcpTool> {
   if (classification.source === "manual") return classification;
+  if (entry.serverId !== BUILT_IN_TOOLS_ADAPTER_ID && entry.serverId !== WORKFLOW_TOOL_ADAPTER_ID) return classification;
+  if (!isL2mOwnToolAdapter(registry.tryGet(entry.serverId))) return classification;
   if (entry.serverId === BUILT_IN_TOOLS_ADAPTER_ID) return { readOnly: true, source: "manual" };
-  if (entry.serverId === WORKFLOW_TOOL_ADAPTER_ID && toRecord(entry.connection).readOnly === true) return { readOnly: true, source: "manual" };
+  if (toRecord(entry.connection).readOnly === true) return { readOnly: true, source: "manual" };
   return classification;
+}
+
+/**
+ * Phase 6.4 — the parent's write controls reach a workflow tool's child run, tighten-only: the parent's write-tool
+ * gate when the child has none of its own, and the parent's "no write tools" switch.
+ */
+function withCallerWriteControls(child: Workflow, caller: Workflow["settings"]): Workflow {
+  const callerGate = caller?.writeToolApproval?.enabled === true ? caller.writeToolApproval : undefined;
+  const callerNoWrite = caller?.noWriteTools === true;
+  if (!callerGate && !callerNoWrite) return child;
+  const own = child.settings ?? {};
+  return {
+    ...child,
+    settings: {
+      ...own,
+      ...(callerNoWrite ? { noWriteTools: true } : {}),
+      ...(callerGate && own.writeToolApproval?.enabled !== true ? { writeToolApproval: callerGate } : {})
+    }
+  };
 }
 
 /** Phase 6.4 — the model-usage blobs of a finished run, its own children's included, to count in the caller's usage. */
@@ -965,10 +992,7 @@ function resolveWebhookPrompt(globals: Record<string, unknown>): string | undefi
   return undefined;
 }
 
-/** The name of the synthetic tool a Supervisor gets for an attached worker node. */
-export function workerDelegateToolName(workerName: string): string {
-  return `delegate_to_${workerName.replace(/[^a-zA-Z0-9_-]/g, "_")}`;
-}
+export { workerDelegateToolName };
 
 function getAttachmentHandle(sourceHandle: string | undefined): AgentAttachmentHandle | undefined {
   if (!sourceHandle || !AGENT_ATTACHMENT_HANDLES.has(sourceHandle as AgentAttachmentHandle)) {
@@ -6166,6 +6190,11 @@ async function executeNodeHandler(
       // Phase 6.4 — Workflow Tool nodes: another workflow as one tool, served by the in-process l2m-workflow adapter.
       const attachedWorkflowToolNodes = getAttachedNodes("tool").filter((entry) => entry.type === "workflow_tool" && entry.disabled !== true);
       const workflowToolConfigs = await Promise.all(attachedWorkflowToolNodes.map((attached) => workflowToolServerConfig(attached, dependencies)));
+      const workflowToolTimeouts = new Map<string, number>();
+      for (const attached of attachedWorkflowToolNodes) {
+        const timeoutMs = toRecord(attached.config).timeoutMs;
+        if (typeof timeoutMs === "number" && Number.isFinite(timeoutMs) && timeoutMs > 0) workflowToolTimeouts.set(attached.id, Math.floor(timeoutMs));
+      }
 
       const resolvedAttachedConfigs = await Promise.all(
         attachedToolServerConfigs.map((entry) => applyRegisteredMcpServer(entry, dependencies, context.toolPolicySubject))
@@ -6224,8 +6253,15 @@ async function executeNodeHandler(
             return failure(error instanceof Error ? error.message : String(error));
           }
           if (!child) return failure(`Workflow '${call.workflowId}' was not found.`);
+          // A per-call limit from the node; without one the call is bounded by the run's own timeout.
+          const timeoutMs = call.nodeId ? workflowToolTimeouts.get(call.nodeId) : undefined;
+          const callAbort = new AbortController();
+          const abortFromRun = () => callAbort.abort(dependencies.abortSignal?.reason);
+          if (dependencies.abortSignal?.aborted) abortFromRun();
+          else dependencies.abortSignal?.addEventListener("abort", abortFromRun, { once: true });
           const childDependencies: WorkflowExecutionDependencies = {
             ...(dependencies.scopeSubWorkflow ? { ...dependencies, ...dependencies.scopeSubWorkflow(child) } : dependencies),
+            abortSignal: callAbort.signal,
             // v1: a child that stops for an approval is not kept; the call fails and says why.
             persistPausedExecution: async () => undefined
           };
@@ -6234,9 +6270,10 @@ async function executeNodeHandler(
           const input: Record<string, unknown> = { ...call.args, arguments: call.args };
           // The fallback schema's free text (or a user_prompt argument) is the child's {{user_prompt}}.
           const childPrompt = typeof call.args.user_prompt === "string" ? call.args.user_prompt : typeof call.args.input === "string" ? call.args.input : undefined;
-          const childResult = await executeWorkflow(
+          const childRun = executeWorkflow(
             {
-              workflow: child,
+              // The parent's write-tool gate and "no write tools" switch apply inside the child too (tighten-only).
+              workflow: withCallerWriteControls(child, context.workflow.settings),
               input,
               ...(inputLabels ? { inputLabels } : {}),
               ...(childPrompt !== undefined ? { userPrompt: childPrompt } : {}),
@@ -6247,15 +6284,39 @@ async function executeNodeHandler(
             },
             childDependencies
           );
+          let timer: ReturnType<typeof setTimeout> | undefined;
+          // The call returns at its limit; the child is told to stop and does so at its next step.
+          const limit =
+            timeoutMs !== undefined
+              ? new Promise<"timed_out">((resolve) => {
+                  timer = setTimeout(() => {
+                    callAbort.abort(new Error(`The workflow tool call timed out after ${timeoutMs} ms.`));
+                    resolve("timed_out");
+                  }, timeoutMs);
+                })
+              : undefined;
+          let childResult: WorkflowExecutionResult;
+          try {
+            const settled = limit ? await Promise.race([childRun, limit]) : await childRun;
+            if (settled === "timed_out") {
+              childRun.catch(() => undefined);
+              return failure(`The workflow '${child.name}' did not finish within this tool's ${timeoutMs} ms limit.`);
+            }
+            childResult = settled;
+          } finally {
+            if (timer) clearTimeout(timer);
+            dependencies.abortSignal?.removeEventListener("abort", abortFromRun);
+          }
           childTelemetry.push(...runTelemetryBlobs(childResult));
+          // The child's output labels, or on failure what its failed node read: its error text can quote that.
+          const outputLabels = runOutputLabels.get(childResult);
+          if (outputLabels && active) workflowToolResultLabels.set(workflowToolResultKey(active.toolName, active.toolCallId), outputLabels);
           if (childResult.status === "waiting_approval") {
             return failure(
               `The workflow '${child.name}' stopped to wait for an approval, and an agent's tool call cannot wait for one. Run that workflow on its own, or move the approval out of it.`
             );
           }
           if (childResult.status !== "success") return failure(childResult.error ?? `The workflow '${child.name}' did not finish (${childResult.status}).`);
-          const outputLabels = runOutputLabels.get(childResult);
-          if (outputLabels && active) workflowToolResultLabels.set(workflowToolResultKey(active.toolName, active.toolCallId), outputLabels);
           const output = childResult.output ?? null;
           const structured = output && typeof output === "object" && !Array.isArray(output) ? (output as Record<string, unknown>) : undefined;
           return { ok: true, output, ...(structured ? { structured } : {}) };
@@ -6371,6 +6432,13 @@ async function executeNodeHandler(
           };
         });
 
+        // Phase 6.4 — every name the model sees stands for one tool: MCP tools, workers and the runtime's own tools.
+        assertUniqueToolNames([
+          ...resolvedTools.resolved.map((entry) => ({ name: entry.exposedName, source: entry.registryServerId ?? entry.serverId })),
+          ...workerTools.map((worker) => ({ name: worker.name, source: `worker ${worker.serverId.slice("worker-".length)}` })),
+          ...RUNTIME_INTERNAL_TOOL_NAMES.map((name) => ({ name, source: "agent runtime" }))
+        ]);
+
         const allToolsForModel = [
           ...resolvedTools.resolved.map((entry) => ({
             serverId: entry.serverId,
@@ -6398,7 +6466,7 @@ async function executeNodeHandler(
                 // Phase 16 — where the agent's calls go, for destination rules.
                 modelDestination: providerDestinationRef(provider),
                 toolDestination: (exposedName) => {
-                  const resolved = resolvedTools.resolved.find((entry) => entry.exposedName === exposedName);
+                  const resolved = resolvedTools.lookup(exposedName);
                   if (!resolved) return null;
                   const server = serverConfigs.find(
                     (entry) => entry.serverId === resolved.serverId && (entry.registryServerId ?? "") === (resolved.registryServerId ?? "")
@@ -6406,7 +6474,7 @@ async function executeNodeHandler(
                   return mcpServerDestinationRef(server ?? { serverId: resolved.serverId, ...(resolved.registryServerId ? { registryServerId: resolved.registryServerId } : {}) });
                 },
                 describeTool: (exposedName) => {
-                  const resolved = resolvedTools.resolved.find((entry) => entry.exposedName === exposedName);
+                  const resolved = resolvedTools.lookup(exposedName);
                   if (resolved) {
                     return {
                       serverId: resolved.registryServerId ?? resolved.serverId,
@@ -6462,7 +6530,7 @@ async function executeNodeHandler(
             };
           }
           if (dependencies.replayNodeHook) return { kind: "allow", ...(decision ? { decision, policyTool } : {}) };
-          const classification = writeGateClassification(resolvedEntry, decision ? decision.classification : classifyMcpTool({ annotations: resolvedEntry.annotations }));
+          const classification = writeGateClassification(resolvedEntry, decision ? decision.classification : classifyMcpTool({ annotations: resolvedEntry.annotations }), dependencies.mcpRegistry);
           const gateAsks = writeGate?.enabled === true && !writeToolGateSkips(classification);
           if (!gateAsks && !decision?.approval) return { kind: "allow", ...(decision ? { decision, policyTool } : {}) };
           const serverKey = resolvedEntry.registryServerId ?? resolvedEntry.serverId;
@@ -6573,7 +6641,7 @@ async function executeNodeHandler(
               const childLabels = workflowToolResultLabels.get(workflowToolResultKey(toolName, toolCallId));
               if (childLabels) return childLabels;
               if (worker || sensitiveToolSources.length === 0) return worker;
-              const entry = resolvedTools.resolved.find((candidate) => candidate.exposedName === toolName);
+              const entry = resolvedTools.lookup(toolName);
               const sensitive =
                 entry &&
                 sensitiveToolSources.some(
@@ -6618,7 +6686,7 @@ async function executeNodeHandler(
                     throw error;
                   }
                }
-               const resolvedEntry = resolvedTools.resolved.find((entry) => entry.exposedName === toolName);
+               const resolvedEntry = resolvedTools.lookup(toolName);
                // Phase 12.4 — the plan the tool-call check made for this call; planned again when the guard rewrote the arguments.
                const argsKey = canonicalPolicyJson(args);
                const checked =
@@ -6679,7 +6747,7 @@ async function executeNodeHandler(
             // the model sees, a call that needs approval pauses the agent (unless it was approved or already ran).
             checkToolCall: (toolName, args, call) => {
               checkedCall = undefined;
-              const resolvedEntry = resolvedTools.resolved.find((entry) => entry.exposedName === toolName);
+              const resolvedEntry = resolvedTools.lookup(toolName);
               if (!resolvedEntry) return { outcome: "allow" };
               const plan = planToolCall(resolvedEntry, args, call.labels);
               // 12.2 — a call stopped here records the labels it was decided with too, so simulation can read them.
@@ -9604,7 +9672,7 @@ async function executeWorkflowRun(
           });
         }
 
-        return {
+        const failedResult: WorkflowExecutionResult = {
           workflowId: workflow.id,
           status: "error",
           startedAt,
@@ -9616,6 +9684,9 @@ async function executeWorkflowRun(
           errorCategory: errorCategoryName,
           errorRemediation
         };
+        // Phase 6.4 — the error can quote what the failed node read: a caller (a Workflow Tool) keeps those labels.
+        runOutputLabels.set(failedResult, labelScope.pendingLabels());
+        return failedResult;
       }
     }
   }

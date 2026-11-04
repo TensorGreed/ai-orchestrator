@@ -10,6 +10,7 @@ import {
   type MCPToolResult
 } from "@ai-orchestrator/shared";
 import type { MCPExecutionContext, MCPServerAdapter } from "../types";
+import { markL2mOwnToolAdapter } from "./own-adapters";
 
 /**
  * Phase 6.4 — the `l2m-workflow` adapter: a workflow an agent calls as a tool.
@@ -53,7 +54,7 @@ export function readWorkflowToolConnection(config: Pick<MCPServerConfig, "connec
   };
 }
 
-/** A workflow is not read-only unless its tool node says so; nothing is known about where it sends data. */
+/** A workflow is not read-only unless its own trigger says so; nothing is known about where it sends data. */
 function annotationsFor(tool: WorkflowToolConnection): McpToolAnnotations {
   return tool.readOnly ? { title: tool.toolName, readOnlyHint: true } : { title: tool.toolName, readOnlyHint: false };
 }
@@ -70,6 +71,10 @@ export class WorkflowToolMCPServerAdapter implements MCPServerAdapter {
     },
     authSchema: { type: "object", properties: {} }
   };
+
+  constructor() {
+    markL2mOwnToolAdapter(this.definition);
+  }
 
   async discoverTools(config: MCPServerConfig): Promise<MCPToolDefinition[]> {
     const tool = readWorkflowToolConnection(config);

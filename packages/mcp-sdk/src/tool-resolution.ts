@@ -18,6 +18,42 @@ export interface ResolvedToolSet {
    * that says more than the JSON), otherwise the text output.
    */
   invokeByExposedName: (toolName: string, args: Record<string, unknown>, call?: McpToolAccessCallContext) => Promise<unknown>;
+  /**
+   * Phase 6.4 — the one entry an exposed name stands for: the entry the call
+   * runs, so policy, the write gate, labels and Guard judge the same tool.
+   */
+  lookup: (exposedName: string) => ResolvedMCPTool | undefined;
+}
+
+/**
+ * Phase 6.4 — two tools of one agent would reach the model under the same
+ * name (two servers on one adapter id serving the same tool, two Workflow
+ * Tools with one tool name). The model cannot tell them apart and the checks
+ * could judge one while the call runs the other, so the agent fails instead.
+ */
+export class DuplicateToolNameError extends Error {
+  readonly duplicates: Array<{ name: string; sources: string[] }>;
+  constructor(duplicates: Array<{ name: string; sources: string[] }>) {
+    super(
+      `Two or more tools on this agent have the same name: ${duplicates
+        .map((entry) => `'${entry.name}' (${entry.sources.join(", ")})`)
+        .join("; ")}. Give each tool a unique name (a Workflow Tool's tool name) or remove one of them.`
+    );
+    this.name = "DuplicateToolNameError";
+    this.duplicates = duplicates;
+  }
+}
+
+/** Phase 6.4 — throws DuplicateToolNameError when any name repeats; `source` says where each tool comes from. */
+export function assertUniqueToolNames(tools: ReadonlyArray<{ name: string; source: string }>): void {
+  const sources = new Map<string, string[]>();
+  for (const tool of tools) sources.set(tool.name, [...(sources.get(tool.name) ?? []), tool.source]);
+  const duplicates = [...sources.entries()].filter(([, from]) => from.length > 1).map(([name, from]) => ({ name, sources: from }));
+  if (duplicates.length > 0) throw new DuplicateToolNameError(duplicates);
+}
+
+function serverConfigSource(config: MCPServerConfig): string {
+  return config.label ?? config.registryServerId ?? config.serverId;
 }
 
 /** What the access check sees about one discovered tool. */
@@ -86,8 +122,11 @@ export async function resolveMCPTools(
       serverConfig: MCPServerConfig;
       originalName: string;
       annotations?: McpToolAnnotations;
+      entry: ResolvedMCPTool;
     }
   >();
+  // Phase 6.4 — every exposed name, allowed or hidden, and the server configs it came from.
+  const seen = new Map<string, MCPServerConfig[]>();
 
 
   for (const serverConfig of serverConfigs) {
@@ -118,6 +157,11 @@ export async function resolveMCPTools(
 
     for (const tool of tools) {
       const exposedName = `${serverConfig.serverId}__${tool.name}`;
+      const from = seen.get(exposedName) ?? [];
+      // One server listing a name twice keeps its first tool; another server reusing it is a duplicate.
+      if (from.includes(serverConfig)) continue;
+      seen.set(exposedName, [...from, serverConfig]);
+      if (from.length > 0) continue;
       if (options.accessCheck) {
         const verdict = options.accessCheck({
           adapterId: serverConfig.serverId,
@@ -135,7 +179,7 @@ export async function resolveMCPTools(
           continue;
         }
       }
-      resolved.push({
+      const entry: ResolvedMCPTool = {
         exposedName,
         originalName: tool.name,
         serverId: serverConfig.serverId,
@@ -148,20 +192,30 @@ export async function resolveMCPTools(
           description: `[${serverConfig.serverId}] ${tool.description}`,
           inputSchema: tool.inputSchema
         }
-      });
+      };
+      resolved.push(entry);
 
       route.set(exposedName, {
         serverConfig,
         originalName: tool.name,
-        ...(tool.annotations ? { annotations: tool.annotations } : {})
+        ...(tool.annotations ? { annotations: tool.annotations } : {}),
+        entry
       });
     }
+  }
+
+  const duplicates = [...seen.entries()].filter(([, from]) => from.length > 1);
+  if (duplicates.length > 0) {
+    throw new DuplicateToolNameError(duplicates.map(([name, from]) => ({ name, sources: from.map(serverConfigSource) })));
   }
 
   return {
     tools: resolved.map((entry) => entry.definition),
     resolved,
     hidden,
+    lookup(exposedName: string) {
+      return route.get(exposedName)?.entry;
+    },
     describeBlocked(toolName: string) {
       return blocked.get(toolName)?.message;
     },
