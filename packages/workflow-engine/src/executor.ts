@@ -316,6 +316,11 @@ const AGENT_USER_PROMPT_SEGMENT = "user_prompt";
 const AGENT_RUN_SEGMENT = "agent_run";
 
 export interface WorkflowExecutionDependencies {
+  /**
+   * Phase 6.4 — set for a Workflow Tool's child run: the calling run's write controls (its settings), which every
+   * Execute Workflow node in the child's subtree applies to its own child too, tighten-only.
+   */
+  callerWriteControls?: Workflow["settings"];
   providerRegistry: ProviderRegistry;
   mcpRegistry: MCPRegistry;
   connectorRegistry: ConnectorRegistry;
@@ -1831,6 +1836,10 @@ function mergeMCPServerConfigs(base: MCPServerConfig[], additional: MCPServerCon
         allowedTools: entry.allowedTools ? new Set(entry.allowedTools) : undefined
       });
       continue;
+    }
+
+    if (entry.label && current.server.label && !current.server.label.split(" + ").includes(entry.label)) {
+      current.server.label = `${current.server.label} + ${entry.label}`;
     }
 
     if (!current.allowedTools || !entry.allowedTools) {
@@ -4505,10 +4514,12 @@ async function executeNodeHandler(
         );
       }
 
-      const targetWorkflow = await dependencies.loadWorkflow(workflowId);
-      if (!targetWorkflow) {
+      const loadedTarget = await dependencies.loadWorkflow(workflowId);
+      if (!loadedTarget) {
         throw new Error(`Sub-workflow '${workflowId}' was not found.`);
       }
+      // Phase 6.4 — inside a Workflow Tool's child, the calling agent's write controls reach this workflow too (tighten-only).
+      const targetWorkflow = dependencies.callerWriteControls ? withCallerWriteControls(loadedTarget, dependencies.callerWriteControls) : loadedTarget;
 
       const childDependencies: WorkflowExecutionDependencies = dependencies.scopeSubWorkflow
         ? { ...dependencies, ...dependencies.scopeSubWorkflow(targetWorkflow) }
@@ -6178,6 +6189,8 @@ async function executeNodeHandler(
         attachedToolServerConfigs.push({
           serverId,
           registryServerId,
+          // Phase 6.4 — errors and renamed tools name the node; a registered server's own name replaces it.
+          label: attached.name || attached.id,
           connection: toRecord(attachedConfig.connection),
           secretRef: attachedConfig.secretRef as SecretReference | undefined,
           allowedTools: allowedTools.size ? [...allowedTools] : undefined
@@ -6262,6 +6275,7 @@ async function executeNodeHandler(
           const childDependencies: WorkflowExecutionDependencies = {
             ...(dependencies.scopeSubWorkflow ? { ...dependencies, ...dependencies.scopeSubWorkflow(child) } : dependencies),
             abortSignal: callAbort.signal,
+            ...(context.workflow.settings ? { callerWriteControls: context.workflow.settings } : {}),
             // v1: a child that stops for an approval is not kept; the call fails and says why.
             persistPausedExecution: async () => undefined
           };
@@ -6437,7 +6451,7 @@ async function executeNodeHandler(
           ...resolvedTools.resolved.map((entry) => ({ name: entry.exposedName, source: entry.registryServerId ?? entry.serverId })),
           ...workerTools.map((worker) => ({ name: worker.name, source: `worker ${worker.serverId.slice("worker-".length)}` })),
           ...RUNTIME_INTERNAL_TOOL_NAMES.map((name) => ({ name, source: "agent runtime" }))
-        ]);
+        ], "Rename one of the worker nodes, or remove one of the clashing tools.");
 
         const allToolsForModel = [
           ...resolvedTools.resolved.map((entry) => ({

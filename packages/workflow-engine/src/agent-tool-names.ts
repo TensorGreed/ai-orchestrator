@@ -13,8 +13,9 @@ import {
  * workflow alone. The run fails closed on any duplicate (the MCP layer and
  * the executor check every name); this catches the ones a workflow shows
  * before it runs: two Workflow Tools with one tool name or one workflow, two
- * built-in tool nodes of one provider, two inline MCP Tool nodes of one
- * adapter naming the same tool, and two workers with one name.
+ * built-in tool nodes of one provider, and two workers with one name. Two
+ * other MCP servers serving one tool name are not an issue: the run renames
+ * both after their server.
  */
 
 const ALL_TOOLS = "__all__";
@@ -78,8 +79,8 @@ export function duplicateAgentToolNameIssues(workflow: Pick<Workflow, "nodes" | 
       }
       if (target.type !== "mcp_tool") continue;
       const serverId = text(config.serverId);
-      // A registered server's adapter and tools are known only at run time.
-      if (!serverId || text(config.registryServerId)) continue;
+      // A registered server's adapter and tools are known only at run time; other MCP servers are renamed on a clash.
+      if (serverId !== BUILT_IN_TOOLS_ADAPTER_ID || text(config.registryServerId)) continue;
       const tools = namedTools(config, serverId);
       if (!tools) continue;
       const key = `${serverId}::${text(record(config.secretRef).secretId)}::${JSON.stringify(record(config.connection))}`;
@@ -96,7 +97,7 @@ export function duplicateAgentToolNameIssues(workflow: Pick<Workflow, "nodes" | 
       const shown = name.includes("\u0000") ? `the tool of workflow '${name.split("\u0000")[1]}'` : `'${name}'`;
       issues.push({
         code: "duplicate_agent_tool_name",
-        message: `Agent '${agent.name || agent.id}' would give its model two tools named ${shown} (${[...from.values()].join(", ")}). Give each tool a unique name or remove one; the run fails while names repeat.`,
+        message: `Agent '${agent.name || agent.id}' would give its model two tools named ${shown} (${[...from.values()].join(", ")}). Give each Workflow Tool its own tool name, keep one built-in tool node per provider, rename one of the workers, or remove one; the run fails while names repeat.`,
         nodeId: agent.id
       });
     }

@@ -43,11 +43,16 @@ function workflow(id: string, nodes: WorkflowNode[], edges: Array<Omit<WorkflowE
 class ScriptedProvider implements LLMProviderAdapter {
   readonly definition = { id: "scripted", label: "Scripted", supportsTools: true, configSchema: {} };
   readonly requests: ProviderCallRequest[] = [];
-  constructor(private readonly calls: Array<{ name: string; arguments: Record<string, unknown> }>) {}
+  constructor(
+    private readonly calls: Array<{ name: string; arguments: Record<string, unknown> }>,
+    /** Each agent calls only the scripted tools it was offered, so nested agents share one script. */
+    private readonly onlyOffered = false
+  ) {}
   async generate(request: ProviderCallRequest) {
     this.requests.push(request);
     const done = request.messages.filter((message: ChatMessage) => message.role === "tool").length;
-    const next = this.calls[done];
+    const offered = new Set((request.tools ?? []).map((tool) => tool.name));
+    const next = (this.onlyOffered ? this.calls.filter((entry) => offered.has(entry.name)) : this.calls)[done];
     if (next) return { content: "Calling a tool.", toolCalls: [{ id: `call-${done + 1}`, ...next }], usage: { inputTokens: 10, outputTokens: 2, totalTokens: 12 } };
     return { content: "All done.", toolCalls: [], usage: { inputTokens: 10, outputTokens: 2, totalTokens: 12 } };
   }
@@ -141,8 +146,9 @@ function harness(input: {
   rules?: McpToolPolicyRule[];
   mcpRegistry?: MCPRegistry;
   loadWorkflow?: WorkflowExecutionDependencies["loadWorkflow"] | null;
+  onlyOffered?: boolean;
 }): Harness {
-  const provider = new ScriptedProvider(input.calls);
+  const provider = new ScriptedProvider(input.calls, input.onlyOffered);
   const child = new ChildModel();
   const providerRegistry = new ProviderRegistry();
   providerRegistry.register(provider);
@@ -522,6 +528,91 @@ describe("Workflow Tool", () => {
     );
     expect(refused.status).toBe("success");
     expect(noWrites.invoked).toEqual([]);
+  });
+
+  it("carries the parent's controls two levels down: through a nested Workflow Tool and through an Execute Workflow node", async () => {
+    /** An agent workflow whose only tool is the repo's write; its prompt is fixed, so an Execute Workflow node needs no mapping. */
+    const writer = (id: string, name: string) =>
+      workflow(
+        id,
+        [
+          node("start", "sub_workflow_trigger"),
+          node("agent", "agent_orchestrator", { maxIterations: 3, toolCallingEnabled: true, userPromptTemplate: "Push the change." }),
+          node("model", "llm_call", { provider: { providerId: "scripted", model: "m" } }),
+          node("repo", "mcp_tool", { serverId: "repo-mcp", toolName: "push" }),
+          node("out", "output")
+        ],
+        [
+          { source: "start", target: "agent" },
+          { source: "agent", target: "out" },
+          { source: "agent", sourceHandle: "chat_model", target: "model" },
+          { source: "agent", sourceHandle: "tool", target: "repo" }
+        ],
+        { name }
+      );
+    // Parent -> C (Workflow Tool) -> D (Workflow Tool) -> push. C and D are both declared read-only by their own editors.
+    const viaTool = declaredReadOnly(
+      workflow(
+        "wf-c",
+        [
+          node("start", "sub_workflow_trigger"),
+          node("agent", "agent_orchestrator", { maxIterations: 3, toolCallingEnabled: true, userPromptTemplate: "{{user_prompt}}" }),
+          node("model", "llm_call", { provider: { providerId: "scripted", model: "m" } }),
+          node("wtool", "workflow_tool", { workflowId: "wf-d" }),
+          node("out", "output")
+        ],
+        [
+          { source: "start", target: "agent" },
+          { source: "agent", target: "out" },
+          { source: "agent", sourceHandle: "chat_model", target: "model" },
+          { source: "agent", sourceHandle: "tool", target: "wtool" }
+        ],
+        { name: "Middle" }
+      )
+    );
+    // Parent -> C (Workflow Tool) -> Execute Workflow -> G -> push.
+    const viaExecute = declaredReadOnly(
+      workflow(
+        "wf-c",
+        [node("start", "sub_workflow_trigger"), node("run-g", "execute_workflow", { workflowId: "wf-g" }), node("out", "output")],
+        [{ source: "start", target: "run-g" }, { source: "run-g", target: "out" }],
+        { name: "Middle" }
+      )
+    );
+    const calls = [
+      { name: "l2m-workflow__middle", arguments: { input: "go" } },
+      { name: "l2m-workflow__deep", arguments: { input: "go" } },
+      { name: "repo-mcp__push", arguments: {} }
+    ];
+    const deep = declaredReadOnly(writer("wf-d", "Deep"));
+    const grandchild = writer("wf-g", "Grandchild");
+    for (const middle of [viaTool, viaExecute]) {
+      const workflows = [middle, deep, grandchild];
+      // Without parent controls the write at depth 2 goes through.
+      const open = harness({ calls, workflows, onlyOffered: true });
+      expect((await executeWorkflow({ workflow: parentWorkflow({ workflowId: "wf-c" }), webhookPayload: { user_prompt: "x" } }, open.dependencies)).status).toBe("success");
+      expect(open.invoked).toEqual(["push"]);
+
+      // Parent gate on: the write at depth 2 waits for an approval instead of running. Through a nested tool C's agent
+      // gets the error; through Execute Workflow C itself stops, and the parent's call reports it.
+      const gated = harness({ calls, workflows, onlyOffered: true });
+      const withGate = await executeWorkflow(
+        { workflow: parentWorkflow({ workflowId: "wf-c" }, { settings: { writeToolApproval: { enabled: true } } }), webhookPayload: { user_prompt: "x" } },
+        gated.dependencies
+      );
+      expect(withGate.status).toBe("success");
+      expect(gated.invoked).toEqual([]);
+      if (middle === viaExecute) expect(toolResults(withGate)[0]!.error).toMatch(/stopped to wait for an approval/);
+
+      // Parent "no write tools": the agent at depth 2 never gets its write tool.
+      const noWrites = harness({ calls, workflows, onlyOffered: true });
+      const refused = await executeWorkflow(
+        { workflow: parentWorkflow({ workflowId: "wf-c" }, { settings: { noWriteTools: true } }), webhookPayload: { user_prompt: "x" } },
+        noWrites.dependencies
+      );
+      expect(refused.status).toBe("success");
+      expect(noWrites.invoked).toEqual([]);
+    }
   });
 
   it("stops a call at the node's timeout, and keeps the child's labels on its error", async () => {
