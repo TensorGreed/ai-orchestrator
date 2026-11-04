@@ -345,6 +345,11 @@ describe("forwarded client certificates", () => {
       expect(describeCertificate(parsed!).fingerprint256).toBe(fingerprintA);
     }
     expect(parseForwardedCertificate("not a certificate")).toBeNull();
+    // A client-written PEM with a proxy's base64 DER appended (or the reverse, or a comma-joined pair) is refused.
+    expect(parseForwardedCertificate(`${CLIENT_CERT_A_PEM}\n${der}`)).toBeNull();
+    expect(parseForwardedCertificate(`${CLIENT_CERT_A_PEM.replace(/\n/g, " ")} ${der}`)).toBeNull();
+    expect(parseForwardedCertificate(`${der}\n${CLIENT_CERT_A_PEM}`)).toBeNull();
+    expect(parseForwardedCertificate(`${der}, ${der}`)).toBeNull();
     // A quoted subject with commas is still one XFCC element.
     expect(parseForwardedCertificate(`Hash=abc;Cert="${encodeURIComponent(CLIENT_CERT_A_PEM)}";Subject="CN=a,O=b"`)).not.toBeNull();
     expect(parseForwardedCertificate("")).toBeNull();

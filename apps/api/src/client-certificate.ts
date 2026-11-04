@@ -72,10 +72,15 @@ export function parseForwardedCertificate(raw: string): crypto.X509Certificate |
   // More than one certificate (a proxy that appends to the header instead of setting it, or duplicate headers that
   // Node joins with ", ") is refused: the one the client wrote could come first.
   if (xfccElementCount(value) > 1) return null;
-  value = xfccCert(value) ?? value;
+  const xfcc = xfccCert(value);
+  // Outside XFCC the header is one certificate: a comma means a second value was appended.
+  if (xfcc === null && value.includes(",")) return null;
+  value = xfcc ?? value;
   if (value.includes("%")) value = safeDecode(value);
   if ((value.match(/-----BEGIN CERTIFICATE-----/g) ?? []).length > 1) return null;
   const pem = value.match(PEM_BLOCK)?.[0];
+  // Anything around the one PEM block (for example a base64 DER appended after it) is refused.
+  if (pem && value.trim() !== pem) return null;
   try {
     if (pem) {
       // A PEM block folded onto one header line (tabs or spaces for newlines) is restored line by line.

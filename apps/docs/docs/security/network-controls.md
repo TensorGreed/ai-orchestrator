@@ -121,6 +121,10 @@ fixing a wrong one is a change to the environment and a restart, never a databas
 ::: warning Behind a proxy on the same host
 If the proxy reaches the API over loopback and `TRUST_PROXY` is off, every request is counted from `127.0.0.1` and
 break-glass admits all of them. Set `TRUST_PROXY` so the client's own address is checked.
+
+In the production compose file the API port is not published, so break-glass works only from inside the API
+container: `docker compose exec api-1 wget -qO- http://localhost:4000/...`. The compose file sets `TRUST_PROXY=1`
+because nginx is its single hop; do not publish port 4000 while it is set.
 :::
 
 ## Per-client lists and certificates (MCP gateway)
