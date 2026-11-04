@@ -219,6 +219,11 @@ export interface McpGatewayDeps {
   mcpRegistry: MCPRegistry;
   /** Phase 10.5 — answers `sampling/createMessage` with a server's default model; absent means sampling is refused. */
   providerRegistry?: ProviderRegistry;
+  /**
+   * 12.6 — the registry a sampling request of this call uses: `providerRegistry` checked against the model allowlist
+   * of the toolset's project (null: app.ts applies the default project's list). Without it, `providerRegistry` as given.
+   */
+  samplingRegistryFor?: (scope: { projectId: string | null; toolsetId: string; clientId: string; sessionId: string }) => ProviderRegistry;
   resolveSecret: MCPExecutionContext["resolveSecret"];
   redact: (value: string) => string;
   resolveRegisteredMcpServer: (registryServerId: string) => Promise<MCPServerConfig>;
@@ -823,7 +828,9 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
       const samplingTrace: McpSamplingTraceEntry[] = [];
       const sampling = deps.providerRegistry
         ? createMcpSamplingHandler({
-            providerRegistry: deps.providerRegistry,
+            providerRegistry: deps.samplingRegistryFor
+              ? deps.samplingRegistryFor({ projectId: toolset.projectId ?? null, toolsetId: toolset.id, clientId: auth.client.id, sessionId: session.id })
+              : deps.providerRegistry,
             resolveSecret: deps.resolveSecret,
             serverConfigs: [serverConfig],
             evaluatePolicy: async (subject) =>

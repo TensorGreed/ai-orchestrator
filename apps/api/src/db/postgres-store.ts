@@ -20,6 +20,7 @@ import * as guard_simulation from "./postgres/guard-simulation.js";
 import * as knowledge from "./postgres/knowledge.js";
 import * as mcp from "./postgres/mcp.js";
 import * as misc from "./postgres/misc.js";
+import * as model_allowlist from "./postgres/model-allowlist.js";
 import * as queue from "./postgres/queue.js";
 import * as release from "./postgres/release.js";
 import * as replay from "./postgres/replay.js";
@@ -972,6 +973,15 @@ export class PostgresStore implements Store {
   }
   async listWorkflowConfigsForDestinations(...args: Parameters<Store["listWorkflowConfigsForDestinations"]>): ReturnType<Store["listWorkflowConfigsForDestinations"]> {
     return data_destinations.listWorkflowConfigsForDestinations(this.ctx, ...args);
+  }
+  async listModelAllowlistEntries(...args: Parameters<Store["listModelAllowlistEntries"]>): ReturnType<Store["listModelAllowlistEntries"]> {
+    return model_allowlist.listModelAllowlistEntries(this.ctx, ...args);
+  }
+  async insertModelAllowlistEntry(...args: Parameters<Store["insertModelAllowlistEntry"]>): ReturnType<Store["insertModelAllowlistEntry"]> {
+    return model_allowlist.insertModelAllowlistEntry(this.ctx, ...args);
+  }
+  async deleteModelAllowlistEntry(...args: Parameters<Store["deleteModelAllowlistEntry"]>): ReturnType<Store["deleteModelAllowlistEntry"]> {
+    return model_allowlist.deleteModelAllowlistEntry(this.ctx, ...args);
   }
   async listDataDestinations(...args: Parameters<Store["listDataDestinations"]>): ReturnType<Store["listDataDestinations"]> {
     return data_destinations.listDataDestinations(this.ctx, ...args);

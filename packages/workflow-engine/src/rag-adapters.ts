@@ -4,6 +4,37 @@ import pg from "pg";
 export interface EmbeddingAdapter {
   id: string;
   embed(text: string): Promise<number[]>;
+  /**
+   * 12.6 — the vendor and model this embedder sends text to, for the model allowlist (provider ids `openai`,
+   * `azure_openai` with the deployment name as the model, `gemini`, `mistral`, `cohere`, `huggingface`).
+   * Absent for a local embedder (the token embedder), which is not a model call.
+   */
+  readonly modelTarget?: EmbeddingModelTarget;
+}
+
+export interface EmbeddingModelTarget {
+  providerId: string;
+  model: string;
+}
+
+/** Asks whether an embedder may send text to its model; throws to refuse (a `ModelNotAllowedError`). */
+export type EmbeddingModelCheck = (target: EmbeddingModelTarget) => Promise<void>;
+
+/**
+ * 12.6 — `adapter` with every `embed` checked first (the model allowlist). A local embedder (no `modelTarget`) is
+ * returned as it is.
+ */
+export function gatedEmbeddingAdapter(adapter: EmbeddingAdapter, check: EmbeddingModelCheck): EmbeddingAdapter {
+  const target = adapter.modelTarget;
+  if (!target) return adapter;
+  return {
+    id: adapter.id,
+    modelTarget: target,
+    embed: async (text) => {
+      await check(target);
+      return await adapter.embed(text);
+    }
+  };
 }
 
 export interface SyncEmbeddingAdapter extends EmbeddingAdapter {
@@ -70,6 +101,10 @@ export class OpenAIEmbeddingAdapter implements EmbeddingAdapter {
 
   constructor(private config: { fetcher?: RagFetch; baseUrl?: string; model?: string; apiKey: string }) {}
 
+  get modelTarget(): EmbeddingModelTarget {
+    return { providerId: "openai", model: this.config.model || "text-embedding-3-small" };
+  }
+
   async embed(text: string): Promise<number[]> {
     const baseUrl = this.config.baseUrl || "https://api.openai.com/v1";
     const model = this.config.model || "text-embedding-3-small";
@@ -102,6 +137,10 @@ export class AzureOpenAIEmbeddingAdapter implements EmbeddingAdapter {
   constructor(
     private config: { fetcher?: RagFetch; endpoint: string; deployment: string; apiVersion?: string; apiKey: string }
   ) {}
+
+  get modelTarget(): EmbeddingModelTarget {
+    return { providerId: "azure_openai", model: this.config.deployment.trim() };
+  }
 
   async embed(text: string): Promise<number[]> {
     const endpoint = this.config.endpoint.replace(/\/+$/, "");
@@ -576,6 +615,9 @@ export class QdrantVectorStoreAdapter implements VectorStoreAdapter {
 export class CohereEmbeddingAdapter implements EmbeddingAdapter {
   readonly id = "cohere-embedder";
   constructor(private config: { apiKey: string; model?: string }) {}
+  get modelTarget(): EmbeddingModelTarget {
+    return { providerId: "cohere", model: this.config.model || "embed-english-v3.0" };
+  }
   async embed(text: string): Promise<number[]> {
     const model = this.config.model || "embed-english-v3.0";
     const res = await fetch("https://api.cohere.ai/v1/embed", {
@@ -592,6 +634,9 @@ export class CohereEmbeddingAdapter implements EmbeddingAdapter {
 export class MistralEmbeddingAdapter implements EmbeddingAdapter {
   readonly id = "mistral-embedder";
   constructor(private config: { apiKey: string; model?: string }) {}
+  get modelTarget(): EmbeddingModelTarget {
+    return { providerId: "mistral", model: this.config.model || "mistral-embed" };
+  }
   async embed(text: string): Promise<number[]> {
     const model = this.config.model || "mistral-embed";
     const res = await fetch("https://api.mistral.ai/v1/embeddings", {
@@ -608,6 +653,9 @@ export class MistralEmbeddingAdapter implements EmbeddingAdapter {
 export class GoogleVertexEmbeddingAdapter implements EmbeddingAdapter {
   readonly id = "google-vertex-embedder";
   constructor(private config: { apiKey: string; model?: string }) {}
+  get modelTarget(): EmbeddingModelTarget {
+    return { providerId: "gemini", model: this.config.model || "text-embedding-004" };
+  }
   async embed(text: string): Promise<number[]> {
     const model = this.config.model || "text-embedding-004";
     const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:embedContent?key=${this.config.apiKey}`, {
@@ -624,6 +672,9 @@ export class GoogleVertexEmbeddingAdapter implements EmbeddingAdapter {
 export class HuggingFaceEmbeddingAdapter implements EmbeddingAdapter {
   readonly id = "huggingface-embedder";
   constructor(private config: { apiKey: string; model?: string }) {}
+  get modelTarget(): EmbeddingModelTarget {
+    return { providerId: "huggingface", model: this.config.model || "sentence-transformers/all-MiniLM-L6-v2" };
+  }
   async embed(text: string): Promise<number[]> {
     const model = this.config.model || "sentence-transformers/all-MiniLM-L6-v2";
     const res = await fetch(`https://api-inference.huggingface.co/pipeline/feature-extraction/${model}`, {

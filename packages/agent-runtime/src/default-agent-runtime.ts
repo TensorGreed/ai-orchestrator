@@ -6,7 +6,7 @@ import type {
   ChatMessage,
   ToolDefinition
 } from "@ai-orchestrator/shared";
-import { NODE_ACTIVITY_PREVIEW_CHARS, unionDataLabels, withoutDataClasses, type DataLabels } from "@ai-orchestrator/shared";
+import { MODEL_NOT_ALLOWED_CODE, NODE_ACTIVITY_PREVIEW_CHARS, unionDataLabels, withoutDataClasses, type DataLabels } from "@ai-orchestrator/shared";
 import type { AgentGuardCheck, AgentRuntimeAdapter, AgentRuntimeContext, AgentRuntimeEvent, AgentToolRuntime, InternalToolResult } from "./types";
 import { AgentGuardInterrupt, createToolErrorResult, isAgentGuardInterrupt } from "./types";
 
@@ -1279,6 +1279,10 @@ ${effectiveSystemPrompt}`;
             if ((llmError as Error & { code?: unknown }).code === "MODEL_TAPE_MISS") {
               break;
             }
+            // 12.6 — the model allowlist refused the model: no retry, and no partial answer from earlier steps.
+            if ((llmError as Error & { code?: unknown }).code === MODEL_NOT_ALLOWED_CODE) {
+              throw llmError;
+            }
             if (llmAttempt < LLM_RETRY_MAX) {
               const delay = LLM_RETRY_BASE_DELAY_MS * Math.pow(2, llmAttempt);
               emit({
@@ -1788,6 +1792,10 @@ ${effectiveSystemPrompt}`;
       // Phase 12.1 — a guard block or approval pause is not an agent failure:
       // it leaves the loop as is, without writing the stopped turn to memory.
       if (isAgentGuardInterrupt(error)) {
+        throw error;
+      }
+      // 12.6 — a model the allowlist refuses fails the node with its typed error, not an answer.
+      if (error instanceof Error && (error as Error & { code?: unknown }).code === MODEL_NOT_ALLOWED_CODE) {
         throw error;
       }
       // A stopped or timed-out run leaves the loop as is too: the caller

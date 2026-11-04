@@ -77,6 +77,7 @@ import {
 } from "@ai-orchestrator/shared";
 import { buildReplayPlan, importWorkflowFromJson, validateWorkflowGraph, type ReplayPlan } from "@ai-orchestrator/workflow-engine";
 import type { ProviderRegistry } from "@ai-orchestrator/provider-sdk";
+import type { ModelAllowlistFinding } from "./model-allowlist-service.js";
 import type { ReplayRecordingRecord } from "../db/database.js";
 import { sha256Hex, workflowForHash } from "./audit-bundle-service.js";
 import type { McpCassetteRunPlan, McpCassetteService, ModelReplayPlan, OfflineReplayOptions } from "./mcp-cassette-service.js";
@@ -166,6 +167,8 @@ export interface ReplayExecutionResult {
   completedAt?: string;
   nodeResults: unknown;
   mcpReplay?: McpReplayReport;
+  /** 12.6 — model calls answered from the tape (one per node, provider and model) that the model allowlist refuses now. */
+  modelAllowlist?: ModelAllowlistFinding[];
 }
 
 export interface ReplayServiceOptions {
@@ -183,6 +186,11 @@ export interface ReplayServiceOptions {
    * before anything runs; the error reaches the caller (HTTP 402 on the replay route). Tape-only replays are not asked.
    */
   admitLive?: (input: { workflow: Workflow; actor: SafeUser }) => Promise<void>;
+  /**
+   * 12.6 — the registry a lenient replay's tape misses go to: the providers checked against the model allowlist of
+   * the replayed workflow's project (a refused model fails the node). Without it, `providerRegistry`.
+   */
+  liveModelsFor?: (input: { workflow: Workflow; executionId: string }) => ProviderRegistry;
   /** Phase 15.3 — what `live_read_only` MCP servers need to read from the live server. */
   liveReads?: OfflineReplayOptions["liveReads"];
   /**
@@ -453,7 +461,11 @@ export class ReplayService {
           blocking: true
         });
       } else if (this.options.providerRegistry) {
-        modelPlan = this.options.cassettes.planModelReplay(tape, mcpMode, this.options.providerRegistry);
+        modelPlan = this.options.cassettes.planModelReplay(
+          tape,
+          mcpMode,
+          this.options.liveModelsFor?.({ workflow: candidate.workflow, executionId }) ?? this.options.providerRegistry
+        );
       } else {
         preflight.push({ kind: "no_model_tape", nodeId: null, message: "Model replay is not available on this server.", blocking: true });
       }
@@ -502,6 +514,16 @@ export class ReplayService {
     const health = [...preflight, ...(preflight.some((warning) => warning.blocking) ? [] : this.health(recording, plan, result))];
     if (executeError) health.push({ kind: "replay_error", nodeId: null, message: `The replay could not run: ${executeError}`, blocking: true });
     if (modelPlan) health.push(...this.modelHealth(modelPlan.player.report(), recording.modelTape?.truncated === true));
+    // 12.6 — reported, not enforced: these are calls the tape answered (what happened in the golden run); a live run
+    // of this model would be refused. A lenient replay's tape misses are live calls and are refused like any run's.
+    for (const finding of result.modelAllowlist ?? []) {
+      health.push({
+        kind: "model_not_allowed",
+        nodeId: finding.nodeId,
+        message: `${finding.message} The replay used the recorded answer; a live run would fail at this node.`,
+        blocking: false
+      });
+    }
     for (const nodeId of liveReadNodes) {
       if (plan.decisions.some((decision) => decision.nodeId === nodeId && decision.action === "live")) {
         health.push({ kind: "live_read", nodeId, message: `Node ${nodeId} read live data instead of the recorded answer; differences can come from data that changed since the golden run.`, blocking: false });

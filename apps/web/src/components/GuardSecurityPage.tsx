@@ -15,9 +15,10 @@ import { ApiError, fetchGuardEvents, fetchGuardProfiles, fetchGuardStats, type G
 import { actionLabel, channelLabel, dailySeries, verdictReasonLine } from "../lib/guard-trace";
 import { DataDestinationsView } from "./DataDestinationsView";
 import { GuardProfilesView } from "./GuardProfilesView";
+import { ModelAllowlistView } from "./ModelAllowlistView";
 
-type Tab = "overview" | "profiles" | "destinations";
-const TAB_LABEL: Record<Tab, string> = { overview: "Overview", profiles: "Profiles & bindings", destinations: "Data destinations" };
+type Tab = "overview" | "profiles" | "destinations" | "models";
+const TAB_LABEL: Record<Tab, string> = { overview: "Overview", profiles: "Profiles & bindings", destinations: "Data destinations", models: "Models" };
 const DAY_WINDOWS = [7, 14, 30] as const;
 
 function formatError(err: unknown): string {
@@ -49,7 +50,7 @@ export function GuardSecurityPage({ projects, workflows, activeProjectId, role, 
           <p className="page-sub">Guard verdicts on prompts, tool calls, tool results and answers, and the profiles that decide them.</p>
         </div>
         <div className="finops-range guard-tabs" role="tablist" aria-label="Security views">
-          {(["overview", "profiles", "destinations"] as Tab[]).map((entry) => (
+          {(["overview", "profiles", "destinations", "models"] as Tab[]).map((entry) => (
             <button
               key={entry}
               type="button"
@@ -66,6 +67,7 @@ export function GuardSecurityPage({ projects, workflows, activeProjectId, role, 
       {tab === "overview" && <GuardOverview projects={projects} workflows={workflows} {...(onOpenRun ? { onOpenRun } : {})} />}
       {tab === "profiles" && <GuardProfilesView projects={projects} workflows={workflows} activeProjectId={activeProjectId ?? "default"} role={role} />}
       {tab === "destinations" && <DataDestinationsView />}
+      {tab === "models" && <ModelAllowlistView projects={projects} {...(activeProjectId ? { activeProjectId } : {})} />}
     </section>
   );
 }

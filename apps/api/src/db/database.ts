@@ -15,6 +15,7 @@ import type {
   McpPolicySuggestionStatus,
   McpClient,
   McpCassette,
+  ModelAllowlistEntry,
   ModelMemorySeed,
   ModelTape,
   McpCassetteBadge,
@@ -4009,6 +4010,20 @@ export class SqliteStore implements Store {
     this.exec(`CREATE INDEX IF NOT EXISTS idx_usage_events_client_created ON usage_events(client_id, created_at DESC)`);
     this.ensureColumn("mcp_clients", "rate_limit_json", "TEXT");
     this.ensureColumn("mcp_toolsets", "rate_limit_json", "TEXT");
+    // 12.6 (v55) — model allowlists (deployment and per project); no rows = every model allowed.
+    this.exec(`
+      CREATE TABLE IF NOT EXISTS model_allowlist_entries (
+        id TEXT PRIMARY KEY,
+        scope TEXT NOT NULL,
+        project_id TEXT NOT NULL DEFAULT '',
+        provider_id TEXT NOT NULL,
+        model_glob TEXT NOT NULL,
+        note TEXT,
+        created_at TEXT NOT NULL,
+        created_by TEXT
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_model_allowlist_entries_match ON model_allowlist_entries(scope, project_id, provider_id, model_glob);
+    `);
 
     this.exec(`CREATE INDEX IF NOT EXISTS idx_workflows_project_id ON workflows(project_id)`);
     this.exec(`CREATE INDEX IF NOT EXISTS idx_workflows_folder_id ON workflows(folder_id)`);
@@ -6858,6 +6873,8 @@ export class SqliteStore implements Store {
     // Variables are project configuration; they must not revive with a re-created id.
     this.exec(`DELETE FROM variables WHERE project_id = ?`, [id]);
     this.exec(`DELETE FROM guard_bindings WHERE scope = 'project' AND scope_id = ?`, [id]);
+    // 12.6 — a re-created project with the same id starts with no model allowlist.
+    this.exec(`DELETE FROM model_allowlist_entries WHERE scope = 'project' AND project_id = ?`, [id]);
     // Memberships, roles and shares of a deleted project must not come back
     // to life if a project with the same id is created later.
     this.exec(`DELETE FROM user_project_roles WHERE project_id = ?`, [id]);
@@ -14432,6 +14449,41 @@ export class SqliteStore implements Store {
     return true;
   }
 
+  // 12.6 — model allowlists.
+
+  async listModelAllowlistEntries(): Promise<ModelAllowlistEntry[]> {
+    return this.queryAll<Record<string, unknown>>(
+      `SELECT * FROM model_allowlist_entries ORDER BY scope, project_id, created_at, id`
+    ).map(mapModelAllowlistRow);
+  }
+
+  async insertModelAllowlistEntry(entry: ModelAllowlistEntry, maxPerScope: number): Promise<ModelAllowlistInsertResult> {
+    return this.db.transaction((): ModelAllowlistInsertResult => {
+      const projectKey = entry.projectId ?? "";
+      const duplicate = this.queryOne<Record<string, unknown>>(
+        `SELECT id FROM model_allowlist_entries WHERE scope = ? AND project_id = ? AND provider_id = ? AND model_glob = ?`,
+        [entry.scope, projectKey, entry.providerId, entry.modelGlob]
+      );
+      if (duplicate) return { ok: false, reason: "duplicate" };
+      const count = this.queryOne<{ n: number }>(`SELECT COUNT(*) AS n FROM model_allowlist_entries WHERE scope = ? AND project_id = ?`, [entry.scope, projectKey]);
+      if (Number(count?.n ?? 0) >= maxPerScope) return { ok: false, reason: "limit" };
+      this.exec(
+        `INSERT INTO model_allowlist_entries (id, scope, project_id, provider_id, model_glob, note, created_at, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [entry.id, entry.scope, projectKey, entry.providerId, entry.modelGlob, entry.note, entry.createdAt, entry.createdBy]
+      );
+      return { ok: true, entry };
+    })();
+  }
+
+  async deleteModelAllowlistEntry(id: string): Promise<ModelAllowlistEntry | null> {
+    return this.db.transaction((): ModelAllowlistEntry | null => {
+      const row = this.queryOne<Record<string, unknown>>(`SELECT * FROM model_allowlist_entries WHERE id = ?`, [id]);
+      if (!row) return null;
+      this.exec(`DELETE FROM model_allowlist_entries WHERE id = ?`, [id]);
+      return mapModelAllowlistRow(row);
+    })();
+  }
+
   // ---------------------------------------------------------------------------
   // Atomic multi-step operations (Phase 13.1): each is one db.transaction, so
   // a check and the write it guards cannot interleave with another request.
@@ -14639,6 +14691,23 @@ export class SqliteStore implements Store {
       throw error;
     }
   }
+}
+
+/** 12.6 — what an allowlist insert did: added, or refused as a duplicate or over the per-scope limit. */
+export type ModelAllowlistInsertResult = { ok: true; entry: ModelAllowlistEntry } | { ok: false; reason: "duplicate" | "limit" };
+
+function mapModelAllowlistRow(row: Record<string, unknown>): ModelAllowlistEntry {
+  const projectId = toString(row.project_id);
+  return {
+    id: toString(row.id),
+    scope: toString(row.scope) === "project" ? "project" : "deployment",
+    projectId: projectId ? projectId : null,
+    providerId: toString(row.provider_id),
+    modelGlob: toString(row.model_glob),
+    note: row.note === null || row.note === undefined ? null : toString(row.note),
+    createdAt: toString(row.created_at),
+    createdBy: row.created_by === null || row.created_by === undefined ? null : toString(row.created_by)
+  };
 }
 
 /** The fields of a data destination row a write sets (already validated and normalised). */

@@ -25,3 +25,4 @@ export * from "./code-sandbox";
 export { configureExpressionSandbox, expressionSandboxLimits, EXPRESSION_SANDBOX_DEFAULTS, ExpressionSandboxError, isExpressionSandboxFailure } from "./expression-sandbox";
 export { runWithSandboxOwner } from "./quickjs-sandbox";
 export * from "./outbound-url-guard";
+export * from "./model-references";

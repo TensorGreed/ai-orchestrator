@@ -44,6 +44,7 @@ import type {
   McpGatewayApproval,
   McpToolset,
   McpToolsetMemberSpec,
+  ModelAllowlistEntry,
   Project,
   ReplayGoldenBadge,
   ReplayRecordingSummary,
@@ -58,6 +59,7 @@ import type {
   AuditSigningKeyRecord,
   BudgetRecord,
   DataDestinationWrite,
+  ModelAllowlistInsertResult,
   EvalDatasetRecord,
   EvalFixtureRecord,
   EvalResultRecord,
@@ -790,6 +792,15 @@ export interface Store {
   /** Replaces a row's fields; null when it does not exist. */
   updateDataDestination(id: string, input: DataDestinationWrite & { actor: string | null; at?: string }): Promise<DataDestinationRow | null>;
   deleteDataDestination(id: string): Promise<boolean>;
+
+  // ---- Model allowlists (12.6)
+
+  /** Every entry, deployment and project scope (a small table: at most a few hundred rows per scope). */
+  listModelAllowlistEntries(): Promise<ModelAllowlistEntry[]>;
+  /** Adds an entry unless the same one exists at its scope or the scope already holds `maxPerScope` entries. */
+  insertModelAllowlistEntry(entry: ModelAllowlistEntry, maxPerScope: number): Promise<ModelAllowlistInsertResult>;
+  /** Removes an entry; the removed entry, or null when it did not exist. */
+  deleteModelAllowlistEntry(id: string): Promise<ModelAllowlistEntry | null>;
 
   // ---- Knowledge bases
 

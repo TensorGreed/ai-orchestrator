@@ -8,7 +8,7 @@ import type {
   McpToolPolicyTrace,
   WorkflowExecutionResult
 } from "@ai-orchestrator/shared";
-import { getNodeDefinition, triggerTrustState } from "@ai-orchestrator/shared";
+import { getNodeDefinition, nodeEmbeddingModelTarget, triggerTrustState } from "@ai-orchestrator/shared";
 import { buildToolPolicyTraceView, readToolPolicyTrace } from "../lib/tool-policy-trace";
 import type { LiveNodeResult } from "../lib/run-trace";
 import { LiveElapsed } from "./WorkflowCanvasNode";
@@ -19,6 +19,7 @@ import { GuardNodeFields, GuardProtectionFields } from "./GuardNodeConfigFields"
 import { ApprovalGateNodeFields } from "./ApprovalGateNodeFields";
 import { McpAnnotationChips, McpOutputSchema } from "./McpToolMeta";
 import { SecretSaveWarnings } from "./SecretSaveWarnings";
+import { ModelAllowlistWarning, useModelAllowlistWarning } from "./ModelAllowlistWarning";
 import {
   TRIGGER_TRUST_OPTIONS,
   describeTriggerTrust,
@@ -2422,7 +2423,7 @@ export function NodeInspector({
       setProviderTestError(null);
       setProviderTestMessage(null);
 
-      const result = await testProvider(payload);
+      const result = await testProvider({ ...payload, ...(workflowContext?.projectId ? { projectId: workflowContext.projectId } : {}) });
       if (!result.ok) {
         setProviderTestError(result.message || "Connection test failed.");
         setProviderTestMessage(null);
@@ -2444,7 +2445,21 @@ export function NodeInspector({
     } finally {
       setProviderTestBusy(false);
     }
-  }, [buildProviderTestConfig]);
+  }, [buildProviderTestConfig, workflowContext?.projectId]);
+
+  // 12.6 — the model allowlist's answer for this node's model in the workflow's project.
+  const allowlistProvider = useMemo((): Pick<LLMProviderConfig, "providerId" | "model" | "extra"> | null => {
+    // An embedding node's vendor and model (RAG Retrieve's embedder, the Azure OpenAI embeddings deployment).
+    const embedding = nodeEmbeddingModelTarget({ type: node.data.nodeType, config });
+    if (embedding) return embedding;
+    const built = buildProviderTestConfig()?.provider;
+    if (built) return built;
+    const configured = asRecord(config.provider);
+    return typeof configured.providerId === "string" && typeof configured.model === "string"
+      ? (configured as unknown as LLMProviderConfig)
+      : null;
+  }, [buildProviderTestConfig, config, node.data.nodeType]);
+  const modelAllowlistWarning = useModelAllowlistWarning(allowlistProvider, workflowContext?.projectId);
 
   const renderModelChoiceField = (input: {
     label?: string;
@@ -2598,6 +2613,7 @@ export function NodeInspector({
           {providerTestMessage && <span className="muted">{providerTestMessage}</span>}
         </div>
         {providerTestError && <div className="error-banner">{providerTestError}</div>}
+        <ModelAllowlistWarning message={modelAllowlistWarning} />
       </div>
     );
   };
@@ -4740,6 +4756,7 @@ export function NodeInspector({
           {providerTestMessage && <span className="muted">{providerTestMessage}</span>}
         </div>
         {providerTestError && <div className="error-banner">{providerTestError}</div>}
+        <ModelAllowlistWarning message={modelAllowlistWarning} />
       </>
     );
   };
@@ -4852,6 +4869,7 @@ export function NodeInspector({
           {providerTestMessage && <span className="muted">{providerTestMessage}</span>}
         </div>
         {providerTestError && <div className="error-banner">{providerTestError}</div>}
+        <ModelAllowlistWarning message={modelAllowlistWarning} />
       </>
     );
   };
@@ -4928,6 +4946,7 @@ export function NodeInspector({
           {providerTestMessage && <span className="muted">{providerTestMessage}</span>}
         </div>
         {providerTestError && <div className="error-banner">{providerTestError}</div>}
+        <ModelAllowlistWarning message={modelAllowlistWarning} />
       </>
     );
   };
@@ -5003,6 +5022,7 @@ export function NodeInspector({
           {providerTestMessage && <span className="muted">{providerTestMessage}</span>}
         </div>
         {providerTestError && <div className="error-banner">{providerTestError}</div>}
+        <ModelAllowlistWarning message={modelAllowlistWarning} />
       </>
     );
   };
@@ -5022,6 +5042,7 @@ export function NodeInspector({
           onChange={(next) => setConfig((current) => ({ ...current, deployment: next }))}
           placeholder="text-embedding-3-small"
         />
+        <ModelAllowlistWarning message={modelAllowlistWarning} />
         <TextField
           label="API Version"
           value={toStringValue(config.apiVersion, "2024-10-21")}
@@ -6316,6 +6337,7 @@ export function NodeInspector({
                 { value: "token-embedder", label: "Token Based (Local Demo)" }
               ]}
             />
+            <ModelAllowlistWarning message={modelAllowlistWarning} />
             <SelectField
               label="Vector Store"
               value={toStringValue(config.vectorStoreId, "pinecone-vector-store")}

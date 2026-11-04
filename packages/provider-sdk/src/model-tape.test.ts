@@ -128,6 +128,19 @@ describe("model tape", () => {
     expect(player.report().liveCalls).toEqual([{ nodeId: "agent_1", iteration: 0, providerId: "openai", model: expect.any(String), inputTokens: 10, outputTokens: 2, cachedInputTokens: null }]);
   });
 
+  it("lists the calls the tape answered, once each, and leaves lenient live calls out", async () => {
+    const { tape } = await record(async (registry) => {
+      await registry.get("openai").generate(request("hi"), context("agent_1", 0));
+    });
+    const live = fakeProvider();
+    const { registry, player } = createModelTapeReplayRegistry(tape, { mode: "lenient", live: live.registry });
+    await registry.get("openai").generate(request("hi"), context("agent_1", 0));
+    await registry.get("openai").generate(request("hi"), context("agent_1", 0));
+    await registry.get("openai").generate(request("new", { model: "gpt-5" }), context("agent_2", 0));
+    expect(live.calls).toHaveLength(1);
+    expect(player.answeredFromTape()).toEqual([{ nodeId: "agent_1", providerId: "openai", model: "gpt-4o-mini" }]);
+  });
+
   it("records a stream as its answer, and replays it for both kinds of call", async () => {
     const { tape } = await record(async (registry) => {
       const chunks = [];

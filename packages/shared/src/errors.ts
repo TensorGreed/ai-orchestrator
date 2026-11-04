@@ -40,7 +40,9 @@ export enum ErrorCategory {
   /** Feature/operation is not implemented in this build */
   NOT_IMPLEMENTED = "not_implemented",
   /** Configuration error (missing dependency, runtime not installed, etc.) */
-  CONFIGURATION = "configuration"
+  CONFIGURATION = "configuration",
+  /** 12.6 — the model is not on the deployment's or the project's model allowlist */
+  MODEL_NOT_ALLOWED = "model_not_allowed"
 }
 
 /**
@@ -112,6 +114,8 @@ export function remediationForCategory(
       return "This integration is registered but its runtime dependency isn't installed. Install the required optional npm package (the message usually names it) and restart the API.";
     case ErrorCategory.CONFIGURATION:
       return "A runtime dependency is missing or misconfigured. Check the message for the specific binary or env var, install it, and restart the API.";
+    case ErrorCategory.MODEL_NOT_ALLOWED:
+      return "An admin limited which models this deployment or project may call, and this model is not on the list. Pick an allowed model on the node, or ask an admin to add it under Security → Models.";
     case ErrorCategory.UNKNOWN:
     default:
       return "Open the execution log for the full error and stack trace. If the message looks like a bug, please file an issue at github.com/TensorGreed/ai-orchestrator/issues with the workflow JSON and the failing node ID.";

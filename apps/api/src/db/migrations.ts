@@ -2386,6 +2386,30 @@ export const MIGRATIONS: Migration[] = [
       ALTER TABLE usage_events DROP COLUMN IF EXISTS toolset_id;
       ALTER TABLE usage_events DROP COLUMN IF EXISTS client_id;
     `
+  },
+  {
+    version: 55,
+    description: "12.6 — model allowlists: provider and model patterns allowed for the deployment and per project",
+    // One row per allowed `{provider_id, model_glob}` at scope 'deployment' (project_id '') or 'project' (project_id
+    // set). No rows at a scope = no restriction from that scope, so an existing deployment allows every model as
+    // before.
+    up: `
+      CREATE TABLE IF NOT EXISTS model_allowlist_entries (
+        id TEXT PRIMARY KEY,
+        scope TEXT NOT NULL,
+        project_id TEXT NOT NULL DEFAULT '',
+        provider_id TEXT NOT NULL,
+        model_glob TEXT NOT NULL,
+        note TEXT,
+        created_at TIMESTAMPTZ NOT NULL,
+        created_by TEXT
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_model_allowlist_entries_match
+        ON model_allowlist_entries (scope, project_id, provider_id, model_glob);
+    `,
+    down: `
+      DROP TABLE IF EXISTS model_allowlist_entries;
+    `
   }
 ];
 
