@@ -148,7 +148,7 @@ import { useMcpCanvasStatus } from "./lib/use-mcp-canvas-status";
 import { TemplateGallery } from "./components/TemplateGallery";
 import { WelcomeModal, isWelcomeDismissed, markWelcomeDismissed } from "./components/WelcomeModal";
 import { AcceptInviteCard } from "./components/AcceptInviteCard";
-import { inviteTokenFromSearch, stripInviteParam } from "./lib/user-invite";
+import { INVITE_SIGNED_IN_NOTICE, inviteTokenFromLocation, stripInviteParam } from "./lib/user-invite";
 import { WorkflowShareModal } from "./components/WorkflowShareModal";
 import { WriteToolApprovalDialog } from "./components/WriteToolApprovalDialog";
 import { WorkflowCardMenu } from "./components/WorkflowCardMenu";
@@ -1116,14 +1116,20 @@ function StudioApp() {
     const code = new URLSearchParams(window.location.search).get("sso_error");
     return code ? ssoErrorMessage(code) : null;
   });
-  // Roadmap 7.3 — an invite link (?invite=<token>) opens the accept form; the token leaves the address bar at once.
+  // Roadmap 7.3 — an invite link (#invite=<token>) opens the accept form; the token leaves the address bar at once.
   const [inviteToken, setInviteToken] = useState<string | null>(() =>
-    typeof window === "undefined" ? null : inviteTokenFromSearch(window.location.search)
+    typeof window === "undefined" ? null : inviteTokenFromLocation(window.location.search, window.location.hash)
   );
   useEffect(() => {
     const cleaned = stripInviteParam(window.location.pathname, window.location.search, window.location.hash);
     if (cleaned !== null) window.history.replaceState(window.history.state, "", cleaned);
   }, []);
+  // A browser that is already signed in cannot accept an invite: say so instead of dropping the token without a word.
+  useEffect(() => {
+    if (!authUser || !inviteToken) return;
+    setInviteToken(null);
+    setInviteNotice(INVITE_SIGNED_IN_NOTICE);
+  }, [authUser, inviteToken]);
   useEffect(() => {
     const cleaned = stripSsoLandingParams(window.location.pathname, window.location.search, window.location.hash);
     if (cleaned === null) return;
@@ -1148,6 +1154,7 @@ function StudioApp() {
   const [secretBusy, setSecretBusy] = useState(false);
   const [secretSensitiveOutput, setSecretSensitiveOutputFlag] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [inviteNotice, setInviteNotice] = useState<string | null>(null);
   const [secretMessage, setSecretMessage] = useState<string | null>(null);
   const [secretWarnings, setSecretWarnings] = useState<string[]>([]);
   const [executionResult, setExecutionResult] = useState<WorkflowExecutionResult | null>(null);
@@ -4830,6 +4837,14 @@ function StudioApp() {
         />
 
         <main className="main-content">
+          {inviteNotice && (
+            <div className="error-banner global-banner" role="status">
+              {inviteNotice}{" "}
+              <button type="button" className="auth-link-btn" onClick={() => setInviteNotice(null)}>
+                Dismiss
+              </button>
+            </div>
+          )}
           {error && <div className="error-banner global-banner">{error}</div>}
           {secretMessage && <div className="info-banner global-banner">{secretMessage}</div>}
 

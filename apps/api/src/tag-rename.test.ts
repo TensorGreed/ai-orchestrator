@@ -65,6 +65,27 @@ describe("PUT /api/tags/:tag", () => {
     expect((await ctx.store.getWorkflow("wf-1"))?.tags).toEqual(["Sales"]);
   });
 
+  it("rewrites only the tags: a graph saved meanwhile is kept, no version is taken, and a delete does the same", async () => {
+    const ctx = await context();
+    const admin = await loginAs(ctx, "admin");
+    await tagged(ctx, "wf-1", ["sales", "ops"]);
+    await tagged(ctx, "wf-2", ["sales"]);
+    // A save lands after the rename's permission pass has read the workflow: its graph must survive.
+    const stale = (await ctx.store.getWorkflow("wf-1"))!;
+    await ctx.store.upsertWorkflow({ ...stale, name: "Saved meanwhile", workflowVersion: 7, tags: ["sales", "ops"] });
+    const changed = await ctx.store.renameWorkflowTag(["wf-1", "wf-2", "wf-missing"], "sales", "revenue");
+    expect(changed.sort()).toEqual(["wf-1", "wf-2"]);
+    const after = (await ctx.store.getWorkflow("wf-1"))!;
+    expect(after).toMatchObject({ name: "Saved meanwhile", workflowVersion: 7, tags: ["revenue", "ops"] });
+    expect(await ctx.store.renameWorkflowTag(["wf-1"], "sales", "x")).toEqual([]);
+    expect(await ctx.store.listWorkflowVersions("wf-1")).toHaveLength(0);
+
+    const removed = await callAs(ctx, "DELETE", "/api/tags/revenue", admin.cookie);
+    expect(removed.json()).toMatchObject({ removedFromWorkflows: 2 });
+    expect((await ctx.store.getWorkflow("wf-1"))).toMatchObject({ name: "Saved meanwhile", workflowVersion: 7, tags: ["ops"] });
+    expect((await ctx.store.getWorkflow("wf-2"))?.tags).toEqual([]);
+  });
+
   it("answers 404 for an unknown tag and 400 for an empty name", async () => {
     const ctx = await context();
     const builder = await loginAs(ctx, "builder");

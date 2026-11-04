@@ -33,7 +33,7 @@ interface InviteResponse {
   inviteUrl?: string;
 }
 
-const tokenOf = (url: string) => new URL(url).searchParams.get("invite")!;
+const tokenOf = (url: string) => new URLSearchParams(new URL(url).hash.slice(1)).get("invite")!;
 
 const login = (ctx: ReleaseTestContext, email: string, password: string) =>
   ctx.app.inject({ method: "POST", url: "/api/auth/login", payload: { email, password } });
@@ -46,7 +46,7 @@ describe("POST /api/users/invite", () => {
     expect(response.statusCode, response.body).toBe(201);
     const body = response.json<InviteResponse>();
     expect(body).toMatchObject({ user: { email: "new.person@example.com", role: "builder", pending: true }, emailed: false });
-    expect(body.inviteUrl).toMatch(/^https:\/\/l2m\.example\.com\/\?invite=[A-Za-z0-9_-]{43}$/);
+    expect(body.inviteUrl).toMatch(/^https:\/\/l2m\.example\.com\/#invite=[A-Za-z0-9_-]{43}$/);
     const token = tokenOf(body.inviteUrl!);
     // Only the token's hash is stored.
     const stored = await ctx.store.findUserInviteByTokenHash(hashInviteToken(token));
@@ -161,7 +161,7 @@ describe("POST /api/users/invite", () => {
     expect(send).toHaveBeenCalledTimes(1);
     const message = send.mock.calls[0]![0];
     expect(message.to).toBe("m@example.com");
-    expect(message.text).toMatch(/http:\/\/localhost:5173\/\?invite=[A-Za-z0-9_-]{43}/);
+    expect(message.text).toMatch(/http:\/\/localhost:5173\/#invite=[A-Za-z0-9_-]{43}/);
     expect(message.html).toContain("operator");
   });
 

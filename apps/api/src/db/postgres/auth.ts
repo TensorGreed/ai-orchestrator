@@ -209,6 +209,8 @@ export async function findUserInviteByTokenHash(ctx: PgContext, tokenHash: strin
 
 export async function acceptUserInvite(ctx: PgContext, input: { tokenHash: string; passwordHash: string; now: string }): ReturnType<Store["acceptUserInvite"]> {
   return ctx.withTransaction(async (client) => {
+    // The user row is locked first, as re-invite and delete lock it, so the three never wait on each other in a cycle.
+    await client.query(`SELECT u.id FROM users u JOIN user_invites i ON i.user_id = u.id WHERE i.token_hash = $1 FOR UPDATE OF u`, [input.tokenHash]);
     // One statement claims the invite, so two accepts of the same token never both succeed.
     const claimed = await client.query<{ user_id: string }>(
       `UPDATE user_invites SET accepted_at = $2 WHERE token_hash = $1 AND accepted_at IS NULL AND expires_at > $2 RETURNING user_id`,

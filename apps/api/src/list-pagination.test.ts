@@ -130,6 +130,20 @@ describe("GET /api/users", () => {
   });
 });
 
+describe("workflow pages with a large readable set", () => {
+  it("binds one parameter for the readable ids, however many there are", async () => {
+    const ctx = await context();
+    await seedWorkflows(ctx, 3);
+    const manyIds = Array.from({ length: 40_000 }, (_, index) => `missing-${index}`);
+    const readable = ["wf-0", "wf-1", ...manyIds];
+    const page = await ctx.store.listWorkflowsPage({ workflowIds: readable, limit: 10, offset: 0 });
+    expect(page.items.map((item) => item.id).sort()).toEqual(["wf-0", "wf-1"]);
+    expect(page.total).toBe(2);
+    const tagged = await ctx.store.listWorkflowsPage({ workflowIds: readable, tag: "even", limit: 10, offset: 0 });
+    expect(tagged.items.map((item) => item.id)).toEqual(["wf-0"]);
+  });
+});
+
 describe("configuration lists paged in memory", () => {
   it("projects: equal names are ordered by id", async () => {
     const ctx = await context();

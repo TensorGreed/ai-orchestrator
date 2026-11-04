@@ -22,7 +22,7 @@ describe("App invite link (roadmap 7.3)", () => {
     fetchAuthMeMock.mockReset().mockRejectedValue(new ApiError("Unauthorized", 401, { error: "Unauthorized" }));
     lookupInviteMock.mockReset();
     acceptInviteMock.mockReset();
-    window.history.replaceState(null, "", "/?invite=tok_abcdefghijklmnop&workflow=w1");
+    window.history.replaceState(null, "", "/?workflow=w1#invite=tok_abcdefghijklmnop");
   });
 
   afterEach(() => {
@@ -35,6 +35,7 @@ describe("App invite link (roadmap 7.3)", () => {
     render(<App />);
     expect(await screen.findByText("new@example.com")).toBeInTheDocument();
     expect(window.location.search).toBe("?workflow=w1");
+    expect(window.location.hash).toBe("");
     expect(lookupInviteMock).toHaveBeenCalledWith("tok_abcdefghijklmnop");
 
     const submit = screen.getByRole("button", { name: "Set password and sign in" });
@@ -57,5 +58,12 @@ describe("App invite link (roadmap 7.3)", () => {
     expect(await screen.findByText("This invite link is invalid or has expired")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Go to sign in" }));
     expect(await screen.findByRole("button", { name: "Sign in" })).toBeInTheDocument();
+  });
+
+  it("tells a signed-in browser to sign out instead of losing the invite", async () => {
+    fetchAuthMeMock.mockReset().mockResolvedValue({ user: { id: "u1", email: "admin@example.com", role: "admin" } });
+    render(<App />);
+    expect(await screen.findByText("Sign out to accept this invite, then open the link again.")).toBeInTheDocument();
+    expect(lookupInviteMock).not.toHaveBeenCalled();
   });
 });

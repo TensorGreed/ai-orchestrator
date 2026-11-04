@@ -57,7 +57,7 @@ export function hashInviteToken(token: string): string {
 }
 
 export function inviteLink(webBaseUrl: string, token: string): string {
-  return `${webBaseUrl.replace(/\/+$/, "")}/?invite=${encodeURIComponent(token)}`;
+  return `${webBaseUrl.replace(/\/+$/, "")}/#invite=${encodeURIComponent(token)}`;
 }
 
 function openInvite(invite: UserInviteRecord | null, now: number): invite is UserInviteRecord {
@@ -146,11 +146,12 @@ export function registerUserInviteRoutes(deps: UserInviteRoutesDeps): void {
       reply.code(400);
       return { error: "Invalid invite payload", details: parsed.error.issues };
     }
-    const accepted = await store.acceptUserInvite({
-      tokenHash: hashInviteToken(parsed.data.token),
-      passwordHash: hashPassword(parsed.data.password),
-      now: new Date().toISOString()
-    });
+    // The token is checked before the password is hashed (scrypt is costly): a bad token is a cheap 404.
+    const tokenHash = hashInviteToken(parsed.data.token);
+    const open = openInvite(await store.findUserInviteByTokenHash(tokenHash), Date.now());
+    const accepted = open
+      ? await store.acceptUserInvite({ tokenHash, passwordHash: hashPassword(parsed.data.password), now: new Date().toISOString() })
+      : null;
     if (!accepted) {
       await audit(request, null, {
         category: "auth",

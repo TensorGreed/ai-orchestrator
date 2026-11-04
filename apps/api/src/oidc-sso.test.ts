@@ -249,7 +249,7 @@ describe("OIDC SSO login", () => {
     const me = await context.app.inject({ method: "GET", url: "/api/auth/me", cookies: { ao_session: login.session! } });
     expect((me.json() as { user: { id: string; role: string } }).user).toMatchObject({ id: user.id, role: "builder" });
     expect(await context.store.listOpenUserInvites()).toEqual([]);
-    const token = new URL(inviteUrl).searchParams.get("invite");
+    const token = new URLSearchParams(new URL(inviteUrl).hash.slice(1)).get("invite");
     const accept = await context.app.inject({ method: "POST", url: "/api/auth/invite/accept", payload: { token, password: "Too-Late-Pass-1" } });
     expect(accept.statusCode).toBe(404);
   });

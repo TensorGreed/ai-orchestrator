@@ -38,9 +38,9 @@ test.describe("user invites", () => {
       try {
         const invitePage = await invitee.newPage();
         await invitePage.addInitScript(() => window.localStorage.setItem("l2m:welcome-dismissed", "1"));
-        await invitePage.goto(`/${link.search}`);
+        await invitePage.goto(`/${link.hash}`);
         await expect(invitePage.getByText(email)).toBeVisible();
-        await expect.poll(() => new URL(invitePage.url()).searchParams.has("invite")).toBe(false);
+        await expect.poll(() => new URL(invitePage.url()).hash).toBe("");
         await invitePage.screenshot({ path: path.join(SHOT_DIR, "accept-invite.png") });
         await invitePage.getByLabel("Password", { exact: true }).fill("Invitee-Pass-123");
         await invitePage.getByLabel("Confirm password").fill("Invitee-Pass-123");
@@ -50,7 +50,7 @@ test.describe("user invites", () => {
         expect(me.user).toMatchObject({ email, role: "builder" });
 
         const reused = await invitee.newPage();
-        const again = await reused.request.post("/api/auth/invite/lookup", { data: { token: link.searchParams.get("invite") } });
+        const again = await reused.request.post("/api/auth/invite/lookup", { data: { token: new URLSearchParams(link.hash.slice(1)).get("invite") } });
         expect(again.status()).toBe(404);
       } finally {
         await invitee.close();

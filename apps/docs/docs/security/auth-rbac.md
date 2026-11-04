@@ -32,7 +32,7 @@ description: "Authentication and access control in L2M: session cookies, admin, 
 
 An admin invites someone by email and role (`POST /api/users/invite`, see [Endpoints](#endpoints)). The invite creates
 a **pending** user that already holds the role, so it can be added to projects at once, but it cannot sign in with a
-password until it accepts. The invitee opens the link (`<web app>/?invite=<token>`), sees the email and role, chooses a
+password until it accepts. The invitee opens the link (`<web app>/#invite=<token>`), sees the email and role, chooses a
 password of 8 characters or more and is signed in through the normal login (with its MFA step when `MFA_ENFORCE`
 applies).
 
@@ -53,6 +53,12 @@ applies).
   instead. An SSO sign-in to the invited email links that pending user (by the usual [linking rules](#linking-accounts))
   and closes its invite, so the link no longer works. Deployments that sign everyone in through SSO usually do not
   need invites at all: SSO creates the account on first sign-in.
+- **The link.** The token sits in the URL fragment (`#invite=`), which a browser never sends to a server, so web-server,
+  proxy and load-balancer access logs and Referer headers never carry it. The page reads it and removes it from the
+  address bar at once. A browser that is already signed in shows "Sign out to accept this invite" instead.
+- **SSO claims by email.** An SSO sign-in claims a pending invite by the email the identity provider asserts, and the
+  invited role (including `admin`) goes with it. Set OIDC `requireEmailVerified` to true and use SAML or LDAP only with a
+  directory that verifies the email, so nobody can assert an invited address they do not own.
 - **Audit.** `user.invite` (with `reinvite` and `emailed`) and `user.invite.accept` (success or failure).
 
 ## Project access

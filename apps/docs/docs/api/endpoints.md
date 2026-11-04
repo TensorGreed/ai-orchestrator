@@ -48,7 +48,7 @@ the envelope `GET /api/executions` uses:
 - `POST /api/users/invite` (admin; `{ email, role?: "admin" | "builder" | "operator" | "viewer" (default viewer), expiresInHours?: 1-720 (default 168) }` → `201 { user, invite: { id, expiresAt }, emailed, inviteUrl? }`; `200` when the email belonged to a pending user, whose role is set and whose old link stops working; `409` when an active account has the email; `inviteUrl` only when the link was not emailed; audited as `user.invite`)
 - `PUT /api/users/:id` (admin; `{ role }`), `DELETE /api/users/:id` (admin; deleting a pending user revokes its invite)
 - `GET /api/tags`, `POST /api/tags` (builder), `DELETE /api/tags/:tag` (admin; removes the tag from every workflow)
-- `PUT /api/tags/:tag` (builder; `{ name }` up to 100 characters → `{ ok, tag, previous, renamedInWorkflows }`; renames the tag on every workflow that has it; `404` for a tag no workflow has, `409` when another tag already has the name (compared without case), `403` when the tag is on a workflow you cannot edit, before anything changes; audited as `tag.rename`)
+- `PUT /api/tags/:tag` (builder; `{ name }` up to 100 characters → `{ ok, tag, previous, renamedInWorkflows }`; renames the tag on every workflow that has it; `404` for a tag no workflow has, `409` when another tag already has the name (compared without case), `403` when the tag is on a workflow you cannot edit, before anything changes; audited as `tag.rename`). A rename and a tag delete rewrite only the tags of the workflows in one transaction, so a graph saved at the same moment is never overwritten. A tag is metadata, so neither takes a version snapshot (the workflow history lists graph changes only); both reload triggers and schedules like any save)
 
 ## Workflows
 

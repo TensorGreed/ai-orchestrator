@@ -1289,6 +1289,12 @@ export interface Store {
    * inserted; later saves never change who created a workflow.
    */
   upsertWorkflow(workflow: Workflow, options?: { createdBy?: string | null }): Promise<Workflow>;
+  /**
+   * Replaces the tag `from` with `to` (removes it when `to` is null) on the given workflows, in one transaction that
+   * rewrites only the tags column (the workflow JSON is never touched, so a concurrent save is not overwritten).
+   * Returns the ids that carried the tag and were changed.
+   */
+  renameWorkflowTag(workflowIds: string[], from: string, to: string | null): Promise<string[]>;
   /** Phase 10.2 — user id of the workflow's creator, or null when unknown. */
   getWorkflowCreatedBy(id: string): Promise<string | null>;
   /**

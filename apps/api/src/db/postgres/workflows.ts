@@ -103,6 +103,27 @@ export async function listWorkflowsPage(ctx: PgContext, options: Parameters<Stor
   return { items: rows.map(workflowListItemFromRow), total: count ? toNum(count.count) : 0 };
 }
 
+export async function renameWorkflowTag(ctx: PgContext, workflowIds: string[], from: string, to: string | null): Promise<string[]> {
+  if (workflowIds.length === 0) return [];
+  return ctx.withTransaction(async (client) => {
+    // Rows are locked in id order, so two renames over the same workflows never wait on each other in a cycle.
+    const rows = await client.query<{ id: string; tags_json: string | null }>(
+      `SELECT id, tags_json FROM workflows WHERE id = ANY($1::text[]) ORDER BY id COLLATE "C" FOR UPDATE`,
+      [workflowIds]
+    );
+    const updatedAt = new Date().toISOString();
+    const changed: string[] = [];
+    for (const row of rows.rows) {
+      const tags = parseTagsJson(row.tags_json) ?? [];
+      if (!tags.includes(from)) continue;
+      const next = [...new Set(tags.flatMap((tag) => (tag === from ? (to === null ? [] : [to]) : [tag])))];
+      await client.query(`UPDATE workflows SET tags_json = $1, updated_at = $2 WHERE id = $3`, [JSON.stringify(next), updatedAt, row.id]);
+      changed.push(toStr(row.id));
+    }
+    return changed;
+  });
+}
+
 export async function getWorkflow(ctx: PgContext, id: string): Promise<Workflow | null> {
   const row = await ctx.queryOne<{
     id: string;

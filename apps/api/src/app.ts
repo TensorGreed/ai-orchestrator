@@ -13966,19 +13966,19 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       }
       targets.push(access.workflow);
     }
-    for (const workflow of targets) {
-      const tags = [...new Set((workflow.tags ?? []).map((tag) => (tag === from ? to : tag)))];
-      await store.upsertWorkflow({ ...workflow, tags });
-    }
+    // Only the tags column is rewritten, in one transaction: a graph saved meanwhile is never overwritten. A tag is
+    // metadata, so no version snapshot is taken (moving a workflow's tags through PATCH does not take one either).
+    const changed = await store.renameWorkflowTag(targets.map((workflow) => workflow.id), from, to);
+    for (const id of changed) await workflowChanged(id);
     await audit(request, user, {
       category: "workflow",
       eventType: "tag.rename",
       action: "update",
       resourceType: "tag",
       resourceId: to,
-      metadata: { from, to, renamedInWorkflows: targets.length }
+      metadata: { from, to, renamedInWorkflows: changed.length }
     });
-    return { ok: true, tag: to, previous: from, renamedInWorkflows: targets.length };
+    return { ok: true, tag: to, previous: from, renamedInWorkflows: changed.length };
   });
 
   app.delete<{ Params: { tag: string } }>("/api/tags/:tag", async (request, reply) => {
@@ -13986,17 +13986,11 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     if (!user) return;
     const tagToRemove = decodeURIComponent(request.params.tag);
     const workflows = await store.listWorkflows();
-    let removedCount = 0;
-    for (const w of workflows) {
-      if (Array.isArray(w.tags) && w.tags.includes(tagToRemove)) {
-        const full = await store.getWorkflow(w.id);
-        if (full) {
-          full.tags = (full.tags ?? []).filter((t) => t !== tagToRemove);
-          await store.upsertWorkflow(full);
-          removedCount++;
-        }
-      }
-    }
+    // Same rule as a rename: the tags column only, one transaction, no version snapshot.
+    const carryingIds = workflows.filter((w) => Array.isArray(w.tags) && w.tags.includes(tagToRemove)).map((w) => w.id);
+    const removed = await store.renameWorkflowTag(carryingIds, tagToRemove, null);
+    for (const id of removed) await workflowChanged(id);
+    const removedCount = removed.length;
     await audit(request, user, {
       category: "workflow",
       eventType: "tag.delete",

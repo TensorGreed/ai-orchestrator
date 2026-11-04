@@ -303,6 +303,10 @@ export class PostgresStore implements Store {
   async getWorkflow(...args: Parameters<Store["getWorkflow"]>): ReturnType<Store["getWorkflow"]> {
     return workflows.getWorkflow(this.ctx, ...args);
   }
+  async renameWorkflowTag(...args: Parameters<Store["renameWorkflowTag"]>): ReturnType<Store["renameWorkflowTag"]> {
+    return workflows.renameWorkflowTag(this.ctx, ...args);
+  }
+
   async upsertWorkflow(...args: Parameters<Store["upsertWorkflow"]>): ReturnType<Store["upsertWorkflow"]> {
     return workflows.upsertWorkflow(this.ctx, ...args);
   }

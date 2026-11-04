@@ -4244,8 +4244,9 @@ export class SqliteStore implements Store {
       params.push(`%${options.search.trim().toLowerCase()}%`);
     }
     if (options.workflowIds) {
-      clauses.push(options.workflowIds.length > 0 ? `id IN (${options.workflowIds.map(() => "?").join(", ")})` : "1 = 0");
-      params.push(...options.workflowIds);
+      // One JSON parameter, not one per id: SQLite caps bound variables, and a deployment can have more readable workflows.
+      clauses.push(options.workflowIds.length > 0 ? `id IN (SELECT value FROM json_each(?))` : "1 = 0");
+      if (options.workflowIds.length > 0) params.push(JSON.stringify(options.workflowIds));
     }
     return { where: clauses.length ? `WHERE ${clauses.join(" AND ")}` : "", params };
   }
@@ -4281,6 +4282,22 @@ export class SqliteStore implements Store {
    * `options.createdBy` (a user id) is stored only when the row is first
    * inserted; later saves never change who created a workflow.
    */
+  async renameWorkflowTag(workflowIds: string[], from: string, to: string | null): Promise<string[]> {
+    return this.transaction(() => {
+      const changed: string[] = [];
+      const updatedAt = new Date().toISOString();
+      for (const id of workflowIds) {
+        const row = this.queryOne<{ tags_json: string | null }>(`SELECT tags_json FROM workflows WHERE id = ?`, [id]);
+        const tags = row ? parseTagsJson(row.tags_json) ?? [] : [];
+        if (!tags.includes(from)) continue;
+        const next = [...new Set(tags.flatMap((tag) => (tag === from ? (to === null ? [] : [to]) : [tag])))];
+        this.exec(`UPDATE workflows SET tags_json = ?, updated_at = ? WHERE id = ?`, [JSON.stringify(next), updatedAt, id]);
+        changed.push(id);
+      }
+      return changed;
+    });
+  }
+
   async upsertWorkflow(workflow: Workflow, options: { createdBy?: string | null } = {}): Promise<Workflow> {
     const now = new Date().toISOString();
     const existing = this.getWorkflowSync(workflow.id);
