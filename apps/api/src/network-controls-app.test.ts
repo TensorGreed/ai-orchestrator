@@ -2,7 +2,7 @@
  * 13.2 — network controls end to end: scope allowlists in enforce and report mode, break-glass with its audit and
  * alert, TRUST_PROXY, per-client and per-webhook lists, forwarded client certificates (trusted and untrusted
  * proxies, fingerprint rotation, subject pins), the audit actor address, the Network settings view and migration
- * v59. Runs against the store TEST_STORE names (SQLite by default; the Postgres suite runs it again).
+ * v58. Runs against the store TEST_STORE names (SQLite by default; the Postgres suite runs it again).
  */
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -508,11 +508,11 @@ describe("forwarded client certificates", () => {
   });
 });
 
-describe("migration v59", () => {
+describe("migration v58", () => {
   it("adds the network columns to mcp_clients in both stores, with a rollback, and the store round-trips them", async () => {
     const versions = MIGRATIONS.map((entry) => entry.version).sort((a, b) => a - b);
     expect(versions).toEqual(contiguousMigrationVersions(versions));
-    const migration = MIGRATIONS.find((entry) => entry.version === 59)!;
+    const migration = MIGRATIONS.find((entry) => entry.version === 58)!;
     expect(migration.description).toContain("13.2");
     expect(migration.up).toContain("ALTER TABLE mcp_clients ADD COLUMN IF NOT EXISTS allowed_ips_json TEXT NOT NULL DEFAULT '[]'");
     expect(migration.up).toContain("ALTER TABLE mcp_clients ADD COLUMN IF NOT EXISTS cert_fingerprints_json TEXT NOT NULL DEFAULT '[]'");
