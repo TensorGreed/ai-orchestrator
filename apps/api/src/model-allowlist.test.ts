@@ -248,7 +248,7 @@ describe("migration v55", () => {
   it("adds the allowlist table with a rollback, right after v53 and v54", () => {
     const versions = MIGRATIONS.map((entry) => entry.version).sort((a, b) => a - b);
     expect(versions).toEqual(contiguousMigrationVersions(versions));
-    expect(versions.filter((version) => version >= 53)).toEqual([53, 54, 55]);
+    expect(versions.filter((version) => version >= 53 && version <= 55)).toEqual([53, 54, 55]);
     const migration = MIGRATIONS.find((entry) => entry.version === 55)!;
     expect(migration.up).toContain("CREATE TABLE IF NOT EXISTS model_allowlist_entries");
     expect(migration.up).toContain("CREATE UNIQUE INDEX IF NOT EXISTS idx_model_allowlist_entries_match");
@@ -267,7 +267,7 @@ describe("migration v55", () => {
     try {
       expect(await reopened.listModelAllowlistEntries()).toEqual([]);
       if (sql.kind === "postgres") {
-        const versions = await testSql(reopened).all<{ version: number | string }>("SELECT version FROM schema_migrations WHERE version >= 52 ORDER BY version");
+        const versions = await testSql(reopened).all<{ version: number | string }>("SELECT version FROM schema_migrations WHERE version >= 52 AND version <= 55 ORDER BY version");
         expect(versions.map((row) => Number(row.version))).toEqual([52, 53, 54, 55]);
       }
       const entry: ModelAllowlistEntry = { id: "mal_1", scope: "project", projectId: "p1", providerId: "openai", modelGlob: "gpt-4o*", note: null, createdAt: new Date().toISOString(), createdBy: "a@example.com" };
