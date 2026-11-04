@@ -552,7 +552,7 @@ to run agents.
 ### 12.6 AI gateway for applications outside L2M
 - [ ] OpenAI-compatible `/v1/chat/completions` and `/v1/embeddings` endpoints that apply a guard profile and route through the provider registry, so other applications send model traffic through the same guard, budgets and audit
 - [x] Guard profiles applied per toolset and per client on the MCP gateway (10.4) — tool arguments and results checked, stacked tighten-only over the toolset project's enforced profile, also inside workflow tool runs (#133)
-- [ ] Per-client and per-project token budgets, rate limits and model allowlists — *partial:* per-client budgets and rate limits delivered (#134); deployment and project model allowlists in review (#135)
+- [x] Per-client and per-project token budgets, rate limits and model allowlists — per-client budgets and rate limits (#134); deployment and project model allowlists (#135)
 
 ### 12.7 Visibility and assurance
 - [x] Every verdict stored (`guard_events`: channel, detector, score, action, masked evidence spans, profile version) and shown in the Trace tab, run tape and a Security page with trends
