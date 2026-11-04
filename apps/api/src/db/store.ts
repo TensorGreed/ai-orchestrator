@@ -1246,6 +1246,19 @@ export interface Store {
     tag?: string;
     search?: string;
   }): Promise<WorkflowListItem[]>;
+  /**
+   * Roadmap 7.3 — one page of listWorkflows' rows, newest change first with an id tiebreak, and the number of rows the
+   * filters match. `workflowIds` narrows to those workflows (an empty list matches nothing), before the page is cut.
+   */
+  listWorkflowsPage(options: {
+    projectId?: string;
+    folderId?: string | null;
+    tag?: string;
+    search?: string;
+    workflowIds?: string[];
+    limit: number;
+    offset: number;
+  }): Promise<{ items: WorkflowListItem[]; total: number }>;
   getWorkflow(id: string): Promise<Workflow | null>;
   /**
    * `options.createdBy` (a user id) is stored only when the row is first
@@ -1343,6 +1356,11 @@ export interface Store {
     createdAt: string;
     updatedAt: string;
   }>>;
+  /** Roadmap 7.3 — one page of listUsers' rows (newest first, id tiebreak) and the number of users. */
+  listUsersPage(options: { limit: number; offset: number }): Promise<{
+    items: Array<{ id: string; email: string; role: string; createdAt: string; updatedAt: string }>;
+    total: number;
+  }>;
   updateUserRole(id: string, role: string): Promise<boolean>;
   deleteUser(id: string): Promise<boolean>;
   getSession(sessionId: string): Promise<{

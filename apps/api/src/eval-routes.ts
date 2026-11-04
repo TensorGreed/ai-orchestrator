@@ -70,6 +70,7 @@ import type { SafeUser, UserRole } from "./services/auth-service.js";
 import type { AuditEventInput } from "./services/audit-service.js";
 import { EvalRunError, type EvalService } from "./services/eval-service.js";
 import { startSseHeartbeat } from "./sse-heartbeat.js";
+import { pageOfById, pageRequestFromQuery } from "./pagination.js";
 import type { Store } from "./db/store.js";
 
 type DatasetPermission = "workflow:read" | "workflow:write";
@@ -242,6 +243,8 @@ export function registerEvalRoutes(deps: EvalRoutesDeps): void {
     };
     const datasets: EvalDatasetRecord[] = [];
     for (const dataset of await evals.listDatasets({ workflowId })) if (await visible(dataset)) datasets.push(dataset);
+    const pageRequest = pageRequestFromQuery(request.query);
+    if (pageRequest) return pageOfById(datasets, pageRequest, (dataset) => dataset.createdAt);
     return { datasets };
   });
 

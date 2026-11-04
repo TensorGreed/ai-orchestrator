@@ -297,6 +297,9 @@ export class PostgresStore implements Store {
   async listWorkflows(...args: Parameters<Store["listWorkflows"]>): ReturnType<Store["listWorkflows"]> {
     return workflows.listWorkflows(this.ctx, ...args);
   }
+  async listWorkflowsPage(...args: Parameters<Store["listWorkflowsPage"]>): ReturnType<Store["listWorkflowsPage"]> {
+    return workflows.listWorkflowsPage(this.ctx, ...args);
+  }
   async getWorkflow(...args: Parameters<Store["getWorkflow"]>): ReturnType<Store["getWorkflow"]> {
     return workflows.getWorkflow(this.ctx, ...args);
   }
@@ -367,6 +370,9 @@ export class PostgresStore implements Store {
   }
   async listUsers(...args: Parameters<Store["listUsers"]>): ReturnType<Store["listUsers"]> {
     return auth.listUsers(this.ctx, ...args);
+  }
+  async listUsersPage(...args: Parameters<Store["listUsersPage"]>): ReturnType<Store["listUsersPage"]> {
+    return auth.listUsersPage(this.ctx, ...args);
   }
   async updateUserRole(...args: Parameters<Store["updateUserRole"]>): ReturnType<Store["updateUserRole"]> {
     return auth.updateUserRole(this.ctx, ...args);

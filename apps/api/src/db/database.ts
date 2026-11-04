@@ -2304,6 +2304,26 @@ function parseTagsJson(value: unknown): string[] | undefined {
   return tags.length > 0 ? tags : [];
 }
 
+function workflowListItemFromRow(row: Omit<WorkflowRow, "workflow_json">): WorkflowListItem {
+  return {
+    id: toString(row.id),
+    name: toString(row.name),
+    schemaVersion: toString(row.schema_version),
+    workflowVersion: toNumber(row.workflow_version),
+    createdAt: toString(row.created_at),
+    updatedAt: toString(row.updated_at),
+    tags: parseTagsJson(row.tags_json),
+    projectId: row.project_id ? toString(row.project_id) : DEFAULT_PROJECT_ID,
+    folderId: row.folder_id ? toString(row.folder_id) : undefined
+  };
+}
+
+function filterWorkflowsByTag(items: WorkflowListItem[], tag: string | undefined): WorkflowListItem[] {
+  if (!tag || !tag.trim()) return items;
+  const needle = tag.trim().toLowerCase();
+  return items.filter((item) => (item.tags ?? []).some((value) => value.toLowerCase() === needle));
+}
+
 const MAX_SESSION_TOOL_CACHE_RECORDS = 400;
 
 // Phase 10.8 — MCP cassettes
@@ -4136,6 +4156,34 @@ export class SqliteStore implements Store {
     tag?: string;
     search?: string;
   } = {}): Promise<WorkflowListItem[]> {
+    const { where, params } = this.workflowListWhere(options);
+    const rows = this.queryAll<Omit<WorkflowRow, "workflow_json">>(
+      `SELECT id, name, schema_version, workflow_version, created_at, updated_at, tags_json, project_id, folder_id
+       FROM workflows
+       ${where}
+       ORDER BY updated_at DESC`,
+      params
+    );
+    return filterWorkflowsByTag(rows.map(workflowListItemFromRow), options.tag);
+  }
+
+  async listWorkflowsPage(options: Parameters<Store["listWorkflowsPage"]>[0]): ReturnType<Store["listWorkflowsPage"]> {
+    const { where, params } = this.workflowListWhere(options);
+    const select = `SELECT id, name, schema_version, workflow_version, created_at, updated_at, tags_json, project_id, folder_id
+       FROM workflows
+       ${where}
+       ORDER BY updated_at DESC, id ASC`;
+    if (options.tag && options.tag.trim()) {
+      // The tag is matched on the parsed tag list, as listWorkflows does, so this filter runs here.
+      const matched = filterWorkflowsByTag(this.queryAll<Omit<WorkflowRow, "workflow_json">>(select, params).map(workflowListItemFromRow), options.tag);
+      return { items: matched.slice(options.offset, options.offset + options.limit), total: matched.length };
+    }
+    const count = this.queryOne<{ count: unknown }>(`SELECT COUNT(*) AS count FROM workflows ${where}`, params);
+    const rows = this.queryAll<Omit<WorkflowRow, "workflow_json">>(`${select} LIMIT ? OFFSET ?`, [...params, options.limit, options.offset]);
+    return { items: rows.map(workflowListItemFromRow), total: toNumber(count?.count ?? 0) };
+  }
+
+  private workflowListWhere(options: { projectId?: string; folderId?: string | null; search?: string; workflowIds?: string[] }): { where: string; params: BindParams } {
     const clauses: string[] = [];
     const params: BindParams = [];
     if (options.projectId) {
@@ -4152,34 +4200,11 @@ export class SqliteStore implements Store {
       clauses.push(`LOWER(name) LIKE ?`);
       params.push(`%${options.search.trim().toLowerCase()}%`);
     }
-    const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
-    const rows = this.queryAll<Omit<WorkflowRow, "workflow_json">>(
-      `SELECT id, name, schema_version, workflow_version, created_at, updated_at, tags_json, project_id, folder_id
-       FROM workflows
-       ${where}
-       ORDER BY updated_at DESC`,
-      params
-    );
-
-    const mapped = rows.map((row) => ({
-      id: toString(row.id),
-      name: toString(row.name),
-      schemaVersion: toString(row.schema_version),
-      workflowVersion: toNumber(row.workflow_version),
-      createdAt: toString(row.created_at),
-      updatedAt: toString(row.updated_at),
-      tags: parseTagsJson(row.tags_json),
-      projectId: row.project_id ? toString(row.project_id) : DEFAULT_PROJECT_ID,
-      folderId: row.folder_id ? toString(row.folder_id) : undefined
-    }));
-
-    if (options.tag && options.tag.trim()) {
-      const needle = options.tag.trim().toLowerCase();
-      return mapped.filter((item) =>
-        (item.tags ?? []).some((tag) => tag.toLowerCase() === needle)
-      );
+    if (options.workflowIds) {
+      clauses.push(options.workflowIds.length > 0 ? `id IN (${options.workflowIds.map(() => "?").join(", ")})` : "1 = 0");
+      params.push(...options.workflowIds);
     }
-    return mapped;
+    return { where: clauses.length ? `WHERE ${clauses.join(" AND ")}` : "", params };
   }
 
   async getWorkflow(id: string): Promise<Workflow | null> {
@@ -4651,6 +4676,24 @@ export class SqliteStore implements Store {
       createdAt: toString(row.created_at),
       updatedAt: toString(row.updated_at)
     }));
+  }
+
+  async listUsersPage(options: Parameters<Store["listUsersPage"]>[0]): ReturnType<Store["listUsersPage"]> {
+    const count = this.queryOne<{ count: unknown }>(`SELECT COUNT(*) AS count FROM users`);
+    const rows = this.queryAll<UserRow>(
+      `SELECT id, email, password_hash, role, created_at, updated_at FROM users ORDER BY created_at DESC, id ASC LIMIT ? OFFSET ?`,
+      [options.limit, options.offset]
+    );
+    return {
+      items: rows.map((row) => ({
+        id: toString(row.id),
+        email: toString(row.email),
+        role: toString(row.role),
+        createdAt: toString(row.created_at),
+        updatedAt: toString(row.updated_at)
+      })),
+      total: toNumber(count?.count ?? 0)
+    };
   }
 
   async updateUserRole(id: string, role: string): Promise<boolean> {

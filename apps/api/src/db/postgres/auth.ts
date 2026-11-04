@@ -127,6 +127,18 @@ export async function listUsers(ctx: PgContext): Promise<Array<{
   }));
 }
 
+export async function listUsersPage(ctx: PgContext, options: Parameters<Store["listUsersPage"]>[0]): ReturnType<Store["listUsersPage"]> {
+  const count = await ctx.queryOne<{ count: string }>(`SELECT COUNT(*) AS count FROM users`);
+  const rows = await ctx.query<{ id: string; email: string; role: string; created_at: string; updated_at: string }>(
+    `SELECT id, email, role, created_at, updated_at FROM users ORDER BY created_at DESC, id ASC LIMIT $1 OFFSET $2`,
+    [options.limit, options.offset]
+  );
+  return {
+    items: rows.map((r) => ({ id: r.id, email: r.email, role: r.role, createdAt: r.created_at, updatedAt: r.updated_at })),
+    total: count ? toNum(count.count) : 0
+  };
+}
+
 export async function updateUserRole(ctx: PgContext, id: string, role: string): Promise<boolean> {
   const existing = await ctx.store.getUserById(id);
   if (!existing) return false;
