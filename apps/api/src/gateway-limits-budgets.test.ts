@@ -643,9 +643,20 @@ describe("a block budget refuses runs from every trigger", () => {
     ];
     for (const response of refusedResponses) {
       expect(response.statusCode, `${response.statusCode} ${response.body}`).toBe(402);
-      expect(response.json()).toMatchObject({ error: "budget_exceeded", budgetId, message: 'Budget "Deployment cap" exceeded for the current month.', limit: 10, currentUsage: 50 });
+      expect(response.json()).toMatchObject({ error: "budget_exceeded", budgetId, message: 'Budget "Deployment cap" exceeded for the current month.' });
       expect(Number(response.headers["retry-after"])).toBeGreaterThan(0);
     }
+    // N2-M1: the webhook, chat and form callers are anonymous and see no amounts; the admin API callers do.
+    const anonymous = new Set([0, 1, 4, 5]);
+    refusedResponses.forEach((response, index) => {
+      const body = response.json<Record<string, unknown>>();
+      if (anonymous.has(index)) {
+        expect(body, `anonymous ${index}`).not.toHaveProperty("limit");
+        expect(body, `anonymous ${index}`).not.toHaveProperty("currentUsage");
+      } else {
+        expect(body, `admin ${index}`).toMatchObject({ limit: 10, currentUsage: 50 });
+      }
+    });
     expect((await runs(store)).length).toBe(runsBefore);
   });
 
@@ -666,6 +677,24 @@ describe("a block budget refuses runs from every trigger", () => {
     expect(writes).toHaveBeenCalledTimes(2);
     const [row] = (await runs(store)).filter((run) => run.workflowId === "wf-fast");
     expect((await store.getExecutionHistory(row!.id))?.output).toMatchObject({ refusedFires: 2 });
+  });
+
+  it("N2-L2: a failed refused-run write does not start the one-minute wait", async () => {
+    const fixture = await overGlobalBudget();
+    const { store } = fixture.context;
+    await store.upsertWorkflow(triggerWorkflow("wf-flaky", "schedule_trigger"));
+    const real = store.recordBudgetRefusedRun.bind(store);
+    const writes = vi.spyOn(store, "recordBudgetRefusedRun").mockRejectedValueOnce(new Error("disk full"));
+    const fire = async () => {
+      const at = new Date().toISOString();
+      await fixture.context.schedule!({ workflowId: "wf-flaky", workflowName: "flaky", scheduleNodeId: "start", cronExpression: "* * * * *", timezone: "UTC", firedAt: at, scheduledFor: at });
+    };
+    await fire();
+    expect((await runs(store)).filter((run) => run.workflowId === "wf-flaky")).toHaveLength(0);
+    writes.mockImplementation(real);
+    await fire();
+    expect(writes).toHaveBeenCalledTimes(2);
+    expect((await runs(store)).filter((run) => run.workflowId === "wf-flaky")).toHaveLength(1);
   });
 
   it("records one failed run per schedule and budget period; later refused fires only count on it (D13)", async () => {

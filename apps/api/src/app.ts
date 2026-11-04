@@ -3271,6 +3271,19 @@ export async function createApp(
    * request.
    */
   const refusedRunsNoted = new Set<string>();
+  /** True only for a request that authenticates (API key or session) as an admin; any failure counts as not admin. */
+  const requestIsAdmin = async (request: FastifyRequest): Promise<boolean> => {
+    try {
+      const apiKeyUser = await authenticateApiKey(request.headers as Record<string, unknown>);
+      if (apiKeyUser) return apiKeyUser.role === "admin";
+      const sessionId = getSessionIdFromRequest(request);
+      if (!sessionId) return false;
+      const user = await authService.getSessionUser(sessionId, await getRequestSession(request, sessionId).catch(() => undefined));
+      return user?.role === "admin";
+    } catch {
+      return false;
+    }
+  };
   const noteRefusedHttpRun = async (error: BudgetExceededError, request: FastifyRequest): Promise<void> => {
     if (!error.run) return;
     const key = JSON.stringify([error.run.workflowId, error.run.triggerType, error.budget.id, error.periodStart]);
@@ -3357,6 +3370,8 @@ export async function createApp(
         );
       }
     } catch (writeError) {
+      // The write failed, so the next refusal must try again rather than wait out the minute.
+      refusedCounterWrites.delete(executionId);
       app.log.warn({ executionId, error: writeError instanceof Error ? writeError.message : String(writeError) }, "Could not record a run a budget refused");
     }
     return { workflowId: spec.run.workflow.id, executionId, status: "error", startedAt: now, completedAt: now, nodeResults: [], error: message };
@@ -14117,7 +14132,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     }
   });
 
-  app.setErrorHandler((error, _request, reply) => {
+  app.setErrorHandler(async (error, _request, reply) => {
     const message = error instanceof Error ? error.message : "Unknown error";
     const statusCode = typeof (error as { statusCode?: unknown }).statusCode === "number"
       ? Number((error as { statusCode?: unknown }).statusCode)
@@ -14177,12 +14192,14 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     if (error instanceof BudgetExceededError) {
       void noteRefusedHttpRun(error, _request);
       reply.header("retry-after", String(retryAfterSeconds(error.budget.period)));
+      // Amounts (the cap and the spend) go only to an authenticated admin: anonymous webhook, chat and form callers
+      // and every other role get the short message, as in a client's budgets view.
+      const adminCaller = await requestIsAdmin(_request);
       reply.code(402).send({
         error: "budget_exceeded",
         message: error.message,
         budgetId: error.budget.id,
-        currentUsage: error.current,
-        limit: error.limit,
+        ...(adminCaller ? { currentUsage: error.current, limit: error.limit } : {}),
         periodStart: error.periodStart
       });
       return;
