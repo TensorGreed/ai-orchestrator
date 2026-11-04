@@ -1,16 +1,28 @@
 /**
  * 12.6 — governance of MCP gateway toolsets and clients, shown on the objects themselves.
  *
- * `GatewayGuardPicker` picks the Guard profile that checks a toolset's or client's tool calls (none by default). `ClientGovernance` is the client's Governance section: one row per setting, so later settings (limits,
- * budgets) add a row. Admins change them; everyone else reads them.
+ * `GatewayGuardPicker` picks the Guard profile that checks a toolset's or client's tool calls (none by default).
+ * `GatewayRateLimitEditor` sets an optional rate limit (a client's own, or a toolset's default for each client).
+ * `ClientGovernance` is the client's Governance section: one row per setting (Guard, rate limit, budgets). Admins
+ * change them; everyone else reads them.
  */
 
 import { useEffect, useState, type ReactNode } from "react";
-import { GUARD_DESTINATION_RULES_PROFILE_ID, type GuardProfileSummary, type GuardResolutionView } from "@ai-orchestrator/shared";
+import {
+  GUARD_DESTINATION_RULES_PROFILE_ID,
+  MCP_GATEWAY_RATE_LIMIT_MAX,
+  type GuardProfileSummary,
+  type GuardResolutionView,
+  type McpClientBudgetUsage,
+  type McpGatewayRateLimit
+} from "@ai-orchestrator/shared";
 import {
   ApiError,
   type GuardGatewayBindingInput,
+  type McpClientView,
   fetchGuardClientBinding,
+  fetchMcpClientBudgets,
+  updateMcpClient,
   fetchGuardProfile,
   fetchGuardProfiles,
   fetchGuardToolsetBinding,
@@ -213,12 +225,247 @@ export function GovernanceRow({ title, children }: { title: string; children: Re
   );
 }
 
+type RateLimitField = keyof McpGatewayRateLimit;
+
+const RATE_LIMIT_FIELDS: Array<{ field: RateLimitField; label: string }> = [
+  { field: "requestsPerMinute", label: "Calls per minute" },
+  { field: "burst", label: "Burst" },
+  { field: "maxConcurrent", label: "Calls at once" }
+];
+
+const RATE_LIMIT_HELP: Record<Scope, string> = {
+  client: "Caps this client's tool calls on every toolset and replaces the toolset default entirely. Leave a field empty for no limit there.",
+  toolset: "Caps each client's calls to this toolset. A client's own limit replaces this default entirely. Leave a field empty for no limit there."
+};
+
+/** Words for a rate limit: "60 calls per minute (burst 10), 2 at once", or "No limit". */
+export function describeRateLimit(limit: McpGatewayRateLimit | null | undefined): string {
+  if (!limit || (limit.requestsPerMinute === null && limit.maxConcurrent === null)) return "No limit";
+  const parts: string[] = [];
+  if (limit.requestsPerMinute !== null) parts.push(`${limit.requestsPerMinute} calls per minute${limit.burst !== null ? ` (burst ${limit.burst})` : ""}`);
+  if (limit.maxConcurrent !== null) parts.push(`${limit.maxConcurrent} at once`);
+  return parts.join(", ");
+}
+
+type Draft = Record<RateLimitField, string>;
+
+function toDraft(limit: McpGatewayRateLimit | null | undefined): Draft {
+  return {
+    requestsPerMinute: limit?.requestsPerMinute != null ? String(limit.requestsPerMinute) : "",
+    burst: limit?.burst != null ? String(limit.burst) : "",
+    maxConcurrent: limit?.maxConcurrent != null ? String(limit.maxConcurrent) : ""
+  };
+}
+
+/** The limit a draft asks for, or an error to show (empty field = no limit there; all empty = no limit). */
+export function parseRateLimitDraft(draft: Draft): { limit: McpGatewayRateLimit | null } | { error: string } {
+  const values: Partial<Record<RateLimitField, number | null>> = {};
+  for (const { field, label } of RATE_LIMIT_FIELDS) {
+    const text = draft[field].trim();
+    if (!text) {
+      values[field] = null;
+      continue;
+    }
+    const value = Number(text);
+    if (!Number.isInteger(value) || value < 1 || value > MCP_GATEWAY_RATE_LIMIT_MAX[field]) {
+      return { error: `${label} must be a whole number from 1 to ${MCP_GATEWAY_RATE_LIMIT_MAX[field]}.` };
+    }
+    values[field] = value;
+  }
+  if (values.burst !== null && values.requestsPerMinute === null) return { error: "Burst needs calls per minute." };
+  if (values.requestsPerMinute === null && values.maxConcurrent === null) return { limit: null };
+  return { limit: { requestsPerMinute: values.requestsPerMinute ?? null, burst: values.burst ?? null, maxConcurrent: values.maxConcurrent ?? null } };
+}
+
+/** An optional rate limit: admins edit it, everyone else reads it. */
+export function GatewayRateLimitEditor({
+  scope,
+  id,
+  value,
+  isAdmin,
+  onSave
+}: {
+  scope: Scope;
+  id: string;
+  value: McpGatewayRateLimit | null | undefined;
+  isAdmin: boolean;
+  onSave: (limit: McpGatewayRateLimit | null) => Promise<McpGatewayRateLimit | null>;
+}) {
+  const [draft, setDraft] = useState<Draft>(() => toDraft(value));
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [saved, setSaved] = useState(false);
+
+  useEffect(() => {
+    setDraft(toDraft(value));
+  }, [value]);
+
+  const helpId = `gateway-rate-limit-help-${scope}-${id}`;
+  const dirty = RATE_LIMIT_FIELDS.some(({ field }) => draft[field].trim() !== toDraft(value)[field]);
+  const apply = async () => {
+    const parsed = parseRateLimitDraft(draft);
+    if ("error" in parsed) {
+      setError(parsed.error);
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    setSaved(false);
+    try {
+      setDraft(toDraft(await onSave(parsed.limit)));
+      setSaved(true);
+    } catch (err) {
+      setError(formatError(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="mcp-gw-rate-limit" data-testid={`gateway-rate-limit-${scope}`}>
+      {error && <div className="settings-error">{error}</div>}
+      {isAdmin ? (
+        <div className="mcp-gw-guard-row">
+          {RATE_LIMIT_FIELDS.map(({ field, label }) => (
+            <label key={field}>
+              {label}
+              <input
+                type="number"
+                min={1}
+                max={MCP_GATEWAY_RATE_LIMIT_MAX[field]}
+                inputMode="numeric"
+                placeholder="No limit"
+                value={draft[field]}
+                onChange={(event) => {
+                  const next = event.target.value;
+                  setDraft((current) => ({ ...current, [field]: next }));
+                  setSaved(false);
+                }}
+                disabled={busy}
+                aria-describedby={helpId}
+              />
+            </label>
+          ))}
+          <button type="button" className="pg-btn small" onClick={() => void apply()} disabled={busy || !dirty}>
+            Save
+          </button>
+          {saved && <span className="kb-subtle">Saved</span>}
+        </div>
+      ) : (
+        <p>
+          Rate limit: <strong>{describeRateLimit(value)}</strong>
+        </p>
+      )}
+      <small id={helpId} className="kb-subtle">
+        {RATE_LIMIT_HELP[scope]}
+      </small>
+    </div>
+  );
+}
+
+function formatBudgetAmount(value: number, limitType: McpClientBudgetUsage["limitType"]): string {
+  if (limitType === "usd") return `$${value.toFixed(2)}`;
+  const tokens = Math.round(value);
+  return `${tokens.toLocaleString()} ${tokens === 1 ? "token" : "tokens"}`;
+}
+
+/**
+ * Every budget that applies to the client (its own, its toolsets' projects', the deployment's), each labelled by scope,
+ * with what it counted this period; one that refuses the client's calls now says so. Budgets are set in Settings,
+ * FinOps.
+ */
+export function ClientBudgets({ clientId }: { clientId: string }) {
+  const [budgets, setBudgets] = useState<McpClientBudgetUsage[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setError(null);
+    setBudgets(null);
+    fetchMcpClientBudgets(clientId)
+      .then((result) => {
+        if (!cancelled) setBudgets(result.budgets);
+      })
+      .catch((err) => {
+        if (!cancelled) setError(formatError(err));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [clientId]);
+
+  return (
+    <div className="mcp-gw-budgets" data-testid="gateway-client-budgets">
+      {error && <div className="settings-error">{error}</div>}
+      {budgets === null && !error && <p className="kb-subtle">Loading…</p>}
+      {budgets && budgets.length === 0 && <p className="kb-subtle">No budget applies to this client.</p>}
+      {budgets && budgets.length > 0 && (
+        <ul className="mcp-gw-budget-list">
+          {budgets.map((budget) => {
+            const amounts = budget.limitValue !== undefined && budget.current !== undefined ? { cap: budget.limitValue, spent: budget.current } : null;
+            const pct = amounts && amounts.cap > 0 ? Math.min(100, Math.round((amounts.spent / amounts.cap) * 100)) : 0;
+            return (
+              <li key={budget.budgetId} data-refusing={budget.refusing ? "true" : undefined}>
+                <span className="kb-subtle">{budget.scopeLabel}</span>
+                {" · "}
+                <strong>{budget.name}</strong>
+                {": "}
+                {amounts
+                  ? `${formatBudgetAmount(amounts.spent, budget.limitType)} of ${formatBudgetAmount(amounts.cap, budget.limitType)} this ${budget.period} (${pct}%)`
+                  : `per ${budget.period}`}
+                {" · "}
+                {budget.action === "block" ? "blocks calls when used up" : "warns only"}
+                {!budget.enabled && " · off"}
+                {budget.refusing && (
+                  <>
+                    {" · "}
+                    <strong className="mcp-gw-budget-refusing">Used up: refusing this client's calls</strong>
+                  </>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+      <small className="kb-subtle">Spend of the runs and model sampling this client's calls use. Set budgets in Settings, FinOps.</small>
+    </div>
+  );
+}
+
 /** The client's Governance section. Each setting is a row; add new settings as rows. */
-export function ClientGovernance({ clientId, isAdmin, active }: { clientId: string; isAdmin: boolean; active: boolean }) {
+export function ClientGovernance({
+  clientId,
+  isAdmin,
+  active,
+  rateLimit = null,
+  onClientChange
+}: {
+  clientId: string;
+  isAdmin: boolean;
+  active: boolean;
+  rateLimit?: McpGatewayRateLimit | null;
+  onClientChange?: (client: McpClientView) => void;
+}) {
   return (
     <section className="mcp-client-usage mcp-governance" aria-label="Client governance">
       <GovernanceRow title="Guard">
         <GatewayGuardPicker scope="client" id={clientId} isAdmin={isAdmin && active} />
+      </GovernanceRow>
+      <GovernanceRow title="Rate limit">
+        <GatewayRateLimitEditor
+          scope="client"
+          id={clientId}
+          value={rateLimit}
+          isAdmin={isAdmin && active}
+          onSave={async (limit) => {
+            const result = await updateMcpClient(clientId, { rateLimit: limit });
+            onClientChange?.(result.client);
+            return result.client.rateLimit;
+          }}
+        />
+      </GovernanceRow>
+      <GovernanceRow title="Budgets">
+        <ClientBudgets clientId={clientId} />
       </GovernanceRow>
     </section>
   );

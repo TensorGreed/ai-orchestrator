@@ -1,3 +1,4 @@
+import type { GatewayRunUsage, McpGatewayRateLimit } from "./gateway-limits";
 import type {
   McpCredentialMode,
   McpDelegatedFallback,
@@ -526,6 +527,11 @@ export interface WorkflowExecutionState {
    * resumed run applies it again. Written and read only by the API; absent for every other run.
    */
   gatewayGuard?: GatewayGuardStack;
+  /**
+   * 12.6 — the gateway client and toolset of a run a gateway call started: the resumed part's usage is charged to
+   * them too. Written and read only by the API; absent for every other run.
+   */
+  gatewayUsage?: GatewayRunUsage;
   /**
    * Phase 16 — the run's data labels, beside `nodeOutputs`: the input's
    * labels, every completed node's labels, and whether labels are tracked
@@ -1836,6 +1842,10 @@ export interface McpToolset {
    * calls are then checked without labels, as before.
    */
   trackSessionLabels: boolean;
+  /**
+   * 12.6 — the default rate limit for each client of this toolset (a client's own limit replaces it); null = none.
+   */
+  rateLimit: McpGatewayRateLimit | null;
   members: McpToolsetMember[];
   createdBy: string | null;
   createdAt: string;
@@ -1885,6 +1895,8 @@ export interface McpClient {
   lastUsedAt: string | null;
   revokedAt: string | null;
   createdAt: string;
+  /** 12.6 — the client's own rate limit (replaces its toolsets' defaults); null = none. */
+  rateLimit: McpGatewayRateLimit | null;
 }
 
 /** One tool a toolset exposes, as an MCP client would list it. */

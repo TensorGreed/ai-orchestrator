@@ -128,7 +128,8 @@ describe("MCP client policy subject", () => {
     expiresAt: null,
     lastUsedAt: null,
     revokedAt: null,
-    createdAt: ""
+    createdAt: "",
+    rateLimit: null
   };
 
   it("caps the client's role at its creator's current role and falls back to viewer without a creator", async () => {

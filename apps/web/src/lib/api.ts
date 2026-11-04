@@ -100,6 +100,8 @@ import type {
   ImportReport,
   LLMProviderConfig,
   McpClient,
+  McpClientBudgetUsage,
+  McpGatewayRateLimit,
   McpGatewaySessionView,
   McpGatewayHiddenToolView,
   McpGatewayToolView,
@@ -2095,7 +2097,7 @@ export async function fetchUsagePricing() {
 // Phase 8.3 — Budgets
 // ---------------------------------------------------------------------------
 
-export type BudgetScopeType = "global" | "project" | "workflow" | "user";
+export type BudgetScopeType = "global" | "project" | "workflow" | "user" | "mcp_client";
 export type BudgetPeriod = "day" | "week" | "month";
 export type BudgetLimitType = "usd" | "tokens";
 export type BudgetAction = "warn" | "block";
@@ -3389,8 +3391,13 @@ export interface McpToolsetInput {
   enabled?: boolean;
   /** 12.2 — "Track outside content per session". */
   trackSessionLabels?: boolean;
+  /** 12.6 — the default rate limit for each client of the toolset (admins only); null removes it. */
+  rateLimit?: McpGatewayRateLimitInput | null;
   members?: McpToolsetMemberSpec[];
 }
+
+/** 12.6 — a gateway rate limit as sent: any field may be left out (no limit there). */
+export type McpGatewayRateLimitInput = Partial<McpGatewayRateLimit>;
 
 export interface McpToolsetPreview {
   toolsetId: string;
@@ -3469,6 +3476,19 @@ export async function createMcpClient(payload: {
     method: "POST",
     body: JSON.stringify(payload)
   });
+}
+
+/** 12.6 — renames a client or sets its rate limit (admins only); null removes the limit. */
+export async function updateMcpClient(id: string, patch: { name?: string; rateLimit?: McpGatewayRateLimitInput | null }) {
+  return apiRequest<{ client: McpClientView }>(`/api/mcp/clients/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    body: JSON.stringify(patch)
+  });
+}
+
+/** 12.6 — the budgets scoped to a client, with what each counted this period. */
+export async function fetchMcpClientBudgets(id: string) {
+  return apiRequest<{ clientId: string; budgets: McpClientBudgetUsage[] }>(`/api/mcp/clients/${encodeURIComponent(id)}/budgets`);
 }
 
 export async function revokeMcpClient(id: string) {

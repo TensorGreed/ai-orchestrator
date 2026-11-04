@@ -177,6 +177,12 @@ export interface ReplayServiceOptions {
   execute: (input: ReplayExecutionInput, actor: SafeUser) => Promise<ReplayExecutionResult>;
   /** Phase 15.3 — the deployment's providers: lenient model replays call them on a tape miss. */
   providerRegistry?: ProviderRegistry;
+  /**
+   * 12.6 (D12) — a replay that may call models or tools live (live models, a lenient model tape, live-read nodes or
+   * servers) is admitted like a run: this throws BudgetExceededError when a used-up `block` budget applies. Asked
+   * before anything runs; the error reaches the caller (HTTP 402 on the replay route). Tape-only replays are not asked.
+   */
+  admitLive?: (input: { workflow: Workflow; actor: SafeUser }) => Promise<void>;
   /** Phase 15.3 — what `live_read_only` MCP servers need to read from the live server. */
   liveReads?: OfflineReplayOptions["liveReads"];
   /**
@@ -198,6 +204,19 @@ function durationOf(result: ReplayExecutionResult): number | null {
 }
 
 export class ReplayService {
+  /**
+   * 12.6 (D12) — whether a replay may call a model or a tool live: live models, a lenient model tape (a miss calls the
+   * live model), live-read nodes, or a server answered live. Only a strict model tape with every MCP call from the
+   * cassette is tape-only.
+   */
+  static mayCallLive(models: ReplayModelMode, mcpMode: ReplayMcpMode, overrides: Pick<ReplayCandidateOverrides, "mcpServers" | "liveReadNodes"> | null): boolean {
+    if (models === "live") return true;
+    // A model tape replays in the MCP mode: lenient calls the live model on a miss.
+    if (mcpMode === "lenient") return true;
+    if ((overrides?.liveReadNodes ?? []).length > 0) return true;
+    return Object.values(overrides?.mcpServers ?? {}).some((mode) => mode === "live_read_only");
+  }
+
   constructor(private readonly options: ReplayServiceOptions) {}
 
   /**
@@ -438,6 +457,11 @@ export class ReplayService {
       } else {
         preflight.push({ kind: "no_model_tape", nodeId: null, message: "Model replay is not available on this server.", blocking: true });
       }
+    }
+
+    // 12.6 (D12) — live calls spend like a run: a used-up block budget refuses the replay before it starts.
+    if (!preflight.some((warning) => warning.blocking) && ReplayService.mayCallLive(models, mcpMode, overrides)) {
+      await this.options.admitLive?.({ workflow: candidate.workflow, actor });
     }
 
     let result: ReplayExecutionResult;

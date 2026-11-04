@@ -52,6 +52,7 @@ import type {
   ReplayCaptureStatus,
   ReplayGoldenBadge
 } from "@ai-orchestrator/shared";
+import { parseStoredGatewayRateLimit, type BudgetScopeType, type McpGatewayRateLimit } from "@ai-orchestrator/shared";
 import { DESTINATION_KINDS, DESTINATION_TIERS, type DataDestinationRow, DEFAULT_PROJECT_ID, GUARD_SIMULATION_JOB_DATASET_PREFIX, MCP_POLICY_KINDS, MCP_POLICY_ROLES, MCP_TOOL_HINT_CONDITIONS, REPLAY_CAPTURE_API_KEY_FILTER, REPLAY_CAPTURE_STATUSES } from "@ai-orchestrator/shared";
 import {
   mapMcpGatewayApproval,
@@ -457,7 +458,7 @@ interface LogStreamDestinationRow {
 export interface BudgetRecord {
   id: string;
   name: string;
-  scopeType: "global" | "project" | "workflow" | "user";
+  scopeType: BudgetScopeType;
   scopeId: string | null;
   period: "day" | "week" | "month";
   limitType: "usd" | "tokens";
@@ -807,6 +808,7 @@ interface McpToolsetRow {
   project_id: string | null;
   enabled: number;
   track_session_labels?: number | null;
+  rate_limit_json?: string | null;
   created_by: string | null;
   created_at: string;
   updated_at: string;
@@ -835,6 +837,7 @@ interface McpClientRow {
   last_used_at: string | null;
   revoked_at: string | null;
   created_at: string;
+  rate_limit_json?: string | null;
 }
 
 /** A client row including the token hash; only the credential check reads the hash. */
@@ -866,6 +869,7 @@ function mapMcpToolset(row: McpToolsetRow, members: McpToolsetMember[]): McpTool
     projectId: row.project_id ? toString(row.project_id) : null,
     enabled: toNumber(row.enabled) === 1,
     trackSessionLabels: toNumber(row.track_session_labels ?? 0) === 1,
+    rateLimit: parseStoredGatewayRateLimit(row.rate_limit_json ?? null),
     members,
     createdBy: row.created_by ? toString(row.created_by) : null,
     createdAt: toString(row.created_at),
@@ -888,7 +892,8 @@ function mapMcpClient(row: McpClientRow): McpClientSecretRecord {
     expiresAt: row.expires_at ? toString(row.expires_at) : null,
     lastUsedAt: row.last_used_at ? toString(row.last_used_at) : null,
     revokedAt: row.revoked_at ? toString(row.revoked_at) : null,
-    createdAt: toString(row.created_at)
+    createdAt: toString(row.created_at),
+    rateLimit: parseStoredGatewayRateLimit(row.rate_limit_json ?? null)
   };
 }
 
@@ -3998,6 +4003,12 @@ export class SqliteStore implements Store {
     // 12.6 (v53) — tool rules scoped to gateway toolsets, and the toolset on gateway telemetry rows.
     this.ensureColumn("mcp_tool_policies", "toolset_ids_json", "TEXT NOT NULL", "'[]'");
     this.ensureColumn("mcp_tool_calls", "toolset_id", "TEXT");
+    // 12.6 (v54) — gateway usage per client and toolset; optional rate limits on gateway clients and toolsets.
+    this.ensureColumn("usage_events", "client_id", "TEXT");
+    this.ensureColumn("usage_events", "toolset_id", "TEXT");
+    this.exec(`CREATE INDEX IF NOT EXISTS idx_usage_events_client_created ON usage_events(client_id, created_at DESC)`);
+    this.ensureColumn("mcp_clients", "rate_limit_json", "TEXT");
+    this.ensureColumn("mcp_toolsets", "rate_limit_json", "TEXT");
 
     this.exec(`CREATE INDEX IF NOT EXISTS idx_workflows_project_id ON workflows(project_id)`);
     this.exec(`CREATE INDEX IF NOT EXISTS idx_workflows_folder_id ON workflows(folder_id)`);
@@ -5256,6 +5267,47 @@ export class SqliteStore implements Store {
       return this.db.transaction(() => this.queueClaimHeldSync(fence) && this.writeExecutionHistory(input, options))();
     }
     return this.writeExecutionHistory(input, options);
+  }
+
+  /** 12.6 (D13) — see Store.recordBudgetRefusedRun: one row per trigger per budget period, its counter bumped. */
+  async recordBudgetRefusedRun(input: Parameters<Store["recordBudgetRefusedRun"]>[0]): Promise<{ created: boolean; refusedFires: number }> {
+    const outcome = this.db.transaction(() => {
+      const existing = this.db.prepare("SELECT output_json FROM execution_history WHERE id = ?").get(input.id) as { output_json: string | null } | undefined;
+      if (existing) {
+        let previous: Record<string, unknown> = {};
+        try {
+          const parsed = existing.output_json ? JSON.parse(existing.output_json) : null;
+          if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) previous = parsed as Record<string, unknown>;
+        } catch {
+          previous = {};
+        }
+        const before = Number(previous.refusedFires);
+        const refusedFires = (Number.isFinite(before) ? before : 1) + 1;
+        this.db
+          .prepare("UPDATE execution_history SET output_json = ?, started_at = ?, completed_at = ? WHERE id = ?")
+          .run(JSON.stringify({ ...previous, refusedFires, lastRefusedAt: input.at }), input.at, input.at, input.id);
+        return { created: false, refusedFires };
+      }
+      this.writeExecutionHistory({
+        id: input.id,
+        workflowId: input.workflowId,
+        ...(input.workflowName !== undefined ? { workflowName: input.workflowName } : {}),
+        status: "error",
+        startedAt: input.at,
+        completedAt: input.at,
+        durationMs: 0,
+        triggerType: input.triggerType,
+        ...(input.triggeredBy !== undefined ? { triggeredBy: input.triggeredBy } : {}),
+        ...(input.inputJson !== undefined ? { inputJson: input.inputJson } : {}),
+        outputJson: { budgetId: input.budgetId, periodStart: input.periodStart, refusedFires: 1, firstRefusedAt: input.at, lastRefusedAt: input.at },
+        nodeResultsJson: [],
+        ...(input.customData !== undefined ? { customData: input.customData } : {}),
+        error: input.error
+      });
+      return { created: true, refusedFires: 1 };
+    })();
+    this.persist();
+    return outcome;
   }
 
   private writeExecutionHistory(
@@ -10529,6 +10581,8 @@ export class SqliteStore implements Store {
     userEmail?: string | null;
     projectId?: string | null;
     triggerType?: string | null;
+    clientId?: string | null;
+    toolsetId?: string | null;
     status: string;
     inputTokens: number;
     outputTokens: number;
@@ -10545,8 +10599,8 @@ export class SqliteStore implements Store {
          id, execution_id, workflow_id, workflow_name, user_id, user_email,
          project_id, trigger_type, status, input_tokens, output_tokens,
          cached_input_tokens, total_tokens, cost_usd, llm_call_count,
-         duration_ms, providers_json, created_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         duration_ms, providers_json, created_at, client_id, toolset_id
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         input.id,
         input.executionId,
@@ -10565,10 +10619,53 @@ export class SqliteStore implements Store {
         input.llmCallCount,
         input.durationMs,
         JSON.stringify(input.providers),
-        input.createdAt ?? new Date().toISOString()
+        input.createdAt ?? new Date().toISOString(),
+        input.clientId ?? null,
+        input.toolsetId ?? null
       ]
     );
     this.persist();
+  }
+
+  async queryBudgetUsage(input: Parameters<Store["queryBudgetUsage"]>[0]): Promise<{ costUsd: number; totalTokens: number }> {
+    const runFilters: string[] = ["created_at >= ?", "created_at < ?"];
+    const runParams: Array<string | number> = [input.from, input.to];
+    const callFilters: string[] = ["source = 'gateway'", "started_at >= ?", "started_at < ?"];
+    const callParams: Array<string | number> = [input.from, input.to];
+    let gatewaySampling = true;
+    if (input.workflowId) { runFilters.push("workflow_id = ?"); runParams.push(input.workflowId); gatewaySampling = false; }
+    if (input.userKey) { runFilters.push("(user_id = ? OR user_email = ?)"); runParams.push(input.userKey, input.userKey); gatewaySampling = false; }
+    if (input.projectId) {
+      runFilters.push("(project_id = ? OR toolset_id IN (SELECT id FROM mcp_toolsets WHERE project_id = ?))");
+      runParams.push(input.projectId, input.projectId);
+      callFilters.push("toolset_id IN (SELECT id FROM mcp_toolsets WHERE project_id = ?)");
+      callParams.push(input.projectId);
+    }
+    if (input.clientId) {
+      // Pre-v54 rows by the client's current name, from its creation on (see Store.queryBudgetUsage).
+      runFilters.push(`(client_id = ? OR (client_id IS NULL AND EXISTS (
+        SELECT 1 FROM mcp_clients c WHERE c.id = ? AND usage_events.user_id = 'mcp-client:' || c.name AND usage_events.created_at >= c.created_at
+      )))`);
+      runParams.push(input.clientId, input.clientId);
+      callFilters.push("client_id = ?");
+      callParams.push(input.clientId);
+    }
+    const runs = this.queryOne<{ cost: number | null; tt: number | null }>(
+      `SELECT SUM(cost_usd) AS cost, SUM(total_tokens) AS tt FROM usage_events WHERE ${runFilters.join(" AND ")}`,
+      runParams
+    );
+    let costUsd = Number(runs?.cost ?? 0);
+    let totalTokens = toNumber(runs?.tt ?? 0);
+    if (gatewaySampling) {
+      const calls = this.queryOne<{ cost: number | null; tt: number | null }>(
+        `SELECT SUM(estimated_cost_usd) AS cost, SUM(COALESCE(sampling_input_tokens, 0) + COALESCE(sampling_output_tokens, 0)) AS tt
+           FROM mcp_tool_calls WHERE ${callFilters.join(" AND ")} AND sampling_requests > 0`,
+        callParams
+      );
+      costUsd += Number(calls?.cost ?? 0);
+      totalTokens += toNumber(calls?.tt ?? 0);
+    }
+    return { costUsd, totalTokens };
   }
 
   /**
@@ -10932,7 +11029,7 @@ export class SqliteStore implements Store {
   async createBudget(input: {
     id: string;
     name: string;
-    scopeType: "global" | "project" | "workflow" | "user";
+    scopeType: BudgetScopeType;
     scopeId?: string | null;
     period: "day" | "week" | "month";
     limitType: "usd" | "tokens";
@@ -12828,15 +12925,16 @@ export class SqliteStore implements Store {
     projectId: string | null;
     enabled: boolean;
     trackSessionLabels?: boolean;
+    rateLimit?: McpGatewayRateLimit | null;
     createdBy: string | null;
     members: McpToolsetMemberSpec[];
   }): Promise<McpToolset> {
     const now = new Date().toISOString();
     this.db.transaction(() => {
       this.exec(
-        `INSERT INTO mcp_toolsets (id, slug, name, description, project_id, enabled, track_session_labels, created_by, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [input.id, input.slug, input.name, input.description, input.projectId, input.enabled ? 1 : 0, input.trackSessionLabels ? 1 : 0, input.createdBy, now, now]
+        `INSERT INTO mcp_toolsets (id, slug, name, description, project_id, enabled, track_session_labels, rate_limit_json, created_by, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [input.id, input.slug, input.name, input.description, input.projectId, input.enabled ? 1 : 0, input.trackSessionLabels ? 1 : 0, input.rateLimit ? JSON.stringify(input.rateLimit) : null, input.createdBy, now, now]
       );
       this.writeMcpToolsetMembers(input.id, input.members);
     })();
@@ -12852,6 +12950,7 @@ export class SqliteStore implements Store {
       projectId?: string | null;
       enabled?: boolean;
       trackSessionLabels?: boolean;
+      rateLimit?: McpGatewayRateLimit | null;
       members?: Array<McpToolsetMemberSpec & { id?: string }>;
     }
   ): Promise<McpToolset | null> {
@@ -12864,6 +12963,7 @@ export class SqliteStore implements Store {
     if (patch.projectId !== undefined) { fields.push("project_id = ?"); params.push(patch.projectId); }
     if (patch.enabled !== undefined) { fields.push("enabled = ?"); params.push(patch.enabled ? 1 : 0); }
     if (patch.trackSessionLabels !== undefined) { fields.push("track_session_labels = ?"); params.push(patch.trackSessionLabels ? 1 : 0); }
+    if (patch.rateLimit !== undefined) { fields.push("rate_limit_json = ?"); params.push(patch.rateLimit ? JSON.stringify(patch.rateLimit) : null); }
     fields.push("updated_at = ?");
     params.push(new Date().toISOString());
     params.push(id);
@@ -12964,6 +13064,16 @@ export class SqliteStore implements Store {
 
   async touchMcpClient(id: string, at: string): Promise<void> {
     this.exec(`UPDATE mcp_clients SET last_used_at = ? WHERE id = ?`, [at, id]);
+  }
+
+  async updateMcpClient(id: string, patch: { name?: string; rateLimit?: McpGatewayRateLimit | null }): Promise<McpClient | null> {
+    if (!this.getMcpClientSync(id)) return null;
+    const fields: string[] = [];
+    const params: Array<string | null> = [];
+    if (patch.name !== undefined) { fields.push("name = ?"); params.push(patch.name); }
+    if (patch.rateLimit !== undefined) { fields.push("rate_limit_json = ?"); params.push(patch.rateLimit ? JSON.stringify(patch.rateLimit) : null); }
+    if (fields.length > 0) this.exec(`UPDATE mcp_clients SET ${fields.join(", ")} WHERE id = ?`, [...params, id]);
+    return this.getMcpClientSync(id);
   }
 
   // ---------------------------------------------------------------------------

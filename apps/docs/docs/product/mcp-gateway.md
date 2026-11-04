@@ -1,5 +1,5 @@
 ---
-description: "L2M as an MCP server: serve workflows and registered tools to other MCP clients through toolsets with per-client tokens, under the same tool policy and telemetry."
+description: "L2M as an MCP server: serve workflows and tools to MCP clients through toolsets with per-client tokens, tool policy, budgets and optional rate limits."
 ---
 
 # MCP gateway
@@ -141,6 +141,39 @@ Every check is recorded in Guard's events with the placement `gateway`, the tool
 
 Changing a toolset's or client's profile is audited as `guard.binding.updated`. Deleting a toolset or revoking a client removes its profile choice.
 
+## Budgets and rate limits
+
+Both are optional. With no budget and no rate limit, the gateway answers as before and reads neither for a call.
+
+### Budgets
+
+[Budgets](./budgets.md) count gateway usage:
+
+- **Per client.** A budget with the scope **MCP client** counts that client's usage: the runs its workflow tool calls start, and the model sampling its server tool calls use (the sampling cost is priced with the model prices and stored on the call's telemetry row). Runs recorded before this release name the client only by name: they still count, by the client's current name and from its creation on. Renaming a client drops those older runs from its budgets, and two clients that existed under the same name before this release both count them. A run that waits on an approval stays the client's after the approval.
+- **Per project.** A toolset's gateway usage also counts toward the budget of the toolset's **policy project**, even when its workflows live in other projects.
+- **Global.** A global budget counts every run and all gateway sampling.
+
+Before the tool policy runs, each `tools/call` is checked against the `block` budgets of the client, the toolset's project and the deployment, and for a workflow tool also the budgets of the workflow and its project. A workflow tool's run is not checked again when it starts. When one is used up, the call is refused with JSON-RPC error `-32032` and a message such as `Budget "IDE agents" exceeded for the current month.` Its `data` carries the `budgetId`, the `period`, its start and `retryAfterSeconds` (until the period ends). The server is not called and no run starts. A `warn` budget never refuses a call; it sends its alerts as for runs.
+
+A call that starts under the cap may take it over, and calls sent together (one batch, or several sessions at once) are checked before any of them ends, so usage can pass a budget by about one batch. The next call is refused. Budgets are read from a copy each instance refreshes every 2 seconds and right after an edit on that instance, so a budget created on another instance applies within 2 seconds. If the budgets cannot be read at all, calls are refused with a tool error rather than sent unchecked.
+
+A client's **Governance** section lists every budget that applies to it, each labelled by scope (**This client**, **Project …**, **Deployment**), with what it counted this period; a used-up block budget is marked as refusing the client's calls. Budgets themselves are set in **Settings**, **FinOps**.
+
+### Rate limits
+
+An admin can cap how fast a client calls tools:
+
+- **Calls per minute**, with an optional **Burst**: how many calls may arrive at once before the per-minute rate applies (the per-minute number when empty).
+- **Calls at once**: calls in flight at the same time.
+
+Set a client's own limit in its **Governance** section, or a **Default rate limit** in a toolset's detail. A toolset's default applies to each of its clients separately, for its calls through that toolset. A client's own limit replaces the toolset default as a whole (fields are not mixed) and is one allowance across all its toolsets. Leave a field empty for no limit there.
+
+Every `tools/call` counts, including each call of a batch. A call over the limit is refused at once, never queued, with JSON-RPC error `-32029` (retry later). Its `data` has the `reason` (`rate_limited` or `concurrency_limited`) and `retryAfterMs`. Refusals are audited as `mcp_gateway.rate_limited` at most once per session per minute, and write no telemetry row.
+
+In [cluster mode](../operations/cluster.md) the per-minute count is shared by all instances through the database, the same way as the sign-in and webhook rate limits: a client gets its allowance once, not once per instance. The shared count uses fixed windows: with a burst up to the per-minute rate, a window of `60 s × burst / calls per minute` holding the burst; with a larger burst, one minute holding the per-minute number (so a burst above one minute's calls applies on a single instance only, and a client that used its allowance waits at most a minute). The window is rounded up to a whole millisecond, so at extreme rates (above about 60,000 calls a minute with a burst of 1) the shared limit is lower than the one you set, and the database round trip is longer than the window anyway. As with any fixed window, up to twice a window's calls can pass around a window boundary. If the database cannot be reached, each instance counts on its own until it can. **Calls at once** is counted per instance, because a session's calls run on the instance that holds the session.
+
+Changing a client's name or rate limit is audited as `mcp_client.updated`; a toolset's default is part of `mcp_toolset.updated`.
+
 ## Telemetry and audit
 
 Every `tools/call` writes a row to `mcp_tool_calls` with `source = gateway`, the client id and the toolset id, so the server page's Tools table and the client's Usage panel include it. Workflow tool calls are recorded under the adapter id `workflow` with the run's execution id.
@@ -158,7 +191,8 @@ Audit events:
 | `mcp_toolset.session_tracking_changed` | **Track outside content per session** was turned on or off. |
 | `mcp_gateway.guard_blocked` | Guard blocked a server tool call's arguments or result (with the client, the tool, the channel, the finding kinds and the profiles; never the content). |
 | `mcp_gateway.session_labels_raised` | A session on a tracking toolset carried outside content or sensitive data for the first time (once per session, with the client and the tool). |
-| `mcp_client.created` / `revoked` | Client changes. Metadata carries the token prefix, never the token. |
+| `mcp_client.created` / `updated` / `revoked` | Client changes (updated: its name or rate limit, with the previous values). Metadata carries the token prefix, never the token. |
+| `mcp_gateway.rate_limited` / `budget_blocked` | A rate limit or a used-up block budget refused a call (once per session per minute). |
 
 `MCP_GATEWAY_AUDIT_READ_ONLY_CALLS` is `first_per_session` by default: the first call to each read-only tool in a session is audited, later ones only in telemetry. Set `all` to audit every call or `none` to rely on telemetry for read-only tools.
 

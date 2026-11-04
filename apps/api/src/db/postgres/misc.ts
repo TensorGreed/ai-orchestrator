@@ -284,8 +284,8 @@ export async function writeUsageEvent(ctx: PgContext, input: Parameters<Store["w
        id, execution_id, workflow_id, workflow_name, user_id, user_email,
        project_id, trigger_type, status, input_tokens, output_tokens,
        cached_input_tokens, total_tokens, cost_usd, llm_call_count,
-       duration_ms, providers_json, created_at
-     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)`,
+       duration_ms, providers_json, created_at, client_id, toolset_id
+     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)`,
     [
       input.id,
       input.executionId,
@@ -304,7 +304,9 @@ export async function writeUsageEvent(ctx: PgContext, input: Parameters<Store["w
       input.llmCallCount,
       input.durationMs,
       JSON.stringify(input.providers),
-      input.createdAt ?? new Date().toISOString()
+      input.createdAt ?? new Date().toISOString(),
+      input.clientId ?? null,
+      input.toolsetId ?? null
     ]
   );
 }
@@ -478,6 +480,47 @@ export async function queryUsageTotals(ctx: PgContext, input: Parameters<Store["
   if (input.projectId) { params.push(input.projectId); filters.push(`project_id = $${params.length}`); }
   const row = await ctx.queryOne<AggregateRow>(`SELECT ${AGGREGATES} FROM usage_events WHERE ${filters.join(" AND ")}`, params);
   return mapAggregates(row ?? { execs: 0, ti: 0, to: 0, ci: 0, tt: 0, cost: 0, calls: 0, avgd: 0 });
+}
+
+export async function queryBudgetUsage(ctx: PgContext, input: Parameters<Store["queryBudgetUsage"]>[0]): ReturnType<Store["queryBudgetUsage"]> {
+  const runParams: Array<string | number> = [input.from, input.to];
+  const runFilters: string[] = ["created_at >= $1::timestamptz", "created_at < $2::timestamptz"];
+  const callParams: Array<string | number> = [input.from, input.to];
+  const callFilters: string[] = ["source = 'gateway'", "started_at >= $1::timestamptz", "started_at < $2::timestamptz"];
+  let gatewaySampling = true;
+  if (input.workflowId) { runParams.push(input.workflowId); runFilters.push(`workflow_id = $${runParams.length}`); gatewaySampling = false; }
+  if (input.userKey) { runParams.push(input.userKey); runFilters.push(`(user_id = $${runParams.length} OR user_email = $${runParams.length})`); gatewaySampling = false; }
+  if (input.projectId) {
+    runParams.push(input.projectId);
+    runFilters.push(`(project_id = $${runParams.length} OR toolset_id IN (SELECT id FROM mcp_toolsets WHERE project_id = $${runParams.length}))`);
+    callParams.push(input.projectId);
+    callFilters.push(`toolset_id IN (SELECT id FROM mcp_toolsets WHERE project_id = $${callParams.length})`);
+  }
+  if (input.clientId) {
+    // Pre-v54 rows by the client's current name, from its creation on (see Store.queryBudgetUsage).
+    runParams.push(input.clientId);
+    runFilters.push(`(client_id = $${runParams.length} OR (client_id IS NULL AND EXISTS (
+      SELECT 1 FROM mcp_clients c WHERE c.id = $${runParams.length} AND usage_events.user_id = 'mcp-client:' || c.name AND usage_events.created_at >= c.created_at
+    )))`);
+    callParams.push(input.clientId);
+    callFilters.push(`client_id = $${callParams.length}`);
+  }
+  const runs = await ctx.queryOne<{ cost: unknown; tt: unknown }>(
+    `SELECT SUM(cost_usd) AS cost, SUM(total_tokens) AS tt FROM usage_events WHERE ${runFilters.join(" AND ")}`,
+    runParams
+  );
+  let costUsd = Number(runs?.cost ?? 0);
+  let totalTokens = toNum(runs?.tt ?? 0);
+  if (gatewaySampling) {
+    const calls = await ctx.queryOne<{ cost: unknown; tt: unknown }>(
+      `SELECT SUM(estimated_cost_usd) AS cost, SUM(COALESCE(sampling_input_tokens, 0) + COALESCE(sampling_output_tokens, 0)) AS tt
+         FROM mcp_tool_calls WHERE ${callFilters.join(" AND ")} AND sampling_requests > 0`,
+      callParams
+    );
+    costUsd += Number(calls?.cost ?? 0);
+    totalTokens += toNum(calls?.tt ?? 0);
+  }
+  return { costUsd, totalTokens };
 }
 
 export async function listUsageEvents(ctx: PgContext, input: Parameters<Store["listUsageEvents"]>[0] = {}): ReturnType<Store["listUsageEvents"]> {

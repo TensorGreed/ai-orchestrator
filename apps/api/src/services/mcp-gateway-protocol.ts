@@ -50,7 +50,13 @@ export const JSON_RPC_ERRORS = {
    * arguments). Identical retries are refused until `data.retryAfter` (the decision time plus the approval window)
    * and open no new request.
    */
-  approvalRejected: -32031
+  approvalRejected: -32031,
+  /**
+   * 12.6 — implementation-defined server error: a `block` budget that applies to this call (the client's, the
+   * toolset's project's, the workflow's or the global one) is used up for its period. `data.budgetId` names it and
+   * `data.retryAfterSeconds` says when its period ends.
+   */
+  budgetExceeded: -32032
 } as const;
 
 export type JsonRpcId = string | number;

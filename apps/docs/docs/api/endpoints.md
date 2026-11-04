@@ -106,7 +106,7 @@ MCP endpoint (client token, `Authorization: Bearer l2m_mcp_...`):
 Toolsets:
 
 - `GET /api/mcp/toolsets` (builder)
-- `POST /api/mcp/toolsets` (admin; `{ name, slug?, description?, projectId?, enabled?, trackSessionLabels?, members? }`)
+- `POST /api/mcp/toolsets` (admin; `{ name, slug?, description?, projectId?, enabled?, trackSessionLabels?, rateLimit?, members? }`; `rateLimit` is the default for each client: `{ requestsPerMinute?, burst?, maxConcurrent? }`, null for none)
 - `GET /api/mcp/toolsets/candidates` (builder; workflows with an Expose as MCP Tool trigger)
 - `GET /api/mcp/toolsets/:id` (builder)
 - `PUT /api/mcp/toolsets/:id` (admin; `members` replaces the member list)
@@ -119,7 +119,9 @@ Clients:
 
 - `GET /api/mcp/clients` (builder; status, effective role, open sessions, 7-day calls and errors)
 - `POST /api/mcp/clients` (admin; `{ name, toolsetIds, role, expiresAt? }`; the response carries the token once)
+- `PATCH /api/mcp/clients/:id` (admin; `{ name?, rateLimit? }`, nothing else; `rateLimit: null` removes the client's limit)
 - `POST /api/mcp/clients/:id/revoke` (admin)
+- `GET /api/mcp/clients/:id/budgets` (builder; every budget that applies to the client, its own, its toolsets' projects' and the global ones, each labelled by scope, with what it counted this period and whether it refuses the client's calls now)
 - `GET /api/mcp/clients/:id/usage?window=24h|7d|30d` (builder)
 - `GET /api/mcp/clients/:id/sessions` (builder): the client's open sessions on the answering instance, with the labels each collected on a toolset that tracks outside content per session
 

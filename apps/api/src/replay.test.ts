@@ -536,8 +536,11 @@ describe("golden runs with side effects stubbed", { timeout: 30_000 }, () => {
     expect(run.status).toBe("success");
     const golden = await saveGolden(context, builder.cookie, run.executionId);
 
-    // A one-token budget: any spend crosses it and would post to the budget's channel.
-    await context.store.createBudget({ id: "bud-1", name: "Tiny", scopeType: "workflow", scopeId: "wf-agent", period: "day", limitType: "tokens", limitValue: 1, action: "warn", notifyChannel: `${counter.base}/budget` });
+    // A one-token budget: any spend crosses it and would post to the budget's channel. Created through the route, so
+    // the instance's budget copy has it at once (12.6).
+    const admin = await login(context, "admin");
+    const budget = await call(context, "POST", "/api/budgets", admin.cookie, { name: "Tiny", scopeType: "workflow", scopeId: "wf-agent", period: "day", limitType: "tokens", limitValue: 1, action: "warn", notifyChannel: `${counter.base}/budget` });
+    expect(budget.statusCode, budget.body).toBe(200);
     const result = await replay(context, builder.cookie, golden.id);
     expect(result.verdict, JSON.stringify(result.reasons)).toBe("pass");
     await sleep(300);

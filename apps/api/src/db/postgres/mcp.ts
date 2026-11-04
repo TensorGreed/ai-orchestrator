@@ -11,7 +11,7 @@
  *   members and gateway clients. `seq` never changes on UPDATE or VACUUM, unlike `xmin` / `ctid`.
  */
 import { randomUUID } from "node:crypto";
-import { parseRecordedCallLabels } from "@ai-orchestrator/shared";
+import { parseRecordedCallLabels, parseStoredGatewayRateLimit } from "@ai-orchestrator/shared";
 import {
   MCP_POLICY_KINDS,
   MCP_POLICY_ROLES,
@@ -376,6 +376,7 @@ function mapMcpToolset(row: Row, members: McpToolsetMember[]): McpToolset {
     projectId: row.project_id ? toStr(row.project_id) : null,
     enabled: toNum(row.enabled) === 1,
     trackSessionLabels: toNum(row.track_session_labels ?? 0) === 1,
+    rateLimit: parseStoredGatewayRateLimit(row.rate_limit_json ?? null),
     members,
     createdBy: row.created_by ? toStr(row.created_by) : null,
     createdAt: toStr(row.created_at),
@@ -398,7 +399,8 @@ function mapMcpClient(row: Row): McpClientSecretRecord {
     expiresAt: row.expires_at ? toStr(row.expires_at) : null,
     lastUsedAt: row.last_used_at ? toStr(row.last_used_at) : null,
     revokedAt: row.revoked_at ? toStr(row.revoked_at) : null,
-    createdAt: toStr(row.created_at)
+    createdAt: toStr(row.created_at),
+    rateLimit: parseStoredGatewayRateLimit(row.rate_limit_json ?? null)
   };
 }
 
@@ -1524,9 +1526,9 @@ export async function createMcpToolset(ctx: PgContext, ...[input]: Parameters<St
   const now = new Date().toISOString();
   return ctx.withTransaction(async (client) => {
     await client.query(
-      `INSERT INTO mcp_toolsets (id, slug, name, description, project_id, enabled, track_session_labels, created_by, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
-      [input.id, input.slug, input.name, input.description, input.projectId, input.enabled ? 1 : 0, input.trackSessionLabels ? 1 : 0, input.createdBy, now, now]
+      `INSERT INTO mcp_toolsets (id, slug, name, description, project_id, enabled, track_session_labels, rate_limit_json, created_by, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+      [input.id, input.slug, input.name, input.description, input.projectId, input.enabled ? 1 : 0, input.trackSessionLabels ? 1 : 0, input.rateLimit ? JSON.stringify(input.rateLimit) : null, input.createdBy, now, now]
     );
     await writeMcpToolsetMembers(client, input.id, input.members);
     return (await getMcpToolsetOn(client, input.id))!;
@@ -1545,6 +1547,7 @@ export async function updateMcpToolset(ctx: PgContext, ...[id, patch]: Parameter
     if (patch.projectId !== undefined) { fields.push("project_id = ?"); params.push(patch.projectId); }
     if (patch.enabled !== undefined) { fields.push("enabled = ?"); params.push(patch.enabled ? 1 : 0); }
     if (patch.trackSessionLabels !== undefined) { fields.push("track_session_labels = ?"); params.push(patch.trackSessionLabels ? 1 : 0); }
+    if (patch.rateLimit !== undefined) { fields.push("rate_limit_json = ?"); params.push(patch.rateLimit ? JSON.stringify(patch.rateLimit) : null); }
     fields.push("updated_at = ?");
     params.push(new Date().toISOString());
     params.push(id);
@@ -1626,4 +1629,16 @@ export async function revokeMcpClient(ctx: PgContext, ...[id]: Parameters<Store[
 
 export async function touchMcpClient(ctx: PgContext, ...[id, at]: Parameters<Store["touchMcpClient"]>): ReturnType<Store["touchMcpClient"]> {
   await ctx.execute(`UPDATE mcp_clients SET last_used_at = $1 WHERE id = $2`, [at, id]);
+}
+
+export async function updateMcpClient(ctx: PgContext, ...[id, patch]: Parameters<Store["updateMcpClient"]>): ReturnType<Store["updateMcpClient"]> {
+  const fields: string[] = [];
+  const params: Array<string | null> = [];
+  if (patch.name !== undefined) { fields.push("name = ?"); params.push(patch.name); }
+  if (patch.rateLimit !== undefined) { fields.push("rate_limit_json = ?"); params.push(patch.rateLimit ? JSON.stringify(patch.rateLimit) : null); }
+  if (fields.length > 0) {
+    params.push(id);
+    await ctx.execute(`UPDATE mcp_clients SET ${numbered(fields).join(", ")} WHERE id = $${params.length}`, params);
+  }
+  return getMcpClientOn(ctx.pool, id);
 }

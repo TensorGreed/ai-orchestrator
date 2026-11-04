@@ -17,6 +17,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import {
   GATEWAY_GUARD_CUSTOM_DATA_KEY,
+  GATEWAY_USAGE_CUSTOM_DATA_KEY,
   parseGatewayGuardStack,
   unionDataLabels,
   workflowExecuteRequestSchema,
@@ -72,6 +73,11 @@ export interface ExecutionRoutesDeps {
   productionMissing: (reply: FastifyReply, workflowId: string) => Promise<{ error: string }>;
   releaseService: Pick<ReleaseService, "productionRefusal">;
   budgetService: Pick<BudgetService, "checkExecution">;
+  /**
+   * 12.6 (D8) — the budget admission every run goes through (throws BudgetExceededError: HTTP 402). The streamed
+   * route asks it before it starts the stream, so the refusal is a 402 and not an event.
+   */
+  admitRunBudget: (run: { workflow: Workflow; triggerType: string; triggeredBy?: string; policyActor?: SafeUser | null }) => Promise<void>;
   prepareWorkflowExecutionPayload: (
     payload: WorkflowExecutePayload,
     reply: FastifyReply,
@@ -125,6 +131,7 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
     productionMissing,
     releaseService,
     budgetService,
+    admitRunBudget,
     prepareWorkflowExecutionPayload,
     auditRunAction,
     mcpCassetteService,
@@ -241,7 +248,8 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
       history: { requestInput: prepared.requestInput, customData: executionPayload.customData },
       // Phase 10.8 — "Record MCP calls": every MCP call of the run goes into a cassette.
       ...(parsed.data.record ? { cassette: { kind: "record" as const, source: "manual" as const, createdBy: user.email } } : {})
-    }, { pool: dispatchPoolOf(workflow) });
+    // The budgets were checked above (with the approaching-limit header).
+    }, { pool: dispatchPoolOf(workflow), admitted: true });
 
     if (result.status === "error") {
       reply.code(400);
@@ -282,6 +290,8 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
       return { error: "Source execution not found" };
     }
     const executionPayload = prepared.payload;
+    // 12.6 (D8) — a used-up block budget refuses the run with a 402 before the stream starts.
+    await admitRunBudget({ workflow, triggerType: executeTrigger, triggeredBy: user.email, policyActor: user });
 
     const executionId = crypto.randomUUID();
     await auditRunAction(request, user, "execution.started", { executionId, workflowId: workflow.id, projectId: workflow.projectId }, { triggerType: executeTrigger });
@@ -368,6 +378,7 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
         ...(parsed.data.record ? { cassette: { kind: "record" as const, source: "manual" as const, createdBy: user.email } } : {})
       }, {
         pool: dispatchPoolOf(workflow),
+        admitted: true,
         passthrough: {
           onNodeStart: (event) => {
             sendSseEvent("node_start", event);
@@ -646,8 +657,10 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
     const executionId = crypto.randomUUID();
     await auditRunAction(request, user, "execution.replayed", { executionId, workflowId: workflow.id, projectId: workflow.projectId }, { sourceExecutionId: source.id, cassetteId: cassette.id, mode });
     const storedInput = asRecord(source.input);
+    // 12.6 — a replay is not the gateway client's run: its usage is the replaying user's.
+    const { [GATEWAY_USAGE_CUSTOM_DATA_KEY]: _sourceUsage, ...sourceCustomData } = asRecord(source.customData);
     const customData = {
-      ...asRecord(source.customData),
+      ...sourceCustomData,
       mcpReplay: { sourceExecutionId: source.id, cassetteId: cassette.id, mode }
     };
     const sourceGatewayGuard = parseGatewayGuardStack(asRecord(source.customData)[GATEWAY_GUARD_CUSTOM_DATA_KEY]);

@@ -433,6 +433,10 @@ export class PostgresStore implements Store {
   async saveExecutionHistory(...args: Parameters<Store["saveExecutionHistory"]>): ReturnType<Store["saveExecutionHistory"]> {
     return executions.saveExecutionHistory(this.ctx, ...args);
   }
+
+  async recordBudgetRefusedRun(...args: Parameters<Store["recordBudgetRefusedRun"]>): ReturnType<Store["recordBudgetRefusedRun"]> {
+    return executions.recordBudgetRefusedRun(this.ctx, ...args);
+  }
   async listExecutionHistory(...args: Parameters<Store["listExecutionHistory"]>): ReturnType<Store["listExecutionHistory"]> {
     return executions.listExecutionHistory(this.ctx, ...args);
   }
@@ -896,6 +900,9 @@ export class PostgresStore implements Store {
   }
   async touchMcpClient(...args: Parameters<Store["touchMcpClient"]>): ReturnType<Store["touchMcpClient"]> {
     return mcp.touchMcpClient(this.ctx, ...args);
+  }
+  async updateMcpClient(...args: Parameters<Store["updateMcpClient"]>): ReturnType<Store["updateMcpClient"]> {
+    return mcp.updateMcpClient(this.ctx, ...args);
   }
   async listMcpToolCallsForExecution(...args: Parameters<Store["listMcpToolCallsForExecution"]>): ReturnType<Store["listMcpToolCallsForExecution"]> {
     return mcp.listMcpToolCallsForExecution(this.ctx, ...args);
@@ -1550,6 +1557,9 @@ export class PostgresStore implements Store {
   }
   async queryUsageTotals(...args: Parameters<Store["queryUsageTotals"]>): ReturnType<Store["queryUsageTotals"]> {
     return misc.queryUsageTotals(this.ctx, ...args);
+  }
+  async queryBudgetUsage(...args: Parameters<Store["queryBudgetUsage"]>): ReturnType<Store["queryBudgetUsage"]> {
+    return misc.queryBudgetUsage(this.ctx, ...args);
   }
   async listUsageEvents(...args: Parameters<Store["listUsageEvents"]>): ReturnType<Store["listUsageEvents"]> {
     return misc.listUsageEvents(this.ctx, ...args);

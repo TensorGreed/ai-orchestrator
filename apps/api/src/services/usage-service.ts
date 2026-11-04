@@ -107,6 +107,9 @@ export interface RecordExecutionInput {
   userEmail?: string | null;
   projectId?: string | null;
   triggerType?: string | null;
+  /** 12.6 — the gateway client and toolset whose tool call started the run (gateway runs only). */
+  clientId?: string | null;
+  toolsetId?: string | null;
   status: string;
   durationMs: number;
   /** Raw nodeResults map from the executor (Record<nodeId, output>). */
@@ -209,6 +212,8 @@ export class UsageService {
       userEmail: input.userEmail,
       projectId: input.projectId,
       triggerType: input.triggerType,
+      ...(input.clientId ? { clientId: input.clientId } : {}),
+      ...(input.toolsetId ? { toolsetId: input.toolsetId } : {}),
       status: input.status,
       inputTokens,
       outputTokens,
