@@ -244,6 +244,7 @@ export const openApiSpec = {
       get: {
         tags: ["Auth"],
         summary: "List API keys for current user (or all for admin)",
+        parameters: [{ $ref: "#/components/parameters/Page" }, { $ref: "#/components/parameters/PageSize" }],
         responses: { "200": { description: "API key list" } }
       },
       post: {
@@ -373,6 +374,90 @@ export const openApiSpec = {
       }
     },
 
+    // ── Users, invites and tags (roadmap 7.3) ──────────────────────────────
+    "/api/users": {
+      get: {
+        tags: ["Users"],
+        summary: "List users (admin); pending invited users carry pending and inviteExpiresAt",
+        parameters: [{ $ref: "#/components/parameters/Page" }, { $ref: "#/components/parameters/PageSize" }],
+        responses: { "200": { description: "User list" } }
+      }
+    },
+    "/api/users/invite": {
+      post: {
+        tags: ["Users"],
+        summary: "Invite a user by email (admin): a pending user and a one-time link",
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["email"],
+                properties: {
+                  email: { type: "string", format: "email" },
+                  role: { type: "string", enum: ["admin", "builder", "operator", "viewer"] },
+                  expiresInHours: { type: "integer", minimum: 1, maximum: 720 }
+                }
+              }
+            }
+          }
+        },
+        responses: {
+          "201": { description: "Invited; inviteUrl is present only when the link was not emailed" },
+          "200": { description: "A pending user invited again; its old link stops working" },
+          "409": { description: "An active account has this email" }
+        }
+      }
+    },
+    "/api/auth/invite/lookup": {
+      post: {
+        tags: ["Auth"],
+        summary: "The email and role of an invite link (public)",
+        requestBody: { required: true, content: { "application/json": { schema: { type: "object", required: ["token"], properties: { token: { type: "string" } } } } } },
+        responses: { "200": { description: "{ email, role, expiresAt }" }, "404": { description: "Used, expired or unknown link" } }
+      }
+    },
+    "/api/auth/invite/accept": {
+      post: {
+        tags: ["Auth"],
+        summary: "Accept an invite by choosing a password (public)",
+        requestBody: {
+          required: true,
+          content: { "application/json": { schema: { type: "object", required: ["token", "password"], properties: { token: { type: "string" }, password: { type: "string", minLength: 8 } } } } }
+        },
+        responses: { "200": { description: "{ ok, email }; sign in with the password next" }, "404": { description: "Used, expired or unknown link" } }
+      }
+    },
+    "/api/tags": {
+      get: {
+        tags: ["Workflows"],
+        summary: "List the tags workflows carry",
+        parameters: [{ $ref: "#/components/parameters/Page" }, { $ref: "#/components/parameters/PageSize" }],
+        responses: { "200": { description: "Tag list" } }
+      }
+    },
+    "/api/tags/{tag}": {
+      put: {
+        tags: ["Workflows"],
+        summary: "Rename a tag on every workflow that carries it (builder)",
+        parameters: [{ name: "tag", in: "path", required: true, schema: { type: "string" } }],
+        requestBody: { required: true, content: { "application/json": { schema: { type: "object", required: ["name"], properties: { name: { type: "string", maxLength: 100 } } } } } },
+        responses: {
+          "200": { description: "{ ok, tag, previous, renamedInWorkflows }" },
+          "403": { description: "The tag is on a workflow you cannot edit" },
+          "404": { description: "No workflow has the tag" },
+          "409": { description: "Another tag has the name" }
+        }
+      },
+      delete: {
+        tags: ["Workflows"],
+        summary: "Remove a tag from every workflow (admin)",
+        parameters: [{ name: "tag", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "{ ok, tag, removedFromWorkflows }" } }
+      }
+    },
+
     // ── Workflows ──────────────────────────────────────────────────────────
     "/api/workflows": {
       get: {
@@ -382,7 +467,8 @@ export const openApiSpec = {
           { name: "projectId", in: "query", schema: { type: "string" } },
           { name: "folderId", in: "query", schema: { type: "string" } },
           { name: "tag", in: "query", schema: { type: "string" } },
-          { name: "search", in: "query", schema: { type: "string" } }
+          { name: "search", in: "query", schema: { type: "string" } },
+          { $ref: "#/components/parameters/Page" }, { $ref: "#/components/parameters/PageSize" }
         ],
         responses: { "200": { description: "Workflow list" } }
       },
@@ -793,6 +879,7 @@ export const openApiSpec = {
       get: {
         tags: ["Projects"],
         summary: "List all projects",
+        parameters: [{ $ref: "#/components/parameters/Page" }, { $ref: "#/components/parameters/PageSize" }],
         responses: { "200": { description: "Project list" } }
       },
       post: {
@@ -846,7 +933,7 @@ export const openApiSpec = {
       get: {
         tags: ["Projects"],
         summary: "List folders",
-        parameters: [{ name: "projectId", in: "query", schema: { type: "string" } }],
+        parameters: [{ name: "projectId", in: "query", schema: { type: "string" } }, { $ref: "#/components/parameters/Page" }, { $ref: "#/components/parameters/PageSize" }],
         responses: { "200": { description: "Folder list" } }
       },
       post: {
@@ -876,7 +963,7 @@ export const openApiSpec = {
       get: {
         tags: ["Secrets"],
         summary: "List secrets (metadata only, never raw values)",
-        parameters: [{ name: "projectId", in: "query", schema: { type: "string" } }],
+        parameters: [{ name: "projectId", in: "query", schema: { type: "string" } }, { $ref: "#/components/parameters/Page" }, { $ref: "#/components/parameters/PageSize" }],
         responses: { "200": { description: "Secret metadata list" } }
       },
       post: {
@@ -954,7 +1041,7 @@ export const openApiSpec = {
       get: {
         tags: ["Variables"],
         summary: "List project-scoped variables",
-        parameters: [{ name: "projectId", in: "query", schema: { type: "string" } }],
+        parameters: [{ name: "projectId", in: "query", schema: { type: "string" } }, { $ref: "#/components/parameters/Page" }, { $ref: "#/components/parameters/PageSize" }],
         responses: { "200": { description: "Variable list" } }
       },
       post: {
@@ -1199,7 +1286,7 @@ export const openApiSpec = {
       get: {
         tags: ["MCP"],
         summary: "List registered MCP servers with status and probe latency (builder)",
-        parameters: [{ name: "projectId", in: "query", schema: { type: "string" } }],
+        parameters: [{ name: "projectId", in: "query", schema: { type: "string" } }, { $ref: "#/components/parameters/Page" }, { $ref: "#/components/parameters/PageSize" }],
         responses: { "200": { description: "Registered servers, available adapters and the default probe interval" } }
       },
       post: {
@@ -2055,7 +2142,8 @@ export const openApiSpec = {
         summary: "Datasets and golden sets you can read (viewers). A golden set has a workflowId.",
         parameters: [
           { name: "workflowId", in: "query", required: false, schema: { type: "string" } },
-          { name: "projectId", in: "query", required: false, schema: { type: "string" } }
+          { name: "projectId", in: "query", required: false, schema: { type: "string" } },
+          { $ref: "#/components/parameters/Page" }, { $ref: "#/components/parameters/PageSize" }
         ],
         responses: { "200": { description: "{ datasets: [{ id, name, workflowId, projectId, fixtureCount, goldenRunCount, ... }] }" } }
       },
@@ -2227,6 +2315,7 @@ export const openApiSpec = {
       get: {
         tags: ["MCP"],
         summary: "List MCP tool policy rules in evaluation order (builder)",
+        parameters: [{ $ref: "#/components/parameters/Page" }, { $ref: "#/components/parameters/PageSize" }],
         responses: { "200": { description: "Rules and the roles a rule can target" } }
       },
       post: {
@@ -2635,6 +2724,7 @@ export const openApiSpec = {
       get: {
         tags: ["LogStreaming"],
         summary: "List log streaming destinations",
+        parameters: [{ $ref: "#/components/parameters/Page" }, { $ref: "#/components/parameters/PageSize" }],
         responses: { "200": { description: "Destination list" } }
       },
       post: {
@@ -2683,7 +2773,7 @@ export const openApiSpec = {
       get: {
         tags: ["RBAC"],
         summary: "List custom roles",
-        parameters: [{ name: "projectId", in: "query", schema: { type: "string" } }],
+        parameters: [{ name: "projectId", in: "query", schema: { type: "string" } }, { $ref: "#/components/parameters/Page" }, { $ref: "#/components/parameters/PageSize" }],
         responses: { "200": { description: "Custom role list with available permissions" } }
       },
       post: {
@@ -2821,6 +2911,7 @@ export const openApiSpec = {
       get: {
         tags: ["MCP"],
         summary: "List MCP gateway toolsets with members, endpoint path and open sessions (builder)",
+        parameters: [{ $ref: "#/components/parameters/Page" }, { $ref: "#/components/parameters/PageSize" }],
         responses: { "200": { description: "Toolsets, the configured public base URL and supported protocol versions" } }
       },
       post: {
@@ -2928,6 +3019,7 @@ export const openApiSpec = {
       get: {
         tags: ["MCP"],
         summary: "List MCP client credentials with status, effective role and 7-day usage (builder). Never returns tokens.",
+        parameters: [{ $ref: "#/components/parameters/Page" }, { $ref: "#/components/parameters/PageSize" }],
         responses: { "200": { description: "Clients" } }
       },
       post: {
@@ -3071,6 +3163,21 @@ export const openApiSpec = {
     }
   },
   components: {
+    // Roadmap 7.3 — optional paging of list routes; without either parameter the route answers its usual list.
+    parameters: {
+      Page: {
+        name: "page",
+        in: "query" as const,
+        description: "Page number (from 1). With page or pageSize the answer is { items, total, page, pageSize }.",
+        schema: { type: "integer", minimum: 1 }
+      },
+      PageSize: {
+        name: "pageSize",
+        in: "query" as const,
+        description: "Items per page (default 20, at most 100).",
+        schema: { type: "integer", minimum: 1, maximum: 100 }
+      }
+    },
     securitySchemes: {
       sessionCookie: {
         type: "apiKey" as const,

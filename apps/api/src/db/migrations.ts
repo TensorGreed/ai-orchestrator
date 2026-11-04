@@ -2423,6 +2423,31 @@ export const MIGRATIONS: Migration[] = [
     down: `
       ALTER TABLE mcp_gateway_approvals DROP COLUMN IF EXISTS labels_json;
     `
+  },
+  {
+    version: 57,
+    description: "7.3 — deployment-level user invites",
+    // One row per invite of a pending user (a users row with an unusable password). Only the SHA-256 of the one-time
+    // token is kept. accepted_at is set once, when the invitee sets a password (or signs in with SSO). No foreign key,
+    // as on SQLite: deleteUser removes a user's invites in both stores.
+    up: `
+      CREATE TABLE IF NOT EXISTS user_invites (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        email TEXT NOT NULL,
+        role TEXT NOT NULL,
+        token_hash TEXT NOT NULL UNIQUE,
+        created_by TEXT,
+        created_at TIMESTAMPTZ NOT NULL,
+        expires_at TIMESTAMPTZ NOT NULL,
+        accepted_at TIMESTAMPTZ
+      );
+      CREATE INDEX IF NOT EXISTS idx_user_invites_user ON user_invites (user_id);
+    `,
+    down: `
+      DROP INDEX IF EXISTS idx_user_invites_user;
+      DROP TABLE IF EXISTS user_invites;
+    `
   }
 ];
 

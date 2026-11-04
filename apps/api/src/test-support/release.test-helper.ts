@@ -28,7 +28,7 @@ export interface ReleaseTestContext {
 
 export type ReleaseTestRole = "admin" | "builder" | "operator" | "viewer";
 
-export async function createReleaseTestContext(options: { scheduler?: boolean } = {}): Promise<ReleaseTestContext> {
+export async function createReleaseTestContext(options: { scheduler?: boolean; env?: Record<string, string> } = {}): Promise<ReleaseTestContext> {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-unpublish-"));
   const store = await openTestStore(path.join(tempDir, "orchestrator.db"));
   await store.ensureDefaultProject();
@@ -39,7 +39,8 @@ export async function createReleaseTestContext(options: { scheduler?: boolean } 
     COOKIE_SECURE: "false",
     RATE_LIMIT_ENABLED: "false",
     MCP_PROBE_INTERVAL_MS: "0",
-    GIT_SYNC_WORKDIR: path.join(tempDir, "sync")
+    GIT_SYNC_WORKDIR: path.join(tempDir, "sync"),
+    ...options.env
   });
   const secretService = new SecretService(store, config.SECRET_MASTER_KEY_BASE64);
   const authService = new AuthService(store, config.SESSION_TTL_HOURS);

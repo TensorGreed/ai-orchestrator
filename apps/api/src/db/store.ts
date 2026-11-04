@@ -322,6 +322,30 @@ export function mcpGatewayApprovalRetentionCutoff(now: string): string {
   return new Date(Date.parse(now) - MCP_GATEWAY_APPROVAL_RETENTION_MS).toISOString();
 }
 
+/** Roadmap 7.3 — a deployment-level user invite (the token itself is never stored, only its SHA-256). */
+export interface UserInviteRecord {
+  id: string;
+  userId: string;
+  email: string;
+  role: string;
+  createdBy: string | null;
+  createdAt: string;
+  expiresAt: string;
+  acceptedAt: string | null;
+}
+
+export interface UserInviteCreate {
+  inviteId: string;
+  /** The id a new pending user gets; an existing pending user keeps its own. */
+  userId: string;
+  email: string;
+  role: string;
+  tokenHash: string;
+  createdBy: string | null;
+  createdAt: string;
+  expiresAt: string;
+}
+
 export interface Store {
   // ---- Store lifecycle
 
@@ -1246,12 +1270,31 @@ export interface Store {
     tag?: string;
     search?: string;
   }): Promise<WorkflowListItem[]>;
+  /**
+   * Roadmap 7.3 — one page of listWorkflows' rows, newest change first with an id tiebreak, and the number of rows the
+   * filters match. `workflowIds` narrows to those workflows (an empty list matches nothing), before the page is cut.
+   */
+  listWorkflowsPage(options: {
+    projectId?: string;
+    folderId?: string | null;
+    tag?: string;
+    search?: string;
+    workflowIds?: string[];
+    limit: number;
+    offset: number;
+  }): Promise<{ items: WorkflowListItem[]; total: number }>;
   getWorkflow(id: string): Promise<Workflow | null>;
   /**
    * `options.createdBy` (a user id) is stored only when the row is first
    * inserted; later saves never change who created a workflow.
    */
   upsertWorkflow(workflow: Workflow, options?: { createdBy?: string | null }): Promise<Workflow>;
+  /**
+   * Replaces the tag `from` with `to` (removes it when `to` is null) on the given workflows, in one transaction that
+   * rewrites only the tags column (the workflow JSON is never touched, so a concurrent save is not overwritten).
+   * Returns the ids that carried the tag and were changed.
+   */
+  renameWorkflowTag(workflowIds: string[], from: string, to: string | null): Promise<string[]>;
   /** Phase 10.2 — user id of the workflow's creator, or null when unknown. */
   getWorkflowCreatedBy(id: string): Promise<string | null>;
   /**
@@ -1343,6 +1386,28 @@ export interface Store {
     createdAt: string;
     updatedAt: string;
   }>>;
+  /**
+   * Roadmap 7.3 — a deployment-level invite: a pending user (an unusable password, so it cannot sign in with one) and
+   * its one-time invite, written together. An email whose user still has an unaccepted invite (pending) is invited
+   * again: the user's role is set and its invites are replaced by this one. Null when an active user (no unaccepted
+   * invite) has the email, or another invite created the user meanwhile.
+   */
+  createUserInvite(input: UserInviteCreate): Promise<{ invite: UserInviteRecord; created: boolean } | null>;
+  /** Invites not accepted yet (expired ones included), oldest first. */
+  listOpenUserInvites(): Promise<UserInviteRecord[]>;
+  findUserInviteByTokenHash(tokenHash: string): Promise<UserInviteRecord | null>;
+  /**
+   * Accepts an invite once: when the invite of `tokenHash` is unaccepted and expires after `now`, marks it accepted
+   * and sets the user's password hash, in one transaction. Null otherwise (unknown, used, expired, user gone).
+   */
+  acceptUserInvite(input: { tokenHash: string; passwordHash: string; now: string }): Promise<{ id: string; email: string; role: string } | null>;
+  /** Marks the user's unaccepted invites accepted (the user signed in another way, for example SSO). */
+  closeUserInvites(userId: string, now: string): Promise<number>;
+  /** Roadmap 7.3 — one page of listUsers' rows (newest first, id tiebreak) and the number of users. */
+  listUsersPage(options: { limit: number; offset: number }): Promise<{
+    items: Array<{ id: string; email: string; role: string; createdAt: string; updatedAt: string }>;
+    total: number;
+  }>;
   updateUserRole(id: string, role: string): Promise<boolean>;
   deleteUser(id: string): Promise<boolean>;
   getSession(sessionId: string): Promise<{

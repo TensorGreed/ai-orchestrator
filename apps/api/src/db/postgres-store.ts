@@ -297,9 +297,16 @@ export class PostgresStore implements Store {
   async listWorkflows(...args: Parameters<Store["listWorkflows"]>): ReturnType<Store["listWorkflows"]> {
     return workflows.listWorkflows(this.ctx, ...args);
   }
+  async listWorkflowsPage(...args: Parameters<Store["listWorkflowsPage"]>): ReturnType<Store["listWorkflowsPage"]> {
+    return workflows.listWorkflowsPage(this.ctx, ...args);
+  }
   async getWorkflow(...args: Parameters<Store["getWorkflow"]>): ReturnType<Store["getWorkflow"]> {
     return workflows.getWorkflow(this.ctx, ...args);
   }
+  async renameWorkflowTag(...args: Parameters<Store["renameWorkflowTag"]>): ReturnType<Store["renameWorkflowTag"]> {
+    return workflows.renameWorkflowTag(this.ctx, ...args);
+  }
+
   async upsertWorkflow(...args: Parameters<Store["upsertWorkflow"]>): ReturnType<Store["upsertWorkflow"]> {
     return workflows.upsertWorkflow(this.ctx, ...args);
   }
@@ -367,6 +374,24 @@ export class PostgresStore implements Store {
   }
   async listUsers(...args: Parameters<Store["listUsers"]>): ReturnType<Store["listUsers"]> {
     return auth.listUsers(this.ctx, ...args);
+  }
+  async createUserInvite(...args: Parameters<Store["createUserInvite"]>): ReturnType<Store["createUserInvite"]> {
+    return auth.createUserInvite(this.ctx, ...args);
+  }
+  async listOpenUserInvites(...args: Parameters<Store["listOpenUserInvites"]>): ReturnType<Store["listOpenUserInvites"]> {
+    return auth.listOpenUserInvites(this.ctx, ...args);
+  }
+  async findUserInviteByTokenHash(...args: Parameters<Store["findUserInviteByTokenHash"]>): ReturnType<Store["findUserInviteByTokenHash"]> {
+    return auth.findUserInviteByTokenHash(this.ctx, ...args);
+  }
+  async acceptUserInvite(...args: Parameters<Store["acceptUserInvite"]>): ReturnType<Store["acceptUserInvite"]> {
+    return auth.acceptUserInvite(this.ctx, ...args);
+  }
+  async closeUserInvites(...args: Parameters<Store["closeUserInvites"]>): ReturnType<Store["closeUserInvites"]> {
+    return auth.closeUserInvites(this.ctx, ...args);
+  }
+  async listUsersPage(...args: Parameters<Store["listUsersPage"]>): ReturnType<Store["listUsersPage"]> {
+    return auth.listUsersPage(this.ctx, ...args);
   }
   async updateUserRole(...args: Parameters<Store["updateUserRole"]>): ReturnType<Store["updateUserRole"]> {
     return auth.updateUserRole(this.ctx, ...args);

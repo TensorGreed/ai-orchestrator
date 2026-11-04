@@ -11,12 +11,21 @@ import { gateStateForWrite } from "./release.js";
 import type { PgContext } from "./context.js";
 
 // Workflow methods
-export async function listWorkflows(ctx: PgContext, options: {
-  projectId?: string;
-  folderId?: string | null;
-  tag?: string;
-  search?: string;
-} = {}): Promise<WorkflowListItem[]> {
+type WorkflowListRow = {
+  id: string;
+  name: string;
+  schema_version: string;
+  workflow_version: number;
+  created_at: string;
+  updated_at: string;
+  tags_json: string | null;
+  project_id: string | null;
+  folder_id: string | null;
+};
+
+const WORKFLOW_LIST_COLUMNS = "id, name, schema_version, workflow_version, created_at, updated_at, tags_json, project_id, folder_id";
+
+function workflowListWhere(options: { projectId?: string; folderId?: string | null; search?: string; workflowIds?: string[] }): { where: string; params: unknown[] } {
   const clauses: string[] = [];
   const params: unknown[] = [];
   if (options.projectId) {
@@ -33,45 +42,86 @@ export async function listWorkflows(ctx: PgContext, options: {
     params.push(`%${options.search.trim().toLowerCase()}%`);
     clauses.push(`LOWER(name) LIKE $${params.length}`);
   }
-  const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
-  const rows = await ctx.query<{
-    id: string;
-    name: string;
-    schema_version: string;
-    workflow_version: number;
-    created_at: string;
-    updated_at: string;
-    tags_json: string | null;
-    project_id: string | null;
-    folder_id: string | null;
-  }>(
-    `SELECT id, name, schema_version, workflow_version, created_at, updated_at, tags_json, project_id, folder_id
+  if (options.workflowIds) {
+    if (options.workflowIds.length === 0) {
+      clauses.push("1 = 0");
+    } else {
+      params.push(options.workflowIds);
+      clauses.push(`id = ANY($${params.length}::text[])`);
+    }
+  }
+  return { where: clauses.length ? `WHERE ${clauses.join(" AND ")}` : "", params };
+}
+
+function workflowListItemFromRow(row: WorkflowListRow): WorkflowListItem {
+  return {
+    id: toStr(row.id),
+    name: toStr(row.name),
+    schemaVersion: toStr(row.schema_version),
+    workflowVersion: toNum(row.workflow_version),
+    createdAt: toStr(row.created_at),
+    updatedAt: toStr(row.updated_at),
+    tags: parseTagsJson(row.tags_json),
+    projectId: row.project_id ? toStr(row.project_id) : DEFAULT_PROJECT_ID,
+    folderId: row.folder_id ? toStr(row.folder_id) : undefined
+  };
+}
+
+function filterWorkflowsByTag(items: WorkflowListItem[], tag: string | undefined): WorkflowListItem[] {
+  if (!tag || !tag.trim()) return items;
+  const needle = tag.trim().toLowerCase();
+  return items.filter((item) => (item.tags ?? []).some((value) => value.toLowerCase() === needle));
+}
+
+export async function listWorkflows(ctx: PgContext, options: {
+  projectId?: string;
+  folderId?: string | null;
+  tag?: string;
+  search?: string;
+} = {}): Promise<WorkflowListItem[]> {
+  const { where, params } = workflowListWhere(options);
+  const rows = await ctx.query<WorkflowListRow>(
+    `SELECT ${WORKFLOW_LIST_COLUMNS}
        FROM workflows
        ${where}
        ORDER BY updated_at DESC`,
     params
   );
-  const mapped = rows.map((row) => {
-    const tags = parseTagsJson(row.tags_json);
-    return {
-      id: toStr(row.id),
-      name: toStr(row.name),
-      schemaVersion: toStr(row.schema_version),
-      workflowVersion: toNum(row.workflow_version),
-      createdAt: toStr(row.created_at),
-      updatedAt: toStr(row.updated_at),
-      tags,
-      projectId: row.project_id ? toStr(row.project_id) : DEFAULT_PROJECT_ID,
-      folderId: row.folder_id ? toStr(row.folder_id) : undefined
-    };
-  });
+  return filterWorkflowsByTag(rows.map(workflowListItemFromRow), options.tag);
+}
+
+export async function listWorkflowsPage(ctx: PgContext, options: Parameters<Store["listWorkflowsPage"]>[0]): ReturnType<Store["listWorkflowsPage"]> {
+  const { where, params } = workflowListWhere(options);
+  const select = `SELECT ${WORKFLOW_LIST_COLUMNS} FROM workflows ${where} ORDER BY updated_at DESC, id ASC`;
   if (options.tag && options.tag.trim()) {
-    const needle = options.tag.trim().toLowerCase();
-    return mapped.filter((item) =>
-      (item.tags ?? []).some((tag) => tag.toLowerCase() === needle)
-    );
+    // The tag is matched on the parsed tag list, as listWorkflows does, so this filter runs here.
+    const matched = filterWorkflowsByTag((await ctx.query<WorkflowListRow>(select, params)).map(workflowListItemFromRow), options.tag);
+    return { items: matched.slice(options.offset, options.offset + options.limit), total: matched.length };
   }
-  return mapped;
+  const count = await ctx.queryOne<{ count: string }>(`SELECT COUNT(*) AS count FROM workflows ${where}`, params);
+  const rows = await ctx.query<WorkflowListRow>(`${select} LIMIT $${params.length + 1} OFFSET $${params.length + 2}`, [...params, options.limit, options.offset]);
+  return { items: rows.map(workflowListItemFromRow), total: count ? toNum(count.count) : 0 };
+}
+
+export async function renameWorkflowTag(ctx: PgContext, workflowIds: string[], from: string, to: string | null): Promise<string[]> {
+  if (workflowIds.length === 0) return [];
+  return ctx.withTransaction(async (client) => {
+    // Rows are locked in id order, so two renames over the same workflows never wait on each other in a cycle.
+    const rows = await client.query<{ id: string; tags_json: string | null }>(
+      `SELECT id, tags_json FROM workflows WHERE id = ANY($1::text[]) ORDER BY id COLLATE "C" FOR UPDATE`,
+      [workflowIds]
+    );
+    const updatedAt = new Date().toISOString();
+    const changed: string[] = [];
+    for (const row of rows.rows) {
+      const tags = parseTagsJson(row.tags_json) ?? [];
+      if (!tags.includes(from)) continue;
+      const next = [...new Set(tags.flatMap((tag) => (tag === from ? (to === null ? [] : [to]) : [tag])))];
+      await client.query(`UPDATE workflows SET tags_json = $1, updated_at = $2 WHERE id = $3`, [JSON.stringify(next), updatedAt, row.id]);
+      changed.push(toStr(row.id));
+    }
+    return changed;
+  });
 }
 
 export async function getWorkflow(ctx: PgContext, id: string): Promise<Workflow | null> {

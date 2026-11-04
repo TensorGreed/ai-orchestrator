@@ -202,6 +202,7 @@ import { bindTriggerTrust, triggerTrustDenial, withoutTriggerTrust, withStoredTr
 import { inputProvenance, type CaptureInputOrigin } from "./services/capture-masking.js";
 import { registerEvalRoutes } from "./eval-routes.js";
 import { registerGoldenSetFileRoutes } from "./golden-set-file-routes.js";
+import { registerUserInviteRoutes } from "./user-invite-routes.js";
 import { effectiveTriggerTrust, isEntryNodeType, parseStoredDataLabels, recordedInputLabels, triggerInputProvenance, unionDataLabels, type DataLabels } from "@ai-orchestrator/shared";
 import { GATEWAY_GUARD_CUSTOM_DATA_KEY, GATEWAY_USAGE_CUSTOM_DATA_KEY, parseGatewayRunUsage, stripReservedCustomData, parseGatewayGuardStack, GOLDEN_SET_FILE_DEFAULT_MAX_BYTES, GUARD_SIMULATION_MAX_CASES_DEFAULT, GUARD_SIMULATION_RETENTION_DAYS } from "@ai-orchestrator/shared";
 import { registerApprovalRoutes } from "./approval-routes.js";
@@ -249,6 +250,7 @@ import type { RunWorkflowExecutionInput, WorkflowExecutionEventHooks } from "./r
 import type { WorkflowExecutionResult } from "@ai-orchestrator/shared";
 import { createRunAccess, type RunAccessDenial } from "./run-access.js";
 import { ProjectNotEmptyError, ReleaseGateEnforcedError, StoreReferenceMissingError } from "./db/store-errors.js";
+import { PaginationQueryError, pageEnvelope, pageOf, pageOfById, pageRequestFromQuery } from "./pagination.js";
 import { createRunScope, type SecretScope } from "./run-scope.js";
 import {
   CODE_SANDBOX_INITIALISING,
@@ -5528,6 +5530,8 @@ export async function createApp(
     if (!storeUser) {
       throw new Error("Failed to provision SSO user");
     }
+    // Roadmap 7.3 — an invited (pending) user who signs in with SSO no longer needs the invite link.
+    if (!created) await store.closeUserInvites(storeUser.id, new Date().toISOString());
 
     // Apply project-level role assignments from group mappings.
     const projectAssignments = await ssoRoles.listProjectRoleAssignments(input.groups);
@@ -5883,6 +5887,7 @@ export async function createApp(
     const AUTH_BURST_PREFIXES = [
       "/api/auth/login",
       "/api/auth/register",
+      "/api/auth/invite",
       "/api/auth/saml/login",
       "/api/auth/saml/callback",
       "/api/auth/ldap/login",
@@ -6193,12 +6198,13 @@ export async function createApp(
     const user = await requireRole(request, reply, ["admin"]);
     if (!user) return;
     const query = request.query as { scopeType?: string; enabledOnly?: string } | undefined;
-    return {
-      budgets: await store.listBudgets({
-        scopeType: query?.scopeType,
-        enabledOnly: query?.enabledOnly === "true"
-      })
-    };
+    const pageRequest = pageRequestFromQuery(query);
+    const budgets = await store.listBudgets({
+      scopeType: query?.scopeType,
+      enabledOnly: query?.enabledOnly === "true"
+    });
+    if (pageRequest) return pageOfById(budgets, pageRequest, (budget) => `${budget.scopeType}\u0000${budget.name}`);
+    return { budgets };
   });
 
   app.post<{ Body: unknown }>("/api/budgets", async (request, reply) => {
@@ -6537,6 +6543,8 @@ export async function createApp(
     const knowledgeBases = (await store
       .listKnowledgeBases({ projectId: query?.projectId }))
       .filter((kb) => readable === null || !kb.projectId || readable.includes(kb.projectId));
+    const pageRequest = pageRequestFromQuery(query);
+    if (pageRequest) return pageOfById(knowledgeBases, pageRequest, (kb) => kb.name);
     return { knowledgeBases };
   });
 
@@ -7517,7 +7525,9 @@ export async function createApp(
   app.get("/api/auth/api-keys", async (request, reply) => {
     const user = await requireRole(request, reply, ["viewer"]);
     if (!user) return;
+    const pageRequest = pageRequestFromQuery(request.query);
     const keys = user.role === "admin" ? await apiKeyService.list() : await apiKeyService.list(user.id);
+    if (pageRequest) return pageOfById(keys, pageRequest, (key) => key.createdAt);
     return { keys };
   });
 
@@ -8185,7 +8195,10 @@ export async function createApp(
   app.get("/api/log-streams", async (request, reply) => {
     const user = await requireRole(request, reply, ["admin"]);
     if (!user) return;
-    return { destinations: await logStreamingService.listDestinations() };
+    const pageRequest = pageRequestFromQuery(request.query);
+    const destinations = await logStreamingService.listDestinations();
+    if (pageRequest) return pageOfById(destinations, pageRequest, (destination) => destination.createdAt);
+    return { destinations };
   });
 
   app.post("/api/log-streams", async (request, reply) => {
@@ -8312,18 +8325,22 @@ export async function createApp(
     if (!user) return;
     const query = request.query as { projectId?: string } | undefined;
     const projectId = query?.projectId;
+    const pageRequest = pageRequestFromQuery(query);
+    const variableOrderKey = (variable: { projectId: string; key: string }) => `${variable.projectId}\u0000${variable.key}`;
     if (projectId) {
       if (user.role !== "admin" && !await rbacService.can(user, projectId, "workflow:read")) {
         reply.code(403);
         return { error: "Insufficient permissions for project" };
       }
-      return { variables: await variablesService.list(projectId) };
+      const variables = await variablesService.list(projectId);
+      return pageRequest ? pageOfById(variables, pageRequest, variableOrderKey) : { variables };
     }
     if (user.role !== "admin") {
       reply.code(403);
       return { error: "projectId query parameter required" };
     }
-    return { variables: await variablesService.list() };
+    const variables = await variablesService.list();
+    return pageRequest ? pageOfById(variables, pageRequest, variableOrderKey) : { variables };
   });
 
   app.post<{ Body: unknown }>("/api/variables", async (request, reply) => {
@@ -8771,6 +8788,10 @@ export async function createApp(
       typeof request.query?.projectId === "string" && request.query.projectId.trim()
         ? request.query.projectId
         : undefined;
+    const pageRequest = pageRequestFromQuery(request.query);
+    if (pageRequest) {
+      return { ...pageOfById(await rbacService.listCustomRoles(projectId), pageRequest, (role) => role.name), availablePermissions: ALL_PERMISSIONS };
+    }
     return {
       roles: await rbacService.listCustomRoles(projectId),
       availablePermissions: ALL_PERMISSIONS
@@ -9065,18 +9086,31 @@ export async function createApp(
         return;
       }
       const query = request.query ?? {};
+      const pageRequest = pageRequestFromQuery(query);
       const folderFilter: string | null | undefined =
         typeof query.folderId === "string" && query.folderId.trim()
           ? query.folderId === "__none__"
             ? null
             : query.folderId
           : undefined;
-      const workflows = await store.listWorkflows({
+      const filters = {
         projectId: typeof query.projectId === "string" && query.projectId.trim() ? query.projectId : undefined,
         folderId: folderFilter,
         tag: typeof query.tag === "string" ? query.tag : undefined,
         search: typeof query.search === "string" ? query.search : undefined
-      });
+      };
+      if (pageRequest) {
+        // Only workflows the user can read, narrowed in SQL before the page is cut so the total matches.
+        const readableIds = await runAccess.readableWorkflowIds(user);
+        const { items, total } = await store.listWorkflowsPage({
+          ...filters,
+          ...(readableIds ? { workflowIds: readableIds } : {}),
+          limit: pageRequest.pageSize,
+          offset: pageRequest.offset
+        });
+        return pageEnvelope(items, total, pageRequest);
+      }
+      const workflows = await store.listWorkflows(filters);
       const readable = await runAccess.readableWorkflowIds(user);
       if (readable === null) return workflows;
       const ids = new Set(readable);
@@ -9636,9 +9670,12 @@ export async function createApp(
   app.get("/api/projects", async (request, reply) => {
     const user = await requireRole(request, reply, ["viewer"]);
     if (!user) return;
+    const pageRequest = pageRequestFromQuery(request.query);
     const readable = await runAccess.readableProjectIds(user);
     const ids = readable && new Set(readable);
-    return { projects: (await store.listProjects()).filter((project) => !ids || ids.has(project.id)) };
+    const projects = (await store.listProjects()).filter((project) => !ids || ids.has(project.id));
+    if (pageRequest) return pageOfById(projects, pageRequest, (project) => project.name);
+    return { projects };
   });
 
   app.post<{ Body: unknown }>("/api/projects", async (request, reply) => {
@@ -9731,9 +9768,12 @@ export async function createApp(
       typeof request.query?.projectId === "string" && request.query.projectId.trim()
         ? request.query.projectId
         : undefined;
+    const pageRequest = pageRequestFromQuery(request.query);
     const readable = await runAccess.readableProjectIds(user);
     const ids = readable && new Set(readable);
-    return { folders: (await store.listFolders(projectId)).filter((folder) => !ids || ids.has(folder.projectId)) };
+    const folders = (await store.listFolders(projectId)).filter((folder) => !ids || ids.has(folder.projectId));
+    if (pageRequest) return pageOfById(folders, pageRequest, (folder) => `${folder.projectId}\u0000${folder.name}`);
+    return { folders };
   });
 
   app.post<{ Body: unknown }>("/api/folders", async (request, reply) => {
@@ -11858,7 +11898,11 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         ? request.query.projectId
         : undefined;
 
-    return await filterAsync(await secretService.listSecrets({ projectId }), (secret) => canSeeSecret(user, secret));
+    const pageRequest = pageRequestFromQuery(request.query);
+    const secrets = await filterAsync(await secretService.listSecrets({ projectId }), (secret) => canSeeSecret(user, secret));
+    // The visibility check is per secret (shares, project roles), so the page is cut after it.
+    if (pageRequest) return pageOfById(secrets, pageRequest, (secret) => secret.createdAt);
+    return secrets;
   });
 
   // Discover/test requests get their own MCP context, closed when the request
@@ -11990,11 +12034,19 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     const user = await requireRole(request, reply, ["builder"]);
     if (!user) return;
     const query = request.query as { projectId?: string } | undefined;
-    return {
-      servers: await mapAsync(await store.listMcpServers({ projectId: query?.projectId }), (server) => mcpServerSummary(server, user)),
+    const pageRequest = pageRequestFromQuery(query);
+    const extras = () => ({
       adapters: mcpRegistry.listDefinitions().map((definition) => ({ id: definition.id, label: definition.label })),
       defaultProbeIntervalMs: mcpProbeService.defaultIntervalMs,
       sandboxPolicy: sandboxPolicyView()
+    });
+    if (pageRequest) {
+      const page = pageOfById(await store.listMcpServers({ projectId: query?.projectId }), pageRequest, (server) => server.name);
+      return { ...page, items: await mapAsync(page.items, (server) => mcpServerSummary(server, user)), ...extras() };
+    }
+    return {
+      servers: await mapAsync(await store.listMcpServers({ projectId: query?.projectId }), (server) => mcpServerSummary(server, user)),
+      ...extras()
     };
   });
 
@@ -12817,6 +12869,11 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
   app.get("/api/mcp/policies", async (request, reply) => {
     const user = await requireRole(request, reply, ["builder"]);
     if (!user) return;
+    const pageRequest = pageRequestFromQuery(request.query);
+    if (pageRequest) {
+      const page = pageOfById(await store.listMcpToolPolicies(), pageRequest, (rule) => rule.createdAt);
+      return { ...page, items: page.items.map(policyRuleResponse), roles: MCP_POLICY_ROLES };
+    }
     return { rules: (await store.listMcpToolPolicies()).map(policyRuleResponse), roles: MCP_POLICY_ROLES };
   });
 
@@ -13842,6 +13899,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
   app.get("/api/tags", async (request, reply) => {
     const user = await requireRole(request, reply, ["builder", "operator", "viewer"]);
     if (!user) return;
+    const pageRequest = pageRequestFromQuery(request.query);
     const workflows = await store.listWorkflows();
     const tagSet = new Set<string>();
     for (const w of workflows) {
@@ -13851,7 +13909,8 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         }
       }
     }
-    return { tags: [...tagSet].sort() };
+    const tags = [...tagSet].sort();
+    return pageRequest ? pageOf(tags, pageRequest) : { tags };
   });
 
   app.post<{ Body: unknown }>("/api/tags", async (request, reply) => {
@@ -13873,22 +13932,65 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     return { ok: true, tag: parsed.data.name };
   });
 
+  // Roadmap 7.3 — rename a tag on every workflow that carries it. A tag is its name, so `:tag` is the current name.
+  app.put<{ Params: { tag: string }; Body: unknown }>("/api/tags/:tag", async (request, reply) => {
+    const user = await requireRole(request, reply, ["builder"]);
+    if (!user) return;
+    const parsed = z.object({ name: z.string().trim().min(1).max(100) }).safeParse(request.body ?? {});
+    if (!parsed.success) {
+      reply.code(400);
+      return { error: "Invalid tag name", details: parsed.error.issues };
+    }
+    const from = request.params.tag;
+    const to = parsed.data.name;
+    const workflows = await store.listWorkflows();
+    const carrying = workflows.filter((workflow) => (workflow.tags ?? []).includes(from));
+    if (carrying.length === 0) {
+      reply.code(404);
+      return { error: "Tag not found" };
+    }
+    // Tags match case-insensitively in filters, so a name that differs from another tag only by case is taken.
+    const taken = workflows.some((workflow) => (workflow.tags ?? []).some((tag) => tag !== from && tag.toLowerCase() === to.toLowerCase()));
+    if (taken) {
+      reply.code(409);
+      return { error: `A tag named "${to}" already exists` };
+    }
+    if (to === from) return { ok: true, tag: to, previous: from, renamedInWorkflows: 0 };
+    // Every workflow is checked before any is changed, so a rename never stops halfway on a permission.
+    const targets: Workflow[] = [];
+    for (const summary of carrying) {
+      const access = await runAccess.workflow(user, summary.id, "workflow:write");
+      if (!access.ok) {
+        reply.code(403);
+        return { error: "The tag is on workflows you cannot edit" };
+      }
+      targets.push(access.workflow);
+    }
+    // Only the tags column is rewritten, in one transaction: a graph saved meanwhile is never overwritten. A tag is
+    // metadata, so no version snapshot is taken (moving a workflow's tags through PATCH does not take one either).
+    const changed = await store.renameWorkflowTag(targets.map((workflow) => workflow.id), from, to);
+    for (const id of changed) await workflowChanged(id);
+    await audit(request, user, {
+      category: "workflow",
+      eventType: "tag.rename",
+      action: "update",
+      resourceType: "tag",
+      resourceId: to,
+      metadata: { from, to, renamedInWorkflows: changed.length }
+    });
+    return { ok: true, tag: to, previous: from, renamedInWorkflows: changed.length };
+  });
+
   app.delete<{ Params: { tag: string } }>("/api/tags/:tag", async (request, reply) => {
     const user = await requireRole(request, reply, ["admin"]);
     if (!user) return;
     const tagToRemove = decodeURIComponent(request.params.tag);
     const workflows = await store.listWorkflows();
-    let removedCount = 0;
-    for (const w of workflows) {
-      if (Array.isArray(w.tags) && w.tags.includes(tagToRemove)) {
-        const full = await store.getWorkflow(w.id);
-        if (full) {
-          full.tags = (full.tags ?? []).filter((t) => t !== tagToRemove);
-          await store.upsertWorkflow(full);
-          removedCount++;
-        }
-      }
-    }
+    // Same rule as a rename: the tags column only, one transaction, no version snapshot.
+    const carryingIds = workflows.filter((w) => Array.isArray(w.tags) && w.tags.includes(tagToRemove)).map((w) => w.id);
+    const removed = await store.renameWorkflowTag(carryingIds, tagToRemove, null);
+    for (const id of removed) await workflowChanged(id);
+    const removedCount = removed.length;
     await audit(request, user, {
       category: "workflow",
       eventType: "tag.delete",
@@ -13902,18 +14004,31 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
 
   // ── Phase 7.3: User management (admin only) ─────────────────────────
 
+  registerUserInviteRoutes({
+    app,
+    store,
+    requireRole: (request, reply, roles) => requireRole(request, reply, roles),
+    audit: async (request, user, event) => await audit(request, user, event),
+    webBaseUrl: config.APP_PUBLIC_URL || ssoPostLoginUrl(config.WEB_ORIGIN),
+    sendEmail: async (message) => await notificationService.sendDirectEmail(message)
+  });
+
   app.get("/api/users", async (request, reply) => {
     const user = await requireRole(request, reply, ["admin"]);
     if (!user) return;
-    const users = await store.listUsers();
-    return {
-      users: users.map((u) => ({
-        id: u.id,
-        email: u.email,
-        role: u.role,
-        createdAt: u.createdAt
-      }))
+    const pageRequest = pageRequestFromQuery(request.query);
+    // Roadmap 7.3 — an invited user who has not accepted yet carries `pending` and its invite's expiry.
+    const invites = new Map((await store.listOpenUserInvites()).map((invite) => [invite.userId, invite]));
+    const userView = (u: { id: string; email: string; role: string; createdAt: string }) => {
+      const invite = invites.get(u.id);
+      return { id: u.id, email: u.email, role: u.role, createdAt: u.createdAt, ...(invite ? { pending: true, inviteExpiresAt: invite.expiresAt } : {}) };
     };
+    if (pageRequest) {
+      const { items, total } = await store.listUsersPage({ limit: pageRequest.pageSize, offset: pageRequest.offset });
+      return pageEnvelope(items.map(userView), total, pageRequest);
+    }
+    const users = await store.listUsers();
+    return { users: users.map(userView) };
   });
 
   app.put<{ Params: { id: string }; Body: unknown }>("/api/users/:id", async (request, reply) => {
@@ -13985,7 +14100,18 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     const query = request.query as Record<string, string>;
     const category = query.category || undefined;
     const search = query.search || undefined;
-    const templates = await store.listTemplates({ category, search });
+    const pageRequest = pageRequestFromQuery(query);
+    const allTemplates = await store.listTemplates({ category, search });
+    // Paged: only the page is enriched below.
+    // In the gallery's order: featured first, then the store's category and name order.
+    const templatePage = pageRequest
+      ? pageOfById(
+          [...allTemplates].sort((a, b) => Number(FEATURED_TEMPLATE_IDS.has(b.id)) - Number(FEATURED_TEMPLATE_IDS.has(a.id))),
+          pageRequest,
+          (tpl) => `${FEATURED_TEMPLATE_IDS.has(tpl.id)}\u0000${tpl.category}\u0000${tpl.name}`
+        )
+      : null;
+    const templates = templatePage ? templatePage.items : allTemplates;
     // Enrich each template with detected external dependencies (OpenAI key,
     // Pinecone, etc.) so the gallery can show "Requires: …" pills before the
     // user clicks Use Template. listTemplates returns metadata only, so we
@@ -14011,6 +14137,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     // Featured templates float to the top of the gallery; everything else
     // keeps the store's category+name order from listTemplates.
     enriched.sort((a, b) => Number(b.featured) - Number(a.featured));
+    if (templatePage) return { ...templatePage, items: enriched };
     return { templates: enriched };
   });
 
@@ -14207,7 +14334,9 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
   app.get("/api/notifications", async (request, reply) => {
     const user = await requireRole(request, reply, ["admin"]);
     if (!user) return;
+    const pageRequest = pageRequestFromQuery(request.query);
     const configs = await store.listNotificationConfigs();
+    if (pageRequest) return pageOfById(configs, pageRequest, (item) => item.createdAt);
     return { configs };
   });
 
@@ -14312,6 +14441,12 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         error: "Request body is too large",
         limitBytes: config.API_BODY_LIMIT_BYTES
       });
+      return;
+    }
+
+    // Roadmap 7.3 — a malformed page or pageSize on a list route.
+    if (error instanceof PaginationQueryError) {
+      reply.code(400).send({ error: error.message });
       return;
     }
 

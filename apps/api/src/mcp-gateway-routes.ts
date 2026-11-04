@@ -129,6 +129,7 @@ import { startSseHeartbeat } from "./sse-heartbeat.js";
 import { createToolArgumentSummarizer, toolArgumentHashKey } from "./services/tool-argument-summary.js";
 import type { Store } from "./db/store.js";
 import { filterAsync, mapAsync } from "./async-array.js";
+import { pageOfById, pageRequestFromQuery } from "./pagination.js";
 
 const SERVER_VERSION = "0.1.0";
 const MAX_ERROR_CHARS = 500;
@@ -2046,6 +2047,11 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
   app.get("/api/mcp/toolsets", async (request, reply) => {
     const user = await deps.requireRole(request, reply, ["builder"]);
     if (!user) return reply;
+    const pageRequest = pageRequestFromQuery(request.query);
+    if (pageRequest) {
+      const page = pageOfById(await store.listMcpToolsets(), pageRequest, (toolset) => `${toolset.name.toLowerCase()}\u0000${toolset.slug}`);
+      return { ...page, items: await mapAsync(page.items, toolsetView), gatewayBaseUrl, protocolVersions: MCP_SUPPORTED_PROTOCOL_VERSIONS };
+    }
     return {
       toolsets: await mapAsync(await store.listMcpToolsets(), toolsetView),
       gatewayBaseUrl,
@@ -2257,6 +2263,11 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     if (!user) return reply;
     const since = new Date(Date.now() - MCP_TELEMETRY_WINDOWS["7d"]).toISOString();
     const usage = new Map((await store.summarizeMcpClientUsage(since)).map((row) => [row.clientId, row]));
+    const pageRequest = pageRequestFromQuery(request.query);
+    if (pageRequest) {
+      const page = pageOfById(await store.listMcpClients(), pageRequest, (client) => client.createdAt);
+      return { ...page, items: await mapAsync(page.items, (client) => clientView(client, usage.get(client.id))), usageWindow: "7d" };
+    }
     return {
       usageWindow: "7d",
       clients: await mapAsync(await store.listMcpClients(), (client) => clientView(client, usage.get(client.id)))

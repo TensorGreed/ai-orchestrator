@@ -88,7 +88,7 @@ function describeEvent(event: NotificationEvent): NotificationContent {
   };
 }
 
-function escapeHtml(value: string): string {
+export function escapeHtml(value: string): string {
   return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 }
 
@@ -182,6 +182,35 @@ export class NotificationService {
       if (r.status === "rejected") {
         console.warn("[Notification] Failed to send to channel:", r.reason);
       }
+    }
+  }
+
+  /**
+   * Roadmap 7.3 — an email to one person (a user invite) through the SMTP server set in the environment
+   * (NOTIFICATIONS_ENABLED and NOTIFICATION_SMTP_HOST). False when none is set or the send failed, so the caller can
+   * hand the message's link over another way.
+   */
+  async sendDirectEmail(message: { to: string; subject: string; html: string; text: string }): Promise<boolean> {
+    if (!this.config.NOTIFICATIONS_ENABLED || !this.config.NOTIFICATION_SMTP_HOST) return false;
+    try {
+      const nodemailer = await import("nodemailer" as string) as { default: { createTransport: (opts: unknown) => { sendMail: (msg: unknown) => Promise<unknown> } } };
+      const transporter = nodemailer.default.createTransport({
+        host: this.config.NOTIFICATION_SMTP_HOST,
+        port: this.config.NOTIFICATION_SMTP_PORT,
+        secure: this.config.NOTIFICATION_SMTP_SECURE,
+        ...(this.config.NOTIFICATION_SMTP_USER ? { auth: { user: this.config.NOTIFICATION_SMTP_USER, pass: this.config.NOTIFICATION_SMTP_PASS ?? "" } } : {})
+      });
+      await transporter.sendMail({
+        from: this.config.NOTIFICATION_EMAIL_FROM || "notifications@ai-orchestrator",
+        to: message.to,
+        subject: message.subject.replace(/[\r\n]+/g, " "),
+        html: message.html,
+        text: message.text
+      });
+      return true;
+    } catch (err) {
+      console.warn("[Notification] Direct email send failed:", err instanceof Error ? err.message : err);
+      return false;
     }
   }
 

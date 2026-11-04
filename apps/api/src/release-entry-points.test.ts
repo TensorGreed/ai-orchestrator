@@ -132,7 +132,6 @@ const WORKFLOW_LOADS: LoadSite[] = [
   { file: "app.ts", match: "projectId: store.getWorkflow(pending.workflowId)?.projectId ?? request.projectId,", kind: "not_run", why: "audit project" },
   { file: "app.ts", match: "const workflow = store.getWorkflow(request.params.id);", kind: "not_run", why: "project transfer (admin)" },
   { file: "execution-routes.ts", match: "projectId: store.getWorkflow(execution.workflowId)?.projectId", kind: "not_run", why: "audit project" },
-  { file: "app.ts", match: "const full = store.getWorkflow(w.id);", kind: "not_run", why: "removing a tag" },
 
   // Other route files and services.
   { file: "mcp-gateway-routes.ts", match: "deps.loadProductionWorkflow ? deps.loadProductionWorkflow(id) : store.getWorkflow(id)", kind: "production", why: "the gateway's tool list and tool calls (the app always passes the production loader)", defaultOnly: true },
