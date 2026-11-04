@@ -184,8 +184,8 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
         error: "budget_exceeded",
         message: `Budget "${budgetCheck.blocked.budget.name}" exceeded for the current ${budgetCheck.blocked.budget.period}.`,
         budgetId: budgetCheck.blocked.budget.id,
-        currentUsage: budgetCheck.blocked.current,
-        limit: budgetCheck.blocked.limit,
+        // The amounts are for admins only, as in the shared 402 handler; other callers get the message.
+        ...(user.role === "admin" ? { currentUsage: budgetCheck.blocked.current, limit: budgetCheck.blocked.limit } : {}),
         periodStart: budgetCheck.blocked.periodStart
       };
     }
