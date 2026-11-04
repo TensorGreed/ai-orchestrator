@@ -40,6 +40,20 @@ function xfccCert(value: string): string | null {
   return match ? match[1]! : null;
 }
 
+/** How many XFCC elements the value holds (commas outside quoted values separate them); 0 when it is not XFCC. */
+function xfccElementCount(value: string): number {
+  if (!/(?:^|[;,])\s*(?:Cert|Hash|By|Subject|URI|DNS|Chain)=/i.test(value)) return 0;
+  let elements = 1;
+  let quoted = false;
+  for (let index = 0; index < value.length; index += 1) {
+    const char = value[index];
+    if (char === "\\" && quoted) index += 1;
+    else if (char === '"') quoted = !quoted;
+    else if (char === "," && !quoted) elements += 1;
+  }
+  return elements;
+}
+
 function safeDecode(value: string): string {
   try {
     return decodeURIComponent(value);
@@ -55,8 +69,12 @@ function safeDecode(value: string): string {
 export function parseForwardedCertificate(raw: string): crypto.X509Certificate | null {
   let value = raw.trim();
   if (!value) return null;
+  // More than one certificate (a proxy that appends to the header instead of setting it, or duplicate headers that
+  // Node joins with ", ") is refused: the one the client wrote could come first.
+  if (xfccElementCount(value) > 1) return null;
   value = xfccCert(value) ?? value;
   if (value.includes("%")) value = safeDecode(value);
+  if ((value.match(/-----BEGIN CERTIFICATE-----/g) ?? []).length > 1) return null;
   const pem = value.match(PEM_BLOCK)?.[0];
   try {
     if (pem) {
@@ -104,6 +122,7 @@ export function readClientCertificate(
   const value = Array.isArray(header) ? header[0] : header;
   if (!value) return { status: "none" };
   if (!settings.proxies.has(request.socket?.remoteAddress)) return { status: "untrusted" };
+  if (Array.isArray(header) && header.length > 1) return { status: "invalid" };
   const parsed = parseForwardedCertificate(value);
   if (!parsed) return { status: "invalid" };
   const certificate = describeCertificate(parsed);

@@ -6,6 +6,7 @@
  * the same as before.
  */
 import net from "node:net";
+import fastifyCookie from "@fastify/cookie";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import {
   NETWORK_DENIED_MESSAGE,
@@ -72,17 +73,21 @@ export class AddressList {
 
 export interface ScopeRequest {
   method: string;
-  /** The raw request URL (path and query). */
+  /** The path to classify: the matched route pattern, or the request path (`classificationPath`); a query is ignored. */
   url: string;
-  /** A session cookie is present (its value is not checked here). */
+  /** A session cookie is present, read the way the auth layer reads it (its value is not checked here). */
   hasSessionCookie: boolean;
-  /** An Authorization header is present (a bearer token or API key). */
-  hasBearer: boolean;
+  /** The Authorization header carries a well-formed API key (`Bearer ao_<prefix>.<secret>`); any other value does not count. */
+  hasApiKey: boolean;
 }
 
 const EXEMPT_PATHS = new Set(["/health", "/ready", "/api/auth/saml/metadata"]);
 const METRICS_PATHS = new Set(["/metrics", "/api/docs", "/api/openapi.json"]);
 const PUBLIC_PATHS = new Set(["/widget.js", "/helper-chat"]);
+/** `/api/auth/*` routes an API key may call; every other auth route (sign-in, registration, SSO, MFA) is studio traffic. */
+const AUTH_API_PREFIXES = ["/api/auth/api-keys", "/api/auth/me", "/api/auth/sso"];
+/** The API keys this server issues (`ApiKeyService`): `ao_`, a 10-character prefix, a dot and the secret. */
+const API_KEY_BEARER = /^Bearer\s+ao_[A-Za-z0-9_-]{10}\.[A-Za-z0-9_-]+\s*$/i;
 
 function startsWithSegment(path: string, prefix: string): boolean {
   return path === prefix || path.startsWith(`${prefix}/`);
@@ -90,7 +95,8 @@ function startsWithSegment(path: string, prefix: string): boolean {
 
 /** The request path as the router matches it: no query, percent-decoding applied where it is valid. */
 function routePath(url: string): string {
-  const raw = (url.split("?")[0] ?? "").split("#")[0] ?? "";
+  // An absolute-form target (`GET http://host/metrics`) is routed by its path, so it is classified by its path too.
+  const raw = (url.replace(/^[a-z][a-z0-9+.-]*:\/\/[^/?#]*/i, "").split("?")[0] ?? "").split("#")[0] ?? "";
   let path = raw;
   try {
     path = decodeURI(raw);
@@ -103,8 +109,8 @@ function routePath(url: string): string {
 /**
  * The scope(s) a request must be admitted on, from its route family and credential. Empty = always exempt (probes
  * and the SAML metadata an IdP fetches). Studio and REST routes under `/api/*` (and any path not in another family)
- * are `ui` with a session cookie or no credential, `api` with a bearer token or API key, and both when the request
- * carries both (the auth layer would accept either). `/api/webhooks/execute` (and its stream) needs a studio or API
+ * are `ui` with a session cookie or no credential, `api` with a well-formed API key, and both when the request
+ * carries both (the auth layer would accept either). Sign-in, registration, SSO and MFA routes are always `ui`. `/api/webhooks/execute` (and its stream) needs a studio or API
  * credential, so it is not in the webhook family.
  */
 export function classifyNetworkScope(input: ScopeRequest): NetworkScope[] {
@@ -121,18 +127,39 @@ export function classifyNetworkScope(input: ScopeRequest): NetworkScope[] {
     return ["webhook"];
   }
   if (PUBLIC_PATHS.has(path) || startsWithSegment(path, "/api/forms") || startsWithSegment(path, "/api/chat")) return ["public"];
-  if (input.hasBearer && input.hasSessionCookie) return ["ui", "api"];
-  return input.hasBearer ? ["api"] : ["ui"];
+  // Sign-in, registration, SSO and MFA take no API key: whatever header comes with them, they are studio traffic.
+  if (startsWithSegment(path, "/api/auth") && !AUTH_API_PREFIXES.some((prefix) => startsWithSegment(path, prefix))) return ["ui"];
+  // A session cookie always brings the ui list (the auth layer falls back to it when an API key fails).
+  if (input.hasSessionCookie) return input.hasApiKey ? ["ui", "api"] : ["ui"];
+  return input.hasApiKey ? ["api"] : ["ui"];
 }
 
-/** True when the Cookie header names the session cookie with a value. */
+/**
+ * The path a request is classified by: the pattern of the route it matched (what the router dispatched on), or,
+ * when no route matched or the match is a catch-all, the request target with any absolute-form scheme and host removed.
+ */
+export function classificationPath(request: Pick<FastifyRequest, "url"> & { routeOptions?: { url?: string } }): string {
+  const pattern = request.routeOptions?.url;
+  if (pattern && pattern.startsWith("/") && pattern !== "/*") return pattern;
+  return request.url;
+}
+
+/** True when the Cookie header names the session cookie with a value, parsed as the cookie plugin parses it. */
 export function hasCookie(header: string | string[] | undefined, name: string): boolean {
-  const text = Array.isArray(header) ? header.join(";") : (header ?? "");
+  const text = Array.isArray(header) ? header.join("; ") : (header ?? "");
   if (!text) return false;
-  return text.split(";").some((part) => {
-    const trimmed = part.trim();
-    return trimmed.startsWith(`${name}=`) && trimmed.length > name.length + 1;
-  });
+  try {
+    return Boolean(fastifyCookie.parse(text)[name]);
+  } catch {
+    // The cookie plugin would fail on it as well; count it as present so the ui list still applies.
+    return true;
+  }
+}
+
+/** True when the Authorization header carries a well-formed API key (any other value is not an API credential). */
+export function hasApiKeyBearer(header: string | string[] | undefined): boolean {
+  const value = Array.isArray(header) ? header[0] : header;
+  return typeof value === "string" && API_KEY_BEARER.test(value);
 }
 
 // ---------------------------------------------------------------------------
@@ -152,6 +179,32 @@ export const NETWORK_AUDIT_SAMPLE_MS = 60_000;
 /** How long one address raises at most one break-glass alert. */
 export const BREAK_GLASS_ALERT_SAMPLE_MS = 10 * 60_000;
 const SAMPLER_MAX_KEYS = 10_000;
+/** At most this many denial audits per scope per audit window, whatever the address (a flood from many addresses). */
+export const NETWORK_AUDIT_SCOPE_CAP = 60;
+
+/**
+ * Counts audits per key in fixed windows: `record` up to the cap, `summary` once when the cap is first passed (one
+ * row saying later ones are dropped until the window ends), `drop` after that.
+ */
+export class WindowCap {
+  private readonly windows = new Map<string, { start: number; count: number }>();
+
+  constructor(
+    private readonly cap: number,
+    private readonly windowMs: number
+  ) {}
+
+  take(key: string, now: number = Date.now()): "record" | "summary" | "drop" {
+    let entry = this.windows.get(key);
+    if (!entry || now - entry.start >= this.windowMs) {
+      entry = { start: now, count: 0 };
+      this.windows.set(key, entry);
+    }
+    entry.count += 1;
+    if (entry.count <= this.cap) return "record";
+    return entry.count === this.cap + 1 ? "summary" : "drop";
+  }
+}
 
 /** Remembers when each key was last let through, so a flood from one address is recorded once per window. */
 export class KeySampler {
@@ -202,6 +255,7 @@ export class NetworkControls {
   readonly breakGlass: AddressList;
   readonly clientCertProxies: AddressList;
   private readonly auditSampler = new KeySampler(NETWORK_AUDIT_SAMPLE_MS);
+  private readonly scopeCap = new WindowCap(NETWORK_AUDIT_SCOPE_CAP, NETWORK_AUDIT_SAMPLE_MS);
   private readonly alertSampler = new KeySampler(BREAK_GLASS_ALERT_SAMPLE_MS);
 
   constructor(private readonly deps: NetworkControlsDeps) {
@@ -223,13 +277,18 @@ export class NetworkControls {
     return this.settings.mode === "report";
   }
 
-  /** The verdict for an address on the given scopes; scopes without a list admit everyone. */
-  evaluate(ip: string, scopes: readonly NetworkScope[]): NetworkVerdict {
+  /**
+   * The verdict for an address on the given scopes; scopes without a list admit everyone. Break-glass needs both the
+   * connecting address (`socketAddress`) and the counted address in its ranges: a loopback address a client wrote
+   * into X-Forwarded-For is not enough, and neither is a proxy on the same host connecting over loopback for an
+   * outside client. `socketAddress` defaults to `ip` for callers that have no socket.
+   */
+  evaluate(ip: string, scopes: readonly NetworkScope[], socketAddress: string = ip): NetworkVerdict {
     let breakGlassScope: NetworkScope | null = null;
     for (const scope of scopes) {
       const list = this.scopeLists.get(scope);
       if (!list || list.has(ip)) continue;
-      if (BREAK_GLASS_SCOPES.has(scope) && this.breakGlass.has(ip)) {
+      if (BREAK_GLASS_SCOPES.has(scope) && this.breakGlass.has(socketAddress) && this.breakGlass.has(ip)) {
         breakGlassScope ??= scope;
         continue;
       }
@@ -242,12 +301,12 @@ export class NetworkControls {
   async checkRequest(request: FastifyRequest, reply: FastifyReply): Promise<boolean> {
     const scopes = classifyNetworkScope({
       method: request.method,
-      url: request.url,
+      url: classificationPath(request),
       hasSessionCookie: hasCookie(request.headers.cookie, this.deps.config.SESSION_COOKIE_NAME),
-      hasBearer: Boolean(request.headers.authorization)
+      hasApiKey: hasApiKeyBearer(request.headers.authorization)
     });
     if (scopes.length === 0) return true;
-    const verdict = this.evaluate(request.ip, scopes);
+    const verdict = this.evaluate(request.ip, scopes, request.socket?.remoteAddress ?? "");
     if (verdict.kind === "allowed") return true;
     const facts = requestFacts(request);
     if (verdict.kind === "break_glass") {
@@ -279,6 +338,8 @@ export class NetworkControls {
     this.deps.metrics.recordNetworkDecision(input.scope, report ? "would_deny" : "denied");
     const key = `${report ? "r" : "d"}|${facts.ip}|${input.scope}|${input.ref ? (input.ref.list === "mcp_client" ? input.ref.clientId : `${input.ref.workflowId}:${input.ref.nodeId}`) : ""}`;
     if (!this.auditSampler.take(key)) return;
+    const capped = this.scopeCap.take(`${report ? "r" : "d"}|${input.scope}`);
+    if (capped === "drop") return;
     const metadata = {
       scope: input.scope,
       mode: this.settings.mode,
@@ -287,7 +348,10 @@ export class NetworkControls {
       list: input.ref?.list ?? "deployment",
       ...(input.ref?.list === "mcp_client" ? { clientId: input.ref.clientId, clientName: input.ref.clientName } : {}),
       ...(input.ref?.list === "webhook" ? { workflowId: input.ref.workflowId, nodeId: input.ref.nodeId } : {}),
-      sampleWindowSeconds: NETWORK_AUDIT_SAMPLE_MS / 1000
+      sampleWindowSeconds: NETWORK_AUDIT_SAMPLE_MS / 1000,
+      // The cap was reached: this row stands for every later refusal on the scope until the window ends (the metric
+      // still counts each one).
+      ...(capped === "summary" ? { scopeCapReached: true, scopeCapPerWindow: NETWORK_AUDIT_SCOPE_CAP } : {})
     };
     this.deps.log.warn(
       { ip: facts.ip, ...metadata },
@@ -340,6 +404,7 @@ export class NetworkControls {
   /** The read-only view for Settings > Access control > Network. */
   view(request: FastifyRequest): NetworkSettingsView {
     const ip = request.ip;
+    const socketAddress = request.socket?.remoteAddress ?? "";
     const scopes = NETWORK_SCOPES.map((scope) => {
       const list = this.scopeLists.get(scope);
       return { scope, env: NETWORK_SCOPE_ENV[scope], ranges: list ? [...list.ranges] : [], matched: list ? list.has(ip) : null };
@@ -364,7 +429,7 @@ export class NetworkControls {
       mode: this.settings.mode,
       active: this.active,
       scopes,
-      breakGlass: { ranges: [...this.breakGlass.ranges], matched: this.breakGlass.has(ip) },
+      breakGlass: { ranges: [...this.breakGlass.ranges], matched: this.breakGlass.has(socketAddress) && this.breakGlass.has(ip) },
       trustProxy: { configured: trustProxy !== false, summary: describeTrustProxy(trustProxy) },
       clientCertificate: { header: this.settings.clientCertHeader, proxies: [...this.clientCertProxies.ranges] },
       yourIp: ip,

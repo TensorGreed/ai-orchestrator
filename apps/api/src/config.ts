@@ -591,7 +591,7 @@ const envSchema = z.object({
   NETWORK_BREAK_GLASS_CIDRS: z.string().optional(),
   /** Header a TLS-terminating proxy forwards the verified client certificate in (PEM, URL-encoded PEM or Envoy XFCC). Unset = off. */
   MCP_GATEWAY_CLIENT_CERT_HEADER: z.string().optional(),
-  /** Addresses of the proxies allowed to set that header (the connecting socket); defaults to TRUST_PROXY when it is an address list. */
+  /** Addresses of the proxies allowed to set that header (the connecting socket); required with the header, never taken from TRUST_PROXY. */
   MCP_GATEWAY_CLIENT_CERT_PROXIES: z.string().optional(),
   HELMET_ENABLED: booleanFromEnv.default(true),
   HELMET_HSTS_ENABLED: booleanFromEnv.default(false),
@@ -827,12 +827,6 @@ export interface NetworkSettings {
 }
 
 const LOOPBACK_RANGES = ["127.0.0.0/8", "::1/128"];
-/** TRUST_PROXY's named ranges as CIDR ranges (the ones proxy-addr uses). */
-const TRUST_PROXY_NAMED_CIDRS: Record<string, string[]> = {
-  loopback: LOOPBACK_RANGES,
-  linklocal: ["169.254.0.0/16", "fe80::/10"],
-  uniquelocal: ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7"]
-};
 /** Headers a client certificate may never be read from (they carry other things the server relies on). */
 const RESERVED_CERT_HEADERS = new Set(["authorization", "cookie", "host", "x-forwarded-for", "x-real-ip", "x-forwarded-proto", "content-type", "mcp-session-id"]);
 
@@ -881,15 +875,15 @@ export function resolveNetworkSettings(config: AppConfig): NetworkSettings {
           "and not one the server reads for something else (such as authorization or x-forwarded-for)"
       );
     }
+    // Set explicitly, never taken from TRUST_PROXY: a certificate is public, so the pin is only as strong as the list
+    // of addresses allowed to write the header (the verifying proxy, not every hop trusted for X-Forwarded-For).
     if ((config.MCP_GATEWAY_CLIENT_CERT_PROXIES ?? "").trim()) {
       clientCertProxies = parseAddressSetting("MCP_GATEWAY_CLIENT_CERT_PROXIES", config.MCP_GATEWAY_CLIENT_CERT_PROXIES);
-    } else if (Array.isArray(trustProxy)) {
-      clientCertProxies = parseIpAllowlist(trustProxy.flatMap((entry) => TRUST_PROXY_NAMED_CIDRS[entry] ?? [entry])).ranges;
     }
     if (clientCertProxies.length === 0) {
       throw new Error(
         "Invalid environment configuration: MCP_GATEWAY_CLIENT_CERT_HEADER needs the addresses of the proxies that verify client certificates, " +
-          "so the header is honoured from them only: set MCP_GATEWAY_CLIENT_CERT_PROXIES (or TRUST_PROXY to an address list)"
+          "so the header is honoured from them only: set MCP_GATEWAY_CLIENT_CERT_PROXIES to those proxies' addresses (it is not taken from TRUST_PROXY)"
       );
     }
   }

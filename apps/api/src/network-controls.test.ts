@@ -10,8 +10,12 @@ import { parseConfig, resolveNetworkSettings } from "./config.js";
 import {
   AddressList,
   KeySampler,
+  NETWORK_AUDIT_SCOPE_CAP,
   NetworkControls,
+  WindowCap,
+  classificationPath,
   classifyNetworkScope,
+  hasApiKeyBearer,
   hasCookie,
   normalizeClientAddress,
   type ScopeRequest
@@ -26,7 +30,7 @@ function scopes(url: string, credential: "none" | "cookie" | "bearer" | "both" =
     method,
     url,
     hasSessionCookie: credential === "cookie" || credential === "both",
-    hasBearer: credential === "bearer" || credential === "both"
+    hasApiKey: credential === "bearer" || credential === "both"
   };
   return classifyNetworkScope(input);
 }
@@ -90,7 +94,23 @@ describe("classifyNetworkScope: every route family", () => {
     ["/", "none", ["ui"]],
     // Percent-encoding is read the way the router reads it.
     ["/%6dcp/support", "bearer", ["mcp_gateway"]],
-    ["/%68ealth", "none", []]
+    ["/%68ealth", "none", []],
+    // Absolute-form request targets are classified by their path, as the router routes them.
+    ["http://x/metrics", "none", ["metrics"]],
+    ["http://x/mcp/t", "bearer", ["mcp_gateway"]],
+    ["HTTPS://x:8443/webhook/orders?y=1", "none", ["webhook"]],
+    ["http://x", "none", ["ui"]],
+    // Sign-in, registration, SSO and MFA are studio traffic whatever header comes with them.
+    ["/api/auth/login", "bearer", ["ui"]],
+    ["/api/auth/register", "bearer", ["ui"]],
+    ["/api/auth/oidc/callback", "bearer", ["ui"]],
+    ["/api/auth/saml/callback", "bearer", ["ui"]],
+    ["/api/auth/login/mfa", "bearer", ["ui"]],
+    ["/api/auth/mfa/enroll", "bearer", ["ui"]],
+    // Auth routes an API key may call follow the credential.
+    ["/api/auth/api-keys", "bearer", ["api"]],
+    ["/api/auth/me", "bearer", ["api"]],
+    ["/api/auth/sso/mappings", "both", ["ui", "api"]]
   ];
 
   it.each(table)("%s with %s → %j", (url, credential, expected) => {
@@ -109,6 +129,29 @@ describe("classifyNetworkScope: every route family", () => {
     expect(hasCookie("ao_session=", "ao_session")).toBe(false);
     expect(hasCookie("xao_session=1", "ao_session")).toBe(false);
     expect(hasCookie(undefined, "ao_session")).toBe(false);
+    // Spacing the cookie plugin trims is read the same way here.
+    expect(hasCookie("ao_session =sess_x", "ao_session")).toBe(true);
+    expect(hasCookie("a=1;\tao_session\t=sess_x", "ao_session")).toBe(true);
+    expect(hasCookie(" ao_session=sess_x", "ao_session")).toBe(true);
+    expect(hasCookie(["a=1", "ao_session=sess_x"], "ao_session")).toBe(true);
+  });
+
+  it("counts only a well-formed API key as an API credential", () => {
+    expect(hasApiKeyBearer("Bearer ao_AbCdEfGh12.s3cr3t-Secret_value")).toBe(true);
+    expect(hasApiKeyBearer("bearer  ao_AbCdEfGh12.s3cr3t")).toBe(true);
+    expect(hasApiKeyBearer("Bearer junk")).toBe(false);
+    expect(hasApiKeyBearer("Bearer x")).toBe(false);
+    expect(hasApiKeyBearer("Basic dXNlcjpwYXNz")).toBe(false);
+    expect(hasApiKeyBearer("Bearer ao_short.s")).toBe(false);
+    expect(hasApiKeyBearer(undefined)).toBe(false);
+  });
+
+  it("classifies by the matched route pattern, or by the target when no concrete route matched", () => {
+    expect(classificationPath({ url: "http://x/metrics", routeOptions: { url: "/metrics" } })).toBe("/metrics");
+    expect(classificationPath({ url: "http://x/mcp/a", routeOptions: { url: "/mcp/:toolset" } })).toBe("/mcp/:toolset");
+    expect(classificationPath({ url: "/metrics/x", routeOptions: { url: undefined } })).toBe("/metrics/x");
+    expect(classificationPath({ url: "/metrics", routeOptions: { url: "*" } })).toBe("/metrics");
+    expect(classificationPath({ url: "/metrics", routeOptions: { url: "/*" } })).toBe("/metrics");
   });
 });
 
@@ -198,10 +241,10 @@ describe("network settings (startup validation)", () => {
       parseConfig({ ...BASE_ENV, MCP_GATEWAY_CLIENT_CERT_HEADER: "X-SSL-Client-Cert", MCP_GATEWAY_CLIENT_CERT_PROXIES: "10.0.0.5" })
     );
     expect(explicit).toMatchObject({ clientCertHeader: "x-ssl-client-cert", clientCertProxies: ["10.0.0.5/32"] });
-    const fromTrustProxy = resolveNetworkSettings(
-      parseConfig({ ...BASE_ENV, MCP_GATEWAY_CLIENT_CERT_HEADER: "x-ssl-client-cert", TRUST_PROXY: "loopback,10.0.0.0/8" })
+    // The proxies are never taken from TRUST_PROXY: every hop trusted for X-Forwarded-For could then forge a certificate.
+    expect(() => parseConfig({ ...BASE_ENV, MCP_GATEWAY_CLIENT_CERT_HEADER: "x-ssl-client-cert", TRUST_PROXY: "loopback,10.0.0.0/8" })).toThrow(
+      "it is not taken from TRUST_PROXY"
     );
-    expect(fromTrustProxy.clientCertProxies).toEqual(["127.0.0.0/8", "::1/128", "10.0.0.0/8"]);
   });
 });
 
@@ -235,10 +278,47 @@ describe("verdicts", () => {
     // A request on both scopes needs both.
     const split = controls({ NETWORK_ALLOW_UI: "10.0.0.0/8", NETWORK_ALLOW_API: "192.168.0.0/16" });
     expect(split.evaluate("10.1.1.1", ["ui", "api"])).toEqual({ kind: "denied", scope: "api" });
+    // Break-glass is matched on the connecting address: a loopback address read from X-Forwarded-For is not it.
+    expect(strict.evaluate("127.0.0.1", ["ui"], "10.0.0.5")).toEqual({ kind: "denied", scope: "ui" });
+    // A proxy on the same host (loopback socket) forwarding an outside client is not break-glass either.
+    expect(strict.evaluate("203.0.113.9", ["ui"], "127.0.0.1")).toEqual({ kind: "denied", scope: "ui" });
+    expect(strict.evaluate("127.0.0.1", ["ui"], "::1")).toEqual({ kind: "break_glass", scope: "ui" });
     expect(controls({ NETWORK_ALLOW_UI: "10.0.0.0/8", NETWORK_BREAK_GLASS_CIDRS: "none" }).evaluate("127.0.0.1", ["ui"])).toEqual({
       kind: "denied",
       scope: "ui"
     });
+  });
+});
+
+describe("denial audits per scope", () => {
+  it("caps a scope's denial audits per window whatever the address, with one summary row", () => {
+    const cap = new WindowCap(3, 1000);
+    expect([0, 1, 2, 3, 4].map(() => cap.take("d|ui", 10))).toEqual(["record", "record", "record", "summary", "drop"]);
+    expect(cap.take("d|api", 10)).toBe("record");
+    expect(cap.take("d|ui", 1010)).toBe("record");
+  });
+
+  it("records at most the cap plus one summary for a flood from rotating addresses", async () => {
+    const audits: Array<{ eventType: string; metadata?: Record<string, unknown> }> = [];
+    const config = parseConfig({ ...BASE_ENV, NETWORK_ALLOW_UI: "10.0.0.0/8" });
+    const strict = new NetworkControls({
+      settings: resolveNetworkSettings(config),
+      config,
+      audit: async (event) => {
+        audits.push(event as never);
+      },
+      notify: async () => undefined,
+      metrics: { recordNetworkDecision: () => undefined },
+      log: { warn: () => undefined }
+    });
+    const reply = { code: () => reply, header: () => reply, send: () => reply } as never;
+    for (let i = 0; i < NETWORK_AUDIT_SCOPE_CAP + 20; i += 1) {
+      const ip = `2001:db8::${(i + 1).toString(16)}`;
+      const request = { method: "GET", url: "/api/workflows", headers: {}, ip, socket: { remoteAddress: ip }, routeOptions: { url: "/api/workflows" } } as never;
+      expect(await strict.checkRequest(request, reply)).toBe(false);
+    }
+    expect(audits).toHaveLength(NETWORK_AUDIT_SCOPE_CAP + 1);
+    expect(audits.at(-1)!.metadata).toMatchObject({ scopeCapReached: true, scopeCapPerWindow: NETWORK_AUDIT_SCOPE_CAP });
   });
 });
 
@@ -265,7 +345,19 @@ describe("forwarded client certificates", () => {
       expect(describeCertificate(parsed!).fingerprint256).toBe(fingerprintA);
     }
     expect(parseForwardedCertificate("not a certificate")).toBeNull();
+    // A quoted subject with commas is still one XFCC element.
+    expect(parseForwardedCertificate(`Hash=abc;Cert="${encodeURIComponent(CLIENT_CERT_A_PEM)}";Subject="CN=a,O=b"`)).not.toBeNull();
     expect(parseForwardedCertificate("")).toBeNull();
+  });
+
+  it("refuses a header that holds more than one certificate (an appending proxy or duplicate headers)", () => {
+    const encodedA = encodeURIComponent(CLIENT_CERT_A_PEM);
+    const encodedB = encodeURIComponent(CLIENT_CERT_B_PEM);
+    expect(parseForwardedCertificate(`${encodedB}, ${encodedA}`)).toBeNull();
+    expect(parseForwardedCertificate(`${CLIENT_CERT_B_PEM}\n${CLIENT_CERT_A_PEM}`)).toBeNull();
+    expect(parseForwardedCertificate(`Hash=1;Cert="${encodedB}",By=spiffe://l2m/gw;Hash=2;Cert="${encodedA}"`)).toBeNull();
+    expect(parseForwardedCertificate(`Hash=1;Cert="${encodedB}",By=spiffe://l2m/gw;Hash=2`)).toBeNull();
+    expect(readClientCertificate(request(`${encodedB}, ${encodedA}`, "10.0.0.5"), settings).status).toBe("invalid");
   });
 
   it("describes the subject, CN and alternative names", () => {

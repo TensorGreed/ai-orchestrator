@@ -6,6 +6,7 @@
  */
 import crypto from "node:crypto";
 import fs from "node:fs";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -197,12 +198,12 @@ describe("scope allowlists, enforce mode", () => {
     expect((await send(context, { method: "GET", url: "/ready", from: OUTSIDE })).statusCode).not.toBe(403);
     expect((await send(context, { method: "POST", url: "/webhook/none", from: OUTSIDE, payload: {} })).statusCode).toBe(404);
     expect((await send(context, { method: "GET", url: "/metrics", from: OUTSIDE })).statusCode).toBe(403);
-    // A bearer request is on the api scope; an IPv4-mapped inside address matches.
+    // A bearer that is not an API key is not API traffic (ui, the 7th ui refusal); an IPv4-mapped inside address matches.
     expect((await send(context, { method: "GET", url: "/api/workflows", from: OUTSIDE, headers: { authorization: "Bearer k" } })).statusCode).toBe(403);
     expect((await send(context, { method: "GET", url: "/api/auth/me", from: "::ffff:10.1.2.3" })).statusCode).toBe(401);
 
     const metrics = await send(context, { method: "GET", url: "/metrics", from: INSIDE });
-    expect(metrics.body).toContain('ao_network_requests_total{scope="ui",outcome="denied"} 6');
+    expect(metrics.body).toContain('ao_network_requests_total{scope="ui",outcome="denied"} 7');
     expect(metrics.body).toContain('ao_network_requests_total{scope="mcp_gateway",outcome="denied"} 1');
   });
 
@@ -217,6 +218,63 @@ describe("scope allowlists, enforce mode", () => {
     expect(view.scopes.find((entry) => entry.scope === "webhook")).toEqual({ scope: "webhook", env: "NETWORK_ALLOW_WEBHOOK", ranges: [], matched: null });
     const viewer = await login(context, "viewer");
     expect((await send(context, { method: "GET", url: "/api/settings/network", headers: { cookie: viewer } })).statusCode).toBe(403);
+  });
+});
+
+describe("the scope classifier on real requests", () => {
+  it("applies the ui list to a session cookie however it is spaced and whatever Authorization header comes with it", async () => {
+    // Only the UI is restricted: a request that could pass as API traffic would be open.
+    const context = await createTestContext({ NETWORK_ALLOW_UI: "10.0.0.0/8" });
+    const cookie = await login(context);
+    const [name, value] = cookie.split("=") as [string, string];
+    const spaced = [`${name} =${value}`, `${name}\t=${value}`, ` ${name}=${value}`];
+    for (const form of spaced) {
+      for (const authorization of ["Bearer x", "Bearer junk", "Basic eDp5"]) {
+        const response = await send(context, { method: "GET", url: "/api/auth/me", from: OUTSIDE, headers: { cookie: form, authorization } });
+        expect(response.statusCode, `${form} / ${authorization}`).toBe(403);
+      }
+    }
+    // The same cookie from inside works (the auth layer reads the spaced form too).
+    expect((await send(context, { method: "GET", url: "/api/auth/me", headers: { cookie: spaced[0]!, authorization: "Bearer junk" } })).statusCode).toBe(200);
+
+    // A real API key from outside is API traffic (open here); with the session cookie as well, the ui list applies.
+    const created = await send(context, { method: "POST", url: "/api/auth/api-keys", headers: { cookie }, payload: { name: "ci" } });
+    expect(created.statusCode, created.body).toBe(200);
+    const key = created.json<{ key: string }>().key;
+    expect((await send(context, { method: "GET", url: "/api/auth/me", from: OUTSIDE, headers: { authorization: `Bearer ${key}` } })).statusCode).toBe(200);
+    expect((await send(context, { method: "GET", url: "/api/auth/me", from: OUTSIDE, headers: { authorization: `Bearer ${key}`, cookie } })).statusCode).toBe(403);
+  });
+
+  it("keeps sign-in and registration on the ui list when an Authorization header is sent", async () => {
+    const context = await createTestContext({ NETWORK_ALLOW_UI: "10.0.0.0/8", AUTH_ALLOW_PUBLIC_REGISTER: "true" });
+    const email = "guess@example.com";
+    await context.authService.register({ email, password: "Guess-Pass-123!", role: "admin" });
+    for (const url of ["/api/auth/login", "/api/auth/register", "/api/auth/ldap/login"]) {
+      const response = await send(context, { method: "POST", url, from: OUTSIDE, headers: { authorization: "Bearer x" }, payload: { email, password: "Guess-Pass-123!" } });
+      expect(response.statusCode, url).toBe(403);
+    }
+    expect((await send(context, { method: "GET", url: "/api/auth/oidc/login", from: OUTSIDE, headers: { authorization: "Bearer x" } })).statusCode).toBe(403);
+  });
+
+  it("classifies an absolute-form request target by its path (a raw socket, as a direct client would send it)", async () => {
+    const context = await createTestContext({ NETWORK_ALLOW_METRICS: "10.0.0.0/8", NETWORK_ALLOW_MCP_GATEWAY: "10.0.0.0/8" });
+    await context.app.listen({ host: "127.0.0.1", port: 0 });
+    const address = context.app.server.address() as net.AddressInfo;
+    const raw = (target: string, method = "GET") =>
+      new Promise<string>((resolve, reject) => {
+        const socket = net.connect(address.port, "127.0.0.1", () => {
+          socket.write(`${method} ${target} HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}`);
+        });
+        let data = "";
+        socket.on("data", (chunk) => (data += chunk.toString()));
+        socket.on("end", () => resolve(data));
+        socket.on("error", reject);
+      });
+    // Loopback is not in the metrics or gateway lists (break-glass covers ui and api only).
+    expect((await raw("http://x/metrics")).split("\r\n")[0]).toContain("403");
+    expect((await raw("/metrics")).split("\r\n")[0]).toContain("403");
+    expect((await raw("http://x/mcp/anything", "POST")).split("\r\n")[0]).toContain("403");
+    expect((await raw("http://x/health")).split("\r\n")[0]).toContain("200");
   });
 });
 
@@ -254,6 +312,22 @@ describe("break-glass", () => {
     expect((await send(context, { method: "GET", url: "/metrics", from: "127.0.0.1" })).statusCode).toBe(403);
     const view = (await send(context, { method: "GET", url: "/api/settings/network", headers: { cookie }, from: "::1" })).json<NetworkSettingsView>();
     expect(view.breakGlass).toEqual({ ranges: ["127.0.0.0/8", "::1/128"], matched: true });
+  });
+
+  it("never trusts a loopback address read from X-Forwarded-For, even from a trusted proxy range", async () => {
+    const notify = vi.spyOn(NotificationService.prototype, "notify");
+    const context = await createTestContext({ NETWORK_ALLOW_UI: "192.168.0.0/16", NETWORK_ALLOW_API: "192.168.0.0/16", TRUST_PROXY: "10.0.0.0/8" });
+    for (const forwarded of ["127.0.0.1", "::1"]) {
+      expect((await send(context, { method: "GET", url: "/api/auth/me", from: "10.4.5.6", headers: { "x-forwarded-for": forwarded } })).statusCode).toBe(403);
+    }
+    expect(await auditEvents(context.store, "network.break_glass_used")).toEqual([]);
+    expect(notify.mock.calls.filter(([event]) => event.type === "network.break_glass_used")).toHaveLength(0);
+    // An operator on the host itself still gets in.
+    expect((await send(context, { method: "GET", url: "/api/auth/me", from: "127.0.0.1" })).statusCode).toBe(401);
+    // A proxy on the same host connecting over loopback for an outside client is not break-glass.
+    const sameHost = await createTestContext({ NETWORK_ALLOW_UI: "192.168.0.0/16", TRUST_PROXY: "loopback" });
+    expect((await send(sameHost, { method: "GET", url: "/api/auth/me", from: "127.0.0.1", headers: { "x-forwarded-for": OUTSIDE } })).statusCode).toBe(403);
+    expect((await send(sameHost, { method: "GET", url: "/api/auth/me", from: "127.0.0.1", headers: { "x-forwarded-for": "127.0.0.1" } })).statusCode).toBe(401);
   });
 
   it("is off with NETWORK_BREAK_GLASS_CIDRS=none", async () => {
@@ -410,6 +484,17 @@ describe("forwarded client certificates", () => {
     // Validation: a subject pin needs a fingerprint; bad fingerprints are refused.
     expect((await setNetwork(context, cookie, client.id, { certFingerprints: [], certSubject: "x" })).statusCode).toBe(400);
     expect((await setNetwork(context, cookie, client.id, { certFingerprints: ["abc"] })).json<{ error: string }>().error).toContain("SHA-256");
+  });
+
+  it("refuse a header with more than one certificate (401, audited)", async () => {
+    const context = await createTestContext(CERT_ENV);
+    const cookie = await login(context);
+    const { client, token, slug } = await gatewayClient(context, cookie);
+    expect((await setNetwork(context, cookie, client.id, { certFingerprints: [FP_A] })).statusCode).toBe(200);
+    const both = { "x-ssl-client-cert": `${encodeURIComponent(CLIENT_CERT_B_PEM)}, ${encodeURIComponent(CLIENT_CERT_A_PEM)}` };
+    expect((await initialize(context, slug, token, PROXY, both)).statusCode).toBe(401);
+    const refused = await auditEvents(context.store, "mcp_gateway.client_certificate_refused");
+    expect(refused.map((event) => (event.metadata as { reason: string }).reason)).toEqual(["invalid"]);
   });
 
   it("cannot be pinned while forwarded certificates are off, and clients without a pin never need one", async () => {
