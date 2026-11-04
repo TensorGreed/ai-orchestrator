@@ -260,7 +260,7 @@ describe("migration v55", () => {
     const sql = testSql(context.store);
     // A database from before v55: no table, and (Postgres) no v55 in schema_migrations.
     await sql.run("DROP TABLE model_allowlist_entries");
-    if (sql.kind === "postgres") await sql.run("DELETE FROM schema_migrations WHERE version = 55");
+    if (sql.kind === "postgres") await sql.run("DELETE FROM schema_migrations WHERE version >= 55");
     await context.app.close();
     await context.store.close();
     const reopened = await openTestStore(context.file);
