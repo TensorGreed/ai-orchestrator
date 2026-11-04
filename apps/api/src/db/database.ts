@@ -5284,8 +5284,8 @@ export class SqliteStore implements Store {
         const before = Number(previous.refusedFires);
         const refusedFires = (Number.isFinite(before) ? before : 1) + 1;
         this.db
-          .prepare("UPDATE execution_history SET output_json = ? WHERE id = ?")
-          .run(JSON.stringify({ ...previous, refusedFires, lastRefusedAt: input.at }), input.id);
+          .prepare("UPDATE execution_history SET output_json = ?, started_at = ?, completed_at = ? WHERE id = ?")
+          .run(JSON.stringify({ ...previous, refusedFires, lastRefusedAt: input.at }), input.at, input.at, input.id);
         return { created: false, refusedFires };
       }
       this.writeExecutionHistory({
@@ -5299,7 +5299,7 @@ export class SqliteStore implements Store {
         triggerType: input.triggerType,
         ...(input.triggeredBy !== undefined ? { triggeredBy: input.triggeredBy } : {}),
         ...(input.inputJson !== undefined ? { inputJson: input.inputJson } : {}),
-        outputJson: { budgetId: input.budgetId, periodStart: input.periodStart, refusedFires: 1, lastRefusedAt: input.at },
+        outputJson: { budgetId: input.budgetId, periodStart: input.periodStart, refusedFires: 1, firstRefusedAt: input.at, lastRefusedAt: input.at },
         nodeResultsJson: [],
         ...(input.customData !== undefined ? { customData: input.customData } : {}),
         error: input.error

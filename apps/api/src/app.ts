@@ -3253,9 +3253,10 @@ export async function createApp(
   };
   /**
    * 12.6 (D8) — a used-up `block` budget refuses every run a trigger starts, not only `POST /api/workflows/:id/execute`:
-   * webhooks, schedules, chat, forms, app triggers, queue dispatch, retries and gateway workflow tools. Replays of a
-   * run's MCP calls are debugging and are not refused (their spend is still recorded). With no matching block budget
-   * this reads nothing from the store.
+   * webhooks, schedules, chat, forms, app triggers, queue dispatch, retries and MCP replays (`mcp_replay`). A gateway
+   * workflow tool is checked once at the gateway, with its workflow's project, and then runs with `admitted: true`.
+   * Only the tape-only golden `replay` is exempt (no live call, so no spend); a golden replay that may call live is
+   * checked by the replay service (`admitLive`). With no matching block budget this reads nothing from the store.
    */
   const admitRunBudget = async (run: Pick<DispatchedRunInput, "workflow" | "triggerType" | "triggeredBy" | "policyActor" | "gatewayUsage">): Promise<void> => {
     if (BUDGET_EXEMPT_TRIGGER_TYPES.has(run.triggerType)) return;
@@ -3311,6 +3312,9 @@ export async function createApp(
    * only count on that run (`refusedFires`), and only the first is logged. Two leaders firing the same second write it
    * once (the id is derived, not the fire's).
    */
+  /** Last counter write per refused run on this instance: the counter is written at most once a minute. */
+  const refusedCounterWrites = new Map<string, number>();
+  const REFUSED_COUNTER_WRITE_INTERVAL_MS = 60_000;
   const recordBudgetRefusedRun = async (spec: DispatchedRunSpec, error: BudgetExceededError): Promise<WorkflowExecutionResult> => {
     const now = new Date().toISOString();
     const message = `${error.message} The run did not start.`;
@@ -3321,6 +3325,17 @@ export async function createApp(
       .update(JSON.stringify([spec.run.workflow.id, triggerNodeId, spec.run.triggerType, error.budget.id, error.periodStart]))
       .digest("hex")
       .slice(0, 32)}`;
+    // A schedule or poller refused every few seconds would write the row on every fire: after the first write, this
+    // instance writes it at most once a minute. `refusedFires` is therefore approximate (it counts the writes, not
+    // every refused fire), and each write moves the row's start time forward, so it stays recent in the history and
+    // outlives retention while the period is current.
+    const nowMs = Date.now();
+    const lastWrite = refusedCounterWrites.get(executionId);
+    if (lastWrite !== undefined && nowMs - lastWrite < REFUSED_COUNTER_WRITE_INTERVAL_MS) {
+      return { workflowId: spec.run.workflow.id, executionId, status: "error", startedAt: now, completedAt: now, nodeResults: [], error: message };
+    }
+    if (refusedCounterWrites.size >= 10_000) refusedCounterWrites.clear();
+    refusedCounterWrites.set(executionId, nowMs);
     try {
       const recorded = await store.recordBudgetRefusedRun({
         id: executionId,

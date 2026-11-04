@@ -649,13 +649,37 @@ describe("a block budget refuses runs from every trigger", () => {
     expect((await runs(store)).length).toBe(runsBefore);
   });
 
+  it("N-L3: a refused trigger writes its counter at most once a minute per instance", async () => {
+    const fixture = await overGlobalBudget();
+    const { store } = fixture.context;
+    await store.upsertWorkflow(triggerWorkflow("wf-fast", "schedule_trigger"));
+    const writes = vi.spyOn(store, "recordBudgetRefusedRun");
+    const fire = async () => {
+      const at = new Date().toISOString();
+      await fixture.context.schedule!({ workflowId: "wf-fast", workflowName: "fast", scheduleNodeId: "start", cronExpression: "* * * * *", timezone: "UTC", firedAt: at, scheduledFor: at });
+    };
+    for (let i = 0; i < 6; i += 1) await fire();
+    expect(writes).toHaveBeenCalledTimes(1);
+    const realNow = Date.now.bind(Date);
+    vi.spyOn(Date, "now").mockImplementation(() => realNow() + 61_000);
+    await fire();
+    expect(writes).toHaveBeenCalledTimes(2);
+    const [row] = (await runs(store)).filter((run) => run.workflowId === "wf-fast");
+    expect((await store.getExecutionHistory(row!.id))?.output).toMatchObject({ refusedFires: 2 });
+  });
+
   it("records one failed run per schedule and budget period; later refused fires only count on it (D13)", async () => {
     const fixture = await overGlobalBudget();
     const { store } = fixture.context;
     await store.upsertWorkflow(triggerWorkflow("wf-cron", "schedule_trigger"));
     // A minutely schedule under a used-up budget: five fires, one run.
+    // The refused-run counter is written at most once a minute per instance: the clock moves a minute per fire.
+    const realNow = Date.now.bind(Date);
+    let skew = 0;
+    vi.spyOn(Date, "now").mockImplementation(() => realNow() + skew);
     for (let minute = 0; minute < 5; minute += 1) {
-      const at = new Date(Date.now() + minute * 60_000).toISOString();
+      skew = minute * 61_000;
+      const at = new Date(realNow() + minute * 60_000).toISOString();
       await fixture.context.schedule!({ workflowId: "wf-cron", workflowName: "cron", scheduleNodeId: "start", cronExpression: "* * * * *", timezone: "UTC", firedAt: at, scheduledFor: at });
     }
     const cron = (await runs(store)).filter((run) => run.workflowId === "wf-cron");
@@ -664,6 +688,11 @@ describe("a block budget refuses runs from every trigger", () => {
     const detail = await store.getExecutionHistory(cron[0]!.id);
     expect(detail?.error).toBe('Budget "Deployment cap" exceeded for the current month. The run did not start.');
     expect(detail?.output).toMatchObject({ refusedFires: 5, periodStart: expect.any(String), budgetId: expect.any(String) });
+    expect(detail?.output).toMatchObject({ firstRefusedAt: expect.any(String), lastRefusedAt: expect.any(String) });
+    // Each counted fire moved the run's start time to the latest refusal, so history ordering and retention see it recent.
+    expect(Date.parse(detail!.startedAt)).toBeGreaterThan(Date.parse((detail!.output as { firstRefusedAt: string }).firstRefusedAt) - 1);
+    vi.restoreAllMocks();
+    skew = 0;
     // Another budget refusing it is another record (its own period and reason).
     await deleteBudgets(fixture);
     await createBudget(fixture, { name: "Cron cap", scopeType: "workflow", scopeId: "wf-cron", limitType: "tokens", limitValue: 1, action: "block" });
@@ -939,7 +968,7 @@ describe("review M1: a gateway run that waits on an approval stays the client's"
     const spent = Number(rows[0]!.total_tokens);
     expect(spent).toBeGreaterThan(0);
     const after = (await clientBudgets(fixture, fixture.admin, own.client.id)).find((entry) => entry.budgetId === budgetId)!.current;
-    expect(after - before).toBe(spent);
+    expect((after ?? 0) - (before ?? 0)).toBe(spent);
     // The approver's own usage is untouched.
     expect(await store.queryBudgetUsage({ from: new Date(Date.now() - 60_000).toISOString(), to: new Date(Date.now() + 60_000).toISOString(), userKey: "admin@example.com" })).toEqual({ costUsd: 0, totalTokens: 0 });
     expect((finished!.customData as Record<string, unknown>).gatewayUsage).toMatchObject({ clientId: own.client.id });
@@ -976,6 +1005,29 @@ describe("review M2 / D13: refused app triggers", () => {
     } as Workflow;
   }
 
+  it("N-L2: a refusal on a long feed with a large maxItemsPerTick keeps the earlier seen list, so nothing is lost", async () => {
+    const ids = Array.from({ length: 600 }, (_, index) => `item-${index}`);
+    const feed = `<rss><channel>${ids.map((id) => `<item><guid>${id}</guid><title>${id}</title></item>`).join("")}</channel></rss>`;
+    const fetchImpl = vi.fn(async () => new Response(feed, { status: 200, headers: { "content-type": "application/rss+xml" } })) as unknown as typeof fetch;
+    let triggers: TriggerService | undefined;
+    const fixture = await setup({}, "default", {
+      triggerService: (store) => (triggers = new TriggerService(store, () => undefined, fetchImpl))
+    });
+    const { store } = fixture.context;
+    triggers!.setOutboundGuard(DEFAULT_OUTBOUND_GUARD, async () => ["93.184.216.34"]);
+    const workflow = rssWorkflow("wf-long-feed");
+    const node = { ...workflow.nodes[0]!, config: { ...(workflow.nodes[0]!.config as object), maxItemsPerTick: 100 } };
+    await store.upsertWorkflow(workflow);
+    await store.saveTriggerState({ workflowId: workflow.id, nodeId: "feed", triggerType: "rss_trigger", state: { seen: ["item-0"] } });
+    await createBudget(fixture, { name: "Deployment cap", scopeType: "global", limitType: "tokens", limitValue: 10, action: "block" });
+    await seedRunUsage(store, { tokens: 50 });
+    const stop = (triggers as unknown as { startRssTrigger: (wf: Workflow, n: typeof node) => () => void }).startRssTrigger(workflow, node);
+    await until(async () => (await runs(store)).find((entry) => entry.workflowId === workflow.id && entry.status === "error"), "the refused run");
+    stop();
+    const seen = ((await store.getTriggerState(workflow.id, "feed")) as { seen?: string[] }).seen;
+    expect(seen).toEqual(["item-0"]);
+  });
+
   it("keeps an RSS item a budget refused unseen, records one failed run, and delivers it once the budget allows", async () => {
     const feed = `<rss><channel><item><guid>item-1</guid><title>One</title><link>https://feeds.example.com/1</link></item><item><guid>item-0</guid><title>Zero</title></item></channel></rss>`;
     const fetchImpl = vi.fn(async () => new Response(feed, { status: 200, headers: { "content-type": "application/rss+xml" } })) as unknown as typeof fetch;
@@ -1004,10 +1056,13 @@ describe("review M2 / D13: refused app triggers", () => {
     }, "the refused item to stay unseen");
     firstPoll();
     // A second poll under the same budget: still one failed run, its counter bumped.
+    const realNow = Date.now.bind(Date);
+    vi.spyOn(Date, "now").mockImplementation(() => realNow() + 61_000);
     const secondPoll = start();
     await until(async () => ((await store.getExecutionHistory(refused.id))?.output as { refusedFires?: number } | undefined)?.refusedFires === 2, "the second refusal to be counted");
     secondPoll();
     expect(await feedRuns()).toHaveLength(1);
+    vi.mocked(Date.now).mockRestore();
 
     await deleteBudgets(fixture);
     const thirdPoll = start();
@@ -1039,6 +1094,36 @@ describe("review M3: the client's Governance lists every budget that applies", (
     ]);
     // The refusing one is what the client's calls get.
     expect((await toolCaller(fixture)("calculator", { expression: "1+1" })).error).toMatchObject({ code: -32032, data: { budgetId: global } });
+  });
+
+  it("N-M1: a builder sees no amounts of the deployment's budget and no project they cannot read; an admin sees all", async () => {
+    const fixture = await setup({ PROJECT_ISOLATION: "strict" });
+    const builder = await login(fixture.context, "builder");
+    const own = await createBudget(fixture, { name: "IDE cap", scopeType: "mcp_client", scopeId: fixture.client.id, limitType: "tokens", limitValue: 1_000, action: "block" });
+    const project = await createBudget(fixture, { name: "Team cap", scopeType: "project", scopeId: "default", limitType: "tokens", limitValue: 1_000, action: "warn" });
+    const global = await createBudget(fixture, { name: "Deployment cap", scopeType: "global", limitType: "tokens", limitValue: 10, action: "block" });
+    await seedRunUsage(fixture.context.store, { tokens: 50, projectId: "elsewhere-project" });
+
+    const asAdmin = await clientBudgets(fixture, fixture.admin, fixture.client.id);
+    expect(asAdmin.map((entry) => entry.budgetId)).toEqual([own, project, global]);
+    expect(asAdmin.find((entry) => entry.budgetId === global)).toMatchObject({ limitValue: 10, current: 50, refusing: true });
+
+    // A builder outside the project (strict isolation): their own client's budget and the deployment's, without amounts.
+    const outside = await clientBudgets(fixture, builder, fixture.client.id);
+    expect(outside.map((entry) => entry.budgetId)).toEqual([own, global]);
+    const hidden = outside.find((entry) => entry.budgetId === global)!;
+    expect(hidden).toMatchObject({ name: "Deployment cap", scopeLabel: "Deployment", action: "block", refusing: true });
+    expect(hidden).not.toHaveProperty("limitValue");
+    expect(hidden).not.toHaveProperty("current");
+    expect(JSON.stringify(outside)).not.toContain("Team cap");
+
+    // A member of the project sees that project's budget with its amounts, the deployment's still without.
+    const builderUser = (await fixture.context.store.getUserByEmail("builder@example.com"))!;
+    await fixture.context.store.upsertProjectRole({ userId: builderUser.id, projectId: "default", role: "viewer", customRoleId: null });
+    const member = await clientBudgets(fixture, builder, fixture.client.id);
+    expect(member.map((entry) => entry.budgetId)).toEqual([own, project, global]);
+    expect(member.find((entry) => entry.budgetId === project)).toMatchObject({ limitValue: 1_000 });
+    expect(member.find((entry) => entry.budgetId === global)).not.toHaveProperty("limitValue");
   });
 });
 

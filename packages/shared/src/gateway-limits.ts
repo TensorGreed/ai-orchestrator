@@ -140,11 +140,12 @@ export interface McpClientBudgetUsage {
   scopeId: string | null;
   period: "day" | "week" | "month";
   limitType: "usd" | "tokens";
-  limitValue: number;
+  /** The cap. Absent for a non-admin viewer of a deployment-wide budget (its amounts are admin-only). */
+  limitValue?: number;
   action: "warn" | "block";
   enabled: boolean;
-  /** What the budget counted from `periodStart` until now (USD or tokens, as `limitType`). */
-  current: number;
+  /** What the budget counted from `periodStart` until now (USD or tokens, as `limitType`). Absent with `limitValue`. */
+  current?: number;
   periodStart: string;
   /**
    * Why it applies to the client, for display: "Deployment" (global), "Project <name>" (a toolset's project), or

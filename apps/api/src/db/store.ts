@@ -1714,8 +1714,9 @@ export interface Store {
   /**
    * 12.6 (D13) — a fired run (a schedule, an app trigger) a used-up budget refused, kept as one failed run per trigger
    * per budget period: `id` is derived from them. The first refusal writes the run (`status = error`, the reason in
-   * `error`, `output_json = { budgetId, periodStart, refusedFires: 1, lastRefusedAt }`); each later one only adds one
-   * to `refusedFires` and sets `lastRefusedAt`, in one statement (two replicas firing at once count both, once).
+   * `error`, `output_json = { budgetId, periodStart, refusedFires: 1, firstRefusedAt, lastRefusedAt }`); each later one only adds one
+   * to `refusedFires`, sets `lastRefusedAt` and moves `started_at` / `completed_at` to the refusal (so the row stays recent in
+   * the history and outlives retention while the period is current), in one statement (two replicas firing at once count both, once).
    * `created` is true only for the write that made the row.
    */
   recordBudgetRefusedRun(input: {

@@ -637,6 +637,20 @@ describe("MCP gateway views", () => {
     expect(rpm).toHaveValue(60);
   });
 
+  it("N-M1: a deployment budget without amounts shows its label and that it refuses, with no cap or spend", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.fetchMcpClientBudgets).mockResolvedValue({
+      clientId: "mcc_1",
+      budgets: [{ budgetId: "b3", name: "Deployment cap", scopeType: "global", scopeId: null, period: "month", limitType: "usd", action: "block", enabled: true, periodStart: "2026-11-01T00:00:00.000Z", scopeLabel: "Deployment", refusing: true }]
+    });
+    render(<McpServersPage view="clients" isAdmin activeProjectId={null} />);
+    const list = await screen.findByRole("list", { name: "MCP clients" });
+    await user.click(within(list).getByRole("button", { name: "Governance" }));
+    const budgets = within(await within(list).findByRole("region", { name: "Client governance" })).getByTestId("gateway-client-budgets");
+    expect(await within(budgets).findByText("Deployment cap")).toBeInTheDocument();
+    expect(within(budgets).getByRole("listitem").textContent).toBe("Deployment · Deployment cap: per month · blocks calls when used up · Used up: refusing this client's calls");
+  });
+
   it("shows builders a client's rate limit and budgets read-only", async () => {
     const user = userEvent.setup();
     vi.mocked(api.fetchMcpClients).mockResolvedValue({ usageWindow: "7d", clients: [{ ...activeClient, rateLimit: { requestsPerMinute: 30, burst: null, maxConcurrent: 2 } }] });

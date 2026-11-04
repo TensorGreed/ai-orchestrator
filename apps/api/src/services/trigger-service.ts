@@ -524,14 +524,14 @@ export class TriggerService {
             rss_items: fresh
           }
         });
-        // 12.6 (D13) — refused by a budget: these items are not seen yet, so they fire on a later poll.
+        // 12.6 (D13) — refused by a budget: the earlier list again (as the file trigger does), so these items, and
+        // those beyond maxItemsPerTick, fire on a later poll. Never an emptied list, which would read as a first poll.
         if (delivery === "refused") {
-          const refused = new Set(fresh.map((item) => item.id));
           await this.store.saveTriggerState({
             workflowId: workflow.id,
             nodeId: node.id,
             triggerType: "rss_trigger",
-            state: { seen: mergedSeen.filter((id) => !refused.has(id)) }
+            state: { seen: Array.from(seen) }
           });
         }
       } catch (err) {

@@ -10,11 +10,13 @@ import { deleteUnlockedInBatches } from "./prune.js";
 
 /** 12.6 (D13) — see Store.recordBudgetRefusedRun: one row per trigger per budget period, its counter bumped atomically. */
 export async function recordBudgetRefusedRun(ctx: PgContext, input: Parameters<Store["recordBudgetRefusedRun"]>[0]): ReturnType<Store["recordBudgetRefusedRun"]> {
-  const output = { budgetId: input.budgetId, periodStart: input.periodStart, refusedFires: 1, lastRefusedAt: input.at };
+  const output = { budgetId: input.budgetId, periodStart: input.periodStart, refusedFires: 1, firstRefusedAt: input.at, lastRefusedAt: input.at };
   const result = await ctx.pool.query<{ created: boolean; output_json: string | null }>(
     `INSERT INTO execution_history (id, workflow_id, workflow_name, status, started_at, completed_at, duration_ms, trigger_type, triggered_by, input_json, output_json, node_results_json, custom_data_json, error)
        VALUES ($1, $2, $3, 'error', $4, $4, 0, $5, $6, $7, $8, '[]', $9, $10)
        ON CONFLICT (id) DO UPDATE SET
+         started_at = $4,
+         completed_at = $4,
          output_json = (
            jsonb_set(
              COALESCE(NULLIF(execution_history.output_json, '')::jsonb, '{}'::jsonb),

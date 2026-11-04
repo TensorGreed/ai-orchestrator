@@ -402,14 +402,17 @@ export function ClientBudgets({ clientId }: { clientId: string }) {
       {budgets && budgets.length > 0 && (
         <ul className="mcp-gw-budget-list">
           {budgets.map((budget) => {
-            const pct = budget.limitValue > 0 ? Math.min(100, Math.round((budget.current / budget.limitValue) * 100)) : 0;
+            const amounts = budget.limitValue !== undefined && budget.current !== undefined ? { cap: budget.limitValue, spent: budget.current } : null;
+            const pct = amounts && amounts.cap > 0 ? Math.min(100, Math.round((amounts.spent / amounts.cap) * 100)) : 0;
             return (
               <li key={budget.budgetId} data-refusing={budget.refusing ? "true" : undefined}>
                 <span className="kb-subtle">{budget.scopeLabel}</span>
                 {" · "}
                 <strong>{budget.name}</strong>
                 {": "}
-                {formatBudgetAmount(budget.current, budget.limitType)} of {formatBudgetAmount(budget.limitValue, budget.limitType)} this {budget.period} ({pct}%)
+                {amounts
+                  ? `${formatBudgetAmount(amounts.spent, budget.limitType)} of ${formatBudgetAmount(amounts.cap, budget.limitType)} this ${budget.period} (${pct}%)`
+                  : `per ${budget.period}`}
                 {" · "}
                 {budget.action === "block" ? "blocks calls when used up" : "warns only"}
                 {!budget.enabled && " · off"}

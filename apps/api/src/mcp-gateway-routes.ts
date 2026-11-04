@@ -2373,7 +2373,11 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
       reply.code(404);
       return { error: "Client not found" };
     }
-    return { clientId: client.id, budgets: deps.budgets ? await deps.budgets.clientUsage({ id: client.id, name: client.name, toolsetIds: client.toolsetIds }) : [] };
+    if (!deps.budgets) return { clientId: client.id, budgets: [] };
+    // Admins see every amount; a builder sees only projects they can read, and the deployment's budget without amounts
+    // (the budget routes and usage pages are admin-only).
+    const viewer = user.role === "admin" ? undefined : { canReadProject: async (projectId: string) => (await deps.runAccess.project(user, projectId, "workflow:read")).ok };
+    return { clientId: client.id, budgets: await deps.budgets.clientUsage({ id: client.id, name: client.name, toolsetIds: client.toolsetIds }, viewer) };
   });
 
   // Phase 12.4 — gateway calls a require_approval rule held back. Admins decide; the client retries the call.

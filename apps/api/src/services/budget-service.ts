@@ -277,9 +277,16 @@ export class BudgetService {
    * 12.6 — every budget that applies to a gateway client's calls, with what each counted this period (the client's
    * Governance): its own (`mcp_client`), those of its toolsets' projects, and the deployment's (`global`). Each is
    * labelled by scope; `refusing` marks an enabled block budget whose cap is met (it refuses the client's calls now).
-   * The client's own come first, then the projects', then the deployment's. A read for the admin view, not the hot path.
+   * The client's own come first, then the projects', then the deployment's. Not the hot path.
+   *
+   * `viewer` limits what a non-admin sees (the route is builder-readable, the usage routes are admin-only): a project's
+   * budget only when `canReadProject` says so, and the deployment's (global) budget without its cap and spend; only its
+   * name, label, action and whether it refuses the client. Without `viewer` everything is shown (admins).
    */
-  async clientUsage(client: { id: string; name: string; toolsetIds?: readonly string[] }): Promise<McpClientBudgetUsage[]> {
+  async clientUsage(
+    client: { id: string; name: string; toolsetIds?: readonly string[] },
+    viewer?: { canReadProject: (projectId: string) => Promise<boolean> }
+  ): Promise<McpClientBudgetUsage[]> {
     const budgets = await this.store.listBudgets({});
     const projectIds: string[] = [];
     for (const toolsetId of client.toolsetIds ?? []) {
@@ -288,9 +295,11 @@ export class BudgetService {
     }
     const projectNames = new Map<string, string>();
     for (const projectId of projectIds) projectNames.set(projectId, (await this.store.getProject(projectId))?.name ?? projectId);
+    const readable = new Set<string>();
+    for (const projectId of projectIds) if (!viewer || (await viewer.canReadProject(projectId))) readable.add(projectId);
     const rank = (budget: BudgetRecord): number => {
       if (budget.scopeType === "mcp_client" && budget.scopeId === client.id) return 0;
-      if (budget.scopeType === "project" && budget.scopeId && projectNames.has(budget.scopeId)) return 1;
+      if (budget.scopeType === "project" && budget.scopeId && projectNames.has(budget.scopeId) && readable.has(budget.scopeId)) return 1;
       if (budget.scopeType === "global") return 2;
       return -1;
     };
@@ -303,17 +312,17 @@ export class BudgetService {
     for (const { budget, order } of applying) {
       const periodStart = currentPeriodStart(budget.period);
       const current = await this.currentUsage(budget, ctx, periodStart);
+      const hideAmounts = viewer !== undefined && order === 2;
       views.push({
         budgetId: budget.id,
         name: budget.name,
         scopeType: budget.scopeType,
-        scopeId: budget.scopeId,
+        scopeId: hideAmounts ? null : budget.scopeId,
         period: budget.period,
         limitType: budget.limitType,
-        limitValue: budget.limitValue,
+        ...(hideAmounts ? {} : { limitValue: budget.limitValue, current }),
         action: budget.action,
         enabled: budget.enabled,
-        current,
         periodStart,
         scopeLabel: order === 0 ? "This client" : order === 1 ? `Project ${projectNames.get(budget.scopeId!)}` : "Deployment",
         refusing: budget.enabled && budget.action === "block" && current >= budget.limitValue
