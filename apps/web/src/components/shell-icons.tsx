@@ -127,6 +127,14 @@ export const McpClientsIcon = (p: IconProps) => (
   </Svg>
 );
 
+/** 12.6b — AI routes: one entry fanning out to models. */
+export const McpAiRoutesIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M4 12h5" />
+    <path d="M9 12l5-6h6M9 12l5 6h6M14 12h6" />
+  </Svg>
+);
+
 export const McpPlaygroundIcon = (p: IconProps) => (
   <Svg {...p}>
     <path d="M9 3h6M10 3v6l-5 9a2 2 0 0 0 1.8 3h10.4a2 2 0 0 0 1.8-3l-5-9V3" />
@@ -283,6 +291,7 @@ export const MODE_ICONS: Record<StudioMode, (p: IconProps) => ReactElement> = {
   "mcp-policies": McpPoliciesIcon,
   "mcp-toolsets": McpToolsetsIcon,
   "mcp-clients": McpClientsIcon,
+  "mcp-ai-routes": McpAiRoutesIcon,
   "mcp-playground": McpPlaygroundIcon,
   "mcp-changes": McpChangesIcon,
   connections: ConnectionsIcon,

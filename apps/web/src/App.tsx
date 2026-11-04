@@ -5510,6 +5510,7 @@ function StudioApp() {
             activeMode === "mcp-policies" ||
             activeMode === "mcp-toolsets" ||
             activeMode === "mcp-clients" ||
+            activeMode === "mcp-ai-routes" ||
             activeMode === "mcp-playground") && (
             <McpServersPage
               key={activeMode}
@@ -5520,9 +5521,11 @@ function StudioApp() {
                     ? "toolsets"
                     : activeMode === "mcp-clients"
                       ? "clients"
-                      : activeMode === "mcp-playground"
-                        ? "playground"
-                        : "servers"
+                      : activeMode === "mcp-ai-routes"
+                        ? "ai-routes"
+                        : activeMode === "mcp-playground"
+                          ? "playground"
+                          : "servers"
               }
               focusServerId={mcpFocus?.page === "servers" ? mcpFocus.serverId : null}
               focusPolicyId={mcpFocus?.page === "policies" ? mcpFocus.policyId : null}

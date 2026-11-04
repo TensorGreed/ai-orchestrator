@@ -3,8 +3,9 @@
  *
  * `GatewayGuardPicker` picks the Guard profile that checks a toolset's or client's tool calls (none by default).
  * `GatewayRateLimitEditor` sets an optional rate limit (a client's own, or a toolset's default for each client).
- * `ClientGovernance` is the client's Governance section: one row per setting (Guard, rate limit, budgets). Admins
- * change them; everyone else reads them.
+ * `ClientGovernance` is the client's Governance section: one row per setting (Guard, rate limit, budgets, and the
+ * AI routes it may call on /v1). Admins change them; everyone else reads them. 12.6b — the pickers also serve an AI
+ * gateway route set (`ai_route_set`).
  */
 
 import { useEffect, useState, type ReactNode } from "react";
@@ -27,7 +28,13 @@ import {
   fetchGuardProfiles,
   fetchGuardToolsetBinding,
   updateGuardClientBinding,
-  updateGuardToolsetBinding
+  updateGuardToolsetBinding,
+  fetchAiGatewayRouteSetGuard,
+  updateAiGatewayRouteSetGuard,
+  fetchAiGatewayClientGrants,
+  fetchAiGatewayRouteSets,
+  updateAiGatewayClientGrants,
+  type AiGatewayRouteSetView
 } from "../lib/api";
 
 function formatError(err: unknown): string {
@@ -36,11 +43,12 @@ function formatError(err: unknown): string {
   return "Unexpected error";
 }
 
-type Scope = "toolset" | "client";
+type Scope = "toolset" | "client" | "ai_route_set";
 
 const HELP: Record<Scope, string> = {
   toolset: "Checks what clients send to this toolset's tools and what comes back, and the Content Rules nodes and agents of its workflow tools.",
-  client: "Checks this client's tool calls on every toolset, on top of the toolset's own rule set."
+  client: "Checks this client's tool calls on every toolset, on top of the toolset's own rule set.",
+  ai_route_set: "Checks the prompts clients send to this set's models and the answers that come back."
 };
 
 const HELD_ACTIONS = new Set(["review", "require_approval"]);
@@ -78,6 +86,10 @@ interface Loaded {
 }
 
 async function load(scope: Scope, id: string): Promise<Loaded> {
+  if (scope === "ai_route_set") {
+    const result = await fetchAiGatewayRouteSetGuard(id);
+    return { profileId: result.binding.mode === "override" ? result.binding.profileId : null, stack: result.effective.stack };
+  }
   if (scope === "toolset") {
     const result = await fetchGuardToolsetBinding(id);
     return { profileId: result.binding.mode === "override" ? result.binding.profileId : null, stack: result.effective.stack };
@@ -87,6 +99,10 @@ async function load(scope: Scope, id: string): Promise<Loaded> {
 }
 
 async function save(scope: Scope, id: string, payload: GuardGatewayBindingInput): Promise<Loaded> {
+  if (scope === "ai_route_set") {
+    const result = await updateAiGatewayRouteSetGuard(id, payload);
+    return { profileId: result.binding.mode === "override" ? result.binding.profileId : null, stack: result.effective.stack };
+  }
   if (scope === "toolset") {
     const result = await updateGuardToolsetBinding(id, payload);
     return { profileId: result.binding.mode === "override" ? result.binding.profileId : null, stack: result.effective.stack };
@@ -139,7 +155,7 @@ export function GatewayGuardPicker({ scope, id, isAdmin, disabled = false }: { s
     };
   }, [scope, id, isAdmin]);
 
-  const label = scope === "toolset" ? "Rule set for this toolset" : "Rule set for this client";
+  const label = scope === "toolset" ? "Rule set for this toolset" : scope === "ai_route_set" ? "Rule set for this route set" : "Rule set for this client";
   const helpId = `gateway-guard-help-${scope}-${id}`;
   const apply = async () => {
     setBusy(true);
@@ -235,6 +251,7 @@ const RATE_LIMIT_FIELDS: Array<{ field: RateLimitField; label: string }> = [
 
 const RATE_LIMIT_HELP: Record<Scope, string> = {
   client: "Caps this client's tool calls on every toolset and replaces the toolset default entirely. Leave a field empty for no limit there.",
+  ai_route_set: "Caps each client's /v1 calls to this set's models. A client's own limit replaces this default entirely. Leave a field empty for no limit there.",
   toolset: "Caps each client's calls to this toolset. A client's own limit replaces this default entirely. Leave a field empty for no limit there."
 };
 
@@ -467,6 +484,90 @@ export function ClientGovernance({
       <GovernanceRow title="Budgets">
         <ClientBudgets clientId={clientId} />
       </GovernanceRow>
+      <GovernanceRow title="AI routes">
+        <ClientAiGrants clientId={clientId} isAdmin={isAdmin && active} />
+      </GovernanceRow>
     </section>
+  );
+}
+
+/** 12.6b — the AI gateway route sets a client may call on /v1 (none by default). Admins pick; everyone else reads. */
+export function ClientAiGrants({ clientId, isAdmin }: { clientId: string; isAdmin: boolean }) {
+  const [sets, setSets] = useState<AiGatewayRouteSetView[] | null>(null);
+  const [granted, setGranted] = useState<string[]>([]);
+  const [draft, setDraft] = useState<string[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [saved, setSaved] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    setError(null);
+    setSets(null);
+    Promise.all([fetchAiGatewayRouteSets(), fetchAiGatewayClientGrants(clientId)])
+      .then(([list, grants]) => {
+        if (cancelled) return;
+        setSets(list.routeSets);
+        setGranted(grants.routeSetIds);
+        setDraft(grants.routeSetIds);
+      })
+      .catch((err) => {
+        if (!cancelled) setError(formatError(err));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [clientId]);
+
+  const toggle = (id: string) => {
+    setSaved(false);
+    setDraft((current) => (current.includes(id) ? current.filter((entry) => entry !== id) : [...current, id]));
+  };
+  const apply = async () => {
+    setBusy(true);
+    setError(null);
+    setSaved(false);
+    try {
+      const result = await updateAiGatewayClientGrants(clientId, draft);
+      setGranted(result.routeSetIds);
+      setDraft(result.routeSetIds);
+      setSaved(true);
+    } catch (err) {
+      setError(formatError(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const changed = draft.length !== granted.length || draft.some((id) => !granted.includes(id));
+  const names = new Map((sets ?? []).map((set) => [set.id, set.name]));
+  const aliases = (set: AiGatewayRouteSetView) => set.routes.map((route) => route.alias).join(", ") || "no models yet";
+
+  return (
+    <div className="mcp-gw-ai-grants" data-testid="gateway-client-ai-grants">
+      {error && <div className="settings-error">{error}</div>}
+      {sets === null && !error && <p className="kb-subtle">Loading…</p>}
+      {sets && sets.length === 0 && <p className="kb-subtle">No AI route sets yet. Admins create them under MCP, AI routes.</p>}
+      {sets && sets.length > 0 && isAdmin && (
+        <>
+          <fieldset className="mcp-gw-ai-grant-list">
+            <legend className="kb-subtle">Route sets this client may call on /v1</legend>
+            {sets.map((set) => (
+              <label key={set.id}>
+                <input type="checkbox" checked={draft.includes(set.id)} onChange={() => toggle(set.id)} disabled={busy} />
+                {set.name} <span className="kb-subtle">({aliases(set)})</span>
+              </label>
+            ))}
+          </fieldset>
+          <button type="button" className="pg-btn small" onClick={() => void apply()} disabled={busy || !changed}>
+            Save
+          </button>
+          {saved && <span className="kb-subtle"> Saved</span>}
+        </>
+      )}
+      {sets && sets.length > 0 && !isAdmin && (
+        <p>{granted.length === 0 ? "None" : granted.map((id) => names.get(id) ?? id).join(", ")}</p>
+      )}
+      <small className="kb-subtle">The client calls these models at /v1 with its own token, by the route's model name; its Guard profile, rate limit and budgets apply there too. None by default.</small>
+    </div>
   );
 }

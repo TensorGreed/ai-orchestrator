@@ -144,7 +144,7 @@ export function McpClientsView({ isAdmin }: McpClientsViewProps) {
         <div className="mcp-section-head">
           <h4>MCP clients ({clients.length})</h4>
           {isAdmin && !creating && !revealed && (
-            <button type="button" className="pg-btn primary" onClick={() => setCreating(true)} disabled={toolsets.length === 0}>
+            <button type="button" className="pg-btn primary" onClick={() => setCreating(true)}>
               + New client
             </button>
           )}
@@ -155,7 +155,7 @@ export function McpClientsView({ isAdmin }: McpClientsViewProps) {
           only once.
         </p>
         {isAdmin && toolsets.length === 0 && !loading && (
-          <p className="kb-subtle">Create a toolset first; a client needs at least one.</p>
+          <p className="kb-subtle">No toolsets yet: a new client can call only the AI routes you grant it (Governance, AI routes).</p>
         )}
 
         {creating && isAdmin && (
@@ -329,10 +329,6 @@ function McpClientForm({
       setError("Name is required");
       return;
     }
-    if (toolsetIds.length === 0) {
-      setError("Pick at least one toolset");
-      return;
-    }
     const days = EXPIRY_OPTIONS.find((option) => option.value === expiry)?.days ?? null;
     const expiresAt = days === null ? null : new Date(Date.now() + days * 86_400_000).toISOString();
     setBusy(true);
@@ -376,7 +372,7 @@ function McpClientForm({
         </label>
       </div>
       <fieldset className="mcp-role-picker mcp-gw-picker">
-        <legend className="kb-subtle">Toolsets this token may call</legend>
+        <legend className="kb-subtle">Toolsets this token may call (none: AI routes only, granted after creating it)</legend>
         {toolsets.map((toolset) => (
           <label key={toolset.id} className="mcp-check">
             <input type="checkbox" checked={toolsetIds.includes(toolset.id)} onChange={() => toggle(toolset.id)} />
