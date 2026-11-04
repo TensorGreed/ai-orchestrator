@@ -13928,6 +13928,55 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     return { ok: true, tag: parsed.data.name };
   });
 
+  // Roadmap 7.3 — rename a tag on every workflow that carries it. A tag is its name, so `:tag` is the current name.
+  app.put<{ Params: { tag: string }; Body: unknown }>("/api/tags/:tag", async (request, reply) => {
+    const user = await requireRole(request, reply, ["builder"]);
+    if (!user) return;
+    const parsed = z.object({ name: z.string().trim().min(1).max(100) }).safeParse(request.body ?? {});
+    if (!parsed.success) {
+      reply.code(400);
+      return { error: "Invalid tag name", details: parsed.error.issues };
+    }
+    const from = request.params.tag;
+    const to = parsed.data.name;
+    const workflows = await store.listWorkflows();
+    const carrying = workflows.filter((workflow) => (workflow.tags ?? []).includes(from));
+    if (carrying.length === 0) {
+      reply.code(404);
+      return { error: "Tag not found" };
+    }
+    // Tags match case-insensitively in filters, so a name that differs from another tag only by case is taken.
+    const taken = workflows.some((workflow) => (workflow.tags ?? []).some((tag) => tag !== from && tag.toLowerCase() === to.toLowerCase()));
+    if (taken) {
+      reply.code(409);
+      return { error: `A tag named "${to}" already exists` };
+    }
+    if (to === from) return { ok: true, tag: to, previous: from, renamedInWorkflows: 0 };
+    // Every workflow is checked before any is changed, so a rename never stops halfway on a permission.
+    const targets: Workflow[] = [];
+    for (const summary of carrying) {
+      const access = await runAccess.workflow(user, summary.id, "workflow:write");
+      if (!access.ok) {
+        reply.code(403);
+        return { error: "The tag is on workflows you cannot edit" };
+      }
+      targets.push(access.workflow);
+    }
+    for (const workflow of targets) {
+      const tags = [...new Set((workflow.tags ?? []).map((tag) => (tag === from ? to : tag)))];
+      await store.upsertWorkflow({ ...workflow, tags });
+    }
+    await audit(request, user, {
+      category: "workflow",
+      eventType: "tag.rename",
+      action: "update",
+      resourceType: "tag",
+      resourceId: to,
+      metadata: { from, to, renamedInWorkflows: targets.length }
+    });
+    return { ok: true, tag: to, previous: from, renamedInWorkflows: targets.length };
+  });
+
   app.delete<{ Params: { tag: string } }>("/api/tags/:tag", async (request, reply) => {
     const user = await requireRole(request, reply, ["admin"]);
     if (!user) return;
