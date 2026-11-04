@@ -3,6 +3,7 @@ import {
   approvalGateConfigSchema,
   guardNodeConfigSchema,
   guardProtectionNodeConfigSchema,
+  parseIpAllowlist,
   workflowSchema,
   type Workflow,
   type WorkflowValidationIssue,
@@ -264,6 +265,21 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
           });
         } else {
           webhookRoutes.set(routeKey, node.id);
+        }
+      }
+
+      // 13.2 — an optional address list: every entry an IP address or CIDR range.
+      if (config.allowedIps !== undefined) {
+        const entries = Array.isArray(config.allowedIps) ? config.allowedIps : null;
+        const invalid = entries
+          ? parseIpAllowlist(entries.map((entry) => (typeof entry === "string" ? entry : String(entry)))).invalid
+          : [String(config.allowedIps)];
+        if (invalid.length > 0) {
+          issues.push({
+            code: "invalid_webhook_allowed_ips",
+            message: `Webhook Input node allowedIps must list IP addresses or CIDR ranges; '${invalid[0]}' is neither.`,
+            nodeId: node.id
+          });
         }
       }
 

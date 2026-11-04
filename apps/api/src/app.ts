@@ -48,8 +48,10 @@ import {
   mcpToolPolicyRuleInputSchema,
   mcpToolPolicyRuleIssues,
   mcpToolPolicyRuleUpdateSchema,
+  NETWORK_DENIED_MESSAGE,
   NODE_ACTIVITY_LIMIT,
   nodeDefinitions,
+  readStoredIpAllowlist,
   workflowExecuteRequestSchema,
   workflowSchema,
   type LLMProviderConfig,
@@ -105,6 +107,7 @@ import {
   resolveOidcSettings,
   resolveSamlSettings,
   parseTrustProxy,
+  resolveNetworkSettings,
   resolveSsoMfaSettings,
   resolveQueueSettings,
   resolveExecutionDispatch,
@@ -290,6 +293,7 @@ import { LogStreamingService } from "./services/log-streaming-service";
 import { NotificationService } from "./services/notification-service";
 import { openApiSpec } from "./openapi.js";
 import { gatewayAllowedOrigins, isGatewayOriginAllowed, registerMcpGatewayRoutes } from "./mcp-gateway-routes.js";
+import { NetworkControls, installNetworkHook, registerNetworkSettingsRoute } from "./network-controls.js";
 import { registerMcpOnboardingRoutes } from "./mcp-onboarding-routes.js";
 import {
   createClusterRefreshLock,
@@ -5221,13 +5225,10 @@ export async function createApp(
     });
   }
 
+  // Phase 13.2 — the actor address is request.ip, which honours TRUST_PROXY: a raw X-Forwarded-For entry is whatever
+  // the client chose to send, so it is never read here.
   const extractIpAndUa = (request: { ip?: string; headers: Record<string, unknown> }) => {
-    const forwarded = request.headers["x-forwarded-for"];
-    const ipAddress =
-      (typeof forwarded === "string" && forwarded.split(",")[0]?.trim()) ||
-      (Array.isArray(forwarded) && typeof forwarded[0] === "string" ? forwarded[0] : "") ||
-      request.ip ||
-      null;
+    const ipAddress = request.ip || null;
     const uaHeader = request.headers["user-agent"];
     const userAgent =
       typeof uaHeader === "string"
@@ -5826,6 +5827,21 @@ export async function createApp(
     allowedHeaders: ["Authorization", "Content-Type", "Accept", "Mcp-Session-Id", "MCP-Protocol-Version", "Last-Event-ID"],
     exposedHeaders: ["Mcp-Session-Id", "WWW-Authenticate"]
   };
+  // Phase 13.2 — network allowlists (NETWORK_ALLOW_*): one onRequest hook, installed only when a scope has a list,
+  // and added before CORS and rate limiting so a refused request is cheap and consumes no bucket.
+  const networkControls = new NetworkControls({
+    settings: resolveNetworkSettings(config),
+    config,
+    audit: async (event) => {
+      await auditService.record(event);
+      await logStreamingService.dispatchAudit(event);
+    },
+    notify: async (event) => await notificationService.notify(event),
+    metrics: metricsService,
+    log: { warn: (fields, message) => app.log.warn(fields, message) }
+  });
+  installNetworkHook(app, networkControls);
+
   app.register(cors, {
     delegator: (request, callback) => {
       const isMcpEndpoint = (request.url ?? "").startsWith("/mcp/");
@@ -6070,6 +6086,8 @@ export async function createApp(
     reply.header("content-type", "text/plain; version=0.0.4; charset=utf-8");
     return metricsService.formatPrometheus();
   });
+
+  registerNetworkSettingsRoute(app, { controls: networkControls, requireRole: (request, reply, roles) => requireRole(request, reply, roles) });
 
   app.get("/api/observability", async (request, reply) => {
     const user = await requireRole(request, reply, ["admin"]);
@@ -11137,6 +11155,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       shared: clusterMode ? store : null,
       logger: { warn: (message, fields) => app.log.warn(fields ?? {}, message) }
     }),
+    network: networkControls,
     runWorkflowTool: async (input) => {
       const triggerType = "mcp_gateway";
       const triggeredBy = `mcp-client:${input.client.name}`;
@@ -11411,6 +11430,18 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
             hint: "Ensure workflow is saved and webhook node path/method match this request.",
             availableEndpoints: methodMatches
           };
+        }
+
+        // Phase 13.2 — the trigger's own address list (optional), checked before its auth.
+        if (
+          !(await networkControls.checkObjectList(request, readStoredIpAllowlist(match.endpoint.config.allowedIps), {
+            list: "webhook",
+            workflowId: match.workflow.id,
+            nodeId: match.endpoint.nodeId
+          }))
+        ) {
+          reply.code(403);
+          return { error: NETWORK_DENIED_MESSAGE };
         }
 
         const security = normalizeWebhookSecurityConfig(match.endpoint.config);

@@ -2448,6 +2448,23 @@ export const MIGRATIONS: Migration[] = [
       DROP INDEX IF EXISTS idx_user_invites_user;
       DROP TABLE IF EXISTS user_invites;
     `
+  },
+  {
+    version: 58,
+    description: "13.2 — network controls: a gateway client's address list and client certificate pin",
+    // `allowed_ips_json`: canonical IP / CIDR ranges the client may call from (empty = any address).
+    // `cert_fingerprints_json`: SHA-256 fingerprints of the client certificates it accepts (empty = no certificate
+    // needed; several during a rotation). `cert_subject`: optional pin on the subject CN or an alternative name.
+    up: `
+      ALTER TABLE mcp_clients ADD COLUMN IF NOT EXISTS allowed_ips_json TEXT NOT NULL DEFAULT '[]';
+      ALTER TABLE mcp_clients ADD COLUMN IF NOT EXISTS cert_fingerprints_json TEXT NOT NULL DEFAULT '[]';
+      ALTER TABLE mcp_clients ADD COLUMN IF NOT EXISTS cert_subject TEXT;
+    `,
+    down: `
+      ALTER TABLE mcp_clients DROP COLUMN IF EXISTS cert_subject;
+      ALTER TABLE mcp_clients DROP COLUMN IF EXISTS cert_fingerprints_json;
+      ALTER TABLE mcp_clients DROP COLUMN IF EXISTS allowed_ips_json;
+    `
   }
 ];
 

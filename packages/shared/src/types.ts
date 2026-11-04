@@ -1903,6 +1903,12 @@ export interface McpClient {
   createdAt: string;
   /** 12.6 — the client's own rate limit (replaces its toolsets' defaults); null = none. */
   rateLimit: McpGatewayRateLimit | null;
+  /** 13.2 — addresses (IPs / CIDR ranges) the client may call from; empty = any address. */
+  allowedIps: string[];
+  /** 13.2 — SHA-256 fingerprints of the client certificates it may present (several during a rotation); empty = no certificate needed. */
+  certFingerprints: string[];
+  /** 13.2 — optional pin on the certificate's subject CN or a subject alternative name. */
+  certSubject: string | null;
 }
 
 /** One tool a toolset exposes, as an MCP client would list it. */

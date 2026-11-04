@@ -73,7 +73,9 @@ client: a comma list of proxy addresses or CIDR ranges (for example
 count, or `true` to trust every hop. Trust only proxies that overwrite the
 header and keep the API unreachable except through them: a client that can
 reach the API directly could otherwise pick its own address. Unset (the
-default) trusts no proxy.
+default) trusts no proxy. `docker-compose.prod.yml` sets `TRUST_PROXY=1` for its
+single nginx hop (the API port is not published there); override it with your
+own value.
 
 ::: warning The shipped nginx appends to `X-Forwarded-For`
 The `web` image's nginx (`apps/web/nginx.conf`) sets
@@ -87,6 +89,15 @@ address or network as a CIDR (for example `TRUST_PROXY=172.18.0.0/16` for the
 compose network). Never `true`. Do not publish port 4000 next to it: a direct
 caller arrives from an address you may trust.
 :::
+
+### Network controls (optional)
+
+Address allowlists per scope (`NETWORK_ALLOW_UI`, `NETWORK_ALLOW_API`, `NETWORK_ALLOW_WEBHOOK`,
+`NETWORK_ALLOW_PUBLIC`, `NETWORK_ALLOW_MCP_GATEWAY`, `NETWORK_ALLOW_METRICS`), `NETWORK_ALLOWLIST_MODE`
+(`enforce` or `report`), `NETWORK_BREAK_GLASS_CIDRS`, and the forwarded client certificate settings for the MCP
+gateway (`MCP_GATEWAY_CLIENT_CERT_HEADER`, `MCP_GATEWAY_CLIENT_CERT_PROXIES`). All unset by default, so every scope is
+open. They are checked against the client address above, and refused with `TRUST_PROXY=true`. See
+[Network controls](../security/network-controls.md).
 
 ## MCP server registry probes (optional)
 

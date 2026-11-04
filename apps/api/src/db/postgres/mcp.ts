@@ -401,8 +401,17 @@ function mapMcpClient(row: Row): McpClientSecretRecord {
     lastUsedAt: row.last_used_at ? toStr(row.last_used_at) : null,
     revokedAt: row.revoked_at ? toStr(row.revoked_at) : null,
     createdAt: toStr(row.created_at),
-    rateLimit: parseStoredGatewayRateLimit(row.rate_limit_json ?? null)
+    rateLimit: parseStoredGatewayRateLimit(row.rate_limit_json ?? null),
+    allowedIps: stringList(row.allowed_ips_json),
+    certFingerprints: stringList(row.cert_fingerprints_json),
+    certSubject: row.cert_subject ? toStr(row.cert_subject) : null
   };
+}
+
+/** 13.2 — a JSON list of strings column (address ranges, fingerprints); anything else reads as empty. */
+function stringList(value: unknown): string[] {
+  const parsed = value ? parseJsonSafe(toStr(value)) : [];
+  return Array.isArray(parsed) ? parsed.filter((entry): entry is string => typeof entry === "string") : [];
 }
 
 function withoutHash(record: McpClientSecretRecord): McpClient {
@@ -1635,6 +1644,14 @@ export async function listMcpClients(ctx: PgContext, ..._args: Parameters<Store[
 export async function revokeMcpClient(ctx: PgContext, ...[id]: Parameters<Store["revokeMcpClient"]>): ReturnType<Store["revokeMcpClient"]> {
   await ctx.execute(`UPDATE mcp_clients SET revoked_at = $1 WHERE id = $2 AND revoked_at IS NULL`, [new Date().toISOString(), id]);
   return getMcpClientOn(ctx.pool, id);
+}
+
+export async function updateMcpClientNetwork(ctx: PgContext, ...[id, input]: Parameters<Store["updateMcpClientNetwork"]>): ReturnType<Store["updateMcpClientNetwork"]> {
+  const row = await ctx.queryOne<Row>(
+    `UPDATE mcp_clients SET allowed_ips_json = $1, cert_fingerprints_json = $2, cert_subject = $3 WHERE id = $4 RETURNING *`,
+    [JSON.stringify(input.allowedIps), JSON.stringify(input.certFingerprints), input.certSubject, id]
+  );
+  return row ? withoutHash(mapMcpClient(row)) : null;
 }
 
 export async function touchMcpClient(ctx: PgContext, ...[id, at]: Parameters<Store["touchMcpClient"]>): ReturnType<Store["touchMcpClient"]> {

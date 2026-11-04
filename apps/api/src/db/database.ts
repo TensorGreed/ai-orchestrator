@@ -842,6 +842,9 @@ interface McpClientRow {
   revoked_at: string | null;
   created_at: string;
   rate_limit_json?: string | null;
+  allowed_ips_json?: string | null;
+  cert_fingerprints_json?: string | null;
+  cert_subject?: string | null;
 }
 
 /** A client row including the token hash; only the credential check reads the hash. */
@@ -897,8 +900,17 @@ function mapMcpClient(row: McpClientRow): McpClientSecretRecord {
     lastUsedAt: row.last_used_at ? toString(row.last_used_at) : null,
     revokedAt: row.revoked_at ? toString(row.revoked_at) : null,
     createdAt: toString(row.created_at),
-    rateLimit: parseStoredGatewayRateLimit(row.rate_limit_json ?? null)
+    rateLimit: parseStoredGatewayRateLimit(row.rate_limit_json ?? null),
+    allowedIps: jsonStringList(row.allowed_ips_json),
+    certFingerprints: jsonStringList(row.cert_fingerprints_json),
+    certSubject: row.cert_subject ? toString(row.cert_subject) : null
   };
+}
+
+/** 13.2 — a JSON list of strings column (address ranges, fingerprints); anything else reads as empty. */
+function jsonStringList(value: string | null | undefined): string[] {
+  const parsed = value ? safeJsonParse(toString(value)) : [];
+  return Array.isArray(parsed) ? parsed.filter((entry): entry is string => typeof entry === "string") : [];
 }
 
 interface McpToolCallRow {
@@ -4091,6 +4103,11 @@ export class SqliteStore implements Store {
       );
       CREATE INDEX IF NOT EXISTS idx_user_invites_user ON user_invites (user_id);
     `);
+
+    // 13.2 (v58) — a gateway client's address list and certificate pin.
+    this.ensureColumn("mcp_clients", "allowed_ips_json", "TEXT NOT NULL", "'[]'");
+    this.ensureColumn("mcp_clients", "cert_fingerprints_json", "TEXT NOT NULL", "'[]'");
+    this.ensureColumn("mcp_clients", "cert_subject", "TEXT");
 
     this.exec(`CREATE INDEX IF NOT EXISTS idx_workflows_project_id ON workflows(project_id)`);
     this.exec(`CREATE INDEX IF NOT EXISTS idx_workflows_folder_id ON workflows(folder_id)`);
@@ -13266,6 +13283,17 @@ export class SqliteStore implements Store {
     if (!existing.revokedAt) {
       this.exec(`UPDATE mcp_clients SET revoked_at = ? WHERE id = ?`, [new Date().toISOString(), id]);
     }
+    return this.getMcpClientSync(id);
+  }
+
+  async updateMcpClientNetwork(id: string, input: { allowedIps: string[]; certFingerprints: string[]; certSubject: string | null }): Promise<McpClient | null> {
+    if (!this.getMcpClientSync(id)) return null;
+    this.exec(`UPDATE mcp_clients SET allowed_ips_json = ?, cert_fingerprints_json = ?, cert_subject = ? WHERE id = ?`, [
+      JSON.stringify(input.allowedIps),
+      JSON.stringify(input.certFingerprints),
+      input.certSubject,
+      id
+    ]);
     return this.getMcpClientSync(id);
   }
 

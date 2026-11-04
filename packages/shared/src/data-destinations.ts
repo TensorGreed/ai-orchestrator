@@ -307,6 +307,21 @@ function cidrToString(pattern: Extract<HostPattern, { type: "cidr" }>): string {
   return `${ipToString({ family: pattern.family, bytes })}/${pattern.prefix}`;
 }
 
+/**
+ * 13.2 — an IP address or CIDR range in canonical form (`10.0.0.1/8` → `10.0.0.0/8`, a bare address → `/32` or
+ * `/128`, an IPv4-mapped IPv6 address or range → the IPv4 one it stands for). Undefined when the text is neither.
+ */
+export function canonicalIpRange(value: string | null | undefined): string | undefined {
+  const text = String(value ?? "").trim().toLowerCase();
+  if (!text || text.startsWith("*.")) return undefined;
+  if (text.includes("/")) {
+    const pattern = parseHostPattern(text);
+    return pattern?.type === "cidr" ? cidrToString(pattern) : undefined;
+  }
+  const ip = parseIp(text);
+  return ip ? `${ipToString(ip)}/${ip.family === 4 ? 32 : 128}` : undefined;
+}
+
 // ---------------------------------------------------------------------------
 // Rows
 // ---------------------------------------------------------------------------

@@ -730,6 +730,7 @@ Injects webhook payload into workflow context.
 | `responseHeaders` | `object` | no | — |
 | `responseBody` | `string` | no | — |
 | `inputTrust` | `string` | no | `user` \| `untrusted_external` |
+| `allowedIps` | `array<string>` | no | — |
 
 **Example config**
 

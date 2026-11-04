@@ -924,6 +924,9 @@ export class PostgresStore implements Store {
   async revokeMcpClient(...args: Parameters<Store["revokeMcpClient"]>): ReturnType<Store["revokeMcpClient"]> {
     return mcp.revokeMcpClient(this.ctx, ...args);
   }
+  async updateMcpClientNetwork(...args: Parameters<Store["updateMcpClientNetwork"]>): ReturnType<Store["updateMcpClientNetwork"]> {
+    return mcp.updateMcpClientNetwork(this.ctx, ...args);
+  }
   async touchMcpClient(...args: Parameters<Store["touchMcpClient"]>): ReturnType<Store["touchMcpClient"]> {
     return mcp.touchMcpClient(this.ctx, ...args);
   }

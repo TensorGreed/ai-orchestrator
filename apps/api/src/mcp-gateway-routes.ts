@@ -29,6 +29,8 @@ import {
   mcpClientUpdateSchema,
   effectiveGatewayRateLimit,
   normalizeGatewayRateLimit,
+  mcpClientNetworkUpdateSchema,
+  NETWORK_DENIED_MESSAGE,
   mcpPolicyRoleSchema,
   mcpToolsetInputSchema,
   mcpToolsetMemberInputSchema,
@@ -124,6 +126,9 @@ import {
   type GatewaySession
 } from "./services/mcp-gateway-sessions.js";
 import { McpClientService, capRole, resolveMcpClientSubject, roleRank } from "./services/mcp-client-service.js";
+import { KeySampler, NETWORK_AUDIT_SAMPLE_MS, type NetworkControls } from "./network-controls.js";
+import { certificateAccepted, readClientCertificate, type ClientCertificateReading } from "./client-certificate.js";
+import { parseTrustProxy } from "./config.js";
 import { MCP_TELEMETRY_WINDOWS, parseMcpTelemetryWindow, rollupMcpToolCalls } from "./services/mcp-tool-telemetry.js";
 import { startSseHeartbeat } from "./sse-heartbeat.js";
 import { createToolArgumentSummarizer, toolArgumentHashKey } from "./services/tool-argument-summary.js";
@@ -283,6 +288,25 @@ export interface McpGatewayDeps {
   priceSampling?: (providerId: string, model: string, inputTokens: number, outputTokens: number) => number | null;
   /** 12.6 — per-client rate limits; absent: counted in this process (`GatewayClientLimiter` without a shared store). */
   limiter?: GatewayClientLimiter;
+  /**
+   * 13.2 — per-client address lists and client certificates. Absent: no forwarded certificate is read, so a client
+   * that pins certificates is refused, and client address lists are checked in enforce mode.
+   */
+  network?: NetworkControls;
+}
+
+/** 13.2 — why a client that pins certificates was refused, as the client sees it. */
+function certificateRefusal(reading: ClientCertificateReading | { status: "mismatch" }): string {
+  switch (reading.status) {
+    case "invalid":
+      return "The client certificate could not be read.";
+    case "expired":
+      return "The client certificate has expired or is not yet valid.";
+    case "mismatch":
+      return "The client certificate is not one this client accepts.";
+    default:
+      return "This client requires a client certificate, presented through the gateway's TLS proxy.";
+  }
 }
 
 /** 12.6 — the Guard stack a gateway call runs under, when a toolset or client binding applies. */
@@ -466,6 +490,8 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     reply.code(status).header("content-type", "application/json").send(rpcError(null, code, message));
   };
 
+  const certificateAuditSampler = new KeySampler(NETWORK_AUDIT_SAMPLE_MS);
+
   const authenticate = async (request: FastifyRequest, reply: FastifyReply): Promise<AuthenticatedClient | null> => {
     const header = headerValue(request, "authorization") ?? "";
     const match = header.match(/^Bearer\s+(.+)$/i);
@@ -485,6 +511,33 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
             : "Invalid client token.";
       return unauthorized(reason);
     }
+    // 13.2 — a client that pins certificates needs its token AND one of its certificates.
+    if (verification.client.certFingerprints.length > 0) {
+      const reading = deps.network
+        ? readClientCertificate(request, { header: deps.network.settings.clientCertHeader, proxies: deps.network.clientCertProxies })
+        : ({ status: "none" } as const);
+      const refusal =
+        reading.status !== "ok" ? reading : certificateAccepted(verification.client, reading.certificate) ? null : ({ status: "mismatch" } as const);
+      if (refusal) {
+        if (certificateAuditSampler.take(`${verification.client.id}|${request.ip}|${refusal.status}`)) {
+          await deps.auditRaw({
+            category: "system",
+            eventType: "mcp_gateway.client_certificate_refused",
+            action: "access",
+            outcome: "denied",
+            actor: { type: "api_key", email: verification.client.name, ipAddress: request.ip },
+            resourceType: "mcp_client",
+            resourceId: verification.client.id,
+            metadata: {
+              reason: refusal.status,
+              ...(reading.status === "ok" || reading.status === "expired" ? { fingerprint256: reading.certificate.fingerprint256, subject: reading.certificate.subject } : {}),
+              sampleWindowSeconds: NETWORK_AUDIT_SAMPLE_MS / 1000
+            }
+          });
+        }
+        return unauthorized(certificateRefusal(refusal));
+      }
+    }
     return { client: verification.client, subject: await resolveMcpClientSubject(store, verification.client) };
   };
 
@@ -499,6 +552,18 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     }
     const auth = await authenticate(request, reply);
     if (!auth) return null;
+    // 13.2 — the client's own address list (empty = any address).
+    if (auth.client.allowedIps.length > 0) {
+      const ref = { list: "mcp_client" as const, clientId: auth.client.id, clientName: auth.client.name };
+      const list = { restricted: true, ranges: auth.client.allowedIps };
+      const admitted = deps.network
+        ? await deps.network.checkObjectList(request, list, ref)
+        : false;
+      if (!admitted) {
+        httpError(reply, 403, NETWORK_DENIED_MESSAGE, -32001);
+        return null;
+      }
+    }
     const toolset = await store.getMcpToolsetBySlug(request.params.toolset);
     if (!toolset || !toolset.enabled) {
       httpError(reply, 404, `Toolset '${request.params.toolset}' does not exist or is disabled.`);
@@ -2398,6 +2463,68 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     // (the budget routes and usage pages are admin-only).
     const viewer = user.role === "admin" ? undefined : { canReadProject: async (projectId: string) => (await deps.runAccess.project(user, projectId, "workflow:read")).ok };
     return { clientId: client.id, budgets: await deps.budgets.clientUsage({ id: client.id, name: client.name, toolsetIds: client.toolsetIds }, viewer) };
+  });
+
+  // 13.2 — a client's address list and certificate pin. A dedicated route (admin), audited with before and after.
+  app.put<{ Params: { id: string } }>("/api/mcp/clients/:id/network", async (request, reply) => {
+    const user = await deps.requireRole(request, reply, ["admin"]);
+    if (!user) return reply;
+    const parsed = mcpClientNetworkUpdateSchema.safeParse(request.body);
+    if (!parsed.success) {
+      reply.code(400);
+      return { error: parsed.error.issues[0]?.message ?? "Invalid network settings", details: parsed.error.issues };
+    }
+    const existing = await store.getMcpClient(request.params.id);
+    if (!existing) {
+      reply.code(404);
+      return { error: "Client not found" };
+    }
+    if (existing.revokedAt) {
+      reply.code(409);
+      return { error: "This client is revoked" };
+    }
+    const next = {
+      allowedIps: parsed.data.allowedIps ?? existing.allowedIps,
+      certFingerprints: parsed.data.certFingerprints ?? existing.certFingerprints,
+      certSubject: parsed.data.certSubject !== undefined ? parsed.data.certSubject : existing.certSubject
+    };
+    if (next.allowedIps.length > 0 && parseTrustProxy(config.TRUST_PROXY) === true) {
+      reply.code(400);
+      return {
+        error:
+          "Address lists cannot be used with TRUST_PROXY=true: any client could choose the address it is checked by. Set TRUST_PROXY to your proxy's address or hop count first."
+      };
+    }
+    if (next.certFingerprints.length > 0 && !deps.network?.settings.clientCertHeader) {
+      reply.code(400);
+      return {
+        error:
+          "Client certificates are off on this deployment: set MCP_GATEWAY_CLIENT_CERT_HEADER (and the proxies it is honoured from) before pinning a certificate, or the client could not connect."
+      };
+    }
+    if (next.certSubject && next.certFingerprints.length === 0) {
+      reply.code(400);
+      return { error: "A subject pin needs at least one certificate fingerprint" };
+    }
+    const updated = await store.updateMcpClientNetwork(existing.id, next);
+    if (!updated) {
+      reply.code(404);
+      return { error: "Client not found" };
+    }
+    await deps.auditUser(request, user, {
+      category: "system",
+      eventType: "mcp_client.network_updated",
+      action: "update",
+      outcome: "success",
+      resourceType: "mcp_client",
+      resourceId: existing.id,
+      metadata: {
+        name: existing.name,
+        before: { allowedIps: existing.allowedIps, certFingerprints: existing.certFingerprints, certSubject: existing.certSubject },
+        after: { allowedIps: updated.allowedIps, certFingerprints: updated.certFingerprints, certSubject: updated.certSubject }
+      }
+    });
+    return { client: await clientView(updated) };
   });
 
   // Phase 12.4 — gateway calls a require_approval rule held back. Admins decide; the client retries the call.

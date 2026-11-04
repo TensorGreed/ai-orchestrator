@@ -21,6 +21,10 @@ version: "3.9"
 x-api-env: &api-env
   API_HOST: 0.0.0.0
   API_PORT: "4000"
+  # The nginx service below is the single hop in front of the API (port 4000 is only exposed inside this network), so
+  # the client address it forwards is trusted: audit addresses and network allowlists see the real client. Do not
+  # publish port 4000 on the host while TRUST_PROXY is set: a direct caller could then choose its own address.
+  TRUST_PROXY: ${TRUST_PROXY:-1}
   WEB_ORIGIN: ${WEB_ORIGIN:-http://localhost}
   DB_TYPE: postgres
   DB_POSTGRESDB_HOST: postgres

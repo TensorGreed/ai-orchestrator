@@ -717,6 +717,8 @@ export interface Store {
   findMcpClientByTokenPrefix(prefix: string): Promise<McpClientSecretRecord | null>;
   listMcpClients(): Promise<McpClient[]>;
   revokeMcpClient(id: string): Promise<McpClient | null>;
+  /** 13.2 — replaces the client's address list and certificate pin; null when the client does not exist. */
+  updateMcpClientNetwork(id: string, input: { allowedIps: string[]; certFingerprints: string[]; certSubject: string | null }): Promise<McpClient | null>;
   touchMcpClient(id: string, at: string): Promise<void>;
   /** 12.6 — an admin's change of a client's name or rate limit (null removes it); null when the client does not exist. */
   updateMcpClient(id: string, patch: { name?: string; rateLimit?: McpGatewayRateLimit | null }): Promise<McpClient | null>;

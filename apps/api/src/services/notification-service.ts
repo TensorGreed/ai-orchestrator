@@ -29,7 +29,12 @@ export interface NotificationEvent {
   };
   /** Phase 15.4 — set when the approval is a release request: which version waits to be published. */
   release?: { version: number };
+  /** Phase 13.2 — set for network.break_glass_used: who came in through a break-glass range, and where. */
+  network?: { ip: string; scope: string; method: string; path: string };
 }
+
+/** Phase 13.2 — an address outside the ui/api allowlist was admitted because it is in NETWORK_BREAK_GLASS_CIDRS. */
+export const NETWORK_NOTIFICATION_EVENTS = ["network.break_glass_used"] as const;
 
 /** Phase 11.2 — approval events channels subscribe to alongside execution events. */
 export const APPROVAL_NOTIFICATION_EVENTS = ["approval.requested", "approval.timed_out"] as const;
@@ -45,6 +50,20 @@ interface NotificationContent {
 }
 
 function describeEvent(event: NotificationEvent): NotificationContent {
+  if (event.type === "network.break_glass_used" && event.network) {
+    return {
+      title: "Break-glass access used",
+      icon: "\u{1F6A8}",
+      color: "FF0000",
+      facts: [
+        { name: "Address", value: event.network.ip },
+        { name: "Scope", value: event.network.scope },
+        { name: "Request", value: `${event.network.method} ${event.network.path}` },
+        { name: "Time", value: event.timestamp }
+      ],
+      text: "A request from a break-glass address was admitted outside the network allowlist. Check the audit log for network.break_glass_used."
+    };
+  }
   const facts: NotificationContent["facts"] = [
     { name: "Workflow", value: event.workflowName },
     { name: "Workflow ID", value: event.workflowId },
@@ -120,7 +139,9 @@ export class NotificationService {
 
   /** Events the env-configured channels receive; Phase 11.2 adds approval events unless turned off. */
   private envChannelEvents(): string[] {
-    return this.config.NOTIFICATIONS_APPROVAL_EVENTS ? ["execution.failure", ...APPROVAL_NOTIFICATION_EVENTS] : ["execution.failure"];
+    const events = this.config.NOTIFICATIONS_APPROVAL_EVENTS ? ["execution.failure", ...APPROVAL_NOTIFICATION_EVENTS] : ["execution.failure"];
+    // Phase 13.2 — break-glass alerts reach the env channels too (they only fire when an allowlist is set).
+    return [...events, ...NETWORK_NOTIFICATION_EVENTS];
   }
 
   /** Reloads the channels from the stored configs (plus the env-configured defaults). */

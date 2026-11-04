@@ -178,7 +178,8 @@ export default defineConfig({
           { text: "Audit Bundles", link: "/security/audit-bundles" },
           { text: "Code Execution", link: "/security/code-execution" },
           { text: "Outbound URL Guard", link: "/security/outbound-url-guard" },
-          { text: "Model Allowlists", link: "/security/model-allowlists" }
+          { text: "Model Allowlists", link: "/security/model-allowlists" },
+          { text: "Network Controls", link: "/security/network-controls" }
         ]
       },
       {

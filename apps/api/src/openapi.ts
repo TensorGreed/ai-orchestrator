@@ -62,6 +62,14 @@ export const openApiSpec = {
         responses: { "200": { description: "Metrics in text format", content: { "text/plain": { schema: { type: "string" } } } } }
       }
     },
+    "/api/settings/network": {
+      get: {
+        tags: ["Observability"],
+        summary:
+          "The deployment's network allowlists per scope (read-only, from NETWORK_ALLOW_*), the mode, break-glass ranges, and the caller's address with the scopes it matches (admin)",
+        responses: { "200": { description: "Network settings view" } }
+      }
+    },
     "/api/observability": {
       get: {
         tags: ["Observability"],
@@ -3091,6 +3099,35 @@ export const openApiSpec = {
         summary: "Revoke a client credential (admin); its open sessions end",
         parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
         responses: { "200": { description: "Revoked client" }, "404": { description: "Not found" } }
+      }
+    },
+    "/api/mcp/clients/{id}/network": {
+      put: {
+        tags: ["MCP"],
+        summary:
+          "Set a client's address allowlist and client certificate pin (admin). Each field given replaces the stored one; an empty allowedIps admits any address, an empty certFingerprints needs no certificate. Audited as mcp_client.network_updated",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                properties: {
+                  allowedIps: { type: "array", items: { type: "string" }, description: "IP addresses or CIDR ranges (IPv4 or IPv6)" },
+                  certFingerprints: { type: "array", items: { type: "string" }, description: "SHA-256 fingerprints (64 hex digits, colons allowed)" },
+                  certSubject: { type: "string", nullable: true, description: "Subject CN or alternative name the certificate must carry" }
+                }
+              }
+            }
+          }
+        },
+        responses: {
+          "200": { description: "Updated client" },
+          "400": { description: "Invalid entry, TRUST_PROXY=true, or certificates off on this deployment" },
+          "404": { description: "Not found" },
+          "409": { description: "Client revoked" }
+        }
       }
     },
     "/api/mcp/gateway/approvals": {

@@ -47,7 +47,9 @@ const baseNodeDefinitions: NodeDefinition[] = [
         responseCode: { type: "number" },
         responseHeaders: { type: "object" },
         responseBody: { type: "string" },
-        inputTrust: { type: "string", enum: ["user", "untrusted_external"] }
+        inputTrust: { type: "string", enum: ["user", "untrusted_external"] },
+        // 13.2 — optional: only these addresses (IPs / CIDR ranges) may call the trigger; empty = any address.
+        allowedIps: { type: "array", items: { type: "string" } }
       }
     },
     sampleConfig: {

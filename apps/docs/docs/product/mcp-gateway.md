@@ -193,6 +193,8 @@ Audit events:
 | `mcp_gateway.session_labels_raised` | A session on a tracking toolset carried outside content or sensitive data for the first time (once per session, with the client and the tool). |
 | `mcp_client.created` / `updated` / `revoked` | Client changes (updated: its name or rate limit, with the previous values). Metadata carries the token prefix, never the token. |
 | `mcp_gateway.rate_limited` / `budget_blocked` | A rate limit or a used-up block budget refused a call (once per session per minute). |
+| `mcp_client.network_updated` | A client's address list or certificate pin changed, with the values before and after. |
+| `mcp_gateway.client_certificate_refused` | A client that pins certificates called without a matching one (at most once a minute per client, address and reason). |
 
 `MCP_GATEWAY_AUDIT_READ_ONLY_CALLS` is `first_per_session` by default: the first call to each read-only tool in a session is audited, later ones only in telemetry. Set `all` to audit every call or `none` to rely on telemetry for read-only tools.
 
@@ -200,6 +202,7 @@ Audit events:
 
 - **Tokens.** Send the token only over HTTPS outside a trusted network. It is shown once, stored hashed, and never appears in API responses, logs or audit events. Give each client its own token with the narrowest role and toolsets it needs, and an expiry.
 - **Origin check.** Browsers can be tricked into sending requests to a local server through DNS rebinding. The endpoint therefore rejects requests whose `Origin` header is not allowed with 403. Requests without an `Origin` (desktop, IDE and CLI clients) are accepted, as are `WEB_ORIGIN`, `MCP_GATEWAY_PUBLIC_URL` and the origins in `MCP_GATEWAY_ALLOWED_ORIGINS`. The `Host` header is not trusted for this check. CORS on `/mcp/*` follows the same list and never allows credentials.
+- **Addresses and certificates.** A client can be limited to address ranges and can be required to present a client certificate, forwarded by your TLS proxy, on top of its token (the client's **Network** panel); the whole `/mcp/*` endpoint can be limited with `NETWORK_ALLOW_MCP_GATEWAY`. See [Network controls](../security/network-controls.md).
 - **Binding.** For local use, bind the API to `127.0.0.1` (`API_HOST`). On a shared host, put it behind a reverse proxy that terminates TLS, and set `MCP_GATEWAY_PUBLIC_URL` to the public base URL so the studio shows the right endpoint.
 - **Secrets.** Gateway tools use the registry server's secret through the secret service; the value is never sent to the client, and if an upstream server echoes it back the gateway replaces it with `[REDACTED]`.
 - **Self-hosted.** The gateway makes no outbound calls of its own beyond the registered servers you configure.

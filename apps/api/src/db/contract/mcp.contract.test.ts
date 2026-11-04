@@ -450,7 +450,8 @@ describeStoreContract("store contract: MCP", (ctx) => {
     });
     expect(created).toEqual({
       id: "c1", name: "First", tokenPrefix: "pre1", toolsetIds: ["ts1"], role: "operator", createdBy: "u1", createdByEmail: "u1@example.com",
-      expiresAt: iso(86_400_000), lastUsedAt: null, revokedAt: null, createdAt: created.createdAt, rateLimit: null
+      expiresAt: iso(86_400_000), lastUsedAt: null, revokedAt: null, createdAt: created.createdAt, rateLimit: null,
+      allowedIps: [], certFingerprints: [], certSubject: null
     });
     expect(created.createdAt).toMatch(ISO);
     expect("tokenHash" in created).toBe(false);
@@ -470,6 +471,15 @@ describeStoreContract("store contract: MCP", (ctx) => {
     await new Promise((resolve) => setTimeout(resolve, 5));
     expect((await store.revokeMcpClient("c1"))?.revokedAt).toBe(revoked?.revokedAt);
     expect(await store.revokeMcpClient("missing")).toBeNull();
+
+    // 13.2 — the address list and certificate pin replace as a whole; the token hash stays out.
+    const fingerprint = "ab".repeat(32);
+    const networked = await store.updateMcpClientNetwork("c2", { allowedIps: ["10.0.0.0/8", "2001:db8::/32"], certFingerprints: [fingerprint], certSubject: "agent" });
+    expect(networked).toMatchObject({ id: "c2", allowedIps: ["10.0.0.0/8", "2001:db8::/32"], certFingerprints: [fingerprint], certSubject: "agent" });
+    expect(networked && "tokenHash" in networked).toBe(false);
+    expect(await store.findMcpClientByTokenPrefix("pre-c2")).toMatchObject({ allowedIps: ["10.0.0.0/8", "2001:db8::/32"], certFingerprints: [fingerprint] });
+    expect(await store.updateMcpClientNetwork("c2", { allowedIps: [], certFingerprints: [], certSubject: null })).toMatchObject({ allowedIps: [], certFingerprints: [], certSubject: null });
+    expect(await store.updateMcpClientNetwork("missing", { allowedIps: [], certFingerprints: [], certSubject: null })).toBeNull();
   });
 
   it("two settles of one elicitation at once: exactly one wins", async () => {
