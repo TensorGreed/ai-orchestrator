@@ -58,7 +58,7 @@ export function NetworkSettingsTab() {
               : view.active
                 ? ", which no list names"
                 : ""}
-            {view.breakGlass.matched ? " (a break-glass address)" : ""}.
+            {view.active && view.breakGlass.matched ? " (a break-glass address)" : ""}.
           </p>
           <p className="settings-muted" data-testid="network-mode">
             {view.active
