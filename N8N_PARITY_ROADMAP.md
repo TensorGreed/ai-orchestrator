@@ -357,13 +357,13 @@
 - [x] Workflow transfer between projects — `apps/api/src/app.ts` `POST /api/workflows/:id/transfer`
 - [x] Execution stop/cancel endpoint — `apps/api/src/app.ts` `POST /api/executions/:id/cancel`
 - [x] Credential schema endpoint — `apps/api/src/app.ts` `GET /api/secrets/schema`
-- [ ] User invite/management endpoints (partial: `PUT /api/users/:id` and project member invites in `apps/api/src/app.ts`, missing: a deployment-level user invite endpoint)
+- [x] User invite/management endpoints — `apps/api/src/user-invite-routes.ts` `POST /api/users/invite` (pending user, one-time hashed link, accept from the login page)
 - [x] Project CRUD endpoints — `apps/api/src/app.ts` `POST /api/projects`
-- [ ] Tag CRUD endpoints (partial: `GET`/`POST`/`DELETE /api/tags` in `apps/api/src/app.ts`, missing: rename via `PUT`)
+- [x] Tag CRUD endpoints — `apps/api/src/app.ts` `GET`/`POST`/`PUT`/`DELETE /api/tags`
 - [x] Variable CRUD endpoints — `apps/api/src/app.ts` `POST /api/variables`
 - [x] Source control push/pull endpoints — `apps/api/src/app.ts` `POST /api/git/push`
 - [x] Audit report endpoint — `apps/api/src/app.ts` `GET /api/audit/export`
-- [ ] Pagination on all list endpoints (partial: `page`/`pageSize` on `GET /api/executions`, missing: other list endpoints)
+- [x] Pagination on all list endpoints — `apps/api/src/pagination.ts` optional `page`/`pageSize` envelope on every growing list (see `apps/docs/docs/api/endpoints.md#pagination`)
 
 ### 7.4 Workflow Templates & Sharing
 - [x] Template library with categories — `apps/api/src/app.ts` `GET /api/templates`
