@@ -1,7 +1,15 @@
 import fs from "node:fs";
 import net from "node:net";
 import { z } from "zod";
-import { QUEUE_POOL_NAME_PATTERN } from "@ai-orchestrator/shared";
+import {
+  NETWORK_SCOPES,
+  NETWORK_SCOPE_ENV,
+  QUEUE_POOL_NAME_PATTERN,
+  parseIpAllowlist,
+  splitIpAllowlist,
+  type NetworkAllowlistMode,
+  type NetworkScope
+} from "@ai-orchestrator/shared";
 
 /** Phase 15.6 — production capture defaults (see the REPLAY_CAPTURE_* settings). */
 export const REPLAY_CAPTURE_DEFAULTS = { enabled: true, maxRate: 1, retentionDays: 14, maxPerWorkflow: 200, maxBytesPerWorkflow: 209_715_200 } as const;
@@ -564,6 +572,27 @@ const envSchema = z.object({
    * `true` (every hop), a hop count, or a comma list of proxy addresses / CIDRs (see parseTrustProxy).
    */
   TRUST_PROXY: z.string().optional(),
+  /**
+   * Phase 13.2 — network controls. Each NETWORK_ALLOW_* is a comma list of IP addresses / CIDR ranges allowed on one
+   * scope (see NETWORK_SCOPES); unset or empty = that scope is open (today's behaviour). Checked against request.ip.
+   */
+  NETWORK_ALLOW_UI: z.string().optional(),
+  NETWORK_ALLOW_API: z.string().optional(),
+  NETWORK_ALLOW_WEBHOOK: z.string().optional(),
+  NETWORK_ALLOW_PUBLIC: z.string().optional(),
+  NETWORK_ALLOW_MCP_GATEWAY: z.string().optional(),
+  NETWORK_ALLOW_METRICS: z.string().optional(),
+  /** `enforce` (default) refuses a request no list admits; `report` admits it and records what would have been refused. */
+  NETWORK_ALLOWLIST_MODE: z.preprocess(
+    (value) => (typeof value === "string" ? (value.trim() === "" ? undefined : value.trim().toLowerCase()) : value),
+    z.enum(["enforce", "report"]).optional()
+  ),
+  /** Addresses always admitted on the ui and api scopes, every use audited and alerted. Unset = loopback; `none` = no break-glass. */
+  NETWORK_BREAK_GLASS_CIDRS: z.string().optional(),
+  /** Header a TLS-terminating proxy forwards the verified client certificate in (PEM, URL-encoded PEM or Envoy XFCC). Unset = off. */
+  MCP_GATEWAY_CLIENT_CERT_HEADER: z.string().optional(),
+  /** Addresses of the proxies allowed to set that header (the connecting socket); defaults to TRUST_PROXY when it is an address list. */
+  MCP_GATEWAY_CLIENT_CERT_PROXIES: z.string().optional(),
   HELMET_ENABLED: booleanFromEnv.default(true),
   HELMET_HSTS_ENABLED: booleanFromEnv.default(false),
   HELMET_CSP_ENABLED: booleanFromEnv.default(false),
@@ -604,6 +633,8 @@ export function parseConfig(env: Record<string, string | undefined>): AppConfig 
   resolveSamlSettings(parsed.data);
   resolveSsoMfaSettings(parsed.data);
   parseTrustProxy(parsed.data.TRUST_PROXY);
+  // Phase 13.2 — a bad address list refuses to start, naming the setting and the entry.
+  resolveNetworkSettings(parsed.data);
   // Phase 13.1 — queue settings that only work in cluster mode fail fast outside it.
   resolveQueueSettings(parsed.data, { clusterMode: isPostgresDbType(env.DB_TYPE) && parsed.data.HA_ENABLED === true });
   checkClusterTimings(parsed.data, env.DB_TYPE);
@@ -777,6 +808,92 @@ export function parseTrustProxy(raw: string | undefined): boolean | number | str
     }
   }
   return entries;
+}
+
+// ---------------------------------------------------------------------------
+// Phase 13.2 — network controls. Every setting is optional; with none set every scope is open, as before.
+// ---------------------------------------------------------------------------
+
+export interface NetworkSettings {
+  mode: NetworkAllowlistMode;
+  /** Canonical ranges per scope; a scope without a list is absent (open). */
+  scopes: Partial<Record<NetworkScope, string[]>>;
+  /** Always admitted on ui and api (each use audited and alerted). */
+  breakGlass: string[];
+  /** Lower-case header name the client certificate arrives in; null = forwarded certificates are off. */
+  clientCertHeader: string | null;
+  /** Socket addresses allowed to set that header. */
+  clientCertProxies: string[];
+}
+
+const LOOPBACK_RANGES = ["127.0.0.0/8", "::1/128"];
+/** TRUST_PROXY's named ranges as CIDR ranges (the ones proxy-addr uses). */
+const TRUST_PROXY_NAMED_CIDRS: Record<string, string[]> = {
+  loopback: LOOPBACK_RANGES,
+  linklocal: ["169.254.0.0/16", "fe80::/10"],
+  uniquelocal: ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7"]
+};
+/** Headers a client certificate may never be read from (they carry other things the server relies on). */
+const RESERVED_CERT_HEADERS = new Set(["authorization", "cookie", "host", "x-forwarded-for", "x-real-ip", "x-forwarded-proto", "content-type", "mcp-session-id"]);
+
+function parseAddressSetting(name: string, raw: string | undefined): string[] {
+  const { ranges, invalid } = parseIpAllowlist(splitIpAllowlist(raw));
+  if (invalid.length > 0) {
+    throw new Error(
+      `Invalid environment configuration: ${name} entry "${invalid[0]}" is not an IP address or CIDR range ` +
+        "(use a comma list such as 10.0.0.0/8, 192.168.1.5, 2001:db8::/32)"
+    );
+  }
+  return ranges;
+}
+
+/**
+ * The network settings, validated: each scope's list, the break-glass ranges, and the forwarded client certificate
+ * header with the proxies it is honoured from. Fails fast with the setting's name; refuses allowlists while
+ * TRUST_PROXY=true, since then any client picks the address it is checked by.
+ */
+export function resolveNetworkSettings(config: AppConfig): NetworkSettings {
+  const scopes: Partial<Record<NetworkScope, string[]>> = {};
+  for (const scope of NETWORK_SCOPES) {
+    const name = NETWORK_SCOPE_ENV[scope];
+    const ranges = parseAddressSetting(name, (config as unknown as Record<string, string | undefined>)[name]);
+    if (ranges.length > 0) scopes[scope] = ranges;
+  }
+  const trustProxy = parseTrustProxy(config.TRUST_PROXY);
+  const listed = Object.keys(scopes);
+  if (listed.length > 0 && trustProxy === true) {
+    throw new Error(
+      `Invalid environment configuration: ${listed.map((scope) => NETWORK_SCOPE_ENV[scope as NetworkScope]).join(", ")} ` +
+        "cannot be used with TRUST_PROXY=true: every hop would be trusted, so any client could choose the address it is checked by. " +
+        "Set TRUST_PROXY to your proxy's address or hop count (for example TRUST_PROXY=1 behind the shipped nginx)"
+    );
+  }
+  const breakGlassRaw = (config.NETWORK_BREAK_GLASS_CIDRS ?? "").trim();
+  const breakGlass =
+    breakGlassRaw === "" ? [...LOOPBACK_RANGES] : breakGlassRaw.toLowerCase() === "none" ? [] : parseAddressSetting("NETWORK_BREAK_GLASS_CIDRS", breakGlassRaw);
+
+  const headerRaw = (config.MCP_GATEWAY_CLIENT_CERT_HEADER ?? "").trim().toLowerCase();
+  let clientCertProxies: string[] = [];
+  if (headerRaw) {
+    if (!/^[a-z0-9-]+$/.test(headerRaw) || RESERVED_CERT_HEADERS.has(headerRaw)) {
+      throw new Error(
+        `Invalid environment configuration: MCP_GATEWAY_CLIENT_CERT_HEADER "${headerRaw}" must be a header name of letters, digits and '-', ` +
+          "and not one the server reads for something else (such as authorization or x-forwarded-for)"
+      );
+    }
+    if ((config.MCP_GATEWAY_CLIENT_CERT_PROXIES ?? "").trim()) {
+      clientCertProxies = parseAddressSetting("MCP_GATEWAY_CLIENT_CERT_PROXIES", config.MCP_GATEWAY_CLIENT_CERT_PROXIES);
+    } else if (Array.isArray(trustProxy)) {
+      clientCertProxies = parseIpAllowlist(trustProxy.flatMap((entry) => TRUST_PROXY_NAMED_CIDRS[entry] ?? [entry])).ranges;
+    }
+    if (clientCertProxies.length === 0) {
+      throw new Error(
+        "Invalid environment configuration: MCP_GATEWAY_CLIENT_CERT_HEADER needs the addresses of the proxies that verify client certificates, " +
+          "so the header is honoured from them only: set MCP_GATEWAY_CLIENT_CERT_PROXIES (or TRUST_PROXY to an address list)"
+      );
+    }
+  }
+  return { mode: config.NETWORK_ALLOWLIST_MODE ?? "enforce", scopes, breakGlass, clientCertHeader: headerRaw || null, clientCertProxies };
 }
 
 export function getConfig(): AppConfig {

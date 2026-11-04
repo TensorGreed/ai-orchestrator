@@ -89,6 +89,8 @@ export class MetricsService {
   private nodeExecutionDuration = new Histogram([10, 50, 100, 250, 500, 1000, 5000, 10000]);
   /** Phase 15.6 — production capture outcomes (captured, skipped_daily_limit, discarded_status, failed, ...). */
   private replayCaptures = new Map<string, number>();
+  /** Phase 13.2 — network allowlist outcomes by scope (denied, would_deny in report mode, break_glass). */
+  private networkDecisions = new Map<string, number>();
   /** Phase 13.1 — the registry's view at the last heartbeat (Postgres only; null until the first one). */
   private cluster: { liveInstances: number; multipleLeaders: boolean; busConnected: boolean | null } | null = null;
 
@@ -142,6 +144,12 @@ export class MetricsService {
     if (!this.enabled) return;
     const key = outcome.replace(/[^a-z0-9_]/gi, "_").slice(0, 64);
     this.replayCaptures.set(key, (this.replayCaptures.get(key) ?? 0) + 1);
+  }
+
+  recordNetworkDecision(scope: string, outcome: "denied" | "would_deny" | "break_glass"): void {
+    if (!this.enabled) return;
+    const key = `${scope.replace(/[^a-z0-9_]/gi, "_").slice(0, 32)}|${outcome}`;
+    this.networkDecisions.set(key, (this.networkDecisions.get(key) ?? 0) + 1);
   }
 
   replayCaptureCounts(): Record<string, number> {
@@ -294,6 +302,15 @@ export class MetricsService {
       lines.push(`# HELP ${p}_replay_captures_total Production runs considered for capture, by outcome`);
       lines.push(`# TYPE ${p}_replay_captures_total counter`);
       for (const [outcome, count] of this.replayCaptures) lines.push(`${p}_replay_captures_total{outcome="${outcome}"} ${count}`);
+    }
+
+    if (this.networkDecisions.size > 0) {
+      lines.push(`# HELP ${p}_network_requests_total Requests a network allowlist refused, would have refused (report mode) or admitted by break-glass, by scope`);
+      lines.push(`# TYPE ${p}_network_requests_total counter`);
+      for (const [key, count] of this.networkDecisions) {
+        const [scope, outcome] = key.split("|");
+        lines.push(`${p}_network_requests_total{scope="${scope}",outcome="${outcome}"} ${count}`);
+      }
     }
 
     if (this.queueDepth !== null) {
