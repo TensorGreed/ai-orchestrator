@@ -9,7 +9,7 @@ description: "How the L2M agent loop runs: messages, tool discovery, model calls
 Agent orchestration is iterative, not one-shot.
 
 1. Collect messages (`system_prompt`, `user_prompt`, optional memory context)
-2. Collect attached tool metadata from `mcp_tool` nodes
+2. Collect attached tool metadata from `mcp_tool` and `workflow_tool` nodes
 3. Call model with tool definitions
 4. If model returns tool calls:
    - execute tool(s)
@@ -22,10 +22,12 @@ Agent orchestration is iterative, not one-shot.
 - `chat_model`: attach model node
   - supported: `openai_chat_model`, `anthropic_chat_model`, `ollama_chat_model`, `openai_compatible_chat_model`, `ai_gateway_chat_model`, `azure_openai_chat_model`, `google_gemini_chat_model`, `llm_call`
 - `memory`: attach `local_memory`
-- `tool`: attach one or more `mcp_tool`
+- `tool`: attach one or more `mcp_tool` (any MCP server, or a [built-in tool](./built-in-agent-tools.md)) or `workflow_tool` (another workflow as one tool, see [Workflow Tool](./workflow-tool.md))
 - `worker`: attach worker agents (supervisor use cases)
 
 In the visual editor, use the `+` button below an Agent port to open a filtered drawer for compatible Language Model, Memory, or Tool nodes. Clicking an item creates and attaches it automatically.
+
+An optional **Think Tool** toggle on the agent adds a `think` scratchpad tool; see [Built-in agent tools](./built-in-agent-tools.md#think-tool).
 
 ## Common failure causes
 
