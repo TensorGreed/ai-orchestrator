@@ -23,6 +23,7 @@ import {
 } from "@ai-orchestrator/community-sdk";
 import type { ConnectorAdapter, ConnectorRegistry } from "@ai-orchestrator/connector-sdk";
 import type { MCPRegistry, MCPServerAdapter } from "@ai-orchestrator/mcp-sdk";
+import { BUILT_IN_TOOLS_ADAPTER_ID, WORKFLOW_TOOL_ADAPTER_ID } from "@ai-orchestrator/shared";
 import type { LLMProviderAdapter, ProviderRegistry } from "@ai-orchestrator/provider-sdk";
 
 export interface CommunityLoaderLogger {
@@ -49,6 +50,9 @@ export interface CommunityLoaderDependencies {
   mcpRegistry: MCPRegistry;
   connectorRegistry: ConnectorRegistry;
 }
+
+/** Phase 6.4 — the ids of L2M's own in-process tool adapters; no package may register under them. */
+export const RESERVED_MCP_ADAPTER_IDS: ReadonlySet<string> = new Set([BUILT_IN_TOOLS_ADAPTER_ID, WORKFLOW_TOOL_ADAPTER_ID]);
 
 export class CommunityPackageLoader {
   private readonly state = new Map<string, LoadedCommunityPackage>();
@@ -234,11 +238,14 @@ export class CommunityPackageLoader {
         counts.providers += 1;
       },
       registerMCPAdapter: (adapter: MCPServerAdapter) => {
-        if (this.deps.mcpRegistry.tryGet(adapter.definition.id)) {
-          this.config.logger.warn(
-            `${packageName} overrides built-in MCP adapter '${adapter.definition.id}'`,
-            { packageName, mcpServerId: adapter.definition.id }
-          );
+        // Phase 6.4 — an MCP adapter id is never taken over: tool rules, the write gate and recordings key on it,
+        // and L2M's own tool adapters are reserved even when this registry does not hold them.
+        const id = adapter.definition.id;
+        if (RESERVED_MCP_ADAPTER_IDS.has(id)) {
+          throw new Error(`${packageName}: the MCP adapter id '${id}' is reserved for L2M's own tools. Register the adapter under another id.`);
+        }
+        if (this.deps.mcpRegistry.tryGet(id)) {
+          throw new Error(`${packageName}: an MCP adapter with the id '${id}' is already registered. Register the adapter under another id.`);
         }
         this.deps.mcpRegistry.register(adapter);
         counts.mcpAdapters += 1;

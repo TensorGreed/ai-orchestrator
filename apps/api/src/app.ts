@@ -69,7 +69,8 @@ import {
   type Workflow,
   type WorkflowExecutionState,
   type WorkflowNode,
-  WorkflowError
+  WorkflowError,
+  WORKFLOW_TOOL_ADAPTER_ID
 } from "@ai-orchestrator/shared";
 import { BUDGET_SCOPE_TYPES, isBudgetScopeType, type BudgetScopeType } from "@ai-orchestrator/shared";
 import {
@@ -12070,7 +12071,11 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     const query = request.query as { projectId?: string } | undefined;
     const pageRequest = pageRequestFromQuery(query);
     const extras = () => ({
-      adapters: mcpRegistry.listDefinitions().map((definition) => ({ id: definition.id, label: definition.label })),
+      // Phase 6.4 — workflow tools are Workflow Tool nodes, never a registered server.
+      adapters: mcpRegistry
+        .listDefinitions()
+        .filter((definition) => definition.id !== WORKFLOW_TOOL_ADAPTER_ID)
+        .map((definition) => ({ id: definition.id, label: definition.label })),
       defaultProbeIntervalMs: mcpProbeService.defaultIntervalMs,
       sandboxPolicy: sandboxPolicyView()
     });
@@ -12192,6 +12197,10 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     if (input.adapterId !== undefined && !mcpRegistry.tryGet(input.adapterId)) {
       reply.code(400);
       return { error: `Unknown MCP adapter '${input.adapterId}'` };
+    }
+    if (input.adapterId === WORKFLOW_TOOL_ADAPTER_ID) {
+      reply.code(400);
+      return { error: "Workflow tools are not registered servers: add a Workflow Tool node to an agent's tool port instead." };
     }
     if (input.secretRef && !await store.getSecret(input.secretRef.secretId)) {
       reply.code(400);

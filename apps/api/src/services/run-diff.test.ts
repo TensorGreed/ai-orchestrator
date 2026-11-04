@@ -253,6 +253,13 @@ describe("run diff", () => {
     expect(diff.health).toHaveLength(1);
   });
 
+  it("ignores a workflow tool's child usage, which a replay answered from the cassette never has", () => {
+    const baseline = facts({ output: { answer: "ok", _childTelemetry: [{ model: "m", totalTokens: 1000 }] } });
+    const candidate = facts({ output: { answer: "ok" } });
+    expect(diffRunFacts(baseline, candidate).output.equal).toBe(true);
+    expect(diffValues(baseline.output, candidate.output).changes.length).toBeGreaterThan(0);
+  });
+
   it("does not call a newly successful run a regression", () => {
     expect(diffRunFacts(facts({ status: "error" }), facts()).status.regression).toBe(false);
     expect(diffRunFacts(facts(), facts({ status: "partial" })).status.regression).toBe(true);

@@ -734,3 +734,22 @@ describe("MCP tool telemetry: storage and endpoints", () => {
     expect(rollup.totals).toMatchObject({ calls: 2, errors: 1, errorRate: 0.5 });
   });
 });
+
+describe("Workflow tools are never registered servers (6.4)", () => {
+  it("leaves the workflow-tool adapter out of the register list and refuses a server on it", async () => {
+    const context = await createTestContext();
+    const admin = await login(context, "admin");
+    const list = await context.app.inject({ method: "GET", url: "/api/mcp/servers", headers: { cookie: admin } });
+    const adapters = list.json<{ adapters: Array<{ id: string }> }>().adapters.map((adapter) => adapter.id);
+    expect(adapters).toContain("l2m-tools");
+    expect(adapters).not.toContain("l2m-workflow");
+    const refused = await context.app.inject({
+      method: "POST",
+      url: "/api/mcp/servers",
+      headers: { cookie: admin },
+      payload: { name: "Sneaky", adapterId: "l2m-workflow", probeEnabled: false, connection: { workflowId: "wf-x" } }
+    });
+    expect(refused.statusCode).toBe(400);
+    expect(refused.json<{ error: string }>().error).toMatch(/Workflow Tool node/);
+  });
+});
