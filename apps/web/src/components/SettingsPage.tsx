@@ -125,6 +125,7 @@ import {
   type AuditExportDestination
 } from "../lib/api";
 import { AuditSigningKeysSection } from "./AuditSigningKeysSection";
+import { NetworkSettingsTab } from "./NetworkSettingsTab";
 
 type SettingsTab =
   | "security"
@@ -133,6 +134,7 @@ type SettingsTab =
   | "roles"
   | "sso"
   | "external-secrets"
+  | "network"
   | "audit-log"
   | "audit-signing"
   | "log-streams"
@@ -201,7 +203,8 @@ export function SettingsPage({ authUser, projects, activeProjectId }: SettingsPa
       tabs: [
         { id: "roles", label: "Custom Roles", restricted: !isAdmin },
         { id: "sso", label: "SSO Mappings", restricted: !isAdmin },
-        { id: "external-secrets", label: "External Secrets", restricted: !isAdmin }
+        { id: "external-secrets", label: "External Secrets", restricted: !isAdmin },
+        { id: "network", label: "Network", restricted: !isAdmin }
       ]
     },
     {
@@ -282,6 +285,7 @@ export function SettingsPage({ authUser, projects, activeProjectId }: SettingsPa
         {tab === "external-secrets" && isAdmin && (
           <ExternalSecretsTab activeProjectId={activeProjectId} />
         )}
+        {tab === "network" && isAdmin && <NetworkSettingsTab />}
         {tab === "audit-log" && isAdmin && <AuditLogTab />}
         {tab === "audit-signing" && isAdmin && <AuditSigningKeysSection />}
         {tab === "log-streams" && isAdmin && <LogStreamsTab />}
@@ -3045,7 +3049,8 @@ const NOTIFICATION_CHANNELS = [
 
 const NOTIFICATION_EVENTS = [
   { value: "workflow_failure", label: "Workflow Failure" },
-  { value: "workflow_success", label: "Workflow Success" }
+  { value: "workflow_success", label: "Workflow Success" },
+  { value: "network.break_glass_used", label: "Break-glass access used" }
 ];
 
 function NotificationsTab() {

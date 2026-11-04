@@ -25,6 +25,7 @@ import { buildMcpClientSnippets, snippetServerName, toolsetEndpointUrl } from ".
 import { CopyButton } from "./McpToolsetsView";
 import { DataLabelChips } from "./DataLabelChips";
 import { ClientGovernance } from "./McpGatewayGovernance";
+import { ClientNetwork, describeClientNetwork } from "./McpClientNetwork";
 
 const ROLES: McpPolicyRole[] = ["viewer", "operator", "builder", "admin"];
 
@@ -83,6 +84,7 @@ export function McpClientsView({ isAdmin }: McpClientsViewProps) {
   const [usageFor, setUsageFor] = useState<string | null>(null);
   const [sessionsFor, setSessionsFor] = useState<string | null>(null);
   const [governanceFor, setGovernanceFor] = useState<string | null>(null);
+  const [networkFor, setNetworkFor] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
@@ -219,6 +221,10 @@ export function McpClientsView({ isAdmin }: McpClientsViewProps) {
                     <dt>Open sessions</dt>
                     <dd>{client.activeSessions}</dd>
                   </div>
+                  <div>
+                    <dt>Network</dt>
+                    <dd data-testid="client-network-summary">{describeClientNetwork(client)}</dd>
+                  </div>
                   {client.revokedAt && (
                     <div>
                       <dt>Revoked</dt>
@@ -251,6 +257,14 @@ export function McpClientsView({ isAdmin }: McpClientsViewProps) {
                   >
                     {governanceFor === client.id ? "Hide governance" : "Governance"}
                   </button>
+                  <button
+                    type="button"
+                    className="pg-btn ghost"
+                    aria-expanded={networkFor === client.id}
+                    onClick={() => setNetworkFor((current) => (current === client.id ? null : client.id))}
+                  >
+                    {networkFor === client.id ? "Hide network" : "Network"}
+                  </button>
                   {isAdmin && client.status === "active" && (
                     <button
                       type="button"
@@ -271,6 +285,13 @@ export function McpClientsView({ isAdmin }: McpClientsViewProps) {
                     active={client.status === "active"}
                     rateLimit={client.rateLimit}
                     onClientChange={(updated) => setClients((current) => current.map((entry) => (entry.id === updated.id ? { ...entry, ...updated } : entry)))}
+                  />
+                )}
+                {networkFor === client.id && (
+                  <ClientNetwork
+                    client={client}
+                    isAdmin={isAdmin}
+                    onSaved={(updated) => setClients((current) => current.map((entry) => (entry.id === updated.id ? { ...entry, ...updated } : entry)))}
                   />
                 )}
               </li>

@@ -8,7 +8,7 @@ import type {
   McpToolPolicyTrace,
   WorkflowExecutionResult
 } from "@ai-orchestrator/shared";
-import { getNodeDefinition, nodeEmbeddingModelTarget, triggerTrustState } from "@ai-orchestrator/shared";
+import { getNodeDefinition, nodeEmbeddingModelTarget, parseIpAllowlist, triggerTrustState } from "@ai-orchestrator/shared";
 import { buildToolPolicyTraceView, readToolPolicyTrace } from "../lib/tool-policy-trace";
 import type { LiveNodeResult } from "../lib/run-trace";
 import { LiveElapsed } from "./WorkflowCanvasNode";
@@ -4214,6 +4214,9 @@ export function NodeInspector({
     const secretId = toStringValue(asRecord(config.secretRef).secretId);
     const idempotencyEnabled = toBooleanValue(config.idempotencyEnabled, false);
     const idempotencyHeaderName = toStringValue(config.idempotencyHeaderName, "idempotency-key");
+    // 13.2 — optional address list; kept line by line as typed, blank lines ignored by the server.
+    const allowedIpsText = Array.isArray(config.allowedIps) ? config.allowedIps.map((item) => String(item)).join("\n") : "";
+    const allowedIpsInvalid = parseIpAllowlist(allowedIpsText.split("\n")).invalid;
     const passThroughCsv = Array.isArray(config.passThroughFields)
       ? config.passThroughFields.map((item) => String(item)).join(",")
       : "system_prompt,user_prompt,session_id,variables";
@@ -4269,6 +4272,23 @@ export function NodeInspector({
           ]}
         />
         {renderTriggerTrustField(authMode)}
+
+        <TextAreaField
+          label="Allowed Addresses (one IP or CIDR range per line; empty = any address)"
+          value={allowedIpsText}
+          rows={2}
+          onChange={(next) =>
+            setConfig((current) => {
+              const { allowedIps: _previous, ...rest } = current;
+              return next.trim() ? { ...rest, allowedIps: next.split("\n") } : rest;
+            })
+          }
+        />
+        {allowedIpsInvalid.length > 0 && (
+          <p className="cfg-tip" role="alert" data-testid="webhook-allowed-ips-invalid">
+            &apos;{allowedIpsInvalid[0]}&apos; is not an IP address or CIDR range. A list with no valid entry admits nobody.
+          </p>
+        )}
 
         {authMode === "bearer_token" && (
           <>

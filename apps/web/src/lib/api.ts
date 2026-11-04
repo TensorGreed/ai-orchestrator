@@ -102,6 +102,7 @@ import type {
   McpClient,
   McpClientBudgetUsage,
   McpGatewayRateLimit,
+  NetworkSettingsView,
   McpGatewaySessionView,
   McpGatewayHiddenToolView,
   McpGatewayToolView,
@@ -3506,6 +3507,22 @@ export async function revokeMcpClient(id: string) {
   return apiRequest<{ client: McpClientView }>(`/api/mcp/clients/${encodeURIComponent(id)}/revoke`, {
     method: "POST"
   });
+}
+
+/** 13.2 — a client's address allowlist and client certificate pin (admin); each field given replaces the stored one. */
+export async function updateMcpClientNetwork(
+  id: string,
+  payload: { allowedIps?: string[]; certFingerprints?: string[]; certSubject?: string | null }
+) {
+  return apiRequest<{ client: McpClientView }>(`/api/mcp/clients/${encodeURIComponent(id)}/network`, {
+    method: "PUT",
+    body: JSON.stringify(payload)
+  });
+}
+
+/** 13.2 — the deployment's network allowlists (read-only) and how this browser's address fares (admin). */
+export async function fetchNetworkSettings() {
+  return apiRequest<NetworkSettingsView>("/api/settings/network");
 }
 
 /** 12.2 — a client's open sessions on the instance that answers, with the labels each has collected. */
