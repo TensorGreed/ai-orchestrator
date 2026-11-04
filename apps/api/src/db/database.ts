@@ -4025,6 +4025,9 @@ export class SqliteStore implements Store {
       CREATE UNIQUE INDEX IF NOT EXISTS idx_model_allowlist_entries_match ON model_allowlist_entries(scope, project_id, provider_id, model_glob);
     `);
 
+    // 12.2 (v56) — the session labels that drove a held gateway call (null on older requests).
+    this.ensureColumn("mcp_gateway_approvals", "labels_json", "TEXT");
+
     this.exec(`CREATE INDEX IF NOT EXISTS idx_workflows_project_id ON workflows(project_id)`);
     this.exec(`CREATE INDEX IF NOT EXISTS idx_workflows_folder_id ON workflows(folder_id)`);
     this.exec(`CREATE INDEX IF NOT EXISTS idx_secrets_project_id ON secrets(project_id)`);
@@ -12705,8 +12708,8 @@ export class SqliteStore implements Store {
       this.exec(
         `INSERT INTO mcp_gateway_approvals (
            id, client_id, client_name, toolset_id, project_id, server_id, server_name, tool_name, gateway_tool_name,
-           args_hash, args_preview, rule_id, rule_name, message, status, requested_at, expires_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
+           args_hash, args_preview, rule_id, rule_name, message, status, requested_at, expires_at, labels_json
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)`,
         [
           input.id,
           input.clientId,
@@ -12723,7 +12726,8 @@ export class SqliteStore implements Store {
           input.ruleName,
           input.message,
           input.requestedAt,
-          input.expiresAt
+          input.expiresAt,
+          input.labels ? JSON.stringify(input.labels) : null
         ]
       );
       return { approval: this.getMcpGatewayApprovalSync(input.id)!, created: true };

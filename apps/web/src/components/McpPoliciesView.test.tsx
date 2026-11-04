@@ -571,7 +571,7 @@ describe("MCP tool policy UI", () => {
       decisionReason: null,
       usedAt: null
     };
-    vi.mocked(api.fetchMcpGatewayApprovals).mockResolvedValue({ approvals: [pending, { ...pending, id: "mga_2", argsPreview: "{}" }], approvalWindowMs: 900000 });
+    vi.mocked(api.fetchMcpGatewayApprovals).mockResolvedValue({ approvals: [pending, { ...pending, id: "mga_2", argsPreview: "{}", labels: { provenance: ["user", "untrusted_external"], tracked: false } }], approvalWindowMs: 900000 });
     vi.mocked(api.decideMcpGatewayApproval).mockImplementation(async (id, decision) => ({
       approval: { ...pending, id, status: decision === "approve" ? "approved" : "rejected", decidedBy: "admin@example.com" }
     }));
@@ -580,6 +580,11 @@ describe("MCP tool policy UI", () => {
     const list = await screen.findByRole("list", { name: "Gateway approval requests" });
     expect(screen.getByText(/once within 15 minutes/)).toBeInTheDocument();
     expect(within(list).getByLabelText("Arguments of mga_1")).toHaveTextContent('{"expression":"1000*3"}');
+    // The session labels that drove a hold show as chips; a request without any shows no row for them.
+    const [first, second] = within(list).getAllByRole("listitem");
+    expect(within(first!).queryByText("Session data")).not.toBeInTheDocument();
+    expect(within(second!).getByText("Session data")).toBeInTheDocument();
+    expect(within(second!).getByLabelText("Data labels: from outside · from a user")).toBeInTheDocument();
     await user.click(within(within(list).getAllByRole("listitem")[0]).getByRole("button", { name: "Approve" }));
     expect(api.decideMcpGatewayApproval).toHaveBeenCalledWith("mga_1", "approve");
     await waitFor(() => expect(within(list).getAllByRole("listitem")).toHaveLength(1));

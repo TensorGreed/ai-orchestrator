@@ -1339,6 +1339,12 @@ export interface McpGatewayApproval {
   decidedAt: string | null;
   decisionReason: string | null;
   usedAt: string | null;
+  /**
+   * 12.2 — the labels the client session had collected when the call was held (toolsets that track session labels),
+   * the ones that drove the require_approval. Null or absent when the session tracked none, and on requests stored
+   * before v56.
+   */
+  labels?: McpToolCallLabels | null;
 }
 
 export interface AgentRunState {

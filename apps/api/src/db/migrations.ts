@@ -2410,6 +2410,19 @@ export const MIGRATIONS: Migration[] = [
     down: `
       DROP TABLE IF EXISTS model_allowlist_entries;
     `
+  },
+  {
+    version: 56,
+    description: "12.2 — gateway approval requests keep the session labels that drove them",
+    // `labels_json`: the provenance labels (and data class names, when tracked) the client session had collected when
+    // a require_approval rule held the call, as the approval_requested audit event records them. Null on requests from
+    // sessions that track nothing and on requests stored before.
+    up: `
+      ALTER TABLE mcp_gateway_approvals ADD COLUMN IF NOT EXISTS labels_json TEXT;
+    `,
+    down: `
+      ALTER TABLE mcp_gateway_approvals DROP COLUMN IF EXISTS labels_json;
+    `
   }
 ];
 

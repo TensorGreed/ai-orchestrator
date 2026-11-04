@@ -1308,8 +1308,8 @@ export async function createMcpGatewayApproval(
       client,
       `INSERT INTO mcp_gateway_approvals (
          id, client_id, client_name, toolset_id, project_id, server_id, server_name, tool_name, gateway_tool_name,
-         args_hash, args_preview, rule_id, rule_name, message, status, requested_at, expires_at
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, 'pending', $15, $16)
+         args_hash, args_preview, rule_id, rule_name, message, status, requested_at, expires_at, labels_json
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, 'pending', $15, $16, $17)
        ON CONFLICT DO NOTHING
        RETURNING *`,
       [
@@ -1328,7 +1328,8 @@ export async function createMcpGatewayApproval(
         input.ruleName,
         input.message,
         input.requestedAt,
-        input.expiresAt
+        input.expiresAt,
+        input.labels ? JSON.stringify(input.labels) : null
       ]
     );
     if (inserted) return { approval: mapMcpGatewayApproval(inserted), created: true };

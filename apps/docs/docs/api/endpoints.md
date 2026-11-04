@@ -90,7 +90,7 @@ See [MCP tool policy](../product/mcp-tool-policy.md).
 - `PUT /api/mcp/policies/:id` (admin)
 - `DELETE /api/mcp/policies/:id` (admin)
 - `POST /api/mcp/policies/evaluate` (builder; `{ projectId, role, serverId, toolName, kind?, noWriteTools?, arguments?, labels?, workflowId?, clientId? }`)
-- `GET /api/mcp/gateway/approvals?status=` (admin; gateway calls held for approval)
+- `GET /api/mcp/gateway/approvals?status=` (admin; gateway calls held for approval, each with the session `labels` that drove the hold, or null)
 - `POST /api/mcp/gateway/approvals/:id/approve` and `/reject` (admin; optional `{ reason }`)
 
 ## MCP gateway

@@ -139,6 +139,22 @@ describeStoreContract("store contract: argument-aware MCP tool rules", (ctx) => 
     expect((await store.createMcpGatewayApproval(approvalInput("mga_4"), at(5))).created).toBe(true);
   });
 
+  it("gateway approvals keep the session labels that drove them (v56); requests without any read back null", async () => {
+    const store = ctx.store();
+    const labels = { provenance: ["untrusted_external" as const, "sensitive" as const], dataClasses: ["email"], tracked: true };
+    const held = await store.createMcpGatewayApproval(approvalInput("mga_l", { labels }), T0);
+    expect(held.approval).toMatchObject({ id: "mga_l", labels });
+    await store.createMcpGatewayApproval(approvalInput("mga_n", { argsHash: "hash-n" }), T0);
+    await store.createMcpGatewayApproval(approvalInput("mga_u", { argsHash: "hash-u", labels: { provenance: ["untrusted_external"], tracked: false } }), T0);
+    const listed = await store.listMcpGatewayApprovals({}, at(1));
+    expect(listed.find((entry) => entry.id === "mga_l")?.labels).toEqual(labels);
+    expect(listed.find((entry) => entry.id === "mga_n")?.labels).toBeNull();
+    expect((await store.getMcpGatewayApproval("mga_u"))?.labels).toEqual({ provenance: ["untrusted_external"], tracked: false });
+    // Deciding keeps them.
+    await store.decideMcpGatewayApproval("mga_l", { status: "approved", decidedBy: "a", decidedAt: at(1), reason: null, expiresAt: at(16) }, at(1));
+    expect((await store.getMcpGatewayApproval("mga_l"))?.labels).toEqual(labels);
+  });
+
   it("gateway approvals: an approval past its window cannot be used, and a pending request expires", async () => {
     const store = ctx.store();
     await store.createMcpGatewayApproval(approvalInput("mga_w", { expiresAt: at(60) }), T0);

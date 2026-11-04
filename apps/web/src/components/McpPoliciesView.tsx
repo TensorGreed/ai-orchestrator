@@ -51,6 +51,7 @@ import {
   draftToConditions,
   type ConditionsDraft
 } from "./McpPolicyConditionsEditor";
+import { DataLabelChips, describeDataLabels } from "./DataLabelChips";
 import { ENFORCE_QUIET_DAYS, PolicySimulatePanel, PolicySuggestions } from "./McpPolicyLearning";
 import { McpSafetyPresets } from "./McpSafetyPresets";
 
@@ -1195,6 +1196,14 @@ function GatewayApprovals() {
                   <dt>Rule</dt>
                   <dd>{approval.ruleName ?? approval.ruleId ?? "—"}</dd>
                 </div>
+                {describeDataLabels(approval.labels).length > 0 && (
+                  <div>
+                    <dt>Session data</dt>
+                    <dd>
+                      <DataLabelChips labels={approval.labels} />
+                    </dd>
+                  </div>
+                )}
                 <div>
                   <dt>Requested</dt>
                   <dd>{new Date(approval.requestedAt).toLocaleString()}</dd>

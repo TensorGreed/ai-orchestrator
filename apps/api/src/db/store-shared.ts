@@ -6,6 +6,7 @@ import {
   DEFAULT_MCP_SAMPLING_SETTINGS,
   MCP_TOOL_POLICY_EFFECTS,
   mcpToolPolicyConditionsSchema,
+  parseRecordedCallLabels,
   parseToolArgumentSummary,
   MCP_POLICY_SUGGESTION_STATUSES,
   type McpGatewayApproval,
@@ -167,7 +168,8 @@ export function mapMcpGatewayApproval(row: Record<string, unknown>): McpGatewayA
     decidedBy: text(row.decided_by),
     decidedAt: isoOrNull(row.decided_at),
     decisionReason: text(row.decision_reason),
-    usedAt: isoOrNull(row.used_at)
+    usedAt: isoOrNull(row.used_at),
+    labels: parseRecordedCallLabels(row.labels_json)
   };
 }
 
