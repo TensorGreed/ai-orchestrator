@@ -4,6 +4,30 @@ description: "Every L2M HTTP API endpoint by area: auth and SSO, workflows, runs
 
 # API Endpoints
 
+## Pagination
+
+List endpoints answer the whole list by default, exactly as before. Add `page` and/or `pageSize` to get one page in
+the envelope `GET /api/executions` uses:
+
+```json
+{ "items": [], "total": 0, "page": 1, "pageSize": 20 }
+```
+
+- `page` starts at 1 (default 1); `pageSize` defaults to 20 and is capped at 100 (a larger value answers with 100).
+  A value that is not a positive integer is a `400`.
+- The route's other filters apply before the page is cut, so `total` counts what the filters match and what you may
+  see. Fields a route returns beside its list (for example `adapters` on `GET /api/mcp/servers`) stay in the answer.
+- Order is the route's usual order with an id tiebreak, so pages do not overlap or skip rows while the data is unchanged.
+- Paged: `GET /api/workflows`, `/api/users`, `/api/projects`, `/api/folders`, `/api/tags`, `/api/secrets`,
+  `/api/variables`, `/api/templates`, `/api/budgets`, `/api/notifications`, `/api/knowledge-bases`,
+  `/api/log-streams`, `/api/auth/api-keys`, `/api/custom-roles`, `/api/eval/datasets`, `/api/mcp/servers`,
+  `/api/mcp/policies`, `/api/mcp/toolsets`, `/api/mcp/clients`. Workflows and users are paged in the database; the
+  others are configuration lists paged after their access check.
+- Routes that already had their own paging keep it: `GET /api/executions` (`page`/`pageSize`), `GET /api/audit`
+  (`page`/`pageSize`, up to 500), `GET /api/guard/events` and `GET /api/replay/recordings` (`limit`/`offset`), and the
+  `limit`-capped feeds (`GET /api/approvals`, `/api/eval/runs`, `/api/replay/runs`, `/api/mcp/gateway/approvals`,
+  `/api/budget-alerts`).
+
 ## Auth
 
 - `POST /api/auth/register`
@@ -15,6 +39,16 @@ description: "Every L2M HTTP API endpoint by area: auth and SSO, workflows, runs
 - `GET /api/auth/oidc/callback?code=&state=` (IdP redirect target; redirects to the web app)
 - `POST /api/auth/login/mfa` (`{ challenge?, code }`; after an SSO login that needs the TOTP step the challenge comes from the HttpOnly `l2m_sso_mfa` cookie; see [MFA on SSO](../security/auth-rbac.md#mfa-on-sso))
 - `POST /api/auth/saml/callback` (IdP HTTP-POST binding form post → redirect to the web app; JSON → JSON; see [SAML single sign-on](../security/auth-rbac.md#saml-single-sign-on))
+- `POST /api/auth/invite/lookup` (public; `{ token }` → `{ email, role, expiresAt }`; `404` for a used, expired or unknown link; see [User invites](../security/auth-rbac.md#user-invites))
+- `POST /api/auth/invite/accept` (public; `{ token, password }` with a password of 8 characters or more → `{ ok, email }`; the invite is used up and the page signs in with the password next; `404` as above; audited as `user.invite.accept`)
+
+## Users and tags
+
+- `GET /api/users` (admin; `{ users }`, each `{ id, email, role, createdAt }`, plus `pending: true` and `inviteExpiresAt` for an invited user who has not accepted yet)
+- `POST /api/users/invite` (admin; `{ email, role?: "admin" | "builder" | "operator" | "viewer" (default viewer), expiresInHours?: 1-720 (default 168) }` → `201 { user, invite: { id, expiresAt }, emailed, inviteUrl? }`; `200` when the email belonged to a pending user, whose role is set and whose old link stops working; `409` when an active account has the email; `inviteUrl` only when the link was not emailed; audited as `user.invite`)
+- `PUT /api/users/:id` (admin; `{ role }`), `DELETE /api/users/:id` (admin; deleting a pending user revokes its invite)
+- `GET /api/tags`, `POST /api/tags` (builder), `DELETE /api/tags/:tag` (admin; removes the tag from every workflow)
+- `PUT /api/tags/:tag` (builder; `{ name }` up to 100 characters → `{ ok, tag, previous, renamedInWorkflows }`; renames the tag on every workflow that has it; `404` for a tag no workflow has, `409` when another tag already has the name (compared without case), `403` when the tag is on a workflow you cannot edit, before anything changes; audited as `tag.rename`)
 
 ## Workflows
 
