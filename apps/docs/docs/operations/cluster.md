@@ -78,6 +78,17 @@ During a rolling upgrade to this version, a TOTP step or MCP OAuth connect in pr
 
 Behind a load balancer or proxy, set `TRUST_PROXY` ([Environment](../getting-started/environment.md)). Without it every client is keyed by the proxy's address, so all of them share one auth bucket. In cluster mode, when requests arrive with `X-Forwarded-For` while `TRUST_PROXY` is off, `GET /health` carries a `forwarded_for_untrusted` warning for 15 minutes. Any client can send that header, so the warning is a hint to check the proxy setup, not proof that a proxy is in front.
 
+## Network controls in a cluster
+
+The network allowlists (`NETWORK_ALLOW_*`, `NETWORK_BREAK_GLASS_CIDRS`, `NETWORK_ALLOWLIST_MODE`) come from the
+environment and are read at startup: give every API, webhook and worker replica the same values, from one configmap.
+Per-client and per-webhook lists are stored with the client and the workflow, so every replica reads the same ones.
+Audit sampling (one entry a minute per address and scope) and the `ao_network_requests_total` metric are per replica.
+See [Network controls](../security/network-controls.md).
+
+The shipped `ops/nginx/ai-orchestrator.conf` routes `/mcp/` to the API replicas by client address
+(`hash $remote_addr consistent`), and the Helm ingress has an `/mcp` path; see [MCP gateway sessions](#mcp-gateway-sessions) for exact session stickiness.
+
 ## Community nodes in a cluster
 
 In cluster mode **Install** and **Uninstall** under Community nodes (`POST /api/community-nodes/install`, `DELETE /api/community-nodes/:name`) answer `409`: the change would reach one instance only, and runs on the others would fail. `GET /api/community-nodes` reports `installAllowed: false`. Give every instance the same packages instead, either way:

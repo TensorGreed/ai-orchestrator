@@ -88,6 +88,15 @@ compose network). Never `true`. Do not publish port 4000 next to it: a direct
 caller arrives from an address you may trust.
 :::
 
+### Network controls (optional)
+
+Address allowlists per scope (`NETWORK_ALLOW_UI`, `NETWORK_ALLOW_API`, `NETWORK_ALLOW_WEBHOOK`,
+`NETWORK_ALLOW_PUBLIC`, `NETWORK_ALLOW_MCP_GATEWAY`, `NETWORK_ALLOW_METRICS`), `NETWORK_ALLOWLIST_MODE`
+(`enforce` or `report`), `NETWORK_BREAK_GLASS_CIDRS`, and the forwarded client certificate settings for the MCP
+gateway (`MCP_GATEWAY_CLIENT_CERT_HEADER`, `MCP_GATEWAY_CLIENT_CERT_PROXIES`). All unset by default, so every scope is
+open. They are checked against the client address above, and refused with `TRUST_PROXY=true`. See
+[Network controls](../security/network-controls.md).
+
 ## MCP server registry probes (optional)
 
 - `MCP_PROBE_INTERVAL_MS` (default `300000`; `0` turns scheduled probes off)

@@ -195,6 +195,11 @@ ingress:
         - path: /webhook
           pathType: Prefix
           service: webhook
+        # The MCP gateway (/mcp/<toolset>). Sessions live on the replica that opened them: with api.replicaCount > 1,
+        # add sticky routing (for ingress-nginx, the upstream-hash-by annotation; see the cluster operations docs).
+        - path: /mcp
+          pathType: Prefix
+          service: api
   tls: []
 
 autoscaling:
@@ -218,6 +223,15 @@ config:
   # Phase 7.1 HA — set per-deployment in the templates
   # WORKER_MODE: controlled by api.workerMode / webhook replicas
   # HA_ENABLED: controlled by api.haEnabled
+  # Phase 13.2 network controls (optional; see the Network controls security docs). Behind the ingress, set
+  # TRUST_PROXY to the ingress controller's pod range or hop count before any NETWORK_ALLOW_* list.
+  # TRUST_PROXY: "10.0.0.0/8"
+  # NETWORK_ALLOW_UI: "10.0.0.0/8"
+  # NETWORK_ALLOW_API: "10.0.0.0/8"
+  # NETWORK_ALLOW_METRICS: "10.0.0.0/8"
+  # NETWORK_ALLOWLIST_MODE: "report"
+  # MCP_GATEWAY_CLIENT_CERT_HEADER: "ssl-client-cert"
+  # MCP_GATEWAY_CLIENT_CERT_PROXIES: "10.0.0.0/8"
 
 # ---------------------------------------------------------------------------
 # Secrets — reference an existing Secret or let the chart create one from
