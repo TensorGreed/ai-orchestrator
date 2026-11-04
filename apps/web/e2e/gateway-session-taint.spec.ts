@@ -139,6 +139,17 @@ test("holds a write after outside content, and shows the session's labels as chi
   await shot("02-session-labels");
 });
 
+test("shows the held call's session labels on its approval request", async () => {
+  await page.reload();
+  await sidebarItem("Policies").click();
+  const list = page.getByRole("list", { name: "Gateway approval requests" });
+  const request = list.getByRole("listitem").filter({ hasText: made.clientName! });
+  await expect(request.getByText("Session data")).toBeVisible();
+  await expect(request.getByText("from outside", { exact: true })).toBeVisible();
+  await request.scrollIntoViewIfNeeded();
+  await shot("02b-approval-labels");
+});
+
 test("explains in the rule editor that gateway labels need the toolset switch", async () => {
   await page.reload();
   await sidebarItem("Policies").click();
