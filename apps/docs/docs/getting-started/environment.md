@@ -73,7 +73,9 @@ client: a comma list of proxy addresses or CIDR ranges (for example
 count, or `true` to trust every hop. Trust only proxies that overwrite the
 header and keep the API unreachable except through them: a client that can
 reach the API directly could otherwise pick its own address. Unset (the
-default) trusts no proxy.
+default) trusts no proxy. `docker-compose.prod.yml` sets `TRUST_PROXY=1` for its
+single nginx hop (the API port is not published there); override it with your
+own value.
 
 ::: warning The shipped nginx appends to `X-Forwarded-For`
 The `web` image's nginx (`apps/web/nginx.conf`) sets

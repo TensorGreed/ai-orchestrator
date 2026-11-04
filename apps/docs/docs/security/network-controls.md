@@ -24,16 +24,22 @@ Each request falls in one scope by its path and credential. A scope without a li
 
 | Scope | Setting | Requests |
 |---|---|---|
-| UI | `NETWORK_ALLOW_UI` | `/api/*` with a session cookie or no credential: the studio's calls, sign-in, SSO and OIDC callbacks, the MCP OAuth callback |
-| API | `NETWORK_ALLOW_API` | `/api/*` with an `Authorization` header (an API key or bearer token), including `/api/webhooks/execute` and `/api/triggers/manual/*` |
-| Webhook | `NETWORK_ALLOW_WEBHOOK` | `/webhook/*`, `/webhook-test/*`, provider webhooks (`/api/webhooks/slack/*` and the others), `/api/mcp-server/*` |
+| UI | `NETWORK_ALLOW_UI` | `/api/*` with a session cookie or no credential: the studio's calls, the MCP OAuth callback, and always sign-in, registration, SSO, OIDC and MFA (`/api/auth/*` except `api-keys`, `me` and `sso`) |
+| API | `NETWORK_ALLOW_API` | `/api/*` with an API key (`Authorization: Bearer ao_…`), including `/api/webhooks/execute` and `/api/triggers/manual/*` |
+| Webhook | `NETWORK_ALLOW_WEBHOOK` | `/webhook/*`, `/webhook-test/*`, provider webhooks (`/api/webhooks/slack/*` and the others), `/api/mcp-server/*` (with or without an API key) |
 | Public | `NETWORK_ALLOW_PUBLIC` | Forms (`/api/forms/*`), chat (`/api/chat/*`), `/widget.js`, `/helper-chat` |
 | MCP gateway | `NETWORK_ALLOW_MCP_GATEWAY` | `/mcp/*` |
 | Metrics | `NETWORK_ALLOW_METRICS` | `/metrics`, `/api/docs`, `/api/openapi.json` |
 
 `/health`, `/ready` and the SAML metadata (`/api/auth/saml/metadata`, which the identity provider fetches) are never
-checked, so health checks and probes keep working. A request with both a session cookie and an `Authorization`
-header must pass both the UI and the API list, since the server accepts either credential.
+checked, so health checks and probes keep working. A request with both a session cookie and an API key must pass both
+the UI and the API list, since the server accepts either credential. A session cookie always brings the UI list: an
+`Authorization` header that is not an API key (`Bearer x`, `Basic …`) does not make a request API traffic.
+
+The workflow-as-MCP endpoints (`/api/mcp-server/*`) are checked against the webhook list only, also when the caller
+sends an API key, because they are how outside callers reach published workflows. To keep API-key callers there on
+your API ranges, put those ranges in `NETWORK_ALLOW_WEBHOOK` as well, or route `/api/mcp-server/` only from those
+networks at your proxy.
 
 The studio's own HTML and JavaScript are served by the `web` container (nginx), not the API, so the UI list covers
 the studio's API calls. To hide the page itself, add `allow` / `deny` rules in nginx or an ingress annotation such as
@@ -50,7 +56,20 @@ address appears in the audit log.
 - `TRUST_PROXY=true` trusts every hop, so any client could choose the address it is checked by. The API refuses to
   start with a `NETWORK_ALLOW_*` list and `TRUST_PROXY=true`, and refuses per-client lists while it is set. Behind the
   shipped nginx use `TRUST_PROXY=1` or the proxy's address.
-- Keep port 4000 reachable only through the proxy.
+- Whenever `TRUST_PROXY` is set, the API port must be reachable **only** through the proxy. A hop count or a broad
+  range (such as a cluster's pod range) trusts `X-Forwarded-For` from anyone who can connect to the port, so a client
+  that reaches it directly picks the address it is checked by. In Kubernetes, add a NetworkPolicy that admits only the
+  ingress controller to the API pods.
+
+The shipped `docker-compose.prod.yml` sets `TRUST_PROXY=1` (override it with your own `TRUST_PROXY`): its nginx is
+the single hop in front of the API, and the API port is only exposed inside the compose network. The development
+`docker-compose.yml` leaves it unset, because it publishes port 4000 on the host.
+
+::: info Upgrading: the audit address
+Audit events now record the address the API counts the request from (`request.ip`). Earlier releases read the first
+`X-Forwarded-For` entry directly, which any client could write. Behind a proxy with `TRUST_PROXY` unset, the audit
+`ipAddress` is now the proxy's address; set `TRUST_PROXY` to record the client's. Field names are unchanged.
+:::
 
 A list entry that is not an address or range refuses to start, naming the setting and the entry:
 
@@ -68,7 +87,7 @@ Refusals are recorded:
 
 | Record | When |
 |---|---|
-| Audit `network.request_denied` | A list refused a request. At most once a minute per address and scope (per client or trigger for object lists), with the scope, the list, the method and the path (never the query). |
+| Audit `network.request_denied` | A list refused a request. At most once a minute per address and scope (per client or trigger for object lists), and at most 60 a minute per scope whatever the address (the 61st is a summary row with `scopeCapReached`), with the scope, the list, the method and the path (never the query). |
 | Audit `network.request_would_be_denied` | The same, in report mode. |
 | Audit `network.break_glass_used` | A break-glass address was admitted outside the list (at most once a minute per address and scope). |
 | Metric `ao_network_requests_total{scope,outcome}` | Every refused (`denied`), would-be refused (`would_deny`) and break-glass (`break_glass`) request. The series appears once something was counted. |
@@ -90,7 +109,9 @@ certificates, which are part of the credential.
 
 `NETWORK_BREAK_GLASS_CIDRS` lists addresses that are always admitted on the UI and API scopes. It defaults to
 loopback (`127.0.0.0/8, ::1`), so an admin on the host (or through an SSH tunnel to it) can still sign in when a list is
-wrong. Every admission through it is audited as `network.break_glass_used` and raises the `network.break_glass_used`
+wrong. A break-glass range must match both the connecting address and the address the request is counted from: a
+loopback address written into `X-Forwarded-For` never counts, even from a trusted proxy, and a proxy on the same host
+connecting over loopback does not make its outside clients break-glass. Every admission through it is audited as `network.break_glass_used` and raises the `network.break_glass_used`
 notification (at most once every 10 minutes per address); pick **Break-glass access used** on a notification channel,
 and channels set from the environment get it automatically. Set `NETWORK_BREAK_GLASS_CIDRS=none` to turn it off.
 
@@ -98,7 +119,7 @@ Break-glass never opens the webhook, public, gateway or metrics scopes. Since th
 fixing a wrong one is a change to the environment and a restart, never a database edit.
 
 ::: warning Behind a proxy on the same host
-If the proxy reaches the API over loopback and `TRUST_PROXY` is off, every request arrives from `127.0.0.1` and
+If the proxy reaches the API over loopback and `TRUST_PROXY` is off, every request is counted from `127.0.0.1` and
 break-glass admits all of them. Set `TRUST_PROXY` so the client's own address is checked.
 :::
 
@@ -131,13 +152,21 @@ forwards it in a header. Two settings turn this on:
 | Setting | Meaning |
 |---|---|
 | `MCP_GATEWAY_CLIENT_CERT_HEADER` | The header the proxy forwards the certificate in. Unset = off (a client with fingerprints then cannot connect, so they cannot be saved). |
-| `MCP_GATEWAY_CLIENT_CERT_PROXIES` | Addresses of the proxies allowed to set that header. Defaults to `TRUST_PROXY` when that is an address list; otherwise required. |
+| `MCP_GATEWAY_CLIENT_CERT_PROXIES` | Addresses of the proxies allowed to set that header. Required with the header, and never taken from `TRUST_PROXY`. |
 
 The header is honoured only when the connection itself comes from one of those proxies (the socket address, not the
 forwarded one); from anywhere else it is ignored, so a client cannot present a certificate by sending the header
-itself. Your proxy must also **overwrite** the header on every request rather than pass a client's value through. The
-API reads a PEM certificate, URL-encoded PEM (nginx `$ssl_client_escaped_cert`, ingress-nginx, AWS ALB), an Envoy
+itself. Your proxy must also **overwrite** the header on every request rather than pass a client's value through or
+append to it; a header that holds more than one certificate is refused as `invalid`. The API reads a PEM certificate, URL-encoded PEM (nginx `$ssl_client_escaped_cert`, ingress-nginx, AWS ALB), an Envoy
 `x-forwarded-client-cert` element with `Cert="…"`, or base64 DER, and checks its validity dates again.
+
+::: warning Keep the proxy list narrow
+A certificate is not a secret: anyone who has seen it (in a log, a TLS capture or a shared bundle) can copy it into
+the header. The pin is only as strong as the rule that only the verifying proxy can set the header. List just that
+proxy's addresses (the ingress controller pods, not the cluster's pod range), and add a NetworkPolicy, or a firewall
+rule, so only the proxy can reach the API port. Any other proxy in front of the API, such as the `web` container's
+nginx, must clear the header (`proxy_set_header X-SSL-Client-Cert "";`) if it can reach the API from a listed address.
+:::
 
 **nginx.** Verify client certificates where nginx terminates TLS and forward them on `/mcp/`:
 
@@ -170,7 +199,7 @@ server {
 ```bash
 TRUST_PROXY=1
 MCP_GATEWAY_CLIENT_CERT_HEADER=x-ssl-client-cert
-MCP_GATEWAY_CLIENT_CERT_PROXIES=172.18.0.0/16   # the nginx container's network
+MCP_GATEWAY_CLIENT_CERT_PROXIES=172.18.0.10     # the nginx container's address only (give it a fixed one)
 ```
 
 **Kubernetes ingress-nginx.** Ask the controller to verify client certificates and pass them on; it sends the
@@ -189,7 +218,27 @@ metadata:
 config:
   TRUST_PROXY: "10.0.0.0/8"                      # the controller's pod range
   MCP_GATEWAY_CLIENT_CERT_HEADER: "ssl-client-cert"
-  MCP_GATEWAY_CLIENT_CERT_PROXIES: "10.0.0.0/8"
+  MCP_GATEWAY_CLIENT_CERT_PROXIES: "10.0.12.0/28"  # the ingress controller pods only, not the whole pod range
+```
+
+```yaml
+# Only the ingress controller may reach the API pods, so no other pod can write the certificate header.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: l2m-api-from-ingress
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: api
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - port: 4000
 ```
 
 **Envoy.** Set `forward_client_cert_details: SANITIZE_SET` with `set_current_client_cert_details: { cert: true }` and
@@ -211,9 +260,9 @@ nobody, and the editor flags an invalid entry.
 |---|---|---|
 | `NETWORK_ALLOW_UI`, `NETWORK_ALLOW_API`, `NETWORK_ALLOW_WEBHOOK`, `NETWORK_ALLOW_PUBLIC`, `NETWORK_ALLOW_MCP_GATEWAY`, `NETWORK_ALLOW_METRICS` | unset (open) | Addresses allowed on each scope |
 | `NETWORK_ALLOWLIST_MODE` | `enforce` | `report` admits and records would-be refusals |
-| `NETWORK_BREAK_GLASS_CIDRS` | loopback | Always admitted on UI and API, audited and alerted; `none` turns it off |
+| `NETWORK_BREAK_GLASS_CIDRS` | loopback | Always admitted on UI and API (matched on the connecting address too), audited and alerted; `none` turns it off |
 | `MCP_GATEWAY_CLIENT_CERT_HEADER` | unset (off) | Header a TLS proxy forwards the verified client certificate in |
-| `MCP_GATEWAY_CLIENT_CERT_PROXIES` | `TRUST_PROXY` list | Proxies allowed to set that header |
+| `MCP_GATEWAY_CLIENT_CERT_PROXIES` | unset (required with the header) | Proxies allowed to set that header |
 
 In a cluster, give every replica (API, webhook and worker replicas) the same values; the lists are read at startup.
 
