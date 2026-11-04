@@ -4408,3 +4408,27 @@ export async function saveDestinationRules(rules: Array<Record<string, unknown>>
 export async function startDestinationPreview(payload: { rows: Array<DataDestinationInput & { id?: string }>; removedIds?: string[] }) {
   return apiRequest<{ simulation: GuardSimulationView }>("/api/data-destinations/preview", { method: "POST", body: JSON.stringify(payload) });
 }
+
+// ---------------------------------------------------------------------------
+// Roadmap 7.3 — deployment-level user invites
+// ---------------------------------------------------------------------------
+
+export interface InviteLookup {
+  email: string;
+  role: AuthUser["role"];
+  expiresAt: string;
+}
+
+/** The email and role an invite link is for; throws (404) when it is used, expired or unknown. */
+export async function lookupInvite(token: string) {
+  return apiRequest<InviteLookup>("/api/auth/invite/lookup", { method: "POST", body: JSON.stringify({ token }) });
+}
+
+/** Sets the password through the invite, then signs in with it (the normal login, so its MFA step applies). */
+export async function acceptInviteAndSignIn(token: string, password: string): Promise<LoginResponse> {
+  const accepted = await apiRequest<{ ok: boolean; email: string }>("/api/auth/invite/accept", {
+    method: "POST",
+    body: JSON.stringify({ token, password })
+  });
+  return await loginUser({ email: accepted.email, password });
+}

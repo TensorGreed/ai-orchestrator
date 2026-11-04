@@ -147,6 +147,8 @@ import type { McpNavTarget } from "./lib/mcp-control-plane";
 import { useMcpCanvasStatus } from "./lib/use-mcp-canvas-status";
 import { TemplateGallery } from "./components/TemplateGallery";
 import { WelcomeModal, isWelcomeDismissed, markWelcomeDismissed } from "./components/WelcomeModal";
+import { AcceptInviteCard } from "./components/AcceptInviteCard";
+import { inviteTokenFromSearch, stripInviteParam } from "./lib/user-invite";
 import { WorkflowShareModal } from "./components/WorkflowShareModal";
 import { WriteToolApprovalDialog } from "./components/WriteToolApprovalDialog";
 import { WorkflowCardMenu } from "./components/WorkflowCardMenu";
@@ -1114,6 +1116,14 @@ function StudioApp() {
     const code = new URLSearchParams(window.location.search).get("sso_error");
     return code ? ssoErrorMessage(code) : null;
   });
+  // Roadmap 7.3 — an invite link (?invite=<token>) opens the accept form; the token leaves the address bar at once.
+  const [inviteToken, setInviteToken] = useState<string | null>(() =>
+    typeof window === "undefined" ? null : inviteTokenFromSearch(window.location.search)
+  );
+  useEffect(() => {
+    const cleaned = stripInviteParam(window.location.pathname, window.location.search, window.location.hash);
+    if (cleaned !== null) window.history.replaceState(window.history.state, "", cleaned);
+  }, []);
   useEffect(() => {
     const cleaned = stripSsoLandingParams(window.location.pathname, window.location.search, window.location.hash);
     if (cleaned === null) return;
@@ -4634,6 +4644,24 @@ function StudioApp() {
             </button>
           </form>
         </div>
+      );
+    }
+    if (inviteToken) {
+      return (
+        <AcceptInviteCard
+          token={inviteToken}
+          onSignedIn={(user) => {
+            setInviteToken(null);
+            setAuthError(null);
+            setError(null);
+            setAuthUser(user);
+          }}
+          onMfaChallenge={(challengeId) => {
+            setInviteToken(null);
+            setMfaChallengeId(challengeId);
+          }}
+          onDismiss={() => setInviteToken(null)}
+        />
       );
     }
     return (
