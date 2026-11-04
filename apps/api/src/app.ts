@@ -14150,16 +14150,18 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     if (!access.ok) return denyRunAccess(reply, access);
     const exported = exportWorkflowToJson(access.workflow);
     const encoded = Buffer.from(exported).toString("base64url");
-    return { shareUrl: `/api/workflows/import-shared?data=${encoded}`, expiresIn: "permanent" };
+    // `shareUrl` is POSTed as it is (or `data` in a POST body); opening it in a browser imports nothing.
+    return { shareUrl: `/api/workflows/import-shared?data=${encoded}`, data: encoded, expiresIn: "permanent" };
   });
 
-  // Import shared workflow from URL
-  app.get("/api/workflows/import-shared", async (request, reply) => {
+  // Import a shared workflow. A POST, so a link someone opens (or an image tag) cannot create a workflow with their
+  // session; the session cookie is SameSite=Lax, which a cross-site POST does not carry.
+  app.post<{ Querystring: { data?: string } }>("/api/workflows/import-shared", async (request, reply) => {
     const user = await requireRole(request, reply, ["admin", "builder"]);
     if (!user) return;
-    const query = request.query as Record<string, string>;
-    const data = query.data;
-    if (!data) { reply.code(400); return { error: "Missing data parameter" }; }
+    const body = request.body && typeof request.body === "object" && !Array.isArray(request.body) ? (request.body as Record<string, unknown>) : {};
+    const data = typeof body.data === "string" && body.data ? body.data : typeof request.query.data === "string" ? request.query.data : "";
+    if (!data) { reply.code(400); return { error: "Missing data: send { data } in the body or ?data= in the query" }; }
     try {
       const json = Buffer.from(data, "base64url").toString("utf-8");
       const imported = importWorkflowFromJson(json);
@@ -14177,6 +14179,12 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       reply.code(400);
       return { error: "Invalid shared workflow data" };
     }
+  });
+
+  // The import used to be a GET (it wrote on a GET). For one release a GET says how to call it instead of importing.
+  app.get("/api/workflows/import-shared", async (_request, reply) => {
+    reply.code(405).header("allow", "POST");
+    return { error: "Importing a shared workflow is a POST now: POST this same URL, or POST /api/workflows/import-shared with { \"data\": \"<data>\" }." };
   });
 
   // ── Phase 7.3: OpenAPI spec & Swagger UI ──────────────────────────────

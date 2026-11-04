@@ -1095,7 +1095,7 @@ describe("project authorization: shares, imports, restores and other callers", (
     const { context, builder } = await seed();
     expect((await call(context, "POST", "/api/workflows/import", builder.cookie, { workflow: simpleWorkflow("wf-imp", "ro") })).statusCode).toBe(403);
     const encoded = Buffer.from(JSON.stringify(simpleWorkflow("wf-imp2", "ro"))).toString("base64url");
-    expect((await call(context, "GET", `/api/workflows/import-shared?data=${encoded}`, builder.cookie)).statusCode).toBe(403);
+    expect((await call(context, "POST", "/api/workflows/import-shared", builder.cookie, { data: encoded })).statusCode).toBe(403);
     await context.store.upsertWorkflow(simpleWorkflow("wf-moved", "default"));
     await context.store.writeWorkflowVersion({ id: "v-ro", workflowId: "wf-moved", version: 1, workflowJson: JSON.stringify(simpleWorkflow("wf-moved", "ro")), createdBy: null, changeNote: null });
     expect((await call(context, "POST", "/api/workflows/wf-moved/versions/1/restore", builder.cookie)).statusCode).toBe(403);

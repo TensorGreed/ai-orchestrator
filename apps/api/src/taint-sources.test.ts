@@ -417,11 +417,37 @@ describe("trust that comes with a copy from elsewhere is dropped", () => {
     const admin = await login(context, "admin");
     expect((await call(context, "POST", "/api/workflows", admin, hookWorkflow("wf-share", { inputTrust: "user" }))).statusCode).toBe(200);
     const link = (await call(context, "GET", "/api/workflows/wf-share/share-link", admin)).json<{ shareUrl: string }>().shareUrl;
-    const imported = await call(context, "GET", link, admin);
+    const imported = await call(context, "POST", link, admin);
     expect(imported.statusCode, imported.body).toBe(200);
     const copy = (await context.store.getWorkflow(imported.json<{ workflowId: string }>().workflowId))!;
     expect(copy.nodes[0]!.config.inputTrust).toBeUndefined();
     expect(copy.nodes[0]!.config.inputTrustFor).toBeUndefined();
+  });
+
+  it("a share link imports only on a POST: opening it (a GET) answers 405 and writes nothing", async () => {
+    const context = await createTestContext();
+    const admin = await login(context, "admin");
+    expect((await call(context, "POST", "/api/workflows", admin, hookWorkflow("wf-link"))).statusCode).toBe(200);
+    const shared = (await call(context, "GET", "/api/workflows/wf-link/share-link", admin)).json<{ shareUrl: string; data: string }>();
+    const before = (await context.store.listWorkflows()).length;
+
+    const opened = await call(context, "GET", shared.shareUrl, admin);
+    expect(opened.statusCode).toBe(405);
+    expect(opened.headers.allow).toBe("POST");
+    expect(opened.json<{ error: string }>().error).toMatch(/POST/);
+    expect((await context.store.listWorkflows()).length).toBe(before);
+
+    // The body form, without the query.
+    const posted = await call(context, "POST", "/api/workflows/import-shared", admin, { data: shared.data });
+    expect(posted.statusCode, posted.body).toBe(200);
+    expect(posted.json<{ name: string }>().name).toBe("Taint wf-link (imported)");
+    expect((await context.store.listWorkflows()).length).toBe(before + 1);
+
+    expect((await call(context, "POST", "/api/workflows/import-shared", admin, {})).statusCode).toBe(400);
+    expect((await call(context, "POST", "/api/workflows/import-shared", admin, { data: "not-a-workflow" })).statusCode).toBe(400);
+    const anonymous = await context.app.inject({ method: "POST", url: "/api/workflows/import-shared", payload: { data: shared.data } });
+    expect(anonymous.statusCode).toBe(401);
+    expect((await context.store.listWorkflows()).length).toBe(before + 1);
   });
 
   it("a git pull drops it: the repository does not decide a trigger's trust", async () => {
