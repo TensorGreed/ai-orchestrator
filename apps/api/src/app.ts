@@ -29,7 +29,7 @@ import {
   type MCPExecutionContext,
   type McpSandboxPolicy
 } from "@ai-orchestrator/mcp-sdk";
-import { createDefaultProviderRegistry, isModelNotAllowedError, type ProviderRegistry } from "@ai-orchestrator/provider-sdk";
+import { createDefaultEmbeddingRegistry, createDefaultProviderRegistry, isModelNotAllowedError, type ProviderRegistry } from "@ai-orchestrator/provider-sdk";
 import {
   agentWebhookPayloadSchema,
   MCP_POLICY_ROLES,
@@ -298,6 +298,8 @@ import { NotificationService } from "./services/notification-service";
 import { openApiSpec } from "./openapi.js";
 import { gatewayAllowedOrigins, isGatewayOriginAllowed, registerMcpGatewayRoutes } from "./mcp-gateway-routes.js";
 import { NetworkControls, installNetworkHook, registerNetworkSettingsRoute } from "./network-controls.js";
+import { registerAiGatewayRoutes, type AiGatewayModelCheck } from "./ai-gateway-routes.js";
+import { registerAiGatewayAdminRoutes } from "./ai-gateway-admin-routes.js";
 import { registerMcpOnboardingRoutes } from "./mcp-onboarding-routes.js";
 import {
   createClusterRefreshLock,
@@ -1384,6 +1386,8 @@ export interface CreateAppOptions {
   logStream?: { write(line: string): void };
   /** Phase 13.1 — readiness and the shutdown drain index.ts runs on SIGTERM/SIGINT; one is made when unset. */
   lifecycle?: AppLifecycle;
+  /** 12.6b — the /v1 AI gateway's model allowlist check (every model is allowed when unset). */
+  aiGatewayCheckModel?: AiGatewayModelCheck;
 }
 
 /** What provisionSsoUser needs to link or create the local user of an SSO login. */
@@ -5873,7 +5877,8 @@ export async function createApp(
 
   app.register(cors, {
     delegator: (request, callback) => {
-      const isMcpEndpoint = (request.url ?? "").startsWith("/mcp/");
+      // 12.6b — the /v1 AI gateway is bearer-token traffic too.
+      const isMcpEndpoint = (request.url ?? "").startsWith("/mcp/") || (request.url ?? "").startsWith("/v1/");
       callback(null, isMcpEndpoint ? mcpCorsOptions : studioCorsOptions);
     }
   });
@@ -11146,6 +11151,12 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     }
   );
 
+  // 12.6 — one per-client limiter for the MCP gateway and /v1: a client's own rate limit is one allowance for both.
+  const gatewayClientLimiter = new GatewayClientLimiter({
+    shared: clusterMode ? store : null,
+    logger: { warn: (message, fields) => app.log.warn(fields ?? {}, message) }
+  });
+
   // Phase 10.4 — spec-compliant MCP endpoint (/mcp/:toolset), the gateway in
   // front of the registry, and the toolset / client admin API.
   registerMcpGatewayRoutes({
@@ -11181,10 +11192,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     // 12.6 — budgets, sampling cost and per-client rate limits (shared across replicas in cluster mode).
     budgets: budgetService,
     priceSampling: (providerId, model, inputTokens, outputTokens) => usageService.estimateCostUsd(providerId, model, inputTokens, outputTokens, 0),
-    limiter: new GatewayClientLimiter({
-      shared: clusterMode ? store : null,
-      logger: { warn: (message, fields) => app.log.warn(fields ?? {}, message) }
-    }),
+    limiter: gatewayClientLimiter,
     network: networkControls,
     runWorkflowTool: async (input) => {
       const triggerType = "mcp_gateway";
@@ -11260,6 +11268,47 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       // Phase 13.1 — a dispatched tool run executes on a worker: the instance running it stops it on this message.
       if (!local && clusterMode) announce({ t: "cancel", id: executionId, reason: clusterCancelReason(reason) });
     }
+  });
+
+  // 12.6b — the OpenAI-compatible /v1 AI gateway and its admin API. Inert until an admin creates a route set and grants
+  // it to a client: with none, every /v1 call answers 401 or 404.
+  const embeddingRegistry = createDefaultEmbeddingRegistry();
+  registerAiGatewayRoutes({
+    app,
+    config,
+    store,
+    providerRegistry,
+    embeddingRegistry,
+    resolveSecret: (secretRef) => secretService.resolveSecret(secretRef),
+    redact: (value) => String(secretService.redact(value)),
+    auditRaw: async (event) => {
+      await auditService.record(event);
+      await logStreamingService.dispatchAudit(event);
+    },
+    guard: guardService,
+    budgets: budgetService,
+    limiter: gatewayClientLimiter,
+    priceRequest: (providerId, model, inputTokens, outputTokens, cachedInputTokens) =>
+      usageService.estimateCostUsd(providerId, model, inputTokens, outputTokens, cachedInputTokens),
+    ...(options.aiGatewayCheckModel ? { checkModel: options.aiGatewayCheckModel } : {})
+  });
+  registerAiGatewayAdminRoutes({
+    app,
+    store,
+    providerRegistry,
+    embeddingRegistry,
+    requireRole: (request, reply, roles) => requireRole(request, reply, roles),
+    auditUser: async (request, user, event) => await audit(request, user, event),
+    secretProblem: async (secretId, ownerProjectId) => {
+      const secretProject = (await store.getSecret(secretId))?.projectId ?? null;
+      if (secretProject === null) return null;
+      const projectId = ownerProjectId ?? DEFAULT_PROJECT_ID;
+      if (secretProject === projectId) return null;
+      if (config.PROJECT_ISOLATION === "role" && secretProject === DEFAULT_PROJECT_ID) return null;
+      if ((await store.listSecretsSharedToProject(projectId)).includes(secretId)) return null;
+      return `Secret '${secretId}' belongs to another project and is not shared to the route set's project.`;
+    },
+    guard: guardService
   });
 
   app.post<{ Body: unknown }>("/api/webhooks/execute/stream", async (request, reply) => {

@@ -35,3 +35,4 @@ export function createDefaultProviderRegistry(): ProviderRegistry {
   registry.register(new AnthropicProviderAdapter());
   return registry;
 }
+export { parseToolArguments } from "./tool-arg-parser";
