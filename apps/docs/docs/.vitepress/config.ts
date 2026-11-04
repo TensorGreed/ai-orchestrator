@@ -117,6 +117,7 @@ export default defineConfig({
           { text: "MCP tool-call telemetry", link: "/product/mcp-tool-call-telemetry" },
           { text: "MCP tool policy", link: "/product/mcp-tool-policy" },
           { text: "MCP gateway", link: "/product/mcp-gateway" },
+          { text: "/v1 AI gateway", link: "/product/ai-gateway" },
           { text: "Budgets", link: "/product/budgets" },
           { text: "MCP onboarding and catalog", link: "/product/mcp-onboarding" },
           { text: "Testing MCP workflows", link: "/product/testing-mcp-workflows" },

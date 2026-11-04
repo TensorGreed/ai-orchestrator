@@ -550,7 +550,7 @@ to run agents.
 - [ ] Checked data also redacted in execution history, logs, traces and telemetry — *partial:* rule verdicts, `guard_events`, traces and logs hold masked evidence only, and outputs after content rules carry the rewritten content; outputs of nodes upstream of content rules keep what they produced
 
 ### 12.6 AI gateway for applications outside L2M
-- [ ] OpenAI-compatible `/v1/chat/completions` and `/v1/embeddings` endpoints that apply a rule set and route through the provider registry, so other applications send model traffic through the same content rules, budgets and audit
+- [x] OpenAI-compatible `/v1/chat/completions` and `/v1/embeddings` endpoints that apply a rule set and route through the provider registry, so other applications send model traffic through the same content rules, budgets and audit
 - [x] Rule sets applied per toolset and per client on the MCP gateway (10.4) — tool arguments and results checked, stacked tighten-only over the toolset project's enforced rule set, also inside workflow tool runs (#133)
 - [x] Per-client and per-project token budgets, rate limits and model allowlists — per-client budgets and rate limits (#134); deployment and project model allowlists (#135)
 

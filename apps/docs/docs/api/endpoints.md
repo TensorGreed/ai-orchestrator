@@ -153,7 +153,7 @@ Toolsets:
 Clients:
 
 - `GET /api/mcp/clients` (builder; status, effective role, open sessions, 7-day calls and errors)
-- `POST /api/mcp/clients` (admin; `{ name, toolsetIds, role, expiresAt? }`; the response carries the token once)
+- `POST /api/mcp/clients` (admin; `{ name, toolsetIds, role, expiresAt? }`; `toolsetIds` may be empty for a client that only calls `/v1`; the response carries the token once)
 - `PATCH /api/mcp/clients/:id` (admin; `{ name?, rateLimit? }`, nothing else; `rateLimit: null` removes the client's limit)
 - `POST /api/mcp/clients/:id/revoke` (admin)
 - `GET /api/mcp/clients/:id/budgets` (builder; every budget that applies to the client, its own, its toolsets' projects' and the global ones, each labelled by scope, with what it counted this period and whether it refuses the client's calls now)
@@ -164,6 +164,28 @@ Legacy workflow tool routes (configured on the `mcp_server_trigger` node):
 
 - `GET /api/mcp-server/:path/manifest`
 - `POST /api/mcp-server/:path/invoke`
+
+## /v1 AI gateway
+
+See [/v1 AI gateway](../product/ai-gateway.md). OpenAI-compatible endpoints (client token, `Authorization: Bearer l2m_mcp_...`; errors in the OpenAI shape):
+
+- `GET /v1/models`, `GET /v1/models/:model` (the models of the route sets granted to the client)
+- `POST /v1/chat/completions` (JSON, or SSE with `stream: true`; `stream_options.include_usage` adds a usage chunk)
+- `POST /v1/embeddings` (`input` as a string or an array of strings; `encoding_format` `float` or `base64`)
+
+Admin API (builders read, admins change; every change is audited):
+
+- `GET /api/ai-gateway/route-sets` (builder; each set with its routes and granted clients, and the provider ids a route may name)
+- `POST /api/ai-gateway/route-sets` (admin; `{ name, description?, projectId?, enabled?, rateLimit? }`)
+- `GET /api/ai-gateway/route-sets/:id` (builder)
+- `PUT /api/ai-gateway/route-sets/:id` (admin; a new `projectId` must be able to use every route's secret)
+- `DELETE /api/ai-gateway/route-sets/:id` (admin; removes its routes, grants and Guard binding)
+- `POST /api/ai-gateway/route-sets/:id/routes` (admin; `{ alias, kind?, providerId, model, baseUrl?, secretRef?, extra?, defaults?, enabled? }`; `409` when the alias is taken)
+- `PUT /api/ai-gateway/routes/:id`, `DELETE /api/ai-gateway/routes/:id` (admin)
+- `GET /api/ai-gateway/route-sets/:id/guard` (builder), `PUT /api/ai-gateway/route-sets/:id/guard` (admin; `{ mode: "inherit" }` or `{ mode: "override", profileId }`)
+- `GET /api/ai-gateway/clients/:clientId/grants` (builder), `PUT /api/ai-gateway/clients/:clientId/grants` (admin; `{ routeSetIds }` replaces the client's grants)
+- `GET /api/ai-gateway/usage?window=24h|7d|30d&clientId=&routeSetId=` (builder; totals, per model name and per client)
+- `GET /api/ai-gateway/requests?window=&clientId=&routeSetId=&limit=` (builder; recent request rows, metadata only)
 
 ## MCP onboarding
 
