@@ -605,6 +605,10 @@ function OptionalNumberField({
   );
 }
 
+/** Phase 6.4 — read-only is the workflow's own claim, made on its trigger, never by a caller. */
+const WORKFLOW_READ_ONLY_HELP =
+  "Turn on only when this workflow changes nothing outside its run. When an agent calls it as a Workflow Tool, the caller's write-tool approval then skips the call. A caller's write controls still apply to this workflow's own tools. Off by default.";
+
 const ANTHROPIC_TEMPERATURE_HELP =
   "Optional. Leave blank to use the model's default. Newer Claude models ignore or reject temperature, so it is only sent to models that accept it.";
 
@@ -6104,16 +6108,14 @@ export function NodeInspector({
               onChange={(next) => setConfig((current) => ({ ...current, toolDescription: next || undefined }))}
               rows={3}
             />
-            <ToggleField
-              label="Read-only workflow"
-              checked={toBooleanValue(config.readOnly, false)}
-              onChange={(next) => setConfig((current) => ({ ...current, readOnly: next }))}
-              help={
-                <>
-                  Turn on only when the workflow changes nothing outside the run. A read-only workflow tool skips this
-                  workflow's write-tool approval and rules that apply to write tools. Off by default: calls count as writes.
-                </>
-              }
+            <OptionalNumberField
+              label="Timeout per call, ms (optional)"
+              value={readOptionalNumber(config.timeoutMs)}
+              min={1}
+              step={1000}
+              placeholder="The run's own timeout"
+              help="Longest one call may run. The call then fails with a message the agent can act on, and the workflow is told to stop."
+              onChange={(next) => setConfig((current) => ({ ...current, timeoutMs: next }))}
             />
             {child?.error ? <div className="cfg-tip" data-testid="workflow-tool-error">Could not load the workflow: {child.error}</div> : null}
             {derived ? (
@@ -6123,6 +6125,11 @@ export function NodeInspector({
                   Tool <code>{derived.toolName}</code>, from {sourceText[derived.source]}. {derived.description}
                 </div>
                 <pre className="result-block">{JSON.stringify(derived.inputSchema, null, 2)}</pre>
+                <div className="cfg-tip" data-testid="workflow-tool-read-only">
+                  {derived.readOnly
+                    ? "The workflow declares itself read-only on its trigger, so this workflow's write-tool approval skips the call. Its own write tools still meet this workflow's write controls."
+                    : "The workflow does not declare itself read-only, so each call counts as a write. Its editors can mark it read-only on its trigger."}
+                </div>
                 <div className="cfg-tip">
                   The workflow runs with the agent's call as its input. If it stops for an approval, the call fails with a
                   message the agent can act on; give the approval step its own run instead.
@@ -7035,11 +7042,19 @@ export function NodeInspector({
         );
       case "sub_workflow_trigger":
         return (
-          <div className="cfg-tip">
-            This node receives input from a parent workflow's <code>execute_workflow</code> call. Place it as the
-            entry point of a child workflow; the input mapping defined on the parent flows directly into this
-            node's output context.
-          </div>
+          <>
+            <div className="cfg-tip">
+              This node receives input from a parent workflow's <code>execute_workflow</code> call. Place it as the
+              entry point of a child workflow; the input mapping defined on the parent flows directly into this
+              node's output context.
+            </div>
+            <ToggleField
+              label="Read-only workflow"
+              checked={toBooleanValue(config.readOnly, false)}
+              onChange={(next) => setConfig((current) => ({ ...current, readOnly: next || undefined }))}
+              help={WORKFLOW_READ_ONLY_HELP}
+            />
+          </>
         );
       case "error_trigger":
         return (
@@ -9053,6 +9068,12 @@ export function NodeInspector({
             <div className="cfg-tip">
               Invoke at <code>/api/mcp-server/&lt;path&gt;/invoke</code>; manifest at <code>/api/mcp-server/&lt;path&gt;/manifest</code>.
             </div>
+            <ToggleField
+              label="Read-only workflow"
+              checked={toBooleanValue(config.readOnly, false)}
+              onChange={(next) => setConfig((current) => ({ ...current, readOnly: next || undefined }))}
+              help={WORKFLOW_READ_ONLY_HELP}
+            />
           </>
         );
       case "kafka_trigger":

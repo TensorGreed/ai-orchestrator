@@ -48,7 +48,7 @@ test.describe("agent tools", () => {
               type: "sub_workflow_trigger",
               name: "Start",
               position: { x: 80, y: 180 },
-              config: { description: "Looks up an order by id.", inputSchema: { type: "object", properties: { order_id: { type: "string" } }, required: ["order_id"] } }
+              config: { readOnly: true, description: "Looks up an order by id.", inputSchema: { type: "object", properties: { order_id: { type: "string" } }, required: ["order_id"] } }
             },
             { id: "out", type: "output", name: "Output", position: { x: 380, y: 180 }, config: { responseTemplate: "shipped", outputKey: "result" } }
           ],
@@ -67,7 +67,7 @@ test.describe("agent tools", () => {
             { id: "agent", type: "agent_orchestrator", name: "Agent", position: { x: 340, y: 180 }, config: { maxIterations: 4, toolCallingEnabled: true, thinkTool: true } },
             { id: "model", type: "llm_call", name: "Model", position: { x: 240, y: 420 }, config: { provider: { providerId: "openai", model: "gpt-4o-mini" } } },
             { id: "wiki", type: "mcp_tool", name: "Wikipedia", position: { x: 400, y: 420 }, config: { serverId: "l2m-tools", toolName: "__all__", connection: { provider: "wikipedia" } } },
-            { id: "lookup", type: "workflow_tool", name: "Order lookup tool", position: { x: 560, y: 420 }, config: { workflowId: childId, readOnly: true } },
+            { id: "lookup", type: "workflow_tool", name: "Order lookup tool", position: { x: 560, y: 420 }, config: { workflowId: childId } },
             { id: "out", type: "output", name: "Output", position: { x: 640, y: 180 }, config: { responseTemplate: "{{results.agent.answer}}", outputKey: "result" } }
           ],
           edges: [
@@ -97,6 +97,9 @@ test.describe("agent tools", () => {
       await expect(preview).toContainText("Looks up an order by id.");
       await expect(preview).toContainText("Sub-Workflow Trigger");
       await expect(preview).toContainText('"order_id"');
+      // Read-only comes from the child's own trigger, not from a toggle on this node.
+      await expect(inspector.getByTestId("workflow-tool-read-only")).toContainText("declares itself read-only");
+      await expect(inspector.getByRole("button", { name: /Read-only workflow/ })).toHaveCount(0);
       await expect(inspector.getByText(`workflow:${childId}`)).toBeVisible();
       await page.screenshot({ path: path.join(SHOT_DIR, "01-workflow-tool-preview.png") });
       await inspector.getByRole("button", { name: "Close inspector" }).click();

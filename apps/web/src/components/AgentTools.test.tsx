@@ -144,6 +144,34 @@ describe("Workflow Tool node", () => {
     await user.click(screen.getByRole("button", { name: "Save changes" }));
     await waitFor(() => expect(onSave).toHaveBeenCalled());
     expect(onSave.mock.calls[0][0].config).toMatchObject({ workflowId: "wf-lookup", toolName: "find order" });
+    // Read-only is the child's own claim: the parent's node offers no toggle and says what the child declares.
+    expect(screen.queryByRole("button", { name: /Read-only/ })).toBeNull();
+    expect(screen.getByTestId("workflow-tool-read-only")).toHaveTextContent("does not declare itself read-only");
+  });
+
+  it("shows a child that declares itself read-only on its trigger, and saves a per-call timeout", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn();
+    vi.mocked(api.fetchWorkflow).mockResolvedValue({ ...child, nodes: child.nodes.map((entry) => ({ ...entry, config: { ...entry.config, readOnly: true } })) });
+    render(<NodeInspector {...makeProps(makeNode("workflow_tool", { workflowId: "wf-lookup" }), onSave)} />);
+    expect(await screen.findByTestId("workflow-tool-read-only")).toHaveTextContent("declares itself read-only");
+    await user.type(screen.getByLabelText(/Timeout per call/), "30000");
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(onSave).toHaveBeenCalled());
+    expect(onSave.mock.calls[0][0].config).toMatchObject({ workflowId: "wf-lookup", timeoutMs: 30000 });
+  });
+
+  it("lets a child's editors mark it read-only on its Sub-Workflow Trigger or Expose as MCP Tool trigger", async () => {
+    const user = userEvent.setup();
+    for (const nodeType of ["sub_workflow_trigger", "mcp_server_trigger"] as const) {
+      const onSave = vi.fn();
+      const { unmount } = render(<NodeInspector {...makeProps(makeNode(nodeType, nodeType === "mcp_server_trigger" ? { path: "p", toolName: "t" } : {}), onSave)} />);
+      await user.click(screen.getByRole("button", { name: /Read-only workflow/ }));
+      await user.click(screen.getByRole("button", { name: "Save changes" }));
+      await waitFor(() => expect(onSave).toHaveBeenCalled());
+      expect(onSave.mock.calls[0][0].config).toMatchObject({ readOnly: true });
+      unmount();
+    }
   });
 
   it("says why when the child cannot be loaded", async () => {

@@ -32,11 +32,22 @@ The built-in tools go through the same MCP layer as any other server, so nothing
 - **Destinations.** Each call is judged against the provider's real host, so data destination rules and Guard destination checks see `en.wikipedia.org`, `serpapi.com` or your SearXNG host.
 - **Outbound policy.** Requests go through the API's outbound URL guard: with `OUTBOUND_DENY_PRIVATE=true`, a SearXNG instance on a private address is refused unless `OUTBOUND_ALLOWLIST` names it. Redirects are checked hop by hop.
 - **Keys.** The key is read from the secret when the call is made, after the checks above, and added to the request by the server. It is never a tool argument, so the model, argument summaries, telemetry rows and recorded cassettes never see it; error messages that quote it are scrubbed.
-- **Limits, telemetry, replay.** Calls count in MCP tool telemetry, and a recorded run replays them from its cassette without calling the provider.
+- **Telemetry, replay.** Calls count in MCP tool telemetry, and a recorded run replays them from its cassette without calling the provider. MCP server rate limits and the circuit breaker are set on registered servers, so they do not apply to these preset nodes; watch the provider's own quota.
+- **Write-tool approval** skips them only because they are L2M's own adapter. An admin's manual read-only setting, or a tool rule on server `l2m-tools`, still decides.
 
-Answers are trimmed (at most 20 results, long text cut) and responses over 2 MiB are refused.
+Answers are trimmed (at most 20 results, long text cut). A response is read as it arrives and stops at 2 MiB, so an answer with no length header cannot grow past that.
 
-Two Wikipedia nodes on one agent would expose the same tool names; use one per agent.
+## Endpoint overrides
+
+**Instance URL** (SearXNG, and the endpoint field of the other providers) sends the calls to the host you set:
+
+- Destination rules and Guard destination checks judge that configured host.
+- Redirects are followed by the outbound URL guard, which checks each hop against `OUTBOUND_DENY_PRIVATE` and `OUTBOUND_ALLOWLIST` and drops credentials on a cross-origin hop. Data destination rules judge the configured host, not each redirect hop.
+- The tool still counts as read-only: it sends a GET with the model's query. Point an override only at a host you trust with that query.
+
+## One name per tool
+
+Each tool an agent sees must have its own name. Two Wikipedia nodes on one agent (two languages, or one with another endpoint) would give the model `l2m-tools__wikipedia_search` twice, so the agent node fails with an error naming the duplicates, and validation reports `duplicate_agent_tool_name`. Use one node per provider on an agent, or split the work across two agents. The same holds for any two MCP servers on one adapter that serve a tool with the same name.
 
 ## Think tool
 

@@ -106,13 +106,12 @@ Lets an agent call another workflow as a tool. Attach it to an Agent or Supervis
 | `workflowId` | `string` | yes | — |
 | `toolName` | `string` | no | — |
 | `toolDescription` | `string` | no | — |
-| `readOnly` | `boolean` | no | — |
+| `timeoutMs` | `number` | no | — |
 
 **Example config**
 
 ```json
 {
-  "workflowId": "",
-  "readOnly": false
+  "workflowId": ""
 }
 ```
